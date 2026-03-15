@@ -4,10 +4,12 @@
 package expr
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/derekmwright/caelum/internal/engine/batch"
@@ -410,8 +412,8 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	for i, a := range e.Args {
 		e.args[i] = a.Eval(b, row)
 	}
-	fn, ok := scalarFuncs[e.Name]
-	if !ok {
+	fn := DefaultRegistry.Lookup(e.Name)
+	if fn == nil {
 		return nil
 	}
 	return fn(e.args)
@@ -420,7 +422,65 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 // ScalarFunc is a scalar function implementation.
 type ScalarFunc func(args []any) any
 
-var scalarFuncs = map[string]ScalarFunc{
+// FuncRegistry is a concurrent-safe registry of scalar functions.
+type FuncRegistry struct {
+	mu    sync.RWMutex
+	funcs map[string]ScalarFunc
+}
+
+// NewFuncRegistry creates a new empty function registry.
+func NewFuncRegistry() *FuncRegistry {
+	return &FuncRegistry{funcs: make(map[string]ScalarFunc)}
+}
+
+// Register adds or replaces a scalar function.
+func (r *FuncRegistry) Register(name string, fn ScalarFunc) {
+	r.mu.Lock()
+	r.funcs[strings.ToLower(name)] = fn
+	r.mu.Unlock()
+}
+
+// Unregister removes a scalar function. Returns true if it existed.
+func (r *FuncRegistry) Unregister(name string) bool {
+	r.mu.Lock()
+	_, existed := r.funcs[strings.ToLower(name)]
+	delete(r.funcs, strings.ToLower(name))
+	r.mu.Unlock()
+	return existed
+}
+
+// Lookup returns the function with the given name, or nil if not found.
+func (r *FuncRegistry) Lookup(name string) ScalarFunc {
+	r.mu.RLock()
+	fn := r.funcs[strings.ToLower(name)]
+	r.mu.RUnlock()
+	return fn
+}
+
+// Has returns true if a function with the given name exists.
+func (r *FuncRegistry) Has(name string) bool {
+	r.mu.RLock()
+	_, ok := r.funcs[strings.ToLower(name)]
+	r.mu.RUnlock()
+	return ok
+}
+
+// Names returns all registered function names.
+func (r *FuncRegistry) Names() []string {
+	r.mu.RLock()
+	names := make([]string, 0, len(r.funcs))
+	for name := range r.funcs {
+		names = append(names, name)
+	}
+	r.mu.RUnlock()
+	return names
+}
+
+// DefaultRegistry is the global function registry used by the expression engine.
+var DefaultRegistry = NewFuncRegistry()
+
+func init() {
+	builtins := map[string]ScalarFunc{
 	// String functions
 	"upper":   fnUpper,
 	"lower":   fnLower,
@@ -470,19 +530,31 @@ var scalarFuncs = map[string]ScalarFunc{
 	"ip_netmask":    fnIPNetmask,
 
 	// Date/time functions
-	"now":        fnNow,
-	"year":       fnYear,
-	"month":      fnMonth,
-	"day":        fnDay,
-	"hour":       fnHour,
-	"minute":     fnMinute,
-	"date_trunc": fnDateTrunc,
-	"extract":    fnExtract,
+	"now":          fnNow,
+	"year":         fnYear,
+	"month":        fnMonth,
+	"day":          fnDay,
+	"hour":         fnHour,
+	"minute":       fnMinute,
+	"date_trunc":   fnDateTrunc,
+	"extract":      fnExtract,
+	"current_date": fnCurrentDate,
+	"date_diff":    fnDateDiff,
+	"date_add":     fnDateAdd,
+	"to_date":      fnToDate,
+
+	// UUID functions
+	"uuid_version":   fnUUIDVersion,
+	"uuid_to_string": fnUUIDToString,
+	}
+	for name, fn := range builtins {
+		DefaultRegistry.funcs[name] = fn
+	}
 }
 
-// RegisterFunc registers a custom scalar function.
+// RegisterFunc registers a custom scalar function in the default registry.
 func RegisterFunc(name string, fn ScalarFunc) {
-	scalarFuncs[strings.ToLower(name)] = fn
+	DefaultRegistry.Register(name, fn)
 }
 
 // --- String function implementations ---
@@ -874,6 +946,129 @@ func fnExtract(args []any) any {
 	}
 }
 
+func fnCurrentDate(args []any) any {
+	return time.Now().Format("2006-01-02")
+}
+
+// fnDateDiff returns the number of days between two dates.
+// Usage: date_diff(date1, date2) → integer
+func fnDateDiff(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	t1 := parseDateValue(args[0])
+	t2 := parseDateValue(args[1])
+	if t1.IsZero() || t2.IsZero() {
+		return nil
+	}
+	return float64(int(t1.Sub(t2).Hours() / 24))
+}
+
+// fnDateAdd adds days to a date.
+// Usage: date_add(date, days) → date string
+func fnDateAdd(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	t := parseDateValue(args[0])
+	if t.IsZero() {
+		return nil
+	}
+	days := int(ToFloat64(args[1]))
+	return t.AddDate(0, 0, days).Format("2006-01-02")
+}
+
+// fnToDate converts a string to a date.
+func fnToDate(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	t := parseDateValue(args[0])
+	if t.IsZero() {
+		return nil
+	}
+	return t.Format("2006-01-02")
+}
+
+// parseDateValue parses a date from various formats.
+func parseDateValue(v any) time.Time {
+	switch tv := v.(type) {
+	case string:
+		for _, layout := range []string{"2006-01-02", time.RFC3339, "2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
+			if t, err := time.Parse(layout, tv); err == nil {
+				return t
+			}
+		}
+	case int32:
+		// Days since epoch
+		return time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, int(tv))
+	case int64:
+		return time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, int(tv))
+	case float64:
+		return time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, int(tv))
+	}
+	return time.Time{}
+}
+
+// fnUUIDVersion extracts the version from a UUID string.
+func fnUUIDVersion(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	raw := parseUUIDHex(s)
+	if raw == nil {
+		return nil
+	}
+	return float64(raw[6] >> 4)
+}
+
+// fnUUIDToString formats raw UUID bytes as a standard string.
+func fnUUIDToString(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	// Already formatted?
+	if len(s) == 36 && s[8] == '-' {
+		return s
+	}
+	raw := parseUUIDHex(s)
+	if raw == nil {
+		return nil
+	}
+	var buf [36]byte
+	hex.Encode(buf[0:8], raw[0:4])
+	buf[8] = '-'
+	hex.Encode(buf[9:13], raw[4:6])
+	buf[13] = '-'
+	hex.Encode(buf[14:18], raw[6:8])
+	buf[18] = '-'
+	hex.Encode(buf[19:23], raw[8:10])
+	buf[23] = '-'
+	hex.Encode(buf[24:36], raw[10:16])
+	return string(buf[:])
+}
+
+// parseUUIDHex parses a UUID string (with or without dashes) into 16 bytes.
+func parseUUIDHex(s string) []byte {
+	clean := make([]byte, 0, 32)
+	for i := 0; i < len(s); i++ {
+		if s[i] != '-' {
+			clean = append(clean, s[i])
+		}
+	}
+	if len(clean) != 32 {
+		return nil
+	}
+	raw := make([]byte, 16)
+	_, err := hex.Decode(raw, clean)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
 // --- Network function implementations ---
 
 func fnIPToString(args []any) any {
@@ -1240,6 +1435,108 @@ func matchLikeRecur(s, pattern string, si, pi int) bool {
 		}
 	}
 	return si == len(s)
+}
+
+// --- Subquery expressions ---
+
+// SubqueryRunner executes a SQL subquery and returns its result rows.
+// Each row is a map of column name to value.
+type SubqueryRunner func(sql string) ([]map[string]any, error)
+
+// ScalarSubquery evaluates a subquery that returns a single scalar value.
+// Example: WHERE price > (SELECT AVG(price) FROM products)
+// Uncorrelated: executed once and result cached.
+type ScalarSubquery struct {
+	SQL    string
+	Runner SubqueryRunner
+	cached bool
+	val    any
+}
+
+func (e *ScalarSubquery) Eval(_ *batch.RecordBatch, _ int) any {
+	if !e.cached {
+		e.cached = true
+		rows, err := e.Runner(e.SQL)
+		if err != nil || len(rows) == 0 {
+			e.val = nil
+			return nil
+		}
+		// Return first column of first row
+		for _, v := range rows[0] {
+			e.val = v
+			break
+		}
+	}
+	return e.val
+}
+
+// InSubquery checks if a value is in the result set of a subquery.
+// Example: WHERE user_id IN (SELECT user_id FROM active_users)
+// Uncorrelated: executed once and result set cached.
+type InSubquery struct {
+	Expr   Expr
+	SQL    string
+	Runner SubqueryRunner
+	Not    bool
+	cached bool
+	vals   []any
+}
+
+func (e *InSubquery) Eval(b *batch.RecordBatch, row int) any {
+	return e.EvalBool(b, row)
+}
+
+func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
+	if !e.cached {
+		e.cached = true
+		rows, err := e.Runner(e.SQL)
+		if err != nil {
+			return e.Not
+		}
+		for _, r := range rows {
+			for _, v := range r {
+				e.vals = append(e.vals, v)
+				break // first column only
+			}
+		}
+	}
+	lv := e.Expr.Eval(b, row)
+	if lv == nil {
+		return false
+	}
+	for _, rv := range e.vals {
+		if rv != nil && compare(lv, rv, CmpEq) {
+			return !e.Not
+		}
+	}
+	return e.Not
+}
+
+// ExistsSubquery evaluates to true if a subquery returns any rows.
+// Example: WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
+// Uncorrelated: executed once and result cached.
+type ExistsSubquery struct {
+	SQL    string
+	Runner SubqueryRunner
+	Not    bool
+	cached bool
+	exists bool
+}
+
+func (e *ExistsSubquery) Eval(b *batch.RecordBatch, row int) any {
+	return e.EvalBool(b, row)
+}
+
+func (e *ExistsSubquery) EvalBool(_ *batch.RecordBatch, _ int) bool {
+	if !e.cached {
+		e.cached = true
+		rows, err := e.Runner(e.SQL)
+		e.exists = err == nil && len(rows) > 0
+	}
+	if e.Not {
+		return !e.exists
+	}
+	return e.exists
 }
 
 // Cast wraps an expression with explicit type conversion.

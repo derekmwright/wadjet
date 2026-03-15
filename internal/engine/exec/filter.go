@@ -2,7 +2,9 @@ package exec
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"net"
 
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec/kernel"
@@ -66,6 +68,9 @@ func (f *Filter) Close() error { return nil }
 // ColumnCompare creates a predicate that compares a column against a constant value.
 func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 	cachedIdx := -2 // -2 = unresolved, -1 = not found
+	var cachedNetInt int64
+	var cachedNetStr string
+	netResolved := false
 	return func(b *batch.RecordBatch, row int) bool {
 		if cachedIdx == -2 {
 			cachedIdx = b.ColumnIndex(colName)
@@ -105,9 +110,130 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 			if op == OpNe {
 				return v.BoolData[row] != value.(bool)
 			}
+		case batch.TypeIPv4:
+			if !netResolved {
+				cachedNetInt = parseIPv4FilterVal(value)
+				netResolved = true
+			}
+			return compareInt64(v.Int64Data[row], cachedNetInt, op)
+		case batch.TypeMAC:
+			if !netResolved {
+				cachedNetInt = parseMACFilterVal(value)
+				netResolved = true
+			}
+			return compareInt64(v.Int64Data[row], cachedNetInt, op)
+		case batch.TypeIPv6:
+			if !netResolved {
+				cachedNetStr = parseIPv6FilterVal(value)
+				netResolved = true
+			}
+			return compareString(v.BytesData.StringValue(row), cachedNetStr, op)
+		case batch.TypeCIDR:
+			return compareString(v.BytesData.StringValue(row), fmt.Sprint(value), op)
+		case batch.TypePort, batch.TypeProtocol:
+			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
+		case batch.TypeDuration:
+			return compareInt64(v.Int64Data[row], toInt64(value), op)
+		case batch.TypeUUID:
+			return compareString(v.BytesData.StringValue(row), fmt.Sprint(value), op)
+		case batch.TypeDate:
+			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
 		}
 		return false
 	}
+}
+
+func parseIPv4FilterVal(value any) int64 {
+	s := fmt.Sprint(value)
+	ip := net.ParseIP(s)
+	if ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return int64(binary.BigEndian.Uint32(ip4))
+		}
+	}
+	return 0
+}
+
+func parseMACFilterVal(value any) int64 {
+	s := fmt.Sprint(value)
+	hw, err := net.ParseMAC(s)
+	if err != nil || len(hw) != 6 {
+		return 0
+	}
+	var n uint64
+	for _, b := range hw {
+		n = (n << 8) | uint64(b)
+	}
+	return int64(n)
+}
+
+func parseIPv6FilterVal(value any) string {
+	s := fmt.Sprint(value)
+	ip := net.ParseIP(s)
+	if ip != nil {
+		return string(ip.To16())
+	}
+	return ""
+}
+
+// ColumnLike creates a predicate that evaluates col LIKE pattern using SQL LIKE semantics.
+// The pattern uses % for any sequence of characters and _ for any single character.
+func ColumnLike(colName, pattern string, not bool) Predicate {
+	cachedIdx := -2
+	return func(b *batch.RecordBatch, row int) bool {
+		if cachedIdx == -2 {
+			cachedIdx = b.ColumnIndex(colName)
+		}
+		if cachedIdx < 0 {
+			return false
+		}
+		v := b.Columns[cachedIdx]
+		if v.Nulls.IsNull(row) {
+			return false
+		}
+		s := v.BytesData.StringValue(row)
+		result := matchLike(s, pattern)
+		if not {
+			return !result
+		}
+		return result
+	}
+}
+
+// matchLike implements SQL LIKE pattern matching.
+// % matches any sequence of characters, _ matches any single character.
+func matchLike(s, pattern string) bool {
+	return matchLikeRecur(s, pattern, 0, 0)
+}
+
+func matchLikeRecur(s, pattern string, si, pi int) bool {
+	for pi < len(pattern) {
+		if pattern[pi] == '%' {
+			pi++
+			for pi < len(pattern) && pattern[pi] == '%' {
+				pi++
+			}
+			if pi == len(pattern) {
+				return true
+			}
+			for i := si; i <= len(s); i++ {
+				if matchLikeRecur(s, pattern, i, pi) {
+					return true
+				}
+			}
+			return false
+		}
+		if si >= len(s) {
+			return false
+		}
+		if pattern[pi] == '_' || pattern[pi] == s[si] {
+			si++
+			pi++
+		} else {
+			return false
+		}
+	}
+	return si == len(s)
 }
 
 // And combines predicates with logical AND.

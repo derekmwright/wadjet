@@ -6,15 +6,15 @@ import "github.com/derekmwright/caelum/internal/engine/batch"
 // The returned function has no type switch — the type is baked into the closure.
 func ResolveSortCompare(typ batch.TypeID) SortCompareKernel {
 	switch typ {
-	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC:
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 		return sortCompareInt64
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return sortCompareInt32
 	case batch.TypeFloat64:
 		return sortCompareFloat64
 	case batch.TypeFloat32:
 		return sortCompareFloat32
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		return sortCompareString
 	case batch.TypeBool:
 		return sortCompareBool

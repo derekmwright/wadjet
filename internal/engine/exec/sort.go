@@ -248,7 +248,7 @@ func compareVectorValues(a *batch.Vector, ai int, b *batch.Vector, bi int, typ b
 	}
 
 	switch typ {
-	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC:
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 		av, bv := a.Int64Data[ai], b.Int64Data[bi]
 		if av < bv {
 			return -1
@@ -257,7 +257,7 @@ func compareVectorValues(a *batch.Vector, ai int, b *batch.Vector, bi int, typ b
 			return 1
 		}
 		return 0
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		av, bv := a.Int32Data[ai], b.Int32Data[bi]
 		if av < bv {
 			return -1
@@ -284,7 +284,7 @@ func compareVectorValues(a *batch.Vector, ai int, b *batch.Vector, bi int, typ b
 			return 1
 		}
 		return 0
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		as := a.BytesData.StringValue(ai)
 		bs := b.BytesData.StringValue(bi)
 		if as < bs {
@@ -314,7 +314,7 @@ func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 	if src.Nulls.IsNull(si) {
 		dst.Nulls.SetNull(di)
 		switch dst.Type {
-		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR:
+		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 			dst.BytesData.Set(di, nil)
 		}
 		return
@@ -323,15 +323,15 @@ func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 	switch dst.Type {
 	case batch.TypeBool:
 		dst.BoolData[di] = src.BoolData[si]
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		dst.Int32Data[di] = src.Int32Data[si]
-	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC:
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 		dst.Int64Data[di] = src.Int64Data[si]
 	case batch.TypeFloat32:
 		dst.Float32Data[di] = src.Float32Data[si]
 	case batch.TypeFloat64:
 		dst.Float64Data[di] = src.Float64Data[si]
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR:
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		dst.BytesData.Set(di, src.BytesData.Value(si))
 	}
 }

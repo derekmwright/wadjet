@@ -24,35 +24,43 @@ func NewScheduler(nc *nats.Conn, logger *slog.Logger) *Scheduler {
 }
 
 // PublishTasks publishes a set of tasks to NATS for worker consumption.
+// Tasks are serialized in batch before publishing to minimize time spent
+// holding the NATS connection and reduce per-message overhead.
 func (s *Scheduler) PublishTasks(_ context.Context, tasks []distributed.Task) error {
-	for _, task := range tasks {
-		subject := distributed.TaskSubject(string(task.Type), task.QueryID, task.StageID)
+	if len(tasks) == 0 {
+		return nil
+	}
 
+	// Pre-serialize all tasks to avoid interleaving marshal + publish
+	type prepared struct {
+		subject string
+		data    []byte
+		task    distributed.Task
+	}
+	batch := make([]prepared, 0, len(tasks))
+	for _, task := range tasks {
 		data, err := distributed.Marshal(task)
 		if err != nil {
 			return fmt.Errorf("marshaling task %s: %w", task.ID, err)
 		}
+		batch = append(batch, prepared{
+			subject: distributed.TaskSubject(string(task.Type), task.QueryID, task.StageID),
+			data:    data,
+			task:    task,
+		})
+	}
 
-		if err := s.nc.Publish(subject, data); err != nil {
-			return fmt.Errorf("publishing task %s to %s: %w", task.ID, subject, err)
+	// Publish all pre-serialized messages
+	for _, p := range batch {
+		if err := s.nc.Publish(p.subject, p.data); err != nil {
+			return fmt.Errorf("publishing task %s to %s: %w", p.task.ID, p.subject, err)
 		}
-
-		s.logger.Debug("published task",
-			"task_id", task.ID,
-			"type", task.Type,
-			"query_id", task.QueryID,
-			"stage_id", task.StageID,
-			"subject", subject,
-		)
 	}
 
 	if err := s.nc.Flush(); err != nil {
 		return fmt.Errorf("flushing NATS: %w", err)
 	}
 
-	s.logger.Info("published tasks",
-		"count", len(tasks),
-	)
-
+	s.logger.Info("published tasks", "count", len(tasks))
 	return nil
 }

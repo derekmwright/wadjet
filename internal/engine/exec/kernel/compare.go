@@ -1,6 +1,11 @@
 package kernel
 
-import "github.com/derekmwright/caelum/internal/engine/batch"
+import (
+	"encoding/binary"
+	"net"
+
+	"github.com/derekmwright/caelum/internal/engine/batch"
+)
 
 // CompareOp represents a comparison operation.
 type CompareOp int
@@ -80,6 +85,22 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 		return compareFilterImpl(getFloat32Data, float32(toFloat64(value)), op)
 	case batch.TypeString:
 		return compareFilterString(op, toString(value))
+	case batch.TypeIPv4:
+		return compareFilterImpl(getInt64Data, parseIPv4ToInt64(toString(value)), op)
+	case batch.TypeMAC:
+		return compareFilterImpl(getInt64Data, parseMACToInt64(toString(value)), op)
+	case batch.TypeIPv6:
+		return compareFilterString(op, parseIPv6ToRawString(toString(value)))
+	case batch.TypeCIDR:
+		return compareFilterString(op, toString(value))
+	case batch.TypePort, batch.TypeProtocol:
+		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
+	case batch.TypeDuration:
+		return compareFilterImpl(getInt64Data, toInt64(value), op)
+	case batch.TypeUUID:
+		return compareFilterString(op, toString(value))
+	case batch.TypeDate:
+		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
 	default:
 		return nil
 	}
@@ -142,6 +163,39 @@ func toFloat64(v any) float64 {
 func toString(v any) string {
 	if s, ok := v.(string); ok {
 		return s
+	}
+	return ""
+}
+
+// parseIPv4ToInt64 converts a string IPv4 address to its int64 representation.
+func parseIPv4ToInt64(s string) int64 {
+	ip := net.ParseIP(s)
+	if ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			return int64(binary.BigEndian.Uint32(ip4))
+		}
+	}
+	return 0
+}
+
+// parseMACToInt64 converts a string MAC address to its int64 representation.
+func parseMACToInt64(s string) int64 {
+	hw, err := net.ParseMAC(s)
+	if err != nil || len(hw) != 6 {
+		return 0
+	}
+	var n uint64
+	for _, b := range hw {
+		n = (n << 8) | uint64(b)
+	}
+	return int64(n)
+}
+
+// parseIPv6ToRawString converts a string IPv6 address to its raw 16-byte string form.
+func parseIPv6ToRawString(s string) string {
+	ip := net.ParseIP(s)
+	if ip != nil {
+		return string(ip.To16())
 	}
 	return ""
 }

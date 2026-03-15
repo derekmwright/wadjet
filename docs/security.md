@@ -8,24 +8,21 @@ Three authentication methods are supported. Configure one in the YAML config fil
 
 ### API Keys
 
-Simple bearer token authentication. Best for service-to-service communication.
+Simple bearer token authentication. Best for service-to-service communication. Each key maps to a name (identity label) and a single role.
 
 ```yaml
 auth:
-  method: apikey
+  enabled: true
   api_keys:
     - key: "caelum-ingest-key-abc123"
-      identity: "ingest-pipeline"
-      roles:
-        - writer
+      name: "ingest-pipeline"
+      role: writer
     - key: "caelum-dashboard-key-xyz789"
-      identity: "grafana-dashboard"
-      roles:
-        - reader
+      name: "grafana-dashboard"
+      role: reader
     - key: "caelum-admin-key-000000"
-      identity: "admin-operator"
-      roles:
-        - admin
+      name: "admin-operator"
+      role: admin
 ```
 
 Usage:
@@ -42,30 +39,33 @@ JSON Web Token authentication. Best for user-facing applications where an identi
 
 ```yaml
 auth:
-  method: jwt
+  enabled: true
   jwt:
-    signing_method: hmac
+    enabled: true
     secret: "your-256-bit-secret-here"
-    subject_claim: sub  # JWT claim containing user identity
+    role_claim: role          # JWT claim containing the role name
+    issuer: "my-idp"         # Expected issuer (optional, validates iss claim)
 ```
 
 **RSA:**
 
 ```yaml
 auth:
-  method: jwt
+  enabled: true
   jwt:
-    signing_method: rsa
-    public_key: /etc/caelum/jwt-public.pem
-    subject_claim: sub
+    enabled: true
+    public_key_file: /etc/caelum/jwt-public.pem
+    role_claim: role
+    issuer: "my-idp"
 ```
 
-The JWT payload must include a `roles` claim (array of role names) for authorization:
+The JWT payload must include a role claim (matching `role_claim` config) for authorization:
 
 ```json
 {
   "sub": "jdoe@example.com",
-  "roles": ["reader"],
+  "role": "reader",
+  "iss": "my-idp",
   "iat": 1773792000,
   "exp": 1773795600
 }
@@ -83,13 +83,20 @@ Mutual TLS authentication. Best for zero-trust environments and government/high-
 
 ```yaml
 auth:
-  method: mtls
+  enabled: true
   mtls:
-    ca_cert: /etc/caelum/ca.pem
-    identity_field: common_name  # or "serial", "dns_san"
+    enabled: true
+    ca_file: /etc/caelum/ca.pem
+    cert_file: /etc/caelum/server-cert.pem
+    key_file: /etc/caelum/server-key.pem
+    role_map:
+      "CN=ingest-pipeline": writer
+      "CN=grafana-dashboard": reader
+      "CN=admin-operator": admin
+    default_role: reader    # Fallback if CN not in role_map
 ```
 
-The server validates client certificates against the configured CA. Identity is extracted from the certificate field specified by `identity_field`.
+The server validates client certificates against the configured CA. The certificate's Common Name is mapped to a role via `role_map`. If the CN isn't found, `default_role` is used.
 
 Usage:
 
@@ -103,46 +110,30 @@ Role-based access control (RBAC) maps authenticated identities to permissions on
 
 ### Role Definitions
 
+Roles are defined as a flat list. Each role has a name, a list of tables it can access (or `"*"` for all), and a list of allowed permissions:
+
 ```yaml
-roles:
-  # Read-only access to all tables
-  reader:
-    tables:
-      "*":
-        permissions:
-          - read
+auth:
+  roles:
+    # Read-only access to all tables
+    - name: reader
+      tables: ["*"]
+      allow: [read]
 
-  # Read/write access to specific tables
-  writer:
-    tables:
-      flow_logs:
-        permissions:
-          - read
-          - write
-      syslog:
-        permissions:
-          - read
-          - write
+    # Read/write access to specific tables
+    - name: writer
+      tables: [flow_logs, syslog]
+      allow: [read, write]
 
-  # Network operations — read everything, write device tables
-  netops:
-    tables:
-      "*":
-        permissions:
-          - read
-      device_inventory:
-        permissions:
-          - read
-          - write
+    # Network operations — read everything, write device tables
+    - name: netops
+      tables: [flow_logs, syslog, snmp_traps, device_inventory]
+      allow: [read, write]
 
-  # Full administrative access
-  admin:
-    tables:
-      "*":
-        permissions:
-          - read
-          - write
-          - admin
+    # Full administrative access
+    - name: admin
+      tables: ["*"]
+      allow: [read, write, admin]
 ```
 
 ### Permission Types
@@ -155,71 +146,45 @@ roles:
 
 ### Permission Resolution
 
-1. Look up the user's roles from their authentication credentials
-2. For each table referenced in the query, check if any role grants the required permission
-3. Wildcard (`"*"`) matches all tables
-4. Specific table entries take precedence over wildcards
-5. If no role grants the required permission, the request is denied with 403 Forbidden
+1. Look up the user's role from their authentication credentials
+2. Find the matching role definition
+3. For each table referenced in the query, check if the role's `tables` list includes it (or `"*"`)
+4. Check if the role's `allow` list includes the required permission
+5. If the role does not grant access, the request is denied with 403 Forbidden
 
 ## Cell-Level Policies
 
 Cell-level policies provide fine-grained data access control, applied **after** query execution but **before** results are returned to the client.
 
-### Column Masking
-
-Replace column values with a masked value for specific roles:
+Policies combine column masking and row filtering in a single definition per table/role pair:
 
 ```yaml
-policies:
-  - name: mask-source-ips
-    description: "Mask source IPs for non-admin users"
-    table: flow_logs
-    type: column_mask
-    column: src_ip
-    mask_value: "***REDACTED***"
-    applies_to:
-      roles:
-        - reader
+auth:
+  policies:
+    # Mask source IPs and filter to internal traffic for readers
+    - table: flow_logs
+      role: reader
+      columns:
+        src_ip: "***REDACTED***"      # Column name -> mask replacement value
+      row_filter: "src_ip LIKE '10.%' OR src_ip LIKE '172.16.%' OR src_ip LIKE '192.168.%'"
 
-  - name: mask-messages
-    description: "Truncate syslog messages for reader role"
-    table: syslog
-    type: column_mask
-    column: message
-    mask_value: "[MASKED]"
-    applies_to:
-      roles:
-        - reader
+    # Mask raw messages for readers viewing syslog
+    - table: syslog
+      role: reader
+      columns:
+        message: "[MASKED]"
+
+    # NetOps can only see production devices
+    - table: device_inventory
+      role: netops
+      row_filter: "environment = 'production'"
 ```
 
-When a user with the `reader` role queries `flow_logs`, the `src_ip` column values are replaced with `"***REDACTED***"` in the response.
+**Column masking** (`columns`): A map of column name to replacement value. When the specified role queries this table, the column values are replaced with the mask string in the response.
 
-### Row Filtering
+**Row filtering** (`row_filter`): A SQL predicate automatically injected into the query. Only rows matching the filter are returned to the role.
 
-Automatically inject WHERE clause conditions to restrict which rows a role can see:
-
-```yaml
-policies:
-  - name: internal-traffic-only
-    description: "Readers can only see internal network traffic"
-    table: flow_logs
-    type: row_filter
-    filter: "src_ip LIKE '10.%' OR src_ip LIKE '172.16.%' OR src_ip LIKE '192.168.%'"
-    applies_to:
-      roles:
-        - reader
-
-  - name: production-devices-only
-    description: "NetOps can only see production device data"
-    table: device_inventory
-    type: row_filter
-    filter: "environment = 'production'"
-    applies_to:
-      roles:
-        - netops
-```
-
-When a `reader` queries `flow_logs`, the row filter is silently applied — they only see rows where `src_ip` matches internal RFC 1918 ranges.
+Both can be combined in a single policy. A policy with only `columns` applies masking without row filtering, and vice versa.
 
 ### Policy Evaluation Order
 
@@ -238,80 +203,51 @@ Complete security configuration for a network monitoring deployment:
 # caelum-security.yaml
 
 auth:
-  method: jwt
+  enabled: true
+
   jwt:
-    signing_method: rsa
-    public_key: /etc/caelum/idp-public.pem
-    subject_claim: sub
+    enabled: true
+    public_key_file: /etc/caelum/idp-public.pem
+    role_claim: role
+    issuer: "corporate-idp"
 
-roles:
-  # SOC analysts — read all data, see everything
-  soc-analyst:
-    tables:
-      "*":
-        permissions:
-          - read
+  api_keys:
+    - key: "caelum-ingest-key-secret"
+      name: "bento-pipeline"
+      role: ingest-service
 
-  # Network engineers — read network data, manage device inventory
-  network-engineer:
-    tables:
-      flow_logs:
-        permissions:
-          - read
-      syslog:
-        permissions:
-          - read
-      snmp_traps:
-        permissions:
-          - read
-      device_inventory:
-        permissions:
-          - read
-          - write
-          - admin
+  roles:
+    # SOC analysts — read all data
+    - name: soc-analyst
+      tables: ["*"]
+      allow: [read]
 
-  # Ingestion services — write only
-  ingest-service:
-    tables:
-      flow_logs:
-        permissions:
-          - write
-      syslog:
-        permissions:
-          - write
-      snmp_traps:
-        permissions:
-          - write
+    # Network engineers — read network data, manage device inventory
+    - name: network-engineer
+      tables: [flow_logs, syslog, snmp_traps, device_inventory]
+      allow: [read, write, admin]
 
-  # Platform admin — full access
-  platform-admin:
-    tables:
-      "*":
-        permissions:
-          - read
-          - write
-          - admin
+    # Ingestion services — write only
+    - name: ingest-service
+      tables: [flow_logs, syslog, snmp_traps]
+      allow: [write]
 
-policies:
-  # Mask source IPs for SOC analysts reviewing external traffic
-  - name: mask-external-sources
-    table: flow_logs
-    type: column_mask
-    column: src_ip
-    mask_value: "EXTERNAL"
-    applies_to:
-      roles:
-        - soc-analyst
-    # Only apply when the source is external (custom logic would need code support)
+    # Platform admin — full access
+    - name: platform-admin
+      tables: ["*"]
+      allow: [read, write, admin]
 
-  # Network engineers can only see their region's devices
-  - name: region-filter
-    table: device_inventory
-    type: row_filter
-    filter: "region = 'us-east-1'"
-    applies_to:
-      roles:
-        - network-engineer
+  policies:
+    # Mask source IPs for SOC analysts
+    - table: flow_logs
+      role: soc-analyst
+      columns:
+        src_ip: "EXTERNAL"
+
+    # Network engineers can only see their region's devices
+    - table: device_inventory
+      role: network-engineer
+      row_filter: "region = 'us-east-1'"
 ```
 
 ## Hot Reload

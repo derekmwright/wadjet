@@ -8,11 +8,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/derekmwright/caelum/internal/auth"
+	"github.com/derekmwright/caelum/internal/coordinator"
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
+	"github.com/derekmwright/caelum/internal/engine/expr"
 	"github.com/derekmwright/caelum/internal/metrics"
 	"github.com/derekmwright/caelum/internal/planner/logical"
 	"github.com/derekmwright/caelum/internal/planner/physical"
@@ -22,14 +27,15 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	Addr      string
-	Catalog   *catalog.Catalog
-	Auth      *auth.Authenticator // nil = no authentication (static mode)
-	Authz     *auth.Authorizer    // nil = no authorization (static mode)
-	Policies  *auth.PolicySet     // nil = no cell-level policies (static mode)
-	Provider  *auth.Provider      // nil = use static Auth/Authz/Policies above
-	Metrics   *metrics.Metrics    // nil = no metrics collection
-	TLSConfig *tls.Config         // nil = plain HTTP
+	Addr        string
+	Catalog     *catalog.Catalog
+	Coordinator *coordinator.Coordinator // nil = local execution only
+	Auth        *auth.Authenticator      // nil = no authentication (static mode)
+	Authz       *auth.Authorizer         // nil = no authorization (static mode)
+	Policies    *auth.PolicySet          // nil = no cell-level policies (static mode)
+	Provider    *auth.Provider           // nil = use static Auth/Authz/Policies above
+	Metrics     *metrics.Metrics         // nil = no metrics collection
+	TLSConfig   *tls.Config              // nil = plain HTTP
 }
 
 // Server is the Caelum HTTP API server.
@@ -37,8 +43,9 @@ type Server struct {
 	config   Config
 	catalog  *catalog.Catalog
 	planner  *physical.Planner
+	coord    *coordinator.Coordinator // nil = local execution
 	logger   *slog.Logger
-	mux      *http.ServeMux
+	mux      chi.Router
 	server   *http.Server
 	provider *auth.Provider   // hot-reloadable auth (nil = static)
 	authz    *auth.Authorizer
@@ -56,44 +63,49 @@ func New(cfg Config, logger *slog.Logger) *Server {
 		config:   cfg,
 		catalog:  cfg.Catalog,
 		planner:  physical.NewPlanner(cfg.Catalog),
+		coord:    cfg.Coordinator,
 		logger:   logger,
-		mux:      http.NewServeMux(),
+		mux:      chi.NewRouter(),
 		provider: cfg.Provider,
 		authz:    cfg.Authz,
 		policies: cfg.Policies,
 		metrics:  cfg.Metrics,
 	}
 
-	s.mux.HandleFunc("POST /v1/queries", s.handleQuery)
-	s.mux.HandleFunc("GET /v1/tables", s.handleListTables)
-	s.mux.HandleFunc("GET /v1/tables/{name}", s.handleGetTable)
-	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
+	s.mux.Post("/v1/queries", s.handleQuery)
+	s.mux.Get("/v1/queries", s.handleListQueries)
+	s.mux.Post("/v1/queries/async", s.handleAsyncQuery)
+	s.mux.Get("/v1/queries/{queryID}", s.handleGetQueryStatus)
+	s.mux.Get("/v1/queries/{queryID}/results", s.handleGetQueryResults)
+	s.mux.Delete("/v1/queries/{queryID}", s.handleCancelQuery)
+	s.mux.Get("/v1/tables", s.handleListTables)
+	s.mux.Get("/v1/tables/{name}", s.handleGetTable)
+	s.mux.Get("/v1/health", s.handleHealth)
 	if s.metrics != nil {
-		s.mux.Handle("GET /metrics", s.metrics.Handler())
+		s.mux.Handle("/metrics", s.metrics.Handler())
 	}
 
 	return s
 }
 
-// Mux returns the underlying ServeMux for registering additional routes (e.g. admin API).
-func (s *Server) Mux() *http.ServeMux {
+// Mux returns the underlying chi router for registering additional routes (e.g. admin API).
+func (s *Server) Mux() chi.Router {
 	return s.mux
 }
 
 // Start starts the HTTP server.
 func (s *Server) Start() error {
-	var handler http.Handler = s.mux
 	if s.provider != nil {
 		// Hot-reloadable auth via Provider
-		handler = auth.ProviderMiddleware(s.provider, s.logger)(handler)
+		s.mux.Use(auth.ProviderMiddleware(s.provider, s.logger))
 	} else if s.config.Auth != nil && s.config.Auth.Enabled() {
 		// Static auth (backwards compatible)
-		handler = auth.Middleware(s.config.Auth, s.logger)(handler)
+		s.mux.Use(auth.Middleware(s.config.Auth, s.logger))
 	}
 
 	s.server = &http.Server{
 		Addr:         s.config.Addr,
-		Handler:      handler,
+		Handler:      s.mux,
 		TLSConfig:    s.config.TLSConfig,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 5 * time.Minute,
@@ -175,6 +187,20 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle CREATE/DROP/SHOW FUNCTION
+	if parsed.Type == plansql.QueryCreateFunction {
+		s.handleCreateFunction(w, r, parsed, start)
+		return
+	}
+	if parsed.Type == plansql.QueryDropFunction {
+		s.handleDropFunction(w, r, parsed, start)
+		return
+	}
+	if parsed.Type == plansql.QueryShowFunctions {
+		s.handleShowFunctions(w, r, start)
+		return
+	}
+
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error())
@@ -204,6 +230,53 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+
+	// Distributed execution path: use coordinator if available
+	if s.coord != nil {
+		result, err := s.coord.ExecuteSQL(r.Context(), req.SQL)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "distributed execution error: "+err.Error())
+			return
+		}
+
+		rows := result.Rows
+
+		// Apply cell-level access policies
+		policies := s.getPolicies()
+		if identity != nil && policies != nil && len(rows) > 0 {
+			tableName := ""
+			if len(selectInfo.Tables) > 0 {
+				tableName = selectInfo.Tables[0].Name
+			}
+			if policy := policies.Lookup(tableName, identity.Role); policy != nil {
+				rows = policy.ApplyToRows(rows)
+			}
+		}
+
+		resp := QueryResponse{
+			QueryID: result.QueryID,
+			Columns: result.Columns,
+			Rows:    rows,
+			Stats: QueryStats{
+				Elapsed:     result.Elapsed.String(),
+				RowsScanned: result.TotalRows,
+				Plan:        result.Plan,
+			},
+		}
+
+		if s.metrics != nil {
+			s.metrics.QueriesTotal.WithLabelValues("success").Inc()
+			s.metrics.RowsOutput.Add(float64(len(rows)))
+		}
+		if done != nil {
+			done()
+		}
+
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// Local execution path (standalone without coordinator)
 
 	// Build logical plan
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
@@ -298,7 +371,7 @@ func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetTable(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+	name := chi.URLParam(r, "name")
 
 	// Check table access
 	if identity := auth.IdentityFromContext(r.Context()); identity != nil {
@@ -420,6 +493,109 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 			Elapsed: time.Since(start).String(),
 			Plan:    planStr,
 		},
+	})
+}
+
+func (s *Server) handleCreateFunction(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	cf := parsed.CreateFunction
+	identity := auth.IdentityFromContext(r.Context())
+
+	owner := ""
+	isAdmin := false
+	if identity != nil {
+		owner = identity.Name
+		isAdmin = identity.Role == "admin"
+	}
+
+	def := expr.UDFDef{
+		Name:   cf.Name,
+		Params: cf.Params,
+		Body:   cf.Body,
+		Owner:  owner,
+		Locked: cf.Locked,
+	}
+
+	// Check if function exists and this is not OR REPLACE
+	if !cf.Replace {
+		if _, exists := expr.DefaultUDFs.Get(def.Name); exists {
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("function %q already exists (use CREATE OR REPLACE to overwrite)", cf.Name))
+			return
+		}
+	}
+
+	if err := expr.DefaultUDFs.Register(def, isAdmin); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q created", cf.Name)}},
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+	})
+}
+
+func (s *Server) handleDropFunction(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	df := parsed.DropFunction
+	identity := auth.IdentityFromContext(r.Context())
+
+	caller := ""
+	isAdmin := false
+	if identity != nil {
+		caller = identity.Name
+		isAdmin = identity.Role == "admin"
+	}
+
+	err := expr.DefaultUDFs.Unregister(df.Name, caller, isAdmin)
+	if err != nil {
+		if df.IfExists {
+			// IF EXISTS — don't error if not found
+			writeJSON(w, http.StatusOK, QueryResponse{
+				QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+				Columns: []string{"result"},
+				Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q does not exist (no-op)", df.Name)}},
+				Stats:   QueryStats{Elapsed: time.Since(start).String()},
+			})
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q dropped", df.Name)}},
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+	})
+}
+
+func (s *Server) handleShowFunctions(w http.ResponseWriter, _ *http.Request, start time.Time) {
+	udfs := expr.DefaultUDFs.List()
+
+	rows := make([]map[string]any, len(udfs))
+	for i, udf := range udfs {
+		params := "(" + strings.Join(udf.Params, ", ") + ")"
+		locked := "NO"
+		if udf.Locked {
+			locked = "YES"
+		}
+		rows[i] = map[string]any{
+			"name":   udf.Name,
+			"params": params,
+			"body":   udf.Body,
+			"owner":  udf.Owner,
+			"locked": locked,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"name", "params", "body", "owner", "locked"},
+		Rows:    rows,
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
 	})
 }
 

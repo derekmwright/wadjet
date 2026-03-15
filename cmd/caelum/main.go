@@ -336,8 +336,8 @@ func runStandalone(ctx context.Context, store objstore.Store, cat *catalog.Catal
 	}
 	defer embeddedNATS.Shutdown()
 
-	// Connect to NATS
-	nc, err := distributed.Connect(embeddedNATS.ClientURL())
+	// Connect to NATS via in-process (zero-copy, no TCP overhead)
+	nc, err := distributed.ConnectInProcess(embeddedNATS.Server())
 	if err != nil {
 		return fmt.Errorf("connecting to NATS: %w", err)
 	}
@@ -379,9 +379,10 @@ func runStandalone(ctx context.Context, store objstore.Store, cat *catalog.Catal
 
 	// Build config manager and auth provider for hot-reload
 	srvCfg := server.Config{
-		Addr:    httpAddr,
-		Catalog: cat,
-		Metrics: m,
+		Addr:        httpAddr,
+		Catalog:     cat,
+		Coordinator: coord,
+		Metrics:     m,
 	}
 
 	var cfgMgr *config.Manager
@@ -474,7 +475,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, cat *catalog.Cata
 	}
 	defer embeddedNATS.Shutdown()
 
-	nc, err := distributed.Connect(embeddedNATS.ClientURL())
+	nc, err := distributed.ConnectInProcess(embeddedNATS.Server())
 	if err != nil {
 		return fmt.Errorf("connecting to NATS: %w", err)
 	}
@@ -499,9 +500,10 @@ func runCoordinator(ctx context.Context, store objstore.Store, cat *catalog.Cata
 	m := metrics.New()
 
 	srvCfg := server.Config{
-		Addr:    httpAddr,
-		Catalog: cat,
-		Metrics: m,
+		Addr:        httpAddr,
+		Catalog:     cat,
+		Coordinator: coord,
+		Metrics:     m,
 	}
 
 	var cfgMgr *config.Manager

@@ -51,11 +51,11 @@ mc mb local/caelum
 ```bash
 ./caelum serve \
   --mode standalone \
-  --s3-endpoint localhost:9000 \
-  --s3-access-key minioadmin \
-  --s3-secret-key minioadmin \
-  --s3-bucket caelum \
-  --listen :8080
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket caelum \
+  --http-addr :8080
 ```
 
 This starts an embedded coordinator and worker in a single process — ideal for development and single-node deployments.
@@ -64,31 +64,35 @@ This starts an embedded coordinator and worker in a single process — ideal for
 
 ```bash
 ./caelum query \
-  --s3-endpoint localhost:9000 \
-  --s3-access-key minioadmin \
-  --s3-secret-key minioadmin \
-  --s3-bucket caelum \
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket caelum \
   "SELECT * FROM my_table LIMIT 10"
 ```
+
+Supports `--format` flag: `json` (default), `table`, or `csv`.
 
 ### Interactive Shell
 
 ```bash
 ./caelum shell \
-  --s3-endpoint localhost:9000 \
-  --s3-access-key minioadmin \
-  --s3-secret-key minioadmin \
-  --s3-bucket caelum
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket caelum
 ```
+
+Supports `--format` flag: `table` (default), `json`, or `csv`.
 
 ### List Tables
 
 ```bash
 ./caelum tables \
-  --s3-endpoint localhost:9000 \
-  --s3-access-key minioadmin \
-  --s3-secret-key minioadmin \
-  --s3-bucket caelum
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket caelum
 ```
 
 ## Your First Table (Embedded Go)
@@ -102,33 +106,45 @@ import (
     "log"
     "time"
 
+    "github.com/derekmwright/caelum/internal/storage/ingest"
+    "github.com/derekmwright/caelum/internal/storage/objstore"
+    "github.com/derekmwright/caelum/internal/storage/parquet"
     "github.com/derekmwright/caelum/pkg/caelum"
 )
 
 func main() {
     ctx := context.Background()
 
+    // Create an S3-compatible object store client
+    store, err := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+        Endpoint:  "localhost:9000",
+        AccessKey: "minioadmin",
+        SecretKey: "minioadmin",
+        UseSSL:    false,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
     db, err := caelum.Open(ctx, caelum.Config{
-        S3Endpoint:  "localhost:9000",
-        S3AccessKey: "minioadmin",
-        S3SecretKey: "minioadmin",
-        S3Bucket:    "caelum",
+        Store:  store,
+        Bucket: "caelum",
     })
     if err != nil {
         log.Fatal(err)
     }
 
     // Define a schema for network flow logs
-    schema := caelum.Schema{
-        Columns: []caelum.Column{
-            {Name: "timestamp",  Type: caelum.Timestamp},
-            {Name: "src_ip",    Type: caelum.IPv4},
-            {Name: "dst_ip",    Type: caelum.IPv4},
-            {Name: "src_port",  Type: caelum.Int32},
-            {Name: "dst_port",  Type: caelum.Int32},
-            {Name: "protocol",  Type: caelum.String},
-            {Name: "bytes_in",  Type: caelum.Int64},
-            {Name: "bytes_out", Type: caelum.Int64},
+    schema := parquet.Schema{
+        Columns: []parquet.Column{
+            {Name: "timestamp",  Type: parquet.TypeTimestamp},
+            {Name: "src_ip",    Type: parquet.TypeIPv4},
+            {Name: "dst_ip",    Type: parquet.TypeIPv4},
+            {Name: "src_port",  Type: parquet.TypeInt32},
+            {Name: "dst_port",  Type: parquet.TypeInt32},
+            {Name: "protocol",  Type: parquet.TypeString},
+            {Name: "bytes_in",  Type: parquet.TypeInt64},
+            {Name: "bytes_out", Type: parquet.TypeInt64},
         },
     }
 
@@ -138,32 +154,33 @@ func main() {
         log.Fatal(err)
     }
 
-    // Set up an ingester
-    ingester, err := db.NewIngester("flow_logs", schema, []string{"date"}, caelum.IngestConfig{
+    // Set up an ingester — returns *ingest.Ingester (no error)
+    ingester := db.NewIngester("flow_logs", schema, []string{"date"}, ingest.Config{
         FlushInterval: 10 * time.Second,
-        MaxRows:       100000,
+        MaxBufferRows: 100000,
+    })
+    ingester.Start() // start background flush goroutine
+
+    // Ingest rows as a batch (takes a slice of row maps)
+    err = ingester.Ingest(ctx, []map[string]any{
+        {
+            "timestamp": time.Now(),
+            "src_ip":    "10.0.1.50",
+            "dst_ip":    "10.0.2.100",
+            "src_port":  int32(54321),
+            "dst_port":  int32(443),
+            "protocol":  "TCP",
+            "bytes_in":  int64(2048),
+            "bytes_out": int64(512),
+        },
     })
     if err != nil {
         log.Fatal(err)
     }
 
-    // Write some rows
-    err = ingester.Write(ctx, map[string]any{
-        "timestamp": time.Now(),
-        "src_ip":    "10.0.1.50",
-        "dst_ip":    "10.0.2.100",
-        "src_port":  int32(54321),
-        "dst_port":  int32(443),
-        "protocol":  "TCP",
-        "bytes_in":  int64(2048),
-        "bytes_out": int64(512),
-    })
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    // Flush to ensure data is written
-    ingester.Flush(ctx)
+    // Flush to ensure data is written, then stop the ingester
+    ingester.FlushAll(ctx)
+    ingester.Stop(ctx)
 
     // Query it
     result, err := db.Query(ctx, "SELECT src_ip, dst_ip, bytes_in FROM flow_logs LIMIT 10")
@@ -199,7 +216,8 @@ Response:
   ],
   "stats": {
     "elapsed": "12ms",
-    "rows_scanned": 50000
+    "rows_scanned": 50000,
+    "plan": "Scan(flow_logs) → Aggregate(src_ip, dst_port) → Sort(total_bytes DESC) → Limit(10)"
   }
 }
 ```

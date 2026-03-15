@@ -15,6 +15,9 @@ type JoinType int
 const (
 	InnerJoin JoinType = iota
 	LeftJoin
+	RightJoin
+	FullOuterJoin
+	CrossJoin
 )
 
 // HashJoin implements a hash join with build and probe phases.
@@ -28,16 +31,25 @@ type HashJoin struct {
 	hashTable map[string][]map[string]any // hash key -> build side rows
 	buildDone bool
 	buildSchema []parquet.Column
+
+	// matched tracks which build-side rows have been matched during probing.
+	// Only populated for RightJoin and FullOuterJoin.
+	// Key: hash key string, Value: set of matched row indices within that key's bucket.
+	matched map[string]map[int]bool
 }
 
 // NewHashJoin creates a new hash join operator.
 func NewHashJoin(joinType JoinType, leftKeys, rightKeys []string) *HashJoin {
-	return &HashJoin{
+	hj := &HashJoin{
 		JoinType:  joinType,
 		LeftKeys:  leftKeys,
 		RightKeys: rightKeys,
 		hashTable: make(map[string][]map[string]any),
 	}
+	if joinType == RightJoin || joinType == FullOuterJoin {
+		hj.matched = make(map[string]map[int]bool)
+	}
+	return hj
 }
 
 // Build consumes all rows from the build (right) side into the hash table.
@@ -129,6 +141,11 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	// Build output schema: left columns + right columns (excluding join keys from right)
 	outSchema := p.outputSchema(in.Schema)
 
+	// CrossJoin: Cartesian product, no key matching needed.
+	if p.join.JoinType == CrossJoin {
+		return p.executeCrossJoin(in, outSchema)
+	}
+
 	var resultRows []map[string]any
 
 	iter := batchIterator(in)
@@ -137,7 +154,7 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		matches := p.join.hashTable[key]
 
 		if len(matches) == 0 {
-			if p.join.JoinType == LeftJoin {
+			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
 				// Emit left row with nulls for right side
 				outRow := make(map[string]any, len(outSchema))
 				for _, col := range in.Schema {
@@ -155,7 +172,7 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			continue
 		}
 
-		for _, matchRow := range matches {
+		for i, matchRow := range matches {
 			outRow := make(map[string]any, len(outSchema))
 			// Left side values
 			for _, col := range in.Schema {
@@ -163,6 +180,51 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			}
 			// Right side values (skip columns that would collide with left)
 			for k, v := range matchRow {
+				if _, exists := outRow[k]; !exists {
+					outRow[k] = v
+				}
+			}
+			resultRows = append(resultRows, outRow)
+
+			// Track matched build-side rows for RIGHT and FULL OUTER joins
+			if p.join.matched != nil {
+				p.join.mu.Lock()
+				if p.join.matched[key] == nil {
+					p.join.matched[key] = make(map[int]bool)
+				}
+				p.join.matched[key][i] = true
+				p.join.mu.Unlock()
+			}
+		}
+	}
+
+	if len(resultRows) == 0 {
+		return nil, nil
+	}
+
+	return batch.FromRows(outSchema, resultRows), nil
+}
+
+// executeCrossJoin produces the Cartesian product of probe rows with all build-side rows.
+func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parquet.Column) (*batch.RecordBatch, error) {
+	var resultRows []map[string]any
+
+	// Collect all build-side rows across all hash keys
+	var allBuildRows []map[string]any
+	for _, rows := range p.join.hashTable {
+		allBuildRows = append(allBuildRows, rows...)
+	}
+
+	iter := batchIterator(in)
+	for _, row := range iter {
+		for _, buildRow := range allBuildRows {
+			outRow := make(map[string]any, len(outSchema))
+			// Left side values
+			for _, col := range in.Schema {
+				outRow[col.Name] = in.ColumnByName(col.Name).GetValue(row)
+			}
+			// Right side values (skip columns that would collide with left)
+			for k, v := range buildRow {
 				if _, exists := outRow[k]; !exists {
 					outRow[k] = v
 				}
@@ -178,11 +240,59 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	return batch.FromRows(outSchema, resultRows), nil
 }
 
+// FlushUnmatched returns a RecordBatch containing build-side rows that were never
+// matched during probing. For RightJoin and FullOuterJoin, unmatched right-side rows
+// are emitted with nil values for all left-side columns. This method should be called
+// after all probe batches have been processed.
+func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.RecordBatch {
+	if p.join.JoinType != RightJoin && p.join.JoinType != FullOuterJoin {
+		return nil
+	}
+
+	outSchema := p.outputSchema(leftSchema)
+	var resultRows []map[string]any
+
+	for key, buildRows := range p.join.hashTable {
+		matchedSet := p.join.matched[key]
+		for i, buildRow := range buildRows {
+			if matchedSet != nil && matchedSet[i] {
+				continue // already matched
+			}
+			// Emit build-side row with nulls for left-side columns
+			outRow := make(map[string]any, len(outSchema))
+			for _, col := range leftSchema {
+				outRow[col.Name] = nil
+			}
+			for k, v := range buildRow {
+				if _, exists := outRow[k]; !exists {
+					outRow[k] = v
+				}
+			}
+			resultRows = append(resultRows, outRow)
+		}
+	}
+
+	if len(resultRows) == 0 {
+		return nil
+	}
+
+	return batch.FromRows(outSchema, resultRows)
+}
+
 func (p *HashJoinProbe) Close() error { return nil }
 
 func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Column {
 	var out []parquet.Column
-	out = append(out, leftSchema...)
+
+	// For RightJoin and FullOuterJoin, left-side columns can be null
+	if p.join.JoinType == RightJoin || p.join.JoinType == FullOuterJoin {
+		for _, col := range leftSchema {
+			col.Nullable = true
+			out = append(out, col)
+		}
+	} else {
+		out = append(out, leftSchema...)
+	}
 
 	seen := make(map[string]bool, len(leftSchema))
 	for _, col := range leftSchema {
@@ -191,7 +301,10 @@ func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Colu
 
 	for _, col := range p.join.buildSchema {
 		if !seen[col.Name] {
-			col.Nullable = true // right side can be null in left join
+			// Right side can be null in left/full outer join
+			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
+				col.Nullable = true
+			}
 			out = append(out, col)
 		}
 	}

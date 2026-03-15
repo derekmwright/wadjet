@@ -42,6 +42,9 @@ type Worker struct {
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	cancelledMu sync.RWMutex
+	cancelled   map[string]struct{} // queryID → cancelled
 }
 
 // New creates a new Worker.
@@ -61,12 +64,13 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 
 	cache := NewLRUCache(cfg.CacheBytes)
 	return &Worker{
-		config:   cfg,
-		store:    store,
-		nc:       nc,
-		js:       js,
-		executor: NewExecutor(store, cache),
-		logger:   logger,
+		config:    cfg,
+		store:     store,
+		nc:        nc,
+		js:        js,
+		executor:  NewExecutor(store, cache),
+		logger:    logger,
+		cancelled: make(map[string]struct{}),
 	}
 }
 
@@ -85,6 +89,24 @@ func (w *Worker) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating consumer: %w", err)
 	}
+
+	// Subscribe to query cancellation messages
+	cancelSub, err := w.nc.Subscribe(distributed.CancelSubjectAll(), func(msg *nats.Msg) {
+		queryID := string(msg.Data)
+		w.cancelledMu.Lock()
+		w.cancelled[queryID] = struct{}{}
+		w.cancelledMu.Unlock()
+		w.logger.Debug("query cancelled", "query_id", queryID)
+	})
+	if err != nil {
+		return fmt.Errorf("subscribing to cancellations: %w", err)
+	}
+
+	// Unsubscribe on shutdown
+	go func() {
+		<-ctx.Done()
+		cancelSub.Unsubscribe()
+	}()
 
 	// Start heartbeat
 	w.wg.Add(1)
@@ -119,26 +141,51 @@ func (w *Worker) Stop() {
 }
 
 func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem chan struct{}) {
+	// Batch fetch: pull up to available concurrency slots at once to
+	// amortize the NATS round-trip overhead.
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		case sem <- struct{}{}:
-			// Have capacity, try to fetch a message
 		}
 
-		msgs, err := consumer.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
+		// Count available slots (non-blocking drain)
+		available := 0
+		for {
+			select {
+			case sem <- struct{}{}:
+				available++
+				if available >= w.config.MaxConcurrent {
+					goto fetch
+				}
+			default:
+				goto fetch
+			}
+		}
+	fetch:
+		if available == 0 {
+			// All slots occupied — wait for one to free up
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+				available = 1
+			}
+		}
+
+		msgs, err := consumer.Fetch(available, jetstream.FetchMaxWait(5*time.Second))
 		if err != nil {
-			<-sem
+			for i := 0; i < available; i++ {
+				<-sem
+			}
 			if ctx.Err() != nil {
 				return
 			}
 			continue
 		}
 
-		gotMsg := false
+		dispatched := 0
 		for msg := range msgs.Messages() {
-			gotMsg = true
+			dispatched++
 			w.wg.Add(1)
 			go func(m jetstream.Msg) {
 				defer w.wg.Done()
@@ -147,7 +194,8 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 			}(msg)
 		}
 
-		if !gotMsg {
+		// Return unused slots
+		for i := dispatched; i < available; i++ {
 			<-sem
 		}
 
@@ -155,6 +203,13 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 			w.logger.Debug("fetch returned", "error", msgs.Error())
 		}
 	}
+}
+
+func (w *Worker) isCancelled(queryID string) bool {
+	w.cancelledMu.RLock()
+	_, ok := w.cancelled[queryID]
+	w.cancelledMu.RUnlock()
+	return ok
 }
 
 func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
@@ -165,13 +220,42 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
+	// Skip tasks for cancelled queries
+	if w.isCancelled(task.QueryID) {
+		w.logger.Debug("skipping task for cancelled query",
+			"task_id", task.ID, "query_id", task.QueryID)
+		msg.Term()
+		return
+	}
+
 	w.logger.Info("executing task",
 		"task_id", task.ID,
 		"type", task.Type,
 		"query_id", task.QueryID,
 	)
 
-	result := w.executor.Execute(ctx, task, w.config.WorkerID)
+	// Create a cancellable context for this task
+	taskCtx, taskCancel := context.WithCancel(ctx)
+	defer taskCancel()
+
+	// Monitor for cancellation during execution
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-taskCtx.Done():
+				return
+			case <-ticker.C:
+				if w.isCancelled(task.QueryID) {
+					taskCancel()
+					return
+				}
+			}
+		}
+	}()
+
+	result := w.executor.Execute(taskCtx, task, w.config.WorkerID)
 
 	// Publish result notification
 	subject := distributed.ResultSubject(task.QueryID, task.StageID, task.ID)

@@ -132,11 +132,11 @@ func findColumnByIndex(root *goparquet.Column, idx int) *goparquet.Column {
 // copyTypedDataDirect copies non-nullable page data directly into a Vector.
 func copyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, n int, typ pqt.TypeID) error {
 	switch typ {
-	case pqt.TypeInt64, pqt.TypeTimestamp:
+	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
 		src := data.Int64()
 		copy(vec.Int64Data[offset:offset+n], src[:n])
 
-	case pqt.TypeInt32:
+	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
 		src := data.Int32()
 		copy(vec.Int32Data[offset:offset+n], src[:n])
 
@@ -156,7 +156,7 @@ func copyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, 
 			vec.BoolData[offset+i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
 		}
 
-	case pqt.TypeString, pqt.TypeBytes:
+	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
 		rawData, offsets := data.ByteArray()
 		if offsets != nil {
 			// Offset-based layout
@@ -189,7 +189,7 @@ func copyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, 
 // values according to definition levels and setting nulls in the bitmap.
 func copyTypedDataScatter(vec *batch.Vector, offset int, data pqencoding.Values, defLevels []byte, maxDefLevel byte, n int, typ pqt.TypeID) error {
 	switch typ {
-	case pqt.TypeInt64, pqt.TypeTimestamp:
+	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
 		src := data.Int64()
 		valIdx := 0
 		for i := 0; i < n; i++ {
@@ -201,7 +201,7 @@ func copyTypedDataScatter(vec *batch.Vector, offset int, data pqencoding.Values,
 			}
 		}
 
-	case pqt.TypeInt32:
+	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
 		src := data.Int32()
 		valIdx := 0
 		for i := 0; i < n; i++ {
@@ -251,7 +251,7 @@ func copyTypedDataScatter(vec *batch.Vector, offset int, data pqencoding.Values,
 			}
 		}
 
-	case pqt.TypeString, pqt.TypeBytes:
+	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
 		rawData, offsets := data.ByteArray()
 		valIdx := 0
 		if offsets != nil {

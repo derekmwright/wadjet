@@ -8,11 +8,56 @@ Caelum exposes Prometheus metrics at `GET /metrics`.
 
 ### Available Metrics
 
+**Query metrics:**
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `caelum_queries_total` | Counter | `status` | Total queries executed, by status |
+| `caelum_query_duration_seconds` | Histogram | — | Query duration (buckets: 10ms–120s) |
+| `caelum_query_rows_scanned` | Counter | `table` | Rows scanned, by table |
+| `caelum_query_bytes_read` | Counter | — | Total bytes read from S3 |
+| `caelum_active_queries` | Gauge | — | Currently executing queries |
+
+**Scanner metrics:**
+
 | Metric | Type | Description |
 |--------|------|-------------|
-| `caelum_queries_total` | Counter | Total queries executed |
-| `caelum_rows_scanned_total` | Counter | Total rows scanned across all queries |
-| `caelum_query_duration_seconds` | Histogram | Query execution time distribution |
+| `caelum_files_scanned` | Counter | Parquet files read |
+| `caelum_files_pruned` | Counter | Parquet files skipped (pruning) |
+| `caelum_row_groups_scanned` | Counter | Row groups read |
+| `caelum_row_groups_pruned` | Counter | Row groups skipped |
+| `caelum_partitions_scanned` | Counter | Partitions read |
+| `caelum_partitions_pruned` | Counter | Partitions skipped (partition pruning) |
+
+**Worker metrics:**
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `caelum_worker_tasks` | Counter | `type`, `status` | Tasks processed by type and outcome |
+| `caelum_worker_task_duration_seconds` | Histogram | `type` | Task duration by type (buckets: 10ms–60s) |
+| `caelum_worker_active` | Gauge | — | Currently active task slots |
+| `caelum_worker_memory` | Gauge | — | Worker memory usage |
+
+**Coordinator metrics:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `caelum_registered_workers` | Gauge | Workers with recent heartbeats |
+
+**Pipeline metrics:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `caelum_batches_processed` | Counter | Record batches processed through pipeline |
+| `caelum_rows_output` | Counter | Total rows returned to clients |
+
+**Cache metrics:**
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `caelum_cache_hits` | Counter | LRU cache hits |
+| `caelum_cache_misses` | Counter | LRU cache misses |
+| `caelum_cache_bytes` | Gauge | Current cache size in bytes |
 
 ### Prometheus Scrape Config
 
@@ -120,7 +165,7 @@ readinessProbe:
 
 ### Ingestion Not Appearing in Queries
 
-1. **Flush delay:** The ingester buffers data for up to 60 seconds before flushing. Wait for a flush cycle or call `Flush()` explicitly.
+1. **Flush delay:** The ingester buffers data for up to 60 seconds before flushing. Wait for a flush cycle or call `FlushAll()` explicitly.
 
 2. **Catalog update:** After Bento writes new Parquet files, the catalog manifest must include them. If using Bento's direct S3 output, you need to manually update the catalog or use Caelum's ingester which handles this automatically.
 
@@ -149,7 +194,7 @@ The catalog uses optimistic concurrency (ETags), so corruption from concurrent w
 1. **Inspect the catalog files:**
    ```bash
    mc cat local/caelum/_catalog/catalog.json | jq .
-   mc cat local/caelum/_catalog/tables/flow_logs/table.json | jq .
+   mc cat local/caelum/_catalog/tables/flow_logs/schema.json | jq .
    ```
 
 2. **Rebuild from Parquet files:** The Parquet files on S3 are the source of truth. If the catalog is lost, re-register the tables and rebuild manifests by listing the Parquet files.

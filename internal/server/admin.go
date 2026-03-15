@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/derekmwright/caelum/internal/auth"
 	"github.com/derekmwright/caelum/internal/config"
 )
@@ -29,17 +31,17 @@ func NewAdminAPI(manager *config.Manager, provider *auth.Provider, logger *slog.
 	}
 }
 
-// RegisterRoutes adds admin routes to the given ServeMux.
-func (a *AdminAPI) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/admin/config", a.handleGetConfig)
-	mux.HandleFunc("PUT /v1/admin/config", a.handleUpdateConfig)
-	mux.HandleFunc("POST /v1/admin/config/reload", a.handleReload)
-	mux.HandleFunc("POST /v1/admin/auth/keys", a.handleAddAPIKey)
-	mux.HandleFunc("DELETE /v1/admin/auth/keys/{name}", a.handleRemoveAPIKey)
-	mux.HandleFunc("GET /v1/admin/auth/roles", a.handleListRoles)
-	mux.HandleFunc("PUT /v1/admin/auth/roles", a.handleUpdateRoles)
-	mux.HandleFunc("PUT /v1/admin/auth/policies", a.handleUpdatePolicies)
-	mux.HandleFunc("PUT /v1/admin/tuning", a.handleUpdateTuning)
+// RegisterRoutes adds admin routes to the given router.
+func (a *AdminAPI) RegisterRoutes(r chi.Router) {
+	r.Get("/v1/admin/config", a.handleGetConfig)
+	r.Put("/v1/admin/config", a.handleUpdateConfig)
+	r.Post("/v1/admin/config/reload", a.handleReload)
+	r.Post("/v1/admin/auth/keys", a.handleAddAPIKey)
+	r.Delete("/v1/admin/auth/keys/{name}", a.handleRemoveAPIKey)
+	r.Get("/v1/admin/auth/roles", a.handleListRoles)
+	r.Put("/v1/admin/auth/roles", a.handleUpdateRoles)
+	r.Put("/v1/admin/auth/policies", a.handleUpdatePolicies)
+	r.Put("/v1/admin/tuning", a.handleUpdateTuning)
 }
 
 func (a *AdminAPI) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
@@ -159,7 +161,7 @@ func (a *AdminAPI) handleRemoveAPIKey(w http.ResponseWriter, r *http.Request) {
 	if !a.requireAdmin(w, r) {
 		return
 	}
-	name := r.PathValue("name")
+	name := chi.URLParam(r, "name")
 
 	cfg := *a.manager.Current()
 	found := false

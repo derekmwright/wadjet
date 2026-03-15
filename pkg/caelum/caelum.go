@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/derekmwright/caelum/internal/engine/exec"
+	"github.com/derekmwright/caelum/internal/engine/expr"
 	"github.com/derekmwright/caelum/internal/planner/logical"
 	"github.com/derekmwright/caelum/internal/planner/physical"
 	plansql "github.com/derekmwright/caelum/internal/planner/sql"
@@ -92,6 +93,12 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return db.explain(ctx, parsed)
 	case plansql.QueryDescribe:
 		return db.describe(ctx, parsed.Describe.TableName)
+	case plansql.QueryCreateFunction:
+		return db.createFunction(parsed.CreateFunction)
+	case plansql.QueryDropFunction:
+		return db.dropFunction(parsed.DropFunction)
+	case plansql.QueryShowFunctions:
+		return db.showFunctions()
 	}
 
 	selectInfo, err := plansql.ExtractSelect(parsed)
@@ -249,6 +256,72 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any) []string {
 		return cols
 	}
 	return nil
+}
+
+func (db *DB) createFunction(cf *plansql.CreateFunctionInfo) (*QueryResult, error) {
+	def := expr.UDFDef{
+		Name:   cf.Name,
+		Params: cf.Params,
+		Body:   cf.Body,
+		Locked: cf.Locked,
+	}
+
+	if !cf.Replace {
+		if _, exists := expr.DefaultUDFs.Get(def.Name); exists {
+			return nil, fmt.Errorf("function %q already exists (use CREATE OR REPLACE to overwrite)", cf.Name)
+		}
+	}
+
+	if err := expr.DefaultUDFs.Register(def, true); err != nil {
+		return nil, err
+	}
+
+	return &QueryResult{
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q created", cf.Name)}},
+	}, nil
+}
+
+func (db *DB) dropFunction(df *plansql.DropFunctionInfo) (*QueryResult, error) {
+	err := expr.DefaultUDFs.Unregister(df.Name, "", true)
+	if err != nil {
+		if df.IfExists {
+			return &QueryResult{
+				Columns: []string{"result"},
+				Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q does not exist (no-op)", df.Name)}},
+			}, nil
+		}
+		return nil, err
+	}
+
+	return &QueryResult{
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Function %q dropped", df.Name)}},
+	}, nil
+}
+
+func (db *DB) showFunctions() (*QueryResult, error) {
+	udfs := expr.DefaultUDFs.List()
+	rows := make([]map[string]any, len(udfs))
+	for i, udf := range udfs {
+		params := "(" + strings.Join(udf.Params, ", ") + ")"
+		locked := "NO"
+		if udf.Locked {
+			locked = "YES"
+		}
+		rows[i] = map[string]any{
+			"name":   udf.Name,
+			"params": params,
+			"body":   udf.Body,
+			"owner":  udf.Owner,
+			"locked": locked,
+		}
+	}
+
+	return &QueryResult{
+		Columns: []string{"name", "params", "body", "owner", "locked"},
+		Rows:    rows,
+	}, nil
 }
 
 // Catalog returns the underlying catalog for advanced usage.

@@ -18,6 +18,9 @@ const (
 	NodeSort
 	NodeLimit
 	NodeJoin
+	NodeDistinct
+	NodeWindow
+	NodeUnion
 )
 
 func (n NodeType) String() string {
@@ -36,6 +39,12 @@ func (n NodeType) String() string {
 		return "Limit"
 	case NodeJoin:
 		return "Join"
+	case NodeDistinct:
+		return "Distinct"
+	case NodeWindow:
+		return "Window"
+	case NodeUnion:
+		return "Union"
 	default:
 		return fmt.Sprintf("Unknown(%d)", int(n))
 	}
@@ -47,8 +56,9 @@ type Node struct {
 	Children []*Node
 
 	// Scan
-	TableName string
-	TableAlias string
+	TableName      string
+	TableAlias     string
+	PartitionFilter map[string]string // extracted partition key filters (year, month, day, hour)
 
 	// Filter
 	Predicates []Predicate
@@ -68,10 +78,16 @@ type Node struct {
 	OffsetVal int
 
 	// Join
-	JoinType  string // inner, left
+	JoinType  string // inner, left, right, full, cross
 	JoinCond  string
 	LeftKeys  []string
 	RightKeys []string
+
+	// Window
+	WindowExprs []WindowExpr
+
+	// Union
+	UnionAll bool // true = UNION ALL, false = UNION (dedup)
 }
 
 // Predicate is a filter condition.
@@ -97,6 +113,16 @@ type AggExpr struct {
 	Func      string // sum, count, min, max, avg
 	InputCol  string
 	OutputCol string
+	Distinct  bool // COUNT(DISTINCT col)
+}
+
+// WindowExpr is a window function expression.
+type WindowExpr struct {
+	Func        string // row_number, rank, dense_rank, sum, count, avg, min, max
+	InputCol    string // for aggregate window functions
+	OutputCol   string
+	PartitionBy []string
+	OrderBy     []OrderExpr
 }
 
 // OrderExpr is a sort expression.
@@ -135,6 +161,16 @@ func NewLimit(child *Node, limit, offset int) *Node {
 	return &Node{Type: NodeLimit, Children: []*Node{child}, LimitVal: limit, OffsetVal: offset}
 }
 
+// NewDistinct creates a distinct node.
+func NewDistinct(child *Node) *Node {
+	return &Node{Type: NodeDistinct, Children: []*Node{child}}
+}
+
+// NewWindow creates a window node.
+func NewWindow(child *Node, exprs []WindowExpr) *Node {
+	return &Node{Type: NodeWindow, Children: []*Node{child}, WindowExprs: exprs}
+}
+
 // NewJoin creates a join node.
 func NewJoin(left, right *Node, joinType, condition string) *Node {
 	return &Node{
@@ -142,6 +178,16 @@ func NewJoin(left, right *Node, joinType, condition string) *Node {
 		Children: []*Node{left, right},
 		JoinType: joinType,
 		JoinCond: condition,
+	}
+}
+
+// NewUnion creates a union node. If all is true, it represents UNION ALL
+// (no deduplication); otherwise it represents UNION (with deduplication).
+func NewUnion(left, right *Node, all bool) *Node {
+	return &Node{
+		Type:     NodeUnion,
+		Children: []*Node{left, right},
+		UnionAll: all,
 	}
 }
 
@@ -174,7 +220,11 @@ func (n *Node) PrettyPrint(indent int) string {
 	case NodeAggregate:
 		aggs := make([]string, len(n.AggExprs))
 		for i, a := range n.AggExprs {
-			aggs[i] = fmt.Sprintf("%s(%s) AS %s", a.Func, a.InputCol, a.OutputCol)
+			distinct := ""
+		if a.Distinct {
+			distinct = "DISTINCT "
+		}
+		aggs[i] = fmt.Sprintf("%s(%s%s) AS %s", a.Func, distinct, a.InputCol, a.OutputCol)
 		}
 		s = fmt.Sprintf("%sAggregate: group_by=%v aggs=%v", prefix, n.GroupBy, aggs)
 	case NodeSort:
@@ -183,6 +233,21 @@ func (n *Node) PrettyPrint(indent int) string {
 		s = fmt.Sprintf("%sLimit: %d offset: %d", prefix, n.LimitVal, n.OffsetVal)
 	case NodeJoin:
 		s = fmt.Sprintf("%sJoin: %s ON %s", prefix, n.JoinType, n.JoinCond)
+	case NodeDistinct:
+		s = fmt.Sprintf("%sDistinct", prefix)
+	case NodeWindow:
+		wins := make([]string, len(n.WindowExprs))
+		for i, w := range n.WindowExprs {
+			wins[i] = fmt.Sprintf("%s(%s) OVER(partition_by=%v order_by=%v) AS %s",
+				w.Func, w.InputCol, w.PartitionBy, w.OrderBy, w.OutputCol)
+		}
+		s = fmt.Sprintf("%sWindow: %v", prefix, wins)
+	case NodeUnion:
+		mode := "UNION"
+		if n.UnionAll {
+			mode = "UNION ALL"
+		}
+		s = fmt.Sprintf("%s%s", prefix, mode)
 	default:
 		s = fmt.Sprintf("%s%s", prefix, n.Type)
 	}

@@ -18,10 +18,15 @@ const (
 	TypeString
 	TypeBytes
 	TypeTimestamp
-	TypeIPv4 // stored as uint32 (4 bytes)
-	TypeIPv6 // stored as [16]byte via BytesColumn
-	TypeCIDR // stored as string (e.g., "192.168.1.0/24")
-	TypeMAC  // stored as uint64 (6 bytes, upper 2 zero)
+	TypeIPv4     // stored as uint32 (4 bytes)
+	TypeIPv6     // stored as [16]byte via BytesColumn
+	TypeCIDR     // stored as string (e.g., "192.168.1.0/24")
+	TypeMAC      // stored as uint64 (6 bytes, upper 2 zero)
+	TypePort     // stored as uint16 in Int32Data
+	TypeProtocol // IANA protocol number, stored as uint8 in Int32Data
+	TypeDuration // nanoseconds, stored as int64
+	TypeUUID     // 128-bit UUID stored as 16-byte ByteArray
+	TypeDate     // calendar date stored as int32 (days since 1970-01-01)
 )
 
 func (t TypeID) String() string {
@@ -50,6 +55,16 @@ func (t TypeID) String() string {
 		return "CIDR"
 	case TypeMAC:
 		return "MAC"
+	case TypePort:
+		return "PORT"
+	case TypeProtocol:
+		return "PROTOCOL"
+	case TypeDuration:
+		return "DURATION"
+	case TypeUUID:
+		return "UUID"
+	case TypeDate:
+		return "DATE"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(t))
 	}
@@ -82,6 +97,16 @@ func ParseTypeID(s string) (TypeID, error) {
 		return TypeCIDR, nil
 	case "MAC", "MACADDR":
 		return TypeMAC, nil
+	case "PORT":
+		return TypePort, nil
+	case "PROTOCOL", "PROTO":
+		return TypeProtocol, nil
+	case "DURATION", "INTERVAL":
+		return TypeDuration, nil
+	case "UUID", "GUID":
+		return TypeUUID, nil
+	case "DATE":
+		return TypeDate, nil
 	default:
 		return 0, fmt.Errorf("unknown type: %s", s)
 	}

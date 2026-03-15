@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/derekmwright/caelum/internal/auth"
 	"github.com/derekmwright/caelum/internal/coordinator"
 )
@@ -18,11 +20,11 @@ func NewOpsAPI(coord *coordinator.Coordinator) *OpsAPI {
 	return &OpsAPI{coord: coord}
 }
 
-// RegisterRoutes adds operational routes to the given ServeMux.
-func (o *OpsAPI) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/workers", o.handleWorkers)
-	mux.HandleFunc("DELETE /v1/results/{queryID}", o.handleDeleteResults)
-	mux.HandleFunc("POST /v1/results/cleanup", o.handleCleanupResults)
+// RegisterRoutes adds operational routes to the given router.
+func (o *OpsAPI) RegisterRoutes(r chi.Router) {
+	r.Get("/v1/workers", o.handleWorkers)
+	r.Delete("/v1/results/{queryID}", o.handleDeleteResults)
+	r.Post("/v1/results/cleanup", o.handleCleanupResults)
 }
 
 // GET /v1/workers — list active workers.
@@ -59,7 +61,7 @@ func (o *OpsAPI) handleDeleteResults(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	queryID := r.PathValue("queryID")
+	queryID := chi.URLParam(r, "queryID")
 	if queryID == "" {
 		writeError(w, http.StatusBadRequest, "queryID is required")
 		return

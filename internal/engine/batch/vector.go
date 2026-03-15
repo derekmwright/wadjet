@@ -2,8 +2,10 @@ package batch
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
@@ -70,6 +72,11 @@ const (
 	TypeIPv6     = parquet.TypeIPv6
 	TypeCIDR     = parquet.TypeCIDR
 	TypeMAC      = parquet.TypeMAC
+	TypePort     = parquet.TypePort
+	TypeProtocol = parquet.TypeProtocol
+	TypeDuration = parquet.TypeDuration
+	TypeUUID     = parquet.TypeUUID
+	TypeDate     = parquet.TypeDate
 )
 
 // BytesColumn stores variable-length byte data (strings, binary) with zero
@@ -145,15 +152,15 @@ func NewVector(typ TypeID, length int) *Vector {
 	switch typ {
 	case TypeBool:
 		v.BoolData = make([]bool, length)
-	case TypeInt32:
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
 		v.Int32Data = make([]int32, length)
-	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC:
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
 		v.Int64Data = make([]int64, length)
 	case TypeFloat32:
 		v.Float32Data = make([]float32, length)
 	case TypeFloat64:
 		v.Float64Data = make([]float64, length)
-	case TypeString, TypeBytes, TypeIPv6, TypeCIDR:
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
 		v.BytesData = NewBytesColumn(length)
 	}
 	return v
@@ -194,6 +201,18 @@ func (v *Vector) GetValue(i int) any {
 		return v.BytesData.StringValue(i)
 	case TypeMAC:
 		return formatMAC(uint64(v.Int64Data[i]))
+	case TypePort, TypeProtocol:
+		return v.Int32Data[i]
+	case TypeDuration:
+		return v.Int64Data[i]
+	case TypeUUID:
+		raw := v.BytesData.Value(i)
+		if len(raw) == 16 {
+			return formatUUID(raw)
+		}
+		return ""
+	case TypeDate:
+		return formatDate(v.Int32Data[i])
 	default:
 		return nil
 	}
@@ -205,7 +224,7 @@ func (v *Vector) SetValue(i int, val any) {
 	if val == nil {
 		v.Nulls.SetNull(i)
 		// For bytes/string columns, write a zero-length entry to keep offsets aligned
-		if v.Type == TypeString || v.Type == TypeBytes || v.Type == TypeIPv6 || v.Type == TypeCIDR {
+		if v.Type == TypeString || v.Type == TypeBytes || v.Type == TypeIPv6 || v.Type == TypeCIDR || v.Type == TypeUUID {
 			v.BytesData.Set(i, nil)
 		}
 		return
@@ -311,6 +330,49 @@ func (v *Vector) SetValue(i int, val any) {
 			n = (n << 8) | uint64(b)
 		}
 		v.Int64Data[i] = int64(n)
+	case TypePort, TypeProtocol:
+		switch tv := val.(type) {
+		case int32:
+			v.Int32Data[i] = tv
+		case int:
+			v.Int32Data[i] = int32(tv)
+		case int64:
+			v.Int32Data[i] = int32(tv)
+		case float64:
+			v.Int32Data[i] = int32(tv)
+		}
+	case TypeDuration:
+		switch tv := val.(type) {
+		case int64:
+			v.Int64Data[i] = tv
+		case int:
+			v.Int64Data[i] = int64(tv)
+		case int32:
+			v.Int64Data[i] = int64(tv)
+		case float64:
+			v.Int64Data[i] = int64(tv)
+		}
+	case TypeUUID:
+		switch tv := val.(type) {
+		case string:
+			raw := parseUUID(tv)
+			v.BytesData.Set(i, raw)
+		case []byte:
+			v.BytesData.Set(i, tv)
+		default:
+			v.BytesData.Set(i, nil)
+		}
+	case TypeDate:
+		switch tv := val.(type) {
+		case int32:
+			v.Int32Data[i] = tv
+		case int:
+			v.Int32Data[i] = int32(tv)
+		case int64:
+			v.Int32Data[i] = int32(tv)
+		case string:
+			v.Int32Data[i] = parseDateString(tv)
+		}
 	}
 }
 
@@ -387,4 +449,57 @@ func (v *Vector) GetNumericFloat64(i int) (float64, bool) {
 // String returns a debug representation of the vector.
 func (v *Vector) String() string {
 	return fmt.Sprintf("Vector{type=%v, len=%d, nulls=%d}", v.Type, v.Len, v.Nulls.NullCount())
+}
+
+// formatUUID formats 16 raw bytes as a UUID string "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".
+func formatUUID(b []byte) string {
+	var buf [36]byte
+	hex.Encode(buf[0:8], b[0:4])
+	buf[8] = '-'
+	hex.Encode(buf[9:13], b[4:6])
+	buf[13] = '-'
+	hex.Encode(buf[14:18], b[6:8])
+	buf[18] = '-'
+	hex.Encode(buf[19:23], b[8:10])
+	buf[23] = '-'
+	hex.Encode(buf[24:36], b[10:16])
+	return string(buf[:])
+}
+
+// parseUUID parses a UUID string into 16 raw bytes.
+// Accepts "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" or "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".
+func parseUUID(s string) []byte {
+	// Remove dashes
+	clean := make([]byte, 0, 32)
+	for i := 0; i < len(s); i++ {
+		if s[i] != '-' {
+			clean = append(clean, s[i])
+		}
+	}
+	if len(clean) != 32 {
+		return nil
+	}
+	raw := make([]byte, 16)
+	_, err := hex.Decode(raw, clean)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+var epochDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// formatDate formats days-since-epoch as "2006-01-02".
+func formatDate(days int32) string {
+	t := epochDate.AddDate(0, 0, int(days))
+	return t.Format("2006-01-02")
+}
+
+// parseDateString parses "2006-01-02" to days since epoch.
+func parseDateString(s string) int32 {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return 0
+	}
+	return int32(t.Sub(epochDate).Hours() / 24)
 }

@@ -7,10 +7,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/blastrain/vitess-sqlparser/sqlparser"
+
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
 	"github.com/derekmwright/caelum/internal/engine/expr"
 	"github.com/derekmwright/caelum/internal/planner/logical"
+	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 	"github.com/derekmwright/caelum/internal/storage/catalog"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
@@ -21,12 +24,59 @@ type PhysicalPlan struct {
 	Stages   []Stage // for distributed execution
 }
 
-// Stage represents a unit of distributed work.
+// Stage represents a unit of distributed work with metadata for task creation.
 type Stage struct {
 	ID           string
-	Type         string // scan, aggregate, sort
+	Type         string // scan, aggregate, sort, hash_join, broadcast_join, window
 	Dependencies []string
 	Tasks        int
+
+	// Scan metadata
+	TableName       string
+	Columns         []string
+	PartitionFilter map[string]string
+	ScanFiles       []string // files to distribute across scan tasks
+	FilterExprs     []string // SQL filter expressions pushed down to scan
+
+	// Aggregate metadata
+	GroupByCols []string
+	AggSpecs   []AggSpec
+
+	// Sort metadata
+	SortKeys []SortKeySpec
+	Limit    int
+
+	// Join metadata
+	JoinType      string // inner, left, right, full, cross
+	JoinLeftKeys  []string
+	JoinRightKeys []string
+	LeftDepStage  string // stage providing probe (left) side
+	RightDepStage string // stage providing build (right) side
+
+	// Window metadata
+	WindowCols []WindowColSpec
+}
+
+// WindowColSpec defines a window function column in a stage.
+type WindowColSpec struct {
+	Func        string
+	InputCol    string
+	OutputCol   string
+	PartitionBy []string
+	OrderBy     []SortKeySpec
+}
+
+// AggSpec defines an aggregation in a stage.
+type AggSpec struct {
+	Func      string
+	InputCol  string
+	OutputCol string
+}
+
+// SortKeySpec defines a sort key in a stage.
+type SortKeySpec struct {
+	Column string
+	Desc   bool
 }
 
 // PrettyPrint returns a formatted string representation of the physical plan.
@@ -49,12 +99,61 @@ func (p *PhysicalPlan) PrettyPrint() string {
 
 // Planner converts logical plans to physical plans.
 type Planner struct {
-	catalog *catalog.Catalog
+	catalog        *catalog.Catalog
+	subqueryRunner expr.SubqueryRunner
 }
 
 // NewPlanner creates a new physical planner.
 func NewPlanner(cat *catalog.Catalog) *Planner {
-	return &Planner{catalog: cat}
+	p := &Planner{catalog: cat}
+	// Create a subquery runner that re-uses this planner for nested queries
+	p.subqueryRunner = p.makeSubqueryRunner()
+	return p
+}
+
+// makeSubqueryRunner creates a SubqueryRunner that executes SQL via this planner.
+func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
+	return func(sql string) ([]map[string]any, error) {
+		return p.executeSubquery(context.Background(), sql)
+	}
+}
+
+// executeSubquery parses and executes a SQL subquery, returning result rows.
+func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string]any, error) {
+	// Parse using our SQL parser
+	pq, err := plansql.Parse(sql)
+	if err != nil {
+		return nil, fmt.Errorf("subquery parse error: %w", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		return nil, fmt.Errorf("subquery extract error: %w", err)
+	}
+
+	// Build logical plan
+	logicalPlan, err := logical.BuildFromSelect(info)
+	if err != nil {
+		return nil, fmt.Errorf("subquery plan error: %w", err)
+	}
+
+	// Build physical pipeline
+	source, ops, sink, err := p.buildPipeline(ctx, logicalPlan)
+	if err != nil {
+		return nil, fmt.Errorf("subquery execution plan error: %w", err)
+	}
+
+	// Execute
+	pipeline := &exec.Pipeline{Source: source, Ops: ops, Sink: sink}
+	if err := pipeline.Run(ctx); err != nil {
+		return nil, fmt.Errorf("subquery execution error: %w", err)
+	}
+
+	// Collect results from the sink
+	collectSink, ok := sink.(*exec.CollectSink)
+	if !ok {
+		return nil, fmt.Errorf("unexpected sink type for subquery")
+	}
+	return collectSink.Rows, nil
 }
 
 // Plan converts a logical plan to a physical plan for local execution.
@@ -94,25 +193,34 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 	switch node.Type {
 	case logical.NodeScan:
 		stageID := fmt.Sprintf("scan-%d", len(*stages))
-		// Estimate tasks from table partitions
 		tasks := 1
+		var scanFiles []string
+		partFilter := node.PartitionFilter
 		if meta, err := p.catalog.GetManifest(context.Background(), node.TableName); err == nil {
-			totalFiles := 0
 			for _, part := range meta.Partitions {
-				totalFiles += len(part.Files)
+				if len(partFilter) > 0 && len(part.Values) > 0 {
+					if !matchesPartitionFilter(part.Values, partFilter) {
+						continue
+					}
+				}
+				for _, f := range part.Files {
+					scanFiles = append(scanFiles, f.Path)
+				}
 			}
-			if totalFiles > 0 {
-				tasks = totalFiles
+			if len(scanFiles) > 0 {
+				tasks = len(scanFiles)
 			}
 		}
 		stage := Stage{
-			ID:    stageID,
-			Type:  "scan",
-			Tasks: tasks,
+			ID:              stageID,
+			Type:            "scan",
+			Tasks:           tasks,
+			TableName:       node.TableName,
+			PartitionFilter: partFilter,
+			ScanFiles:       scanFiles,
 		}
 		*stages = append(*stages, stage)
 		if parentID != nil {
-			// Link parent dependency
 			for i := range *stages {
 				if (*stages)[i].ID == *parentID {
 					(*stages)[i].Dependencies = append((*stages)[i].Dependencies, stageID)
@@ -122,16 +230,27 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 	case logical.NodeAggregate:
 		stageID := fmt.Sprintf("aggregate-%d", len(*stages))
-		// Walk children first
 		for _, child := range node.Children {
 			p.walkStages(child, stages, &stageID)
 		}
-		stage := Stage{
-			ID:    stageID,
-			Type:  "aggregate",
-			Tasks: 1,
+		var aggSpecs []AggSpec
+		for _, agg := range node.AggExprs {
+			aggSpecs = append(aggSpecs, AggSpec{
+				Func:      agg.Func,
+				InputCol:  agg.InputCol,
+				OutputCol: agg.OutputCol,
+			})
 		}
-		// Dependencies: all child scan stages
+		groupBy := make([]string, len(node.GroupBy))
+		copy(groupBy, node.GroupBy)
+
+		stage := Stage{
+			ID:          stageID,
+			Type:        "aggregate",
+			Tasks:       1,
+			GroupByCols: groupBy,
+			AggSpecs:    aggSpecs,
+		}
 		for _, s := range *stages {
 			if s.Type == "scan" {
 				stage.Dependencies = append(stage.Dependencies, s.ID)
@@ -144,20 +263,38 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, child := range node.Children {
 			p.walkStages(child, stages, &stageID)
 		}
-		stage := Stage{
-			ID:    stageID,
-			Type:  "sort",
-			Tasks: 1,
+		var sortKeys []SortKeySpec
+		for _, ob := range node.OrderBy {
+			sortKeys = append(sortKeys, SortKeySpec{Column: ob.Column, Desc: ob.Desc})
 		}
-		// Depends on all prior stages
+		stage := Stage{
+			ID:       stageID,
+			Type:     "sort",
+			Tasks:    1,
+			SortKeys: sortKeys,
+		}
 		for _, s := range *stages {
 			stage.Dependencies = append(stage.Dependencies, s.ID)
 		}
+		// Propagate limit from parent if present
 		*stages = append(*stages, stage)
 
+	case logical.NodeLimit:
+		// Pass limit info down to sort stage if child is sort
+		for _, child := range node.Children {
+			p.walkStages(child, stages, parentID)
+		}
+		// Tag the last sort stage with our limit
+		for i := len(*stages) - 1; i >= 0; i-- {
+			if (*stages)[i].Type == "sort" {
+				(*stages)[i].Limit = node.LimitVal
+				break
+			}
+		}
+
 	case logical.NodeJoin:
-		// Check if right side is small enough for broadcast join
 		stageID := fmt.Sprintf("join-%d", len(*stages))
+		stagesBefore := len(*stages)
 		for _, child := range node.Children {
 			p.walkStages(child, stages, &stageID)
 		}
@@ -165,10 +302,36 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		if p.isBroadcastCandidate(node) {
 			joinType = "broadcast_join"
 		}
+
+		// Identify left (probe) and right (build) dependency stages
+		var leftDep, rightDep string
+		stagesAfter := *stages
+		newStages := stagesAfter[stagesBefore:]
+		if len(newStages) >= 2 {
+			leftDep = newStages[0].ID  // first child = left
+			rightDep = newStages[1].ID // second child = right
+		} else if len(newStages) == 1 {
+			leftDep = newStages[0].ID
+		}
+
+		// Map logical join type to canonical short form
+		jt := mapJoinType(node.JoinType)
+
+		// Extract join keys from condition (cross joins have no ON clause)
+		var leftKeys, rightKeys []string
+		if jt != "cross" {
+			leftKeys, rightKeys = parseJoinKeys(node.JoinCond)
+		}
+
 		stage := Stage{
-			ID:    stageID,
-			Type:  joinType,
-			Tasks: 1,
+			ID:            stageID,
+			Type:          joinType,
+			Tasks:         1,
+			JoinType:      jt,
+			JoinLeftKeys:  leftKeys,
+			JoinRightKeys: rightKeys,
+			LeftDepStage:  leftDep,
+			RightDepStage: rightDep,
 		}
 		for _, s := range *stages {
 			if s.Type == "scan" {
@@ -177,8 +340,64 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		*stages = append(*stages, stage)
 
+	case logical.NodeUnion:
+		// Each side of the UNION runs independently; merge results at the end.
+		for _, child := range node.Children {
+			p.walkStages(child, stages, parentID)
+		}
+
+	case logical.NodeFilter:
+		// Walk children first. If a child is a scan, attach filter expressions
+		// to the scan stage for predicate pushdown.
+		for _, child := range node.Children {
+			p.walkStages(child, stages, parentID)
+		}
+		// Attach filter expressions to the most recent scan stage
+		if len(node.Predicates) > 0 && len(*stages) > 0 {
+			lastStage := &(*stages)[len(*stages)-1]
+			if lastStage.Type == "scan" {
+				for _, pred := range node.Predicates {
+					if pred.Raw != "" {
+						lastStage.FilterExprs = append(lastStage.FilterExprs, pred.Raw)
+					} else if pred.ASTExpr != nil {
+						lastStage.FilterExprs = append(lastStage.FilterExprs, sqlparser.String(pred.ASTExpr))
+					}
+				}
+			}
+		}
+
+	case logical.NodeWindow:
+		stageID := fmt.Sprintf("window-%d", len(*stages))
+		for _, child := range node.Children {
+			p.walkStages(child, stages, &stageID)
+		}
+		var winCols []WindowColSpec
+		for _, we := range node.WindowExprs {
+			var orderBy []SortKeySpec
+			for _, ob := range we.OrderBy {
+				orderBy = append(orderBy, SortKeySpec{Column: ob.Column, Desc: ob.Desc})
+			}
+			winCols = append(winCols, WindowColSpec{
+				Func:        we.Func,
+				InputCol:    we.InputCol,
+				OutputCol:   we.OutputCol,
+				PartitionBy: we.PartitionBy,
+				OrderBy:     orderBy,
+			})
+		}
+		stage := Stage{
+			ID:         stageID,
+			Type:       "window",
+			Tasks:      1,
+			WindowCols: winCols,
+		}
+		for _, s := range *stages {
+			stage.Dependencies = append(stage.Dependencies, s.ID)
+		}
+		*stages = append(*stages, stage)
+
 	default:
-		// Passthrough nodes (Filter, Project, Limit) — walk children
+		// Passthrough nodes (Project, Distinct) — walk children
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}
@@ -226,13 +445,19 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 		return p.buildScan(ctx, node)
 	case logical.NodeJoin:
 		return p.buildJoin(ctx, node)
+	case logical.NodeDistinct:
+		return p.buildDistinct(ctx, node)
+	case logical.NodeWindow:
+		return p.buildWindow(ctx, node)
+	case logical.NodeUnion:
+		return p.buildUnion(ctx, node)
 	default:
 		return nil, nil, nil, fmt.Errorf("unsupported plan node: %s", node.Type)
 	}
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	scanner := p.newScanner(ctx, node.TableName)
+	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter)
 	return scanner, nil, &exec.CollectSink{}, nil
 }
 
@@ -241,16 +466,16 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		return nil, nil, nil, fmt.Errorf("join requires two children")
 	}
 
-	joinType := exec.InnerJoin
-	if strings.Contains(strings.ToLower(node.JoinType), "left") {
-		joinType = exec.LeftJoin
-	}
+	jt := mapJoinType(node.JoinType)
+	joinType := mapExecJoinType(jt)
 
-	// Parse join condition to extract key columns
-	// Handles "left.col = right.col" patterns
-	leftKeys, rightKeys := parseJoinKeys(node.JoinCond)
-	if len(leftKeys) == 0 {
-		return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
+	// Parse join condition to extract key columns (cross joins have no ON clause)
+	var leftKeys, rightKeys []string
+	if jt != "cross" {
+		leftKeys, rightKeys = parseJoinKeys(node.JoinCond)
+		if len(leftKeys) == 0 {
+			return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
+		}
 	}
 
 	hj := exec.NewHashJoin(joinType, leftKeys, rightKeys)
@@ -277,10 +502,104 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		return nil, nil, nil, fmt.Errorf("building join left side: %w", err)
 	}
 
-	// Add hash join probe as a unary operator on the left side
-	leftOps = append(leftOps, hj.Probe())
+	probe := hj.Probe()
+	leftOps = append(leftOps, probe)
+
+	// For RIGHT and FULL OUTER joins, unmatched build-side rows must be
+	// flushed after all probe batches have been processed. Wrap the source
+	// so that FlushUnmatched is called at the end.
+	if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
+		return &joinFlushSource{
+			inner:    leftSource,
+			innerOps: leftOps,
+			probe:    probe,
+		}, nil, &exec.CollectSink{}, nil
+	}
 
 	return leftSource, leftOps, &exec.CollectSink{}, nil
+}
+
+// joinFlushSource wraps a join probe pipeline and appends unmatched build-side
+// rows (via FlushUnmatched) after the probe side is exhausted.
+type joinFlushSource struct {
+	inner      exec.Source
+	innerOps   []exec.UnaryOperator
+	probe      *exec.HashJoinProbe
+	leftSchema []parquet.Column
+	pipeline   *pipelineSource
+	flushed    bool
+	flushBatch *batch.RecordBatch
+}
+
+func (s *joinFlushSource) Init(ctx context.Context) error {
+	s.pipeline = &pipelineSource{source: s.inner, ops: s.innerOps}
+	return s.pipeline.Init(ctx)
+}
+
+func (s *joinFlushSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if !s.flushed {
+		b, err := s.pipeline.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if b != nil {
+			// Capture left-side schema from first result batch
+			if s.leftSchema == nil && len(b.Schema) > 0 {
+				s.leftSchema = b.Schema
+			}
+			return b, nil
+		}
+		// Probe exhausted — flush unmatched build-side rows
+		s.flushed = true
+		if s.leftSchema != nil {
+			s.flushBatch = s.probe.FlushUnmatched(s.leftSchema)
+		}
+	}
+	if s.flushBatch != nil {
+		b := s.flushBatch
+		s.flushBatch = nil
+		return b, nil
+	}
+	return nil, nil
+}
+
+func (s *joinFlushSource) Close() error {
+	return s.pipeline.Close()
+}
+
+// mapJoinType converts a vitess join type string (e.g. "join", "left join",
+// "right join", "full outer join", "cross join") or a canonical short form
+// to a canonical short form used by the distributed planner.
+func mapJoinType(vt string) string {
+	lower := strings.ToLower(strings.TrimSpace(vt))
+	switch {
+	case lower == "cross" || strings.Contains(lower, "cross"):
+		return "cross"
+	case strings.Contains(lower, "full"):
+		return "full"
+	case strings.Contains(lower, "right"):
+		return "right"
+	case strings.Contains(lower, "left"):
+		return "left"
+	default:
+		return "inner"
+	}
+}
+
+// mapExecJoinType converts a canonical join type string to exec.JoinType.
+func mapExecJoinType(jt string) exec.JoinType {
+	switch jt {
+	case "left":
+		return exec.LeftJoin
+	case "right":
+		return exec.RightJoin
+	case "full":
+		return exec.FullOuterJoin
+	case "cross":
+		return exec.CrossJoin
+	default:
+		return exec.InnerJoin
+	}
 }
 
 // pipelineSource wraps a Source + UnaryOps into a single Source.
@@ -367,7 +686,7 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	for _, pred := range node.Predicates {
-		filter := buildFilterOp(pred)
+		filter := p.buildFilterOp(pred)
 		if filter != nil {
 			ops = append(ops, filter)
 		}
@@ -383,11 +702,11 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 
 	child := node.Children[0]
 
-	// If the child is an Aggregate, skip the projection — the aggregate already
-	// produces correctly named output columns (group-by cols + agg output cols).
-	// Adding a Project on top would fail because ColumnRef can't find aggregate
-	// output names by their SQL expression strings.
-	if child.Type == logical.NodeAggregate {
+	// If the child (or child chain through Filter/HAVING) leads to an Aggregate,
+	// skip the projection — the aggregate already produces correctly named output
+	// columns (group-by cols + agg output cols). Adding a Project on top would
+	// fail because ColumnRef can't find aggregate output names.
+	if hasAggregateAncestor(child) {
 		return p.buildPipeline(ctx, child)
 	}
 
@@ -410,7 +729,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// Try to compile from AST expression first, fall back to ColumnRef
 		var expression exec.Expression
 		if proj.ASTExpr != nil && !proj.IsAgg {
-			compiled, err := expr.Compile(proj.ASTExpr)
+			compiled, err := expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
 			if err == nil {
 				expression = wrapExpr(compiled)
 			}
@@ -445,11 +764,15 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 
 	var aggCols []exec.AggColumn
 	for _, agg := range node.AggExprs {
+		fn := parseAggFunc(agg.Func)
+		if agg.Distinct && fn == exec.AggCount {
+			fn = exec.AggCountDistinct
+		}
 		aggCols = append(aggCols, exec.AggColumn{
-			Func:       parseAggFunc(agg.Func),
+			Func:       fn,
 			InputCol:   cleanExpr(agg.InputCol),
 			OutputCol:  agg.OutputCol,
-			OutputType: aggOutputType(agg.Func),
+			OutputType: aggOutputType(agg.Func, agg.Distinct),
 		})
 	}
 
@@ -516,7 +839,221 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 	return source, ops, sink, nil
 }
 
-func (p *Planner) newScanner(ctx context.Context, tableName string) exec.Source {
+func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	if len(node.Children) == 0 {
+		return nil, nil, nil, fmt.Errorf("window has no child")
+	}
+
+	childSource, childOps, _, err := p.buildPipeline(ctx, node.Children[0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var winCols []exec.WindowColumn
+	for _, we := range node.WindowExprs {
+		var orderKeys []exec.SortKey
+		for _, ob := range we.OrderBy {
+			order := exec.Ascending
+			if ob.Desc {
+				order = exec.Descending
+			}
+			orderKeys = append(orderKeys, exec.SortKey{
+				Column: ob.Column,
+				Order:  order,
+			})
+		}
+		winCols = append(winCols, exec.WindowColumn{
+			Func:        parseWindowFunc(we.Func),
+			InputCol:    cleanExpr(we.InputCol),
+			OutputCol:   we.OutputCol,
+			OutputType:  windowOutputType(we.Func),
+			PartitionBy: we.PartitionBy,
+			OrderBy:     orderKeys,
+		})
+	}
+
+	winOp := exec.NewWindow(winCols)
+
+	return &windowSourceAdapter{
+		childSource: childSource,
+		childOps:    childOps,
+		win:         winOp,
+	}, nil, &exec.CollectSink{}, nil
+}
+
+func (p *Planner) buildDistinct(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	if len(node.Children) == 0 {
+		return nil, nil, nil, fmt.Errorf("distinct has no child")
+	}
+
+	source, ops, sink, err := p.buildPipeline(ctx, node.Children[0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	ops = append(ops, exec.NewDistinct())
+	return source, ops, sink, nil
+}
+
+func (p *Planner) buildUnion(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	if len(node.Children) < 2 {
+		return nil, nil, nil, fmt.Errorf("union requires two children")
+	}
+
+	// Build pipelines for both children, execute them, collect results.
+	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("building union left side: %w", err)
+	}
+
+	rightSource, rightOps, _, err := p.buildPipeline(ctx, node.Children[1])
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("building union right side: %w", err)
+	}
+
+	unionSrc := &unionSourceAdapter{
+		leftSource:  leftSource,
+		leftOps:     leftOps,
+		rightSource: rightSource,
+		rightOps:    rightOps,
+		unionAll:    node.UnionAll,
+	}
+
+	return unionSrc, nil, &exec.CollectSink{}, nil
+}
+
+// unionSourceAdapter executes both child pipelines, collects their results,
+// and emits the concatenated (and optionally deduplicated) batches.
+type unionSourceAdapter struct {
+	leftSource  exec.Source
+	leftOps     []exec.UnaryOperator
+	rightSource exec.Source
+	rightOps    []exec.UnaryOperator
+	unionAll    bool
+
+	batches     []*batch.RecordBatch
+	idx         int
+	initialized bool
+}
+
+func (u *unionSourceAdapter) Init(_ context.Context) error { return nil }
+
+func (u *unionSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if !u.initialized {
+		u.initialized = true
+
+		// Run left pipeline
+		leftSink := &exec.CollectSink{}
+		leftPipe := &exec.Pipeline{
+			Source: u.leftSource,
+			Ops:    u.leftOps,
+			Sink:   leftSink,
+		}
+		if err := leftPipe.Run(ctx); err != nil {
+			return nil, fmt.Errorf("executing union left side: %w", err)
+		}
+
+		// Run right pipeline
+		rightSink := &exec.CollectSink{}
+		rightPipe := &exec.Pipeline{
+			Source: u.rightSource,
+			Ops:    u.rightOps,
+			Sink:   rightSink,
+		}
+		if err := rightPipe.Run(ctx); err != nil {
+			return nil, fmt.Errorf("executing union right side: %w", err)
+		}
+
+		// Collect all rows from both sides
+		allRows := append(leftSink.Rows, rightSink.Rows...)
+
+		if !u.unionAll {
+			// UNION (distinct): deduplicate rows using a hash set
+			allRows = deduplicateRows(allRows)
+		}
+
+		if len(allRows) > 0 {
+			// Determine schema from left side batches; fall back to right side
+			var schema []parquet.Column
+			if leftBatches := leftSink.Batches(); len(leftBatches) > 0 {
+				schema = leftBatches[0].Schema
+			} else if rightBatches := rightSink.Batches(); len(rightBatches) > 0 {
+				schema = rightBatches[0].Schema
+			}
+			if schema != nil {
+				u.batches = []*batch.RecordBatch{batch.FromRows(schema, allRows)}
+			}
+		}
+	}
+
+	if u.idx >= len(u.batches) {
+		return nil, nil
+	}
+	b := u.batches[u.idx]
+	u.idx++
+	return b, nil
+}
+
+func (u *unionSourceAdapter) Close() error {
+	err := u.leftSource.Close()
+	if e := u.rightSource.Close(); e != nil && err == nil {
+		err = e
+	}
+	for _, op := range u.leftOps {
+		if e := op.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	for _, op := range u.rightOps {
+		if e := op.Close(); e != nil && err == nil {
+			err = e
+		}
+	}
+	return err
+}
+
+// deduplicateRows removes duplicate rows from a slice of row maps.
+func deduplicateRows(rows []map[string]any) []map[string]any {
+	seen := make(map[string]struct{}, len(rows))
+	result := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		key := rowHashKey(row)
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			result = append(result, row)
+		}
+	}
+	return result
+}
+
+// rowHashKey generates a unique string key from a row's column values.
+func rowHashKey(row map[string]any) string {
+	// Sort keys for deterministic hashing
+	keys := make([]string, 0, len(row))
+	for k := range row {
+		keys = append(keys, k)
+	}
+	// Simple sort for determinism
+	for i := 0; i < len(keys); i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[i] > keys[j] {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(0)
+		}
+		b.WriteString(k)
+		b.WriteByte(0)
+		b.WriteString(fmt.Sprintf("%v", row[k]))
+	}
+	return b.String()
+}
+
+func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter map[string]string) exec.Source {
 	// Get table schema
 	tableMeta, err := p.catalog.GetTable(ctx, tableName)
 	if err != nil {
@@ -526,21 +1063,23 @@ func (p *Planner) newScanner(ctx context.Context, tableName string) exec.Source 
 
 	// Create a scanner source that reads from the catalog
 	return &catalogScanSource{
-		catalog:   p.catalog,
-		tableName: tableName,
+		catalog:         p.catalog,
+		tableName:       tableName,
+		partitionFilter: partFilter,
 	}
 }
 
 // catalogScanSource adapts the scan.Scanner to exec.Source
 type catalogScanSource struct {
-	catalog   *catalog.Catalog
-	tableName string
-	inner     exec.Source
+	catalog         *catalog.Catalog
+	tableName       string
+	partitionFilter map[string]string
+	inner           exec.Source
 }
 
 func (s *catalogScanSource) Init(ctx context.Context) error {
 	// Use the scan package scanner
-	sc := newScannerSource(s.catalog, s.tableName)
+	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter)
 	s.inner = sc
 	return s.inner.Init(ctx)
 }
@@ -559,10 +1098,10 @@ func (s *catalogScanSource) Close() error {
 // RecordBatch type alias for convenience
 type RecordBatch = batch.RecordBatch
 
-func buildFilterOp(pred logical.Predicate) exec.UnaryOperator {
+func (p *Planner) buildFilterOp(pred logical.Predicate) exec.UnaryOperator {
 	// Try to compile from AST expression first (full expression engine)
 	if pred.ASTExpr != nil {
-		compiled, err := expr.Compile(pred.ASTExpr)
+		compiled, err := expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
 		if err == nil {
 			return exec.NewFilter(wrapPredicate(compiled))
 		}
@@ -608,8 +1147,22 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 		}
 	}
 
-	// IS NULL / IS NOT NULL
+	// LIKE / NOT LIKE
 	upper := strings.ToUpper(raw)
+	if idx := strings.Index(upper, " NOT LIKE "); idx >= 0 {
+		col := cleanExpr(strings.TrimSpace(raw[:idx]))
+		pattern := strings.TrimSpace(raw[idx+len(" NOT LIKE "):])
+		pattern = strings.Trim(pattern, "'")
+		return exec.NewFilter(exec.ColumnLike(col, pattern, true))
+	}
+	if idx := strings.Index(upper, " LIKE "); idx >= 0 {
+		col := cleanExpr(strings.TrimSpace(raw[:idx]))
+		pattern := strings.TrimSpace(raw[idx+len(" LIKE "):])
+		pattern = strings.Trim(pattern, "'")
+		return exec.NewFilter(exec.ColumnLike(col, pattern, false))
+	}
+
+	// IS NULL / IS NOT NULL
 	if strings.Contains(upper, "IS NOT NULL") {
 		col := cleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NOT NULL")]))
 		return exec.NewFilter(exec.ColumnCompare(col, exec.OpIsNotNull, nil))
@@ -707,13 +1260,57 @@ func parseAggFunc(s string) exec.AggFunc {
 	}
 }
 
-func aggOutputType(funcName string) parquet.TypeID {
-	switch strings.ToLower(funcName) {
+func parseWindowFunc(s string) exec.WindowFunc {
+	switch strings.ToLower(s) {
+	case "row_number":
+		return exec.WinRowNumber
+	case "rank":
+		return exec.WinRank
+	case "dense_rank":
+		return exec.WinDenseRank
+	case "sum":
+		return exec.WinSum
 	case "count":
+		return exec.WinCount
+	case "avg":
+		return exec.WinAvg
+	case "min":
+		return exec.WinMin
+	case "max":
+		return exec.WinMax
+	default:
+		return exec.WinRowNumber
+	}
+}
+
+func windowOutputType(funcName string) parquet.TypeID {
+	switch strings.ToLower(funcName) {
+	case "row_number", "rank", "dense_rank", "count":
 		return parquet.TypeInt64
 	default:
 		return parquet.TypeFloat64
 	}
+}
+
+func aggOutputType(funcName string, distinct bool) parquet.TypeID {
+	switch strings.ToLower(funcName) {
+	case "count":
+		return parquet.TypeInt64 // both COUNT and COUNT(DISTINCT) produce int64
+	default:
+		return parquet.TypeFloat64
+	}
+}
+
+// hasAggregateAncestor checks if a node is an Aggregate, or if it's a
+// passthrough node (e.g., Filter for HAVING) whose child is an Aggregate.
+func hasAggregateAncestor(node *logical.Node) bool {
+	if node.Type == logical.NodeAggregate {
+		return true
+	}
+	if node.Type == logical.NodeFilter && len(node.Children) > 0 {
+		return hasAggregateAncestor(node.Children[0])
+	}
+	return false
 }
 
 func cleanExpr(s string) string {
@@ -789,18 +1386,50 @@ func (s *sortSourceAdapter) Close() error {
 	return s.childSource.Close()
 }
 
+// windowSourceAdapter wraps a child pipeline + window into a Source.
+type windowSourceAdapter struct {
+	childSource exec.Source
+	childOps    []exec.UnaryOperator
+	win         *exec.Window
+	initialized bool
+}
+
+func (w *windowSourceAdapter) Init(_ context.Context) error { return nil }
+
+func (w *windowSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if !w.initialized {
+		w.initialized = true
+		pipe := &exec.Pipeline{
+			Source: w.childSource,
+			Ops:    w.childOps,
+			Sink:   w.win,
+		}
+		if err := pipe.Run(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return w.win.Next(ctx)
+}
+
+func (w *windowSourceAdapter) Close() error {
+	w.win.Close()
+	return w.childSource.Close()
+}
+
 // newScannerSource creates a scanner exec.Source from the catalog
-func newScannerSource(cat *catalog.Catalog, tableName string) exec.Source {
+func newScannerSource(cat *catalog.Catalog, tableName string, partFilter map[string]string) exec.Source {
 	return &scannerExecSource{
-		catalog:   cat,
-		tableName: tableName,
+		catalog:         cat,
+		tableName:       tableName,
+		partitionFilter: partFilter,
 	}
 }
 
 type scannerExecSource struct {
-	catalog   *catalog.Catalog
-	tableName string
-	scanner   *scanSourceInner
+	catalog         *catalog.Catalog
+	tableName       string
+	partitionFilter map[string]string
+	scanner         *scanSourceInner
 }
 
 type scanSourceInner struct {
@@ -823,6 +1452,12 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 
 	var files []catalog.FileEntry
 	for _, p := range manifest.Partitions {
+		// Prune partitions that don't match the filter
+		if len(s.partitionFilter) > 0 && len(p.Values) > 0 {
+			if !matchesPartitionFilter(p.Values, s.partitionFilter) {
+				continue
+			}
+		}
 		files = append(files, p.Files...)
 	}
 
@@ -833,6 +1468,20 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		schema:    tableMeta.Schema.Columns,
 	}
 	return nil
+}
+
+// matchesPartitionFilter returns true if all filter keys match the partition values.
+func matchesPartitionFilter(partValues, filter map[string]string) bool {
+	for k, v := range filter {
+		pv, ok := partValues[k]
+		if !ok {
+			continue // partition doesn't have this key, skip
+		}
+		if pv != v {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *scannerExecSource) Next(ctx context.Context) (*batch.RecordBatch, error) {

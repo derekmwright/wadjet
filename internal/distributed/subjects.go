@@ -8,6 +8,7 @@ const (
 	SubjectTasksAggregate = "caelum.tasks.aggregate"
 	SubjectTasksJoin      = "caelum.tasks.join"
 	SubjectTasksSort      = "caelum.tasks.sort"
+	SubjectTasksWindow    = "caelum.tasks.window"
 	SubjectTasksAll       = "caelum.tasks.>"
 
 	// Result notifications — JetStream Interest retention
@@ -16,6 +17,9 @@ const (
 
 	// Worker heartbeats — Core NATS
 	SubjectHeartbeat = "caelum.workers.heartbeat"
+
+	// Query cancellation — Core NATS
+	SubjectCancel = "caelum.cancel"
 
 	// Catalog locks — NATS KV
 	SubjectCatalogLock = "caelum.catalog.lock"
@@ -41,4 +45,14 @@ func ResultSubject(queryID, stageID, taskID string) string {
 // QueryResultSubject returns the wildcard subject for all results of a query.
 func QueryResultSubject(queryID string) string {
 	return SubjectResults + "." + queryID + ".>"
+}
+
+// CancelSubject returns the NATS subject for cancelling a specific query.
+func CancelSubject(queryID string) string {
+	return SubjectCancel + "." + queryID
+}
+
+// CancelSubjectAll returns the wildcard subject for all cancellation messages.
+func CancelSubjectAll() string {
+	return SubjectCancel + ".>"
 }

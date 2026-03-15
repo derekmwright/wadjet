@@ -73,11 +73,11 @@ mc mb local/caelum
 ```bash
 ./caelum serve \
   --mode standalone \
-  --listen :8080 \
-  --s3-endpoint localhost:9000 \
-  --s3-access-key minioadmin \
-  --s3-secret-key minioadmin \
-  --s3-bucket caelum \
+  --http-addr :8080 \
+  --endpoint localhost:9000 \
+  --access-key minioadmin \
+  --secret-key minioadmin \
+  --bucket caelum \
   --config caelum.yaml
 ```
 
@@ -343,73 +343,83 @@ import (
     "context"
     "log"
 
+    "github.com/derekmwright/caelum/internal/storage/objstore"
+    "github.com/derekmwright/caelum/internal/storage/parquet"
     "github.com/derekmwright/caelum/pkg/caelum"
 )
 
 func main() {
     ctx := context.Background()
+
+    store, err := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+        Endpoint:  "localhost:9000",
+        AccessKey: "minioadmin",
+        SecretKey: "minioadmin",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
     db, err := caelum.Open(ctx, caelum.Config{
-        S3Endpoint:  "localhost:9000",
-        S3AccessKey: "minioadmin",
-        S3SecretKey: "minioadmin",
-        S3Bucket:    "caelum",
+        Store:  store,
+        Bucket: "caelum",
     })
     if err != nil {
         log.Fatal(err)
     }
 
     // Firewall logs
-    db.CreateTable(ctx, "firewall_logs", caelum.Schema{
-        Columns: []caelum.Column{
-            {Name: "timestamp", Type: caelum.Timestamp},
-            {Name: "device", Type: caelum.String},
-            {Name: "severity", Type: caelum.String},
-            {Name: "src_ip", Type: caelum.String},
-            {Name: "dst_ip", Type: caelum.String},
-            {Name: "protocol", Type: caelum.String},
-            {Name: "src_port", Type: caelum.Int32},
-            {Name: "dst_port", Type: caelum.Int32},
-            {Name: "action", Type: caelum.String},
-            {Name: "traffic_class", Type: caelum.String},
-            {Name: "raw_message", Type: caelum.String},
+    db.CreateTable(ctx, "firewall_logs", parquet.Schema{
+        Columns: []parquet.Column{
+            {Name: "timestamp", Type: parquet.TypeTimestamp},
+            {Name: "device", Type: parquet.TypeString},
+            {Name: "severity", Type: parquet.TypeString},
+            {Name: "src_ip", Type: parquet.TypeString},
+            {Name: "dst_ip", Type: parquet.TypeString},
+            {Name: "protocol", Type: parquet.TypeString},
+            {Name: "src_port", Type: parquet.TypeInt32},
+            {Name: "dst_port", Type: parquet.TypeInt32},
+            {Name: "action", Type: parquet.TypeString},
+            {Name: "traffic_class", Type: parquet.TypeString},
+            {Name: "raw_message", Type: parquet.TypeString},
         },
     }, []string{"date", "device"})
 
     // NetFlow
-    db.CreateTable(ctx, "netflow", caelum.Schema{
-        Columns: []caelum.Column{
-            {Name: "timestamp", Type: caelum.Timestamp},
-            {Name: "src_ip", Type: caelum.String},
-            {Name: "dst_ip", Type: caelum.String},
-            {Name: "src_port", Type: caelum.Int32},
-            {Name: "dst_port", Type: caelum.Int32},
-            {Name: "protocol", Type: caelum.String},
-            {Name: "bytes", Type: caelum.Int64},
-            {Name: "packets", Type: caelum.Int64},
-            {Name: "tcp_flags", Type: caelum.Int32},
-            {Name: "tos", Type: caelum.Int32},
-            {Name: "input_snmp", Type: caelum.Int32},
-            {Name: "output_snmp", Type: caelum.Int32},
-            {Name: "exporter", Type: caelum.String},
-            {Name: "next_hop", Type: caelum.String},
-            {Name: "src_as", Type: caelum.Int64},
-            {Name: "dst_as", Type: caelum.Int64},
+    db.CreateTable(ctx, "netflow", parquet.Schema{
+        Columns: []parquet.Column{
+            {Name: "timestamp", Type: parquet.TypeTimestamp},
+            {Name: "src_ip", Type: parquet.TypeString},
+            {Name: "dst_ip", Type: parquet.TypeString},
+            {Name: "src_port", Type: parquet.TypeInt32},
+            {Name: "dst_port", Type: parquet.TypeInt32},
+            {Name: "protocol", Type: parquet.TypeString},
+            {Name: "bytes", Type: parquet.TypeInt64},
+            {Name: "packets", Type: parquet.TypeInt64},
+            {Name: "tcp_flags", Type: parquet.TypeInt32},
+            {Name: "tos", Type: parquet.TypeInt32},
+            {Name: "input_snmp", Type: parquet.TypeInt32},
+            {Name: "output_snmp", Type: parquet.TypeInt32},
+            {Name: "exporter", Type: parquet.TypeString},
+            {Name: "next_hop", Type: parquet.TypeString},
+            {Name: "src_as", Type: parquet.TypeInt64},
+            {Name: "dst_as", Type: parquet.TypeInt64},
         },
     }, []string{"date", "exporter"})
 
     // Device inventory
-    db.CreateTable(ctx, "device_inventory", caelum.Schema{
-        Columns: []caelum.Column{
-            {Name: "ip_address", Type: caelum.String},
-            {Name: "hostname", Type: caelum.String},
-            {Name: "vendor", Type: caelum.String},
-            {Name: "model", Type: caelum.String},
-            {Name: "os_version", Type: caelum.String},
-            {Name: "location", Type: caelum.String},
-            {Name: "role", Type: caelum.String},
-            {Name: "region", Type: caelum.String},
-            {Name: "environment", Type: caelum.String},
-            {Name: "last_seen", Type: caelum.Timestamp},
+    db.CreateTable(ctx, "device_inventory", parquet.Schema{
+        Columns: []parquet.Column{
+            {Name: "ip_address", Type: parquet.TypeString},
+            {Name: "hostname", Type: parquet.TypeString},
+            {Name: "vendor", Type: parquet.TypeString},
+            {Name: "model", Type: parquet.TypeString},
+            {Name: "os_version", Type: parquet.TypeString},
+            {Name: "location", Type: parquet.TypeString},
+            {Name: "role", Type: parquet.TypeString},
+            {Name: "region", Type: parquet.TypeString},
+            {Name: "environment", Type: parquet.TypeString},
+            {Name: "last_seen", Type: parquet.TypeTimestamp},
         },
     }, nil)
 
@@ -422,7 +432,7 @@ func main() {
 ### Via the Interactive Shell
 
 ```bash
-./caelum shell --s3-endpoint localhost:9000 --s3-access-key minioadmin --s3-secret-key minioadmin --s3-bucket caelum
+./caelum shell --endpoint localhost:9000 --access-key minioadmin --secret-key minioadmin --bucket caelum
 ```
 
 ```sql
@@ -553,6 +563,7 @@ import (
     "log"
     "time"
 
+    "github.com/derekmwright/caelum/internal/storage/objstore"
     "github.com/derekmwright/caelum/pkg/caelum"
 )
 
@@ -565,11 +576,14 @@ type Alert struct {
 
 func main() {
     ctx := context.Background()
+    store, _ := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+        Endpoint:  "localhost:9000",
+        AccessKey: "minioadmin",
+        SecretKey: "minioadmin",
+    })
     db, _ := caelum.Open(ctx, caelum.Config{
-        S3Endpoint:  "localhost:9000",
-        S3AccessKey: "minioadmin",
-        S3SecretKey: "minioadmin",
-        S3Bucket:    "caelum",
+        Store:  store,
+        Bucket: "caelum",
     })
 
     ticker := time.NewTicker(5 * time.Minute)

@@ -93,6 +93,71 @@ func TestHashAggregate(t *testing.T) {
 	}
 }
 
+func TestHashAggregateCountDistinct(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "group", Type: parquet.TypeString},
+		{Name: "status", Type: parquet.TypeString},
+	}
+
+	rows := []map[string]any{
+		{"group": "a", "status": "active"},
+		{"group": "a", "status": "active"},   // duplicate
+		{"group": "a", "status": "inactive"},
+		{"group": "b", "status": "active"},
+		{"group": "b", "status": "active"},   // duplicate
+		{"group": "b", "status": "active"},   // duplicate
+		{"group": "b", "status": "pending"},
+	}
+
+	agg := NewHashAggregate([]string{"group"}, []AggColumn{
+		{Func: AggCountDistinct, InputCol: "status", OutputCol: "distinct_statuses", OutputType: parquet.TypeInt64},
+		{Func: AggCount, InputCol: "status", OutputCol: "total_count", OutputType: parquet.TypeInt64},
+	})
+
+	source := NewSliceSource(schema, rows)
+	pipe := &Pipeline{Source: source, Ops: nil, Sink: agg}
+	if err := pipe.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := agg.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil {
+		t.Fatal("expected non-nil batch")
+	}
+
+	resultRows := b.ToRows()
+	if len(resultRows) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(resultRows))
+	}
+
+	for _, row := range resultRows {
+		g := row["group"]
+		dc := row["distinct_statuses"].(int64)
+		tc := row["total_count"].(int64)
+		switch g {
+		case "a":
+			if dc != 2 {
+				t.Errorf("group 'a': expected 2 distinct statuses, got %d", dc)
+			}
+			if tc != 3 {
+				t.Errorf("group 'a': expected total count 3, got %d", tc)
+			}
+		case "b":
+			if dc != 2 {
+				t.Errorf("group 'b': expected 2 distinct statuses, got %d", dc)
+			}
+			if tc != 4 {
+				t.Errorf("group 'b': expected total count 4, got %d", tc)
+			}
+		default:
+			t.Errorf("unexpected group: %v", g)
+		}
+	}
+}
+
 func TestSort(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "name", Type: parquet.TypeString},
@@ -183,5 +248,50 @@ func TestProject(t *testing.T) {
 	}
 	if sink.Rows[0]["sum_ab"].(float64) != 13.0 {
 		t.Fatalf("expected sum_ab=13.0, got %v", sink.Rows[0]["sum_ab"])
+	}
+}
+
+func TestColumnLike(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "name", Type: parquet.TypeString},
+	}
+
+	rows := []map[string]any{
+		{"name": "alice"},
+		{"name": "bob"},
+		{"name": "alex"},
+		{"name": "carol"},
+		{"name": "ali"},
+	}
+
+	tests := []struct {
+		name     string
+		pattern  string
+		not      bool
+		expected int
+	}{
+		{"prefix", "al%", false, 3},      // alice, alex, ali
+		{"suffix", "%ob", false, 1},       // bob
+		{"contains", "%li%", false, 2},    // alice, ali
+		{"single char", "al_x", false, 1}, // alex
+		{"exact", "bob", false, 1},
+		{"not like", "al%", true, 2}, // bob, carol
+		{"no match", "xyz%", false, 0},
+		{"match all", "%", false, 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := NewSliceSource(schema, rows)
+			filter := NewFilter(ColumnLike("name", tt.pattern, tt.not))
+			sink := &CollectSink{}
+			pipe := &Pipeline{Source: source, Ops: []UnaryOperator{filter}, Sink: sink}
+			if err := pipe.Run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if len(sink.Rows) != tt.expected {
+				t.Fatalf("pattern %q not=%v: expected %d rows, got %d", tt.pattern, tt.not, tt.expected, len(sink.Rows))
+			}
+		})
 	}
 }

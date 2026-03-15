@@ -1,0 +1,289 @@
+package catalog
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/derekmwright/caelum/internal/storage/objstore"
+	"github.com/derekmwright/caelum/internal/storage/parquet"
+)
+
+func testSchema() parquet.Schema {
+	return parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+			{Name: "name", Type: parquet.TypeString, Nullable: true},
+			{Name: "region", Type: parquet.TypeString, Nullable: false},
+		},
+	}
+}
+
+func setupCatalog(t *testing.T) (*Catalog, context.Context) {
+	t.Helper()
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	cat := New(store, "test-bucket")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	return cat, ctx
+}
+
+func TestInit(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	cat := New(store, "test-bucket")
+
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("Init failed: %v", err)
+	}
+
+	// Bucket should exist.
+	exists, err := store.BucketExists(ctx, "test-bucket")
+	if err != nil {
+		t.Fatalf("BucketExists: %v", err)
+	}
+	if !exists {
+		t.Fatal("expected bucket to exist after Init")
+	}
+
+	// Catalog metadata should be readable.
+	_, err = store.Head(ctx, "test-bucket", catalogPath)
+	if err != nil {
+		t.Fatalf("catalog metadata not found after Init: %v", err)
+	}
+
+	// Calling Init again should be idempotent (no error).
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("second Init failed: %v", err)
+	}
+}
+
+func TestCreateTableAndGetTable(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "users", schema, []string{"region"}); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	got, err := cat.GetTable(ctx, "users")
+	if err != nil {
+		t.Fatalf("GetTable: %v", err)
+	}
+
+	if got.Name != "users" {
+		t.Errorf("Name = %q, want %q", got.Name, "users")
+	}
+	if got.Version != 1 {
+		t.Errorf("Version = %d, want 1", got.Version)
+	}
+	if len(got.Schema.Columns) != len(schema.Columns) {
+		t.Fatalf("got %d columns, want %d", len(got.Schema.Columns), len(schema.Columns))
+	}
+	for i, col := range got.Schema.Columns {
+		if col.Name != schema.Columns[i].Name {
+			t.Errorf("column %d name = %q, want %q", i, col.Name, schema.Columns[i].Name)
+		}
+		if col.Type != schema.Columns[i].Type {
+			t.Errorf("column %d type = %v, want %v", i, col.Type, schema.Columns[i].Type)
+		}
+	}
+	if len(got.PartitionKeys) != 1 || got.PartitionKeys[0] != "region" {
+		t.Errorf("PartitionKeys = %v, want [region]", got.PartitionKeys)
+	}
+	if got.CreatedAt.IsZero() {
+		t.Error("CreatedAt should not be zero")
+	}
+}
+
+func TestListTables(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	// Empty catalog should have no tables.
+	tables, err := cat.ListTables(ctx)
+	if err != nil {
+		t.Fatalf("ListTables: %v", err)
+	}
+	if len(tables) != 0 {
+		t.Fatalf("expected 0 tables, got %d", len(tables))
+	}
+
+	// Create two tables and verify they appear.
+	if err := cat.CreateTable(ctx, "alpha", schema, nil); err != nil {
+		t.Fatalf("CreateTable alpha: %v", err)
+	}
+	if err := cat.CreateTable(ctx, "beta", schema, nil); err != nil {
+		t.Fatalf("CreateTable beta: %v", err)
+	}
+
+	tables, err = cat.ListTables(ctx)
+	if err != nil {
+		t.Fatalf("ListTables: %v", err)
+	}
+	if len(tables) != 2 {
+		t.Fatalf("expected 2 tables, got %d", len(tables))
+	}
+
+	found := map[string]bool{}
+	for _, name := range tables {
+		found[name] = true
+	}
+	if !found["alpha"] || !found["beta"] {
+		t.Errorf("expected tables alpha and beta, got %v", tables)
+	}
+}
+
+func TestAddFilesAndGetManifest(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, []string{"region"}); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	files := []FileEntry{
+		{Path: "data/region=us/part-0001.parquet", SizeBytes: 1024, NumRows: 100, CreatedAt: time.Now().UTC()},
+		{Path: "data/region=us/part-0002.parquet", SizeBytes: 2048, NumRows: 200, CreatedAt: time.Now().UTC()},
+	}
+	partValues := map[string]string{"region": "us"}
+
+	if err := cat.AddFiles(ctx, "events", partValues, "data/region=us", files); err != nil {
+		t.Fatalf("AddFiles: %v", err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatalf("GetManifest: %v", err)
+	}
+
+	if manifest.Table != "events" {
+		t.Errorf("manifest.Table = %q, want %q", manifest.Table, "events")
+	}
+	if len(manifest.Partitions) != 1 {
+		t.Fatalf("expected 1 partition, got %d", len(manifest.Partitions))
+	}
+
+	part := manifest.Partitions[0]
+	if part.Path != "data/region=us" {
+		t.Errorf("partition path = %q, want %q", part.Path, "data/region=us")
+	}
+	if part.Values["region"] != "us" {
+		t.Errorf("partition value region = %q, want %q", part.Values["region"], "us")
+	}
+	if len(part.Files) != 2 {
+		t.Fatalf("expected 2 files, got %d", len(part.Files))
+	}
+
+	// Add more files to the same partition.
+	extraFiles := []FileEntry{
+		{Path: "data/region=us/part-0003.parquet", SizeBytes: 512, NumRows: 50, CreatedAt: time.Now().UTC()},
+	}
+	if err := cat.AddFiles(ctx, "events", partValues, "data/region=us", extraFiles); err != nil {
+		t.Fatalf("AddFiles (append): %v", err)
+	}
+
+	manifest, err = cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatalf("GetManifest after append: %v", err)
+	}
+	if len(manifest.Partitions) != 1 {
+		t.Fatalf("expected 1 partition after append, got %d", len(manifest.Partitions))
+	}
+	if len(manifest.Partitions[0].Files) != 3 {
+		t.Fatalf("expected 3 files after append, got %d", len(manifest.Partitions[0].Files))
+	}
+
+	// Add files to a different partition.
+	euFiles := []FileEntry{
+		{Path: "data/region=eu/part-0001.parquet", SizeBytes: 768, NumRows: 80, CreatedAt: time.Now().UTC()},
+	}
+	if err := cat.AddFiles(ctx, "events", map[string]string{"region": "eu"}, "data/region=eu", euFiles); err != nil {
+		t.Fatalf("AddFiles (new partition): %v", err)
+	}
+
+	manifest, err = cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatalf("GetManifest after new partition: %v", err)
+	}
+	if len(manifest.Partitions) != 2 {
+		t.Fatalf("expected 2 partitions, got %d", len(manifest.Partitions))
+	}
+}
+
+func TestDropTable(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "logs", schema, nil); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	if err := cat.CreateTable(ctx, "metrics", schema, nil); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	if err := cat.DropTable(ctx, "logs"); err != nil {
+		t.Fatalf("DropTable: %v", err)
+	}
+
+	tables, err := cat.ListTables(ctx)
+	if err != nil {
+		t.Fatalf("ListTables: %v", err)
+	}
+	if len(tables) != 1 {
+		t.Fatalf("expected 1 table after drop, got %d", len(tables))
+	}
+	if tables[0] != "metrics" {
+		t.Errorf("remaining table = %q, want %q", tables[0], "metrics")
+	}
+
+	// GetTable on dropped table should fail.
+	_, err = cat.GetTable(ctx, "logs")
+	if err == nil {
+		t.Fatal("expected error for dropped table, got nil")
+	}
+}
+
+func TestGetTableNotFound(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+
+	_, err := cat.GetTable(ctx, "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for non-existent table, got nil")
+	}
+}
+
+func TestCreateTableDuplicate(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "dup", schema, nil); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	err := cat.CreateTable(ctx, "dup", schema, nil)
+	if err == nil {
+		t.Fatal("expected error when creating duplicate table, got nil")
+	}
+}
+
+func TestDropTableNotFound(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+
+	err := cat.DropTable(ctx, "ghost")
+	if err == nil {
+		t.Fatal("expected error when dropping non-existent table, got nil")
+	}
+}
+
+func TestCreateTableInvalidPartitionKey(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	err := cat.CreateTable(ctx, "bad", schema, []string{"nonexistent_col"})
+	if err == nil {
+		t.Fatal("expected error for invalid partition key, got nil")
+	}
+}

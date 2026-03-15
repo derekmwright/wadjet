@@ -43,7 +43,7 @@ The coordinator is the single entry point for queries:
 1. Receives SQL via HTTP API
 2. Parses and plans the query
 3. Breaks the physical plan into distributed stages
-4. Publishes tasks to the NATS `tasks` stream
+4. Publishes tasks to the NATS `CAELUM_TASKS` JetStream stream (subjects: `caelum.tasks.scan`, `caelum.tasks.aggregate`, etc.)
 5. Waits for result notifications from workers
 6. Merges partial results into a final response
 
@@ -76,12 +76,12 @@ NATS provides the messaging backbone:
 ```bash
 ./caelum serve \
   --mode coordinator \
-  --listen :8080 \
+  --http-addr :8080 \
   --nats-port 4222 \
-  --s3-endpoint minio.internal:9000 \
-  --s3-access-key $S3_ACCESS_KEY \
-  --s3-secret-key $S3_SECRET_KEY \
-  --s3-bucket caelum \
+  --endpoint minio.internal:9000 \
+  --access-key $S3_ACCESS_KEY \
+  --secret-key $S3_SECRET_KEY \
+  --bucket caelum \
   --config caelum.yaml
 ```
 
@@ -93,10 +93,10 @@ On each worker node:
 ./caelum serve \
   --mode worker \
   --nats-url nats://coordinator.internal:4222 \
-  --s3-endpoint minio.internal:9000 \
-  --s3-access-key $S3_ACCESS_KEY \
-  --s3-secret-key $S3_SECRET_KEY \
-  --s3-bucket caelum
+  --endpoint minio.internal:9000 \
+  --access-key $S3_ACCESS_KEY \
+  --secret-key $S3_SECRET_KEY \
+  --bucket caelum
 ```
 
 Workers automatically register with the coordinator and begin pulling tasks.
@@ -123,10 +123,10 @@ services:
     build: .
     command: >
       serve --mode coordinator
-      --listen :8080 --nats-port 4222
-      --s3-endpoint minio:9000
-      --s3-access-key minioadmin --s3-secret-key minioadmin
-      --s3-bucket caelum
+      --http-addr :8080 --nats-port 4222
+      --endpoint minio:9000
+      --access-key minioadmin --secret-key minioadmin
+      --bucket caelum
     ports:
       - "8080:8080"
       - "4222:4222"
@@ -138,9 +138,9 @@ services:
     command: >
       serve --mode worker
       --nats-url nats://coordinator:4222
-      --s3-endpoint minio:9000
-      --s3-access-key minioadmin --s3-secret-key minioadmin
-      --s3-bucket caelum
+      --endpoint minio:9000
+      --access-key minioadmin --secret-key minioadmin
+      --bucket caelum
     depends_on:
       - coordinator
 
@@ -149,9 +149,9 @@ services:
     command: >
       serve --mode worker
       --nats-url nats://coordinator:4222
-      --s3-endpoint minio:9000
-      --s3-access-key minioadmin --s3-secret-key minioadmin
-      --s3-bucket caelum
+      --endpoint minio:9000
+      --access-key minioadmin --secret-key minioadmin
+      --bucket caelum
     depends_on:
       - coordinator
 
@@ -189,12 +189,12 @@ spec:
           args:
             - serve
             - --mode=coordinator
-            - --listen=:8080
+            - --http-addr=:8080
             - --nats-port=4222
-            - --s3-endpoint=$(S3_ENDPOINT)
-            - --s3-access-key=$(S3_ACCESS_KEY)
-            - --s3-secret-key=$(S3_SECRET_KEY)
-            - --s3-bucket=caelum
+            - --endpoint=$(S3_ENDPOINT)
+            - --access-key=$(S3_ACCESS_KEY)
+            - --secret-key=$(S3_SECRET_KEY)
+            - --bucket=caelum
           ports:
             - containerPort: 8080
               name: http
@@ -239,10 +239,10 @@ spec:
             - serve
             - --mode=worker
             - --nats-url=nats://caelum-coordinator:4222
-            - --s3-endpoint=$(S3_ENDPOINT)
-            - --s3-access-key=$(S3_ACCESS_KEY)
-            - --s3-secret-key=$(S3_SECRET_KEY)
-            - --s3-bucket=caelum
+            - --endpoint=$(S3_ENDPOINT)
+            - --access-key=$(S3_ACCESS_KEY)
+            - --secret-key=$(S3_SECRET_KEY)
+            - --bucket=caelum
           resources:
             requests:
               cpu: "2"

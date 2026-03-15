@@ -31,6 +31,8 @@ Variable-length types use an **offset/data** columnar layout: a contiguous data 
 | `IPv6` | `[16]byte` | 16 bytes | Standard IPv6 notation on input | IPv6 addresses |
 | `CIDR` | `string` | Variable | CIDR notation ("10.0.0.0/8") | Subnet definitions, ACLs |
 | `MAC` | `uint64` | 8 bytes | Colon-separated hex on input ("aa:bb:cc:dd:ee:ff") | Interface identification |
+| `Port` | `uint16` (in `Int32Data`) | 2 bytes | Integer 0–65535 | Transport-layer ports |
+| `Protocol` | `uint8` (in `Int32Data`) | 1 byte | IANA protocol number | IP protocol (6=TCP, 17=UDP) |
 
 Network types are stored in their compact binary representations (not as strings), enabling efficient comparison and aggregation while maintaining human-readable input/output formats.
 
@@ -39,6 +41,14 @@ Network types are stored in their compact binary representations (not as strings
 | Type | Go Backing | Precision | Use Cases |
 |------|-----------|-----------|-----------|
 | `Timestamp` | `int64` | Milliseconds since epoch | Event times, log timestamps |
+| `Date` | `int32` | Days since 1970-01-01 | Calendar dates, partition keys |
+| `Duration` | `int64` | Nanoseconds | Time intervals, latency measurements |
+
+### Identifier Types
+
+| Type | Go Backing | Size | Use Cases |
+|------|-----------|------|-----------|
+| `UUID` | `[16]byte` (ByteArray) | 16 bytes | Unique identifiers, trace IDs, correlation IDs |
 
 ## Nullability
 
@@ -55,22 +65,28 @@ Null handling in expressions:
 ### In Go (Embedded API)
 
 ```go
-schema := caelum.Schema{
-    Columns: []caelum.Column{
-        {Name: "timestamp",   Type: caelum.Timestamp},
-        {Name: "src_ip",     Type: caelum.IPv4},
-        {Name: "dst_ip",     Type: caelum.IPv4},
-        {Name: "src_port",   Type: caelum.Int32},
-        {Name: "dst_port",   Type: caelum.Int32},
-        {Name: "protocol",   Type: caelum.String},
-        {Name: "bytes_in",   Type: caelum.Int64},
-        {Name: "bytes_out",  Type: caelum.Int64},
-        {Name: "src_mac",    Type: caelum.MAC},
-        {Name: "vlan_id",    Type: caelum.Int32},
-        {Name: "is_encrypted", Type: caelum.Bool},
+import "github.com/derekmwright/caelum/internal/storage/parquet"
+
+schema := parquet.Schema{
+    Columns: []parquet.Column{
+        {Name: "timestamp",    Type: parquet.TypeTimestamp},
+        {Name: "src_ip",      Type: parquet.TypeIPv4},
+        {Name: "dst_ip",      Type: parquet.TypeIPv4},
+        {Name: "src_port",    Type: parquet.TypePort},
+        {Name: "dst_port",    Type: parquet.TypePort},
+        {Name: "protocol",    Type: parquet.TypeProtocol},
+        {Name: "bytes_in",    Type: parquet.TypeInt64},
+        {Name: "bytes_out",   Type: parquet.TypeInt64},
+        {Name: "src_mac",     Type: parquet.TypeMAC},
+        {Name: "vlan_id",     Type: parquet.TypeInt32},
+        {Name: "is_encrypted", Type: parquet.TypeBool},
+        {Name: "flow_id",     Type: parquet.TypeUUID},
+        {Name: "duration",    Type: parquet.TypeDuration},
     },
 }
 ```
+
+Column types are referenced as `parquet.TypeXxx` constants (e.g., `parquet.TypeIPv4`, `parquet.TypeTimestamp`). The `Nullable` field on `Column` defaults to `false`; set it to `true` to allow nulls.
 
 ### In Parquet (Automatic Mapping)
 

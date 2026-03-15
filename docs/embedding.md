@@ -13,22 +13,37 @@ go get github.com/derekmwright/caelum/pkg/caelum
 ### Opening a Database
 
 ```go
-import "github.com/derekmwright/caelum/pkg/caelum"
+import (
+    "github.com/derekmwright/caelum/internal/storage/objstore"
+    "github.com/derekmwright/caelum/pkg/caelum"
+)
+
+// First create an object store client
+store, err := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+    Endpoint:  "localhost:9000",
+    AccessKey: "minioadmin",
+    SecretKey: "minioadmin",
+    UseSSL:    false,
+})
+if err != nil {
+    log.Fatal(err)
+}
 
 db, err := caelum.Open(ctx, caelum.Config{
-    S3Endpoint:  "localhost:9000",
-    S3AccessKey: "minioadmin",
-    S3SecretKey: "minioadmin",
-    S3Bucket:    "caelum",
+    Store:  store,
+    Bucket: "caelum",
 })
 ```
 
-The `Open` call initializes the object store client and loads the catalog from storage.
+The `Config` struct accepts:
+- `Store` — An `objstore.Store` implementation (MinIOStore for production, MemStore for testing)
+- `Bucket` — S3 bucket name
+- `Logger` — Optional `*slog.Logger` (defaults to slog.Default)
 
 ### Table Management
 
 ```go
-// Create a table
+// Create a table (schema uses parquet.Schema from internal/storage/parquet)
 err := db.CreateTable(ctx, "flow_logs", schema, []string{"date"})
 
 // Drop a table (removes metadata only — Parquet files remain on S3)
@@ -37,37 +52,52 @@ err := db.DropTable(ctx, "flow_logs")
 // List all tables
 tables, err := db.ListTables(ctx)
 // tables: ["flow_logs", "syslog", "device_inventory"]
+
+// Access underlying catalog and store directly
+catalog := db.Catalog()
+store := db.Store()
 ```
 
 ### Ingestion
 
 ```go
-ingester, err := db.NewIngester("flow_logs", schema, []string{"date"}, caelum.IngestConfig{
+import "github.com/derekmwright/caelum/internal/storage/ingest"
+
+// NewIngester returns *ingest.Ingester (no error return)
+ingester := db.NewIngester("flow_logs", schema, []string{"date"}, ingest.Config{
     FlushInterval: 30 * time.Second,
-    MaxRows:       500000,
+    MaxBufferRows: 500000,
 })
 
-// Write individual rows
-err = ingester.Write(ctx, map[string]any{
-    "timestamp": time.Now(),
-    "src_ip":    "10.0.1.50",
-    "dst_ip":    "10.0.2.100",
-    "src_port":  int32(54321),
-    "dst_port":  int32(443),
-    "protocol":  "TCP",
-    "bytes_in":  int64(2048),
-    "bytes_out": int64(512),
+// Start the background flush goroutine
+ingester.Start()
+
+// Ingest rows as a batch (takes a slice of row maps)
+err = ingester.Ingest(ctx, []map[string]any{
+    {
+        "timestamp": time.Now(),
+        "src_ip":    "10.0.1.50",
+        "dst_ip":    "10.0.2.100",
+        "src_port":  int32(54321),
+        "dst_port":  int32(443),
+        "protocol":  "TCP",
+        "bytes_in":  int64(2048),
+        "bytes_out": int64(512),
+    },
 })
 
 // Force flush all buffered data
-ingester.Flush(ctx)
+ingester.FlushAll(ctx)
+
+// Stop the ingester when done (flushes remaining data)
+ingester.Stop(ctx)
 ```
 
 The ingester automatically:
 - Partitions rows based on partition keys
-- Buffers rows in memory
-- Flushes to Parquet on S3 when thresholds are hit
-- Updates the catalog manifest
+- Buffers rows in per-partition accumulators
+- Flushes to Parquet on S3 when thresholds are hit (size, rows, or time)
+- Updates the catalog manifest atomically via ETags
 
 ### Querying
 
@@ -104,6 +134,8 @@ import (
     "net/http"
     "time"
 
+    "github.com/derekmwright/caelum/internal/storage/objstore"
+    "github.com/derekmwright/caelum/internal/storage/parquet"
     "github.com/derekmwright/caelum/pkg/caelum"
 )
 
@@ -112,12 +144,18 @@ var db *caelum.DB
 func main() {
     ctx := context.Background()
 
-    var err error
+    store, err := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+        Endpoint:  "minio.internal:9000",
+        AccessKey: "prod-access-key",
+        SecretKey: "prod-secret-key",
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
     db, err = caelum.Open(ctx, caelum.Config{
-        S3Endpoint:  "minio.internal:9000",
-        S3AccessKey: "prod-access-key",
-        S3SecretKey: "prod-secret-key",
-        S3Bucket:    "network-analytics",
+        Store:  store,
+        Bucket: "network-analytics",
     })
     if err != nil {
         log.Fatal(err)
@@ -147,16 +185,16 @@ func ensureTables(ctx context.Context) {
     }
 
     if !tableSet["flow_logs"] {
-        db.CreateTable(ctx, "flow_logs", caelum.Schema{
-            Columns: []caelum.Column{
-                {Name: "timestamp", Type: caelum.Timestamp},
-                {Name: "src_ip", Type: caelum.IPv4},
-                {Name: "dst_ip", Type: caelum.IPv4},
-                {Name: "src_port", Type: caelum.Int32},
-                {Name: "dst_port", Type: caelum.Int32},
-                {Name: "protocol", Type: caelum.String},
-                {Name: "bytes_in", Type: caelum.Int64},
-                {Name: "bytes_out", Type: caelum.Int64},
+        db.CreateTable(ctx, "flow_logs", parquet.Schema{
+            Columns: []parquet.Column{
+                {Name: "timestamp", Type: parquet.TypeTimestamp},
+                {Name: "src_ip", Type: parquet.TypeIPv4},
+                {Name: "dst_ip", Type: parquet.TypeIPv4},
+                {Name: "src_port", Type: parquet.TypeInt32},
+                {Name: "dst_port", Type: parquet.TypeInt32},
+                {Name: "protocol", Type: parquet.TypeString},
+                {Name: "bytes_in", Type: parquet.TypeInt64},
+                {Name: "bytes_out", Type: parquet.TypeInt64},
             },
         }, []string{"date"})
     }
@@ -293,5 +331,5 @@ func ingestFromQueue(ctx context.Context) {
 
 - `DB.Query()` is safe to call concurrently from multiple goroutines
 - `DB.CreateTable()` and `DB.DropTable()` use optimistic concurrency on the catalog
-- `Ingester.Write()` is safe for concurrent writes from multiple goroutines within the same ingester
+- `Ingester.Ingest()` is safe for concurrent calls from multiple goroutines within the same ingester
 - Do not share an `Ingester` across multiple processes writing to the same table — use separate ingesters (catalog ETag concurrency will prevent corruption but may cause flush retries)

@@ -168,6 +168,113 @@ Return the schema and partition keys for a specific table.
 
 ---
 
+### List Active Queries
+
+```
+GET /v1/queries
+```
+
+Returns a list of currently active and recently completed queries.
+
+**Response (200 OK):**
+
+```json
+{
+  "queries": [
+    {
+      "query_id": "q-7f3a2b1c",
+      "state": "running",
+      "sql": "SELECT ...",
+      "elapsed": "2s"
+    }
+  ]
+}
+```
+
+---
+
+### Submit Async Query
+
+```
+POST /v1/queries/async
+```
+
+Submit a query for asynchronous execution. Returns immediately with a query ID that can be polled for results.
+
+**Request:**
+
+```json
+{
+  "sql": "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC"
+}
+```
+
+**Response (202 Accepted):**
+
+```json
+{
+  "query_id": "q-9e8d7c6b"
+}
+```
+
+---
+
+### Get Query Status
+
+```
+GET /v1/queries/{queryID}
+```
+
+Check the status of an async query.
+
+**Response (200 OK):**
+
+```json
+{
+  "query_id": "q-9e8d7c6b",
+  "state": "completed",
+  "total_rows": 150,
+  "elapsed": "340ms"
+}
+```
+
+States: `pending`, `running`, `completed`, `failed`, `cancelled`
+
+---
+
+### Get Query Results
+
+```
+GET /v1/queries/{queryID}/results
+```
+
+Retrieve the results of a completed async query.
+
+**Response (200 OK):**
+
+Same format as the synchronous `POST /v1/queries` response.
+
+---
+
+### Cancel Query
+
+```
+DELETE /v1/queries/{queryID}
+```
+
+Cancel a running query.
+
+**Response (200 OK):**
+
+```json
+{
+  "query_id": "q-9e8d7c6b",
+  "state": "cancelled"
+}
+```
+
+---
+
 ### Health Check
 
 ```
@@ -359,6 +466,11 @@ The HTTP server processes queries concurrently with no built-in rate limiting. F
 | Endpoint | Request | Response |
 |----------|---------|----------|
 | `POST /v1/queries` | `application/json` | `application/json` |
+| `GET /v1/queries` | — | `application/json` |
+| `POST /v1/queries/async` | `application/json` | `application/json` |
+| `GET /v1/queries/{id}` | — | `application/json` |
+| `GET /v1/queries/{id}/results` | — | `application/json` |
+| `DELETE /v1/queries/{id}` | — | `application/json` |
 | `GET /v1/tables` | — | `application/json` |
 | `GET /v1/tables/{name}` | — | `application/json` |
 | `GET /v1/health` | — | `application/json` |

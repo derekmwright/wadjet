@@ -8,8 +8,23 @@ import (
 	"github.com/blastrain/vitess-sqlparser/sqlparser"
 )
 
+// compileContext holds optional state for expression compilation.
+type compileContext struct {
+	runner SubqueryRunner
+}
+
 // Compile converts a vitess sqlparser expression AST into an Expr tree.
 func Compile(node sqlparser.Expr) (Expr, error) {
+	return compileWithCtx(node, &compileContext{})
+}
+
+// CompileWithRunner converts a vitess sqlparser expression AST into an Expr tree,
+// with support for subquery expressions (scalar subqueries, IN subquery, EXISTS).
+func CompileWithRunner(node sqlparser.Expr, runner SubqueryRunner) (Expr, error) {
+	return compileWithCtx(node, &compileContext{runner: runner})
+}
+
+func compileWithCtx(node sqlparser.Expr, ctx *compileContext) (Expr, error) {
 	if node == nil {
 		return &Lit{Val: nil}, nil
 	}
@@ -27,60 +42,76 @@ func Compile(node sqlparser.Expr) (Expr, error) {
 		return &Lit{Val: bool(n)}, nil
 
 	case *sqlparser.BinaryExpr:
-		return compileBinaryExpr(n)
+		return compileBinaryExprCtx(n, ctx)
 
 	case *sqlparser.UnaryExpr:
-		return compileUnaryExpr(n)
+		return compileUnaryExprCtx(n, ctx)
 
 	case *sqlparser.ComparisonExpr:
-		return compileComparison(n)
+		return compileComparisonCtx(n, ctx)
 
 	case *sqlparser.AndExpr:
-		left, err := Compile(n.Left)
+		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {
 			return nil, err
 		}
-		right, err := Compile(n.Right)
+		right, err := compileWithCtx(n.Right, ctx)
 		if err != nil {
 			return nil, err
 		}
 		return &And{Left: left, Right: right}, nil
 
 	case *sqlparser.OrExpr:
-		left, err := Compile(n.Left)
+		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {
 			return nil, err
 		}
-		right, err := Compile(n.Right)
+		right, err := compileWithCtx(n.Right, ctx)
 		if err != nil {
 			return nil, err
 		}
 		return &Or{Left: left, Right: right}, nil
 
 	case *sqlparser.NotExpr:
-		operand, err := Compile(n.Expr)
+		operand, err := compileWithCtx(n.Expr, ctx)
 		if err != nil {
 			return nil, err
 		}
 		return &Not{Operand: operand}, nil
 
 	case *sqlparser.ParenExpr:
-		return Compile(n.Expr)
+		return compileWithCtx(n.Expr, ctx)
 
 	case *sqlparser.IsExpr:
-		return compileIsExpr(n)
+		return compileIsExprCtx(n, ctx)
 
 	case *sqlparser.RangeCond:
-		return compileRangeCond(n)
+		return compileRangeCondCtx(n, ctx)
 
 	case *sqlparser.FuncExpr:
-		return compileFuncExpr(n)
+		return compileFuncExprCtx(n, ctx)
 
 	case *sqlparser.CaseExpr:
-		return compileCaseExpr(n)
+		return compileCaseExprCtx(n, ctx)
 
 	case *sqlparser.ConvertExpr:
-		return compileConvertExpr(n)
+		return compileConvertExprCtx(n, ctx)
+
+	case *sqlparser.Subquery:
+		// Scalar subquery: (SELECT ...)
+		if ctx.runner == nil {
+			return nil, fmt.Errorf("subqueries require a SubqueryRunner")
+		}
+		sql := sqlparser.String(n.Select)
+		return &ScalarSubquery{SQL: sql, Runner: ctx.runner}, nil
+
+	case *sqlparser.ExistsExpr:
+		// EXISTS (SELECT ...)
+		if ctx.runner == nil {
+			return nil, fmt.Errorf("EXISTS subquery requires a SubqueryRunner")
+		}
+		sql := sqlparser.String(n.Subquery.Select)
+		return &ExistsSubquery{SQL: sql, Runner: ctx.runner}, nil
 
 	case sqlparser.ValTuple:
 		// This is handled in the context of IN expressions
@@ -120,11 +151,15 @@ func compileSQLVal(n *sqlparser.SQLVal) (Expr, error) {
 }
 
 func compileBinaryExpr(n *sqlparser.BinaryExpr) (Expr, error) {
-	left, err := Compile(n.Left)
+	return compileBinaryExprCtx(n, &compileContext{})
+}
+
+func compileBinaryExprCtx(n *sqlparser.BinaryExpr, ctx *compileContext) (Expr, error) {
+	left, err := compileWithCtx(n.Left, ctx)
 	if err != nil {
 		return nil, err
 	}
-	right, err := Compile(n.Right)
+	right, err := compileWithCtx(n.Right, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +180,11 @@ func compileBinaryExpr(n *sqlparser.BinaryExpr) (Expr, error) {
 }
 
 func compileUnaryExpr(n *sqlparser.UnaryExpr) (Expr, error) {
-	operand, err := Compile(n.Expr)
+	return compileUnaryExprCtx(n, &compileContext{})
+}
+
+func compileUnaryExprCtx(n *sqlparser.UnaryExpr, ctx *compileContext) (Expr, error) {
+	operand, err := compileWithCtx(n.Expr, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -160,16 +199,20 @@ func compileUnaryExpr(n *sqlparser.UnaryExpr) (Expr, error) {
 }
 
 func compileComparison(n *sqlparser.ComparisonExpr) (Expr, error) {
-	left, err := Compile(n.Left)
+	return compileComparisonCtx(n, &compileContext{})
+}
+
+func compileComparisonCtx(n *sqlparser.ComparisonExpr, ctx *compileContext) (Expr, error) {
+	left, err := compileWithCtx(n.Left, ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	switch n.Operator {
 	case sqlparser.InStr, sqlparser.NotInStr:
-		return compileInExpr(left, n.Right, n.Operator == sqlparser.NotInStr)
+		return compileInExprCtx(left, n.Right, n.Operator == sqlparser.NotInStr, ctx)
 	case sqlparser.LikeStr, sqlparser.NotLikeStr:
-		right, err := Compile(n.Right)
+		right, err := compileWithCtx(n.Right, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +223,7 @@ func compileComparison(n *sqlparser.ComparisonExpr) (Expr, error) {
 		}, nil
 	}
 
-	right, err := Compile(n.Right)
+	right, err := compileWithCtx(n.Right, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -206,13 +249,26 @@ func compileComparison(n *sqlparser.ComparisonExpr) (Expr, error) {
 }
 
 func compileInExpr(left Expr, right sqlparser.Expr, not bool) (Expr, error) {
+	return compileInExprCtx(left, right, not, &compileContext{})
+}
+
+func compileInExprCtx(left Expr, right sqlparser.Expr, not bool, ctx *compileContext) (Expr, error) {
+	// Check for subquery: IN (SELECT ...)
+	if subq, ok := right.(*sqlparser.Subquery); ok {
+		if ctx.runner == nil {
+			return nil, fmt.Errorf("IN subquery requires a SubqueryRunner")
+		}
+		sql := sqlparser.String(subq.Select)
+		return &InSubquery{Expr: left, SQL: sql, Runner: ctx.runner, Not: not}, nil
+	}
+
 	tuple, ok := right.(sqlparser.ValTuple)
 	if !ok {
-		return nil, fmt.Errorf("IN requires a value list, got %T", right)
+		return nil, fmt.Errorf("IN requires a value list or subquery, got %T", right)
 	}
 	var values []Expr
 	for _, v := range tuple {
-		compiled, err := Compile(v)
+		compiled, err := compileWithCtx(v, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -222,7 +278,11 @@ func compileInExpr(left Expr, right sqlparser.Expr, not bool) (Expr, error) {
 }
 
 func compileIsExpr(n *sqlparser.IsExpr) (Expr, error) {
-	operand, err := Compile(n.Expr)
+	return compileIsExprCtx(n, &compileContext{})
+}
+
+func compileIsExprCtx(n *sqlparser.IsExpr, ctx *compileContext) (Expr, error) {
+	operand, err := compileWithCtx(n.Expr, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -245,20 +305,24 @@ func compileIsExpr(n *sqlparser.IsExpr) (Expr, error) {
 }
 
 func compileRangeCond(n *sqlparser.RangeCond) (Expr, error) {
-	expr, err := Compile(n.Left)
+	return compileRangeCondCtx(n, &compileContext{})
+}
+
+func compileRangeCondCtx(n *sqlparser.RangeCond, ctx *compileContext) (Expr, error) {
+	e, err := compileWithCtx(n.Left, ctx)
 	if err != nil {
 		return nil, err
 	}
-	low, err := Compile(n.From)
+	low, err := compileWithCtx(n.From, ctx)
 	if err != nil {
 		return nil, err
 	}
-	hi, err := Compile(n.To)
+	hi, err := compileWithCtx(n.To, ctx)
 	if err != nil {
 		return nil, err
 	}
 	return &Between{
-		Expr: expr,
+		Expr: e,
 		Low:  low,
 		Hi:   hi,
 		Not:  n.Operator == sqlparser.NotBetweenStr,
@@ -266,6 +330,10 @@ func compileRangeCond(n *sqlparser.RangeCond) (Expr, error) {
 }
 
 func compileFuncExpr(n *sqlparser.FuncExpr) (Expr, error) {
+	return compileFuncExprCtx(n, &compileContext{})
+}
+
+func compileFuncExprCtx(n *sqlparser.FuncExpr, ctx *compileContext) (Expr, error) {
 	name := strings.ToLower(n.Name.String())
 
 	// Compile arguments
@@ -273,7 +341,7 @@ func compileFuncExpr(n *sqlparser.FuncExpr) (Expr, error) {
 	for _, selExpr := range n.Exprs {
 		switch e := selExpr.(type) {
 		case *sqlparser.AliasedExpr:
-			compiled, err := Compile(e.Expr)
+			compiled, err := compileWithCtx(e.Expr, ctx)
 			if err != nil {
 				return nil, err
 			}
@@ -301,22 +369,26 @@ func compileFuncExpr(n *sqlparser.FuncExpr) (Expr, error) {
 }
 
 func compileCaseExpr(n *sqlparser.CaseExpr) (Expr, error) {
+	return compileCaseExprCtx(n, &compileContext{})
+}
+
+func compileCaseExprCtx(n *sqlparser.CaseExpr, ctx *compileContext) (Expr, error) {
 	c := &Case{}
 
 	if n.Expr != nil {
 		var err error
-		c.Operand, err = Compile(n.Expr)
+		c.Operand, err = compileWithCtx(n.Expr, ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
 
 	for _, when := range n.Whens {
-		cond, err := Compile(when.Cond)
+		cond, err := compileWithCtx(when.Cond, ctx)
 		if err != nil {
 			return nil, err
 		}
-		result, err := Compile(when.Val)
+		result, err := compileWithCtx(when.Val, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -325,7 +397,7 @@ func compileCaseExpr(n *sqlparser.CaseExpr) (Expr, error) {
 
 	if n.Else != nil {
 		var err error
-		c.Else, err = Compile(n.Else)
+		c.Else, err = compileWithCtx(n.Else, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -335,7 +407,11 @@ func compileCaseExpr(n *sqlparser.CaseExpr) (Expr, error) {
 }
 
 func compileConvertExpr(n *sqlparser.ConvertExpr) (Expr, error) {
-	operand, err := Compile(n.Expr)
+	return compileConvertExprCtx(n, &compileContext{})
+}
+
+func compileConvertExprCtx(n *sqlparser.ConvertExpr, ctx *compileContext) (Expr, error) {
+	operand, err := compileWithCtx(n.Expr, ctx)
 	if err != nil {
 		return nil, err
 	}

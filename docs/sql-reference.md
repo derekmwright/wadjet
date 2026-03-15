@@ -1,11 +1,22 @@
 # SQL Reference
 
-Caelum supports a subset of SQL for analytical queries, parsed via the vitess-sqlparser.
+Caelum supports a focused subset of SQL for analytical queries, parsed via the vitess-sqlparser.
+
+## Supported Statement Types
+
+| Statement | Description |
+|-----------|-------------|
+| `SELECT` | Query data from tables |
+| `EXPLAIN` | Show the query execution plan without running it |
+| `DESCRIBE table_name` | Show the schema of a table |
+| `CREATE FUNCTION` | Register a user-defined function |
+| `DROP FUNCTION` | Remove a user-defined function |
+| `SHOW FUNCTIONS` | List registered user-defined functions |
 
 ## SELECT Statement
 
 ```sql
-SELECT [columns | expressions | aggregates]
+SELECT [DISTINCT] [columns | expressions | aggregates | window_functions]
 FROM table_name
 [JOIN other_table ON condition]
 [WHERE condition]
@@ -13,6 +24,26 @@ FROM table_name
 [HAVING condition]
 [ORDER BY columns [ASC|DESC]]
 [LIMIT n [OFFSET m]]
+```
+
+## EXPLAIN
+
+View the query plan without executing:
+
+```sql
+EXPLAIN SELECT src_ip, SUM(bytes_in) FROM flow_logs GROUP BY src_ip
+
+-- Output shows: Scan → Filter → Aggregate → Sort → Limit
+```
+
+## DESCRIBE
+
+Inspect a table's schema:
+
+```sql
+DESCRIBE flow_logs
+
+-- Output: column names, types, nullable
 ```
 
 ## Column Selection
@@ -193,7 +224,49 @@ FROM flow_logs
 | `*` | Multiplication |
 | `/` | Division |
 
+## DISTINCT
+
+Deduplicate result rows:
+
+```sql
+SELECT DISTINCT protocol FROM flow_logs
+SELECT DISTINCT src_ip, dst_port FROM flow_logs WHERE date = '2026-03-15'
+```
+
+## Additional Predicate Expressions
+
+### IN
+
+```sql
+SELECT * FROM flow_logs WHERE dst_port IN (80, 443, 8080, 8443)
+SELECT * FROM syslog WHERE severity IN ('error', 'critical')
+```
+
+### BETWEEN
+
+```sql
+SELECT * FROM flow_logs WHERE dst_port BETWEEN 1024 AND 65535
+SELECT * FROM flow_logs WHERE bytes_in BETWEEN 1000 AND 1000000
+```
+
+### CASE
+
+```sql
+SELECT
+    src_ip,
+    CASE
+        WHEN dst_port = 443 THEN 'HTTPS'
+        WHEN dst_port = 80 THEN 'HTTP'
+        WHEN dst_port = 22 THEN 'SSH'
+        ELSE 'OTHER'
+    END AS traffic_type,
+    bytes_in
+FROM flow_logs
+```
+
 ## Built-in Functions
+
+Caelum includes 53 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -201,14 +274,108 @@ FROM flow_logs
 |----------|-------------|---------|
 | `UPPER(s)` | Uppercase | `UPPER(protocol)` → `"TCP"` |
 | `LOWER(s)` | Lowercase | `LOWER(hostname)` → `"fw-01"` |
-| `SUBSTRING(s, start, len)` | Extract substring | `SUBSTRING(message, 1, 50)` |
+| `CONCAT(a, b, ...)` | Concatenate strings | `CONCAT(src_ip, ':', src_port)` |
+| `LENGTH(s)` / `LEN(s)` | String length | `LENGTH(message)` |
+| `SUBSTR(s, start, len)` | Extract substring | `SUBSTR(message, 1, 50)` |
+| `TRIM(s)` | Remove leading/trailing whitespace | `TRIM(hostname)` |
+| `LTRIM(s)` | Remove leading whitespace | `LTRIM(message)` |
+| `RTRIM(s)` | Remove trailing whitespace | `RTRIM(message)` |
+| `REPLACE(s, old, new)` | Replace occurrences | `REPLACE(message, 'error', 'ERROR')` |
+| `REVERSE(s)` | Reverse string | `REVERSE(hostname)` |
+| `LEFT(s, n)` | First n characters | `LEFT(hostname, 3)` |
+| `RIGHT(s, n)` | Last n characters | `RIGHT(hostname, 2)` |
 
-### Type Functions
+### Math Functions
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `CAST(expr AS type)` | Type conversion | `CAST(port AS Int64)` |
+| `ABS(n)` | Absolute value | `ABS(bytes_in - bytes_out)` |
+| `CEIL(n)` | Round up | `CEIL(avg_latency)` |
+| `FLOOR(n)` | Round down | `FLOOR(avg_latency)` |
+| `ROUND(n)` | Round to nearest | `ROUND(ratio)` |
+| `POW(base, exp)` / `POWER(base, exp)` | Exponentiation | `POW(2, 10)` |
+| `SQRT(n)` | Square root | `SQRT(variance)` |
+| `MOD(a, b)` | Modulo | `MOD(timestamp, 3600000)` |
+| `LOG(n)` | Base-10 logarithm | `LOG(bytes_in)` |
+| `LN(n)` | Natural logarithm | `LN(bytes_in)` |
+| `EXP(n)` | Exponential (e^n) | `EXP(rate)` |
+
+### Conditional Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
 | `COALESCE(a, b, ...)` | First non-null value | `COALESCE(hostname, 'unknown')` |
+| `NULLIF(a, b)` | Returns NULL if a = b | `NULLIF(bytes_in, 0)` |
+| `IFNULL(a, b)` | Returns b if a is NULL | `IFNULL(src_ip, '0.0.0.0')` |
+| `IF(cond, then, else)` | Conditional value | `IF(bytes_in > 1000000, 'large', 'small')` |
+
+### Type Casting Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `CAST(expr AS type)` | SQL-standard type cast | `CAST(port AS Int64)` |
+| `CAST_INT(s)` | Cast to integer | `CAST_INT('443')` |
+| `CAST_FLOAT(s)` | Cast to float | `CAST_FLOAT('3.14')` |
+| `CAST_STRING(n)` | Cast to string | `CAST_STRING(dst_port)` |
+
+### Network Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `IP_TO_STRING(ip)` | Convert binary IP to string | `IP_TO_STRING(src_ip)` |
+| `CIDR_CONTAINS(cidr, ip)` | Test if IP is in CIDR range | `CIDR_CONTAINS('10.0.0.0/8', src_ip)` |
+| `IP_VERSION(ip)` | Return IP version (4 or 6) | `IP_VERSION(src_ip)` |
+| `MASK_IP(ip)` | Mask an IP address | `MASK_IP(src_ip)` |
+| `MAC_TO_STRING(mac)` | Convert binary MAC to string | `MAC_TO_STRING(src_mac)` |
+| `IP_SUBNET(ip)` | Extract subnet from IP | `IP_SUBNET(src_ip)` |
+| `IP_NETMASK(cidr)` | Extract netmask from CIDR | `IP_NETMASK(src_cidr)` |
+
+### Date/Time Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `NOW()` | Current timestamp | `NOW()` |
+| `CURRENT_DATE()` | Current date | `CURRENT_DATE()` |
+| `YEAR(ts)` | Extract year | `YEAR(timestamp)` |
+| `MONTH(ts)` | Extract month | `MONTH(timestamp)` |
+| `DAY(ts)` | Extract day | `DAY(timestamp)` |
+| `HOUR(ts)` | Extract hour | `HOUR(timestamp)` |
+| `MINUTE(ts)` | Extract minute | `MINUTE(timestamp)` |
+| `EXTRACT(part FROM ts)` | Extract date part | `EXTRACT(hour FROM timestamp)` |
+| `DATE_TRUNC(part, ts)` | Truncate to precision | `DATE_TRUNC('hour', timestamp)` |
+| `DATE_DIFF(unit, a, b)` | Difference between timestamps | `DATE_DIFF('second', start_ts, end_ts)` |
+| `DATE_ADD(ts, interval)` | Add interval to timestamp | `DATE_ADD(timestamp, 3600000)` |
+| `TO_DATE(s)` | Parse string to date | `TO_DATE('2026-03-15')` |
+
+### UUID Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `UUID_VERSION(uuid)` | Extract UUID version | `UUID_VERSION(flow_id)` |
+| `UUID_TO_STRING(uuid)` | Convert binary UUID to string | `UUID_TO_STRING(flow_id)` |
+
+## User-Defined Functions (UDFs)
+
+Register custom SQL expression functions:
+
+```sql
+-- Create a UDF
+CREATE FUNCTION classify_port(p) AS
+  CASE WHEN p < 1024 THEN 'well-known'
+       WHEN p < 49152 THEN 'registered'
+       ELSE 'dynamic' END
+
+-- Use it in queries
+SELECT src_ip, classify_port(dst_port) AS port_class FROM flow_logs
+
+-- List all UDFs
+SHOW FUNCTIONS
+
+-- Remove a UDF
+DROP FUNCTION classify_port
+```
+
+UDFs can be locked by their owner so only the creator (or an admin) can modify or remove them.
 
 ## Query Examples for Network Analytics
 
@@ -289,11 +456,26 @@ ORDER BY total_ingress DESC
 LIMIT 50
 ```
 
+## Window Functions
+
+Caelum supports window functions for running calculations across row sets:
+
+```sql
+SELECT
+    timestamp,
+    src_ip,
+    bytes_in,
+    SUM(bytes_in) OVER (PARTITION BY src_ip ORDER BY timestamp) AS running_total,
+    ROW_NUMBER() OVER (PARTITION BY src_ip ORDER BY bytes_in DESC) AS rank
+FROM flow_logs
+WHERE date = '2026-03-15'
+```
+
+Window specifications support `PARTITION BY` and `ORDER BY` clauses.
+
 ## Limitations
 
 - No subqueries (yet)
-- No window functions (yet)
 - No UNION / INTERSECT / EXCEPT
 - No CREATE TABLE / INSERT via SQL (use the Go API or Bento for ingestion)
 - No UPDATE / DELETE (append-only analytical store)
-- String matching limited to `LIKE` (no regex in SQL — use Bento for pre-filtering)

@@ -17,9 +17,9 @@ Data lands in Parquet format on your S3-compatible store, organized by partition
 ### How It Works
 
 ```
-          Write()          Partition         Buffer            Flush
+         Ingest()          Partition         Buffer            FlushAll
 Rows ──────────────► Route by key ─────► Accumulate ──────► Parquet
-                     (e.g., date)        per partition       to S3
+ ([]map)             (e.g., date)        per partition       to S3
                                                               │
                                                     Update catalog
                                                     manifest (ETag)
@@ -36,24 +36,34 @@ The ingester flushes automatically when any threshold is exceeded:
 ### Usage (Go API)
 
 ```go
-schema := caelum.Schema{
-    Columns: []caelum.Column{
-        {Name: "timestamp", Type: caelum.Timestamp},
-        {Name: "device",    Type: caelum.String},
-        {Name: "severity",  Type: caelum.String},
-        {Name: "message",   Type: caelum.String},
-        {Name: "src_ip",    Type: caelum.IPv4},
+import (
+    "github.com/derekmwright/caelum/internal/storage/ingest"
+    "github.com/derekmwright/caelum/internal/storage/parquet"
+)
+
+schema := parquet.Schema{
+    Columns: []parquet.Column{
+        {Name: "timestamp", Type: parquet.TypeTimestamp},
+        {Name: "device",    Type: parquet.TypeString},
+        {Name: "severity",  Type: parquet.TypeString},
+        {Name: "message",   Type: parquet.TypeString},
+        {Name: "src_ip",    Type: parquet.TypeIPv4},
     },
 }
 
-ingester, err := db.NewIngester("syslog", schema, []string{"date", "device"}, caelum.IngestConfig{
+// NewIngester returns *ingest.Ingester (no error)
+ingester := db.NewIngester("syslog", schema, []string{"date", "device"}, ingest.Config{
     FlushInterval: 30 * time.Second,
-    MaxRows:       500000,
+    MaxBufferRows: 500000,
 })
 
-// Write rows — ingester handles partitioning and buffering
+// Start background flush goroutine
+ingester.Start()
+
+// Ingest rows as batches — ingester handles partitioning and buffering
+batch := make([]map[string]any, 0, len(events))
 for _, event := range events {
-    err := ingester.Write(ctx, map[string]any{
+    batch = append(batch, map[string]any{
         "timestamp": event.Time,
         "device":    event.Hostname,
         "severity":  event.Severity,
@@ -61,9 +71,13 @@ for _, event := range events {
         "src_ip":    event.SourceIP,
     })
 }
+err := ingester.Ingest(ctx, batch)
 
 // Explicit flush (also happens automatically on thresholds)
-ingester.Flush(ctx)
+ingester.FlushAll(ctx)
+
+// Stop when done
+ingester.Stop(ctx)
 ```
 
 ### Partitioning Strategy
@@ -311,34 +325,43 @@ output:
 After Bento starts writing Parquet files to S3, register the table schema in Caelum so it can be queried:
 
 ```go
-db, _ := caelum.Open(ctx, config)
+import (
+    "github.com/derekmwright/caelum/internal/storage/objstore"
+    "github.com/derekmwright/caelum/internal/storage/parquet"
+    "github.com/derekmwright/caelum/pkg/caelum"
+)
+
+store, _ := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
+    Endpoint: "localhost:9000", AccessKey: "minioadmin", SecretKey: "minioadmin",
+})
+db, _ := caelum.Open(ctx, caelum.Config{Store: store, Bucket: "caelum"})
 
 // Register the syslog table
-db.CreateTable(ctx, "syslog", caelum.Schema{
-    Columns: []caelum.Column{
-        {Name: "timestamp", Type: caelum.Timestamp},
-        {Name: "hostname",  Type: caelum.String},
-        {Name: "app_name",  Type: caelum.String},
-        {Name: "severity",  Type: caelum.String},
-        {Name: "facility",  Type: caelum.String},
-        {Name: "message",   Type: caelum.String},
-        {Name: "src_ip",    Type: caelum.String},  // String since Bento writes UTF8
+db.CreateTable(ctx, "syslog", parquet.Schema{
+    Columns: []parquet.Column{
+        {Name: "timestamp", Type: parquet.TypeTimestamp},
+        {Name: "hostname",  Type: parquet.TypeString},
+        {Name: "app_name",  Type: parquet.TypeString},
+        {Name: "severity",  Type: parquet.TypeString},
+        {Name: "facility",  Type: parquet.TypeString},
+        {Name: "message",   Type: parquet.TypeString},
+        {Name: "src_ip",    Type: parquet.TypeString},  // String since Bento writes UTF8
     },
 }, []string{"date"})
 
 // Register the netflow table
-db.CreateTable(ctx, "netflow", caelum.Schema{
-    Columns: []caelum.Column{
-        {Name: "timestamp", Type: caelum.Timestamp},
-        {Name: "src_ip",    Type: caelum.String},
-        {Name: "dst_ip",    Type: caelum.String},
-        {Name: "src_port",  Type: caelum.Int32},
-        {Name: "dst_port",  Type: caelum.Int32},
-        {Name: "protocol",  Type: caelum.String},
-        {Name: "bytes",     Type: caelum.Int64},
-        {Name: "packets",   Type: caelum.Int64},
-        {Name: "tcp_flags", Type: caelum.Int32},
-        {Name: "exporter",  Type: caelum.String},
+db.CreateTable(ctx, "netflow", parquet.Schema{
+    Columns: []parquet.Column{
+        {Name: "timestamp", Type: parquet.TypeTimestamp},
+        {Name: "src_ip",    Type: parquet.TypeString},
+        {Name: "dst_ip",    Type: parquet.TypeString},
+        {Name: "src_port",  Type: parquet.TypeInt32},
+        {Name: "dst_port",  Type: parquet.TypeInt32},
+        {Name: "protocol",  Type: parquet.TypeString},
+        {Name: "bytes",     Type: parquet.TypeInt64},
+        {Name: "packets",   Type: parquet.TypeInt64},
+        {Name: "tcp_flags", Type: parquet.TypeInt32},
+        {Name: "exporter",  Type: parquet.TypeString},
     },
 }, []string{"date"})
 ```

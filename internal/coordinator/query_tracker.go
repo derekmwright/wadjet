@@ -218,6 +218,68 @@ func (qt *QueryTracker) IsComplete(queryID string) bool {
 	return true
 }
 
+// SetStageTasks updates the total task count for a stage (used when intermediate
+// stage tasks are created dynamically after dependencies complete).
+func (qt *QueryTracker) SetStageTasks(queryID, stageID string, count int) {
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
+
+	q, ok := qt.queries[queryID]
+	if !ok {
+		return
+	}
+	if stage, ok := q.Stages[stageID]; ok {
+		stage.TotalTasks = count
+	}
+}
+
+// UpdateResultPath updates the result path for a specific task result.
+// Used when inline results are materialized to S3 for downstream stages.
+func (qt *QueryTracker) UpdateResultPath(queryID, stageID, taskID, path string) {
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
+
+	q, ok := qt.queries[queryID]
+	if !ok {
+		return
+	}
+	stage, ok := q.Stages[stageID]
+	if !ok {
+		return
+	}
+	for i := range stage.Results {
+		if stage.Results[i].TaskID == taskID {
+			stage.Results[i].ResultPath = path
+			q.ResultFiles = append(q.ResultFiles, path)
+			return
+		}
+	}
+}
+
+// Cancel marks a query as cancelled.
+func (qt *QueryTracker) Cancel(queryID string) {
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
+
+	if q, ok := qt.queries[queryID]; ok {
+		q.State = QueryStateCancelled
+		q.EndTime = time.Now()
+	}
+}
+
+// List returns all tracked queries (shallow copies).
+func (qt *QueryTracker) List() []*QueryInfo {
+	qt.mu.RLock()
+	defer qt.mu.RUnlock()
+
+	result := make([]*QueryInfo, 0, len(qt.queries))
+	for _, q := range qt.queries {
+		copy := *q
+		result = append(result, &copy)
+	}
+	return result
+}
+
 // StageResults returns the result notifications for a given stage.
 func (qt *QueryTracker) StageResults(queryID, stageID string) []distributed.ResultNotification {
 	qt.mu.RLock()

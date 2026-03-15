@@ -244,9 +244,9 @@ func maxRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 // ResolveRowSum returns a row-level sum updater for the given column type.
 func ResolveRowSum(typ batch.TypeID) RowAggUpdater {
 	switch typ {
-	case batch.TypeInt64, batch.TypeTimestamp:
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 		return sumRowInt64
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
 		return sumRowInt32
 	case batch.TypeFloat64:
 		return sumRowFloat64
@@ -260,9 +260,9 @@ func ResolveRowSum(typ batch.TypeID) RowAggUpdater {
 // ResolveRowMin returns a row-level min updater for the given column type.
 func ResolveRowMin(typ batch.TypeID) RowAggUpdater {
 	switch typ {
-	case batch.TypeInt64, batch.TypeTimestamp:
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 		return minRowInt64
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return minRowInt32
 	case batch.TypeFloat64:
 		return minRowFloat64
@@ -276,9 +276,9 @@ func ResolveRowMin(typ batch.TypeID) RowAggUpdater {
 // ResolveRowMax returns a row-level max updater for the given column type.
 func ResolveRowMax(typ batch.TypeID) RowAggUpdater {
 	switch typ {
-	case batch.TypeInt64, batch.TypeTimestamp:
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 		return maxRowInt64
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return maxRowInt32
 	case batch.TypeFloat64:
 		return maxRowFloat64
@@ -303,13 +303,13 @@ func ResolveRowCount(countStar bool) RowAggUpdater {
 // ResolveBatchSum returns a batch-level sum kernel for the given column type.
 func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 	switch typ {
-	case batch.TypeInt64, batch.TypeTimestamp:
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
 			s, c := sumSlice(vec.Int64Data, &vec.Nulls, sel, vecLen)
 			acc.SumI64 += s
 			acc.Count += c
 		}
-	case batch.TypeInt32:
+	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
 		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
 			s, c := sumSlice(vec.Int32Data, &vec.Nulls, sel, vecLen)
 			acc.SumI64 += int64(s)

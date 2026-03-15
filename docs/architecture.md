@@ -80,16 +80,15 @@ The catalog is a JSON metadata layer stored at `_catalog/` in the object store:
 
 ```
 _catalog/
-├── catalog.json              # Top-level: version, table list
+├── catalog.json                        # Top-level: version, table list, timestamps
 ├── tables/
 │   └── flow_logs/
-│       ├── table.json        # Schema, partition keys
+│       ├── schema.json                 # Table schema, partition keys, version
 │       └── partitions/
-│           ├── date=2026-03-14/
-│           │   └── manifest.json   # File entries for this partition
-│           └── date=2026-03-15/
-│               └── manifest.json
+│           └── manifest.json           # All partitions and their file entries
 ```
+
+The `PartitionManifest` contains an array of `PartitionEntry` objects, each with a `path`, `values` (partition key → value map), and `files` (list of Parquet `FileEntry` objects with path, size, row count, and creation time).
 
 **Concurrency control**: All catalog updates use S3 ETags for optimistic concurrency — if another writer modifies the file between your read and write, the update fails and retries.
 
@@ -208,14 +207,18 @@ The `objstore.Store` interface abstracts S3-compatible storage:
 
 ```go
 type Store interface {
-    Put(ctx, key, reader, size) error
-    PutIfMatch(ctx, key, reader, size, etag) error  // optimistic concurrency
-    Get(ctx, key) (ReadCloser, error)
-    Head(ctx, key) (ObjectInfo, error)
-    List(ctx, prefix) ([]ObjectInfo, error)
-    Delete(ctx, key) error
+    Put(ctx, bucket, key, reader, size, contentType) (etag string, err error)
+    PutIfMatch(ctx, bucket, key, reader, size, contentType, expectedETag) (etag string, err error)
+    Get(ctx, bucket, key) (ReadCloser, ObjectInfo, error)
+    Head(ctx, bucket, key) (ObjectInfo, error)
+    List(ctx, bucket, opts ListOptions) ([]ObjectInfo, error)
+    Delete(ctx, bucket, key) error
+    BucketExists(ctx, bucket) (bool, error)
+    MakeBucket(ctx, bucket) error
 }
 ```
+
+All methods take an explicit `bucket` parameter. `Put` returns the resulting ETag for subsequent optimistic concurrency checks.
 
 Two implementations:
 - **MemStore** — In-memory map for testing
@@ -225,7 +228,7 @@ Two implementations:
 
 The ingester is a micro-batch accumulator that:
 
-1. Accepts rows via `Write()`
+1. Accepts rows via `Ingest(ctx, []map[string]any)`
 2. Partitions rows based on configured partition keys (e.g., `date`)
 3. Buffers rows in per-partition accumulators
 4. Flushes to Parquet when thresholds are exceeded:

@@ -75,7 +75,12 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 
 // ClientURL returns the URL for connecting to this embedded server.
 func (e *EmbeddedNATS) ClientURL() string {
-	return fmt.Sprintf("nats://%s:%d", e.config.Host, e.config.Port)
+	return e.server.ClientURL()
+}
+
+// Server returns the underlying NATS server for in-process connections.
+func (e *EmbeddedNATS) Server() *natsserver.Server {
+	return e.server
 }
 
 // Shutdown stops the embedded NATS server.
@@ -114,7 +119,7 @@ func SetupStreams(ctx context.Context, js jetstream.JetStream) error {
 	return nil
 }
 
-// Connect creates a NATS client connection.
+// Connect creates a NATS client connection over TCP.
 func Connect(url string) (*nats.Conn, error) {
 	nc, err := nats.Connect(url,
 		nats.MaxReconnects(-1),
@@ -130,6 +135,28 @@ func Connect(url string) (*nats.Conn, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS: %w", err)
+	}
+	return nc, nil
+}
+
+// ConnectInProcess creates a NATS client connection using in-process communication.
+// This avoids TCP overhead when the client is co-located with the embedded NATS server.
+func ConnectInProcess(server *natsserver.Server) (*nats.Conn, error) {
+	nc, err := nats.Connect(server.ClientURL(),
+		nats.InProcessServer(server),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(time.Second),
+		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
+			if err != nil {
+				slog.Warn("NATS disconnected", "error", err)
+			}
+		}),
+		nats.ReconnectHandler(func(_ *nats.Conn) {
+			slog.Info("NATS reconnected")
+		}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to NATS in-process: %w", err)
 	}
 	return nc, nil
 }
