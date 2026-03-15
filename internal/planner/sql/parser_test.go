@@ -91,3 +91,77 @@ func TestExtractJoin(t *testing.T) {
 		t.Fatalf("expected right table 'users', got %s", info.Joins[0].RightTable)
 	}
 }
+
+func TestParseExplain(t *testing.T) {
+	parsed, err := Parse("EXPLAIN SELECT * FROM events WHERE id > 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Type != QueryExplain {
+		t.Fatalf("expected QueryExplain, got %v", parsed.Type)
+	}
+	if parsed.Explain == nil {
+		t.Fatal("Explain info is nil")
+	}
+	if parsed.Explain.Verbose {
+		t.Error("should not be verbose")
+	}
+	if parsed.Explain.InnerSQL != "SELECT * FROM events WHERE id > 5" {
+		t.Errorf("unexpected inner SQL: %s", parsed.Explain.InnerSQL)
+	}
+	// AST should be the inner SELECT
+	if parsed.AST == nil {
+		t.Error("AST should contain inner SELECT")
+	}
+}
+
+func TestParseExplainVerbose(t *testing.T) {
+	parsed, err := Parse("EXPLAIN VERBOSE SELECT id FROM events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Type != QueryExplain {
+		t.Fatalf("expected QueryExplain, got %v", parsed.Type)
+	}
+	if !parsed.Explain.Verbose {
+		t.Error("should be verbose")
+	}
+}
+
+func TestParseDescribe(t *testing.T) {
+	tests := []struct {
+		sql       string
+		tableName string
+	}{
+		{"DESCRIBE events", "events"},
+		{"DESC events", "events"},
+		{"describe users;", "users"},
+		{"SHOW COLUMNS FROM events", "events"},
+		{"show columns from users;", "users"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Type != QueryDescribe {
+				t.Fatalf("expected QueryDescribe, got %v", parsed.Type)
+			}
+			if parsed.Describe == nil {
+				t.Fatal("Describe info is nil")
+			}
+			if parsed.Describe.TableName != tt.tableName {
+				t.Errorf("expected table %q, got %q", tt.tableName, parsed.Describe.TableName)
+			}
+		})
+	}
+}
+
+func TestParseDescribeEmpty(t *testing.T) {
+	_, err := Parse("DESCRIBE ")
+	if err == nil {
+		t.Error("expected error for empty DESCRIBE")
+	}
+}

@@ -163,6 +163,18 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle DESCRIBE/SHOW COLUMNS
+	if parsed.Type == plansql.QueryDescribe {
+		s.handleDescribe(w, r, parsed, start)
+		return
+	}
+
+	// Handle EXPLAIN
+	if parsed.Type == plansql.QueryExplain {
+		s.handleExplain(w, r, parsed, start)
+		return
+	}
+
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error())
@@ -333,6 +345,82 @@ func (s *Server) getPolicies() *auth.PolicySet {
 		return s.provider.Policies()
 	}
 	return s.policies
+}
+
+func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	tableName := parsed.Describe.TableName
+
+	// Check table access
+	if identity := auth.IdentityFromContext(r.Context()); identity != nil {
+		if authz := s.getAuthz(); authz != nil && !authz.CanAccessTable(identity, tableName) {
+			writeError(w, http.StatusForbidden, fmt.Sprintf("access denied to table %q", tableName))
+			return
+		}
+	}
+
+	table, err := s.catalog.GetTable(r.Context(), tableName)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("table %q: %s", tableName, err.Error()))
+		return
+	}
+
+	columns := []string{"column_name", "type", "nullable"}
+	rows := make([]map[string]any, len(table.Schema.Columns))
+	for i, col := range table.Schema.Columns {
+		nullable := "NO"
+		if col.Nullable {
+			nullable = "YES"
+		}
+		rows[i] = map[string]any{
+			"column_name": col.Name,
+			"type":        col.Type.String(),
+			"nullable":    nullable,
+		}
+	}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: columns,
+		Rows:    rows,
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+	})
+}
+
+func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	selectInfo, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error())
+		return
+	}
+
+	logicalPlan, err := logical.BuildFromSelect(selectInfo)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "plan build error: "+err.Error())
+		return
+	}
+	logicalPlan = logical.Optimize(logicalPlan)
+	planStr := logicalPlan.PrettyPrint(0)
+
+	if parsed.Explain.Verbose {
+		physPlan, err := s.planner.Plan(r.Context(), logicalPlan)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "physical plan error: "+err.Error())
+			return
+		}
+		planStr += "\n\n-- Physical Plan --\n" + physPlan.PrettyPrint()
+	}
+
+	rows := []map[string]any{{"plan": planStr}}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"plan"},
+		Rows:    rows,
+		Stats: QueryStats{
+			Elapsed: time.Since(start).String(),
+			Plan:    planStr,
+		},
+	})
 }
 
 // Ensure batch is used (it's referenced via types flowing through)

@@ -3,6 +3,7 @@ package sql
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/blastrain/vitess-sqlparser/sqlparser"
 )
@@ -13,6 +14,19 @@ type ParsedQuery struct {
 	Type      QueryType
 	TableName string
 	SQL       string
+	Explain   *ExplainInfo
+	Describe  *DescribeInfo
+}
+
+// ExplainInfo holds details for an EXPLAIN statement.
+type ExplainInfo struct {
+	Verbose  bool
+	InnerSQL string
+}
+
+// DescribeInfo holds details for a DESCRIBE/SHOW COLUMNS statement.
+type DescribeInfo struct {
+	TableName string
 }
 
 // QueryType identifies the kind of SQL statement.
@@ -20,11 +34,31 @@ type QueryType int
 
 const (
 	QuerySelect QueryType = iota
+	QueryExplain
+	QueryDescribe
 	QueryUnsupported
 )
 
 // Parse parses a SQL string into a ParsedQuery.
 func Parse(sql string) (*ParsedQuery, error) {
+	trimmed := strings.TrimSpace(sql)
+	upper := strings.ToUpper(trimmed)
+
+	// Pre-parse: EXPLAIN [VERBOSE] <query>
+	if strings.HasPrefix(upper, "EXPLAIN ") {
+		return parseExplain(trimmed)
+	}
+
+	// Pre-parse: DESCRIBE <table> / DESC <table>
+	if strings.HasPrefix(upper, "DESCRIBE ") || strings.HasPrefix(upper, "DESC ") {
+		return parseDescribe(trimmed)
+	}
+
+	// Pre-parse: SHOW COLUMNS FROM <table>
+	if strings.HasPrefix(upper, "SHOW COLUMNS FROM ") {
+		return parseShowColumns(trimmed)
+	}
+
 	stmt, err := sqlparser.Parse(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parsing SQL: %w", err)
@@ -44,6 +78,76 @@ func Parse(sql string) (*ParsedQuery, error) {
 	}
 
 	return pq, nil
+}
+
+func parseExplain(sql string) (*ParsedQuery, error) {
+	// Strip "EXPLAIN"
+	rest := strings.TrimSpace(sql[len("EXPLAIN"):])
+	upper := strings.ToUpper(rest)
+
+	verbose := false
+	if strings.HasPrefix(upper, "VERBOSE ") {
+		verbose = true
+		rest = strings.TrimSpace(rest[len("VERBOSE"):])
+	}
+
+	// Parse the inner SQL as a normal SELECT
+	inner, err := Parse(rest)
+	if err != nil {
+		return nil, fmt.Errorf("parsing EXPLAIN query: %w", err)
+	}
+
+	return &ParsedQuery{
+		AST:  inner.AST,
+		Type: QueryExplain,
+		SQL:  sql,
+		Explain: &ExplainInfo{
+			Verbose:  verbose,
+			InnerSQL: rest,
+		},
+	}, nil
+}
+
+func parseDescribe(sql string) (*ParsedQuery, error) {
+	// Strip "DESCRIBE" or "DESC"
+	upper := strings.ToUpper(sql)
+	var rest string
+	if strings.HasPrefix(upper, "DESCRIBE ") {
+		rest = strings.TrimSpace(sql[len("DESCRIBE"):])
+	} else {
+		rest = strings.TrimSpace(sql[len("DESC"):])
+	}
+
+	tableName := strings.TrimRight(rest, ";")
+	tableName = strings.TrimSpace(tableName)
+	if tableName == "" {
+		return nil, fmt.Errorf("DESCRIBE requires a table name")
+	}
+
+	return &ParsedQuery{
+		Type: QueryDescribe,
+		SQL:  sql,
+		Describe: &DescribeInfo{
+			TableName: tableName,
+		},
+	}, nil
+}
+
+func parseShowColumns(sql string) (*ParsedQuery, error) {
+	rest := strings.TrimSpace(sql[len("SHOW COLUMNS FROM"):])
+	tableName := strings.TrimRight(rest, ";")
+	tableName = strings.TrimSpace(tableName)
+	if tableName == "" {
+		return nil, fmt.Errorf("SHOW COLUMNS FROM requires a table name")
+	}
+
+	return &ParsedQuery{
+		Type: QueryDescribe,
+		SQL:  sql,
+		Describe: &DescribeInfo{
+			TableName: tableName,
+		},
+	}, nil
 }
 
 // ExtractSelect extracts details from a SELECT statement.

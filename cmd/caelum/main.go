@@ -1,21 +1,24 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/peterh/liner"
 
 	"github.com/derekmwright/caelum/internal/auth"
 	"github.com/derekmwright/caelum/internal/config"
 	"github.com/derekmwright/caelum/internal/coordinator"
 	"github.com/derekmwright/caelum/internal/distributed"
+	"github.com/derekmwright/caelum/internal/format"
 	"github.com/derekmwright/caelum/internal/metrics"
 	"github.com/derekmwright/caelum/internal/server"
 	"github.com/derekmwright/caelum/internal/storage/catalog"
@@ -99,16 +102,22 @@ func serveCmd() *cobra.Command {
 }
 
 func queryCmd() *cobra.Command {
-	return &cobra.Command{
+	var outputFormat string
+
+	cmd := &cobra.Command{
 		Use:   "query [sql]",
 		Short: "Execute a SQL query (standalone mode)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
+			f, err := format.ParseFormat(outputFormat)
+			if err != nil {
+				return err
+			}
+
 			store, err := newStore()
 			if err != nil {
-				// Fall back to memstore for testing
 				store = objstore.NewMemStore()
 			}
 
@@ -125,12 +134,12 @@ func queryCmd() *cobra.Command {
 				return err
 			}
 
-			// Print results as JSON
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			return format.Write(os.Stdout, f, result.Columns, result.Rows)
 		},
 	}
+
+	cmd.Flags().StringVarP(&outputFormat, "format", "f", "json", "Output format: table, json, csv")
+	return cmd
 }
 
 func tablesCmd() *cobra.Command {
@@ -160,15 +169,21 @@ func tablesCmd() *cobra.Command {
 }
 
 func shellCmd() *cobra.Command {
-	return &cobra.Command{
+	var outputFormat string
+
+	cmd := &cobra.Command{
 		Use:   "shell",
 		Short: "Interactive SQL shell (standalone mode)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
 
+			f, err := format.ParseFormat(outputFormat)
+			if err != nil {
+				return err
+			}
+
 			store, err := newStore()
 			if err != nil {
-				// Fall back to memstore for interactive testing
 				store = objstore.NewMemStore()
 			}
 
@@ -180,42 +195,126 @@ func shellCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Println("Caelum SQL Shell. Type 'exit' to quit.")
-			scanner := bufio.NewScanner(os.Stdin)
-			for {
-				fmt.Print("caelum> ")
-				if !scanner.Scan() {
-					break
-				}
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" {
-					continue
-				}
-				if line == "exit" || line == "quit" || line == "\\q" {
-					break
-				}
-
-				result, err := db.Query(ctx, line)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					continue
-				}
-
-				if len(result.Rows) == 0 {
-					fmt.Println("(0 rows)")
-					continue
-				}
-
-				// Print as JSON
-				enc := json.NewEncoder(os.Stdout)
-				enc.SetIndent("", "  ")
-				enc.Encode(result.Rows)
-				fmt.Printf("(%d rows)\n", len(result.Rows))
-			}
-
-			return nil
+			return runShell(ctx, db, f)
 		},
 	}
+
+	cmd.Flags().StringVarP(&outputFormat, "format", "f", "table", "Output format: table, json, csv")
+	return cmd
+}
+
+const maxHistoryLines = 1000
+
+func historyPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(home, ".caelum")
+	os.MkdirAll(dir, 0o700)
+	return filepath.Join(dir, "history")
+}
+
+func runShell(ctx context.Context, db *caelum.DB, f format.Format) error {
+	line := liner.NewLiner()
+	defer line.Close()
+
+	line.SetCtrlCAborts(true)
+
+	// Load history
+	if path := historyPath(); path != "" {
+		if fh, err := os.Open(path); err == nil {
+			line.ReadHistory(fh)
+			fh.Close()
+		}
+	}
+
+	// Save history on exit
+	defer func() {
+		if path := historyPath(); path != "" {
+			if fh, err := os.Create(path); err == nil {
+				line.WriteHistory(fh)
+				fh.Close()
+			}
+		}
+	}()
+
+	fmt.Println("Caelum SQL Shell. Type 'exit' to quit.")
+	fmt.Println("  Supports: SELECT, EXPLAIN, DESCRIBE, SHOW COLUMNS FROM")
+	fmt.Println()
+
+	var buf strings.Builder
+	prompt := "caelum> "
+
+	for {
+		input, err := line.Prompt(prompt)
+		if err == liner.ErrPromptAborted {
+			// Ctrl-C: clear current buffer
+			buf.Reset()
+			prompt = "caelum> "
+			continue
+		}
+		if err == io.EOF {
+			fmt.Println()
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		trimmed := strings.TrimSpace(input)
+
+		// Exit commands (only when not in multi-line mode)
+		if buf.Len() == 0 && (trimmed == "exit" || trimmed == "quit" || trimmed == `\q`) {
+			break
+		}
+
+		if trimmed == "" {
+			if buf.Len() > 0 {
+				buf.WriteString("\n")
+			}
+			continue
+		}
+
+		// Accumulate multi-line input
+		if buf.Len() > 0 {
+			buf.WriteString(" ")
+		}
+		buf.WriteString(trimmed)
+
+		// Check if statement is complete (ends with ;)
+		current := buf.String()
+		if !strings.HasSuffix(strings.TrimSpace(current), ";") {
+			prompt = "     -> "
+			continue
+		}
+
+		// Strip trailing semicolon and execute
+		sql := strings.TrimRight(strings.TrimSpace(current), ";")
+		buf.Reset()
+		prompt = "caelum> "
+
+		if sql == "" {
+			continue
+		}
+
+		line.AppendHistory(current)
+
+		result, err := db.Query(ctx, sql)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			continue
+		}
+
+		if len(result.Rows) == 0 {
+			fmt.Println("(0 rows)")
+			continue
+		}
+
+		format.Write(os.Stdout, f, result.Columns, result.Rows)
+	}
+
+	return nil
 }
 
 func newStore() (objstore.Store, error) {

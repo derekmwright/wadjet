@@ -29,6 +29,24 @@ type Stage struct {
 	Tasks        int
 }
 
+// PrettyPrint returns a formatted string representation of the physical plan.
+func (p *PhysicalPlan) PrettyPrint() string {
+	if len(p.Stages) == 0 {
+		return "Single-stage local execution"
+	}
+	var b strings.Builder
+	for i, stage := range p.Stages {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(fmt.Sprintf("Stage %s [%s] (%d tasks)", stage.ID, stage.Type, stage.Tasks))
+		if len(stage.Dependencies) > 0 {
+			b.WriteString(fmt.Sprintf(" <- depends on %s", strings.Join(stage.Dependencies, ", ")))
+		}
+	}
+	return b.String()
+}
+
 // Planner converts logical plans to physical plans.
 type Planner struct {
 	catalog *catalog.Catalog
