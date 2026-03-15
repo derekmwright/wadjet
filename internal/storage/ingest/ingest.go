@@ -1,0 +1,246 @@
+// Package ingest provides micro-batch accumulation and flushing to object storage.
+package ingest
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"log/slog"
+	"sync"
+	"time"
+
+	"github.com/derekmwright/caelum/internal/storage/catalog"
+	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/derekmwright/caelum/internal/storage/partition"
+	"github.com/google/uuid"
+)
+
+// Config configures the micro-batch ingester.
+type Config struct {
+	MaxBufferSize int           // max bytes before flush (default 128 MB)
+	MaxBufferRows int           // max rows before flush (default 1M)
+	FlushInterval time.Duration // max time before flush (default 60s)
+	RowGroupSize  int           // rows per row group in Parquet (default 128K)
+}
+
+// DefaultConfig returns default ingest configuration.
+func DefaultConfig() Config {
+	return Config{
+		MaxBufferSize: 128 * 1024 * 1024,
+		MaxBufferRows: 1_000_000,
+		FlushInterval: 60 * time.Second,
+		RowGroupSize:  128 * 1024,
+	}
+}
+
+// Ingester accumulates rows and periodically flushes them as Parquet files.
+type Ingester struct {
+	catalog   *catalog.Catalog
+	tableName string
+	schema    parquet.Schema
+	strategy  *partition.Strategy
+	config    Config
+	logger    *slog.Logger
+
+	mu      sync.Mutex
+	buffers map[string]*partitionBuffer // partition path -> buffer
+	done    chan struct{}
+	wg      sync.WaitGroup
+}
+
+type partitionBuffer struct {
+	values map[string]string
+	path   string
+	rows   []map[string]any
+	size   int // estimated size in bytes
+}
+
+// New creates a new Ingester for the given table.
+func New(cat *catalog.Catalog, tableName string, schema parquet.Schema, partKeys []string, cfg Config) *Ingester {
+	if cfg.MaxBufferSize <= 0 {
+		cfg.MaxBufferSize = DefaultConfig().MaxBufferSize
+	}
+	if cfg.MaxBufferRows <= 0 {
+		cfg.MaxBufferRows = DefaultConfig().MaxBufferRows
+	}
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = DefaultConfig().FlushInterval
+	}
+	if cfg.RowGroupSize <= 0 {
+		cfg.RowGroupSize = DefaultConfig().RowGroupSize
+	}
+
+	return &Ingester{
+		catalog:   cat,
+		tableName: tableName,
+		schema:    schema,
+		strategy:  partition.NewStrategy(partKeys),
+		config:    cfg,
+		logger:    slog.Default(),
+		buffers:   make(map[string]*partitionBuffer),
+		done:      make(chan struct{}),
+	}
+}
+
+// Start begins the background flush timer.
+func (ing *Ingester) Start() {
+	ing.wg.Add(1)
+	go func() {
+		defer ing.wg.Done()
+		ticker := time.NewTicker(ing.config.FlushInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				if err := ing.FlushAll(context.Background()); err != nil {
+					ing.logger.Error("periodic flush failed", "error", err)
+				}
+			case <-ing.done:
+				return
+			}
+		}
+	}()
+}
+
+// Stop stops the background flush timer and flushes remaining data.
+func (ing *Ingester) Stop(ctx context.Context) error {
+	close(ing.done)
+	ing.wg.Wait()
+	return ing.FlushAll(ctx)
+}
+
+// Ingest adds rows to the buffer. Rows are partitioned based on partition key values.
+func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
+	ing.mu.Lock()
+	defer ing.mu.Unlock()
+
+	for _, row := range rows {
+		partValues := make(map[string]string, len(ing.strategy.Keys))
+		for _, key := range ing.strategy.Keys {
+			v, ok := row[key]
+			if !ok {
+				return fmt.Errorf("missing partition key %q in row", key)
+			}
+			partValues[key] = fmt.Sprintf("%v", v)
+		}
+
+		partPath := ing.strategy.PartitionPath(partValues)
+		buf, ok := ing.buffers[partPath]
+		if !ok {
+			buf = &partitionBuffer{
+				values: partValues,
+				path:   partPath,
+			}
+			ing.buffers[partPath] = buf
+		}
+
+		buf.rows = append(buf.rows, row)
+		buf.size += estimateRowSize(row)
+	}
+
+	// Check if any buffer needs flushing
+	for partPath, buf := range ing.buffers {
+		if buf.size >= ing.config.MaxBufferSize || len(buf.rows) >= ing.config.MaxBufferRows {
+			if err := ing.flushBuffer(ctx, partPath, buf); err != nil {
+				return fmt.Errorf("flushing partition %s: %w", partPath, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// FlushAll flushes all buffered data to storage.
+func (ing *Ingester) FlushAll(ctx context.Context) error {
+	ing.mu.Lock()
+	defer ing.mu.Unlock()
+
+	for partPath, buf := range ing.buffers {
+		if len(buf.rows) == 0 {
+			continue
+		}
+		if err := ing.flushBuffer(ctx, partPath, buf); err != nil {
+			return fmt.Errorf("flushing partition %s: %w", partPath, err)
+		}
+	}
+	return nil
+}
+
+func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *partitionBuffer) error {
+	if len(buf.rows) == 0 {
+		return nil
+	}
+
+	chunkID := fmt.Sprintf("chunk_%s", uuid.New().String()[:8])
+	filePath := ing.strategy.FilePath(
+		partition.TablePrefix(ing.tableName),
+		buf.values,
+		chunkID,
+	)
+
+	// Write parquet to buffer
+	var parquetBuf bytes.Buffer
+	pw, err := parquet.NewWriter(&parquetBuf, ing.schema, parquet.WriterConfig{
+		RowGroupSize: ing.config.RowGroupSize,
+	})
+	if err != nil {
+		return fmt.Errorf("creating parquet writer: %w", err)
+	}
+
+	if err := pw.WriteRows(buf.rows); err != nil {
+		return fmt.Errorf("writing rows: %w", err)
+	}
+	if err := pw.Close(); err != nil {
+		return fmt.Errorf("closing parquet writer: %w", err)
+	}
+
+	data := parquetBuf.Bytes()
+	_, err = ing.catalog.Store().Put(ctx, ing.catalog.Bucket(), filePath,
+		bytes.NewReader(data), int64(len(data)), "application/octet-stream")
+	if err != nil {
+		return fmt.Errorf("uploading parquet file: %w", err)
+	}
+
+	// Update catalog manifest
+	fileEntry := catalog.FileEntry{
+		Path:      filePath,
+		SizeBytes: int64(len(data)),
+		NumRows:   int64(len(buf.rows)),
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := ing.catalog.AddFiles(ctx, ing.tableName, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
+		return fmt.Errorf("updating manifest: %w", err)
+	}
+
+	ing.logger.Info("flushed partition",
+		"table", ing.tableName,
+		"partition", partPath,
+		"rows", len(buf.rows),
+		"bytes", len(data),
+		"file", filePath,
+	)
+
+	// Reset buffer
+	buf.rows = buf.rows[:0]
+	buf.size = 0
+
+	return nil
+}
+
+func estimateRowSize(row map[string]any) int {
+	size := 64 // map overhead
+	for k, v := range row {
+		size += len(k) + 16 // key string + pointer
+		switch val := v.(type) {
+		case string:
+			size += len(val)
+		case []byte:
+			size += len(val)
+		default:
+			size += 8 // numeric types
+		}
+	}
+	return size
+}

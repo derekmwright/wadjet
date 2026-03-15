@@ -1,0 +1,686 @@
+package expr
+
+import (
+	"testing"
+
+	"github.com/blastrain/vitess-sqlparser/sqlparser"
+	"github.com/derekmwright/caelum/internal/engine/batch"
+	"github.com/derekmwright/caelum/internal/storage/parquet"
+)
+
+// helper: create a batch with named columns
+func testBatch() *batch.RecordBatch {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "name", Type: parquet.TypeString},
+		{Name: "amount", Type: parquet.TypeFloat64},
+		{Name: "active", Type: parquet.TypeBool},
+	}
+	b := batch.NewRecordBatch(schema, 3)
+	// Row 0: id=1, name="alice", amount=100.5, active=true
+	b.Columns[0].SetValue(0, int64(1))
+	b.Columns[1].SetValue(0, "alice")
+	b.Columns[2].SetValue(0, 100.5)
+	b.Columns[3].SetValue(0, true)
+	// Row 1: id=2, name="bob", amount=200.0, active=false
+	b.Columns[0].SetValue(1, int64(2))
+	b.Columns[1].SetValue(1, "bob")
+	b.Columns[2].SetValue(1, 200.0)
+	b.Columns[3].SetValue(1, false)
+	// Row 2: id=3, name="carol", amount=50.25, active=true
+	b.Columns[0].SetValue(2, int64(3))
+	b.Columns[1].SetValue(2, "carol")
+	b.Columns[2].SetValue(2, 50.25)
+	b.Columns[3].SetValue(2, true)
+	return b
+}
+
+func TestColRef(t *testing.T) {
+	b := testBatch()
+	e := &ColRef{Name: "name"}
+	if v := e.Eval(b, 0); v != "alice" {
+		t.Fatalf("expected alice, got %v", v)
+	}
+	if v := e.Eval(b, 1); v != "bob" {
+		t.Fatalf("expected bob, got %v", v)
+	}
+}
+
+func TestLiteral(t *testing.T) {
+	b := testBatch()
+	e := &Lit{Val: int64(42)}
+	if v := e.Eval(b, 0); v != int64(42) {
+		t.Fatalf("expected 42, got %v", v)
+	}
+}
+
+func TestBinOp(t *testing.T) {
+	b := testBatch()
+	// amount + 10
+	e := &BinOp{
+		Left:  &ColRef{Name: "amount"},
+		Right: &Lit{Val: float64(10)},
+		Op:    "+",
+	}
+	if v := e.Eval(b, 0); v != 110.5 {
+		t.Fatalf("expected 110.5, got %v", v)
+	}
+	// amount * 2
+	e2 := &BinOp{
+		Left:  &ColRef{Name: "amount"},
+		Right: &Lit{Val: float64(2)},
+		Op:    "*",
+	}
+	if v := e2.Eval(b, 1); v != 400.0 {
+		t.Fatalf("expected 400, got %v", v)
+	}
+	// division by zero
+	e3 := &BinOp{
+		Left:  &ColRef{Name: "amount"},
+		Right: &Lit{Val: float64(0)},
+		Op:    "/",
+	}
+	if v := e3.Eval(b, 0); v != nil {
+		t.Fatalf("expected nil for div by zero, got %v", v)
+	}
+}
+
+func TestComparison(t *testing.T) {
+	b := testBatch()
+	// id > 1
+	e := &Cmp{
+		Left:  &ColRef{Name: "id"},
+		Right: &Lit{Val: int64(1)},
+		Op:    CmpGt,
+	}
+	if e.EvalBool(b, 0) {
+		t.Fatal("1 > 1 should be false")
+	}
+	if !e.EvalBool(b, 1) {
+		t.Fatal("2 > 1 should be true")
+	}
+}
+
+func TestAndOr(t *testing.T) {
+	b := testBatch()
+	// id > 1 AND amount < 100
+	e := &And{
+		Left:  &Cmp{Left: &ColRef{Name: "id"}, Right: &Lit{Val: int64(1)}, Op: CmpGt},
+		Right: &Cmp{Left: &ColRef{Name: "amount"}, Right: &Lit{Val: float64(100)}, Op: CmpLt},
+	}
+	if e.EvalBool(b, 0) {
+		t.Fatal("row 0: should be false (id=1)")
+	}
+	if e.EvalBool(b, 1) {
+		t.Fatal("row 1: should be false (amount=200)")
+	}
+	if !e.EvalBool(b, 2) {
+		t.Fatal("row 2: should be true (id=3, amount=50.25)")
+	}
+
+	// id = 1 OR id = 3
+	e2 := &Or{
+		Left:  &Cmp{Left: &ColRef{Name: "id"}, Right: &Lit{Val: int64(1)}, Op: CmpEq},
+		Right: &Cmp{Left: &ColRef{Name: "id"}, Right: &Lit{Val: int64(3)}, Op: CmpEq},
+	}
+	if !e2.EvalBool(b, 0) {
+		t.Fatal("row 0: should be true (id=1)")
+	}
+	if e2.EvalBool(b, 1) {
+		t.Fatal("row 1: should be false (id=2)")
+	}
+}
+
+func TestIn(t *testing.T) {
+	b := testBatch()
+	e := &In{
+		Expr: &ColRef{Name: "id"},
+		Values: []Expr{
+			&Lit{Val: int64(1)},
+			&Lit{Val: int64(3)},
+		},
+	}
+	if !e.EvalBool(b, 0) {
+		t.Fatal("1 should be in (1,3)")
+	}
+	if e.EvalBool(b, 1) {
+		t.Fatal("2 should not be in (1,3)")
+	}
+}
+
+func TestBetween(t *testing.T) {
+	b := testBatch()
+	e := &Between{
+		Expr: &ColRef{Name: "amount"},
+		Low:  &Lit{Val: float64(50)},
+		Hi:   &Lit{Val: float64(150)},
+	}
+	if !e.EvalBool(b, 0) {
+		t.Fatal("100.5 should be between 50 and 150")
+	}
+	if e.EvalBool(b, 1) {
+		t.Fatal("200 should not be between 50 and 150")
+	}
+}
+
+func TestLike(t *testing.T) {
+	b := testBatch()
+	// name LIKE 'al%'
+	e := &Like{
+		Expr:    &ColRef{Name: "name"},
+		Pattern: &Lit{Val: "al%"},
+	}
+	if !e.EvalBool(b, 0) {
+		t.Fatal("alice should match al%")
+	}
+	if e.EvalBool(b, 1) {
+		t.Fatal("bob should not match al%")
+	}
+
+	// name LIKE '_o_'
+	e2 := &Like{
+		Expr:    &ColRef{Name: "name"},
+		Pattern: &Lit{Val: "_o_"},
+	}
+	if !e2.EvalBool(b, 1) {
+		t.Fatal("bob should match _o_")
+	}
+	if e2.EvalBool(b, 0) {
+		t.Fatal("alice should not match _o_")
+	}
+}
+
+func TestCase(t *testing.T) {
+	b := testBatch()
+	// CASE WHEN id = 1 THEN 'one' WHEN id = 2 THEN 'two' ELSE 'other' END
+	e := &Case{
+		Whens: []CaseWhen{
+			{Cond: &Cmp{Left: &ColRef{Name: "id"}, Right: &Lit{Val: int64(1)}, Op: CmpEq}, Result: &Lit{Val: "one"}},
+			{Cond: &Cmp{Left: &ColRef{Name: "id"}, Right: &Lit{Val: int64(2)}, Op: CmpEq}, Result: &Lit{Val: "two"}},
+		},
+		Else: &Lit{Val: "other"},
+	}
+	if v := e.Eval(b, 0); v != "one" {
+		t.Fatalf("expected one, got %v", v)
+	}
+	if v := e.Eval(b, 1); v != "two" {
+		t.Fatalf("expected two, got %v", v)
+	}
+	if v := e.Eval(b, 2); v != "other" {
+		t.Fatalf("expected other, got %v", v)
+	}
+}
+
+func TestScalarFunctions(t *testing.T) {
+	b := testBatch()
+
+	tests := []struct {
+		name     string
+		expr     Expr
+		row      int
+		expected any
+	}{
+		{"UPPER", &FuncCall{Name: "upper", Args: []Expr{&ColRef{Name: "name"}}}, 0, "ALICE"},
+		{"LOWER", &FuncCall{Name: "lower", Args: []Expr{&Lit{Val: "HELLO"}}}, 0, "hello"},
+		{"LENGTH", &FuncCall{Name: "length", Args: []Expr{&ColRef{Name: "name"}}}, 0, float64(5)},
+		{"ABS", &FuncCall{Name: "abs", Args: []Expr{&Lit{Val: float64(-5)}}}, 0, float64(5)},
+		{"CEIL", &FuncCall{Name: "ceil", Args: []Expr{&ColRef{Name: "amount"}}}, 0, float64(101)},
+		{"FLOOR", &FuncCall{Name: "floor", Args: []Expr{&ColRef{Name: "amount"}}}, 0, float64(100)},
+		{"ROUND", &FuncCall{Name: "round", Args: []Expr{&Lit{Val: float64(3.456)}, &Lit{Val: float64(1)}}}, 0, float64(3.5)},
+		{"CONCAT", &FuncCall{Name: "concat", Args: []Expr{&ColRef{Name: "name"}, &Lit{Val: "_suffix"}}}, 0, "alice_suffix"},
+		{"SUBSTR", &FuncCall{Name: "substr", Args: []Expr{&ColRef{Name: "name"}, &Lit{Val: float64(1)}, &Lit{Val: float64(3)}}}, 0, "ali"},
+		{"TRIM", &FuncCall{Name: "trim", Args: []Expr{&Lit{Val: "  hello  "}}}, 0, "hello"},
+		{"REPLACE", &FuncCall{Name: "replace", Args: []Expr{&ColRef{Name: "name"}, &Lit{Val: "ice"}, &Lit{Val: "ex"}}}, 0, "alex"},
+		{"REVERSE", &FuncCall{Name: "reverse", Args: []Expr{&ColRef{Name: "name"}}}, 1, "bob"},
+		{"LEFT", &FuncCall{Name: "left", Args: []Expr{&ColRef{Name: "name"}, &Lit{Val: float64(3)}}}, 0, "ali"},
+		{"RIGHT", &FuncCall{Name: "right", Args: []Expr{&ColRef{Name: "name"}, &Lit{Val: float64(3)}}}, 0, "ice"},
+		{"COALESCE", &Coalesce{Args: []Expr{&Lit{Val: nil}, &Lit{Val: "fallback"}}}, 0, "fallback"},
+		{"NULLIF equal", &FuncCall{Name: "nullif", Args: []Expr{&Lit{Val: int64(1)}, &Lit{Val: int64(1)}}}, 0, nil},
+		{"NULLIF not equal", &FuncCall{Name: "nullif", Args: []Expr{&Lit{Val: int64(1)}, &Lit{Val: int64(2)}}}, 0, int64(1)},
+		{"IFNULL non-null", &FuncCall{Name: "ifnull", Args: []Expr{&ColRef{Name: "name"}, &Lit{Val: "default"}}}, 0, "alice"},
+		{"IF true", &FuncCall{Name: "if", Args: []Expr{&Lit{Val: true}, &Lit{Val: "yes"}, &Lit{Val: "no"}}}, 0, "yes"},
+		{"IF false", &FuncCall{Name: "if", Args: []Expr{&Lit{Val: false}, &Lit{Val: "yes"}, &Lit{Val: "no"}}}, 0, "no"},
+		{"SQRT", &FuncCall{Name: "sqrt", Args: []Expr{&Lit{Val: float64(16)}}}, 0, float64(4)},
+		{"POW", &FuncCall{Name: "pow", Args: []Expr{&Lit{Val: float64(2)}, &Lit{Val: float64(3)}}}, 0, float64(8)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.expr.Eval(b, tt.row)
+			if result != tt.expected {
+				t.Fatalf("expected %v (%T), got %v (%T)", tt.expected, tt.expected, result, result)
+			}
+		})
+	}
+}
+
+func TestNullPropagation(t *testing.T) {
+	b := testBatch()
+	// NULL + 1 = NULL
+	e := &BinOp{Left: &Lit{Val: nil}, Right: &Lit{Val: float64(1)}, Op: "+"}
+	if v := e.Eval(b, 0); v != nil {
+		t.Fatalf("NULL + 1 should be NULL, got %v", v)
+	}
+	// UPPER(NULL) = NULL
+	e2 := &FuncCall{Name: "upper", Args: []Expr{&Lit{Val: nil}}}
+	if v := e2.Eval(b, 0); v != nil {
+		t.Fatalf("UPPER(NULL) should be NULL, got %v", v)
+	}
+}
+
+func TestCast(t *testing.T) {
+	b := testBatch()
+	// CAST(amount AS int)
+	e := &Cast{Operand: &ColRef{Name: "amount"}, DestType: "int"}
+	if v := e.Eval(b, 0); v != int64(100) {
+		t.Fatalf("expected 100, got %v", v)
+	}
+	// CAST(id AS string)
+	e2 := &Cast{Operand: &ColRef{Name: "id"}, DestType: "string"}
+	if v := e2.Eval(b, 0); v != "1" {
+		t.Fatalf("expected '1', got %v", v)
+	}
+}
+
+// --- Compiler tests ---
+
+func TestCompileColumnRef(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT name FROM t WHERE id > 1"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	where := sel.Where.Expr
+
+	compiled, err := Compile(where)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Row 0: id=1, should be false
+	if toBool(compiled, b, 0) {
+		t.Fatal("1 > 1 should be false")
+	}
+	// Row 1: id=2, should be true
+	if !toBool(compiled, b, 1) {
+		t.Fatal("2 > 1 should be true")
+	}
+}
+
+func TestCompileArithExpr(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT amount + 10 FROM t"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
+
+	compiled, err := Compile(aliased.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := compiled.Eval(b, 0)
+	if v != 110.5 {
+		t.Fatalf("expected 110.5, got %v", v)
+	}
+}
+
+func TestCompileAndOr(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT * FROM t WHERE id > 1 AND amount < 100"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	compiled, err := Compile(sel.Where.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Row 2: id=3, amount=50.25 → true
+	if !toBool(compiled, b, 2) {
+		t.Fatal("row 2 should match")
+	}
+	// Row 0: id=1 → false
+	if toBool(compiled, b, 0) {
+		t.Fatal("row 0 should not match")
+	}
+}
+
+func TestCompileIn(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT * FROM t WHERE id IN (1, 3)"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	compiled, err := Compile(sel.Where.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !toBool(compiled, b, 0) {
+		t.Fatal("id=1 should be in (1,3)")
+	}
+	if toBool(compiled, b, 1) {
+		t.Fatal("id=2 should not be in (1,3)")
+	}
+	if !toBool(compiled, b, 2) {
+		t.Fatal("id=3 should be in (1,3)")
+	}
+}
+
+func TestCompileBetween(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT * FROM t WHERE amount BETWEEN 50 AND 150"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	compiled, err := Compile(sel.Where.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !toBool(compiled, b, 0) {
+		t.Fatal("100.5 should be between 50 and 150")
+	}
+	if toBool(compiled, b, 1) {
+		t.Fatal("200 should not be between 50 and 150")
+	}
+}
+
+func TestCompileLike(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT * FROM t WHERE name LIKE 'al%'"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	compiled, err := Compile(sel.Where.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !toBool(compiled, b, 0) {
+		t.Fatal("alice should match al%")
+	}
+	if toBool(compiled, b, 1) {
+		t.Fatal("bob should not match al%")
+	}
+}
+
+func TestCompileCaseWhen(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT CASE WHEN id = 1 THEN 'one' WHEN id = 2 THEN 'two' ELSE 'other' END FROM t"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
+	compiled, err := Compile(aliased.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := compiled.Eval(b, 0); v != "one" {
+		t.Fatalf("expected one, got %v", v)
+	}
+	if v := compiled.Eval(b, 1); v != "two" {
+		t.Fatalf("expected two, got %v", v)
+	}
+	if v := compiled.Eval(b, 2); v != "other" {
+		t.Fatalf("expected other, got %v", v)
+	}
+}
+
+func TestCompileFuncCall(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT upper(name) FROM t"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
+	compiled, err := Compile(aliased.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := compiled.Eval(b, 0); v != "ALICE" {
+		t.Fatalf("expected ALICE, got %v", v)
+	}
+}
+
+func TestCompileNestedExpr(t *testing.T) {
+	b := testBatch()
+	// amount * 2 + 10
+	sql := "SELECT amount * 2 + 10 FROM t"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
+	compiled, err := Compile(aliased.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Row 0: 100.5 * 2 + 10 = 211
+	v := compiled.Eval(b, 0)
+	if v != 211.0 {
+		t.Fatalf("expected 211, got %v", v)
+	}
+}
+
+func TestCompileIsNull(t *testing.T) {
+	b := testBatch()
+	sql := "SELECT * FROM t WHERE name IS NOT NULL"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+	compiled, err := Compile(sel.Where.Expr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// All rows have name set
+	if !toBool(compiled, b, 0) {
+		t.Fatal("name should not be null")
+	}
+}
+
+func TestCompileSelectExpr(t *testing.T) {
+	sql := "SELECT amount * 2 AS doubled, upper(name) AS uname FROM t"
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sel := stmt.(*sqlparser.Select)
+
+	for _, se := range sel.SelectExprs {
+		aliased := se.(*sqlparser.AliasedExpr)
+		_, name, err := CompileSelectExpr(aliased)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == "" {
+			t.Fatal("expected non-empty name")
+		}
+	}
+}
+
+func TestMatchLike(t *testing.T) {
+	tests := []struct {
+		s       string
+		pattern string
+		want    bool
+	}{
+		{"hello", "hello", true},
+		{"hello", "hell%", true},
+		{"hello", "%llo", true},
+		{"hello", "%ll%", true},
+		{"hello", "h_llo", true},
+		{"hello", "h__lo", true},
+		{"hello", "h%o", true},
+		{"hello", "abc", false},
+		{"", "%", true},
+		{"", "_", false},
+		{"a", "_", true},
+		{"abc", "a_c", true},
+		{"abc", "a__", true},
+		{"abc", "___", true},
+		{"abc", "____", false},
+	}
+	for _, tt := range tests {
+		got := matchLike(tt.s, tt.pattern)
+		if got != tt.want {
+			t.Errorf("matchLike(%q, %q) = %v, want %v", tt.s, tt.pattern, got, tt.want)
+		}
+	}
+}
+
+func TestRegisterFunc(t *testing.T) {
+	RegisterFunc("double", func(args []any) any {
+		if len(args) < 1 || args[0] == nil {
+			return nil
+		}
+		return ToFloat64(args[0]) * 2
+	})
+	b := testBatch()
+	e := &FuncCall{Name: "double", Args: []Expr{&ColRef{Name: "amount"}}}
+	v := e.Eval(b, 0)
+	if v != 201.0 {
+		t.Fatalf("expected 201, got %v", v)
+	}
+}
+
+func TestNetworkFunctions(t *testing.T) {
+	b := testBatch()
+
+	tests := []struct {
+		name     string
+		expr     Expr
+		row      int
+		expected any
+	}{
+		// ip_to_string
+		{
+			"ip_to_string IPv4",
+			&FuncCall{Name: "ip_to_string", Args: []Expr{&Lit{Val: "192.168.1.1"}}},
+			0, "192.168.1.1",
+		},
+		{
+			"ip_to_string IPv6",
+			&FuncCall{Name: "ip_to_string", Args: []Expr{&Lit{Val: "::1"}}},
+			0, "::1",
+		},
+		{
+			"ip_to_string invalid",
+			&FuncCall{Name: "ip_to_string", Args: []Expr{&Lit{Val: "not-an-ip"}}},
+			0, nil,
+		},
+
+		// cidr_contains
+		{
+			"cidr_contains match",
+			&FuncCall{Name: "cidr_contains", Args: []Expr{&Lit{Val: "192.168.1.0/24"}, &Lit{Val: "192.168.1.50"}}},
+			0, true,
+		},
+		{
+			"cidr_contains no match",
+			&FuncCall{Name: "cidr_contains", Args: []Expr{&Lit{Val: "10.0.0.0/8"}, &Lit{Val: "192.168.1.1"}}},
+			0, false,
+		},
+		{
+			"cidr_contains invalid cidr",
+			&FuncCall{Name: "cidr_contains", Args: []Expr{&Lit{Val: "invalid"}, &Lit{Val: "192.168.1.1"}}},
+			0, nil,
+		},
+
+		// ip_version
+		{
+			"ip_version IPv4",
+			&FuncCall{Name: "ip_version", Args: []Expr{&Lit{Val: "192.168.1.1"}}},
+			0, float64(4),
+		},
+		{
+			"ip_version IPv6",
+			&FuncCall{Name: "ip_version", Args: []Expr{&Lit{Val: "::1"}}},
+			0, float64(6),
+		},
+		{
+			"ip_version invalid",
+			&FuncCall{Name: "ip_version", Args: []Expr{&Lit{Val: "nope"}}},
+			0, nil,
+		},
+
+		// mask_ip
+		{
+			"mask_ip last 1 octet",
+			&FuncCall{Name: "mask_ip", Args: []Expr{&Lit{Val: "192.168.1.100"}, &Lit{Val: float64(1)}}},
+			0, "192.168.1.0",
+		},
+		{
+			"mask_ip last 2 octets",
+			&FuncCall{Name: "mask_ip", Args: []Expr{&Lit{Val: "10.20.30.40"}, &Lit{Val: float64(2)}}},
+			0, "10.20.0.0",
+		},
+
+		// mac_to_string
+		{
+			"mac_to_string valid",
+			&FuncCall{Name: "mac_to_string", Args: []Expr{&Lit{Val: "aa:bb:cc:dd:ee:ff"}}},
+			0, "aa:bb:cc:dd:ee:ff",
+		},
+		{
+			"mac_to_string invalid",
+			&FuncCall{Name: "mac_to_string", Args: []Expr{&Lit{Val: "not-a-mac"}}},
+			0, nil,
+		},
+
+		// ip_subnet
+		{
+			"ip_subnet",
+			&FuncCall{Name: "ip_subnet", Args: []Expr{&Lit{Val: "192.168.1.100/24"}}},
+			0, "192.168.1.0",
+		},
+
+		// ip_netmask
+		{
+			"ip_netmask /24",
+			&FuncCall{Name: "ip_netmask", Args: []Expr{&Lit{Val: "192.168.1.0/24"}}},
+			0, "255.255.255.0",
+		},
+		{
+			"ip_netmask /16",
+			&FuncCall{Name: "ip_netmask", Args: []Expr{&Lit{Val: "10.0.0.0/16"}}},
+			0, "255.255.0.0",
+		},
+
+		// null handling
+		{
+			"ip_to_string null",
+			&FuncCall{Name: "ip_to_string", Args: []Expr{&Lit{Val: nil}}},
+			0, nil,
+		},
+		{
+			"cidr_contains null",
+			&FuncCall{Name: "cidr_contains", Args: []Expr{&Lit{Val: nil}, &Lit{Val: "1.2.3.4"}}},
+			0, nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.expr.Eval(b, tt.row)
+			if result != tt.expected {
+				t.Fatalf("expected %v (%T), got %v (%T)", tt.expected, tt.expected, result, result)
+			}
+		})
+	}
+}

@@ -1,0 +1,150 @@
+package exec
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/derekmwright/caelum/internal/engine/batch"
+	"github.com/derekmwright/caelum/internal/storage/parquet"
+)
+
+// Pipeline represents Source → [UnaryOps...] → Sink.
+type Pipeline struct {
+	Source Source
+	Ops    []UnaryOperator
+	Sink   Sink
+}
+
+// Run executes the pipeline by pulling from source, transforming through
+// operators, and pushing to sink. Designed to be run per goroutine (one per partition).
+func (p *Pipeline) Run(ctx context.Context) error {
+	if err := p.Source.Init(ctx); err != nil {
+		return fmt.Errorf("source init: %w", err)
+	}
+	for _, op := range p.Ops {
+		if err := op.Init(ctx); err != nil {
+			return fmt.Errorf("operator init: %w", err)
+		}
+	}
+	if err := p.Sink.Init(ctx); err != nil {
+		return fmt.Errorf("sink init: %w", err)
+	}
+
+	for {
+		b, err := p.Source.Next(ctx)
+		if err != nil {
+			return fmt.Errorf("source next: %w", err)
+		}
+		if b == nil {
+			break
+		}
+
+		for _, op := range p.Ops {
+			b, err = op.Execute(ctx, b)
+			if err != nil {
+				return fmt.Errorf("operator execute: %w", err)
+			}
+			if b == nil {
+				break // fully filtered out
+			}
+		}
+
+		if b != nil {
+			if err := p.Sink.Consume(ctx, b); err != nil {
+				return fmt.Errorf("sink consume: %w", err)
+			}
+		}
+	}
+
+	return p.Sink.Finalize(ctx)
+}
+
+// Close releases all resources in the pipeline.
+func (p *Pipeline) Close() error {
+	var firstErr error
+	if err := p.Source.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	for _, op := range p.Ops {
+		if err := op.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if err := p.Sink.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// SliceSource is a simple Source that yields batches from a slice of rows.
+type SliceSource struct {
+	schema []parquet.Column
+	rows   []map[string]any
+	offset int
+	pool   *batch.BatchPool
+}
+
+// Column is imported from parquet for convenience.
+type Column = parquet.Column
+
+// NewSliceSource creates a source from in-memory rows.
+func NewSliceSource(schema []Column, rows []map[string]any) *SliceSource {
+	return &SliceSource{schema: schema, rows: rows}
+}
+
+func (s *SliceSource) Init(_ context.Context) error {
+	s.pool = batch.NewBatchPool(s.schema, batch.DefaultBatchSize)
+	s.offset = 0
+	return nil
+}
+
+func (s *SliceSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.offset >= len(s.rows) {
+		return nil, nil
+	}
+
+	end := s.offset + batch.DefaultBatchSize
+	if end > len(s.rows) {
+		end = len(s.rows)
+	}
+
+	chunk := s.rows[s.offset:end]
+	s.offset = end
+
+	return batch.FromRows(s.schema, chunk), nil
+}
+
+func (s *SliceSource) Close() error { return nil }
+
+// CollectSink collects all consumed batches. Data is stored columnar internally
+// and only converted to rows on demand via ToRows().
+type CollectSink struct {
+	Rows    []map[string]any       // populated lazily in Finalize
+	batches []*batch.RecordBatch   // columnar storage
+}
+
+func (s *CollectSink) Init(_ context.Context) error {
+	s.Rows = nil
+	s.batches = nil
+	return nil
+}
+
+func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
+	s.batches = append(s.batches, b)
+	return nil
+}
+
+func (s *CollectSink) Finalize(_ context.Context) error {
+	// Convert to rows for backward compatibility
+	for _, b := range s.batches {
+		s.Rows = append(s.Rows, b.ToRows()...)
+	}
+	return nil
+}
+
+// Batches returns the raw columnar batches (zero-copy, no conversion).
+func (s *CollectSink) Batches() []*batch.RecordBatch {
+	return s.batches
+}
+
+func (s *CollectSink) Close() error { return nil }

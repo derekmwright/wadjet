@@ -1,0 +1,432 @@
+package exec
+
+import (
+	"context"
+	"sort"
+	"strconv"
+	"sync"
+
+	"github.com/derekmwright/caelum/internal/engine/batch"
+	"github.com/derekmwright/caelum/internal/engine/exec/kernel"
+	"github.com/derekmwright/caelum/internal/engine/memory"
+	"github.com/derekmwright/caelum/internal/storage/parquet"
+)
+
+// SortOrder specifies sort direction.
+type SortOrder int
+
+const (
+	Ascending SortOrder = iota
+	Descending
+)
+
+// SortKey defines a column and direction for sorting.
+type SortKey struct {
+	Column string
+	Order  SortOrder
+}
+
+// Sort is a Sink that accumulates all batches columnar and sorts them
+// using typed comparisons on an index array (no row-oriented conversion).
+// When a SpillManager is set, Sort will spill to disk when memory pressure is high.
+type Sort struct {
+	Keys   []SortKey
+	schema []parquet.Column
+	Spill  *memory.SpillManager // optional: enables spill-to-disk
+
+	mu         sync.Mutex
+	batches    []*batch.RecordBatch // columnar storage
+	totalRows  int
+	spillFiles []string
+	sorted     []*batch.RecordBatch // materialized sorted results
+	pos        int
+}
+
+func NewSort(keys []SortKey) *Sort {
+	return &Sort{Keys: keys}
+}
+
+func (s *Sort) Init(_ context.Context) error {
+	s.batches = nil
+	s.totalRows = 0
+	s.sorted = nil
+	s.pos = 0
+	return nil
+}
+
+func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.schema == nil {
+		s.schema = b.Schema
+	}
+	s.batches = append(s.batches, b)
+	s.totalRows += b.ActiveLen()
+
+	// Spill to disk if memory pressure is high
+	if s.Spill != nil && s.Spill.ShouldSpill() && len(s.batches) > 0 {
+		var rows []map[string]any
+		for _, sb := range s.batches {
+			rows = append(rows, sb.ToRows()...)
+		}
+		path, err := s.Spill.SpillRows(rows)
+		if err != nil {
+			return err
+		}
+		s.spillFiles = append(s.spillFiles, path)
+		s.batches = s.batches[:0]
+		s.totalRows = 0
+	}
+	return nil
+}
+
+func (s *Sort) Finalize(_ context.Context) error {
+	if len(s.spillFiles) > 0 {
+		return s.finalizeWithSpill()
+	}
+	return s.finalizeColumnar()
+}
+
+// finalizeWithSpill falls back to row-oriented sort when spill files exist.
+func (s *Sort) finalizeWithSpill() error {
+	// Convert stored batches to rows
+	var rows []map[string]any
+	for _, b := range s.batches {
+		rows = append(rows, b.ToRows()...)
+	}
+	s.batches = nil
+
+	// Merge spilled data
+	for _, spillFile := range s.spillFiles {
+		spilled, err := memory.ReadSpilledRows(spillFile)
+		if err != nil {
+			return err
+		}
+		rows = append(rows, spilled...)
+	}
+	s.spillFiles = nil
+
+	sort.SliceStable(rows, func(i, j int) bool {
+		for _, key := range s.Keys {
+			vi := rows[i][key.Column]
+			vj := rows[j][key.Column]
+			cmp := compareAny(vi, vj)
+			if cmp == 0 {
+				continue
+			}
+			if key.Order == Descending {
+				return cmp > 0
+			}
+			return cmp < 0
+		}
+		return false
+	})
+
+	// Materialize into sorted batches
+	for pos := 0; pos < len(rows); {
+		end := pos + batch.DefaultBatchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		s.sorted = append(s.sorted, batch.FromRows(s.schema, rows[pos:end]))
+		pos = end
+	}
+	return nil
+}
+
+// finalizeColumnar sorts using typed column comparisons on an index array.
+func (s *Sort) finalizeColumnar() error {
+	if len(s.batches) == 0 {
+		return nil
+	}
+
+	// Build index entries for all active rows
+	type sortEntry struct {
+		batchIdx uint32
+		rowIdx   uint16
+	}
+	entries := make([]sortEntry, 0, s.totalRows)
+	for bi, b := range s.batches {
+		if b.Sel != nil {
+			for _, idx := range b.Sel {
+				entries = append(entries, sortEntry{batchIdx: uint32(bi), rowIdx: idx})
+			}
+		} else {
+			for i := 0; i < b.Len; i++ {
+				entries = append(entries, sortEntry{batchIdx: uint32(bi), rowIdx: uint16(i)})
+			}
+		}
+	}
+
+	// Resolve sort key column indices and pre-resolve typed comparison kernels
+	type resolvedKey struct {
+		colIdx  int
+		order   SortOrder
+		compare kernel.SortCompareKernel
+	}
+	firstBatch := s.batches[0]
+	resolved := make([]resolvedKey, len(s.Keys))
+	for i, key := range s.Keys {
+		idx := firstBatch.ColumnIndex(key.Column)
+		var cmp kernel.SortCompareKernel
+		if idx >= 0 {
+			cmp = kernel.ResolveSortCompare(firstBatch.Columns[idx].Type)
+		}
+		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, compare: cmp}
+	}
+
+	// Sort index using pre-resolved typed comparison kernels — no type switches
+	batches := s.batches
+	sort.SliceStable(entries, func(i, j int) bool {
+		ei, ej := entries[i], entries[j]
+		bi, bj := batches[ei.batchIdx], batches[ej.batchIdx]
+		ri, rj := int(ei.rowIdx), int(ej.rowIdx)
+		for _, key := range resolved {
+			if key.colIdx < 0 {
+				continue
+			}
+			vi := bi.Columns[key.colIdx]
+			vj := bj.Columns[key.colIdx]
+			cmp := key.compare(vi, ri, vj, rj)
+			if cmp == 0 {
+				continue
+			}
+			if key.order == Descending {
+				return cmp > 0
+			}
+			return cmp < 0
+		}
+		return false
+	})
+
+	// Materialize sorted batches using typed column copies
+	for pos := 0; pos < len(entries); {
+		end := pos + batch.DefaultBatchSize
+		if end > len(entries) {
+			end = len(entries)
+		}
+		chunk := entries[pos:end]
+		out := batch.NewRecordBatch(s.schema, len(chunk))
+		for i, e := range chunk {
+			src := batches[e.batchIdx]
+			for j := range s.schema {
+				copyVectorValue(out.Columns[j], i, src.Columns[j], int(e.rowIdx))
+			}
+		}
+		s.sorted = append(s.sorted, out)
+		pos = end
+	}
+
+	s.batches = nil // release input batches
+	return nil
+}
+
+func (s *Sort) Close() error { return nil }
+
+// Next returns sorted results in batches.
+func (s *Sort) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.pos >= len(s.sorted) {
+		return nil, nil
+	}
+	b := s.sorted[s.pos]
+	s.pos++
+	return b, nil
+}
+
+// compareVectorValues compares two values from vectors using typed access (no boxing).
+func compareVectorValues(a *batch.Vector, ai int, b *batch.Vector, bi int, typ batch.TypeID) int {
+	aNil := a.Nulls.IsNull(ai)
+	bNil := b.Nulls.IsNull(bi)
+	if aNil && bNil {
+		return 0
+	}
+	if aNil {
+		return -1 // nulls first
+	}
+	if bNil {
+		return 1
+	}
+
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC:
+		av, bv := a.Int64Data[ai], b.Int64Data[bi]
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case batch.TypeInt32:
+		av, bv := a.Int32Data[ai], b.Int32Data[bi]
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case batch.TypeFloat64:
+		av, bv := a.Float64Data[ai], b.Float64Data[bi]
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case batch.TypeFloat32:
+		av, bv := a.Float32Data[ai], b.Float32Data[bi]
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR:
+		as := a.BytesData.StringValue(ai)
+		bs := b.BytesData.StringValue(bi)
+		if as < bs {
+			return -1
+		}
+		if as > bs {
+			return 1
+		}
+		return 0
+	case batch.TypeBool:
+		av, bv := a.BoolData[ai], b.BoolData[bi]
+		if av == bv {
+			return 0
+		}
+		if !av {
+			return -1
+		}
+		return 1
+	default:
+		return 0
+	}
+}
+
+// copyVectorValue copies a single value between vectors using typed access (no boxing).
+// For bytes-based types, values must be copied in sequential order for dst (i = 0, 1, 2, ...).
+func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
+	if src.Nulls.IsNull(si) {
+		dst.Nulls.SetNull(di)
+		switch dst.Type {
+		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR:
+			dst.BytesData.Set(di, nil)
+		}
+		return
+	}
+	dst.Nulls.SetValid(di)
+	switch dst.Type {
+	case batch.TypeBool:
+		dst.BoolData[di] = src.BoolData[si]
+	case batch.TypeInt32:
+		dst.Int32Data[di] = src.Int32Data[si]
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC:
+		dst.Int64Data[di] = src.Int64Data[si]
+	case batch.TypeFloat32:
+		dst.Float32Data[di] = src.Float32Data[si]
+	case batch.TypeFloat64:
+		dst.Float64Data[di] = src.Float64Data[si]
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR:
+		dst.BytesData.Set(di, src.BytesData.Value(si))
+	}
+}
+
+// compareAny compares two interface{} values. Used by the spill fallback path.
+func compareAny(a, b any) int {
+	if a == nil && b == nil {
+		return 0
+	}
+	if a == nil {
+		return -1 // nulls first
+	}
+	if b == nil {
+		return 1
+	}
+
+	switch av := a.(type) {
+	case int64:
+		bv := toInt64(b)
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case int32:
+		return compareAny(int64(av), b)
+	case float64:
+		bv := toFloat64(b)
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case float32:
+		return compareAny(float64(av), b)
+	case string:
+		bv, ok := b.(string)
+		if !ok {
+			return 0
+		}
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case bool:
+		bv, ok := b.(bool)
+		if !ok {
+			return 0
+		}
+		if av == bv {
+			return 0
+		}
+		if !av {
+			return -1
+		}
+		return 1
+	default:
+		return 0
+	}
+}
+
+// appendKeyValue writes a value to a byte buffer without fmt.Sprint overhead.
+func appendKeyValue(buf []byte, v any) []byte {
+	if v == nil {
+		return append(buf, "<null>"...)
+	}
+	switch tv := v.(type) {
+	case int64:
+		return strconv.AppendInt(buf, tv, 10)
+	case int32:
+		return strconv.AppendInt(buf, int64(tv), 10)
+	case float64:
+		return strconv.AppendFloat(buf, tv, 'g', -1, 64)
+	case float32:
+		return strconv.AppendFloat(buf, float64(tv), 'g', -1, 32)
+	case string:
+		return append(buf, tv...)
+	case bool:
+		return strconv.AppendBool(buf, tv)
+	default:
+		return append(buf, "<unknown>"...)
+	}
+}
+
+func appendInt64(buf []byte, v int64) []byte {
+	return strconv.AppendInt(buf, v, 10)
+}
+
+func appendFloat64(buf []byte, v float64) []byte {
+	return strconv.AppendFloat(buf, v, 'g', -1, 64)
+}
