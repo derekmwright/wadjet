@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
@@ -23,11 +25,13 @@ type NATSConfig struct {
 }
 
 // DefaultNATSConfig returns a default NATS configuration.
+// StoreDir defaults to ~/.caelum/nats for persistence across reboots.
 func DefaultNATSConfig() NATSConfig {
+	storeDir := filepath.Join(os.Getenv("HOME"), ".caelum", "nats")
 	return NATSConfig{
 		Host:       "127.0.0.1",
 		Port:       4222,
-		StoreDir:   "/tmp/caelum-nats",
+		StoreDir:   storeDir,
 		MaxPayload: 8 * 1024 * 1024,
 	}
 }
@@ -43,6 +47,11 @@ type EmbeddedNATS struct {
 func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error) {
 	if logger == nil {
 		logger = slog.Default()
+	}
+
+	// Ensure store directory exists for JetStream persistence.
+	if err := os.MkdirAll(cfg.StoreDir, 0o750); err != nil {
+		return nil, fmt.Errorf("creating NATS store dir %q: %w", cfg.StoreDir, err)
 	}
 
 	opts := &natsserver.Options{

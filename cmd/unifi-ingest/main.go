@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/derekmwright/caelum/caelum"
+	"github.com/derekmwright/caelum/internal/distributed"
 	"github.com/derekmwright/caelum/internal/server"
+	"github.com/derekmwright/caelum/internal/storage/catalog"
 	"github.com/derekmwright/caelum/internal/storage/ingest"
 	"github.com/derekmwright/caelum/internal/storage/objstore"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
@@ -29,6 +31,7 @@ var (
 	s3Secret   string
 	s3Bucket   string
 
+	natsURL      string
 	pollInterval time.Duration
 	httpAddr     string
 )
@@ -50,6 +53,7 @@ func main() {
 	rootCmd.Flags().StringVar(&s3Secret, "secret-key", "minioadmin", "S3 secret key")
 	rootCmd.Flags().StringVar(&s3Bucket, "bucket", "caelum", "S3 bucket name")
 
+	rootCmd.Flags().StringVar(&natsURL, "nats-url", "", "NATS URL for shared catalog (e.g., nats://localhost:4333)")
 	rootCmd.Flags().DurationVar(&pollInterval, "poll-interval", 30*time.Second, "How often to poll the UniFi API")
 	rootCmd.Flags().StringVar(&httpAddr, "http-addr", ":8080", "HTTP API listen address for querying ingested data")
 
@@ -86,11 +90,34 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("connecting to S3: %w", err)
 	}
 
+	// Connect to shared NATS catalog if configured
+	var metaKV catalog.MetaKV
+	if natsURL != "" {
+		nc, err := distributed.Connect(natsURL)
+		if err != nil {
+			return fmt.Errorf("connecting to NATS at %s: %w", natsURL, err)
+		}
+		defer nc.Close()
+
+		js, err := distributed.NewJetStream(nc)
+		if err != nil {
+			return fmt.Errorf("creating JetStream: %w", err)
+		}
+
+		kv, err := catalog.NewNATSKV(js)
+		if err != nil {
+			return fmt.Errorf("creating NATS KV catalog: %w", err)
+		}
+		metaKV = kv
+		logger.Info("using shared NATS catalog", "url", natsURL)
+	}
+
 	// Open Caelum DB
 	db, err := caelum.Open(ctx, caelum.Config{
 		Store:  store,
 		Bucket: s3Bucket,
 		Logger: logger,
+		MetaKV: metaKV,
 	})
 	if err != nil {
 		return fmt.Errorf("opening Caelum: %w", err)

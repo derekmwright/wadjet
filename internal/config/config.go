@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,6 +19,13 @@ type Config struct {
 	Worker  Worker  `yaml:"worker"`
 	Parquet Parquet `yaml:"parquet"`
 	Auth    Auth    `yaml:"auth"`
+	GeoIP   GeoIP   `yaml:"geoip"`
+}
+
+// GeoIP configures MaxMind GeoIP database paths.
+type GeoIP struct {
+	CityDB string `yaml:"city_db"` // path to GeoLite2-City.mmdb
+	ASNDB  string `yaml:"asn_db"`  // path to GeoLite2-ASN.mmdb
 }
 
 // Auth configures authentication and authorization.
@@ -130,7 +138,7 @@ func DefaultConfig() Config {
 		},
 		NATS: NATS{
 			Port:     4222,
-			StoreDir: "/tmp/caelum-nats",
+			StoreDir: filepath.Join(os.Getenv("HOME"), ".caelum", "nats"),
 		},
 		HTTP: HTTP{
 			Addr: ":8080",

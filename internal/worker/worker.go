@@ -159,12 +159,20 @@ func (w *Worker) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully stops the worker.
+// Stop gracefully stops the worker and cleans up its JetStream consumer.
 func (w *Worker) Stop() {
 	if w.cancel != nil {
 		w.cancel()
 	}
 	w.wg.Wait()
+
+	// Delete the durable consumer so it doesn't block restarts with a new worker ID.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.js.DeleteConsumer(ctx, distributed.StreamTasks, w.config.WorkerID); err != nil {
+		w.logger.Debug("failed to delete consumer on shutdown (may already be gone)", "err", err)
+	}
+
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }
 

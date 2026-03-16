@@ -1,0 +1,28 @@
+version: "3.8"
+services:
+  superset:
+    image: apache/superset:latest
+    container_name: caelum-superset
+    ports:
+      - "8088:8088"
+    environment:
+      SUPERSET_SECRET_KEY: "caelum-dev-secret-key-change-in-prod"
+      # Connect to Caelum's pgwire on the host
+      DATABASE_HOST: host.docker.internal
+      DATABASE_PORT: 5434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - superset_home:/app/superset_home
+    command: >
+      bash -c "
+        pip install psycopg2-binary &&
+        cp -r /app/superset_home/.local/lib/python3.10/site-packages/psycopg2* /app/.venv/lib/python3.10/site-packages/ 2>/dev/null || true &&
+        superset db upgrade &&
+        superset fab create-admin --username admin --firstname Admin --lastname User --email admin@caelum.local --password admin 2>/dev/null || true &&
+        superset init &&
+        superset run -h 0.0.0.0 -p 8088
+      "
+
+volumes:
+  superset_home:

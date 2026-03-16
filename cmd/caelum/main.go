@@ -16,6 +16,7 @@ import (
 
 	"github.com/derekmwright/caelum/internal/auth"
 	"github.com/derekmwright/caelum/internal/config"
+	"github.com/derekmwright/caelum/internal/geoip"
 	"github.com/derekmwright/caelum/internal/coordinator"
 	"github.com/derekmwright/caelum/internal/distributed"
 	"github.com/derekmwright/caelum/internal/format"
@@ -49,6 +50,9 @@ var (
 	spillDir         string
 	resultStoreBytes int64
 	pgAddr           string
+	natsStoreDir     string
+	geoipCityDB      string
+	geoipASNDB       string
 )
 
 func main() {
@@ -70,12 +74,15 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&grpcAddr, "grpc-addr", ":9090", "gRPC API listen address")
 	rootCmd.PersistentFlags().IntVar(&natsPort, "nats-port", 4222, "Embedded NATS port")
 	rootCmd.PersistentFlags().StringVar(&natsURL, "nats-url", "", "NATS URL (for worker mode)")
+	rootCmd.PersistentFlags().StringVar(&natsStoreDir, "nats-store-dir", "", "NATS JetStream storage directory (default: ~/.caelum/nats)")
 	rootCmd.PersistentFlags().StringVar(&clusterID, "cluster-id", "local", "Cluster identifier for federation")
 	rootCmd.PersistentFlags().StringSliceVar(&leafRemotes, "leaf-remote", nil, "Remote NATS URLs for leaf node connections (repeatable)")
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = unlimited, no spill)")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 0, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
 	rootCmd.PersistentFlags().StringVar(&pgAddr, "pg-addr", ":5433", "PostgreSQL wire protocol listen address")
+	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
+	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(queryCmd())
@@ -129,11 +136,18 @@ func queryCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 			f, err := format.ParseFormat(outputFormat)
 			if err != nil {
 				return err
 			}
+
+			// Load GeoIP databases if configured
+			if err := loadGeoIP(nil, logger); err != nil {
+				return fmt.Errorf("loading GeoIP: %w", err)
+			}
+			defer geoip.Close()
 
 			store, err := newStore()
 			if err != nil {
@@ -325,11 +339,18 @@ func shellCmd() *cobra.Command {
 		Short: "Interactive SQL shell (standalone mode)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 			f, err := format.ParseFormat(outputFormat)
 			if err != nil {
 				return err
 			}
+
+			// Load GeoIP databases if configured
+			if err := loadGeoIP(nil, logger); err != nil {
+				return fmt.Errorf("loading GeoIP: %w", err)
+			}
+			defer geoip.Close()
 
 			store, err := newStore()
 			if err != nil {
@@ -488,6 +509,9 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	natsCfg.Port = natsPort
 	natsCfg.ClusterID = clusterID
 	natsCfg.LeafRemotes = leafRemotes
+	if natsStoreDir != "" {
+		natsCfg.StoreDir = natsStoreDir
+	}
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
@@ -519,6 +543,16 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	if err := cat.Init(ctx); err != nil {
 		return fmt.Errorf("initializing catalog: %w", err)
 	}
+
+	// Load GeoIP databases if configured
+	var fileCfg *config.Config
+	if configFile != "" {
+		fileCfg, _ = config.Load(configFile)
+	}
+	if err := loadGeoIP(fileCfg, logger); err != nil {
+		return fmt.Errorf("loading GeoIP: %w", err)
+	}
+	defer geoip.Close()
 
 	// Start worker
 	w := worker.New(worker.Config{
@@ -672,6 +706,9 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	natsCfg.Port = natsPort
 	natsCfg.ClusterID = clusterID
 	natsCfg.LeafRemotes = leafRemotes
+	if natsStoreDir != "" {
+		natsCfg.StoreDir = natsStoreDir
+	}
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
@@ -808,6 +845,16 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		return fmt.Errorf("creating JetStream: %w", err)
 	}
 
+	// Load GeoIP databases if configured
+	var fileCfg *config.Config
+	if configFile != "" {
+		fileCfg, _ = config.Load(configFile)
+	}
+	if err := loadGeoIP(fileCfg, logger); err != nil {
+		return fmt.Errorf("loading GeoIP: %w", err)
+	}
+	defer geoip.Close()
+
 	w := worker.New(worker.Config{
 		NATSUrl:          natsAddr,
 		ClusterID:        clusterID,
@@ -917,6 +964,27 @@ func buildPolicies(cfgs []config.AuthPolicy) *auth.PolicySet {
 		}
 	}
 	return auth.ParsePolicies(policyCfgs)
+}
+
+// loadGeoIP loads MaxMind GeoIP databases from CLI flags or config file.
+func loadGeoIP(cfg *config.Config, logger *slog.Logger) error {
+	cityDB, asnDB := geoipCityDB, geoipASNDB
+	if cfg != nil {
+		if cfg.GeoIP.CityDB != "" && cityDB == "" {
+			cityDB = cfg.GeoIP.CityDB
+		}
+		if cfg.GeoIP.ASNDB != "" && asnDB == "" {
+			asnDB = cfg.GeoIP.ASNDB
+		}
+	}
+	if cityDB == "" && asnDB == "" {
+		return nil
+	}
+	if err := geoip.Load(cityDB, asnDB); err != nil {
+		return err
+	}
+	logger.Info("GeoIP databases loaded", "city", cityDB, "asn", asnDB)
+	return nil
 }
 
 func buildTLSConfig(cfg config.AuthMTLS) (*tls.Config, error) {
