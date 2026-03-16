@@ -134,6 +134,122 @@ func TestBatchPool(t *testing.T) {
 	}
 }
 
+func TestBatchPoolConcurrency(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "x", Type: parquet.TypeInt64},
+		{Name: "y", Type: parquet.TypeFloat64},
+	}
+
+	pool := NewBatchPool(schema, 128)
+
+	// Hammer Get/Put from multiple goroutines
+	const goroutines = 8
+	const iterations = 100
+	done := make(chan struct{}, goroutines)
+
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for i := 0; i < iterations; i++ {
+				b := pool.Get()
+				if b == nil {
+					t.Error("Get returned nil")
+					return
+				}
+				if b.Len != 128 {
+					t.Errorf("expected batch size 128, got %d", b.Len)
+					return
+				}
+				// Simulate some work
+				pool.Put(b)
+			}
+		}()
+	}
+
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+}
+
+func TestGlobalPool(t *testing.T) {
+	gp := NewGlobalPool()
+
+	schema1 := []parquet.Column{
+		{Name: "a", Type: parquet.TypeInt64},
+	}
+	schema2 := []parquet.Column{
+		{Name: "b", Type: parquet.TypeString},
+	}
+
+	// Same schema and batch size should return the same pool
+	pool1a := gp.ForSchema(schema1, 1024)
+	pool1b := gp.ForSchema(schema1, 1024)
+	if pool1a != pool1b {
+		t.Fatal("ForSchema should return same pool for identical schema+size")
+	}
+
+	// Different schema should return a different pool
+	pool2 := gp.ForSchema(schema2, 1024)
+	if pool1a == pool2 {
+		t.Fatal("ForSchema should return different pool for different schema")
+	}
+
+	// Different batch size should return a different pool
+	pool1c := gp.ForSchema(schema1, 512)
+	if pool1a == pool1c {
+		t.Fatal("ForSchema should return different pool for different batch size")
+	}
+
+	// Verify the pool actually works
+	b := pool1a.Get()
+	if b == nil {
+		t.Fatal("Get from global pool returned nil")
+	}
+	if b.Len != 1024 {
+		t.Fatalf("expected batch size 1024, got %d", b.Len)
+	}
+	pool1a.Put(b)
+
+	b2 := pool1a.Get()
+	if b2 != b {
+		t.Fatal("expected to get same batch back from pool")
+	}
+}
+
+func TestGlobalPoolConcurrency(t *testing.T) {
+	gp := NewGlobalPool()
+
+	schemas := [][]parquet.Column{
+		{{Name: "x", Type: parquet.TypeInt64}},
+		{{Name: "y", Type: parquet.TypeFloat64}},
+		{{Name: "z", Type: parquet.TypeString}},
+	}
+
+	const goroutines = 12
+	const iterations = 50
+	done := make(chan struct{}, goroutines)
+
+	for g := 0; g < goroutines; g++ {
+		go func(id int) {
+			defer func() { done <- struct{}{} }()
+			schema := schemas[id%len(schemas)]
+			for i := 0; i < iterations; i++ {
+				pool := gp.ForSchema(schema, 256)
+				b := pool.Get()
+				if b == nil {
+					t.Error("Get returned nil")
+					return
+				}
+				pool.Put(b)
+			}
+		}(g)
+	}
+
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+}
+
 func TestVectorNetworkTypes(t *testing.T) {
 	// Test TypeIPv4
 	t.Run("IPv4", func(t *testing.T) {

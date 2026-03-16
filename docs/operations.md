@@ -33,10 +33,14 @@ Caelum exposes Prometheus metrics at `GET /metrics`.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `caelum_worker_tasks` | Counter | `type`, `status` | Tasks processed by type and outcome |
+| `caelum_worker_tasks_total` | Counter | `type`, `status` | Tasks processed by type and outcome |
 | `caelum_worker_task_duration_seconds` | Histogram | `type` | Task duration by type (buckets: 10ms–60s) |
-| `caelum_worker_active` | Gauge | — | Currently active task slots |
-| `caelum_worker_memory` | Gauge | — | Worker memory usage |
+| `caelum_worker_active_tasks` | Gauge | — | Currently active task slots |
+| `caelum_worker_memory_bytes` | Gauge | — | Worker memory usage |
+| `caelum_worker_spill_events_total` | Counter | — | Spill-to-disk events (Sort, Aggregate, Window) |
+| `caelum_worker_spill_bytes_written_total` | Counter | — | Total bytes written to spill files |
+| `caelum_worker_memory_budget_bytes` | Gauge | — | Configured per-task memory budget |
+| `caelum_worker_memory_used_bytes` | Gauge | — | Current tracked memory usage |
 
 **Coordinator metrics:**
 
@@ -91,8 +95,30 @@ histogram_quantile(0.99, rate(caelum_query_duration_seconds_bucket[5m]))
 
 **Scan throughput (rows/sec):**
 ```promql
-rate(caelum_rows_scanned_total[5m])
+rate(caelum_query_rows_scanned_total[5m])
 ```
+
+**Spill rate (events/sec):**
+```promql
+rate(caelum_worker_spill_events_total[5m])
+```
+
+**Spill volume (bytes/sec):**
+```promql
+rate(caelum_worker_spill_bytes_written_total[5m])
+```
+
+**Memory utilization vs budget:**
+```promql
+caelum_worker_memory_used_bytes / caelum_worker_memory_budget_bytes
+```
+
+**Cache hit ratio:**
+```promql
+rate(caelum_cache_hits_total[5m]) / (rate(caelum_cache_hits_total[5m]) + rate(caelum_cache_misses_total[5m]))
+```
+
+For a complete tuning methodology using these metrics, see [Performance Tuning](tuning.md).
 
 ## Health Checking
 
@@ -153,15 +179,21 @@ readinessProbe:
    - Narrow your time range
    - Add more selective WHERE conditions
 
-2. **Check file sizes:** Many small files (< 1 MB) cause high S3 LIST/GET overhead. Re-tune Bento's batch size to produce larger files (64–256 MB target).
+2. **Check for excessive spilling:** If `caelum_worker_spill_events_total` is growing rapidly, the memory budget is too tight. Increase `--memory-budget` or reduce `--max-concurrent` to give each task more headroom.
 
-3. **Check worker count:** In distributed mode, add more workers for parallelism:
+3. **Check result store usage:** If multi-stage queries are slow, enable the in-memory result store with `--result-store` to avoid S3 round-trips between stages. See [Performance Tuning](tuning.md) for sizing guidance.
+
+4. **Check file sizes:** Many small files (< 1 MB) cause high S3 LIST/GET overhead. Re-tune Bento's batch size to produce larger files (64–256 MB target).
+
+5. **Check cache hit ratio:** A low cache hit ratio means workers are re-reading data from S3. Increase `worker.cache_bytes` to hold more of the working set.
+
+6. **Check worker count:** In distributed mode, add more workers for parallelism:
    ```bash
    # Check worker count
    curl http://localhost:8080/v1/health | jq .
    ```
 
-4. **Check join order:** For JOINs, place the smaller table on the right side (it becomes the hash table build side).
+7. **Check join order:** For JOINs, place the smaller table on the right side (it becomes the hash table build side).
 
 ### Ingestion Not Appearing in Queries
 
@@ -289,12 +321,14 @@ Snappy compression typically achieves 2–4x ratio on network log data. Zstd ach
 
 ### Compute
 
-| Role | CPU | Memory | Storage |
-|------|-----|--------|---------|
-| Coordinator | 2 cores | 1 GB | Minimal (stateless) |
-| Worker (small) | 2 cores | 1 GB | 10 GB (cache) |
-| Worker (medium) | 4 cores | 2 GB | 20 GB (cache) |
-| Worker (large) | 8 cores | 4 GB | 50 GB (cache) |
+| Role | CPU | Memory | Storage | Key Flags |
+|------|-----|--------|---------|-----------|
+| Coordinator | 2 cores | 1 GB | Minimal (stateless) | — |
+| Worker (constrained) | 1–2 cores | 512 MB–1 GB | 10 GB (spill) | `--memory-budget 67108864 --result-store 16777216` |
+| Worker (moderate) | 2–4 cores | 2–4 GB | 20 GB (spill+cache) | `--memory-budget 268435456 --result-store 134217728` |
+| Worker (unconstrained) | 4–8 cores | 8–16 GB | 50 GB (spill+cache) | `--memory-budget 1073741824 --result-store 1073741824` |
+
+For detailed tuning by hardware profile, see [Performance Tuning](tuning.md).
 
 ### Network
 

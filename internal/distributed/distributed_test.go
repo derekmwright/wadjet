@@ -250,3 +250,65 @@ func TestCancelSubjectAll(t *testing.T) {
 		t.Errorf("CancelSubjectAll: got %q, want %q", got, want)
 	}
 }
+
+func TestClusterTaskSubject(t *testing.T) {
+	got := ClusterTaskSubject("afb-east", "scan", "q-100", "s-0")
+	want := "caelum.tasks.afb-east.scan.q-100.s-0"
+	if got != want {
+		t.Errorf("ClusterTaskSubject: got %q, want %q", got, want)
+	}
+}
+
+func TestClusterTasksFilter(t *testing.T) {
+	got := ClusterTasksFilter("afb-east")
+	want := "caelum.tasks.afb-east.>"
+	if got != want {
+		t.Errorf("ClusterTasksFilter: got %q, want %q", got, want)
+	}
+}
+
+func TestTaskClusterIDRoundTrip(t *testing.T) {
+	original := Task{
+		ID:        "task-1",
+		QueryID:   "q-100",
+		StageID:   "s-0",
+		Type:      TaskTypeScan,
+		ClusterID: "afb-east",
+		TableName: "sensor_data",
+		CreatedAt: time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC),
+	}
+
+	data, err := Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded Task
+	if err := Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ClusterID != "afb-east" {
+		t.Errorf("ClusterID: got %q, want %q", decoded.ClusterID, "afb-east")
+	}
+}
+
+func TestHeartbeatClusterIDRoundTrip(t *testing.T) {
+	original := WorkerHeartbeat{
+		WorkerID:  "w-1",
+		ClusterID: "afb-west",
+		Timestamp: time.Now().UTC(),
+	}
+
+	data, err := Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded WorkerHeartbeat
+	if err := Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.ClusterID != "afb-west" {
+		t.Errorf("ClusterID: got %q, want %q", decoded.ClusterID, "afb-west")
+	}
+}

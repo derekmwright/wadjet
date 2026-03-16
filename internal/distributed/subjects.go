@@ -37,6 +37,17 @@ func TaskSubject(taskType string, queryID string, stageID string) string {
 	return SubjectTasksScan[:len("caelum.tasks.")] + taskType + "." + queryID + "." + stageID
 }
 
+// ClusterTaskSubject returns the NATS subject for a task targeted at a specific cluster.
+// Format: caelum.tasks.<clusterID>.<type>.<queryID>.<stageID>
+func ClusterTaskSubject(clusterID, taskType, queryID, stageID string) string {
+	return "caelum.tasks." + clusterID + "." + taskType + "." + queryID + "." + stageID
+}
+
+// ClusterTasksFilter returns the filter subject for a worker to receive only its cluster's tasks.
+func ClusterTasksFilter(clusterID string) string {
+	return "caelum.tasks." + clusterID + ".>"
+}
+
 // ResultSubject returns the NATS subject for a result notification.
 func ResultSubject(queryID, stageID, taskID string) string {
 	return SubjectResults + "." + queryID + "." + stageID + "." + taskID

@@ -23,6 +23,7 @@ import (
 	"github.com/derekmwright/caelum/internal/planner/physical"
 	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 	"github.com/derekmwright/caelum/internal/storage/catalog"
+	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
 
 // Config holds server configuration.
@@ -79,7 +80,9 @@ func New(cfg Config, logger *slog.Logger) *Server {
 	s.mux.Get("/v1/queries/{queryID}/results", s.handleGetQueryResults)
 	s.mux.Delete("/v1/queries/{queryID}", s.handleCancelQuery)
 	s.mux.Get("/v1/tables", s.handleListTables)
+	s.mux.Post("/v1/tables", s.handleCreateTable)
 	s.mux.Get("/v1/tables/{name}", s.handleGetTable)
+	s.mux.Delete("/v1/tables/{name}", s.handleDeleteTable)
 	s.mux.Get("/v1/health", s.handleHealth)
 	if s.metrics != nil {
 		s.mux.Handle("/metrics", s.metrics.Handler())
@@ -198,6 +201,24 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	if parsed.Type == plansql.QueryShowFunctions {
 		s.handleShowFunctions(w, r, start)
+		return
+	}
+
+	// Handle CREATE TABLE
+	if parsed.Type == plansql.QueryCreateTable {
+		s.handleCreateTableSQL(w, r, parsed, start)
+		return
+	}
+
+	// Handle DROP TABLE
+	if parsed.Type == plansql.QueryDropTable {
+		s.handleDropTableSQL(w, r, parsed, start)
+		return
+	}
+
+	// Handle SHOW TABLES
+	if parsed.Type == plansql.QueryShowTables {
+		s.handleShowTables(w, r, start)
 		return
 	}
 
@@ -597,6 +618,212 @@ func (s *Server) handleShowFunctions(w http.ResponseWriter, _ *http.Request, sta
 		Rows:    rows,
 		Stats:   QueryStats{Elapsed: time.Since(start).String()},
 	})
+}
+
+// handleCreateTableSQL handles CREATE TABLE via SQL.
+func (s *Server) handleCreateTableSQL(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	ct := parsed.CreateTable
+
+	// Check write permission
+	identity := auth.IdentityFromContext(r.Context())
+	if identity != nil {
+		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
+			writeError(w, http.StatusForbidden, "insufficient permissions to create tables")
+			return
+		}
+	}
+
+	schema, err := columnDefsToSchema(ct.Columns)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.catalog.CreateTable(r.Context(), ct.Name, schema, ct.PartitionKeys); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q created", ct.Name)}},
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+	})
+}
+
+// handleDropTableSQL handles DROP TABLE via SQL.
+func (s *Server) handleDropTableSQL(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	dt := parsed.DropTable
+
+	// Check write permission
+	identity := auth.IdentityFromContext(r.Context())
+	if identity != nil {
+		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
+			writeError(w, http.StatusForbidden, "insufficient permissions to drop tables")
+			return
+		}
+	}
+
+	err := s.catalog.DropTable(r.Context(), dt.Name)
+	if err != nil {
+		if dt.IfExists {
+			writeJSON(w, http.StatusOK, QueryResponse{
+				QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+				Columns: []string{"result"},
+				Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q does not exist (no-op)", dt.Name)}},
+				Stats:   QueryStats{Elapsed: time.Since(start).String()},
+			})
+			return
+		}
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q dropped", dt.Name)}},
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+	})
+}
+
+// handleShowTables handles SHOW TABLES via SQL.
+func (s *Server) handleShowTables(w http.ResponseWriter, r *http.Request, start time.Time) {
+	tables, err := s.catalog.ListTables(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Filter by role access
+	if identity := auth.IdentityFromContext(r.Context()); identity != nil {
+		if authz := s.getAuthz(); authz != nil {
+			tables = authz.FilterTables(identity, tables)
+		}
+	}
+
+	rows := make([]map[string]any, len(tables))
+	for i, t := range tables {
+		rows[i] = map[string]any{"table_name": t}
+	}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"table_name"},
+		Rows:    rows,
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+	})
+}
+
+// CreateTableRequest is the request body for POST /v1/tables.
+type CreateTableRequest struct {
+	Name          string              `json:"name"`
+	Columns       []CreateTableColumn `json:"columns"`
+	PartitionKeys []string            `json:"partition_keys,omitempty"`
+}
+
+// CreateTableColumn defines a column in a REST table creation request.
+type CreateTableColumn struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	Nullable *bool  `json:"nullable,omitempty"` // default true
+}
+
+// handleCreateTable handles POST /v1/tables (REST endpoint).
+func (s *Server) handleCreateTable(w http.ResponseWriter, r *http.Request) {
+	// Check write permission
+	identity := auth.IdentityFromContext(r.Context())
+	if identity != nil {
+		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
+			writeError(w, http.StatusForbidden, "insufficient permissions to create tables")
+			return
+		}
+	}
+
+	var req CreateTableRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "table name is required")
+		return
+	}
+	if len(req.Columns) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one column is required")
+		return
+	}
+
+	// Convert to ColumnDef for reuse
+	defs := make([]plansql.ColumnDef, len(req.Columns))
+	for i, c := range req.Columns {
+		nullable := true
+		if c.Nullable != nil {
+			nullable = *c.Nullable
+		}
+		defs[i] = plansql.ColumnDef{
+			Name:     c.Name,
+			Type:     c.Type,
+			Nullable: nullable,
+		}
+	}
+
+	schema, err := columnDefsToSchema(defs)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := s.catalog.CreateTable(r.Context(), req.Name, schema, req.PartitionKeys); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]string{
+		"result": fmt.Sprintf("Table %q created", req.Name),
+	})
+}
+
+// handleDeleteTable handles DELETE /v1/tables/{name}.
+func (s *Server) handleDeleteTable(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+
+	// Check write permission
+	identity := auth.IdentityFromContext(r.Context())
+	if identity != nil {
+		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
+			writeError(w, http.StatusForbidden, "insufficient permissions to drop tables")
+			return
+		}
+	}
+
+	if err := s.catalog.DropTable(r.Context(), name); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"result": fmt.Sprintf("Table %q dropped", name),
+	})
+}
+
+// columnDefsToSchema converts parsed column definitions to a parquet.Schema.
+func columnDefsToSchema(defs []plansql.ColumnDef) (parquet.Schema, error) {
+	columns := make([]parquet.Column, len(defs))
+	for i, d := range defs {
+		typeID, err := parquet.ParseTypeID(d.Type)
+		if err != nil {
+			return parquet.Schema{}, fmt.Errorf("column %q: %w", d.Name, err)
+		}
+		columns[i] = parquet.Column{
+			Name:     strings.ToLower(d.Name),
+			Type:     typeID,
+			Nullable: d.Nullable,
+		}
+	}
+	return parquet.Schema{Columns: columns}, nil
 }
 
 // Ensure batch is used (it's referenced via types flowing through)

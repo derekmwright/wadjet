@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/blastrain/vitess-sqlparser/sqlparser"
-
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
 	"github.com/derekmwright/caelum/internal/engine/expr"
@@ -28,6 +26,7 @@ type PhysicalPlan struct {
 type Stage struct {
 	ID           string
 	Type         string // scan, aggregate, sort, hash_join, broadcast_join, window
+	ClusterID    string // target cluster for routing ("" = local/coordinator's cluster)
 	Dependencies []string
 	Tasks        int
 
@@ -181,6 +180,108 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 // Returns stages with dependency ordering suitable for coordinator dispatch.
 func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]Stage, error) {
 	return p.generateStages(node), nil
+}
+
+// ExpandFederatedScans checks if scan stages reference tables that exist on
+// multiple clusters. If so, it splits the scan into per-cluster scan stages
+// and rewrites downstream dependencies. Returns stages unchanged if only one
+// cluster has the table (or if federation lookup fails).
+func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
+	clusters, err := p.catalog.ListClusters()
+	if err != nil || len(clusters) <= 1 {
+		return stages // single cluster or error — no expansion needed
+	}
+
+	// Build cluster → table set
+	clusterTables := make(map[string]map[string]bool, len(clusters))
+	for _, c := range clusters {
+		m := make(map[string]bool, len(c.Tables))
+		for _, t := range c.Tables {
+			m[t] = true
+		}
+		clusterTables[c.ClusterID] = m
+	}
+
+	localID := p.catalog.ClusterID()
+	var expanded []Stage
+	oldToNew := map[string][]string{} // original stageID → replacement stageIDs
+
+	for _, stage := range stages {
+		if stage.Type != "scan" || stage.TableName == "" {
+			expanded = append(expanded, stage)
+			continue
+		}
+
+		// Find all clusters that have this table
+		var targetClusters []string
+		for _, c := range clusters {
+			if clusterTables[c.ClusterID][stage.TableName] {
+				targetClusters = append(targetClusters, c.ClusterID)
+			}
+		}
+
+		if len(targetClusters) <= 1 {
+			// Single cluster — tag with local ID, no split
+			stage.ClusterID = localID
+			expanded = append(expanded, stage)
+			continue
+		}
+
+		// Split into per-cluster scan stages
+		var replacements []string
+		for _, cid := range targetClusters {
+			newStage := stage // copy value
+			newStage.ID = fmt.Sprintf("%s-%s", stage.ID, cid)
+			newStage.ClusterID = cid
+
+			if cid != localID {
+				// Get scan files from remote manifest
+				manifest, err := p.catalog.GetRemoteManifest(cid, stage.TableName)
+				if err != nil {
+					continue // skip clusters we can't read
+				}
+				var files []string
+				for _, part := range manifest.Partitions {
+					if len(stage.PartitionFilter) > 0 && len(part.Values) > 0 {
+						if !matchesPartitionFilter(part.Values, stage.PartitionFilter) {
+							continue
+						}
+					}
+					for _, f := range part.Files {
+						files = append(files, f.Path)
+					}
+				}
+				newStage.ScanFiles = files
+				if len(files) > 0 {
+					newStage.Tasks = len(files)
+				}
+			}
+
+			replacements = append(replacements, newStage.ID)
+			expanded = append(expanded, newStage)
+		}
+		oldToNew[stage.ID] = replacements
+	}
+
+	if len(oldToNew) == 0 {
+		return expanded // nothing was split
+	}
+
+	// Rewrite dependencies: any stage depending on a split scan stage
+	// now depends on all its replacement stages
+	for i := range expanded {
+		var newDeps []string
+		for _, dep := range expanded[i].Dependencies {
+			if replacements, ok := oldToNew[dep]; ok {
+				newDeps = append(newDeps, replacements...)
+			} else {
+				newDeps = append(newDeps, dep)
+			}
+		}
+		expanded[i].Dependencies = newDeps
+	}
+
+	return expanded
 }
 
 func (p *Planner) generateStages(node *logical.Node) []Stage {
@@ -360,7 +461,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 					if pred.Raw != "" {
 						lastStage.FilterExprs = append(lastStage.FilterExprs, pred.Raw)
 					} else if pred.ASTExpr != nil {
-						lastStage.FilterExprs = append(lastStage.FilterExprs, sqlparser.String(pred.ASTExpr))
+						lastStage.FilterExprs = append(lastStage.FilterExprs, pred.ASTExpr.String())
 					}
 				}
 			}

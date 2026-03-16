@@ -231,6 +231,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}
 
+	// Expand scans to target remote clusters when table exists on multiple clusters
+	physStages = planner.ExpandFederatedScans(physStages)
+
 	if len(physStages) == 0 {
 		return &SQLResult{QueryID: queryID, Plan: planStr, Elapsed: time.Since(start)}, nil
 	}
@@ -325,20 +328,31 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, depResults map[string][]string) []distributed.Task {
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 
+	var tasks []distributed.Task
 	switch stage.Type {
 	case "scan":
-		return c.createScanTasks(queryID, stage, resultPrefix)
+		tasks = c.createScanTasks(queryID, stage, resultPrefix)
 	case "aggregate":
-		return c.createAggregateTasks(queryID, stage, resultPrefix, depResults)
+		tasks = c.createAggregateTasks(queryID, stage, resultPrefix, depResults)
 	case "sort":
-		return c.createSortTasks(queryID, stage, resultPrefix, depResults)
+		tasks = c.createSortTasks(queryID, stage, resultPrefix, depResults)
 	case "hash_join", "broadcast_join":
-		return c.createJoinTasks(queryID, stage, resultPrefix, depResults)
+		tasks = c.createJoinTasks(queryID, stage, resultPrefix, depResults)
 	case "window":
-		return c.createWindowTasks(queryID, stage, resultPrefix, depResults)
+		tasks = c.createWindowTasks(queryID, stage, resultPrefix, depResults)
 	default:
 		return nil
 	}
+
+	// Propagate cluster routing: use stage's ClusterID, or default to local
+	clusterID := stage.ClusterID
+	if clusterID == "" {
+		clusterID = c.catalog.ClusterID()
+	}
+	for i := range tasks {
+		tasks[i].ClusterID = clusterID
+	}
+	return tasks
 }
 
 // coalesceScanTargetBytes is the minimum total bytes per scan task.
@@ -887,6 +901,9 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	if err != nil {
 		return "", "", fmt.Errorf("physical plan: %w", err)
 	}
+
+	// Expand scans to target remote clusters when table exists on multiple clusters
+	physStages = planner.ExpandFederatedScans(physStages)
 
 	if len(physStages) == 0 {
 		// No work to do — register as immediately completed

@@ -3,8 +3,8 @@ package expr
 import (
 	"testing"
 
-	"github.com/blastrain/vitess-sqlparser/sqlparser"
 	"github.com/derekmwright/caelum/internal/engine/batch"
+	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
 
@@ -284,20 +284,55 @@ func TestCast(t *testing.T) {
 
 // --- Compiler tests ---
 
+// compileWhere parses a SQL statement and compiles the WHERE clause expression.
+func compileWhere(t *testing.T, sql string) Expr {
+	t.Helper()
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.WhereExpr == nil {
+		t.Fatal("no WHERE clause")
+	}
+	compiled, err := Compile(info.WhereExpr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compiled
+}
+
+// compileSelectCol parses a SQL statement and compiles the first SELECT column expression.
+func compileSelectCol(t *testing.T, sql string) Expr {
+	t.Helper()
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Columns) == 0 {
+		t.Fatal("no columns")
+	}
+	col := info.Columns[0]
+	if col.ASTExpr == nil {
+		t.Fatal("no AST expression for column")
+	}
+	compiled, err := Compile(col.ASTExpr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compiled
+}
+
 func TestCompileColumnRef(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT name FROM t WHERE id > 1"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	where := sel.Where.Expr
-
-	compiled, err := Compile(where)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileWhere(t, "SELECT name FROM t WHERE id > 1")
 	// Row 0: id=1, should be false
 	if toBool(compiled, b, 0) {
 		t.Fatal("1 > 1 should be false")
@@ -310,18 +345,7 @@ func TestCompileColumnRef(t *testing.T) {
 
 func TestCompileArithExpr(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT amount + 10 FROM t"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
-
-	compiled, err := Compile(aliased.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileSelectCol(t, "SELECT amount + 10 FROM t")
 	v := compiled.Eval(b, 0)
 	if v != 110.5 {
 		t.Fatalf("expected 110.5, got %v", v)
@@ -330,16 +354,7 @@ func TestCompileArithExpr(t *testing.T) {
 
 func TestCompileAndOr(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT * FROM t WHERE id > 1 AND amount < 100"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	compiled, err := Compile(sel.Where.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileWhere(t, "SELECT * FROM t WHERE id > 1 AND amount < 100")
 	// Row 2: id=3, amount=50.25 → true
 	if !toBool(compiled, b, 2) {
 		t.Fatal("row 2 should match")
@@ -352,16 +367,7 @@ func TestCompileAndOr(t *testing.T) {
 
 func TestCompileIn(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT * FROM t WHERE id IN (1, 3)"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	compiled, err := Compile(sel.Where.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileWhere(t, "SELECT * FROM t WHERE id IN (1, 3)")
 	if !toBool(compiled, b, 0) {
 		t.Fatal("id=1 should be in (1,3)")
 	}
@@ -375,16 +381,7 @@ func TestCompileIn(t *testing.T) {
 
 func TestCompileBetween(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT * FROM t WHERE amount BETWEEN 50 AND 150"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	compiled, err := Compile(sel.Where.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileWhere(t, "SELECT * FROM t WHERE amount BETWEEN 50 AND 150")
 	if !toBool(compiled, b, 0) {
 		t.Fatal("100.5 should be between 50 and 150")
 	}
@@ -395,16 +392,7 @@ func TestCompileBetween(t *testing.T) {
 
 func TestCompileLike(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT * FROM t WHERE name LIKE 'al%'"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	compiled, err := Compile(sel.Where.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileWhere(t, "SELECT * FROM t WHERE name LIKE 'al%'")
 	if !toBool(compiled, b, 0) {
 		t.Fatal("alice should match al%")
 	}
@@ -415,17 +403,7 @@ func TestCompileLike(t *testing.T) {
 
 func TestCompileCaseWhen(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT CASE WHEN id = 1 THEN 'one' WHEN id = 2 THEN 'two' ELSE 'other' END FROM t"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
-	compiled, err := Compile(aliased.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileSelectCol(t, "SELECT CASE WHEN id = 1 THEN 'one' WHEN id = 2 THEN 'two' ELSE 'other' END FROM t")
 	if v := compiled.Eval(b, 0); v != "one" {
 		t.Fatalf("expected one, got %v", v)
 	}
@@ -439,17 +417,7 @@ func TestCompileCaseWhen(t *testing.T) {
 
 func TestCompileFuncCall(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT upper(name) FROM t"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
-	compiled, err := Compile(aliased.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileSelectCol(t, "SELECT upper(name) FROM t")
 	if v := compiled.Eval(b, 0); v != "ALICE" {
 		t.Fatalf("expected ALICE, got %v", v)
 	}
@@ -458,17 +426,7 @@ func TestCompileFuncCall(t *testing.T) {
 func TestCompileNestedExpr(t *testing.T) {
 	b := testBatch()
 	// amount * 2 + 10
-	sql := "SELECT amount * 2 + 10 FROM t"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
-	compiled, err := Compile(aliased.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileSelectCol(t, "SELECT amount * 2 + 10 FROM t")
 	// Row 0: 100.5 * 2 + 10 = 211
 	v := compiled.Eval(b, 0)
 	if v != 211.0 {
@@ -478,16 +436,7 @@ func TestCompileNestedExpr(t *testing.T) {
 
 func TestCompileIsNull(t *testing.T) {
 	b := testBatch()
-	sql := "SELECT * FROM t WHERE name IS NOT NULL"
-	stmt, err := sqlparser.Parse(sql)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sel := stmt.(*sqlparser.Select)
-	compiled, err := Compile(sel.Where.Expr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	compiled := compileWhere(t, "SELECT * FROM t WHERE name IS NOT NULL")
 	// All rows have name set
 	if !toBool(compiled, b, 0) {
 		t.Fatal("name should not be null")
@@ -496,15 +445,20 @@ func TestCompileIsNull(t *testing.T) {
 
 func TestCompileSelectExpr(t *testing.T) {
 	sql := "SELECT amount * 2 AS doubled, upper(name) AS uname FROM t"
-	stmt, err := sqlparser.Parse(sql)
+	parsed, err := plansql.Parse(sql)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sel := stmt.(*sqlparser.Select)
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	for _, se := range sel.SelectExprs {
-		aliased := se.(*sqlparser.AliasedExpr)
-		_, name, err := CompileSelectExpr(aliased)
+	for _, col := range info.Columns {
+		if col.ASTExpr == nil {
+			continue
+		}
+		_, name, err := CompileSelectExpr(col.ASTExpr, col.Alias)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"time"
 
 	natsserver "github.com/nats-io/nats-server/v2/server"
@@ -13,10 +14,12 @@ import (
 
 // NATSConfig configures the embedded NATS server.
 type NATSConfig struct {
-	Host       string
-	Port       int
-	StoreDir   string // JetStream storage directory
-	MaxPayload int32  // max message payload in bytes (default 8 MB)
+	Host        string
+	Port        int
+	StoreDir    string // JetStream storage directory
+	MaxPayload  int32  // max message payload in bytes (default 8 MB)
+	ClusterID   string // unique cluster identifier (e.g., "central", "afb-east")
+	LeafRemotes []string // remote NATS URLs for leaf node connections (edge → central)
 }
 
 // DefaultNATSConfig returns a default NATS configuration.
@@ -50,6 +53,24 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 		MaxPayload:     cfg.MaxPayload,
 		JetStream:      true,
 		StoreDir:       cfg.StoreDir,
+		ServerName:     cfg.ClusterID,
+	}
+
+	// Configure leaf node connections to remote clusters
+	if len(cfg.LeafRemotes) > 0 {
+		var remotes []*natsserver.RemoteLeafOpts
+		for _, remote := range cfg.LeafRemotes {
+			u, err := url.Parse(remote)
+			if err != nil {
+				return nil, fmt.Errorf("parsing leaf remote URL %q: %w", remote, err)
+			}
+			remotes = append(remotes, &natsserver.RemoteLeafOpts{
+				URLs: []*url.URL{u},
+			})
+		}
+		opts.LeafNode = natsserver.LeafNodeOpts{
+			Remotes: remotes,
+		}
 	}
 
 	ns, err := natsserver.NewServer(opts)
@@ -64,7 +85,14 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 		return nil, fmt.Errorf("nats server failed to become ready")
 	}
 
-	logger.Info("embedded NATS started", "host", cfg.Host, "port", cfg.Port)
+	logFields := []any{"host", cfg.Host, "port", cfg.Port}
+	if cfg.ClusterID != "" {
+		logFields = append(logFields, "cluster_id", cfg.ClusterID)
+	}
+	if len(cfg.LeafRemotes) > 0 {
+		logFields = append(logFields, "leaf_remotes", cfg.LeafRemotes)
+	}
+	logger.Info("embedded NATS started", logFields...)
 
 	return &EmbeddedNATS{
 		server: ns,

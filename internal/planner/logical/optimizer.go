@@ -3,7 +3,7 @@ package logical
 import (
 	"strings"
 
-	"github.com/blastrain/vitess-sqlparser/sqlparser"
+	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 )
 
 // partitionKeys are the standard Hive-style partition key columns.
@@ -47,7 +47,6 @@ func pushdownPredicates(n *Node) *Node {
 
 // extractPartitionFilters finds Filter nodes above Scan nodes and extracts
 // equality predicates on partition key columns (year, month, day, hour).
-// These are propagated to the Scan node's PartitionFilter for partition pruning.
 func extractPartitionFilters(n *Node) *Node {
 	if n == nil {
 		return nil
@@ -75,8 +74,7 @@ func extractPartitionFilters(n *Node) *Node {
 	return n
 }
 
-// findDescendantScan walks through passthrough nodes (Filter, Project) to find
-// the nearest Scan node.
+// findDescendantScan walks through passthrough nodes to find the nearest Scan node.
 func findDescendantScan(n *Node) *Node {
 	if n == nil {
 		return nil
@@ -84,7 +82,6 @@ func findDescendantScan(n *Node) *Node {
 	if n.Type == NodeScan {
 		return n
 	}
-	// Walk through passthrough nodes
 	if n.Type == NodeFilter || n.Type == NodeProject {
 		if len(n.Children) > 0 {
 			return findDescendantScan(n.Children[0])
@@ -93,8 +90,7 @@ func findDescendantScan(n *Node) *Node {
 	return nil
 }
 
-// extractPartitionEqualities extracts equality predicates on partition keys
-// from a Filter node's predicates. It handles both AST expressions and raw strings.
+// extractPartitionEqualities extracts equality predicates on partition keys.
 func extractPartitionEqualities(filterNode *Node) map[string]string {
 	result := make(map[string]string)
 
@@ -114,28 +110,28 @@ func extractPartitionEqualities(filterNode *Node) map[string]string {
 	return result
 }
 
-// extractFromAST walks a vitess AST expression to find column = literal patterns
+// extractFromAST walks our AST expression to find column = literal patterns
 // on partition key columns.
-func extractFromAST(expr sqlparser.Expr, result map[string]string) {
+func extractFromAST(expr plansql.Node, result map[string]string) {
 	switch e := expr.(type) {
-	case *sqlparser.ComparisonExpr:
-		if e.Operator != "=" {
+	case *plansql.CmpExpr:
+		if e.Op != "=" {
 			return
 		}
 		col, val := extractColLiteral(e.Left, e.Right)
 		if col != "" && partitionKeys[col] {
 			result[col] = val
 		}
-	case *sqlparser.AndExpr:
+	case *plansql.AndNode:
 		extractFromAST(e.Left, result)
 		extractFromAST(e.Right, result)
-	case *sqlparser.ParenExpr:
-		extractFromAST(e.Expr, result)
+	case *plansql.ParenNode:
+		extractFromAST(e.Inner, result)
 	}
 }
 
 // extractColLiteral extracts column name and literal value from a comparison's sides.
-func extractColLiteral(left, right sqlparser.Expr) (col, val string) {
+func extractColLiteral(left, right plansql.Node) (col, val string) {
 	colName := exprColName(left)
 	litVal := exprLiteral(right)
 	if colName != "" && litVal != "" {
@@ -150,10 +146,9 @@ func extractColLiteral(left, right sqlparser.Expr) (col, val string) {
 	return "", ""
 }
 
-func exprColName(e sqlparser.Expr) string {
-	switch n := e.(type) {
-	case *sqlparser.ColName:
-		name := n.Name.String()
+func exprColName(e plansql.Node) string {
+	if n, ok := e.(*plansql.ColRef); ok {
+		name := n.Column
 		// Strip table qualifier
 		if parts := strings.SplitN(name, ".", 2); len(parts) == 2 {
 			return strings.ToLower(parts[1])
@@ -163,11 +158,9 @@ func exprColName(e sqlparser.Expr) string {
 	return ""
 }
 
-func exprLiteral(e sqlparser.Expr) string {
-	switch n := e.(type) {
-	case *sqlparser.SQLVal:
-		val := string(n.Val)
-		return val
+func exprLiteral(e plansql.Node) string {
+	if n, ok := e.(*plansql.Lit); ok {
+		return n.Value
 	}
 	return ""
 }
@@ -218,7 +211,7 @@ func splitOnAnd(raw, upper string) []string {
 	return parts
 }
 
-// pruneProjections removes unnecessary projections (e.g., SELECT * passthrough).
+// pruneProjections removes unnecessary projections.
 func pruneProjections(n *Node) *Node {
 	if n == nil {
 		return nil

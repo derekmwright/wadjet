@@ -3,7 +3,7 @@ package logical
 import (
 	"testing"
 
-	"github.com/blastrain/vitess-sqlparser/sqlparser"
+	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 )
 
 func TestExtractPartitionFilters_Equality(t *testing.T) {
@@ -93,11 +93,11 @@ func TestExtractPartitionFilters_WithAST(t *testing.T) {
 	// Test with AST-based predicate
 	scan := NewScan("events", "")
 
-	// Build: year = '2026' AST expression
-	astExpr := &sqlparser.ComparisonExpr{
-		Operator: "=",
-		Left:     &sqlparser.ColName{Name: sqlparser.NewColIdent("year")},
-		Right:    &sqlparser.SQLVal{Type: sqlparser.StrVal, Val: []byte("2026")},
+	// Build: year = '2026' AST expression using our types
+	astExpr := &plansql.CmpExpr{
+		Op:    "=",
+		Left:  &plansql.ColRef{Column: "year"},
+		Right: &plansql.Lit{Kind: plansql.LitString, Value: "2026"},
 	}
 
 	filter := NewFilter(scan, []Predicate{
@@ -114,16 +114,16 @@ func TestExtractPartitionFilters_WithAST(t *testing.T) {
 func TestExtractPartitionFilters_ASTWithAnd(t *testing.T) {
 	scan := NewScan("events", "")
 
-	astExpr := &sqlparser.AndExpr{
-		Left: &sqlparser.ComparisonExpr{
-			Operator: "=",
-			Left:     &sqlparser.ColName{Name: sqlparser.NewColIdent("year")},
-			Right:    &sqlparser.SQLVal{Type: sqlparser.StrVal, Val: []byte("2026")},
+	astExpr := &plansql.AndNode{
+		Left: &plansql.CmpExpr{
+			Op:    "=",
+			Left:  &plansql.ColRef{Column: "year"},
+			Right: &plansql.Lit{Kind: plansql.LitString, Value: "2026"},
 		},
-		Right: &sqlparser.ComparisonExpr{
-			Operator: "=",
-			Left:     &sqlparser.ColName{Name: sqlparser.NewColIdent("month")},
-			Right:    &sqlparser.SQLVal{Type: sqlparser.StrVal, Val: []byte("03")},
+		Right: &plansql.CmpExpr{
+			Op:    "=",
+			Left:  &plansql.ColRef{Column: "month"},
+			Right: &plansql.Lit{Kind: plansql.LitString, Value: "03"},
 		},
 	}
 
@@ -145,10 +145,10 @@ func TestExtractPartitionFilters_IgnoresNonEquality(t *testing.T) {
 	// Inequality predicates on partition keys should not be extracted
 	scan := NewScan("events", "")
 
-	astExpr := &sqlparser.ComparisonExpr{
-		Operator: ">",
-		Left:     &sqlparser.ColName{Name: sqlparser.NewColIdent("year")},
-		Right:    &sqlparser.SQLVal{Type: sqlparser.StrVal, Val: []byte("2025")},
+	astExpr := &plansql.CmpExpr{
+		Op:    ">",
+		Left:  &plansql.ColRef{Column: "year"},
+		Right: &plansql.Lit{Kind: plansql.LitString, Value: "2025"},
 	}
 
 	filter := NewFilter(scan, []Predicate{

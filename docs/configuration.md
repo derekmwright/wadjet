@@ -10,12 +10,19 @@ Caelum is configured through CLI flags, environment variables, and an optional Y
 |------|-------------|---------|
 | `--mode` | Deployment mode: `standalone`, `coordinator`, `worker` | `standalone` |
 | `--http-addr` | HTTP API listen address | `:8080` |
+| `--storage-type` | Storage backend: `s3` or `file` | `s3` |
+| `--data-dir` | Local directory for `--storage-type file` | none |
 | `--endpoint` | S3-compatible endpoint (host:port) | `localhost:9000` |
-| `--access-key` | S3 access key | required |
-| `--secret-key` | S3 secret key | required |
+| `--access-key` | S3 access key | required for S3 |
+| `--secret-key` | S3 secret key | required for S3 |
 | `--bucket` | S3 bucket name | `caelum` |
 | `--nats-port` | Embedded NATS port (standalone/coordinator mode) | `4222` |
 | `--nats-url` | NATS server URL (worker mode) | `nats://localhost:4222` |
+| `--cluster-id` | Unique cluster identifier for federated routing | `local` |
+| `--leaf-remote` | Remote NATS URLs for leaf node federation (repeatable) | none |
+| `--memory-budget` | Per-task memory budget in bytes (0 = unlimited, no spill) | `0` |
+| `--spill-dir` | Directory for spill-to-disk files | OS temp dir |
+| `--result-store` | In-memory result store capacity in bytes (0 = disabled) | `0` |
 | `--config` | Path to YAML config file | none |
 
 ### `query` Command
@@ -44,10 +51,44 @@ Same S3 flags as `query`. Opens an interactive SQL REPL.
 
 ## YAML Configuration File
 
-The YAML config file is used primarily for security settings and is hot-reloadable — changes take effect without restarting the server.
+The YAML config file controls all aspects of Caelum's configuration. Security settings are hot-reloadable — changes take effect without restarting the server.
 
 ```yaml
 # caelum.yaml
+
+mode: standalone  # standalone, coordinator, worker
+
+storage:
+  type: s3                    # s3 or file
+  data_dir: ""                # local directory for type=file
+  endpoint: "localhost:9000"
+  access_key: "minioadmin"
+  secret_key: "minioadmin"
+  bucket: "caelum"
+  use_ssl: false
+  region: ""
+
+nats:
+  port: 4222
+  url: ""                     # worker mode: coordinator's NATS URL
+  store_dir: "/tmp/caelum-nats"
+  cluster_id: "local"         # unique cluster ID for federation
+  leaf_remotes: []            # remote NATS URLs for leaf node connections
+
+http:
+  addr: ":8080"
+
+worker:
+  max_concurrent: 4
+  cache_bytes: 268435456      # 256 MB LRU cache
+  memory_budget: 0            # per-task memory budget (0 = unlimited, no spill)
+  spill_dir: ""               # spill directory (default: OS temp dir)
+  result_store_bytes: 0       # in-memory result store (0 = disabled, use S3)
+
+parquet:
+  compression: "snappy"       # snappy, zstd, gzip, lz4, none
+  row_group_size: 131072      # 128K rows per row group
+  page_buffer_size: 262144    # 256 KB page buffer
 
 auth:
   enabled: true
@@ -140,7 +181,14 @@ These constants are compiled into the binary and represent the default ingestion
 | Batch size | 2,048 rows | Rows per record batch during execution |
 | Worker concurrency | 4 tasks | Max concurrent tasks per worker |
 | Worker cache size | 256 MB | LRU cache for recently-read Parquet data |
+| Memory budget | 0 (unlimited) | Per-task memory limit before spilling to disk |
+| Spill directory | OS temp dir | Where Sort/Aggregate/Window spill files are written |
+| Result store | 0 (disabled) | In-memory result cache for intermediate stage results |
+| Inline result threshold | 64 KB | Results below this are embedded in NATS messages |
 | Heartbeat interval | 10 seconds | Worker heartbeat frequency |
+| Batch pool max per class | 16 | Maximum pooled RecordBatches per schema/size class |
+
+For detailed tuning guidance by hardware profile, see [Performance Tuning](tuning.md).
 
 ## Environment Variables
 

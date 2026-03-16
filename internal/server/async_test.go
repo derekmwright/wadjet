@@ -57,7 +57,7 @@ func setupTestServer(t *testing.T) (*httptest.Server, objstore.Store, *catalog.C
 	if err := store.MakeBucket(ctx, "test"); err != nil {
 		t.Fatal(err)
 	}
-	cat := catalog.New(store, "test")
+	cat := catalog.NewWithStore(store, "test")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestAsyncQueryNoCoordinator(t *testing.T) {
 	// Server without coordinator
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	store := objstore.NewMemStore()
-	cat := catalog.New(store, "test")
+	cat := catalog.NewWithStore(store, "test")
 
 	srv := server.New(server.Config{
 		Addr:    ":0",

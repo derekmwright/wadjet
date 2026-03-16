@@ -110,12 +110,114 @@ func (ing *Ingester) Stop(ctx context.Context) error {
 	return ing.FlushAll(ctx)
 }
 
+// validateRow checks that a row conforms to the table schema.
+// It verifies that all non-nullable columns are present and non-nil,
+// and that values have compatible types.
+func (ing *Ingester) validateRow(row map[string]any) error {
+	for _, col := range ing.schema.Columns {
+		v, ok := row[col.Name]
+		if !ok {
+			if !col.Nullable {
+				return fmt.Errorf("missing required column %q (NOT NULL)", col.Name)
+			}
+			continue
+		}
+		if v == nil {
+			if !col.Nullable {
+				return fmt.Errorf("column %q cannot be null (NOT NULL constraint)", col.Name)
+			}
+			continue
+		}
+		if err := checkType(col, v); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkType validates that a value is compatible with the column type.
+func checkType(col parquet.Column, v any) error {
+	switch col.Type {
+	case parquet.TypeBool:
+		if _, ok := v.(bool); !ok {
+			return fmt.Errorf("column %q: expected bool, got %T", col.Name, v)
+		}
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol:
+		switch v.(type) {
+		case int, int8, int16, int32, int64, uint8, uint16, uint32:
+			// ok
+		default:
+			return fmt.Errorf("column %q: expected integer, got %T", col.Name, v)
+		}
+	case parquet.TypeInt64:
+		switch v.(type) {
+		case int, int8, int16, int32, int64, uint8, uint16, uint32, uint64:
+			// ok
+		default:
+			return fmt.Errorf("column %q: expected integer, got %T", col.Name, v)
+		}
+	case parquet.TypeFloat32:
+		switch v.(type) {
+		case float32, float64, int, int32, int64:
+			// ok
+		default:
+			return fmt.Errorf("column %q: expected float, got %T", col.Name, v)
+		}
+	case parquet.TypeFloat64:
+		switch v.(type) {
+		case float32, float64, int, int32, int64:
+			// ok
+		default:
+			return fmt.Errorf("column %q: expected float, got %T", col.Name, v)
+		}
+	case parquet.TypeString, parquet.TypeIPv4, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeMAC, parquet.TypeUUID:
+		if _, ok := v.(string); !ok {
+			return fmt.Errorf("column %q: expected string, got %T", col.Name, v)
+		}
+	case parquet.TypeBytes:
+		switch v.(type) {
+		case []byte, string:
+			// ok
+		default:
+			return fmt.Errorf("column %q: expected bytes or string, got %T", col.Name, v)
+		}
+	case parquet.TypeTimestamp:
+		switch v.(type) {
+		case time.Time, int64, string:
+			// ok
+		default:
+			return fmt.Errorf("column %q: expected timestamp (time.Time, int64, or string), got %T", col.Name, v)
+		}
+	case parquet.TypeDate:
+		switch v.(type) {
+		case time.Time, int32, int64, string:
+			// ok
+		default:
+			return fmt.Errorf("column %q: expected date (time.Time, int, or string), got %T", col.Name, v)
+		}
+	case parquet.TypeDuration:
+		switch v.(type) {
+		case time.Duration, int64, string:
+			// ok
+		default:
+			return fmt.Errorf("column %q: expected duration (time.Duration, int64, or string), got %T", col.Name, v)
+		}
+	}
+	return nil
+}
+
 // Ingest adds rows to the buffer. Rows are partitioned based on partition key values.
+// Each row is validated against the table schema before buffering.
 func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
 	ing.mu.Lock()
 	defer ing.mu.Unlock()
 
 	for _, row := range rows {
+		// Validate row against schema
+		if err := ing.validateRow(row); err != nil {
+			return fmt.Errorf("schema validation: %w", err)
+		}
+
 		partValues := make(map[string]string, len(ing.strategy.Keys))
 		for _, key := range ing.strategy.Keys {
 			v, ok := row[key]

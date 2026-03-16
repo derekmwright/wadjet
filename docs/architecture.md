@@ -46,16 +46,18 @@ github.com/derekmwright/caelum/
 │   │   ├── parquet/        # Parquet reader/writer wrappers
 │   │   └── ingest/         # Micro-batch accumulator + partitioner
 │   ├── engine/
-│   │   ├── batch/          # Record batches, vectors, selection vectors
+│   │   ├── batch/          # Record batches, vectors, selection vectors, BatchPool
 │   │   ├── exec/           # Push-based pipeline executor
-│   │   └── expr/           # Expression compiler (SQL AST → functions)
+│   │   ├── expr/           # Expression compiler (SQL AST → functions)
+│   │   ├── memory/         # MemoryTracker, SpillManager, spill-to-disk
+│   │   └── scan/           # Scanner with 3-level pushdown
 │   ├── planner/
 │   │   ├── sql/            # SQL → SelectInfo parser (vitess-sqlparser)
 │   │   ├── logical/        # Logical plan tree + optimizer
 │   │   └── physical/       # Physical plan + distributed stages
-│   ├── coordinator/        # Distributed query coordinator
-│   ├── worker/             # Distributed task executor
-│   ├── distributed/        # NATS messaging layer
+│   ├── coordinator/        # Distributed query coordinator + federated routing
+│   ├── worker/             # Distributed task executor + result store
+│   ├── distributed/        # NATS messaging layer + cluster-scoped subjects
 │   ├── auth/               # Authentication + authorization
 │   ├── config/             # YAML config with hot-reload
 │   ├── server/             # HTTP API (net/http)
@@ -107,6 +109,14 @@ RecordBatch
 ```
 
 **Selection vectors** avoid copying data during filtering — instead, only the indices of matching rows are tracked.
+
+### Batch Pool
+
+Record batches are reused via `BatchPool` — a thread-safe, per-schema object pool that avoids allocation on the hot path. Batches are pooled by schema and row count, with up to 16 batches cached per size class.
+
+`GlobalPool` provides cross-operator batch sharing: multiple operators with the same schema share a single pool, improving reuse in multi-operator pipelines.
+
+> **Future: Go Arenas.** When Go arenas reach GA (currently experimental behind `GOEXPERIMENT=arenas`), the BatchPool backing allocator should be swapped to arena-based allocation. Arena lifecycle maps naturally to batch lifecycle: allocate vectors/bitmaps from an arena, free the entire arena when the batch is released. This would eliminate GC pressure on the batch processing path entirely. The pool abstraction makes this swap straightforward — only `Get()` and the underlying allocation need to change.
 
 ## Query Execution Pipeline
 
@@ -243,29 +253,83 @@ The ingester is a micro-batch accumulator that:
 - **Reader**: Reads full row groups, automatically maps Parquet schema to Caelum types
 - **Schema inference**: Parquet physical/logical types are mapped to Caelum types (including network primitives)
 
+## Memory Management
+
+### Per-Task Memory Budget
+
+Each task can be assigned a memory budget via `worker.memory_budget`. When an operator (Sort, HashAggregate, Window) exceeds the budget, it spills intermediate state to disk rather than growing memory unboundedly.
+
+```
+Task starts → MemoryTracker created with budget
+  → Operator allocates → Tracker.Reserve(n)
+    → If within budget: proceed in memory
+    → If exceeds budget: SpillManager writes to disk
+  → Task completes → SpillManager.Cleanup() removes temp files
+```
+
+This makes workers viable at 512 MB - 2 GB RAM. Without budgets, a large sort or aggregation could OOM the worker.
+
+### Result Store
+
+The **ResultStore** is an in-memory cache for intermediate stage results, avoiding S3 round-trips when stages execute on the same worker.
+
+```
+Without ResultStore:                    With ResultStore:
+Stage 1 → write to S3 → Stage 2        Stage 1 → memory → Stage 2
+          ~50-200ms per hop                       ~0ms
+```
+
+The result store is keyed by S3 path (what the result *would* be stored as), bounded by a configurable capacity (`worker.result_store_bytes`). When full, new results fall back to S3 transparently. Per-query cleanup removes entries after a query completes.
+
+Results smaller than 64 KB bypass both the result store and S3 — they are embedded directly in the NATS result notification message (inline fast path).
+
+### Spill Metrics
+
+Prometheus metrics track spill behavior for tuning:
+- `caelum_worker_spill_events_total` — number of spill-to-disk events
+- `caelum_worker_spill_bytes_written_total` — bytes written to spill files
+- `caelum_worker_memory_budget_bytes` — configured per-task budget
+- `caelum_worker_memory_used_bytes` — current tracked memory usage
+
+See [Performance Tuning](tuning.md) for guidance on sizing memory budgets and result stores.
+
 ## Distributed Execution
 
 ```
 ┌─────────────┐     NATS/JetStream      ┌─────────────┐
 │ Coordinator  │◄──────────────────────►│   Worker 1   │
-│              │     tasks stream        │              │
+│              │     tasks stream        │   (central)  │
 │  - Plans     │     results subjects    │  - Executor  │
 │  - Dispatches│                         │  - LRU Cache │
-│  - Merges    │                         └─────────────┘
+│  - Merges    │                         │  - ResultStore│
+│  - Federation│                         └─────────────┘
 │              │                         ┌─────────────┐
 │              │◄──────────────────────►│   Worker 2   │
-└─────────────┘                         │              │
-                                         │  - Executor  │
-                                         │  - LRU Cache │
-                                         └─────────────┘
+└─────────────┘                         │   (central)  │
+       │                                 │  - Executor  │
+       │ Leaf Node                       │  - LRU Cache │
+       │ Connection                      │  - ResultStore│
+       │                                 └─────────────┘
+       ▼
+┌─────────────┐                         ┌─────────────┐
+│ Remote NATS  │◄──────────────────────►│   Worker 3   │
+│ (site-east)  │                         │  (site-east) │
+└─────────────┘                         └─────────────┘
 ```
 
-- **Coordinator**: Receives queries, builds plans, dispatches task messages to NATS, collects results, merges final output
-- **Workers**: Pull tasks from a JetStream consumer, execute locally (scan, aggregate, join, sort), write intermediate results to object storage, publish completion notifications
-- **Heartbeats**: Workers send heartbeats every 10 seconds; coordinator reaps workers that miss heartbeats
-- **Task types**: `scan`, `aggregate`, `join`, `sort`
+- **Coordinator**: Receives queries, builds plans, dispatches task messages to NATS, collects results, merges final output. For federated queries, splits scan stages per cluster.
+- **Workers**: Pull tasks from a JetStream consumer, execute locally (scan, aggregate, join, sort, window), write intermediate results to result store or S3, publish completion notifications. Cluster-scoped: workers only pull tasks for their cluster.
+- **Heartbeats**: Workers send heartbeats (with cluster ID) every 10 seconds; coordinator reaps workers that miss heartbeats
+- **Task types**: `scan`, `aggregate`, `join`, `sort`, `window`
+- **Task routing**: Tasks are published to cluster-scoped NATS subjects (`caelum.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`). Workers subscribe to their cluster's filter (`caelum.tasks.<cluster-id>.>`)
 - **Worker concurrency**: 4 concurrent tasks per worker (default)
 - **Worker cache**: 256 MB LRU cache for recently-read Parquet data
+
+### Federation
+
+In federated deployments, data lives on multiple clusters (e.g., a central data center and regional sites). The coordinator automatically detects multi-cluster tables and splits scan stages per cluster, routing each to workers at the cluster where the data resides. Downstream aggregation and merge stages run on the central cluster.
+
+See [Distributed Deployment](distributed.md) for federation setup details.
 
 ## Security Model
 

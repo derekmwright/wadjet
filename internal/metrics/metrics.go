@@ -41,6 +41,12 @@ type Metrics struct {
 	BatchesProcessed prometheus.Counter
 	RowsOutput       prometheus.Counter
 
+	// Memory/Spill metrics
+	SpillEvents       prometheus.Counter
+	SpillBytesWritten prometheus.Counter
+	MemoryBudgetBytes prometheus.Gauge
+	MemoryUsedBytes   prometheus.Gauge
+
 	// Cache metrics
 	CacheHits   prometheus.Counter
 	CacheMisses prometheus.Counter
@@ -175,6 +181,34 @@ func New() *Metrics {
 			Help:      "Total result rows output to clients.",
 		}),
 
+		SpillEvents: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "caelum",
+			Subsystem: "worker",
+			Name:      "spill_events_total",
+			Help:      "Total number of spill-to-disk events.",
+		}),
+
+		SpillBytesWritten: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: "caelum",
+			Subsystem: "worker",
+			Name:      "spill_bytes_written_total",
+			Help:      "Total bytes written to spill files.",
+		}),
+
+		MemoryBudgetBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "caelum",
+			Subsystem: "worker",
+			Name:      "memory_budget_bytes",
+			Help:      "Configured per-task memory budget in bytes.",
+		}),
+
+		MemoryUsedBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "caelum",
+			Subsystem: "worker",
+			Name:      "memory_used_bytes",
+			Help:      "Current memory usage tracked by the memory tracker.",
+		}),
+
 		CacheHits: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: "caelum",
 			Subsystem: "cache",
@@ -217,6 +251,10 @@ func New() *Metrics {
 		m.RegisteredWorkers,
 		m.BatchesProcessed,
 		m.RowsOutput,
+		m.SpillEvents,
+		m.SpillBytesWritten,
+		m.MemoryBudgetBytes,
+		m.MemoryUsedBytes,
 		m.CacheHits,
 		m.CacheMisses,
 		m.CacheBytes,

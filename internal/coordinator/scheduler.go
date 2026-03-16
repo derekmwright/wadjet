@@ -43,8 +43,15 @@ func (s *Scheduler) PublishTasks(_ context.Context, tasks []distributed.Task) er
 		if err != nil {
 			return fmt.Errorf("marshaling task %s: %w", task.ID, err)
 		}
+
+		// Use cluster-scoped subject when ClusterID is set
+		subject := distributed.TaskSubject(string(task.Type), task.QueryID, task.StageID)
+		if task.ClusterID != "" {
+			subject = distributed.ClusterTaskSubject(task.ClusterID, string(task.Type), task.QueryID, task.StageID)
+		}
+
 		batch = append(batch, prepared{
-			subject: distributed.TaskSubject(string(task.Type), task.QueryID, task.StageID),
+			subject: subject,
 			data:    data,
 			task:    task,
 		})

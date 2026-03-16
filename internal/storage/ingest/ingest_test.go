@@ -23,7 +23,7 @@ const testTable = "events"
 func setupCatalog(t *testing.T) (*catalog.Catalog, objstore.Store) {
 	t.Helper()
 	store := objstore.NewMemStore()
-	cat := catalog.New(store, testBucket)
+	cat := catalog.NewWithStore(store, testBucket)
 	ctx := context.Background()
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
@@ -194,5 +194,145 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.RowGroupSize != 128*1024 {
 		t.Errorf("expected RowGroupSize 128K, got %d", cfg.RowGroupSize)
+	}
+}
+
+func TestIngestValidation_MissingRequiredColumn(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	_ = cat.Init(ctx)
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+		{Name: "name", Type: parquet.TypeString, Nullable: true},
+		{Name: "year", Type: parquet.TypeString, Nullable: false},
+	}}
+	_ = cat.CreateTable(ctx, "strict", schema, []string{"year"})
+
+	ing := New(cat, "strict", schema, []string{"year"}, DefaultConfig())
+
+	// Missing required column "id"
+	err := ing.Ingest(ctx, []map[string]any{
+		{"name": "alice", "year": "2025"},
+	})
+	if err == nil {
+		t.Fatal("expected error for missing NOT NULL column")
+	}
+	if !strings.Contains(err.Error(), "missing required column") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestIngestValidation_NullInNotNullColumn(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	_ = cat.Init(ctx)
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+		{Name: "year", Type: parquet.TypeString, Nullable: false},
+	}}
+	_ = cat.CreateTable(ctx, "strict2", schema, []string{"year"})
+
+	ing := New(cat, "strict2", schema, []string{"year"}, DefaultConfig())
+
+	// Null value for NOT NULL column
+	err := ing.Ingest(ctx, []map[string]any{
+		{"id": nil, "year": "2025"},
+	})
+	if err == nil {
+		t.Fatal("expected error for null in NOT NULL column")
+	}
+	if !strings.Contains(err.Error(), "cannot be null") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestIngestValidation_WrongType(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	_ = cat.Init(ctx)
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+		{Name: "name", Type: parquet.TypeString, Nullable: true},
+		{Name: "year", Type: parquet.TypeString, Nullable: false},
+	}}
+	_ = cat.CreateTable(ctx, "typed", schema, []string{"year"})
+
+	ing := New(cat, "typed", schema, []string{"year"}, DefaultConfig())
+
+	// Wrong type: string where int64 expected
+	err := ing.Ingest(ctx, []map[string]any{
+		{"id": "not-a-number", "name": "alice", "year": "2025"},
+	})
+	if err == nil {
+		t.Fatal("expected error for wrong type")
+	}
+	if !strings.Contains(err.Error(), "expected integer") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestIngestValidation_NullableColumnMissing(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	_ = cat.Init(ctx)
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+		{Name: "name", Type: parquet.TypeString, Nullable: true},
+		{Name: "year", Type: parquet.TypeString, Nullable: false},
+	}}
+	_ = cat.CreateTable(ctx, "nullable", schema, []string{"year"})
+
+	ing := New(cat, "nullable", schema, []string{"year"}, DefaultConfig())
+
+	// Missing nullable column "name" should be OK
+	err := ing.Ingest(ctx, []map[string]any{
+		{"id": int64(1), "year": "2025"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error for missing nullable column: %v", err)
+	}
+}
+
+func TestIngestValidation_NetworkTypes(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	_ = cat.Init(ctx)
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "src_ip", Type: parquet.TypeIPv4, Nullable: false},
+		{Name: "dst_ip", Type: parquet.TypeIPv6, Nullable: true},
+		{Name: "mac", Type: parquet.TypeMAC, Nullable: true},
+		{Name: "year", Type: parquet.TypeString, Nullable: false},
+	}}
+	_ = cat.CreateTable(ctx, "network", schema, []string{"year"})
+
+	ing := New(cat, "network", schema, []string{"year"}, DefaultConfig())
+
+	// Valid: string values for network types
+	err := ing.Ingest(ctx, []map[string]any{
+		{"src_ip": "192.168.1.1", "dst_ip": "::1", "mac": "aa:bb:cc:dd:ee:ff", "year": "2025"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error for valid network types: %v", err)
+	}
+
+	// Invalid: integer where string expected for IPV4
+	err = ing.Ingest(ctx, []map[string]any{
+		{"src_ip": 12345, "year": "2025"},
+	})
+	if err == nil {
+		t.Fatal("expected error for integer in IPV4 column")
+	}
+	if !strings.Contains(err.Error(), "expected string") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

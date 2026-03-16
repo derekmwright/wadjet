@@ -64,6 +64,8 @@ func (m *Manager) Apply(newCfg *Config) error {
 	frozen.NATS.Port = old.NATS.Port
 	frozen.NATS.URL = old.NATS.URL
 	frozen.NATS.StoreDir = old.NATS.StoreDir
+	frozen.NATS.ClusterID = old.NATS.ClusterID
+	frozen.NATS.LeafRemotes = old.NATS.LeafRemotes
 
 	if err := validate(&frozen); err != nil {
 		return fmt.Errorf("config validation: %w", err)

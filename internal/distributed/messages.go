@@ -24,6 +24,7 @@ type Task struct {
 	QueryID   string   `json:"query_id"`
 	StageID   string   `json:"stage_id"`
 	Type      TaskType `json:"type"`
+	ClusterID string   `json:"cluster_id,omitempty"` // target cluster for routing
 	TableName string   `json:"table_name,omitempty"`
 
 	// Scan-specific
@@ -103,6 +104,7 @@ type ResultNotification struct {
 // WorkerHeartbeat is periodically sent by workers.
 type WorkerHeartbeat struct {
 	WorkerID     string    `json:"worker_id"`
+	ClusterID    string    `json:"cluster_id,omitempty"` // cluster this worker belongs to
 	ActiveTasks  int       `json:"active_tasks"`
 	MemoryUsed   int64     `json:"memory_used"`
 	MemoryTotal  int64     `json:"memory_total"`

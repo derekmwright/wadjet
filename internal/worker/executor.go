@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
 	"time"
 
 	"sort"
@@ -14,6 +16,8 @@ import (
 	"github.com/derekmwright/caelum/internal/distributed"
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
+	"github.com/derekmwright/caelum/internal/engine/memory"
+	"github.com/derekmwright/caelum/internal/metrics"
 	"github.com/derekmwright/caelum/internal/storage/objstore"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
@@ -22,13 +26,63 @@ const inlineResultThreshold = 64 * 1024 // 64 KB
 
 // Executor dispatches task types to the appropriate execution logic.
 type Executor struct {
-	store objstore.Store
-	cache *LRUCache
+	store        objstore.Store
+	cache        *LRUCache
+	resultStore  *ResultStore // in-memory result passing between stages (nil = disabled)
+	memoryBudget int64        // per-task memory budget in bytes (0 = unlimited)
+	spillDir     string       // directory for spill files
+	metrics      *metrics.Metrics
+	logger       *slog.Logger
 }
 
 // NewExecutor creates a new task executor.
 func NewExecutor(store objstore.Store, cache *LRUCache) *Executor {
-	return &Executor{store: store, cache: cache}
+	return &Executor{store: store, cache: cache, logger: slog.Default()}
+}
+
+// SetMemoryBudget configures the per-task memory budget and spill directory.
+func (e *Executor) SetMemoryBudget(budget int64, spillDir string) {
+	e.memoryBudget = budget
+	e.spillDir = spillDir
+}
+
+// SetResultStore attaches an in-memory result store for inter-stage result passing.
+func (e *Executor) SetResultStore(rs *ResultStore) {
+	e.resultStore = rs
+}
+
+// SetMetrics attaches Prometheus metrics for spill/memory tracking.
+func (e *Executor) SetMetrics(m *metrics.Metrics) {
+	e.metrics = m
+}
+
+// SetLogger sets the executor's logger.
+func (e *Executor) SetLogger(l *slog.Logger) {
+	e.logger = l
+}
+
+// newSpillManager creates a Tracker + SpillManager for a task if memory budget is configured.
+// Returns nil, nil if budget is 0 (unlimited).
+func (e *Executor) newSpillManager(taskID string) (*memory.SpillManager, *memory.Tracker) {
+	if e.memoryBudget <= 0 {
+		return nil, nil
+	}
+
+	tracker := memory.NewTracker(taskID, e.memoryBudget)
+
+	dir := e.spillDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+
+	sm, err := memory.NewSpillManager(dir, tracker)
+	if err != nil {
+		e.logger.Warn("failed to create spill manager, running without spill",
+			"task_id", taskID, "error", err)
+		return nil, tracker
+	}
+
+	return sm, tracker
 }
 
 // Execute runs a task and returns the result notification.
@@ -213,6 +267,15 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 	}
 
 	agg := exec.NewHashAggregate(task.GroupByCols, aggs)
+
+	// Wire spill manager if memory budget is set
+	spill, tracker := e.newSpillManager(task.ID)
+	if spill != nil {
+		agg.Spill = spill
+		defer spill.Cleanup()
+		defer e.recordSpillMetrics(spill, tracker)
+	}
+
 	if err := agg.Init(ctx); err != nil {
 		return err
 	}
@@ -272,6 +335,15 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 	}
 
 	sortOp := exec.NewSort(keys)
+
+	// Wire spill manager if memory budget is set
+	spill, tracker := e.newSpillManager(task.ID)
+	if spill != nil {
+		sortOp.Spill = spill
+		defer spill.Cleanup()
+		defer e.recordSpillMetrics(spill, tracker)
+	}
+
 	if err := sortOp.Init(ctx); err != nil {
 		return err
 	}
@@ -436,6 +508,15 @@ func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, res
 	}
 
 	winOp := exec.NewWindow(winCols)
+
+	// Wire spill manager if memory budget is set
+	spill, tracker := e.newSpillManager(task.ID)
+	if spill != nil {
+		winOp.Spill = spill
+		defer spill.Cleanup()
+		defer e.recordSpillMetrics(spill, tracker)
+	}
+
 	if err := winOp.Init(ctx); err != nil {
 		return err
 	}
@@ -517,7 +598,18 @@ func mapExecJoinType(jt string) exec.JoinType {
 }
 
 func (e *Executor) readParquetFile(ctx context.Context, bucket, path string, selectedCols []string) ([]map[string]any, error) {
-	// Check cache first
+	// Check in-memory result store first (avoids S3 round-trip for same-node stages)
+	if e.resultStore != nil {
+		if data, ok := e.resultStore.Get(path); ok {
+			reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				return nil, err
+			}
+			return reader.ReadRows(selectedCols)
+		}
+	}
+
+	// Check LRU cache
 	cacheKey := bucket + "/" + path
 	if data, ok := e.cache.Get(cacheKey); ok {
 		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
@@ -572,8 +664,15 @@ func (e *Executor) writeResult(ctx context.Context, task distributed.Task, rows 
 		return nil
 	}
 
-	// Write to S3
 	resultPath := task.ResultPrefix + task.ID + ".parquet"
+
+	// Try in-memory result store first (avoids S3 write for same-node stages)
+	if e.resultStore != nil && e.resultStore.Put(task.QueryID, resultPath, data) {
+		result.ResultPath = resultPath
+		return nil
+	}
+
+	// Fall back to S3
 	_, err = e.store.Put(ctx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
 	if err != nil {
 		return fmt.Errorf("writing result to S3: %w", err)
@@ -625,6 +724,32 @@ func schemaFromRows(rows []map[string]any) []parquet.Column {
 		cols[i] = col
 	}
 	return cols
+}
+
+// recordSpillMetrics updates Prometheus counters with spill stats after a task completes.
+func (e *Executor) recordSpillMetrics(spill *memory.SpillManager, tracker *memory.Tracker) {
+	if e.metrics == nil {
+		return
+	}
+
+	files := spill.SpilledFiles()
+	if len(files) > 0 {
+		e.metrics.SpillEvents.Add(float64(len(files)))
+
+		// Sum spill file sizes
+		var totalBytes int64
+		for _, f := range files {
+			if info, err := os.Stat(f); err == nil {
+				totalBytes += info.Size()
+			}
+		}
+		e.metrics.SpillBytesWritten.Add(float64(totalBytes))
+	}
+
+	if tracker != nil {
+		e.metrics.MemoryBudgetBytes.Set(float64(tracker.Budget()))
+		e.metrics.MemoryUsedBytes.Set(float64(tracker.Used()))
+	}
 }
 
 func parseAggFunc(s string) exec.AggFunc {

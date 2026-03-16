@@ -32,6 +32,7 @@ type Config struct {
 	Store  objstore.Store
 	Bucket string
 	Logger *slog.Logger
+	MetaKV catalog.MetaKV // optional: NATS KV for production, nil = in-memory
 }
 
 // Open creates and initializes a new Caelum database.
@@ -40,7 +41,12 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		cfg.Logger = slog.Default()
 	}
 
-	cat := catalog.New(cfg.Store, cfg.Bucket)
+	var cat *catalog.Catalog
+	if cfg.MetaKV != nil {
+		cat = catalog.New(cfg.MetaKV, cfg.Store, cfg.Bucket)
+	} else {
+		cat = catalog.NewWithStore(cfg.Store, cfg.Bucket)
+	}
 	if err := cat.Init(ctx); err != nil {
 		return nil, fmt.Errorf("initializing catalog: %w", err)
 	}
@@ -99,6 +105,12 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return db.dropFunction(parsed.DropFunction)
 	case plansql.QueryShowFunctions:
 		return db.showFunctions()
+	case plansql.QueryCreateTable:
+		return db.createTableSQL(ctx, parsed.CreateTable)
+	case plansql.QueryDropTable:
+		return db.dropTableSQL(ctx, parsed.DropTable)
+	case plansql.QueryShowTables:
+		return db.showTables(ctx)
 	}
 
 	selectInfo, err := plansql.ExtractSelect(parsed)
@@ -322,6 +334,69 @@ func (db *DB) showFunctions() (*QueryResult, error) {
 		Columns: []string{"name", "params", "body", "owner", "locked"},
 		Rows:    rows,
 	}, nil
+}
+
+func (db *DB) createTableSQL(ctx context.Context, ct *plansql.CreateTableInfo) (*QueryResult, error) {
+	schema, err := columnDefsToSchema(ct.Columns)
+	if err != nil {
+		return nil, err
+	}
+	if err := db.catalog.CreateTable(ctx, ct.Name, schema, ct.PartitionKeys); err != nil {
+		return nil, err
+	}
+	return &QueryResult{
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q created", ct.Name)}},
+	}, nil
+}
+
+func (db *DB) dropTableSQL(ctx context.Context, dt *plansql.DropTableInfo) (*QueryResult, error) {
+	err := db.catalog.DropTable(ctx, dt.Name)
+	if err != nil {
+		if dt.IfExists {
+			return &QueryResult{
+				Columns: []string{"result"},
+				Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q does not exist (no-op)", dt.Name)}},
+			}, nil
+		}
+		return nil, err
+	}
+	return &QueryResult{
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q dropped", dt.Name)}},
+	}, nil
+}
+
+func (db *DB) showTables(ctx context.Context) (*QueryResult, error) {
+	tables, err := db.catalog.ListTables(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]map[string]any, len(tables))
+	for i, t := range tables {
+		rows[i] = map[string]any{"table_name": t}
+	}
+	return &QueryResult{
+		Columns: []string{"table_name"},
+		Rows:    rows,
+	}, nil
+}
+
+// columnDefsToSchema converts parsed column definitions to a parquet.Schema.
+func columnDefsToSchema(defs []plansql.ColumnDef) (parquet.Schema, error) {
+	columns := make([]parquet.Column, len(defs))
+	for i, d := range defs {
+		typeID, err := parquet.ParseTypeID(d.Type)
+		if err != nil {
+			return parquet.Schema{}, fmt.Errorf("column %q: %w", d.Name, err)
+		}
+		columns[i] = parquet.Column{
+			Name:     strings.ToLower(d.Name),
+			Type:     typeID,
+			Nullable: d.Nullable,
+		}
+	}
+	return parquet.Schema{Columns: columns}, nil
 }
 
 // Catalog returns the underlying catalog for advanced usage.

@@ -25,6 +25,20 @@ const (
 	TokenComma     // ,
 	TokenSemicolon // ;
 	TokenStar      // *
+	TokenDot       // .
+
+	// Operators
+	TokenPlus    // +
+	TokenMinus   // -
+	TokenSlash   // /
+	TokenPercent // %
+	TokenConcat  // ||
+	TokenEq      // =
+	TokenNotEq   // != or <>
+	TokenLT      // <
+	TokenLTEq    // <=
+	TokenGT      // >
+	TokenGTEq    // >=
 
 	// Keywords (case-insensitive, val is always uppercase)
 	TokenKWCreate
@@ -45,6 +59,48 @@ const (
 	TokenKWDesc
 	TokenKWWith
 	TokenKWLock
+	TokenKWTable
+	TokenKWTables
+	TokenKWNot
+	TokenKWNull
+	TokenKWPartition
+	TokenKWBy
+
+	// SQL query keywords
+	TokenKWSelect
+	TokenKWWhere
+	TokenKWGroup
+	TokenKWHaving
+	TokenKWOrder
+	TokenKWLimit
+	TokenKWOffset
+	TokenKWAsc
+	TokenKWDistinct
+	TokenKWAll
+	TokenKWUnion
+	TokenKWAnd
+	TokenKWIn
+	TokenKWBetween
+	TokenKWLike
+	TokenKWIs
+	TokenKWTrue
+	TokenKWFalse
+	TokenKWCase
+	TokenKWWhen
+	TokenKWThen
+	TokenKWElse
+	TokenKWEnd
+	TokenKWCast
+	TokenKWJoin
+	TokenKWOn
+	TokenKWInner
+	TokenKWLeft
+	TokenKWRight
+	TokenKWOuter
+	TokenKWFull
+	TokenKWCross
+	TokenKWNatural
+	TokenKWOver
 
 	// Raw capture
 	TokenRawBody // everything after AS until terminator
@@ -71,6 +127,46 @@ var keywords = map[string]TokenType{
 	"DESC":      TokenKWDesc,
 	"WITH":      TokenKWWith,
 	"LOCK":      TokenKWLock,
+	"TABLE":     TokenKWTable,
+	"TABLES":    TokenKWTables,
+	"NOT":       TokenKWNot,
+	"NULL":      TokenKWNull,
+	"PARTITION": TokenKWPartition,
+	"BY":        TokenKWBy,
+	"SELECT":    TokenKWSelect,
+	"WHERE":     TokenKWWhere,
+	"GROUP":     TokenKWGroup,
+	"HAVING":    TokenKWHaving,
+	"ORDER":     TokenKWOrder,
+	"LIMIT":     TokenKWLimit,
+	"OFFSET":    TokenKWOffset,
+	"ASC":       TokenKWAsc,
+	"DISTINCT":  TokenKWDistinct,
+	"ALL":       TokenKWAll,
+	"UNION":     TokenKWUnion,
+	"AND":       TokenKWAnd,
+	"IN":        TokenKWIn,
+	"BETWEEN":   TokenKWBetween,
+	"LIKE":      TokenKWLike,
+	"IS":        TokenKWIs,
+	"TRUE":      TokenKWTrue,
+	"FALSE":     TokenKWFalse,
+	"CASE":      TokenKWCase,
+	"WHEN":      TokenKWWhen,
+	"THEN":      TokenKWThen,
+	"ELSE":      TokenKWElse,
+	"END":       TokenKWEnd,
+	"CAST":      TokenKWCast,
+	"JOIN":      TokenKWJoin,
+	"ON":        TokenKWOn,
+	"INNER":     TokenKWInner,
+	"LEFT":      TokenKWLeft,
+	"RIGHT":     TokenKWRight,
+	"OUTER":     TokenKWOuter,
+	"FULL":      TokenKWFull,
+	"CROSS":     TokenKWCross,
+	"NATURAL":   TokenKWNatural,
+	"OVER":      TokenKWOver,
 }
 
 // token is a lexical token produced by the lexer.
@@ -350,6 +446,60 @@ func lexStart(l *lexer) stateFn {
 	case r == '*':
 		l.emit(TokenStar)
 		return nil
+	case r == '.':
+		l.emit(TokenDot)
+		return nil
+	case r == '+':
+		l.emit(TokenPlus)
+		return nil
+	case r == '-':
+		l.emit(TokenMinus)
+		return nil
+	case r == '/':
+		l.emit(TokenSlash)
+		return nil
+	case r == '%':
+		l.emit(TokenPercent)
+		return nil
+	case r == '=':
+		l.emit(TokenEq)
+		return nil
+	case r == '!':
+		if l.peek() == '=' {
+			l.next()
+			l.emit(TokenNotEq)
+			return nil
+		}
+		return l.errorf("unexpected character: !")
+	case r == '<':
+		p := l.peek()
+		if p == '=' {
+			l.next()
+			l.emit(TokenLTEq)
+			return nil
+		}
+		if p == '>' {
+			l.next()
+			l.emit(TokenNotEq)
+			return nil
+		}
+		l.emit(TokenLT)
+		return nil
+	case r == '>':
+		if l.peek() == '=' {
+			l.next()
+			l.emit(TokenGTEq)
+			return nil
+		}
+		l.emit(TokenGT)
+		return nil
+	case r == '|':
+		if l.peek() == '|' {
+			l.next()
+			l.emit(TokenConcat)
+			return nil
+		}
+		return l.errorf("unexpected character: |")
 	case r == '\'':
 		return lexString
 	case r >= '0' && r <= '9':

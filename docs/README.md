@@ -14,8 +14,9 @@ Caelum is an analytical query engine written in Go, inspired by systems like Duc
 | [SQL Reference](sql-reference.md) | Supported SQL syntax, functions, operators |
 | [HTTP API](api-reference.md) | REST endpoints for queries, tables, health |
 | [Embedding](embedding.md) | Using Caelum as a Go library via `pkg/caelum` |
-| [Distributed Deployment](distributed.md) | Multi-node setup with NATS and S3 |
+| [Distributed Deployment](distributed.md) | Multi-node setup, federation, cluster routing |
 | [Security](security.md) | API keys, JWT, mTLS, RBAC, cell-level policies |
+| [Performance Tuning](tuning.md) | Environment profiles, memory/spill tuning, methodology |
 | [Network Analytics Workflow](network-analytics.md) | End-to-end: device logs -> Bento -> Caelum -> app |
 | [Operations](operations.md) | Monitoring, Prometheus metrics, troubleshooting |
 

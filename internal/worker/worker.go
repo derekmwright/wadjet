@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/derekmwright/caelum/internal/distributed"
+	"github.com/derekmwright/caelum/internal/metrics"
 	"github.com/derekmwright/caelum/internal/storage/objstore"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
@@ -17,10 +18,14 @@ import (
 
 // Config holds worker configuration.
 type Config struct {
-	NATSUrl       string
-	WorkerID      string
-	MaxConcurrent int    // max concurrent tasks
-	CacheBytes    int64  // local LRU cache size
+	NATSUrl          string
+	WorkerID         string
+	ClusterID        string // cluster this worker belongs to (for federated routing)
+	MaxConcurrent    int    // max concurrent tasks
+	CacheBytes       int64  // local LRU cache size
+	MemoryBudget     int64  // per-task memory budget in bytes (0 = unlimited, no spill)
+	SpillDir         string // directory for spill files (default: os temp dir)
+	ResultStoreBytes int64  // in-memory result store capacity (0 = disabled, results go to S3)
 }
 
 // DefaultConfig returns default worker configuration.
@@ -39,6 +44,7 @@ type Worker struct {
 	js       jetstream.JetStream
 	executor *Executor
 	logger   *slog.Logger
+	metrics  *metrics.Metrics
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -63,25 +69,45 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	}
 
 	cache := NewLRUCache(cfg.CacheBytes)
+	executor := NewExecutor(store, cache)
+	executor.SetMemoryBudget(cfg.MemoryBudget, cfg.SpillDir)
+	executor.SetLogger(logger)
+	if cfg.ResultStoreBytes > 0 {
+		executor.SetResultStore(NewResultStore(cfg.ResultStoreBytes))
+	}
+
 	return &Worker{
 		config:    cfg,
 		store:     store,
 		nc:        nc,
 		js:        js,
-		executor:  NewExecutor(store, cache),
+		executor:  executor,
 		logger:    logger,
 		cancelled: make(map[string]struct{}),
 	}
+}
+
+// SetMetrics attaches Prometheus metrics for spill/memory tracking.
+func (w *Worker) SetMetrics(m *metrics.Metrics) {
+	w.metrics = m
+	w.executor.SetMetrics(m)
 }
 
 // Start begins the worker task loop and heartbeat.
 func (w *Worker) Start(ctx context.Context) error {
 	ctx, w.cancel = context.WithCancel(ctx)
 
+	// Use cluster-scoped filter so this worker only pulls tasks for its cluster.
+	// If ClusterID is empty, subscribe to all tasks (backward compatible).
+	filterSubject := distributed.SubjectTasksAll
+	if w.config.ClusterID != "" {
+		filterSubject = distributed.ClusterTasksFilter(w.config.ClusterID)
+	}
+
 	// Create a durable consumer for tasks
 	consumer, err := w.js.CreateOrUpdateConsumer(ctx, distributed.StreamTasks, jetstream.ConsumerConfig{
 		Durable:       w.config.WorkerID,
-		FilterSubject: distributed.SubjectTasksAll,
+		FilterSubject: filterSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       2 * time.Minute,
 		MaxDeliver:    3,
@@ -125,7 +151,9 @@ func (w *Worker) Start(ctx context.Context) error {
 
 	w.logger.Info("worker started",
 		"worker_id", w.config.WorkerID,
+		"cluster_id", w.config.ClusterID,
 		"max_concurrent", w.config.MaxConcurrent,
+		"filter_subject", filterSubject,
 	)
 
 	return nil
@@ -296,6 +324,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 
 			hb := distributed.WorkerHeartbeat{
 				WorkerID:    w.config.WorkerID,
+				ClusterID:   w.config.ClusterID,
 				MemoryUsed:  int64(memStats.Alloc),
 				MemoryTotal: int64(memStats.Sys),
 				Timestamp:   time.Now(),

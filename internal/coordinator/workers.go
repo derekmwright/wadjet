@@ -13,6 +13,7 @@ import (
 // WorkerInfo tracks the state of a registered worker.
 type WorkerInfo struct {
 	WorkerID    string
+	ClusterID   string
 	MemoryUsed  int64
 	MemoryTotal int64
 	LastSeen    time.Time
@@ -61,10 +62,11 @@ func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
 
 	info, exists := wr.workers[hb.WorkerID]
 	if !exists {
-		wr.logger.Info("worker registered", "worker_id", hb.WorkerID)
+		wr.logger.Info("worker registered", "worker_id", hb.WorkerID, "cluster_id", hb.ClusterID)
 		info = &WorkerInfo{WorkerID: hb.WorkerID}
 		wr.workers[hb.WorkerID] = info
 	}
+	info.ClusterID = hb.ClusterID
 	info.MemoryUsed = hb.MemoryUsed
 	info.MemoryTotal = hb.MemoryTotal
 	info.LastSeen = hb.Timestamp

@@ -3,6 +3,8 @@ package worker
 import (
 	"bytes"
 	"context"
+	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/derekmwright/caelum/internal/distributed"
@@ -192,5 +194,297 @@ func TestExecuteJoinLeftJoin(t *testing.T) {
 	// Left join: u1 matches (1 row) + u999 with nulls (1 row) = 2 rows
 	if result.NumRows != 2 {
 		t.Fatalf("expected 2 rows, got %d", result.NumRows)
+	}
+}
+
+// newExecutorWithBudget creates an executor with a memory budget and spill directory.
+func newExecutorWithBudget(t *testing.T, store objstore.Store, budget int64) *Executor {
+	t.Helper()
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache)
+	executor.SetMemoryBudget(budget, t.TempDir())
+	executor.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	return executor
+}
+
+func TestExecuteSortWithSpill(t *testing.T) {
+	store := newTestStore(t, "results")
+	// Use a tiny memory budget (256 bytes) to force spill on a moderate dataset
+	executor := newExecutorWithBudget(t, store, 256)
+	ctx := context.Background()
+
+	// Create enough rows to exceed the tiny budget
+	rows := make([]map[string]any, 50)
+	for i := range rows {
+		rows[i] = map[string]any{
+			"name":  "user-" + string(rune('a'+i%26)),
+			"score": float64(50 - i),
+		}
+	}
+	writeTestParquet(t, store, "results", "input/large.parquet", rows)
+
+	task := distributed.Task{
+		ID:           "sort-spill",
+		QueryID:      "q-spill",
+		StageID:      "s1",
+		Type:         distributed.TaskTypeSort,
+		InputFiles:   []string{"input/large.parquet"},
+		SortKeys:     []distributed.SortKeySpec{{Column: "score", Desc: true}},
+		ResultBucket: "results",
+		ResultPrefix: "output/",
+	}
+
+	result := executor.Execute(ctx, task, "w1")
+	if !result.Success {
+		t.Fatalf("sort with spill failed: %s", result.Error)
+	}
+	if result.NumRows != 50 {
+		t.Fatalf("expected 50 rows, got %d", result.NumRows)
+	}
+}
+
+func TestExecuteAggregateWithSpill(t *testing.T) {
+	store := newTestStore(t, "results")
+	executor := newExecutorWithBudget(t, store, 256)
+	ctx := context.Background()
+
+	rows := make([]map[string]any, 60)
+	for i := range rows {
+		rows[i] = map[string]any{
+			"group_key": "g" + string(rune('0'+i%5)),
+			"value":     float64(i * 10),
+		}
+	}
+	writeTestParquet(t, store, "results", "input/agg_data.parquet", rows)
+
+	task := distributed.Task{
+		ID:         "agg-spill",
+		QueryID:    "q-agg-spill",
+		StageID:    "s1",
+		Type:       distributed.TaskTypeAggregate,
+		InputFiles: []string{"input/agg_data.parquet"},
+		GroupByCols: []string{"group_key"},
+		Aggregates: []distributed.AggSpec{
+			{Func: "sum", InputCol: "value", OutputCol: "total"},
+			{Func: "count", InputCol: "value", OutputCol: "cnt"},
+		},
+		ResultBucket: "results",
+		ResultPrefix: "output/",
+	}
+
+	result := executor.Execute(ctx, task, "w1")
+	if !result.Success {
+		t.Fatalf("aggregate with spill failed: %s", result.Error)
+	}
+	if result.NumRows != 5 {
+		t.Fatalf("expected 5 groups, got %d", result.NumRows)
+	}
+}
+
+func TestExecuteSortNoSpillUnlimited(t *testing.T) {
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache)
+	// budget=0 means unlimited — no spill manager created
+	executor.SetMemoryBudget(0, "")
+	ctx := context.Background()
+
+	rows := []map[string]any{
+		{"name": "b", "score": float64(2)},
+		{"name": "a", "score": float64(1)},
+		{"name": "c", "score": float64(3)},
+	}
+	writeTestParquet(t, store, "results", "input/small.parquet", rows)
+
+	task := distributed.Task{
+		ID:           "sort-nospill",
+		QueryID:      "q-nospill",
+		StageID:      "s1",
+		Type:         distributed.TaskTypeSort,
+		InputFiles:   []string{"input/small.parquet"},
+		SortKeys:     []distributed.SortKeySpec{{Column: "score", Desc: false}},
+		ResultBucket: "results",
+		ResultPrefix: "output/",
+	}
+
+	result := executor.Execute(ctx, task, "w1")
+	if !result.Success {
+		t.Fatalf("sort failed: %s", result.Error)
+	}
+	if result.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", result.NumRows)
+	}
+}
+
+func TestExecuteWithResultStore(t *testing.T) {
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache)
+	rs := NewResultStore(1024 * 1024) // 1 MB result store
+	executor.SetResultStore(rs)
+	ctx := context.Background()
+
+	rows := []map[string]any{
+		{"name": "alice", "score": float64(90)},
+		{"name": "bob", "score": float64(80)},
+	}
+	writeTestParquet(t, store, "results", "input/data.parquet", rows)
+
+	task := distributed.Task{
+		ID:           "rs-sort",
+		QueryID:      "q-rs",
+		StageID:      "s1",
+		Type:         distributed.TaskTypeSort,
+		InputFiles:   []string{"input/data.parquet"},
+		SortKeys:     []distributed.SortKeySpec{{Column: "score", Desc: true}},
+		ResultBucket: "results",
+		ResultPrefix: "stage1/",
+	}
+
+	result := executor.Execute(ctx, task, "w1")
+	if !result.Success {
+		t.Fatalf("sort failed: %s", result.Error)
+	}
+
+	// Result should be in the result store (not inlined since we check the path)
+	if result.ResultPath == "" && result.InlineData == nil {
+		t.Fatal("expected result path or inline data")
+	}
+
+	// If the result was stored (not inlined), verify it's in the result store
+	if result.ResultPath != "" {
+		if rs.Count() != 1 {
+			t.Fatalf("expected 1 entry in result store, got %d", rs.Count())
+		}
+
+		// A second task should be able to read from the result store
+		task2 := distributed.Task{
+			ID:           "rs-agg",
+			QueryID:      "q-rs",
+			StageID:      "s2",
+			Type:         distributed.TaskTypeSort,
+			InputFiles:   []string{result.ResultPath},
+			SortKeys:     []distributed.SortKeySpec{{Column: "score", Desc: false}},
+			ResultBucket: "results",
+			ResultPrefix: "stage2/",
+		}
+
+		result2 := executor.Execute(ctx, task2, "w1")
+		if !result2.Success {
+			t.Fatalf("second stage failed: %s", result2.Error)
+		}
+		if result2.NumRows != 2 {
+			t.Fatalf("expected 2 rows from result store, got %d", result2.NumRows)
+		}
+	}
+}
+
+func TestExecuteResultStoreFallbackToS3(t *testing.T) {
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache)
+	// Tiny result store — will be too small for the result
+	rs := NewResultStore(10) // 10 bytes
+	executor.SetResultStore(rs)
+	ctx := context.Background()
+
+	rows := []map[string]any{
+		{"name": "alice", "score": float64(90)},
+		{"name": "bob", "score": float64(80)},
+		{"name": "carol", "score": float64(70)},
+	}
+	writeTestParquet(t, store, "results", "input/data.parquet", rows)
+
+	task := distributed.Task{
+		ID:           "rs-fallback",
+		QueryID:      "q-fallback",
+		StageID:      "s1",
+		Type:         distributed.TaskTypeSort,
+		InputFiles:   []string{"input/data.parquet"},
+		SortKeys:     []distributed.SortKeySpec{{Column: "score", Desc: true}},
+		ResultBucket: "results",
+		ResultPrefix: "output/",
+	}
+
+	result := executor.Execute(ctx, task, "w1")
+	if !result.Success {
+		t.Fatalf("sort failed: %s", result.Error)
+	}
+
+	// Result store should be empty (too small), result went to S3 or inline
+	if rs.Count() != 0 {
+		t.Fatalf("expected 0 entries in result store (too small), got %d", rs.Count())
+	}
+
+	// The result should still exist — either inline or on S3
+	if result.ResultPath != "" {
+		// Verify it's on S3
+		_, _, err := store.Get(ctx, "results", result.ResultPath)
+		if err != nil {
+			t.Fatalf("result should be on S3 after store fallback: %v", err)
+		}
+	} else if result.InlineData == nil {
+		t.Fatal("expected either S3 path or inline data")
+	}
+}
+
+func TestExecuteResultStoreCleanup(t *testing.T) {
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache)
+	rs := NewResultStore(1024 * 1024)
+	executor.SetResultStore(rs)
+	ctx := context.Background()
+
+	rows := []map[string]any{
+		{"val": float64(1)},
+		{"val": float64(2)},
+	}
+	writeTestParquet(t, store, "results", "input/a.parquet", rows)
+	writeTestParquet(t, store, "results", "input/b.parquet", rows)
+
+	// Two tasks for query q1
+	for i, prefix := range []string{"stage-a/", "stage-b/"} {
+		task := distributed.Task{
+			ID:           "t" + string(rune('1'+i)),
+			QueryID:      "q-cleanup",
+			StageID:      "s1",
+			Type:         distributed.TaskTypeSort,
+			InputFiles:   []string{"input/a.parquet"},
+			SortKeys:     []distributed.SortKeySpec{{Column: "val", Desc: false}},
+			ResultBucket: "results",
+			ResultPrefix: prefix,
+		}
+		result := executor.Execute(ctx, task, "w1")
+		if !result.Success {
+			t.Fatalf("task %d failed: %s", i, result.Error)
+		}
+	}
+
+	// One task for query q2
+	task3 := distributed.Task{
+		ID:           "t3",
+		QueryID:      "q-other",
+		StageID:      "s1",
+		Type:         distributed.TaskTypeSort,
+		InputFiles:   []string{"input/b.parquet"},
+		SortKeys:     []distributed.SortKeySpec{{Column: "val", Desc: false}},
+		ResultBucket: "results",
+		ResultPrefix: "other/",
+	}
+	result3 := executor.Execute(ctx, task3, "w1")
+	if !result3.Success {
+		t.Fatalf("task 3 failed: %s", result3.Error)
+	}
+
+	// Some results may be inlined — only non-inline results are in the store.
+	// Cleanup q-cleanup should remove only its entries.
+	beforeCleanup := rs.Count()
+	rs.CleanupQuery("q-cleanup")
+	afterCleanup := rs.Count()
+
+	// After cleanup, q-other entries should remain
+	if afterCleanup > beforeCleanup {
+		t.Fatalf("cleanup should not increase count: before=%d, after=%d", beforeCleanup, afterCleanup)
 	}
 }

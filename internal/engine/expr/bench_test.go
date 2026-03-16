@@ -3,8 +3,8 @@ package expr
 import (
 	"testing"
 
-	"github.com/blastrain/vitess-sqlparser/sqlparser"
 	"github.com/derekmwright/caelum/internal/engine/batch"
+	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
 
@@ -167,9 +167,9 @@ func BenchmarkInExpr(b *testing.B) {
 func BenchmarkCompileAndEval(b *testing.B) {
 	bb := benchBatch(2048)
 	sql := "SELECT * FROM t WHERE amount > 100 AND id < 1000"
-	stmt, _ := sqlparser.Parse(sql)
-	sel := stmt.(*sqlparser.Select)
-	compiled, _ := Compile(sel.Where.Expr)
+	parsed, _ := plansql.Parse(sql)
+	info, _ := plansql.ExtractSelect(parsed)
+	compiled, _ := Compile(info.WhereExpr)
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -183,10 +183,9 @@ func BenchmarkCompileAndEval(b *testing.B) {
 func BenchmarkCompileComplexExpr(b *testing.B) {
 	bb := benchBatch(2048)
 	sql := "SELECT amount * 2 + id FROM t"
-	stmt, _ := sqlparser.Parse(sql)
-	sel := stmt.(*sqlparser.Select)
-	aliased := sel.SelectExprs[0].(*sqlparser.AliasedExpr)
-	compiled, _ := Compile(aliased.Expr)
+	parsed, _ := plansql.Parse(sql)
+	info, _ := plansql.ExtractSelect(parsed)
+	compiled, _ := Compile(info.Columns[0].ASTExpr)
 
 	b.ResetTimer()
 	b.ReportAllocs()

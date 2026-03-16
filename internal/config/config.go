@@ -72,6 +72,8 @@ type AuthPolicy struct {
 
 // Storage configures the object store connection.
 type Storage struct {
+	Type      string `yaml:"type"`       // "s3" (default) or "file"
+	DataDir   string `yaml:"data_dir"`   // local directory for type=file
 	Endpoint  string `yaml:"endpoint"`
 	AccessKey string `yaml:"access_key"`
 	SecretKey string `yaml:"secret_key"`
@@ -82,9 +84,11 @@ type Storage struct {
 
 // NATS configures the embedded NATS server or client connection.
 type NATS struct {
-	Port     int    `yaml:"port"`
-	URL      string `yaml:"url"`       // for worker mode: coordinator's NATS URL
-	StoreDir string `yaml:"store_dir"` // JetStream storage directory
+	Port        int      `yaml:"port"`
+	URL         string   `yaml:"url"`          // for worker mode: coordinator's NATS URL
+	StoreDir    string   `yaml:"store_dir"`    // JetStream storage directory
+	ClusterID   string   `yaml:"cluster_id"`   // unique cluster identifier (e.g., "central", "afb-east")
+	LeafRemotes []string `yaml:"leaf_remotes"` // remote NATS URLs for leaf node connections
 }
 
 // HTTP configures the HTTP API server.
@@ -94,8 +98,11 @@ type HTTP struct {
 
 // Worker configures the worker.
 type Worker struct {
-	MaxConcurrent int   `yaml:"max_concurrent"`
-	CacheBytes    int64 `yaml:"cache_bytes"`
+	MaxConcurrent    int    `yaml:"max_concurrent"`
+	CacheBytes       int64  `yaml:"cache_bytes"`
+	MemoryBudget     int64  `yaml:"memory_budget"`      // per-task memory budget in bytes (0 = unlimited, no spill)
+	SpillDir         string `yaml:"spill_dir"`           // directory for spill files (default: os temp dir)
+	ResultStoreBytes int64  `yaml:"result_store_bytes"`  // in-memory result store capacity (0 = disabled)
 }
 
 // Parquet configures Parquet file writing.

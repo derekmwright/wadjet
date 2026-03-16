@@ -29,15 +29,22 @@ import (
 )
 
 var (
-	mode       string
-	endpoint   string
-	accessKey  string
-	secretKey  string
-	bucket     string
-	httpAddr   string
-	natsPort   int
-	natsURL    string
-	configFile string
+	mode             string
+	storageType      string
+	dataDir          string
+	endpoint         string
+	accessKey        string
+	secretKey        string
+	bucket           string
+	httpAddr         string
+	natsPort         int
+	natsURL          string
+	configFile       string
+	clusterID        string
+	leafRemotes      []string
+	memoryBudget     int64
+	spillDir         string
+	resultStoreBytes int64
 )
 
 func main() {
@@ -49,6 +56,8 @@ func main() {
 
 	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "YAML config file path")
 	rootCmd.PersistentFlags().StringVar(&mode, "mode", "standalone", "Run mode: standalone, coordinator, or worker")
+	rootCmd.PersistentFlags().StringVar(&storageType, "storage-type", "s3", "Storage backend: s3 or file")
+	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "Local data directory (for --storage-type=file)")
 	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "localhost:9000", "S3-compatible endpoint")
 	rootCmd.PersistentFlags().StringVar(&accessKey, "access-key", "minioadmin", "S3 access key")
 	rootCmd.PersistentFlags().StringVar(&secretKey, "secret-key", "minioadmin", "S3 secret key")
@@ -56,11 +65,19 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&httpAddr, "http-addr", ":8080", "HTTP API listen address")
 	rootCmd.PersistentFlags().IntVar(&natsPort, "nats-port", 4222, "Embedded NATS port")
 	rootCmd.PersistentFlags().StringVar(&natsURL, "nats-url", "", "NATS URL (for worker mode)")
+	rootCmd.PersistentFlags().StringVar(&clusterID, "cluster-id", "local", "Cluster identifier for federation")
+	rootCmd.PersistentFlags().StringSliceVar(&leafRemotes, "leaf-remote", nil, "Remote NATS URLs for leaf node connections (repeatable)")
+	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = unlimited, no spill)")
+	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
+	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 0, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
 
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(queryCmd())
 	rootCmd.AddCommand(tablesCmd())
+	rootCmd.AddCommand(createTableCmd())
+	rootCmd.AddCommand(dropTableCmd())
 	rootCmd.AddCommand(shellCmd())
+	rootCmd.AddCommand(clustersCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -82,16 +99,11 @@ func serveCmd() *cobra.Command {
 				return err
 			}
 
-			cat := catalog.New(store, bucket)
-			if err := cat.Init(ctx); err != nil {
-				return fmt.Errorf("initializing catalog: %w", err)
-			}
-
 			switch mode {
 			case "standalone":
-				return runStandalone(ctx, store, cat, logger)
+				return runStandalone(ctx, store, logger)
 			case "coordinator":
-				return runCoordinator(ctx, store, cat, logger)
+				return runCoordinator(ctx, store, logger)
 			case "worker":
 				return runWorker(ctx, store, logger)
 			default:
@@ -154,7 +166,7 @@ func tablesCmd() *cobra.Command {
 				return err
 			}
 
-			cat := catalog.New(store, bucket)
+			cat := catalog.NewWithStore(store, bucket)
 			tables, err := cat.ListTables(ctx)
 			if err != nil {
 				return err
@@ -162,6 +174,136 @@ func tablesCmd() *cobra.Command {
 
 			for _, t := range tables {
 				fmt.Println(t)
+			}
+			return nil
+		},
+	}
+}
+
+func createTableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "create-table [sql]",
+		Short: "Create a table via SQL (e.g., CREATE TABLE events (id BIGINT, name VARCHAR) PARTITION BY (date))",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+
+			store, err := newStore()
+			if err != nil {
+				store = objstore.NewMemStore()
+			}
+
+			db, err := caelum.Open(ctx, caelum.Config{
+				Store:  store,
+				Bucket: bucket,
+			})
+			if err != nil {
+				return err
+			}
+
+			result, err := db.Query(ctx, args[0])
+			if err != nil {
+				return err
+			}
+
+			if len(result.Rows) > 0 {
+				if r, ok := result.Rows[0]["result"]; ok {
+					fmt.Println(r)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func dropTableCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "drop-table [name]",
+		Short: "Drop a table by name",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+
+			store, err := newStore()
+			if err != nil {
+				store = objstore.NewMemStore()
+			}
+
+			db, err := caelum.Open(ctx, caelum.Config{
+				Store:  store,
+				Bucket: bucket,
+			})
+			if err != nil {
+				return err
+			}
+
+			if err := db.DropTable(ctx, args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("Table %q dropped\n", args[0])
+			return nil
+		},
+	}
+}
+
+func clustersCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "clusters",
+		Short: "List all federated clusters and their tables",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+
+			natsAddr := natsURL
+			if natsAddr == "" {
+				natsAddr = fmt.Sprintf("nats://127.0.0.1:%d", natsPort)
+			}
+
+			nc, err := distributed.Connect(natsAddr)
+			if err != nil {
+				return fmt.Errorf("connecting to NATS: %w", err)
+			}
+			defer nc.Close()
+
+			js, err := distributed.NewJetStream(nc)
+			if err != nil {
+				return fmt.Errorf("creating JetStream: %w", err)
+			}
+
+			kv, err := catalog.NewNATSKV(js)
+			if err != nil {
+				return fmt.Errorf("creating catalog KV: %w", err)
+			}
+
+			store, storeErr := newStore()
+			if storeErr != nil {
+				store = objstore.NewMemStore()
+			}
+
+			cat := catalog.NewWithCluster(kv, store, bucket, clusterID)
+			_ = cat.Init(ctx)
+
+			clusters, err := cat.ListClusters()
+			if err != nil {
+				return err
+			}
+
+			if len(clusters) == 0 {
+				fmt.Println("No clusters found.")
+				return nil
+			}
+
+			for _, c := range clusters {
+				marker := ""
+				if c.ClusterID == clusterID {
+					marker = " (local)"
+				}
+				fmt.Printf("Cluster: %s%s\n", c.ClusterID, marker)
+				if len(c.Tables) == 0 {
+					fmt.Println("  (no tables)")
+				}
+				for _, t := range c.Tables {
+					fmt.Printf("  - %s\n", t)
+				}
 			}
 			return nil
 		},
@@ -318,18 +460,29 @@ func runShell(ctx context.Context, db *caelum.DB, f format.Format) error {
 }
 
 func newStore() (objstore.Store, error) {
-	return objstore.NewMinIOStore(objstore.MinIOConfig{
-		Endpoint:  endpoint,
-		AccessKey: accessKey,
-		SecretKey: secretKey,
-		UseSSL:    false,
-	})
+	switch storageType {
+	case "file":
+		dir := dataDir
+		if dir == "" {
+			dir = "/var/lib/caelum/data"
+		}
+		return objstore.NewFileStore(dir)
+	default:
+		return objstore.NewMinIOStore(objstore.MinIOConfig{
+			Endpoint:  endpoint,
+			AccessKey: accessKey,
+			SecretKey: secretKey,
+			UseSSL:    false,
+		})
+	}
 }
 
-func runStandalone(ctx context.Context, store objstore.Store, cat *catalog.Catalog, logger *slog.Logger) error {
-	// Start embedded NATS
+func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger) error {
+	// Start embedded NATS (with optional leaf node connections)
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = natsPort
+	natsCfg.ClusterID = clusterID
+	natsCfg.LeafRemotes = leafRemotes
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
@@ -352,12 +505,30 @@ func runStandalone(ctx context.Context, store objstore.Store, cat *catalog.Catal
 		return fmt.Errorf("setting up streams: %w", err)
 	}
 
+	// Create catalog with NATS KV metadata store and cluster identity
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		return fmt.Errorf("creating catalog KV: %w", err)
+	}
+	cat := catalog.NewWithCluster(kv, store, bucket, clusterID)
+	if err := cat.Init(ctx); err != nil {
+		return fmt.Errorf("initializing catalog: %w", err)
+	}
+
 	// Start worker
 	w := worker.New(worker.Config{
-		NATSUrl:       embeddedNATS.ClientURL(),
-		MaxConcurrent: 4,
-		CacheBytes:    256 * 1024 * 1024,
+		NATSUrl:          embeddedNATS.ClientURL(),
+		ClusterID:        clusterID,
+		MaxConcurrent:    4,
+		CacheBytes:       256 * 1024 * 1024,
+		MemoryBudget:     memoryBudget,
+		SpillDir:         spillDir,
+		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)
+
+	// Initialize Prometheus metrics (before worker.Start so spill metrics are wired)
+	m := metrics.New()
+	w.SetMetrics(m)
 
 	if err := w.Start(ctx); err != nil {
 		return fmt.Errorf("starting worker: %w", err)
@@ -373,9 +544,6 @@ func runStandalone(ctx context.Context, store objstore.Store, cat *catalog.Catal
 	// Start heartbeat monitoring and result cleanup
 	coord.Workers().StartReaper(ctx)
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
-
-	// Initialize Prometheus metrics
-	m := metrics.New()
 
 	// Build config manager and auth provider for hot-reload
 	srvCfg := server.Config{
@@ -465,10 +633,12 @@ func runStandalone(ctx context.Context, store objstore.Store, cat *catalog.Catal
 	}
 }
 
-func runCoordinator(ctx context.Context, store objstore.Store, cat *catalog.Catalog, logger *slog.Logger) error {
-	// Start embedded NATS
+func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logger) error {
+	// Start embedded NATS (with optional leaf node connections)
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = natsPort
+	natsCfg.ClusterID = clusterID
+	natsCfg.LeafRemotes = leafRemotes
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
@@ -488,6 +658,16 @@ func runCoordinator(ctx context.Context, store objstore.Store, cat *catalog.Cata
 
 	if err := distributed.SetupStreams(ctx, js); err != nil {
 		return fmt.Errorf("setting up streams: %w", err)
+	}
+
+	// Create catalog with NATS KV metadata store and cluster identity
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		return fmt.Errorf("creating catalog KV: %w", err)
+	}
+	cat := catalog.NewWithCluster(kv, store, bucket, clusterID)
+	if err := cat.Init(ctx); err != nil {
+		return fmt.Errorf("initializing catalog: %w", err)
 	}
 
 	coord := coordinator.New(coordinator.Config{
@@ -585,9 +765,13 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	}
 
 	w := worker.New(worker.Config{
-		NATSUrl:       natsAddr,
-		MaxConcurrent: 4,
-		CacheBytes:    256 * 1024 * 1024,
+		NATSUrl:          natsAddr,
+		ClusterID:        clusterID,
+		MaxConcurrent:    4,
+		CacheBytes:       256 * 1024 * 1024,
+		MemoryBudget:     memoryBudget,
+		SpillDir:         spillDir,
+		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)
 
 	if err := w.Start(ctx); err != nil {

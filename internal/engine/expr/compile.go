@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/blastrain/vitess-sqlparser/sqlparser"
+	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 )
 
 // compileContext holds optional state for expression compilation.
@@ -13,44 +13,152 @@ type compileContext struct {
 	runner SubqueryRunner
 }
 
-// Compile converts a vitess sqlparser expression AST into an Expr tree.
-func Compile(node sqlparser.Expr) (Expr, error) {
+// Compile converts our AST Node into an Expr tree.
+func Compile(node plansql.Node) (Expr, error) {
 	return compileWithCtx(node, &compileContext{})
 }
 
-// CompileWithRunner converts a vitess sqlparser expression AST into an Expr tree,
+// CompileWithRunner converts our AST Node into an Expr tree,
 // with support for subquery expressions (scalar subqueries, IN subquery, EXISTS).
-func CompileWithRunner(node sqlparser.Expr, runner SubqueryRunner) (Expr, error) {
+func CompileWithRunner(node plansql.Node, runner SubqueryRunner) (Expr, error) {
 	return compileWithCtx(node, &compileContext{runner: runner})
 }
 
-func compileWithCtx(node sqlparser.Expr, ctx *compileContext) (Expr, error) {
+func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 	if node == nil {
 		return &Lit{Val: nil}, nil
 	}
 	switch n := node.(type) {
-	case *sqlparser.ColName:
-		return compileColName(n), nil
+	case *plansql.ColRef:
+		name := n.Column
+		// Strip table qualifier — we resolve by column name only
+		return &ColRef{Name: name}, nil
 
-	case *sqlparser.SQLVal:
-		return compileSQLVal(n)
+	case *plansql.Lit:
+		return compileLit(n)
 
-	case *sqlparser.NullVal:
-		return &Lit{Val: nil}, nil
+	case *plansql.StarNode:
+		return &Lit{Val: "*"}, nil
 
-	case sqlparser.BoolVal:
-		return &Lit{Val: bool(n)}, nil
+	case *plansql.BinaryOp:
+		left, err := compileWithCtx(n.Left, ctx)
+		if err != nil {
+			return nil, err
+		}
+		right, err := compileWithCtx(n.Right, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &BinOp{Left: left, Right: right, Op: n.Op}, nil
 
-	case *sqlparser.BinaryExpr:
-		return compileBinaryExprCtx(n, ctx)
+	case *plansql.UnaryOp:
+		operand, err := compileWithCtx(n.Inner, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &UnaryOp{Operand: operand, Op: n.Op}, nil
 
-	case *sqlparser.UnaryExpr:
-		return compileUnaryExprCtx(n, ctx)
+	case *plansql.CmpExpr:
+		left, err := compileWithCtx(n.Left, ctx)
+		if err != nil {
+			return nil, err
+		}
+		right, err := compileWithCtx(n.Right, ctx)
+		if err != nil {
+			return nil, err
+		}
+		var op CmpOp
+		switch n.Op {
+		case "=":
+			op = CmpEq
+		case "!=", "<>":
+			op = CmpNe
+		case "<":
+			op = CmpLt
+		case "<=":
+			op = CmpLe
+		case ">":
+			op = CmpGt
+		case ">=":
+			op = CmpGe
+		default:
+			op = CmpEq
+		}
+		return &Cmp{Left: left, Right: right, Op: op}, nil
 
-	case *sqlparser.ComparisonExpr:
-		return compileComparisonCtx(n, ctx)
+	case *plansql.InExpr:
+		left, err := compileWithCtx(n.Left, ctx)
+		if err != nil {
+			return nil, err
+		}
+		// Check for subquery IN: single SubqueryNode in values
+		if len(n.Values) == 1 {
+			if sq, ok := n.Values[0].(*plansql.SubqueryNode); ok {
+				if ctx.runner == nil {
+					return nil, fmt.Errorf("IN subquery requires a SubqueryRunner")
+				}
+				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not}, nil
+			}
+		}
+		var values []Expr
+		for _, v := range n.Values {
+			compiled, err := compileWithCtx(v, ctx)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, compiled)
+		}
+		return &In{Expr: left, Values: values, Not: n.Not}, nil
 
-	case *sqlparser.AndExpr:
+	case *plansql.BetweenExpr:
+		e, err := compileWithCtx(n.Left, ctx)
+		if err != nil {
+			return nil, err
+		}
+		low, err := compileWithCtx(n.Low, ctx)
+		if err != nil {
+			return nil, err
+		}
+		hi, err := compileWithCtx(n.High, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &Between{Expr: e, Low: low, Hi: hi, Not: n.Not}, nil
+
+	case *plansql.LikeExpr:
+		left, err := compileWithCtx(n.Left, ctx)
+		if err != nil {
+			return nil, err
+		}
+		right, err := compileWithCtx(n.Pattern, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &Like{Expr: left, Pattern: right, Not: n.Not}, nil
+
+	case *plansql.IsExpr:
+		operand, err := compileWithCtx(n.Left, ctx)
+		if err != nil {
+			return nil, err
+		}
+		switch n.Check {
+		case "null":
+			return &IsNull{Operand: operand, Not: n.Not}, nil
+		case "true":
+			if n.Not {
+				return &Cmp{Left: operand, Right: &Lit{Val: true}, Op: CmpNe}, nil
+			}
+			return &Cmp{Left: operand, Right: &Lit{Val: true}, Op: CmpEq}, nil
+		case "false":
+			if n.Not {
+				return &Cmp{Left: operand, Right: &Lit{Val: false}, Op: CmpNe}, nil
+			}
+			return &Cmp{Left: operand, Right: &Lit{Val: false}, Op: CmpEq}, nil
+		default:
+			return nil, fmt.Errorf("unsupported IS check: %s", n.Check)
+		}
+
+	case *plansql.AndNode:
 		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {
 			return nil, err
@@ -61,7 +169,7 @@ func compileWithCtx(node sqlparser.Expr, ctx *compileContext) (Expr, error) {
 		}
 		return &And{Left: left, Right: right}, nil
 
-	case *sqlparser.OrExpr:
+	case *plansql.OrNode:
 		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {
 			return nil, err
@@ -72,292 +180,84 @@ func compileWithCtx(node sqlparser.Expr, ctx *compileContext) (Expr, error) {
 		}
 		return &Or{Left: left, Right: right}, nil
 
-	case *sqlparser.NotExpr:
-		operand, err := compileWithCtx(n.Expr, ctx)
+	case *plansql.NotNode:
+		operand, err := compileWithCtx(n.Inner, ctx)
 		if err != nil {
 			return nil, err
 		}
 		return &Not{Operand: operand}, nil
 
-	case *sqlparser.ParenExpr:
-		return compileWithCtx(n.Expr, ctx)
+	case *plansql.ParenNode:
+		return compileWithCtx(n.Inner, ctx)
 
-	case *sqlparser.IsExpr:
-		return compileIsExprCtx(n, ctx)
+	case *plansql.FuncCallNode:
+		return compileFuncCallNode(n, ctx)
 
-	case *sqlparser.RangeCond:
-		return compileRangeCondCtx(n, ctx)
+	case *plansql.CaseNode:
+		return compileCaseNode(n, ctx)
 
-	case *sqlparser.FuncExpr:
-		return compileFuncExprCtx(n, ctx)
+	case *plansql.CastNode:
+		operand, err := compileWithCtx(n.Inner, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &Cast{Operand: operand, DestType: strings.ToLower(n.TypeName)}, nil
 
-	case *sqlparser.CaseExpr:
-		return compileCaseExprCtx(n, ctx)
-
-	case *sqlparser.ConvertExpr:
-		return compileConvertExprCtx(n, ctx)
-
-	case *sqlparser.Subquery:
+	case *plansql.SubqueryNode:
 		// Scalar subquery: (SELECT ...)
 		if ctx.runner == nil {
 			return nil, fmt.Errorf("subqueries require a SubqueryRunner")
 		}
-		sql := sqlparser.String(n.Select)
-		return &ScalarSubquery{SQL: sql, Runner: ctx.runner}, nil
+		return &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner}, nil
 
-	case *sqlparser.ExistsExpr:
-		// EXISTS (SELECT ...)
+	case *plansql.ExistsNode:
 		if ctx.runner == nil {
 			return nil, fmt.Errorf("EXISTS subquery requires a SubqueryRunner")
 		}
-		sql := sqlparser.String(n.Subquery.Select)
-		return &ExistsSubquery{SQL: sql, Runner: ctx.runner}, nil
-
-	case sqlparser.ValTuple:
-		// This is handled in the context of IN expressions
-		return nil, fmt.Errorf("unexpected ValTuple outside of IN expression")
+		return &ExistsSubquery{SQL: n.SQL, Runner: ctx.runner, Not: n.Not}, nil
 
 	default:
-		// Fallback: render to SQL string and treat as literal
-		return &Lit{Val: sqlparser.String(node)}, nil
+		return &Lit{Val: node.String()}, nil
 	}
 }
 
-func compileColName(n *sqlparser.ColName) Expr {
-	name := n.Name.String()
-	// Strip table qualifier — we resolve by column name only
-	return &ColRef{Name: name}
-}
-
-func compileSQLVal(n *sqlparser.SQLVal) (Expr, error) {
-	switch n.Type {
-	case sqlparser.IntVal:
-		i, err := strconv.ParseInt(string(n.Val), 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid integer: %s", n.Val)
+func compileLit(n *plansql.Lit) (Expr, error) {
+	switch n.Kind {
+	case plansql.LitNumber:
+		// Try integer first
+		if i, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
+			return &Lit{Val: i}, nil
 		}
-		return &Lit{Val: i}, nil
-	case sqlparser.FloatVal:
-		f, err := strconv.ParseFloat(string(n.Val), 64)
-		if err != nil {
-			return nil, fmt.Errorf("invalid float: %s", n.Val)
+		// Try float
+		if f, err := strconv.ParseFloat(n.Value, 64); err == nil {
+			return &Lit{Val: f}, nil
 		}
-		return &Lit{Val: f}, nil
-	case sqlparser.StrVal:
-		return &Lit{Val: string(n.Val)}, nil
+		return &Lit{Val: n.Value}, nil
+	case plansql.LitString:
+		return &Lit{Val: n.Value}, nil
+	case plansql.LitBool:
+		return &Lit{Val: strings.ToLower(n.Value) == "true"}, nil
+	case plansql.LitNull:
+		return &Lit{Val: nil}, nil
 	default:
-		return &Lit{Val: string(n.Val)}, nil
+		return &Lit{Val: n.Value}, nil
 	}
 }
 
-func compileBinaryExpr(n *sqlparser.BinaryExpr) (Expr, error) {
-	return compileBinaryExprCtx(n, &compileContext{})
-}
+func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, error) {
+	name := strings.ToLower(n.Name)
 
-func compileBinaryExprCtx(n *sqlparser.BinaryExpr, ctx *compileContext) (Expr, error) {
-	left, err := compileWithCtx(n.Left, ctx)
-	if err != nil {
-		return nil, err
-	}
-	right, err := compileWithCtx(n.Right, ctx)
-	if err != nil {
-		return nil, err
-	}
-	switch n.Operator {
-	case sqlparser.PlusStr:
-		return &BinOp{Left: left, Right: right, Op: "+"}, nil
-	case sqlparser.MinusStr:
-		return &BinOp{Left: left, Right: right, Op: "-"}, nil
-	case sqlparser.MultStr:
-		return &BinOp{Left: left, Right: right, Op: "*"}, nil
-	case sqlparser.DivStr:
-		return &BinOp{Left: left, Right: right, Op: "/"}, nil
-	case sqlparser.ModStr:
-		return &BinOp{Left: left, Right: right, Op: "%"}, nil
-	default:
-		return &BinOp{Left: left, Right: right, Op: n.Operator}, nil
-	}
-}
-
-func compileUnaryExpr(n *sqlparser.UnaryExpr) (Expr, error) {
-	return compileUnaryExprCtx(n, &compileContext{})
-}
-
-func compileUnaryExprCtx(n *sqlparser.UnaryExpr, ctx *compileContext) (Expr, error) {
-	operand, err := compileWithCtx(n.Expr, ctx)
-	if err != nil {
-		return nil, err
-	}
-	switch n.Operator {
-	case sqlparser.UMinusStr:
-		return &UnaryOp{Operand: operand, Op: "-"}, nil
-	case sqlparser.UPlusStr:
-		return &UnaryOp{Operand: operand, Op: "+"}, nil
-	default:
-		return operand, nil
-	}
-}
-
-func compileComparison(n *sqlparser.ComparisonExpr) (Expr, error) {
-	return compileComparisonCtx(n, &compileContext{})
-}
-
-func compileComparisonCtx(n *sqlparser.ComparisonExpr, ctx *compileContext) (Expr, error) {
-	left, err := compileWithCtx(n.Left, ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	switch n.Operator {
-	case sqlparser.InStr, sqlparser.NotInStr:
-		return compileInExprCtx(left, n.Right, n.Operator == sqlparser.NotInStr, ctx)
-	case sqlparser.LikeStr, sqlparser.NotLikeStr:
-		right, err := compileWithCtx(n.Right, ctx)
-		if err != nil {
-			return nil, err
-		}
-		return &Like{
-			Expr:    left,
-			Pattern: right,
-			Not:     n.Operator == sqlparser.NotLikeStr,
-		}, nil
-	}
-
-	right, err := compileWithCtx(n.Right, ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	var op CmpOp
-	switch n.Operator {
-	case sqlparser.EqualStr:
-		op = CmpEq
-	case sqlparser.NotEqualStr:
-		op = CmpNe
-	case sqlparser.LessThanStr:
-		op = CmpLt
-	case sqlparser.LessEqualStr:
-		op = CmpLe
-	case sqlparser.GreaterThanStr:
-		op = CmpGt
-	case sqlparser.GreaterEqualStr:
-		op = CmpGe
-	default:
-		op = CmpEq
-	}
-	return &Cmp{Left: left, Right: right, Op: op}, nil
-}
-
-func compileInExpr(left Expr, right sqlparser.Expr, not bool) (Expr, error) {
-	return compileInExprCtx(left, right, not, &compileContext{})
-}
-
-func compileInExprCtx(left Expr, right sqlparser.Expr, not bool, ctx *compileContext) (Expr, error) {
-	// Check for subquery: IN (SELECT ...)
-	if subq, ok := right.(*sqlparser.Subquery); ok {
-		if ctx.runner == nil {
-			return nil, fmt.Errorf("IN subquery requires a SubqueryRunner")
-		}
-		sql := sqlparser.String(subq.Select)
-		return &InSubquery{Expr: left, SQL: sql, Runner: ctx.runner, Not: not}, nil
-	}
-
-	tuple, ok := right.(sqlparser.ValTuple)
-	if !ok {
-		return nil, fmt.Errorf("IN requires a value list or subquery, got %T", right)
-	}
-	var values []Expr
-	for _, v := range tuple {
-		compiled, err := compileWithCtx(v, ctx)
-		if err != nil {
-			return nil, err
-		}
-		values = append(values, compiled)
-	}
-	return &In{Expr: left, Values: values, Not: not}, nil
-}
-
-func compileIsExpr(n *sqlparser.IsExpr) (Expr, error) {
-	return compileIsExprCtx(n, &compileContext{})
-}
-
-func compileIsExprCtx(n *sqlparser.IsExpr, ctx *compileContext) (Expr, error) {
-	operand, err := compileWithCtx(n.Expr, ctx)
-	if err != nil {
-		return nil, err
-	}
-	switch n.Operator {
-	case sqlparser.IsNullStr:
-		return &IsNull{Operand: operand, Not: false}, nil
-	case sqlparser.IsNotNullStr:
-		return &IsNull{Operand: operand, Not: true}, nil
-	case sqlparser.IsTrueStr:
-		return &Cmp{Left: operand, Right: &Lit{Val: true}, Op: CmpEq}, nil
-	case sqlparser.IsFalseStr:
-		return &Cmp{Left: operand, Right: &Lit{Val: false}, Op: CmpEq}, nil
-	case sqlparser.IsNotTrueStr:
-		return &Cmp{Left: operand, Right: &Lit{Val: true}, Op: CmpNe}, nil
-	case sqlparser.IsNotFalseStr:
-		return &Cmp{Left: operand, Right: &Lit{Val: false}, Op: CmpNe}, nil
-	default:
-		return nil, fmt.Errorf("unsupported IS operator: %s", n.Operator)
-	}
-}
-
-func compileRangeCond(n *sqlparser.RangeCond) (Expr, error) {
-	return compileRangeCondCtx(n, &compileContext{})
-}
-
-func compileRangeCondCtx(n *sqlparser.RangeCond, ctx *compileContext) (Expr, error) {
-	e, err := compileWithCtx(n.Left, ctx)
-	if err != nil {
-		return nil, err
-	}
-	low, err := compileWithCtx(n.From, ctx)
-	if err != nil {
-		return nil, err
-	}
-	hi, err := compileWithCtx(n.To, ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &Between{
-		Expr: e,
-		Low:  low,
-		Hi:   hi,
-		Not:  n.Operator == sqlparser.NotBetweenStr,
-	}, nil
-}
-
-func compileFuncExpr(n *sqlparser.FuncExpr) (Expr, error) {
-	return compileFuncExprCtx(n, &compileContext{})
-}
-
-func compileFuncExprCtx(n *sqlparser.FuncExpr, ctx *compileContext) (Expr, error) {
-	name := strings.ToLower(n.Name.String())
-
-	// Compile arguments
 	var args []Expr
-	for _, selExpr := range n.Exprs {
-		switch e := selExpr.(type) {
-		case *sqlparser.AliasedExpr:
-			compiled, err := compileWithCtx(e.Expr, ctx)
+	if n.Star {
+		args = append(args, &Lit{Val: "*"})
+	} else {
+		for _, arg := range n.Args {
+			compiled, err := compileWithCtx(arg, ctx)
 			if err != nil {
 				return nil, err
 			}
 			args = append(args, compiled)
-		case *sqlparser.StarExpr:
-			// COUNT(*) — pass nil marker
-			args = append(args, &Lit{Val: "*"})
-		default:
-			return nil, fmt.Errorf("unsupported function argument: %T", selExpr)
 		}
-	}
-
-	// Check if it's a known aggregate (handled by aggregate operator, not expression engine)
-	if sqlparser.Aggregates[name] {
-		// Return as a func call that the planner can recognize as aggregate
-		return &FuncCall{Name: name, Args: args}, nil
 	}
 
 	// Check for COALESCE special form
@@ -368,16 +268,12 @@ func compileFuncExprCtx(n *sqlparser.FuncExpr, ctx *compileContext) (Expr, error
 	return &FuncCall{Name: name, Args: args}, nil
 }
 
-func compileCaseExpr(n *sqlparser.CaseExpr) (Expr, error) {
-	return compileCaseExprCtx(n, &compileContext{})
-}
-
-func compileCaseExprCtx(n *sqlparser.CaseExpr, ctx *compileContext) (Expr, error) {
+func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {
 	c := &Case{}
 
-	if n.Expr != nil {
+	if n.Subject != nil {
 		var err error
-		c.Operand, err = compileWithCtx(n.Expr, ctx)
+		c.Operand, err = compileWithCtx(n.Subject, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -388,7 +284,7 @@ func compileCaseExprCtx(n *sqlparser.CaseExpr, ctx *compileContext) (Expr, error
 		if err != nil {
 			return nil, err
 		}
-		result, err := compileWithCtx(when.Val, ctx)
+		result, err := compileWithCtx(when.Result, ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -406,37 +302,20 @@ func compileCaseExprCtx(n *sqlparser.CaseExpr, ctx *compileContext) (Expr, error
 	return c, nil
 }
 
-func compileConvertExpr(n *sqlparser.ConvertExpr) (Expr, error) {
-	return compileConvertExprCtx(n, &compileContext{})
-}
-
-func compileConvertExprCtx(n *sqlparser.ConvertExpr, ctx *compileContext) (Expr, error) {
-	operand, err := compileWithCtx(n.Expr, ctx)
-	if err != nil {
-		return nil, err
-	}
-	destType := "string"
-	if n.Type != nil {
-		destType = strings.ToLower(n.Type.Type)
-	}
-	return &Cast{Operand: operand, DestType: destType}, nil
-}
-
-// CompileSelectExpr compiles a SELECT column expression from the vitess AST.
+// CompileSelectExpr compiles a SELECT column expression from our AST.
 // Returns the compiled expression and the output column name.
-func CompileSelectExpr(selExpr *sqlparser.AliasedExpr) (Expr, string, error) {
-	compiled, err := Compile(selExpr.Expr)
+func CompileSelectExpr(expr plansql.Node, alias string) (Expr, string, error) {
+	compiled, err := Compile(expr)
 	if err != nil {
 		return nil, "", err
 	}
 
-	// Determine output name: alias > column name > expression string
-	name := selExpr.As.String()
+	name := alias
 	if name == "" {
-		if colName, ok := selExpr.Expr.(*sqlparser.ColName); ok {
-			name = colName.Name.String()
+		if colRef, ok := expr.(*plansql.ColRef); ok {
+			name = colRef.Column
 		} else {
-			name = sqlparser.String(selExpr.Expr)
+			name = expr.String()
 		}
 	}
 

@@ -4,7 +4,7 @@ package logical
 import (
 	"fmt"
 
-	"github.com/blastrain/vitess-sqlparser/sqlparser"
+	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 )
 
 // NodeType identifies the kind of logical plan node.
@@ -96,7 +96,7 @@ type Predicate struct {
 	Op      string // =, !=, <, <=, >, >=, is_null, is_not_null, in, between
 	Value   any
 	Raw     string         // raw SQL expression
-	ASTExpr sqlparser.Expr // compiled AST expression node
+	ASTExpr plansql.Node // compiled AST expression node
 }
 
 // Projection is a column expression in a SELECT.
@@ -105,7 +105,7 @@ type Projection struct {
 	Alias   string         // output name
 	Expr    string         // raw expression
 	IsAgg   bool
-	ASTExpr sqlparser.Expr // compiled AST expression node (nil for aggregates)
+	ASTExpr plansql.Node // compiled AST expression node (nil for aggregates)
 }
 
 // AggExpr is an aggregation expression.

@@ -23,7 +23,7 @@ func setupCatalog(t *testing.T) (*Catalog, context.Context) {
 	t.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
-	cat := New(store, "test-bucket")
+	cat := NewWithStore(store, "test-bucket")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -33,7 +33,7 @@ func setupCatalog(t *testing.T) (*Catalog, context.Context) {
 func TestInit(t *testing.T) {
 	ctx := context.Background()
 	store := objstore.NewMemStore()
-	cat := New(store, "test-bucket")
+	cat := NewWithStore(store, "test-bucket")
 
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("Init failed: %v", err)
@@ -48,10 +48,10 @@ func TestInit(t *testing.T) {
 		t.Fatal("expected bucket to exist after Init")
 	}
 
-	// Catalog metadata should be readable.
-	_, err = store.Head(ctx, "test-bucket", catalogPath)
+	// Catalog meta should be readable from KV.
+	_, _, err = cat.KV().Get("local.meta")
 	if err != nil {
-		t.Fatalf("catalog metadata not found after Init: %v", err)
+		t.Fatalf("catalog meta not found in KV after Init: %v", err)
 	}
 
 	// Calling Init again should be idempotent (no error).
@@ -244,6 +244,16 @@ func TestDropTable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for dropped table, got nil")
 	}
+
+	// KV keys should be cleaned up.
+	_, _, err = cat.KV().Get("local.table.logs")
+	if err != ErrKeyNotFound {
+		t.Error("expected table KV key to be deleted after drop")
+	}
+	_, _, err = cat.KV().Get("local.manifest.logs")
+	if err != ErrKeyNotFound {
+		t.Error("expected manifest KV key to be deleted after drop")
+	}
 }
 
 func TestGetTableNotFound(t *testing.T) {
@@ -285,5 +295,94 @@ func TestCreateTableInvalidPartitionKey(t *testing.T) {
 	err := cat.CreateTable(ctx, "bad", schema, []string{"nonexistent_col"})
 	if err == nil {
 		t.Fatal("expected error for invalid partition key, got nil")
+	}
+}
+
+func TestClusterID(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := NewWithCluster(NewMemKV(), store, "test", "afb-east")
+	if cat.ClusterID() != "afb-east" {
+		t.Fatalf("expected cluster ID 'afb-east', got %q", cat.ClusterID())
+	}
+}
+
+func TestFederatedCatalog(t *testing.T) {
+	ctx := context.Background()
+	schema := testSchema()
+
+	// Shared KV simulates NATS KV replicated across clusters
+	sharedKV := NewMemKV()
+	store := objstore.NewMemStore()
+	_ = store.MakeBucket(ctx, "test")
+
+	// Create two clusters sharing the same KV
+	central := NewWithCluster(sharedKV, store, "test", "central")
+	if err := central.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	edge := NewWithCluster(sharedKV, store, "test", "afb-east")
+	if err := edge.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Central creates a table
+	if err := central.CreateTable(ctx, "users", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Edge creates a different table
+	if err := edge.CreateTable(ctx, "sensor_data", schema, []string{"region"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Each catalog only sees its own tables via ListTables
+	centralTables, _ := central.ListTables(ctx)
+	edgeTables, _ := edge.ListTables(ctx)
+	if len(centralTables) != 1 || centralTables[0] != "users" {
+		t.Fatalf("central should see [users], got %v", centralTables)
+	}
+	if len(edgeTables) != 1 || edgeTables[0] != "sensor_data" {
+		t.Fatalf("edge should see [sensor_data], got %v", edgeTables)
+	}
+
+	// ListClusters sees both clusters
+	clusters, err := central.ListClusters()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(clusters) != 2 {
+		t.Fatalf("expected 2 clusters, got %d", len(clusters))
+	}
+
+	clusterMap := make(map[string][]string)
+	for _, c := range clusters {
+		clusterMap[c.ClusterID] = c.Tables
+	}
+	if tables, ok := clusterMap["central"]; !ok || len(tables) != 1 || tables[0] != "users" {
+		t.Errorf("central cluster tables: %v", clusterMap["central"])
+	}
+	if tables, ok := clusterMap["afb-east"]; !ok || len(tables) != 1 || tables[0] != "sensor_data" {
+		t.Errorf("afb-east cluster tables: %v", clusterMap["afb-east"])
+	}
+
+	// Central can read edge's table metadata via GetRemoteTable
+	remoteMeta, err := central.GetRemoteTable("afb-east", "sensor_data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remoteMeta.Name != "sensor_data" {
+		t.Errorf("expected table name 'sensor_data', got %q", remoteMeta.Name)
+	}
+	if len(remoteMeta.PartitionKeys) != 1 || remoteMeta.PartitionKeys[0] != "region" {
+		t.Errorf("expected partition keys [region], got %v", remoteMeta.PartitionKeys)
+	}
+
+	// Central can read edge's manifest via GetRemoteManifest
+	remoteManifest, err := central.GetRemoteManifest("afb-east", "sensor_data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remoteManifest.Table != "sensor_data" {
+		t.Errorf("expected manifest table 'sensor_data', got %q", remoteManifest.Table)
 	}
 }

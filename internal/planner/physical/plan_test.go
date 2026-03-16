@@ -17,7 +17,7 @@ func setupCatalog(t *testing.T) (*catalog.Catalog, context.Context) {
 	ctx := context.Background()
 
 	store := objstore.NewMemStore()
-	cat := catalog.New(store, "test")
+	cat := catalog.NewWithStore(store, "test")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}
@@ -306,6 +306,136 @@ func TestPlan_SimpleScan(t *testing.T) {
 	// Plan also populates Stages
 	if len(plan.Stages) == 0 {
 		t.Error("expected Plan to also populate Stages")
+	}
+}
+
+func TestExpandFederatedScans(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+
+	// Shared KV simulates NATS KV replicated via leaf nodes
+	sharedKV := catalog.NewMemKV()
+
+	// Central cluster: has "events" table
+	central := catalog.NewWithCluster(sharedKV, store, "test", "central")
+	if err := central.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "event_id", Type: parquet.TypeString},
+			{Name: "ts", Type: parquet.TypeTimestamp},
+		},
+	}
+	if err := central.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := central.AddFiles(ctx, "events", nil, "tables/events/",
+		[]catalog.FileEntry{
+			{Path: "tables/events/central-001.parquet", SizeBytes: 1024, NumRows: 100},
+			{Path: "tables/events/central-002.parquet", SizeBytes: 1024, NumRows: 100},
+		}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Edge cluster "afb-east": also has "events" table
+	edge := catalog.NewWithCluster(sharedKV, store, "test", "afb-east")
+	if err := edge.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := edge.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := edge.AddFiles(ctx, "events", nil, "tables/events/",
+		[]catalog.FileEntry{
+			{Path: "tables/events/east-001.parquet", SizeBytes: 2048, NumRows: 200},
+		}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Plan from central's perspective
+	planner := NewPlanner(central)
+
+	scan := logical.NewScan("events", "e")
+	agg := logical.NewAggregate(scan, nil, []logical.AggExpr{
+		{Func: "count", InputCol: "event_id", OutputCol: "cnt"},
+	})
+
+	stages, err := planner.PlanDistributed(ctx, agg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Before expansion: 1 scan + 1 aggregate
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stages before expansion, got %d", len(stages))
+	}
+
+	// Expand
+	expanded := planner.ExpandFederatedScans(stages)
+
+	// After expansion: 2 scan stages (one per cluster) + 1 aggregate
+	scanStages := 0
+	aggStages := 0
+	for _, s := range expanded {
+		switch s.Type {
+		case "scan":
+			scanStages++
+		case "aggregate":
+			aggStages++
+		}
+	}
+
+	if scanStages != 2 {
+		t.Fatalf("expected 2 scan stages after expansion, got %d", scanStages)
+	}
+	if aggStages != 1 {
+		t.Fatalf("expected 1 aggregate stage, got %d", aggStages)
+	}
+
+	// Verify cluster IDs on scan stages
+	clusterIDs := map[string]bool{}
+	for _, s := range expanded {
+		if s.Type == "scan" {
+			clusterIDs[s.ClusterID] = true
+			if s.ClusterID == "central" && len(s.ScanFiles) != 2 {
+				t.Errorf("central scan should have 2 files, got %d", len(s.ScanFiles))
+			}
+			if s.ClusterID == "afb-east" && len(s.ScanFiles) != 1 {
+				t.Errorf("afb-east scan should have 1 file, got %d", len(s.ScanFiles))
+			}
+		}
+	}
+	if !clusterIDs["central"] || !clusterIDs["afb-east"] {
+		t.Errorf("expected scan stages for central and afb-east, got %v", clusterIDs)
+	}
+
+	// Verify aggregate depends on both scan stages
+	for _, s := range expanded {
+		if s.Type == "aggregate" {
+			if len(s.Dependencies) != 2 {
+				t.Errorf("aggregate should depend on 2 scan stages, got %d: %v", len(s.Dependencies), s.Dependencies)
+			}
+		}
+	}
+}
+
+func TestExpandFederatedScans_SingleCluster(t *testing.T) {
+	// With only one cluster, ExpandFederatedScans should be a no-op
+	cat, ctx := setupCatalog(t)
+	planner := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	stages, err := planner.PlanDistributed(ctx, scan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expanded := planner.ExpandFederatedScans(stages)
+
+	// Should be unchanged (single cluster)
+	if len(expanded) != len(stages) {
+		t.Fatalf("expected %d stages (unchanged), got %d", len(stages), len(expanded))
 	}
 }
 

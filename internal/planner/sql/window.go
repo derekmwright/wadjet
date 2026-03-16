@@ -29,8 +29,8 @@ type windowReplacement struct {
 
 // rewriteWindowFunctions scans SQL for FUNC(...) OVER (...) patterns and
 // replaces them with placeholder literals, returning the modified SQL and
-// extracted window specs. This allows vitess-sqlparser (which doesn't
-// support window functions) to parse the rest of the query.
+// extracted window specs. This pre-processing step handles window syntax
+// before the main parser sees the query.
 func rewriteWindowFunctions(sqlStr string) (string, []WindowSpec, error) {
 	reps := findWindowFunctions(sqlStr)
 	if len(reps) == 0 {

@@ -109,9 +109,9 @@ func TestParseExplain(t *testing.T) {
 	if parsed.Explain.InnerSQL != "SELECT * FROM events WHERE id > 5" {
 		t.Errorf("unexpected inner SQL: %s", parsed.Explain.InnerSQL)
 	}
-	// AST should be the inner SELECT
-	if parsed.AST == nil {
-		t.Error("AST should contain inner SELECT")
+	// SelectInfo should be populated for the inner SELECT
+	if parsed.SelectInfo == nil {
+		t.Error("SelectInfo should contain inner SELECT")
 	}
 }
 
@@ -489,5 +489,185 @@ func TestParseCreateFunctionErrors(t *testing.T) {
 				t.Errorf("expected error for %q", sql)
 			}
 		})
+	}
+}
+
+func TestParseCreateTable(t *testing.T) {
+	tests := []struct {
+		sql           string
+		name          string
+		cols          int
+		partKeys      int
+		firstColName  string
+		firstColType  string
+		firstNullable bool
+	}{
+		{
+			sql:           "CREATE TABLE events (id BIGINT NOT NULL, name VARCHAR, score DOUBLE)",
+			name:          "events",
+			cols:          3,
+			partKeys:      0,
+			firstColName:  "id",
+			firstColType:  "BIGINT",
+			firstNullable: false,
+		},
+		{
+			sql:           "CREATE TABLE flow_logs (src_ip IPV4 NOT NULL, dst_ip IPV4, port PORT, proto PROTOCOL) PARTITION BY (date)",
+			name:          "flow_logs",
+			cols:          4,
+			partKeys:      1,
+			firstColName:  "src_ip",
+			firstColType:  "IPV4",
+			firstNullable: false,
+		},
+		{
+			sql:           "CREATE TABLE simple (val INT)",
+			name:          "simple",
+			cols:          1,
+			partKeys:      0,
+			firstColName:  "val",
+			firstColType:  "INT",
+			firstNullable: true,
+		},
+		{
+			sql:           "CREATE TABLE multi_part (id BIGINT, year INT, month INT) PARTITION BY (year, month)",
+			name:          "multi_part",
+			cols:          3,
+			partKeys:      2,
+			firstColName:  "id",
+			firstColType:  "BIGINT",
+			firstNullable: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if parsed.Type != QueryCreateTable {
+				t.Fatalf("expected QueryCreateTable, got %v", parsed.Type)
+			}
+			ct := parsed.CreateTable
+			if ct == nil {
+				t.Fatal("CreateTable is nil")
+			}
+			if ct.Name != tt.name {
+				t.Errorf("name: got %q, want %q", ct.Name, tt.name)
+			}
+			if len(ct.Columns) != tt.cols {
+				t.Fatalf("columns: got %d, want %d", len(ct.Columns), tt.cols)
+			}
+			if len(ct.PartitionKeys) != tt.partKeys {
+				t.Fatalf("partition keys: got %d, want %d", len(ct.PartitionKeys), tt.partKeys)
+			}
+			if ct.Columns[0].Name != tt.firstColName {
+				t.Errorf("first col name: got %q, want %q", ct.Columns[0].Name, tt.firstColName)
+			}
+			if ct.Columns[0].Type != tt.firstColType {
+				t.Errorf("first col type: got %q, want %q", ct.Columns[0].Type, tt.firstColType)
+			}
+			if ct.Columns[0].Nullable != tt.firstNullable {
+				t.Errorf("first col nullable: got %v, want %v", ct.Columns[0].Nullable, tt.firstNullable)
+			}
+		})
+	}
+}
+
+func TestParseCreateTableErrors(t *testing.T) {
+	tests := []struct {
+		sql  string
+		desc string
+	}{
+		{"CREATE TABLE", "missing table name"},
+		{"CREATE TABLE events", "missing columns"},
+		{"CREATE TABLE events ()", "empty columns"},
+		{"CREATE TABLE events (id)", "missing type"},
+		{"CREATE TABLE events (id BIGINT) PARTITION", "missing BY"},
+		{"CREATE TABLE events (id BIGINT) PARTITION BY", "missing partition parens"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.desc, func(t *testing.T) {
+			_, err := Parse(tt.sql)
+			if err == nil {
+				t.Errorf("expected error for %q", tt.sql)
+			}
+		})
+	}
+}
+
+func TestParseDropTable(t *testing.T) {
+	tests := []struct {
+		sql      string
+		name     string
+		ifExists bool
+	}{
+		{"DROP TABLE events", "events", false},
+		{"DROP TABLE IF EXISTS events", "events", true},
+		{"DROP TABLE events;", "events", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if parsed.Type != QueryDropTable {
+				t.Fatalf("expected QueryDropTable, got %v", parsed.Type)
+			}
+			dt := parsed.DropTable
+			if dt.Name != tt.name {
+				t.Errorf("name: got %q, want %q", dt.Name, tt.name)
+			}
+			if dt.IfExists != tt.ifExists {
+				t.Errorf("ifExists: got %v, want %v", dt.IfExists, tt.ifExists)
+			}
+		})
+	}
+}
+
+func TestParseShowTables(t *testing.T) {
+	for _, sql := range []string{"SHOW TABLES", "SHOW TABLES;", "show tables"} {
+		parsed, err := Parse(sql)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", sql, err)
+		}
+		if parsed.Type != QueryShowTables {
+			t.Fatalf("expected QueryShowTables, got %v", parsed.Type)
+		}
+	}
+}
+
+func TestParseCreateTableAllTypes(t *testing.T) {
+	sql := `CREATE TABLE network_logs (
+		id BIGINT NOT NULL,
+		src_ip IPV4 NOT NULL,
+		dst_ip IPV6,
+		src_port PORT,
+		proto PROTOCOL,
+		mac_addr MAC,
+		subnet CIDR,
+		request_id UUID,
+		event_date DATE,
+		event_ts TIMESTAMP,
+		duration DURATION,
+		payload BYTES,
+		active BOOLEAN,
+		score FLOAT,
+		amount DOUBLE,
+		count INTEGER
+	) PARTITION BY (event_date)`
+	parsed, err := Parse(sql)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	ct := parsed.CreateTable
+	if len(ct.Columns) != 16 {
+		t.Fatalf("expected 16 columns, got %d", len(ct.Columns))
+	}
+	if len(ct.PartitionKeys) != 1 || ct.PartitionKeys[0] != "event_date" {
+		t.Fatalf("expected partition key [event_date], got %v", ct.PartitionKeys)
 	}
 }

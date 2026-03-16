@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/blastrain/vitess-sqlparser/sqlparser"
 	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 )
 
@@ -214,19 +213,21 @@ func cleanExpr(s string) string {
 
 // rewriteHavingExpr rewrites aggregate function calls in a HAVING expression
 // to column references that match the aggregate output column names.
-// e.g., COUNT(*) > 5 becomes a comparison against the "count(*)" output column.
-func rewriteHavingExpr(expr sqlparser.Expr, cols []plansql.SelectColumn) sqlparser.Expr {
+func rewriteHavingExpr(expr plansql.Node, cols []plansql.SelectColumn) plansql.Node {
 	return rewriteExpr(expr, cols)
 }
 
-func rewriteExpr(node sqlparser.Expr, cols []plansql.SelectColumn) sqlparser.Expr {
+func rewriteExpr(node plansql.Node, cols []plansql.SelectColumn) plansql.Node {
+	if node == nil {
+		return nil
+	}
 	switch n := node.(type) {
-	case *sqlparser.FuncExpr:
+	case *plansql.FuncCallNode:
 		// This is an aggregate call — find the matching output column name
-		funcStr := sqlparser.String(n)
+		funcStr := n.String()
 		colName := funcStr // default: use the expression string as column name
 		for _, col := range cols {
-			if col.IsAgg && strings.EqualFold(sqlparser.String(col.ASTExpr), funcStr) {
+			if col.IsAgg && col.ASTExpr != nil && strings.EqualFold(col.ASTExpr.String(), funcStr) {
 				if col.Alias != "" {
 					colName = col.Alias
 				} else {
@@ -235,42 +236,38 @@ func rewriteExpr(node sqlparser.Expr, cols []plansql.SelectColumn) sqlparser.Exp
 				break
 			}
 		}
-		return &sqlparser.ColName{
-			Name: sqlparser.NewColIdent(colName),
-		}
-	case *sqlparser.AndExpr:
-		return &sqlparser.AndExpr{
+		return &plansql.ColRef{Column: colName}
+	case *plansql.AndNode:
+		return &plansql.AndNode{
 			Left:  rewriteExpr(n.Left, cols),
 			Right: rewriteExpr(n.Right, cols),
 		}
-	case *sqlparser.OrExpr:
-		return &sqlparser.OrExpr{
+	case *plansql.OrNode:
+		return &plansql.OrNode{
 			Left:  rewriteExpr(n.Left, cols),
 			Right: rewriteExpr(n.Right, cols),
 		}
-	case *sqlparser.ComparisonExpr:
-		return &sqlparser.ComparisonExpr{
-			Operator: n.Operator,
-			Left:     rewriteExpr(n.Left, cols),
-			Right:    rewriteExpr(n.Right, cols),
+	case *plansql.CmpExpr:
+		return &plansql.CmpExpr{
+			Op:    n.Op,
+			Left:  rewriteExpr(n.Left, cols),
+			Right: rewriteExpr(n.Right, cols),
 		}
-	case *sqlparser.ParenExpr:
-		return &sqlparser.ParenExpr{
-			Expr: rewriteExpr(n.Expr, cols),
+	case *plansql.ParenNode:
+		return &plansql.ParenNode{
+			Inner: rewriteExpr(n.Inner, cols),
 		}
-	case *sqlparser.NotExpr:
-		return &sqlparser.NotExpr{
-			Expr: rewriteExpr(n.Expr, cols),
+	case *plansql.NotNode:
+		return &plansql.NotNode{
+			Inner: rewriteExpr(n.Inner, cols),
 		}
 	default:
-		// Literals, ColName, etc. — pass through unchanged
+		// Literals, ColRef, etc. — pass through unchanged
 		return node
 	}
 }
 
 // buildUnionPlan constructs a logical plan for a UNION query.
-// It recursively builds plans for the left and right sides, wraps them
-// in a NewUnion node, and then applies any ORDER BY / LIMIT from the outer query.
 func buildUnionPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
 	leftPlan, err := buildFromSelectWithCTEs(info.Union.Left, ctes)
 	if err != nil {
@@ -315,8 +312,6 @@ func buildUnionPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, err
 }
 
 // resolveTableOrCTE checks whether a table reference matches a CTE name.
-// If it does, the CTE body is parsed and planned as a sub-plan.
-// Otherwise, a regular Scan node is returned.
 func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, error) {
 	nameLower := strings.ToLower(table.Name)
 	for _, cte := range ctes {
