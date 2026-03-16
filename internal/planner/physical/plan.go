@@ -954,20 +954,33 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	child := node.Children[0]
 
 	// If the child (or child chain through Filter/HAVING) leads to an Aggregate,
-	// skip the projection — the aggregate already produces correctly named output
-	// columns (group-by cols + agg output cols). Adding a Project on top would
-	// fail because ColumnRef can't find aggregate output names.
-	// Exception: if any projection has an AST expression that needs evaluation
-	// (e.g., nested aggregates like SUM(x) * 0.0001), keep the projection.
+	// skip the projection when possible — the aggregate already produces correctly
+	// named output columns (group-by cols + agg output cols).
+	// Keep the projection when:
+	//   1. Any non-aggregate projection has a complex AST expression (e.g., SUM(x) * 0.0001)
+	//   2. Any projection renames a column via alias (e.g., l_suppkey AS supplier_no)
 	if hasAggregateAncestor(child) {
-		needsExprEval := false
+		needsProject := false
 		for _, proj := range node.Projections {
 			if proj.ASTExpr != nil && !proj.IsAgg && !isSimpleColRef(proj.ASTExpr) {
-				needsExprEval = true
+				needsProject = true
 				break
 			}
+			// Check for column rename on non-aggregate columns: alias differs
+			// from source column/expression (aggregate columns already use
+			// the alias as their OutputCol, so no rename needed).
+			if !proj.IsAgg && proj.Alias != "" {
+				src := proj.Column
+				if src == "" {
+					src = proj.Expr
+				}
+				if proj.Alias != src {
+					needsProject = true
+					break
+				}
+			}
 		}
-		if !needsExprEval {
+		if !needsProject {
 			return p.buildPipeline(ctx, child)
 		}
 	}

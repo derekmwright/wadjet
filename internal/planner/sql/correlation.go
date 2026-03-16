@@ -122,7 +122,7 @@ func walkForOuterRefs(node Node, outerTables, innerTables map[string]bool, outer
 			}
 		} else if outerCols != nil {
 			col := strings.ToLower(n.Column)
-			if tbl, ok := outerCols[col]; ok {
+			if tbl, ok := outerCols[col]; ok && !innerTables[tbl] {
 				*refs = append(*refs, OuterRef{Table: tbl, Column: col})
 			}
 		}
