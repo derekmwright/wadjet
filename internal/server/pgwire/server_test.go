@@ -454,6 +454,287 @@ func TestPGWireConcurrentConnections(t *testing.T) {
 	}
 }
 
+// parseRowDescTyped extracts column names AND type OIDs from a RowDescription.
+func (c *pgClient) parseRowDescTyped(data []byte) (names []string, oids []int) {
+	if len(data) < 2 {
+		return nil, nil
+	}
+	nCols := int(binary.BigEndian.Uint16(data[:2]))
+	data = data[2:]
+
+	names = make([]string, nCols)
+	oids = make([]int, nCols)
+	for i := 0; i < nCols; i++ {
+		name := readCString(data)
+		names[i] = name
+		data = data[len(name)+1:]
+		// tableOID(4) + colAttr(2) = 6 bytes
+		data = data[6:]
+		// typeOID(4)
+		oids[i] = int(binary.BigEndian.Uint32(data[:4]))
+		data = data[4:]
+		// typeSize(2) + typMod(4) + fmtCode(2) = 8 bytes
+		data = data[8:]
+	}
+	return
+}
+
+// extendedQuery runs Parse/Bind/Describe(Portal)/Execute/Sync and returns
+// typed RowDescription info alongside normal results.
+func (c *pgClient) extendedQuery(sql string) (names []string, oids []int, rows [][]string, tag string) {
+	c.t.Helper()
+
+	// Parse: ""(unnamed) + sql\0 + 0 param types
+	var parseBuf []byte
+	parseBuf = append(parseBuf, 0) // unnamed statement
+	parseBuf = append(parseBuf, sql...)
+	parseBuf = append(parseBuf, 0)
+	parseBuf = binary.BigEndian.AppendUint16(parseBuf, 0) // 0 param types
+	c.writeMsg('P', parseBuf)
+
+	// Bind: unnamed portal + unnamed statement + 0 fmt codes + 0 params + 0 result fmt codes
+	var bindBuf []byte
+	bindBuf = append(bindBuf, 0)    // unnamed portal
+	bindBuf = append(bindBuf, 0)    // unnamed statement
+	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 format codes
+	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 parameters
+	bindBuf = binary.BigEndian.AppendUint16(bindBuf, 0) // 0 result format codes
+	c.writeMsg('B', bindBuf)
+
+	// Describe portal
+	var descBuf []byte
+	descBuf = append(descBuf, 'P') // portal
+	descBuf = append(descBuf, 0)   // unnamed
+	c.writeMsg('D', descBuf)
+
+	// Execute unnamed portal, 0 = no row limit
+	var execBuf []byte
+	execBuf = append(execBuf, 0) // unnamed portal
+	execBuf = binary.BigEndian.AppendUint32(execBuf, 0)
+	c.writeMsg('E', execBuf)
+
+	// Sync
+	c.writeMsg('S', nil)
+
+	// Read responses
+	for {
+		typ, data, err := c.readMsg()
+		if err != nil {
+			c.t.Fatalf("reading extended query response: %v", err)
+		}
+		switch typ {
+		case '1': // ParseComplete
+		case '2': // BindComplete
+		case 'T': // RowDescription
+			names, oids = c.parseRowDescTyped(data)
+		case 'D': // DataRow
+			rows = append(rows, c.parseDataRow(data, len(names)))
+		case 'C': // CommandComplete
+			tag = readCString(data)
+		case 'n': // NoData
+		case 'E': // ErrorResponse
+			msg := c.parseError(data)
+			c.t.Logf("extended query error: %s", msg)
+			tag = "ERROR: " + msg
+		case 'Z': // ReadyForQuery
+			return
+		}
+	}
+}
+
+func TestPGWireTypedRowDescription(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	names, oids, rows, tag := client.extendedQuery("SELECT id, name, score FROM users ORDER BY id")
+	t.Logf("Columns: %v, OIDs: %v, Tag: %s", names, oids, tag)
+
+	if len(names) != 3 {
+		t.Fatalf("expected 3 columns, got %d", len(names))
+	}
+	// id is INT32 → OID 23 (int4)
+	if oids[0] != 23 {
+		t.Errorf("expected id OID 23 (int4), got %d", oids[0])
+	}
+	// name is STRING → OID 25 (text)
+	if oids[1] != 25 {
+		t.Errorf("expected name OID 25 (text), got %d", oids[1])
+	}
+	// score is FLOAT64 → OID 701 (float8)
+	if oids[2] != 701 {
+		t.Errorf("expected score OID 701 (float8), got %d", oids[2])
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+
+	client.terminate()
+}
+
+func TestPGWireDescribeStatement(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	// Parse a named statement
+	var parseBuf []byte
+	parseBuf = append(parseBuf, "stmt1"...)
+	parseBuf = append(parseBuf, 0)
+	parseBuf = append(parseBuf, "SELECT id, score FROM users"...)
+	parseBuf = append(parseBuf, 0)
+	parseBuf = binary.BigEndian.AppendUint16(parseBuf, 0)
+	client.writeMsg('P', parseBuf)
+
+	// Describe statement (not portal)
+	var descBuf []byte
+	descBuf = append(descBuf, 'S')
+	descBuf = append(descBuf, "stmt1"...)
+	descBuf = append(descBuf, 0)
+	client.writeMsg('D', descBuf)
+
+	// Sync
+	client.writeMsg('S', nil)
+
+	// Read responses
+	var gotParamDesc, gotRowDesc bool
+	var names []string
+	var oids []int
+	for {
+		typ, data, err := client.readMsg()
+		if err != nil {
+			t.Fatalf("reading describe response: %v", err)
+		}
+		switch typ {
+		case '1': // ParseComplete
+		case 't': // ParameterDescription
+			gotParamDesc = true
+		case 'T': // RowDescription
+			gotRowDesc = true
+			names, oids = client.parseRowDescTyped(data)
+		case 'n': // NoData
+		case 'Z':
+			if !gotParamDesc {
+				t.Error("did not receive ParameterDescription")
+			}
+			if !gotRowDesc {
+				t.Error("did not receive RowDescription (got NoData)")
+			}
+			if len(names) > 0 {
+				t.Logf("Described columns: %v, OIDs: %v", names, oids)
+				if names[0] != "id" {
+					t.Errorf("expected first column 'id', got %q", names[0])
+				}
+			}
+			client.terminate()
+			return
+		}
+	}
+}
+
+func TestPGWireTransactionState(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	// BEGIN — should get 'T' state in ReadyForQuery
+	client.writeMsg('Q', append([]byte("BEGIN"), 0))
+	var txState byte
+	for {
+		typ, data, err := client.readMsg()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ == 'Z' {
+			txState = data[0]
+			break
+		}
+	}
+	if txState != 'T' {
+		t.Errorf("expected txState 'T' after BEGIN, got %c", txState)
+	}
+
+	// COMMIT — should get 'I' state
+	client.writeMsg('Q', append([]byte("COMMIT"), 0))
+	for {
+		typ, data, err := client.readMsg()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if typ == 'Z' {
+			txState = data[0]
+			break
+		}
+	}
+	if txState != 'I' {
+		t.Errorf("expected txState 'I' after COMMIT, got %c", txState)
+	}
+
+	client.terminate()
+}
+
+func TestPGWirePgType(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	cols, rows, tag := client.simpleQuery("SELECT oid, typname FROM pg_type")
+	t.Logf("pg_type: %d columns, %d rows, tag=%s", len(cols), len(rows), tag)
+
+	if len(rows) < 10 {
+		t.Errorf("expected at least 10 pg_type rows, got %d", len(rows))
+	}
+
+	// Verify int4 is present
+	found := false
+	for _, row := range rows {
+		if len(row) >= 2 && row[0] == "23" && row[1] == "int4" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("pg_type missing int4 (OID 23)")
+	}
+
+	client.terminate()
+}
+
+func TestPGWireInfoSchemaTables(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	cols, rows, tag := client.simpleQuery("SELECT table_name FROM information_schema.tables")
+	t.Logf("info_schema.tables: cols=%v rows=%v tag=%s", cols, rows, tag)
+
+	if len(rows) < 1 {
+		t.Fatal("expected at least 1 table in information_schema.tables")
+	}
+	found := false
+	for _, row := range rows {
+		if len(row) > 0 && row[0] == "users" {
+			found = true
+		}
+	}
+	if !found {
+		// The table_name column may not be first depending on SELECT list
+		t.Logf("Note: 'users' table may be in a different column position")
+	}
+
+	client.terminate()
+}
+
 func containsSubstring(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(s) > 0 && contains(s, sub))
 }

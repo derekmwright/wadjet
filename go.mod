@@ -5,9 +5,11 @@ go 1.26.1
 require (
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/google/uuid v1.6.0
+	github.com/lib/pq v1.10.9
 	github.com/minio/minio-go/v7 v7.0.99
 	github.com/nats-io/nats-server/v2 v2.12.5
 	github.com/nats-io/nats.go v1.49.0
+	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/parquet-go/parquet-go v0.29.0
 	github.com/peterh/liner v1.2.2
 	github.com/prometheus/client_golang v1.23.2
@@ -36,7 +38,6 @@ require (
 	github.com/nats-io/jwt/v2 v2.8.0 // indirect
 	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
-	github.com/oschwald/maxminddb-golang v1.13.1 // indirect
 	github.com/parquet-go/bitpack v1.0.0 // indirect
 	github.com/parquet-go/jsonlite v1.0.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect

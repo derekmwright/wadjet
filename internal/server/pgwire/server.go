@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -102,11 +103,12 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	c := &pgConn{
-		conn:   conn,
-		db:     s.db,
-		logger: s.logger,
-		buf:    make([]byte, 0, 4096),
-		stmts:  make(map[string]string),
+		conn:    conn,
+		db:      s.db,
+		logger:  s.logger,
+		buf:     make([]byte, 0, 4096),
+		stmts:   make(map[string]string),
+		txState: 'I',
 	}
 	c.run()
 }
@@ -119,9 +121,14 @@ type pgConn struct {
 	buf    []byte
 
 	// Extended Query protocol state
-	preparedSQL string   // last parsed statement SQL
-	portalSQL   string   // last bound portal SQL
-	stmts       map[string]string // named prepared statements
+	preparedSQL     string            // last parsed statement SQL
+	portalSQL       string            // last bound portal SQL
+	stmts           map[string]string // named prepared statements
+	described       bool              // true if Describe was sent for current portal
+	resultFmtCodes  []int16           // result format codes from Bind (0=text, 1=binary)
+
+	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
+	txState byte
 }
 
 func (c *pgConn) run() {
@@ -220,6 +227,9 @@ func (c *pgConn) handleStartup() error {
 	c.sendParamStatus("DateStyle", "ISO, MDY")
 	c.sendParamStatus("integer_datetimes", "on")
 	c.sendParamStatus("standard_conforming_strings", "on")
+	c.sendParamStatus("TimeZone", "UTC")
+	c.sendParamStatus("IntervalStyle", "postgres")
+	c.sendParamStatus("is_superuser", "on")
 
 	// Send BackendKeyData (process ID + secret key for cancellation)
 	c.sendBackendKeyData(0, 0)
@@ -250,12 +260,27 @@ func (c *pgConn) handleQuery(sql string) {
 	// Special handling for SET/RESET/DISCARD/BEGIN/COMMIT/ROLLBACK
 	// that BI tools send during connection setup
 	upper := strings.ToUpper(sql)
+	if strings.HasPrefix(upper, "BEGIN") {
+		c.txState = 'T'
+		c.sendCommandComplete("BEGIN")
+		c.sendReadyForQuery()
+		return
+	}
+	if strings.HasPrefix(upper, "COMMIT") || strings.HasPrefix(upper, "END") {
+		c.txState = 'I'
+		c.sendCommandComplete("COMMIT")
+		c.sendReadyForQuery()
+		return
+	}
+	if strings.HasPrefix(upper, "ROLLBACK") {
+		c.txState = 'I'
+		c.sendCommandComplete("ROLLBACK")
+		c.sendReadyForQuery()
+		return
+	}
 	if strings.HasPrefix(upper, "SET ") ||
 		strings.HasPrefix(upper, "RESET ") ||
 		strings.HasPrefix(upper, "DISCARD ") ||
-		strings.HasPrefix(upper, "BEGIN") ||
-		strings.HasPrefix(upper, "COMMIT") ||
-		strings.HasPrefix(upper, "ROLLBACK") ||
 		strings.HasPrefix(upper, "DEALLOCATE") {
 		c.sendCommandComplete("SET")
 		c.sendReadyForQuery()
@@ -288,7 +313,11 @@ func (c *pgConn) handleQuery(sql string) {
 		c.sendReadyForQuery()
 		return
 	}
-	c.sendRowDescription(columns)
+	if len(result.ColumnMetas) > 0 {
+		c.sendTypedRowDescription(result.ColumnMetas)
+	} else {
+		c.sendRowDescription(columns)
+	}
 
 	// Send DataRow for each row
 	for _, row := range result.Rows {
@@ -313,6 +342,7 @@ func (c *pgConn) handleParse(payload []byte) {
 	} else {
 		c.stmts[name] = sql
 	}
+	c.described = false
 
 	// Send ParseComplete ('1')
 	c.sendMsg('1', nil)
@@ -366,6 +396,19 @@ func (c *pgConn) handleBind(payload []byte) {
 
 	c.portalSQL = sql
 
+	// Parse result format codes (at the end of the Bind message)
+	c.resultFmtCodes = nil
+	if len(payload) >= 2 {
+		numResultFmt := int(binary.BigEndian.Uint16(payload[:2]))
+		payload = payload[2:]
+		if numResultFmt > 0 && len(payload) >= numResultFmt*2 {
+			c.resultFmtCodes = make([]int16, numResultFmt)
+			for i := 0; i < numResultFmt; i++ {
+				c.resultFmtCodes[i] = int16(binary.BigEndian.Uint16(payload[i*2:]))
+			}
+		}
+	}
+
 	// Send BindComplete ('2')
 	c.sendMsg('2', nil)
 }
@@ -382,28 +425,67 @@ func (c *pgConn) handleDescribe(payload []byte) {
 		c.buf = appendInt16(c.buf, 0) // zero parameters
 		c.sendMsg('t', c.buf)
 
-		// For statement describe, we also need RowDescription or NoData
-		// Send NoData if SQL is empty, otherwise try to describe
 		sql := c.preparedSQL
 		if name := readCString(payload[1:]); name != "" {
 			if s, ok := c.stmts[name]; ok {
 				sql = s
 			}
 		}
-		if sql == "" || isCommandSQL(sql) {
-			c.sendMsg('n', nil) // NoData
-		} else {
-			// Try executing to get columns (or send NoData for non-select)
-			c.sendMsg('n', nil) // NoData — simplified
-		}
+		c.describeSQL(sql)
 	} else {
 		// Portal describe — send RowDescription based on portal SQL
-		sql := c.portalSQL
-		if sql == "" || isCommandSQL(sql) {
-			c.sendMsg('n', nil) // NoData
-		} else {
-			c.sendMsg('n', nil) // simplified
+		c.describeSQL(c.portalSQL)
+	}
+}
+
+// describeSQL executes a SQL statement to discover its result columns
+// and sends either a typed RowDescription or NoData.
+func (c *pgConn) describeSQL(sql string) {
+	sql = strings.TrimSpace(sql)
+	sql = strings.TrimRight(sql, ";")
+	sql = strings.TrimSpace(sql)
+
+	if sql == "" || isCommandSQL(sql) {
+		c.sendMsg('n', nil) // NoData
+		return
+	}
+
+	// Check introspection queries — these return synthetic results
+	upper := strings.ToUpper(sql)
+	normalized := strings.Join(strings.Fields(upper), " ")
+	if strings.HasPrefix(normalized, "SHOW ") ||
+		strings.Contains(normalized, "PG_CATALOG") ||
+		strings.Contains(normalized, "INFORMATION_SCHEMA") ||
+		strings.Contains(normalized, "PG_TYPE") ||
+		strings.Contains(normalized, "PG_CLASS") {
+		// Return text columns based on SELECT list
+		cols := extractSelectColumns(sql)
+		if len(cols) == 0 {
+			cols = []string{"?column?"}
 		}
+		c.sendRowDescription(cols)
+		c.described = true
+		return
+	}
+
+	// Execute the real query to get typed column metadata
+	ctx := context.Background()
+	result, err := c.db.Query(ctx, sql)
+	if err != nil {
+		// Can't describe — send NoData rather than error (the error
+		// will surface when Execute runs).
+		c.sendMsg('n', nil)
+		return
+	}
+
+	if len(result.ColumnMetas) > 0 {
+		c.sendTypedRowDescription(result.ColumnMetas)
+		c.described = true
+	} else if len(result.Columns) > 0 {
+		c.sendRowDescription(result.Columns)
+		c.described = true
+	} else {
+		c.sendMsg('n', nil)
 	}
 }
 
@@ -424,12 +506,24 @@ func (c *pgConn) handleExecute(payload []byte) {
 
 	// Handle SET/RESET/BEGIN/etc
 	upper := strings.ToUpper(sql)
+	if strings.HasPrefix(upper, "BEGIN") {
+		c.txState = 'T'
+		c.sendCommandComplete("BEGIN")
+		return
+	}
+	if strings.HasPrefix(upper, "COMMIT") || strings.HasPrefix(upper, "END") {
+		c.txState = 'I'
+		c.sendCommandComplete("COMMIT")
+		return
+	}
+	if strings.HasPrefix(upper, "ROLLBACK") {
+		c.txState = 'I'
+		c.sendCommandComplete("ROLLBACK")
+		return
+	}
 	if strings.HasPrefix(upper, "SET ") ||
 		strings.HasPrefix(upper, "RESET ") ||
 		strings.HasPrefix(upper, "DISCARD ") ||
-		strings.HasPrefix(upper, "BEGIN") ||
-		strings.HasPrefix(upper, "COMMIT") ||
-		strings.HasPrefix(upper, "ROLLBACK") ||
 		strings.HasPrefix(upper, "DEALLOCATE") ||
 		strings.HasPrefix(upper, "CLOSE") {
 		c.sendCommandComplete("SET")
@@ -459,9 +553,14 @@ func (c *pgConn) handleExecute(payload []byte) {
 		return
 	}
 
-	c.sendRowDescription(columns)
+	// Extended query protocol: Execute sends only DataRow + CommandComplete.
+	// RowDescription was already sent by Describe. Do NOT send it again.
 	for _, row := range result.Rows {
-		c.sendDataRow(columns, row)
+		if len(c.resultFmtCodes) > 0 {
+			c.sendDataRowFormatted(columns, row, c.resultFmtCodes)
+		} else {
+			c.sendDataRow(columns, row)
+		}
 	}
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(result.Rows)))
 }
@@ -512,7 +611,8 @@ func (c *pgConn) handleIntrospection(sql, upper string) bool {
 		strings.Contains(normalized, "PG_PROC") ||
 		strings.Contains(normalized, "PG_TABLES") ||
 		strings.Contains(normalized, "PG_VIEWS") ||
-		strings.Contains(normalized, "PG_MATVIEWS")
+		strings.Contains(normalized, "PG_MATVIEWS") ||
+		strings.Contains(normalized, "PG_DATABASE")
 
 	if isPgCatalog {
 		if c.handleCatalogQuery(normalized) {
@@ -667,6 +767,23 @@ func pgTypeOID(typeName string) int {
 // that SQLAlchemy/Superset uses for schema introspection.
 func (c *pgConn) handleCatalogQuery(normalized string) bool {
 	ctx := context.Background()
+
+	// pg_type — JDBC drivers query this to map OIDs to type names
+	if strings.Contains(normalized, "PG_TYPE") && !strings.Contains(normalized, "PG_CLASS") &&
+		!strings.Contains(normalized, "PG_ATTRIBUTE") {
+		return c.handlePgType(normalized)
+	}
+
+	// information_schema.tables
+	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "TABLES") &&
+		!strings.Contains(normalized, "COLUMNS") {
+		return c.handleInfoSchemaTables(ctx)
+	}
+
+	// information_schema.columns
+	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "COLUMNS") {
+		return c.handleInfoSchemaColumns(ctx, normalized)
+	}
 
 	// Schema listing: SELECT nspname FROM pg_namespace (used by get_schema_names)
 	// Exclude queries that mention pg_type/pg_class/pg_attribute — those just JOIN pg_namespace.
@@ -841,6 +958,130 @@ func (c *pgConn) handleAttributeQuery(ctx context.Context, normalized string) bo
 	return true
 }
 
+// handlePgType returns rows from pg_type for JDBC/ODBC type mapping.
+// Drivers like pgjdbc query pg_type to map OIDs to Java types.
+func (c *pgConn) handlePgType(normalized string) bool {
+	type pgType struct {
+		oid      string
+		typname  string
+		typlen   string
+		typtype  string
+		typnamespace string
+	}
+
+	types := []pgType{
+		{"16", "bool", "1", "b", "11"},
+		{"17", "bytea", "-1", "b", "11"},
+		{"20", "int8", "8", "b", "11"},
+		{"21", "int2", "2", "b", "11"},
+		{"23", "int4", "4", "b", "11"},
+		{"25", "text", "-1", "b", "11"},
+		{"26", "oid", "4", "b", "11"},
+		{"700", "float4", "4", "b", "11"},
+		{"701", "float8", "8", "b", "11"},
+		{"1042", "bpchar", "-1", "b", "11"},
+		{"1043", "varchar", "-1", "b", "11"},
+		{"1082", "date", "4", "b", "11"},
+		{"1114", "timestamp", "8", "b", "11"},
+		{"1184", "timestamptz", "8", "b", "11"},
+		{"1700", "numeric", "-1", "b", "11"},
+	}
+
+	// If query is looking for a specific OID, filter
+	specificOID := extractParamValue(normalized, "OID")
+
+	cols := []string{"oid", "typname", "typlen", "typtype", "typnamespace"}
+	c.sendRowDescription(cols)
+
+	count := 0
+	for _, t := range types {
+		if specificOID != "" && t.oid != specificOID {
+			continue
+		}
+		c.sendDataRow(cols, map[string]any{
+			"oid":          t.oid,
+			"typname":      t.typname,
+			"typlen":       t.typlen,
+			"typtype":      t.typtype,
+			"typnamespace": t.typnamespace,
+		})
+		count++
+	}
+	c.sendCommandComplete(fmt.Sprintf("SELECT %d", count))
+	return true
+}
+
+// handleInfoSchemaTables returns information_schema.tables data.
+func (c *pgConn) handleInfoSchemaTables(ctx context.Context) bool {
+	tables, err := c.db.ListTables(ctx)
+	if err != nil {
+		return false
+	}
+
+	cols := []string{"table_catalog", "table_schema", "table_name", "table_type"}
+	c.sendRowDescription(cols)
+	for _, t := range tables {
+		c.sendDataRow(cols, map[string]any{
+			"table_catalog": "caelum",
+			"table_schema":  "public",
+			"table_name":    t,
+			"table_type":    "BASE TABLE",
+		})
+	}
+	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(tables)))
+	return true
+}
+
+// handleInfoSchemaColumns returns information_schema.columns data.
+func (c *pgConn) handleInfoSchemaColumns(ctx context.Context, normalized string) bool {
+	tables, err := c.db.ListTables(ctx)
+	if err != nil {
+		return false
+	}
+
+	// Filter to specific table if referenced
+	targetTable := extractParamValue(normalized, "TABLE_NAME")
+
+	cols := []string{"table_catalog", "table_schema", "table_name",
+		"column_name", "ordinal_position", "data_type", "is_nullable"}
+
+	c.sendRowDescription(cols)
+	count := 0
+	for _, tableName := range tables {
+		if targetTable != "" && tableName != targetTable {
+			continue
+		}
+		table, err := c.db.Query(ctx, fmt.Sprintf("DESCRIBE %s", tableName))
+		if err != nil {
+			continue
+		}
+		for i, row := range table.Rows {
+			colName, _ := row["column_name"].(string)
+			colType, _ := row["type"].(string)
+			nullable, _ := row["nullable"].(string)
+			if colName == "" || colName == "Partition Keys" {
+				continue
+			}
+			isNullable := "YES"
+			if nullable == "NO" {
+				isNullable = "NO"
+			}
+			c.sendDataRow(cols, map[string]any{
+				"table_catalog":    "caelum",
+				"table_schema":     "public",
+				"table_name":       tableName,
+				"column_name":      colName,
+				"ordinal_position": fmt.Sprintf("%d", i+1),
+				"data_type":        pgFormatType(colType),
+				"is_nullable":      isNullable,
+			})
+			count++
+		}
+	}
+	c.sendCommandComplete(fmt.Sprintf("SELECT %d", count))
+	return true
+}
+
 // pgFormatType maps Caelum type names to PostgreSQL format_type() output.
 func pgFormatType(typeName string) string {
 	switch strings.ToUpper(typeName) {
@@ -995,8 +1236,12 @@ func (c *pgConn) sendBackendKeyData(pid, secret int32) {
 }
 
 func (c *pgConn) sendReadyForQuery() {
-	// 'Z' + int32(5) + byte('I' = idle)
-	c.conn.Write([]byte{'Z', 0, 0, 0, 5, 'I'})
+	// 'Z' + int32(5) + byte(txState)
+	state := c.txState
+	if state == 0 {
+		state = 'I'
+	}
+	c.conn.Write([]byte{'Z', 0, 0, 0, 5, state})
 }
 
 func (c *pgConn) sendEmptyQuery() {
@@ -1031,6 +1276,60 @@ func (c *pgConn) sendRowDescription(columns []string) {
 	c.sendMsg('T', c.buf)
 }
 
+// sendTypedRowDescription emits a RowDescription ('T') message with correct
+// PostgreSQL type OIDs derived from ColumnMeta. This is critical for JDBC/ODBC
+// drivers that use OIDs to determine Java/C types for result columns.
+func (c *pgConn) sendTypedRowDescription(metas []caelum.ColumnMeta) {
+	c.buf = c.buf[:0]
+	c.buf = appendInt16(c.buf, int16(len(metas)))
+
+	for _, m := range metas {
+		// Field name (null-terminated)
+		c.buf = append(c.buf, m.Name...)
+		c.buf = append(c.buf, 0)
+		// Table OID (int32) = 0
+		c.buf = appendInt32(c.buf, 0)
+		// Column attr number (int16) = 0
+		c.buf = appendInt16(c.buf, 0)
+		// Data type OID
+		oid := pgTypeOID(m.TypeName)
+		c.buf = appendInt32(c.buf, int32(oid))
+		// Data type size
+		c.buf = appendInt16(c.buf, pgTypeSize(oid))
+		// Type modifier (int32) = -1
+		c.buf = appendInt32(c.buf, -1)
+		// Format code (int16) = 0 (text)
+		c.buf = appendInt16(c.buf, 0)
+	}
+
+	c.sendMsg('T', c.buf)
+}
+
+// pgTypeSize returns the type size for a PostgreSQL type OID.
+// Fixed-size types report their byte size; variable-length types report -1.
+func pgTypeSize(oid int) int16 {
+	switch oid {
+	case 16: // bool
+		return 1
+	case 21: // int2
+		return 2
+	case 23: // int4
+		return 4
+	case 20: // int8
+		return 8
+	case 700: // float4
+		return 4
+	case 701: // float8
+		return 8
+	case 1082: // date
+		return 4
+	case 1114: // timestamp
+		return 8
+	default:
+		return -1 // variable length
+	}
+}
+
 func (c *pgConn) sendDataRow(columns []string, row map[string]any) {
 	c.buf = c.buf[:0]
 
@@ -1050,6 +1349,82 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any) {
 	}
 
 	c.sendMsg('D', c.buf)
+}
+
+// sendDataRowFormatted sends a DataRow using the format codes from Bind.
+// Columns with format code 1 (binary) get binary-encoded values.
+func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16) {
+	c.buf = c.buf[:0]
+	c.buf = appendInt16(c.buf, int16(len(columns)))
+
+	for i, col := range columns {
+		val, ok := row[col]
+		if !ok || val == nil {
+			c.buf = appendInt32(c.buf, -1)
+			continue
+		}
+
+		// Determine format for this column
+		binary := false
+		if len(fmtCodes) == 1 {
+			binary = fmtCodes[0] == 1 // single code applies to all columns
+		} else if i < len(fmtCodes) {
+			binary = fmtCodes[i] == 1
+		}
+
+		if binary {
+			c.buf = appendBinaryValue(c.buf, val)
+		} else {
+			s := formatPgValue(val)
+			c.buf = appendInt32(c.buf, int32(len(s)))
+			c.buf = append(c.buf, s...)
+		}
+	}
+
+	c.sendMsg('D', c.buf)
+}
+
+// appendBinaryValue appends a value in PostgreSQL binary format.
+func appendBinaryValue(buf []byte, val any) []byte {
+	switch v := val.(type) {
+	case bool:
+		buf = appendInt32(buf, 1)
+		if v {
+			buf = append(buf, 1)
+		} else {
+			buf = append(buf, 0)
+		}
+	case int32:
+		buf = appendInt32(buf, 4)
+		buf = appendInt32(buf, v)
+	case int64:
+		buf = appendInt32(buf, 8)
+		buf = append(buf, byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32),
+			byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
+	case int:
+		v64 := int64(v)
+		buf = appendInt32(buf, 8)
+		buf = append(buf, byte(v64>>56), byte(v64>>48), byte(v64>>40), byte(v64>>32),
+			byte(v64>>24), byte(v64>>16), byte(v64>>8), byte(v64))
+	case float32:
+		buf = appendInt32(buf, 4)
+		bits := math.Float32bits(v)
+		buf = append(buf, byte(bits>>24), byte(bits>>16), byte(bits>>8), byte(bits))
+	case float64:
+		buf = appendInt32(buf, 8)
+		bits := math.Float64bits(v)
+		buf = append(buf, byte(bits>>56), byte(bits>>48), byte(bits>>40), byte(bits>>32),
+			byte(bits>>24), byte(bits>>16), byte(bits>>8), byte(bits))
+	case string:
+		buf = appendInt32(buf, int32(len(v)))
+		buf = append(buf, v...)
+	default:
+		// Fallback: text encoding
+		s := fmt.Sprintf("%v", v)
+		buf = appendInt32(buf, int32(len(s)))
+		buf = append(buf, s...)
+	}
+	return buf
 }
 
 // formatPgValue formats a value for PgWire text output.

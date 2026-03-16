@@ -86,11 +86,20 @@ func (db *DB) NewIngester(tableName string, schema parquet.Schema, partitionKeys
 	return ingest.New(db.catalog, tableName, schema, partitionKeys, cfg)
 }
 
+// ColumnMeta describes a result column's type information.
+type ColumnMeta struct {
+	Name     string
+	TypeName string         // Caelum type name (e.g., "INT64", "STRING")
+	TypeID   parquet.TypeID // Caelum type ID
+	Nullable bool
+}
+
 // QueryResult contains the result of a SQL query.
 type QueryResult struct {
-	Columns []string
-	Rows    []map[string]any
-	Plan    string
+	Columns     []string
+	ColumnMetas []ColumnMeta // typed column metadata (may be nil for introspection queries)
+	Rows        []map[string]any
+	Plan        string
 }
 
 // Query executes a SQL query and returns the results.
@@ -153,10 +162,17 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 	// Derive column order from the projection list, not map iteration
 	columns := deriveColumns(selectInfo, rows)
 
+	// Derive typed column metadata
+	var metas []ColumnMeta
+	if len(columns) > 0 {
+		metas = deriveColumnMetas(columns, rows, db.catalog)
+	}
+
 	return &QueryResult{
-		Columns: columns,
-		Rows:    rows,
-		Plan:    planStr,
+		Columns:     columns,
+		ColumnMetas: metas,
+		Rows:        rows,
+		Plan:        planStr,
 	}, nil
 }
 
@@ -278,6 +294,72 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any) []string {
 		return cols
 	}
 	return nil
+}
+
+// deriveColumnMetas infers column type metadata from result data and catalog schemas.
+func deriveColumnMetas(columns []string, rows []map[string]any, cat *catalog.Catalog) []ColumnMeta {
+	metas := make([]ColumnMeta, len(columns))
+
+	// Try to match columns against catalog table schemas
+	ctx := context.Background()
+	schemaMap := make(map[string]parquet.TypeID)
+	if cat != nil {
+		if tableNames, err := cat.ListTables(ctx); err == nil {
+			for _, tableName := range tableNames {
+				if table, err := cat.GetTable(ctx, tableName); err == nil && table != nil {
+					for _, col := range table.Schema.Columns {
+						schemaMap[col.Name] = col.Type
+					}
+				}
+			}
+		}
+	}
+
+	for i, name := range columns {
+		metas[i] = ColumnMeta{Name: name, Nullable: true}
+
+		// Try catalog schema first
+		if tid, ok := schemaMap[name]; ok {
+			metas[i].TypeID = tid
+			metas[i].TypeName = tid.String()
+			continue
+		}
+
+		// Infer from first non-null value in results
+		for _, row := range rows {
+			val := row[name]
+			if val == nil {
+				continue
+			}
+			switch val.(type) {
+			case bool:
+				metas[i].TypeID = parquet.TypeBool
+			case int32:
+				metas[i].TypeID = parquet.TypeInt32
+			case int64:
+				metas[i].TypeID = parquet.TypeInt64
+			case int:
+				metas[i].TypeID = parquet.TypeInt64
+			case float32:
+				metas[i].TypeID = parquet.TypeFloat32
+			case float64:
+				metas[i].TypeID = parquet.TypeFloat64
+			case string:
+				metas[i].TypeID = parquet.TypeString
+			default:
+				metas[i].TypeID = parquet.TypeString
+			}
+			metas[i].TypeName = metas[i].TypeID.String()
+			break
+		}
+
+		// Default to STRING if no data
+		if metas[i].TypeName == "" {
+			metas[i].TypeID = parquet.TypeString
+			metas[i].TypeName = "STRING"
+		}
+	}
+	return metas
 }
 
 func (db *DB) createFunction(cf *plansql.CreateFunctionInfo) (*QueryResult, error) {
