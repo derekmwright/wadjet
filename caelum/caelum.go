@@ -129,6 +129,7 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return nil, fmt.Errorf("building logical plan: %w", err)
 	}
 
+	db.planner.AnnotateScanColumns(ctx, logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan)
 	planStr := logicalPlan.PrettyPrint(0)
 
@@ -169,6 +170,7 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 		return nil, fmt.Errorf("building logical plan: %w", err)
 	}
 
+	db.planner.AnnotateScanColumns(ctx, logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan)
 	plan := logicalPlan.PrettyPrint(0)
 

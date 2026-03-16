@@ -31,7 +31,6 @@ func pushdownPredicates(n *Node) *Node {
 	}
 
 	// If this is a Filter above a Scan, keep it (already at leaf)
-	// If this is a Filter above a Project, swap them
 	if n.Type == NodeFilter && len(n.Children) == 1 {
 		child := n.Children[0]
 		if child.Type == NodeProject {
@@ -40,9 +39,237 @@ func pushdownPredicates(n *Node) *Node {
 			child.Children[0] = n
 			return child
 		}
+		if child.Type == NodeJoin && len(child.Children) == 2 {
+			return pushFilterThroughJoin(n, child)
+		}
 	}
 
 	return n
+}
+
+// pushFilterThroughJoin decomposes a filter node above a join and pushes
+// single-table predicates to the appropriate join child.
+func pushFilterThroughJoin(filter, join *Node) *Node {
+	flatPreds := flattenANDPredicates(filter.Predicates)
+	if len(flatPreds) == 0 {
+		return filter
+	}
+
+	leftTables, leftColMap := collectScanInfo(join.Children[0])
+	rightTables, rightColMap := collectScanInfo(join.Children[1])
+
+	// Merge column maps for resolving unqualified column references
+	allColMap := make(map[string]string, len(leftColMap)+len(rightColMap))
+	for k, v := range leftColMap {
+		allColMap[k] = v
+	}
+	for k, v := range rightColMap {
+		allColMap[k] = v
+	}
+
+	var leftPreds, rightPreds, remainingPreds []Predicate
+	for _, pred := range flatPreds {
+		refs := predicateTableRefs(pred, allColMap)
+		if refs == nil || len(refs) == 0 {
+			remainingPreds = append(remainingPreds, pred)
+			continue
+		}
+
+		allLeft := true
+		allRight := true
+		for table := range refs {
+			if !leftTables[table] {
+				allLeft = false
+			}
+			if !rightTables[table] {
+				allRight = false
+			}
+		}
+
+		if allLeft {
+			leftPreds = append(leftPreds, pred)
+		} else if allRight {
+			rightPreds = append(rightPreds, pred)
+		} else {
+			remainingPreds = append(remainingPreds, pred)
+		}
+	}
+
+	if len(leftPreds) > 0 {
+		join.Children[0] = NewFilter(join.Children[0], leftPreds)
+		join.Children[0] = pushdownPredicates(join.Children[0])
+	}
+	if len(rightPreds) > 0 {
+		join.Children[1] = NewFilter(join.Children[1], rightPreds)
+		join.Children[1] = pushdownPredicates(join.Children[1])
+	}
+
+	if len(remainingPreds) == 0 {
+		return join
+	}
+
+	filter.Predicates = remainingPreds
+	filter.Children[0] = join
+	return filter
+}
+
+// flattenANDPredicates splits compound AND predicates into individual predicates.
+func flattenANDPredicates(preds []Predicate) []Predicate {
+	var result []Predicate
+	for _, pred := range preds {
+		if pred.ASTExpr != nil {
+			flattenASTAnd(pred.ASTExpr, &result)
+		} else if pred.Raw != "" {
+			upper := strings.ToUpper(pred.Raw)
+			parts := splitOnAnd(pred.Raw, upper)
+			for _, part := range parts {
+				part = strings.TrimSpace(part)
+				if part != "" {
+					result = append(result, Predicate{Raw: part})
+				}
+			}
+		}
+	}
+	return result
+}
+
+// flattenASTAnd recursively splits AND nodes into individual predicates.
+func flattenASTAnd(expr plansql.Node, result *[]Predicate) {
+	switch e := expr.(type) {
+	case *plansql.AndNode:
+		flattenASTAnd(e.Left, result)
+		flattenASTAnd(e.Right, result)
+	case *plansql.ParenNode:
+		if _, ok := e.Inner.(*plansql.AndNode); ok {
+			flattenASTAnd(e.Inner, result)
+		} else {
+			*result = append(*result, Predicate{ASTExpr: expr, Raw: expr.String()})
+		}
+	default:
+		*result = append(*result, Predicate{ASTExpr: expr, Raw: expr.String()})
+	}
+}
+
+// collectScanInfo returns table names/aliases and a column-to-table mapping from a subtree.
+func collectScanInfo(n *Node) (tables map[string]bool, colToTable map[string]string) {
+	tables = make(map[string]bool)
+	colToTable = make(map[string]string)
+	collectScanInfoRec(n, tables, colToTable)
+	return
+}
+
+func collectScanInfoRec(n *Node, tables map[string]bool, colToTable map[string]string) {
+	if n == nil {
+		return
+	}
+	if n.Type == NodeScan {
+		name := strings.ToLower(n.TableName)
+		alias := strings.ToLower(n.TableAlias)
+		if name != "" {
+			tables[name] = true
+		}
+		if alias != "" && alias != name {
+			tables[alias] = true
+		}
+		// Map column names to the table identifier (prefer alias)
+		tableID := alias
+		if tableID == "" {
+			tableID = name
+		}
+		for _, col := range n.ScanColumns {
+			colToTable[strings.ToLower(col)] = tableID
+		}
+	}
+	for _, child := range n.Children {
+		collectScanInfoRec(child, tables, colToTable)
+	}
+}
+
+// predicateTableRefs returns the set of tables referenced by a predicate's column refs.
+// Returns nil if the predicate can't be fully resolved (e.g., unqualified columns
+// not found in ScanColumns, or no AST available).
+func predicateTableRefs(pred Predicate, colToTable map[string]string) map[string]bool {
+	if pred.ASTExpr == nil {
+		return nil
+	}
+	refs := make(map[string]bool)
+	resolved := true
+	collectColTableRefs(pred.ASTExpr, refs, colToTable, &resolved)
+	if !resolved {
+		return nil
+	}
+	return refs
+}
+
+// collectColTableRefs walks an AST and collects the table names referenced by column refs.
+func collectColTableRefs(expr plansql.Node, refs map[string]bool, colToTable map[string]string, resolved *bool) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case *plansql.ColRef:
+		if e.Table != "" {
+			refs[strings.ToLower(e.Table)] = true
+		} else {
+			table, ok := colToTable[strings.ToLower(e.Column)]
+			if ok {
+				refs[table] = true
+			} else {
+				*resolved = false
+			}
+		}
+	case *plansql.CmpExpr:
+		collectColTableRefs(e.Left, refs, colToTable, resolved)
+		collectColTableRefs(e.Right, refs, colToTable, resolved)
+	case *plansql.AndNode:
+		collectColTableRefs(e.Left, refs, colToTable, resolved)
+		collectColTableRefs(e.Right, refs, colToTable, resolved)
+	case *plansql.OrNode:
+		collectColTableRefs(e.Left, refs, colToTable, resolved)
+		collectColTableRefs(e.Right, refs, colToTable, resolved)
+	case *plansql.NotNode:
+		collectColTableRefs(e.Inner, refs, colToTable, resolved)
+	case *plansql.ParenNode:
+		collectColTableRefs(e.Inner, refs, colToTable, resolved)
+	case *plansql.BinaryOp:
+		collectColTableRefs(e.Left, refs, colToTable, resolved)
+		collectColTableRefs(e.Right, refs, colToTable, resolved)
+	case *plansql.UnaryOp:
+		collectColTableRefs(e.Inner, refs, colToTable, resolved)
+	case *plansql.InExpr:
+		collectColTableRefs(e.Left, refs, colToTable, resolved)
+		for _, v := range e.Values {
+			collectColTableRefs(v, refs, colToTable, resolved)
+		}
+	case *plansql.BetweenExpr:
+		collectColTableRefs(e.Left, refs, colToTable, resolved)
+		collectColTableRefs(e.Low, refs, colToTable, resolved)
+		collectColTableRefs(e.High, refs, colToTable, resolved)
+	case *plansql.LikeExpr:
+		collectColTableRefs(e.Left, refs, colToTable, resolved)
+		collectColTableRefs(e.Pattern, refs, colToTable, resolved)
+	case *plansql.IsExpr:
+		collectColTableRefs(e.Left, refs, colToTable, resolved)
+	case *plansql.FuncCallNode:
+		for _, arg := range e.Args {
+			collectColTableRefs(arg, refs, colToTable, resolved)
+		}
+	case *plansql.CastNode:
+		collectColTableRefs(e.Inner, refs, colToTable, resolved)
+	case *plansql.CaseNode:
+		if e.Subject != nil {
+			collectColTableRefs(e.Subject, refs, colToTable, resolved)
+		}
+		for _, w := range e.Whens {
+			collectColTableRefs(w.Cond, refs, colToTable, resolved)
+			collectColTableRefs(w.Result, refs, colToTable, resolved)
+		}
+		if e.Else != nil {
+			collectColTableRefs(e.Else, refs, colToTable, resolved)
+		}
+	case *plansql.Lit:
+		// No column refs
+	}
 }
 
 // extractPartitionFilters finds Filter nodes above Scan nodes and extracts

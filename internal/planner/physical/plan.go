@@ -161,6 +161,28 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	return collectSink.Rows, nil
 }
 
+// AnnotateScanColumns walks the logical plan tree and populates ScanColumns
+// on Scan nodes from the catalog. This enables the logical optimizer to resolve
+// unqualified column references for filter pushdown through joins.
+func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
+	if node == nil {
+		return
+	}
+	if node.Type == logical.NodeScan && node.TableName != "" {
+		table, err := p.catalog.GetTable(ctx, node.TableName)
+		if err == nil {
+			cols := make([]string, len(table.Schema.Columns))
+			for i, c := range table.Schema.Columns {
+				cols[i] = c.Name
+			}
+			node.ScanColumns = cols
+		}
+	}
+	for _, child := range node.Children {
+		p.AnnotateScanColumns(ctx, child)
+	}
+}
+
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
 	source, ops, sink, err := p.buildPipeline(ctx, node)

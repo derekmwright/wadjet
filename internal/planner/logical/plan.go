@@ -62,8 +62,9 @@ type Node struct {
 	Children []*Node
 
 	// Scan
-	TableName      string
-	TableAlias     string
+	TableName       string
+	TableAlias      string
+	ScanColumns     []string          // column names available from this scan (populated by physical planner)
 	PartitionFilter map[string]string // extracted partition key filters (year, month, day, hour)
 
 	// Filter
