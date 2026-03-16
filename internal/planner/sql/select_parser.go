@@ -8,8 +8,9 @@ import (
 // selectParser is a recursive descent parser for SELECT statements.
 // It parses SELECT/UNION queries into our own AST (Node types from ast.go).
 type selectParser struct {
-	lex *lexer
-	cur token
+	lex       *lexer
+	cur       token
+	lookahead []token // buffered tokens for lookahead
 }
 
 func newSelectParser(input string) *selectParser {
@@ -20,12 +21,29 @@ func newSelectParser(input string) *selectParser {
 
 func (p *selectParser) advance() token {
 	prev := p.cur
-	p.cur = p.lex.nextToken()
+	if len(p.lookahead) > 0 {
+		p.cur = p.lookahead[0]
+		p.lookahead = p.lookahead[1:]
+	} else {
+		p.cur = p.lex.nextToken()
+	}
 	return prev
 }
 
 func (p *selectParser) peek() TokenType {
 	return p.cur.typ
+}
+
+// peekN returns the token type n positions ahead (0 = current token).
+func (p *selectParser) peekN(n int) TokenType {
+	if n == 0 {
+		return p.cur.typ
+	}
+	// Buffer enough tokens
+	for len(p.lookahead) < n {
+		p.lookahead = append(p.lookahead, p.lex.nextToken())
+	}
+	return p.lookahead[n-1].typ
 }
 
 func (p *selectParser) expect(typ TokenType) (token, error) {
@@ -861,16 +879,41 @@ func (p *selectParser) parseUnary() (Node, error) {
 	switch p.peek() {
 	case TokenMinus:
 		p.advance()
-		inner, err := p.parsePrimary()
+		inner, err := p.parsePostfix()
 		if err != nil {
 			return nil, err
 		}
 		return &UnaryOp{Op: "-", Inner: inner}, nil
 	case TokenPlus:
 		p.advance()
-		return p.parsePrimary()
+		return p.parsePostfix()
 	}
-	return p.parsePrimary()
+	return p.parsePostfix()
+}
+
+// parsePostfix handles subscript access: expr[index] → element_at(expr, index)
+func (p *selectParser) parsePostfix() (Node, error) {
+	expr, err := p.parsePrimary()
+	if err != nil {
+		return nil, err
+	}
+	// Handle subscript: expr[index]
+	for p.peek() == TokenLBracket {
+		p.advance() // consume [
+		index, err := p.parseExpr()
+		if err != nil {
+			return nil, fmt.Errorf("expected expression inside []")
+		}
+		if _, err := p.expect(TokenRBracket); err != nil {
+			return nil, fmt.Errorf("expected ] after subscript")
+		}
+		// Rewrite arr[i] → element_at(arr, i)
+		expr = &FuncCallNode{
+			Name: "element_at",
+			Args: []Node{expr, index},
+		}
+	}
+	return expr, nil
 }
 
 func (p *selectParser) parsePrimary() (Node, error) {
@@ -925,6 +968,11 @@ func (p *selectParser) parsePrimary() (Node, error) {
 		return &ParenNode{Inner: inner}, nil
 
 	case TokenIdent:
+		// ARRAY[...] literal
+		if strings.EqualFold(p.cur.val, "ARRAY") && p.peekN(1) == TokenLBracket {
+			p.advance() // consume ARRAY
+			return p.parseArrayLiteral()
+		}
 		return p.parseIdentExpr()
 
 	default:
@@ -1273,6 +1321,29 @@ func (p *selectParser) parseCastExpr() (Node, error) {
 	}
 
 	return &CastNode{Inner: inner, TypeName: typeName}, nil
+}
+
+// parseArrayLiteral parses ARRAY[expr, expr, ...]. The ARRAY keyword has been consumed;
+// the current token is [.
+func (p *selectParser) parseArrayLiteral() (Node, error) {
+	p.advance() // consume [
+	var elements []Node
+	for p.peek() != TokenRBracket && p.peek() != TokenEOF {
+		if len(elements) > 0 {
+			if _, err := p.expect(TokenComma); err != nil {
+				return nil, fmt.Errorf("expected , or ] in ARRAY literal")
+			}
+		}
+		elem, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		elements = append(elements, elem)
+	}
+	if _, err := p.expect(TokenRBracket); err != nil {
+		return nil, fmt.Errorf("expected ] to close ARRAY literal")
+	}
+	return &ArrayLitNode{Elements: elements}, nil
 }
 
 // consumeTypeParams reads a parenthesized type parameter list like "(INT64)" or "(name STRING, age INT32)".

@@ -695,3 +695,95 @@ func TestNewScalarFunctions(t *testing.T) {
 		})
 	}
 }
+
+func TestArrayFunctions(t *testing.T) {
+	b := testBatch()
+
+	// Test array literal
+	arrExpr := &ArrayLitExpr{Elements: []Expr{
+		&Lit{Val: int64(10)},
+		&Lit{Val: int64(20)},
+		&Lit{Val: int64(30)},
+	}}
+	arr := arrExpr.Eval(b, 0).([]any)
+	if len(arr) != 3 || arr[0] != int64(10) || arr[2] != int64(30) {
+		t.Fatalf("array literal: expected [10, 20, 30], got %v", arr)
+	}
+
+	t.Run("cardinality", func(t *testing.T) {
+		fn := DefaultRegistry.Lookup("cardinality")
+		if fn == nil {
+			t.Fatal("cardinality function not registered")
+		}
+		if result := fn([]any{arr}); result != int64(3) {
+			t.Fatalf("expected 3, got %v", result)
+		}
+	})
+
+	t.Run("element_at", func(t *testing.T) {
+		fn := DefaultRegistry.Lookup("element_at")
+		if result := fn([]any{arr, int64(1)}); result != int64(10) {
+			t.Fatalf("element_at(arr, 1) = %v, want 10", result)
+		}
+		if result := fn([]any{arr, int64(3)}); result != int64(30) {
+			t.Fatalf("element_at(arr, 3) = %v, want 30", result)
+		}
+		if result := fn([]any{arr, int64(-1)}); result != int64(30) {
+			t.Fatalf("element_at(arr, -1) = %v, want 30", result)
+		}
+		if result := fn([]any{arr, int64(5)}); result != nil {
+			t.Fatalf("element_at(arr, 5) = %v, want nil", result)
+		}
+	})
+
+	t.Run("array_contains", func(t *testing.T) {
+		fn := DefaultRegistry.Lookup("array_contains")
+		if result := fn([]any{arr, int64(20)}); result != true {
+			t.Fatalf("expected true, got %v", result)
+		}
+		if result := fn([]any{arr, int64(99)}); result != false {
+			t.Fatalf("expected false, got %v", result)
+		}
+	})
+
+	t.Run("array_join", func(t *testing.T) {
+		strArr := []any{"hello", "world", "go"}
+		fn := DefaultRegistry.Lookup("array_join")
+		if result := fn([]any{strArr, ", "}); result != "hello, world, go" {
+			t.Fatalf("expected 'hello, world, go', got %v", result)
+		}
+	})
+
+	t.Run("array_min_max", func(t *testing.T) {
+		strArr := []any{"banana", "apple", "cherry"}
+		fnMin := DefaultRegistry.Lookup("array_min")
+		fnMax := DefaultRegistry.Lookup("array_max")
+		if result := fnMin([]any{strArr}); result != "apple" {
+			t.Fatalf("array_min = %v, want apple", result)
+		}
+		if result := fnMax([]any{strArr}); result != "cherry" {
+			t.Fatalf("array_max = %v, want cherry", result)
+		}
+	})
+}
+
+func TestArraySubscriptParsing(t *testing.T) {
+	input := "SELECT ARRAY[1, 2, 3][2] AS val"
+	parsed, err := plansql.Parse(input)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Fatalf("extract error: %v", err)
+	}
+	if len(info.Columns) == 0 {
+		t.Fatal("expected at least one column")
+	}
+	// The expression should contain element_at
+	expr := info.Columns[0].Expr
+	if expr == "" {
+		t.Fatal("expected non-empty expression")
+	}
+	t.Logf("parsed expression: %s", expr)
+}

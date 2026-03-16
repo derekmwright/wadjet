@@ -479,8 +479,28 @@ func (v *Vector) SetValue(i int, val any) {
 			v.DecimalData.Data[i] = ParseDecimalString(tv, v.DecimalData.Scale)
 		}
 	case TypeArray, TypeMap:
-		elems, ok := val.([]any)
-		if !ok || v.Child == nil {
+		if v.Child == nil {
+			return
+		}
+		var elems []any
+		switch tv := val.(type) {
+		case []any:
+			elems = tv
+		case []map[string]any:
+			// parquet-go returns []map[string]any for repeated groups
+			elems = make([]any, len(tv))
+			for j, m := range tv {
+				// Unwrap single-key maps (LIST element wrapper: {"element": value})
+				if len(m) == 1 {
+					for _, v := range m {
+						elems[j] = v
+						break
+					}
+				} else {
+					elems[j] = m
+				}
+			}
+		default:
 			return
 		}
 		start := v.Child.Len

@@ -428,6 +428,19 @@ func (e *Coalesce) Eval(b *batch.RecordBatch, row int) any {
 
 // --- Scalar functions ---
 
+// ArrayLitExpr evaluates to a []any containing the evaluated elements.
+type ArrayLitExpr struct {
+	Elements []Expr
+}
+
+func (e *ArrayLitExpr) Eval(b *batch.RecordBatch, row int) any {
+	result := make([]any, len(e.Elements))
+	for i, elem := range e.Elements {
+		result[i] = elem.Eval(b, row)
+	}
+	return result
+}
+
 // FuncCall represents a scalar function call.
 type FuncCall struct {
 	Name string
@@ -886,6 +899,15 @@ func init() {
 	"parse_bytes":   fnParseBytes,
 	"format_rate":   fnFormatRate,
 	"parse_rate":    fnParseRate,
+
+	// Array/nested type functions (Trino-compatible)
+	"cardinality":   fnCardinality,
+	"array_length":  fnCardinality,
+	"element_at":    fnElementAt,
+	"array_contains": fnArrayContains,
+	"array_join":    fnArrayJoin,
+	"array_min":     fnArrayMin,
+	"array_max":     fnArrayMax,
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
@@ -5952,4 +5974,137 @@ func safeArg(args []any, i int) any {
 		return args[i]
 	}
 	return nil
+}
+
+// --- Array/nested type function implementations ---
+
+// toSlice converts a value to []any, handling both []any and []map[string]any.
+func toSlice(v any) ([]any, bool) {
+	switch tv := v.(type) {
+	case []any:
+		return tv, true
+	case []map[string]any:
+		out := make([]any, len(tv))
+		for i, m := range tv {
+			out[i] = m
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+// cardinality(array) / array_length(array) — returns the number of elements
+func fnCardinality(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	arr, ok := toSlice(args[0])
+	if !ok {
+		return nil
+	}
+	return int64(len(arr))
+}
+
+// element_at(array, index) — returns the element at 1-based index (Trino convention)
+// Negative indices count from the end.
+func fnElementAt(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	arr, ok := toSlice(args[0])
+	if !ok {
+		return nil
+	}
+	idx := int(ToInt64(args[1]))
+	if idx > 0 {
+		idx-- // convert 1-based to 0-based
+	} else if idx < 0 {
+		idx = len(arr) + idx // negative index from end
+	} else {
+		return nil // 0 is invalid in 1-based indexing
+	}
+	if idx < 0 || idx >= len(arr) {
+		return nil
+	}
+	return arr[idx]
+}
+
+// array_contains(array, element) — returns true if array contains element
+func fnArrayContains(args []any) any {
+	if len(args) < 2 || args[0] == nil {
+		return nil
+	}
+	arr, ok := toSlice(args[0])
+	if !ok {
+		return nil
+	}
+	target := args[1]
+	for _, elem := range arr {
+		if elem == target || fmt.Sprint(elem) == fmt.Sprint(target) {
+			return true
+		}
+	}
+	return false
+}
+
+// array_join(array, delimiter) — joins array elements into a string
+func fnArrayJoin(args []any) any {
+	if len(args) < 2 || args[0] == nil {
+		return nil
+	}
+	arr, ok := toSlice(args[0])
+	if !ok {
+		return nil
+	}
+	delim := toString(args[1])
+	parts := make([]string, 0, len(arr))
+	for _, elem := range arr {
+		if elem != nil {
+			parts = append(parts, fmt.Sprint(elem))
+		}
+	}
+	return strings.Join(parts, delim)
+}
+
+// array_min(array) — returns the minimum element
+func fnArrayMin(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	arr, ok := toSlice(args[0])
+	if !ok || len(arr) == 0 {
+		return nil
+	}
+	min := arr[0]
+	for _, elem := range arr[1:] {
+		if elem == nil {
+			continue
+		}
+		if min == nil || fmt.Sprint(elem) < fmt.Sprint(min) {
+			min = elem
+		}
+	}
+	return min
+}
+
+// array_max(array) — returns the maximum element
+func fnArrayMax(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	arr, ok := toSlice(args[0])
+	if !ok || len(arr) == 0 {
+		return nil
+	}
+	max := arr[0]
+	for _, elem := range arr[1:] {
+		if elem == nil {
+			continue
+		}
+		if max == nil || fmt.Sprint(elem) > fmt.Sprint(max) {
+			max = elem
+		}
+	}
+	return max
 }

@@ -303,6 +303,17 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		}
 		return &ExistsSubquery{SQL: n.SQL, Runner: ctx.runner, Not: n.Not}, nil
 
+	case *plansql.ArrayLitNode:
+		elems := make([]Expr, len(n.Elements))
+		for i, e := range n.Elements {
+			compiled, err := compileWithCtx(e, ctx)
+			if err != nil {
+				return nil, fmt.Errorf("compiling array element %d: %w", i, err)
+			}
+			elems[i] = compiled
+		}
+		return &ArrayLitExpr{Elements: elems}, nil
+
 	default:
 		return &Lit{Val: node.String()}, nil
 	}

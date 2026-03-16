@@ -28,7 +28,14 @@ func fromRows(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch
 // readBatchDirect reads a parquet file directly into a RecordBatch using
 // column-at-a-time page reading. This avoids the row-reconstruction overhead
 // of parquet-go's ReadRows and eliminates the map[string]any intermediate.
+// For schemas with nested types (ARRAY, ROW, MAP), falls back to row-level reading.
 func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string, preds ...scanPredicate) *batch.RecordBatch {
+	// Nested types require rep/def level decoding — fall back to row reader
+	pqSchema := parquet.Schema{Columns: schema}
+	if pqSchema.HasNestedColumns() {
+		return readBatchViaRows(pqReader, schema, requiredCols)
+	}
+
 	file := pqReader.File()
 	rowGroups := file.RowGroups()
 	if len(rowGroups) == 0 {
@@ -143,6 +150,43 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 
 	b.Len = int(totalRows)
 	return b
+}
+
+// readBatchViaRows reads a parquet file using parquet-go's row-level reader,
+// which handles nested types (LIST, MAP, STRUCT) natively. Used as fallback
+// when the schema contains nested columns.
+func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string) *batch.RecordBatch {
+	selectedCols := requiredCols
+	if len(selectedCols) == 0 {
+		selectedCols = make([]string, len(schema))
+		for i, c := range schema {
+			selectedCols[i] = c.Name
+		}
+	}
+	rows, err := pqReader.ReadRows(selectedCols)
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+
+	// Build the read schema (only columns we're reading)
+	readSchema := schema
+	if len(requiredCols) > 0 {
+		needed := make(map[string]bool, len(requiredCols))
+		for _, c := range requiredCols {
+			needed[c] = true
+		}
+		filtered := make([]parquet.Column, 0, len(requiredCols))
+		for _, col := range schema {
+			if needed[col.Name] {
+				filtered = append(filtered, col)
+			}
+		}
+		if len(filtered) > 0 {
+			readSchema = filtered
+		}
+	}
+
+	return fromRows(readSchema, rows)
 }
 
 // mapPredOp converts a logical predicate operator string to an exec.CompareOp.

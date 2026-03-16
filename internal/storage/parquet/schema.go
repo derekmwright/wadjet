@@ -312,6 +312,41 @@ func (s *Schema) HasColumn(name string) bool {
 	return s.ColumnIndex(name) >= 0
 }
 
+// HasNestedColumns returns true if any column is a nested type (ARRAY, ROW, MAP).
+func (s *Schema) HasNestedColumns() bool {
+	for _, c := range s.Columns {
+		if c.Type == TypeArray || c.Type == TypeRow || c.Type == TypeMap {
+			return true
+		}
+	}
+	return false
+}
+
+// FlatColumns returns the leaf-level columns, flattening any nested types.
+// Useful for code paths that need flat column names (e.g., projection).
+func (s *Schema) FlatColumns() []Column {
+	var flat []Column
+	for _, c := range s.Columns {
+		flattenColumn(c, &flat)
+	}
+	return flat
+}
+
+func flattenColumn(c Column, out *[]Column) {
+	switch c.Type {
+	case TypeArray, TypeMap:
+		if c.ElementType != nil {
+			flattenColumn(*c.ElementType, out)
+		}
+	case TypeRow:
+		for _, f := range c.Fields {
+			flattenColumn(f, out)
+		}
+	default:
+		*out = append(*out, c)
+	}
+}
+
 // ColumnNames returns the names of all columns.
 func (s *Schema) ColumnNames() []string {
 	names := make([]string, len(s.Columns))

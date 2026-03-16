@@ -26,6 +26,8 @@ const (
 	TokenSemicolon // ;
 	TokenStar      // *
 	TokenDot       // .
+	TokenLBracket  // [
+	TokenRBracket  // ]
 
 	// Operators
 	TokenPlus    // +
@@ -532,6 +534,12 @@ func lexStart(l *lexer) stateFn {
 			return nil
 		}
 		return l.errorf("unexpected character: |")
+	case r == '[':
+		l.emit(TokenLBracket)
+		return nil
+	case r == ']':
+		l.emit(TokenRBracket)
+		return nil
 	case r == '\'':
 		return lexString
 	case r >= '0' && r <= '9':

@@ -218,10 +218,75 @@ func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string
 
 func extractSchema(f *goparquet.File) Schema {
 	var columns []Column
-	collectLeafColumns(f.Root(), &columns)
+	for _, child := range f.Root().Columns() {
+		columns = append(columns, extractColumn(child))
+	}
 	return Schema{Columns: columns}
 }
 
+// extractColumn converts a parquet-go Column into our Column definition,
+// detecting LIST, MAP, and STRUCT patterns from the Parquet schema structure.
+func extractColumn(col *goparquet.Column) Column {
+	if col.Leaf() {
+		return Column{
+			Name:     col.Name(),
+			Type:     goTypeToTypeID(col),
+			Nullable: col.Optional(),
+		}
+	}
+
+	children := col.Columns()
+
+	// Detect LIST pattern: group with one repeated child group
+	// Standard: optional group NAME (LIST) { repeated group list { element } }
+	// Also handles: optional group NAME { repeated group bag { element } }
+	if len(children) == 1 && children[0].Repeated() {
+		repeatedChild := children[0]
+		innerChildren := repeatedChild.Columns()
+
+		if len(innerChildren) == 1 {
+			// ARRAY: single element column
+			elemCol := extractColumn(innerChildren[0])
+			return Column{
+				Name:        col.Name(),
+				Type:        TypeArray,
+				Nullable:    col.Optional(),
+				ElementType: &elemCol,
+			}
+		}
+		if len(innerChildren) == 2 {
+			// MAP: key-value pair
+			keyCol := extractColumn(innerChildren[0])
+			valCol := extractColumn(innerChildren[1])
+			entryCol := Column{
+				Name:   "entry",
+				Type:   TypeRow,
+				Fields: []Column{keyCol, valCol},
+			}
+			return Column{
+				Name:        col.Name(),
+				Type:        TypeMap,
+				Nullable:    col.Optional(),
+				ElementType: &entryCol,
+			}
+		}
+	}
+
+	// ROW/STRUCT: group with named children (none repeated at this level)
+	fields := make([]Column, len(children))
+	for i, child := range children {
+		fields[i] = extractColumn(child)
+	}
+	return Column{
+		Name:     col.Name(),
+		Type:     TypeRow,
+		Nullable: col.Optional(),
+		Fields:   fields,
+	}
+}
+
+// collectLeafColumns flattens a Parquet column tree into leaf-only columns.
+// Used by legacy code paths that don't support nested types.
 func collectLeafColumns(col *goparquet.Column, columns *[]Column) {
 	if col.Leaf() {
 		name := flattenColumnPath(col)

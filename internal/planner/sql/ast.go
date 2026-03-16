@@ -297,6 +297,22 @@ func (c *CastNode) String() string {
 	return fmt.Sprintf("cast(%s as %s)", c.Inner.String(), c.TypeName)
 }
 
+// --- Array literal ---
+
+// ArrayLitNode is ARRAY[expr, expr, ...].
+type ArrayLitNode struct {
+	Elements []Node
+}
+
+func (*ArrayLitNode) nodeTag() {}
+func (a *ArrayLitNode) String() string {
+	parts := make([]string, len(a.Elements))
+	for i, e := range a.Elements {
+		parts[i] = e.String()
+	}
+	return "ARRAY[" + strings.Join(parts, ", ") + "]"
+}
+
 // --- Subquery ---
 
 // SubqueryNode wraps a subquery as raw SQL.
