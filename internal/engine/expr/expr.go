@@ -158,6 +158,37 @@ func (e *ColRef) EvalString(b *batch.RecordBatch, row int) (string, bool) {
 	return b.Columns[e.idx].GetString(row)
 }
 
+// EvalInt64 reads the column value as int64 without boxing.
+func (e *ColRef) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
+	if !e.resolved {
+		e.idx = b.ColumnIndex(e.Name)
+		if e.idx < 0 && strings.Contains(e.Name, ".") {
+			parts := strings.SplitN(e.Name, ".", 2)
+			e.idx = b.ColumnIndex(parts[1])
+		}
+		if e.idx >= 0 {
+			e.typ = b.Columns[e.idx].Type
+		}
+		e.resolved = true
+	}
+	if e.idx < 0 {
+		return 0, false
+	}
+	v := b.Columns[e.idx]
+	if v.Nulls.IsNull(row) {
+		return 0, false
+	}
+	switch e.typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return v.Int64Data[row], true
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return int64(v.Int32Data[row]), true
+	default:
+		f, ok := v.GetNumericFloat64(row)
+		return int64(f), ok
+	}
+}
+
 // Lit returns a constant value.
 type Lit struct {
 	Val any
@@ -167,9 +198,35 @@ func (e *Lit) Eval(_ *batch.RecordBatch, _ int) any {
 	return e.Val
 }
 
+func (e *Lit) EvalFloat64(_ *batch.RecordBatch, _ int) (float64, bool) {
+	if e.Val == nil {
+		return 0, false
+	}
+	return ToFloat64(e.Val), true
+}
+
+func (e *Lit) EvalInt64(_ *batch.RecordBatch, _ int) (int64, bool) {
+	if e.Val == nil {
+		return 0, false
+	}
+	return ToInt64(e.Val), true
+}
+
+// --- Typed expression interfaces for zero-boxing hot paths ---
+
+// Float64Expr evaluates to float64 without boxing.
+type Float64Expr interface {
+	EvalFloat64(b *batch.RecordBatch, row int) (float64, bool)
+}
+
+// Int64Expr evaluates to int64 without boxing.
+type Int64Expr interface {
+	EvalInt64(b *batch.RecordBatch, row int) (int64, bool)
+}
+
 // --- Arithmetic ---
 
-// BinOp is a binary arithmetic expression.
+// BinOp is a binary arithmetic expression (generic, uses ToFloat64).
 type BinOp struct {
 	Left, Right Expr
 	Op          string // +, -, *, /, %
@@ -203,6 +260,102 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 	default:
 		return nil
 	}
+}
+
+// BinOpFloat64 is a typed binary op that operates on float64 without boxing.
+type BinOpFloat64 struct {
+	Left, Right Float64Expr
+	Op          string
+}
+
+func (e *BinOpFloat64) Eval(b *batch.RecordBatch, row int) any {
+	v, ok := e.EvalFloat64(b, row)
+	if !ok {
+		return nil
+	}
+	return v
+}
+
+func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
+	lf, lok := e.Left.EvalFloat64(b, row)
+	if !lok {
+		return 0, false
+	}
+	rf, rok := e.Right.EvalFloat64(b, row)
+	if !rok {
+		return 0, false
+	}
+	switch e.Op {
+	case "+":
+		return lf + rf, true
+	case "-":
+		return lf - rf, true
+	case "*":
+		return lf * rf, true
+	case "/":
+		if rf == 0 {
+			return 0, false
+		}
+		return lf / rf, true
+	case "%":
+		if rf == 0 {
+			return 0, false
+		}
+		return float64(int64(lf) % int64(rf)), true
+	default:
+		return 0, false
+	}
+}
+
+// BinOpInt64 is a typed binary op that operates on int64 without boxing.
+type BinOpInt64 struct {
+	Left, Right Int64Expr
+	Op          string
+}
+
+func (e *BinOpInt64) Eval(b *batch.RecordBatch, row int) any {
+	v, ok := e.EvalInt64(b, row)
+	if !ok {
+		return nil
+	}
+	return v
+}
+
+func (e *BinOpInt64) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
+	lv, lok := e.Left.EvalInt64(b, row)
+	if !lok {
+		return 0, false
+	}
+	rv, rok := e.Right.EvalInt64(b, row)
+	if !rok {
+		return 0, false
+	}
+	switch e.Op {
+	case "+":
+		return lv + rv, true
+	case "-":
+		return lv - rv, true
+	case "*":
+		return lv * rv, true
+	case "/":
+		if rv == 0 {
+			return 0, false
+		}
+		return lv / rv, true
+	case "%":
+		if rv == 0 {
+			return 0, false
+		}
+		return lv % rv, true
+	default:
+		return 0, false
+	}
+}
+
+// EvalFloat64 allows BinOpInt64 to be used as Float64Expr (int→float promotion).
+func (e *BinOpInt64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
+	v, ok := e.EvalInt64(b, row)
+	return float64(v), ok
 }
 
 // UnaryOp is a unary arithmetic expression (negation).

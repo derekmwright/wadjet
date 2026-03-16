@@ -67,7 +67,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &BinOp{Left: left, Right: right, Op: n.Op}, nil
+		return compileBinOp(left, right, n.Op), nil
 
 	case *plansql.UnaryOp:
 		operand, err := compileWithCtx(n.Inner, ctx)
@@ -316,6 +316,44 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 
 	default:
 		return &Lit{Val: node.String()}, nil
+	}
+}
+
+// compileBinOp creates a typed BinOp when both sides implement typed interfaces,
+// falling back to the generic BinOp otherwise.
+func compileBinOp(left, right Expr, op string) Expr {
+	// Try float64 typed path (covers float64 columns, int64 columns via promotion, and literals)
+	lf, lfOk := left.(Float64Expr)
+	rf, rfOk := right.(Float64Expr)
+	if lfOk && rfOk {
+		// Prefer int64 path if both sides are native int64 (not float literals)
+		li, liOk := left.(Int64Expr)
+		ri, riOk := right.(Int64Expr)
+		if liOk && riOk && op != "/" && isIntNative(left) && isIntNative(right) {
+			return &BinOpInt64{Left: li, Right: ri, Op: op}
+		}
+		return &BinOpFloat64{Left: lf, Right: rf, Op: op}
+	}
+	return &BinOp{Left: left, Right: right, Op: op}
+}
+
+// isIntNative returns true if the expression natively produces int64 values
+// (not a float literal or float column that happens to implement Int64Expr).
+func isIntNative(e Expr) bool {
+	switch v := e.(type) {
+	case *Lit:
+		switch v.Val.(type) {
+		case int64, int32, int:
+			return true
+		default:
+			return false
+		}
+	case *ColRef:
+		return false // column type unknown at compile time; use float64 path for safety
+	case *BinOpInt64:
+		return true
+	default:
+		return false
 	}
 }
 
