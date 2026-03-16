@@ -33,7 +33,8 @@ type Config struct {
 	Bucket       string
 	Logger       *slog.Logger
 	MetaKV       catalog.MetaKV // optional: NATS KV for production, nil = in-memory
-	MemoryBudget int64          // per-query memory budget in bytes (0 = unlimited)
+	MemoryBudget int64  // per-query memory budget in bytes (0 = unlimited)
+	SpillDir     string // directory for spill-to-disk files (empty = os temp dir)
 }
 
 // Open creates and initializes a new Caelum database.
@@ -54,6 +55,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 
 	planner := physical.NewPlanner(cat)
 	planner.MemoryBudget = cfg.MemoryBudget
+	planner.SpillDir = cfg.SpillDir
 
 	return &DB{
 		store:   cfg.Store,

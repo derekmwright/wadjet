@@ -49,6 +49,11 @@ type HashJoin struct {
 	// build-side batch. If the budget is exceeded, Build returns ErrMemoryExceeded.
 	MemTracker *memory.Tracker
 
+	// Spill-to-disk (optional). When set, build-side batches are spilled to disk
+	// when memory pressure exceeds 80% of budget, then re-loaded before probing.
+	Spill      *memory.SpillManager
+	spillFiles []string
+
 	// matched tracks which build-side rows have been matched during probing.
 	// Only populated for RightJoin and FullOuterJoin.
 	matched map[string]map[int]bool
@@ -122,13 +127,34 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			h.buildSchema = b.Schema
 		}
 
+		// Spill to disk if memory pressure is high
+		if h.Spill != nil && h.Spill.ShouldSpill() && len(h.buildBatches) > 0 {
+			if err := h.spillBuildBatches(); err != nil {
+				h.mu.Unlock()
+				return fmt.Errorf("spilling build side: %w", err)
+			}
+		}
+
 		// Track memory if budget is set
 		if h.MemTracker != nil {
 			cost := estimateBatchBytes(b)
 			if err := h.MemTracker.Reserve(cost); err != nil {
-				h.mu.Unlock()
-				return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
-					err, h.buildRows, len(h.buildBatches))
+				// Try spilling before giving up
+				if h.Spill != nil && len(h.buildBatches) > 0 {
+					if spillErr := h.spillBuildBatches(); spillErr == nil {
+						h.MemTracker.Reset()
+						// Re-reserve for just this batch
+						if err2 := h.MemTracker.Reserve(cost); err2 != nil {
+							h.mu.Unlock()
+							return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
+								err2, h.buildRows, len(h.buildBatches))
+						}
+					}
+				} else {
+					h.mu.Unlock()
+					return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
+						err, h.buildRows, len(h.buildBatches))
+				}
 			}
 		}
 
@@ -147,7 +173,84 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.mu.Unlock()
 	}
 
+	// Re-load spilled data before probing
+	if len(h.spillFiles) > 0 {
+		if err := h.reloadSpilledBuild(); err != nil {
+			return fmt.Errorf("reloading spilled build data: %w", err)
+		}
+	}
+
 	h.buildDone = true
+	return nil
+}
+
+// spillBuildBatches writes current build batches to disk and clears in-memory state.
+// Must be called with h.mu held.
+func (h *HashJoin) spillBuildBatches() error {
+	var rows []map[string]any
+	for _, b := range h.buildBatches {
+		rows = append(rows, b.ToRows()...)
+	}
+	path, err := h.Spill.SpillRows(rows)
+	if err != nil {
+		return err
+	}
+	h.spillFiles = append(h.spillFiles, path)
+	// Clear in-memory state
+	h.buildBatches = h.buildBatches[:0]
+	h.hashIndex = make(map[string][]buildRef)
+	h.buildRows = 0
+	if h.MemTracker != nil {
+		h.MemTracker.Reset()
+	}
+	return nil
+}
+
+// reloadSpilledBuild reads all spilled build data and rebuilds the hash index.
+func (h *HashJoin) reloadSpilledBuild() error {
+	// Collect existing in-memory rows
+	var allRows []map[string]any
+	for _, b := range h.buildBatches {
+		allRows = append(allRows, b.ToRows()...)
+	}
+
+	// Read spilled data
+	for _, path := range h.spillFiles {
+		rows, err := memory.ReadSpilledRows(path)
+		if err != nil {
+			return err
+		}
+		allRows = append(allRows, rows...)
+	}
+	h.spillFiles = nil
+
+	// Rebuild from all rows
+	h.buildBatches = nil
+	h.hashIndex = make(map[string][]buildRef)
+	h.buildRows = 0
+	if h.MemTracker != nil {
+		h.MemTracker.Reset()
+	}
+
+	// Convert to batches in chunks
+	for pos := 0; pos < len(allRows); {
+		end := pos + batch.DefaultBatchSize
+		if end > len(allRows) {
+			end = len(allRows)
+		}
+		b := batch.FromRows(h.buildSchema, allRows[pos:end])
+		batchIdx := int32(len(h.buildBatches))
+		h.buildBatches = append(h.buildBatches, b)
+		for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+			key := h.buildKeyFromBatch(b, rowIdx)
+			h.hashIndex[key] = append(h.hashIndex[key], buildRef{
+				batchIdx: batchIdx,
+				rowIdx:   int32(rowIdx),
+			})
+			h.buildRows++
+		}
+		pos = end
+	}
 	return nil
 }
 

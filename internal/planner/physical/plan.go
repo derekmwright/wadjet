@@ -4,6 +4,7 @@ package physical
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -103,7 +104,8 @@ func (p *PhysicalPlan) PrettyPrint() string {
 type Planner struct {
 	catalog        *catalog.Catalog
 	subqueryRunner expr.SubqueryRunner
-	MemoryBudget   int64 // per-query memory budget in bytes (0 = unlimited)
+	MemoryBudget   int64  // per-query memory budget in bytes (0 = unlimited)
+	SpillDir       string // directory for spill files (empty = os temp dir)
 }
 
 // NewPlanner creates a new physical planner.
@@ -588,9 +590,17 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 
 	hj := exec.NewHashJoin(joinType, leftKeys, rightKeys)
 
-	// Attach memory tracker if budget is configured
+	// Attach memory tracker and spill manager if budget is configured
 	if p.MemoryBudget > 0 {
-		hj.MemTracker = memory.NewTracker("hash_join", p.MemoryBudget)
+		tracker := memory.NewTracker("hash_join", p.MemoryBudget)
+		hj.MemTracker = tracker
+		spillDir := p.SpillDir
+		if spillDir == "" {
+			spillDir = os.TempDir()
+		}
+		if sm, err := memory.NewSpillManager(spillDir, tracker); err == nil {
+			hj.Spill = sm
+		}
 	}
 
 	// Build right side (small table) into hash table
