@@ -196,6 +196,71 @@ func BenchmarkCompileComplexExpr(b *testing.B) {
 	}
 }
 
+func BenchmarkArithExprTypedFloat64(b *testing.B) {
+	bb := benchBatch(2048)
+	// Same expression as BenchmarkArithExpr but using typed BinOpFloat64
+	inner := &BinOpFloat64{
+		Left:  &ColRef{Name: "amount"},
+		Right: &Lit{Val: float64(2)},
+		Op:    "*",
+	}
+	e := &BinOpFloat64{
+		Left:  inner,
+		Right: &Lit{Val: float64(10)},
+		Op:    "+",
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < 2048; row++ {
+			_, _ = e.EvalFloat64(bb, row)
+		}
+	}
+}
+
+func BenchmarkArithExprTypedInt64(b *testing.B) {
+	bb := benchBatch(2048)
+	// id * 2 + 10 using typed int64 path
+	inner := &BinOpInt64{
+		Left:  &ColRef{Name: "id"},
+		Right: &Lit{Val: int64(2)},
+		Op:    "*",
+	}
+	e := &BinOpInt64{
+		Left:  inner,
+		Right: &Lit{Val: int64(10)},
+		Op:    "+",
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < 2048; row++ {
+			_, _ = e.EvalInt64(bb, row)
+		}
+	}
+}
+
+func BenchmarkArithExprGenericInt(b *testing.B) {
+	bb := benchBatch(2048)
+	// Same int expression but using generic BinOp (baseline)
+	e := &BinOp{
+		Left: &BinOp{
+			Left:  &ColRef{Name: "id"},
+			Right: &Lit{Val: int64(2)},
+			Op:    "*",
+		},
+		Right: &Lit{Val: int64(10)},
+		Op:    "+",
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		for row := 0; row < 2048; row++ {
+			_ = e.Eval(bb, row)
+		}
+	}
+}
+
 func BenchmarkLikePattern(b *testing.B) {
 	bb := benchBatch(2048)
 	e := &Like{
