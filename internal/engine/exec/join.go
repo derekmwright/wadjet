@@ -57,6 +57,11 @@ type HashJoin struct {
 	// matched tracks which build-side rows have been matched during probing.
 	// Only populated for RightJoin and FullOuterJoin.
 	matched map[string]map[int]bool
+
+	// SemiAntiFilter is an optional predicate applied during semi/anti join probe.
+	// When set, each candidate build row is checked in addition to hash key equality.
+	// This enables non-equality join conditions (e.g., "!=") from decorrelated EXISTS.
+	SemiAntiFilter func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool
 }
 
 // NewHashJoin creates a new hash join operator.
@@ -471,7 +476,23 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	iter := batchIterator(in)
 	for _, row := range iter {
 		key := p.join.probeKey(in, row)
-		hasMatch := len(p.join.hashIndex[key]) > 0
+		candidates := p.join.hashIndex[key]
+		hasMatch := false
+
+		if len(candidates) > 0 {
+			if p.join.SemiAntiFilter != nil {
+				// Check each candidate against the extra filter
+				for _, ref := range candidates {
+					buildBatch := p.join.buildBatches[ref.batchIdx]
+					if p.join.SemiAntiFilter(in, row, buildBatch, int(ref.rowIdx)) {
+						hasMatch = true
+						break
+					}
+				}
+			} else {
+				hasMatch = true
+			}
+		}
 
 		emit := (p.join.JoinType == SemiJoin && hasMatch) ||
 			(p.join.JoinType == AntiJoin && !hasMatch)

@@ -86,10 +86,11 @@ type Node struct {
 	OffsetVal int
 
 	// Join
-	JoinType  string // inner, left, right, full, cross
-	JoinCond  string
-	LeftKeys  []string
-	RightKeys []string
+	JoinType   string // inner, left, right, full, cross, semi, anti
+	JoinCond   string
+	JoinFilter string // non-equality join conditions for semi/anti join
+	LeftKeys   []string
+	RightKeys  []string
 
 	// Window
 	WindowExprs []WindowExpr

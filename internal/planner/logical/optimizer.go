@@ -13,6 +13,7 @@ var partitionKeys = map[string]bool{
 
 // Optimize applies logical optimizations to the plan tree.
 func Optimize(plan *Node) *Node {
+	plan = decorrelateExists(plan)
 	plan = pushdownPredicates(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
@@ -436,6 +437,339 @@ func splitOnAnd(raw, upper string) []string {
 		upper = upper[idx+5:]
 	}
 	return parts
+}
+
+// decorrelateExists converts correlated EXISTS/NOT EXISTS subqueries in Filter
+// predicates into SemiJoin/AntiJoin nodes. This eliminates per-row subquery
+// execution by materializing the subquery as a hash join build side.
+func decorrelateExists(n *Node) *Node {
+	if n == nil {
+		return nil
+	}
+
+	// Recursively process children first (bottom-up)
+	for i, child := range n.Children {
+		n.Children[i] = decorrelateExists(child)
+	}
+
+	if n.Type != NodeFilter || len(n.Children) == 0 {
+		return n
+	}
+
+	// Collect outer tables from the subtree below this filter
+	outerTables := make(map[string]bool)
+	collectTableNames(n.Children[0], outerTables)
+	if len(outerTables) == 0 {
+		return n
+	}
+
+	// Flatten AND predicates so each EXISTS is a separate predicate
+	flatPreds := flattenANDPredicates(n.Predicates)
+
+	var remainingPreds []Predicate
+	currentPlan := n.Children[0]
+
+	for _, pred := range flatPreds {
+		existsNode := findExistsNode(pred.ASTExpr)
+		if existsNode == nil {
+			remainingPreds = append(remainingPreds, pred)
+			continue
+		}
+
+		joinNode := tryDecorrelateExists(existsNode, outerTables)
+		if joinNode == nil {
+			remainingPreds = append(remainingPreds, pred)
+			continue
+		}
+
+		// Wire the current plan as the left (probe) child
+		joinNode.Children[0] = currentPlan
+		currentPlan = joinNode
+	}
+
+	if len(remainingPreds) == 0 {
+		return currentPlan
+	}
+
+	n.Children[0] = currentPlan
+	n.Predicates = remainingPreds
+	return n
+}
+
+// tryDecorrelateExists attempts to convert an EXISTS/NOT EXISTS subquery
+// into a SemiJoin/AntiJoin node. Returns nil if decorrelation is not possible.
+// The returned join node has a nil left child (to be filled by the caller).
+func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]bool) *Node {
+	parsed, err := plansql.Parse(exists.SQL)
+	if err != nil {
+		return nil
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		return nil
+	}
+
+	// Only handle single-table subqueries (no JOINs)
+	if len(info.Tables) != 1 || len(info.Joins) > 0 {
+		return nil
+	}
+
+	// Check for correlated references
+	refs, err := plansql.FindCorrelatedRefs(exists.SQL, outerTables)
+	if err != nil || len(refs) == 0 {
+		return nil // uncorrelated, keep as-is
+	}
+
+	if info.WhereExpr == nil {
+		return nil
+	}
+
+	innerTable := info.Tables[0]
+	innerTables := map[string]bool{
+		strings.ToLower(innerTable.Name): true,
+	}
+	if innerTable.Alias != "" {
+		innerTables[strings.ToLower(innerTable.Alias)] = true
+	}
+
+	// Flatten the subquery WHERE into individual conditions
+	var whereNodes []plansql.Node
+	flattenASTNodes(info.WhereExpr, &whereNodes)
+
+	// Classify each condition
+	var eqKeys []string     // equality: "outer_col = inner_col" for hash join keys
+	var filterConds []string // non-equality correlated: "outer_col != inner_col"
+	var innerFilterNodes []plansql.Node // inner-only conditions for scan filter
+
+	for _, node := range whereNodes {
+		hasOuter, hasInner := nodeTableRefs(node, outerTables, innerTables)
+
+		if hasOuter && hasInner {
+			// Cross-table predicate: must be a simple comparison
+			cmp, ok := node.(*plansql.CmpExpr)
+			if !ok {
+				return nil // can't decorrelate complex cross-table predicates
+			}
+			outerCol, innerCol, ok := extractCorrelatedCols(cmp, outerTables, innerTables)
+			if !ok {
+				return nil
+			}
+			if cmp.Op == "=" {
+				eqKeys = append(eqKeys, outerCol+" = "+innerCol)
+			} else {
+				filterConds = append(filterConds, outerCol+" "+cmp.Op+" "+innerCol)
+			}
+		} else if hasInner {
+			innerFilterNodes = append(innerFilterNodes, node)
+		}
+		// Outer-only conditions in subquery WHERE shouldn't happen, skip
+	}
+
+	if len(eqKeys) == 0 {
+		return nil // no equality keys → can't use hash join
+	}
+
+	// Build inner scan node
+	innerScan := NewScan(innerTable.Name, innerTable.Alias)
+
+	// Apply inner-only filters to the scan
+	var innerPlan *Node = innerScan
+	if len(innerFilterNodes) > 0 {
+		var innerPreds []Predicate
+		for _, f := range innerFilterNodes {
+			stripped := stripTableQualifiers(f)
+			innerPreds = append(innerPreds, Predicate{
+				Raw:     stripped.String(),
+				ASTExpr: stripped,
+			})
+		}
+		innerPlan = NewFilter(innerScan, innerPreds)
+	}
+
+	// Build semi/anti join
+	joinType := "semi"
+	if exists.Not {
+		joinType = "anti"
+	}
+
+	joinCond := strings.Join(eqKeys, " AND ")
+	joinNode := &Node{
+		Type:     NodeJoin,
+		Children: []*Node{nil, innerPlan}, // left child filled by caller
+		JoinType: joinType,
+		JoinCond: joinCond,
+	}
+	if len(filterConds) > 0 {
+		joinNode.JoinFilter = strings.Join(filterConds, " AND ")
+	}
+
+	return joinNode
+}
+
+// findExistsNode checks if a predicate AST node is an EXISTS/NOT EXISTS.
+func findExistsNode(node plansql.Node) *plansql.ExistsNode {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *plansql.ExistsNode:
+		return n
+	case *plansql.ParenNode:
+		return findExistsNode(n.Inner)
+	default:
+		return nil
+	}
+}
+
+// flattenASTNodes splits an AND tree into individual nodes.
+func flattenASTNodes(node plansql.Node, result *[]plansql.Node) {
+	if node == nil {
+		return
+	}
+	switch e := node.(type) {
+	case *plansql.AndNode:
+		flattenASTNodes(e.Left, result)
+		flattenASTNodes(e.Right, result)
+	default:
+		*result = append(*result, node)
+	}
+}
+
+// nodeTableRefs checks if an AST node references outer and/or inner tables.
+func nodeTableRefs(node plansql.Node, outerTables, innerTables map[string]bool) (hasOuter, hasInner bool) {
+	if node == nil {
+		return
+	}
+	switch e := node.(type) {
+	case *plansql.ColRef:
+		if e.Table != "" {
+			tbl := strings.ToLower(e.Table)
+			if outerTables[tbl] && !innerTables[tbl] {
+				hasOuter = true
+			}
+			if innerTables[tbl] {
+				hasInner = true
+			}
+		}
+	case *plansql.CmpExpr:
+		lo, li := nodeTableRefs(e.Left, outerTables, innerTables)
+		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables)
+		hasOuter = lo || ro
+		hasInner = li || ri
+	case *plansql.BinaryOp:
+		lo, li := nodeTableRefs(e.Left, outerTables, innerTables)
+		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables)
+		hasOuter = lo || ro
+		hasInner = li || ri
+	case *plansql.AndNode:
+		lo, li := nodeTableRefs(e.Left, outerTables, innerTables)
+		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables)
+		hasOuter = lo || ro
+		hasInner = li || ri
+	case *plansql.ParenNode:
+		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables)
+	case *plansql.NotNode:
+		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables)
+	case *plansql.FuncCallNode:
+		for _, arg := range e.Args {
+			o, i := nodeTableRefs(arg, outerTables, innerTables)
+			hasOuter = hasOuter || o
+			hasInner = hasInner || i
+		}
+	}
+	return
+}
+
+// extractCorrelatedCols extracts the outer and inner column names from a
+// comparison expression between outer and inner tables.
+// Returns the unqualified column names (outer, inner) and ok=true if extraction succeeded.
+func extractCorrelatedCols(cmp *plansql.CmpExpr, outerTables, innerTables map[string]bool) (outerCol, innerCol string, ok bool) {
+	leftCol, leftIsOuter := getColRefInfo(cmp.Left, outerTables, innerTables)
+	rightCol, rightIsOuter := getColRefInfo(cmp.Right, outerTables, innerTables)
+	if leftCol == "" || rightCol == "" {
+		return "", "", false
+	}
+	if leftIsOuter {
+		return leftCol, rightCol, true
+	}
+	if rightIsOuter {
+		return rightCol, leftCol, true
+	}
+	return "", "", false
+}
+
+// getColRefInfo returns the unqualified column name and whether it's an outer reference.
+func getColRefInfo(node plansql.Node, outerTables, innerTables map[string]bool) (col string, isOuter bool) {
+	ref, ok := node.(*plansql.ColRef)
+	if !ok || ref.Table == "" {
+		return "", false
+	}
+	tbl := strings.ToLower(ref.Table)
+	if outerTables[tbl] && !innerTables[tbl] {
+		return ref.Column, true
+	}
+	if innerTables[tbl] {
+		return ref.Column, false
+	}
+	return "", false
+}
+
+// collectTableNames collects all table names and aliases from scan nodes in a subtree.
+func collectTableNames(n *Node, tables map[string]bool) {
+	if n == nil {
+		return
+	}
+	if n.Type == NodeScan {
+		if n.TableName != "" {
+			tables[strings.ToLower(n.TableName)] = true
+		}
+		if n.TableAlias != "" {
+			tables[strings.ToLower(n.TableAlias)] = true
+		}
+	}
+	for _, child := range n.Children {
+		collectTableNames(child, tables)
+	}
+}
+
+// stripTableQualifiers removes table qualifiers from ColRef nodes in an AST.
+func stripTableQualifiers(node plansql.Node) plansql.Node {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *plansql.ColRef:
+		return &plansql.ColRef{Column: n.Column}
+	case *plansql.CmpExpr:
+		return &plansql.CmpExpr{
+			Left:  stripTableQualifiers(n.Left),
+			Op:    n.Op,
+			Right: stripTableQualifiers(n.Right),
+		}
+	case *plansql.AndNode:
+		return &plansql.AndNode{
+			Left:  stripTableQualifiers(n.Left),
+			Right: stripTableQualifiers(n.Right),
+		}
+	case *plansql.BinaryOp:
+		return &plansql.BinaryOp{
+			Left:  stripTableQualifiers(n.Left),
+			Op:    n.Op,
+			Right: stripTableQualifiers(n.Right),
+		}
+	case *plansql.ParenNode:
+		return &plansql.ParenNode{Inner: stripTableQualifiers(n.Inner)}
+	case *plansql.NotNode:
+		return &plansql.NotNode{Inner: stripTableQualifiers(n.Inner)}
+	case *plansql.FuncCallNode:
+		newArgs := make([]plansql.Node, len(n.Args))
+		for i, a := range n.Args {
+			newArgs[i] = stripTableQualifiers(a)
+		}
+		return &plansql.FuncCallNode{Name: n.Name, Args: newArgs, Distinct: n.Distinct, Star: n.Star}
+	default:
+		return node
+	}
 }
 
 // pruneProjections removes unnecessary projections.

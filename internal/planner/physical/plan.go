@@ -647,6 +647,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// After building, we know the build schema; swap any misassigned pairs.
 	hj.FixKeyAssignment()
 
+	// For semi/anti joins with non-equality filter conditions (from decorrelated EXISTS),
+	// compile the filter into a function that checks each candidate build row.
+	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
+		hj.SemiAntiFilter = buildSemiAntiFilter(node.JoinFilter)
+	}
+
 	// Left side (probe) streams through
 	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])
 	if err != nil {
@@ -758,6 +764,75 @@ func mapExecJoinType(jt string) exec.JoinType {
 		return exec.AntiJoin
 	default:
 		return exec.InnerJoin
+	}
+}
+
+// buildSemiAntiFilter compiles a non-equality join filter string (e.g., "l_suppkey != l_suppkey")
+// into a function that evaluates the condition on probe and build batch rows.
+// Convention: left of operator = probe column, right = build column.
+func buildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
+	type filterCond struct {
+		probeCol string
+		op       string
+		buildCol string
+	}
+	var conds []filterCond
+	parts := strings.Split(strings.ToLower(filter), " and ")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// Try operators from longest to shortest to avoid partial matches
+		for _, op := range []string{"!=", ">=", "<=", "<>", ">", "<"} {
+			idx := strings.Index(part, " "+op+" ")
+			if idx >= 0 {
+				left := cleanExpr(strings.TrimSpace(part[:idx]))
+				right := cleanExpr(strings.TrimSpace(part[idx+len(op)+2:]))
+				conds = append(conds, filterCond{probeCol: left, op: op, buildCol: right})
+				break
+			}
+		}
+	}
+
+	if len(conds) == 0 {
+		return nil
+	}
+
+	return func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
+		for _, c := range conds {
+			pv := probe.ColumnByName(c.probeCol)
+			bv := build.ColumnByName(c.buildCol)
+			if pv == nil || bv == nil {
+				return false
+			}
+			probeVal := pv.GetValue(probeRow)
+			buildVal := bv.GetValue(buildRow)
+			if !evalJoinFilterOp(probeVal, buildVal, c.op) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+// evalJoinFilterOp evaluates a comparison operator on two values.
+func evalJoinFilterOp(a, b any, op string) bool {
+	as := fmt.Sprint(a)
+	bs := fmt.Sprint(b)
+	switch op {
+	case "!=", "<>":
+		return as != bs
+	case ">":
+		return as > bs
+	case "<":
+		return as < bs
+	case ">=":
+		return as >= bs
+	case "<=":
+		return as <= bs
+	default:
+		return as == bs
 	}
 }
 
