@@ -463,6 +463,9 @@ func decorrelateExists(n *Node) *Node {
 		return n
 	}
 
+	// Collect column-to-table mapping for resolving unqualified column references
+	_, outerColMap := collectScanInfo(n.Children[0])
+
 	// Flatten AND predicates so each EXISTS is a separate predicate
 	flatPreds := flattenANDPredicates(n.Predicates)
 
@@ -476,7 +479,7 @@ func decorrelateExists(n *Node) *Node {
 			continue
 		}
 
-		joinNode := tryDecorrelateExists(existsNode, outerTables)
+		joinNode := tryDecorrelateExists(existsNode, outerTables, outerColMap)
 		if joinNode == nil {
 			remainingPreds = append(remainingPreds, pred)
 			continue
@@ -499,7 +502,7 @@ func decorrelateExists(n *Node) *Node {
 // tryDecorrelateExists attempts to convert an EXISTS/NOT EXISTS subquery
 // into a SemiJoin/AntiJoin node. Returns nil if decorrelation is not possible.
 // The returned join node has a nil left child (to be filled by the caller).
-func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]bool) *Node {
+func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]bool, outerColMap map[string]string) *Node {
 	parsed, err := plansql.Parse(exists.SQL)
 	if err != nil {
 		return nil
@@ -542,7 +545,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	var innerFilterNodes []plansql.Node // inner-only conditions for scan filter
 
 	for _, node := range whereNodes {
-		hasOuter, hasInner := nodeTableRefs(node, outerTables, innerTables)
+		hasOuter, hasInner := nodeTableRefs(node, outerTables, innerTables, outerColMap)
 
 		if hasOuter && hasInner {
 			// Cross-table predicate: must be a simple comparison
@@ -550,7 +553,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 			if !ok {
 				return nil // can't decorrelate complex cross-table predicates
 			}
-			outerCol, innerCol, ok := extractCorrelatedCols(cmp, outerTables, innerTables)
+			outerCol, innerCol, ok := extractCorrelatedCols(cmp, outerTables, innerTables, outerColMap)
 			if !ok {
 				return nil
 			}
@@ -636,7 +639,9 @@ func flattenASTNodes(node plansql.Node, result *[]plansql.Node) {
 }
 
 // nodeTableRefs checks if an AST node references outer and/or inner tables.
-func nodeTableRefs(node plansql.Node, outerTables, innerTables map[string]bool) (hasOuter, hasInner bool) {
+// outerColMap maps unqualified column names to their source table, enabling
+// resolution of unqualified column references (e.g., TPC-H style l_orderkey).
+func nodeTableRefs(node plansql.Node, outerTables, innerTables map[string]bool, outerColMap map[string]string) (hasOuter, hasInner bool) {
 	if node == nil {
 		return
 	}
@@ -650,29 +655,37 @@ func nodeTableRefs(node plansql.Node, outerTables, innerTables map[string]bool) 
 			if innerTables[tbl] {
 				hasInner = true
 			}
+		} else if outerColMap != nil {
+			// Unqualified column: check outer column map
+			col := strings.ToLower(e.Column)
+			if _, ok := outerColMap[col]; ok {
+				hasOuter = true
+			} else {
+				hasInner = true
+			}
 		}
 	case *plansql.CmpExpr:
-		lo, li := nodeTableRefs(e.Left, outerTables, innerTables)
-		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables)
+		lo, li := nodeTableRefs(e.Left, outerTables, innerTables, outerColMap)
+		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables, outerColMap)
 		hasOuter = lo || ro
 		hasInner = li || ri
 	case *plansql.BinaryOp:
-		lo, li := nodeTableRefs(e.Left, outerTables, innerTables)
-		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables)
+		lo, li := nodeTableRefs(e.Left, outerTables, innerTables, outerColMap)
+		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables, outerColMap)
 		hasOuter = lo || ro
 		hasInner = li || ri
 	case *plansql.AndNode:
-		lo, li := nodeTableRefs(e.Left, outerTables, innerTables)
-		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables)
+		lo, li := nodeTableRefs(e.Left, outerTables, innerTables, outerColMap)
+		ro, ri := nodeTableRefs(e.Right, outerTables, innerTables, outerColMap)
 		hasOuter = lo || ro
 		hasInner = li || ri
 	case *plansql.ParenNode:
-		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables)
+		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables, outerColMap)
 	case *plansql.NotNode:
-		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables)
+		hasOuter, hasInner = nodeTableRefs(e.Inner, outerTables, innerTables, outerColMap)
 	case *plansql.FuncCallNode:
 		for _, arg := range e.Args {
-			o, i := nodeTableRefs(arg, outerTables, innerTables)
+			o, i := nodeTableRefs(arg, outerTables, innerTables, outerColMap)
 			hasOuter = hasOuter || o
 			hasInner = hasInner || i
 		}
@@ -683,9 +696,9 @@ func nodeTableRefs(node plansql.Node, outerTables, innerTables map[string]bool) 
 // extractCorrelatedCols extracts the outer and inner column names from a
 // comparison expression between outer and inner tables.
 // Returns the unqualified column names (outer, inner) and ok=true if extraction succeeded.
-func extractCorrelatedCols(cmp *plansql.CmpExpr, outerTables, innerTables map[string]bool) (outerCol, innerCol string, ok bool) {
-	leftCol, leftIsOuter := getColRefInfo(cmp.Left, outerTables, innerTables)
-	rightCol, rightIsOuter := getColRefInfo(cmp.Right, outerTables, innerTables)
+func extractCorrelatedCols(cmp *plansql.CmpExpr, outerTables, innerTables map[string]bool, outerColMap map[string]string) (outerCol, innerCol string, ok bool) {
+	leftCol, leftIsOuter := getColRefInfo(cmp.Left, outerTables, innerTables, outerColMap)
+	rightCol, rightIsOuter := getColRefInfo(cmp.Right, outerTables, innerTables, outerColMap)
 	if leftCol == "" || rightCol == "" {
 		return "", "", false
 	}
@@ -699,10 +712,21 @@ func extractCorrelatedCols(cmp *plansql.CmpExpr, outerTables, innerTables map[st
 }
 
 // getColRefInfo returns the unqualified column name and whether it's an outer reference.
-func getColRefInfo(node plansql.Node, outerTables, innerTables map[string]bool) (col string, isOuter bool) {
+// outerColMap enables resolution of unqualified column references.
+func getColRefInfo(node plansql.Node, outerTables, innerTables map[string]bool, outerColMap map[string]string) (col string, isOuter bool) {
 	ref, ok := node.(*plansql.ColRef)
-	if !ok || ref.Table == "" {
+	if !ok {
 		return "", false
+	}
+	if ref.Table == "" {
+		// Unqualified column: resolve using outer column map
+		if outerColMap != nil {
+			c := strings.ToLower(ref.Column)
+			if _, ok := outerColMap[c]; ok {
+				return ref.Column, true // outer column
+			}
+		}
+		return ref.Column, false // assume inner
 	}
 	tbl := strings.ToLower(ref.Table)
 	if outerTables[tbl] && !innerTables[tbl] {

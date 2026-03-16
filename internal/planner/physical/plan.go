@@ -919,11 +919,12 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 		return nil, nil, nil, err
 	}
 
-	// Collect outer table aliases for correlated subquery detection
+	// Collect outer table aliases and columns for correlated subquery detection
 	outerTables := collectTableAliases(node.Children[0])
+	outerCols := collectOuterColumns(node.Children[0])
 
 	for _, pred := range node.Predicates {
-		filter := p.buildFilterOp(pred, outerTables)
+		filter := p.buildFilterOp(pred, outerTables, outerCols)
 		if filter != nil {
 			ops = append(ops, filter)
 		}
@@ -967,10 +968,15 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		var expression exec.Expression
 		if proj.ASTExpr != nil && !proj.IsAgg {
 			outerTables := collectTableAliases(child)
+			outerCols := collectOuterColumns(child)
 			var compiled expr.Expr
 			var compErr error
 			if len(outerTables) > 0 {
-				compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
+				if len(outerCols) > 0 {
+					compiled, compErr = expr.CompileWithFullScope(proj.ASTExpr, p.subqueryRunner, outerTables, outerCols)
+				} else {
+					compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
+				}
 			} else {
 				compiled, compErr = expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
 			}
@@ -1044,12 +1050,21 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		if synName, ok := syntheticNames[i]; ok {
 			inputCol = synName
 		}
-		aggCols = append(aggCols, exec.AggColumn{
+		ac := exec.AggColumn{
 			Func:       fn,
 			InputCol:   inputCol,
 			OutputCol:  agg.OutputCol,
 			OutputType: aggOutputType(agg.Func, agg.Distinct),
-		})
+		}
+		// Parse STRING_AGG separator from InputCol (format: "col, 'sep'")
+		if fn == exec.AggStringAgg && strings.Contains(inputCol, ",") {
+			parts := strings.SplitN(inputCol, ",", 2)
+			ac.InputCol = strings.TrimSpace(parts[0])
+			sep := strings.TrimSpace(parts[1])
+			sep = strings.Trim(sep, "'\"")
+			ac.Separator = sep
+		}
+		aggCols = append(aggCols, ac)
 	}
 
 	groupByCols := make([]string, len(node.GroupBy))
@@ -1224,6 +1239,42 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 				Mode: we.Frame.Mode,
 				Start: exec.WindowBound{Type: we.Frame.Start.Type, Offset: we.Frame.Start.Offset},
 				End:   exec.WindowBound{Type: we.Frame.End.Type, Offset: we.Frame.End.Offset},
+			}
+		}
+		// Parse function-specific arguments from InputCol
+		fn := strings.ToLower(we.Func)
+		if fn == "ntile" {
+			if n, err := strconv.Atoi(strings.TrimSpace(wc.InputCol)); err == nil {
+				wc.NtileBuckets = n
+			}
+			wc.InputCol = ""
+		} else if fn == "nth_value" {
+			parts := strings.SplitN(wc.InputCol, ",", 2)
+			if len(parts) > 0 {
+				wc.InputCol = strings.TrimSpace(parts[0])
+			}
+			if len(parts) >= 2 {
+				if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+					wc.NthValueN = n
+				}
+			}
+		} else if fn == "lag" || fn == "lead" {
+			parts := strings.SplitN(wc.InputCol, ",", 3)
+			if len(parts) > 0 {
+				wc.InputCol = strings.TrimSpace(parts[0])
+			}
+			if len(parts) >= 2 {
+				if offset, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+					wc.LagLeadOffset = offset
+				}
+			}
+			if len(parts) >= 3 {
+				defStr := strings.TrimSpace(parts[2])
+				if v, err := strconv.ParseFloat(defStr, 64); err == nil {
+					wc.LagLeadDefault = v
+				} else {
+					wc.LagLeadDefault = defStr
+				}
 			}
 		}
 		winCols = append(winCols, wc)
@@ -1552,13 +1603,17 @@ func (s *catalogScanSource) RowsScanned() int64 {
 // RecordBatch type alias for convenience
 type RecordBatch = batch.RecordBatch
 
-func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool) exec.UnaryOperator {
+func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool, outerCols map[string]string) exec.UnaryOperator {
 	// Try to compile from AST expression first (full expression engine)
 	if pred.ASTExpr != nil {
 		var compiled expr.Expr
 		var err error
 		if len(outerTables) > 0 {
-			compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables)
+			if len(outerCols) > 0 {
+				compiled, err = expr.CompileWithFullScope(pred.ASTExpr, p.subqueryRunner, outerTables, outerCols)
+			} else {
+				compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables)
+			}
 		} else {
 			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
 		}
@@ -1605,6 +1660,33 @@ func collectTableAliases(node *logical.Node) map[string]bool {
 	}
 	walk(node)
 	return aliases
+}
+
+// collectOuterColumns recursively collects a column-name→table mapping from
+// scan nodes in a logical plan subtree. Used to resolve unqualified column
+// references in correlated subqueries.
+func collectOuterColumns(node *logical.Node) map[string]string {
+	colMap := make(map[string]string)
+	var walk func(n *logical.Node)
+	walk = func(n *logical.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == logical.NodeScan {
+			tableID := strings.ToLower(n.TableAlias)
+			if tableID == "" {
+				tableID = strings.ToLower(n.TableName)
+			}
+			for _, col := range n.ScanColumns {
+				colMap[strings.ToLower(col)] = tableID
+			}
+		}
+		for _, child := range n.Children {
+			walk(child)
+		}
+	}
+	walk(node)
+	return colMap
 }
 
 func parseSimplePredicate(raw string) exec.UnaryOperator {
@@ -1739,6 +1821,20 @@ func parseAggFunc(s string) exec.AggFunc {
 		return exec.AggMax
 	case "avg":
 		return exec.AggAvg
+	case "string_agg":
+		return exec.AggStringAgg
+	case "bool_and", "every":
+		return exec.AggBoolAnd
+	case "bool_or":
+		return exec.AggBoolOr
+	case "stddev", "stddev_samp":
+		return exec.AggStddev
+	case "variance", "var_samp":
+		return exec.AggVariance
+	case "stddev_pop":
+		return exec.AggStddevPop
+	case "var_pop":
+		return exec.AggVarPop
 	default:
 		return exec.AggCount
 	}
@@ -1762,6 +1858,22 @@ func parseWindowFunc(s string) exec.WindowFunc {
 		return exec.WinMin
 	case "max":
 		return exec.WinMax
+	case "lag":
+		return exec.WinLag
+	case "lead":
+		return exec.WinLead
+	case "first_value":
+		return exec.WinFirstValue
+	case "last_value":
+		return exec.WinLastValue
+	case "ntile":
+		return exec.WinNtile
+	case "percent_rank":
+		return exec.WinPercentRank
+	case "cume_dist":
+		return exec.WinCumeDist
+	case "nth_value":
+		return exec.WinNthValue
 	default:
 		return exec.WinRowNumber
 	}
@@ -1769,8 +1881,12 @@ func parseWindowFunc(s string) exec.WindowFunc {
 
 func windowOutputType(funcName string) parquet.TypeID {
 	switch strings.ToLower(funcName) {
-	case "row_number", "rank", "dense_rank", "count":
+	case "row_number", "rank", "dense_rank", "count", "ntile":
 		return parquet.TypeInt64
+	case "lag", "lead", "first_value", "last_value", "nth_value":
+		return parquet.TypeFloat64 // value functions default to float64
+	case "percent_rank", "cume_dist":
+		return parquet.TypeFloat64
 	default:
 		return parquet.TypeFloat64
 	}
@@ -1779,7 +1895,11 @@ func windowOutputType(funcName string) parquet.TypeID {
 func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 	switch strings.ToLower(funcName) {
 	case "count":
-		return parquet.TypeInt64 // both COUNT and COUNT(DISTINCT) produce int64
+		return parquet.TypeInt64
+	case "string_agg":
+		return parquet.TypeString
+	case "bool_and", "every", "bool_or":
+		return parquet.TypeBool
 	default:
 		return parquet.TypeFloat64
 	}

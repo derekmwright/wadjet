@@ -29,16 +29,16 @@ func FindCorrelatedRefs(subquerySQL string, outerTables map[string]bool) ([]Oute
 	var refs []OuterRef
 	// Walk WHERE
 	if info.WhereExpr != nil {
-		walkForOuterRefs(info.WhereExpr, outerTables, innerTables, &refs)
+		walkForOuterRefs(info.WhereExpr, outerTables, innerTables, nil, &refs)
 	}
 	// Walk HAVING
 	if info.HavingExpr != nil {
-		walkForOuterRefs(info.HavingExpr, outerTables, innerTables, &refs)
+		walkForOuterRefs(info.HavingExpr, outerTables, innerTables, nil, &refs)
 	}
 	// Walk SELECT columns
 	for _, col := range info.Columns {
 		if col.ASTExpr != nil {
-			walkForOuterRefs(col.ASTExpr, outerTables, innerTables, &refs)
+			walkForOuterRefs(col.ASTExpr, outerTables, innerTables, nil, &refs)
 		}
 	}
 
@@ -76,9 +76,40 @@ func dedup(refs []OuterRef) []OuterRef {
 	return out
 }
 
+// FindCorrelatedRefsWithColumns is like FindCorrelatedRefs but also accepts
+// a column-to-table mapping for resolving unqualified column references.
+func FindCorrelatedRefsWithColumns(subquerySQL string, outerTables map[string]bool, outerCols map[string]string) ([]OuterRef, error) {
+	parsed, err := Parse(subquerySQL)
+	if err != nil {
+		return nil, err
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		return nil, err
+	}
+
+	innerTables := collectInnerTables(info)
+
+	var refs []OuterRef
+	if info.WhereExpr != nil {
+		walkForOuterRefs(info.WhereExpr, outerTables, innerTables, outerCols, &refs)
+	}
+	if info.HavingExpr != nil {
+		walkForOuterRefs(info.HavingExpr, outerTables, innerTables, outerCols, &refs)
+	}
+	for _, col := range info.Columns {
+		if col.ASTExpr != nil {
+			walkForOuterRefs(col.ASTExpr, outerTables, innerTables, outerCols, &refs)
+		}
+	}
+
+	return dedup(refs), nil
+}
+
 // walkForOuterRefs recursively walks an AST node and appends any ColRef whose
 // Table qualifier is in outerTables but not in innerTables.
-func walkForOuterRefs(node Node, outerTables, innerTables map[string]bool, refs *[]OuterRef) {
+// outerCols maps unqualified column names to their source table for resolution.
+func walkForOuterRefs(node Node, outerTables, innerTables map[string]bool, outerCols map[string]string, refs *[]OuterRef) {
 	if node == nil {
 		return
 	}
@@ -89,56 +120,61 @@ func walkForOuterRefs(node Node, outerTables, innerTables map[string]bool, refs 
 			if outerTables[tbl] && !innerTables[tbl] {
 				*refs = append(*refs, OuterRef{Table: tbl, Column: strings.ToLower(n.Column)})
 			}
+		} else if outerCols != nil {
+			col := strings.ToLower(n.Column)
+			if tbl, ok := outerCols[col]; ok {
+				*refs = append(*refs, OuterRef{Table: tbl, Column: col})
+			}
 		}
 	case *BinaryOp:
-		walkForOuterRefs(n.Left, outerTables, innerTables, refs)
-		walkForOuterRefs(n.Right, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Right, outerTables, innerTables, outerCols, refs)
 	case *UnaryOp:
-		walkForOuterRefs(n.Inner, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Inner, outerTables, innerTables, outerCols, refs)
 	case *CmpExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, refs)
-		walkForOuterRefs(n.Right, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Right, outerTables, innerTables, outerCols, refs)
 	case *AndNode:
-		walkForOuterRefs(n.Left, outerTables, innerTables, refs)
-		walkForOuterRefs(n.Right, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Right, outerTables, innerTables, outerCols, refs)
 	case *OrNode:
-		walkForOuterRefs(n.Left, outerTables, innerTables, refs)
-		walkForOuterRefs(n.Right, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Right, outerTables, innerTables, outerCols, refs)
 	case *NotNode:
-		walkForOuterRefs(n.Inner, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Inner, outerTables, innerTables, outerCols, refs)
 	case *ParenNode:
-		walkForOuterRefs(n.Inner, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Inner, outerTables, innerTables, outerCols, refs)
 	case *FuncCallNode:
 		for _, arg := range n.Args {
-			walkForOuterRefs(arg, outerTables, innerTables, refs)
+			walkForOuterRefs(arg, outerTables, innerTables, outerCols, refs)
 		}
 	case *InExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
 		for _, v := range n.Values {
-			walkForOuterRefs(v, outerTables, innerTables, refs)
+			walkForOuterRefs(v, outerTables, innerTables, outerCols, refs)
 		}
 	case *BetweenExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, refs)
-		walkForOuterRefs(n.Low, outerTables, innerTables, refs)
-		walkForOuterRefs(n.High, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Low, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.High, outerTables, innerTables, outerCols, refs)
 	case *LikeExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, refs)
-		walkForOuterRefs(n.Pattern, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
+		walkForOuterRefs(n.Pattern, outerTables, innerTables, outerCols, refs)
 	case *IsExpr:
-		walkForOuterRefs(n.Left, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Left, outerTables, innerTables, outerCols, refs)
 	case *CaseNode:
 		if n.Subject != nil {
-			walkForOuterRefs(n.Subject, outerTables, innerTables, refs)
+			walkForOuterRefs(n.Subject, outerTables, innerTables, outerCols, refs)
 		}
 		for _, w := range n.Whens {
-			walkForOuterRefs(w.Cond, outerTables, innerTables, refs)
-			walkForOuterRefs(w.Result, outerTables, innerTables, refs)
+			walkForOuterRefs(w.Cond, outerTables, innerTables, outerCols, refs)
+			walkForOuterRefs(w.Result, outerTables, innerTables, outerCols, refs)
 		}
 		if n.Else != nil {
-			walkForOuterRefs(n.Else, outerTables, innerTables, refs)
+			walkForOuterRefs(n.Else, outerTables, innerTables, outerCols, refs)
 		}
 	case *CastNode:
-		walkForOuterRefs(n.Inner, outerTables, innerTables, refs)
+		walkForOuterRefs(n.Inner, outerTables, innerTables, outerCols, refs)
 	}
 }
 
@@ -230,6 +266,79 @@ func RewriteOuterRefs(node Node, outerTables map[string]bool, vals map[string]an
 		return cn
 	case *CastNode:
 		return &CastNode{Inner: RewriteOuterRefs(n.Inner, outerTables, vals), TypeName: n.TypeName}
+	default:
+		return node
+	}
+}
+
+// RewriteUnqualifiedOuterRefs replaces unqualified column references that were
+// detected as outer refs (via column mapping). unqualOuter maps column names
+// (lowercased) to their resolved table. vals contains "table.column" → value.
+func RewriteUnqualifiedOuterRefs(node Node, unqualOuter map[string]string, vals map[string]any) Node {
+	if node == nil || len(unqualOuter) == 0 {
+		return node
+	}
+	switch n := node.(type) {
+	case *ColRef:
+		if n.Table == "" {
+			col := strings.ToLower(n.Column)
+			if tbl, ok := unqualOuter[col]; ok {
+				key := tbl + "." + col
+				if v, ok := vals[key]; ok {
+					return anyToLit(v)
+				}
+			}
+		}
+		return n
+	case *BinaryOp:
+		return &BinaryOp{
+			Left:  RewriteUnqualifiedOuterRefs(n.Left, unqualOuter, vals),
+			Op:    n.Op,
+			Right: RewriteUnqualifiedOuterRefs(n.Right, unqualOuter, vals),
+		}
+	case *UnaryOp:
+		return &UnaryOp{Op: n.Op, Inner: RewriteUnqualifiedOuterRefs(n.Inner, unqualOuter, vals)}
+	case *CmpExpr:
+		return &CmpExpr{
+			Left:  RewriteUnqualifiedOuterRefs(n.Left, unqualOuter, vals),
+			Op:    n.Op,
+			Right: RewriteUnqualifiedOuterRefs(n.Right, unqualOuter, vals),
+		}
+	case *AndNode:
+		return &AndNode{
+			Left:  RewriteUnqualifiedOuterRefs(n.Left, unqualOuter, vals),
+			Right: RewriteUnqualifiedOuterRefs(n.Right, unqualOuter, vals),
+		}
+	case *OrNode:
+		return &OrNode{
+			Left:  RewriteUnqualifiedOuterRefs(n.Left, unqualOuter, vals),
+			Right: RewriteUnqualifiedOuterRefs(n.Right, unqualOuter, vals),
+		}
+	case *NotNode:
+		return &NotNode{Inner: RewriteUnqualifiedOuterRefs(n.Inner, unqualOuter, vals)}
+	case *ParenNode:
+		return &ParenNode{Inner: RewriteUnqualifiedOuterRefs(n.Inner, unqualOuter, vals)}
+	case *FuncCallNode:
+		newArgs := make([]Node, len(n.Args))
+		for i, a := range n.Args {
+			newArgs[i] = RewriteUnqualifiedOuterRefs(a, unqualOuter, vals)
+		}
+		return &FuncCallNode{Name: n.Name, Args: newArgs, Distinct: n.Distinct, Star: n.Star}
+	case *InExpr:
+		newVals := make([]Node, len(n.Values))
+		for i, v := range n.Values {
+			newVals[i] = RewriteUnqualifiedOuterRefs(v, unqualOuter, vals)
+		}
+		return &InExpr{Left: RewriteUnqualifiedOuterRefs(n.Left, unqualOuter, vals), Not: n.Not, Values: newVals}
+	case *BetweenExpr:
+		return &BetweenExpr{
+			Left: RewriteUnqualifiedOuterRefs(n.Left, unqualOuter, vals),
+			Not:  n.Not,
+			Low:  RewriteUnqualifiedOuterRefs(n.Low, unqualOuter, vals),
+			High: RewriteUnqualifiedOuterRefs(n.High, unqualOuter, vals),
+		}
+	case *CastNode:
+		return &CastNode{Inner: RewriteUnqualifiedOuterRefs(n.Inner, unqualOuter, vals), TypeName: n.TypeName}
 	default:
 		return node
 	}

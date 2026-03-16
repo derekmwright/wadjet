@@ -11,7 +11,8 @@ import (
 // compileContext holds optional state for expression compilation.
 type compileContext struct {
 	runner      SubqueryRunner
-	outerTables map[string]bool // table aliases from the outer query scope
+	outerTables map[string]bool   // table aliases from the outer query scope
+	outerCols   map[string]string // column name → table mapping for unqualified resolution
 }
 
 // Compile converts our AST Node into an Expr tree.
@@ -30,6 +31,12 @@ func CompileWithRunner(node plansql.Node, runner SubqueryRunner) (Expr, error) {
 // outerTables contains the table names and aliases from the outer query.
 func CompileWithScope(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool) (Expr, error) {
 	return compileWithCtx(node, &compileContext{runner: runner, outerTables: outerTables})
+}
+
+// CompileWithFullScope is like CompileWithScope but also accepts a column-to-table
+// mapping for resolving unqualified column references in correlated subqueries.
+func CompileWithFullScope(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool, outerCols map[string]string) (Expr, error) {
+	return compileWithCtx(node, &compileContext{runner: runner, outerTables: outerTables, outerCols: outerCols})
 }
 
 func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
@@ -106,18 +113,25 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 					return nil, fmt.Errorf("IN subquery requires a SubqueryRunner")
 				}
 				if len(ctx.outerTables) > 0 {
-					refs, err := plansql.FindCorrelatedRefs(sq.SQL, ctx.outerTables)
+					var refs []plansql.OuterRef
+					var err error
+					if len(ctx.outerCols) > 0 {
+						refs, err = plansql.FindCorrelatedRefsWithColumns(sq.SQL, ctx.outerTables, ctx.outerCols)
+					} else {
+						refs, err = plansql.FindCorrelatedRefs(sq.SQL, ctx.outerTables)
+					}
 					if err == nil && len(refs) > 0 {
 						parsed, _ := plansql.Parse(sq.SQL)
 						info, _ := plansql.ExtractSelect(parsed)
 						if info != nil {
 							return &CorrelatedInSubquery{
-								Expr:        left,
-								Runner:      ctx.runner,
-								Not:         n.Not,
-								OuterRefs:   refs,
-								OuterTables: ctx.outerTables,
-								ParsedInfo:  info,
+								Expr:            left,
+								Runner:          ctx.runner,
+								Not:             n.Not,
+								OuterRefs:       refs,
+								OuterTables:     ctx.outerTables,
+								ParsedInfo:      info,
+								UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
 							}, nil
 						}
 					}
@@ -234,16 +248,23 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			return nil, fmt.Errorf("subqueries require a SubqueryRunner")
 		}
 		if len(ctx.outerTables) > 0 {
-			refs, err := plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
+			var refs []plansql.OuterRef
+			var err error
+			if len(ctx.outerCols) > 0 {
+				refs, err = plansql.FindCorrelatedRefsWithColumns(n.SQL, ctx.outerTables, ctx.outerCols)
+			} else {
+				refs, err = plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
+			}
 			if err == nil && len(refs) > 0 {
 				parsed, _ := plansql.Parse(n.SQL)
 				info, _ := plansql.ExtractSelect(parsed)
 				if info != nil {
 					return &CorrelatedScalarSubquery{
-						Runner:      ctx.runner,
-						OuterRefs:   refs,
-						OuterTables: ctx.outerTables,
-						ParsedInfo:  info,
+						Runner:          ctx.runner,
+						OuterRefs:       refs,
+						OuterTables:     ctx.outerTables,
+						ParsedInfo:      info,
+						UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
 					}, nil
 				}
 			}
@@ -255,17 +276,24 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			return nil, fmt.Errorf("EXISTS subquery requires a SubqueryRunner")
 		}
 		if len(ctx.outerTables) > 0 {
-			refs, err := plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
+			var refs []plansql.OuterRef
+			var err error
+			if len(ctx.outerCols) > 0 {
+				refs, err = plansql.FindCorrelatedRefsWithColumns(n.SQL, ctx.outerTables, ctx.outerCols)
+			} else {
+				refs, err = plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
+			}
 			if err == nil && len(refs) > 0 {
 				parsed, _ := plansql.Parse(n.SQL)
 				info, _ := plansql.ExtractSelect(parsed)
 				if info != nil {
 					return &CorrelatedExistsSubquery{
-						Runner:      ctx.runner,
-						Not:         n.Not,
-						OuterRefs:   refs,
-						OuterTables: ctx.outerTables,
-						ParsedInfo:  info,
+						Runner:          ctx.runner,
+						Not:             n.Not,
+						OuterRefs:       refs,
+						OuterTables:     ctx.outerTables,
+						ParsedInfo:      info,
+						UnqualOuterCols: buildUnqualOuterCols(refs, ctx.outerCols),
 					}, nil
 				}
 			}
@@ -356,6 +384,26 @@ func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {
 	}
 
 	return c, nil
+}
+
+// buildUnqualOuterCols extracts unqualified outer column mappings from detected refs.
+// These are refs that were resolved via outerCols (column→table mapping) rather than
+// explicit table qualifiers.
+func buildUnqualOuterCols(refs []plansql.OuterRef, outerCols map[string]string) map[string]string {
+	if len(outerCols) == 0 {
+		return nil
+	}
+	var result map[string]string
+	for _, ref := range refs {
+		col := ref.Column
+		if tbl, ok := outerCols[col]; ok && tbl == ref.Table {
+			if result == nil {
+				result = make(map[string]string)
+			}
+			result[col] = ref.Table
+		}
+	}
+	return result
 }
 
 // CompileSelectExpr compiles a SELECT column expression from our AST.

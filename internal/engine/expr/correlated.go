@@ -11,10 +11,11 @@ import (
 // Unlike ScalarSubquery, it cannot cache the result because the inner query
 // depends on values from the outer row.
 type CorrelatedScalarSubquery struct {
-	Runner      SubqueryRunner
-	OuterRefs   []plansql.OuterRef // correlated column references
-	OuterTables map[string]bool    // outer table aliases
-	ParsedInfo  *plansql.SelectInfo
+	Runner         SubqueryRunner
+	OuterRefs      []plansql.OuterRef // correlated column references
+	OuterTables    map[string]bool    // outer table aliases
+	ParsedInfo     *plansql.SelectInfo
+	UnqualOuterCols map[string]string // unqualified column → table mapping for outer refs
 }
 
 func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -32,17 +33,21 @@ func (e *CorrelatedScalarSubquery) Eval(b *batch.RecordBatch, row int) any {
 func (e *CorrelatedScalarSubquery) buildSQL(b *batch.RecordBatch, row int) string {
 	vals := readOuterValues(b, row, e.OuterRefs)
 	rewrittenWhere := plansql.RewriteOuterRefs(e.ParsedInfo.WhereExpr, e.OuterTables, vals)
+	if len(e.UnqualOuterCols) > 0 {
+		rewrittenWhere = plansql.RewriteUnqualifiedOuterRefs(rewrittenWhere, e.UnqualOuterCols, vals)
+	}
 	return plansql.RebuildSQL(e.ParsedInfo, rewrittenWhere)
 }
 
 // CorrelatedInSubquery checks if a value is in the result set of a correlated subquery.
 type CorrelatedInSubquery struct {
-	Expr        Expr
-	Runner      SubqueryRunner
-	Not         bool
-	OuterRefs   []plansql.OuterRef
-	OuterTables map[string]bool
-	ParsedInfo  *plansql.SelectInfo
+	Expr            Expr
+	Runner          SubqueryRunner
+	Not             bool
+	OuterRefs       []plansql.OuterRef
+	OuterTables     map[string]bool
+	ParsedInfo      *plansql.SelectInfo
+	UnqualOuterCols map[string]string
 }
 
 func (e *CorrelatedInSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -75,16 +80,20 @@ func (e *CorrelatedInSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 func (e *CorrelatedInSubquery) buildSQL(b *batch.RecordBatch, row int) string {
 	vals := readOuterValues(b, row, e.OuterRefs)
 	rewrittenWhere := plansql.RewriteOuterRefs(e.ParsedInfo.WhereExpr, e.OuterTables, vals)
+	if len(e.UnqualOuterCols) > 0 {
+		rewrittenWhere = plansql.RewriteUnqualifiedOuterRefs(rewrittenWhere, e.UnqualOuterCols, vals)
+	}
 	return plansql.RebuildSQL(e.ParsedInfo, rewrittenWhere)
 }
 
 // CorrelatedExistsSubquery evaluates a correlated EXISTS subquery per-row.
 type CorrelatedExistsSubquery struct {
-	Runner      SubqueryRunner
-	Not         bool
-	OuterRefs   []plansql.OuterRef
-	OuterTables map[string]bool
-	ParsedInfo  *plansql.SelectInfo
+	Runner          SubqueryRunner
+	Not             bool
+	OuterRefs       []plansql.OuterRef
+	OuterTables     map[string]bool
+	ParsedInfo      *plansql.SelectInfo
+	UnqualOuterCols map[string]string
 }
 
 func (e *CorrelatedExistsSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -104,6 +113,9 @@ func (e *CorrelatedExistsSubquery) EvalBool(b *batch.RecordBatch, row int) bool 
 func (e *CorrelatedExistsSubquery) buildSQL(b *batch.RecordBatch, row int) string {
 	vals := readOuterValues(b, row, e.OuterRefs)
 	rewrittenWhere := plansql.RewriteOuterRefs(e.ParsedInfo.WhereExpr, e.OuterTables, vals)
+	if len(e.UnqualOuterCols) > 0 {
+		rewrittenWhere = plansql.RewriteUnqualifiedOuterRefs(rewrittenWhere, e.UnqualOuterCols, vals)
+	}
 	return plansql.RebuildSQL(e.ParsedInfo, rewrittenWhere)
 }
 
