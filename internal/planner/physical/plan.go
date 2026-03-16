@@ -10,6 +10,7 @@ import (
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
 	"github.com/derekmwright/caelum/internal/engine/expr"
+	"github.com/derekmwright/caelum/internal/engine/memory"
 	"github.com/derekmwright/caelum/internal/planner/logical"
 	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 	"github.com/derekmwright/caelum/internal/storage/catalog"
@@ -102,6 +103,7 @@ func (p *PhysicalPlan) PrettyPrint() string {
 type Planner struct {
 	catalog        *catalog.Catalog
 	subqueryRunner expr.SubqueryRunner
+	MemoryBudget   int64 // per-query memory budget in bytes (0 = unlimited)
 }
 
 // NewPlanner creates a new physical planner.
@@ -586,6 +588,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 
 	hj := exec.NewHashJoin(joinType, leftKeys, rightKeys)
 
+	// Attach memory tracker if budget is configured
+	if p.MemoryBudget > 0 {
+		hj.MemTracker = memory.NewTracker("hash_join", p.MemoryBudget)
+	}
+
 	// Build right side (small table) into hash table
 	rightSource, rightOps, _, err := p.buildPipeline(ctx, node.Children[1])
 	if err != nil {
@@ -601,6 +608,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if err := hj.Build(ctx, buildSource); err != nil {
 		return nil, nil, nil, fmt.Errorf("building hash table: %w", err)
 	}
+
+	// Fix key assignment: parseJoinKeys takes columns from the SQL literally
+	// (left of "=" → leftKey, right → rightKey), but the SQL may put the
+	// build-side column on the left (e.g., "JOIN t ON t.id = probe.id").
+	// After building, we know the build schema; swap any misassigned pairs.
+	hj.FixKeyAssignment()
 
 	// Left side (probe) streams through
 	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])

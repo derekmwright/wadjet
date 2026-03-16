@@ -29,10 +29,11 @@ type DB struct {
 
 // Config holds configuration for creating a DB instance.
 type Config struct {
-	Store  objstore.Store
-	Bucket string
-	Logger *slog.Logger
-	MetaKV catalog.MetaKV // optional: NATS KV for production, nil = in-memory
+	Store        objstore.Store
+	Bucket       string
+	Logger       *slog.Logger
+	MetaKV       catalog.MetaKV // optional: NATS KV for production, nil = in-memory
+	MemoryBudget int64          // per-query memory budget in bytes (0 = unlimited)
 }
 
 // Open creates and initializes a new Caelum database.
@@ -51,11 +52,14 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		return nil, fmt.Errorf("initializing catalog: %w", err)
 	}
 
+	planner := physical.NewPlanner(cat)
+	planner.MemoryBudget = cfg.MemoryBudget
+
 	return &DB{
 		store:   cfg.Store,
 		catalog: cat,
 		bucket:  cfg.Bucket,
-		planner: physical.NewPlanner(cat),
+		planner: planner,
 		logger:  cfg.Logger,
 	}, nil
 }

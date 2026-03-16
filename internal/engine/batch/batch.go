@@ -87,6 +87,48 @@ func FromRows(schema []parquet.Column, rows []map[string]any) *RecordBatch {
 	return b
 }
 
+// Compact creates a new RecordBatch containing only the active rows.
+// If there is no selection vector, it returns the batch as-is.
+func (b *RecordBatch) Compact() *RecordBatch {
+	if b.Sel == nil {
+		return b
+	}
+	n := len(b.Sel)
+	out := NewRecordBatch(b.Schema, n)
+	for di, si := range b.Sel {
+		for j := range b.Schema {
+			src := b.Columns[j]
+			dst := out.Columns[j]
+			if src.Nulls.IsNullFast(int(si)) {
+				dst.Nulls.SetNull(di)
+				switch dst.Type {
+				case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+					dst.BytesData.Set(di, nil)
+				}
+				continue
+			}
+			dst.Nulls.SetValid(di)
+			switch dst.Type {
+			case TypeBool:
+				dst.BoolData[di] = src.BoolData[si]
+			case TypeInt32, TypePort, TypeProtocol, TypeDate:
+				dst.Int32Data[di] = src.Int32Data[si]
+			case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+				dst.Int64Data[di] = src.Int64Data[si]
+			case TypeFloat32:
+				dst.Float32Data[di] = src.Float32Data[si]
+			case TypeFloat64:
+				dst.Float64Data[di] = src.Float64Data[si]
+			case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+				dst.BytesData.Set(di, src.BytesData.Value(int(si)))
+			case TypeDecimal:
+				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			}
+		}
+	}
+	return out
+}
+
 // ToRows converts a RecordBatch to row-oriented data.
 func (b *RecordBatch) ToRows() []map[string]any {
 	rows := make([]map[string]any, 0, b.ActiveLen())
