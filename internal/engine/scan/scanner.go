@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
@@ -15,6 +16,14 @@ import (
 	pqt "github.com/derekmwright/caelum/internal/storage/parquet"
 	"github.com/derekmwright/caelum/internal/storage/partition"
 )
+
+// fileReadPool reuses read buffers across Parquet file reads to avoid
+// repeated large allocations and GC pressure during sequential scans.
+var fileReadPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, 4*1024*1024)) // 4MB default
+	},
+}
 
 // ScanStats tracks scan statistics.
 type ScanStats struct {
@@ -164,14 +173,18 @@ func (s *Scanner) readFile(ctx context.Context, file scanFile) (*batch.RecordBat
 	}
 	defer rc.Close()
 
-	data, err := io.ReadAll(rc)
-	if err != nil {
+	buf := fileReadPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	if _, err := io.Copy(buf, rc); err != nil {
+		fileReadPool.Put(buf)
 		return nil, fmt.Errorf("reading file data: %w", err)
 	}
+	data := buf.Bytes()
 	_ = info
 
 	reader, err := pqt.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
+		fileReadPool.Put(buf)
 		return nil, fmt.Errorf("opening parquet reader: %w", err)
 	}
 
@@ -217,6 +230,9 @@ func (s *Scanner) readFile(ctx context.Context, file scanFile) (*batch.RecordBat
 		s.stats.RowsScanned += int64(b.Len)
 		batches = append(batches, b)
 	}
+
+	// Return read buffer to pool — all batch data is now in columnar vectors
+	fileReadPool.Put(buf)
 
 	if len(batches) == 0 {
 		return nil, nil
