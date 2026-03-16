@@ -214,10 +214,12 @@ type SelectInfo struct {
 	Union        *UnionInfo   // non-nil if this is a UNION query
 }
 
-// TableRef is a reference to a table.
+// TableRef is a reference to a table or table-producing function.
 type TableRef struct {
-	Name  string
-	Alias string
+	Name       string
+	Alias      string
+	IsFunction bool     // true for table functions like read_json(...)
+	FuncArgs   []string // function arguments (string literals)
 }
 
 // SelectColumn describes a column in a SELECT clause.

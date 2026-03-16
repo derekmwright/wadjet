@@ -924,3 +924,55 @@ func TestCTEColumnList(t *testing.T) {
 		t.Errorf("CTE columns: got %v, want [a b]", cte.Columns)
 	}
 }
+
+func TestParseTableFunction(t *testing.T) {
+	sql := "SELECT * FROM read_json('https://example.com/data.json')"
+	parsed, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(info.Tables) != 1 {
+		t.Fatalf("expected 1 table, got %d", len(info.Tables))
+	}
+	tr := info.Tables[0]
+	if !tr.IsFunction {
+		t.Error("expected IsFunction=true")
+	}
+	if tr.Name != "read_json" {
+		t.Errorf("expected name=read_json, got %q", tr.Name)
+	}
+	if len(tr.FuncArgs) != 1 || tr.FuncArgs[0] != "https://example.com/data.json" {
+		t.Errorf("expected args=[https://example.com/data.json], got %v", tr.FuncArgs)
+	}
+}
+
+func TestParseTableFunctionWithAlias(t *testing.T) {
+	sql := "SELECT j.name FROM read_json('/tmp/data.jsonl') AS j WHERE j.age > 30"
+	parsed, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(info.Tables) != 1 {
+		t.Fatalf("expected 1 table, got %d", len(info.Tables))
+	}
+	tr := info.Tables[0]
+	if !tr.IsFunction {
+		t.Error("expected IsFunction=true")
+	}
+	if tr.Alias != "j" {
+		t.Errorf("expected alias=j, got %q", tr.Alias)
+	}
+	if info.Where == "" {
+		t.Error("expected WHERE clause")
+	}
+}

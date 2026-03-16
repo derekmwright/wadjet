@@ -599,6 +599,15 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		return plan, nil
 	}
 
+	// Check for table function (e.g., read_json('url'), read_csv('path'))
+	if table.IsFunction {
+		node := NewScan(table.Name, table.Alias)
+		node.IsTableFunc = true
+		node.FuncName = strings.ToLower(table.Name)
+		node.FuncArgs = table.FuncArgs
+		return node, nil
+	}
+
 	return NewScan(table.Name, table.Alias), nil
 }
 

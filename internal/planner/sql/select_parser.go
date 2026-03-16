@@ -508,7 +508,68 @@ func (p *selectParser) parseTableRef() (TableRef, error) {
 	if err != nil {
 		return TableRef{}, fmt.Errorf("expected table name")
 	}
+
+	// Check for table function syntax: name(args...)
+	if p.peek() == TokenLParen {
+		return p.parseTableFunction(nameTok.val)
+	}
+
 	tr := TableRef{Name: nameTok.val, Alias: nameTok.val}
+	// Optional alias
+	if p.isKeyword(TokenKWAs) {
+		p.advance()
+		aliasTok, err := p.expect(TokenIdent)
+		if err != nil {
+			return TableRef{}, fmt.Errorf("expected alias after AS")
+		}
+		tr.Alias = aliasTok.val
+	} else if p.peek() == TokenIdent && !p.isJoinKeyword() {
+		tr.Alias = p.advance().val
+	}
+	return tr, nil
+}
+
+// parseTableFunction parses a table function call: name(arg1, arg2, ...) [AS alias]
+func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
+	p.advance() // consume (
+
+	var args []string
+	for p.peek() != TokenRParen && p.peek() != TokenEOF {
+		if len(args) > 0 {
+			if _, err := p.expect(TokenComma); err != nil {
+				return TableRef{}, fmt.Errorf("expected , between function arguments")
+			}
+		}
+		// Accept string literals or identifiers as arguments
+		tok := p.cur
+		switch tok.typ {
+		case TokenString:
+			args = append(args, tok.val)
+			p.advance()
+		case TokenIdent:
+			args = append(args, tok.val)
+			p.advance()
+		case TokenNumber:
+			args = append(args, tok.val)
+			p.advance()
+		default:
+			// Try to consume as a general token value
+			args = append(args, tok.val)
+			p.advance()
+		}
+	}
+
+	if _, err := p.expect(TokenRParen); err != nil {
+		return TableRef{}, fmt.Errorf("expected ) after function arguments")
+	}
+
+	tr := TableRef{
+		Name:       name,
+		Alias:      name,
+		IsFunction: true,
+		FuncArgs:   args,
+	}
+
 	// Optional alias
 	if p.isKeyword(TokenKWAs) {
 		p.advance()

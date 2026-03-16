@@ -186,7 +186,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 	if node == nil {
 		return
 	}
-	if node.Type == logical.NodeScan && node.TableName != "" {
+	if node.Type == logical.NodeScan && node.TableName != "" && !node.IsTableFunc {
 		table, err := p.catalog.GetTable(ctx, node.TableName)
 		if err == nil {
 			cols := make([]string, len(table.Schema.Columns))
@@ -613,6 +613,14 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	// Table functions (read_json, read_csv, etc.) bypass the catalog scan
+	if node.IsTableFunc {
+		source, err := buildTableFunctionSource(node.FuncName, node.FuncArgs)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("table function %s: %w", node.FuncName, err)
+		}
+		return source, nil, &exec.CollectSink{}, nil
+	}
 	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates)
 	return scanner, nil, &exec.CollectSink{}, nil
 }
