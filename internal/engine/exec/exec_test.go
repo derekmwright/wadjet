@@ -206,7 +206,7 @@ func TestLimit(t *testing.T) {
 	}
 
 	source := NewSliceSource(schema, rows)
-	limit := NewLimit(5)
+	limit := NewLimit(5, 0)
 	sink := &CollectSink{}
 
 	pipe := &Pipeline{Source: source, Ops: []UnaryOperator{limit}, Sink: sink}
@@ -216,6 +216,84 @@ func TestLimit(t *testing.T) {
 
 	if len(sink.Rows) != 5 {
 		t.Fatalf("expected 5 rows, got %d", len(sink.Rows))
+	}
+}
+
+func TestLimitOffset(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+
+	var rows []map[string]any
+	for i := 0; i < 100; i++ {
+		rows = append(rows, map[string]any{"id": int64(i)})
+	}
+
+	source := NewSliceSource(schema, rows)
+	limit := NewLimit(5, 10) // skip 10, take 5
+	sink := &CollectSink{}
+
+	pipe := &Pipeline{Source: source, Ops: []UnaryOperator{limit}, Sink: sink}
+	if err := pipe.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sink.Rows) != 5 {
+		t.Fatalf("expected 5 rows, got %d", len(sink.Rows))
+	}
+	// First row should be id=10 (after skipping 10)
+	if id, ok := sink.Rows[0]["id"].(int64); !ok || id != 10 {
+		t.Errorf("expected first row id=10, got %v", sink.Rows[0]["id"])
+	}
+	// Last row should be id=14
+	if id, ok := sink.Rows[4]["id"].(int64); !ok || id != 14 {
+		t.Errorf("expected last row id=14, got %v", sink.Rows[4]["id"])
+	}
+}
+
+func TestTopNSort(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeFloat64},
+	}
+
+	var rows []map[string]any
+	for i := 0; i < 1000; i++ {
+		rows = append(rows, map[string]any{"id": int64(i), "val": float64(1000 - i)})
+	}
+
+	source := NewSliceSource(schema, rows)
+	sortOp := NewSort([]SortKey{{Column: "val", Order: Ascending}})
+	sink := &CollectSink{}
+
+	pipe := &Pipeline{Source: source, Sink: sortOp}
+	if err := pipe.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sortOp.Truncate(5) // Top-5
+
+	var result []map[string]any
+	for {
+		b, err := sortOp.Next(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+		result = append(result, b.ToRows()...)
+	}
+	_ = sink
+
+	if len(result) != 5 {
+		t.Fatalf("expected 5 rows after TopN, got %d", len(result))
+	}
+	// Ascending sort: smallest val first. val=1 (id=999), val=2 (id=998), etc.
+	if v, ok := result[0]["val"].(float64); !ok || v != 1.0 {
+		t.Errorf("expected first val=1.0, got %v", result[0]["val"])
+	}
+	if v, ok := result[4]["val"].(float64); !ok || v != 5.0 {
+		t.Errorf("expected last val=5.0, got %v", result[4]["val"])
 	}
 }
 

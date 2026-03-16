@@ -7,30 +7,63 @@ import (
 	"github.com/derekmwright/caelum/internal/engine/batch"
 )
 
-// Limit is a UnaryOperator that passes through at most N rows.
+// Limit is a UnaryOperator that passes through at most N rows,
+// optionally skipping the first Offset rows.
 type Limit struct {
 	Max     int64
-	passed  atomic.Int64
+	Offset  int64
+	seen    atomic.Int64 // total rows seen (for offset tracking)
+	passed  atomic.Int64 // rows passed through after offset
 }
 
-func NewLimit(n int64) *Limit {
-	return &Limit{Max: n}
+func NewLimit(n, offset int64) *Limit {
+	return &Limit{Max: n, Offset: offset}
 }
 
 func (l *Limit) Init(_ context.Context) error {
+	l.seen.Store(0)
 	l.passed.Store(0)
 	return nil
 }
 
 func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	current := l.passed.Load()
-	if current >= l.Max {
+	if l.passed.Load() >= l.Max {
 		return nil, nil
 	}
 
-	remaining := l.Max - current
 	activeLen := int64(in.ActiveLen())
 
+	// Handle OFFSET: skip rows until we've seen enough
+	if l.Offset > 0 {
+		seen := l.seen.Load()
+		if seen+activeLen <= l.Offset {
+			// Entire batch is within offset — skip it
+			l.seen.Add(activeLen)
+			return nil, nil
+		}
+		if seen < l.Offset {
+			// Partial skip: trim the front of this batch
+			skip := int(l.Offset - seen)
+			l.seen.Store(l.Offset)
+			sel := make([]uint16, 0, activeLen-int64(skip))
+			if in.Sel != nil {
+				for i := skip; i < len(in.Sel); i++ {
+					sel = append(sel, in.Sel[i])
+				}
+			} else {
+				for i := skip; i < int(activeLen); i++ {
+					sel = append(sel, uint16(i))
+				}
+			}
+			in.Sel = sel
+			activeLen = int64(len(sel))
+			if activeLen == 0 {
+				return nil, nil
+			}
+		}
+	}
+
+	remaining := l.Max - l.passed.Load()
 	if activeLen <= remaining {
 		l.passed.Add(activeLen)
 		return in, nil
@@ -112,4 +145,9 @@ func (t *TopN) Close() error { return t.inner.Close() }
 
 func (t *TopN) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	return t.inner.Next(ctx)
+}
+
+// InnerSort returns the underlying Sort for use with sortSourceAdapter.
+func (t *TopN) InnerSort() *Sort {
+	return t.inner
 }

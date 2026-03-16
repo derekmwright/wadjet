@@ -1443,15 +1443,51 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 		return nil, nil, nil, fmt.Errorf("limit has no child")
 	}
 
-	source, ops, sink, err := p.buildPipeline(ctx, node.Children[0])
+	child := node.Children[0]
+
+	// Optimization: Limit(Sort(...)) → TopN sort (heap-based, keeps only N rows)
+	if child.Type == logical.NodeSort && node.OffsetVal == 0 {
+		return p.buildTopN(ctx, child, node.LimitVal)
+	}
+
+	source, ops, sink, err := p.buildPipeline(ctx, child)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	limit := exec.NewLimit(int64(node.LimitVal))
+	limit := exec.NewLimit(int64(node.LimitVal), int64(node.OffsetVal))
 	ops = append(ops, limit)
 
 	return source, ops, sink, nil
+}
+
+func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	childSource, childOps, _, err := p.buildPipeline(ctx, sortNode.Children[0])
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	var keys []exec.SortKey
+	for _, ob := range sortNode.OrderBy {
+		order := exec.Ascending
+		if ob.Desc {
+			order = exec.Descending
+		}
+		keys = append(keys, exec.SortKey{
+			Column:    cleanExpr(ob.Column),
+			Order:     order,
+			NullsLast: resolveNullsLast(ob),
+		})
+	}
+
+	sortOp := exec.NewSort(keys)
+
+	return &sortSourceAdapter{
+		childSource: childSource,
+		childOps:    childOps,
+		sort:        sortOp,
+		limitN:      n,
+	}, nil, &exec.CollectSink{}, nil
 }
 
 func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
@@ -2279,10 +2315,13 @@ func (a *aggSourceAdapter) Close() error {
 }
 
 // sortSourceAdapter wraps a child pipeline + sort into a Source.
+// When limitN > 0, it truncates results to the top N rows after sorting
+// (Top-K optimization: avoids materializing the full sorted result).
 type sortSourceAdapter struct {
 	childSource exec.Source
 	childOps    []exec.UnaryOperator
 	sort        *exec.Sort
+	limitN      int // 0 = no limit
 	initialized bool
 }
 
@@ -2300,6 +2339,10 @@ func (s *sortSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error
 		}
 		if err := pipe.Run(ctx); err != nil {
 			return nil, err
+		}
+		// Top-K truncation: discard everything beyond limitN rows
+		if s.limitN > 0 {
+			s.sort.Truncate(s.limitN)
 		}
 	}
 	return s.sort.Next(ctx)

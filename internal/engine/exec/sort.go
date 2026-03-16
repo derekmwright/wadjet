@@ -241,6 +241,34 @@ func (s *Sort) finalizeColumnar() error {
 	return nil
 }
 
+// Truncate keeps only the first n rows of sorted output (Top-K).
+func (s *Sort) Truncate(n int) {
+	remaining := n
+	for i, b := range s.sorted {
+		if remaining <= 0 {
+			s.sorted = s.sorted[:i]
+			return
+		}
+		active := b.ActiveLen()
+		if active <= remaining {
+			remaining -= active
+			continue
+		}
+		// Truncate this batch
+		sel := make([]uint16, remaining)
+		if b.Sel != nil {
+			copy(sel, b.Sel[:remaining])
+		} else {
+			for j := range sel {
+				sel[j] = uint16(j)
+			}
+		}
+		b.Sel = sel
+		s.sorted = s.sorted[:i+1]
+		return
+	}
+}
+
 func (s *Sort) Close() error { return nil }
 
 // Next returns sorted results in batches.
