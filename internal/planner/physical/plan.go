@@ -509,9 +509,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 }
 
 // isBroadcastCandidate returns true if the right (build) side of a join is
-// small enough to broadcast to all workers (< 100 MB estimated).
-const broadcastThresholdBytes = 100 * 1024 * 1024
-
+// small enough to broadcast to all workers (heuristic: <= 10 files).
 func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if len(joinNode.Children) < 2 {
 		return false

@@ -39,38 +39,6 @@ func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint16, vecLen int
 	return sum, count
 }
 
-func minSlice[T Ordered](data []T, nulls *batch.Bitmap, sel []uint16, vecLen int) (T, bool) {
-	var min T
-	found := false
-	iter := selOrRange(sel, vecLen)
-	for _, i := range iter {
-		if !nulls.IsNullFast(i) {
-			v := data[i]
-			if !found || v < min {
-				min = v
-				found = true
-			}
-		}
-	}
-	return min, found
-}
-
-func maxSlice[T Ordered](data []T, nulls *batch.Bitmap, sel []uint16, vecLen int) (T, bool) {
-	var max T
-	found := false
-	iter := selOrRange(sel, vecLen)
-	for _, i := range iter {
-		if !nulls.IsNullFast(i) {
-			v := data[i]
-			if !found || v > max {
-				max = v
-				found = true
-			}
-		}
-	}
-	return max, found
-}
-
 func countSlice(nulls *batch.Bitmap, sel []uint16, vecLen int) int64 {
 	if sel != nil {
 		if nulls.NullCount() == 0 {
@@ -94,23 +62,6 @@ func countSlice(nulls *batch.Bitmap, sel []uint16, vecLen int) int64 {
 		}
 	}
 	return count
-}
-
-// selOrRange converts a selection vector to []int, or generates 0..n-1.
-// Used by min/max which iterate less frequently than sum.
-func selOrRange(sel []uint16, n int) []int {
-	if sel != nil {
-		out := make([]int, len(sel))
-		for i, idx := range sel {
-			out[i] = int(idx)
-		}
-		return out
-	}
-	out := make([]int, n)
-	for i := range out {
-		out[i] = i
-	}
-	return out
 }
 
 // --- Row-level updaters (for grouped aggregation inner loop) ---

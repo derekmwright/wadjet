@@ -345,8 +345,6 @@ func shellCmd() *cobra.Command {
 	return cmd
 }
 
-const maxHistoryLines = 1000
-
 func historyPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

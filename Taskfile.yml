@@ -1,0 +1,39 @@
+version: "3"
+
+tasks:
+  build:
+    desc: Build the caelum binary
+    cmds:
+      - go build -o caelum ./cmd/caelum
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test ./internal/...
+
+  test-race:
+    desc: Run unit tests with race detector
+    cmds:
+      - go test -race ./internal/...
+
+  bench:
+    desc: Run benchmarks
+    cmds:
+      - go test -bench=. -benchmem -run=^$ ./internal/engine/... ./internal/worker/...
+
+  check:
+    desc: Run vet, lint, and tests
+    cmds:
+      - task: vet
+      - task: lint
+      - task: test

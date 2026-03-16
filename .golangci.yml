@@ -1,0 +1,83 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+        - "-QF*"
+
+  exclusions:
+    presets:
+      - std-error-handling
+
+    paths:
+      - test/
+
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - staticcheck
+      - linters:
+          - errcheck
+        text: "defer"
+      - linters:
+          - errcheck
+        text: "w\\.Write"
+      - linters:
+          - errcheck
+        text: "Unsubscribe"
+      - linters:
+          - errcheck
+        text: "msg\\.Ack"
+      - linters:
+          - errcheck
+        text: "msg\\.Nak"
+      - linters:
+          - errcheck
+        text: "msg\\.Term"
+      - linters:
+          - errcheck
+        text: "Publish"
+      - linters:
+          - errcheck
+        text: "Shutdown"
+      - linters:
+          - errcheck
+        text: "Cleanup"
+      - linters:
+          - errcheck
+        text: "Encoder\\)\\.Encode"
+      - linters:
+          - errcheck
+        text: "Decoder\\)\\.Decode"
+      - linters:
+          - errcheck
+        text: "json\\.Unmarshal"
+      - linters:
+          - errcheck
+        text: "os\\.MkdirAll"
+      - linters:
+          - errcheck
+        text: "format\\.Write"
+      - linters:
+          - errcheck
+        text: "ReadHistory"
+      - linters:
+          - errcheck
+        text: "WriteHistory"
+      - linters:
+          - errcheck
+        text: "CleanStale"
+      - linters:
+          - errcheck
+        text: "watcher\\.Stop"

@@ -177,9 +177,7 @@ func computeWindowFunc(rows []map[string]any, wc WindowColumn) {
 	for _, pc := range wc.PartitionBy {
 		sortKeys = append(sortKeys, SortKey{Column: pc, Order: Ascending})
 	}
-	for _, oc := range wc.OrderBy {
-		sortKeys = append(sortKeys, oc)
-	}
+	sortKeys = append(sortKeys, wc.OrderBy...)
 
 	// Sort rows by partition + order keys (stable to preserve input order)
 	if len(sortKeys) > 0 {
