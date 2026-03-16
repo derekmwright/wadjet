@@ -809,6 +809,55 @@ func TestRowFieldAccess(t *testing.T) {
 	}
 }
 
+func TestMapFunctions(t *testing.T) {
+	// MAP represented as ARRAY(ROW("key","value"))
+	mapArr := []any{
+		map[string]any{"key": "a", "value": int64(1)},
+		map[string]any{"key": "b", "value": int64(2)},
+		map[string]any{"key": "c", "value": int64(3)},
+	}
+
+	t.Run("map_keys", func(t *testing.T) {
+		fn := DefaultRegistry.Lookup("map_keys")
+		result := fn([]any{mapArr}).([]any)
+		if len(result) != 3 {
+			t.Fatalf("expected 3 keys, got %d", len(result))
+		}
+	})
+
+	t.Run("map_values", func(t *testing.T) {
+		fn := DefaultRegistry.Lookup("map_values")
+		result := fn([]any{mapArr}).([]any)
+		if len(result) != 3 {
+			t.Fatalf("expected 3 values, got %d", len(result))
+		}
+	})
+
+	t.Run("element_at_map", func(t *testing.T) {
+		// element_at on a map[string]any should do key lookup
+		m := map[string]any{"x": int64(10), "y": int64(20)}
+		fn := DefaultRegistry.Lookup("element_at")
+		if result := fn([]any{m, "x"}); result != int64(10) {
+			t.Fatalf("element_at(map, 'x') = %v, want 10", result)
+		}
+		if result := fn([]any{m, "z"}); result != nil {
+			t.Fatalf("element_at(map, 'z') = %v, want nil", result)
+		}
+	})
+
+	t.Run("map_from_entries", func(t *testing.T) {
+		fn := DefaultRegistry.Lookup("map_from_entries")
+		result := fn([]any{mapArr})
+		m, ok := result.(map[string]any)
+		if !ok {
+			t.Fatalf("expected map[string]any, got %T", result)
+		}
+		if m["a"] != int64(1) || m["b"] != int64(2) {
+			t.Fatalf("unexpected map: %v", m)
+		}
+	})
+}
+
 func TestArraySubscriptParsing(t *testing.T) {
 	input := "SELECT ARRAY[1, 2, 3][2] AS val"
 	parsed, err := plansql.Parse(input)

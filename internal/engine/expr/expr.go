@@ -930,8 +930,14 @@ func init() {
 	"array_max":      fnArrayMax,
 
 	// ROW/struct functions
-	"row_field":   fnRowField,
+	"row_field":    fnRowField,
 	"struct_field": fnRowField,
+
+	// MAP functions
+	"map_keys":      fnMapKeys,
+	"map_values":    fnMapValues,
+	"map_entries":   fnMapEntries,
+	"map_from_entries": fnMapFromEntries,
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
@@ -6031,10 +6037,19 @@ func fnCardinality(args []any) any {
 }
 
 // element_at(array, index) — returns the element at 1-based index (Trino convention)
+// For MAPs: element_at(map, key) returns the value for the given key.
 // Negative indices count from the end.
 func fnElementAt(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
+	}
+	// Try map lookup first
+	if m, ok := toMap(args[0]); ok {
+		// If second arg is not numeric, or the first arg isn't a plain array, treat as map key
+		if _, isSlice := args[0].([]any); !isSlice {
+			key := fmt.Sprint(args[1])
+			return m[key]
+		}
 	}
 	arr, ok := toSlice(args[0])
 	if !ok {
@@ -6123,6 +6138,104 @@ func fnRowField(args []any) any {
 	}
 	field := toString(args[1])
 	return row[field]
+}
+
+// --- MAP function implementations ---
+
+// toMap extracts key-value pairs from a MAP value.
+// MAPs are stored as []any where each element is map[string]any{"key":k, "value":v}
+// or as map[string]any directly.
+func toMap(v any) (map[string]any, bool) {
+	switch tv := v.(type) {
+	case map[string]any:
+		return tv, true
+	case []any:
+		// ARRAY(ROW("key","value")) representation
+		m := make(map[string]any, len(tv))
+		for _, entry := range tv {
+			if row, ok := entry.(map[string]any); ok {
+				key := fmt.Sprint(row["key"])
+				m[key] = row["value"]
+			}
+		}
+		return m, true
+	case []map[string]any:
+		m := make(map[string]any, len(tv))
+		for _, row := range tv {
+			key := fmt.Sprint(row["key"])
+			m[key] = row["value"]
+		}
+		return m, true
+	default:
+		return nil, false
+	}
+}
+
+// map_keys(map) — returns the keys as an array
+func fnMapKeys(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	m, ok := toMap(args[0])
+	if !ok {
+		return nil
+	}
+	keys := make([]any, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// map_values(map) — returns the values as an array
+func fnMapValues(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	m, ok := toMap(args[0])
+	if !ok {
+		return nil
+	}
+	vals := make([]any, 0, len(m))
+	for _, v := range m {
+		vals = append(vals, v)
+	}
+	return vals
+}
+
+// map_entries(map) — returns array of ROW(key, value) entries
+func fnMapEntries(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	m, ok := toMap(args[0])
+	if !ok {
+		return nil
+	}
+	entries := make([]any, 0, len(m))
+	for k, v := range m {
+		entries = append(entries, map[string]any{"key": k, "value": v})
+	}
+	return entries
+}
+
+// map_from_entries(array_of_rows) — constructs a map from ROW(key, value) entries
+func fnMapFromEntries(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	arr, ok := toSlice(args[0])
+	if !ok {
+		return nil
+	}
+	m := make(map[string]any, len(arr))
+	for _, entry := range arr {
+		if row, ok := entry.(map[string]any); ok {
+			key := fmt.Sprint(row["key"])
+			m[key] = row["value"]
+		}
+	}
+	return m
 }
 
 // array_max(array) — returns the maximum element
