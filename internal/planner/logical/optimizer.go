@@ -1,6 +1,7 @@
 package logical
 
 import (
+	"fmt"
 	"strings"
 
 	plansql "github.com/derekmwright/caelum/internal/planner/sql"
@@ -14,10 +15,344 @@ var partitionKeys = map[string]bool{
 // Optimize applies logical optimizations to the plan tree.
 func Optimize(plan *Node) *Node {
 	plan = decorrelateExists(plan)
+	plan = decorrelateScalarSubqueries(plan)
 	plan = pushdownPredicates(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
 	return plan
+}
+
+// decorrelateScalarSubqueries converts correlated scalar subqueries in Filter
+// predicates into LEFT JOIN + Aggregate patterns. This eliminates per-row
+// subquery execution by materializing the subquery result set once, grouped
+// by the correlation key.
+//
+// Pattern: WHERE col OP (SELECT agg(...) FROM ... WHERE inner.key = outer.key ...)
+// Becomes: LEFT JOIN (SELECT key, agg(...) FROM ... GROUP BY key) ON key = outer.key
+//
+//	WHERE col OP agg_result
+func decorrelateScalarSubqueries(n *Node) *Node {
+	if n == nil {
+		return nil
+	}
+
+	// Recursively process children first (bottom-up)
+	for i, child := range n.Children {
+		n.Children[i] = decorrelateScalarSubqueries(child)
+	}
+
+	if n.Type != NodeFilter || len(n.Children) == 0 {
+		return n
+	}
+
+	// Collect outer tables from the subtree below this filter
+	outerTables := make(map[string]bool)
+	collectTableNames(n.Children[0], outerTables)
+	if len(outerTables) == 0 {
+		return n
+	}
+
+	_, outerColMap := collectScanInfo(n.Children[0])
+	flatPreds := flattenANDPredicates(n.Predicates)
+
+	var remainingPreds []Predicate
+	currentPlan := n.Children[0]
+	scalarIdx := 0
+
+	for _, pred := range flatPreds {
+		joinNode, rewrittenPred, ok := tryDecorrelateScalarSubquery(pred, outerTables, outerColMap, scalarIdx)
+		if !ok {
+			remainingPreds = append(remainingPreds, pred)
+			continue
+		}
+		// Wire the current plan as the left (probe) child
+		joinNode.Children[0] = currentPlan
+		currentPlan = joinNode
+		remainingPreds = append(remainingPreds, rewrittenPred)
+		scalarIdx++
+	}
+
+	if scalarIdx == 0 {
+		return n
+	}
+
+	n.Children[0] = currentPlan
+	n.Predicates = remainingPreds
+	return n
+}
+
+// tryDecorrelateScalarSubquery attempts to convert a predicate containing a
+// correlated scalar subquery into a LEFT JOIN + Aggregate. Returns the join
+// node (with nil left child), the rewritten predicate, and true on success.
+func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, outerColMap map[string]string, idx int) (*Node, Predicate, bool) {
+	if pred.ASTExpr == nil {
+		return nil, pred, false
+	}
+
+	// Find comparison with scalar subquery
+	cmp, subq := findScalarSubqueryComparison(pred.ASTExpr)
+	if cmp == nil {
+		return nil, pred, false
+	}
+
+	// Parse the subquery
+	parsed, err := plansql.Parse(subq.SQL)
+	if err != nil {
+		return nil, pred, false
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		return nil, pred, false
+	}
+
+	// Must be a scalar subquery (exactly one SELECT column)
+	if len(info.Columns) != 1 || len(info.Tables) == 0 {
+		return nil, pred, false
+	}
+
+	// Check for correlated references
+	refs, err := plansql.FindCorrelatedRefsWithColumns(subq.SQL, outerTables, outerColMap)
+	if err != nil || len(refs) == 0 {
+		return nil, pred, false
+	}
+
+	if info.WhereExpr == nil {
+		return nil, pred, false
+	}
+
+	// Build set of outer ref column names for classification.
+	// We use FindCorrelatedRefsWithColumns (which checks inner vs outer tables)
+	// rather than the outer col map directly to avoid ambiguity when a column
+	// name exists in both outer and inner scopes.
+	outerRefCols := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		outerRefCols[ref.Column] = true
+	}
+
+	// Flatten subquery WHERE into individual conditions
+	var whereNodes []plansql.Node
+	flattenASTNodes(info.WhereExpr, &whereNodes)
+
+	// Classify each condition as correlated or inner-only
+	type corrKey struct{ outerCol, innerCol string }
+	var correlationKeys []corrKey
+	var innerFilterNodes []plansql.Node
+
+	for _, node := range whereNodes {
+		if refsOuterColumn(node, outerRefCols) {
+			// Correlation condition: must be an equality comparison
+			cmpNode, ok := node.(*plansql.CmpExpr)
+			if !ok || cmpNode.Op != "=" {
+				return nil, pred, false
+			}
+			leftCol := colRefName(cmpNode.Left)
+			rightCol := colRefName(cmpNode.Right)
+			if leftCol == "" || rightCol == "" {
+				return nil, pred, false
+			}
+			if outerRefCols[strings.ToLower(leftCol)] {
+				correlationKeys = append(correlationKeys, corrKey{outerCol: leftCol, innerCol: rightCol})
+			} else {
+				correlationKeys = append(correlationKeys, corrKey{outerCol: rightCol, innerCol: leftCol})
+			}
+		} else {
+			innerFilterNodes = append(innerFilterNodes, node)
+		}
+	}
+
+	if len(correlationKeys) == 0 {
+		return nil, pred, false
+	}
+
+	// Build inner plan from subquery's FROM/JOIN
+	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
+	var innerPlan *Node = innerScan
+	for _, j := range info.Joins {
+		rightScan := NewScan(j.RightTable, j.RightAlias)
+		innerPlan = NewJoin(innerPlan, rightScan, j.Type, j.Condition)
+	}
+
+	// Apply inner-only filters to the subquery plan
+	if len(innerFilterNodes) > 0 {
+		var innerPreds []Predicate
+		for _, f := range innerFilterNodes {
+			stripped := stripTableQualifiers(f)
+			innerPreds = append(innerPreds, Predicate{
+				Raw:     stripped.String(),
+				ASTExpr: stripped,
+			})
+		}
+		innerPlan = NewFilter(innerPlan, innerPreds)
+	}
+
+	// Extract aggregate from the SELECT column expression
+	selectAST := info.Columns[0].ASTExpr
+	if selectAST == nil {
+		return nil, pred, false
+	}
+
+	aggFunc := plansql.FindNestedAggregate(selectAST)
+	if aggFunc == nil {
+		return nil, pred, false
+	}
+
+	// Build aggregate expression
+	aggOutputCol := fmt.Sprintf("__scalar_%d", idx)
+	aggInputCol := ""
+	if len(aggFunc.Args) > 0 {
+		stripped := stripTableQualifiers(aggFunc.Args[0])
+		aggInputCol = stripped.String()
+	}
+
+	aggExpr := AggExpr{
+		Func:      strings.ToLower(aggFunc.Name),
+		InputCol:  aggInputCol,
+		OutputCol: aggOutputCol,
+		Distinct:  aggFunc.Distinct,
+	}
+
+	// GROUP BY the inner correlation columns
+	var groupBy []string
+	for _, ck := range correlationKeys {
+		groupBy = append(groupBy, ck.innerCol)
+	}
+
+	aggNode := NewAggregate(innerPlan, groupBy, []AggExpr{aggExpr})
+
+	// Rewrite SELECT expression: replace aggregate with ColRef to output.
+	// For MIN(x) → ColRef("__scalar_0")
+	// For 0.2 * AVG(x) → BinaryOp(0.2, *, ColRef("__scalar_0"))
+	replacementExpr := plansql.ReplaceAggregate(selectAST, aggOutputCol)
+
+	// Build LEFT JOIN condition
+	var joinCondParts []string
+	for _, ck := range correlationKeys {
+		joinCondParts = append(joinCondParts, ck.outerCol+" = "+ck.innerCol)
+	}
+
+	joinNode := &Node{
+		Type:     NodeJoin,
+		Children: []*Node{nil, aggNode}, // left child filled by caller
+		JoinType: "left",
+		JoinCond: strings.Join(joinCondParts, " AND "),
+	}
+
+	// Rewrite the original predicate: replace SubqueryNode with the expression
+	rewrittenExpr := replaceSubqueryInExpr(pred.ASTExpr, subq, replacementExpr)
+	rewrittenPred := Predicate{
+		Raw:     rewrittenExpr.String(),
+		ASTExpr: rewrittenExpr,
+	}
+
+	return joinNode, rewrittenPred, true
+}
+
+// findScalarSubqueryComparison finds a CmpExpr where one side is a SubqueryNode.
+func findScalarSubqueryComparison(expr plansql.Node) (*plansql.CmpExpr, *plansql.SubqueryNode) {
+	if expr == nil {
+		return nil, nil
+	}
+	switch e := expr.(type) {
+	case *plansql.CmpExpr:
+		if subq := unwrapSubquery(e.Right); subq != nil {
+			return e, subq
+		}
+		if subq := unwrapSubquery(e.Left); subq != nil {
+			return e, subq
+		}
+	case *plansql.ParenNode:
+		return findScalarSubqueryComparison(e.Inner)
+	}
+	return nil, nil
+}
+
+// unwrapSubquery extracts a SubqueryNode from possibly parenthesized expressions.
+func unwrapSubquery(expr plansql.Node) *plansql.SubqueryNode {
+	if expr == nil {
+		return nil
+	}
+	switch e := expr.(type) {
+	case *plansql.SubqueryNode:
+		return e
+	case *plansql.ParenNode:
+		return unwrapSubquery(e.Inner)
+	}
+	return nil
+}
+
+// refsOuterColumn checks if an AST node references any column in outerRefCols.
+func refsOuterColumn(node plansql.Node, outerRefCols map[string]bool) bool {
+	if node == nil {
+		return false
+	}
+	switch n := node.(type) {
+	case *plansql.ColRef:
+		return outerRefCols[strings.ToLower(n.Column)]
+	case *plansql.CmpExpr:
+		return refsOuterColumn(n.Left, outerRefCols) || refsOuterColumn(n.Right, outerRefCols)
+	case *plansql.AndNode:
+		return refsOuterColumn(n.Left, outerRefCols) || refsOuterColumn(n.Right, outerRefCols)
+	case *plansql.OrNode:
+		return refsOuterColumn(n.Left, outerRefCols) || refsOuterColumn(n.Right, outerRefCols)
+	case *plansql.BinaryOp:
+		return refsOuterColumn(n.Left, outerRefCols) || refsOuterColumn(n.Right, outerRefCols)
+	case *plansql.FuncCallNode:
+		for _, arg := range n.Args {
+			if refsOuterColumn(arg, outerRefCols) {
+				return true
+			}
+		}
+	case *plansql.ParenNode:
+		return refsOuterColumn(n.Inner, outerRefCols)
+	case *plansql.NotNode:
+		return refsOuterColumn(n.Inner, outerRefCols)
+	}
+	return false
+}
+
+// colRefName extracts the unqualified column name from a ColRef node.
+func colRefName(node plansql.Node) string {
+	ref, ok := node.(*plansql.ColRef)
+	if !ok {
+		return ""
+	}
+	return ref.Column
+}
+
+// replaceSubqueryInExpr replaces a specific SubqueryNode in an expression
+// with a replacement node.
+func replaceSubqueryInExpr(expr plansql.Node, target *plansql.SubqueryNode, replacement plansql.Node) plansql.Node {
+	if expr == nil {
+		return nil
+	}
+	switch e := expr.(type) {
+	case *plansql.SubqueryNode:
+		if e == target {
+			return replacement
+		}
+		return e
+	case *plansql.CmpExpr:
+		return &plansql.CmpExpr{
+			Left:  replaceSubqueryInExpr(e.Left, target, replacement),
+			Op:    e.Op,
+			Right: replaceSubqueryInExpr(e.Right, target, replacement),
+		}
+	case *plansql.ParenNode:
+		inner := replaceSubqueryInExpr(e.Inner, target, replacement)
+		// Unwrap unnecessary parens around the replacement
+		if inner == replacement {
+			return inner
+		}
+		return &plansql.ParenNode{Inner: inner}
+	case *plansql.BinaryOp:
+		return &plansql.BinaryOp{
+			Left:  replaceSubqueryInExpr(e.Left, target, replacement),
+			Op:    e.Op,
+			Right: replaceSubqueryInExpr(e.Right, target, replacement),
+		}
+	default:
+		return expr
+	}
 }
 
 // pushdownPredicates pushes filter predicates closer to scan nodes.
