@@ -586,6 +586,12 @@ func pushdownPredicates(n *Node) *Node {
 		}
 	}
 
+	// Extract single-table predicates from join conditions and push them down.
+	// E.g., "a.id = b.id AND a.status = 'active'" → push "a.status = 'active'" to left child.
+	if n.Type == NodeJoin && len(n.Children) == 2 && n.JoinCond != "" {
+		n = extractJoinCondPredicates(n)
+	}
+
 	return n
 }
 
@@ -653,6 +659,111 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 	filter.Predicates = remainingPreds
 	filter.Children[0] = join
 	return filter
+}
+
+// extractJoinCondPredicates splits a join's ON condition and pushes single-table
+// predicates to the appropriate child. Only applies to INNER joins (for outer joins
+// pushing predicates from ON changes semantics).
+func extractJoinCondPredicates(join *Node) *Node {
+	if !strings.EqualFold(join.JoinType, "inner") && join.JoinType != "" {
+		return join
+	}
+
+	upper := strings.ToUpper(join.JoinCond)
+	parts := splitOnAnd(join.JoinCond, upper)
+	if len(parts) < 2 {
+		return join // single condition, nothing to split
+	}
+
+	leftTables, leftColMap := collectScanInfo(join.Children[0])
+	rightTables, rightColMap := collectScanInfo(join.Children[1])
+	allColMap := make(map[string]string, len(leftColMap)+len(rightColMap))
+	for k, v := range leftColMap {
+		allColMap[k] = v
+	}
+	for k, v := range rightColMap {
+		allColMap[k] = v
+	}
+
+	var joinParts, leftParts, rightParts []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// Try to parse this part as an AST predicate to resolve table refs
+		pred := Predicate{Raw: part}
+		if parsed := tryParseExpr(part); parsed != nil {
+			pred.ASTExpr = parsed
+		}
+		refs := predicateTableRefs(pred, allColMap)
+		if refs == nil || len(refs) == 0 {
+			joinParts = append(joinParts, part)
+			continue
+		}
+
+		allLeft := true
+		allRight := true
+		for table := range refs {
+			if !leftTables[table] {
+				allLeft = false
+			}
+			if !rightTables[table] {
+				allRight = false
+			}
+		}
+
+		if allLeft {
+			leftParts = append(leftParts, part)
+		} else if allRight {
+			rightParts = append(rightParts, part)
+		} else {
+			joinParts = append(joinParts, part)
+		}
+	}
+
+	if len(leftParts) == 0 && len(rightParts) == 0 {
+		return join // nothing to push
+	}
+
+	if len(leftParts) > 0 {
+		var preds []Predicate
+		for _, p := range leftParts {
+			preds = append(preds, Predicate{Raw: p, ASTExpr: tryParseExpr(p)})
+		}
+		join.Children[0] = NewFilter(join.Children[0], preds)
+		join.Children[0] = pushdownPredicates(join.Children[0])
+	}
+	if len(rightParts) > 0 {
+		var preds []Predicate
+		for _, p := range rightParts {
+			preds = append(preds, Predicate{Raw: p, ASTExpr: tryParseExpr(p)})
+		}
+		join.Children[1] = NewFilter(join.Children[1], preds)
+		join.Children[1] = pushdownPredicates(join.Children[1])
+	}
+
+	if len(joinParts) > 0 {
+		join.JoinCond = strings.Join(joinParts, " AND ")
+	} else {
+		join.JoinCond = "1 = 1" // all conditions pushed; join becomes cross
+	}
+	return join
+}
+
+// tryParseExpr attempts to parse a string as a SQL expression.
+// Returns nil if parsing fails.
+func tryParseExpr(s string) plansql.Node {
+	// Wrap as a SELECT WHERE to use the parser
+	parsed, err := plansql.Parse("SELECT 1 FROM _dummy WHERE " + s)
+	if err != nil {
+		return nil
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil || info == nil || info.WhereExpr == nil {
+		return nil
+	}
+	return info.WhereExpr
 }
 
 // flattenANDPredicates splits compound AND predicates into individual predicates.
