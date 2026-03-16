@@ -5,8 +5,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
@@ -2371,10 +2374,16 @@ type scanSourceInner struct {
 	cat          *catalog.Catalog
 	tableName    string
 	files        []catalog.FileEntry
-	idx          int
+	idx          int64 // atomic index for parallel workers
 	schema       []parquet.Column
 	requiredCols []string
 	rowsScanned  int64
+
+	// parallel scan
+	batchCh chan *batch.RecordBatch
+	errCh   chan error
+	wg      sync.WaitGroup
+	cancel  context.CancelFunc
 }
 
 func (s *scannerExecSource) Init(ctx context.Context) error {
@@ -2398,13 +2407,42 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		files = append(files, p.Files...)
 	}
 
-	s.scanner = &scanSourceInner{
+	scanCtx, cancel := context.WithCancel(ctx)
+	inner := &scanSourceInner{
 		cat:          s.catalog,
 		tableName:    s.tableName,
 		files:        files,
 		schema:       tableMeta.Schema.Columns,
 		requiredCols: s.requiredCols,
+		batchCh:      make(chan *batch.RecordBatch, 4),
+		errCh:        make(chan error, 1),
+		cancel:       cancel,
 	}
+	s.scanner = inner
+
+	// Launch parallel file readers
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > len(files) {
+		workers = len(files)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	inner.wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go inner.scanWorker(scanCtx)
+	}
+
+	// Close batchCh when all workers are done
+	go func() {
+		inner.wg.Wait()
+		close(inner.batchCh)
+	}()
+
 	return nil
 }
 
@@ -2426,20 +2464,34 @@ func (s *scannerExecSource) Next(ctx context.Context) (*batch.RecordBatch, error
 	return s.scanner.next(ctx)
 }
 
-func (s *scannerExecSource) Close() error { return nil }
+func (s *scannerExecSource) Close() error {
+	if s.scanner != nil && s.scanner.cancel != nil {
+		s.scanner.cancel()
+	}
+	return nil
+}
 
 func (s *scannerExecSource) RowsScanned() int64 {
 	if s.scanner != nil {
-		return s.scanner.rowsScanned
+		return atomic.LoadInt64(&s.scanner.rowsScanned)
 	}
 	return 0
 }
 
-func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, error) {
-	for inner.idx < len(inner.files) {
-		file := inner.files[inner.idx]
-		inner.idx++
+// scanWorker reads files in parallel, writing decoded batches to batchCh.
+func (inner *scanSourceInner) scanWorker(ctx context.Context) {
+	defer inner.wg.Done()
 
+	for {
+		idx := int(atomic.AddInt64(&inner.idx, 1) - 1)
+		if idx >= len(inner.files) {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		file := inner.files[idx]
 		rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), file.Path)
 		if err != nil {
 			continue
@@ -2461,10 +2513,34 @@ func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, err
 			continue
 		}
 
-		inner.rowsScanned += int64(b.Len)
-		return b, nil
+		atomic.AddInt64(&inner.rowsScanned, int64(b.Len))
+
+		select {
+		case inner.batchCh <- b:
+		case <-ctx.Done():
+			return
+		}
 	}
-	return nil, nil
+}
+
+func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, error) {
+	select {
+	case b, ok := <-inner.batchCh:
+		if !ok {
+			// Channel closed, check for errors
+			select {
+			case err := <-inner.errCh:
+				return nil, err
+			default:
+				return nil, nil
+			}
+		}
+		return b, nil
+	case err := <-inner.errCh:
+		return nil, err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // wrapExpr adapts an expr.Expr into an exec.Expression function.
