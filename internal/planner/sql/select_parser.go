@@ -529,31 +529,40 @@ func (p *selectParser) parseTableRef() (TableRef, error) {
 	return tr, nil
 }
 
-// parseTableFunction parses a table function call: name(arg1, arg2, ...) [AS alias]
+// parseTableFunction parses a table function call: name(arg1, key=val, ...) [AS alias]
+// Supports both positional arguments and named parameters (key=value).
 func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 	p.advance() // consume (
 
 	var args []string
+	namedArgs := make(map[string]string)
+	argCount := 0
 	for p.peek() != TokenRParen && p.peek() != TokenEOF {
-		if len(args) > 0 {
+		if argCount > 0 {
 			if _, err := p.expect(TokenComma); err != nil {
 				return TableRef{}, fmt.Errorf("expected , between function arguments")
 			}
 		}
-		// Accept string literals or identifiers as arguments
+		argCount++
+
 		tok := p.cur
 		switch tok.typ {
-		case TokenString:
-			args = append(args, tok.val)
-			p.advance()
 		case TokenIdent:
-			args = append(args, tok.val)
+			// Advance past ident, then check if next is = (named param)
 			p.advance()
-		case TokenNumber:
+			if p.cur.typ == TokenEq {
+				key := tok.val
+				p.advance() // consume =
+				namedArgs[key] = p.cur.val
+				p.advance() // consume value
+			} else {
+				// Plain ident positional arg (already advanced)
+				args = append(args, tok.val)
+			}
+		case TokenString, TokenNumber:
 			args = append(args, tok.val)
 			p.advance()
 		default:
-			// Try to consume as a general token value
 			args = append(args, tok.val)
 			p.advance()
 		}
@@ -564,10 +573,11 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 	}
 
 	tr := TableRef{
-		Name:       name,
-		Alias:      name,
-		IsFunction: true,
-		FuncArgs:   args,
+		Name:          name,
+		Alias:         name,
+		IsFunction:    true,
+		FuncArgs:      args,
+		FuncNamedArgs: namedArgs,
 	}
 
 	// Optional alias

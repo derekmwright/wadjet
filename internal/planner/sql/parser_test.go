@@ -976,3 +976,55 @@ func TestParseTableFunctionWithAlias(t *testing.T) {
 		t.Error("expected WHERE clause")
 	}
 }
+
+func TestParseTableFunctionNamedArgs(t *testing.T) {
+	sql := "SELECT * FROM read_csv('/tmp/data.csv', delimiter='|', header=false)"
+	parsed, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(info.Tables) != 1 {
+		t.Fatalf("expected 1 table, got %d", len(info.Tables))
+	}
+	tr := info.Tables[0]
+	if !tr.IsFunction {
+		t.Error("expected IsFunction=true")
+	}
+	if tr.Name != "read_csv" {
+		t.Errorf("expected name=read_csv, got %q", tr.Name)
+	}
+	if len(tr.FuncArgs) != 1 || tr.FuncArgs[0] != "/tmp/data.csv" {
+		t.Errorf("expected positional args=[/tmp/data.csv], got %v", tr.FuncArgs)
+	}
+	if tr.FuncNamedArgs["delimiter"] != "|" {
+		t.Errorf("expected delimiter=|, got %q", tr.FuncNamedArgs["delimiter"])
+	}
+	if tr.FuncNamedArgs["header"] != "FALSE" {
+		t.Errorf("expected header=FALSE, got %q", tr.FuncNamedArgs["header"])
+	}
+}
+
+func TestParseTableFunctionMixedArgs(t *testing.T) {
+	sql := "SELECT * FROM read_json('data.json') AS j"
+	parsed, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr := info.Tables[0]
+	if len(tr.FuncNamedArgs) != 0 {
+		t.Errorf("expected no named args, got %v", tr.FuncNamedArgs)
+	}
+	if tr.Alias != "j" {
+		t.Errorf("expected alias=j, got %q", tr.Alias)
+	}
+}

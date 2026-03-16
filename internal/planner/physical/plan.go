@@ -615,7 +615,7 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	// Table functions (read_json, read_csv, etc.) bypass the catalog scan
 	if node.IsTableFunc {
-		source, err := buildTableFunctionSource(node.FuncName, node.FuncArgs)
+		source, err := buildTableFunctionSource(node.FuncName, node.FuncArgs, node.FuncNamedArgs)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("table function %s: %w", node.FuncName, err)
 		}

@@ -605,6 +605,7 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		node.IsTableFunc = true
 		node.FuncName = strings.ToLower(table.Name)
 		node.FuncArgs = table.FuncArgs
+		node.FuncNamedArgs = table.FuncNamedArgs
 		return node, nil
 	}
 

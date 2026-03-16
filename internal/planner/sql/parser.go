@@ -216,10 +216,11 @@ type SelectInfo struct {
 
 // TableRef is a reference to a table or table-producing function.
 type TableRef struct {
-	Name       string
-	Alias      string
-	IsFunction bool     // true for table functions like read_json(...)
-	FuncArgs   []string // function arguments (string literals)
+	Name          string
+	Alias         string
+	IsFunction    bool              // true for table functions like read_json(...)
+	FuncArgs      []string          // positional arguments
+	FuncNamedArgs map[string]string // named arguments (key=value)
 }
 
 // SelectColumn describes a column in a SELECT clause.

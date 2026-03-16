@@ -70,9 +70,10 @@ type Node struct {
 	ScanPredicates  []Predicate       // pushed-down filter predicates for row group pruning
 
 	// Table Function (e.g., read_json, read_csv)
-	IsTableFunc bool     // true if this scan reads from a table function
-	FuncName    string   // function name (e.g., "read_json")
-	FuncArgs    []string // function arguments (e.g., URL/path)
+	IsTableFunc    bool              // true if this scan reads from a table function
+	FuncName       string            // function name (e.g., "read_json")
+	FuncArgs       []string          // positional arguments (e.g., URL/path)
+	FuncNamedArgs  map[string]string // named arguments (e.g., delimiter="|")
 
 	// Filter
 	Predicates []Predicate
