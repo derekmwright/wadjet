@@ -90,6 +90,37 @@ ORDER BY hour
 - Health endpoint with Kubernetes-compatible probes
 - Output in table, JSON, or CSV format
 
+## Benchmarks
+
+Columnar scan throughput vs row-oriented baseline (`go test -bench`; AMD Ryzen 9 5900X):
+
+| Rows | Columnar | Row-Oriented | Speedup | Allocs/op |
+|------|----------|--------------|---------|-----------|
+| 1K | 165 MB/s | 15 MB/s | 11x | 221 vs 11K |
+| 10K | 193 MB/s | 14 MB/s | 14x | 230 vs 110K |
+| 100K | 250 MB/s | 15 MB/s | 17x | 426 vs 1.1M |
+
+With column projection (reading 2 of 5 columns):
+
+| Rows | Columnar | Row-Oriented | Speedup |
+|------|----------|--------------|---------|
+| 1K | 335 MB/s | 11 MB/s | 31x |
+| 10K | 513 MB/s | 11 MB/s | 45x |
+| 100K | 661 MB/s | 12 MB/s | 56x |
+
+Operator micro-benchmarks (2048-row batches):
+
+| Operation | Time | Allocs |
+|-----------|------|--------|
+| Batch SUM (int64) | 616 ns | 1 |
+| Filter (column compare) | 17.6 µs | 1 |
+| Hash aggregate (low cardinality) | 55 µs | 62 |
+| Sort | 50 µs | 40 |
+| CASE WHEN | 61 µs | 0 |
+| Kernel filter (int64) | 5.1 µs | 0 |
+
+Run benchmarks locally: `go test -bench=. -benchmem ./internal/engine/...`
+
 ## Deployment Modes
 
 ```
