@@ -237,7 +237,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		var orderExprs []OrderExpr
 		for _, ob := range info.OrderBy {
 			orderExprs = append(orderExprs, OrderExpr{
-				Column:     cleanExpr(ob.Column),
+				Column:     resolveOrderByColumn(cleanExpr(ob.Column), info.Columns),
 				Desc:       ob.Desc,
 				NullsFirst: ob.NullsFirst,
 			})
@@ -281,6 +281,47 @@ func cleanExpr(s string) string {
 		return parts[1]
 	}
 	return s
+}
+
+// resolveOrderByColumn resolves an ORDER BY expression to the matching SELECT
+// column's output name. This handles cases like ORDER BY SUM(x) DESC when the
+// SELECT has SUM(x) AS total — the sort key must use "total", not "sum(x)".
+func resolveOrderByColumn(col string, selectCols []plansql.SelectColumn) string {
+	colLower := strings.ToLower(col)
+	// 1. Direct alias match (case-insensitive)
+	for _, sc := range selectCols {
+		if strings.ToLower(sc.Alias) == colLower {
+			return sc.Alias
+		}
+	}
+	// 2. Expression match (case-insensitive)
+	for _, sc := range selectCols {
+		if strings.ToLower(sc.Expr) == colLower {
+			if sc.Alias != "" {
+				return sc.Alias
+			}
+			return sc.Expr
+		}
+	}
+	// 3. Aggregate function match: ORDER BY sum(x) matches SELECT sum(x) AS alias
+	for _, sc := range selectCols {
+		if !sc.IsAgg {
+			continue
+		}
+		var aggExpr string
+		if sc.AggFunc == "count" && (sc.AggArg == "*" || sc.AggArg == "") {
+			aggExpr = "count(*)"
+		} else {
+			aggExpr = sc.AggFunc + "(" + strings.ToLower(sc.AggArg) + ")"
+		}
+		if aggExpr == colLower {
+			if sc.Alias != "" {
+				return sc.Alias
+			}
+			return sc.Expr
+		}
+	}
+	return col
 }
 
 // rewriteHavingExpr rewrites aggregate function calls in a HAVING expression

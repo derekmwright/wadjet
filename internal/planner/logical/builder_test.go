@@ -475,6 +475,114 @@ func TestBuildFromSelectRollup(t *testing.T) {
 	}
 }
 
+func TestResolveOrderByColumn(t *testing.T) {
+	tests := []struct {
+		name       string
+		col        string
+		selectCols []plansql.SelectColumn
+		want       string
+	}{
+		{
+			name: "direct alias match",
+			col:  "rx_total",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "sum(rx_bytes)", Alias: "rx_total", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "rx_total",
+		},
+		{
+			name: "expression match returns alias",
+			col:  "sum(rx_bytes)",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "sum(rx_bytes)", Alias: "rx_total", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "rx_total",
+		},
+		{
+			name: "aggregate function match",
+			col:  "sum(rx_bytes)",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "sum(rx_bytes)", Alias: "rx_total", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "rx_total",
+		},
+		{
+			name: "count star match",
+			col:  "count(*)",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "count(*)", Alias: "cnt", IsAgg: true, AggFunc: "count", AggArg: "*"},
+			},
+			want: "cnt",
+		},
+		{
+			name: "count star with empty arg",
+			col:  "count(*)",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "count(*)", Alias: "total", IsAgg: true, AggFunc: "count", AggArg: ""},
+			},
+			want: "total",
+		},
+		{
+			name: "no match returns original",
+			col:  "unknown_col",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "sum(rx_bytes)", Alias: "rx_total", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "unknown_col",
+		},
+		{
+			name: "case insensitive alias match",
+			col:  "RX_TOTAL",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "sum(rx_bytes)", Alias: "rx_total", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "rx_total",
+		},
+		{
+			name: "case insensitive expression match",
+			col:  "SUM(rx_bytes)",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "sum(rx_bytes)", Alias: "rx_total", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "rx_total",
+		},
+		{
+			name: "expression match without alias returns expr",
+			col:  "sum(rx_bytes)",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "sum(rx_bytes)", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "sum(rx_bytes)",
+		},
+		{
+			name: "non-agg column direct alias",
+			col:  "device_name",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "d.name", Alias: "device_name"},
+				{Expr: "sum(rx_bytes)", Alias: "rx_total", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "device_name",
+		},
+		{
+			name: "aggregate match case insensitive agg func",
+			col:  "SUM(RX_BYTES)",
+			selectCols: []plansql.SelectColumn{
+				{Expr: "sum(rx_bytes)", Alias: "total", IsAgg: true, AggFunc: "sum", AggArg: "rx_bytes"},
+			},
+			want: "total",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveOrderByColumn(tt.col, tt.selectCols)
+			if got != tt.want {
+				t.Errorf("resolveOrderByColumn(%q) = %q, want %q", tt.col, got, tt.want)
+			}
+		})
+	}
+}
+
 // findAllNodeType collects all nodes of the given type via depth-first search.
 func findAllNodeType(node *Node, typ NodeType) []*Node {
 	var result []*Node
