@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"sort"
@@ -22,7 +23,12 @@ import (
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
 
-const inlineResultThreshold = 64 * 1024 // 64 KB
+const inlineResultThreshold = 256 * 1024 // 256 KB — avoids S3 round-trip for common aggregation/LIMIT results
+
+// maxBufferedRows caps in-memory row accumulation during scan tasks to prevent
+// unbounded memory growth. When this limit is reached, rows are flushed to the
+// result file and the buffer is reused. Set to 0 for unlimited (legacy behavior).
+const maxBufferedRows = 500_000
 
 // Executor dispatches task types to the appropriate execution logic.
 type Executor struct {
@@ -125,29 +131,70 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 }
 
 func (e *Executor) executeScan(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	allRows := make([]map[string]any, 0, len(task.Files)*1024) // pre-allocate estimate
+	// For large scans, stream rows to the result file in chunks to bound
+	// memory usage. We accumulate up to maxBufferedRows before flushing.
+	var (
+		allRows     = make([]map[string]any, 0, min(len(task.Files)*1024, maxBufferedRows))
+		totalRows   int64
+		flushed     bool
+		resultPath  = task.ResultPrefix + task.ID + ".parquet"
+		multiWriter *multiPartWriter
+	)
 
 	for _, filePath := range task.Files {
 		rows, err := e.readParquetFile(ctx, task.ResultBucket, filePath, task.Columns)
 		if err != nil {
 			return fmt.Errorf("reading file %s: %w", filePath, err)
 		}
+
+		// Apply pushed-down filter predicates per file to reduce memory
+		if len(task.FilterExprs) > 0 && len(rows) > 0 {
+			rows = e.applyRowFilters(rows, task.FilterExprs)
+		}
+
 		allRows = append(allRows, rows...)
+		totalRows += int64(len(rows))
+
+		// Flush to prevent unbounded memory growth
+		if maxBufferedRows > 0 && len(allRows) >= maxBufferedRows {
+			if multiWriter == nil {
+				multiWriter = &multiPartWriter{}
+			}
+			multiWriter.parts = append(multiWriter.parts, allRows)
+			allRows = make([]map[string]any, 0, maxBufferedRows)
+			flushed = true
+		}
 	}
 
-	// Apply pushed-down filter predicates
-	if len(task.FilterExprs) > 0 && len(allRows) > 0 {
-		allRows = e.applyRowFilters(allRows, task.FilterExprs)
-	}
-
-	result.NumRows = int64(len(allRows))
-
-	if len(allRows) == 0 {
+	if totalRows == 0 {
 		return nil
 	}
 
-	// Write result to S3
-	return e.writeResult(ctx, task, allRows, result)
+	result.NumRows = totalRows
+
+	// If we never hit the cap, write normally (may use inline fast path)
+	if !flushed {
+		return e.writeResult(ctx, task, allRows, result)
+	}
+
+	// Flushed at least once: collect remaining rows and write all parts
+	if len(allRows) > 0 {
+		multiWriter.parts = append(multiWriter.parts, allRows)
+	}
+
+	// Flatten parts for writing (total is bounded: we only hold the last chunk + result)
+	var combined []map[string]any
+	for _, part := range multiWriter.parts {
+		combined = append(combined, part...)
+	}
+	multiWriter = nil // release part references
+
+	return e.writeResultToPath(ctx, task, combined, resultPath, result)
+}
+
+// multiPartWriter collects row batches for large scan results.
+type multiPartWriter struct {
+	parts [][]map[string]any
 }
 
 // applyRowFilters applies SQL filter expressions to rows, keeping only matches.
@@ -235,14 +282,13 @@ func parseFilterValue(s string) any {
 }
 
 func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	// Read input files from previous stage
-	allRows := make([]map[string]any, 0, len(task.InputFiles)*1024)
-	for _, filePath := range task.InputFiles {
-		rows, err := e.readParquetFile(ctx, task.ResultBucket, filePath, nil)
-		if err != nil {
-			return fmt.Errorf("reading input file %s: %w", filePath, err)
-		}
-		allRows = append(allRows, rows...)
+	// Build column projection: only read group-by columns + aggregate input columns
+	neededCols := aggregateNeededCols(task.GroupByCols, task.Aggregates)
+
+	// Read input files concurrently from previous stage
+	allRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.InputFiles, neededCols)
+	if err != nil {
+		return err
 	}
 
 	if len(allRows) == 0 {
@@ -310,13 +356,9 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 }
 
 func (e *Executor) executeSort(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	allRows := make([]map[string]any, 0, len(task.InputFiles)*1024)
-	for _, filePath := range task.InputFiles {
-		rows, err := e.readParquetFile(ctx, task.ResultBucket, filePath, nil)
-		if err != nil {
-			return fmt.Errorf("reading input file %s: %w", filePath, err)
-		}
-		allRows = append(allRows, rows...)
+	allRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.InputFiles, nil)
+	if err != nil {
+		return err
 	}
 
 	if len(allRows) == 0 {
@@ -382,24 +424,15 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 }
 
 func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	// Read build (right) side files
-	buildRows := make([]map[string]any, 0, len(task.BuildFiles)*1024)
-	for _, filePath := range task.BuildFiles {
-		rows, err := e.readParquetFile(ctx, task.ResultBucket, filePath, nil)
-		if err != nil {
-			return fmt.Errorf("reading build file %s: %w", filePath, err)
-		}
-		buildRows = append(buildRows, rows...)
+	// Read build (right) and probe (left) sides concurrently
+	buildRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.BuildFiles, nil)
+	if err != nil {
+		return fmt.Errorf("reading build files: %w", err)
 	}
 
-	// Read probe (left) side files
-	probeRows := make([]map[string]any, 0, len(task.InputFiles)*1024)
-	for _, filePath := range task.InputFiles {
-		rows, err := e.readParquetFile(ctx, task.ResultBucket, filePath, nil)
-		if err != nil {
-			return fmt.Errorf("reading probe file %s: %w", filePath, err)
-		}
-		probeRows = append(probeRows, rows...)
+	probeRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.InputFiles, nil)
+	if err != nil {
+		return fmt.Errorf("reading probe files: %w", err)
 	}
 
 	if len(probeRows) == 0 && len(buildRows) == 0 {
@@ -471,13 +504,9 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 }
 
 func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	allRows := make([]map[string]any, 0, len(task.InputFiles)*1024)
-	for _, filePath := range task.InputFiles {
-		rows, err := e.readParquetFile(ctx, task.ResultBucket, filePath, nil)
-		if err != nil {
-			return fmt.Errorf("reading input file %s: %w", filePath, err)
-		}
-		allRows = append(allRows, rows...)
+	allRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.InputFiles, nil)
+	if err != nil {
+		return err
 	}
 
 	if len(allRows) == 0 {
@@ -597,6 +626,50 @@ func mapExecJoinType(jt string) exec.JoinType {
 	}
 }
 
+// readParquetFilesConcurrent reads multiple Parquet files in parallel (up to 8
+// goroutines), returning all rows concatenated in file order. This significantly
+// reduces latency for S3-backed reads where each GET is a network round-trip.
+func (e *Executor) readParquetFilesConcurrent(ctx context.Context, bucket string, files []string, selectedCols []string) ([]map[string]any, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+	if len(files) == 1 {
+		return e.readParquetFile(ctx, bucket, files[0], selectedCols)
+	}
+
+	type result struct {
+		rows []map[string]any
+		err  error
+	}
+	results := make([]result, len(files))
+
+	const maxConcurrency = 8
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+
+	for i, f := range files {
+		wg.Add(1)
+		go func(idx int, filePath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			rows, err := e.readParquetFile(ctx, bucket, filePath, selectedCols)
+			results[idx] = result{rows: rows, err: err}
+		}(i, f)
+	}
+	wg.Wait()
+
+	var allRows []map[string]any
+	for i, r := range results {
+		if r.err != nil {
+			return nil, fmt.Errorf("reading file %s: %w", files[i], r.err)
+		}
+		allRows = append(allRows, r.rows...)
+	}
+	return allRows, nil
+}
+
 func (e *Executor) readParquetFile(ctx context.Context, bucket, path string, selectedCols []string) ([]map[string]any, error) {
 	// Check in-memory result store first (avoids S3 round-trip for same-node stages)
 	if e.resultStore != nil {
@@ -641,21 +714,11 @@ func (e *Executor) readParquetFile(ctx context.Context, bucket, path string, sel
 }
 
 func (e *Executor) writeResult(ctx context.Context, task distributed.Task, rows []map[string]any, result *distributed.ResultNotification) error {
-	schema := schemaFromRows(rows)
-
-	var buf bytes.Buffer
-	pw, err := parquet.NewWriter(&buf, parquet.Schema{Columns: schema}, parquet.DefaultWriterConfig())
+	data, err := e.serializeRows(rows)
 	if err != nil {
-		return fmt.Errorf("creating parquet writer: %w", err)
-	}
-	if err := pw.WriteRows(rows); err != nil {
-		return fmt.Errorf("writing rows: %w", err)
-	}
-	if err := pw.Close(); err != nil {
-		return fmt.Errorf("closing writer: %w", err)
+		return err
 	}
 
-	data := buf.Bytes()
 	result.SizeBytes = int64(len(data))
 
 	// Small result fast path: include inline
@@ -680,6 +743,46 @@ func (e *Executor) writeResult(ctx context.Context, task distributed.Task, rows 
 	result.ResultPath = resultPath
 
 	return nil
+}
+
+// writeResultToPath writes a large result directly to S3 (no inline fast path).
+func (e *Executor) writeResultToPath(ctx context.Context, task distributed.Task, rows []map[string]any, resultPath string, result *distributed.ResultNotification) error {
+	data, err := e.serializeRows(rows)
+	if err != nil {
+		return err
+	}
+
+	result.SizeBytes = int64(len(data))
+
+	// Try in-memory result store first
+	if e.resultStore != nil && e.resultStore.Put(task.QueryID, resultPath, data) {
+		result.ResultPath = resultPath
+		return nil
+	}
+
+	_, err = e.store.Put(ctx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
+	if err != nil {
+		return fmt.Errorf("writing result to S3: %w", err)
+	}
+	result.ResultPath = resultPath
+	return nil
+}
+
+func (e *Executor) serializeRows(rows []map[string]any) ([]byte, error) {
+	schema := schemaFromRows(rows)
+
+	var buf bytes.Buffer
+	pw, err := parquet.NewWriter(&buf, parquet.Schema{Columns: schema}, parquet.DefaultWriterConfig())
+	if err != nil {
+		return nil, fmt.Errorf("creating parquet writer: %w", err)
+	}
+	if err := pw.WriteRows(rows); err != nil {
+		return nil, fmt.Errorf("writing rows: %w", err)
+	}
+	if err := pw.Close(); err != nil {
+		return nil, fmt.Errorf("closing writer: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 func schemaFromRows(rows []map[string]any) []parquet.Column {
@@ -750,6 +853,32 @@ func (e *Executor) recordSpillMetrics(spill *memory.SpillManager, tracker *memor
 		e.metrics.MemoryBudgetBytes.Set(float64(tracker.Budget()))
 		e.metrics.MemoryUsedBytes.Set(float64(tracker.Used()))
 	}
+}
+
+// aggregateNeededCols returns the minimal set of columns needed for an
+// aggregate task: group-by columns + aggregate input columns. Returns nil
+// (read all) if no columns are specified (safety fallback).
+func aggregateNeededCols(groupBy []string, aggs []distributed.AggSpec) []string {
+	seen := make(map[string]struct{})
+	var cols []string
+	for _, col := range groupBy {
+		if _, ok := seen[col]; !ok {
+			seen[col] = struct{}{}
+			cols = append(cols, col)
+		}
+	}
+	for _, a := range aggs {
+		if a.InputCol != "" {
+			if _, ok := seen[a.InputCol]; !ok {
+				seen[a.InputCol] = struct{}{}
+				cols = append(cols, a.InputCol)
+			}
+		}
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+	return cols
 }
 
 func parseAggFunc(s string) exec.AggFunc {

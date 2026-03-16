@@ -109,7 +109,7 @@ func (w *Worker) Start(ctx context.Context) error {
 		Durable:       w.config.WorkerID,
 		FilterSubject: filterSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       2 * time.Minute,
+		AckWait:       5 * time.Minute,
 		MaxDeliver:    3,
 	})
 	if err != nil {
@@ -134,15 +134,15 @@ func (w *Worker) Start(ctx context.Context) error {
 		cancelSub.Unsubscribe()
 	}()
 
-	// Start heartbeat
+	// Start task pull loop
+	sem := make(chan struct{}, w.config.MaxConcurrent)
+
+	// Start heartbeat (needs sem to report active task count)
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
-		w.heartbeatLoop(ctx)
+		w.heartbeatLoop(ctx, sem)
 	}()
-
-	// Start task pull loop
-	sem := make(chan struct{}, w.config.MaxConcurrent)
 	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
@@ -200,7 +200,7 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 			}
 		}
 
-		msgs, err := consumer.Fetch(available, jetstream.FetchMaxWait(5*time.Second))
+		msgs, err := consumer.Fetch(available, jetstream.FetchMaxWait(500*time.Millisecond))
 		if err != nil {
 			for i := 0; i < available; i++ {
 				<-sem
@@ -310,7 +310,7 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	)
 }
 
-func (w *Worker) heartbeatLoop(ctx context.Context) {
+func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -325,6 +325,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context) {
 			hb := distributed.WorkerHeartbeat{
 				WorkerID:    w.config.WorkerID,
 				ClusterID:   w.config.ClusterID,
+				ActiveTasks: len(sem),
 				MemoryUsed:  int64(memStats.Alloc),
 				MemoryTotal: int64(memStats.Sys),
 				Timestamp:   time.Now(),

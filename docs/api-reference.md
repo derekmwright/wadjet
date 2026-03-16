@@ -201,6 +201,8 @@ POST /v1/queries/async
 
 Submit a query for asynchronous execution. Returns immediately with a query ID that can be polled for results.
 
+> **Note:** Async query endpoints (`POST /v1/queries/async`, `GET /v1/queries/{queryID}`, `GET /v1/queries/{queryID}/results`, `DELETE /v1/queries/{queryID}`) require distributed mode (coordinator + workers). In standalone mode, these endpoints return `503 Service Unavailable`.
+
 **Request:**
 
 ```json

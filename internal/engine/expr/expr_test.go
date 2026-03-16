@@ -638,3 +638,60 @@ func TestNetworkFunctions(t *testing.T) {
 		})
 	}
 }
+
+func TestNewScalarFunctions(t *testing.T) {
+	b := testBatch()
+
+	tests := []struct {
+		name     string
+		expr     Expr
+		row      int
+		expected any
+	}{
+		// starts_with
+		{"starts_with true", &FuncCall{Name: "starts_with", Args: []Expr{&Lit{Val: "hello world"}, &Lit{Val: "hello"}}}, 0, true},
+		{"starts_with false", &FuncCall{Name: "starts_with", Args: []Expr{&Lit{Val: "hello"}, &Lit{Val: "world"}}}, 0, false},
+		{"starts_with null", &FuncCall{Name: "starts_with", Args: []Expr{&Lit{Val: nil}, &Lit{Val: "x"}}}, 0, nil},
+
+		// ends_with
+		{"ends_with true", &FuncCall{Name: "ends_with", Args: []Expr{&Lit{Val: "hello world"}, &Lit{Val: "world"}}}, 0, true},
+		{"ends_with false", &FuncCall{Name: "ends_with", Args: []Expr{&Lit{Val: "hello"}, &Lit{Val: "world"}}}, 0, false},
+
+		// contains
+		{"contains true", &FuncCall{Name: "contains", Args: []Expr{&Lit{Val: "hello world"}, &Lit{Val: "lo wo"}}}, 0, true},
+		{"contains false", &FuncCall{Name: "contains", Args: []Expr{&Lit{Val: "hello"}, &Lit{Val: "xyz"}}}, 0, false},
+		{"contains column", &FuncCall{Name: "contains", Args: []Expr{&ColRef{Name: "name"}, &Lit{Val: "lic"}}}, 0, true},
+
+		// repeat
+		{"repeat", &FuncCall{Name: "repeat", Args: []Expr{&Lit{Val: "ab"}, &Lit{Val: float64(3)}}}, 0, "ababab"},
+		{"repeat zero", &FuncCall{Name: "repeat", Args: []Expr{&Lit{Val: "x"}, &Lit{Val: float64(0)}}}, 0, ""},
+		{"repeat null", &FuncCall{Name: "repeat", Args: []Expr{&Lit{Val: nil}, &Lit{Val: float64(3)}}}, 0, nil},
+
+		// sign
+		{"sign positive", &FuncCall{Name: "sign", Args: []Expr{&Lit{Val: float64(42)}}}, 0, float64(1)},
+		{"sign negative", &FuncCall{Name: "sign", Args: []Expr{&Lit{Val: float64(-7)}}}, 0, float64(-1)},
+		{"sign zero", &FuncCall{Name: "sign", Args: []Expr{&Lit{Val: float64(0)}}}, 0, float64(0)},
+
+		// greatest
+		{"greatest", &FuncCall{Name: "greatest", Args: []Expr{&Lit{Val: float64(1)}, &Lit{Val: float64(5)}, &Lit{Val: float64(3)}}}, 0, float64(5)},
+		{"greatest with null", &FuncCall{Name: "greatest", Args: []Expr{&Lit{Val: nil}, &Lit{Val: float64(3)}}}, 0, float64(3)},
+		{"greatest all null", &FuncCall{Name: "greatest", Args: []Expr{&Lit{Val: nil}}}, 0, nil},
+
+		// least
+		{"least", &FuncCall{Name: "least", Args: []Expr{&Lit{Val: float64(5)}, &Lit{Val: float64(1)}, &Lit{Val: float64(3)}}}, 0, float64(1)},
+		{"least with null", &FuncCall{Name: "least", Args: []Expr{&Lit{Val: nil}, &Lit{Val: float64(3)}}}, 0, float64(3)},
+
+		// second
+		{"second", &FuncCall{Name: "second", Args: []Expr{&Lit{Val: "2026-03-15T14:30:45Z"}}}, 0, float64(45)},
+		{"second null", &FuncCall{Name: "second", Args: []Expr{&Lit{Val: nil}}}, 0, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.expr.Eval(b, tt.row)
+			if result != tt.expected {
+				t.Fatalf("expected %v (%T), got %v (%T)", tt.expected, tt.expected, result, result)
+			}
+		})
+	}
+}

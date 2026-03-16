@@ -546,6 +546,20 @@ func init() {
 	// UUID functions
 	"uuid_version":   fnUUIDVersion,
 	"uuid_to_string": fnUUIDToString,
+
+	// Additional string functions
+	"starts_with": fnStartsWith,
+	"ends_with":   fnEndsWith,
+	"contains":    fnContains,
+	"repeat":      fnRepeat,
+
+	// Additional math functions
+	"sign":     fnSign,
+	"greatest": fnGreatest,
+	"least":    fnLeast,
+
+	// Additional date/time functions
+	"second": fnSecond,
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
@@ -683,6 +697,38 @@ func fnRight(args []any) any {
 	return s[len(s)-n:]
 }
 
+func fnStartsWith(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	return strings.HasPrefix(toString(args[0]), toString(args[1]))
+}
+
+func fnEndsWith(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	return strings.HasSuffix(toString(args[0]), toString(args[1]))
+}
+
+func fnContains(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	return strings.Contains(toString(args[0]), toString(args[1]))
+}
+
+func fnRepeat(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	n := int(ToFloat64(args[1]))
+	if n < 0 {
+		return ""
+	}
+	return strings.Repeat(toString(args[0]), n)
+}
+
 // --- Math function implementations ---
 
 func fnAbs(args []any) any {
@@ -780,6 +826,47 @@ func fnExp(args []any) any {
 		return nil
 	}
 	return math.Exp(ToFloat64(args[0]))
+}
+
+func fnSign(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	v := ToFloat64(args[0])
+	switch {
+	case v > 0:
+		return float64(1)
+	case v < 0:
+		return float64(-1)
+	default:
+		return float64(0)
+	}
+}
+
+func fnGreatest(args []any) any {
+	var best any
+	for _, a := range args {
+		if a == nil {
+			continue
+		}
+		if best == nil || ToFloat64(a) > ToFloat64(best) {
+			best = a
+		}
+	}
+	return best
+}
+
+func fnLeast(args []any) any {
+	var best any
+	for _, a := range args {
+		if a == nil {
+			continue
+		}
+		if best == nil || ToFloat64(a) < ToFloat64(best) {
+			best = a
+		}
+	}
+	return best
 }
 
 // --- Conditional function implementations ---
@@ -890,6 +977,14 @@ func fnMinute(args []any) any {
 		return nil
 	}
 	return float64(t.Minute())
+}
+
+func fnSecond(args []any) any {
+	t := toTime(args)
+	if t.IsZero() {
+		return nil
+	}
+	return float64(t.Second())
 }
 
 func fnDateTrunc(args []any) any {

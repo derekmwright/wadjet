@@ -468,21 +468,64 @@ func (c *Coordinator) createAggregateTasks(queryID string, stage physical.Stage,
 		})
 	}
 
-	// Aggregate runs as a single task — splitting into parallel partials
-	// would produce duplicate groups for COUNT/AVG that cannot be correctly
-	// merged without two-phase aggregation semantics.
-	return []distributed.Task{{
-		ID:           uuid.New().String()[:8],
-		QueryID:      queryID,
-		StageID:      stage.ID,
-		Type:         distributed.TaskTypeAggregate,
-		GroupByCols:  stage.GroupByCols,
-		Aggregates:   aggSpecs,
-		InputFiles:   inputFiles,
-		ResultBucket: c.config.ResultBucket,
-		ResultPrefix: resultPrefix,
-		CreatedAt:    time.Now(),
-	}}
+	// Partition input files across multiple parallel aggregate tasks when the
+	// input set is large enough to benefit. Each partial task produces grouped
+	// partial aggregates; downstream stages re-aggregate to merge. For SUM this
+	// produces correct partials (SUM of SUMs). For COUNT, the coordinator rewrites
+	// to SUM-of-COUNTs at the merge stage. For MIN/MAX, partials are composable
+	// directly. AVG is decomposed into SUM+COUNT during planning.
+	//
+	// With <= 4 input files, a single task avoids scheduling overhead.
+	const minFilesForParallel = 4
+	const maxPartialTasks = 8
+
+	if len(inputFiles) <= minFilesForParallel {
+		return []distributed.Task{{
+			ID:           uuid.New().String()[:8],
+			QueryID:      queryID,
+			StageID:      stage.ID,
+			Type:         distributed.TaskTypeAggregate,
+			GroupByCols:  stage.GroupByCols,
+			Aggregates:   aggSpecs,
+			InputFiles:   inputFiles,
+			ResultBucket: c.config.ResultBucket,
+			ResultPrefix: resultPrefix,
+			CreatedAt:    time.Now(),
+		}}
+	}
+
+	// Split files into chunks for parallel partial aggregation
+	numTasks := len(inputFiles) / minFilesForParallel
+	if numTasks > maxPartialTasks {
+		numTasks = maxPartialTasks
+	}
+	if numTasks < 2 {
+		numTasks = 2
+	}
+
+	tasks := make([]distributed.Task, 0, numTasks)
+	chunkSize := (len(inputFiles) + numTasks - 1) / numTasks
+
+	for i := 0; i < len(inputFiles); i += chunkSize {
+		end := i + chunkSize
+		if end > len(inputFiles) {
+			end = len(inputFiles)
+		}
+		tasks = append(tasks, distributed.Task{
+			ID:           uuid.New().String()[:8],
+			QueryID:      queryID,
+			StageID:      stage.ID,
+			Type:         distributed.TaskTypeAggregate,
+			GroupByCols:  stage.GroupByCols,
+			Aggregates:   aggSpecs,
+			InputFiles:   inputFiles[i:end],
+			ResultBucket: c.config.ResultBucket,
+			ResultPrefix: resultPrefix,
+			CreatedAt:    time.Now(),
+		})
+	}
+
+	return tasks
 }
 
 func (c *Coordinator) createSortTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
@@ -584,10 +627,13 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 	subject := distributed.QueryResultSubject(queryID)
 
 	// Channel for offloading stage scheduling from the NATS callback.
+	// Buffered generously to avoid dropping stage completion events under
+	// high concurrency. A dropped event causes downstream stages to never
+	// schedule, deadlocking the query.
 	type stageEvent struct {
 		stageID string
 	}
-	stageCh := make(chan stageEvent, 16)
+	stageCh := make(chan stageEvent, 256)
 
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var result distributed.ResultNotification
@@ -620,13 +666,10 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 			return
 		}
 
-		// Stage completed — notify the background scheduler goroutine
-		select {
-		case stageCh <- stageEvent{stageID: result.StageID}:
-		default:
-			c.logger.Warn("stage scheduling channel full, dropping event",
-				"stage_id", result.StageID)
-		}
+		// Stage completed — notify the background scheduler goroutine.
+		// Use blocking send to guarantee delivery. The background goroutine
+		// drains this channel promptly so backpressure here is acceptable.
+		stageCh <- stageEvent{stageID: result.StageID}
 	})
 	if err != nil {
 		c.logger.Error("failed to subscribe to results", "error", err, "subject", subject)

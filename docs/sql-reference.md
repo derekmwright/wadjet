@@ -586,6 +586,10 @@ Caelum includes 58 built-in scalar functions across several categories.
 | `REVERSE(s)` | Reverse string | `REVERSE(hostname)` |
 | `LEFT(s, n)` | First n characters | `LEFT(hostname, 3)` |
 | `RIGHT(s, n)` | Last n characters | `RIGHT(hostname, 2)` |
+| `STARTS_WITH(s, prefix)` | Test if string starts with prefix | `STARTS_WITH(hostname, 'web')` |
+| `ENDS_WITH(s, suffix)` | Test if string ends with suffix | `ENDS_WITH(hostname, '.com')` |
+| `CONTAINS(s, sub)` | Test if string contains substring | `CONTAINS(message, 'error')` |
+| `REPEAT(s, n)` | Repeat string n times | `REPEAT('*', 10)` |
 
 ### Math Functions
 
@@ -601,6 +605,9 @@ Caelum includes 58 built-in scalar functions across several categories.
 | `LOG(n)` | Base-10 logarithm | `LOG(bytes_in)` |
 | `LN(n)` | Natural logarithm | `LN(bytes_in)` |
 | `EXP(n)` | Exponential (e^n) | `EXP(rate)` |
+| `SIGN(n)` | Sign of number (-1, 0, 1) | `SIGN(profit)` |
+| `GREATEST(a, b, ...)` | Largest value | `GREATEST(bytes_in, bytes_out)` |
+| `LEAST(a, b, ...)` | Smallest value | `LEAST(bytes_in, bytes_out)` |
 
 ### Conditional Functions
 
@@ -643,6 +650,7 @@ Caelum includes 58 built-in scalar functions across several categories.
 | `DAY(ts)` | Extract day | `DAY(timestamp)` |
 | `HOUR(ts)` | Extract hour | `HOUR(timestamp)` |
 | `MINUTE(ts)` | Extract minute | `MINUTE(timestamp)` |
+| `SECOND(ts)` | Extract second | `SECOND(timestamp)` |
 | `EXTRACT(part FROM ts)` | Extract date part | `EXTRACT(hour FROM timestamp)` |
 | `DATE_TRUNC(part, ts)` | Truncate to precision | `DATE_TRUNC('hour', timestamp)` |
 | `DATE_DIFF(unit, a, b)` | Difference between timestamps | `DATE_DIFF('second', start_ts, end_ts)` |
