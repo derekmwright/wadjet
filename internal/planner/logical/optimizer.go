@@ -20,7 +20,31 @@ func Optimize(plan *Node) *Node {
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
 	computeRequiredColumns(plan)
+	attachScanPredicates(plan)
 	return plan
+}
+
+// attachScanPredicates copies simple filter predicates to scan nodes for
+// row-group-level pruning. Only predicates with a Column, Op, and literal Value
+// are useful for stats-based pruning.
+func attachScanPredicates(n *Node) {
+	if n == nil {
+		return
+	}
+	for _, child := range n.Children {
+		attachScanPredicates(child)
+	}
+	if n.Type != NodeFilter || len(n.Children) == 0 {
+		return
+	}
+	child := n.Children[0]
+	if child.Type == NodeScan {
+		for _, pred := range n.Predicates {
+			if pred.Column != "" && pred.Op != "" && pred.Value != nil {
+				child.ScanPredicates = append(child.ScanPredicates, pred)
+			}
+		}
+	}
 }
 
 // computeRequiredColumns walks the plan tree top-down, collecting column

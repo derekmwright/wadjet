@@ -89,9 +89,35 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 			continue
 		}
 
-		cs := ColumnStats{HasStats: ci.NumPages() > 0}
+		numPages := ci.NumPages()
+		cs := ColumnStats{HasStats: numPages > 0}
 		if cs.HasStats {
-			cs.NullCount = int64(ci.NullCount(0))
+			var totalNulls int64
+			for p := 0; p < numPages; p++ {
+				totalNulls += ci.NullCount(p)
+			}
+			cs.NullCount = totalNulls
+
+			// Compute row-group min/max from page-level stats
+			for p := 0; p < numPages; p++ {
+				if ci.NullPage(p) {
+					continue
+				}
+				pageMin := ci.MinValue(p)
+				pageMax := ci.MaxValue(p)
+				if !pageMin.IsNull() {
+					native := parquetValueToNative(pageMin)
+					if cs.MinValue == nil || compareNative(native, cs.MinValue) < 0 {
+						cs.MinValue = native
+					}
+				}
+				if !pageMax.IsNull() {
+					native := parquetValueToNative(pageMax)
+					if cs.MaxValue == nil || compareNative(native, cs.MaxValue) > 0 {
+						cs.MaxValue = native
+					}
+				}
+			}
 		}
 		stats.Columns[colName] = cs
 	}
@@ -219,6 +245,65 @@ func flattenColumnPath(col *goparquet.Column) string {
 		return col.Name()
 	}
 	return path[len(path)-1]
+}
+
+// parquetValueToNative converts a parquet-go Value to a Go native type.
+func parquetValueToNative(v goparquet.Value) any {
+	switch v.Kind() {
+	case goparquet.Boolean:
+		return v.Boolean()
+	case goparquet.Int32:
+		return int64(v.Int32())
+	case goparquet.Int64:
+		return v.Int64()
+	case goparquet.Float:
+		return float64(v.Float())
+	case goparquet.Double:
+		return v.Double()
+	case goparquet.ByteArray:
+		return string(v.ByteArray())
+	case goparquet.FixedLenByteArray:
+		return string(v.ByteArray())
+	default:
+		return nil
+	}
+}
+
+// compareNative compares two native Go values for ordering.
+func compareNative(a, b any) int {
+	switch av := a.(type) {
+	case int64:
+		if bv, ok := b.(int64); ok {
+			if av < bv {
+				return -1
+			}
+			if av > bv {
+				return 1
+			}
+			return 0
+		}
+	case float64:
+		if bv, ok := b.(float64); ok {
+			if av < bv {
+				return -1
+			}
+			if av > bv {
+				return 1
+			}
+			return 0
+		}
+	case string:
+		if bv, ok := b.(string); ok {
+			if av < bv {
+				return -1
+			}
+			if av > bv {
+				return 1
+			}
+			return 0
+		}
+	}
+	return 0
 }
 
 func goTypeToTypeID(col *goparquet.Column) TypeID {

@@ -67,6 +67,7 @@ type Node struct {
 	ScanColumns     []string          // column names available from this scan (populated by physical planner)
 	RequiredColumns []string          // columns actually needed from this scan (set by optimizer column pruning)
 	PartitionFilter map[string]string // extracted partition key filters (year, month, day, hour)
+	ScanPredicates  []Predicate       // pushed-down filter predicates for row group pruning
 
 	// Filter
 	Predicates []Predicate

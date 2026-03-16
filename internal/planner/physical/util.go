@@ -3,10 +3,13 @@ package physical
 import (
 	"bytes"
 	"io"
+	"strings"
 
 	goparquet "github.com/parquet-go/parquet-go"
 
 	"github.com/derekmwright/caelum/internal/engine/batch"
+	"github.com/derekmwright/caelum/internal/engine/exec"
+	"github.com/derekmwright/caelum/internal/engine/scan"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
 
@@ -25,7 +28,7 @@ func fromRows(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch
 // readBatchDirect reads a parquet file directly into a RecordBatch using
 // column-at-a-time page reading. This avoids the row-reconstruction overhead
 // of parquet-go's ReadRows and eliminates the map[string]any intermediate.
-func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string) *batch.RecordBatch {
+func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string, preds ...scanPredicate) *batch.RecordBatch {
 	file := pqReader.File()
 	rowGroups := file.RowGroups()
 	if len(rowGroups) == 0 {
@@ -67,9 +70,32 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 		}
 	}
 
-	// Count total rows across all row groups
+	// Filter row groups using stats-based predicate pruning
+	activeRGs := rowGroups
+	if len(preds) > 0 {
+		activeRGs = make([]goparquet.RowGroup, 0, len(rowGroups))
+		for i, rg := range rowGroups {
+			stats := pqReader.RowGroupStats(i)
+			pruned := false
+			for _, pred := range preds {
+				op := mapPredOp(pred.Op)
+				if op >= 0 {
+					sp := scan.StatsPredicate{Column: pred.Column, Op: op, Value: pred.Value}
+					if scan.CanPruneRowGroup(sp, stats) {
+						pruned = true
+						break
+					}
+				}
+			}
+			if !pruned {
+				activeRGs = append(activeRGs, rg)
+			}
+		}
+	}
+
+	// Count total rows across active row groups
 	var totalRows int64
-	for _, rg := range rowGroups {
+	for _, rg := range activeRGs {
 		totalRows += rg.NumRows()
 	}
 	if totalRows == 0 {
@@ -79,12 +105,12 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	b := batch.NewRecordBatch(readSchema, int(totalRows))
 	valBuf := make([]goparquet.Value, 4096)
 
-	// Read column-by-column across all row groups
+	// Read column-by-column across active row groups
 	for _, m := range mappings {
 		col := b.Columns[m.batchIdx]
 		rowOffset := 0
 
-		for _, rg := range rowGroups {
+		for _, rg := range activeRGs {
 			chunks := rg.ColumnChunks()
 			if m.fileIdx >= len(chunks) {
 				continue
@@ -117,6 +143,26 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 
 	b.Len = int(totalRows)
 	return b
+}
+
+// mapPredOp converts a logical predicate operator string to an exec.CompareOp.
+func mapPredOp(op string) exec.CompareOp {
+	switch strings.ToLower(op) {
+	case "=":
+		return exec.OpEq
+	case "!=", "<>":
+		return exec.OpNe
+	case "<":
+		return exec.OpLt
+	case "<=":
+		return exec.OpLe
+	case ">":
+		return exec.OpGt
+	case ">=":
+		return exec.OpGe
+	default:
+		return -1
+	}
 }
 
 // buildProjectedParquetSchema creates a parquet-go schema with only the requested columns.

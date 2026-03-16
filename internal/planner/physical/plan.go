@@ -613,7 +613,7 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns)
+	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates)
 	return scanner, nil, &exec.CollectSink{}, nil
 }
 
@@ -1803,7 +1803,7 @@ func rowHashKey(row map[string]any) string {
 	return b.String()
 }
 
-func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter map[string]string, requiredCols []string) exec.Source {
+func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter map[string]string, requiredCols []string, scanPreds []logical.Predicate) exec.Source {
 	// Get table schema
 	tableMeta, err := p.catalog.GetTable(ctx, tableName)
 	if err != nil {
@@ -1817,6 +1817,7 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 		tableName:       tableName,
 		partitionFilter: partFilter,
 		requiredCols:    requiredCols,
+		scanPreds:       scanPreds,
 	}
 }
 
@@ -1826,12 +1827,13 @@ type catalogScanSource struct {
 	tableName       string
 	partitionFilter map[string]string
 	requiredCols    []string
+	scanPreds       []logical.Predicate
 	inner           exec.Source
 }
 
 func (s *catalogScanSource) Init(ctx context.Context) error {
 	// Use the scan package scanner
-	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, s.requiredCols)
+	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, s.requiredCols, s.scanPreds)
 	s.inner = sc
 	return s.inner.Init(ctx)
 }
@@ -2353,12 +2355,13 @@ func (w *windowSourceAdapter) Close() error {
 }
 
 // newScannerSource creates a scanner exec.Source from the catalog
-func newScannerSource(cat *catalog.Catalog, tableName string, partFilter map[string]string, requiredCols []string) exec.Source {
+func newScannerSource(cat *catalog.Catalog, tableName string, partFilter map[string]string, requiredCols []string, scanPreds []logical.Predicate) exec.Source {
 	return &scannerExecSource{
 		catalog:         cat,
 		tableName:       tableName,
 		partitionFilter: partFilter,
 		requiredCols:    requiredCols,
+		scanPreds:       scanPreds,
 	}
 }
 
@@ -2367,6 +2370,7 @@ type scannerExecSource struct {
 	tableName       string
 	partitionFilter map[string]string
 	requiredCols    []string
+	scanPreds       []logical.Predicate
 	scanner         *scanSourceInner
 }
 
@@ -2377,6 +2381,7 @@ type scanSourceInner struct {
 	idx          int64 // atomic index for parallel workers
 	schema       []parquet.Column
 	requiredCols []string
+	scanPreds    []scanPredicate // converted predicates for row-group pruning
 	rowsScanned  int64
 
 	// parallel scan
@@ -2384,6 +2389,13 @@ type scanSourceInner struct {
 	errCh   chan error
 	wg      sync.WaitGroup
 	cancel  context.CancelFunc
+}
+
+// scanPredicate is a simple predicate for row-group stats pruning.
+type scanPredicate struct {
+	Column string
+	Op     string
+	Value  any
 }
 
 func (s *scannerExecSource) Init(ctx context.Context) error {
@@ -2408,12 +2420,21 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	}
 
 	scanCtx, cancel := context.WithCancel(ctx)
+	// Convert logical predicates to scan predicates for row-group pruning
+	var sp []scanPredicate
+	for _, pred := range s.scanPreds {
+		if pred.Column != "" && pred.Op != "" && pred.Value != nil {
+			sp = append(sp, scanPredicate{Column: pred.Column, Op: pred.Op, Value: pred.Value})
+		}
+	}
+
 	inner := &scanSourceInner{
 		cat:          s.catalog,
 		tableName:    s.tableName,
 		files:        files,
 		schema:       tableMeta.Schema.Columns,
 		requiredCols: s.requiredCols,
+		scanPreds:    sp,
 		batchCh:      make(chan *batch.RecordBatch, 4),
 		errCh:        make(chan error, 1),
 		cancel:       cancel,
@@ -2508,7 +2529,7 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 			continue
 		}
 
-		b := readBatchDirect(reader, inner.schema, inner.requiredCols)
+		b := readBatchDirect(reader, inner.schema, inner.requiredCols, inner.scanPreds...)
 		if b == nil || b.Len == 0 {
 			continue
 		}
