@@ -388,44 +388,28 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		return p.executeSemiAntiJoin(in)
 	}
 
-	var resultRows []map[string]any
+	// Collect match pairs: (probe row, build ref, matched flag)
+	type matchPair struct {
+		probeRow int
+		ref      buildRef
+		matched  bool
+	}
+	var pairs []matchPair
 
 	iter := batchIterator(in)
 	for _, row := range iter {
 		key := p.join.probeKey(in, row)
-		matches := p.join.hashIndex[key]
+		buildMatches := p.join.hashIndex[key]
 
-		if len(matches) == 0 {
+		if len(buildMatches) == 0 {
 			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
-				outRow := make(map[string]any, len(outSchema))
-				for _, col := range in.Schema {
-					outRow[col.Name] = in.ColumnByName(col.Name).GetValue(row)
-				}
-				for _, col := range p.join.buildSchema {
-					if !p.isRightJoinKey(col.Name) || !p.leftHasColumn(col.Name, in.Schema) {
-						if _, exists := outRow[col.Name]; !exists {
-							outRow[col.Name] = nil
-						}
-					}
-				}
-				resultRows = append(resultRows, outRow)
+				pairs = append(pairs, matchPair{probeRow: row})
 			}
 			continue
 		}
 
-		for i, ref := range matches {
-			outRow := make(map[string]any, len(outSchema))
-			// Left side values
-			for _, col := range in.Schema {
-				outRow[col.Name] = in.ColumnByName(col.Name).GetValue(row)
-			}
-			// Right side values from columnar build storage
-			for _, col := range p.join.buildSchema {
-				if _, exists := outRow[col.Name]; !exists {
-					outRow[col.Name] = p.join.readBuildValue(ref, col.Name)
-				}
-			}
-			resultRows = append(resultRows, outRow)
+		for i, ref := range buildMatches {
+			pairs = append(pairs, matchPair{probeRow: row, ref: ref, matched: true})
 
 			if p.join.matched != nil {
 				p.join.mu.Lock()
@@ -438,76 +422,135 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		}
 	}
 
-	if len(resultRows) == 0 {
+	if len(pairs) == 0 {
 		return nil, nil
 	}
 
-	return batch.FromRows(outSchema, resultRows), nil
+	// Build output batch directly in columnar form
+	out := batch.NewRecordBatch(outSchema, len(pairs))
+
+	// Pre-compute column source mappings
+	probeSeen := make(map[string]bool, len(in.Schema))
+	for _, col := range in.Schema {
+		probeSeen[col.Name] = true
+	}
+
+	for outColIdx, col := range outSchema {
+		dst := out.Columns[outColIdx]
+		probeColIdx := in.ColumnIndex(col.Name)
+		buildColIdx := -1
+		if probeColIdx < 0 {
+			for bi, bc := range p.join.buildSchema {
+				if bc.Name == col.Name {
+					buildColIdx = bi
+					break
+				}
+			}
+		}
+
+		for outRow, m := range pairs {
+			if probeColIdx >= 0 {
+				copyVectorValue(dst, outRow, in.Columns[probeColIdx], m.probeRow)
+			} else if buildColIdx >= 0 && m.matched {
+				buildBatch := p.join.buildBatches[m.ref.batchIdx]
+				copyVectorValue(dst, outRow, buildBatch.Columns[buildColIdx], int(m.ref.rowIdx))
+			} else {
+				setVectorNull(dst, outRow)
+			}
+		}
+	}
+
+	return out, nil
 }
 
 // executeSemiAntiJoin handles SemiJoin and AntiJoin semantics.
 func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	var resultRows []map[string]any
+	// Collect qualifying probe row indices
+	var rows []int
 
 	iter := batchIterator(in)
 	for _, row := range iter {
 		key := p.join.probeKey(in, row)
 		hasMatch := len(p.join.hashIndex[key]) > 0
 
-		emit := false
-		if p.join.JoinType == SemiJoin {
-			emit = hasMatch
-		} else { // AntiJoin
-			emit = !hasMatch
-		}
-
+		emit := (p.join.JoinType == SemiJoin && hasMatch) ||
+			(p.join.JoinType == AntiJoin && !hasMatch)
 		if emit {
-			outRow := make(map[string]any, len(in.Schema))
-			for _, col := range in.Schema {
-				outRow[col.Name] = in.ColumnByName(col.Name).GetValue(row)
-			}
-			resultRows = append(resultRows, outRow)
+			rows = append(rows, row)
 		}
 	}
 
-	if len(resultRows) == 0 {
+	if len(rows) == 0 {
 		return nil, nil
 	}
 
-	return batch.FromRows(in.Schema, resultRows), nil
+	out := batch.NewRecordBatch(in.Schema, len(rows))
+	for colIdx := range in.Schema {
+		dst := out.Columns[colIdx]
+		src := in.Columns[colIdx]
+		for outRow, srcRow := range rows {
+			copyVectorValue(dst, outRow, src, srcRow)
+		}
+	}
+	return out, nil
 }
 
 // executeCrossJoin produces the Cartesian product of probe rows with all build-side rows.
 func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parquet.Column) (*batch.RecordBatch, error) {
-	var resultRows []map[string]any
+	// Collect cross product pairs
+	type crossPair struct {
+		probeRow  int
+		batchIdx  int32
+		buildRow  int
+	}
+	var pairs []crossPair
 
 	iter := batchIterator(in)
 	for _, row := range iter {
-		for _, buildBatch := range p.join.buildBatches {
+		for bi, buildBatch := range p.join.buildBatches {
 			buildIter := batchIterator(buildBatch)
 			for _, buildRow := range buildIter {
-				outRow := make(map[string]any, len(outSchema))
-				for _, col := range in.Schema {
-					outRow[col.Name] = in.ColumnByName(col.Name).GetValue(row)
-				}
-				for _, col := range p.join.buildSchema {
-					if _, exists := outRow[col.Name]; !exists {
-						v := buildBatch.ColumnByName(col.Name)
-						if v != nil {
-							outRow[col.Name] = v.GetValue(buildRow)
-						}
-					}
-				}
-				resultRows = append(resultRows, outRow)
+				pairs = append(pairs, crossPair{probeRow: row, batchIdx: int32(bi), buildRow: buildRow})
 			}
 		}
 	}
 
-	if len(resultRows) == 0 {
+	if len(pairs) == 0 {
 		return nil, nil
 	}
 
-	return batch.FromRows(outSchema, resultRows), nil
+	out := batch.NewRecordBatch(outSchema, len(pairs))
+	probeSeen := make(map[string]bool, len(in.Schema))
+	for _, col := range in.Schema {
+		probeSeen[col.Name] = true
+	}
+
+	for outColIdx, col := range outSchema {
+		dst := out.Columns[outColIdx]
+		probeColIdx := in.ColumnIndex(col.Name)
+		buildColIdx := -1
+		if probeColIdx < 0 {
+			for bi, bc := range p.join.buildSchema {
+				if bc.Name == col.Name {
+					buildColIdx = bi
+					break
+				}
+			}
+		}
+
+		for outRow, cp := range pairs {
+			if probeColIdx >= 0 {
+				copyVectorValue(dst, outRow, in.Columns[probeColIdx], cp.probeRow)
+			} else if buildColIdx >= 0 {
+				buildBatch := p.join.buildBatches[cp.batchIdx]
+				copyVectorValue(dst, outRow, buildBatch.Columns[buildColIdx], cp.buildRow)
+			} else {
+				setVectorNull(dst, outRow)
+			}
+		}
+	}
+
+	return out, nil
 }
 
 // FlushUnmatched returns a RecordBatch containing build-side rows that were never
@@ -517,33 +560,57 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 		return nil
 	}
 
-	outSchema := p.outputSchema(leftSchema)
-	var resultRows []map[string]any
-
-	for key, refs := range p.join.hashIndex {
+	// Collect unmatched build refs
+	var refs []buildRef
+	for key, keyRefs := range p.join.hashIndex {
 		matchedSet := p.join.matched[key]
-		for i, ref := range refs {
+		for i, ref := range keyRefs {
 			if matchedSet != nil && matchedSet[i] {
 				continue
 			}
-			outRow := make(map[string]any, len(outSchema))
-			for _, col := range leftSchema {
-				outRow[col.Name] = nil
-			}
-			for _, col := range p.join.buildSchema {
-				if _, exists := outRow[col.Name]; !exists {
-					outRow[col.Name] = p.join.readBuildValue(ref, col.Name)
-				}
-			}
-			resultRows = append(resultRows, outRow)
+			refs = append(refs, ref)
 		}
 	}
 
-	if len(resultRows) == 0 {
+	if len(refs) == 0 {
 		return nil
 	}
 
-	return batch.FromRows(outSchema, resultRows)
+	outSchema := p.outputSchema(leftSchema)
+	out := batch.NewRecordBatch(outSchema, len(refs))
+
+	leftSeen := make(map[string]bool, len(leftSchema))
+	for _, col := range leftSchema {
+		leftSeen[col.Name] = true
+	}
+
+	for outColIdx, col := range outSchema {
+		dst := out.Columns[outColIdx]
+		if leftSeen[col.Name] {
+			// Left side is all NULLs for unmatched build rows
+			for outRow := range refs {
+				setVectorNull(dst, outRow)
+			}
+		} else {
+			buildColIdx := -1
+			for bi, bc := range p.join.buildSchema {
+				if bc.Name == col.Name {
+					buildColIdx = bi
+					break
+				}
+			}
+			for outRow, ref := range refs {
+				if buildColIdx >= 0 {
+					buildBatch := p.join.buildBatches[ref.batchIdx]
+					copyVectorValue(dst, outRow, buildBatch.Columns[buildColIdx], int(ref.rowIdx))
+				} else {
+					setVectorNull(dst, outRow)
+				}
+			}
+		}
+	}
+
+	return out
 }
 
 func (p *HashJoinProbe) Close() error { return nil }
@@ -592,4 +659,13 @@ func (p *HashJoinProbe) leftHasColumn(name string, leftSchema []parquet.Column) 
 		}
 	}
 	return false
+}
+
+// setVectorNull marks a position as null, handling BytesColumn offset alignment.
+func setVectorNull(dst *batch.Vector, row int) {
+	dst.Nulls.SetNull(row)
+	switch dst.Type {
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		dst.BytesData.Set(row, nil)
+	}
 }
