@@ -192,11 +192,12 @@ func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {
 		default:
 			// Simple GROUP BY
 			for {
-				expr, err := p.parseExpr()
+				gbExpr, err := p.parseExpr()
 				if err != nil {
 					return nil, fmt.Errorf("parsing GROUP BY: %w", err)
 				}
-				info.GroupBy = append(info.GroupBy, expr.String())
+				info.GroupBy = append(info.GroupBy, gbExpr.String())
+				info.GroupByExprs = append(info.GroupByExprs, gbExpr)
 				if p.peek() != TokenComma {
 					break
 				}
@@ -313,18 +314,27 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 		col.TableRef = ref.Table
 	}
 
-	// Check if it's an aggregate function
-	if fn, ok := expr.(*FuncCallNode); ok {
-		if IsAggregate(fn.Name) {
-			col.IsAgg = true
-			col.AggFunc = strings.ToLower(fn.Name)
-			col.AggDistinct = fn.Distinct
-			if fn.Star {
-				col.AggArg = "*"
-			} else if len(fn.Args) > 0 {
-				col.AggArg = fn.Args[0].String()
-				col.AggArgExpr = fn.Args[0]
-			}
+	// Check if it's an aggregate function (top-level or nested)
+	if fn, ok := expr.(*FuncCallNode); ok && IsAggregate(fn.Name) {
+		col.IsAgg = true
+		col.AggFunc = strings.ToLower(fn.Name)
+		col.AggDistinct = fn.Distinct
+		if fn.Star {
+			col.AggArg = "*"
+		} else if len(fn.Args) > 0 {
+			col.AggArg = fn.Args[0].String()
+			col.AggArgExpr = fn.Args[0]
+		}
+	} else if fn := FindNestedAggregate(expr); fn != nil {
+		// Aggregate nested inside a binary expression (e.g., SUM(x) * 0.0001)
+		col.IsAgg = true
+		col.AggFunc = strings.ToLower(fn.Name)
+		col.AggDistinct = fn.Distinct
+		if fn.Star {
+			col.AggArg = "*"
+		} else if len(fn.Args) > 0 {
+			col.AggArg = fn.Args[0].String()
+			col.AggArgExpr = fn.Args[0]
 		}
 	}
 

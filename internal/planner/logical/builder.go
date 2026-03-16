@@ -70,32 +70,62 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		}
 	}
 
+	// Track columns that need AST rewriting for nested aggregates.
+	// Key: column index, Value: rewritten AST with aggregate replaced by ColRef.
+	nestedAggRewrites := map[int]plansql.Node{}
+
 	// GROUP BY / aggregation
 	if hasAgg || len(info.GroupBy) > 0 {
 		var aggs []AggExpr
 
-		for _, col := range info.Columns {
+		for i, col := range info.Columns {
 			if col.IsAgg {
-				outputCol := col.Alias
-				if outputCol == "" {
-					outputCol = col.Expr
+				// Skip GROUPING() — it's computed during output, not a real aggregate
+				if col.AggFunc == "grouping" {
+					continue
 				}
 				inputCol := cleanExpr(col.AggArg)
 				// Handle COUNT(*)
 				if col.AggFunc == "count" && (inputCol == "*" || inputCol == "") {
 					inputCol = ""
 				}
-				// Skip GROUPING() — it's computed during output, not a real aggregate
-				if col.AggFunc == "grouping" {
-					continue
+
+				// Detect nested aggregate: ASTExpr is not a direct FuncCallNode
+				// (e.g., SUM(x) * 0.0001). Use a synthetic output name and rewrite
+				// the column AST to reference it.
+				isNested := false
+				if col.ASTExpr != nil {
+					if _, topLevel := col.ASTExpr.(*plansql.FuncCallNode); !topLevel {
+						isNested = true
+					}
 				}
-				aggs = append(aggs, AggExpr{
-					Func:      col.AggFunc,
-					InputCol:  inputCol,
-					OutputCol: outputCol,
-					Distinct:  col.AggDistinct,
-					InputExpr: col.AggArgExpr,
-				})
+
+				outputCol := col.Alias
+				if outputCol == "" {
+					outputCol = col.Expr
+				}
+
+				if isNested {
+					// Use a synthetic name for the aggregate output
+					syntheticName := fmt.Sprintf("__agg_%d", i)
+					aggs = append(aggs, AggExpr{
+						Func:      col.AggFunc,
+						InputCol:  inputCol,
+						OutputCol: syntheticName,
+						Distinct:  col.AggDistinct,
+						InputExpr: col.AggArgExpr,
+					})
+					// Rewrite the AST: replace the aggregate call with a ColRef
+					nestedAggRewrites[i] = plansql.ReplaceAggregate(col.ASTExpr, syntheticName)
+				} else {
+					aggs = append(aggs, AggExpr{
+						Func:      col.AggFunc,
+						InputCol:  inputCol,
+						OutputCol: outputCol,
+						Distinct:  col.AggDistinct,
+						InputExpr: col.AggArgExpr,
+					})
+				}
 			}
 		}
 
@@ -114,7 +144,9 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			for _, gb := range info.GroupBy {
 				groupBy = append(groupBy, cleanExpr(gb))
 			}
-			plan = NewAggregate(plan, groupBy, aggs)
+			aggNode := NewAggregate(plan, groupBy, aggs)
+			aggNode.GroupByExprs = info.GroupByExprs
+			plan = aggNode
 		}
 
 		// HAVING clause (must come after Aggregate)
@@ -159,7 +191,7 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// PROJECT (SELECT columns)
 	if !isStarOnly(info.Columns) {
 		var projections []Projection
-		for _, col := range info.Columns {
+		for i, col := range info.Columns {
 			if col.IsWindow {
 				// Window column: reference the window output by alias
 				projections = append(projections, Projection{
@@ -174,6 +206,14 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				Alias:   col.Alias,
 				IsAgg:   col.IsAgg,
 				ASTExpr: col.ASTExpr,
+			}
+			// For nested aggregates, use the rewritten AST that references
+			// the synthetic aggregate output column. The projection is no
+			// longer an aggregate — it's a regular expression that references
+			// the aggregate output column.
+			if rewritten, ok := nestedAggRewrites[i]; ok {
+				p.ASTExpr = rewritten
+				p.IsAgg = false
 			}
 			if col.ColumnRef != "" {
 				p.Column = col.ColumnRef
@@ -485,7 +525,41 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 			return plan, nil
 		}
 	}
+	// Check for derived table (subquery in FROM): name starts with "("
+	if strings.HasPrefix(table.Name, "(") {
+		// Strip outer parens to get inner SQL
+		inner := table.Name[1 : len(table.Name)-1]
+		parsed, err := plansql.Parse(inner)
+		if err != nil {
+			return nil, fmt.Errorf("parsing derived table: %w", err)
+		}
+		selectInfo, err := plansql.ExtractSelect(parsed)
+		if err != nil {
+			return nil, fmt.Errorf("extracting SELECT from derived table: %w", err)
+		}
+		plan, err := buildFromSelectWithCTEs(selectInfo, ctes)
+		if err != nil {
+			return nil, fmt.Errorf("building plan for derived table: %w", err)
+		}
+		// Apply alias as table alias on the root scan if available
+		if table.Alias != "" {
+			setSubtreeAlias(plan, table.Alias)
+		}
+		return plan, nil
+	}
+
 	return NewScan(table.Name, table.Alias), nil
+}
+
+// setSubtreeAlias sets the table alias on all Scan nodes in a subtree,
+// used to alias derived table output so columns can be referenced by the alias.
+func setSubtreeAlias(n *Node, alias string) {
+	if n.Type == NodeScan {
+		n.TableAlias = alias
+	}
+	for _, c := range n.Children {
+		setSubtreeAlias(c, alias)
+	}
 }
 
 // countOutputCols returns the number of output columns from a select info.

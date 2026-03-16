@@ -75,6 +75,7 @@ type Node struct {
 
 	// Aggregate
 	GroupBy          []string
+	GroupByExprs     []plansql.Node // AST for GROUP BY expressions (may be nil)
 	AggExprs         []AggExpr
 	GroupingSetNulls []string // columns that should be NULL in this grouping set
 

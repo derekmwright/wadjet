@@ -201,6 +201,7 @@ type SelectInfo struct {
 	Where        string
 	WhereExpr    Node
 	GroupBy      []string
+	GroupByExprs []Node // AST for GROUP BY expressions (parallel to GroupBy)
 	GroupingSets [][]string // GROUPING SETS / CUBE / ROLLUP (nil = simple GROUP BY)
 	Having       string
 	HavingExpr   Node

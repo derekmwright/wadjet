@@ -3,6 +3,7 @@ package tpch
 import (
 	"fmt"
 	"math/rand"
+	"time"
 )
 
 // ScaleFactor controls data volume. SF=0.01 is ~10MB, SF=1 is ~1GB.
@@ -319,16 +320,17 @@ func genLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int) []map
 			discount := float64(rng.Intn(11)) / 100.0
 			tax := float64(rng.Intn(9)) / 100.0
 
-			// Ship date is order date + 1-120 days (simplified)
+			// TPC-H spec date generation:
+			// L_COMMITDATE = O_ORDERDATE + random(5, 120) days
+			// L_SHIPDATE   = L_COMMITDATE + random(-10, 40) days
+			// L_RECEIPTDATE = L_SHIPDATE + random(1, 30) days
 			year := 1992 + rng.Intn(6)
 			month := rng.Intn(12) + 1
 			day := rng.Intn(28) + 1
-			shipYear := year
-			shipMonth := month + rng.Intn(4)
-			if shipMonth > 12 {
-				shipYear++
-				shipMonth -= 12
-			}
+			orderDate := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+			commitDate := orderDate.AddDate(0, 0, rng.Intn(116)+5)     // +5..120 days
+			shipDate := commitDate.AddDate(0, 0, rng.Intn(51)-10)      // -10..+40 days
+			receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)      // +1..30 days
 
 			rows = append(rows, map[string]any{
 				"l_orderkey":     int32(orderKey),
@@ -341,9 +343,9 @@ func genLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int) []map
 				"l_tax":          tax,
 				"l_returnflag":   flags[rng.Intn(3)],
 				"l_linestatus":   lineStatuses[rng.Intn(2)],
-				"l_shipdate":     fmt.Sprintf("%04d-%02d-%02d", shipYear, shipMonth, day),
-				"l_commitdate":   fmt.Sprintf("%04d-%02d-%02d", year, month+1, day),
-				"l_receiptdate":  fmt.Sprintf("%04d-%02d-%02d", shipYear, shipMonth, min(28, day+rng.Intn(10))),
+				"l_shipdate":     shipDate.Format("2006-01-02"),
+				"l_commitdate":   commitDate.Format("2006-01-02"),
+				"l_receiptdate":  receiptDate.Format("2006-01-02"),
 				"l_shipinstruct": shipInstructs[rng.Intn(len(shipInstructs))],
 				"l_shipmode":     shipModes[rng.Intn(len(shipModes))],
 				"l_comment":      randString(rng, 10, 40),
@@ -502,15 +504,17 @@ func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, e 
 			discount := float64(rng.Intn(11)) / 100.0
 			tax := float64(rng.Intn(9)) / 100.0
 
+			// TPC-H spec date generation:
+			// L_COMMITDATE = O_ORDERDATE + random(5, 120) days
+			// L_SHIPDATE   = L_COMMITDATE + random(-10, 40) days
+			// L_RECEIPTDATE = L_SHIPDATE + random(1, 30) days
 			year := 1992 + rng.Intn(6)
 			month := rng.Intn(12) + 1
 			day := rng.Intn(28) + 1
-			shipYear := year
-			shipMonth := month + rng.Intn(4)
-			if shipMonth > 12 {
-				shipYear++
-				shipMonth -= 12
-			}
+			orderDate := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
+			commitDate := orderDate.AddDate(0, 0, rng.Intn(116)+5)     // +5..120 days
+			shipDate := commitDate.AddDate(0, 0, rng.Intn(51)-10)      // -10..+40 days
+			receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)      // +1..30 days
 
 			e.add(map[string]any{
 				"l_orderkey":      int32(orderKey),
@@ -523,9 +527,9 @@ func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, e 
 				"l_tax":           tax,
 				"l_returnflag":    flags[rng.Intn(3)],
 				"l_linestatus":    lineStatuses[rng.Intn(2)],
-				"l_shipdate":      fmt.Sprintf("%04d-%02d-%02d", shipYear, shipMonth, day),
-				"l_commitdate":    fmt.Sprintf("%04d-%02d-%02d", year, month+1, day),
-				"l_receiptdate":   fmt.Sprintf("%04d-%02d-%02d", shipYear, shipMonth, min(28, day+rng.Intn(10))),
+				"l_shipdate":      shipDate.Format("2006-01-02"),
+				"l_commitdate":    commitDate.Format("2006-01-02"),
+				"l_receiptdate":   receiptDate.Format("2006-01-02"),
 				"l_shipinstruct":  shipInstructs[rng.Intn(len(shipInstructs))],
 				"l_shipmode":      shipModes[rng.Intn(len(shipModes))],
 				"l_comment":       randString(rng, 10, 40),

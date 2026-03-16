@@ -396,11 +396,108 @@ var knownAggregates = map[string]bool{
 	"stddev_samp": true,
 	"stddev_pop": true,
 	"variance":   true,
-	"var_samp":   true,
-	"var_pop":    true,
+	"var_samp":        true,
+	"var_pop":         true,
+	"approx_distinct": true,
+	"corr":            true,
+	"covar_samp":      true,
+	"covar_pop":       true,
+	"percentile_cont": true,
+	"percentile_disc": true,
+	"mode":            true,
+	"min_by":          true,
+	"max_by":          true,
+	"median":          true,
 }
 
 // IsAggregate returns true if the function name is a known aggregate.
 func IsAggregate(name string) bool {
 	return knownAggregates[strings.ToLower(name)]
+}
+
+// FindNestedAggregate walks an expression tree and returns the first aggregate
+// function call found, or nil if none exists. This detects aggregates nested
+// inside binary expressions like SUM(x) * 0.0001.
+func FindNestedAggregate(node Node) *FuncCallNode {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *FuncCallNode:
+		if IsAggregate(n.Name) {
+			return n
+		}
+		for _, arg := range n.Args {
+			if found := FindNestedAggregate(arg); found != nil {
+				return found
+			}
+		}
+	case *BinaryOp:
+		if found := FindNestedAggregate(n.Left); found != nil {
+			return found
+		}
+		return FindNestedAggregate(n.Right)
+	case *UnaryOp:
+		return FindNestedAggregate(n.Inner)
+	case *ParenNode:
+		return FindNestedAggregate(n.Inner)
+	case *CmpExpr:
+		if found := FindNestedAggregate(n.Left); found != nil {
+			return found
+		}
+		return FindNestedAggregate(n.Right)
+	case *CaseNode:
+		if found := FindNestedAggregate(n.Subject); found != nil {
+			return found
+		}
+		for _, w := range n.Whens {
+			if found := FindNestedAggregate(w.Cond); found != nil {
+				return found
+			}
+			if found := FindNestedAggregate(w.Result); found != nil {
+				return found
+			}
+		}
+		return FindNestedAggregate(n.Else)
+	case *CastNode:
+		return FindNestedAggregate(n.Inner)
+	}
+	return nil
+}
+
+// ReplaceAggregate replaces the first aggregate function call in the expression
+// tree with a ColRef pointing to the aggregate output column name.
+func ReplaceAggregate(node Node, aggName string) Node {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *FuncCallNode:
+		if IsAggregate(n.Name) {
+			return &ColRef{Column: aggName}
+		}
+		return node
+	case *BinaryOp:
+		return &BinaryOp{
+			Left:  ReplaceAggregate(n.Left, aggName),
+			Op:    n.Op,
+			Right: ReplaceAggregate(n.Right, aggName),
+		}
+	case *UnaryOp:
+		return &UnaryOp{
+			Inner: ReplaceAggregate(n.Inner, aggName),
+			Op:    n.Op,
+		}
+	case *ParenNode:
+		return &ParenNode{
+			Inner: ReplaceAggregate(n.Inner, aggName),
+		}
+	case *CastNode:
+		return &CastNode{
+			Inner:    ReplaceAggregate(n.Inner, aggName),
+			TypeName: n.TypeName,
+		}
+	default:
+		return node
+	}
 }

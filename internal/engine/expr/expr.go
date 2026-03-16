@@ -4,21 +4,29 @@
 package expr
 
 import (
+	"crypto/hmac"
 	"crypto/md5"
+	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"math"
+	"math/bits"
 	"math/rand"
 	"net"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/derekmwright/caelum/internal/engine/batch"
 )
@@ -508,7 +516,8 @@ func init() {
 	"concat":  fnConcat,
 	"length":  fnLength,
 	"len":     fnLength,
-	"substr":  fnSubstr,
+	"substr":    fnSubstr,
+	"substring": fnSubstr,
 	"trim":    fnTrim,
 	"ltrim":   fnLTrim,
 	"rtrim":   fnRTrim,
@@ -655,6 +664,143 @@ func init() {
 
 	// Type introspection
 	"typeof": fnTypeof,
+
+	// String: distance and utility
+	"soundex":             fnSoundex,
+	"levenshtein_distance": fnLevenshtein,
+	"hamming_distance":    fnHamming,
+	"normalize":           fnNormalize,
+	"format":              fnFormat,
+	"lcase":               fnLower,
+	"ucase":               fnUpper,
+	"to_utf8":             fnToUTF8,
+	"from_utf8":           fnFromUTF8,
+
+	// Math: IEEE 754 and utility
+	"e":             fnE,
+	"log10":         fnLog10,
+	"infinity":      fnInfinity,
+	"nan":           fnNaN,
+	"is_nan":        fnIsNaN,
+	"is_finite":     fnIsFinite,
+	"is_infinite":   fnIsInfinite,
+	"width_bucket":  fnWidthBucket,
+	"from_base":     fnFromBase,
+	"to_base":       fnToBase,
+	"bit_count":     fnBitCount,
+
+	// Hash: additional
+	"sha1":        fnSHA1,
+	"crc32":       fnCRC32,
+	"hmac_sha256": fnHMACSHA256,
+	"hmac_sha512": fnHMACSHA512,
+
+	// Date: additional accessors
+	"quarter":            fnQuarter,
+	"week":               fnWeek,
+	"day_of_week":        fnDayOfWeek,
+	"day_of_year":        fnDayOfYear,
+	"last_day_of_month":  fnLastDayOfMonth,
+	"current_timestamp":  fnCurrentTimestamp,
+	"at_timezone":        fnAtTimezone,
+	"human_readable_seconds": fnHumanReadableSeconds,
+
+	// Network: analytics
+	"is_private_ip":   fnIsPrivateIP,
+	"is_loopback_ip":  fnIsLoopbackIP,
+	"ip_to_int":       fnIPToInt,
+	"int_to_ip":       fnIntToIP,
+	"is_ipv4":         fnIsIPv4,
+	"is_ipv6":         fnIsIPv6,
+
+	// Network: CIDR / subnet operations
+	"network_address":   fnNetworkAddress,
+	"broadcast_address": fnBroadcastAddress,
+	"prefix_length":     fnPrefixLength,
+	"cidr_to_range":     fnCIDRToRange,
+	"hosts_in_cidr":     fnHostsInCIDR,
+	"cidr_overlap":      fnCIDROverlap,
+	"ip_in_range":       fnIPInRange,
+	"same_subnet":       fnSameSubnet,
+
+	// Network: IP manipulation
+	"ip_add":            fnIPAdd,
+	"ip_subtract":       fnIPSubtract,
+	"ip_diff":           fnIPDiff,
+	"ip_between":        fnIPBetween,
+	"reverse_dns":       fnReverseDNS,
+	"is_multicast_ip":   fnIsMulticastIP,
+	"is_link_local_ip":  fnIsLinkLocalIP,
+	"is_reserved_ip":    fnIsReservedIP,
+	"ip_to_hex":         fnIPToHex,
+
+	// Network: MAC operations
+	"mac_vendor_oui":  fnMACVendorOUI,
+	"mac_is_unicast":  fnMACIsUnicast,
+	"mac_is_local":    fnMACIsLocal,
+	"mac_format":      fnMACFormat,
+
+	// Network: port classification
+	"port_name":          fnPortName,
+	"is_well_known_port": fnIsWellKnownPort,
+	"is_registered_port": fnIsRegisteredPort,
+	"is_ephemeral_port":  fnIsEphemeralPort,
+	"port_class":         fnPortClass,
+
+	// Network: protocol
+	"protocol_name":   fnProtocolName,
+	"protocol_number": fnProtocolNumber,
+
+	// Deep inspection: TCP
+	"tcp_flags_to_string":   fnTCPFlagsToString,
+	"has_tcp_flag":           fnHasTCPFlag,
+	"tcp_flags_from_string": fnTCPFlagsFromString,
+	"is_tcp_handshake":      fnIsTCPHandshake,
+	"is_tcp_reset":          fnIsTCPReset,
+	"tcp_session_id":        fnTCPSessionID,
+	"flow_direction":        fnFlowDirection,
+
+	// Deep inspection: DNS
+	"dns_query_name":     fnDNSQueryName,
+	"dns_query_type":     fnDNSQueryType,
+	"dns_is_response":    fnDNSIsResponse,
+	"dns_response_code":  fnDNSResponseCode,
+	"dns_question_count": fnDNSQuestionCount,
+	"dns_answer_count":   fnDNSAnswerCount,
+	"dns_transaction_id": fnDNSTransactionID,
+
+	// Deep inspection: TLS
+	"tls_sni":             fnTLSSNI,
+	"tls_version":         fnTLSVersion,
+	"tls_record_type":     fnTLSRecordType,
+	"is_tls_client_hello": fnIsTLSClientHello,
+	"tls_handshake_type":  fnTLSHandshakeType,
+
+	// Deep inspection: HTTP
+	"http_method":         fnHTTPMethod,
+	"http_path":           fnHTTPPath,
+	"http_host":           fnHTTPHost,
+	"http_status_code":    fnHTTPStatusCode,
+	"http_status_class":   fnHTTPStatusClass,
+	"http_content_type":   fnHTTPContentType,
+	"http_content_length": fnHTTPContentLength,
+	"http_user_agent":     fnHTTPUserAgent,
+	"http_header":         fnHTTPHeader,
+	"http_version":        fnHTTPVersion,
+	"is_http_request":     fnIsHTTPRequest,
+	"is_http_response":    fnIsHTTPResponse,
+
+	// Deep inspection: packet headers
+	"ip_header_length": fnIPHeaderLength,
+	"ip_ttl":           fnIPTTL,
+	"ip_total_length":  fnIPTotalLength,
+	"ip_dscp":          fnIPDSCP,
+	"ether_type":       fnEtherType,
+	"vlan_id":          fnVLANID,
+
+	// Deep inspection: payload analysis
+	"payload_entropy":  fnPayloadEntropy,
+	"payload_hex_dump": fnPayloadHexDump,
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
@@ -2476,4 +2622,2363 @@ func fnTypeof(args []any) any {
 	default:
 		return fmt.Sprintf("%T", args[0])
 	}
+}
+
+// --- String: distance and utility ---
+
+func fnSoundex(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := strings.ToUpper(toString(args[0]))
+	if len(s) == 0 {
+		return ""
+	}
+	result := make([]byte, 4)
+	result[0] = s[0]
+	codes := map[byte]byte{
+		'B': '1', 'F': '1', 'P': '1', 'V': '1',
+		'C': '2', 'G': '2', 'J': '2', 'K': '2', 'Q': '2', 'S': '2', 'X': '2', 'Z': '2',
+		'D': '3', 'T': '3',
+		'L': '4',
+		'M': '5', 'N': '5',
+		'R': '6',
+	}
+	idx := 1
+	lastCode := codes[s[0]]
+	for i := 1; i < len(s) && idx < 4; i++ {
+		code, ok := codes[s[i]]
+		if ok && code != lastCode {
+			result[idx] = code
+			idx++
+			lastCode = code
+		} else if !ok {
+			lastCode = 0
+		}
+	}
+	for idx < 4 {
+		result[idx] = '0'
+		idx++
+	}
+	return string(result)
+}
+
+func fnLevenshtein(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	s := []rune(toString(args[0]))
+	t := []rune(toString(args[1]))
+	m, n := len(s), len(t)
+	if m == 0 {
+		return float64(n)
+	}
+	if n == 0 {
+		return float64(m)
+	}
+	prev := make([]int, n+1)
+	curr := make([]int, n+1)
+	for j := 0; j <= n; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= m; i++ {
+		curr[0] = i
+		for j := 1; j <= n; j++ {
+			cost := 1
+			if s[i-1] == t[j-1] {
+				cost = 0
+			}
+			ins := curr[j-1] + 1
+			del := prev[j] + 1
+			sub := prev[j-1] + cost
+			min := ins
+			if del < min {
+				min = del
+			}
+			if sub < min {
+				min = sub
+			}
+			curr[j] = min
+		}
+		prev, curr = curr, prev
+	}
+	return float64(prev[n])
+}
+
+func fnHamming(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	a := toString(args[0])
+	b := toString(args[1])
+	if len(a) != len(b) {
+		return nil
+	}
+	dist := 0
+	for i := 0; i < len(a); i++ {
+		if a[i] != b[i] {
+			dist++
+		}
+	}
+	return float64(dist)
+}
+
+func fnNormalize(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	// NFC normalization: collapse combining characters
+	var sb strings.Builder
+	for _, r := range s {
+		if unicode.IsPrint(r) {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+func fnFormat(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	format := toString(args[0])
+	fmtArgs := make([]any, 0, len(args)-1)
+	for _, a := range args[1:] {
+		fmtArgs = append(fmtArgs, a)
+	}
+	return fmt.Sprintf(format, fmtArgs...)
+}
+
+func fnToUTF8(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return []byte(toString(args[0]))
+}
+
+func fnFromUTF8(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	switch v := args[0].(type) {
+	case []byte:
+		if utf8.Valid(v) {
+			return string(v)
+		}
+		return nil
+	case string:
+		return v
+	default:
+		return fmt.Sprint(args[0])
+	}
+}
+
+// --- Math: IEEE 754 and utility ---
+
+func fnE(args []any) any {
+	return math.E
+}
+
+func fnLog10(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	v := ToFloat64(args[0])
+	if v <= 0 {
+		return nil
+	}
+	return math.Log10(v)
+}
+
+func fnInfinity(args []any) any {
+	return math.Inf(1)
+}
+
+func fnNaN(args []any) any {
+	return math.NaN()
+}
+
+func fnIsNaN(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return math.IsNaN(ToFloat64(args[0]))
+}
+
+func fnIsFinite(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	v := ToFloat64(args[0])
+	return !math.IsInf(v, 0) && !math.IsNaN(v)
+}
+
+func fnIsInfinite(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return math.IsInf(ToFloat64(args[0]), 0)
+}
+
+func fnWidthBucket(args []any) any {
+	if len(args) < 4 || args[0] == nil || args[1] == nil || args[2] == nil || args[3] == nil {
+		return nil
+	}
+	value := ToFloat64(args[0])
+	bound1 := ToFloat64(args[1])
+	bound2 := ToFloat64(args[2])
+	n := int(ToFloat64(args[3]))
+	if n <= 0 || bound1 == bound2 {
+		return nil
+	}
+	if value < bound1 {
+		return float64(0)
+	}
+	if value >= bound2 {
+		return float64(n + 1)
+	}
+	width := (bound2 - bound1) / float64(n)
+	bucket := int((value-bound1)/width) + 1
+	if bucket > n {
+		bucket = n + 1
+	}
+	return float64(bucket)
+}
+
+func fnFromBase(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	base := int(ToFloat64(args[1]))
+	if base < 2 || base > 36 {
+		return nil
+	}
+	n, err := strconv.ParseInt(s, base, 64)
+	if err != nil {
+		return nil
+	}
+	return float64(n)
+}
+
+func fnToBase(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	n := int64(ToFloat64(args[0]))
+	base := int(ToFloat64(args[1]))
+	if base < 2 || base > 36 {
+		return nil
+	}
+	return strconv.FormatInt(n, base)
+}
+
+func fnBitCount(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	n := int64(ToFloat64(args[0]))
+	return float64(bits.OnesCount64(uint64(n)))
+}
+
+// --- Hash: additional ---
+
+func fnSHA1(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	h := sha1.Sum([]byte(toString(args[0])))
+	return hex.EncodeToString(h[:])
+}
+
+func fnCRC32(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return float64(crc32.ChecksumIEEE([]byte(toString(args[0]))))
+}
+
+func fnHMACSHA256(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	mac := hmac.New(sha256.New, []byte(toString(args[1])))
+	mac.Write([]byte(toString(args[0])))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func fnHMACSHA512(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	mac := hmac.New(sha512.New, []byte(toString(args[1])))
+	mac.Write([]byte(toString(args[0])))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// --- Date: additional accessors ---
+
+func fnQuarter(args []any) any {
+	t := toTime(args)
+	if t.IsZero() {
+		return nil
+	}
+	return float64((int(t.Month())-1)/3 + 1)
+}
+
+func fnWeek(args []any) any {
+	t := toTime(args)
+	if t.IsZero() {
+		return nil
+	}
+	_, week := t.ISOWeek()
+	return float64(week)
+}
+
+func fnDayOfWeek(args []any) any {
+	t := toTime(args)
+	if t.IsZero() {
+		return nil
+	}
+	return float64(t.Weekday())
+}
+
+func fnDayOfYear(args []any) any {
+	t := toTime(args)
+	if t.IsZero() {
+		return nil
+	}
+	return float64(t.YearDay())
+}
+
+func fnLastDayOfMonth(args []any) any {
+	t := toTime(args)
+	if t.IsZero() {
+		return nil
+	}
+	firstOfNext := time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
+	last := firstOfNext.AddDate(0, 0, -1)
+	return last.Format("2006-01-02")
+}
+
+func fnCurrentTimestamp(args []any) any {
+	return time.Now().Format(time.RFC3339)
+}
+
+func fnAtTimezone(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	t := parseTime(args[0])
+	if t.IsZero() {
+		return nil
+	}
+	tz := toString(args[1])
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil
+	}
+	return t.In(loc).Format(time.RFC3339)
+}
+
+func fnHumanReadableSeconds(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	total := int64(ToFloat64(args[0]))
+	if total < 0 {
+		total = -total
+	}
+	days := total / 86400
+	total %= 86400
+	hours := total / 3600
+	total %= 3600
+	minutes := total / 60
+	seconds := total % 60
+	var parts []string
+	if days > 0 {
+		parts = append(parts, fmt.Sprintf("%d day%s", days, plural(days)))
+	}
+	if hours > 0 {
+		parts = append(parts, fmt.Sprintf("%d hour%s", hours, plural(hours)))
+	}
+	if minutes > 0 {
+		parts = append(parts, fmt.Sprintf("%d minute%s", minutes, plural(minutes)))
+	}
+	if seconds > 0 || len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%d second%s", seconds, plural(seconds)))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func plural(n int64) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// --- Network: analytics ---
+
+func fnIsPrivateIP(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	return ip.IsPrivate()
+}
+
+func fnIsLoopbackIP(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	return ip.IsLoopback()
+}
+
+func fnIPToInt(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil // only IPv4
+	}
+	return float64(uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3]))
+}
+
+func fnIntToIP(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	n := uint32(ToFloat64(args[0]))
+	return fmt.Sprintf("%d.%d.%d.%d", n>>24&0xFF, n>>16&0xFF, n>>8&0xFF, n&0xFF)
+}
+
+func fnIsIPv4(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return false
+	}
+	return ip.To4() != nil
+}
+
+func fnIsIPv6(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return false
+	}
+	return ip.To4() == nil
+}
+
+// ── CIDR / Subnet Operations ────────────────────────────────────────────────
+
+func fnNetworkAddress(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	_, network, err := net.ParseCIDR(fmt.Sprint(args[0]))
+	if err != nil {
+		return nil
+	}
+	return network.IP.String()
+}
+
+func fnBroadcastAddress(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	_, network, err := net.ParseCIDR(fmt.Sprint(args[0]))
+	if err != nil {
+		return nil
+	}
+	ip := network.IP.To4()
+	if ip == nil {
+		return nil
+	}
+	mask := network.Mask
+	broadcast := make(net.IP, len(ip))
+	for i := range ip {
+		broadcast[i] = ip[i] | ^mask[i]
+	}
+	return broadcast.String()
+}
+
+func fnPrefixLength(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	_, network, err := net.ParseCIDR(fmt.Sprint(args[0]))
+	if err != nil {
+		return nil
+	}
+	ones, _ := network.Mask.Size()
+	return int64(ones)
+}
+
+func fnCIDRToRange(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	_, network, err := net.ParseCIDR(fmt.Sprint(args[0]))
+	if err != nil {
+		return nil
+	}
+	ip := network.IP.To4()
+	if ip == nil {
+		return nil
+	}
+	mask := network.Mask
+	first := network.IP.String()
+	broadcast := make(net.IP, len(ip))
+	for i := range ip {
+		broadcast[i] = ip[i] | ^mask[i]
+	}
+	return first + "-" + broadcast.String()
+}
+
+func fnHostsInCIDR(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	_, network, err := net.ParseCIDR(fmt.Sprint(args[0]))
+	if err != nil {
+		return nil
+	}
+	ones, bits := network.Mask.Size()
+	hostBits := bits - ones
+	if hostBits <= 0 {
+		return int64(1)
+	}
+	if hostBits == 1 {
+		return int64(2)
+	}
+	return int64(1<<uint(hostBits) - 2)
+}
+
+func fnCIDROverlap(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	_, net1, err1 := net.ParseCIDR(fmt.Sprint(args[0]))
+	_, net2, err2 := net.ParseCIDR(fmt.Sprint(args[1]))
+	if err1 != nil || err2 != nil {
+		return nil
+	}
+	return net1.Contains(net2.IP) || net2.Contains(net1.IP)
+}
+
+func ipToUint32(ip net.IP) uint32 {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0
+	}
+	return uint32(ip4[0])<<24 | uint32(ip4[1])<<16 | uint32(ip4[2])<<8 | uint32(ip4[3])
+}
+
+func uint32ToIP(n uint32) string {
+	return fmt.Sprintf("%d.%d.%d.%d", n>>24&0xFF, n>>16&0xFF, n>>8&0xFF, n&0xFF)
+}
+
+func fnIPInRange(args []any) any {
+	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	lo := net.ParseIP(fmt.Sprint(args[1]))
+	hi := net.ParseIP(fmt.Sprint(args[2]))
+	if ip == nil || lo == nil || hi == nil {
+		return nil
+	}
+	v := ipToUint32(ip)
+	vLo := ipToUint32(lo)
+	vHi := ipToUint32(hi)
+	return v >= vLo && v <= vHi
+}
+
+func fnSameSubnet(args []any) any {
+	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
+		return nil
+	}
+	ip1 := net.ParseIP(fmt.Sprint(args[0]))
+	ip2 := net.ParseIP(fmt.Sprint(args[1]))
+	prefixLen := int(ToInt64(args[2]))
+	if ip1 == nil || ip2 == nil {
+		return nil
+	}
+	ip1v4 := ip1.To4()
+	ip2v4 := ip2.To4()
+	if ip1v4 == nil || ip2v4 == nil {
+		return nil
+	}
+	mask := net.CIDRMask(prefixLen, 32)
+	for i := 0; i < 4; i++ {
+		if ip1v4[i]&mask[i] != ip2v4[i]&mask[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ── IP Manipulation ─────────────────────────────────────────────────────────
+
+func fnIPAdd(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	offset := ToInt64(args[1])
+	v := uint32(int64(ipToUint32(ip)) + offset)
+	return uint32ToIP(v)
+}
+
+func fnIPSubtract(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	offset := ToInt64(args[1])
+	v := uint32(int64(ipToUint32(ip)) - offset)
+	return uint32ToIP(v)
+}
+
+func fnIPDiff(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	ip1 := net.ParseIP(fmt.Sprint(args[0]))
+	ip2 := net.ParseIP(fmt.Sprint(args[1]))
+	if ip1 == nil || ip2 == nil {
+		return nil
+	}
+	return int64(ipToUint32(ip1)) - int64(ipToUint32(ip2))
+}
+
+func fnIPBetween(args []any) any {
+	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	lo := net.ParseIP(fmt.Sprint(args[1]))
+	hi := net.ParseIP(fmt.Sprint(args[2]))
+	if ip == nil || lo == nil || hi == nil {
+		return nil
+	}
+	v := ipToUint32(ip)
+	vLo := ipToUint32(lo)
+	vHi := ipToUint32(hi)
+	return v >= vLo && v <= vHi
+}
+
+func fnReverseDNS(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", ip4[3], ip4[2], ip4[1], ip4[0])
+	}
+	// IPv6: expand to full 32 nibbles reversed
+	ip16 := ip.To16()
+	nibbles := make([]string, 32)
+	for i := 0; i < 16; i++ {
+		nibbles[31-2*i] = fmt.Sprintf("%x", ip16[i]>>4)
+		nibbles[30-2*i] = fmt.Sprintf("%x", ip16[i]&0x0f)
+	}
+	return strings.Join(nibbles, ".") + ".ip6.arpa"
+}
+
+func fnIsMulticastIP(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	return ip.IsMulticast()
+}
+
+func fnIsLinkLocalIP(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	return ip.IsLinkLocalUnicast()
+}
+
+func fnIsReservedIP(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast()
+}
+
+func fnIPToHex(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(fmt.Sprint(args[0]))
+	if ip == nil {
+		return nil
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return hex.EncodeToString(ip4)
+	}
+	return hex.EncodeToString(ip.To16())
+}
+
+// ── MAC Operations ──────────────────────────────────────────────────────────
+
+func fnMACVendorOUI(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	mac, err := net.ParseMAC(fmt.Sprint(args[0]))
+	if err != nil || len(mac) < 3 {
+		return nil
+	}
+	return strings.ToUpper(fmt.Sprintf("%02x:%02x:%02x", mac[0], mac[1], mac[2]))
+}
+
+func fnMACIsUnicast(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	mac, err := net.ParseMAC(fmt.Sprint(args[0]))
+	if err != nil || len(mac) < 1 {
+		return nil
+	}
+	return mac[0]&0x01 == 0
+}
+
+func fnMACIsLocal(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	mac, err := net.ParseMAC(fmt.Sprint(args[0]))
+	if err != nil || len(mac) < 1 {
+		return nil
+	}
+	return mac[0]&0x02 != 0
+}
+
+func fnMACFormat(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	input := fmt.Sprint(args[0])
+	sep := ":"
+	if len(args) >= 2 && args[1] != nil {
+		sep = fmt.Sprint(args[1])
+	}
+	// Strip any existing separators to get raw hex
+	raw := strings.NewReplacer(":", "", "-", "", ".", "").Replace(input)
+	if len(raw) != 12 {
+		return nil
+	}
+	// Validate hex
+	for _, c := range raw {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return nil
+		}
+	}
+	raw = strings.ToLower(raw)
+	parts := make([]string, 6)
+	for i := 0; i < 6; i++ {
+		parts[i] = raw[i*2 : i*2+2]
+	}
+	return strings.Join(parts, sep)
+}
+
+// ── Port Classification ─────────────────────────────────────────────────────
+
+var wellKnownPorts = map[int64]string{
+	20: "ftp-data", 21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp",
+	53: "dns", 67: "dhcp", 68: "dhcp-client", 80: "http", 110: "pop3",
+	123: "ntp", 143: "imap", 161: "snmp", 162: "snmp-trap", 443: "https",
+	445: "smb", 465: "smtps", 514: "syslog", 587: "submission", 636: "ldaps",
+	993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle", 3306: "mysql",
+	3389: "rdp", 5432: "postgresql", 5900: "vnc", 6379: "redis",
+	8080: "http-alt", 8443: "https-alt", 9200: "elasticsearch", 27017: "mongodb",
+}
+
+func fnPortName(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	port := ToInt64(args[0])
+	name, ok := wellKnownPorts[port]
+	if !ok {
+		return nil
+	}
+	return name
+}
+
+func fnIsWellKnownPort(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	port := ToInt64(args[0])
+	return port >= 0 && port <= 1023
+}
+
+func fnIsRegisteredPort(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	port := ToInt64(args[0])
+	return port >= 1024 && port <= 49151
+}
+
+func fnIsEphemeralPort(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	port := ToInt64(args[0])
+	return port >= 49152 && port <= 65535
+}
+
+func fnPortClass(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	port := ToInt64(args[0])
+	switch {
+	case port >= 0 && port <= 1023:
+		return "well-known"
+	case port >= 1024 && port <= 49151:
+		return "registered"
+	case port >= 49152 && port <= 65535:
+		return "ephemeral"
+	default:
+		return nil
+	}
+}
+
+// ── Protocol ────────────────────────────────────────────────────────────────
+
+var protocolNumToName = map[int64]string{
+	1: "icmp", 2: "igmp", 6: "tcp", 17: "udp", 41: "ipv6",
+	47: "gre", 50: "esp", 51: "ah", 58: "icmpv6", 89: "ospf",
+	103: "pim", 132: "sctp",
+}
+
+var protocolNameToNum map[string]int64
+
+func init() {
+	protocolNameToNum = make(map[string]int64, len(protocolNumToName))
+	for num, name := range protocolNumToName {
+		protocolNameToNum[name] = num
+	}
+}
+
+func fnProtocolName(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	num := ToInt64(args[0])
+	name, ok := protocolNumToName[num]
+	if !ok {
+		return nil
+	}
+	return name
+}
+
+func fnProtocolNumber(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	name := strings.ToLower(fmt.Sprint(args[0]))
+	num, ok := protocolNameToNum[name]
+	if !ok {
+		return nil
+	}
+	return num
+}
+
+// --- Protocol Deep Inspection Functions ---
+
+// TCP flag constants (bitmask positions in TCP flags byte)
+const (
+	tcpFIN = 0x01
+	tcpSYN = 0x02
+	tcpRST = 0x04
+	tcpPSH = 0x08
+	tcpACK = 0x10
+	tcpURG = 0x20
+	tcpECE = 0x40
+	tcpCWR = 0x80
+)
+
+var tcpFlagNames = []struct {
+	mask byte
+	name string
+}{
+	{tcpFIN, "FIN"},
+	{tcpSYN, "SYN"},
+	{tcpRST, "RST"},
+	{tcpPSH, "PSH"},
+	{tcpACK, "ACK"},
+	{tcpURG, "URG"},
+	{tcpECE, "ECE"},
+	{tcpCWR, "CWR"},
+}
+
+var tcpFlagLookup = map[string]byte{
+	"fin": tcpFIN, "syn": tcpSYN, "rst": tcpRST, "psh": tcpPSH,
+	"ack": tcpACK, "urg": tcpURG, "ece": tcpECE, "cwr": tcpCWR,
+}
+
+// fnTCPFlagsToString converts a TCP flags bitmask to comma-separated names.
+// tcp_flags_to_string(0x12) → 'SYN,ACK'
+func fnTCPFlagsToString(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	flags := byte(ToInt64(args[0]))
+	var parts []string
+	for _, f := range tcpFlagNames {
+		if flags&f.mask != 0 {
+			parts = append(parts, f.name)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, ",")
+}
+
+// fnHasTCPFlag tests if a TCP flags bitmask has a specific flag set.
+// has_tcp_flag(0x12, 'SYN') → true
+func fnHasTCPFlag(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	flags := byte(ToInt64(args[0]))
+	name := strings.ToLower(toString(args[1]))
+	mask, ok := tcpFlagLookup[name]
+	if !ok {
+		return nil
+	}
+	return flags&mask != 0
+}
+
+// fnTCPFlagsFromString converts flag names to bitmask.
+// tcp_flags_from_string('SYN,ACK') → 0x12 (18)
+func fnTCPFlagsFromString(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	parts := strings.Split(toString(args[0]), ",")
+	var result byte
+	for _, p := range parts {
+		mask, ok := tcpFlagLookup[strings.ToLower(strings.TrimSpace(p))]
+		if ok {
+			result |= mask
+		}
+	}
+	return int64(result)
+}
+
+// fnIsTCPHandshake tests for SYN-only (connection initiation).
+// is_tcp_handshake(flags) → true if SYN is set and ACK is not
+func fnIsTCPHandshake(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	flags := byte(ToInt64(args[0]))
+	return flags&tcpSYN != 0 && flags&tcpACK == 0
+}
+
+// fnIsTCPReset tests for RST flag.
+func fnIsTCPReset(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	flags := byte(ToInt64(args[0]))
+	return flags&tcpRST != 0
+}
+
+// fnTCPSessionID generates a canonical 5-tuple session key.
+// tcp_session_id(src_ip, dst_ip, src_port, dst_port, protocol)
+// Orders the IP/port pair so both directions map to the same key.
+func fnTCPSessionID(args []any) any {
+	if len(args) < 5 {
+		return nil
+	}
+	for _, a := range args[:5] {
+		if a == nil {
+			return nil
+		}
+	}
+	srcIP := toString(args[0])
+	dstIP := toString(args[1])
+	srcPort := ToInt64(args[2])
+	dstPort := ToInt64(args[3])
+	proto := ToInt64(args[4])
+
+	// Canonical ordering: lower IP first, break ties by port
+	if srcIP > dstIP || (srcIP == dstIP && srcPort > dstPort) {
+		srcIP, dstIP = dstIP, srcIP
+		srcPort, dstPort = dstPort, srcPort
+	}
+	return fmt.Sprintf("%s:%d-%s:%d/%d", srcIP, srcPort, dstIP, dstPort, proto)
+}
+
+// fnFlowDirection classifies a flow as 'inbound', 'outbound', or 'internal'.
+// flow_direction(src_ip, dst_ip) — based on RFC 1918 private ranges
+func fnFlowDirection(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	srcIP := net.ParseIP(toString(args[0]))
+	dstIP := net.ParseIP(toString(args[1]))
+	if srcIP == nil || dstIP == nil {
+		return nil
+	}
+	srcPriv := srcIP.IsPrivate() || srcIP.IsLoopback()
+	dstPriv := dstIP.IsPrivate() || dstIP.IsLoopback()
+	switch {
+	case srcPriv && dstPriv:
+		return "internal"
+	case srcPriv && !dstPriv:
+		return "outbound"
+	case !srcPriv && dstPriv:
+		return "inbound"
+	default:
+		return "transit"
+	}
+}
+
+// --- DNS parsing functions ---
+// These work on raw DNS payload bytes (the UDP payload after the IP/UDP headers).
+
+// fnDNSQueryName extracts the query name from a DNS query payload.
+// dns_query_name(payload_hex) → 'www.example.com'
+// DNS wire format: 2-byte ID, 2-byte flags, 2-byte QDCOUNT, ..., then QNAME
+// QNAME is a sequence of length-prefixed labels ending with a 0-length label.
+func fnDNSQueryName(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 13 { // minimum DNS header + 1-byte name
+		return nil
+	}
+	// Skip 12-byte DNS header
+	offset := 12
+	return parseDNSName(data, offset)
+}
+
+// fnDNSQueryType extracts the query type (A=1, AAAA=28, CNAME=5, MX=15, etc.).
+func fnDNSQueryType(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 13 {
+		return nil
+	}
+	// Skip header, skip QNAME
+	offset := 12
+	for offset < len(data) {
+		length := int(data[offset])
+		if length == 0 {
+			offset++
+			break
+		}
+		offset += 1 + length
+	}
+	if offset+2 > len(data) {
+		return nil
+	}
+	qtype := binary.BigEndian.Uint16(data[offset : offset+2])
+	return dnsTypeName(qtype)
+}
+
+// fnDNSIsResponse checks if DNS packet is a response (QR bit set).
+func fnDNSIsResponse(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 4 {
+		return nil
+	}
+	// QR is bit 15 of the flags field (byte 2, bit 7)
+	return data[2]&0x80 != 0
+}
+
+// fnDNSResponseCode extracts the RCODE from DNS flags.
+// 0=NOERROR, 1=FORMERR, 2=SERVFAIL, 3=NXDOMAIN, 5=REFUSED
+func fnDNSResponseCode(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 4 {
+		return nil
+	}
+	rcode := data[3] & 0x0F
+	switch rcode {
+	case 0:
+		return "NOERROR"
+	case 1:
+		return "FORMERR"
+	case 2:
+		return "SERVFAIL"
+	case 3:
+		return "NXDOMAIN"
+	case 4:
+		return "NOTIMP"
+	case 5:
+		return "REFUSED"
+	default:
+		return fmt.Sprintf("RCODE_%d", rcode)
+	}
+}
+
+// fnDNSQuestionCount returns the number of questions in a DNS packet.
+func fnDNSQuestionCount(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 6 {
+		return nil
+	}
+	return int64(binary.BigEndian.Uint16(data[4:6]))
+}
+
+// fnDNSAnswerCount returns the number of answers in a DNS packet.
+func fnDNSAnswerCount(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 8 {
+		return nil
+	}
+	return int64(binary.BigEndian.Uint16(data[6:8]))
+}
+
+// fnDNSTransactionID extracts the 16-bit transaction ID.
+func fnDNSTransactionID(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 2 {
+		return nil
+	}
+	return int64(binary.BigEndian.Uint16(data[0:2]))
+}
+
+// --- TLS inspection functions ---
+
+// fnTLSSNI extracts the Server Name Indication from a TLS ClientHello.
+// tls_sni(payload_hex) → 'www.example.com'
+func fnTLSSNI(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	return parseTLSSNI(data)
+}
+
+// fnTLSVersion extracts the TLS version from a TLS record header.
+// Returns human-readable version: 'TLS 1.0', 'TLS 1.2', 'TLS 1.3', etc.
+func fnTLSVersion(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 5 {
+		return nil
+	}
+	// TLS record: type(1) + version(2) + length(2)
+	major := data[1]
+	minor := data[2]
+	return tlsVersionString(major, minor)
+}
+
+// fnTLSRecordType identifies the TLS record content type.
+// 20=ChangeCipherSpec, 21=Alert, 22=Handshake, 23=ApplicationData
+func fnTLSRecordType(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 1 {
+		return nil
+	}
+	switch data[0] {
+	case 20:
+		return "ChangeCipherSpec"
+	case 21:
+		return "Alert"
+	case 22:
+		return "Handshake"
+	case 23:
+		return "ApplicationData"
+	default:
+		return fmt.Sprintf("Unknown(%d)", data[0])
+	}
+}
+
+// fnIsTLSClientHello tests if payload starts with a TLS ClientHello.
+func fnIsTLSClientHello(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	// TLS record: type 22 (Handshake), then version, then length, then handshake type 1 (ClientHello)
+	if len(data) < 6 {
+		return false
+	}
+	return data[0] == 22 && data[5] == 1
+}
+
+// fnTLSHandshakeType returns the handshake message type.
+// 1=ClientHello, 2=ServerHello, 11=Certificate, 12=ServerKeyExchange, etc.
+func fnTLSHandshakeType(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 6 || data[0] != 22 {
+		return nil
+	}
+	hsType := data[5]
+	switch hsType {
+	case 0:
+		return "HelloRequest"
+	case 1:
+		return "ClientHello"
+	case 2:
+		return "ServerHello"
+	case 4:
+		return "NewSessionTicket"
+	case 11:
+		return "Certificate"
+	case 12:
+		return "ServerKeyExchange"
+	case 13:
+		return "CertificateRequest"
+	case 14:
+		return "ServerHelloDone"
+	case 15:
+		return "CertificateVerify"
+	case 16:
+		return "ClientKeyExchange"
+	case 20:
+		return "Finished"
+	default:
+		return fmt.Sprintf("Unknown(%d)", hsType)
+	}
+}
+
+// --- HTTP parsing functions ---
+// These work on raw HTTP request/response payloads (text protocol).
+
+// fnHTTPMethod extracts the HTTP method from a request payload.
+// http_method(payload) → 'GET', 'POST', etc.
+func fnHTTPMethod(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	sp := strings.IndexByte(s, ' ')
+	if sp < 0 || sp > 7 {
+		return nil
+	}
+	method := s[:sp]
+	switch method {
+	case "GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT":
+		return method
+	default:
+		return nil
+	}
+}
+
+// fnHTTPPath extracts the request path from an HTTP request.
+// http_path('GET /api/v1/users HTTP/1.1\r\n...') → '/api/v1/users'
+func fnHTTPPath(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	sp1 := strings.IndexByte(s, ' ')
+	if sp1 < 0 {
+		return nil
+	}
+	rest := s[sp1+1:]
+	sp2 := strings.IndexByte(rest, ' ')
+	if sp2 < 0 {
+		// try newline
+		sp2 = strings.IndexByte(rest, '\r')
+		if sp2 < 0 {
+			sp2 = strings.IndexByte(rest, '\n')
+		}
+	}
+	if sp2 < 0 {
+		return rest
+	}
+	return rest[:sp2]
+}
+
+// fnHTTPHost extracts the Host header from an HTTP request.
+func fnHTTPHost(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return extractHTTPHeader(toString(args[0]), "host")
+}
+
+// fnHTTPStatusCode extracts the status code from an HTTP response.
+// http_status_code('HTTP/1.1 200 OK\r\n...') → 200
+func fnHTTPStatusCode(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	if !strings.HasPrefix(s, "HTTP/") {
+		return nil
+	}
+	sp1 := strings.IndexByte(s, ' ')
+	if sp1 < 0 {
+		return nil
+	}
+	rest := s[sp1+1:]
+	sp2 := strings.IndexAny(rest, " \r\n")
+	codeStr := rest
+	if sp2 >= 0 {
+		codeStr = rest[:sp2]
+	}
+	code, err := strconv.Atoi(codeStr)
+	if err != nil {
+		return nil
+	}
+	return int64(code)
+}
+
+// fnHTTPStatusClass classifies HTTP status: '1xx', '2xx', '3xx', '4xx', '5xx'.
+func fnHTTPStatusClass(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	code := int(ToInt64(args[0]))
+	switch {
+	case code >= 100 && code < 200:
+		return "1xx"
+	case code >= 200 && code < 300:
+		return "2xx"
+	case code >= 300 && code < 400:
+		return "3xx"
+	case code >= 400 && code < 500:
+		return "4xx"
+	case code >= 500 && code < 600:
+		return "5xx"
+	default:
+		return nil
+	}
+}
+
+// fnHTTPContentType extracts Content-Type header value.
+func fnHTTPContentType(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return extractHTTPHeader(toString(args[0]), "content-type")
+}
+
+// fnHTTPContentLength extracts Content-Length header as integer.
+func fnHTTPContentLength(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	val := extractHTTPHeader(toString(args[0]), "content-length")
+	if val == nil {
+		return nil
+	}
+	n, err := strconv.ParseInt(val.(string), 10, 64)
+	if err != nil {
+		return nil
+	}
+	return n
+}
+
+// fnHTTPUserAgent extracts User-Agent header.
+func fnHTTPUserAgent(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return extractHTTPHeader(toString(args[0]), "user-agent")
+}
+
+// fnHTTPHeader extracts any HTTP header by name.
+// http_header(payload, 'X-Forwarded-For')
+func fnHTTPHeader(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	return extractHTTPHeader(toString(args[0]), strings.ToLower(toString(args[1])))
+}
+
+// fnHTTPVersion extracts the HTTP version from a request or response.
+// http_version('GET / HTTP/1.1\r\n...') → 'HTTP/1.1'
+func fnHTTPVersion(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	// Response: starts with HTTP/
+	if strings.HasPrefix(s, "HTTP/") {
+		sp := strings.IndexAny(s, " \r\n")
+		if sp < 0 {
+			return s
+		}
+		return s[:sp]
+	}
+	// Request: HTTP version is after the second space on the first line
+	line := s
+	if nl := strings.IndexByte(s, '\r'); nl >= 0 {
+		line = s[:nl]
+	} else if nl := strings.IndexByte(s, '\n'); nl >= 0 {
+		line = s[:nl]
+	}
+	sp := strings.LastIndex(line, " HTTP/")
+	if sp < 0 {
+		return nil
+	}
+	return line[sp+1:]
+}
+
+// fnIsHTTPRequest tests if payload looks like an HTTP request.
+func fnIsHTTPRequest(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	for _, m := range []string{"GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "TRACE ", "CONNECT "} {
+		if strings.HasPrefix(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// fnIsHTTPResponse tests if payload looks like an HTTP response.
+func fnIsHTTPResponse(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return strings.HasPrefix(toString(args[0]), "HTTP/")
+}
+
+// --- Packet header parsing ---
+
+// fnIPHeaderLength returns the IP header length in bytes from the raw IP header.
+// ip_header_length(payload_hex) — first nibble of byte 0 × 4
+func fnIPHeaderLength(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 1 {
+		return nil
+	}
+	ihl := int64(data[0]&0x0F) * 4
+	return ihl
+}
+
+// fnIPTTL extracts the TTL field from an IPv4 header.
+func fnIPTTL(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 9 {
+		return nil
+	}
+	return int64(data[8])
+}
+
+// fnIPTotalLength extracts the total length from an IPv4 header.
+func fnIPTotalLength(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 4 {
+		return nil
+	}
+	return int64(binary.BigEndian.Uint16(data[2:4]))
+}
+
+// fnIPDSCP extracts the DSCP value from the IPv4 TOS byte.
+// DSCP is the top 6 bits of byte 1.
+func fnIPDSCP(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 2 {
+		return nil
+	}
+	return int64(data[1] >> 2)
+}
+
+// fnEtherType identifies the EtherType from an Ethernet frame header.
+// ether_type(frame_hex) — bytes 12-13 of the Ethernet header
+func fnEtherType(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 14 {
+		return nil
+	}
+	et := binary.BigEndian.Uint16(data[12:14])
+	switch et {
+	case 0x0800:
+		return "IPv4"
+	case 0x0806:
+		return "ARP"
+	case 0x86DD:
+		return "IPv6"
+	case 0x8100:
+		return "VLAN"
+	case 0x8847:
+		return "MPLS"
+	case 0x88CC:
+		return "LLDP"
+	default:
+		return fmt.Sprintf("0x%04X", et)
+	}
+}
+
+// fnVLANID extracts the VLAN ID from an 802.1Q tagged frame.
+// Expects raw Ethernet frame; VLAN tag starts at byte 14 if EtherType is 0x8100.
+func fnVLANID(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 16 {
+		return nil
+	}
+	et := binary.BigEndian.Uint16(data[12:14])
+	if et != 0x8100 {
+		return nil // not a VLAN-tagged frame
+	}
+	// VLAN ID is the lower 12 bits of bytes 14-15
+	vlanID := binary.BigEndian.Uint16(data[14:16]) & 0x0FFF
+	return int64(vlanID)
+}
+
+// fnPayloadEntropy estimates the Shannon entropy of a byte payload.
+// Useful for detecting encrypted/compressed traffic vs plaintext.
+// payload_entropy(data) → float64 (0.0 = uniform, ~8.0 = maximum entropy)
+func fnPayloadEntropy(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) == 0 {
+		return float64(0)
+	}
+	var freq [256]int
+	for _, b := range data {
+		freq[b]++
+	}
+	n := float64(len(data))
+	entropy := 0.0
+	for _, f := range freq {
+		if f == 0 {
+			continue
+		}
+		p := float64(f) / n
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
+}
+
+// fnPayloadHexDump returns the first N bytes as a hex dump string.
+// payload_hex_dump(data, 16) → '48 65 6c 6c 6f 20 ...'
+func fnPayloadHexDump(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	maxBytes := 32
+	if len(args) >= 2 && args[1] != nil {
+		maxBytes = int(ToInt64(args[1]))
+	}
+	if maxBytes > len(data) {
+		maxBytes = len(data)
+	}
+	if maxBytes <= 0 {
+		return ""
+	}
+	parts := make([]string, maxBytes)
+	for i := 0; i < maxBytes; i++ {
+		parts[i] = fmt.Sprintf("%02x", data[i])
+	}
+	return strings.Join(parts, " ")
+}
+
+// --- Deep inspection helpers ---
+
+// toBytes converts a value to a byte slice, supporting hex strings and raw []byte.
+func toBytes(v any) []byte {
+	switch tv := v.(type) {
+	case []byte:
+		return tv
+	case string:
+		// Try hex decoding first
+		if decoded, err := hex.DecodeString(tv); err == nil && len(tv)%2 == 0 && len(tv) > 0 {
+			return decoded
+		}
+		// Fall back to raw bytes
+		return []byte(tv)
+	default:
+		return []byte(fmt.Sprint(v))
+	}
+}
+
+// parseDNSName parses a DNS wire-format name starting at the given offset.
+func parseDNSName(data []byte, offset int) any {
+	var parts []string
+	for offset < len(data) {
+		length := int(data[offset])
+		if length == 0 {
+			break
+		}
+		// Pointer (compression)
+		if length&0xC0 == 0xC0 {
+			if offset+1 >= len(data) {
+				break
+			}
+			ptr := int(binary.BigEndian.Uint16(data[offset:offset+2])) & 0x3FFF
+			rest := parseDNSName(data, ptr)
+			if rest != nil {
+				parts = append(parts, rest.(string))
+			}
+			return strings.Join(parts, ".")
+		}
+		offset++
+		if offset+length > len(data) {
+			break
+		}
+		parts = append(parts, string(data[offset:offset+length]))
+		offset += length
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return strings.Join(parts, ".")
+}
+
+// dnsTypeName maps DNS query type numbers to names.
+func dnsTypeName(qtype uint16) string {
+	switch qtype {
+	case 1:
+		return "A"
+	case 2:
+		return "NS"
+	case 5:
+		return "CNAME"
+	case 6:
+		return "SOA"
+	case 12:
+		return "PTR"
+	case 15:
+		return "MX"
+	case 16:
+		return "TXT"
+	case 28:
+		return "AAAA"
+	case 33:
+		return "SRV"
+	case 43:
+		return "DS"
+	case 46:
+		return "RRSIG"
+	case 48:
+		return "DNSKEY"
+	case 65:
+		return "HTTPS"
+	case 255:
+		return "ANY"
+	default:
+		return fmt.Sprintf("TYPE%d", qtype)
+	}
+}
+
+// parseTLSSNI extracts the SNI from a TLS ClientHello message.
+func parseTLSSNI(data []byte) any {
+	// TLS record: type(1) version(2) length(2) [record payload]
+	if len(data) < 5 || data[0] != 22 { // not handshake
+		return nil
+	}
+	// Handshake header: type(1) length(3)
+	if len(data) < 9 || data[5] != 1 { // not ClientHello
+		return nil
+	}
+	// ClientHello: version(2) random(32) session_id_len(1) ...
+	offset := 9 // start of ClientHello body
+	if offset+34 > len(data) {
+		return nil
+	}
+	offset += 34 // skip version + random
+
+	// Session ID
+	if offset >= len(data) {
+		return nil
+	}
+	sessIDLen := int(data[offset])
+	offset += 1 + sessIDLen
+
+	// Cipher suites
+	if offset+2 > len(data) {
+		return nil
+	}
+	csLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+	offset += 2 + csLen
+
+	// Compression methods
+	if offset >= len(data) {
+		return nil
+	}
+	compLen := int(data[offset])
+	offset += 1 + compLen
+
+	// Extensions
+	if offset+2 > len(data) {
+		return nil
+	}
+	extLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+	offset += 2
+	extEnd := offset + extLen
+	if extEnd > len(data) {
+		extEnd = len(data)
+	}
+
+	for offset+4 <= extEnd {
+		extType := binary.BigEndian.Uint16(data[offset : offset+2])
+		eLen := int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
+		offset += 4
+		if extType == 0 { // SNI extension
+			// SNI list: total_len(2) type(1) name_len(2) name(...)
+			if offset+5 > extEnd {
+				return nil
+			}
+			// skip list length (2 bytes)
+			nameType := data[offset+2]
+			nameLen := int(binary.BigEndian.Uint16(data[offset+3 : offset+5]))
+			if nameType != 0 { // must be hostname type
+				return nil
+			}
+			if offset+5+nameLen > extEnd {
+				return nil
+			}
+			return string(data[offset+5 : offset+5+nameLen])
+		}
+		offset += eLen
+	}
+	return nil
+}
+
+// tlsVersionString converts TLS major.minor to human-readable string.
+func tlsVersionString(major, minor byte) string {
+	if major == 3 {
+		switch minor {
+		case 0:
+			return "SSL 3.0"
+		case 1:
+			return "TLS 1.0"
+		case 2:
+			return "TLS 1.1"
+		case 3:
+			return "TLS 1.2"
+		case 4:
+			return "TLS 1.3"
+		}
+	}
+	return fmt.Sprintf("TLS %d.%d", major, minor)
+}
+
+// extractHTTPHeader extracts an HTTP header value by name (case-insensitive).
+func extractHTTPHeader(payload, headerName string) any {
+	// Find end of first line
+	lines := strings.Split(payload, "\r\n")
+	if len(lines) < 2 {
+		lines = strings.Split(payload, "\n")
+	}
+	for _, line := range lines[1:] {
+		if line == "" {
+			break // end of headers
+		}
+		colon := strings.IndexByte(line, ':')
+		if colon < 0 {
+			continue
+		}
+		name := strings.TrimSpace(line[:colon])
+		if strings.EqualFold(name, headerName) {
+			return strings.TrimSpace(line[colon+1:])
+		}
+	}
+	return nil
+}
+
+// --- ICMP Functions ---
+
+var icmpTypeNames = map[int]string{
+	0:  "Echo Reply",
+	3:  "Destination Unreachable",
+	4:  "Source Quench",
+	5:  "Redirect",
+	8:  "Echo Request",
+	9:  "Router Advertisement",
+	10: "Router Solicitation",
+	11: "Time Exceeded",
+	12: "Parameter Problem",
+	13: "Timestamp Request",
+	14: "Timestamp Reply",
+	17: "Address Mask Request",
+	18: "Address Mask Reply",
+	30: "Traceroute",
+}
+
+var icmpUnreachableCodes = map[int]string{
+	0:  "Network Unreachable",
+	1:  "Host Unreachable",
+	2:  "Protocol Unreachable",
+	3:  "Port Unreachable",
+	4:  "Fragmentation Needed",
+	5:  "Source Route Failed",
+	6:  "Destination Network Unknown",
+	7:  "Destination Host Unknown",
+	9:  "Network Administratively Prohibited",
+	10: "Host Administratively Prohibited",
+	13: "Communication Administratively Prohibited",
+}
+
+var icmpRedirectCodes = map[int]string{
+	0: "Redirect for Network",
+	1: "Redirect for Host",
+	2: "Redirect for TOS and Network",
+	3: "Redirect for TOS and Host",
+}
+
+var icmpTimeExceededCodes = map[int]string{
+	0: "TTL Exceeded in Transit",
+	1: "Fragment Reassembly Time Exceeded",
+}
+
+func fnICMPTypeName(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	t := int(ToInt64(args[0]))
+	name, ok := icmpTypeNames[t]
+	if !ok {
+		return fmt.Sprintf("Type %d", t)
+	}
+	return name
+}
+
+func fnICMPCodeName(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	t := int(ToInt64(args[0]))
+	c := int(ToInt64(args[1]))
+	switch t {
+	case 3:
+		if name, ok := icmpUnreachableCodes[c]; ok {
+			return name
+		}
+	case 5:
+		if name, ok := icmpRedirectCodes[c]; ok {
+			return name
+		}
+	case 11:
+		if name, ok := icmpTimeExceededCodes[c]; ok {
+			return name
+		}
+	}
+	if c == 0 {
+		if name, ok := icmpTypeNames[t]; ok {
+			return name
+		}
+	}
+	return fmt.Sprintf("Type %d Code %d", t, c)
+}
+
+func fnIsICMPEcho(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	t := int(ToInt64(args[0]))
+	return t == 0 || t == 8
+}
+
+func fnICMPParse(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 2 {
+		return nil
+	}
+	return fmt.Sprintf("%d:%d", data[0], data[1])
+}
+
+func fnICMPType(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 1 {
+		return nil
+	}
+	return int64(data[0])
+}
+
+func fnICMPCode(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	if len(data) < 2 {
+		return nil
+	}
+	return int64(data[1])
+}
+
+// --- IPv6 Functions ---
+
+func fnIPv6Scope(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(toString(args[0]))
+	if ip == nil {
+		return nil
+	}
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case ip.IsLinkLocalUnicast():
+		return "link-local"
+	case ip.IsLinkLocalMulticast():
+		return "link-local-multicast"
+	case ip.IsMulticast():
+		return "multicast"
+	case ip.IsPrivate():
+		if ip.To4() != nil {
+			return "private"
+		}
+		return "unique-local"
+	case ip.IsGlobalUnicast():
+		return "global"
+	case ip.IsUnspecified():
+		return "unspecified"
+	default:
+		return "unknown"
+	}
+}
+
+func fnIPv6Expand(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(toString(args[0]))
+	if ip == nil {
+		return nil
+	}
+	ip16 := ip.To16()
+	if ip16 == nil {
+		return nil
+	}
+	return fmt.Sprintf("%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+		ip16[0], ip16[1], ip16[2], ip16[3],
+		ip16[4], ip16[5], ip16[6], ip16[7],
+		ip16[8], ip16[9], ip16[10], ip16[11],
+		ip16[12], ip16[13], ip16[14], ip16[15])
+}
+
+func fnIPv6Compress(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(toString(args[0]))
+	if ip == nil {
+		return nil
+	}
+	return ip.String()
+}
+
+func fnIPv6ToEUI64(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	mac, err := net.ParseMAC(toString(args[0]))
+	if err != nil || len(mac) != 6 {
+		return nil
+	}
+	eui := make([]byte, 8)
+	eui[0] = mac[0] ^ 0x02
+	eui[1] = mac[1]
+	eui[2] = mac[2]
+	eui[3] = 0xFF
+	eui[4] = 0xFE
+	eui[5] = mac[3]
+	eui[6] = mac[4]
+	eui[7] = mac[5]
+	return fmt.Sprintf("%02x%02x:%02xff:%02x%02x:%02x%02x",
+		eui[0], eui[1], eui[2], eui[5], eui[6], eui[7], eui[3])
+}
+
+func fnIs6to4(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(toString(args[0]))
+	if ip == nil {
+		return false
+	}
+	ip16 := ip.To16()
+	return ip16 != nil && ip16[0] == 0x20 && ip16[1] == 0x02
+}
+
+func fnIsTeredo(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(toString(args[0]))
+	if ip == nil {
+		return false
+	}
+	ip16 := ip.To16()
+	return ip16 != nil && ip16[0] == 0x20 && ip16[1] == 0x01 && ip16[2] == 0x00 && ip16[3] == 0x00
+}
+
+func fnTeredoServer(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(toString(args[0]))
+	if ip == nil {
+		return nil
+	}
+	ip16 := ip.To16()
+	if ip16 == nil || ip16[0] != 0x20 || ip16[1] != 0x01 || ip16[2] != 0x00 || ip16[3] != 0x00 {
+		return nil
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", ip16[4], ip16[5], ip16[6], ip16[7])
+}
+
+func fnTeredoClient(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(toString(args[0]))
+	if ip == nil {
+		return nil
+	}
+	ip16 := ip.To16()
+	if ip16 == nil || ip16[0] != 0x20 || ip16[1] != 0x01 || ip16[2] != 0x00 || ip16[3] != 0x00 {
+		return nil
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", ip16[12]^0xFF, ip16[13]^0xFF, ip16[14]^0xFF, ip16[15]^0xFF)
+}
+
+func fnSixto4Gateway(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ip := net.ParseIP(toString(args[0]))
+	if ip == nil {
+		return nil
+	}
+	ip16 := ip.To16()
+	if ip16 == nil || ip16[0] != 0x20 || ip16[1] != 0x02 {
+		return nil
+	}
+	return fmt.Sprintf("%d.%d.%d.%d", ip16[2], ip16[3], ip16[4], ip16[5])
+}
+
+// --- JA3 TLS Fingerprinting ---
+
+func fnJA3Fingerprint(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ja3str := buildJA3String(toBytes(args[0]))
+	if ja3str == "" {
+		return nil
+	}
+	hash := md5.Sum([]byte(ja3str))
+	return hex.EncodeToString(hash[:])
+}
+
+func fnJA3String(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	result := buildJA3String(toBytes(args[0]))
+	if result == "" {
+		return nil
+	}
+	return result
+}
+
+func fnJA3SFingerprint(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	ja3s := buildJA3SString(toBytes(args[0]))
+	if ja3s == "" {
+		return nil
+	}
+	hash := md5.Sum([]byte(ja3s))
+	return hex.EncodeToString(hash[:])
+}
+
+func fnJA3SString(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	result := buildJA3SString(toBytes(args[0]))
+	if result == "" {
+		return nil
+	}
+	return result
+}
+
+func buildJA3String(data []byte) string {
+	if len(data) < 5 || data[0] != 22 {
+		return ""
+	}
+	if len(data) < 9 || data[5] != 1 {
+		return ""
+	}
+	offset := 9
+	if offset+2 > len(data) {
+		return ""
+	}
+	tlsVersion := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+	offset += 34 // version + random
+	if offset >= len(data) {
+		return ""
+	}
+	sessIDLen := int(data[offset])
+	offset += 1 + sessIDLen
+	if offset+2 > len(data) {
+		return ""
+	}
+	csLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+	offset += 2
+	if offset+csLen > len(data) {
+		return ""
+	}
+	var ciphers []string
+	for i := 0; i < csLen; i += 2 {
+		cs := int(binary.BigEndian.Uint16(data[offset+i : offset+i+2]))
+		if !isGREASE(uint16(cs)) {
+			ciphers = append(ciphers, strconv.Itoa(cs))
+		}
+	}
+	offset += csLen
+	if offset >= len(data) {
+		return ""
+	}
+	compLen := int(data[offset])
+	offset += 1 + compLen
+
+	var extensions, ellipticCurves, ecPointFormats []string
+	if offset+2 <= len(data) {
+		extTotalLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		offset += 2
+		extEnd := offset + extTotalLen
+		if extEnd > len(data) {
+			extEnd = len(data)
+		}
+		for offset+4 <= extEnd {
+			extType := binary.BigEndian.Uint16(data[offset : offset+2])
+			extLen := int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
+			offset += 4
+			if !isGREASE(extType) {
+				extensions = append(extensions, strconv.Itoa(int(extType)))
+			}
+			if offset+extLen > extEnd {
+				break
+			}
+			if extType == 10 && extLen >= 2 {
+				listLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+				for j := 2; j+1 < 2+listLen && offset+j+1 < extEnd; j += 2 {
+					curve := binary.BigEndian.Uint16(data[offset+j : offset+j+2])
+					if !isGREASE(curve) {
+						ellipticCurves = append(ellipticCurves, strconv.Itoa(int(curve)))
+					}
+				}
+			}
+			if extType == 11 && extLen >= 1 {
+				fmtLen := int(data[offset])
+				for j := 1; j < 1+fmtLen && offset+j < extEnd; j++ {
+					ecPointFormats = append(ecPointFormats, strconv.Itoa(int(data[offset+j])))
+				}
+			}
+			offset += extLen
+		}
+	}
+	return fmt.Sprintf("%d,%s,%s,%s,%s",
+		tlsVersion,
+		strings.Join(ciphers, "-"),
+		strings.Join(extensions, "-"),
+		strings.Join(ellipticCurves, "-"),
+		strings.Join(ecPointFormats, "-"))
+}
+
+func buildJA3SString(data []byte) string {
+	if len(data) < 5 || data[0] != 22 {
+		return ""
+	}
+	if len(data) < 9 || data[5] != 2 {
+		return ""
+	}
+	offset := 9
+	if offset+2 > len(data) {
+		return ""
+	}
+	tlsVersion := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+	offset += 34
+	if offset >= len(data) {
+		return ""
+	}
+	sessIDLen := int(data[offset])
+	offset += 1 + sessIDLen
+	if offset+2 > len(data) {
+		return ""
+	}
+	cipher := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+	offset += 3 // cipher + compression
+
+	var extensions []string
+	if offset+2 <= len(data) {
+		extTotalLen := int(binary.BigEndian.Uint16(data[offset : offset+2]))
+		offset += 2
+		extEnd := offset + extTotalLen
+		if extEnd > len(data) {
+			extEnd = len(data)
+		}
+		for offset+4 <= extEnd {
+			extType := binary.BigEndian.Uint16(data[offset : offset+2])
+			extLen := int(binary.BigEndian.Uint16(data[offset+2 : offset+4]))
+			offset += 4
+			if !isGREASE(extType) {
+				extensions = append(extensions, strconv.Itoa(int(extType)))
+			}
+			offset += extLen
+		}
+	}
+	return fmt.Sprintf("%d,%d,%s", tlsVersion, cipher, strings.Join(extensions, "-"))
+}
+
+func isGREASE(v uint16) bool {
+	return v&0x0f0f == 0x0a0a
+}
+
+// --- Payload Search Functions ---
+
+func fnPayloadContains(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	pattern := toBytes(args[1])
+	if len(pattern) == 0 {
+		return true
+	}
+	for i := 0; i <= len(data)-len(pattern); i++ {
+		found := true
+		for j := 0; j < len(pattern); j++ {
+			if data[i+j] != pattern[j] {
+				found = false
+				break
+			}
+		}
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+func fnPayloadMatches(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	matched, err := regexp.MatchString(toString(args[1]), toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return matched
+}
+
+func fnPayloadOffset(args []any) any {
+	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
+		return nil
+	}
+	data := toBytes(args[0])
+	off := int(ToInt64(args[1]))
+	length := int(ToInt64(args[2]))
+	if off < 0 || length <= 0 || off+length > len(data) {
+		return nil
+	}
+	return hex.EncodeToString(data[off : off+length])
+}
+
+func fnPayloadLength(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return int64(len(toBytes(args[0])))
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 
@@ -30,6 +31,16 @@ const (
 	AggVariance
 	AggStddevPop
 	AggVarPop
+	AggApproxDistinct
+	AggCorr
+	AggCovarSamp
+	AggCovarPop
+	AggPercentileCont
+	AggPercentileDisc
+	AggMode
+	AggMinBy
+	AggMaxBy
+	AggMedian
 )
 
 // AggColumn defines an aggregation to perform.
@@ -38,7 +49,9 @@ type AggColumn struct {
 	InputCol   string // input column name (empty for COUNT(*))
 	OutputCol  string // output column name
 	OutputType parquet.TypeID
-	Separator  string // separator for STRING_AGG (default ',')
+	Separator  string  // separator for STRING_AGG (default ',')
+	InputCol2  string  // second input column (corr, covar, min_by, max_by)
+	Percentile float64 // percentile value for percentile_cont/percentile_disc
 }
 
 // HashAggregate is a Sink that performs grouped aggregation with a hash map.
@@ -57,6 +70,7 @@ type HashAggregate struct {
 	serializedKeys []string // pre-serialized keys matching h.keys order
 	groupColIdx   []int
 	aggColIdx     []int
+	aggColIdx2    []int                  // second column indices for two-column aggregates
 	groupColTypes []batch.TypeID
 	aggUpdaters   []kernel.RowAggUpdater // resolved typed updaters
 	resolved      bool
@@ -105,6 +119,62 @@ func (v *varianceState) varianceSamp() float64 {
 		return 0
 	}
 	return v.m2 / float64(v.count-1)
+}
+
+// covarianceState tracks running covariance using an online algorithm.
+type covarianceState struct {
+	count int64
+	meanX float64
+	meanY float64
+	c     float64 // co-moment: sum of (xi - meanX_old)(yi - meanY_new)
+	m2x   float64 // sum of (xi - meanX)^2
+	m2y   float64 // sum of (yi - meanY)^2
+}
+
+func (s *covarianceState) update(x, y float64) {
+	s.count++
+	n := float64(s.count)
+	dx := x - s.meanX
+	s.meanX += dx / n
+	dy := y - s.meanY
+	s.meanY += dy / n
+	s.c += dx * (y - s.meanY)
+	s.m2x += dx * (x - s.meanX)
+	s.m2y += dy * (y - s.meanY)
+}
+
+func (s *covarianceState) covarPop() float64 {
+	if s.count == 0 {
+		return 0
+	}
+	return s.c / float64(s.count)
+}
+
+func (s *covarianceState) covarSamp() float64 {
+	if s.count < 2 {
+		return 0
+	}
+	return s.c / float64(s.count-1)
+}
+
+func (s *covarianceState) correlation() float64 {
+	if s.count < 2 || s.m2x == 0 || s.m2y == 0 {
+		return 0
+	}
+	return s.c / math.Sqrt(s.m2x*s.m2y)
+}
+
+// collectState accumulates raw float64 values for percentile/mode/median.
+type collectState struct {
+	values []float64
+}
+
+// minMaxByState tracks the row where a comparison column is min/max.
+type minMaxByState struct {
+	hasValue bool
+	bestCmp  float64 // the comparison column value (min or max)
+	bestVal  any     // the return column value at that row
+	isMin    bool
 }
 
 func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
@@ -177,9 +247,11 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 	}
 	h.aggColIdx = make([]int, len(h.Aggs))
+	h.aggColIdx2 = make([]int, len(h.Aggs))
 	h.aggUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
 	for i, agg := range h.Aggs {
-		if agg.Func == AggCountDistinct {
+		h.aggColIdx2[i] = -1 // default: no second column
+		if agg.Func == AggCountDistinct || agg.Func == AggApproxDistinct {
 			if agg.InputCol != "" {
 				h.aggColIdx[i] = b.ColumnIndex(agg.InputCol)
 			} else {
@@ -198,6 +270,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			if agg.Func == AggCount {
 				h.aggUpdaters[i] = kernel.ResolveRowCount(true) // COUNT(*)
 			}
+		}
+		// Resolve second column index for two-column aggregates
+		if agg.InputCol2 != "" {
+			h.aggColIdx2[i] = b.ColumnIndex(agg.InputCol2)
 		}
 	}
 	h.resolved = true
@@ -266,6 +342,16 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 				gs.extraState[i] = true // starts true, AND-ed with each value
 			case AggBoolOr:
 				gs.extraState[i] = false // starts false, OR-ed with each value
+			case AggApproxDistinct:
+				gs.distinctSets[i] = make(map[string]struct{})
+			case AggCorr, AggCovarSamp, AggCovarPop:
+				gs.extraState[i] = &covarianceState{}
+			case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
+				gs.extraState[i] = &collectState{}
+			case AggMinBy:
+				gs.extraState[i] = &minMaxByState{isMin: true}
+			case AggMaxBy:
+				gs.extraState[i] = &minMaxByState{isMin: false}
 			}
 		}
 		h.groups[key] = gs
@@ -371,6 +457,79 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 				continue
 			}
 			state.update(fval)
+
+		case AggApproxDistinct:
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			h.keyBuf = h.keyBuf[:0]
+			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
+			valKey := string(h.keyBuf)
+			gs.distinctSets[i][valKey] = struct{}{}
+
+		case AggCorr, AggCovarSamp, AggCovarPop:
+			idx1 := h.aggColIdx[i]
+			idx2 := h.aggColIdx2[i]
+			if idx1 < 0 || idx2 < 0 {
+				continue
+			}
+			v1 := b.Columns[idx1]
+			v2 := b.Columns[idx2]
+			if v1.Nulls.IsNullFast(row) || v2.Nulls.IsNullFast(row) {
+				continue
+			}
+			state := gs.extraState[i].(*covarianceState)
+			state.update(vecToFloat64(v1, row), vecToFloat64(v2, row))
+
+		case AggPercentileCont, AggPercentileDisc, AggMedian:
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			state := gs.extraState[i].(*collectState)
+			state.values = append(state.values, vecToFloat64(v, row))
+
+		case AggMode:
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			state := gs.extraState[i].(*collectState)
+			state.values = append(state.values, vecToFloat64(v, row))
+
+		case AggMinBy, AggMaxBy:
+			idx1 := h.aggColIdx[i]
+			idx2 := h.aggColIdx2[i]
+			if idx1 < 0 || idx2 < 0 {
+				continue
+			}
+			v1 := b.Columns[idx1] // return column
+			v2 := b.Columns[idx2] // comparison column
+			if v1.Nulls.IsNullFast(row) || v2.Nulls.IsNullFast(row) {
+				continue
+			}
+			state := gs.extraState[i].(*minMaxByState)
+			cmpVal := vecToFloat64(v2, row)
+			if !state.hasValue ||
+				(state.isMin && cmpVal < state.bestCmp) ||
+				(!state.isMin && cmpVal > state.bestCmp) {
+				state.hasValue = true
+				state.bestCmp = cmpVal
+				state.bestVal = v1.GetValue(row)
+			}
 
 		default:
 			updater := h.aggUpdaters[i]
@@ -484,6 +643,48 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 				} else {
 					out.Columns[colIdx].SetValue(i, state.variancePop())
 				}
+			case AggApproxDistinct:
+				out.Columns[colIdx].SetValue(i, int64(len(gs.distinctSets[j])))
+			case AggCorr:
+				state := gs.extraState[j].(*covarianceState)
+				if state.count < 2 {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, state.correlation())
+				}
+			case AggCovarSamp:
+				state := gs.extraState[j].(*covarianceState)
+				if state.count < 2 {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, state.covarSamp())
+				}
+			case AggCovarPop:
+				state := gs.extraState[j].(*covarianceState)
+				if state.count == 0 {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, state.covarPop())
+				}
+			case AggPercentileCont:
+				state := gs.extraState[j].(*collectState)
+				out.Columns[colIdx].SetValue(i, computePercentileCont(state.values, agg.Percentile))
+			case AggPercentileDisc:
+				state := gs.extraState[j].(*collectState)
+				out.Columns[colIdx].SetValue(i, computePercentileDisc(state.values, agg.Percentile))
+			case AggMedian:
+				state := gs.extraState[j].(*collectState)
+				out.Columns[colIdx].SetValue(i, computePercentileCont(state.values, 0.5))
+			case AggMode:
+				state := gs.extraState[j].(*collectState)
+				out.Columns[colIdx].SetValue(i, computeMode(state.values))
+			case AggMinBy, AggMaxBy:
+				state := gs.extraState[j].(*minMaxByState)
+				if !state.hasValue {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, state.bestVal)
+				}
 			default:
 				result := finalizeKernelAcc(&gs.accs[j], agg.Func)
 				out.Columns[colIdx].SetValue(i, result)
@@ -590,6 +791,83 @@ func appendColumnValue(buf []byte, v *batch.Vector, row int, typ batch.TypeID) [
 		return appendFloat64(buf, v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale))
 	default:
 		return append(buf, '?')
+	}
+}
+
+// computePercentileCont returns the interpolated percentile value (continuous).
+func computePercentileCont(values []float64, p float64) any {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Float64s(values)
+	n := float64(len(values))
+	if p <= 0 {
+		return values[0]
+	}
+	if p >= 1 {
+		return values[len(values)-1]
+	}
+	idx := p * (n - 1)
+	lo := int(math.Floor(idx))
+	hi := int(math.Ceil(idx))
+	if lo == hi {
+		return values[lo]
+	}
+	frac := idx - float64(lo)
+	return values[lo]*(1-frac) + values[hi]*frac
+}
+
+// computePercentileDisc returns the discrete percentile value (nearest rank).
+func computePercentileDisc(values []float64, p float64) any {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Float64s(values)
+	idx := int(math.Ceil(p*float64(len(values)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(values) {
+		idx = len(values) - 1
+	}
+	return values[idx]
+}
+
+// computeMode returns the most frequent value. Ties broken by smallest value.
+func computeMode(values []float64) any {
+	if len(values) == 0 {
+		return nil
+	}
+	counts := make(map[float64]int)
+	for _, v := range values {
+		counts[v]++
+	}
+	var bestVal float64
+	bestCount := 0
+	for v, c := range counts {
+		if c > bestCount || (c == bestCount && v < bestVal) {
+			bestVal = v
+			bestCount = c
+		}
+	}
+	return bestVal
+}
+
+// vecToFloat64 extracts a float64 value from a vector at the given row.
+func vecToFloat64(v *batch.Vector, row int) float64 {
+	switch v.Type {
+	case batch.TypeInt64, batch.TypeTimestamp:
+		return float64(v.Int64Data[row])
+	case batch.TypeInt32:
+		return float64(v.Int32Data[row])
+	case batch.TypeFloat64:
+		return v.Float64Data[row]
+	case batch.TypeFloat32:
+		return float64(v.Float32Data[row])
+	case batch.TypeDecimal:
+		return v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale)
+	default:
+		return 0
 	}
 }
 

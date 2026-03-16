@@ -290,6 +290,9 @@ func (v *Vector) SetValue(i int, val any) {
 			v.BytesData.Set(i, []byte(tv))
 		case []byte:
 			v.BytesData.Set(i, tv)
+		default:
+			// Coerce non-string values to string representation
+			v.BytesData.Set(i, []byte(fmt.Sprint(val)))
 		}
 	case TypeBytes:
 		v.BytesData.Set(i, val.([]byte))

@@ -104,8 +104,9 @@ func (p *PhysicalPlan) PrettyPrint() string {
 type Planner struct {
 	catalog        *catalog.Catalog
 	subqueryRunner expr.SubqueryRunner
-	MemoryBudget   int64  // per-query memory budget in bytes (0 = unlimited)
-	SpillDir       string // directory for spill files (empty = os temp dir)
+	planCtx        context.Context // context from the current Plan() call, used by subquery runner
+	MemoryBudget   int64           // per-query memory budget in bytes (0 = unlimited)
+	SpillDir       string          // directory for spill files (empty = os temp dir)
 }
 
 // NewPlanner creates a new physical planner.
@@ -117,9 +118,15 @@ func NewPlanner(cat *catalog.Catalog) *Planner {
 }
 
 // makeSubqueryRunner creates a SubqueryRunner that executes SQL via this planner.
+// Uses the planCtx stored during Plan() so subqueries respect the parent context's
+// cancellation and timeout.
 func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
 	return func(sql string) ([]map[string]any, error) {
-		return p.executeSubquery(context.Background(), sql)
+		ctx := p.planCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return p.executeSubquery(ctx, sql)
 	}
 }
 
@@ -185,6 +192,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
+	p.planCtx = ctx // store for subquery runner context propagation
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
 		return nil, err
@@ -949,8 +957,19 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 	// skip the projection — the aggregate already produces correctly named output
 	// columns (group-by cols + agg output cols). Adding a Project on top would
 	// fail because ColumnRef can't find aggregate output names.
+	// Exception: if any projection has an AST expression that needs evaluation
+	// (e.g., nested aggregates like SUM(x) * 0.0001), keep the projection.
 	if hasAggregateAncestor(child) {
-		return p.buildPipeline(ctx, child)
+		needsExprEval := false
+		for _, proj := range node.Projections {
+			if proj.ASTExpr != nil && !proj.IsAgg && !isSimpleColRef(proj.ASTExpr) {
+				needsExprEval = true
+				break
+			}
+		}
+		if !needsExprEval {
+			return p.buildPipeline(ctx, child)
+		}
 	}
 
 	source, ops, sink, err := p.buildPipeline(ctx, child)
@@ -993,9 +1012,20 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			expression = exec.ColumnRef(colRef)
 		}
 
+		// Infer output type: TypeString is the default, resolved at runtime from
+		// input schema when column names match. For arithmetic expressions that
+		// won't match an input column (e.g., nested aggregate rewrites like
+		// __agg_0 * 0.0001), use TypeFloat64.
+		outType := parquet.TypeString
+		if proj.ASTExpr != nil && !proj.IsAgg {
+			if _, isBinOp := proj.ASTExpr.(*plansql.BinaryOp); isBinOp {
+				outType = parquet.TypeFloat64
+			}
+		}
+
 		projCols = append(projCols, exec.ProjectColumn{
 			Name: name,
-			Type: parquet.TypeString, // Will be resolved at runtime
+			Type: outType, // Will be resolved at runtime if input column matches
 			Expr: expression,
 		})
 	}
@@ -1038,12 +1068,6 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		}
 	}
 
-	// If we have expression inputs, build a pass-through projection that
-	// keeps all input columns and adds the computed ones.
-	if len(preProjectCols) > 0 {
-		childOps = append(childOps, &aggPreProject{computed: preProjectCols})
-	}
-
 	var aggCols []exec.AggColumn
 	for i, agg := range node.AggExprs {
 		fn := parseAggFunc(agg.Func)
@@ -1069,6 +1093,22 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			sep = strings.Trim(sep, "'\"")
 			ac.Separator = sep
 		}
+		// Parse two-column aggregates (format: "col1, col2")
+		if (fn == exec.AggCorr || fn == exec.AggCovarSamp || fn == exec.AggCovarPop ||
+			fn == exec.AggMinBy || fn == exec.AggMaxBy) && strings.Contains(inputCol, ",") {
+			parts := strings.SplitN(inputCol, ",", 2)
+			ac.InputCol = strings.TrimSpace(parts[0])
+			ac.InputCol2 = strings.TrimSpace(parts[1])
+		}
+		// Parse percentile value (format: "percentile, col") — e.g., percentile_cont(0.5, amount)
+		if (fn == exec.AggPercentileCont || fn == exec.AggPercentileDisc) && strings.Contains(inputCol, ",") {
+			parts := strings.SplitN(inputCol, ",", 2)
+			pctStr := strings.TrimSpace(parts[0])
+			if pv, err := strconv.ParseFloat(pctStr, 64); err == nil {
+				ac.Percentile = pv
+				ac.InputCol = strings.TrimSpace(parts[1])
+			}
+		}
 		aggCols = append(aggCols, ac)
 	}
 
@@ -1077,6 +1117,33 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		// Preserve table qualifiers for self-join disambiguation (e.g., n1.n_name vs n2.n_name).
 		// The aggregate operator resolves qualified names with fallback to unqualified.
 		groupByCols[i] = strings.TrimSpace(gb)
+	}
+
+	// Handle GROUP BY expressions (e.g., SUBSTR(c_phone, 1, 2)).
+	// Compile expression-valued GROUP BY entries into pre-aggregate projections
+	// so the aggregate can group by the computed result.
+	if len(node.GroupByExprs) == len(node.GroupBy) {
+		for i, gbExpr := range node.GroupByExprs {
+			if gbExpr != nil && !isSimpleColRef(gbExpr) {
+				synName := fmt.Sprintf("__gb_expr_%d", i)
+				compiled, compErr := expr.CompileWithRunner(gbExpr, p.subqueryRunner)
+				if compErr == nil {
+					preProjectCols = append(preProjectCols, exec.ProjectColumn{
+						Name: synName,
+						Type: parquet.TypeString,
+						Expr: wrapExpr(compiled),
+					})
+					groupByCols[i] = synName
+				}
+			}
+		}
+	}
+
+	// If we have expression inputs or GROUP BY expressions, build a
+	// pass-through projection that keeps all input columns and adds
+	// the computed ones.
+	if len(preProjectCols) > 0 {
+		childOps = append(childOps, &aggPreProject{computed: preProjectCols})
 	}
 
 	hashAgg := exec.NewHashAggregate(groupByCols, aggCols)
@@ -1862,6 +1929,26 @@ func parseAggFunc(s string) exec.AggFunc {
 		return exec.AggStddevPop
 	case "var_pop":
 		return exec.AggVarPop
+	case "approx_distinct":
+		return exec.AggApproxDistinct
+	case "corr":
+		return exec.AggCorr
+	case "covar_samp":
+		return exec.AggCovarSamp
+	case "covar_pop":
+		return exec.AggCovarPop
+	case "percentile_cont":
+		return exec.AggPercentileCont
+	case "percentile_disc":
+		return exec.AggPercentileDisc
+	case "mode":
+		return exec.AggMode
+	case "min_by":
+		return exec.AggMinBy
+	case "max_by":
+		return exec.AggMaxBy
+	case "median":
+		return exec.AggMedian
 	default:
 		return exec.AggCount
 	}
@@ -1921,7 +2008,7 @@ func windowOutputType(funcName string) parquet.TypeID {
 
 func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 	switch strings.ToLower(funcName) {
-	case "count":
+	case "count", "approx_distinct":
 		return parquet.TypeInt64
 	case "string_agg":
 		return parquet.TypeString
