@@ -23,6 +23,19 @@ type ListOptions struct {
 	MaxKeys   int
 }
 
+// ReaderAtCloser combines io.ReaderAt with io.Closer for random-access reads.
+type ReaderAtCloser interface {
+	io.ReaderAt
+	io.Closer
+}
+
+// ReaderAtStore is an optional interface that Store implementations can provide
+// to support random-access reads. This enables Parquet column pruning by reading
+// only needed column chunks instead of downloading entire files.
+type ReaderAtStore interface {
+	GetReaderAt(ctx context.Context, bucket, key string) (ReaderAtCloser, int64, error)
+}
+
 // Store defines the interface for S3-compatible object storage operations.
 type Store interface {
 	// Put writes an object to storage. Returns the ETag of the written object.

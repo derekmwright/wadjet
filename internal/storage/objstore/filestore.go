@@ -150,6 +150,26 @@ func (f *FileStore) Get(_ context.Context, bucket, key string) (io.ReadCloser, O
 	}, nil
 }
 
+func (f *FileStore) GetReaderAt(_ context.Context, bucket, key string) (ReaderAtCloser, int64, error) {
+	path := f.objectPath(bucket, key)
+
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, ErrNotFound
+		}
+		return nil, 0, fmt.Errorf("opening file: %w", err)
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, 0, fmt.Errorf("stat file: %w", err)
+	}
+
+	return file, info.Size(), nil
+}
+
 func (f *FileStore) Head(_ context.Context, bucket, key string) (ObjectInfo, error) {
 	path := f.objectPath(bucket, key)
 

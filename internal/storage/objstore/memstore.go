@@ -145,6 +145,28 @@ func (m *MemStore) Get(_ context.Context, bucket, key string) (io.ReadCloser, Ob
 	return io.NopCloser(bytes.NewReader(obj.data)), info, nil
 }
 
+// nopReaderAtCloser wraps an io.ReaderAt with a no-op Close.
+type nopReaderAtCloser struct {
+	io.ReaderAt
+}
+
+func (nopReaderAtCloser) Close() error { return nil }
+
+func (m *MemStore) GetReaderAt(_ context.Context, bucket, key string) (ReaderAtCloser, int64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	b, err := m.getBucket(bucket)
+	if err != nil {
+		return nil, 0, err
+	}
+	obj, ok := b[key]
+	if !ok {
+		return nil, 0, ErrNotFound
+	}
+	return nopReaderAtCloser{bytes.NewReader(obj.data)}, int64(len(obj.data)), nil
+}
+
 func (m *MemStore) Head(_ context.Context, bucket, key string) (ObjectInfo, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

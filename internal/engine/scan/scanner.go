@@ -50,12 +50,14 @@ type Scanner struct {
 	logger          *slog.Logger
 
 	// Internal state
-	files     []scanFile
-	fileIdx   int
-	stats     ScanStats
-	schema    []pqt.Column
+	files        []scanFile
+	fileIdx      int
+	stats        ScanStats
+	schema       []pqt.Column
+	useReaderAt  bool // true if store supports random access (column pruning)
 
 	// Async prefetch: downloads next file while current is being decoded
+	// Only used when NOT using ReaderAt path
 	prefetchCh chan prefetchedFile
 }
 
@@ -145,8 +147,12 @@ func (s *Scanner) Init(ctx context.Context) error {
 		"files_to_scan", len(s.files),
 	)
 
-	// Start prefetching the first file
-	if len(s.files) > 0 {
+	// Use random-access reads when the store supports it and we have column projection
+	_, hasReaderAt := s.cat.Store().(objstore.ReaderAtStore)
+	s.useReaderAt = hasReaderAt && len(s.selectedColumns) > 0
+
+	// Start prefetching the first file (only for full-download path)
+	if len(s.files) > 0 && !s.useReaderAt {
 		s.prefetchCh = make(chan prefetchedFile, 1)
 		s.startPrefetch(ctx, 0)
 	}
@@ -178,35 +184,42 @@ func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
 			return nil, fmt.Errorf("scan cancelled: %w", err)
 		}
 
-		// Receive prefetched file data
-		var pf prefetchedFile
-		select {
-		case pf = <-s.prefetchCh:
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-
+		file := s.files[s.fileIdx]
 		s.fileIdx++
 
-		// Start prefetching the next file while we decode this one
-		if s.fileIdx < len(s.files) {
-			s.startPrefetch(ctx, s.fileIdx)
-		}
+		var b *batch.RecordBatch
+		var err error
 
-		if pf.err != nil {
-			if pf.err == objstore.ErrNotFound {
-				s.logger.Warn("file not found, skipping", "path", pf.file.path)
-				fileReadPool.Put(pf.buf)
-				continue
+		if s.useReaderAt {
+			b, err = s.readFileReaderAt(ctx, file)
+		} else {
+			// Full-download path with async prefetch
+			var pf prefetchedFile
+			select {
+			case pf = <-s.prefetchCh:
+			case <-ctx.Done():
+				return nil, ctx.Err()
 			}
+
+			if s.fileIdx < len(s.files) {
+				s.startPrefetch(ctx, s.fileIdx)
+			}
+
+			if pf.err != nil {
+				fileReadPool.Put(pf.buf)
+				if pf.err == objstore.ErrNotFound {
+					s.logger.Warn("file not found, skipping", "path", pf.file.path)
+					continue
+				}
+				return nil, fmt.Errorf("reading file %s: %w", pf.file.path, pf.err)
+			}
+
+			b, err = s.decodeFile(ctx, pf.buf, pf.file)
 			fileReadPool.Put(pf.buf)
-			return nil, fmt.Errorf("reading file %s: %w", pf.file.path, pf.err)
 		}
 
-		b, err := s.decodeFile(ctx, pf.buf, pf.file)
-		fileReadPool.Put(pf.buf)
 		if err != nil {
-			return nil, fmt.Errorf("reading file %s: %w", pf.file.path, err)
+			return nil, fmt.Errorf("reading file %s: %w", file.path, err)
 		}
 		if b == nil || b.ActiveLen() == 0 {
 			continue
@@ -218,6 +231,29 @@ func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
 
 func (s *Scanner) Close() error { return nil }
 
+// readFileReaderAt opens a Parquet file via random-access reads and decodes only
+// the requested column chunks. For S3 stores, this issues targeted range requests
+// instead of downloading the entire file.
+func (s *Scanner) readFileReaderAt(ctx context.Context, file scanFile) (*batch.RecordBatch, error) {
+	ras := s.cat.Store().(objstore.ReaderAtStore)
+	ra, size, err := ras.GetReaderAt(ctx, s.cat.Bucket(), file.path)
+	if err != nil {
+		if err == objstore.ErrNotFound {
+			s.logger.Warn("file not found, skipping", "path", file.path)
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer ra.Close()
+
+	reader, err := pqt.NewReader(ra, size)
+	if err != nil {
+		return nil, fmt.Errorf("opening parquet reader: %w", err)
+	}
+
+	return s.decodeRowGroups(ctx, reader, file)
+}
+
 // decodeFile decodes a Parquet file from a pre-downloaded buffer into a RecordBatch.
 func (s *Scanner) decodeFile(ctx context.Context, buf *bytes.Buffer, file scanFile) (*batch.RecordBatch, error) {
 	data := buf.Bytes()
@@ -227,7 +263,12 @@ func (s *Scanner) decodeFile(ctx context.Context, buf *bytes.Buffer, file scanFi
 		return nil, fmt.Errorf("opening parquet reader: %w", err)
 	}
 
-	// Determine schema for the batch
+	return s.decodeRowGroups(ctx, reader, file)
+}
+
+// decodeRowGroups reads row groups from a parquet reader, applying stats-based
+// pruning and row-level filtering.
+func (s *Scanner) decodeRowGroups(ctx context.Context, reader *pqt.Reader, file scanFile) (*batch.RecordBatch, error) {
 	schema := s.schema
 	if len(s.selectedColumns) > 0 {
 		schema = filterSchema(s.schema, s.selectedColumns)
@@ -236,13 +277,11 @@ func (s *Scanner) decodeFile(ctx context.Context, buf *bytes.Buffer, file scanFi
 	pqFile := reader.File()
 	rgs := pqFile.RowGroups()
 
-	// Level 2: Row-group pruning using column min/max stats
 	numRGs := len(rgs)
 	s.stats.TotalRowGroups += numRGs
 
 	var batches []*batch.RecordBatch
 	for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
-		// Stats-based pruning
 		if len(s.statsPredicates) > 0 {
 			rgStats := reader.RowGroupStats(rgIdx)
 			pruned := false
@@ -258,7 +297,6 @@ func (s *Scanner) decodeFile(ctx context.Context, buf *bytes.Buffer, file scanFi
 			}
 		}
 
-		// Columnar read: directly into RecordBatch, no map[string]any
 		b, err := readRowGroupColumnar(rgs[rgIdx], schema, pqFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading row group %d: %w", rgIdx, err)
@@ -274,13 +312,10 @@ func (s *Scanner) decodeFile(ctx context.Context, buf *bytes.Buffer, file scanFi
 		return nil, nil
 	}
 
-	// For now, concatenate row groups into a single batch
-	// (most files have a single row group at our target file sizes)
 	var result *batch.RecordBatch
 	if len(batches) == 1 {
 		result = batches[0]
 	} else {
-		// Multiple row groups — merge into one batch
 		totalRows := 0
 		for _, b := range batches {
 			totalRows += b.Len
@@ -297,7 +332,6 @@ func (s *Scanner) decodeFile(ctx context.Context, buf *bytes.Buffer, file scanFi
 		}
 	}
 
-	// Level 3: Row-level filtering
 	if s.rowFilter != nil {
 		filter := exec.NewFilter(s.rowFilter)
 		filtered, err := filter.Execute(ctx, result)

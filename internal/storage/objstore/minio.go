@@ -123,6 +123,39 @@ func (s *MinIOStore) Get(ctx context.Context, bucket, key string) (io.ReadCloser
 	}, nil
 }
 
+// minioReaderAt wraps a *minio.Object as ReaderAtCloser.
+// minio.Object already implements io.ReaderAt via range requests.
+type minioReaderAt struct {
+	obj *minio.Object
+}
+
+func (m *minioReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	return m.obj.ReadAt(p, off)
+}
+
+func (m *minioReaderAt) Close() error {
+	return m.obj.Close()
+}
+
+func (s *MinIOStore) GetReaderAt(ctx context.Context, bucket, key string) (ReaderAtCloser, int64, error) {
+	obj, err := s.client.GetObject(ctx, bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, 0, fmt.Errorf("getting object: %w", err)
+	}
+
+	info, err := obj.Stat()
+	if err != nil {
+		obj.Close()
+		resp := minio.ToErrorResponse(err)
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, 0, ErrNotFound
+		}
+		return nil, 0, fmt.Errorf("stat object: %w", err)
+	}
+
+	return &minioReaderAt{obj: obj}, info.Size, nil
+}
+
 func (s *MinIOStore) Head(ctx context.Context, bucket, key string) (ObjectInfo, error) {
 	info, err := s.client.StatObject(ctx, bucket, key, minio.StatObjectOptions{})
 	if err != nil {
