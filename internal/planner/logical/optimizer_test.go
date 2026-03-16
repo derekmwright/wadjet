@@ -199,3 +199,65 @@ func TestOptimize_PartitionExtraction(t *testing.T) {
 		t.Fatalf("expected month=03, got %v", scanNode.PartitionFilter)
 	}
 }
+
+func TestReorderJoins_SmallestFirst(t *testing.T) {
+	// Three-way join: A (large, no filter) JOIN B (filtered) JOIN C (no filter)
+	scanA := NewScan("big_table", "a")
+	scanB := NewScan("small_table", "b")
+	scanB.ScanPredicates = []Predicate{{Column: "status", Op: "=", Value: "active"}}
+	scanC := NewScan("medium_table", "c")
+
+	// Original: (A JOIN B) JOIN C
+	join1 := NewJoin(scanA, scanB, "inner", "a.id = b.id")
+	join2 := NewJoin(join1, scanC, "inner", "b.id = c.id")
+
+	result := reorderJoins(join2)
+
+	if result.Type != NodeJoin {
+		t.Fatalf("expected join, got %s", result.Type)
+	}
+	// B (filtered, cheapest) should be the leftmost leaf
+	leftmost := result
+	for leftmost.Type == NodeJoin {
+		leftmost = leftmost.Children[0]
+	}
+	if leftmost.TableName != "small_table" {
+		t.Errorf("expected filtered table 'small_table' as leftmost, got %q", leftmost.TableName)
+	}
+}
+
+func TestReorderJoins_SkipsOuterJoins(t *testing.T) {
+	// LEFT JOIN order is semantically significant — should not be reordered
+	scanA := NewScan("t1", "a")
+	scanB := NewScan("t2", "b")
+	scanB.ScanPredicates = []Predicate{{Column: "x", Op: "=", Value: 1}}
+	scanC := NewScan("t3", "c")
+
+	join1 := NewJoin(scanA, scanB, "left", "a.id = b.id")
+	join2 := NewJoin(join1, scanC, "inner", "b.id = c.id")
+
+	result := reorderJoins(join2)
+
+	if result.Type != NodeJoin {
+		t.Fatalf("expected join, got %s", result.Type)
+	}
+	// LEFT JOIN is not flattenable, so the inner join on top is only 2-way — no reorder
+	left := result.Children[0]
+	if left.Type != NodeJoin || left.JoinType != "left" {
+		t.Errorf("expected left join preserved, got type=%s joinType=%s", left.Type, left.JoinType)
+	}
+}
+
+func TestReorderJoins_TwoTableNoop(t *testing.T) {
+	scanA := NewScan("t1", "")
+	scanB := NewScan("t2", "")
+	join := NewJoin(scanA, scanB, "inner", "t1.id = t2.id")
+
+	result := reorderJoins(join)
+	if result.Type != NodeJoin {
+		t.Fatalf("expected join, got %s", result.Type)
+	}
+	if result.Children[0].TableName != "t1" || result.Children[1].TableName != "t2" {
+		t.Error("two-way join should not be reordered")
+	}
+}

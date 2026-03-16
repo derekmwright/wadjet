@@ -17,6 +17,7 @@ func Optimize(plan *Node) *Node {
 	plan = decorrelateExists(plan)
 	plan = decorrelateScalarSubqueries(plan)
 	plan = pushdownPredicates(plan)
+	plan = reorderJoins(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
 	computeRequiredColumns(plan)
@@ -1469,4 +1470,225 @@ func pruneProjections(n *Node) *Node {
 	}
 
 	return n
+}
+
+// ---------------------------------------------------------------------------
+// Join reordering — greedy smallest-relation-first heuristic
+// ---------------------------------------------------------------------------
+
+// joinEdge represents a join condition between two relations.
+type joinEdge struct {
+	leftIdx  int
+	rightIdx int
+	joinType string
+	joinCond string
+}
+
+// reorderJoins recursively looks for chains of INNER JOINs and reorders them
+// so that smaller (filtered) relations are joined first.
+func reorderJoins(n *Node) *Node {
+	if n == nil {
+		return nil
+	}
+	for i, child := range n.Children {
+		n.Children[i] = reorderJoins(child)
+	}
+	if n.Type != NodeJoin {
+		return n
+	}
+	// Only reorder chains of inner joins (outer join order is semantically significant)
+	if !isInnerJoin(n) {
+		return n
+	}
+	// Flatten the join chain
+	var rels []*Node
+	var edges []joinEdge
+	flattenJoinChain(n, &rels, &edges)
+	if len(rels) < 3 {
+		return n // 2-way join, nothing to reorder
+	}
+	return greedyJoinReorder(rels, edges)
+}
+
+// isInnerJoin returns true for INNER joins (or empty join type which defaults to inner).
+func isInnerJoin(n *Node) bool {
+	if n.Type != NodeJoin {
+		return false
+	}
+	jt := strings.ToLower(n.JoinType)
+	return jt == "" || jt == "inner" || jt == "cross"
+}
+
+// flattenJoinChain walks a left-deep chain of inner joins, collecting leaf
+// relations and the join conditions between them.
+func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
+	if n.Type != NodeJoin || !isInnerJoin(n) {
+		*rels = append(*rels, n)
+		return
+	}
+	flattenJoinChain(n.Children[0], rels, edges)
+	leftAfter := len(*rels)
+
+	rightBefore := len(*rels)
+	flattenJoinChain(n.Children[1], rels, edges)
+
+	// The join condition connects some relation from the left subtree to some
+	// relation from the right subtree. We record the range but for greedy
+	// reordering we just need to know which relations a condition touches.
+	// Use the last relation added from each side as the representative.
+	leftRep := leftAfter - 1
+	rightRep := rightBefore // first (and usually only) relation from right
+	if leftRep < 0 {
+		leftRep = 0
+	}
+
+	if n.JoinCond != "" {
+		*edges = append(*edges, joinEdge{
+			leftIdx:  leftRep,
+			rightIdx: rightRep,
+			joinType: n.JoinType,
+			joinCond: n.JoinCond,
+		})
+	}
+}
+
+// estimateRelCost assigns a heuristic cost to a relation subtree.
+// Lower cost = smaller/cheaper → should be joined first.
+func estimateRelCost(n *Node) int {
+	if n == nil {
+		return 1000
+	}
+	switch n.Type {
+	case NodeScan:
+		// Bare scan — medium cost
+		if len(n.ScanPredicates) > 0 || len(n.PartitionFilter) > 0 {
+			return 10 // filtered scan is cheap
+		}
+		return 100
+	case NodeFilter:
+		// Filter above something — cheaper than the thing below
+		base := estimateRelCost(n.Children[0])
+		return base / 2
+	case NodeAggregate:
+		// Aggregation reduces rows
+		return 50
+	case NodeDistinct:
+		return 50
+	default:
+		// Complex subplan
+		return 200
+	}
+}
+
+// greedyJoinReorder builds a left-deep join tree starting from the cheapest
+// relation, greedily adding the cheapest connected neighbor at each step.
+func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
+	n := len(rels)
+	costs := make([]int, n)
+	for i, r := range rels {
+		costs[i] = estimateRelCost(r)
+	}
+
+	// Build adjacency: for each relation, which edges connect to it
+	relEdges := make([][]int, n)
+	for i := range relEdges {
+		relEdges[i] = []int{}
+	}
+	for ei, e := range edges {
+		relEdges[e.leftIdx] = append(relEdges[e.leftIdx], ei)
+		relEdges[e.rightIdx] = append(relEdges[e.rightIdx], ei)
+	}
+
+	// Track which table names each slot in the plan covers (for condition matching)
+	relTables := make([]map[string]bool, n)
+	for i, r := range rels {
+		relTables[i], _ = collectScanInfo(r)
+	}
+
+	// Pick the cheapest relation as the starting point
+	used := make([]bool, n)
+	bestIdx := 0
+	for i := 1; i < n; i++ {
+		if costs[i] < costs[bestIdx] {
+			bestIdx = i
+		}
+	}
+	used[bestIdx] = true
+	plan := rels[bestIdx]
+	planTables := copyBoolMap(relTables[bestIdx])
+	usedEdges := make([]bool, len(edges))
+
+	// Greedily add remaining relations
+	for added := 1; added < n; added++ {
+		bestNext := -1
+		bestEdge := -1
+		bestCost := int(^uint(0) >> 1) // MaxInt
+
+		// Find the cheapest unused relation that has an edge to the current plan
+		for ei, e := range edges {
+			if usedEdges[ei] {
+				continue
+			}
+			var candidate int
+			if used[e.leftIdx] && !used[e.rightIdx] {
+				candidate = e.rightIdx
+			} else if used[e.rightIdx] && !used[e.leftIdx] {
+				candidate = e.leftIdx
+			} else {
+				continue
+			}
+			if costs[candidate] < bestCost {
+				bestCost = costs[candidate]
+				bestNext = candidate
+				bestEdge = ei
+			}
+		}
+
+		if bestNext < 0 {
+			// No connected relation found — pick cheapest unused (cross join)
+			for i := 0; i < n; i++ {
+				if !used[i] && costs[i] < bestCost {
+					bestCost = costs[i]
+					bestNext = i
+				}
+			}
+			if bestNext < 0 {
+				break
+			}
+			plan = NewJoin(plan, rels[bestNext], "inner", "")
+		} else {
+			usedEdges[bestEdge] = true
+			plan = NewJoin(plan, rels[bestNext], edges[bestEdge].joinType, edges[bestEdge].joinCond)
+		}
+		used[bestNext] = true
+		for t := range relTables[bestNext] {
+			planTables[t] = true
+		}
+
+		// Attach any other edges that are now fully covered by the plan
+		for ei, e := range edges {
+			if usedEdges[ei] {
+				continue
+			}
+			if used[e.leftIdx] && used[e.rightIdx] {
+				// Both sides covered — add as additional filter on the join
+				usedEdges[ei] = true
+				if plan.JoinCond != "" {
+					plan.JoinCond = plan.JoinCond + " AND " + e.joinCond
+				} else {
+					plan.JoinCond = e.joinCond
+				}
+			}
+		}
+	}
+
+	return plan
+}
+
+func copyBoolMap(m map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
