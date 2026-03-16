@@ -54,6 +54,15 @@ type Scanner struct {
 	fileIdx   int
 	stats     ScanStats
 	schema    []pqt.Column
+
+	// Async prefetch: downloads next file while current is being decoded
+	prefetchCh chan prefetchedFile
+}
+
+type prefetchedFile struct {
+	file scanFile
+	buf  *bytes.Buffer
+	err  error
 }
 
 type scanFile struct {
@@ -136,7 +145,31 @@ func (s *Scanner) Init(ctx context.Context) error {
 		"files_to_scan", len(s.files),
 	)
 
+	// Start prefetching the first file
+	if len(s.files) > 0 {
+		s.prefetchCh = make(chan prefetchedFile, 1)
+		s.startPrefetch(ctx, 0)
+	}
+
 	return nil
+}
+
+// startPrefetch downloads file at idx in a background goroutine.
+func (s *Scanner) startPrefetch(ctx context.Context, idx int) {
+	file := s.files[idx]
+	go func() {
+		buf := fileReadPool.Get().(*bytes.Buffer)
+		buf.Reset()
+
+		rc, _, err := s.cat.Store().Get(ctx, s.cat.Bucket(), file.path)
+		if err != nil {
+			s.prefetchCh <- prefetchedFile{file: file, buf: buf, err: err}
+			return
+		}
+		_, err = io.Copy(buf, rc)
+		rc.Close()
+		s.prefetchCh <- prefetchedFile{file: file, buf: buf, err: err}
+	}()
 }
 
 func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
@@ -145,12 +178,35 @@ func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
 			return nil, fmt.Errorf("scan cancelled: %w", err)
 		}
 
-		file := s.files[s.fileIdx]
+		// Receive prefetched file data
+		var pf prefetchedFile
+		select {
+		case pf = <-s.prefetchCh:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
 		s.fileIdx++
 
-		b, err := s.readFile(ctx, file)
+		// Start prefetching the next file while we decode this one
+		if s.fileIdx < len(s.files) {
+			s.startPrefetch(ctx, s.fileIdx)
+		}
+
+		if pf.err != nil {
+			if pf.err == objstore.ErrNotFound {
+				s.logger.Warn("file not found, skipping", "path", pf.file.path)
+				fileReadPool.Put(pf.buf)
+				continue
+			}
+			fileReadPool.Put(pf.buf)
+			return nil, fmt.Errorf("reading file %s: %w", pf.file.path, pf.err)
+		}
+
+		b, err := s.decodeFile(ctx, pf.buf, pf.file)
+		fileReadPool.Put(pf.buf)
 		if err != nil {
-			return nil, fmt.Errorf("reading file %s: %w", file.path, err)
+			return nil, fmt.Errorf("reading file %s: %w", pf.file.path, err)
 		}
 		if b == nil || b.ActiveLen() == 0 {
 			continue
@@ -162,29 +218,12 @@ func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
 
 func (s *Scanner) Close() error { return nil }
 
-func (s *Scanner) readFile(ctx context.Context, file scanFile) (*batch.RecordBatch, error) {
-	rc, info, err := s.cat.Store().Get(ctx, s.cat.Bucket(), file.path)
-	if err != nil {
-		if err == objstore.ErrNotFound {
-			s.logger.Warn("file not found, skipping", "path", file.path)
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer rc.Close()
-
-	buf := fileReadPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	if _, err := io.Copy(buf, rc); err != nil {
-		fileReadPool.Put(buf)
-		return nil, fmt.Errorf("reading file data: %w", err)
-	}
+// decodeFile decodes a Parquet file from a pre-downloaded buffer into a RecordBatch.
+func (s *Scanner) decodeFile(ctx context.Context, buf *bytes.Buffer, file scanFile) (*batch.RecordBatch, error) {
 	data := buf.Bytes()
-	_ = info
 
 	reader, err := pqt.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
-		fileReadPool.Put(buf)
 		return nil, fmt.Errorf("opening parquet reader: %w", err)
 	}
 
@@ -230,9 +269,6 @@ func (s *Scanner) readFile(ctx context.Context, file scanFile) (*batch.RecordBat
 		s.stats.RowsScanned += int64(b.Len)
 		batches = append(batches, b)
 	}
-
-	// Return read buffer to pool — all batch data is now in columnar vectors
-	fileReadPool.Put(buf)
 
 	if len(batches) == 0 {
 		return nil, nil
