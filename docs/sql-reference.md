@@ -62,25 +62,45 @@ WITH traffic(ip, total_bytes) AS (
 SELECT ip, total_bytes FROM traffic ORDER BY total_bytes DESC LIMIT 10
 ```
 
-## UNION
+## Set Operations (UNION, INTERSECT, EXCEPT)
 
 Combine results from multiple queries:
 
 ```sql
--- Deduplicated (UNION)
+-- UNION: all rows from both sides, deduplicated
 SELECT src_ip AS ip FROM flow_logs
 UNION
 SELECT ip_address AS ip FROM device_inventory
 
--- All rows (UNION ALL)
+-- UNION ALL: all rows, including duplicates
 SELECT src_ip, bytes_in FROM flow_logs WHERE date = '2026-03-14'
 UNION ALL
 SELECT src_ip, bytes_in FROM flow_logs WHERE date = '2026-03-15'
 ORDER BY bytes_in DESC
 LIMIT 100
+
+-- INTERSECT: only rows that appear in both sides
+SELECT user_id FROM purchases
+INTERSECT
+SELECT user_id FROM refunds
+
+-- INTERSECT ALL: preserves duplicate counts (min of left/right occurrences)
+SELECT user_id FROM purchases
+INTERSECT ALL
+SELECT user_id FROM refunds
+
+-- EXCEPT: rows from the left side that do not appear in the right side
+SELECT src_ip FROM flow_logs
+EXCEPT
+SELECT ip_address FROM blocklist
+
+-- EXCEPT ALL: each right occurrence removes one left occurrence
+SELECT src_ip FROM flow_logs
+EXCEPT ALL
+SELECT ip_address FROM blocklist
 ```
 
-ORDER BY and LIMIT after a UNION apply to the combined result.
+All set operations support ORDER BY and LIMIT on the combined result. Operations are left-associative when chained (e.g., `A UNION B EXCEPT C` is `(A UNION B) EXCEPT C`).
 
 ## EXPLAIN
 
@@ -548,7 +568,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Caelum includes 53 built-in scalar functions across several categories.
+Caelum includes 58 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -795,7 +815,6 @@ From lowest to highest:
 ## Limitations
 
 - No UPDATE / DELETE (append-only analytical store)
-- No INTERSECT / EXCEPT (UNION and UNION ALL are supported)
 - No correlated subqueries
 - No lateral joins
 - No recursive CTEs

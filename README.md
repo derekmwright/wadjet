@@ -33,13 +33,13 @@ go build -o caelum ./cmd/caelum
 Full analytical SQL via a custom recursive descent parser:
 
 - SELECT, EXPLAIN, DESCRIBE, CREATE TABLE, DROP TABLE
-- CTEs (`WITH ... AS`), UNION / UNION ALL
+- CTEs (`WITH ... AS`), UNION / INTERSECT / EXCEPT (with ALL variants)
 - INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs
 - Subqueries (scalar, IN, EXISTS, derived tables)
 - Window functions with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs
 - GROUP BY and ORDER BY with positional references
 - CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE
-- 53 built-in scalar functions (string, math, date/time, network, UUID, conditional)
+- 58 built-in scalar functions (string, math, date/time, network, UUID, conditional)
 - User-defined functions (CREATE FUNCTION)
 
 ```sql

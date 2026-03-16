@@ -21,6 +21,8 @@ const (
 	NodeDistinct
 	NodeWindow
 	NodeUnion
+	NodeIntersect
+	NodeExcept
 )
 
 func (n NodeType) String() string {
@@ -45,6 +47,10 @@ func (n NodeType) String() string {
 		return "Window"
 	case NodeUnion:
 		return "Union"
+	case NodeIntersect:
+		return "Intersect"
+	case NodeExcept:
+		return "Except"
 	default:
 		return fmt.Sprintf("Unknown(%d)", int(n))
 	}
@@ -206,6 +212,26 @@ func NewUnion(left, right *Node, all bool) *Node {
 	}
 }
 
+// NewIntersect creates an intersect node. Returns only rows present in both sides.
+// If all is true (INTERSECT ALL), preserves duplicates; otherwise deduplicates.
+func NewIntersect(left, right *Node, all bool) *Node {
+	return &Node{
+		Type:     NodeIntersect,
+		Children: []*Node{left, right},
+		UnionAll: all, // reuse field: true = ALL variant
+	}
+}
+
+// NewExcept creates an except node. Returns rows from left that are not in right.
+// If all is true (EXCEPT ALL), preserves duplicates; otherwise deduplicates.
+func NewExcept(left, right *Node, all bool) *Node {
+	return &Node{
+		Type:     NodeExcept,
+		Children: []*Node{left, right},
+		UnionAll: all, // reuse field: true = ALL variant
+	}
+}
+
 // PrettyPrint returns a formatted string representation of the plan tree.
 func (n *Node) PrettyPrint(indent int) string {
 	prefix := ""
@@ -261,6 +287,18 @@ func (n *Node) PrettyPrint(indent int) string {
 		mode := "UNION"
 		if n.UnionAll {
 			mode = "UNION ALL"
+		}
+		s = fmt.Sprintf("%s%s", prefix, mode)
+	case NodeIntersect:
+		mode := "INTERSECT"
+		if n.UnionAll {
+			mode = "INTERSECT ALL"
+		}
+		s = fmt.Sprintf("%s%s", prefix, mode)
+	case NodeExcept:
+		mode := "EXCEPT"
+		if n.UnionAll {
+			mode = "EXCEPT ALL"
 		}
 		s = fmt.Sprintf("%s%s", prefix, mode)
 	default:

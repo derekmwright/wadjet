@@ -78,6 +78,8 @@ const (
 	TokenKWDistinct
 	TokenKWAll
 	TokenKWUnion
+	TokenKWIntersect
+	TokenKWExcept
 	TokenKWAnd
 	TokenKWIn
 	TokenKWBetween
@@ -154,6 +156,8 @@ var keywords = map[string]TokenType{
 	"DISTINCT":  TokenKWDistinct,
 	"ALL":       TokenKWAll,
 	"UNION":     TokenKWUnion,
+	"INTERSECT": TokenKWIntersect,
+	"EXCEPT":    TokenKWExcept,
 	"AND":       TokenKWAnd,
 	"IN":        TokenKWIn,
 	"BETWEEN":   TokenKWBetween,

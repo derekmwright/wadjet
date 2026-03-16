@@ -443,8 +443,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		*stages = append(*stages, stage)
 
-	case logical.NodeUnion:
-		// Each side of the UNION runs independently; merge results at the end.
+	case logical.NodeUnion, logical.NodeIntersect, logical.NodeExcept:
+		// Each side of the set operation runs independently; merge results at the end.
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}
@@ -552,7 +552,11 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 	case logical.NodeWindow:
 		return p.buildWindow(ctx, node)
 	case logical.NodeUnion:
-		return p.buildUnion(ctx, node)
+		return p.buildSetOp(ctx, node, "union")
+	case logical.NodeIntersect:
+		return p.buildSetOp(ctx, node, "intersect")
+	case logical.NodeExcept:
+		return p.buildSetOp(ctx, node, "except")
 	default:
 		return nil, nil, nil, fmt.Errorf("unsupported plan node: %s", node.Type)
 	}
@@ -1007,50 +1011,51 @@ func (p *Planner) buildDistinct(ctx context.Context, node *logical.Node) (exec.S
 	return source, ops, sink, nil
 }
 
-func (p *Planner) buildUnion(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	if len(node.Children) < 2 {
-		return nil, nil, nil, fmt.Errorf("union requires two children")
+		return nil, nil, nil, fmt.Errorf("%s requires two children", op)
 	}
 
-	// Build pipelines for both children, execute them, collect results.
 	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("building union left side: %w", err)
+		return nil, nil, nil, fmt.Errorf("building %s left side: %w", op, err)
 	}
 
 	rightSource, rightOps, _, err := p.buildPipeline(ctx, node.Children[1])
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("building union right side: %w", err)
+		return nil, nil, nil, fmt.Errorf("building %s right side: %w", op, err)
 	}
 
-	unionSrc := &unionSourceAdapter{
+	src := &setOpSourceAdapter{
 		leftSource:  leftSource,
 		leftOps:     leftOps,
 		rightSource: rightSource,
 		rightOps:    rightOps,
-		unionAll:    node.UnionAll,
+		all:         node.UnionAll,
+		op:          op,
 	}
 
-	return unionSrc, nil, &exec.CollectSink{}, nil
+	return src, nil, &exec.CollectSink{}, nil
 }
 
-// unionSourceAdapter executes both child pipelines, collects their results,
-// and emits the concatenated (and optionally deduplicated) batches.
-type unionSourceAdapter struct {
+// setOpSourceAdapter executes both child pipelines and applies the set operation
+// (union, intersect, or except) to produce the result.
+type setOpSourceAdapter struct {
 	leftSource  exec.Source
 	leftOps     []exec.UnaryOperator
 	rightSource exec.Source
 	rightOps    []exec.UnaryOperator
-	unionAll    bool
+	all         bool
+	op          string // "union", "intersect", "except"
 
 	batches     []*batch.RecordBatch
 	idx         int
 	initialized bool
 }
 
-func (u *unionSourceAdapter) Init(_ context.Context) error { return nil }
+func (u *setOpSourceAdapter) Init(_ context.Context) error { return nil }
 
-func (u *unionSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
+func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if !u.initialized {
 		u.initialized = true
 
@@ -1062,7 +1067,7 @@ func (u *unionSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 			Sink:   leftSink,
 		}
 		if err := leftPipe.Run(ctx); err != nil {
-			return nil, fmt.Errorf("executing union left side: %w", err)
+			return nil, fmt.Errorf("executing %s left side: %w", u.op, err)
 		}
 
 		// Run right pipeline
@@ -1073,19 +1078,24 @@ func (u *unionSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 			Sink:   rightSink,
 		}
 		if err := rightPipe.Run(ctx); err != nil {
-			return nil, fmt.Errorf("executing union right side: %w", err)
+			return nil, fmt.Errorf("executing %s right side: %w", u.op, err)
 		}
 
-		// Collect all rows from both sides
-		allRows := append(leftSink.Rows, rightSink.Rows...)
+		var resultRows []map[string]any
 
-		if !u.unionAll {
-			// UNION (distinct): deduplicate rows using a hash set
-			allRows = deduplicateRows(allRows)
+		switch u.op {
+		case "intersect":
+			resultRows = intersectRows(leftSink.Rows, rightSink.Rows, u.all)
+		case "except":
+			resultRows = exceptRows(leftSink.Rows, rightSink.Rows, u.all)
+		default: // "union"
+			resultRows = append(leftSink.Rows, rightSink.Rows...)
+			if !u.all {
+				resultRows = deduplicateRows(resultRows)
+			}
 		}
 
-		if len(allRows) > 0 {
-			// Determine schema from left side batches; fall back to right side
+		if len(resultRows) > 0 {
 			var schema []parquet.Column
 			if leftBatches := leftSink.Batches(); len(leftBatches) > 0 {
 				schema = leftBatches[0].Schema
@@ -1093,7 +1103,7 @@ func (u *unionSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 				schema = rightBatches[0].Schema
 			}
 			if schema != nil {
-				u.batches = []*batch.RecordBatch{batch.FromRows(schema, allRows)}
+				u.batches = []*batch.RecordBatch{batch.FromRows(schema, resultRows)}
 			}
 		}
 	}
@@ -1106,7 +1116,7 @@ func (u *unionSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 	return b, nil
 }
 
-func (u *unionSourceAdapter) Close() error {
+func (u *setOpSourceAdapter) Close() error {
 	err := u.leftSource.Close()
 	if e := u.rightSource.Close(); e != nil && err == nil {
 		err = e
@@ -1122,6 +1132,79 @@ func (u *unionSourceAdapter) Close() error {
 		}
 	}
 	return err
+}
+
+// intersectRows returns rows that appear in both left and right.
+// If all is true, preserves duplicate counts (min of left/right occurrences).
+func intersectRows(left, right []map[string]any, all bool) []map[string]any {
+	rightSet := make(map[string]int, len(right))
+	for _, row := range right {
+		rightSet[rowHashKey(row)]++
+	}
+
+	if all {
+		result := make([]map[string]any, 0)
+		for _, row := range left {
+			key := rowHashKey(row)
+			if rightSet[key] > 0 {
+				result = append(result, row)
+				rightSet[key]--
+			}
+		}
+		return result
+	}
+
+	// INTERSECT (distinct): deduplicate, then keep only rows in both
+	seen := make(map[string]struct{}, len(left))
+	result := make([]map[string]any, 0)
+	for _, row := range left {
+		key := rowHashKey(row)
+		if _, already := seen[key]; already {
+			continue
+		}
+		seen[key] = struct{}{}
+		if rightSet[key] > 0 {
+			result = append(result, row)
+		}
+	}
+	return result
+}
+
+// exceptRows returns rows from left that do not appear in right.
+// If all is true, each right occurrence removes one left occurrence.
+func exceptRows(left, right []map[string]any, all bool) []map[string]any {
+	rightSet := make(map[string]int, len(right))
+	for _, row := range right {
+		rightSet[rowHashKey(row)]++
+	}
+
+	if all {
+		result := make([]map[string]any, 0)
+		for _, row := range left {
+			key := rowHashKey(row)
+			if rightSet[key] > 0 {
+				rightSet[key]--
+			} else {
+				result = append(result, row)
+			}
+		}
+		return result
+	}
+
+	// EXCEPT (distinct): deduplicate left, exclude rows in right
+	seen := make(map[string]struct{}, len(left))
+	result := make([]map[string]any, 0)
+	for _, row := range left {
+		key := rowHashKey(row)
+		if _, already := seen[key]; already {
+			continue
+		}
+		seen[key] = struct{}{}
+		if rightSet[key] == 0 {
+			result = append(result, row)
+		}
+	}
+	return result
 }
 
 // deduplicateRows removes duplicate rows from a slice of row maps.

@@ -265,6 +265,99 @@ func TestBuildFromSelectUnionWithOrderByLimit(t *testing.T) {
 	}
 }
 
+func TestBuildFromSelectIntersect(t *testing.T) {
+	pq, err := plansql.Parse("SELECT id FROM events INTERSECT SELECT id FROM users")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		t.Fatalf("ExtractSelect: %v", err)
+	}
+
+	plan, err := BuildFromSelect(info)
+	if err != nil {
+		t.Fatalf("BuildFromSelect: %v", err)
+	}
+
+	pp := plan.PrettyPrint(0)
+	t.Logf("Plan:\n%s", pp)
+
+	node := findNodeType(plan, NodeIntersect)
+	if node == nil {
+		t.Fatal("expected an Intersect node in the plan")
+	}
+	if node.UnionAll {
+		t.Error("expected INTERSECT (not ALL)")
+	}
+	if len(node.Children) != 2 {
+		t.Fatalf("expected 2 children, got %d", len(node.Children))
+	}
+}
+
+func TestBuildFromSelectExcept(t *testing.T) {
+	pq, err := plansql.Parse("SELECT id FROM events EXCEPT ALL SELECT id FROM users")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		t.Fatalf("ExtractSelect: %v", err)
+	}
+
+	plan, err := BuildFromSelect(info)
+	if err != nil {
+		t.Fatalf("BuildFromSelect: %v", err)
+	}
+
+	pp := plan.PrettyPrint(0)
+	t.Logf("Plan:\n%s", pp)
+
+	node := findNodeType(plan, NodeExcept)
+	if node == nil {
+		t.Fatal("expected an Except node in the plan")
+	}
+	if !node.UnionAll {
+		t.Error("expected EXCEPT ALL")
+	}
+}
+
+func TestBuildFromSelectIntersectWithOrderByLimit(t *testing.T) {
+	pq, err := plansql.Parse("SELECT id FROM events EXCEPT SELECT id FROM users ORDER BY id LIMIT 3")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		t.Fatalf("ExtractSelect: %v", err)
+	}
+
+	plan, err := BuildFromSelect(info)
+	if err != nil {
+		t.Fatalf("BuildFromSelect: %v", err)
+	}
+
+	pp := plan.PrettyPrint(0)
+	t.Logf("Plan:\n%s", pp)
+
+	if plan.Type != NodeLimit {
+		t.Fatalf("expected top node to be Limit, got %s", plan.Type)
+	}
+	if plan.LimitVal != 3 {
+		t.Errorf("expected LIMIT 3, got %d", plan.LimitVal)
+	}
+
+	sortNode := plan.Children[0]
+	if sortNode.Type != NodeSort {
+		t.Fatalf("expected Sort below Limit, got %s", sortNode.Type)
+	}
+
+	exceptNode := sortNode.Children[0]
+	if exceptNode.Type != NodeExcept {
+		t.Fatalf("expected Except below Sort, got %s", exceptNode.Type)
+	}
+}
+
 // findNodeType does a depth-first search for the first node of the given type.
 func findNodeType(node *Node, typ NodeType) *Node {
 	if node.Type == typ {

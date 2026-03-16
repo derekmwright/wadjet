@@ -404,6 +404,89 @@ func TestExtractNestedUnion(t *testing.T) {
 	}
 }
 
+func TestParseIntersect(t *testing.T) {
+	tests := []struct {
+		sql    string
+		wantOp SetOp
+		all    bool
+	}{
+		{"SELECT id FROM events INTERSECT SELECT id FROM users", SetOpIntersect, false},
+		{"SELECT id FROM events INTERSECT ALL SELECT id FROM users", SetOpIntersect, true},
+		{"SELECT id FROM events EXCEPT SELECT id FROM users", SetOpExcept, false},
+		{"SELECT id FROM events EXCEPT ALL SELECT id FROM users", SetOpExcept, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Union == nil {
+				t.Fatal("expected Union (set op) to be non-nil")
+			}
+			if info.Union.Op != tt.wantOp {
+				t.Errorf("op: got %q, want %q", info.Union.Op, tt.wantOp)
+			}
+			if info.Union.All != tt.all {
+				t.Errorf("all: got %v, want %v", info.Union.All, tt.all)
+			}
+		})
+	}
+}
+
+func TestParseIntersectWithOrderByAndLimit(t *testing.T) {
+	parsed, err := Parse("SELECT id FROM events INTERSECT SELECT id FROM users ORDER BY id DESC LIMIT 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Union == nil {
+		t.Fatal("expected set op to be non-nil")
+	}
+	if info.Union.Op != SetOpIntersect {
+		t.Errorf("op: got %q, want INTERSECT", info.Union.Op)
+	}
+	if len(info.OrderBy) != 1 || !info.OrderBy[0].Desc {
+		t.Errorf("expected ORDER BY id DESC, got %v", info.OrderBy)
+	}
+	if info.Limit != "5" {
+		t.Errorf("expected LIMIT 5, got %s", info.Limit)
+	}
+}
+
+func TestParseMixedSetOps(t *testing.T) {
+	// SELECT a UNION SELECT b EXCEPT SELECT c => ((a UNION b) EXCEPT c)
+	parsed, err := Parse("SELECT id FROM a UNION SELECT id FROM b EXCEPT SELECT id FROM c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Union == nil {
+		t.Fatal("expected outer set op")
+	}
+	if info.Union.Op != SetOpExcept {
+		t.Errorf("outer op: got %q, want EXCEPT", info.Union.Op)
+	}
+	// Left side should be a UNION
+	if info.Union.Left.Union == nil {
+		t.Fatal("expected inner set op on left")
+	}
+	if info.Union.Left.Union.Op != SetOpUnion {
+		t.Errorf("inner op: got %q, want UNION", info.Union.Left.Union.Op)
+	}
+}
+
 // Edge cases that the old substring-slicing parser would fail on.
 
 func TestParseCreateFunctionParensInBody(t *testing.T) {

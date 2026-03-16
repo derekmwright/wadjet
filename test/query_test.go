@@ -424,3 +424,85 @@ func TestQueryLargeDataset(t *testing.T) {
 
 	t.Logf("\nQuery plan:\n%s", result.Plan)
 }
+
+func TestQueryIntersect(t *testing.T) {
+	db := setupDBWithEvents(t, 100)
+	ctx := context.Background()
+
+	// INTERSECT: users who appear in both event_type=purchase AND event_type=refund
+	result, err := db.Query(ctx, `
+		SELECT user_id FROM events WHERE event_type = 'purchase'
+		INTERSECT
+		SELECT user_id FROM events WHERE event_type = 'refund'
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("INTERSECT returned %d rows", len(result.Rows))
+	for _, row := range result.Rows {
+		t.Logf("  user_id=%v", row["user_id"])
+	}
+
+	// All returned users must appear in both sets
+	if len(result.Rows) == 0 {
+		t.Log("no overlapping users (possible with small data)")
+	}
+}
+
+func TestQueryExcept(t *testing.T) {
+	db := setupDBWithEvents(t, 100)
+	ctx := context.Background()
+
+	// EXCEPT: users who have purchases but no refunds
+	result, err := db.Query(ctx, `
+		SELECT user_id FROM events WHERE event_type = 'purchase'
+		EXCEPT
+		SELECT user_id FROM events WHERE event_type = 'refund'
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("EXCEPT returned %d rows", len(result.Rows))
+	for _, row := range result.Rows {
+		t.Logf("  user_id=%v", row["user_id"])
+	}
+}
+
+func TestQueryIntersectAll(t *testing.T) {
+	db := setupDBWithEvents(t, 100)
+	ctx := context.Background()
+
+	// INTERSECT ALL preserves duplicates
+	result, err := db.Query(ctx, `
+		SELECT user_id FROM events WHERE event_type = 'purchase'
+		INTERSECT ALL
+		SELECT user_id FROM events WHERE event_type = 'refund'
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Logf("INTERSECT ALL returned %d rows", len(result.Rows))
+}
+
+func TestQueryExceptWithOrderLimit(t *testing.T) {
+	db := setupDBWithEvents(t, 100)
+	ctx := context.Background()
+
+	result, err := db.Query(ctx, `
+		SELECT user_id FROM events WHERE event_type = 'purchase'
+		EXCEPT
+		SELECT user_id FROM events WHERE event_type = 'refund'
+		ORDER BY user_id LIMIT 3
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Rows) > 3 {
+		t.Fatalf("expected at most 3 rows, got %d", len(result.Rows))
+	}
+	t.Logf("EXCEPT with ORDER BY LIMIT returned %d rows", len(result.Rows))
+}

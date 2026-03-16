@@ -39,16 +39,27 @@ func (p *selectParser) isKeyword(kw TokenType) bool {
 	return p.cur.typ == kw
 }
 
-// parseSelectOrUnion parses a SELECT or UNION query.
+// parseSelectOrUnion parses a SELECT with optional set operations (UNION, INTERSECT, EXCEPT).
 func (p *selectParser) parseSelectOrUnion() (*SelectInfo, error) {
 	left, err := p.parseSingleSelect()
 	if err != nil {
 		return nil, err
 	}
 
-	// Check for UNION
-	for p.isKeyword(TokenKWUnion) {
-		p.advance() // consume UNION
+	// Check for set operations: UNION, INTERSECT, EXCEPT
+	for {
+		var op SetOp
+		switch {
+		case p.isKeyword(TokenKWUnion):
+			op = SetOpUnion
+		case p.isKeyword(TokenKWIntersect):
+			op = SetOpIntersect
+		case p.isKeyword(TokenKWExcept):
+			op = SetOpExcept
+		default:
+			goto done
+		}
+		p.advance() // consume UNION/INTERSECT/EXCEPT
 		all := false
 		if p.isKeyword(TokenKWAll) {
 			p.advance()
@@ -56,12 +67,13 @@ func (p *selectParser) parseSelectOrUnion() (*SelectInfo, error) {
 		}
 		right, err := p.parseSingleSelect()
 		if err != nil {
-			return nil, fmt.Errorf("parsing UNION right side: %w", err)
+			return nil, fmt.Errorf("parsing %s right side: %w", op, err)
 		}
 		left = &SelectInfo{
-			Union: &UnionInfo{Left: left, Right: right, All: all},
+			Union: &UnionInfo{Left: left, Right: right, All: all, Op: op},
 		}
 	}
+done:
 
 	// ORDER BY (applies to outermost query or UNION result)
 	if p.isKeyword(TokenKWOrder) {
@@ -300,7 +312,8 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 func (p *selectParser) isFromKeyword() bool {
 	switch p.cur.typ {
 	case TokenKWFrom, TokenKWWhere, TokenKWGroup, TokenKWHaving,
-		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWJoin,
+		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWIntersect,
+		TokenKWExcept, TokenKWJoin,
 		TokenKWInner, TokenKWLeft, TokenKWRight, TokenKWFull,
 		TokenKWCross, TokenKWOn, TokenKWOffset, TokenKWOver,
 		TokenKWNulls, TokenKWRows, TokenKWRange, TokenKWUnbounded,
@@ -450,7 +463,8 @@ func (p *selectParser) isJoinKeyword() bool {
 	switch p.cur.typ {
 	case TokenKWJoin, TokenKWInner, TokenKWLeft, TokenKWRight, TokenKWFull,
 		TokenKWCross, TokenKWOn, TokenKWWhere, TokenKWGroup, TokenKWHaving,
-		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWOffset,
+		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWIntersect,
+		TokenKWExcept, TokenKWOffset,
 		TokenKWNulls, TokenKWRows, TokenKWRange:
 		return true
 	}

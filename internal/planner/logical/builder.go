@@ -16,9 +16,9 @@ func BuildFromSelect(info *plansql.SelectInfo) (*Node, error) {
 // buildFromSelectWithCTEs constructs a logical plan, resolving CTE references
 // to inline sub-plans instead of table scans.
 func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
-	// Handle UNION queries
+	// Handle set operations (UNION, INTERSECT, EXCEPT)
 	if info.Union != nil {
-		return buildUnionPlan(info, ctes)
+		return buildSetOpPlan(info, ctes)
 	}
 
 	var plan *Node
@@ -320,20 +320,33 @@ func convertBound(b plansql.FrameBound) WindowBound {
 	return wb
 }
 
-// buildUnionPlan constructs a logical plan for a UNION query.
-func buildUnionPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
+// buildSetOpPlan constructs a logical plan for a set operation (UNION, INTERSECT, EXCEPT).
+func buildSetOpPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
+	op := info.Union.Op
+	if op == "" {
+		op = plansql.SetOpUnion // backwards compat
+	}
+
 	leftPlan, err := buildFromSelectWithCTEs(info.Union.Left, ctes)
 	if err != nil {
-		return nil, fmt.Errorf("building UNION left side: %w", err)
+		return nil, fmt.Errorf("building %s left side: %w", op, err)
 	}
 	rightPlan, err := buildFromSelectWithCTEs(info.Union.Right, ctes)
 	if err != nil {
-		return nil, fmt.Errorf("building UNION right side: %w", err)
+		return nil, fmt.Errorf("building %s right side: %w", op, err)
 	}
 
-	plan := NewUnion(leftPlan, rightPlan, info.Union.All)
+	var plan *Node
+	switch op {
+	case plansql.SetOpIntersect:
+		plan = NewIntersect(leftPlan, rightPlan, info.Union.All)
+	case plansql.SetOpExcept:
+		plan = NewExcept(leftPlan, rightPlan, info.Union.All)
+	default:
+		plan = NewUnion(leftPlan, rightPlan, info.Union.All)
+	}
 
-	// ORDER BY on the overall UNION
+	// ORDER BY on the overall set operation
 	if len(info.OrderBy) > 0 {
 		var orderExprs []OrderExpr
 		for _, ob := range info.OrderBy {
@@ -346,7 +359,7 @@ func buildUnionPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, err
 		plan = NewSort(plan, orderExprs)
 	}
 
-	// LIMIT on the overall UNION
+	// LIMIT on the overall set operation
 	if info.Limit != "" {
 		limit, err := strconv.Atoi(info.Limit)
 		if err != nil {

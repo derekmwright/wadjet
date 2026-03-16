@@ -176,11 +176,21 @@ func ExtractSelect(pq *ParsedQuery) (*SelectInfo, error) {
 	return nil, fmt.Errorf("no SELECT info in parsed query")
 }
 
-// UnionInfo describes a UNION query with left and right sides.
+// SetOp identifies the type of set operation.
+type SetOp string
+
+const (
+	SetOpUnion     SetOp = "UNION"
+	SetOpIntersect SetOp = "INTERSECT"
+	SetOpExcept    SetOp = "EXCEPT"
+)
+
+// UnionInfo describes a set operation (UNION, INTERSECT, EXCEPT) with left and right sides.
 type UnionInfo struct {
 	Left  *SelectInfo
 	Right *SelectInfo
-	All   bool // true for UNION ALL (no dedup)
+	All   bool  // true for UNION ALL / INTERSECT ALL / EXCEPT ALL (no dedup)
+	Op    SetOp // the set operation type (defaults to UNION for backwards compat)
 }
 
 // SelectInfo contains extracted information from a SELECT statement.
