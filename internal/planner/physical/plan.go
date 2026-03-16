@@ -1003,7 +1003,21 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		return nil, nil, nil, err
 	}
 
-	isOverAggregate := hasAggregateAncestor(child)
+	aggNode := findAggregateAncestor(child)
+	isOverAggregate := aggNode != nil
+
+	// Build a map from GROUP BY expression string → synthetic column name.
+	// When a SELECT expression matches a GROUP BY expression (e.g.,
+	// SUBSTR(c_phone, 1, 2)), the original columns may not exist in the
+	// aggregate output — use the synthetic column instead.
+	gbExprToSyn := map[string]string{}
+	if isOverAggregate && len(aggNode.GroupByExprs) == len(aggNode.GroupBy) {
+		for i, gbExpr := range aggNode.GroupByExprs {
+			if gbExpr != nil && !isSimpleColRef(gbExpr) {
+				gbExprToSyn[gbExpr.String()] = fmt.Sprintf("__gb_expr_%d", i)
+			}
+		}
+	}
 
 	var projCols []exec.ProjectColumn
 	for _, proj := range node.Projections {
@@ -1024,7 +1038,18 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 
 		// Try to compile from AST expression first, fall back to ColumnRef
 		var expression exec.Expression
-		if proj.ASTExpr != nil && !proj.IsAgg {
+
+		// When projecting over an aggregate, check if this SELECT expression
+		// matches a GROUP BY expression that was pre-computed into a synthetic
+		// column. If so, use a ColumnRef to the synthetic column instead of
+		// re-evaluating the expression (the original columns are gone).
+		if isOverAggregate && proj.ASTExpr != nil && !proj.IsAgg {
+			if synName, ok := gbExprToSyn[proj.ASTExpr.String()]; ok {
+				expression = exec.ColumnRef(synName)
+			}
+		}
+
+		if expression == nil && proj.ASTExpr != nil && !proj.IsAgg {
 			outerTables := collectTableAliases(child)
 			outerCols := collectOuterColumns(child)
 			var compiled expr.Expr
@@ -2056,13 +2081,19 @@ func aggOutputType(funcName string, distinct bool) parquet.TypeID {
 // hasAggregateAncestor checks if a node is an Aggregate, or if it's a
 // passthrough node (e.g., Filter for HAVING) whose child is an Aggregate.
 func hasAggregateAncestor(node *logical.Node) bool {
+	return findAggregateAncestor(node) != nil
+}
+
+// findAggregateAncestor returns the Aggregate node if the given node is one,
+// or traverses through passthrough nodes (Filter/HAVING) to find it.
+func findAggregateAncestor(node *logical.Node) *logical.Node {
 	if node.Type == logical.NodeAggregate {
-		return true
+		return node
 	}
 	if node.Type == logical.NodeFilter && len(node.Children) > 0 {
-		return hasAggregateAncestor(node.Children[0])
+		return findAggregateAncestor(node.Children[0])
 	}
-	return false
+	return nil
 }
 
 // resolveNullsLast determines whether nulls should sort last for a given order expression.

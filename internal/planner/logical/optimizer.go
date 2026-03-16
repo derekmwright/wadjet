@@ -268,6 +268,10 @@ func collectColTableRefs(expr plansql.Node, refs map[string]bool, colToTable map
 		if e.Else != nil {
 			collectColTableRefs(e.Else, refs, colToTable, resolved)
 		}
+	case *plansql.SubqueryNode, *plansql.ExistsNode:
+		// Subqueries may contain correlated references to outer tables.
+		// Mark unresolved to prevent pushdown past joins.
+		*resolved = false
 	case *plansql.Lit:
 		// No column refs
 	}
@@ -517,8 +521,9 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		return nil
 	}
 
-	// Check for correlated references
-	refs, err := plansql.FindCorrelatedRefs(exists.SQL, outerTables)
+	// Check for correlated references — use column-aware version to
+	// detect unqualified outer refs (e.g., c_custkey from customer).
+	refs, err := plansql.FindCorrelatedRefsWithColumns(exists.SQL, outerTables, outerColMap)
 	if err != nil || len(refs) == 0 {
 		return nil // uncorrelated, keep as-is
 	}
