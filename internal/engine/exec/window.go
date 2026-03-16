@@ -22,6 +22,14 @@ const (
 	WinAvg
 	WinMin
 	WinMax
+	WinLag
+	WinLead
+	WinFirstValue
+	WinLastValue
+	WinNtile
+	WinPercentRank
+	WinCumeDist
+	WinNthValue
 )
 
 // WindowFrameSpec describes a window frame specification for execution.
@@ -39,13 +47,17 @@ type WindowBound struct {
 
 // WindowColumn defines a window function computation.
 type WindowColumn struct {
-	Func        WindowFunc
-	InputCol    string // for aggregate window functions (empty for ranking funcs)
-	OutputCol   string
-	OutputType  parquet.TypeID
-	PartitionBy []string
-	OrderBy     []SortKey
-	Frame       *WindowFrameSpec // optional frame specification
+	Func           WindowFunc
+	InputCol       string // for aggregate window functions (empty for ranking funcs)
+	OutputCol      string
+	OutputType     parquet.TypeID
+	PartitionBy    []string
+	OrderBy        []SortKey
+	Frame          *WindowFrameSpec // optional frame specification
+	LagLeadOffset  int              // offset for LAG/LEAD (default 1)
+	LagLeadDefault any              // default value for LAG/LEAD (default NULL)
+	NtileBuckets   int              // number of buckets for NTILE
+	NthValueN      int              // N for NTH_VALUE (1-based)
 }
 
 // Window is a SinkSource that collects all rows, partitions and sorts them,
@@ -364,6 +376,131 @@ func computePartition(rows []map[string]any, wc WindowColumn) {
 			}
 			for _, row := range rows {
 				row[wc.OutputCol] = maxVal
+			}
+		}
+
+	case WinLag:
+		offset := wc.LagLeadOffset
+		if offset <= 0 {
+			offset = 1
+		}
+		for i, row := range rows {
+			if i-offset >= 0 {
+				row[wc.OutputCol] = rows[i-offset][wc.InputCol]
+			} else {
+				row[wc.OutputCol] = wc.LagLeadDefault
+			}
+		}
+
+	case WinLead:
+		offset := wc.LagLeadOffset
+		if offset <= 0 {
+			offset = 1
+		}
+		for i, row := range rows {
+			if i+offset < len(rows) {
+				row[wc.OutputCol] = rows[i+offset][wc.InputCol]
+			} else {
+				row[wc.OutputCol] = wc.LagLeadDefault
+			}
+		}
+
+	case WinFirstValue:
+		if len(rows) > 0 {
+			first := rows[0][wc.InputCol]
+			for _, row := range rows {
+				row[wc.OutputCol] = first
+			}
+		}
+
+	case WinLastValue:
+		if len(wc.OrderBy) > 0 {
+			// With ORDER BY: running last value (current row is the "last" seen so far)
+			for i, row := range rows {
+				row[wc.OutputCol] = rows[i][wc.InputCol]
+			}
+		} else {
+			// Without ORDER BY: last value of entire partition
+			if len(rows) > 0 {
+				last := rows[len(rows)-1][wc.InputCol]
+				for _, row := range rows {
+					row[wc.OutputCol] = last
+				}
+			}
+		}
+
+	case WinNtile:
+		buckets := wc.NtileBuckets
+		if buckets <= 0 {
+			buckets = 1
+		}
+		n := len(rows)
+		base := n / buckets
+		remainder := n % buckets
+		bucket := int64(1)
+		count := 0
+		limit := base
+		if remainder > 0 {
+			limit++
+		}
+		for _, row := range rows {
+			row[wc.OutputCol] = bucket
+			count++
+			if count >= limit && int(bucket) < buckets {
+				bucket++
+				count = 0
+				if int(bucket) <= remainder {
+					limit = base + 1
+				} else {
+					limit = base
+				}
+			}
+		}
+
+	case WinPercentRank:
+		n := len(rows)
+		if n <= 1 {
+			for _, row := range rows {
+				row[wc.OutputCol] = float64(0)
+			}
+		} else {
+			rank := int64(1)
+			for i, row := range rows {
+				if i > 0 && !sameOrderValues(rows[i-1], row, wc.OrderBy) {
+					rank = int64(i + 1)
+				}
+				row[wc.OutputCol] = float64(rank-1) / float64(n-1)
+			}
+		}
+
+	case WinCumeDist:
+		n := len(rows)
+		for i := 0; i < n; {
+			// Find peer group end
+			j := i + 1
+			for j < n && sameOrderValues(rows[i], rows[j], wc.OrderBy) {
+				j++
+			}
+			cd := float64(j) / float64(n)
+			for k := i; k < j; k++ {
+				rows[k][wc.OutputCol] = cd
+			}
+			i = j
+		}
+
+	case WinNthValue:
+		nth := wc.NthValueN
+		if nth <= 0 {
+			nth = 1
+		}
+		if nth <= len(rows) {
+			val := rows[nth-1][wc.InputCol]
+			for _, row := range rows {
+				row[wc.OutputCol] = val
+			}
+		} else {
+			for _, row := range rows {
+				row[wc.OutputCol] = nil
 			}
 		}
 	}

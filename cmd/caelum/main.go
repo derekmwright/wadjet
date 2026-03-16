@@ -21,6 +21,7 @@ import (
 	"github.com/derekmwright/caelum/internal/format"
 	"github.com/derekmwright/caelum/internal/metrics"
 	"github.com/derekmwright/caelum/internal/server"
+	"github.com/derekmwright/caelum/internal/server/mcp"
 	"github.com/derekmwright/caelum/internal/server/pgwire"
 	"github.com/derekmwright/caelum/internal/storage/catalog"
 	"github.com/derekmwright/caelum/internal/storage/objstore"
@@ -83,6 +84,7 @@ func main() {
 	rootCmd.AddCommand(dropTableCmd())
 	rootCmd.AddCommand(shellCmd())
 	rootCmd.AddCommand(clustersCmd())
+	rootCmd.AddCommand(mcpCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -923,4 +925,48 @@ func buildTLSConfig(cfg config.AuthMTLS) (*tls.Config, error) {
 		return nil, err
 	}
 	return auth.NewTLSConfig(cfg.CertFile, cfg.KeyFile, clientCA)
+}
+
+func mcpCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "mcp",
+		Short: "Start MCP (Model Context Protocol) server on stdio for AI agent integration",
+		Long: `Start a Model Context Protocol server that communicates over stdin/stdout.
+This allows AI agents (Claude Desktop, Claude Code, Cursor, etc.) to discover
+tables, inspect schemas, and execute SQL queries against Caelum.
+
+Configure in Claude Desktop's claude_desktop_config.json:
+
+  {
+    "mcpServers": {
+      "caelum": {
+        "command": "caelum",
+        "args": ["mcp", "--endpoint", "localhost:9000"]
+      }
+    }
+  }`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+			defer cancel()
+
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+			store, err := newStore()
+			if err != nil {
+				return fmt.Errorf("initializing storage: %w", err)
+			}
+
+			db, err := caelum.Open(ctx, caelum.Config{
+				Store:  store,
+				Bucket: bucket,
+				Logger: logger,
+			})
+			if err != nil {
+				return fmt.Errorf("opening database: %w", err)
+			}
+
+			srv := mcp.NewServer(db, logger)
+			return srv.ServeStdio(ctx, os.Stdin, os.Stdout)
+		},
+	}
 }

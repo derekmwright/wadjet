@@ -2,6 +2,9 @@ package exec
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"strings"
 	"sync"
 
 	"github.com/derekmwright/caelum/internal/engine/batch"
@@ -20,6 +23,13 @@ const (
 	AggMax
 	AggAvg
 	AggCountDistinct
+	AggStringAgg
+	AggBoolAnd
+	AggBoolOr
+	AggStddev
+	AggVariance
+	AggStddevPop
+	AggVarPop
 )
 
 // AggColumn defines an aggregation to perform.
@@ -28,6 +38,7 @@ type AggColumn struct {
 	InputCol   string // input column name (empty for COUNT(*))
 	OutputCol  string // output column name
 	OutputType parquet.TypeID
+	Separator  string // separator for STRING_AGG (default ',')
 }
 
 // HashAggregate is a Sink that performs grouped aggregation with a hash map.
@@ -58,6 +69,42 @@ type groupState struct {
 	keyValues    []any
 	accs         []kernel.Accumulator
 	distinctSets []map[string]struct{} // per-agg distinct value sets (nil if not COUNT(DISTINCT))
+	extraState   []any                 // per-agg custom state (string_agg builder, variance state, etc.)
+}
+
+// stringAggState accumulates strings with a separator.
+type stringAggState struct {
+	parts []string
+	sep   string
+}
+
+// varianceState tracks running variance using Welford's online algorithm.
+type varianceState struct {
+	count int64
+	mean  float64
+	m2    float64
+}
+
+func (v *varianceState) update(x float64) {
+	v.count++
+	delta := x - v.mean
+	v.mean += delta / float64(v.count)
+	delta2 := x - v.mean
+	v.m2 += delta * delta2
+}
+
+func (v *varianceState) variancePop() float64 {
+	if v.count == 0 {
+		return 0
+	}
+	return v.m2 / float64(v.count)
+}
+
+func (v *varianceState) varianceSamp() float64 {
+	if v.count < 2 {
+		return 0
+	}
+	return v.m2 / float64(v.count-1)
 }
 
 func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
@@ -107,11 +154,23 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	return nil
 }
 
+// columnIndexFallback resolves a column name with fallback for table-qualified names.
+// Tries the name as-is first, then strips a "table." prefix and retries.
+func columnIndexFallback(b *batch.RecordBatch, name string) int {
+	idx := b.ColumnIndex(name)
+	if idx < 0 {
+		if dotIdx := strings.Index(name, "."); dotIdx >= 0 {
+			idx = b.ColumnIndex(name[dotIdx+1:])
+		}
+	}
+	return idx
+}
+
 func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	h.groupColIdx = make([]int, len(h.GroupByCols))
 	h.groupColTypes = make([]batch.TypeID, len(h.GroupByCols))
 	for i, col := range h.GroupByCols {
-		idx := b.ColumnIndex(col)
+		idx := columnIndexFallback(b, col)
 		h.groupColIdx[i] = idx
 		if idx >= 0 {
 			h.groupColTypes[i] = b.Columns[idx].Type
@@ -188,11 +247,25 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 			keyValues:    keyVals,
 			accs:         make([]kernel.Accumulator, len(h.Aggs)),
 			distinctSets: make([]map[string]struct{}, len(h.Aggs)),
+			extraState:   make([]any, len(h.Aggs)),
 		}
-		// Initialize distinct sets for COUNT(DISTINCT) aggs
+		// Initialize per-agg state
 		for i, agg := range h.Aggs {
-			if agg.Func == AggCountDistinct {
+			switch agg.Func {
+			case AggCountDistinct:
 				gs.distinctSets[i] = make(map[string]struct{})
+			case AggStringAgg:
+				sep := agg.Separator
+				if sep == "" {
+					sep = ","
+				}
+				gs.extraState[i] = &stringAggState{sep: sep}
+			case AggStddev, AggVariance, AggStddevPop, AggVarPop:
+				gs.extraState[i] = &varianceState{}
+			case AggBoolAnd:
+				gs.extraState[i] = true // starts true, AND-ed with each value
+			case AggBoolOr:
+				gs.extraState[i] = false // starts false, OR-ed with each value
 			}
 		}
 		h.groups[key] = gs
@@ -202,7 +275,8 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 
 	// Update accumulators via pre-resolved typed kernels
 	for i, agg := range h.Aggs {
-		if agg.Func == AggCountDistinct {
+		switch agg.Func {
+		case AggCountDistinct:
 			// COUNT(DISTINCT): hash the value, add to set
 			idx := h.aggColIdx[i]
 			if idx < 0 {
@@ -210,24 +284,106 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 			}
 			v := b.Columns[idx]
 			if v.Nulls.IsNullFast(row) {
-				continue // NULLs excluded from COUNT(DISTINCT)
+				continue
 			}
 			h.keyBuf = h.keyBuf[:0]
 			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
 			valKey := string(h.keyBuf)
 			gs.distinctSets[i][valKey] = struct{}{}
-			continue
-		}
-		updater := h.aggUpdaters[i]
-		if updater == nil {
-			continue
-		}
-		idx := h.aggColIdx[i]
-		if idx >= 0 {
-			updater(&gs.accs[i], b.Columns[idx], row)
-		} else {
-			// COUNT(*) — pass nil vec
-			updater(&gs.accs[i], nil, row)
+
+		case AggStringAgg:
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			state := gs.extraState[i].(*stringAggState)
+			state.parts = append(state.parts, fmt.Sprint(v.GetValue(row)))
+
+		case AggBoolAnd:
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			val := v.GetValue(row)
+			boolVal := false
+			switch tv := val.(type) {
+			case bool:
+				boolVal = tv
+			case int64:
+				boolVal = tv != 0
+			case float64:
+				boolVal = tv != 0
+			}
+			current := gs.extraState[i].(bool)
+			gs.extraState[i] = current && boolVal
+
+		case AggBoolOr:
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			val := v.GetValue(row)
+			boolVal := false
+			switch tv := val.(type) {
+			case bool:
+				boolVal = tv
+			case int64:
+				boolVal = tv != 0
+			case float64:
+				boolVal = tv != 0
+			}
+			current := gs.extraState[i].(bool)
+			gs.extraState[i] = current || boolVal
+
+		case AggStddev, AggVariance, AggStddevPop, AggVarPop:
+			idx := h.aggColIdx[i]
+			if idx < 0 {
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				continue
+			}
+			state := gs.extraState[i].(*varianceState)
+			var fval float64
+			switch v.Type {
+			case batch.TypeInt64, batch.TypeTimestamp:
+				fval = float64(v.Int64Data[row])
+			case batch.TypeInt32:
+				fval = float64(v.Int32Data[row])
+			case batch.TypeFloat64:
+				fval = v.Float64Data[row]
+			case batch.TypeFloat32:
+				fval = float64(v.Float32Data[row])
+			default:
+				continue
+			}
+			state.update(fval)
+
+		default:
+			updater := h.aggUpdaters[i]
+			if updater == nil {
+				continue
+			}
+			idx := h.aggColIdx[i]
+			if idx >= 0 {
+				updater(&gs.accs[i], b.Columns[idx], row)
+			} else {
+				// COUNT(*) — pass nil vec
+				updater(&gs.accs[i], nil, row)
+			}
 		}
 	}
 }
@@ -288,9 +444,47 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		// Set aggregate columns
 		for j, agg := range h.Aggs {
 			colIdx := len(h.GroupByCols) + j
-			if agg.Func == AggCountDistinct {
+			switch agg.Func {
+			case AggCountDistinct:
 				out.Columns[colIdx].SetValue(i, int64(len(gs.distinctSets[j])))
-			} else {
+			case AggStringAgg:
+				state := gs.extraState[j].(*stringAggState)
+				if len(state.parts) == 0 {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, strings.Join(state.parts, state.sep))
+				}
+			case AggBoolAnd, AggBoolOr:
+				out.Columns[colIdx].SetValue(i, gs.extraState[j].(bool))
+			case AggStddev:
+				state := gs.extraState[j].(*varianceState)
+				if state.count < 2 {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, math.Sqrt(state.varianceSamp()))
+				}
+			case AggVariance:
+				state := gs.extraState[j].(*varianceState)
+				if state.count < 2 {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, state.varianceSamp())
+				}
+			case AggStddevPop:
+				state := gs.extraState[j].(*varianceState)
+				if state.count == 0 {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, math.Sqrt(state.variancePop()))
+				}
+			case AggVarPop:
+				state := gs.extraState[j].(*varianceState)
+				if state.count == 0 {
+					out.Columns[colIdx].SetValue(i, nil)
+				} else {
+					out.Columns[colIdx].SetValue(i, state.variancePop())
+				}
+			default:
 				result := finalizeKernelAcc(&gs.accs[j], agg.Func)
 				out.Columns[colIdx].SetValue(i, result)
 			}

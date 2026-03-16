@@ -4,10 +4,18 @@
 package expr
 
 import (
+	"crypto/md5"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"net"
+	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +48,11 @@ type ColRef struct {
 func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 	if !e.resolved {
 		e.idx = b.ColumnIndex(e.Name)
+		if e.idx < 0 && strings.Contains(e.Name, ".") {
+			// Qualified name not found: try unqualified (strip table prefix)
+			parts := strings.SplitN(e.Name, ".", 2)
+			e.idx = b.ColumnIndex(parts[1])
+		}
 		if e.idx >= 0 {
 			e.typ = b.Columns[e.idx].Type
 		}
@@ -81,6 +94,10 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 	if !e.resolved {
 		e.idx = b.ColumnIndex(e.Name)
+		if e.idx < 0 && strings.Contains(e.Name, ".") {
+			parts := strings.SplitN(e.Name, ".", 2)
+			e.idx = b.ColumnIndex(parts[1])
+		}
 		if e.idx >= 0 {
 			e.typ = b.Columns[e.idx].Type
 		}
@@ -96,6 +113,10 @@ func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 func (e *ColRef) EvalString(b *batch.RecordBatch, row int) (string, bool) {
 	if !e.resolved {
 		e.idx = b.ColumnIndex(e.Name)
+		if e.idx < 0 && strings.Contains(e.Name, ".") {
+			parts := strings.SplitN(e.Name, ".", 2)
+			e.idx = b.ColumnIndex(parts[1])
+		}
 		if e.idx >= 0 {
 			e.typ = b.Columns[e.idx].Type
 		}
@@ -560,6 +581,80 @@ func init() {
 
 	// Additional date/time functions
 	"second": fnSecond,
+
+	// String: regex and parsing
+	"split_part":     fnSplitPart,
+	"strpos":         fnStrPos,
+	"position":       fnStrPos,
+	"regexp_like":    fnRegexpLike,
+	"regexp_extract": fnRegexpExtract,
+	"regexp_replace": fnRegexpReplace,
+
+	// Encoding
+	"to_hex":     fnToHex,
+	"from_hex":   fnFromHex,
+	"to_base64":  fnToBase64,
+	"from_base64": fnFromBase64,
+
+	// Date/time conversion
+	"from_unixtime": fnFromUnixtime,
+	"to_unixtime":   fnToUnixtime,
+	"date_format":   fnDateFormat,
+	"date_parse":    fnDateParse,
+
+	// Hash
+	"md5":    fnMD5,
+	"sha256": fnSHA256,
+	"sha512": fnSHA512,
+
+	// Bitwise
+	"bitwise_and": fnBitwiseAnd,
+	"bitwise_or":  fnBitwiseOr,
+	"bitwise_xor": fnBitwiseXor,
+	"bitwise_not": fnBitwiseNot,
+
+	// String: padding and character
+	"lpad":       fnLPad,
+	"rpad":       fnRPad,
+	"chr":        fnChr,
+	"codepoint":  fnCodepoint,
+	"concat_ws":  fnConcatWS,
+	"char_length": fnCharLength,
+	"translate":  fnTranslate,
+
+	// Math: trigonometry
+	"pi":       fnPi,
+	"degrees":  fnDegrees,
+	"radians":  fnRadians,
+	"sin":      fnSin,
+	"cos":      fnCos,
+	"tan":      fnTan,
+	"asin":     fnAsin,
+	"acos":     fnAcos,
+	"atan":     fnAtan,
+	"atan2":    fnAtan2,
+	"cbrt":     fnCbrt,
+	"log2":     fnLog2,
+	"truncate": fnTruncate,
+	"rand":     fnRandom,
+	"random":   fnRandom,
+
+	// JSON
+	"json_extract":        fnJSONExtract,
+	"json_extract_scalar": fnJSONExtractScalar,
+	"json_array_length":   fnJSONArrayLength,
+	"json_valid":          fnJSONValid,
+
+	// URL
+	"url_extract_host":     fnURLExtractHost,
+	"url_extract_port":     fnURLExtractPort,
+	"url_extract_path":     fnURLExtractPath,
+	"url_extract_protocol": fnURLExtractProtocol,
+	"url_extract_query":    fnURLExtractQuery,
+	"url_extract_parameter": fnURLExtractParameter,
+
+	// Type introspection
+	"typeof": fnTypeof,
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
@@ -1663,5 +1758,722 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 		return fmt.Sprint(v)
 	default:
 		return v
+	}
+}
+
+// --- String: regex and parsing ---
+
+func fnSplitPart(args []any) any {
+	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
+		return nil
+	}
+	parts := strings.Split(toString(args[0]), toString(args[1]))
+	idx := int(ToFloat64(args[2])) - 1 // SQL is 1-indexed
+	if idx < 0 || idx >= len(parts) {
+		return ""
+	}
+	return parts[idx]
+}
+
+func fnStrPos(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	pos := strings.Index(toString(args[0]), toString(args[1]))
+	if pos < 0 {
+		return float64(0)
+	}
+	return float64(pos + 1) // 1-based
+}
+
+func fnRegexpLike(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	matched, err := regexp.MatchString(toString(args[1]), toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return matched
+}
+
+func fnRegexpExtract(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	re, err := regexp.Compile(toString(args[1]))
+	if err != nil {
+		return nil
+	}
+	group := 0
+	if len(args) >= 3 && args[2] != nil {
+		group = int(ToFloat64(args[2]))
+	}
+	matches := re.FindStringSubmatch(toString(args[0]))
+	if matches == nil || group >= len(matches) {
+		return nil
+	}
+	return matches[group]
+}
+
+func fnRegexpReplace(args []any) any {
+	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
+		return nil
+	}
+	re, err := regexp.Compile(toString(args[1]))
+	if err != nil {
+		return nil
+	}
+	return re.ReplaceAllString(toString(args[0]), toString(args[2]))
+}
+
+// --- Encoding functions ---
+
+func fnToHex(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return fmt.Sprintf("%x", int64(ToFloat64(args[0])))
+}
+
+func fnFromHex(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	var n int64
+	_, err := fmt.Sscanf(toString(args[0]), "%x", &n)
+	if err != nil {
+		return nil
+	}
+	return float64(n)
+}
+
+func fnToBase64(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return base64.StdEncoding.EncodeToString([]byte(toString(args[0])))
+}
+
+func fnFromBase64(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return string(decoded)
+}
+
+// --- Date/time conversion functions ---
+
+func fnFromUnixtime(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	epoch := int64(ToFloat64(args[0]))
+	return time.Unix(epoch, 0).UTC().Format(time.RFC3339)
+}
+
+func fnToUnixtime(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	t := parseTime(args[0])
+	if t.IsZero() {
+		return nil
+	}
+	return float64(t.Unix())
+}
+
+func fnDateFormat(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	t := parseTime(args[0])
+	if t.IsZero() {
+		return nil
+	}
+	return t.Format(sqlFormatToGo(toString(args[1])))
+}
+
+func fnDateParse(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	t, err := time.Parse(sqlFormatToGo(toString(args[1])), toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return t.Format(time.RFC3339)
+}
+
+// sqlFormatToGo converts SQL date format specifiers to Go time layout.
+func sqlFormatToGo(format string) string {
+	r := strings.NewReplacer(
+		"%Y", "2006",
+		"%m", "01",
+		"%d", "02",
+		"%H", "15",
+		"%i", "04",
+		"%s", "05",
+		"%S", "05",
+		"%M", "January",
+		"%b", "Jan",
+		"%W", "Monday",
+		"%a", "Mon",
+		"%p", "PM",
+		"%T", "15:04:05",
+	)
+	return r.Replace(format)
+}
+
+// --- Hash functions ---
+
+func fnMD5(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	h := md5.Sum([]byte(toString(args[0])))
+	return hex.EncodeToString(h[:])
+}
+
+func fnSHA256(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	h := sha256.Sum256([]byte(toString(args[0])))
+	return hex.EncodeToString(h[:])
+}
+
+func fnSHA512(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	h := sha512.Sum512([]byte(toString(args[0])))
+	return hex.EncodeToString(h[:])
+}
+
+// --- Bitwise functions ---
+
+func fnBitwiseAnd(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	return float64(int64(ToFloat64(args[0])) & int64(ToFloat64(args[1])))
+}
+
+func fnBitwiseOr(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	return float64(int64(ToFloat64(args[0])) | int64(ToFloat64(args[1])))
+}
+
+func fnBitwiseXor(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	return float64(int64(ToFloat64(args[0])) ^ int64(ToFloat64(args[1])))
+}
+
+func fnBitwiseNot(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return float64(^int64(ToFloat64(args[0])))
+}
+
+// --- String: padding and character ---
+
+func fnLPad(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	n := int(ToFloat64(args[1]))
+	pad := " "
+	if len(args) >= 3 && args[2] != nil {
+		pad = toString(args[2])
+	}
+	if len(pad) == 0 || n <= len(s) {
+		if n < 0 {
+			return ""
+		}
+		if n <= len(s) {
+			return s[:n]
+		}
+		return s
+	}
+	var sb strings.Builder
+	for sb.Len()+len(s) < n {
+		sb.WriteString(pad)
+	}
+	result := sb.String()
+	need := n - len(s)
+	if len(result) > need {
+		result = result[:need]
+	}
+	return result + s
+}
+
+func fnRPad(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	n := int(ToFloat64(args[1]))
+	pad := " "
+	if len(args) >= 3 && args[2] != nil {
+		pad = toString(args[2])
+	}
+	if len(pad) == 0 || n <= len(s) {
+		if n < 0 {
+			return ""
+		}
+		if n <= len(s) {
+			return s[:n]
+		}
+		return s
+	}
+	var sb strings.Builder
+	sb.WriteString(s)
+	for sb.Len() < n {
+		sb.WriteString(pad)
+	}
+	result := sb.String()
+	if len(result) > n {
+		result = result[:n]
+	}
+	return result
+}
+
+func fnChr(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	code := int(ToFloat64(args[0]))
+	if code < 0 || code > 0x10FFFF {
+		return nil
+	}
+	return string(rune(code))
+}
+
+func fnCodepoint(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	if len(s) == 0 {
+		return nil
+	}
+	runes := []rune(s)
+	return float64(runes[0])
+}
+
+func fnConcatWS(args []any) any {
+	if len(args) < 2 || args[0] == nil {
+		return nil
+	}
+	sep := toString(args[0])
+	parts := make([]string, 0, len(args)-1)
+	for _, a := range args[1:] {
+		if a == nil {
+			continue // skip nulls
+		}
+		parts = append(parts, toString(a))
+	}
+	return strings.Join(parts, sep)
+}
+
+func fnCharLength(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return float64(len([]rune(toString(args[0]))))
+}
+
+func fnTranslate(args []any) any {
+	if len(args) < 3 || args[0] == nil || args[1] == nil || args[2] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	from := []rune(toString(args[1]))
+	to := []rune(toString(args[2]))
+	mapping := make(map[rune]rune)
+	for i, r := range from {
+		if i < len(to) {
+			mapping[r] = to[i]
+		} else {
+			mapping[r] = -1 // mark for deletion
+		}
+	}
+	var sb strings.Builder
+	for _, r := range s {
+		if repl, ok := mapping[r]; ok {
+			if repl >= 0 {
+				sb.WriteRune(repl)
+			}
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+// --- Math: trigonometry ---
+
+func fnPi(args []any) any {
+	return math.Pi
+}
+
+func fnDegrees(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return ToFloat64(args[0]) * 180.0 / math.Pi
+}
+
+func fnRadians(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return ToFloat64(args[0]) * math.Pi / 180.0
+}
+
+func fnSin(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return math.Sin(ToFloat64(args[0]))
+}
+
+func fnCos(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return math.Cos(ToFloat64(args[0]))
+}
+
+func fnTan(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return math.Tan(ToFloat64(args[0]))
+}
+
+func fnAsin(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	v := ToFloat64(args[0])
+	if v < -1 || v > 1 {
+		return nil
+	}
+	return math.Asin(v)
+}
+
+func fnAcos(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	v := ToFloat64(args[0])
+	if v < -1 || v > 1 {
+		return nil
+	}
+	return math.Acos(v)
+}
+
+func fnAtan(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return math.Atan(ToFloat64(args[0]))
+}
+
+func fnAtan2(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	return math.Atan2(ToFloat64(args[0]), ToFloat64(args[1]))
+}
+
+func fnCbrt(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return math.Cbrt(ToFloat64(args[0]))
+}
+
+func fnLog2(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	v := ToFloat64(args[0])
+	if v <= 0 {
+		return nil
+	}
+	return math.Log2(v)
+}
+
+func fnTruncate(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	v := ToFloat64(args[0])
+	decimals := 0
+	if len(args) >= 2 && args[1] != nil {
+		decimals = int(ToFloat64(args[1]))
+	}
+	pow := math.Pow(10, float64(decimals))
+	return math.Trunc(v*pow) / pow
+}
+
+func fnRandom(args []any) any {
+	return rand.Float64()
+}
+
+// --- JSON functions ---
+
+func fnJSONExtract(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	jsonStr := toString(args[0])
+	path := toString(args[1])
+	result := jsonPathExtract(jsonStr, path)
+	if result == nil {
+		return nil
+	}
+	// Return as JSON string for non-scalar values
+	switch v := result.(type) {
+	case string:
+		return v
+	case float64:
+		return v
+	case bool:
+		return v
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil
+		}
+		return string(b)
+	}
+}
+
+func fnJSONExtractScalar(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	result := jsonPathExtract(toString(args[0]), toString(args[1]))
+	if result == nil {
+		return nil
+	}
+	switch v := result.(type) {
+	case string:
+		return v
+	case float64:
+		return v
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	default:
+		return nil // non-scalar
+	}
+}
+
+func fnJSONArrayLength(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	s := toString(args[0])
+	var arr []any
+	if err := json.Unmarshal([]byte(s), &arr); err != nil {
+		return nil
+	}
+	return float64(len(arr))
+}
+
+func fnJSONValid(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	return json.Valid([]byte(toString(args[0])))
+}
+
+// jsonPathExtract extracts a value from a JSON string using a simple dot-path.
+// Supports: $.key, $.key.nested, $.key[0], $.key[0].nested
+func jsonPathExtract(jsonStr, path string) any {
+	var data any
+	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+		return nil
+	}
+	// Strip leading "$." or "$"
+	if strings.HasPrefix(path, "$.") {
+		path = path[2:]
+	} else if strings.HasPrefix(path, "$") {
+		path = path[1:]
+	}
+	if path == "" {
+		return data
+	}
+	return navigateJSON(data, path)
+}
+
+func navigateJSON(data any, path string) any {
+	current := data
+	for path != "" {
+		// Parse next segment
+		var segment string
+		dotIdx := strings.IndexAny(path, ".[")
+		if dotIdx < 0 {
+			segment = path
+			path = ""
+		} else if path[dotIdx] == '.' {
+			segment = path[:dotIdx]
+			path = path[dotIdx+1:]
+		} else {
+			// '[' found
+			segment = path[:dotIdx]
+			path = path[dotIdx:]
+		}
+
+		if segment != "" {
+			obj, ok := current.(map[string]any)
+			if !ok {
+				return nil
+			}
+			current = obj[segment]
+			if current == nil {
+				return nil
+			}
+		}
+
+		// Handle array index [N]
+		if strings.HasPrefix(path, "[") {
+			end := strings.Index(path, "]")
+			if end < 0 {
+				return nil
+			}
+			idxStr := path[1:end]
+			path = path[end+1:]
+			if strings.HasPrefix(path, ".") {
+				path = path[1:]
+			}
+			var idx int
+			if _, err := fmt.Sscanf(idxStr, "%d", &idx); err != nil {
+				return nil
+			}
+			arr, ok := current.([]any)
+			if !ok || idx < 0 || idx >= len(arr) {
+				return nil
+			}
+			current = arr[idx]
+		}
+	}
+	return current
+}
+
+// --- URL functions ---
+
+func fnURLExtractHost(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	u, err := url.Parse(toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return u.Hostname()
+}
+
+func fnURLExtractPort(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	u, err := url.Parse(toString(args[0]))
+	if err != nil || u.Port() == "" {
+		return nil
+	}
+	var port int
+	if _, err := fmt.Sscanf(u.Port(), "%d", &port); err != nil {
+		return nil
+	}
+	return float64(port)
+}
+
+func fnURLExtractPath(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	u, err := url.Parse(toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return u.Path
+}
+
+func fnURLExtractProtocol(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	u, err := url.Parse(toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return u.Scheme
+}
+
+func fnURLExtractQuery(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return nil
+	}
+	u, err := url.Parse(toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return u.RawQuery
+}
+
+func fnURLExtractParameter(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	u, err := url.Parse(toString(args[0]))
+	if err != nil {
+		return nil
+	}
+	return u.Query().Get(toString(args[1]))
+}
+
+// --- Type introspection ---
+
+func fnTypeof(args []any) any {
+	if len(args) < 1 || args[0] == nil {
+		return "null"
+	}
+	switch args[0].(type) {
+	case int64:
+		return "bigint"
+	case int32:
+		return "integer"
+	case int:
+		return "integer"
+	case float64:
+		return "double"
+	case float32:
+		return "real"
+	case string:
+		return "varchar"
+	case bool:
+		return "boolean"
+	case []byte:
+		return "varbinary"
+	default:
+		return fmt.Sprintf("%T", args[0])
 	}
 }

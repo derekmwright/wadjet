@@ -40,7 +40,7 @@ Full analytical SQL via a custom recursive descent parser:
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references
 - CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
-- 58 built-in scalar functions (string, math, date/time, network, UUID, conditional)
+- 112 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL)
 - User-defined functions (CREATE FUNCTION)
 
 ```sql
@@ -91,6 +91,7 @@ ORDER BY hour
 - **PostgreSQL wire protocol** (pgwire) — connect with `psql`, JDBC, ODBC, or any PostgreSQL client
 - **HTTP** REST API for queries, table management, health, and Prometheus metrics
 - **gRPC** API with protobuf service definition — generate type-safe clients for Go, Python, Java, TypeScript, Rust, C#, and more
+- **MCP** (Model Context Protocol) — AI agent integration for Claude Desktop, Claude Code, Cursor, and other MCP-compatible tools
 - gRPC health checking protocol for load balancer integration
 
 ### Operations
@@ -149,6 +150,40 @@ caelum serve --mode=standalone     # All-in-one (dev / small workloads)
 caelum serve --mode=coordinator    # Plans queries, embeds NATS, touches zero data
 caelum serve --mode=worker         # Stateless task executor, scale horizontally
 ```
+
+## AI Agent Integration (MCP)
+
+Caelum includes a native [Model Context Protocol](https://modelcontextprotocol.io/) server, enabling AI agents to discover tables, inspect schemas, and execute SQL queries.
+
+```bash
+# Start MCP server on stdio (for Claude Desktop, Claude Code, Cursor)
+caelum mcp --endpoint localhost:9000
+```
+
+Configure in Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "caelum": {
+      "command": "caelum",
+      "args": ["mcp", "--endpoint", "localhost:9000"]
+    }
+  }
+}
+```
+
+The MCP server exposes 5 tools:
+
+| Tool | Description |
+|------|-------------|
+| `list_tables` | Discover all tables in the catalog |
+| `describe_table` | Get schema with column types (including network-native types), nullability, and partition keys |
+| `query` | Execute SQL with token-efficient compact JSON output (array-of-arrays, not array-of-objects) |
+| `explain` | Show query execution plan without running |
+| `list_functions` | List user-defined functions |
+
+AI agents automatically understand network-typed columns (IPv4, CIDR, MAC, Port, Protocol) and receive hints about available network analysis functions.
 
 ## Embedding
 

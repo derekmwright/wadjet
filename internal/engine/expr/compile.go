@@ -46,7 +46,10 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 	switch n := node.(type) {
 	case *plansql.ColRef:
 		name := n.Column
-		// Strip table qualifier — we resolve by column name only
+		if n.Table != "" {
+			// Preserve table qualifier for disambiguation (e.g., self-joins)
+			name = n.Table + "." + n.Column
+		}
 		return &ColRef{Name: name}, nil
 
 	case *plansql.Lit:

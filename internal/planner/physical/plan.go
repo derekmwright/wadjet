@@ -612,6 +612,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 
 	hj := exec.NewHashJoin(joinType, leftKeys, rightKeys)
 
+	// Set build-side table alias for column disambiguation in self-joins
+	if alias := findScanAlias(node.Children[1]); alias != "" {
+		hj.BuildTableAlias = alias
+	}
+
 	// Attach memory tracker and spill manager if budget is configured
 	if p.MemoryBudget > 0 {
 		tracker := memory.NewTracker("hash_join", p.MemoryBudget)
@@ -1069,7 +1074,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 
 	groupByCols := make([]string, len(node.GroupBy))
 	for i, gb := range node.GroupBy {
-		groupByCols[i] = cleanExpr(gb)
+		// Preserve table qualifiers for self-join disambiguation (e.g., n1.n_name vs n2.n_name).
+		// The aggregate operator resolves qualified names with fallback to unqualified.
+		groupByCols[i] = strings.TrimSpace(gb)
 	}
 
 	hashAgg := exec.NewHashAggregate(groupByCols, aggCols)
@@ -1660,6 +1667,26 @@ func collectTableAliases(node *logical.Node) map[string]bool {
 	}
 	walk(node)
 	return aliases
+}
+
+// findScanAlias returns the table alias of the scan node in a subtree.
+// Used to set BuildTableAlias for column disambiguation in self-joins.
+func findScanAlias(node *logical.Node) string {
+	if node == nil {
+		return ""
+	}
+	if node.Type == logical.NodeScan {
+		if node.TableAlias != "" {
+			return node.TableAlias
+		}
+		return node.TableName
+	}
+	for _, child := range node.Children {
+		if alias := findScanAlias(child); alias != "" {
+			return alias
+		}
+	}
+	return ""
 }
 
 // collectOuterColumns recursively collects a column-name→table mapping from

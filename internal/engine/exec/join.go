@@ -62,6 +62,11 @@ type HashJoin struct {
 	// When set, each candidate build row is checked in addition to hash key equality.
 	// This enables non-equality join conditions (e.g., "!=") from decorrelated EXISTS.
 	SemiAntiFilter func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool
+
+	// BuildTableAlias is the table alias of the build side. When set, duplicate
+	// column names in the output schema are qualified as "alias.column" to avoid
+	// ambiguity (e.g., self-joins like nation n1 JOIN nation n2).
+	BuildTableAlias string
 }
 
 // NewHashJoin creates a new hash join operator.
@@ -383,15 +388,16 @@ func (p *HashJoinProbe) Init(_ context.Context) error {
 }
 
 func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	outSchema := p.outputSchema(in.Schema)
-
 	if p.join.JoinType == CrossJoin {
+		outSchema := p.outputSchema(in.Schema)
 		return p.executeCrossJoin(in, outSchema)
 	}
 
 	if p.join.JoinType == SemiJoin || p.join.JoinType == AntiJoin {
 		return p.executeSemiAntiJoin(in)
 	}
+
+	outSchema, mapping := p.outputSchemaWithMapping(in.Schema)
 
 	// Collect match pairs: (probe row, build ref, matched flag)
 	type matchPair struct {
@@ -431,36 +437,23 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		return nil, nil
 	}
 
-	// Build output batch directly in columnar form
+	// Build output batch using precomputed column source mapping
 	out := batch.NewRecordBatch(outSchema, len(pairs))
 
-	// Pre-compute column source mappings
-	probeSeen := make(map[string]bool, len(in.Schema))
-	for _, col := range in.Schema {
-		probeSeen[col.Name] = true
-	}
-
-	for outColIdx, col := range outSchema {
+	for outColIdx, m := range mapping {
 		dst := out.Columns[outColIdx]
-		probeColIdx := in.ColumnIndex(col.Name)
-		buildColIdx := -1
-		if probeColIdx < 0 {
-			for bi, bc := range p.join.buildSchema {
-				if bc.Name == col.Name {
-					buildColIdx = bi
-					break
-				}
+		if m.fromProbe {
+			for outRow, pair := range pairs {
+				copyVectorValue(dst, outRow, in.Columns[m.srcIdx], pair.probeRow)
 			}
-		}
-
-		for outRow, m := range pairs {
-			if probeColIdx >= 0 {
-				copyVectorValue(dst, outRow, in.Columns[probeColIdx], m.probeRow)
-			} else if buildColIdx >= 0 && m.matched {
-				buildBatch := p.join.buildBatches[m.ref.batchIdx]
-				copyVectorValue(dst, outRow, buildBatch.Columns[buildColIdx], int(m.ref.rowIdx))
-			} else {
-				setVectorNull(dst, outRow)
+		} else {
+			for outRow, pair := range pairs {
+				if pair.matched {
+					buildBatch := p.join.buildBatches[pair.ref.batchIdx]
+					copyVectorValue(dst, outRow, buildBatch.Columns[m.srcIdx], int(pair.ref.rowIdx))
+				} else {
+					setVectorNull(dst, outRow)
+				}
 			}
 		}
 	}
@@ -518,11 +511,12 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 
 // executeCrossJoin produces the Cartesian product of probe rows with all build-side rows.
 func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parquet.Column) (*batch.RecordBatch, error) {
-	// Collect cross product pairs
+	_, mapping := p.outputSchemaWithMapping(in.Schema)
+
 	type crossPair struct {
-		probeRow  int
-		batchIdx  int32
-		buildRow  int
+		probeRow int
+		batchIdx int32
+		buildRow int
 	}
 	var pairs []crossPair
 
@@ -541,32 +535,17 @@ func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parq
 	}
 
 	out := batch.NewRecordBatch(outSchema, len(pairs))
-	probeSeen := make(map[string]bool, len(in.Schema))
-	for _, col := range in.Schema {
-		probeSeen[col.Name] = true
-	}
 
-	for outColIdx, col := range outSchema {
+	for outColIdx, m := range mapping {
 		dst := out.Columns[outColIdx]
-		probeColIdx := in.ColumnIndex(col.Name)
-		buildColIdx := -1
-		if probeColIdx < 0 {
-			for bi, bc := range p.join.buildSchema {
-				if bc.Name == col.Name {
-					buildColIdx = bi
-					break
-				}
+		if m.fromProbe {
+			for outRow, cp := range pairs {
+				copyVectorValue(dst, outRow, in.Columns[m.srcIdx], cp.probeRow)
 			}
-		}
-
-		for outRow, cp := range pairs {
-			if probeColIdx >= 0 {
-				copyVectorValue(dst, outRow, in.Columns[probeColIdx], cp.probeRow)
-			} else if buildColIdx >= 0 {
+		} else {
+			for outRow, cp := range pairs {
 				buildBatch := p.join.buildBatches[cp.batchIdx]
-				copyVectorValue(dst, outRow, buildBatch.Columns[buildColIdx], cp.buildRow)
-			} else {
-				setVectorNull(dst, outRow)
+				copyVectorValue(dst, outRow, buildBatch.Columns[m.srcIdx], cp.buildRow)
 			}
 		}
 	}
@@ -597,36 +576,20 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 		return nil
 	}
 
-	outSchema := p.outputSchema(leftSchema)
+	outSchema, mapping := p.outputSchemaWithMapping(leftSchema)
 	out := batch.NewRecordBatch(outSchema, len(refs))
 
-	leftSeen := make(map[string]bool, len(leftSchema))
-	for _, col := range leftSchema {
-		leftSeen[col.Name] = true
-	}
-
-	for outColIdx, col := range outSchema {
+	for outColIdx, m := range mapping {
 		dst := out.Columns[outColIdx]
-		if leftSeen[col.Name] {
+		if m.fromProbe {
 			// Left side is all NULLs for unmatched build rows
 			for outRow := range refs {
 				setVectorNull(dst, outRow)
 			}
 		} else {
-			buildColIdx := -1
-			for bi, bc := range p.join.buildSchema {
-				if bc.Name == col.Name {
-					buildColIdx = bi
-					break
-				}
-			}
 			for outRow, ref := range refs {
-				if buildColIdx >= 0 {
-					buildBatch := p.join.buildBatches[ref.batchIdx]
-					copyVectorValue(dst, outRow, buildBatch.Columns[buildColIdx], int(ref.rowIdx))
-				} else {
-					setVectorNull(dst, outRow)
-				}
+				buildBatch := p.join.buildBatches[ref.batchIdx]
+				copyVectorValue(dst, outRow, buildBatch.Columns[m.srcIdx], int(ref.rowIdx))
 			}
 		}
 	}
@@ -636,16 +599,32 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 
 func (p *HashJoinProbe) Close() error { return nil }
 
+// outColSource tracks the source of each output column in the join result.
+type outColSource struct {
+	fromProbe bool // true = probe side, false = build side
+	srcIdx    int  // column index in the source batch
+}
+
 func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Column {
+	schema, _ := p.outputSchemaWithMapping(leftSchema)
+	return schema
+}
+
+func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]parquet.Column, []outColSource) {
 	var out []parquet.Column
+	var mapping []outColSource
 
 	if p.join.JoinType == RightJoin || p.join.JoinType == FullOuterJoin {
-		for _, col := range leftSchema {
+		for i, col := range leftSchema {
 			col.Nullable = true
 			out = append(out, col)
+			mapping = append(mapping, outColSource{fromProbe: true, srcIdx: i})
 		}
 	} else {
-		out = append(out, leftSchema...)
+		for i, col := range leftSchema {
+			out = append(out, col)
+			mapping = append(mapping, outColSource{fromProbe: true, srcIdx: i})
+		}
 	}
 
 	seen := make(map[string]bool, len(leftSchema))
@@ -653,15 +632,30 @@ func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Colu
 		seen[col.Name] = true
 	}
 
-	for _, col := range p.join.buildSchema {
-		if !seen[col.Name] {
+	for i, col := range p.join.buildSchema {
+		if seen[col.Name] {
+			if p.join.BuildTableAlias != "" {
+				// Duplicate column: include with qualified name for disambiguation
+				qualCol := col
+				qualCol.Name = p.join.BuildTableAlias + "." + col.Name
+				if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
+					qualCol.Nullable = true
+				}
+				out = append(out, qualCol)
+				mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
+			}
+			// When no alias: skip duplicate (backward compatible)
+		} else {
 			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
 				col.Nullable = true
 			}
 			out = append(out, col)
+			mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
+			seen[col.Name] = true
 		}
 	}
-	return out
+
+	return out, mapping
 }
 
 func (p *HashJoinProbe) isRightJoinKey(name string) bool {

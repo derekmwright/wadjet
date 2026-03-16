@@ -293,6 +293,13 @@ WHERE t.total > 1000000
 | `MIN(column)` | Minimum value | Skips nulls |
 | `MAX(column)` | Maximum value | Skips nulls |
 | `AVG(column)` | Average value | Skips nulls |
+| `STRING_AGG(column, separator)` | Concatenate values with separator | Skips nulls |
+| `BOOL_AND(column)` / `EVERY(column)` | True if all values are true | Skips nulls |
+| `BOOL_OR(column)` | True if any value is true | Skips nulls |
+| `STDDEV(column)` / `STDDEV_SAMP(column)` | Sample standard deviation | Skips nulls |
+| `STDDEV_POP(column)` | Population standard deviation | Skips nulls |
+| `VARIANCE(column)` / `VAR_SAMP(column)` | Sample variance | Skips nulls |
+| `VAR_POP(column)` | Population variance | Skips nulls |
 
 ### Examples
 
@@ -536,6 +543,14 @@ Window functions compute values across sets of rows related to the current row w
 | `AVG(expr)` | Running or partition average |
 | `MIN(expr)` | Running or partition minimum |
 | `MAX(expr)` | Running or partition maximum |
+| `LAG(expr [, offset [, default]])` | Value from a preceding row |
+| `LEAD(expr [, offset [, default]])` | Value from a following row |
+| `FIRST_VALUE(expr)` | First value in the partition |
+| `LAST_VALUE(expr)` | Last value in the partition |
+| `NTH_VALUE(expr, n)` | Value at the nth row in the partition |
+| `NTILE(n)` | Distribute rows into n buckets |
+| `PERCENT_RANK()` | Relative rank: (rank - 1) / (total - 1) |
+| `CUME_DIST()` | Cumulative distribution |
 
 ### Basic Window Functions
 
@@ -618,7 +633,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Caelum includes 58 built-in scalar functions across several categories.
+Caelum includes 112 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -640,6 +655,18 @@ Caelum includes 58 built-in scalar functions across several categories.
 | `ENDS_WITH(s, suffix)` | Test if string ends with suffix | `ENDS_WITH(hostname, '.com')` |
 | `CONTAINS(s, sub)` | Test if string contains substring | `CONTAINS(message, 'error')` |
 | `REPEAT(s, n)` | Repeat string n times | `REPEAT('*', 10)` |
+| `SPLIT_PART(s, delim, n)` | Extract nth part from delimited string (1-based) | `SPLIT_PART(url, '/', 3)` |
+| `STRPOS(s, sub)` / `POSITION(sub IN s)` | Position of substring (1-based, 0 if not found) | `STRPOS(message, 'error')` |
+| `REGEXP_LIKE(s, pattern)` | Test if string matches regex | `REGEXP_LIKE(src_ip, '^\d+\.\d+')` |
+| `REGEXP_EXTRACT(s, pattern [, group])` | Extract regex match or capture group | `REGEXP_EXTRACT(url, '(\w+)://(\w+)', 2)` |
+| `REGEXP_REPLACE(s, pattern, repl)` | Replace regex matches | `REGEXP_REPLACE(message, '\s+', ' ')` |
+| `LPAD(s, n [, pad])` | Left-pad to length n | `LPAD(port, 5, '0')` |
+| `RPAD(s, n [, pad])` | Right-pad to length n | `RPAD(name, 20)` |
+| `CHR(n)` | Character from code point | `CHR(65)` → `'A'` |
+| `CODEPOINT(s)` | Code point of first character | `CODEPOINT('A')` → `65` |
+| `CONCAT_WS(sep, a, b, ...)` | Concatenate with separator (skips NULLs) | `CONCAT_WS(',', a, b, c)` |
+| `CHAR_LENGTH(s)` | Character length (Unicode-aware) | `CHAR_LENGTH('日本語')` → `3` |
+| `TRANSLATE(s, from, to)` | Character-by-character translation | `TRANSLATE('abc', 'abc', 'xyz')` |
 
 ### Math Functions
 
@@ -658,6 +685,24 @@ Caelum includes 58 built-in scalar functions across several categories.
 | `SIGN(n)` | Sign of number (-1, 0, 1) | `SIGN(profit)` |
 | `GREATEST(a, b, ...)` | Largest value | `GREATEST(bytes_in, bytes_out)` |
 | `LEAST(a, b, ...)` | Smallest value | `LEAST(bytes_in, bytes_out)` |
+| `BITWISE_AND(a, b)` | Bitwise AND | `BITWISE_AND(flags, 0xFF)` |
+| `BITWISE_OR(a, b)` | Bitwise OR | `BITWISE_OR(flags, 0x01)` |
+| `BITWISE_XOR(a, b)` | Bitwise XOR | `BITWISE_XOR(a, b)` |
+| `BITWISE_NOT(a)` | Bitwise NOT | `BITWISE_NOT(mask)` |
+| `PI()` | Pi constant | `PI()` → `3.14159...` |
+| `DEGREES(rad)` | Radians to degrees | `DEGREES(PI())` → `180` |
+| `RADIANS(deg)` | Degrees to radians | `RADIANS(180)` → `3.14159...` |
+| `SIN(x)` | Sine | `SIN(RADIANS(30))` |
+| `COS(x)` | Cosine | `COS(0)` → `1` |
+| `TAN(x)` | Tangent | `TAN(RADIANS(45))` → `1` |
+| `ASIN(x)` | Arcsine | `ASIN(1)` → `1.5707...` |
+| `ACOS(x)` | Arccosine | `ACOS(1)` → `0` |
+| `ATAN(x)` | Arctangent | `ATAN(1)` → `0.7853...` |
+| `ATAN2(y, x)` | Two-argument arctangent | `ATAN2(1, 1)` |
+| `CBRT(n)` | Cube root | `CBRT(27)` → `3` |
+| `LOG2(n)` | Base-2 logarithm | `LOG2(8)` → `3` |
+| `TRUNCATE(n [, d])` | Truncate to d decimal places | `TRUNCATE(3.789, 2)` → `3.78` |
+| `RANDOM()` / `RAND()` | Random float in [0, 1) | `RANDOM()` |
 
 ### Conditional Functions
 
@@ -706,6 +751,53 @@ Caelum includes 58 built-in scalar functions across several categories.
 | `DATE_DIFF(unit, a, b)` | Difference between timestamps | `DATE_DIFF('second', start_ts, end_ts)` |
 | `DATE_ADD(ts, interval)` | Add interval to timestamp | `DATE_ADD(timestamp, 3600000)` |
 | `TO_DATE(s)` | Parse string to date | `TO_DATE('2026-03-15')` |
+| `FROM_UNIXTIME(epoch)` | Convert unix timestamp to datetime string | `FROM_UNIXTIME(1700000000)` |
+| `TO_UNIXTIME(ts)` | Convert datetime to unix epoch | `TO_UNIXTIME(timestamp)` |
+| `DATE_FORMAT(ts, fmt)` | Format timestamp with SQL format specifiers | `DATE_FORMAT(ts, '%Y-%m-%d')` |
+| `DATE_PARSE(s, fmt)` | Parse string to timestamp using format | `DATE_PARSE('2026-03-15', '%Y-%m-%d')` |
+
+### Hash Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `MD5(s)` | MD5 hash as hex string | `MD5(payload)` |
+| `SHA256(s)` | SHA-256 hash as hex string | `SHA256(password)` |
+| `SHA512(s)` | SHA-512 hash as hex string | `SHA512(token)` |
+
+### Encoding Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `TO_HEX(n)` | Convert integer to hex string | `TO_HEX(255)` → `'ff'` |
+| `FROM_HEX(s)` | Convert hex string to integer | `FROM_HEX('ff')` → `255` |
+| `TO_BASE64(s)` | Encode string to Base64 | `TO_BASE64('hello')` |
+| `FROM_BASE64(s)` | Decode Base64 string | `FROM_BASE64('aGVsbG8=')` |
+
+### JSON Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `JSON_EXTRACT(json, path)` | Extract value from JSON by path | `JSON_EXTRACT(data, '$.user.name')` |
+| `JSON_EXTRACT_SCALAR(json, path)` | Extract scalar value (returns NULL for objects/arrays) | `JSON_EXTRACT_SCALAR(data, '$.id')` |
+| `JSON_ARRAY_LENGTH(json)` | Length of a JSON array | `JSON_ARRAY_LENGTH('[1,2,3]')` → `3` |
+| `JSON_VALID(s)` | Test if string is valid JSON | `JSON_VALID(payload)` |
+
+### URL Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `URL_EXTRACT_HOST(url)` | Extract hostname | `URL_EXTRACT_HOST('https://example.com:8080/path')` → `'example.com'` |
+| `URL_EXTRACT_PORT(url)` | Extract port number | `URL_EXTRACT_PORT('https://example.com:8080/')` → `8080` |
+| `URL_EXTRACT_PATH(url)` | Extract path | `URL_EXTRACT_PATH('https://example.com/api/v1')` → `'/api/v1'` |
+| `URL_EXTRACT_PROTOCOL(url)` | Extract protocol/scheme | `URL_EXTRACT_PROTOCOL('https://example.com')` → `'https'` |
+| `URL_EXTRACT_QUERY(url)` | Extract query string | `URL_EXTRACT_QUERY('https://x.com?a=1&b=2')` → `'a=1&b=2'` |
+| `URL_EXTRACT_PARAMETER(url, key)` | Extract query parameter value | `URL_EXTRACT_PARAMETER(url, 'limit')` |
+
+### Type Introspection
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `TYPEOF(expr)` | Return SQL type name of expression | `TYPEOF(42)` → `'bigint'` |
 
 ### UUID Functions
 
