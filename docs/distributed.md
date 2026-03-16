@@ -4,34 +4,22 @@ Caelum supports distributed query execution across multiple worker nodes, coordi
 
 ## Architecture
 
-```
-                     Clients
-                       │
-                       ▼
-              ┌─────────────────┐
-              │   Coordinator    │
-              │                  │
-              │  - HTTP API      │
-              │  - Query planner │
-              │  - NATS embed    │
-              │  - Result merger │
-              └────────┬────────┘
-                       │ NATS JetStream
-          ┌────────────┼────────────┐
-          │            │            │
-    ┌─────▼─────┐ ┌───▼───────┐ ┌─▼─────────┐
-    │  Worker 1  │ │  Worker 2  │ │  Worker 3  │
-    │            │ │            │ │            │
-    │ - Executor │ │ - Executor │ │ - Executor │
-    │ - LRU Cache│ │ - LRU Cache│ │ - LRU Cache│
-    └─────┬─────┘ └─────┬─────┘ └─────┬─────┘
-          │             │             │
-          └─────────────┼─────────────┘
-                        │
-                 ┌──────▼──────┐
-                 │  S3 / MinIO  │
-                 │  (shared)    │
-                 └─────────────┘
+```mermaid
+graph TD
+    CL["Clients"]
+    CO["Coordinator<br/><sub>HTTP API, Query Planner,<br/>Embedded NATS, Result Merger</sub>"]
+    W1["Worker 1<br/><sub>Executor, LRU Cache</sub>"]
+    W2["Worker 2<br/><sub>Executor, LRU Cache</sub>"]
+    W3["Worker 3<br/><sub>Executor, LRU Cache</sub>"]
+    S3["S3 / MinIO<br/>(shared)"]
+
+    CL --> CO
+    CO -- "NATS JetStream" --> W1
+    CO -- "NATS JetStream" --> W2
+    CO -- "NATS JetStream" --> W3
+    W1 --> S3
+    W2 --> S3
+    W3 --> S3
 ```
 
 ## Components
@@ -304,32 +292,24 @@ spec:
 
 ## Distributed Query Execution Flow
 
-```
-1. Client sends SQL to coordinator
-   │
-2. Coordinator parses SQL → logical plan → physical plan
-   │
-3. For federated tables: ExpandFederatedScans splits scans per cluster
-   │
-4. Physical plan is split into stages with dependencies:
-   │
-   │  Stage 1a: Scan (cluster=central, partitions from central)
-   │    ├── Task 1a: Scan partition date=2026-03-14  → Central Worker 1
-   │    └── Task 1b: Scan partition date=2026-03-15  → Central Worker 2
-   │
-   │  Stage 1b: Scan (cluster=site-east, partitions from site-east)
-   │    └── Task 1c: Scan partition date=2026-03-15  → Site-East Worker 1
-   │
-   │  Stage 2: Aggregate (depends on Stage 1a + 1b)
-   │    ├── Task 2a: Partial aggregate chunk 1       → Central Worker 1
-   │    └── Task 2b: Partial aggregate chunk 2       → Central Worker 2
-   │
-   │  Stage 3: Final merge (depends on Stage 2)
-   │    └── Task 3a: Merge + sort + limit            → Central Worker 1
-   │
-5. Workers write intermediate results to result store (or S3 if store full)
-   │
-6. Coordinator reads final result and returns to client
+```mermaid
+graph TD
+    C["1. Client sends SQL"]
+    P["2. Parse → Logical Plan → Physical Plan"]
+    F["3. ExpandFederatedScans<br/>(split scans per cluster)"]
+
+    S1A["Stage 1a: Scan (central)<br/><sub>Task 1a: date=2026-03-14 → Central Worker 1<br/>Task 1b: date=2026-03-15 → Central Worker 2</sub>"]
+    S1B["Stage 1b: Scan (site-east)<br/><sub>Task 1c: date=2026-03-15 → Site-East Worker 1</sub>"]
+    S2["Stage 2: Aggregate<br/><sub>Task 2a: chunk 1 → Central Worker 1<br/>Task 2b: chunk 2 → Central Worker 2</sub>"]
+    S3["Stage 3: Final Merge<br/><sub>Task 3a: merge + sort + limit → Central Worker 1</sub>"]
+    R["6. Coordinator returns result to client"]
+
+    C --> P --> F
+    F --> S1A
+    F --> S1B
+    S1A --> S2
+    S1B --> S2
+    S2 --> S3 --> R
 ```
 
 ## Task Types
@@ -393,27 +373,18 @@ Federation allows Caelum to query data spread across multiple clusters — for e
 
 ### Architecture
 
-```
-                     ┌─────────────────┐
-                     │   Coordinator    │
-                     │   (central)      │
-                     │                  │
-                     │  Embedded NATS   │
-                     └───────┬─────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              │              │              │
-              ▼              ▼              ▼
-        ┌──────────┐  ┌──────────┐  ┌──────────────┐
-        │ Worker 1  │  │ Worker 2  │  │ Remote NATS   │
-        │ (central) │  │ (central) │  │ (site-east)   │
-        │           │  │           │  │  Leaf Node     │
-        └──────────┘  └──────────┘  └──────┬───────┘
-                                            │
-                                     ┌──────▼───────┐
-                                     │   Worker 3    │
-                                     │  (site-east)  │
-                                     └──────────────┘
+```mermaid
+graph TD
+    CO["Coordinator (central)<br/><sub>Embedded NATS</sub>"]
+    W1["Worker 1<br/>(central)"]
+    W2["Worker 2<br/>(central)"]
+    RN["Remote NATS (site-east)<br/><sub>Leaf Node</sub>"]
+    W3["Worker 3<br/>(site-east)"]
+
+    CO --> W1
+    CO --> W2
+    CO -- "Leaf Node Connection" --> RN
+    RN --> W3
 ```
 
 ### How It Works

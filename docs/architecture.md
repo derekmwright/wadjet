@@ -4,33 +4,18 @@ Caelum is a columnar analytical query engine designed for high-throughput scan-h
 
 ## High-Level Architecture
 
-```
-                          ┌──────────────────────────────────┐
-                          │           CLI / HTTP API          │
-                          │   cmd/caelum    internal/server   │
-                          └──────────┬───────────────────────┘
-                                     │
-                          ┌──────────▼───────────────────────┐
-                          │          Query Pipeline           │
-                          │                                   │
-                          │  SQL Parser ──► Logical Plan      │
-                          │                    │              │
-                          │              Optimizer            │
-                          │                    │              │
-                          │             Physical Plan         │
-                          │                    │              │
-                          │          Execution Engine         │
-                          └──────────┬───────────────────────┘
-                                     │
-              ┌──────────────────────┼──────────────────────┐
-              │                      │                      │
-   ┌──────────▼────────┐  ┌─────────▼─────────┐  ┌────────▼────────┐
-   │  Storage Layer     │  │  Distributed Layer │  │  Security Layer │
-   │  - Object Store    │  │  - NATS/JetStream  │  │  - AuthN        │
-   │  - Catalog         │  │  - Coordinator     │  │  - AuthZ        │
-   │  - Parquet I/O     │  │  - Worker Pool     │  │  - Cell Policies│
-   │  - Ingest          │  │  - Task Dispatch   │  │  - Config Reload│
-   └───────────────────┘  └───────────────────┘  └─────────────────┘
+```mermaid
+graph TD
+    API["CLI / HTTP API<br/><sub>cmd/caelum &nbsp; internal/server</sub>"]
+    QP["Query Pipeline<br/><sub>SQL Parser → Logical Plan → Optimizer → Physical Plan → Execution Engine</sub>"]
+    ST["Storage Layer<br/><sub>Object Store, Catalog,<br/>Parquet I/O, Ingest</sub>"]
+    DL["Distributed Layer<br/><sub>NATS/JetStream, Coordinator,<br/>Worker Pool, Task Dispatch</sub>"]
+    SL["Security Layer<br/><sub>AuthN, AuthZ,<br/>Cell Policies, Config Reload</sub>"]
+
+    API --> QP
+    QP --> ST
+    QP --> DL
+    QP --> SL
 ```
 
 ## Package Layout
@@ -164,26 +149,14 @@ The logical plan is converted into executable pipeline stages. In distributed mo
 
 Caelum uses a **push-based, streaming pipeline** model:
 
-```
-Source (Parquet scan)
-  │  produces batches
-  ▼
-UnaryOperator (Filter)
-  │  applies selection vector in-place
-  ▼
-UnaryOperator (Project)
-  │  selects/renames columns
-  ▼
-SinkSource (Aggregate)
-  │  consumes all input, then produces grouped output
-  ▼
-SinkSource (Sort)
-  │  collects all input, sorts, then produces sorted output
-  ▼
-Sink (Collect)
-  │  accumulates final result
-  ▼
-QueryResult
+```mermaid
+graph TD
+    S["Source<br/>(Parquet scan)"] -- produces batches --> F["UnaryOperator<br/>(Filter)"]
+    F -- applies selection vector in-place --> P["UnaryOperator<br/>(Project)"]
+    P -- selects/renames columns --> A["SinkSource<br/>(Aggregate)"]
+    A -- consumes all input, then produces grouped output --> SO["SinkSource<br/>(Sort)"]
+    SO -- collects all input, sorts, then produces sorted output --> C["Sink<br/>(Collect)"]
+    C -- accumulates final result --> QR["QueryResult"]
 ```
 
 **Pipeline breakers** (aggregates, sorts) consume all input before producing output. Non-breaking operators (filter, project, limit) operate in streaming fashion.
@@ -295,26 +268,18 @@ See [Performance Tuning](tuning.md) for guidance on sizing memory budgets and re
 
 ## Distributed Execution
 
-```
-┌─────────────┐     NATS/JetStream      ┌─────────────┐
-│ Coordinator  │◄──────────────────────►│   Worker 1   │
-│              │     tasks stream        │   (central)  │
-│  - Plans     │     results subjects    │  - Executor  │
-│  - Dispatches│                         │  - LRU Cache │
-│  - Merges    │                         │  - ResultStore│
-│  - Federation│                         └─────────────┘
-│              │                         ┌─────────────┐
-│              │◄──────────────────────►│   Worker 2   │
-└─────────────┘                         │   (central)  │
-       │                                 │  - Executor  │
-       │ Leaf Node                       │  - LRU Cache │
-       │ Connection                      │  - ResultStore│
-       │                                 └─────────────┘
-       ▼
-┌─────────────┐                         ┌─────────────┐
-│ Remote NATS  │◄──────────────────────►│   Worker 3   │
-│ (site-east)  │                         │  (site-east) │
-└─────────────┘                         └─────────────┘
+```mermaid
+graph TD
+    CO["Coordinator<br/><sub>Plans, Dispatches,<br/>Merges, Federation</sub>"]
+    W1["Worker 1 (central)<br/><sub>Executor, LRU Cache, ResultStore</sub>"]
+    W2["Worker 2 (central)<br/><sub>Executor, LRU Cache, ResultStore</sub>"]
+    RN["Remote NATS<br/>(site-east)"]
+    W3["Worker 3 (site-east)"]
+
+    CO -- "NATS/JetStream<br/>tasks + results" --- W1
+    CO -- "NATS/JetStream<br/>tasks + results" --- W2
+    CO -- "Leaf Node Connection" --> RN
+    RN --- W3
 ```
 
 - **Coordinator**: Receives queries, builds plans, dispatches task messages to NATS, collects results, merges final output. For federated queries, splits scan stages per cluster.

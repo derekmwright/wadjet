@@ -200,13 +200,12 @@ The coordinator's federated scan planner automatically routes tasks to the clust
 
 Follow this observe-identify-adjust-verify loop:
 
-```
-  ┌──────────┐     ┌────────────┐     ┌──────────┐     ┌──────────┐
-  │ 1.Observe │────▶│ 2.Identify │────▶│ 3.Adjust │────▶│ 4.Verify │
-  │  metrics  │     │ bottleneck │     │  config  │     │  results │
-  └──────────┘     └────────────┘     └──────────┘     └─────┬────┘
-       ▲                                                      │
-       └──────────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    O["1. Observe<br/>metrics"] --> I["2. Identify<br/>bottleneck"]
+    I --> A["3. Adjust<br/>config"]
+    A --> V["4. Verify<br/>results"]
+    V --> O
 ```
 
 ### Step 1: Observe

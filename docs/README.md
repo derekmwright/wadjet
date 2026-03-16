@@ -22,14 +22,11 @@ Caelum is an analytical query engine written in Go, inspired by systems like Duc
 
 ## Typical Workflow
 
-```
-Network Devices         Bento (streaming ETL)         Caelum              Your Application
-┌─────────────┐        ┌─────────────────────┐       ┌──────────────┐    ┌───────────────┐
-│  Routers     │──logs──│  Parse syslog/SNMP  │──S3──│  Query via   │────│  Dashboards   │
-│  Switches    │        │  Enrich fields      │      │  SQL over    │    │  Alerting     │
-│  Firewalls   │        │  Partition by time   │      │  HTTP API    │    │  Reports      │
-│  Load Balancers│      │  Write Parquet       │      │  or embedded │    │  Automation   │
-└─────────────┘        └─────────────────────┘       └──────────────┘    └───────────────┘
+```mermaid
+graph LR
+    A["Network Devices<br/>Routers, Switches,<br/>Firewalls, Load Balancers"] -- logs --> B["Bento<br/>(streaming ETL)<br/>Parse, Enrich,<br/>Partition, Write Parquet"]
+    B -- S3 --> C["Caelum<br/>SQL over HTTP API<br/>or embedded"]
+    C --> D["Your Application<br/>Dashboards, Alerting,<br/>Reports, Automation"]
 ```
 
 ## Quick Links

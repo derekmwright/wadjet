@@ -16,13 +16,12 @@ Data lands in Parquet format on your S3-compatible store, organized by partition
 
 ### How It Works
 
-```
-         Ingest()          Partition         Buffer            FlushAll
-Rows ──────────────► Route by key ─────► Accumulate ──────► Parquet
- ([]map)             (e.g., date)        per partition       to S3
-                                                              │
-                                                    Update catalog
-                                                    manifest (ETag)
+```mermaid
+graph LR
+    R["Rows<br/>([]map)"] -- "Ingest()" --> P["Route by<br/>partition key"]
+    P -- "Buffer" --> A["Accumulate<br/>per partition"]
+    A -- "FlushAll" --> S["Parquet<br/>to S3"]
+    S --> C["Update catalog<br/>manifest (ETag)"]
 ```
 
 The ingester flushes automatically when any threshold is exceeded:

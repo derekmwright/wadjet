@@ -4,51 +4,41 @@ This guide walks through the complete end-to-end pipeline: collecting network de
 
 ## Pipeline Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        DATA SOURCES                                 │
-│                                                                     │
-│  Routers ─── Syslog (UDP 514) ──────┐                              │
-│  Switches ── SNMP Traps (UDP 162) ──┤                              │
-│  Firewalls ─ NetFlow (UDP 2055) ────┤                              │
-│  Load Bal. ─ JSON API ──────────────┤                              │
-│  Wireless ── SNMP Polling ──────────┘                              │
-└──────────────────────┬──────────────────────────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     BENTO (Stream Processing)                       │
-│                                                                     │
-│  ┌──────────┐  ┌───────────────┐  ┌──────────────┐  ┌───────────┐ │
-│  │  Input    │─▶│  Parse/Decode │─▶│  Enrich/     │─▶│  Output   │ │
-│  │  (UDP,   │  │  (syslog,     │  │  Transform   │  │  (Parquet │ │
-│  │   Kafka,  │  │   JSON,       │  │  (add fields,│  │   to S3)  │ │
-│  │   HTTP)   │  │   NetFlow)    │  │   partition)  │  │           │ │
-│  └──────────┘  └───────────────┘  └──────────────┘  └───────────┘ │
-└──────────────────────┬──────────────────────────────────────────────┘
-                       │ Parquet files on S3
-                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     CAELUM (Query Engine)                            │
-│                                                                     │
-│  ┌──────────┐  ┌───────────────┐  ┌──────────────┐                 │
-│  │  Catalog  │  │  SQL Engine    │  │  HTTP API    │                 │
-│  │  (table   │  │  (parse,plan,  │  │  (REST +     │                 │
-│  │   schemas, │  │   execute)     │  │   Prometheus) │                │
-│  │   manifests)│  │               │  │              │                 │
-│  └──────────┘  └───────────────┘  └──────────────┘                 │
-└──────────────────────┬──────────────────────────────────────────────┘
-                       │ JSON over HTTP
-                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                     YOUR APPLICATION                                │
-│                                                                     │
-│  Dashboards ─── Grafana / custom UI                                 │
-│  Alerting ──── PagerDuty / Slack integration                        │
-│  Reports ───── Scheduled PDF generation                             │
-│  Automation ── Auto-remediation scripts                             │
-│  SIEM ──────── Security event correlation                           │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph DS ["DATA SOURCES"]
+        R["Routers<br/><sub>Syslog UDP 514</sub>"]
+        SW["Switches<br/><sub>SNMP Traps UDP 162</sub>"]
+        FW["Firewalls<br/><sub>NetFlow UDP 2055</sub>"]
+        LB["Load Balancers<br/><sub>JSON API</sub>"]
+        WL["Wireless<br/><sub>SNMP Polling</sub>"]
+    end
+
+    subgraph BE ["BENTO (Stream Processing)"]
+        IN["Input<br/><sub>UDP, Kafka, HTTP</sub>"]
+        PA["Parse / Decode<br/><sub>syslog, JSON, NetFlow</sub>"]
+        EN["Enrich / Transform<br/><sub>add fields, partition</sub>"]
+        OUT["Output<br/><sub>Parquet to S3</sub>"]
+        IN --> PA --> EN --> OUT
+    end
+
+    subgraph CA ["CAELUM (Query Engine)"]
+        CAT["Catalog<br/><sub>table schemas, manifests</sub>"]
+        SQL["SQL Engine<br/><sub>parse, plan, execute</sub>"]
+        API["HTTP API<br/><sub>REST + Prometheus</sub>"]
+    end
+
+    subgraph APP ["YOUR APPLICATION"]
+        DA["Dashboards"]
+        AL["Alerting"]
+        RE["Reports"]
+        AU["Automation"]
+        SI["SIEM"]
+    end
+
+    DS --> IN
+    OUT -- "Parquet files on S3" --> CA
+    API -- "JSON over HTTP" --> APP
 ```
 
 ## Step 1: Set Up Infrastructure
