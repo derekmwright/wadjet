@@ -18,13 +18,35 @@ type RecordBatch struct {
 func NewRecordBatch(schema []parquet.Column, numRows int) *RecordBatch {
 	cols := make([]*Vector, len(schema))
 	for i, col := range schema {
-		cols[i] = NewVectorWithScale(col.Type, numRows, col.Scale)
+		cols[i] = newVectorFromColumn(col, numRows)
 	}
 	return &RecordBatch{
 		Columns: cols,
 		Schema:  schema,
 		Len:     numRows,
 	}
+}
+
+// newVectorFromColumn creates a Vector from a Column definition, recursively
+// initializing nested type children.
+func newVectorFromColumn(col parquet.Column, numRows int) *Vector {
+	v := NewVectorWithScale(col.Type, numRows, col.Scale)
+	switch col.Type {
+	case TypeArray, TypeMap:
+		if col.ElementType != nil {
+			v.Child = newVectorFromColumn(*col.ElementType, 0)
+		}
+	case TypeRow:
+		if len(col.Fields) > 0 {
+			v.FieldNames = make([]string, len(col.Fields))
+			v.Children = make([]*Vector, len(col.Fields))
+			for i, f := range col.Fields {
+				v.FieldNames[i] = f.Name
+				v.Children[i] = newVectorFromColumn(f, numRows)
+			}
+		}
+	}
+	return v
 }
 
 // ActiveLen returns the number of active rows (respecting selection vector).
@@ -123,6 +145,28 @@ func (b *RecordBatch) Compact() *RecordBatch {
 				dst.BytesData.Set(di, src.BytesData.Value(int(si)))
 			case TypeDecimal:
 				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			case TypeArray, TypeMap:
+				if src.Child != nil && dst.Child != nil {
+					start := int(src.Offsets[si])
+					end := int(src.Offsets[si+1])
+					dstStart := int32(dst.Child.Len)
+					for k := start; k < end; k++ {
+						appendToVector(dst.Child, src.Child.GetValue(k))
+					}
+					dst.Offsets[di] = dstStart
+					dst.Offsets[di+1] = int32(dst.Child.Len)
+				}
+			case TypeRow:
+				for ci, child := range src.Children {
+					if ci < len(dst.Children) {
+						dstChild := dst.Children[ci]
+						if child.Nulls.IsNullFast(int(si)) {
+							dstChild.Nulls.SetNull(di)
+						} else {
+							dstChild.SetValue(di, child.GetValue(int(si)))
+						}
+					}
+				}
 			}
 		}
 	}

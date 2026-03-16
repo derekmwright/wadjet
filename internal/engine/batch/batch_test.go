@@ -250,6 +250,143 @@ func TestGlobalPoolConcurrency(t *testing.T) {
 	}
 }
 
+func TestBitmapGrow(t *testing.T) {
+	bm := NewBitmap(4)
+	bm.SetNull(1)
+
+	bm = bm.Grow(8)
+	if bm.Len() != 8 {
+		t.Fatalf("expected len 8, got %d", bm.Len())
+	}
+	// Original null should be preserved
+	if !bm.IsNull(1) {
+		t.Fatal("expected bit 1 to still be null after grow")
+	}
+	// Original valid bits preserved
+	if bm.IsNull(0) {
+		t.Fatal("expected bit 0 to be valid after grow")
+	}
+	// New bits should be valid
+	if bm.IsNull(5) {
+		t.Fatal("expected new bit 5 to be valid after grow")
+	}
+}
+
+func TestArrayVector(t *testing.T) {
+	schema := []parquet.Column{
+		{
+			Name: "tags",
+			Type: parquet.TypeArray,
+			ElementType: &parquet.Column{
+				Name: "element", Type: parquet.TypeString,
+			},
+		},
+	}
+
+	b := NewRecordBatch(schema, 3)
+	v := b.Columns[0]
+
+	// Set array values
+	v.SetValue(0, []any{"hello", "world"})
+	v.SetValue(1, []any{"foo"})
+	v.SetValue(2, []any{})
+
+	// Verify
+	got0 := v.GetValue(0).([]any)
+	if len(got0) != 2 || got0[0] != "hello" || got0[1] != "world" {
+		t.Fatalf("row 0: expected [hello, world], got %v", got0)
+	}
+
+	got1 := v.GetValue(1).([]any)
+	if len(got1) != 1 || got1[0] != "foo" {
+		t.Fatalf("row 1: expected [foo], got %v", got1)
+	}
+
+	got2 := v.GetValue(2).([]any)
+	if len(got2) != 0 {
+		t.Fatalf("row 2: expected [], got %v", got2)
+	}
+}
+
+func TestRowVector(t *testing.T) {
+	schema := []parquet.Column{
+		{
+			Name: "person",
+			Type: parquet.TypeRow,
+			Fields: []parquet.Column{
+				{Name: "name", Type: parquet.TypeString},
+				{Name: "age", Type: parquet.TypeInt64},
+			},
+		},
+	}
+
+	b := NewRecordBatch(schema, 2)
+	v := b.Columns[0]
+
+	v.SetValue(0, map[string]any{"name": "Alice", "age": int64(30)})
+	v.SetValue(1, map[string]any{"name": "Bob", "age": int64(25)})
+
+	got0 := v.GetValue(0).(map[string]any)
+	if got0["name"] != "Alice" || got0["age"] != int64(30) {
+		t.Fatalf("row 0: expected {name:Alice, age:30}, got %v", got0)
+	}
+
+	got1 := v.GetValue(1).(map[string]any)
+	if got1["name"] != "Bob" || got1["age"] != int64(25) {
+		t.Fatalf("row 1: expected {name:Bob, age:25}, got %v", got1)
+	}
+}
+
+func TestArrayVectorNull(t *testing.T) {
+	v := NewArrayVector(3, TypeInt64)
+	v.SetValue(0, []any{int64(1), int64(2)})
+	v.SetValue(1, nil) // null array
+	v.SetValue(2, []any{int64(3)})
+
+	if v.GetValue(1) != nil {
+		t.Fatalf("expected nil for null array, got %v", v.GetValue(1))
+	}
+
+	got0 := v.GetValue(0).([]any)
+	if len(got0) != 2 {
+		t.Fatalf("expected 2 elements, got %d", len(got0))
+	}
+}
+
+func TestResolveColumn(t *testing.T) {
+	tests := []struct {
+		typeStr string
+		wantType parquet.TypeID
+		wantElem bool
+		wantFields int
+	}{
+		{"INT64", parquet.TypeInt64, false, 0},
+		{"STRING", parquet.TypeString, false, 0},
+		{"ARRAY(INT64)", parquet.TypeArray, true, 0},
+		{"ARRAY(STRING)", parquet.TypeArray, true, 0},
+		{"ROW(name STRING, age INT64)", parquet.TypeRow, false, 2},
+		{"MAP(STRING, INT64)", parquet.TypeMap, true, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.typeStr, func(t *testing.T) {
+			col, err := parquet.ResolveColumn("test", tt.typeStr)
+			if err != nil {
+				t.Fatalf("ResolveColumn(%q) error: %v", tt.typeStr, err)
+			}
+			if col.Type != tt.wantType {
+				t.Fatalf("type = %v, want %v", col.Type, tt.wantType)
+			}
+			if tt.wantElem && col.ElementType == nil {
+				t.Fatal("expected ElementType to be set")
+			}
+			if tt.wantFields > 0 && len(col.Fields) != tt.wantFields {
+				t.Fatalf("fields = %d, want %d", len(col.Fields), tt.wantFields)
+			}
+		})
+	}
+}
+
 func TestVectorNetworkTypes(t *testing.T) {
 	// Test TypeIPv4
 	t.Run("IPv4", func(t *testing.T) {

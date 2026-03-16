@@ -1261,11 +1261,52 @@ func (p *selectParser) parseCastExpr() (Node, error) {
 		return nil, fmt.Errorf("expected type name in CAST")
 	}
 
+	typeName := strings.ToLower(typeTok.val)
+
+	// Handle parameterized types: ARRAY(...), ROW(...), MAP(...), DECIMAL(...)
+	if p.cur.typ == TokenLParen {
+		typeName += p.consumeTypeParams()
+	}
+
 	if _, err := p.expect(TokenRParen); err != nil {
 		return nil, fmt.Errorf("expected ) after CAST")
 	}
 
-	return &CastNode{Inner: inner, TypeName: strings.ToLower(typeTok.val)}, nil
+	return &CastNode{Inner: inner, TypeName: typeName}, nil
+}
+
+// consumeTypeParams reads a parenthesized type parameter list like "(INT64)" or "(name STRING, age INT32)".
+// Returns the consumed text including the parens. Handles nested parens for types like ARRAY(ROW(...)).
+func (p *selectParser) consumeTypeParams() string {
+	if p.cur.typ != TokenLParen {
+		return ""
+	}
+	var buf strings.Builder
+	buf.WriteByte('(')
+	p.advance() // consume (
+	depth := 1
+	for depth > 0 && p.cur.typ != TokenEOF {
+		switch p.cur.typ {
+		case TokenLParen:
+			depth++
+			buf.WriteByte('(')
+		case TokenRParen:
+			depth--
+			if depth > 0 {
+				buf.WriteByte(')')
+			}
+		case TokenComma:
+			buf.WriteString(", ")
+		default:
+			if buf.Len() > 1 && buf.String()[buf.Len()-1] != '(' && buf.String()[buf.Len()-1] != ' ' {
+				buf.WriteByte(' ')
+			}
+			buf.WriteString(strings.ToLower(p.cur.val))
+		}
+		p.advance()
+	}
+	buf.WriteByte(')')
+	return buf.String()
 }
 
 // windowSpecFromNode converts a parsed WindowFuncNode into a WindowSpec

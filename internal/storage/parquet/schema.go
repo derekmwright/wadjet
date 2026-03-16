@@ -28,6 +28,9 @@ const (
 	TypeUUID     // 128-bit UUID stored as 16-byte ByteArray
 	TypeDate     // calendar date stored as int32 (days since 1970-01-01)
 	TypeDecimal  // fixed-point DECIMAL(p,s) stored as scaled Int128
+	TypeArray    // variable-length array of a single element type
+	TypeRow      // struct/row with named fields
+	TypeMap      // key-value map, stored as ARRAY(ROW("key","value"))
 )
 
 func (t TypeID) String() string {
@@ -68,6 +71,12 @@ func (t TypeID) String() string {
 		return "DATE"
 	case TypeDecimal:
 		return "DECIMAL"
+	case TypeArray:
+		return "ARRAY"
+	case TypeRow:
+		return "ROW"
+	case TypeMap:
+		return "MAP"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(t))
 	}
@@ -77,9 +86,18 @@ func (t TypeID) String() string {
 // Supports parameterized types like "DECIMAL(10,2)".
 func ParseTypeID(s string) (TypeID, error) {
 	upper := strings.ToUpper(strings.TrimSpace(s))
-	// Handle parameterized types like DECIMAL(10,2)
+	// Handle parameterized types
 	if strings.HasPrefix(upper, "DECIMAL") || strings.HasPrefix(upper, "NUMERIC") {
 		return TypeDecimal, nil
+	}
+	if strings.HasPrefix(upper, "ARRAY") {
+		return TypeArray, nil
+	}
+	if strings.HasPrefix(upper, "ROW") || strings.HasPrefix(upper, "STRUCT") {
+		return TypeRow, nil
+	}
+	if strings.HasPrefix(upper, "MAP") {
+		return TypeMap, nil
 	}
 	switch upper {
 	case "BOOL", "BOOLEAN":
@@ -150,13 +168,128 @@ func ParseDecimalParams(s string) (precision, scale int) {
 	return
 }
 
+// ResolveColumn parses a type string into a fully-resolved Column with nested types.
+// Handles: "INT64", "ARRAY(STRING)", "ROW(name STRING, age INT32)", "MAP(STRING, INT64)".
+func ResolveColumn(name, typeStr string) (Column, error) {
+	upper := strings.ToUpper(strings.TrimSpace(typeStr))
+
+	// Check for parameterized nested types
+	if idx := strings.Index(upper, "("); idx >= 0 {
+		base := strings.TrimSpace(upper[:idx])
+		// Extract inner params (everything between outer parens)
+		end := strings.LastIndex(upper, ")")
+		if end < 0 {
+			return Column{}, fmt.Errorf("unmatched parenthesis in type: %s", typeStr)
+		}
+		inner := strings.TrimSpace(upper[idx+1 : end])
+
+		switch base {
+		case "ARRAY":
+			elemCol, err := ResolveColumn("element", inner)
+			if err != nil {
+				return Column{}, fmt.Errorf("invalid ARRAY element type: %w", err)
+			}
+			return Column{Name: name, Type: TypeArray, Nullable: true, ElementType: &elemCol}, nil
+
+		case "MAP":
+			parts := splitTopLevel(inner)
+			if len(parts) != 2 {
+				return Column{}, fmt.Errorf("MAP requires exactly 2 type parameters, got %d", len(parts))
+			}
+			keyCol, err := ResolveColumn("key", parts[0])
+			if err != nil {
+				return Column{}, fmt.Errorf("invalid MAP key type: %w", err)
+			}
+			valCol, err := ResolveColumn("value", parts[1])
+			if err != nil {
+				return Column{}, fmt.Errorf("invalid MAP value type: %w", err)
+			}
+			entryCol := Column{
+				Name: "entry", Type: TypeRow, Fields: []Column{keyCol, valCol},
+			}
+			return Column{Name: name, Type: TypeMap, Nullable: true, ElementType: &entryCol}, nil
+
+		case "ROW", "STRUCT":
+			fields, err := parseRowFields(inner)
+			if err != nil {
+				return Column{}, err
+			}
+			return Column{Name: name, Type: TypeRow, Nullable: true, Fields: fields}, nil
+
+		case "DECIMAL", "NUMERIC":
+			p, s := ParseDecimalParams(typeStr)
+			return Column{Name: name, Type: TypeDecimal, Nullable: true, Precision: p, Scale: s}, nil
+		}
+	}
+
+	// Simple type
+	tid, err := ParseTypeID(upper)
+	if err != nil {
+		return Column{}, err
+	}
+	col := Column{Name: name, Type: tid, Nullable: true}
+	if tid == TypeDecimal {
+		col.Precision, col.Scale = ParseDecimalParams(typeStr)
+	}
+	return col, nil
+}
+
+// splitTopLevel splits a string by commas, but only at the top level (not inside parentheses).
+func splitTopLevel(s string) []string {
+	var parts []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				parts = append(parts, strings.TrimSpace(s[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, strings.TrimSpace(s[start:]))
+	return parts
+}
+
+// parseRowFields parses "name1 TYPE1, name2 TYPE2, ..." into Column definitions.
+func parseRowFields(s string) ([]Column, error) {
+	parts := splitTopLevel(s)
+	fields := make([]Column, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		// Split into name and type — first token is the name, rest is the type
+		spaceIdx := strings.IndexByte(part, ' ')
+		if spaceIdx < 0 {
+			return nil, fmt.Errorf("ROW field must have name and type: %q", part)
+		}
+		fieldName := strings.TrimSpace(part[:spaceIdx])
+		fieldType := strings.TrimSpace(part[spaceIdx+1:])
+		col, err := ResolveColumn(fieldName, fieldType)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ROW field %q: %w", fieldName, err)
+		}
+		fields = append(fields, col)
+	}
+	return fields, nil
+}
+
 // Column defines a column in a Parquet schema.
 type Column struct {
-	Name      string `json:"name"`
-	Type      TypeID `json:"type"`
-	Nullable  bool   `json:"nullable"`
-	Precision int    `json:"precision,omitempty"` // for DECIMAL: max digits (1-38)
-	Scale     int    `json:"scale,omitempty"`     // for DECIMAL: digits after decimal point
+	Name      string  `json:"name"`
+	Type      TypeID  `json:"type"`
+	Nullable  bool    `json:"nullable"`
+	Precision int     `json:"precision,omitempty"` // for DECIMAL: max digits (1-38)
+	Scale     int     `json:"scale,omitempty"`     // for DECIMAL: digits after decimal point
+	ElementType *Column  `json:"element_type,omitempty"` // for ARRAY: element column definition
+	Fields      []Column `json:"fields,omitempty"`       // for ROW/MAP: child field definitions
 }
 
 // Schema defines the schema for a Parquet file.

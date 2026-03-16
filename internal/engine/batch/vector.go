@@ -78,6 +78,9 @@ const (
 	TypeUUID     = parquet.TypeUUID
 	TypeDate     = parquet.TypeDate
 	TypeDecimal  = parquet.TypeDecimal
+	TypeArray    = parquet.TypeArray
+	TypeRow      = parquet.TypeRow
+	TypeMap      = parquet.TypeMap
 )
 
 // BytesColumn stores variable-length byte data (strings, binary) with zero
@@ -142,6 +145,12 @@ type Vector struct {
 	Float64Data []float64
 	BytesData   BytesColumn
 	DecimalData DecimalColumn // for TypeDecimal
+
+	// Nested type fields (ARRAY, ROW, MAP)
+	Offsets    []int32   // ARRAY/MAP: offsets[i]..offsets[i+1] delimit child elements for row i
+	Child      *Vector   // ARRAY: flat vector of all element values
+	Children   []*Vector // ROW: one vector per field (same length as parent)
+	FieldNames []string  // ROW: names of child fields
 }
 
 // NewVector creates a new vector of the given type and length.
@@ -171,7 +180,40 @@ func NewVectorWithScale(typ TypeID, length int, scale int) *Vector {
 		v.BytesData = NewBytesColumn(length)
 	case TypeDecimal:
 		v.DecimalData = NewDecimalColumn(length, scale)
+	case TypeArray, TypeMap:
+		v.Offsets = make([]int32, length+1)
+		// Child vector is set by the caller after construction
+	case TypeRow:
+		// Children and FieldNames are set by the caller after construction
 	}
+	return v
+}
+
+// NewArrayVector creates a new ARRAY vector with the given length and element type.
+// The child vector starts with capacity 0; callers append elements and update offsets.
+func NewArrayVector(length int, elemType TypeID) *Vector {
+	v := NewVector(TypeArray, length)
+	v.Child = NewVector(elemType, 0)
+	return v
+}
+
+// NewRowVector creates a new ROW/STRUCT vector with named child fields.
+func NewRowVector(length int, fieldNames []string, fieldTypes []TypeID) *Vector {
+	v := NewVector(TypeRow, length)
+	v.FieldNames = fieldNames
+	v.Children = make([]*Vector, len(fieldNames))
+	for i, ft := range fieldTypes {
+		v.Children[i] = NewVector(ft, length)
+	}
+	return v
+}
+
+// NewMapVector creates a new MAP vector. Internally stored as ARRAY(ROW("key","value")).
+func NewMapVector(length int, keyType, valueType TypeID) *Vector {
+	v := NewVector(TypeMap, length)
+	child := NewRowVector(0, []string{"key", "value"}, []TypeID{keyType, valueType})
+	child.Type = TypeRow
+	v.Child = child
 	return v
 }
 
@@ -224,6 +266,30 @@ func (v *Vector) GetValue(i int) any {
 		return formatDate(v.Int32Data[i])
 	case TypeDecimal:
 		return v.DecimalData.Data[i].FormatDecimal(v.DecimalData.Scale)
+	case TypeArray, TypeMap:
+		if v.Child == nil {
+			return nil
+		}
+		start := int(v.Offsets[i])
+		end := int(v.Offsets[i+1])
+		elems := make([]any, 0, end-start)
+		for j := start; j < end; j++ {
+			elems = append(elems, v.Child.GetValue(j))
+		}
+		return elems
+	case TypeRow:
+		if v.Children == nil {
+			return nil
+		}
+		row := make(map[string]any, len(v.Children))
+		for j, child := range v.Children {
+			name := fmt.Sprintf("f%d", j)
+			if j < len(v.FieldNames) {
+				name = v.FieldNames[j]
+			}
+			row[name] = child.GetValue(i)
+		}
+		return row
 	default:
 		return nil
 	}
@@ -412,7 +478,64 @@ func (v *Vector) SetValue(i int, val any) {
 		case string:
 			v.DecimalData.Data[i] = ParseDecimalString(tv, v.DecimalData.Scale)
 		}
+	case TypeArray, TypeMap:
+		elems, ok := val.([]any)
+		if !ok || v.Child == nil {
+			return
+		}
+		start := v.Child.Len
+		for _, elem := range elems {
+			appendToVector(v.Child, elem)
+		}
+		v.Offsets[i] = int32(start)
+		v.Offsets[i+1] = int32(v.Child.Len)
+	case TypeRow:
+		row, ok := val.(map[string]any)
+		if !ok || v.Children == nil {
+			return
+		}
+		for j, child := range v.Children {
+			name := ""
+			if j < len(v.FieldNames) {
+				name = v.FieldNames[j]
+			}
+			child.SetValue(i, row[name])
+		}
 	}
+}
+
+// appendToVector appends a single value to a vector, growing its backing storage.
+// Used by ARRAY/MAP SetValue to build up the child vector.
+func appendToVector(v *Vector, val any) {
+	idx := v.Len
+	v.Len++
+	v.Nulls = v.Nulls.Grow(v.Len)
+	if val == nil {
+		v.Nulls.SetNull(idx)
+		switch v.Type {
+		case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+			v.BytesData.Offsets = append(v.BytesData.Offsets, v.BytesData.Offsets[len(v.BytesData.Offsets)-1])
+		}
+		return
+	}
+	// Grow typed storage
+	switch v.Type {
+	case TypeBool:
+		v.BoolData = append(v.BoolData, false)
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		v.Int32Data = append(v.Int32Data, 0)
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		v.Int64Data = append(v.Int64Data, 0)
+	case TypeFloat32:
+		v.Float32Data = append(v.Float32Data, 0)
+	case TypeFloat64:
+		v.Float64Data = append(v.Float64Data, 0)
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		v.BytesData.Offsets = append(v.BytesData.Offsets, v.BytesData.Offsets[len(v.BytesData.Offsets)-1])
+	case TypeDecimal:
+		v.DecimalData.Data = append(v.DecimalData.Data, Int128{})
+	}
+	v.SetValue(idx, val)
 }
 
 // --- Typed accessors (zero-allocation hot path) ---

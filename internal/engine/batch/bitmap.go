@@ -79,3 +79,32 @@ func (b *Bitmap) NullCount() int {
 func (b *Bitmap) Len() int {
 	return b.len
 }
+
+// Grow returns a bitmap that can hold at least newLen bits, preserving existing data.
+// If the current bitmap is already large enough, it is returned as-is.
+func (b Bitmap) Grow(newLen int) Bitmap {
+	if newLen <= b.len {
+		return b
+	}
+	newWords := (newLen + 63) / 64
+	if newWords <= len(b.data) {
+		// Enough capacity, just extend the valid bits in the new range
+		// Set new bits to valid (1) by default
+		for i := b.len; i < newLen; i++ {
+			b.data[i/64] |= 1 << uint(i%64)
+		}
+		b.len = newLen
+		return b
+	}
+	data := make([]uint64, newWords)
+	copy(data, b.data)
+	// Set new words to all-valid
+	for i := len(b.data); i < newWords; i++ {
+		data[i] = ^uint64(0)
+	}
+	// Clear excess bits in last word
+	if rem := newLen % 64; rem > 0 {
+		data[newWords-1] &= (uint64(1) << rem) - 1
+	}
+	return Bitmap{data: data, len: newLen}
+}
