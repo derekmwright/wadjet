@@ -1245,6 +1245,13 @@ type aggPreProject struct {
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
 
 func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	// If the input has a selection vector, materialize (compact) the pass-through
+	// columns first. BytesColumn.Set requires sequential writes (i=0,1,2,...),
+	// so we can't write computed columns at sparse selection indices.
+	if in.Sel != nil {
+		in = a.materialize(in)
+	}
+
 	// Build output schema: all input columns + computed columns
 	schema := make([]parquet.Column, 0, len(in.Schema)+len(a.computed))
 	schema = append(schema, in.Schema...)
@@ -1257,32 +1264,61 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	}
 
 	out := batch.NewRecordBatch(schema, in.Len)
-	out.Sel = in.Sel
 
 	// Share existing column vectors (zero-copy for pass-through columns)
 	for j := 0; j < len(in.Schema); j++ {
 		out.Columns[j] = in.Columns[j]
 	}
 
-	// Compute expression columns
+	// Compute expression columns (sequential writes, no selection vector)
 	computedOffset := len(in.Schema)
-	if in.Sel != nil {
-		for _, idx := range in.Sel {
-			for k, c := range a.computed {
-				val := c.Expr(in, int(idx))
-				out.Columns[computedOffset+k].SetValue(int(idx), val)
-			}
-		}
-	} else {
-		for i := 0; i < in.Len; i++ {
-			for k, c := range a.computed {
-				val := c.Expr(in, i)
-				out.Columns[computedOffset+k].SetValue(i, val)
-			}
+	for i := 0; i < in.Len; i++ {
+		for k, c := range a.computed {
+			val := c.Expr(in, i)
+			out.Columns[computedOffset+k].SetValue(i, val)
 		}
 	}
 
 	return out, nil
+}
+
+// materialize compacts a batch with a selection vector into a dense batch
+// with only the selected rows, removing the selection vector.
+func (a *aggPreProject) materialize(in *batch.RecordBatch) *batch.RecordBatch {
+	n := len(in.Sel)
+	out := batch.NewRecordBatch(in.Schema, n)
+	for j := range in.Schema {
+		src := in.Columns[j]
+		dst := out.Columns[j]
+		for di, si := range in.Sel {
+			if src.Nulls.IsNullFast(int(si)) {
+				dst.Nulls.SetNull(di)
+				if dst.Type == batch.TypeString || dst.Type == batch.TypeBytes ||
+					dst.Type == batch.TypeIPv6 || dst.Type == batch.TypeCIDR || dst.Type == batch.TypeUUID {
+					dst.BytesData.Set(di, nil)
+				}
+			} else {
+				dst.Nulls.SetValid(di)
+				switch dst.Type {
+				case batch.TypeBool:
+					dst.BoolData[di] = src.BoolData[si]
+				case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+					dst.Int32Data[di] = src.Int32Data[si]
+				case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+					dst.Int64Data[di] = src.Int64Data[si]
+				case batch.TypeFloat32:
+					dst.Float32Data[di] = src.Float32Data[si]
+				case batch.TypeFloat64:
+					dst.Float64Data[di] = src.Float64Data[si]
+				case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+					dst.BytesData.Set(di, src.BytesData.Value(int(si)))
+				case batch.TypeDecimal:
+					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				}
+			}
+		}
+	}
+	return out
 }
 
 func (a *aggPreProject) Close() error { return nil }
