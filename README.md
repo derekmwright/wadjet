@@ -8,7 +8,8 @@ A lightweight analytical query engine in pure Go. Columnar storage on Parquet, v
 - **Lightweight workers** — viable at 512 MB RAM with spill-to-disk. Scale to zero, start in under 2 seconds.
 - **Single binary** — run standalone for development or split into coordinator + workers for production.
 - **Pure Go** — no JVM, no CGo, no external query engine dependencies. Custom recursive descent SQL parser, vectorized batch execution, typed kernel dispatch.
-- **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with dedicated functions.
+- **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 90+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
+- **GeoIP enrichment** — optional MaxMind GeoLite2/GeoIP2 integration with 11 functions for IP geolocation (country, city, subdivision, coordinates, timezone, continent) and ASN lookup (AS number, organization).
 
 ## Quick Start
 
@@ -40,7 +41,8 @@ Full analytical SQL via a custom recursive descent parser:
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references
 - CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
-- 112 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL)
+- 273 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN)
+- 23 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
 - User-defined functions (CREATE FUNCTION)
 
 ```sql
