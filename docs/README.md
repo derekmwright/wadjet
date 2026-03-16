@@ -13,7 +13,8 @@ Caelum is an analytical query engine written in Go, inspired by systems like Duc
 | [Ingestion](ingestion.md) | Writing data: micro-batch accumulator, partitioning, Bento pipelines |
 | [SQL Reference](sql-reference.md) | Supported SQL syntax, functions, operators |
 | [HTTP API](api-reference.md) | REST endpoints for queries, tables, health |
-| [Embedding](embedding.md) | Using Caelum as a Go library via `pkg/caelum` |
+| [gRPC API](grpc-api.md) | Protobuf service for multi-language client generation |
+| [Embedding](embedding.md) | Using Caelum as a Go library via `caelum` |
 | [Distributed Deployment](distributed.md) | Multi-node setup, federation, cluster routing |
 | [Security](security.md) | API keys, JWT, mTLS, RBAC, cell-level policies |
 | [Performance Tuning](tuning.md) | Environment profiles, memory/spill tuning, methodology |
@@ -25,12 +26,12 @@ Caelum is an analytical query engine written in Go, inspired by systems like Duc
 ```mermaid
 graph LR
     A["Network Devices<br/>Routers, Switches,<br/>Firewalls, Load Balancers"] -- logs --> B["Bento<br/>(streaming ETL)<br/>Parse, Enrich,<br/>Partition, Write Parquet"]
-    B -- S3 --> C["Caelum<br/>SQL over HTTP API<br/>or embedded"]
+    B -- S3 --> C["Caelum<br/>SQL over HTTP/gRPC API<br/>or embedded"]
     C --> D["Your Application<br/>Dashboards, Alerting,<br/>Reports, Automation"]
 ```
 
 ## Quick Links
 
 - **Repository**: [github.com/derekmwright/caelum](https://github.com/derekmwright/caelum)
-- **Go Package**: `github.com/derekmwright/caelum/pkg/caelum`
+- **Go Package**: `github.com/derekmwright/caelum/caelum`
 - **License**: See repository root

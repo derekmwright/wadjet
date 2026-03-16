@@ -327,7 +327,7 @@ After Bento starts writing Parquet files to S3, register the table schema in Cae
 import (
     "github.com/derekmwright/caelum/internal/storage/objstore"
     "github.com/derekmwright/caelum/internal/storage/parquet"
-    "github.com/derekmwright/caelum/pkg/caelum"
+    "github.com/derekmwright/caelum/caelum"
 )
 
 store, _ := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{

@@ -24,7 +24,7 @@ import (
 	"github.com/derekmwright/caelum/internal/storage/catalog"
 	"github.com/derekmwright/caelum/internal/storage/objstore"
 	"github.com/derekmwright/caelum/internal/worker"
-	"github.com/derekmwright/caelum/pkg/caelum"
+	"github.com/derekmwright/caelum/caelum"
 	"github.com/spf13/cobra"
 )
 
@@ -42,6 +42,7 @@ var (
 	configFile       string
 	clusterID        string
 	leafRemotes      []string
+	grpcAddr         string
 	memoryBudget     int64
 	spillDir         string
 	resultStoreBytes int64
@@ -63,6 +64,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&secretKey, "secret-key", "minioadmin", "S3 secret key")
 	rootCmd.PersistentFlags().StringVar(&bucket, "bucket", "caelum", "Storage bucket name")
 	rootCmd.PersistentFlags().StringVar(&httpAddr, "http-addr", ":8080", "HTTP API listen address")
+	rootCmd.PersistentFlags().StringVar(&grpcAddr, "grpc-addr", ":9090", "gRPC API listen address")
 	rootCmd.PersistentFlags().IntVar(&natsPort, "nats-port", 4222, "Embedded NATS port")
 	rootCmd.PersistentFlags().StringVar(&natsURL, "nats-url", "", "NATS URL (for worker mode)")
 	rootCmd.PersistentFlags().StringVar(&clusterID, "cluster-id", "local", "Cluster identifier for federation")
@@ -615,15 +617,26 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	ops := server.NewOpsAPI(coord)
 	ops.RegisterRoutes(srv.Mux())
 
-	errCh := make(chan error, 1)
+	// Start gRPC server
+	grpcSrv := server.NewGRPCServer(server.GRPCConfig{
+		Addr:    grpcAddr,
+		Catalog: cat,
+		Coord:   coord,
+	}, logger)
+
+	errCh := make(chan error, 2)
 	go func() {
 		errCh <- srv.Start()
+	}()
+	go func() {
+		errCh <- grpcSrv.Start()
 	}()
 
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down...")
 		coord.Workers().Close()
+		grpcSrv.Shutdown()
 		srv.Shutdown(context.Background())
 		return nil
 	case err := <-errCh:
@@ -729,15 +742,26 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	ops := server.NewOpsAPI(coord)
 	ops.RegisterRoutes(srv.Mux())
 
-	errCh := make(chan error, 1)
+	// Start gRPC server
+	grpcSrv := server.NewGRPCServer(server.GRPCConfig{
+		Addr:    grpcAddr,
+		Catalog: cat,
+		Coord:   coord,
+	}, logger)
+
+	errCh := make(chan error, 2)
 	go func() {
 		errCh <- srv.Start()
+	}()
+	go func() {
+		errCh <- grpcSrv.Start()
 	}()
 
 	select {
 	case <-ctx.Done():
 		logger.Info("coordinator shutting down...")
 		coord.Workers().Close()
+		grpcSrv.Shutdown()
 		srv.Shutdown(context.Background())
 		return nil
 	case err := <-errCh:

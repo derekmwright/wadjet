@@ -335,7 +335,7 @@ import (
 
     "github.com/derekmwright/caelum/internal/storage/objstore"
     "github.com/derekmwright/caelum/internal/storage/parquet"
-    "github.com/derekmwright/caelum/pkg/caelum"
+    "github.com/derekmwright/caelum/caelum"
 )
 
 func main() {
@@ -554,7 +554,7 @@ import (
     "time"
 
     "github.com/derekmwright/caelum/internal/storage/objstore"
-    "github.com/derekmwright/caelum/pkg/caelum"
+    "github.com/derekmwright/caelum/caelum"
 )
 
 type Alert struct {

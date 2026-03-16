@@ -84,10 +84,16 @@ ORDER BY hour
 - Cell-level policies (column masking, row filtering)
 - Hot-reloadable configuration
 
+### APIs
+
+- **HTTP** REST API for queries, table management, health, and Prometheus metrics
+- **gRPC** API with protobuf service definition — generate type-safe clients for Go, Python, Java, TypeScript, Rust, C#, and more
+- gRPC health checking protocol for load balancer integration
+
 ### Operations
 
 - Prometheus metrics for queries, scans, workers, cache, and spill
-- Health endpoint with Kubernetes-compatible probes
+- Health endpoint with Kubernetes-compatible probes (HTTP and gRPC)
 - Output in table, JSON, or CSV format
 
 ## Benchmarks
@@ -134,7 +140,7 @@ caelum serve --mode=worker         # Stateless task executor, scale horizontally
 Use Caelum as a Go library:
 
 ```go
-import "github.com/derekmwright/caelum/pkg/caelum"
+import "github.com/derekmwright/caelum/caelum"
 
 db, _ := caelum.Open(ctx, caelum.Config{
     StorageEndpoint: "localhost:9000",
@@ -154,6 +160,7 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 | [SQL Reference](docs/sql-reference.md) | Full SQL syntax, functions, operators |
 | [Data Types](docs/data-types.md) | Column types including network primitives |
 | [HTTP API](docs/api-reference.md) | REST endpoints for queries, tables, health |
+| [gRPC API](docs/grpc-api.md) | Protobuf service for multi-language client generation |
 | [Configuration](docs/configuration.md) | YAML config, environment variables, CLI flags |
 | [Ingestion](docs/ingestion.md) | Micro-batch accumulator, partitioning, Bento pipelines |
 | [Embedding](docs/embedding.md) | Using Caelum as a Go library |

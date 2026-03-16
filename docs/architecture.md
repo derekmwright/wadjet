@@ -6,7 +6,7 @@ Caelum is a columnar analytical query engine designed for high-throughput scan-h
 
 ```mermaid
 graph TD
-    API["CLI / HTTP API<br/><sub>cmd/caelum &nbsp; internal/server</sub>"]
+    API["CLI / HTTP / gRPC API<br/><sub>cmd/caelum &nbsp; internal/server</sub>"]
     QP["Query Pipeline<br/><sub>SQL Parser → Logical Plan → Optimizer → Physical Plan → Execution Engine</sub>"]
     ST["Storage Layer<br/><sub>Object Store, Catalog,<br/>Parquet I/O, Ingest</sub>"]
     DL["Distributed Layer<br/><sub>NATS/JetStream, Coordinator,<br/>Worker Pool, Task Dispatch</sub>"]
@@ -23,7 +23,9 @@ graph TD
 ```
 github.com/derekmwright/caelum/
 ├── cmd/caelum/             # CLI entry point (cobra commands)
-├── pkg/caelum/             # Public embeddable Go API
+├── caelum/             # Public embeddable Go API
+├── proto/caelum/v1/        # Protobuf service definition
+├── gen/caelum/v1/          # Generated gRPC + protobuf Go code
 ├── internal/
 │   ├── storage/
 │   │   ├── objstore/       # S3-compatible object store abstraction
@@ -45,7 +47,7 @@ github.com/derekmwright/caelum/
 │   ├── distributed/        # NATS messaging layer + cluster-scoped subjects
 │   ├── auth/               # Authentication + authorization
 │   ├── config/             # YAML config with hot-reload
-│   ├── server/             # HTTP API (net/http)
+│   ├── server/             # HTTP API (net/http) + gRPC API (google.golang.org/grpc)
 │   └── metrics/            # Prometheus metrics
 └── test/                   # Integration tests
 ```

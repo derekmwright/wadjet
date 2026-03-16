@@ -7,7 +7,7 @@ Caelum supports distributed query execution across multiple worker nodes, coordi
 ```mermaid
 graph TD
     CL["Clients"]
-    CO["Coordinator<br/><sub>HTTP API, Query Planner,<br/>Embedded NATS, Result Merger</sub>"]
+    CO["Coordinator<br/><sub>HTTP + gRPC API, Query Planner,<br/>Embedded NATS, Result Merger</sub>"]
     W1["Worker 1<br/><sub>Executor, LRU Cache</sub>"]
     W2["Worker 2<br/><sub>Executor, LRU Cache</sub>"]
     W3["Worker 3<br/><sub>Executor, LRU Cache</sub>"]
@@ -28,7 +28,7 @@ graph TD
 
 The coordinator is the single entry point for queries:
 
-1. Receives SQL via HTTP API
+1. Receives SQL via HTTP or gRPC API
 2. Parses and plans the query
 3. Breaks the physical plan into distributed stages
 4. For federated queries, expands scan stages per-cluster via `ExpandFederatedScans`
@@ -66,6 +66,7 @@ NATS provides the messaging backbone:
 ./caelum serve \
   --mode coordinator \
   --http-addr :8080 \
+  --grpc-addr :9090 \
   --nats-port 4222 \
   --cluster-id central \
   --endpoint minio.internal:9000 \
@@ -117,13 +118,14 @@ services:
     build: .
     command: >
       serve --mode coordinator
-      --http-addr :8080 --nats-port 4222
+      --http-addr :8080 --grpc-addr :9090 --nats-port 4222
       --cluster-id central
       --endpoint minio:9000
       --access-key minioadmin --secret-key minioadmin
       --bucket caelum
     ports:
       - "8080:8080"
+      - "9090:9090"
       - "4222:4222"
     depends_on:
       - minio
@@ -193,6 +195,7 @@ spec:
             - serve
             - --mode=coordinator
             - --http-addr=:8080
+            - --grpc-addr=:9090
             - --nats-port=4222
             - --cluster-id=central
             - --endpoint=$(S3_ENDPOINT)
@@ -202,6 +205,8 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            - containerPort: 9090
+              name: grpc
             - containerPort: 4222
               name: nats
           env:
@@ -286,6 +291,8 @@ spec:
   ports:
     - name: http
       port: 8080
+    - name: grpc
+      port: 9090
     - name: nats
       port: 4222
 ```

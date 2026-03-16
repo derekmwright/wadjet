@@ -10,6 +10,7 @@ Caelum is configured through CLI flags, environment variables, and an optional Y
 |------|-------------|---------|
 | `--mode` | Deployment mode: `standalone`, `coordinator`, `worker` | `standalone` |
 | `--http-addr` | HTTP API listen address | `:8080` |
+| `--grpc-addr` | gRPC API listen address | `:9090` |
 | `--storage-type` | Storage backend: `s3` or `file` | `s3` |
 | `--data-dir` | Local directory for `--storage-type file` | none |
 | `--endpoint` | S3-compatible endpoint (host:port) | `localhost:9000` |
@@ -77,6 +78,9 @@ nats:
 
 http:
   addr: ":8080"
+
+grpc:
+  addr: ":9090"
 
 worker:
   max_concurrent: 4

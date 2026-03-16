@@ -1,11 +1,11 @@
 # Embedding Caelum
 
-Caelum can be embedded directly in Go applications via the `pkg/caelum` package, giving you a programmatic analytical query engine without running a separate server.
+Caelum can be embedded directly in Go applications via the `caelum` package, giving you a programmatic analytical query engine without running a separate server.
 
 ## Installation
 
 ```bash
-go get github.com/derekmwright/caelum/pkg/caelum
+go get github.com/derekmwright/caelum/caelum
 ```
 
 ## Core API
@@ -15,7 +15,7 @@ go get github.com/derekmwright/caelum/pkg/caelum
 ```go
 import (
     "github.com/derekmwright/caelum/internal/storage/objstore"
-    "github.com/derekmwright/caelum/pkg/caelum"
+    "github.com/derekmwright/caelum/caelum"
 )
 
 // First create an object store client
@@ -136,7 +136,7 @@ import (
 
     "github.com/derekmwright/caelum/internal/storage/objstore"
     "github.com/derekmwright/caelum/internal/storage/parquet"
-    "github.com/derekmwright/caelum/pkg/caelum"
+    "github.com/derekmwright/caelum/caelum"
 )
 
 var db *caelum.DB

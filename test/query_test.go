@@ -9,7 +9,7 @@ import (
 	"github.com/derekmwright/caelum/internal/storage/ingest"
 	"github.com/derekmwright/caelum/internal/storage/objstore"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
-	"github.com/derekmwright/caelum/pkg/caelum"
+	"github.com/derekmwright/caelum/caelum"
 )
 
 func setupDBWithEvents(t *testing.T, numRows int) *caelum.DB {

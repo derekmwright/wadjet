@@ -1,0 +1,170 @@
+syntax = "proto3";
+
+package caelum.v1;
+
+option go_package = "github.com/derekmwright/caelum/gen/caelum/v1;caelumv1";
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+
+// CaelumService exposes Caelum's query engine over gRPC.
+service CaelumService {
+  // Execute a SQL query and return all results.
+  rpc Query(QueryRequest) returns (QueryResponse);
+
+  // Execute a SQL query and stream result batches.
+  rpc QueryStream(QueryRequest) returns (stream QueryStreamResponse);
+
+  // Submit a query for async execution (distributed mode).
+  rpc SubmitQuery(QueryRequest) returns (SubmitQueryResponse);
+
+  // Get the status of an async query.
+  rpc GetQueryStatus(GetQueryStatusRequest) returns (GetQueryStatusResponse);
+
+  // Cancel a running query.
+  rpc CancelQuery(CancelQueryRequest) returns (CancelQueryResponse);
+
+  // List all tables.
+  rpc ListTables(ListTablesRequest) returns (ListTablesResponse);
+
+  // Describe a table's schema.
+  rpc DescribeTable(DescribeTableRequest) returns (DescribeTableResponse);
+
+  // Create a table.
+  rpc CreateTable(CreateTableRequest) returns (CreateTableResponse);
+
+  // Drop a table.
+  rpc DropTable(DropTableRequest) returns (DropTableResponse);
+}
+
+// QueryRequest is used for both synchronous and streaming queries.
+message QueryRequest {
+  string sql = 1;
+}
+
+// Row represents a single result row as a map of column name to value.
+message Row {
+  map<string, google.protobuf.Value> fields = 1;
+}
+
+// QueryStats contains execution statistics.
+message QueryStats {
+  int64 total_rows = 1;
+  google.protobuf.Duration elapsed = 2;
+  string plan = 3;
+}
+
+// QueryResponse contains the full result of a synchronous query.
+message QueryResponse {
+  string query_id = 1;
+  repeated string columns = 2;
+  repeated Row rows = 3;
+  QueryStats stats = 4;
+}
+
+// QueryStreamResponse contains a batch of rows in a streaming query.
+message QueryStreamResponse {
+  repeated string columns = 1;
+  repeated Row rows = 2;
+  QueryStats stats = 3;
+  bool is_last = 4;
+}
+
+// SubmitQueryResponse is returned when an async query is submitted.
+message SubmitQueryResponse {
+  string query_id = 1;
+  string plan = 2;
+}
+
+// GetQueryStatusRequest identifies a query to check.
+message GetQueryStatusRequest {
+  string query_id = 1;
+}
+
+// StageStatus reports progress on a single query stage.
+message StageStatus {
+  string stage_id = 1;
+  string type = 2;
+  int32 total_tasks = 3;
+  int32 done_tasks = 4;
+  int32 failed_tasks = 5;
+}
+
+// GetQueryStatusResponse reports the current state of a query.
+message GetQueryStatusResponse {
+  string query_id = 1;
+  string sql = 2;
+  string state = 3;
+  repeated StageStatus stages = 4;
+  google.protobuf.Duration elapsed = 5;
+  int64 total_rows = 6;
+  string error = 7;
+}
+
+// CancelQueryRequest identifies a query to cancel.
+message CancelQueryRequest {
+  string query_id = 1;
+}
+
+// CancelQueryResponse confirms cancellation.
+message CancelQueryResponse {
+  string query_id = 1;
+  string state = 2;
+}
+
+// ListTablesRequest is empty.
+message ListTablesRequest {}
+
+// ListTablesResponse contains all table names.
+message ListTablesResponse {
+  repeated string tables = 1;
+}
+
+// DescribeTableRequest identifies a table.
+message DescribeTableRequest {
+  string table_name = 1;
+}
+
+// ColumnInfo describes a column in a table schema.
+message ColumnInfo {
+  string name = 1;
+  string type = 2;
+  bool nullable = 3;
+}
+
+// DescribeTableResponse contains a table's schema.
+message DescribeTableResponse {
+  string name = 1;
+  repeated ColumnInfo columns = 2;
+  repeated string partition_keys = 3;
+}
+
+// CreateTableRequest defines a new table.
+message CreateTableRequest {
+  string name = 1;
+  repeated ColumnDef columns = 2;
+  repeated string partition_keys = 3;
+}
+
+// ColumnDef defines a column for table creation.
+message ColumnDef {
+  string name = 1;
+  string type = 2;
+  bool nullable = 3;
+}
+
+// CreateTableResponse confirms creation.
+message CreateTableResponse {
+  string name = 1;
+}
+
+// DropTableRequest identifies a table to drop.
+message DropTableRequest {
+  string name = 1;
+  bool if_exists = 2;
+}
+
+// DropTableResponse confirms deletion.
+message DropTableResponse {
+  string name = 1;
+}

@@ -14,6 +14,7 @@ type Config struct {
 	Storage Storage `yaml:"storage"`
 	NATS    NATS    `yaml:"nats"`
 	HTTP    HTTP    `yaml:"http"`
+	GRPC    GRPC    `yaml:"grpc"`
 	Worker  Worker  `yaml:"worker"`
 	Parquet Parquet `yaml:"parquet"`
 	Auth    Auth    `yaml:"auth"`
@@ -96,6 +97,11 @@ type HTTP struct {
 	Addr string `yaml:"addr"`
 }
 
+// GRPC configures the gRPC API server.
+type GRPC struct {
+	Addr string `yaml:"addr"`
+}
+
 // Worker configures the worker.
 type Worker struct {
 	MaxConcurrent    int    `yaml:"max_concurrent"`
@@ -128,6 +134,9 @@ func DefaultConfig() Config {
 		},
 		HTTP: HTTP{
 			Addr: ":8080",
+		},
+		GRPC: GRPC{
+			Addr: ":9090",
 		},
 		Worker: Worker{
 			MaxConcurrent: 4,

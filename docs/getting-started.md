@@ -21,7 +21,7 @@ go build -o caelum ./cmd/caelum
 ### As a Go Library
 
 ```bash
-go get github.com/derekmwright/caelum/pkg/caelum
+go get github.com/derekmwright/caelum/caelum
 ```
 
 ## Start MinIO (Local Development)
@@ -109,7 +109,7 @@ import (
     "github.com/derekmwright/caelum/internal/storage/ingest"
     "github.com/derekmwright/caelum/internal/storage/objstore"
     "github.com/derekmwright/caelum/internal/storage/parquet"
-    "github.com/derekmwright/caelum/pkg/caelum"
+    "github.com/derekmwright/caelum/caelum"
 )
 
 func main() {
@@ -222,8 +222,33 @@ Response:
 }
 ```
 
+## Your First Query (gRPC)
+
+Caelum also exposes a gRPC API on `:9090` (default). Clients can be generated for any language from the proto definition at `proto/caelum/v1/caelum.proto`.
+
+**Using grpcurl:**
+
+```bash
+# List tables
+grpcurl -plaintext localhost:9090 caelum.v1.CaelumService/ListTables
+
+# Execute a query
+grpcurl -plaintext -d '{"sql": "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip LIMIT 5"}' \
+  localhost:9090 caelum.v1.CaelumService/Query
+```
+
+**Generate a client (e.g., Python):**
+
+```bash
+pip install grpcio-tools
+python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. proto/caelum/v1/caelum.proto
+```
+
+See [gRPC API](grpc-api.md) for the full service reference.
+
 ## Next Steps
 
 - [Ingestion Guide](ingestion.md) — Bento pipelines, partitioning strategies, tuning flush thresholds
 - [SQL Reference](sql-reference.md) — Supported syntax, aggregates, joins
+- [gRPC API](grpc-api.md) — Generate type-safe clients for any language
 - [Network Analytics Workflow](network-analytics.md) — Full pipeline from device logs to dashboards
