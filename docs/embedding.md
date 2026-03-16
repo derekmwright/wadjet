@@ -97,7 +97,7 @@ The ingester automatically:
 - Partitions rows based on partition keys
 - Buffers rows in per-partition accumulators
 - Flushes to Parquet on S3 when thresholds are hit (size, rows, or time)
-- Updates the catalog manifest atomically via ETags
+- Updates the catalog manifest atomically via NATS KV revisions
 
 ### Querying
 
@@ -330,6 +330,6 @@ func ingestFromQueue(ctx context.Context) {
 ## Thread Safety
 
 - `DB.Query()` is safe to call concurrently from multiple goroutines
-- `DB.CreateTable()` and `DB.DropTable()` use optimistic concurrency on the catalog
+- `DB.CreateTable()` and `DB.DropTable()` use NATS KV revision-based optimistic concurrency on the catalog
 - `Ingester.Ingest()` is safe for concurrent calls from multiple goroutines within the same ingester
-- Do not share an `Ingester` across multiple processes writing to the same table — use separate ingesters (catalog ETag concurrency will prevent corruption but may cause flush retries)
+- Do not share an `Ingester` across multiple processes writing to the same table — use separate ingesters (catalog revision concurrency will prevent corruption but may cause flush retries)

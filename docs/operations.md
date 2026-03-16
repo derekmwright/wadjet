@@ -219,14 +219,14 @@ readinessProbe:
 
 3. **Check logs:** Worker logs will show connection errors and retry attempts.
 
-### Catalog Corruption
+### Catalog Issues
 
-The catalog uses optimistic concurrency (ETags), so corruption from concurrent writes shouldn't happen. However, if the catalog is corrupted:
+The catalog uses NATS KV with revision-based optimistic concurrency, so corruption from concurrent writes shouldn't happen. However, if catalog data is lost (e.g., NATS storage wiped):
 
-1. **Inspect the catalog files:**
+1. **Inspect the catalog via the API:**
    ```bash
-   mc cat local/caelum/_catalog/catalog.json | jq .
-   mc cat local/caelum/_catalog/tables/flow_logs/schema.json | jq .
+   curl http://localhost:8080/v1/tables | jq .
+   curl http://localhost:8080/v1/tables/flow_logs | jq .
    ```
 
 2. **Rebuild from Parquet files:** The Parquet files on S3 are the source of truth. If the catalog is lost, re-register the tables and rebuild manifests by listing the Parquet files.
@@ -287,22 +287,24 @@ After S3 deletes old Parquet files, remove stale catalog entries by re-running t
 
 | Component | Location | Criticality |
 |-----------|----------|-------------|
-| Catalog JSON | `s3://caelum/_catalog/` | High — needed to query data |
+| Catalog (NATS KV) | NATS JetStream storage dir | High — needed to query data |
 | Parquet data | `s3://caelum/data/` | High — the actual data |
 | Config YAML | `caelum.yaml` | Medium — security/auth settings |
 | Bento configs | `bento-*.yaml` | Medium — pipeline definitions |
 
 ### Catalog Backup
 
+The catalog lives in NATS JetStream storage. Back up the NATS store directory:
+
 ```bash
-# Snapshot the catalog
-mc mirror local/caelum/_catalog/ /backup/caelum-catalog-$(date +%Y%m%d)/
+# Snapshot the NATS JetStream data (includes catalog KV bucket)
+tar czf /backup/caelum-nats-$(date +%Y%m%d).tar.gz /var/caelum/nats-store/
 ```
 
 ### Recovery
 
-1. Restore the catalog files to `_catalog/` in your S3 bucket
-2. Start the Caelum server — it reads the catalog on startup
+1. Restore the NATS JetStream store directory and restart the coordinator
+2. Alternatively, re-register tables from Parquet files on S3 (the data is the source of truth)
 3. Verify tables are visible: `curl http://localhost:8080/v1/tables`
 4. Run a test query to confirm data access
 

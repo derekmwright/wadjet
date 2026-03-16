@@ -364,7 +364,7 @@ For detailed tuning guidance, see [Performance Tuning](tuning.md).
 
 - **Worker crash**: The coordinator detects missed heartbeats and reaps the worker. Tasks assigned to the dead worker time out and are redelivered by JetStream to surviving workers.
 - **Coordinator crash**: All in-flight queries fail. Restart the coordinator; workers reconnect automatically. No data is lost (all state is on S3).
-- **S3 unavailability**: Queries and ingestion fail with storage errors. Resume when S3 recovers — catalog uses ETags so no corruption occurs.
+- **S3 unavailability**: Queries and ingestion fail with storage errors. Resume when S3 recovers. Catalog metadata in NATS KV is unaffected.
 - **NATS partition**: Workers lose connection and stop receiving tasks. They reconnect automatically when the partition heals.
 
 ## Federation

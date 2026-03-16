@@ -21,7 +21,7 @@ graph LR
     R["Rows<br/>([]map)"] -- "Ingest()" --> P["Route by<br/>partition key"]
     P -- "Buffer" --> A["Accumulate<br/>per partition"]
     A -- "FlushAll" --> S["Parquet<br/>to S3"]
-    S --> C["Update catalog<br/>manifest (ETag)"]
+    S --> C["Update catalog<br/>manifest (NATS KV)"]
 ```
 
 The ingester flushes automatically when any threshold is exceeded:
@@ -395,4 +395,4 @@ Tune Bento's `batching.count` and `batching.period` to hit the sweet spot.
 
 ### Exactly-Once Considerations
 
-Caelum's catalog uses optimistic concurrency (ETags), so concurrent writers won't corrupt the catalog. However, if an ingestion process crashes mid-flush, a Parquet file may exist on S3 without a corresponding catalog entry. On restart, the file becomes orphaned but doesn't affect queries. Periodic cleanup of orphaned files is recommended for production deployments.
+Caelum's catalog uses NATS KV with revision-based optimistic concurrency, so concurrent writers won't corrupt the catalog. However, if an ingestion process crashes mid-flush, a Parquet file may exist on S3 without a corresponding catalog entry. On restart, the file becomes orphaned but doesn't affect queries. Periodic cleanup of orphaned files is recommended for production deployments.

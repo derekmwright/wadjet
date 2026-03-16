@@ -67,7 +67,7 @@ ORDER BY hour
 
 - **Apache Parquet** on any S3-compatible store (MinIO, AWS S3, R2, SeaweedFS)
 - **Hive-style partitioning** with automatic time-based partition keys
-- **JSON catalog** in object storage with ETag-based optimistic concurrency
+- **NATS KV catalog** with revision-based optimistic concurrency
 - **Micro-batch ingestion** with configurable flush thresholds (size, row count, time)
 
 ### Distributed

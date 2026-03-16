@@ -698,5 +698,5 @@ POST /v1/queries
 ### Operations
 - [ ] S3 lifecycle policies for data retention (e.g., 90-day expiry)
 - [ ] Orphaned Parquet file cleanup job
-- [ ] Backup strategy for the catalog JSON files
+- [ ] Backup strategy for the NATS JetStream store (catalog KV)
 - [ ] Runbook for common failure scenarios

@@ -27,7 +27,7 @@ github.com/derekmwright/caelum/
 ├── internal/
 │   ├── storage/
 │   │   ├── objstore/       # S3-compatible object store abstraction
-│   │   ├── catalog/        # JSON metadata catalog on object storage
+│   │   ├── catalog/        # Schema + partition metadata (NATS KV)
 │   │   ├── parquet/        # Parquet reader/writer wrappers
 │   │   └── ingest/         # Micro-batch accumulator + partitioner
 │   ├── engine/
@@ -63,21 +63,19 @@ All data in Caelum is stored in **Apache Parquet** files on S3-compatible object
 
 ### Catalog
 
-The catalog is a JSON metadata layer stored at `_catalog/` in the object store:
+The catalog is a JSON-serialized metadata layer stored in **NATS KV** (bucket: `caelum_catalog`). Keys are cluster-scoped:
 
 ```
-_catalog/
-├── catalog.json                        # Top-level: version, table list, timestamps
-├── tables/
-│   └── flow_logs/
-│       ├── schema.json                 # Table schema, partition keys, version
-│       └── partitions/
-│           └── manifest.json           # All partitions and their file entries
+<cluster-id>.meta              → CatalogMeta (version, table list, timestamps)
+<cluster-id>.table.<name>      → TableMeta (schema, partition keys, version)
+<cluster-id>.manifest.<name>   → PartitionManifest (partitions and file entries)
 ```
 
 The `PartitionManifest` contains an array of `PartitionEntry` objects, each with a `path`, `values` (partition key → value map), and `files` (list of Parquet `FileEntry` objects with path, size, row count, and creation time).
 
-**Concurrency control**: All catalog updates use S3 ETags for optimistic concurrency — if another writer modifies the file between your read and write, the update fails and retries.
+**Concurrency control**: NATS KV provides revision-based optimistic concurrency — each key tracks a monotonic revision, and concurrent writers are detected automatically. An in-memory `MemKV` implementation is used for standalone/embedded mode.
+
+**Distributed locking**: An optional `LockManager` uses NATS KV for read-write locks with a 30-second TTL, auto-refreshed every 10 seconds. Write locks are exclusive; read locks are shared.
 
 ### Record Batches
 
