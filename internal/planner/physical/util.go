@@ -22,20 +22,19 @@ func fromRows(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch
 	return batch.FromRows(schema, rows)
 }
 
-// readBatchDirect reads a parquet file directly into a RecordBatch, bypassing
-// the expensive map[string]any intermediate. Uses parquet-go's batch Row API
-// for efficient columnar decoding.
+// readBatchDirect reads a parquet file directly into a RecordBatch using
+// column-at-a-time page reading. This avoids the row-reconstruction overhead
+// of parquet-go's ReadRows and eliminates the map[string]any intermediate.
 func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string) *batch.RecordBatch {
 	file := pqReader.File()
+	rowGroups := file.RowGroups()
+	if len(rowGroups) == 0 {
+		return nil
+	}
 
-	// Build projected schema for column pruning
-	var opts []goparquet.ReaderOption
+	// Determine which columns to read and build the batch schema
 	readSchema := schema
 	if len(requiredCols) > 0 {
-		projected := buildProjectedParquetSchema(file, requiredCols)
-		if projected != nil {
-			opts = append(opts, projected)
-		}
 		needed := make(map[string]bool, len(requiredCols))
 		for _, c := range requiredCols {
 			needed[c] = true
@@ -51,61 +50,72 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 		}
 	}
 
-	pr := goparquet.NewReader(file, opts...)
-	defer pr.Close()
-
-	numRows := int(pr.NumRows())
-	if numRows == 0 {
-		return nil
+	// Map batch schema columns to parquet file column indices
+	fileColumns := file.Schema().Columns() // [][]string
+	type colMapping struct {
+		fileIdx  int // index in parquet file's column chunks
+		batchIdx int // index in our batch schema
 	}
-
-	// Map projected parquet columns to batch column indices
-	pqCols := pr.Schema().Columns()
-	colMap := make([]int, len(pqCols))
-	for i, path := range pqCols {
-		name := path[len(path)-1]
-		colMap[i] = -1
-		for j, sc := range readSchema {
-			if sc.Name == name {
-				colMap[i] = j
+	mappings := make([]colMapping, 0, len(readSchema))
+	for bi, sc := range readSchema {
+		for fi, path := range fileColumns {
+			name := path[len(path)-1]
+			if name == sc.Name {
+				mappings = append(mappings, colMapping{fileIdx: fi, batchIdx: bi})
 				break
 			}
 		}
 	}
 
-	b := batch.NewRecordBatch(readSchema, numRows)
-
-	bufSize := 4096
-	if numRows < bufSize {
-		bufSize = numRows
+	// Count total rows across all row groups
+	var totalRows int64
+	for _, rg := range rowGroups {
+		totalRows += rg.NumRows()
 	}
-	buf := make([]goparquet.Row, bufSize)
-	rowIdx := 0
-	for rowIdx < numRows {
-		remaining := numRows - rowIdx
-		if remaining < len(buf) {
-			buf = buf[:remaining]
-		}
-		n, err := pr.ReadRows(buf)
-		for i := 0; i < n; i++ {
-			for j, val := range buf[i] {
-				if j >= len(colMap) {
+	if totalRows == 0 {
+		return nil
+	}
+
+	b := batch.NewRecordBatch(readSchema, int(totalRows))
+	valBuf := make([]goparquet.Value, 4096)
+
+	// Read column-by-column across all row groups
+	for _, m := range mappings {
+		col := b.Columns[m.batchIdx]
+		rowOffset := 0
+
+		for _, rg := range rowGroups {
+			chunks := rg.ColumnChunks()
+			if m.fileIdx >= len(chunks) {
+				continue
+			}
+			pages := chunks[m.fileIdx].Pages()
+			for {
+				page, err := pages.ReadPage()
+				if err != nil || page == nil {
 					break
 				}
-				batchCol := colMap[j]
-				if batchCol < 0 {
-					continue
+
+				vr := page.Values()
+				for {
+					n, err := vr.ReadValues(valBuf)
+					for i := 0; i < n; i++ {
+						setValueDirect(col, rowOffset+i, valBuf[i])
+					}
+					rowOffset += n
+					if err != nil || n == 0 {
+						break
+					}
 				}
-				setValueDirect(b.Columns[batchCol], rowIdx, val)
+				if cl, ok := vr.(io.Closer); ok {
+					cl.Close()
+				}
 			}
-			rowIdx++
-		}
-		if err != nil || n == 0 {
-			break
+			pages.Close()
 		}
 	}
 
-	b.Len = rowIdx
+	b.Len = int(totalRows)
 	return b
 }
 
@@ -187,7 +197,6 @@ func decimalFromBytes(b []byte) batch.Int128 {
 			lo = (lo << 8) | uint64(c)
 		}
 		if hi < 0 {
-			// Sign-extend lo to handle negative values
 			lo |= ^uint64(0) << (uint(len(b)) * 8)
 		}
 		return batch.Int128From(int64(lo))
