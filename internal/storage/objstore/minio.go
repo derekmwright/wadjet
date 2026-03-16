@@ -2,9 +2,12 @@ package objstore
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -24,12 +27,34 @@ type MinIOStore struct {
 	client *minio.Client
 }
 
-// NewMinIOStore creates a new MinIO-backed object store.
+// s3Transport returns an http.Transport tuned for high-throughput S3 access.
+// Connection pooling avoids TCP/TLS handshake overhead on repeated requests
+// to the same endpoint (typical for scan-heavy query workloads).
+func s3Transport(secure bool) *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: !secure},
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		DisableCompression:    true, // Parquet/object data is already compressed
+	}
+}
+
+// NewMinIOStore creates a new MinIO-backed object store with connection pooling.
 func NewMinIOStore(cfg MinIOConfig) (*MinIOStore, error) {
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
-		Secure: cfg.UseSSL,
-		Region: cfg.Region,
+		Creds:     credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Secure:    cfg.UseSSL,
+		Region:    cfg.Region,
+		Transport: s3Transport(cfg.UseSSL),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating minio client: %w", err)
