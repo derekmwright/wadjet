@@ -101,6 +101,16 @@ const (
 	TokenKWCross
 	TokenKWNatural
 	TokenKWOver
+	TokenKWNulls
+	TokenKWFirst
+	TokenKWLast
+	TokenKWRows
+	TokenKWRange
+	TokenKWUnbounded
+	TokenKWPreceding
+	TokenKWFollowing
+	TokenKWCurrent
+	TokenKWRow
 
 	// Raw capture
 	TokenRawBody // everything after AS until terminator
@@ -166,7 +176,17 @@ var keywords = map[string]TokenType{
 	"FULL":      TokenKWFull,
 	"CROSS":     TokenKWCross,
 	"NATURAL":   TokenKWNatural,
-	"OVER":      TokenKWOver,
+	"OVER":       TokenKWOver,
+	"NULLS":      TokenKWNulls,
+	"FIRST":      TokenKWFirst,
+	"LAST":       TokenKWLast,
+	"ROWS":       TokenKWRows,
+	"RANGE":      TokenKWRange,
+	"UNBOUNDED":  TokenKWUnbounded,
+	"PRECEDING":  TokenKWPreceding,
+	"FOLLOWING":  TokenKWFollowing,
+	"CURRENT":    TokenKWCurrent,
+	"ROW":        TokenKWRow,
 }
 
 // token is a lexical token produced by the lexer.

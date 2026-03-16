@@ -239,6 +239,26 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 		ASTExpr: expr,
 	}
 
+	// Check if it's a window function
+	if wfn, ok := expr.(*WindowFuncNode); ok {
+		// Parse alias first (AS alias or implicit alias)
+		alias := ""
+		if p.isKeyword(TokenKWAs) {
+			p.advance()
+			aliasTok, err := p.expect(TokenIdent)
+			if err != nil {
+				return SelectColumn{}, fmt.Errorf("expected alias after AS")
+			}
+			alias = aliasTok.val
+		} else if p.peek() == TokenIdent && !p.isFromKeyword() {
+			alias = p.advance().val
+		}
+		col.Alias = alias
+		col.IsWindow = true
+		col.WindowSpec = windowSpecFromNode(wfn, alias)
+		return col, nil
+	}
+
 	// Check if it's a column reference
 	if ref, ok := expr.(*ColRef); ok {
 		col.ColumnRef = ref.Column
@@ -282,7 +302,9 @@ func (p *selectParser) isFromKeyword() bool {
 	case TokenKWFrom, TokenKWWhere, TokenKWGroup, TokenKWHaving,
 		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWJoin,
 		TokenKWInner, TokenKWLeft, TokenKWRight, TokenKWFull,
-		TokenKWCross, TokenKWOn, TokenKWOffset:
+		TokenKWCross, TokenKWOn, TokenKWOffset, TokenKWOver,
+		TokenKWNulls, TokenKWRows, TokenKWRange, TokenKWUnbounded,
+		TokenKWPreceding, TokenKWFollowing, TokenKWCurrent, TokenKWRow:
 		return true
 	}
 	return false
@@ -428,7 +450,8 @@ func (p *selectParser) isJoinKeyword() bool {
 	switch p.cur.typ {
 	case TokenKWJoin, TokenKWInner, TokenKWLeft, TokenKWRight, TokenKWFull,
 		TokenKWCross, TokenKWOn, TokenKWWhere, TokenKWGroup, TokenKWHaving,
-		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWOffset:
+		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWOffset,
+		TokenKWNulls, TokenKWRows, TokenKWRange:
 		return true
 	}
 	return false
@@ -469,6 +492,20 @@ func (p *selectParser) parseOrderByList() ([]OrderByItem, error) {
 			item.Desc = true
 		} else if p.isKeyword(TokenKWAsc) {
 			p.advance()
+		}
+		if p.isKeyword(TokenKWNulls) {
+			p.advance()
+			if p.isKeyword(TokenKWFirst) {
+				p.advance()
+				v := true
+				item.NullsFirst = &v
+			} else if p.isKeyword(TokenKWLast) {
+				p.advance()
+				v := false
+				item.NullsFirst = &v
+			} else {
+				return nil, fmt.Errorf("expected FIRST or LAST after NULLS")
+			}
 		}
 		items = append(items, item)
 		if p.peek() != TokenComma {
@@ -909,11 +946,185 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 }
 
 // maybeParseOver checks for OVER (...) after a function call and returns
-// the function node. For now we return the FuncCallNode — window function
-// handling is done at a higher level via the WindowSpec extraction.
+// a WindowFuncNode if OVER is present, otherwise the original FuncCallNode.
 func (p *selectParser) maybeParseOver(fn *FuncCallNode) (Node, error) {
-	// Window functions are handled by the pre-parse rewriter, not here
-	return fn, nil
+	if !p.isKeyword(TokenKWOver) {
+		return fn, nil
+	}
+	return p.parseWindowFunc(fn)
+}
+
+// parseWindowFunc parses OVER (...) after a function call.
+func (p *selectParser) parseWindowFunc(fn *FuncCallNode) (Node, error) {
+	p.advance() // consume OVER
+
+	if _, err := p.expect(TokenLParen); err != nil {
+		return nil, fmt.Errorf("expected '(' after OVER")
+	}
+
+	wfn := &WindowFuncNode{Func: fn}
+
+	// PARTITION BY
+	if p.isKeyword(TokenKWPartition) {
+		p.advance() // consume PARTITION
+		if _, err := p.expect(TokenKWBy); err != nil {
+			return nil, fmt.Errorf("expected BY after PARTITION")
+		}
+		for {
+			expr, err := p.parseExpr()
+			if err != nil {
+				return nil, fmt.Errorf("parsing PARTITION BY: %w", err)
+			}
+			wfn.PartitionBy = append(wfn.PartitionBy, expr)
+			if p.peek() != TokenComma {
+				break
+			}
+			// Check if next comma is part of PARTITION BY or start of ORDER BY
+			// Peek ahead to see if after comma we get ORDER
+			if p.isOrderByNext() {
+				break
+			}
+			p.advance() // consume comma
+		}
+	}
+
+	// ORDER BY
+	if p.isKeyword(TokenKWOrder) {
+		p.advance() // consume ORDER
+		if _, err := p.expect(TokenKWBy); err != nil {
+			return nil, fmt.Errorf("expected BY after ORDER in OVER")
+		}
+		for {
+			expr, err := p.parseExpr()
+			if err != nil {
+				return nil, fmt.Errorf("parsing ORDER BY in OVER: %w", err)
+			}
+			wob := WindowOrderBy{Expr: expr}
+			if p.isKeyword(TokenKWDesc) {
+				p.advance()
+				wob.Desc = true
+			} else if p.isKeyword(TokenKWAsc) {
+				p.advance()
+			}
+			if p.isKeyword(TokenKWNulls) {
+				p.advance()
+				if p.isKeyword(TokenKWFirst) {
+					p.advance()
+					v := true
+					wob.NullsFirst = &v
+				} else if p.isKeyword(TokenKWLast) {
+					p.advance()
+					v := false
+					wob.NullsFirst = &v
+				} else {
+					return nil, fmt.Errorf("expected FIRST or LAST after NULLS in OVER")
+				}
+			}
+			wfn.OrderBy = append(wfn.OrderBy, wob)
+			if p.peek() != TokenComma {
+				break
+			}
+			p.advance() // consume comma
+		}
+	}
+
+	// Frame spec: ROWS|RANGE ...
+	if p.isKeyword(TokenKWRows) || p.isKeyword(TokenKWRange) {
+		frame, err := p.parseWindowFrame()
+		if err != nil {
+			return nil, err
+		}
+		wfn.Frame = frame
+	}
+
+	if _, err := p.expect(TokenRParen); err != nil {
+		return nil, fmt.Errorf("expected ')' after OVER clause")
+	}
+
+	return wfn, nil
+}
+
+// isOrderByNext checks if the current token starts ORDER BY (used to stop
+// PARTITION BY parsing at the right place).
+func (p *selectParser) isOrderByNext() bool {
+	return p.isKeyword(TokenKWOrder)
+}
+
+// parseWindowFrame parses a frame specification: ROWS|RANGE ...
+func (p *selectParser) parseWindowFrame() (*WindowFrame, error) {
+	frame := &WindowFrame{}
+	if p.isKeyword(TokenKWRows) {
+		frame.Mode = FrameRows
+	} else {
+		frame.Mode = FrameRange
+	}
+	p.advance() // consume ROWS/RANGE
+
+	// Check for BETWEEN ... AND ...
+	if p.isKeyword(TokenKWBetween) {
+		p.advance() // consume BETWEEN
+		start, err := p.parseFrameBound()
+		if err != nil {
+			return nil, fmt.Errorf("parsing frame start: %w", err)
+		}
+		frame.Start = start
+		if _, err := p.expect(TokenKWAnd); err != nil {
+			return nil, fmt.Errorf("expected AND in frame BETWEEN")
+		}
+		end, err := p.parseFrameBound()
+		if err != nil {
+			return nil, fmt.Errorf("parsing frame end: %w", err)
+		}
+		frame.End = &end
+	} else {
+		// Single bound (start only, end defaults to CURRENT ROW)
+		start, err := p.parseFrameBound()
+		if err != nil {
+			return nil, fmt.Errorf("parsing frame bound: %w", err)
+		}
+		frame.Start = start
+	}
+
+	return frame, nil
+}
+
+// parseFrameBound parses a single frame bound:
+// UNBOUNDED PRECEDING, UNBOUNDED FOLLOWING, CURRENT ROW, N PRECEDING, N FOLLOWING
+func (p *selectParser) parseFrameBound() (FrameBound, error) {
+	if p.isKeyword(TokenKWUnbounded) {
+		p.advance()
+		if p.isKeyword(TokenKWPreceding) {
+			p.advance()
+			return FrameBound{Type: BoundUnboundedPreceding}, nil
+		}
+		if p.isKeyword(TokenKWFollowing) {
+			p.advance()
+			return FrameBound{Type: BoundUnboundedFollowing}, nil
+		}
+		return FrameBound{}, fmt.Errorf("expected PRECEDING or FOLLOWING after UNBOUNDED")
+	}
+	if p.isKeyword(TokenKWCurrent) {
+		p.advance()
+		if _, err := p.expect(TokenKWRow); err != nil {
+			return FrameBound{}, fmt.Errorf("expected ROW after CURRENT")
+		}
+		return FrameBound{Type: BoundCurrentRow}, nil
+	}
+	// N PRECEDING or N FOLLOWING
+	if p.peek() == TokenNumber {
+		numTok := p.advance()
+		offset := &Lit{Value: numTok.val, Kind: LitNumber}
+		if p.isKeyword(TokenKWPreceding) {
+			p.advance()
+			return FrameBound{Type: BoundPreceding, Offset: offset}, nil
+		}
+		if p.isKeyword(TokenKWFollowing) {
+			p.advance()
+			return FrameBound{Type: BoundFollowing, Offset: offset}, nil
+		}
+		return FrameBound{}, fmt.Errorf("expected PRECEDING or FOLLOWING after number")
+	}
+	return FrameBound{}, fmt.Errorf("unexpected frame bound token %q", p.cur.val)
 }
 
 func (p *selectParser) parseCaseExpr() (Node, error) {
@@ -994,6 +1205,47 @@ func (p *selectParser) parseCastExpr() (Node, error) {
 	}
 
 	return &CastNode{Inner: inner, TypeName: strings.ToLower(typeTok.val)}, nil
+}
+
+// windowSpecFromNode converts a parsed WindowFuncNode into a WindowSpec
+// that the logical plan builder expects.
+func windowSpecFromNode(wfn *WindowFuncNode, alias string) *WindowSpec {
+	ws := &WindowSpec{
+		FuncName: wfn.Func.Name,
+		Alias:    alias,
+	}
+
+	// Build args string
+	if wfn.Func.Star {
+		ws.Args = "*"
+	} else if len(wfn.Func.Args) > 0 {
+		args := make([]string, len(wfn.Func.Args))
+		for i, a := range wfn.Func.Args {
+			args[i] = a.String()
+		}
+		ws.Args = strings.Join(args, ", ")
+	}
+
+	// Partition By
+	for _, pb := range wfn.PartitionBy {
+		ws.PartitionBy = append(ws.PartitionBy, pb.String())
+	}
+
+	// Order By
+	for _, ob := range wfn.OrderBy {
+		ws.OrderBy = append(ws.OrderBy, WindowOrderItem{
+			Column:     ob.Expr.String(),
+			Desc:       ob.Desc,
+			NullsFirst: ob.NullsFirst,
+		})
+	}
+
+	// Frame
+	if wfn.Frame != nil {
+		ws.Frame = wfn.Frame
+	}
+
+	return ws
 }
 
 // ParseExpression parses a single expression from a SQL string.

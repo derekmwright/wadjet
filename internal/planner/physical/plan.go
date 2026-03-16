@@ -63,6 +63,7 @@ type WindowColSpec struct {
 	OutputCol   string
 	PartitionBy []string
 	OrderBy     []SortKeySpec
+	Frame       *logical.WindowFrameSpec
 }
 
 // AggSpec defines an aggregation in a stage.
@@ -74,8 +75,9 @@ type AggSpec struct {
 
 // SortKeySpec defines a sort key in a stage.
 type SortKeySpec struct {
-	Column string
-	Desc   bool
+	Column    string
+	Desc      bool
+	NullsLast bool
 }
 
 // PrettyPrint returns a formatted string representation of the physical plan.
@@ -366,7 +368,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		var sortKeys []SortKeySpec
 		for _, ob := range node.OrderBy {
-			sortKeys = append(sortKeys, SortKeySpec{Column: ob.Column, Desc: ob.Desc})
+			sortKeys = append(sortKeys, SortKeySpec{Column: ob.Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
 		}
 		stage := Stage{
 			ID:       stageID,
@@ -476,7 +478,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, we := range node.WindowExprs {
 			var orderBy []SortKeySpec
 			for _, ob := range we.OrderBy {
-				orderBy = append(orderBy, SortKeySpec{Column: ob.Column, Desc: ob.Desc})
+				orderBy = append(orderBy, SortKeySpec{Column: ob.Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
 			}
 			winCols = append(winCols, WindowColSpec{
 				Func:        we.Func,
@@ -484,6 +486,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				OutputCol:   we.OutputCol,
 				PartitionBy: we.PartitionBy,
 				OrderBy:     orderBy,
+				Frame:       we.Frame,
 			})
 		}
 		stage := Stage{
@@ -668,9 +671,9 @@ func (s *joinFlushSource) Close() error {
 	return s.pipeline.Close()
 }
 
-// mapJoinType converts a vitess join type string (e.g. "join", "left join",
-// "right join", "full outer join", "cross join") or a canonical short form
-// to a canonical short form used by the distributed planner.
+// mapJoinType converts a join type string (e.g. "join", "left join",
+// "right join", "full outer join", "cross join") to a canonical short
+// form used by the distributed planner.
 func mapJoinType(vt string) string {
 	lower := strings.ToLower(strings.TrimSpace(vt))
 	switch {
@@ -910,8 +913,9 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 			order = exec.Descending
 		}
 		keys = append(keys, exec.SortKey{
-			Column: cleanExpr(ob.Column),
-			Order:  order,
+			Column:    cleanExpr(ob.Column),
+			Order:     order,
+			NullsLast: resolveNullsLast(ob),
 		})
 	}
 
@@ -959,18 +963,27 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 				order = exec.Descending
 			}
 			orderKeys = append(orderKeys, exec.SortKey{
-				Column: ob.Column,
-				Order:  order,
+				Column:    ob.Column,
+				Order:     order,
+				NullsLast: resolveNullsLast(ob),
 			})
 		}
-		winCols = append(winCols, exec.WindowColumn{
+		wc := exec.WindowColumn{
 			Func:        parseWindowFunc(we.Func),
 			InputCol:    cleanExpr(we.InputCol),
 			OutputCol:   we.OutputCol,
 			OutputType:  windowOutputType(we.Func),
 			PartitionBy: we.PartitionBy,
 			OrderBy:     orderKeys,
-		})
+		}
+		if we.Frame != nil {
+			wc.Frame = &exec.WindowFrameSpec{
+				Mode: we.Frame.Mode,
+				Start: exec.WindowBound{Type: we.Frame.Start.Type, Offset: we.Frame.Start.Offset},
+				End:   exec.WindowBound{Type: we.Frame.End.Type, Offset: we.Frame.End.Offset},
+			}
+		}
+		winCols = append(winCols, wc)
 	}
 
 	winOp := exec.NewWindow(winCols)
@@ -1412,6 +1425,17 @@ func hasAggregateAncestor(node *logical.Node) bool {
 		return hasAggregateAncestor(node.Children[0])
 	}
 	return false
+}
+
+// resolveNullsLast determines whether nulls should sort last for a given order expression.
+// Default SQL behavior: NULLS LAST for ASC, NULLS FIRST for DESC.
+// When NullsFirst is explicitly set, use the explicit value.
+func resolveNullsLast(ob logical.OrderExpr) bool {
+	if ob.NullsFirst != nil {
+		return !*ob.NullsFirst // NullsFirst=true => NullsLast=false, and vice versa
+	}
+	// Default: ASC => NULLS LAST, DESC => NULLS FIRST
+	return !ob.Desc
 }
 
 func cleanExpr(s string) string {

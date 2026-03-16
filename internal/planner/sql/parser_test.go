@@ -671,3 +671,173 @@ func TestParseCreateTableAllTypes(t *testing.T) {
 		t.Fatalf("expected partition key [event_date], got %v", ct.PartitionKeys)
 	}
 }
+
+func TestParseWindowFunction(t *testing.T) {
+	tests := []struct {
+		sql     string
+		winFunc string
+		partBy  int // number of partition by cols
+		orderBy int // number of order by cols
+	}{
+		{"SELECT ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t", "row_number", 0, 1},
+		{"SELECT SUM(amount) OVER (PARTITION BY dept ORDER BY id) AS running FROM t", "sum", 1, 1},
+		{"SELECT RANK() OVER (PARTITION BY dept, team ORDER BY score DESC NULLS LAST) AS r FROM t", "rank", 2, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(info.Windows) != 1 {
+				t.Fatalf("expected 1 window, got %d", len(info.Windows))
+			}
+			ws := info.Windows[0]
+			if ws.FuncName != tt.winFunc {
+				t.Errorf("func: got %q, want %q", ws.FuncName, tt.winFunc)
+			}
+			if len(ws.PartitionBy) != tt.partBy {
+				t.Errorf("partition by: got %d, want %d", len(ws.PartitionBy), tt.partBy)
+			}
+			if len(ws.OrderBy) != tt.orderBy {
+				t.Errorf("order by: got %d, want %d", len(ws.OrderBy), tt.orderBy)
+			}
+		})
+	}
+}
+
+func TestParseWindowFrame(t *testing.T) {
+	sql := "SELECT SUM(amount) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS rolling FROM t"
+	parsed, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Windows) != 1 {
+		t.Fatalf("expected 1 window, got %d", len(info.Windows))
+	}
+	ws := info.Windows[0]
+	if ws.Frame == nil {
+		t.Fatal("expected frame spec")
+	}
+	if ws.Frame.Mode != FrameRows {
+		t.Errorf("expected ROWS frame, got %v", ws.Frame.Mode)
+	}
+}
+
+func TestParseNullsFirstLast(t *testing.T) {
+	tests := []struct {
+		sql        string
+		nullsFirst *bool
+	}{
+		{"SELECT * FROM t ORDER BY id NULLS FIRST", boolPtr(true)},
+		{"SELECT * FROM t ORDER BY id NULLS LAST", boolPtr(false)},
+		{"SELECT * FROM t ORDER BY id DESC NULLS FIRST", boolPtr(true)},
+		{"SELECT * FROM t ORDER BY id", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(info.OrderBy) != 1 {
+				t.Fatalf("expected 1 ORDER BY, got %d", len(info.OrderBy))
+			}
+			ob := info.OrderBy[0]
+			if tt.nullsFirst == nil && ob.NullsFirst != nil {
+				t.Errorf("expected NullsFirst=nil, got %v", *ob.NullsFirst)
+			}
+			if tt.nullsFirst != nil {
+				if ob.NullsFirst == nil {
+					t.Fatalf("expected NullsFirst=%v, got nil", *tt.nullsFirst)
+				}
+				if *ob.NullsFirst != *tt.nullsFirst {
+					t.Errorf("expected NullsFirst=%v, got %v", *tt.nullsFirst, *ob.NullsFirst)
+				}
+			}
+		})
+	}
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func TestPositionalGroupByOrderBy(t *testing.T) {
+	tests := []struct {
+		sql      string
+		groupBy  []string
+		orderCol string
+	}{
+		{
+			sql:     "SELECT user_id, SUM(amount) AS total FROM events GROUP BY 1",
+			groupBy: []string{"user_id"},
+		},
+		{
+			sql:      "SELECT user_id, name FROM users ORDER BY 1 DESC",
+			orderCol: "user_id",
+		},
+		{
+			sql:      "SELECT user_id, SUM(amount) AS total FROM events GROUP BY 1 ORDER BY 2 DESC",
+			groupBy:  []string{"user_id"},
+			orderCol: "total",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.groupBy != nil {
+				if len(info.GroupBy) != len(tt.groupBy) {
+					t.Fatalf("GROUP BY: got %v, want %v", info.GroupBy, tt.groupBy)
+				}
+				for i, want := range tt.groupBy {
+					if info.GroupBy[i] != want {
+						t.Errorf("GROUP BY[%d]: got %q, want %q", i, info.GroupBy[i], want)
+					}
+				}
+			}
+			if tt.orderCol != "" {
+				if len(info.OrderBy) != 1 || info.OrderBy[0].Column != tt.orderCol {
+					t.Errorf("ORDER BY: got %v, want column=%q", info.OrderBy, tt.orderCol)
+				}
+			}
+		})
+	}
+}
+
+func TestCTEColumnList(t *testing.T) {
+	sql := "WITH t(a, b) AS (SELECT id, name FROM users) SELECT a, b FROM t"
+	parsed, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.CTEs) != 1 {
+		t.Fatalf("expected 1 CTE, got %d", len(parsed.CTEs))
+	}
+	cte := parsed.CTEs[0]
+	if cte.Name != "t" {
+		t.Errorf("CTE name: got %q, want %q", cte.Name, "t")
+	}
+	if len(cte.Columns) != 2 || cte.Columns[0] != "a" || cte.Columns[1] != "b" {
+		t.Errorf("CTE columns: got %v, want [a b]", cte.Columns)
+	}
+}

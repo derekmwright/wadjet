@@ -116,6 +116,19 @@ type AggExpr struct {
 	Distinct  bool // COUNT(DISTINCT col)
 }
 
+// WindowFrameSpec describes a window frame specification.
+type WindowFrameSpec struct {
+	Mode  string // "rows" or "range"
+	Start WindowBound
+	End   WindowBound
+}
+
+// WindowBound describes one end of a window frame.
+type WindowBound struct {
+	Type   string // "unbounded_preceding", "preceding", "current_row", "following", "unbounded_following"
+	Offset int
+}
+
 // WindowExpr is a window function expression.
 type WindowExpr struct {
 	Func        string // row_number, rank, dense_rank, sum, count, avg, min, max
@@ -123,12 +136,14 @@ type WindowExpr struct {
 	OutputCol   string
 	PartitionBy []string
 	OrderBy     []OrderExpr
+	Frame       *WindowFrameSpec
 }
 
 // OrderExpr is a sort expression.
 type OrderExpr struct {
-	Column string
-	Desc   bool
+	Column     string
+	Desc       bool
+	NullsFirst *bool // nil = default, true = NULLS FIRST, false = NULLS LAST
 }
 
 // NewScan creates a scan node.

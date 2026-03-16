@@ -324,6 +324,60 @@ func (e *ExistsNode) String() string {
 	return notStr + "exists (" + e.SQL + ")"
 }
 
+// --- Window function AST ---
+
+// FrameMode identifies ROWS vs RANGE.
+type FrameMode int
+
+const (
+	FrameRows FrameMode = iota
+	FrameRange
+)
+
+// FrameBoundType identifies the type of a frame bound.
+type FrameBoundType int
+
+const (
+	BoundUnboundedPreceding FrameBoundType = iota
+	BoundPreceding
+	BoundCurrentRow
+	BoundFollowing
+	BoundUnboundedFollowing
+)
+
+// FrameBound describes one end of a window frame.
+type FrameBound struct {
+	Type   FrameBoundType
+	Offset Node // nil for UNBOUNDED/CURRENT ROW
+}
+
+// WindowFrame describes a window frame specification.
+type WindowFrame struct {
+	Mode  FrameMode
+	Start FrameBound
+	End   *FrameBound // nil means "to CURRENT ROW"
+}
+
+// WindowFuncNode represents a window function call: FUNC(...) OVER (...)
+type WindowFuncNode struct {
+	Func        *FuncCallNode
+	PartitionBy []Node
+	OrderBy     []WindowOrderBy
+	Frame       *WindowFrame
+}
+
+// WindowOrderBy describes ordering in a window function's OVER clause.
+type WindowOrderBy struct {
+	Expr       Node
+	Desc       bool
+	NullsFirst *bool
+}
+
+func (n *WindowFuncNode) nodeTag() {}
+func (n *WindowFuncNode) String() string {
+	return n.Func.String() + " OVER (...)"
+}
+
 // --- Aggregates lookup ---
 
 // knownAggregates is the set of standard aggregate function names.

@@ -22,8 +22,9 @@ const (
 
 // SortKey defines a column and direction for sorting.
 type SortKey struct {
-	Column string
-	Order  SortOrder
+	Column   string
+	Order    SortOrder
+	NullsLast bool
 }
 
 // Sort is a Sink that accumulates all batches columnar and sorts them
@@ -110,6 +111,17 @@ func (s *Sort) finalizeWithSpill() error {
 		for _, key := range s.Keys {
 			vi := rows[i][key.Column]
 			vj := rows[j][key.Column]
+			viNil := vi == nil
+			vjNil := vj == nil
+			if viNil && vjNil {
+				continue
+			}
+			if viNil || vjNil {
+				if key.NullsLast {
+					return !viNil // nil sorts last: non-nil < nil
+				}
+				return viNil // nil sorts first: nil < non-nil
+			}
 			cmp := compareAny(vi, vj)
 			if cmp == 0 {
 				continue
@@ -160,9 +172,10 @@ func (s *Sort) finalizeColumnar() error {
 
 	// Resolve sort key column indices and pre-resolve typed comparison kernels
 	type resolvedKey struct {
-		colIdx  int
-		order   SortOrder
-		compare kernel.SortCompareKernel
+		colIdx    int
+		order     SortOrder
+		nullsLast bool
+		compare   kernel.SortCompareKernel
 	}
 	firstBatch := s.batches[0]
 	resolved := make([]resolvedKey, len(s.Keys))
@@ -172,7 +185,7 @@ func (s *Sort) finalizeColumnar() error {
 		if idx >= 0 {
 			cmp = kernel.ResolveSortCompare(firstBatch.Columns[idx].Type)
 		}
-		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, compare: cmp}
+		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, nullsLast: key.NullsLast, compare: cmp}
 	}
 
 	// Sort index using pre-resolved typed comparison kernels — no type switches
@@ -188,6 +201,13 @@ func (s *Sort) finalizeColumnar() error {
 			vi := bi.Columns[key.colIdx]
 			vj := bj.Columns[key.colIdx]
 			cmp := key.compare(vi, ri, vj, rj)
+			if cmp != 0 && key.nullsLast {
+				aiNull := vi.Nulls.IsNull(ri)
+				bjNull := vj.Nulls.IsNull(rj)
+				if aiNull || bjNull {
+					cmp = -cmp // flip null ordering
+				}
+			}
 			if cmp == 0 {
 				continue
 			}

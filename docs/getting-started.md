@@ -4,7 +4,7 @@ This guide walks you through installing Caelum, creating a table, ingesting data
 
 ## Prerequisites
 
-- **Go 1.25.5+**
+- **Go 1.26+**
 - **S3-compatible object storage** (MinIO for local development, AWS S3 or similar for production)
 - **NATS** (only required for distributed mode)
 

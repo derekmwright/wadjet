@@ -116,21 +116,26 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			var orderBy []OrderExpr
 			for _, ob := range ws.OrderBy {
 				orderBy = append(orderBy, OrderExpr{
-					Column: cleanExpr(ob.Column),
-					Desc:   ob.Desc,
+					Column:     cleanExpr(ob.Column),
+					Desc:       ob.Desc,
+					NullsFirst: ob.NullsFirst,
 				})
 			}
 			partBy := make([]string, len(ws.PartitionBy))
 			for i, p := range ws.PartitionBy {
 				partBy[i] = cleanExpr(p)
 			}
-			winExprs = append(winExprs, WindowExpr{
+			we := WindowExpr{
 				Func:        ws.FuncName,
 				InputCol:    cleanExpr(ws.Args),
 				OutputCol:   ws.Alias,
 				PartitionBy: partBy,
 				OrderBy:     orderBy,
-			})
+			}
+			if ws.Frame != nil {
+				we.Frame = convertFrame(ws.Frame)
+			}
+			winExprs = append(winExprs, we)
 		}
 		plan = NewWindow(plan, winExprs)
 	}
@@ -172,8 +177,9 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		var orderExprs []OrderExpr
 		for _, ob := range info.OrderBy {
 			orderExprs = append(orderExprs, OrderExpr{
-				Column: cleanExpr(ob.Column),
-				Desc:   ob.Desc,
+				Column:     cleanExpr(ob.Column),
+				Desc:       ob.Desc,
+				NullsFirst: ob.NullsFirst,
 			})
 		}
 		plan = NewSort(plan, orderExprs)
@@ -267,6 +273,53 @@ func rewriteExpr(node plansql.Node, cols []plansql.SelectColumn) plansql.Node {
 	}
 }
 
+// convertFrame converts a SQL WindowFrame to a logical WindowFrameSpec.
+func convertFrame(f *plansql.WindowFrame) *WindowFrameSpec {
+	spec := &WindowFrameSpec{}
+	switch f.Mode {
+	case plansql.FrameRows:
+		spec.Mode = "rows"
+	case plansql.FrameRange:
+		spec.Mode = "range"
+	}
+	spec.Start = convertBound(f.Start)
+	if f.End != nil {
+		spec.End = convertBound(*f.End)
+	} else {
+		spec.End = WindowBound{Type: "current_row"}
+	}
+	return spec
+}
+
+func convertBound(b plansql.FrameBound) WindowBound {
+	wb := WindowBound{}
+	switch b.Type {
+	case plansql.BoundUnboundedPreceding:
+		wb.Type = "unbounded_preceding"
+	case plansql.BoundPreceding:
+		wb.Type = "preceding"
+		if b.Offset != nil {
+			if lit, ok := b.Offset.(*plansql.Lit); ok {
+				v, _ := strconv.Atoi(lit.Value)
+				wb.Offset = v
+			}
+		}
+	case plansql.BoundCurrentRow:
+		wb.Type = "current_row"
+	case plansql.BoundFollowing:
+		wb.Type = "following"
+		if b.Offset != nil {
+			if lit, ok := b.Offset.(*plansql.Lit); ok {
+				v, _ := strconv.Atoi(lit.Value)
+				wb.Offset = v
+			}
+		}
+	case plansql.BoundUnboundedFollowing:
+		wb.Type = "unbounded_following"
+	}
+	return wb
+}
+
 // buildUnionPlan constructs a logical plan for a UNION query.
 func buildUnionPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
 	leftPlan, err := buildFromSelectWithCTEs(info.Union.Left, ctes)
@@ -285,8 +338,9 @@ func buildUnionPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, err
 		var orderExprs []OrderExpr
 		for _, ob := range info.OrderBy {
 			orderExprs = append(orderExprs, OrderExpr{
-				Column: cleanExpr(ob.Column),
-				Desc:   ob.Desc,
+				Column:     cleanExpr(ob.Column),
+				Desc:       ob.Desc,
+				NullsFirst: ob.NullsFirst,
 			})
 		}
 		plan = NewSort(plan, orderExprs)
@@ -330,8 +384,51 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 			if err != nil {
 				return nil, fmt.Errorf("building plan for CTE %q: %w", cte.Name, err)
 			}
+
+			// If the CTE has an explicit column list, wrap with a rename projection
+			if len(cte.Columns) > 0 {
+				// Count output columns from the plan
+				outCols := countOutputCols(plan, selectInfo)
+				if len(cte.Columns) == outCols {
+					var projections []Projection
+					srcNames := getOutputColNames(selectInfo)
+					for i, newName := range cte.Columns {
+						srcName := srcNames[i]
+						projections = append(projections, Projection{
+							Column: srcName,
+							Alias:  newName,
+							Expr:   srcName,
+						})
+					}
+					plan = NewProject(plan, projections)
+				}
+			}
+
 			return plan, nil
 		}
 	}
 	return NewScan(table.Name, table.Alias), nil
+}
+
+// countOutputCols returns the number of output columns from a select info.
+func countOutputCols(plan *Node, info *plansql.SelectInfo) int {
+	if info != nil {
+		return len(info.Columns)
+	}
+	return 0
+}
+
+// getOutputColNames returns the output column names from a select info.
+func getOutputColNames(info *plansql.SelectInfo) []string {
+	names := make([]string, len(info.Columns))
+	for i, col := range info.Columns {
+		if col.Alias != "" {
+			names[i] = col.Alias
+		} else if col.ColumnRef != "" {
+			names[i] = col.ColumnRef
+		} else {
+			names[i] = col.Expr
+		}
+	}
+	return names
 }

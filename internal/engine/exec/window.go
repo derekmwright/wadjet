@@ -24,6 +24,19 @@ const (
 	WinMax
 )
 
+// WindowFrameSpec describes a window frame specification for execution.
+type WindowFrameSpec struct {
+	Mode  string // "rows" or "range"
+	Start WindowBound
+	End   WindowBound
+}
+
+// WindowBound describes one end of a window frame.
+type WindowBound struct {
+	Type   string // "unbounded_preceding", "preceding", "current_row", "following", "unbounded_following"
+	Offset int
+}
+
 // WindowColumn defines a window function computation.
 type WindowColumn struct {
 	Func        WindowFunc
@@ -32,6 +45,7 @@ type WindowColumn struct {
 	OutputType  parquet.TypeID
 	PartitionBy []string
 	OrderBy     []SortKey
+	Frame       *WindowFrameSpec // optional frame specification
 }
 
 // Window is a SinkSource that collects all rows, partitions and sorts them,
@@ -173,6 +187,17 @@ func computeWindowFunc(rows []map[string]any, wc WindowColumn) {
 			for _, key := range sortKeys {
 				vi := rows[i][key.Column]
 				vj := rows[j][key.Column]
+				viNil := vi == nil
+				vjNil := vj == nil
+				if viNil && vjNil {
+					continue
+				}
+				if viNil || vjNil {
+					if key.NullsLast {
+						return !viNil
+					}
+					return viNil
+				}
 				cmp := compareAny(vi, vj)
 				if cmp == 0 {
 					continue

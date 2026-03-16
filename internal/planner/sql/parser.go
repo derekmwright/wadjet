@@ -3,6 +3,7 @@ package sql
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -24,8 +25,9 @@ type ParsedQuery struct {
 
 // CTEDef represents a Common Table Expression definition.
 type CTEDef struct {
-	Name string // CTE name (lowercased for matching)
-	SQL  string // the CTE body SQL (the SELECT inside the parentheses)
+	Name    string   // CTE name (lowercased for matching)
+	SQL     string   // the CTE body SQL (the SELECT inside the parentheses)
+	Columns []string // optional column name list
 }
 
 // ExplainInfo holds details for an EXPLAIN statement.
@@ -120,47 +122,40 @@ func Parse(sql string) (*ParsedQuery, error) {
 	// Pre-parse CTEs — extract WITH ... AS (...) clauses
 	var cteDefs []CTEDef
 	if first.typ == TokenKWWith {
-		var remaining string
+		l2 := newLexer(trimmed)
 		var err error
-		cteDefs, remaining, err = extractCTEs(trimmed)
+		cteDefs, err = lexParseCTEs(l2)
 		if err != nil {
-			return nil, fmt.Errorf("extracting CTEs: %w", err)
+			return nil, fmt.Errorf("parsing CTEs: %w", err)
 		}
-		trimmed = remaining
+		trimmed = strings.TrimSpace(l2.rest())
 	}
 
-	// Pre-parse window functions
-	rewritten, windowSpecs, err := rewriteWindowFunctions(trimmed)
-	if err != nil {
-		return nil, fmt.Errorf("rewriting window functions: %w", err)
-	}
-
-	// Parse using our recursive descent parser
-	sp := newSelectParser(rewritten)
+	// Parse using our recursive descent parser (window functions are now
+	// parsed natively via maybeParseOver in the expression parser)
+	sp := newSelectParser(trimmed)
 	info, err := sp.parseSelectOrUnion()
 	if err != nil {
 		return nil, fmt.Errorf("parsing SQL: %w", err)
 	}
 
+	// Resolve positional references (GROUP BY 1, ORDER BY 1 DESC)
+	if err := resolvePositionalRefs(info); err != nil {
+		return nil, fmt.Errorf("resolving positional refs: %w", err)
+	}
+
 	// Propagate CTE definitions
 	info.CTEs = cteDefs
 
-	// Propagate window specs and mark window columns
-	info.Windows = windowSpecs
-	windowAliases := make(map[string]*WindowSpec)
-	for i := range info.Windows {
-		windowAliases[info.Windows[i].Alias] = &info.Windows[i]
-	}
+	// Collect window specs from parsed columns (populated by parseSelectColumn
+	// when it encounters WindowFuncNode).
+	var windowSpecs []WindowSpec
 	for i := range info.Columns {
-		alias := info.Columns[i].Alias
-		if alias == "" {
-			alias = info.Columns[i].ColumnRef
-		}
-		if ws, ok := windowAliases[alias]; ok {
-			info.Columns[i].IsWindow = true
-			info.Columns[i].WindowSpec = ws
+		if info.Columns[i].IsWindow && info.Columns[i].WindowSpec != nil {
+			windowSpecs = append(windowSpecs, *info.Columns[i].WindowSpec)
 		}
 	}
+	info.Windows = windowSpecs
 
 	pq := &ParsedQuery{
 		Type:       QuerySelect,
@@ -241,8 +236,9 @@ type JoinInfo struct {
 
 // OrderByItem describes an ORDER BY element.
 type OrderByItem struct {
-	Column string
-	Desc   bool
+	Column     string
+	Desc       bool
+	NullsFirst *bool // nil = default, true = NULLS FIRST, false = NULLS LAST
 }
 
 // --- Lexer-based pre-parse functions ---
@@ -612,118 +608,167 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 	}, nil
 }
 
-// extractCTEs parses WITH cte_name AS (body) [, cte_name2 AS (body2)] SELECT ...
-// It returns the CTE definitions and the remaining SQL (the final SELECT statement).
-// The input must start with WITH (case-insensitive).
-func extractCTEs(sql string) ([]CTEDef, string, error) {
+// resolvePositionalRefs replaces numeric positional references in GROUP BY
+// and ORDER BY with the corresponding SELECT column expression (1-indexed).
+// UNION queries are skipped since positions would be ambiguous.
+func resolvePositionalRefs(info *SelectInfo) error {
+	if info.Union != nil {
+		return nil // skip UNION queries
+	}
+
+	// Resolve GROUP BY positional refs
+	for i, gb := range info.GroupBy {
+		pos, err := strconv.Atoi(strings.TrimSpace(gb))
+		if err != nil {
+			continue // not a number, leave as-is
+		}
+		if pos < 1 || pos > len(info.Columns) {
+			return fmt.Errorf("GROUP BY position %d is out of range (1-%d)", pos, len(info.Columns))
+		}
+		col := info.Columns[pos-1]
+		if col.Alias != "" {
+			info.GroupBy[i] = col.Alias
+		} else {
+			info.GroupBy[i] = col.Expr
+		}
+	}
+
+	// Resolve ORDER BY positional refs
+	for i, ob := range info.OrderBy {
+		pos, err := strconv.Atoi(strings.TrimSpace(ob.Column))
+		if err != nil {
+			continue // not a number, leave as-is
+		}
+		if pos < 1 || pos > len(info.Columns) {
+			return fmt.Errorf("ORDER BY position %d is out of range (1-%d)", pos, len(info.Columns))
+		}
+		col := info.Columns[pos-1]
+		if col.Alias != "" {
+			info.OrderBy[i].Column = col.Alias
+		} else {
+			info.OrderBy[i].Column = col.Expr
+		}
+	}
+
+	return nil
+}
+
+// lexParseCTEs parses CTE definitions from a lexer.
+// The caller has verified the first token is WITH.
+func lexParseCTEs(l *lexer) ([]CTEDef, error) {
+	// Consume WITH
+	l.nextToken()
+
 	var defs []CTEDef
-	n := len(sql)
-
-	// Skip past "WITH"
-	i := skipWS(sql, 0)
-	if i+4 > n || !strings.EqualFold(sql[i:i+4], "WITH") {
-		return nil, sql, nil
-	}
-	i += 4
-
-	// Make sure WITH isn't part of a longer word
-	if i < n && isIdentByte(sql[i]) {
-		return nil, sql, nil
-	}
-
 	for {
-		// Skip whitespace to find CTE name
-		i = skipWS(sql, i)
-		if i >= n {
-			return nil, "", fmt.Errorf("unexpected end of input after WITH")
-		}
-
 		// Read CTE name
-		if !isIdentStartByte(sql[i]) {
-			return nil, "", fmt.Errorf("expected CTE name, got %q", string(sql[i]))
+		nameTok := l.nextToken()
+		if nameTok.typ != TokenIdent {
+			return nil, fmt.Errorf("expected CTE name, got %q", nameTok.val)
 		}
-		nameStart := i
-		for i < n && isIdentByte(sql[i]) {
-			i++
-		}
-		cteName := sql[nameStart:i]
+		cteName := strings.ToLower(nameTok.val)
 
-		// Check if this "name" is actually SELECT — that means there are no
-		// more CTEs and the final query starts here.
-		if strings.EqualFold(cteName, "SELECT") {
-			return nil, "", fmt.Errorf("expected CTE definition, found SELECT")
+		// Check for optional column list: name(col1, col2, ...) AS (...)
+		// vs name AS (SELECT ...)
+		var columns []string
+		peek := l.peekToken()
+		if peek.typ == TokenLParen {
+			// Save position to backtrack if this is AS (SELECT ...)
+			savedPos := l.pos
+			savedStart := l.start
+			savedWidth := l.width
+
+			l.nextToken() // consume (
+			// Check if this is the start of the CTE body (SELECT keyword) or a column list
+			inner := l.peekToken()
+			if inner.typ == TokenKWSelect || inner.typ == TokenKWWith {
+				// It's the CTE body, not a column list. Restore position.
+				l.pos = savedPos
+				l.start = savedStart
+				l.width = savedWidth
+			} else {
+				// Parse column list
+				for {
+					colTok := l.nextToken()
+					if colTok.typ != TokenIdent {
+						return nil, fmt.Errorf("expected column name in CTE %q column list, got %q", cteName, colTok.val)
+					}
+					columns = append(columns, strings.ToLower(colTok.val))
+					next := l.nextToken()
+					if next.typ == TokenRParen {
+						break
+					}
+					if next.typ != TokenComma {
+						return nil, fmt.Errorf("expected ',' or ')' in CTE %q column list, got %q", cteName, next.val)
+					}
+				}
+			}
 		}
 
 		// Expect AS
-		i = skipWS(sql, i)
-		if i+2 > n || !strings.EqualFold(sql[i:i+2], "AS") {
-			return nil, "", fmt.Errorf("expected AS after CTE name %q", cteName)
-		}
-		i += 2
-		// Make sure AS isn't part of a longer word
-		if i < n && isIdentByte(sql[i]) {
-			return nil, "", fmt.Errorf("expected AS after CTE name %q", cteName)
+		asTok := l.nextToken()
+		if asTok.typ != TokenKWAs {
+			return nil, fmt.Errorf("expected AS after CTE name %q, got %q", cteName, asTok.val)
 		}
 
-		// Expect opening paren for the CTE body
-		i = skipWS(sql, i)
-		if i >= n || sql[i] != '(' {
-			return nil, "", fmt.Errorf("expected '(' after AS in CTE %q", cteName)
+		// Expect opening paren
+		lparenTok := l.nextToken()
+		if lparenTok.typ != TokenLParen {
+			return nil, fmt.Errorf("expected '(' after AS in CTE %q", cteName)
 		}
-		i++ // skip '('
 
-		// Find matching closing paren, respecting nested parens and string literals
-		bodyStart := i
+		// Capture body using balanced paren counting
+		bodyStart := l.pos
 		depth := 1
-		for i < n && depth > 0 {
-			if sql[i] == '\'' {
-				i = skipStringLit(sql, i)
+		for l.pos < len(l.input) && depth > 0 {
+			ch := l.input[l.pos]
+			if ch == '\'' {
+				// Skip string literal
+				l.pos++
+				for l.pos < len(l.input) {
+					if l.input[l.pos] == '\'' {
+						l.pos++
+						if l.pos < len(l.input) && l.input[l.pos] == '\'' {
+							l.pos++ // escaped quote
+							continue
+						}
+						break
+					}
+					l.pos++
+				}
 				continue
 			}
-			if sql[i] == '(' {
+			if ch == '(' {
 				depth++
-			}
-			if sql[i] == ')' {
+			} else if ch == ')' {
 				depth--
 			}
 			if depth > 0 {
-				i++
+				l.pos++
 			}
 		}
 		if depth != 0 {
-			return nil, "", fmt.Errorf("unmatched parenthesis in CTE %q", cteName)
+			return nil, fmt.Errorf("unmatched parenthesis in CTE %q", cteName)
 		}
-		bodyEnd := i
-		i++ // skip closing ')'
+		body := strings.TrimSpace(l.input[bodyStart:l.pos])
+		l.pos++ // skip closing ')'
+		l.start = l.pos
 
-		body := strings.TrimSpace(sql[bodyStart:bodyEnd])
 		defs = append(defs, CTEDef{
-			Name: strings.ToLower(cteName),
-			SQL:  body,
+			Name:    cteName,
+			SQL:     body,
+			Columns: columns,
 		})
 
-		// After the CTE body, check for comma (more CTEs) or the start of
-		// the final SELECT statement.
-		i = skipWS(sql, i)
-		if i >= n {
-			return nil, "", fmt.Errorf("expected SELECT after CTE definitions")
-		}
-
-		if sql[i] == ',' {
-			i++ // consume comma, loop for next CTE
+		// Check for comma (more CTEs) or end
+		peek = l.peekToken()
+		if peek.typ == TokenComma {
+			l.nextToken() // consume comma
 			continue
 		}
-
-		// No comma — the rest is the final query
-		remaining := strings.TrimSpace(sql[i:])
-		return defs, remaining, nil
+		break
 	}
+
+	return defs, nil
 }
 
-// skipWSInline skips spaces and tabs (not newlines, for safety) starting at i.
-func skipWSInline(s string, i int) int {
-	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
-		i++
-	}
-	return i
-}

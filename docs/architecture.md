@@ -52,7 +52,7 @@ github.com/derekmwright/caelum/
 │   │   ├── memory/         # MemoryTracker, SpillManager, spill-to-disk
 │   │   └── scan/           # Scanner with 3-level pushdown
 │   ├── planner/
-│   │   ├── sql/            # SQL → SelectInfo parser (vitess-sqlparser)
+│   │   ├── sql/            # Recursive descent SQL parser → SelectInfo
 │   │   ├── logical/        # Logical plan tree + optimizer
 │   │   └── physical/       # Physical plan + distributed stages
 │   ├── coordinator/        # Distributed query coordinator + federated routing
@@ -122,7 +122,7 @@ Record batches are reused via `BatchPool` — a thread-safe, per-schema object p
 
 ### 1. SQL Parsing
 
-The SQL string is parsed into a `SelectInfo` structure via the vitess-sqlparser:
+The SQL string is parsed into a `SelectInfo` structure by the custom recursive descent parser:
 
 ```
 "SELECT src_ip, SUM(bytes_in) FROM flow_logs WHERE dst_port = 443 GROUP BY src_ip"
