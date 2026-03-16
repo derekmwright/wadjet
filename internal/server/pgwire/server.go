@@ -1044,12 +1044,47 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any) {
 			c.buf = appendInt32(c.buf, -1)
 			continue
 		}
-		s := fmt.Sprintf("%v", val)
+		s := formatPgValue(val)
 		c.buf = appendInt32(c.buf, int32(len(s)))
 		c.buf = append(c.buf, s...)
 	}
 
 	c.sendMsg('D', c.buf)
+}
+
+// formatPgValue formats a value for PgWire text output.
+// Produces SQL-like formatting for nested types (arrays, maps, structs).
+func formatPgValue(val any) string {
+	switch tv := val.(type) {
+	case []any:
+		var buf strings.Builder
+		buf.WriteByte('[')
+		for i, elem := range tv {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			buf.WriteString(formatPgValue(elem))
+		}
+		buf.WriteByte(']')
+		return buf.String()
+	case map[string]any:
+		var buf strings.Builder
+		buf.WriteByte('{')
+		first := true
+		for k, v := range tv {
+			if !first {
+				buf.WriteString(", ")
+			}
+			first = false
+			buf.WriteString(k)
+			buf.WriteString(": ")
+			buf.WriteString(formatPgValue(v))
+		}
+		buf.WriteByte('}')
+		return buf.String()
+	default:
+		return fmt.Sprintf("%v", val)
+	}
 }
 
 func (c *pgConn) sendCommandComplete(tag string) {
