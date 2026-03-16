@@ -6,6 +6,11 @@ tasks:
     cmds:
       - go build -o caelum ./cmd/caelum
 
+  build-ingest:
+    desc: Build the unifi-ingest binary
+    cmds:
+      - go build -o unifi-ingest ./cmd/unifi-ingest
+
   vet:
     desc: Run go vet
     cmds:

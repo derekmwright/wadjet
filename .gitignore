@@ -1,5 +1,9 @@
 # Binaries
 /caelum
+/unifi-ingest
+
+# MinIO data volume
+/data/
 *.exe
 *.dll
 *.so
