@@ -35,10 +35,11 @@ Full analytical SQL via a custom recursive descent parser:
 - SELECT, EXPLAIN, DESCRIBE, CREATE TABLE, DROP TABLE
 - CTEs (`WITH ... AS`), UNION / INTERSECT / EXCEPT (with ALL variants)
 - INNER, LEFT, RIGHT, FULL OUTER, CROSS JOINs
-- Subqueries (scalar, IN, EXISTS, derived tables)
+- Subqueries: scalar, IN, EXISTS, correlated subqueries
 - Window functions with PARTITION BY, ORDER BY, NULLS FIRST/LAST, and ROWS/RANGE frame specs
-- GROUP BY and ORDER BY with positional references
+- GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references
 - CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE
+- Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
 - 58 built-in scalar functions (string, math, date/time, network, UUID, conditional)
 - User-defined functions (CREATE FUNCTION)
 
@@ -66,6 +67,7 @@ ORDER BY hour
 ### Storage
 
 - **Apache Parquet** on any S3-compatible store (MinIO, AWS S3, R2, SeaweedFS)
+- **Apache Iceberg** metadata reading — register external Iceberg tables and query them via the catalog
 - **Hive-style partitioning** with automatic time-based partition keys
 - **NATS KV catalog** with revision-based optimistic concurrency
 - **Micro-batch ingestion** with configurable flush thresholds (size, row count, time)
@@ -84,8 +86,9 @@ ORDER BY hour
 - Cell-level policies (column masking, row filtering)
 - Hot-reloadable configuration
 
-### APIs
+### Client Connectivity
 
+- **PostgreSQL wire protocol** (pgwire) — connect with `psql`, JDBC, ODBC, or any PostgreSQL client
 - **HTTP** REST API for queries, table management, health, and Prometheus metrics
 - **gRPC** API with protobuf service definition — generate type-safe clients for Go, Python, Java, TypeScript, Rust, C#, and more
 - gRPC health checking protocol for load balancer integration
@@ -126,6 +129,18 @@ Operator micro-benchmarks (2048-row batches):
 | Kernel filter (int64) | 5.1 µs | 0 |
 
 Run benchmarks locally: `go test -bench=. -benchmem ./internal/engine/...`
+
+### TPC-H Compliance
+
+All 22 TPC-H queries execute successfully at scale factor 0.01, validating:
+- Multi-table JOINs (up to 8 tables)
+- Correlated subqueries (Q2, Q4, Q17, Q20, Q21, Q22)
+- CASE WHEN expressions (Q7, Q8, Q12, Q14)
+- CTEs (Q15)
+- NOT EXISTS / EXISTS (Q21, Q22)
+- Complex aggregation with SUM over computed expressions
+
+Run: `go test -v -run TestTPCHQueries ./benchmarks/tpch/`
 
 ## Deployment Modes
 
@@ -169,3 +184,7 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 | [Performance Tuning](docs/tuning.md) | Memory budgets, spill tuning, environment profiles |
 | [Operations](docs/operations.md) | Monitoring, Prometheus metrics, troubleshooting |
 | [Network Analytics](docs/network-analytics.md) | End-to-end workflow: devices → Bento → Caelum → app |
+
+## TPC-H Benchmark Queries
+
+Caelum passes all 22 TPC-H benchmark queries, validating comprehensive SQL coverage including correlated subqueries, multi-table JOINs, CTEs, CASE expressions, and complex aggregation. Run `go test -v ./benchmarks/tpch/` to verify.

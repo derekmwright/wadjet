@@ -12,7 +12,24 @@ Caelum supports a focused set of column types optimized for analytical workloads
 | `Int64` | `int64` | 8 bytes | -2^63 to 2^63-1 | Byte counts, large counters, IDs |
 | `Float32` | `float32` | 4 bytes | IEEE 754 | Ratios, percentages |
 | `Float64` | `float64` | 8 bytes | IEEE 754 | Latency, jitter, precise measurements |
+| `Decimal(p,s)` | `Int128` | 16 bytes | Up to 38 digits | Financial amounts, exact arithmetic |
 | `Bool` | `bool` | 1 bit | true/false | Flags, states |
+
+#### DECIMAL Type
+
+`DECIMAL(precision, scale)` stores exact fixed-point numbers using 128-bit scaled integers (the same approach used by DuckDB). The value `123.45` with `DECIMAL(10,2)` is stored internally as `12345` with scale 2.
+
+```sql
+CREATE TABLE transactions (
+    amount DECIMAL(18,2),
+    tax_rate DECIMAL(5,4)
+);
+```
+
+- **precision**: Total number of digits (1–38, default 38)
+- **scale**: Digits after the decimal point (default 0)
+- **Arithmetic**: SUM, AVG, MIN, MAX all use exact Int128 arithmetic through the aggregate pipeline
+- **Parquet storage**: Written as Parquet DECIMAL logical type for interoperability
 
 ### String and Binary Types
 
@@ -102,6 +119,7 @@ When reading Parquet files written by external tools (e.g., Bento), Caelum autom
 | BOOLEAN | none | Bool |
 | BYTE_ARRAY | UTF8 | String |
 | BYTE_ARRAY | none | Bytes |
+| INT64 | DECIMAL | Decimal |
 
 Network types (`IPv4`, `IPv6`, `CIDR`, `MAC`) require explicit schema registration since Parquet has no native representation for these. When creating a table via the API, specify the schema with the correct network types, and the ingester will handle conversion.
 

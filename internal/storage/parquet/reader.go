@@ -221,6 +221,9 @@ func goTypeToTypeID(col *goparquet.Column) TypeID {
 		if lt.Timestamp != nil {
 			return TypeTimestamp
 		}
+		if lt.Decimal != nil {
+			return TypeDecimal
+		}
 		if lt.Integer != nil {
 			if lt.Integer.BitWidth <= 32 {
 				return TypeInt32

@@ -21,6 +21,7 @@ import (
 	"github.com/derekmwright/caelum/internal/format"
 	"github.com/derekmwright/caelum/internal/metrics"
 	"github.com/derekmwright/caelum/internal/server"
+	"github.com/derekmwright/caelum/internal/server/pgwire"
 	"github.com/derekmwright/caelum/internal/storage/catalog"
 	"github.com/derekmwright/caelum/internal/storage/objstore"
 	"github.com/derekmwright/caelum/internal/worker"
@@ -46,6 +47,7 @@ var (
 	memoryBudget     int64
 	spillDir         string
 	resultStoreBytes int64
+	pgAddr           string
 )
 
 func main() {
@@ -72,6 +74,7 @@ func main() {
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = unlimited, no spill)")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 0, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
+	rootCmd.PersistentFlags().StringVar(&pgAddr, "pg-addr", ":5433", "PostgreSQL wire protocol listen address")
 
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(queryCmd())
@@ -624,18 +627,35 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		Coord:   coord,
 	}, logger)
 
-	errCh := make(chan error, 2)
+	// Start PostgreSQL wire protocol server
+	pgDB, err := caelum.Open(ctx, caelum.Config{
+		Store:  store,
+		Bucket: bucket,
+		MetaKV: kv,
+	})
+	if err != nil {
+		return fmt.Errorf("opening DB for pgwire: %w", err)
+	}
+	pgSrv := pgwire.NewServer(pgDB, logger)
+
+	errCh := make(chan error, 3)
 	go func() {
 		errCh <- srv.Start()
 	}()
 	go func() {
 		errCh <- grpcSrv.Start()
 	}()
+	go func() {
+		if err := pgSrv.Start(pgAddr); err != nil {
+			errCh <- err
+		}
+	}()
 
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down...")
 		coord.Workers().Close()
+		pgSrv.Shutdown()
 		grpcSrv.Shutdown()
 		srv.Shutdown(context.Background())
 		return nil

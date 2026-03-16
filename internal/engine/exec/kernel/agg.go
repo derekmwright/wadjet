@@ -190,6 +190,41 @@ func maxRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 	}
 }
 
+// --- Decimal row updaters ---
+
+func sumRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		acc.SumDec = acc.SumDec.Add(vec.DecimalData.Data[row])
+		acc.Count++
+		acc.IsDecimal = true
+		acc.DecScale = vec.DecimalData.Scale
+	}
+}
+
+func minRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		v := vec.DecimalData.Data[row]
+		if !acc.HasMin || v.Less(acc.MinDec) {
+			acc.MinDec = v
+			acc.HasMin = true
+			acc.IsDecimal = true
+			acc.DecScale = vec.DecimalData.Scale
+		}
+	}
+}
+
+func maxRowDecimal(acc *Accumulator, vec *batch.Vector, row int) {
+	if !vec.Nulls.IsNullFast(row) {
+		v := vec.DecimalData.Data[row]
+		if !acc.HasMax || acc.MaxDec.Less(v) {
+			acc.MaxDec = v
+			acc.HasMax = true
+			acc.IsDecimal = true
+			acc.DecScale = vec.DecimalData.Scale
+		}
+	}
+}
+
 // --- Resolve functions (called once at query init) ---
 
 // ResolveRowSum returns a row-level sum updater for the given column type.
@@ -203,6 +238,8 @@ func ResolveRowSum(typ batch.TypeID) RowAggUpdater {
 		return sumRowFloat64
 	case batch.TypeFloat32:
 		return sumRowFloat32
+	case batch.TypeDecimal:
+		return sumRowDecimal
 	default:
 		return nil
 	}
@@ -219,6 +256,8 @@ func ResolveRowMin(typ batch.TypeID) RowAggUpdater {
 		return minRowFloat64
 	case batch.TypeFloat32:
 		return minRowFloat32
+	case batch.TypeDecimal:
+		return minRowDecimal
 	default:
 		return nil
 	}
@@ -235,6 +274,8 @@ func ResolveRowMax(typ batch.TypeID) RowAggUpdater {
 		return maxRowFloat64
 	case batch.TypeFloat32:
 		return maxRowFloat32
+	case batch.TypeDecimal:
+		return maxRowDecimal
 	default:
 		return nil
 	}
@@ -279,6 +320,28 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 			acc.SumF64 += float64(s)
 			acc.Count += c
 			acc.IsFloat = true
+		}
+	case batch.TypeDecimal:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			data := vec.DecimalData.Data
+			nulls := &vec.Nulls
+			if sel != nil {
+				for _, idx := range sel {
+					if !nulls.IsNullFast(int(idx)) {
+						acc.SumDec = acc.SumDec.Add(data[idx])
+						acc.Count++
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if !nulls.IsNullFast(i) {
+						acc.SumDec = acc.SumDec.Add(data[i])
+						acc.Count++
+					}
+				}
+			}
+			acc.IsDecimal = true
+			acc.DecScale = vec.DecimalData.Scale
 		}
 	default:
 		return nil

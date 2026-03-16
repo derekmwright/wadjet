@@ -35,9 +35,10 @@ type AggColumn struct {
 // When a SpillManager is set, input batches are spilled to disk under memory
 // pressure and re-processed during Finalize.
 type HashAggregate struct {
-	GroupByCols []string
-	Aggs        []AggColumn
-	Spill       *memory.SpillManager // optional: enables spill-to-disk
+	GroupByCols   []string
+	Aggs          []AggColumn
+	Spill         *memory.SpillManager // optional: enables spill-to-disk
+	NullGroupCols []string             // GROUPING SETS: columns to output as NULL
 
 	mu            sync.Mutex
 	groups        map[string]*groupState
@@ -270,6 +271,12 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	numRows := len(h.keys)
 	out := batch.NewRecordBatch(schema, numRows)
 
+	// Build a set of null group columns for fast lookup
+	nullSet := make(map[string]bool, len(h.NullGroupCols))
+	for _, c := range h.NullGroupCols {
+		nullSet[c] = true
+	}
+
 	for i := range h.keys {
 		gs := h.groups[h.serializedKeys[i]]
 
@@ -288,6 +295,14 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 				out.Columns[colIdx].SetValue(i, result)
 			}
 		}
+
+		// NULL out columns that are part of GROUPING SETS exclusion
+		nullColIdx := len(h.GroupByCols) + len(h.Aggs)
+		for k := 0; k < len(h.NullGroupCols); k++ {
+			if nullColIdx+k < len(out.Columns) {
+				out.Columns[nullColIdx+k].SetValue(i, nil)
+			}
+		}
 	}
 
 	h.keys = nil
@@ -295,7 +310,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 }
 
 func (h *HashAggregate) outputSchema() []parquet.Column {
-	cols := make([]parquet.Column, 0, len(h.GroupByCols)+len(h.Aggs))
+	cols := make([]parquet.Column, 0, len(h.GroupByCols)+len(h.Aggs)+len(h.NullGroupCols))
 	for i, name := range h.GroupByCols {
 		typ := parquet.TypeString // default fallback
 		if i < len(h.groupColTypes) && h.groupColTypes[i] != 0 {
@@ -305,6 +320,10 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	}
 	for _, agg := range h.Aggs {
 		cols = append(cols, parquet.Column{Name: agg.OutputCol, Type: agg.OutputType, Nullable: true})
+	}
+	// GROUPING SETS null columns (appear in other sets but not this one)
+	for _, name := range h.NullGroupCols {
+		cols = append(cols, parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true})
 	}
 	return cols
 }
@@ -373,6 +392,8 @@ func appendColumnValue(buf []byte, v *batch.Vector, row int, typ batch.TypeID) [
 			return append(buf, "true"...)
 		}
 		return append(buf, "false"...)
+	case batch.TypeDecimal:
+		return appendFloat64(buf, v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale))
 	default:
 		return append(buf, '?')
 	}

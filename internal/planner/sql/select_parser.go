@@ -150,22 +150,58 @@ func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {
 		info.WhereExpr = whereExpr
 	}
 
-	// GROUP BY
+	// GROUP BY (with optional GROUPING SETS, CUBE, ROLLUP)
 	if p.isKeyword(TokenKWGroup) {
 		p.advance()
 		if _, err := p.expect(TokenKWBy); err != nil {
 			return nil, fmt.Errorf("expected BY after GROUP")
 		}
-		for {
-			expr, err := p.parseExpr()
+
+		// Check for GROUPING SETS, CUBE, or ROLLUP
+		switch {
+		case p.isKeyword(TokenKWGrouping):
+			// GROUPING SETS ((...), (...), ...)
+			p.advance() // consume GROUPING
+			if _, err := p.expect(TokenKWSets); err != nil {
+				return nil, fmt.Errorf("expected SETS after GROUPING")
+			}
+			sets, allCols, err := p.parseGroupingSets()
 			if err != nil {
-				return nil, fmt.Errorf("parsing GROUP BY: %w", err)
+				return nil, err
 			}
-			info.GroupBy = append(info.GroupBy, expr.String())
-			if p.peek() != TokenComma {
-				break
+			info.GroupingSets = sets
+			info.GroupBy = allCols
+		case p.isKeyword(TokenKWCube):
+			// CUBE(a, b, c) → all 2^n subsets
+			p.advance()
+			cols, err := p.parseGroupingColList()
+			if err != nil {
+				return nil, fmt.Errorf("parsing CUBE: %w", err)
 			}
-			p.advance() // consume comma
+			info.GroupingSets = expandCube(cols)
+			info.GroupBy = cols
+		case p.isKeyword(TokenKWRollup):
+			// ROLLUP(a, b, c) → (a,b,c), (a,b), (a), ()
+			p.advance()
+			cols, err := p.parseGroupingColList()
+			if err != nil {
+				return nil, fmt.Errorf("parsing ROLLUP: %w", err)
+			}
+			info.GroupingSets = expandRollup(cols)
+			info.GroupBy = cols
+		default:
+			// Simple GROUP BY
+			for {
+				expr, err := p.parseExpr()
+				if err != nil {
+					return nil, fmt.Errorf("parsing GROUP BY: %w", err)
+				}
+				info.GroupBy = append(info.GroupBy, expr.String())
+				if p.peek() != TokenComma {
+					break
+				}
+				p.advance() // consume comma
+			}
 		}
 	}
 
@@ -287,6 +323,7 @@ func (p *selectParser) parseSelectColumn() (SelectColumn, error) {
 				col.AggArg = "*"
 			} else if len(fn.Args) > 0 {
 				col.AggArg = fn.Args[0].String()
+				col.AggArgExpr = fn.Args[0]
 			}
 		}
 	}
@@ -1271,4 +1308,122 @@ func ParseExpression(sql string) (Node, error) {
 		return nil, err
 	}
 	return expr, nil
+}
+
+// --- GROUPING SETS / CUBE / ROLLUP helpers ---
+
+// parseGroupingSets parses GROUPING SETS ((...), (...), ...).
+// Returns the list of grouping sets and the union of all columns referenced.
+func (p *selectParser) parseGroupingSets() ([][]string, []string, error) {
+	if _, err := p.expect(TokenLParen); err != nil {
+		return nil, nil, fmt.Errorf("expected ( after GROUPING SETS")
+	}
+
+	allCols := make(map[string]bool)
+	var sets [][]string
+
+	for {
+		if p.peek() == TokenLParen {
+			// Parenthesized set: (col1, col2)
+			p.advance() // consume (
+			var cols []string
+			if p.peek() != TokenRParen {
+				for {
+					expr, err := p.parseExpr()
+					if err != nil {
+						return nil, nil, fmt.Errorf("parsing grouping set: %w", err)
+					}
+					col := expr.String()
+					cols = append(cols, col)
+					allCols[col] = true
+					if p.peek() != TokenComma {
+						break
+					}
+					p.advance()
+				}
+			}
+			if _, err := p.expect(TokenRParen); err != nil {
+				return nil, nil, fmt.Errorf("expected ) in grouping set")
+			}
+			sets = append(sets, cols)
+		} else {
+			// Single column without parens (e.g., GROUPING SETS (a, (a,b)))
+			expr, err := p.parseExpr()
+			if err != nil {
+				return nil, nil, fmt.Errorf("parsing grouping set column: %w", err)
+			}
+			col := expr.String()
+			sets = append(sets, []string{col})
+			allCols[col] = true
+		}
+
+		if p.peek() != TokenComma {
+			break
+		}
+		p.advance() // consume comma
+	}
+
+	if _, err := p.expect(TokenRParen); err != nil {
+		return nil, nil, fmt.Errorf("expected ) after GROUPING SETS")
+	}
+
+	var all []string
+	for col := range allCols {
+		all = append(all, col)
+	}
+	return sets, all, nil
+}
+
+// parseGroupingColList parses a parenthesized column list: (a, b, c).
+func (p *selectParser) parseGroupingColList() ([]string, error) {
+	if _, err := p.expect(TokenLParen); err != nil {
+		return nil, fmt.Errorf("expected ( after CUBE/ROLLUP")
+	}
+	var cols []string
+	for {
+		expr, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		cols = append(cols, expr.String())
+		if p.peek() != TokenComma {
+			break
+		}
+		p.advance()
+	}
+	if _, err := p.expect(TokenRParen); err != nil {
+		return nil, fmt.Errorf("expected ) after column list")
+	}
+	return cols, nil
+}
+
+// expandCube expands CUBE(a, b, c) into all 2^n subsets.
+// CUBE(a, b, c) = GROUPING SETS ((a,b,c), (a,b), (a,c), (b,c), (a), (b), (c), ())
+func expandCube(cols []string) [][]string {
+	n := len(cols)
+	total := 1 << n // 2^n
+	sets := make([][]string, 0, total)
+	// Iterate from all-bits-set down to 0 for conventional ordering
+	for mask := total - 1; mask >= 0; mask-- {
+		var set []string
+		for i := 0; i < n; i++ {
+			if mask&(1<<i) != 0 {
+				set = append(set, cols[i])
+			}
+		}
+		sets = append(sets, set)
+	}
+	return sets
+}
+
+// expandRollup expands ROLLUP(a, b, c) into hierarchical subsets.
+// ROLLUP(a, b, c) = GROUPING SETS ((a,b,c), (a,b), (a), ())
+func expandRollup(cols []string) [][]string {
+	sets := make([][]string, 0, len(cols)+1)
+	for i := len(cols); i >= 0; i-- {
+		set := make([]string, i)
+		copy(set, cols[:i])
+		sets = append(sets, set)
+	}
+	return sets
 }

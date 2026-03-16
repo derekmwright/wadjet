@@ -358,6 +358,135 @@ func TestBuildFromSelectIntersectWithOrderByLimit(t *testing.T) {
 	}
 }
 
+func TestBuildFromSelectGroupingSets(t *testing.T) {
+	pq, err := plansql.Parse("SELECT region, product, SUM(sales) as total FROM t GROUP BY GROUPING SETS ((region, product), (region), ())")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		t.Fatalf("ExtractSelect: %v", err)
+	}
+
+	plan, err := BuildFromSelect(info)
+	if err != nil {
+		t.Fatalf("BuildFromSelect: %v", err)
+	}
+
+	pp := plan.PrettyPrint(0)
+	t.Logf("Plan:\n%s", pp)
+
+	// With 3 grouping sets, the plan should contain UNION ALL nodes
+	// combining 3 Aggregate nodes.
+	// Structure: Project → Union → (Union, Agg2)
+	//                        ↓
+	//                   (Agg0, Agg1)
+
+	// Count all aggregate nodes in the plan
+	aggNodes := findAllNodeType(plan, NodeAggregate)
+	if len(aggNodes) != 3 {
+		t.Fatalf("expected 3 Aggregate nodes (one per grouping set), got %d", len(aggNodes))
+	}
+
+	// Count union nodes
+	unionNodes := findAllNodeType(plan, NodeUnion)
+	if len(unionNodes) != 2 {
+		t.Fatalf("expected 2 Union nodes, got %d", len(unionNodes))
+	}
+
+	// Verify each union is UNION ALL
+	for i, u := range unionNodes {
+		if !u.UnionAll {
+			t.Errorf("union node %d: expected UNION ALL", i)
+		}
+	}
+
+	// First aggregate: GROUP BY (region, product) — no null cols
+	if len(aggNodes[0].GroupingSetNulls) != 0 {
+		t.Errorf("set 0: expected 0 null cols, got %v", aggNodes[0].GroupingSetNulls)
+	}
+	// Second aggregate: GROUP BY (region) — product is null
+	if len(aggNodes[1].GroupingSetNulls) != 1 || aggNodes[1].GroupingSetNulls[0] != "product" {
+		t.Errorf("set 1: expected null cols [product], got %v", aggNodes[1].GroupingSetNulls)
+	}
+	// Third aggregate: GROUP BY () — both null
+	if len(aggNodes[2].GroupingSetNulls) != 2 {
+		t.Errorf("set 2: expected 2 null cols, got %v", aggNodes[2].GroupingSetNulls)
+	}
+}
+
+func TestBuildFromSelectCube(t *testing.T) {
+	pq, err := plansql.Parse("SELECT a, b, COUNT(*) as cnt FROM t GROUP BY CUBE(a, b)")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		t.Fatalf("ExtractSelect: %v", err)
+	}
+
+	plan, err := BuildFromSelect(info)
+	if err != nil {
+		t.Fatalf("BuildFromSelect: %v", err)
+	}
+
+	pp := plan.PrettyPrint(0)
+	t.Logf("Plan:\n%s", pp)
+
+	// CUBE(a,b) = 4 grouping sets → 4 aggregate nodes, 3 union nodes
+	aggNodes := findAllNodeType(plan, NodeAggregate)
+	if len(aggNodes) != 4 {
+		t.Fatalf("expected 4 Aggregate nodes for CUBE(a,b), got %d", len(aggNodes))
+	}
+
+	unionNodes := findAllNodeType(plan, NodeUnion)
+	if len(unionNodes) != 3 {
+		t.Fatalf("expected 3 Union nodes, got %d", len(unionNodes))
+	}
+}
+
+func TestBuildFromSelectRollup(t *testing.T) {
+	pq, err := plansql.Parse("SELECT year, month, SUM(sales) as total FROM t GROUP BY ROLLUP(year, month)")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		t.Fatalf("ExtractSelect: %v", err)
+	}
+
+	plan, err := BuildFromSelect(info)
+	if err != nil {
+		t.Fatalf("BuildFromSelect: %v", err)
+	}
+
+	pp := plan.PrettyPrint(0)
+	t.Logf("Plan:\n%s", pp)
+
+	// ROLLUP(year, month) = 3 sets: (year,month), (year), ()
+	aggNodes := findAllNodeType(plan, NodeAggregate)
+	if len(aggNodes) != 3 {
+		t.Fatalf("expected 3 Aggregate nodes for ROLLUP(year,month), got %d", len(aggNodes))
+	}
+
+	unionNodes := findAllNodeType(plan, NodeUnion)
+	if len(unionNodes) != 2 {
+		t.Fatalf("expected 2 Union nodes, got %d", len(unionNodes))
+	}
+}
+
+// findAllNodeType collects all nodes of the given type via depth-first search.
+func findAllNodeType(node *Node, typ NodeType) []*Node {
+	var result []*Node
+	if node.Type == typ {
+		result = append(result, node)
+	}
+	for _, child := range node.Children {
+		result = append(result, findAllNodeType(child, typ)...)
+	}
+	return result
+}
+
 // findNodeType does a depth-first search for the first node of the given type.
 func findNodeType(node *Node, typ NodeType) *Node {
 	if node.Type == typ {

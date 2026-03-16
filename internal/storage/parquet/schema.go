@@ -27,6 +27,7 @@ const (
 	TypeDuration // nanoseconds, stored as int64
 	TypeUUID     // 128-bit UUID stored as 16-byte ByteArray
 	TypeDate     // calendar date stored as int32 (days since 1970-01-01)
+	TypeDecimal  // fixed-point DECIMAL(p,s) stored as scaled Int128
 )
 
 func (t TypeID) String() string {
@@ -65,14 +66,22 @@ func (t TypeID) String() string {
 		return "UUID"
 	case TypeDate:
 		return "DATE"
+	case TypeDecimal:
+		return "DECIMAL"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(t))
 	}
 }
 
 // ParseTypeID parses a type name string into a TypeID.
+// Supports parameterized types like "DECIMAL(10,2)".
 func ParseTypeID(s string) (TypeID, error) {
-	switch strings.ToUpper(s) {
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	// Handle parameterized types like DECIMAL(10,2)
+	if strings.HasPrefix(upper, "DECIMAL") || strings.HasPrefix(upper, "NUMERIC") {
+		return TypeDecimal, nil
+	}
+	switch upper {
 	case "BOOL", "BOOLEAN":
 		return TypeBool, nil
 	case "INT32", "INT", "INTEGER":
@@ -112,11 +121,42 @@ func ParseTypeID(s string) (TypeID, error) {
 	}
 }
 
+// ParseDecimalParams extracts precision and scale from a type string like "DECIMAL(10,2)".
+// Returns default (38, 0) if no parameters are specified.
+func ParseDecimalParams(s string) (precision, scale int) {
+	upper := strings.ToUpper(strings.TrimSpace(s))
+	precision, scale = 38, 0 // defaults
+
+	idx := strings.Index(upper, "(")
+	if idx < 0 {
+		return
+	}
+	end := strings.Index(upper, ")")
+	if end < 0 {
+		return
+	}
+	params := upper[idx+1 : end]
+	parts := strings.Split(params, ",")
+	if len(parts) >= 1 {
+		if p := strings.TrimSpace(parts[0]); p != "" {
+			fmt.Sscanf(p, "%d", &precision)
+		}
+	}
+	if len(parts) >= 2 {
+		if s := strings.TrimSpace(parts[1]); s != "" {
+			fmt.Sscanf(s, "%d", &scale)
+		}
+	}
+	return
+}
+
 // Column defines a column in a Parquet schema.
 type Column struct {
-	Name     string `json:"name"`
-	Type     TypeID `json:"type"`
-	Nullable bool   `json:"nullable"`
+	Name      string `json:"name"`
+	Type      TypeID `json:"type"`
+	Nullable  bool   `json:"nullable"`
+	Precision int    `json:"precision,omitempty"` // for DECIMAL: max digits (1-38)
+	Scale     int    `json:"scale,omitempty"`     // for DECIMAL: digits after decimal point
 }
 
 // Schema defines the schema for a Parquet file.

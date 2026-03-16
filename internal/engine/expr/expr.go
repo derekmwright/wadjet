@@ -1305,6 +1305,13 @@ func ToFloat64(v any) float64 {
 		}
 		return 0
 	default:
+		// Try string → float for decimal formatted strings like "123.45"
+		if s, ok := v.(string); ok {
+			var f float64
+			if _, err := fmt.Sscanf(s, "%f", &f); err == nil {
+				return f
+			}
+		}
 		return 0
 	}
 }
@@ -1648,7 +1655,9 @@ func (e *Cast) Eval(b *batch.RecordBatch, row int) any {
 	switch strings.ToLower(e.DestType) {
 	case "int", "integer", "bigint", "signed":
 		return int64(ToFloat64(v))
-	case "float", "double", "decimal", "real":
+	case "float", "double", "real":
+		return ToFloat64(v)
+	case "decimal", "numeric":
 		return ToFloat64(v)
 	case "char", "varchar", "text", "string":
 		return fmt.Sprint(v)

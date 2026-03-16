@@ -77,6 +77,7 @@ const (
 	TypeDuration = parquet.TypeDuration
 	TypeUUID     = parquet.TypeUUID
 	TypeDate     = parquet.TypeDate
+	TypeDecimal  = parquet.TypeDecimal
 )
 
 // BytesColumn stores variable-length byte data (strings, binary) with zero
@@ -140,10 +141,16 @@ type Vector struct {
 	Float32Data []float32
 	Float64Data []float64
 	BytesData   BytesColumn
+	DecimalData DecimalColumn // for TypeDecimal
 }
 
 // NewVector creates a new vector of the given type and length.
 func NewVector(typ TypeID, length int) *Vector {
+	return NewVectorWithScale(typ, length, 0)
+}
+
+// NewVectorWithScale creates a new vector with scale metadata (used for DECIMAL).
+func NewVectorWithScale(typ TypeID, length int, scale int) *Vector {
 	v := &Vector{
 		Type:  typ,
 		Len:   length,
@@ -162,6 +169,8 @@ func NewVector(typ TypeID, length int) *Vector {
 		v.Float64Data = make([]float64, length)
 	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
 		v.BytesData = NewBytesColumn(length)
+	case TypeDecimal:
+		v.DecimalData = NewDecimalColumn(length, scale)
 	}
 	return v
 }
@@ -213,6 +222,8 @@ func (v *Vector) GetValue(i int) any {
 		return ""
 	case TypeDate:
 		return formatDate(v.Int32Data[i])
+	case TypeDecimal:
+		return v.DecimalData.Data[i].FormatDecimal(v.DecimalData.Scale)
 	default:
 		return nil
 	}
@@ -381,6 +392,23 @@ func (v *Vector) SetValue(i int, val any) {
 		case string:
 			v.Int32Data[i] = parseDateString(tv)
 		}
+	case TypeDecimal:
+		switch tv := val.(type) {
+		case Int128:
+			v.DecimalData.Data[i] = tv
+		case int64:
+			v.DecimalData.Data[i] = Int128From(tv)
+		case int:
+			v.DecimalData.Data[i] = Int128From(int64(tv))
+		case int32:
+			v.DecimalData.Data[i] = Int128From(int64(tv))
+		case float64:
+			v.DecimalData.Data[i] = Int128FromFloat64(tv, v.DecimalData.Scale)
+		case float32:
+			v.DecimalData.Data[i] = Int128FromFloat64(float64(tv), v.DecimalData.Scale)
+		case string:
+			v.DecimalData.Data[i] = ParseDecimalString(tv, v.DecimalData.Scale)
+		}
 	}
 }
 
@@ -449,6 +477,8 @@ func (v *Vector) GetNumericFloat64(i int) (float64, bool) {
 		return float64(v.Int32Data[i]), true
 	case TypeFloat32:
 		return float64(v.Float32Data[i]), true
+	case TypeDecimal:
+		return v.DecimalData.Data[i].ToFloat64(v.DecimalData.Scale), true
 	default:
 		return 0, false
 	}

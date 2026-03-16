@@ -18,6 +18,8 @@ const (
 	RightJoin
 	FullOuterJoin
 	CrossJoin
+	SemiJoin // returns left row if match found, no duplicates
+	AntiJoin // returns left row only if NO match found
 )
 
 // HashJoin implements a hash join with build and probe phases.
@@ -146,6 +148,11 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		return p.executeCrossJoin(in, outSchema)
 	}
 
+	// SemiJoin/AntiJoin: only output left-side columns.
+	if p.join.JoinType == SemiJoin || p.join.JoinType == AntiJoin {
+		return p.executeSemiAntiJoin(in)
+	}
+
 	var resultRows []map[string]any
 
 	iter := batchIterator(in)
@@ -203,6 +210,40 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	}
 
 	return batch.FromRows(outSchema, resultRows), nil
+}
+
+// executeSemiAntiJoin handles SemiJoin and AntiJoin semantics.
+// SemiJoin: emit the probe row if at least one match exists (no duplicates).
+// AntiJoin: emit the probe row only if NO match exists.
+func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	var resultRows []map[string]any
+
+	iter := batchIterator(in)
+	for _, row := range iter {
+		key := p.join.probeKey(in, row)
+		hasMatch := len(p.join.hashTable[key]) > 0
+
+		emit := false
+		if p.join.JoinType == SemiJoin {
+			emit = hasMatch
+		} else { // AntiJoin
+			emit = !hasMatch
+		}
+
+		if emit {
+			outRow := make(map[string]any, len(in.Schema))
+			for _, col := range in.Schema {
+				outRow[col.Name] = in.ColumnByName(col.Name).GetValue(row)
+			}
+			resultRows = append(resultRows, outRow)
+		}
+	}
+
+	if len(resultRows) == 0 {
+		return nil, nil
+	}
+
+	return batch.FromRows(in.Schema, resultRows), nil
 }
 
 // executeCrossJoin produces the Cartesian product of probe rows with all build-side rows.

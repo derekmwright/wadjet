@@ -685,6 +685,10 @@ func mapJoinType(vt string) string {
 		return "full"
 	case strings.Contains(lower, "right"):
 		return "right"
+	case strings.Contains(lower, "semi"):
+		return "semi"
+	case strings.Contains(lower, "anti"):
+		return "anti"
 	case strings.Contains(lower, "left"):
 		return "left"
 	default:
@@ -703,6 +707,10 @@ func mapExecJoinType(jt string) exec.JoinType {
 		return exec.FullOuterJoin
 	case "cross":
 		return exec.CrossJoin
+	case "semi":
+		return exec.SemiJoin
+	case "anti":
+		return exec.AntiJoin
 	default:
 		return exec.InnerJoin
 	}
@@ -791,8 +799,11 @@ func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Sou
 		return nil, nil, nil, err
 	}
 
+	// Collect outer table aliases for correlated subquery detection
+	outerTables := collectTableAliases(node.Children[0])
+
 	for _, pred := range node.Predicates {
-		filter := p.buildFilterOp(pred)
+		filter := p.buildFilterOp(pred, outerTables)
 		if filter != nil {
 			ops = append(ops, filter)
 		}
@@ -835,8 +846,15 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// Try to compile from AST expression first, fall back to ColumnRef
 		var expression exec.Expression
 		if proj.ASTExpr != nil && !proj.IsAgg {
-			compiled, err := expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
-			if err == nil {
+			outerTables := collectTableAliases(child)
+			var compiled expr.Expr
+			var compErr error
+			if len(outerTables) > 0 {
+				compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
+			} else {
+				compiled, compErr = expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
+			}
+			if compErr == nil {
 				expression = wrapExpr(compiled)
 			}
 		}
@@ -868,15 +886,47 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		return nil, nil, nil, err
 	}
 
+	// Detect aggregate inputs that are expressions (not simple column refs).
+	// For each, compile the expression and add a pre-aggregate projection
+	// that evaluates it into a synthetic column.
+	var preProjectCols []exec.ProjectColumn
+	syntheticNames := make(map[int]string) // agg index → synthetic column name
+
+	for i, agg := range node.AggExprs {
+		if agg.InputExpr != nil && !isSimpleColRef(agg.InputExpr) {
+			synName := fmt.Sprintf("__agg_expr_%d", i)
+			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner)
+			if compErr == nil {
+				preProjectCols = append(preProjectCols, exec.ProjectColumn{
+					Name: synName,
+					Type: parquet.TypeFloat64,
+					Expr: wrapExpr(compiled),
+				})
+				syntheticNames[i] = synName
+			}
+		}
+	}
+
+	// If we have expression inputs, build a pass-through projection that
+	// keeps all input columns and adds the computed ones.
+	if len(preProjectCols) > 0 {
+		childOps = append(childOps, &aggPreProject{computed: preProjectCols})
+	}
+
 	var aggCols []exec.AggColumn
-	for _, agg := range node.AggExprs {
+	for i, agg := range node.AggExprs {
 		fn := parseAggFunc(agg.Func)
 		if agg.Distinct && fn == exec.AggCount {
 			fn = exec.AggCountDistinct
 		}
+		inputCol := cleanExpr(agg.InputCol)
+		// Use synthetic column name if the input was an expression
+		if synName, ok := syntheticNames[i]; ok {
+			inputCol = synName
+		}
 		aggCols = append(aggCols, exec.AggColumn{
 			Func:       fn,
-			InputCol:   cleanExpr(agg.InputCol),
+			InputCol:   inputCol,
 			OutputCol:  agg.OutputCol,
 			OutputType: aggOutputType(agg.Func, agg.Distinct),
 		})
@@ -889,14 +939,85 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 
 	hashAgg := exec.NewHashAggregate(groupByCols, aggCols)
 
+	// For GROUPING SETS: wrap with a projection that adds NULL columns
+	// for the group-by columns not in this particular set.
+	var postOps []exec.UnaryOperator
+	if len(node.GroupingSetNulls) > 0 {
+		hashAgg.NullGroupCols = node.GroupingSetNulls
+	}
+
 	// The aggregate acts as both sink and source
 	// We need to run childSource -> childOps -> hashAgg(sink), then hashAgg(source) -> collectSink
 	return &aggSourceAdapter{
 		childSource: childSource,
 		childOps:    childOps,
 		agg:         hashAgg,
-	}, nil, &exec.CollectSink{}, nil
+	}, postOps, &exec.CollectSink{}, nil
 }
+
+// isSimpleColRef returns true if the AST node is a simple column reference
+// (no arithmetic, function calls, etc).
+func isSimpleColRef(node plansql.Node) bool {
+	switch node.(type) {
+	case *plansql.ColRef:
+		return true
+	case *plansql.Lit:
+		return true
+	default:
+		return false
+	}
+}
+
+// aggPreProject is a UnaryOperator that passes through all input columns
+// and adds computed expression columns for aggregate inputs.
+type aggPreProject struct {
+	computed []exec.ProjectColumn
+}
+
+func (a *aggPreProject) Init(_ context.Context) error { return nil }
+
+func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	// Build output schema: all input columns + computed columns
+	schema := make([]parquet.Column, 0, len(in.Schema)+len(a.computed))
+	schema = append(schema, in.Schema...)
+	for _, c := range a.computed {
+		schema = append(schema, parquet.Column{
+			Name:     c.Name,
+			Type:     c.Type,
+			Nullable: true,
+		})
+	}
+
+	out := batch.NewRecordBatch(schema, in.Len)
+	out.Sel = in.Sel
+
+	// Share existing column vectors (zero-copy for pass-through columns)
+	for j := 0; j < len(in.Schema); j++ {
+		out.Columns[j] = in.Columns[j]
+	}
+
+	// Compute expression columns
+	computedOffset := len(in.Schema)
+	if in.Sel != nil {
+		for _, idx := range in.Sel {
+			for k, c := range a.computed {
+				val := c.Expr(in, int(idx))
+				out.Columns[computedOffset+k].SetValue(int(idx), val)
+			}
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			for k, c := range a.computed {
+				val := c.Expr(in, i)
+				out.Columns[computedOffset+k].SetValue(i, val)
+			}
+		}
+	}
+
+	return out, nil
+}
+
+func (a *aggPreProject) Close() error { return nil }
 
 func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	if len(node.Children) == 0 {
@@ -1311,10 +1432,16 @@ func (s *catalogScanSource) RowsScanned() int64 {
 // RecordBatch type alias for convenience
 type RecordBatch = batch.RecordBatch
 
-func (p *Planner) buildFilterOp(pred logical.Predicate) exec.UnaryOperator {
+func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]bool) exec.UnaryOperator {
 	// Try to compile from AST expression first (full expression engine)
 	if pred.ASTExpr != nil {
-		compiled, err := expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
+		var compiled expr.Expr
+		var err error
+		if len(outerTables) > 0 {
+			compiled, err = expr.CompileWithScope(pred.ASTExpr, p.subqueryRunner, outerTables)
+		} else {
+			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
+		}
 		if err == nil {
 			return exec.NewFilter(wrapPredicate(compiled))
 		}
@@ -1334,6 +1461,30 @@ func (p *Planner) buildFilterOp(pred logical.Predicate) exec.UnaryOperator {
 	}
 
 	return nil
+}
+
+// collectTableAliases recursively collects all table names and aliases from
+// scan nodes in a logical plan subtree. Used to provide outer scope context
+// for correlated subquery detection.
+func collectTableAliases(node *logical.Node) map[string]bool {
+	aliases := make(map[string]bool)
+	var walk func(n *logical.Node)
+	walk = func(n *logical.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == logical.NodeScan {
+			aliases[strings.ToLower(n.TableName)] = true
+			if n.TableAlias != "" {
+				aliases[strings.ToLower(n.TableAlias)] = true
+			}
+		}
+		for _, child := range n.Children {
+			walk(child)
+		}
+	}
+	walk(node)
+	return aliases
 }
 
 func parseSimplePredicate(raw string) exec.UnaryOperator {

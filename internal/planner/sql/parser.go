@@ -195,21 +195,22 @@ type UnionInfo struct {
 
 // SelectInfo contains extracted information from a SELECT statement.
 type SelectInfo struct {
-	Tables     []TableRef
-	Joins      []JoinInfo
-	Columns    []SelectColumn
-	Where      string
-	WhereExpr  Node
-	GroupBy    []string
-	Having     string
-	HavingExpr Node
-	Distinct   bool
-	OrderBy    []OrderByItem
-	Limit      string
-	Offset     string
-	Windows    []WindowSpec // window function specs extracted during pre-parse
-	CTEs       []CTEDef     // CTE definitions extracted during pre-parse
-	Union      *UnionInfo   // non-nil if this is a UNION query
+	Tables       []TableRef
+	Joins        []JoinInfo
+	Columns      []SelectColumn
+	Where        string
+	WhereExpr    Node
+	GroupBy      []string
+	GroupingSets [][]string // GROUPING SETS / CUBE / ROLLUP (nil = simple GROUP BY)
+	Having       string
+	HavingExpr   Node
+	Distinct     bool
+	OrderBy      []OrderByItem
+	Limit        string
+	Offset       string
+	Windows      []WindowSpec // window function specs extracted during pre-parse
+	CTEs         []CTEDef     // CTE definitions extracted during pre-parse
+	Union        *UnionInfo   // non-nil if this is a UNION query
 }
 
 // TableRef is a reference to a table.
@@ -226,6 +227,7 @@ type SelectColumn struct {
 	IsAgg       bool
 	AggFunc     string
 	AggArg      string
+	AggArgExpr  Node        // AST for aggregate argument expression
 	AggDistinct bool        // COUNT(DISTINCT col)
 	IsWindow    bool        // true if this is a window function
 	WindowSpec  *WindowSpec // window function details

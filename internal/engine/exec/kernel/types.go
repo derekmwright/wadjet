@@ -17,23 +17,32 @@ type Ordered interface {
 
 // Accumulator holds aggregate state with typed precision.
 // Int64 sums stay int64 (no float64 precision loss); float sums use float64.
+// Decimal sums use Int128 for exact fixed-point arithmetic.
 type Accumulator struct {
-	SumI64  int64
-	SumF64  float64
-	Count   int64
-	MinI64  int64
-	MaxI64  int64
-	MinF64  float64
-	MaxF64  float64
-	HasMin  bool
-	HasMax  bool
-	IsFloat bool // true when the source column is a float type
+	SumI64    int64
+	SumF64    float64
+	SumDec    batch.Int128
+	Count     int64
+	MinI64    int64
+	MaxI64    int64
+	MinF64    float64
+	MaxF64    float64
+	MinDec    batch.Int128
+	MaxDec    batch.Int128
+	HasMin    bool
+	HasMax    bool
+	IsFloat   bool // true when the source column is a float type
+	IsDecimal bool // true when the source column is DECIMAL
+	DecScale  int  // scale for DECIMAL columns
 }
 
 // FinalSum returns the accumulated sum as the appropriate type.
 func (a *Accumulator) FinalSum() any {
 	if a.Count == 0 {
 		return nil
+	}
+	if a.IsDecimal {
+		return a.SumDec.ToFloat64(a.DecScale)
 	}
 	if a.IsFloat {
 		return a.SumF64
@@ -46,6 +55,9 @@ func (a *Accumulator) FinalAvg() any {
 	if a.Count == 0 {
 		return nil
 	}
+	if a.IsDecimal {
+		return a.SumDec.ToFloat64(a.DecScale) / float64(a.Count)
+	}
 	if a.IsFloat {
 		return a.SumF64 / float64(a.Count)
 	}
@@ -57,6 +69,9 @@ func (a *Accumulator) FinalMin() any {
 	if !a.HasMin {
 		return nil
 	}
+	if a.IsDecimal {
+		return a.MinDec.ToFloat64(a.DecScale)
+	}
 	if a.IsFloat {
 		return a.MinF64
 	}
@@ -67,6 +82,9 @@ func (a *Accumulator) FinalMin() any {
 func (a *Accumulator) FinalMax() any {
 	if !a.HasMax {
 		return nil
+	}
+	if a.IsDecimal {
+		return a.MaxDec.ToFloat64(a.DecScale)
 	}
 	if a.IsFloat {
 		return a.MaxF64

@@ -6,7 +6,7 @@ Caelum is a columnar analytical query engine designed for high-throughput scan-h
 
 ```mermaid
 graph TD
-    API["CLI / HTTP / gRPC API<br/><sub>cmd/caelum &nbsp; internal/server</sub>"]
+    API["CLI / HTTP / gRPC / pgwire API<br/><sub>cmd/caelum &nbsp; internal/server</sub>"]
     QP["Query Pipeline<br/><sub>SQL Parser → Logical Plan → Optimizer → Physical Plan → Execution Engine</sub>"]
     ST["Storage Layer<br/><sub>Object Store, Catalog,<br/>Parquet I/O, Ingest</sub>"]
     DL["Distributed Layer<br/><sub>NATS/JetStream, Coordinator,<br/>Worker Pool, Task Dispatch</sub>"]
@@ -32,6 +32,7 @@ github.com/derekmwright/caelum/
 │   │   ├── catalog/        # Schema + partition metadata (NATS KV)
 │   │   ├── parquet/        # Parquet reader/writer wrappers
 │   │   └── ingest/         # Micro-batch accumulator + partitioner
+│   ├── iceberg/            # Apache Iceberg table metadata reader + catalog integration
 │   ├── engine/
 │   │   ├── batch/          # Record batches, vectors, selection vectors, BatchPool
 │   │   ├── exec/           # Push-based pipeline executor
@@ -47,7 +48,7 @@ github.com/derekmwright/caelum/
 │   ├── distributed/        # NATS messaging layer + cluster-scoped subjects
 │   ├── auth/               # Authentication + authorization
 │   ├── config/             # YAML config with hot-reload
-│   ├── server/             # HTTP API (net/http) + gRPC API (google.golang.org/grpc)
+│   ├── server/             # HTTP API (net/http) + gRPC API + PostgreSQL wire protocol (pgwire)
 │   └── metrics/            # Prometheus metrics
 └── test/                   # Integration tests
 ```
@@ -206,6 +207,21 @@ All methods take an explicit `bucket` parameter. `Put` returns the resulting ETa
 Two implementations:
 - **MemStore** — In-memory map for testing
 - **MinIOStore** — Production S3-compatible client (MinIO, AWS S3, R2, etc.)
+
+### Apache Iceberg Integration
+
+The `internal/iceberg` package provides read-only support for Apache Iceberg tables:
+
+- Parses Iceberg v1 and v2 table metadata JSON
+- Resolves snapshots → manifest lists → manifests → Parquet data files
+- Supports `s3://`, `gs://`, `s3a://` path schemes
+- `CatalogIntegration` bridges Iceberg tables into the native Caelum catalog, enabling SQL queries against Iceberg-managed Parquet files
+
+```go
+ci := iceberg.NewCatalogIntegration(catalog)
+info, err := ci.DiscoverAndRegister(ctx, "events", "warehouse/events")
+// Now queryable: SELECT * FROM events WHERE year = 2024
+```
 
 ### Ingestion
 

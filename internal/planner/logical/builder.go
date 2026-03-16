@@ -73,11 +73,6 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// GROUP BY / aggregation
 	if hasAgg || len(info.GroupBy) > 0 {
 		var aggs []AggExpr
-		var groupBy []string
-
-		for _, gb := range info.GroupBy {
-			groupBy = append(groupBy, cleanExpr(gb))
-		}
 
 		for _, col := range info.Columns {
 			if col.IsAgg {
@@ -90,16 +85,37 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				if col.AggFunc == "count" && (inputCol == "*" || inputCol == "") {
 					inputCol = ""
 				}
+				// Skip GROUPING() — it's computed during output, not a real aggregate
+				if col.AggFunc == "grouping" {
+					continue
+				}
 				aggs = append(aggs, AggExpr{
 					Func:      col.AggFunc,
 					InputCol:  inputCol,
 					OutputCol: outputCol,
 					Distinct:  col.AggDistinct,
+					InputExpr: col.AggArgExpr,
 				})
 			}
 		}
 
-		plan = NewAggregate(plan, groupBy, aggs)
+		if len(info.GroupingSets) > 0 {
+			// GROUPING SETS / CUBE / ROLLUP: build multiple aggregate passes
+			// connected by UNION ALL.
+			allGroupCols := make([]string, len(info.GroupBy))
+			for i, gb := range info.GroupBy {
+				allGroupCols[i] = cleanExpr(gb)
+			}
+
+			plan = buildGroupingSets(plan, allGroupCols, aggs, info.GroupingSets)
+		} else {
+			// Simple GROUP BY
+			var groupBy []string
+			for _, gb := range info.GroupBy {
+				groupBy = append(groupBy, cleanExpr(gb))
+			}
+			plan = NewAggregate(plan, groupBy, aggs)
+		}
 
 		// HAVING clause (must come after Aggregate)
 		if info.Having != "" && info.HavingExpr != nil {
@@ -318,6 +334,55 @@ func convertBound(b plansql.FrameBound) WindowBound {
 		wb.Type = "unbounded_following"
 	}
 	return wb
+}
+
+// buildGroupingSets creates a plan that runs multiple aggregate passes
+// (one per grouping set) and combines them with UNION ALL.
+// Columns not present in a given grouping set produce NULL in the output.
+func buildGroupingSets(inputPlan *Node, allGroupCols []string, aggs []AggExpr, sets [][]string) *Node {
+	if len(sets) == 0 {
+		return NewAggregate(inputPlan, allGroupCols, aggs)
+	}
+
+	// Build one aggregate node per grouping set.
+	var plans []*Node
+	for _, set := range sets {
+		setMap := make(map[string]bool, len(set))
+		for _, c := range set {
+			setMap[cleanExpr(c)] = true
+		}
+
+		// The GROUP BY for this set is only the columns in this set
+		var setCols []string
+		for _, c := range set {
+			setCols = append(setCols, cleanExpr(c))
+		}
+
+		// Build aggregate for this grouping set
+		aggNode := NewAggregate(inputPlan, setCols, aggs)
+
+		// Mark which columns from allGroupCols are NOT in this set
+		// (they need to be NULL). We do this via the GroupingSetNulls field.
+		var nullCols []string
+		for _, c := range allGroupCols {
+			if !setMap[c] {
+				nullCols = append(nullCols, c)
+			}
+		}
+		aggNode.GroupingSetNulls = nullCols
+
+		plans = append(plans, aggNode)
+	}
+
+	// Combine with UNION ALL
+	if len(plans) == 1 {
+		return plans[0]
+	}
+	result := plans[0]
+	for i := 1; i < len(plans); i++ {
+		result = NewUnion(result, plans[i], true) // UNION ALL
+	}
+	return result
 }
 
 // buildSetOpPlan constructs a logical plan for a set operation (UNION, INTERSECT, EXCEPT).

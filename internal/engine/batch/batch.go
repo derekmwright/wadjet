@@ -18,7 +18,7 @@ type RecordBatch struct {
 func NewRecordBatch(schema []parquet.Column, numRows int) *RecordBatch {
 	cols := make([]*Vector, len(schema))
 	for i, col := range schema {
-		cols[i] = NewVector(col.Type, numRows)
+		cols[i] = NewVectorWithScale(col.Type, numRows, col.Scale)
 	}
 	return &RecordBatch{
 		Columns: cols,

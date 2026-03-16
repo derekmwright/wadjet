@@ -382,11 +382,12 @@ func (n *WindowFuncNode) String() string {
 
 // knownAggregates is the set of standard aggregate function names.
 var knownAggregates = map[string]bool{
-	"sum":   true,
-	"count": true,
-	"avg":   true,
-	"min":   true,
-	"max":   true,
+	"sum":      true,
+	"count":    true,
+	"avg":      true,
+	"min":      true,
+	"max":      true,
+	"grouping": true,
 }
 
 // IsAggregate returns true if the function name is a known aggregate.

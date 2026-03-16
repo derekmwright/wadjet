@@ -245,6 +245,31 @@ SELECT * FROM flow_logs
 WHERE src_ip IN (SELECT ip_address FROM device_inventory WHERE role = 'server')
 ```
 
+### Correlated Subqueries
+
+Subqueries that reference columns from the outer query. Re-executed per outer row:
+
+```sql
+-- EXISTS with correlation
+SELECT s.s_name FROM supplier s
+WHERE EXISTS (
+    SELECT 1 FROM lineitem l WHERE l.l_suppkey = s.s_suppkey
+)
+
+-- Correlated scalar subquery
+SELECT o.o_orderkey, (
+    SELECT SUM(l.l_extendedprice) FROM lineitem l
+    WHERE l.l_orderkey = o.o_orderkey
+) AS total
+FROM orders o
+
+-- NOT EXISTS
+SELECT c.c_name FROM customer c
+WHERE NOT EXISTS (
+    SELECT 1 FROM orders o WHERE o.o_custkey = c.c_custkey
+)
+```
+
 ### Derived Tables
 
 ```sql
@@ -312,6 +337,31 @@ Use column positions (1-indexed) instead of repeating expressions:
 SELECT src_ip, dst_port, COUNT(*) FROM flow_logs GROUP BY src_ip, dst_port
 SELECT src_ip, dst_port, COUNT(*) FROM flow_logs GROUP BY 1, 2
 ```
+
+### GROUPING SETS
+
+Generate multiple levels of aggregation in a single query:
+
+```sql
+-- Explicit grouping sets
+SELECT region, product, SUM(sales)
+FROM orders
+GROUP BY GROUPING SETS ((region, product), (region), ())
+
+-- ROLLUP: hierarchical subtotals
+SELECT year, month, SUM(revenue)
+FROM sales
+GROUP BY ROLLUP (year, month)
+-- Equivalent to: GROUPING SETS ((year, month), (year), ())
+
+-- CUBE: all possible combinations
+SELECT region, product, SUM(sales)
+FROM orders
+GROUP BY CUBE (region, product)
+-- Equivalent to: GROUPING SETS ((region, product), (region), (product), ())
+```
+
+Each grouping set produces its own aggregation level. Columns not in a given set are NULL in the output.
 
 ## HAVING
 

@@ -279,6 +279,14 @@ func columnToNode(col Column) (goparquet.Node, error) {
 		node = goparquet.Leaf(goparquet.ByteArrayType)
 	case TypeDate:
 		node = goparquet.Int(32)
+	case TypeDecimal:
+		// Store DECIMAL as Parquet DECIMAL with fixed-length byte array
+		prec := col.Precision
+		if prec <= 0 {
+			prec = 38
+		}
+		scale := col.Scale
+		node = goparquet.Decimal(scale, prec, goparquet.Int64Type)
 	default:
 		return nil, fmt.Errorf("unsupported type: %v", col.Type)
 	}

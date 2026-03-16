@@ -113,6 +113,10 @@ const (
 	TokenKWFollowing
 	TokenKWCurrent
 	TokenKWRow
+	TokenKWCube
+	TokenKWRollup
+	TokenKWGrouping
+	TokenKWSets
 
 	// Raw capture
 	TokenRawBody // everything after AS until terminator
@@ -191,6 +195,10 @@ var keywords = map[string]TokenType{
 	"FOLLOWING":  TokenKWFollowing,
 	"CURRENT":    TokenKWCurrent,
 	"ROW":        TokenKWRow,
+	"CUBE":       TokenKWCube,
+	"ROLLUP":     TokenKWRollup,
+	"GROUPING":   TokenKWGrouping,
+	"SETS":       TokenKWSets,
 }
 
 // token is a lexical token produced by the lexer.

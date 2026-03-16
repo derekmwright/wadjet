@@ -10,7 +10,8 @@ import (
 
 // compileContext holds optional state for expression compilation.
 type compileContext struct {
-	runner SubqueryRunner
+	runner      SubqueryRunner
+	outerTables map[string]bool // table aliases from the outer query scope
 }
 
 // Compile converts our AST Node into an Expr tree.
@@ -22,6 +23,13 @@ func Compile(node plansql.Node) (Expr, error) {
 // with support for subquery expressions (scalar subqueries, IN subquery, EXISTS).
 func CompileWithRunner(node plansql.Node, runner SubqueryRunner) (Expr, error) {
 	return compileWithCtx(node, &compileContext{runner: runner})
+}
+
+// CompileWithScope converts our AST Node into an Expr tree with full scope
+// information, enabling correlated subquery detection and per-row execution.
+// outerTables contains the table names and aliases from the outer query.
+func CompileWithScope(node plansql.Node, runner SubqueryRunner, outerTables map[string]bool) (Expr, error) {
+	return compileWithCtx(node, &compileContext{runner: runner, outerTables: outerTables})
 }
 
 func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
@@ -96,6 +104,23 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 			if sq, ok := n.Values[0].(*plansql.SubqueryNode); ok {
 				if ctx.runner == nil {
 					return nil, fmt.Errorf("IN subquery requires a SubqueryRunner")
+				}
+				if len(ctx.outerTables) > 0 {
+					refs, err := plansql.FindCorrelatedRefs(sq.SQL, ctx.outerTables)
+					if err == nil && len(refs) > 0 {
+						parsed, _ := plansql.Parse(sq.SQL)
+						info, _ := plansql.ExtractSelect(parsed)
+						if info != nil {
+							return &CorrelatedInSubquery{
+								Expr:        left,
+								Runner:      ctx.runner,
+								Not:         n.Not,
+								OuterRefs:   refs,
+								OuterTables: ctx.outerTables,
+								ParsedInfo:  info,
+							}, nil
+						}
+					}
 				}
 				return &InSubquery{Expr: left, SQL: sq.SQL, Runner: ctx.runner, Not: n.Not}, nil
 			}
@@ -208,11 +233,42 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		if ctx.runner == nil {
 			return nil, fmt.Errorf("subqueries require a SubqueryRunner")
 		}
+		if len(ctx.outerTables) > 0 {
+			refs, err := plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
+			if err == nil && len(refs) > 0 {
+				parsed, _ := plansql.Parse(n.SQL)
+				info, _ := plansql.ExtractSelect(parsed)
+				if info != nil {
+					return &CorrelatedScalarSubquery{
+						Runner:      ctx.runner,
+						OuterRefs:   refs,
+						OuterTables: ctx.outerTables,
+						ParsedInfo:  info,
+					}, nil
+				}
+			}
+		}
 		return &ScalarSubquery{SQL: n.SQL, Runner: ctx.runner}, nil
 
 	case *plansql.ExistsNode:
 		if ctx.runner == nil {
 			return nil, fmt.Errorf("EXISTS subquery requires a SubqueryRunner")
+		}
+		if len(ctx.outerTables) > 0 {
+			refs, err := plansql.FindCorrelatedRefs(n.SQL, ctx.outerTables)
+			if err == nil && len(refs) > 0 {
+				parsed, _ := plansql.Parse(n.SQL)
+				info, _ := plansql.ExtractSelect(parsed)
+				if info != nil {
+					return &CorrelatedExistsSubquery{
+						Runner:      ctx.runner,
+						Not:         n.Not,
+						OuterRefs:   refs,
+						OuterTables: ctx.outerTables,
+						ParsedInfo:  info,
+					}, nil
+				}
+			}
 		}
 		return &ExistsSubquery{SQL: n.SQL, Runner: ctx.runner, Not: n.Not}, nil
 

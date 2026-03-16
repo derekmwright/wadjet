@@ -73,8 +73,9 @@ type Node struct {
 	Projections []Projection
 
 	// Aggregate
-	GroupBy    []string
-	AggExprs  []AggExpr
+	GroupBy          []string
+	AggExprs         []AggExpr
+	GroupingSetNulls []string // columns that should be NULL in this grouping set
 
 	// Sort
 	OrderBy []OrderExpr
@@ -119,7 +120,8 @@ type AggExpr struct {
 	Func      string // sum, count, min, max, avg
 	InputCol  string
 	OutputCol string
-	Distinct  bool // COUNT(DISTINCT col)
+	Distinct  bool           // COUNT(DISTINCT col)
+	InputExpr plansql.Node   // AST for aggregate argument (nil for simple column refs)
 }
 
 // WindowFrameSpec describes a window frame specification.

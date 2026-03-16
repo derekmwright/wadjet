@@ -278,6 +278,8 @@ func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 		dst.Float64Data[di] = src.Float64Data[si]
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		dst.BytesData.Set(di, src.BytesData.Value(si))
+	case batch.TypeDecimal:
+		dst.DecimalData.Data[di] = src.DecimalData.Data[si]
 	}
 }
 
