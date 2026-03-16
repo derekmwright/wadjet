@@ -42,6 +42,7 @@ type HashAggregate struct {
 	mu            sync.Mutex
 	groups        map[string]*groupState
 	keys          [][]any
+	serializedKeys []string // pre-serialized keys matching h.keys order
 	groupColIdx   []int
 	aggColIdx     []int
 	groupColTypes []batch.TypeID
@@ -68,6 +69,7 @@ func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 func (h *HashAggregate) Init(_ context.Context) error {
 	h.groups = make(map[string]*groupState)
 	h.keys = nil
+	h.serializedKeys = nil
 	h.resolved = false
 	h.keyBuf = make([]byte, 0, 128)
 	return nil
@@ -194,6 +196,7 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		}
 		h.groups[key] = gs
 		h.keys = append(h.keys, keyVals)
+		h.serializedKeys = append(h.serializedKeys, key)
 	}
 
 	// Update accumulators via pre-resolved typed kernels
@@ -267,9 +270,8 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	numRows := len(h.keys)
 	out := batch.NewRecordBatch(schema, numRows)
 
-	for i, keyVals := range h.keys {
-		key := serializeKey(h.keyBuf, keyVals)
-		gs := h.groups[key]
+	for i := range h.keys {
+		gs := h.groups[h.serializedKeys[i]]
 
 		// Set group-by columns
 		for j, val := range gs.keyValues {
@@ -294,8 +296,12 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 func (h *HashAggregate) outputSchema() []parquet.Column {
 	cols := make([]parquet.Column, 0, len(h.GroupByCols)+len(h.Aggs))
-	for _, name := range h.GroupByCols {
-		cols = append(cols, parquet.Column{Name: name, Type: parquet.TypeString, Nullable: true})
+	for i, name := range h.GroupByCols {
+		typ := parquet.TypeString // default fallback
+		if i < len(h.groupColTypes) && h.groupColTypes[i] != 0 {
+			typ = parquet.TypeID(h.groupColTypes[i])
+		}
+		cols = append(cols, parquet.Column{Name: name, Type: typ, Nullable: true})
 	}
 	for _, agg := range h.Aggs {
 		cols = append(cols, parquet.Column{Name: agg.OutputCol, Type: agg.OutputType, Nullable: true})
