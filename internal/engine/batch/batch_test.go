@@ -310,4 +310,60 @@ func TestVectorNetworkTypes(t *testing.T) {
 			t.Fatalf("expected 1.2.3.4, got %v", got)
 		}
 	})
+
+	// Test int64 input (Parquet round-trip: values read back from storage are int64, not strings)
+	t.Run("IPv4_Int64Roundtrip", func(t *testing.T) {
+		v := NewVector(TypeIPv4, 2)
+		v.SetValue(0, "192.168.1.100")
+		raw := v.Int64Data[0] // capture the encoded int64
+		v2 := NewVector(TypeIPv4, 1)
+		v2.SetValue(0, raw) // set from int64, as Parquet reader would
+		if got := v2.GetValue(0); got != "192.168.1.100" {
+			t.Fatalf("IPv4 int64 roundtrip: expected 192.168.1.100, got %v", got)
+		}
+	})
+
+	t.Run("MAC_Int64Roundtrip", func(t *testing.T) {
+		v := NewVector(TypeMAC, 2)
+		v.SetValue(0, "aa:bb:cc:dd:ee:ff")
+		raw := v.Int64Data[0] // capture the encoded int64
+		v2 := NewVector(TypeMAC, 1)
+		v2.SetValue(0, raw) // set from int64, as Parquet reader would
+		if got := v2.GetValue(0); got != "aa:bb:cc:dd:ee:ff" {
+			t.Fatalf("MAC int64 roundtrip: expected aa:bb:cc:dd:ee:ff, got %v", got)
+		}
+	})
+
+	t.Run("FromRows_Int64NetworkTypes", func(t *testing.T) {
+		// Simulate what happens when Parquet reader returns int64 values
+		// for MAC/IPv4 columns (the actual round-trip scenario)
+		schema := []parquet.Column{
+			{Name: "ip", Type: TypeIPv4},
+			{Name: "mac", Type: TypeMAC},
+		}
+		// Encode known values
+		v := NewVector(TypeIPv4, 1)
+		v.SetValue(0, "10.0.0.1")
+		ipEncoded := v.Int64Data[0]
+
+		vm := NewVector(TypeMAC, 1)
+		vm.SetValue(0, "de:ad:be:ef:ca:fe")
+		macEncoded := vm.Int64Data[0]
+
+		// FromRows with int64 values (as Parquet reader would provide)
+		rows := []map[string]any{
+			{"ip": ipEncoded, "mac": macEncoded},
+		}
+		b := FromRows(schema, rows)
+		result := b.ToRows()
+		if len(result) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(result))
+		}
+		if result[0]["ip"] != "10.0.0.1" {
+			t.Errorf("expected ip 10.0.0.1, got %v", result[0]["ip"])
+		}
+		if result[0]["mac"] != "de:ad:be:ef:ca:fe" {
+			t.Errorf("expected mac de:ad:be:ef:ca:fe, got %v", result[0]["mac"])
+		}
+	})
 }

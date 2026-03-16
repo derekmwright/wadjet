@@ -1134,6 +1134,17 @@ func (u *setOpSourceAdapter) Close() error {
 	return err
 }
 
+func (u *setOpSourceAdapter) RowsScanned() int64 {
+	var total int64
+	if sp, ok := u.leftSource.(exec.ScanStatsProvider); ok {
+		total += sp.RowsScanned()
+	}
+	if sp, ok := u.rightSource.(exec.ScanStatsProvider); ok {
+		total += sp.RowsScanned()
+	}
+	return total
+}
+
 // intersectRows returns rows that appear in both left and right.
 // If all is true, preserves duplicate counts (min of left/right occurrences).
 func intersectRows(left, right []map[string]any, all bool) []map[string]any {
@@ -1288,6 +1299,13 @@ func (s *catalogScanSource) Close() error {
 		return s.inner.Close()
 	}
 	return nil
+}
+
+func (s *catalogScanSource) RowsScanned() int64 {
+	if sp, ok := s.inner.(exec.ScanStatsProvider); ok {
+		return sp.RowsScanned()
+	}
+	return 0
 }
 
 // RecordBatch type alias for convenience
@@ -1555,6 +1573,13 @@ func (a *aggSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error)
 	return a.agg.Next(ctx)
 }
 
+func (a *aggSourceAdapter) RowsScanned() int64 {
+	if sp, ok := a.childSource.(exec.ScanStatsProvider); ok {
+		return sp.RowsScanned()
+	}
+	return 0
+}
+
 func (a *aggSourceAdapter) Close() error {
 	a.agg.Close()
 	return a.childSource.Close()
@@ -1592,6 +1617,13 @@ func (s *sortSourceAdapter) Close() error {
 	return s.childSource.Close()
 }
 
+func (s *sortSourceAdapter) RowsScanned() int64 {
+	if sp, ok := s.childSource.(exec.ScanStatsProvider); ok {
+		return sp.RowsScanned()
+	}
+	return 0
+}
+
 // windowSourceAdapter wraps a child pipeline + window into a Source.
 type windowSourceAdapter struct {
 	childSource exec.Source
@@ -1617,6 +1649,13 @@ func (w *windowSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, err
 	return w.win.Next(ctx)
 }
 
+func (w *windowSourceAdapter) RowsScanned() int64 {
+	if sp, ok := w.childSource.(exec.ScanStatsProvider); ok {
+		return sp.RowsScanned()
+	}
+	return 0
+}
+
 func (w *windowSourceAdapter) Close() error {
 	w.win.Close()
 	return w.childSource.Close()
@@ -1639,11 +1678,12 @@ type scannerExecSource struct {
 }
 
 type scanSourceInner struct {
-	cat       *catalog.Catalog
-	tableName string
-	files     []catalog.FileEntry
-	idx       int
-	schema    []parquet.Column
+	cat          *catalog.Catalog
+	tableName    string
+	files        []catalog.FileEntry
+	idx          int
+	schema       []parquet.Column
+	rowsScanned  int64
 }
 
 func (s *scannerExecSource) Init(ctx context.Context) error {
@@ -1696,6 +1736,13 @@ func (s *scannerExecSource) Next(ctx context.Context) (*batch.RecordBatch, error
 
 func (s *scannerExecSource) Close() error { return nil }
 
+func (s *scannerExecSource) RowsScanned() int64 {
+	if s.scanner != nil {
+		return s.scanner.rowsScanned
+	}
+	return 0
+}
+
 func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, error) {
 	for inner.idx < len(inner.files) {
 		file := inner.files[inner.idx]
@@ -1722,6 +1769,7 @@ func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, err
 			continue
 		}
 
+		inner.rowsScanned += int64(len(rows))
 		return fromRows(inner.schema, rows), nil
 	}
 	return nil, nil

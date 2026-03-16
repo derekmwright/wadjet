@@ -54,6 +54,7 @@ func TestNetworkTypesRoundTrip(t *testing.T) {
 	for _, row := range readBack {
 		t.Logf("  %v", row)
 	}
+
 }
 
 func TestNewSIEMTypesRoundTrip(t *testing.T) {

@@ -351,13 +351,22 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Extract actual rows scanned from the pipeline source
+	var rowsScanned int64
+	if sp, ok := pipeline.Source.(exec.ScanStatsProvider); ok {
+		rowsScanned = sp.RowsScanned()
+	}
+	if rowsScanned == 0 {
+		rowsScanned = int64(len(rows)) // fallback for non-scan sources
+	}
+
 	resp := QueryResponse{
 		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
 		Columns: columns,
 		Rows:    rows,
 		Stats: QueryStats{
 			Elapsed:     time.Since(start).String(),
-			RowsScanned: int64(len(rows)),
+			RowsScanned: rowsScanned,
 			Plan:        logicalPlan.PrettyPrint(0),
 		},
 	}

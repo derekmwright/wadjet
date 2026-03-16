@@ -35,3 +35,8 @@ type SinkSource interface {
 	Sink
 	Source
 }
+
+// ScanStatsProvider is implemented by sources that can report scan statistics.
+type ScanStatsProvider interface {
+	RowsScanned() int64
+}

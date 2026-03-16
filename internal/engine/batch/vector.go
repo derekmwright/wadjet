@@ -283,19 +283,24 @@ func (v *Vector) SetValue(i int, val any) {
 	case TypeBytes:
 		v.BytesData.Set(i, val.([]byte))
 	case TypeIPv4:
-		s, ok := val.(string)
-		if !ok {
+		switch tv := val.(type) {
+		case string:
+			ip := net.ParseIP(tv)
+			if ip == nil {
+				return
+			}
+			ip4 := ip.To4()
+			if ip4 == nil {
+				return
+			}
+			v.Int64Data[i] = int64(binary.BigEndian.Uint32(ip4))
+		case int64:
+			v.Int64Data[i] = tv
+		case int32:
+			v.Int64Data[i] = int64(tv)
+		default:
 			return
 		}
-		ip := net.ParseIP(s)
-		if ip == nil {
-			return
-		}
-		ip4 := ip.To4()
-		if ip4 == nil {
-			return
-		}
-		v.Int64Data[i] = int64(binary.BigEndian.Uint32(ip4))
 	case TypeIPv6:
 		s, ok := val.(string)
 		if !ok {
@@ -317,19 +322,22 @@ func (v *Vector) SetValue(i int, val any) {
 		}
 		v.BytesData.Set(i, []byte(s))
 	case TypeMAC:
-		s, ok := val.(string)
-		if !ok {
+		switch tv := val.(type) {
+		case string:
+			hw, err := net.ParseMAC(tv)
+			if err != nil || len(hw) != 6 {
+				return
+			}
+			var n uint64
+			for _, b := range hw {
+				n = (n << 8) | uint64(b)
+			}
+			v.Int64Data[i] = int64(n)
+		case int64:
+			v.Int64Data[i] = tv
+		default:
 			return
 		}
-		hw, err := net.ParseMAC(s)
-		if err != nil || len(hw) != 6 {
-			return
-		}
-		var n uint64
-		for _, b := range hw {
-			n = (n << 8) | uint64(b)
-		}
-		v.Int64Data[i] = int64(n)
 	case TypePort, TypeProtocol:
 		switch tv := val.(type) {
 		case int32:
