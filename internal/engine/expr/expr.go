@@ -49,19 +49,28 @@ type BoolExpr interface {
 // Caches the column index and type after first resolution for zero-allocation
 // reads on numeric types.
 type ColRef struct {
-	Name     string
-	resolved bool
-	idx      int
-	typ      batch.TypeID
+	Name        string
+	resolved    bool
+	idx         int
+	typ         batch.TypeID
+	structField string // for ROW field access (e.g., "person.name" → structField="name")
 }
 
 func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 	if !e.resolved {
 		e.idx = b.ColumnIndex(e.Name)
 		if e.idx < 0 && strings.Contains(e.Name, ".") {
-			// Qualified name not found: try unqualified (strip table prefix)
 			parts := strings.SplitN(e.Name, ".", 2)
+			// Try unqualified (strip table prefix)
 			e.idx = b.ColumnIndex(parts[1])
+			if e.idx < 0 {
+				// Try as struct field access: parts[0] is a ROW column, parts[1] is field name
+				parentIdx := b.ColumnIndex(parts[0])
+				if parentIdx >= 0 && b.Columns[parentIdx].Type == batch.TypeRow {
+					e.idx = parentIdx
+					e.structField = parts[1]
+				}
+			}
 		}
 		if e.idx >= 0 {
 			e.typ = b.Columns[e.idx].Type
@@ -69,6 +78,17 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 		e.resolved = true
 	}
 	if e.idx < 0 {
+		return nil
+	}
+	// Struct field access: extract named field from ROW value
+	if e.structField != "" {
+		v := b.Columns[e.idx].GetValue(row)
+		if v == nil {
+			return nil
+		}
+		if m, ok := v.(map[string]any); ok {
+			return m[e.structField]
+		}
 		return nil
 	}
 	v := b.Columns[e.idx]
@@ -901,13 +921,17 @@ func init() {
 	"parse_rate":    fnParseRate,
 
 	// Array/nested type functions (Trino-compatible)
-	"cardinality":   fnCardinality,
-	"array_length":  fnCardinality,
-	"element_at":    fnElementAt,
+	"cardinality":    fnCardinality,
+	"array_length":   fnCardinality,
+	"element_at":     fnElementAt,
 	"array_contains": fnArrayContains,
-	"array_join":    fnArrayJoin,
-	"array_min":     fnArrayMin,
-	"array_max":     fnArrayMax,
+	"array_join":     fnArrayJoin,
+	"array_min":      fnArrayMin,
+	"array_max":      fnArrayMax,
+
+	// ROW/struct functions
+	"row_field":   fnRowField,
+	"struct_field": fnRowField,
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
@@ -6086,6 +6110,19 @@ func fnArrayMin(args []any) any {
 		}
 	}
 	return min
+}
+
+// row_field(row, 'field_name') — extracts a named field from a ROW/struct value
+func fnRowField(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	row, ok := args[0].(map[string]any)
+	if !ok {
+		return nil
+	}
+	field := toString(args[1])
+	return row[field]
 }
 
 // array_max(array) — returns the maximum element

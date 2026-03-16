@@ -767,6 +767,48 @@ func TestArrayFunctions(t *testing.T) {
 	})
 }
 
+func TestRowFieldAccess(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{
+			Name: "person",
+			Type: parquet.TypeRow,
+			Fields: []parquet.Column{
+				{Name: "name", Type: parquet.TypeString},
+				{Name: "age", Type: parquet.TypeInt64},
+			},
+		},
+	}
+
+	b := batch.NewRecordBatch(schema, 2)
+	b.Columns[0].SetValue(0, int64(1))
+	b.Columns[1].SetValue(0, map[string]any{"name": "Alice", "age": int64(30)})
+	b.Columns[0].SetValue(1, int64(2))
+	b.Columns[1].SetValue(1, map[string]any{"name": "Bob", "age": int64(25)})
+
+	// Test dot notation: person.name
+	nameRef := &ColRef{Name: "person.name"}
+	if result := nameRef.Eval(b, 0); result != "Alice" {
+		t.Fatalf("person.name row 0 = %v, want Alice", result)
+	}
+	if result := nameRef.Eval(b, 1); result != "Bob" {
+		t.Fatalf("person.name row 1 = %v, want Bob", result)
+	}
+
+	// Test dot notation: person.age
+	ageRef := &ColRef{Name: "person.age"}
+	if result := ageRef.Eval(b, 0); result != int64(30) {
+		t.Fatalf("person.age row 0 = %v, want 30", result)
+	}
+
+	// Test row_field function
+	fn := DefaultRegistry.Lookup("row_field")
+	row := b.Columns[1].GetValue(0)
+	if result := fn([]any{row, "name"}); result != "Alice" {
+		t.Fatalf("row_field(person, 'name') = %v, want Alice", result)
+	}
+}
+
 func TestArraySubscriptParsing(t *testing.T) {
 	input := "SELECT ARRAY[1, 2, 3][2] AS val"
 	parsed, err := plansql.Parse(input)
