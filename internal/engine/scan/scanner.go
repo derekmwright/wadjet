@@ -132,6 +132,10 @@ func (s *Scanner) Init(ctx context.Context) error {
 
 func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	for s.fileIdx < len(s.files) {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("scan cancelled: %w", err)
+		}
+
 		file := s.files[s.fileIdx]
 		s.fileIdx++
 

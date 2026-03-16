@@ -62,6 +62,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	defer source.Close()
 
 	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("join build cancelled: %w", err)
+		}
+
 		b, err := source.Next(ctx)
 		if err != nil {
 			return fmt.Errorf("build source next: %w", err)

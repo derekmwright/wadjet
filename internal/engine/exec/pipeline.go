@@ -31,6 +31,11 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	}
 
 	for {
+		// Check for context cancellation (timeout, user cancel)
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("pipeline cancelled: %w", err)
+		}
+
 		b, err := p.Source.Next(ctx)
 		if err != nil {
 			return fmt.Errorf("source next: %w", err)

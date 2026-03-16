@@ -13,6 +13,7 @@ const (
 	SF01  ScaleFactor = 0.1
 	SF1   ScaleFactor = 1.0
 	SF10  ScaleFactor = 10.0
+	SF100 ScaleFactor = 100.0
 )
 
 // RowCounts returns the row counts for each table at the given scale factor.
@@ -97,6 +98,87 @@ func Generate(sf ScaleFactor) map[string][]map[string]any {
 	data["lineitem"] = genLineItem(rng, counts.Orders, counts.LineItem, counts.Part, counts.Supplier)
 
 	return data
+}
+
+// chunkEmitter collects rows and emits them in fixed-size chunks to bound memory.
+type chunkEmitter struct {
+	buf       []map[string]any
+	chunkSize int
+	emit      func([]map[string]any) error
+	err       error
+	total     int
+}
+
+func newEmitter(chunkSize int, emit func([]map[string]any) error) *chunkEmitter {
+	return &chunkEmitter{
+		buf:       make([]map[string]any, 0, chunkSize),
+		chunkSize: chunkSize,
+		emit:      emit,
+	}
+}
+
+func (e *chunkEmitter) add(row map[string]any) {
+	if e.err != nil {
+		return
+	}
+	e.buf = append(e.buf, row)
+	e.total++
+	if len(e.buf) >= e.chunkSize {
+		e.err = e.emit(e.buf)
+		e.buf = e.buf[:0]
+	}
+}
+
+func (e *chunkEmitter) flush() error {
+	if e.err != nil {
+		return e.err
+	}
+	if len(e.buf) > 0 {
+		e.err = e.emit(e.buf)
+		e.buf = e.buf[:0]
+	}
+	return e.err
+}
+
+// GenerateChunked streams TPC-H data for all tables, calling emit with chunks of rows.
+// Memory usage is bounded to O(chunkSize) regardless of scale factor.
+func GenerateChunked(sf ScaleFactor, chunkSize int, emit func(table string, rows []map[string]any) error) error {
+	rng := rand.New(rand.NewSource(int64(sf * 42_000_000)))
+	counts := sf.RowCounts()
+
+	// Region and nation are fixed-size, emit whole
+	if err := emit("region", genRegion()); err != nil {
+		return fmt.Errorf("region: %w", err)
+	}
+	if err := emit("nation", genNation()); err != nil {
+		return fmt.Errorf("nation: %w", err)
+	}
+
+	type tableGen struct {
+		name string
+		fn   func(*chunkEmitter)
+	}
+	tables := []tableGen{
+		{"supplier", func(e *chunkEmitter) { streamSupplier(rng, counts.Supplier, e) }},
+		{"part", func(e *chunkEmitter) { streamPart(rng, counts.Part, e) }},
+		{"partsupp", func(e *chunkEmitter) { streamPartSupp(rng, counts.Part, counts.Supplier, counts.PartSupp, e) }},
+		{"customer", func(e *chunkEmitter) { streamCustomer(rng, counts.Customer, e) }},
+		{"orders", func(e *chunkEmitter) { streamOrders(rng, counts.Orders, counts.Customer, e) }},
+		{"lineitem", func(e *chunkEmitter) { streamLineItem(rng, counts.Orders, counts.LineItem, counts.Part, counts.Supplier, e) }},
+	}
+
+	for _, tbl := range tables {
+		name := tbl.name
+		e := newEmitter(chunkSize, func(rows []map[string]any) error {
+			return emit(name, rows)
+		})
+		tbl.fn(e)
+		if err := e.flush(); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+
+	return nil
 }
 
 func genRegion() []map[string]any {
@@ -312,4 +394,143 @@ func randPartName(rng *rand.Rand) string {
 	return partNameWords[rng.Intn(len(partNameWords))] + " " +
 		partNameWords[rng.Intn(len(partNameWords))] + " " +
 		partNameWords[rng.Intn(len(partNameWords))]
+}
+
+// Streaming generators — identical logic to gen* but emit rows via chunkEmitter
+// to bound memory usage at large scale factors.
+
+func streamSupplier(rng *rand.Rand, count int, e *chunkEmitter) {
+	for i := 0; i < count; i++ {
+		e.add(map[string]any{
+			"s_suppkey":   int32(i + 1),
+			"s_name":      fmt.Sprintf("Supplier#%09d", i+1),
+			"s_address":   randString(rng, 10, 25),
+			"s_nationkey": int32(rng.Intn(25)),
+			"s_phone":     randPhone(rng),
+			"s_acctbal":   randFloat(rng, -999.99, 9999.99),
+			"s_comment":   randString(rng, 20, 80),
+		})
+	}
+}
+
+func streamPart(rng *rand.Rand, count int, e *chunkEmitter) {
+	for i := 0; i < count; i++ {
+		e.add(map[string]any{
+			"p_partkey":     int32(i + 1),
+			"p_name":        randPartName(rng),
+			"p_mfgr":        fmt.Sprintf("Manufacturer#%d", rng.Intn(5)+1),
+			"p_brand":       brands[rng.Intn(len(brands))],
+			"p_type":        partTypes[rng.Intn(len(partTypes))],
+			"p_size":        int32(rng.Intn(50) + 1),
+			"p_container":   containers[rng.Intn(len(containers))],
+			"p_retailprice": float64(90000+i*3+int(rng.Int31n(1000))) / 100.0,
+			"p_comment":     randString(rng, 5, 20),
+		})
+	}
+}
+
+func streamPartSupp(rng *rand.Rand, numParts, numSupps, count int, e *chunkEmitter) {
+	suppPerPart := 4
+	if count < numParts*4 {
+		suppPerPart = max(1, count/max(1, numParts))
+	}
+	n := 0
+	for i := 0; i < numParts && n < count; i++ {
+		for j := 0; j < suppPerPart && n < count; j++ {
+			suppKey := (i*suppPerPart+j)%numSupps + 1
+			e.add(map[string]any{
+				"ps_partkey":    int32(i + 1),
+				"ps_suppkey":    int32(suppKey),
+				"ps_availqty":   int32(rng.Intn(9999) + 1),
+				"ps_supplycost": randFloat(rng, 1.0, 1000.0),
+				"ps_comment":    randString(rng, 20, 120),
+			})
+			n++
+		}
+	}
+}
+
+func streamCustomer(rng *rand.Rand, count int, e *chunkEmitter) {
+	for i := 0; i < count; i++ {
+		e.add(map[string]any{
+			"c_custkey":    int32(i + 1),
+			"c_name":       fmt.Sprintf("Customer#%09d", i+1),
+			"c_address":    randString(rng, 10, 25),
+			"c_nationkey":  int32(rng.Intn(25)),
+			"c_phone":      randPhone(rng),
+			"c_acctbal":    randFloat(rng, -999.99, 9999.99),
+			"c_mktsegment": mktSegments[rng.Intn(len(mktSegments))],
+			"c_comment":    randString(rng, 20, 80),
+		})
+	}
+}
+
+func streamOrders(rng *rand.Rand, count, numCusts int, e *chunkEmitter) {
+	statuses := []string{"F", "O", "P"}
+	for i := 0; i < count; i++ {
+		year := 1992 + rng.Intn(6)
+		month := rng.Intn(12) + 1
+		day := rng.Intn(28) + 1
+		e.add(map[string]any{
+			"o_orderkey":      int32(i + 1),
+			"o_custkey":       int32(rng.Intn(numCusts) + 1),
+			"o_orderstatus":   statuses[rng.Intn(3)],
+			"o_totalprice":    randFloat(rng, 1000.0, 500000.0),
+			"o_orderdate":     fmt.Sprintf("%04d-%02d-%02d", year, month, day),
+			"o_orderpriority": priorities[rng.Intn(len(priorities))],
+			"o_clerk":         fmt.Sprintf("Clerk#%09d", rng.Intn(max(1, count/1000))+1),
+			"o_shippriority":  int32(0),
+			"o_comment":       randString(rng, 20, 60),
+		})
+	}
+}
+
+func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, e *chunkEmitter) {
+	flags := []string{"N", "R", "A"}
+	lineStatuses := []string{"O", "F"}
+	linesPerOrder := max(1, count/max(1, numOrders))
+
+	n := 0
+	for orderKey := 1; orderKey <= numOrders && n < count; orderKey++ {
+		nLines := linesPerOrder + rng.Intn(3) - 1
+		if nLines < 1 {
+			nLines = 1
+		}
+		for ln := 1; ln <= nLines && n < count; ln++ {
+			quantity := float64(rng.Intn(50) + 1)
+			price := randFloat(rng, 900.0, 100000.0)
+			discount := float64(rng.Intn(11)) / 100.0
+			tax := float64(rng.Intn(9)) / 100.0
+
+			year := 1992 + rng.Intn(6)
+			month := rng.Intn(12) + 1
+			day := rng.Intn(28) + 1
+			shipYear := year
+			shipMonth := month + rng.Intn(4)
+			if shipMonth > 12 {
+				shipYear++
+				shipMonth -= 12
+			}
+
+			e.add(map[string]any{
+				"l_orderkey":      int32(orderKey),
+				"l_partkey":       int32(rng.Intn(numParts) + 1),
+				"l_suppkey":       int32(rng.Intn(numSupps) + 1),
+				"l_linenumber":    int32(ln),
+				"l_quantity":      quantity,
+				"l_extendedprice": price,
+				"l_discount":      discount,
+				"l_tax":           tax,
+				"l_returnflag":    flags[rng.Intn(3)],
+				"l_linestatus":    lineStatuses[rng.Intn(2)],
+				"l_shipdate":      fmt.Sprintf("%04d-%02d-%02d", shipYear, shipMonth, day),
+				"l_commitdate":    fmt.Sprintf("%04d-%02d-%02d", year, month+1, day),
+				"l_receiptdate":   fmt.Sprintf("%04d-%02d-%02d", shipYear, shipMonth, min(28, day+rng.Intn(10))),
+				"l_shipinstruct":  shipInstructs[rng.Intn(len(shipInstructs))],
+				"l_shipmode":      shipModes[rng.Intn(len(shipModes))],
+				"l_comment":       randString(rng, 10, 40),
+			})
+			n++
+		}
+	}
 }
