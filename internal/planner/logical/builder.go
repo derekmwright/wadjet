@@ -10,12 +10,12 @@ import (
 
 // BuildFromSelect constructs a logical plan from a parsed SELECT query.
 func BuildFromSelect(info *plansql.SelectInfo) (*Node, error) {
-	return buildFromSelectWithCTEs(info, info.CTEs)
+	return BuildFromSelectWithCTEs(info, info.CTEs)
 }
 
-// buildFromSelectWithCTEs constructs a logical plan, resolving CTE references
+// BuildFromSelectWithCTEs constructs a logical plan, resolving CTE references
 // to inline sub-plans instead of table scans.
-func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
+func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, error) {
 	// Handle set operations (UNION, INTERSECT, EXCEPT)
 	if info.Union != nil {
 		return buildSetOpPlan(info, ctes)
@@ -257,6 +257,12 @@ func buildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		plan = NewLimit(plan, limit, offset)
 	}
 
+	// Store CTE definitions on the root node so the physical planner
+	// can resolve CTE references in scalar subqueries.
+	if len(ctes) > 0 {
+		plan.CTEs = ctes
+	}
+
 	return plan, nil
 }
 
@@ -432,11 +438,11 @@ func buildSetOpPlan(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*Node, err
 		op = plansql.SetOpUnion // backwards compat
 	}
 
-	leftPlan, err := buildFromSelectWithCTEs(info.Union.Left, ctes)
+	leftPlan, err := BuildFromSelectWithCTEs(info.Union.Left, ctes)
 	if err != nil {
 		return nil, fmt.Errorf("building %s left side: %w", op, err)
 	}
-	rightPlan, err := buildFromSelectWithCTEs(info.Union.Right, ctes)
+	rightPlan, err := BuildFromSelectWithCTEs(info.Union.Right, ctes)
 	if err != nil {
 		return nil, fmt.Errorf("building %s right side: %w", op, err)
 	}
@@ -498,7 +504,7 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 				return nil, fmt.Errorf("extracting SELECT from CTE %q: %w", cte.Name, err)
 			}
 			// Pass the same CTE defs so CTEs can reference earlier CTEs
-			plan, err := buildFromSelectWithCTEs(selectInfo, ctes)
+			plan, err := BuildFromSelectWithCTEs(selectInfo, ctes)
 			if err != nil {
 				return nil, fmt.Errorf("building plan for CTE %q: %w", cte.Name, err)
 			}
@@ -537,7 +543,7 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		if err != nil {
 			return nil, fmt.Errorf("extracting SELECT from derived table: %w", err)
 		}
-		plan, err := buildFromSelectWithCTEs(selectInfo, ctes)
+		plan, err := BuildFromSelectWithCTEs(selectInfo, ctes)
 		if err != nil {
 			return nil, fmt.Errorf("building plan for derived table: %w", err)
 		}

@@ -801,6 +801,37 @@ func init() {
 	// Deep inspection: payload analysis
 	"payload_entropy":  fnPayloadEntropy,
 	"payload_hex_dump": fnPayloadHexDump,
+
+	// ICMP
+	"icmp_type_name": fnICMPTypeName,
+	"icmp_code_name": fnICMPCodeName,
+	"is_icmp_echo":   fnIsICMPEcho,
+	"icmp_parse":     fnICMPParse,
+	"icmp_type":      fnICMPType,
+	"icmp_code":      fnICMPCode,
+
+	// IPv6
+	"ipv6_scope":      fnIPv6Scope,
+	"ipv6_expand":     fnIPv6Expand,
+	"ipv6_compress":   fnIPv6Compress,
+	"ipv6_to_eui64":   fnIPv6ToEUI64,
+	"is_6to4":         fnIs6to4,
+	"is_teredo":       fnIsTeredo,
+	"teredo_server":   fnTeredoServer,
+	"teredo_client":   fnTeredoClient,
+	"sixto4_gateway":  fnSixto4Gateway,
+
+	// JA3 TLS fingerprinting
+	"ja3_fingerprint":  fnJA3Fingerprint,
+	"ja3_string":       fnJA3String,
+	"ja3s_fingerprint": fnJA3SFingerprint,
+	"ja3s_string":      fnJA3SString,
+
+	// Payload search
+	"payload_contains": fnPayloadContains,
+	"payload_matches":  fnPayloadMatches,
+	"payload_offset":   fnPayloadOffset,
+	"payload_length":   fnPayloadLength,
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
@@ -4672,8 +4703,8 @@ func fnIPv6ToEUI64(args []any) any {
 	eui[5] = mac[3]
 	eui[6] = mac[4]
 	eui[7] = mac[5]
-	return fmt.Sprintf("%02x%02x:%02xff:%02x%02x:%02x%02x",
-		eui[0], eui[1], eui[2], eui[5], eui[6], eui[7], eui[3])
+	return fmt.Sprintf("%02x%02x:%02x%02x:%02x%02x:%02x%02x",
+		eui[0], eui[1], eui[2], eui[3], eui[4], eui[5], eui[6], eui[7])
 }
 
 func fnIs6to4(args []any) any {

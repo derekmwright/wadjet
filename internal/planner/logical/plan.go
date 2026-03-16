@@ -98,6 +98,11 @@ type Node struct {
 
 	// Union
 	UnionAll bool // true = UNION ALL, false = UNION (dedup)
+
+	// CTEs — stored on the root node so the physical planner can resolve
+	// CTE references inside scalar subqueries (e.g., Q15's HAVING/WHERE
+	// subquery that references a CTE defined in the outer WITH clause).
+	CTEs []plansql.CTEDef
 }
 
 // Predicate is a filter condition.

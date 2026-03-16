@@ -104,9 +104,10 @@ func (p *PhysicalPlan) PrettyPrint() string {
 type Planner struct {
 	catalog        *catalog.Catalog
 	subqueryRunner expr.SubqueryRunner
-	planCtx        context.Context // context from the current Plan() call, used by subquery runner
-	MemoryBudget   int64           // per-query memory budget in bytes (0 = unlimited)
-	SpillDir       string          // directory for spill files (empty = os temp dir)
+	planCtx        context.Context   // context from the current Plan() call, used by subquery runner
+	ctes           []plansql.CTEDef  // CTE definitions from the current query, for subquery resolution
+	MemoryBudget   int64             // per-query memory budget in bytes (0 = unlimited)
+	SpillDir       string            // directory for spill files (empty = os temp dir)
 }
 
 // NewPlanner creates a new physical planner.
@@ -142,8 +143,15 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 		return nil, fmt.Errorf("subquery extract error: %w", err)
 	}
 
-	// Build logical plan
-	logicalPlan, err := logical.BuildFromSelect(info)
+	// Build logical plan — merge outer CTEs so subqueries can reference
+	// CTE tables defined in the enclosing WITH clause.
+	var logicalPlan *logical.Node
+	if len(p.ctes) > 0 {
+		merged := append(p.ctes, info.CTEs...)
+		logicalPlan, err = logical.BuildFromSelectWithCTEs(info, merged)
+	} else {
+		logicalPlan, err = logical.BuildFromSelect(info)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("subquery plan error: %w", err)
 	}
@@ -193,6 +201,11 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
 	p.planCtx = ctx // store for subquery runner context propagation
+	// Propagate CTE definitions from the logical plan so scalar subqueries
+	// (e.g., in WHERE/HAVING) can resolve CTE table references.
+	if len(node.CTEs) > 0 {
+		p.ctes = node.CTEs
+	}
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
 		return nil, err
@@ -990,6 +1003,8 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		return nil, nil, nil, err
 	}
 
+	isOverAggregate := hasAggregateAncestor(child)
+
 	var projCols []exec.ProjectColumn
 	for _, proj := range node.Projections {
 		colRef := proj.Column
@@ -999,6 +1014,12 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		name := proj.Alias
 		if name == "" {
 			name = colRef // use unqualified column name
+		}
+
+		// When projecting over an aggregate, aggregate columns should reference
+		// their output column name (the alias), not the raw expression.
+		if isOverAggregate && proj.IsAgg && proj.Alias != "" {
+			colRef = proj.Alias
 		}
 
 		// Try to compile from AST expression first, fall back to ColumnRef
