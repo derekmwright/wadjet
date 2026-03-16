@@ -95,7 +95,11 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				// the column AST to reference it.
 				isNested := false
 				if col.ASTExpr != nil {
-					if _, topLevel := col.ASTExpr.(*plansql.FuncCallNode); !topLevel {
+					if fn, topLevel := col.ASTExpr.(*plansql.FuncCallNode); !topLevel {
+						isNested = true
+					} else if topLevel && !plansql.IsAggregate(fn.Name) {
+						// Top-level is a scalar function wrapping an aggregate,
+						// e.g., format_bytes(SUM(rx_bytes)). Treat as nested.
 						isNested = true
 					}
 				}

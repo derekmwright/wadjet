@@ -668,40 +668,31 @@ func pgTypeOID(typeName string) int {
 func (c *pgConn) handleCatalogQuery(normalized string) bool {
 	ctx := context.Background()
 
-	// List tables: SELECT c.relname FROM pg_class ... WHERE ... relkind in ('r', 'p')
-	if strings.Contains(normalized, "RELNAME") && strings.Contains(normalized, "PG_CLASS") &&
-		strings.Contains(normalized, "RELKIND") {
-		tables, err := c.db.ListTables(ctx)
-		if err != nil {
-			return false
-		}
-		cols := []string{"relname"}
+	// Schema listing: SELECT nspname FROM pg_namespace (used by get_schema_names)
+	// Exclude queries that mention pg_type/pg_class/pg_attribute — those just JOIN pg_namespace.
+	if strings.Contains(normalized, "PG_NAMESPACE") && strings.Contains(normalized, "NSPNAME") &&
+		!strings.Contains(normalized, "PG_CLASS") &&
+		!strings.Contains(normalized, "PG_TYPE") &&
+		!strings.Contains(normalized, "PG_ATTRIBUTE") {
+		cols := []string{"nspname"}
 		c.sendRowDescription(cols)
-		for _, t := range tables {
-			c.sendDataRow(cols, map[string]any{"relname": t})
-		}
-		c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(tables)))
+		c.sendDataRow(cols, map[string]any{"nspname": "public"})
+		c.sendCommandComplete("SELECT 1")
 		return true
 	}
 
-	// Table OID lookup: SELECT c.oid FROM pg_class WHERE relname = '<table>'
-	if strings.Contains(normalized, "OID") && strings.Contains(normalized, "PG_CLASS") &&
-		strings.Contains(normalized, "RELNAME") && !strings.Contains(normalized, "RELKIND") {
-		// Extract table name from WHERE clause
-		tableName := extractParamValue(normalized, "RELNAME")
-		if tableName == "" {
-			// Try to find it from the original query parameters
-			// SQLAlchemy sends it as a parameter, but we don't parse those yet.
-			// Return a generic OID.
-			c.sendRowDescription([]string{"oid"})
-			c.sendDataRow([]string{"oid"}, map[string]any{"oid": "16384"})
-			c.sendCommandComplete("SELECT 1")
-			return true
+	// Index/constraint queries that happen to JOIN pg_attribute — return empty
+	if strings.Contains(normalized, "PG_INDEX") ||
+		strings.Contains(normalized, "PG_CONSTRAINT") {
+		cols := extractSelectColumns(c.portalSQL)
+		if len(cols) == 0 {
+			cols = extractSelectColumns(c.preparedSQL)
 		}
-		oid := tableOID(tableName)
-		c.sendRowDescription([]string{"oid"})
-		c.sendDataRow([]string{"oid"}, map[string]any{"oid": fmt.Sprintf("%d", oid)})
-		c.sendCommandComplete("SELECT 1")
+		if len(cols) == 0 {
+			cols = []string{"?column?"}
+		}
+		c.sendRowDescription(cols)
+		c.sendCommandComplete("SELECT 0")
 		return true
 	}
 
@@ -710,42 +701,118 @@ func (c *pgConn) handleCatalogQuery(normalized string) bool {
 		return c.handleAttributeQuery(ctx, normalized)
 	}
 
+	// pg_class queries: table listing, OID lookup, or reverse OID lookup
+	if strings.Contains(normalized, "PG_CLASS") && strings.Contains(normalized, "RELNAME") {
+		tables, err := c.db.ListTables(ctx)
+		if err != nil {
+			return false
+		}
+
+		// Specific table lookup: relname = '<value>' in WHERE
+		specificTable := extractParamValue(normalized, "RELNAME")
+		if specificTable != "" {
+			// OID lookup for a specific table
+			for _, t := range tables {
+				if t == specificTable {
+					oid := tableOID(t)
+					c.sendRowDescription([]string{"oid"})
+					c.sendDataRow([]string{"oid"}, map[string]any{"oid": fmt.Sprintf("%d", oid)})
+					c.sendCommandComplete("SELECT 1")
+					return true
+				}
+			}
+			c.sendRowDescription([]string{"oid"})
+			c.sendCommandComplete("SELECT 0")
+			return true
+		}
+
+		// Reverse OID lookup: SELECT relname FROM pg_class WHERE oid = '<value>'
+		oidVal := extractParamValue(normalized, "OID")
+		if oidVal != "" {
+			for _, t := range tables {
+				if fmt.Sprintf("%d", tableOID(t)) == oidVal {
+					c.sendRowDescription([]string{"relname"})
+					c.sendDataRow([]string{"relname"}, map[string]any{"relname": t})
+					c.sendCommandComplete("SELECT 1")
+					return true
+				}
+			}
+			c.sendRowDescription([]string{"relname"})
+			c.sendCommandComplete("SELECT 0")
+			return true
+		}
+
+		// List all tables — only when RELKIND is present (real table listing query)
+		if strings.Contains(normalized, "RELKIND") {
+			cols := []string{"relname"}
+			c.sendRowDescription(cols)
+			for _, t := range tables {
+				c.sendDataRow(cols, map[string]any{"relname": t})
+			}
+			c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(tables)))
+			return true
+		}
+
+		// Unknown pg_class query — don't handle, fall through to blanket
+		return false
+	}
+
 	return false
 }
 
 // handleAttributeQuery returns column metadata from our catalog for pg_attribute queries.
 func (c *pgConn) handleAttributeQuery(ctx context.Context, normalized string) bool {
-	// SQLAlchemy sends queries with parameterized attrelid (OID).
-	// Since we can't easily map the OID back to a table in parameterized queries,
-	// we'll use a different approach: if there's exactly one table, return its columns.
-	// Otherwise, try all tables and match by OID.
 	tables, err := c.db.ListTables(ctx)
 	if err != nil || len(tables) == 0 {
 		return false
 	}
 
-	// Try to find the target OID from the query text
-	targetOID := extractParamValue(normalized, "ATTRELID")
+	// Try to find the target from the query text.
+	// SQLAlchemy may send a table name or a numeric OID as the attrelid parameter.
+	target := extractParamValue(normalized, "ATTRELID")
 
-	// Build column results in pg_attribute format
-	// SQLAlchemy expects: attname, atttypid, attnotnull, atthasdef, attnum, ...
-	cols := []string{"attname", "atttypid", "attnotnull", "atthasdef", "attnum",
-		"atttypmod", "attlen", "attndims", "attidentity", "attgenerated"}
+	// Determine which table(s) to describe
+	var targetTables []string
+	if target == "" {
+		targetTables = tables
+	} else {
+		// Check if target is a table name (SQLAlchemy sends table name as table_oid param)
+		for _, t := range tables {
+			if t == target {
+				targetTables = []string{t}
+				break
+			}
+		}
+		// If not a name, try matching as numeric OID
+		if len(targetTables) == 0 {
+			for _, t := range tables {
+				if fmt.Sprintf("%d", tableOID(t)) == target {
+					targetTables = []string{t}
+					break
+				}
+			}
+		}
+		// If still no match, return empty
+		if len(targetTables) == 0 {
+			targetTables = nil
+		}
+	}
+
+	// SQLAlchemy 1.4 PGDialect.get_columns unpacks exactly 8 values per row:
+	//   name, format_type, default_, notnull, table_oid, comment, generated, identity
+	cols := []string{"attname", "format_type", "default", "attnotnull",
+		"table_oid", "comment", "generated", "identity"}
 
 	var resultRows []map[string]any
 
-	for _, tableName := range tables {
-		oid := tableOID(tableName)
-		if targetOID != "" && fmt.Sprintf("%d", oid) != targetOID {
-			continue
-		}
-
+	for _, tableName := range targetTables {
 		table, err := c.db.Query(ctx, fmt.Sprintf("DESCRIBE %s", tableName))
 		if err != nil {
 			continue
 		}
 
-		for i, row := range table.Rows {
+		oid := fmt.Sprintf("%d", tableOID(tableName))
+		for _, row := range table.Rows {
 			colName, _ := row["column_name"].(string)
 			colType, _ := row["type"].(string)
 			nullable, _ := row["nullable"].(string)
@@ -754,21 +821,15 @@ func (c *pgConn) handleAttributeQuery(ctx context.Context, normalized string) bo
 			}
 
 			resultRows = append(resultRows, map[string]any{
-				"attname":       colName,
-				"atttypid":      fmt.Sprintf("%d", pgTypeOID(colType)),
-				"attnotnull":    boolStr(nullable == "NO"),
-				"atthasdef":     "f",
-				"attnum":        fmt.Sprintf("%d", i+1),
-				"atttypmod":     "-1",
-				"attlen":        "-1",
-				"attndims":      "0",
-				"attidentity":   "",
-				"attgenerated":  "",
+				"attname":     colName,
+				"format_type": pgFormatType(colType),
+				"default":     nil,
+				"attnotnull":  boolStr(nullable == "NO"),
+				"table_oid":   oid,
+				"comment":     nil,
+				"generated":   "",
+				"identity":    "",
 			})
-		}
-		// If we matched a specific OID, stop
-		if targetOID != "" {
-			break
 		}
 	}
 
@@ -778,6 +839,30 @@ func (c *pgConn) handleAttributeQuery(ctx context.Context, normalized string) bo
 	}
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(resultRows)))
 	return true
+}
+
+// pgFormatType maps Caelum type names to PostgreSQL format_type() output.
+func pgFormatType(typeName string) string {
+	switch strings.ToUpper(typeName) {
+	case "INT32":
+		return "integer"
+	case "INT64":
+		return "bigint"
+	case "FLOAT32":
+		return "real"
+	case "FLOAT64":
+		return "double precision"
+	case "BOOLEAN", "BOOL":
+		return "boolean"
+	case "TIMESTAMP":
+		return "timestamp without time zone"
+	case "DATE":
+		return "date"
+	case "DECIMAL":
+		return "numeric"
+	default:
+		return "text"
+	}
 }
 
 func boolStr(b bool) string {
@@ -837,6 +922,7 @@ func extractSelectColumns(sql string) []string {
 		upperP := strings.ToUpper(p)
 		if asIdx := strings.LastIndex(upperP, " AS "); asIdx >= 0 {
 			alias := strings.TrimSpace(p[asIdx+4:])
+			alias = strings.Trim(alias, "\"")
 			cols = append(cols, alias)
 			continue
 		}

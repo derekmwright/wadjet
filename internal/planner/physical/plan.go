@@ -610,7 +610,7 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter)
+	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns)
 	return scanner, nil, &exec.CollectSink{}, nil
 }
 
@@ -979,6 +979,21 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 				needsProject = true
 				break
 			}
+			// Aggregate projection with a wrapping scalar function
+			// e.g., format_bytes(SUM(rx_bytes)) — the outer function must be
+			// applied as a post-aggregate projection.
+			if proj.IsAgg && proj.ASTExpr != nil {
+				if fn, ok := proj.ASTExpr.(*plansql.FuncCallNode); ok {
+					if !plansql.IsAggregate(fn.Name) {
+						needsProject = true
+						break
+					}
+				}
+				if _, ok := proj.ASTExpr.(*plansql.BinaryOp); ok {
+					needsProject = true
+					break
+				}
+			}
 			// Check for column rename on non-aggregate columns: alias differs
 			// from source column/expression (aggregate columns already use
 			// the alias as their OutputCol, so no rename needed).
@@ -1046,6 +1061,40 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		if isOverAggregate && proj.ASTExpr != nil && !proj.IsAgg {
 			if synName, ok := gbExprToSyn[proj.ASTExpr.String()]; ok {
 				expression = exec.ColumnRef(synName)
+			}
+		}
+
+		// Handle aggregate projections with wrapping scalar functions,
+		// e.g., format_bytes(SUM(rx_bytes)). Replace the inner aggregate
+		// AST node with a ColRef to the aggregate output column, then
+		// compile the modified AST as a scalar expression.
+		if expression == nil && proj.IsAgg && proj.ASTExpr != nil && isOverAggregate {
+			innerAgg := plansql.FindNestedAggregate(proj.ASTExpr)
+			if innerAgg != nil {
+				outerFn, isFunc := proj.ASTExpr.(*plansql.FuncCallNode)
+				if isFunc && !plansql.IsAggregate(outerFn.Name) {
+					// Build the aggregate output column name
+					aggOutputCol := strings.ToLower(innerAgg.Name) + "("
+					if innerAgg.Distinct {
+						aggOutputCol += "distinct "
+					}
+					if innerAgg.Star {
+						aggOutputCol += "*"
+					} else if len(innerAgg.Args) > 0 {
+						var argStrs []string
+						for _, a := range innerAgg.Args {
+							argStrs = append(argStrs, a.String())
+						}
+						aggOutputCol += strings.Join(argStrs, ", ")
+					}
+					aggOutputCol += ")"
+					// Replace inner aggregate with a column reference in the AST
+					rewritten := replaceAggWithColRef(proj.ASTExpr, innerAgg, aggOutputCol)
+					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner)
+					if compErr == nil {
+						expression = wrapExpr(compiled)
+					}
+				}
 			}
 		}
 
@@ -1225,6 +1274,37 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 
 // isSimpleColRef returns true if the AST node is a simple column reference
 // (no arithmetic, function calls, etc).
+// replaceAggWithColRef returns a copy of the AST with the target aggregate
+// function node replaced by a ColRef to the given column name.
+func replaceAggWithColRef(node plansql.Node, target *plansql.FuncCallNode, colName string) plansql.Node {
+	if node == nil {
+		return nil
+	}
+	if fn, ok := node.(*plansql.FuncCallNode); ok && fn == target {
+		return &plansql.ColRef{Column: colName}
+	}
+	switch n := node.(type) {
+	case *plansql.FuncCallNode:
+		newArgs := make([]plansql.Node, len(n.Args))
+		for i, a := range n.Args {
+			newArgs[i] = replaceAggWithColRef(a, target, colName)
+		}
+		return &plansql.FuncCallNode{Name: n.Name, Args: newArgs, Distinct: n.Distinct, Star: n.Star}
+	case *plansql.BinaryOp:
+		return &plansql.BinaryOp{
+			Left:  replaceAggWithColRef(n.Left, target, colName),
+			Op:    n.Op,
+			Right: replaceAggWithColRef(n.Right, target, colName),
+		}
+	case *plansql.ParenNode:
+		return &plansql.ParenNode{Inner: replaceAggWithColRef(n.Inner, target, colName)}
+	case *plansql.CastNode:
+		return &plansql.CastNode{Inner: replaceAggWithColRef(n.Inner, target, colName), TypeName: n.TypeName}
+	default:
+		return node
+	}
+}
+
 func isSimpleColRef(node plansql.Node) bool {
 	switch node.(type) {
 	case *plansql.ColRef:
@@ -1720,7 +1800,7 @@ func rowHashKey(row map[string]any) string {
 	return b.String()
 }
 
-func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter map[string]string) exec.Source {
+func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter map[string]string, requiredCols []string) exec.Source {
 	// Get table schema
 	tableMeta, err := p.catalog.GetTable(ctx, tableName)
 	if err != nil {
@@ -1733,6 +1813,7 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 		catalog:         p.catalog,
 		tableName:       tableName,
 		partitionFilter: partFilter,
+		requiredCols:    requiredCols,
 	}
 }
 
@@ -1741,12 +1822,13 @@ type catalogScanSource struct {
 	catalog         *catalog.Catalog
 	tableName       string
 	partitionFilter map[string]string
+	requiredCols    []string
 	inner           exec.Source
 }
 
 func (s *catalogScanSource) Init(ctx context.Context) error {
 	// Use the scan package scanner
-	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter)
+	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, s.requiredCols)
 	s.inner = sc
 	return s.inner.Init(ctx)
 }
@@ -2268,11 +2350,12 @@ func (w *windowSourceAdapter) Close() error {
 }
 
 // newScannerSource creates a scanner exec.Source from the catalog
-func newScannerSource(cat *catalog.Catalog, tableName string, partFilter map[string]string) exec.Source {
+func newScannerSource(cat *catalog.Catalog, tableName string, partFilter map[string]string, requiredCols []string) exec.Source {
 	return &scannerExecSource{
 		catalog:         cat,
 		tableName:       tableName,
 		partitionFilter: partFilter,
+		requiredCols:    requiredCols,
 	}
 }
 
@@ -2280,6 +2363,7 @@ type scannerExecSource struct {
 	catalog         *catalog.Catalog
 	tableName       string
 	partitionFilter map[string]string
+	requiredCols    []string
 	scanner         *scanSourceInner
 }
 
@@ -2289,6 +2373,7 @@ type scanSourceInner struct {
 	files        []catalog.FileEntry
 	idx          int
 	schema       []parquet.Column
+	requiredCols []string
 	rowsScanned  int64
 }
 
@@ -2314,10 +2399,11 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	}
 
 	s.scanner = &scanSourceInner{
-		cat:       s.catalog,
-		tableName: s.tableName,
-		files:     files,
-		schema:    tableMeta.Schema.Columns,
+		cat:          s.catalog,
+		tableName:    s.tableName,
+		files:        files,
+		schema:       tableMeta.Schema.Columns,
+		requiredCols: s.requiredCols,
 	}
 	return nil
 }
@@ -2370,13 +2456,13 @@ func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, err
 			continue
 		}
 
-		rows, err := reader.ReadRows(nil)
-		if err != nil || len(rows) == 0 {
+		b := readBatchDirect(reader, inner.schema, inner.requiredCols)
+		if b == nil || b.Len == 0 {
 			continue
 		}
 
-		inner.rowsScanned += int64(len(rows))
-		return fromRows(inner.schema, rows), nil
+		inner.rowsScanned += int64(b.Len)
+		return b, nil
 	}
 	return nil, nil
 }

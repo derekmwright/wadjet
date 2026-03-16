@@ -19,7 +19,189 @@ func Optimize(plan *Node) *Node {
 	plan = pushdownPredicates(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
+	computeRequiredColumns(plan)
 	return plan
+}
+
+// computeRequiredColumns walks the plan tree top-down, collecting column
+// references from each operator and propagating them to scan nodes. Each
+// scan's RequiredColumns is set to the accumulated set of columns referenced
+// by its ancestors. This allows the physical planner to read only needed
+// columns from storage.
+func computeRequiredColumns(n *Node) {
+	pushColumnNeeds(n, nil)
+}
+
+// pushColumnNeeds recursively pushes the set of needed columns from parent
+// nodes down to scan nodes. At each level, it adds columns referenced by
+// the current node and passes the accumulated set to children.
+func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
+	if n == nil {
+		return
+	}
+
+	// Merge parent needs with this node's own column references
+	needs := make(map[string]bool, len(parentNeeds)+8)
+	for col := range parentNeeds {
+		needs[col] = true
+	}
+	collectNodeColumnRefs(n, needs)
+
+	if n.Type == NodeScan {
+		if len(needs) > 0 {
+			cols := make([]string, 0, len(needs))
+			for col := range needs {
+				cols = append(cols, col)
+			}
+			n.RequiredColumns = cols
+		}
+		return
+	}
+
+	for _, child := range n.Children {
+		pushColumnNeeds(child, needs)
+	}
+}
+
+// collectNodeColumnRefs adds column names referenced by a node's metadata
+// (predicates, projections, join conditions, aggregates, etc.) to the set.
+func collectNodeColumnRefs(n *Node, refs map[string]bool) {
+	switch n.Type {
+	case NodeFilter:
+		for _, pred := range n.Predicates {
+			if pred.ASTExpr != nil {
+				collectASTColumnRefs(pred.ASTExpr, refs)
+			} else if pred.Column != "" {
+				refs[strings.ToLower(pred.Column)] = true
+			}
+		}
+	case NodeProject:
+		for _, proj := range n.Projections {
+			if proj.ASTExpr != nil {
+				collectASTColumnRefs(proj.ASTExpr, refs)
+			}
+			if proj.Column != "" {
+				refs[strings.ToLower(proj.Column)] = true
+			}
+		}
+	case NodeAggregate:
+		for _, gb := range n.GroupBy {
+			refs[strings.ToLower(gb)] = true
+		}
+		for _, agg := range n.AggExprs {
+			if agg.InputCol != "" && agg.InputCol != "*" {
+				refs[strings.ToLower(agg.InputCol)] = true
+			}
+			if agg.InputExpr != nil {
+				collectASTColumnRefs(agg.InputExpr, refs)
+			}
+		}
+	case NodeJoin:
+		if n.JoinCond != "" {
+			extractJoinColumnRefs(n.JoinCond, refs)
+		}
+		if n.JoinFilter != "" {
+			extractJoinColumnRefs(n.JoinFilter, refs)
+		}
+	case NodeSort:
+		for _, ob := range n.OrderBy {
+			refs[strings.ToLower(ob.Column)] = true
+		}
+	case NodeWindow:
+		for _, w := range n.WindowExprs {
+			if w.InputCol != "" {
+				refs[strings.ToLower(w.InputCol)] = true
+			}
+			for _, pb := range w.PartitionBy {
+				refs[strings.ToLower(pb)] = true
+			}
+			for _, ob := range w.OrderBy {
+				refs[strings.ToLower(ob.Column)] = true
+			}
+		}
+	}
+}
+
+// collectASTColumnRefs walks an AST expression and adds all column references to the set.
+func collectASTColumnRefs(node plansql.Node, refs map[string]bool) {
+	if node == nil {
+		return
+	}
+	switch n := node.(type) {
+	case *plansql.ColRef:
+		refs[strings.ToLower(n.Column)] = true
+	case *plansql.CmpExpr:
+		collectASTColumnRefs(n.Left, refs)
+		collectASTColumnRefs(n.Right, refs)
+	case *plansql.AndNode:
+		collectASTColumnRefs(n.Left, refs)
+		collectASTColumnRefs(n.Right, refs)
+	case *plansql.OrNode:
+		collectASTColumnRefs(n.Left, refs)
+		collectASTColumnRefs(n.Right, refs)
+	case *plansql.BinaryOp:
+		collectASTColumnRefs(n.Left, refs)
+		collectASTColumnRefs(n.Right, refs)
+	case *plansql.UnaryOp:
+		collectASTColumnRefs(n.Inner, refs)
+	case *plansql.NotNode:
+		collectASTColumnRefs(n.Inner, refs)
+	case *plansql.ParenNode:
+		collectASTColumnRefs(n.Inner, refs)
+	case *plansql.FuncCallNode:
+		for _, arg := range n.Args {
+			collectASTColumnRefs(arg, refs)
+		}
+	case *plansql.CastNode:
+		collectASTColumnRefs(n.Inner, refs)
+	case *plansql.InExpr:
+		collectASTColumnRefs(n.Left, refs)
+		for _, v := range n.Values {
+			collectASTColumnRefs(v, refs)
+		}
+	case *plansql.BetweenExpr:
+		collectASTColumnRefs(n.Left, refs)
+		collectASTColumnRefs(n.Low, refs)
+		collectASTColumnRefs(n.High, refs)
+	case *plansql.LikeExpr:
+		collectASTColumnRefs(n.Left, refs)
+		collectASTColumnRefs(n.Pattern, refs)
+	case *plansql.IsExpr:
+		collectASTColumnRefs(n.Left, refs)
+	case *plansql.CaseNode:
+		if n.Subject != nil {
+			collectASTColumnRefs(n.Subject, refs)
+		}
+		for _, w := range n.Whens {
+			collectASTColumnRefs(w.Cond, refs)
+			collectASTColumnRefs(w.Result, refs)
+		}
+		if n.Else != nil {
+			collectASTColumnRefs(n.Else, refs)
+		}
+	}
+}
+
+// extractJoinColumnRefs parses a join condition string (e.g. "a = b AND c = d")
+// and adds column references to the set.
+func extractJoinColumnRefs(cond string, refs map[string]bool) {
+	parts := strings.Split(strings.ToLower(cond), " and ")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		eqParts := strings.SplitN(part, "=", 2)
+		if len(eqParts) != 2 {
+			continue
+		}
+		for _, side := range eqParts {
+			col := strings.TrimSpace(side)
+			if dotParts := strings.SplitN(col, ".", 2); len(dotParts) == 2 {
+				col = dotParts[1]
+			}
+			if col != "" {
+				refs[col] = true
+			}
+		}
+	}
 }
 
 // decorrelateScalarSubqueries converts correlated scalar subqueries in Filter

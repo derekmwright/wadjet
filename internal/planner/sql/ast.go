@@ -476,7 +476,19 @@ func ReplaceAggregate(node Node, aggName string) Node {
 		if IsAggregate(n.Name) {
 			return &ColRef{Column: aggName}
 		}
-		return node
+		// Recurse into arguments of non-aggregate functions
+		newArgs := make([]Node, len(n.Args))
+		changed := false
+		for i, arg := range n.Args {
+			newArgs[i] = ReplaceAggregate(arg, aggName)
+			if newArgs[i] != arg {
+				changed = true
+			}
+		}
+		if !changed {
+			return node
+		}
+		return &FuncCallNode{Name: n.Name, Args: newArgs, Distinct: n.Distinct, Star: n.Star}
 	case *BinaryOp:
 		return &BinaryOp{
 			Left:  ReplaceAggregate(n.Left, aggName),

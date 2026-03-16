@@ -100,8 +100,17 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 }
 
 // ReadRows reads all rows from the Parquet file, optionally selecting only specific columns.
+// When selectedColumns is non-empty, true column projection is used at the parquet level
+// so that only the requested columns are decoded from disk.
 func (r *Reader) ReadRows(selectedColumns []string) ([]map[string]any, error) {
-	pr := goparquet.NewReader(r.file)
+	var opts []goparquet.ReaderOption
+	if len(selectedColumns) > 0 {
+		if projected := r.buildProjectedSchema(selectedColumns); projected != nil {
+			opts = append(opts, projected)
+		}
+	}
+
+	pr := goparquet.NewReader(r.file, opts...)
 	defer pr.Close()
 
 	numRows := pr.NumRows()
@@ -118,23 +127,32 @@ func (r *Reader) ReadRows(selectedColumns []string) ([]map[string]any, error) {
 		rows = append(rows, row)
 	}
 
-	if len(selectedColumns) > 0 {
-		selected := make(map[string]bool, len(selectedColumns))
-		for _, c := range selectedColumns {
-			selected[c] = true
-		}
-		for i, row := range rows {
-			filtered := make(map[string]any, len(selectedColumns))
-			for k, v := range row {
-				if selected[k] {
-					filtered[k] = v
-				}
-			}
-			rows[i] = filtered
+	return rows, nil
+}
+
+// buildProjectedSchema creates a parquet schema containing only the requested columns.
+// Returns nil if projection cannot be built (falls back to reading all columns).
+func (r *Reader) buildProjectedSchema(selectedColumns []string) *goparquet.Schema {
+	fileSchema := r.file.Schema()
+	fields := fileSchema.Fields()
+
+	needed := make(map[string]bool, len(selectedColumns))
+	for _, c := range selectedColumns {
+		needed[c] = true
+	}
+
+	group := make(goparquet.Group)
+	for _, f := range fields {
+		if needed[f.Name()] {
+			group[f.Name()] = f
 		}
 	}
 
-	return rows, nil
+	if len(group) == 0 {
+		return nil
+	}
+
+	return goparquet.NewSchema(fileSchema.Name(), group)
 }
 
 // ReadRowGroup reads all rows from a specific row group.
@@ -145,7 +163,14 @@ func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string
 	}
 
 	rg := rgs[index]
-	pr := goparquet.NewRowGroupReader(rg)
+	var opts []goparquet.ReaderOption
+	if len(selectedColumns) > 0 {
+		if projected := r.buildProjectedSchema(selectedColumns); projected != nil {
+			opts = append(opts, projected)
+		}
+	}
+
+	pr := goparquet.NewRowGroupReader(rg, opts...)
 	defer pr.Close()
 
 	numRows := rg.NumRows()
@@ -160,22 +185,6 @@ func (r *Reader) ReadRowGroup(index int, selectedColumns []string) ([]map[string
 			return nil, fmt.Errorf("reading row group: %w", err)
 		}
 		rows = append(rows, row)
-	}
-
-	if len(selectedColumns) > 0 {
-		selected := make(map[string]bool, len(selectedColumns))
-		for _, c := range selectedColumns {
-			selected[c] = true
-		}
-		for i, row := range rows {
-			filtered := make(map[string]any, len(selectedColumns))
-			for k, v := range row {
-				if selected[k] {
-					filtered[k] = v
-				}
-			}
-			rows[i] = filtered
-		}
 	}
 
 	return rows, nil
