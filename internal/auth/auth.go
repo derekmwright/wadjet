@@ -23,11 +23,12 @@ var (
 
 // Identity represents an authenticated caller.
 type Identity struct {
-	Name   string   // human-readable label (e.g. "grafana-prod", "alice@example.com")
-	Role   string   // resolved role name
-	Method string   // how they authenticated: "apikey", "jwt", "mtls"
-	Tables []string // allowed tables from role (["*"] = all)
-	Perms  []string // allowed permissions from role
+	Name       string     // human-readable label (e.g. "grafana-prod", "alice@example.com")
+	Role       string     // resolved role name
+	Method     string     // how they authenticated: "apikey", "jwt", "mtls"
+	Tables     []string   // allowed tables from role (["*"] = all)
+	Perms      []string   // allowed permissions from role
+	Attributes Attributes // extended attributes for ABAC (from JWT claims, mTLS cert, config)
 }
 
 // Authenticator verifies caller identity from HTTP requests.
@@ -56,9 +57,10 @@ type Config struct {
 
 // APIKeyDef defines an API key in configuration.
 type APIKeyDef struct {
-	Key  string `yaml:"key"`  // the bearer token value
-	Name string `yaml:"name"` // human label
-	Role string `yaml:"role"` // role name reference
+	Key        string            `yaml:"key"`        // the bearer token value
+	Name       string            `yaml:"name"`       // human label
+	Role       string            `yaml:"role"`       // role name reference
+	Attributes map[string]string `yaml:"attributes"` // optional ABAC attributes
 }
 
 // RoleConfig defines a role in configuration.
@@ -87,10 +89,15 @@ func New(cfg Config) (*Authenticator, *Authorizer) {
 	// Build API key lookup
 	for _, ak := range cfg.APIKeys {
 		role := roles[ak.Role]
+		attrs := make(Attributes, len(ak.Attributes))
+		for k, v := range ak.Attributes {
+			attrs[k] = v
+		}
 		id := &Identity{
-			Name:   ak.Name,
-			Role:   ak.Role,
-			Method: "apikey",
+			Name:       ak.Name,
+			Role:       ak.Role,
+			Method:     "apikey",
+			Attributes: attrs,
 		}
 		if role != nil {
 			id.Tables = role.Tables
@@ -153,6 +160,24 @@ func (a *Authenticator) Authenticate(r *http.Request) (*Identity, error) {
 		}
 	}
 
+	return nil, ErrUnauthorized
+}
+
+// AuthenticateToken verifies identity from a raw bearer token (API key or JWT).
+// Used by non-HTTP frontends (pgwire, gRPC) where there is no http.Request.
+func (a *Authenticator) AuthenticateToken(token string) (*Identity, error) {
+	if token == "" {
+		return nil, ErrNoCredentials
+	}
+	if id := a.lookupAPIKey(token); id != nil {
+		return id, nil
+	}
+	if a.jwt != nil {
+		id, err := a.jwt.Verify(token)
+		if err == nil {
+			return id, nil
+		}
+	}
 	return nil, ErrUnauthorized
 }
 

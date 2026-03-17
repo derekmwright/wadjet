@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/wadjet"
 	"golang.org/x/net/netutil"
 )
@@ -22,20 +23,22 @@ import (
 // Server listens for PostgreSQL wire protocol connections and dispatches
 // queries to a Wadjet DB instance.
 type Server struct {
-	db        *wadjet.DB
-	listener  net.Listener
-	logger    *slog.Logger
-	wg        sync.WaitGroup
-	done      chan struct{}
-	tlsConfig *tls.Config
-	maxConns  int
+	db           *wadjet.DB
+	listener     net.Listener
+	logger       *slog.Logger
+	wg           sync.WaitGroup
+	done         chan struct{}
+	tlsConfig    *tls.Config
+	maxConns     int
+	authProvider *auth.Provider // nil = no auth enforcement
 }
 
 // Config holds configuration for the pgwire server.
 type Config struct {
-	Addr           string     // listen address, e.g. ":5433"
-	TLSConfig      *tls.Config // nil = plain TCP
-	MaxConnections int         // 0 = unlimited
+	Addr           string         // listen address, e.g. ":5433"
+	TLSConfig      *tls.Config    // nil = plain TCP
+	MaxConnections int            // 0 = unlimited
+	AuthProvider   *auth.Provider // nil = no auth enforcement
 }
 
 // NewServer creates a new PostgreSQL wire protocol server.
@@ -44,11 +47,12 @@ func NewServer(db *wadjet.DB, cfg Config, logger *slog.Logger) *Server {
 		logger = slog.Default()
 	}
 	return &Server{
-		db:        db,
-		logger:    logger,
-		done:      make(chan struct{}),
-		tlsConfig: cfg.TLSConfig,
-		maxConns:  cfg.MaxConnections,
+		db:           db,
+		logger:       logger,
+		done:         make(chan struct{}),
+		tlsConfig:    cfg.TLSConfig,
+		maxConns:     cfg.MaxConnections,
+		authProvider: cfg.AuthProvider,
 	}
 }
 
@@ -121,12 +125,13 @@ func (s *Server) acceptLoop() {
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	c := &pgConn{
-		conn:    conn,
-		db:      s.db,
-		logger:  s.logger,
-		buf:     make([]byte, 0, 4096),
-		stmts:   make(map[string]string),
-		txState: 'I',
+		conn:         conn,
+		db:           s.db,
+		logger:       s.logger,
+		buf:          make([]byte, 0, 4096),
+		stmts:        make(map[string]string),
+		txState:      'I',
+		authProvider: s.authProvider,
 	}
 	c.run()
 }
@@ -137,6 +142,10 @@ type pgConn struct {
 	db     *wadjet.DB
 	logger *slog.Logger
 	buf    []byte
+
+	// Authentication
+	authProvider *auth.Provider  // nil = no auth
+	identity     *auth.Identity  // set after successful auth
 
 	// Extended Query protocol state
 	preparedSQL     string            // last parsed statement SQL
@@ -231,9 +240,13 @@ func (c *pgConn) handleStartup() error {
 	}
 
 	// Parse startup parameters (key=value pairs, null-terminated)
-	// We don't enforce authentication — just accept.
 	params := parseStartupParams(payload[4:])
-	_ = params // could log database, user, etc.
+
+	// Authenticate if auth is enabled
+	if err := c.authenticate(params); err != nil {
+		c.sendError("FATAL", "28P01", fmt.Sprintf("authentication failed: %v", err))
+		return err
+	}
 
 	// Send AuthenticationOk
 	c.sendAuthOk()
@@ -247,7 +260,11 @@ func (c *pgConn) handleStartup() error {
 	c.sendParamStatus("standard_conforming_strings", "on")
 	c.sendParamStatus("TimeZone", "UTC")
 	c.sendParamStatus("IntervalStyle", "postgres")
-	c.sendParamStatus("is_superuser", "on")
+	if c.identity != nil && c.identity.Role != "admin" {
+		c.sendParamStatus("is_superuser", "off")
+	} else {
+		c.sendParamStatus("is_superuser", "on")
+	}
 
 	// Send BackendKeyData (process ID + secret key for cancellation)
 	c.sendBackendKeyData(0, 0)
@@ -256,6 +273,60 @@ func (c *pgConn) handleStartup() error {
 	c.sendReadyForQuery()
 
 	return nil
+}
+
+// authenticate performs PostgreSQL cleartext password authentication.
+// When auth is disabled (no provider), all connections are accepted.
+// When enabled, sends AuthenticationCleartextPassword, reads the password
+// response, and resolves identity via API key or JWT token.
+func (c *pgConn) authenticate(params map[string]string) error {
+	// No auth provider or auth disabled — accept all connections
+	if c.authProvider == nil || !c.authProvider.Enabled() {
+		return nil
+	}
+
+	authn := c.authProvider.Authenticator()
+	if authn == nil {
+		return nil
+	}
+
+	// Request cleartext password: 'R' + int32(8) + int32(3)
+	c.conn.Write([]byte{'R', 0, 0, 0, 8, 0, 0, 0, 3})
+
+	// Read PasswordMessage ('p')
+	msgType, payload, err := c.readMessage()
+	if err != nil {
+		return fmt.Errorf("reading password: %w", err)
+	}
+	if msgType != 'p' {
+		return fmt.Errorf("expected PasswordMessage, got '%c'", msgType)
+	}
+
+	token := readCString(payload)
+	if token == "" {
+		return auth.ErrNoCredentials
+	}
+
+	id, err := authn.AuthenticateToken(token)
+	if err != nil {
+		return err
+	}
+
+	c.identity = id
+	c.logger.Debug("pgwire authenticated",
+		"identity", id.String(),
+		"user", params["user"],
+	)
+	return nil
+}
+
+// queryContext returns a context enriched with the connection's identity.
+func (c *pgConn) queryContext() context.Context {
+	ctx := context.Background()
+	if c.identity != nil {
+		ctx = auth.ContextWithIdentity(ctx, c.identity)
+	}
+	return ctx
 }
 
 func (c *pgConn) handleQuery(sql string) {
@@ -315,7 +386,7 @@ func (c *pgConn) handleQuery(sql string) {
 	if strings.HasPrefix(upper, "INSERT ") ||
 		strings.HasPrefix(upper, "UPDATE ") ||
 		strings.HasPrefix(upper, "DELETE ") {
-		ctx := context.Background()
+		ctx := c.queryContext()
 		result, err := c.db.Execute(ctx, sql)
 		if err != nil {
 			c.sendError("ERROR", "42000", err.Error())
@@ -327,7 +398,7 @@ func (c *pgConn) handleQuery(sql string) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.queryContext()
 	result, err := c.db.Query(ctx, sql)
 	if err != nil {
 		c.sendError("ERROR", "42000", err.Error())
@@ -503,7 +574,7 @@ func (c *pgConn) describeSQL(sql string) {
 	}
 
 	// Execute the real query to get typed column metadata
-	ctx := context.Background()
+	ctx := c.queryContext()
 	result, err := c.db.Query(ctx, sql)
 	if err != nil {
 		// Can't describe — send NoData rather than error (the error
@@ -569,7 +640,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 		return
 	}
 
-	ctx := context.Background()
+	ctx := c.queryContext()
 	result, err := c.db.Query(ctx, sql)
 	if err != nil {
 		c.sendError("ERROR", "42000", err.Error())
@@ -696,8 +767,12 @@ func (c *pgConn) handleSyntheticSelect(sql, upper string) bool {
 
 	// current_user / session_user
 	if strings.Contains(upper, "CURRENT_USER") || strings.Contains(upper, "SESSION_USER") {
+		user := "wadjet"
+		if c.identity != nil {
+			user = c.identity.Name
+		}
 		c.sendSingleRow([]string{"current_user"}, map[string]any{
-			"current_user": "wadjet",
+			"current_user": user,
 		})
 		return true
 	}

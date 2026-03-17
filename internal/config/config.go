@@ -43,12 +43,13 @@ type QueryLimits struct {
 
 // Auth configures authentication and authorization.
 type Auth struct {
-	Enabled  bool              `yaml:"enabled"`
-	APIKeys  []AuthAPIKey      `yaml:"api_keys"`
-	JWT      AuthJWT           `yaml:"jwt"`
-	MTLS     AuthMTLS          `yaml:"mtls"`
-	Roles    []AuthRole        `yaml:"roles"`
-	Policies []AuthPolicy      `yaml:"policies"` // cell-level access policies
+	Enabled      bool              `yaml:"enabled"`
+	APIKeys      []AuthAPIKey      `yaml:"api_keys"`
+	JWT          AuthJWT           `yaml:"jwt"`
+	MTLS         AuthMTLS          `yaml:"mtls"`
+	Roles        []AuthRole        `yaml:"roles"`
+	Policies     []AuthPolicy      `yaml:"policies"`      // cell-level access policies (legacy)
+	ABACPolicies []ABACPolicy      `yaml:"abac_policies"` // ABAC access control policies
 }
 
 // AuthAPIKey defines an API key credential.
@@ -91,6 +92,36 @@ type AuthPolicy struct {
 	Role      string            `yaml:"role"`
 	Columns   map[string]string `yaml:"columns"`    // column -> "allow", "mask", "deny"
 	RowFilter string            `yaml:"row_filter"` // SQL WHERE predicate
+}
+
+// ABACPolicy defines an attribute-based access control policy in config.
+type ABACPolicy struct {
+	Name        string         `yaml:"name"`
+	Description string         `yaml:"description"`
+	Priority    int            `yaml:"priority"`  // lower = evaluated first
+	Enabled     *bool          `yaml:"enabled"`   // nil = true
+	Rules       []ABACRule     `yaml:"rules"`
+}
+
+// ABACRule defines a single rule within an ABAC policy.
+type ABACRule struct {
+	Effect      string            `yaml:"effect"`      // "allow" or "deny"
+	Conditions  []ABACCondition   `yaml:"conditions"`
+	Obligations []ABACObligation  `yaml:"obligations"` // only for "allow" rules
+}
+
+// ABACCondition defines a condition that must match for the rule to apply.
+type ABACCondition struct {
+	Attribute string `yaml:"attribute"` // e.g. "subject.role", "resource.name", "env.source_ip"
+	Operator  string `yaml:"operator"`  // eq, neq, in, not_in, gt, lt, gte, lte, contains, regex, exists, not_exists
+	Value     string `yaml:"value"`     // single value or comma-separated for "in"/"not_in"
+}
+
+// ABACObligation defines a side-effect obligation on an allow rule.
+type ABACObligation struct {
+	Type   string `yaml:"type"`   // row_filter, mask_column, deny_column, query_limit
+	Target string `yaml:"target"` // column name or table name
+	Value  string `yaml:"value"`  // filter expression, mask function, limit value
 }
 
 // Storage configures the object store connection.

@@ -168,12 +168,19 @@ func (v *JWTVerifier) Verify(tokenStr string) (*Identity, error) {
 		name = claims.Sub
 	}
 
+	// Build attributes from all JWT claims for ABAC evaluation
+	attrs := make(Attributes, len(claims.Extras))
+	for k, val := range claims.Extras {
+		attrs[k] = val
+	}
+
 	return &Identity{
-		Name:   name,
-		Role:   roleName,
-		Method: "jwt",
-		Tables: role.Tables,
-		Perms:  role.Perms,
+		Name:       name,
+		Role:       roleName,
+		Method:     "jwt",
+		Tables:     role.Tables,
+		Perms:      role.Perms,
+		Attributes: attrs,
 	}, nil
 }
 

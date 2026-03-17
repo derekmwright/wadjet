@@ -55,6 +55,9 @@ type Task struct {
 	IdentityName string `json:"identity_name,omitempty"`
 	IdentityRole string `json:"identity_role,omitempty"`
 
+	// ABAC pre-evaluated policy decisions (serialized for worker enforcement)
+	PolicyDecisionJSON json.RawMessage `json:"policy_decision,omitempty"`
+
 	// Result destination
 	ResultBucket string `json:"result_bucket"`
 	ResultPrefix string `json:"result_prefix"`

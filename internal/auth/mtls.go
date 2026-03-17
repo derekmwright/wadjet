@@ -78,12 +78,33 @@ func (v *MTLSVerifier) Verify(cert *x509.Certificate) (*Identity, error) {
 		name = cert.DNSNames[0]
 	}
 
+	// Build attributes from cert fields for ABAC evaluation
+	attrs := Attributes{
+		"cn": cert.Subject.CommonName,
+	}
+	if len(cert.Subject.Organization) > 0 {
+		attrs["org"] = cert.Subject.Organization[0]
+	}
+	if len(cert.Subject.OrganizationalUnit) > 0 {
+		attrs["ou"] = cert.Subject.OrganizationalUnit[0]
+	}
+	if len(cert.DNSNames) > 0 {
+		attrs["san_dns"] = cert.DNSNames
+	}
+	if len(cert.EmailAddresses) > 0 {
+		attrs["san_email"] = cert.EmailAddresses
+	}
+	if cert.Issuer.CommonName != "" {
+		attrs["issuer"] = cert.Issuer.CommonName
+	}
+
 	return &Identity{
-		Name:   name,
-		Role:   roleName,
-		Method: "mtls",
-		Tables: role.Tables,
-		Perms:  role.Perms,
+		Name:       name,
+		Role:       roleName,
+		Method:     "mtls",
+		Tables:     role.Tables,
+		Perms:      role.Perms,
+		Attributes: attrs,
 	}, nil
 }
 

@@ -19,10 +19,12 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	wadjetv1 "github.com/citc-tech/wadjet/gen/wadjet/v1"
-	wadjetdb "github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/coordinator"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	wadjetdb "github.com/citc-tech/wadjet/wadjet"
+	"google.golang.org/grpc/metadata"
 )
 
 const streamBatchSize = 1000
@@ -35,20 +37,22 @@ type GRPCConfig struct {
 	DB             *wadjetdb.DB             // nil = distributed
 	TLSConfig      *tls.Config              // nil = plain gRPC
 	MaxConnections int                      // 0 = unlimited
+	AuthProvider   *auth.Provider           // nil = no auth enforcement
 }
 
 // GRPCServer implements the WadjetService gRPC API.
 type GRPCServer struct {
 	wadjetv1.UnimplementedWadjetServiceServer
 
-	catalog   *catalog.Catalog
-	coord     *coordinator.Coordinator
-	db        *wadjetdb.DB
-	logger    *slog.Logger
-	server    *grpc.Server
-	addr      string
-	tlsConfig *tls.Config
-	maxConns  int
+	catalog      *catalog.Catalog
+	coord        *coordinator.Coordinator
+	db           *wadjetdb.DB
+	logger       *slog.Logger
+	server       *grpc.Server
+	addr         string
+	tlsConfig    *tls.Config
+	maxConns     int
+	authProvider *auth.Provider
 }
 
 // NewGRPCServer creates a new gRPC server.
@@ -57,13 +61,14 @@ func NewGRPCServer(cfg GRPCConfig, logger *slog.Logger) *GRPCServer {
 		logger = slog.Default()
 	}
 	return &GRPCServer{
-		catalog:   cfg.Catalog,
-		coord:     cfg.Coord,
-		db:        cfg.DB,
-		logger:    logger,
-		addr:      cfg.Addr,
-		tlsConfig: cfg.TLSConfig,
-		maxConns:  cfg.MaxConnections,
+		catalog:      cfg.Catalog,
+		coord:        cfg.Coord,
+		db:           cfg.DB,
+		logger:       logger,
+		addr:         cfg.Addr,
+		tlsConfig:    cfg.TLSConfig,
+		maxConns:     cfg.MaxConnections,
+		authProvider: cfg.AuthProvider,
 	}
 }
 
@@ -82,6 +87,12 @@ func (g *GRPCServer) Start() error {
 	opts = append(opts, grpc.MaxConcurrentStreams(256))
 	if g.tlsConfig != nil {
 		opts = append(opts, grpc.Creds(credentials.NewTLS(g.tlsConfig)))
+	}
+	if g.authProvider != nil {
+		opts = append(opts,
+			grpc.UnaryInterceptor(g.unaryAuthInterceptor()),
+			grpc.StreamInterceptor(g.streamAuthInterceptor()),
+		)
 	}
 
 	g.server = grpc.NewServer(opts...)
@@ -374,6 +385,76 @@ func (g *GRPCServer) DropTable(ctx context.Context, req *wadjetv1.DropTableReque
 
 	return &wadjetv1.DropTableResponse{Name: req.Name}, nil
 }
+
+// grpcAuthenticateContext extracts a bearer token from gRPC metadata,
+// authenticates it, and returns a context with the resolved identity.
+// Health check RPCs bypass authentication.
+func (g *GRPCServer) grpcAuthenticateContext(ctx context.Context, fullMethod string) (context.Context, error) {
+	// Health checks bypass auth
+	if strings.HasPrefix(fullMethod, "/grpc.health.v1.Health/") {
+		return ctx, nil
+	}
+
+	if !g.authProvider.Enabled() {
+		return ctx, nil
+	}
+	authn := g.authProvider.Authenticator()
+	if authn == nil {
+		return ctx, nil
+	}
+
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return nil, status.Error(codes.Unauthenticated, "missing metadata")
+	}
+
+	var token string
+	if vals := md.Get("authorization"); len(vals) > 0 {
+		v := vals[0]
+		if len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
+			token = v[7:]
+		} else {
+			token = v
+		}
+	}
+
+	id, err := authn.AuthenticateToken(token)
+	if err != nil {
+		return nil, status.Error(codes.Unauthenticated, err.Error())
+	}
+
+	g.logger.Debug("gRPC authenticated", "identity", id.String(), "method", fullMethod)
+	return auth.ContextWithIdentity(ctx, id), nil
+}
+
+func (g *GRPCServer) unaryAuthInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		newCtx, err := g.grpcAuthenticateContext(ctx, info.FullMethod)
+		if err != nil {
+			return nil, err
+		}
+		return handler(newCtx, req)
+	}
+}
+
+func (g *GRPCServer) streamAuthInterceptor() grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		newCtx, err := g.grpcAuthenticateContext(ss.Context(), info.FullMethod)
+		if err != nil {
+			return err
+		}
+		wrapped := &authServerStream{ServerStream: ss, ctx: newCtx}
+		return handler(srv, wrapped)
+	}
+}
+
+// authServerStream wraps a grpc.ServerStream to override the context.
+type authServerStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *authServerStream) Context() context.Context { return s.ctx }
 
 // rowsToProto converts Go row maps to protobuf Row messages.
 func rowsToProto(rows []map[string]any) []*wadjetv1.Row {

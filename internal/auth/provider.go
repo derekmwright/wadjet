@@ -7,15 +7,15 @@ import (
 
 // authState holds an immutable snapshot of auth components.
 type authState struct {
-	authn    *Authenticator
-	authz    *Authorizer
-	policies *PolicySet
-	enabled  bool
+	authn     *Authenticator
+	authz     *Authorizer
+	policies  *PolicySet
+	evaluator *PolicyEvaluator
+	enabled   bool
 }
 
-// Provider wraps Authenticator, Authorizer, and PolicySet behind an atomic
-// pointer so they can be swapped on config reload without locks on the read path.
-// Every HTTP request reads the current state via a single atomic load.
+// Provider wraps Authenticator, Authorizer, PolicySet, and PolicyEvaluator behind
+// an atomic pointer so they can be swapped on config reload without locks.
 type Provider struct {
 	state  atomic.Pointer[authState]
 	logger *slog.Logger
@@ -53,6 +53,11 @@ func (p *Provider) Policies() *PolicySet {
 	return p.state.Load().policies
 }
 
+// Evaluator returns the current ABAC PolicyEvaluator. Lock-free.
+func (p *Provider) Evaluator() *PolicyEvaluator {
+	return p.state.Load().evaluator
+}
+
 // Enabled returns whether authentication is currently active. Lock-free.
 func (p *Provider) Enabled() bool {
 	return p.state.Load().enabled
@@ -70,12 +75,37 @@ func (p *Provider) Update(authn *Authenticator, authz *Authorizer, policies *Pol
 	p.logger.Info("auth provider updated", "enabled", enabled)
 }
 
+// UpdateWithEvaluator atomically replaces all auth components including the ABAC evaluator.
+func (p *Provider) UpdateWithEvaluator(authn *Authenticator, authz *Authorizer, policies *PolicySet, evaluator *PolicyEvaluator) {
+	enabled := authn != nil && authn.Enabled()
+	p.state.Store(&authState{
+		authn:     authn,
+		authz:     authz,
+		policies:  policies,
+		evaluator: evaluator,
+		enabled:   enabled,
+	})
+	p.logger.Info("auth provider updated", "enabled", enabled, "abac", evaluator != nil)
+}
+
 // UpdateFromConfig rebuilds auth from a Config and atomically swaps.
-func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig) {
+// If abacPolicies is non-empty, builds an ABAC evaluator. Otherwise, if RBAC
+// roles and cell policies are present, auto-migrates them to ABAC.
+func (p *Provider) UpdateFromConfig(cfg Config, policyCfgs []PolicyConfig, abacPolicies ...AccessControlPolicy) {
 	authn, authz := New(cfg)
-	var policies *PolicySet
+	var legacyPolicies *PolicySet
 	if len(policyCfgs) > 0 {
-		policies = ParsePolicies(policyCfgs)
+		legacyPolicies = ParsePolicies(policyCfgs)
 	}
-	p.Update(authn, authz, policies)
+
+	var evaluator *PolicyEvaluator
+	if len(abacPolicies) > 0 {
+		evaluator = NewPolicyEvaluator(abacPolicies)
+	} else if len(cfg.Roles) > 0 {
+		// Auto-migrate RBAC to ABAC
+		migrated := MigrateRBACToABAC(cfg.Roles, policyCfgs)
+		evaluator = NewPolicyEvaluator(migrated)
+	}
+
+	p.UpdateWithEvaluator(authn, authz, legacyPolicies, evaluator)
 }

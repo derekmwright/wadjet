@@ -9,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
 )
 
 func setupTestDB(t *testing.T) *wadjet.DB {
@@ -732,6 +733,205 @@ func TestPGWireInfoSchemaTables(t *testing.T) {
 		t.Logf("Note: 'users' table may be in a different column position")
 	}
 
+	client.terminate()
+}
+
+// startTestServerWithAuth creates a pgwire server backed by an auth provider.
+func startTestServerWithAuth(t *testing.T, db *wadjet.DB, provider *auth.Provider) *Server {
+	t.Helper()
+	srv := NewServer(db, Config{AuthProvider: provider}, nil)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Shutdown)
+	return srv
+}
+
+// startupWithPassword sends a startup message and responds to a cleartext
+// password request with the given token. Returns an error string on auth
+// failure, or "" on success.
+func (c *pgClient) startupWithPassword(user, database, password string) string {
+	c.t.Helper()
+	// Build startup message
+	var payload []byte
+	payload = binary.BigEndian.AppendUint32(payload, 196608)
+	payload = append(payload, "user"...)
+	payload = append(payload, 0)
+	payload = append(payload, user...)
+	payload = append(payload, 0)
+	payload = append(payload, "database"...)
+	payload = append(payload, 0)
+	payload = append(payload, database...)
+	payload = append(payload, 0)
+	payload = append(payload, 0) // terminator
+
+	msg := binary.BigEndian.AppendUint32(nil, uint32(len(payload)+4))
+	msg = append(msg, payload...)
+	if _, err := c.conn.Write(msg); err != nil {
+		c.t.Fatalf("writing startup: %v", err)
+	}
+
+	// Read first response — either AuthOk or AuthCleartextPassword or Error
+	for {
+		typ, data, err := c.readMsg()
+		if err != nil {
+			c.t.Fatalf("reading startup response: %v", err)
+		}
+		switch typ {
+		case 'R': // Authentication
+			authCode := binary.BigEndian.Uint32(data[:4])
+			if authCode == 0 {
+				// AuthenticationOk — read remaining startup messages
+				for {
+					typ2, data2, err2 := c.readMsg()
+					if err2 != nil {
+						c.t.Fatalf("reading post-auth response: %v", err2)
+					}
+					if typ2 == 'Z' {
+						return "" // success
+					}
+					if typ2 == 'E' {
+						return c.parseError(data2)
+					}
+				}
+			}
+			if authCode == 3 {
+				// CleartextPassword requested — send password
+				pwPayload := append([]byte(password), 0)
+				c.writeMsg('p', pwPayload)
+				continue // loop to read AuthOk or Error
+			}
+			c.t.Fatalf("unexpected auth code: %d", authCode)
+		case 'E': // ErrorResponse (FATAL)
+			return c.parseError(data)
+		}
+	}
+}
+
+func TestPGWireAuthSuccess(t *testing.T) {
+	db := setupTestDB(t)
+
+	cfg := auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "test-key-123", Name: "test-user", Role: "admin"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "admin", Tables: []string{"*"}, Allow: []string{"read", "write", "admin"}},
+		},
+	}
+	authn, authz := auth.New(cfg)
+	provider := auth.NewProvider(authn, authz, nil, nil)
+
+	srv := startTestServerWithAuth(t, db, provider)
+	client := newPGClient(t, srv.Addr())
+
+	errMsg := client.startupWithPassword("test-user", "testdb", "test-key-123")
+	if errMsg != "" {
+		t.Fatalf("expected auth success, got error: %s", errMsg)
+	}
+
+	// Verify we can query after auth
+	cols, rows, tag := client.simpleQuery("SELECT * FROM users")
+	if len(rows) != 3 {
+		t.Errorf("expected 3 rows, got %d (cols=%v tag=%s)", len(rows), cols, tag)
+	}
+
+	client.terminate()
+}
+
+func TestPGWireAuthBadKey(t *testing.T) {
+	db := setupTestDB(t)
+
+	cfg := auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "test-key-123", Name: "test-user", Role: "admin"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "admin", Tables: []string{"*"}, Allow: []string{"read"}},
+		},
+	}
+	authn, authz := auth.New(cfg)
+	provider := auth.NewProvider(authn, authz, nil, nil)
+
+	srv := startTestServerWithAuth(t, db, provider)
+	client := newPGClient(t, srv.Addr())
+
+	errMsg := client.startupWithPassword("test-user", "testdb", "wrong-key")
+	if errMsg == "" {
+		t.Fatal("expected auth failure, but got success")
+	}
+	t.Logf("auth rejected as expected: %s", errMsg)
+}
+
+func TestPGWireAuthNoPassword(t *testing.T) {
+	db := setupTestDB(t)
+
+	cfg := auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "test-key-123", Name: "test-user", Role: "admin"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "admin", Tables: []string{"*"}, Allow: []string{"read"}},
+		},
+	}
+	authn, authz := auth.New(cfg)
+	provider := auth.NewProvider(authn, authz, nil, nil)
+
+	srv := startTestServerWithAuth(t, db, provider)
+	client := newPGClient(t, srv.Addr())
+
+	errMsg := client.startupWithPassword("test-user", "testdb", "")
+	if errMsg == "" {
+		t.Fatal("expected auth failure with empty password, but got success")
+	}
+	t.Logf("empty password rejected as expected: %s", errMsg)
+}
+
+func TestPGWireAuthDisabled(t *testing.T) {
+	db := setupTestDB(t)
+
+	// No auth provider — should accept without password flow
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("anyone", "anydb") // original startup with no password
+
+	cols, rows, tag := client.simpleQuery("SELECT * FROM users")
+	if len(rows) != 3 {
+		t.Errorf("expected 3 rows, got %d (cols=%v tag=%s)", len(rows), cols, tag)
+	}
+	client.terminate()
+}
+
+func TestPGWireCurrentUserReflectsIdentity(t *testing.T) {
+	db := setupTestDB(t)
+
+	cfg := auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "analyst-key", Name: "alice@example.com", Role: "analyst"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "analyst", Tables: []string{"*"}, Allow: []string{"read"}},
+		},
+	}
+	authn, authz := auth.New(cfg)
+	provider := auth.NewProvider(authn, authz, nil, nil)
+
+	srv := startTestServerWithAuth(t, db, provider)
+	client := newPGClient(t, srv.Addr())
+
+	errMsg := client.startupWithPassword("alice", "testdb", "analyst-key")
+	if errMsg != "" {
+		t.Fatalf("auth failed: %s", errMsg)
+	}
+
+	_, rows, _ := client.simpleQuery("SELECT current_user")
+	if len(rows) != 1 || rows[0][0] != "alice@example.com" {
+		t.Errorf("expected current_user=alice@example.com, got %v", rows)
+	}
 	client.terminate()
 }
 

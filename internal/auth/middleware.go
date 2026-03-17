@@ -8,6 +8,7 @@ import (
 
 type contextKey struct{}
 type rowFilterKey struct{}
+type tableDecisionsKey struct{}
 
 // IdentityFromContext extracts the authenticated identity from a request context.
 // Returns nil if no identity is present (auth disabled or unauthenticated).
@@ -23,6 +24,20 @@ func ContextWithIdentity(ctx context.Context, id *Identity) context.Context {
 
 // RowFilters is a map of table name → SQL predicate for row-level security.
 type RowFilters map[string]string
+
+// TableDecisions maps table names to their ABAC-evaluated access decisions.
+type TableDecisions map[string]*TableDecision
+
+// ContextWithTableDecisions returns a context carrying ABAC table decisions.
+func ContextWithTableDecisions(ctx context.Context, decisions TableDecisions) context.Context {
+	return context.WithValue(ctx, tableDecisionsKey{}, decisions)
+}
+
+// TableDecisionsFromContext extracts ABAC table decisions from context.
+func TableDecisionsFromContext(ctx context.Context) TableDecisions {
+	td, _ := ctx.Value(tableDecisionsKey{}).(TableDecisions)
+	return td
+}
 
 // ContextWithRowFilters returns a context carrying row filter predicates.
 func ContextWithRowFilters(ctx context.Context, filters RowFilters) context.Context {

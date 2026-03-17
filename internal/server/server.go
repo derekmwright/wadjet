@@ -267,42 +267,82 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Authorization: check table access after parsing, before planning
+	// Authorization: ABAC evaluation with legacy RBAC fallback
 	identity := auth.IdentityFromContext(r.Context())
-	authz := s.getAuthz()
-	if identity != nil && authz != nil {
-		if !authz.HasPermission(identity, "read") {
-			writeError(w, http.StatusForbidden, "insufficient permissions")
-			return
-		}
-		for _, table := range selectInfo.Tables {
-			if !authz.CanAccessTable(identity, table.Name) {
-				writeError(w, http.StatusForbidden,
-					fmt.Sprintf("access denied to table %q", table.Name))
-				return
-			}
-		}
-		for _, join := range selectInfo.Joins {
-			if !authz.CanAccessTable(identity, join.RightTable) {
-				writeError(w, http.StatusForbidden,
-					fmt.Sprintf("access denied to table %q", join.RightTable))
-				return
-			}
-		}
-	}
-
-	// Collect row-level security filters from access policies
 	var rowFilters auth.RowFilters
-	policies := s.getPolicies()
-	if identity != nil && policies != nil {
-		for _, table := range selectInfo.Tables {
-			if policy := policies.Lookup(table.Name, identity.Role); policy != nil && policy.RowFilter != "" {
-				if rowFilters == nil {
-					rowFilters = make(auth.RowFilters)
+	var tableDecisions auth.TableDecisions
+
+	if identity != nil {
+		evaluator := s.getEvaluator()
+		if evaluator != nil {
+			// ABAC path: evaluate policies per table
+			subject := identity.ToSubject()
+			env := auth.Environment{
+				SourceIP: r.RemoteAddr,
+				Protocol: "http",
+			}
+			tableDecisions = make(auth.TableDecisions)
+
+			allTables := make([]string, 0, len(selectInfo.Tables)+len(selectInfo.Joins))
+			for _, t := range selectInfo.Tables {
+				allTables = append(allTables, t.Name)
+			}
+			for _, j := range selectInfo.Joins {
+				allTables = append(allTables, j.RightTable)
+			}
+
+			for _, tableName := range allTables {
+				td := evaluator.EvaluateTableAccess(subject, tableName, auth.ActionRead, env)
+				if !td.Allowed {
+					writeError(w, http.StatusForbidden,
+						fmt.Sprintf("access denied to table %q: %s", tableName, td.Reason))
+					return
 				}
-				rowFilters[table.Name] = policy.RowFilter
-				if s.audit != nil {
-					s.audit.LogRowFilterApplied(identity, table.Name, policy.RowFilter)
+				tableDecisions[tableName] = td
+				if td.RowFilter != "" {
+					if rowFilters == nil {
+						rowFilters = make(auth.RowFilters)
+					}
+					rowFilters[tableName] = td.RowFilter
+					if s.audit != nil {
+						s.audit.LogRowFilterApplied(identity, tableName, td.RowFilter)
+					}
+				}
+			}
+		} else if authz := s.getAuthz(); authz != nil {
+			// Legacy RBAC fallback
+			if !authz.HasPermission(identity, "read") {
+				writeError(w, http.StatusForbidden, "insufficient permissions")
+				return
+			}
+			for _, table := range selectInfo.Tables {
+				if !authz.CanAccessTable(identity, table.Name) {
+					writeError(w, http.StatusForbidden,
+						fmt.Sprintf("access denied to table %q", table.Name))
+					return
+				}
+			}
+			for _, join := range selectInfo.Joins {
+				if !authz.CanAccessTable(identity, join.RightTable) {
+					writeError(w, http.StatusForbidden,
+						fmt.Sprintf("access denied to table %q", join.RightTable))
+					return
+				}
+			}
+
+			// Legacy row filter collection
+			policies := s.getPolicies()
+			if policies != nil {
+				for _, table := range selectInfo.Tables {
+					if policy := policies.Lookup(table.Name, identity.Role); policy != nil && policy.RowFilter != "" {
+						if rowFilters == nil {
+							rowFilters = make(auth.RowFilters)
+						}
+						rowFilters[table.Name] = policy.RowFilter
+						if s.audit != nil {
+							s.audit.LogRowFilterApplied(identity, table.Name, policy.RowFilter)
+						}
+					}
 				}
 			}
 		}
@@ -310,10 +350,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Distributed execution path: use coordinator if available
 	if s.coord != nil {
-		// Pass row filters and identity through context for the coordinator
+		// Pass row filters, table decisions, and identity through context
 		execCtx := r.Context()
 		if len(rowFilters) > 0 {
 			execCtx = auth.ContextWithRowFilters(execCtx, rowFilters)
+		}
+		if len(tableDecisions) > 0 {
+			execCtx = auth.ContextWithTableDecisions(execCtx, tableDecisions)
 		}
 		result, err := s.coord.ExecuteSQL(execCtx, req.SQL)
 		if err != nil {
@@ -324,15 +367,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		rows := result.Rows
 
 		// Apply cell-level access policies (column masking/denial)
-		if identity != nil && policies != nil && len(rows) > 0 {
+		if identity != nil && len(rows) > 0 {
 			tableName := ""
 			if len(selectInfo.Tables) > 0 {
 				tableName = selectInfo.Tables[0].Name
 			}
-			if policy := policies.Lookup(tableName, identity.Role); policy != nil {
-				rows = policy.ApplyToRows(rows)
-				s.auditColumnPolicy(identity, tableName, policy)
-			}
+			rows = s.applyColumnPolicies(identity, tableName, tableDecisions, rows)
 		}
 
 		resp := QueryResponse{
@@ -401,16 +441,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply cell-level access policies (column masking/denial)
-	if identity != nil && policies != nil && len(rows) > 0 {
-		// Find the queried table — use first table for single-table queries
+	if identity != nil && len(rows) > 0 {
 		tableName := ""
 		if len(selectInfo.Tables) > 0 {
 			tableName = selectInfo.Tables[0].Name
 		}
-		if policy := policies.Lookup(tableName, identity.Role); policy != nil {
-			rows = policy.ApplyToRows(rows)
-			s.auditColumnPolicy(identity, tableName, policy)
-		}
+		rows = s.applyColumnPolicies(identity, tableName, tableDecisions, rows)
 	}
 
 	// Extract column names
@@ -874,7 +910,93 @@ func (s *Server) getPolicies() *auth.PolicySet {
 	return s.policies
 }
 
+func (s *Server) getEvaluator() *auth.PolicyEvaluator {
+	if s.provider != nil {
+		return s.provider.Evaluator()
+	}
+	return nil
+}
+
 // auditColumnPolicy logs which columns were masked or denied for this query.
+// applyColumnPolicies applies ABAC table decisions or falls back to legacy PolicySet
+// for column masking/denial on result rows.
+func (s *Server) applyColumnPolicies(identity *auth.Identity, tableName string, decisions auth.TableDecisions, rows []map[string]any) []map[string]any {
+	if len(rows) == 0 {
+		return rows
+	}
+
+	// ABAC path: use pre-evaluated table decisions
+	if td, ok := decisions[tableName]; ok && len(td.Columns) > 0 {
+		var masked, denied []string
+		for _, col := range td.Columns {
+			if !col.Allowed {
+				denied = append(denied, col.Column)
+			} else if col.MaskFunc != "" {
+				masked = append(masked, col.Column)
+			}
+		}
+		if len(masked) > 0 || len(denied) > 0 {
+			if s.audit != nil {
+				s.audit.LogColumnPolicy(identity, tableName, masked, denied)
+			}
+			// Build deny/mask sets for fast lookup
+			denySet := make(map[string]bool, len(denied))
+			for _, c := range denied {
+				denySet[c] = true
+			}
+			maskSet := make(map[string]bool, len(masked))
+			for _, c := range masked {
+				maskSet[c] = true
+			}
+			result := make([]map[string]any, len(rows))
+			for i, row := range rows {
+				filtered := make(map[string]any, len(row))
+				for col, val := range row {
+					if denySet[col] {
+						continue
+					}
+					if maskSet[col] {
+						filtered[col] = defaultMaskValue(val)
+					} else {
+						filtered[col] = val
+					}
+				}
+				result[i] = filtered
+			}
+			return result
+		}
+		return rows
+	}
+
+	// Legacy fallback: use PolicySet
+	if policies := s.getPolicies(); policies != nil {
+		if policy := policies.Lookup(tableName, identity.Role); policy != nil {
+			rows = policy.ApplyToRows(rows)
+			s.auditColumnPolicy(identity, tableName, policy)
+		}
+	}
+	return rows
+}
+
+// defaultMaskValue returns a redacted placeholder based on value type.
+func defaultMaskValue(val any) any {
+	if val == nil {
+		return nil
+	}
+	switch val.(type) {
+	case string:
+		return "***"
+	case int, int32, int64:
+		return int64(0)
+	case float32, float64:
+		return float64(0)
+	case bool:
+		return false
+	default:
+		return "***"
+	}
+}
+
 func (s *Server) auditColumnPolicy(identity *auth.Identity, table string, policy *auth.AccessPolicy) {
 	if s.audit == nil || policy == nil {
 		return

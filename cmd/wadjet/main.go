@@ -611,17 +611,30 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 				policies = buildPolicies(cfg.Auth.Policies)
 			}
 			provider = auth.NewProvider(authn, authz, policies, logger)
+			// Wire ABAC evaluator (explicit policies or auto-migrate from RBAC)
+			if len(cfg.Auth.ABACPolicies) > 0 {
+				abac := buildABACPolicies(cfg.Auth.ABACPolicies)
+				authCfg := buildAuthConfig(cfg.Auth)
+				policyCfgs := buildPolicyConfigs(cfg.Auth.Policies)
+				provider.UpdateFromConfig(authCfg, policyCfgs, abac...)
+			} else if len(cfg.Auth.Roles) > 0 {
+				authCfg := buildAuthConfig(cfg.Auth)
+				policyCfgs := buildPolicyConfigs(cfg.Auth.Policies)
+				provider.UpdateFromConfig(authCfg, policyCfgs)
+			}
 			srvCfg.Provider = provider
 
 			// Subscribe to config changes to rebuild auth
 			cfgMgr.Subscribe(func(event config.ChangeEvent) {
 				authCfg := buildAuthConfig(event.New.Auth)
 				policyCfgs := buildPolicyConfigs(event.New.Auth.Policies)
-				provider.UpdateFromConfig(authCfg, policyCfgs)
+				abacPolicies := buildABACPolicies(event.New.Auth.ABACPolicies)
+				provider.UpdateFromConfig(authCfg, policyCfgs, abacPolicies...)
 				logger.Info("auth hot-reloaded",
 					"enabled", event.New.Auth.Enabled,
 					"api_keys", len(event.New.Auth.APIKeys),
 					"roles", len(event.New.Auth.Roles),
+					"abac_policies", len(event.New.Auth.ABACPolicies),
 				)
 			})
 
@@ -662,9 +675,10 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Start gRPC server
 	grpcSrv := server.NewGRPCServer(server.GRPCConfig{
-		Addr:    grpcAddr,
-		Catalog: cat,
-		Coord:   coord,
+		Addr:         grpcAddr,
+		Catalog:      cat,
+		Coord:        coord,
+		AuthProvider: provider,
 	}, logger)
 
 	// Start PostgreSQL wire protocol server
@@ -676,7 +690,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	if err != nil {
 		return fmt.Errorf("opening DB for pgwire: %w", err)
 	}
-	pgSrv := pgwire.NewServer(pgDB, pgwire.Config{}, logger)
+	pgSrv := pgwire.NewServer(pgDB, pgwire.Config{AuthProvider: provider}, logger)
 
 	errCh := make(chan error, 3)
 	go func() {
@@ -776,12 +790,23 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 				policies = buildPolicies(cfg.Auth.Policies)
 			}
 			provider = auth.NewProvider(authn, authz, policies, logger)
+			if len(cfg.Auth.ABACPolicies) > 0 {
+				abac := buildABACPolicies(cfg.Auth.ABACPolicies)
+				authCfg := buildAuthConfig(cfg.Auth)
+				policyCfgs := buildPolicyConfigs(cfg.Auth.Policies)
+				provider.UpdateFromConfig(authCfg, policyCfgs, abac...)
+			} else if len(cfg.Auth.Roles) > 0 {
+				authCfg := buildAuthConfig(cfg.Auth)
+				policyCfgs := buildPolicyConfigs(cfg.Auth.Policies)
+				provider.UpdateFromConfig(authCfg, policyCfgs)
+			}
 			srvCfg.Provider = provider
 
 			cfgMgr.Subscribe(func(event config.ChangeEvent) {
 				authCfg := buildAuthConfig(event.New.Auth)
 				policyCfgs := buildPolicyConfigs(event.New.Auth.Policies)
-				provider.UpdateFromConfig(authCfg, policyCfgs)
+				abacPolicies := buildABACPolicies(event.New.Auth.ABACPolicies)
+				provider.UpdateFromConfig(authCfg, policyCfgs, abacPolicies...)
 			})
 
 			if cfg.Auth.MTLS.Enabled {
@@ -810,9 +835,10 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 
 	// Start gRPC server
 	grpcSrv := server.NewGRPCServer(server.GRPCConfig{
-		Addr:    grpcAddr,
-		Catalog: cat,
-		Coord:   coord,
+		Addr:         grpcAddr,
+		Catalog:      cat,
+		Coord:        coord,
+		AuthProvider: provider,
 	}, logger)
 
 	errCh := make(chan error, 2)
@@ -1009,6 +1035,67 @@ func buildPolicies(cfgs []config.AuthPolicy) *auth.PolicySet {
 		}
 	}
 	return auth.ParsePolicies(policyCfgs)
+}
+
+// buildABACPolicies converts config ABAC policies to auth ABAC policies.
+func buildABACPolicies(cfgs []config.ABACPolicy) []auth.AccessControlPolicy {
+	policies := make([]auth.AccessControlPolicy, len(cfgs))
+	for i, p := range cfgs {
+		enabled := true
+		if p.Enabled != nil {
+			enabled = *p.Enabled
+		}
+		rules := make([]auth.PolicyRule, len(p.Rules))
+		for j, r := range p.Rules {
+			effect := auth.EffectAllow
+			if r.Effect == "deny" {
+				effect = auth.EffectDeny
+			}
+			// Categorize conditions into subject/resource/environment
+			var subjects, resources, envConds []auth.Condition
+			for _, c := range r.Conditions {
+				cond := auth.Condition{Attribute: c.Attribute, Op: c.Operator, Value: c.Value}
+				switch {
+				case len(c.Attribute) > 8 && c.Attribute[:8] == "subject.":
+					cond.Attribute = c.Attribute[8:]
+					subjects = append(subjects, cond)
+				case len(c.Attribute) > 9 && c.Attribute[:9] == "resource.":
+					cond.Attribute = c.Attribute[9:]
+					resources = append(resources, cond)
+				case len(c.Attribute) > 4 && c.Attribute[:4] == "env.":
+					cond.Attribute = c.Attribute[4:]
+					envConds = append(envConds, cond)
+				default:
+					// Put unprefixed conditions in subjects by default
+					subjects = append(subjects, cond)
+				}
+			}
+			obligs := make([]auth.Obligation, len(r.Obligations))
+			for k, o := range r.Obligations {
+				obligs[k] = auth.Obligation{
+					Type:   o.Type,
+					Target: o.Target,
+					Value:  o.Value,
+				}
+			}
+			rules[j] = auth.PolicyRule{
+				Description: p.Description,
+				EffectStr:   r.Effect,
+				Effect:      effect,
+				Priority:    p.Priority,
+				Subjects:    subjects,
+				Resources:   resources,
+				Environment: envConds,
+				Obligations: obligs,
+			}
+		}
+		policies[i] = auth.AccessControlPolicy{
+			Name:    p.Name,
+			Enabled: enabled,
+			Rules:   rules,
+		}
+	}
+	return policies
 }
 
 // loadGeoIP loads MaxMind GeoIP databases from CLI flags or config file.
