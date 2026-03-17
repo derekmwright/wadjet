@@ -40,8 +40,8 @@ type HashJoin struct {
 
 	mu           sync.Mutex
 	buildBatches []*batch.RecordBatch // columnar storage of build side
-	hashIndex    map[string]int32     // hash key -> head index in arena (general path)
-	intIndex     map[int64]int32      // fast path: single-column integer join key
+	hashIndex    map[string]int32  // hash key -> head index in arena (general path)
+	intIndex     *intHashTable    // fast path: single-column integer join key
 	arena        []buildRef           // flat storage for all build refs
 	arenaNext    []int32              // chain: arenaNext[i] = next arena index for same key (-1 = end)
 	useIntKey    bool                 // true when single int32/int64 join key detected
@@ -126,22 +126,22 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 	col := b.Columns[h.buildKeyIdx[0]]
 	if isIntKeyColumn(col.Type) {
 		h.useIntKey = true
-		h.intIndex = make(map[int64]int32)
+		h.intIndex = newIntHashTable(64)
 		h.hashIndex = nil // free the string map
 	}
 }
 
-// arenaAppend adds a buildRef to the arena and chains it under the given key.
+// arenaAppendInt adds a buildRef to the arena and chains it under an int64 key.
 func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
 	idx := int32(len(h.arena))
 	h.arena = append(h.arena, ref)
-	head, ok := h.intIndex[key]
+	head, ok := h.intIndex.Get(key)
 	if ok {
 		h.arenaNext = append(h.arenaNext, head)
 	} else {
 		h.arenaNext = append(h.arenaNext, -1)
 	}
-	h.intIndex[key] = idx
+	h.intIndex.Put(key, idx)
 }
 
 func (h *HashJoin) arenaAppendStr(key string, ref buildRef) {
@@ -165,7 +165,7 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		if !ok {
 			return p.lookupBuf
 		}
-		head, ok := h.intIndex[key]
+		head, ok := h.intIndex.Get(key)
 		if !ok {
 			return p.lookupBuf
 		}
@@ -349,7 +349,7 @@ func (h *HashJoin) spillBuildBatches() error {
 	h.arena = h.arena[:0]
 	h.arenaNext = h.arenaNext[:0]
 	if h.useIntKey {
-		h.intIndex = make(map[int64]int32)
+		h.intIndex = newIntHashTable(64)
 	} else {
 		h.hashIndex = make(map[string]int32)
 	}
@@ -383,7 +383,7 @@ func (h *HashJoin) reloadSpilledBuild() error {
 	h.arena = h.arena[:0]
 	h.arenaNext = h.arenaNext[:0]
 	if h.useIntKey {
-		h.intIndex = make(map[int64]int32)
+		h.intIndex = newIntHashTable(64)
 	} else {
 		h.hashIndex = make(map[string]int32)
 	}
@@ -557,7 +557,7 @@ func (h *HashJoin) FixKeyAssignment() {
 		h.arena = h.arena[:0]
 		h.arenaNext = h.arenaNext[:0]
 		if h.useIntKey {
-			h.intIndex = make(map[int64]int32)
+			h.intIndex = newIntHashTable(64)
 			for batchIdx, b := range h.buildBatches {
 				col := b.Columns[h.buildKeyIdx[0]]
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -667,7 +667,7 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 		if !ok {
 			return
 		}
-		head, ok := h.intIndex[key]
+		head, ok := h.intIndex.Get(key)
 		if !ok {
 			return
 		}
