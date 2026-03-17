@@ -40,7 +40,9 @@ type HashJoin struct {
 
 	mu           sync.Mutex
 	buildBatches []*batch.RecordBatch   // columnar storage of build side
-	hashIndex    map[string][]buildRef  // hash key -> list of (batch, row) refs
+	hashIndex    map[string][]buildRef  // hash key -> list of (batch, row) refs (general path)
+	intIndex     map[int64][]buildRef   // fast path: single-column integer join key
+	useIntKey    bool                   // true when single int32/int64 join key detected
 	buildDone    bool
 	buildSchema  []parquet.Column
 	buildRows    int64 // total rows in build side
@@ -56,7 +58,8 @@ type HashJoin struct {
 
 	// matched tracks which build-side rows have been matched during probing.
 	// Only populated for RightJoin and FullOuterJoin.
-	matched map[string]map[int]bool
+	matched    map[string]map[int]bool
+	intMatched map[int64]map[int]bool // matched tracking for int key path
 
 	// SemiAntiFilter is an optional predicate applied during semi/anti join probe.
 	// When set, each candidate build row is checked in addition to hash key equality.
@@ -89,6 +92,77 @@ func NewHashJoin(joinType JoinType, leftKeys, rightKeys []string) *HashJoin {
 		hj.matched = make(map[string]map[int]bool)
 	}
 	return hj
+}
+
+// isIntKeyColumn returns true if the column type supports the int64 hash fast path.
+func isIntKeyColumn(t batch.TypeID) bool {
+	switch t {
+	case batch.TypeInt32, batch.TypeInt64, batch.TypePort, batch.TypeProtocol,
+		batch.TypeDate, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC,
+		batch.TypeDuration:
+		return true
+	}
+	return false
+}
+
+// intKeyFromVector extracts the int64 value from an integer-typed vector at row.
+func intKeyFromVector(v *batch.Vector, row int) (int64, bool) {
+	if v.Nulls.IsNullFast(row) {
+		return 0, false
+	}
+	switch v.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return int64(v.Int32Data[row]), true
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return v.Int64Data[row], true
+	}
+	return 0, false
+}
+
+// tryEnableIntKey checks if the join uses a single integer column and enables
+// the int64 hash fast path, avoiding string allocation per build/probe row.
+func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
+	if len(h.buildKeyIdx) != 1 || h.buildKeyIdx[0] < 0 {
+		return
+	}
+	col := b.Columns[h.buildKeyIdx[0]]
+	if isIntKeyColumn(col.Type) {
+		h.useIntKey = true
+		h.intIndex = make(map[int64][]buildRef)
+		h.hashIndex = nil // free the string map
+		if h.matched != nil {
+			h.intMatched = make(map[int64]map[int]bool)
+			h.matched = nil
+		}
+	}
+}
+
+// lookupBuild returns build refs for a probe row, using the appropriate index.
+func (h *HashJoin) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
+	if h.useIntKey {
+		key, ok := h.intProbeKey(in, row)
+		if !ok {
+			return nil
+		}
+		return h.intIndex[key]
+	}
+	key := h.probeKey(in, row)
+	return h.hashIndex[key]
+}
+
+// intProbeKey extracts the int64 probe key for the int fast path.
+func (h *HashJoin) intProbeKey(in *batch.RecordBatch, row int) (int64, bool) {
+	if !h.probeResolved {
+		h.probeKeyIdx = make([]int, len(h.LeftKeys))
+		for i, col := range h.LeftKeys {
+			h.probeKeyIdx[i] = in.ColumnIndex(col)
+		}
+		h.probeResolved = true
+	}
+	if h.probeKeyIdx[0] < 0 {
+		return 0, false
+	}
+	return intKeyFromVector(in.Columns[h.probeKeyIdx[0]], row)
 }
 
 // estimateBatchBytes estimates the memory footprint of a RecordBatch.
@@ -148,6 +222,8 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			for i, col := range h.RightKeys {
 				h.buildKeyIdx[i] = b.ColumnIndex(col)
 			}
+			// Try to enable int64 fast path for single-column integer keys
+			h.tryEnableIntKey(b)
 		}
 
 		// Spill to disk if memory pressure is high
@@ -185,13 +261,28 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.buildBatches = append(h.buildBatches, b)
 
 		// After Compact(), Sel is nil so we iterate all rows (which are only the active ones)
-		for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-			key := h.buildKeyFromBatch(b, rowIdx)
-			h.hashIndex[key] = append(h.hashIndex[key], buildRef{
-				batchIdx: batchIdx,
-				rowIdx:   int32(rowIdx),
-			})
-			h.buildRows++
+		if h.useIntKey {
+			col := b.Columns[h.buildKeyIdx[0]]
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				key, ok := intKeyFromVector(col, rowIdx)
+				if !ok {
+					continue // skip null keys
+				}
+				h.intIndex[key] = append(h.intIndex[key], buildRef{
+					batchIdx: batchIdx,
+					rowIdx:   int32(rowIdx),
+				})
+				h.buildRows++
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				key := h.buildKeyFromBatch(b, rowIdx)
+				h.hashIndex[key] = append(h.hashIndex[key], buildRef{
+					batchIdx: batchIdx,
+					rowIdx:   int32(rowIdx),
+				})
+				h.buildRows++
+			}
 		}
 		h.mu.Unlock()
 	}
@@ -221,7 +312,11 @@ func (h *HashJoin) spillBuildBatches() error {
 	h.spillFiles = append(h.spillFiles, path)
 	// Clear in-memory state
 	h.buildBatches = h.buildBatches[:0]
-	h.hashIndex = make(map[string][]buildRef)
+	if h.useIntKey {
+		h.intIndex = make(map[int64][]buildRef)
+	} else {
+		h.hashIndex = make(map[string][]buildRef)
+	}
 	h.buildRows = 0
 	if h.MemTracker != nil {
 		h.MemTracker.Reset()
@@ -249,7 +344,11 @@ func (h *HashJoin) reloadSpilledBuild() error {
 
 	// Rebuild from all rows
 	h.buildBatches = nil
-	h.hashIndex = make(map[string][]buildRef)
+	if h.useIntKey {
+		h.intIndex = make(map[int64][]buildRef)
+	} else {
+		h.hashIndex = make(map[string][]buildRef)
+	}
 	h.buildRows = 0
 	if h.MemTracker != nil {
 		h.MemTracker.Reset()
@@ -264,13 +363,28 @@ func (h *HashJoin) reloadSpilledBuild() error {
 		b := batch.FromRows(h.buildSchema, allRows[pos:end])
 		batchIdx := int32(len(h.buildBatches))
 		h.buildBatches = append(h.buildBatches, b)
-		for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-			key := h.buildKeyFromBatch(b, rowIdx)
-			h.hashIndex[key] = append(h.hashIndex[key], buildRef{
-				batchIdx: batchIdx,
-				rowIdx:   int32(rowIdx),
-			})
-			h.buildRows++
+		if h.useIntKey {
+			col := b.Columns[h.buildKeyIdx[0]]
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				key, ok := intKeyFromVector(col, rowIdx)
+				if !ok {
+					continue
+				}
+				h.intIndex[key] = append(h.intIndex[key], buildRef{
+					batchIdx: batchIdx,
+					rowIdx:   int32(rowIdx),
+				})
+				h.buildRows++
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				key := h.buildKeyFromBatch(b, rowIdx)
+				h.hashIndex[key] = append(h.hashIndex[key], buildRef{
+					batchIdx: batchIdx,
+					rowIdx:   int32(rowIdx),
+				})
+				h.buildRows++
+			}
 		}
 		pos = end
 	}
@@ -337,16 +451,32 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 		for i, col := range h.RightKeys {
 			h.buildKeyIdx[i] = b.ColumnIndex(col)
 		}
+		h.tryEnableIntKey(b)
 	}
 	batchIdx := int32(len(h.buildBatches))
 	h.buildBatches = append(h.buildBatches, b)
-	for i := 0; i < b.Len; i++ {
-		key := h.buildKeyFromBatch(b, i)
-		h.hashIndex[key] = append(h.hashIndex[key], buildRef{
-			batchIdx: batchIdx,
-			rowIdx:   int32(i),
-		})
-		h.buildRows++
+	if h.useIntKey {
+		col := b.Columns[h.buildKeyIdx[0]]
+		for i := 0; i < b.Len; i++ {
+			key, ok := intKeyFromVector(col, i)
+			if !ok {
+				continue
+			}
+			h.intIndex[key] = append(h.intIndex[key], buildRef{
+				batchIdx: batchIdx,
+				rowIdx:   int32(i),
+			})
+			h.buildRows++
+		}
+	} else {
+		for i := 0; i < b.Len; i++ {
+			key := h.buildKeyFromBatch(b, i)
+			h.hashIndex[key] = append(h.hashIndex[key], buildRef{
+				batchIdx: batchIdx,
+				rowIdx:   int32(i),
+			})
+			h.buildRows++
+		}
 	}
 	h.buildDone = true
 }
@@ -390,17 +520,38 @@ func (h *HashJoin) FixKeyAssignment() {
 			for i, col := range h.RightKeys {
 				h.buildKeyIdx[i] = b.ColumnIndex(col)
 			}
+			// Re-check int key eligibility with new key assignment
+			h.useIntKey = false
+			h.tryEnableIntKey(b)
 		}
-		h.hashIndex = make(map[string][]buildRef)
 		h.buildRows = 0
-		for batchIdx, b := range h.buildBatches {
-			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				key := h.buildKeyFromBatch(b, rowIdx)
-				h.hashIndex[key] = append(h.hashIndex[key], buildRef{
-					batchIdx: int32(batchIdx),
-					rowIdx:   int32(rowIdx),
-				})
-				h.buildRows++
+		if h.useIntKey {
+			h.intIndex = make(map[int64][]buildRef)
+			for batchIdx, b := range h.buildBatches {
+				col := b.Columns[h.buildKeyIdx[0]]
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					key, ok := intKeyFromVector(col, rowIdx)
+					if !ok {
+						continue
+					}
+					h.intIndex[key] = append(h.intIndex[key], buildRef{
+						batchIdx: int32(batchIdx),
+						rowIdx:   int32(rowIdx),
+					})
+					h.buildRows++
+				}
+			}
+		} else {
+			h.hashIndex = make(map[string][]buildRef)
+			for batchIdx, b := range h.buildBatches {
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					key := h.buildKeyFromBatch(b, rowIdx)
+					h.hashIndex[key] = append(h.hashIndex[key], buildRef{
+						batchIdx: int32(batchIdx),
+						rowIdx:   int32(rowIdx),
+					})
+					h.buildRows++
+				}
 			}
 		}
 	}
@@ -495,8 +646,7 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	pairs := p.pairsBuf[:0]
 
 	probeRow := func(row int) {
-		key := p.join.probeKey(in, row)
-		buildMatches := p.join.hashIndex[key]
+		buildMatches := p.join.lookupBuild(in, row)
 
 		if len(buildMatches) == 0 {
 			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
@@ -508,8 +658,17 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		for i, ref := range buildMatches {
 			pairs = append(pairs, matchPair{probeRow: row, ref: ref, matched: true})
 
-			if p.join.matched != nil {
+			if p.join.useIntKey && p.join.intMatched != nil {
 				p.join.mu.Lock()
+				key, _ := p.join.intProbeKey(in, row)
+				if p.join.intMatched[key] == nil {
+					p.join.intMatched[key] = make(map[int]bool)
+				}
+				p.join.intMatched[key][i] = true
+				p.join.mu.Unlock()
+			} else if p.join.matched != nil {
+				p.join.mu.Lock()
+				key := p.join.probeKey(in, row)
 				if p.join.matched[key] == nil {
 					p.join.matched[key] = make(map[int]bool)
 				}
@@ -564,8 +723,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	var rows []int
 
 	checkRow := func(row int) {
-		key := p.join.probeKey(in, row)
-		candidates := p.join.hashIndex[key]
+		candidates := p.join.lookupBuild(in, row)
 		hasMatch := false
 
 		if len(candidates) > 0 {
@@ -681,13 +839,25 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 
 	// Collect unmatched build refs
 	var refs []buildRef
-	for key, keyRefs := range p.join.hashIndex {
-		matchedSet := p.join.matched[key]
-		for i, ref := range keyRefs {
-			if matchedSet != nil && matchedSet[i] {
-				continue
+	if p.join.useIntKey {
+		for key, keyRefs := range p.join.intIndex {
+			matchedSet := p.join.intMatched[key]
+			for i, ref := range keyRefs {
+				if matchedSet != nil && matchedSet[i] {
+					continue
+				}
+				refs = append(refs, ref)
 			}
-			refs = append(refs, ref)
+		}
+	} else {
+		for key, keyRefs := range p.join.hashIndex {
+			matchedSet := p.join.matched[key]
+			for i, ref := range keyRefs {
+				if matchedSet != nil && matchedSet[i] {
+					continue
+				}
+				refs = append(refs, ref)
+			}
 		}
 	}
 
