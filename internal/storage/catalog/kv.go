@@ -5,6 +5,10 @@ import "errors"
 // ErrKeyNotFound is returned when a key does not exist in the KV store.
 var ErrKeyNotFound = errors.New("key not found")
 
+// ErrRevisionMismatch is returned when a CAS update fails due to a
+// concurrent modification (the key's current revision != expected).
+var ErrRevisionMismatch = errors.New("revision mismatch")
+
 // MetaKV abstracts key-value storage for catalog metadata.
 // Production uses NATSKVAdapter; tests/embedded use MemKV.
 type MetaKV interface {
@@ -14,6 +18,11 @@ type MetaKV interface {
 
 	// Put creates or updates a key, returning the new revision.
 	Put(key string, value []byte) (revision uint64, err error)
+
+	// Update performs a compare-and-swap: writes value only if the key's
+	// current revision matches expectedRev. Returns ErrRevisionMismatch
+	// if a concurrent write changed the key since it was read.
+	Update(key string, value []byte, expectedRev uint64) (revision uint64, err error)
 
 	// Delete removes a key. No error if the key does not exist.
 	Delete(key string) error

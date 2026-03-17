@@ -48,6 +48,17 @@ func (n *NATSKVAdapter) Put(key string, value []byte) (uint64, error) {
 	return rev, nil
 }
 
+func (n *NATSKVAdapter) Update(key string, value []byte, expectedRev uint64) (uint64, error) {
+	rev, err := n.kv.Update(context.Background(), key, value, expectedRev)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyExists) {
+			return 0, ErrRevisionMismatch
+		}
+		return 0, fmt.Errorf("kv update %q: %w", key, err)
+	}
+	return rev, nil
+}
+
 func (n *NATSKVAdapter) Delete(key string) error {
 	err := n.kv.Delete(context.Background(), key)
 	if err != nil && !errors.Is(err, jetstream.ErrKeyNotFound) {

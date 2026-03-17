@@ -201,30 +201,88 @@ func (c *Catalog) GetManifest(_ context.Context, tableName string) (*PartitionMa
 }
 
 // AddFiles adds file entries to the manifest for a given partition.
+// Uses compare-and-swap to prevent concurrent flushes from losing updates.
 func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
-	var manifest PartitionManifest
-	if err := c.getJSON(c.key("manifest."+tableName), &manifest); err != nil {
+	key := c.key("manifest." + tableName)
+
+	// Retry loop for CAS conflicts (concurrent ingest flushes).
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		data, rev, err := c.kv.Get(key)
+		if err != nil {
+			return err
+		}
+
+		var manifest PartitionManifest
+		if err := json.Unmarshal(data, &manifest); err != nil {
+			return fmt.Errorf("unmarshaling manifest: %w", err)
+		}
+
+		found := false
+		for i, p := range manifest.Partitions {
+			if p.Path == partPath {
+				manifest.Partitions[i].Files = append(manifest.Partitions[i].Files, files...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			manifest.Partitions = append(manifest.Partitions, PartitionEntry{
+				Path:   partPath,
+				Values: partValues,
+				Files:  files,
+			})
+		}
+
+		manifest.UpdatedAt = time.Now().UTC()
+		updated, err := json.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("marshaling manifest: %w", err)
+		}
+
+		_, err = c.kv.Update(key, updated, rev)
+		if err == ErrRevisionMismatch {
+			continue // retry with fresh read
+		}
 		return err
 	}
+	return fmt.Errorf("manifest update failed after %d CAS retries (table %q)", maxRetries, tableName)
+}
 
-	found := false
-	for i, p := range manifest.Partitions {
-		if p.Path == partPath {
-			manifest.Partitions[i].Files = append(manifest.Partitions[i].Files, files...)
-			found = true
-			break
-		}
-	}
-	if !found {
-		manifest.Partitions = append(manifest.Partitions, PartitionEntry{
-			Path:   partPath,
-			Values: partValues,
-			Files:  files,
-		})
-	}
+// UDFDef mirrors expr.UDFDef for persistence without import cycles.
+type UDFDef struct {
+	Name   string   `json:"name"`
+	Params []string `json:"params"`
+	Body   string   `json:"body"`
+	Owner  string   `json:"owner"`
+	Locked bool     `json:"locked"`
+}
 
-	manifest.UpdatedAt = time.Now().UTC()
-	return c.putJSON(c.key("manifest."+tableName), manifest)
+// SaveUDFs persists user-defined function definitions to the catalog KV.
+func (c *Catalog) SaveUDFs(defs []UDFDef) error {
+	data, err := json.Marshal(defs)
+	if err != nil {
+		return fmt.Errorf("marshaling UDFs: %w", err)
+	}
+	_, err = c.kv.Put(c.key("udfs"), data)
+	return err
+}
+
+// LoadUDFs reads persisted UDF definitions from the catalog KV.
+// Returns nil (not error) if no UDFs have been saved.
+func (c *Catalog) LoadUDFs() ([]UDFDef, error) {
+	data, _, err := c.kv.Get(c.key("udfs"))
+	if err == ErrKeyNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var defs []UDFDef
+	if err := json.Unmarshal(data, &defs); err != nil {
+		return nil, fmt.Errorf("unmarshaling UDFs: %w", err)
+	}
+	return defs, nil
 }
 
 // DropTable removes a table from the catalog.

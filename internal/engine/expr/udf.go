@@ -55,11 +55,15 @@ func (e *UDFCall) Eval(b *batch.RecordBatch, row int) any {
 	return e.Body.Eval(b, row)
 }
 
+// UDFPersister is called after UDF register/unregister to persist the current state.
+type UDFPersister func(udfs []UDFDef) error
+
 // UDFStore holds compiled UDF definitions for use by the expression engine.
 // Thread-safe for concurrent reads and writes.
 type UDFStore struct {
-	mu   sync.RWMutex
-	udfs map[string]*compiledUDF
+	mu        sync.RWMutex
+	udfs      map[string]*compiledUDF
+	persister UDFPersister // optional: called after mutations to persist state
 }
 
 type compiledUDF struct {
@@ -75,6 +79,41 @@ func NewUDFStore() *UDFStore {
 
 // DefaultUDFs is the global UDF store.
 var DefaultUDFs = NewUDFStore()
+
+// SetPersister sets the function called after UDF mutations to persist state.
+func (s *UDFStore) SetPersister(p UDFPersister) {
+	s.mu.Lock()
+	s.persister = p
+	s.mu.Unlock()
+}
+
+// persist calls the persister with the current UDF definitions.
+// Must be called with s.mu held (at least RLock).
+func (s *UDFStore) persist() {
+	if s.persister == nil {
+		return
+	}
+	defs := make([]UDFDef, 0, len(s.udfs))
+	for _, u := range s.udfs {
+		defs = append(defs, u.def)
+	}
+	// Best-effort persistence — log errors but don't fail the operation.
+	if err := s.persister(defs); err != nil {
+		fmt.Printf("WARNING: failed to persist UDFs: %v\n", err)
+	}
+}
+
+// LoadDefs registers pre-existing UDF definitions (e.g., from KV on startup).
+// Skips compilation errors silently so one bad UDF doesn't block startup.
+func (s *UDFStore) LoadDefs(defs []UDFDef) int {
+	loaded := 0
+	for _, def := range defs {
+		if err := s.Register(def, true); err == nil {
+			loaded++
+		}
+	}
+	return loaded
+}
 
 // Register compiles and registers a UDF.
 func (s *UDFStore) Register(def UDFDef, isAdmin bool) error {
@@ -127,6 +166,7 @@ func (s *UDFStore) Register(def UDFDef, isAdmin bool) error {
 
 	s.mu.Lock()
 	s.udfs[def.Name] = &compiledUDF{def: def, body: body, deps: deps}
+	s.persist()
 	s.mu.Unlock()
 
 	DefaultRegistry.Register(def.Name, s.makeScalarFunc(def.Name))
@@ -164,6 +204,7 @@ func (s *UDFStore) Unregister(name, caller string, isAdmin bool) error {
 			name, existing.def.Owner)
 	}
 	delete(s.udfs, name)
+	s.persist()
 	s.mu.Unlock()
 	DefaultRegistry.Unregister(name)
 	return nil

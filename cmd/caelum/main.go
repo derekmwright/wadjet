@@ -19,6 +19,7 @@ import (
 	"github.com/derekmwright/caelum/internal/geoip"
 	"github.com/derekmwright/caelum/internal/coordinator"
 	"github.com/derekmwright/caelum/internal/distributed"
+	"github.com/derekmwright/caelum/internal/engine/expr"
 	"github.com/derekmwright/caelum/internal/format"
 	"github.com/derekmwright/caelum/internal/metrics"
 	"github.com/derekmwright/caelum/internal/server"
@@ -544,6 +545,9 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		return fmt.Errorf("initializing catalog: %w", err)
 	}
 
+	// Restore persisted UDFs and wire persistence callback
+	wireUDFPersistence(cat, logger)
+
 	// Load GeoIP databases if configured
 	var fileCfg *config.Config
 	if configFile != "" {
@@ -740,6 +744,9 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		return fmt.Errorf("initializing catalog: %w", err)
 	}
 
+	// Restore persisted UDFs and wire persistence callback
+	wireUDFPersistence(cat, logger)
+
 	coord := coordinator.New(coordinator.Config{
 		NATSUrl:      embeddedNATS.ClientURL(),
 		ResultBucket: bucket,
@@ -872,6 +879,44 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	<-ctx.Done()
 	w.Stop()
 	return nil
+}
+
+// wireUDFPersistence loads persisted UDFs from the catalog and sets up
+// a callback so future UDF changes are automatically saved to KV.
+func wireUDFPersistence(cat *catalog.Catalog, logger *slog.Logger) {
+	// Load existing UDFs from KV
+	kvDefs, err := cat.LoadUDFs()
+	if err != nil {
+		logger.Warn("failed to load persisted UDFs", "error", err)
+	} else if len(kvDefs) > 0 {
+		exprDefs := make([]expr.UDFDef, len(kvDefs))
+		for i, d := range kvDefs {
+			exprDefs[i] = expr.UDFDef{
+				Name:   d.Name,
+				Params: d.Params,
+				Body:   d.Body,
+				Owner:  d.Owner,
+				Locked: d.Locked,
+			}
+		}
+		loaded := expr.DefaultUDFs.LoadDefs(exprDefs)
+		logger.Info("restored persisted UDFs", "count", loaded)
+	}
+
+	// Wire persistence callback for future mutations
+	expr.DefaultUDFs.SetPersister(func(udfs []expr.UDFDef) error {
+		catDefs := make([]catalog.UDFDef, len(udfs))
+		for i, d := range udfs {
+			catDefs[i] = catalog.UDFDef{
+				Name:   d.Name,
+				Params: d.Params,
+				Body:   d.Body,
+				Owner:  d.Owner,
+				Locked: d.Locked,
+			}
+		}
+		return cat.SaveUDFs(catDefs)
+	})
 }
 
 // buildAuthConfig converts config.Auth to auth.Config without creating the Authenticator.

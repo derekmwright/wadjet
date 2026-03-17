@@ -50,6 +50,24 @@ func (m *MemKV) Put(key string, value []byte) (uint64, error) {
 	return rev, nil
 }
 
+func (m *MemKV) Update(key string, value []byte, expectedRev uint64) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	currentRev, ok := m.revs[key]
+	if !ok || currentRev != expectedRev {
+		return 0, ErrRevisionMismatch
+	}
+
+	cp := make([]byte, len(value))
+	copy(cp, value)
+	m.data[key] = cp
+	rev := m.nextRev
+	m.revs[key] = rev
+	m.nextRev++
+	return rev, nil
+}
+
 func (m *MemKV) Delete(key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
