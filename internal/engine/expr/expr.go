@@ -1893,6 +1893,36 @@ func toBoolVal(v any) bool {
 	}
 }
 
+// toInt64Safe converts a value to int64, returning false if not possible.
+func toInt64Safe(v any) (int64, bool) {
+	switch tv := v.(type) {
+	case int64:
+		return tv, true
+	case int32:
+		return int64(tv), true
+	case int:
+		return int64(tv), true
+	default:
+		return 0, false
+	}
+}
+
+// toFloat64Safe converts a value to float64, returning false if not possible.
+func toFloat64Safe(v any) (float64, bool) {
+	switch tv := v.(type) {
+	case float64:
+		return tv, true
+	case float32:
+		return float64(tv), true
+	case int64:
+		return float64(tv), true
+	case int32:
+		return float64(tv), true
+	default:
+		return 0, false
+	}
+}
+
 func compare(a, b any, op CmpOp) bool {
 	// Fast path: both int64 (most common for column comparisons)
 	if ai, ok := a.(int64); ok {
@@ -2105,14 +2135,17 @@ func (e *ScalarSubquery) Eval(_ *batch.RecordBatch, _ int) any {
 
 // InSubquery checks if a value is in the result set of a subquery.
 // Example: WHERE user_id IN (SELECT user_id FROM active_users)
-// Uncorrelated: executed once and result set cached.
+// Uncorrelated: executed once and result set cached in a hash set for O(1) lookup.
 type InSubquery struct {
 	Expr   Expr
 	SQL    string
 	Runner SubqueryRunner
 	Not    bool
 	cached bool
-	vals   []any
+	intSet map[int64]struct{}
+	strSet map[string]struct{}
+	fltSet map[float64]struct{}
+	vals   []any // fallback for mixed types
 }
 
 func (e *InSubquery) Eval(b *batch.RecordBatch, row int) any {
@@ -2126,10 +2159,54 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 		if err != nil {
 			return e.Not
 		}
+		// Collect values and detect predominant type for hash set
+		var rawVals []any
 		for _, r := range rows {
 			for _, v := range r {
-				e.vals = append(e.vals, v)
+				if v != nil {
+					rawVals = append(rawVals, v)
+				}
 				break // first column only
+			}
+		}
+		// Build typed hash set based on first value's type
+		if len(rawVals) > 0 {
+			switch rawVals[0].(type) {
+			case int64:
+				e.intSet = make(map[int64]struct{}, len(rawVals))
+				for _, v := range rawVals {
+					if iv, ok := v.(int64); ok {
+						e.intSet[iv] = struct{}{}
+					} else {
+						e.vals = rawVals // mixed types, fallback
+						e.intSet = nil
+						break
+					}
+				}
+			case string:
+				e.strSet = make(map[string]struct{}, len(rawVals))
+				for _, v := range rawVals {
+					if sv, ok := v.(string); ok {
+						e.strSet[sv] = struct{}{}
+					} else {
+						e.vals = rawVals
+						e.strSet = nil
+						break
+					}
+				}
+			case float64:
+				e.fltSet = make(map[float64]struct{}, len(rawVals))
+				for _, v := range rawVals {
+					if fv, ok := v.(float64); ok {
+						e.fltSet[fv] = struct{}{}
+					} else {
+						e.vals = rawVals
+						e.fltSet = nil
+						break
+					}
+				}
+			default:
+				e.vals = rawVals
 			}
 		}
 	}
@@ -2137,6 +2214,26 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 	if lv == nil {
 		return false
 	}
+	// Fast path: typed hash lookup
+	if e.intSet != nil {
+		if iv, ok := toInt64Safe(lv); ok {
+			_, found := e.intSet[iv]
+			return found != e.Not
+		}
+	}
+	if e.strSet != nil {
+		if sv, ok := lv.(string); ok {
+			_, found := e.strSet[sv]
+			return found != e.Not
+		}
+	}
+	if e.fltSet != nil {
+		if fv, ok := toFloat64Safe(lv); ok {
+			_, found := e.fltSet[fv]
+			return found != e.Not
+		}
+	}
+	// Fallback: linear scan for mixed types
 	for _, rv := range e.vals {
 		if rv != nil && compare(lv, rv, CmpEq) {
 			return !e.Not
