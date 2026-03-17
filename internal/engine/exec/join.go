@@ -67,6 +67,13 @@ type HashJoin struct {
 	// column names in the output schema are qualified as "alias.column" to avoid
 	// ambiguity (e.g., self-joins like nation n1 JOIN nation n2).
 	BuildTableAlias string
+
+	// Pre-resolved column indices and reusable key buffer for typed serialization.
+	// Avoids fmt.Sprint + GetValue boxing on every row.
+	keyBuf       []byte
+	buildKeyIdx  []int // column indices for RightKeys in build batches
+	probeKeyIdx  []int // column indices for LeftKeys in probe batches
+	probeResolved bool
 }
 
 // NewHashJoin creates a new hash join operator.
@@ -76,6 +83,7 @@ func NewHashJoin(joinType JoinType, leftKeys, rightKeys []string) *HashJoin {
 		LeftKeys:  leftKeys,
 		RightKeys: rightKeys,
 		hashIndex: make(map[string][]buildRef),
+		keyBuf:    make([]byte, 0, 128),
 	}
 	if joinType == RightJoin || joinType == FullOuterJoin {
 		hj.matched = make(map[string]map[int]bool)
@@ -135,6 +143,11 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.mu.Lock()
 		if h.buildSchema == nil {
 			h.buildSchema = b.Schema
+			// Pre-resolve build key column indices
+			h.buildKeyIdx = make([]int, len(h.RightKeys))
+			for i, col := range h.RightKeys {
+				h.buildKeyIdx[i] = b.ColumnIndex(col)
+			}
 		}
 
 		// Spill to disk if memory pressure is high
@@ -272,6 +285,13 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 		return
 	}
 	b := batch.FromRows(schema, rows)
+	// Resolve build key indices if not yet done
+	if h.buildKeyIdx == nil {
+		h.buildKeyIdx = make([]int, len(h.RightKeys))
+		for i, col := range h.RightKeys {
+			h.buildKeyIdx[i] = b.ColumnIndex(col)
+		}
+	}
 	batchIdx := int32(len(h.buildBatches))
 	h.buildBatches = append(h.buildBatches, b)
 	for i := 0; i < b.Len; i++ {
@@ -311,11 +331,20 @@ func (h *HashJoin) FixKeyAssignment() {
 		if leftInBuild && !rightInBuild {
 			h.LeftKeys[i], h.RightKeys[i] = h.RightKeys[i], h.LeftKeys[i]
 			needsRebuild = true
+			h.probeResolved = false // force re-resolution of probe key indices
 		}
 	}
 
 	// Rebuild hash index if keys were swapped
 	if needsRebuild {
+		// Re-resolve build key indices after swap
+		if len(h.buildBatches) > 0 {
+			b := h.buildBatches[0]
+			h.buildKeyIdx = make([]int, len(h.RightKeys))
+			for i, col := range h.RightKeys {
+				h.buildKeyIdx[i] = b.ColumnIndex(col)
+			}
+		}
 		h.hashIndex = make(map[string][]buildRef)
 		h.buildRows = 0
 		for batchIdx, b := range h.buildBatches {
@@ -336,33 +365,52 @@ func (h *HashJoin) Probe() *HashJoinProbe {
 	return &HashJoinProbe{join: h}
 }
 
-// buildKeyFromBatch computes the hash key for a build-side row from columnar storage.
+// buildKeyFromBatch computes the hash key for a build-side row using typed serialization.
+// Uses pre-resolved column indices and a reusable buffer to avoid allocations.
 func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) string {
-	key := ""
-	for i, col := range h.RightKeys {
+	h.keyBuf = h.keyBuf[:0]
+	for i, idx := range h.buildKeyIdx {
 		if i > 0 {
-			key += "\x00"
+			h.keyBuf = append(h.keyBuf, 0)
 		}
-		v := b.ColumnByName(col)
-		if v != nil {
-			key += fmt.Sprint(v.GetValue(rowIdx))
+		if idx < 0 {
+			continue
+		}
+		v := b.Columns[idx]
+		if v.Nulls.IsNullFast(rowIdx) {
+			h.keyBuf = append(h.keyBuf, "<null>"...)
+		} else {
+			h.keyBuf = appendColumnValue(h.keyBuf, v, rowIdx, v.Type)
 		}
 	}
-	return key
+	return string(h.keyBuf)
 }
 
+// probeKey computes the hash key for a probe-side row using typed serialization.
 func (h *HashJoin) probeKey(b *batch.RecordBatch, row int) string {
-	key := ""
-	for i, col := range h.LeftKeys {
-		if i > 0 {
-			key += "\x00"
+	if !h.probeResolved {
+		h.probeKeyIdx = make([]int, len(h.LeftKeys))
+		for i, col := range h.LeftKeys {
+			h.probeKeyIdx[i] = b.ColumnIndex(col)
 		}
-		v := b.ColumnByName(col)
-		if v != nil {
-			key += fmt.Sprint(v.GetValue(row))
+		h.probeResolved = true
+	}
+	h.keyBuf = h.keyBuf[:0]
+	for i, idx := range h.probeKeyIdx {
+		if i > 0 {
+			h.keyBuf = append(h.keyBuf, 0)
+		}
+		if idx < 0 {
+			continue
+		}
+		v := b.Columns[idx]
+		if v.Nulls.IsNullFast(row) {
+			h.keyBuf = append(h.keyBuf, "<null>"...)
+		} else {
+			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
 		}
 	}
-	return key
+	return string(h.keyBuf)
 }
 
 // readBuildValue reads a single value from the columnar build-side storage.
