@@ -8,7 +8,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-const kvBucket = "caelum_catalog"
+const kvBucket = "wadjet_catalog"
 
 // NATSKVAdapter wraps a NATS JetStream KeyValue as a MetaKV.
 type NATSKVAdapter struct {
@@ -16,11 +16,11 @@ type NATSKVAdapter struct {
 }
 
 // NewNATSKV creates a NATS KV-backed MetaKV.
-// Creates or opens the caelum_catalog KV bucket.
+// Creates or opens the wadjet_catalog KV bucket.
 func NewNATSKV(js jetstream.JetStream) (*NATSKVAdapter, error) {
 	kv, err := js.CreateOrUpdateKeyValue(context.Background(), jetstream.KeyValueConfig{
 		Bucket:      kvBucket,
-		Description: "Caelum catalog metadata",
+		Description: "Wadjet catalog metadata",
 		Storage:     jetstream.FileStorage,
 	})
 	if err != nil {

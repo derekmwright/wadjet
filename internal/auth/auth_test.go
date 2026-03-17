@@ -220,14 +220,14 @@ func TestJWTAuth(t *testing.T) {
 		cfg2.JWT = JWTConfig{
 			Enabled:   true,
 			Secret:    secret,
-			RoleClaim: "caelum_role",
+			RoleClaim: "wadjet_role",
 		}
 		authn2, _ := New(cfg2)
 
 		token := signHS256(map[string]any{
 			"sub":         "user-1",
 			"name":        "Bob",
-			"caelum_role": "admin",
+			"wadjet_role": "admin",
 			"exp":         time.Now().Add(time.Hour).Unix(),
 		}, secret)
 
@@ -248,7 +248,7 @@ func TestJWTAuth(t *testing.T) {
 		cfg2.JWT = JWTConfig{
 			Enabled: true,
 			Secret:  secret,
-			Issuer:  "caelum-auth",
+			Issuer:  "wadjet-auth",
 		}
 		authn2, _ := New(cfg2)
 
@@ -256,7 +256,7 @@ func TestJWTAuth(t *testing.T) {
 		token := signHS256(map[string]any{
 			"sub":  "user-1",
 			"role": "reader",
-			"iss":  "caelum-auth",
+			"iss":  "wadjet-auth",
 			"exp":  time.Now().Add(time.Hour).Unix(),
 		}, secret)
 

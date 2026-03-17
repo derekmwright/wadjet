@@ -1,6 +1,6 @@
 # SQL Reference
 
-Caelum supports a broad subset of SQL for analytical queries, parsed by a custom recursive descent parser with precedence-climbing expression parsing.
+Wadjet supports a broad subset of SQL for analytical queries, parsed by a custom recursive descent parser with precedence-climbing expression parsing.
 
 ## Supported Statement Types
 
@@ -126,7 +126,7 @@ Connection strings use the standard MySQL DSN format (`user:password@tcp(host:po
 
 ### Database Connector Type Mapping
 
-| Database Type | Caelum Type |
+| Database Type | Wadjet Type |
 |---|---|
 | BOOL, BOOLEAN | BOOL |
 | SMALLINT, TINYINT | INT32 |
@@ -533,7 +533,7 @@ SELECT * FROM flow_logs ORDER BY timestamp DESC LIMIT 100 OFFSET 200
 
 ## JOIN
 
-Caelum supports multiple join types using a hash join strategy.
+Wadjet supports multiple join types using a hash join strategy.
 
 ### Inner Join
 
@@ -753,7 +753,7 @@ FROM flow_logs
 
 ## Built-in Functions
 
-Caelum includes 273 built-in scalar functions across several categories.
+Wadjet includes 273 built-in scalar functions across several categories.
 
 ### String Functions
 
@@ -1048,7 +1048,7 @@ GeoIP functions require [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite
 
 ```bash
 # Start with GeoIP databases
-caelum serve --geoip-city /path/to/GeoLite2-City.mmdb --geoip-asn /path/to/GeoLite2-ASN.mmdb
+wadjet serve --geoip-city /path/to/GeoLite2-City.mmdb --geoip-asn /path/to/GeoLite2-ASN.mmdb
 ```
 
 ```yaml
@@ -1394,7 +1394,7 @@ From lowest to highest:
 
 ## Data Manipulation (DML)
 
-Caelum supports INSERT, UPDATE, and DELETE via merge-on-read semantics. Deleted rows are tracked as markers in the manifest and filtered out at scan time. Updated rows are implemented as DELETE + INSERT of the modified values.
+Wadjet supports INSERT, UPDATE, and DELETE via merge-on-read semantics. Deleted rows are tracked as markers in the manifest and filtered out at scan time. Updated rows are implemented as DELETE + INSERT of the modified values.
 
 ### INSERT
 

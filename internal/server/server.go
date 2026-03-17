@@ -1,4 +1,4 @@
-// Package server provides the HTTP API for Caelum.
+// Package server provides the HTTP API for Wadjet.
 package server
 
 import (
@@ -18,21 +18,21 @@ import (
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/net/netutil"
 
-	"github.com/derekmwright/caelum/internal/auth"
-	"github.com/derekmwright/caelum/internal/config"
-	"github.com/derekmwright/caelum/internal/coordinator"
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/engine/exec"
-	"github.com/derekmwright/caelum/internal/engine/expr"
-	"github.com/derekmwright/caelum/internal/engine/scan"
-	"github.com/derekmwright/caelum/internal/metrics"
-	"github.com/derekmwright/caelum/internal/planner/logical"
-	"github.com/derekmwright/caelum/internal/planner/physical"
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/config"
+	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
+	"github.com/citc-tech/wadjet/internal/engine/scan"
+	"github.com/citc-tech/wadjet/internal/metrics"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/citc-tech/wadjet/internal/planner/physical"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // Config holds server configuration.
@@ -53,7 +53,7 @@ type Config struct {
 	RoleLimits         map[string]*config.QueryLimits // per-role overrides (nil = use global)
 }
 
-// Server is the Caelum HTTP API server.
+// Server is the Wadjet HTTP API server.
 type Server struct {
 	config   Config
 	catalog  *catalog.Catalog

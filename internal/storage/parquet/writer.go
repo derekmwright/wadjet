@@ -20,7 +20,7 @@ import (
 //
 // Note: the underlying parquet-go gzip.Codec has a quirk where its zero value
 // (Level=0) maps to gzip.NoCompression rather than gzip.DefaultCompression.
-// Caelum works around this by explicitly setting Level to DefaultCompression
+// Wadjet works around this by explicitly setting Level to DefaultCompression
 // when CompressionGzip is selected.
 type Compression int
 
@@ -121,7 +121,7 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 	opts := []goparquet.WriterOption{
 		parquetSchema,
 		compressionCodec(cfg.Compression),
-		goparquet.CreatedBy("caelum", "0.1.0", ""),
+		goparquet.CreatedBy("wadjet", "0.1.0", ""),
 	}
 	if cfg.PageBufferSize > 0 {
 		opts = append(opts, goparquet.PageBufferSize(cfg.PageBufferSize))
@@ -245,7 +245,7 @@ func buildParquetSchema(schema Schema) (*goparquet.Schema, error) {
 	for i, col := range schema.Columns {
 		group[col.Name] = nodes[i]
 	}
-	return goparquet.NewSchema("caelum", group), nil
+	return goparquet.NewSchema("wadjet", group), nil
 }
 
 func columnToNode(col Column) (goparquet.Node, error) {

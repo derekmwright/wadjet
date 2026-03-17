@@ -4,7 +4,7 @@ package logical
 import (
 	"fmt"
 
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
 // NodeType identifies the kind of logical plan node.

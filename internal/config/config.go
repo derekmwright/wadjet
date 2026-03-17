@@ -1,4 +1,4 @@
-// Package config provides YAML configuration loading for Caelum.
+// Package config provides YAML configuration loading for Wadjet.
 package config
 
 import (
@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the top-level configuration for Caelum.
+// Config is the top-level configuration for Wadjet.
 type Config struct {
 	Mode        string      `yaml:"mode"`         // standalone, coordinator, worker
 	Storage     Storage     `yaml:"storage"`
@@ -148,11 +148,11 @@ func DefaultConfig() Config {
 			Endpoint:  "localhost:9000",
 			AccessKey: "minioadmin",
 			SecretKey: "minioadmin",
-			Bucket:    "caelum",
+			Bucket:    "wadjet",
 		},
 		NATS: NATS{
 			Port:     4222,
-			StoreDir: filepath.Join(os.Getenv("HOME"), ".caelum", "nats"),
+			StoreDir: filepath.Join(os.Getenv("HOME"), ".wadjet", "nats"),
 		},
 		HTTP: HTTP{
 			Addr: ":8080",
@@ -189,7 +189,7 @@ func Load(path string) (*Config, error) {
 }
 
 // LoadOrDefault loads a config file if it exists, otherwise returns defaults.
-// Environment variables with CAELUM_ prefix always override file/default values.
+// Environment variables with WADJET_ prefix always override file/default values.
 func LoadOrDefault(path string) *Config {
 	var cfg *Config
 	if path == "" {
@@ -207,103 +207,103 @@ func LoadOrDefault(path string) *Config {
 	return cfg
 }
 
-// applyEnvOverrides reads CAELUM_* environment variables and overrides config values.
+// applyEnvOverrides reads WADJET_* environment variables and overrides config values.
 // Supported variables:
 //
-//	CAELUM_MODE                   - standalone, coordinator, worker
-//	CAELUM_HTTP_ADDR              - HTTP listen address
-//	CAELUM_GRPC_ADDR              - gRPC listen address
-//	CAELUM_STORAGE_TYPE           - s3, file
-//	CAELUM_STORAGE_ENDPOINT       - S3/MinIO endpoint
-//	CAELUM_STORAGE_ACCESS_KEY     - S3 access key
-//	CAELUM_STORAGE_SECRET_KEY     - S3 secret key
-//	CAELUM_STORAGE_BUCKET         - S3 bucket name
-//	CAELUM_STORAGE_REGION         - S3 region
-//	CAELUM_STORAGE_USE_SSL        - true/false
-//	CAELUM_NATS_PORT              - NATS listen port
-//	CAELUM_NATS_URL               - NATS URL (worker mode)
-//	CAELUM_NATS_CLUSTER_ID        - cluster identifier
-//	CAELUM_NATS_LEAF_REMOTES      - comma-separated remote NATS URLs
-//	CAELUM_WORKER_MAX_CONCURRENT  - max concurrent tasks
-//	CAELUM_WORKER_MEMORY_BUDGET   - per-task memory budget (bytes)
-//	CAELUM_WORKER_SPILL_DIR       - spill directory
-//	CAELUM_GEOIP_CITY_DB          - GeoLite2-City.mmdb path
-//	CAELUM_GEOIP_ASN_DB           - GeoLite2-ASN.mmdb path
+//	WADJET_MODE                   - standalone, coordinator, worker
+//	WADJET_HTTP_ADDR              - HTTP listen address
+//	WADJET_GRPC_ADDR              - gRPC listen address
+//	WADJET_STORAGE_TYPE           - s3, file
+//	WADJET_STORAGE_ENDPOINT       - S3/MinIO endpoint
+//	WADJET_STORAGE_ACCESS_KEY     - S3 access key
+//	WADJET_STORAGE_SECRET_KEY     - S3 secret key
+//	WADJET_STORAGE_BUCKET         - S3 bucket name
+//	WADJET_STORAGE_REGION         - S3 region
+//	WADJET_STORAGE_USE_SSL        - true/false
+//	WADJET_NATS_PORT              - NATS listen port
+//	WADJET_NATS_URL               - NATS URL (worker mode)
+//	WADJET_NATS_CLUSTER_ID        - cluster identifier
+//	WADJET_NATS_LEAF_REMOTES      - comma-separated remote NATS URLs
+//	WADJET_WORKER_MAX_CONCURRENT  - max concurrent tasks
+//	WADJET_WORKER_MEMORY_BUDGET   - per-task memory budget (bytes)
+//	WADJET_WORKER_SPILL_DIR       - spill directory
+//	WADJET_GEOIP_CITY_DB          - GeoLite2-City.mmdb path
+//	WADJET_GEOIP_ASN_DB           - GeoLite2-ASN.mmdb path
 func applyEnvOverrides(cfg *Config) {
-	if v := os.Getenv("CAELUM_MODE"); v != "" {
+	if v := os.Getenv("WADJET_MODE"); v != "" {
 		cfg.Mode = v
 	}
-	if v := os.Getenv("CAELUM_HTTP_ADDR"); v != "" {
+	if v := os.Getenv("WADJET_HTTP_ADDR"); v != "" {
 		cfg.HTTP.Addr = v
 	}
-	if v := os.Getenv("CAELUM_GRPC_ADDR"); v != "" {
+	if v := os.Getenv("WADJET_GRPC_ADDR"); v != "" {
 		cfg.GRPC.Addr = v
 	}
-	if v := os.Getenv("CAELUM_STORAGE_TYPE"); v != "" {
+	if v := os.Getenv("WADJET_STORAGE_TYPE"); v != "" {
 		cfg.Storage.Type = v
 	}
-	if v := os.Getenv("CAELUM_STORAGE_ENDPOINT"); v != "" {
+	if v := os.Getenv("WADJET_STORAGE_ENDPOINT"); v != "" {
 		cfg.Storage.Endpoint = v
 	}
-	if v := os.Getenv("CAELUM_STORAGE_ACCESS_KEY"); v != "" {
+	if v := os.Getenv("WADJET_STORAGE_ACCESS_KEY"); v != "" {
 		cfg.Storage.AccessKey = v
 	}
-	if v := os.Getenv("CAELUM_STORAGE_SECRET_KEY"); v != "" {
+	if v := os.Getenv("WADJET_STORAGE_SECRET_KEY"); v != "" {
 		cfg.Storage.SecretKey = v
 	}
-	if v := os.Getenv("CAELUM_STORAGE_BUCKET"); v != "" {
+	if v := os.Getenv("WADJET_STORAGE_BUCKET"); v != "" {
 		cfg.Storage.Bucket = v
 	}
-	if v := os.Getenv("CAELUM_STORAGE_REGION"); v != "" {
+	if v := os.Getenv("WADJET_STORAGE_REGION"); v != "" {
 		cfg.Storage.Region = v
 	}
-	if v := os.Getenv("CAELUM_STORAGE_USE_SSL"); v != "" {
+	if v := os.Getenv("WADJET_STORAGE_USE_SSL"); v != "" {
 		cfg.Storage.UseSSL = strings.EqualFold(v, "true") || v == "1"
 	}
-	if v := os.Getenv("CAELUM_NATS_PORT"); v != "" {
+	if v := os.Getenv("WADJET_NATS_PORT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.NATS.Port = n
 		}
 	}
-	if v := os.Getenv("CAELUM_NATS_URL"); v != "" {
+	if v := os.Getenv("WADJET_NATS_URL"); v != "" {
 		cfg.NATS.URL = v
 	}
-	if v := os.Getenv("CAELUM_NATS_CLUSTER_ID"); v != "" {
+	if v := os.Getenv("WADJET_NATS_CLUSTER_ID"); v != "" {
 		cfg.NATS.ClusterID = v
 	}
-	if v := os.Getenv("CAELUM_NATS_LEAF_REMOTES"); v != "" {
+	if v := os.Getenv("WADJET_NATS_LEAF_REMOTES"); v != "" {
 		cfg.NATS.LeafRemotes = strings.Split(v, ",")
 	}
-	if v := os.Getenv("CAELUM_WORKER_MAX_CONCURRENT"); v != "" {
+	if v := os.Getenv("WADJET_WORKER_MAX_CONCURRENT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.Worker.MaxConcurrent = n
 		}
 	}
-	if v := os.Getenv("CAELUM_WORKER_MEMORY_BUDGET"); v != "" {
+	if v := os.Getenv("WADJET_WORKER_MEMORY_BUDGET"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			cfg.Worker.MemoryBudget = n
 		}
 	}
-	if v := os.Getenv("CAELUM_WORKER_SPILL_DIR"); v != "" {
+	if v := os.Getenv("WADJET_WORKER_SPILL_DIR"); v != "" {
 		cfg.Worker.SpillDir = v
 	}
-	if v := os.Getenv("CAELUM_GEOIP_CITY_DB"); v != "" {
+	if v := os.Getenv("WADJET_GEOIP_CITY_DB"); v != "" {
 		cfg.GeoIP.CityDB = v
 	}
-	if v := os.Getenv("CAELUM_GEOIP_ASN_DB"); v != "" {
+	if v := os.Getenv("WADJET_GEOIP_ASN_DB"); v != "" {
 		cfg.GeoIP.ASNDB = v
 	}
-	if v := os.Getenv("CAELUM_QUERY_MAX_SCAN_BYTES"); v != "" {
+	if v := os.Getenv("WADJET_QUERY_MAX_SCAN_BYTES"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			cfg.QueryLimits.MaxScanBytes = n
 		}
 	}
-	if v := os.Getenv("CAELUM_QUERY_MAX_SCAN_ROWS"); v != "" {
+	if v := os.Getenv("WADJET_QUERY_MAX_SCAN_ROWS"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
 			cfg.QueryLimits.MaxScanRows = n
 		}
 	}
-	if v := os.Getenv("CAELUM_QUERY_MAX_SCAN_FILES"); v != "" {
+	if v := os.Getenv("WADJET_QUERY_MAX_SCAN_FILES"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.QueryLimits.MaxScanFiles = n
 		}

@@ -1,4 +1,4 @@
-// Package auth provides authentication and authorization for Caelum's HTTP API.
+// Package auth provides authentication and authorization for Wadjet's HTTP API.
 //
 // Supports three authentication methods:
 //   - API keys: Simple bearer tokens for internal tools (Grafana, ETL pipelines)

@@ -7,13 +7,13 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/derekmwright/caelum/internal/engine/expr"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
 	// KVUserFunctions is the NATS KV bucket for user-defined functions.
-	KVUserFunctions = "caelum_user_functions"
+	KVUserFunctions = "wadjet_user_functions"
 )
 
 // UDFEntry is the JSON-serializable form of a UDF stored in NATS KV.

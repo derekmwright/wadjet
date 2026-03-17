@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/coordinator"
-	"github.com/derekmwright/caelum/internal/distributed"
-	"github.com/derekmwright/caelum/internal/server"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
-	"github.com/derekmwright/caelum/internal/worker"
+	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/server"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/worker"
 )
 
 // setupTestServer creates an embedded NATS, coordinator, worker, and HTTP server for testing.

@@ -11,7 +11,7 @@ import (
 
 func TestWatcherDetectsChange(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "caelum.yaml")
+	path := filepath.Join(dir, "wadjet.yaml")
 
 	initial := `
 mode: standalone
@@ -73,7 +73,7 @@ worker:
 
 func TestWatcherStopsOnCancel(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "caelum.yaml")
+	path := filepath.Join(dir, "wadjet.yaml")
 	os.WriteFile(path, []byte("mode: standalone\n"), 0644)
 
 	cfg := DefaultConfig()

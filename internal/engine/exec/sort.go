@@ -6,10 +6,10 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/engine/exec/kernel"
-	"github.com/derekmwright/caelum/internal/engine/memory"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // SortOrder specifies sort direction.

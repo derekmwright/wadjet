@@ -4,7 +4,7 @@ package exec
 import (
 	"context"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 )
 
 // Source produces batches (table scan, hash table probe side).

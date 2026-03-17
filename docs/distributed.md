@@ -1,6 +1,6 @@
 # Distributed Deployment
 
-Caelum supports distributed query execution across multiple worker nodes, coordinated via NATS JetStream and backed by shared S3-compatible object storage.
+Wadjet supports distributed query execution across multiple worker nodes, coordinated via NATS JetStream and backed by shared S3-compatible object storage.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ The coordinator is the single entry point for queries:
 2. Parses and plans the query
 3. Breaks the physical plan into distributed stages
 4. For federated queries, expands scan stages per-cluster via `ExpandFederatedScans`
-5. Publishes tasks to NATS with cluster-scoped subjects (`caelum.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`)
+5. Publishes tasks to NATS with cluster-scoped subjects (`wadjet.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`)
 6. Waits for result notifications from workers
 7. Merges partial results into a final response
 
@@ -63,7 +63,7 @@ NATS provides the messaging backbone:
 ### Start the Coordinator
 
 ```bash
-./caelum serve \
+./wadjet serve \
   --mode coordinator \
   --http-addr :8080 \
   --grpc-addr :9090 \
@@ -72,8 +72,8 @@ NATS provides the messaging backbone:
   --endpoint minio.internal:9000 \
   --access-key $S3_ACCESS_KEY \
   --secret-key $S3_SECRET_KEY \
-  --bucket caelum \
-  --config caelum.yaml
+  --bucket wadjet \
+  --config wadjet.yaml
 ```
 
 ### Start Workers
@@ -81,17 +81,17 @@ NATS provides the messaging backbone:
 On each worker node:
 
 ```bash
-./caelum serve \
+./wadjet serve \
   --mode worker \
   --nats-url nats://coordinator.internal:4222 \
   --cluster-id central \
   --memory-budget 268435456 \
-  --spill-dir /var/caelum/spill \
+  --spill-dir /var/wadjet/spill \
   --result-store 134217728 \
   --endpoint minio.internal:9000 \
   --access-key $S3_ACCESS_KEY \
   --secret-key $S3_SECRET_KEY \
-  --bucket caelum
+  --bucket wadjet
 ```
 
 Workers automatically register with the coordinator and begin pulling tasks. The `--cluster-id` determines which tasks a worker pulls — it only processes tasks targeted at its cluster. See [Performance Tuning](tuning.md) for guidance on `--memory-budget`, `--spill-dir`, and `--result-store` sizing.
@@ -122,7 +122,7 @@ services:
       --cluster-id central
       --endpoint minio:9000
       --access-key minioadmin --secret-key minioadmin
-      --bucket caelum
+      --bucket wadjet
     ports:
       - "8080:8080"
       - "9090:9090"
@@ -138,10 +138,10 @@ services:
       --cluster-id central
       --memory-budget 268435456
       --result-store 134217728
-      --spill-dir /tmp/caelum-spill
+      --spill-dir /tmp/wadjet-spill
       --endpoint minio:9000
       --access-key minioadmin --secret-key minioadmin
-      --bucket caelum
+      --bucket wadjet
     depends_on:
       - coordinator
 
@@ -153,10 +153,10 @@ services:
       --cluster-id central
       --memory-budget 268435456
       --result-store 134217728
-      --spill-dir /tmp/caelum-spill
+      --spill-dir /tmp/wadjet-spill
       --endpoint minio:9000
       --access-key minioadmin --secret-key minioadmin
-      --bucket caelum
+      --bucket wadjet
     depends_on:
       - coordinator
 
@@ -177,20 +177,20 @@ docker-compose up -d --scale worker-1=5
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: caelum-coordinator
+  name: wadjet-coordinator
 spec:
   replicas: 1  # Single coordinator
   selector:
     matchLabels:
-      app: caelum-coordinator
+      app: wadjet-coordinator
   template:
     metadata:
       labels:
-        app: caelum-coordinator
+        app: wadjet-coordinator
     spec:
       containers:
         - name: coordinator
-          image: ghcr.io/derekmwright/caelum:latest
+          image: ghcr.io/citc-tech/wadjet:latest
           args:
             - serve
             - --mode=coordinator
@@ -201,7 +201,7 @@ spec:
             - --endpoint=$(S3_ENDPOINT)
             - --access-key=$(S3_ACCESS_KEY)
             - --secret-key=$(S3_SECRET_KEY)
-            - --bucket=caelum
+            - --bucket=wadjet
           ports:
             - containerPort: 8080
               name: http
@@ -213,49 +213,49 @@ spec:
             - name: S3_ENDPOINT
               valueFrom:
                 configMapKeyRef:
-                  name: caelum-config
+                  name: wadjet-config
                   key: s3-endpoint
             - name: S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: caelum-s3
+                  name: wadjet-s3
                   key: access-key
             - name: S3_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: caelum-s3
+                  name: wadjet-s3
                   key: secret-key
 ---
 # worker-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: caelum-worker
+  name: wadjet-worker
 spec:
   replicas: 3  # Scale as needed
   selector:
     matchLabels:
-      app: caelum-worker
+      app: wadjet-worker
   template:
     metadata:
       labels:
-        app: caelum-worker
+        app: wadjet-worker
     spec:
       containers:
         - name: worker
-          image: ghcr.io/derekmwright/caelum:latest
+          image: ghcr.io/citc-tech/wadjet:latest
           args:
             - serve
             - --mode=worker
-            - --nats-url=nats://caelum-coordinator:4222
+            - --nats-url=nats://wadjet-coordinator:4222
             - --cluster-id=central
             - --memory-budget=268435456
             - --result-store=134217728
-            - --spill-dir=/tmp/caelum-spill
+            - --spill-dir=/tmp/wadjet-spill
             - --endpoint=$(S3_ENDPOINT)
             - --access-key=$(S3_ACCESS_KEY)
             - --secret-key=$(S3_SECRET_KEY)
-            - --bucket=caelum
+            - --bucket=wadjet
           resources:
             requests:
               cpu: "2"
@@ -267,27 +267,27 @@ spec:
             - name: S3_ENDPOINT
               valueFrom:
                 configMapKeyRef:
-                  name: caelum-config
+                  name: wadjet-config
                   key: s3-endpoint
             - name: S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: caelum-s3
+                  name: wadjet-s3
                   key: access-key
             - name: S3_SECRET_KEY
               valueFrom:
                 secretKeyRef:
-                  name: caelum-s3
+                  name: wadjet-s3
                   key: secret-key
 ---
 # coordinator-service.yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: caelum-coordinator
+  name: wadjet-coordinator
 spec:
   selector:
-    app: caelum-coordinator
+    app: wadjet-coordinator
   ports:
     - name: http
       port: 8080
@@ -376,7 +376,7 @@ For detailed tuning guidance, see [Performance Tuning](tuning.md).
 
 ## Federation
 
-Federation allows Caelum to query data spread across multiple clusters — for example, a central data center and multiple regional sites.
+Federation allows Wadjet to query data spread across multiple clusters — for example, a central data center and multiple regional sites.
 
 ### Architecture
 
@@ -397,7 +397,7 @@ graph TD
 ### How It Works
 
 1. Each cluster has a unique `--cluster-id` (e.g., `central`, `site-east`)
-2. Workers subscribe to cluster-scoped NATS subjects: `caelum.tasks.<cluster-id>.>`
+2. Workers subscribe to cluster-scoped NATS subjects: `wadjet.tasks.<cluster-id>.>`
 3. The catalog stores per-cluster partition manifests
 4. When a table exists on multiple clusters, the coordinator's `ExpandFederatedScans` splits scan stages per-cluster
 5. Each cluster's workers scan their local data; results flow back for centralized aggregation
@@ -406,32 +406,32 @@ graph TD
 
 **Central coordinator:**
 ```bash
-./caelum serve --mode coordinator \
+./wadjet serve --mode coordinator \
   --cluster-id central \
   --nats-port 4222 \
   --endpoint minio-central:9000 \
-  --access-key $S3_KEY --secret-key $S3_SECRET --bucket caelum
+  --access-key $S3_KEY --secret-key $S3_SECRET --bucket wadjet
 ```
 
 **Central workers:**
 ```bash
-./caelum serve --mode worker \
+./wadjet serve --mode worker \
   --cluster-id central \
   --nats-url nats://coordinator:4222 \
   --memory-budget 268435456 --result-store 134217728 \
   --endpoint minio-central:9000 \
-  --access-key $S3_KEY --secret-key $S3_SECRET --bucket caelum
+  --access-key $S3_KEY --secret-key $S3_SECRET --bucket wadjet
 ```
 
 **Remote site workers (with leaf node connection):**
 ```bash
-./caelum serve --mode worker \
+./wadjet serve --mode worker \
   --cluster-id site-east \
   --nats-url nats://coordinator:4222 \
   --leaf-remote nats://coordinator:4222 \
   --memory-budget 67108864 --result-store 16777216 \
   --endpoint minio-east:9000 \
-  --access-key $S3_KEY --secret-key $S3_SECRET --bucket caelum
+  --access-key $S3_KEY --secret-key $S3_SECRET --bucket wadjet
 ```
 
 ### NATS Subject Routing
@@ -439,13 +439,13 @@ graph TD
 Tasks are published to cluster-scoped subjects:
 
 ```
-caelum.tasks.<cluster-id>.<type>.<query-id>.<stage-id>
+wadjet.tasks.<cluster-id>.<type>.<query-id>.<stage-id>
 ```
 
 Workers subscribe to their cluster's wildcard filter:
 
 ```
-caelum.tasks.<cluster-id>.>
+wadjet.tasks.<cluster-id>.>
 ```
 
 This ensures workers only pull tasks for data in their local object store, avoiding cross-cluster data transfers for scan operations.

@@ -207,13 +207,13 @@ func TestResultNotificationInlineDataRoundTrip(t *testing.T) {
 
 func TestTaskSubject(t *testing.T) {
 	got := TaskSubject("scan", "q-100", "s-0")
-	want := "caelum.tasks.scan.q-100.s-0"
+	want := "wadjet.tasks.scan.q-100.s-0"
 	if got != want {
 		t.Errorf("TaskSubject: got %q, want %q", got, want)
 	}
 
 	got = TaskSubject("aggregate", "q-200", "s-1")
-	want = "caelum.tasks.aggregate.q-200.s-1"
+	want = "wadjet.tasks.aggregate.q-200.s-1"
 	if got != want {
 		t.Errorf("TaskSubject: got %q, want %q", got, want)
 	}
@@ -221,7 +221,7 @@ func TestTaskSubject(t *testing.T) {
 
 func TestResultSubject(t *testing.T) {
 	got := ResultSubject("q-100", "s-0", "t-1")
-	want := "caelum.results.q-100.s-0.t-1"
+	want := "wadjet.results.q-100.s-0.t-1"
 	if got != want {
 		t.Errorf("ResultSubject: got %q, want %q", got, want)
 	}
@@ -229,7 +229,7 @@ func TestResultSubject(t *testing.T) {
 
 func TestQueryResultSubject(t *testing.T) {
 	got := QueryResultSubject("q-100")
-	want := "caelum.results.q-100.>"
+	want := "wadjet.results.q-100.>"
 	if got != want {
 		t.Errorf("QueryResultSubject: got %q, want %q", got, want)
 	}
@@ -237,7 +237,7 @@ func TestQueryResultSubject(t *testing.T) {
 
 func TestCancelSubject(t *testing.T) {
 	got := CancelSubject("q-100")
-	want := "caelum.cancel.q-100"
+	want := "wadjet.cancel.q-100"
 	if got != want {
 		t.Errorf("CancelSubject: got %q, want %q", got, want)
 	}
@@ -245,7 +245,7 @@ func TestCancelSubject(t *testing.T) {
 
 func TestCancelSubjectAll(t *testing.T) {
 	got := CancelSubjectAll()
-	want := "caelum.cancel.>"
+	want := "wadjet.cancel.>"
 	if got != want {
 		t.Errorf("CancelSubjectAll: got %q, want %q", got, want)
 	}
@@ -253,7 +253,7 @@ func TestCancelSubjectAll(t *testing.T) {
 
 func TestClusterTaskSubject(t *testing.T) {
 	got := ClusterTaskSubject("afb-east", "scan", "q-100", "s-0")
-	want := "caelum.tasks.afb-east.scan.q-100.s-0"
+	want := "wadjet.tasks.afb-east.scan.q-100.s-0"
 	if got != want {
 		t.Errorf("ClusterTaskSubject: got %q, want %q", got, want)
 	}
@@ -261,7 +261,7 @@ func TestClusterTaskSubject(t *testing.T) {
 
 func TestClusterTasksFilter(t *testing.T) {
 	got := ClusterTasksFilter("afb-east")
-	want := "caelum.tasks.afb-east.>"
+	want := "wadjet.tasks.afb-east.>"
 	if got != want {
 		t.Errorf("ClusterTasksFilter: got %q, want %q", got, want)
 	}

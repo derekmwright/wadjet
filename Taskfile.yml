@@ -2,9 +2,9 @@ version: "3"
 
 tasks:
   build:
-    desc: Build the caelum binary
+    desc: Build the wadjet binary
     cmds:
-      - go build -o caelum ./cmd/caelum
+      - go build -o wadjet ./cmd/wadjet
 
   build-ingest:
     desc: Build the unifi-ingest binary
@@ -39,7 +39,7 @@ tasks:
   proto:
     desc: Regenerate protobuf and gRPC Go code
     cmds:
-      - protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative proto/caelum/v1/caelum.proto
+      - protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative proto/wadjet/v1/wadjet.proto
 
   check:
     desc: Run vet, lint, and tests

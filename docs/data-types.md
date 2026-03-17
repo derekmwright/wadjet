@@ -1,6 +1,6 @@
 # Data Types
 
-Caelum supports a focused set of column types optimized for analytical workloads, with first-class support for network primitives.
+Wadjet supports a focused set of column types optimized for analytical workloads, with first-class support for network primitives.
 
 ## Type Reference
 
@@ -119,7 +119,7 @@ Null handling in expressions:
 ### In Go (Embedded API)
 
 ```go
-import "github.com/derekmwright/caelum/internal/storage/parquet"
+import "github.com/citc-tech/wadjet/internal/storage/parquet"
 
 schema := parquet.Schema{
     Columns: []parquet.Column{
@@ -144,9 +144,9 @@ Column types are referenced as `parquet.TypeXxx` constants (e.g., `parquet.TypeI
 
 ### In Parquet (Automatic Mapping)
 
-When reading Parquet files written by external tools (e.g., Bento), Caelum automatically infers types from the Parquet schema:
+When reading Parquet files written by external tools (e.g., Bento), Wadjet automatically infers types from the Parquet schema:
 
-| Parquet Physical Type | Parquet Logical Annotation | Caelum Type |
+| Parquet Physical Type | Parquet Logical Annotation | Wadjet Type |
 |----------------------|---------------------------|-------------|
 | INT32 | none | Int32 |
 | INT64 | none | Int64 |

@@ -12,8 +12,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Mode != "standalone" {
 		t.Fatalf("expected mode=standalone, got %s", cfg.Mode)
 	}
-	if cfg.Storage.Bucket != "caelum" {
-		t.Fatalf("expected bucket=caelum, got %s", cfg.Storage.Bucket)
+	if cfg.Storage.Bucket != "wadjet" {
+		t.Fatalf("expected bucket=wadjet, got %s", cfg.Storage.Bucket)
 	}
 	if cfg.NATS.Port != 4222 {
 		t.Fatalf("expected nats port=4222, got %d", cfg.NATS.Port)
@@ -45,7 +45,7 @@ parquet:
   page_buffer_size: 1048576
 `
 	dir := t.TempDir()
-	path := filepath.Join(dir, "caelum.yaml")
+	path := filepath.Join(dir, "wadjet.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ nats:
   url: nats://coordinator:4222
 `
 	dir := t.TempDir()
-	path := filepath.Join(dir, "caelum.yaml")
+	path := filepath.Join(dir, "wadjet.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +106,8 @@ nats:
 		t.Fatalf("expected nats url, got %s", cfg.NATS.URL)
 	}
 	// Defaults should still be present
-	if cfg.Storage.Bucket != "caelum" {
-		t.Fatalf("expected default bucket=caelum, got %s", cfg.Storage.Bucket)
+	if cfg.Storage.Bucket != "wadjet" {
+		t.Fatalf("expected default bucket=wadjet, got %s", cfg.Storage.Bucket)
 	}
 	if cfg.Worker.MaxConcurrent != 4 {
 		t.Fatalf("expected default max_concurrent=4, got %d", cfg.Worker.MaxConcurrent)
@@ -136,13 +136,13 @@ auth:
   jwt:
     enabled: true
     secret: "my-jwt-secret"
-    role_claim: "caelum_role"
+    role_claim: "wadjet_role"
     issuer: "auth.example.com"
   mtls:
     enabled: true
-    ca_file: "/etc/caelum/ca.pem"
-    cert_file: "/etc/caelum/server.pem"
-    key_file: "/etc/caelum/server-key.pem"
+    ca_file: "/etc/wadjet/ca.pem"
+    cert_file: "/etc/wadjet/server.pem"
+    key_file: "/etc/wadjet/server-key.pem"
     role_map:
       grafana.internal: reader
       etl.internal: writer
@@ -167,7 +167,7 @@ auth:
       row_filter: "department = 'engineering'"
 `
 	dir := t.TempDir()
-	path := filepath.Join(dir, "caelum.yaml")
+	path := filepath.Join(dir, "wadjet.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -189,8 +189,8 @@ auth:
 	if !cfg.Auth.JWT.Enabled {
 		t.Fatal("expected jwt.enabled=true")
 	}
-	if cfg.Auth.JWT.RoleClaim != "caelum_role" {
-		t.Fatalf("expected role_claim=caelum_role, got %s", cfg.Auth.JWT.RoleClaim)
+	if cfg.Auth.JWT.RoleClaim != "wadjet_role" {
+		t.Fatalf("expected role_claim=wadjet_role, got %s", cfg.Auth.JWT.RoleClaim)
 	}
 	if cfg.Auth.JWT.Issuer != "auth.example.com" {
 		t.Fatalf("expected issuer=auth.example.com, got %s", cfg.Auth.JWT.Issuer)
@@ -198,7 +198,7 @@ auth:
 	if !cfg.Auth.MTLS.Enabled {
 		t.Fatal("expected mtls.enabled=true")
 	}
-	if cfg.Auth.MTLS.CAFile != "/etc/caelum/ca.pem" {
+	if cfg.Auth.MTLS.CAFile != "/etc/wadjet/ca.pem" {
 		t.Fatalf("expected ca_file path, got %s", cfg.Auth.MTLS.CAFile)
 	}
 	if cfg.Auth.MTLS.RoleMap["grafana.internal"] != "reader" {

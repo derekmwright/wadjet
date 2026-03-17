@@ -1,4 +1,4 @@
-package caelum
+package wadjet
 
 import (
 	"bytes"
@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/engine/expr"
-	"github.com/derekmwright/caelum/internal/engine/scan"
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
+	"github.com/citc-tech/wadjet/internal/engine/scan"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // ExecResult contains the result of a DML operation (INSERT/UPDATE/DELETE).

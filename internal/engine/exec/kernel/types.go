@@ -3,7 +3,7 @@
 // at query init time (not per-row), eliminating type-switch overhead from hot loops.
 package kernel
 
-import "github.com/derekmwright/caelum/internal/engine/batch"
+import "github.com/citc-tech/wadjet/internal/engine/batch"
 
 // Numeric constrains types that support arithmetic operations.
 type Numeric interface {

@@ -1,4 +1,4 @@
-# Caelum TPC-H Benchmark on EC2
+# Wadjet TPC-H Benchmark on EC2
 
 Terraform + scripts for running TPC-H benchmarks on dedicated Graviton3 (ARM) EC2 instances with S3.
 
@@ -42,7 +42,7 @@ source /etc/environment
 tail -f /var/log/cloud-init-output.log
 
 # Run benchmark
-cd /root/caelum
+cd /root/wadjet
 sudo -i
 ./deploy/benchmark/run-benchmark.sh standalone SF1
 ./deploy/benchmark/run-benchmark.sh standalone SF10
@@ -102,22 +102,22 @@ export MEMORY_BUDGET=536870912  # 512 MB
 
 ```bash
 # Create a persistent bucket
-aws s3 mb s3://caelum-bench-sf100
+aws s3 mb s3://wadjet-bench-sf100
 
 # First run — generates data
 terraform apply -var-file=sf100-distributed.tfvars \
   -var="key_name=my-key" \
-  -var="data_bucket=caelum-bench-sf100"
+  -var="data_bucket=wadjet-bench-sf100"
 
 # Tear down compute, keep data
 terraform destroy -var-file=sf100-distributed.tfvars \
   -var="key_name=my-key" \
-  -var="data_bucket=caelum-bench-sf100"
+  -var="data_bucket=wadjet-bench-sf100"
 
 # Rebuild with different config — skips data gen automatically
 terraform apply -var-file=sf100-distributed.tfvars \
   -var="key_name=my-key" \
-  -var="data_bucket=caelum-bench-sf100" \
+  -var="data_bucket=wadjet-bench-sf100" \
   -var="worker_count=6"
 ```
 

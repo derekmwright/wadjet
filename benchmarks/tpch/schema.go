@@ -1,9 +1,9 @@
 package tpch
 
-import "github.com/derekmwright/caelum/internal/storage/parquet"
+import "github.com/citc-tech/wadjet/internal/storage/parquet"
 
-// TPC-H table schemas adapted for Caelum's type system.
-// Monetary values use FLOAT64 (DECIMAL would be ideal but Caelum uses float).
+// TPC-H table schemas adapted for Wadjet's type system.
+// Monetary values use FLOAT64 (DECIMAL would be ideal but Wadjet uses float).
 // Dates use DATE type (int32 days since epoch).
 
 var RegionSchema = parquet.Schema{

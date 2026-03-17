@@ -1,11 +1,11 @@
-# Embedding Caelum
+# Embedding Wadjet
 
-Caelum can be embedded directly in Go applications via the `caelum` package, giving you a programmatic analytical query engine without running a separate server.
+Wadjet can be embedded directly in Go applications via the `wadjet` package, giving you a programmatic analytical query engine without running a separate server.
 
 ## Installation
 
 ```bash
-go get github.com/derekmwright/caelum/caelum
+go get github.com/citc-tech/wadjet/wadjet
 ```
 
 ## Core API
@@ -14,8 +14,8 @@ go get github.com/derekmwright/caelum/caelum
 
 ```go
 import (
-    "github.com/derekmwright/caelum/internal/storage/objstore"
-    "github.com/derekmwright/caelum/caelum"
+    "github.com/citc-tech/wadjet/internal/storage/objstore"
+    "github.com/citc-tech/wadjet/wadjet"
 )
 
 // First create an object store client
@@ -29,9 +29,9 @@ if err != nil {
     log.Fatal(err)
 }
 
-db, err := caelum.Open(ctx, caelum.Config{
+db, err := wadjet.Open(ctx, wadjet.Config{
     Store:  store,
-    Bucket: "caelum",
+    Bucket: "wadjet",
 })
 ```
 
@@ -61,7 +61,7 @@ store := db.Store()
 ### Ingestion
 
 ```go
-import "github.com/derekmwright/caelum/internal/storage/ingest"
+import "github.com/citc-tech/wadjet/internal/storage/ingest"
 
 // NewIngester returns *ingest.Ingester (no error return)
 ingester := db.NewIngester("flow_logs", schema, []string{"date"}, ingest.Config{
@@ -134,12 +134,12 @@ import (
     "net/http"
     "time"
 
-    "github.com/derekmwright/caelum/internal/storage/objstore"
-    "github.com/derekmwright/caelum/internal/storage/parquet"
-    "github.com/derekmwright/caelum/caelum"
+    "github.com/citc-tech/wadjet/internal/storage/objstore"
+    "github.com/citc-tech/wadjet/internal/storage/parquet"
+    "github.com/citc-tech/wadjet/wadjet"
 )
 
-var db *caelum.DB
+var db *wadjet.DB
 
 func main() {
     ctx := context.Background()
@@ -153,7 +153,7 @@ func main() {
         log.Fatal(err)
     }
 
-    db, err = caelum.Open(ctx, caelum.Config{
+    db, err = wadjet.Open(ctx, wadjet.Config{
         Store:  store,
         Bucket: "network-analytics",
     })

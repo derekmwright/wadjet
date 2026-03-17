@@ -1,4 +1,4 @@
-# Caelum
+# Wadjet
 
 Columnar analytics engine in Go with network-native operations, distributed execution, and PostgreSQL wire protocol compatibility.
 
@@ -6,7 +6,7 @@ Columnar analytics engine in Go with network-native operations, distributed exec
 
 ```bash
 # Build
-go build -o caelum ./cmd/caelum
+go build -o wadjet ./cmd/wadjet
 
 # Unit tests
 go test ./internal/...
@@ -23,7 +23,7 @@ go test -bench=. -benchmem ./internal/engine/scan
 go test -bench=. -benchmem ./internal/engine/batch
 
 # Run standalone server
-caelum serve --mode=standalone --pg-addr=:5432
+wadjet serve --mode=standalone --pg-addr=:5432
 ```
 
 ## Architecture
@@ -43,8 +43,8 @@ SQL text
 
 | Package | Purpose |
 |---|---|
-| `caelum/` | Public embeddable API (`caelum.DB`, `caelum.Open()`) |
-| `cmd/caelum/` | CLI entry point (Cobra: serve, query, shell, mcp) |
+| `wadjet/` | Public embeddable API (`wadjet.DB`, `wadjet.Open()`) |
+| `cmd/wadjet/` | CLI entry point (Cobra: serve, query, shell, mcp) |
 | `internal/engine/batch/` | Record batches, vectors, selection vectors, batch pooling |
 | `internal/engine/exec/` | Pipeline executor, operators (filter, project, join, sort, aggregate, window) |
 | `internal/engine/expr/` | Expression compiler, 273+ scalar functions |
@@ -179,14 +179,14 @@ refactor(scan): extract predicate pushdown into separate module
 
 ```bash
 # Development (all-in-one)
-caelum serve --mode=standalone --pg-addr=:5432
+wadjet serve --mode=standalone --pg-addr=:5432
 
 # Production distributed
-caelum serve --mode=coordinator --pg-addr=:5432 --nats-url=nats://nats:4222
-caelum serve --mode=worker --nats-url=nats://nats:4222
+wadjet serve --mode=coordinator --pg-addr=:5432 --nats-url=nats://nats:4222
+wadjet serve --mode=worker --nats-url=nats://nats:4222
 
 # Query interface
-psql -h localhost -p 5432 -U caelum -d caelum
+psql -h localhost -p 5432 -U wadjet -d wadjet
 ```
 
 ## CI/CD Automation

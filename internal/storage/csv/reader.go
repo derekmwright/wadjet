@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 const defaultBatchSize = 2048

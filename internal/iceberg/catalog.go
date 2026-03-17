@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
-// CatalogIntegration bridges Iceberg table metadata into Caelum's native catalog.
+// CatalogIntegration bridges Iceberg table metadata into Wadjet's native catalog.
 type CatalogIntegration struct {
 	reader  *TableReader
 	catalog *catalog.Catalog
@@ -33,7 +33,7 @@ func NewCatalogIntegrationWithStore(cat *catalog.Catalog, store objstore.Store, 
 }
 
 // RegisterTable reads an Iceberg table from the given metadata path and
-// registers it in the Caelum catalog with the given name. Data files from
+// registers it in the Wadjet catalog with the given name. Data files from
 // the Iceberg manifest are registered as partition entries in the catalog.
 func (ci *CatalogIntegration) RegisterTable(ctx context.Context, name, metadataPath string) (*TableInfo, error) {
 	info, err := ci.reader.ReadTable(ctx, metadataPath)

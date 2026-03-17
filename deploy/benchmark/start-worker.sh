@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Start a Caelum worker node for distributed benchmarking.
+# Start a Wadjet worker node for distributed benchmarking.
 # Run this on each worker instance after Terraform provisioning.
 #
 # Usage:
@@ -14,13 +14,13 @@ set -euo pipefail
 COORD_IP="${1:?Usage: $0 <coordinator-private-ip>}"
 NATS_URL="nats://${COORD_IP}:4222"
 
-BUCKET="${CAELUM_BUCKET:?Set CAELUM_BUCKET}"
-REGION="${CAELUM_REGION:?Set CAELUM_REGION}"
+BUCKET="${WADJET_BUCKET:?Set WADJET_BUCKET}"
+REGION="${WADJET_REGION:?Set WADJET_REGION}"
 S3_ENDPOINT="s3.${REGION}.amazonaws.com"
 
 echo "[$(date +%H:%M:%S)] Starting worker, connecting to coordinator at ${COORD_IP}..."
 
-exec caelum serve \
+exec wadjet serve \
   --mode=worker \
   --nats-url="${NATS_URL}" \
   --storage.endpoint="${S3_ENDPOINT}" \

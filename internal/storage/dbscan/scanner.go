@@ -8,8 +8,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 const defaultBatchSize = 2048
@@ -96,12 +96,12 @@ func (s *Scanner) Close() error {
 	return nil
 }
 
-// mapSQLType maps a *sql.ColumnType to a Caelum TypeID.
+// mapSQLType maps a *sql.ColumnType to a Wadjet TypeID.
 func mapSQLType(ct *sql.ColumnType) parquet.TypeID {
 	return mapDBTypeName(ct.DatabaseTypeName())
 }
 
-// mapDBTypeName maps a database type name string to a Caelum TypeID.
+// mapDBTypeName maps a database type name string to a Wadjet TypeID.
 func mapDBTypeName(dbType string) parquet.TypeID {
 	switch dbType {
 	// Boolean

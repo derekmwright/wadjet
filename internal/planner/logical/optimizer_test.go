@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
 func TestExtractPartitionFilters_Equality(t *testing.T) {

@@ -18,11 +18,11 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	caelumv1 "github.com/derekmwright/caelum/gen/caelum/v1"
-	caelumdb "github.com/derekmwright/caelum/caelum"
-	"github.com/derekmwright/caelum/internal/coordinator"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	wadjetv1 "github.com/citc-tech/wadjet/gen/wadjet/v1"
+	wadjetdb "github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 const streamBatchSize = 1000
@@ -32,18 +32,18 @@ type GRPCConfig struct {
 	Addr           string
 	Catalog        *catalog.Catalog
 	Coord          *coordinator.Coordinator // nil = standalone
-	DB             *caelumdb.DB             // nil = distributed
+	DB             *wadjetdb.DB             // nil = distributed
 	TLSConfig      *tls.Config              // nil = plain gRPC
 	MaxConnections int                      // 0 = unlimited
 }
 
-// GRPCServer implements the CaelumService gRPC API.
+// GRPCServer implements the WadjetService gRPC API.
 type GRPCServer struct {
-	caelumv1.UnimplementedCaelumServiceServer
+	wadjetv1.UnimplementedWadjetServiceServer
 
 	catalog   *catalog.Catalog
 	coord     *coordinator.Coordinator
-	db        *caelumdb.DB
+	db        *wadjetdb.DB
 	logger    *slog.Logger
 	server    *grpc.Server
 	addr      string
@@ -85,13 +85,13 @@ func (g *GRPCServer) Start() error {
 	}
 
 	g.server = grpc.NewServer(opts...)
-	caelumv1.RegisterCaelumServiceServer(g.server, g)
+	wadjetv1.RegisterWadjetServiceServer(g.server, g)
 
 	// Register health service
 	hs := health.NewServer()
 	healthpb.RegisterHealthServer(g.server, hs)
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
-	hs.SetServingStatus("caelum.v1.CaelumService", healthpb.HealthCheckResponse_SERVING)
+	hs.SetServingStatus("wadjet.v1.WadjetService", healthpb.HealthCheckResponse_SERVING)
 
 	g.logger.Info("gRPC server listening", "addr", g.addr, "tls", g.tlsConfig != nil,
 		"max_connections", g.maxConns)
@@ -106,7 +106,7 @@ func (g *GRPCServer) Shutdown() {
 }
 
 // Query executes a SQL query and returns all results.
-func (g *GRPCServer) Query(ctx context.Context, req *caelumv1.QueryRequest) (*caelumv1.QueryResponse, error) {
+func (g *GRPCServer) Query(ctx context.Context, req *wadjetv1.QueryRequest) (*wadjetv1.QueryResponse, error) {
 	if req.Sql == "" {
 		return nil, status.Error(codes.InvalidArgument, "sql is required")
 	}
@@ -116,11 +116,11 @@ func (g *GRPCServer) Query(ctx context.Context, req *caelumv1.QueryRequest) (*ca
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "query error: %v", err)
 		}
-		return &caelumv1.QueryResponse{
+		return &wadjetv1.QueryResponse{
 			QueryId: result.QueryID,
 			Columns: result.Columns,
 			Rows:    rowsToProto(result.Rows),
-			Stats: &caelumv1.QueryStats{
+			Stats: &wadjetv1.QueryStats{
 				TotalRows: result.TotalRows,
 				Elapsed:   durationpb.New(result.Elapsed),
 				Plan:      result.Plan,
@@ -133,10 +133,10 @@ func (g *GRPCServer) Query(ctx context.Context, req *caelumv1.QueryRequest) (*ca
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "query error: %v", err)
 		}
-		return &caelumv1.QueryResponse{
+		return &wadjetv1.QueryResponse{
 			Columns: result.Columns,
 			Rows:    rowsToProto(result.Rows),
-			Stats: &caelumv1.QueryStats{
+			Stats: &wadjetv1.QueryStats{
 				TotalRows: int64(len(result.Rows)),
 				Plan:      result.Plan,
 			},
@@ -147,14 +147,14 @@ func (g *GRPCServer) Query(ctx context.Context, req *caelumv1.QueryRequest) (*ca
 }
 
 // QueryStream executes a SQL query and streams result batches.
-func (g *GRPCServer) QueryStream(req *caelumv1.QueryRequest, stream caelumv1.CaelumService_QueryStreamServer) error {
+func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.WadjetService_QueryStreamServer) error {
 	if req.Sql == "" {
 		return status.Error(codes.InvalidArgument, "sql is required")
 	}
 
 	var rows []map[string]any
 	var columns []string
-	var stats *caelumv1.QueryStats
+	var stats *wadjetv1.QueryStats
 
 	if g.coord != nil {
 		result, err := g.coord.ExecuteSQL(stream.Context(), req.Sql)
@@ -163,7 +163,7 @@ func (g *GRPCServer) QueryStream(req *caelumv1.QueryRequest, stream caelumv1.Cae
 		}
 		rows = result.Rows
 		columns = result.Columns
-		stats = &caelumv1.QueryStats{
+		stats = &wadjetv1.QueryStats{
 			TotalRows: result.TotalRows,
 			Elapsed:   durationpb.New(result.Elapsed),
 			Plan:      result.Plan,
@@ -175,7 +175,7 @@ func (g *GRPCServer) QueryStream(req *caelumv1.QueryRequest, stream caelumv1.Cae
 		}
 		rows = result.Rows
 		columns = result.Columns
-		stats = &caelumv1.QueryStats{
+		stats = &wadjetv1.QueryStats{
 			TotalRows: int64(len(result.Rows)),
 			Plan:      result.Plan,
 		}
@@ -191,7 +191,7 @@ func (g *GRPCServer) QueryStream(req *caelumv1.QueryRequest, stream caelumv1.Cae
 		}
 		isLast := end >= len(rows)
 
-		resp := &caelumv1.QueryStreamResponse{
+		resp := &wadjetv1.QueryStreamResponse{
 			Rows:   rowsToProto(rows[i:end]),
 			IsLast: isLast,
 		}
@@ -210,7 +210,7 @@ func (g *GRPCServer) QueryStream(req *caelumv1.QueryRequest, stream caelumv1.Cae
 
 	// Empty result set
 	if len(rows) == 0 {
-		return stream.Send(&caelumv1.QueryStreamResponse{
+		return stream.Send(&wadjetv1.QueryStreamResponse{
 			Columns: columns,
 			Stats:   stats,
 			IsLast:  true,
@@ -221,7 +221,7 @@ func (g *GRPCServer) QueryStream(req *caelumv1.QueryRequest, stream caelumv1.Cae
 }
 
 // SubmitQuery submits an async query (distributed mode only).
-func (g *GRPCServer) SubmitQuery(ctx context.Context, req *caelumv1.QueryRequest) (*caelumv1.SubmitQueryResponse, error) {
+func (g *GRPCServer) SubmitQuery(ctx context.Context, req *wadjetv1.QueryRequest) (*wadjetv1.SubmitQueryResponse, error) {
 	if g.coord == nil {
 		return nil, status.Error(codes.Unavailable, "async queries require distributed mode")
 	}
@@ -234,14 +234,14 @@ func (g *GRPCServer) SubmitQuery(ctx context.Context, req *caelumv1.QueryRequest
 		return nil, status.Errorf(codes.Internal, "submit error: %v", err)
 	}
 
-	return &caelumv1.SubmitQueryResponse{
+	return &wadjetv1.SubmitQueryResponse{
 		QueryId: queryID,
 		Plan:    plan,
 	}, nil
 }
 
 // GetQueryStatus returns the status of an async query.
-func (g *GRPCServer) GetQueryStatus(ctx context.Context, req *caelumv1.GetQueryStatusRequest) (*caelumv1.GetQueryStatusResponse, error) {
+func (g *GRPCServer) GetQueryStatus(ctx context.Context, req *wadjetv1.GetQueryStatusRequest) (*wadjetv1.GetQueryStatusResponse, error) {
 	if g.coord == nil {
 		return nil, status.Error(codes.Unavailable, "async queries require distributed mode")
 	}
@@ -254,7 +254,7 @@ func (g *GRPCServer) GetQueryStatus(ctx context.Context, req *caelumv1.GetQueryS
 		return nil, status.Errorf(codes.NotFound, "%v", err)
 	}
 
-	resp := &caelumv1.GetQueryStatusResponse{
+	resp := &wadjetv1.GetQueryStatusResponse{
 		QueryId:   qs.QueryID,
 		Sql:       qs.SQL,
 		State:     qs.State,
@@ -263,7 +263,7 @@ func (g *GRPCServer) GetQueryStatus(ctx context.Context, req *caelumv1.GetQueryS
 		Error:     qs.Error,
 	}
 	for _, s := range qs.Stages {
-		resp.Stages = append(resp.Stages, &caelumv1.StageStatus{
+		resp.Stages = append(resp.Stages, &wadjetv1.StageStatus{
 			StageId:     s.StageID,
 			Type:        s.Type,
 			TotalTasks:  int32(s.TotalTasks),
@@ -276,7 +276,7 @@ func (g *GRPCServer) GetQueryStatus(ctx context.Context, req *caelumv1.GetQueryS
 }
 
 // CancelQuery cancels a running query.
-func (g *GRPCServer) CancelQuery(ctx context.Context, req *caelumv1.CancelQueryRequest) (*caelumv1.CancelQueryResponse, error) {
+func (g *GRPCServer) CancelQuery(ctx context.Context, req *wadjetv1.CancelQueryRequest) (*wadjetv1.CancelQueryResponse, error) {
 	if g.coord == nil {
 		return nil, status.Error(codes.Unavailable, "async queries require distributed mode")
 	}
@@ -288,23 +288,23 @@ func (g *GRPCServer) CancelQuery(ctx context.Context, req *caelumv1.CancelQueryR
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
 
-	return &caelumv1.CancelQueryResponse{
+	return &wadjetv1.CancelQueryResponse{
 		QueryId: req.QueryId,
 		State:   "cancelled",
 	}, nil
 }
 
 // ListTables returns all table names.
-func (g *GRPCServer) ListTables(ctx context.Context, _ *caelumv1.ListTablesRequest) (*caelumv1.ListTablesResponse, error) {
+func (g *GRPCServer) ListTables(ctx context.Context, _ *wadjetv1.ListTablesRequest) (*wadjetv1.ListTablesResponse, error) {
 	tables, err := g.catalog.ListTables(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "listing tables: %v", err)
 	}
-	return &caelumv1.ListTablesResponse{Tables: tables}, nil
+	return &wadjetv1.ListTablesResponse{Tables: tables}, nil
 }
 
 // DescribeTable returns a table's schema.
-func (g *GRPCServer) DescribeTable(ctx context.Context, req *caelumv1.DescribeTableRequest) (*caelumv1.DescribeTableResponse, error) {
+func (g *GRPCServer) DescribeTable(ctx context.Context, req *wadjetv1.DescribeTableRequest) (*wadjetv1.DescribeTableResponse, error) {
 	if req.TableName == "" {
 		return nil, status.Error(codes.InvalidArgument, "table_name is required")
 	}
@@ -314,12 +314,12 @@ func (g *GRPCServer) DescribeTable(ctx context.Context, req *caelumv1.DescribeTa
 		return nil, status.Errorf(codes.NotFound, "table %q: %v", req.TableName, err)
 	}
 
-	resp := &caelumv1.DescribeTableResponse{
+	resp := &wadjetv1.DescribeTableResponse{
 		Name:          table.Name,
 		PartitionKeys: table.PartitionKeys,
 	}
 	for _, col := range table.Schema.Columns {
-		resp.Columns = append(resp.Columns, &caelumv1.ColumnInfo{
+		resp.Columns = append(resp.Columns, &wadjetv1.ColumnInfo{
 			Name:     col.Name,
 			Type:     col.Type.String(),
 			Nullable: col.Nullable,
@@ -330,7 +330,7 @@ func (g *GRPCServer) DescribeTable(ctx context.Context, req *caelumv1.DescribeTa
 }
 
 // CreateTable creates a new table.
-func (g *GRPCServer) CreateTable(ctx context.Context, req *caelumv1.CreateTableRequest) (*caelumv1.CreateTableResponse, error) {
+func (g *GRPCServer) CreateTable(ctx context.Context, req *wadjetv1.CreateTableRequest) (*wadjetv1.CreateTableResponse, error) {
 	if req.Name == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
@@ -356,34 +356,34 @@ func (g *GRPCServer) CreateTable(ctx context.Context, req *caelumv1.CreateTableR
 		return nil, status.Errorf(codes.Internal, "creating table: %v", err)
 	}
 
-	return &caelumv1.CreateTableResponse{Name: req.Name}, nil
+	return &wadjetv1.CreateTableResponse{Name: req.Name}, nil
 }
 
 // DropTable removes a table.
-func (g *GRPCServer) DropTable(ctx context.Context, req *caelumv1.DropTableRequest) (*caelumv1.DropTableResponse, error) {
+func (g *GRPCServer) DropTable(ctx context.Context, req *wadjetv1.DropTableRequest) (*wadjetv1.DropTableResponse, error) {
 	if req.Name == "" {
 		return nil, status.Error(codes.InvalidArgument, "name is required")
 	}
 
 	if err := g.catalog.DropTable(ctx, req.Name); err != nil {
 		if req.IfExists {
-			return &caelumv1.DropTableResponse{Name: req.Name}, nil
+			return &wadjetv1.DropTableResponse{Name: req.Name}, nil
 		}
 		return nil, status.Errorf(codes.NotFound, "table %q: %v", req.Name, err)
 	}
 
-	return &caelumv1.DropTableResponse{Name: req.Name}, nil
+	return &wadjetv1.DropTableResponse{Name: req.Name}, nil
 }
 
 // rowsToProto converts Go row maps to protobuf Row messages.
-func rowsToProto(rows []map[string]any) []*caelumv1.Row {
-	result := make([]*caelumv1.Row, len(rows))
+func rowsToProto(rows []map[string]any) []*wadjetv1.Row {
+	result := make([]*wadjetv1.Row, len(rows))
 	for i, row := range rows {
 		fields := make(map[string]*structpb.Value, len(row))
 		for k, v := range row {
 			fields[k] = anyToProtoValue(v)
 		}
-		result[i] = &caelumv1.Row{Fields: fields}
+		result[i] = &wadjetv1.Row{Fields: fields}
 	}
 	return result
 }

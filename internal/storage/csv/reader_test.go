@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 func TestReader_Basic(t *testing.T) {

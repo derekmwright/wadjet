@@ -14,13 +14,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/derekmwright/caelum/internal/distributed"
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/engine/exec"
-	"github.com/derekmwright/caelum/internal/engine/memory"
-	"github.com/derekmwright/caelum/internal/metrics"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/metrics"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 const inlineResultThreshold = 256 * 1024 // 256 KB — avoids S3 round-trip for common aggregation/LIMIT results

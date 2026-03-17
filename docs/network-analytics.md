@@ -1,6 +1,6 @@
 # Network Analytics Workflow
 
-This guide walks through the complete end-to-end pipeline: collecting network device logs, processing them through Bento, querying with Caelum, and integrating with custom applications.
+This guide walks through the complete end-to-end pipeline: collecting network device logs, processing them through Bento, querying with Wadjet, and integrating with custom applications.
 
 ## Pipeline Overview
 
@@ -22,7 +22,7 @@ graph TD
         IN --> PA --> EN --> OUT
     end
 
-    subgraph CA ["CAELUM (Query Engine)"]
+    subgraph CA ["WADJET (Query Engine)"]
         CAT["Catalog<br/><sub>table schemas, manifests</sub>"]
         SQL["SQL Engine<br/><sub>parse, plan, execute</sub>"]
         API["HTTP API<br/><sub>REST + Prometheus</sub>"]
@@ -55,20 +55,20 @@ docker run -d --name minio \
 
 # Create the bucket
 mc alias set local http://localhost:9000 minioadmin minioadmin
-mc mb local/caelum
+mc mb local/wadjet
 ```
 
-### Caelum Server
+### Wadjet Server
 
 ```bash
-./caelum serve \
+./wadjet serve \
   --mode standalone \
   --http-addr :8080 \
   --endpoint localhost:9000 \
   --access-key minioadmin \
   --secret-key minioadmin \
-  --bucket caelum \
-  --config caelum.yaml
+  --bucket wadjet \
+  --config wadjet.yaml
 ```
 
 ## Step 2: Configure Bento Pipelines
@@ -123,7 +123,7 @@ pipeline:
 
 output:
   aws_s3:
-    bucket: caelum
+    bucket: wadjet
     path: 'data/firewall_logs/date=${! this.date }/device=${! this.device }/part-${! uuid_v4() }.parquet'
     batching:
       count: 100000
@@ -174,7 +174,7 @@ input:
       - kafka.internal:9092
     topics:
       - netflow-v9
-    consumer_group: caelum-netflow
+    consumer_group: wadjet-netflow
 
 pipeline:
   processors:
@@ -201,7 +201,7 @@ pipeline:
 
 output:
   aws_s3:
-    bucket: caelum
+    bucket: wadjet
     path: 'data/netflow/date=${! this.date }/exporter=${! this.exporter }/part-${! uuid_v4() }.parquet'
     batching:
       count: 250000
@@ -287,7 +287,7 @@ pipeline:
 
 output:
   aws_s3:
-    bucket: caelum
+    bucket: wadjet
     path: 'data/device_inventory/snapshot-${! now().format_timestamp("2006-01-02T15-04-05") }.parquet'
     codec: parquet
     parquet_encoding:
@@ -321,9 +321,9 @@ output:
     force_path_style_urls: true
 ```
 
-## Step 3: Register Tables in Caelum
+## Step 3: Register Tables in Wadjet
 
-After Bento starts writing data, register the tables so Caelum can query them.
+After Bento starts writing data, register the tables so Wadjet can query them.
 
 ```go
 // register_tables.go
@@ -333,9 +333,9 @@ import (
     "context"
     "log"
 
-    "github.com/derekmwright/caelum/internal/storage/objstore"
-    "github.com/derekmwright/caelum/internal/storage/parquet"
-    "github.com/derekmwright/caelum/caelum"
+    "github.com/citc-tech/wadjet/internal/storage/objstore"
+    "github.com/citc-tech/wadjet/internal/storage/parquet"
+    "github.com/citc-tech/wadjet/wadjet"
 )
 
 func main() {
@@ -350,9 +350,9 @@ func main() {
         log.Fatal(err)
     }
 
-    db, err := caelum.Open(ctx, caelum.Config{
+    db, err := wadjet.Open(ctx, wadjet.Config{
         Store:  store,
-        Bucket: "caelum",
+        Bucket: "wadjet",
     })
     if err != nil {
         log.Fatal(err)
@@ -422,12 +422,12 @@ func main() {
 ### Via the Interactive Shell
 
 ```bash
-./caelum shell --endpoint localhost:9000 --access-key minioadmin --secret-key minioadmin --bucket caelum
+./wadjet shell --endpoint localhost:9000 --access-key minioadmin --secret-key minioadmin --bucket wadjet
 ```
 
 ```sql
 -- Top denied connections by source
-caelum> SELECT src_ip, COUNT(*) AS denied
+wadjet> SELECT src_ip, COUNT(*) AS denied
         FROM firewall_logs
         WHERE date = '2026-03-15' AND action = 'DENY'
         GROUP BY src_ip
@@ -435,7 +435,7 @@ caelum> SELECT src_ip, COUNT(*) AS denied
         LIMIT 20;
 
 -- Bandwidth by AS path
-caelum> SELECT src_as, dst_as, SUM(bytes) AS total_bytes, SUM(packets) AS total_pkts
+wadjet> SELECT src_as, dst_as, SUM(bytes) AS total_bytes, SUM(packets) AS total_pkts
         FROM netflow
         WHERE date = '2026-03-15'
         GROUP BY src_as, dst_as
@@ -443,7 +443,7 @@ caelum> SELECT src_as, dst_as, SUM(bytes) AS total_bytes, SUM(packets) AS total_
         LIMIT 25;
 
 -- Join flow data with device inventory
-caelum> SELECT d.hostname, d.location, d.role,
+wadjet> SELECT d.hostname, d.location, d.role,
                SUM(n.bytes) AS total_bytes,
                COUNT(*) AS flow_count
         FROM netflow n
@@ -474,10 +474,10 @@ from datetime import date, timedelta
 from flask import Flask, jsonify
 
 app = Flask(__name__)
-CAELUM = "http://localhost:8080"
+WADJET = "http://localhost:8080"
 
-def caelum_query(sql: str) -> list:
-    resp = requests.post(f"{CAELUM}/v1/queries", json={"sql": sql})
+def wadjet_query(sql: str) -> list:
+    resp = requests.post(f"{WADJET}/v1/queries", json={"sql": sql})
     resp.raise_for_status()
     return resp.json()["rows"]
 
@@ -486,13 +486,13 @@ def dashboard_overview():
     today = date.today().isoformat()
 
     # Run multiple queries for the dashboard
-    top_talkers = caelum_query(f"""
+    top_talkers = wadjet_query(f"""
         SELECT src_ip, SUM(bytes) AS total_bytes, COUNT(*) AS flows
         FROM netflow WHERE date = '{today}'
         GROUP BY src_ip ORDER BY total_bytes DESC LIMIT 10
     """)
 
-    denied_connections = caelum_query(f"""
+    denied_connections = wadjet_query(f"""
         SELECT src_ip, dst_ip, dst_port, COUNT(*) AS attempts
         FROM firewall_logs
         WHERE date = '{today}' AND action = 'DENY'
@@ -500,7 +500,7 @@ def dashboard_overview():
         ORDER BY attempts DESC LIMIT 10
     """)
 
-    traffic_by_protocol = caelum_query(f"""
+    traffic_by_protocol = wadjet_query(f"""
         SELECT protocol, SUM(bytes) AS total_bytes, COUNT(*) AS flows
         FROM netflow WHERE date = '{today}'
         GROUP BY protocol ORDER BY total_bytes DESC
@@ -517,11 +517,11 @@ def dashboard_overview():
 def device_detail(hostname):
     today = date.today().isoformat()
 
-    device_info = caelum_query(f"""
+    device_info = wadjet_query(f"""
         SELECT * FROM device_inventory WHERE hostname = '{hostname}' LIMIT 1
     """)
 
-    device_traffic = caelum_query(f"""
+    device_traffic = wadjet_query(f"""
         SELECT
             n.dst_ip, n.dst_port, n.protocol,
             SUM(n.bytes) AS total_bytes, COUNT(*) AS flows
@@ -544,7 +544,7 @@ if __name__ == "__main__":
 ### Go Alerting Service
 
 ```go
-// alerting.go — monitors Caelum for anomalous patterns and sends alerts
+// alerting.go — monitors Wadjet for anomalous patterns and sends alerts
 package main
 
 import (
@@ -553,8 +553,8 @@ import (
     "log"
     "time"
 
-    "github.com/derekmwright/caelum/internal/storage/objstore"
-    "github.com/derekmwright/caelum/caelum"
+    "github.com/citc-tech/wadjet/internal/storage/objstore"
+    "github.com/citc-tech/wadjet/wadjet"
 )
 
 type Alert struct {
@@ -571,9 +571,9 @@ func main() {
         AccessKey: "minioadmin",
         SecretKey: "minioadmin",
     })
-    db, _ := caelum.Open(ctx, caelum.Config{
+    db, _ := wadjet.Open(ctx, wadjet.Config{
         Store:  store,
-        Bucket: "caelum",
+        Bucket: "wadjet",
     })
 
     ticker := time.NewTicker(5 * time.Minute)
@@ -585,7 +585,7 @@ func main() {
     }
 }
 
-func runChecks(ctx context.Context, db *caelum.DB) []Alert {
+func runChecks(ctx context.Context, db *wadjet.DB) []Alert {
     var alerts []Alert
     today := time.Now().Format("2006-01-02")
 
@@ -651,11 +651,11 @@ func sendAlert(a Alert) {
 
 ### Grafana Integration
 
-Caelum's HTTP API can be used as a JSON data source in Grafana via the [JSON API plugin](https://grafana.com/grafana/plugins/marcusolsson-json-datasource/):
+Wadjet's HTTP API can be used as a JSON data source in Grafana via the [JSON API plugin](https://grafana.com/grafana/plugins/marcusolsson-json-datasource/):
 
 1. Install the Grafana JSON API data source plugin
 2. Add a new data source:
-   - **URL**: `http://caelum.internal:8080`
+   - **URL**: `http://wadjet.internal:8080`
    - **Custom headers**: `Authorization: Bearer <api-key>`
 3. Create a dashboard panel with a query like:
 
@@ -672,16 +672,16 @@ POST /v1/queries
 
 ### Infrastructure
 - [ ] S3 storage with replication enabled (MinIO erasure coding or AWS S3 standard)
-- [ ] Caelum deployed in distributed mode with 3+ workers
+- [ ] Wadjet deployed in distributed mode with 3+ workers
 - [ ] Bento pipelines deployed as systemd services or Kubernetes deployments
-- [ ] Reverse proxy (nginx/Caddy) in front of Caelum with TLS termination
+- [ ] Reverse proxy (nginx/Caddy) in front of Wadjet with TLS termination
 
 ### Data Pipeline
 - [ ] Syslog collection configured on all network devices
 - [ ] NetFlow/IPFIX export enabled on core routers and switches
 - [ ] Bento batching tuned for 64–256 MB Parquet files
 - [ ] Partition keys chosen (typically `date` + one device/region dimension)
-- [ ] All tables registered in the Caelum catalog
+- [ ] All tables registered in the Wadjet catalog
 
 ### Security
 - [ ] Authentication configured (JWT or mTLS for production)
@@ -690,7 +690,7 @@ POST /v1/queries
 - [ ] API keys rotated on schedule
 
 ### Monitoring
-- [ ] Prometheus scraping Caelum `/metrics` endpoint
+- [ ] Prometheus scraping Wadjet `/metrics` endpoint
 - [ ] Grafana dashboards for query latency, rows scanned, error rate
 - [ ] Alerting on query failures and high latency
 - [ ] Bento pipeline health monitoring

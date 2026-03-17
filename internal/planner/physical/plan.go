@@ -11,15 +11,15 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/derekmwright/caelum/internal/config"
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/engine/exec"
-	"github.com/derekmwright/caelum/internal/engine/expr"
-	"github.com/derekmwright/caelum/internal/engine/memory"
-	"github.com/derekmwright/caelum/internal/planner/logical"
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/config"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // PhysicalPlan represents an executable query plan.

@@ -1,6 +1,6 @@
 # Security
 
-Caelum provides layered security: authentication, role-based authorization, and cell-level access policies. All security configuration is hot-reloadable.
+Wadjet provides layered security: authentication, role-based authorization, and cell-level access policies. All security configuration is hot-reloadable.
 
 ## Authentication
 
@@ -14,13 +14,13 @@ Simple bearer token authentication. Best for service-to-service communication. E
 auth:
   enabled: true
   api_keys:
-    - key: "caelum-ingest-key-abc123"
+    - key: "wadjet-ingest-key-abc123"
       name: "ingest-pipeline"
       role: writer
-    - key: "caelum-dashboard-key-xyz789"
+    - key: "wadjet-dashboard-key-xyz789"
       name: "grafana-dashboard"
       role: reader
-    - key: "caelum-admin-key-000000"
+    - key: "wadjet-admin-key-000000"
       name: "admin-operator"
       role: admin
 ```
@@ -28,7 +28,7 @@ auth:
 Usage:
 
 ```bash
-curl -H "Authorization: Bearer caelum-ingest-key-abc123" http://localhost:8080/v1/queries ...
+curl -H "Authorization: Bearer wadjet-ingest-key-abc123" http://localhost:8080/v1/queries ...
 ```
 
 ### JWT
@@ -54,7 +54,7 @@ auth:
   enabled: true
   jwt:
     enabled: true
-    public_key_file: /etc/caelum/jwt-public.pem
+    public_key_file: /etc/wadjet/jwt-public.pem
     role_claim: role
     issuer: "my-idp"
 ```
@@ -86,9 +86,9 @@ auth:
   enabled: true
   mtls:
     enabled: true
-    ca_file: /etc/caelum/ca.pem
-    cert_file: /etc/caelum/server-cert.pem
-    key_file: /etc/caelum/server-key.pem
+    ca_file: /etc/wadjet/ca.pem
+    cert_file: /etc/wadjet/server-cert.pem
+    key_file: /etc/wadjet/server-key.pem
     role_map:
       "CN=ingest-pipeline": writer
       "CN=grafana-dashboard": reader
@@ -101,7 +101,7 @@ The server validates client certificates against the configured CA. The certific
 Usage:
 
 ```bash
-curl --cert client.pem --key client-key.pem --cacert ca.pem https://caelum.internal:8443/v1/queries ...
+curl --cert client.pem --key client-key.pem --cacert ca.pem https://wadjet.internal:8443/v1/queries ...
 ```
 
 ## Authorization
@@ -205,19 +205,19 @@ In distributed mode, identity context (name and role) is propagated from the HTT
 Complete security configuration for a network monitoring deployment:
 
 ```yaml
-# caelum-security.yaml
+# wadjet-security.yaml
 
 auth:
   enabled: true
 
   jwt:
     enabled: true
-    public_key_file: /etc/caelum/idp-public.pem
+    public_key_file: /etc/wadjet/idp-public.pem
     role_claim: role
     issuer: "corporate-idp"
 
   api_keys:
-    - key: "caelum-ingest-key-secret"
+    - key: "wadjet-ingest-key-secret"
       name: "bento-pipeline"
       role: ingest-service
 
@@ -274,7 +274,7 @@ This enables operations like:
 
 ## Audit Logging
 
-Caelum logs security-relevant events as structured slog entries with the `component=audit` attribute. These events are emitted automatically and can be filtered and forwarded to your SIEM or log aggregation system.
+Wadjet logs security-relevant events as structured slog entries with the `component=audit` attribute. These events are emitted automatically and can be filtered and forwarded to your SIEM or log aggregation system.
 
 ### Audit Events
 
@@ -301,14 +301,14 @@ Since audit events use standard Go slog, configure your log aggregation pipeline
 
 ```bash
 # journalctl filter
-journalctl -u caelum | grep 'component=audit'
+journalctl -u wadjet | grep 'component=audit'
 
 # Vector/Fluentd: filter on structured field component=audit
 ```
 
 ## Query Cost Estimation and Guards
 
-Caelum estimates query cost at plan time using manifest metadata (file sizes, row counts) before any I/O occurs. Cost-based guards can reject expensive queries before they execute.
+Wadjet estimates query cost at plan time using manifest metadata (file sizes, row counts) before any I/O occurs. Cost-based guards can reject expensive queries before they execute.
 
 ### Configuration
 
@@ -361,9 +361,9 @@ Global query limits can also be set via environment variables (useful for contai
 
 | Variable | Description |
 |----------|-------------|
-| `CAELUM_QUERY_MAX_SCAN_BYTES` | Max bytes to scan per query |
-| `CAELUM_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
-| `CAELUM_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
+| `WADJET_QUERY_MAX_SCAN_BYTES` | Max bytes to scan per query |
+| `WADJET_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
+| `WADJET_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
 
 ### Example Error
 

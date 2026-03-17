@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
 // compileContext holds optional state for expression compilation.

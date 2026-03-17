@@ -8,8 +8,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // TableReader reads Iceberg table metadata from an object store and

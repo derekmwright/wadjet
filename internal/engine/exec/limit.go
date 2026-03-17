@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync/atomic"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 )
 
 // Limit is a UnaryOperator that passes through at most N rows,

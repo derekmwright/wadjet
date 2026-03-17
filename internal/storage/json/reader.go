@@ -1,5 +1,5 @@
 // Package json reads JSON data (JSONL or JSON array format) and converts it
-// to the columnar RecordBatch format used by Caelum's execution engine.
+// to the columnar RecordBatch format used by Wadjet's execution engine.
 package json
 
 import (
@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // defaultSampleSize is the number of rows sampled for schema inference.
@@ -215,7 +215,7 @@ func inferSchema(rows []map[string]any, sampleSize int) []parquet.Column {
 	return schema
 }
 
-// detectType determines the Caelum type for a single Go value.
+// detectType determines the Wadjet type for a single Go value.
 func detectType(v any) parquet.TypeID {
 	switch val := v.(type) {
 	case bool:

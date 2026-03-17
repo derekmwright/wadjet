@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
-	"github.com/derekmwright/caelum/internal/storage/partition"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/storage/partition"
 	"github.com/google/uuid"
 )
 

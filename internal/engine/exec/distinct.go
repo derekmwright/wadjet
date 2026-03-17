@@ -3,7 +3,7 @@ package exec
 import (
 	"context"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 )
 
 // Distinct is a UnaryOperator that removes duplicate rows.

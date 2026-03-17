@@ -1,8 +1,8 @@
-# Caelum
+# Wadjet
 
 A lightweight analytical query engine in pure Go. Columnar storage on Parquet, vectorized execution, full SQL, and optional distributed processing over NATS and S3-compatible object storage.
 
-## Why Caelum
+## Why Wadjet
 
 - **No coordinator bottleneck** — the coordinator plans queries and schedules tasks but never touches data bytes. Workers read from and write results to object storage directly.
 - **Lightweight workers** — viable at 512 MB RAM with spill-to-disk. Scale to zero, start in under 2 seconds.
@@ -17,16 +17,16 @@ A lightweight analytical query engine in pure Go. Columnar storage on Parquet, v
 
 ```bash
 # Build
-go build -o caelum ./cmd/caelum
+go build -o wadjet ./cmd/wadjet
 
 # Start standalone (embedded NATS + worker + coordinator)
-./caelum serve --mode=standalone --storage.endpoint=localhost:9000
+./wadjet serve --mode=standalone --storage.endpoint=localhost:9000
 
 # Run a query
-./caelum query "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC LIMIT 10"
+./wadjet query "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC LIMIT 10"
 
 # Interactive shell
-./caelum shell
+./wadjet shell
 ```
 
 ## Features
@@ -211,18 +211,18 @@ TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch
 ## Deployment Modes
 
 ```
-caelum serve --mode=standalone     # All-in-one (dev / small workloads)
-caelum serve --mode=coordinator    # Plans queries, embeds NATS, touches zero data
-caelum serve --mode=worker         # Stateless task executor, scale horizontally
+wadjet serve --mode=standalone     # All-in-one (dev / small workloads)
+wadjet serve --mode=coordinator    # Plans queries, embeds NATS, touches zero data
+wadjet serve --mode=worker         # Stateless task executor, scale horizontally
 ```
 
 ## AI Agent Integration (MCP)
 
-Caelum includes a native [Model Context Protocol](https://modelcontextprotocol.io/) server, enabling AI agents to discover tables, inspect schemas, and execute SQL queries.
+Wadjet includes a native [Model Context Protocol](https://modelcontextprotocol.io/) server, enabling AI agents to discover tables, inspect schemas, and execute SQL queries.
 
 ```bash
 # Start MCP server on stdio (for Claude Desktop, Claude Code, Cursor)
-caelum mcp --endpoint localhost:9000
+wadjet mcp --endpoint localhost:9000
 ```
 
 Configure in Claude Desktop (`claude_desktop_config.json`):
@@ -230,8 +230,8 @@ Configure in Claude Desktop (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
-    "caelum": {
-      "command": "caelum",
+    "wadjet": {
+      "command": "wadjet",
       "args": ["mcp", "--endpoint", "localhost:9000"]
     }
   }
@@ -252,12 +252,12 @@ AI agents automatically understand network-typed columns (IPv4, CIDR, MAC, Port,
 
 ## Embedding
 
-Use Caelum as a Go library:
+Use Wadjet as a Go library:
 
 ```go
-import "github.com/derekmwright/caelum/caelum"
+import "github.com/citc-tech/wadjet/wadjet"
 
-db, _ := caelum.Open(ctx, caelum.Config{
+db, _ := wadjet.Open(ctx, wadjet.Config{
     StorageEndpoint: "localhost:9000",
     Bucket:          "analytics",
 })
@@ -278,12 +278,12 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 | [gRPC API](docs/grpc-api.md) | Protobuf service for multi-language client generation |
 | [Configuration](docs/configuration.md) | YAML config, environment variables, CLI flags |
 | [Ingestion](docs/ingestion.md) | Micro-batch accumulator, partitioning, Bento pipelines |
-| [Embedding](docs/embedding.md) | Using Caelum as a Go library |
+| [Embedding](docs/embedding.md) | Using Wadjet as a Go library |
 | [Distributed Deployment](docs/distributed.md) | Multi-node setup, federation, cluster routing |
 | [Security](docs/security.md) | API keys, JWT, mTLS, RBAC, cell-level policies |
 | [Performance Tuning](docs/tuning.md) | Memory budgets, spill tuning, environment profiles |
 | [Operations](docs/operations.md) | Monitoring, Prometheus metrics, troubleshooting |
-| [Network Analytics](docs/network-analytics.md) | End-to-end workflow: devices → Bento → Caelum → app |
+| [Network Analytics](docs/network-analytics.md) | End-to-end workflow: devices → Bento → Wadjet → app |
 
 ## TPC-H Benchmark Queries
 

@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
-	"github.com/derekmwright/caelum/caelum"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
 )
 
 func toFloat64(v any) float64 {
@@ -26,12 +26,12 @@ func toFloat64(v any) float64 {
 	return 0
 }
 
-func setupDBWithEvents(t *testing.T, numRows int) *caelum.DB {
+func setupDBWithEvents(t *testing.T, numRows int) *wadjet.DB {
 	t.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
 
-	db, err := caelum.Open(ctx, caelum.Config{
+	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: "test",
 	})

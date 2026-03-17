@@ -10,13 +10,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/derekmwright/caelum/caelum"
-	"github.com/derekmwright/caelum/internal/distributed"
-	"github.com/derekmwright/caelum/internal/server"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/server"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +39,7 @@ var (
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "unifi-ingest",
-		Short: "Poll UniFi Controller API and ingest network telemetry into Caelum",
+		Short: "Poll UniFi Controller API and ingest network telemetry into Wadjet",
 		RunE:  run,
 	}
 
@@ -51,7 +51,7 @@ func main() {
 	rootCmd.Flags().StringVar(&s3Endpoint, "endpoint", "localhost:9000", "S3-compatible endpoint")
 	rootCmd.Flags().StringVar(&s3Access, "access-key", "minioadmin", "S3 access key")
 	rootCmd.Flags().StringVar(&s3Secret, "secret-key", "minioadmin", "S3 secret key")
-	rootCmd.Flags().StringVar(&s3Bucket, "bucket", "caelum", "S3 bucket name")
+	rootCmd.Flags().StringVar(&s3Bucket, "bucket", "wadjet", "S3 bucket name")
 
 	rootCmd.Flags().StringVar(&natsURL, "nats-url", "", "NATS URL for shared catalog (e.g., nats://localhost:4333)")
 	rootCmd.Flags().DurationVar(&pollInterval, "poll-interval", 30*time.Second, "How often to poll the UniFi API")
@@ -112,15 +112,15 @@ func run(cmd *cobra.Command, args []string) error {
 		logger.Info("using shared NATS catalog", "url", natsURL)
 	}
 
-	// Open Caelum DB
-	db, err := caelum.Open(ctx, caelum.Config{
+	// Open Wadjet DB
+	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: s3Bucket,
 		Logger: logger,
 		MetaKV: metaKV,
 	})
 	if err != nil {
-		return fmt.Errorf("opening Caelum: %w", err)
+		return fmt.Errorf("opening Wadjet: %w", err)
 	}
 
 	// Create tables if they don't exist

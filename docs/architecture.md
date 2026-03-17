@@ -1,12 +1,12 @@
 # Architecture
 
-Caelum is a columnar analytical query engine designed for high-throughput scan-heavy workloads over S3-compatible object storage. This document covers the system's internals.
+Wadjet is a columnar analytical query engine designed for high-throughput scan-heavy workloads over S3-compatible object storage. This document covers the system's internals.
 
 ## High-Level Architecture
 
 ```mermaid
 graph TD
-    API["CLI / HTTP / gRPC / pgwire API<br/><sub>cmd/caelum &nbsp; internal/server</sub>"]
+    API["CLI / HTTP / gRPC / pgwire API<br/><sub>cmd/wadjet &nbsp; internal/server</sub>"]
     QP["Query Pipeline<br/><sub>SQL Parser → Logical Plan → Optimizer → Physical Plan → Execution Engine</sub>"]
     ST["Storage Layer<br/><sub>Object Store, Catalog,<br/>Parquet I/O, Ingest</sub>"]
     DL["Distributed Layer<br/><sub>NATS/JetStream, Coordinator,<br/>Worker Pool, Task Dispatch</sub>"]
@@ -21,11 +21,11 @@ graph TD
 ## Package Layout
 
 ```
-github.com/derekmwright/caelum/
-├── cmd/caelum/             # CLI entry point (cobra commands)
-├── caelum/             # Public embeddable Go API
-├── proto/caelum/v1/        # Protobuf service definition
-├── gen/caelum/v1/          # Generated gRPC + protobuf Go code
+github.com/citc-tech/wadjet/
+├── cmd/wadjet/             # CLI entry point (cobra commands)
+├── wadjet/             # Public embeddable Go API
+├── proto/wadjet/v1/        # Protobuf service definition
+├── gen/wadjet/v1/          # Generated gRPC + protobuf Go code
 ├── internal/
 │   ├── storage/
 │   │   ├── objstore/       # S3-compatible object store abstraction
@@ -57,7 +57,7 @@ github.com/derekmwright/caelum/
 
 ### Columnar Storage
 
-All data in Caelum is stored in **Apache Parquet** files on S3-compatible object storage. Parquet provides:
+All data in Wadjet is stored in **Apache Parquet** files on S3-compatible object storage. Parquet provides:
 
 - Columnar layout for analytical scan efficiency
 - Built-in compression (Snappy default, Zstd, Gzip, LZ4 available)
@@ -66,7 +66,7 @@ All data in Caelum is stored in **Apache Parquet** files on S3-compatible object
 
 ### Catalog
 
-The catalog is a JSON-serialized metadata layer stored in **NATS KV** (bucket: `caelum_catalog`). Keys are cluster-scoped:
+The catalog is a JSON-serialized metadata layer stored in **NATS KV** (bucket: `wadjet_catalog`). Keys are cluster-scoped:
 
 ```
 <cluster-id>.meta              → CatalogMeta (version, table list, timestamps)
@@ -148,7 +148,7 @@ The logical plan is converted into executable pipeline stages. In distributed mo
 
 ### 5. Pipeline Execution
 
-Caelum uses a **push-based, streaming pipeline** model:
+Wadjet uses a **push-based, streaming pipeline** model:
 
 ```mermaid
 graph TD
@@ -215,7 +215,7 @@ The `internal/iceberg` package provides read-only support for Apache Iceberg tab
 - Parses Iceberg v1 and v2 table metadata JSON
 - Resolves snapshots → manifest lists → manifests → Parquet data files
 - Supports `s3://`, `gs://`, `s3a://` path schemes
-- `CatalogIntegration` bridges Iceberg tables into the native Caelum catalog, enabling SQL queries against Iceberg-managed Parquet files
+- `CatalogIntegration` bridges Iceberg tables into the native Wadjet catalog, enabling SQL queries against Iceberg-managed Parquet files
 
 ```go
 ci := iceberg.NewCatalogIntegration(catalog)
@@ -239,8 +239,8 @@ The ingester is a micro-batch accumulator that:
 ### Parquet I/O
 
 - **Writer**: Configurable row group size (128K rows), page buffer (256KB), compression codec
-- **Reader**: Reads full row groups, automatically maps Parquet schema to Caelum types
-- **Schema inference**: Parquet physical/logical types are mapped to Caelum types (including network primitives)
+- **Reader**: Reads full row groups, automatically maps Parquet schema to Wadjet types
+- **Schema inference**: Parquet physical/logical types are mapped to Wadjet types (including network primitives)
 
 ## Memory Management
 
@@ -275,10 +275,10 @@ Results smaller than 64 KB bypass both the result store and S3 — they are embe
 ### Spill Metrics
 
 Prometheus metrics track spill behavior for tuning:
-- `caelum_worker_spill_events_total` — number of spill-to-disk events
-- `caelum_worker_spill_bytes_written_total` — bytes written to spill files
-- `caelum_worker_memory_budget_bytes` — configured per-task budget
-- `caelum_worker_memory_used_bytes` — current tracked memory usage
+- `wadjet_worker_spill_events_total` — number of spill-to-disk events
+- `wadjet_worker_spill_bytes_written_total` — bytes written to spill files
+- `wadjet_worker_memory_budget_bytes` — configured per-task budget
+- `wadjet_worker_memory_used_bytes` — current tracked memory usage
 
 See [Performance Tuning](tuning.md) for guidance on sizing memory budgets and result stores.
 
@@ -302,7 +302,7 @@ graph TD
 - **Workers**: Pull tasks from a JetStream consumer, execute locally (scan, aggregate, join, sort, window), write intermediate results to result store or S3, publish completion notifications. Cluster-scoped: workers only pull tasks for their cluster.
 - **Heartbeats**: Workers send heartbeats (with cluster ID) every 10 seconds; coordinator reaps workers that miss heartbeats
 - **Task types**: `scan`, `aggregate`, `join`, `sort`, `window`
-- **Task routing**: Tasks are published to cluster-scoped NATS subjects (`caelum.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`). Workers subscribe to their cluster's filter (`caelum.tasks.<cluster-id>.>`)
+- **Task routing**: Tasks are published to cluster-scoped NATS subjects (`wadjet.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`). Workers subscribe to their cluster's filter (`wadjet.tasks.<cluster-id>.>`)
 - **Worker concurrency**: 4 concurrent tasks per worker (default)
 - **Worker cache**: 256 MB LRU cache for recently-read Parquet data
 

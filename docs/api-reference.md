@@ -1,6 +1,6 @@
 # HTTP API Reference
 
-Caelum exposes a REST API for executing queries, managing tables, and monitoring health.
+Wadjet exposes a REST API for executing queries, managing tables, and monitoring health.
 
 ## Base URL
 
@@ -16,7 +16,7 @@ If authentication is configured (see [Security](security.md)), include credentia
 
 **API Key:**
 ```
-Authorization: Bearer caelum-key-abc123
+Authorization: Bearer wadjet-key-abc123
 ```
 
 **JWT:**
@@ -99,7 +99,7 @@ Execute a SQL query and return results.
 ```bash
 curl -s -X POST http://localhost:8080/v1/queries \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer caelum-key-abc123" \
+  -H "Authorization: Bearer wadjet-key-abc123" \
   -d '{"sql": "SELECT * FROM flow_logs LIMIT 5"}' | jq .
 ```
 
@@ -306,18 +306,18 @@ Returns Prometheus-formatted metrics. See [Operations](operations.md) for detail
 **Response (200 OK):**
 
 ```
-# HELP caelum_queries_total Total number of queries executed
-# TYPE caelum_queries_total counter
-caelum_queries_total 1523
-# HELP caelum_rows_scanned_total Total rows scanned across all queries
-# TYPE caelum_rows_scanned_total counter
-caelum_rows_scanned_total 45000000
-# HELP caelum_query_duration_seconds Query execution time
-# TYPE caelum_query_duration_seconds histogram
-caelum_query_duration_seconds_bucket{le="0.01"} 892
-caelum_query_duration_seconds_bucket{le="0.1"} 1400
-caelum_query_duration_seconds_bucket{le="1"} 1510
-caelum_query_duration_seconds_bucket{le="10"} 1523
+# HELP wadjet_queries_total Total number of queries executed
+# TYPE wadjet_queries_total counter
+wadjet_queries_total 1523
+# HELP wadjet_rows_scanned_total Total rows scanned across all queries
+# TYPE wadjet_rows_scanned_total counter
+wadjet_rows_scanned_total 45000000
+# HELP wadjet_query_duration_seconds Query execution time
+# TYPE wadjet_query_duration_seconds histogram
+wadjet_query_duration_seconds_bucket{le="0.01"} 892
+wadjet_query_duration_seconds_bucket{le="0.1"} 1400
+wadjet_query_duration_seconds_bucket{le="1"} 1510
+wadjet_query_duration_seconds_bucket{le="10"} 1523
 ```
 
 ---
@@ -329,15 +329,15 @@ caelum_query_duration_seconds_bucket{le="10"} 1523
 ```python
 import requests
 
-CAELUM_URL = "http://localhost:8080"
+WADJET_URL = "http://localhost:8080"
 HEADERS = {
     "Content-Type": "application/json",
-    "Authorization": "Bearer caelum-key-abc123",
+    "Authorization": "Bearer wadjet-key-abc123",
 }
 
 def query(sql: str) -> dict:
     resp = requests.post(
-        f"{CAELUM_URL}/v1/queries",
+        f"{WADJET_URL}/v1/queries",
         json={"sql": sql},
         headers=HEADERS,
     )
@@ -385,7 +385,7 @@ func query(sql string) (*QueryResponse, error) {
     body, _ := json.Marshal(QueryRequest{SQL: sql})
     req, _ := http.NewRequest("POST", "http://localhost:8080/v1/queries", bytes.NewReader(body))
     req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("Authorization", "Bearer caelum-key-abc123")
+    req.Header.Set("Authorization", "Bearer wadjet-key-abc123")
 
     resp, err := http.DefaultClient.Do(req)
     if err != nil {
@@ -409,8 +409,8 @@ func main() {
 ### JavaScript / TypeScript
 
 ```typescript
-const CAELUM_URL = "http://localhost:8080";
-const API_KEY = "caelum-key-abc123";
+const WADJET_URL = "http://localhost:8080";
+const API_KEY = "wadjet-key-abc123";
 
 interface QueryResult {
   query_id: string;
@@ -420,7 +420,7 @@ interface QueryResult {
 }
 
 async function query(sql: string): Promise<QueryResult> {
-  const res = await fetch(`${CAELUM_URL}/v1/queries`, {
+  const res = await fetch(`${WADJET_URL}/v1/queries`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -448,20 +448,20 @@ console.table(result.rows);
 
 ```bash
 # One-liner for quick queries
-caelum_query() {
+wadjet_query() {
   curl -s -X POST http://localhost:8080/v1/queries \
     -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${CAELUM_API_KEY}" \
+    -H "Authorization: Bearer ${WADJET_API_KEY}" \
     -d "{\"sql\": \"$1\"}" | jq .
 }
 
 # Usage
-caelum_query "SELECT COUNT(*) as total FROM flow_logs WHERE date = '2026-03-15'"
+wadjet_query "SELECT COUNT(*) as total FROM flow_logs WHERE date = '2026-03-15'"
 ```
 
 ## Rate Limiting and Concurrency
 
-The HTTP server processes queries concurrently with no built-in rate limiting. For production deployments, place a reverse proxy (e.g., nginx, Caddy, Envoy) in front of Caelum to enforce rate limits, connection limits, and request timeouts.
+The HTTP server processes queries concurrently with no built-in rate limiting. For production deployments, place a reverse proxy (e.g., nginx, Caddy, Envoy) in front of Wadjet to enforce rate limits, connection limits, and request timeouts.
 
 ## Content Types
 

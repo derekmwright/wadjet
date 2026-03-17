@@ -1,6 +1,6 @@
 # Performance Tuning
 
-This guide covers how to configure Caelum for different hardware profiles — from constrained edge nodes to high-spec data center workers — and a systematic methodology for tuning performance using Prometheus metrics.
+This guide covers how to configure Wadjet for different hardware profiles — from constrained edge nodes to high-spec data center workers — and a systematic methodology for tuning performance using Prometheus metrics.
 
 ## Tunable Parameters Overview
 
@@ -25,12 +25,12 @@ This guide covers how to configure Caelum for different hardware profiles — fr
 Edge nodes, Raspberry Pi clusters, small VMs, containers with tight resource limits. Typical use: remote site workers in federated deployments, IoT gateway analytics.
 
 ```yaml
-# caelum-constrained.yaml
+# wadjet-constrained.yaml
 worker:
   max_concurrent: 2
   cache_bytes: 33554432        # 32 MB
   memory_budget: 67108864      # 64 MB per task — spill early
-  spill_dir: /var/caelum/spill
+  spill_dir: /var/wadjet/spill
   result_store_bytes: 16777216 # 16 MB
 
 parquet:
@@ -40,15 +40,15 @@ parquet:
 ```
 
 ```bash
-./caelum serve --mode worker \
+./wadjet serve --mode worker \
   --nats-url nats://coordinator:4222 \
   --memory-budget 67108864 \
-  --spill-dir /var/caelum/spill \
+  --spill-dir /var/wadjet/spill \
   --result-store 16777216 \
   --endpoint minio:9000 \
   --access-key $S3_ACCESS_KEY \
   --secret-key $S3_SECRET_KEY \
-  --bucket caelum
+  --bucket wadjet
 ```
 
 **Key trade-offs:**
@@ -74,12 +74,12 @@ resources:
 Standard cloud VMs (t3.medium, e2-standard-2), typical production workers.
 
 ```yaml
-# caelum-moderate.yaml
+# wadjet-moderate.yaml
 worker:
   max_concurrent: 4
   cache_bytes: 268435456        # 256 MB
   memory_budget: 268435456      # 256 MB per task
-  spill_dir: /var/caelum/spill
+  spill_dir: /var/wadjet/spill
   result_store_bytes: 134217728 # 128 MB
 
 parquet:
@@ -89,15 +89,15 @@ parquet:
 ```
 
 ```bash
-./caelum serve --mode worker \
+./wadjet serve --mode worker \
   --nats-url nats://coordinator:4222 \
   --memory-budget 268435456 \
-  --spill-dir /var/caelum/spill \
+  --spill-dir /var/wadjet/spill \
   --result-store 134217728 \
   --endpoint minio:9000 \
   --access-key $S3_ACCESS_KEY \
   --secret-key $S3_SECRET_KEY \
-  --bucket caelum
+  --bucket wadjet
 ```
 
 **Key trade-offs:**
@@ -122,12 +122,12 @@ resources:
 High-spec bare metal, dedicated analytics nodes (m5.2xlarge, n2-highmem-8), data center workers processing heavy workloads.
 
 ```yaml
-# caelum-unconstrained.yaml
+# wadjet-unconstrained.yaml
 worker:
   max_concurrent: 8
   cache_bytes: 2147483648        # 2 GB
   memory_budget: 1073741824      # 1 GB per task — spill only for very large datasets
-  spill_dir: /nvme/caelum/spill  # fast NVMe for rare spills
+  spill_dir: /nvme/wadjet/spill  # fast NVMe for rare spills
   result_store_bytes: 1073741824 # 1 GB
 
 parquet:
@@ -137,15 +137,15 @@ parquet:
 ```
 
 ```bash
-./caelum serve --mode worker \
+./wadjet serve --mode worker \
   --nats-url nats://coordinator:4222 \
   --memory-budget 1073741824 \
-  --spill-dir /nvme/caelum/spill \
+  --spill-dir /nvme/wadjet/spill \
   --result-store 1073741824 \
   --endpoint minio:9000 \
   --access-key $S3_ACCESS_KEY \
   --secret-key $S3_SECRET_KEY \
-  --bucket caelum
+  --bucket wadjet
 ```
 
 **Key trade-offs:**
@@ -173,25 +173,25 @@ In federated deployments, different clusters can run different profiles. A centr
 
 ```bash
 # Central DC worker (8+ GB RAM)
-./caelum serve --mode worker \
+./wadjet serve --mode worker \
   --cluster-id central \
   --nats-url nats://coordinator:4222 \
   --memory-budget 1073741824 \
   --result-store 1073741824 \
-  --spill-dir /nvme/caelum/spill \
+  --spill-dir /nvme/wadjet/spill \
   --endpoint minio-central:9000 \
-  --access-key $S3_ACCESS_KEY --secret-key $S3_SECRET_KEY --bucket caelum
+  --access-key $S3_ACCESS_KEY --secret-key $S3_SECRET_KEY --bucket wadjet
 
 # Remote site worker (1 GB RAM)
-./caelum serve --mode worker \
+./wadjet serve --mode worker \
   --cluster-id site-east \
   --leaf-remote nats://coordinator.central:4222 \
   --nats-url nats://local-nats:4222 \
   --memory-budget 67108864 \
   --result-store 16777216 \
-  --spill-dir /var/caelum/spill \
+  --spill-dir /var/wadjet/spill \
   --endpoint minio-east:9000 \
-  --access-key $S3_ACCESS_KEY --secret-key $S3_SECRET_KEY --bucket caelum
+  --access-key $S3_ACCESS_KEY --secret-key $S3_SECRET_KEY --bucket wadjet
 ```
 
 The coordinator's federated scan planner automatically routes tasks to the cluster where the data resides. Remote workers process local data with constrained settings, while the central cluster handles the final merge with more resources.
@@ -214,17 +214,17 @@ Collect baseline metrics. Run representative queries and observe:
 
 ```promql
 # Query latency P50/P99
-histogram_quantile(0.50, rate(caelum_query_duration_seconds_bucket[5m]))
-histogram_quantile(0.99, rate(caelum_query_duration_seconds_bucket[5m]))
+histogram_quantile(0.50, rate(wadjet_query_duration_seconds_bucket[5m]))
+histogram_quantile(0.99, rate(wadjet_query_duration_seconds_bucket[5m]))
 
 # Task latency by type
-histogram_quantile(0.99, rate(caelum_worker_task_duration_seconds_bucket{type="aggregate"}[5m]))
+histogram_quantile(0.99, rate(wadjet_worker_task_duration_seconds_bucket{type="aggregate"}[5m]))
 
 # Scan efficiency (pruning ratio)
-rate(caelum_scan_files_pruned_total[5m]) / (rate(caelum_scan_files_scanned_total[5m]) + rate(caelum_scan_files_pruned_total[5m]))
+rate(wadjet_scan_files_pruned_total[5m]) / (rate(wadjet_scan_files_scanned_total[5m]) + rate(wadjet_scan_files_pruned_total[5m]))
 
 # Cache effectiveness
-rate(caelum_cache_hits_total[5m]) / (rate(caelum_cache_hits_total[5m]) + rate(caelum_cache_misses_total[5m]))
+rate(wadjet_cache_hits_total[5m]) / (rate(wadjet_cache_hits_total[5m]) + rate(wadjet_cache_misses_total[5m]))
 ```
 
 ### Step 2: Identify the Bottleneck
@@ -277,13 +277,13 @@ Re-run the same representative queries and compare:
 
 ```promql
 # Before/after comparison: P99 query latency
-histogram_quantile(0.99, rate(caelum_query_duration_seconds_bucket[5m]))
+histogram_quantile(0.99, rate(wadjet_query_duration_seconds_bucket[5m]))
 
 # Spill rate should decrease if budget was increased
-rate(caelum_worker_spill_events_total[5m])
+rate(wadjet_worker_spill_events_total[5m])
 
 # Cache hit ratio should increase if cache was enlarged
-rate(caelum_cache_hits_total[5m]) / (rate(caelum_cache_hits_total[5m]) + rate(caelum_cache_misses_total[5m]))
+rate(wadjet_cache_hits_total[5m]) / (rate(wadjet_cache_hits_total[5m]) + rate(wadjet_cache_misses_total[5m]))
 ```
 
 ## Deep Dive: Memory Budget vs Disk Spill
@@ -304,13 +304,13 @@ memory_budget = 1G  → spill after 1 GB per task (aggressive, rare spills)
 
 ```promql
 # Spill rate — should be low (< 1/sec) in a well-tuned system
-rate(caelum_worker_spill_events_total[5m])
+rate(wadjet_worker_spill_events_total[5m])
 
 # Spill volume — high bytes means large datasets are overflowing
-rate(caelum_worker_spill_bytes_written_total[5m])
+rate(wadjet_worker_spill_bytes_written_total[5m])
 
 # Memory utilization vs budget
-caelum_worker_memory_used_bytes / caelum_worker_memory_budget_bytes
+wadjet_worker_memory_used_bytes / wadjet_worker_memory_budget_bytes
 ```
 
 If spill events are frequent but each spill is small, the budget is too tight — increase it. If spills are rare but the worker is using far less memory than available, the budget can be lowered and concurrency increased.
@@ -351,7 +351,7 @@ When the result store is full, new results fall back to S3 transparently — the
 The LRU cache stores recently-read Parquet column chunks and footers. Effective caching eliminates S3 reads for repeated access patterns.
 
 **When to increase cache size:**
-- `caelum_cache_misses_total` is growing steadily
+- `wadjet_cache_misses_total` is growing steadily
 - Cache hit ratio is below 50%
 - Queries repeatedly access the same time ranges
 

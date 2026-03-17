@@ -3,8 +3,8 @@ package scan
 import (
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/engine/exec"
-	pqt "github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 func TestCanPruneRowGroup(t *testing.T) {

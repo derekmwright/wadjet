@@ -1,6 +1,6 @@
 package tpch
 
-// TPCHQueries contains all 22 TPC-H queries adapted for Caelum's SQL dialect.
+// TPCHQueries contains all 22 TPC-H queries adapted for Wadjet's SQL dialect.
 // Dates use string comparisons (YYYY-MM-DD format is lexicographically ordered).
 // DECIMAL is replaced with FLOAT64. SUBSTRING uses SUBSTR.
 //

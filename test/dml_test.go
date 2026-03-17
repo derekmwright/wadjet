@@ -4,18 +4,18 @@ import (
 	"context"
 	"testing"
 
-	"github.com/derekmwright/caelum/caelum"
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-func setupDMLTestDB(t *testing.T) *caelum.DB {
+func setupDMLTestDB(t *testing.T) *wadjet.DB {
 	t.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
 
-	db, err := caelum.Open(ctx, caelum.Config{
+	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: "test",
 	})
@@ -57,7 +57,7 @@ func setupDMLTestDB(t *testing.T) *caelum.DB {
 	return db
 }
 
-func queryCount(t *testing.T, db *caelum.DB, sql string) int {
+func queryCount(t *testing.T, db *wadjet.DB, sql string) int {
 	t.Helper()
 	ctx := context.Background()
 	result, err := db.Query(ctx, sql)
@@ -67,7 +67,7 @@ func queryCount(t *testing.T, db *caelum.DB, sql string) int {
 	return len(result.Rows)
 }
 
-func queryRows(t *testing.T, db *caelum.DB, sql string) []map[string]any {
+func queryRows(t *testing.T, db *wadjet.DB, sql string) []map[string]any {
 	t.Helper()
 	ctx := context.Background()
 	result, err := db.Query(ctx, sql)

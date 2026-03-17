@@ -1,6 +1,6 @@
-// Package mcp implements a Model Context Protocol (MCP) server for Caelum.
+// Package mcp implements a Model Context Protocol (MCP) server for Wadjet.
 // This allows AI agents (Claude, Cursor, etc.) to discover tables, inspect schemas,
-// and execute SQL queries against a Caelum instance.
+// and execute SQL queries against a Wadjet instance.
 //
 // Supports two transports:
 //   - stdio: JSON-RPC over stdin/stdout (for CLI integration with Claude Desktop/Code)
@@ -20,23 +20,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/derekmwright/caelum/caelum"
+	"github.com/citc-tech/wadjet/wadjet"
 )
 
 const (
 	protocolVersion = "2024-11-05"
-	serverName      = "caelum"
+	serverName      = "wadjet"
 	serverVersion   = "0.1.0"
 )
 
-// Server is an MCP server that exposes Caelum tools to AI agents.
+// Server is an MCP server that exposes Wadjet tools to AI agents.
 type Server struct {
-	db     *caelum.DB
+	db     *wadjet.DB
 	logger *slog.Logger
 }
 
-// NewServer creates a new MCP server backed by a Caelum DB.
-func NewServer(db *caelum.DB, logger *slog.Logger) *Server {
+// NewServer creates a new MCP server backed by a Wadjet DB.
+func NewServer(db *wadjet.DB, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -305,7 +305,7 @@ func (s *Server) toolDefinitions() []toolInfo {
 	return []toolInfo{
 		{
 			Name:        "list_tables",
-			Description: "List all tables in the Caelum catalog. Returns table names. Use this first to discover available data.",
+			Description: "List all tables in the Wadjet catalog. Returns table names. Use this first to discover available data.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
 		},
 		{
@@ -325,7 +325,7 @@ func (s *Server) toolDefinitions() []toolInfo {
 		},
 		{
 			Name: "query",
-			Description: "Execute a SQL query against Caelum and return results. Supports full analytical SQL: " +
+			Description: "Execute a SQL query against Wadjet and return results. Supports full analytical SQL: " +
 				"JOINs, GROUP BY, window functions, CTEs, subqueries, CASE, CAST, LIKE, BETWEEN, IN, " +
 				"and 58+ built-in functions including network functions (cidr_contains, ip_version, mask_ip). " +
 				"Network-native column types: IPv4, IPv6, CIDR, MAC, Port, Protocol. " +

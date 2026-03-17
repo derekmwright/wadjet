@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
 // UDFDef defines a user-defined function.

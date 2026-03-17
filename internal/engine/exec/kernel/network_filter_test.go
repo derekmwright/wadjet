@@ -3,8 +3,8 @@ package kernel
 import (
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 func TestFilterIPv4(t *testing.T) {

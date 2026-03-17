@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
 // partitionKeys are the standard Hive-style partition key columns.

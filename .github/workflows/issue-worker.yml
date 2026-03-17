@@ -1,0 +1,163 @@
+name: Issue Worker
+
+on:
+  issues:
+    types: [labeled]
+
+# Only one issue worker at a time to prevent runaway costs
+concurrency:
+  group: issue-worker
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    # Only runs when a maintainer adds the "needs-triage" label
+    if: github.event.label.name == 'needs-triage'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Triage Issue
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+
+          # Fetch issue body via API to avoid shell injection from user-controlled content
+          ISSUE_BODY="$(gh issue view "$ISSUE_NUMBER" --json body -q '.body')"
+
+          claude --dangerouslySkipPermissions -p "
+          You are triaging a GitHub issue for the Wadjet analytics engine.
+
+          Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
+
+          Body:
+          ${ISSUE_BODY}
+
+          Instructions:
+          1. Read the CLAUDE.md for project context
+          2. Search the codebase to understand if this is a valid bug or feature request
+          3. For bugs: try to identify the root cause and affected code paths
+          4. For features: assess feasibility and architectural fit
+
+          Write your analysis as a GitHub comment using gh CLI:
+            gh issue comment ${ISSUE_NUMBER} --body \"your analysis\"
+
+          Your comment MUST include:
+          - Whether you can reproduce or confirm the issue from reading the code
+          - The likely root cause (with file:line references)
+          - Estimated complexity (trivial / moderate / complex / architectural)
+          - Whether you recommend the auto-fix label
+
+          If the issue is clearly spam, invalid, or a duplicate, say so.
+          Do NOT attempt any fixes. Triage only.
+          "
+
+  fix:
+    # Only runs when a maintainer adds the "auto-fix" label
+    if: github.event.label.name == 'auto-fix'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Fix Issue
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ISSUE_NUMBER="${{ github.event.issue.number }}"
+          ISSUE_TITLE="${{ github.event.issue.title }}"
+
+          # Fetch issue body via API to avoid shell injection
+          ISSUE_BODY="$(gh issue view "$ISSUE_NUMBER" --json body -q '.body')"
+
+          # Configure git for commits
+          git config user.name "wadjet-bot"
+          git config user.email "wadjet-bot@users.noreply.github.com"
+
+          claude --dangerouslySkipPermissions -p "
+          You are fixing a GitHub issue for the Wadjet analytics engine.
+
+          Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}
+
+          Body:
+          ${ISSUE_BODY}
+
+          Instructions — follow these steps in order:
+
+          STEP 1 — UNDERSTAND
+          - Read CLAUDE.md for project conventions
+          - Read the issue carefully
+          - Search the codebase to find the root cause
+          - Read all relevant source files
+
+          STEP 2 — BRANCH
+          - Create a branch: git checkout -b fix/issue-${ISSUE_NUMBER}
+
+          STEP 3 — FIX
+          - Implement the minimal fix
+          - Follow existing code patterns and conventions
+          - Do not refactor unrelated code
+
+          STEP 4 — TEST
+          - Write regression tests that fail without your fix and pass with it
+          - Run: go test ./internal/... -timeout 5m
+          - If tests fail, fix them before proceeding
+          - Run: go test -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
+          - If TPC-H tests fail, your fix introduced a regression. Fix it.
+
+          STEP 5 — COMMIT
+          - Use conventional commit format
+          - Include Fixes #${ISSUE_NUMBER} in the commit body
+          - Example: fix(planner): resolve ORDER BY on wrapped aggregates
+
+          STEP 6 — PR
+          - Push the branch: git push -u origin fix/issue-${ISSUE_NUMBER}
+          - Create a PR linking to the issue with Fixes #${ISSUE_NUMBER}
+          - Use: gh pr create --title \"...\" --body \"...\"
+
+          STEP 7 — COMMENT
+          - Comment on the issue with a link to the PR
+          - Use: gh issue comment ${ISSUE_NUMBER} --body \"...\"
+
+          IMPORTANT:
+          - If you cannot confidently fix the issue, do NOT create a PR.
+            Instead, comment on the issue explaining what you found and
+            what makes the fix non-trivial.
+          - Never skip tests. Never create a PR with failing tests.
+          - Keep changes minimal. One issue = one fix.
+          "
+
+      - name: Comment on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue comment "${{ github.event.issue.number }}" --body "Auto-fix attempted but failed. A human should investigate.
+
+          [View workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"

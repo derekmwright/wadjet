@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Caelum TPC-H benchmark runner for EC2 instances.
+# Wadjet TPC-H benchmark runner for EC2 instances.
 #
 # Usage:
 #   ./run-benchmark.sh standalone SF1           # Single-node SF1
@@ -9,8 +9,8 @@
 #   ./run-benchmark.sh standalone SF100         # Single-node SF100
 #
 # Environment (set by Terraform user data):
-#   CAELUM_BUCKET  — S3 bucket name
-#   CAELUM_REGION  — AWS region
+#   WADJET_BUCKET  — S3 bucket name
+#   WADJET_REGION  — AWS region
 #
 # Outputs results to /root/benchmark-results/
 
@@ -21,8 +21,8 @@ SF="${2:-SF1}"
 WORKER_COUNT="${3:-3}"
 RUNS="${BENCHMARK_RUNS:-3}"
 
-BUCKET="${CAELUM_BUCKET:?Set CAELUM_BUCKET}"
-REGION="${CAELUM_REGION:?Set CAELUM_REGION}"
+BUCKET="${WADJET_BUCKET:?Set WADJET_BUCKET}"
+REGION="${WADJET_REGION:?Set WADJET_REGION}"
 S3_ENDPOINT="s3.${REGION}.amazonaws.com"
 RESULTS_DIR="/root/benchmark-results"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -42,7 +42,7 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RESULT_FILE"; }
 
 # Capture system info
 {
-  echo "=== Caelum TPC-H Benchmark ==="
+  echo "=== Wadjet TPC-H Benchmark ==="
   echo "Mode:         $MODE"
   echo "Scale Factor: $SF (${SCALE}x)"
   echo "Workers:      $WORKER_COUNT"
@@ -61,7 +61,7 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RESULT_FILE"; }
 
 # ---- Phase 1: Data generation + S3 load ----
 
-cd /root/caelum
+cd /root/wadjet
 
 # Check if data already exists in the bucket (supports pre-seeded / preserved buckets)
 DATA_EXISTS=$(aws s3 ls "s3://${BUCKET}/" --recursive 2>/dev/null | grep -c "\.parquet$" || true)
@@ -95,7 +95,7 @@ if [ "$MODE" = "distributed" ]; then
   log "Phase 2: Starting coordinator on ${COORD_IP}..."
 
   # Start coordinator in background
-  caelum serve \
+  wadjet serve \
     --mode=coordinator \
     --storage.endpoint="${S3_ENDPOINT}" \
     --bucket="${BUCKET}" \
@@ -127,19 +127,19 @@ if [ "$MODE" = "distributed" ]; then
   for run in $(seq 1 "$RUNS"); do
     log "--- Run ${run}/${RUNS} ---"
 
-    # Run queries via the caelum CLI against the coordinator
+    # Run queries via the wadjet CLI against the coordinator
     for qnum in $(seq 1 22); do
       PADDED=$(printf "%02d" "$qnum")
       START=$(date +%s%N)
 
-      caelum query --endpoint="localhost:8080" \
+      wadjet query --endpoint="localhost:8080" \
         "$(python3 -c "
-import sys; sys.path.insert(0, '/root/caelum/benchmarks/tpch')
+import sys; sys.path.insert(0, '/root/wadjet/benchmarks/tpch')
 # Queries are in Go, so we use the test binary instead
 " 2>/dev/null || true)"
 
       # Use the compiled test binary for consistent query execution
-      TPCH_SCALE=$SCALE /usr/local/bin/caelum-bench \
+      TPCH_SCALE=$SCALE /usr/local/bin/wadjet-bench \
         -test.v -test.run "TestTPCHQueriesLarge/Q${PADDED}" \
         -test.timeout 30m -test.count=1 2>&1 | tee -a "$RESULT_FILE"
     done

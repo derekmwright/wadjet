@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/distributed"
-	"github.com/derekmwright/caelum/internal/metrics"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/metrics"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"

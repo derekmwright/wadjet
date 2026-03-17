@@ -6,8 +6,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/derekmwright/caelum/internal/auth"
-	"github.com/derekmwright/caelum/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/coordinator"
 )
 
 // OpsAPI provides operational endpoints for monitoring and cleanup.

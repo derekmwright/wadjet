@@ -7,8 +7,8 @@ import (
 
 	goparquet "github.com/parquet-go/parquet-go"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	pqt "github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // generateParquetData writes n rows to a parquet buffer and returns the bytes.

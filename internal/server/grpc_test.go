@@ -13,15 +13,15 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
-	caelumv1 "github.com/derekmwright/caelum/gen/caelum/v1"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	wadjetv1 "github.com/citc-tech/wadjet/gen/wadjet/v1"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 const bufSize = 1024 * 1024
 
-func setupGRPCTest(t *testing.T) (caelumv1.CaelumServiceClient, func()) {
+func setupGRPCTest(t *testing.T) (wadjetv1.WadjetServiceClient, func()) {
 	t.Helper()
 
 	store := objstore.NewMemStore()
@@ -37,7 +37,7 @@ func setupGRPCTest(t *testing.T) (caelumv1.CaelumServiceClient, func()) {
 
 	lis := bufconn.Listen(bufSize)
 	srv.server = grpc.NewServer()
-	caelumv1.RegisterCaelumServiceServer(srv.server, srv)
+	wadjetv1.RegisterWadjetServiceServer(srv.server, srv)
 
 	go func() {
 		if err := srv.server.Serve(lis); err != nil {
@@ -55,7 +55,7 @@ func setupGRPCTest(t *testing.T) (caelumv1.CaelumServiceClient, func()) {
 		t.Fatalf("dial bufconn: %v", err)
 	}
 
-	client := caelumv1.NewCaelumServiceClient(conn)
+	client := wadjetv1.NewWadjetServiceClient(conn)
 
 	cleanup := func() {
 		conn.Close()
@@ -69,7 +69,7 @@ func TestGRPC_ListTables_Empty(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	resp, err := client.ListTables(context.Background(), &caelumv1.ListTablesRequest{})
+	resp, err := client.ListTables(context.Background(), &wadjetv1.ListTablesRequest{})
 	if err != nil {
 		t.Fatalf("ListTables: %v", err)
 	}
@@ -85,9 +85,9 @@ func TestGRPC_CreateAndListTables(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a table
-	createResp, err := client.CreateTable(ctx, &caelumv1.CreateTableRequest{
+	createResp, err := client.CreateTable(ctx, &wadjetv1.CreateTableRequest{
 		Name: "events",
-		Columns: []*caelumv1.ColumnDef{
+		Columns: []*wadjetv1.ColumnDef{
 			{Name: "id", Type: "BIGINT", Nullable: false},
 			{Name: "name", Type: "VARCHAR", Nullable: true},
 			{Name: "ts", Type: "TIMESTAMP", Nullable: false},
@@ -103,7 +103,7 @@ func TestGRPC_CreateAndListTables(t *testing.T) {
 	}
 
 	// List should show the table
-	listResp, err := client.ListTables(ctx, &caelumv1.ListTablesRequest{})
+	listResp, err := client.ListTables(ctx, &wadjetv1.ListTablesRequest{})
 	if err != nil {
 		t.Fatalf("ListTables: %v", err)
 	}
@@ -119,9 +119,9 @@ func TestGRPC_DescribeTable(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a table first
-	_, err := client.CreateTable(ctx, &caelumv1.CreateTableRequest{
+	_, err := client.CreateTable(ctx, &wadjetv1.CreateTableRequest{
 		Name: "logs",
-		Columns: []*caelumv1.ColumnDef{
+		Columns: []*wadjetv1.ColumnDef{
 			{Name: "timestamp", Type: "TIMESTAMP"},
 			{Name: "message", Type: "VARCHAR", Nullable: true},
 			{Name: "level", Type: "INT32"},
@@ -132,7 +132,7 @@ func TestGRPC_DescribeTable(t *testing.T) {
 	}
 
 	// Describe it
-	resp, err := client.DescribeTable(ctx, &caelumv1.DescribeTableRequest{TableName: "logs"})
+	resp, err := client.DescribeTable(ctx, &wadjetv1.DescribeTableRequest{TableName: "logs"})
 	if err != nil {
 		t.Fatalf("DescribeTable: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestGRPC_DescribeTable_NotFound(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	_, err := client.DescribeTable(context.Background(), &caelumv1.DescribeTableRequest{TableName: "nonexistent"})
+	_, err := client.DescribeTable(context.Background(), &wadjetv1.DescribeTableRequest{TableName: "nonexistent"})
 	if err == nil {
 		t.Fatal("expected error for nonexistent table")
 	}
@@ -175,9 +175,9 @@ func TestGRPC_DropTable(t *testing.T) {
 	ctx := context.Background()
 
 	// Create then drop
-	_, err := client.CreateTable(ctx, &caelumv1.CreateTableRequest{
+	_, err := client.CreateTable(ctx, &wadjetv1.CreateTableRequest{
 		Name: "temp",
-		Columns: []*caelumv1.ColumnDef{
+		Columns: []*wadjetv1.ColumnDef{
 			{Name: "id", Type: "BIGINT"},
 		},
 	})
@@ -185,7 +185,7 @@ func TestGRPC_DropTable(t *testing.T) {
 		t.Fatalf("CreateTable: %v", err)
 	}
 
-	dropResp, err := client.DropTable(ctx, &caelumv1.DropTableRequest{Name: "temp"})
+	dropResp, err := client.DropTable(ctx, &wadjetv1.DropTableRequest{Name: "temp"})
 	if err != nil {
 		t.Fatalf("DropTable: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestGRPC_DropTable(t *testing.T) {
 	}
 
 	// Verify it's gone
-	listResp, err := client.ListTables(ctx, &caelumv1.ListTablesRequest{})
+	listResp, err := client.ListTables(ctx, &wadjetv1.ListTablesRequest{})
 	if err != nil {
 		t.Fatalf("ListTables: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestGRPC_DropTable_IfExists(t *testing.T) {
 	defer cleanup()
 
 	// Drop nonexistent with if_exists should succeed
-	resp, err := client.DropTable(context.Background(), &caelumv1.DropTableRequest{
+	resp, err := client.DropTable(context.Background(), &wadjetv1.DropTableRequest{
 		Name:     "ghost",
 		IfExists: true,
 	})
@@ -227,9 +227,9 @@ func TestGRPC_CreateTable_Validation(t *testing.T) {
 	ctx := context.Background()
 
 	// Empty name
-	_, err := client.CreateTable(ctx, &caelumv1.CreateTableRequest{
+	_, err := client.CreateTable(ctx, &wadjetv1.CreateTableRequest{
 		Name: "",
-		Columns: []*caelumv1.ColumnDef{
+		Columns: []*wadjetv1.ColumnDef{
 			{Name: "id", Type: "BIGINT"},
 		},
 	})
@@ -242,9 +242,9 @@ func TestGRPC_CreateTable_Validation(t *testing.T) {
 	}
 
 	// No columns
-	_, err = client.CreateTable(ctx, &caelumv1.CreateTableRequest{
+	_, err = client.CreateTable(ctx, &wadjetv1.CreateTableRequest{
 		Name:    "noColumns",
-		Columns: []*caelumv1.ColumnDef{},
+		Columns: []*wadjetv1.ColumnDef{},
 	})
 	if err == nil {
 		t.Fatal("expected error for no columns")
@@ -255,9 +255,9 @@ func TestGRPC_CreateTable_Validation(t *testing.T) {
 	}
 
 	// Invalid column type
-	_, err = client.CreateTable(ctx, &caelumv1.CreateTableRequest{
+	_, err = client.CreateTable(ctx, &wadjetv1.CreateTableRequest{
 		Name: "badType",
-		Columns: []*caelumv1.ColumnDef{
+		Columns: []*wadjetv1.ColumnDef{
 			{Name: "x", Type: "MYSTERY"},
 		},
 	})
@@ -275,7 +275,7 @@ func TestGRPC_Query_NoEngine(t *testing.T) {
 	defer cleanup()
 
 	// No coordinator or DB configured — should return Unavailable
-	_, err := client.Query(context.Background(), &caelumv1.QueryRequest{Sql: "SELECT 1"})
+	_, err := client.Query(context.Background(), &wadjetv1.QueryRequest{Sql: "SELECT 1"})
 	if err == nil {
 		t.Fatal("expected error with no engine")
 	}
@@ -289,7 +289,7 @@ func TestGRPC_Query_EmptySQL(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	_, err := client.Query(context.Background(), &caelumv1.QueryRequest{Sql: ""})
+	_, err := client.Query(context.Background(), &wadjetv1.QueryRequest{Sql: ""})
 	if err == nil {
 		t.Fatal("expected error for empty SQL")
 	}
@@ -303,7 +303,7 @@ func TestGRPC_QueryStream_EmptySQL(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	stream, err := client.QueryStream(context.Background(), &caelumv1.QueryRequest{Sql: ""})
+	stream, err := client.QueryStream(context.Background(), &wadjetv1.QueryRequest{Sql: ""})
 	if err != nil {
 		t.Fatalf("QueryStream: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestGRPC_SubmitQuery_NoCoordinator(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	_, err := client.SubmitQuery(context.Background(), &caelumv1.QueryRequest{Sql: "SELECT 1"})
+	_, err := client.SubmitQuery(context.Background(), &wadjetv1.QueryRequest{Sql: "SELECT 1"})
 	if err == nil {
 		t.Fatal("expected error without coordinator")
 	}
@@ -335,7 +335,7 @@ func TestGRPC_GetQueryStatus_NoCoordinator(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	_, err := client.GetQueryStatus(context.Background(), &caelumv1.GetQueryStatusRequest{QueryId: "q-123"})
+	_, err := client.GetQueryStatus(context.Background(), &wadjetv1.GetQueryStatusRequest{QueryId: "q-123"})
 	if err == nil {
 		t.Fatal("expected error without coordinator")
 	}
@@ -349,7 +349,7 @@ func TestGRPC_CancelQuery_NoCoordinator(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	_, err := client.CancelQuery(context.Background(), &caelumv1.CancelQueryRequest{QueryId: "q-123"})
+	_, err := client.CancelQuery(context.Background(), &wadjetv1.CancelQueryRequest{QueryId: "q-123"})
 	if err == nil {
 		t.Fatal("expected error without coordinator")
 	}
@@ -377,7 +377,7 @@ func TestGRPC_QueryWithDB(t *testing.T) {
 		t.Fatalf("create table: %v", err)
 	}
 
-	// We can't easily test with a real caelum.DB here since it requires
+	// We can't easily test with a real wadjet.DB here since it requires
 	// the full planner stack, but we can verify the catalog operations work
 	// through gRPC. The Query path is tested via integration tests.
 
@@ -388,7 +388,7 @@ func TestGRPC_QueryWithDB(t *testing.T) {
 
 	lis := bufconn.Listen(bufSize)
 	srv.server = grpc.NewServer()
-	caelumv1.RegisterCaelumServiceServer(srv.server, srv)
+	wadjetv1.RegisterWadjetServiceServer(srv.server, srv)
 
 	go func() {
 		srv.server.Serve(lis)
@@ -406,10 +406,10 @@ func TestGRPC_QueryWithDB(t *testing.T) {
 	defer conn.Close()
 	defer srv.server.GracefulStop()
 
-	client := caelumv1.NewCaelumServiceClient(conn)
+	client := wadjetv1.NewWadjetServiceClient(conn)
 
 	// Verify table exists via DescribeTable
-	desc, err := client.DescribeTable(context.Background(), &caelumv1.DescribeTableRequest{TableName: "users"})
+	desc, err := client.DescribeTable(context.Background(), &wadjetv1.DescribeTableRequest{TableName: "users"})
 	if err != nil {
 		t.Fatalf("DescribeTable: %v", err)
 	}
@@ -425,7 +425,7 @@ func TestGRPC_QueryStream_NoEngine(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	stream, err := client.QueryStream(context.Background(), &caelumv1.QueryRequest{Sql: "SELECT 1"})
+	stream, err := client.QueryStream(context.Background(), &wadjetv1.QueryRequest{Sql: "SELECT 1"})
 	if err != nil {
 		t.Fatalf("QueryStream: %v", err)
 	}
@@ -511,9 +511,9 @@ func TestGRPC_FullDDLWorkflow(t *testing.T) {
 
 	// Create two tables
 	for _, name := range []string{"orders", "customers"} {
-		_, err := client.CreateTable(ctx, &caelumv1.CreateTableRequest{
+		_, err := client.CreateTable(ctx, &wadjetv1.CreateTableRequest{
 			Name: name,
-			Columns: []*caelumv1.ColumnDef{
+			Columns: []*wadjetv1.ColumnDef{
 				{Name: "id", Type: "BIGINT"},
 				{Name: "data", Type: "VARCHAR", Nullable: true},
 			},
@@ -524,7 +524,7 @@ func TestGRPC_FullDDLWorkflow(t *testing.T) {
 	}
 
 	// List should show both
-	listResp, err := client.ListTables(ctx, &caelumv1.ListTablesRequest{})
+	listResp, err := client.ListTables(ctx, &wadjetv1.ListTablesRequest{})
 	if err != nil {
 		t.Fatalf("ListTables: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestGRPC_FullDDLWorkflow(t *testing.T) {
 	}
 
 	// Describe orders
-	desc, err := client.DescribeTable(ctx, &caelumv1.DescribeTableRequest{TableName: "orders"})
+	desc, err := client.DescribeTable(ctx, &wadjetv1.DescribeTableRequest{TableName: "orders"})
 	if err != nil {
 		t.Fatalf("DescribeTable: %v", err)
 	}
@@ -542,13 +542,13 @@ func TestGRPC_FullDDLWorkflow(t *testing.T) {
 	}
 
 	// Drop one
-	_, err = client.DropTable(ctx, &caelumv1.DropTableRequest{Name: "orders"})
+	_, err = client.DropTable(ctx, &wadjetv1.DropTableRequest{Name: "orders"})
 	if err != nil {
 		t.Fatalf("DropTable: %v", err)
 	}
 
 	// List should show one
-	listResp, err = client.ListTables(ctx, &caelumv1.ListTablesRequest{})
+	listResp, err = client.ListTables(ctx, &wadjetv1.ListTablesRequest{})
 	if err != nil {
 		t.Fatalf("ListTables: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestGRPC_FullDDLWorkflow(t *testing.T) {
 	}
 
 	// Describe dropped table should fail
-	_, err = client.DescribeTable(ctx, &caelumv1.DescribeTableRequest{TableName: "orders"})
+	_, err = client.DescribeTable(ctx, &wadjetv1.DescribeTableRequest{TableName: "orders"})
 	if err == nil {
 		t.Fatal("expected error for dropped table")
 	}
@@ -568,7 +568,7 @@ func TestGRPC_DescribeTable_EmptyName(t *testing.T) {
 	client, cleanup := setupGRPCTest(t)
 	defer cleanup()
 
-	_, err := client.DescribeTable(context.Background(), &caelumv1.DescribeTableRequest{TableName: ""})
+	_, err := client.DescribeTable(context.Background(), &wadjetv1.DescribeTableRequest{TableName: ""})
 	if err == nil {
 		t.Fatal("expected error for empty table name")
 	}
@@ -586,19 +586,19 @@ func TestGRPC_Validation_EmptyQueryIDs(t *testing.T) {
 	defer cleanup()
 
 	// SubmitQuery with empty SQL
-	_, err := client.SubmitQuery(context.Background(), &caelumv1.QueryRequest{Sql: ""})
+	_, err := client.SubmitQuery(context.Background(), &wadjetv1.QueryRequest{Sql: ""})
 	if err == nil {
 		t.Fatal("expected error for empty SQL")
 	}
 
 	// CancelQuery with empty query_id (hits Unavailable first since no coordinator)
-	_, err = client.CancelQuery(context.Background(), &caelumv1.CancelQueryRequest{QueryId: ""})
+	_, err = client.CancelQuery(context.Background(), &wadjetv1.CancelQueryRequest{QueryId: ""})
 	if err == nil {
 		t.Fatal("expected error for empty query_id")
 	}
 
 	// GetQueryStatus with empty query_id (hits Unavailable first since no coordinator)
-	_, err = client.GetQueryStatus(context.Background(), &caelumv1.GetQueryStatusRequest{QueryId: ""})
+	_, err = client.GetQueryStatus(context.Background(), &wadjetv1.GetQueryStatusRequest{QueryId: ""})
 	if err == nil {
 		t.Fatal("expected error for empty query_id")
 	}

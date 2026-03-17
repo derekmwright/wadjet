@@ -1,5 +1,5 @@
-// Package caelum provides the public embeddable API for Caelum.
-package caelum
+// Package wadjet provides the public embeddable API for Wadjet.
+package wadjet
 
 import (
 	"context"
@@ -7,18 +7,18 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/derekmwright/caelum/internal/engine/exec"
-	"github.com/derekmwright/caelum/internal/engine/expr"
-	"github.com/derekmwright/caelum/internal/planner/logical"
-	"github.com/derekmwright/caelum/internal/planner/physical"
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/citc-tech/wadjet/internal/planner/physical"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-// DB is the main entry point for embedded usage of Caelum.
+// DB is the main entry point for embedded usage of Wadjet.
 type DB struct {
 	store   objstore.Store
 	catalog *catalog.Catalog
@@ -37,7 +37,7 @@ type Config struct {
 	SpillDir     string // directory for spill-to-disk files (empty = os temp dir)
 }
 
-// Open creates and initializes a new Caelum database.
+// Open creates and initializes a new Wadjet database.
 func Open(ctx context.Context, cfg Config) (*DB, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -89,8 +89,8 @@ func (db *DB) NewIngester(tableName string, schema parquet.Schema, partitionKeys
 // ColumnMeta describes a result column's type information.
 type ColumnMeta struct {
 	Name     string
-	TypeName string         // Caelum type name (e.g., "INT64", "STRING")
-	TypeID   parquet.TypeID // Caelum type ID
+	TypeName string         // Wadjet type name (e.g., "INT64", "STRING")
+	TypeID   parquet.TypeID // Wadjet type ID
 	Nullable bool
 }
 

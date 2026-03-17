@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/planner/logical"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // setupCatalog creates an in-memory catalog with an "events" table containing

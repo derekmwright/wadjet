@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // TableMetadata represents an Iceberg table metadata file (v1 or v2).
@@ -168,21 +168,21 @@ func (m *TableMetadata) ActivePartitionSpec() []PartitionField {
 	return m.PartitionSpec
 }
 
-// ToParquetSchema converts an Iceberg schema to Caelum's parquet schema.
+// ToParquetSchema converts an Iceberg schema to Wadjet's parquet schema.
 func (s *Schema) ToParquetSchema() parquet.Schema {
 	cols := make([]parquet.Column, len(s.Fields))
 	for i, f := range s.Fields {
 		cols[i] = parquet.Column{
 			Name:     f.Name,
-			Type:     icebergTypeToCaelum(f.Type),
+			Type:     icebergTypeToWadjet(f.Type),
 			Nullable: !f.Required,
 		}
 	}
 	return parquet.Schema{Columns: cols}
 }
 
-// icebergTypeToCaelum maps Iceberg type strings to Caelum TypeIDs.
-func icebergTypeToCaelum(iceType string) parquet.TypeID {
+// icebergTypeToWadjet maps Iceberg type strings to Wadjet TypeIDs.
+func icebergTypeToWadjet(iceType string) parquet.TypeID {
 	lower := strings.ToLower(iceType)
 	switch {
 	case lower == "boolean":

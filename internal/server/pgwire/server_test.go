@@ -9,17 +9,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/caelum/caelum"
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-func setupTestDB(t *testing.T) *caelum.DB {
+func setupTestDB(t *testing.T) *wadjet.DB {
 	t.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
-	db, err := caelum.Open(ctx, caelum.Config{Store: store, Bucket: "test"})
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func setupTestDB(t *testing.T) *caelum.DB {
 	return db
 }
 
-func startTestServer(t *testing.T, db *caelum.DB) *Server {
+func startTestServer(t *testing.T, db *wadjet.DB) *Server {
 	t.Helper()
 	srv := NewServer(db, Config{}, nil)
 	if err := srv.Start("127.0.0.1:0"); err != nil {

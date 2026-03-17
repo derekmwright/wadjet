@@ -9,12 +9,12 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/engine/exec"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	pqt "github.com/derekmwright/caelum/internal/storage/parquet"
-	"github.com/derekmwright/caelum/internal/storage/partition"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/storage/partition"
 )
 
 // fileReadPool reuses read buffers across Parquet file reads to avoid

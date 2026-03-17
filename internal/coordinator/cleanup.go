@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
 // ResultCleaner manages cleanup of query result files in object storage.

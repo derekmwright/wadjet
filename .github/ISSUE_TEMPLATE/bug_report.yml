@@ -1,0 +1,52 @@
+name: Bug Report
+description: Report a bug in Wadjet
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug.
+      placeholder: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: SQL query or minimal steps to reproduce the bug.
+      placeholder: |
+        ```sql
+        SELECT ...
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages or wrong output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Version, OS, deployment mode, etc.
+      placeholder: |
+        - Wadjet version: v0.x.x
+        - OS: Linux/macOS/Windows
+        - Mode: standalone/distributed
+    validations:
+      required: false

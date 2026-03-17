@@ -1,0 +1,63 @@
+name: PR Review
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+# One review at a time
+concurrency:
+  group: pr-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    # Only runs when a maintainer adds "needs-review" label
+    # Using pull_request_target + label gate prevents fork abuse
+    if: github.event.label.name == 'needs-review'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Review PR
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+
+          claude --dangerouslySkipPermissions -p "
+          You are reviewing pull request #${PR_NUMBER} for the Wadjet analytics engine.
+
+          Instructions:
+          1. Read CLAUDE.md for project conventions
+          2. Run: gh pr diff ${PR_NUMBER}
+          3. Review the diff for:
+             - Correctness: does the code do what it claims?
+             - Tests: are there regression tests? Do they cover edge cases?
+             - Performance: could this regress TPC-H SF1 performance?
+             - Style: does it follow conventional commits and code conventions?
+             - Security: any injection risks, unsafe operations?
+          4. Run the test suite: go test ./internal/... -timeout 5m
+          5. Post your review using:
+             gh pr review ${PR_NUMBER} --comment --body \"your review\"
+
+          Keep the review concise. Focus on issues, not praise.
+          If everything looks good, say so briefly.
+          If there are problems, be specific with file:line references.
+
+          Do NOT approve or request changes. Only comment.
+          A human maintainer makes the final decision.
+          "

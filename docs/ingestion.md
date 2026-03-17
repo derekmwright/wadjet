@@ -1,10 +1,10 @@
 # Ingestion
 
-This guide covers writing data into Caelum — from the built-in micro-batch ingester to production pipelines using Bento.
+This guide covers writing data into Wadjet — from the built-in micro-batch ingester to production pipelines using Bento.
 
 ## Ingestion Overview
 
-Caelum ingests data by:
+Wadjet ingests data by:
 
 1. Accepting rows into per-partition memory buffers
 2. Automatically flushing buffers to Parquet files on object storage
@@ -36,8 +36,8 @@ The ingester flushes automatically when any threshold is exceeded:
 
 ```go
 import (
-    "github.com/derekmwright/caelum/internal/storage/ingest"
-    "github.com/derekmwright/caelum/internal/storage/parquet"
+    "github.com/citc-tech/wadjet/internal/storage/ingest"
+    "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 schema := parquet.Schema{
@@ -84,9 +84,9 @@ ingester.Stop(ctx)
 Partition keys determine how data is organized on storage:
 
 ```
-s3://caelum/data/syslog/date=2026-03-15/device=fw-01/part-0001.parquet
-s3://caelum/data/syslog/date=2026-03-15/device=sw-02/part-0002.parquet
-s3://caelum/data/syslog/date=2026-03-14/device=fw-01/part-0003.parquet
+s3://wadjet/data/syslog/date=2026-03-15/device=fw-01/part-0001.parquet
+s3://wadjet/data/syslog/date=2026-03-15/device=sw-02/part-0002.parquet
+s3://wadjet/data/syslog/date=2026-03-14/device=fw-01/part-0003.parquet
 ```
 
 Good partitioning enables **partition pruning** — the query engine skips entire partitions that don't match the WHERE clause.
@@ -104,20 +104,20 @@ Avoid over-partitioning (too many small files) or under-partitioning (single gia
 
 ## Bento Integration
 
-[Bento](https://warpstreamlabs.github.io/bento/) (formerly Benthos) is a stream processing tool that fits naturally as the ingestion layer in front of Caelum. Bento handles parsing, enrichment, and batching, then writes Parquet directly to S3.
+[Bento](https://warpstreamlabs.github.io/bento/) (formerly Benthos) is a stream processing tool that fits naturally as the ingestion layer in front of Wadjet. Bento handles parsing, enrichment, and batching, then writes Parquet directly to S3.
 
-### Why Bento + Caelum
+### Why Bento + Wadjet
 
 ```
-Device Logs ──► Bento (parse, enrich, partition) ──► S3 (Parquet) ──► Caelum (query)
+Device Logs ──► Bento (parse, enrich, partition) ──► S3 (Parquet) ──► Wadjet (query)
 ```
 
 - **Bento** handles the messy real-world ingestion: syslog parsing, JSON decoding, field extraction, enrichment, batching, retries
-- **Caelum** handles the analytical query layer: SQL, aggregation, joins, API serving
+- **Wadjet** handles the analytical query layer: SQL, aggregation, joins, API serving
 
 This separation keeps each component focused and independently scalable.
 
-### Syslog to Caelum via Bento
+### Syslog to Wadjet via Bento
 
 ```yaml
 # bento-syslog.yaml
@@ -148,7 +148,7 @@ pipeline:
 
 output:
   aws_s3:
-    bucket: caelum
+    bucket: wadjet
     path: 'data/syslog/date=${! this.date }/part-${! uuid_v4() }.parquet'
     batching:
       count: 100000
@@ -215,7 +215,7 @@ pipeline:
 
 output:
   aws_s3:
-    bucket: caelum
+    bucket: wadjet
     path: 'data/snmp_traps/date=${! this.date }/part-${! uuid_v4() }.parquet'
     batching:
       count: 50000
@@ -256,7 +256,7 @@ input:
       - localhost:9092
     topics:
       - netflow
-    consumer_group: caelum-ingest
+    consumer_group: wadjet-ingest
 
 pipeline:
   processors:
@@ -280,7 +280,7 @@ pipeline:
 
 output:
   aws_s3:
-    bucket: caelum
+    bucket: wadjet
     path: 'data/netflow/date=${! this.date }/part-${! uuid_v4() }.parquet'
     batching:
       count: 250000
@@ -319,21 +319,21 @@ output:
     force_path_style_urls: true
 ```
 
-### Registering Bento-Written Tables in Caelum
+### Registering Bento-Written Tables in Wadjet
 
-After Bento starts writing Parquet files to S3, register the table schema in Caelum so it can be queried:
+After Bento starts writing Parquet files to S3, register the table schema in Wadjet so it can be queried:
 
 ```go
 import (
-    "github.com/derekmwright/caelum/internal/storage/objstore"
-    "github.com/derekmwright/caelum/internal/storage/parquet"
-    "github.com/derekmwright/caelum/caelum"
+    "github.com/citc-tech/wadjet/internal/storage/objstore"
+    "github.com/citc-tech/wadjet/internal/storage/parquet"
+    "github.com/citc-tech/wadjet/wadjet"
 )
 
 store, _ := objstore.NewMinIOStore(ctx, objstore.MinIOConfig{
     Endpoint: "localhost:9000", AccessKey: "minioadmin", SecretKey: "minioadmin",
 })
-db, _ := caelum.Open(ctx, caelum.Config{Store: store, Bucket: "caelum"})
+db, _ := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "wadjet"})
 
 // Register the syslog table
 db.CreateTable(ctx, "syslog", parquet.Schema{
@@ -395,4 +395,4 @@ Tune Bento's `batching.count` and `batching.period` to hit the sweet spot.
 
 ### Exactly-Once Considerations
 
-Caelum's catalog uses NATS KV with revision-based optimistic concurrency, so concurrent writers won't corrupt the catalog. However, if an ingestion process crashes mid-flush, a Parquet file may exist on S3 without a corresponding catalog entry. On restart, the file becomes orphaned but doesn't affect queries. Periodic cleanup of orphaned files is recommended for production deployments.
+Wadjet's catalog uses NATS KV with revision-based optimistic concurrency, so concurrent writers won't corrupt the catalog. However, if an ingestion process crashes mid-flush, a Parquet file may exist on S3 without a corresponding catalog entry. On restart, the file becomes orphaned but doesn't affect queries. Periodic cleanup of orphaned files is recommended for production deployments.

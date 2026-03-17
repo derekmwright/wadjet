@@ -1,6 +1,6 @@
 # Configuration
 
-Caelum is configured through CLI flags, environment variables, and an optional YAML configuration file.
+Wadjet is configured through CLI flags, environment variables, and an optional YAML configuration file.
 
 ## CLI Flags
 
@@ -16,7 +16,7 @@ Caelum is configured through CLI flags, environment variables, and an optional Y
 | `--endpoint` | S3-compatible endpoint (host:port) | `localhost:9000` |
 | `--access-key` | S3 access key | required for S3 |
 | `--secret-key` | S3 secret key | required for S3 |
-| `--bucket` | S3 bucket name | `caelum` |
+| `--bucket` | S3 bucket name | `wadjet` |
 | `--nats-port` | Embedded NATS port (standalone/coordinator mode) | `4222` |
 | `--nats-url` | NATS server URL (worker mode) | `nats://localhost:4222` |
 | `--cluster-id` | Unique cluster identifier for federated routing | `local` |
@@ -33,10 +33,10 @@ Caelum is configured through CLI flags, environment variables, and an optional Y
 | `--endpoint` | S3-compatible endpoint | `localhost:9000` |
 | `--access-key` | S3 access key | required |
 | `--secret-key` | S3 secret key | required |
-| `--bucket` | S3 bucket name | `caelum` |
+| `--bucket` | S3 bucket name | `wadjet` |
 | `--format` | Output format: `json`, `table`, `csv` | `json` |
 
-Usage: `caelum query [flags] "SQL STATEMENT"`
+Usage: `wadjet query [flags] "SQL STATEMENT"`
 
 ### `tables` Command
 
@@ -52,10 +52,10 @@ Same S3 flags as `query`. Opens an interactive SQL REPL.
 
 ## YAML Configuration File
 
-The YAML config file controls all aspects of Caelum's configuration. Security settings are hot-reloadable — changes take effect without restarting the server.
+The YAML config file controls all aspects of Wadjet's configuration. Security settings are hot-reloadable — changes take effect without restarting the server.
 
 ```yaml
-# caelum.yaml
+# wadjet.yaml
 
 mode: standalone  # standalone, coordinator, worker
 
@@ -65,14 +65,14 @@ storage:
   endpoint: "localhost:9000"
   access_key: "minioadmin"
   secret_key: "minioadmin"
-  bucket: "caelum"
+  bucket: "wadjet"
   use_ssl: false
   region: ""
 
 nats:
   port: 4222
   url: ""                     # worker mode: coordinator's NATS URL
-  store_dir: "/tmp/caelum-nats"
+  store_dir: "/tmp/wadjet-nats"
   cluster_id: "local"         # unique cluster ID for federation
   leaf_remotes: []            # remote NATS URLs for leaf node connections
 
@@ -99,10 +99,10 @@ auth:
 
   # API key definitions
   api_keys:
-    - key: "caelum-key-abc123"
+    - key: "wadjet-key-abc123"
       name: "ingest-service"
       role: writer
-    - key: "caelum-key-xyz789"
+    - key: "wadjet-key-xyz789"
       name: "analytics-dashboard"
       role: reader
 
@@ -158,7 +158,7 @@ The configuration file is watched for changes via filesystem notifications. When
 You can subscribe to config changes programmatically:
 
 ```go
-cfg := config.LoadOrDefault("/path/to/caelum.yaml")
+cfg := config.LoadOrDefault("/path/to/wadjet.yaml")
 // Config is loaded once at startup; the auth Provider handles hot-reload
 // by watching the file and swapping credentials atomically.
 ```
@@ -240,7 +240,7 @@ Per-role limits fully override global limits when defined. See [Security](securi
 
 ## Environment Variables
 
-All configuration can be overridden via `CAELUM_*` environment variables. This is useful for container and cloud deployments where config files may not be practical.
+All configuration can be overridden via `WADJET_*` environment variables. This is useful for container and cloud deployments where config files may not be practical.
 
 ### S3/Storage
 
@@ -249,47 +249,47 @@ All configuration can be overridden via `CAELUM_*` environment variables. This i
 | `AWS_ACCESS_KEY_ID` | `--access-key` | S3 access key |
 | `AWS_SECRET_ACCESS_KEY` | `--secret-key` | S3 secret key |
 | `AWS_ENDPOINT_URL_S3` | `--endpoint` | S3 endpoint |
-| `CAELUM_BUCKET` | `--bucket` | S3 bucket name |
+| `WADJET_BUCKET` | `--bucket` | S3 bucket name |
 
 ### Server
 
 | Variable | Description |
 |----------|-------------|
-| `CAELUM_HTTP_ADDR` | HTTP listen address |
-| `CAELUM_GRPC_ADDR` | gRPC listen address |
-| `CAELUM_MODE` | Deployment mode (`standalone`, `coordinator`, `worker`) |
-| `CAELUM_MAX_CONNECTIONS` | Maximum concurrent connections |
-| `CAELUM_SLOW_QUERY_THRESHOLD` | Slow query log threshold (e.g., `5s`) |
-| `CAELUM_SHUTDOWN_TIMEOUT` | Graceful shutdown drain timeout (e.g., `30s`) |
+| `WADJET_HTTP_ADDR` | HTTP listen address |
+| `WADJET_GRPC_ADDR` | gRPC listen address |
+| `WADJET_MODE` | Deployment mode (`standalone`, `coordinator`, `worker`) |
+| `WADJET_MAX_CONNECTIONS` | Maximum concurrent connections |
+| `WADJET_SLOW_QUERY_THRESHOLD` | Slow query log threshold (e.g., `5s`) |
+| `WADJET_SHUTDOWN_TIMEOUT` | Graceful shutdown drain timeout (e.g., `30s`) |
 
 ### NATS
 
 | Variable | Description |
 |----------|-------------|
-| `CAELUM_NATS_PORT` | Embedded NATS port |
-| `CAELUM_NATS_URL` | NATS server URL (worker mode) |
-| `CAELUM_CLUSTER_ID` | Cluster identifier for federation |
+| `WADJET_NATS_PORT` | Embedded NATS port |
+| `WADJET_NATS_URL` | NATS server URL (worker mode) |
+| `WADJET_CLUSTER_ID` | Cluster identifier for federation |
 
 ### Worker
 
 | Variable | Description |
 |----------|-------------|
-| `CAELUM_WORKER_MAX_CONCURRENT` | Max concurrent tasks per worker |
-| `CAELUM_WORKER_CACHE_BYTES` | LRU cache size in bytes |
-| `CAELUM_MEMORY_BUDGET` | Per-task memory budget |
-| `CAELUM_RESULT_STORE_BYTES` | In-memory result store capacity |
+| `WADJET_WORKER_MAX_CONCURRENT` | Max concurrent tasks per worker |
+| `WADJET_WORKER_CACHE_BYTES` | LRU cache size in bytes |
+| `WADJET_MEMORY_BUDGET` | Per-task memory budget |
+| `WADJET_RESULT_STORE_BYTES` | In-memory result store capacity |
 
 ### Query Limits
 
 | Variable | Description |
 |----------|-------------|
-| `CAELUM_QUERY_MAX_SCAN_BYTES` | Max bytes to scan per query |
-| `CAELUM_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
-| `CAELUM_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
+| `WADJET_QUERY_MAX_SCAN_BYTES` | Max bytes to scan per query |
+| `WADJET_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
+| `WADJET_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
 
 ### Rate Limiting
 
 | Variable | Description |
 |----------|-------------|
-| `CAELUM_RATE_LIMIT_RPS` | Requests per second per identity |
-| `CAELUM_RATE_LIMIT_BURST` | Burst allowance per identity |
+| `WADJET_RATE_LIMIT_RPS` | Requests per second per identity |
+| `WADJET_RATE_LIMIT_BURST` | Burst allowance per identity |

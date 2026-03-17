@@ -8,8 +8,8 @@ import (
 	goparquet "github.com/parquet-go/parquet-go"
 	pqencoding "github.com/parquet-go/parquet-go/encoding"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	pqt "github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // ReadFileColumnar reads all row groups from a Parquet reader into a single RecordBatch.

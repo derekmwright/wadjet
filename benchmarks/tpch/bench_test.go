@@ -9,19 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/caelum/caelum"
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-// setupTPCH creates a Caelum DB loaded with TPC-H data at the given scale factor.
-func setupTPCH(tb testing.TB, sf ScaleFactor) *caelum.DB {
+// setupTPCH creates a Wadjet DB loaded with TPC-H data at the given scale factor.
+func setupTPCH(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 	tb.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
 
-	db, err := caelum.Open(ctx, caelum.Config{
+	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: "tpch",
 	})
@@ -190,7 +190,7 @@ func BenchmarkTPCHSingleQuery(b *testing.B) {
 func TestTPCHTableSchemas(t *testing.T) {
 	ctx := context.Background()
 	store := objstore.NewMemStore()
-	db, err := caelum.Open(ctx, caelum.Config{Store: store, Bucket: "test"})
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,12 +242,12 @@ func sortedKeys(m map[string][]map[string]any) []string {
 
 // setupTPCHStreaming creates a TPC-H database using streaming generation for large scale factors.
 // Memory-bounded: generates data in chunks of chunkSize rows, ingests each chunk, releases.
-func setupTPCHStreaming(tb testing.TB, sf ScaleFactor) *caelum.DB {
+func setupTPCHStreaming(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 	tb.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
 
-	db, err := caelum.Open(ctx, caelum.Config{
+	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: "tpch",
 	})

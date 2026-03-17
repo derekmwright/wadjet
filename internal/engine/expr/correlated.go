@@ -3,8 +3,8 @@ package expr
 import (
 	"strings"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
 // CorrelatedScalarSubquery evaluates a correlated scalar subquery per-row.

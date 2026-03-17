@@ -8,18 +8,18 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"github.com/derekmwright/caelum/caelum"
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // setupRealDB creates a test DB with a multi-type schema to exercise type mapping.
-func setupRealDB(t *testing.T) (*caelum.DB, *Server) {
+func setupRealDB(t *testing.T) (*wadjet.DB, *Server) {
 	t.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
-	db, err := caelum.Open(ctx, caelum.Config{Store: store, Bucket: "test"})
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func setupRealDB(t *testing.T) (*caelum.DB, *Server) {
 
 func openPQ(t *testing.T, addr string) *sql.DB {
 	t.Helper()
-	dsn := fmt.Sprintf("host=127.0.0.1 port=%s user=caelum dbname=caelum sslmode=disable",
+	dsn := fmt.Sprintf("host=127.0.0.1 port=%s user=wadjet dbname=wadjet sslmode=disable",
 		addr[len("127.0.0.1:"):])
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

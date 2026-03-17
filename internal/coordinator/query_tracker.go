@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/distributed"
 )
 
 // QueryState represents the lifecycle state of a query.

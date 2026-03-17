@@ -1,6 +1,6 @@
 package kernel
 
-import "github.com/derekmwright/caelum/internal/engine/batch"
+import "github.com/citc-tech/wadjet/internal/engine/batch"
 
 // --- Generic aggregate slice functions (monomorphized at compile time) ---
 

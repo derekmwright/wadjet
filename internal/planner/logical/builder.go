@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
 // BuildFromSelect constructs a logical plan from a parsed SELECT query.

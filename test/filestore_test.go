@@ -6,10 +6,10 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/storage/ingest"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
-	"github.com/derekmwright/caelum/caelum"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
 )
 
 // TestFileStoreEndToEnd verifies the full query pipeline using local
@@ -23,7 +23,7 @@ func TestFileStoreEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	db, err := caelum.Open(ctx, caelum.Config{
+	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: "edge-data",
 	})

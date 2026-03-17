@@ -14,21 +14,21 @@ import (
 
 	"github.com/peterh/liner"
 
-	"github.com/derekmwright/caelum/internal/auth"
-	"github.com/derekmwright/caelum/internal/config"
-	"github.com/derekmwright/caelum/internal/geoip"
-	"github.com/derekmwright/caelum/internal/coordinator"
-	"github.com/derekmwright/caelum/internal/distributed"
-	"github.com/derekmwright/caelum/internal/engine/expr"
-	"github.com/derekmwright/caelum/internal/format"
-	"github.com/derekmwright/caelum/internal/metrics"
-	"github.com/derekmwright/caelum/internal/server"
-	"github.com/derekmwright/caelum/internal/server/mcp"
-	"github.com/derekmwright/caelum/internal/server/pgwire"
-	"github.com/derekmwright/caelum/internal/storage/catalog"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/worker"
-	"github.com/derekmwright/caelum/caelum"
+	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/config"
+	"github.com/citc-tech/wadjet/internal/geoip"
+	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
+	"github.com/citc-tech/wadjet/internal/format"
+	"github.com/citc-tech/wadjet/internal/metrics"
+	"github.com/citc-tech/wadjet/internal/server"
+	"github.com/citc-tech/wadjet/internal/server/mcp"
+	"github.com/citc-tech/wadjet/internal/server/pgwire"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/worker"
+	"github.com/citc-tech/wadjet/wadjet"
 	"github.com/spf13/cobra"
 )
 
@@ -58,8 +58,8 @@ var (
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "caelum",
-		Short: "Caelum — lightweight distributed analytical query engine",
+		Use:   "wadjet",
+		Short: "Wadjet — lightweight distributed analytical query engine",
 		Long:  "A distributed analytical query engine that uses embedded NATS for coordination and object storage for results.",
 	}
 
@@ -70,12 +70,12 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "localhost:9000", "S3-compatible endpoint")
 	rootCmd.PersistentFlags().StringVar(&accessKey, "access-key", "minioadmin", "S3 access key")
 	rootCmd.PersistentFlags().StringVar(&secretKey, "secret-key", "minioadmin", "S3 secret key")
-	rootCmd.PersistentFlags().StringVar(&bucket, "bucket", "caelum", "Storage bucket name")
+	rootCmd.PersistentFlags().StringVar(&bucket, "bucket", "wadjet", "Storage bucket name")
 	rootCmd.PersistentFlags().StringVar(&httpAddr, "http-addr", ":8080", "HTTP API listen address")
 	rootCmd.PersistentFlags().StringVar(&grpcAddr, "grpc-addr", ":9090", "gRPC API listen address")
 	rootCmd.PersistentFlags().IntVar(&natsPort, "nats-port", 4222, "Embedded NATS port")
 	rootCmd.PersistentFlags().StringVar(&natsURL, "nats-url", "", "NATS URL (for worker mode)")
-	rootCmd.PersistentFlags().StringVar(&natsStoreDir, "nats-store-dir", "", "NATS JetStream storage directory (default: ~/.caelum/nats)")
+	rootCmd.PersistentFlags().StringVar(&natsStoreDir, "nats-store-dir", "", "NATS JetStream storage directory (default: ~/.wadjet/nats)")
 	rootCmd.PersistentFlags().StringVar(&clusterID, "cluster-id", "local", "Cluster identifier for federation")
 	rootCmd.PersistentFlags().StringSliceVar(&leafRemotes, "leaf-remote", nil, "Remote NATS URLs for leaf node connections (repeatable)")
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = unlimited, no spill)")
@@ -102,7 +102,7 @@ func main() {
 func serveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "serve",
-		Short: "Start the Caelum server",
+		Short: "Start the Wadjet server",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
@@ -155,7 +155,7 @@ func queryCmd() *cobra.Command {
 				store = objstore.NewMemStore()
 			}
 
-			db, err := caelum.Open(ctx, caelum.Config{
+			db, err := wadjet.Open(ctx, wadjet.Config{
 				Store:  store,
 				Bucket: bucket,
 			})
@@ -215,7 +215,7 @@ func createTableCmd() *cobra.Command {
 				store = objstore.NewMemStore()
 			}
 
-			db, err := caelum.Open(ctx, caelum.Config{
+			db, err := wadjet.Open(ctx, wadjet.Config{
 				Store:  store,
 				Bucket: bucket,
 			})
@@ -251,7 +251,7 @@ func dropTableCmd() *cobra.Command {
 				store = objstore.NewMemStore()
 			}
 
-			db, err := caelum.Open(ctx, caelum.Config{
+			db, err := wadjet.Open(ctx, wadjet.Config{
 				Store:  store,
 				Bucket: bucket,
 			})
@@ -358,7 +358,7 @@ func shellCmd() *cobra.Command {
 				store = objstore.NewMemStore()
 			}
 
-			db, err := caelum.Open(ctx, caelum.Config{
+			db, err := wadjet.Open(ctx, wadjet.Config{
 				Store:  store,
 				Bucket: bucket,
 			})
@@ -379,12 +379,12 @@ func historyPath() string {
 	if err != nil {
 		return ""
 	}
-	dir := filepath.Join(home, ".caelum")
+	dir := filepath.Join(home, ".wadjet")
 	os.MkdirAll(dir, 0o700)
 	return filepath.Join(dir, "history")
 }
 
-func runShell(ctx context.Context, db *caelum.DB, f format.Format) error {
+func runShell(ctx context.Context, db *wadjet.DB, f format.Format) error {
 	line := liner.NewLiner()
 	defer line.Close()
 
@@ -408,19 +408,19 @@ func runShell(ctx context.Context, db *caelum.DB, f format.Format) error {
 		}
 	}()
 
-	fmt.Println("Caelum SQL Shell. Type 'exit' to quit.")
+	fmt.Println("Wadjet SQL Shell. Type 'exit' to quit.")
 	fmt.Println("  Supports: SELECT, EXPLAIN, DESCRIBE, SHOW COLUMNS FROM")
 	fmt.Println()
 
 	var buf strings.Builder
-	prompt := "caelum> "
+	prompt := "wadjet> "
 
 	for {
 		input, err := line.Prompt(prompt)
 		if err == liner.ErrPromptAborted {
 			// Ctrl-C: clear current buffer
 			buf.Reset()
-			prompt = "caelum> "
+			prompt = "wadjet> "
 			continue
 		}
 		if err == io.EOF {
@@ -461,7 +461,7 @@ func runShell(ctx context.Context, db *caelum.DB, f format.Format) error {
 		// Strip trailing semicolon and execute
 		sql := strings.TrimRight(strings.TrimSpace(current), ";")
 		buf.Reset()
-		prompt = "caelum> "
+		prompt = "wadjet> "
 
 		if sql == "" {
 			continue
@@ -491,7 +491,7 @@ func newStore() (objstore.Store, error) {
 	case "file":
 		dir := dataDir
 		if dir == "" {
-			dir = "/var/lib/caelum/data"
+			dir = "/var/lib/wadjet/data"
 		}
 		return objstore.NewFileStore(dir)
 	default:
@@ -668,7 +668,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	}, logger)
 
 	// Start PostgreSQL wire protocol server
-	pgDB, err := caelum.Open(ctx, caelum.Config{
+	pgDB, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: bucket,
 		MetaKV: kv,
@@ -1046,14 +1046,14 @@ func mcpCmd() *cobra.Command {
 		Short: "Start MCP (Model Context Protocol) server on stdio for AI agent integration",
 		Long: `Start a Model Context Protocol server that communicates over stdin/stdout.
 This allows AI agents (Claude Desktop, Claude Code, Cursor, etc.) to discover
-tables, inspect schemas, and execute SQL queries against Caelum.
+tables, inspect schemas, and execute SQL queries against Wadjet.
 
 Configure in Claude Desktop's claude_desktop_config.json:
 
   {
     "mcpServers": {
-      "caelum": {
-        "command": "caelum",
+      "wadjet": {
+        "command": "wadjet",
         "args": ["mcp", "--endpoint", "localhost:9000"]
       }
     }
@@ -1069,7 +1069,7 @@ Configure in Claude Desktop's claude_desktop_config.json:
 				return fmt.Errorf("initializing storage: %w", err)
 			}
 
-			db, err := caelum.Open(ctx, caelum.Config{
+			db, err := wadjet.Open(ctx, wadjet.Config{
 				Store:  store,
 				Bucket: bucket,
 				Logger: logger,

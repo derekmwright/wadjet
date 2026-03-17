@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
 // putObj is a helper to store a JSON-serializable object in the MemStore.

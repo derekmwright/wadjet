@@ -1,14 +1,14 @@
 syntax = "proto3";
 
-package caelum.v1;
+package wadjet.v1;
 
-option go_package = "github.com/derekmwright/caelum/gen/caelum/v1;caelumv1";
+option go_package = "github.com/citc-tech/wadjet/gen/wadjet/v1;wadjetv1";
 
 import "google/protobuf/duration.proto";
 import "google/protobuf/struct.proto";
 
-// CaelumService exposes Caelum's query engine over gRPC.
-service CaelumService {
+// WadjetService exposes Wadjet's query engine over gRPC.
+service WadjetService {
   // Execute a SQL query and return all results.
   rpc Query(QueryRequest) returns (QueryResponse);
 

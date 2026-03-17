@@ -25,9 +25,9 @@ type NATSConfig struct {
 }
 
 // DefaultNATSConfig returns a default NATS configuration.
-// StoreDir defaults to ~/.caelum/nats for persistence across reboots.
+// StoreDir defaults to ~/.wadjet/nats for persistence across reboots.
 func DefaultNATSConfig() NATSConfig {
-	storeDir := filepath.Join(os.Getenv("HOME"), ".caelum", "nats")
+	storeDir := filepath.Join(os.Getenv("HOME"), ".wadjet", "nats")
 	return NATSConfig{
 		Host:       "127.0.0.1",
 		Port:       4222,
@@ -127,7 +127,7 @@ func (e *EmbeddedNATS) Shutdown() {
 	e.logger.Info("embedded NATS shut down")
 }
 
-// SetupStreams creates the required JetStream streams for Caelum.
+// SetupStreams creates the required JetStream streams for Wadjet.
 func SetupStreams(ctx context.Context, js jetstream.JetStream) error {
 	// Tasks stream: WorkQueue retention so each task is delivered to exactly one worker
 	_, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{

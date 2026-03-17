@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"net"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 )
 
 // CompareOp represents a comparison operation.

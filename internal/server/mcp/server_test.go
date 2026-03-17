@@ -11,18 +11,18 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/caelum/caelum"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-func setupTestDB(t *testing.T) *caelum.DB {
+func setupTestDB(t *testing.T) *wadjet.DB {
 	t.Helper()
 	ctx := context.Background()
 	store := objstore.NewMemStore()
 	store.MakeBucket(ctx, "test")
 
-	db, err := caelum.Open(ctx, caelum.Config{
+	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: "test",
 	})
@@ -114,8 +114,8 @@ func TestInitialize(t *testing.T) {
 	if result.ProtocolVersion != protocolVersion {
 		t.Errorf("expected protocol version %s, got %s", protocolVersion, result.ProtocolVersion)
 	}
-	if result.ServerInfo.Name != "caelum" {
-		t.Errorf("expected server name 'caelum', got %s", result.ServerInfo.Name)
+	if result.ServerInfo.Name != "wadjet" {
+		t.Errorf("expected server name 'wadjet', got %s", result.ServerInfo.Name)
 	}
 	if result.Capabilities.Tools == nil {
 		t.Error("expected tools capability")

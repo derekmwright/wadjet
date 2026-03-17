@@ -120,7 +120,7 @@ worker:
   cache_bytes: 1073741824
 `
 	dir := t.TempDir()
-	path := filepath.Join(dir, "caelum.yaml")
+	path := filepath.Join(dir, "wadjet.yaml")
 	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
 		t.Fatal(err)
 	}

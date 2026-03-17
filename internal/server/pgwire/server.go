@@ -1,6 +1,6 @@
 // Package pgwire implements the PostgreSQL v3 wire protocol frontend.
 // This allows psql, JDBC, ODBC, and any Postgres-compatible client to
-// connect to Caelum and execute SQL queries.
+// connect to Wadjet and execute SQL queries.
 package pgwire
 
 import (
@@ -15,14 +15,14 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/derekmwright/caelum/caelum"
+	"github.com/citc-tech/wadjet/wadjet"
 	"golang.org/x/net/netutil"
 )
 
 // Server listens for PostgreSQL wire protocol connections and dispatches
-// queries to a Caelum DB instance.
+// queries to a Wadjet DB instance.
 type Server struct {
-	db        *caelum.DB
+	db        *wadjet.DB
 	listener  net.Listener
 	logger    *slog.Logger
 	wg        sync.WaitGroup
@@ -39,7 +39,7 @@ type Config struct {
 }
 
 // NewServer creates a new PostgreSQL wire protocol server.
-func NewServer(db *caelum.DB, cfg Config, logger *slog.Logger) *Server {
+func NewServer(db *wadjet.DB, cfg Config, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -134,7 +134,7 @@ func (s *Server) handleConn(conn net.Conn) {
 // pgConn handles a single PostgreSQL client connection.
 type pgConn struct {
 	conn   net.Conn
-	db     *caelum.DB
+	db     *wadjet.DB
 	logger *slog.Logger
 	buf    []byte
 
@@ -239,7 +239,7 @@ func (c *pgConn) handleStartup() error {
 	c.sendAuthOk()
 
 	// Send ParameterStatus messages (clients like psql expect these)
-	c.sendParamStatus("server_version", "15.0 (Caelum)")
+	c.sendParamStatus("server_version", "15.0 (Wadjet)")
 	c.sendParamStatus("server_encoding", "UTF8")
 	c.sendParamStatus("client_encoding", "UTF8")
 	c.sendParamStatus("DateStyle", "ISO, MDY")
@@ -624,7 +624,7 @@ func (c *pgConn) handleIntrospection(sql, upper string) bool {
 	// blanket pg_catalog intercept so we return real values.
 	if strings.Contains(normalized, "VERSION()") {
 		c.sendSingleRow([]string{"version"}, map[string]any{
-			"version": "PostgreSQL 15.0 (Caelum analytical query engine)",
+			"version": "PostgreSQL 15.0 (Wadjet analytical query engine)",
 		})
 		return true
 	}
@@ -660,7 +660,7 @@ func (c *pgConn) handleIntrospection(sql, upper string) bool {
 	}
 
 	// SELECT with no FROM clause — evaluate common synthetic expressions.
-	// Caelum requires FROM, but PostgreSQL clients expect these to work.
+	// Wadjet requires FROM, but PostgreSQL clients expect these to work.
 	if strings.HasPrefix(normalized, "SELECT ") && !strings.Contains(normalized, " FROM ") {
 		return c.handleSyntheticSelect(sql, normalized)
 	}
@@ -673,7 +673,7 @@ func (c *pgConn) handleSyntheticSelect(sql, upper string) bool {
 	// version()
 	if strings.Contains(upper, "VERSION()") {
 		c.sendSingleRow([]string{"version"}, map[string]any{
-			"version": "PostgreSQL 15.0 (Caelum analytical query engine)",
+			"version": "PostgreSQL 15.0 (Wadjet analytical query engine)",
 		})
 		return true
 	}
@@ -689,7 +689,7 @@ func (c *pgConn) handleSyntheticSelect(sql, upper string) bool {
 	// current_database()
 	if strings.Contains(upper, "CURRENT_DATABASE()") {
 		c.sendSingleRow([]string{"current_database"}, map[string]any{
-			"current_database": "caelum",
+			"current_database": "wadjet",
 		})
 		return true
 	}
@@ -697,7 +697,7 @@ func (c *pgConn) handleSyntheticSelect(sql, upper string) bool {
 	// current_user / session_user
 	if strings.Contains(upper, "CURRENT_USER") || strings.Contains(upper, "SESSION_USER") {
 		c.sendSingleRow([]string{"current_user"}, map[string]any{
-			"current_user": "caelum",
+			"current_user": "wadjet",
 		})
 		return true
 	}
@@ -775,7 +775,7 @@ func tableOID(name string) int {
 	return h
 }
 
-// pgTypeOID maps Caelum types to PostgreSQL type OIDs.
+// pgTypeOID maps Wadjet types to PostgreSQL type OIDs.
 func pgTypeOID(typeName string) int {
 	switch strings.ToUpper(typeName) {
 	case "INT32":
@@ -1056,7 +1056,7 @@ func (c *pgConn) handleInfoSchemaTables(ctx context.Context) bool {
 	c.sendRowDescription(cols)
 	for _, t := range tables {
 		c.sendDataRow(cols, map[string]any{
-			"table_catalog": "caelum",
+			"table_catalog": "wadjet",
 			"table_schema":  "public",
 			"table_name":    t,
 			"table_type":    "BASE TABLE",
@@ -1101,7 +1101,7 @@ func (c *pgConn) handleInfoSchemaColumns(ctx context.Context, normalized string)
 				isNullable = "NO"
 			}
 			c.sendDataRow(cols, map[string]any{
-				"table_catalog":    "caelum",
+				"table_catalog":    "wadjet",
 				"table_schema":     "public",
 				"table_name":       tableName,
 				"column_name":      colName,
@@ -1116,7 +1116,7 @@ func (c *pgConn) handleInfoSchemaColumns(ctx context.Context, normalized string)
 	return true
 }
 
-// pgFormatType maps Caelum type names to PostgreSQL format_type() output.
+// pgFormatType maps Wadjet type names to PostgreSQL format_type() output.
 func pgFormatType(typeName string) string {
 	switch strings.ToUpper(typeName) {
 	case "INT32":
@@ -1313,7 +1313,7 @@ func (c *pgConn) sendRowDescription(columns []string) {
 // sendTypedRowDescription emits a RowDescription ('T') message with correct
 // PostgreSQL type OIDs derived from ColumnMeta. This is critical for JDBC/ODBC
 // drivers that use OIDs to determine Java/C types for result columns.
-func (c *pgConn) sendTypedRowDescription(metas []caelum.ColumnMeta) {
+func (c *pgConn) sendTypedRowDescription(metas []wadjet.ColumnMeta) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(metas)))
 

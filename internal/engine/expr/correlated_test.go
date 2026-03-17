@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	plansql "github.com/derekmwright/caelum/internal/planner/sql"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // correlatedBatch creates a test batch with id and customer_id columns.

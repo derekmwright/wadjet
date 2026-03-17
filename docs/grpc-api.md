@@ -1,10 +1,10 @@
 # gRPC API Reference
 
-Caelum exposes a gRPC API alongside the HTTP API, enabling type-safe client generation for any language with protobuf support.
+Wadjet exposes a gRPC API alongside the HTTP API, enabling type-safe client generation for any language with protobuf support.
 
 ## Service Definition
 
-The proto file is at `proto/caelum/v1/caelum.proto`. Generated Go code is in `gen/caelum/v1/`.
+The proto file is at `proto/wadjet/v1/wadjet.proto`. Generated Go code is in `gen/wadjet/v1/`.
 
 Default listen address: `:9090` (configurable via `--grpc-addr` or `grpc.addr` in YAML).
 
@@ -141,21 +141,21 @@ grpcurl -plaintext localhost:9090 grpc.health.v1.Health/Check
 
 Service names:
 - `""` (empty) — overall server health
-- `caelum.v1.CaelumService` — query service health
+- `wadjet.v1.WadjetService` — query service health
 
 ## Client Generation
 
 ### Go
 
-Generated Go code is already included at `gen/caelum/v1/`. Import it directly:
+Generated Go code is already included at `gen/wadjet/v1/`. Import it directly:
 
 ```go
-import caelumv1 "github.com/derekmwright/caelum/gen/caelum/v1"
+import wadjetv1 "github.com/citc-tech/wadjet/gen/wadjet/v1"
 
 conn, _ := grpc.NewClient("localhost:9090", grpc.WithTransportCredentials(insecure.NewCredentials()))
-client := caelumv1.NewCaelumServiceClient(conn)
+client := wadjetv1.NewWadjetServiceClient(conn)
 
-resp, _ := client.Query(ctx, &caelumv1.QueryRequest{Sql: "SELECT COUNT(*) AS n FROM flow_logs"})
+resp, _ := client.Query(ctx, &wadjetv1.QueryRequest{Sql: "SELECT COUNT(*) AS n FROM flow_logs"})
 fmt.Println(resp.Rows[0].Fields["n"].GetNumberValue())
 ```
 
@@ -167,17 +167,17 @@ python -m grpc_tools.protoc \
   -Iproto \
   --python_out=./gen \
   --grpc_python_out=./gen \
-  proto/caelum/v1/caelum.proto
+  proto/wadjet/v1/wadjet.proto
 ```
 
 ```python
 import grpc
-from caelum.v1 import caelum_pb2, caelum_pb2_grpc
+from wadjet.v1 import wadjet_pb2, wadjet_pb2_grpc
 
 channel = grpc.insecure_channel("localhost:9090")
-client = caelum_pb2_grpc.CaelumServiceStub(channel)
+client = wadjet_pb2_grpc.WadjetServiceStub(channel)
 
-resp = client.Query(caelum_pb2.QueryRequest(sql="SELECT COUNT(*) AS n FROM flow_logs"))
+resp = client.Query(wadjet_pb2.QueryRequest(sql="SELECT COUNT(*) AS n FROM flow_logs"))
 for row in resp.rows:
     print(row.fields["n"].number_value)
 ```
@@ -192,10 +192,10 @@ npm install @grpc/grpc-js @grpc/proto-loader
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
 
-const packageDef = protoLoader.loadSync("proto/caelum/v1/caelum.proto");
+const packageDef = protoLoader.loadSync("proto/wadjet/v1/wadjet.proto");
 const proto = grpc.loadPackageDefinition(packageDef) as any;
 
-const client = new proto.caelum.v1.CaelumService(
+const client = new proto.wadjet.v1.WadjetService(
   "localhost:9090",
   grpc.credentials.createInsecure()
 );
@@ -211,7 +211,7 @@ Use the [protobuf-gradle-plugin](https://github.com/google/protobuf-gradle-plugi
 
 ```bash
 protoc --java_out=src/main/java --grpc-java_out=src/main/java \
-  -Iproto proto/caelum/v1/caelum.proto
+  -Iproto proto/wadjet/v1/wadjet.proto
 ```
 
 ### Rust
@@ -219,7 +219,7 @@ protoc --java_out=src/main/java --grpc-java_out=src/main/java \
 Use [tonic-build](https://docs.rs/tonic-build) in your `build.rs`:
 
 ```rust
-tonic_build::compile_protos("proto/caelum/v1/caelum.proto")?;
+tonic_build::compile_protos("proto/wadjet/v1/wadjet.proto")?;
 ```
 
 ## Regenerating Code
@@ -231,7 +231,7 @@ task proto
 # Or manually
 protoc --go_out=. --go_opt=paths=source_relative \
   --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-  proto/caelum/v1/caelum.proto
+  proto/wadjet/v1/wadjet.proto
 ```
 
 Requires `protoc`, `protoc-gen-go`, and `protoc-gen-go-grpc`.

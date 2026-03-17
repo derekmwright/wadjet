@@ -12,13 +12,13 @@ import (
 
 	"database/sql"
 
-	"github.com/derekmwright/caelum/internal/engine/batch"
-	"github.com/derekmwright/caelum/internal/engine/exec"
-	csvreader "github.com/derekmwright/caelum/internal/storage/csv"
-	"github.com/derekmwright/caelum/internal/storage/dbscan"
-	jsonreader "github.com/derekmwright/caelum/internal/storage/json"
-	"github.com/derekmwright/caelum/internal/storage/objstore"
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	csvreader "github.com/citc-tech/wadjet/internal/storage/csv"
+	"github.com/citc-tech/wadjet/internal/storage/dbscan"
+	jsonreader "github.com/citc-tech/wadjet/internal/storage/json"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 
 	_ "github.com/go-sql-driver/mysql" // MySQL driver
 	_ "github.com/lib/pq"              // PostgreSQL driver

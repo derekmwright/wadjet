@@ -2,9 +2,9 @@
 // versions:
 // 	protoc-gen-go v1.36.11
 // 	protoc        v5.28.3
-// source: caelum/v1/caelum.proto
+// source: wadjet/v1/wadjet.proto
 
-package caelumv1
+package wadjetv1
 
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
@@ -33,7 +33,7 @@ type QueryRequest struct {
 
 func (x *QueryRequest) Reset() {
 	*x = QueryRequest{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[0]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -45,7 +45,7 @@ func (x *QueryRequest) String() string {
 func (*QueryRequest) ProtoMessage() {}
 
 func (x *QueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[0]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -58,7 +58,7 @@ func (x *QueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRequest.ProtoReflect.Descriptor instead.
 func (*QueryRequest) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{0}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *QueryRequest) GetSql() string {
@@ -78,7 +78,7 @@ type Row struct {
 
 func (x *Row) Reset() {
 	*x = Row{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[1]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -90,7 +90,7 @@ func (x *Row) String() string {
 func (*Row) ProtoMessage() {}
 
 func (x *Row) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[1]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -103,7 +103,7 @@ func (x *Row) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Row.ProtoReflect.Descriptor instead.
 func (*Row) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{1}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Row) GetFields() map[string]*structpb.Value {
@@ -125,7 +125,7 @@ type QueryStats struct {
 
 func (x *QueryStats) Reset() {
 	*x = QueryStats{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[2]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -137,7 +137,7 @@ func (x *QueryStats) String() string {
 func (*QueryStats) ProtoMessage() {}
 
 func (x *QueryStats) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[2]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -150,7 +150,7 @@ func (x *QueryStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryStats.ProtoReflect.Descriptor instead.
 func (*QueryStats) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{2}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *QueryStats) GetTotalRows() int64 {
@@ -187,7 +187,7 @@ type QueryResponse struct {
 
 func (x *QueryResponse) Reset() {
 	*x = QueryResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[3]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -199,7 +199,7 @@ func (x *QueryResponse) String() string {
 func (*QueryResponse) ProtoMessage() {}
 
 func (x *QueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[3]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -212,7 +212,7 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{3}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *QueryResponse) GetQueryId() string {
@@ -256,7 +256,7 @@ type QueryStreamResponse struct {
 
 func (x *QueryStreamResponse) Reset() {
 	*x = QueryStreamResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[4]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -268,7 +268,7 @@ func (x *QueryStreamResponse) String() string {
 func (*QueryStreamResponse) ProtoMessage() {}
 
 func (x *QueryStreamResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[4]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -281,7 +281,7 @@ func (x *QueryStreamResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryStreamResponse.ProtoReflect.Descriptor instead.
 func (*QueryStreamResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{4}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *QueryStreamResponse) GetColumns() []string {
@@ -323,7 +323,7 @@ type SubmitQueryResponse struct {
 
 func (x *SubmitQueryResponse) Reset() {
 	*x = SubmitQueryResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[5]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -335,7 +335,7 @@ func (x *SubmitQueryResponse) String() string {
 func (*SubmitQueryResponse) ProtoMessage() {}
 
 func (x *SubmitQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[5]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -348,7 +348,7 @@ func (x *SubmitQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubmitQueryResponse.ProtoReflect.Descriptor instead.
 func (*SubmitQueryResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{5}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *SubmitQueryResponse) GetQueryId() string {
@@ -375,7 +375,7 @@ type GetQueryStatusRequest struct {
 
 func (x *GetQueryStatusRequest) Reset() {
 	*x = GetQueryStatusRequest{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[6]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -387,7 +387,7 @@ func (x *GetQueryStatusRequest) String() string {
 func (*GetQueryStatusRequest) ProtoMessage() {}
 
 func (x *GetQueryStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[6]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -400,7 +400,7 @@ func (x *GetQueryStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQueryStatusRequest.ProtoReflect.Descriptor instead.
 func (*GetQueryStatusRequest) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{6}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *GetQueryStatusRequest) GetQueryId() string {
@@ -424,7 +424,7 @@ type StageStatus struct {
 
 func (x *StageStatus) Reset() {
 	*x = StageStatus{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[7]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -436,7 +436,7 @@ func (x *StageStatus) String() string {
 func (*StageStatus) ProtoMessage() {}
 
 func (x *StageStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[7]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -449,7 +449,7 @@ func (x *StageStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StageStatus.ProtoReflect.Descriptor instead.
 func (*StageStatus) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{7}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StageStatus) GetStageId() string {
@@ -503,7 +503,7 @@ type GetQueryStatusResponse struct {
 
 func (x *GetQueryStatusResponse) Reset() {
 	*x = GetQueryStatusResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[8]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -515,7 +515,7 @@ func (x *GetQueryStatusResponse) String() string {
 func (*GetQueryStatusResponse) ProtoMessage() {}
 
 func (x *GetQueryStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[8]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -528,7 +528,7 @@ func (x *GetQueryStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetQueryStatusResponse.ProtoReflect.Descriptor instead.
 func (*GetQueryStatusResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{8}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetQueryStatusResponse) GetQueryId() string {
@@ -590,7 +590,7 @@ type CancelQueryRequest struct {
 
 func (x *CancelQueryRequest) Reset() {
 	*x = CancelQueryRequest{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[9]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -602,7 +602,7 @@ func (x *CancelQueryRequest) String() string {
 func (*CancelQueryRequest) ProtoMessage() {}
 
 func (x *CancelQueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[9]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -615,7 +615,7 @@ func (x *CancelQueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelQueryRequest.ProtoReflect.Descriptor instead.
 func (*CancelQueryRequest) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{9}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CancelQueryRequest) GetQueryId() string {
@@ -636,7 +636,7 @@ type CancelQueryResponse struct {
 
 func (x *CancelQueryResponse) Reset() {
 	*x = CancelQueryResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[10]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -648,7 +648,7 @@ func (x *CancelQueryResponse) String() string {
 func (*CancelQueryResponse) ProtoMessage() {}
 
 func (x *CancelQueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[10]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -661,7 +661,7 @@ func (x *CancelQueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelQueryResponse.ProtoReflect.Descriptor instead.
 func (*CancelQueryResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{10}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CancelQueryResponse) GetQueryId() string {
@@ -687,7 +687,7 @@ type ListTablesRequest struct {
 
 func (x *ListTablesRequest) Reset() {
 	*x = ListTablesRequest{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[11]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -699,7 +699,7 @@ func (x *ListTablesRequest) String() string {
 func (*ListTablesRequest) ProtoMessage() {}
 
 func (x *ListTablesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[11]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -712,7 +712,7 @@ func (x *ListTablesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTablesRequest.ProtoReflect.Descriptor instead.
 func (*ListTablesRequest) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{11}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{11}
 }
 
 // ListTablesResponse contains all table names.
@@ -725,7 +725,7 @@ type ListTablesResponse struct {
 
 func (x *ListTablesResponse) Reset() {
 	*x = ListTablesResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[12]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -737,7 +737,7 @@ func (x *ListTablesResponse) String() string {
 func (*ListTablesResponse) ProtoMessage() {}
 
 func (x *ListTablesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[12]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -750,7 +750,7 @@ func (x *ListTablesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListTablesResponse.ProtoReflect.Descriptor instead.
 func (*ListTablesResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{12}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *ListTablesResponse) GetTables() []string {
@@ -770,7 +770,7 @@ type DescribeTableRequest struct {
 
 func (x *DescribeTableRequest) Reset() {
 	*x = DescribeTableRequest{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[13]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -782,7 +782,7 @@ func (x *DescribeTableRequest) String() string {
 func (*DescribeTableRequest) ProtoMessage() {}
 
 func (x *DescribeTableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[13]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -795,7 +795,7 @@ func (x *DescribeTableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescribeTableRequest.ProtoReflect.Descriptor instead.
 func (*DescribeTableRequest) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{13}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *DescribeTableRequest) GetTableName() string {
@@ -817,7 +817,7 @@ type ColumnInfo struct {
 
 func (x *ColumnInfo) Reset() {
 	*x = ColumnInfo{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[14]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -829,7 +829,7 @@ func (x *ColumnInfo) String() string {
 func (*ColumnInfo) ProtoMessage() {}
 
 func (x *ColumnInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[14]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -842,7 +842,7 @@ func (x *ColumnInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ColumnInfo.ProtoReflect.Descriptor instead.
 func (*ColumnInfo) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{14}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ColumnInfo) GetName() string {
@@ -878,7 +878,7 @@ type DescribeTableResponse struct {
 
 func (x *DescribeTableResponse) Reset() {
 	*x = DescribeTableResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[15]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -890,7 +890,7 @@ func (x *DescribeTableResponse) String() string {
 func (*DescribeTableResponse) ProtoMessage() {}
 
 func (x *DescribeTableResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[15]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -903,7 +903,7 @@ func (x *DescribeTableResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DescribeTableResponse.ProtoReflect.Descriptor instead.
 func (*DescribeTableResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{15}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DescribeTableResponse) GetName() string {
@@ -939,7 +939,7 @@ type CreateTableRequest struct {
 
 func (x *CreateTableRequest) Reset() {
 	*x = CreateTableRequest{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[16]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -951,7 +951,7 @@ func (x *CreateTableRequest) String() string {
 func (*CreateTableRequest) ProtoMessage() {}
 
 func (x *CreateTableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[16]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -964,7 +964,7 @@ func (x *CreateTableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateTableRequest.ProtoReflect.Descriptor instead.
 func (*CreateTableRequest) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{16}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CreateTableRequest) GetName() string {
@@ -1000,7 +1000,7 @@ type ColumnDef struct {
 
 func (x *ColumnDef) Reset() {
 	*x = ColumnDef{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[17]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1012,7 +1012,7 @@ func (x *ColumnDef) String() string {
 func (*ColumnDef) ProtoMessage() {}
 
 func (x *ColumnDef) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[17]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1025,7 +1025,7 @@ func (x *ColumnDef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ColumnDef.ProtoReflect.Descriptor instead.
 func (*ColumnDef) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{17}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ColumnDef) GetName() string {
@@ -1059,7 +1059,7 @@ type CreateTableResponse struct {
 
 func (x *CreateTableResponse) Reset() {
 	*x = CreateTableResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[18]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1071,7 +1071,7 @@ func (x *CreateTableResponse) String() string {
 func (*CreateTableResponse) ProtoMessage() {}
 
 func (x *CreateTableResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[18]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1084,7 +1084,7 @@ func (x *CreateTableResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateTableResponse.ProtoReflect.Descriptor instead.
 func (*CreateTableResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{18}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *CreateTableResponse) GetName() string {
@@ -1105,7 +1105,7 @@ type DropTableRequest struct {
 
 func (x *DropTableRequest) Reset() {
 	*x = DropTableRequest{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[19]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1117,7 +1117,7 @@ func (x *DropTableRequest) String() string {
 func (*DropTableRequest) ProtoMessage() {}
 
 func (x *DropTableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[19]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1130,7 +1130,7 @@ func (x *DropTableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropTableRequest.ProtoReflect.Descriptor instead.
 func (*DropTableRequest) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{19}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DropTableRequest) GetName() string {
@@ -1157,7 +1157,7 @@ type DropTableResponse struct {
 
 func (x *DropTableResponse) Reset() {
 	*x = DropTableResponse{}
-	mi := &file_caelum_v1_caelum_proto_msgTypes[20]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1169,7 +1169,7 @@ func (x *DropTableResponse) String() string {
 func (*DropTableResponse) ProtoMessage() {}
 
 func (x *DropTableResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_caelum_v1_caelum_proto_msgTypes[20]
+	mi := &file_wadjet_v1_wadjet_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1182,7 +1182,7 @@ func (x *DropTableResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropTableResponse.ProtoReflect.Descriptor instead.
 func (*DropTableResponse) Descriptor() ([]byte, []int) {
-	return file_caelum_v1_caelum_proto_rawDescGZIP(), []int{20}
+	return file_wadjet_v1_wadjet_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *DropTableResponse) GetName() string {
@@ -1192,15 +1192,15 @@ func (x *DropTableResponse) GetName() string {
 	return ""
 }
 
-var File_caelum_v1_caelum_proto protoreflect.FileDescriptor
+var File_wadjet_v1_wadjet_proto protoreflect.FileDescriptor
 
-const file_caelum_v1_caelum_proto_rawDesc = "" +
+const file_wadjet_v1_wadjet_proto_rawDesc = "" +
 	"\n" +
-	"\x16caelum/v1/caelum.proto\x12\tcaelum.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1cgoogle/protobuf/struct.proto\" \n" +
+	"\x16wadjet/v1/wadjet.proto\x12\twadjet.v1\x1a\x1egoogle/protobuf/duration.proto\x1a\x1cgoogle/protobuf/struct.proto\" \n" +
 	"\fQueryRequest\x12\x10\n" +
 	"\x03sql\x18\x01 \x01(\tR\x03sql\"\x8c\x01\n" +
 	"\x03Row\x122\n" +
-	"\x06fields\x18\x01 \x03(\v2\x1a.caelum.v1.Row.FieldsEntryR\x06fields\x1aQ\n" +
+	"\x06fields\x18\x01 \x03(\v2\x1a.wadjet.v1.Row.FieldsEntryR\x06fields\x1aQ\n" +
 	"\vFieldsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12,\n" +
 	"\x05value\x18\x02 \x01(\v2\x16.google.protobuf.ValueR\x05value:\x028\x01\"t\n" +
@@ -1213,12 +1213,12 @@ const file_caelum_v1_caelum_proto_rawDesc = "" +
 	"\rQueryResponse\x12\x19\n" +
 	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12\x18\n" +
 	"\acolumns\x18\x02 \x03(\tR\acolumns\x12\"\n" +
-	"\x04rows\x18\x03 \x03(\v2\x0e.caelum.v1.RowR\x04rows\x12+\n" +
-	"\x05stats\x18\x04 \x01(\v2\x15.caelum.v1.QueryStatsR\x05stats\"\x99\x01\n" +
+	"\x04rows\x18\x03 \x03(\v2\x0e.wadjet.v1.RowR\x04rows\x12+\n" +
+	"\x05stats\x18\x04 \x01(\v2\x15.wadjet.v1.QueryStatsR\x05stats\"\x99\x01\n" +
 	"\x13QueryStreamResponse\x12\x18\n" +
 	"\acolumns\x18\x01 \x03(\tR\acolumns\x12\"\n" +
-	"\x04rows\x18\x02 \x03(\v2\x0e.caelum.v1.RowR\x04rows\x12+\n" +
-	"\x05stats\x18\x03 \x01(\v2\x15.caelum.v1.QueryStatsR\x05stats\x12\x17\n" +
+	"\x04rows\x18\x02 \x03(\v2\x0e.wadjet.v1.RowR\x04rows\x12+\n" +
+	"\x05stats\x18\x03 \x01(\v2\x15.wadjet.v1.QueryStatsR\x05stats\x12\x17\n" +
 	"\ais_last\x18\x04 \x01(\bR\x06isLast\"D\n" +
 	"\x13SubmitQueryResponse\x12\x19\n" +
 	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12\x12\n" +
@@ -1237,7 +1237,7 @@ const file_caelum_v1_caelum_proto_rawDesc = "" +
 	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12\x10\n" +
 	"\x03sql\x18\x02 \x01(\tR\x03sql\x12\x14\n" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12.\n" +
-	"\x06stages\x18\x04 \x03(\v2\x16.caelum.v1.StageStatusR\x06stages\x123\n" +
+	"\x06stages\x18\x04 \x03(\v2\x16.wadjet.v1.StageStatusR\x06stages\x123\n" +
 	"\aelapsed\x18\x05 \x01(\v2\x19.google.protobuf.DurationR\aelapsed\x12\x1d\n" +
 	"\n" +
 	"total_rows\x18\x06 \x01(\x03R\ttotalRows\x12\x14\n" +
@@ -1260,11 +1260,11 @@ const file_caelum_v1_caelum_proto_rawDesc = "" +
 	"\bnullable\x18\x03 \x01(\bR\bnullable\"\x83\x01\n" +
 	"\x15DescribeTableResponse\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12/\n" +
-	"\acolumns\x18\x02 \x03(\v2\x15.caelum.v1.ColumnInfoR\acolumns\x12%\n" +
+	"\acolumns\x18\x02 \x03(\v2\x15.wadjet.v1.ColumnInfoR\acolumns\x12%\n" +
 	"\x0epartition_keys\x18\x03 \x03(\tR\rpartitionKeys\"\x7f\n" +
 	"\x12CreateTableRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12.\n" +
-	"\acolumns\x18\x02 \x03(\v2\x14.caelum.v1.ColumnDefR\acolumns\x12%\n" +
+	"\acolumns\x18\x02 \x03(\v2\x14.wadjet.v1.ColumnDefR\acolumns\x12%\n" +
 	"\x0epartition_keys\x18\x03 \x03(\tR\rpartitionKeys\"O\n" +
 	"\tColumnDef\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
@@ -1277,87 +1277,87 @@ const file_caelum_v1_caelum_proto_rawDesc = "" +
 	"\tif_exists\x18\x02 \x01(\bR\bifExists\"'\n" +
 	"\x11DropTableResponse\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name2\xb7\x05\n" +
-	"\rCaelumService\x12:\n" +
-	"\x05Query\x12\x17.caelum.v1.QueryRequest\x1a\x18.caelum.v1.QueryResponse\x12H\n" +
-	"\vQueryStream\x12\x17.caelum.v1.QueryRequest\x1a\x1e.caelum.v1.QueryStreamResponse0\x01\x12F\n" +
-	"\vSubmitQuery\x12\x17.caelum.v1.QueryRequest\x1a\x1e.caelum.v1.SubmitQueryResponse\x12U\n" +
-	"\x0eGetQueryStatus\x12 .caelum.v1.GetQueryStatusRequest\x1a!.caelum.v1.GetQueryStatusResponse\x12L\n" +
-	"\vCancelQuery\x12\x1d.caelum.v1.CancelQueryRequest\x1a\x1e.caelum.v1.CancelQueryResponse\x12I\n" +
+	"\rWadjetService\x12:\n" +
+	"\x05Query\x12\x17.wadjet.v1.QueryRequest\x1a\x18.wadjet.v1.QueryResponse\x12H\n" +
+	"\vQueryStream\x12\x17.wadjet.v1.QueryRequest\x1a\x1e.wadjet.v1.QueryStreamResponse0\x01\x12F\n" +
+	"\vSubmitQuery\x12\x17.wadjet.v1.QueryRequest\x1a\x1e.wadjet.v1.SubmitQueryResponse\x12U\n" +
+	"\x0eGetQueryStatus\x12 .wadjet.v1.GetQueryStatusRequest\x1a!.wadjet.v1.GetQueryStatusResponse\x12L\n" +
+	"\vCancelQuery\x12\x1d.wadjet.v1.CancelQueryRequest\x1a\x1e.wadjet.v1.CancelQueryResponse\x12I\n" +
 	"\n" +
-	"ListTables\x12\x1c.caelum.v1.ListTablesRequest\x1a\x1d.caelum.v1.ListTablesResponse\x12R\n" +
-	"\rDescribeTable\x12\x1f.caelum.v1.DescribeTableRequest\x1a .caelum.v1.DescribeTableResponse\x12L\n" +
-	"\vCreateTable\x12\x1d.caelum.v1.CreateTableRequest\x1a\x1e.caelum.v1.CreateTableResponse\x12F\n" +
-	"\tDropTable\x12\x1b.caelum.v1.DropTableRequest\x1a\x1c.caelum.v1.DropTableResponseB7Z5github.com/derekmwright/caelum/gen/caelum/v1;caelumv1b\x06proto3"
+	"ListTables\x12\x1c.wadjet.v1.ListTablesRequest\x1a\x1d.wadjet.v1.ListTablesResponse\x12R\n" +
+	"\rDescribeTable\x12\x1f.wadjet.v1.DescribeTableRequest\x1a .wadjet.v1.DescribeTableResponse\x12L\n" +
+	"\vCreateTable\x12\x1d.wadjet.v1.CreateTableRequest\x1a\x1e.wadjet.v1.CreateTableResponse\x12F\n" +
+	"\tDropTable\x12\x1b.wadjet.v1.DropTableRequest\x1a\x1c.wadjet.v1.DropTableResponseB4Z2github.com/citc-tech/wadjet/gen/wadjet/v1;wadjetv1b\x06proto3"
 
 var (
-	file_caelum_v1_caelum_proto_rawDescOnce sync.Once
-	file_caelum_v1_caelum_proto_rawDescData []byte
+	file_wadjet_v1_wadjet_proto_rawDescOnce sync.Once
+	file_wadjet_v1_wadjet_proto_rawDescData []byte
 )
 
-func file_caelum_v1_caelum_proto_rawDescGZIP() []byte {
-	file_caelum_v1_caelum_proto_rawDescOnce.Do(func() {
-		file_caelum_v1_caelum_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_caelum_v1_caelum_proto_rawDesc), len(file_caelum_v1_caelum_proto_rawDesc)))
+func file_wadjet_v1_wadjet_proto_rawDescGZIP() []byte {
+	file_wadjet_v1_wadjet_proto_rawDescOnce.Do(func() {
+		file_wadjet_v1_wadjet_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_wadjet_v1_wadjet_proto_rawDesc), len(file_wadjet_v1_wadjet_proto_rawDesc)))
 	})
-	return file_caelum_v1_caelum_proto_rawDescData
+	return file_wadjet_v1_wadjet_proto_rawDescData
 }
 
-var file_caelum_v1_caelum_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
-var file_caelum_v1_caelum_proto_goTypes = []any{
-	(*QueryRequest)(nil),           // 0: caelum.v1.QueryRequest
-	(*Row)(nil),                    // 1: caelum.v1.Row
-	(*QueryStats)(nil),             // 2: caelum.v1.QueryStats
-	(*QueryResponse)(nil),          // 3: caelum.v1.QueryResponse
-	(*QueryStreamResponse)(nil),    // 4: caelum.v1.QueryStreamResponse
-	(*SubmitQueryResponse)(nil),    // 5: caelum.v1.SubmitQueryResponse
-	(*GetQueryStatusRequest)(nil),  // 6: caelum.v1.GetQueryStatusRequest
-	(*StageStatus)(nil),            // 7: caelum.v1.StageStatus
-	(*GetQueryStatusResponse)(nil), // 8: caelum.v1.GetQueryStatusResponse
-	(*CancelQueryRequest)(nil),     // 9: caelum.v1.CancelQueryRequest
-	(*CancelQueryResponse)(nil),    // 10: caelum.v1.CancelQueryResponse
-	(*ListTablesRequest)(nil),      // 11: caelum.v1.ListTablesRequest
-	(*ListTablesResponse)(nil),     // 12: caelum.v1.ListTablesResponse
-	(*DescribeTableRequest)(nil),   // 13: caelum.v1.DescribeTableRequest
-	(*ColumnInfo)(nil),             // 14: caelum.v1.ColumnInfo
-	(*DescribeTableResponse)(nil),  // 15: caelum.v1.DescribeTableResponse
-	(*CreateTableRequest)(nil),     // 16: caelum.v1.CreateTableRequest
-	(*ColumnDef)(nil),              // 17: caelum.v1.ColumnDef
-	(*CreateTableResponse)(nil),    // 18: caelum.v1.CreateTableResponse
-	(*DropTableRequest)(nil),       // 19: caelum.v1.DropTableRequest
-	(*DropTableResponse)(nil),      // 20: caelum.v1.DropTableResponse
-	nil,                            // 21: caelum.v1.Row.FieldsEntry
+var file_wadjet_v1_wadjet_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_wadjet_v1_wadjet_proto_goTypes = []any{
+	(*QueryRequest)(nil),           // 0: wadjet.v1.QueryRequest
+	(*Row)(nil),                    // 1: wadjet.v1.Row
+	(*QueryStats)(nil),             // 2: wadjet.v1.QueryStats
+	(*QueryResponse)(nil),          // 3: wadjet.v1.QueryResponse
+	(*QueryStreamResponse)(nil),    // 4: wadjet.v1.QueryStreamResponse
+	(*SubmitQueryResponse)(nil),    // 5: wadjet.v1.SubmitQueryResponse
+	(*GetQueryStatusRequest)(nil),  // 6: wadjet.v1.GetQueryStatusRequest
+	(*StageStatus)(nil),            // 7: wadjet.v1.StageStatus
+	(*GetQueryStatusResponse)(nil), // 8: wadjet.v1.GetQueryStatusResponse
+	(*CancelQueryRequest)(nil),     // 9: wadjet.v1.CancelQueryRequest
+	(*CancelQueryResponse)(nil),    // 10: wadjet.v1.CancelQueryResponse
+	(*ListTablesRequest)(nil),      // 11: wadjet.v1.ListTablesRequest
+	(*ListTablesResponse)(nil),     // 12: wadjet.v1.ListTablesResponse
+	(*DescribeTableRequest)(nil),   // 13: wadjet.v1.DescribeTableRequest
+	(*ColumnInfo)(nil),             // 14: wadjet.v1.ColumnInfo
+	(*DescribeTableResponse)(nil),  // 15: wadjet.v1.DescribeTableResponse
+	(*CreateTableRequest)(nil),     // 16: wadjet.v1.CreateTableRequest
+	(*ColumnDef)(nil),              // 17: wadjet.v1.ColumnDef
+	(*CreateTableResponse)(nil),    // 18: wadjet.v1.CreateTableResponse
+	(*DropTableRequest)(nil),       // 19: wadjet.v1.DropTableRequest
+	(*DropTableResponse)(nil),      // 20: wadjet.v1.DropTableResponse
+	nil,                            // 21: wadjet.v1.Row.FieldsEntry
 	(*durationpb.Duration)(nil),    // 22: google.protobuf.Duration
 	(*structpb.Value)(nil),         // 23: google.protobuf.Value
 }
-var file_caelum_v1_caelum_proto_depIdxs = []int32{
-	21, // 0: caelum.v1.Row.fields:type_name -> caelum.v1.Row.FieldsEntry
-	22, // 1: caelum.v1.QueryStats.elapsed:type_name -> google.protobuf.Duration
-	1,  // 2: caelum.v1.QueryResponse.rows:type_name -> caelum.v1.Row
-	2,  // 3: caelum.v1.QueryResponse.stats:type_name -> caelum.v1.QueryStats
-	1,  // 4: caelum.v1.QueryStreamResponse.rows:type_name -> caelum.v1.Row
-	2,  // 5: caelum.v1.QueryStreamResponse.stats:type_name -> caelum.v1.QueryStats
-	7,  // 6: caelum.v1.GetQueryStatusResponse.stages:type_name -> caelum.v1.StageStatus
-	22, // 7: caelum.v1.GetQueryStatusResponse.elapsed:type_name -> google.protobuf.Duration
-	14, // 8: caelum.v1.DescribeTableResponse.columns:type_name -> caelum.v1.ColumnInfo
-	17, // 9: caelum.v1.CreateTableRequest.columns:type_name -> caelum.v1.ColumnDef
-	23, // 10: caelum.v1.Row.FieldsEntry.value:type_name -> google.protobuf.Value
-	0,  // 11: caelum.v1.CaelumService.Query:input_type -> caelum.v1.QueryRequest
-	0,  // 12: caelum.v1.CaelumService.QueryStream:input_type -> caelum.v1.QueryRequest
-	0,  // 13: caelum.v1.CaelumService.SubmitQuery:input_type -> caelum.v1.QueryRequest
-	6,  // 14: caelum.v1.CaelumService.GetQueryStatus:input_type -> caelum.v1.GetQueryStatusRequest
-	9,  // 15: caelum.v1.CaelumService.CancelQuery:input_type -> caelum.v1.CancelQueryRequest
-	11, // 16: caelum.v1.CaelumService.ListTables:input_type -> caelum.v1.ListTablesRequest
-	13, // 17: caelum.v1.CaelumService.DescribeTable:input_type -> caelum.v1.DescribeTableRequest
-	16, // 18: caelum.v1.CaelumService.CreateTable:input_type -> caelum.v1.CreateTableRequest
-	19, // 19: caelum.v1.CaelumService.DropTable:input_type -> caelum.v1.DropTableRequest
-	3,  // 20: caelum.v1.CaelumService.Query:output_type -> caelum.v1.QueryResponse
-	4,  // 21: caelum.v1.CaelumService.QueryStream:output_type -> caelum.v1.QueryStreamResponse
-	5,  // 22: caelum.v1.CaelumService.SubmitQuery:output_type -> caelum.v1.SubmitQueryResponse
-	8,  // 23: caelum.v1.CaelumService.GetQueryStatus:output_type -> caelum.v1.GetQueryStatusResponse
-	10, // 24: caelum.v1.CaelumService.CancelQuery:output_type -> caelum.v1.CancelQueryResponse
-	12, // 25: caelum.v1.CaelumService.ListTables:output_type -> caelum.v1.ListTablesResponse
-	15, // 26: caelum.v1.CaelumService.DescribeTable:output_type -> caelum.v1.DescribeTableResponse
-	18, // 27: caelum.v1.CaelumService.CreateTable:output_type -> caelum.v1.CreateTableResponse
-	20, // 28: caelum.v1.CaelumService.DropTable:output_type -> caelum.v1.DropTableResponse
+var file_wadjet_v1_wadjet_proto_depIdxs = []int32{
+	21, // 0: wadjet.v1.Row.fields:type_name -> wadjet.v1.Row.FieldsEntry
+	22, // 1: wadjet.v1.QueryStats.elapsed:type_name -> google.protobuf.Duration
+	1,  // 2: wadjet.v1.QueryResponse.rows:type_name -> wadjet.v1.Row
+	2,  // 3: wadjet.v1.QueryResponse.stats:type_name -> wadjet.v1.QueryStats
+	1,  // 4: wadjet.v1.QueryStreamResponse.rows:type_name -> wadjet.v1.Row
+	2,  // 5: wadjet.v1.QueryStreamResponse.stats:type_name -> wadjet.v1.QueryStats
+	7,  // 6: wadjet.v1.GetQueryStatusResponse.stages:type_name -> wadjet.v1.StageStatus
+	22, // 7: wadjet.v1.GetQueryStatusResponse.elapsed:type_name -> google.protobuf.Duration
+	14, // 8: wadjet.v1.DescribeTableResponse.columns:type_name -> wadjet.v1.ColumnInfo
+	17, // 9: wadjet.v1.CreateTableRequest.columns:type_name -> wadjet.v1.ColumnDef
+	23, // 10: wadjet.v1.Row.FieldsEntry.value:type_name -> google.protobuf.Value
+	0,  // 11: wadjet.v1.WadjetService.Query:input_type -> wadjet.v1.QueryRequest
+	0,  // 12: wadjet.v1.WadjetService.QueryStream:input_type -> wadjet.v1.QueryRequest
+	0,  // 13: wadjet.v1.WadjetService.SubmitQuery:input_type -> wadjet.v1.QueryRequest
+	6,  // 14: wadjet.v1.WadjetService.GetQueryStatus:input_type -> wadjet.v1.GetQueryStatusRequest
+	9,  // 15: wadjet.v1.WadjetService.CancelQuery:input_type -> wadjet.v1.CancelQueryRequest
+	11, // 16: wadjet.v1.WadjetService.ListTables:input_type -> wadjet.v1.ListTablesRequest
+	13, // 17: wadjet.v1.WadjetService.DescribeTable:input_type -> wadjet.v1.DescribeTableRequest
+	16, // 18: wadjet.v1.WadjetService.CreateTable:input_type -> wadjet.v1.CreateTableRequest
+	19, // 19: wadjet.v1.WadjetService.DropTable:input_type -> wadjet.v1.DropTableRequest
+	3,  // 20: wadjet.v1.WadjetService.Query:output_type -> wadjet.v1.QueryResponse
+	4,  // 21: wadjet.v1.WadjetService.QueryStream:output_type -> wadjet.v1.QueryStreamResponse
+	5,  // 22: wadjet.v1.WadjetService.SubmitQuery:output_type -> wadjet.v1.SubmitQueryResponse
+	8,  // 23: wadjet.v1.WadjetService.GetQueryStatus:output_type -> wadjet.v1.GetQueryStatusResponse
+	10, // 24: wadjet.v1.WadjetService.CancelQuery:output_type -> wadjet.v1.CancelQueryResponse
+	12, // 25: wadjet.v1.WadjetService.ListTables:output_type -> wadjet.v1.ListTablesResponse
+	15, // 26: wadjet.v1.WadjetService.DescribeTable:output_type -> wadjet.v1.DescribeTableResponse
+	18, // 27: wadjet.v1.WadjetService.CreateTable:output_type -> wadjet.v1.CreateTableResponse
+	20, // 28: wadjet.v1.WadjetService.DropTable:output_type -> wadjet.v1.DropTableResponse
 	20, // [20:29] is the sub-list for method output_type
 	11, // [11:20] is the sub-list for method input_type
 	11, // [11:11] is the sub-list for extension type_name
@@ -1365,26 +1365,26 @@ var file_caelum_v1_caelum_proto_depIdxs = []int32{
 	0,  // [0:11] is the sub-list for field type_name
 }
 
-func init() { file_caelum_v1_caelum_proto_init() }
-func file_caelum_v1_caelum_proto_init() {
-	if File_caelum_v1_caelum_proto != nil {
+func init() { file_wadjet_v1_wadjet_proto_init() }
+func file_wadjet_v1_wadjet_proto_init() {
+	if File_wadjet_v1_wadjet_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_caelum_v1_caelum_proto_rawDesc), len(file_caelum_v1_caelum_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_wadjet_v1_wadjet_proto_rawDesc), len(file_wadjet_v1_wadjet_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_caelum_v1_caelum_proto_goTypes,
-		DependencyIndexes: file_caelum_v1_caelum_proto_depIdxs,
-		MessageInfos:      file_caelum_v1_caelum_proto_msgTypes,
+		GoTypes:           file_wadjet_v1_wadjet_proto_goTypes,
+		DependencyIndexes: file_wadjet_v1_wadjet_proto_depIdxs,
+		MessageInfos:      file_wadjet_v1_wadjet_proto_msgTypes,
 	}.Build()
-	File_caelum_v1_caelum_proto = out.File
-	file_caelum_v1_caelum_proto_goTypes = nil
-	file_caelum_v1_caelum_proto_depIdxs = nil
+	File_wadjet_v1_wadjet_proto = out.File
+	file_wadjet_v1_wadjet_proto_goTypes = nil
+	file_wadjet_v1_wadjet_proto_depIdxs = nil
 }

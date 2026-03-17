@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/derekmwright/caelum/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/distributed"
 )
 
 func TestWorkerRegistryRecord(t *testing.T) {

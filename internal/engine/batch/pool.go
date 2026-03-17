@@ -3,7 +3,7 @@ package batch
 import (
 	"sync"
 
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // NOTE: When Go arenas reach GA (currently experimental behind GOEXPERIMENT=arenas),

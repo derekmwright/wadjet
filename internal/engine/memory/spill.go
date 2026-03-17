@@ -38,7 +38,7 @@ type SpillManager struct {
 
 // NewSpillManager creates a spill manager that writes temp files to the given directory.
 func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
-	spillDir := filepath.Join(dir, "caelum-spill")
+	spillDir := filepath.Join(dir, "wadjet-spill")
 	if err := os.MkdirAll(spillDir, 0700); err != nil {
 		return nil, fmt.Errorf("creating spill dir: %w", err)
 	}

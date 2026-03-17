@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/derekmwright/caelum/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 func TestTableFuncReadJSON_Local(t *testing.T) {

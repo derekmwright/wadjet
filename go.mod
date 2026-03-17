@@ -1,4 +1,4 @@
-module github.com/derekmwright/caelum
+module github.com/citc-tech/wadjet
 
 go 1.26.1
 

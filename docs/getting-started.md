@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks you through installing Caelum, creating a table, ingesting data, and running your first query.
+This guide walks you through installing Wadjet, creating a table, ingesting data, and running your first query.
 
 ## Prerequisites
 
@@ -13,15 +13,15 @@ This guide walks you through installing Caelum, creating a table, ingesting data
 ### From Source
 
 ```bash
-git clone https://github.com/derekmwright/caelum.git
-cd caelum
-go build -o caelum ./cmd/caelum
+git clone https://github.com/citc-tech/wadjet.git
+cd wadjet
+go build -o wadjet ./cmd/wadjet
 ```
 
 ### As a Go Library
 
 ```bash
-go get github.com/derekmwright/caelum/caelum
+go get github.com/citc-tech/wadjet/wadjet
 ```
 
 ## Start MinIO (Local Development)
@@ -41,7 +41,7 @@ Create a bucket:
 ```bash
 # Using mc (MinIO client)
 mc alias set local http://localhost:9000 minioadmin minioadmin
-mc mb local/caelum
+mc mb local/wadjet
 ```
 
 ## Start the Server
@@ -49,12 +49,12 @@ mc mb local/caelum
 ### Standalone Mode (Single Process)
 
 ```bash
-./caelum serve \
+./wadjet serve \
   --mode standalone \
   --endpoint localhost:9000 \
   --access-key minioadmin \
   --secret-key minioadmin \
-  --bucket caelum \
+  --bucket wadjet \
   --http-addr :8080
 ```
 
@@ -63,11 +63,11 @@ This starts an embedded coordinator and worker in a single process — ideal for
 ### One-Off Query
 
 ```bash
-./caelum query \
+./wadjet query \
   --endpoint localhost:9000 \
   --access-key minioadmin \
   --secret-key minioadmin \
-  --bucket caelum \
+  --bucket wadjet \
   "SELECT * FROM my_table LIMIT 10"
 ```
 
@@ -76,11 +76,11 @@ Supports `--format` flag: `json` (default), `table`, or `csv`.
 ### Interactive Shell
 
 ```bash
-./caelum shell \
+./wadjet shell \
   --endpoint localhost:9000 \
   --access-key minioadmin \
   --secret-key minioadmin \
-  --bucket caelum
+  --bucket wadjet
 ```
 
 Supports `--format` flag: `table` (default), `json`, or `csv`.
@@ -88,11 +88,11 @@ Supports `--format` flag: `table` (default), `json`, or `csv`.
 ### List Tables
 
 ```bash
-./caelum tables \
+./wadjet tables \
   --endpoint localhost:9000 \
   --access-key minioadmin \
   --secret-key minioadmin \
-  --bucket caelum
+  --bucket wadjet
 ```
 
 ## Your First Table (Embedded Go)
@@ -106,10 +106,10 @@ import (
     "log"
     "time"
 
-    "github.com/derekmwright/caelum/internal/storage/ingest"
-    "github.com/derekmwright/caelum/internal/storage/objstore"
-    "github.com/derekmwright/caelum/internal/storage/parquet"
-    "github.com/derekmwright/caelum/caelum"
+    "github.com/citc-tech/wadjet/internal/storage/ingest"
+    "github.com/citc-tech/wadjet/internal/storage/objstore"
+    "github.com/citc-tech/wadjet/internal/storage/parquet"
+    "github.com/citc-tech/wadjet/wadjet"
 )
 
 func main() {
@@ -126,9 +126,9 @@ func main() {
         log.Fatal(err)
     }
 
-    db, err := caelum.Open(ctx, caelum.Config{
+    db, err := wadjet.Open(ctx, wadjet.Config{
         Store:  store,
-        Bucket: "caelum",
+        Bucket: "wadjet",
     })
     if err != nil {
         log.Fatal(err)
@@ -224,24 +224,24 @@ Response:
 
 ## Your First Query (gRPC)
 
-Caelum also exposes a gRPC API on `:9090` (default). Clients can be generated for any language from the proto definition at `proto/caelum/v1/caelum.proto`.
+Wadjet also exposes a gRPC API on `:9090` (default). Clients can be generated for any language from the proto definition at `proto/wadjet/v1/wadjet.proto`.
 
 **Using grpcurl:**
 
 ```bash
 # List tables
-grpcurl -plaintext localhost:9090 caelum.v1.CaelumService/ListTables
+grpcurl -plaintext localhost:9090 wadjet.v1.WadjetService/ListTables
 
 # Execute a query
 grpcurl -plaintext -d '{"sql": "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip LIMIT 5"}' \
-  localhost:9090 caelum.v1.CaelumService/Query
+  localhost:9090 wadjet.v1.WadjetService/Query
 ```
 
 **Generate a client (e.g., Python):**
 
 ```bash
 pip install grpcio-tools
-python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. proto/caelum/v1/caelum.proto
+python -m grpc_tools.protoc -Iproto --python_out=. --grpc_python_out=. proto/wadjet/v1/wadjet.proto
 ```
 
 See [gRPC API](grpc-api.md) for the full service reference.
