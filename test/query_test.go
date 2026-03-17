@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"testing"
 
 	"github.com/derekmwright/caelum/internal/storage/ingest"
@@ -11,6 +12,19 @@ import (
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 	"github.com/derekmwright/caelum/caelum"
 )
+
+func toFloat64(v any) float64 {
+	switch val := v.(type) {
+	case float64:
+		return val
+	case int64:
+		return float64(val)
+	case string:
+		f, _ := strconv.ParseFloat(val, 64)
+		return f
+	}
+	return 0
+}
 
 func setupDBWithEvents(t *testing.T, numRows int) *caelum.DB {
 	t.Helper()
@@ -485,6 +499,132 @@ func TestQueryIntersectAll(t *testing.T) {
 	}
 
 	t.Logf("INTERSECT ALL returned %d rows", len(result.Rows))
+}
+
+// Issue #1: ORDER BY on aggregate wrapped in scalar function should sort numerically
+func TestQueryOrderByNestedAggregate(t *testing.T) {
+	db := setupDBWithEvents(t, 1000)
+	ctx := context.Background()
+
+	// ROUND(SUM(amount), 0) wraps the aggregate — ORDER BY SUM(amount) DESC
+	// must sort on raw numeric values, not the projected output
+	result, err := db.Query(ctx, `
+		SELECT event_type, ROUND(SUM(amount), 0) as total
+		FROM events
+		GROUP BY event_type
+		ORDER BY SUM(amount) DESC
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Rows) != 4 {
+		t.Fatalf("expected 4 event types, got %d", len(result.Rows))
+	}
+
+	// Verify descending numeric order
+	var prev float64
+	for i, row := range result.Rows {
+		total := toFloat64(row["total"])
+		t.Logf("  %s: %.0f", row["event_type"], total)
+		if i > 0 && total > prev {
+			t.Fatalf("expected descending order, but %.0f > %.0f at row %d", total, prev, i)
+		}
+		prev = total
+	}
+}
+
+func TestQueryOrderByNestedAggregateASC(t *testing.T) {
+	db := setupDBWithEvents(t, 1000)
+	ctx := context.Background()
+
+	result, err := db.Query(ctx, `
+		SELECT event_type, ROUND(SUM(amount), 0) as total
+		FROM events
+		GROUP BY event_type
+		ORDER BY SUM(amount) ASC
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Rows) != 4 {
+		t.Fatalf("expected 4 event types, got %d", len(result.Rows))
+	}
+
+	// Verify ascending numeric order
+	var prev float64
+	for i, row := range result.Rows {
+		total := toFloat64(row["total"])
+		if i > 0 && total < prev {
+			t.Fatalf("expected ascending order, but %.0f < %.0f at row %d", total, prev, i)
+		}
+		prev = total
+	}
+}
+
+// Issue #2: Multiple aggregates per SELECT expression
+func TestQueryMultipleAggregatesPerExpression(t *testing.T) {
+	db := setupDBWithEvents(t, 1000)
+	ctx := context.Background()
+
+	// MAX(amount) - MIN(amount) requires both aggregates to be computed
+	result, err := db.Query(ctx, `
+		SELECT event_type, MAX(amount) - MIN(amount) as range_val
+		FROM events
+		GROUP BY event_type
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Rows) != 4 {
+		t.Fatalf("expected 4 event types, got %d", len(result.Rows))
+	}
+
+	// With 1000 random rows (amount 0-99.99), range should be > 0 for each group
+	for _, row := range result.Rows {
+		rangeVal := row["range_val"].(float64)
+		t.Logf("  %s: range=%.2f", row["event_type"], rangeVal)
+		if rangeVal <= 0 {
+			t.Fatalf("expected range > 0 for %s, got %.2f", row["event_type"], rangeVal)
+		}
+	}
+}
+
+func TestQueryAggregateRatio(t *testing.T) {
+	db := setupDBWithEvents(t, 1000)
+	ctx := context.Background()
+
+	// SUM/COUNT should equal AVG — tests multi-aggregate in division
+	result, err := db.Query(ctx, `
+		SELECT event_type,
+			SUM(amount) / COUNT(amount) as manual_avg,
+			AVG(amount) as builtin_avg
+		FROM events
+		GROUP BY event_type
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.Rows) != 4 {
+		t.Fatalf("expected 4 event types, got %d", len(result.Rows))
+	}
+
+	for _, row := range result.Rows {
+		manualAvg := row["manual_avg"].(float64)
+		builtinAvg := row["builtin_avg"].(float64)
+		t.Logf("  %s: manual=%.4f builtin=%.4f", row["event_type"], manualAvg, builtinAvg)
+		// Allow small floating-point tolerance
+		diff := manualAvg - builtinAvg
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > 0.01 {
+			t.Fatalf("manual avg %.4f != builtin avg %.4f for %s", manualAvg, builtinAvg, row["event_type"])
+		}
+	}
 }
 
 func TestQueryExceptWithOrderLimit(t *testing.T) {

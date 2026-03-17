@@ -481,6 +481,130 @@ func FindNestedAggregate(node Node) *FuncCallNode {
 	return nil
 }
 
+// FindAllAggregates walks an expression tree and returns all aggregate function
+// calls found. For multi-aggregate expressions like MAX(x) - MIN(x), this
+// returns both aggregates.
+func FindAllAggregates(node Node) []*FuncCallNode {
+	var result []*FuncCallNode
+	findAllAggsHelper(node, &result)
+	return result
+}
+
+func findAllAggsHelper(node Node, result *[]*FuncCallNode) {
+	if node == nil {
+		return
+	}
+	switch n := node.(type) {
+	case *FuncCallNode:
+		if IsAggregate(n.Name) {
+			*result = append(*result, n)
+			return // don't recurse into aggregate arguments
+		}
+		for _, arg := range n.Args {
+			findAllAggsHelper(arg, result)
+		}
+	case *BinaryOp:
+		findAllAggsHelper(n.Left, result)
+		findAllAggsHelper(n.Right, result)
+	case *UnaryOp:
+		findAllAggsHelper(n.Inner, result)
+	case *ParenNode:
+		findAllAggsHelper(n.Inner, result)
+	case *CmpExpr:
+		findAllAggsHelper(n.Left, result)
+		findAllAggsHelper(n.Right, result)
+	case *CaseNode:
+		findAllAggsHelper(n.Subject, result)
+		for _, w := range n.Whens {
+			findAllAggsHelper(w.Cond, result)
+			findAllAggsHelper(w.Result, result)
+		}
+		findAllAggsHelper(n.Else, result)
+	case *CastNode:
+		findAllAggsHelper(n.Inner, result)
+	}
+}
+
+// ReplaceAllAggregates replaces all aggregate function calls in the expression
+// tree with ColRef nodes. The replacements map maps lowercase aggregate
+// expression strings (e.g., "sum(rx_bytes)") to output column names.
+func ReplaceAllAggregates(node Node, replacements map[string]string) Node {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *FuncCallNode:
+		if IsAggregate(n.Name) {
+			key := strings.ToLower(n.String())
+			if colName, ok := replacements[key]; ok {
+				return &ColRef{Column: colName}
+			}
+			return node
+		}
+		newArgs := make([]Node, len(n.Args))
+		changed := false
+		for i, arg := range n.Args {
+			newArgs[i] = ReplaceAllAggregates(arg, replacements)
+			if newArgs[i] != arg {
+				changed = true
+			}
+		}
+		if !changed {
+			return node
+		}
+		return &FuncCallNode{Name: n.Name, Args: newArgs, Distinct: n.Distinct, Star: n.Star}
+	case *BinaryOp:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		right := ReplaceAllAggregates(n.Right, replacements)
+		if left == n.Left && right == n.Right {
+			return node
+		}
+		return &BinaryOp{Left: left, Op: n.Op, Right: right}
+	case *UnaryOp:
+		inner := ReplaceAllAggregates(n.Inner, replacements)
+		if inner == n.Inner {
+			return node
+		}
+		return &UnaryOp{Inner: inner, Op: n.Op}
+	case *ParenNode:
+		inner := ReplaceAllAggregates(n.Inner, replacements)
+		if inner == n.Inner {
+			return node
+		}
+		return &ParenNode{Inner: inner}
+	case *CastNode:
+		inner := ReplaceAllAggregates(n.Inner, replacements)
+		if inner == n.Inner {
+			return node
+		}
+		return &CastNode{Inner: inner, TypeName: n.TypeName}
+	case *CaseNode:
+		changed := false
+		newWhens := make([]WhenClause, len(n.Whens))
+		for i, w := range n.Whens {
+			cond := ReplaceAllAggregates(w.Cond, replacements)
+			result := ReplaceAllAggregates(w.Result, replacements)
+			if cond != w.Cond || result != w.Result {
+				changed = true
+			}
+			newWhens[i] = WhenClause{Cond: cond, Result: result}
+		}
+		var elseNode Node
+		if n.Else != nil {
+			elseNode = ReplaceAllAggregates(n.Else, replacements)
+			if elseNode != n.Else {
+				changed = true
+			}
+		}
+		if !changed {
+			return node
+		}
+		return &CaseNode{Subject: n.Subject, Whens: newWhens, Else: elseNode}
+	default:
+		return node
+	}
+}
+
 // ReplaceAggregate replaces the first aggregate function call in the expression
 // tree with a ColRef pointing to the aggregate output column name.
 func ReplaceAggregate(node Node, aggName string) Node {

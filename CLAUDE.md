@@ -189,7 +189,34 @@ caelum serve --mode=worker --nats-url=nats://nats:4222
 psql -h localhost -p 5432 -U caelum -d caelum
 ```
 
-## Known Issues
+## CI/CD Automation
 
-- ORDER BY on aggregates wrapped in scalar functions sorts lexicographically (#1)
-- Planner only supports one aggregate per SELECT expression (#2)
+### Workflows
+
+| Workflow | Trigger | Purpose |
+|---|---|---|
+| `ci.yml` | Push/PR to main | Build, unit tests, TPC-H SF0.01 correctness |
+| `issue-worker.yml` | Issue opened or labeled `auto-fix` | Triage issues, auto-fix with PR |
+| `pr-review.yml` | PR opened/updated | Automated code review |
+
+### Issue-to-PR Flow
+
+All Claude workflows are **label-gated** — only maintainers can add labels, so no external user can trigger API costs.
+
+1. Issue opened → maintainer reviews, adds `needs-triage` label
+2. Claude triages: comments with analysis, root cause, complexity estimate
+3. Maintainer adds `auto-fix` label → Claude creates branch, fixes, writes tests, opens PR
+4. Maintainer adds `needs-review` label on PR → Claude reviews the diff
+5. CI runs tests + SF1 benchmark automatically on all PRs
+6. Human approves and merges
+
+Concurrency limits ensure only one Claude workflow runs at a time.
+
+### Required Secrets
+
+- `ANTHROPIC_API_KEY` — Claude API key (set at repo or org level in Settings → Secrets → Actions)
+
+## Resolved Issues
+
+- ~~ORDER BY on aggregates wrapped in scalar functions sorts lexicographically (#1)~~ — Fixed: Sort placed before Project using synthetic aggregate names
+- ~~Planner only supports one aggregate per SELECT expression (#2)~~ — Fixed: `FindAllAggregates`/`ReplaceAllAggregates` extract all aggregates from expressions

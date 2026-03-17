@@ -73,10 +73,13 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 	// Track columns that need AST rewriting for nested aggregates.
 	// Key: column index, Value: rewritten AST with aggregate replaced by ColRef.
 	nestedAggRewrites := map[int]plansql.Node{}
+	// Map aggregate expression string → synthetic name (for ORDER BY resolution)
+	aggSyntheticNames := map[string]string{}
 
 	// GROUP BY / aggregation
 	if hasAgg || len(info.GroupBy) > 0 {
 		var aggs []AggExpr
+		aggCounter := 0
 
 		for i, col := range info.Columns {
 			if col.IsAgg {
@@ -84,44 +87,68 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				if col.AggFunc == "grouping" {
 					continue
 				}
-				inputCol := cleanExpr(col.AggArg)
-				// Handle COUNT(*)
-				if col.AggFunc == "count" && (inputCol == "*" || inputCol == "") {
-					inputCol = ""
+
+				// Find all aggregates in this expression (handles multi-aggregate
+				// expressions like MAX(x) - MIN(x)).
+				var allAggs []*plansql.FuncCallNode
+				if col.ASTExpr != nil {
+					allAggs = plansql.FindAllAggregates(col.ASTExpr)
 				}
 
-				// Detect nested aggregate: ASTExpr is not a direct FuncCallNode
-				// (e.g., SUM(x) * 0.0001). Use a synthetic output name and rewrite
-				// the column AST to reference it.
+				// Detect nested aggregate: top-level is not a direct aggregate,
+				// or there are multiple aggregates in the expression.
 				isNested := false
-				if col.ASTExpr != nil {
+				if len(allAggs) > 1 {
+					isNested = true
+				} else if col.ASTExpr != nil {
 					if fn, topLevel := col.ASTExpr.(*plansql.FuncCallNode); !topLevel {
 						isNested = true
 					} else if topLevel && !plansql.IsAggregate(fn.Name) {
-						// Top-level is a scalar function wrapping an aggregate,
-						// e.g., format_bytes(SUM(rx_bytes)). Treat as nested.
 						isNested = true
 					}
 				}
 
-				outputCol := col.Alias
-				if outputCol == "" {
-					outputCol = col.Expr
-				}
+				if isNested && len(allAggs) > 0 {
+					// Register each aggregate with its own synthetic name
+					replacements := map[string]string{}
+					for _, agg := range allAggs {
+						syntheticName := fmt.Sprintf("__agg_%d", aggCounter)
+						aggCounter++
 
-				if isNested {
-					// Use a synthetic name for the aggregate output
-					syntheticName := fmt.Sprintf("__agg_%d", i)
-					aggs = append(aggs, AggExpr{
-						Func:      col.AggFunc,
-						InputCol:  inputCol,
-						OutputCol: syntheticName,
-						Distinct:  col.AggDistinct,
-						InputExpr: col.AggArgExpr,
-					})
-					// Rewrite the AST: replace the aggregate call with a ColRef
-					nestedAggRewrites[i] = plansql.ReplaceAggregate(col.ASTExpr, syntheticName)
+						aggInputCol := ""
+						var aggInputExpr plansql.Node
+						if len(agg.Args) > 0 {
+							aggInputCol = cleanExpr(agg.Args[0].String())
+							aggInputExpr = agg.Args[0]
+						}
+						funcName := strings.ToLower(agg.Name)
+						if funcName == "count" && (aggInputCol == "*" || aggInputCol == "") {
+							aggInputCol = ""
+						}
+
+						aggs = append(aggs, AggExpr{
+							Func:      funcName,
+							InputCol:  aggInputCol,
+							OutputCol: syntheticName,
+							Distinct:  agg.Distinct,
+							InputExpr: aggInputExpr,
+						})
+
+						aggKey := strings.ToLower(agg.String())
+						replacements[aggKey] = syntheticName
+						aggSyntheticNames[aggKey] = syntheticName
+					}
+					nestedAggRewrites[i] = plansql.ReplaceAllAggregates(col.ASTExpr, replacements)
 				} else {
+					// Simple non-nested single aggregate
+					inputCol := cleanExpr(col.AggArg)
+					if col.AggFunc == "count" && (inputCol == "*" || inputCol == "") {
+						inputCol = ""
+					}
+					outputCol := col.Alias
+					if outputCol == "" {
+						outputCol = col.Expr
+					}
 					aggs = append(aggs, AggExpr{
 						Func:      col.AggFunc,
 						InputCol:  inputCol,
@@ -129,6 +156,7 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 						Distinct:  col.AggDistinct,
 						InputExpr: col.AggArgExpr,
 					})
+					aggCounter++
 				}
 			}
 		}
@@ -192,6 +220,48 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		plan = NewWindow(plan, winExprs)
 	}
 
+	// When ORDER BY references a nested aggregate, sort BEFORE Project
+	// so the sort operates on raw numeric aggregate values rather than
+	// post-formatted strings.
+	sortBeforeProject := false
+	if len(nestedAggRewrites) > 0 && len(info.OrderBy) > 0 {
+		for _, ob := range info.OrderBy {
+			colLower := strings.ToLower(cleanExpr(ob.Column))
+			// Check if ORDER BY matches any aggregate expression
+			for _, sc := range info.Columns {
+				if !sc.IsAgg {
+					continue
+				}
+				var aggExpr string
+				if sc.AggFunc == "count" && (sc.AggArg == "*" || sc.AggArg == "") {
+					aggExpr = "count(*)"
+				} else {
+					aggExpr = strings.ToLower(sc.AggFunc) + "(" + strings.ToLower(sc.AggArg) + ")"
+				}
+				if aggExpr == colLower {
+					sortBeforeProject = true
+					break
+				}
+			}
+			if sortBeforeProject {
+				break
+			}
+		}
+	}
+
+	// Build Sort before Project when ORDER BY references nested aggregates
+	if sortBeforeProject {
+		var orderExprs []OrderExpr
+		for _, ob := range info.OrderBy {
+			orderExprs = append(orderExprs, OrderExpr{
+				Column:     resolveOrderByPreProject(cleanExpr(ob.Column), info.Columns, aggSyntheticNames),
+				Desc:       ob.Desc,
+				NullsFirst: ob.NullsFirst,
+			})
+		}
+		plan = NewSort(plan, orderExprs)
+	}
+
 	// PROJECT (SELECT columns)
 	if !isStarOnly(info.Columns) {
 		var projections []Projection
@@ -232,8 +302,8 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		plan = NewDistinct(plan)
 	}
 
-	// ORDER BY
-	if len(info.OrderBy) > 0 {
+	// ORDER BY (skip if already sorted before project)
+	if len(info.OrderBy) > 0 && !sortBeforeProject {
 		var orderExprs []OrderExpr
 		for _, ob := range info.OrderBy {
 			orderExprs = append(orderExprs, OrderExpr{
@@ -321,6 +391,65 @@ func resolveOrderByColumn(col string, selectCols []plansql.SelectColumn) string 
 			return sc.Expr
 		}
 	}
+	return col
+}
+
+// resolveOrderByPreProject resolves an ORDER BY expression to a column name
+// available at the Aggregate output level (before projection). This maps
+// aggregate expressions to their synthetic names and aliases to underlying
+// column names.
+func resolveOrderByPreProject(col string, selectCols []plansql.SelectColumn, aggSynthetic map[string]string) string {
+	colLower := strings.ToLower(col)
+
+	// 1. Check if it matches a known aggregate with a synthetic name
+	if synthName, ok := aggSynthetic[colLower]; ok {
+		return synthName
+	}
+
+	// 2. Check aggregate function pattern: sum(x) → synthetic name
+	for _, sc := range selectCols {
+		if !sc.IsAgg {
+			continue
+		}
+		var aggExpr string
+		if sc.AggFunc == "count" && (sc.AggArg == "*" || sc.AggArg == "") {
+			aggExpr = "count(*)"
+		} else {
+			aggExpr = strings.ToLower(sc.AggFunc) + "(" + strings.ToLower(sc.AggArg) + ")"
+		}
+		if aggExpr == colLower {
+			// Check if this aggregate has a synthetic name
+			if synthName, ok := aggSynthetic[aggExpr]; ok {
+				return synthName
+			}
+			// Non-nested aggregate: use alias or expression
+			if sc.Alias != "" {
+				return sc.Alias
+			}
+			return sc.Expr
+		}
+	}
+
+	// 3. Direct alias → resolve to underlying column name
+	for _, sc := range selectCols {
+		if strings.ToLower(sc.Alias) == colLower {
+			if sc.ColumnRef != "" {
+				return sc.ColumnRef
+			}
+			return sc.Alias
+		}
+	}
+
+	// 4. Expression match
+	for _, sc := range selectCols {
+		if strings.ToLower(sc.Expr) == colLower {
+			if sc.ColumnRef != "" {
+				return sc.ColumnRef
+			}
+			return sc.Expr
+		}
+	}
+
 	return col
 }
 
