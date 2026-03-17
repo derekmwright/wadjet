@@ -354,3 +354,465 @@ func ResolveBatchCount() BatchAggKernel {
 		acc.Count += countSlice(&vec.Nulls, sel, vecLen)
 	}
 }
+
+// ResolveBatchMin returns a batch-level min kernel for the given column type.
+func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			minSliceInt64(acc, vec.Int64Data, &vec.Nulls, sel, vecLen)
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			minSliceInt32(acc, vec.Int32Data, &vec.Nulls, sel, vecLen)
+		}
+	case batch.TypeFloat64:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			minSliceFloat64(acc, vec.Float64Data, &vec.Nulls, sel, vecLen)
+			acc.IsFloat = true
+		}
+	case batch.TypeFloat32:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			minSliceFloat32(acc, vec.Float32Data, &vec.Nulls, sel, vecLen)
+			acc.IsFloat = true
+		}
+	case batch.TypeDecimal:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			data := vec.DecimalData.Data
+			nulls := &vec.Nulls
+			if sel != nil {
+				for _, idx := range sel {
+					if !nulls.IsNullFast(int(idx)) {
+						v := data[idx]
+						if !acc.HasMin || v.Less(acc.MinDec) {
+							acc.MinDec = v
+							acc.HasMin = true
+						}
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if !nulls.IsNullFast(i) {
+						v := data[i]
+						if !acc.HasMin || v.Less(acc.MinDec) {
+							acc.MinDec = v
+							acc.HasMin = true
+						}
+					}
+				}
+			}
+			acc.IsDecimal = true
+			acc.DecScale = vec.DecimalData.Scale
+		}
+	default:
+		return nil
+	}
+}
+
+// ResolveBatchMax returns a batch-level max kernel for the given column type.
+func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			maxSliceInt64(acc, vec.Int64Data, &vec.Nulls, sel, vecLen)
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			maxSliceInt32(acc, vec.Int32Data, &vec.Nulls, sel, vecLen)
+		}
+	case batch.TypeFloat64:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			maxSliceFloat64(acc, vec.Float64Data, &vec.Nulls, sel, vecLen)
+			acc.IsFloat = true
+		}
+	case batch.TypeFloat32:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			maxSliceFloat32(acc, vec.Float32Data, &vec.Nulls, sel, vecLen)
+			acc.IsFloat = true
+		}
+	case batch.TypeDecimal:
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+			data := vec.DecimalData.Data
+			nulls := &vec.Nulls
+			if sel != nil {
+				for _, idx := range sel {
+					if !nulls.IsNullFast(int(idx)) {
+						v := data[idx]
+						if !acc.HasMax || acc.MaxDec.Less(v) {
+							acc.MaxDec = v
+							acc.HasMax = true
+						}
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if !nulls.IsNullFast(i) {
+						v := data[i]
+						if !acc.HasMax || acc.MaxDec.Less(v) {
+							acc.MaxDec = v
+							acc.HasMax = true
+						}
+					}
+				}
+			}
+			acc.IsDecimal = true
+			acc.DecScale = vec.DecimalData.Scale
+		}
+	default:
+		return nil
+	}
+}
+
+// --- Batch-level min/max helper functions ---
+
+func minSliceInt64(acc *Accumulator, data []int64, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					v := data[idx]
+					if !acc.HasMin || v < acc.MinI64 {
+						acc.MinI64 = v
+						acc.HasMin = true
+					}
+				}
+			}
+		} else {
+			for _, idx := range sel {
+				v := data[idx]
+				if !acc.HasMin || v < acc.MinI64 {
+					acc.MinI64 = v
+					acc.HasMin = true
+				}
+			}
+		}
+	} else {
+		if nulls.HasNulls() {
+			for i := 0; i < vecLen; i++ {
+				if !nulls.IsNullFast(i) {
+					v := data[i]
+					if !acc.HasMin || v < acc.MinI64 {
+						acc.MinI64 = v
+						acc.HasMin = true
+					}
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				v := data[i]
+				if !acc.HasMin || v < acc.MinI64 {
+					acc.MinI64 = v
+					acc.HasMin = true
+				}
+			}
+		}
+	}
+}
+
+func minSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					v := int64(data[idx])
+					if !acc.HasMin || v < acc.MinI64 {
+						acc.MinI64 = v
+						acc.HasMin = true
+					}
+				}
+			}
+		} else {
+			for _, idx := range sel {
+				v := int64(data[idx])
+				if !acc.HasMin || v < acc.MinI64 {
+					acc.MinI64 = v
+					acc.HasMin = true
+				}
+			}
+		}
+	} else {
+		if nulls.HasNulls() {
+			for i := 0; i < vecLen; i++ {
+				if !nulls.IsNullFast(i) {
+					v := int64(data[i])
+					if !acc.HasMin || v < acc.MinI64 {
+						acc.MinI64 = v
+						acc.HasMin = true
+					}
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				v := int64(data[i])
+				if !acc.HasMin || v < acc.MinI64 {
+					acc.MinI64 = v
+					acc.HasMin = true
+				}
+			}
+		}
+	}
+}
+
+func minSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					v := data[idx]
+					if !acc.HasMin || v < acc.MinF64 {
+						acc.MinF64 = v
+						acc.HasMin = true
+					}
+				}
+			}
+		} else {
+			for _, idx := range sel {
+				v := data[idx]
+				if !acc.HasMin || v < acc.MinF64 {
+					acc.MinF64 = v
+					acc.HasMin = true
+				}
+			}
+		}
+	} else {
+		if nulls.HasNulls() {
+			for i := 0; i < vecLen; i++ {
+				if !nulls.IsNullFast(i) {
+					v := data[i]
+					if !acc.HasMin || v < acc.MinF64 {
+						acc.MinF64 = v
+						acc.HasMin = true
+					}
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				v := data[i]
+				if !acc.HasMin || v < acc.MinF64 {
+					acc.MinF64 = v
+					acc.HasMin = true
+				}
+			}
+		}
+	}
+}
+
+func minSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					v := float64(data[idx])
+					if !acc.HasMin || v < acc.MinF64 {
+						acc.MinF64 = v
+						acc.HasMin = true
+					}
+				}
+			}
+		} else {
+			for _, idx := range sel {
+				v := float64(data[idx])
+				if !acc.HasMin || v < acc.MinF64 {
+					acc.MinF64 = v
+					acc.HasMin = true
+				}
+			}
+		}
+	} else {
+		if nulls.HasNulls() {
+			for i := 0; i < vecLen; i++ {
+				if !nulls.IsNullFast(i) {
+					v := float64(data[i])
+					if !acc.HasMin || v < acc.MinF64 {
+						acc.MinF64 = v
+						acc.HasMin = true
+					}
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				v := float64(data[i])
+				if !acc.HasMin || v < acc.MinF64 {
+					acc.MinF64 = v
+					acc.HasMin = true
+				}
+			}
+		}
+	}
+}
+
+func maxSliceInt64(acc *Accumulator, data []int64, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					v := data[idx]
+					if !acc.HasMax || v > acc.MaxI64 {
+						acc.MaxI64 = v
+						acc.HasMax = true
+					}
+				}
+			}
+		} else {
+			for _, idx := range sel {
+				v := data[idx]
+				if !acc.HasMax || v > acc.MaxI64 {
+					acc.MaxI64 = v
+					acc.HasMax = true
+				}
+			}
+		}
+	} else {
+		if nulls.HasNulls() {
+			for i := 0; i < vecLen; i++ {
+				if !nulls.IsNullFast(i) {
+					v := data[i]
+					if !acc.HasMax || v > acc.MaxI64 {
+						acc.MaxI64 = v
+						acc.HasMax = true
+					}
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				v := data[i]
+				if !acc.HasMax || v > acc.MaxI64 {
+					acc.MaxI64 = v
+					acc.HasMax = true
+				}
+			}
+		}
+	}
+}
+
+func maxSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					v := int64(data[idx])
+					if !acc.HasMax || v > acc.MaxI64 {
+						acc.MaxI64 = v
+						acc.HasMax = true
+					}
+				}
+			}
+		} else {
+			for _, idx := range sel {
+				v := int64(data[idx])
+				if !acc.HasMax || v > acc.MaxI64 {
+					acc.MaxI64 = v
+					acc.HasMax = true
+				}
+			}
+		}
+	} else {
+		if nulls.HasNulls() {
+			for i := 0; i < vecLen; i++ {
+				if !nulls.IsNullFast(i) {
+					v := int64(data[i])
+					if !acc.HasMax || v > acc.MaxI64 {
+						acc.MaxI64 = v
+						acc.HasMax = true
+					}
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				v := int64(data[i])
+				if !acc.HasMax || v > acc.MaxI64 {
+					acc.MaxI64 = v
+					acc.HasMax = true
+				}
+			}
+		}
+	}
+}
+
+func maxSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					v := data[idx]
+					if !acc.HasMax || v > acc.MaxF64 {
+						acc.MaxF64 = v
+						acc.HasMax = true
+					}
+				}
+			}
+		} else {
+			for _, idx := range sel {
+				v := data[idx]
+				if !acc.HasMax || v > acc.MaxF64 {
+					acc.MaxF64 = v
+					acc.HasMax = true
+				}
+			}
+		}
+	} else {
+		if nulls.HasNulls() {
+			for i := 0; i < vecLen; i++ {
+				if !nulls.IsNullFast(i) {
+					v := data[i]
+					if !acc.HasMax || v > acc.MaxF64 {
+						acc.MaxF64 = v
+						acc.HasMax = true
+					}
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				v := data[i]
+				if !acc.HasMax || v > acc.MaxF64 {
+					acc.MaxF64 = v
+					acc.HasMax = true
+				}
+			}
+		}
+	}
+}
+
+func maxSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+	if sel != nil {
+		if nulls.HasNulls() {
+			for _, idx := range sel {
+				if !nulls.IsNullFast(int(idx)) {
+					v := float64(data[idx])
+					if !acc.HasMax || v > acc.MaxF64 {
+						acc.MaxF64 = v
+						acc.HasMax = true
+					}
+				}
+			}
+		} else {
+			for _, idx := range sel {
+				v := float64(data[idx])
+				if !acc.HasMax || v > acc.MaxF64 {
+					acc.MaxF64 = v
+					acc.HasMax = true
+				}
+			}
+		}
+	} else {
+		if nulls.HasNulls() {
+			for i := 0; i < vecLen; i++ {
+				if !nulls.IsNullFast(i) {
+					v := float64(data[i])
+					if !acc.HasMax || v > acc.MaxF64 {
+						acc.MaxF64 = v
+						acc.HasMax = true
+					}
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				v := float64(data[i])
+				if !acc.HasMax || v > acc.MaxF64 {
+					acc.MaxF64 = v
+					acc.HasMax = true
+				}
+			}
+		}
+	}
+}

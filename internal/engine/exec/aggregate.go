@@ -71,10 +71,13 @@ type HashAggregate struct {
 	groupColIdx   []int
 	aggColIdx     []int
 	aggColIdx2    []int                  // second column indices for two-column aggregates
-	groupColTypes []batch.TypeID
-	aggUpdaters   []kernel.RowAggUpdater // resolved typed updaters
-	resolved      bool
-	keyBuf        []byte
+	groupColTypes  []batch.TypeID
+	aggUpdaters    []kernel.RowAggUpdater  // resolved typed updaters
+	batchAggKernels []kernel.BatchAggKernel // batch-level kernels (scalar aggregate fast path)
+	scalarAccs     []kernel.Accumulator    // accumulators for scalar aggregate fast path
+	isScalarAgg    bool                    // true when len(GroupByCols)==0 and all aggs are batch-able
+	resolved       bool
+	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles    []string
 	outputPos     int              // position in keys for batched Next() output
@@ -279,9 +282,38 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 	}
 	h.resolved = true
+
+	// Resolve batch-level kernels for scalar aggregate fast path
+	if len(h.GroupByCols) == 0 {
+		h.batchAggKernels = make([]kernel.BatchAggKernel, len(h.Aggs))
+		allBatchable := true
+		for i, agg := range h.Aggs {
+			h.batchAggKernels[i] = resolveBatchAggKernel(agg.Func, h.aggColIdx[i], b)
+			if h.batchAggKernels[i] == nil {
+				allBatchable = false
+			}
+		}
+		if allBatchable {
+			h.isScalarAgg = true
+			h.scalarAccs = make([]kernel.Accumulator, len(h.Aggs))
+		}
+	}
 }
 
 func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
+	// Scalar aggregate fast path: use batch-level kernels (no per-row dispatch)
+	if h.isScalarAgg {
+		for i := range h.Aggs {
+			idx := h.aggColIdx[i]
+			var vec *batch.Vector
+			if idx >= 0 {
+				vec = b.Columns[idx]
+			}
+			h.batchAggKernels[i](&h.scalarAccs[i], vec, b.Sel, b.Len)
+		}
+		return
+	}
+
 	if b.Sel != nil {
 		for _, idx := range b.Sel {
 			h.processRow(b, int(idx))
@@ -588,6 +620,21 @@ func (h *HashAggregate) Close() error { return nil }
 
 // Next returns the aggregated results in batches of DefaultBatchSize rows.
 func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
+	// Scalar aggregate fast path: single row output from batch accumulators
+	if h.isScalarAgg {
+		if h.outputPos > 0 {
+			return nil, nil
+		}
+		h.outputPos = 1
+		schema := h.outputSchema()
+		out := batch.NewRecordBatch(schema, 1)
+		for j, agg := range h.Aggs {
+			result := finalizeKernelAcc(&h.scalarAccs[j], agg.Func)
+			out.Columns[j].SetValue(0, result)
+		}
+		return out, nil
+	}
+
 	if h.outputPos >= len(h.keys) {
 		return nil, nil
 	}
@@ -745,7 +792,42 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	return cols
 }
 
-// resolveAggUpdater maps an AggFunc + TypeID to a kernel RowAggUpdater.
+// resolveBatchAggKernel returns a batch-level aggregate kernel for scalar aggregates.
+// Returns nil if the aggregate function is not batch-able (e.g., COUNT(DISTINCT), STRING_AGG).
+func resolveBatchAggKernel(fn AggFunc, colIdx int, b *batch.RecordBatch) kernel.BatchAggKernel {
+	switch fn {
+	case AggSum, AggAvg:
+		if colIdx < 0 {
+			return nil
+		}
+		return kernel.ResolveBatchSum(b.Columns[colIdx].Type)
+	case AggCount:
+		if colIdx < 0 {
+			// COUNT(*) — counts all rows
+			return func(acc *kernel.Accumulator, _ *batch.Vector, sel []uint16, vecLen int) {
+				if sel != nil {
+					acc.Count += int64(len(sel))
+				} else {
+					acc.Count += int64(vecLen)
+				}
+			}
+		}
+		return kernel.ResolveBatchCount()
+	case AggMin:
+		if colIdx < 0 {
+			return nil
+		}
+		return kernel.ResolveBatchMin(b.Columns[colIdx].Type)
+	case AggMax:
+		if colIdx < 0 {
+			return nil
+		}
+		return kernel.ResolveBatchMax(b.Columns[colIdx].Type)
+	default:
+		return nil
+	}
+}
+
 func resolveAggUpdater(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
 	switch fn {
 	case AggSum, AggAvg:

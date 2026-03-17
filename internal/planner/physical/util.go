@@ -2,27 +2,23 @@ package physical
 
 import (
 	"bytes"
+	"context"
+	"encoding/binary"
 	"io"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	goparquet "github.com/parquet-go/parquet-go"
+	pqencoding "github.com/parquet-go/parquet-go/encoding"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
-
-// valBufPool reuses the []goparquet.Value slice used in readBatchDirect.
-// Each call to readBatchDirect previously allocated a fresh 4096-element slice;
-// pooling eliminates this repeated allocation in scan-heavy queries.
-var valBufPool = sync.Pool{
-	New: func() any {
-		buf := make([]goparquet.Value, 4096)
-		return &buf
-	},
-}
 
 func readAll(rc io.ReadCloser) ([]byte, error) {
 	return io.ReadAll(rc)
@@ -121,14 +117,21 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	}
 
 	b := batch.NewRecordBatch(readSchema, int(totalRows))
-	valBufPtr := valBufPool.Get().(*[]goparquet.Value)
-	valBuf := *valBufPtr
-	defer valBufPool.Put(valBufPtr)
 
-	// Read column-by-column across active row groups
+	// Read column-by-column across active row groups using direct typed page reads.
+	// This bypasses parquet-go's Value interface, using page.Data() for zero-copy
+	// typed array access (memcpy for int64/int32/float slices).
 	for _, m := range mappings {
 		col := b.Columns[m.batchIdx]
+		colType := readSchema[m.batchIdx].Type
 		rowOffset := 0
+
+		// Get max definition level for null handling (once per column)
+		pqCol := scan.FindColumnByIndex(file.Root(), m.fileIdx)
+		maxDefLevel := byte(0)
+		if pqCol != nil {
+			maxDefLevel = byte(pqCol.MaxDefinitionLevel())
+		}
 
 		for _, rg := range activeRGs {
 			chunks := rg.ColumnChunks()
@@ -142,18 +145,22 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 					break
 				}
 
-				vr := page.Values()
-				for {
-					n, err := vr.ReadValues(valBuf)
-					setValuesBulk(col, rowOffset, valBuf, n)
-					rowOffset += n
-					if err != nil || n == 0 {
-						break
-					}
+				pageRows := int(page.NumRows())
+				if pageRows == 0 {
+					continue
 				}
-				if cl, ok := vr.(io.Closer); ok {
-					cl.Close()
+
+				defLevels := page.DefinitionLevels()
+				data := page.Data()
+
+				if colType == batch.TypeDecimal {
+					readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
+				} else if defLevels == nil {
+					scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
+				} else {
+					scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
 				}
+				rowOffset += pageRows
 			}
 			pages.Close()
 		}
@@ -243,123 +250,107 @@ func buildProjectedParquetSchema(file *goparquet.File, selectedColumns []string)
 	return goparquet.NewSchema(fileSchema.Name(), group)
 }
 
-// setValuesBulk writes n parquet Values to a batch Vector starting at offset.
-// Hoists the type switch outside the loop, eliminating per-value dispatch overhead.
-func setValuesBulk(col *batch.Vector, offset int, vals []goparquet.Value, n int) {
-	switch col.Type {
-	case batch.TypeBool:
-		for i := 0; i < n; i++ {
-			if vals[i].IsNull() {
-				col.Nulls.SetNull(offset + i)
-			} else {
-				col.Nulls.SetValid(offset + i)
-				col.BoolData[offset+i] = vals[i].Boolean()
+// readDecimalPage reads decimal data from a parquet page directly into a Vector,
+// dispatching on the physical storage type (INT32, INT64, or byte array).
+func readDecimalPage(col *batch.Vector, offset int, data pqencoding.Values, defLevels []byte, maxDefLevel byte, n int, pqCol *goparquet.Column) {
+	kind := pqCol.Type().Kind()
+
+	if defLevels == nil {
+		// Non-nullable column — direct copy
+		switch kind {
+		case goparquet.Int64:
+			src := data.Int64()
+			for i := 0; i < n; i++ {
+				col.DecimalData.Data[offset+i] = batch.Int128From(src[i])
 			}
-		}
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		for i := 0; i < n; i++ {
-			if vals[i].IsNull() {
-				col.Nulls.SetNull(offset + i)
-			} else {
-				col.Nulls.SetValid(offset + i)
-				col.Int32Data[offset+i] = vals[i].Int32()
+		case goparquet.Int32:
+			src := data.Int32()
+			for i := 0; i < n; i++ {
+				col.DecimalData.Data[offset+i] = batch.Int128From(int64(src[i]))
 			}
-		}
-	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-		for i := 0; i < n; i++ {
-			if vals[i].IsNull() {
-				col.Nulls.SetNull(offset + i)
+		case goparquet.FixedLenByteArray, goparquet.ByteArray:
+			rawData, offsets := data.ByteArray()
+			if offsets != nil {
+				for i := 0; i < n; i++ {
+					start := offsets[i]
+					end := offsets[i+1]
+					col.DecimalData.Data[offset+i] = decimalFromBytes(rawData[start:end])
+				}
 			} else {
-				col.Nulls.SetValid(offset + i)
-				col.Int64Data[offset+i] = vals[i].Int64()
-			}
-		}
-	case batch.TypeFloat32:
-		for i := 0; i < n; i++ {
-			if vals[i].IsNull() {
-				col.Nulls.SetNull(offset + i)
-			} else {
-				col.Nulls.SetValid(offset + i)
-				col.Float32Data[offset+i] = vals[i].Float()
-			}
-		}
-	case batch.TypeFloat64:
-		for i := 0; i < n; i++ {
-			if vals[i].IsNull() {
-				col.Nulls.SetNull(offset + i)
-			} else {
-				col.Nulls.SetValid(offset + i)
-				col.Float64Data[offset+i] = vals[i].Double()
-			}
-		}
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		for i := 0; i < n; i++ {
-			if vals[i].IsNull() {
-				col.Nulls.SetNull(offset + i)
-				col.BytesData.Set(offset+i, nil)
-			} else {
-				col.Nulls.SetValid(offset + i)
-				col.BytesData.Set(offset+i, vals[i].ByteArray())
-			}
-		}
-	case batch.TypeDecimal:
-		for i := 0; i < n; i++ {
-			if vals[i].IsNull() {
-				col.Nulls.SetNull(offset + i)
-			} else {
-				col.Nulls.SetValid(offset + i)
-				switch vals[i].Kind() {
-				case goparquet.Int32:
-					col.DecimalData.Data[offset+i] = batch.Int128From(int64(vals[i].Int32()))
-				case goparquet.Int64:
-					col.DecimalData.Data[offset+i] = batch.Int128From(vals[i].Int64())
-				case goparquet.FixedLenByteArray, goparquet.ByteArray:
-					col.DecimalData.Data[offset+i] = decimalFromBytes(vals[i].ByteArray())
+				pos := 0
+				for i := 0; i < n; i++ {
+					if pos+4 > len(rawData) {
+						break
+					}
+					length := int(binary.LittleEndian.Uint32(rawData[pos:]))
+					pos += 4
+					if pos+length > len(rawData) {
+						break
+					}
+					col.DecimalData.Data[offset+i] = decimalFromBytes(rawData[pos : pos+length])
+					pos += length
 				}
 			}
 		}
-	default:
-		// Fallback for any unhandled types
-		for i := 0; i < n; i++ {
-			setValueDirect(col, offset+i, vals[i])
-		}
-	}
-}
-
-// setValueDirect writes a parquet Value directly to a batch Vector at the given index,
-// using typed accessors to avoid the interface{} overhead of SetValue.
-func setValueDirect(col *batch.Vector, idx int, val goparquet.Value) {
-	if val.IsNull() {
-		col.Nulls.SetNull(idx)
-		switch col.Type {
-		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-			col.BytesData.Set(idx, nil)
-		}
-		return
-	}
-	col.Nulls.SetValid(idx)
-	switch col.Type {
-	case batch.TypeBool:
-		col.BoolData[idx] = val.Boolean()
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		col.Int32Data[idx] = val.Int32()
-	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-		col.Int64Data[idx] = val.Int64()
-	case batch.TypeFloat32:
-		col.Float32Data[idx] = val.Float()
-	case batch.TypeFloat64:
-		col.Float64Data[idx] = val.Double()
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		col.BytesData.Set(idx, val.ByteArray())
-	case batch.TypeDecimal:
-		switch val.Kind() {
-		case goparquet.Int32:
-			col.DecimalData.Data[idx] = batch.Int128From(int64(val.Int32()))
+	} else {
+		// Nullable column — scatter using definition levels
+		switch kind {
 		case goparquet.Int64:
-			col.DecimalData.Data[idx] = batch.Int128From(val.Int64())
+			src := data.Int64()
+			valIdx := 0
+			for i := 0; i < n; i++ {
+				if defLevels[i] == maxDefLevel {
+					col.DecimalData.Data[offset+i] = batch.Int128From(src[valIdx])
+					valIdx++
+				} else {
+					col.Nulls.SetNull(offset + i)
+				}
+			}
+		case goparquet.Int32:
+			src := data.Int32()
+			valIdx := 0
+			for i := 0; i < n; i++ {
+				if defLevels[i] == maxDefLevel {
+					col.DecimalData.Data[offset+i] = batch.Int128From(int64(src[valIdx]))
+					valIdx++
+				} else {
+					col.Nulls.SetNull(offset + i)
+				}
+			}
 		case goparquet.FixedLenByteArray, goparquet.ByteArray:
-			b := val.ByteArray()
-			col.DecimalData.Data[idx] = decimalFromBytes(b)
+			rawData, offsets := data.ByteArray()
+			valIdx := 0
+			if offsets != nil {
+				for i := 0; i < n; i++ {
+					if defLevels[i] == maxDefLevel {
+						start := offsets[valIdx]
+						end := offsets[valIdx+1]
+						col.DecimalData.Data[offset+i] = decimalFromBytes(rawData[start:end])
+						valIdx++
+					} else {
+						col.Nulls.SetNull(offset + i)
+					}
+				}
+			} else {
+				pos := 0
+				for i := 0; i < n; i++ {
+					if defLevels[i] == maxDefLevel {
+						if pos+4 > len(rawData) {
+							break
+						}
+						length := int(binary.LittleEndian.Uint32(rawData[pos:]))
+						pos += 4
+						if pos+length > len(rawData) {
+							break
+						}
+						col.DecimalData.Data[offset+i] = decimalFromBytes(rawData[pos : pos+length])
+						pos += length
+						valIdx++
+					} else {
+						col.Nulls.SetNull(offset + i)
+					}
+				}
+			}
 		}
 	}
 }
@@ -399,4 +390,256 @@ func decimalFromBytes(b []byte) batch.Int128 {
 		lo = (lo << 8) | uint64(c)
 	}
 	return batch.Int128{Hi: hi, Lo: lo}
+}
+
+// --- Row-group-level parallel scan ---
+
+// rgUnit is a work unit for parallel row-group scanning.
+type rgUnit struct {
+	pqFile      *goparquet.File
+	fileEntry   catalog.FileEntry
+	rg          goparquet.RowGroup
+	rgRowOffset int64 // cumulative row offset within the file (for delete markers)
+}
+
+// buildRGUnits reads all files concurrently and builds a flat list of row group
+// work units. Predicate-based row group pruning is applied during enumeration.
+func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
+	// Check for nested types — fall back to file-level scan
+	pqSchema := parquet.Schema{Columns: inner.schema}
+	if pqSchema.HasNestedColumns() {
+		inner.hasNestedTypes = true
+		return
+	}
+
+	type fileResult struct {
+		reader *parquet.Reader
+		entry  catalog.FileEntry
+	}
+
+	results := make([]fileResult, len(inner.files))
+	var readWg sync.WaitGroup
+	var readIdx int64
+
+	readWorkers := runtime.NumCPU()
+	if readWorkers > 8 {
+		readWorkers = 8
+	}
+	if readWorkers > len(inner.files) {
+		readWorkers = len(inner.files)
+	}
+	if readWorkers < 1 {
+		readWorkers = 1
+	}
+
+	readWg.Add(readWorkers)
+	for i := 0; i < readWorkers; i++ {
+		go func() {
+			defer readWg.Done()
+			for {
+				idx := int(atomic.AddInt64(&readIdx, 1) - 1)
+				if idx >= len(inner.files) {
+					return
+				}
+				if ctx.Err() != nil {
+					return
+				}
+				entry := inner.files[idx]
+				rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
+				if err != nil {
+					continue
+				}
+				data, err := readAll(rc)
+				rc.Close()
+				if err != nil {
+					continue
+				}
+				reader, err := parquet.NewReader(bytesReader(data), int64(len(data)))
+				if err != nil {
+					continue
+				}
+				results[idx] = fileResult{reader: reader, entry: entry}
+			}
+		}()
+	}
+	readWg.Wait()
+
+	// Enumerate row groups from all files, applying predicate-based pruning
+	for _, fr := range results {
+		if fr.reader == nil {
+			continue
+		}
+		pqFile := fr.reader.File()
+		rgs := pqFile.RowGroups()
+
+		var rowOffset int64
+		for rgIdx, rg := range rgs {
+			// Predicate-based row group pruning
+			if len(inner.scanPreds) > 0 {
+				stats := fr.reader.RowGroupStats(rgIdx)
+				pruned := false
+				for _, pred := range inner.scanPreds {
+					op := mapPredOp(pred.Op)
+					if op >= 0 {
+						sp := scan.StatsPredicate{Column: pred.Column, Op: op, Value: pred.Value}
+						if scan.CanPruneRowGroup(sp, stats) {
+							pruned = true
+							break
+						}
+					}
+				}
+				if pruned {
+					rowOffset += rg.NumRows()
+					continue
+				}
+			}
+
+			inner.rgUnits = append(inner.rgUnits, rgUnit{
+				pqFile:      pqFile,
+				fileEntry:   fr.entry,
+				rg:          rg,
+				rgRowOffset: rowOffset,
+			})
+			rowOffset += rg.NumRows()
+		}
+	}
+}
+
+// rgWorker processes row group work units in parallel.
+func (inner *scanSourceInner) rgWorker(ctx context.Context) {
+	defer inner.wg.Done()
+
+	for {
+		idx := int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
+		if idx >= len(inner.rgUnits) {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+
+		unit := inner.rgUnits[idx]
+		b := readRowGroupDirect(unit.pqFile, unit.rg, inner.schema, inner.requiredCols)
+		if b == nil || b.Len == 0 {
+			continue
+		}
+
+		// Apply delete markers with row offset adjustment
+		if delSet := inner.deleteMarkers[unit.fileEntry.Path]; len(delSet) > 0 {
+			sel := make([]uint16, 0, b.Len)
+			for i := 0; i < b.Len; i++ {
+				absRow := unit.rgRowOffset + int64(i)
+				if !delSet[absRow] {
+					sel = append(sel, uint16(i))
+				}
+			}
+			if len(sel) == 0 {
+				continue
+			}
+			if len(sel) < b.Len {
+				b.Sel = sel
+			}
+		}
+
+		atomic.AddInt64(&inner.rowsScanned, int64(b.ActiveLen()))
+
+		select {
+		case inner.batchCh <- b:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// readRowGroupDirect reads a single row group into a RecordBatch using direct
+// typed page reads. This is the per-RG equivalent of readBatchDirect.
+func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []parquet.Column, requiredCols []string) *batch.RecordBatch {
+	numRows := int(rg.NumRows())
+	if numRows == 0 {
+		return nil
+	}
+
+	// Build read schema
+	readSchema := schema
+	if len(requiredCols) > 0 {
+		needed := make(map[string]bool, len(requiredCols))
+		for _, c := range requiredCols {
+			needed[c] = true
+		}
+		filtered := make([]parquet.Column, 0, len(requiredCols))
+		for _, col := range schema {
+			if needed[col.Name] {
+				filtered = append(filtered, col)
+			}
+		}
+		if len(filtered) > 0 {
+			readSchema = filtered
+		}
+	}
+
+	// Map batch schema columns to parquet file column indices
+	fileColumns := file.Schema().Columns()
+	type colMapping struct {
+		fileIdx  int
+		batchIdx int
+	}
+	mappings := make([]colMapping, 0, len(readSchema))
+	for bi, sc := range readSchema {
+		for fi, path := range fileColumns {
+			name := path[len(path)-1]
+			if name == sc.Name {
+				mappings = append(mappings, colMapping{fileIdx: fi, batchIdx: bi})
+				break
+			}
+		}
+	}
+
+	b := batch.NewRecordBatch(readSchema, numRows)
+	chunks := rg.ColumnChunks()
+
+	for _, m := range mappings {
+		col := b.Columns[m.batchIdx]
+		colType := readSchema[m.batchIdx].Type
+		rowOffset := 0
+
+		if m.fileIdx >= len(chunks) {
+			continue
+		}
+
+		// Get max definition level for null handling
+		pqCol := scan.FindColumnByIndex(file.Root(), m.fileIdx)
+		maxDefLevel := byte(0)
+		if pqCol != nil {
+			maxDefLevel = byte(pqCol.MaxDefinitionLevel())
+		}
+
+		pages := chunks[m.fileIdx].Pages()
+		for {
+			page, err := pages.ReadPage()
+			if err != nil || page == nil {
+				break
+			}
+
+			pageRows := int(page.NumRows())
+			if pageRows == 0 {
+				continue
+			}
+
+			defLevels := page.DefinitionLevels()
+			data := page.Data()
+
+			if colType == batch.TypeDecimal {
+				readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
+			} else if defLevels == nil {
+				scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
+			} else {
+				scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
+			}
+			rowOffset += pageRows
+		}
+		pages.Close()
+	}
+
+	b.Len = numRows
+	return b
 }

@@ -106,7 +106,7 @@ func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int
 	defer pages.Close()
 
 	// Get max definition level for null handling
-	pqCol := findColumnByIndex(pqFile.Root(), colIdx)
+	pqCol := FindColumnByIndex(pqFile.Root(), colIdx)
 	maxDefLevel := 0
 	if pqCol != nil {
 		maxDefLevel = pqCol.MaxDefinitionLevel()
@@ -132,12 +132,12 @@ func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int
 
 		if defLevels == nil {
 			// Non-nullable column — direct copy
-			if err := copyTypedDataDirect(vec, offset, data, pageRows, typ); err != nil {
+			if err := CopyTypedDataDirect(vec, offset, data, pageRows, typ); err != nil {
 				return err
 			}
 		} else {
 			// Nullable column — scatter using definition levels
-			if err := copyTypedDataScatter(vec, offset, data, defLevels, byte(maxDefLevel), pageRows, typ); err != nil {
+			if err := CopyTypedDataScatter(vec, offset, data, defLevels, byte(maxDefLevel), pageRows, typ); err != nil {
 				return err
 			}
 		}
@@ -148,8 +148,8 @@ func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int
 	return nil
 }
 
-// findColumnByIndex finds the leaf Column at the given index in the schema tree.
-func findColumnByIndex(root *goparquet.Column, idx int) *goparquet.Column {
+// FindColumnByIndex finds the leaf Column at the given index in the schema tree.
+func FindColumnByIndex(root *goparquet.Column, idx int) *goparquet.Column {
 	var found *goparquet.Column
 	var walk func(col *goparquet.Column)
 	walk = func(col *goparquet.Column) {
@@ -170,8 +170,8 @@ func findColumnByIndex(root *goparquet.Column, idx int) *goparquet.Column {
 	return found
 }
 
-// copyTypedDataDirect copies non-nullable page data directly into a Vector.
-func copyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, n int, typ pqt.TypeID) error {
+// CopyTypedDataDirect copies non-nullable page data directly into a Vector.
+func CopyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, n int, typ pqt.TypeID) error {
 	switch typ {
 	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
 		src := data.Int64()
@@ -226,9 +226,9 @@ func copyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, 
 	return nil
 }
 
-// copyTypedDataScatter copies nullable page data into a Vector, scattering
+// CopyTypedDataScatter copies nullable page data into a Vector, scattering
 // values according to definition levels and setting nulls in the bitmap.
-func copyTypedDataScatter(vec *batch.Vector, offset int, data pqencoding.Values, defLevels []byte, maxDefLevel byte, n int, typ pqt.TypeID) error {
+func CopyTypedDataScatter(vec *batch.Vector, offset int, data pqencoding.Values, defLevels []byte, maxDefLevel byte, n int, typ pqt.TypeID) error {
 	switch typ {
 	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
 		src := data.Int64()

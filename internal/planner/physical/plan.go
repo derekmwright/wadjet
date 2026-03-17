@@ -2610,12 +2610,17 @@ type scanSourceInner struct {
 	cat            *catalog.Catalog
 	tableName      string
 	files          []catalog.FileEntry
-	idx            int64 // atomic index for parallel workers
+	idx            int64 // atomic index for parallel file workers (fallback path)
 	schema         []parquet.Column
 	requiredCols   []string
 	scanPreds      []scanPredicate // converted predicates for row-group pruning
 	rowsScanned    int64
 	deleteMarkers  map[string]map[int64]bool // file path -> set of row indices to skip
+	hasNestedTypes bool                      // true if schema has ARRAY/ROW/MAP types
+
+	// row-group-level parallel scan
+	rgUnits []rgUnit // flat list of row group work units
+	rgIdx   int64    // atomic index for parallel RG workers
 
 	// parallel scan
 	batchCh chan *batch.RecordBatch
@@ -2688,21 +2693,41 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	}
 	s.scanner = inner
 
-	// Launch parallel file readers
-	workers := runtime.NumCPU()
-	if workers > 8 {
-		workers = 8
-	}
-	if workers > len(files) {
-		workers = len(files)
-	}
-	if workers < 1 {
-		workers = 1
-	}
+	// Build row-group-level work units (reads files, enumerates RGs, prunes)
+	inner.buildRGUnits(scanCtx)
 
-	inner.wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go inner.scanWorker(scanCtx)
+	if inner.hasNestedTypes {
+		// Nested types need row-level reading — fall back to file-level workers
+		workers := runtime.NumCPU()
+		if workers > 8 {
+			workers = 8
+		}
+		if workers > len(files) {
+			workers = len(files)
+		}
+		if workers < 1 {
+			workers = 1
+		}
+		inner.wg.Add(workers)
+		for i := 0; i < workers; i++ {
+			go inner.scanWorker(scanCtx)
+		}
+	} else {
+		// Row-group-level parallel scan — full CPU utilization
+		workers := runtime.NumCPU()
+		if workers > 8 {
+			workers = 8
+		}
+		if workers > len(inner.rgUnits) {
+			workers = len(inner.rgUnits)
+		}
+		if workers < 1 {
+			workers = 1
+		}
+		inner.wg.Add(workers)
+		for i := 0; i < workers; i++ {
+			go inner.rgWorker(scanCtx)
+		}
 	}
 
 	// Close batchCh when all workers are done
