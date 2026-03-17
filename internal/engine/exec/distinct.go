@@ -57,17 +57,15 @@ func (d *Distinct) Close() error {
 	return nil
 }
 
-// rowKey serializes all column values for a row into a unique string key.
+// rowKey serializes all column values for a row into a unique binary key.
 func (d *Distinct) rowKey(b *batch.RecordBatch, row int) string {
 	d.keyBuf = d.keyBuf[:0]
-	for i, col := range b.Columns {
-		if i > 0 {
-			d.keyBuf = append(d.keyBuf, 0)
-		}
+	for _, col := range b.Columns {
 		if col.Nulls.IsNullFast(row) {
-			d.keyBuf = append(d.keyBuf, "<null>"...)
+			d.keyBuf = append(d.keyBuf, 1) // null flag
 			continue
 		}
+		d.keyBuf = append(d.keyBuf, 0) // not-null flag
 		d.keyBuf = appendColumnValue(d.keyBuf, col, row, col.Type)
 	}
 	return string(d.keyBuf)

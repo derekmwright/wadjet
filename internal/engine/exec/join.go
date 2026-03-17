@@ -594,17 +594,16 @@ func (h *HashJoin) Probe() *HashJoinProbe {
 // Uses pre-resolved column indices and a reusable buffer to avoid allocations.
 func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) string {
 	h.keyBuf = h.keyBuf[:0]
-	for i, idx := range h.buildKeyIdx {
-		if i > 0 {
-			h.keyBuf = append(h.keyBuf, 0)
-		}
+	for _, idx := range h.buildKeyIdx {
 		if idx < 0 {
+			h.keyBuf = append(h.keyBuf, 1) // null flag
 			continue
 		}
 		v := b.Columns[idx]
 		if v.Nulls.IsNullFast(rowIdx) {
-			h.keyBuf = append(h.keyBuf, "<null>"...)
+			h.keyBuf = append(h.keyBuf, 1) // null flag
 		} else {
+			h.keyBuf = append(h.keyBuf, 0) // not-null flag
 			h.keyBuf = appendColumnValue(h.keyBuf, v, rowIdx, v.Type)
 		}
 	}
@@ -623,17 +622,16 @@ func (h *HashJoin) buildProbeKeyBuf(b *batch.RecordBatch, row int) {
 		h.probeResolved = true
 	}
 	h.keyBuf = h.keyBuf[:0]
-	for i, idx := range h.probeKeyIdx {
-		if i > 0 {
-			h.keyBuf = append(h.keyBuf, 0)
-		}
+	for _, idx := range h.probeKeyIdx {
 		if idx < 0 {
+			h.keyBuf = append(h.keyBuf, 1) // null flag
 			continue
 		}
 		v := b.Columns[idx]
 		if v.Nulls.IsNullFast(row) {
-			h.keyBuf = append(h.keyBuf, "<null>"...)
+			h.keyBuf = append(h.keyBuf, 1) // null flag
 		} else {
+			h.keyBuf = append(h.keyBuf, 0) // not-null flag
 			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
 		}
 	}
@@ -759,14 +757,7 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		if m.fromProbe {
 			gatherVector(dst, in.Columns[m.srcIdx], probeIndices)
 		} else {
-			for outRow, pair := range pairs {
-				if pair.matched {
-					buildBatch := p.join.buildBatches[pair.ref.batchIdx]
-					copyVectorValue(dst, outRow, buildBatch.Columns[m.srcIdx], int(pair.ref.rowIdx))
-				} else {
-					setVectorNull(dst, outRow)
-				}
-			}
+			gatherBuildVector(dst, m.srcIdx, pairs, p.join.buildBatches)
 		}
 	}
 
@@ -829,14 +820,16 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 }
 
 // executeCrossJoin produces the Cartesian product of probe rows with all build-side rows.
+// crossPair tracks a probe row matched to a build-side row in cross joins.
+type crossPair struct {
+	probeRow int
+	batchIdx int32
+	buildRow int
+}
+
 func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parquet.Column) (*batch.RecordBatch, error) {
 	_, mapping := p.outputSchemaWithMapping(in.Schema)
 
-	type crossPair struct {
-		probeRow int
-		batchIdx int32
-		buildRow int
-	}
 	var pairs []crossPair
 
 	addProbeRow := func(row int) {
@@ -883,10 +876,7 @@ func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parq
 		if m.fromProbe {
 			gatherVector(dst, in.Columns[m.srcIdx], crossProbeIdx)
 		} else {
-			for outRow, cp := range pairs {
-				buildBatch := p.join.buildBatches[cp.batchIdx]
-				copyVectorValue(dst, outRow, buildBatch.Columns[m.srcIdx], cp.buildRow)
-			}
+			gatherCrossBuildVector(dst, m.srcIdx, pairs, p.join.buildBatches)
 		}
 	}
 
@@ -1017,6 +1007,221 @@ func (p *HashJoinProbe) leftHasColumn(name string, leftSchema []parquet.Column) 
 		}
 	}
 	return false
+}
+
+// gatherBuildVector copies build-side column values into the output vector for
+// all match pairs. Hoists the type switch outside the loop, eliminating per-row
+// function call and type dispatch overhead vs per-row copyVectorValue.
+func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBatches []*batch.RecordBatch) {
+	switch dst.Type {
+	case batch.TypeBool:
+		for di, pair := range pairs {
+			if !pair.matched {
+				dst.Nulls.SetNull(di)
+				continue
+			}
+			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			si := int(pair.ref.rowIdx)
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.BoolData[di] = src.BoolData[si]
+			}
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		for di, pair := range pairs {
+			if !pair.matched {
+				dst.Nulls.SetNull(di)
+				continue
+			}
+			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			si := int(pair.ref.rowIdx)
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.Int32Data[di] = src.Int32Data[si]
+			}
+		}
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		for di, pair := range pairs {
+			if !pair.matched {
+				dst.Nulls.SetNull(di)
+				continue
+			}
+			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			si := int(pair.ref.rowIdx)
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.Int64Data[di] = src.Int64Data[si]
+			}
+		}
+	case batch.TypeFloat32:
+		for di, pair := range pairs {
+			if !pair.matched {
+				dst.Nulls.SetNull(di)
+				continue
+			}
+			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			si := int(pair.ref.rowIdx)
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.Float32Data[di] = src.Float32Data[si]
+			}
+		}
+	case batch.TypeFloat64:
+		for di, pair := range pairs {
+			if !pair.matched {
+				dst.Nulls.SetNull(di)
+				continue
+			}
+			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			si := int(pair.ref.rowIdx)
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.Float64Data[di] = src.Float64Data[si]
+			}
+		}
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		for di, pair := range pairs {
+			if !pair.matched {
+				dst.Nulls.SetNull(di)
+				dst.BytesData.Set(di, nil)
+				continue
+			}
+			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			si := int(pair.ref.rowIdx)
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+				dst.BytesData.Set(di, nil)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.BytesData.Set(di, src.BytesData.Value(si))
+			}
+		}
+	case batch.TypeDecimal:
+		for di, pair := range pairs {
+			if !pair.matched {
+				dst.Nulls.SetNull(di)
+				continue
+			}
+			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			si := int(pair.ref.rowIdx)
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			}
+		}
+	default:
+		// Fallback for any unhandled types
+		for di, pair := range pairs {
+			if !pair.matched {
+				setVectorNull(dst, di)
+			} else {
+				buildBatch := buildBatches[pair.ref.batchIdx]
+				copyVectorValue(dst, di, buildBatch.Columns[srcIdx], int(pair.ref.rowIdx))
+			}
+		}
+	}
+}
+
+// gatherCrossBuildVector is like gatherBuildVector but for cross join pairs
+// where all rows are matched (no null handling for unmatched).
+func gatherCrossBuildVector(dst *batch.Vector, srcIdx int, pairs []crossPair, buildBatches []*batch.RecordBatch) {
+	switch dst.Type {
+	case batch.TypeBool:
+		for di, cp := range pairs {
+			src := buildBatches[cp.batchIdx].Columns[srcIdx]
+			si := cp.buildRow
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.BoolData[di] = src.BoolData[si]
+			}
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		for di, cp := range pairs {
+			src := buildBatches[cp.batchIdx].Columns[srcIdx]
+			si := cp.buildRow
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.Int32Data[di] = src.Int32Data[si]
+			}
+		}
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		for di, cp := range pairs {
+			src := buildBatches[cp.batchIdx].Columns[srcIdx]
+			si := cp.buildRow
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.Int64Data[di] = src.Int64Data[si]
+			}
+		}
+	case batch.TypeFloat32:
+		for di, cp := range pairs {
+			src := buildBatches[cp.batchIdx].Columns[srcIdx]
+			si := cp.buildRow
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.Float32Data[di] = src.Float32Data[si]
+			}
+		}
+	case batch.TypeFloat64:
+		for di, cp := range pairs {
+			src := buildBatches[cp.batchIdx].Columns[srcIdx]
+			si := cp.buildRow
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.Float64Data[di] = src.Float64Data[si]
+			}
+		}
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		for di, cp := range pairs {
+			src := buildBatches[cp.batchIdx].Columns[srcIdx]
+			si := cp.buildRow
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+				dst.BytesData.Set(di, nil)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.BytesData.Set(di, src.BytesData.Value(si))
+			}
+		}
+	case batch.TypeDecimal:
+		for di, cp := range pairs {
+			src := buildBatches[cp.batchIdx].Columns[srcIdx]
+			si := cp.buildRow
+			if src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Nulls.SetValid(di)
+				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			}
+		}
+	default:
+		for di, cp := range pairs {
+			buildBatch := buildBatches[cp.batchIdx]
+			copyVectorValue(dst, di, buildBatch.Columns[srcIdx], cp.buildRow)
+		}
+	}
 }
 
 // setVectorNull marks a position as null, handling BytesColumn offset alignment.

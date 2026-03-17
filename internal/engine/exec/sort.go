@@ -483,10 +483,3 @@ func appendKeyValue(buf []byte, v any) []byte {
 	}
 }
 
-func appendInt64(buf []byte, v int64) []byte {
-	return strconv.AppendInt(buf, v, 10)
-}
-
-func appendFloat64(buf []byte, v float64) []byte {
-	return strconv.AppendFloat(buf, v, 'g', -1, 64)
-}

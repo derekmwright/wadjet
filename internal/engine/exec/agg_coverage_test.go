@@ -181,8 +181,10 @@ func TestAppendColumnValueTypes(t *testing.T) {
 		v := batch.NewVector(batch.TypeInt32, 1)
 		v.Int32Data[0] = 42
 		buf := appendColumnValue(nil, v, 0, batch.TypeInt32)
-		if string(buf) != "42" {
-			t.Fatalf("expected '42', got %q", string(buf))
+		// Binary encoding: 4 bytes little-endian
+		expected := []byte{42, 0, 0, 0}
+		if !bytesEqual(buf, expected) {
+			t.Fatalf("expected %v, got %v", expected, buf)
 		}
 	})
 
@@ -190,8 +192,8 @@ func TestAppendColumnValueTypes(t *testing.T) {
 		v := batch.NewVector(batch.TypeFloat32, 1)
 		v.Float32Data[0] = 2.5
 		buf := appendColumnValue(nil, v, 0, batch.TypeFloat32)
-		if string(buf) != "2.5" {
-			t.Fatalf("expected '2.5', got %q", string(buf))
+		if len(buf) != 4 {
+			t.Fatalf("expected 4 bytes, got %d", len(buf))
 		}
 	})
 
@@ -199,8 +201,8 @@ func TestAppendColumnValueTypes(t *testing.T) {
 		v := batch.NewVector(batch.TypeBool, 1)
 		v.BoolData[0] = true
 		buf := appendColumnValue(nil, v, 0, batch.TypeBool)
-		if string(buf) != "true" {
-			t.Fatalf("expected 'true', got %q", string(buf))
+		if len(buf) != 1 || buf[0] != 1 {
+			t.Fatalf("expected [1], got %v", buf)
 		}
 	})
 
@@ -208,8 +210,8 @@ func TestAppendColumnValueTypes(t *testing.T) {
 		v := batch.NewVector(batch.TypeBool, 1)
 		v.BoolData[0] = false
 		buf := appendColumnValue(nil, v, 0, batch.TypeBool)
-		if string(buf) != "false" {
-			t.Fatalf("expected 'false', got %q", string(buf))
+		if len(buf) != 1 || buf[0] != 0 {
+			t.Fatalf("expected [0], got %v", buf)
 		}
 	})
 
@@ -217,8 +219,8 @@ func TestAppendColumnValueTypes(t *testing.T) {
 		v := batch.NewVectorWithScale(batch.TypeDecimal, 1, 2)
 		v.DecimalData.Data[0] = batch.Int128From(1000)
 		buf := appendColumnValue(nil, v, 0, batch.TypeDecimal)
-		if string(buf) != "10" {
-			t.Fatalf("expected '10', got %q", string(buf))
+		if len(buf) != 8 {
+			t.Fatalf("expected 8 bytes, got %d", len(buf))
 		}
 	})
 
@@ -229,6 +231,30 @@ func TestAppendColumnValueTypes(t *testing.T) {
 			t.Fatalf("expected '?', got %q", string(buf))
 		}
 	})
+
+	t.Run("Roundtrip_distinct_keys", func(t *testing.T) {
+		// Verify different values produce different keys
+		v := batch.NewVector(batch.TypeInt64, 2)
+		v.Int64Data[0] = 100
+		v.Int64Data[1] = 200
+		buf1 := appendColumnValue(nil, v, 0, batch.TypeInt64)
+		buf2 := appendColumnValue(nil, v, 1, batch.TypeInt64)
+		if bytesEqual(buf1, buf2) {
+			t.Fatal("different values should produce different keys")
+		}
+	})
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestVarianceState(t *testing.T) {

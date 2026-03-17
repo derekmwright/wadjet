@@ -1502,6 +1502,11 @@ type aggPreProject struct {
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
 
+// Clone returns a copy that shares the same computed expressions (stateless).
+func (a *aggPreProject) Clone() exec.UnaryOperator {
+	return &aggPreProject{computed: a.computed}
+}
+
 func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	// If the input has a selection vector, materialize (compact) the pass-through
 	// columns first. BytesColumn.Set requires sequential writes (i=0,1,2,...),
@@ -2612,6 +2617,21 @@ func extractFilterBuildColumns(filter string) []string {
 	return cols
 }
 
+// innerPipelineWorkers returns the number of parallel workers for an inner
+// pipeline (aggregate/sort child). Returns 0 (serial) unless the source is
+// a concurrent-safe scan source.
+func innerPipelineWorkers(src exec.Source) int {
+	switch src.(type) {
+	case *catalogScanSource, *scannerExecSource:
+		w := runtime.NumCPU()
+		if w > 8 {
+			w = 8
+		}
+		return w
+	}
+	return 0
+}
+
 // aggSourceAdapter wraps a child pipeline + hash aggregate into a Source.
 type aggSourceAdapter struct {
 	childSource exec.Source
@@ -2629,9 +2649,10 @@ func (a *aggSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error)
 		a.initialized = true
 		// Run child pipeline into aggregate
 		pipe := &exec.Pipeline{
-			Source: a.childSource,
+			Source:  a.childSource,
 			Ops:    a.childOps,
 			Sink:   a.agg,
+			Workers: innerPipelineWorkers(a.childSource),
 		}
 		if err := pipe.Run(ctx); err != nil {
 			return nil, err
@@ -2671,9 +2692,10 @@ func (s *sortSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, error
 	if !s.initialized {
 		s.initialized = true
 		pipe := &exec.Pipeline{
-			Source: s.childSource,
+			Source:  s.childSource,
 			Ops:    s.childOps,
 			Sink:   s.sort,
+			Workers: innerPipelineWorkers(s.childSource),
 		}
 		if err := pipe.Run(ctx); err != nil {
 			return nil, err

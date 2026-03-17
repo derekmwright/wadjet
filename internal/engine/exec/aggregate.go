@@ -456,21 +456,20 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 }
 
 func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
-	// Serialize group key directly from typed columns
+	// Serialize group key using binary encoding (fixed-width for numeric types).
+	// Each column is prefixed by a 1-byte null flag (0=value, 1=null).
 	h.keyBuf = h.keyBuf[:0]
 	for i, idx := range h.groupColIdx {
-		if i > 0 {
-			h.keyBuf = append(h.keyBuf, 0)
-		}
 		if idx < 0 {
-			h.keyBuf = append(h.keyBuf, "<null>"...)
+			h.keyBuf = append(h.keyBuf, 1) // null flag
 			continue
 		}
 		v := b.Columns[idx]
 		if v.Nulls.IsNullFast(row) {
-			h.keyBuf = append(h.keyBuf, "<null>"...)
+			h.keyBuf = append(h.keyBuf, 1) // null flag
 			continue
 		}
+		h.keyBuf = append(h.keyBuf, 0) // not-null flag
 		h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[i])
 	}
 
@@ -1008,26 +1007,43 @@ func serializeKey(buf []byte, vals []any) string {
 	return string(buf)
 }
 
-// appendColumnValue writes a typed column value to the buffer without boxing.
+// appendColumnValue appends a binary-encoded column value to buf for GROUP BY
+// key construction. Uses fixed-width binary encoding for numeric types (no
+// strconv text conversion), eliminating expensive int→decimal and float→string
+// conversions in the hot path.
 func appendColumnValue(buf []byte, v *batch.Vector, row int, typ batch.TypeID) []byte {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-		return appendInt64(buf, v.Int64Data[row])
+		val := v.Int64Data[row]
+		return append(buf,
+			byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
+			byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		return appendInt64(buf, int64(v.Int32Data[row]))
+		val := v.Int32Data[row]
+		return append(buf, byte(val), byte(val>>8), byte(val>>16), byte(val>>24))
 	case batch.TypeFloat64:
-		return appendFloat64(buf, v.Float64Data[row])
+		val := math.Float64bits(v.Float64Data[row])
+		return append(buf,
+			byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
+			byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
 	case batch.TypeFloat32:
-		return appendFloat64(buf, float64(v.Float32Data[row]))
+		val := math.Float32bits(v.Float32Data[row])
+		return append(buf, byte(val), byte(val>>8), byte(val>>16), byte(val>>24))
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		return append(buf, v.BytesData.Value(row)...)
+		data := v.BytesData.Value(row)
+		l := uint16(len(data))
+		buf = append(buf, byte(l), byte(l>>8))
+		return append(buf, data...)
 	case batch.TypeBool:
 		if v.BoolData[row] {
-			return append(buf, "true"...)
+			return append(buf, 1)
 		}
-		return append(buf, "false"...)
+		return append(buf, 0)
 	case batch.TypeDecimal:
-		return appendFloat64(buf, v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale))
+		val := math.Float64bits(v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale))
+		return append(buf,
+			byte(val), byte(val>>8), byte(val>>16), byte(val>>24),
+			byte(val>>32), byte(val>>40), byte(val>>48), byte(val>>56))
 	default:
 		return append(buf, '?')
 	}
