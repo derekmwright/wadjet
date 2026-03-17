@@ -277,6 +277,52 @@ func (h *HashJoin) reloadSpilledBuild() error {
 	return nil
 }
 
+// PruneBuildColumns removes non-essential columns from the build-side batches.
+// For SEMI/ANTI joins, the build side never appears in the output, so after
+// the hash index is built we only need columns referenced by SemiAntiFilter.
+// If keepCols is empty and no SemiAntiFilter is set, buildBatches are cleared.
+func (h *HashJoin) PruneBuildColumns(keepCols []string) {
+	if len(h.buildBatches) == 0 {
+		return
+	}
+	if len(keepCols) == 0 {
+		h.buildBatches = nil
+		h.buildSchema = nil
+		return
+	}
+
+	keep := make(map[string]bool, len(keepCols))
+	for _, c := range keepCols {
+		keep[c] = true
+	}
+
+	// Build new pruned schema
+	var newSchema []parquet.Column
+	var colIdx []int
+	for i, col := range h.buildSchema {
+		if keep[col.Name] {
+			newSchema = append(newSchema, col)
+			colIdx = append(colIdx, i)
+		}
+	}
+	if len(newSchema) == len(h.buildSchema) {
+		return // nothing to prune
+	}
+
+	h.buildSchema = newSchema
+	for bi, b := range h.buildBatches {
+		newCols := make([]*batch.Vector, len(colIdx))
+		for j, idx := range colIdx {
+			newCols[j] = b.Columns[idx]
+		}
+		h.buildBatches[bi] = &batch.RecordBatch{
+			Columns: newCols,
+			Schema:  newSchema,
+			Len:     b.Len,
+		}
+	}
+}
+
 // BuildFromRows loads the build side directly from rows (used by tests and worker).
 func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any) {
 	h.buildSchema = schema

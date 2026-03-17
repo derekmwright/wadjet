@@ -83,6 +83,24 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		return
 	}
 
+	// For SEMI/ANTI joins, the build side (child[1]) never contributes to output.
+	// Only push join key + filter column refs to the build side, not parent needs.
+	if n.Type == NodeJoin && len(n.Children) == 2 &&
+		(strings.EqualFold(n.JoinType, "semi") || strings.EqualFold(n.JoinType, "anti")) {
+		// Probe side (child[0]) gets full needs
+		pushColumnNeeds(n.Children[0], needs)
+		// Build side (child[1]) only needs join key + filter columns
+		buildNeeds := make(map[string]bool, 8)
+		if n.JoinCond != "" {
+			extractJoinColumnRefs(n.JoinCond, buildNeeds)
+		}
+		if n.JoinFilter != "" {
+			extractJoinColumnRefs(n.JoinFilter, buildNeeds)
+		}
+		pushColumnNeeds(n.Children[1], buildNeeds)
+		return
+	}
+
 	for _, child := range n.Children {
 		pushColumnNeeds(child, needs)
 	}
@@ -207,17 +225,31 @@ func collectASTColumnRefs(node plansql.Node, refs map[string]bool) {
 	}
 }
 
-// extractJoinColumnRefs parses a join condition string (e.g. "a = b AND c = d")
-// and adds column references to the set.
+// extractJoinColumnRefs parses a join condition string (e.g. "a = b AND c != d")
+// and adds column references to the set. Handles all comparison operators.
 func extractJoinColumnRefs(cond string, refs map[string]bool) {
 	parts := strings.Split(strings.ToLower(cond), " and ")
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		eqParts := strings.SplitN(part, "=", 2)
-		if len(eqParts) != 2 {
+		if part == "" {
 			continue
 		}
-		for _, side := range eqParts {
+		// Try operators from longest to shortest to avoid partial matches
+		var sides []string
+		found := false
+		for _, op := range []string{"!=", ">=", "<=", "<>", ">", "<", "="} {
+			sep := " " + op + " "
+			idx := strings.Index(part, sep)
+			if idx >= 0 {
+				sides = []string{part[:idx], part[idx+len(sep):]}
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		for _, side := range sides {
 			col := strings.TrimSpace(side)
 			if dotParts := strings.SplitN(col, ".", 2); len(dotParts) == 2 {
 				col = dotParts[1]
@@ -1516,7 +1548,7 @@ func isInnerJoin(n *Node) bool {
 		return false
 	}
 	jt := strings.ToLower(n.JoinType)
-	return jt == "" || jt == "inner" || jt == "cross"
+	return jt == "" || jt == "join" || jt == "inner" || jt == "inner join" || jt == "cross"
 }
 
 // flattenJoinChain walks a left-deep chain of inner joins, collecting leaf
@@ -1553,13 +1585,24 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 }
 
 // estimateRelCost assigns a heuristic cost to a relation subtree.
-// Lower cost = smaller/cheaper → should be joined first.
+// Lower cost = smaller/cheaper → should be joined first (as build side).
 func estimateRelCost(n *Node) int {
 	if n == nil {
 		return 1000
 	}
 	switch n.Type {
 	case NodeScan:
+		// Use actual row estimate from manifest if available
+		if n.ScanRowEstimate > 0 {
+			cost := int(n.ScanRowEstimate / 1000) // 1 cost unit per 1K rows
+			if cost < 1 {
+				cost = 1
+			}
+			if len(n.ScanPredicates) > 0 || len(n.PartitionFilter) > 0 {
+				cost /= 2 // filtered scan is cheaper
+			}
+			return cost
+		}
 		// Bare scan — medium cost
 		if len(n.ScanPredicates) > 0 || len(n.PartitionFilter) > 0 {
 			return 10 // filtered scan is cheap
@@ -1605,11 +1648,13 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 		relTables[i], _ = collectScanInfo(r)
 	}
 
-	// Pick the cheapest relation as the starting point
+	// Pick the MOST EXPENSIVE relation as the starting point (probe side).
+	// In a left-deep tree, the initial relation streams as the probe through
+	// all subsequent hash joins, so the largest table avoids being materialized.
 	used := make([]bool, n)
 	bestIdx := 0
 	for i := 1; i < n; i++ {
-		if costs[i] < costs[bestIdx] {
+		if costs[i] > costs[bestIdx] {
 			bestIdx = i
 		}
 	}

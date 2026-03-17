@@ -202,6 +202,16 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			}
 			node.ScanColumns = cols
 		}
+		// Estimate row count from manifest for join reordering
+		if manifest, err := p.catalog.GetManifest(ctx, node.TableName); err == nil {
+			var total int64
+			for _, part := range manifest.Partitions {
+				for _, f := range part.Files {
+					total += f.NumRows
+				}
+			}
+			node.ScanRowEstimate = total
+		}
 	}
 	for _, child := range node.Children {
 		p.AnnotateScanColumns(ctx, child)
@@ -695,6 +705,14 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// compile the filter into a function that checks each candidate build row.
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
 		hj.SemiAntiFilter = buildSemiAntiFilter(node.JoinFilter)
+	}
+
+	// For SEMI/ANTI joins, prune build-side batches to only columns needed by
+	// the SemiAntiFilter. The build side never appears in the output, so after
+	// the hash index is built, only filter columns need to be retained.
+	if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
+		keepCols := extractFilterBuildColumns(node.JoinFilter)
+		hj.PruneBuildColumns(keepCols)
 	}
 
 	// Left side (probe) streams through
@@ -2287,6 +2305,38 @@ func cleanExpr(s string) string {
 		return parts[1]
 	}
 	return s
+}
+
+// extractFilterBuildColumns extracts the build-side column names from a
+// semi/anti join filter string. Convention: right of operator = build column.
+func extractFilterBuildColumns(filter string) []string {
+	if filter == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	parts := strings.Split(strings.ToLower(filter), " and ")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		for _, op := range []string{"!=", ">=", "<=", "<>", ">", "<", "="} {
+			sep := " " + op + " "
+			idx := strings.Index(part, sep)
+			if idx >= 0 {
+				right := cleanExpr(strings.TrimSpace(part[idx+len(sep):]))
+				if right != "" {
+					seen[right] = true
+				}
+				break
+			}
+		}
+	}
+	cols := make([]string, 0, len(seen))
+	for c := range seen {
+		cols = append(cols, c)
+	}
+	return cols
 }
 
 // aggSourceAdapter wraps a child pipeline + hash aggregate into a Source.

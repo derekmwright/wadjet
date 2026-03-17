@@ -68,6 +68,7 @@ type Node struct {
 	RequiredColumns []string          // columns actually needed from this scan (set by optimizer column pruning)
 	PartitionFilter map[string]string // extracted partition key filters (year, month, day, hour)
 	ScanPredicates  []Predicate       // pushed-down filter predicates for row group pruning
+	ScanRowEstimate int64             // estimated row count from manifest (0 = unknown)
 
 	// Table Function (e.g., read_json, read_csv)
 	IsTableFunc    bool              // true if this scan reads from a table function
