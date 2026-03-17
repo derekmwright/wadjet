@@ -60,6 +60,7 @@ type Server struct {
 	authz    *auth.Authorizer
 	policies *auth.PolicySet
 	metrics  *metrics.Metrics // nil = no metrics
+	audit    *auth.AuditLogger
 }
 
 // New creates a new HTTP server.
@@ -79,6 +80,7 @@ func New(cfg Config, logger *slog.Logger) *Server {
 		authz:    cfg.Authz,
 		policies: cfg.Policies,
 		metrics:  cfg.Metrics,
+		audit:    auth.NewAuditLogger(logger),
 	}
 
 	s.mux.Post("/v1/queries", s.handleQuery)
@@ -277,9 +279,31 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Collect row-level security filters from access policies
+	var rowFilters auth.RowFilters
+	policies := s.getPolicies()
+	if identity != nil && policies != nil {
+		for _, table := range selectInfo.Tables {
+			if policy := policies.Lookup(table.Name, identity.Role); policy != nil && policy.RowFilter != "" {
+				if rowFilters == nil {
+					rowFilters = make(auth.RowFilters)
+				}
+				rowFilters[table.Name] = policy.RowFilter
+				if s.audit != nil {
+					s.audit.LogRowFilterApplied(identity, table.Name, policy.RowFilter)
+				}
+			}
+		}
+	}
+
 	// Distributed execution path: use coordinator if available
 	if s.coord != nil {
-		result, err := s.coord.ExecuteSQL(r.Context(), req.SQL)
+		// Pass row filters and identity through context for the coordinator
+		execCtx := r.Context()
+		if len(rowFilters) > 0 {
+			execCtx = auth.ContextWithRowFilters(execCtx, rowFilters)
+		}
+		result, err := s.coord.ExecuteSQL(execCtx, req.SQL)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "distributed execution error: "+err.Error())
 			return
@@ -287,8 +311,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 		rows := result.Rows
 
-		// Apply cell-level access policies
-		policies := s.getPolicies()
+		// Apply cell-level access policies (column masking/denial)
 		if identity != nil && policies != nil && len(rows) > 0 {
 			tableName := ""
 			if len(selectInfo.Tables) > 0 {
@@ -296,6 +319,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			}
 			if policy := policies.Lookup(tableName, identity.Role); policy != nil {
 				rows = policy.ApplyToRows(rows)
+				s.auditColumnPolicy(identity, tableName, policy)
 			}
 		}
 
@@ -332,6 +356,11 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Inject row-level security filters into logical plan
+	for table, filter := range rowFilters {
+		logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
+	}
+
 	// Optimize
 	logicalPlan = logical.Optimize(logicalPlan)
 
@@ -360,7 +389,6 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Apply cell-level access policies (column masking/denial)
-	policies := s.getPolicies()
 	if identity != nil && policies != nil && len(rows) > 0 {
 		// Find the queried table — use first table for single-table queries
 		tableName := ""
@@ -369,6 +397,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		}
 		if policy := policies.Lookup(tableName, identity.Role); policy != nil {
 			rows = policy.ApplyToRows(rows)
+			s.auditColumnPolicy(identity, tableName, policy)
 		}
 	}
 
@@ -500,6 +529,23 @@ func (s *Server) getPolicies() *auth.PolicySet {
 		return s.provider.Policies()
 	}
 	return s.policies
+}
+
+// auditColumnPolicy logs which columns were masked or denied for this query.
+func (s *Server) auditColumnPolicy(identity *auth.Identity, table string, policy *auth.AccessPolicy) {
+	if s.audit == nil || policy == nil {
+		return
+	}
+	var masked, denied []string
+	for col, cp := range policy.Columns {
+		switch cp {
+		case auth.ColumnMask:
+			masked = append(masked, col)
+		case auth.ColumnDeny:
+			denied = append(denied, col)
+		}
+	}
+	s.audit.LogColumnPolicy(identity, table, masked, denied)
 }
 
 func (s *Server) handleDescribe(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {

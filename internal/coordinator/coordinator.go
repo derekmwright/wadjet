@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/derekmwright/caelum/internal/auth"
 	"github.com/derekmwright/caelum/internal/distributed"
 	"github.com/derekmwright/caelum/internal/planner/logical"
 	"github.com/derekmwright/caelum/internal/planner/physical"
@@ -30,8 +31,10 @@ type Config struct {
 
 // queryMeta stores per-query metadata needed for later result retrieval.
 type queryMeta struct {
-	stages  []physical.Stage
-	planStr string
+	stages       []physical.Stage
+	planStr      string
+	identityName string // caller identity for task propagation
+	identityRole string
 }
 
 // Coordinator accepts queries, plans them, dispatches tasks, and tracks results.
@@ -236,6 +239,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	if err != nil {
 		return nil, fmt.Errorf("logical plan: %w", err)
 	}
+
+	// Inject row-level security filters from context (set by server from access policies)
+	if rowFilters := auth.RowFiltersFromContext(ctx); len(rowFilters) > 0 {
+		for table, filter := range rowFilters {
+			logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
+		}
+	}
+
 	logicalPlan = logical.Optimize(logicalPlan)
 	planStr := logicalPlan.PrettyPrint(0)
 
@@ -263,7 +274,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		specMap[s.ID] = s
 	}
 	c.stageSpecs[queryID] = specMap
-	c.queryMetas[queryID] = &queryMeta{stages: physStages, planStr: planStr}
+	qm := &queryMeta{stages: physStages, planStr: planStr}
+	if id := auth.IdentityFromContext(ctx); id != nil {
+		qm.identityName = id.Name
+		qm.identityRole = id.Role
+	}
+	c.queryMetas[queryID] = qm
 	c.mu.Unlock()
 
 	// Register stages with tracker
@@ -359,13 +375,20 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 		return nil
 	}
 
-	// Propagate cluster routing: use stage's ClusterID, or default to local
+	// Propagate cluster routing and identity context
 	clusterID := stage.ClusterID
 	if clusterID == "" {
 		clusterID = c.catalog.ClusterID()
 	}
+	c.mu.Lock()
+	qm := c.queryMetas[queryID]
+	c.mu.Unlock()
 	for i := range tasks {
 		tasks[i].ClusterID = clusterID
+		if qm != nil {
+			tasks[i].IdentityName = qm.identityName
+			tasks[i].IdentityRole = qm.identityRole
+		}
 	}
 	return tasks
 }

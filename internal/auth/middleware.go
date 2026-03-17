@@ -7,6 +7,7 @@ import (
 )
 
 type contextKey struct{}
+type rowFilterKey struct{}
 
 // IdentityFromContext extracts the authenticated identity from a request context.
 // Returns nil if no identity is present (auth disabled or unauthenticated).
@@ -18,6 +19,20 @@ func IdentityFromContext(ctx context.Context) *Identity {
 // ContextWithIdentity returns a new context with the given identity.
 func ContextWithIdentity(ctx context.Context, id *Identity) context.Context {
 	return context.WithValue(ctx, contextKey{}, id)
+}
+
+// RowFilters is a map of table name → SQL predicate for row-level security.
+type RowFilters map[string]string
+
+// ContextWithRowFilters returns a context carrying row filter predicates.
+func ContextWithRowFilters(ctx context.Context, filters RowFilters) context.Context {
+	return context.WithValue(ctx, rowFilterKey{}, filters)
+}
+
+// RowFiltersFromContext extracts row filter predicates from context.
+func RowFiltersFromContext(ctx context.Context) RowFilters {
+	rf, _ := ctx.Value(rowFilterKey{}).(RowFilters)
+	return rf
 }
 
 // Middleware returns HTTP middleware that authenticates requests.

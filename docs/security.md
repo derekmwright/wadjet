@@ -154,7 +154,7 @@ auth:
 
 ## Cell-Level Policies
 
-Cell-level policies provide fine-grained data access control, applied **after** query execution but **before** results are returned to the client.
+Cell-level policies provide fine-grained data access control. Row filters are injected into the query plan **before** execution (pushed down to scan operators for distributed enforcement). Column masking is applied **after** execution but **before** results are returned.
 
 Policies combine column masking and row filtering in a single definition per table/role pair:
 
@@ -188,12 +188,17 @@ Both can be combined in a single policy. A policy with only `columns` applies ma
 
 ### Policy Evaluation Order
 
-1. Query executes normally against full data
-2. Row filter policies are applied (rows not matching the filter are removed)
-3. Column mask policies are applied (column values are replaced)
-4. Filtered and masked results are returned to the client
+1. Row filter predicates are injected into the logical query plan as additional Filter nodes above scan operators
+2. The optimizer pushes these filters down to scan operators and through partition pruning
+3. In distributed mode, row filters propagate to worker tasks via the physical plan's `FilterExprs`
+4. Query executes — workers only scan rows matching the filter
+5. Column mask policies are applied to the results before returning to the client
 
 Admin roles are typically exempt from all policies (they see the raw data).
+
+### Distributed Enforcement
+
+In distributed mode, identity context (name and role) is propagated from the HTTP server to the coordinator and stamped on every worker task. Row filters are injected at plan time and flow naturally through distributed execution — workers never see rows outside the filter predicate.
 
 ## Security Configuration Example
 
@@ -266,6 +271,107 @@ This enables operations like:
 - Adding/removing roles dynamically
 - Updating cell-level policies in response to incidents
 - Revoking access immediately
+
+## Audit Logging
+
+Caelum logs security-relevant events as structured slog entries with the `component=audit` attribute. These events are emitted automatically and can be filtered and forwarded to your SIEM or log aggregation system.
+
+### Audit Events
+
+| Event | Level | Description |
+|-------|-------|-------------|
+| `query_executed` | INFO | Query completed successfully, with identity, SQL, tables, and elapsed time |
+| `query_failed` | WARN | Query failed, with identity and error details |
+| `access_denied` | WARN | Authorization denied access to a table or permission |
+| `row_filter_applied` | INFO | Row-level security filter injected into query plan |
+| `column_policy_applied` | INFO | Column masking or denial applied, listing affected columns |
+| `auth_failure` | WARN | Authentication failed (bad credentials, expired token) |
+
+### Example Log Output
+
+```
+level=INFO component=audit msg=row_filter_applied identity=analyst@corp.com role=soc-analyst table=flow_logs filter="src_ip LIKE '10.%'"
+level=INFO component=audit msg=column_policy_applied identity=analyst@corp.com role=soc-analyst table=flow_logs masked_columns=[src_ip] denied_columns=[]
+level=INFO component=audit msg=query_executed identity=analyst@corp.com role=soc-analyst sql="SELECT * FROM flow_logs" tables=[flow_logs] elapsed=1.23s
+```
+
+### Forwarding Audit Logs
+
+Since audit events use standard Go slog, configure your log aggregation pipeline to filter on `component=audit`:
+
+```bash
+# journalctl filter
+journalctl -u caelum | grep 'component=audit'
+
+# Vector/Fluentd: filter on structured field component=audit
+```
+
+## Query Cost Estimation and Guards
+
+Caelum estimates query cost at plan time using manifest metadata (file sizes, row counts) before any I/O occurs. Cost-based guards can reject expensive queries before they execute.
+
+### Configuration
+
+```yaml
+# Global query limits (apply to all users)
+query_limits:
+  max_scan_bytes: 107374182400       # 100 GB — reject queries scanning more
+  max_scan_rows: 1000000000          # 1 billion rows
+  max_scan_files: 10000              # 10,000 files
+  require_filter_above_bytes: 10737418240  # Require WHERE clause for scans > 10 GB
+  require_limit_above_rows: 100000000      # Require LIMIT for scans > 100M rows
+
+auth:
+  roles:
+    - name: admin
+      tables: ["*"]
+      allow: [read, write, admin]
+      # No query_limits → unlimited (overrides global)
+
+    - name: analyst
+      tables: ["*"]
+      allow: [read]
+      query_limits:
+        max_scan_bytes: 10737418240    # 10 GB
+        max_scan_rows: 100000000       # 100M rows
+
+    - name: viewer
+      tables: ["*"]
+      allow: [read]
+      query_limits:
+        max_scan_bytes: 1073741824     # 1 GB
+        max_scan_rows: 10000000        # 10M rows
+        require_filter_above_bytes: 0  # Always require filter
+```
+
+### How It Works
+
+1. The planner resolves file lists from the catalog manifest
+2. Each file's `size_bytes` and `num_rows` metadata (recorded at ingest time) is summed
+3. The estimated cost is checked against the applicable limits (per-role if defined, else global)
+4. If any limit is exceeded, the query is rejected with a descriptive error **before any I/O**
+
+### Per-Role Limits
+
+Per-role `query_limits` override the global limits entirely. If a role defines `query_limits`, only those limits apply — the global limits are ignored for that role. To grant unlimited access, define a role with no `query_limits` (or set all values to 0).
+
+### Environment Variable Overrides
+
+Global query limits can also be set via environment variables (useful for container deployments):
+
+| Variable | Description |
+|----------|-------------|
+| `CAELUM_QUERY_MAX_SCAN_BYTES` | Max bytes to scan per query |
+| `CAELUM_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
+| `CAELUM_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
+
+### Example Error
+
+```json
+{
+  "error": "query exceeds scan size limit: estimated 234.5 GB across 2,847 files, limit is 100.0 GB. Add a WHERE clause to narrow the scan."
+}
+```
 
 ## Best Practices
 

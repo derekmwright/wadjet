@@ -194,12 +194,102 @@ These constants are compiled into the binary and represent the default ingestion
 
 For detailed tuning guidance by hardware profile, see [Performance Tuning](tuning.md).
 
+## Query Limits
+
+Cost-based query guards prevent expensive queries from consuming excessive resources. Limits are checked at plan time using manifest metadata — no I/O occurs before validation.
+
+### Global Limits
+
+```yaml
+query_limits:
+  max_scan_bytes: 107374182400       # 100 GB
+  max_scan_rows: 1000000000          # 1 billion rows
+  max_scan_files: 10000              # 10,000 files
+  require_filter_above_bytes: 10737418240  # Require WHERE for scans > 10 GB
+  require_limit_above_rows: 100000000      # Require LIMIT for scans > 100M rows
+```
+
+### Per-Role Limits
+
+Override global limits for specific roles by adding `query_limits` to the role definition:
+
+```yaml
+auth:
+  roles:
+    - name: admin
+      tables: ["*"]
+      allow: [read, write, admin]
+      # No query_limits = unlimited
+
+    - name: analyst
+      tables: ["*"]
+      allow: [read]
+      query_limits:
+        max_scan_bytes: 10737418240   # 10 GB per query
+        max_scan_rows: 100000000      # 100M rows per query
+
+    - name: viewer
+      tables: ["*"]
+      allow: [read]
+      query_limits:
+        max_scan_bytes: 1073741824    # 1 GB per query
+        require_filter_above_bytes: 0 # Always require WHERE clause
+```
+
+Per-role limits fully override global limits when defined. See [Security](security.md#query-cost-estimation-and-guards) for details.
+
 ## Environment Variables
 
-S3 credentials can also be inherited from standard AWS environment variables when using AWS S3:
+All configuration can be overridden via `CAELUM_*` environment variables. This is useful for container and cloud deployments where config files may not be practical.
 
-| Variable | Maps To |
-|----------|---------|
-| `AWS_ACCESS_KEY_ID` | `--access-key` |
-| `AWS_SECRET_ACCESS_KEY` | `--secret-key` |
-| `AWS_ENDPOINT_URL_S3` | `--endpoint` |
+### S3/Storage
+
+| Variable | Maps To | Description |
+|----------|---------|-------------|
+| `AWS_ACCESS_KEY_ID` | `--access-key` | S3 access key |
+| `AWS_SECRET_ACCESS_KEY` | `--secret-key` | S3 secret key |
+| `AWS_ENDPOINT_URL_S3` | `--endpoint` | S3 endpoint |
+| `CAELUM_BUCKET` | `--bucket` | S3 bucket name |
+
+### Server
+
+| Variable | Description |
+|----------|-------------|
+| `CAELUM_HTTP_ADDR` | HTTP listen address |
+| `CAELUM_GRPC_ADDR` | gRPC listen address |
+| `CAELUM_MODE` | Deployment mode (`standalone`, `coordinator`, `worker`) |
+| `CAELUM_MAX_CONNECTIONS` | Maximum concurrent connections |
+| `CAELUM_SLOW_QUERY_THRESHOLD` | Slow query log threshold (e.g., `5s`) |
+| `CAELUM_SHUTDOWN_TIMEOUT` | Graceful shutdown drain timeout (e.g., `30s`) |
+
+### NATS
+
+| Variable | Description |
+|----------|-------------|
+| `CAELUM_NATS_PORT` | Embedded NATS port |
+| `CAELUM_NATS_URL` | NATS server URL (worker mode) |
+| `CAELUM_CLUSTER_ID` | Cluster identifier for federation |
+
+### Worker
+
+| Variable | Description |
+|----------|-------------|
+| `CAELUM_WORKER_MAX_CONCURRENT` | Max concurrent tasks per worker |
+| `CAELUM_WORKER_CACHE_BYTES` | LRU cache size in bytes |
+| `CAELUM_MEMORY_BUDGET` | Per-task memory budget |
+| `CAELUM_RESULT_STORE_BYTES` | In-memory result store capacity |
+
+### Query Limits
+
+| Variable | Description |
+|----------|-------------|
+| `CAELUM_QUERY_MAX_SCAN_BYTES` | Max bytes to scan per query |
+| `CAELUM_QUERY_MAX_SCAN_ROWS` | Max rows to scan per query |
+| `CAELUM_QUERY_MAX_SCAN_FILES` | Max files to scan per query |
+
+### Rate Limiting
+
+| Variable | Description |
+|----------|-------------|
+| `CAELUM_RATE_LIMIT_RPS` | Requests per second per identity |
+| `CAELUM_RATE_LIMIT_BURST` | Burst allowance per identity |

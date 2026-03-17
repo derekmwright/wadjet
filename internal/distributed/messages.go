@@ -51,6 +51,10 @@ type Task struct {
 	// Window-specific
 	WindowCols []WindowColSpec `json:"window_cols,omitempty"`
 
+	// Identity context (for access control enforcement at workers)
+	IdentityName string `json:"identity_name,omitempty"`
+	IdentityRole string `json:"identity_role,omitempty"`
+
 	// Result destination
 	ResultBucket string `json:"result_bucket"`
 	ResultPrefix string `json:"result_prefix"`

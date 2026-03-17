@@ -171,6 +171,39 @@ type OrderExpr struct {
 	NullsFirst *bool // nil = default, true = NULLS FIRST, false = NULLS LAST
 }
 
+// InjectRowFilter walks the logical plan tree and wraps Scan nodes for the
+// given table with an additional Filter node containing the row filter predicate.
+// This is used by row-level security policies to restrict which rows a role can see.
+func InjectRowFilter(plan *Node, tableName, filterSQL string) *Node {
+	ast, err := plansql.ParseExpression(filterSQL)
+	if err != nil {
+		return plan // don't break queries on malformed filter
+	}
+	return injectRowFilter(plan, tableName, filterSQL, ast)
+}
+
+func injectRowFilter(n *Node, tableName, raw string, ast plansql.Node) *Node {
+	if n == nil {
+		return nil
+	}
+
+	// Process children first (bottom-up)
+	for i, child := range n.Children {
+		n.Children[i] = injectRowFilter(child, tableName, raw, ast)
+	}
+
+	// If this is a Scan for the target table, wrap it in a Filter
+	if n.Type == NodeScan && (n.TableName == tableName || n.TableAlias == tableName) {
+		filterNode := NewFilter(n, []Predicate{{
+			Raw:     raw,
+			ASTExpr: ast,
+		}})
+		return filterNode
+	}
+
+	return n
+}
+
 // NewScan creates a scan node.
 func NewScan(table, alias string) *Node {
 	return &Node{Type: NodeScan, TableName: table, TableAlias: alias}
