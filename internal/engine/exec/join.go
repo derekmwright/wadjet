@@ -39,10 +39,12 @@ type HashJoin struct {
 	RightKeys []string // join key columns from right (build) side
 
 	mu           sync.Mutex
-	buildBatches []*batch.RecordBatch   // columnar storage of build side
-	hashIndex    map[string][]buildRef  // hash key -> list of (batch, row) refs (general path)
-	intIndex     map[int64][]buildRef   // fast path: single-column integer join key
-	useIntKey    bool                   // true when single int32/int64 join key detected
+	buildBatches []*batch.RecordBatch // columnar storage of build side
+	hashIndex    map[string]int32     // hash key -> head index in arena (general path)
+	intIndex     map[int64]int32      // fast path: single-column integer join key
+	arena        []buildRef           // flat storage for all build refs
+	arenaNext    []int32              // chain: arenaNext[i] = next arena index for same key (-1 = end)
+	useIntKey    bool                 // true when single int32/int64 join key detected
 	buildDone    bool
 	buildSchema  []parquet.Column
 	buildRows    int64 // total rows in build side
@@ -56,10 +58,9 @@ type HashJoin struct {
 	Spill      *memory.SpillManager
 	spillFiles []string
 
-	// matched tracks which build-side rows have been matched during probing.
-	// Only populated for RightJoin and FullOuterJoin.
-	matched    map[string]map[int]bool
-	intMatched map[int64]map[int]bool // matched tracking for int key path
+	// arenaMatched tracks which build-side arena entries have been matched during
+	// probing. Only allocated for RightJoin and FullOuterJoin.
+	arenaMatched []bool
 
 	// SemiAntiFilter is an optional predicate applied during semi/anti join probe.
 	// When set, each candidate build row is checked in addition to hash key equality.
@@ -85,11 +86,8 @@ func NewHashJoin(joinType JoinType, leftKeys, rightKeys []string) *HashJoin {
 		JoinType:  joinType,
 		LeftKeys:  leftKeys,
 		RightKeys: rightKeys,
-		hashIndex: make(map[string][]buildRef),
+		hashIndex: make(map[string]int32),
 		keyBuf:    make([]byte, 0, 128),
-	}
-	if joinType == RightJoin || joinType == FullOuterJoin {
-		hj.matched = make(map[string]map[int]bool)
 	}
 	return hj
 }
@@ -128,26 +126,63 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 	col := b.Columns[h.buildKeyIdx[0]]
 	if isIntKeyColumn(col.Type) {
 		h.useIntKey = true
-		h.intIndex = make(map[int64][]buildRef)
+		h.intIndex = make(map[int64]int32)
 		h.hashIndex = nil // free the string map
-		if h.matched != nil {
-			h.intMatched = make(map[int64]map[int]bool)
-			h.matched = nil
-		}
 	}
 }
 
-// lookupBuild returns build refs for a probe row, using the appropriate index.
-func (h *HashJoin) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
+// arenaAppend adds a buildRef to the arena and chains it under the given key.
+func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
+	idx := int32(len(h.arena))
+	h.arena = append(h.arena, ref)
+	head, ok := h.intIndex[key]
+	if ok {
+		h.arenaNext = append(h.arenaNext, head)
+	} else {
+		h.arenaNext = append(h.arenaNext, -1)
+	}
+	h.intIndex[key] = idx
+}
+
+func (h *HashJoin) arenaAppendStr(key string, ref buildRef) {
+	idx := int32(len(h.arena))
+	h.arena = append(h.arena, ref)
+	head, ok := h.hashIndex[key]
+	if ok {
+		h.arenaNext = append(h.arenaNext, head)
+	} else {
+		h.arenaNext = append(h.arenaNext, -1)
+	}
+	h.hashIndex[key] = idx
+}
+
+// lookupBuild collects build refs for a probe row into the probe's reusable buffer.
+func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
+	h := p.join
+	p.lookupBuf = p.lookupBuf[:0]
 	if h.useIntKey {
 		key, ok := h.intProbeKey(in, row)
 		if !ok {
-			return nil
+			return p.lookupBuf
 		}
-		return h.intIndex[key]
+		head, ok := h.intIndex[key]
+		if !ok {
+			return p.lookupBuf
+		}
+		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
+			p.lookupBuf = append(p.lookupBuf, h.arena[idx])
+		}
+		return p.lookupBuf
 	}
 	key := h.probeKey(in, row)
-	return h.hashIndex[key]
+	head, ok := h.hashIndex[key]
+	if !ok {
+		return p.lookupBuf
+	}
+	for idx := head; idx >= 0; idx = h.arenaNext[idx] {
+		p.lookupBuf = append(p.lookupBuf, h.arena[idx])
+	}
+	return p.lookupBuf
 }
 
 // intProbeKey extracts the int64 probe key for the int fast path.
@@ -268,19 +303,13 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				if !ok {
 					continue // skip null keys
 				}
-				h.intIndex[key] = append(h.intIndex[key], buildRef{
-					batchIdx: batchIdx,
-					rowIdx:   int32(rowIdx),
-				})
+				h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 				h.buildRows++
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				key := h.buildKeyFromBatch(b, rowIdx)
-				h.hashIndex[key] = append(h.hashIndex[key], buildRef{
-					batchIdx: batchIdx,
-					rowIdx:   int32(rowIdx),
-				})
+				h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 				h.buildRows++
 			}
 		}
@@ -292,6 +321,11 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		if err := h.reloadSpilledBuild(); err != nil {
 			return fmt.Errorf("reloading spilled build data: %w", err)
 		}
+	}
+
+	// Allocate matched bitmap for right/full outer join tracking
+	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
+		h.arenaMatched = make([]bool, len(h.arena))
 	}
 
 	h.buildDone = true
@@ -312,10 +346,12 @@ func (h *HashJoin) spillBuildBatches() error {
 	h.spillFiles = append(h.spillFiles, path)
 	// Clear in-memory state
 	h.buildBatches = h.buildBatches[:0]
+	h.arena = h.arena[:0]
+	h.arenaNext = h.arenaNext[:0]
 	if h.useIntKey {
-		h.intIndex = make(map[int64][]buildRef)
+		h.intIndex = make(map[int64]int32)
 	} else {
-		h.hashIndex = make(map[string][]buildRef)
+		h.hashIndex = make(map[string]int32)
 	}
 	h.buildRows = 0
 	if h.MemTracker != nil {
@@ -344,10 +380,12 @@ func (h *HashJoin) reloadSpilledBuild() error {
 
 	// Rebuild from all rows
 	h.buildBatches = nil
+	h.arena = h.arena[:0]
+	h.arenaNext = h.arenaNext[:0]
 	if h.useIntKey {
-		h.intIndex = make(map[int64][]buildRef)
+		h.intIndex = make(map[int64]int32)
 	} else {
-		h.hashIndex = make(map[string][]buildRef)
+		h.hashIndex = make(map[string]int32)
 	}
 	h.buildRows = 0
 	if h.MemTracker != nil {
@@ -370,19 +408,13 @@ func (h *HashJoin) reloadSpilledBuild() error {
 				if !ok {
 					continue
 				}
-				h.intIndex[key] = append(h.intIndex[key], buildRef{
-					batchIdx: batchIdx,
-					rowIdx:   int32(rowIdx),
-				})
+				h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 				h.buildRows++
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 				key := h.buildKeyFromBatch(b, rowIdx)
-				h.hashIndex[key] = append(h.hashIndex[key], buildRef{
-					batchIdx: batchIdx,
-					rowIdx:   int32(rowIdx),
-				})
+				h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 				h.buildRows++
 			}
 		}
@@ -462,21 +494,18 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 			if !ok {
 				continue
 			}
-			h.intIndex[key] = append(h.intIndex[key], buildRef{
-				batchIdx: batchIdx,
-				rowIdx:   int32(i),
-			})
+			h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
 	} else {
 		for i := 0; i < b.Len; i++ {
 			key := h.buildKeyFromBatch(b, i)
-			h.hashIndex[key] = append(h.hashIndex[key], buildRef{
-				batchIdx: batchIdx,
-				rowIdx:   int32(i),
-			})
+			h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
+	}
+	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
+		h.arenaMatched = make([]bool, len(h.arena))
 	}
 	h.buildDone = true
 }
@@ -525,8 +554,10 @@ func (h *HashJoin) FixKeyAssignment() {
 			h.tryEnableIntKey(b)
 		}
 		h.buildRows = 0
+		h.arena = h.arena[:0]
+		h.arenaNext = h.arenaNext[:0]
 		if h.useIntKey {
-			h.intIndex = make(map[int64][]buildRef)
+			h.intIndex = make(map[int64]int32)
 			for batchIdx, b := range h.buildBatches {
 				col := b.Columns[h.buildKeyIdx[0]]
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -534,22 +565,16 @@ func (h *HashJoin) FixKeyAssignment() {
 					if !ok {
 						continue
 					}
-					h.intIndex[key] = append(h.intIndex[key], buildRef{
-						batchIdx: int32(batchIdx),
-						rowIdx:   int32(rowIdx),
-					})
+					h.arenaAppendInt(key, buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
 			}
 		} else {
-			h.hashIndex = make(map[string][]buildRef)
+			h.hashIndex = make(map[string]int32)
 			for batchIdx, b := range h.buildBatches {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 					key := h.buildKeyFromBatch(b, rowIdx)
-					h.hashIndex[key] = append(h.hashIndex[key], buildRef{
-						batchIdx: int32(batchIdx),
-						rowIdx:   int32(rowIdx),
-					})
+					h.arenaAppendStr(key, buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
 			}
@@ -622,6 +647,8 @@ type HashJoinProbe struct {
 	join       *HashJoin
 	pairsBuf   []matchPair // reusable buffer to avoid per-batch allocation
 	semiSelBuf []uint16    // reusable selection vector for semi/anti join output
+	lookupBuf  []buildRef  // reusable buffer for lookupBuild results
+	indexBuf   []int       // reusable buffer for probe-side gather indices
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
@@ -629,6 +656,34 @@ func (p *HashJoinProbe) Init(_ context.Context) error {
 		return fmt.Errorf("hash join build phase not complete")
 	}
 	return nil
+}
+
+// markKeyMatched marks all arena entries for a probe row's key as matched.
+// Must be called with h.mu held.
+func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
+	h := p.join
+	if h.useIntKey {
+		key, ok := h.intProbeKey(in, row)
+		if !ok {
+			return
+		}
+		head, ok := h.intIndex[key]
+		if !ok {
+			return
+		}
+		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
+			h.arenaMatched[idx] = true
+		}
+	} else {
+		key := h.probeKey(in, row)
+		head, ok := h.hashIndex[key]
+		if !ok {
+			return
+		}
+		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
+			h.arenaMatched[idx] = true
+		}
+	}
 }
 
 func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
@@ -647,7 +702,7 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	pairs := p.pairsBuf[:0]
 
 	probeRow := func(row int) {
-		buildMatches := p.join.lookupBuild(in, row)
+		buildMatches := p.lookupBuild(in, row)
 
 		if len(buildMatches) == 0 {
 			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
@@ -656,26 +711,15 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			return
 		}
 
-		for i, ref := range buildMatches {
+		for _, ref := range buildMatches {
 			pairs = append(pairs, matchPair{probeRow: row, ref: ref, matched: true})
+		}
 
-			if p.join.useIntKey && p.join.intMatched != nil {
-				p.join.mu.Lock()
-				key, _ := p.join.intProbeKey(in, row)
-				if p.join.intMatched[key] == nil {
-					p.join.intMatched[key] = make(map[int]bool)
-				}
-				p.join.intMatched[key][i] = true
-				p.join.mu.Unlock()
-			} else if p.join.matched != nil {
-				p.join.mu.Lock()
-				key := p.join.probeKey(in, row)
-				if p.join.matched[key] == nil {
-					p.join.matched[key] = make(map[int]bool)
-				}
-				p.join.matched[key][i] = true
-				p.join.mu.Unlock()
-			}
+		// Mark all build-side refs for this key as matched (for right/full outer)
+		if p.join.arenaMatched != nil {
+			p.join.mu.Lock()
+			p.markKeyMatched(in, row)
+			p.join.mu.Unlock()
 		}
 	}
 
@@ -697,12 +741,19 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	// Build output batch using precomputed column source mapping
 	out := batch.NewRecordBatch(outSchema, len(pairs))
 
+	// Pre-extract probe row indices for bulk gather
+	if cap(p.indexBuf) < len(pairs) {
+		p.indexBuf = make([]int, len(pairs))
+	}
+	probeIndices := p.indexBuf[:len(pairs)]
+	for i, pair := range pairs {
+		probeIndices[i] = pair.probeRow
+	}
+
 	for outColIdx, m := range mapping {
 		dst := out.Columns[outColIdx]
 		if m.fromProbe {
-			for outRow, pair := range pairs {
-				copyVectorValue(dst, outRow, in.Columns[m.srcIdx], pair.probeRow)
-			}
+			gatherVector(dst, in.Columns[m.srcIdx], probeIndices)
 		} else {
 			for outRow, pair := range pairs {
 				if pair.matched {
@@ -728,7 +779,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	sel := p.semiSelBuf[:0]
 
 	checkRow := func(row int) {
-		candidates := p.join.lookupBuild(in, row)
+		candidates := p.lookupBuild(in, row)
 		hasMatch := false
 
 		if len(candidates) > 0 {
@@ -814,12 +865,19 @@ func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parq
 
 	out := batch.NewRecordBatch(outSchema, len(pairs))
 
+	// Pre-extract probe row indices for bulk gather
+	if cap(p.indexBuf) < len(pairs) {
+		p.indexBuf = make([]int, len(pairs))
+	}
+	crossProbeIdx := p.indexBuf[:len(pairs)]
+	for i, cp := range pairs {
+		crossProbeIdx[i] = cp.probeRow
+	}
+
 	for outColIdx, m := range mapping {
 		dst := out.Columns[outColIdx]
 		if m.fromProbe {
-			for outRow, cp := range pairs {
-				copyVectorValue(dst, outRow, in.Columns[m.srcIdx], cp.probeRow)
-			}
+			gatherVector(dst, in.Columns[m.srcIdx], crossProbeIdx)
 		} else {
 			for outRow, cp := range pairs {
 				buildBatch := p.join.buildBatches[cp.batchIdx]
@@ -838,28 +896,13 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 		return nil
 	}
 
-	// Collect unmatched build refs
+	// Collect unmatched build refs from arena
 	var refs []buildRef
-	if p.join.useIntKey {
-		for key, keyRefs := range p.join.intIndex {
-			matchedSet := p.join.intMatched[key]
-			for i, ref := range keyRefs {
-				if matchedSet != nil && matchedSet[i] {
-					continue
-				}
-				refs = append(refs, ref)
-			}
+	for i, ref := range p.join.arena {
+		if p.join.arenaMatched != nil && p.join.arenaMatched[i] {
+			continue
 		}
-	} else {
-		for key, keyRefs := range p.join.hashIndex {
-			matchedSet := p.join.matched[key]
-			for i, ref := range keyRefs {
-				if matchedSet != nil && matchedSet[i] {
-					continue
-				}
-				refs = append(refs, ref)
-			}
-		}
+		refs = append(refs, ref)
 	}
 
 	if len(refs) == 0 {

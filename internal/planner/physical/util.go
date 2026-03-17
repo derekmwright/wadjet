@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"sync"
 
 	goparquet "github.com/parquet-go/parquet-go"
 
@@ -12,6 +13,16 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
+
+// valBufPool reuses the []goparquet.Value slice used in readBatchDirect.
+// Each call to readBatchDirect previously allocated a fresh 4096-element slice;
+// pooling eliminates this repeated allocation in scan-heavy queries.
+var valBufPool = sync.Pool{
+	New: func() any {
+		buf := make([]goparquet.Value, 4096)
+		return &buf
+	},
+}
 
 func readAll(rc io.ReadCloser) ([]byte, error) {
 	return io.ReadAll(rc)
@@ -110,7 +121,9 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 	}
 
 	b := batch.NewRecordBatch(readSchema, int(totalRows))
-	valBuf := make([]goparquet.Value, 4096)
+	valBufPtr := valBufPool.Get().(*[]goparquet.Value)
+	valBuf := *valBufPtr
+	defer valBufPool.Put(valBufPtr)
 
 	// Read column-by-column across active row groups
 	for _, m := range mappings {
