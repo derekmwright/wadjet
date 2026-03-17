@@ -180,30 +180,30 @@ All 22 TPC-H queries at scale factor 1 (~6M lineitem rows, 8 tables). Pure Go, n
 | Query | Description | Time | Rows |
 |-------|-------------|------|------|
 | Q01 | Pricing Summary | 1.6s | 6 |
-| Q02 | Min Cost Supplier | 0.8s | 100 |
-| Q03 | Shipping Priority | 1.5s | 10 |
-| Q04 | Order Priority | 1.8s | 5 |
-| Q05 | Local Supplier Volume | 1.3s | 5 |
+| Q02 | Min Cost Supplier | 0.7s | 100 |
+| Q03 | Shipping Priority | 1.3s | 10 |
+| Q04 | Order Priority | 1.4s | 5 |
+| Q05 | Local Supplier Volume | 1.0s | 5 |
 | Q06 | Revenue Change | 0.6s | 1 |
-| Q07 | Volume Shipping | 3.2s | 10 |
-| Q08 | National Market Share | 1.5s | 5 |
-| Q09 | Product Type Profit | 2.3s | 58 |
-| Q10 | Returned Item Reporting | 1.2s | 20 |
-| Q11 | Important Stock | 0.3s | 758 |
+| Q07 | Volume Shipping | 2.6s | 10 |
+| Q08 | National Market Share | 0.9s | 5 |
+| Q09 | Product Type Profit | 1.4s | 58 |
+| Q10 | Returned Item Reporting | 1.0s | 20 |
+| Q11 | Important Stock | 0.2s | 758 |
 | Q12 | Shipping Modes | 0.9s | 7 |
-| Q13 | Customer Distribution | 0.6s | 100 |
-| Q14 | Promotion Effect | 0.9s | 1 |
+| Q13 | Customer Distribution | 0.5s | 100 |
+| Q14 | Promotion Effect | 0.8s | 1 |
 | Q15 | Top Supplier | 1.2s | 1 |
-| Q16 | Parts/Supplier | 0.2s | 14262 |
-| Q17 | Small-Quantity Revenue | 2.5s | 1 |
-| Q18 | Large Volume Customer | 4.0s | 0 |
-| Q19 | Discounted Revenue | 3.6s | 1 |
-| Q20 | Potential Part Promotion | 2.3s | 0 |
-| Q21 | Suppliers Kept Orders Waiting | 5.1s | 10 |
-| Q22 | Global Sales Opportunity | 0.4s | 1 |
-| | **Total** | **37.8s** | |
+| Q16 | Parts/Supplier | 0.1s | 14262 |
+| Q17 | Small-Quantity Revenue | 2.1s | 1 |
+| Q18 | Large Volume Customer | 3.1s | 0 |
+| Q19 | Discounted Revenue | 3.0s | 1 |
+| Q20 | Potential Part Promotion | 2.2s | 0 |
+| Q21 | Suppliers Kept Orders Waiting | 3.5s | 10 |
+| Q22 | Global Sales Opportunity | 0.2s | 1 |
+| | **Total** | **30.5s** | |
 
-Includes cost-based join reordering, subquery decorrelation, columnar hash joins, and 3-level predicate pushdown (partition → row-group → row).
+Includes cost-based join reordering, subquery decorrelation, columnar hash joins with int64 fast-path indexing, build-side column pruning, and 3-level predicate pushdown (partition → row-group → row).
 
 ```bash
 # Reproduce (requires ~2GB RAM, ~30s for data generation)
