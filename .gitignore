@@ -1,6 +1,11 @@
 # Binaries
 /caelum
 /unifi-ingest
+/tpch-seed
+/wadjet
+
+# Claude Code
+.claude/
 
 # MinIO data volume
 /data/

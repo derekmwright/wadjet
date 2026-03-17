@@ -51,7 +51,7 @@ locals {
 
 resource "aws_s3_bucket" "benchmark" {
   count         = local.create_bucket ? 1 : 0
-  bucket_prefix = "caelum-bench-"
+  bucket_prefix = "wadjet-bench-"
   force_destroy = true
 }
 
@@ -84,16 +84,8 @@ resource "aws_vpc_endpoint" "s3" {
 # --- Security group ---
 
 resource "aws_security_group" "bench" {
-  name_prefix = "caelum-bench-"
+  name_prefix = "wadjet-bench-"
   vpc_id      = data.aws_vpc.default.id
-
-  # SSH
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
 
   # NATS (coordinator ↔ workers)
   ingress {
@@ -138,7 +130,7 @@ resource "aws_security_group" "bench" {
 # --- IAM role for S3 access ---
 
 resource "aws_iam_role" "bench" {
-  name_prefix = "caelum-bench-"
+  name_prefix = "wadjet-bench-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -153,7 +145,7 @@ resource "aws_iam_role" "bench" {
 }
 
 resource "aws_iam_role_policy" "s3_access" {
-  name_prefix = "caelum-bench-s3-"
+  name_prefix = "wadjet-bench-s3-"
   role        = aws_iam_role.bench.id
 
   policy = jsonencode({
@@ -176,8 +168,13 @@ resource "aws_iam_role_policy" "s3_access" {
   })
 }
 
+resource "aws_iam_role_policy_attachment" "ssm" {
+  role       = aws_iam_role.bench.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "bench" {
-  name_prefix = "caelum-bench-"
+  name_prefix = "wadjet-bench-"
   role        = aws_iam_role.bench.name
 }
 
@@ -198,15 +195,16 @@ locals {
     # Clone and build
     dnf install -y git
     cd /root
-    git clone https://github.com/derekmwright/caelum.git
-    cd caelum
-    go build -o /usr/local/bin/caelum ./cmd/caelum
+    git clone https://github.com/citc-tech/wadjet.git
+    cd wadjet
+    go build -o /usr/local/bin/wadjet ./cmd/wadjet
+    go build -o /usr/local/bin/wadjet-seed ./cmd/tpch-seed
 
     # Build benchmark binary
-    go test -c -o /usr/local/bin/caelum-bench ./benchmarks/tpch/
+    go test -c -o /usr/local/bin/wadjet-bench ./benchmarks/tpch/
 
-    echo "CAELUM_BUCKET=${local.bucket_name}" >> /etc/environment
-    echo "CAELUM_REGION=${var.region}" >> /etc/environment
+    echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
+    echo "WADJET_REGION=${var.region}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   EOF
 }
@@ -218,7 +216,6 @@ resource "aws_instance" "standalone" {
 
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.worker_instance_type
-  key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.bench.id]
   iam_instance_profile   = aws_iam_instance_profile.bench.name
   subnet_id              = data.aws_subnets.default.ids[0]
@@ -244,7 +241,7 @@ resource "aws_instance" "standalone" {
   user_data = base64encode(local.user_data)
 
   tags = {
-    Name = "caelum-bench-standalone"
+    Name = "wadjet-bench-standalone"
     Role = "standalone"
     SF   = "SF${var.scale_factor}"
   }
@@ -257,7 +254,6 @@ resource "aws_instance" "coordinator" {
 
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.coordinator_instance_type
-  key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.bench.id]
   iam_instance_profile   = aws_iam_instance_profile.bench.name
   subnet_id              = data.aws_subnets.default.ids[0]
@@ -281,7 +277,7 @@ resource "aws_instance" "coordinator" {
   user_data = base64encode(local.user_data)
 
   tags = {
-    Name = "caelum-bench-coordinator"
+    Name = "wadjet-bench-coordinator"
     Role = "coordinator"
     SF   = "SF${var.scale_factor}"
   }
@@ -292,7 +288,6 @@ resource "aws_instance" "worker" {
 
   ami                    = data.aws_ami.al2023.id
   instance_type          = var.worker_instance_type
-  key_name               = var.key_name
   vpc_security_group_ids = [aws_security_group.bench.id]
   iam_instance_profile   = aws_iam_instance_profile.bench.name
   subnet_id              = data.aws_subnets.default.ids[0]
@@ -318,7 +313,7 @@ resource "aws_instance" "worker" {
   user_data = base64encode(local.user_data)
 
   tags = {
-    Name = "caelum-bench-worker-${count.index}"
+    Name = "wadjet-bench-worker-${count.index}"
     Role = "worker"
     SF   = "SF${var.scale_factor}"
   }

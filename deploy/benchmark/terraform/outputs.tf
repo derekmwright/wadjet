@@ -15,8 +15,8 @@ output "scale_factor" {
 }
 
 # Standalone outputs
-output "standalone_ip" {
-  value = var.mode == "standalone" ? aws_instance.standalone[0].public_ip : null
+output "standalone_instance_id" {
+  value = var.mode == "standalone" ? aws_instance.standalone[0].id : null
 }
 
 output "standalone_instance_type" {
@@ -24,29 +24,29 @@ output "standalone_instance_type" {
 }
 
 # Distributed outputs
-output "coordinator_ip" {
-  value = var.mode == "distributed" ? aws_instance.coordinator[0].public_ip : null
+output "coordinator_instance_id" {
+  value = var.mode == "distributed" ? aws_instance.coordinator[0].id : null
 }
 
 output "coordinator_private_ip" {
   value = var.mode == "distributed" ? aws_instance.coordinator[0].private_ip : null
 }
 
-output "worker_ips" {
-  value = var.mode == "distributed" ? aws_instance.worker[*].public_ip : []
+output "worker_instance_ids" {
+  value = var.mode == "distributed" ? aws_instance.worker[*].id : []
 }
 
 output "worker_private_ips" {
   value = var.mode == "distributed" ? aws_instance.worker[*].private_ip : []
 }
 
-# SSH commands
-output "ssh_standalone" {
-  value = var.mode == "standalone" ? "ssh -i ~/.ssh/${var.key_name}.pem ec2-user@${aws_instance.standalone[0].public_ip}" : null
+# SSM session commands
+output "ssm_standalone" {
+  value = var.mode == "standalone" ? "aws ssm start-session --target ${aws_instance.standalone[0].id} --region ${var.region}" : null
 }
 
-output "ssh_coordinator" {
-  value = var.mode == "distributed" ? "ssh -i ~/.ssh/${var.key_name}.pem ec2-user@${aws_instance.coordinator[0].public_ip}" : null
+output "ssm_coordinator" {
+  value = var.mode == "distributed" ? "aws ssm start-session --target ${aws_instance.coordinator[0].id} --region ${var.region}" : null
 }
 
 # Estimated hourly cost

@@ -64,13 +64,18 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RESULT_FILE"; }
 cd /root/wadjet
 
 # Check if data already exists in the bucket (supports pre-seeded / preserved buckets)
-DATA_EXISTS=$(aws s3 ls "s3://${BUCKET}/" --recursive 2>/dev/null | grep -c "\.parquet$" || true)
+DATA_EXISTS=$(aws s3 ls "s3://${BUCKET}/tables/" --recursive 2>/dev/null | grep -c "\.parquet$" || true)
 if [ "$DATA_EXISTS" -gt 0 ] && [ "${FORCE_DATAGEN:-}" != "1" ]; then
   log "Phase 1: Found existing data in s3://${BUCKET}/ ($DATA_EXISTS parquet files), skipping generation."
   log "  Set FORCE_DATAGEN=1 to regenerate."
 else
   log "Phase 1: Generating TPC-H SF${SCALE} data and loading to S3..."
-  TPCH_SCALE=$SCALE go test -v -run TestTPCHDataGen -timeout 60m ./benchmarks/tpch/ 2>&1 | tee -a "$RESULT_FILE"
+  /usr/local/bin/wadjet-seed \
+    --scale="${SCALE}" \
+    --endpoint="${S3_ENDPOINT}" \
+    --bucket="${BUCKET}" \
+    --region="${REGION}" \
+    --skip-if-exists 2>&1 | tee -a "$RESULT_FILE"
   log "Data generation complete."
 fi
 
@@ -161,7 +166,10 @@ grep -E "Q[0-9]{2}:" "$RESULT_FILE" | tail -22 | while read -r line; do
 done
 
 log ""
-log "To download results:"
-log "  scp ec2-user@\$(hostname -I | awk '{print \$1}'):${RESULT_FILE} ."
+log "To download results (via SSM):"
+INSTANCE_ID=$(curl -sf http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "INSTANCE_ID")
+log "  aws s3 cp ${RESULT_FILE} s3://${BUCKET}/results/ && aws s3 cp s3://${BUCKET}/results/$(basename ${RESULT_FILE}) ."
+log "  # Or via SSM port forwarding:"
+log "  # aws ssm start-session --target ${INSTANCE_ID} --region ${REGION}"
 log ""
 log "Done. Remember to terraform destroy when finished!"
