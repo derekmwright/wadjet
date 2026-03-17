@@ -76,6 +76,14 @@ type HashAggregate struct {
 	batchAggKernels []kernel.BatchAggKernel // batch-level kernels (scalar aggregate fast path)
 	scalarAccs     []kernel.Accumulator    // accumulators for scalar aggregate fast path
 	isScalarAgg    bool                    // true when len(GroupByCols)==0 and all aggs are batch-able
+
+	// Single-column integer GROUP BY fast path: uses intHashTable
+	// instead of serializing keys to strings and using map[string].
+	useIntGroupKey bool
+	intGroupIndex  *intHashTable
+	intGroupStates []*groupState
+	intGroupKeyCol int // column index for the integer group-by key
+
 	resolved       bool
 	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
@@ -283,6 +291,36 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	}
 	h.resolved = true
 
+	// Single-column integer GROUP BY fast path:
+	// Use intHashTable when grouping by one integer-typed column and
+	// all aggregate functions use standard kernel updaters (no COUNT(DISTINCT),
+	// STRING_AGG, etc. which need the generic processRow path).
+	if len(h.GroupByCols) == 1 && h.groupColIdx[0] >= 0 {
+		typ := h.groupColTypes[0]
+		isIntType := typ == batch.TypeInt64 || typ == batch.TypeTimestamp ||
+			typ == batch.TypeIPv4 || typ == batch.TypeMAC || typ == batch.TypeDuration ||
+			typ == batch.TypeInt32 || typ == batch.TypePort || typ == batch.TypeProtocol || typ == batch.TypeDate
+		allSimple := isIntType
+		for i, agg := range h.Aggs {
+			switch agg.Func {
+			case AggCountDistinct, AggStringAgg, AggApproxDistinct,
+				AggCorr, AggCovarSamp, AggCovarPop,
+				AggPercentileCont, AggPercentileDisc, AggMedian,
+				AggMinBy, AggMaxBy:
+				allSimple = false
+			default:
+				if h.aggUpdaters[i] == nil && agg.InputCol != "" {
+					allSimple = false
+				}
+			}
+		}
+		if allSimple {
+			h.useIntGroupKey = true
+			h.intGroupIndex = newIntHashTable(4096)
+			h.intGroupKeyCol = h.groupColIdx[0]
+		}
+	}
+
 	// Resolve batch-level kernels for scalar aggregate fast path
 	if len(h.GroupByCols) == 0 {
 		h.batchAggKernels = make([]kernel.BatchAggKernel, len(h.Aggs))
@@ -314,6 +352,12 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 		return
 	}
 
+	// Single-column integer GROUP BY fast path
+	if h.useIntGroupKey {
+		h.consumeBatchIntGroup(b)
+		return
+	}
+
 	if b.Sel != nil {
 		for _, idx := range b.Sel {
 			h.processRow(b, int(idx))
@@ -321,6 +365,92 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	} else {
 		for i := 0; i < b.Len; i++ {
 			h.processRow(b, i)
+		}
+	}
+}
+
+// consumeBatchIntGroup is the fast path for single-column integer GROUP BY.
+// Uses intHashTable for group lookup — no key serialization, no string allocation.
+func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
+	gkVec := b.Columns[h.intGroupKeyCol]
+	isInt32 := h.groupColTypes[0] == batch.TypeInt32 ||
+		h.groupColTypes[0] == batch.TypePort ||
+		h.groupColTypes[0] == batch.TypeProtocol ||
+		h.groupColTypes[0] == batch.TypeDate
+	hasNulls := gkVec.Nulls.HasNulls()
+
+	processRow := func(row int) {
+		if hasNulls && gkVec.Nulls.IsNullFast(row) {
+			h.processRow(b, row) // fall back for NULL keys
+			return
+		}
+		var key int64
+		if isInt32 {
+			key = int64(gkVec.Int32Data[row])
+		} else {
+			key = gkVec.Int64Data[row]
+		}
+
+		gsIdx, ok := h.intGroupIndex.Get(key)
+		if ok {
+			gs := h.intGroupStates[gsIdx]
+			for i := range h.Aggs {
+				updater := h.aggUpdaters[i]
+				if updater == nil {
+					continue
+				}
+				idx := h.aggColIdx[i]
+				if idx >= 0 {
+					updater(&gs.accs[i], b.Columns[idx], row)
+				} else {
+					updater(&gs.accs[i], nil, row) // COUNT(*)
+				}
+			}
+			return
+		}
+
+		// New group
+		gs := &groupState{
+			keyValues:    []any{key},
+			accs:         make([]kernel.Accumulator, len(h.Aggs)),
+			distinctSets: make([]map[string]struct{}, len(h.Aggs)),
+			extraState:   make([]any, len(h.Aggs)),
+		}
+		for i, agg := range h.Aggs {
+			if agg.Func == AggStddev || agg.Func == AggVariance ||
+				agg.Func == AggStddevPop || agg.Func == AggVarPop {
+				gs.extraState[i] = &varianceState{}
+			} else if agg.Func == AggBoolAnd || agg.Func == AggBoolOr {
+				gs.extraState[i] = true // initial value for bool aggregates
+			}
+		}
+
+		newIdx := int32(len(h.intGroupStates))
+		h.intGroupIndex.Put(key, newIdx)
+		h.intGroupStates = append(h.intGroupStates, gs)
+		h.keys = append(h.keys, gs.keyValues)
+
+		for i := range h.Aggs {
+			updater := h.aggUpdaters[i]
+			if updater == nil {
+				continue
+			}
+			idx := h.aggColIdx[i]
+			if idx >= 0 {
+				updater(&gs.accs[i], b.Columns[idx], row)
+			} else {
+				updater(&gs.accs[i], nil, row)
+			}
+		}
+	}
+
+	if b.Sel != nil {
+		for _, idx := range b.Sel {
+			processRow(int(idx))
+		}
+	} else {
+		for i := 0; i < b.Len; i++ {
+			processRow(i)
 		}
 	}
 }
@@ -657,7 +787,12 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	}
 
 	for i := 0; i < numRows; i++ {
-		gs := h.groups[h.serializedKeys[start+i]]
+		var gs *groupState
+		if h.useIntGroupKey {
+			gs = h.intGroupStates[start+i]
+		} else {
+			gs = h.groups[h.serializedKeys[start+i]]
+		}
 
 		// Set group-by columns
 		for j, val := range gs.keyValues {
