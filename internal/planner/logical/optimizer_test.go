@@ -200,8 +200,10 @@ func TestOptimize_PartitionExtraction(t *testing.T) {
 	}
 }
 
-func TestReorderJoins_SmallestFirst(t *testing.T) {
+func TestReorderJoins_LargestFirst(t *testing.T) {
 	// Three-way join: A (large, no filter) JOIN B (filtered) JOIN C (no filter)
+	// Greedy reorder starts with the most expensive (largest) table as the
+	// initial probe (left) side, avoiding hashing large tables into build side.
 	scanA := NewScan("big_table", "a")
 	scanB := NewScan("small_table", "b")
 	scanB.ScanPredicates = []Predicate{{Column: "status", Op: "=", Value: "active"}}
@@ -216,13 +218,13 @@ func TestReorderJoins_SmallestFirst(t *testing.T) {
 	if result.Type != NodeJoin {
 		t.Fatalf("expected join, got %s", result.Type)
 	}
-	// B (filtered, cheapest) should be the leftmost leaf
+	// A (most expensive, no filter) should be the leftmost leaf (probe side)
 	leftmost := result
 	for leftmost.Type == NodeJoin {
 		leftmost = leftmost.Children[0]
 	}
-	if leftmost.TableName != "small_table" {
-		t.Errorf("expected filtered table 'small_table' as leftmost, got %q", leftmost.TableName)
+	if leftmost.TableName != "big_table" {
+		t.Errorf("expected largest table 'big_table' as leftmost, got %q", leftmost.TableName)
 	}
 }
 

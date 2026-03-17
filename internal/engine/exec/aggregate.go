@@ -871,17 +871,3 @@ func vecToFloat64(v *batch.Vector, row int) float64 {
 	}
 }
 
-func batchIterator(b *batch.RecordBatch) []int {
-	if b.Sel != nil {
-		rows := make([]int, len(b.Sel))
-		for i, idx := range b.Sel {
-			rows[i] = int(idx)
-		}
-		return rows
-	}
-	rows := make([]int, b.Len)
-	for i := range rows {
-		rows[i] = i
-	}
-	return rows
-}

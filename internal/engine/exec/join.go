@@ -459,19 +459,17 @@ func (h *HashJoin) probeKey(b *batch.RecordBatch, row int) string {
 	return string(h.keyBuf)
 }
 
-// readBuildValue reads a single value from the columnar build-side storage.
-func (h *HashJoin) readBuildValue(ref buildRef, colName string) any {
-	b := h.buildBatches[ref.batchIdx]
-	v := b.ColumnByName(colName)
-	if v == nil {
-		return nil
-	}
-	return v.GetValue(int(ref.rowIdx))
+// matchPair tracks a probe-build row match for output construction.
+type matchPair struct {
+	probeRow int
+	ref      buildRef
+	matched  bool
 }
 
 // HashJoinProbe is a UnaryOperator that probes the build-side hash table.
 type HashJoinProbe struct {
-	join *HashJoin
+	join     *HashJoin
+	pairsBuf []matchPair // reusable buffer to avoid per-batch allocation
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
@@ -493,16 +491,10 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 
 	outSchema, mapping := p.outputSchemaWithMapping(in.Schema)
 
-	// Collect match pairs: (probe row, build ref, matched flag)
-	type matchPair struct {
-		probeRow int
-		ref      buildRef
-		matched  bool
-	}
-	var pairs []matchPair
+	// Collect match pairs using reusable buffer
+	pairs := p.pairsBuf[:0]
 
-	iter := batchIterator(in)
-	for _, row := range iter {
+	probeRow := func(row int) {
 		key := p.join.probeKey(in, row)
 		buildMatches := p.join.hashIndex[key]
 
@@ -510,7 +502,7 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
 				pairs = append(pairs, matchPair{probeRow: row})
 			}
-			continue
+			return
 		}
 
 		for i, ref := range buildMatches {
@@ -526,6 +518,17 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			}
 		}
 	}
+
+	if in.Sel != nil {
+		for _, idx := range in.Sel {
+			probeRow(int(idx))
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			probeRow(i)
+		}
+	}
+	p.pairsBuf = pairs // save grown slice for reuse
 
 	if len(pairs) == 0 {
 		return nil, nil
@@ -560,15 +563,13 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	// Collect qualifying probe row indices
 	var rows []int
 
-	iter := batchIterator(in)
-	for _, row := range iter {
+	checkRow := func(row int) {
 		key := p.join.probeKey(in, row)
 		candidates := p.join.hashIndex[key]
 		hasMatch := false
 
 		if len(candidates) > 0 {
 			if p.join.SemiAntiFilter != nil {
-				// Check each candidate against the extra filter
 				for _, ref := range candidates {
 					buildBatch := p.join.buildBatches[ref.batchIdx]
 					if p.join.SemiAntiFilter(in, row, buildBatch, int(ref.rowIdx)) {
@@ -585,6 +586,16 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			(p.join.JoinType == AntiJoin && !hasMatch)
 		if emit {
 			rows = append(rows, row)
+		}
+	}
+
+	if in.Sel != nil {
+		for _, idx := range in.Sel {
+			checkRow(int(idx))
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			checkRow(i)
 		}
 	}
 
@@ -614,13 +625,27 @@ func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parq
 	}
 	var pairs []crossPair
 
-	iter := batchIterator(in)
-	for _, row := range iter {
+	addProbeRow := func(row int) {
 		for bi, buildBatch := range p.join.buildBatches {
-			buildIter := batchIterator(buildBatch)
-			for _, buildRow := range buildIter {
-				pairs = append(pairs, crossPair{probeRow: row, batchIdx: int32(bi), buildRow: buildRow})
+			if buildBatch.Sel != nil {
+				for _, bidx := range buildBatch.Sel {
+					pairs = append(pairs, crossPair{probeRow: row, batchIdx: int32(bi), buildRow: int(bidx)})
+				}
+			} else {
+				for br := 0; br < buildBatch.Len; br++ {
+					pairs = append(pairs, crossPair{probeRow: row, batchIdx: int32(bi), buildRow: br})
+				}
 			}
+		}
+	}
+
+	if in.Sel != nil {
+		for _, idx := range in.Sel {
+			addProbeRow(int(idx))
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			addProbeRow(i)
 		}
 	}
 

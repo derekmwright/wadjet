@@ -27,12 +27,20 @@ func (d *Distinct) Init(_ context.Context) error {
 func (d *Distinct) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	sel := make([]uint16, 0, in.Len)
 
-	iter := batchIterator(in)
-	for _, row := range iter {
+	checkRow := func(row int) {
 		key := d.rowKey(in, row)
 		if _, exists := d.seen[key]; !exists {
 			d.seen[key] = struct{}{}
 			sel = append(sel, uint16(row))
+		}
+	}
+	if in.Sel != nil {
+		for _, idx := range in.Sel {
+			checkRow(int(idx))
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			checkRow(i)
 		}
 	}
 

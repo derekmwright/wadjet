@@ -101,8 +101,72 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		return
 	}
 
+	// For inner/left/right joins, partition parent needs between probe and build
+	// sides based on which columns each child's subtree can provide. This prevents
+	// build-side scans from reading columns only needed by the probe side, reducing
+	// hash table memory substantially for wide tables (e.g., lineitem: 16 columns).
+	if n.Type == NodeJoin && len(n.Children) == 2 {
+		jt := strings.ToLower(n.JoinType)
+		if jt == "" || jt == "join" || jt == "inner" || jt == "inner join" ||
+			jt == "left" || jt == "right" || jt == "cross" {
+			leftAvail := collectSubtreeColumns(n.Children[0])
+			rightAvail := collectSubtreeColumns(n.Children[1])
+			// Only partition if we have column metadata from both sides
+			if len(leftAvail) > 0 && len(rightAvail) > 0 {
+				// Join keys go to both sides
+				joinRefs := make(map[string]bool, 8)
+				if n.JoinCond != "" {
+					extractJoinColumnRefs(n.JoinCond, joinRefs)
+				}
+				if n.JoinFilter != "" {
+					extractJoinColumnRefs(n.JoinFilter, joinRefs)
+				}
+
+				probeNeeds := make(map[string]bool, len(needs))
+				buildNeeds := make(map[string]bool, len(needs))
+				for col := range joinRefs {
+					probeNeeds[col] = true
+					buildNeeds[col] = true
+				}
+				for col := range needs {
+					if leftAvail[col] {
+						probeNeeds[col] = true
+					}
+					if rightAvail[col] {
+						buildNeeds[col] = true
+					}
+				}
+				pushColumnNeeds(n.Children[0], probeNeeds)
+				pushColumnNeeds(n.Children[1], buildNeeds)
+				return
+			}
+		}
+	}
+
 	for _, child := range n.Children {
 		pushColumnNeeds(child, needs)
+	}
+}
+
+// collectSubtreeColumns returns all column names available from scan nodes
+// in the subtree rooted at n (lowercased).
+func collectSubtreeColumns(n *Node) map[string]bool {
+	result := make(map[string]bool)
+	collectSubtreeColumnsRec(n, result)
+	return result
+}
+
+func collectSubtreeColumnsRec(n *Node, result map[string]bool) {
+	if n == nil {
+		return
+	}
+	if n.Type == NodeScan {
+		for _, col := range n.ScanColumns {
+			result[strings.ToLower(col)] = true
+		}
+	}
+	for _, child := range n.Children {
+		collectSubtreeColumnsRec(child, result)
 	}
 }
 

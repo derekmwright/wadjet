@@ -29,7 +29,8 @@ const (
 
 // Filter is a UnaryOperator that filters rows using a selection vector.
 type Filter struct {
-	Pred Predicate
+	Pred   Predicate
+	selBuf []uint16 // reusable selection vector to avoid per-batch allocation
 }
 
 func NewFilter(pred Predicate) *Filter {
@@ -39,7 +40,10 @@ func NewFilter(pred Predicate) *Filter {
 func (f *Filter) Init(_ context.Context) error { return nil }
 
 func (f *Filter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	sel := make([]uint16, 0, in.Len)
+	if cap(f.selBuf) < in.Len {
+		f.selBuf = make([]uint16, 0, in.Len)
+	}
+	sel := f.selBuf[:0]
 
 	if in.Sel != nil {
 		for _, idx := range in.Sel {
@@ -54,6 +58,8 @@ func (f *Filter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Recor
 			}
 		}
 	}
+
+	f.selBuf = sel // save grown slice for next call
 
 	if len(sel) == 0 {
 		return nil, nil
