@@ -683,9 +683,10 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Start PostgreSQL wire protocol server
 	pgDB, err := wadjet.Open(ctx, wadjet.Config{
-		Store:  store,
-		Bucket: bucket,
-		MetaKV: kv,
+		Store:        store,
+		Bucket:       bucket,
+		MetaKV:       kv,
+		AuthProvider: provider,
 	})
 	if err != nil {
 		return fmt.Errorf("opening DB for pgwire: %w", err)

@@ -204,6 +204,102 @@ func injectRowFilter(n *Node, tableName, raw string, ast plansql.Node) *Node {
 	return n
 }
 
+// ColumnPolicy describes a column-level security policy for plan-level enforcement.
+type ColumnPolicy struct {
+	Column   string
+	Denied   bool   // true = column excluded from results
+	MaskExpr string // non-empty = column replaced with this value (e.g., "'***'", "0")
+}
+
+// InjectColumnPolicies walks the logical plan and inserts a security projection
+// above Scan nodes for the given table. Denied columns are removed and masked
+// columns are replaced with literal expressions. This ensures restricted data
+// never enters the execution pipeline.
+func InjectColumnPolicies(plan *Node, tableName string, policies []ColumnPolicy) *Node {
+	if len(policies) == 0 {
+		return plan
+	}
+	return injectColumnPolicies(plan, tableName, policies)
+}
+
+func injectColumnPolicies(n *Node, tableName string, policies []ColumnPolicy) *Node {
+	if n == nil {
+		return nil
+	}
+
+	// Process children first (bottom-up)
+	for i, child := range n.Children {
+		n.Children[i] = injectColumnPolicies(child, tableName, policies)
+	}
+
+	// If this is a Scan for the target table, wrap in a security projection
+	if n.Type == NodeScan && (n.TableName == tableName || n.TableAlias == tableName) {
+		denySet := make(map[string]bool)
+		maskMap := make(map[string]string)
+		for _, p := range policies {
+			if p.Denied {
+				denySet[p.Column] = true
+			} else if p.MaskExpr != "" {
+				maskMap[p.Column] = p.MaskExpr
+			}
+		}
+
+		// Build projection list from scan columns
+		// ScanColumns may not be populated yet, so we also check RequiredColumns
+		cols := n.ScanColumns
+		if len(cols) == 0 {
+			cols = n.RequiredColumns
+		}
+		if len(cols) == 0 {
+			// No column info yet — can't rewrite projection. The post-execution
+			// fallback in applyColumnPolicies will handle this case.
+			return n
+		}
+
+		var projections []Projection
+		for _, col := range cols {
+			if denySet[col] {
+				continue // skip denied columns
+			}
+			if mask, ok := maskMap[col]; ok {
+				// Replace column with mask expression
+				maskAST, err := plansql.ParseExpression(mask)
+				if err != nil {
+					// Fallback to string literal mask
+					projections = append(projections, Projection{
+						Alias: col,
+						Expr:  "'" + mask + "'",
+					})
+				} else {
+					projections = append(projections, Projection{
+						Alias:   col,
+						Expr:    mask,
+						ASTExpr: maskAST,
+					})
+				}
+			} else {
+				projections = append(projections, Projection{
+					Column: col,
+					Alias:  col,
+				})
+			}
+		}
+
+		if len(projections) == 0 {
+			return n // all columns denied — shouldn't happen (access denied upstream)
+		}
+
+		projectNode := &Node{
+			Type:        NodeProject,
+			Children:    []*Node{n},
+			Projections: projections,
+		}
+		return projectNode
+	}
+
+	return n
+}
+
 // NewScan creates a scan node.
 func NewScan(table, alias string) *Node {
 	return &Node{Type: NodeScan, TableName: table, TableAlias: alias}

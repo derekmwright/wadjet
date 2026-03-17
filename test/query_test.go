@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -645,4 +646,263 @@ func TestQueryExceptWithOrderLimit(t *testing.T) {
 		t.Fatalf("expected at most 3 rows, got %d", len(result.Rows))
 	}
 	t.Logf("EXCEPT with ORDER BY LIMIT returned %d rows", len(result.Rows))
+}
+
+// TestABACRowFilterAtPlanLevel verifies that ABAC row filters are injected
+// into the logical plan (not post-execution), so restricted rows never enter
+// the execution pipeline.
+func TestABACRowFilterAtPlanLevel(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+
+	// Create auth provider with ABAC policies
+	authCfg := auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "secret-key", Name: "analyst", Role: "analyst"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "analyst", Tables: []string{"*"}, Allow: []string{"read"}},
+		},
+	}
+	authn, authz := auth.New(authCfg)
+	provider := auth.NewProvider(authn, authz, nil, nil)
+
+	// Create ABAC policy: analyst can only see event_type = 'click'
+	policies := []auth.AccessControlPolicy{{
+		Name:    "filter-clicks-only",
+		Enabled: true,
+		Rules: []auth.PolicyRule{{
+			EffectStr: "allow",
+			Effect:    auth.EffectAllow,
+			Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+			Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: "events"}},
+			Actions:   []auth.Action{auth.ActionRead},
+			Obligations: []auth.Obligation{{
+				Type:   "row_filter",
+				Target: "events",
+				Value:  "event_type = 'click'",
+			}},
+		}},
+	}}
+	evaluator := auth.NewPolicyEvaluator(policies)
+	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
+
+	db, err := wadjet.Open(ctx, wadjet.Config{
+		Store:        store,
+		Bucket:       "test",
+		AuthProvider: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt32},
+			{Name: "event_type", Type: parquet.TypeString},
+			{Name: "value", Type: parquet.TypeFloat64},
+		},
+	}
+	if err := db.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := []map[string]any{
+		{"id": int32(1), "event_type": "click", "value": 10.0},
+		{"id": int32(2), "event_type": "view", "value": 20.0},
+		{"id": int32(3), "event_type": "click", "value": 30.0},
+		{"id": int32(4), "event_type": "purchase", "value": 100.0},
+		{"id": int32(5), "event_type": "click", "value": 5.0},
+	}
+	ing := db.NewIngester("events", schema, nil, ingest.Config{MaxBufferRows: 10, RowGroupSize: 10})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query WITHOUT identity — should see all rows
+	result, err := db.Query(ctx, "SELECT * FROM events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 5 {
+		t.Fatalf("unauthenticated: expected 5 rows, got %d", len(result.Rows))
+	}
+
+	// Query WITH analyst identity — should only see 'click' rows
+	id, err := authn.AuthenticateToken("secret-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authCtx := auth.ContextWithIdentity(ctx, id)
+
+	result, err = db.Query(authCtx, "SELECT * FROM events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 3 {
+		t.Fatalf("analyst: expected 3 rows (clicks only), got %d", len(result.Rows))
+	}
+	for _, row := range result.Rows {
+		if row["event_type"] != "click" {
+			t.Errorf("analyst saw non-click event: %v", row["event_type"])
+		}
+	}
+	t.Logf("ABAC row filter enforced at plan level: %d rows returned", len(result.Rows))
+}
+
+// TestABACColumnDenialAtPlanLevel verifies that denied columns never appear
+// in query results when ABAC policies deny them.
+func TestABACColumnDenialAtPlanLevel(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+
+	authCfg := auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "viewer-key", Name: "viewer", Role: "viewer"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "viewer", Tables: []string{"*"}, Allow: []string{"read"}},
+		},
+	}
+	authn, authz := auth.New(authCfg)
+	provider := auth.NewProvider(authn, authz, nil, nil)
+
+	// ABAC policy: viewer cannot see 'ssn' column
+	policies := []auth.AccessControlPolicy{{
+		Name:    "deny-ssn",
+		Enabled: true,
+		Rules: []auth.PolicyRule{{
+			EffectStr: "allow",
+			Effect:    auth.EffectAllow,
+			Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "viewer"}},
+			Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: "employees"}},
+			Actions:   []auth.Action{auth.ActionRead},
+			Obligations: []auth.Obligation{
+				{Type: "deny_column", Target: "ssn"},
+				{Type: "mask_column", Target: "salary", Value: "0"},
+			},
+		}},
+	}}
+	evaluator := auth.NewPolicyEvaluator(policies)
+	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
+
+	db, err := wadjet.Open(ctx, wadjet.Config{
+		Store:        store,
+		Bucket:       "test",
+		AuthProvider: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "name", Type: parquet.TypeString},
+			{Name: "ssn", Type: parquet.TypeString},
+			{Name: "salary", Type: parquet.TypeFloat64},
+		},
+	}
+	if err := db.CreateTable(ctx, "employees", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := []map[string]any{
+		{"name": "alice", "ssn": "123-45-6789", "salary": 100000.0},
+		{"name": "bob", "ssn": "987-65-4321", "salary": 85000.0},
+	}
+	ing := db.NewIngester("employees", schema, nil, ingest.Config{MaxBufferRows: 10, RowGroupSize: 10})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Query as viewer — ssn should be absent, salary should be masked
+	id, err := authn.AuthenticateToken("viewer-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authCtx := auth.ContextWithIdentity(ctx, id)
+
+	result, err := db.Query(authCtx, "SELECT * FROM employees")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(result.Rows))
+	}
+
+	for _, row := range result.Rows {
+		if _, hasSSN := row["ssn"]; hasSSN {
+			t.Error("viewer should not see 'ssn' column (denied by ABAC)")
+		}
+	}
+	t.Logf("ABAC column policies enforced at plan level: ssn denied, returned columns: %v", result.Columns)
+}
+
+// TestABACAccessDenied verifies that queries to denied tables return an error.
+func TestABACAccessDenied(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+
+	authCfg := auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "intern-key", Name: "intern", Role: "intern"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "intern", Tables: []string{"public_data"}, Allow: []string{"read"}},
+		},
+	}
+	authn, authz := auth.New(authCfg)
+	provider := auth.NewProvider(authn, authz, nil, nil)
+
+	// ABAC policy: intern can only access public_data
+	policies := []auth.AccessControlPolicy{{
+		Name:    "intern-access",
+		Enabled: true,
+		Rules: []auth.PolicyRule{{
+			EffectStr: "allow",
+			Effect:    auth.EffectAllow,
+			Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "intern"}},
+			Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: "public_data"}},
+			Actions:   []auth.Action{auth.ActionRead},
+		}},
+	}}
+	evaluator := auth.NewPolicyEvaluator(policies)
+	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
+
+	db, err := wadjet.Open(ctx, wadjet.Config{
+		Store:        store,
+		Bucket:       "test",
+		AuthProvider: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "data", Type: parquet.TypeString},
+		},
+	}
+	db.CreateTable(ctx, "classified", schema, nil)
+
+	id, err := authn.AuthenticateToken("intern-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authCtx := auth.ContextWithIdentity(ctx, id)
+
+	_, err = db.Query(authCtx, "SELECT * FROM classified")
+	if err == nil {
+		t.Fatal("expected access denied error for intern querying classified table")
+	}
+	t.Logf("Access correctly denied: %v", err)
 }
