@@ -81,6 +81,9 @@ func (h *intHashTable) Get(key int64) (int32, bool) {
 	}
 }
 
+// Len returns the number of entries in the table.
+func (h *intHashTable) Len() int { return h.size }
+
 // ForEach iterates over all entries in the table.
 func (h *intHashTable) ForEach(fn func(key int64, val int32)) {
 	for i, k := range h.keys {

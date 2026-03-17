@@ -78,6 +78,12 @@ type HashJoin struct {
 	buildKeyIdx  []int // column indices for RightKeys in build batches
 	probeKeyIdx  []int // column indices for LeftKeys in probe batches
 	probeResolved bool
+
+	// Bloom filter for fast negative lookups during probe phase.
+	// When the build side is small relative to expected probe volume,
+	// this rejects non-matching probe rows without touching the hash table.
+	bloom     []uint64
+	bloomMask uint64
 }
 
 // NewHashJoin creates a new hash join operator.
@@ -156,13 +162,42 @@ func (h *HashJoin) arenaAppendStr(key string, ref buildRef) {
 	h.hashIndex[key] = idx
 }
 
+// existsInBuild checks if a probe row has any match in the build-side hash table.
+// Unlike lookupBuild, it returns immediately on finding the first match — no list
+// construction. Used by semi/anti joins when no SemiAntiFilter is set.
+func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
+	h := p.join
+	if h.useIntKey {
+		key, ok := h.intProbeKey(in, row)
+		if !ok {
+			return false
+		}
+		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(key)) {
+			return false
+		}
+		_, ok = h.intIndex.Get(key)
+		return ok
+	}
+	h.buildProbeKeyBuf(in, row)
+	if h.bloom != nil && !h.bloomMayContain(bloomHashStr(string(h.keyBuf))) {
+		return false
+	}
+	_, ok := h.hashIndex[string(h.keyBuf)]
+	return ok
+}
+
 // lookupBuild collects build refs for a probe row into the probe's reusable buffer.
+// Uses bloom filter to skip hash table lookups for definite non-matches.
 func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 	h := p.join
 	p.lookupBuf = p.lookupBuf[:0]
 	if h.useIntKey {
 		key, ok := h.intProbeKey(in, row)
 		if !ok {
+			return p.lookupBuf
+		}
+		// Bloom filter pre-check: reject definite non-matches
+		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(key)) {
 			return p.lookupBuf
 		}
 		head, ok := h.intIndex.Get(key)
@@ -174,10 +209,11 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		}
 		return p.lookupBuf
 	}
-	// Build key into reusable buffer, then look up using string([]byte) directly
-	// in the map index expression. Go compiler optimizes map[string(buf)] to avoid
-	// allocating a string — the conversion is temporary and stack-allocated.
 	h.buildProbeKeyBuf(in, row)
+	// Bloom filter pre-check for string keys
+	if h.bloom != nil && !h.bloomMayContain(bloomHashStr(string(h.keyBuf))) {
+		return p.lookupBuf
+	}
 	head, ok := h.hashIndex[string(h.keyBuf)]
 	if !ok {
 		return p.lookupBuf
@@ -331,8 +367,83 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.arenaMatched = make([]bool, len(h.arena))
 	}
 
+	// Build bloom filter for fast negative lookups during probe.
+	h.buildBloom()
+
 	h.buildDone = true
 	return nil
+}
+
+// buildBloom populates the bloom filter from the build-side hash table keys.
+// Uses a 64-bit-per-slot bloom with 2 hash functions. The filter size is
+// chosen to give ~1% false positive rate for the number of distinct keys.
+func (h *HashJoin) buildBloom() {
+	var nKeys int
+	if h.useIntKey {
+		nKeys = h.intIndex.Len()
+	} else {
+		nKeys = len(h.hashIndex)
+	}
+	if nKeys == 0 {
+		return
+	}
+	// Size: ~10 bits per key for ~1% FPR, rounded to power-of-2 uint64 slots.
+	nBits := nKeys * 10
+	nSlots := 1
+	for nSlots*64 < nBits {
+		nSlots *= 2
+	}
+	if nSlots < 8 {
+		nSlots = 8
+	}
+	h.bloom = make([]uint64, nSlots)
+	h.bloomMask = uint64(nSlots - 1)
+
+	if h.useIntKey {
+		h.intIndex.ForEach(func(key int64, _ int32) {
+			h.bloomSet(bloomHashInt(key))
+		})
+	} else {
+		for key := range h.hashIndex {
+			h.bloomSet(bloomHashStr(key))
+		}
+	}
+}
+
+// bloomSet marks the bloom filter for a given hash.
+func (h *HashJoin) bloomSet(hash uint64) {
+	// Two hash functions derived from the same hash (split high/low)
+	h1 := hash & h.bloomMask
+	h2 := (hash >> 17) & h.bloomMask
+	b1 := hash & 63
+	b2 := (hash >> 6) & 63
+	h.bloom[h1] |= 1 << b1
+	h.bloom[h2] |= 1 << b2
+}
+
+// bloomMayContain returns false if the key is definitely not in the build side.
+func (h *HashJoin) bloomMayContain(hash uint64) bool {
+	h1 := hash & h.bloomMask
+	h2 := (hash >> 17) & h.bloomMask
+	b1 := hash & 63
+	b2 := (hash >> 6) & 63
+	return (h.bloom[h1]>>b1)&1 != 0 && (h.bloom[h2]>>b2)&1 != 0
+}
+
+func bloomHashInt(key int64) uint64 {
+	// Mix bits using a multiply-shift hash
+	x := uint64(key) * 0x9E3779B97F4A7C15
+	return x ^ (x >> 32)
+}
+
+func bloomHashStr(key string) uint64 {
+	// FNV-1a style hash
+	h := uint64(14695981039346656037)
+	for i := 0; i < len(key); i++ {
+		h ^= uint64(key[i])
+		h *= 16777619
+	}
+	return h ^ (h >> 32)
 }
 
 // spillBuildBatches writes current build batches to disk and clears in-memory state.
@@ -510,6 +621,7 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
 		h.arenaMatched = make([]bool, len(h.arena))
 	}
+	h.buildBloom()
 	h.buildDone = true
 }
 
@@ -651,6 +763,10 @@ type HashJoinProbe struct {
 	semiSelBuf []uint16    // reusable selection vector for semi/anti join output
 	lookupBuf  []buildRef  // reusable buffer for lookupBuild results
 	indexBuf   []int       // reusable buffer for probe-side gather indices
+
+	// Cached output schema and column mapping (computed once on first batch)
+	cachedSchema  []parquet.Column
+	cachedMapping []outColSource
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
@@ -698,7 +814,11 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		return p.executeSemiAntiJoin(in)
 	}
 
-	outSchema, mapping := p.outputSchemaWithMapping(in.Schema)
+	// Cache output schema and column mapping on first batch (avoids per-batch allocation)
+	if p.cachedSchema == nil {
+		p.cachedSchema, p.cachedMapping = p.outputSchemaWithMapping(in.Schema)
+	}
+	outSchema, mapping := p.cachedSchema, p.cachedMapping
 
 	// Collect match pairs using reusable buffer
 	pairs := p.pairsBuf[:0]
@@ -767,47 +887,109 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 // executeSemiAntiJoin handles SemiJoin and AntiJoin semantics.
 // Uses a selection vector on the input batch to avoid copying rows.
 func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	// Collect qualifying probe row indices into a selection vector
 	if cap(p.semiSelBuf) < in.Len {
 		p.semiSelBuf = make([]uint16, 0, in.Len)
 	}
 	sel := p.semiSelBuf[:0]
 
-	checkRow := func(row int) {
-		candidates := p.lookupBuild(in, row)
-		hasMatch := false
+	h := p.join
+	isSemi := h.JoinType == SemiJoin
+	hasFilter := h.SemiAntiFilter != nil
 
-		if len(candidates) > 0 {
-			if p.join.SemiAntiFilter != nil {
-				for _, ref := range candidates {
-					buildBatch := p.join.buildBatches[ref.batchIdx]
-					if p.join.SemiAntiFilter(in, row, buildBatch, int(ref.rowIdx)) {
-						hasMatch = true
-						break
+	// Fast path: int-key semi/anti without filter — inline everything
+	if h.useIntKey && !hasFilter {
+		if !h.probeResolved {
+			h.probeKeyIdx = make([]int, len(h.LeftKeys))
+			for i, col := range h.LeftKeys {
+				h.probeKeyIdx[i] = in.ColumnIndex(col)
+			}
+			h.probeResolved = true
+		}
+		keyIdx := h.probeKeyIdx[0]
+		if keyIdx >= 0 {
+			keyCol := in.Columns[keyIdx]
+			hasNulls := keyCol.Nulls.HasNulls()
+			isInt32 := keyCol.Type == batch.TypeInt32 || keyCol.Type == batch.TypePort ||
+				keyCol.Type == batch.TypeProtocol || keyCol.Type == batch.TypeDate
+
+			hasBloom := h.bloom != nil
+
+			checkIntRow := func(row int) {
+				if hasNulls && keyCol.Nulls.IsNullFast(row) {
+					if !isSemi {
+						sel = append(sel, uint16(row))
+					}
+					return
+				}
+				var key int64
+				if isInt32 {
+					key = int64(keyCol.Int32Data[row])
+				} else {
+					key = keyCol.Int64Data[row]
+				}
+				// Bloom filter pre-check
+				if hasBloom && !h.bloomMayContain(bloomHashInt(key)) {
+					if !isSemi {
+						sel = append(sel, uint16(row))
+					}
+					return
+				}
+				_, exists := h.intIndex.Get(key)
+				emit := (isSemi && exists) || (!isSemi && !exists)
+				if emit {
+					sel = append(sel, uint16(row))
+				}
+			}
+
+			if in.Sel != nil {
+				for _, idx := range in.Sel {
+					checkIntRow(int(idx))
+				}
+			} else {
+				for i := 0; i < in.Len; i++ {
+					checkIntRow(i)
+				}
+			}
+			goto done
+		}
+	}
+
+	// General path: uses existence-only check when no filter is set
+	{
+		checkRow := func(row int) {
+			var hasMatch bool
+			if hasFilter {
+				candidates := p.lookupBuild(in, row)
+				if len(candidates) > 0 {
+					for _, ref := range candidates {
+						buildBatch := h.buildBatches[ref.batchIdx]
+						if h.SemiAntiFilter(in, row, buildBatch, int(ref.rowIdx)) {
+							hasMatch = true
+							break
+						}
 					}
 				}
 			} else {
-				hasMatch = true
+				hasMatch = p.existsInBuild(in, row)
+			}
+			emit := (isSemi && hasMatch) || (!isSemi && !hasMatch)
+			if emit {
+				sel = append(sel, uint16(row))
 			}
 		}
 
-		emit := (p.join.JoinType == SemiJoin && hasMatch) ||
-			(p.join.JoinType == AntiJoin && !hasMatch)
-		if emit {
-			sel = append(sel, uint16(row))
+		if in.Sel != nil {
+			for _, idx := range in.Sel {
+				checkRow(int(idx))
+			}
+		} else {
+			for i := 0; i < in.Len; i++ {
+				checkRow(i)
+			}
 		}
 	}
 
-	if in.Sel != nil {
-		for _, idx := range in.Sel {
-			checkRow(int(idx))
-		}
-	} else {
-		for i := 0; i < in.Len; i++ {
-			checkRow(i)
-		}
-	}
-
+done:
 	p.semiSelBuf = sel // save grown slice for reuse
 
 	if len(sel) == 0 {

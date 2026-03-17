@@ -1497,7 +1497,8 @@ func isSimpleColRef(node plansql.Node) bool {
 // aggPreProject is a UnaryOperator that passes through all input columns
 // and adds computed expression columns for aggregate inputs.
 type aggPreProject struct {
-	computed []exec.ProjectColumn
+	computed     []exec.ProjectColumn
+	cachedSchema []parquet.Column // cached output schema (computed once)
 }
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
@@ -1515,18 +1516,21 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		in = a.materialize(in)
 	}
 
-	// Build output schema: all input columns + computed columns
-	schema := make([]parquet.Column, 0, len(in.Schema)+len(a.computed))
-	schema = append(schema, in.Schema...)
-	for _, c := range a.computed {
-		schema = append(schema, parquet.Column{
-			Name:     c.Name,
-			Type:     c.Type,
-			Nullable: true,
-		})
+	// Cache output schema on first call (avoids per-batch allocation)
+	if a.cachedSchema == nil {
+		schema := make([]parquet.Column, 0, len(in.Schema)+len(a.computed))
+		schema = append(schema, in.Schema...)
+		for _, c := range a.computed {
+			schema = append(schema, parquet.Column{
+				Name:     c.Name,
+				Type:     c.Type,
+				Nullable: true,
+			})
+		}
+		a.cachedSchema = schema
 	}
 
-	out := batch.NewRecordBatch(schema, in.Len)
+	out := batch.NewRecordBatch(a.cachedSchema, in.Len)
 
 	// Share existing column vectors (zero-copy for pass-through columns)
 	for j := 0; j < len(in.Schema); j++ {
