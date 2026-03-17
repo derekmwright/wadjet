@@ -79,6 +79,12 @@ variable "use_spot" {
   default     = false
 }
 
+variable "data_bucket" {
+  description = "Existing S3 bucket with TPC-H data. If empty, creates an ephemeral bucket. Use this to preserve data across cluster rebuilds."
+  type        = string
+  default     = ""
+}
+
 # Recommended instance types per scale factor (Graviton3 ARM):
 #   SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
 #   SF10:  c7g.4xlarge  (16 vCPU, 32 GB) — $0.58/hr

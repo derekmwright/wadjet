@@ -1,5 +1,5 @@
 output "bucket" {
-  value = aws_s3_bucket.benchmark.bucket
+  value = local.bucket_name
 }
 
 output "region" {

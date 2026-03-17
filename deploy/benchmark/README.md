@@ -97,3 +97,28 @@ export MEMORY_BUDGET=536870912  # 512 MB
 ```
 
 **Spot instances**: Defaults to off. Use `-var="use_spot=true"` to opt in. Saves ~60-70% but nodes can be reclaimed mid-benchmark. Best for SF1 where session cost is already low ($0.40). Not recommended for SF100 distributed (~$12 session) where a single reclaimed worker wastes the full run.
+
+**Persistent data bucket**: For iterative tuning (especially SF100), create a bucket once and reuse it across cluster rebuilds:
+
+```bash
+# Create a persistent bucket
+aws s3 mb s3://caelum-bench-sf100
+
+# First run — generates data
+terraform apply -var-file=sf100-distributed.tfvars \
+  -var="key_name=my-key" \
+  -var="data_bucket=caelum-bench-sf100"
+
+# Tear down compute, keep data
+terraform destroy -var-file=sf100-distributed.tfvars \
+  -var="key_name=my-key" \
+  -var="data_bucket=caelum-bench-sf100"
+
+# Rebuild with different config — skips data gen automatically
+terraform apply -var-file=sf100-distributed.tfvars \
+  -var="key_name=my-key" \
+  -var="data_bucket=caelum-bench-sf100" \
+  -var="worker_count=6"
+```
+
+The benchmark script auto-detects existing parquet files and skips generation. Set `FORCE_DATAGEN=1` to regenerate.

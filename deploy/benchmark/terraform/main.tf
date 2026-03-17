@@ -40,14 +40,24 @@ data "aws_ami" "al2023" {
 }
 
 # --- S3 bucket for benchmark data ---
+# If data_bucket is set, use an existing bucket (preserves data across cluster rebuilds).
+# Otherwise, create an ephemeral bucket with 7-day expiry.
+
+locals {
+  create_bucket = var.data_bucket == ""
+  bucket_name   = local.create_bucket ? aws_s3_bucket.benchmark[0].bucket : var.data_bucket
+  bucket_arn    = local.create_bucket ? aws_s3_bucket.benchmark[0].arn : "arn:aws:s3:::${var.data_bucket}"
+}
 
 resource "aws_s3_bucket" "benchmark" {
+  count         = local.create_bucket ? 1 : 0
   bucket_prefix = "caelum-bench-"
   force_destroy = true
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "benchmark" {
-  bucket = aws_s3_bucket.benchmark.id
+  count  = local.create_bucket ? 1 : 0
+  bucket = aws_s3_bucket.benchmark[0].id
 
   rule {
     id     = "expire-all"
@@ -159,8 +169,8 @@ resource "aws_iam_role_policy" "s3_access" {
         "s3:HeadBucket",
       ]
       Resource = [
-        aws_s3_bucket.benchmark.arn,
-        "${aws_s3_bucket.benchmark.arn}/*",
+        local.bucket_arn,
+        "${local.bucket_arn}/*",
       ]
     }]
   })
@@ -195,7 +205,7 @@ locals {
     # Build benchmark binary
     go test -c -o /usr/local/bin/caelum-bench ./benchmarks/tpch/
 
-    echo "CAELUM_BUCKET=${aws_s3_bucket.benchmark.bucket}" >> /etc/environment
+    echo "CAELUM_BUCKET=${local.bucket_name}" >> /etc/environment
     echo "CAELUM_REGION=${var.region}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   EOF

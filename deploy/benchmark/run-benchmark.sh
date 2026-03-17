@@ -61,13 +61,18 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RESULT_FILE"; }
 
 # ---- Phase 1: Data generation + S3 load ----
 
-log "Phase 1: Generating TPC-H SF${SCALE} data and loading to S3..."
-
 cd /root/caelum
 
-TPCH_SCALE=$SCALE go test -v -run TestTPCHDataGen -timeout 60m ./benchmarks/tpch/ 2>&1 | tee -a "$RESULT_FILE"
-
-log "Data generation complete."
+# Check if data already exists in the bucket (supports pre-seeded / preserved buckets)
+DATA_EXISTS=$(aws s3 ls "s3://${BUCKET}/" --recursive 2>/dev/null | grep -c "\.parquet$" || true)
+if [ "$DATA_EXISTS" -gt 0 ] && [ "${FORCE_DATAGEN:-}" != "1" ]; then
+  log "Phase 1: Found existing data in s3://${BUCKET}/ ($DATA_EXISTS parquet files), skipping generation."
+  log "  Set FORCE_DATAGEN=1 to regenerate."
+else
+  log "Phase 1: Generating TPC-H SF${SCALE} data and loading to S3..."
+  TPCH_SCALE=$SCALE go test -v -run TestTPCHDataGen -timeout 60m ./benchmarks/tpch/ 2>&1 | tee -a "$RESULT_FILE"
+  log "Data generation complete."
+fi
 
 # ---- Phase 2: Standalone benchmark ----
 
