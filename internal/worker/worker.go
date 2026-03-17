@@ -104,9 +104,15 @@ func (w *Worker) Start(ctx context.Context) error {
 		filterSubject = distributed.ClusterTasksFilter(w.config.ClusterID)
 	}
 
-	// Create a durable consumer for tasks
+	// Create a shared durable consumer per cluster. All workers in the same
+	// cluster pull from the same consumer — NATS distributes messages across them.
+	// WorkQueuePolicy streams don't allow multiple consumers with the same filter.
+	consumerName := "tasks"
+	if w.config.ClusterID != "" {
+		consumerName = "tasks-" + w.config.ClusterID
+	}
 	consumer, err := w.js.CreateOrUpdateConsumer(ctx, distributed.StreamTasks, jetstream.ConsumerConfig{
-		Durable:       w.config.WorkerID,
+		Durable:       consumerName,
 		FilterSubject: filterSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       5 * time.Minute,
@@ -159,19 +165,13 @@ func (w *Worker) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully stops the worker and cleans up its JetStream consumer.
+// Stop gracefully stops the worker. The shared per-cluster consumer is left in
+// place so other workers can continue pulling tasks.
 func (w *Worker) Stop() {
 	if w.cancel != nil {
 		w.cancel()
 	}
 	w.wg.Wait()
-
-	// Delete the durable consumer so it doesn't block restarts with a new worker ID.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := w.js.DeleteConsumer(ctx, distributed.StreamTasks, w.config.WorkerID); err != nil {
-		w.logger.Debug("failed to delete consumer on shutdown (may already be gone)", "err", err)
-	}
 
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }
