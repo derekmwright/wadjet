@@ -36,6 +36,13 @@ type SinkSource interface {
 	Source
 }
 
+// DoneSignaler is implemented by operators (like Limit) that can signal early
+// pipeline termination. When Done() returns true, the pipeline stops pulling
+// from the source, enabling LIMIT pushdown without scanning the full table.
+type DoneSignaler interface {
+	Done() bool
+}
+
 // ScanStatsProvider is implemented by sources that can report scan statistics.
 type ScanStatsProvider interface {
 	RowsScanned() int64

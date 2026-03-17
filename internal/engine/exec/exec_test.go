@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
 
@@ -296,6 +297,86 @@ func TestTopNSort(t *testing.T) {
 		t.Errorf("expected last val=5.0, got %v", result[4]["val"])
 	}
 }
+
+func TestLimit_EarlyTermination(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+
+	// Create 10,000 rows — LIMIT 5 should stop pulling after first batch
+	rows := make([]map[string]any, 10000)
+	for i := range rows {
+		rows[i] = map[string]any{"id": int64(i)}
+	}
+
+	source := &countingSource{inner: NewSliceSource(schema, rows)}
+	limit := NewLimit(5, 0)
+	sink := &CollectSink{}
+
+	pipe := &Pipeline{Source: source, Ops: []UnaryOperator{limit}, Sink: sink}
+	if err := pipe.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sink.Rows) != 5 {
+		t.Fatalf("expected 5 rows, got %d", len(sink.Rows))
+	}
+
+	// With 10,000 rows at batch size 2048, without early termination we'd
+	// need 5 batches. With early termination, only 1 batch should be read
+	// (first batch has 2048 rows, LIMIT 5 is satisfied).
+	if source.nextCalls > 2 {
+		t.Errorf("expected ≤2 source.Next() calls (early termination), got %d", source.nextCalls)
+	}
+}
+
+func TestLimit_WithOffset(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+
+	rows := make([]map[string]any, 100)
+	for i := range rows {
+		rows[i] = map[string]any{"id": int64(i)}
+	}
+
+	source := NewSliceSource(schema, rows)
+	limit := NewLimit(3, 10) // OFFSET 10 LIMIT 3
+	sink := &CollectSink{}
+
+	pipe := &Pipeline{Source: source, Ops: []UnaryOperator{limit}, Sink: sink}
+	if err := pipe.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sink.Rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(sink.Rows))
+	}
+	// First row should be id=10 (offset skips 0-9)
+	if sink.Rows[0]["id"].(int64) != 10 {
+		t.Errorf("expected first id=10, got %v", sink.Rows[0]["id"])
+	}
+}
+
+func TestLimit_Done(t *testing.T) {
+	limit := NewLimit(10, 0)
+	if limit.Done() {
+		t.Error("should not be done initially")
+	}
+}
+
+// countingSource wraps a Source and counts Next() calls.
+type countingSource struct {
+	inner     Source
+	nextCalls int
+}
+
+func (c *countingSource) Init(ctx context.Context) error { return c.inner.Init(ctx) }
+func (c *countingSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	c.nextCalls++
+	return c.inner.Next(ctx)
+}
+func (c *countingSource) Close() error { return c.inner.Close() }
 
 func TestProject(t *testing.T) {
 	schema := []parquet.Column{

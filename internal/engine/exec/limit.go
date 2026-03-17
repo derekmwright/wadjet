@@ -91,6 +91,12 @@ func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Record
 
 func (l *Limit) Close() error { return nil }
 
+// Done returns true when the limit has been satisfied, enabling pipeline
+// early termination (LIMIT pushdown).
+func (l *Limit) Done() bool {
+	return l.passed.Load() >= l.Max
+}
+
 // TopN is a Sink that combines sort + limit efficiently by keeping only the
 // top N rows in a heap. For small N this is much more efficient than full sort.
 type TopN struct {

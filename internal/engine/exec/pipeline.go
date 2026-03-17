@@ -44,12 +44,17 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			break
 		}
 
+		exhausted := false
 		for _, op := range p.Ops {
 			b, err = op.Execute(ctx, b)
 			if err != nil {
 				return fmt.Errorf("operator execute: %w", err)
 			}
 			if b == nil {
+				// Check if operator is done (e.g., LIMIT satisfied)
+				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
+					exhausted = true
+				}
 				break // fully filtered out
 			}
 		}
@@ -58,6 +63,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			if err := p.Sink.Consume(ctx, b); err != nil {
 				return fmt.Errorf("sink consume: %w", err)
 			}
+		}
+
+		if exhausted {
+			break // early termination: operator signaled completion
 		}
 	}
 
