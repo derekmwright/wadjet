@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/derekmwright/caelum/internal/config"
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
 	"github.com/derekmwright/caelum/internal/engine/expr"
@@ -59,6 +60,10 @@ type Stage struct {
 
 	// Window metadata
 	WindowCols []WindowColSpec
+
+	// Cost estimation (populated at plan time from manifest metadata)
+	EstimatedBytes int64
+	EstimatedRows  int64
 }
 
 // WindowColSpec defines a window function column in a stage.
@@ -111,6 +116,7 @@ type Planner struct {
 	ctes           []plansql.CTEDef  // CTE definitions from the current query, for subquery resolution
 	MemoryBudget   int64             // per-query memory budget in bytes (0 = unlimited)
 	SpillDir       string            // directory for spill files (empty = os temp dir)
+	QueryLimits    *config.QueryLimits // cost-based query guard (nil = no limits)
 }
 
 // NewPlanner creates a new physical planner.
@@ -242,13 +248,122 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// Generate distributed stages for coordinator dispatch
 	plan.Stages = p.generateStages(node)
 
+	if err := p.enforceQueryLimits(plan.Stages, node); err != nil {
+		return nil, err
+	}
+
 	return plan, nil
 }
 
 // PlanDistributed generates a stage DAG for distributed execution.
 // Returns stages with dependency ordering suitable for coordinator dispatch.
 func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]Stage, error) {
-	return p.generateStages(node), nil
+	stages := p.generateStages(node)
+	if err := p.enforceQueryLimits(stages, node); err != nil {
+		return nil, err
+	}
+	return stages, nil
+}
+
+// QueryCost summarizes the estimated cost of a query across all scan stages.
+type QueryCost struct {
+	TotalBytes int64
+	TotalRows  int64
+	TotalFiles int
+	HasFilter  bool
+	HasLimit   bool
+}
+
+// EstimateCost computes the aggregate cost of a set of stages.
+func EstimateCost(stages []Stage, node *logical.Node) QueryCost {
+	var cost QueryCost
+	for _, s := range stages {
+		if s.Type == "scan" {
+			cost.TotalBytes += s.EstimatedBytes
+			cost.TotalRows += s.EstimatedRows
+			cost.TotalFiles += len(s.ScanFiles)
+		}
+	}
+	cost.HasFilter = hasFilterOrPartition(node)
+	cost.HasLimit = hasLimit(node)
+	return cost
+}
+
+func hasFilterOrPartition(n *logical.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type == logical.NodeFilter {
+		return true
+	}
+	if n.Type == logical.NodeScan && (len(n.PartitionFilter) > 0 || len(n.ScanPredicates) > 0) {
+		return true
+	}
+	for _, c := range n.Children {
+		if hasFilterOrPartition(c) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLimit(n *logical.Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type == logical.NodeLimit {
+		return true
+	}
+	for _, c := range n.Children {
+		if hasLimit(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// enforceQueryLimits checks estimated query cost against configured limits.
+func (p *Planner) enforceQueryLimits(stages []Stage, node *logical.Node) error {
+	if p.QueryLimits == nil {
+		return nil
+	}
+	limits := p.QueryLimits
+	cost := EstimateCost(stages, node)
+
+	if limits.MaxScanBytes > 0 && cost.TotalBytes > limits.MaxScanBytes {
+		return fmt.Errorf("query would scan %s (%d bytes) across %d files, exceeding limit of %s — add a WHERE clause or partition filter",
+			formatBytes(cost.TotalBytes), cost.TotalBytes, cost.TotalFiles, formatBytes(limits.MaxScanBytes))
+	}
+	if limits.MaxScanRows > 0 && cost.TotalRows > limits.MaxScanRows {
+		return fmt.Errorf("query would scan %d rows across %d files, exceeding limit of %d rows — add a WHERE clause or LIMIT",
+			cost.TotalRows, cost.TotalFiles, limits.MaxScanRows)
+	}
+	if limits.MaxScanFiles > 0 && cost.TotalFiles > limits.MaxScanFiles {
+		return fmt.Errorf("query would scan %d files, exceeding limit of %d — add a partition filter",
+			cost.TotalFiles, limits.MaxScanFiles)
+	}
+	if limits.RequireFilterAboveBytes > 0 && cost.TotalBytes > limits.RequireFilterAboveBytes && !cost.HasFilter {
+		return fmt.Errorf("query scans %s without a WHERE clause (filter required above %s)",
+			formatBytes(cost.TotalBytes), formatBytes(limits.RequireFilterAboveBytes))
+	}
+	if limits.RequireLimitAboveRows > 0 && cost.TotalRows > limits.RequireLimitAboveRows && !cost.HasLimit {
+		return fmt.Errorf("query scans %d rows without a LIMIT (limit required above %d rows)",
+			cost.TotalRows, limits.RequireLimitAboveRows)
+	}
+	return nil
+}
+
+func formatBytes(b int64) string {
+	switch {
+	case b >= 1<<40:
+		return fmt.Sprintf("%.1fTB", float64(b)/float64(1<<40))
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1fGB", float64(b)/float64(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1fMB", float64(b)/float64(1<<20))
+	default:
+		return fmt.Sprintf("%dB", b)
+	}
 }
 
 // ExpandFederatedScans checks if scan stages reference tables that exist on
@@ -365,6 +480,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		stageID := fmt.Sprintf("scan-%d", len(*stages))
 		tasks := 1
 		var scanFiles []string
+		var estBytes, estRows int64
 		partFilter := node.PartitionFilter
 		if meta, err := p.catalog.GetManifest(context.Background(), node.TableName); err == nil {
 			for _, part := range meta.Partitions {
@@ -375,6 +491,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				}
 				for _, f := range part.Files {
 					scanFiles = append(scanFiles, f.Path)
+					estBytes += f.SizeBytes
+					estRows += f.NumRows
 				}
 			}
 			if len(scanFiles) > 0 {
@@ -388,6 +506,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			TableName:       node.TableName,
 			PartitionFilter: partFilter,
 			ScanFiles:       scanFiles,
+			EstimatedBytes:  estBytes,
+			EstimatedRows:   estRows,
 		}
 		*stages = append(*stages, stage)
 		if parentID != nil {

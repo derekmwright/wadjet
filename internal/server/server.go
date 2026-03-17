@@ -16,6 +16,7 @@ import (
 	"golang.org/x/net/netutil"
 
 	"github.com/derekmwright/caelum/internal/auth"
+	"github.com/derekmwright/caelum/internal/config"
 	"github.com/derekmwright/caelum/internal/coordinator"
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
@@ -39,9 +40,11 @@ type Config struct {
 	Provider          *auth.Provider           // nil = use static Auth/Authz/Policies above
 	Metrics           *metrics.Metrics         // nil = no metrics collection
 	TLSConfig         *tls.Config              // nil = plain HTTP
-	MaxConnections    int                      // 0 = unlimited
-	SlowQueryThreshold time.Duration           // 0 = disabled, log queries exceeding this
-	ShutdownTimeout   time.Duration            // graceful shutdown drain timeout (default 30s)
+	MaxConnections     int                      // 0 = unlimited
+	SlowQueryThreshold time.Duration            // 0 = disabled, log queries exceeding this
+	ShutdownTimeout    time.Duration            // graceful shutdown drain timeout (default 30s)
+	QueryLimits        *config.QueryLimits      // global cost-based query limits (nil = unlimited)
+	RoleLimits         map[string]*config.QueryLimits // per-role overrides (nil = use global)
 }
 
 // Server is the Caelum HTTP API server.
@@ -332,6 +335,9 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Optimize
 	logicalPlan = logical.Optimize(logicalPlan)
 
+	// Apply query cost limits (per-role or global)
+	s.planner.QueryLimits = s.resolveQueryLimits(r)
+
 	// Build physical plan
 	physPlan, err := s.planner.Plan(r.Context(), logicalPlan)
 	if err != nil {
@@ -456,6 +462,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// resolveQueryLimits returns the effective query limits for the request identity.
+// Per-role limits override global limits when set.
+func (s *Server) resolveQueryLimits(r *http.Request) *config.QueryLimits {
+	if identity := auth.IdentityFromContext(r.Context()); identity != nil && s.config.RoleLimits != nil {
+		if limits, ok := s.config.RoleLimits[identity.Role]; ok {
+			return limits
+		}
+	}
+	return s.config.QueryLimits
 }
 
 // logSlowQuery logs a warning if the query exceeded the slow query threshold.

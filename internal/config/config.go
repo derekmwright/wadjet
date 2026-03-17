@@ -13,21 +13,32 @@ import (
 
 // Config is the top-level configuration for Caelum.
 type Config struct {
-	Mode    string  `yaml:"mode"`    // standalone, coordinator, worker
-	Storage Storage `yaml:"storage"`
-	NATS    NATS    `yaml:"nats"`
-	HTTP    HTTP    `yaml:"http"`
-	GRPC    GRPC    `yaml:"grpc"`
-	Worker  Worker  `yaml:"worker"`
-	Parquet Parquet `yaml:"parquet"`
-	Auth    Auth    `yaml:"auth"`
-	GeoIP   GeoIP   `yaml:"geoip"`
+	Mode        string      `yaml:"mode"`         // standalone, coordinator, worker
+	Storage     Storage     `yaml:"storage"`
+	NATS        NATS        `yaml:"nats"`
+	HTTP        HTTP        `yaml:"http"`
+	GRPC        GRPC        `yaml:"grpc"`
+	Worker      Worker      `yaml:"worker"`
+	Parquet     Parquet     `yaml:"parquet"`
+	Auth        Auth        `yaml:"auth"`
+	GeoIP       GeoIP       `yaml:"geoip"`
+	QueryLimits QueryLimits `yaml:"query_limits"` // global query cost limits
 }
 
 // GeoIP configures MaxMind GeoIP database paths.
 type GeoIP struct {
 	CityDB string `yaml:"city_db"` // path to GeoLite2-City.mmdb
 	ASNDB  string `yaml:"asn_db"`  // path to GeoLite2-ASN.mmdb
+}
+
+// QueryLimits configures cost-based query guards. Zero values mean unlimited.
+// Per-role limits in Auth.Roles override these global defaults.
+type QueryLimits struct {
+	MaxScanBytes  int64 `yaml:"max_scan_bytes"`  // max estimated bytes across all scans
+	MaxScanRows   int64 `yaml:"max_scan_rows"`   // max estimated rows across all scans
+	MaxScanFiles  int   `yaml:"max_scan_files"`  // max files across all scans
+	RequireFilterAboveBytes int64 `yaml:"require_filter_above_bytes"` // require WHERE on tables exceeding this size
+	RequireLimitAboveRows   int64 `yaml:"require_limit_above_rows"`   // require LIMIT on scans exceeding this row count
 }
 
 // Auth configures authentication and authorization.
@@ -68,9 +79,10 @@ type AuthMTLS struct {
 
 // AuthRole defines a role with table access and permissions.
 type AuthRole struct {
-	Name   string   `yaml:"name"`
-	Tables []string `yaml:"tables"` // table names or "*" for all
-	Allow  []string `yaml:"allow"`  // "read", "write", "admin"
+	Name        string       `yaml:"name"`
+	Tables      []string     `yaml:"tables"`       // table names or "*" for all
+	Allow       []string     `yaml:"allow"`         // "read", "write", "admin"
+	QueryLimits *QueryLimits `yaml:"query_limits"`  // per-role overrides (nil = use global)
 }
 
 // AuthPolicy defines a cell-level access policy for a table+role.
@@ -280,5 +292,20 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("CAELUM_GEOIP_ASN_DB"); v != "" {
 		cfg.GeoIP.ASNDB = v
+	}
+	if v := os.Getenv("CAELUM_QUERY_MAX_SCAN_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			cfg.QueryLimits.MaxScanBytes = n
+		}
+	}
+	if v := os.Getenv("CAELUM_QUERY_MAX_SCAN_ROWS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			cfg.QueryLimits.MaxScanRows = n
+		}
+	}
+	if v := os.Getenv("CAELUM_QUERY_MAX_SCAN_FILES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.QueryLimits.MaxScanFiles = n
+		}
 	}
 }
