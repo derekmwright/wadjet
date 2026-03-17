@@ -66,6 +66,28 @@ func (b *Bitmap) SetValid(i int) {
 	b.data[word] |= 1 << bit
 }
 
+// HasNulls returns true if any bit is 0 (null). Short-circuits on the first
+// non-full word, making it O(1) in the common all-valid case.
+func (b *Bitmap) HasNulls() bool {
+	if len(b.data) == 0 {
+		return false
+	}
+	// Check all words except the last
+	for i := 0; i < len(b.data)-1; i++ {
+		if b.data[i] != ^uint64(0) {
+			return true
+		}
+	}
+	// Last word: only valid bits should be set
+	last := b.data[len(b.data)-1]
+	rem := b.len % 64
+	if rem == 0 {
+		return last != ^uint64(0)
+	}
+	mask := (uint64(1) << uint(rem)) - 1
+	return last != mask
+}
+
 // NullCount returns the number of null (0) bits.
 func (b *Bitmap) NullCount() int {
 	count := 0
@@ -78,6 +100,11 @@ func (b *Bitmap) NullCount() int {
 // Len returns the number of bits.
 func (b *Bitmap) Len() int {
 	return b.len
+}
+
+// Words returns the raw uint64 bitmap data for word-level operations.
+func (b *Bitmap) Words() []uint64 {
+	return b.data
 }
 
 // Grow returns a bitmap that can hold at least newLen bits, preserving existing data.

@@ -8,7 +8,7 @@ func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint16, vecLen int
 	var sum T
 	var count int64
 	if sel != nil {
-		if nulls.NullCount() > 0 {
+		if nulls.HasNulls() {
 			for _, idx := range sel {
 				if !nulls.IsNullFast(int(idx)) {
 					sum += data[idx]
@@ -22,7 +22,7 @@ func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint16, vecLen int
 			count = int64(len(sel))
 		}
 	} else {
-		if nulls.NullCount() > 0 {
+		if nulls.HasNulls() {
 			for i := 0; i < vecLen; i++ {
 				if !nulls.IsNullFast(i) {
 					sum += data[i]
@@ -41,7 +41,7 @@ func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint16, vecLen int
 
 func countSlice(nulls *batch.Bitmap, sel []uint16, vecLen int) int64 {
 	if sel != nil {
-		if nulls.NullCount() == 0 {
+		if !nulls.HasNulls() {
 			return int64(len(sel))
 		}
 		var count int64
@@ -52,7 +52,7 @@ func countSlice(nulls *batch.Bitmap, sel []uint16, vecLen int) int64 {
 		}
 		return count
 	}
-	if nulls.NullCount() == 0 {
+	if !nulls.HasNulls() {
 		return int64(vecLen)
 	}
 	var count int64

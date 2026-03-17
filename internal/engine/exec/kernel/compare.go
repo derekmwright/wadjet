@@ -47,16 +47,33 @@ func compareFilterImpl[T Ordered](getData func(v *batch.Vector) []T, val T, op C
 	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
 		data := getData(vec)
 		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
 		if sel != nil {
-			for _, idx := range sel {
-				if !vec.Nulls.IsNullFast(int(idx)) && cmpFn(data[idx], val) {
-					out = append(out, idx)
+			if hasNulls {
+				for _, idx := range sel {
+					if !vec.Nulls.IsNullFast(int(idx)) && cmpFn(data[idx], val) {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					if cmpFn(data[idx], val) {
+						out = append(out, idx)
+					}
 				}
 			}
 		} else {
-			for i := 0; i < vecLen; i++ {
-				if !vec.Nulls.IsNullFast(i) && cmpFn(data[i], val) {
-					out = append(out, uint16(i))
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !vec.Nulls.IsNullFast(i) && cmpFn(data[i], val) {
+						out = append(out, uint16(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if cmpFn(data[i], val) {
+						out = append(out, uint16(i))
+					}
 				}
 			}
 		}
@@ -111,16 +128,33 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 	cmpFn := resolveCompare[string](op)
 	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
 		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
 		if sel != nil {
-			for _, idx := range sel {
-				if !vec.Nulls.IsNullFast(int(idx)) && cmpFn(vec.BytesData.StringValue(int(idx)), val) {
-					out = append(out, idx)
+			if hasNulls {
+				for _, idx := range sel {
+					if !vec.Nulls.IsNullFast(int(idx)) && cmpFn(vec.BytesData.StringValue(int(idx)), val) {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					if cmpFn(vec.BytesData.StringValue(int(idx)), val) {
+						out = append(out, idx)
+					}
 				}
 			}
 		} else {
-			for i := 0; i < vecLen; i++ {
-				if !vec.Nulls.IsNullFast(i) && cmpFn(vec.BytesData.StringValue(i), val) {
-					out = append(out, uint16(i))
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !vec.Nulls.IsNullFast(i) && cmpFn(vec.BytesData.StringValue(i), val) {
+						out = append(out, uint16(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if cmpFn(vec.BytesData.StringValue(i), val) {
+						out = append(out, uint16(i))
+					}
 				}
 			}
 		}
