@@ -201,6 +201,74 @@ func (s *jsonScanner) readNumber() []byte {
 	return s.data[start:s.pos]
 }
 
+// readRawValue extracts the raw JSON bytes for an entire value (string,
+// number, object, array, bool, null). Used for nested types where we
+// delegate parsing to encoding/json.
+func (s *jsonScanner) readRawValue() []byte {
+	s.skipWhitespace()
+	start := s.pos
+	c := s.peek()
+	switch c {
+	case '"':
+		s.readStringBytes()
+		return s.data[start:s.pos]
+	case '{':
+		s.advance()
+		depth := 1
+		for depth > 0 && s.pos < len(s.data) {
+			switch s.data[s.pos] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			case '"':
+				s.pos++
+				for s.pos < len(s.data) && s.data[s.pos] != '"' {
+					if s.data[s.pos] == '\\' {
+						s.pos++
+					}
+					s.pos++
+				}
+			}
+			s.pos++
+		}
+		return s.data[start:s.pos]
+	case '[':
+		s.advance()
+		depth := 1
+		for depth > 0 && s.pos < len(s.data) {
+			switch s.data[s.pos] {
+			case '[':
+				depth++
+			case ']':
+				depth--
+			case '"':
+				s.pos++
+				for s.pos < len(s.data) && s.data[s.pos] != '"' {
+					if s.data[s.pos] == '\\' {
+						s.pos++
+					}
+					s.pos++
+				}
+			}
+			s.pos++
+		}
+		return s.data[start:s.pos]
+	case 't':
+		s.pos += 4
+		return s.data[start:s.pos]
+	case 'f':
+		s.pos += 5
+		return s.data[start:s.pos]
+	case 'n':
+		s.pos += 4
+		return s.data[start:s.pos]
+	default: // number
+		s.readNumber()
+		return s.data[start:s.pos]
+	}
+}
+
 // skipValue skips a JSON value (used for unknown columns).
 func (s *jsonScanner) skipValue() {
 	c := s.peek()
@@ -379,11 +447,21 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 			vec.Nulls.SetValid(row)
 			writeBoolFalse(vec, row, colType)
 
-		case valByte == '{' || valByte == '[': // nested
-			sc.skipValue()
-			vec.Nulls.SetNull(row)
-			if needsBytesNull(vec.Type) {
-				vec.BytesData.Set(row, nil)
+		case valByte == '{' || valByte == '[': // nested object or array
+			if colType == parquet.TypeArray || colType == parquet.TypeRow || colType == parquet.TypeMap {
+				raw := sc.readRawValue()
+				var decoded any
+				if err := json.Unmarshal(raw, &decoded); err != nil {
+					vec.Nulls.SetNull(row)
+				} else {
+					vec.Nulls.SetValid(row)
+					vec.SetValue(row, decoded)
+				}
+			} else {
+				// Schema says scalar but JSON has nested — store as JSON string
+				raw := sc.readRawValue()
+				vec.Nulls.SetValid(row)
+				vec.BytesData.Set(row, raw)
 			}
 
 		default: // number
@@ -531,6 +609,7 @@ func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Col
 	var colOrder []string
 	colSet := make(map[string]struct{})
 	colTypes := make(map[string]parquet.TypeID)
+	nestedSchemas := make(map[string]parquet.Column) // full column defs for nested types
 	count := 0
 
 	for count < sampleSize && dec.More() {
@@ -563,11 +642,16 @@ func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Col
 			}
 
 			if d, ok := valTok.(json.Delim); ok && (d == '{' || d == '[') {
-				drainNestedStatic(dec)
+				nestedType := inferNestedType(dec, d)
 				if prev, has := colTypes[key]; has {
-					colTypes[key] = promoteType(prev, parquet.TypeString)
+					if prev != nestedType.Type {
+						colTypes[key] = parquet.TypeString // conflicting types fall back to string
+					}
 				} else {
-					colTypes[key] = parquet.TypeString
+					colTypes[key] = nestedType.Type
+				}
+				if _, has := nestedSchemas[key]; !has {
+					nestedSchemas[key] = nestedType
 				}
 				continue
 			}
@@ -590,14 +674,20 @@ func inferSchemaTokens(data []byte, isArray bool, sampleSize int) ([]parquet.Col
 
 	schema := make([]parquet.Column, len(colOrder))
 	for i, name := range colOrder {
-		typ, ok := colTypes[name]
-		if !ok {
-			typ = parquet.TypeString
-		}
-		schema[i] = parquet.Column{
-			Name:     name,
-			Type:     typ,
-			Nullable: true,
+		if nested, ok := nestedSchemas[name]; ok && (colTypes[name] == parquet.TypeArray || colTypes[name] == parquet.TypeRow || colTypes[name] == parquet.TypeMap) {
+			nested.Name = name
+			nested.Nullable = true
+			schema[i] = nested
+		} else {
+			typ, ok := colTypes[name]
+			if !ok {
+				typ = parquet.TypeString
+			}
+			schema[i] = parquet.Column{
+				Name:     name,
+				Type:     typ,
+				Nullable: true,
+			}
 		}
 	}
 	return schema, nil
@@ -619,6 +709,126 @@ func detectTokenType(tok json.Token) parquet.TypeID {
 		return detectStringType(v)
 	default:
 		return parquet.TypeString
+	}
+}
+
+// inferNestedType determines the schema for a nested JSON value.
+// The opening delimiter ('{' or '[') has already been consumed by Token().
+func inferNestedType(dec *json.Decoder, delim json.Delim) parquet.Column {
+	if delim == '[' {
+		return inferArrayType(dec)
+	}
+	return inferObjectType(dec)
+}
+
+// inferArrayType infers ARRAY element type by sampling array elements.
+func inferArrayType(dec *json.Decoder) parquet.Column {
+	var elemType parquet.TypeID
+	var elemCol *parquet.Column
+	first := true
+
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		if d, ok := tok.(json.Delim); ok {
+			nested := inferNestedType(dec, d)
+			if first {
+				elemType = nested.Type
+				elemCol = &nested
+				first = false
+			}
+			continue
+		}
+		if tok == nil {
+			continue
+		}
+		observed := detectTokenType(tok)
+		if first {
+			elemType = observed
+			first = false
+		} else {
+			elemType = promoteType(elemType, observed)
+		}
+	}
+	// Consume closing ']'
+	dec.Token()
+
+	if first {
+		// Empty array
+		elemType = parquet.TypeString
+	}
+
+	elem := parquet.Column{Name: "element", Type: elemType, Nullable: true}
+	if elemCol != nil && (elemType == parquet.TypeRow || elemType == parquet.TypeArray) {
+		elemCol.Name = "element"
+		elemCol.Nullable = true
+		elem = *elemCol
+	}
+	return parquet.Column{
+		Type:        parquet.TypeArray,
+		ElementType: &elem,
+	}
+}
+
+// inferObjectType infers ROW field types from a JSON object.
+func inferObjectType(dec *json.Decoder) parquet.Column {
+	var fieldOrder []string
+	fieldSet := make(map[string]struct{})
+	fieldTypes := make(map[string]parquet.TypeID)
+	fieldNested := make(map[string]*parquet.Column)
+
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			break
+		}
+		if _, exists := fieldSet[key]; !exists {
+			fieldOrder = append(fieldOrder, key)
+			fieldSet[key] = struct{}{}
+		}
+
+		valTok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		if d, ok := valTok.(json.Delim); ok {
+			nested := inferNestedType(dec, d)
+			fieldTypes[key] = nested.Type
+			fieldNested[key] = &nested
+			continue
+		}
+		if valTok == nil {
+			continue
+		}
+		fieldTypes[key] = detectTokenType(valTok)
+	}
+	// Consume closing '}'
+	dec.Token()
+
+	fields := make([]parquet.Column, len(fieldOrder))
+	for i, name := range fieldOrder {
+		if nc, ok := fieldNested[name]; ok {
+			nc.Name = name
+			nc.Nullable = true
+			fields[i] = *nc
+		} else {
+			typ := fieldTypes[name]
+			if typ == 0 {
+				typ = parquet.TypeString
+			}
+			fields[i] = parquet.Column{Name: name, Type: typ, Nullable: true}
+		}
+	}
+
+	return parquet.Column{
+		Type:   parquet.TypeRow,
+		Fields: fields,
 	}
 }
 

@@ -221,6 +221,121 @@ func TestColumnarReader_SchemaInference(t *testing.T) {
 	}
 }
 
+func TestColumnarReader_NestedArray(t *testing.T) {
+	data := `{"name":"alice","tags":["admin","user","vip"]}
+{"name":"bob","tags":["guest"]}
+{"name":"carol","tags":[]}
+`
+	r, err := NewColumnarReader([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := r.Schema()
+	if len(schema) != 2 {
+		t.Fatalf("expected 2 columns, got %d", len(schema))
+	}
+	if schema[1].Type != parquet.TypeArray {
+		t.Fatalf("expected TypeArray for tags, got %v", schema[1].Type)
+	}
+	if schema[1].ElementType == nil || schema[1].ElementType.Type != parquet.TypeString {
+		t.Fatalf("expected ARRAY(STRING), got element type %v", schema[1].ElementType)
+	}
+
+	b, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil || b.Len != 3 {
+		t.Fatalf("expected 3 rows, got %v", b)
+	}
+
+	// Check alice's tags array
+	tagsVec := b.Columns[1]
+	aliceTags := tagsVec.GetValue(0)
+	if tags, ok := aliceTags.([]any); ok {
+		if len(tags) != 3 {
+			t.Errorf("expected 3 tags for alice, got %d", len(tags))
+		}
+	} else {
+		t.Errorf("expected []any for tags, got %T", aliceTags)
+	}
+
+	// Check carol's empty array
+	carolTags := tagsVec.GetValue(2)
+	if tags, ok := carolTags.([]any); ok {
+		if len(tags) != 0 {
+			t.Errorf("expected 0 tags for carol, got %d", len(tags))
+		}
+	}
+}
+
+func TestColumnarReader_NestedObject(t *testing.T) {
+	data := `{"name":"alice","geo":{"city":"NYC","lat":40.7}}
+{"name":"bob","geo":{"city":"LA","lat":34.0}}
+`
+	r, err := NewColumnarReader([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := r.Schema()
+	if schema[1].Type != parquet.TypeRow {
+		t.Fatalf("expected TypeRow for geo, got %v", schema[1].Type)
+	}
+	if len(schema[1].Fields) != 2 {
+		t.Fatalf("expected 2 fields in geo, got %d", len(schema[1].Fields))
+	}
+
+	b, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	geoVec := b.Columns[1]
+	aliceGeo := geoVec.GetValue(0)
+	if m, ok := aliceGeo.(map[string]any); ok {
+		if m["city"] != "NYC" {
+			t.Errorf("expected city=NYC, got %v", m["city"])
+		}
+	} else {
+		t.Errorf("expected map for geo, got %T", aliceGeo)
+	}
+}
+
+func TestColumnarReader_ArrayOfObjects(t *testing.T) {
+	data := `{"id":1,"events":[{"type":"login","ts":"2026-01-01"},{"type":"logout","ts":"2026-01-02"}]}
+{"id":2,"events":[{"type":"login","ts":"2026-03-01"}]}
+`
+	r, err := NewColumnarReader([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := r.Schema()
+	if schema[1].Type != parquet.TypeArray {
+		t.Fatalf("expected TypeArray for events, got %v", schema[1].Type)
+	}
+	if schema[1].ElementType == nil || schema[1].ElementType.Type != parquet.TypeRow {
+		t.Fatalf("expected ARRAY(ROW(...)), got %v", schema[1].ElementType)
+	}
+
+	b, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	eventsVec := b.Columns[1]
+	row1Events := eventsVec.GetValue(0)
+	if events, ok := row1Events.([]any); ok {
+		if len(events) != 2 {
+			t.Errorf("expected 2 events for id=1, got %d", len(events))
+		}
+	} else {
+		t.Errorf("expected []any for events, got %T", row1Events)
+	}
+}
+
 // Benchmarks comparing row-oriented Reader vs ColumnarReader
 
 func benchData(n int) []byte {

@@ -531,15 +531,8 @@ func appendToVector(v *Vector, val any) {
 	idx := v.Len
 	v.Len++
 	v.Nulls = v.Nulls.Grow(v.Len)
-	if val == nil {
-		v.Nulls.SetNull(idx)
-		switch v.Type {
-		case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
-			v.BytesData.Offsets = append(v.BytesData.Offsets, v.BytesData.Offsets[len(v.BytesData.Offsets)-1])
-		}
-		return
-	}
-	// Grow typed storage
+
+	// Always grow typed storage (needed even for null to keep indices valid)
 	switch v.Type {
 	case TypeBool:
 		v.BoolData = append(v.BoolData, false)
@@ -555,6 +548,17 @@ func appendToVector(v *Vector, val any) {
 		v.BytesData.Offsets = append(v.BytesData.Offsets, v.BytesData.Offsets[len(v.BytesData.Offsets)-1])
 	case TypeDecimal:
 		v.DecimalData.Data = append(v.DecimalData.Data, Int128{})
+	case TypeArray, TypeMap:
+		v.Offsets = append(v.Offsets, v.Offsets[len(v.Offsets)-1])
+	case TypeRow:
+		for _, child := range v.Children {
+			appendToVector(child, nil)
+		}
+	}
+
+	if val == nil {
+		v.Nulls.SetNull(idx)
+		return
 	}
 	v.SetValue(idx, val)
 }
