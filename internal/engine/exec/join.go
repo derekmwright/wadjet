@@ -174,8 +174,11 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		}
 		return p.lookupBuf
 	}
-	key := h.probeKey(in, row)
-	head, ok := h.hashIndex[key]
+	// Build key into reusable buffer, then look up using string([]byte) directly
+	// in the map index expression. Go compiler optimizes map[string(buf)] to avoid
+	// allocating a string — the conversion is temporary and stack-allocated.
+	h.buildProbeKeyBuf(in, row)
+	head, ok := h.hashIndex[string(h.keyBuf)]
 	if !ok {
 		return p.lookupBuf
 	}
@@ -608,8 +611,10 @@ func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) string {
 	return string(h.keyBuf)
 }
 
-// probeKey computes the hash key for a probe-side row using typed serialization.
-func (h *HashJoin) probeKey(b *batch.RecordBatch, row int) string {
+// buildProbeKeyBuf fills h.keyBuf with the serialized probe key for a row.
+// The caller should use string(h.keyBuf) directly in a map index expression
+// to benefit from Go's compiler optimization that avoids string allocation.
+func (h *HashJoin) buildProbeKeyBuf(b *batch.RecordBatch, row int) {
 	if !h.probeResolved {
 		h.probeKeyIdx = make([]int, len(h.LeftKeys))
 		for i, col := range h.LeftKeys {
@@ -632,7 +637,6 @@ func (h *HashJoin) probeKey(b *batch.RecordBatch, row int) string {
 			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
 		}
 	}
-	return string(h.keyBuf)
 }
 
 // matchPair tracks a probe-build row match for output construction.
@@ -675,8 +679,8 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 			h.arenaMatched[idx] = true
 		}
 	} else {
-		key := h.probeKey(in, row)
-		head, ok := h.hashIndex[key]
+		h.buildProbeKeyBuf(in, row)
+		head, ok := h.hashIndex[string(h.keyBuf)]
 		if !ok {
 			return
 		}

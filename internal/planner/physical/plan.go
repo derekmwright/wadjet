@@ -2067,6 +2067,10 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
 		}
 		if err == nil {
+			// Try to extract vectorized filter for simple comparison patterns
+			if vf := tryVectorizeFilter(compiled); vf != nil {
+				return vf
+			}
 			return exec.NewFilter(wrapPredicate(compiled))
 		}
 	}
@@ -2085,6 +2089,111 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 	}
 
 	return nil
+}
+
+// tryVectorizeFilter inspects a compiled expression tree and returns a vectorized
+// filter operator when the pattern is a simple comparison (col op col, col op const)
+// or an AND chain of such comparisons. Returns nil for complex expressions.
+func tryVectorizeFilter(e expr.Expr) exec.UnaryOperator {
+	ops := extractFilterOps(e)
+	if len(ops) == 0 {
+		return nil
+	}
+	if len(ops) == 1 {
+		return ops[0]
+	}
+	return exec.NewChainFilter(ops)
+}
+
+// extractFilterOps recursively extracts vectorizable filter ops from AND combinations.
+func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
+	switch v := e.(type) {
+	case *expr.Cmp:
+		op := cmpToExecOp(v.Op)
+		// col op col
+		if lc, lok := v.Left.(*expr.ColRef); lok {
+			if rc, rok := v.Right.(*expr.ColRef); rok {
+				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
+			}
+		}
+		// col op const
+		if lc, lok := v.Left.(*expr.ColRef); lok {
+			if lit, rok := v.Right.(*expr.Lit); rok {
+				return []exec.UnaryOperator{exec.NewKernelFilter(lc.Name, op, lit.Val)}
+			}
+		}
+		// const op col → flip
+		if lit, lok := v.Left.(*expr.Lit); lok {
+			if rc, rok := v.Right.(*expr.ColRef); rok {
+				return []exec.UnaryOperator{exec.NewKernelFilter(rc.Name, flipOp(op), lit.Val)}
+			}
+		}
+	case *expr.CmpInt64:
+		op := cmpToExecOp(v.Op)
+		if lc, lok := v.Left.(*expr.ColRef); lok {
+			if rc, rok := v.Right.(*expr.ColRef); rok {
+				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
+			}
+			if lit, rok := v.Right.(*expr.Lit); rok {
+				return []exec.UnaryOperator{exec.NewKernelFilter(lc.Name, op, lit.Val)}
+			}
+		}
+	case *expr.CmpFloat64:
+		op := cmpToExecOp(v.Op)
+		if lc, lok := v.Left.(*expr.ColRef); lok {
+			if rc, rok := v.Right.(*expr.ColRef); rok {
+				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
+			}
+			if lit, rok := v.Right.(*expr.Lit); rok {
+				return []exec.UnaryOperator{exec.NewKernelFilter(lc.Name, op, lit.Val)}
+			}
+		}
+	case *expr.And:
+		leftOps := extractFilterOps(v.Left)
+		if leftOps == nil {
+			return nil
+		}
+		rightOps := extractFilterOps(v.Right)
+		if rightOps == nil {
+			return nil
+		}
+		return append(leftOps, rightOps...)
+	}
+	return nil
+}
+
+func cmpToExecOp(op expr.CmpOp) exec.CompareOp {
+	switch op {
+	case expr.CmpEq:
+		return exec.OpEq
+	case expr.CmpNe:
+		return exec.OpNe
+	case expr.CmpLt:
+		return exec.OpLt
+	case expr.CmpLe:
+		return exec.OpLe
+	case expr.CmpGt:
+		return exec.OpGt
+	case expr.CmpGe:
+		return exec.OpGe
+	default:
+		return exec.OpEq
+	}
+}
+
+func flipOp(op exec.CompareOp) exec.CompareOp {
+	switch op {
+	case exec.OpLt:
+		return exec.OpGt
+	case exec.OpLe:
+		return exec.OpGe
+	case exec.OpGt:
+		return exec.OpLt
+	case exec.OpGe:
+		return exec.OpLe
+	default:
+		return op
+	}
 }
 
 // collectTableAliases recursively collects all table names and aliases from
@@ -2860,7 +2969,13 @@ func wrapExpr(e expr.Expr) exec.Expression {
 }
 
 // wrapPredicate adapts an expr.Expr into an exec.Predicate function.
+// Uses BoolExpr.EvalBool() when available to avoid interface{} boxing.
 func wrapPredicate(e expr.Expr) exec.Predicate {
+	if be, ok := e.(expr.BoolExpr); ok {
+		return func(b *batch.RecordBatch, row int) bool {
+			return be.EvalBool(b, row)
+		}
+	}
 	return func(b *batch.RecordBatch, row int) bool {
 		v := e.Eval(b, row)
 		if v == nil {

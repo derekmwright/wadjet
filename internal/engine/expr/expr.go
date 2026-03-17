@@ -96,18 +96,31 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 	// For comparisons and arithmetic, the caller will use ToFloat64/ToInt64
 	// which handle int64/float64 natively without re-boxing.
 	switch e.typ {
-	case batch.TypeInt64, batch.TypeTimestamp:
-		val, ok := v.GetInt64(row)
-		if !ok {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		if v.Nulls.IsNullFast(row) {
 			return nil
 		}
-		return val
+		return v.Int64Data[row]
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		if v.Nulls.IsNullFast(row) {
+			return nil
+		}
+		return int64(v.Int32Data[row])
 	case batch.TypeFloat64:
-		val, ok := v.GetFloat64(row)
-		if !ok {
+		if v.Nulls.IsNullFast(row) {
 			return nil
 		}
-		return val
+		return v.Float64Data[row]
+	case batch.TypeFloat32:
+		if v.Nulls.IsNullFast(row) {
+			return nil
+		}
+		return float64(v.Float32Data[row])
+	case batch.TypeBool:
+		if v.Nulls.IsNullFast(row) {
+			return nil
+		}
+		return v.BoolData[row]
 	case batch.TypeString:
 		val, ok := v.GetString(row)
 		if !ok {

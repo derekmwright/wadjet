@@ -402,6 +402,46 @@ func toInt64(v any) int64 {
 	}
 }
 
+// ChainFilter applies a sequence of unary filter operators in order.
+// Each operator narrows the selection vector before passing to the next.
+type ChainFilter struct {
+	Ops []UnaryOperator
+}
+
+func NewChainFilter(ops []UnaryOperator) *ChainFilter {
+	return &ChainFilter{Ops: ops}
+}
+
+func (f *ChainFilter) Init(ctx context.Context) error {
+	for _, op := range f.Ops {
+		if err := op.Init(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *ChainFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	for _, op := range f.Ops {
+		var err error
+		in, err = op.Execute(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		if in == nil {
+			return nil, nil
+		}
+	}
+	return in, nil
+}
+
+func (f *ChainFilter) Close() error {
+	for _, op := range f.Ops {
+		op.Close()
+	}
+	return nil
+}
+
 func toFloat64(v any) float64 {
 	switch tv := v.(type) {
 	case float64:
@@ -416,3 +456,49 @@ func toFloat64(v any) float64 {
 		return 0
 	}
 }
+
+// ColColFilter compares two columns element-wise using a vectorized kernel.
+// Resolves column indices and kernel on first Execute; inner loop has no type switches.
+type ColColFilter struct {
+	LeftCol  string
+	RightCol string
+	Op       CompareOp
+	leftIdx  int
+	rightIdx int
+	kern     kernel.ColColFilterKernel
+	outSel   []uint16
+	resolved bool
+}
+
+func NewColColFilter(leftCol, rightCol string, op CompareOp) *ColColFilter {
+	return &ColColFilter{LeftCol: leftCol, RightCol: rightCol, Op: op}
+}
+
+func (f *ColColFilter) Init(_ context.Context) error { return nil }
+
+func (f *ColColFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if !f.resolved {
+		f.leftIdx = in.ColumnIndex(f.LeftCol)
+		f.rightIdx = in.ColumnIndex(f.RightCol)
+		if f.leftIdx >= 0 && f.rightIdx >= 0 {
+			typ := in.Columns[f.leftIdx].Type
+			f.kern = kernel.ResolveColColFilterKernel(typ, toKernelOp(f.Op))
+		}
+		f.outSel = make([]uint16, 0, in.Len)
+		f.resolved = true
+	}
+
+	if f.kern == nil {
+		return nil, nil
+	}
+
+	sel := f.kern(in.Columns[f.leftIdx], in.Columns[f.rightIdx], in.Sel, in.Len, f.outSel)
+	if len(sel) == 0 {
+		return nil, nil
+	}
+
+	in.Sel = sel
+	return in, nil
+}
+
+func (f *ColColFilter) Close() error { return nil }

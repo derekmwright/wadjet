@@ -233,3 +233,110 @@ func parseIPv6ToRawString(s string) string {
 	}
 	return ""
 }
+
+// ColColFilterKernel compares two columns element-wise, returning matching row indices.
+type ColColFilterKernel func(left, right *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16
+
+// colColFilterImpl creates a ColColFilterKernel for comparing two typed columns.
+func colColFilterImpl[T Ordered](getData func(v *batch.Vector) []T, op CompareOp) ColColFilterKernel {
+	cmpFn := resolveCompare[T](op)
+	return func(left, right *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+		ld := getData(left)
+		rd := getData(right)
+		out := outSel[:0]
+		lNulls := left.Nulls.HasNulls()
+		rNulls := right.Nulls.HasNulls()
+		hasNulls := lNulls || rNulls
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					i := int(idx)
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(ld[idx], rd[idx]) {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					if cmpFn(ld[idx], rd[idx]) {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(ld[i], rd[i]) {
+						out = append(out, uint16(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if cmpFn(ld[i], rd[i]) {
+						out = append(out, uint16(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
+// colColFilterString creates a ColColFilterKernel for comparing two string columns.
+func colColFilterString(op CompareOp) ColColFilterKernel {
+	cmpFn := resolveCompare[string](op)
+	return func(left, right *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+		out := outSel[:0]
+		hasNulls := left.Nulls.HasNulls() || right.Nulls.HasNulls()
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					i := int(idx)
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(left.BytesData.StringValue(i), right.BytesData.StringValue(i)) {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					i := int(idx)
+					if cmpFn(left.BytesData.StringValue(i), right.BytesData.StringValue(i)) {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(left.BytesData.StringValue(i), right.BytesData.StringValue(i)) {
+						out = append(out, uint16(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if cmpFn(left.BytesData.StringValue(i), right.BytesData.StringValue(i)) {
+						out = append(out, uint16(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
+// ResolveColColFilterKernel creates a ColColFilterKernel for comparing two columns
+// of the given type. Returns nil if the type is not supported.
+func ResolveColColFilterKernel(typ batch.TypeID, op CompareOp) ColColFilterKernel {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return colColFilterImpl(getInt64Data, op)
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return colColFilterImpl(getInt32Data, op)
+	case batch.TypeFloat64:
+		return colColFilterImpl(getFloat64Data, op)
+	case batch.TypeFloat32:
+		return colColFilterImpl(getFloat32Data, op)
+	case batch.TypeString, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		return colColFilterString(op)
+	default:
+		return nil
+	}
+}
