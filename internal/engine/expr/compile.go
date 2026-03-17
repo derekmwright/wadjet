@@ -102,7 +102,7 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 		default:
 			op = CmpEq
 		}
-		return &Cmp{Left: left, Right: right, Op: op}, nil
+		return compileCmp(left, right, op), nil
 
 	case *plansql.InExpr:
 		left, err := compileWithCtx(n.Left, ctx)
@@ -317,6 +317,49 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 	default:
 		return &Lit{Val: node.String()}, nil
 	}
+}
+
+// compileCmp creates a typed comparison when both sides are provably numeric,
+// falling back to the generic Cmp otherwise.
+// We can't use typed paths for ColRef since column types are unknown at compile time.
+func compileCmp(left, right Expr, op CmpOp) Expr {
+	// Only use typed paths when both sides are provably numeric
+	// (not ColRef, which implements Int64Expr/Float64Expr as fallback)
+	if isProvablyInt64(left) && isProvablyInt64(right) {
+		return &CmpInt64{Left: left.(Int64Expr), Right: right.(Int64Expr), Op: op}
+	}
+	if isProvablyFloat64(left) && isProvablyFloat64(right) {
+		return &CmpFloat64{Left: left.(Float64Expr), Right: right.(Float64Expr), Op: op}
+	}
+	return &Cmp{Left: left, Right: right, Op: op}
+}
+
+// isProvablyInt64 returns true if the expression definitely produces int64 values.
+func isProvablyInt64(e Expr) bool {
+	switch v := e.(type) {
+	case *Lit:
+		switch v.Val.(type) {
+		case int64, int32, int:
+			return true
+		}
+	case *BinOpInt64:
+		return true
+	}
+	return false
+}
+
+// isProvablyFloat64 returns true if the expression definitely produces float64 values.
+func isProvablyFloat64(e Expr) bool {
+	switch v := e.(type) {
+	case *Lit:
+		switch v.Val.(type) {
+		case float64, float32:
+			return true
+		}
+	case *BinOpFloat64:
+		return true
+	}
+	return false
 }
 
 // compileBinOp creates a typed BinOp when both sides implement typed interfaces,

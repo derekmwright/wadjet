@@ -412,6 +412,80 @@ func (e *Cmp) EvalBool(b *batch.RecordBatch, row int) bool {
 	return compare(lv, rv, e.Op)
 }
 
+// CmpInt64 is a typed comparison that operates on int64 without boxing.
+type CmpInt64 struct {
+	Left, Right Int64Expr
+	Op          CmpOp
+}
+
+func (e *CmpInt64) Eval(b *batch.RecordBatch, row int) any {
+	return e.EvalBool(b, row)
+}
+
+func (e *CmpInt64) EvalBool(b *batch.RecordBatch, row int) bool {
+	lv, lok := e.Left.EvalInt64(b, row)
+	if !lok {
+		return false
+	}
+	rv, rok := e.Right.EvalInt64(b, row)
+	if !rok {
+		return false
+	}
+	switch e.Op {
+	case CmpEq:
+		return lv == rv
+	case CmpNe:
+		return lv != rv
+	case CmpLt:
+		return lv < rv
+	case CmpLe:
+		return lv <= rv
+	case CmpGt:
+		return lv > rv
+	case CmpGe:
+		return lv >= rv
+	default:
+		return false
+	}
+}
+
+// CmpFloat64 is a typed comparison that operates on float64 without boxing.
+type CmpFloat64 struct {
+	Left, Right Float64Expr
+	Op          CmpOp
+}
+
+func (e *CmpFloat64) Eval(b *batch.RecordBatch, row int) any {
+	return e.EvalBool(b, row)
+}
+
+func (e *CmpFloat64) EvalBool(b *batch.RecordBatch, row int) bool {
+	lv, lok := e.Left.EvalFloat64(b, row)
+	if !lok {
+		return false
+	}
+	rv, rok := e.Right.EvalFloat64(b, row)
+	if !rok {
+		return false
+	}
+	switch e.Op {
+	case CmpEq:
+		return lv == rv
+	case CmpNe:
+		return lv != rv
+	case CmpLt:
+		return lv < rv
+	case CmpLe:
+		return lv <= rv
+	case CmpGt:
+		return lv > rv
+	case CmpGe:
+		return lv >= rv
+	default:
+		return false
+	}
+}
+
 // IsNull checks if an expression is null.
 type IsNull struct {
 	Operand Expr
