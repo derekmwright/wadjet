@@ -52,7 +52,7 @@ func setupTestDB(t *testing.T) *caelum.DB {
 
 func startTestServer(t *testing.T, db *caelum.DB) *Server {
 	t.Helper()
-	srv := NewServer(db, nil)
+	srv := NewServer(db, Config{}, nil)
 	if err := srv.Start("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}

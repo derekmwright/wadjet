@@ -2,7 +2,6 @@ package exec
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
@@ -114,7 +113,7 @@ func ArithExpr(left, right Expression, op string) Expression {
 			}
 			return lf / rf
 		default:
-			panic(fmt.Sprintf("unknown arithmetic op: %s", op))
+			return nil // unknown op → SQL NULL (validated at plan time)
 		}
 	}
 }

@@ -672,7 +672,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	if err != nil {
 		return fmt.Errorf("opening DB for pgwire: %w", err)
 	}
-	pgSrv := pgwire.NewServer(pgDB, logger)
+	pgSrv := pgwire.NewServer(pgDB, pgwire.Config{}, logger)
 
 	errCh := make(chan error, 3)
 	go func() {

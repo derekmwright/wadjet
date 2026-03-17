@@ -50,7 +50,7 @@ func setupRealDB(t *testing.T) (*caelum.DB, *Server) {
 		t.Fatal(err)
 	}
 
-	srv := NewServer(db, nil)
+	srv := NewServer(db, Config{}, nil)
 	if err := srv.Start("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}

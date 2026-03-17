@@ -23,8 +23,9 @@ import (
 
 // Config holds coordinator configuration.
 type Config struct {
-	NATSUrl      string
-	ResultBucket string
+	NATSUrl        string
+	ResultBucket   string
+	MaxInflight    int // max concurrent queries, 0 = default (64)
 }
 
 // queryMeta stores per-query metadata needed for later result retrieval.
@@ -49,12 +50,17 @@ type Coordinator struct {
 	resultSubs map[string]context.CancelFunc          // queryID -> cancel
 	stageSpecs map[string]map[string]physical.Stage   // queryID -> stageID -> stage spec
 	queryMetas map[string]*queryMeta                  // queryID -> metadata for result retrieval
+	querySem   chan struct{}                           // limits concurrent inflight queries
 }
 
 // New creates a new Coordinator.
 func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream, logger *slog.Logger) *Coordinator {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	maxInflight := cfg.MaxInflight
+	if maxInflight <= 0 {
+		maxInflight = 64
 	}
 	c := &Coordinator{
 		config:     cfg,
@@ -67,6 +73,7 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 		logger:     logger,
 		resultSubs: make(map[string]context.CancelFunc),
 		queryMetas: make(map[string]*queryMeta),
+		querySem:   make(chan struct{}, maxInflight),
 	}
 	return c
 }
@@ -202,6 +209,14 @@ type SQLResult struct {
 
 // ExecuteSQL parses SQL, plans, distributes across workers, and collects results.
 func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, error) {
+	// Backpressure: limit concurrent inflight queries.
+	select {
+	case c.querySem <- struct{}{}:
+		defer func() { <-c.querySem }()
+	case <-ctx.Done():
+		return nil, fmt.Errorf("query queue full: %w", ctx.Err())
+	}
+
 	start := time.Now()
 	queryID := uuid.New().String()[:8]
 

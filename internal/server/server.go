@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/net/netutil"
 
 	"github.com/derekmwright/caelum/internal/auth"
 	"github.com/derekmwright/caelum/internal/coordinator"
@@ -28,15 +30,16 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	Addr        string
-	Catalog     *catalog.Catalog
-	Coordinator *coordinator.Coordinator // nil = local execution only
-	Auth        *auth.Authenticator      // nil = no authentication (static mode)
-	Authz       *auth.Authorizer         // nil = no authorization (static mode)
-	Policies    *auth.PolicySet          // nil = no cell-level policies (static mode)
-	Provider    *auth.Provider           // nil = use static Auth/Authz/Policies above
-	Metrics     *metrics.Metrics         // nil = no metrics collection
-	TLSConfig   *tls.Config              // nil = plain HTTP
+	Addr           string
+	Catalog        *catalog.Catalog
+	Coordinator    *coordinator.Coordinator // nil = local execution only
+	Auth           *auth.Authenticator      // nil = no authentication (static mode)
+	Authz          *auth.Authorizer         // nil = no authorization (static mode)
+	Policies       *auth.PolicySet          // nil = no cell-level policies (static mode)
+	Provider       *auth.Provider           // nil = use static Auth/Authz/Policies above
+	Metrics        *metrics.Metrics         // nil = no metrics collection
+	TLSConfig      *tls.Config              // nil = plain HTTP
+	MaxConnections int                      // 0 = unlimited
 }
 
 // Server is the Caelum HTTP API server.
@@ -107,22 +110,32 @@ func (s *Server) Start() error {
 	}
 
 	s.server = &http.Server{
-		Addr:         s.config.Addr,
 		Handler:      s.mux,
 		TLSConfig:    s.config.TLSConfig,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 5 * time.Minute,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	ln, err := net.Listen("tcp", s.config.Addr)
+	if err != nil {
+		return fmt.Errorf("http listen: %w", err)
+	}
+
+	if s.config.MaxConnections > 0 {
+		ln = netutil.LimitListener(ln, s.config.MaxConnections)
 	}
 
 	s.logger.Info("HTTP server starting", "addr", s.config.Addr,
 		"auth", s.config.Auth != nil && s.config.Auth.Enabled(),
 		"tls", s.config.TLSConfig != nil,
+		"max_connections", s.config.MaxConnections,
 	)
 
 	if s.config.TLSConfig != nil {
-		return s.server.ListenAndServeTLS("", "")
+		return s.server.ServeTLS(ln, "", "")
 	}
-	return s.server.ListenAndServe()
+	return s.server.Serve(ln)
 }
 
 // Shutdown gracefully shuts down the server.

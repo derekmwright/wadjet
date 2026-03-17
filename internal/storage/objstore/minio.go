@@ -41,7 +41,7 @@ func s3Transport(secure bool) *http.Transport {
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
-		TLSClientConfig:     &tls.Config{InsecureSkipVerify: !secure},
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12}, //nolint:gosec // TLS always verified
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 		DisableCompression:    true, // Parquet/object data is already compressed

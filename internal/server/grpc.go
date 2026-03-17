@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
 	"strings"
 
+	"golang.org/x/net/netutil"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -26,22 +29,26 @@ const streamBatchSize = 1000
 
 // GRPCConfig holds configuration for the gRPC server.
 type GRPCConfig struct {
-	Addr    string
-	Catalog *catalog.Catalog
-	Coord   *coordinator.Coordinator // nil = standalone
-	DB      *caelumdb.DB             // nil = distributed
+	Addr           string
+	Catalog        *catalog.Catalog
+	Coord          *coordinator.Coordinator // nil = standalone
+	DB             *caelumdb.DB             // nil = distributed
+	TLSConfig      *tls.Config              // nil = plain gRPC
+	MaxConnections int                      // 0 = unlimited
 }
 
 // GRPCServer implements the CaelumService gRPC API.
 type GRPCServer struct {
 	caelumv1.UnimplementedCaelumServiceServer
 
-	catalog *catalog.Catalog
-	coord   *coordinator.Coordinator
-	db      *caelumdb.DB
-	logger  *slog.Logger
-	server  *grpc.Server
-	addr    string
+	catalog   *catalog.Catalog
+	coord     *coordinator.Coordinator
+	db        *caelumdb.DB
+	logger    *slog.Logger
+	server    *grpc.Server
+	addr      string
+	tlsConfig *tls.Config
+	maxConns  int
 }
 
 // NewGRPCServer creates a new gRPC server.
@@ -50,11 +57,13 @@ func NewGRPCServer(cfg GRPCConfig, logger *slog.Logger) *GRPCServer {
 		logger = slog.Default()
 	}
 	return &GRPCServer{
-		catalog: cfg.Catalog,
-		coord:   cfg.Coord,
-		db:      cfg.DB,
-		logger:  logger,
-		addr:    cfg.Addr,
+		catalog:   cfg.Catalog,
+		coord:     cfg.Coord,
+		db:        cfg.DB,
+		logger:    logger,
+		addr:      cfg.Addr,
+		tlsConfig: cfg.TLSConfig,
+		maxConns:  cfg.MaxConnections,
 	}
 }
 
@@ -65,7 +74,17 @@ func (g *GRPCServer) Start() error {
 		return fmt.Errorf("grpc listen: %w", err)
 	}
 
-	g.server = grpc.NewServer()
+	if g.maxConns > 0 {
+		lis = netutil.LimitListener(lis, g.maxConns)
+	}
+
+	var opts []grpc.ServerOption
+	opts = append(opts, grpc.MaxConcurrentStreams(256))
+	if g.tlsConfig != nil {
+		opts = append(opts, grpc.Creds(credentials.NewTLS(g.tlsConfig)))
+	}
+
+	g.server = grpc.NewServer(opts...)
 	caelumv1.RegisterCaelumServiceServer(g.server, g)
 
 	// Register health service
@@ -74,7 +93,8 @@ func (g *GRPCServer) Start() error {
 	hs.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)
 	hs.SetServingStatus("caelum.v1.CaelumService", healthpb.HealthCheckResponse_SERVING)
 
-	g.logger.Info("gRPC server listening", "addr", g.addr)
+	g.logger.Info("gRPC server listening", "addr", g.addr, "tls", g.tlsConfig != nil,
+		"max_connections", g.maxConns)
 	return g.server.Serve(lis)
 }
 

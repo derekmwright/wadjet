@@ -5,6 +5,7 @@ package pgwire
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,32 +16,39 @@ import (
 	"sync"
 
 	"github.com/derekmwright/caelum/caelum"
+	"golang.org/x/net/netutil"
 )
 
 // Server listens for PostgreSQL wire protocol connections and dispatches
 // queries to a Caelum DB instance.
 type Server struct {
-	db       *caelum.DB
-	listener net.Listener
-	logger   *slog.Logger
-	wg       sync.WaitGroup
-	done     chan struct{}
+	db        *caelum.DB
+	listener  net.Listener
+	logger    *slog.Logger
+	wg        sync.WaitGroup
+	done      chan struct{}
+	tlsConfig *tls.Config
+	maxConns  int
 }
 
 // Config holds configuration for the pgwire server.
 type Config struct {
-	Addr string // listen address, e.g. ":5433"
+	Addr           string     // listen address, e.g. ":5433"
+	TLSConfig      *tls.Config // nil = plain TCP
+	MaxConnections int         // 0 = unlimited
 }
 
 // NewServer creates a new PostgreSQL wire protocol server.
-func NewServer(db *caelum.DB, logger *slog.Logger) *Server {
+func NewServer(db *caelum.DB, cfg Config, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Server{
-		db:     db,
-		logger: logger,
-		done:   make(chan struct{}),
+		db:        db,
+		logger:    logger,
+		done:      make(chan struct{}),
+		tlsConfig: cfg.TLSConfig,
+		maxConns:  cfg.MaxConnections,
 	}
 }
 
@@ -50,8 +58,18 @@ func (s *Server) Start(addr string) error {
 	if err != nil {
 		return fmt.Errorf("pgwire listen: %w", err)
 	}
+
+	if s.maxConns > 0 {
+		ln = netutil.LimitListener(ln, s.maxConns)
+	}
+
+	if s.tlsConfig != nil {
+		ln = tls.NewListener(ln, s.tlsConfig)
+	}
+
 	s.listener = ln
-	s.logger.Info("PostgreSQL wire protocol server listening", "addr", addr)
+	s.logger.Info("PostgreSQL wire protocol server listening", "addr", addr,
+		"tls", s.tlsConfig != nil, "max_connections", s.maxConns)
 
 	s.wg.Add(1)
 	go func() {
