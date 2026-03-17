@@ -1392,8 +1392,48 @@ From lowest to highest:
 | 6 | `*`, `/`, `%` |
 | 7 (highest) | Unary `-`, `+` |
 
+## Data Manipulation (DML)
+
+Caelum supports INSERT, UPDATE, and DELETE via merge-on-read semantics. Deleted rows are tracked as markers in the manifest and filtered out at scan time. Updated rows are implemented as DELETE + INSERT of the modified values.
+
+### INSERT
+
+```sql
+INSERT INTO table_name [(col1, col2, ...)] VALUES (val1, val2, ...) [, (val3, val4, ...) ...]
+```
+
+If column list is omitted, values are matched to schema column order.
+
+### DELETE
+
+```sql
+DELETE FROM table_name [WHERE condition]
+```
+
+Without WHERE, deletes all rows. Delete markers are stored in the table manifest and applied during scans.
+
+### UPDATE
+
+```sql
+UPDATE table_name SET col1 = val1 [, col2 = val2 ...] [WHERE condition]
+```
+
+Internally executes as DELETE of matching rows + INSERT of modified rows.
+
+### Type Coercion
+
+Values in INSERT/UPDATE are automatically coerced to the target column type:
+
+| Column Type | Accepted Formats |
+|---|---|
+| INT32, INT64 | Integer literals: `42` |
+| FLOAT32, FLOAT64 | Numeric literals: `3.14` |
+| BOOL | `true`, `false` |
+| STRING | Quoted: `'hello'` |
+| TIMESTAMP | `'2026-03-17T10:00:00Z'`, `'2026-03-17 10:00:00'` |
+| DATE | `'2026-03-17'` |
+
 ## Limitations
 
-- No UPDATE / DELETE (append-only analytical store)
 - No lateral joins
 - No recursive CTEs

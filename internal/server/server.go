@@ -2,13 +2,16 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,11 +24,14 @@ import (
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
 	"github.com/derekmwright/caelum/internal/engine/expr"
+	"github.com/derekmwright/caelum/internal/engine/scan"
 	"github.com/derekmwright/caelum/internal/metrics"
 	"github.com/derekmwright/caelum/internal/planner/logical"
 	"github.com/derekmwright/caelum/internal/planner/physical"
 	plansql "github.com/derekmwright/caelum/internal/planner/sql"
 	"github.com/derekmwright/caelum/internal/storage/catalog"
+	"github.com/derekmwright/caelum/internal/storage/ingest"
+	"github.com/derekmwright/caelum/internal/storage/objstore"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
 )
 
@@ -249,6 +255,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle DML (INSERT/UPDATE/DELETE)
+	if parsed.Type == plansql.QueryInsert || parsed.Type == plansql.QueryUpdate || parsed.Type == plansql.QueryDelete {
+		s.handleDML(w, r, req.SQL, start)
+		return
+	}
+
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "SQL extraction error: "+err.Error())
@@ -440,6 +452,337 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	s.logSlowQuery(req.SQL, time.Since(start), len(rows))
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleDML(w http.ResponseWriter, r *http.Request, sql string, start time.Time) {
+	ctx := r.Context()
+
+	// Authorization: check write permission
+	identity := auth.IdentityFromContext(ctx)
+	authz := s.getAuthz()
+	if identity != nil && authz != nil {
+		if !authz.HasPermission(identity, "write") {
+			writeError(w, http.StatusForbidden, "insufficient permissions for DML operation")
+			return
+		}
+	}
+
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "SQL parse error: "+err.Error())
+		return
+	}
+
+	var result *dmlResult
+	switch parsed.Type {
+	case plansql.QueryInsert:
+		result, err = executeDMLInsert(ctx, s.catalog, parsed.Insert)
+	case plansql.QueryUpdate:
+		result, err = executeDMLUpdate(ctx, s.catalog, parsed.Update)
+	case plansql.QueryDelete:
+		result, err = executeDMLDelete(ctx, s.catalog, parsed.Delete)
+	default:
+		writeError(w, http.StatusBadRequest, "unsupported DML type")
+		return
+	}
+
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "DML execution error: "+err.Error())
+		return
+	}
+
+	resp := QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("%s %d", result.command, result.rowsAffected)}},
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+	}
+
+	if s.metrics != nil {
+		s.metrics.QueriesTotal.WithLabelValues("success").Inc()
+	}
+	if done := func() {}; done != nil {
+		done()
+	}
+	s.logSlowQuery(sql, time.Since(start), 0)
+
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type dmlResult struct {
+	rowsAffected int64
+	command      string
+}
+
+func executeDMLInsert(ctx context.Context, cat *catalog.Catalog, info *plansql.InsertInfo) (*dmlResult, error) {
+	tableMeta, err := cat.GetTable(ctx, info.Table)
+	if err != nil {
+		return nil, fmt.Errorf("table %q: %w", info.Table, err)
+	}
+
+	columns := info.Columns
+	if len(columns) == 0 {
+		columns = make([]string, len(tableMeta.Schema.Columns))
+		for i, col := range tableMeta.Schema.Columns {
+			columns[i] = col.Name
+		}
+	}
+
+	typeMap := make(map[string]parquet.TypeID, len(tableMeta.Schema.Columns))
+	for _, col := range tableMeta.Schema.Columns {
+		typeMap[col.Name] = col.Type
+	}
+
+	var rows []map[string]any
+	for rowIdx, vals := range info.Values {
+		if len(vals) != len(columns) {
+			return nil, fmt.Errorf("row %d: expected %d values, got %d", rowIdx, len(columns), len(vals))
+		}
+		row := make(map[string]any, len(columns))
+		for i, colName := range columns {
+			v, err := convertDMLValue(vals[i], typeMap[colName])
+			if err != nil {
+				return nil, fmt.Errorf("row %d, column %q: %w", rowIdx, colName, err)
+			}
+			row[colName] = v
+		}
+		rows = append(rows, row)
+	}
+
+	ing := ingest.New(cat, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
+	if err := ing.Ingest(ctx, rows); err != nil {
+		return nil, fmt.Errorf("ingesting rows: %w", err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		return nil, fmt.Errorf("flushing rows: %w", err)
+	}
+
+	return &dmlResult{rowsAffected: int64(len(rows)), command: "INSERT"}, nil
+}
+
+func executeDMLDelete(ctx context.Context, cat *catalog.Catalog, info *plansql.DeleteInfo) (*dmlResult, error) {
+	tableMeta, err := cat.GetTable(ctx, info.Table)
+	if err != nil {
+		return nil, fmt.Errorf("table %q: %w", info.Table, err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, info.Table)
+	if err != nil {
+		return nil, fmt.Errorf("reading manifest: %w", err)
+	}
+
+	var predicate func(b *batch.RecordBatch, row int) bool
+	if info.WhereSQL != "" {
+		node, parseErr := plansql.ParseExpression(info.WhereSQL)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing WHERE: %w", parseErr)
+		}
+		compiled, compErr := expr.Compile(node)
+		if compErr != nil {
+			return nil, fmt.Errorf("compiling WHERE: %w", compErr)
+		}
+		predicate = func(b *batch.RecordBatch, row int) bool {
+			v := compiled.Eval(b, row)
+			bv, ok := v.(bool)
+			return ok && bv
+		}
+	}
+
+	var totalDeleted int64
+	var markers []catalog.DeleteMarker
+	schema := tableMeta.Schema.Columns
+
+	for _, part := range manifest.Partitions {
+		for _, file := range part.Files {
+			b, err := readDMLFile(ctx, cat, file.Path, schema)
+			if err != nil {
+				return nil, fmt.Errorf("reading %s: %w", file.Path, err)
+			}
+			if b == nil {
+				continue
+			}
+			var indices []int64
+			for i := 0; i < b.Len; i++ {
+				if predicate == nil || predicate(b, i) {
+					indices = append(indices, int64(i))
+				}
+			}
+			if len(indices) > 0 {
+				markers = append(markers, catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices})
+				totalDeleted += int64(len(indices))
+			}
+		}
+	}
+
+	if len(markers) > 0 {
+		if err := cat.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
+			return nil, fmt.Errorf("recording delete markers: %w", err)
+		}
+	}
+
+	return &dmlResult{rowsAffected: totalDeleted, command: "DELETE"}, nil
+}
+
+func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.UpdateInfo) (*dmlResult, error) {
+	tableMeta, err := cat.GetTable(ctx, info.Table)
+	if err != nil {
+		return nil, fmt.Errorf("table %q: %w", info.Table, err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, info.Table)
+	if err != nil {
+		return nil, fmt.Errorf("reading manifest: %w", err)
+	}
+
+	var predicate func(b *batch.RecordBatch, row int) bool
+	if info.WhereSQL != "" {
+		node, parseErr := plansql.ParseExpression(info.WhereSQL)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing WHERE: %w", parseErr)
+		}
+		compiled, compErr := expr.Compile(node)
+		if compErr != nil {
+			return nil, fmt.Errorf("compiling WHERE: %w", compErr)
+		}
+		predicate = func(b *batch.RecordBatch, row int) bool {
+			v := compiled.Eval(b, row)
+			bv, ok := v.(bool)
+			return ok && bv
+		}
+	}
+
+	typeMap := make(map[string]parquet.TypeID, len(tableMeta.Schema.Columns))
+	for _, col := range tableMeta.Schema.Columns {
+		typeMap[col.Name] = col.Type
+	}
+
+	schema := tableMeta.Schema.Columns
+	var totalUpdated int64
+	var markers []catalog.DeleteMarker
+	var updatedRows []map[string]any
+
+	for _, part := range manifest.Partitions {
+		for _, file := range part.Files {
+			b, err := readDMLFile(ctx, cat, file.Path, schema)
+			if err != nil {
+				return nil, fmt.Errorf("reading %s: %w", file.Path, err)
+			}
+			if b == nil {
+				continue
+			}
+			allRows := b.ToRows()
+			var indices []int64
+			for i := 0; i < b.Len; i++ {
+				if predicate == nil || predicate(b, i) {
+					indices = append(indices, int64(i))
+				}
+			}
+			if len(indices) == 0 {
+				continue
+			}
+			markers = append(markers, catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices})
+			for _, idx := range indices {
+				row := allRows[idx]
+				for _, sc := range info.SetClauses {
+					v, convErr := convertDMLValue(sc.Value, typeMap[sc.Column])
+					if convErr != nil {
+						return nil, fmt.Errorf("SET %s: %w", sc.Column, convErr)
+					}
+					row[sc.Column] = v
+				}
+				updatedRows = append(updatedRows, row)
+			}
+			totalUpdated += int64(len(indices))
+		}
+	}
+
+	if len(markers) > 0 {
+		if err := cat.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
+			return nil, fmt.Errorf("recording delete markers: %w", err)
+		}
+	}
+
+	if len(updatedRows) > 0 {
+		ing := ingest.New(cat, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
+		if err := ing.Ingest(ctx, updatedRows); err != nil {
+			return nil, fmt.Errorf("inserting updated rows: %w", err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			return nil, fmt.Errorf("flushing updated rows: %w", err)
+		}
+	}
+
+	return &dmlResult{rowsAffected: totalUpdated, command: "UPDATE"}, nil
+}
+
+func readDMLFile(ctx context.Context, cat *catalog.Catalog, filePath string, schema []parquet.Column) (*batch.RecordBatch, error) {
+	store := cat.Store()
+	if ras, ok := store.(objstore.ReaderAtStore); ok {
+		ra, size, err := ras.GetReaderAt(ctx, cat.Bucket(), filePath)
+		if err != nil {
+			return nil, err
+		}
+		defer ra.Close()
+		reader, err := parquet.NewReader(ra, size)
+		if err != nil {
+			return nil, err
+		}
+		return scan.ReadFileColumnar(reader, schema)
+	}
+
+	rc, _, err := store.Get(ctx, cat.Bucket(), filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, rc); err != nil {
+		return nil, err
+	}
+	data := buf.Bytes()
+	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	return scan.ReadFileColumnar(reader, schema)
+}
+
+func convertDMLValue(s string, typ parquet.TypeID) (any, error) {
+	s = strings.TrimSpace(s)
+	if strings.EqualFold(s, "null") {
+		return nil, nil
+	}
+	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		s = s[1 : len(s)-1]
+	}
+	switch typ {
+	case parquet.TypeBool:
+		return strconv.ParseBool(s)
+	case parquet.TypeInt32:
+		v, err := strconv.ParseInt(s, 10, 32)
+		return int32(v), err
+	case parquet.TypeInt64:
+		return strconv.ParseInt(s, 10, 64)
+	case parquet.TypeFloat32:
+		v, err := strconv.ParseFloat(s, 32)
+		return float32(v), err
+	case parquet.TypeFloat64:
+		return strconv.ParseFloat(s, 64)
+	case parquet.TypeString:
+		return s, nil
+	case parquet.TypeTimestamp:
+		for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02"} {
+			if t, err := time.Parse(layout, s); err == nil {
+				return t, nil
+			}
+		}
+		return nil, fmt.Errorf("cannot parse timestamp %q", s)
+	case parquet.TypeDate:
+		t, err := time.Parse("2006-01-02", s)
+		return t, err
+	default:
+		return s, nil
+	}
 }
 
 func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {

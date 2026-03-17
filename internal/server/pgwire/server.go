@@ -311,6 +311,22 @@ func (c *pgConn) handleQuery(sql string) {
 		return
 	}
 
+	// Handle DML (INSERT/UPDATE/DELETE) via Execute path
+	if strings.HasPrefix(upper, "INSERT ") ||
+		strings.HasPrefix(upper, "UPDATE ") ||
+		strings.HasPrefix(upper, "DELETE ") {
+		ctx := context.Background()
+		result, err := c.db.Execute(ctx, sql)
+		if err != nil {
+			c.sendError("ERROR", "42000", err.Error())
+			c.sendReadyForQuery()
+			return
+		}
+		c.sendCommandComplete(fmt.Sprintf("%s 0 %d", result.Command, result.RowsAffected))
+		c.sendReadyForQuery()
+		return
+	}
+
 	ctx := context.Background()
 	result, err := c.db.Query(ctx, sql)
 	if err != nil {

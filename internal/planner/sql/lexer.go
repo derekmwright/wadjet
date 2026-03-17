@@ -120,6 +120,14 @@ const (
 	TokenKWGrouping
 	TokenKWSets
 
+	// DML keywords
+	TokenKWUpdate
+	TokenKWSet
+	TokenKWDelete
+	TokenKWInsert
+	TokenKWInto
+	TokenKWValues
+
 	// Raw capture
 	TokenRawBody // everything after AS until terminator
 )
@@ -201,6 +209,12 @@ var keywords = map[string]TokenType{
 	"ROLLUP":     TokenKWRollup,
 	"GROUPING":   TokenKWGrouping,
 	"SETS":       TokenKWSets,
+	"UPDATE":     TokenKWUpdate,
+	"SET":        TokenKWSet,
+	"DELETE":     TokenKWDelete,
+	"INSERT":     TokenKWInsert,
+	"INTO":       TokenKWInto,
+	"VALUES":     TokenKWValues,
 }
 
 // token is a lexical token produced by the lexer.

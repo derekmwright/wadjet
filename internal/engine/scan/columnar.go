@@ -12,6 +12,47 @@ import (
 	pqt "github.com/derekmwright/caelum/internal/storage/parquet"
 )
 
+// ReadFileColumnar reads all row groups from a Parquet reader into a single RecordBatch.
+// Used by the DML executor to read entire files for DELETE/UPDATE operations.
+func ReadFileColumnar(reader *pqt.Reader, schema []pqt.Column) (*batch.RecordBatch, error) {
+	pqFile := reader.File()
+	rgs := pqFile.RowGroups()
+
+	var batches []*batch.RecordBatch
+	for _, rg := range rgs {
+		b, err := readRowGroupColumnar(rg, schema, pqFile)
+		if err != nil {
+			return nil, err
+		}
+		if b != nil {
+			batches = append(batches, b)
+		}
+	}
+
+	if len(batches) == 0 {
+		return nil, nil
+	}
+	if len(batches) == 1 {
+		return batches[0], nil
+	}
+
+	totalRows := 0
+	for _, b := range batches {
+		totalRows += b.Len
+	}
+	result := batch.NewRecordBatch(schema, totalRows)
+	offset := 0
+	for _, b := range batches {
+		for j := range schema {
+			for i := 0; i < b.Len; i++ {
+				copyVectorValue(result.Columns[j], offset+i, b.Columns[j], i)
+			}
+		}
+		offset += b.Len
+	}
+	return result, nil
+}
+
 // readRowGroupColumnar reads a parquet row group directly into a RecordBatch
 // using typed column access — no map[string]any intermediate.
 func readRowGroupColumnar(rg goparquet.RowGroup, schema []pqt.Column, pqFile *goparquet.File) (*batch.RecordBatch, error) {

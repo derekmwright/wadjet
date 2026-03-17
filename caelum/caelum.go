@@ -126,6 +126,17 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return db.dropTableSQL(ctx, parsed.DropTable)
 	case plansql.QueryShowTables:
 		return db.showTables(ctx)
+	case plansql.QueryInsert, plansql.QueryUpdate, plansql.QueryDelete:
+		result, err := db.Execute(ctx, sql)
+		if err != nil {
+			return nil, err
+		}
+		return &QueryResult{
+			Columns: []string{"result"},
+			Rows: []map[string]any{{
+				"result": fmt.Sprintf("%s %d", result.Command, result.RowsAffected),
+			}},
+		}, nil
 	}
 
 	selectInfo, err := plansql.ExtractSelect(parsed)

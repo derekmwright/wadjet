@@ -386,3 +386,142 @@ func TestFederatedCatalog(t *testing.T) {
 		t.Errorf("expected manifest table 'sensor_data', got %q", remoteManifest.Table)
 	}
 }
+
+func TestAddDeleteMarkers(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	files := []FileEntry{
+		{Path: "data/part-0001.parquet", SizeBytes: 1024, NumRows: 100, CreatedAt: time.Now().UTC()},
+		{Path: "data/part-0002.parquet", SizeBytes: 2048, NumRows: 200, CreatedAt: time.Now().UTC()},
+	}
+	if err := cat.AddFiles(ctx, "events", nil, "", files); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add delete markers
+	markers := []DeleteMarker{
+		{FilePath: "data/part-0001.parquet", RowIndices: []int64{0, 5, 10}},
+		{FilePath: "data/part-0002.parquet", RowIndices: []int64{3}},
+	}
+	if err := cat.AddDeleteMarkers(ctx, "events", markers); err != nil {
+		t.Fatalf("AddDeleteMarkers: %v", err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(manifest.DeleteMarkers) != 2 {
+		t.Fatalf("expected 2 delete markers, got %d", len(manifest.DeleteMarkers))
+	}
+
+	markerMap := make(map[string][]int64)
+	for _, dm := range manifest.DeleteMarkers {
+		markerMap[dm.FilePath] = dm.RowIndices
+	}
+
+	if len(markerMap["data/part-0001.parquet"]) != 3 {
+		t.Errorf("expected 3 deleted indices for part-0001, got %d", len(markerMap["data/part-0001.parquet"]))
+	}
+	if len(markerMap["data/part-0002.parquet"]) != 1 {
+		t.Errorf("expected 1 deleted index for part-0002, got %d", len(markerMap["data/part-0002.parquet"]))
+	}
+}
+
+func TestAddDeleteMarkers_Merge(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	files := []FileEntry{{Path: "data/part-0001.parquet", SizeBytes: 1024, NumRows: 100, CreatedAt: time.Now().UTC()}}
+	if err := cat.AddFiles(ctx, "events", nil, "", files); err != nil {
+		t.Fatal(err)
+	}
+
+	// First batch of deletes
+	if err := cat.AddDeleteMarkers(ctx, "events", []DeleteMarker{
+		{FilePath: "data/part-0001.parquet", RowIndices: []int64{0, 5}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second batch — should merge, not overwrite
+	if err := cat.AddDeleteMarkers(ctx, "events", []DeleteMarker{
+		{FilePath: "data/part-0001.parquet", RowIndices: []int64{5, 10}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(manifest.DeleteMarkers) != 1 {
+		t.Fatalf("expected 1 marker entry (merged), got %d", len(manifest.DeleteMarkers))
+	}
+
+	// Should have {0, 5, 10} — deduped
+	indices := make(map[int64]bool)
+	for _, idx := range manifest.DeleteMarkers[0].RowIndices {
+		indices[idx] = true
+	}
+	if len(indices) != 3 {
+		t.Fatalf("expected 3 unique indices after merge, got %d", len(indices))
+	}
+	for _, expected := range []int64{0, 5, 10} {
+		if !indices[expected] {
+			t.Errorf("expected index %d in merged markers", expected)
+		}
+	}
+}
+
+func TestRemoveFiles_CleansDeleteMarkers(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "events", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	files := []FileEntry{
+		{Path: "data/part-0001.parquet", SizeBytes: 1024, NumRows: 100, CreatedAt: time.Now().UTC()},
+		{Path: "data/part-0002.parquet", SizeBytes: 2048, NumRows: 200, CreatedAt: time.Now().UTC()},
+	}
+	if err := cat.AddFiles(ctx, "events", nil, "", files); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add delete markers to both files
+	if err := cat.AddDeleteMarkers(ctx, "events", []DeleteMarker{
+		{FilePath: "data/part-0001.parquet", RowIndices: []int64{0}},
+		{FilePath: "data/part-0002.parquet", RowIndices: []int64{1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Remove one file — its markers should also be removed
+	if err := cat.RemoveFiles(ctx, "events", []string{"data/part-0001.parquet"}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(manifest.DeleteMarkers) != 1 {
+		t.Fatalf("expected 1 delete marker after removal, got %d", len(manifest.DeleteMarkers))
+	}
+	if manifest.DeleteMarkers[0].FilePath != "data/part-0002.parquet" {
+		t.Errorf("expected remaining marker for part-0002, got %q", manifest.DeleteMarkers[0].FilePath)
+	}
+}

@@ -53,9 +53,17 @@ type TableMeta struct {
 
 // PartitionManifest tracks all partitions and their files for a table.
 type PartitionManifest struct {
-	Table      string           `json:"table"`
-	Partitions []PartitionEntry `json:"partitions"`
-	UpdatedAt  time.Time        `json:"updated_at"`
+	Table        string           `json:"table"`
+	Partitions   []PartitionEntry `json:"partitions"`
+	DeleteMarkers []DeleteMarker  `json:"delete_markers,omitempty"` // merge-on-read deletes
+	UpdatedAt    time.Time        `json:"updated_at"`
+}
+
+// DeleteMarker records rows to skip during scan (merge-on-read).
+// Each marker identifies deleted rows within a specific data file.
+type DeleteMarker struct {
+	FilePath   string  `json:"file_path"`   // path of the data file containing deleted rows
+	RowIndices []int64 `json:"row_indices"` // 0-based row indices to skip
 }
 
 // PartitionEntry describes a single partition.
@@ -247,6 +255,126 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 		return err
 	}
 	return fmt.Errorf("manifest update failed after %d CAS retries (table %q)", maxRetries, tableName)
+}
+
+// AddDeleteMarkers adds delete markers to a table's manifest using CAS.
+// Merges new markers with existing ones for the same file.
+func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers []DeleteMarker) error {
+	key := c.key("manifest." + tableName)
+	const maxRetries = 5
+
+	for retry := 0; retry < maxRetries; retry++ {
+		raw, rev, err := c.kv.Get(key)
+		if err != nil {
+			return fmt.Errorf("reading manifest for %q: %w", tableName, err)
+		}
+
+		var manifest PartitionManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return fmt.Errorf("decoding manifest: %w", err)
+		}
+
+		// Merge markers: combine row indices for same file path
+		existing := make(map[string]map[int64]bool)
+		for _, dm := range manifest.DeleteMarkers {
+			if existing[dm.FilePath] == nil {
+				existing[dm.FilePath] = make(map[int64]bool)
+			}
+			for _, idx := range dm.RowIndices {
+				existing[dm.FilePath][idx] = true
+			}
+		}
+		for _, dm := range markers {
+			if existing[dm.FilePath] == nil {
+				existing[dm.FilePath] = make(map[int64]bool)
+			}
+			for _, idx := range dm.RowIndices {
+				existing[dm.FilePath][idx] = true
+			}
+		}
+
+		// Rebuild merged markers
+		manifest.DeleteMarkers = nil
+		for filePath, indices := range existing {
+			rows := make([]int64, 0, len(indices))
+			for idx := range indices {
+				rows = append(rows, idx)
+			}
+			manifest.DeleteMarkers = append(manifest.DeleteMarkers, DeleteMarker{
+				FilePath:   filePath,
+				RowIndices: rows,
+			})
+		}
+		manifest.UpdatedAt = time.Now().UTC()
+
+		updated, err := json.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("marshaling manifest: %w", err)
+		}
+
+		_, err = c.kv.Update(key, updated, rev)
+		if err == ErrRevisionMismatch {
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("delete marker update failed after %d CAS retries (table %q)", maxRetries, tableName)
+}
+
+// RemoveFiles removes data files and their delete markers from the manifest.
+// Used after compaction to clean up rewritten files.
+func (c *Catalog) RemoveFiles(_ context.Context, tableName string, filePaths []string) error {
+	key := c.key("manifest." + tableName)
+	const maxRetries = 5
+	removeSet := make(map[string]bool, len(filePaths))
+	for _, p := range filePaths {
+		removeSet[p] = true
+	}
+
+	for retry := 0; retry < maxRetries; retry++ {
+		raw, rev, err := c.kv.Get(key)
+		if err != nil {
+			return fmt.Errorf("reading manifest for %q: %w", tableName, err)
+		}
+
+		var manifest PartitionManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return fmt.Errorf("decoding manifest: %w", err)
+		}
+
+		// Remove files from partitions
+		for i := range manifest.Partitions {
+			filtered := manifest.Partitions[i].Files[:0]
+			for _, f := range manifest.Partitions[i].Files {
+				if !removeSet[f.Path] {
+					filtered = append(filtered, f)
+				}
+			}
+			manifest.Partitions[i].Files = filtered
+		}
+
+		// Remove delete markers for removed files
+		filtered := manifest.DeleteMarkers[:0]
+		for _, dm := range manifest.DeleteMarkers {
+			if !removeSet[dm.FilePath] {
+				filtered = append(filtered, dm)
+			}
+		}
+		manifest.DeleteMarkers = filtered
+		manifest.UpdatedAt = time.Now().UTC()
+
+		updated, err := json.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("marshaling manifest: %w", err)
+		}
+
+		_, err = c.kv.Update(key, updated, rev)
+		if err == ErrRevisionMismatch {
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("file removal failed after %d CAS retries (table %q)", maxRetries, tableName)
 }
 
 // UDFDef mirrors expr.UDFDef for persistence without import cycles.

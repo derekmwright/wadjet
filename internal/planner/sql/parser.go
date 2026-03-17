@@ -18,6 +18,9 @@ type ParsedQuery struct {
 	DropFunction   *DropFunctionInfo
 	CreateTable    *CreateTableInfo
 	DropTable      *DropTableInfo
+	Update         *UpdateInfo
+	Delete         *DeleteInfo
+	Insert         *InsertInfo
 	Windows        []WindowSpec   // extracted window function specs
 	CTEs           []CTEDef       // extracted CTE definitions
 	SelectInfo     *SelectInfo    // parsed SELECT info (replaces AST)
@@ -76,6 +79,32 @@ type DropTableInfo struct {
 	IfExists bool
 }
 
+// UpdateInfo holds details for an UPDATE statement.
+type UpdateInfo struct {
+	Table      string            // table name
+	SetClauses []SetClause       // SET column = value pairs
+	WhereSQL   string            // raw WHERE clause SQL (empty = update all rows)
+}
+
+// SetClause represents a single SET column = value assignment.
+type SetClause struct {
+	Column string
+	Value  string // raw expression text
+}
+
+// DeleteInfo holds details for a DELETE statement.
+type DeleteInfo struct {
+	Table    string // table name
+	WhereSQL string // raw WHERE clause SQL (empty = delete all rows)
+}
+
+// InsertInfo holds details for an INSERT statement.
+type InsertInfo struct {
+	Table   string     // table name
+	Columns []string   // target column names (empty = all columns)
+	Values  [][]string // rows of value expressions
+}
+
 // QueryType identifies the kind of SQL statement.
 type QueryType int
 
@@ -89,6 +118,9 @@ const (
 	QueryCreateTable
 	QueryDropTable
 	QueryShowTables
+	QueryUpdate
+	QueryDelete
+	QueryInsert
 	QueryUnsupported
 )
 
@@ -117,6 +149,12 @@ func Parse(sql string) (*ParsedQuery, error) {
 	case TokenKWDrop:
 		l.nextToken() // consume DROP
 		return lexParseDrop(trimmed, l)
+	case TokenKWUpdate:
+		return parseUpdate(trimmed, l)
+	case TokenKWDelete:
+		return parseDelete(trimmed, l)
+	case TokenKWInsert:
+		return parseInsert(trimmed, l)
 	}
 
 	// Pre-parse CTEs — extract WITH ... AS (...) clauses

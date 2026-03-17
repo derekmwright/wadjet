@@ -50,11 +50,12 @@ type Scanner struct {
 	logger          *slog.Logger
 
 	// Internal state
-	files        []scanFile
-	fileIdx      int
-	stats        ScanStats
-	schema       []pqt.Column
-	useReaderAt  bool // true if store supports random access (column pruning)
+	files         []scanFile
+	fileIdx       int
+	stats         ScanStats
+	schema        []pqt.Column
+	useReaderAt   bool // true if store supports random access (column pruning)
+	deleteMarkers map[string]map[int64]bool // file path -> set of row indices to skip
 
 	// Async prefetch: downloads next file while current is being decoded
 	// Only used when NOT using ReaderAt path
@@ -123,6 +124,18 @@ func (s *Scanner) Init(ctx context.Context) error {
 	s.schema = tableMeta.Schema.Columns
 
 	s.stats.TotalPartitions = len(manifest.Partitions)
+
+	// Load delete markers for merge-on-read deletes
+	if len(manifest.DeleteMarkers) > 0 {
+		s.deleteMarkers = make(map[string]map[int64]bool, len(manifest.DeleteMarkers))
+		for _, dm := range manifest.DeleteMarkers {
+			idxSet := make(map[int64]bool, len(dm.RowIndices))
+			for _, idx := range dm.RowIndices {
+				idxSet[idx] = true
+			}
+			s.deleteMarkers[dm.FilePath] = idxSet
+		}
+	}
 
 	// Level 1: Partition pruning
 	for _, part := range manifest.Partitions {
@@ -329,6 +342,22 @@ func (s *Scanner) decodeRowGroups(ctx context.Context, reader *pqt.Reader, file 
 				}
 			}
 			offset += b.Len
+		}
+	}
+
+	// Apply delete markers: skip rows marked for deletion (merge-on-read)
+	if delSet := s.deleteMarkers[file.path]; len(delSet) > 0 {
+		sel := make([]uint16, 0, result.Len)
+		for i := 0; i < result.Len; i++ {
+			if !delSet[int64(i)] {
+				sel = append(sel, uint16(i))
+			}
+		}
+		if len(sel) == 0 {
+			return nil, nil
+		}
+		if len(sel) < result.Len {
+			result.Sel = sel
 		}
 	}
 

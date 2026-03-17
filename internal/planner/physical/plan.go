@@ -2604,14 +2604,15 @@ type scannerExecSource struct {
 }
 
 type scanSourceInner struct {
-	cat          *catalog.Catalog
-	tableName    string
-	files        []catalog.FileEntry
-	idx          int64 // atomic index for parallel workers
-	schema       []parquet.Column
-	requiredCols []string
-	scanPreds    []scanPredicate // converted predicates for row-group pruning
-	rowsScanned  int64
+	cat            *catalog.Catalog
+	tableName      string
+	files          []catalog.FileEntry
+	idx            int64 // atomic index for parallel workers
+	schema         []parquet.Column
+	requiredCols   []string
+	scanPreds      []scanPredicate // converted predicates for row-group pruning
+	rowsScanned    int64
+	deleteMarkers  map[string]map[int64]bool // file path -> set of row indices to skip
 
 	// parallel scan
 	batchCh chan *batch.RecordBatch
@@ -2657,16 +2658,30 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		}
 	}
 
+	// Load delete markers for merge-on-read deletes
+	var delMarkers map[string]map[int64]bool
+	if len(manifest.DeleteMarkers) > 0 {
+		delMarkers = make(map[string]map[int64]bool, len(manifest.DeleteMarkers))
+		for _, dm := range manifest.DeleteMarkers {
+			idxSet := make(map[int64]bool, len(dm.RowIndices))
+			for _, idx := range dm.RowIndices {
+				idxSet[idx] = true
+			}
+			delMarkers[dm.FilePath] = idxSet
+		}
+	}
+
 	inner := &scanSourceInner{
-		cat:          s.catalog,
-		tableName:    s.tableName,
-		files:        files,
-		schema:       tableMeta.Schema.Columns,
-		requiredCols: s.requiredCols,
-		scanPreds:    sp,
-		batchCh:      make(chan *batch.RecordBatch, 4),
-		errCh:        make(chan error, 1),
-		cancel:       cancel,
+		cat:           s.catalog,
+		tableName:     s.tableName,
+		files:         files,
+		schema:        tableMeta.Schema.Columns,
+		requiredCols:  s.requiredCols,
+		scanPreds:     sp,
+		deleteMarkers: delMarkers,
+		batchCh:       make(chan *batch.RecordBatch, 4),
+		errCh:         make(chan error, 1),
+		cancel:        cancel,
 	}
 	s.scanner = inner
 
@@ -2763,7 +2778,23 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 			continue
 		}
 
-		atomic.AddInt64(&inner.rowsScanned, int64(b.Len))
+		// Apply delete markers: skip rows marked for deletion
+		if delSet := inner.deleteMarkers[file.Path]; len(delSet) > 0 {
+			sel := make([]uint16, 0, b.Len)
+			for i := 0; i < b.Len; i++ {
+				if !delSet[int64(i)] {
+					sel = append(sel, uint16(i))
+				}
+			}
+			if len(sel) == 0 {
+				continue
+			}
+			if len(sel) < b.Len {
+				b.Sel = sel
+			}
+		}
+
+		atomic.AddInt64(&inner.rowsScanned, int64(b.ActiveLen()))
 
 		select {
 		case inner.batchCh <- b:
