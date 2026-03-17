@@ -174,39 +174,76 @@ Run benchmarks locally: `go test -bench=. -benchmem ./internal/engine/...`
 
 ### TPC-H SF1 Performance
 
-All 22 TPC-H queries at scale factor 1 (~6M lineitem rows, 8 tables). Pure Go, no SIMD, no CGo. Single-node standalone mode on AMD Ryzen 9 5900X (WSL2).
+All 22 TPC-H queries at scale factor 1 (~6M lineitem rows, 8 tables). Pure Go, no SIMD, no CGo. Best of 3 runs.
 
-| Query | Description | Time | Heap Delta | Rows |
-|-------|-------------|------|------------|------|
-| Q01 | Pricing Summary | 1.7s | +133 MB | 6 |
-| Q02 | Min Cost Supplier | 0.7s | +169 MB | 100 |
-| Q03 | Shipping Priority | 1.3s | +299 MB | 10 |
-| Q04 | Order Priority | 1.5s | +232 MB | 5 |
-| Q05 | Local Supplier Volume | 1.0s | +380 MB | 5 |
-| Q06 | Revenue Change | 0.8s | +90 MB | 1 |
-| Q07 | Volume Shipping | 2.8s | +430 MB | 10 |
-| Q08 | National Market Share | 1.0s | +442 MB | 5 |
-| Q09 | Product Type Profit | 1.5s | +828 MB | 58 |
-| Q10 | Returned Item Reporting | 1.1s | +692 MB | 20 |
-| Q11 | Important Stock | 0.2s | +427 MB | 758 |
-| Q12 | Shipping Modes | 1.0s | +120 MB | 7 |
-| Q13 | Customer Distribution | 0.5s | +152 MB | 100 |
-| Q14 | Promotion Effect | 0.9s | +162 MB | 1 |
-| Q15 | Top Supplier | 1.4s | +582 MB | 1 |
-| Q16 | Parts/Supplier | 0.1s | +250 MB | 14262 |
-| Q17 | Small-Quantity Revenue | 2.2s | +199 MB | 1 |
-| Q18 | Large Volume Customer | 3.3s | +558 MB | 0 |
-| Q19 | Discounted Revenue | 1.0s | +269 MB | 1 |
-| Q20 | Potential Part Promotion | 2.6s | +819 MB | 0 |
-| Q21 | Suppliers Kept Orders Waiting | 4.0s | +1043 MB | 10 |
-| Q22 | Global Sales Opportunity | 0.2s | +382 MB | 1 |
-| | **Total** | **30.8s** | | |
+**Standalone** — AWS c7g.2xlarge (8 vCPU Graviton3, 16 GB RAM):
+
+| Query | Description | Time | Rows |
+|-------|-------------|------|------|
+| Q01 | Pricing Summary | 1.79s | 6 |
+| Q02 | Min Cost Supplier | 717ms | 100 |
+| Q03 | Shipping Priority | 1.44s | 10 |
+| Q04 | Order Priority | 1.58s | 5 |
+| Q05 | Local Supplier Volume | 1.11s | 5 |
+| Q06 | Revenue Change | 802ms | 1 |
+| Q07 | Volume Shipping | 3.08s | 10 |
+| Q08 | National Market Share | 1.03s | 5 |
+| Q09 | Product Type Profit | 1.72s | 58 |
+| Q10 | Returned Item Reporting | 1.12s | 20 |
+| Q11 | Important Stock | 186ms | 758 |
+| Q12 | Shipping Modes | 989ms | 7 |
+| Q13 | Customer Distribution | 620ms | 100 |
+| Q14 | Promotion Effect | 939ms | 1 |
+| Q15 | Top Supplier | 1.56s | 1 |
+| Q16 | Parts/Supplier | 146ms | 14262 |
+| Q17 | Small-Quantity Revenue | 2.88s | 1 |
+| Q18 | Large Volume Customer | 3.64s | 0 |
+| Q19 | Discounted Revenue | 990ms | 1 |
+| Q20 | Potential Part Promotion | 2.91s | 0 |
+| Q21 | Suppliers Kept Orders Waiting | 4.18s | 10 |
+| Q22 | Global Sales Opportunity | 296ms | 1 |
+| | **Total** | **33.8s** | |
+
+**Distributed** — 1x c7g.xlarge coordinator + 3x c7g.xlarge workers (16 vCPU total, S3 storage, NATS coordination):
+
+| Query | Description | Time | Rows |
+|-------|-------------|------|------|
+| Q01 | Pricing Summary | 1.96s | 6 |
+| Q02 | Min Cost Supplier | 1.30s | 100 |
+| Q03 | Shipping Priority | 2.04s | 10 |
+| Q04 | Order Priority | 1.95s | 5 |
+| Q05 | Local Supplier Volume | 1.99s | 5 |
+| Q06 | Revenue Change | 1.38s | 1 |
+| Q07 | Volume Shipping | 3.83s | 10 |
+| Q08 | National Market Share | 2.27s | 5 |
+| Q09 | Product Type Profit | 2.90s | 58 |
+| Q10 | Returned Item Reporting | 2.02s | 20 |
+| Q11 | Important Stock | 642ms | 758 |
+| Q12 | Shipping Modes | 1.79s | 7 |
+| Q13 | Customer Distribution | 818ms | 100 |
+| Q14 | Promotion Effect | 1.47s | 1 |
+| Q15 | Top Supplier | 2.83s | 0 |
+| Q16 | Parts/Supplier | 366ms | 14262 |
+| Q17 | Small-Quantity Revenue | 4.08s | 1 |
+| Q18 | Large Volume Customer | 4.53s | 0 |
+| Q19 | Discounted Revenue | 1.57s | 1 |
+| Q20 | Potential Part Promotion | 3.58s | 0 |
+| Q21 | Suppliers Kept Orders Waiting | 5.58s | 10 |
+| Q22 | Global Sales Opportunity | 639ms | 1 |
+| | **Total** | **49.5s** | |
+
+At SF1, distributed mode adds ~47% overhead from NATS coordination and S3 I/O — the dataset is too small to benefit from parallelism across nodes. Distributed mode targets SF10+ workloads where scan volume dominates coordination cost.
 
 Includes cost-based join reordering, subquery decorrelation, common OR predicate extraction, columnar hash joins with int64 fast-path indexing, build-side column pruning, allocation-free aggregate group lookup, Top-K sort materialization, zero-copy semi/anti join output, and 3-level predicate pushdown (partition → row-group → row).
 
 ```bash
-# Reproduce (requires ~2GB RAM, ~30s for data generation)
+# Reproduce standalone (requires ~2GB RAM, ~30s for data generation)
 TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch/
+
+# Reproduce on EC2 (Terraform + SSM, no SSH required)
+cd deploy/benchmark/terraform
+tofu apply -var-file=sf1.tfvars             # Standalone
+tofu apply -var-file=sf1-distributed.tfvars  # Distributed
 ```
 
 ## Deployment Modes
