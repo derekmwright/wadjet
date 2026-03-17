@@ -137,13 +137,46 @@ auth:
       tables: ["*"]
       allow: [read, write, admin]
 
-  # Cell-level security policies
+  # Cell-level security policies (legacy RBAC)
   policies:
     - table: flow_logs
       role: reader
       columns:
         src_ip: "***MASKED***"           # Column masking: column -> mask value
       row_filter: "src_ip LIKE '10.%' OR src_ip LIKE '172.16.%'"
+
+  # ABAC policies (attribute-based access control)
+  # When defined, these take precedence over RBAC roles.
+  # When omitted, RBAC roles are auto-migrated to ABAC at startup.
+  abac_policies:
+    - name: classified-access
+      description: "Clearance-based access to classified tables"
+      priority: 10                       # lower = evaluated first
+      # enabled: true                    # default true; set false to disable
+      rules:
+        - effect: allow
+          conditions:
+            - attribute: subject.clearance
+              operator: in
+              value: "TOP_SECRET,SECRET"
+            - attribute: resource.name
+              operator: eq
+              value: classified_events
+          obligations:
+            - type: row_filter
+              target: classified_events
+              value: "classification_level <= 2"
+            - type: mask_column
+              target: ssn
+              value: "***REDACTED***"
+        - effect: deny
+          conditions:
+            - attribute: subject.role
+              operator: eq
+              value: contractor
+            - attribute: resource.name
+              operator: eq
+              value: classified_events
 ```
 
 ## Hot Reload

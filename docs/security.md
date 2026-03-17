@@ -1,6 +1,6 @@
 # Security
 
-Wadjet provides layered security: authentication, role-based authorization, and cell-level access policies. All security configuration is hot-reloadable.
+Wadjet provides layered security: authentication, authorization (RBAC and ABAC), and cell-level access policies. All security configuration is hot-reloadable.
 
 ## Authentication
 
@@ -8,7 +8,7 @@ Three authentication methods are supported. Configure one in the YAML config fil
 
 ### API Keys
 
-Simple bearer token authentication. Best for service-to-service communication. Each key maps to a name (identity label) and a single role.
+Simple bearer token authentication. Best for service-to-service communication. Each key maps to a name (identity label), a role, and optional ABAC attributes.
 
 ```yaml
 auth:
@@ -23,6 +23,9 @@ auth:
     - key: "wadjet-admin-key-000000"
       name: "admin-operator"
       role: admin
+      attributes:               # optional ABAC attributes
+        clearance: "TOP_SECRET"
+        department: "noc"
 ```
 
 Usage:
@@ -104,7 +107,52 @@ Usage:
 curl --cert client.pem --key client-key.pem --cacert ca.pem https://wadjet.internal:8443/v1/queries ...
 ```
 
+### Identity Enrichment
+
+All authentication methods enrich the `Identity` with attributes for ABAC policy evaluation:
+
+- **API keys**: Custom `attributes` from config (e.g., `clearance`, `department`)
+- **JWT**: All non-standard claims from the token payload (e.g., `department`, `clearance`, `team`)
+- **mTLS**: Certificate fields — `cn`, `org`, `ou`, `san_dns`, `san_email`, `issuer`
+
+These attributes are available as `subject.*` conditions in ABAC policies. The `role`, `name`, and `method` attributes are always populated automatically.
+
+### Multi-Protocol Authentication
+
+Authentication is enforced across all three client protocols:
+
+| Protocol | Mechanism | Details |
+|----------|-----------|---------|
+| **HTTP** | `Authorization: Bearer <token>` header | API key, JWT, or mTLS from TLS state |
+| **PostgreSQL wire** (pgwire) | Cleartext password flow | Server sends `AuthenticationCleartextPassword`, client sends API key or JWT as password |
+| **gRPC** | `authorization` metadata header | Bearer token extracted from gRPC metadata |
+
+When auth is disabled (no provider configured), all protocols accept connections without credentials.
+
+**pgwire example** (psql):
+```bash
+# API key as password
+psql -h localhost -p 5433 -U analyst -W
+Password: wadjet-dashboard-key-xyz789
+
+# Or via connection string
+psql "host=localhost port=5433 user=analyst password=wadjet-dashboard-key-xyz789"
+```
+
+**gRPC example** (grpcurl):
+```bash
+grpcurl -H "authorization: Bearer wadjet-key-abc123" \
+  -d '{"sql": "SELECT * FROM flow_logs LIMIT 10"}' \
+  localhost:9090 wadjet.v1.WadjetService/Query
+```
+
 ## Authorization
+
+Wadjet supports two authorization models: RBAC (role-based) and ABAC (attribute-based). RBAC is simpler and sufficient for most deployments. ABAC provides fine-grained control for government, clearance-level, and multi-tenant environments.
+
+When both are configured, ABAC takes precedence. When only RBAC roles are defined, they are automatically migrated to equivalent ABAC policies at startup.
+
+### RBAC
 
 Role-based access control (RBAC) maps authenticated identities to permissions on tables.
 
@@ -152,6 +200,112 @@ auth:
 4. Check if the role's `allow` list includes the required permission
 5. If the role does not grant access, the request is denied with 403 Forbidden
 
+### ABAC (Attribute-Based Access Control)
+
+ABAC policies evaluate subject attributes (who), resource attributes (what), action (how), and environment conditions (when/where) to make access decisions. This enables policies like "users with clearance=SECRET can read classified tables during business hours, but SSN columns are masked."
+
+#### Policy Structure
+
+```yaml
+auth:
+  abac_policies:
+    - name: classified-data-access
+      description: "Control access to classified tables by clearance level"
+      priority: 10           # lower = evaluated first
+      rules:
+        - effect: allow
+          conditions:
+            - attribute: subject.clearance
+              operator: in
+              value: "TOP_SECRET,SECRET"
+            - attribute: resource.name
+              operator: eq
+              value: "classified_events"
+            - attribute: subject.role
+              operator: neq
+              value: "contractor"
+          obligations:
+            - type: row_filter
+              target: classified_events
+              value: "classification_level <= 2"
+
+        - effect: allow
+          conditions:
+            - attribute: subject.clearance
+              operator: eq
+              value: "SECRET"
+            - attribute: resource.name
+              operator: eq
+              value: "classified_events"
+          obligations:
+            - type: mask_column
+              target: ssn
+              value: "***REDACTED***"
+            - type: deny_column
+              target: raw_payload
+
+    - name: deny-contractors-classified
+      description: "Contractors cannot access classified tables"
+      priority: 5            # higher priority (lower number) than allow rules
+      rules:
+        - effect: deny
+          conditions:
+            - attribute: subject.role
+              operator: eq
+              value: "contractor"
+            - attribute: resource.name
+              operator: eq
+              value: "classified_events"
+```
+
+#### Condition Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `eq` | Equals | `subject.role eq admin` |
+| `neq` | Not equals | `subject.method neq apikey` |
+| `in` | Value in comma-separated list | `subject.clearance in TOP_SECRET,SECRET` |
+| `not_in` | Value not in list | `subject.department not_in hr,legal` |
+| `gt`, `lt`, `gte`, `lte` | Numeric comparison | `env.hour gte 9` |
+| `contains` | String contains | `subject.name contains @example.com` |
+| `regex` | Regular expression match | `resource.name regex ^classified_.*` |
+| `exists` | Attribute is present | `subject.clearance exists` |
+| `not_exists` | Attribute is absent | `subject.clearance not_exists` |
+
+#### Obligation Types
+
+Obligations are side-effects attached to **allow** rules. They constrain how data is returned even when access is granted.
+
+| Type | Target | Value | Description |
+|------|--------|-------|-------------|
+| `row_filter` | table name | SQL predicate | Injected as WHERE clause before execution |
+| `mask_column` | column name | replacement string | Column values replaced with mask value |
+| `deny_column` | column name | — | Column excluded from results entirely |
+| `query_limit` | — | row count | Maximum rows returned |
+
+#### Deny-Overrides Combining
+
+ABAC uses a **deny-overrides** combining algorithm:
+
+1. All matching policies are evaluated (by priority order)
+2. If **any** matching rule has `effect: deny`, the result is **Deny** — regardless of any allow rules
+3. If at least one `effect: allow` matches and no deny rules match, the result is **Allow**
+4. Obligations from all matching allow rules are merged (row filters are AND'd)
+5. If no rules match at all, the default is **Deny** (closed-world assumption)
+
+This ensures that a narrow deny rule always overrides a broad allow — critical for clearance-level data where over-granting is unacceptable.
+
+#### RBAC Auto-Migration
+
+When `abac_policies` is not configured but `roles` are defined, Wadjet automatically converts RBAC roles to equivalent ABAC policies at startup:
+
+- Each role becomes an ABAC policy with `subject.role eq <name>` conditions
+- Table lists become `resource.name in <tables>` conditions
+- Permission lists become action conditions
+- Cell-level `policies` become obligations (row_filter, mask_column, deny_column)
+
+This means existing RBAC configurations work unchanged — they get ABAC evaluation semantics (deny-overrides, attribute matching) automatically.
+
 ## Cell-Level Policies
 
 Cell-level policies provide fine-grained data access control. Row filters are injected into the query plan **before** execution (pushed down to scan operators for distributed enforcement). Column masking is applied **after** execution but **before** results are returned.
@@ -198,7 +352,9 @@ Admin roles are typically exempt from all policies (they see the raw data).
 
 ### Distributed Enforcement
 
-In distributed mode, identity context (name and role) is propagated from the HTTP server to the coordinator and stamped on every worker task. Row filters are injected at plan time and flow naturally through distributed execution — workers never see rows outside the filter predicate.
+In distributed mode, identity context (name, role, and attributes) is propagated from the HTTP/pgwire/gRPC server to the coordinator and stamped on every worker task. Row filters are injected at plan time and flow naturally through distributed execution — workers never see rows outside the filter predicate.
+
+For ABAC, pre-evaluated policy decisions are serialized as JSON into the distributed task's `PolicyDecisionJSON` field. Workers enforce column denial, column masking, and row filters from these decisions without needing access to the full policy set.
 
 ## Security Configuration Example
 
@@ -379,7 +535,9 @@ Global query limits can also be set via environment variables (useful for contai
 2. **Use JWT for user-facing applications** — integrate with your identity provider (Keycloak, Okta, etc.)
 3. **Use API keys for service-to-service** — simpler, adequate for internal services behind a network boundary
 4. **Apply least-privilege roles** — don't give `admin` to services that only need `read`
-5. **Use row filters for multi-tenancy** — ensure each tenant only sees their own data
-6. **Use column masking for PII** — comply with data handling policies without separate data copies
-7. **Rotate credentials regularly** — hot reload makes this zero-downtime
-8. **Audit access** — use Prometheus metrics and server logs to track who queries what
+5. **Use ABAC for clearance-level or multi-tenant workloads** — attribute conditions and deny-overrides prevent over-granting
+6. **Use row filters for multi-tenancy** — ensure each tenant only sees their own data
+7. **Use column masking for PII** — comply with data handling policies without separate data copies
+8. **Use deny rules for hard boundaries** — deny-overrides ensure narrow denials always win over broad allows
+9. **Rotate credentials regularly** — hot reload makes this zero-downtime
+10. **Audit access** — use Prometheus metrics and server logs to track who queries what

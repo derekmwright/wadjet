@@ -8,6 +8,36 @@ The proto file is at `proto/wadjet/v1/wadjet.proto`. Generated Go code is in `ge
 
 Default listen address: `:9090` (configurable via `--grpc-addr` or `grpc.addr` in YAML).
 
+## Authentication
+
+When auth is enabled, gRPC requests must include a bearer token in the `authorization` metadata header. The token can be an API key or JWT.
+
+```bash
+# grpcurl with bearer token
+grpcurl -H "authorization: Bearer wadjet-key-abc123" \
+  -d '{"sql": "SELECT * FROM flow_logs LIMIT 10"}' \
+  localhost:9090 wadjet.v1.WadjetService/Query
+```
+
+```go
+// Go client with per-RPC credentials
+import "google.golang.org/grpc/metadata"
+
+md := metadata.Pairs("authorization", "Bearer "+token)
+ctx := metadata.NewOutgoingContext(ctx, md)
+resp, err := client.Query(ctx, &wadjetv1.QueryRequest{Sql: "SELECT 1"})
+```
+
+```python
+# Python client
+metadata = [("authorization", f"Bearer {token}")]
+resp = client.Query(wadjet_pb2.QueryRequest(sql="SELECT 1"), metadata=metadata)
+```
+
+Health check RPCs (`grpc.health.v1.Health/Check`) bypass authentication.
+
+Unauthenticated requests return gRPC code `UNAUTHENTICATED`. When auth is disabled, no credentials are required.
+
 ## RPCs
 
 ### Query (unary)
@@ -240,6 +270,7 @@ Requires `protoc`, `protoc-gen-go`, and `protoc-gen-go-grpc`.
 
 | gRPC Code | When |
 |-----------|------|
+| `UNAUTHENTICATED` | Missing or invalid bearer token (when auth enabled) |
 | `INVALID_ARGUMENT` | Empty SQL, missing table name, invalid column type |
 | `NOT_FOUND` | Table does not exist, query ID not found |
 | `UNAVAILABLE` | No query engine configured, async RPCs in standalone mode |

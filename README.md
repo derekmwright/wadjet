@@ -115,10 +115,11 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 
 ### Security
 
-- API key, JWT (HMAC/RSA), and mTLS authentication
-- Role-based table access control
-- Cell-level policies (column masking, row filtering)
-- Hot-reloadable configuration
+- API key, JWT (HMAC/RSA), and mTLS authentication — enforced on HTTP, pgwire, and gRPC
+- RBAC (role-based) and ABAC (attribute-based) access control with deny-overrides combining
+- Cell-level policies: column masking, column denial, row filtering via ABAC obligations
+- Identity enrichment from JWT claims, mTLS cert fields, and API key attributes
+- Hot-reloadable configuration (including ABAC policies)
 
 ### Client Connectivity
 
@@ -280,7 +281,7 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 | [Ingestion](docs/ingestion.md) | Micro-batch accumulator, partitioning, Bento pipelines |
 | [Embedding](docs/embedding.md) | Using Wadjet as a Go library |
 | [Distributed Deployment](docs/distributed.md) | Multi-node setup, federation, cluster routing |
-| [Security](docs/security.md) | API keys, JWT, mTLS, RBAC, cell-level policies |
+| [Security](docs/security.md) | API keys, JWT, mTLS, RBAC, ABAC, cell-level policies |
 | [Performance Tuning](docs/tuning.md) | Memory budgets, spill tuning, environment profiles |
 | [Operations](docs/operations.md) | Monitoring, Prometheus metrics, troubleshooting |
 | [Network Analytics](docs/network-analytics.md) | End-to-end workflow: devices → Bento → Wadjet → app |

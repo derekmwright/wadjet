@@ -60,7 +60,7 @@ SQL text
 | `internal/coordinator/` | Query coordinator (plan, dispatch, merge) |
 | `internal/worker/` | Distributed task executor |
 | `internal/server/pgwire/` | PostgreSQL wire protocol |
-| `internal/auth/` | API keys, JWT, mTLS, cell-level policies |
+| `internal/auth/` | API keys, JWT, mTLS, RBAC, ABAC policy engine, identity enrichment |
 | `internal/iceberg/` | Apache Iceberg metadata reader |
 | `benchmarks/tpch/` | TPC-H benchmark suite (22 queries) |
 

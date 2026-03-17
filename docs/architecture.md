@@ -316,7 +316,9 @@ See [Distributed Deployment](distributed.md) for federation setup details.
 
 See [Security](security.md) for full details.
 
-- **Authentication**: API keys, JWT (HMAC-SHA256 / RSA), mTLS
-- **Authorization**: Role-based table access (read / write / admin)
-- **Cell-level policies**: Column masking and row filtering applied post-query
-- **Hot-reloadable**: Auth config changes are picked up without restart
+- **Authentication**: API keys, JWT (HMAC-SHA256 / RSA), mTLS — enforced on HTTP, pgwire, and gRPC
+- **Authorization**: RBAC (role-based) and ABAC (attribute-based) with deny-overrides combining
+- **Identity enrichment**: JWT claims, mTLS cert fields, API key attributes flow into ABAC evaluation
+- **Cell-level policies**: Column masking, column denial, and row filtering via ABAC obligations
+- **Distributed enforcement**: Pre-evaluated policy decisions serialized into worker tasks
+- **Hot-reloadable**: Auth config changes (including ABAC policies) are picked up without restart
