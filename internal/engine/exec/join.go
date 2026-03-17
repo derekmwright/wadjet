@@ -619,8 +619,9 @@ type matchPair struct {
 
 // HashJoinProbe is a UnaryOperator that probes the build-side hash table.
 type HashJoinProbe struct {
-	join     *HashJoin
-	pairsBuf []matchPair // reusable buffer to avoid per-batch allocation
+	join       *HashJoin
+	pairsBuf   []matchPair // reusable buffer to avoid per-batch allocation
+	semiSelBuf []uint16    // reusable selection vector for semi/anti join output
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
@@ -718,9 +719,13 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 }
 
 // executeSemiAntiJoin handles SemiJoin and AntiJoin semantics.
+// Uses a selection vector on the input batch to avoid copying rows.
 func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	// Collect qualifying probe row indices
-	var rows []int
+	// Collect qualifying probe row indices into a selection vector
+	if cap(p.semiSelBuf) < in.Len {
+		p.semiSelBuf = make([]uint16, 0, in.Len)
+	}
+	sel := p.semiSelBuf[:0]
 
 	checkRow := func(row int) {
 		candidates := p.join.lookupBuild(in, row)
@@ -743,7 +748,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 		emit := (p.join.JoinType == SemiJoin && hasMatch) ||
 			(p.join.JoinType == AntiJoin && !hasMatch)
 		if emit {
-			rows = append(rows, row)
+			sel = append(sel, uint16(row))
 		}
 	}
 
@@ -757,19 +762,15 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 		}
 	}
 
-	if len(rows) == 0 {
+	p.semiSelBuf = sel // save grown slice for reuse
+
+	if len(sel) == 0 {
 		return nil, nil
 	}
 
-	out := batch.NewRecordBatch(in.Schema, len(rows))
-	for colIdx := range in.Schema {
-		dst := out.Columns[colIdx]
-		src := in.Columns[colIdx]
-		for outRow, srcRow := range rows {
-			copyVectorValue(dst, outRow, src, srcRow)
-		}
-	}
-	return out, nil
+	// Use selection vector instead of copying — zero allocation output
+	in.Sel = sel
+	return in, nil
 }
 
 // executeCrossJoin produces the Cartesian product of probe rows with all build-side rows.
