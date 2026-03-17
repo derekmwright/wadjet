@@ -1,0 +1,872 @@
+package physical
+
+import (
+	"testing"
+
+	"github.com/citc-tech/wadjet/internal/config"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
+)
+
+// --- PrettyPrint ---
+
+func TestPrettyPrint_EmptyStages(t *testing.T) {
+	plan := &PhysicalPlan{}
+	got := plan.PrettyPrint()
+	if got != "Single-stage local execution" {
+		t.Errorf("PrettyPrint() = %q, want 'Single-stage local execution'", got)
+	}
+}
+
+func TestPrettyPrint_MultipleStages(t *testing.T) {
+	plan := &PhysicalPlan{
+		Stages: []Stage{
+			{ID: "scan-0", Type: "scan", Tasks: 2},
+			{ID: "agg-1", Type: "aggregate", Tasks: 1, Dependencies: []string{"scan-0"}},
+		},
+	}
+	got := plan.PrettyPrint()
+	if got == "" {
+		t.Error("PrettyPrint() returned empty string for multi-stage plan")
+	}
+	// Should contain stage information
+	if !contains(got, "scan-0") || !contains(got, "agg-1") {
+		t.Errorf("PrettyPrint() missing stage IDs: %q", got)
+	}
+	if !contains(got, "depends on") {
+		t.Errorf("PrettyPrint() missing dependency info: %q", got)
+	}
+}
+
+func TestPrettyPrint_StageWithNoDeps(t *testing.T) {
+	plan := &PhysicalPlan{
+		Stages: []Stage{
+			{ID: "scan-0", Type: "scan", Tasks: 3},
+		},
+	}
+	got := plan.PrettyPrint()
+	if contains(got, "depends on") {
+		t.Errorf("PrettyPrint() should not show deps for stage without them: %q", got)
+	}
+}
+
+// --- EstimateCost ---
+
+func TestEstimateCost_ScanStages(t *testing.T) {
+	stages := []Stage{
+		{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 100, ScanFiles: []string{"a.parquet", "b.parquet"}},
+		{Type: "scan", EstimatedBytes: 2000, EstimatedRows: 200, ScanFiles: []string{"c.parquet"}},
+		{Type: "aggregate"}, // non-scan stages should be ignored
+	}
+	node := logical.NewScan("t", "")
+	cost := EstimateCost(stages, node)
+	if cost.TotalBytes != 3000 {
+		t.Errorf("TotalBytes = %d, want 3000", cost.TotalBytes)
+	}
+	if cost.TotalRows != 300 {
+		t.Errorf("TotalRows = %d, want 300", cost.TotalRows)
+	}
+	if cost.TotalFiles != 3 {
+		t.Errorf("TotalFiles = %d, want 3", cost.TotalFiles)
+	}
+}
+
+func TestEstimateCost_WithFilter(t *testing.T) {
+	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 100}}
+	scan := logical.NewScan("t", "")
+	filter := logical.NewFilter(scan, []logical.Predicate{{Raw: "x > 1"}})
+
+	cost := EstimateCost(stages, filter)
+	if !cost.HasFilter {
+		t.Error("expected HasFilter=true with filter node")
+	}
+}
+
+func TestEstimateCost_WithLimit(t *testing.T) {
+	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 100}}
+	scan := logical.NewScan("t", "")
+	limit := logical.NewLimit(scan, 10, 0)
+
+	cost := EstimateCost(stages, limit)
+	if !cost.HasLimit {
+		t.Error("expected HasLimit=true with limit node")
+	}
+}
+
+func TestEstimateCost_WithPartitionFilter(t *testing.T) {
+	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 100}}
+	scan := logical.NewScan("t", "")
+	scan.PartitionFilter = map[string]string{"year": "2026"}
+
+	cost := EstimateCost(stages, scan)
+	if !cost.HasFilter {
+		t.Error("expected HasFilter=true with partition filter")
+	}
+}
+
+func TestEstimateCost_WithScanPredicates(t *testing.T) {
+	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 100}}
+	scan := logical.NewScan("t", "")
+	scan.ScanPredicates = []logical.Predicate{{Column: "x", Op: "=", Value: 1}}
+
+	cost := EstimateCost(stages, scan)
+	if !cost.HasFilter {
+		t.Error("expected HasFilter=true with scan predicates")
+	}
+}
+
+// --- hasFilterOrPartition ---
+
+func TestHasFilterOrPartition_NilNode(t *testing.T) {
+	if hasFilterOrPartition(nil) {
+		t.Error("expected false for nil node")
+	}
+}
+
+func TestHasFilterOrPartition_DeepFilter(t *testing.T) {
+	scan := logical.NewScan("t", "")
+	filter := logical.NewFilter(scan, nil)
+	project := logical.NewProject(filter, nil)
+
+	if !hasFilterOrPartition(project) {
+		t.Error("expected true for deeply nested filter")
+	}
+}
+
+// --- hasLimit ---
+
+func TestHasLimit_NilNode(t *testing.T) {
+	if hasLimit(nil) {
+		t.Error("expected false for nil node")
+	}
+}
+
+func TestHasLimit_NoLimit(t *testing.T) {
+	scan := logical.NewScan("t", "")
+	if hasLimit(scan) {
+		t.Error("expected false for scan without limit")
+	}
+}
+
+func TestHasLimit_DeepLimit(t *testing.T) {
+	scan := logical.NewScan("t", "")
+	limit := logical.NewLimit(scan, 10, 0)
+	sort := logical.NewSort(limit, nil)
+
+	if !hasLimit(sort) {
+		t.Error("expected true for deeply nested limit")
+	}
+}
+
+// --- formatBytes ---
+
+func TestFormatBytes(t *testing.T) {
+	tests := []struct {
+		input int64
+		want  string
+	}{
+		{500, "500B"},
+		{1 << 20, "1.0MB"},
+		{5 * (1 << 20), "5.0MB"},
+		{1 << 30, "1.0GB"},
+		{3 * (1 << 30), "3.0GB"},
+		{1 << 40, "1.0TB"},
+		{2 * (1 << 40), "2.0TB"},
+	}
+	for _, tt := range tests {
+		got := formatBytes(tt.input)
+		if got != tt.want {
+			t.Errorf("formatBytes(%d) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// --- enforceQueryLimits ---
+
+func TestEnforceQueryLimits_NilLimits(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	planner := NewPlanner(cat)
+	// No query limits — should pass
+	err := planner.enforceQueryLimits(nil, nil)
+	if err != nil {
+		t.Errorf("expected nil error with nil limits, got %v", err)
+	}
+}
+
+func TestEnforceQueryLimits_MaxScanBytes(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	planner := NewPlanner(cat)
+	planner.QueryLimits = &config.QueryLimits{MaxScanBytes: 500}
+
+	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 10}}
+	scan := logical.NewScan("t", "")
+
+	err := planner.enforceQueryLimits(stages, scan)
+	if err == nil {
+		t.Error("expected error for exceeding MaxScanBytes")
+	}
+}
+
+func TestEnforceQueryLimits_MaxScanRows(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	planner := NewPlanner(cat)
+	planner.QueryLimits = &config.QueryLimits{MaxScanRows: 50}
+
+	stages := []Stage{{Type: "scan", EstimatedBytes: 100, EstimatedRows: 100}}
+	scan := logical.NewScan("t", "")
+
+	err := planner.enforceQueryLimits(stages, scan)
+	if err == nil {
+		t.Error("expected error for exceeding MaxScanRows")
+	}
+}
+
+func TestEnforceQueryLimits_MaxScanFiles(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	planner := NewPlanner(cat)
+	planner.QueryLimits = &config.QueryLimits{MaxScanFiles: 1}
+
+	stages := []Stage{{Type: "scan", ScanFiles: []string{"a", "b", "c"}}}
+	scan := logical.NewScan("t", "")
+
+	err := planner.enforceQueryLimits(stages, scan)
+	if err == nil {
+		t.Error("expected error for exceeding MaxScanFiles")
+	}
+}
+
+func TestEnforceQueryLimits_RequireFilterAboveBytes(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	planner := NewPlanner(cat)
+	planner.QueryLimits = &config.QueryLimits{RequireFilterAboveBytes: 100}
+
+	stages := []Stage{{Type: "scan", EstimatedBytes: 200}}
+	scan := logical.NewScan("t", "") // no filter
+
+	err := planner.enforceQueryLimits(stages, scan)
+	if err == nil {
+		t.Error("expected error for missing filter above byte threshold")
+	}
+
+	// With filter should pass
+	filter := logical.NewFilter(scan, []logical.Predicate{{Raw: "x=1"}})
+	err = planner.enforceQueryLimits(stages, filter)
+	if err != nil {
+		t.Errorf("expected no error with filter, got %v", err)
+	}
+}
+
+func TestEnforceQueryLimits_RequireLimitAboveRows(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	planner := NewPlanner(cat)
+	planner.QueryLimits = &config.QueryLimits{RequireLimitAboveRows: 50}
+
+	stages := []Stage{{Type: "scan", EstimatedRows: 100}}
+	scan := logical.NewScan("t", "") // no limit
+
+	err := planner.enforceQueryLimits(stages, scan)
+	if err == nil {
+		t.Error("expected error for missing limit above row threshold")
+	}
+
+	// With limit should pass
+	limit := logical.NewLimit(scan, 10, 0)
+	err = planner.enforceQueryLimits(stages, limit)
+	if err != nil {
+		t.Errorf("expected no error with limit, got %v", err)
+	}
+}
+
+func TestEnforceQueryLimits_UnderLimits(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	planner := NewPlanner(cat)
+	planner.QueryLimits = &config.QueryLimits{
+		MaxScanBytes: 5000,
+		MaxScanRows:  500,
+		MaxScanFiles: 10,
+	}
+
+	stages := []Stage{{Type: "scan", EstimatedBytes: 1000, EstimatedRows: 100, ScanFiles: []string{"a"}}}
+	scan := logical.NewScan("t", "")
+
+	err := planner.enforceQueryLimits(stages, scan)
+	if err != nil {
+		t.Errorf("expected nil error under all limits, got %v", err)
+	}
+}
+
+// --- mapJoinType ---
+
+func TestMapJoinType(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"inner", "inner"},
+		{"INNER JOIN", "inner"},
+		{"left", "left"},
+		{"LEFT OUTER JOIN", "left"},
+		{"right", "right"},
+		{"RIGHT JOIN", "right"},
+		{"full", "full"},
+		{"FULL OUTER JOIN", "full"},
+		{"cross", "cross"},
+		{"CROSS JOIN", "cross"},
+		{"semi", "semi"},
+		{"SEMI JOIN", "semi"},
+		{"anti", "anti"},
+		{"ANTI JOIN", "anti"},
+		{"join", "inner"},
+		{"", "inner"},
+	}
+	for _, tt := range tests {
+		got := mapJoinType(tt.input)
+		if got != tt.want {
+			t.Errorf("mapJoinType(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+// --- mapExecJoinType ---
+
+func TestMapExecJoinType(t *testing.T) {
+	tests := []struct {
+		input string
+		want  exec.JoinType
+	}{
+		{"left", exec.LeftJoin},
+		{"right", exec.RightJoin},
+		{"full", exec.FullOuterJoin},
+		{"cross", exec.CrossJoin},
+		{"semi", exec.SemiJoin},
+		{"anti", exec.AntiJoin},
+		{"inner", exec.InnerJoin},
+		{"unknown", exec.InnerJoin},
+	}
+	for _, tt := range tests {
+		got := mapExecJoinType(tt.input)
+		if got != tt.want {
+			t.Errorf("mapExecJoinType(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+// --- parseJoinKeys ---
+
+func TestParseJoinKeys(t *testing.T) {
+	tests := []struct {
+		cond   string
+		leftN  int
+		rightN int
+	}{
+		{"e.user_id = u.user_id", 1, 1},
+		{"e.a = u.a AND e.b = u.b", 2, 2},
+		{"a = b", 1, 1},
+		{"no equals here", 0, 0},
+	}
+	for _, tt := range tests {
+		left, right := parseJoinKeys(tt.cond)
+		if len(left) != tt.leftN || len(right) != tt.rightN {
+			t.Errorf("parseJoinKeys(%q) = left=%v, right=%v, want %d left, %d right",
+				tt.cond, left, right, tt.leftN, tt.rightN)
+		}
+	}
+}
+
+// --- matchesPartitionFilter ---
+
+func TestMatchesPartitionFilter(t *testing.T) {
+	tests := []struct {
+		name      string
+		partVals  map[string]string
+		filter    map[string]string
+		want      bool
+	}{
+		{"match", map[string]string{"year": "2026"}, map[string]string{"year": "2026"}, true},
+		{"no match", map[string]string{"year": "2025"}, map[string]string{"year": "2026"}, false},
+		{"filter key missing from partition", map[string]string{}, map[string]string{"year": "2026"}, true},
+		{"multi key match", map[string]string{"year": "2026", "month": "03"}, map[string]string{"year": "2026", "month": "03"}, true},
+		{"partial mismatch", map[string]string{"year": "2026", "month": "04"}, map[string]string{"year": "2026", "month": "03"}, false},
+		{"empty filter", map[string]string{"year": "2026"}, map[string]string{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesPartitionFilter(tt.partVals, tt.filter)
+			if got != tt.want {
+				t.Errorf("matchesPartitionFilter(%v, %v) = %v, want %v", tt.partVals, tt.filter, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- evalJoinFilterOp ---
+
+func TestEvalJoinFilterOp(t *testing.T) {
+	tests := []struct {
+		a, b any
+		op   string
+		want bool
+	}{
+		{"a", "b", "!=", true},
+		{"a", "a", "!=", false},
+		{"a", "a", "<>", false},
+		{"b", "a", ">", true},
+		{"a", "b", "<", true},
+		{"b", "b", ">=", true},
+		{"a", "a", "<=", true},
+		{"a", "a", "=", true},
+		{"a", "b", "=", false},
+	}
+	for _, tt := range tests {
+		got := evalJoinFilterOp(tt.a, tt.b, tt.op)
+		if got != tt.want {
+			t.Errorf("evalJoinFilterOp(%v, %v, %q) = %v, want %v", tt.a, tt.b, tt.op, got, tt.want)
+		}
+	}
+}
+
+// --- mapPredOp ---
+
+func TestMapPredOp(t *testing.T) {
+	tests := []struct {
+		op   string
+		want exec.CompareOp
+	}{
+		{"=", exec.OpEq},
+		{"!=", exec.OpNe},
+		{"<>", exec.OpNe},
+		{"<", exec.OpLt},
+		{"<=", exec.OpLe},
+		{">", exec.OpGt},
+		{">=", exec.OpGe},
+		{"like", exec.CompareOp(-1)},
+		{"in", exec.CompareOp(-1)},
+	}
+	for _, tt := range tests {
+		got := mapPredOp(tt.op)
+		if got != tt.want {
+			t.Errorf("mapPredOp(%q) = %d, want %d", tt.op, got, tt.want)
+		}
+	}
+}
+
+// --- decimalFromBytes ---
+
+func TestDecimalFromBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+		wantZ bool // true if we expect zero
+	}{
+		{"empty", nil, true},
+		{"zero", []byte{0}, false},
+		{"small positive", []byte{0x00, 0x0A}, false},           // 10
+		{"small negative", []byte{0xFF, 0xF6}, false},           // -10 (sign-extended)
+		{"large positive", []byte{0, 0, 0, 0, 0, 0, 0, 0, 42}, false}, // 42 in 9 bytes
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := decimalFromBytes(tt.input)
+			if tt.wantZ && (got.Hi != 0 || got.Lo != 0) {
+				t.Errorf("decimalFromBytes(%v) = {Hi:%d, Lo:%d}, want zero", tt.input, got.Hi, got.Lo)
+			}
+		})
+	}
+}
+
+// --- Distributed plan stage generation ---
+
+func TestPlanDistributed_Distinct(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	planner := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	distinct := logical.NewDistinct(scan)
+	stages, err := planner.PlanDistributed(ctx, distinct)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	// Distinct should pass through to children
+	if len(stages) == 0 {
+		t.Fatal("expected at least 1 stage")
+	}
+	if stages[0].Type != "scan" {
+		t.Errorf("expected scan stage, got %q", stages[0].Type)
+	}
+}
+
+func TestPlanDistributed_Project(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	planner := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	proj := logical.NewProject(scan, []logical.Projection{{Column: "event_id", Alias: "id"}})
+	stages, err := planner.PlanDistributed(ctx, proj)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	if len(stages) == 0 {
+		t.Fatal("expected at least 1 stage")
+	}
+	if stages[0].Type != "scan" {
+		t.Errorf("expected scan stage from project passthrough, got %q", stages[0].Type)
+	}
+}
+
+func TestPlanDistributed_Filter(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	planner := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	filter := logical.NewFilter(scan, []logical.Predicate{
+		{Raw: "year = '2026'"},
+	})
+	stages, err := planner.PlanDistributed(ctx, filter)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	if len(stages) == 0 {
+		t.Fatal("expected at least 1 stage")
+	}
+}
+
+func TestPlanDistributed_LimitSort(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	planner := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	sort := logical.NewSort(scan, []logical.OrderExpr{{Column: "ts", Desc: true}})
+	limit := logical.NewLimit(sort, 10, 0)
+
+	stages, err := planner.PlanDistributed(ctx, limit)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+
+	// Expect scan + sort stages
+	if len(stages) < 2 {
+		t.Fatalf("expected at least 2 stages, got %d", len(stages))
+	}
+
+	// Limit should be propagated to sort stage
+	foundSort := false
+	for _, s := range stages {
+		if s.Type == "sort" {
+			foundSort = true
+			if s.Limit != 10 {
+				t.Errorf("expected sort stage limit=10, got %d", s.Limit)
+			}
+		}
+	}
+	if !foundSort {
+		t.Error("expected a sort stage")
+	}
+}
+
+func TestPlanDistributed_UnionSetOp(t *testing.T) {
+	cat, ctx := setupCatalogWithUsers(t)
+	planner := NewPlanner(cat)
+
+	left := logical.NewScan("events", "e")
+	right := logical.NewScan("users", "u")
+	union := logical.NewUnion(left, right, true)
+	stages, err := planner.PlanDistributed(ctx, union)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	// Should have scan stages for both children
+	scanCount := 0
+	for _, s := range stages {
+		if s.Type == "scan" {
+			scanCount++
+		}
+	}
+	if scanCount != 2 {
+		t.Errorf("expected 2 scan stages for union, got %d", scanCount)
+	}
+}
+
+func TestPlanDistributed_IntersectSetOp(t *testing.T) {
+	cat, ctx := setupCatalogWithUsers(t)
+	planner := NewPlanner(cat)
+
+	left := logical.NewScan("events", "e")
+	right := logical.NewScan("users", "u")
+	intersect := logical.NewIntersect(left, right, false)
+	stages, err := planner.PlanDistributed(ctx, intersect)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	if len(stages) < 2 {
+		t.Fatalf("expected at least 2 stages, got %d", len(stages))
+	}
+}
+
+func TestPlanDistributed_ExceptSetOp(t *testing.T) {
+	cat, ctx := setupCatalogWithUsers(t)
+	planner := NewPlanner(cat)
+
+	left := logical.NewScan("events", "e")
+	right := logical.NewScan("users", "u")
+	except := logical.NewExcept(left, right, true)
+	stages, err := planner.PlanDistributed(ctx, except)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	if len(stages) < 2 {
+		t.Fatalf("expected at least 2 stages, got %d", len(stages))
+	}
+}
+
+// --- isURL / isGlob helpers ---
+
+func TestIsURL(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"http://example.com", true},
+		{"https://example.com/data.json", true},
+		{"s3://bucket/key", false},
+		{"/tmp/data.json", false},
+		{"data.json", false},
+	}
+	for _, tt := range tests {
+		got := isURL(tt.input)
+		if got != tt.want {
+			t.Errorf("isURL(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestIsGlob(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"*.json", true},
+		{"data?.csv", true},
+		{"data[0-9].csv", true},
+		{"data.json", false},
+		{"/path/to/file.parquet", false},
+	}
+	for _, tt := range tests {
+		got := isGlob(tt.input)
+		if got != tt.want {
+			t.Errorf("isGlob(%q) = %v, want %v", tt.input, got, tt.want)
+		}
+	}
+}
+
+// --- dbScanSource ---
+
+func TestDBScanSource_Close_NilFields(t *testing.T) {
+	s := &dbScanSource{}
+	err := s.Close()
+	if err != nil {
+		t.Errorf("Close on nil fields should not error, got %v", err)
+	}
+}
+
+// --- CSV named args ---
+
+func TestBuildTableFunctionSource_CSV_SepArg(t *testing.T) {
+	source, err := buildTableFunctionSource("read_csv", []string{"/tmp/test.csv"}, map[string]string{"sep": "|"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	csvSrc, ok := source.(*csvTableFuncSource)
+	if !ok {
+		t.Fatalf("expected *csvTableFuncSource, got %T", source)
+	}
+	if csvSrc.namedArgs["sep"] != "|" {
+		t.Errorf("expected sep=|, got %v", csvSrc.namedArgs)
+	}
+}
+
+func TestBuildTableFunctionSource_ReadJSONAuto(t *testing.T) {
+	source, err := buildTableFunctionSource("read_json_auto", []string{"/tmp/data.json"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := source.(*jsonTableFuncSource); !ok {
+		t.Errorf("expected *jsonTableFuncSource for read_json_auto, got %T", source)
+	}
+}
+
+func TestBuildTableFunctionSource_ReadCSVAuto(t *testing.T) {
+	source, err := buildTableFunctionSource("read_csv_auto", []string{"/tmp/data.csv"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := source.(*csvTableFuncSource); !ok {
+		t.Errorf("expected *csvTableFuncSource for read_csv_auto, got %T", source)
+	}
+}
+
+// helpers
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstring(s, substr))
+}
+
+func containsSubstring(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}
+
+// --- resolveNullsLast ---
+
+func TestResolveNullsLast(t *testing.T) {
+	// Default ASC => NullsLast=true
+	ob := logical.OrderExpr{Column: "id", Desc: false}
+	if !resolveNullsLast(ob) {
+		t.Error("ASC default should be NullsLast=true")
+	}
+
+	// Default DESC => NullsLast=false (NullsFirst)
+	ob = logical.OrderExpr{Column: "id", Desc: true}
+	if resolveNullsLast(ob) {
+		t.Error("DESC default should be NullsLast=false")
+	}
+
+	// Explicit NullsFirst=true => NullsLast=false
+	nf := true
+	ob = logical.OrderExpr{Column: "id", Desc: false, NullsFirst: &nf}
+	if resolveNullsLast(ob) {
+		t.Error("NullsFirst=true should make NullsLast=false")
+	}
+
+	// Explicit NullsFirst=false => NullsLast=true
+	nf = false
+	ob = logical.OrderExpr{Column: "id", Desc: true, NullsFirst: &nf}
+	if !resolveNullsLast(ob) {
+		t.Error("NullsFirst=false should make NullsLast=true")
+	}
+}
+
+// --- extractFilterBuildColumns ---
+
+func TestExtractFilterBuildColumns(t *testing.T) {
+	// Empty
+	cols := extractFilterBuildColumns("")
+	if cols != nil {
+		t.Errorf("expected nil for empty, got %v", cols)
+	}
+
+	// Simple equality
+	cols = extractFilterBuildColumns("e.id = u.id")
+	if len(cols) != 1 {
+		t.Fatalf("expected 1 column, got %d: %v", len(cols), cols)
+	}
+	// The right side of "e.id = u.id" is "u.id" → cleanExpr → "id"
+	if cols[0] != "id" {
+		t.Errorf("expected 'id', got %q", cols[0])
+	}
+
+	// Multiple conditions with AND
+	cols = extractFilterBuildColumns("a.x = b.x AND a.y = b.y")
+	if len(cols) != 2 {
+		t.Fatalf("expected 2 columns, got %d: %v", len(cols), cols)
+	}
+
+	// No operator matches
+	cols = extractFilterBuildColumns("unknown stuff")
+	if len(cols) != 0 {
+		t.Errorf("expected 0 columns for unrecognized filter, got %v", cols)
+	}
+}
+
+// --- cleanExpr ---
+
+func TestCleanExpr(t *testing.T) {
+	if cleanExpr("t.col") != "col" {
+		t.Error("expected 'col' for 't.col'")
+	}
+	if cleanExpr("col") != "col" {
+		t.Error("expected 'col' for 'col'")
+	}
+	if cleanExpr("  t.col  ") != "col" {
+		t.Error("expected 'col' for '  t.col  '")
+	}
+}
+
+// --- PlanDistributed: additional node types ---
+
+func TestPlanDistributed_Window(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	p := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	window := logical.NewWindow(scan, []logical.WindowExpr{
+		{
+			Func:        "row_number",
+			OutputCol:   "rn",
+			PartitionBy: []string{"src_ip"},
+			OrderBy:     []logical.OrderExpr{{Column: "ts"}},
+		},
+	})
+
+	stages, err := p.PlanDistributed(ctx, window)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	if len(stages) == 0 {
+		t.Error("expected at least 1 stage for window")
+	}
+}
+
+func TestPlanDistributed_Aggregate(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	p := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	agg := logical.NewAggregate(scan, []string{"src_ip"}, []logical.AggExpr{
+		{Func: "count", InputCol: "*", OutputCol: "cnt"},
+	})
+
+	stages, err := p.PlanDistributed(ctx, agg)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	if len(stages) == 0 {
+		t.Error("expected at least 1 stage for aggregate")
+	}
+}
+
+func TestPlanDistributed_Sort(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	p := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	sort := logical.NewSort(scan, []logical.OrderExpr{{Column: "ts"}})
+
+	stages, err := p.PlanDistributed(ctx, sort)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	if len(stages) == 0 {
+		t.Error("expected at least 1 stage for sort")
+	}
+}
+
+func TestPlanDistributed_Join(t *testing.T) {
+	cat, ctx := setupCatalogWithUsers(t)
+	p := NewPlanner(cat)
+
+	left := logical.NewScan("events", "e")
+	right := logical.NewScan("users", "u")
+	join := logical.NewJoin(left, right, "inner", "e.user_id = u.id")
+
+	stages, err := p.PlanDistributed(ctx, join)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+	if len(stages) == 0 {
+		t.Error("expected at least 1 stage for join")
+	}
+}

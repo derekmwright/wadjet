@@ -1,0 +1,500 @@
+package parquet
+
+import (
+	"testing"
+)
+
+func TestTypeIDString(t *testing.T) {
+	tests := []struct {
+		id   TypeID
+		want string
+	}{
+		{TypeBool, "BOOL"},
+		{TypeInt32, "INT32"},
+		{TypeInt64, "INT64"},
+		{TypeFloat32, "FLOAT32"},
+		{TypeFloat64, "FLOAT64"},
+		{TypeString, "STRING"},
+		{TypeBytes, "BYTES"},
+		{TypeTimestamp, "TIMESTAMP"},
+		{TypeIPv4, "IPV4"},
+		{TypeIPv6, "IPV6"},
+		{TypeCIDR, "CIDR"},
+		{TypeMAC, "MAC"},
+		{TypePort, "PORT"},
+		{TypeProtocol, "PROTOCOL"},
+		{TypeDuration, "DURATION"},
+		{TypeUUID, "UUID"},
+		{TypeDate, "DATE"},
+		{TypeDecimal, "DECIMAL"},
+		{TypeArray, "ARRAY"},
+		{TypeRow, "ROW"},
+		{TypeMap, "MAP"},
+		{TypeID(999), "UNKNOWN(999)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			got := tt.id.String()
+			if got != tt.want {
+				t.Errorf("TypeID(%d).String() = %q, want %q", int(tt.id), got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseTypeID_AllTypes(t *testing.T) {
+	tests := []struct {
+		input string
+		want  TypeID
+		err   bool
+	}{
+		// Booleans
+		{"BOOL", TypeBool, false},
+		{"BOOLEAN", TypeBool, false},
+		{"bool", TypeBool, false},
+		// Integers
+		{"INT32", TypeInt32, false},
+		{"INT", TypeInt32, false},
+		{"INTEGER", TypeInt32, false},
+		{"INT64", TypeInt64, false},
+		{"BIGINT", TypeInt64, false},
+		{"LONG", TypeInt64, false},
+		// Floats
+		{"FLOAT32", TypeFloat32, false},
+		{"FLOAT", TypeFloat32, false},
+		{"FLOAT64", TypeFloat64, false},
+		{"DOUBLE", TypeFloat64, false},
+		// Strings
+		{"STRING", TypeString, false},
+		{"VARCHAR", TypeString, false},
+		{"TEXT", TypeString, false},
+		// Bytes
+		{"BYTES", TypeBytes, false},
+		{"BINARY", TypeBytes, false},
+		{"VARBINARY", TypeBytes, false},
+		// Timestamp
+		{"TIMESTAMP", TypeTimestamp, false},
+		{"DATETIME", TypeTimestamp, false},
+		// Parameterized types (prefix match)
+		{"DECIMAL(10,2)", TypeDecimal, false},
+		{"NUMERIC(38,6)", TypeDecimal, false},
+		{"ARRAY(STRING)", TypeArray, false},
+		{"ROW(name STRING)", TypeRow, false},
+		{"STRUCT(x INT)", TypeRow, false},
+		{"MAP(STRING, INT)", TypeMap, false},
+		// Unknown
+		{"BANANA", 0, true},
+		{"", 0, true},
+		// With whitespace
+		{"  INT64  ", TypeInt64, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseTypeID(tt.input)
+			if tt.err {
+				if err == nil {
+					t.Fatalf("ParseTypeID(%q): expected error, got %v", tt.input, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseTypeID(%q): unexpected error: %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("ParseTypeID(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseDecimalParams(t *testing.T) {
+	tests := []struct {
+		input     string
+		wantPrec  int
+		wantScale int
+	}{
+		{"DECIMAL", 38, 0},
+		{"DECIMAL(10,2)", 10, 2},
+		{"DECIMAL(18)", 18, 0},
+		{"NUMERIC(5,3)", 5, 3},
+		{"DECIMAL(38,18)", 38, 18},
+		// No closing paren
+		{"DECIMAL(10", 38, 0},
+		// Empty params
+		{"DECIMAL()", 38, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			p, s := ParseDecimalParams(tt.input)
+			if p != tt.wantPrec {
+				t.Errorf("precision = %d, want %d", p, tt.wantPrec)
+			}
+			if s != tt.wantScale {
+				t.Errorf("scale = %d, want %d", s, tt.wantScale)
+			}
+		})
+	}
+}
+
+func TestResolveColumn_SimpleTypes(t *testing.T) {
+	tests := []struct {
+		typeStr string
+		want    TypeID
+	}{
+		{"INT64", TypeInt64},
+		{"STRING", TypeString},
+		{"BOOL", TypeBool},
+		{"FLOAT64", TypeFloat64},
+		{"DATE", TypeDate},
+	}
+	for _, tt := range tests {
+		t.Run(tt.typeStr, func(t *testing.T) {
+			col, err := ResolveColumn("test", tt.typeStr)
+			if err != nil {
+				t.Fatalf("ResolveColumn(%q): %v", tt.typeStr, err)
+			}
+			if col.Type != tt.want {
+				t.Fatalf("Type = %v, want %v", col.Type, tt.want)
+			}
+			if col.Name != "test" {
+				t.Fatalf("Name = %q, want %q", col.Name, "test")
+			}
+			if !col.Nullable {
+				t.Fatal("expected Nullable to be true")
+			}
+		})
+	}
+}
+
+func TestResolveColumn_Array(t *testing.T) {
+	col, err := ResolveColumn("tags", "ARRAY(STRING)")
+	if err != nil {
+		t.Fatalf("ResolveColumn: %v", err)
+	}
+	if col.Type != TypeArray {
+		t.Fatalf("Type = %v, want TypeArray", col.Type)
+	}
+	if col.ElementType == nil {
+		t.Fatal("expected non-nil ElementType")
+	}
+	if col.ElementType.Type != TypeString {
+		t.Fatalf("ElementType.Type = %v, want TypeString", col.ElementType.Type)
+	}
+}
+
+func TestResolveColumn_NestedArray(t *testing.T) {
+	col, err := ResolveColumn("matrix", "ARRAY(ARRAY(INT64))")
+	if err != nil {
+		t.Fatalf("ResolveColumn: %v", err)
+	}
+	if col.Type != TypeArray {
+		t.Fatalf("Type = %v, want TypeArray", col.Type)
+	}
+	if col.ElementType == nil || col.ElementType.Type != TypeArray {
+		t.Fatal("expected ARRAY element type")
+	}
+	if col.ElementType.ElementType == nil || col.ElementType.ElementType.Type != TypeInt64 {
+		t.Fatal("expected INT64 inner element type")
+	}
+}
+
+func TestResolveColumn_Map(t *testing.T) {
+	col, err := ResolveColumn("meta", "MAP(STRING, INT64)")
+	if err != nil {
+		t.Fatalf("ResolveColumn: %v", err)
+	}
+	if col.Type != TypeMap {
+		t.Fatalf("Type = %v, want TypeMap", col.Type)
+	}
+	if col.ElementType == nil {
+		t.Fatal("expected non-nil ElementType")
+	}
+	if len(col.ElementType.Fields) != 2 {
+		t.Fatalf("expected 2 fields in entry, got %d", len(col.ElementType.Fields))
+	}
+	if col.ElementType.Fields[0].Type != TypeString {
+		t.Fatalf("key type = %v, want TypeString", col.ElementType.Fields[0].Type)
+	}
+	if col.ElementType.Fields[1].Type != TypeInt64 {
+		t.Fatalf("value type = %v, want TypeInt64", col.ElementType.Fields[1].Type)
+	}
+}
+
+func TestResolveColumn_MapWrongArity(t *testing.T) {
+	_, err := ResolveColumn("bad", "MAP(STRING)")
+	if err == nil {
+		t.Fatal("expected error for MAP with 1 param")
+	}
+
+	_, err = ResolveColumn("bad", "MAP(STRING, INT64, BOOL)")
+	if err == nil {
+		t.Fatal("expected error for MAP with 3 params")
+	}
+}
+
+func TestResolveColumn_Row(t *testing.T) {
+	col, err := ResolveColumn("addr", "ROW(CITY STRING, ZIP STRING)")
+	if err != nil {
+		t.Fatalf("ResolveColumn: %v", err)
+	}
+	if col.Type != TypeRow {
+		t.Fatalf("Type = %v, want TypeRow", col.Type)
+	}
+	if len(col.Fields) != 2 {
+		t.Fatalf("expected 2 fields, got %d", len(col.Fields))
+	}
+	if col.Fields[0].Name != "CITY" {
+		t.Fatalf("field[0].Name = %q, want %q", col.Fields[0].Name, "CITY")
+	}
+	if col.Fields[1].Name != "ZIP" {
+		t.Fatalf("field[1].Name = %q, want %q", col.Fields[1].Name, "ZIP")
+	}
+}
+
+func TestResolveColumn_Struct(t *testing.T) {
+	col, err := ResolveColumn("data", "STRUCT(X INT64, Y FLOAT64)")
+	if err != nil {
+		t.Fatalf("ResolveColumn: %v", err)
+	}
+	if col.Type != TypeRow {
+		t.Fatalf("STRUCT should map to TypeRow, got %v", col.Type)
+	}
+}
+
+func TestResolveColumn_Decimal(t *testing.T) {
+	col, err := ResolveColumn("price", "DECIMAL(10,2)")
+	if err != nil {
+		t.Fatalf("ResolveColumn: %v", err)
+	}
+	if col.Type != TypeDecimal {
+		t.Fatalf("Type = %v, want TypeDecimal", col.Type)
+	}
+	if col.Precision != 10 {
+		t.Fatalf("Precision = %d, want 10", col.Precision)
+	}
+	if col.Scale != 2 {
+		t.Fatalf("Scale = %d, want 2", col.Scale)
+	}
+}
+
+func TestResolveColumn_SimpleDecimal(t *testing.T) {
+	// Simple "DECIMAL" without params
+	col, err := ResolveColumn("amount", "DECIMAL")
+	if err != nil {
+		t.Fatalf("ResolveColumn: %v", err)
+	}
+	if col.Type != TypeDecimal {
+		t.Fatalf("Type = %v, want TypeDecimal", col.Type)
+	}
+	if col.Precision != 38 {
+		t.Fatalf("Precision = %d, want 38", col.Precision)
+	}
+	if col.Scale != 0 {
+		t.Fatalf("Scale = %d, want 0", col.Scale)
+	}
+}
+
+func TestResolveColumn_Errors(t *testing.T) {
+	// Unmatched paren
+	_, err := ResolveColumn("bad", "ARRAY(STRING")
+	if err == nil {
+		t.Fatal("expected error for unmatched paren")
+	}
+
+	// Unknown type
+	_, err = ResolveColumn("bad", "BANANA")
+	if err == nil {
+		t.Fatal("expected error for unknown type")
+	}
+
+	// Invalid ARRAY element
+	_, err = ResolveColumn("bad", "ARRAY(BANANA)")
+	if err == nil {
+		t.Fatal("expected error for invalid ARRAY element type")
+	}
+
+	// Invalid MAP key
+	_, err = ResolveColumn("bad", "MAP(BANANA, INT64)")
+	if err == nil {
+		t.Fatal("expected error for invalid MAP key type")
+	}
+
+	// Invalid MAP value
+	_, err = ResolveColumn("bad", "MAP(STRING, BANANA)")
+	if err == nil {
+		t.Fatal("expected error for invalid MAP value type")
+	}
+
+	// Invalid ROW field (no type)
+	_, err = ResolveColumn("bad", "ROW(fieldonly)")
+	if err == nil {
+		t.Fatal("expected error for ROW field without type")
+	}
+
+	// Invalid ROW field type
+	_, err = ResolveColumn("bad", "ROW(name BANANA)")
+	if err == nil {
+		t.Fatal("expected error for ROW field with invalid type")
+	}
+}
+
+func TestSplitTopLevel(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"STRING, INT64", []string{"STRING", "INT64"}},
+		{"ARRAY(STRING), INT64", []string{"ARRAY(STRING)", "INT64"}},
+		{"STRING", []string{"STRING"}},
+		{"MAP(STRING, INT64), ARRAY(ROW(X INT64, Y INT64))", []string{"MAP(STRING, INT64)", "ARRAY(ROW(X INT64, Y INT64))"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := splitTopLevel(tt.input)
+			if len(got) != len(tt.want) {
+				t.Fatalf("len = %d, want %d; got %v", len(got), len(tt.want), got)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestSchemaColumnIndex(t *testing.T) {
+	s := Schema{
+		Columns: []Column{
+			{Name: "id", Type: TypeInt64},
+			{Name: "name", Type: TypeString},
+			{Name: "score", Type: TypeFloat64},
+		},
+	}
+
+	if idx := s.ColumnIndex("id"); idx != 0 {
+		t.Fatalf("ColumnIndex(id) = %d, want 0", idx)
+	}
+	if idx := s.ColumnIndex("name"); idx != 1 {
+		t.Fatalf("ColumnIndex(name) = %d, want 1", idx)
+	}
+	if idx := s.ColumnIndex("score"); idx != 2 {
+		t.Fatalf("ColumnIndex(score) = %d, want 2", idx)
+	}
+	if idx := s.ColumnIndex("nonexistent"); idx != -1 {
+		t.Fatalf("ColumnIndex(nonexistent) = %d, want -1", idx)
+	}
+}
+
+func TestSchemaHasColumn(t *testing.T) {
+	s := Schema{
+		Columns: []Column{
+			{Name: "id", Type: TypeInt64},
+			{Name: "name", Type: TypeString},
+		},
+	}
+
+	if !s.HasColumn("id") {
+		t.Fatal("HasColumn(id) should be true")
+	}
+	if s.HasColumn("nonexistent") {
+		t.Fatal("HasColumn(nonexistent) should be false")
+	}
+}
+
+func TestSchemaHasNestedColumns(t *testing.T) {
+	// No nested columns
+	flat := Schema{
+		Columns: []Column{
+			{Name: "id", Type: TypeInt64},
+			{Name: "name", Type: TypeString},
+		},
+	}
+	if flat.HasNestedColumns() {
+		t.Fatal("flat schema should not have nested columns")
+	}
+
+	// ARRAY
+	withArray := Schema{
+		Columns: []Column{
+			{Name: "id", Type: TypeInt64},
+			{Name: "tags", Type: TypeArray},
+		},
+	}
+	if !withArray.HasNestedColumns() {
+		t.Fatal("schema with ARRAY should have nested columns")
+	}
+
+	// ROW
+	withRow := Schema{
+		Columns: []Column{
+			{Name: "addr", Type: TypeRow},
+		},
+	}
+	if !withRow.HasNestedColumns() {
+		t.Fatal("schema with ROW should have nested columns")
+	}
+
+	// MAP
+	withMap := Schema{
+		Columns: []Column{
+			{Name: "meta", Type: TypeMap},
+		},
+	}
+	if !withMap.HasNestedColumns() {
+		t.Fatal("schema with MAP should have nested columns")
+	}
+}
+
+func TestSchemaFlatColumns(t *testing.T) {
+	s := Schema{
+		Columns: []Column{
+			{Name: "id", Type: TypeInt64},
+			{Name: "tags", Type: TypeArray, ElementType: &Column{
+				Name: "element", Type: TypeString,
+			}},
+			{Name: "addr", Type: TypeRow, Fields: []Column{
+				{Name: "city", Type: TypeString},
+				{Name: "zip", Type: TypeString},
+			}},
+			{Name: "meta", Type: TypeMap, ElementType: &Column{
+				Name: "entry", Type: TypeRow, Fields: []Column{
+					{Name: "key", Type: TypeString},
+					{Name: "value", Type: TypeInt64},
+				},
+			}},
+		},
+	}
+
+	flat := s.FlatColumns()
+	// id + element (from tags array) + city + zip (from row) + key + value (from map entry) = 6
+	if len(flat) != 6 {
+		names := make([]string, len(flat))
+		for i, c := range flat {
+			names[i] = c.Name
+		}
+		t.Fatalf("expected 6 flat columns, got %d: %v", len(flat), names)
+	}
+}
+
+func TestSchemaColumnNames(t *testing.T) {
+	s := Schema{
+		Columns: []Column{
+			{Name: "a"},
+			{Name: "b"},
+			{Name: "c"},
+		},
+	}
+	names := s.ColumnNames()
+	if len(names) != 3 || names[0] != "a" || names[1] != "b" || names[2] != "c" {
+		t.Fatalf("ColumnNames = %v, want [a b c]", names)
+	}
+}
+
+func TestSchemaColumnNames_Empty(t *testing.T) {
+	s := Schema{}
+	names := s.ColumnNames()
+	if len(names) != 0 {
+		t.Fatalf("expected empty names, got %v", names)
+	}
+}
