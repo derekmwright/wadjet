@@ -77,6 +77,7 @@ type HashAggregate struct {
 	keyBuf        []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles    []string
+	outputPos     int              // position in keys for batched Next() output
 }
 
 type groupState struct {
@@ -190,6 +191,7 @@ func (h *HashAggregate) Init(_ context.Context) error {
 	h.serializedKeys = nil
 	h.resolved = false
 	h.keyBuf = make([]byte, 0, 128)
+	h.outputPos = 0
 	return nil
 }
 
@@ -584,14 +586,21 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 
 func (h *HashAggregate) Close() error { return nil }
 
-// Next returns the aggregated results as batches.
+// Next returns the aggregated results in batches of DefaultBatchSize rows.
 func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
-	if len(h.keys) == 0 {
+	if h.outputPos >= len(h.keys) {
 		return nil, nil
 	}
 
 	schema := h.outputSchema()
-	numRows := len(h.keys)
+	start := h.outputPos
+	end := start + batch.DefaultBatchSize
+	if end > len(h.keys) {
+		end = len(h.keys)
+	}
+	numRows := end - start
+	h.outputPos = end
+
 	out := batch.NewRecordBatch(schema, numRows)
 
 	// Build a set of null group columns for fast lookup
@@ -600,8 +609,8 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		nullSet[c] = true
 	}
 
-	for i := range h.keys {
-		gs := h.groups[h.serializedKeys[i]]
+	for i := 0; i < numRows; i++ {
+		gs := h.groups[h.serializedKeys[start+i]]
 
 		// Set group-by columns
 		for j, val := range gs.keyValues {
@@ -708,7 +717,12 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		}
 	}
 
-	h.keys = nil
+	// Release memory when all groups have been emitted
+	if h.outputPos >= len(h.keys) {
+		h.keys = nil
+		h.serializedKeys = nil
+		h.groups = nil
+	}
 	return out, nil
 }
 
