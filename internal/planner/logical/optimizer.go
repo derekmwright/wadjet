@@ -13,8 +13,20 @@ var partitionKeys = map[string]bool{
 }
 
 // Optimize applies logical optimizations to the plan tree.
-func Optimize(plan *Node) *Node {
+//
+// An optional ScanAnnotator function may be provided to populate scan metadata
+// (ScanColumns) on newly created scan nodes after IN-to-SemiJoin conversion.
+// This enables subsequent scalar subquery decorrelation to resolve unqualified
+// column references. Without an annotator, scalar decorrelation may fail for
+// subqueries that use unqualified outer column references.
+func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	plan = decorrelateExists(plan)
+	plan = decorrelateInSubqueries(plan)
+	// Annotate new scans created by IN decorrelation so scalar subquery
+	// decorrelation can resolve unqualified column references.
+	for _, annotate := range annotators {
+		annotate(plan)
+	}
 	plan = decorrelateScalarSubqueries(plan)
 	plan = extractCommonORPredicates(plan)
 	plan = pushdownPredicates(plan)
@@ -656,6 +668,278 @@ func replaceSubqueryInExpr(expr plansql.Node, target *plansql.SubqueryNode, repl
 		}
 	default:
 		return expr
+	}
+}
+
+// ---------------------------------------------------------------------------
+// IN/NOT IN → SemiJoin/AntiJoin decorrelation
+// ---------------------------------------------------------------------------
+
+// decorrelateInSubqueries converts IN/NOT IN subqueries in Filter predicates
+// into SemiJoin/AntiJoin nodes. This eliminates runtime subquery execution by
+// materializing the subquery as a hash join build side.
+//
+// Handles both uncorrelated IN (e.g., Q18) and correlated IN subqueries.
+// For uncorrelated IN with GROUP BY + HAVING, the aggregate is properly
+// extracted and placed in the inner plan.
+//
+// NOTE: NOT IN with nullable columns has different NULL semantics than AntiJoin.
+// This is safe for TPC-H queries where IN columns are NOT NULL.
+func decorrelateInSubqueries(n *Node) *Node {
+	if n == nil {
+		return nil
+	}
+
+	// Recursively process children first (bottom-up)
+	for i, child := range n.Children {
+		n.Children[i] = decorrelateInSubqueries(child)
+	}
+
+	if n.Type != NodeFilter || len(n.Children) == 0 {
+		return n
+	}
+
+	// Collect outer tables from the subtree below this filter
+	outerTables := make(map[string]bool)
+	collectTableNames(n.Children[0], outerTables)
+
+	_, outerColMap := collectScanInfo(n.Children[0])
+	flatPreds := flattenANDPredicates(n.Predicates)
+
+	var remainingPreds []Predicate
+	currentPlan := n.Children[0]
+
+	for _, pred := range flatPreds {
+		inExpr, subq := findInSubqueryNode(pred.ASTExpr)
+		if inExpr == nil {
+			remainingPreds = append(remainingPreds, pred)
+			continue
+		}
+
+		joinNode := tryDecorrelateInSubquery(inExpr, subq, outerTables, outerColMap)
+		if joinNode == nil {
+			remainingPreds = append(remainingPreds, pred)
+			continue
+		}
+
+		// Wire the current plan as the left (probe) child
+		joinNode.Children[0] = currentPlan
+		currentPlan = joinNode
+	}
+
+	if len(remainingPreds) == 0 {
+		return currentPlan
+	}
+
+	n.Children[0] = currentPlan
+	n.Predicates = remainingPreds
+	return n
+}
+
+// findInSubqueryNode checks if a predicate AST node is an IN/NOT IN with a subquery.
+func findInSubqueryNode(node plansql.Node) (*plansql.InExpr, *plansql.SubqueryNode) {
+	if node == nil {
+		return nil, nil
+	}
+	switch n := node.(type) {
+	case *plansql.InExpr:
+		if len(n.Values) == 1 {
+			if subq := unwrapSubquery(n.Values[0]); subq != nil {
+				return n, subq
+			}
+		}
+	case *plansql.ParenNode:
+		return findInSubqueryNode(n.Inner)
+	}
+	return nil, nil
+}
+
+// tryDecorrelateInSubquery attempts to convert an IN/NOT IN subquery into a
+// SemiJoin (IN) or AntiJoin (NOT IN) node. Handles uncorrelated IN with
+// optional GROUP BY + HAVING, and correlated IN with equality keys.
+// Returns nil if decorrelation is not possible.
+func tryDecorrelateInSubquery(inExpr *plansql.InExpr, subq *plansql.SubqueryNode, outerTables map[string]bool, outerColMap map[string]string) *Node {
+	parsed, err := plansql.Parse(subq.SQL)
+	if err != nil {
+		return nil
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		return nil
+	}
+
+	// Must have exactly one SELECT column and at least one table.
+	// Skip UNION/set-op subqueries.
+	if len(info.Columns) != 1 || len(info.Tables) == 0 || info.Union != nil {
+		return nil
+	}
+
+	// Get the inner select column name (stripped of table qualifiers)
+	innerSelectCol := info.Columns[0].Alias
+	if innerSelectCol == "" {
+		innerSelectCol = cleanExpr(info.Columns[0].Expr)
+	}
+	if innerSelectCol == "" {
+		return nil
+	}
+
+	// Get outer key from InExpr.Left — must be a simple column reference
+	outerKey := colRefName(inExpr.Left)
+	if outerKey == "" {
+		return nil
+	}
+
+	// Build inner plan: Scan → optional JOINs
+	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
+	var innerPlan *Node = innerScan
+	for _, j := range info.Joins {
+		rightScan := NewScan(j.RightTable, j.RightAlias)
+		innerPlan = NewJoin(innerPlan, rightScan, j.Type, j.Condition)
+	}
+
+	// Build inner table set for classifying WHERE conditions
+	innerTableSet := make(map[string]bool)
+	for _, t := range info.Tables {
+		innerTableSet[strings.ToLower(t.Name)] = true
+		if t.Alias != "" {
+			innerTableSet[strings.ToLower(t.Alias)] = true
+		}
+	}
+	for _, j := range info.Joins {
+		innerTableSet[strings.ToLower(j.RightTable)] = true
+		if j.RightAlias != "" {
+			innerTableSet[strings.ToLower(j.RightAlias)] = true
+		}
+	}
+
+	// Classify WHERE conditions into inner-only vs correlated
+	var innerFilterPreds []Predicate
+	var correlationKeys []string
+
+	if info.WhereExpr != nil {
+		var whereNodes []plansql.Node
+		flattenASTNodes(info.WhereExpr, &whereNodes)
+
+		for _, node := range whereNodes {
+			hasOuter, hasInner := nodeTableRefs(node, outerTables, innerTableSet, outerColMap)
+			if hasOuter && hasInner {
+				// Correlated equality condition
+				cmp, ok := node.(*plansql.CmpExpr)
+				if !ok || cmp.Op != "=" {
+					return nil
+				}
+				outerCol, innerCol, ok := extractCorrelatedCols(cmp, outerTables, innerTableSet, outerColMap)
+				if !ok {
+					return nil
+				}
+				correlationKeys = append(correlationKeys, outerCol+" = "+innerCol)
+			} else {
+				// Inner-only condition (including subquery expressions)
+				stripped := stripTableQualifiers(node)
+				innerFilterPreds = append(innerFilterPreds, Predicate{
+					Raw:     stripped.String(),
+					ASTExpr: stripped,
+				})
+			}
+		}
+	}
+
+	// Apply inner-only WHERE conditions
+	if len(innerFilterPreds) > 0 {
+		innerPlan = NewFilter(innerPlan, innerFilterPreds)
+	}
+
+	// Handle GROUP BY + HAVING
+	if len(info.GroupBy) > 0 {
+		var groupBy []string
+		for _, gb := range info.GroupBy {
+			groupBy = append(groupBy, cleanExpr(gb))
+		}
+
+		var aggs []AggExpr
+		aggCounter := 0
+
+		// SELECT column aggregate (if the SELECT expression is an aggregate)
+		if info.Columns[0].IsAgg {
+			inputCol := cleanExpr(info.Columns[0].AggArg)
+			if info.Columns[0].AggFunc == "count" && (inputCol == "*" || inputCol == "") {
+				inputCol = ""
+			}
+			outputCol := info.Columns[0].Alias
+			if outputCol == "" {
+				outputCol = info.Columns[0].Expr
+			}
+			aggs = append(aggs, AggExpr{
+				Func:      info.Columns[0].AggFunc,
+				InputCol:  inputCol,
+				OutputCol: outputCol,
+				Distinct:  info.Columns[0].AggDistinct,
+			})
+			aggCounter++
+		}
+
+		// HAVING aggregates — extract from HAVING expression, assign synthetic
+		// output names, then rewrite HAVING to reference those names.
+		if info.HavingExpr != nil {
+			havingAggs := plansql.FindAllAggregates(info.HavingExpr)
+			replacements := map[string]string{}
+
+			for _, agg := range havingAggs {
+				synName := fmt.Sprintf("__having_%d", aggCounter)
+				aggCounter++
+
+				aggInputCol := ""
+				var aggInputExpr plansql.Node
+				if len(agg.Args) > 0 {
+					aggInputCol = cleanExpr(agg.Args[0].String())
+					aggInputExpr = agg.Args[0]
+				}
+				funcName := strings.ToLower(agg.Name)
+				if funcName == "count" && (aggInputCol == "*" || aggInputCol == "") {
+					aggInputCol = ""
+				}
+
+				aggs = append(aggs, AggExpr{
+					Func:      funcName,
+					InputCol:  aggInputCol,
+					OutputCol: synName,
+					Distinct:  agg.Distinct,
+					InputExpr: aggInputExpr,
+				})
+				replacements[strings.ToLower(agg.String())] = synName
+			}
+
+			rewrittenHaving := plansql.ReplaceAllAggregates(info.HavingExpr, replacements)
+
+			innerPlan = NewAggregate(innerPlan, groupBy, aggs)
+			innerPlan = NewFilter(innerPlan, []Predicate{{
+				Raw:     rewrittenHaving.String(),
+				ASTExpr: rewrittenHaving,
+			}})
+		} else {
+			innerPlan = NewAggregate(innerPlan, groupBy, aggs)
+		}
+	}
+
+	// Recursively decorrelate nested IN subqueries in the inner plan
+	innerPlan = decorrelateInSubqueries(innerPlan)
+
+	// Build join condition: outer IN column = inner SELECT column
+	joinCond := outerKey + " = " + innerSelectCol
+	if len(correlationKeys) > 0 {
+		joinCond = joinCond + " AND " + strings.Join(correlationKeys, " AND ")
+	}
+
+	joinType := "semi"
+	if inExpr.Not {
+		joinType = "anti"
+	}
+
+	return &Node{
+		Type:     NodeJoin,
+		Children: []*Node{nil, innerPlan},
+		JoinType: joinType,
+		JoinCond: joinCond,
 	}
 }
 

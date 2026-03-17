@@ -169,8 +169,11 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	// unqualified column references (needed for subquery decorrelation).
 	p.AnnotateScanColumns(ctx, logicalPlan)
 
-	// Optimize — decorrelate nested subqueries, push predicates, etc.
-	logicalPlan = logical.Optimize(logicalPlan)
+	// Optimize — pass scan annotator so new scans created by IN-to-SemiJoin
+	// conversion get column metadata for scalar subquery decorrelation.
+	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+		p.AnnotateScanColumns(ctx, plan)
+	})
 
 	// Build physical pipeline
 	source, ops, sink, err := p.buildPipeline(ctx, logicalPlan)

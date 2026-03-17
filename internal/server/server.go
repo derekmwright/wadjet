@@ -413,8 +413,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
 	}
 
-	// Optimize
-	logicalPlan = logical.Optimize(logicalPlan)
+	// Annotate scan columns from catalog so optimizer can resolve unqualified refs
+	s.planner.AnnotateScanColumns(r.Context(), logicalPlan)
+
+	// Optimize — pass scan annotator for new scans created during IN decorrelation
+	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+		s.planner.AnnotateScanColumns(r.Context(), plan)
+	})
 
 	// Apply query cost limits (per-role or global)
 	s.planner.QueryLimits = s.resolveQueryLimits(r)
@@ -1064,7 +1069,10 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		writeError(w, http.StatusBadRequest, "plan build error: "+err.Error())
 		return
 	}
-	logicalPlan = logical.Optimize(logicalPlan)
+	s.planner.AnnotateScanColumns(r.Context(), logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+		s.planner.AnnotateScanColumns(r.Context(), plan)
+	})
 	planStr := logicalPlan.PrettyPrint(0)
 
 	if parsed.Explain.Verbose {

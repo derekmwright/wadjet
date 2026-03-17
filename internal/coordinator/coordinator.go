@@ -247,7 +247,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		}
 	}
 
-	logicalPlan = logical.Optimize(logicalPlan)
+	// Annotate scan columns and optimize — pass scan annotator for IN decorrelation
+	scanAnnotator := func(plan *logical.Node) {
+		physical.NewPlanner(c.catalog).AnnotateScanColumns(ctx, plan)
+	}
+	scanAnnotator(logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 	planStr := logicalPlan.PrettyPrint(0)
 
 	// Generate distributed stages
@@ -973,7 +978,11 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	if err != nil {
 		return "", "", fmt.Errorf("logical plan: %w", err)
 	}
-	logicalPlan = logical.Optimize(logicalPlan)
+	explainAnnotator := func(plan *logical.Node) {
+		physical.NewPlanner(c.catalog).AnnotateScanColumns(ctx, plan)
+	}
+	explainAnnotator(logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, explainAnnotator)
 	planStr = logicalPlan.PrettyPrint(0)
 
 	// Generate distributed stages

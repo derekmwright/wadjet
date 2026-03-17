@@ -161,8 +161,9 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	logicalPlan = logical.Optimize(logicalPlan)
-	db.planner.AnnotateScanColumns(ctx, logicalPlan) // re-annotate scans added by optimizer (e.g., decorrelated EXISTS)
+	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+		db.planner.AnnotateScanColumns(ctx, plan)
+	})
 	planStr := logicalPlan.PrettyPrint(0)
 
 	physPlan, err := db.planner.Plan(ctx, logicalPlan)
@@ -210,8 +211,9 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	}
 
 	db.planner.AnnotateScanColumns(ctx, logicalPlan)
-	logicalPlan = logical.Optimize(logicalPlan)
-	db.planner.AnnotateScanColumns(ctx, logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+		db.planner.AnnotateScanColumns(ctx, plan)
+	})
 	plan := logicalPlan.PrettyPrint(0)
 
 	if parsed.Explain.Verbose {
