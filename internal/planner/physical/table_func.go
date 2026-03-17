@@ -72,18 +72,43 @@ func (s *jsonTableFuncSource) Close() error { return nil }
 
 // parquetTableFuncSource reads a Parquet file (local or HTTP) and produces batches.
 // Uses readBatchDirect for column-at-a-time page reading (no row reconstruction).
+// For local files, opens the file as io.ReaderAt to avoid loading into memory.
 type parquetTableFuncSource struct {
-	path  string
-	batch *batch.RecordBatch
-	done  bool
+	path   string
+	batch  *batch.RecordBatch
+	done   bool
+	closer io.Closer // file handle to close when done
 }
 
 func (s *parquetTableFuncSource) Init(_ context.Context) error {
-	data, err := fetchData(s.path)
-	if err != nil {
-		return fmt.Errorf("read_parquet: %w", err)
+	var ra io.ReaderAt
+	var size int64
+
+	if !isURL(s.path) && !isGlob(s.path) {
+		// Local file: open as io.ReaderAt (zero-copy, no memory allocation)
+		f, err := os.Open(s.path)
+		if err != nil {
+			return fmt.Errorf("read_parquet: %w", err)
+		}
+		s.closer = f
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return fmt.Errorf("read_parquet: stat: %w", err)
+		}
+		ra = f
+		size = fi.Size()
+	} else {
+		// URLs and globs: fetch into memory
+		data, err := fetchData(s.path)
+		if err != nil {
+			return fmt.Errorf("read_parquet: %w", err)
+		}
+		ra = bytes.NewReader(data)
+		size = int64(len(data))
 	}
-	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+
+	reader, err := parquet.NewReader(ra, size)
 	if err != nil {
 		return fmt.Errorf("read_parquet: %w", err)
 	}
@@ -100,20 +125,23 @@ func (s *parquetTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, er
 	return s.batch, nil
 }
 
-func (s *parquetTableFuncSource) Close() error { return nil }
+func (s *parquetTableFuncSource) Close() error {
+	if s.closer != nil {
+		return s.closer.Close()
+	}
+	return nil
+}
 
 // csvTableFuncSource reads a CSV file (local or HTTP) and produces batches.
+// For local files, uses streaming to avoid loading the entire file into memory.
 type csvTableFuncSource struct {
 	path      string
 	namedArgs map[string]string
 	reader    *csvreader.Reader
+	closer    io.Closer // file handle to close when done
 }
 
 func (s *csvTableFuncSource) Init(_ context.Context) error {
-	data, err := fetchData(s.path)
-	if err != nil {
-		return fmt.Errorf("read_csv: %w", err)
-	}
 	cfg := csvreader.DefaultConfig()
 	if delim, ok := s.namedArgs["delimiter"]; ok && len(delim) > 0 {
 		cfg.Delimiter = rune(delim[0])
@@ -127,6 +155,28 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 	if hdr, ok := s.namedArgs["header"]; ok {
 		cfg.HasHeader = hdr == "true" || hdr == "TRUE" || hdr == "1"
 	}
+
+	// Use streaming for local non-glob files to avoid loading into memory
+	if !isURL(s.path) && !isGlob(s.path) {
+		f, err := os.Open(s.path)
+		if err != nil {
+			return fmt.Errorf("read_csv: %w", err)
+		}
+		s.closer = f
+		r, err := csvreader.NewStreamReader(f, cfg)
+		if err != nil {
+			f.Close()
+			return fmt.Errorf("read_csv: %w", err)
+		}
+		s.reader = r
+		return nil
+	}
+
+	// Fallback to full read for URLs and globs
+	data, err := fetchData(s.path)
+	if err != nil {
+		return fmt.Errorf("read_csv: %w", err)
+	}
 	r, err := csvreader.NewReader(data, cfg)
 	if err != nil {
 		return fmt.Errorf("read_csv: %w", err)
@@ -139,7 +189,12 @@ func (s *csvTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error)
 	return s.reader.Next()
 }
 
-func (s *csvTableFuncSource) Close() error { return nil }
+func (s *csvTableFuncSource) Close() error {
+	if s.closer != nil {
+		return s.closer.Close()
+	}
+	return nil
+}
 
 // fetchData retrieves data from a local file path, glob pattern, or HTTP/HTTPS URL.
 // Glob patterns (e.g., "data/*.json") expand to multiple files whose contents

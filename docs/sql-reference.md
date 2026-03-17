@@ -88,6 +88,12 @@ SELECT * FROM read_parquet('https://storage.example.com/data.parquet')
 
 All table functions support local file paths and HTTP/HTTPS URLs with connection pooling and configurable auth headers.
 
+### Streaming I/O
+
+Local CSV files are read in streaming mode — only the current batch of rows is held in memory at a time, making it possible to query files larger than available RAM. Schema is inferred from the first 100 rows.
+
+Local Parquet files are opened as file handles (`io.ReaderAt`), enabling page-level random access without reading the entire file into memory. HTTP sources and glob patterns still require a full download.
+
 ## Common Table Expressions (CTEs)
 
 CTEs define named temporary result sets for use in the main query:

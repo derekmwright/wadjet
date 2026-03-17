@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"net"
 	"regexp"
 	"strconv"
@@ -44,8 +45,9 @@ func DefaultConfig() ReaderConfig {
 type Reader struct {
 	schema []parquet.Column
 	colIdx map[string]int
-	rows   [][]string // all data rows (excluding header)
+	rows   [][]string // all data rows (excluding header) — used for []byte path
 	offset int
+	cr     *csv.Reader // streaming csv reader — used for io.Reader path
 }
 
 // NewReader creates a CSV reader from raw bytes with the given config.
@@ -103,6 +105,77 @@ func NewReader(data []byte, cfg ReaderConfig) (*Reader, error) {
 	}, nil
 }
 
+// NewStreamReader creates a streaming CSV reader from an io.Reader.
+// Reads the header and a sample of rows for schema inference, then streams
+// remaining rows on demand via Next(). Memory usage is O(batch_size) instead
+// of O(total_rows).
+func NewStreamReader(r io.Reader, cfg ReaderConfig) (*Reader, error) {
+	cr := csv.NewReader(r)
+	cr.FieldsPerRecord = -1
+	cr.ReuseRecord = true
+	if cfg.Delimiter != 0 {
+		cr.Comma = cfg.Delimiter
+	}
+
+	// Read header
+	firstRow, err := cr.Read()
+	if err != nil {
+		if err == io.EOF {
+			return &Reader{}, nil
+		}
+		return nil, fmt.Errorf("reading CSV header: %w", err)
+	}
+
+	var header []string
+	var sampleRows [][]string
+
+	if cfg.HasHeader {
+		header = make([]string, len(firstRow))
+		copy(header, firstRow)
+	} else {
+		header = make([]string, len(firstRow))
+		for i := range header {
+			header[i] = fmt.Sprintf("col%d", i)
+		}
+		row := make([]string, len(firstRow))
+		copy(row, firstRow)
+		sampleRows = append(sampleRows, row)
+	}
+
+	// Read sample rows for schema inference (up to 100)
+	const sampleSize = 100
+	for len(sampleRows) < sampleSize {
+		record, err := cr.Read()
+		if err != nil {
+			break // EOF or error — use what we have
+		}
+		row := make([]string, len(record))
+		copy(row, record)
+		sampleRows = append(sampleRows, row)
+	}
+
+	if len(sampleRows) == 0 && len(header) > 0 {
+		schema := make([]parquet.Column, len(header))
+		for i, name := range header {
+			schema[i] = parquet.Column{Name: name, Type: parquet.TypeString}
+		}
+		return &Reader{schema: schema, colIdx: makeColIdx(schema)}, nil
+	}
+
+	schema := inferCSVSchema(header, sampleRows)
+	// ReuseRecord was on for sampling; turn off a fresh reader wrapping isn't
+	// possible, but the sample rows are already copied. The cr will continue
+	// streaming from where it left off.
+	cr.ReuseRecord = false
+
+	return &Reader{
+		schema: schema,
+		colIdx: makeColIdx(schema),
+		rows:   sampleRows, // buffered sample rows returned first
+		cr:     cr,         // then stream remaining from here
+	}, nil
+}
+
 // Schema returns the inferred schema.
 func (r *Reader) Schema() []parquet.Column {
 	return r.schema
@@ -110,24 +183,58 @@ func (r *Reader) Schema() []parquet.Column {
 
 // Next returns the next batch of rows as a RecordBatch.
 func (r *Reader) Next() (*batch.RecordBatch, error) {
-	if r.offset >= len(r.rows) {
-		return nil, nil
+	// If we have buffered rows (from []byte path or streaming sample), use those first
+	if r.offset < len(r.rows) {
+		end := r.offset + defaultBatchSize
+		if end > len(r.rows) {
+			end = len(r.rows)
+		}
+		chunk := r.rows[r.offset:end]
+		r.offset = end
+		return r.buildBatch(chunk), nil
 	}
 
-	end := r.offset + defaultBatchSize
-	if end > len(r.rows) {
-		end = len(r.rows)
+	// If we have a streaming csv.Reader, read the next batch from it
+	if r.cr != nil {
+		chunk, err := r.readStreamBatch()
+		if err != nil {
+			return nil, err
+		}
+		if len(chunk) == 0 {
+			return nil, nil // EOF
+		}
+		return r.buildBatch(chunk), nil
 	}
-	chunk := r.rows[r.offset:end]
-	r.offset = end
 
+	return nil, nil
+}
+
+// readStreamBatch reads up to defaultBatchSize rows from the streaming csv.Reader.
+func (r *Reader) readStreamBatch() ([][]string, error) {
+	var rows [][]string
+	for len(rows) < defaultBatchSize {
+		record, err := r.cr.Read()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("reading CSV row: %w", err)
+		}
+		row := make([]string, len(record))
+		copy(row, record)
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// buildBatch creates a RecordBatch from a slice of string rows.
+func (r *Reader) buildBatch(chunk [][]string) *batch.RecordBatch {
 	numRows := len(chunk)
 	b := batch.NewRecordBatch(r.schema, numRows)
 
 	for row, fields := range chunk {
 		for col, sc := range r.schema {
 			if col >= len(fields) {
-				// Missing field — null
 				b.Columns[col].Nulls.SetNull(row)
 				if needsBytesNull(sc.Type) {
 					b.Columns[col].BytesData.Set(row, nil)
@@ -145,7 +252,7 @@ func (r *Reader) Next() (*batch.RecordBatch, error) {
 			writeCSVValue(b.Columns[col], row, val, sc.Type)
 		}
 	}
-	return b, nil
+	return b
 }
 
 func writeCSVValue(vec *batch.Vector, row int, val string, typ parquet.TypeID) {
