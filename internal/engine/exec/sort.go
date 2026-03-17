@@ -30,8 +30,10 @@ type SortKey struct {
 // Sort is a Sink that accumulates all batches columnar and sorts them
 // using typed comparisons on an index array (no row-oriented conversion).
 // When a SpillManager is set, Sort will spill to disk when memory pressure is high.
+// When Limit > 0, only the top Limit rows are materialized (Top-K optimization).
 type Sort struct {
 	Keys   []SortKey
+	Limit  int // 0 = no limit, >0 = only materialize top N rows
 	schema []parquet.Column
 	Spill  *memory.SpillManager // optional: enables spill-to-disk
 
@@ -134,11 +136,16 @@ func (s *Sort) finalizeWithSpill() error {
 		return false
 	})
 
-	// Materialize into sorted batches
-	for pos := 0; pos < len(rows); {
+	// Materialize into sorted batches.
+	// When Limit > 0, only materialize the top Limit rows (Top-K).
+	materializeN := len(rows)
+	if s.Limit > 0 && s.Limit < materializeN {
+		materializeN = s.Limit
+	}
+	for pos := 0; pos < materializeN; {
 		end := pos + batch.DefaultBatchSize
-		if end > len(rows) {
-			end = len(rows)
+		if end > materializeN {
+			end = materializeN
 		}
 		s.sorted = append(s.sorted, batch.FromRows(s.schema, rows[pos:end]))
 		pos = end
@@ -219,18 +226,24 @@ func (s *Sort) finalizeColumnar() error {
 		return false
 	})
 
-	// Materialize sorted batches using typed column copies
-	for pos := 0; pos < len(entries); {
+	// Materialize sorted batches using typed column copies.
+	// When Limit > 0, only materialize the top Limit rows (Top-K).
+	materializeN := len(entries)
+	if s.Limit > 0 && s.Limit < materializeN {
+		materializeN = s.Limit
+	}
+	for pos := 0; pos < materializeN; {
 		end := pos + batch.DefaultBatchSize
-		if end > len(entries) {
-			end = len(entries)
+		if end > materializeN {
+			end = materializeN
 		}
 		chunk := entries[pos:end]
 		out := batch.NewRecordBatch(s.schema, len(chunk))
-		for i, e := range chunk {
-			src := batches[e.batchIdx]
-			for j := range s.schema {
-				copyVectorValue(out.Columns[j], i, src.Columns[j], int(e.rowIdx))
+		// Column-first iteration for better cache locality on destination arrays.
+		for j := range s.schema {
+			dst := out.Columns[j]
+			for i, e := range chunk {
+				copyVectorValue(dst, i, batches[e.batchIdx].Columns[j], int(e.rowIdx))
 			}
 		}
 		s.sorted = append(s.sorted, out)

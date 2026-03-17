@@ -1514,6 +1514,7 @@ func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 	}
 
 	sortOp := exec.NewSort(keys)
+	sortOp.Limit = n // Top-K: only materialize top N rows
 
 	return &sortSourceAdapter{
 		childSource: childSource,

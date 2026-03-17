@@ -1,6 +1,7 @@
 package logical
 
 import (
+	"strings"
 	"testing"
 
 	plansql "github.com/derekmwright/caelum/internal/planner/sql"
@@ -261,5 +262,100 @@ func TestReorderJoins_TwoTableNoop(t *testing.T) {
 	}
 	if result.Children[0].TableName != "t1" || result.Children[1].TableName != "t2" {
 		t.Error("two-way join should not be reordered")
+	}
+}
+
+func TestExtractCommonORPredicates_Basic(t *testing.T) {
+	// (a = 1 AND c = 3) OR (b = 2 AND c = 3) → common: c = 3, remaining: (a = 1 OR b = 2)
+	scan := NewScan("t1", "")
+	orExpr := &plansql.OrNode{
+		Left: &plansql.AndNode{
+			Left:  &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "a"}, Right: &plansql.Lit{Kind: plansql.LitNumber, Value: "1"}},
+			Right: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "c"}, Right: &plansql.Lit{Kind: plansql.LitNumber, Value: "3"}},
+		},
+		Right: &plansql.AndNode{
+			Left:  &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "b"}, Right: &plansql.Lit{Kind: plansql.LitNumber, Value: "2"}},
+			Right: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "c"}, Right: &plansql.Lit{Kind: plansql.LitNumber, Value: "3"}},
+		},
+	}
+	filter := NewFilter(scan, []Predicate{{ASTExpr: orExpr, Raw: orExpr.String()}})
+
+	result := extractCommonORPredicates(filter)
+	if result.Type != NodeFilter {
+		t.Fatalf("expected filter, got %s", result.Type)
+	}
+	// Should have 2 predicates: common (c = 3) + simplified OR (a = 1 OR b = 2)
+	if len(result.Predicates) != 2 {
+		t.Fatalf("expected 2 predicates, got %d: %v", len(result.Predicates), result.Predicates)
+	}
+
+	// Check that one predicate is the common term
+	foundCommon := false
+	foundOR := false
+	for _, p := range result.Predicates {
+		s := strings.ToLower(p.Raw)
+		if strings.Contains(s, "c = 3") && !strings.Contains(s, "or") {
+			foundCommon = true
+		}
+		if strings.Contains(s, "or") {
+			foundOR = true
+		}
+	}
+	if !foundCommon {
+		t.Errorf("expected common predicate c = 3, got predicates: %v", result.Predicates)
+	}
+	if !foundOR {
+		t.Errorf("expected simplified OR predicate, got predicates: %v", result.Predicates)
+	}
+}
+
+func TestExtractCommonORPredicates_ThreeBranches(t *testing.T) {
+	// (a AND c1 AND c2) OR (b AND c1 AND c2) OR (d AND c1 AND c2)
+	// Should extract c1 and c2
+	c1 := &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "mode"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "AIR"}}
+	c2 := &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "instruct"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "DELIVER"}}
+
+	branch1 := &plansql.AndNode{
+		Left: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "A"}},
+		Right: &plansql.AndNode{Left: c1, Right: c2},
+	}
+	branch2 := &plansql.AndNode{
+		Left: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "B"}},
+		Right: &plansql.AndNode{Left: c1, Right: c2},
+	}
+	branch3 := &plansql.AndNode{
+		Left: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "brand"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "C"}},
+		Right: &plansql.AndNode{Left: c1, Right: c2},
+	}
+
+	orExpr := &plansql.OrNode{
+		Left:  branch1,
+		Right: &plansql.OrNode{Left: branch2, Right: branch3},
+	}
+
+	scan := NewScan("t1", "")
+	filter := NewFilter(scan, []Predicate{{ASTExpr: orExpr, Raw: orExpr.String()}})
+
+	result := extractCommonORPredicates(filter)
+
+	// Should have 3 predicates: c1, c2, and the simplified OR
+	if len(result.Predicates) != 3 {
+		t.Fatalf("expected 3 predicates, got %d: %v", len(result.Predicates), result.Predicates)
+	}
+}
+
+func TestExtractCommonORPredicates_NoCommon(t *testing.T) {
+	// (a = 1) OR (b = 2) → no common terms, should return unchanged
+	orExpr := &plansql.OrNode{
+		Left:  &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "a"}, Right: &plansql.Lit{Kind: plansql.LitNumber, Value: "1"}},
+		Right: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Column: "b"}, Right: &plansql.Lit{Kind: plansql.LitNumber, Value: "2"}},
+	}
+
+	scan := NewScan("t1", "")
+	filter := NewFilter(scan, []Predicate{{ASTExpr: orExpr, Raw: orExpr.String()}})
+
+	result := extractCommonORPredicates(filter)
+	if len(result.Predicates) != 1 {
+		t.Fatalf("expected 1 predicate (unchanged), got %d", len(result.Predicates))
 	}
 }

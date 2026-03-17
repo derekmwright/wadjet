@@ -16,6 +16,7 @@ var partitionKeys = map[string]bool{
 func Optimize(plan *Node) *Node {
 	plan = decorrelateExists(plan)
 	plan = decorrelateScalarSubqueries(plan)
+	plan = extractCommonORPredicates(plan)
 	plan = pushdownPredicates(plan)
 	plan = reorderJoins(plan)
 	plan = extractPartitionFilters(plan)
@@ -898,6 +899,180 @@ func flattenASTAnd(expr plansql.Node, result *[]Predicate) {
 	default:
 		*result = append(*result, Predicate{ASTExpr: expr, Raw: expr.String()})
 	}
+}
+
+// extractCommonORPredicates walks the plan tree and decomposes OR predicates
+// that share common terms across all branches. For example:
+//
+//	(A AND C1 AND C2) OR (B AND C1 AND C2)
+//
+// becomes three separate predicates: C1, C2, (A OR B).
+// The common predicates can then be pushed down independently by pushdownPredicates.
+func extractCommonORPredicates(n *Node) *Node {
+	if n == nil {
+		return nil
+	}
+	for i, child := range n.Children {
+		n.Children[i] = extractCommonORPredicates(child)
+	}
+	if n.Type != NodeFilter {
+		return n
+	}
+	var newPreds []Predicate
+	for _, pred := range n.Predicates {
+		extracted := extractCommonFromORPred(pred)
+		newPreds = append(newPreds, extracted...)
+	}
+	n.Predicates = newPreds
+	return n
+}
+
+// extractCommonFromORPred checks if a predicate is an OR with common AND terms
+// across all branches. Returns the original predicate if no extraction is possible.
+func extractCommonFromORPred(pred Predicate) []Predicate {
+	var orExpr *plansql.OrNode
+	if pred.ASTExpr != nil {
+		orExpr, _ = unwrapParenOr(pred.ASTExpr)
+	}
+	if orExpr == nil {
+		return []Predicate{pred}
+	}
+
+	// Flatten OR tree into branches
+	branches := flattenORNodes(orExpr)
+	if len(branches) < 2 {
+		return []Predicate{pred}
+	}
+
+	// Flatten each branch's AND terms
+	branchTerms := make([][]string, len(branches))
+	branchTermNodes := make([][]plansql.Node, len(branches))
+	for i, branch := range branches {
+		var terms []plansql.Node
+		flattenANDNodes(branch, &terms)
+		branchTermNodes[i] = terms
+		strs := make([]string, len(terms))
+		for j, t := range terms {
+			strs[j] = strings.ToLower(t.String())
+		}
+		branchTerms[i] = strs
+	}
+
+	// Find common terms: intersection of all branches by string representation
+	commonSet := make(map[string]bool)
+	for _, s := range branchTerms[0] {
+		commonSet[s] = true
+	}
+	for i := 1; i < len(branchTerms); i++ {
+		branchSet := make(map[string]bool)
+		for _, s := range branchTerms[i] {
+			branchSet[s] = true
+		}
+		for s := range commonSet {
+			if !branchSet[s] {
+				delete(commonSet, s)
+			}
+		}
+	}
+	if len(commonSet) == 0 {
+		return []Predicate{pred}
+	}
+
+	// Build result: common predicates + simplified OR
+	var result []Predicate
+	for _, node := range branchTermNodes[0] {
+		if commonSet[strings.ToLower(node.String())] {
+			result = append(result, Predicate{ASTExpr: node, Raw: node.String()})
+		}
+	}
+
+	// Rebuild each branch without common terms
+	var newBranches []plansql.Node
+	for _, terms := range branchTermNodes {
+		var remaining []plansql.Node
+		for _, t := range terms {
+			if !commonSet[strings.ToLower(t.String())] {
+				remaining = append(remaining, t)
+			}
+		}
+		if len(remaining) == 0 {
+			continue // Branch was entirely common
+		}
+		newBranches = append(newBranches, buildANDTree(remaining))
+	}
+
+	if len(newBranches) > 0 {
+		orNode := buildORTree(newBranches)
+		result = append(result, Predicate{ASTExpr: orNode, Raw: orNode.String()})
+	}
+	return result
+}
+
+// unwrapParenOr returns the OrNode inside possible ParenNode wrapping.
+func unwrapParenOr(n plansql.Node) (*plansql.OrNode, bool) {
+	switch e := n.(type) {
+	case *plansql.OrNode:
+		return e, true
+	case *plansql.ParenNode:
+		return unwrapParenOr(e.Inner)
+	}
+	return nil, false
+}
+
+// flattenORNodes collects all branches of a binary OR tree into a flat slice.
+func flattenORNodes(n plansql.Node) []plansql.Node {
+	switch e := n.(type) {
+	case *plansql.OrNode:
+		return append(flattenORNodes(e.Left), flattenORNodes(e.Right)...)
+	case *plansql.ParenNode:
+		if or, ok := e.Inner.(*plansql.OrNode); ok {
+			return flattenORNodes(or)
+		}
+		return []plansql.Node{n}
+	default:
+		return []plansql.Node{n}
+	}
+}
+
+// flattenANDNodes collects all terms of a binary AND tree into a flat slice.
+func flattenANDNodes(n plansql.Node, result *[]plansql.Node) {
+	switch e := n.(type) {
+	case *plansql.AndNode:
+		flattenANDNodes(e.Left, result)
+		flattenANDNodes(e.Right, result)
+	case *plansql.ParenNode:
+		if and, ok := e.Inner.(*plansql.AndNode); ok {
+			flattenANDNodes(and, result)
+		} else {
+			*result = append(*result, n)
+		}
+	default:
+		*result = append(*result, n)
+	}
+}
+
+// buildANDTree constructs a right-associative AND tree from a slice of nodes.
+func buildANDTree(nodes []plansql.Node) plansql.Node {
+	if len(nodes) == 1 {
+		return nodes[0]
+	}
+	result := nodes[len(nodes)-1]
+	for i := len(nodes) - 2; i >= 0; i-- {
+		result = &plansql.AndNode{Left: nodes[i], Right: result}
+	}
+	return result
+}
+
+// buildORTree constructs a right-associative OR tree from a slice of nodes.
+func buildORTree(nodes []plansql.Node) plansql.Node {
+	if len(nodes) == 1 {
+		return nodes[0]
+	}
+	result := nodes[len(nodes)-1]
+	for i := len(nodes) - 2; i >= 0; i-- {
+		result = &plansql.OrNode{Left: nodes[i], Right: result}
+	}
+	return result
 }
 
 // collectScanInfo returns table names/aliases and a column-to-table mapping from a subtree.
