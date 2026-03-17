@@ -309,57 +309,65 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		}
 		h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[i])
 	}
-	key := string(h.keyBuf)
 
-	gs, ok := h.groups[key]
-	if !ok {
-		keyVals := make([]any, len(h.GroupByCols))
-		for i, idx := range h.groupColIdx {
-			if idx >= 0 {
-				keyVals[i] = b.Columns[idx].GetValue(row)
-			}
-		}
-		gs = &groupState{
-			keyValues:    keyVals,
-			accs:         make([]kernel.Accumulator, len(h.Aggs)),
-			distinctSets: make([]map[string]struct{}, len(h.Aggs)),
-			extraState:   make([]any, len(h.Aggs)),
-		}
-		// Initialize per-agg state
-		for i, agg := range h.Aggs {
-			switch agg.Func {
-			case AggCountDistinct:
-				gs.distinctSets[i] = make(map[string]struct{})
-			case AggStringAgg:
-				sep := agg.Separator
-				if sep == "" {
-					sep = ","
-				}
-				gs.extraState[i] = &stringAggState{sep: sep}
-			case AggStddev, AggVariance, AggStddevPop, AggVarPop:
-				gs.extraState[i] = &varianceState{}
-			case AggBoolAnd:
-				gs.extraState[i] = true // starts true, AND-ed with each value
-			case AggBoolOr:
-				gs.extraState[i] = false // starts false, OR-ed with each value
-			case AggApproxDistinct:
-				gs.distinctSets[i] = make(map[string]struct{})
-			case AggCorr, AggCovarSamp, AggCovarPop:
-				gs.extraState[i] = &covarianceState{}
-			case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
-				gs.extraState[i] = &collectState{}
-			case AggMinBy:
-				gs.extraState[i] = &minMaxByState{isMin: true}
-			case AggMaxBy:
-				gs.extraState[i] = &minMaxByState{isMin: false}
-			}
-		}
-		h.groups[key] = gs
-		h.keys = append(h.keys, keyVals)
-		h.serializedKeys = append(h.serializedKeys, key)
+	// Fast path: Go avoids allocating a string for map lookups of string([]byte).
+	// Only allocate the key string when creating a new group.
+	if gs, ok := h.groups[string(h.keyBuf)]; ok {
+		h.updateGroup(gs, b, row)
+		return
 	}
 
-	// Update accumulators via pre-resolved typed kernels
+	// Slow path: new group — allocate key string only here
+	key := string(h.keyBuf)
+	keyVals := make([]any, len(h.GroupByCols))
+	for i, idx := range h.groupColIdx {
+		if idx >= 0 {
+			keyVals[i] = b.Columns[idx].GetValue(row)
+		}
+	}
+	gs := &groupState{
+		keyValues:    keyVals,
+		accs:         make([]kernel.Accumulator, len(h.Aggs)),
+		distinctSets: make([]map[string]struct{}, len(h.Aggs)),
+		extraState:   make([]any, len(h.Aggs)),
+	}
+	for i, agg := range h.Aggs {
+		switch agg.Func {
+		case AggCountDistinct:
+			gs.distinctSets[i] = make(map[string]struct{})
+		case AggStringAgg:
+			sep := agg.Separator
+			if sep == "" {
+				sep = ","
+			}
+			gs.extraState[i] = &stringAggState{sep: sep}
+		case AggStddev, AggVariance, AggStddevPop, AggVarPop:
+			gs.extraState[i] = &varianceState{}
+		case AggBoolAnd:
+			gs.extraState[i] = true
+		case AggBoolOr:
+			gs.extraState[i] = false
+		case AggApproxDistinct:
+			gs.distinctSets[i] = make(map[string]struct{})
+		case AggCorr, AggCovarSamp, AggCovarPop:
+			gs.extraState[i] = &covarianceState{}
+		case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
+			gs.extraState[i] = &collectState{}
+		case AggMinBy:
+			gs.extraState[i] = &minMaxByState{isMin: true}
+		case AggMaxBy:
+			gs.extraState[i] = &minMaxByState{isMin: false}
+		}
+	}
+	h.groups[key] = gs
+	h.keys = append(h.keys, keyVals)
+	h.serializedKeys = append(h.serializedKeys, key)
+
+	h.updateGroup(gs, b, row)
+}
+
+// updateGroup updates a group's accumulators with values from a single row.
+func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row int) {
 	for i, agg := range h.Aggs {
 		switch agg.Func {
 		case AggCountDistinct:
