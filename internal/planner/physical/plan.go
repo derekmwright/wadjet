@@ -176,7 +176,7 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	if !ok {
 		return nil, fmt.Errorf("unexpected sink type for subquery")
 	}
-	return collectSink.Rows, nil
+	return collectSink.ToRows(), nil
 }
 
 // AnnotateScanColumns walks the logical plan tree and populates ScanColumns
@@ -1673,11 +1673,11 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 
 		switch u.op {
 		case "intersect":
-			resultRows = intersectRows(leftSink.Rows, rightSink.Rows, u.all)
+			resultRows = intersectRows(leftSink.ToRows(), rightSink.ToRows(), u.all)
 		case "except":
-			resultRows = exceptRows(leftSink.Rows, rightSink.Rows, u.all)
+			resultRows = exceptRows(leftSink.ToRows(), rightSink.ToRows(), u.all)
 		default: // "union"
-			resultRows = append(leftSink.Rows, rightSink.Rows...)
+			resultRows = append(leftSink.ToRows(), rightSink.ToRows()...)
 			if !u.all {
 				resultRows = deduplicateRows(resultRows)
 			}

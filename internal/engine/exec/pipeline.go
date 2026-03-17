@@ -121,16 +121,19 @@ func (s *SliceSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 func (s *SliceSource) Close() error { return nil }
 
-// CollectSink collects all consumed batches. Data is stored columnar internally
-// and only converted to rows on demand via ToRows().
+// CollectSink collects all consumed batches. Data is stored columnar internally.
+// Rows are converted lazily on first access to ToRows(), not during Finalize.
+// Use Batches() for zero-copy columnar access.
 type CollectSink struct {
-	Rows    []map[string]any       // populated lazily in Finalize
-	batches []*batch.RecordBatch   // columnar storage
+	Rows    []map[string]any     // populated lazily on first access
+	batches []*batch.RecordBatch // columnar storage
+	rowsDone bool
 }
 
 func (s *CollectSink) Init(_ context.Context) error {
 	s.Rows = nil
 	s.batches = nil
+	s.rowsDone = false
 	return nil
 }
 
@@ -140,11 +143,19 @@ func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 }
 
 func (s *CollectSink) Finalize(_ context.Context) error {
-	// Convert to rows for backward compatibility
-	for _, b := range s.batches {
-		s.Rows = append(s.Rows, b.ToRows()...)
-	}
+	s.ToRows() // populate Rows for backward compatibility
 	return nil
+}
+
+// ToRows returns all results as rows, converting from batches on first call.
+func (s *CollectSink) ToRows() []map[string]any {
+	if !s.rowsDone {
+		s.rowsDone = true
+		for _, b := range s.batches {
+			s.Rows = append(s.Rows, b.ToRows()...)
+		}
+	}
+	return s.Rows
 }
 
 // Batches returns the raw columnar batches (zero-copy, no conversion).

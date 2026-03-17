@@ -156,7 +156,7 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 
 	var rows []map[string]any
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
-		rows = collectSink.Rows
+		rows = collectSink.ToRows()
 	}
 
 	// Derive column order from the projection list, not map iteration

@@ -327,7 +327,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Collect results
 	var rows []map[string]any
 	if collectSink, ok := pipeline.Sink.(*exec.CollectSink); ok {
-		rows = collectSink.Rows
+		rows = collectSink.ToRows()
 	}
 
 	// Apply cell-level access policies (column masking/denial)
