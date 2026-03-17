@@ -936,6 +936,12 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 
 func (p *HashJoinProbe) Close() error { return nil }
 
+// Clone returns a new HashJoinProbe that shares the same build-side hash table
+// but has its own scratch buffers (pairsBuf, semiSelBuf, lookupBuf, indexBuf).
+func (p *HashJoinProbe) Clone() UnaryOperator {
+	return p.join.Probe()
+}
+
 // outColSource tracks the source of each output column in the join result.
 type outColSource struct {
 	fromProbe bool // true = probe side, false = build side

@@ -28,11 +28,19 @@ func Literal(val any) Expression {
 	}
 }
 
+// Float64Expression evaluates to float64 without boxing.
+type Float64Expression func(b *batch.RecordBatch, row int) (float64, bool)
+
+// Int64Expression evaluates to int64 without boxing.
+type Int64Expression func(b *batch.RecordBatch, row int) (int64, bool)
+
 // ProjectColumn defines an output column of a projection.
 type ProjectColumn struct {
-	Name string
-	Type parquet.TypeID
-	Expr Expression
+	Name        string
+	Type        parquet.TypeID
+	Expr        Expression
+	Float64Eval Float64Expression // optional typed path (avoids interface{} boxing)
+	Int64Eval   Int64Expression   // optional typed path
 }
 
 // Project is a UnaryOperator that selects and computes columns.
@@ -87,6 +95,12 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 }
 
 func (p *Project) Close() error { return nil }
+
+// Clone returns a new Project that shares the same (immutable) projections.
+// Project has no per-instance scratch buffers, so sharing is safe.
+func (p *Project) Clone() UnaryOperator {
+	return &Project{Projections: p.Projections}
+}
 
 // ArithExpr creates an arithmetic expression between two expressions.
 func ArithExpr(left, right Expression, op string) Expression {

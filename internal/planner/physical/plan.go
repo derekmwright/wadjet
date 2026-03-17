@@ -240,11 +240,23 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		return nil, err
 	}
 
+	// Enable parallel pipeline execution when the source supports
+	// concurrent Next() calls (channel-based scan sources).
+	pipelineWorkers := 0
+	switch source.(type) {
+	case *catalogScanSource, *scannerExecSource:
+		pipelineWorkers = runtime.NumCPU()
+		if pipelineWorkers > 8 {
+			pipelineWorkers = 8
+		}
+	}
+
 	plan := &PhysicalPlan{
 		Pipeline: &exec.Pipeline{
-			Source: source,
+			Source:  source,
 			Ops:    ops,
 			Sink:   sink,
+			Workers: pipelineWorkers,
 		},
 	}
 
@@ -1325,11 +1337,18 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 			synName := fmt.Sprintf("__agg_expr_%d", i)
 			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner)
 			if compErr == nil {
-				preProjectCols = append(preProjectCols, exec.ProjectColumn{
+				pc := exec.ProjectColumn{
 					Name: synName,
 					Type: parquet.TypeFloat64,
 					Expr: wrapExpr(compiled),
-				})
+				}
+				// Use typed evaluation to avoid interface{} boxing in the inner loop
+				if fe, ok := compiled.(expr.Float64Expr); ok {
+					pc.Float64Eval = fe.EvalFloat64
+				} else if ie, ok := compiled.(expr.Int64Expr); ok {
+					pc.Int64Eval = ie.EvalInt64
+				}
+				preProjectCols = append(preProjectCols, pc)
 				syntheticNames[i] = synName
 			}
 		}
@@ -1509,12 +1528,33 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		out.Columns[j] = in.Columns[j]
 	}
 
-	// Compute expression columns (sequential writes, no selection vector)
+	// Compute expression columns (sequential writes, no selection vector).
+	// Use typed evaluation paths when available to avoid interface{} boxing.
 	computedOffset := len(in.Schema)
-	for i := 0; i < in.Len; i++ {
-		for k, c := range a.computed {
-			val := c.Expr(in, i)
-			out.Columns[computedOffset+k].SetValue(i, val)
+	for k, c := range a.computed {
+		col := out.Columns[computedOffset+k]
+		if c.Float64Eval != nil {
+			for i := 0; i < in.Len; i++ {
+				v, ok := c.Float64Eval(in, i)
+				if ok {
+					col.Float64Data[i] = v
+				} else {
+					col.Nulls.SetNull(i)
+				}
+			}
+		} else if c.Int64Eval != nil {
+			for i := 0; i < in.Len; i++ {
+				v, ok := c.Int64Eval(in, i)
+				if ok {
+					col.Int64Data[i] = v
+				} else {
+					col.Nulls.SetNull(i)
+				}
+			}
+		} else {
+			for i := 0; i < in.Len; i++ {
+				col.SetValue(i, c.Expr(in, i))
+			}
 		}
 	}
 

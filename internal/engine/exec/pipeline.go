@@ -3,6 +3,8 @@ package exec
 import (
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -10,13 +12,16 @@ import (
 
 // Pipeline represents Source → [UnaryOps...] → Sink.
 type Pipeline struct {
-	Source Source
+	Source  Source
 	Ops    []UnaryOperator
 	Sink   Sink
+	Workers int // number of parallel workers (0 or 1 = serial)
 }
 
 // Run executes the pipeline by pulling from source, transforming through
-// operators, and pushing to sink. Designed to be run per goroutine (one per partition).
+// operators, and pushing to sink. When Workers > 1 and all operators
+// implement Cloneable, batches are processed by multiple goroutines
+// concurrently. Otherwise falls back to serial execution.
 func (p *Pipeline) Run(ctx context.Context) error {
 	if err := p.Source.Init(ctx); err != nil {
 		return fmt.Errorf("source init: %w", err)
@@ -30,8 +35,25 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return fmt.Errorf("sink init: %w", err)
 	}
 
+	if p.Workers > 1 && p.allOpsCloneable() {
+		return p.runParallel(ctx)
+	}
+	return p.runSerial(ctx)
+}
+
+// allOpsCloneable returns true if every operator in the chain implements Cloneable.
+func (p *Pipeline) allOpsCloneable() bool {
+	for _, op := range p.Ops {
+		if _, ok := op.(Cloneable); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// runSerial is the original single-threaded pipeline loop.
+func (p *Pipeline) runSerial(ctx context.Context) error {
 	for {
-		// Check for context cancellation (timeout, user cancel)
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("pipeline cancelled: %w", err)
 		}
@@ -51,11 +73,10 @@ func (p *Pipeline) Run(ctx context.Context) error {
 				return fmt.Errorf("operator execute: %w", err)
 			}
 			if b == nil {
-				// Check if operator is done (e.g., LIMIT satisfied)
 				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
 					exhausted = true
 				}
-				break // fully filtered out
+				break
 			}
 		}
 
@@ -66,7 +87,171 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		}
 
 		if exhausted {
-			break // early termination: operator signaled completion
+			break
+		}
+	}
+
+	return p.Sink.Finalize(ctx)
+}
+
+// runParallel processes batches through cloned operator chains in parallel.
+// The source and sink are shared; each worker gets its own cloned operators.
+func (p *Pipeline) runParallel(ctx context.Context) error {
+	// Warm-up: process one batch through the original ops to resolve lazy
+	// column indices in expressions (e.g., KernelFilter, ColumnCompare).
+	// This ensures clones inherit resolved state where possible.
+	warmupBatch, err := p.Source.Next(ctx)
+	if err != nil {
+		return fmt.Errorf("source next: %w", err)
+	}
+	if warmupBatch == nil {
+		// No data at all — just finalize and return.
+		return p.Sink.Finalize(ctx)
+	}
+
+	// Process warmup batch through original ops.
+	{
+		b := warmupBatch
+		exhausted := false
+		for _, op := range p.Ops {
+			b, err = op.Execute(ctx, b)
+			if err != nil {
+				return fmt.Errorf("operator execute: %w", err)
+			}
+			if b == nil {
+				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
+					exhausted = true
+				}
+				break
+			}
+		}
+		if b != nil {
+			if err := p.Sink.Consume(ctx, b); err != nil {
+				return fmt.Errorf("sink consume: %w", err)
+			}
+			// Check DoneSignalers even when batch was non-nil — Limit
+			// may have returned a truncated batch and is now satisfied.
+			for _, op := range p.Ops {
+				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
+					exhausted = true
+				}
+			}
+		}
+		if exhausted {
+			return p.Sink.Finalize(ctx)
+		}
+	}
+
+	// Build cloned op chains for each worker. Worker 0 reuses the original ops.
+	workers := p.Workers
+	opChains := make([][]UnaryOperator, workers)
+	opChains[0] = p.Ops
+	for i := 1; i < workers; i++ {
+		chain := make([]UnaryOperator, len(p.Ops))
+		for j, op := range p.Ops {
+			chain[j] = op.(Cloneable).Clone()
+		}
+		// Init only truly new cloned ops — skip ops that are the same
+		// instance as the original (e.g., Limit.Clone() returns self to
+		// share atomic counters; re-Init would reset those counters).
+		for j, cop := range chain {
+			if cop == p.Ops[j] {
+				continue // shared instance, already initialized
+			}
+			if err := cop.Init(ctx); err != nil {
+				return fmt.Errorf("cloned operator init: %w", err)
+			}
+		}
+		opChains[i] = chain
+	}
+
+	// Collect DoneSignalers from the original chain (shared across workers
+	// for Limit, which uses atomics).
+	var doneSignalers []DoneSignaler
+	for _, op := range p.Ops {
+		if ds, ok := op.(DoneSignaler); ok {
+			doneSignalers = append(doneSignalers, ds)
+		}
+	}
+
+	// Launch workers.
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var firstErr atomic.Value // stores first error
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(workerID int, ops []UnaryOperator) {
+			defer wg.Done()
+			for {
+				// Check for cancellation or done signaling.
+				if workerCtx.Err() != nil {
+					return
+				}
+				for _, ds := range doneSignalers {
+					if ds.Done() {
+						return
+					}
+				}
+
+				b, err := p.Source.Next(workerCtx)
+				if err != nil {
+					if workerCtx.Err() != nil {
+						return // context cancelled, not a real error
+					}
+					firstErr.CompareAndSwap(nil, fmt.Errorf("source next: %w", err))
+					cancel()
+					return
+				}
+				if b == nil {
+					return // source exhausted
+				}
+
+				exhausted := false
+				for _, op := range ops {
+					b, err = op.Execute(workerCtx, b)
+					if err != nil {
+						firstErr.CompareAndSwap(nil, fmt.Errorf("operator execute: %w", err))
+						cancel()
+						return
+					}
+					if b == nil {
+						if ds, ok := op.(DoneSignaler); ok && ds.Done() {
+							exhausted = true
+						}
+						break
+					}
+				}
+
+				if b != nil {
+					if err := p.Sink.Consume(workerCtx, b); err != nil {
+						firstErr.CompareAndSwap(nil, fmt.Errorf("sink consume: %w", err))
+						cancel()
+						return
+					}
+				}
+
+				if exhausted {
+					cancel() // signal other workers to stop
+					return
+				}
+			}
+		}(i, opChains[i])
+	}
+
+	wg.Wait()
+
+	// Check for worker errors.
+	if v := firstErr.Load(); v != nil {
+		return v.(error)
+	}
+
+	// Close cloned ops (workers 1..N).
+	for i := 1; i < workers; i++ {
+		for _, op := range opChains[i] {
+			op.Close()
 		}
 	}
 
@@ -133,10 +318,12 @@ func (s *SliceSource) Close() error { return nil }
 // CollectSink collects all consumed batches. Data is stored columnar internally.
 // Rows are converted lazily on first access to ToRows(), not during Finalize.
 // Use Batches() for zero-copy columnar access.
+// Thread-safe: Consume() is protected by a mutex for parallel pipeline workers.
 type CollectSink struct {
 	Rows    []map[string]any     // populated lazily on first access
 	batches []*batch.RecordBatch // columnar storage
 	rowsDone bool
+	mu       sync.Mutex
 }
 
 func (s *CollectSink) Init(_ context.Context) error {
@@ -147,7 +334,9 @@ func (s *CollectSink) Init(_ context.Context) error {
 }
 
 func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
+	s.mu.Lock()
 	s.batches = append(s.batches, b)
+	s.mu.Unlock()
 	return nil
 }
 

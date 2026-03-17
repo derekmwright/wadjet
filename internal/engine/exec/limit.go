@@ -91,6 +91,13 @@ func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Record
 
 func (l *Limit) Close() error { return nil }
 
+// Clone returns the same Limit instance. Limit uses atomic counters for
+// seen/passed tracking, making it safe for concurrent Execute calls from
+// multiple pipeline workers.
+func (l *Limit) Clone() UnaryOperator {
+	return l
+}
+
 // Done returns true when the limit has been satisfied, enabling pipeline
 // early termination (LIMIT pushdown).
 func (l *Limit) Done() bool {

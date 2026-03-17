@@ -71,6 +71,12 @@ func (f *Filter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Recor
 
 func (f *Filter) Close() error { return nil }
 
+// Clone returns a new Filter that shares the same predicate closure but has
+// its own scratch buffer, allowing concurrent Execute calls.
+func (f *Filter) Clone() UnaryOperator {
+	return &Filter{Pred: f.Pred}
+}
+
 // ColumnCompare creates a predicate that compares a column against a constant value.
 func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 	cachedIdx := -2 // -2 = unresolved, -1 = not found
@@ -368,6 +374,12 @@ func (f *KernelFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch
 
 func (f *KernelFilter) Close() error { return nil }
 
+// Clone returns a new KernelFilter with the same parameters but fresh
+// resolution state and scratch buffers for concurrent Execute calls.
+func (f *KernelFilter) Clone() UnaryOperator {
+	return &KernelFilter{ColName: f.ColName, Op: f.Op, Value: f.Value}
+}
+
 func toKernelOp(op CompareOp) kernel.CompareOp {
 	switch op {
 	case OpEq:
@@ -442,6 +454,20 @@ func (f *ChainFilter) Close() error {
 	return nil
 }
 
+// Clone returns a new ChainFilter with cloned sub-operators.
+// Sub-operators that implement Cloneable are cloned; others are shared.
+func (f *ChainFilter) Clone() UnaryOperator {
+	cloned := make([]UnaryOperator, len(f.Ops))
+	for i, op := range f.Ops {
+		if c, ok := op.(Cloneable); ok {
+			cloned[i] = c.Clone()
+		} else {
+			cloned[i] = op
+		}
+	}
+	return &ChainFilter{Ops: cloned}
+}
+
 func toFloat64(v any) float64 {
 	switch tv := v.(type) {
 	case float64:
@@ -502,3 +528,9 @@ func (f *ColColFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch
 }
 
 func (f *ColColFilter) Close() error { return nil }
+
+// Clone returns a new ColColFilter with the same parameters but fresh
+// resolution state and scratch buffers for concurrent Execute calls.
+func (f *ColColFilter) Clone() UnaryOperator {
+	return &ColColFilter{LeftCol: f.LeftCol, RightCol: f.RightCol, Op: f.Op}
+}

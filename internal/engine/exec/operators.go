@@ -36,6 +36,13 @@ type SinkSource interface {
 	Source
 }
 
+// Cloneable is implemented by operators that can be cloned for parallel
+// pipeline execution. Each clone gets its own scratch buffers so that
+// multiple goroutines can call Execute concurrently without data races.
+type Cloneable interface {
+	Clone() UnaryOperator
+}
+
 // DoneSignaler is implemented by operators (like Limit) that can signal early
 // pipeline termination. When Done() returns true, the pipeline stops pulling
 // from the source, enabling LIMIT pushdown without scanning the full table.
