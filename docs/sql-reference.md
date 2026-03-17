@@ -94,6 +94,52 @@ Local CSV files are read in streaming mode — only the current batch of rows is
 
 Local Parquet files are opened as file handles (`io.ReaderAt`), enabling page-level random access without reading the entire file into memory. HTTP sources and glob patterns still require a full download.
 
+### postgres_scan / postgres_query
+
+Query external PostgreSQL databases directly from SQL. Uses `database/sql` with the `lib/pq` driver.
+
+```sql
+-- Scan an entire table
+SELECT * FROM postgres_scan('host=pghost dbname=mydb user=readonly', 'customers')
+
+-- Run an arbitrary query with pushdown
+SELECT name, total
+FROM postgres_query('host=pghost dbname=mydb sslmode=require', 'SELECT name, SUM(amount) AS total FROM orders GROUP BY name')
+WHERE total > 1000
+```
+
+Connection strings use the standard PostgreSQL `libpq` format (`host=... dbname=... user=... password=... sslmode=...`).
+
+### mysql_scan / mysql_query
+
+Query external MySQL databases directly from SQL. Uses the `go-sql-driver/mysql` driver.
+
+```sql
+-- Scan an entire table
+SELECT * FROM mysql_scan('user:password@tcp(mysqlhost:3306)/mydb', 'products')
+
+-- Run an arbitrary query
+SELECT * FROM mysql_query('user:password@tcp(mysqlhost:3306)/mydb', 'SELECT * FROM logs WHERE created_at > NOW() - INTERVAL 1 HOUR')
+```
+
+Connection strings use the standard MySQL DSN format (`user:password@tcp(host:port)/dbname`).
+
+### Database Connector Type Mapping
+
+| Database Type | Caelum Type |
+|---|---|
+| BOOL, BOOLEAN | BOOL |
+| SMALLINT, TINYINT | INT32 |
+| INT, INTEGER, BIGINT | INT64 |
+| FLOAT, REAL, DOUBLE | FLOAT64 |
+| NUMERIC, DECIMAL | FLOAT64 |
+| DATE | DATE |
+| TIMESTAMP, DATETIME | TIMESTAMP |
+| TEXT, VARCHAR, CHAR | STRING |
+| BYTEA, BLOB | BYTES |
+| JSON, JSONB | STRING |
+| UUID, INET, CIDR | STRING |
+
 ## Common Table Expressions (CTEs)
 
 CTEs define named temporary result sets for use in the main query:

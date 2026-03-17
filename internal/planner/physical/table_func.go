@@ -10,12 +10,18 @@ import (
 	"sort"
 	"strings"
 
+	"database/sql"
+
 	"github.com/derekmwright/caelum/internal/engine/batch"
 	"github.com/derekmwright/caelum/internal/engine/exec"
 	csvreader "github.com/derekmwright/caelum/internal/storage/csv"
+	"github.com/derekmwright/caelum/internal/storage/dbscan"
 	jsonreader "github.com/derekmwright/caelum/internal/storage/json"
 	"github.com/derekmwright/caelum/internal/storage/objstore"
 	"github.com/derekmwright/caelum/internal/storage/parquet"
+
+	_ "github.com/go-sql-driver/mysql" // MySQL driver
+	_ "github.com/lib/pq"              // PostgreSQL driver
 )
 
 // buildTableFunctionSource creates an exec.Source for a table function like
@@ -38,6 +44,26 @@ func buildTableFunctionSource(funcName string, args []string, namedArgs map[stri
 			return nil, fmt.Errorf("read_csv requires at least 1 argument (path or URL)")
 		}
 		return &csvTableFuncSource{path: args[0], namedArgs: namedArgs}, nil
+	case "postgres_scan":
+		if len(args) < 2 {
+			return nil, fmt.Errorf("postgres_scan requires 2 arguments (connection_string, table_name)")
+		}
+		return &dbScanSource{driver: "postgres", connStr: args[0], query: fmt.Sprintf("SELECT * FROM %s", args[1])}, nil
+	case "postgres_query":
+		if len(args) < 2 {
+			return nil, fmt.Errorf("postgres_query requires 2 arguments (connection_string, sql_query)")
+		}
+		return &dbScanSource{driver: "postgres", connStr: args[0], query: args[1]}, nil
+	case "mysql_scan":
+		if len(args) < 2 {
+			return nil, fmt.Errorf("mysql_scan requires 2 arguments (connection_string, table_name)")
+		}
+		return &dbScanSource{driver: "mysql", connStr: args[0], query: fmt.Sprintf("SELECT * FROM %s", args[1])}, nil
+	case "mysql_query":
+		if len(args) < 2 {
+			return nil, fmt.Errorf("mysql_query requires 2 arguments (connection_string, sql_query)")
+		}
+		return &dbScanSource{driver: "mysql", connStr: args[0], query: args[1]}, nil
 	default:
 		return nil, fmt.Errorf("unknown table function: %s", funcName)
 	}
@@ -277,5 +303,57 @@ func splitURL(rawURL string) (bucket, key string) {
 		return rawURL, ""
 	}
 	return rawURL[:idx], rawURL[idx+1:]
+}
+
+// dbScanSource queries an external SQL database and produces columnar batches.
+// Supports PostgreSQL (via lib/pq) and MySQL (via go-sql-driver/mysql).
+type dbScanSource struct {
+	driver  string // "postgres" or "mysql"
+	connStr string
+	query   string
+	db      *sql.DB
+	scanner *dbscan.Scanner
+}
+
+func (s *dbScanSource) Init(_ context.Context) error {
+	db, err := sql.Open(s.driver, s.connStr)
+	if err != nil {
+		return fmt.Errorf("%s_scan: connect: %w", s.driver, err)
+	}
+	s.db = db
+
+	rows, err := db.Query(s.query)
+	if err != nil {
+		db.Close()
+		return fmt.Errorf("%s_scan: query: %w", s.driver, err)
+	}
+
+	scanner, err := dbscan.NewScanner(rows)
+	if err != nil {
+		rows.Close()
+		db.Close()
+		return fmt.Errorf("%s_scan: %w", s.driver, err)
+	}
+	s.scanner = scanner
+	return nil
+}
+
+func (s *dbScanSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	return s.scanner.Next()
+}
+
+func (s *dbScanSource) Close() error {
+	var firstErr error
+	if s.scanner != nil {
+		if err := s.scanner.Close(); err != nil {
+			firstErr = err
+		}
+	}
+	if s.db != nil {
+		if err := s.db.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 

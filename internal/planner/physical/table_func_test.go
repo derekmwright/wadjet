@@ -365,6 +365,75 @@ func TestFetchGlob_NoMatch(t *testing.T) {
 	}
 }
 
+func TestTableFuncPostgresScan_NoArgs(t *testing.T) {
+	_, err := buildTableFunctionSource("postgres_scan", nil, nil)
+	if err == nil {
+		t.Error("expected error for missing args")
+	}
+	_, err = buildTableFunctionSource("postgres_scan", []string{"connstr"}, nil)
+	if err == nil {
+		t.Error("expected error for missing table name")
+	}
+}
+
+func TestTableFuncPostgresQuery_NoArgs(t *testing.T) {
+	_, err := buildTableFunctionSource("postgres_query", nil, nil)
+	if err == nil {
+		t.Error("expected error for missing args")
+	}
+}
+
+func TestTableFuncMySQLScan_NoArgs(t *testing.T) {
+	_, err := buildTableFunctionSource("mysql_scan", nil, nil)
+	if err == nil {
+		t.Error("expected error for missing args")
+	}
+	_, err = buildTableFunctionSource("mysql_scan", []string{"connstr"}, nil)
+	if err == nil {
+		t.Error("expected error for missing table name")
+	}
+}
+
+func TestTableFuncMySQLQuery_NoArgs(t *testing.T) {
+	_, err := buildTableFunctionSource("mysql_query", nil, nil)
+	if err == nil {
+		t.Error("expected error for missing args")
+	}
+}
+
+func TestTableFuncDBScan_SourceCreated(t *testing.T) {
+	// Verify sources are created with correct driver/query (Init will fail without a real DB)
+	source, err := buildTableFunctionSource("postgres_scan", []string{"host=localhost", "users"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating source: %v", err)
+	}
+	dbs, ok := source.(*dbScanSource)
+	if !ok {
+		t.Fatalf("expected *dbScanSource, got %T", source)
+	}
+	if dbs.driver != "postgres" {
+		t.Errorf("expected driver=postgres, got %s", dbs.driver)
+	}
+	if dbs.query != "SELECT * FROM users" {
+		t.Errorf("expected query='SELECT * FROM users', got %q", dbs.query)
+	}
+
+	source2, err := buildTableFunctionSource("mysql_query", []string{"root:pass@tcp(localhost)/db", "SELECT id FROM t"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating source: %v", err)
+	}
+	dbs2, ok := source2.(*dbScanSource)
+	if !ok {
+		t.Fatalf("expected *dbScanSource, got %T", source2)
+	}
+	if dbs2.driver != "mysql" {
+		t.Errorf("expected driver=mysql, got %s", dbs2.driver)
+	}
+	if dbs2.query != "SELECT id FROM t" {
+		t.Errorf("expected query='SELECT id FROM t', got %q", dbs2.query)
+	}
+}
+
 func TestSplitURL(t *testing.T) {
 	tests := []struct {
 		url    string
