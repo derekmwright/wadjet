@@ -145,9 +145,7 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 				vr := page.Values()
 				for {
 					n, err := vr.ReadValues(valBuf)
-					for i := 0; i < n; i++ {
-						setValueDirect(col, rowOffset+i, valBuf[i])
-					}
+					setValuesBulk(col, rowOffset, valBuf, n)
 					rowOffset += n
 					if err != nil || n == 0 {
 						break
@@ -243,6 +241,89 @@ func buildProjectedParquetSchema(file *goparquet.File, selectedColumns []string)
 		return nil
 	}
 	return goparquet.NewSchema(fileSchema.Name(), group)
+}
+
+// setValuesBulk writes n parquet Values to a batch Vector starting at offset.
+// Hoists the type switch outside the loop, eliminating per-value dispatch overhead.
+func setValuesBulk(col *batch.Vector, offset int, vals []goparquet.Value, n int) {
+	switch col.Type {
+	case batch.TypeBool:
+		for i := 0; i < n; i++ {
+			if vals[i].IsNull() {
+				col.Nulls.SetNull(offset + i)
+			} else {
+				col.Nulls.SetValid(offset + i)
+				col.BoolData[offset+i] = vals[i].Boolean()
+			}
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		for i := 0; i < n; i++ {
+			if vals[i].IsNull() {
+				col.Nulls.SetNull(offset + i)
+			} else {
+				col.Nulls.SetValid(offset + i)
+				col.Int32Data[offset+i] = vals[i].Int32()
+			}
+		}
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		for i := 0; i < n; i++ {
+			if vals[i].IsNull() {
+				col.Nulls.SetNull(offset + i)
+			} else {
+				col.Nulls.SetValid(offset + i)
+				col.Int64Data[offset+i] = vals[i].Int64()
+			}
+		}
+	case batch.TypeFloat32:
+		for i := 0; i < n; i++ {
+			if vals[i].IsNull() {
+				col.Nulls.SetNull(offset + i)
+			} else {
+				col.Nulls.SetValid(offset + i)
+				col.Float32Data[offset+i] = vals[i].Float()
+			}
+		}
+	case batch.TypeFloat64:
+		for i := 0; i < n; i++ {
+			if vals[i].IsNull() {
+				col.Nulls.SetNull(offset + i)
+			} else {
+				col.Nulls.SetValid(offset + i)
+				col.Float64Data[offset+i] = vals[i].Double()
+			}
+		}
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		for i := 0; i < n; i++ {
+			if vals[i].IsNull() {
+				col.Nulls.SetNull(offset + i)
+				col.BytesData.Set(offset+i, nil)
+			} else {
+				col.Nulls.SetValid(offset + i)
+				col.BytesData.Set(offset+i, vals[i].ByteArray())
+			}
+		}
+	case batch.TypeDecimal:
+		for i := 0; i < n; i++ {
+			if vals[i].IsNull() {
+				col.Nulls.SetNull(offset + i)
+			} else {
+				col.Nulls.SetValid(offset + i)
+				switch vals[i].Kind() {
+				case goparquet.Int32:
+					col.DecimalData.Data[offset+i] = batch.Int128From(int64(vals[i].Int32()))
+				case goparquet.Int64:
+					col.DecimalData.Data[offset+i] = batch.Int128From(vals[i].Int64())
+				case goparquet.FixedLenByteArray, goparquet.ByteArray:
+					col.DecimalData.Data[offset+i] = decimalFromBytes(vals[i].ByteArray())
+				}
+			}
+		}
+	default:
+		// Fallback for any unhandled types
+		for i := 0; i < n; i++ {
+			setValueDirect(col, offset+i, vals[i])
+		}
+	}
 }
 
 // setValueDirect writes a parquet Value directly to a batch Vector at the given index,
