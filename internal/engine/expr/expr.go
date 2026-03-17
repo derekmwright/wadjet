@@ -2169,21 +2169,21 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 				break // first column only
 			}
 		}
-		// Build typed hash set based on first value's type
+		// Build typed hash set. Use toInt64Safe/toFloat64Safe to normalize
+		// all integer types (int32, int64, int) and float types (float32, float64).
 		if len(rawVals) > 0 {
-			switch rawVals[0].(type) {
-			case int64:
+			if _, ok := toInt64Safe(rawVals[0]); ok {
 				e.intSet = make(map[int64]struct{}, len(rawVals))
 				for _, v := range rawVals {
-					if iv, ok := v.(int64); ok {
+					if iv, ok := toInt64Safe(v); ok {
 						e.intSet[iv] = struct{}{}
 					} else {
-						e.vals = rawVals // mixed types, fallback
+						e.vals = rawVals
 						e.intSet = nil
 						break
 					}
 				}
-			case string:
+			} else if _, ok := rawVals[0].(string); ok {
 				e.strSet = make(map[string]struct{}, len(rawVals))
 				for _, v := range rawVals {
 					if sv, ok := v.(string); ok {
@@ -2194,10 +2194,10 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 						break
 					}
 				}
-			case float64:
+			} else if _, ok := toFloat64Safe(rawVals[0]); ok {
 				e.fltSet = make(map[float64]struct{}, len(rawVals))
 				for _, v := range rawVals {
-					if fv, ok := v.(float64); ok {
+					if fv, ok := toFloat64Safe(v); ok {
 						e.fltSet[fv] = struct{}{}
 					} else {
 						e.vals = rawVals
@@ -2205,7 +2205,7 @@ func (e *InSubquery) EvalBool(b *batch.RecordBatch, row int) bool {
 						break
 					}
 				}
-			default:
+			} else {
 				e.vals = rawVals
 			}
 		}

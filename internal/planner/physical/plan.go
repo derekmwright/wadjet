@@ -159,6 +159,13 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 		return nil, fmt.Errorf("subquery plan error: %w", err)
 	}
 
+	// Annotate scan nodes with column metadata so the optimizer can resolve
+	// unqualified column references (needed for subquery decorrelation).
+	p.AnnotateScanColumns(ctx, logicalPlan)
+
+	// Optimize — decorrelate nested subqueries, push predicates, etc.
+	logicalPlan = logical.Optimize(logicalPlan)
+
 	// Build physical pipeline
 	source, ops, sink, err := p.buildPipeline(ctx, logicalPlan)
 	if err != nil {
