@@ -287,6 +287,41 @@ func columnToNode(col Column) (goparquet.Node, error) {
 		}
 		scale := col.Scale
 		node = goparquet.Decimal(scale, prec, goparquet.Int64Type)
+	case TypeArray:
+		if col.ElementType == nil {
+			return nil, fmt.Errorf("ARRAY column missing element type")
+		}
+		elemNode, err := columnToNode(*col.ElementType)
+		if err != nil {
+			return nil, fmt.Errorf("ARRAY element: %w", err)
+		}
+		node = goparquet.List(elemNode)
+	case TypeMap:
+		if col.ElementType == nil || len(col.ElementType.Fields) != 2 {
+			return nil, fmt.Errorf("MAP column missing key/value fields")
+		}
+		keyNode, err := columnToNode(col.ElementType.Fields[0])
+		if err != nil {
+			return nil, fmt.Errorf("MAP key: %w", err)
+		}
+		valNode, err := columnToNode(col.ElementType.Fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("MAP value: %w", err)
+		}
+		node = goparquet.Map(keyNode, valNode)
+	case TypeRow:
+		if len(col.Fields) == 0 {
+			return nil, fmt.Errorf("ROW column has no fields")
+		}
+		group := goparquet.Group{}
+		for _, f := range col.Fields {
+			fNode, err := columnToNode(f)
+			if err != nil {
+				return nil, fmt.Errorf("ROW field %s: %w", f.Name, err)
+			}
+			group[f.Name] = fNode
+		}
+		node = group
 	default:
 		return nil, fmt.Errorf("unsupported type: %v", col.Type)
 	}
