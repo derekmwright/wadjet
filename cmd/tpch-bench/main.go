@@ -108,8 +108,9 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		log.Fatalf("creating S3 store: %v", err)
 	}
 
-	// Embedded NATS for coordination
+	// Embedded NATS for coordination — bind to 0.0.0.0 so remote workers can connect
 	natsCfg := distrib.DefaultNATSConfig()
+	natsCfg.Host = "0.0.0.0"
 	natsCfg.Port = nPort
 	embeddedNATS, err := distrib.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {

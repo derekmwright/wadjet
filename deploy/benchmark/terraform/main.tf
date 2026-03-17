@@ -186,6 +186,11 @@ locals {
     #!/bin/bash
     set -euo pipefail
 
+    # Set HOME explicitly (cloud-init runs without login shell)
+    export HOME=/root
+    export GOPATH=/root/go
+    export GOMODCACHE=/root/go/pkg/mod
+
     # Install Go
     cd /tmp
     curl -fsSL "https://go.dev/dl/go${var.go_version}.linux-arm64.tar.gz" -o go.tar.gz
@@ -333,16 +338,25 @@ resource "aws_instance" "worker" {
   user_data = base64encode(<<-EOF
     ${local.build_script}
 
-    # Start wadjet worker connecting to coordinator
-    /usr/local/bin/wadjet serve \
-      --mode=worker \
-      --nats-url="nats://${aws_instance.coordinator[0].private_ip}:4222" \
-      --endpoint="s3.${var.region}.amazonaws.com" \
-      --ssl \
-      --bucket="${local.bucket_name}" \
-      --region="${var.region}" \
-      --storage-type=s3 &
-    echo "WORKER_STARTED=1" >> /etc/environment
+    # Start wadjet worker connecting to coordinator (retry until NATS is ready)
+    for i in $(seq 1 60); do
+      /usr/local/bin/wadjet serve \
+        --mode=worker \
+        --nats-url="nats://${aws_instance.coordinator[0].private_ip}:4222" \
+        --endpoint="s3.${var.region}.amazonaws.com" \
+        --ssl \
+        --bucket="${local.bucket_name}" \
+        --region="${var.region}" \
+        --storage-type=s3 &
+      WORKER_PID=$!
+      sleep 5
+      if kill -0 $WORKER_PID 2>/dev/null; then
+        echo "WORKER_STARTED=1" >> /etc/environment
+        break
+      fi
+      echo "Worker attempt $i failed, retrying in 10s..."
+      sleep 10
+    done
   EOF
   )
 
