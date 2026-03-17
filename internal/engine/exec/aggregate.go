@@ -84,6 +84,11 @@ type HashAggregate struct {
 	intGroupStates []*groupState
 	intGroupKeyCol int // column index for the integer group-by key
 
+	// Multi-column compact GROUP BY fast path: binary-encoded key packed into int64.
+	// Uses intHashTable for lookup. Falls back to generic path if key exceeds 8 bytes.
+	useCompactGroupKey bool
+	compactKeys        []string // serialized binary keys for fallback migration
+
 	resolved       bool
 	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
@@ -291,33 +296,60 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	}
 	h.resolved = true
 
-	// Single-column integer GROUP BY fast path:
-	// Use intHashTable when grouping by one integer-typed column and
-	// all aggregate functions use standard kernel updaters (no COUNT(DISTINCT),
+	// Check if all aggregates use simple kernel updaters (no COUNT(DISTINCT),
 	// STRING_AGG, etc. which need the generic processRow path).
+	allSimpleAggs := true
+	for i, agg := range h.Aggs {
+		switch agg.Func {
+		case AggCountDistinct, AggStringAgg, AggApproxDistinct,
+			AggCorr, AggCovarSamp, AggCovarPop,
+			AggPercentileCont, AggPercentileDisc, AggMedian,
+			AggMinBy, AggMaxBy:
+			allSimpleAggs = false
+		default:
+			if h.aggUpdaters[i] == nil && agg.InputCol != "" {
+				allSimpleAggs = false
+			}
+		}
+	}
+
+	// Single-column integer GROUP BY fast path:
+	// Use intHashTable when grouping by one integer-typed column.
 	if len(h.GroupByCols) == 1 && h.groupColIdx[0] >= 0 {
 		typ := h.groupColTypes[0]
 		isIntType := typ == batch.TypeInt64 || typ == batch.TypeTimestamp ||
 			typ == batch.TypeIPv4 || typ == batch.TypeMAC || typ == batch.TypeDuration ||
 			typ == batch.TypeInt32 || typ == batch.TypePort || typ == batch.TypeProtocol || typ == batch.TypeDate
-		allSimple := isIntType
-		for i, agg := range h.Aggs {
-			switch agg.Func {
-			case AggCountDistinct, AggStringAgg, AggApproxDistinct,
-				AggCorr, AggCovarSamp, AggCovarPop,
-				AggPercentileCont, AggPercentileDisc, AggMedian,
-				AggMinBy, AggMaxBy:
-				allSimple = false
-			default:
-				if h.aggUpdaters[i] == nil && agg.InputCol != "" {
-					allSimple = false
-				}
-			}
-		}
-		if allSimple {
+		if isIntType && allSimpleAggs {
 			h.useIntGroupKey = true
 			h.intGroupIndex = newIntHashTable(4096)
 			h.intGroupKeyCol = h.groupColIdx[0]
+		}
+	}
+
+	// Multi-column compact GROUP BY fast path:
+	// When the binary-encoded GROUP BY key fits in 8 bytes, pack it into int64
+	// and use intHashTable instead of map[string]. Avoids string hashing and
+	// Go map overhead. Falls back to generic path if a key exceeds 8 bytes.
+	if !h.useIntGroupKey && !h.isScalarAgg && len(h.GroupByCols) >= 2 && allSimpleAggs {
+		estimatedWidth := 0
+		canCompact := true
+		for _, typ := range h.groupColTypes {
+			estimatedWidth++ // null flag byte
+			switch typ {
+			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate, batch.TypeFloat32:
+				estimatedWidth += 4
+			case batch.TypeBool:
+				estimatedWidth += 1
+			case batch.TypeString, batch.TypeBytes:
+				estimatedWidth += 3 // 2-byte length prefix + 1 byte min data
+			default:
+				canCompact = false
+			}
+		}
+		if canCompact && estimatedWidth <= 8 {
+			h.useCompactGroupKey = true
+			h.intGroupIndex = newIntHashTable(4096)
 		}
 	}
 
@@ -355,6 +387,12 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	// Single-column integer GROUP BY fast path
 	if h.useIntGroupKey {
 		h.consumeBatchIntGroup(b)
+		return
+	}
+
+	// Multi-column compact GROUP BY fast path
+	if h.useCompactGroupKey {
+		h.consumeBatchCompactGroup(b)
 		return
 	}
 
@@ -453,6 +491,129 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			processRow(i)
 		}
 	}
+}
+
+// consumeBatchCompactGroup is the fast path for multi-column GROUP BY where
+// the binary-encoded key fits in int64. Uses intHashTable for group lookup.
+// Falls back to generic path if any key exceeds 8 bytes.
+func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
+	processRow := func(row int) bool {
+		h.keyBuf = h.keyBuf[:0]
+		for i, idx := range h.groupColIdx {
+			if idx < 0 {
+				h.keyBuf = append(h.keyBuf, 1) // null flag
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				h.keyBuf = append(h.keyBuf, 1) // null flag
+				continue
+			}
+			h.keyBuf = append(h.keyBuf, 0) // not-null flag
+			h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[i])
+		}
+
+		if len(h.keyBuf) > 8 {
+			return false // key too long, need fallback
+		}
+
+		key := packKeyInt64(h.keyBuf)
+		if gsIdx, ok := h.intGroupIndex.Get(key); ok {
+			gs := h.intGroupStates[gsIdx]
+			for i := range h.Aggs {
+				updater := h.aggUpdaters[i]
+				if updater == nil {
+					continue
+				}
+				idx := h.aggColIdx[i]
+				if idx >= 0 {
+					updater(&gs.accs[i], b.Columns[idx], row)
+				} else {
+					updater(&gs.accs[i], nil, row) // COUNT(*)
+				}
+			}
+			return true
+		}
+
+		// New group
+		keyVals := make([]any, len(h.GroupByCols))
+		for i, idx := range h.groupColIdx {
+			if idx >= 0 {
+				keyVals[i] = b.Columns[idx].GetValue(row)
+			}
+		}
+		gs := &groupState{
+			keyValues:    keyVals,
+			accs:         make([]kernel.Accumulator, len(h.Aggs)),
+			distinctSets: make([]map[string]struct{}, len(h.Aggs)),
+			extraState:   make([]any, len(h.Aggs)),
+		}
+
+		newIdx := int32(len(h.intGroupStates))
+		h.intGroupIndex.Put(key, newIdx)
+		h.intGroupStates = append(h.intGroupStates, gs)
+		h.compactKeys = append(h.compactKeys, string(h.keyBuf))
+		h.keys = append(h.keys, keyVals)
+
+		for i := range h.Aggs {
+			updater := h.aggUpdaters[i]
+			if updater == nil {
+				continue
+			}
+			idx := h.aggColIdx[i]
+			if idx >= 0 {
+				updater(&gs.accs[i], b.Columns[idx], row)
+			} else {
+				updater(&gs.accs[i], nil, row) // COUNT(*)
+			}
+		}
+		return true
+	}
+
+	if b.Sel != nil {
+		for i, idx := range b.Sel {
+			if !processRow(int(idx)) {
+				// Key exceeded 8 bytes — migrate to generic path
+				h.migrateCompactToGeneric()
+				for j := i; j < len(b.Sel); j++ {
+					h.processRow(b, int(b.Sel[j]))
+				}
+				return
+			}
+		}
+	} else {
+		for i := 0; i < b.Len; i++ {
+			if !processRow(i) {
+				h.migrateCompactToGeneric()
+				for j := i; j < b.Len; j++ {
+					h.processRow(b, j)
+				}
+				return
+			}
+		}
+	}
+}
+
+// migrateCompactToGeneric moves all groups from intHashTable to the string map
+// when compact mode cannot handle a key that exceeds 8 bytes.
+func (h *HashAggregate) migrateCompactToGeneric() {
+	h.useCompactGroupKey = false
+	for i, gs := range h.intGroupStates {
+		h.groups[h.compactKeys[i]] = gs
+		h.serializedKeys = append(h.serializedKeys, h.compactKeys[i])
+	}
+	h.intGroupStates = nil
+	h.intGroupIndex = nil
+	h.compactKeys = nil
+}
+
+// packKeyInt64 interprets up to 8 bytes as a little-endian int64.
+func packKeyInt64(b []byte) int64 {
+	var v int64
+	for i := 0; i < len(b); i++ {
+		v |= int64(b[i]) << uint(i*8)
+	}
+	return v
 }
 
 func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
@@ -787,7 +948,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 	for i := 0; i < numRows; i++ {
 		var gs *groupState
-		if h.useIntGroupKey {
+		if h.useIntGroupKey || h.useCompactGroupKey {
 			gs = h.intGroupStates[start+i]
 		} else {
 			gs = h.groups[h.serializedKeys[start+i]]

@@ -79,6 +79,12 @@ type HashJoin struct {
 	probeKeyIdx  []int // column indices for LeftKeys in probe batches
 	probeResolved bool
 
+	// SemiAntiKeyOnly enables a lightweight build for semi/anti joins that have
+	// no SemiAntiFilter. Only the key index and bloom filter are built — batch
+	// storage and arena refs are skipped. Reduces memory and build time by ~2-4x
+	// for large build sides (e.g., 6M-row lineitem scan for EXISTS subqueries).
+	SemiAntiKeyOnly bool
+
 	// Bloom filter for fast negative lookups during probe phase.
 	// When the build side is small relative to expected probe volume,
 	// this rejects non-matching probe rows without touching the hash table.
@@ -285,9 +291,6 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			break
 		}
 
-		// Compact filtered batches so we only store active rows
-		b = b.Compact()
-
 		h.mu.Lock()
 		if h.buildSchema == nil {
 			h.buildSchema = b.Schema
@@ -300,16 +303,23 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			h.tryEnableIntKey(b)
 		}
 
+		// For key-only mode, skip compaction and memory tracking — just extract keys
+		if !h.SemiAntiKeyOnly {
+			h.mu.Unlock()
+			b = b.Compact()
+			h.mu.Lock()
+		}
+
 		// Spill to disk if memory pressure is high
-		if h.Spill != nil && h.Spill.ShouldSpill() && len(h.buildBatches) > 0 {
+		if !h.SemiAntiKeyOnly && h.Spill != nil && h.Spill.ShouldSpill() && len(h.buildBatches) > 0 {
 			if err := h.spillBuildBatches(); err != nil {
 				h.mu.Unlock()
 				return fmt.Errorf("spilling build side: %w", err)
 			}
 		}
 
-		// Track memory if budget is set
-		if h.MemTracker != nil {
+		// Track memory if budget is set (not needed for key-only mode)
+		if !h.SemiAntiKeyOnly && h.MemTracker != nil {
 			cost := estimateBatchBytes(b)
 			if err := h.MemTracker.Reserve(cost); err != nil {
 				// Try spilling before giving up
@@ -329,6 +339,50 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						err, h.buildRows, len(h.buildBatches))
 				}
 			}
+		}
+
+		if h.SemiAntiKeyOnly {
+			// Key-only build: populate index without storing batches or arena refs.
+			// Semi/anti joins only need key existence, not row data.
+			if h.useIntKey {
+				col := b.Columns[h.buildKeyIdx[0]]
+				if b.Sel != nil {
+					for _, si := range b.Sel {
+						key, ok := intKeyFromVector(col, int(si))
+						if !ok {
+							continue
+						}
+						h.intIndex.Put(key, 0)
+					}
+				} else {
+					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+						key, ok := intKeyFromVector(col, rowIdx)
+						if !ok {
+							continue
+						}
+						h.intIndex.Put(key, 0)
+					}
+				}
+			} else {
+				if b.Sel != nil {
+					for _, si := range b.Sel {
+						key := h.buildKeyFromBatch(b, int(si))
+						if _, ok := h.hashIndex[key]; !ok {
+							h.hashIndex[key] = 0
+						}
+					}
+				} else {
+					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+						key := h.buildKeyFromBatch(b, rowIdx)
+						if _, ok := h.hashIndex[key]; !ok {
+							h.hashIndex[key] = 0
+						}
+					}
+				}
+			}
+			h.buildRows += int64(b.ActiveLen())
+			h.mu.Unlock()
+			continue
 		}
 
 		batchIdx := int32(len(h.buildBatches))

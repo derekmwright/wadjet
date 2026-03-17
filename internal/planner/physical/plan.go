@@ -814,6 +814,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 	}
 
+	// For semi/anti joins without a filter, enable key-only build:
+	// only build the key index and bloom filter, skip batch storage and arena refs.
+	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter == "" {
+		hj.SemiAntiKeyOnly = true
+	}
+
 	// Build right side (small table) into hash table
 	rightSource, rightOps, _, err := p.buildPipeline(ctx, node.Children[1])
 	if err != nil {
