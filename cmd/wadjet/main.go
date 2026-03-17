@@ -54,6 +54,8 @@ var (
 	natsStoreDir     string
 	geoipCityDB      string
 	geoipASNDB       string
+	useSSL           bool
+	s3Region         string
 )
 
 func main() {
@@ -68,8 +70,10 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&storageType, "storage-type", "s3", "Storage backend: s3 or file")
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "Local data directory (for --storage-type=file)")
 	rootCmd.PersistentFlags().StringVar(&endpoint, "endpoint", "localhost:9000", "S3-compatible endpoint")
-	rootCmd.PersistentFlags().StringVar(&accessKey, "access-key", "minioadmin", "S3 access key")
-	rootCmd.PersistentFlags().StringVar(&secretKey, "secret-key", "minioadmin", "S3 secret key")
+	rootCmd.PersistentFlags().StringVar(&accessKey, "access-key", "", "S3 access key (empty = auto-detect from env/IAM)")
+	rootCmd.PersistentFlags().StringVar(&secretKey, "secret-key", "", "S3 secret key (empty = auto-detect from env/IAM)")
+	rootCmd.PersistentFlags().BoolVar(&useSSL, "ssl", false, "Use TLS for S3 connections")
+	rootCmd.PersistentFlags().StringVar(&s3Region, "region", "", "S3 region (for IAM credential signing)")
 	rootCmd.PersistentFlags().StringVar(&bucket, "bucket", "wadjet", "Storage bucket name")
 	rootCmd.PersistentFlags().StringVar(&httpAddr, "http-addr", ":8080", "HTTP API listen address")
 	rootCmd.PersistentFlags().StringVar(&grpcAddr, "grpc-addr", ":9090", "gRPC API listen address")
@@ -499,7 +503,8 @@ func newStore() (objstore.Store, error) {
 			Endpoint:  endpoint,
 			AccessKey: accessKey,
 			SecretKey: secretKey,
-			UseSSL:    false,
+			UseSSL:    useSSL,
+			Region:    s3Region,
 		})
 	}
 }

@@ -49,9 +49,23 @@ func s3Transport(secure bool) *http.Transport {
 }
 
 // NewMinIOStore creates a new MinIO-backed object store with connection pooling.
+// When AccessKey and SecretKey are both empty, credentials are auto-detected
+// from environment variables (AWS_ACCESS_KEY_ID) and IAM instance profiles.
 func NewMinIOStore(cfg MinIOConfig) (*MinIOStore, error) {
+	var creds *credentials.Credentials
+	if cfg.AccessKey != "" && cfg.SecretKey != "" {
+		creds = credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, "")
+	} else {
+		creds = credentials.NewChainCredentials([]credentials.Provider{
+			&credentials.EnvAWS{},
+			&credentials.IAM{
+				Client: &http.Client{Timeout: 10 * time.Second},
+			},
+		})
+	}
+
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:     credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+		Creds:     creds,
 		Secure:    cfg.UseSSL,
 		Region:    cfg.Region,
 		Transport: s3Transport(cfg.UseSSL),

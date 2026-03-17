@@ -178,10 +178,11 @@ resource "aws_iam_instance_profile" "bench" {
   role        = aws_iam_role.bench.name
 }
 
-# --- User data script (shared) ---
+# --- User data scripts ---
 
 locals {
-  user_data = <<-EOF
+  # Shared build script prefix
+  build_script = <<-SCRIPT
     #!/bin/bash
     set -euo pipefail
 
@@ -198,14 +199,33 @@ locals {
     git clone https://github.com/citc-tech/wadjet.git
     cd wadjet
     go build -o /usr/local/bin/wadjet ./cmd/wadjet
-    go build -o /usr/local/bin/wadjet-seed ./cmd/tpch-seed
-
-    # Build benchmark binary
-    go test -c -o /usr/local/bin/wadjet-bench ./benchmarks/tpch/
+    go build -o /usr/local/bin/tpch-bench ./cmd/tpch-bench
 
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
     echo "WADJET_REGION=${var.region}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
+  SCRIPT
+
+  # Standalone: build + auto-run benchmark
+  standalone_user_data = <<-EOF
+    ${local.build_script}
+
+    # Auto-run standalone benchmark
+    export WADJET_BUCKET="${local.bucket_name}"
+    export WADJET_REGION="${var.region}"
+    cd /root/wadjet
+    bash deploy/benchmark/run-benchmark.sh standalone SF${var.scale_factor} 2>&1 | tee /root/benchmark.log
+  EOF
+
+  # Coordinator: build + auto-run distributed benchmark
+  coordinator_user_data = <<-EOF
+    ${local.build_script}
+
+    # Auto-run distributed benchmark (starts NATS, waits for workers)
+    export WADJET_BUCKET="${local.bucket_name}"
+    export WADJET_REGION="${var.region}"
+    cd /root/wadjet
+    bash deploy/benchmark/run-benchmark.sh distributed SF${var.scale_factor} ${var.worker_count} 2>&1 | tee /root/benchmark.log
   EOF
 }
 
@@ -238,7 +258,7 @@ resource "aws_instance" "standalone" {
     }
   }
 
-  user_data = base64encode(local.user_data)
+  user_data = base64encode(local.standalone_user_data)
 
   tags = {
     Name = "wadjet-bench-standalone"
@@ -274,7 +294,7 @@ resource "aws_instance" "coordinator" {
     }
   }
 
-  user_data = base64encode(local.user_data)
+  user_data = base64encode(local.coordinator_user_data)
 
   tags = {
     Name = "wadjet-bench-coordinator"
@@ -310,7 +330,21 @@ resource "aws_instance" "worker" {
     }
   }
 
-  user_data = base64encode(local.user_data)
+  user_data = base64encode(<<-EOF
+    ${local.build_script}
+
+    # Start wadjet worker connecting to coordinator
+    /usr/local/bin/wadjet serve \
+      --mode=worker \
+      --nats-url="nats://${aws_instance.coordinator[0].private_ip}:4222" \
+      --endpoint="s3.${var.region}.amazonaws.com" \
+      --ssl \
+      --bucket="${local.bucket_name}" \
+      --region="${var.region}" \
+      --storage-type=s3 &
+    echo "WORKER_STARTED=1" >> /etc/environment
+  EOF
+  )
 
   tags = {
     Name = "wadjet-bench-worker-${count.index}"
