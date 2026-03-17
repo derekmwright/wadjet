@@ -215,8 +215,3 @@ Concurrency limits ensure only one Claude workflow runs at a time.
 ### Required Secrets
 
 - `ANTHROPIC_API_KEY` — Claude API key (set at repo or org level in Settings → Secrets → Actions)
-
-## Resolved Issues
-
-- ~~ORDER BY on aggregates wrapped in scalar functions sorts lexicographically (#1)~~ — Fixed: Sort placed before Project using synthetic aggregate names
-- ~~Planner only supports one aggregate per SELECT expression (#2)~~ — Fixed: `FindAllAggregates`/`ReplaceAllAggregates` extract all aggregates from expressions
