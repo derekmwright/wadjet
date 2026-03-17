@@ -140,36 +140,34 @@ Columnar scan throughput vs row-oriented baseline (`go test -bench`; AMD Ryzen 9
 
 | Rows | Columnar | Row-Oriented | Speedup | Allocs/op |
 |------|----------|--------------|---------|-----------|
-| 1K | 165 MB/s | 15 MB/s | 11x | 221 vs 11K |
-| 10K | 193 MB/s | 14 MB/s | 14x | 230 vs 110K |
-| 100K | 250 MB/s | 15 MB/s | 17x | 426 vs 1.1M |
+| 1K | 153 MB/s | 13 MB/s | 12x | 221 vs 11K |
+| 10K | 180 MB/s | 13 MB/s | 14x | 231 vs 110K |
+| 100K | 236 MB/s | 14 MB/s | 17x | 426 vs 1.1M |
 
 With column projection (reading 2 of 5 columns):
 
 | Rows | Columnar | Row-Oriented | Speedup |
 |------|----------|--------------|---------|
-| 1K | 335 MB/s | 11 MB/s | 31x |
-| 10K | 513 MB/s | 11 MB/s | 45x |
-| 100K | 661 MB/s | 12 MB/s | 56x |
+| 1K | 312 MB/s | 17 MB/s | 18x |
+| 10K | 464 MB/s | 17 MB/s | 27x |
+| 100K | 603 MB/s | 18 MB/s | 34x |
 
 Operator micro-benchmarks (2048-row batches):
 
 | Operation | Time | Allocs |
 |-----------|------|--------|
-| Batch SUM (int64) | 616 ns | 1 |
-| Filter (column compare) | 17.6 µs | 1 |
-| Hash aggregate (low cardinality) | 55 µs | 62 |
-| Sort | 50 µs | 40 |
-| CASE WHEN | 61 µs | 0 |
-| Kernel filter (int64) | 5.1 µs | 0 |
+| Filter (column compare) | 18.1 µs | 0 |
+| Hash aggregate (low cardinality) | 67 µs | 72 |
+| Sort | 67 µs | 551 |
+| Kernel filter (int64) | 6.0 µs | 0 |
 
 JSON reader throughput (10,000 rows, 4 columns; direct-to-columnar byte scanner vs row-oriented `encoding/json`):
 
 | Reader | Time | Allocs | Bytes |
 |--------|------|--------|-------|
-| Columnar (byte scanner) | 2.5 ms | 6,976 | 546 KB |
-| Row-oriented | 20.6 ms | 221,335 | 6.6 MB |
-| **Speedup** | **8.3x** | **31.7x fewer** | **12.1x less** |
+| Columnar (byte scanner) | 2.8 ms | 6,976 | 546 KB |
+| Row-oriented | 23.3 ms | 221,335 | 6.6 MB |
+| **Speedup** | **8.4x** | **31.7x fewer** | **12.1x less** |
 
 Run benchmarks locally: `go test -bench=. -benchmem ./internal/engine/...`
 
@@ -177,33 +175,33 @@ Run benchmarks locally: `go test -bench=. -benchmem ./internal/engine/...`
 
 All 22 TPC-H queries at scale factor 1 (~6M lineitem rows, 8 tables). Pure Go, no SIMD, no CGo. Single-node standalone mode on AMD Ryzen 9 5900X (WSL2).
 
-| Query | Description | Time | Rows |
-|-------|-------------|------|------|
-| Q01 | Pricing Summary | 1.5s | 6 |
-| Q02 | Min Cost Supplier | 0.7s | 100 |
-| Q03 | Shipping Priority | 1.2s | 10 |
-| Q04 | Order Priority | 1.3s | 5 |
-| Q05 | Local Supplier Volume | 0.9s | 5 |
-| Q06 | Revenue Change | 0.6s | 1 |
-| Q07 | Volume Shipping | 2.5s | 10 |
-| Q08 | National Market Share | 0.9s | 5 |
-| Q09 | Product Type Profit | 1.4s | 58 |
-| Q10 | Returned Item Reporting | 1.0s | 20 |
-| Q11 | Important Stock | 0.2s | 758 |
-| Q12 | Shipping Modes | 0.8s | 7 |
-| Q13 | Customer Distribution | 0.4s | 100 |
-| Q14 | Promotion Effect | 0.8s | 1 |
-| Q15 | Top Supplier | 1.2s | 1 |
-| Q16 | Parts/Supplier | 0.1s | 14262 |
-| Q17 | Small-Quantity Revenue | 2.2s | 1 |
-| Q18 | Large Volume Customer | 3.1s | 0 |
-| Q19 | Discounted Revenue | 3.1s | 1 |
-| Q20 | Potential Part Promotion | 2.2s | 0 |
-| Q21 | Suppliers Kept Orders Waiting | 3.5s | 10 |
-| Q22 | Global Sales Opportunity | 0.2s | 1 |
-| | **Total** | **29.6s** | |
+| Query | Description | Time | Heap Delta | Rows |
+|-------|-------------|------|------------|------|
+| Q01 | Pricing Summary | 1.7s | +133 MB | 6 |
+| Q02 | Min Cost Supplier | 0.7s | +169 MB | 100 |
+| Q03 | Shipping Priority | 1.3s | +299 MB | 10 |
+| Q04 | Order Priority | 1.5s | +232 MB | 5 |
+| Q05 | Local Supplier Volume | 1.0s | +380 MB | 5 |
+| Q06 | Revenue Change | 0.8s | +90 MB | 1 |
+| Q07 | Volume Shipping | 2.8s | +430 MB | 10 |
+| Q08 | National Market Share | 1.0s | +442 MB | 5 |
+| Q09 | Product Type Profit | 1.5s | +828 MB | 58 |
+| Q10 | Returned Item Reporting | 1.1s | +692 MB | 20 |
+| Q11 | Important Stock | 0.2s | +427 MB | 758 |
+| Q12 | Shipping Modes | 1.0s | +120 MB | 7 |
+| Q13 | Customer Distribution | 0.5s | +152 MB | 100 |
+| Q14 | Promotion Effect | 0.9s | +162 MB | 1 |
+| Q15 | Top Supplier | 1.4s | +582 MB | 1 |
+| Q16 | Parts/Supplier | 0.1s | +250 MB | 14262 |
+| Q17 | Small-Quantity Revenue | 2.2s | +199 MB | 1 |
+| Q18 | Large Volume Customer | 3.3s | +558 MB | 0 |
+| Q19 | Discounted Revenue | 1.0s | +269 MB | 1 |
+| Q20 | Potential Part Promotion | 2.6s | +819 MB | 0 |
+| Q21 | Suppliers Kept Orders Waiting | 4.0s | +1043 MB | 10 |
+| Q22 | Global Sales Opportunity | 0.2s | +382 MB | 1 |
+| | **Total** | **30.8s** | | |
 
-Includes cost-based join reordering, subquery decorrelation, columnar hash joins with int64 fast-path indexing, build-side column pruning, allocation-free aggregate group lookup, and 3-level predicate pushdown (partition → row-group → row).
+Includes cost-based join reordering, subquery decorrelation, common OR predicate extraction, columnar hash joins with int64 fast-path indexing, build-side column pruning, allocation-free aggregate group lookup, Top-K sort materialization, zero-copy semi/anti join output, and 3-level predicate pushdown (partition → row-group → row).
 
 ```bash
 # Reproduce (requires ~2GB RAM, ~30s for data generation)
