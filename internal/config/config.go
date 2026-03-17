@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -175,15 +177,108 @@ func Load(path string) (*Config, error) {
 }
 
 // LoadOrDefault loads a config file if it exists, otherwise returns defaults.
+// Environment variables with CAELUM_ prefix always override file/default values.
 func LoadOrDefault(path string) *Config {
+	var cfg *Config
 	if path == "" {
-		cfg := DefaultConfig()
-		return &cfg
-	}
-	cfg, err := Load(path)
-	if err != nil {
 		def := DefaultConfig()
-		return &def
+		cfg = &def
+	} else {
+		var err error
+		cfg, err = Load(path)
+		if err != nil {
+			def := DefaultConfig()
+			cfg = &def
+		}
 	}
+	applyEnvOverrides(cfg)
 	return cfg
+}
+
+// applyEnvOverrides reads CAELUM_* environment variables and overrides config values.
+// Supported variables:
+//
+//	CAELUM_MODE                   - standalone, coordinator, worker
+//	CAELUM_HTTP_ADDR              - HTTP listen address
+//	CAELUM_GRPC_ADDR              - gRPC listen address
+//	CAELUM_STORAGE_TYPE           - s3, file
+//	CAELUM_STORAGE_ENDPOINT       - S3/MinIO endpoint
+//	CAELUM_STORAGE_ACCESS_KEY     - S3 access key
+//	CAELUM_STORAGE_SECRET_KEY     - S3 secret key
+//	CAELUM_STORAGE_BUCKET         - S3 bucket name
+//	CAELUM_STORAGE_REGION         - S3 region
+//	CAELUM_STORAGE_USE_SSL        - true/false
+//	CAELUM_NATS_PORT              - NATS listen port
+//	CAELUM_NATS_URL               - NATS URL (worker mode)
+//	CAELUM_NATS_CLUSTER_ID        - cluster identifier
+//	CAELUM_NATS_LEAF_REMOTES      - comma-separated remote NATS URLs
+//	CAELUM_WORKER_MAX_CONCURRENT  - max concurrent tasks
+//	CAELUM_WORKER_MEMORY_BUDGET   - per-task memory budget (bytes)
+//	CAELUM_WORKER_SPILL_DIR       - spill directory
+//	CAELUM_GEOIP_CITY_DB          - GeoLite2-City.mmdb path
+//	CAELUM_GEOIP_ASN_DB           - GeoLite2-ASN.mmdb path
+func applyEnvOverrides(cfg *Config) {
+	if v := os.Getenv("CAELUM_MODE"); v != "" {
+		cfg.Mode = v
+	}
+	if v := os.Getenv("CAELUM_HTTP_ADDR"); v != "" {
+		cfg.HTTP.Addr = v
+	}
+	if v := os.Getenv("CAELUM_GRPC_ADDR"); v != "" {
+		cfg.GRPC.Addr = v
+	}
+	if v := os.Getenv("CAELUM_STORAGE_TYPE"); v != "" {
+		cfg.Storage.Type = v
+	}
+	if v := os.Getenv("CAELUM_STORAGE_ENDPOINT"); v != "" {
+		cfg.Storage.Endpoint = v
+	}
+	if v := os.Getenv("CAELUM_STORAGE_ACCESS_KEY"); v != "" {
+		cfg.Storage.AccessKey = v
+	}
+	if v := os.Getenv("CAELUM_STORAGE_SECRET_KEY"); v != "" {
+		cfg.Storage.SecretKey = v
+	}
+	if v := os.Getenv("CAELUM_STORAGE_BUCKET"); v != "" {
+		cfg.Storage.Bucket = v
+	}
+	if v := os.Getenv("CAELUM_STORAGE_REGION"); v != "" {
+		cfg.Storage.Region = v
+	}
+	if v := os.Getenv("CAELUM_STORAGE_USE_SSL"); v != "" {
+		cfg.Storage.UseSSL = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("CAELUM_NATS_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.NATS.Port = n
+		}
+	}
+	if v := os.Getenv("CAELUM_NATS_URL"); v != "" {
+		cfg.NATS.URL = v
+	}
+	if v := os.Getenv("CAELUM_NATS_CLUSTER_ID"); v != "" {
+		cfg.NATS.ClusterID = v
+	}
+	if v := os.Getenv("CAELUM_NATS_LEAF_REMOTES"); v != "" {
+		cfg.NATS.LeafRemotes = strings.Split(v, ",")
+	}
+	if v := os.Getenv("CAELUM_WORKER_MAX_CONCURRENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Worker.MaxConcurrent = n
+		}
+	}
+	if v := os.Getenv("CAELUM_WORKER_MEMORY_BUDGET"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			cfg.Worker.MemoryBudget = n
+		}
+	}
+	if v := os.Getenv("CAELUM_WORKER_SPILL_DIR"); v != "" {
+		cfg.Worker.SpillDir = v
+	}
+	if v := os.Getenv("CAELUM_GEOIP_CITY_DB"); v != "" {
+		cfg.GeoIP.CityDB = v
+	}
+	if v := os.Getenv("CAELUM_GEOIP_ASN_DB"); v != "" {
+		cfg.GeoIP.ASNDB = v
+	}
 }

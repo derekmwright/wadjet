@@ -30,16 +30,18 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	Addr           string
-	Catalog        *catalog.Catalog
-	Coordinator    *coordinator.Coordinator // nil = local execution only
-	Auth           *auth.Authenticator      // nil = no authentication (static mode)
-	Authz          *auth.Authorizer         // nil = no authorization (static mode)
-	Policies       *auth.PolicySet          // nil = no cell-level policies (static mode)
-	Provider       *auth.Provider           // nil = use static Auth/Authz/Policies above
-	Metrics        *metrics.Metrics         // nil = no metrics collection
-	TLSConfig      *tls.Config              // nil = plain HTTP
-	MaxConnections int                      // 0 = unlimited
+	Addr              string
+	Catalog           *catalog.Catalog
+	Coordinator       *coordinator.Coordinator // nil = local execution only
+	Auth              *auth.Authenticator      // nil = no authentication (static mode)
+	Authz             *auth.Authorizer         // nil = no authorization (static mode)
+	Policies          *auth.PolicySet          // nil = no cell-level policies (static mode)
+	Provider          *auth.Provider           // nil = use static Auth/Authz/Policies above
+	Metrics           *metrics.Metrics         // nil = no metrics collection
+	TLSConfig         *tls.Config              // nil = plain HTTP
+	MaxConnections    int                      // 0 = unlimited
+	SlowQueryThreshold time.Duration           // 0 = disabled, log queries exceeding this
+	ShutdownTimeout   time.Duration            // graceful shutdown drain timeout (default 30s)
 }
 
 // Server is the Caelum HTTP API server.
@@ -138,9 +140,16 @@ func (s *Server) Start() error {
 	return s.server.Serve(ln)
 }
 
-// Shutdown gracefully shuts down the server.
+// Shutdown gracefully shuts down the server, draining in-flight requests.
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.server.Shutdown(ctx)
+	timeout := s.config.ShutdownTimeout
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	drainCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	s.logger.Info("HTTP server shutting down", "drain_timeout", timeout)
+	return s.server.Shutdown(drainCtx)
 }
 
 // QueryRequest is the request body for POST /v1/queries.
@@ -305,6 +314,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		if done != nil {
 			done()
 		}
+		s.logSlowQuery(req.SQL, result.Elapsed, len(rows))
 
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -392,6 +402,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if done != nil {
 		done()
 	}
+	s.logSlowQuery(req.SQL, time.Since(start), len(rows))
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -445,6 +456,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// logSlowQuery logs a warning if the query exceeded the slow query threshold.
+func (s *Server) logSlowQuery(sql string, elapsed time.Duration, rows int) {
+	if s.config.SlowQueryThreshold > 0 && elapsed >= s.config.SlowQueryThreshold {
+		s.logger.Warn("slow query",
+			"sql", sql,
+			"elapsed", elapsed.String(),
+			"rows", rows,
+		)
+	}
 }
 
 // getAuthz returns the current authorizer (from Provider if hot-reloadable, else static).
