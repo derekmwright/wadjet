@@ -30,6 +30,64 @@ FROM table_name [alias]
 [LIMIT n [OFFSET m]]
 ```
 
+## Table Functions
+
+Query files directly from SQL without prior ingestion. Table functions appear in the `FROM` clause and support positional arguments, named parameters (`key=value`), and glob patterns.
+
+### read_json
+
+Reads JSON files (JSONL or JSON array) with automatic schema inference and a custom direct-to-columnar byte scanner.
+
+```sql
+-- Local file (JSONL or JSON array auto-detected)
+SELECT * FROM read_json('/path/to/data.json')
+
+-- HTTP/HTTPS URL
+SELECT * FROM read_json('https://api.example.com/events.json')
+
+-- Glob pattern (concatenates matching files)
+SELECT * FROM read_json('logs/2026-03-*.json')
+
+-- With alias
+SELECT j.src_ip, j.bytes FROM read_json('traffic.json') AS j WHERE j.bytes > 1000
+```
+
+Type inference detects: integers, floats, booleans, IPv4 addresses, timestamps (RFC 3339, ISO 8601, date-only), and strings.
+
+### read_csv
+
+Reads CSV files with configurable parsing and type inference.
+
+```sql
+-- Default (comma-delimited, first row is header)
+SELECT * FROM read_csv('data.csv')
+
+-- Custom delimiter
+SELECT * FROM read_csv('data.tsv', delimiter='\t')
+
+-- Pipe-delimited, no header
+SELECT * FROM read_csv('data.txt', delimiter='|', header=false)
+
+-- Glob across partitioned files
+SELECT * FROM read_csv('export/part_*.csv')
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `delimiter` / `delim` / `sep` | `,` | Field separator character |
+| `header` | `true` | Whether the first row contains column names |
+
+### read_parquet
+
+Reads Parquet files with column-at-a-time page reading and row-group stats pruning.
+
+```sql
+SELECT * FROM read_parquet('warehouse/sales.parquet')
+SELECT * FROM read_parquet('https://storage.example.com/data.parquet')
+```
+
+All table functions support local file paths and HTTP/HTTPS URLs with connection pooling and configurable auth headers.
+
 ## Common Table Expressions (CTEs)
 
 CTEs define named temporary result sets for use in the main query:
@@ -1085,6 +1143,38 @@ LIMIT 10
 |----------|-------------|---------|
 | `TYPEOF(expr)` | Return SQL type name of expression | `TYPEOF(42)` → `'bigint'` |
 | `FORMAT_NUMBER(n [, decimals])` | Format number with comma separators | `FORMAT_NUMBER(1234567)` → `'1,234,567'` |
+
+### Array Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `CARDINALITY(array)` | Number of elements | `CARDINALITY(ARRAY[1,2,3])` → `3` |
+| `ARRAY_LENGTH(array)` | Alias for CARDINALITY | `ARRAY_LENGTH(tags)` |
+| `ELEMENT_AT(array, index)` | 1-based element access (negative indexes from end) | `ELEMENT_AT(ips, 1)` → first element |
+| `ARRAY_CONTAINS(array, value)` | Test membership | `ARRAY_CONTAINS(tags, 'critical')` |
+| `ARRAY_JOIN(array, delimiter)` | Concatenate elements with delimiter | `ARRAY_JOIN(tags, ', ')` |
+| `ARRAY_MIN(array)` | Minimum element | `ARRAY_MIN(scores)` |
+| `ARRAY_MAX(array)` | Maximum element | `ARRAY_MAX(scores)` |
+
+Array literal syntax: `ARRAY[1, 2, 3]`
+
+### ROW/STRUCT Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `col.field` | Dot-notation field access | `person.name` |
+| `ROW_FIELD(row, 'name')` | Extract field by name | `ROW_FIELD(geo, 'country')` |
+| `STRUCT_FIELD(row, 'name')` | Alias for ROW_FIELD | `STRUCT_FIELD(meta, 'source')` |
+
+### MAP Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `ELEMENT_AT(map, key)` | Lookup value by key | `ELEMENT_AT(headers, 'Host')` |
+| `MAP_KEYS(map)` | Extract all keys as ARRAY | `MAP_KEYS(labels)` |
+| `MAP_VALUES(map)` | Extract all values as ARRAY | `MAP_VALUES(labels)` |
+| `MAP_ENTRIES(map)` | Convert to ARRAY(ROW(key, value)) | `MAP_ENTRIES(headers)` |
+| `MAP_FROM_ENTRIES(entries)` | Construct MAP from entry array | `MAP_FROM_ENTRIES(pairs)` |
 
 ### UUID Functions
 

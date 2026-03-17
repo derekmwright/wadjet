@@ -8,7 +8,9 @@ A lightweight analytical query engine in pure Go. Columnar storage on Parquet, v
 - **Lightweight workers** — viable at 512 MB RAM with spill-to-disk. Scale to zero, start in under 2 seconds.
 - **Single binary** — run standalone for development or split into coordinator + workers for production.
 - **Pure Go** — no JVM, no CGo, no external query engine dependencies. Custom recursive descent SQL parser, vectorized batch execution, typed kernel dispatch.
-- **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 90+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
+- **Network-native types** — first-class IPv4, IPv6, CIDR, MAC, Port, and Protocol column types with 80+ network functions covering CIDR math, deep packet inspection, ICMP analysis, IPv6 tunneling, JA3/JA3S TLS fingerprinting, payload search, and GeoIP/ASN enrichment (MaxMind).
+- **Nested types** — ARRAY, ROW/STRUCT, and MAP column types with dot-notation field access, array functions, and full Parquet round-trip.
+- **Table functions** — `read_json()`, `read_csv()`, `read_parquet()` query local files and HTTP URLs directly from SQL, with glob patterns and named parameters.
 - **GeoIP enrichment** — optional MaxMind GeoLite2/GeoIP2 integration with 11 functions for IP geolocation (country, city, subdivision, coordinates, timezone, continent) and ASN lookup (AS number, organization).
 
 ## Quick Start
@@ -41,11 +43,23 @@ Full analytical SQL via a custom recursive descent parser:
 - GROUP BY, GROUPING SETS, CUBE, ROLLUP, and ORDER BY with positional references
 - CASE, CAST, LIKE, BETWEEN, IN, IS NULL/TRUE/FALSE
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
+- Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`
+- Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters
 - 273 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN)
 - 23 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
 - User-defined functions (CREATE FUNCTION)
 
 ```sql
+-- Query JSON files directly from SQL
+SELECT ip, count, geoip_country(ip) AS country
+FROM read_json('https://example.com/traffic.json')
+WHERE count > 100
+ORDER BY count DESC
+
+-- Query CSV with custom delimiter
+SELECT * FROM read_csv('logs/*.csv', delimiter='|', header=true)
+
+-- Window functions over CTEs
 WITH hourly AS (
     SELECT DATE_TRUNC('hour', timestamp) AS hour, SUM(bytes_in) AS bytes
     FROM flow_logs WHERE date = '2026-03-15'
@@ -65,6 +79,24 @@ ORDER BY hour
 - **Typed kernels** — type dispatch resolved once at query init, no per-row switches in hot loops
 - **3-level pushdown** — partition pruning → row-group stats pruning → row-level filtering
 - **Spill-to-disk** — sort, aggregate, and window operators spill under memory pressure
+
+### Table Functions
+
+Query files directly from SQL without ingestion:
+
+```sql
+SELECT * FROM read_json('data.json')                              -- local file
+SELECT * FROM read_json('https://api.example.com/events.json')    -- HTTP/HTTPS
+SELECT * FROM read_json('logs/*.json')                            -- glob patterns
+SELECT * FROM read_csv('data.csv', delimiter='|', header=false)   -- named parameters
+SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet files
+```
+
+- **read_json** — JSONL and JSON array auto-detection, schema inference (IPv4, timestamp, bool, numeric), custom direct-to-columnar byte scanner (8x faster than `encoding/json`)
+- **read_csv** — configurable delimiter, header detection, type inference
+- **read_parquet** — column-at-a-time page reading with row-group stats pruning
+- **HTTP filesystem** — connection pooling, Range requests, configurable auth headers
+- **Glob patterns** — `read_json('data/*.json')` expands and concatenates matching files
 
 ### Storage
 
@@ -130,6 +162,14 @@ Operator micro-benchmarks (2048-row batches):
 | Sort | 50 µs | 40 |
 | CASE WHEN | 61 µs | 0 |
 | Kernel filter (int64) | 5.1 µs | 0 |
+
+JSON reader throughput (10,000 rows, 4 columns; direct-to-columnar byte scanner vs row-oriented `encoding/json`):
+
+| Reader | Time | Allocs | Bytes |
+|--------|------|--------|-------|
+| Columnar (byte scanner) | 2.5 ms | 6,976 | 546 KB |
+| Row-oriented | 20.6 ms | 221,335 | 6.6 MB |
+| **Speedup** | **8.3x** | **31.7x fewer** | **12.1x less** |
 
 Run benchmarks locally: `go test -bench=. -benchmem ./internal/engine/...`
 

@@ -67,6 +67,43 @@ Network types are stored in their compact binary representations (not as strings
 |------|-----------|------|-----------|
 | `UUID` | `[16]byte` (ByteArray) | 16 bytes | Unique identifiers, trace IDs, correlation IDs |
 
+### Nested Types
+
+| Type | Storage | Access | Use Cases |
+|------|---------|--------|-----------|
+| `ARRAY(T)` | Offsets + child vector | `element_at(col, i)`, `ARRAY[1,2,3]` | Tags, IP lists, port lists, DNS answers |
+| `ROW(f1 T1, f2 T2, ...)` | Child vector per field | `col.field` dot notation, `row_field()` | Geo (lat/lng/country), enrichment metadata |
+| `MAP(K, V)` | Key/value child vectors | `element_at(col, 'key')`, `map_keys()` | HTTP headers, flow labels, key-value metadata |
+
+ARRAY uses an offset-based layout: row `i`'s elements are `child[offsets[i]..offsets[i+1]]`, the same model as Arrow and DuckDB.
+
+```sql
+-- Array literal and access
+SELECT ARRAY[1, 2, 3] AS nums, element_at(ARRAY[10, 20, 30], 2) AS second
+
+-- ROW field access via dot notation
+SELECT person.name, person.age FROM events
+
+-- Array functions
+SELECT cardinality(tags) AS num_tags,
+       array_contains(tags, 'critical') AS is_critical,
+       array_join(tags, ', ') AS tag_list
+FROM alerts
+
+-- Map functions
+SELECT map_keys(headers) AS header_names,
+       element_at(headers, 'Content-Type') AS content_type
+FROM http_logs
+```
+
+**Array functions:** `cardinality`, `element_at`, `array_contains`, `array_join`, `array_min`, `array_max`, `array_length`
+
+**Map functions:** `map_keys`, `map_values`, `map_entries`, `map_from_entries`
+
+**JSON extraction:** `json_extract`, `json_extract_scalar`, `json_array_length`, `json_valid`
+
+Nested types are fully supported in Parquet read (LIST/MAP/STRUCT pattern detection) and display output.
+
 ## Nullability
 
 Every column supports null values via a **null bitmap** — one bit per row indicating presence or absence. This has minimal storage overhead (1 bit per row) and enables three-valued logic in expressions.
