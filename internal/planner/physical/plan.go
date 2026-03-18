@@ -999,15 +999,6 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	probe := hj.Probe()
 	leftOps = append(leftOps, probe)
 
-	// Intermediate column pruning: if the logical optimizer determined which
-	// columns the parent actually needs from this join's output, insert a
-	// zero-copy ColumnPrune operator to drop everything else. This is
-	// especially beneficial for multi-way join chains where wide intermediate
-	// results carry unused columns through subsequent probes and aggregates.
-	if len(node.NeededColumns) > 0 && joinType != exec.SemiJoin && joinType != exec.AntiJoin {
-		leftOps = append(leftOps, exec.NewColumnPrune(node.NeededColumns))
-	}
-
 	// For RIGHT and FULL OUTER joins, unmatched build-side rows must be
 	// flushed after all probe batches have been processed. Wrap the source
 	// so that FlushUnmatched is called at the end.

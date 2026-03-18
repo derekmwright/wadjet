@@ -218,6 +218,11 @@ func collectNodeColumnRefs(n *Node, refs map[string]bool) {
 		for _, gb := range n.GroupBy {
 			refs[strings.ToLower(gb)] = true
 		}
+		// Walk GROUP BY AST expressions to capture actual column refs
+		// (e.g., EXTRACT(year FROM o_orderdate) → needs "o_orderdate")
+		for _, expr := range n.GroupByExprs {
+			collectASTColumnRefs(expr, refs)
+		}
 		for _, agg := range n.AggExprs {
 			if agg.InputCol != "" && agg.InputCol != "*" {
 				refs[strings.ToLower(agg.InputCol)] = true

@@ -877,6 +877,7 @@ type HashJoinProbe struct {
 	// Cached output schema and column mapping (computed once on first batch)
 	cachedSchema  []parquet.Column
 	cachedMapping []outColSource
+
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
