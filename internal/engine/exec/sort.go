@@ -363,69 +363,105 @@ func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 // destination positions. srcRows[i] gives the source row index for destination row i.
 // Hoists the type switch outside the loop, eliminating per-row function call overhead.
 func gatherVector(dst, src *batch.Vector, srcRows []int) {
+	hasNulls := src.Nulls.HasNulls()
 	switch dst.Type {
 	case batch.TypeBool:
-		for di, si := range srcRows {
-			if src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Nulls.SetValid(di)
+		if !hasNulls {
+			for di, si := range srcRows {
 				dst.BoolData[di] = src.BoolData[si]
+			}
+		} else {
+			for di, si := range srcRows {
+				if src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BoolData[di] = src.BoolData[si]
+				}
 			}
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		for di, si := range srcRows {
-			if src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Nulls.SetValid(di)
+		if !hasNulls {
+			for di, si := range srcRows {
 				dst.Int32Data[di] = src.Int32Data[si]
+			}
+		} else {
+			for di, si := range srcRows {
+				if src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int32Data[di] = src.Int32Data[si]
+				}
 			}
 		}
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-		for di, si := range srcRows {
-			if src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Nulls.SetValid(di)
+		if !hasNulls {
+			for di, si := range srcRows {
 				dst.Int64Data[di] = src.Int64Data[si]
+			}
+		} else {
+			for di, si := range srcRows {
+				if src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int64Data[di] = src.Int64Data[si]
+				}
 			}
 		}
 	case batch.TypeFloat32:
-		for di, si := range srcRows {
-			if src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Nulls.SetValid(di)
+		if !hasNulls {
+			for di, si := range srcRows {
 				dst.Float32Data[di] = src.Float32Data[si]
+			}
+		} else {
+			for di, si := range srcRows {
+				if src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float32Data[di] = src.Float32Data[si]
+				}
 			}
 		}
 	case batch.TypeFloat64:
-		for di, si := range srcRows {
-			if src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Nulls.SetValid(di)
+		if !hasNulls {
+			for di, si := range srcRows {
 				dst.Float64Data[di] = src.Float64Data[si]
+			}
+		} else {
+			for di, si := range srcRows {
+				if src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float64Data[di] = src.Float64Data[si]
+				}
 			}
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		for di, si := range srcRows {
-			if src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-				dst.BytesData.Set(di, nil)
-			} else {
-				dst.Nulls.SetValid(di)
+		if !hasNulls {
+			for di, si := range srcRows {
 				dst.BytesData.Set(di, src.BytesData.Value(si))
+			}
+		} else {
+			for di, si := range srcRows {
+				if src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+					dst.BytesData.Set(di, nil)
+				} else {
+					dst.BytesData.Set(di, src.BytesData.Value(si))
+				}
 			}
 		}
 	case batch.TypeDecimal:
-		for di, si := range srcRows {
-			if src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Nulls.SetValid(di)
+		if !hasNulls {
+			for di, si := range srcRows {
 				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			}
+		} else {
+			for di, si := range srcRows {
+				if src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				}
 			}
 		}
 	}

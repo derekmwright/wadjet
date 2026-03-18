@@ -118,12 +118,22 @@ type Planner struct {
 	SpillDir       string            // directory for spill files (empty = os temp dir)
 	QueryLimits    *config.QueryLimits // cost-based query guard (nil = no limits)
 	cteCache       map[string]*cteMaterialized // materialized CTE results
+	scanCache      map[string]*scanCached       // cached scan results for duplicate table scans
 }
 
 // cteMaterialized stores the pre-computed results of a CTE.
 type cteMaterialized struct {
 	schema []parquet.Column
 	rows   []map[string]any
+}
+
+// scanCached stores columnar scan results for a table that is scanned multiple
+// times within a single query (e.g., decorrelated subqueries). The first scan
+// populates the cache, and subsequent scans replay from it.
+type scanCached struct {
+	batches []*batch.RecordBatch
+	schema  []parquet.Column
+	done    bool // true when the first scan is complete
 }
 
 // NewPlanner creates a new physical planner.
@@ -321,9 +331,70 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 	}
 }
 
+// mergeDuplicateScans detects tables scanned multiple times in a query
+// (e.g., from decorrelated subqueries) and merges their required columns.
+// When duplicates are found, a scanCache entry is created so the first scan
+// caches its results and subsequent scans replay from memory.
+func (p *Planner) mergeDuplicateScans(node *logical.Node) {
+	// Collect all scan nodes grouped by table name.
+	scansByTable := map[string][]*logical.Node{}
+	var walkScans func(n *logical.Node)
+	walkScans = func(n *logical.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == logical.NodeScan && n.TableName != "" {
+			scansByTable[n.TableName] = append(scansByTable[n.TableName], n)
+		}
+		for _, c := range n.Children {
+			walkScans(c)
+		}
+	}
+	walkScans(node)
+
+	// For tables scanned more than once, merge RequiredColumns across all scans.
+	for table, scans := range scansByTable {
+		if len(scans) < 2 {
+			continue
+		}
+		// Skip if any scan has predicates (pushdown filters differ = not cacheable)
+		hasPreds := false
+		for _, s := range scans {
+			if len(s.ScanPredicates) > 0 {
+				hasPreds = true
+				break
+			}
+		}
+		if hasPreds {
+			continue
+		}
+		// Compute the union of required columns.
+		colSet := map[string]bool{}
+		for _, s := range scans {
+			for _, col := range s.RequiredColumns {
+				colSet[col] = true
+			}
+		}
+		merged := make([]string, 0, len(colSet))
+		for col := range colSet {
+			merged = append(merged, col)
+		}
+		// Update all scan nodes to use the merged column set.
+		for _, s := range scans {
+			s.RequiredColumns = merged
+		}
+		// Initialize the scan cache entry.
+		if p.scanCache == nil {
+			p.scanCache = make(map[string]*scanCached)
+		}
+		p.scanCache[table] = &scanCached{}
+	}
+}
+
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
-	p.planCtx = ctx // store for subquery runner context propagation
+	p.planCtx = ctx   // store for subquery runner context propagation
+	p.scanCache = nil // reset per-query scan cache
 	// Propagate CTE definitions from the logical plan so scalar subqueries
 	// (e.g., in WHERE/HAVING) can resolve CTE table references.
 	if len(node.CTEs) > 0 {
@@ -335,6 +406,10 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// exact same data. This prevents float64 accumulation-order divergence
 	// that would break exact equality comparisons (e.g., TPC-H Q15).
 	p.materializeCTEs(ctx, node)
+
+	// Detect tables scanned multiple times and merge their column needs.
+	// The first scan caches decoded batches; subsequent scans replay from cache.
+	p.mergeDuplicateScans(node)
 
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
@@ -2364,13 +2439,20 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 	_ = tableMeta
 
 	// Create a scanner source that reads from the catalog
-	return &catalogScanSource{
+	src := &catalogScanSource{
 		catalog:         p.catalog,
 		tableName:       tableName,
 		partitionFilter: partFilter,
 		requiredCols:    requiredCols,
 		scanPreds:       scanPreds,
 	}
+	// Attach scan cache if this table is scanned multiple times in this query.
+	if p.scanCache != nil {
+		if cached, ok := p.scanCache[tableName]; ok {
+			src.cache = cached
+		}
+	}
+	return src
 }
 
 // catalogScanSource adapts the scan.Scanner to exec.Source
@@ -2381,20 +2463,72 @@ type catalogScanSource struct {
 	requiredCols    []string
 	scanPreds       []logical.Predicate
 	inner           exec.Source
+	cache           *scanCached // non-nil when this table is scanned multiple times
+	replayIdx       int         // position in cache replay
+	isReplay        bool        // true when reading from cache instead of scanning
 }
 
 func (s *catalogScanSource) Init(ctx context.Context) error {
-	// Use the scan package scanner
+	if s.cache != nil && s.cache.done {
+		// Second (or later) scan of this table — replay from cache.
+		s.isReplay = true
+		s.replayIdx = 0
+		return nil
+	}
+	// First scan (or no cache) — scan from storage.
 	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, s.requiredCols, s.scanPreds)
 	s.inner = sc
 	return s.inner.Init(ctx)
 }
 
 func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
-	return s.inner.Next(ctx)
+	if s.isReplay {
+		if s.replayIdx >= len(s.cache.batches) {
+			return nil, nil
+		}
+		cached := s.cache.batches[s.replayIdx]
+		s.replayIdx++
+		// Return a shallow copy: shared column vectors (read-only), independent Sel.
+		// This prevents downstream operators from corrupting cached data via in-place
+		// Sel mutation.
+		clone := &batch.RecordBatch{
+			Schema:  cached.Schema,
+			Columns: make([]*batch.Vector, len(cached.Columns)),
+			Len:     cached.Len,
+		}
+		copy(clone.Columns, cached.Columns)
+		return clone, nil
+	}
+	b, err := s.inner.Next(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if s.cache != nil && !s.cache.done {
+		if b == nil {
+			s.cache.done = true
+		} else {
+			// Detach from pool so the pipeline's b.Release() is a no-op.
+			// Without this, the pool recycles the batch and the scanner
+			// overwrites the Vectors that the cache references.
+			b.Detach()
+			// Cache a shallow copy so the first consumer's operators don't
+			// corrupt cached data by setting Sel in-place.
+			cached := &batch.RecordBatch{
+				Schema:  b.Schema,
+				Columns: make([]*batch.Vector, len(b.Columns)),
+				Len:     b.Len,
+			}
+			copy(cached.Columns, b.Columns)
+			s.cache.batches = append(s.cache.batches, cached)
+		}
+	}
+	return b, err
 }
 
 func (s *catalogScanSource) Close() error {
+	if s.isReplay {
+		return nil
+	}
 	if s.inner != nil {
 		return s.inner.Close()
 	}
@@ -2402,6 +2536,13 @@ func (s *catalogScanSource) Close() error {
 }
 
 func (s *catalogScanSource) RowsScanned() int64 {
+	if s.isReplay {
+		var total int64
+		for _, b := range s.cache.batches {
+			total += int64(b.Len)
+		}
+		return total
+	}
 	if sp, ok := s.inner.(exec.ScanStatsProvider); ok {
 		return sp.RowsScanned()
 	}

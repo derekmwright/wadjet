@@ -1492,6 +1492,17 @@ func (p *HashJoinProbe) leftHasColumn(name string, leftSchema []parquet.Column) 
 // all match pairs. Hoists the type switch outside the loop, eliminating per-row
 // function call and type dispatch overhead vs per-row copyVectorValue.
 func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBatches []*batch.RecordBatch) {
+	// Cache last batch pointer to avoid repeated slice indexing
+	var src *batch.Vector
+	prevBatch := int32(-1)
+	resolveCol := func(batchIdx int32) *batch.Vector {
+		if batchIdx != prevBatch {
+			src = buildBatches[batchIdx].Columns[srcIdx]
+			prevBatch = batchIdx
+		}
+		return src
+	}
+
 	switch dst.Type {
 	case batch.TypeBool:
 		for di, pair := range pairs {
@@ -1499,13 +1510,12 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				dst.Nulls.SetNull(di)
 				continue
 			}
-			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			s := resolveCol(pair.ref.batchIdx)
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if s.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
-				dst.Nulls.SetValid(di)
-				dst.BoolData[di] = src.BoolData[si]
+				dst.BoolData[di] = s.BoolData[si]
 			}
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
@@ -1514,13 +1524,12 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				dst.Nulls.SetNull(di)
 				continue
 			}
-			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			s := resolveCol(pair.ref.batchIdx)
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if s.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
-				dst.Nulls.SetValid(di)
-				dst.Int32Data[di] = src.Int32Data[si]
+				dst.Int32Data[di] = s.Int32Data[si]
 			}
 		}
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
@@ -1529,13 +1538,12 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				dst.Nulls.SetNull(di)
 				continue
 			}
-			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			s := resolveCol(pair.ref.batchIdx)
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if s.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
-				dst.Nulls.SetValid(di)
-				dst.Int64Data[di] = src.Int64Data[si]
+				dst.Int64Data[di] = s.Int64Data[si]
 			}
 		}
 	case batch.TypeFloat32:
@@ -1544,13 +1552,12 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				dst.Nulls.SetNull(di)
 				continue
 			}
-			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			s := resolveCol(pair.ref.batchIdx)
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if s.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
-				dst.Nulls.SetValid(di)
-				dst.Float32Data[di] = src.Float32Data[si]
+				dst.Float32Data[di] = s.Float32Data[si]
 			}
 		}
 	case batch.TypeFloat64:
@@ -1559,13 +1566,12 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				dst.Nulls.SetNull(di)
 				continue
 			}
-			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			s := resolveCol(pair.ref.batchIdx)
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if s.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
-				dst.Nulls.SetValid(di)
-				dst.Float64Data[di] = src.Float64Data[si]
+				dst.Float64Data[di] = s.Float64Data[si]
 			}
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
@@ -1575,14 +1581,13 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				dst.BytesData.Set(di, nil)
 				continue
 			}
-			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			s := resolveCol(pair.ref.batchIdx)
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if s.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 				dst.BytesData.Set(di, nil)
 			} else {
-				dst.Nulls.SetValid(di)
-				dst.BytesData.Set(di, src.BytesData.Value(si))
+				dst.BytesData.Set(di, s.BytesData.Value(si))
 			}
 		}
 	case batch.TypeDecimal:
@@ -1591,17 +1596,15 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				dst.Nulls.SetNull(di)
 				continue
 			}
-			src := buildBatches[pair.ref.batchIdx].Columns[srcIdx]
+			s := resolveCol(pair.ref.batchIdx)
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if s.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
-				dst.Nulls.SetValid(di)
-				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				dst.DecimalData.Data[di] = s.DecimalData.Data[si]
 			}
 		}
 	default:
-		// Fallback for any unhandled types
 		for di, pair := range pairs {
 			if !pair.matched {
 				setVectorNull(dst, di)
