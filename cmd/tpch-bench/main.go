@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"sort"
+	"strings"
 	"time"
 
 	tpch "github.com/citc-tech/wadjet/benchmarks/tpch"
@@ -42,6 +43,7 @@ func main() {
 		natsPort   = flag.Int("nats-port", 4222, "NATS listen port (distributed mode)")
 		runs       = flag.Int("runs", 1, "Number of benchmark runs")
 		dataOnly   = flag.Bool("data-only", false, "Generate and upload data only, skip benchmark queries")
+		skipLoad   = flag.Bool("skip-load", false, "Skip data generation; discover existing parquet files from S3")
 		cpuProf    = flag.String("cpuprofile", "", "Write CPU profile to file")
 		memProf    = flag.String("memprofile", "", "Write memory profile to file")
 		profDir    = flag.String("profdir", "", "Directory for per-query profiles")
@@ -78,7 +80,11 @@ func main() {
 	}
 
 	sf := tpch.ScaleFactor(float64(*scale))
-	loadData(ctx, db, sf)
+	if *skipLoad {
+		discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl)
+	} else {
+		loadData(ctx, db, sf)
+	}
 	if !*dataOnly {
 		runBenchmark(ctx, db, *runs, *profDir)
 	}
@@ -206,6 +212,61 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	}
 
 	return db
+}
+
+func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool) {
+	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
+		Endpoint: endpoint,
+		UseSSL:   ssl,
+		Region:   region,
+	})
+	if err != nil {
+		log.Fatalf("creating S3 store for discovery: %v", err)
+	}
+
+	// Register table schemas in catalog
+	for name, schema := range tpch.AllTables {
+		if err := db.CreateTable(ctx, name, schema, nil); err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				continue
+			}
+			log.Fatalf("create table %s: %v", name, err)
+		}
+	}
+
+	// Discover existing parquet files for each table
+	totalFiles := 0
+	for name := range tpch.AllTables {
+		prefix := "tables/" + name + "/"
+		objects, err := store.List(ctx, bucket, objstore.ListOptions{Prefix: prefix})
+		if err != nil {
+			log.Fatalf("listing %s files: %v", name, err)
+		}
+		if len(objects) == 0 {
+			log.Printf("WARNING: no files found for table %s (prefix: %s)", name, prefix)
+			continue
+		}
+
+		files := make([]catalog.FileEntry, 0, len(objects))
+		for _, obj := range objects {
+			if !strings.HasSuffix(obj.Key, ".parquet") {
+				continue
+			}
+			files = append(files, catalog.FileEntry{
+				Path:      obj.Key,
+				SizeBytes: obj.Size,
+				NumRows:   0, // unknown, scanner reads from parquet footer
+				CreatedAt: obj.LastModified,
+			})
+		}
+
+		if err := db.Catalog().AddFiles(ctx, name, nil, "", files); err != nil {
+			log.Fatalf("registering %s files: %v", name, err)
+		}
+		totalFiles += len(files)
+		log.Printf("Discovered %d files for table %s", len(files), name)
+	}
+	log.Printf("Data discovery complete: %d total files across %d tables", totalFiles, len(tpch.AllTables))
 }
 
 func loadData(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor) {
