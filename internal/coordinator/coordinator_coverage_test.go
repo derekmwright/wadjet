@@ -424,8 +424,8 @@ func TestExecuteSQLSortQuery(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
-	if len(result.Rows) != 3 {
-		t.Fatalf("expected 3 rows, got %d", len(result.Rows))
+	if len(result.Rows()) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(result.Rows()))
 	}
 }
 
@@ -454,8 +454,8 @@ func TestExecuteSQLWithLimit(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
 	// LIMIT 2 should give us 2 rows
-	if len(result.Rows) > 5 { // at minimum, should not exceed total
-		t.Errorf("expected at most 5 rows, got %d", len(result.Rows))
+	if len(result.Rows()) > 5 { // at minimum, should not exceed total
+		t.Errorf("expected at most 5 rows, got %d", len(result.Rows()))
 	}
 }
 

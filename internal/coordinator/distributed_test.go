@@ -170,14 +170,14 @@ func TestDistributedExecuteSQL(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
-	if len(result.Rows) != 4 {
-		t.Fatalf("expected 4 rows, got %d", len(result.Rows))
+	if len(result.Rows()) != 4 {
+		t.Fatalf("expected 4 rows, got %d", len(result.Rows()))
 	}
 	if result.Plan == "" {
 		t.Error("expected non-empty plan")
 	}
 	t.Logf("Plan:\n%s", result.Plan)
-	t.Logf("Rows: %d, Elapsed: %s", len(result.Rows), result.Elapsed)
+	t.Logf("Rows: %d, Elapsed: %s", len(result.Rows()), result.Elapsed)
 }
 
 func TestDistributedAggregateQuery(t *testing.T) {
@@ -204,17 +204,17 @@ func TestDistributedAggregateQuery(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
 	t.Logf("Result files: %v", result.ResultFiles)
-	t.Logf("Rows: %d, Columns: %v", len(result.Rows), result.Columns)
-	for i, row := range result.Rows {
+	t.Logf("Rows: %d, Columns: %v", len(result.Rows()), result.Columns)
+	for i, row := range result.Rows() {
 		t.Logf("  row[%d]: %v", i, row)
 	}
-	if len(result.Rows) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(result.Rows))
+	if len(result.Rows()) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(result.Rows()))
 	}
 
 	// Verify aggregates
 	totals := make(map[string]float64)
-	for _, row := range result.Rows {
+	for _, row := range result.Rows() {
 		uid := row["user_id"].(string)
 		total, ok := row["total"].(float64)
 		if !ok {
@@ -324,13 +324,13 @@ func TestDistributedAggregateWithSpill(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
-	if len(result.Rows) != 3 {
-		t.Fatalf("expected 3 groups, got %d", len(result.Rows))
+	if len(result.Rows()) != 3 {
+		t.Fatalf("expected 3 groups, got %d", len(result.Rows()))
 	}
 
 	// Verify aggregates are correct despite spilling
 	totals := make(map[string]float64)
-	for _, row := range result.Rows {
+	for _, row := range result.Rows() {
 		cat := row["category"].(string)
 		total, ok := row["total"].(float64)
 		if !ok {
@@ -377,13 +377,13 @@ func TestDistributedQueryWithResultStore(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
-	if len(result.Rows) != 3 {
-		t.Fatalf("expected 3 users, got %d", len(result.Rows))
+	if len(result.Rows()) != 3 {
+		t.Fatalf("expected 3 users, got %d", len(result.Rows()))
 	}
 
 	// Verify correct aggregate values
 	totals := make(map[string]float64)
-	for _, row := range result.Rows {
+	for _, row := range result.Rows() {
 		uid := row["user_id"].(string)
 		total, ok := row["total"].(float64)
 		if !ok {
@@ -431,13 +431,13 @@ func TestDistributedQueryWithBudgetAndResultStore(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
-	if len(result.Rows) != 4 {
-		t.Fatalf("expected 4 regions, got %d", len(result.Rows))
+	if len(result.Rows()) != 4 {
+		t.Fatalf("expected 4 regions, got %d", len(result.Rows()))
 	}
 
 	// Each region has 20 rows, total revenue = sum of region's entries
 	var totalRevenue float64
-	for _, row := range result.Rows {
+	for _, row := range result.Rows() {
 		total, ok := row["total"].(float64)
 		if !ok {
 			if iv, ok := row["total"].(int64); ok {
@@ -451,5 +451,5 @@ func TestDistributedQueryWithBudgetAndResultStore(t *testing.T) {
 	if totalRevenue != expected {
 		t.Errorf("total revenue: got %f, want %f", totalRevenue, expected)
 	}
-	t.Logf("Result: %d rows, total revenue: %f", len(result.Rows), totalRevenue)
+	t.Logf("Result: %d rows, total revenue: %f", len(result.Rows()), totalRevenue)
 }

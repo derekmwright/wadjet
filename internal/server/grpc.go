@@ -130,7 +130,7 @@ func (g *GRPCServer) Query(ctx context.Context, req *wadjetv1.QueryRequest) (*wa
 		return &wadjetv1.QueryResponse{
 			QueryId: result.QueryID,
 			Columns: result.Columns,
-			Rows:    rowsToProto(result.Rows),
+			Rows:    rowsToProto(result.Rows()),
 			Stats: &wadjetv1.QueryStats{
 				TotalRows: result.TotalRows,
 				Elapsed:   durationpb.New(result.Elapsed),
@@ -172,7 +172,7 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 		if err != nil {
 			return status.Errorf(codes.Internal, "query error: %v", err)
 		}
-		rows = result.Rows
+		rows = result.Rows()
 		columns = result.Columns
 		stats = &wadjetv1.QueryStats{
 			TotalRows: result.TotalRows,

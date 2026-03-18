@@ -142,7 +142,7 @@ func (s *Server) handleGetQueryResults(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, QueryResponse{
 		QueryID: result.QueryID,
 		Columns: result.Columns,
-		Rows:    result.Rows,
+		Rows:    result.Rows(),
 		Stats: QueryStats{
 			Elapsed:     result.Elapsed.Round(time.Millisecond).String(),
 			RowsScanned: result.TotalRows,

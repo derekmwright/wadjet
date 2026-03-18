@@ -11,6 +11,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
@@ -200,15 +201,30 @@ func (c *Coordinator) SubmitScanQuery(ctx context.Context, tableName string, col
 }
 
 // SQLResult holds the full result of a distributed SQL query.
+// Results are kept columnar (as RecordBatches) to avoid materializing
+// per-row map[string]any which causes massive heap pressure at SF10+.
 type SQLResult struct {
 	QueryID     string
 	Columns     []string
-	Rows        []map[string]any
+	Batches     []*batch.RecordBatch
 	ResultFiles []string
 	TotalRows   int64
 	Elapsed     time.Duration
 	Plan        string
 	Error       string
+}
+
+// Rows materializes the result batches into row-oriented maps.
+// This is expensive for large results — prefer iterating Batches directly.
+func (r *SQLResult) Rows() []map[string]any {
+	if r == nil {
+		return nil
+	}
+	var rows []map[string]any
+	for _, b := range r.Batches {
+		rows = append(rows, b.ToRows()...)
+	}
+	return rows
 }
 
 // ExecuteSQL parses SQL, plans, distributes across workers, and collects results.
@@ -338,7 +354,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	}
 
 	// Read results from the final stage
-	rows, columns, err := c.readFinalResults(ctx, queryID, physStages)
+	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, physStages)
 	if err != nil {
 		return &SQLResult{
 			QueryID:     queryID,
@@ -352,9 +368,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	return &SQLResult{
 		QueryID:     queryID,
 		Columns:     columns,
-		Rows:        rows,
+		Batches:     batches,
 		ResultFiles: info.ResultFiles,
-		TotalRows:   int64(len(rows)),
+		TotalRows:   totalRows,
 		Elapsed:     time.Since(start),
 		Plan:        planStr,
 	}, nil
@@ -949,10 +965,10 @@ func (c *Coordinator) collectDepResults(queryID string) map[string][]string {
 }
 
 // readFinalResults reads the result files from the final (last) stage.
-// Uses direct columnar page reads to avoid per-row map[string]any deserialization.
-func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stages []physical.Stage) ([]map[string]any, []string, error) {
+// Returns columnar batches to avoid per-row map[string]any heap pressure.
+func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stages []physical.Stage) ([]*batch.RecordBatch, []string, int64, error) {
 	if len(stages) == 0 {
-		return nil, nil, nil
+		return nil, nil, 0, nil
 	}
 
 	// Find the final stage (last in topological order)
@@ -961,12 +977,13 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 	// Get results for the final stage
 	results := c.tracker.StageResults(queryID, finalStage.ID)
 	if len(results) == 0 {
-		return nil, nil, nil
+		return nil, nil, 0, nil
 	}
 
 	store := c.catalog.Store()
-	var allRows []map[string]any
+	var allBatches []*batch.RecordBatch
 	var columns []string
+	var totalRows int64
 
 	for _, r := range results {
 		if !r.Success {
@@ -1006,17 +1023,18 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 			}
 		}
 
-		// Direct columnar read — bypasses per-row map allocation in ReadRows
+		// Direct columnar read — keeps data as batches, no row materialization
 		batches, err := scan.ReadFileBatches(reader, schema, nil)
 		if err != nil {
 			continue
 		}
 		for _, b := range batches {
-			allRows = append(allRows, b.ToRows()...)
+			totalRows += int64(b.ActiveLen())
 		}
+		allBatches = append(allBatches, batches...)
 	}
 
-	return allRows, columns, nil
+	return allBatches, columns, totalRows, nil
 }
 
 func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done chan<- struct{}) {
@@ -1266,7 +1284,7 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		}, nil
 	}
 
-	rows, columns, err := c.readFinalResults(ctx, queryID, meta.stages)
+	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, meta.stages)
 	if err != nil {
 		return &SQLResult{
 			QueryID:     queryID,
@@ -1280,9 +1298,9 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 	return &SQLResult{
 		QueryID:     queryID,
 		Columns:     columns,
-		Rows:        rows,
+		Batches:     batches,
 		ResultFiles: info.ResultFiles,
-		TotalRows:   int64(len(rows)),
+		TotalRows:   totalRows,
 		Elapsed:     elapsed,
 		Plan:        planStr,
 	}, nil

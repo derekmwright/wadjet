@@ -364,7 +364,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		rows := result.Rows
+		rows := result.Rows()
 
 		// Apply cell-level access policies (column masking/denial)
 		if identity != nil && len(rows) > 0 {
