@@ -14,6 +14,8 @@ import (
 
 	"github.com/peterh/liner"
 
+	"github.com/citc-tech/wadjet/internal/engine/memory"
+
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/config"
 	"github.com/citc-tech/wadjet/internal/geoip"
@@ -82,7 +84,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&natsStoreDir, "nats-store-dir", "", "NATS JetStream storage directory (default: ~/.wadjet/nats)")
 	rootCmd.PersistentFlags().StringVar(&clusterID, "cluster-id", "local", "Cluster identifier for federation")
 	rootCmd.PersistentFlags().StringSliceVar(&leafRemotes, "leaf-remote", nil, "Remote NATS URLs for leaf node connections (repeatable)")
-	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = unlimited, no spill)")
+	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = auto-detect from cgroup, or unlimited)")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 512*1024*1024, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
 	rootCmd.PersistentFlags().StringVar(&pgAddr, "pg-addr", ":5433", "PostgreSQL wire protocol listen address")
@@ -112,6 +114,13 @@ func serveCmd() *cobra.Command {
 			defer cancel()
 
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+			if memoryBudget == 0 {
+				if detected := memory.DetectBudget(); detected > 0 {
+					memoryBudget = detected
+					logger.Info("auto-detected memory budget from cgroup", "budget_bytes", memoryBudget)
+				}
+			}
 
 			store, err := newStore()
 			if err != nil {
