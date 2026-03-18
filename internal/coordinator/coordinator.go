@@ -806,29 +806,59 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 
 // materializeInlineResults writes inline results to S3 so downstream stages can read them.
 // Updates the tracker's result entries with the materialized file paths.
+// Writes are parallelized to minimize wall-clock time at stage boundaries.
 func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, stageID string) {
 	results := c.tracker.StageResults(queryID, stageID)
 	store := c.catalog.Store()
 
+	// Collect indices of inline results that need materialization
+	type work struct {
+		idx  int
+		path string
+		r    distributed.ResultNotification
+	}
+	var pending []work
 	for i, r := range results {
 		if !r.Success || len(r.InlineData) == 0 || r.ResultPath != "" {
 			continue
 		}
-
-		// Write inline data to S3
 		path := fmt.Sprintf("queries/%s/%s/%s.parquet", queryID, stageID, r.TaskID)
-		_, err := store.Put(ctx, c.config.ResultBucket, path,
-			bytes.NewReader(r.InlineData), int64(len(r.InlineData)), "application/octet-stream")
-		if err != nil {
-			c.logger.Error("failed to materialize inline result",
-				"path", path, "error", err)
-			continue
-		}
-
-		// Update tracker with the materialized path
-		results[i].ResultPath = path
-		c.tracker.UpdateResultPath(queryID, stageID, r.TaskID, path)
+		pending = append(pending, work{idx: i, path: path, r: r})
 	}
+	if len(pending) == 0 {
+		return
+	}
+
+	// Single result: skip goroutine overhead
+	if len(pending) == 1 {
+		w := pending[0]
+		_, err := store.Put(ctx, c.config.ResultBucket, w.path,
+			bytes.NewReader(w.r.InlineData), int64(len(w.r.InlineData)), "application/octet-stream")
+		if err != nil {
+			c.logger.Error("failed to materialize inline result", "path", w.path, "error", err)
+			return
+		}
+		results[w.idx].ResultPath = w.path
+		c.tracker.UpdateResultPath(queryID, stageID, w.r.TaskID, w.path)
+		return
+	}
+
+	// Parallel writes
+	var wg sync.WaitGroup
+	for _, w := range pending {
+		wg.Add(1)
+		go func(w work) {
+			defer wg.Done()
+			_, err := store.Put(ctx, c.config.ResultBucket, w.path,
+				bytes.NewReader(w.r.InlineData), int64(len(w.r.InlineData)), "application/octet-stream")
+			if err != nil {
+				c.logger.Error("failed to materialize inline result", "path", w.path, "error", err)
+				return
+			}
+			c.tracker.UpdateResultPath(queryID, stageID, w.r.TaskID, w.path)
+		}(w)
+	}
+	wg.Wait()
 }
 
 // collectDepResults gathers result file paths from completed stages.
