@@ -410,15 +410,25 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 }
 
 func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	// Read build (right) and probe (left) sides concurrently into columnar batches
-	buildBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
-	if err != nil {
-		return fmt.Errorf("reading build files: %w", err)
+	// Read build (right) and probe (left) sides concurrently
+	var buildBatches, probeBatches []*batch.RecordBatch
+	var buildErr, probeErr error
+	var rwg sync.WaitGroup
+	rwg.Add(2)
+	go func() {
+		defer rwg.Done()
+		buildBatches, buildErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
+	}()
+	go func() {
+		defer rwg.Done()
+		probeBatches, probeErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
+	}()
+	rwg.Wait()
+	if buildErr != nil {
+		return fmt.Errorf("reading build files: %w", buildErr)
 	}
-
-	probeBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
-	if err != nil {
-		return fmt.Errorf("reading probe files: %w", err)
+	if probeErr != nil {
+		return fmt.Errorf("reading probe files: %w", probeErr)
 	}
 
 	if len(probeBatches) == 0 && len(buildBatches) == 0 {
