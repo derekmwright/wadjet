@@ -132,28 +132,27 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 }
 
 func (e *Executor) executeScan(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	var (
-		allBatches []*batch.RecordBatch
-		totalRows  int64
-	)
+	// Read all scan files concurrently (parallel S3 GETs)
+	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.Files, task.Columns)
+	if err != nil {
+		return err
+	}
 
-	for _, filePath := range task.Files {
-		batches, err := e.readParquetFileBatches(ctx, task.ResultBucket, filePath, task.Columns)
-		if err != nil {
-			return fmt.Errorf("reading file %s: %w", filePath, err)
+	// Apply pushed-down filter predicates as selection vectors
+	if len(task.FilterExprs) > 0 {
+		var filtered []*batch.RecordBatch
+		for _, b := range allBatches {
+			b = e.applyBatchFilters(b, task.FilterExprs)
+			if b != nil && b.ActiveLen() > 0 {
+				filtered = append(filtered, b)
+			}
 		}
+		allBatches = filtered
+	}
 
-		for _, b := range batches {
-			// Apply pushed-down filter predicates as selection vectors
-			if len(task.FilterExprs) > 0 {
-				b = e.applyBatchFilters(b, task.FilterExprs)
-			}
-			if b == nil || b.ActiveLen() == 0 {
-				continue
-			}
-			allBatches = append(allBatches, b)
-			totalRows += int64(b.ActiveLen())
-		}
+	var totalRows int64
+	for _, b := range allBatches {
+		totalRows += int64(b.ActiveLen())
 	}
 
 	if totalRows == 0 {
