@@ -578,6 +578,13 @@ func ReplaceAllAggregates(node Node, replacements map[string]string) Node {
 			return node
 		}
 		return &CastNode{Inner: inner, TypeName: n.TypeName}
+	case *CmpExpr:
+		left := ReplaceAllAggregates(n.Left, replacements)
+		right := ReplaceAllAggregates(n.Right, replacements)
+		if left == n.Left && right == n.Right {
+			return node
+		}
+		return &CmpExpr{Left: left, Op: n.Op, Right: right}
 	case *CaseNode:
 		changed := false
 		newWhens := make([]WhenClause, len(n.Whens))

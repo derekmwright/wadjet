@@ -117,6 +117,13 @@ type Planner struct {
 	MemoryBudget   int64             // per-query memory budget in bytes (0 = unlimited)
 	SpillDir       string            // directory for spill files (empty = os temp dir)
 	QueryLimits    *config.QueryLimits // cost-based query guard (nil = no limits)
+	cteCache       map[string]*cteMaterialized // materialized CTE results
+}
+
+// cteMaterialized stores the pre-computed results of a CTE.
+type cteMaterialized struct {
+	schema []parquet.Column
+	rows   []map[string]any
 }
 
 // NewPlanner creates a new physical planner.
@@ -227,6 +234,93 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 	}
 }
 
+// materializeCTEs pre-computes any CTE that is referenced more than once in
+// the plan tree (including inside scalar subqueries). Both the main pipeline
+// and any subquery pipelines will read from the cached result, ensuring they
+// see bit-identical data.
+func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
+	if len(root.CTEs) == 0 {
+		return
+	}
+	// Count how many times each CTE name appears as a CTEName tag.
+	refCounts := map[string]int{}
+	var countRefs func(n *logical.Node)
+	countRefs = func(n *logical.Node) {
+		if n == nil {
+			return
+		}
+		if n.CTEName != "" {
+			refCounts[n.CTEName]++
+		}
+		for _, c := range n.Children {
+			countRefs(c)
+		}
+	}
+	countRefs(root)
+
+	// Also count CTE references inside scalar subquery expressions.
+	// These are in predicate ASTExpr nodes that reference CTE table names.
+	// A simple heuristic: if a CTE name appears in the CTE list AND has
+	// at least 1 reference in the plan tree, check if any scalar subquery
+	// in the plan text also references it. We conservatively materialize
+	// any CTE that has >=1 ref in the plan tree AND appears in the CTE
+	// list (since scalar subqueries may reference it too).
+	for _, cte := range root.CTEs {
+		if refCounts[cte.Name] > 0 {
+			// Conservatively mark as multi-ref since scalar subqueries
+			// (not visible in the logical tree) may also reference it.
+			refCounts[cte.Name] = 2
+		}
+	}
+
+	p.cteCache = make(map[string]*cteMaterialized)
+
+	for _, cte := range root.CTEs {
+		if refCounts[cte.Name] < 2 {
+			continue
+		}
+		// Build and execute the CTE pipeline to materialize its results
+		rows, err := p.executeSubquery(ctx, cte.SQL)
+		if err != nil {
+			continue // fall back to inline expansion
+		}
+		// Derive schema from the CTE's parsed SELECT list
+		pq, err := plansql.Parse(cte.SQL)
+		if err != nil {
+			continue
+		}
+		info, err := plansql.ExtractSelect(pq)
+		if err != nil {
+			continue
+		}
+		schema := make([]parquet.Column, len(info.Columns))
+		for i, col := range info.Columns {
+			name := col.Alias
+			if name == "" {
+				name = col.Expr
+			}
+			// Infer type from first data row
+			typ := parquet.TypeString
+			if len(rows) > 0 {
+				if v, ok := rows[0][name]; ok {
+					switch v.(type) {
+					case int64:
+						typ = parquet.TypeInt64
+					case int32:
+						typ = parquet.TypeInt32
+					case float64:
+						typ = parquet.TypeFloat64
+					case bool:
+						typ = parquet.TypeBool
+					}
+				}
+			}
+			schema[i] = parquet.Column{Name: name, Type: typ, Nullable: true}
+		}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: rows}
+	}
+}
+
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
 	p.planCtx = ctx // store for subquery runner context propagation
@@ -235,6 +329,13 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	if len(node.CTEs) > 0 {
 		p.ctes = node.CTEs
 	}
+
+	// Materialize CTEs referenced multiple times. Each CTE is computed once
+	// and cached so that all references (main query + subqueries) see the
+	// exact same data. This prevents float64 accumulation-order divergence
+	// that would break exact equality comparisons (e.g., TPC-H Q15).
+	p.materializeCTEs(ctx, node)
+
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
 		return nil, err
@@ -747,6 +848,15 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 }
 
 func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	// If this subtree is a materialized CTE, serve from cache instead of
+	// re-executing the full sub-plan.
+	if node.CTEName != "" && p.cteCache != nil {
+		if mat, ok := p.cteCache[node.CTEName]; ok {
+			source := exec.NewSliceSource(mat.schema, mat.rows)
+			return source, nil, nil, nil
+		}
+	}
+
 	switch node.Type {
 	case logical.NodeLimit:
 		return p.buildLimit(ctx, node)
@@ -1464,11 +1574,17 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			}
 		}
 
-		projCols = append(projCols, exec.ProjectColumn{
+		pc := exec.ProjectColumn{
 			Name: name,
 			Type: outType, // Will be resolved at runtime if input column matches
 			Expr: expression,
-		})
+		}
+		// For column renames (e.g., l_suppkey AS supplier_no), record the
+		// source column so Project.Execute can resolve the correct type.
+		if name != colRef {
+			pc.SourceCol = colRef
+		}
+		projCols = append(projCols, pc)
 	}
 
 	if len(projCols) > 0 {

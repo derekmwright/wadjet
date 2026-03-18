@@ -112,6 +112,10 @@ type Node struct {
 	// CTE references inside scalar subqueries (e.g., Q15's HAVING/WHERE
 	// subquery that references a CTE defined in the outer WITH clause).
 	CTEs []plansql.CTEDef
+
+	// CTEName — set on the root of a CTE sub-plan so the physical planner
+	// can detect and materialize multi-referenced CTEs.
+	CTEName string
 }
 
 // Predicate is a filter condition.

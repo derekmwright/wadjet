@@ -779,6 +779,10 @@ func (h *HashJoin) FixKeyAssignment() {
 				}
 			}
 		}
+
+		// Rebuild bloom filter with corrected keys.
+		h.bloom = nil
+		h.buildBloom()
 	}
 }
 

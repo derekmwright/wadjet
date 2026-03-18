@@ -306,14 +306,9 @@ func genLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int) []map
 	flags := []string{"N", "R", "A"}
 	lineStatuses := []string{"O", "F"}
 
-	// Distribute ~count items across numOrders orders
-	linesPerOrder := max(1, count/max(1, numOrders))
-
+	// TPC-H spec: 1-7 line items per order (uniform random)
 	for orderKey := 1; orderKey <= numOrders && len(rows) < count; orderKey++ {
-		nLines := linesPerOrder + rng.Intn(3) - 1
-		if nLines < 1 {
-			nLines = 1
-		}
+		nLines := 1 + rng.Intn(7) // 1 to 7 line items
 		for ln := 1; ln <= nLines && len(rows) < count; ln++ {
 			quantity := float64(rng.Intn(50) + 1)
 			price := randFloat(rng, 900.0, 100000.0)
@@ -332,10 +327,16 @@ func genLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int) []map
 			shipDate := commitDate.AddDate(0, 0, rng.Intn(51)-10)      // -10..+40 days
 			receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)      // +1..30 days
 
+			// Derive suppkey from partkey using same formula as partsupp,
+			// ensuring lineitem's (l_partkey, l_suppkey) has matching rows in partsupp.
+			partKey := rng.Intn(numParts)                          // 0-based
+			suppIdx := rng.Intn(4)                                 // pick one of 4 suppliers for this part
+			suppKey := (partKey*4 + suppIdx) % numSupps + 1
+
 			rows = append(rows, map[string]any{
 				"l_orderkey":     int32(orderKey),
-				"l_partkey":      int32(rng.Intn(numParts) + 1),
-				"l_suppkey":      int32(rng.Intn(numSupps) + 1),
+				"l_partkey":      int32(partKey + 1),
+				"l_suppkey":      int32(suppKey),
 				"l_linenumber":   int32(ln),
 				"l_quantity":     quantity,
 				"l_extendedprice": price,
@@ -490,14 +491,10 @@ func streamOrders(rng *rand.Rand, count, numCusts int, e *chunkEmitter) {
 func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, e *chunkEmitter) {
 	flags := []string{"N", "R", "A"}
 	lineStatuses := []string{"O", "F"}
-	linesPerOrder := max(1, count/max(1, numOrders))
 
 	n := 0
 	for orderKey := 1; orderKey <= numOrders && n < count; orderKey++ {
-		nLines := linesPerOrder + rng.Intn(3) - 1
-		if nLines < 1 {
-			nLines = 1
-		}
+		nLines := 1 + rng.Intn(7) // TPC-H spec: 1-7 line items per order
 		for ln := 1; ln <= nLines && n < count; ln++ {
 			quantity := float64(rng.Intn(50) + 1)
 			price := randFloat(rng, 900.0, 100000.0)
@@ -516,10 +513,15 @@ func streamLineItem(rng *rand.Rand, numOrders, count, numParts, numSupps int, e 
 			shipDate := commitDate.AddDate(0, 0, rng.Intn(51)-10)      // -10..+40 days
 			receiptDate := shipDate.AddDate(0, 0, rng.Intn(30)+1)      // +1..30 days
 
+			// Derive suppkey from partkey using same formula as partsupp
+			partKey := rng.Intn(numParts)                          // 0-based
+			suppIdx := rng.Intn(4)                                 // pick one of 4 suppliers for this part
+			suppKey := (partKey*4 + suppIdx) % numSupps + 1
+
 			e.add(map[string]any{
 				"l_orderkey":      int32(orderKey),
-				"l_partkey":       int32(rng.Intn(numParts) + 1),
-				"l_suppkey":       int32(rng.Intn(numSupps) + 1),
+				"l_partkey":       int32(partKey + 1),
+				"l_suppkey":       int32(suppKey),
 				"l_linenumber":    int32(ln),
 				"l_quantity":      quantity,
 				"l_extendedprice": price,

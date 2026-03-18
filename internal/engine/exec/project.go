@@ -41,6 +41,7 @@ type ProjectColumn struct {
 	Expr        Expression
 	Float64Eval Float64Expression // optional typed path (avoids interface{} boxing)
 	Int64Eval   Int64Expression   // optional typed path
+	SourceCol   string            // source column name for type resolution on renames
 }
 
 // Project is a UnaryOperator that selects and computes columns.
@@ -64,6 +65,12 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 		// Try to resolve the actual type from input schema by matching column name
 		if idx := in.ColumnIndex(proj.Name); idx >= 0 {
 			typ = in.Schema[idx].Type
+		} else if proj.SourceCol != "" {
+			// Fallback: renamed column (e.g., l_suppkey AS supplier_no) —
+			// look up the source column to preserve the original type.
+			if idx := in.ColumnIndex(proj.SourceCol); idx >= 0 {
+				typ = in.Schema[idx].Type
+			}
 		}
 		schema[i] = parquet.Column{
 			Name:     proj.Name,

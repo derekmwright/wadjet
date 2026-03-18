@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
@@ -351,6 +352,11 @@ func (f *KernelFilter) Init(_ context.Context) error { return nil }
 func (f *KernelFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
 		f.colIdx = in.ColumnIndex(f.ColName)
+		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
+			// Strip table alias qualifier (e.g. "n1.n_name" → "n_name")
+			parts := strings.SplitN(f.ColName, ".", 2)
+			f.colIdx = in.ColumnIndex(parts[1])
+		}
 		if f.colIdx >= 0 {
 			typ := in.Columns[f.colIdx].Type
 			f.kern = kernel.ResolveFilterKernel(typ, toKernelOp(f.Op), f.Value)
@@ -505,7 +511,15 @@ func (f *ColColFilter) Init(_ context.Context) error { return nil }
 func (f *ColColFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
 		f.leftIdx = in.ColumnIndex(f.LeftCol)
+		if f.leftIdx < 0 && strings.Contains(f.LeftCol, ".") {
+			parts := strings.SplitN(f.LeftCol, ".", 2)
+			f.leftIdx = in.ColumnIndex(parts[1])
+		}
 		f.rightIdx = in.ColumnIndex(f.RightCol)
+		if f.rightIdx < 0 && strings.Contains(f.RightCol, ".") {
+			parts := strings.SplitN(f.RightCol, ".", 2)
+			f.rightIdx = in.ColumnIndex(parts[1])
+		}
 		if f.leftIdx >= 0 && f.rightIdx >= 0 {
 			typ := in.Columns[f.leftIdx].Type
 			f.kern = kernel.ResolveColColFilterKernel(typ, toKernelOp(f.Op))

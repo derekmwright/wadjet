@@ -161,6 +161,53 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			}
 		}
 
+		// Add hidden aggregates from HAVING that aren't in the SELECT list.
+		// e.g., SELECT l_orderkey FROM lineitem GROUP BY l_orderkey HAVING SUM(l_quantity) > 300
+		// needs SUM(l_quantity) computed even though it's not in SELECT.
+		havingReplacements := map[string]string{}
+		if info.HavingExpr != nil {
+			havingAggs := plansql.FindAllAggregates(info.HavingExpr)
+			for _, hAgg := range havingAggs {
+				hKey := strings.ToLower(hAgg.String())
+				// Check if this aggregate already exists in the SELECT-derived aggs
+				found := false
+				for _, existing := range aggs {
+					existingKey := strings.ToLower(existing.Func + "(")
+					if existing.Distinct {
+						existingKey += "distinct "
+					}
+					existingKey += existing.InputCol + ")"
+					if existingKey == hKey {
+						found = true
+						havingReplacements[hKey] = existing.OutputCol
+						break
+					}
+				}
+				if !found {
+					synName := fmt.Sprintf("__having_%d", aggCounter)
+					aggCounter++
+					aggInputCol := ""
+					var aggInputExpr plansql.Node
+					if len(hAgg.Args) > 0 {
+						aggInputCol = cleanExpr(hAgg.Args[0].String())
+						aggInputExpr = hAgg.Args[0]
+					}
+					funcName := strings.ToLower(hAgg.Name)
+					if funcName == "count" && (aggInputCol == "*" || aggInputCol == "") {
+						aggInputCol = ""
+					}
+					aggs = append(aggs, AggExpr{
+						Func:      funcName,
+						InputCol:  aggInputCol,
+						OutputCol: synName,
+						Distinct:  hAgg.Distinct,
+						InputExpr: aggInputExpr,
+					})
+					havingReplacements[hKey] = synName
+				}
+			}
+		}
+
 		if len(info.GroupingSets) > 0 {
 			// GROUPING SETS / CUBE / ROLLUP: build multiple aggregate passes
 			// connected by UNION ALL.
@@ -183,8 +230,13 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 
 		// HAVING clause (must come after Aggregate)
 		if info.Having != "" && info.HavingExpr != nil {
-			rewritten := rewriteHavingExpr(info.HavingExpr, info.Columns)
-			preds := []Predicate{{Raw: info.Having, ASTExpr: rewritten}}
+			var rewritten plansql.Node
+			if len(havingReplacements) > 0 {
+				rewritten = plansql.ReplaceAllAggregates(info.HavingExpr, havingReplacements)
+			} else {
+				rewritten = rewriteHavingExpr(info.HavingExpr, info.Columns)
+			}
+			preds := []Predicate{{Raw: rewritten.String(), ASTExpr: rewritten}}
 			plan = NewFilter(plan, preds)
 		}
 	}
@@ -682,6 +734,10 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 			if err != nil {
 				return nil, fmt.Errorf("building plan for CTE %q: %w", cte.Name, err)
 			}
+
+			// Tag the sub-plan so the physical planner can detect CTE subtrees
+			// and materialize multi-referenced CTEs.
+			plan.CTEName = cte.Name
 
 			// If the CTE has an explicit column list, wrap with a rename projection
 			if len(cte.Columns) > 0 {
