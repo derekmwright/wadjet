@@ -990,6 +990,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		return nil, nil, nil, fmt.Errorf("building join left side: %w", err)
 	}
 
+	// Insert bloom filter pre-check before probe for early row elimination.
+	// Rows whose join key is definitely not in the build side are filtered
+	// out via selection vector before they reach the probe operator.
+	if bf := hj.BloomPushdownOp(); bf != nil {
+		leftOps = append(leftOps, bf)
+	}
 	probe := hj.Probe()
 	leftOps = append(leftOps, probe)
 

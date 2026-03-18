@@ -96,6 +96,31 @@ type HashJoin struct {
 	bloomMask uint64
 }
 
+// BloomPushdownOp returns a UnaryOperator that pre-filters probe batches using
+// the build-side bloom filter. Must be called after Build() completes.
+// Returns nil if bloom filter pushdown is not applicable (empty build, wrong
+// join type). Safe for InnerJoin, SemiJoin, and RightJoin only.
+func (h *HashJoin) BloomPushdownOp() *BloomFilterOp {
+	if h.bloom == nil {
+		return nil
+	}
+	// Only safe for join types where non-matching probe rows produce no output.
+	// LEFT/FULL OUTER: must preserve all probe rows (with NULLs for no match).
+	// ANTI: returns rows that don't match — bloom rejection would be inverted.
+	switch h.JoinType {
+	case InnerJoin, SemiJoin, RightJoin:
+		// safe
+	default:
+		return nil
+	}
+	return &BloomFilterOp{
+		bloom:     h.bloom,
+		bloomMask: h.bloomMask,
+		leftKeys:  h.LeftKeys,
+		useIntKey: h.useIntKey,
+	}
+}
+
 // NewHashJoin creates a new hash join operator.
 func NewHashJoin(joinType JoinType, leftKeys, rightKeys []string) *HashJoin {
 	hj := &HashJoin{
@@ -507,11 +532,7 @@ func (h *HashJoin) bloomSet(hash uint64) {
 
 // bloomMayContain returns false if the key is definitely not in the build side.
 func (h *HashJoin) bloomMayContain(hash uint64) bool {
-	h1 := hash & h.bloomMask
-	h2 := (hash >> 17) & h.bloomMask
-	b1 := hash & 63
-	b2 := (hash >> 6) & 63
-	return (h.bloom[h1]>>b1)&1 != 0 && (h.bloom[h2]>>b2)&1 != 0
+	return bloomContains(h.bloom, h.bloomMask, hash)
 }
 
 func bloomHashInt(key int64) uint64 {
