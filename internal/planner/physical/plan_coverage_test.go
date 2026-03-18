@@ -568,13 +568,14 @@ func TestPlanDistributed_LimitSort(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	// Expect scan + sort stages
-	if len(stages) < 2 {
-		t.Fatalf("expected at least 2 stages, got %d", len(stages))
+	// Expect scan + sort + merge_sort stages
+	if len(stages) < 3 {
+		t.Fatalf("expected at least 3 stages, got %d", len(stages))
 	}
 
-	// Limit should be propagated to sort stage
+	// Limit should be propagated to both sort and merge_sort stages
 	foundSort := false
+	foundMerge := false
 	for _, s := range stages {
 		if s.Type == "sort" {
 			foundSort = true
@@ -582,9 +583,18 @@ func TestPlanDistributed_LimitSort(t *testing.T) {
 				t.Errorf("expected sort stage limit=10, got %d", s.Limit)
 			}
 		}
+		if s.Type == "merge_sort" {
+			foundMerge = true
+			if s.Limit != 10 {
+				t.Errorf("expected merge_sort stage limit=10, got %d", s.Limit)
+			}
+		}
 	}
 	if !foundSort {
 		t.Error("expected a sort stage")
+	}
+	if !foundMerge {
+		t.Error("expected a merge_sort stage")
 	}
 }
 
@@ -874,8 +884,20 @@ func TestPlanDistributed_Sort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
-	if len(stages) == 0 {
-		t.Error("expected at least 1 stage for sort")
+	if len(stages) < 2 {
+		t.Fatalf("expected at least 2 stages (sort + merge_sort), got %d", len(stages))
+	}
+	// Last two stages should be sort and merge_sort
+	sortStage := stages[len(stages)-2]
+	mergeStage := stages[len(stages)-1]
+	if sortStage.Type != "sort" {
+		t.Errorf("expected sort stage, got %q", sortStage.Type)
+	}
+	if mergeStage.Type != "merge_sort" {
+		t.Errorf("expected merge_sort stage, got %q", mergeStage.Type)
+	}
+	if len(mergeStage.Dependencies) != 1 || mergeStage.Dependencies[0] != sortStage.ID {
+		t.Errorf("merge_sort should depend on sort stage, got %v", mergeStage.Dependencies)
 	}
 }
 

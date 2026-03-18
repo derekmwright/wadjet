@@ -168,8 +168,8 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	if len(stages) != 3 {
-		t.Fatalf("expected 3 stages, got %d", len(stages))
+	if len(stages) != 4 {
+		t.Fatalf("expected 4 stages (scan, aggregate, sort, merge_sort), got %d", len(stages))
 	}
 
 	if stages[0].Type != "scan" {
@@ -181,6 +181,9 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 	if stages[2].Type != "sort" {
 		t.Errorf("stage 2 should be 'sort', got %q", stages[2].Type)
 	}
+	if stages[3].Type != "merge_sort" {
+		t.Errorf("stage 3 should be 'merge_sort', got %q", stages[3].Type)
+	}
 
 	// Sort depends on both previous stages
 	if len(stages[2].Dependencies) < 2 {
@@ -191,6 +194,14 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 	}
 	if stages[2].SortKeys[0].Column != "cnt" || !stages[2].SortKeys[0].Desc {
 		t.Errorf("unexpected sort key: %+v", stages[2].SortKeys[0])
+	}
+
+	// Merge sort depends only on the sort stage
+	if len(stages[3].Dependencies) != 1 || stages[3].Dependencies[0] != stages[2].ID {
+		t.Errorf("merge_sort should depend only on sort stage, got %v", stages[3].Dependencies)
+	}
+	if len(stages[3].SortKeys) != 1 || stages[3].SortKeys[0].Column != "cnt" {
+		t.Errorf("merge_sort should have same sort keys as sort stage")
 	}
 }
 

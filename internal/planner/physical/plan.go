@@ -564,34 +564,47 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		*stages = append(*stages, stage)
 
 	case logical.NodeSort:
-		stageID := fmt.Sprintf("sort-%d", len(*stages))
+		sortStageID := fmt.Sprintf("sort-%d", len(*stages))
 		for _, child := range node.Children {
-			p.walkStages(child, stages, &stageID)
+			p.walkStages(child, stages, &sortStageID)
 		}
 		var sortKeys []SortKeySpec
 		for _, ob := range node.OrderBy {
 			sortKeys = append(sortKeys, SortKeySpec{Column: ob.Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
 		}
-		stage := Stage{
-			ID:       stageID,
+
+		// Phase 1: partial sort (coordinator splits into parallel tasks at runtime)
+		sortStage := Stage{
+			ID:       sortStageID,
 			Type:     "sort",
 			Tasks:    1,
 			SortKeys: sortKeys,
 		}
 		for _, s := range *stages {
-			stage.Dependencies = append(stage.Dependencies, s.ID)
+			sortStage.Dependencies = append(sortStage.Dependencies, s.ID)
 		}
-		// Propagate limit from parent if present
-		*stages = append(*stages, stage)
+		*stages = append(*stages, sortStage)
+
+		// Phase 2: merge sort (single task merges pre-sorted partial results)
+		mergeStageID := fmt.Sprintf("merge_sort-%d", len(*stages))
+		*stages = append(*stages, Stage{
+			ID:           mergeStageID,
+			Type:         "merge_sort",
+			Tasks:        1,
+			SortKeys:     sortKeys,
+			Dependencies: []string{sortStageID},
+		})
 
 	case logical.NodeLimit:
 		// Pass limit info down to sort stage if child is sort
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}
-		// Tag the last sort stage with our limit
+		// Propagate limit to both merge_sort and sort stages
 		for i := len(*stages) - 1; i >= 0; i-- {
-			if (*stages)[i].Type == "sort" {
+			if (*stages)[i].Type == "merge_sort" {
+				(*stages)[i].Limit = node.LimitVal
+			} else if (*stages)[i].Type == "sort" {
 				(*stages)[i].Limit = node.LimitVal
 				break
 			}

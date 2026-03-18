@@ -373,6 +373,8 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 		tasks = c.createAggregateTasks(queryID, stage, resultPrefix, depResults)
 	case "sort":
 		tasks = c.createSortTasks(queryID, stage, resultPrefix, depResults)
+	case "merge_sort":
+		tasks = c.createMergeSortTasks(queryID, stage, resultPrefix, depResults)
 	case "hash_join", "broadcast_join":
 		tasks = c.createJoinTasks(queryID, stage, resultPrefix, depResults)
 	case "window":
@@ -573,6 +575,74 @@ func (c *Coordinator) createAggregateTasks(queryID string, stage physical.Stage,
 }
 
 func (c *Coordinator) createSortTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
+	totalFiles := 0
+	for _, depID := range stage.Dependencies {
+		totalFiles += len(depResults[depID])
+	}
+	inputFiles := make([]string, 0, totalFiles)
+	for _, depID := range stage.Dependencies {
+		inputFiles = append(inputFiles, depResults[depID]...)
+	}
+
+	var sortKeys []distributed.SortKeySpec
+	for _, sk := range stage.SortKeys {
+		sortKeys = append(sortKeys, distributed.SortKeySpec{Column: sk.Column, Desc: sk.Desc})
+	}
+
+	// With <= 4 input files, a single task avoids scheduling overhead.
+	const minFilesForParallel = 4
+	const maxPartialTasks = 8
+
+	if len(inputFiles) <= minFilesForParallel {
+		return []distributed.Task{{
+			ID:           uuid.New().String()[:8],
+			QueryID:      queryID,
+			StageID:      stage.ID,
+			Type:         distributed.TaskTypeSort,
+			SortKeys:     sortKeys,
+			Limit:        stage.Limit,
+			InputFiles:   inputFiles,
+			ResultBucket: c.config.ResultBucket,
+			ResultPrefix: resultPrefix,
+			CreatedAt:    time.Now(),
+		}}
+	}
+
+	// Split files across parallel partial sort tasks
+	numTasks := len(inputFiles) / minFilesForParallel
+	if numTasks > maxPartialTasks {
+		numTasks = maxPartialTasks
+	}
+	if numTasks < 2 {
+		numTasks = 2
+	}
+
+	tasks := make([]distributed.Task, 0, numTasks)
+	chunkSize := (len(inputFiles) + numTasks - 1) / numTasks
+
+	for i := 0; i < len(inputFiles); i += chunkSize {
+		end := i + chunkSize
+		if end > len(inputFiles) {
+			end = len(inputFiles)
+		}
+		tasks = append(tasks, distributed.Task{
+			ID:           uuid.New().String()[:8],
+			QueryID:      queryID,
+			StageID:      stage.ID,
+			Type:         distributed.TaskTypeSort,
+			SortKeys:     sortKeys,
+			Limit:        stage.Limit,
+			InputFiles:   inputFiles[i:end],
+			ResultBucket: c.config.ResultBucket,
+			ResultPrefix: resultPrefix,
+			CreatedAt:    time.Now(),
+		})
+	}
+
+	return tasks
+}
+
+func (c *Coordinator) createMergeSortTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
 	totalFiles := 0
 	for _, depID := range stage.Dependencies {
 		totalFiles += len(depResults[depID])
