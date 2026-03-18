@@ -336,7 +336,6 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// that would break exact equality comparisons (e.g., TPC-H Q15).
 	p.materializeCTEs(ctx, node)
 
-
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
 		return nil, err

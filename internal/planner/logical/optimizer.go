@@ -2229,12 +2229,23 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 	usedEdges := make([]bool, len(edges))
 
 	// Greedily add remaining relations
+	// Pre-compute which relations have selective filters.
+	// Filtered relations provide selective bloom filters that eliminate
+	// probe rows early, so they should be joined (as build side) first.
+	filtered := make([]bool, n)
+	for i, r := range rels {
+		filtered[i] = hasSelectiveFilter(r)
+	}
+
 	for added := 1; added < n; added++ {
 		bestNext := -1
 		bestEdge := -1
 		bestCost := int(^uint(0) >> 1) // MaxInt
+		bestFiltered := false
 
-		// Find the cheapest unused relation that has an edge to the current plan
+		// Find the best unused relation that has an edge to the current plan.
+		// Prefer filtered relations (they reduce probe volume for all subsequent joins)
+		// as long as they're not excessively large (cost < 1000 ≈ <1M rows).
 		for ei, e := range edges {
 			if usedEdges[ei] {
 				continue
@@ -2247,10 +2258,25 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 			} else {
 				continue
 			}
-			if costs[candidate] < bestCost {
+			cf := filtered[candidate] && costs[candidate] < 1000
+			if bestNext < 0 {
 				bestCost = costs[candidate]
 				bestNext = candidate
 				bestEdge = ei
+				bestFiltered = cf
+			} else if cf && !bestFiltered {
+				// Prefer filtered candidate over unfiltered best
+				bestCost = costs[candidate]
+				bestNext = candidate
+				bestEdge = ei
+				bestFiltered = cf
+			} else if !cf && bestFiltered {
+				// Keep filtered best
+			} else if costs[candidate] < bestCost {
+				bestCost = costs[candidate]
+				bestNext = candidate
+				bestEdge = ei
+				bestFiltered = cf
 			}
 		}
 
@@ -2293,6 +2319,28 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 	}
 
 	return plan
+}
+
+// hasSelectiveFilter checks whether a relation subtree contains a filter
+// (NodeFilter or scan predicates) that reduces its output. Filtered relations
+// provide selective bloom filters during hash join, making them beneficial
+// as early build sides in multi-way join chains.
+func hasSelectiveFilter(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type == NodeFilter {
+		return true
+	}
+	if n.Type == NodeScan {
+		return len(n.ScanPredicates) > 0 || len(n.PartitionFilter) > 0
+	}
+	for _, child := range n.Children {
+		if hasSelectiveFilter(child) {
+			return true
+		}
+	}
+	return false
 }
 
 func copyBoolMap(m map[string]bool) map[string]bool {

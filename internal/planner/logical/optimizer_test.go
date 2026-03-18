@@ -289,6 +289,57 @@ func TestReorderJoins_TwoTableSwap(t *testing.T) {
 	}
 }
 
+func TestReorderJoins_FilterPreference(t *testing.T) {
+	// In a multi-way join with probe = largest table, filtered relations
+	// should be preferred as build sides (even if more expensive than
+	// unfiltered alternatives) because their bloom filters reduce probe volume.
+	//
+	// Setup: lineitem (6M probe) joins supplier (10K), part+filter (200K).
+	// Without filter preference: supplier (cost 10) chosen first.
+	// With filter preference: part+filter chosen first.
+	lineitem := NewScan("lineitem", "")
+	lineitem.ScanRowEstimate = 6000000
+	lineitem.ScanColumns = []string{"l_partkey", "l_suppkey"}
+
+	supplier := NewScan("supplier", "")
+	supplier.ScanRowEstimate = 10000
+	supplier.ScanColumns = []string{"s_suppkey"}
+
+	partScan := NewScan("part", "")
+	partScan.ScanRowEstimate = 200000
+	partScan.ScanColumns = []string{"p_partkey", "p_name"}
+
+	partFiltered := NewFilter(partScan, []Predicate{{Column: "p_name", Op: "LIKE", Value: "%green%"}})
+
+	// lineitem JOIN supplier ON l_suppkey = s_suppkey
+	j1 := NewJoin(lineitem, supplier, "inner", "l_suppkey = s_suppkey")
+	// ... JOIN part ON l_partkey = p_partkey (with filter on part)
+	j2 := NewJoin(j1, partFiltered, "inner", "l_partkey = p_partkey")
+
+	result := reorderJoins(j2)
+
+	// After reorder: lineitem should be probe (left-most).
+	// The first build (right child of innermost join) should be part+filter,
+	// not supplier, because part has a selective filter.
+	innerJoin := result
+	for innerJoin.Type == NodeJoin && innerJoin.Children[0].Type == NodeJoin {
+		innerJoin = innerJoin.Children[0]
+	}
+	// innerJoin is the innermost join: probe(lineitem) JOIN build(first_choice)
+	rightChild := innerJoin.Children[1]
+	// The right child should be the part+filter subtree
+	if rightChild.Type == NodeFilter {
+		// Good — part+filter was chosen first
+		if rightChild.Children[0].TableName != "part" {
+			t.Errorf("expected part as first build (under filter), got %s", rightChild.Children[0].TableName)
+		}
+	} else if rightChild.Type == NodeScan && rightChild.TableName == "part" {
+		// Also acceptable
+	} else {
+		t.Errorf("expected part+filter as first build side, got type=%s table=%s", rightChild.Type, rightChild.TableName)
+	}
+}
+
 func TestExtractCommonORPredicates_Basic(t *testing.T) {
 	// (a = 1 AND c = 3) OR (b = 2 AND c = 3) → common: c = 3, remaining: (a = 1 OR b = 2)
 	scan := NewScan("t1", "")
