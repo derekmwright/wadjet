@@ -11,6 +11,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
@@ -848,6 +849,7 @@ func (c *Coordinator) collectDepResults(queryID string) map[string][]string {
 }
 
 // readFinalResults reads the result files from the final (last) stage.
+// Uses direct columnar page reads to avoid per-row map[string]any deserialization.
 func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stages []physical.Stage) ([]map[string]any, []string, error) {
 	if len(stages) == 0 {
 		return nil, nil, nil
@@ -893,17 +895,24 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		if err != nil {
 			continue
 		}
-		rows, err := reader.ReadRows(nil)
+
+		schema := reader.Schema().Columns
+
+		// Extract column names from schema
+		if len(columns) == 0 && len(schema) > 0 {
+			columns = make([]string, len(schema))
+			for i, col := range schema {
+				columns[i] = col.Name
+			}
+		}
+
+		// Direct columnar read — bypasses per-row map allocation in ReadRows
+		batches, err := scan.ReadFileBatches(reader, schema, nil)
 		if err != nil {
 			continue
 		}
-		allRows = append(allRows, rows...)
-
-		// Extract columns from first batch
-		if len(columns) == 0 && len(rows) > 0 {
-			for k := range rows[0] {
-				columns = append(columns, k)
-			}
+		for _, b := range batches {
+			allRows = append(allRows, b.ToRows()...)
 		}
 	}
 
