@@ -41,6 +41,7 @@ func main() {
 		workers    = flag.Int("workers", 0, "Expected external workers (0 = standalone in-memory)")
 		natsPort   = flag.Int("nats-port", 4222, "NATS listen port (distributed mode)")
 		runs       = flag.Int("runs", 1, "Number of benchmark runs")
+		dataOnly   = flag.Bool("data-only", false, "Generate and upload data only, skip benchmark queries")
 		cpuProf    = flag.String("cpuprofile", "", "Write CPU profile to file")
 		memProf    = flag.String("memprofile", "", "Write memory profile to file")
 		profDir    = flag.String("profdir", "", "Directory for per-query profiles")
@@ -66,16 +67,21 @@ func main() {
 
 	var db *wadjet.DB
 	isDistributed := *workers > 0 && *s3Endpoint != ""
+	useS3 := *s3Endpoint != ""
 
 	if isDistributed {
 		db = setupDistributed(ctx, logger, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *natsPort, *workers)
+	} else if useS3 {
+		db = setupS3Standalone(ctx, *s3Endpoint, *s3Region, *s3Bucket, *ssl)
 	} else {
 		db = setupStandalone(ctx)
 	}
 
 	sf := tpch.ScaleFactor(float64(*scale))
 	loadData(ctx, db, sf)
-	runBenchmark(ctx, db, *runs, *profDir)
+	if !*dataOnly {
+		runBenchmark(ctx, db, *runs, *profDir)
+	}
 
 	if *memProf != "" {
 		f, err := os.Create(*memProf)
@@ -91,6 +97,22 @@ func main() {
 func setupStandalone(ctx context.Context) *wadjet.DB {
 	store := objstore.NewMemStore()
 	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "tpch"})
+	if err != nil {
+		log.Fatalf("opening DB: %v", err)
+	}
+	return db
+}
+
+func setupS3Standalone(ctx context.Context, endpoint, region, bucket string, ssl bool) *wadjet.DB {
+	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
+		Endpoint: endpoint,
+		UseSSL:   ssl,
+		Region:   region,
+	})
+	if err != nil {
+		log.Fatalf("creating S3 store: %v", err)
+	}
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: bucket})
 	if err != nil {
 		log.Fatalf("opening DB: %v", err)
 	}

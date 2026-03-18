@@ -58,6 +58,7 @@ func NewMinIOStore(cfg MinIOConfig) (*MinIOStore, error) {
 	} else {
 		creds = credentials.NewChainCredentials([]credentials.Provider{
 			&credentials.EnvAWS{},
+			&credentials.FileAWSCredentials{},
 			&credentials.IAM{
 				Client: &http.Client{Timeout: 10 * time.Second},
 			},
@@ -65,10 +66,11 @@ func NewMinIOStore(cfg MinIOConfig) (*MinIOStore, error) {
 	}
 
 	client, err := minio.New(cfg.Endpoint, &minio.Options{
-		Creds:     creds,
-		Secure:    cfg.UseSSL,
-		Region:    cfg.Region,
-		Transport: s3Transport(cfg.UseSSL),
+		Creds:        creds,
+		Secure:       cfg.UseSSL,
+		Region:       cfg.Region,
+		Transport:    s3Transport(cfg.UseSSL),
+		BucketLookup: minio.BucketLookupDNS,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating minio client: %w", err)
