@@ -234,16 +234,47 @@ All 22 TPC-H queries at scale factor 1 (~6M lineitem rows, 8 tables). Pure Go, n
 
 At SF1, distributed mode adds ~47% overhead from NATS coordination and S3 I/O — the dataset is too small to benefit from parallelism across nodes. Distributed mode targets SF10+ workloads where scan volume dominates coordination cost.
 
+### TPC-H SF10 Performance
+
+All 22 TPC-H queries at scale factor 10 (~60M lineitem rows, 86.6M total rows). Best of 3 runs.
+
+**Standalone** — AWS c7g.2xlarge (8 vCPU Graviton3, 16 GB RAM), S3 storage:
+
+| Query | Description | Time | Rows |
+|-------|-------------|------|------|
+| Q01 | Pricing Summary | 10.87s | 6 |
+| Q02 | Min Cost Supplier | 2.84s | 0 |
+| Q03 | Shipping Priority | 15.05s | 10 |
+| Q04 | Order Priority | 11.67s | 5 |
+| Q05 | Local Supplier Volume | 14.27s | 5 |
+| Q06 | Revenue Change | 6.32s | 1 |
+| Q07 | Volume Shipping | 23.75s | 0 |
+| Q08 | National Market Share | 10.09s | 0 |
+| Q09 | Product Type Profit | 15.54s | 0 |
+| Q10 | Returned Item Reporting | 13.17s | 20 |
+| Q11 | Important Stock | 2.64s | 0 |
+| Q12 | Shipping Modes | 13.63s | 7 |
+| Q13 | Customer Distribution | 4.35s | 100 |
+| Q14 | Promotion Effect | 6.79s | 1 |
+| Q15 | Top Supplier | 6.84s | 0 |
+| Q16 | Parts/Supplier | 1.67s | 119 |
+| Q17 | Small-Quantity Revenue | 27.05s | 1 |
+| Q18 | Large Volume Customer | 29.95s | 0 |
+| Q19 | Discounted Revenue | 6.95s | 0 |
+| Q20 | Potential Part Promotion | 29.00s | 0 |
+| Q21 | Suppliers Kept Orders Waiting | 30.06s | 0 |
+| Q22 | Global Sales Opportunity | 2.82s | 10 |
+| | **Total** | **4m45s** | |
+
 Includes cost-based join reordering, subquery decorrelation, common OR predicate extraction, columnar hash joins with int64 fast-path indexing, build-side column pruning, allocation-free aggregate group lookup, Top-K sort materialization, zero-copy semi/anti join output, and 3-level predicate pushdown (partition → row-group → row).
 
 ```bash
 # Reproduce standalone (requires ~2GB RAM, ~30s for data generation)
 TPCH_SCALE=1 go test -v -run TestTPCHQueriesLarge -timeout 30m ./benchmarks/tpch/
 
-# Reproduce on EC2 (Terraform + SSM, no SSH required)
+# Reproduce SF10 on EC2 (Terraform + SSM, no SSH required)
 cd deploy/benchmark/terraform
-tofu apply -var-file=sf1.tfvars             # Standalone
-tofu apply -var-file=sf1-distributed.tfvars  # Distributed
+tofu apply -var="scale_factor=10" -var="data_bucket=wadjet-bench-sf10-use2"
 ```
 
 ## Deployment Modes

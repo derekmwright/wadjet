@@ -118,4 +118,8 @@ aws s3 cp "$RESULTS_DIR/" "s3://${BUCKET}/results/${TIMESTAMP}/" --recursive 2>&
 
 log ""
 log "Results uploaded to: s3://${BUCKET}/results/${TIMESTAMP}/"
-log "Done. Remember to terraform destroy when finished!"
+log "Benchmark complete. Shutting down instance."
+
+# Auto-shutdown to avoid burning compute after benchmark completes.
+# Terraform destroy will clean up the instance and associated resources.
+sudo shutdown -h now
