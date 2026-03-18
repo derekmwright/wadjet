@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -208,13 +209,24 @@ func (c *Catalog) GetManifest(_ context.Context, tableName string) (*PartitionMa
 	return &manifest, nil
 }
 
+// casBackoff sleeps with jittered exponential backoff after a CAS conflict.
+// Base delay doubles each attempt (1ms, 2ms, 4ms, ...) with ±50% jitter.
+func casBackoff(attempt int) {
+	base := time.Millisecond << uint(attempt)
+	if base > 128*time.Millisecond {
+		base = 128 * time.Millisecond
+	}
+	jitter := time.Duration(rand.Int64N(int64(base)))
+	time.Sleep(base/2 + jitter)
+}
+
 // AddFiles adds file entries to the manifest for a given partition.
 // Uses compare-and-swap to prevent concurrent flushes from losing updates.
 func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
 	key := c.key("manifest." + tableName)
 
 	// Retry loop for CAS conflicts (concurrent ingest flushes).
-	const maxRetries = 5
+	const maxRetries = 10
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		data, rev, err := c.kv.Get(key)
 		if err != nil {
@@ -250,7 +262,8 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 
 		_, err = c.kv.Update(key, updated, rev)
 		if err == ErrRevisionMismatch {
-			continue // retry with fresh read
+			casBackoff(attempt)
+			continue
 		}
 		return err
 	}
@@ -261,7 +274,7 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 // Merges new markers with existing ones for the same file.
 func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers []DeleteMarker) error {
 	key := c.key("manifest." + tableName)
-	const maxRetries = 5
+	const maxRetries = 10
 
 	for retry := 0; retry < maxRetries; retry++ {
 		raw, rev, err := c.kv.Get(key)
@@ -314,6 +327,7 @@ func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers 
 
 		_, err = c.kv.Update(key, updated, rev)
 		if err == ErrRevisionMismatch {
+			casBackoff(retry)
 			continue
 		}
 		return err
@@ -325,7 +339,7 @@ func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers 
 // Used after compaction to clean up rewritten files.
 func (c *Catalog) RemoveFiles(_ context.Context, tableName string, filePaths []string) error {
 	key := c.key("manifest." + tableName)
-	const maxRetries = 5
+	const maxRetries = 10
 	removeSet := make(map[string]bool, len(filePaths))
 	for _, p := range filePaths {
 		removeSet[p] = true
@@ -370,6 +384,7 @@ func (c *Catalog) RemoveFiles(_ context.Context, tableName string, filePaths []s
 
 		_, err = c.kv.Update(key, updated, rev)
 		if err == ErrRevisionMismatch {
+			casBackoff(retry)
 			continue
 		}
 		return err
