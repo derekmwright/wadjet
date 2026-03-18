@@ -251,7 +251,7 @@ func TestReorderJoins_SkipsOuterJoins(t *testing.T) {
 	}
 }
 
-func TestReorderJoins_TwoTableNoop(t *testing.T) {
+func TestReorderJoins_TwoTableEqualCost(t *testing.T) {
 	scanA := NewScan("t1", "")
 	scanB := NewScan("t2", "")
 	join := NewJoin(scanA, scanB, "inner", "t1.id = t2.id")
@@ -260,8 +260,32 @@ func TestReorderJoins_TwoTableNoop(t *testing.T) {
 	if result.Type != NodeJoin {
 		t.Fatalf("expected join, got %s", result.Type)
 	}
+	// Equal cost: should not swap
 	if result.Children[0].TableName != "t1" || result.Children[1].TableName != "t2" {
-		t.Error("two-way join should not be reordered")
+		t.Error("equal-cost two-way join should not be reordered")
+	}
+}
+
+func TestReorderJoins_TwoTableSwap(t *testing.T) {
+	// Small table (left) should be swapped to build (right) side
+	scanSmall := NewScan("small", "")
+	scanSmall.ScanRowEstimate = 1000 // 1K rows → cost 1
+
+	scanLarge := NewScan("large", "")
+	scanLarge.ScanRowEstimate = 1000000 // 1M rows → cost 1000
+
+	join := NewJoin(scanSmall, scanLarge, "inner", "small.id = large.id")
+
+	result := reorderJoins(join)
+	if result.Type != NodeJoin {
+		t.Fatalf("expected join, got %s", result.Type)
+	}
+	// Small table should be swapped to build (right) side
+	if result.Children[0].TableName != "large" {
+		t.Errorf("expected probe (left) = large, got %s", result.Children[0].TableName)
+	}
+	if result.Children[1].TableName != "small" {
+		t.Errorf("expected build (right) = small, got %s", result.Children[1].TableName)
 	}
 }
 

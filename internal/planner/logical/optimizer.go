@@ -2059,8 +2059,17 @@ func reorderJoins(n *Node) *Node {
 	var rels []*Node
 	var edges []joinEdge
 	flattenJoinChain(n, &rels, &edges)
-	if len(rels) < 3 {
-		return n // 2-way join, nothing to reorder
+	if len(rels) <= 2 {
+		// For 2-way inner joins, ensure the larger relation is on the
+		// probe (left) side and the smaller on the build (right) side.
+		// The hash join builds right into a hash table (materialized),
+		// so the smaller side should be the build side.
+		leftCost := estimateRelCost(n.Children[0])
+		rightCost := estimateRelCost(n.Children[1])
+		if leftCost < rightCost {
+			n.Children[0], n.Children[1] = n.Children[1], n.Children[0]
+		}
+		return n
 	}
 	return greedyJoinReorder(rels, edges)
 }
