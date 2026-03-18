@@ -45,6 +45,7 @@ type HashJoin struct {
 	arena        []buildRef           // flat storage for all build refs
 	arenaNext    []int32              // chain: arenaNext[i] = next arena index for same key (-1 = end)
 	useIntKey    bool                 // true when single int32/int64 join key detected
+	useDualIntKey bool               // true when exactly two int32/int64 join keys
 	buildDone    bool
 	buildSchema  []parquet.Column
 	buildRows    int64 // total rows in build side
@@ -114,10 +115,11 @@ func (h *HashJoin) BloomPushdownOp() *BloomFilterOp {
 		return nil
 	}
 	return &BloomFilterOp{
-		bloom:     h.bloom,
-		bloomMask: h.bloomMask,
-		leftKeys:  h.LeftKeys,
-		useIntKey: h.useIntKey,
+		bloom:         h.bloom,
+		bloomMask:     h.bloomMask,
+		leftKeys:      h.LeftKeys,
+		useIntKey:     h.useIntKey,
+		useDualIntKey: h.useDualIntKey,
 	}
 }
 
@@ -161,14 +163,26 @@ func intKeyFromVector(v *batch.Vector, row int) (int64, bool) {
 // tryEnableIntKey checks if the join uses a single integer column and enables
 // the int64 hash fast path, avoiding string allocation per build/probe row.
 func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
-	if len(h.buildKeyIdx) != 1 || h.buildKeyIdx[0] < 0 {
-		return
+	if len(h.buildKeyIdx) == 1 && h.buildKeyIdx[0] >= 0 {
+		col := b.Columns[h.buildKeyIdx[0]]
+		if isIntKeyColumn(col.Type) {
+			h.useIntKey = true
+			h.intIndex = newIntHashTable(64)
+			h.hashIndex = nil
+			return
+		}
 	}
-	col := b.Columns[h.buildKeyIdx[0]]
-	if isIntKeyColumn(col.Type) {
-		h.useIntKey = true
-		h.intIndex = newIntHashTable(64)
-		h.hashIndex = nil // free the string map
+	// Two-int-key fast path: exactly 2 integer key columns.
+	// Uses composite hash in intHashTable with equality verification
+	// during chain traversal. Avoids string serialization + map[string] overhead.
+	if len(h.buildKeyIdx) == 2 && h.buildKeyIdx[0] >= 0 && h.buildKeyIdx[1] >= 0 {
+		col0 := b.Columns[h.buildKeyIdx[0]]
+		col1 := b.Columns[h.buildKeyIdx[1]]
+		if isIntKeyColumn(col0.Type) && isIntKeyColumn(col1.Type) {
+			h.useDualIntKey = true
+			h.intIndex = newIntHashTable(64)
+			h.hashIndex = nil
+		}
 	}
 }
 
@@ -213,8 +227,28 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 		_, ok = h.intIndex.Get(key)
 		return ok
 	}
+	if h.useDualIntKey {
+		if !h.probeResolved {
+			h.probeKeyIdx = make([]int, len(h.LeftKeys))
+			for i, col := range h.LeftKeys {
+				h.probeKeyIdx[i] = in.ColumnIndex(col)
+			}
+			h.probeResolved = true
+		}
+		col0, col1 := in.Columns[h.probeKeyIdx[0]], in.Columns[h.probeKeyIdx[1]]
+		a, b, ok := dualIntKeyFromVectors(col0, col1, row)
+		if !ok {
+			return false
+		}
+		compositeKey := dualIntHash(a, b)
+		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(compositeKey)) {
+			return false
+		}
+		_, ok = h.intIndex.Get(compositeKey)
+		return ok
+	}
 	h.buildProbeKeyBuf(in, row)
-	if h.bloom != nil && !h.bloomMayContain(bloomHashStr(string(h.keyBuf))) {
+	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(h.keyBuf)) {
 		return false
 	}
 	_, ok := h.hashIndex[string(h.keyBuf)]
@@ -231,7 +265,6 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		if !ok {
 			return p.lookupBuf
 		}
-		// Bloom filter pre-check: reject definite non-matches
 		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(key)) {
 			return p.lookupBuf
 		}
@@ -244,9 +277,46 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		}
 		return p.lookupBuf
 	}
+	if h.useDualIntKey {
+		if !h.probeResolved {
+			h.probeKeyIdx = make([]int, len(h.LeftKeys))
+			for i, col := range h.LeftKeys {
+				h.probeKeyIdx[i] = in.ColumnIndex(col)
+			}
+			h.probeResolved = true
+		}
+		col0, col1 := in.Columns[h.probeKeyIdx[0]], in.Columns[h.probeKeyIdx[1]]
+		a, b, ok := dualIntKeyFromVectors(col0, col1, row)
+		if !ok {
+			return p.lookupBuf
+		}
+		compositeKey := dualIntHash(a, b)
+		if h.bloom != nil && !h.bloomMayContain(bloomHashInt(compositeKey)) {
+			return p.lookupBuf
+		}
+		head, ok := h.intIndex.Get(compositeKey)
+		if !ok {
+			return p.lookupBuf
+		}
+		// Traverse chain, verifying both keys match (composite hash may collide)
+		bcol0, bcol1 := h.buildBatches[0].Columns[h.buildKeyIdx[0]], h.buildBatches[0].Columns[h.buildKeyIdx[1]]
+		prevBatch := int32(0)
+		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
+			ref := h.arena[idx]
+			if ref.batchIdx != prevBatch {
+				bcol0 = h.buildBatches[ref.batchIdx].Columns[h.buildKeyIdx[0]]
+				bcol1 = h.buildBatches[ref.batchIdx].Columns[h.buildKeyIdx[1]]
+				prevBatch = ref.batchIdx
+			}
+			ba, bb, _ := dualIntKeyFromVectors(bcol0, bcol1, int(ref.rowIdx))
+			if ba == a && bb == b {
+				p.lookupBuf = append(p.lookupBuf, ref)
+			}
+		}
+		return p.lookupBuf
+	}
 	h.buildProbeKeyBuf(in, row)
-	// Bloom filter pre-check for string keys
-	if h.bloom != nil && !h.bloomMayContain(bloomHashStr(string(h.keyBuf))) {
+	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(h.keyBuf)) {
 		return p.lookupBuf
 	}
 	head, ok := h.hashIndex[string(h.keyBuf)]
@@ -336,7 +406,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				hint := int(h.BuildRowHint)
 				h.arena = make([]buildRef, 0, hint)
 				h.arenaNext = make([]int32, 0, hint)
-				if h.useIntKey {
+				if h.useIntKey || h.useDualIntKey {
 					h.intIndex = newIntHashTable(hint)
 				} else {
 					h.hashIndex = make(map[string]int32, hint)
@@ -364,6 +434,25 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 							continue
 						}
 						h.intIndex.Put(key, 0)
+					}
+				}
+			} else if h.useDualIntKey {
+				col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
+				if b.Sel != nil {
+					for _, si := range b.Sel {
+						a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
+						if !ok {
+							continue
+						}
+						h.intIndex.Put(dualIntHash(a, bb), 0)
+					}
+				} else {
+					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+						a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
+						if !ok {
+							continue
+						}
+						h.intIndex.Put(dualIntHash(a, bb), 0)
 					}
 				}
 			} else {
@@ -446,6 +535,27 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 					h.buildRows++
 				}
 			}
+		} else if h.useDualIntKey {
+			col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
+			if b.Sel != nil {
+				for _, si := range b.Sel {
+					a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
+					if !ok {
+						continue
+					}
+					h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
+					h.buildRows++
+				}
+			} else {
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
+					if !ok {
+						continue
+					}
+					h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+					h.buildRows++
+				}
+			}
 		} else {
 			if b.Sel != nil {
 				for _, si := range b.Sel {
@@ -488,7 +598,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 // chosen to give ~1% false positive rate for the number of distinct keys.
 func (h *HashJoin) buildBloom() {
 	var nKeys int
-	if h.useIntKey {
+	if h.useIntKey || h.useDualIntKey {
 		nKeys = h.intIndex.Len()
 	} else {
 		nKeys = len(h.hashIndex)
@@ -508,7 +618,7 @@ func (h *HashJoin) buildBloom() {
 	h.bloom = make([]uint64, nSlots)
 	h.bloomMask = uint64(nSlots - 1)
 
-	if h.useIntKey {
+	if h.useIntKey || h.useDualIntKey {
 		h.intIndex.ForEach(func(key int64, _ int32) {
 			h.bloomSet(bloomHashInt(key))
 		})
@@ -535,14 +645,52 @@ func (h *HashJoin) bloomMayContain(hash uint64) bool {
 	return bloomContains(h.bloom, h.bloomMask, hash)
 }
 
+// dualIntHash combines two int64 keys into a single int64 composite key
+// for the intHashTable. Uses different golden-ratio multipliers to minimize
+// collisions. Hash collisions are handled by chain traversal with exact
+// key verification in the probe phase.
+func dualIntHash(a, b int64) int64 {
+	return int64(uint64(a)*0x9E3779B97F4A7C15 ^ uint64(b)*0x517CC1B727220A95)
+}
+
+// dualIntKeyFromVectors extracts two int64 values from two vectors at a given row.
+func dualIntKeyFromVectors(v0, v1 *batch.Vector, row int) (int64, int64, bool) {
+	if v0.Nulls.IsNullFast(row) || v1.Nulls.IsNullFast(row) {
+		return 0, 0, false
+	}
+	var a, b int64
+	switch v0.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		a = int64(v0.Int32Data[row])
+	default:
+		a = v0.Int64Data[row]
+	}
+	switch v1.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		b = int64(v1.Int32Data[row])
+	default:
+		b = v1.Int64Data[row]
+	}
+	return a, b, true
+}
+
 func bloomHashInt(key int64) uint64 {
 	// Mix bits using a multiply-shift hash
 	x := uint64(key) * 0x9E3779B97F4A7C15
 	return x ^ (x >> 32)
 }
 
-func bloomHashStr(key string) uint64 {
+func bloomHashBytes(key []byte) uint64 {
 	// FNV-1a style hash
+	h := uint64(14695981039346656037)
+	for _, b := range key {
+		h ^= uint64(b)
+		h *= 16777619
+	}
+	return h ^ (h >> 32)
+}
+
+func bloomHashStr(key string) uint64 {
 	h := uint64(14695981039346656037)
 	for i := 0; i < len(key); i++ {
 		h ^= uint64(key[i])
@@ -772,6 +920,7 @@ func (h *HashJoin) FixKeyAssignment() {
 			}
 			// Re-check int key eligibility with new key assignment
 			h.useIntKey = false
+			h.useDualIntKey = false
 			h.tryEnableIntKey(b)
 		}
 		h.buildRows = 0
@@ -787,6 +936,19 @@ func (h *HashJoin) FixKeyAssignment() {
 						continue
 					}
 					h.arenaAppendInt(key, buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
+					h.buildRows++
+				}
+			}
+		} else if h.useDualIntKey {
+			h.intIndex = newIntHashTable(64)
+			for batchIdx, b := range h.buildBatches {
+				col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
+					if !ok {
+						continue
+					}
+					h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
 			}

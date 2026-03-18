@@ -15,12 +15,13 @@ type BloomFilterOp struct {
 	bloom     []uint64 // shared, read-only after Build()
 	bloomMask uint64
 
-	leftKeys   []string // probe-side key column names
-	useIntKey  bool     // single-column integer fast path
-	keyIdx     []int    // resolved column indices (lazy)
-	resolved   bool
-	selBuf     []uint16 // scratch for selection vector
-	keyBuf     []byte   // scratch for multi-column key serialization
+	leftKeys      []string // probe-side key column names
+	useIntKey     bool     // single-column integer fast path
+	useDualIntKey bool     // two-column integer fast path
+	keyIdx        []int    // resolved column indices (lazy)
+	resolved      bool
+	selBuf        []uint16 // scratch for selection vector
+	keyBuf        []byte   // scratch for multi-column key serialization
 }
 
 func (op *BloomFilterOp) Init(_ context.Context) error { return nil }
@@ -68,6 +69,23 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 				}
 			}
 		}
+	} else if op.useDualIntKey && len(op.keyIdx) == 2 && op.keyIdx[0] >= 0 && op.keyIdx[1] >= 0 {
+		col0, col1 := in.Columns[op.keyIdx[0]], in.Columns[op.keyIdx[1]]
+		if in.Sel != nil {
+			for _, idx := range in.Sel {
+				a, b, ok := dualIntKeyFromVectors(col0, col1, int(idx))
+				if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
+					sel = append(sel, idx)
+				}
+			}
+		} else {
+			for i := 0; i < in.Len; i++ {
+				a, b, ok := dualIntKeyFromVectors(col0, col1, i)
+				if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
+					sel = append(sel, uint16(i))
+				}
+			}
+		}
 	} else {
 		// General string key path
 		if in.Sel != nil {
@@ -108,7 +126,7 @@ func (op *BloomFilterOp) probeKeyHash(in *batch.RecordBatch, row int) bool {
 		op.keyBuf = append(op.keyBuf, 0) // not-null flag
 		op.keyBuf = appendColumnValue(op.keyBuf, v, row, v.Type)
 	}
-	return bloomContains(op.bloom, op.bloomMask, bloomHashStr(string(op.keyBuf)))
+	return bloomContains(op.bloom, op.bloomMask, bloomHashBytes(op.keyBuf))
 }
 
 func (op *BloomFilterOp) Close() error { return nil }
@@ -119,10 +137,11 @@ func (op *BloomFilterOp) KeyColumns() []string { return op.leftKeys }
 // Clone returns a new BloomFilterOp sharing the same bloom data.
 func (op *BloomFilterOp) Clone() UnaryOperator {
 	return &BloomFilterOp{
-		bloom:     op.bloom,
-		bloomMask: op.bloomMask,
-		leftKeys:  op.leftKeys,
-		useIntKey: op.useIntKey,
+		bloom:         op.bloom,
+		bloomMask:     op.bloomMask,
+		leftKeys:      op.leftKeys,
+		useIntKey:     op.useIntKey,
+		useDualIntKey: op.useDualIntKey,
 	}
 }
 
