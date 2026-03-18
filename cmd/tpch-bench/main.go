@@ -171,10 +171,11 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 
 	// Local worker on coordinator node
 	w := worker.New(worker.Config{
-		NATSUrl:       embeddedNATS.ClientURL(),
-		ClusterID:     "local",
-		MaxConcurrent: 4,
-		CacheBytes:    256 * 1024 * 1024,
+		NATSUrl:          embeddedNATS.ClientURL(),
+		ClusterID:        "local",
+		MaxConcurrent:    4,
+		CacheBytes:       256 * 1024 * 1024,
+		ResultStoreBytes: 512 * 1024 * 1024,
 	}, store, nc, js, logger)
 	if err := w.Start(ctx); err != nil {
 		log.Fatalf("worker start: %v", err)

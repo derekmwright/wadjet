@@ -31,8 +31,9 @@ type Config struct {
 // DefaultConfig returns default worker configuration.
 func DefaultConfig() Config {
 	return Config{
-		MaxConcurrent: 4,
-		CacheBytes:    256 * 1024 * 1024, // 256 MB
+		MaxConcurrent:    4,
+		CacheBytes:       256 * 1024 * 1024, // 256 MB
+		ResultStoreBytes: 512 * 1024 * 1024, // 512 MB — avoids S3 round-trips for inter-stage results
 	}
 }
 
