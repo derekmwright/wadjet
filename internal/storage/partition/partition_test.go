@@ -210,6 +210,24 @@ func TestSortPartitions(t *testing.T) {
 	}
 }
 
+func TestFilePathNoPartitionKeys(t *testing.T) {
+	s := NewStrategy(nil)
+	got := s.FilePath("tables/events", nil, "chunk_0001_abc")
+	want := "tables/events/chunk_0001_abc.parquet"
+	if got != want {
+		t.Errorf("FilePath() with no partition keys = %q, want %q", got, want)
+	}
+}
+
+func TestFilePathNoPartitionKeysNoDoubleSlash(t *testing.T) {
+	s := NewStrategy([]string{})
+	got := s.FilePath("tables/events", map[string]string{}, "chunk_0001_abc")
+	want := "tables/events/chunk_0001_abc.parquet"
+	if got != want {
+		t.Errorf("FilePath() with empty partition keys = %q, want %q", got, want)
+	}
+}
+
 func TestSortPartitionsAlreadySorted(t *testing.T) {
 	partitions := []PartitionInfo{
 		{Path: "a"},

@@ -34,6 +34,9 @@ func (s *Strategy) PartitionPath(values map[string]string) string {
 // Example: tables/events/year=2026/month=03/day=15/chunk_0001_<uuid>.parquet
 func (s *Strategy) FilePath(tablePrefix string, values map[string]string, chunkID string) string {
 	partPath := s.PartitionPath(values)
+	if partPath == "" {
+		return fmt.Sprintf("%s/%s.parquet", tablePrefix, chunkID)
+	}
 	return fmt.Sprintf("%s/%s/%s.parquet", tablePrefix, partPath, chunkID)
 }
 

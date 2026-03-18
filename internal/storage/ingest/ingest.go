@@ -224,7 +224,7 @@ func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
 			if !ok {
 				return fmt.Errorf("missing partition key %q in row", key)
 			}
-			partValues[key] = fmt.Sprintf("%v", v)
+			partValues[key] = ing.formatPartitionValue(key, v)
 		}
 
 		partPath := ing.strategy.PartitionPath(partValues)
@@ -329,6 +329,26 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 	buf.size = 0
 
 	return nil
+}
+
+func (ing *Ingester) formatPartitionValue(key string, v any) string {
+	switch t := v.(type) {
+	case time.Time:
+		for _, col := range ing.schema.Columns {
+			if col.Name == key {
+				if col.Type == parquet.TypeDate {
+					return t.Format("2006-01-02")
+				}
+				if col.Type == parquet.TypeTimestamp {
+					return t.Format(time.RFC3339)
+				}
+				break
+			}
+		}
+		return t.Format(time.RFC3339)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func estimateRowSize(row map[string]any) int {

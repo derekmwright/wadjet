@@ -301,6 +301,102 @@ func TestIngestValidation_NullableColumnMissing(t *testing.T) {
 	}
 }
 
+func TestIngestDatePartitionPath(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	_ = cat.Init(ctx)
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+		{Name: "day", Type: parquet.TypeDate, Nullable: false},
+	}}
+	_ = cat.CreateTable(ctx, "dated", schema, []string{"day"})
+
+	ing := New(cat, "dated", schema, []string{"day"}, DefaultConfig())
+
+	rows := []map[string]any{
+		{"id": int64(1), "day": time.Date(2026, 3, 18, 0, 0, 0, 0, time.UTC)},
+		{"id": int64(2), "day": time.Date(2026, 3, 19, 0, 0, 0, 0, time.UTC)},
+	}
+
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	objects, err := store.List(ctx, testBucket, objstore.ListOptions{Prefix: "tables/dated/"})
+	if err != nil {
+		t.Fatalf("list objects: %v", err)
+	}
+
+	found := map[string]bool{"day=2026-03-18": false, "day=2026-03-19": false}
+	for _, obj := range objects {
+		if !strings.HasSuffix(obj.Key, ".parquet") {
+			continue
+		}
+		// Must not contain spaces or colons from time.Time.String()
+		if strings.Contains(obj.Key, " ") || strings.Contains(obj.Key, ":") {
+			t.Errorf("partition path contains invalid characters: %s", obj.Key)
+		}
+		for k := range found {
+			if strings.Contains(obj.Key, k) {
+				found[k] = true
+			}
+		}
+	}
+	for k, v := range found {
+		if !v {
+			t.Errorf("expected partition path containing %q", k)
+		}
+	}
+}
+
+func TestIngestTimestampPartitionPath(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, testBucket)
+	ctx := context.Background()
+	_ = cat.Init(ctx)
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+		{Name: "ts", Type: parquet.TypeTimestamp, Nullable: false},
+	}}
+	_ = cat.CreateTable(ctx, "timestamped", schema, []string{"ts"})
+
+	ing := New(cat, "timestamped", schema, []string{"ts"}, DefaultConfig())
+
+	rows := []map[string]any{
+		{"id": int64(1), "ts": time.Date(2026, 3, 18, 14, 30, 0, 0, time.UTC)},
+	}
+
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	objects, err := store.List(ctx, testBucket, objstore.ListOptions{Prefix: "tables/timestamped/"})
+	if err != nil {
+		t.Fatalf("list objects: %v", err)
+	}
+
+	for _, obj := range objects {
+		if !strings.HasSuffix(obj.Key, ".parquet") {
+			continue
+		}
+		if strings.Contains(obj.Key, " ") {
+			t.Errorf("timestamp partition path contains spaces: %s", obj.Key)
+		}
+		if !strings.Contains(obj.Key, "ts=2026-03-18T14") {
+			t.Errorf("expected RFC3339 formatted timestamp in path, got: %s", obj.Key)
+		}
+	}
+}
+
 func TestIngestValidation_NetworkTypes(t *testing.T) {
 	store := objstore.NewMemStore()
 	cat := catalog.NewWithStore(store, testBucket)
