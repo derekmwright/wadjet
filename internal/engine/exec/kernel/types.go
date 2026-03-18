@@ -92,6 +92,66 @@ func (a *Accumulator) FinalMax() any {
 	return a.MaxI64
 }
 
+// Merge combines another accumulator's state into this one.
+// Used for parallel aggregation: each worker builds partial state, then merges.
+func (a *Accumulator) Merge(other *Accumulator) {
+	a.SumI64 += other.SumI64
+	a.SumF64 += other.SumF64
+	a.Count += other.Count
+	if other.IsFloat {
+		a.IsFloat = true
+	}
+	if other.IsDecimal {
+		a.IsDecimal = true
+		a.SumDec = a.SumDec.Add(other.SumDec)
+		a.DecScale = other.DecScale
+	}
+	if other.HasMin {
+		if !a.HasMin {
+			a.MinI64 = other.MinI64
+			a.MinF64 = other.MinF64
+			a.MinDec = other.MinDec
+			a.HasMin = true
+		} else {
+			if other.IsFloat || a.IsFloat {
+				if other.MinF64 < a.MinF64 {
+					a.MinF64 = other.MinF64
+				}
+			} else if other.IsDecimal || a.IsDecimal {
+				if other.MinDec.Less(a.MinDec) {
+					a.MinDec = other.MinDec
+				}
+			} else {
+				if other.MinI64 < a.MinI64 {
+					a.MinI64 = other.MinI64
+				}
+			}
+		}
+	}
+	if other.HasMax {
+		if !a.HasMax {
+			a.MaxI64 = other.MaxI64
+			a.MaxF64 = other.MaxF64
+			a.MaxDec = other.MaxDec
+			a.HasMax = true
+		} else {
+			if other.IsFloat || a.IsFloat {
+				if other.MaxF64 > a.MaxF64 {
+					a.MaxF64 = other.MaxF64
+				}
+			} else if other.IsDecimal || a.IsDecimal {
+				if a.MaxDec.Less(other.MaxDec) {
+					a.MaxDec = other.MaxDec
+				}
+			} else {
+				if other.MaxI64 > a.MaxI64 {
+					a.MaxI64 = other.MaxI64
+				}
+			}
+		}
+	}
+}
+
 // RowAggUpdater updates an accumulator for a single row (used in grouped aggregation).
 // The type dispatch is resolved once; the function body has no type switches.
 type RowAggUpdater func(acc *Accumulator, vec *batch.Vector, row int)

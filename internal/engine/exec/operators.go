@@ -50,6 +50,15 @@ type DoneSignaler interface {
 	Done() bool
 }
 
+// MergeableSink is a SinkSource that supports per-worker partial aggregation.
+// When the pipeline has multiple workers, each worker gets its own cloned sink.
+// After all workers finish, partial sinks are merged into the primary sink.
+type MergeableSink interface {
+	SinkSource
+	CloneSink() SinkSource
+	MergeSink(other SinkSource)
+}
+
 // ScanStatsProvider is implemented by sources that can report scan statistics.
 type ScanStatsProvider interface {
 	RowsScanned() int64

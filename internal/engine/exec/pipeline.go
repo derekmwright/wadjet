@@ -167,6 +167,23 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		opChains[i] = chain
 	}
 
+	// Per-worker sinks for MergeableSink: each worker gets its own sink
+	// to avoid mutex contention. After all workers finish, partial sinks
+	// are merged into the primary sink.
+	var workerSinks []Sink
+	mergeable, isMergeable := p.Sink.(MergeableSink)
+	if isMergeable {
+		workerSinks = make([]Sink, workers)
+		workerSinks[0] = p.Sink
+		for i := 1; i < workers; i++ {
+			cloned := mergeable.CloneSink()
+			if err := cloned.Init(ctx); err != nil {
+				return fmt.Errorf("cloned sink init: %w", err)
+			}
+			workerSinks[i] = cloned
+		}
+	}
+
 	// Collect DoneSignalers from the original chain (shared across workers
 	// for Limit, which uses atomics).
 	var doneSignalers []DoneSignaler
@@ -187,6 +204,13 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		wg.Add(1)
 		go func(workerID int, ops []UnaryOperator) {
 			defer wg.Done()
+			// Each worker uses its own sink when MergeableSink, else shared sink
+			var sink Sink
+			if workerSinks != nil {
+				sink = workerSinks[workerID]
+			} else {
+				sink = p.Sink
+			}
 			for {
 				// Check for cancellation or done signaling.
 				if workerCtx.Err() != nil {
@@ -228,7 +252,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				}
 
 				if b != nil {
-					if err := p.Sink.Consume(workerCtx, b); err != nil {
+					if err := sink.Consume(workerCtx, b); err != nil {
 						firstErr.CompareAndSwap(nil, fmt.Errorf("sink consume: %w", err))
 						cancel()
 						return
@@ -249,6 +273,14 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 	// Check for worker errors.
 	if v := firstErr.Load(); v != nil {
 		return v.(error)
+	}
+
+	// Merge per-worker partial sinks into the primary sink.
+	if isMergeable {
+		for i := 1; i < workers; i++ {
+			mergeable.MergeSink(workerSinks[i].(SinkSource))
+			workerSinks[i].Close()
+		}
 	}
 
 	// Close cloned ops (workers 1..N).

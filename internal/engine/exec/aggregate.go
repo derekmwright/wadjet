@@ -1087,6 +1087,78 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	return cols
 }
 
+// CloneSink returns a new HashAggregate with the same configuration but fresh state.
+// Used by parallel pipeline execution: each worker gets its own cloned sink.
+func (h *HashAggregate) CloneSink() SinkSource {
+	clone := &HashAggregate{
+		GroupByCols:   h.GroupByCols,
+		Aggs:          h.Aggs,
+		NullGroupCols: h.NullGroupCols,
+		// No spill manager — partial aggregates are small enough
+	}
+	return clone
+}
+
+// MergeSink merges another HashAggregate's partial state into this one.
+// Called after all parallel workers finish to combine partial aggregates.
+func (h *HashAggregate) MergeSink(other SinkSource) {
+	o := other.(*HashAggregate)
+
+	// Scalar aggregate fast path: merge batch accumulators directly
+	if h.isScalarAgg && o.isScalarAgg {
+		for i := range h.scalarAccs {
+			h.scalarAccs[i].Merge(&o.scalarAccs[i])
+		}
+		return
+	}
+
+	// Normalize both sides to the generic map path so merge is uniform.
+	// This runs once at the end, so O(N_groups) overhead is negligible.
+	h.migrateToGenericMap()
+	o.migrateToGenericMap()
+
+	for i := range o.keys {
+		key := o.serializedKeys[i]
+		oGS := o.groups[key]
+
+		if gs, ok := h.groups[key]; ok {
+			for j := range gs.accs {
+				gs.accs[j].Merge(&oGS.accs[j])
+			}
+		} else {
+			h.groups[key] = oGS
+			h.keys = append(h.keys, oGS.keyValues)
+			h.serializedKeys = append(h.serializedKeys, key)
+		}
+	}
+}
+
+// migrateToGenericMap converts int/compact group key state to the generic
+// map[string]*groupState path. No-op if already using the generic path.
+func (h *HashAggregate) migrateToGenericMap() {
+	if h.useCompactGroupKey {
+		h.migrateCompactToGeneric()
+		return
+	}
+	if !h.useIntGroupKey {
+		return
+	}
+	// Migrate int group key → generic map
+	if h.groups == nil {
+		h.groups = make(map[string]*groupState, len(h.intGroupStates))
+	}
+	h.serializedKeys = make([]string, 0, len(h.intGroupStates))
+	for _, gs := range h.intGroupStates {
+		h.keyBuf = h.keyBuf[:0]
+		key := serializeKey(h.keyBuf, gs.keyValues)
+		h.groups[key] = gs
+		h.serializedKeys = append(h.serializedKeys, key)
+	}
+	h.useIntGroupKey = false
+	h.intGroupStates = nil
+	h.intGroupIndex = nil
+}
+
 // resolveBatchAggKernel returns a batch-level aggregate kernel for scalar aggregates.
 // Returns nil if the aggregate function is not batch-able (e.g., COUNT(DISTINCT), STRING_AGG).
 func resolveBatchAggKernel(fn AggFunc, colIdx int, b *batch.RecordBatch) kernel.BatchAggKernel {
