@@ -341,6 +341,12 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		return nil, err
 	}
 
+	// Front-load bloom filters whose key columns exist in the source scan.
+	// In multi-way joins with selective semi/anti-join bloom filters (e.g.,
+	// Q18's HAVING filter), this eliminates most rows at the source before
+	// expensive join probes run.
+	ops = frontLoadBlooms(source, ops)
+
 	// Enable parallel pipeline execution when the source supports
 	// concurrent Next() calls (channel-based scan sources).
 	pipelineWorkers := 0
@@ -997,6 +1003,17 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		leftOps = append(leftOps, bf)
 	}
 	probe := hj.Probe()
+	// Push output filter into the probe to avoid materializing intermediate
+	// columns not needed by upstream operators. In multi-way joins, this
+	// eliminates allocation and gather work for columns that would otherwise
+	// be built then immediately dropped.
+	if len(node.NeededColumns) > 0 {
+		filter := make(map[string]bool, len(node.NeededColumns))
+		for _, col := range node.NeededColumns {
+			filter[col] = true
+		}
+		probe.OutputFilter = filter
+	}
 	leftOps = append(leftOps, probe)
 
 	// For RIGHT and FULL OUTER joins, unmatched build-side rows must be
@@ -2560,6 +2577,73 @@ func collectTableAliases(node *logical.Node) map[string]bool {
 	}
 	walk(node)
 	return aliases
+}
+
+// frontLoadBlooms reorders the operator chain to move bloom filter operators
+// whose key columns exist in the source scan schema to the front. In multi-way
+// join pipelines, this allows selective bloom filters (e.g., from semi-joins
+// with HAVING filters) to eliminate rows before expensive join probes.
+func frontLoadBlooms(source exec.Source, ops []exec.UnaryOperator) []exec.UnaryOperator {
+	if len(ops) < 3 {
+		return ops // need at least bloom+probe+bloom to benefit
+	}
+
+	// Get source scan columns
+	var scanCols map[string]bool
+	switch s := source.(type) {
+	case *catalogScanSource:
+		scanCols = make(map[string]bool, len(s.requiredCols))
+		for _, c := range s.requiredCols {
+			scanCols[c] = true
+		}
+	case *scannerExecSource:
+		scanCols = make(map[string]bool, len(s.requiredCols))
+		for _, c := range s.requiredCols {
+			scanCols[c] = true
+		}
+	}
+	if len(scanCols) == 0 {
+		return ops
+	}
+
+	// Find bloom filters that can be applied to the source scan (their key
+	// columns all exist in the scan schema) and that are NOT already at the
+	// front of the pipeline (i.e., there's a non-bloom op before them).
+	firstNonBloom := -1
+	for i, op := range ops {
+		if _, ok := op.(*exec.BloomFilterOp); !ok {
+			firstNonBloom = i
+			break
+		}
+	}
+	if firstNonBloom < 0 {
+		return ops // all ops are blooms (unlikely)
+	}
+
+	var front, rest []exec.UnaryOperator
+	for i, op := range ops {
+		bf, isBF := op.(*exec.BloomFilterOp)
+		if isBF && i > firstNonBloom {
+			// This bloom is after a non-bloom op — check if it can be front-loaded
+			allPresent := true
+			for _, key := range bf.KeyColumns() {
+				if !scanCols[key] {
+					allPresent = false
+					break
+				}
+			}
+			if allPresent {
+				front = append(front, op)
+				continue
+			}
+		}
+		rest = append(rest, op)
+	}
+
+	if len(front) == 0 {
+		return ops
+	}
+	return append(front, rest...)
 }
 
 // findScanRowEstimate returns the total row estimate from scan nodes in a subtree.

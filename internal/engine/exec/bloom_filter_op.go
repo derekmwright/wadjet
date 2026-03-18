@@ -113,6 +113,9 @@ func (op *BloomFilterOp) probeKeyHash(in *batch.RecordBatch, row int) bool {
 
 func (op *BloomFilterOp) Close() error { return nil }
 
+// KeyColumns returns the probe-side key column names this bloom filter checks.
+func (op *BloomFilterOp) KeyColumns() []string { return op.leftKeys }
+
 // Clone returns a new BloomFilterOp sharing the same bloom data.
 func (op *BloomFilterOp) Clone() UnaryOperator {
 	return &BloomFilterOp{

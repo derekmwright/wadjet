@@ -878,6 +878,11 @@ type HashJoinProbe struct {
 	cachedSchema  []parquet.Column
 	cachedMapping []outColSource
 
+	// OutputFilter restricts which columns the probe materializes.
+	// When set, only columns in this map appear in the output batch.
+	// This avoids allocating and gathering unneeded intermediate columns
+	// in multi-way join pipelines.
+	OutputFilter map[string]bool
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
@@ -1222,7 +1227,9 @@ func (p *HashJoinProbe) Close() error { return nil }
 // Clone returns a new HashJoinProbe that shares the same build-side hash table
 // but has its own scratch buffers (pairsBuf, semiSelBuf, lookupBuf, indexBuf).
 func (p *HashJoinProbe) Clone() UnaryOperator {
-	return p.join.Probe()
+	c := p.join.Probe()
+	c.OutputFilter = p.OutputFilter
+	return c
 }
 
 // outColSource tracks the source of each output column in the join result.
@@ -1278,6 +1285,23 @@ func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]
 			out = append(out, col)
 			mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
 			seen[col.Name] = true
+		}
+	}
+
+	// Apply output filter: skip columns not needed by downstream operators.
+	// This avoids allocating and gathering unneeded intermediate columns
+	// in multi-way join pipelines, reducing both CPU and memory pressure.
+	if len(p.OutputFilter) > 0 {
+		var filteredSchema []parquet.Column
+		var filteredMapping []outColSource
+		for i, col := range out {
+			if p.OutputFilter[col.Name] {
+				filteredSchema = append(filteredSchema, col)
+				filteredMapping = append(filteredMapping, mapping[i])
+			}
+		}
+		if len(filteredSchema) < len(out) {
+			return filteredSchema, filteredMapping
 		}
 	}
 
