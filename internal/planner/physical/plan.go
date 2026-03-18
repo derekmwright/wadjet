@@ -357,15 +357,16 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 		if len(scans) < 2 {
 			continue
 		}
-		// Skip if any scan has predicates (pushdown filters differ = not cacheable)
-		hasPreds := false
+		// Skip if any scan has predicates or partition filters
+		// (different filters = different result sets, not cacheable)
+		incompatible := false
 		for _, s := range scans {
-			if len(s.ScanPredicates) > 0 {
-				hasPreds = true
+			if len(s.ScanPredicates) > 0 || len(s.PartitionFilter) > 0 {
+				incompatible = true
 				break
 			}
 		}
-		if hasPreds {
+		if incompatible {
 			continue
 		}
 		// Compute the union of required columns.

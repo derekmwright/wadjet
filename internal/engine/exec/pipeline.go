@@ -53,10 +53,14 @@ func (p *Pipeline) allOpsCloneable() bool {
 
 // runSerial is the original single-threaded pipeline loop.
 func (p *Pipeline) runSerial(ctx context.Context) error {
+	batchCount := 0
 	for {
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("pipeline cancelled: %w", err)
+		if batchCount&63 == 0 {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("pipeline cancelled: %w", err)
+			}
 		}
+		batchCount++
 
 		b, err := p.Source.Next(ctx)
 		if err != nil {

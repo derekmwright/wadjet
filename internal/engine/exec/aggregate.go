@@ -447,20 +447,11 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			return
 		}
 
-		// New group
+		// New group — useIntGroupKey requires allSimpleAggs, so
+		// distinctSets and extraState are never used; skip allocation.
 		gs := &groupState{
-			keyValues:    []any{key},
-			accs:         make([]kernel.Accumulator, len(h.Aggs)),
-			distinctSets: make([]map[string]struct{}, len(h.Aggs)),
-			extraState:   make([]any, len(h.Aggs)),
-		}
-		for i, agg := range h.Aggs {
-			if agg.Func == AggStddev || agg.Func == AggVariance ||
-				agg.Func == AggStddevPop || agg.Func == AggVarPop {
-				gs.extraState[i] = &varianceState{}
-			} else if agg.Func == AggBoolAnd || agg.Func == AggBoolOr {
-				gs.extraState[i] = true // initial value for bool aggregates
-			}
+			keyValues: []any{key},
+			accs:      make([]kernel.Accumulator, len(h.Aggs)),
 		}
 
 		newIdx := int32(len(h.intGroupStates))
@@ -542,11 +533,10 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 				keyVals[i] = b.Columns[idx].GetValue(row)
 			}
 		}
+		// useCompactGroupKey requires allSimpleAggs — skip distinctSets/extraState.
 		gs := &groupState{
-			keyValues:    keyVals,
-			accs:         make([]kernel.Accumulator, len(h.Aggs)),
-			distinctSets: make([]map[string]struct{}, len(h.Aggs)),
-			extraState:   make([]any, len(h.Aggs)),
+			keyValues: keyVals,
+			accs:      make([]kernel.Accumulator, len(h.Aggs)),
 		}
 
 		newIdx := int32(len(h.intGroupStates))

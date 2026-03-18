@@ -46,7 +46,8 @@ type ProjectColumn struct {
 
 // Project is a UnaryOperator that selects and computes columns.
 type Project struct {
-	Projections []ProjectColumn
+	Projections  []ProjectColumn
+	cachedSchema []parquet.Column // reused across batches after first resolution
 }
 
 func NewProject(projections []ProjectColumn) *Project {
@@ -56,41 +57,63 @@ func NewProject(projections []ProjectColumn) *Project {
 func (p *Project) Init(_ context.Context) error { return nil }
 
 func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	// Resolve output types from the input batch schema rather than using the
-	// pre-declared type (which may be a placeholder). This ensures float columns
-	// don't get written into string vectors, which would panic.
-	schema := make([]parquet.Column, len(p.Projections))
-	for i, proj := range p.Projections {
-		typ := proj.Type
-		// Try to resolve the actual type from input schema by matching column name
-		if idx := in.ColumnIndex(proj.Name); idx >= 0 {
-			typ = in.Schema[idx].Type
-		} else if proj.SourceCol != "" {
-			// Fallback: renamed column (e.g., l_suppkey AS supplier_no) —
-			// look up the source column to preserve the original type.
-			if idx := in.ColumnIndex(proj.SourceCol); idx >= 0 {
+	schema := p.cachedSchema
+	if schema == nil {
+		// Resolve output types from the input batch schema rather than using the
+		// pre-declared type (which may be a placeholder). This ensures float columns
+		// don't get written into string vectors, which would panic.
+		schema = make([]parquet.Column, len(p.Projections))
+		for i, proj := range p.Projections {
+			typ := proj.Type
+			if idx := in.ColumnIndex(proj.Name); idx >= 0 {
 				typ = in.Schema[idx].Type
+			} else if proj.SourceCol != "" {
+				if idx := in.ColumnIndex(proj.SourceCol); idx >= 0 {
+					typ = in.Schema[idx].Type
+				}
+			}
+			schema[i] = parquet.Column{
+				Name:     proj.Name,
+				Type:     typ,
+				Nullable: true,
 			}
 		}
-		schema[i] = parquet.Column{
-			Name:     proj.Name,
-			Type:     typ,
-			Nullable: true,
-		}
+		p.cachedSchema = schema
 	}
 
 	activeLen := in.ActiveLen()
 	out := batch.NewRecordBatch(schema, activeLen)
 
+	// Use typed evaluation paths per-column to avoid interface{} boxing.
+	// This applies to both selection-vector and non-sel paths.
 	if in.Sel != nil {
-		for outRow, idx := range in.Sel {
-			for j, proj := range p.Projections {
-				val := proj.Expr(in, int(idx))
-				out.Columns[j].SetValue(outRow, val)
+		for j, proj := range p.Projections {
+			col := out.Columns[j]
+			if proj.Float64Eval != nil {
+				for outRow, idx := range in.Sel {
+					v, ok := proj.Float64Eval(in, int(idx))
+					if ok {
+						col.Float64Data[outRow] = v
+					} else {
+						col.Nulls.SetNull(outRow)
+					}
+				}
+			} else if proj.Int64Eval != nil {
+				for outRow, idx := range in.Sel {
+					v, ok := proj.Int64Eval(in, int(idx))
+					if ok {
+						col.Int64Data[outRow] = v
+					} else {
+						col.Nulls.SetNull(outRow)
+					}
+				}
+			} else {
+				for outRow, idx := range in.Sel {
+					col.SetValue(outRow, proj.Expr(in, int(idx)))
+				}
 			}
 		}
 	} else {
-		// Use typed evaluation paths per-column to avoid interface{} boxing.
 		for j, proj := range p.Projections {
 			col := out.Columns[j]
 			if proj.Float64Eval != nil {
