@@ -41,6 +41,9 @@ func NewBatchPool(schema []parquet.Column, batchSize int) *BatchPool {
 	}
 }
 
+// BatchSize returns the row count this pool is configured for.
+func (p *BatchPool) BatchSize() int { return p.batchSize }
+
 // Get returns a batch from the pool, or allocates a new one.
 func (p *BatchPool) Get() *RecordBatch {
 	p.mu.Lock()

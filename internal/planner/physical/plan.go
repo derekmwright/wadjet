@@ -2970,6 +2970,9 @@ type scanSourceInner struct {
 	rgUnits []rgUnit // flat list of row group work units
 	rgIdx   int64    // atomic index for parallel RG workers
 
+	// batch pooling — reuse batch allocations across row groups
+	pool *batch.BatchPool
+
 	// parallel scan
 	batchCh chan *batch.RecordBatch
 	errCh   chan error
@@ -3043,6 +3046,15 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 
 	// Build row-group-level work units (reads files, enumerates RGs, prunes)
 	inner.buildRGUnits(scanCtx)
+
+	// Initialize batch pool from the most common row group size
+	if !inner.hasNestedTypes && len(inner.rgUnits) > 0 {
+		rgSize := int(inner.rgUnits[0].rg.NumRows())
+		readSchema := inner.readSchema()
+		if rgSize > 0 && len(readSchema) > 0 {
+			inner.pool = batch.NewBatchPool(readSchema, rgSize)
+		}
+	}
 
 	if inner.hasNestedTypes {
 		// Nested types need row-level reading — fall back to file-level workers
@@ -3178,6 +3190,27 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// readSchema returns the column-projected schema for this scan.
+func (inner *scanSourceInner) readSchema() []parquet.Column {
+	if len(inner.requiredCols) == 0 {
+		return inner.schema
+	}
+	needed := make(map[string]bool, len(inner.requiredCols))
+	for _, c := range inner.requiredCols {
+		needed[c] = true
+	}
+	filtered := make([]parquet.Column, 0, len(inner.requiredCols))
+	for _, col := range inner.schema {
+		if needed[col.Name] {
+			filtered = append(filtered, col)
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered
+	}
+	return inner.schema
 }
 
 func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, error) {

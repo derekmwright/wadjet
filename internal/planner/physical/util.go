@@ -519,7 +519,7 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 		}
 
 		unit := inner.rgUnits[idx]
-		b := readRowGroupDirect(unit.pqFile, unit.rg, inner.schema, inner.requiredCols)
+		b := inner.readRG(unit)
 		if b == nil || b.Len == 0 {
 			continue
 		}
@@ -551,31 +551,38 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	}
 }
 
-// readRowGroupDirect reads a single row group into a RecordBatch using direct
-// typed page reads. This is the per-RG equivalent of readBatchDirect.
+// readRG reads a row group using the pool when the size matches.
+func (inner *scanSourceInner) readRG(unit rgUnit) *batch.RecordBatch {
+	numRows := int(unit.rg.NumRows())
+	if inner.pool != nil && numRows == inner.pool.BatchSize() {
+		b := inner.pool.Get()
+		readRowGroupInto(unit.pqFile, unit.rg, b, inner.schema, inner.requiredCols)
+		return b
+	}
+	return readRowGroupDirect(unit.pqFile, unit.rg, inner.schema, inner.requiredCols)
+}
+
+// readRowGroupDirect reads a single row group into a fresh RecordBatch.
 func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []parquet.Column, requiredCols []string) *batch.RecordBatch {
 	numRows := int(rg.NumRows())
 	if numRows == 0 {
 		return nil
 	}
+	readSchema := buildReadSchema(schema, requiredCols)
+	b := batch.NewRecordBatch(readSchema, numRows)
+	readRowGroupInto(file, rg, b, schema, requiredCols)
+	return b
+}
 
-	// Build read schema
-	readSchema := schema
-	if len(requiredCols) > 0 {
-		needed := make(map[string]bool, len(requiredCols))
-		for _, c := range requiredCols {
-			needed[c] = true
-		}
-		filtered := make([]parquet.Column, 0, len(requiredCols))
-		for _, col := range schema {
-			if needed[col.Name] {
-				filtered = append(filtered, col)
-			}
-		}
-		if len(filtered) > 0 {
-			readSchema = filtered
-		}
+// readRowGroupInto reads a single row group into an existing RecordBatch.
+// The batch must already have the correct schema and sufficient capacity.
+func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.RecordBatch, schema []parquet.Column, requiredCols []string) {
+	numRows := int(rg.NumRows())
+	if numRows == 0 {
+		return
 	}
+
+	readSchema := b.Schema
 
 	// Map batch schema columns to parquet file column indices
 	fileColumns := file.Schema().Columns()
@@ -594,7 +601,6 @@ func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []pa
 		}
 	}
 
-	b := batch.NewRecordBatch(readSchema, numRows)
 	chunks := rg.ColumnChunks()
 
 	for _, m := range mappings {
@@ -641,5 +647,25 @@ func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []pa
 	}
 
 	b.Len = numRows
-	return b
+}
+
+// buildReadSchema applies column projection to the table schema.
+func buildReadSchema(schema []parquet.Column, requiredCols []string) []parquet.Column {
+	if len(requiredCols) == 0 {
+		return schema
+	}
+	needed := make(map[string]bool, len(requiredCols))
+	for _, c := range requiredCols {
+		needed[c] = true
+	}
+	filtered := make([]parquet.Column, 0, len(requiredCols))
+	for _, col := range schema {
+		if needed[col.Name] {
+			filtered = append(filtered, col)
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered
+	}
+	return schema
 }

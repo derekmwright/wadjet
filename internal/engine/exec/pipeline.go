@@ -84,6 +84,7 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 			if err := p.Sink.Consume(ctx, b); err != nil {
 				return fmt.Errorf("sink consume: %w", err)
 			}
+			b.Release()
 		}
 
 		if exhausted {
@@ -129,6 +130,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			if err := p.Sink.Consume(ctx, b); err != nil {
 				return fmt.Errorf("sink consume: %w", err)
 			}
+			b.Release()
 			// Check DoneSignalers even when batch was non-nil — Limit
 			// may have returned a truncated batch and is now satisfied.
 			for _, op := range p.Ops {
@@ -231,6 +233,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 						cancel()
 						return
 					}
+					b.Release()
 				}
 
 				if exhausted {

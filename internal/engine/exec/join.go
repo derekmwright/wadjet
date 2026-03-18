@@ -396,6 +396,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		// Skip Compact() — iterate through Sel (if any) directly.
 		// Avoids copying entire batch just to remove selection vector gaps.
 		// Arena refs store original row indices, which are valid for direct access.
+		b.Detach() // prevent pooled batches from being recycled — build stores references
 		batchIdx := int32(len(h.buildBatches))
 		h.buildBatches = append(h.buildBatches, b)
 
@@ -682,6 +683,7 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 		}
 		h.tryEnableIntKey(b)
 	}
+	b.Detach() // prevent pooled batches from being recycled — build stores references
 	batchIdx := int32(len(h.buildBatches))
 	h.buildBatches = append(h.buildBatches, b)
 	if h.useIntKey {

@@ -84,6 +84,12 @@ func (b *RecordBatch) Release() {
 	}
 }
 
+// Detach removes the batch from its pool so Release() becomes a no-op.
+// Use this when a batch will be stored long-term (e.g., hash join build side).
+func (b *RecordBatch) Detach() {
+	b.pool = nil
+}
+
 // Reset clears the batch for reuse, keeping allocated memory.
 func (b *RecordBatch) Reset(numRows int) {
 	b.Len = numRows
