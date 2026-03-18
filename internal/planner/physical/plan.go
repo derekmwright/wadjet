@@ -1607,11 +1607,19 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	// Detect aggregate inputs that are expressions (not simple column refs).
 	// For each, compile the expression and add a pre-aggregate projection
 	// that evaluates it into a synthetic column.
+	// CSE: deduplicate identical expressions by their string representation.
 	var preProjectCols []exec.ProjectColumn
 	syntheticNames := make(map[int]string) // agg index → synthetic column name
+	exprDedup := make(map[string]string)   // expr string → synthetic column name
 
 	for i, agg := range node.AggExprs {
 		if agg.InputExpr != nil && !isSimpleColRef(agg.InputExpr) {
+			exprStr := agg.InputExpr.String()
+			if existing, ok := exprDedup[exprStr]; ok {
+				// Reuse previously compiled expression
+				syntheticNames[i] = existing
+				continue
+			}
 			synName := fmt.Sprintf("__agg_expr_%d", i)
 			compiled, compErr := expr.CompileWithRunner(agg.InputExpr, p.subqueryRunner)
 			if compErr == nil {
@@ -1628,6 +1636,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				}
 				preProjectCols = append(preProjectCols, pc)
 				syntheticNames[i] = synName
+				exprDedup[exprStr] = synName
 			}
 		}
 	}
