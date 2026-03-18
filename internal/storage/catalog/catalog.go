@@ -16,6 +16,7 @@ import (
 	"io"
 	"math/rand/v2"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -26,12 +27,23 @@ const (
 	defaultClusterID = "local"
 )
 
+// manifestCacheEntry holds a cached manifest with an expiry time.
+type manifestCacheEntry struct {
+	manifest *PartitionManifest
+	expiry   time.Time
+}
+
+const manifestCacheTTL = 2 * time.Second
+
 // Catalog manages table metadata via KV and data via object storage.
 type Catalog struct {
 	kv        MetaKV
 	store     objstore.Store
 	bucket    string
 	clusterID string
+
+	manifestMu    sync.Mutex
+	manifestCache map[string]manifestCacheEntry
 }
 
 // CatalogMeta is the top-level catalog metadata.
@@ -198,7 +210,17 @@ func (c *Catalog) GetTable(_ context.Context, name string) (*TableMeta, error) {
 }
 
 // GetManifest returns the partition manifest for a table.
+// Results are cached briefly to avoid repeated KV reads within a query.
 func (c *Catalog) GetManifest(_ context.Context, tableName string) (*PartitionManifest, error) {
+	c.manifestMu.Lock()
+	if c.manifestCache != nil {
+		if entry, ok := c.manifestCache[tableName]; ok && time.Now().Before(entry.expiry) {
+			c.manifestMu.Unlock()
+			return entry.manifest, nil
+		}
+	}
+	c.manifestMu.Unlock()
+
 	var manifest PartitionManifest
 	if err := c.getJSON(c.key("manifest."+tableName), &manifest); err != nil {
 		if err == ErrKeyNotFound {
@@ -206,6 +228,17 @@ func (c *Catalog) GetManifest(_ context.Context, tableName string) (*PartitionMa
 		}
 		return nil, err
 	}
+
+	c.manifestMu.Lock()
+	if c.manifestCache == nil {
+		c.manifestCache = make(map[string]manifestCacheEntry)
+	}
+	c.manifestCache[tableName] = manifestCacheEntry{
+		manifest: &manifest,
+		expiry:   time.Now().Add(manifestCacheTTL),
+	}
+	c.manifestMu.Unlock()
+
 	return &manifest, nil
 }
 
@@ -223,6 +256,7 @@ func casBackoff(attempt int) {
 // AddFiles adds file entries to the manifest for a given partition.
 // Uses compare-and-swap to prevent concurrent flushes from losing updates.
 func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
+	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
 
 	// Retry loop for CAS conflicts (concurrent ingest flushes).
@@ -273,6 +307,7 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 // AddDeleteMarkers adds delete markers to a table's manifest using CAS.
 // Merges new markers with existing ones for the same file.
 func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers []DeleteMarker) error {
+	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
 	const maxRetries = 10
 
@@ -338,6 +373,7 @@ func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers 
 // RemoveFiles removes data files and their delete markers from the manifest.
 // Used after compaction to clean up rewritten files.
 func (c *Catalog) RemoveFiles(_ context.Context, tableName string, filePaths []string) error {
+	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
 	const maxRetries = 10
 	removeSet := make(map[string]bool, len(filePaths))
@@ -448,6 +484,7 @@ func (c *Catalog) DropTable(_ context.Context, name string) error {
 		return fmt.Errorf("table %q not found", name)
 	}
 
+	c.invalidateManifestCache(name)
 	_ = c.kv.Delete(c.key("table." + name))
 	_ = c.kv.Delete(c.key("manifest." + name))
 
@@ -546,6 +583,14 @@ func (c *Catalog) KV() MetaKV {
 }
 
 // --- internal helpers ---
+
+// invalidateManifestCache removes a cached manifest entry so the next
+// GetManifest call reads fresh data from KV.
+func (c *Catalog) invalidateManifestCache(tableName string) {
+	c.manifestMu.Lock()
+	delete(c.manifestCache, tableName)
+	c.manifestMu.Unlock()
+}
 
 // key returns a cluster-prefixed KV key.
 func (c *Catalog) key(suffix string) string {

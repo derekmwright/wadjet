@@ -90,10 +90,31 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			}
 		}
 	} else {
-		for i := 0; i < in.Len; i++ {
-			for j, proj := range p.Projections {
-				val := proj.Expr(in, i)
-				out.Columns[j].SetValue(i, val)
+		// Use typed evaluation paths per-column to avoid interface{} boxing.
+		for j, proj := range p.Projections {
+			col := out.Columns[j]
+			if proj.Float64Eval != nil {
+				for i := 0; i < in.Len; i++ {
+					v, ok := proj.Float64Eval(in, i)
+					if ok {
+						col.Float64Data[i] = v
+					} else {
+						col.Nulls.SetNull(i)
+					}
+				}
+			} else if proj.Int64Eval != nil {
+				for i := 0; i < in.Len; i++ {
+					v, ok := proj.Int64Eval(in, i)
+					if ok {
+						col.Int64Data[i] = v
+					} else {
+						col.Nulls.SetNull(i)
+					}
+				}
+			} else {
+				for i := 0; i < in.Len; i++ {
+					col.SetValue(i, proj.Expr(in, i))
+				}
 			}
 		}
 	}
