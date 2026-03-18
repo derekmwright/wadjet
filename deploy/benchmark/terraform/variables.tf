@@ -65,7 +65,7 @@ variable "benchmark_runs" {
 variable "use_spot" {
   description = "Use spot instances (~60-70% cheaper, risk of reclamation mid-benchmark)"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "data_bucket" {
