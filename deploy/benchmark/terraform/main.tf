@@ -219,6 +219,7 @@ locals {
     # Auto-run standalone benchmark
     export WADJET_BUCKET="${local.bucket_name}"
     export WADJET_REGION="${var.region}"
+    export BENCHMARK_RUNS="${var.benchmark_runs}"
     cd /root/wadjet
     bash deploy/benchmark/run-benchmark.sh standalone SF${var.scale_factor} 2>&1 | tee /root/benchmark.log
   EOF
@@ -230,6 +231,7 @@ locals {
     # Auto-run distributed benchmark (starts NATS, waits for workers)
     export WADJET_BUCKET="${local.bucket_name}"
     export WADJET_REGION="${var.region}"
+    export BENCHMARK_RUNS="${var.benchmark_runs}"
     cd /root/wadjet
     bash deploy/benchmark/run-benchmark.sh distributed SF${var.scale_factor} ${var.worker_count} 2>&1 | tee /root/benchmark.log
   EOF

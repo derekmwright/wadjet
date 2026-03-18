@@ -57,9 +57,9 @@ variable "memory_budget" {
 }
 
 variable "benchmark_runs" {
-  description = "Number of benchmark runs per query"
+  description = "Number of benchmark runs per query (use 1 for profiling, 3 for final benchmarks)"
   type        = number
-  default     = 3
+  default     = 1
 }
 
 variable "use_spot" {
