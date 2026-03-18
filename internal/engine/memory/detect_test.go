@@ -6,10 +6,31 @@ import (
 	"testing"
 )
 
+func TestDetectCgroupLimitNonNegative(t *testing.T) {
+	limit := DetectCgroupLimit()
+	if limit < 0 {
+		t.Fatalf("DetectCgroupLimit() returned negative value: %d", limit)
+	}
+}
+
 func TestDetectBudgetNonNegative(t *testing.T) {
 	budget := DetectBudget()
 	if budget < 0 {
 		t.Fatalf("DetectBudget() returned negative value: %d", budget)
+	}
+}
+
+func TestDetectBudgetIsSmallerThanLimit(t *testing.T) {
+	limit := DetectCgroupLimit()
+	if limit == 0 {
+		t.Skip("no cgroup limit detected (not in a container)")
+	}
+	budget := DetectBudget()
+	if budget >= limit {
+		t.Errorf("budget (%d) should be less than cgroup limit (%d)", budget, limit)
+	}
+	if budget < limit/2 {
+		t.Errorf("budget (%d) is less than 50%% of limit (%d), expected ~75%%", budget, limit)
 	}
 }
 

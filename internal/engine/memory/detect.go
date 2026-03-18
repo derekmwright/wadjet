@@ -21,18 +21,26 @@ const (
 	cgroupV1Unlimited = int64(9223372036854771712)
 )
 
-// DetectBudget reads the container memory limit from cgroup files and returns
-// a recommended per-task memory budget (75% of limit). Returns 0 if no
-// container limit is detected.
+// DetectCgroupLimit reads the raw container memory limit from cgroup files.
+// Returns 0 if no container limit is detected.
 //
 // Detection order:
 //  1. cgroups v2: /sys/fs/cgroup/memory.max
 //  2. cgroups v1: /sys/fs/cgroup/memory/memory.limit_in_bytes
-func DetectBudget() int64 {
+func DetectCgroupLimit() int64 {
 	if limit := readLimit(cgroupV2MemMax, false); limit > 0 {
-		return int64(float64(limit) * headroomFactor)
+		return limit
 	}
 	if limit := readLimit(cgroupV1MemLimit, true); limit > 0 {
+		return limit
+	}
+	return 0
+}
+
+// DetectBudget returns a recommended per-task memory budget (75% of the
+// container cgroup limit). Returns 0 if no container limit is detected.
+func DetectBudget() int64 {
+	if limit := DetectCgroupLimit(); limit > 0 {
 		return int64(float64(limit) * headroomFactor)
 	}
 	return 0
