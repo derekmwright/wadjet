@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/config"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 )
@@ -399,29 +400,53 @@ func TestMatchesPartitionFilter(t *testing.T) {
 	}
 }
 
-// --- evalJoinFilterOp ---
+// --- evalFilterTyped ---
 
-func TestEvalJoinFilterOp(t *testing.T) {
-	tests := []struct {
-		a, b any
-		op   string
-		want bool
-	}{
-		{"a", "b", "!=", true},
-		{"a", "a", "!=", false},
-		{"a", "a", "<>", false},
-		{"b", "a", ">", true},
-		{"a", "b", "<", true},
-		{"b", "b", ">=", true},
-		{"a", "a", "<=", true},
-		{"a", "a", "=", true},
-		{"a", "b", "=", false},
+func TestEvalFilterTyped(t *testing.T) {
+	const (
+		opNE = iota
+		opGT
+		opLT
+		opGE
+		opLE
+		opEQ
+	)
+
+	// Test int32 comparisons
+	pv := batch.NewVector(batch.TypeInt32, 2)
+	bv := batch.NewVector(batch.TypeInt32, 2)
+	pv.Int32Data[0] = 10
+	pv.Int32Data[1] = 20
+	bv.Int32Data[0] = 20
+	bv.Int32Data[1] = 20
+	if !evalFilterTyped(pv, bv, 0, 0, opNE) {
+		t.Error("10 != 20 should be true")
 	}
-	for _, tt := range tests {
-		got := evalJoinFilterOp(tt.a, tt.b, tt.op)
-		if got != tt.want {
-			t.Errorf("evalJoinFilterOp(%v, %v, %q) = %v, want %v", tt.a, tt.b, tt.op, got, tt.want)
-		}
+	if evalFilterTyped(pv, bv, 1, 1, opNE) {
+		t.Error("20 != 20 should be false")
+	}
+	if !evalFilterTyped(pv, bv, 0, 0, opLT) {
+		t.Error("10 < 20 should be true")
+	}
+	if !evalFilterTyped(pv, bv, 1, 1, opEQ) {
+		t.Error("20 == 20 should be true")
+	}
+
+	// Test string comparisons via fallback
+	sv := batch.NewVector(batch.TypeString, 2)
+	sv.BytesData.Set(0, []byte("a"))
+	sv.BytesData.Set(1, []byte("b"))
+	tv := batch.NewVector(batch.TypeString, 2)
+	tv.BytesData.Set(0, []byte("b"))
+	tv.BytesData.Set(1, []byte("b"))
+	if !evalFilterTyped(sv, tv, 0, 0, opNE) {
+		t.Error("a != b should be true")
+	}
+	if evalFilterTyped(sv, tv, 1, 1, opNE) {
+		t.Error("b != b should be false")
+	}
+	if !evalFilterTyped(sv, tv, 0, 0, opLT) {
+		t.Error("a < b should be true")
 	}
 }
 

@@ -85,6 +85,10 @@ type HashJoin struct {
 	// for large build sides (e.g., 6M-row lineitem scan for EXISTS subqueries).
 	SemiAntiKeyOnly bool
 
+	// BuildRowHint is an optional hint for the expected number of build-side rows.
+	// When set, the arena and hash table are pre-allocated to avoid repeated growth.
+	BuildRowHint int64
+
 	// Bloom filter for fast negative lookups during probe phase.
 	// When the build side is small relative to expected probe volume,
 	// this rejects non-matching probe rows without touching the hash table.
@@ -301,42 +305,16 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			}
 			// Try to enable int64 fast path for single-column integer keys
 			h.tryEnableIntKey(b)
-		}
 
-		// For key-only mode, skip compaction and memory tracking — just extract keys
-		if !h.SemiAntiKeyOnly {
-			h.mu.Unlock()
-			b = b.Compact()
-			h.mu.Lock()
-		}
-
-		// Spill to disk if memory pressure is high
-		if !h.SemiAntiKeyOnly && h.Spill != nil && h.Spill.ShouldSpill() && len(h.buildBatches) > 0 {
-			if err := h.spillBuildBatches(); err != nil {
-				h.mu.Unlock()
-				return fmt.Errorf("spilling build side: %w", err)
-			}
-		}
-
-		// Track memory if budget is set (not needed for key-only mode)
-		if !h.SemiAntiKeyOnly && h.MemTracker != nil {
-			cost := estimateBatchBytes(b)
-			if err := h.MemTracker.Reserve(cost); err != nil {
-				// Try spilling before giving up
-				if h.Spill != nil && len(h.buildBatches) > 0 {
-					if spillErr := h.spillBuildBatches(); spillErr == nil {
-						h.MemTracker.Reset()
-						// Re-reserve for just this batch
-						if err2 := h.MemTracker.Reserve(cost); err2 != nil {
-							h.mu.Unlock()
-							return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
-								err2, h.buildRows, len(h.buildBatches))
-						}
-					}
+			// Pre-allocate arena and index to avoid repeated slice growth.
+			if h.BuildRowHint > 0 && !h.SemiAntiKeyOnly {
+				hint := int(h.BuildRowHint)
+				h.arena = make([]buildRef, 0, hint)
+				h.arenaNext = make([]int32, 0, hint)
+				if h.useIntKey {
+					h.intIndex = newIntHashTable(hint)
 				} else {
-					h.mu.Unlock()
-					return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
-						err, h.buildRows, len(h.buildBatches))
+					h.hashIndex = make(map[string]int32, hint)
 				}
 			}
 		}
@@ -385,25 +363,76 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			continue
 		}
 
+		// Spill to disk if memory pressure is high
+		if h.Spill != nil && h.Spill.ShouldSpill() && len(h.buildBatches) > 0 {
+			if err := h.spillBuildBatches(); err != nil {
+				h.mu.Unlock()
+				return fmt.Errorf("spilling build side: %w", err)
+			}
+		}
+
+		// Track memory if budget is set
+		if h.MemTracker != nil {
+			cost := estimateBatchBytes(b)
+			if err := h.MemTracker.Reserve(cost); err != nil {
+				// Try spilling before giving up
+				if h.Spill != nil && len(h.buildBatches) > 0 {
+					if spillErr := h.spillBuildBatches(); spillErr == nil {
+						h.MemTracker.Reset()
+						if err2 := h.MemTracker.Reserve(cost); err2 != nil {
+							h.mu.Unlock()
+							return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
+								err2, h.buildRows, len(h.buildBatches))
+						}
+					}
+				} else {
+					h.mu.Unlock()
+					return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
+						err, h.buildRows, len(h.buildBatches))
+				}
+			}
+		}
+
+		// Skip Compact() — iterate through Sel (if any) directly.
+		// Avoids copying entire batch just to remove selection vector gaps.
+		// Arena refs store original row indices, which are valid for direct access.
 		batchIdx := int32(len(h.buildBatches))
 		h.buildBatches = append(h.buildBatches, b)
 
-		// After Compact(), Sel is nil so we iterate all rows (which are only the active ones)
 		if h.useIntKey {
 			col := b.Columns[h.buildKeyIdx[0]]
-			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				key, ok := intKeyFromVector(col, rowIdx)
-				if !ok {
-					continue // skip null keys
+			if b.Sel != nil {
+				for _, si := range b.Sel {
+					key, ok := intKeyFromVector(col, int(si))
+					if !ok {
+						continue
+					}
+					h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
+					h.buildRows++
 				}
-				h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
-				h.buildRows++
+			} else {
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					key, ok := intKeyFromVector(col, rowIdx)
+					if !ok {
+						continue
+					}
+					h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+					h.buildRows++
+				}
 			}
 		} else {
-			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				key := h.buildKeyFromBatch(b, rowIdx)
-				h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
-				h.buildRows++
+			if b.Sel != nil {
+				for _, si := range b.Sel {
+					key := h.buildKeyFromBatch(b, int(si))
+					h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
+					h.buildRows++
+				}
+			} else {
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					key := h.buildKeyFromBatch(b, rowIdx)
+					h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+					h.buildRows++
+				}
 			}
 		}
 		h.mu.Unlock()

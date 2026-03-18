@@ -2081,30 +2081,48 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 		*rels = append(*rels, n)
 		return
 	}
+	leftStart := len(*rels)
 	flattenJoinChain(n.Children[0], rels, edges)
 	leftAfter := len(*rels)
 
 	rightBefore := len(*rels)
 	flattenJoinChain(n.Children[1], rels, edges)
 
-	// The join condition connects some relation from the left subtree to some
-	// relation from the right subtree. We record the range but for greedy
-	// reordering we just need to know which relations a condition touches.
-	// Use the last relation added from each side as the representative.
+	if n.JoinCond == "" {
+		return
+	}
+
+	// Find which left-side relation owns the columns in the join condition.
+	// The naive approach (leftRep = leftAfter-1) is wrong for multi-way joins
+	// where the condition references a non-last relation (e.g., supplier-nation
+	// edge in supplier-lineitem-orders-nation chain).
 	leftRep := leftAfter - 1
-	rightRep := rightBefore // first (and usually only) relation from right
 	if leftRep < 0 {
 		leftRep = 0
 	}
+	rightRep := rightBefore
 
-	if n.JoinCond != "" {
-		*edges = append(*edges, joinEdge{
-			leftIdx:  leftRep,
-			rightIdx: rightRep,
-			joinType: n.JoinType,
-			joinCond: n.JoinCond,
-		})
+	// Extract column refs from the join condition and match to relations.
+	condRefs := make(map[string]bool, 4)
+	extractJoinColumnRefs(n.JoinCond, condRefs)
+	if len(condRefs) > 0 {
+		for i := leftStart; i < leftAfter; i++ {
+			relCols := collectSubtreeColumns((*rels)[i])
+			for ref := range condRefs {
+				if relCols[ref] {
+					leftRep = i
+					break
+				}
+			}
+		}
 	}
+
+	*edges = append(*edges, joinEdge{
+		leftIdx:  leftRep,
+		rightIdx: rightRep,
+		joinType: n.JoinType,
+		joinCond: n.JoinCond,
+	})
 }
 
 // estimateRelCost assigns a heuristic cost to a relation subtree.

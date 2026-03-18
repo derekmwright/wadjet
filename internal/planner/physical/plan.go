@@ -820,6 +820,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.SemiAntiKeyOnly = true
 	}
 
+	// Pass build-side row estimate to pre-allocate arena and hash table.
+	if est := findScanRowEstimate(node.Children[1]); est > 0 {
+		hj.BuildRowHint = est
+	}
+
 	// Build right side (small table) into hash table
 	rightSource, rightOps, _, err := p.buildPipeline(ctx, node.Children[1])
 	if err != nil {
@@ -973,6 +978,10 @@ func mapExecJoinType(jt string) exec.JoinType {
 // buildSemiAntiFilter compiles a non-equality join filter string (e.g., "l_suppkey != l_suppkey")
 // into a function that evaluates the condition on probe and build batch rows.
 // Convention: left of operator = probe column, right = build column.
+//
+// The returned closure lazily resolves column indices on first call and caches
+// them, avoiding per-row ColumnByName lookups. Comparisons use typed dispatch
+// (int32, int64, float64, string) instead of fmt.Sprint conversion.
 func buildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
 	type filterCond struct {
 		probeCol string
@@ -1002,16 +1011,57 @@ func buildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 		return nil
 	}
 
+	// Pre-encode operator as int for switch-free dispatch in hot path.
+	const (
+		opNE = iota
+		opGT
+		opLT
+		opGE
+		opLE
+		opEQ
+	)
+	ops := make([]int, len(conds))
+	for i, c := range conds {
+		switch c.op {
+		case "!=", "<>":
+			ops[i] = opNE
+		case ">":
+			ops[i] = opGT
+		case "<":
+			ops[i] = opLT
+		case ">=":
+			ops[i] = opGE
+		case "<=":
+			ops[i] = opLE
+		default:
+			ops[i] = opEQ
+		}
+	}
+
+	// Lazily resolved column indices; reset when batch pointers change.
+	probeIdxs := make([]int, len(conds))
+	buildIdxs := make([]int, len(conds))
+	var prevProbe, prevBuild *batch.RecordBatch
+
 	return func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
-		for _, c := range conds {
-			pv := probe.ColumnByName(c.probeCol)
-			bv := build.ColumnByName(c.buildCol)
-			if pv == nil || bv == nil {
+		// Resolve column indices once per batch pair.
+		if probe != prevProbe || build != prevBuild {
+			for i, c := range conds {
+				probeIdxs[i] = probe.ColumnIndex(c.probeCol)
+				buildIdxs[i] = build.ColumnIndex(c.buildCol)
+			}
+			prevProbe = probe
+			prevBuild = build
+		}
+
+		for i := range conds {
+			pi, bi := probeIdxs[i], buildIdxs[i]
+			if pi < 0 || bi < 0 {
 				return false
 			}
-			probeVal := pv.GetValue(probeRow)
-			buildVal := bv.GetValue(buildRow)
-			if !evalJoinFilterOp(probeVal, buildVal, c.op) {
+			pv := probe.Columns[pi]
+			bv := build.Columns[bi]
+			if !evalFilterTyped(pv, bv, probeRow, buildRow, ops[i]) {
 				return false
 			}
 		}
@@ -1019,23 +1069,116 @@ func buildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 	}
 }
 
-// evalJoinFilterOp evaluates a comparison operator on two values.
-func evalJoinFilterOp(a, b any, op string) bool {
-	as := fmt.Sprint(a)
-	bs := fmt.Sprint(b)
-	switch op {
-	case "!=", "<>":
-		return as != bs
-	case ">":
-		return as > bs
-	case "<":
-		return as < bs
-	case ">=":
-		return as >= bs
-	case "<=":
-		return as <= bs
+// evalFilterTyped compares two vector values at given rows using typed dispatch.
+// Avoids interface boxing and fmt.Sprint allocation on every comparison.
+func evalFilterTyped(pv, bv *batch.Vector, pRow, bRow, op int) bool {
+	const (
+		opNE = iota
+		opGT
+		opLT
+		opGE
+		opLE
+		opEQ
+	)
+	switch pv.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		a, b := pv.Int32Data[pRow], bv.Int32Data[bRow]
+		switch op {
+		case opNE:
+			return a != b
+		case opGT:
+			return a > b
+		case opLT:
+			return a < b
+		case opGE:
+			return a >= b
+		case opLE:
+			return a <= b
+		default:
+			return a == b
+		}
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+		a, b := pv.Int64Data[pRow], bv.Int64Data[bRow]
+		switch op {
+		case opNE:
+			return a != b
+		case opGT:
+			return a > b
+		case opLT:
+			return a < b
+		case opGE:
+			return a >= b
+		case opLE:
+			return a <= b
+		default:
+			return a == b
+		}
+	case batch.TypeFloat64:
+		a, b := pv.Float64Data[pRow], bv.Float64Data[bRow]
+		switch op {
+		case opNE:
+			return a != b
+		case opGT:
+			return a > b
+		case opLT:
+			return a < b
+		case opGE:
+			return a >= b
+		case opLE:
+			return a <= b
+		default:
+			return a == b
+		}
+	case batch.TypeFloat32:
+		a, b := pv.Float32Data[pRow], bv.Float32Data[bRow]
+		switch op {
+		case opNE:
+			return a != b
+		case opGT:
+			return a > b
+		case opLT:
+			return a < b
+		case opGE:
+			return a >= b
+		case opLE:
+			return a <= b
+		default:
+			return a == b
+		}
+	case batch.TypeString:
+		a, b := pv.BytesData.StringValue(pRow), bv.BytesData.StringValue(bRow)
+		switch op {
+		case opNE:
+			return a != b
+		case opGT:
+			return a > b
+		case opLT:
+			return a < b
+		case opGE:
+			return a >= b
+		case opLE:
+			return a <= b
+		default:
+			return a == b
+		}
 	default:
-		return as == bs
+		// Fallback for other types: use GetValue + fmt.Sprint
+		as := fmt.Sprint(pv.GetValue(pRow))
+		bs := fmt.Sprint(bv.GetValue(bRow))
+		switch op {
+		case opNE:
+			return as != bs
+		case opGT:
+			return as > bs
+		case opLT:
+			return as < bs
+		case opGE:
+			return as >= bs
+		case opLE:
+			return as <= bs
+		default:
+			return as == bs
+		}
 	}
 }
 
@@ -2273,6 +2416,30 @@ func collectTableAliases(node *logical.Node) map[string]bool {
 	}
 	walk(node)
 	return aliases
+}
+
+// findScanRowEstimate returns the total row estimate from scan nodes in a subtree.
+// Used to pre-allocate hash join arena and index.
+func findScanRowEstimate(node *logical.Node) int64 {
+	if node == nil {
+		return 0
+	}
+	if node.Type == logical.NodeScan {
+		return node.ScanRowEstimate
+	}
+	// For aggregates, row count is much smaller than scan (assume 10% or 100K max)
+	if node.Type == logical.NodeAggregate {
+		est := findScanRowEstimate(node.Children[0])
+		if est > 100000 {
+			return 100000
+		}
+		return est / 10
+	}
+	var total int64
+	for _, child := range node.Children {
+		total += findScanRowEstimate(child)
+	}
+	return total
 }
 
 // findScanAlias returns the table alias of the scan node in a subtree.
