@@ -29,7 +29,7 @@ variable "mode" {
 variable "coordinator_instance_type" {
   description = "EC2 instance type for coordinator (distributed mode)"
   type        = string
-  default     = "c7g.xlarge"
+  default     = "c7g.2xlarge"
 }
 
 variable "worker_instance_type" {
