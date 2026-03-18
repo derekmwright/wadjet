@@ -18,6 +18,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -131,38 +132,27 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 }
 
 func (e *Executor) executeScan(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	// For large scans, stream rows to the result file in chunks to bound
-	// memory usage. We accumulate up to maxBufferedRows before flushing.
 	var (
-		allRows     = make([]map[string]any, 0, min(len(task.Files)*1024, maxBufferedRows))
-		totalRows   int64
-		flushed     bool
-		resultPath  = task.ResultPrefix + task.ID + ".parquet"
-		multiWriter *multiPartWriter
+		allBatches []*batch.RecordBatch
+		totalRows  int64
 	)
 
 	for _, filePath := range task.Files {
-		rows, err := e.readParquetFile(ctx, task.ResultBucket, filePath, task.Columns)
+		batches, err := e.readParquetFileBatches(ctx, task.ResultBucket, filePath, task.Columns)
 		if err != nil {
 			return fmt.Errorf("reading file %s: %w", filePath, err)
 		}
 
-		// Apply pushed-down filter predicates per file to reduce memory
-		if len(task.FilterExprs) > 0 && len(rows) > 0 {
-			rows = e.applyRowFilters(rows, task.FilterExprs)
-		}
-
-		allRows = append(allRows, rows...)
-		totalRows += int64(len(rows))
-
-		// Flush to prevent unbounded memory growth
-		if maxBufferedRows > 0 && len(allRows) >= maxBufferedRows {
-			if multiWriter == nil {
-				multiWriter = &multiPartWriter{}
+		for _, b := range batches {
+			// Apply pushed-down filter predicates as selection vectors
+			if len(task.FilterExprs) > 0 {
+				b = e.applyBatchFilters(b, task.FilterExprs)
 			}
-			multiWriter.parts = append(multiWriter.parts, allRows)
-			allRows = make([]map[string]any, 0, maxBufferedRows)
-			flushed = true
+			if b == nil || b.ActiveLen() == 0 {
+				continue
+			}
+			allBatches = append(allBatches, b)
+			totalRows += int64(b.ActiveLen())
 		}
 	}
 
@@ -171,62 +161,41 @@ func (e *Executor) executeScan(ctx context.Context, task distributed.Task, resul
 	}
 
 	result.NumRows = totalRows
-
-	// If we never hit the cap, write normally (may use inline fast path)
-	if !flushed {
-		return e.writeResult(ctx, task, allRows, result)
-	}
-
-	// Flushed at least once: collect remaining rows and write all parts
-	if len(allRows) > 0 {
-		multiWriter.parts = append(multiWriter.parts, allRows)
-	}
-
-	// Flatten parts for writing (total is bounded: we only hold the last chunk + result)
-	var combined []map[string]any
-	for _, part := range multiWriter.parts {
-		combined = append(combined, part...)
-	}
-	multiWriter = nil // release part references
-
-	return e.writeResultToPath(ctx, task, combined, resultPath, result)
+	return e.writeBatchResult(ctx, task, allBatches, result)
 }
 
-// multiPartWriter collects row batches for large scan results.
-type multiPartWriter struct {
-	parts [][]map[string]any
-}
-
-// applyRowFilters applies SQL filter expressions to rows, keeping only matches.
-// Uses the expression engine for evaluation.
-func (e *Executor) applyRowFilters(rows []map[string]any, filterExprs []string) []map[string]any {
-	if len(rows) == 0 {
-		return rows
-	}
-
-	schema := schemaFromRows(rows)
-	b := batch.FromRows(schema, rows)
-
+// applyBatchFilters applies SQL filter expressions to a RecordBatch using
+// selection vectors, avoiding row-level map[string]any allocation.
+func (e *Executor) applyBatchFilters(b *batch.RecordBatch, filterExprs []string) *batch.RecordBatch {
 	for _, filterSQL := range filterExprs {
 		filter := buildSimpleFilter(filterSQL)
 		if filter == nil {
 			continue
 		}
 
-		var filtered []map[string]any
-		for i := 0; i < b.Len; i++ {
-			if filter(b, i) {
-				filtered = append(filtered, rows[i])
+		var sel []uint16
+		if b.Sel != nil {
+			sel = make([]uint16, 0, len(b.Sel))
+			for _, idx := range b.Sel {
+				if filter(b, int(idx)) {
+					sel = append(sel, idx)
+				}
+			}
+		} else {
+			sel = make([]uint16, 0, b.Len)
+			for i := 0; i < b.Len; i++ {
+				if filter(b, i) {
+					sel = append(sel, uint16(i))
+				}
 			}
 		}
-		rows = filtered
-		if len(rows) == 0 {
-			break
+
+		if len(sel) == 0 {
+			return nil
 		}
-		// Rebuild batch for next filter
-		b = batch.FromRows(schema, rows)
+		b.Sel = sel
 	}
-	return rows
+	return b
 }
 
 // buildSimpleFilter creates a predicate function from a SQL expression string.
@@ -285,18 +254,15 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 	// Build column projection: only read group-by columns + aggregate input columns
 	neededCols := aggregateNeededCols(task.GroupByCols, task.Aggregates)
 
-	// Read input files concurrently from previous stage
-	allRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.InputFiles, neededCols)
+	// Read input files directly into columnar batches
+	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, neededCols)
 	if err != nil {
 		return err
 	}
 
-	if len(allRows) == 0 {
+	if len(allBatches) == 0 {
 		return nil
 	}
-
-	// Determine schema from first row
-	schema := schemaFromRows(allRows)
 
 	// Build and execute aggregate
 	aggs := make([]exec.AggColumn, len(task.Aggregates))
@@ -326,16 +292,19 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 		return err
 	}
 
-	b := batch.FromRows(schema, allRows)
-	if err := agg.Consume(ctx, b); err != nil {
-		return err
+	// Consume batches directly — no FromRows conversion
+	for _, b := range allBatches {
+		if err := agg.Consume(ctx, b); err != nil {
+			return err
+		}
 	}
 	if err := agg.Finalize(ctx); err != nil {
 		return err
 	}
 
-	// Read results
-	var resultRows []map[string]any
+	// Collect result batches
+	var resultBatches []*batch.RecordBatch
+	var totalRows int64
 	for {
 		rb, err := agg.Next(ctx)
 		if err != nil {
@@ -344,28 +313,27 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 		if rb == nil {
 			break
 		}
-		resultRows = append(resultRows, rb.ToRows()...)
+		totalRows += int64(rb.ActiveLen())
+		resultBatches = append(resultBatches, rb)
 	}
 
-	result.NumRows = int64(len(resultRows))
-	if len(resultRows) == 0 {
+	result.NumRows = totalRows
+	if totalRows == 0 {
 		return nil
 	}
 
-	return e.writeResult(ctx, task, resultRows, result)
+	return e.writeBatchResult(ctx, task, resultBatches, result)
 }
 
 func (e *Executor) executeSort(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	allRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.InputFiles, nil)
+	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
 	if err != nil {
 		return err
 	}
 
-	if len(allRows) == 0 {
+	if len(allBatches) == 0 {
 		return nil
 	}
-
-	schema := schemaFromRows(allRows)
 
 	var keys []exec.SortKey
 	for _, sk := range task.SortKeys {
@@ -390,15 +358,18 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 		return err
 	}
 
-	b := batch.FromRows(schema, allRows)
-	if err := sortOp.Consume(ctx, b); err != nil {
-		return err
+	// Consume batches directly
+	for _, b := range allBatches {
+		if err := sortOp.Consume(ctx, b); err != nil {
+			return err
+		}
 	}
 	if err := sortOp.Finalize(ctx); err != nil {
 		return err
 	}
 
-	var resultRows []map[string]any
+	var resultBatches []*batch.RecordBatch
+	var totalRows int64
 	for {
 		rb, err := sortOp.Next(ctx)
 		if err != nil {
@@ -407,35 +378,51 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 		if rb == nil {
 			break
 		}
-		resultRows = append(resultRows, rb.ToRows()...)
+		totalRows += int64(rb.ActiveLen())
+		resultBatches = append(resultBatches, rb)
+
+		// Apply limit: stop collecting once we have enough
+		if task.Limit > 0 && totalRows >= int64(task.Limit) {
+			break
+		}
 	}
 
-	// Apply limit if specified
-	if task.Limit > 0 && len(resultRows) > task.Limit {
-		resultRows = resultRows[:task.Limit]
+	// Trim last batch if limit causes overshoot
+	if task.Limit > 0 && totalRows > int64(task.Limit) {
+		excess := totalRows - int64(task.Limit)
+		last := resultBatches[len(resultBatches)-1]
+		trimLen := int64(last.ActiveLen()) - excess
+		if trimLen > 0 {
+			sel := make([]uint16, trimLen)
+			for i := range sel {
+				sel[i] = uint16(i)
+			}
+			last.Sel = sel
+		}
+		totalRows = int64(task.Limit)
 	}
 
-	result.NumRows = int64(len(resultRows))
-	if len(resultRows) == 0 {
+	result.NumRows = totalRows
+	if totalRows == 0 {
 		return nil
 	}
 
-	return e.writeResult(ctx, task, resultRows, result)
+	return e.writeBatchResult(ctx, task, resultBatches, result)
 }
 
 func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	// Read build (right) and probe (left) sides concurrently
-	buildRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.BuildFiles, nil)
+	// Read build (right) and probe (left) sides concurrently into columnar batches
+	buildBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
 	if err != nil {
 		return fmt.Errorf("reading build files: %w", err)
 	}
 
-	probeRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.InputFiles, nil)
+	probeBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
 	if err != nil {
 		return fmt.Errorf("reading probe files: %w", err)
 	}
 
-	if len(probeRows) == 0 && len(buildRows) == 0 {
+	if len(probeBatches) == 0 && len(buildBatches) == 0 {
 		return nil
 	}
 
@@ -443,16 +430,16 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 
 	hj := exec.NewHashJoin(joinType, task.JoinLeftKeys, task.JoinRightKeys)
 
-	// Build the hash table from right side
-	var buildSchema []parquet.Column
-	if len(buildRows) > 0 {
-		buildSchema = schemaFromRows(buildRows)
-		hj.BuildFromRows(buildSchema, buildRows)
+	// Build the hash table from right side batches
+	if len(buildBatches) > 0 {
+		if err := hj.Build(ctx, &batchSource{batches: buildBatches}); err != nil {
+			return fmt.Errorf("building hash table: %w", err)
+		}
 	}
 
 	// For RIGHT and FULL OUTER joins, we may still have results even
 	// with no probe rows (unmatched build-side rows).
-	if len(probeRows) == 0 && joinType != exec.RightJoin && joinType != exec.FullOuterJoin {
+	if len(probeBatches) == 0 && joinType != exec.RightJoin && joinType != exec.FullOuterJoin {
 		return nil
 	}
 
@@ -461,59 +448,55 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 		return err
 	}
 
-	var resultRows []map[string]any
+	var resultBatches []*batch.RecordBatch
+	var totalRows int64
 
-	// Probe with left side (if we have probe rows)
-	if len(probeRows) > 0 {
-		probeSchema := schemaFromRows(probeRows)
-		probeBatch := batch.FromRows(probeSchema, probeRows)
-
-		resultBatch, err := probe.Execute(ctx, probeBatch)
+	// Probe with left side batches
+	for _, pb := range probeBatches {
+		rb, err := probe.Execute(ctx, pb)
 		if err != nil {
 			return err
 		}
-
-		if resultBatch != nil {
-			resultRows = append(resultRows, resultBatch.ToRows()...)
+		if rb != nil && rb.ActiveLen() > 0 {
+			totalRows += int64(rb.ActiveLen())
+			resultBatches = append(resultBatches, rb)
 		}
+	}
 
-		// For RIGHT and FULL OUTER joins, flush unmatched build-side rows
-		if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
+	// For RIGHT and FULL OUTER joins, flush unmatched build-side rows
+	if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
+		var probeSchema []parquet.Column
+		if len(probeBatches) > 0 {
+			probeSchema = probeBatches[0].Schema
+		} else if len(buildBatches) > 0 {
+			probeSchema = buildBatches[0].Schema
+		}
+		if probeSchema != nil {
 			unmatchedBatch := probe.FlushUnmatched(probeSchema)
-			if unmatchedBatch != nil {
-				resultRows = append(resultRows, unmatchedBatch.ToRows()...)
-			}
-		}
-	} else if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
-		// No probe rows but we need unmatched build rows — use build schema
-		// for the left-side columns (all will be null).
-		if buildSchema != nil {
-			unmatchedBatch := probe.FlushUnmatched(buildSchema)
-			if unmatchedBatch != nil {
-				resultRows = append(resultRows, unmatchedBatch.ToRows()...)
+			if unmatchedBatch != nil && unmatchedBatch.ActiveLen() > 0 {
+				totalRows += int64(unmatchedBatch.ActiveLen())
+				resultBatches = append(resultBatches, unmatchedBatch)
 			}
 		}
 	}
 
-	result.NumRows = int64(len(resultRows))
-	if len(resultRows) == 0 {
+	result.NumRows = totalRows
+	if totalRows == 0 {
 		return nil
 	}
 
-	return e.writeResult(ctx, task, resultRows, result)
+	return e.writeBatchResult(ctx, task, resultBatches, result)
 }
 
 func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	allRows, err := e.readParquetFilesConcurrent(ctx, task.ResultBucket, task.InputFiles, nil)
+	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
 	if err != nil {
 		return err
 	}
 
-	if len(allRows) == 0 {
+	if len(allBatches) == 0 {
 		return nil
 	}
-
-	schema := schemaFromRows(allRows)
 
 	// Convert task window column specs to exec.WindowColumn
 	var winCols []exec.WindowColumn
@@ -550,15 +533,18 @@ func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, res
 		return err
 	}
 
-	b := batch.FromRows(schema, allRows)
-	if err := winOp.Consume(ctx, b); err != nil {
-		return err
+	// Consume batches directly
+	for _, b := range allBatches {
+		if err := winOp.Consume(ctx, b); err != nil {
+			return err
+		}
 	}
 	if err := winOp.Finalize(ctx); err != nil {
 		return err
 	}
 
-	var resultRows []map[string]any
+	var resultBatches []*batch.RecordBatch
+	var totalRows int64
 	for {
 		rb, err := winOp.Next(ctx)
 		if err != nil {
@@ -567,15 +553,16 @@ func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, res
 		if rb == nil {
 			break
 		}
-		resultRows = append(resultRows, rb.ToRows()...)
+		totalRows += int64(rb.ActiveLen())
+		resultBatches = append(resultBatches, rb)
 	}
 
-	result.NumRows = int64(len(resultRows))
-	if len(resultRows) == 0 {
+	result.NumRows = totalRows
+	if totalRows == 0 {
 		return nil
 	}
 
-	return e.writeResult(ctx, task, resultRows, result)
+	return e.writeBatchResult(ctx, task, resultBatches, result)
 }
 
 func parseWindowFunc(s string) exec.WindowFunc {
@@ -626,6 +613,98 @@ func mapExecJoinType(jt string) exec.JoinType {
 	}
 }
 
+// getFileData retrieves raw Parquet bytes with 3-tier caching:
+// in-memory result store → LRU cache → object store (S3).
+func (e *Executor) getFileData(ctx context.Context, bucket, path string) ([]byte, error) {
+	// Check in-memory result store first (avoids S3 round-trip for same-node stages)
+	if e.resultStore != nil {
+		if data, ok := e.resultStore.Get(path); ok {
+			return data, nil
+		}
+	}
+
+	// Check LRU cache
+	cacheKey := bucket + "/" + path
+	if data, ok := e.cache.Get(cacheKey); ok {
+		return data, nil
+	}
+
+	rc, _, err := e.store.Get(ctx, bucket, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		return nil, fmt.Errorf("reading file: %w", err)
+	}
+
+	// Cache the file data
+	e.cache.Put(cacheKey, data)
+	return data, nil
+}
+
+// readParquetFileBatches reads a Parquet file directly into columnar RecordBatches,
+// bypassing the map[string]any intermediate. One batch per row group.
+func (e *Executor) readParquetFileBatches(ctx context.Context, bucket, path string, selectedCols []string) ([]*batch.RecordBatch, error) {
+	data, err := e.getFileData(ctx, bucket, path)
+	if err != nil {
+		return nil, err
+	}
+
+	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+
+	schema := reader.Schema().Columns
+	return scan.ReadFileBatches(reader, schema, selectedCols)
+}
+
+// readParquetFilesConcurrentBatches reads multiple Parquet files in parallel (up to 8
+// goroutines), returning all batches concatenated in file order.
+func (e *Executor) readParquetFilesConcurrentBatches(ctx context.Context, bucket string, files []string, selectedCols []string) ([]*batch.RecordBatch, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+	if len(files) == 1 {
+		return e.readParquetFileBatches(ctx, bucket, files[0], selectedCols)
+	}
+
+	type result struct {
+		batches []*batch.RecordBatch
+		err     error
+	}
+	results := make([]result, len(files))
+
+	const maxConcurrency = 8
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+
+	for i, f := range files {
+		wg.Add(1)
+		go func(idx int, filePath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			batches, err := e.readParquetFileBatches(ctx, bucket, filePath, selectedCols)
+			results[idx] = result{batches: batches, err: err}
+		}(i, f)
+	}
+	wg.Wait()
+
+	var allBatches []*batch.RecordBatch
+	for i, r := range results {
+		if r.err != nil {
+			return nil, fmt.Errorf("reading file %s: %w", files[i], r.err)
+		}
+		allBatches = append(allBatches, r.batches...)
+	}
+	return allBatches, nil
+}
+
 // readParquetFilesConcurrent reads multiple Parquet files in parallel (up to 8
 // goroutines), returning all rows concatenated in file order. This significantly
 // reduces latency for S3-backed reads where each GET is a network round-trip.
@@ -671,40 +750,10 @@ func (e *Executor) readParquetFilesConcurrent(ctx context.Context, bucket string
 }
 
 func (e *Executor) readParquetFile(ctx context.Context, bucket, path string, selectedCols []string) ([]map[string]any, error) {
-	// Check in-memory result store first (avoids S3 round-trip for same-node stages)
-	if e.resultStore != nil {
-		if data, ok := e.resultStore.Get(path); ok {
-			reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
-			if err != nil {
-				return nil, err
-			}
-			return reader.ReadRows(selectedCols)
-		}
-	}
-
-	// Check LRU cache
-	cacheKey := bucket + "/" + path
-	if data, ok := e.cache.Get(cacheKey); ok {
-		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
-		if err != nil {
-			return nil, err
-		}
-		return reader.ReadRows(selectedCols)
-	}
-
-	rc, _, err := e.store.Get(ctx, bucket, path)
+	data, err := e.getFileData(ctx, bucket, path)
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
-
-	data, err := io.ReadAll(rc)
-	if err != nil {
-		return nil, fmt.Errorf("reading file: %w", err)
-	}
-
-	// Cache the file data
-	e.cache.Put(cacheKey, data)
 
 	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -713,8 +762,35 @@ func (e *Executor) readParquetFile(ctx context.Context, bucket, path string, sel
 	return reader.ReadRows(selectedCols)
 }
 
-func (e *Executor) writeResult(ctx context.Context, task distributed.Task, rows []map[string]any, result *distributed.ResultNotification) error {
-	data, err := e.serializeRows(rows)
+
+// serializeBatches writes columnar batches directly to Parquet bytes.
+func (e *Executor) serializeBatches(batches []*batch.RecordBatch) ([]byte, error) {
+	if len(batches) == 0 {
+		return nil, fmt.Errorf("no batches to serialize")
+	}
+
+	schema := batches[0].Schema
+
+	var buf bytes.Buffer
+	pw, err := parquet.NewWriter(&buf, parquet.Schema{Columns: schema}, parquet.DefaultWriterConfig())
+	if err != nil {
+		return nil, fmt.Errorf("creating parquet writer: %w", err)
+	}
+	for _, b := range batches {
+		rows := b.ToRows()
+		if err := pw.WriteRows(rows); err != nil {
+			return nil, fmt.Errorf("writing rows: %w", err)
+		}
+	}
+	if err := pw.Close(); err != nil {
+		return nil, fmt.Errorf("closing writer: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// writeBatchResult serializes batches and writes via inline/ResultStore/S3 tiering.
+func (e *Executor) writeBatchResult(ctx context.Context, task distributed.Task, batches []*batch.RecordBatch, result *distributed.ResultNotification) error {
+	data, err := e.serializeBatches(batches)
 	if err != nil {
 		return err
 	}
@@ -741,32 +817,25 @@ func (e *Executor) writeResult(ctx context.Context, task distributed.Task, rows 
 		return fmt.Errorf("writing result to S3: %w", err)
 	}
 	result.ResultPath = resultPath
-
 	return nil
 }
 
-// writeResultToPath writes a large result directly to S3 (no inline fast path).
-func (e *Executor) writeResultToPath(ctx context.Context, task distributed.Task, rows []map[string]any, resultPath string, result *distributed.ResultNotification) error {
-	data, err := e.serializeRows(rows)
-	if err != nil {
-		return err
-	}
-
-	result.SizeBytes = int64(len(data))
-
-	// Try in-memory result store first
-	if e.resultStore != nil && e.resultStore.Put(task.QueryID, resultPath, data) {
-		result.ResultPath = resultPath
-		return nil
-	}
-
-	_, err = e.store.Put(ctx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
-	if err != nil {
-		return fmt.Errorf("writing result to S3: %w", err)
-	}
-	result.ResultPath = resultPath
-	return nil
+// batchSource wraps a slice of RecordBatches as an exec.Source.
+type batchSource struct {
+	batches []*batch.RecordBatch
+	idx     int
 }
+
+func (s *batchSource) Init(_ context.Context) error { return nil }
+func (s *batchSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.idx >= len(s.batches) {
+		return nil, nil
+	}
+	b := s.batches[s.idx]
+	s.idx++
+	return b, nil
+}
+func (s *batchSource) Close() error { return nil }
 
 func (e *Executor) serializeRows(rows []map[string]any) ([]byte, error) {
 	schema := schemaFromRows(rows)

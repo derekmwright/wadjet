@@ -12,6 +12,78 @@ import (
 	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
+// ReadFileBatches reads all row groups from a Parquet file into separate RecordBatches
+// (one per row group). Supports column projection via selectedCols. Falls back to
+// row-based reading for schemas containing Decimal, Array, Row, or Map types.
+func ReadFileBatches(reader *pqt.Reader, schema []pqt.Column, selectedCols []string) ([]*batch.RecordBatch, error) {
+	readSchema := schema
+	if len(selectedCols) > 0 {
+		readSchema = projectSchema(schema, selectedCols)
+	}
+
+	// Schemas with types unsupported by the columnar reader fall back to rows
+	if hasUnsupportedColumnarTypes(readSchema) {
+		return readFileBatchesViaRows(reader, readSchema, selectedCols)
+	}
+
+	pqFile := reader.File()
+	rgs := pqFile.RowGroups()
+
+	var batches []*batch.RecordBatch
+	for _, rg := range rgs {
+		b, err := readRowGroupColumnar(rg, readSchema, pqFile)
+		if err != nil {
+			return nil, err
+		}
+		if b != nil {
+			batches = append(batches, b)
+		}
+	}
+	return batches, nil
+}
+
+// readFileBatchesViaRows falls back to row-based reading for unsupported types.
+func readFileBatchesViaRows(reader *pqt.Reader, readSchema []pqt.Column, selectedCols []string) ([]*batch.RecordBatch, error) {
+	rows, err := reader.ReadRows(selectedCols)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return []*batch.RecordBatch{batch.FromRows(readSchema, rows)}, nil
+}
+
+// projectSchema filters schema to only include columns in selectedCols.
+func projectSchema(schema []pqt.Column, selectedCols []string) []pqt.Column {
+	needed := make(map[string]bool, len(selectedCols))
+	for _, c := range selectedCols {
+		needed[c] = true
+	}
+	filtered := make([]pqt.Column, 0, len(selectedCols))
+	for _, col := range schema {
+		if needed[col.Name] {
+			filtered = append(filtered, col)
+		}
+	}
+	if len(filtered) > 0 {
+		return filtered
+	}
+	return schema
+}
+
+// hasUnsupportedColumnarTypes returns true if any column uses a type the
+// direct columnar reader cannot handle (Decimal, Array, Row, Map).
+func hasUnsupportedColumnarTypes(schema []pqt.Column) bool {
+	for _, col := range schema {
+		switch col.Type {
+		case pqt.TypeDecimal, pqt.TypeArray, pqt.TypeRow, pqt.TypeMap:
+			return true
+		}
+	}
+	return false
+}
+
 // ReadFileColumnar reads all row groups from a Parquet reader into a single RecordBatch.
 // Used by the DML executor to read entire files for DELETE/UPDATE operations.
 func ReadFileColumnar(reader *pqt.Reader, schema []pqt.Column) (*batch.RecordBatch, error) {
