@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"container/heap"
 	"context"
 	"sort"
 	"strconv"
@@ -153,6 +154,12 @@ func (s *Sort) finalizeWithSpill() error {
 	return nil
 }
 
+// sortEntry identifies a row within the accumulated batches by batch and row index.
+type sortEntry struct {
+	batchIdx uint32
+	rowIdx   uint16
+}
+
 // finalizeColumnar sorts using typed column comparisons on an index array.
 func (s *Sort) finalizeColumnar() error {
 	if len(s.batches) == 0 {
@@ -160,10 +167,6 @@ func (s *Sort) finalizeColumnar() error {
 	}
 
 	// Build index entries for all active rows
-	type sortEntry struct {
-		batchIdx uint32
-		rowIdx   uint16
-	}
 	entries := make([]sortEntry, 0, s.totalRows)
 	for bi, b := range s.batches {
 		if b.Sel != nil {
@@ -195,10 +198,9 @@ func (s *Sort) finalizeColumnar() error {
 		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, nullsLast: key.NullsLast, compare: cmp}
 	}
 
-	// Sort index using pre-resolved typed comparison kernels — no type switches
+	// Sort comparison function used by both full sort and TopN heap.
 	batches := s.batches
-	sort.SliceStable(entries, func(i, j int) bool {
-		ei, ej := entries[i], entries[j]
+	lessFunc := func(ei, ej sortEntry) bool {
 		bi, bj := batches[ei.batchIdx], batches[ej.batchIdx]
 		ri, rj := int(ei.rowIdx), int(ej.rowIdx)
 		for _, key := range resolved {
@@ -224,7 +226,40 @@ func (s *Sort) finalizeColumnar() error {
 			return cmp < 0
 		}
 		return false
-	})
+	}
+
+	// When Limit is small relative to total rows, use a bounded heap
+	// to find the top Limit entries in O(n log k) instead of O(n log n).
+	if s.Limit > 0 && s.Limit < len(entries)/2 {
+		k := s.Limit
+		// Build a max-heap of size k where the root is the WORST entry
+		// (the one we'd evict first). "Worse" = sorts LATER = inverse of lessFunc.
+		h := &topNHeap{
+			entries: make([]sortEntry, k),
+			less:    lessFunc,
+		}
+		copy(h.entries, entries[:k])
+		heap.Init(h)
+
+		for _, e := range entries[k:] {
+			// If this entry is better than the worst in the heap, replace
+			if lessFunc(e, h.entries[0]) {
+				h.entries[0] = e
+				heap.Fix(h, 0)
+			}
+		}
+
+		// Sort the heap entries to get final order
+		entries = h.entries
+		sort.SliceStable(entries, func(i, j int) bool {
+			return lessFunc(entries[i], entries[j])
+		})
+	} else {
+		// Full sort for unlimited or large-limit queries
+		sort.SliceStable(entries, func(i, j int) bool {
+			return lessFunc(entries[i], entries[j])
+		})
+	}
 
 	// Materialize sorted batches using typed column copies.
 	// When Limit > 0, only materialize the top Limit rows (Top-K).
@@ -458,6 +493,31 @@ func compareAny(a, b any) int {
 	default:
 		return 0
 	}
+}
+
+// topNHeap implements container/heap.Interface for bounded TopN selection.
+// The root is the WORST entry (sorts LAST among the heap), so new entries
+// that are better can replace it. "Worse" = inverse of the sort order.
+type topNHeap struct {
+	entries []sortEntry
+	less    func(a, b sortEntry) bool // sort-order comparator
+}
+
+func (h *topNHeap) Len() int { return len(h.entries) }
+
+// Less returns true if entries[i] is WORSE than entries[j] (should be evicted first).
+// This is the inverse of the sort comparator: a max-heap where root = worst.
+func (h *topNHeap) Less(i, j int) bool {
+	return h.less(h.entries[j], h.entries[i]) // inverted
+}
+func (h *topNHeap) Swap(i, j int) { h.entries[i], h.entries[j] = h.entries[j], h.entries[i] }
+func (h *topNHeap) Push(x any)    { h.entries = append(h.entries, x.(sortEntry)) }
+func (h *topNHeap) Pop() any {
+	old := h.entries
+	n := len(old)
+	x := old[n-1]
+	h.entries = old[:n-1]
+	return x
 }
 
 // appendKeyValue writes a value to a byte buffer without fmt.Sprint overhead.

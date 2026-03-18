@@ -96,6 +96,16 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		return
 	}
 
+	// Save needed columns on join nodes so the physical planner can insert
+	// intermediate projections to drop unneeded columns between joins.
+	if n.Type == NodeJoin && len(needs) > 0 {
+		cols := make([]string, 0, len(needs))
+		for col := range needs {
+			cols = append(cols, col)
+		}
+		n.NeededColumns = cols
+	}
+
 	// For SEMI/ANTI joins, the build side (child[1]) never contributes to output.
 	// Only push join key + filter column refs to the build side, not parent needs.
 	if n.Type == NodeJoin && len(n.Children) == 2 &&
