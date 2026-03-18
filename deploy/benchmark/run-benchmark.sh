@@ -3,12 +3,13 @@
 # Wadjet TPC-H benchmark runner for EC2 instances.
 #
 # Usage:
-#   ./run-benchmark.sh standalone SF1           # Single-node SF1
+#   ./run-benchmark.sh standalone SF1           # Single-node SF1 (uses S3 data)
 #   ./run-benchmark.sh distributed SF1 3        # Distributed SF1, 3 workers
 #
 # Environment (set by Terraform user data):
 #   WADJET_BUCKET  — S3 bucket name
 #   WADJET_REGION  — AWS region
+#   GENERATE_DATA  — Set to "1" to regenerate data instead of using pre-seeded bucket
 #
 # Outputs results to /root/benchmark-results/
 
@@ -18,6 +19,7 @@ MODE="${1:-standalone}"
 SF="${2:-SF1}"
 WORKER_COUNT="${3:-3}"
 RUNS="${BENCHMARK_RUNS:-3}"
+GENERATE="${GENERATE_DATA:-0}"
 
 BUCKET="${WADJET_BUCKET:?Set WADJET_BUCKET}"
 REGION="${WADJET_REGION:?Set WADJET_REGION}"
@@ -59,6 +61,24 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RESULT_FILE"; }
   echo ""
 } | tee "$RESULT_FILE"
 
+# ---- Build common S3 flags ----
+
+S3_FLAGS=(
+  --endpoint="${S3_ENDPOINT}"
+  --ssl
+  --bucket="${BUCKET}"
+  --region="${REGION}"
+)
+
+# Default: use pre-seeded data. Set GENERATE_DATA=1 to regenerate.
+LOAD_FLAGS=()
+if [ "$GENERATE" = "1" ]; then
+  log "GENERATE_DATA=1: will generate and load data"
+else
+  LOAD_FLAGS=(--skip-load)
+  log "Using pre-seeded data from s3://${BUCKET} (set GENERATE_DATA=1 to regenerate)"
+fi
+
 # ---- Run benchmark ----
 
 if [ "$MODE" = "standalone" ]; then
@@ -67,6 +87,8 @@ if [ "$MODE" = "standalone" ]; then
   /usr/local/bin/tpch-bench \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
+    "${S3_FLAGS[@]}" \
+    "${LOAD_FLAGS[@]}" \
     --cpuprofile="${PROF_DIR}/cpu-standalone.prof" \
     --memprofile="${PROF_DIR}/mem-standalone.prof" \
     --profdir="${PROF_DIR}" \
@@ -79,10 +101,8 @@ elif [ "$MODE" = "distributed" ]; then
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     --workers="${WORKER_COUNT}" \
-    --endpoint="${S3_ENDPOINT}" \
-    --ssl \
-    --bucket="${BUCKET}" \
-    --region="${REGION}" \
+    "${S3_FLAGS[@]}" \
+    "${LOAD_FLAGS[@]}" \
     --nats-port=4222 \
     --cpuprofile="${PROF_DIR}/cpu-distributed.prof" \
     --memprofile="${PROF_DIR}/mem-distributed.prof" \

@@ -62,6 +62,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "benchmark" {
   rule {
     id     = "expire-all"
     status = "Enabled"
+    filter {}
     expiration {
       days = 7
     }
