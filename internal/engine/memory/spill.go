@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -48,12 +49,27 @@ func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
 	}, nil
 }
 
-// ShouldSpill returns true if the tracker's memory budget is exhausted.
+// ShouldSpill returns true if memory pressure is high. It checks both the
+// tracker's explicit reservations and the Go runtime's actual heap usage
+// against the budget. This ensures operators that don't call Reserve()
+// (Sort, Aggregate, Window) still spill when the process approaches OOM.
 func (sm *SpillManager) ShouldSpill() bool {
 	if sm.tracker == nil || sm.tracker.Budget() <= 0 {
 		return false
 	}
-	return sm.tracker.Used() > sm.tracker.Budget()*80/100 // spill at 80%
+	budget := sm.tracker.Budget()
+	// Check explicit tracker reservations (HashJoin uses this)
+	if sm.tracker.Used() > budget*80/100 {
+		return true
+	}
+	// Check actual Go heap against budget. Only meaningful when the budget
+	// reflects real system memory (≥100MB), not unit-test micro-budgets.
+	if budget >= 100*1024*1024 {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return int64(m.HeapInuse) > budget*80/100
+	}
+	return false
 }
 
 // SpillRows writes rows to a temporary binary file on disk and returns the file path.

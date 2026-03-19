@@ -430,6 +430,9 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "physical plan error: "+err.Error())
 		return
 	}
+	if physPlan.Cleanup != nil {
+		defer physPlan.Cleanup()
+	}
 
 	// Execute
 	pipeline := physPlan.Pipeline

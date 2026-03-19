@@ -26,6 +26,7 @@ import (
 type PhysicalPlan struct {
 	Pipeline *exec.Pipeline
 	Stages   []Stage // for distributed execution
+	Cleanup  func()  // optional: called after pipeline finishes to clean up spill files
 }
 
 // Stage represents a unit of distributed work with metadata for task creation.
@@ -119,6 +120,47 @@ type Planner struct {
 	QueryLimits    *config.QueryLimits // cost-based query guard (nil = no limits)
 	cteCache       map[string]*cteMaterialized // materialized CTE results
 	scanCache      map[string]*scanCached       // cached scan results for duplicate table scans
+	spillMgr       *memory.SpillManager // shared per-query spill manager (lazy-initialized)
+	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
+}
+
+// getSpillManager returns a shared per-query spill manager, creating it on
+// first call. Uses MemoryBudget if set, otherwise auto-detects from system
+// memory (cgroup or physical). Returns nil if no memory limit can be determined.
+func (p *Planner) getSpillManager() *memory.SpillManager {
+	if p.spillMgr != nil {
+		return p.spillMgr
+	}
+	budget := p.MemoryBudget
+	if budget <= 0 {
+		budget = memory.DetectBudget()
+	}
+	if budget <= 0 {
+		// Fall back to 75% of physical memory
+		if phys := memory.DetectPhysicalMemory(); phys > 0 {
+			budget = int64(float64(phys) * 0.75)
+		}
+	}
+	if budget <= 0 {
+		return nil
+	}
+	p.memTracker = memory.NewTracker("query", budget)
+	dir := p.SpillDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	sm, err := memory.NewSpillManager(dir, p.memTracker)
+	if err != nil {
+		return nil
+	}
+	p.spillMgr = sm
+	return sm
+}
+
+// getMemTracker returns the shared per-query memory tracker.
+// Must be called after getSpillManager().
+func (p *Planner) getMemTracker() *memory.Tracker {
+	return p.memTracker
 }
 
 // cteMaterialized stores the pre-computed results of a CTE.
@@ -396,6 +438,8 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
 	p.planCtx = ctx   // store for subquery runner context propagation
 	p.scanCache = nil // reset per-query scan cache
+	p.spillMgr = nil  // reset per-query spill manager
+	p.memTracker = nil
 	// Propagate CTE definitions from the logical plan so scalar subqueries
 	// (e.g., in WHERE/HAVING) can resolve CTE table references.
 	if len(node.CTEs) > 0 {
@@ -441,6 +485,11 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 			Sink:   sink,
 			Workers: pipelineWorkers,
 		},
+	}
+
+	// Attach spill file cleanup
+	if sm := p.spillMgr; sm != nil {
+		plan.Cleanup = func() { sm.Cleanup() }
 	}
 
 	// Generate distributed stages for coordinator dispatch
@@ -1006,17 +1055,10 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.BuildTableAlias = alias
 	}
 
-	// Attach memory tracker and spill manager if budget is configured
-	if p.MemoryBudget > 0 {
-		tracker := memory.NewTracker("hash_join", p.MemoryBudget)
-		hj.MemTracker = tracker
-		spillDir := p.SpillDir
-		if spillDir == "" {
-			spillDir = os.TempDir()
-		}
-		if sm, err := memory.NewSpillManager(spillDir, tracker); err == nil {
-			hj.Spill = sm
-		}
+	// Attach shared spill manager (auto-detects memory limit)
+	if sm := p.getSpillManager(); sm != nil {
+		hj.Spill = sm
+		hj.MemTracker = p.getMemTracker()
 	}
 
 	// For semi/anti joins without a filter, enable key-only build:
@@ -1819,6 +1861,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	}
 
 	hashAgg := exec.NewHashAggregate(groupByCols, aggCols)
+	if sm := p.getSpillManager(); sm != nil {
+		hashAgg.Spill = sm
+	}
 
 	// For GROUPING SETS: wrap with a projection that adds NULL columns
 	// for the group-by columns not in this particular set.
@@ -2022,6 +2067,9 @@ func (p *Planner) buildSort(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 
 	sortOp := exec.NewSort(keys)
+	if sm := p.getSpillManager(); sm != nil {
+		sortOp.Spill = sm
+	}
 
 	return &sortSourceAdapter{
 		childSource: childSource,
@@ -2162,6 +2210,9 @@ func (p *Planner) buildWindow(ctx context.Context, node *logical.Node) (exec.Sou
 	}
 
 	winOp := exec.NewWindow(winCols)
+	if sm := p.getSpillManager(); sm != nil {
+		winOp.Spill = sm
+	}
 
 	return &windowSourceAdapter{
 		childSource: childSource,

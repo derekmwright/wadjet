@@ -170,6 +170,9 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building physical plan: %w", err)
 	}
+	if physPlan.Cleanup != nil {
+		defer physPlan.Cleanup()
+	}
 
 	pipeline := physPlan.Pipeline
 	if err := pipeline.Run(ctx); err != nil {
