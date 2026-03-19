@@ -49,40 +49,101 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 	if op.useIntKey && len(op.keyIdx) == 1 && op.keyIdx[0] >= 0 {
 		col := in.Columns[op.keyIdx[0]]
 		if in.Sel != nil {
-			for _, idx := range in.Sel {
-				if col.Nulls.IsNullFast(int(idx)) {
-					continue // null keys never match
+			if !col.Nulls.HasNulls() {
+				// Null-free + selection: skip null checks, inline typed access
+				switch col.Type {
+				case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+					data := col.Int32Data
+					for _, idx := range in.Sel {
+						if bloomContains(op.bloom, op.bloomMask, bloomHashInt(int64(data[idx]))) {
+							sel = append(sel, idx)
+						}
+					}
+				default:
+					data := col.Int64Data
+					for _, idx := range in.Sel {
+						if bloomContains(op.bloom, op.bloomMask, bloomHashInt(data[idx])) {
+							sel = append(sel, idx)
+						}
+					}
 				}
-				key, ok := intKeyFromVector(col, int(idx))
-				if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(key)) {
-					sel = append(sel, idx)
+			} else {
+				for _, idx := range in.Sel {
+					if col.Nulls.IsNullFast(int(idx)) {
+						continue
+					}
+					key, ok := intKeyFromVector(col, int(idx))
+					if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(key)) {
+						sel = append(sel, idx)
+					}
 				}
 			}
 		} else {
-			for i := 0; i < in.Len; i++ {
-				if col.Nulls.IsNullFast(i) {
-					continue
+			if !col.Nulls.HasNulls() {
+				// Null-free: inline typed data access, no null checks
+				switch col.Type {
+				case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+					data := col.Int32Data
+					for i := 0; i < in.Len; i++ {
+						if bloomContains(op.bloom, op.bloomMask, bloomHashInt(int64(data[i]))) {
+							sel = append(sel, uint16(i))
+						}
+					}
+				default:
+					data := col.Int64Data
+					for i := 0; i < in.Len; i++ {
+						if bloomContains(op.bloom, op.bloomMask, bloomHashInt(data[i])) {
+							sel = append(sel, uint16(i))
+						}
+					}
 				}
-				key, ok := intKeyFromVector(col, i)
-				if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(key)) {
-					sel = append(sel, uint16(i))
+			} else {
+				for i := 0; i < in.Len; i++ {
+					if col.Nulls.IsNullFast(i) {
+						continue
+					}
+					key, ok := intKeyFromVector(col, i)
+					if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(key)) {
+						sel = append(sel, uint16(i))
+					}
 				}
 			}
 		}
 	} else if op.useDualIntKey && len(op.keyIdx) == 2 && op.keyIdx[0] >= 0 && op.keyIdx[1] >= 0 {
 		col0, col1 := in.Columns[op.keyIdx[0]], in.Columns[op.keyIdx[1]]
+		noNulls := !col0.Nulls.HasNulls() && !col1.Nulls.HasNulls()
 		if in.Sel != nil {
-			for _, idx := range in.Sel {
-				a, b, ok := dualIntKeyFromVectors(col0, col1, int(idx))
-				if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
-					sel = append(sel, idx)
+			if noNulls {
+				for _, idx := range in.Sel {
+					a := intValFromCol(col0, int(idx))
+					b := intValFromCol(col1, int(idx))
+					if bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
+						sel = append(sel, idx)
+					}
+				}
+			} else {
+				for _, idx := range in.Sel {
+					a, b, ok := dualIntKeyFromVectors(col0, col1, int(idx))
+					if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
+						sel = append(sel, idx)
+					}
 				}
 			}
 		} else {
-			for i := 0; i < in.Len; i++ {
-				a, b, ok := dualIntKeyFromVectors(col0, col1, i)
-				if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
-					sel = append(sel, uint16(i))
+			if noNulls {
+				for i := 0; i < in.Len; i++ {
+					a := intValFromCol(col0, i)
+					b := intValFromCol(col1, i)
+					if bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
+						sel = append(sel, uint16(i))
+					}
+				}
+			} else {
+				for i := 0; i < in.Len; i++ {
+					a, b, ok := dualIntKeyFromVectors(col0, col1, i)
+					if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
+						sel = append(sel, uint16(i))
+					}
 				}
 			}
 		}
@@ -142,6 +203,17 @@ func (op *BloomFilterOp) Clone() UnaryOperator {
 		leftKeys:      op.leftKeys,
 		useIntKey:     op.useIntKey,
 		useDualIntKey: op.useDualIntKey,
+	}
+}
+
+// intValFromCol reads an int64 value from a column without null checks.
+// Caller must ensure the row is not null.
+func intValFromCol(col *batch.Vector, row int) int64 {
+	switch col.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return int64(col.Int32Data[row])
+	default:
+		return col.Int64Data[row]
 	}
 }
 
