@@ -65,7 +65,6 @@ type HashAggregate struct {
 	NullGroupCols []string             // GROUPING SETS: columns to output as NULL
 
 	mu            sync.Mutex
-	groups        map[string]*groupState
 	keys          [][]any
 	serializedKeys []string // pre-serialized keys matching h.keys order
 	groupColIdx   []int
@@ -207,7 +206,6 @@ func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 }
 
 func (h *HashAggregate) Init(_ context.Context) error {
-	h.groups = make(map[string]*groupState)
 	h.strGroupIndex = newStrHashTable(4096)
 	h.strGroupStates = nil
 	h.keys = nil
@@ -599,7 +597,6 @@ func (h *HashAggregate) migrateCompactToGeneric() {
 	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 	for i, gs := range h.intGroupStates {
 		key := h.compactKeys[i]
-		h.groups[key] = gs
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
@@ -684,11 +681,9 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 			gs.extraState[i] = &minMaxByState{isMin: false}
 		}
 	}
-	key := string(h.keyBuf)
-	h.groups[key] = gs
 	h.strGroupStates = append(h.strGroupStates, gs)
 	h.keys = append(h.keys, keyVals)
-	h.serializedKeys = append(h.serializedKeys, key)
+	h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
 
 	h.updateGroup(gs, b, row)
 }
@@ -954,7 +949,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		if h.useIntGroupKey || h.useCompactGroupKey {
 			gs = h.intGroupStates[start+i]
 		} else {
-			gs = h.groups[h.serializedKeys[start+i]]
+			gs = h.strGroupStates[start+i]
 		}
 
 		// Set group-by columns
@@ -1066,7 +1061,8 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	if h.outputPos >= len(h.keys) {
 		h.keys = nil
 		h.serializedKeys = nil
-		h.groups = nil
+		h.strGroupStates = nil
+		h.strGroupIndex = nil
 	}
 	return out, nil
 }
@@ -1122,14 +1118,18 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 
 	for i := range o.keys {
 		key := o.serializedKeys[i]
-		oGS := o.groups[key]
+		oGS := o.strGroupStates[i]
 
-		if gs, ok := h.groups[key]; ok {
+		gsIdx, found := h.strGroupIndex.Get([]byte(key))
+		if found {
+			gs := h.strGroupStates[gsIdx]
 			for j := range gs.accs {
 				gs.accs[j].Merge(&oGS.accs[j])
 			}
 		} else {
-			h.groups[key] = oGS
+			newIdx := int32(len(h.strGroupStates))
+			h.strGroupIndex.Put([]byte(key), newIdx)
+			h.strGroupStates = append(h.strGroupStates, oGS)
 			h.keys = append(h.keys, oGS.keyValues)
 			h.serializedKeys = append(h.serializedKeys, key)
 		}
@@ -1147,16 +1147,12 @@ func (h *HashAggregate) migrateToGenericMap() {
 		return
 	}
 	// Migrate int group key → generic path
-	if h.groups == nil {
-		h.groups = make(map[string]*groupState, len(h.intGroupStates))
-	}
 	h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
 	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 	h.serializedKeys = make([]string, 0, len(h.intGroupStates))
 	for _, gs := range h.intGroupStates {
 		h.keyBuf = h.keyBuf[:0]
 		key := serializeKey(h.keyBuf, gs.keyValues)
-		h.groups[key] = gs
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
