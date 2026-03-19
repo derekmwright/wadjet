@@ -1006,6 +1006,81 @@ func TestCollectSinkClose(t *testing.T) {
 	}
 }
 
+// TestSinkDetachPooledBatch verifies that Sort, CollectSink, and Window
+// correctly detach batches from the pool so that Release() after Consume()
+// does not recycle memory that the sink still references.
+func TestSinkDetachPooledBatch(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+	pool := batch.NewBatchPool(schema, 4)
+
+	// Get a batch from the pool, write known data
+	b := pool.Get()
+	ids := b.ColumnByName("id").Int64Data
+	ids[0] = 42
+	ids[1] = 99
+	b.Len = 2
+
+	// --- Test CollectSink ---
+	collect := &CollectSink{}
+	collect.Init(context.Background())
+	collect.Consume(context.Background(), b)
+
+	// Pipeline would call Release after Consume. If Detach wasn't called,
+	// the batch goes back to the pool and its data gets overwritten.
+	b.Release()
+
+	// Get a new batch (should recycle) and overwrite
+	b2 := pool.Get()
+	b2.ColumnByName("id").Int64Data[0] = 0
+	b2.ColumnByName("id").Int64Data[1] = 0
+	b2.Len = 2
+
+	// Verify CollectSink still has original data
+	collect.Finalize(context.Background())
+	batches := collect.Batches()
+	if len(batches) != 1 {
+		t.Fatalf("expected 1 batch, got %d", len(batches))
+	}
+	got := batches[0].ColumnByName("id").Int64Data
+	if got[0] != 42 || got[1] != 99 {
+		t.Errorf("CollectSink data corrupted: got [%d, %d], want [42, 99]", got[0], got[1])
+	}
+
+	// --- Test Sort ---
+	s := &Sort{
+		Keys: []SortKey{{Column: "id", Order: Ascending}},
+	}
+	s.Init(context.Background())
+
+	b3 := pool.Get()
+	b3.ColumnByName("id").Int64Data[0] = 7
+	b3.ColumnByName("id").Int64Data[1] = 3
+	b3.Len = 2
+	s.Consume(context.Background(), b3)
+	b3.Release()
+
+	// Overwrite recycled batch
+	b4 := pool.Get()
+	b4.ColumnByName("id").Int64Data[0] = 0
+	b4.ColumnByName("id").Int64Data[1] = 0
+	b4.Len = 2
+
+	s.Finalize(context.Background())
+	sorted, _ := s.Next(context.Background())
+	if sorted == nil {
+		t.Fatal("Sort produced nil batch")
+	}
+	sortedIDs := sorted.ColumnByName("id").Int64Data
+	if sortedIDs[0] != 3 || sortedIDs[1] != 7 {
+		t.Errorf("Sort data corrupted: got [%d, %d], want [3, 7]", sortedIDs[0], sortedIDs[1])
+	}
+
+	b2.Release()
+	b4.Release()
+}
+
 func TestSliceSourceClose(t *testing.T) {
 	source := NewSliceSource(nil, nil)
 	if err := source.Close(); err != nil {

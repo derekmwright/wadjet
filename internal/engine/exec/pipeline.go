@@ -374,6 +374,7 @@ func (s *CollectSink) Init(_ context.Context) error {
 
 func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
+	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
 	s.batches = append(s.batches, b)
 	s.mu.Unlock()
 	return nil

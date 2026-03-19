@@ -64,6 +64,7 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	if s.schema == nil {
 		s.schema = b.Schema
 	}
+	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
 	s.batches = append(s.batches, b)
 	s.totalRows += b.ActiveLen()
 
