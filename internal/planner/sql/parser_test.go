@@ -1596,3 +1596,111 @@ func TestQualify(t *testing.T) {
 		})
 	}
 }
+
+// --- Sprint 3 tests: ANY/ALL/SOME, Tuple, ALTER TABLE ---
+
+func TestTupleExpr(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{"two elements", "SELECT * FROM t WHERE (a, b) IN (SELECT x, y FROM u)", "(a, b)"},
+		{"three elements", "SELECT * FROM t WHERE (a, b, c) = (1, 2, 3)", "(a, b, c)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			info, _ := ExtractSelect(parsed)
+			if info.Where == "" {
+				t.Fatal("WHERE clause not parsed")
+			}
+			if !strings.Contains(info.Where, tt.want) {
+				t.Errorf("WHERE = %q, should contain %q", info.Where, tt.want)
+			}
+		})
+	}
+}
+
+func TestAnyAllSome(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{"any values", "SELECT * FROM t WHERE x = ANY (1, 2, 3)", "= ANY"},
+		{"all values", "SELECT * FROM t WHERE x > ALL (10, 20)", "> ALL"},
+		{"some values", "SELECT * FROM t WHERE x != SOME (5, 6)", "!= SOME"},
+		{"any subquery", "SELECT * FROM t WHERE x = ANY (SELECT id FROM u)", "= ANY"},
+		{"all subquery", "SELECT * FROM t WHERE x < ALL (SELECT val FROM u)", "< ALL"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			info, _ := ExtractSelect(parsed)
+			if info.Where == "" {
+				t.Fatal("WHERE clause not parsed")
+			}
+			if !strings.Contains(info.Where, tt.want) {
+				t.Errorf("WHERE = %q, should contain %q", info.Where, tt.want)
+			}
+		})
+	}
+}
+
+func TestAlterTable(t *testing.T) {
+	tests := []struct {
+		name       string
+		sql        string
+		table      string
+		action     string
+		colName    string
+		newColName string
+		colType    string
+		nullable   bool
+	}{
+		{"add column", "ALTER TABLE users ADD COLUMN age INT", "users", "ADD COLUMN", "age", "", "int", true},
+		{"add column not null", "ALTER TABLE users ADD COLUMN email VARCHAR(255) NOT NULL", "users", "ADD COLUMN", "email", "", "varchar(255)", false},
+		{"add without column keyword", "ALTER TABLE orders ADD total DECIMAL(10,2)", "orders", "ADD COLUMN", "total", "", "decimal(10,2)", true},
+		{"drop column", "ALTER TABLE users DROP COLUMN age", "users", "DROP COLUMN", "age", "", "", false},
+		{"drop without column keyword", "ALTER TABLE users DROP age", "users", "DROP COLUMN", "age", "", "", false},
+		{"rename column", "ALTER TABLE users RENAME COLUMN name TO full_name", "users", "RENAME COLUMN", "name", "full_name", "", false},
+		{"rename without column keyword", "ALTER TABLE users RENAME name TO full_name", "users", "RENAME COLUMN", "name", "full_name", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if parsed.Type != QueryAlterTable {
+				t.Fatalf("got type %v, want QueryAlterTable", parsed.Type)
+			}
+			a := parsed.AlterTable
+			if a.Table != tt.table {
+				t.Errorf("table = %q, want %q", a.Table, tt.table)
+			}
+			if a.Action != tt.action {
+				t.Errorf("action = %q, want %q", a.Action, tt.action)
+			}
+			if a.ColumnName != tt.colName {
+				t.Errorf("column = %q, want %q", a.ColumnName, tt.colName)
+			}
+			if tt.newColName != "" && a.NewColumnName != tt.newColName {
+				t.Errorf("new column = %q, want %q", a.NewColumnName, tt.newColName)
+			}
+			if tt.colType != "" && a.ColumnType != tt.colType {
+				t.Errorf("type = %q, want %q", a.ColumnType, tt.colType)
+			}
+			if tt.action == "ADD COLUMN" && a.Nullable != tt.nullable {
+				t.Errorf("nullable = %v, want %v", a.Nullable, tt.nullable)
+			}
+		})
+	}
+}

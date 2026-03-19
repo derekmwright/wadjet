@@ -20,6 +20,7 @@ type ParsedQuery struct {
 	DropTable      *DropTableInfo
 	CreateView     *CreateViewInfo
 	DropView       *DropViewInfo
+	AlterTable     *AlterTableInfo
 	Update         *UpdateInfo
 	Delete         *DeleteInfo
 	Insert         *InsertInfo
@@ -39,6 +40,16 @@ type CreateViewInfo struct {
 type DropViewInfo struct {
 	Name     string
 	IfExists bool
+}
+
+// AlterTableInfo holds details for an ALTER TABLE statement.
+type AlterTableInfo struct {
+	Table         string
+	Action        string // "ADD COLUMN", "DROP COLUMN", "RENAME COLUMN"
+	ColumnName    string
+	NewColumnName string // for RENAME COLUMN
+	ColumnType    string // for ADD COLUMN
+	Nullable      bool   // for ADD COLUMN (default true)
 }
 
 // CTEDef represents a Common Table Expression definition.
@@ -138,6 +149,7 @@ const (
 	QueryInsert
 	QueryCreateView
 	QueryDropView
+	QueryAlterTable
 	QueryUnsupported
 )
 
@@ -172,6 +184,9 @@ func Parse(sql string) (*ParsedQuery, error) {
 		return parseDelete(trimmed, l)
 	case TokenKWInsert:
 		return parseInsert(trimmed, l)
+	case TokenKWAlter:
+		l.nextToken() // consume ALTER
+		return parseAlterTable(trimmed, l)
 	}
 
 	// Pre-parse CTEs — extract WITH ... AS (...) clauses
@@ -875,6 +890,111 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 	}
 
 	return defs, nil
+}
+
+// parseAlterTable handles: ALTER TABLE name ADD/DROP/RENAME COLUMN ...
+// ALTER has already been consumed.
+func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
+	tableTok := l.nextToken()
+	if tableTok.typ != TokenKWTable {
+		return nil, fmt.Errorf("expected TABLE after ALTER")
+	}
+
+	nameTok := l.nextToken()
+	if nameTok.typ != TokenIdent {
+		return nil, fmt.Errorf("ALTER TABLE: table name is required")
+	}
+
+	info := &AlterTableInfo{
+		Table:    strings.ToLower(nameTok.val),
+		Nullable: true,
+	}
+
+	actionTok := l.nextToken()
+	switch actionTok.typ {
+	case TokenKWAdd:
+		// ADD [COLUMN] name TYPE [NOT NULL]
+		info.Action = "ADD COLUMN"
+		tok := l.nextToken()
+		if tok.typ == TokenKWColumn {
+			tok = l.nextToken() // skip optional COLUMN keyword
+		}
+		if tok.typ != TokenIdent {
+			return nil, fmt.Errorf("ALTER TABLE ADD: column name is required")
+		}
+		info.ColumnName = strings.ToLower(tok.val)
+
+		typeTok := l.nextToken()
+		if typeTok.typ != TokenIdent {
+			return nil, fmt.Errorf("ALTER TABLE ADD: column type is required")
+		}
+		info.ColumnType = strings.ToLower(typeTok.val)
+
+		// Optional type precision
+		if l.peekToken().typ == TokenLParen {
+			l.nextToken() // (
+			prec := l.nextToken()
+			info.ColumnType += "(" + prec.val
+			if l.peekToken().typ == TokenComma {
+				l.nextToken()
+				scale := l.nextToken()
+				info.ColumnType += "," + scale.val
+			}
+			l.nextToken() // )
+			info.ColumnType += ")"
+		}
+
+		// Optional NOT NULL
+		if l.peekToken().typ == TokenKWNot {
+			l.nextToken()
+			l.nextToken() // NULL
+			info.Nullable = false
+		}
+
+	case TokenKWDrop:
+		// DROP [COLUMN] name
+		info.Action = "DROP COLUMN"
+		tok := l.nextToken()
+		if tok.typ == TokenKWColumn {
+			tok = l.nextToken()
+		}
+		if tok.typ != TokenIdent {
+			return nil, fmt.Errorf("ALTER TABLE DROP: column name is required")
+		}
+		info.ColumnName = strings.ToLower(tok.val)
+
+	case TokenKWRename:
+		// RENAME [COLUMN] old TO new
+		info.Action = "RENAME COLUMN"
+		tok := l.nextToken()
+		if tok.typ == TokenKWColumn {
+			tok = l.nextToken()
+		}
+		if tok.typ != TokenIdent {
+			return nil, fmt.Errorf("ALTER TABLE RENAME: column name is required")
+		}
+		info.ColumnName = strings.ToLower(tok.val)
+
+		toTok := l.nextToken()
+		if toTok.typ != TokenKWTo {
+			return nil, fmt.Errorf("ALTER TABLE RENAME: expected TO after column name")
+		}
+
+		newTok := l.nextToken()
+		if newTok.typ != TokenIdent {
+			return nil, fmt.Errorf("ALTER TABLE RENAME: new column name is required")
+		}
+		info.NewColumnName = strings.ToLower(newTok.val)
+
+	default:
+		return nil, fmt.Errorf("ALTER TABLE: expected ADD, DROP, or RENAME, got %q", actionTok.val)
+	}
+
+	return &ParsedQuery{
+		Type:       QueryAlterTable,
+		SQL:        sql,
+		AlterTable: info,
+	}, nil
 }
 
 // lexParseCreateView handles: CREATE [OR REPLACE] VIEW <name> AS <query>

@@ -326,6 +326,41 @@ func (i *IntervalLit) String() string {
 	return fmt.Sprintf("INTERVAL '%d' %s", i.Value, strings.ToUpper(i.Unit))
 }
 
+// --- Tuple (row constructor) ---
+
+// TupleNode represents a tuple expression: (a, b, c).
+type TupleNode struct {
+	Elements []Node
+}
+
+func (*TupleNode) nodeTag() {}
+func (t *TupleNode) String() string {
+	parts := make([]string, len(t.Elements))
+	for i, e := range t.Elements {
+		parts[i] = e.String()
+	}
+	return "(" + strings.Join(parts, ", ") + ")"
+}
+
+// --- ANY/ALL/SOME ---
+
+// AnyAllExpr is expr op ANY/ALL/SOME (subquery or values).
+type AnyAllExpr struct {
+	Left     Node
+	Op       string // =, !=, <, <=, >, >=
+	Modifier string // "ANY", "ALL", "SOME"
+	Values   []Node // value list or single SubqueryNode
+}
+
+func (*AnyAllExpr) nodeTag() {}
+func (a *AnyAllExpr) String() string {
+	vals := make([]string, len(a.Values))
+	for i, v := range a.Values {
+		vals[i] = v.String()
+	}
+	return a.Left.String() + " " + a.Op + " " + a.Modifier + " (" + strings.Join(vals, ", ") + ")"
+}
+
 // --- Subquery ---
 
 // SubqueryNode wraps a subquery as raw SQL.

@@ -937,7 +937,7 @@ func (p *selectParser) parseComparison() (Node, error) {
 		savedSimStart := p.lex.start
 		savedSimWidth := p.lex.width
 		p.advance() // consume SIMILAR
-		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "TO") {
+		if (p.peek() == TokenIdent || p.peek() == TokenKWTo) && strings.EqualFold(p.cur.val, "TO") {
 			p.advance() // consume TO
 			pattern, err := p.parseAddition()
 			if err != nil {
@@ -979,6 +979,42 @@ func (p *selectParser) parseComparison() (Node, error) {
 		p.advance()
 	default:
 		return left, nil
+	}
+
+	// Check for ANY/ALL/SOME modifier: expr op ANY(...) / ALL(...) / SOME(...)
+	if p.peek() == TokenIdent || p.peek() == TokenKWAll {
+		upper := strings.ToUpper(p.cur.val)
+		if upper == "ANY" || upper == "ALL" || upper == "SOME" {
+			p.advance() // consume ANY/ALL/SOME
+			if _, err := p.expect(TokenLParen); err != nil {
+				return nil, fmt.Errorf("expected ( after %s", upper)
+			}
+			// Check for subquery
+			if p.isKeyword(TokenKWSelect) {
+				subSQL := p.consumeBalancedParens()
+				if _, err := p.expect(TokenRParen); err != nil {
+					return nil, fmt.Errorf("expected ) after %s subquery", upper)
+				}
+				return &AnyAllExpr{Left: left, Op: op, Modifier: upper, Values: []Node{&SubqueryNode{SQL: subSQL}}}, nil
+			}
+			// Value list
+			var values []Node
+			for {
+				val, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				values = append(values, val)
+				if p.peek() != TokenComma {
+					break
+				}
+				p.advance()
+			}
+			if _, err := p.expect(TokenRParen); err != nil {
+				return nil, fmt.Errorf("expected ) after %s value list", upper)
+			}
+			return &AnyAllExpr{Left: left, Op: op, Modifier: upper, Values: values}, nil
+		}
 	}
 
 	right, err := p.parseAddition()
@@ -1142,6 +1178,22 @@ func (p *selectParser) parsePrimary() (Node, error) {
 		inner, err := p.parseExpr()
 		if err != nil {
 			return nil, err
+		}
+		// Check for tuple: (a, b, c)
+		if p.peek() == TokenComma {
+			elements := []Node{inner}
+			for p.peek() == TokenComma {
+				p.advance() // consume ,
+				elem, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				elements = append(elements, elem)
+			}
+			if _, err := p.expect(TokenRParen); err != nil {
+				return nil, fmt.Errorf("expected ) after tuple")
+			}
+			return &TupleNode{Elements: elements}, nil
 		}
 		if _, err := p.expect(TokenRParen); err != nil {
 			return nil, fmt.Errorf("expected )")
