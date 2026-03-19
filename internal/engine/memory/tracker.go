@@ -77,6 +77,15 @@ func (t *Tracker) Name() string {
 	return t.name
 }
 
+// ForceReserve adds n bytes without checking or rolling back on over-budget.
+// Used by operators that need to track usage for spill detection without failing.
+func (t *Tracker) ForceReserve(n int64) {
+	t.used.Add(n)
+	if t.parent != nil {
+		t.parent.ForceReserve(n)
+	}
+}
+
 // Reset resets the usage counter.
 func (t *Tracker) Reset() {
 	t.used.Store(0)

@@ -8,7 +8,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -30,12 +29,11 @@ const (
 
 // SpillManager handles spilling data to disk when memory budget is exceeded.
 type SpillManager struct {
-	dir          string
-	tracker      *Tracker
-	mu           sync.Mutex
-	files        []string
-	nextID       atomic.Int64
-	baselineHeap uint64 // HeapInuse at creation time, for delta-based pressure detection
+	dir     string
+	tracker *Tracker
+	mu      sync.Mutex
+	files   []string
+	nextID  atomic.Int64
 }
 
 // NewSpillManager creates a spill manager that writes temp files to the given directory.
@@ -44,42 +42,35 @@ func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
 	if err := os.MkdirAll(spillDir, 0700); err != nil {
 		return nil, fmt.Errorf("creating spill dir: %w", err)
 	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
 	return &SpillManager{
-		dir:          spillDir,
-		tracker:      tracker,
-		baselineHeap: m.HeapInuse,
+		dir:     spillDir,
+		tracker: tracker,
 	}, nil
 }
 
-// ShouldSpill returns true if memory pressure is high. It checks both the
-// tracker's explicit reservations and the Go runtime's actual heap usage
-// against the budget. This ensures operators that don't call Reserve()
-// (Sort, Aggregate, Window) still spill when the process approaches OOM.
+// ShouldSpill returns true if the tracker's memory budget is exhausted.
+// Operators should call TrackBatch() to register their allocations.
 func (sm *SpillManager) ShouldSpill() bool {
 	if sm.tracker == nil || sm.tracker.Budget() <= 0 {
 		return false
 	}
-	budget := sm.tracker.Budget()
-	// Check explicit tracker reservations (HashJoin uses this)
-	if sm.tracker.Used() > budget*80/100 {
-		return true
+	return sm.tracker.Used() > sm.tracker.Budget()*80/100 // spill at 80%
+}
+
+// TrackBatch adds an estimated batch size to the memory tracker.
+// Unlike Reserve(), this always succeeds — it accumulates usage past the
+// budget so ShouldSpill() can detect the threshold crossing.
+func (sm *SpillManager) TrackBatch(bytes int64) {
+	if sm.tracker != nil && bytes > 0 {
+		sm.tracker.ForceReserve(bytes)
 	}
-	// Check actual Go heap growth since query start. Only meaningful when
-	// the budget reflects real system memory (≥100MB), not unit-test
-	// micro-budgets. Uses delta from baseline to ignore pre-existing heap
-	// from the server, NATS, etc.
-	if budget >= 100*1024*1024 {
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		growth := int64(m.HeapInuse) - int64(sm.baselineHeap)
-		if growth < 0 {
-			growth = 0
-		}
-		return growth > budget*70/100
+}
+
+// ResetTracking resets the memory tracker after spilling frees memory.
+func (sm *SpillManager) ResetTracking() {
+	if sm.tracker != nil {
+		sm.tracker.Reset()
 	}
-	return false
 }
 
 // SpillRows writes rows to a temporary binary file on disk and returns the file path.

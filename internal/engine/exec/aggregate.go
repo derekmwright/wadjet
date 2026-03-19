@@ -233,6 +233,11 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 		h.resolveIndices(b)
 	}
 
+	// Track memory usage for spill pressure detection
+	if h.Spill != nil {
+		h.Spill.TrackBatch(estimateBatchBytes(b))
+	}
+
 	// Spill input batch to disk if memory pressure is high.
 	// The spilled rows are re-processed during Finalize.
 	if h.Spill != nil && h.Spill.ShouldSpill() {
