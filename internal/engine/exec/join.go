@@ -432,6 +432,19 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						}
 						h.intIndex.Put(key, 0)
 					}
+				} else if !col.Nulls.HasNulls() {
+					switch col.Type {
+					case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+						data := col.Int32Data
+						for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+							h.intIndex.Put(int64(data[rowIdx]), 0)
+						}
+					default:
+						data := col.Int64Data
+						for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+							h.intIndex.Put(data[rowIdx], 0)
+						}
+					}
 				} else {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 						key, ok := intKeyFromVector(col, rowIdx)
@@ -530,6 +543,21 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 					h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
 					h.buildRows++
 				}
+			} else if !col.Nulls.HasNulls() {
+				// Null-free: inline typed data access, skip null checks
+				switch col.Type {
+				case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+					data := col.Int32Data
+					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+						h.arenaAppendInt(int64(data[rowIdx]), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+					}
+				default:
+					data := col.Int64Data
+					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+						h.arenaAppendInt(data[rowIdx], buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+					}
+				}
+				h.buildRows += int64(b.Len)
 			} else {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 					key, ok := intKeyFromVector(col, rowIdx)
