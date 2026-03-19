@@ -96,7 +96,7 @@ func (b *RecordBatch) Reset(numRows int) {
 	b.Sel = nil
 	for _, col := range b.Columns {
 		col.Len = numRows
-		col.Nulls = NewBitmap(numRows)
+		col.Nulls.ResetNonNull(numRows)
 		if col.Type == TypeString || col.Type == TypeBytes {
 			col.BytesData.Reset()
 		}

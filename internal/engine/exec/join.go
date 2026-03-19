@@ -1056,6 +1056,12 @@ type HashJoinProbe struct {
 	// This avoids allocating and gathering unneeded intermediate columns
 	// in multi-way join pipelines.
 	OutputFilter map[string]bool
+
+	// outPool caches output batches for reuse. Created on first Execute
+	// when the output schema is known. Eliminates per-batch allocation
+	// in multi-way join pipelines where intermediate batches are released
+	// back to the pool after the next operator consumes them.
+	outPool *batch.BatchPool
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
@@ -1149,8 +1155,23 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		return nil, nil
 	}
 
-	// Build output batch using precomputed column source mapping
-	out := batch.NewRecordBatch(outSchema, len(pairs))
+	// Build output batch using precomputed column source mapping.
+	// Use pooled batch when output fits within DefaultBatchSize to avoid
+	// per-batch allocation. The pipeline releases intermediate batches
+	// back to this pool after the next operator consumes them.
+	var out *batch.RecordBatch
+	if len(pairs) <= batch.DefaultBatchSize {
+		if p.outPool == nil {
+			p.outPool = batch.NewBatchPool(outSchema, batch.DefaultBatchSize)
+		}
+		out = p.outPool.Get()
+		out.Len = len(pairs)
+		for _, col := range out.Columns {
+			col.Len = len(pairs)
+		}
+	} else {
+		out = batch.NewRecordBatch(outSchema, len(pairs))
+	}
 
 	// Pre-extract probe row indices for bulk gather
 	if cap(p.indexBuf) < len(pairs) {

@@ -107,6 +107,25 @@ func (b *Bitmap) Words() []uint64 {
 	return b.data
 }
 
+// ResetNonNull resets the bitmap to all non-null (all bits 1) for n elements,
+// reusing the existing backing slice when capacity allows. This avoids
+// allocation on the batch pool hot path.
+func (b *Bitmap) ResetNonNull(n int) {
+	words := (n + 63) / 64
+	if cap(b.data) >= words {
+		b.data = b.data[:words]
+	} else {
+		b.data = make([]uint64, words)
+	}
+	for i := range b.data {
+		b.data[i] = ^uint64(0)
+	}
+	if rem := n % 64; rem > 0 {
+		b.data[len(b.data)-1] = (uint64(1) << rem) - 1
+	}
+	b.len = n
+}
+
 // Grow returns a bitmap that can hold at least newLen bits, preserving existing data.
 // If the current bitmap is already large enough, it is returned as-is.
 func (b Bitmap) Grow(newLen int) Bitmap {

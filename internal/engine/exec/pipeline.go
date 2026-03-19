@@ -72,9 +72,15 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 
 		exhausted := false
 		for _, op := range p.Ops {
+			prev := b
 			b, err = op.Execute(ctx, b)
 			if err != nil {
 				return fmt.Errorf("operator execute: %w", err)
+			}
+			// Release intermediate batch when operator created a new one.
+			// Returns source batches to scan pool, probe output to probe pool.
+			if b != prev && prev != nil {
+				prev.Release()
 			}
 			if b == nil {
 				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
@@ -119,9 +125,13 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		b := warmupBatch
 		exhausted := false
 		for _, op := range p.Ops {
+			prev := b
 			b, err = op.Execute(ctx, b)
 			if err != nil {
 				return fmt.Errorf("operator execute: %w", err)
+			}
+			if b != prev && prev != nil {
+				prev.Release()
 			}
 			if b == nil {
 				if ds, ok := op.(DoneSignaler); ok && ds.Done() {
@@ -241,11 +251,15 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 
 				exhausted := false
 				for _, op := range ops {
+					prev := b
 					b, err = op.Execute(workerCtx, b)
 					if err != nil {
 						firstErr.CompareAndSwap(nil, fmt.Errorf("operator execute: %w", err))
 						cancel()
 						return
+					}
+					if b != prev && prev != nil {
+						prev.Release()
 					}
 					if b == nil {
 						if ds, ok := op.(DoneSignaler); ok && ds.Done() {
