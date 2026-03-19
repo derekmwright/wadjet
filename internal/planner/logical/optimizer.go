@@ -1739,8 +1739,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		return nil
 	}
 
-	// Only handle single-table subqueries (no JOINs)
-	if len(info.Tables) != 1 || len(info.Joins) > 0 {
+	if len(info.Tables) == 0 {
 		return nil
 	}
 
@@ -1755,12 +1754,19 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		return nil
 	}
 
-	innerTable := info.Tables[0]
-	innerTables := map[string]bool{
-		strings.ToLower(innerTable.Name): true,
+	// Build inner table set from all tables and joins in the subquery
+	innerTables := make(map[string]bool)
+	for _, t := range info.Tables {
+		innerTables[strings.ToLower(t.Name)] = true
+		if t.Alias != "" {
+			innerTables[strings.ToLower(t.Alias)] = true
+		}
 	}
-	if innerTable.Alias != "" {
-		innerTables[strings.ToLower(innerTable.Alias)] = true
+	for _, j := range info.Joins {
+		innerTables[strings.ToLower(j.RightTable)] = true
+		if j.RightAlias != "" {
+			innerTables[strings.ToLower(j.RightAlias)] = true
+		}
 	}
 
 	// Flatten the subquery WHERE into individual conditions
@@ -1800,11 +1806,15 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 		return nil // no equality keys → can't use hash join
 	}
 
-	// Build inner scan node
-	innerScan := NewScan(innerTable.Name, innerTable.Alias)
-
-	// Apply inner-only filters to the scan
+	// Build inner plan: Scan → optional JOINs
+	innerScan := NewScan(info.Tables[0].Name, info.Tables[0].Alias)
 	var innerPlan *Node = innerScan
+	for _, j := range info.Joins {
+		rightScan := NewScan(j.RightTable, j.RightAlias)
+		innerPlan = NewJoin(innerPlan, rightScan, j.Type, j.Condition)
+	}
+
+	// Apply inner-only filters
 	if len(innerFilterNodes) > 0 {
 		var innerPreds []Predicate
 		for _, f := range innerFilterNodes {
@@ -1814,7 +1824,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 				ASTExpr: stripped,
 			})
 		}
-		innerPlan = NewFilter(innerScan, innerPreds)
+		innerPlan = NewFilter(innerPlan, innerPreds)
 	}
 
 	// Build semi/anti join

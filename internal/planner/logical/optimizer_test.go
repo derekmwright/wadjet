@@ -434,3 +434,123 @@ func TestExtractCommonORPredicates_NoCommon(t *testing.T) {
 		t.Fatalf("expected 1 predicate (unchanged), got %d", len(result.Predicates))
 	}
 }
+
+func TestDecorrelateExists_SingleTable(t *testing.T) {
+	// EXISTS (SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey)
+	// should become a semi join
+	outerScan := NewScan("orders", "")
+	outerScan.ScanColumns = []string{"o_orderkey", "o_orderstatus"}
+
+	existsNode := &plansql.ExistsNode{
+		Not: false,
+		SQL: "SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey",
+	}
+	filter := NewFilter(outerScan, []Predicate{
+		{Raw: "EXISTS(...)", ASTExpr: existsNode},
+	})
+
+	result := decorrelateExists(filter)
+
+	if result.Type != NodeJoin {
+		t.Fatalf("expected semi join, got %s", result.Type)
+	}
+	if result.JoinType != "semi" {
+		t.Fatalf("expected semi join type, got %q", result.JoinType)
+	}
+	if !strings.Contains(result.JoinCond, "o_orderkey") {
+		t.Fatalf("expected join condition on o_orderkey, got %q", result.JoinCond)
+	}
+}
+
+func TestDecorrelateExists_NotExists(t *testing.T) {
+	// NOT EXISTS should become an anti join
+	outerScan := NewScan("customer", "c")
+	outerScan.ScanColumns = []string{"c_custkey"}
+
+	existsNode := &plansql.ExistsNode{
+		Not: true,
+		SQL: "SELECT 1 FROM orders WHERE o_custkey = c_custkey",
+	}
+	filter := NewFilter(outerScan, []Predicate{
+		{Raw: "NOT EXISTS(...)", ASTExpr: existsNode},
+	})
+
+	result := decorrelateExists(filter)
+
+	if result.Type != NodeJoin {
+		t.Fatalf("expected anti join, got %s", result.Type)
+	}
+	if result.JoinType != "anti" {
+		t.Fatalf("expected anti join type, got %q", result.JoinType)
+	}
+}
+
+func TestDecorrelateExists_MultiTableSubquery(t *testing.T) {
+	// EXISTS with JOINs in the subquery should now decorrelate
+	// EXISTS (SELECT 1 FROM partsupp JOIN supplier ON s_suppkey = ps_suppkey
+	//         WHERE ps_partkey = p_partkey AND s_nationkey = 10)
+	outerScan := NewScan("part", "")
+	outerScan.ScanColumns = []string{"p_partkey", "p_name"}
+
+	existsNode := &plansql.ExistsNode{
+		Not: false,
+		SQL: "SELECT 1 FROM partsupp JOIN supplier ON s_suppkey = ps_suppkey WHERE ps_partkey = p_partkey AND s_nationkey = 10",
+	}
+	filter := NewFilter(outerScan, []Predicate{
+		{Raw: "EXISTS(...)", ASTExpr: existsNode},
+	})
+
+	result := decorrelateExists(filter)
+
+	if result.Type != NodeJoin {
+		t.Fatalf("expected semi join for multi-table EXISTS, got %s", result.Type)
+	}
+	if result.JoinType != "semi" {
+		t.Fatalf("expected semi join type, got %q", result.JoinType)
+	}
+	if !strings.Contains(result.JoinCond, "p_partkey") {
+		t.Fatalf("expected join condition on p_partkey, got %q", result.JoinCond)
+	}
+	// Inner plan should contain a join (partsupp JOIN supplier)
+	innerPlan := result.Children[1]
+	foundInnerJoin := false
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == NodeJoin {
+			foundInnerJoin = true
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(innerPlan)
+	if !foundInnerJoin {
+		t.Fatal("expected inner plan to contain a join node for multi-table subquery")
+	}
+}
+
+func TestDecorrelateExists_MultiTableNotExists(t *testing.T) {
+	// NOT EXISTS with JOINs → anti join with inner join tree
+	outerScan := NewScan("orders", "o")
+	outerScan.ScanColumns = []string{"o_orderkey", "o_custkey"}
+
+	existsNode := &plansql.ExistsNode{
+		Not: true,
+		SQL: "SELECT 1 FROM lineitem JOIN partsupp ON l_partkey = ps_partkey WHERE l_orderkey = o_orderkey AND ps_availqty > 0",
+	}
+	filter := NewFilter(outerScan, []Predicate{
+		{Raw: "NOT EXISTS(...)", ASTExpr: existsNode},
+	})
+
+	result := decorrelateExists(filter)
+
+	if result.Type != NodeJoin {
+		t.Fatalf("expected anti join, got %s", result.Type)
+	}
+	if result.JoinType != "anti" {
+		t.Fatalf("expected anti join type, got %q", result.JoinType)
+	}
+}
