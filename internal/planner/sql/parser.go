@@ -288,11 +288,13 @@ type SelectInfo struct {
 
 // TableRef is a reference to a table or table-producing function.
 type TableRef struct {
-	Name          string
-	Alias         string
-	IsFunction    bool              // true for table functions like read_json(...)
-	FuncArgs      []string          // positional arguments
-	FuncNamedArgs map[string]string // named arguments (key=value)
+	Name            string
+	Alias           string
+	IsFunction      bool              // true for table functions like read_json(...)
+	FuncArgs        []string          // positional arguments
+	FuncNamedArgs   map[string]string // named arguments (key=value)
+	WithOrdinality  bool              // UNNEST(...) WITH ORDINALITY
+	ColumnAliases   []string          // AS alias(col1, col2, ...)
 }
 
 // SelectColumn describes a column in a SELECT clause.
@@ -320,6 +322,7 @@ type JoinInfo struct {
 	RightAlias string
 	Condition  string
 	CondExpr   Node
+	Lateral    bool // LATERAL join — right side can reference left side columns
 }
 
 // OrderByItem describes an ORDER BY element.

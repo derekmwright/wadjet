@@ -1704,3 +1704,75 @@ func TestAlterTable(t *testing.T) {
 		})
 	}
 }
+
+// --- Sprint 4 tests: LATERAL, UNNEST ---
+
+func TestLateralJoin(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		lateral bool
+	}{
+		{"lateral cross join", "SELECT * FROM t CROSS JOIN LATERAL unnest(t.arr) AS u(val)", true},
+		{"lateral left join", "SELECT * FROM t LEFT JOIN LATERAL (SELECT * FROM u WHERE u.id = t.id) AS sub ON true", true},
+		{"non-lateral join", "SELECT * FROM t JOIN u ON t.id = u.id", false},
+		{"lateral comma", "SELECT * FROM t, LATERAL unnest(t.tags) AS tag(v)", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			info, _ := ExtractSelect(parsed)
+			if len(info.Joins) == 0 {
+				t.Fatal("expected at least one join")
+			}
+			if info.Joins[0].Lateral != tt.lateral {
+				t.Errorf("lateral = %v, want %v", info.Joins[0].Lateral, tt.lateral)
+			}
+		})
+	}
+}
+
+func TestUnnestWithOrdinality(t *testing.T) {
+	tests := []struct {
+		name           string
+		sql            string
+		withOrdinality bool
+		colAliases     []string
+	}{
+		{"basic unnest", "SELECT * FROM unnest(arr) AS u", false, nil},
+		{"with ordinality", "SELECT * FROM unnest(arr) WITH ORDINALITY AS u(val, ord)", true, []string{"val", "ord"}},
+		{"column aliases", "SELECT * FROM unnest(arr) AS u(val)", false, []string{"val"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			info, _ := ExtractSelect(parsed)
+			if len(info.Tables) == 0 {
+				t.Fatal("expected at least one table")
+			}
+			tbl := info.Tables[0]
+			if !tbl.IsFunction {
+				t.Fatal("expected table function")
+			}
+			if tbl.WithOrdinality != tt.withOrdinality {
+				t.Errorf("withOrdinality = %v, want %v", tbl.WithOrdinality, tt.withOrdinality)
+			}
+			if tt.colAliases != nil {
+				if len(tbl.ColumnAliases) != len(tt.colAliases) {
+					t.Errorf("column aliases = %v, want %v", tbl.ColumnAliases, tt.colAliases)
+				}
+				for i, want := range tt.colAliases {
+					if i < len(tbl.ColumnAliases) && tbl.ColumnAliases[i] != want {
+						t.Errorf("column alias[%d] = %q, want %q", i, tbl.ColumnAliases[i], want)
+					}
+				}
+			}
+		})
+	}
+}

@@ -425,8 +425,11 @@ func (p *selectParser) isFromKeyword() bool {
 		TokenKWPreceding, TokenKWFollowing, TokenKWCurrent, TokenKWRow:
 		return true
 	}
-	if p.cur.typ == TokenIdent && strings.EqualFold(p.cur.val, "QUALIFY") {
-		return true
+	if p.cur.typ == TokenIdent {
+		upper := strings.ToUpper(p.cur.val)
+		if upper == "QUALIFY" || upper == "LATERAL" {
+			return true
+		}
 	}
 	return false
 }
@@ -488,6 +491,31 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 		case TokenComma:
 			// Cross join via comma
 			p.advance()
+			// Check for LATERAL after comma
+			if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "LATERAL") {
+				p.advance()
+				rightTable, err := p.parseTableRef()
+				if err != nil {
+					return err
+				}
+				ji := JoinInfo{
+					Type:       "cross join",
+					RightTable: rightTable.Name,
+					RightAlias: rightTable.Alias,
+					Lateral:    true,
+				}
+				if p.isKeyword(TokenKWOn) {
+					p.advance()
+					condExpr, err := p.parseExpr()
+					if err != nil {
+						return fmt.Errorf("parsing JOIN ON: %w", err)
+					}
+					ji.Condition = condExpr.String()
+					ji.CondExpr = condExpr
+				}
+				info.Joins = append(info.Joins, ji)
+				continue
+			}
 			table, err := p.parseTableRef()
 			if err != nil {
 				return err
@@ -496,6 +524,13 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 			continue
 		default:
 			return nil
+		}
+
+		// Check for LATERAL modifier
+		lateral := false
+		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "LATERAL") {
+			lateral = true
+			p.advance()
 		}
 
 		// Parse the right side table
@@ -508,6 +543,7 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 			Type:       joinType,
 			RightTable: rightTable.Name,
 			RightAlias: rightTable.Alias,
+			Lateral:    lateral,
 		}
 
 		// Parse ON condition
@@ -591,7 +627,7 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		tok := p.cur
 		switch tok.typ {
 		case TokenIdent:
-			// Advance past ident, then check if next is = (named param)
+			// Advance past ident, then check if next is = (named param) or . (qualified name)
 			p.advance()
 			if p.cur.typ == TokenEq {
 				key := tok.val
@@ -599,8 +635,14 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 				namedArgs[key] = p.cur.val
 				p.advance() // consume value
 			} else {
-				// Plain ident positional arg (already advanced)
-				args = append(args, tok.val)
+				argVal := tok.val
+				// Handle dot-qualified names: t.col
+				for p.cur.typ == TokenDot {
+					p.advance() // consume .
+					argVal += "." + p.cur.val
+					p.advance() // consume name after dot
+				}
+				args = append(args, argVal)
 			}
 		case TokenString, TokenNumber:
 			args = append(args, tok.val)
@@ -623,7 +665,26 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 		FuncNamedArgs: namedArgs,
 	}
 
-	// Optional alias
+	// Optional WITH ORDINALITY (for UNNEST)
+	if p.peek() == TokenKWWith {
+		saved := p.cur
+		savedPos := p.lex.pos
+		savedStart := p.lex.start
+		savedWidth := p.lex.width
+		p.advance() // consume WITH
+		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "ORDINALITY") {
+			p.advance() // consume ORDINALITY
+			tr.WithOrdinality = true
+		} else {
+			// Not WITH ORDINALITY, restore
+			p.cur = saved
+			p.lex.pos = savedPos
+			p.lex.start = savedStart
+			p.lex.width = savedWidth
+		}
+	}
+
+	// Optional alias with column list: AS alias(col1, col2)
 	if p.isKeyword(TokenKWAs) {
 		p.advance()
 		aliasTok, err := p.expect(TokenIdent)
@@ -631,6 +692,24 @@ func (p *selectParser) parseTableFunction(name string) (TableRef, error) {
 			return TableRef{}, fmt.Errorf("expected alias after AS")
 		}
 		tr.Alias = aliasTok.val
+		// Optional column alias list
+		if p.peek() == TokenLParen {
+			p.advance() // consume (
+			for {
+				colTok, err := p.expect(TokenIdent)
+				if err != nil {
+					return TableRef{}, fmt.Errorf("expected column alias")
+				}
+				tr.ColumnAliases = append(tr.ColumnAliases, colTok.val)
+				if p.peek() != TokenComma {
+					break
+				}
+				p.advance() // consume ,
+			}
+			if _, err := p.expect(TokenRParen); err != nil {
+				return TableRef{}, fmt.Errorf("expected ) after column aliases")
+			}
+		}
 	} else if p.peek() == TokenIdent && !p.isJoinKeyword() {
 		tr.Alias = p.advance().val
 	}
@@ -647,8 +726,11 @@ func (p *selectParser) isJoinKeyword() bool {
 		TokenKWNulls, TokenKWRows, TokenKWRange:
 		return true
 	}
-	if p.cur.typ == TokenIdent && strings.EqualFold(p.cur.val, "QUALIFY") {
-		return true
+	if p.cur.typ == TokenIdent {
+		upper := strings.ToUpper(p.cur.val)
+		if upper == "QUALIFY" || upper == "LATERAL" {
+			return true
+		}
 	}
 	return false
 }
