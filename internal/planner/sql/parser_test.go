@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -33,6 +34,62 @@ func TestParse_Select(t *testing.T) {
 				t.Fatalf("expected SELECT, got %v", parsed.Type)
 			}
 		})
+	}
+}
+
+func TestCurrentDateAndInterval(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"current_date bare", "SELECT CURRENT_DATE"},
+		{"current_date in WHERE", "SELECT * FROM events WHERE scan_date >= CURRENT_DATE"},
+		{"current_timestamp bare", "SELECT CURRENT_TIMESTAMP"},
+		{"interval days", "SELECT CURRENT_DATE - INTERVAL '30' DAY"},
+		{"interval days combined", "SELECT CURRENT_DATE - INTERVAL '30 days'"},
+		{"interval months", "SELECT CURRENT_DATE - INTERVAL '3' MONTH"},
+		{"interval years", "SELECT CURRENT_DATE + INTERVAL '1' YEAR"},
+		{"interval in where", "SELECT * FROM events WHERE scan_date >= CURRENT_DATE - INTERVAL '30 days'"},
+		{"date_add with interval", "SELECT date_add(CURRENT_DATE, INTERVAL '7 days')"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			if parsed.Type != QuerySelect {
+				t.Fatalf("expected SELECT, got %v", parsed.Type)
+			}
+		})
+	}
+}
+
+func TestIntervalLitAST(t *testing.T) {
+	parsed, err := Parse("SELECT CURRENT_DATE - INTERVAL '30 days'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Columns) != 1 {
+		t.Fatalf("expected 1 column, got %d", len(info.Columns))
+	}
+	// The string representation should contain the interval expression.
+	expr := info.Columns[0].Expr
+	if expr == "" {
+		t.Fatal("expected non-empty expression")
+	}
+	// Verify CURRENT_DATE is parsed as a function call (lowercase), not a column ref
+	if !strings.Contains(expr, "current_date()") {
+		t.Fatalf("expected expression to contain 'current_date()', got %q", expr)
+	}
+	// Verify the interval is present
+	if !strings.Contains(expr, "INTERVAL") {
+		t.Fatalf("expected expression to contain 'INTERVAL', got %q", expr)
 	}
 }
 

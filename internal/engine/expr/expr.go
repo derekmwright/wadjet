@@ -237,6 +237,40 @@ type Int64Expr interface {
 	EvalInt64(b *batch.RecordBatch, row int) (int64, bool)
 }
 
+// --- Interval type ---
+
+// IntervalValue represents a SQL INTERVAL (e.g., INTERVAL '30' DAY).
+type IntervalValue struct {
+	Years   int
+	Months  int
+	Days    int
+	Hours   int
+	Minutes int
+	Seconds int
+}
+
+// dateAddInterval applies an interval to a date/timestamp string.
+func dateAddInterval(dateStr string, iv IntervalValue, subtract bool) string {
+	t := parseDateValue(dateStr)
+	if t.IsZero() {
+		return ""
+	}
+	sign := 1
+	if subtract {
+		sign = -1
+	}
+	t = t.AddDate(sign*iv.Years, sign*iv.Months, sign*iv.Days)
+	t = t.Add(time.Duration(sign) * (time.Duration(iv.Hours)*time.Hour +
+		time.Duration(iv.Minutes)*time.Minute +
+		time.Duration(iv.Seconds)*time.Second))
+	// Return date format if no time component, otherwise RFC3339.
+	if iv.Hours == 0 && iv.Minutes == 0 && iv.Seconds == 0 &&
+		t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
+		return t.Format("2006-01-02")
+	}
+	return t.Format(time.RFC3339)
+}
+
 // --- Arithmetic ---
 
 // BinOp is a binary arithmetic expression (generic, uses ToFloat64).
@@ -251,6 +285,21 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 	if lv == nil || rv == nil {
 		return nil
 	}
+
+	// Date ± interval arithmetic
+	if e.Op == "+" || e.Op == "-" {
+		if iv, ok := rv.(IntervalValue); ok {
+			if ds, ok := lv.(string); ok {
+				return dateAddInterval(ds, iv, e.Op == "-")
+			}
+		}
+		if iv, ok := lv.(IntervalValue); ok && e.Op == "+" {
+			if ds, ok := rv.(string); ok {
+				return dateAddInterval(ds, iv, false)
+			}
+		}
+	}
+
 	lf := ToFloat64(lv)
 	rf := ToFloat64(rv)
 	switch e.Op {
@@ -846,6 +895,7 @@ func init() {
 	"current_date": fnCurrentDate,
 	"date_diff":    fnDateDiff,
 	"date_add":     fnDateAdd,
+	"date_sub":     fnDateSub,
 	"to_date":      fnToDate,
 
 	// UUID functions
@@ -1677,11 +1727,17 @@ func fnDateDiff(args []any) any {
 	return float64(int(t1.Sub(t2).Hours() / 24))
 }
 
-// fnDateAdd adds days to a date.
+// fnDateAdd adds days (or an interval) to a date.
 // Usage: date_add(date, days) → date string
+//        date_add(date, interval) → date string
 func fnDateAdd(args []any) any {
 	if len(args) < 2 || args[0] == nil || args[1] == nil {
 		return nil
+	}
+	if iv, ok := args[1].(IntervalValue); ok {
+		if ds, ok := args[0].(string); ok {
+			return dateAddInterval(ds, iv, false)
+		}
 	}
 	t := parseDateValue(args[0])
 	if t.IsZero() {
@@ -1689,6 +1745,26 @@ func fnDateAdd(args []any) any {
 	}
 	days := int(ToFloat64(args[1]))
 	return t.AddDate(0, 0, days).Format("2006-01-02")
+}
+
+// fnDateSub subtracts days (or an interval) from a date.
+// Usage: date_sub(date, days) → date string
+//        date_sub(date, interval) → date string
+func fnDateSub(args []any) any {
+	if len(args) < 2 || args[0] == nil || args[1] == nil {
+		return nil
+	}
+	if iv, ok := args[1].(IntervalValue); ok {
+		if ds, ok := args[0].(string); ok {
+			return dateAddInterval(ds, iv, true)
+		}
+	}
+	t := parseDateValue(args[0])
+	if t.IsZero() {
+		return nil
+	}
+	days := int(ToFloat64(args[1]))
+	return t.AddDate(0, 0, -days).Format("2006-01-02")
 }
 
 // fnToDate converts a string to a date.

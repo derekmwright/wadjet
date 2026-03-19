@@ -659,3 +659,93 @@ func TestBuildUnqualOuterCols(t *testing.T) {
 		t.Fatal("expected nil for non-matching table")
 	}
 }
+
+func TestCompileIntervalLit(t *testing.T) {
+	tests := []struct {
+		name  string
+		value int
+		unit  string
+		want  IntervalValue
+	}{
+		{"days", 30, "day", IntervalValue{Days: 30}},
+		{"months", 3, "month", IntervalValue{Months: 3}},
+		{"years", 1, "year", IntervalValue{Years: 1}},
+		{"weeks", 2, "week", IntervalValue{Days: 14}},
+		{"hours", 12, "hour", IntervalValue{Hours: 12}},
+		{"minutes", 45, "minute", IntervalValue{Minutes: 45}},
+		{"seconds", 90, "second", IntervalValue{Seconds: 90}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &plansql.IntervalLit{Value: tt.value, Unit: tt.unit}
+			e, err := Compile(node)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lit, ok := e.(*Lit)
+			if !ok {
+				t.Fatalf("expected Lit, got %T", e)
+			}
+			iv, ok := lit.Val.(IntervalValue)
+			if !ok {
+				t.Fatalf("expected IntervalValue, got %T", lit.Val)
+			}
+			if iv != tt.want {
+				t.Errorf("got %+v, want %+v", iv, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompileCurrentDateMinusInterval(t *testing.T) {
+	// Construct the AST directly: CURRENT_DATE - INTERVAL '30' DAY
+	ast := &plansql.BinaryOp{
+		Left:  &plansql.FuncCallNode{Name: "current_date"},
+		Op:    "-",
+		Right: &plansql.IntervalLit{Value: 30, Unit: "day"},
+	}
+
+	compiled, err := Compile(ast)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	result := compiled.Eval(nil, 0)
+	if result == nil {
+		t.Fatal("CURRENT_DATE - INTERVAL '30 days' returned nil")
+	}
+	dateStr, ok := result.(string)
+	if !ok {
+		t.Fatalf("expected string result, got %T: %v", result, result)
+	}
+	if len(dateStr) != 10 || dateStr[4] != '-' || dateStr[7] != '-' {
+		t.Fatalf("expected date format YYYY-MM-DD, got %q", dateStr)
+	}
+	t.Logf("CURRENT_DATE - INTERVAL '30 days' = %s", dateStr)
+}
+
+func TestCompileCurrentDatePlusInterval(t *testing.T) {
+	ast := &plansql.BinaryOp{
+		Left:  &plansql.FuncCallNode{Name: "current_date"},
+		Op:    "+",
+		Right: &plansql.IntervalLit{Value: 1, Unit: "year"},
+	}
+
+	compiled, err := Compile(ast)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	result := compiled.Eval(nil, 0)
+	if result == nil {
+		t.Fatal("CURRENT_DATE + INTERVAL '1' YEAR returned nil")
+	}
+	dateStr, ok := result.(string)
+	if !ok {
+		t.Fatalf("expected string result, got %T: %v", result, result)
+	}
+	if len(dateStr) != 10 {
+		t.Fatalf("expected date format YYYY-MM-DD, got %q", dateStr)
+	}
+	t.Logf("CURRENT_DATE + INTERVAL '1' YEAR = %s", dateStr)
+}

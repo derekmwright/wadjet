@@ -2,6 +2,7 @@ package sql
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -1039,8 +1040,22 @@ func (p *selectParser) parsePrimary() (Node, error) {
 		return &ParenNode{Inner: inner}, nil
 
 	case TokenIdent:
+		upper := strings.ToUpper(p.cur.val)
+
+		// CURRENT_DATE / CURRENT_TIMESTAMP / CURRENT_TIME — niladic SQL functions
+		// These are used without parentheses in standard SQL.
+		if upper == "CURRENT_DATE" || upper == "CURRENT_TIMESTAMP" || upper == "CURRENT_TIME" {
+			p.advance()
+			return &FuncCallNode{Name: strings.ToLower(upper)}, nil
+		}
+
+		// INTERVAL 'N days' or INTERVAL 'N' DAY
+		if upper == "INTERVAL" {
+			return p.parseIntervalLiteral()
+		}
+
 		// ARRAY[...] literal
-		if strings.EqualFold(p.cur.val, "ARRAY") && p.peekN(1) == TokenLBracket {
+		if upper == "ARRAY" && p.peekN(1) == TokenLBracket {
 			p.advance() // consume ARRAY
 			return p.parseArrayLiteral()
 		}
@@ -1392,6 +1407,73 @@ func (p *selectParser) parseCastExpr() (Node, error) {
 	}
 
 	return &CastNode{Inner: inner, TypeName: typeName}, nil
+}
+
+// parseIntervalLiteral parses INTERVAL 'N' UNIT or INTERVAL 'N unit[s]'.
+// Examples: INTERVAL '30' DAY, INTERVAL '30 days', INTERVAL '1' YEAR
+func (p *selectParser) parseIntervalLiteral() (Node, error) {
+	p.advance() // consume INTERVAL
+
+	if p.peek() != TokenString {
+		return nil, fmt.Errorf("expected string literal after INTERVAL")
+	}
+	valStr := p.advance().val
+
+	// Try to parse combined form: INTERVAL '30 days'
+	valStr = strings.TrimSpace(valStr)
+	parts := strings.Fields(valStr)
+
+	var value int
+	var unit string
+
+	if len(parts) == 2 {
+		// Combined: '30 days'
+		n, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid interval value %q: %w", parts[0], err)
+		}
+		value = n
+		unit = normalizeIntervalUnit(parts[1])
+	} else if len(parts) == 1 {
+		// Separate: 'N' followed by keyword unit
+		n, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid interval value %q: %w", parts[0], err)
+		}
+		value = n
+		// Look for trailing unit keyword (DAY, MONTH, YEAR, etc.)
+		if p.peek() == TokenIdent {
+			unit = normalizeIntervalUnit(p.advance().val)
+		} else {
+			unit = "day" // default
+		}
+	} else {
+		return nil, fmt.Errorf("invalid INTERVAL literal %q", valStr)
+	}
+
+	return &IntervalLit{Value: value, Unit: unit}, nil
+}
+
+// normalizeIntervalUnit maps plural/mixed-case units to canonical lowercase singular.
+func normalizeIntervalUnit(s string) string {
+	switch strings.ToLower(strings.TrimSuffix(strings.ToLower(s), "s")) {
+	case "day":
+		return "day"
+	case "month":
+		return "month"
+	case "year":
+		return "year"
+	case "hour":
+		return "hour"
+	case "minute":
+		return "minute"
+	case "second":
+		return "second"
+	case "week":
+		return "week"
+	default:
+		return strings.ToLower(s)
+	}
 }
 
 // parseArrayLiteral parses ARRAY[expr, expr, ...]. The ARRAY keyword has been consumed;

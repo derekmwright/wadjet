@@ -58,6 +58,28 @@ func compileWithCtx(node plansql.Node, ctx *compileContext) (Expr, error) {
 	case *plansql.StarNode:
 		return &Lit{Val: "*"}, nil
 
+	case *plansql.IntervalLit:
+		iv := IntervalValue{}
+		switch n.Unit {
+		case "year":
+			iv.Years = n.Value
+		case "month":
+			iv.Months = n.Value
+		case "week":
+			iv.Days = n.Value * 7
+		case "day":
+			iv.Days = n.Value
+		case "hour":
+			iv.Hours = n.Value
+		case "minute":
+			iv.Minutes = n.Value
+		case "second":
+			iv.Seconds = n.Value
+		default:
+			iv.Days = n.Value // fallback
+		}
+		return &Lit{Val: iv}, nil
+
 	case *plansql.BinaryOp:
 		left, err := compileWithCtx(n.Left, ctx)
 		if err != nil {

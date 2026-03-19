@@ -1012,6 +1012,101 @@ func TestFnDateAdd(t *testing.T) {
 	}
 }
 
+func TestFnDateSub(t *testing.T) {
+	if fnDateSub(nil) != nil {
+		t.Error("nil")
+	}
+	if fnDateSub([]any{nil, int64(5)}) != nil {
+		t.Error("nil date")
+	}
+	// Numeric days
+	result := fnDateSub([]any{"2024-01-11", int64(10)})
+	if result != "2024-01-01" {
+		t.Errorf("expected 2024-01-01, got %v", result)
+	}
+	// Interval value
+	result = fnDateSub([]any{"2024-03-15", IntervalValue{Months: 1}})
+	if result != "2024-02-15" {
+		t.Errorf("expected 2024-02-15, got %v", result)
+	}
+}
+
+func TestFnDateAddInterval(t *testing.T) {
+	// date_add with IntervalValue
+	result := fnDateAdd([]any{"2024-01-01", IntervalValue{Days: 30}})
+	if result != "2024-01-31" {
+		t.Errorf("expected 2024-01-31, got %v", result)
+	}
+	result = fnDateAdd([]any{"2024-01-01", IntervalValue{Years: 1}})
+	if result != "2025-01-01" {
+		t.Errorf("expected 2025-01-01, got %v", result)
+	}
+}
+
+func TestDateIntervalArithmetic(t *testing.T) {
+	// Test BinOp with date - interval
+	iv := IntervalValue{Days: 30}
+	binop := &BinOp{
+		Left:  &Lit{Val: "2026-03-18"},
+		Right: &Lit{Val: iv},
+		Op:    "-",
+	}
+	result := binop.Eval(nil, 0)
+	if result != "2026-02-16" {
+		t.Errorf("date - interval: expected 2026-02-16, got %v", result)
+	}
+
+	// Test date + interval
+	binop.Op = "+"
+	result = binop.Eval(nil, 0)
+	if result != "2026-04-17" {
+		t.Errorf("date + interval: expected 2026-04-17, got %v", result)
+	}
+
+	// Test interval + date (commutative for +)
+	binop2 := &BinOp{
+		Left:  &Lit{Val: iv},
+		Right: &Lit{Val: "2026-03-18"},
+		Op:    "+",
+	}
+	result = binop2.Eval(nil, 0)
+	if result != "2026-04-17" {
+		t.Errorf("interval + date: expected 2026-04-17, got %v", result)
+	}
+
+	// Test month interval
+	binop3 := &BinOp{
+		Left:  &Lit{Val: "2026-03-18"},
+		Right: &Lit{Val: IntervalValue{Months: 3}},
+		Op:    "-",
+	}
+	result = binop3.Eval(nil, 0)
+	if result != "2025-12-18" {
+		t.Errorf("date - 3 months: expected 2025-12-18, got %v", result)
+	}
+
+	// Test year interval
+	binop4 := &BinOp{
+		Left:  &Lit{Val: "2026-03-18"},
+		Right: &Lit{Val: IntervalValue{Years: 1}},
+		Op:    "+",
+	}
+	result = binop4.Eval(nil, 0)
+	if result != "2027-03-18" {
+		t.Errorf("date + 1 year: expected 2027-03-18, got %v", result)
+	}
+
+	// Test nil handling
+	binop5 := &BinOp{
+		Left:  &Lit{Val: nil},
+		Right: &Lit{Val: iv},
+		Op:    "-",
+	}
+	if binop5.Eval(nil, 0) != nil {
+		t.Error("nil date should return nil")
+	}
+}
+
 func TestFnToDate(t *testing.T) {
 	if fnToDate(nil) != nil {
 		t.Error("nil")

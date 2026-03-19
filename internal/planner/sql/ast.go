@@ -313,6 +313,19 @@ func (a *ArrayLitNode) String() string {
 	return "ARRAY[" + strings.Join(parts, ", ") + "]"
 }
 
+// --- Interval literal ---
+
+// IntervalLit represents INTERVAL 'N' DAY or INTERVAL 'N days' expressions.
+type IntervalLit struct {
+	Value int
+	Unit  string // "day", "month", "year", "hour", "minute", "second"
+}
+
+func (*IntervalLit) nodeTag() {}
+func (i *IntervalLit) String() string {
+	return fmt.Sprintf("INTERVAL '%d' %s", i.Value, strings.ToUpper(i.Unit))
+}
+
 // --- Subquery ---
 
 // SubqueryNode wraps a subquery as raw SQL.
