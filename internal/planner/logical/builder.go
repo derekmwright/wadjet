@@ -397,12 +397,7 @@ func isStarOnly(cols []plansql.SelectColumn) bool {
 }
 
 func cleanExpr(s string) string {
-	s = strings.TrimSpace(s)
-	// Remove table qualifiers for simple references: "e.user_id" -> "user_id"
-	if parts := strings.SplitN(s, ".", 2); len(parts) == 2 {
-		return parts[1]
-	}
-	return s
+	return strings.TrimSpace(s)
 }
 
 // resolveOrderByColumn resolves an ORDER BY expression to the matching SELECT

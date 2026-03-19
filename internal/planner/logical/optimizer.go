@@ -265,6 +265,9 @@ func collectASTColumnRefs(node plansql.Node, refs map[string]bool) {
 	switch n := node.(type) {
 	case *plansql.ColRef:
 		refs[strings.ToLower(n.Column)] = true
+		if n.Table != "" {
+			refs[strings.ToLower(n.Table+"."+n.Column)] = true
+		}
 	case *plansql.CmpExpr:
 		collectASTColumnRefs(n.Left, refs)
 		collectASTColumnRefs(n.Right, refs)
@@ -2137,12 +2140,20 @@ func flattenJoinChain(n *Node, rels *[]*Node, edges *[]joinEdge) {
 	rightRep := rightBefore
 
 	// Extract column refs from the join condition and match to relations.
+	// We must exclude right-side columns to avoid matching self-join aliases
+	// on the wrong side (e.g., for "c_nationkey = n2.n_nationkey" where n1 is
+	// already on the left, n_nationkey would incorrectly match n1).
 	condRefs := make(map[string]bool, 4)
 	extractJoinColumnRefs(n.JoinCond, condRefs)
 	if len(condRefs) > 0 {
+		// Collect right-side relation columns to exclude them from left matching
+		rightCols := collectSubtreeColumns((*rels)[rightRep])
 		for i := leftStart; i < leftAfter; i++ {
 			relCols := collectSubtreeColumns((*rels)[i])
 			for ref := range condRefs {
+				if rightCols[ref] {
+					continue // skip refs owned by the right side
+				}
 				if relCols[ref] {
 					leftRep = i
 					break

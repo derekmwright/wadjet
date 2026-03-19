@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -1467,7 +1468,16 @@ func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]
 		var filteredSchema []parquet.Column
 		var filteredMapping []outColSource
 		for i, col := range out {
-			if p.OutputFilter[col.Name] {
+			keep := p.OutputFilter[col.Name]
+			// For qualified columns (e.g., "n2.n_name" from self-joins), also
+			// check if the unqualified base name is needed. Without this, the
+			// output filter would drop disambiguated self-join columns.
+			if !keep {
+				if dot := strings.IndexByte(col.Name, '.'); dot >= 0 {
+					keep = p.OutputFilter[col.Name[dot+1:]]
+				}
+			}
+			if keep {
 				filteredSchema = append(filteredSchema, col)
 				filteredMapping = append(filteredMapping, mapping[i])
 			}

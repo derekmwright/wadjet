@@ -472,9 +472,9 @@ func TestCleanExpr(t *testing.T) {
 		want  string
 	}{
 		{"  user_id  ", "user_id"},
-		{"e.user_id", "user_id"},
+		{"e.user_id", "e.user_id"},  // preserve table qualifiers for self-join disambiguation
 		{"user_id", "user_id"},
-		{"e.sub.col", "sub.col"}, // only first qualifier stripped
+		{"e.sub.col", "e.sub.col"},  // preserve all qualifiers
 	}
 	for _, tt := range tests {
 		got := cleanExpr(tt.input)
