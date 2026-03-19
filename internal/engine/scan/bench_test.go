@@ -108,7 +108,7 @@ func BenchmarkReadColumnar(b *testing.B) {
 				rgs := pqFile.RowGroups()
 				var total int
 				for _, rg := range rgs {
-					rb, err := readRowGroupColumnar(rg, schema, pqFile)
+					rb, err := readRowGroupColumnar(rg, schema, pqFile, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -147,7 +147,7 @@ func BenchmarkReadColumnarNullable(b *testing.B) {
 				rgs := pqFile.RowGroups()
 				var total int
 				for _, rg := range rgs {
-					rb, err := readRowGroupColumnar(rg, schema, pqFile)
+					rb, err := readRowGroupColumnar(rg, schema, pqFile, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -204,7 +204,7 @@ func BenchmarkReadProjection(b *testing.B) {
 				pqFile := reader.File()
 				rgs := pqFile.RowGroups()
 				for _, rg := range rgs {
-					rb, err := readRowGroupColumnar(rg, schema, pqFile)
+					rb, err := readRowGroupColumnar(rg, schema, pqFile, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -250,7 +250,7 @@ func TestColumnarReadCorrectness(t *testing.T) {
 
 	var colBatches []*batch.RecordBatch
 	for _, rg := range rgs {
-		rb, err := readRowGroupColumnar(rg, schema, pqFile)
+		rb, err := readRowGroupColumnar(rg, schema, pqFile, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -275,9 +275,7 @@ func TestColumnarReadCorrectness(t *testing.T) {
 		offset := 0
 		for _, b := range colBatches {
 			for j := range schema {
-				for i := 0; i < b.Len; i++ {
-					copyVectorValue(colBatch.Columns[j], offset+i, b.Columns[j], i)
-				}
+				copyVectorRange(colBatch.Columns[j], offset, b.Columns[j], 0, b.Len)
 			}
 			offset += b.Len
 		}
@@ -311,7 +309,7 @@ func TestColumnarReadWithProjection(t *testing.T) {
 	rgs := pqFile.RowGroups()
 
 	for _, rg := range rgs {
-		rb, err := readRowGroupColumnar(rg, projectedSchema, pqFile)
+		rb, err := readRowGroupColumnar(rg, projectedSchema, pqFile, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -354,7 +352,7 @@ func TestColumnarReadMissingColumn(t *testing.T) {
 	rgs := pqFile.RowGroups()
 
 	for _, rg := range rgs {
-		rb, err := readRowGroupColumnar(rg, schemaWithExtra, pqFile)
+		rb, err := readRowGroupColumnar(rg, schemaWithExtra, pqFile, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

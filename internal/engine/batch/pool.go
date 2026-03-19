@@ -60,6 +60,27 @@ func (p *BatchPool) Get() *RecordBatch {
 	return b
 }
 
+// GetForSize returns a batch from the pool reset for the given numRows.
+// If numRows exceeds the pool's batch size, allocates a fresh batch.
+func (p *BatchPool) GetForSize(numRows int) *RecordBatch {
+	if numRows > p.batchSize {
+		return NewRecordBatch(p.schema, numRows)
+	}
+	p.mu.Lock()
+	if len(p.pool) > 0 {
+		b := p.pool[len(p.pool)-1]
+		p.pool = p.pool[:len(p.pool)-1]
+		p.mu.Unlock()
+		b.Reset(numRows)
+		return b
+	}
+	p.mu.Unlock()
+	b := NewRecordBatch(p.schema, p.batchSize)
+	b.pool = p
+	b.Reset(numRows)
+	return b
+}
+
 // Put returns a batch to the pool for reuse.
 func (p *BatchPool) Put(b *RecordBatch) {
 	p.mu.Lock()

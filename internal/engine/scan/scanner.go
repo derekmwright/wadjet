@@ -56,6 +56,7 @@ type Scanner struct {
 	schema        []pqt.Column
 	useReaderAt   bool // true if store supports random access (column pruning)
 	deleteMarkers map[string]map[int64]bool // file path -> set of row indices to skip
+	scanPool      *batch.BatchPool // reuse batch allocations across files
 
 	// Async prefetch: downloads next file while current is being decoded
 	// Only used when NOT using ReaderAt path
@@ -163,6 +164,14 @@ func (s *Scanner) Init(ctx context.Context) error {
 	// Use random-access reads when the store supports it and we have column projection
 	_, hasReaderAt := s.cat.Store().(objstore.ReaderAtStore)
 	s.useReaderAt = hasReaderAt && len(s.selectedColumns) > 0
+
+	// Create batch pool for reuse across files — avoids re-allocating vectors
+	// for every file read. 128K rows covers the default row group size.
+	scanSchema := s.schema
+	if len(s.selectedColumns) > 0 {
+		scanSchema = filterSchema(s.schema, s.selectedColumns)
+	}
+	s.scanPool = batch.NewBatchPool(scanSchema, 128*1024)
 
 	// Start prefetching the first file (only for full-download path)
 	if len(s.files) > 0 && !s.useReaderAt {
@@ -310,7 +319,7 @@ func (s *Scanner) decodeRowGroups(ctx context.Context, reader *pqt.Reader, file 
 			}
 		}
 
-		b, err := readRowGroupColumnar(rgs[rgIdx], schema, pqFile)
+		b, err := readRowGroupColumnar(rgs[rgIdx], schema, pqFile, s.scanPool)
 		if err != nil {
 			return nil, fmt.Errorf("reading row group %d: %w", rgIdx, err)
 		}
@@ -333,15 +342,21 @@ func (s *Scanner) decodeRowGroups(ctx context.Context, reader *pqt.Reader, file 
 		for _, b := range batches {
 			totalRows += b.Len
 		}
-		result = batch.NewRecordBatch(schema, totalRows)
+		if s.scanPool != nil {
+			result = s.scanPool.GetForSize(totalRows)
+		} else {
+			result = batch.NewRecordBatch(schema, totalRows)
+		}
 		offset := 0
 		for _, b := range batches {
 			for j := range schema {
-				for i := 0; i < b.Len; i++ {
-					copyVectorValue(result.Columns[j], offset+i, b.Columns[j], i)
-				}
+				copyVectorRange(result.Columns[j], offset, b.Columns[j], 0, b.Len)
 			}
 			offset += b.Len
+		}
+		// Release intermediate batches back to pool
+		for _, b := range batches {
+			b.Release()
 		}
 	}
 
@@ -373,32 +388,35 @@ func (s *Scanner) decodeRowGroups(ctx context.Context, reader *pqt.Reader, file 
 	return result, nil
 }
 
-// copyVectorValue copies a single value between vectors using typed access.
-func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
-	if src.Nulls.IsNullFast(si) {
-		dst.Nulls.SetNull(di)
-		switch dst.Type {
-		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-			dst.BytesData.Set(di, nil)
+// copyVectorRange copies count values from src[srcOff..] to dst[dstOff..] using
+// bulk typed copies. One type switch per column instead of per row.
+func copyVectorRange(dst *batch.Vector, dstOff int, src *batch.Vector, srcOff, count int) {
+	// Copy null bitmap — dst starts as all-non-null from Reset/NewRecordBatch
+	if src.Nulls.HasNulls() {
+		for i := 0; i < count; i++ {
+			if src.Nulls.IsNullFast(srcOff + i) {
+				dst.Nulls.SetNull(dstOff + i)
+			}
 		}
-		return
 	}
-	dst.Nulls.SetValid(di)
+	// Bulk copy typed data
 	switch dst.Type {
 	case batch.TypeBool:
-		dst.BoolData[di] = src.BoolData[si]
+		copy(dst.BoolData[dstOff:dstOff+count], src.BoolData[srcOff:srcOff+count])
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		dst.Int32Data[di] = src.Int32Data[si]
+		copy(dst.Int32Data[dstOff:dstOff+count], src.Int32Data[srcOff:srcOff+count])
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-		dst.Int64Data[di] = src.Int64Data[si]
+		copy(dst.Int64Data[dstOff:dstOff+count], src.Int64Data[srcOff:srcOff+count])
 	case batch.TypeFloat32:
-		dst.Float32Data[di] = src.Float32Data[si]
+		copy(dst.Float32Data[dstOff:dstOff+count], src.Float32Data[srcOff:srcOff+count])
 	case batch.TypeFloat64:
-		dst.Float64Data[di] = src.Float64Data[si]
+		copy(dst.Float64Data[dstOff:dstOff+count], src.Float64Data[srcOff:srcOff+count])
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		dst.BytesData.Set(di, src.BytesData.Value(si))
+		for i := 0; i < count; i++ {
+			dst.BytesData.Set(dstOff+i, src.BytesData.Value(srcOff+i))
+		}
 	case batch.TypeDecimal:
-		dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+		copy(dst.DecimalData.Data[dstOff:dstOff+count], src.DecimalData.Data[srcOff:srcOff+count])
 	}
 }
 

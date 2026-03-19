@@ -31,7 +31,7 @@ func ReadFileBatches(reader *pqt.Reader, schema []pqt.Column, selectedCols []str
 
 	var batches []*batch.RecordBatch
 	for _, rg := range rgs {
-		b, err := readRowGroupColumnar(rg, readSchema, pqFile)
+		b, err := readRowGroupColumnar(rg, readSchema, pqFile, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -92,7 +92,7 @@ func ReadFileColumnar(reader *pqt.Reader, schema []pqt.Column) (*batch.RecordBat
 
 	var batches []*batch.RecordBatch
 	for _, rg := range rgs {
-		b, err := readRowGroupColumnar(rg, schema, pqFile)
+		b, err := readRowGroupColumnar(rg, schema, pqFile, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -116,9 +116,7 @@ func ReadFileColumnar(reader *pqt.Reader, schema []pqt.Column) (*batch.RecordBat
 	offset := 0
 	for _, b := range batches {
 		for j := range schema {
-			for i := 0; i < b.Len; i++ {
-				copyVectorValue(result.Columns[j], offset+i, b.Columns[j], i)
-			}
+			copyVectorRange(result.Columns[j], offset, b.Columns[j], 0, b.Len)
 		}
 		offset += b.Len
 	}
@@ -127,13 +125,18 @@ func ReadFileColumnar(reader *pqt.Reader, schema []pqt.Column) (*batch.RecordBat
 
 // readRowGroupColumnar reads a parquet row group directly into a RecordBatch
 // using typed column access — no map[string]any intermediate.
-func readRowGroupColumnar(rg goparquet.RowGroup, schema []pqt.Column, pqFile *goparquet.File) (*batch.RecordBatch, error) {
+func readRowGroupColumnar(rg goparquet.RowGroup, schema []pqt.Column, pqFile *goparquet.File, pool *batch.BatchPool) (*batch.RecordBatch, error) {
 	numRows := int(rg.NumRows())
 	if numRows == 0 {
 		return nil, nil
 	}
 
-	b := batch.NewRecordBatch(schema, numRows)
+	var b *batch.RecordBatch
+	if pool != nil {
+		b = pool.GetForSize(numRows)
+	} else {
+		b = batch.NewRecordBatch(schema, numRows)
+	}
 	chunks := rg.ColumnChunks()
 	pqCols := pqFile.Schema().Columns()
 

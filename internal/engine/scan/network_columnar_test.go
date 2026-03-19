@@ -50,7 +50,7 @@ func TestColumnarReadNetworkTypes(t *testing.T) {
 		t.Fatal("no row groups")
 	}
 
-	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile)
+	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile, nil)
 	if err != nil {
 		t.Fatalf("readRowGroupColumnar: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestColumnarReadUUIDAndDate(t *testing.T) {
 
 	pqFile := reader.File()
 	rgs := pqFile.RowGroups()
-	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile)
+	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile, nil)
 	if err != nil {
 		t.Fatalf("readRowGroupColumnar: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestColumnarReadSIEMTypes(t *testing.T) {
 
 	pqFile := reader.File()
 	rgs := pqFile.RowGroups()
-	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile)
+	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile, nil)
 	if err != nil {
 		t.Fatalf("readRowGroupColumnar: %v", err)
 	}
