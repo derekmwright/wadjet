@@ -46,6 +46,36 @@ func DetectBudget() int64 {
 	return 0
 }
 
+// DetectPhysicalMemory reads total physical memory from /proc/meminfo.
+// Returns 0 if detection fails (non-Linux).
+func DetectPhysicalMemory() int64 {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "MemTotal:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				kb, err := strconv.ParseInt(fields[1], 10, 64)
+				if err == nil && kb > 0 {
+					return kb * 1024 // convert kB to bytes
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// DetectMemoryLimit returns the effective memory limit: cgroup limit if
+// available, otherwise physical memory. Returns 0 if neither is detected.
+func DetectMemoryLimit() int64 {
+	if limit := DetectCgroupLimit(); limit > 0 {
+		return limit
+	}
+	return DetectPhysicalMemory()
+}
+
 // readLimit parses a cgroup memory limit file. If filterV1Unlimited is true,
 // the cgroups v1 "unlimited" sentinel value is treated as no limit.
 func readLimit(path string, filterV1Unlimited bool) int64 {

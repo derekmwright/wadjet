@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
 	"sort"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 	tpch "github.com/citc-tech/wadjet/benchmarks/tpch"
 	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	distrib "github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
@@ -60,6 +62,14 @@ func main() {
 			pprof.StopCPUProfile()
 			f.Close()
 		}()
+	}
+
+	// Set GOMEMLIMIT to prevent OOM on bare metal / EC2 instances
+	if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
+		goMemLimit := memLimit * 9 / 10
+		debug.SetMemoryLimit(goMemLimit)
+		log.Printf("Set GOMEMLIMIT=%d (%.1f GB) from detected limit %d",
+			goMemLimit, float64(goMemLimit)/(1024*1024*1024), memLimit)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

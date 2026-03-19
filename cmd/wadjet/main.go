@@ -116,14 +116,14 @@ func serveCmd() *cobra.Command {
 
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-			if cgroupLimit := memory.DetectCgroupLimit(); cgroupLimit > 0 {
-				goMemLimit := cgroupLimit * 9 / 10
+			if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
+				goMemLimit := memLimit * 9 / 10
 				debug.SetMemoryLimit(goMemLimit)
-				logger.Info("set GOMEMLIMIT from cgroup", "cgroup_limit", cgroupLimit, "go_mem_limit", goMemLimit)
+				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit)
 
 				if memoryBudget == 0 {
-					memoryBudget = int64(float64(cgroupLimit) * 0.75)
-					logger.Info("auto-detected memory budget from cgroup", "budget_bytes", memoryBudget)
+					memoryBudget = int64(float64(memLimit) * 0.75)
+					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget)
 				}
 			}
 
