@@ -104,6 +104,7 @@ type HashAggregate struct {
 
 type groupState struct {
 	keyValues    []any
+	intKey       int64 // single int64 key for int-keyed groups (avoids []any boxing)
 	accs         []kernel.Accumulator
 	distinctSets []map[string]struct{} // per-agg distinct value sets (nil if not COUNT(DISTINCT))
 	extraState   []any                 // per-agg custom state (string_agg builder, variance state, etc.)
@@ -423,6 +424,7 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 
 // consumeBatchIntGroup is the fast path for single-column integer GROUP BY.
 // Uses intHashTable for group lookup — no key serialization, no string allocation.
+// The loop body is fully inlined (no closure) to avoid per-call heap allocation.
 func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	gkVec := b.Columns[h.intGroupKeyCol]
 	isInt32 := h.groupColTypes[0] == batch.TypeInt32 ||
@@ -431,69 +433,112 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 		h.groupColTypes[0] == batch.TypeDate
 	hasNulls := gkVec.Nulls.HasNulls()
 
-	processRow := func(row int) {
-		if hasNulls && gkVec.Nulls.IsNullFast(row) {
-			h.processRow(b, row) // fall back for NULL keys
-			return
-		}
-		var key int64
-		if isInt32 {
-			key = int64(gkVec.Int32Data[row])
-		} else {
-			key = gkVec.Int64Data[row]
-		}
-
-		gsIdx, ok := h.intGroupIndex.Get(key)
-		if ok {
-			gs := h.intGroupStates[gsIdx]
-			for i := range h.Aggs {
-				updater := h.aggUpdaters[i]
-				if updater == nil {
-					continue
-				}
-				idx := h.aggColIdx[i]
-				if idx >= 0 {
-					updater(&gs.accs[i], b.Columns[idx], row)
-				} else {
-					updater(&gs.accs[i], nil, row) // COUNT(*)
-				}
-			}
-			return
-		}
-
-		// New group — useIntGroupKey requires allSimpleAggs, so
-		// distinctSets and extraState are never used; skip allocation.
-		gs := &groupState{
-			keyValues: []any{key},
-			accs:      make([]kernel.Accumulator, len(h.Aggs)),
-		}
-
-		newIdx := int32(len(h.intGroupStates))
-		h.intGroupIndex.Put(key, newIdx)
-		h.intGroupStates = append(h.intGroupStates, gs)
-		h.keys = append(h.keys, gs.keyValues)
-
-		for i := range h.Aggs {
-			updater := h.aggUpdaters[i]
-			if updater == nil {
-				continue
-			}
-			idx := h.aggColIdx[i]
-			if idx >= 0 {
-				updater(&gs.accs[i], b.Columns[idx], row)
-			} else {
-				updater(&gs.accs[i], nil, row)
-			}
-		}
-	}
+	// Local copies to avoid repeated field loads in the inner loop
+	intIdx := h.intGroupIndex
+	updaters := h.aggUpdaters
+	colIdx := h.aggColIdx
+	nAggs := len(h.Aggs)
 
 	if b.Sel != nil {
-		for _, idx := range b.Sel {
-			processRow(int(idx))
+		for _, si := range b.Sel {
+			row := int(si)
+			if hasNulls && gkVec.Nulls.IsNullFast(row) {
+				h.processRow(b, row)
+				continue
+			}
+			var key int64
+			if isInt32 {
+				key = int64(gkVec.Int32Data[row])
+			} else {
+				key = gkVec.Int64Data[row]
+			}
+			gsIdx, ok := intIdx.Get(key)
+			if ok {
+				gs := h.intGroupStates[gsIdx]
+				for i := 0; i < nAggs; i++ {
+					u := updaters[i]
+					if u == nil {
+						continue
+					}
+					ci := colIdx[i]
+					if ci >= 0 {
+						u(&gs.accs[i], b.Columns[ci], row)
+					} else {
+						u(&gs.accs[i], nil, row)
+					}
+				}
+				continue
+			}
+			// New group — store intKey directly, defer []any boxing to output.
+			gs := &groupState{
+				intKey: key,
+				accs:   make([]kernel.Accumulator, nAggs),
+			}
+			newIdx := int32(len(h.intGroupStates))
+			intIdx.Put(key, newIdx)
+			h.intGroupStates = append(h.intGroupStates, gs)
+			for i := 0; i < nAggs; i++ {
+				u := updaters[i]
+				if u == nil {
+					continue
+				}
+				ci := colIdx[i]
+				if ci >= 0 {
+					u(&gs.accs[i], b.Columns[ci], row)
+				} else {
+					u(&gs.accs[i], nil, row)
+				}
+			}
 		}
 	} else {
-		for i := 0; i < b.Len; i++ {
-			processRow(i)
+		for row := 0; row < b.Len; row++ {
+			if hasNulls && gkVec.Nulls.IsNullFast(row) {
+				h.processRow(b, row)
+				continue
+			}
+			var key int64
+			if isInt32 {
+				key = int64(gkVec.Int32Data[row])
+			} else {
+				key = gkVec.Int64Data[row]
+			}
+			gsIdx, ok := intIdx.Get(key)
+			if ok {
+				gs := h.intGroupStates[gsIdx]
+				for i := 0; i < nAggs; i++ {
+					u := updaters[i]
+					if u == nil {
+						continue
+					}
+					ci := colIdx[i]
+					if ci >= 0 {
+						u(&gs.accs[i], b.Columns[ci], row)
+					} else {
+						u(&gs.accs[i], nil, row)
+					}
+				}
+				continue
+			}
+			// New group — store intKey directly, defer []any boxing to output.
+			gs := &groupState{
+				intKey: key,
+				accs:   make([]kernel.Accumulator, nAggs),
+			}
+			newIdx := int32(len(h.intGroupStates))
+			intIdx.Put(key, newIdx)
+			h.intGroupStates = append(h.intGroupStates, gs)
+			for i := 0; i < nAggs; i++ {
+				u := updaters[i]
+				if u == nil {
+					continue
+				}
+				ci := colIdx[i]
+				if ci >= 0 {
+					u(&gs.accs[i], b.Columns[ci], row)
+				} else {
+					u(&gs.accs[i], nil, row)
+				}
+			}
 		}
 	}
 }
@@ -940,15 +985,19 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		return out, nil
 	}
 
-	if h.outputPos >= len(h.keys) {
+	totalGroups := len(h.keys)
+	if h.useIntGroupKey {
+		totalGroups = len(h.intGroupStates)
+	}
+	if h.outputPos >= totalGroups {
 		return nil, nil
 	}
 
 	schema := h.outputSchema()
 	start := h.outputPos
 	end := start + batch.DefaultBatchSize
-	if end > len(h.keys) {
-		end = len(h.keys)
+	if end > totalGroups {
+		end = totalGroups
 	}
 	numRows := end - start
 	h.outputPos = end
@@ -969,9 +1018,14 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 			gs = h.strGroupStates[start+i]
 		}
 
-		// Set group-by columns
-		for j, val := range gs.keyValues {
-			out.Columns[j].SetValue(i, val)
+		// Set group-by columns: use intKey directly for int-keyed groups
+		// to avoid deferred []any boxing. For other paths, use keyValues.
+		if h.useIntGroupKey && gs.keyValues == nil {
+			out.Columns[0].SetValue(i, gs.intKey)
+		} else {
+			for j, val := range gs.keyValues {
+				out.Columns[j].SetValue(i, val)
+			}
 		}
 
 		// Set aggregate columns
@@ -1075,7 +1129,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	}
 
 	// Release memory when all groups have been emitted
-	if h.outputPos >= len(h.keys) {
+	if h.outputPos >= totalGroups {
 		h.keys = nil
 		h.serializedKeys = nil
 		h.strGroupStates = nil
@@ -1167,12 +1221,18 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
 	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 	h.serializedKeys = make([]string, 0, len(h.intGroupStates))
+	h.keys = make([][]any, 0, len(h.intGroupStates))
 	for _, gs := range h.intGroupStates {
+		// Lazily construct keyValues for groups that deferred boxing
+		if gs.keyValues == nil {
+			gs.keyValues = []any{gs.intKey}
+		}
 		h.keyBuf = h.keyBuf[:0]
 		key := serializeKey(h.keyBuf, gs.keyValues)
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
+		h.keys = append(h.keys, gs.keyValues)
 	}
 	h.useIntGroupKey = false
 	h.intGroupStates = nil
