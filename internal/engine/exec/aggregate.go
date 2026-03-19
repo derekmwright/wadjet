@@ -986,7 +986,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	}
 
 	totalGroups := len(h.keys)
-	if h.useIntGroupKey {
+	if h.useIntGroupKey || h.useCompactGroupKey {
 		totalGroups = len(h.intGroupStates)
 	}
 	if h.outputPos >= totalGroups {

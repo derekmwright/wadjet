@@ -30,11 +30,12 @@ const (
 
 // SpillManager handles spilling data to disk when memory budget is exceeded.
 type SpillManager struct {
-	dir     string
-	tracker *Tracker
-	mu      sync.Mutex
-	files   []string
-	nextID  atomic.Int64
+	dir          string
+	tracker      *Tracker
+	mu           sync.Mutex
+	files        []string
+	nextID       atomic.Int64
+	baselineHeap uint64 // HeapInuse at creation time, for delta-based pressure detection
 }
 
 // NewSpillManager creates a spill manager that writes temp files to the given directory.
@@ -43,9 +44,12 @@ func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
 	if err := os.MkdirAll(spillDir, 0700); err != nil {
 		return nil, fmt.Errorf("creating spill dir: %w", err)
 	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
 	return &SpillManager{
-		dir:     spillDir,
-		tracker: tracker,
+		dir:          spillDir,
+		tracker:      tracker,
+		baselineHeap: m.HeapInuse,
 	}, nil
 }
 
@@ -62,12 +66,18 @@ func (sm *SpillManager) ShouldSpill() bool {
 	if sm.tracker.Used() > budget*80/100 {
 		return true
 	}
-	// Check actual Go heap against budget. Only meaningful when the budget
-	// reflects real system memory (≥100MB), not unit-test micro-budgets.
+	// Check actual Go heap growth since query start. Only meaningful when
+	// the budget reflects real system memory (≥100MB), not unit-test
+	// micro-budgets. Uses delta from baseline to ignore pre-existing heap
+	// from the server, NATS, etc.
 	if budget >= 100*1024*1024 {
 		var m runtime.MemStats
 		runtime.ReadMemStats(&m)
-		return int64(m.HeapInuse) > budget*80/100
+		growth := int64(m.HeapInuse) - int64(sm.baselineHeap)
+		if growth < 0 {
+			growth = 0
+		}
+		return growth > budget*70/100
 	}
 	return false
 }
