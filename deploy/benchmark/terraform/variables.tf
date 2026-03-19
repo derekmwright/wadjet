@@ -74,6 +74,12 @@ variable "data_bucket" {
   default     = ""
 }
 
+variable "bin_version" {
+  description = "Pre-built binary version to pull from S3 (git short SHA or 'latest'). If empty, builds from source."
+  type        = string
+  default     = "latest"
+}
+
 # Recommended instance types per scale factor (Graviton3 ARM):
 #   SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
 #   SF10:  c7g.4xlarge  (16 vCPU, 32 GB) — $0.58/hr

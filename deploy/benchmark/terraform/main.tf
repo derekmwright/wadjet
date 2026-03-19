@@ -182,12 +182,32 @@ resource "aws_iam_instance_profile" "bench" {
 # --- User data scripts ---
 
 locals {
-  # Shared build script prefix
-  build_script = <<-SCRIPT
+  use_prebuilt = var.bin_version != "" && var.data_bucket != ""
+
+  # Pull pre-built binaries from S3 (~10s vs ~5min build)
+  prebuilt_script = <<-SCRIPT
     #!/bin/bash
     set -euo pipefail
+    export HOME=/root
 
-    # Set HOME explicitly (cloud-init runs without login shell)
+    # Download pre-built arm64 binaries from the data bucket
+    aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/wadjet" /usr/local/bin/wadjet --region ${var.region}
+    aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/tpch-bench" /usr/local/bin/tpch-bench --region ${var.region}
+    chmod +x /usr/local/bin/wadjet /usr/local/bin/tpch-bench
+
+    # Clone repo for benchmark scripts only
+    dnf install -y git
+    git clone --depth=1 https://github.com/citc-tech/wadjet.git /root/wadjet
+
+    echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
+    echo "WADJET_REGION=${var.region}" >> /etc/environment
+    echo "BUILD_COMPLETE=1" >> /etc/environment
+  SCRIPT
+
+  # Build from source (when no pre-built binaries available)
+  source_build_script = <<-SCRIPT
+    #!/bin/bash
+    set -euo pipefail
     export HOME=/root
     export GOPATH=/root/go
     export GOMODCACHE=/root/go/pkg/mod
@@ -211,6 +231,8 @@ locals {
     echo "WADJET_REGION=${var.region}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
+
+  build_script = local.use_prebuilt ? local.prebuilt_script : local.source_build_script
 
   # Standalone: build + auto-run benchmark
   standalone_user_data = <<-EOF
