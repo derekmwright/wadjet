@@ -1410,3 +1410,189 @@ func TestDoubleColonCastPrecedence(t *testing.T) {
 		t.Errorf("type = %q, want int", cast.TypeName)
 	}
 }
+
+// --- Sprint 2: Analytics user expectations ---
+
+func TestExtractExpr(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{"year", "SELECT EXTRACT(YEAR FROM created_at) FROM t", "year(created_at)"},
+		{"month", "SELECT EXTRACT(MONTH FROM ts) FROM t", "month(ts)"},
+		{"day", "SELECT EXTRACT(DAY FROM ts) FROM t", "day(ts)"},
+		{"hour", "SELECT EXTRACT(HOUR FROM ts) FROM t", "hour(ts)"},
+		{"minute", "SELECT EXTRACT(MINUTE FROM ts) FROM t", "minute(ts)"},
+		{"second", "SELECT EXTRACT(SECOND FROM ts) FROM t", "second(ts)"},
+		{"dow", "SELECT EXTRACT(DOW FROM ts) FROM t", "day_of_week(ts)"},
+		{"doy", "SELECT EXTRACT(DOY FROM ts) FROM t", "day_of_year(ts)"},
+		{"quarter", "SELECT EXTRACT(QUARTER FROM ts) FROM t", "quarter(ts)"},
+		{"in where", "SELECT * FROM t WHERE EXTRACT(YEAR FROM ts) = 2026", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			info, _ := ExtractSelect(parsed)
+			if tt.want != "" {
+				got := info.Columns[0].Expr
+				if got != tt.want {
+					t.Errorf("expr = %q, want %q", got, tt.want)
+				}
+			}
+			if tt.name == "in where" {
+				if !strings.Contains(info.Where, "year(ts)") {
+					t.Errorf("WHERE = %q, want year(ts) in it", info.Where)
+				}
+			}
+		})
+	}
+}
+
+func TestTrimExtended(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{"leading char", "SELECT TRIM(LEADING '0' FROM col) FROM t", "ltrim(col, '0')"},
+		{"trailing char", "SELECT TRIM(TRAILING ' ' FROM col) FROM t", "rtrim(col, ' ')"},
+		{"both char", "SELECT TRIM(BOTH 'x' FROM col) FROM t", "trim(col, 'x')"},
+		{"leading no char", "SELECT TRIM(LEADING FROM col) FROM t", "ltrim(col)"},
+		{"trailing no char", "SELECT TRIM(TRAILING FROM col) FROM t", "rtrim(col)"},
+		{"both no char", "SELECT TRIM(BOTH FROM col) FROM t", "trim(col)"},
+		{"simple trim", "SELECT TRIM(col) FROM t", "trim(col)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			info, _ := ExtractSelect(parsed)
+			got := info.Columns[0].Expr
+			if got != tt.want {
+				t.Errorf("expr = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSimilarTo(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string
+	}{
+		{"basic", "SELECT * FROM t WHERE name SIMILAR TO '%(john|jane)%'", "regexp_like(name, '%(john|jane)%')"},
+		{"not similar to", "SELECT * FROM t WHERE name NOT SIMILAR TO 'test.*'", "not regexp_like(name, 'test.*')"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			info, _ := ExtractSelect(parsed)
+			if info.Where != tt.want {
+				t.Errorf("WHERE = %q, want %q", info.Where, tt.want)
+			}
+		})
+	}
+}
+
+func TestCreateView(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		wantName string
+		wantSQL  string
+		replace  bool
+	}{
+		{"basic", "CREATE VIEW active_users AS SELECT * FROM users WHERE active = true",
+			"active_users", "SELECT * FROM users WHERE active = true", false},
+		{"replace", "CREATE OR REPLACE VIEW v AS SELECT 1",
+			"v", "SELECT 1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if parsed.Type != QueryCreateView {
+				t.Fatalf("type = %d, want QueryCreateView", parsed.Type)
+			}
+			cv := parsed.CreateView
+			if cv.Name != tt.wantName {
+				t.Errorf("name = %q, want %q", cv.Name, tt.wantName)
+			}
+			if cv.SQL != tt.wantSQL {
+				t.Errorf("sql = %q, want %q", cv.SQL, tt.wantSQL)
+			}
+			if cv.Replace != tt.replace {
+				t.Errorf("replace = %v, want %v", cv.Replace, tt.replace)
+			}
+		})
+	}
+}
+
+func TestDropView(t *testing.T) {
+	tests := []struct {
+		name     string
+		sql      string
+		wantName string
+		ifExists bool
+	}{
+		{"basic", "DROP VIEW my_view", "my_view", false},
+		{"if exists", "DROP VIEW IF EXISTS my_view", "my_view", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if parsed.Type != QueryDropView {
+				t.Fatalf("type = %d, want QueryDropView", parsed.Type)
+			}
+			dv := parsed.DropView
+			if dv.Name != tt.wantName {
+				t.Errorf("name = %q, want %q", dv.Name, tt.wantName)
+			}
+			if dv.IfExists != tt.ifExists {
+				t.Errorf("ifExists = %v, want %v", dv.IfExists, tt.ifExists)
+			}
+		})
+	}
+}
+
+func TestQualify(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		wantQ   string
+	}{
+		{"basic qualify", "SELECT *, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM t QUALIFY rn = 1", "rn = 1"},
+		{"qualify with partition", "SELECT * FROM t QUALIFY ROW_NUMBER() OVER (PARTITION BY grp ORDER BY id) <= 3",
+			"ROW_NUMBER() OVER (...) <= 3"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			info, _ := ExtractSelect(parsed)
+			if info.Qualify == "" {
+				t.Fatal("QUALIFY clause not parsed")
+			}
+			if tt.name == "basic qualify" && info.Qualify != tt.wantQ {
+				t.Errorf("qualify = %q, want %q", info.Qualify, tt.wantQ)
+			}
+		})
+	}
+}

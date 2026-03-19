@@ -18,12 +18,27 @@ type ParsedQuery struct {
 	DropFunction   *DropFunctionInfo
 	CreateTable    *CreateTableInfo
 	DropTable      *DropTableInfo
+	CreateView     *CreateViewInfo
+	DropView       *DropViewInfo
 	Update         *UpdateInfo
 	Delete         *DeleteInfo
 	Insert         *InsertInfo
 	Windows        []WindowSpec   // extracted window function specs
 	CTEs           []CTEDef       // extracted CTE definitions
 	SelectInfo     *SelectInfo    // parsed SELECT info (replaces AST)
+}
+
+// CreateViewInfo holds details for a CREATE VIEW statement.
+type CreateViewInfo struct {
+	Name    string
+	SQL     string // the view definition SQL
+	Replace bool   // CREATE OR REPLACE VIEW
+}
+
+// DropViewInfo holds details for a DROP VIEW statement.
+type DropViewInfo struct {
+	Name     string
+	IfExists bool
 }
 
 // CTEDef represents a Common Table Expression definition.
@@ -121,6 +136,8 @@ const (
 	QueryUpdate
 	QueryDelete
 	QueryInsert
+	QueryCreateView
+	QueryDropView
 	QueryUnsupported
 )
 
@@ -244,6 +261,8 @@ type SelectInfo struct {
 	Having       string
 	HavingExpr   Node
 	Distinct     bool
+	Qualify      string
+	QualifyExpr  Node
 	OrderBy      []OrderByItem
 	Limit        string
 	Offset       string
@@ -399,13 +418,17 @@ func lexParseCreate(sql string, l *lexer) (*ParsedQuery, error) {
 		tok = l.nextToken()
 	}
 
-	// Dispatch to TABLE or FUNCTION
+	// Dispatch to TABLE, VIEW, or FUNCTION
 	if tok.typ == TokenKWTable {
 		return lexParseCreateTable(sql, l)
 	}
 
+	if tok.typ == TokenKWView {
+		return lexParseCreateView(sql, l, replace)
+	}
+
 	if tok.typ != TokenKWFunction {
-		return nil, fmt.Errorf("expected TABLE or FUNCTION after CREATE")
+		return nil, fmt.Errorf("expected TABLE, VIEW, or FUNCTION after CREATE")
 	}
 
 	// Function name
@@ -486,8 +509,12 @@ func lexParseDrop(sql string, l *lexer) (*ParsedQuery, error) {
 		return lexParseDropTable(sql, l)
 	}
 
+	if kindTok.typ == TokenKWView {
+		return lexParseDropView(sql, l)
+	}
+
 	if kindTok.typ != TokenKWFunction {
-		return nil, fmt.Errorf("expected TABLE or FUNCTION after DROP")
+		return nil, fmt.Errorf("expected TABLE, VIEW, or FUNCTION after DROP")
 	}
 
 	ifExists := false
@@ -848,5 +875,60 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 	}
 
 	return defs, nil
+}
+
+// lexParseCreateView handles: CREATE [OR REPLACE] VIEW <name> AS <query>
+func lexParseCreateView(sql string, l *lexer, replace bool) (*ParsedQuery, error) {
+	nameTok := l.nextToken()
+	if nameTok.typ != TokenIdent {
+		return nil, fmt.Errorf("CREATE VIEW: view name is required")
+	}
+
+	asTok := l.nextToken()
+	if asTok.typ != TokenKWAs {
+		return nil, fmt.Errorf("CREATE VIEW: expected AS after view name")
+	}
+
+	viewSQL := strings.TrimSpace(l.rest())
+	if viewSQL == "" {
+		return nil, fmt.Errorf("CREATE VIEW: view definition is required")
+	}
+
+	return &ParsedQuery{
+		Type: QueryCreateView,
+		SQL:  sql,
+		CreateView: &CreateViewInfo{
+			Name:    strings.ToLower(nameTok.val),
+			SQL:     viewSQL,
+			Replace: replace,
+		},
+	}, nil
+}
+
+// lexParseDropView handles: DROP VIEW [IF EXISTS] <name>
+func lexParseDropView(sql string, l *lexer) (*ParsedQuery, error) {
+	ifExists := false
+	tok := l.nextToken()
+	if tok.typ == TokenKWIf {
+		existsTok := l.nextToken()
+		if existsTok.typ != TokenKWExists {
+			return nil, fmt.Errorf("expected EXISTS after IF")
+		}
+		ifExists = true
+		tok = l.nextToken()
+	}
+
+	if tok.typ != TokenIdent {
+		return nil, fmt.Errorf("DROP VIEW: view name is required")
+	}
+
+	return &ParsedQuery{
+		Type: QueryDropView,
+		SQL:  sql,
+		DropView: &DropViewInfo{
+			Name:     strings.ToLower(tok.val),
+			IfExists: ifExists,
+		},
+	}, nil
 }
 

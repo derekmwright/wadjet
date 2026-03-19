@@ -124,6 +124,7 @@ const (
 
 	// Clause keywords
 	TokenKWFetch
+	TokenKWView
 
 	// DML keywords
 	TokenKWUpdate
@@ -216,6 +217,7 @@ var keywords = map[string]TokenType{
 	"GROUPING":   TokenKWGrouping,
 	"SETS":       TokenKWSets,
 	"FETCH":      TokenKWFetch,
+	"VIEW":       TokenKWView,
 	"UPDATE":     TokenKWUpdate,
 	"SET":        TokenKWSet,
 	"DELETE":     TokenKWDelete,

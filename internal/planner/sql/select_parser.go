@@ -264,6 +264,17 @@ func (p *selectParser) parseSingleSelect() (*SelectInfo, error) {
 		info.HavingExpr = havingExpr
 	}
 
+	// QUALIFY (window function filter — Snowflake/BigQuery/Teradata extension)
+	if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "QUALIFY") {
+		p.advance()
+		qualifyExpr, err := p.parseExpr()
+		if err != nil {
+			return nil, fmt.Errorf("parsing QUALIFY: %w", err)
+		}
+		info.Qualify = qualifyExpr.String()
+		info.QualifyExpr = qualifyExpr
+	}
+
 	return info, nil
 }
 
@@ -412,6 +423,9 @@ func (p *selectParser) isFromKeyword() bool {
 		TokenKWCross, TokenKWOn, TokenKWOffset, TokenKWOver, TokenKWFetch,
 		TokenKWNulls, TokenKWRows, TokenKWRange, TokenKWUnbounded,
 		TokenKWPreceding, TokenKWFollowing, TokenKWCurrent, TokenKWRow:
+		return true
+	}
+	if p.cur.typ == TokenIdent && strings.EqualFold(p.cur.val, "QUALIFY") {
 		return true
 	}
 	return false
@@ -633,6 +647,9 @@ func (p *selectParser) isJoinKeyword() bool {
 		TokenKWNulls, TokenKWRows, TokenKWRange:
 		return true
 	}
+	if p.cur.typ == TokenIdent && strings.EqualFold(p.cur.val, "QUALIFY") {
+		return true
+	}
 	return false
 }
 
@@ -828,7 +845,12 @@ func (p *selectParser) parseComparison() (Node, error) {
 			not = true
 			// fall through to ILIKE handling below
 		default:
-			// Not a NOT IN/BETWEEN/LIKE — restore and return left
+			// Check for NOT SIMILAR TO
+			if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "SIMILAR") {
+				not = true
+				break // fall through to SIMILAR TO handling below
+			}
+			// Not a NOT IN/BETWEEN/LIKE/SIMILAR — restore and return left
 			p.cur = saved
 			p.lex.pos = savedPos
 			p.lex.start = savedStart
@@ -906,6 +928,32 @@ func (p *selectParser) parseComparison() (Node, error) {
 			Not:     not,
 			Pattern: &FuncCallNode{Name: "lower", Args: []Node{pattern}},
 		}, nil
+	}
+
+	// SIMILAR TO — rewrite to regexp_like(left, pattern)
+	if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "SIMILAR") {
+		savedSim := p.cur
+		savedSimPos := p.lex.pos
+		savedSimStart := p.lex.start
+		savedSimWidth := p.lex.width
+		p.advance() // consume SIMILAR
+		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "TO") {
+			p.advance() // consume TO
+			pattern, err := p.parseAddition()
+			if err != nil {
+				return nil, err
+			}
+			var node Node = &FuncCallNode{Name: "regexp_like", Args: []Node{left, pattern}}
+			if not {
+				node = &NotNode{Inner: node}
+			}
+			return node, nil
+		}
+		// Not "SIMILAR TO", restore
+		p.cur = savedSim
+		p.lex.pos = savedSimPos
+		p.lex.start = savedSimStart
+		p.lex.width = savedSimWidth
 	}
 
 	// Comparison operators
@@ -1113,6 +1161,16 @@ func (p *selectParser) parsePrimary() (Node, error) {
 		// INTERVAL 'N days' or INTERVAL 'N' DAY
 		if upper == "INTERVAL" {
 			return p.parseIntervalLiteral()
+		}
+
+		// EXTRACT(field FROM expr) — rewrite to field(expr) function call
+		if upper == "EXTRACT" {
+			return p.parseExtractExpr()
+		}
+
+		// TRIM with optional LEADING/TRAILING/BOTH syntax
+		if upper == "TRIM" && p.peekN(1) == TokenLParen {
+			return p.parseTrimExpr()
 		}
 
 		// ARRAY[...] literal
@@ -1532,6 +1590,120 @@ func (p *selectParser) parseCastExpr() (Node, error) {
 	}
 
 	return &CastNode{Inner: inner, TypeName: typeName}, nil
+}
+
+// parseExtractExpr parses EXTRACT(field FROM expr) and rewrites to field(expr).
+// Examples: EXTRACT(YEAR FROM col) → year(col), EXTRACT(DOW FROM ts) → day_of_week(ts)
+func (p *selectParser) parseExtractExpr() (Node, error) {
+	p.advance() // consume EXTRACT
+	if _, err := p.expect(TokenLParen); err != nil {
+		return nil, fmt.Errorf("expected ( after EXTRACT")
+	}
+
+	// Field name — accept any token (ident or keyword) as field
+	fieldTok := p.advance()
+	field := strings.ToLower(fieldTok.val)
+
+	if _, err := p.expect(TokenKWFrom); err != nil {
+		return nil, fmt.Errorf("expected FROM in EXTRACT")
+	}
+
+	source, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := p.expect(TokenRParen); err != nil {
+		return nil, fmt.Errorf("expected ) after EXTRACT")
+	}
+
+	// Map non-standard field names to function names
+	switch field {
+	case "dow":
+		field = "day_of_week"
+	case "doy":
+		field = "day_of_year"
+	}
+	return &FuncCallNode{Name: field, Args: []Node{source}}, nil
+}
+
+// parseTrimExpr parses TRIM with optional LEADING/TRAILING/BOTH syntax.
+// Examples:
+//
+//	TRIM(col)                      → trim(col)
+//	TRIM(LEADING '0' FROM col)     → ltrim(col, '0')
+//	TRIM(TRAILING FROM col)        → rtrim(col)
+//	TRIM(BOTH ' ' FROM col)        → trim(col, ' ')
+func (p *selectParser) parseTrimExpr() (Node, error) {
+	p.advance() // consume TRIM
+	if _, err := p.expect(TokenLParen); err != nil {
+		return nil, fmt.Errorf("expected ( after TRIM")
+	}
+
+	// Check for LEADING/TRAILING/BOTH — use lookahead to confirm extended syntax
+	mode := ""
+	if p.peek() == TokenIdent {
+		upper := strings.ToUpper(p.cur.val)
+		if upper == "LEADING" || upper == "TRAILING" || upper == "BOTH" {
+			// Only treat as mode if FROM appears within the next 2 tokens
+			if p.peekN(1) == TokenKWFrom || p.peekN(2) == TokenKWFrom {
+				mode = upper
+				p.advance() // consume mode
+			}
+		}
+	}
+
+	if mode != "" {
+		// Extended TRIM syntax
+		var trimChar Node
+		if !p.isKeyword(TokenKWFrom) {
+			var err error
+			trimChar, err = p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+		}
+		if _, err := p.expect(TokenKWFrom); err != nil {
+			return nil, fmt.Errorf("expected FROM in TRIM(%s ...)", mode)
+		}
+		source, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(TokenRParen); err != nil {
+			return nil, fmt.Errorf("expected ) after TRIM")
+		}
+		fn := "trim"
+		switch mode {
+		case "LEADING":
+			fn = "ltrim"
+		case "TRAILING":
+			fn = "rtrim"
+		}
+		args := []Node{source}
+		if trimChar != nil {
+			args = append(args, trimChar)
+		}
+		return &FuncCallNode{Name: fn, Args: args}, nil
+	}
+
+	// Regular TRIM(expr[, char])
+	var args []Node
+	for {
+		arg, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, arg)
+		if p.peek() != TokenComma {
+			break
+		}
+		p.advance()
+	}
+	if _, err := p.expect(TokenRParen); err != nil {
+		return nil, fmt.Errorf("expected ) after TRIM")
+	}
+	return &FuncCallNode{Name: "trim", Args: args}, nil
 }
 
 // parseIntervalLiteral parses INTERVAL 'N' UNIT or INTERVAL 'N unit[s]'.
