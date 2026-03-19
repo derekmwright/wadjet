@@ -89,6 +89,11 @@ type HashAggregate struct {
 	useCompactGroupKey bool
 	compactKeys        []string // serialized binary keys for fallback migration
 
+	// String hash table for generic GROUP BY: open-addressing with arena-stored keys.
+	// Replaces map[string]*groupState to eliminate GC scanning overhead.
+	strGroupIndex  *strHashTable
+	strGroupStates []*groupState
+
 	resolved       bool
 	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
@@ -203,6 +208,8 @@ func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 
 func (h *HashAggregate) Init(_ context.Context) error {
 	h.groups = make(map[string]*groupState)
+	h.strGroupIndex = newStrHashTable(4096)
+	h.strGroupStates = nil
 	h.keys = nil
 	h.serializedKeys = nil
 	h.resolved = false
@@ -588,9 +595,14 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 // when compact mode cannot handle a key that exceeds 8 bytes.
 func (h *HashAggregate) migrateCompactToGeneric() {
 	h.useCompactGroupKey = false
+	h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
+	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 	for i, gs := range h.intGroupStates {
-		h.groups[h.compactKeys[i]] = gs
-		h.serializedKeys = append(h.serializedKeys, h.compactKeys[i])
+		key := h.compactKeys[i]
+		h.groups[key] = gs
+		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
+		h.strGroupStates = append(h.strGroupStates, gs)
+		h.serializedKeys = append(h.serializedKeys, key)
 	}
 	h.intGroupStates = nil
 	h.intGroupIndex = nil
@@ -624,15 +636,14 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[i])
 	}
 
-	// Fast path: Go avoids allocating a string for map lookups of string([]byte).
-	// Only allocate the key string when creating a new group.
-	if gs, ok := h.groups[string(h.keyBuf)]; ok {
-		h.updateGroup(gs, b, row)
+	// Use open-addressing string hash table to avoid GC overhead of map[string].
+	groupIdx, found := h.strGroupIndex.GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
+	if found {
+		h.updateGroup(h.strGroupStates[groupIdx], b, row)
 		return
 	}
 
-	// Slow path: new group — allocate key string only here
-	key := string(h.keyBuf)
+	// New group
 	keyVals := make([]any, len(h.GroupByCols))
 	for i, idx := range h.groupColIdx {
 		if idx >= 0 {
@@ -673,7 +684,9 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 			gs.extraState[i] = &minMaxByState{isMin: false}
 		}
 	}
+	key := string(h.keyBuf)
 	h.groups[key] = gs
+	h.strGroupStates = append(h.strGroupStates, gs)
 	h.keys = append(h.keys, keyVals)
 	h.serializedKeys = append(h.serializedKeys, key)
 
@@ -1133,15 +1146,19 @@ func (h *HashAggregate) migrateToGenericMap() {
 	if !h.useIntGroupKey {
 		return
 	}
-	// Migrate int group key → generic map
+	// Migrate int group key → generic path
 	if h.groups == nil {
 		h.groups = make(map[string]*groupState, len(h.intGroupStates))
 	}
+	h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
+	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 	h.serializedKeys = make([]string, 0, len(h.intGroupStates))
 	for _, gs := range h.intGroupStates {
 		h.keyBuf = h.keyBuf[:0]
 		key := serializeKey(h.keyBuf, gs.keyValues)
 		h.groups[key] = gs
+		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
+		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
 	}
 	h.useIntGroupKey = false

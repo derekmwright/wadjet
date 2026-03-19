@@ -1328,3 +1328,82 @@ func TestHashJoinPreSizedFromHint(t *testing.T) {
 		}
 	}
 }
+
+func TestStrHashTable(t *testing.T) {
+	n := 1000
+	ht := newStrHashTable(n)
+
+	// Generate unique keys using binary encoding
+	makeKey := func(i int) []byte {
+		return []byte{byte(i >> 24), byte(i >> 16), byte(i >> 8), byte(i), 'k', 'e', 'y'}
+	}
+
+	// Insert keys
+	for i := 0; i < n; i++ {
+		ht.Put(makeKey(i), int32(i))
+	}
+
+	if ht.Len() != n {
+		t.Errorf("expected %d entries, got %d", n, ht.Len())
+	}
+
+	// Verify lookups
+	for i := 0; i < n; i++ {
+		val, ok := ht.Get(makeKey(i))
+		if !ok {
+			t.Fatalf("key %d not found", i)
+		}
+		if val != int32(i) {
+			t.Errorf("Get(%d) = %d, want %d", i, val, i)
+		}
+	}
+
+	// Test GetOrInsert — existing key returns existing value
+	val, found := ht.GetOrInsert(makeKey(0), 9999)
+	if !found {
+		t.Error("GetOrInsert should find existing key")
+	}
+	if val != 0 {
+		t.Errorf("GetOrInsert existing = %d, want 0", val)
+	}
+
+	// Test GetOrInsert — new key inserts
+	newKey := []byte("brand_new_key")
+	val, found = ht.GetOrInsert(newKey, 42)
+	if found {
+		t.Error("GetOrInsert should not find new key")
+	}
+	if val != 42 {
+		t.Errorf("GetOrInsert new = %d, want 42", val)
+	}
+
+	// Verify it's now retrievable
+	val, ok := ht.Get(newKey)
+	if !ok || val != 42 {
+		t.Errorf("Get after insert = (%d, %v), want (42, true)", val, ok)
+	}
+}
+
+func TestStrHashTablePreSizing(t *testing.T) {
+	n := 50000
+	ht := newStrHashTable(n)
+	initialCap := len(ht.entries)
+
+	for i := 0; i < n; i++ {
+		// Generate unique keys of varying lengths
+		key := make([]byte, 8)
+		key[0] = byte(i >> 24)
+		key[1] = byte(i >> 16)
+		key[2] = byte(i >> 8)
+		key[3] = byte(i)
+		key[4] = byte(i >> 12)
+		key[5] = byte(i >> 4)
+		key[6] = byte(i >> 20)
+		key[7] = byte(i >> 28)
+		ht.Put(key, int32(i))
+	}
+
+	if len(ht.entries) != initialCap {
+		t.Errorf("hash table grew from %d to %d with %d entries", initialCap, len(ht.entries), n)
+	}
+}
