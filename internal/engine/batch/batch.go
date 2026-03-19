@@ -97,7 +97,8 @@ func (b *RecordBatch) Reset(numRows int) {
 	for _, col := range b.Columns {
 		col.Len = numRows
 		col.Nulls.ResetNonNull(numRows)
-		if col.Type == TypeString || col.Type == TypeBytes {
+		switch col.Type {
+		case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
 			col.BytesData.Reset()
 		}
 	}
