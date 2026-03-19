@@ -529,7 +529,8 @@ func (f *ColColFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch
 	}
 
 	if f.kern == nil {
-		return nil, nil
+		return nil, fmt.Errorf("ColColFilter: could not resolve kernel for %s %v %s (leftIdx=%d, rightIdx=%d)",
+			f.LeftCol, f.Op, f.RightCol, f.leftIdx, f.rightIdx)
 	}
 
 	sel := f.kern(in.Columns[f.leftIdx], in.Columns[f.rightIdx], in.Sel, in.Len, f.outSel)

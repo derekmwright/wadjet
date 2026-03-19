@@ -1923,9 +1923,10 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		out.Columns[j] = in.Columns[j]
 	}
 
+	computedOffset := len(in.Schema)
+
 	// Compute expression columns (sequential writes, no selection vector).
 	// Use typed evaluation paths when available to avoid interface{} boxing.
-	computedOffset := len(in.Schema)
 	for k, c := range a.computed {
 		col := out.Columns[computedOffset+k]
 		if c.Float64Eval != nil {
