@@ -66,6 +66,69 @@ func TestCurrentDateAndInterval(t *testing.T) {
 	}
 }
 
+func TestAggregateFilter(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"count star filter", "SELECT COUNT(*) FILTER (WHERE severity = 'critical') FROM findings"},
+		{"count star filter alias", "SELECT COUNT(*) FILTER (WHERE severity = 'critical') AS critical FROM findings"},
+		{"sum filter", "SELECT SUM(amount) FILTER (WHERE status = 'paid') FROM invoices"},
+		{"avg filter", "SELECT AVG(score) FILTER (WHERE grade = 'A') FROM students"},
+		{"min filter", "SELECT MIN(price) FILTER (WHERE category = 'electronics') FROM products"},
+		{"max filter", "SELECT MAX(price) FILTER (WHERE category = 'electronics') FROM products"},
+		{"multiple filters", `SELECT
+			COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+			COUNT(*) FILTER (WHERE severity = 'high') AS high,
+			COUNT(*) AS total
+		FROM findings GROUP BY scan_date`},
+		{"filter with current_date", `SELECT scan_date,
+			COUNT(*) FILTER (WHERE severity = 'critical') AS critical
+		FROM findings
+		WHERE scan_date >= CURRENT_DATE - INTERVAL '30 days'
+		GROUP BY scan_date`},
+		{"count distinct filter", "SELECT COUNT(DISTINCT user_id) FILTER (WHERE active = true) FROM sessions"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			if parsed.Type != QuerySelect {
+				t.Fatalf("expected SELECT, got %v", parsed.Type)
+			}
+		})
+	}
+}
+
+func TestAggregateFilterRewrite(t *testing.T) {
+	// COUNT(*) FILTER (WHERE cond) should rewrite to SUM(CASE WHEN cond THEN 1 ELSE 0 END)
+	parsed, err := Parse("SELECT COUNT(*) FILTER (WHERE severity = 'critical') AS critical FROM findings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Columns) != 1 {
+		t.Fatalf("expected 1 column, got %d", len(info.Columns))
+	}
+	col := info.Columns[0]
+	// Should be rewritten to SUM aggregate
+	if !col.IsAgg {
+		t.Fatal("expected aggregate column")
+	}
+	if col.AggFunc != "sum" {
+		t.Fatalf("expected rewritten to SUM, got %q", col.AggFunc)
+	}
+	if col.Alias != "critical" {
+		t.Fatalf("expected alias 'critical', got %q", col.Alias)
+	}
+}
+
 func TestIntervalLitAST(t *testing.T) {
 	parsed, err := Parse("SELECT CURRENT_DATE - INTERVAL '30 days'")
 	if err != nil {

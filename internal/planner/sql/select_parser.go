@@ -1140,13 +1140,77 @@ func (p *selectParser) parseFuncCall(name string) (Node, error) {
 	return p.maybeParseOver(fn)
 }
 
-// maybeParseOver checks for OVER (...) after a function call and returns
-// a WindowFuncNode if OVER is present, otherwise the original FuncCallNode.
+// maybeParseFilterAndOver checks for FILTER (WHERE ...) and OVER (...) after
+// a function call. FILTER is rewritten to CASE WHEN at the AST level:
+//   COUNT(*) FILTER (WHERE cond) → SUM(CASE WHEN cond THEN 1 ELSE 0 END)
+//   AGG(expr) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END)
 func (p *selectParser) maybeParseOver(fn *FuncCallNode) (Node, error) {
+	// Check for FILTER (WHERE ...) — standard SQL aggregate filtering
+	if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "FILTER") {
+		rewritten, err := p.parseAggFilter(fn)
+		if err != nil {
+			return nil, err
+		}
+		fn = rewritten
+	}
+
 	if !p.isKeyword(TokenKWOver) {
 		return fn, nil
 	}
 	return p.parseWindowFunc(fn)
+}
+
+// parseAggFilter parses FILTER (WHERE condition) after an aggregate function
+// and rewrites it to the equivalent CASE WHEN expression.
+func (p *selectParser) parseAggFilter(fn *FuncCallNode) (*FuncCallNode, error) {
+	p.advance() // consume FILTER
+
+	if _, err := p.expect(TokenLParen); err != nil {
+		return nil, fmt.Errorf("expected ( after FILTER")
+	}
+	if !p.isKeyword(TokenKWWhere) {
+		return nil, fmt.Errorf("expected WHERE after FILTER(")
+	}
+	p.advance() // consume WHERE
+
+	cond, err := p.parseExpr()
+	if err != nil {
+		return nil, fmt.Errorf("FILTER WHERE condition: %w", err)
+	}
+
+	if _, err := p.expect(TokenRParen); err != nil {
+		return nil, fmt.Errorf("expected ) after FILTER(WHERE ...)")
+	}
+
+	// Rewrite: COUNT(*) FILTER (WHERE cond) → SUM(CASE WHEN cond THEN 1 ELSE 0 END)
+	if fn.Star && strings.ToLower(fn.Name) == "count" {
+		return &FuncCallNode{
+			Name: "sum",
+			Args: []Node{
+				&CaseNode{
+					Whens: []WhenClause{{Cond: cond, Result: &Lit{Value: "1", Kind: LitNumber}}},
+					Else:  &Lit{Value: "0", Kind: LitNumber},
+				},
+			},
+		}, nil
+	}
+
+	// Rewrite: AGG(expr) FILTER (WHERE cond) → AGG(CASE WHEN cond THEN expr END)
+	// NULL values from non-matching rows are ignored by all standard aggregates.
+	if len(fn.Args) >= 1 {
+		return &FuncCallNode{
+			Name:     fn.Name,
+			Distinct: fn.Distinct,
+			Args: []Node{
+				&CaseNode{
+					Whens: []WhenClause{{Cond: cond, Result: fn.Args[0]}},
+					Else:  nil, // NULL → excluded by aggregates
+				},
+			},
+		}, nil
+	}
+
+	return nil, fmt.Errorf("FILTER clause on %s() with no arguments", fn.Name)
 }
 
 // parseWindowFunc parses OVER (...) after a function call.
