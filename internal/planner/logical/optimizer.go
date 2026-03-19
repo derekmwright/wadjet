@@ -1276,38 +1276,178 @@ func extractCommonFromORPred(pred Predicate) []Predicate {
 			}
 		}
 	}
-	if len(commonSet) == 0 {
-		return []Predicate{pred}
-	}
-
-	// Build result: common predicates + simplified OR
 	var result []Predicate
-	for _, node := range branchTermNodes[0] {
-		if commonSet[strings.ToLower(node.String())] {
-			result = append(result, Predicate{ASTExpr: node, Raw: node.String()})
-		}
-	}
-
-	// Rebuild each branch without common terms
-	var newBranches []plansql.Node
-	for _, terms := range branchTermNodes {
-		var remaining []plansql.Node
-		for _, t := range terms {
-			if !commonSet[strings.ToLower(t.String())] {
-				remaining = append(remaining, t)
+	if len(commonSet) > 0 {
+		// Build result: common predicates + simplified OR
+		for _, node := range branchTermNodes[0] {
+			if commonSet[strings.ToLower(node.String())] {
+				result = append(result, Predicate{ASTExpr: node, Raw: node.String()})
 			}
 		}
-		if len(remaining) == 0 {
-			continue // Branch was entirely common
+
+		// Rebuild each branch without common terms
+		var newBranches []plansql.Node
+		for _, terms := range branchTermNodes {
+			var remaining []plansql.Node
+			for _, t := range terms {
+				if !commonSet[strings.ToLower(t.String())] {
+					remaining = append(remaining, t)
+				}
+			}
+			if len(remaining) == 0 {
+				continue // Branch was entirely common
+			}
+			newBranches = append(newBranches, buildANDTree(remaining))
 		}
-		newBranches = append(newBranches, buildANDTree(remaining))
+
+		if len(newBranches) > 0 {
+			orNode := buildORTree(newBranches)
+			result = append(result, Predicate{ASTExpr: orNode, Raw: orNode.String()})
+		}
+	} else {
+		// Keep the original OR predicate
+		result = append(result, pred)
 	}
 
-	if len(newBranches) > 0 {
-		orNode := buildORTree(newBranches)
-		result = append(result, Predicate{ASTExpr: orNode, Raw: orNode.String()})
+	// Also extract per-column value sets from OR branches. When every branch
+	// constrains the same column with equality (e.g., (n1.n_name = 'FRANCE' AND ...)
+	// OR (n1.n_name = 'GERMANY' AND ...)), we can derive n1.n_name IN ('FRANCE',
+	// 'GERMANY') and push it down independently — even though the full OR can't be
+	// decomposed because the branches differ.
+	// Use remaining branch terms (after common removal) to avoid redundancy.
+	var remainingTerms [][]plansql.Node
+	if len(commonSet) > 0 {
+		for _, terms := range branchTermNodes {
+			var rem []plansql.Node
+			for _, t := range terms {
+				if !commonSet[strings.ToLower(t.String())] {
+					rem = append(rem, t)
+				}
+			}
+			if len(rem) > 0 {
+				remainingTerms = append(remainingTerms, rem)
+			}
+		}
+	} else {
+		remainingTerms = branchTermNodes
+	}
+	valuePreds := extractColumnValueSetsFromOR(remainingTerms)
+	result = append(result, valuePreds...)
+
+	return result
+}
+
+// extractColumnValueSetsFromOR finds columns that appear with equality comparisons
+// in every OR branch and generates implied IN predicates. For example:
+//
+//	(n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY')
+//	OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE')
+//
+// implies n1.n_name IN ('FRANCE', 'GERMANY') AND n2.n_name IN ('FRANCE', 'GERMANY').
+// These predicates are weaker than the original OR but can be pushed down to
+// individual table scans, filtering early in the join chain.
+func extractColumnValueSetsFromOR(branchTermNodes [][]plansql.Node) []Predicate {
+	if len(branchTermNodes) < 2 {
+		return nil
+	}
+
+	type colEntry struct {
+		colNode plansql.Node            // representative ColRef for the IN predicate
+		values  map[string]plansql.Node // deduped literal values by string repr
+	}
+
+	// Collect column=literal pairs across all branches.
+	// Track which columns appear with equality in every branch.
+	colValues := make(map[string]*colEntry)
+	for branchIdx, terms := range branchTermNodes {
+		branchCols := make(map[string]bool)
+		for _, term := range terms {
+			cmp, ok := term.(*plansql.CmpExpr)
+			if !ok || cmp.Op != "=" {
+				continue
+			}
+			colNode, litNode := extractColAndLit(cmp)
+			if colNode == nil {
+				continue
+			}
+			colKey := strings.ToLower(colNode.String())
+			branchCols[colKey] = true
+			if entry, exists := colValues[colKey]; exists {
+				litKey := litNode.String()
+				if _, seen := entry.values[litKey]; !seen {
+					entry.values[litKey] = litNode
+				}
+			} else {
+				colValues[colKey] = &colEntry{
+					colNode: colNode,
+					values:  map[string]plansql.Node{litNode.String(): litNode},
+				}
+			}
+		}
+		// Remove columns that don't have equality in this branch
+		if branchIdx > 0 {
+			for colKey := range colValues {
+				if !branchCols[colKey] {
+					delete(colValues, colKey)
+				}
+			}
+		}
+	}
+
+	if len(colValues) == 0 {
+		return nil
+	}
+
+	// Skip when every branch is a single-column equality on the same column.
+	// In that case the remaining OR (e.g., col='A' OR col='B' OR col='C') is
+	// already semantically equivalent to the IN predicate, so extracting it
+	// would be redundant.
+	if len(colValues) == 1 {
+		allSingle := true
+		for _, terms := range branchTermNodes {
+			if len(terms) != 1 {
+				allSingle = false
+				break
+			}
+		}
+		if allSingle {
+			return nil
+		}
+	}
+
+	// Build IN predicates for columns with 2+ distinct values
+	var result []Predicate
+	for _, entry := range colValues {
+		if len(entry.values) < 2 {
+			continue // single value — no benefit over the original OR
+		}
+		vals := make([]plansql.Node, 0, len(entry.values))
+		for _, v := range entry.values {
+			vals = append(vals, v)
+		}
+		inExpr := &plansql.InExpr{
+			Left:   entry.colNode,
+			Values: vals,
+		}
+		result = append(result, Predicate{ASTExpr: inExpr, Raw: inExpr.String()})
 	}
 	return result
+}
+
+// extractColAndLit returns the ColRef and Lit from a CmpExpr if one side is a
+// column reference and the other is a literal. Returns nil, nil otherwise.
+func extractColAndLit(cmp *plansql.CmpExpr) (plansql.Node, plansql.Node) {
+	_, leftIsCol := cmp.Left.(*plansql.ColRef)
+	_, rightIsLit := cmp.Right.(*plansql.Lit)
+	if leftIsCol && rightIsLit {
+		return cmp.Left, cmp.Right
+	}
+	_, rightIsCol := cmp.Right.(*plansql.ColRef)
+	_, leftIsLit := cmp.Left.(*plansql.Lit)
+	if rightIsCol && leftIsLit {
+		return cmp.Right, cmp.Left
+	}
+	return nil, nil
 }
 
 // unwrapParenOr returns the OrNode inside possible ParenNode wrapping.

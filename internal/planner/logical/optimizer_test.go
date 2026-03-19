@@ -435,6 +435,49 @@ func TestExtractCommonORPredicates_NoCommon(t *testing.T) {
 	}
 }
 
+func TestExtractColumnValueSetsFromOR(t *testing.T) {
+	// Q07 pattern: (n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY')
+	//           OR (n1.n_name = 'GERMANY' AND n2.n_name = 'FRANCE')
+	// Should extract: n1.n_name IN ('FRANCE', 'GERMANY'), n2.n_name IN ('FRANCE', 'GERMANY')
+	branch1 := &plansql.AndNode{
+		Left:  &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Table: "n1", Column: "n_name"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "FRANCE"}},
+		Right: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Table: "n2", Column: "n_name"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "GERMANY"}},
+	}
+	branch2 := &plansql.AndNode{
+		Left:  &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Table: "n1", Column: "n_name"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "GERMANY"}},
+		Right: &plansql.CmpExpr{Op: "=", Left: &plansql.ColRef{Table: "n2", Column: "n_name"}, Right: &plansql.Lit{Kind: plansql.LitString, Value: "FRANCE"}},
+	}
+	orExpr := &plansql.OrNode{Left: branch1, Right: branch2}
+
+	scan := NewScan("t1", "")
+	filter := NewFilter(scan, []Predicate{{ASTExpr: orExpr, Raw: orExpr.String()}})
+
+	result := extractCommonORPredicates(filter)
+	// Should have 3 predicates: original OR + two IN predicates
+	if len(result.Predicates) != 3 {
+		t.Fatalf("expected 3 predicates, got %d: %v", len(result.Predicates), result.Predicates)
+	}
+
+	// Check that we have both IN predicates
+	foundN1In := false
+	foundN2In := false
+	for _, p := range result.Predicates {
+		raw := strings.ToLower(p.Raw)
+		if strings.Contains(raw, "n1.n_name") && strings.Contains(raw, "in") {
+			foundN1In = true
+		}
+		if strings.Contains(raw, "n2.n_name") && strings.Contains(raw, "in") {
+			foundN2In = true
+		}
+	}
+	if !foundN1In {
+		t.Errorf("expected n1.n_name IN predicate, got: %v", result.Predicates)
+	}
+	if !foundN2In {
+		t.Errorf("expected n2.n_name IN predicate, got: %v", result.Predicates)
+	}
+}
+
 func TestEstimateRelCost_JoinSubtree(t *testing.T) {
 	// Join subtree cost should be estimated from children, not flat 200
 	small := NewScan("nation", "")
