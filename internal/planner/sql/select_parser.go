@@ -594,6 +594,28 @@ func (p *selectParser) parseTableRef() (TableRef, error) {
 	}
 
 	tr := TableRef{Name: nameTok.val, Alias: nameTok.val}
+
+	// Optional TABLESAMPLE method(percent)
+	if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "TABLESAMPLE") {
+		p.advance() // consume TABLESAMPLE
+		methodTok, err := p.expect(TokenIdent)
+		if err != nil {
+			return TableRef{}, fmt.Errorf("expected TABLESAMPLE method (BERNOULLI or SYSTEM)")
+		}
+		tr.SampleMethod = strings.ToUpper(methodTok.val)
+		if _, err := p.expect(TokenLParen); err != nil {
+			return TableRef{}, fmt.Errorf("expected ( after TABLESAMPLE %s", tr.SampleMethod)
+		}
+		pctTok, err := p.expect(TokenNumber)
+		if err != nil {
+			return TableRef{}, fmt.Errorf("expected percentage in TABLESAMPLE")
+		}
+		tr.SamplePercent = pctTok.val
+		if _, err := p.expect(TokenRParen); err != nil {
+			return TableRef{}, fmt.Errorf("expected ) after TABLESAMPLE percentage")
+		}
+	}
+
 	// Optional alias
 	if p.isKeyword(TokenKWAs) {
 		p.advance()

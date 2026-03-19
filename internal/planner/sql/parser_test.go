@@ -1776,3 +1776,108 @@ func TestUnnestWithOrdinality(t *testing.T) {
 		})
 	}
 }
+
+// --- Sprint 5 tests: WITH RECURSIVE, MERGE, TABLESAMPLE ---
+
+func TestWithRecursive(t *testing.T) {
+	tests := []struct {
+		name      string
+		sql       string
+		recursive bool
+		cteName   string
+	}{
+		{"recursive cte", "WITH RECURSIVE tree(id, parent_id) AS (SELECT id, parent_id FROM nodes WHERE parent_id IS NULL UNION ALL SELECT n.id, n.parent_id FROM nodes n JOIN tree t ON n.parent_id = t.id) SELECT * FROM tree", true, "tree"},
+		{"non-recursive cte", "WITH totals AS (SELECT SUM(amount) AS total FROM orders) SELECT * FROM totals", false, "totals"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if len(parsed.CTEs) == 0 {
+				t.Fatal("expected at least one CTE")
+			}
+			cte := parsed.CTEs[0]
+			if cte.Name != tt.cteName {
+				t.Errorf("CTE name = %q, want %q", cte.Name, tt.cteName)
+			}
+			if cte.Recursive != tt.recursive {
+				t.Errorf("recursive = %v, want %v", cte.Recursive, tt.recursive)
+			}
+		})
+	}
+}
+
+func TestMerge(t *testing.T) {
+	tests := []struct {
+		name        string
+		sql         string
+		target      string
+		source      string
+		whenCount   int
+		firstAction string
+	}{
+		{"basic merge",
+			"MERGE INTO target t USING source s ON t.id = s.id WHEN MATCHED THEN UPDATE SET t.name = s.name WHEN NOT MATCHED THEN INSERT (id, name) VALUES (s.id, s.name)",
+			"target", "source", 2, "UPDATE"},
+		{"merge with delete",
+			"MERGE INTO orders USING updates ON orders.id = updates.id WHEN MATCHED AND updates.deleted = true THEN DELETE WHEN MATCHED THEN UPDATE SET orders.status = updates.status",
+			"orders", "updates", 2, "DELETE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			if parsed.Type != QueryMerge {
+				t.Fatalf("got type %v, want QueryMerge", parsed.Type)
+			}
+			m := parsed.Merge
+			if m.Target != tt.target {
+				t.Errorf("target = %q, want %q", m.Target, tt.target)
+			}
+			if m.Source != tt.source {
+				t.Errorf("source = %q, want %q", m.Source, tt.source)
+			}
+			if len(m.WhenClauses) != tt.whenCount {
+				t.Errorf("when clauses = %d, want %d", len(m.WhenClauses), tt.whenCount)
+			}
+			if len(m.WhenClauses) > 0 && m.WhenClauses[0].Action != tt.firstAction {
+				t.Errorf("first action = %q, want %q", m.WhenClauses[0].Action, tt.firstAction)
+			}
+		})
+	}
+}
+
+func TestTablesample(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		method  string
+		percent string
+	}{
+		{"bernoulli", "SELECT * FROM events TABLESAMPLE BERNOULLI(10)", "BERNOULLI", "10"},
+		{"system", "SELECT * FROM logs TABLESAMPLE SYSTEM(5)", "SYSTEM", "5"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse error: %v", err)
+			}
+			info, _ := ExtractSelect(parsed)
+			if len(info.Tables) == 0 {
+				t.Fatal("expected at least one table")
+			}
+			tbl := info.Tables[0]
+			if tbl.SampleMethod != tt.method {
+				t.Errorf("method = %q, want %q", tbl.SampleMethod, tt.method)
+			}
+			if tbl.SamplePercent != tt.percent {
+				t.Errorf("percent = %q, want %q", tbl.SamplePercent, tt.percent)
+			}
+		})
+	}
+}

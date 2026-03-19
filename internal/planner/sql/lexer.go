@@ -138,6 +138,9 @@ const (
 	TokenKWInsert
 	TokenKWInto
 	TokenKWValues
+	TokenKWMerge
+	TokenKWUsing
+	TokenKWMatched
 
 	// Raw capture
 	TokenRawBody // everything after AS until terminator
@@ -234,6 +237,9 @@ var keywords = map[string]TokenType{
 	"INSERT":     TokenKWInsert,
 	"INTO":       TokenKWInto,
 	"VALUES":     TokenKWValues,
+	"MERGE":      TokenKWMerge,
+	"USING":      TokenKWUsing,
+	"MATCHED":    TokenKWMatched,
 }
 
 // token is a lexical token produced by the lexer.

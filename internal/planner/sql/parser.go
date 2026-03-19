@@ -21,6 +21,7 @@ type ParsedQuery struct {
 	CreateView     *CreateViewInfo
 	DropView       *DropViewInfo
 	AlterTable     *AlterTableInfo
+	Merge          *MergeInfo
 	Update         *UpdateInfo
 	Delete         *DeleteInfo
 	Insert         *InsertInfo
@@ -42,6 +43,24 @@ type DropViewInfo struct {
 	IfExists bool
 }
 
+// MergeInfo holds details for a MERGE statement.
+type MergeInfo struct {
+	Target      string // target table name
+	TargetAlias string
+	Source      string // source table/subquery
+	SourceAlias string
+	OnCondition string           // MERGE ON condition
+	WhenClauses []MergeWhenClause // WHEN MATCHED / NOT MATCHED clauses
+}
+
+// MergeWhenClause represents a WHEN clause in a MERGE statement.
+type MergeWhenClause struct {
+	Matched   bool   // true = WHEN MATCHED, false = WHEN NOT MATCHED
+	Condition string // optional AND condition
+	Action    string // "UPDATE", "DELETE", "INSERT"
+	SQL       string // raw SET/VALUES clause
+}
+
 // AlterTableInfo holds details for an ALTER TABLE statement.
 type AlterTableInfo struct {
 	Table         string
@@ -54,9 +73,10 @@ type AlterTableInfo struct {
 
 // CTEDef represents a Common Table Expression definition.
 type CTEDef struct {
-	Name    string   // CTE name (lowercased for matching)
-	SQL     string   // the CTE body SQL (the SELECT inside the parentheses)
-	Columns []string // optional column name list
+	Name      string   // CTE name (lowercased for matching)
+	SQL       string   // the CTE body SQL (the SELECT inside the parentheses)
+	Columns   []string // optional column name list
+	Recursive bool     // WITH RECURSIVE
 }
 
 // ExplainInfo holds details for an EXPLAIN statement.
@@ -150,6 +170,7 @@ const (
 	QueryCreateView
 	QueryDropView
 	QueryAlterTable
+	QueryMerge
 	QueryUnsupported
 )
 
@@ -187,6 +208,8 @@ func Parse(sql string) (*ParsedQuery, error) {
 	case TokenKWAlter:
 		l.nextToken() // consume ALTER
 		return parseAlterTable(trimmed, l)
+	case TokenKWMerge:
+		return parseMerge(trimmed, l)
 	}
 
 	// Pre-parse CTEs — extract WITH ... AS (...) clauses
@@ -295,6 +318,8 @@ type TableRef struct {
 	FuncNamedArgs   map[string]string // named arguments (key=value)
 	WithOrdinality  bool              // UNNEST(...) WITH ORDINALITY
 	ColumnAliases   []string          // AS alias(col1, col2, ...)
+	SampleMethod    string            // TABLESAMPLE method: BERNOULLI, SYSTEM
+	SamplePercent   string            // percentage for TABLESAMPLE
 }
 
 // SelectColumn describes a column in a SELECT clause.
@@ -782,6 +807,13 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 	// Consume WITH
 	l.nextToken()
 
+	// Check for RECURSIVE
+	recursive := false
+	if l.peekToken().typ == TokenIdent && strings.EqualFold(l.peekToken().val, "RECURSIVE") {
+		l.nextToken() // consume RECURSIVE
+		recursive = true
+	}
+
 	var defs []CTEDef
 	for {
 		// Read CTE name
@@ -878,9 +910,10 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 		l.start = l.pos
 
 		defs = append(defs, CTEDef{
-			Name:    cteName,
-			SQL:     body,
-			Columns: columns,
+			Name:      cteName,
+			SQL:       body,
+			Columns:   columns,
+			Recursive: recursive,
 		})
 
 		// Check for comma (more CTEs) or end
@@ -998,6 +1031,184 @@ func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
 		SQL:        sql,
 		AlterTable: info,
 	}, nil
+}
+
+// parseMerge handles: MERGE INTO target USING source ON condition WHEN ...
+func parseMerge(sql string, l *lexer) (*ParsedQuery, error) {
+	l.nextToken() // consume MERGE
+
+	// INTO (optional)
+	if l.peekToken().typ == TokenKWInto {
+		l.nextToken()
+	}
+
+	// Target table
+	targetTok := l.nextToken()
+	if targetTok.typ != TokenIdent {
+		return nil, fmt.Errorf("MERGE: expected target table name")
+	}
+	info := &MergeInfo{Target: strings.ToLower(targetTok.val)}
+
+	// Optional alias
+	peek := l.peekToken()
+	if peek.typ == TokenKWAs {
+		l.nextToken()
+		aliasTok := l.nextToken()
+		info.TargetAlias = strings.ToLower(aliasTok.val)
+	} else if peek.typ == TokenIdent && !isClauseKeyword(peek) {
+		l.nextToken()
+		info.TargetAlias = strings.ToLower(peek.val)
+	}
+
+	// USING
+	if l.peekToken().typ != TokenKWUsing {
+		return nil, fmt.Errorf("MERGE: expected USING")
+	}
+	l.nextToken()
+
+	// Source table or subquery
+	sourceTok := l.nextToken()
+	if sourceTok.typ == TokenLParen {
+		// Subquery — collect balanced parens
+		depth := 1
+		start := l.pos
+		for depth > 0 {
+			ch := l.next()
+			if ch == '(' {
+				depth++
+			} else if ch == ')' {
+				depth--
+			} else if ch == eof {
+				return nil, fmt.Errorf("MERGE: unterminated subquery in USING")
+			}
+		}
+		info.Source = "(" + strings.TrimSpace(l.input[start:l.pos-1]) + ")"
+		l.start = l.pos
+	} else if sourceTok.typ == TokenIdent {
+		info.Source = strings.ToLower(sourceTok.val)
+	} else {
+		return nil, fmt.Errorf("MERGE: expected source table or subquery after USING")
+	}
+
+	// Optional source alias
+	peek = l.peekToken()
+	if peek.typ == TokenKWAs {
+		l.nextToken()
+		aliasTok := l.nextToken()
+		info.SourceAlias = strings.ToLower(aliasTok.val)
+	} else if peek.typ == TokenIdent && !isClauseKeyword(peek) {
+		l.nextToken()
+		info.SourceAlias = strings.ToLower(peek.val)
+	}
+
+	// ON condition
+	if l.peekToken().typ != TokenKWOn {
+		return nil, fmt.Errorf("MERGE: expected ON")
+	}
+	l.nextToken()
+
+	// Read condition until WHEN
+	condStart := l.pos
+	for {
+		pk := l.peekToken()
+		if pk.typ == TokenKWWhen || pk.typ == TokenEOF {
+			break
+		}
+		l.nextToken()
+	}
+	info.OnCondition = strings.TrimSpace(l.input[condStart:l.pos])
+
+	// Parse WHEN clauses
+	for l.peekToken().typ == TokenKWWhen {
+		l.nextToken() // consume WHEN
+
+		clause := MergeWhenClause{}
+
+		// MATCHED or NOT MATCHED
+		if l.peekToken().typ == TokenKWNot {
+			l.nextToken()
+			clause.Matched = false
+		} else {
+			clause.Matched = true
+		}
+		if l.peekToken().typ != TokenKWMatched {
+			return nil, fmt.Errorf("MERGE: expected MATCHED after WHEN [NOT]")
+		}
+		l.nextToken()
+
+		// Optional AND condition
+		if l.peekToken().typ == TokenKWAnd {
+			l.nextToken()
+			andStart := l.pos
+			for {
+				pk := l.peekToken()
+				if pk.typ == TokenKWThen || pk.typ == TokenEOF {
+					break
+				}
+				l.nextToken()
+			}
+			clause.Condition = strings.TrimSpace(l.input[andStart:l.pos])
+		}
+
+		// THEN
+		if l.peekToken().typ != TokenKWThen {
+			return nil, fmt.Errorf("MERGE: expected THEN")
+		}
+		l.nextToken()
+
+		// Action: UPDATE SET ..., DELETE, INSERT ...
+		actionTok := l.peekToken()
+		switch actionTok.typ {
+		case TokenKWUpdate:
+			l.nextToken()
+			clause.Action = "UPDATE"
+			// Read until next WHEN or EOF
+			sqlStart := l.pos
+			for {
+				pk := l.peekToken()
+				if pk.typ == TokenKWWhen || pk.typ == TokenEOF || pk.typ == TokenSemicolon {
+					break
+				}
+				l.nextToken()
+			}
+			clause.SQL = strings.TrimSpace(l.input[sqlStart:l.pos])
+		case TokenKWDelete:
+			l.nextToken()
+			clause.Action = "DELETE"
+		case TokenKWInsert:
+			l.nextToken()
+			clause.Action = "INSERT"
+			sqlStart := l.pos
+			for {
+				pk := l.peekToken()
+				if pk.typ == TokenKWWhen || pk.typ == TokenEOF || pk.typ == TokenSemicolon {
+					break
+				}
+				l.nextToken()
+			}
+			clause.SQL = strings.TrimSpace(l.input[sqlStart:l.pos])
+		default:
+			return nil, fmt.Errorf("MERGE: expected UPDATE, DELETE, or INSERT after THEN")
+		}
+
+		info.WhenClauses = append(info.WhenClauses, clause)
+	}
+
+	return &ParsedQuery{
+		Type:  QueryMerge,
+		SQL:   sql,
+		Merge: info,
+	}, nil
+}
+
+// isClauseKeyword returns true if a token is a clause-level keyword.
+func isClauseKeyword(t token) bool {
+	switch t.typ {
+	case TokenKWUsing, TokenKWOn, TokenKWWhen, TokenKWThen,
+		TokenKWUpdate, TokenKWDelete, TokenKWInsert, TokenKWSet:
+		return true
+	}
+	return false
 }
 
 // lexParseCreateView handles: CREATE [OR REPLACE] VIEW <name> AS <query>
