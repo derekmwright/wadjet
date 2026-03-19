@@ -1975,7 +1975,9 @@ func isSimpleColRef(node plansql.Node) bool {
 // and adds computed expression columns for aggregate inputs.
 type aggPreProject struct {
 	computed     []exec.ProjectColumn
-	cachedSchema []parquet.Column // cached output schema (computed once)
+	cachedSchema []parquet.Column    // cached output schema (computed once)
+	cachedOutput *batch.RecordBatch  // reused output batch across calls
+	computedCap  int                 // row capacity of cached computed vectors
 }
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
@@ -2007,19 +2009,42 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		a.cachedSchema = schema
 	}
 
-	out := batch.NewRecordBatch(a.cachedSchema, in.Len)
+	computedOffset := len(in.Schema)
+
+	if a.cachedOutput == nil || in.Len > a.computedCap {
+		// First call or input exceeds computed vector capacity — allocate
+		a.cachedOutput = &batch.RecordBatch{
+			Schema:  a.cachedSchema,
+			Columns: make([]*batch.Vector, len(a.cachedSchema)),
+		}
+		for k, c := range a.computed {
+			a.cachedOutput.Columns[computedOffset+k] = batch.NewVector(c.Type, in.Len)
+		}
+		a.computedCap = in.Len
+	} else {
+		// Reuse computed vectors — reset null bitmaps and bytes columns
+		for k := range a.computed {
+			col := a.cachedOutput.Columns[computedOffset+k]
+			col.Len = in.Len
+			col.Nulls.ResetNonNull(in.Len)
+			switch col.Type {
+			case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+				col.BytesData.Reset()
+			}
+		}
+	}
+	a.cachedOutput.Len = in.Len
+	a.cachedOutput.Sel = nil
 
 	// Share existing column vectors (zero-copy for pass-through columns)
 	for j := 0; j < len(in.Schema); j++ {
-		out.Columns[j] = in.Columns[j]
+		a.cachedOutput.Columns[j] = in.Columns[j]
 	}
-
-	computedOffset := len(in.Schema)
 
 	// Compute expression columns (sequential writes, no selection vector).
 	// Use typed evaluation paths when available to avoid interface{} boxing.
 	for k, c := range a.computed {
-		col := out.Columns[computedOffset+k]
+		col := a.cachedOutput.Columns[computedOffset+k]
 		if c.Float64Eval != nil {
 			for i := 0; i < in.Len; i++ {
 				v, ok := c.Float64Eval(in, i)
@@ -2045,7 +2070,7 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		}
 	}
 
-	return out, nil
+	return a.cachedOutput, nil
 }
 
 // materialize compacts a batch with a selection vector into a dense batch
