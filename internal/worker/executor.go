@@ -578,14 +578,11 @@ func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, res
 }
 
 // executeShuffle hash-partitions input batches by key columns and writes
-// one output file per partition. Each output file contains only the rows
-// whose key hash maps to that partition.
+// one output file per partition. Processes files one at a time to avoid
+// holding the entire input in memory — only one file's batches plus the
+// per-partition Parquet writer buffers are resident at any point.
 func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
-	if err != nil {
-		return err
-	}
-	if len(allBatches) == 0 {
+	if len(task.InputFiles) == 0 {
 		return nil
 	}
 
@@ -594,92 +591,121 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		numPartitions = 1
 	}
 
-	// Find key column indices in the schema
-	schema := allBatches[0].Schema
-	keyIdxs := make([]int, len(task.ShuffleKeys))
-	for i, key := range task.ShuffleKeys {
-		found := false
-		for j, col := range schema {
-			if col.Name == key {
-				keyIdxs[i] = j
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("shuffle key %q not found in schema", key)
-		}
-	}
+	// Per-partition Parquet writers — initialized from first batch's schema.
+	var (
+		partWriters []*parquet.Writer
+		partBufs    []*bytes.Buffer
+		keyIdxs     []int
+		totalRows   int64
+	)
 
-	// Accumulate per-partition batches by splitting each input batch
-	partitionBatches := make([][]*batch.RecordBatch, numPartitions)
-	for _, b := range allBatches {
-		nRows := b.ActiveLen()
-		if nRows == 0 {
-			continue
+	// Process input files one at a time (streaming)
+	for _, inputFile := range task.InputFiles {
+		batches, err := e.readParquetFileBatches(ctx, task.ResultBucket, inputFile, nil)
+		if err != nil {
+			return fmt.Errorf("reading shuffle input %s: %w", inputFile, err)
 		}
 
-		// Compute partition assignment for each row
-		partitionRows := make([][]uint16, numPartitions)
-		for ri := 0; ri < nRows; ri++ {
-			rowIdx := ri
-			if b.Sel != nil {
-				rowIdx = int(b.Sel[ri])
-			}
-
-			h := uint64(14695981039346656037) // FNV-1a offset basis
-			for _, ki := range keyIdxs {
-				vec := b.Columns[ki]
-				h = shuffleHashValue(vec, rowIdx, h)
-			}
-			pid := int(h % uint64(numPartitions))
-			partitionRows[pid] = append(partitionRows[pid], uint16(rowIdx))
-		}
-
-		// Create a batch view per partition (shares underlying vectors)
-		for pid := 0; pid < numPartitions; pid++ {
-			if len(partitionRows[pid]) == 0 {
+		for _, b := range batches {
+			if b.ActiveLen() == 0 {
 				continue
 			}
-			pb := &batch.RecordBatch{
-				Columns: b.Columns,
-				Schema:  b.Schema,
-				Len:     b.Len,
-				Sel:     partitionRows[pid],
+
+			// Lazy-initialize writers and key indices from first batch
+			if partWriters == nil {
+				schema := b.Schema
+				keyIdxs = make([]int, len(task.ShuffleKeys))
+				for i, key := range task.ShuffleKeys {
+					found := false
+					for j, col := range schema {
+						if col.Name == key {
+							keyIdxs[i] = j
+							found = true
+							break
+						}
+					}
+					if !found {
+						return fmt.Errorf("shuffle key %q not found in schema", key)
+					}
+				}
+
+				partBufs = make([]*bytes.Buffer, numPartitions)
+				partWriters = make([]*parquet.Writer, numPartitions)
+				for pid := 0; pid < numPartitions; pid++ {
+					partBufs[pid] = &bytes.Buffer{}
+					pw, pwErr := parquet.NewWriter(partBufs[pid], parquet.Schema{Columns: schema}, parquet.DefaultWriterConfig())
+					if pwErr != nil {
+						return fmt.Errorf("creating partition %d writer: %w", pid, pwErr)
+					}
+					partWriters[pid] = pw
+				}
 			}
-			partitionBatches[pid] = append(partitionBatches[pid], pb)
+
+			// Partition rows by hash
+			nRows := b.ActiveLen()
+			partitionRows := make([][]uint16, numPartitions)
+			for ri := 0; ri < nRows; ri++ {
+				rowIdx := ri
+				if b.Sel != nil {
+					rowIdx = int(b.Sel[ri])
+				}
+
+				h := uint64(14695981039346656037) // FNV-1a offset basis
+				for _, ki := range keyIdxs {
+					h = shuffleHashValue(b.Columns[ki], rowIdx, h)
+				}
+				pid := int(h % uint64(numPartitions))
+				partitionRows[pid] = append(partitionRows[pid], uint16(rowIdx))
+			}
+
+			// Write partitioned rows immediately to Parquet writers
+			for pid := 0; pid < numPartitions; pid++ {
+				if len(partitionRows[pid]) == 0 {
+					continue
+				}
+				pb := &batch.RecordBatch{
+					Columns: b.Columns,
+					Schema:  b.Schema,
+					Len:     b.Len,
+					Sel:     partitionRows[pid],
+				}
+				rows := pb.ToRows()
+				if err := partWriters[pid].WriteRows(rows); err != nil {
+					return fmt.Errorf("writing to partition %d: %w", pid, err)
+				}
+				totalRows += int64(len(rows))
+			}
 		}
+		// batches from this file are now unreferenced — GC can reclaim
 	}
 
-	// Write per-partition result files
-	resultFiles := make([]string, numPartitions)
-	var totalRows int64
-	for pid := 0; pid < numPartitions; pid++ {
-		if len(partitionBatches[pid]) == 0 {
-			continue
-		}
+	if partWriters == nil {
+		return nil // no data
+	}
 
-		data, serErr := e.serializeBatches(partitionBatches[pid])
-		if serErr != nil {
-			return fmt.Errorf("serializing partition %d: %w", pid, serErr)
+	// Close writers and upload partition files
+	resultFiles := make([]string, numPartitions)
+	for pid := 0; pid < numPartitions; pid++ {
+		if err := partWriters[pid].Close(); err != nil {
+			return fmt.Errorf("closing partition %d writer: %w", pid, err)
+		}
+		data := partBufs[pid].Bytes()
+		if len(data) == 0 {
+			continue
 		}
 
 		partPath := fmt.Sprintf("%s%s-p%d.parquet", task.ResultPrefix, task.ID, pid)
 		_, putErr := e.store.Put(ctx, task.ResultBucket, partPath,
 			bytes.NewReader(data), int64(len(data)), "application/octet-stream")
 		if putErr != nil {
-			return fmt.Errorf("writing partition %d: %w", pid, putErr)
+			return fmt.Errorf("writing partition %d to store: %w", pid, putErr)
 		}
-
 		resultFiles[pid] = partPath
-		for _, pb := range partitionBatches[pid] {
-			totalRows += int64(pb.ActiveLen())
-		}
 	}
 
 	result.NumRows = totalRows
 	result.ResultFiles = resultFiles
-	result.ResultPath = task.ResultPrefix // signal completion
+	result.ResultPath = task.ResultPrefix
 	return nil
 }
 
