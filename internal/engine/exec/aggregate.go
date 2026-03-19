@@ -94,6 +94,8 @@ type HashAggregate struct {
 	strGroupStates []*groupState
 
 	resolved       bool
+	needsDistinct  bool // true if any agg uses distinctSets
+	needsExtra     bool // true if any agg uses extraState
 	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles    []string
@@ -306,11 +308,18 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	allSimpleAggs := true
 	for i, agg := range h.Aggs {
 		switch agg.Func {
-		case AggCountDistinct, AggStringAgg, AggApproxDistinct,
-			AggCorr, AggCovarSamp, AggCovarPop,
+		case AggCountDistinct, AggApproxDistinct:
+			allSimpleAggs = false
+			h.needsDistinct = true
+		case AggStringAgg, AggStddev, AggVariance, AggStddevPop, AggVarPop,
+			AggBoolAnd, AggBoolOr, AggCorr, AggCovarSamp, AggCovarPop,
 			AggPercentileCont, AggPercentileDisc, AggMedian,
 			AggMinBy, AggMaxBy:
 			allSimpleAggs = false
+			h.needsExtra = true
+		case AggMode:
+			allSimpleAggs = false
+			h.needsExtra = true
 		default:
 			if h.aggUpdaters[i] == nil && agg.InputCol != "" {
 				allSimpleAggs = false
@@ -648,15 +657,21 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		}
 	}
 	gs := &groupState{
-		keyValues:    keyVals,
-		accs:         make([]kernel.Accumulator, len(h.Aggs)),
-		distinctSets: make([]map[string]struct{}, len(h.Aggs)),
-		extraState:   make([]any, len(h.Aggs)),
+		keyValues: keyVals,
+		accs:      make([]kernel.Accumulator, len(h.Aggs)),
+	}
+	if h.needsDistinct {
+		gs.distinctSets = make([]map[string]struct{}, len(h.Aggs))
+	}
+	if h.needsExtra {
+		gs.extraState = make([]any, len(h.Aggs))
 	}
 	for i, agg := range h.Aggs {
 		switch agg.Func {
 		case AggCountDistinct:
-			gs.distinctSets[i] = make(map[string]struct{})
+			if gs.distinctSets != nil {
+				gs.distinctSets[i] = make(map[string]struct{})
+			}
 		case AggStringAgg:
 			sep := agg.Separator
 			if sep == "" {
@@ -670,7 +685,9 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		case AggBoolOr:
 			gs.extraState[i] = false
 		case AggApproxDistinct:
-			gs.distinctSets[i] = make(map[string]struct{})
+			if gs.distinctSets != nil {
+				gs.distinctSets[i] = make(map[string]struct{})
+			}
 		case AggCorr, AggCovarSamp, AggCovarPop:
 			gs.extraState[i] = &covarianceState{}
 		case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
