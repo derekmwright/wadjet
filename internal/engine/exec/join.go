@@ -1118,35 +1118,51 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	// Collect match pairs using reusable buffer
 	pairs := p.pairsBuf[:0]
 
-	probeRow := func(row int) {
-		buildMatches := p.lookupBuild(in, row)
-
-		if len(buildMatches) == 0 {
-			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
-				pairs = append(pairs, matchPair{probeRow: row})
+	h := p.join
+	// Fast path: single int key inner join without right/full outer tracking.
+	// Inlines hash table lookup + typed data access, eliminating 4 levels of
+	// per-row function calls (probeRow → lookupBuild → intProbeKey → intKeyFromVector).
+	if h.useIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil {
+		if !h.probeResolved {
+			h.probeKeyIdx = make([]int, len(h.LeftKeys))
+			for i, col := range h.LeftKeys {
+				h.probeKeyIdx[i] = in.ColumnIndex(col)
 			}
-			return
+			h.probeResolved = true
 		}
-
-		for _, ref := range buildMatches {
-			pairs = append(pairs, matchPair{probeRow: row, ref: ref, matched: true})
-		}
-
-		// Mark all build-side refs for this key as matched (for right/full outer)
-		if p.join.arenaMatched != nil {
-			p.join.mu.Lock()
-			p.markKeyMatched(in, row)
-			p.join.mu.Unlock()
-		}
-	}
-
-	if in.Sel != nil {
-		for _, idx := range in.Sel {
-			probeRow(int(idx))
+		if keyIdx := h.probeKeyIdx[0]; keyIdx >= 0 {
+			pairs = p.inlineIntProbe(in.Columns[keyIdx], in, pairs)
 		}
 	} else {
-		for i := 0; i < in.Len; i++ {
-			probeRow(i)
+		probeRow := func(row int) {
+			buildMatches := p.lookupBuild(in, row)
+
+			if len(buildMatches) == 0 {
+				if h.JoinType == LeftJoin || h.JoinType == FullOuterJoin {
+					pairs = append(pairs, matchPair{probeRow: row})
+				}
+				return
+			}
+
+			for _, ref := range buildMatches {
+				pairs = append(pairs, matchPair{probeRow: row, ref: ref, matched: true})
+			}
+
+			if h.arenaMatched != nil {
+				h.mu.Lock()
+				p.markKeyMatched(in, row)
+				h.mu.Unlock()
+			}
+		}
+
+		if in.Sel != nil {
+			for _, idx := range in.Sel {
+				probeRow(int(idx))
+			}
+		} else {
+			for i := 0; i < in.Len; i++ {
+				probeRow(i)
+			}
 		}
 	}
 	p.pairsBuf = pairs // save grown slice for reuse
@@ -1192,6 +1208,82 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	}
 
 	return out, nil
+}
+
+// inlineIntProbe is the fast probe path for single int key inner joins.
+// It inlines the hash table lookup with typed data access, eliminating
+// per-row function call overhead from lookupBuild/intProbeKey/intKeyFromVector.
+func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBatch, pairs []matchPair) []matchPair {
+	h := p.join
+	arena := h.arena
+	arenaNext := h.arenaNext
+	idx := h.intIndex
+
+	probeInt := func(row int, key int64) {
+		if h.bloom != nil && !bloomContains(h.bloom, h.bloomMask, bloomHashInt(key)) {
+			return
+		}
+		head, ok := idx.Get(key)
+		if !ok {
+			return
+		}
+		for ref := head; ref >= 0; ref = arenaNext[ref] {
+			pairs = append(pairs, matchPair{probeRow: row, ref: arena[ref], matched: true})
+		}
+	}
+
+	if in.Sel != nil {
+		if !keyCol.Nulls.HasNulls() {
+			switch keyCol.Type {
+			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+				data := keyCol.Int32Data
+				for _, si := range in.Sel {
+					probeInt(int(si), int64(data[si]))
+				}
+			default:
+				data := keyCol.Int64Data
+				for _, si := range in.Sel {
+					probeInt(int(si), data[si])
+				}
+			}
+		} else {
+			for _, si := range in.Sel {
+				if keyCol.Nulls.IsNullFast(int(si)) {
+					continue
+				}
+				key, ok := intKeyFromVector(keyCol, int(si))
+				if ok {
+					probeInt(int(si), key)
+				}
+			}
+		}
+	} else {
+		if !keyCol.Nulls.HasNulls() {
+			switch keyCol.Type {
+			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+				data := keyCol.Int32Data
+				for i := 0; i < in.Len; i++ {
+					probeInt(i, int64(data[i]))
+				}
+			default:
+				data := keyCol.Int64Data
+				for i := 0; i < in.Len; i++ {
+					probeInt(i, data[i])
+				}
+			}
+		} else {
+			for i := 0; i < in.Len; i++ {
+				if keyCol.Nulls.IsNullFast(i) {
+					continue
+				}
+				key, ok := intKeyFromVector(keyCol, i)
+				if ok {
+					probeInt(i, key)
+				}
+			}
+		}
+	}
+	return pairs
 }
 
 // executeSemiAntiJoin handles SemiJoin and AntiJoin semantics.
