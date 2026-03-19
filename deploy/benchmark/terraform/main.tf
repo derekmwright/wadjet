@@ -287,8 +287,10 @@ resource "aws_instance" "coordinator" {
   subnet_id              = data.aws_subnets.default.ids[0]
 
   root_block_device {
-    volume_size = 30
+    volume_size = var.scale_factor <= 10 ? 50 : 200
     volume_type = "gp3"
+    throughput  = 250
+    iops        = 3000
   }
 
   dynamic "instance_market_options" {
