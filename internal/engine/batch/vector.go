@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -119,6 +120,18 @@ func (bc *BytesColumn) Value(i int) []byte {
 // StringValue returns the string at position i.
 func (bc *BytesColumn) StringValue(i int) string {
 	return string(bc.Value(i))
+}
+
+// UnsafeStringValue returns a zero-copy string view of the value at position i.
+// The returned string shares the BytesColumn's backing buffer and is only valid
+// while the BytesColumn is not modified or recycled. Use for transient comparisons
+// in filter/sort kernels where the string is consumed immediately.
+func (bc *BytesColumn) UnsafeStringValue(i int) string {
+	b := bc.Value(i)
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(&b[0], len(b))
 }
 
 // Len returns the number of values.

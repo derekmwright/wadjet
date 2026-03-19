@@ -115,7 +115,7 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 		case batch.TypeFloat32:
 			return compareFloat64(float64(v.Float32Data[row]), toFloat64(value), op)
 		case batch.TypeString:
-			return compareString(v.BytesData.StringValue(row), fmt.Sprint(value), op)
+			return compareString(v.BytesData.UnsafeStringValue(row), fmt.Sprint(value), op)
 		case batch.TypeBool:
 			if op == OpEq {
 				return v.BoolData[row] == value.(bool)
@@ -140,15 +140,15 @@ func ColumnCompare(colName string, op CompareOp, value any) Predicate {
 				cachedNetStr = parseIPv6FilterVal(value)
 				netResolved = true
 			}
-			return compareString(v.BytesData.StringValue(row), cachedNetStr, op)
+			return compareString(v.BytesData.UnsafeStringValue(row), cachedNetStr, op)
 		case batch.TypeCIDR:
-			return compareString(v.BytesData.StringValue(row), fmt.Sprint(value), op)
+			return compareString(v.BytesData.UnsafeStringValue(row), fmt.Sprint(value), op)
 		case batch.TypePort, batch.TypeProtocol:
 			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
 		case batch.TypeDuration:
 			return compareInt64(v.Int64Data[row], toInt64(value), op)
 		case batch.TypeUUID:
-			return compareString(v.BytesData.StringValue(row), fmt.Sprint(value), op)
+			return compareString(v.BytesData.UnsafeStringValue(row), fmt.Sprint(value), op)
 		case batch.TypeDate:
 			return compareInt64(int64(v.Int32Data[row]), toInt64(value), op)
 		}
@@ -204,7 +204,7 @@ func ColumnLike(colName, pattern string, not bool) Predicate {
 		if v.Nulls.IsNull(row) {
 			return false
 		}
-		s := v.BytesData.StringValue(row)
+		s := v.BytesData.UnsafeStringValue(row)
 		result := matchLike(s, pattern)
 		if not {
 			return !result

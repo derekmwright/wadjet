@@ -392,8 +392,8 @@ func compareVectorValues(col *batch.Vector, a, b int) int {
 		}
 		return 0
 	case batch.TypeString:
-		va := col.BytesData.StringValue(a)
-		vb := col.BytesData.StringValue(b)
+		va := col.BytesData.UnsafeStringValue(a)
+		vb := col.BytesData.UnsafeStringValue(b)
 		if va < vb {
 			return -1
 		}

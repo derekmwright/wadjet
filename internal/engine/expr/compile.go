@@ -466,7 +466,35 @@ func compileFuncCallNode(n *plansql.FuncCallNode, ctx *compileContext) (Expr, er
 		return &Coalesce{Args: args}, nil
 	}
 
-	return &FuncCall{Name: name, Args: args}, nil
+	fc := &FuncCall{Name: name, Args: args}
+	if isNumericFunc(name) {
+		return &numericFuncCall{fc}, nil
+	}
+	return fc, nil
+}
+
+// isNumericFunc returns true if the function is known to return a numeric value.
+// These functions get wrapped in numericFuncCall to implement Float64Expr/Int64Expr,
+// enabling compileBinOp to produce typed BinOpFloat64 when they are operands.
+func isNumericFunc(name string) bool {
+	switch name {
+	case "extract", "year", "month", "day", "hour", "minute", "second",
+		"length", "char_length", "character_length", "octet_length", "bit_length",
+		"abs", "ceil", "ceiling", "floor", "round", "truncate", "trunc",
+		"sign", "sqrt", "cbrt", "exp", "ln", "log", "log2", "log10",
+		"power", "pow", "mod",
+		"sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+		"degrees", "radians", "pi",
+		"position", "strpos",
+		"ascii", "crc32",
+		"random",
+		"epoch", "date_part",
+		"width_bucket",
+		"greatest", "least",
+		"coalesce": // coalesce of numbers returns numbers
+		return true
+	}
+	return false
 }
 
 func compileCaseNode(n *plansql.CaseNode, ctx *compileContext) (Expr, error) {

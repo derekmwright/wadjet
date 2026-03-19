@@ -124,6 +124,8 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 }
 
 // compareFilterString handles string column comparison.
+// Uses UnsafeStringValue for zero-copy comparisons — the string is consumed
+// within the comparison function and never stored.
 func compareFilterString(op CompareOp, val string) FilterKernel {
 	cmpFn := resolveCompare[string](op)
 	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
@@ -132,13 +134,13 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 		if sel != nil {
 			if hasNulls {
 				for _, idx := range sel {
-					if !vec.Nulls.IsNullFast(int(idx)) && cmpFn(vec.BytesData.StringValue(int(idx)), val) {
+					if !vec.Nulls.IsNullFast(int(idx)) && cmpFn(vec.BytesData.UnsafeStringValue(int(idx)), val) {
 						out = append(out, idx)
 					}
 				}
 			} else {
 				for _, idx := range sel {
-					if cmpFn(vec.BytesData.StringValue(int(idx)), val) {
+					if cmpFn(vec.BytesData.UnsafeStringValue(int(idx)), val) {
 						out = append(out, idx)
 					}
 				}
@@ -146,13 +148,13 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 		} else {
 			if hasNulls {
 				for i := 0; i < vecLen; i++ {
-					if !vec.Nulls.IsNullFast(i) && cmpFn(vec.BytesData.StringValue(i), val) {
+					if !vec.Nulls.IsNullFast(i) && cmpFn(vec.BytesData.UnsafeStringValue(i), val) {
 						out = append(out, uint16(i))
 					}
 				}
 			} else {
 				for i := 0; i < vecLen; i++ {
-					if cmpFn(vec.BytesData.StringValue(i), val) {
+					if cmpFn(vec.BytesData.UnsafeStringValue(i), val) {
 						out = append(out, uint16(i))
 					}
 				}
@@ -282,6 +284,8 @@ func colColFilterImpl[T Ordered](getData func(v *batch.Vector) []T, op CompareOp
 }
 
 // colColFilterString creates a ColColFilterKernel for comparing two string columns.
+// Uses UnsafeStringValue for zero-copy comparisons — strings are consumed
+// within the comparison function and never stored.
 func colColFilterString(op CompareOp) ColColFilterKernel {
 	cmpFn := resolveCompare[string](op)
 	return func(left, right *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
@@ -291,14 +295,14 @@ func colColFilterString(op CompareOp) ColColFilterKernel {
 			if hasNulls {
 				for _, idx := range sel {
 					i := int(idx)
-					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(left.BytesData.StringValue(i), right.BytesData.StringValue(i)) {
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(left.BytesData.UnsafeStringValue(i), right.BytesData.UnsafeStringValue(i)) {
 						out = append(out, idx)
 					}
 				}
 			} else {
 				for _, idx := range sel {
 					i := int(idx)
-					if cmpFn(left.BytesData.StringValue(i), right.BytesData.StringValue(i)) {
+					if cmpFn(left.BytesData.UnsafeStringValue(i), right.BytesData.UnsafeStringValue(i)) {
 						out = append(out, idx)
 					}
 				}
@@ -306,13 +310,13 @@ func colColFilterString(op CompareOp) ColColFilterKernel {
 		} else {
 			if hasNulls {
 				for i := 0; i < vecLen; i++ {
-					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(left.BytesData.StringValue(i), right.BytesData.StringValue(i)) {
+					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(left.BytesData.UnsafeStringValue(i), right.BytesData.UnsafeStringValue(i)) {
 						out = append(out, uint16(i))
 					}
 				}
 			} else {
 				for i := 0; i < vecLen; i++ {
-					if cmpFn(left.BytesData.StringValue(i), right.BytesData.StringValue(i)) {
+					if cmpFn(left.BytesData.UnsafeStringValue(i), right.BytesData.UnsafeStringValue(i)) {
 						out = append(out, uint16(i))
 					}
 				}

@@ -123,8 +123,8 @@ func sortCompareString(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
 	if bN {
 		return 1
 	}
-	as := a.BytesData.StringValue(ai)
-	bs := b.BytesData.StringValue(bi)
+	as := a.BytesData.UnsafeStringValue(ai)
+	bs := b.BytesData.UnsafeStringValue(bi)
 	if as < bs {
 		return -1
 	}

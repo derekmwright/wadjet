@@ -777,6 +777,29 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	return e.fn(e.args)
 }
 
+// numericFuncCall wraps a FuncCall to implement Float64Expr and Int64Expr
+// for functions known to return numeric values. Created by the compiler for
+// functions like extract, year, length, abs, ceil, floor, round, etc.
+type numericFuncCall struct {
+	*FuncCall
+}
+
+func (e *numericFuncCall) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
+	v := e.Eval(b, row)
+	if v == nil {
+		return 0, false
+	}
+	return ToFloat64(v), true
+}
+
+func (e *numericFuncCall) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
+	v := e.Eval(b, row)
+	if v == nil {
+		return 0, false
+	}
+	return int64(ToFloat64(v)), true
+}
+
 // ScalarFunc is a scalar function implementation.
 type ScalarFunc func(args []any) any
 
