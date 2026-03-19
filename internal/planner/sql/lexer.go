@@ -34,8 +34,9 @@ const (
 	TokenMinus   // -
 	TokenSlash   // /
 	TokenPercent // %
-	TokenConcat  // ||
-	TokenEq      // =
+	TokenConcat      // ||
+	TokenDoubleColon // ::
+	TokenEq          // =
 	TokenNotEq   // != or <>
 	TokenLT      // <
 	TokenLTEq    // <=
@@ -86,6 +87,7 @@ const (
 	TokenKWIn
 	TokenKWBetween
 	TokenKWLike
+	TokenKWILike
 	TokenKWIs
 	TokenKWTrue
 	TokenKWFalse
@@ -119,6 +121,9 @@ const (
 	TokenKWRollup
 	TokenKWGrouping
 	TokenKWSets
+
+	// Clause keywords
+	TokenKWFetch
 
 	// DML keywords
 	TokenKWUpdate
@@ -176,6 +181,7 @@ var keywords = map[string]TokenType{
 	"IN":        TokenKWIn,
 	"BETWEEN":   TokenKWBetween,
 	"LIKE":      TokenKWLike,
+	"ILIKE":     TokenKWILike,
 	"IS":        TokenKWIs,
 	"TRUE":      TokenKWTrue,
 	"FALSE":     TokenKWFalse,
@@ -209,6 +215,7 @@ var keywords = map[string]TokenType{
 	"ROLLUP":     TokenKWRollup,
 	"GROUPING":   TokenKWGrouping,
 	"SETS":       TokenKWSets,
+	"FETCH":      TokenKWFetch,
 	"UPDATE":     TokenKWUpdate,
 	"SET":        TokenKWSet,
 	"DELETE":     TokenKWDelete,
@@ -548,6 +555,18 @@ func lexStart(l *lexer) stateFn {
 			return nil
 		}
 		return l.errorf("unexpected character: |")
+	case r == ':':
+		if l.peek() == ':' {
+			l.next()
+			l.emit(TokenDoubleColon)
+			return nil
+		}
+		return l.errorf("unexpected character: :")
+	case r == '$':
+		if l.peek() == '$' {
+			return lexDollarString
+		}
+		return l.errorf("unexpected character: $")
 	case r == '[':
 		l.emit(TokenLBracket)
 		return nil
@@ -633,4 +652,23 @@ func lexIdentOrKeyword(l *lexer) stateFn {
 		l.emit(TokenIdent)
 	}
 	return nil
+}
+
+// lexDollarString scans a dollar-quoted string literal ($$...$$).
+// The first $ has already been consumed by lexStart.
+func lexDollarString(l *lexer) stateFn {
+	l.next() // consume second opening $
+	contentStart := l.pos
+	for {
+		r := l.next()
+		if r == eof {
+			return l.errorf("unterminated dollar-quoted string")
+		}
+		if r == '$' && l.peek() == '$' {
+			contentEnd := l.pos - l.width
+			l.next() // consume second closing $
+			l.emitVal(TokenString, l.input[contentStart:contentEnd])
+			return nil
+		}
+	}
 }

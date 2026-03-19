@@ -117,7 +117,7 @@ done:
 		left.Limit = tok.val
 	}
 
-	// OFFSET
+	// OFFSET (with optional ROW/ROWS)
 	if p.isKeyword(TokenKWOffset) {
 		p.advance()
 		tok, err := p.expect(TokenNumber)
@@ -125,6 +125,34 @@ done:
 			return nil, fmt.Errorf("expected number after OFFSET")
 		}
 		left.Offset = tok.val
+		if p.isKeyword(TokenKWRow) || p.isKeyword(TokenKWRows) {
+			p.advance()
+		}
+	}
+
+	// FETCH FIRST/NEXT N ROW(S) ONLY — SQL standard alternative to LIMIT
+	if p.isKeyword(TokenKWFetch) {
+		p.advance() // consume FETCH
+		if p.isKeyword(TokenKWFirst) {
+			p.advance()
+		} else if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "NEXT") {
+			p.advance()
+		} else {
+			return nil, fmt.Errorf("expected FIRST or NEXT after FETCH")
+		}
+		tok, err := p.expect(TokenNumber)
+		if err != nil {
+			return nil, fmt.Errorf("expected number after FETCH FIRST/NEXT")
+		}
+		if left.Limit == "" {
+			left.Limit = tok.val
+		}
+		if p.isKeyword(TokenKWRow) || p.isKeyword(TokenKWRows) {
+			p.advance()
+		}
+		if p.peek() == TokenIdent && strings.EqualFold(p.cur.val, "ONLY") {
+			p.advance()
+		}
 	}
 
 	return left, nil
@@ -381,7 +409,7 @@ func (p *selectParser) isFromKeyword() bool {
 		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWIntersect,
 		TokenKWExcept, TokenKWJoin,
 		TokenKWInner, TokenKWLeft, TokenKWRight, TokenKWFull,
-		TokenKWCross, TokenKWOn, TokenKWOffset, TokenKWOver,
+		TokenKWCross, TokenKWOn, TokenKWOffset, TokenKWOver, TokenKWFetch,
 		TokenKWNulls, TokenKWRows, TokenKWRange, TokenKWUnbounded,
 		TokenKWPreceding, TokenKWFollowing, TokenKWCurrent, TokenKWRow:
 		return true
@@ -601,7 +629,7 @@ func (p *selectParser) isJoinKeyword() bool {
 	case TokenKWJoin, TokenKWInner, TokenKWLeft, TokenKWRight, TokenKWFull,
 		TokenKWCross, TokenKWOn, TokenKWWhere, TokenKWGroup, TokenKWHaving,
 		TokenKWOrder, TokenKWLimit, TokenKWUnion, TokenKWIntersect,
-		TokenKWExcept, TokenKWOffset,
+		TokenKWExcept, TokenKWOffset, TokenKWFetch,
 		TokenKWNulls, TokenKWRows, TokenKWRange:
 		return true
 	}
@@ -796,6 +824,9 @@ func (p *selectParser) parseComparison() (Node, error) {
 		case TokenKWLike:
 			not = true
 			// fall through to LIKE handling below
+		case TokenKWILike:
+			not = true
+			// fall through to ILIKE handling below
 		default:
 			// Not a NOT IN/BETWEEN/LIKE — restore and return left
 			p.cur = saved
@@ -861,6 +892,20 @@ func (p *selectParser) parseComparison() (Node, error) {
 			return nil, err
 		}
 		return &LikeExpr{Left: left, Not: not, Pattern: pattern}, nil
+	}
+
+	// ILIKE — case-insensitive LIKE, rewritten to LOWER(left) LIKE LOWER(pattern)
+	if p.isKeyword(TokenKWILike) {
+		p.advance()
+		pattern, err := p.parseAddition()
+		if err != nil {
+			return nil, err
+		}
+		return &LikeExpr{
+			Left:    &FuncCallNode{Name: "lower", Args: []Node{left}},
+			Not:     not,
+			Pattern: &FuncCallNode{Name: "lower", Args: []Node{pattern}},
+		}, nil
 	}
 
 	// Comparison operators
@@ -963,29 +1008,45 @@ func (p *selectParser) parseUnary() (Node, error) {
 	return p.parsePostfix()
 }
 
-// parsePostfix handles subscript access: expr[index] → element_at(expr, index)
+// parsePostfix handles :: type cast and subscript access (left to right).
 func (p *selectParser) parsePostfix() (Node, error) {
 	expr, err := p.parsePrimary()
 	if err != nil {
 		return nil, err
 	}
-	// Handle subscript: expr[index]
-	for p.peek() == TokenLBracket {
-		p.advance() // consume [
-		index, err := p.parseExpr()
-		if err != nil {
-			return nil, fmt.Errorf("expected expression inside []")
-		}
-		if _, err := p.expect(TokenRBracket); err != nil {
-			return nil, fmt.Errorf("expected ] after subscript")
-		}
-		// Rewrite arr[i] → element_at(arr, i)
-		expr = &FuncCallNode{
-			Name: "element_at",
-			Args: []Node{expr, index},
+	for {
+		switch p.peek() {
+		case TokenDoubleColon:
+			// PostgreSQL-style type cast: expr::type
+			p.advance() // consume ::
+			typeTok, err := p.expect(TokenIdent)
+			if err != nil {
+				return nil, fmt.Errorf("expected type name after ::")
+			}
+			typeName := strings.ToLower(typeTok.val)
+			// Optional precision: ::decimal(10,2)
+			if p.peek() == TokenLParen {
+				typeName += p.consumeTypeParams()
+			}
+			expr = &CastNode{Inner: expr, TypeName: typeName}
+		case TokenLBracket:
+			// Subscript: expr[index] → element_at(expr, index)
+			p.advance() // consume [
+			index, err := p.parseExpr()
+			if err != nil {
+				return nil, fmt.Errorf("expected expression inside []")
+			}
+			if _, err := p.expect(TokenRBracket); err != nil {
+				return nil, fmt.Errorf("expected ] after subscript")
+			}
+			expr = &FuncCallNode{
+				Name: "element_at",
+				Args: []Node{expr, index},
+			}
+		default:
+			return expr, nil
 		}
 	}
-	return expr, nil
 }
 
 func (p *selectParser) parsePrimary() (Node, error) {

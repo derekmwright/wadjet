@@ -593,9 +593,33 @@ func lexParseCreateTable(sql string, l *lexer) (*ParsedQuery, error) {
 			return nil, fmt.Errorf("CREATE TABLE: expected type for column %q, got %q", colNameTok.val, colTypeTok.val)
 		}
 
+		typeName := colTypeTok.val
+		// Optional type precision: DECIMAL(10,2), VARCHAR(255)
+		if l.peekToken().typ == TokenLParen {
+			l.nextToken() // consume (
+			precTok := l.nextToken()
+			if precTok.typ != TokenNumber {
+				return nil, fmt.Errorf("CREATE TABLE: expected precision in %s()", typeName)
+			}
+			typeName += "(" + precTok.val
+			if l.peekToken().typ == TokenComma {
+				l.nextToken() // consume ,
+				scaleTok := l.nextToken()
+				if scaleTok.typ != TokenNumber {
+					return nil, fmt.Errorf("CREATE TABLE: expected scale in %s(n,)", typeName)
+				}
+				typeName += "," + scaleTok.val
+			}
+			rp := l.nextToken()
+			if rp.typ != TokenRParen {
+				return nil, fmt.Errorf("CREATE TABLE: expected ) after type precision")
+			}
+			typeName += ")"
+		}
+
 		col := ColumnDef{
 			Name:     strings.ToLower(colNameTok.val),
-			Type:     colTypeTok.val,
+			Type:     typeName,
 			Nullable: true,
 		}
 

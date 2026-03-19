@@ -1148,3 +1148,265 @@ func TestParseTableFunctionMixedArgs(t *testing.T) {
 		t.Errorf("expected alias=j, got %q", tr.Alias)
 	}
 }
+
+// --- Sprint 1: BI tool compatibility tests ---
+
+func TestDoubleColonCast(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string // substring of column expr
+	}{
+		{"simple cast", "SELECT col::int FROM t", "cast(col as int)"},
+		{"cast with precision", "SELECT price::decimal(10,2) FROM t", "cast(price as decimal(10, 2))"},
+		{"cast string literal", "SELECT '123'::int FROM t", "cast('123' as int)"},
+		{"chained cast", "SELECT col::int::text FROM t", "cast(cast(col as int) as text)"},
+		{"cast in expression", "SELECT a + b::int FROM t", "a + cast(b as int)"},
+		{"cast in where", "SELECT * FROM t WHERE col::text = 'hello'", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.want != "" {
+				got := info.Columns[0].Expr
+				if got != tt.want {
+					t.Errorf("column expr = %q, want %q", got, tt.want)
+				}
+			}
+			// WHERE test: verify cast appears in where clause
+			if tt.name == "cast in where" {
+				if !strings.Contains(info.Where, "cast(col as text)") {
+					t.Errorf("WHERE = %q, want to contain cast(col as text)", info.Where)
+				}
+			}
+		})
+	}
+}
+
+func TestILike(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		wantErr bool
+	}{
+		{"basic ilike", "SELECT * FROM t WHERE name ILIKE '%john%'", false},
+		{"not ilike", "SELECT * FROM t WHERE name NOT ILIKE '%john%'", false},
+		{"ilike column", "SELECT name ILIKE '%test%' FROM t", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// ILIKE should be rewritten to lower() LIKE lower()
+			var expr string
+			if info.Where != "" {
+				expr = info.Where
+			} else if len(info.Columns) > 0 {
+				expr = info.Columns[0].Expr
+			}
+			if !strings.Contains(expr, "lower(") {
+				t.Errorf("expected ILIKE to be rewritten with lower(), got %q", expr)
+			}
+			if !strings.Contains(expr, "like") {
+				t.Errorf("expected rewritten expression to contain 'like', got %q", expr)
+			}
+		})
+	}
+}
+
+func TestILikeRewrite(t *testing.T) {
+	// Verify the exact rewrite: name ILIKE '%x%' → lower(name) like lower('%x%')
+	parsed, err := Parse("SELECT * FROM t WHERE name ILIKE '%x%'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := ExtractSelect(parsed)
+	want := "lower(name) like lower('%x%')"
+	if info.Where != want {
+		t.Errorf("WHERE = %q, want %q", info.Where, want)
+	}
+}
+
+func TestNotILikeRewrite(t *testing.T) {
+	parsed, err := Parse("SELECT * FROM t WHERE name NOT ILIKE '%x%'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := ExtractSelect(parsed)
+	want := "lower(name) not like lower('%x%')"
+	if info.Where != want {
+		t.Errorf("WHERE = %q, want %q", info.Where, want)
+	}
+}
+
+func TestFetchFirst(t *testing.T) {
+	tests := []struct {
+		name       string
+		sql        string
+		wantLimit  string
+		wantOffset string
+	}{
+		{"fetch first", "SELECT * FROM t FETCH FIRST 10 ROWS ONLY", "10", ""},
+		{"fetch next", "SELECT * FROM t FETCH NEXT 5 ROWS ONLY", "5", ""},
+		{"fetch without rows only", "SELECT * FROM t FETCH FIRST 10 ROW", "10", ""},
+		{"offset then fetch", "SELECT * FROM t OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY", "10", "20"},
+		{"offset without rows", "SELECT * FROM t OFFSET 5 FETCH FIRST 10 ROWS ONLY", "10", "5"},
+		{"limit takes precedence", "SELECT * FROM t LIMIT 5 FETCH FIRST 10 ROWS ONLY", "5", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Limit != tt.wantLimit {
+				t.Errorf("limit = %q, want %q", info.Limit, tt.wantLimit)
+			}
+			if info.Offset != tt.wantOffset {
+				t.Errorf("offset = %q, want %q", info.Offset, tt.wantOffset)
+			}
+		})
+	}
+}
+
+func TestDollarQuotedString(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want string // expected string literal value
+	}{
+		{"simple", "SELECT $$hello$$ FROM t", "hello"},
+		{"with spaces", "SELECT $$hello world$$ FROM t", "hello world"},
+		{"with single quotes", "SELECT $$it's a test$$ FROM t", "it''s a test"},
+		{"empty", "SELECT $$$$ FROM t", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The column expr should contain the string as a literal
+			got := info.Columns[0].Expr
+			want := "'" + tt.want + "'"
+			if got != want {
+				t.Errorf("column expr = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestTypePrecision(t *testing.T) {
+	tests := []struct {
+		name     string
+		sql      string
+		wantType string
+	}{
+		{"decimal precision", "CREATE TABLE t (amount DECIMAL(10,2))", "DECIMAL(10,2)"},
+		{"varchar length", "CREATE TABLE t (name VARCHAR(255))", "VARCHAR(255)"},
+		{"no precision", "CREATE TABLE t (id INT)", "INT"},
+		{"mixed", "CREATE TABLE t (id INT, amount DECIMAL(10,2), name VARCHAR(100))", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			if tt.wantType != "" {
+				col := parsed.CreateTable.Columns[0]
+				if tt.name == "varchar length" || tt.name == "decimal precision" {
+					col = parsed.CreateTable.Columns[0]
+				}
+				if col.Type != tt.wantType {
+					t.Errorf("type = %q, want %q", col.Type, tt.wantType)
+				}
+			}
+			if tt.name == "mixed" {
+				cols := parsed.CreateTable.Columns
+				if cols[0].Type != "INT" {
+					t.Errorf("col 0 type = %q, want INT", cols[0].Type)
+				}
+				if cols[1].Type != "DECIMAL(10,2)" {
+					t.Errorf("col 1 type = %q, want DECIMAL(10,2)", cols[1].Type)
+				}
+				if cols[2].Type != "VARCHAR(100)" {
+					t.Errorf("col 2 type = %q, want VARCHAR(100)", cols[2].Type)
+				}
+			}
+		})
+	}
+}
+
+func TestImplicitCrossJoin(t *testing.T) {
+	// Comma-separated FROM should produce multiple tables (implicit cross join)
+	parsed, err := Parse("SELECT * FROM a, b WHERE a.id = b.id")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	info, _ := ExtractSelect(parsed)
+	if len(info.Tables) != 2 {
+		t.Fatalf("expected 2 tables, got %d", len(info.Tables))
+	}
+	if info.Tables[0].Name != "a" {
+		t.Errorf("table 0 = %q, want a", info.Tables[0].Name)
+	}
+	if info.Tables[1].Name != "b" {
+		t.Errorf("table 1 = %q, want b", info.Tables[1].Name)
+	}
+}
+
+func TestDoubleColonCastPrecedence(t *testing.T) {
+	// :: should bind tighter than arithmetic: a + b::int = a + CAST(b AS int)
+	parsed, err := Parse("SELECT a + b::int FROM t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := ExtractSelect(parsed)
+	// The AST should be BinaryOp(ColRef(a), +, CastNode(ColRef(b), int))
+	expr := info.Columns[0].ASTExpr
+	binOp, ok := expr.(*BinaryOp)
+	if !ok {
+		t.Fatalf("expected BinaryOp, got %T", expr)
+	}
+	if binOp.Op != "+" {
+		t.Errorf("op = %q, want +", binOp.Op)
+	}
+	if _, ok := binOp.Left.(*ColRef); !ok {
+		t.Errorf("left = %T, want ColRef", binOp.Left)
+	}
+	cast, ok := binOp.Right.(*CastNode)
+	if !ok {
+		t.Fatalf("right = %T, want CastNode", binOp.Right)
+	}
+	if cast.TypeName != "int" {
+		t.Errorf("type = %q, want int", cast.TypeName)
+	}
+}
