@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
@@ -415,9 +416,27 @@ func toInt64(v any) int64 {
 		return int64(tv)
 	case float64:
 		return int64(tv)
+	case string:
+		return parseTimestampString(tv)
 	default:
 		return 0
 	}
+}
+
+func parseTimestampString(s string) int64 {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04:05.000",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UnixMilli()
+		}
+	}
+	return 0
 }
 
 // ChainFilter applies a sequence of unary filter operators in order.

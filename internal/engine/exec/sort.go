@@ -200,7 +200,19 @@ func (s *Sort) finalizeColumnar() error {
 		idx := firstBatch.ColumnIndex(key.Column)
 		var cmp kernel.SortCompareKernel
 		if idx >= 0 {
-			cmp = kernel.ResolveSortCompare(firstBatch.Columns[idx].Type)
+			// Check if this column is null-free across all batches.
+			allNullFree := true
+			for _, b := range s.batches {
+				if b.Columns[idx].Nulls.HasNulls() {
+					allNullFree = false
+					break
+				}
+			}
+			if allNullFree {
+				cmp = kernel.ResolveSortCompareNoNulls(firstBatch.Columns[idx].Type)
+			} else {
+				cmp = kernel.ResolveSortCompare(firstBatch.Columns[idx].Type)
+			}
 		}
 		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, nullsLast: key.NullsLast, compare: cmp}
 	}

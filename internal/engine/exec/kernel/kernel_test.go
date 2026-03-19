@@ -199,6 +199,44 @@ func TestFilterKernelWithNulls(t *testing.T) {
 	}
 }
 
+func TestFilterKernelTimestampWithStringValue(t *testing.T) {
+	// Timestamps stored as epoch ms: 2024-01-15T00:00:00Z = 1705276800000
+	ts1 := int64(1705276800000) // 2024-01-15T00:00:00Z
+	ts2 := int64(1705363200000) // 2024-01-16T00:00:00Z
+	ts3 := int64(1705449600000) // 2024-01-17T00:00:00Z
+
+	vec := batch.NewVector(batch.TypeTimestamp, 3)
+	vec.Int64Data[0] = ts1
+	vec.Int64Data[1] = ts2
+	vec.Int64Data[2] = ts3
+
+	tests := []struct {
+		name     string
+		op       CompareOp
+		value    string
+		expected int
+	}{
+		{"RFC3339 eq", OpEq, "2024-01-16T00:00:00Z", 1},
+		{"RFC3339 gt", OpGt, "2024-01-15T00:00:00Z", 2},
+		{"RFC3339 ge", OpGe, "2024-01-16T00:00:00Z", 2},
+		{"RFC3339 lt", OpLt, "2024-01-17T00:00:00Z", 2},
+		{"space format", OpEq, "2024-01-15 00:00:00", 1},
+		{"date only", OpGe, "2024-01-16", 2},
+		{"RFC3339 millis", OpEq, "2024-01-16T00:00:00.000Z", 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			k := ResolveFilterKernel(batch.TypeTimestamp, tt.op, tt.value)
+			out := make([]uint16, 0, 3)
+			result := k(vec, nil, 3, out)
+			if len(result) != tt.expected {
+				t.Fatalf("expected %d matches, got %d: %v", tt.expected, len(result), result)
+			}
+		})
+	}
+}
+
 func TestSortCompareInt64(t *testing.T) {
 	a := makeIntVec([]int64{30}, nil)
 	b := makeIntVec([]int64{20}, nil)

@@ -428,6 +428,61 @@ func TestCmpInt64Eval(t *testing.T) {
 	}
 }
 
+func TestCmpTimestampWithStringLiteral(t *testing.T) {
+	// Simulate: WHERE ts_col > '2024-01-15T00:00:00Z'
+	// Timestamp stored as epoch ms: 2024-01-16 = 1705363200000
+	ts := int64(1705363200000)
+
+	// Typed path: CmpInt64 with string literal parsed via ToInt64
+	cmp := &CmpInt64{
+		Left:  &Lit{Val: ts},
+		Right: &Lit{Val: "2024-01-15T00:00:00Z"},
+		Op:    CmpGt,
+	}
+	if !cmp.EvalBool(nil, 0) {
+		t.Error("2024-01-16 > '2024-01-15T00:00:00Z' should be true")
+	}
+
+	cmp2 := &CmpInt64{
+		Left:  &Lit{Val: ts},
+		Right: &Lit{Val: "2024-01-16T00:00:00Z"},
+		Op:    CmpEq,
+	}
+	if !cmp2.EvalBool(nil, 0) {
+		t.Error("2024-01-16 == '2024-01-16T00:00:00Z' should be true")
+	}
+
+	// Generic path: compare(int64, string) — the mixed-type implicit cast
+	cmpGeneric := &Cmp{
+		Left:  &Lit{Val: ts},
+		Right: &Lit{Val: "2024-01-15 00:00:00"},
+		Op:    CmpGt,
+	}
+	if !cmpGeneric.EvalBool(nil, 0) {
+		t.Error("compare(int64, string) should implicitly parse timestamp")
+	}
+
+	// Reverse: string on left, int64 on right
+	cmpReverse := &Cmp{
+		Left:  &Lit{Val: "2024-01-17T00:00:00Z"},
+		Right: &Lit{Val: ts},
+		Op:    CmpGt,
+	}
+	if !cmpReverse.EvalBool(nil, 0) {
+		t.Error("compare(string, int64) reverse should implicitly parse timestamp")
+	}
+
+	// Date-only format
+	cmpDate := &CmpInt64{
+		Left:  &Lit{Val: ts},
+		Right: &Lit{Val: "2024-01-16"},
+		Op:    CmpEq,
+	}
+	if !cmpDate.EvalBool(nil, 0) {
+		t.Error("timestamp should equal date-only string for midnight")
+	}
+}
+
 func TestCmpFloat64(t *testing.T) {
 	tests := []struct {
 		op   CmpOp

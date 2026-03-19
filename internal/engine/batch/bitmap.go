@@ -5,8 +5,9 @@ import "math/bits"
 
 // Bitmap is a compact null bitmap using 1 bit per row.
 type Bitmap struct {
-	data []uint64
-	len  int
+	data     []uint64
+	len      int
+	hasNulls int8 // -1 = unknown, 0 = no nulls, 1 = has nulls
 }
 
 // NewBitmap creates a new bitmap with the given capacity, all bits set to 1 (non-null).
@@ -21,13 +22,17 @@ func NewBitmap(n int) Bitmap {
 	if rem := n % 64; rem > 0 {
 		data[len(data)-1] = (uint64(1) << rem) - 1
 	}
-	return Bitmap{data: data, len: n}
+	return Bitmap{data: data, len: n, hasNulls: 0}
 }
 
 // NewBitmapAllNull creates a bitmap with all bits cleared (all null).
 func NewBitmapAllNull(n int) Bitmap {
 	words := (n + 63) / 64
-	return Bitmap{data: make([]uint64, words), len: n}
+	hn := int8(1)
+	if n == 0 {
+		hn = 0
+	}
+	return Bitmap{data: make([]uint64, words), len: n, hasNulls: hn}
 }
 
 // IsNull returns true if the bit at position i is 0 (null).
@@ -54,6 +59,7 @@ func (b *Bitmap) SetNull(i int) {
 	word := i / 64
 	bit := uint(i % 64)
 	b.data[word] &^= 1 << bit
+	b.hasNulls = 1
 }
 
 // SetValid sets the bit at position i to 1 (non-null).
@@ -64,17 +70,26 @@ func (b *Bitmap) SetValid(i int) {
 	word := i / 64
 	bit := uint(i % 64)
 	b.data[word] |= 1 << bit
+	if b.hasNulls == 1 {
+		b.hasNulls = -1 // may or may not still have nulls
+	}
 }
 
 // HasNulls returns true if any bit is 0 (null). Short-circuits on the first
 // non-full word, making it O(1) in the common all-valid case.
+// Result is cached — repeated calls are free.
 func (b *Bitmap) HasNulls() bool {
+	if b.hasNulls >= 0 {
+		return b.hasNulls == 1
+	}
 	if len(b.data) == 0 {
+		b.hasNulls = 0
 		return false
 	}
 	// Check all words except the last
 	for i := 0; i < len(b.data)-1; i++ {
 		if b.data[i] != ^uint64(0) {
+			b.hasNulls = 1
 			return true
 		}
 	}
@@ -82,10 +97,20 @@ func (b *Bitmap) HasNulls() bool {
 	last := b.data[len(b.data)-1]
 	rem := b.len % 64
 	if rem == 0 {
-		return last != ^uint64(0)
+		if last != ^uint64(0) {
+			b.hasNulls = 1
+			return true
+		}
+		b.hasNulls = 0
+		return false
 	}
 	mask := (uint64(1) << uint(rem)) - 1
-	return last != mask
+	if last != mask {
+		b.hasNulls = 1
+		return true
+	}
+	b.hasNulls = 0
+	return false
 }
 
 // NullCount returns the number of null (0) bits.
@@ -124,6 +149,7 @@ func (b *Bitmap) ResetNonNull(n int) {
 		b.data[len(b.data)-1] = (uint64(1) << rem) - 1
 	}
 	b.len = n
+	b.hasNulls = 0
 }
 
 // Grow returns a bitmap that can hold at least newLen bits, preserving existing data.
@@ -152,5 +178,5 @@ func (b Bitmap) Grow(newLen int) Bitmap {
 	if rem := newLen % 64; rem > 0 {
 		data[newWords-1] &= (uint64(1) << rem) - 1
 	}
-	return Bitmap{data: data, len: newLen}
+	return Bitmap{data: data, len: newLen, hasNulls: -1}
 }

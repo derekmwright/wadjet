@@ -65,6 +65,9 @@ func countSlice(nulls *batch.Bitmap, sel []uint16, vecLen int) int64 {
 }
 
 // --- Row-level updaters (for grouped aggregation inner loop) ---
+// Each updater has a null-checking variant and a NoNulls variant.
+// The NoNulls variants skip the per-row null bitmap check, which
+// eliminates a branch + memory load per row when the column has no nulls.
 
 func sumRowInt64(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
@@ -72,12 +75,20 @@ func sumRowInt64(acc *Accumulator, vec *batch.Vector, row int) {
 		acc.Count++
 	}
 }
+func sumRowInt64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	acc.SumI64 += vec.Int64Data[row]
+	acc.Count++
+}
 
 func sumRowInt32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
 		acc.SumI64 += int64(vec.Int32Data[row])
 		acc.Count++
 	}
+}
+func sumRowInt32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	acc.SumI64 += int64(vec.Int32Data[row])
+	acc.Count++
 }
 
 func sumRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
@@ -87,6 +98,11 @@ func sumRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
 		acc.IsFloat = true
 	}
 }
+func sumRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	acc.SumF64 += vec.Float64Data[row]
+	acc.Count++
+	acc.IsFloat = true
+}
 
 func sumRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
@@ -94,6 +110,11 @@ func sumRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 		acc.Count++
 		acc.IsFloat = true
 	}
+}
+func sumRowFloat32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	acc.SumF64 += float64(vec.Float32Data[row])
+	acc.Count++
+	acc.IsFloat = true
 }
 
 func countRow(acc *Accumulator, vec *batch.Vector, row int) {
@@ -115,6 +136,13 @@ func minRowInt64(acc *Accumulator, vec *batch.Vector, row int) {
 		}
 	}
 }
+func minRowInt64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	v := vec.Int64Data[row]
+	if !acc.HasMin || v < acc.MinI64 {
+		acc.MinI64 = v
+		acc.HasMin = true
+	}
+}
 
 func minRowInt32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
@@ -123,6 +151,13 @@ func minRowInt32(acc *Accumulator, vec *batch.Vector, row int) {
 			acc.MinI64 = v
 			acc.HasMin = true
 		}
+	}
+}
+func minRowInt32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	v := int64(vec.Int32Data[row])
+	if !acc.HasMin || v < acc.MinI64 {
+		acc.MinI64 = v
+		acc.HasMin = true
 	}
 }
 
@@ -136,6 +171,14 @@ func minRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
 		}
 	}
 }
+func minRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	v := vec.Float64Data[row]
+	if !acc.HasMin || v < acc.MinF64 {
+		acc.MinF64 = v
+		acc.HasMin = true
+		acc.IsFloat = true
+	}
+}
 
 func minRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
@@ -145,6 +188,14 @@ func minRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 			acc.HasMin = true
 			acc.IsFloat = true
 		}
+	}
+}
+func minRowFloat32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	v := float64(vec.Float32Data[row])
+	if !acc.HasMin || v < acc.MinF64 {
+		acc.MinF64 = v
+		acc.HasMin = true
+		acc.IsFloat = true
 	}
 }
 
@@ -157,6 +208,13 @@ func maxRowInt64(acc *Accumulator, vec *batch.Vector, row int) {
 		}
 	}
 }
+func maxRowInt64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	v := vec.Int64Data[row]
+	if !acc.HasMax || v > acc.MaxI64 {
+		acc.MaxI64 = v
+		acc.HasMax = true
+	}
+}
 
 func maxRowInt32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
@@ -165,6 +223,13 @@ func maxRowInt32(acc *Accumulator, vec *batch.Vector, row int) {
 			acc.MaxI64 = v
 			acc.HasMax = true
 		}
+	}
+}
+func maxRowInt32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	v := int64(vec.Int32Data[row])
+	if !acc.HasMax || v > acc.MaxI64 {
+		acc.MaxI64 = v
+		acc.HasMax = true
 	}
 }
 
@@ -178,6 +243,14 @@ func maxRowFloat64(acc *Accumulator, vec *batch.Vector, row int) {
 		}
 	}
 }
+func maxRowFloat64NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	v := vec.Float64Data[row]
+	if !acc.HasMax || v > acc.MaxF64 {
+		acc.MaxF64 = v
+		acc.HasMax = true
+		acc.IsFloat = true
+	}
+}
 
 func maxRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 	if !vec.Nulls.IsNullFast(row) {
@@ -187,6 +260,14 @@ func maxRowFloat32(acc *Accumulator, vec *batch.Vector, row int) {
 			acc.HasMax = true
 			acc.IsFloat = true
 		}
+	}
+}
+func maxRowFloat32NoNulls(acc *Accumulator, vec *batch.Vector, row int) {
+	v := float64(vec.Float32Data[row])
+	if !acc.HasMax || v > acc.MaxF64 {
+		acc.MaxF64 = v
+		acc.HasMax = true
+		acc.IsFloat = true
 	}
 }
 
@@ -245,6 +326,24 @@ func ResolveRowSum(typ batch.TypeID) RowAggUpdater {
 	}
 }
 
+// ResolveRowSumNoNulls returns a no-null-check sum updater.
+func ResolveRowSumNoNulls(typ batch.TypeID) RowAggUpdater {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
+		return sumRowInt64NoNulls
+	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
+		return sumRowInt32NoNulls
+	case batch.TypeFloat64:
+		return sumRowFloat64NoNulls
+	case batch.TypeFloat32:
+		return sumRowFloat32NoNulls
+	case batch.TypeDecimal:
+		return sumRowDecimal
+	default:
+		return nil
+	}
+}
+
 // ResolveRowMin returns a row-level min updater for the given column type.
 func ResolveRowMin(typ batch.TypeID) RowAggUpdater {
 	switch typ {
@@ -263,6 +362,24 @@ func ResolveRowMin(typ batch.TypeID) RowAggUpdater {
 	}
 }
 
+// ResolveRowMinNoNulls returns a no-null-check min updater.
+func ResolveRowMinNoNulls(typ batch.TypeID) RowAggUpdater {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return minRowInt64NoNulls
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return minRowInt32NoNulls
+	case batch.TypeFloat64:
+		return minRowFloat64NoNulls
+	case batch.TypeFloat32:
+		return minRowFloat32NoNulls
+	case batch.TypeDecimal:
+		return minRowDecimal
+	default:
+		return nil
+	}
+}
+
 // ResolveRowMax returns a row-level max updater for the given column type.
 func ResolveRowMax(typ batch.TypeID) RowAggUpdater {
 	switch typ {
@@ -274,6 +391,24 @@ func ResolveRowMax(typ batch.TypeID) RowAggUpdater {
 		return maxRowFloat64
 	case batch.TypeFloat32:
 		return maxRowFloat32
+	case batch.TypeDecimal:
+		return maxRowDecimal
+	default:
+		return nil
+	}
+}
+
+// ResolveRowMaxNoNulls returns a no-null-check max updater.
+func ResolveRowMaxNoNulls(typ batch.TypeID) RowAggUpdater {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return maxRowInt64NoNulls
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return maxRowInt32NoNulls
+	case batch.TypeFloat64:
+		return maxRowFloat64NoNulls
+	case batch.TypeFloat32:
+		return maxRowFloat32NoNulls
 	case batch.TypeDecimal:
 		return maxRowDecimal
 	default:

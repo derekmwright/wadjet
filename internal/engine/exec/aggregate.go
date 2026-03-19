@@ -71,7 +71,9 @@ type HashAggregate struct {
 	aggColIdx     []int
 	aggColIdx2    []int                  // second column indices for two-column aggregates
 	groupColTypes  []batch.TypeID
-	aggUpdaters    []kernel.RowAggUpdater  // resolved typed updaters
+	aggUpdaters       []kernel.RowAggUpdater // resolved typed updaters
+	aggUpdatersNoNull []kernel.RowAggUpdater // no-null-check variants
+	batchUpdaters     []kernel.RowAggUpdater // per-batch updater selection (reusable)
 	batchAggKernels []kernel.BatchAggKernel // batch-level kernels (scalar aggregate fast path)
 	scalarAccs     []kernel.Accumulator    // accumulators for scalar aggregate fast path
 	isScalarAgg    bool                    // true when len(GroupByCols)==0 and all aggs are batch-able
@@ -280,6 +282,8 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	h.aggColIdx = make([]int, len(h.Aggs))
 	h.aggColIdx2 = make([]int, len(h.Aggs))
 	h.aggUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
+	h.aggUpdatersNoNull = make([]kernel.RowAggUpdater, len(h.Aggs))
+	h.batchUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
 	for i, agg := range h.Aggs {
 		h.aggColIdx2[i] = -1 // default: no second column
 		if agg.Func == AggCountDistinct || agg.Func == AggApproxDistinct {
@@ -295,11 +299,13 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			h.aggColIdx[i] = idx
 			if idx >= 0 {
 				h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
+				h.aggUpdatersNoNull[i] = resolveAggUpdaterNoNull(agg.Func, b.Columns[idx].Type)
 			}
 		} else {
 			h.aggColIdx[i] = -1
 			if agg.Func == AggCount {
 				h.aggUpdaters[i] = kernel.ResolveRowCount(true) // COUNT(*)
+				h.aggUpdatersNoNull[i] = kernel.ResolveRowCount(true)
 			}
 		}
 		// Resolve second column index for two-column aggregates
@@ -440,9 +446,19 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 
 	// Local copies to avoid repeated field loads in the inner loop
 	intIdx := h.intGroupIndex
-	updaters := h.aggUpdaters
 	colIdx := h.aggColIdx
 	nAggs := len(h.Aggs)
+
+	// Select no-null-check updaters for columns without nulls in this batch.
+	updaters := h.batchUpdaters
+	for i := 0; i < nAggs; i++ {
+		ci := colIdx[i]
+		if ci >= 0 && h.aggUpdatersNoNull[i] != nil && !b.Columns[ci].Nulls.HasNulls() {
+			updaters[i] = h.aggUpdatersNoNull[i]
+		} else {
+			updaters[i] = h.aggUpdaters[i]
+		}
+	}
 
 	if b.Sel != nil {
 		for _, si := range b.Sel {
@@ -552,6 +568,17 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 // the binary-encoded key fits in int64. Uses intHashTable for group lookup.
 // Falls back to generic path if any key exceeds 8 bytes.
 func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
+	// Select no-null-check updaters for columns without nulls in this batch.
+	nAggs := len(h.Aggs)
+	for i := 0; i < nAggs; i++ {
+		ci := h.aggColIdx[i]
+		if ci >= 0 && h.aggUpdatersNoNull[i] != nil && !b.Columns[ci].Nulls.HasNulls() {
+			h.batchUpdaters[i] = h.aggUpdatersNoNull[i]
+		} else {
+			h.batchUpdaters[i] = h.aggUpdaters[i]
+		}
+	}
+
 	processRow := func(row int) bool {
 		h.keyBuf = h.keyBuf[:0]
 		for i, idx := range h.groupColIdx {
@@ -576,7 +603,7 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 		if gsIdx, ok := h.intGroupIndex.Get(key); ok {
 			gs := h.intGroupStates[gsIdx]
 			for i := range h.Aggs {
-				updater := h.aggUpdaters[i]
+				updater := h.batchUpdaters[i]
 				if updater == nil {
 					continue
 				}
@@ -610,7 +637,7 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 		h.keys = append(h.keys, keyVals)
 
 		for i := range h.Aggs {
-			updater := h.aggUpdaters[i]
+			updater := h.batchUpdaters[i]
 			if updater == nil {
 				continue
 			}
@@ -1290,6 +1317,23 @@ func resolveAggUpdater(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
 		return kernel.ResolveRowMin(typ)
 	case AggMax:
 		return kernel.ResolveRowMax(typ)
+	default:
+		return nil
+	}
+}
+
+// resolveAggUpdaterNoNull returns a row-level updater that skips null checks.
+// Used when the aggregate column's vector has no nulls in the current batch.
+func resolveAggUpdaterNoNull(fn AggFunc, typ batch.TypeID) kernel.RowAggUpdater {
+	switch fn {
+	case AggSum, AggAvg:
+		return kernel.ResolveRowSumNoNulls(typ)
+	case AggCount:
+		return kernel.ResolveRowCount(true) // no nulls → every row counts
+	case AggMin:
+		return kernel.ResolveRowMinNoNulls(typ)
+	case AggMax:
+		return kernel.ResolveRowMaxNoNulls(typ)
 	default:
 		return nil
 	}
