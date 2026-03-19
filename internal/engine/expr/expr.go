@@ -754,7 +754,8 @@ func (e *ArrayLitExpr) Eval(b *batch.RecordBatch, row int) any {
 type FuncCall struct {
 	Name string
 	Args []Expr
-	args []any // pre-allocated args buffer (avoids alloc per call)
+	args []any       // pre-allocated args buffer (avoids alloc per call)
+	fn   ScalarFunc  // cached function pointer (avoids RWMutex per row)
 }
 
 func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
@@ -765,11 +766,15 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	for i, a := range e.Args {
 		e.args[i] = a.Eval(b, row)
 	}
-	fn := DefaultRegistry.Lookup(e.Name)
-	if fn == nil {
-		return nil
+	// Cache function pointer to avoid RWMutex contention on every row.
+	// The registry is read-only during query execution, so this is safe.
+	if e.fn == nil {
+		e.fn = DefaultRegistry.Lookup(e.Name)
+		if e.fn == nil {
+			return nil
+		}
 	}
-	return fn(e.args)
+	return e.fn(e.args)
 }
 
 // ScalarFunc is a scalar function implementation.
