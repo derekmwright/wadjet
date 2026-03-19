@@ -1717,6 +1717,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 	case batch.TypeBool:
 		var src *batch.Vector
 		prevBatch := int32(-1)
+		srcHasNulls := true
 		for di, pair := range pairs {
 			if !pair.matched {
 				dst.Nulls.SetNull(di)
@@ -1725,9 +1726,10 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			if bi := pair.ref.batchIdx; bi != prevBatch {
 				src = buildBatches[bi].Columns[srcIdx]
 				prevBatch = bi
+				srcHasNulls = src.Nulls.HasNulls()
 			}
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.BoolData[di] = src.BoolData[si]
@@ -1736,6 +1738,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		var src *batch.Vector
 		prevBatch := int32(-1)
+		srcHasNulls := true
 		for di, pair := range pairs {
 			if !pair.matched {
 				dst.Nulls.SetNull(di)
@@ -1744,9 +1747,10 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			if bi := pair.ref.batchIdx; bi != prevBatch {
 				src = buildBatches[bi].Columns[srcIdx]
 				prevBatch = bi
+				srcHasNulls = src.Nulls.HasNulls()
 			}
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.Int32Data[di] = src.Int32Data[si]
@@ -1755,6 +1759,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 		var src *batch.Vector
 		prevBatch := int32(-1)
+		srcHasNulls := true
 		for di, pair := range pairs {
 			if !pair.matched {
 				dst.Nulls.SetNull(di)
@@ -1763,9 +1768,10 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			if bi := pair.ref.batchIdx; bi != prevBatch {
 				src = buildBatches[bi].Columns[srcIdx]
 				prevBatch = bi
+				srcHasNulls = src.Nulls.HasNulls()
 			}
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.Int64Data[di] = src.Int64Data[si]
@@ -1774,6 +1780,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 	case batch.TypeFloat32:
 		var src *batch.Vector
 		prevBatch := int32(-1)
+		srcHasNulls := true
 		for di, pair := range pairs {
 			if !pair.matched {
 				dst.Nulls.SetNull(di)
@@ -1782,9 +1789,10 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			if bi := pair.ref.batchIdx; bi != prevBatch {
 				src = buildBatches[bi].Columns[srcIdx]
 				prevBatch = bi
+				srcHasNulls = src.Nulls.HasNulls()
 			}
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.Float32Data[di] = src.Float32Data[si]
@@ -1793,6 +1801,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 	case batch.TypeFloat64:
 		var src *batch.Vector
 		prevBatch := int32(-1)
+		srcHasNulls := true
 		for di, pair := range pairs {
 			if !pair.matched {
 				dst.Nulls.SetNull(di)
@@ -1801,9 +1810,10 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			if bi := pair.ref.batchIdx; bi != prevBatch {
 				src = buildBatches[bi].Columns[srcIdx]
 				prevBatch = bi
+				srcHasNulls = src.Nulls.HasNulls()
 			}
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.Float64Data[di] = src.Float64Data[si]
@@ -1812,6 +1822,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		var src *batch.Vector
 		prevBatch := int32(-1)
+		srcHasNulls := true
 		for di, pair := range pairs {
 			if !pair.matched {
 				dst.Nulls.SetNull(di)
@@ -1820,9 +1831,10 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			if bi := pair.ref.batchIdx; bi != prevBatch {
 				src = buildBatches[bi].Columns[srcIdx]
 				prevBatch = bi
+				srcHasNulls = src.Nulls.HasNulls()
 			}
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.BytesData.Set(di, src.BytesData.Value(si))
@@ -1831,6 +1843,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 	case batch.TypeDecimal:
 		var src *batch.Vector
 		prevBatch := int32(-1)
+		srcHasNulls := true
 		for di, pair := range pairs {
 			if !pair.matched {
 				dst.Nulls.SetNull(di)
@@ -1839,9 +1852,10 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			if bi := pair.ref.batchIdx; bi != prevBatch {
 				src = buildBatches[bi].Columns[srcIdx]
 				prevBatch = bi
+				srcHasNulls = src.Nulls.HasNulls()
 			}
 			si := int(pair.ref.rowIdx)
-			if src.Nulls.IsNullFast(si) {
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
