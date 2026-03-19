@@ -2188,12 +2188,48 @@ func estimateRelCost(n *Node) int {
 		base := estimateRelCost(n.Children[0])
 		return base / 2
 	case NodeAggregate:
-		// Aggregation reduces rows
-		return 50
+		// Aggregation reduces rows substantially
+		base := estimateRelCost(n.Children[0])
+		cost := base / 10
+		if cost < 1 {
+			cost = 1
+		}
+		return cost
 	case NodeDistinct:
-		return 50
+		base := estimateRelCost(n.Children[0])
+		cost := base / 5
+		if cost < 1 {
+			cost = 1
+		}
+		return cost
+	case NodeJoin:
+		// Non-flattenable join subtree (e.g., outer join inside an inner join chain).
+		// Estimate output as roughly max(left, right) — joins can expand or reduce.
+		leftCost := estimateRelCost(n.Children[0])
+		rightCost := estimateRelCost(n.Children[1])
+		cost := leftCost
+		if rightCost > cost {
+			cost = rightCost
+		}
+		// Semi/anti joins reduce to at most left-side cardinality
+		jt := strings.ToLower(n.JoinType)
+		if jt == "semi" || jt == "anti" {
+			cost = leftCost / 2
+			if cost < 1 {
+				cost = 1
+			}
+		}
+		return cost
+	case NodeLimit:
+		// Limit caps output regardless of input size
+		return 1
+	case NodeProject:
+		if len(n.Children) > 0 {
+			return estimateRelCost(n.Children[0])
+		}
+		return 100
 	default:
-		// Complex subplan
+		// Unknown — moderate cost
 		return 200
 	}
 }

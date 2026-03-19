@@ -435,6 +435,50 @@ func TestExtractCommonORPredicates_NoCommon(t *testing.T) {
 	}
 }
 
+func TestEstimateRelCost_JoinSubtree(t *testing.T) {
+	// Join subtree cost should be estimated from children, not flat 200
+	small := NewScan("nation", "")
+	small.ScanRowEstimate = 25
+	large := NewScan("lineitem", "")
+	large.ScanRowEstimate = 6000000
+	join := NewJoin(small, large, "inner", "n_nationkey = l_nationkey")
+
+	cost := estimateRelCost(join)
+	largeCost := estimateRelCost(large)
+	// Join should reflect the larger child, not a fixed 200
+	if cost < largeCost {
+		t.Errorf("join cost %d should be >= large child cost %d", cost, largeCost)
+	}
+}
+
+func TestEstimateRelCost_SemiAntiJoin(t *testing.T) {
+	// Semi/anti join reduces cardinality — should be cheaper than left child
+	outer := NewScan("orders", "")
+	outer.ScanRowEstimate = 1500000
+	inner := NewScan("lineitem", "")
+	inner.ScanRowEstimate = 6000000
+	semi := NewJoin(outer, inner, "semi", "o_orderkey = l_orderkey")
+
+	semiCost := estimateRelCost(semi)
+	outerCost := estimateRelCost(outer)
+	if semiCost >= outerCost {
+		t.Errorf("semi join cost %d should be < outer cost %d", semiCost, outerCost)
+	}
+}
+
+func TestEstimateRelCost_AggregateReduction(t *testing.T) {
+	// Aggregate should dramatically reduce cost relative to input
+	scan := NewScan("lineitem", "")
+	scan.ScanRowEstimate = 6000000
+	agg := NewAggregate(scan, []string{"l_orderkey"}, nil)
+
+	aggCost := estimateRelCost(agg)
+	scanCost := estimateRelCost(scan)
+	if aggCost > scanCost/5 {
+		t.Errorf("aggregate cost %d should be much less than scan cost %d", aggCost, scanCost)
+	}
+}
+
 func TestDecorrelateExists_SingleTable(t *testing.T) {
 	// EXISTS (SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey)
 	// should become a semi join
