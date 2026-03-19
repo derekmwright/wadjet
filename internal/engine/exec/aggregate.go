@@ -419,6 +419,17 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 		return
 	}
 
+	// Select no-null-check updaters for columns without nulls in this batch.
+	// Applies to all grouped paths: int, compact, and generic.
+	for i := 0; i < len(h.Aggs); i++ {
+		ci := h.aggColIdx[i]
+		if ci >= 0 && h.aggUpdatersNoNull[i] != nil && !b.Columns[ci].Nulls.HasNulls() {
+			h.batchUpdaters[i] = h.aggUpdatersNoNull[i]
+		} else {
+			h.batchUpdaters[i] = h.aggUpdaters[i]
+		}
+	}
+
 	// Single-column integer GROUP BY fast path
 	if h.useIntGroupKey {
 		h.consumeBatchIntGroup(b)
@@ -573,16 +584,7 @@ func (h *HashAggregate) ensureGroupIndexBuf(n int) []int32 {
 // the binary-encoded key fits in int64. Uses intHashTable for group lookup.
 // Falls back to generic path if any key exceeds 8 bytes.
 func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
-	// Select no-null-check updaters for columns without nulls in this batch.
-	nAggs := len(h.Aggs)
-	for i := 0; i < nAggs; i++ {
-		ci := h.aggColIdx[i]
-		if ci >= 0 && h.aggUpdatersNoNull[i] != nil && !b.Columns[ci].Nulls.HasNulls() {
-			h.batchUpdaters[i] = h.aggUpdatersNoNull[i]
-		} else {
-			h.batchUpdaters[i] = h.aggUpdaters[i]
-		}
-	}
+	// batchUpdaters already set by consumeBatch.
 
 	processRow := func(row int) bool {
 		h.keyBuf = h.keyBuf[:0]
@@ -961,7 +963,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			}
 
 		default:
-			updater := h.aggUpdaters[i]
+			updater := h.batchUpdaters[i]
 			if updater == nil {
 				continue
 			}

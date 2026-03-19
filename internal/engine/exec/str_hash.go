@@ -160,6 +160,15 @@ func (h *strHashTable) grow() {
 	h.mask = newMask
 }
 
+// ForEach calls fn for each key in the table.
+func (h *strHashTable) ForEach(fn func(key []byte)) {
+	for _, e := range h.entries {
+		if e.offset >= 0 {
+			fn(h.arena[e.offset : e.offset+e.keyLen])
+		}
+	}
+}
+
 // strKeyEqual compares two byte slices for equality.
 // Inlined by the compiler for short keys.
 func strKeyEqual(a, b []byte) bool {

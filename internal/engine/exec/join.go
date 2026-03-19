@@ -41,7 +41,7 @@ type HashJoin struct {
 
 	mu           sync.Mutex
 	buildBatches []*batch.RecordBatch // columnar storage of build side
-	hashIndex    map[string]int32  // hash key -> head index in arena (general path)
+	strIndex     *strHashTable     // arena-based hash table for string keys (general path)
 	intIndex     *intHashTable    // fast path: single-column integer join key
 	arena        []buildRef           // flat storage for all build refs
 	arenaNext    []int32              // chain: arenaNext[i] = next arena index for same key (-1 = end)
@@ -130,7 +130,6 @@ func NewHashJoin(joinType JoinType, leftKeys, rightKeys []string) *HashJoin {
 		JoinType:  joinType,
 		LeftKeys:  leftKeys,
 		RightKeys: rightKeys,
-		hashIndex: make(map[string]int32),
 		keyBuf:    make([]byte, 0, 128),
 	}
 	return hj
@@ -174,7 +173,7 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 		if isIntKeyColumn(col.Type) {
 			h.useIntKey = true
 			h.intIndex = newIntHashTable(hint)
-			h.hashIndex = nil
+			h.strIndex = nil
 			return
 		}
 	}
@@ -187,7 +186,7 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 		if isIntKeyColumn(col0.Type) && isIntKeyColumn(col1.Type) {
 			h.useDualIntKey = true
 			h.intIndex = newIntHashTable(hint)
-			h.hashIndex = nil
+			h.strIndex = nil
 		}
 	}
 }
@@ -205,16 +204,15 @@ func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
 	h.intIndex.Put(key, idx)
 }
 
-func (h *HashJoin) arenaAppendStr(key string, ref buildRef) {
+func (h *HashJoin) arenaAppendStr(ref buildRef) {
 	idx := int32(len(h.arena))
 	h.arena = append(h.arena, ref)
-	head, ok := h.hashIndex[key]
-	if ok {
+	head, existed := h.strIndex.Put(h.keyBuf, idx)
+	if existed {
 		h.arenaNext = append(h.arenaNext, head)
 	} else {
 		h.arenaNext = append(h.arenaNext, -1)
 	}
-	h.hashIndex[key] = idx
 }
 
 // existsInBuild checks if a probe row has any match in the build-side hash table.
@@ -253,11 +251,14 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 		_, ok = h.intIndex.Get(compositeKey)
 		return ok
 	}
+	if h.strIndex == nil {
+		return false
+	}
 	h.buildProbeKeyBuf(in, row)
 	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(h.keyBuf)) {
 		return false
 	}
-	_, ok := h.hashIndex[string(h.keyBuf)]
+	_, ok := h.strIndex.Get(h.keyBuf)
 	return ok
 }
 
@@ -321,11 +322,14 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		}
 		return p.lookupBuf
 	}
+	if h.strIndex == nil {
+		return p.lookupBuf
+	}
 	h.buildProbeKeyBuf(in, row)
 	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(h.keyBuf)) {
 		return p.lookupBuf
 	}
-	head, ok := h.hashIndex[string(h.keyBuf)]
+	head, ok := h.strIndex.Get(h.keyBuf)
 	if !ok {
 		return p.lookupBuf
 	}
@@ -412,9 +416,9 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				hint := int(h.BuildRowHint)
 				h.arena = make([]buildRef, 0, hint)
 				h.arenaNext = make([]int32, 0, hint)
-				// intIndex already pre-sized by tryEnableIntKey; only pre-size string map
+				// intIndex already pre-sized by tryEnableIntKey; only pre-size string table
 				if !h.useIntKey && !h.useDualIntKey {
-					h.hashIndex = make(map[string]int32, hint)
+					h.strIndex = newStrHashTable(hint)
 				}
 			}
 		}
@@ -474,19 +478,18 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 					}
 				}
 			} else {
+				if h.strIndex == nil {
+					h.strIndex = newStrHashTable(64)
+				}
 				if b.Sel != nil {
 					for _, si := range b.Sel {
-						key := h.buildKeyFromBatch(b, int(si))
-						if _, ok := h.hashIndex[key]; !ok {
-							h.hashIndex[key] = 0
-						}
+						h.buildKeyFromBatch(b, int(si))
+						h.strIndex.GetOrInsert(h.keyBuf, 0)
 					}
 				} else {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-						key := h.buildKeyFromBatch(b, rowIdx)
-						if _, ok := h.hashIndex[key]; !ok {
-							h.hashIndex[key] = 0
-						}
+						h.buildKeyFromBatch(b, rowIdx)
+						h.strIndex.GetOrInsert(h.keyBuf, 0)
 					}
 				}
 			}
@@ -590,16 +593,19 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				}
 			}
 		} else {
+			if h.strIndex == nil {
+				h.strIndex = newStrHashTable(64)
+			}
 			if b.Sel != nil {
 				for _, si := range b.Sel {
-					key := h.buildKeyFromBatch(b, int(si))
-					h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
+					h.buildKeyFromBatch(b, int(si))
+					h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
 					h.buildRows++
 				}
 			} else {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					key := h.buildKeyFromBatch(b, rowIdx)
-					h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+					h.buildKeyFromBatch(b, rowIdx)
+					h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
 			}
@@ -633,8 +639,8 @@ func (h *HashJoin) buildBloom() {
 	var nKeys int
 	if h.useIntKey || h.useDualIntKey {
 		nKeys = h.intIndex.Len()
-	} else {
-		nKeys = len(h.hashIndex)
+	} else if h.strIndex != nil {
+		nKeys = h.strIndex.Len()
 	}
 	if nKeys == 0 {
 		return
@@ -655,10 +661,10 @@ func (h *HashJoin) buildBloom() {
 		h.intIndex.ForEach(func(key int64, _ int32) {
 			h.bloomSet(bloomHashInt(key))
 		})
-	} else {
-		for key := range h.hashIndex {
-			h.bloomSet(bloomHashStr(key))
-		}
+	} else if h.strIndex != nil {
+		h.strIndex.ForEach(func(key []byte) {
+			h.bloomSet(bloomHashBytes(key))
+		})
 	}
 }
 
@@ -723,14 +729,7 @@ func bloomHashBytes(key []byte) uint64 {
 	return h ^ (h >> 32)
 }
 
-func bloomHashStr(key string) uint64 {
-	h := uint64(14695981039346656037)
-	for i := 0; i < len(key); i++ {
-		h ^= uint64(key[i])
-		h *= 16777619
-	}
-	return h ^ (h >> 32)
-}
+
 
 // spillBuildBatches writes current build batches to disk and clears in-memory state.
 // Must be called with h.mu held.
@@ -751,7 +750,7 @@ func (h *HashJoin) spillBuildBatches() error {
 	if h.useIntKey {
 		h.intIndex = newIntHashTable(64)
 	} else {
-		h.hashIndex = make(map[string]int32)
+		h.strIndex = newStrHashTable(64)
 	}
 	h.buildRows = 0
 	if h.MemTracker != nil {
@@ -786,7 +785,7 @@ func (h *HashJoin) reloadSpilledBuild() error {
 	if h.useIntKey || h.useDualIntKey {
 		h.intIndex = newIntHashTable(rowCount)
 	} else {
-		h.hashIndex = make(map[string]int32, rowCount)
+		h.strIndex = newStrHashTable(rowCount)
 	}
 	h.buildRows = 0
 	if h.MemTracker != nil {
@@ -814,8 +813,8 @@ func (h *HashJoin) reloadSpilledBuild() error {
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				key := h.buildKeyFromBatch(b, rowIdx)
-				h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				h.buildKeyFromBatch(b, rowIdx)
+				h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
 				h.buildRows++
 			}
 		}
@@ -900,9 +899,12 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 			h.buildRows++
 		}
 	} else {
+		if h.strIndex == nil {
+			h.strIndex = newStrHashTable(64)
+		}
 		for i := 0; i < b.Len; i++ {
-			key := h.buildKeyFromBatch(b, i)
-			h.arenaAppendStr(key, buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
+			h.buildKeyFromBatch(b, i)
+			h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
 	}
@@ -992,11 +994,11 @@ func (h *HashJoin) FixKeyAssignment() {
 				}
 			}
 		} else {
-			h.hashIndex = make(map[string]int32, totalBuildRows)
+			h.strIndex = newStrHashTable(totalBuildRows)
 			for batchIdx, b := range h.buildBatches {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					key := h.buildKeyFromBatch(b, rowIdx)
-					h.arenaAppendStr(key, buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
+					h.buildKeyFromBatch(b, rowIdx)
+					h.arenaAppendStr(buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
 			}
@@ -1019,9 +1021,9 @@ func (h *HashJoin) Probe() *HashJoinProbe {
 	}
 }
 
-// buildKeyFromBatch computes the hash key for a build-side row using typed serialization.
+// buildKeyFromBatch fills h.keyBuf with the serialized build-side key for a row.
 // Uses pre-resolved column indices and a reusable buffer to avoid allocations.
-func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) string {
+func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) {
 	h.keyBuf = h.keyBuf[:0]
 	for _, idx := range h.buildKeyIdx {
 		if idx < 0 {
@@ -1036,7 +1038,6 @@ func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) string {
 			h.keyBuf = appendColumnValue(h.keyBuf, v, rowIdx, v.Type)
 		}
 	}
-	return string(h.keyBuf)
 }
 
 // buildProbeKeyBuf fills h.keyBuf with the serialized probe key for a row.
@@ -1121,9 +1122,9 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
 			h.arenaMatched[idx] = true
 		}
-	} else {
+	} else if h.strIndex != nil {
 		h.buildProbeKeyBuf(in, row)
-		head, ok := h.hashIndex[string(h.keyBuf)]
+		head, ok := h.strIndex.Get(h.keyBuf)
 		if !ok {
 			return
 		}
