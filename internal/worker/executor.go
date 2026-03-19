@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -116,6 +117,8 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		err = e.executeJoin(ctx, task, &result)
 	case distributed.TaskTypeWindow:
 		err = e.executeWindow(ctx, task, &result)
+	case distributed.TaskTypeShuffle:
+		err = e.executeShuffle(ctx, task, &result)
 	default:
 		err = fmt.Errorf("unsupported task type: %s", task.Type)
 	}
@@ -572,6 +575,174 @@ func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, res
 	}
 
 	return e.writeBatchResult(ctx, task, resultBatches, result)
+}
+
+// executeShuffle hash-partitions input batches by key columns and writes
+// one output file per partition. Each output file contains only the rows
+// whose key hash maps to that partition.
+func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
+	if err != nil {
+		return err
+	}
+	if len(allBatches) == 0 {
+		return nil
+	}
+
+	numPartitions := task.NumPartitions
+	if numPartitions <= 1 {
+		numPartitions = 1
+	}
+
+	// Find key column indices in the schema
+	schema := allBatches[0].Schema
+	keyIdxs := make([]int, len(task.ShuffleKeys))
+	for i, key := range task.ShuffleKeys {
+		found := false
+		for j, col := range schema {
+			if col.Name == key {
+				keyIdxs[i] = j
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("shuffle key %q not found in schema", key)
+		}
+	}
+
+	// Accumulate per-partition batches by splitting each input batch
+	partitionBatches := make([][]*batch.RecordBatch, numPartitions)
+	for _, b := range allBatches {
+		nRows := b.ActiveLen()
+		if nRows == 0 {
+			continue
+		}
+
+		// Compute partition assignment for each row
+		partitionRows := make([][]uint16, numPartitions)
+		for ri := 0; ri < nRows; ri++ {
+			rowIdx := ri
+			if b.Sel != nil {
+				rowIdx = int(b.Sel[ri])
+			}
+
+			h := uint64(14695981039346656037) // FNV-1a offset basis
+			for _, ki := range keyIdxs {
+				vec := b.Columns[ki]
+				h = shuffleHashValue(vec, rowIdx, h)
+			}
+			pid := int(h % uint64(numPartitions))
+			partitionRows[pid] = append(partitionRows[pid], uint16(rowIdx))
+		}
+
+		// Create a batch view per partition (shares underlying vectors)
+		for pid := 0; pid < numPartitions; pid++ {
+			if len(partitionRows[pid]) == 0 {
+				continue
+			}
+			pb := &batch.RecordBatch{
+				Columns: b.Columns,
+				Schema:  b.Schema,
+				Len:     b.Len,
+				Sel:     partitionRows[pid],
+			}
+			partitionBatches[pid] = append(partitionBatches[pid], pb)
+		}
+	}
+
+	// Write per-partition result files
+	resultFiles := make([]string, numPartitions)
+	var totalRows int64
+	for pid := 0; pid < numPartitions; pid++ {
+		if len(partitionBatches[pid]) == 0 {
+			continue
+		}
+
+		data, serErr := e.serializeBatches(partitionBatches[pid])
+		if serErr != nil {
+			return fmt.Errorf("serializing partition %d: %w", pid, serErr)
+		}
+
+		partPath := fmt.Sprintf("%s%s-p%d.parquet", task.ResultPrefix, task.ID, pid)
+		_, putErr := e.store.Put(ctx, task.ResultBucket, partPath,
+			bytes.NewReader(data), int64(len(data)), "application/octet-stream")
+		if putErr != nil {
+			return fmt.Errorf("writing partition %d: %w", pid, putErr)
+		}
+
+		resultFiles[pid] = partPath
+		for _, pb := range partitionBatches[pid] {
+			totalRows += int64(pb.ActiveLen())
+		}
+	}
+
+	result.NumRows = totalRows
+	result.ResultFiles = resultFiles
+	result.ResultPath = task.ResultPrefix // signal completion
+	return nil
+}
+
+// shuffleHashValue hashes a single vector value into the running FNV-1a hash.
+func shuffleHashValue(vec *batch.Vector, idx int, h uint64) uint64 {
+	const fnvPrime = 1099511628211
+
+	if vec.Nulls.IsNull(idx) {
+		return (h ^ 0xFF) * fnvPrime // hash NULL distinctly
+	}
+
+	switch vec.Type {
+	case batch.TypeInt64:
+		v := uint64(vec.Int64Data[idx])
+		h = (h ^ (v & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 8) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 16) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 24) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 32) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 40) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 48) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 56) & 0xFF)) * fnvPrime
+	case batch.TypeInt32:
+		v := uint64(vec.Int32Data[idx])
+		h = (h ^ (v & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 8) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 16) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 24) & 0xFF)) * fnvPrime
+	case batch.TypeFloat64:
+		v := math.Float64bits(vec.Float64Data[idx])
+		h = (h ^ (v & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 8) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 16) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 24) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 32) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 40) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 48) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 56) & 0xFF)) * fnvPrime
+	case batch.TypeFloat32:
+		v := uint64(math.Float32bits(vec.Float32Data[idx]))
+		h = (h ^ (v & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 8) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 16) & 0xFF)) * fnvPrime
+		h = (h ^ ((v >> 24) & 0xFF)) * fnvPrime
+	case batch.TypeString, batch.TypeBytes:
+		b := vec.BytesData.Value(idx)
+		for _, c := range b {
+			h = (h ^ uint64(c)) * fnvPrime
+		}
+	case batch.TypeBool:
+		if vec.BoolData[idx] {
+			h = (h ^ 1) * fnvPrime
+		} else {
+			h = (h ^ 0) * fnvPrime
+		}
+	default:
+		// Fallback: hash as string
+		b := vec.BytesData.Value(idx)
+		for _, c := range b {
+			h = (h ^ uint64(c)) * fnvPrime
+		}
+	}
+	return h
 }
 
 func parseWindowFunc(s string) exec.WindowFunc {

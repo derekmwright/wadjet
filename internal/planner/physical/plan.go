@@ -62,6 +62,10 @@ type Stage struct {
 	// Window metadata
 	WindowCols []WindowColSpec
 
+	// Shuffle metadata
+	ShuffleKeys   []string // columns to hash-partition on
+	NumPartitions int      // number of output partitions (also used on join stages)
+
 	// Cost estimation (populated at plan time from manifest metadata)
 	EstimatedBytes int64
 	EstimatedRows  int64
@@ -122,6 +126,7 @@ type Planner struct {
 	scanCache      map[string]*scanCached       // cached scan results for duplicate table scans
 	spillMgr       *memory.SpillManager // shared per-query spill manager (lazy-initialized)
 	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
+	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
 }
 
 // getSpillManager returns a shared per-query spill manager, creating it on
@@ -848,8 +853,9 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, child := range node.Children {
 			p.walkStages(child, stages, &stageID)
 		}
+		isBroadcast := p.isBroadcastCandidate(node)
 		joinType := "hash_join"
-		if p.isBroadcastCandidate(node) {
+		if isBroadcast {
 			joinType = "broadcast_join"
 		}
 
@@ -873,20 +879,60 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			leftKeys, rightKeys = parseJoinKeys(node.JoinCond)
 		}
 
+		// Insert shuffle stages for non-broadcast joins when distributed
+		numPartitions := 0
+		if !isBroadcast && jt != "cross" && len(leftKeys) > 0 && p.WorkerCount > 1 {
+			numPartitions = p.WorkerCount
+			if numPartitions < 2 {
+				numPartitions = 4
+			}
+
+			// Left (probe) side shuffle
+			leftShuffleID := fmt.Sprintf("shuffle-%d", len(*stages))
+			*stages = append(*stages, Stage{
+				ID:            leftShuffleID,
+				Type:          "shuffle",
+				Tasks:         1,
+				ShuffleKeys:   leftKeys,
+				NumPartitions: numPartitions,
+				Dependencies:  []string{leftDep},
+			})
+
+			// Right (build) side shuffle
+			rightShuffleID := fmt.Sprintf("shuffle-%d", len(*stages))
+			*stages = append(*stages, Stage{
+				ID:            rightShuffleID,
+				Type:          "shuffle",
+				Tasks:         1,
+				ShuffleKeys:   rightKeys,
+				NumPartitions: numPartitions,
+				Dependencies:  []string{rightDep},
+			})
+
+			leftDep = leftShuffleID
+			rightDep = rightShuffleID
+		}
+
+		joinTasks := 1
+		if numPartitions > 0 {
+			joinTasks = numPartitions
+		}
 		stage := Stage{
 			ID:            stageID,
 			Type:          joinType,
-			Tasks:         1,
+			Tasks:         joinTasks,
 			JoinType:      jt,
 			JoinLeftKeys:  leftKeys,
 			JoinRightKeys: rightKeys,
 			LeftDepStage:  leftDep,
 			RightDepStage: rightDep,
+			NumPartitions: numPartitions,
 		}
-		for _, s := range *stages {
-			if s.Type == "scan" {
-				stage.Dependencies = append(stage.Dependencies, s.ID)
-			}
+		if leftDep != "" {
+			stage.Dependencies = append(stage.Dependencies, leftDep)
+		}
+		if rightDep != "" {
+			stage.Dependencies = append(stage.Dependencies, rightDep)
 		}
 		*stages = append(*stages, stage)
 

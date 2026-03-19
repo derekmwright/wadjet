@@ -2,6 +2,7 @@ package physical
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/planner/logical"
@@ -476,5 +477,161 @@ func TestScanStage_TableNameAndFiles(t *testing.T) {
 	}
 	if s.Tasks != 1 {
 		t.Errorf("expected 1 task (one file), got %d", s.Tasks)
+	}
+}
+
+func TestPlanDistributed_ShuffleJoin(t *testing.T) {
+	cat, ctx := setupCatalogWithUsers(t)
+	planner := NewPlanner(cat)
+	planner.WorkerCount = 4 // enables shuffle stages
+
+	left := logical.NewScan("events", "e")
+	right := logical.NewScan("users", "u")
+	join := logical.NewJoin(left, right, "inner", "e.user_id = u.user_id")
+
+	stages, err := planner.PlanDistributed(ctx, join)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+
+	// users has only 1 file → isBroadcastCandidate returns true
+	// → no shuffles needed, join is broadcast_join with 1 task
+	var hasBroadcast bool
+	for _, s := range stages {
+		if s.Type == "broadcast_join" {
+			hasBroadcast = true
+		}
+	}
+	if !hasBroadcast {
+		t.Fatal("expected broadcast_join for small right-side table")
+	}
+
+	// Verify no shuffle stages were created for broadcast
+	for _, s := range stages {
+		if s.Type == "shuffle" {
+			t.Errorf("broadcast join should not have shuffle stages, found %s", s.ID)
+		}
+	}
+}
+
+// setupCatalogWithLargeTables creates two tables with many files so both
+// sides exceed the broadcast threshold and trigger shuffle stages.
+func setupCatalogWithLargeTables(t *testing.T) (*catalog.Catalog, context.Context) {
+	t.Helper()
+	ctx := context.Background()
+
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("catalog init: %v", err)
+	}
+
+	ordersSchema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "o_orderkey", Type: parquet.TypeInt64},
+			{Name: "o_custkey", Type: parquet.TypeInt64},
+		},
+	}
+	if err := cat.CreateTable(ctx, "orders", ordersSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	orderFiles := make([]catalog.FileEntry, 20)
+	for i := range orderFiles {
+		orderFiles[i] = catalog.FileEntry{
+			Path: fmt.Sprintf("tables/orders/chunk_%03d.parquet", i),
+			SizeBytes: 10 * 1024 * 1024,
+			NumRows:   100000,
+		}
+	}
+	if err := cat.AddFiles(ctx, "orders", map[string]string{}, "tables/orders/", orderFiles); err != nil {
+		t.Fatal(err)
+	}
+
+	lineitemSchema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "l_orderkey", Type: parquet.TypeInt64},
+			{Name: "l_quantity", Type: parquet.TypeFloat64},
+		},
+	}
+	if err := cat.CreateTable(ctx, "lineitem", lineitemSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	liFiles := make([]catalog.FileEntry, 100)
+	for i := range liFiles {
+		liFiles[i] = catalog.FileEntry{
+			Path: fmt.Sprintf("tables/lineitem/chunk_%03d.parquet", i),
+			SizeBytes: 10 * 1024 * 1024,
+			NumRows:   500000,
+		}
+	}
+	if err := cat.AddFiles(ctx, "lineitem", map[string]string{}, "tables/lineitem/", liFiles); err != nil {
+		t.Fatal(err)
+	}
+
+	return cat, ctx
+}
+
+func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
+	cat, ctx := setupCatalogWithLargeTables(t)
+	planner := NewPlanner(cat)
+	planner.WorkerCount = 4
+
+	left := logical.NewScan("lineitem", "l")
+	right := logical.NewScan("orders", "o")
+	join := logical.NewJoin(left, right, "inner", "l.l_orderkey = o.o_orderkey")
+
+	stages, err := planner.PlanDistributed(ctx, join)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+
+	var shuffles, joins []Stage
+	for _, s := range stages {
+		switch s.Type {
+		case "shuffle":
+			shuffles = append(shuffles, s)
+		case "hash_join":
+			joins = append(joins, s)
+		}
+	}
+
+	// Both tables are large (>10 files each), so expect 2 shuffle stages
+	if len(shuffles) != 2 {
+		t.Fatalf("expected 2 shuffle stages, got %d", len(shuffles))
+	}
+	if len(joins) != 1 {
+		t.Fatalf("expected 1 join stage, got %d", len(joins))
+	}
+
+	// Verify shuffle properties
+	for _, s := range shuffles {
+		if s.NumPartitions != 4 {
+			t.Errorf("shuffle %s: expected 4 partitions, got %d", s.ID, s.NumPartitions)
+		}
+		if len(s.ShuffleKeys) == 0 {
+			t.Errorf("shuffle %s: no shuffle keys", s.ID)
+		}
+	}
+
+	// Verify join stage is partitioned
+	js := joins[0]
+	if js.NumPartitions != 4 {
+		t.Errorf("join: expected 4 partitions, got %d", js.NumPartitions)
+	}
+	if js.Tasks != 4 {
+		t.Errorf("join: expected 4 tasks, got %d", js.Tasks)
+	}
+	// Join should depend on shuffle stages, not scan stages
+	for _, dep := range js.Dependencies {
+		found := false
+		for _, s := range shuffles {
+			if s.ID == dep {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("join dependency %q is not a shuffle stage", dep)
+		}
 	}
 }

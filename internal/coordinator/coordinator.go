@@ -274,6 +274,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 
 	// Generate distributed stages
 	planner := physical.NewPlanner(c.catalog)
+	planner.WorkerCount = c.workers.Count()
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return nil, fmt.Errorf("physical plan: %w", err)
@@ -391,6 +392,8 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 		tasks = c.createSortTasks(queryID, stage, resultPrefix, depResults)
 	case "merge_sort":
 		tasks = c.createMergeSortTasks(queryID, stage, resultPrefix, depResults)
+	case "shuffle":
+		tasks = c.createShuffleTasks(queryID, stage, resultPrefix, depResults)
 	case "hash_join", "broadcast_join":
 		tasks = c.createJoinTasks(queryID, stage, resultPrefix, depResults)
 	case "window":
@@ -687,7 +690,80 @@ func (c *Coordinator) createMergeSortTasks(queryID string, stage physical.Stage,
 	}}
 }
 
+func (c *Coordinator) createShuffleTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
+	var inputFiles []string
+	for _, depID := range stage.Dependencies {
+		inputFiles = append(inputFiles, depResults[depID]...)
+	}
+
+	// Also collect ResultFiles from shuffle dependencies (partition outputs)
+	info := c.tracker.Get(queryID)
+	if info != nil {
+		for _, depID := range stage.Dependencies {
+			if depStage, ok := info.Stages[depID]; ok {
+				for _, r := range depStage.Results {
+					if r.Success {
+						inputFiles = append(inputFiles, r.ResultFiles...)
+					}
+				}
+			}
+		}
+	}
+
+	if len(inputFiles) == 0 {
+		return []distributed.Task{{
+			ID:            uuid.New().String()[:8],
+			QueryID:       queryID,
+			StageID:       stage.ID,
+			Type:          distributed.TaskTypeShuffle,
+			ShuffleKeys:   stage.ShuffleKeys,
+			NumPartitions: stage.NumPartitions,
+			ResultBucket:  c.config.ResultBucket,
+			ResultPrefix:  resultPrefix,
+			CreatedAt:     time.Now(),
+		}}
+	}
+
+	// Split input files across multiple shuffle tasks (one per worker)
+	workerCount := c.workers.Count()
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	numTasks := workerCount
+	if numTasks > len(inputFiles) {
+		numTasks = len(inputFiles)
+	}
+
+	tasks := make([]distributed.Task, numTasks)
+	for i := range tasks {
+		tasks[i] = distributed.Task{
+			ID:            uuid.New().String()[:8],
+			QueryID:       queryID,
+			StageID:       stage.ID,
+			Type:          distributed.TaskTypeShuffle,
+			ShuffleKeys:   stage.ShuffleKeys,
+			NumPartitions: stage.NumPartitions,
+			ResultBucket:  c.config.ResultBucket,
+			ResultPrefix:  resultPrefix,
+			CreatedAt:     time.Now(),
+		}
+	}
+
+	// Round-robin distribute files across tasks
+	for i, f := range inputFiles {
+		idx := i % numTasks
+		tasks[idx].InputFiles = append(tasks[idx].InputFiles, f)
+	}
+
+	return tasks
+}
+
 func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
+	// Partitioned join: one task per partition, routed by shuffle output
+	if stage.NumPartitions > 1 {
+		return c.createPartitionedJoinTasks(queryID, stage, resultPrefix)
+	}
+
 	var probeFiles, buildFiles []string
 	if stage.LeftDepStage != "" {
 		probeFiles = depResults[stage.LeftDepStage]
@@ -710,6 +786,58 @@ func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resu
 		ResultPrefix:  resultPrefix,
 		CreatedAt:     time.Now(),
 	}}
+}
+
+// createPartitionedJoinTasks creates one join task per partition. Each task
+// receives only the shuffle output files for its partition from both sides.
+func (c *Coordinator) createPartitionedJoinTasks(queryID string, stage physical.Stage, resultPrefix string) []distributed.Task {
+	leftParts := c.collectShufflePartitions(queryID, stage.LeftDepStage, stage.NumPartitions)
+	rightParts := c.collectShufflePartitions(queryID, stage.RightDepStage, stage.NumPartitions)
+
+	tasks := make([]distributed.Task, 0, stage.NumPartitions)
+	for pid := 0; pid < stage.NumPartitions; pid++ {
+		tasks = append(tasks, distributed.Task{
+			ID:            fmt.Sprintf("%s-p%d", uuid.New().String()[:8], pid),
+			QueryID:       queryID,
+			StageID:       stage.ID,
+			Type:          distributed.TaskTypeJoin,
+			JoinType:      stage.JoinType,
+			JoinLeftKeys:  stage.JoinLeftKeys,
+			JoinRightKeys: stage.JoinRightKeys,
+			InputFiles:    leftParts[pid],
+			BuildFiles:    rightParts[pid],
+			PartitionID:   pid,
+			ResultBucket:  c.config.ResultBucket,
+			ResultPrefix:  resultPrefix,
+			CreatedAt:     time.Now(),
+		})
+	}
+	return tasks
+}
+
+// collectShufflePartitions gathers per-partition file paths from a completed
+// shuffle stage. Shuffle tasks report ResultFiles indexed by partition ID.
+func (c *Coordinator) collectShufflePartitions(queryID, stageID string, numPartitions int) map[int][]string {
+	partFiles := make(map[int][]string, numPartitions)
+	info := c.tracker.Get(queryID)
+	if info == nil {
+		return partFiles
+	}
+	stage, ok := info.Stages[stageID]
+	if !ok {
+		return partFiles
+	}
+	for _, r := range stage.Results {
+		if !r.Success || len(r.ResultFiles) == 0 {
+			continue
+		}
+		for pid, path := range r.ResultFiles {
+			if path != "" {
+				partFiles[pid] = append(partFiles[pid], path)
+			}
+		}
+	}
+	return partFiles
 }
 
 func (c *Coordinator) createWindowTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {

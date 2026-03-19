@@ -9,6 +9,7 @@ const (
 	SubjectTasksJoin      = "wadjet.tasks.join"
 	SubjectTasksSort      = "wadjet.tasks.sort"
 	SubjectTasksWindow    = "wadjet.tasks.window"
+	SubjectTasksShuffle   = "wadjet.tasks.shuffle"
 	SubjectTasksAll       = "wadjet.tasks.>"
 
 	// Result notifications — JetStream Interest retention

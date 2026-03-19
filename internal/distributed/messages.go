@@ -16,6 +16,7 @@ const (
 	TaskTypeJoin      TaskType = "join"
 	TaskTypeSort      TaskType = "sort"
 	TaskTypeWindow    TaskType = "window"
+	TaskTypeShuffle   TaskType = "shuffle"
 )
 
 // Task is the unit of distributed work published to NATS JetStream.
@@ -50,6 +51,11 @@ type Task struct {
 
 	// Window-specific
 	WindowCols []WindowColSpec `json:"window_cols,omitempty"`
+
+	// Shuffle-specific
+	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`    // columns to hash-partition on
+	NumPartitions int      `json:"num_partitions,omitempty"`  // number of output partitions
+	PartitionID   int      `json:"partition_id,omitempty"`    // which partition this join task handles
 
 	// Identity context (for access control enforcement at workers)
 	IdentityName string `json:"identity_name,omitempty"`
@@ -97,9 +103,10 @@ type ResultNotification struct {
 	Error     string `json:"error,omitempty"`
 
 	// Result location
-	ResultPath string `json:"result_path,omitempty"`
-	NumRows    int64  `json:"num_rows"`
-	SizeBytes  int64  `json:"size_bytes"`
+	ResultPath  string   `json:"result_path,omitempty"`
+	ResultFiles []string `json:"result_files,omitempty"` // multi-file output (e.g., shuffle per-partition files)
+	NumRows     int64    `json:"num_rows"`
+	SizeBytes   int64    `json:"size_bytes"`
 
 	// Small result fast path (< 256 KB): inline result data
 	InlineData []byte `json:"inline_data,omitempty"`
