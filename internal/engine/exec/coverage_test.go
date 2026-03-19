@@ -1266,3 +1266,65 @@ func TestCopyVectorValueTypes(t *testing.T) {
 		})
 	}
 }
+
+func TestIntHashTablePreSizing(t *testing.T) {
+	// Pre-sized table should not need any grow() calls
+	n := 100000
+	ht := newIntHashTable(n)
+	initialCap := len(ht.keys)
+
+	for i := 0; i < n; i++ {
+		ht.Put(int64(i), int32(i))
+	}
+
+	if len(ht.keys) != initialCap {
+		t.Errorf("hash table grew from %d to %d with %d entries (pre-sized for %d)",
+			initialCap, len(ht.keys), n, n)
+	}
+	if ht.Len() != n {
+		t.Errorf("expected %d entries, got %d", n, ht.Len())
+	}
+
+	// Verify lookups work
+	for i := 0; i < n; i++ {
+		val, ok := ht.Get(int64(i))
+		if !ok || val != int32(i) {
+			t.Fatalf("Get(%d) = (%d, %v), want (%d, true)", i, val, ok, i)
+		}
+	}
+}
+
+func TestHashJoinPreSizedFromHint(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeFloat64},
+	}
+
+	n := 10000
+	rows := make([]map[string]any, n)
+	for i := range rows {
+		rows[i] = map[string]any{"id": int64(i), "val": float64(i)}
+	}
+
+	hj := &HashJoin{
+		LeftKeys:     []string{"id"},
+		RightKeys:    []string{"id"},
+		BuildRowHint: int64(n),
+	}
+	hj.BuildFromRows(schema, rows)
+
+	// Verify the int fast path was used and all rows are present
+	if !hj.useIntKey {
+		t.Fatal("expected int key fast path")
+	}
+	if hj.buildRows != int64(n) {
+		t.Errorf("buildRows = %d, want %d", hj.buildRows, n)
+	}
+	// Verify we can look up all keys
+	for i := 0; i < n; i++ {
+		_, ok := hj.intIndex.Get(int64(i))
+		if !ok {
+			t.Fatalf("key %d not found", i)
+		}
+	}
+}

@@ -162,12 +162,17 @@ func intKeyFromVector(v *batch.Vector, row int) (int64, bool) {
 
 // tryEnableIntKey checks if the join uses a single integer column and enables
 // the int64 hash fast path, avoiding string allocation per build/probe row.
+// sizeHint is used to pre-size the hash table (0 = default 64).
 func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
+	hint := 64
+	if h.BuildRowHint > 0 {
+		hint = int(h.BuildRowHint)
+	}
 	if len(h.buildKeyIdx) == 1 && h.buildKeyIdx[0] >= 0 {
 		col := b.Columns[h.buildKeyIdx[0]]
 		if isIntKeyColumn(col.Type) {
 			h.useIntKey = true
-			h.intIndex = newIntHashTable(64)
+			h.intIndex = newIntHashTable(hint)
 			h.hashIndex = nil
 			return
 		}
@@ -180,7 +185,7 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 		col1 := b.Columns[h.buildKeyIdx[1]]
 		if isIntKeyColumn(col0.Type) && isIntKeyColumn(col1.Type) {
 			h.useDualIntKey = true
-			h.intIndex = newIntHashTable(64)
+			h.intIndex = newIntHashTable(hint)
 			h.hashIndex = nil
 		}
 	}
@@ -406,9 +411,8 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				hint := int(h.BuildRowHint)
 				h.arena = make([]buildRef, 0, hint)
 				h.arenaNext = make([]int32, 0, hint)
-				if h.useIntKey || h.useDualIntKey {
-					h.intIndex = newIntHashTable(hint)
-				} else {
+				// intIndex already pre-sized by tryEnableIntKey; only pre-size string map
+				if !h.useIntKey && !h.useDualIntKey {
 					h.hashIndex = make(map[string]int32, hint)
 				}
 			}
@@ -745,14 +749,15 @@ func (h *HashJoin) reloadSpilledBuild() error {
 	}
 	h.spillFiles = nil
 
-	// Rebuild from all rows
+	// Rebuild from all rows with pre-sized hash table
 	h.buildBatches = nil
 	h.arena = h.arena[:0]
 	h.arenaNext = h.arenaNext[:0]
-	if h.useIntKey {
-		h.intIndex = newIntHashTable(64)
+	rowCount := len(allRows)
+	if h.useIntKey || h.useDualIntKey {
+		h.intIndex = newIntHashTable(rowCount)
 	} else {
-		h.hashIndex = make(map[string]int32)
+		h.hashIndex = make(map[string]int32, rowCount)
 	}
 	h.buildRows = 0
 	if h.MemTracker != nil {
@@ -926,8 +931,13 @@ func (h *HashJoin) FixKeyAssignment() {
 		h.buildRows = 0
 		h.arena = h.arena[:0]
 		h.arenaNext = h.arenaNext[:0]
+		// Count total rows across build batches for pre-sizing
+		totalBuildRows := 0
+		for _, b := range h.buildBatches {
+			totalBuildRows += b.Len
+		}
 		if h.useIntKey {
-			h.intIndex = newIntHashTable(64)
+			h.intIndex = newIntHashTable(totalBuildRows)
 			for batchIdx, b := range h.buildBatches {
 				col := b.Columns[h.buildKeyIdx[0]]
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -940,7 +950,7 @@ func (h *HashJoin) FixKeyAssignment() {
 				}
 			}
 		} else if h.useDualIntKey {
-			h.intIndex = newIntHashTable(64)
+			h.intIndex = newIntHashTable(totalBuildRows)
 			for batchIdx, b := range h.buildBatches {
 				col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -953,7 +963,7 @@ func (h *HashJoin) FixKeyAssignment() {
 				}
 			}
 		} else {
-			h.hashIndex = make(map[string]int32)
+			h.hashIndex = make(map[string]int32, totalBuildRows)
 			for batchIdx, b := range h.buildBatches {
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 					key := h.buildKeyFromBatch(b, rowIdx)
