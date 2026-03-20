@@ -1698,6 +1698,91 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 		}
 	}
 
+	// Fast path: int-key semi/anti WITH filter — inline hash lookup + chain walk.
+	// Avoids lookupBuild overhead and intermediate slice; breaks early on first
+	// filter match instead of collecting all candidates.
+	if h.useIntKey && hasFilter {
+		h.resolveProbeKeyIdx(in)
+		keyIdx := h.probeKeyIdx[0]
+		if keyIdx >= 0 {
+			keyCol := in.Columns[keyIdx]
+			hasNulls := keyCol.Nulls.HasNulls()
+			isInt32 := keyCol.Type == batch.TypeInt32 || keyCol.Type == batch.TypePort ||
+				keyCol.Type == batch.TypeProtocol || keyCol.Type == batch.TypeDate
+			hasBloom := h.bloom != nil
+
+			// Pre-cache hash table internals for inline lookup
+			htKeys := h.intIndex.keys
+			htMask := h.intIndex.mask
+			htVals := h.intIndex.vals
+			arena := h.arena
+			arenaNext := h.arenaNext
+			buildBatches := h.buildBatches
+			filter := h.SemiAntiFilter
+
+			checkRow := func(row int) {
+				if hasNulls && keyCol.Nulls.IsNullFast(row) {
+					if !isSemi {
+						sel = append(sel, uint16(row))
+					}
+					return
+				}
+				var key int64
+				if isInt32 {
+					key = int64(keyCol.Int32Data[row])
+				} else {
+					key = keyCol.Int64Data[row]
+				}
+				if hasBloom && !h.bloomMayContain(bloomHashInt(key)) {
+					if !isSemi {
+						sel = append(sel, uint16(row))
+					}
+					return
+				}
+				// Inline intIndex.Get: fibHash + linear probe
+				htIdx := fibHash(key) & htMask
+				for {
+					k := htKeys[htIdx]
+					if k == intHashEmpty {
+						// Key not in table — no match possible
+						if !isSemi {
+							sel = append(sel, uint16(row))
+						}
+						return
+					}
+					if k == key {
+						break
+					}
+					htIdx = (htIdx + 1) & htMask
+				}
+				// Key found — walk chain and evaluate filter, break on first match
+				var hasMatch bool
+				for ai := htVals[htIdx]; ai >= 0; ai = arenaNext[ai] {
+					ref := arena[ai]
+					if filter(in, row, buildBatches[ref.batchIdx], int(ref.rowIdx)) {
+						hasMatch = true
+						break
+					}
+				}
+				emit := (isSemi && hasMatch) || (!isSemi && !hasMatch)
+				if emit {
+					sel = append(sel, uint16(row))
+				}
+			}
+
+			if in.Sel != nil {
+				for _, idx := range in.Sel {
+					checkRow(int(idx))
+				}
+			} else {
+				for i := 0; i < in.Len; i++ {
+					checkRow(i)
+				}
+			}
+			goto done
+		}
+	}
+
 	// General path: uses existence-only check when no filter is set
 	{
 		checkRow := func(row int) {

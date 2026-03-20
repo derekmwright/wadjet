@@ -1607,6 +1607,16 @@ func collectPlanColumnsRec(n *logical.Node, result map[string]bool) {
 			result[strings.ToLower(col)] = true
 		}
 	}
+	// Semi/anti joins only output probe-side (child[0]) columns.
+	// Skip build side so fixJoinKeyOrder doesn't see build-only columns
+	// as available from this subtree.
+	if n.Type == logical.NodeJoin && len(n.Children) == 2 {
+		jt := strings.ToLower(n.JoinType)
+		if jt == "semi" || jt == "anti" {
+			collectPlanColumnsRec(n.Children[0], result)
+			return
+		}
+	}
 	for _, child := range n.Children {
 		collectPlanColumnsRec(child, result)
 	}
