@@ -74,6 +74,7 @@ type HashAggregate struct {
 	Aggs          []AggColumn
 	Spill         *memory.SpillManager // optional: enables spill-to-disk
 	NullGroupCols []string             // GROUPING SETS: columns to output as NULL
+	InputRowHint  int64                // estimated input rows for pre-sizing hash table
 
 	mu            sync.Mutex
 	keys          [][]any
@@ -133,6 +134,7 @@ type HashAggregate struct {
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles    []string
 	outputPos     int              // position in keys for batched Next() output
+	gsPool        groupStatePool   // chunk allocator for groupState (reduces GC pressure)
 }
 
 type groupState struct {
@@ -141,6 +143,28 @@ type groupState struct {
 	accs         []kernel.Accumulator
 	distinctSets []map[string]struct{} // per-agg distinct value sets (nil if not COUNT(DISTINCT))
 	extraState   []any                 // per-agg custom state (string_agg builder, variance state, etc.)
+}
+
+// groupStatePool allocates groupState objects in contiguous chunks to reduce
+// heap allocations and GC pressure. With per-object allocation, 1.5M groups
+// at SF1 create 1.5M heap objects; with chunk allocation, they create ~366.
+// Each chunk is a single contiguous array; pointers into it remain valid
+// because new chunks don't move old ones.
+type groupStatePool struct {
+	chunks [][]groupState
+	pos    int // position within current chunk
+}
+
+const groupStateChunkSize = 4096
+
+func (p *groupStatePool) alloc() *groupState {
+	if len(p.chunks) == 0 || p.pos >= len(p.chunks[len(p.chunks)-1]) {
+		p.chunks = append(p.chunks, make([]groupState, groupStateChunkSize))
+		p.pos = 0
+	}
+	gs := &p.chunks[len(p.chunks)-1][p.pos]
+	p.pos++
+	return gs
 }
 
 // stringAggState accumulates strings with a separator.
@@ -370,6 +394,20 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 	}
 
+	// Pre-sizing hint: use InputRowHint to estimate initial hash table capacity.
+	// Use inputRows/8 capped at 256K — conservative to avoid over-allocating
+	// for low-cardinality GROUP BY (Q1: 6M rows → 4 groups) while still
+	// reducing growth for high-cardinality (Q18: 6M rows → 1.5M groups).
+	// At 256K initial, Q18 grows from 256K → 1.5M in ~3 doublings vs 9.
+	htInitSize := 4096
+	if h.InputRowHint > int64(htInitSize)*8 {
+		est := int(h.InputRowHint / 8)
+		if est > 256*1024 {
+			est = 256 * 1024
+		}
+		htInitSize = est
+	}
+
 	// Single-column integer GROUP BY fast path:
 	// Use intHashTable when grouping by one integer-typed column.
 	if len(h.GroupByCols) == 1 && h.groupColIdx[0] >= 0 {
@@ -379,7 +417,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			typ == batch.TypeInt32 || typ == batch.TypePort || typ == batch.TypeProtocol || typ == batch.TypeDate
 		if isIntType && allSimpleAggs {
 			h.useIntGroupKey = true
-			h.intGroupIndex = newIntHashTable(4096)
+			h.intGroupIndex = newIntHashTable(htInitSize)
 			h.intGroupKeyCol = h.groupColIdx[0]
 			if h.intFlatAccs == nil {
 				h.initFlatAccums(b)
@@ -397,7 +435,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			if isAggIntType(typ0) && isAggIntType(typ1) {
 				h.useDualIntGroupKey = true
 				h.dualIntGroupKeyCols = [2]int{idx0, idx1}
-				h.intGroupIndex = newIntHashTable(4096)
+				h.intGroupIndex = newIntHashTable(htInitSize)
 				if h.intFlatAccs == nil {
 					h.initFlatAccums(b)
 				}
@@ -427,7 +465,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 		if canCompact && estimatedWidth <= 8 {
 			h.useCompactGroupKey = true
-			h.intGroupIndex = newIntHashTable(4096)
+			h.intGroupIndex = newIntHashTable(htInitSize)
 		}
 	}
 
@@ -581,7 +619,9 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			} else {
 				newIdx := int32(len(h.intGroupStates))
 				intIdx.Put(key, newIdx)
-				h.intGroupStates = append(h.intGroupStates, &groupState{intKey: key})
+				gs := h.gsPool.alloc()
+				gs.intKey = key
+				h.intGroupStates = append(h.intGroupStates, gs)
 				for ai := range h.intFlatAccs {
 					h.intFlatAccs[ai].appendGroup()
 				}
@@ -609,7 +649,9 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			} else {
 				newIdx := int32(len(h.intGroupStates))
 				intIdx.Put(key, newIdx)
-				h.intGroupStates = append(h.intGroupStates, &groupState{intKey: key})
+				gs := h.gsPool.alloc()
+				gs.intKey = key
+				h.intGroupStates = append(h.intGroupStates, gs)
 				for ai := range h.intFlatAccs {
 					h.intFlatAccs[ai].appendGroup()
 				}
@@ -696,7 +738,7 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 			}
 			// Collision: new group, chain to existing head
 			newIdx := int32(len(h.intGroupStates))
-			h.intGroupStates = append(h.intGroupStates, &groupState{})
+			h.intGroupStates = append(h.intGroupStates, h.gsPool.alloc())
 			h.dualIntKeysA = append(h.dualIntKeysA, a)
 			h.dualIntKeysB = append(h.dualIntKeysB, b)
 			h.dualIntNextGroup = append(h.dualIntNextGroup, head)
@@ -708,7 +750,7 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 		}
 		// New composite key
 		newIdx := int32(len(h.intGroupStates))
-		h.intGroupStates = append(h.intGroupStates, &groupState{})
+		h.intGroupStates = append(h.intGroupStates, h.gsPool.alloc())
 		h.dualIntKeysA = append(h.dualIntKeysA, a)
 		h.dualIntKeysB = append(h.dualIntKeysB, b)
 		h.dualIntNextGroup = append(h.dualIntNextGroup, -1)
@@ -851,10 +893,9 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 			}
 		}
 		// useCompactGroupKey requires allSimpleAggs — skip distinctSets/extraState.
-		gs := &groupState{
-			keyValues: keyVals,
-			accs:      make([]kernel.Accumulator, len(h.Aggs)),
-		}
+		gs := h.gsPool.alloc()
+		gs.keyValues = keyVals
+		gs.accs = make([]kernel.Accumulator, len(h.Aggs))
 
 		newIdx := int32(len(h.intGroupStates))
 		h.intGroupIndex.Put(key, newIdx)
@@ -934,7 +975,9 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				gi[si] = gsIdx
 			} else {
 				keyStr := string(key)
-				h.strGroupStates = append(h.strGroupStates, &groupState{keyValues: []any{keyStr}})
+				gs := h.gsPool.alloc()
+				gs.keyValues = []any{keyStr}
+				h.strGroupStates = append(h.strGroupStates, gs)
 				h.keys = append(h.keys, []any{keyStr})
 				h.serializedKeys = append(h.serializedKeys, keyStr)
 				for ai := range h.intFlatAccs {
@@ -958,7 +1001,9 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				gi[row] = gsIdx
 			} else {
 				keyStr := string(key)
-				h.strGroupStates = append(h.strGroupStates, &groupState{keyValues: []any{keyStr}})
+				gs := h.gsPool.alloc()
+				gs.keyValues = []any{keyStr}
+				h.strGroupStates = append(h.strGroupStates, gs)
 				h.keys = append(h.keys, []any{keyStr})
 				h.serializedKeys = append(h.serializedKeys, keyStr)
 				for ai := range h.intFlatAccs {
@@ -1056,10 +1101,9 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 			keyVals[i] = b.Columns[idx].GetValue(row)
 		}
 	}
-	gs := &groupState{
-		keyValues: keyVals,
-		accs:      make([]kernel.Accumulator, len(h.Aggs)),
-	}
+	gs := h.gsPool.alloc()
+	gs.keyValues = keyVals
+	gs.accs = make([]kernel.Accumulator, len(h.Aggs))
 	if h.needsDistinct {
 		gs.distinctSets = make([]map[string]struct{}, len(h.Aggs))
 	}
@@ -2157,7 +2201,14 @@ func vecToFloat64(v *batch.Vector, row int) float64 {
 func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	nAggs := len(h.Aggs)
 	h.intFlatAccs = make([]flatAccumArrays, nAggs)
-	initCap := 4096 // matches initial intHashTable size
+	initCap := 4096
+	if h.InputRowHint > int64(initCap)*8 {
+		est := int(h.InputRowHint / 8)
+		if est > 256*1024 {
+			est = 256 * 1024
+		}
+		initCap = est
+	}
 
 	for i, agg := range h.Aggs {
 		fa := &h.intFlatAccs[i]

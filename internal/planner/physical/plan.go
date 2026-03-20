@@ -1965,6 +1965,9 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 	}
 
 	hashAgg := exec.NewHashAggregate(groupByCols, aggCols)
+	if est := findScanRowEstimate(node.Children[0]); est > 0 {
+		hashAgg.InputRowHint = est
+	}
 	if sm := p.getSpillManager(); sm != nil {
 		hashAgg.Spill = sm
 	}

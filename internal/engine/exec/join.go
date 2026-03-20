@@ -774,9 +774,18 @@ func (h *HashJoin) reloadSpilledBuild() error {
 
 	// Rebuild from all rows with pre-sized hash table
 	h.buildBatches = nil
-	h.arena = h.arena[:0]
-	h.arenaNext = h.arenaNext[:0]
 	rowCount := len(allRows)
+	// Pre-allocate arena to avoid slice growth during rebuild
+	if cap(h.arena) < rowCount {
+		h.arena = make([]buildRef, 0, rowCount)
+	} else {
+		h.arena = h.arena[:0]
+	}
+	if cap(h.arenaNext) < rowCount {
+		h.arenaNext = make([]int32, 0, rowCount)
+	} else {
+		h.arenaNext = h.arenaNext[:0]
+	}
 	if h.useIntKey || h.useDualIntKey {
 		h.intIndex = newIntHashTable(rowCount)
 	} else {
@@ -955,12 +964,21 @@ func (h *HashJoin) FixKeyAssignment() {
 			h.tryEnableIntKey(b)
 		}
 		h.buildRows = 0
-		h.arena = h.arena[:0]
-		h.arenaNext = h.arenaNext[:0]
 		// Count total rows across build batches for pre-sizing
 		totalBuildRows := 0
 		for _, b := range h.buildBatches {
 			totalBuildRows += b.Len
+		}
+		// Pre-allocate arena and arenaNext to avoid slice growth during build
+		if cap(h.arena) < totalBuildRows {
+			h.arena = make([]buildRef, 0, totalBuildRows)
+		} else {
+			h.arena = h.arena[:0]
+		}
+		if cap(h.arenaNext) < totalBuildRows {
+			h.arenaNext = make([]int32, 0, totalBuildRows)
+		} else {
+			h.arenaNext = h.arenaNext[:0]
 		}
 		if h.useIntKey {
 			h.intIndex = newIntHashTable(totalBuildRows)
