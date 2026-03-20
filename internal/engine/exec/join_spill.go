@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -59,6 +60,7 @@ type spillState struct {
 	// Probe-side: per-partition buffered batches (flushed to disk files)
 	partProbeFiles   map[int][]string
 	partProbeWriters map[int]*spillBatchWriter
+	probeMu          sync.Mutex // protects partProbeWriters during parallel probe
 
 	// Track memory per partition for choosing what to spill
 	partMemory map[int]int64
@@ -116,7 +118,10 @@ func (s *spillState) spillBuildPartition(partID int) (int64, error) {
 }
 
 // writeProbeRow buffers a probe batch for a spilled partition.
+// Thread-safe: called concurrently from parallel pipeline workers.
 func (s *spillState) writeProbeRow(partID int, b *batch.RecordBatch) error {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
 	w, ok := s.partProbeWriters[partID]
 	if !ok {
 		var err error
@@ -1071,6 +1076,7 @@ func compactBatchForRows(in *batch.RecordBatch, rows []int) *batch.RecordBatch {
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
+					dst.BytesData.Set(di, nil) // maintain offset continuity
 				} else {
 					dst.BytesData.Set(di, col.BytesData.Value(si))
 				}

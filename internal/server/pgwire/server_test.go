@@ -428,6 +428,23 @@ func TestPGWireShowTables(t *testing.T) {
 	client.terminate()
 }
 
+func TestPGWireShowColumns(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	columns, rows, tag := client.simpleQuery("SHOW COLUMNS FROM users")
+	t.Logf("SHOW COLUMNS FROM users: columns=%v rows=%v tag=%s", columns, rows, tag)
+
+	if len(rows) < 3 {
+		t.Errorf("expected at least 3 columns for users table, got %d rows", len(rows))
+	}
+
+	client.terminate()
+}
+
 func TestPGWireConcurrentConnections(t *testing.T) {
 	db := setupTestDB(t)
 	srv := startTestServer(t, db)

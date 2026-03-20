@@ -822,6 +822,10 @@ func (c *pgConn) handleShow(upper string) bool {
 			"DateStyle": "ISO, MDY",
 		})
 	default:
+		// SHOW TABLES, SHOW COLUMNS FROM, etc. are handled by the query engine.
+		if strings.HasPrefix(upper, "SHOW TABLES") || strings.HasPrefix(upper, "SHOW COLUMNS ") {
+			return false
+		}
 		// Unknown SHOW — return empty
 		c.sendSingleRow([]string{"setting"}, map[string]any{
 			"setting": "",

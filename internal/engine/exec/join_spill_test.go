@@ -257,6 +257,163 @@ func TestColumnarSpillRoundtrip(t *testing.T) {
 	}
 }
 
+// TestCompactBatchForRows_NullStrings verifies that compactBatchForRows
+// correctly maintains BytesColumn offset continuity when null string values
+// are present. Previously, skipping Set for null rows left zero-valued offsets
+// that corrupted subsequent string values.
+func TestCompactBatchForRows_NullStrings(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "name", Type: parquet.TypeString, Nullable: true},
+	}
+
+	rows := []map[string]any{
+		{"id": int64(0), "name": "alice"},
+		{"id": int64(1), "name": nil},
+		{"id": int64(2), "name": "charlie"},
+		{"id": int64(3), "name": nil},
+		{"id": int64(4), "name": "eve"},
+	}
+	original := batch.FromRows(schema, rows)
+
+	// Select rows 0,1,2,3,4 (all rows — exercises null gaps at indices 1,3)
+	compact := compactBatchForRows(original, []int{0, 1, 2, 3, 4})
+	if compact.Len != 5 {
+		t.Fatalf("expected 5 rows, got %d", compact.Len)
+	}
+
+	// Verify non-null strings via offsets
+	nameCol := compact.Columns[1]
+	for i, want := range []string{"alice", "", "charlie", "", "eve"} {
+		if i == 1 || i == 3 {
+			if !nameCol.Nulls.IsNullFast(i) {
+				t.Errorf("row %d: expected null", i)
+			}
+			continue
+		}
+		got := nameCol.BytesData.StringValue(i)
+		if got != want {
+			t.Errorf("row %d: got %q, want %q", i, got, want)
+		}
+	}
+
+	// Also verify spill roundtrip with null strings
+	tmpDir, err := os.MkdirTemp("", "compact-null-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	path, err := writeSpillBatches(tmpDir, []*batch.RecordBatch{compact})
+	if err != nil {
+		t.Fatalf("writeSpillBatches: %v", err)
+	}
+	batches, err := readSpillBatches(path)
+	if err != nil {
+		t.Fatalf("readSpillBatches: %v", err)
+	}
+	if len(batches) != 1 || batches[0].Len != 5 {
+		t.Fatalf("unexpected batch count/size")
+	}
+
+	reloaded := batches[0]
+	for i, want := range []string{"alice", "", "charlie", "", "eve"} {
+		if i == 1 || i == 3 {
+			if !reloaded.Columns[1].Nulls.IsNullFast(i) {
+				t.Errorf("reloaded row %d: expected null", i)
+			}
+			continue
+		}
+		got := reloaded.Columns[1].BytesData.StringValue(i)
+		if got != want {
+			t.Errorf("reloaded row %d: got %q, want %q", i, got, want)
+		}
+	}
+}
+
+// TestGraceHashJoinSpill_Parallel verifies Grace Hash Join spill correctness
+// under parallel pipeline execution. Previously, multiple workers shared the
+// same spillBatchWriter without synchronization, corrupting the binary stream.
+func TestGraceHashJoinSpill_Parallel(t *testing.T) {
+	rightSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString},
+	}
+	const buildN = 5000
+	var rightRows []map[string]any
+	for i := 0; i < buildN; i++ {
+		rightRows = append(rightRows, map[string]any{
+			"id":  int64(i),
+			"val": "build-row",
+		})
+	}
+
+	leftSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "label", Type: parquet.TypeString},
+	}
+	const probeN = 500
+	var leftRows []map[string]any
+	for i := 0; i < probeN; i++ {
+		leftRows = append(leftRows, map[string]any{
+			"id":    int64(i * 2),
+			"label": "probe-row",
+		})
+	}
+
+	tmpDir, err := os.MkdirTemp("", "grace-parallel-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tracker := memory.NewTracker("test", 250_000)
+	sm, err := memory.NewSpillManager(tmpDir, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sm.Cleanup()
+
+	hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
+	hj.Spill = sm
+	hj.MemTracker = tracker
+
+	buildSource := NewSliceSource(rightSchema, rightRows)
+	if err := hj.Build(context.Background(), buildSource); err != nil {
+		t.Fatalf("Build failed: %v", err)
+	}
+
+	if hj.spillState == nil || len(hj.spillState.spilledParts) == 0 {
+		t.Fatal("expected spill to trigger")
+	}
+
+	source := NewSliceSource(leftSchema, leftRows)
+	probe := hj.Probe()
+	sink := &CollectSink{}
+	pipe := &Pipeline{
+		Source:  source,
+		Ops:    []UnaryOperator{probe},
+		Sink:   sink,
+		Workers: 4, // Force parallel — exercises concurrent probe spill writes
+	}
+	if err := pipe.Run(context.Background()); err != nil {
+		t.Fatalf("Parallel pipeline failed: %v", err)
+	}
+
+	if len(sink.Rows) != probeN {
+		t.Fatalf("expected %d rows, got %d", probeN, len(sink.Rows))
+	}
+
+	seen := make(map[int64]bool)
+	for _, row := range sink.Rows {
+		id := row["id"].(int64)
+		if seen[id] {
+			t.Fatalf("duplicate id: %d", id)
+		}
+		seen[id] = true
+	}
+}
+
 func fromRowsForTest(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch {
 	return batch.FromRows(schema, rows)
 }

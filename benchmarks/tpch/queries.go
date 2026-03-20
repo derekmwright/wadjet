@@ -1,5 +1,7 @@
 package tpch
 
+import "fmt"
+
 // TPCHQueries contains all 22 TPC-H queries adapted for Wadjet's SQL dialect.
 // Dates use string comparisons (YYYY-MM-DD format is lexicographically ordered).
 // DECIMAL is replaced with FLOAT64. SUBSTRING uses SUBSTR.
@@ -476,4 +478,30 @@ var TPCHQueries = map[int]QueryDef{
 type QueryDef struct {
 	Name string
 	SQL  string
+}
+
+// GetQuery returns the query definition for the given query number, adjusted
+// for the scale factor. Q11 uses FRACTION = 0.0001/SF per the TPC-H spec.
+func GetQuery(qNum int, sf ScaleFactor) QueryDef {
+	q := TPCHQueries[qNum]
+	if qNum == 11 && sf > 0 {
+		fraction := 0.0001 / float64(sf)
+		q.SQL = fmt.Sprintf(`SELECT
+			ps_partkey,
+			SUM(ps_supplycost * ps_availqty) as value
+		FROM partsupp
+		JOIN supplier ON ps_suppkey = s_suppkey
+		JOIN nation ON s_nationkey = n_nationkey
+		WHERE n_name = 'GERMANY'
+		GROUP BY ps_partkey
+		HAVING SUM(ps_supplycost * ps_availqty) > (
+			SELECT SUM(ps_supplycost * ps_availqty) * %g
+			FROM partsupp
+			JOIN supplier ON ps_suppkey = s_suppkey
+			JOIN nation ON s_nationkey = n_nationkey
+			WHERE n_name = 'GERMANY'
+		)
+		ORDER BY value DESC`, fraction)
+	}
+	return q
 }

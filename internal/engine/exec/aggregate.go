@@ -420,7 +420,11 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			h.intGroupIndex = newIntHashTable(htInitSize)
 			h.intGroupKeyCol = h.groupColIdx[0]
 			if h.intFlatAccs == nil {
-				h.initFlatAccums(b)
+				if len(h.intGroupStates) > 0 {
+					h.rebuildFlatAccums(b)
+				} else {
+					h.initFlatAccums(b)
+				}
 			}
 		}
 	}
@@ -437,7 +441,11 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				h.dualIntGroupKeyCols = [2]int{idx0, idx1}
 				h.intGroupIndex = newIntHashTable(htInitSize)
 				if h.intFlatAccs == nil {
-					h.initFlatAccums(b)
+					if len(h.intGroupStates) > 0 {
+						h.rebuildFlatAccums(b)
+					} else {
+						h.initFlatAccums(b)
+					}
 				}
 			}
 		}
@@ -484,7 +492,11 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 					h.strGroupIndex = newStrHashTable(htInitSize)
 				}
 				if h.intFlatAccs == nil {
-					h.initFlatAccums(b)
+					if len(h.strGroupStates) > 0 {
+						h.rebuildFlatAccums(b)
+					} else {
+						h.initFlatAccums(b)
+					}
 				}
 			}
 		}
@@ -2374,5 +2386,65 @@ func (h *HashAggregate) materializeFlatAccums() {
 	// Free flat arrays — no longer needed after materialization
 	h.intFlatAccs = nil
 	h.groupIndexBuf = nil
+}
+
+// rebuildFlatAccums re-creates SoA flat accumulator arrays from materialized
+// per-group Accumulator structs. Called when intFlatAccs was cleared by
+// materializeFlatAccums (during parallel merge) but the fast path is
+// re-enabled for processing spilled rows in Finalize.
+func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
+	h.initFlatAccums(b)
+
+	var groups []*groupState
+	if h.useStrGroupKey {
+		groups = h.strGroupStates
+	} else {
+		groups = h.intGroupStates
+	}
+
+	for gi, gs := range groups {
+		for ai := range h.intFlatAccs {
+			fa := &h.intFlatAccs[ai]
+			fa.appendGroup()
+			if gs.accs == nil || ai >= len(gs.accs) {
+				continue
+			}
+			acc := &gs.accs[ai]
+			fa.count[gi] = acc.Count
+			if fa.sumI64 != nil {
+				fa.sumI64[gi] = acc.SumI64
+			}
+			if fa.sumF64 != nil {
+				fa.sumF64[gi] = acc.SumF64
+			}
+			if fa.sumDec != nil {
+				fa.sumDec[gi] = acc.SumDec
+			}
+			if fa.minI64 != nil {
+				fa.minI64[gi] = acc.MinI64
+				fa.hasMin[gi] = acc.HasMin
+			}
+			if fa.maxI64 != nil {
+				fa.maxI64[gi] = acc.MaxI64
+				fa.hasMax[gi] = acc.HasMax
+			}
+			if fa.minF64 != nil {
+				fa.minF64[gi] = acc.MinF64
+				fa.hasMin[gi] = acc.HasMin
+			}
+			if fa.maxF64 != nil {
+				fa.maxF64[gi] = acc.MaxF64
+				fa.hasMax[gi] = acc.HasMax
+			}
+			if fa.minDec != nil {
+				fa.minDec[gi] = acc.MinDec
+				fa.hasMin[gi] = acc.HasMin
+			}
+			if fa.maxDec != nil {
+				fa.maxDec[gi] = acc.MaxDec
+				fa.hasMax[gi] = acc.HasMax
+			}
+		}
+	}
 }
 
