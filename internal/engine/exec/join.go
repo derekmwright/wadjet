@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -1292,6 +1293,17 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 
 	if len(pairs) == 0 {
 		return nil, nil
+	}
+
+	// Sort pairs by build batch index so gatherBuildVector accesses each
+	// build batch's column vectors contiguously. The per-type gather loops
+	// cache the current src vector and skip reload while batchIdx is unchanged;
+	// grouping pairs by batch maximizes that cache hit rate and keeps the
+	// underlying column data in L1/L2 across the entire run.
+	if len(p.join.buildBatches) > 1 {
+		slices.SortFunc(pairs, func(a, b matchPair) int {
+			return int(a.ref.batchIdx) - int(b.ref.batchIdx)
+		})
 	}
 
 	// Build output batch using precomputed column source mapping.

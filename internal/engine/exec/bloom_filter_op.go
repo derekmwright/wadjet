@@ -22,12 +22,27 @@ type BloomFilterOp struct {
 	resolved      bool
 	selBuf        []uint32 // scratch for selection vector
 	keyBuf        []byte   // scratch for multi-column key serialization
+
+	// Adaptive disabling: if the bloom filter isn't filtering enough rows,
+	// the hash computation + random memory accesses cost more than they save.
+	// Track rejection rate over the first 8 batches; disable if <5% rejected.
+	totalChecked int
+	totalPassed  int
+	batchesSeen  int
+	disabled     bool
 }
 
 func (op *BloomFilterOp) Init(_ context.Context) error { return nil }
 
 func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if in == nil || in.ActiveLen() == 0 {
+		return in, nil
+	}
+
+	// Adaptive bypass: if the bloom filter isn't rejecting enough rows,
+	// skip it entirely. The hash + two random reads per row cost more
+	// than the probe savings when rejection rate is below 5%.
+	if op.disabled {
 		return in, nil
 	}
 
@@ -167,6 +182,22 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 	if len(sel) == 0 {
 		return nil, nil
 	}
+
+	// Track rejection rate for adaptive disabling.
+	// After 8 batches, if <5% of rows are rejected, the bloom filter
+	// costs more than it saves and is disabled for remaining batches.
+	if !op.disabled {
+		op.totalChecked += activeLen
+		op.totalPassed += len(sel)
+		op.batchesSeen++
+		if op.batchesSeen >= 8 && op.totalChecked > 0 {
+			rejected := op.totalChecked - op.totalPassed
+			if rejected*20 < op.totalChecked { // <5% rejection
+				op.disabled = true
+			}
+		}
+	}
+
 	op.selBuf = sel
 	in.Sel = sel
 	return in, nil
