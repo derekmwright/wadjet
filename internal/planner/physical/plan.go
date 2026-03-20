@@ -2035,10 +2035,12 @@ func isSimpleColRef(node plansql.Node) bool {
 // aggPreProject is a UnaryOperator that passes through all input columns
 // and adds computed expression columns for aggregate inputs.
 type aggPreProject struct {
-	computed     []exec.ProjectColumn
-	cachedSchema []parquet.Column    // cached output schema (computed once)
-	cachedOutput *batch.RecordBatch  // reused output batch across calls
-	computedCap  int                 // row capacity of cached computed vectors
+	computed          []exec.ProjectColumn
+	cachedSchema      []parquet.Column    // cached output schema (computed once)
+	cachedOutput      *batch.RecordBatch  // reused output batch across calls
+	computedCap       int                 // row capacity of cached computed vectors
+	canPassSelThrough bool                // true if all computed columns are numeric (no BytesColumn)
+	checkedSelPass    bool                // true after first call resolves canPassSelThrough
 }
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
@@ -2049,11 +2051,25 @@ func (a *aggPreProject) Clone() exec.UnaryOperator {
 }
 
 func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	// If the input has a selection vector, materialize (compact) the pass-through
-	// columns first. BytesColumn.Set requires sequential writes (i=0,1,2,...),
-	// so we can't write computed columns at sparse selection indices.
-	if in.Sel != nil {
+	// Check once whether all computed columns are numeric. If so, we can keep
+	// the selection vector and write computed values at sparse indices — avoiding
+	// the full materialize copy. BytesColumn.Set requires sequential writes,
+	// so string-typed computed columns still need materialize.
+	if !a.checkedSelPass {
+		a.checkedSelPass = true
+		a.canPassSelThrough = true
+		for _, c := range a.computed {
+			switch c.Type {
+			case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+				a.canPassSelThrough = false
+			}
+		}
+	}
+
+	hasSel := in.Sel != nil
+	if hasSel && !a.canPassSelThrough {
 		in = a.materialize(in)
+		hasSel = false
 	}
 
 	// Cache output schema on first call (avoids per-batch allocation)
@@ -2095,38 +2111,65 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		}
 	}
 	a.cachedOutput.Len = in.Len
-	a.cachedOutput.Sel = nil
+	a.cachedOutput.Sel = in.Sel // pass through selection vector (nil if materialized)
 
 	// Share existing column vectors (zero-copy for pass-through columns)
 	for j := 0; j < len(in.Schema); j++ {
 		a.cachedOutput.Columns[j] = in.Columns[j]
 	}
 
-	// Compute expression columns (sequential writes, no selection vector).
-	// Use typed evaluation paths when available to avoid interface{} boxing.
+	// Compute expression columns.
+	// When selection vector is present and all computed columns are numeric,
+	// write values only at selected indices (avoiding full materialize).
 	for k, c := range a.computed {
 		col := a.cachedOutput.Columns[computedOffset+k]
-		if c.Float64Eval != nil {
-			for i := 0; i < in.Len; i++ {
-				v, ok := c.Float64Eval(in, i)
-				if ok {
-					col.Float64Data[i] = v
-				} else {
-					col.Nulls.SetNull(i)
+		if hasSel {
+			if c.Float64Eval != nil {
+				for _, idx := range in.Sel {
+					v, ok := c.Float64Eval(in, int(idx))
+					if ok {
+						col.Float64Data[idx] = v
+					} else {
+						col.Nulls.SetNull(int(idx))
+					}
 				}
-			}
-		} else if c.Int64Eval != nil {
-			for i := 0; i < in.Len; i++ {
-				v, ok := c.Int64Eval(in, i)
-				if ok {
-					col.Int64Data[i] = v
-				} else {
-					col.Nulls.SetNull(i)
+			} else if c.Int64Eval != nil {
+				for _, idx := range in.Sel {
+					v, ok := c.Int64Eval(in, int(idx))
+					if ok {
+						col.Int64Data[idx] = v
+					} else {
+						col.Nulls.SetNull(int(idx))
+					}
+				}
+			} else {
+				for _, idx := range in.Sel {
+					col.SetValue(int(idx), c.Expr(in, int(idx)))
 				}
 			}
 		} else {
-			for i := 0; i < in.Len; i++ {
-				col.SetValue(i, c.Expr(in, i))
+			if c.Float64Eval != nil {
+				for i := 0; i < in.Len; i++ {
+					v, ok := c.Float64Eval(in, i)
+					if ok {
+						col.Float64Data[i] = v
+					} else {
+						col.Nulls.SetNull(i)
+					}
+				}
+			} else if c.Int64Eval != nil {
+				for i := 0; i < in.Len; i++ {
+					v, ok := c.Int64Eval(in, i)
+					if ok {
+						col.Int64Data[i] = v
+					} else {
+						col.Nulls.SetNull(i)
+					}
+				}
+			} else {
+				for i := 0; i < in.Len; i++ {
+					col.SetValue(i, c.Expr(in, i))
+				}
 			}
 		}
 	}
