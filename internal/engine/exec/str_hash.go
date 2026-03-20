@@ -16,9 +16,10 @@ type strHashTable struct {
 }
 
 type strEntry struct {
-	offset int32 // byte offset into arena (-1 = empty)
-	keyLen int32 // key length in bytes
-	val    int32 // user value (group index)
+	offset  int32  // byte offset into arena (-1 = empty)
+	keyLen  int32  // key length in bytes
+	val     int32  // user value (group index)
+	hashTag uint32 // lower 32 bits of key hash — fast-reject before byte comparison
 }
 
 // newStrHashTable creates a hash table pre-sized for at least n entries at 70% load.
@@ -65,13 +66,15 @@ func (h *strHashTable) getKey(e strEntry) []byte {
 
 // Get looks up a key. Returns the value and whether the key was found.
 func (h *strHashTable) Get(key []byte) (int32, bool) {
-	idx := strHash(key) & h.mask
+	hash := strHash(key)
+	tag := uint32(hash)
+	idx := hash & h.mask
 	for {
 		e := &h.entries[idx]
 		if e.offset == -1 {
 			return 0, false
 		}
-		if e.keyLen == int32(len(key)) && strKeyEqual(h.arena[e.offset:e.offset+e.keyLen], key) {
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.arena[e.offset:e.offset+e.keyLen], key) {
 			return e.val, true
 		}
 		idx = (idx + 1) & h.mask
@@ -80,7 +83,9 @@ func (h *strHashTable) Get(key []byte) (int32, bool) {
 
 // Put inserts a key-value pair. Returns the previous value and whether the key existed.
 func (h *strHashTable) Put(key []byte, val int32) (int32, bool) {
-	idx := strHash(key) & h.mask
+	hash := strHash(key)
+	tag := uint32(hash)
+	idx := hash & h.mask
 	for {
 		e := &h.entries[idx]
 		if e.offset == -1 {
@@ -90,13 +95,14 @@ func (h *strHashTable) Put(key []byte, val int32) (int32, bool) {
 			e.offset = offset
 			e.keyLen = int32(len(key))
 			e.val = val
+			e.hashTag = tag
 			h.size++
 			if h.size*10 > len(h.entries)*7 {
 				h.grow()
 			}
 			return 0, false
 		}
-		if e.keyLen == int32(len(key)) && strKeyEqual(h.arena[e.offset:e.offset+e.keyLen], key) {
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.arena[e.offset:e.offset+e.keyLen], key) {
 			old := e.val
 			e.val = val
 			return old, true
@@ -109,7 +115,9 @@ func (h *strHashTable) Put(key []byte, val int32) (int32, bool) {
 // If not found, inserts with the given value and returns the value and false.
 // This is the hot path for GROUP BY — combines lookup and insert in one probe.
 func (h *strHashTable) GetOrInsert(key []byte, val int32) (int32, bool) {
-	idx := strHash(key) & h.mask
+	hash := strHash(key)
+	tag := uint32(hash)
+	idx := hash & h.mask
 	for {
 		e := &h.entries[idx]
 		if e.offset == -1 {
@@ -118,13 +126,14 @@ func (h *strHashTable) GetOrInsert(key []byte, val int32) (int32, bool) {
 			e.offset = offset
 			e.keyLen = int32(len(key))
 			e.val = val
+			e.hashTag = tag
 			h.size++
 			if h.size*10 > len(h.entries)*7 {
 				h.grow()
 			}
 			return val, false
 		}
-		if e.keyLen == int32(len(key)) && strKeyEqual(h.arena[e.offset:e.offset+e.keyLen], key) {
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.arena[e.offset:e.offset+e.keyLen], key) {
 			return e.val, true
 		}
 		idx = (idx + 1) & h.mask
