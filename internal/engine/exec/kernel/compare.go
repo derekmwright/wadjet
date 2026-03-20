@@ -118,7 +118,7 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 	case batch.TypeUUID:
 		return compareFilterString(op, toString(value))
 	case batch.TypeDate:
-		return compareFilterImpl(getInt32Data, int32(toInt64(value)), op)
+		return compareFilterImpl(getInt32Data, toDateInt32(value), op)
 	default:
 		return nil
 	}
@@ -177,7 +177,13 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 			set[toInt64(v)] = struct{}{}
 		}
 		return inFilterInt64(getInt64Data, set, negate)
-	case batch.TypeInt32, batch.TypeDate, batch.TypePort, batch.TypeProtocol:
+	case batch.TypeDate:
+		set := make(map[int32]struct{}, len(values))
+		for _, v := range values {
+			set[toDateInt32(v)] = struct{}{}
+		}
+		return inFilterInt32(getInt32Data, set, negate)
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol:
 		set := make(map[int32]struct{}, len(values))
 		for _, v := range values {
 			set[int32(toInt64(v))] = struct{}{}
@@ -507,6 +513,45 @@ func toInt64(v any) int64 {
 	default:
 		return 0
 	}
+}
+
+// toDateInt32 converts a value to days-since-epoch for DATE column comparison.
+// DATE columns store int32 days since 1970-01-01, not milliseconds.
+func toDateInt32(v any) int32 {
+	switch tv := v.(type) {
+	case int32:
+		return tv
+	case int64:
+		return int32(tv)
+	case int:
+		return int32(tv)
+	case string:
+		return parseDateToDays(tv)
+	default:
+		return 0
+	}
+}
+
+// parseDateToDays converts a date string to days since 1970-01-01.
+func parseDateToDays(s string) int32 {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		// Try with timestamp formats, truncate to date
+		for _, layout := range []string{
+			"2006-01-02 15:04:05",
+			"2006-01-02T15:04:05",
+			time.RFC3339,
+		} {
+			if t, err = time.Parse(layout, s); err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return 0
+		}
+	}
+	epoch := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	return int32(t.Sub(epoch).Hours() / 24)
 }
 
 // parseTimestampString parses common timestamp formats into epoch milliseconds.
