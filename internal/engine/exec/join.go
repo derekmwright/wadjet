@@ -1265,9 +1265,10 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 	arena := h.arena
 	arenaNext := h.arenaNext
 	idx := h.intIndex
-	bloom := h.bloom
-	bloomMask := h.bloomMask
-	hasBloom := bloom != nil
+
+	// Bloom filter is NOT checked here — it's already applied as a separate
+	// BloomFilterOp in the pipeline (InnerJoin always gets one). Checking
+	// it again inline would be redundant work.
 
 	if in.Sel != nil {
 		if !keyCol.Nulls.HasNulls() {
@@ -1275,11 +1276,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 				data := keyCol.Int32Data
 				for _, si := range in.Sel {
-					key := int64(data[si])
-					if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(key)) {
-						continue
-					}
-					head, ok := idx.Get(key)
+					head, ok := idx.Get(int64(data[si]))
 					if !ok {
 						continue
 					}
@@ -1290,11 +1287,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 			default:
 				data := keyCol.Int64Data
 				for _, si := range in.Sel {
-					key := data[si]
-					if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(key)) {
-						continue
-					}
-					head, ok := idx.Get(key)
+					head, ok := idx.Get(data[si])
 					if !ok {
 						continue
 					}
@@ -1312,9 +1305,6 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 				if !ok {
 					continue
 				}
-				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(key)) {
-					continue
-				}
 				head, ok := idx.Get(key)
 				if !ok {
 					continue
@@ -1330,11 +1320,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 				data := keyCol.Int32Data
 				for i := 0; i < in.Len; i++ {
-					key := int64(data[i])
-					if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(key)) {
-						continue
-					}
-					head, ok := idx.Get(key)
+					head, ok := idx.Get(int64(data[i]))
 					if !ok {
 						continue
 					}
@@ -1345,11 +1331,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 			default:
 				data := keyCol.Int64Data
 				for i := 0; i < in.Len; i++ {
-					key := data[i]
-					if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(key)) {
-						continue
-					}
-					head, ok := idx.Get(key)
+					head, ok := idx.Get(data[i])
 					if !ok {
 						continue
 					}
@@ -1365,9 +1347,6 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 				}
 				key, ok := intKeyFromVector(keyCol, i)
 				if !ok {
-					continue
-				}
-				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(key)) {
 					continue
 				}
 				head, ok := idx.Get(key)
@@ -1391,9 +1370,6 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 	arena := h.arena
 	arenaNext := h.arenaNext
 	idx := h.intIndex
-	bloom := h.bloom
-	bloomMask := h.bloomMask
-	hasBloom := bloom != nil
 	buildBatches := h.buildBatches
 	bkIdx0, bkIdx1 := h.buildKeyIdx[0], h.buildKeyIdx[1]
 
@@ -1461,9 +1437,6 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					b = pd1i64[si]
 				}
 				ck := dualIntHash(a, b)
-				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(ck)) {
-					continue
-				}
 				head, ok := idx.Get(ck)
 				if !ok {
 					continue
@@ -1506,9 +1479,6 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					b = pd1i64[si]
 				}
 				ck := dualIntHash(a, b)
-				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(ck)) {
-					continue
-				}
 				head, ok := idx.Get(ck)
 				if !ok {
 					continue
@@ -1550,9 +1520,6 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					b = pd1i64[i]
 				}
 				ck := dualIntHash(a, b)
-				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(ck)) {
-					continue
-				}
 				head, ok := idx.Get(ck)
 				if !ok {
 					continue
@@ -1595,9 +1562,6 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 					b = pd1i64[i]
 				}
 				ck := dualIntHash(a, b)
-				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(ck)) {
-					continue
-				}
 				head, ok := idx.Get(ck)
 				if !ok {
 					continue
