@@ -254,11 +254,11 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 	if h.strIndex == nil {
 		return false
 	}
-	h.buildProbeKeyBuf(in, row)
-	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(h.keyBuf)) {
+	p.buildProbeKey(in, row)
+	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(p.keyBuf)) {
 		return false
 	}
-	_, ok := h.strIndex.Get(h.keyBuf)
+	_, ok := h.strIndex.Get(p.keyBuf)
 	return ok
 }
 
@@ -325,11 +325,11 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 	if h.strIndex == nil {
 		return p.lookupBuf
 	}
-	h.buildProbeKeyBuf(in, row)
-	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(h.keyBuf)) {
+	p.buildProbeKey(in, row)
+	if h.bloom != nil && !h.bloomMayContain(bloomHashBytes(p.keyBuf)) {
 		return p.lookupBuf
 	}
-	head, ok := h.strIndex.Get(h.keyBuf)
+	head, ok := h.strIndex.Get(p.keyBuf)
 	if !ok {
 		return p.lookupBuf
 	}
@@ -341,13 +341,7 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 
 // intProbeKey extracts the int64 probe key for the int fast path.
 func (h *HashJoin) intProbeKey(in *batch.RecordBatch, row int) (int64, bool) {
-	if !h.probeResolved {
-		h.probeKeyIdx = make([]int, len(h.LeftKeys))
-		for i, col := range h.LeftKeys {
-			h.probeKeyIdx[i] = in.ColumnIndex(col)
-		}
-		h.probeResolved = true
-	}
+	h.resolveProbeKeyIdx(in)
 	if h.probeKeyIdx[0] < 0 {
 		return 0, false
 	}
@@ -1018,6 +1012,7 @@ func (h *HashJoin) Probe() *HashJoinProbe {
 		join:     h,
 		pairsBuf: make([]matchPair, 0, 2*batch.DefaultBatchSize),
 		indexBuf: make([]int, 0, 2*batch.DefaultBatchSize),
+		keyBuf:   make([]byte, 0, 128),
 	}
 }
 
@@ -1040,29 +1035,43 @@ func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) {
 	}
 }
 
-// buildProbeKeyBuf fills h.keyBuf with the serialized probe key for a row.
-// The caller should use string(h.keyBuf) directly in a map index expression
-// to benefit from Go's compiler optimization that avoids string allocation.
-func (h *HashJoin) buildProbeKeyBuf(b *batch.RecordBatch, row int) {
-	if !h.probeResolved {
-		h.probeKeyIdx = make([]int, len(h.LeftKeys))
-		for i, col := range h.LeftKeys {
-			h.probeKeyIdx[i] = b.ColumnIndex(col)
-		}
-		h.probeResolved = true
+// resolveProbeKeyIdx lazily resolves probe-side column indices.
+// Safe for concurrent calls: probeResolved is set after probeKeyIdx is fully
+// populated, and repeated resolution produces identical results.
+func (h *HashJoin) resolveProbeKeyIdx(b *batch.RecordBatch) {
+	if h.probeResolved {
+		return
 	}
-	h.keyBuf = h.keyBuf[:0]
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.probeResolved {
+		return // another goroutine resolved while we waited
+	}
+	h.probeKeyIdx = make([]int, len(h.LeftKeys))
+	for i, col := range h.LeftKeys {
+		h.probeKeyIdx[i] = b.ColumnIndex(col)
+	}
+	h.probeResolved = true
+}
+
+// buildProbeKey fills p.keyBuf with the serialized probe key for a row.
+// Uses the per-probe keyBuf to avoid races when multiple cloned probes
+// execute in parallel.
+func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) {
+	h := p.join
+	h.resolveProbeKeyIdx(b)
+	p.keyBuf = p.keyBuf[:0]
 	for _, idx := range h.probeKeyIdx {
 		if idx < 0 {
-			h.keyBuf = append(h.keyBuf, 1) // null flag
+			p.keyBuf = append(p.keyBuf, 1) // null flag
 			continue
 		}
 		v := b.Columns[idx]
 		if v.Nulls.IsNullFast(row) {
-			h.keyBuf = append(h.keyBuf, 1) // null flag
+			p.keyBuf = append(p.keyBuf, 1) // null flag
 		} else {
-			h.keyBuf = append(h.keyBuf, 0) // not-null flag
-			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
+			p.keyBuf = append(p.keyBuf, 0) // not-null flag
+			p.keyBuf = appendColumnValue(p.keyBuf, v, row, v.Type)
 		}
 	}
 }
@@ -1081,6 +1090,7 @@ type HashJoinProbe struct {
 	semiSelBuf []uint16    // reusable selection vector for semi/anti join output
 	lookupBuf  []buildRef  // reusable buffer for lookupBuild results
 	indexBuf   []int       // reusable buffer for probe-side gather indices
+	keyBuf     []byte      // per-probe key serialization buffer (avoids race on shared h.keyBuf)
 
 	// Cached output schema and column mapping (computed once on first batch)
 	cachedSchema  []parquet.Column
@@ -1123,8 +1133,8 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 			h.arenaMatched[idx] = true
 		}
 	} else if h.strIndex != nil {
-		h.buildProbeKeyBuf(in, row)
-		head, ok := h.strIndex.Get(h.keyBuf)
+		p.buildProbeKey(in, row)
+		head, ok := h.strIndex.Get(p.keyBuf)
 		if !ok {
 			return
 		}
@@ -1158,13 +1168,7 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	// Inlines hash table lookup + typed data access, eliminating 4 levels of
 	// per-row function calls (probeRow → lookupBuild → intProbeKey → intKeyFromVector).
 	if h.useIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil {
-		if !h.probeResolved {
-			h.probeKeyIdx = make([]int, len(h.LeftKeys))
-			for i, col := range h.LeftKeys {
-				h.probeKeyIdx[i] = in.ColumnIndex(col)
-			}
-			h.probeResolved = true
-		}
+		h.resolveProbeKeyIdx(in)
 		if keyIdx := h.probeKeyIdx[0]; keyIdx >= 0 {
 			pairs = p.inlineIntProbe(in.Columns[keyIdx], in, pairs)
 		}
