@@ -54,6 +54,17 @@ type AggColumn struct {
 	Percentile float64 // percentile value for percentile_cont/percentile_disc
 }
 
+// isAggIntType returns true if the type can be used as an integer group-by key.
+func isAggIntType(t batch.TypeID) bool {
+	switch t {
+	case batch.TypeInt32, batch.TypeInt64, batch.TypePort, batch.TypeProtocol,
+		batch.TypeDate, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC,
+		batch.TypeDuration:
+		return true
+	}
+	return false
+}
+
 // HashAggregate is a Sink that performs grouped aggregation with a hash map.
 // Uses kernel-resolved typed updaters and cached column indices.
 // When a SpillManager is set, input batches are spilled to disk under memory
@@ -90,6 +101,15 @@ type HashAggregate struct {
 	// heap objects, reducing working set from ~192MB to ~32MB for 2M groups.
 	intFlatAccs   []flatAccumArrays // one per aggregate (nil = use AoS path)
 	groupIndexBuf []int32           // reused per-batch for two-phase scatter
+
+	// Dual-integer GROUP BY fast path: two integer columns hashed via dualIntHash
+	// into intHashTable, with chain verification for collision handling.
+	// Uses SoA scatter like the single-int path.
+	useDualIntGroupKey  bool
+	dualIntGroupKeyCols [2]int     // column indices for the two GROUP BY columns
+	dualIntKeysA        []int64    // first key per group
+	dualIntKeysB        []int64    // second key per group
+	dualIntNextGroup    []int32    // chain for hash collisions (-1 = end)
 
 	// Multi-column compact GROUP BY fast path: binary-encoded key packed into int64.
 	// Uses intHashTable for lookup. Falls back to generic path if key exceeds 8 bytes.
@@ -362,11 +382,29 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 	}
 
+	// Dual-integer GROUP BY fast path:
+	// When grouping by exactly 2 integer columns, use composite dualIntHash
+	// with chain verification. Gets SoA scatter like the single-int path.
+	if !h.useIntGroupKey && !h.isScalarAgg && len(h.GroupByCols) == 2 && allSimpleAggs {
+		idx0, idx1 := h.groupColIdx[0], h.groupColIdx[1]
+		if idx0 >= 0 && idx1 >= 0 {
+			typ0, typ1 := h.groupColTypes[0], h.groupColTypes[1]
+			if isAggIntType(typ0) && isAggIntType(typ1) {
+				h.useDualIntGroupKey = true
+				h.dualIntGroupKeyCols = [2]int{idx0, idx1}
+				h.intGroupIndex = newIntHashTable(4096)
+				if h.intFlatAccs == nil {
+					h.initFlatAccums(b)
+				}
+			}
+		}
+	}
+
 	// Multi-column compact GROUP BY fast path:
 	// When the binary-encoded GROUP BY key fits in 8 bytes, pack it into int64
 	// and use intHashTable instead of map[string]. Avoids string hashing and
 	// Go map overhead. Falls back to generic path if a key exceeds 8 bytes.
-	if !h.useIntGroupKey && !h.isScalarAgg && len(h.GroupByCols) >= 2 && allSimpleAggs {
+	if !h.useIntGroupKey && !h.useDualIntGroupKey && !h.isScalarAgg && len(h.GroupByCols) >= 2 && allSimpleAggs {
 		estimatedWidth := 0
 		canCompact := true
 		for _, typ := range h.groupColTypes {
@@ -433,6 +471,12 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	// Single-column integer GROUP BY fast path
 	if h.useIntGroupKey {
 		h.consumeBatchIntGroup(b)
+		return
+	}
+
+	// Dual-integer GROUP BY fast path
+	if h.useDualIntGroupKey {
+		h.consumeBatchDualIntGroup(b)
 		return
 	}
 
@@ -555,6 +599,149 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	}
 
 	// Handle null-key rows via generic path (rare: only when GROUP BY key is nullable).
+	if hasNullKeys {
+		if sel != nil {
+			for si, selIdx := range sel {
+				if gi[si] < 0 {
+					h.processRow(b, int(selIdx))
+				}
+			}
+		} else {
+			for row := 0; row < iterLen; row++ {
+				if gi[row] < 0 {
+					h.processRow(b, row)
+				}
+			}
+		}
+	}
+}
+
+// consumeBatchDualIntGroup is the fast path for two-column integer GROUP BY.
+// Uses composite dualIntHash in intHashTable with chain verification for collisions.
+// Two-phase SoA approach like consumeBatchIntGroup.
+func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
+	col0 := b.Columns[h.dualIntGroupKeyCols[0]]
+	col1 := b.Columns[h.dualIntGroupKeyCols[1]]
+	hasNulls := col0.Nulls.HasNulls() || col1.Nulls.HasNulls()
+
+	// Pre-extract typed arrays for the two GROUP BY columns.
+	var d0i32 []int32
+	var d0i64 []int64
+	var d1i32 []int32
+	var d1i64 []int64
+	switch col0.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		d0i32 = col0.Int32Data
+	default:
+		d0i64 = col0.Int64Data
+	}
+	switch col1.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		d1i32 = col1.Int32Data
+	default:
+		d1i64 = col1.Int64Data
+	}
+
+	intIdx := h.intGroupIndex
+	colIdx := h.aggColIdx
+	nAggs := len(h.Aggs)
+
+	// Phase 1: Hash lookup — build group index array with chain verification.
+	var gi []int32
+	var sel []uint16
+	var iterLen int
+	hasNullKeys := false
+
+	lookupOrInsert := func(a, b int64) int32 {
+		ck := dualIntHash(a, b)
+		head, ok := intIdx.Get(ck)
+		if ok {
+			// Walk chain, verify both keys
+			for gi := head; gi >= 0; gi = h.dualIntNextGroup[gi] {
+				if h.dualIntKeysA[gi] == a && h.dualIntKeysB[gi] == b {
+					return gi
+				}
+			}
+			// Collision: new group, chain to existing head
+			newIdx := int32(len(h.intGroupStates))
+			h.intGroupStates = append(h.intGroupStates, &groupState{})
+			h.dualIntKeysA = append(h.dualIntKeysA, a)
+			h.dualIntKeysB = append(h.dualIntKeysB, b)
+			h.dualIntNextGroup = append(h.dualIntNextGroup, head)
+			intIdx.Put(ck, newIdx)
+			for ai := range h.intFlatAccs {
+				h.intFlatAccs[ai].appendGroup()
+			}
+			return newIdx
+		}
+		// New composite key
+		newIdx := int32(len(h.intGroupStates))
+		h.intGroupStates = append(h.intGroupStates, &groupState{})
+		h.dualIntKeysA = append(h.dualIntKeysA, a)
+		h.dualIntKeysB = append(h.dualIntKeysB, b)
+		h.dualIntNextGroup = append(h.dualIntNextGroup, -1)
+		intIdx.Put(ck, newIdx)
+		for ai := range h.intFlatAccs {
+			h.intFlatAccs[ai].appendGroup()
+		}
+		return newIdx
+	}
+
+	extractKeys := func(row int) (int64, int64) {
+		var a, b int64
+		if d0i32 != nil {
+			a = int64(d0i32[row])
+		} else {
+			a = d0i64[row]
+		}
+		if d1i32 != nil {
+			b = int64(d1i32[row])
+		} else {
+			b = d1i64[row]
+		}
+		return a, b
+	}
+
+	if b.Sel != nil {
+		iterLen = len(b.Sel)
+		sel = b.Sel
+		gi = h.ensureGroupIndexBuf(iterLen)
+		for si, selIdx := range b.Sel {
+			row := int(selIdx)
+			if hasNulls && (col0.Nulls.IsNullFast(row) || col1.Nulls.IsNullFast(row)) {
+				gi[si] = -1
+				hasNullKeys = true
+				continue
+			}
+			a, bv := extractKeys(row)
+			gi[si] = lookupOrInsert(a, bv)
+		}
+	} else {
+		iterLen = b.Len
+		gi = h.ensureGroupIndexBuf(iterLen)
+		for row := 0; row < iterLen; row++ {
+			if hasNulls && (col0.Nulls.IsNullFast(row) || col1.Nulls.IsNullFast(row)) {
+				gi[row] = -1
+				hasNullKeys = true
+				continue
+			}
+			a, bv := extractKeys(row)
+			gi[row] = lookupOrInsert(a, bv)
+		}
+	}
+
+	// Phase 2: Per-aggregate typed scatter update using flat arrays.
+	for i := 0; i < nAggs; i++ {
+		fa := &h.intFlatAccs[i]
+		ci := colIdx[i]
+		if ci >= 0 {
+			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
+		} else if h.Aggs[i].Func == AggCount {
+			scatterCountStar(fa.count, gi, iterLen)
+		}
+	}
+
+	// Handle null-key rows via generic path (rare).
 	if hasNullKeys {
 		if sel != nil {
 			for si, selIdx := range sel {
@@ -1028,7 +1215,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	}
 
 	totalGroups := len(h.keys)
-	if h.useIntGroupKey || h.useCompactGroupKey {
+	if h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey {
 		totalGroups = len(h.intGroupStates)
 	}
 	if h.outputPos >= totalGroups {
@@ -1054,7 +1241,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 	for i := 0; i < numRows; i++ {
 		var gs *groupState
-		if h.useIntGroupKey || h.useCompactGroupKey {
+		if h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey {
 			gs = h.intGroupStates[start+i]
 		} else {
 			gs = h.strGroupStates[start+i]
@@ -1064,6 +1251,10 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		// to avoid deferred []any boxing. For other paths, use keyValues.
 		if h.useIntGroupKey && gs.keyValues == nil {
 			out.Columns[0].SetValue(i, gs.intKey)
+		} else if h.useDualIntGroupKey && gs.keyValues == nil {
+			idx := start + i
+			out.Columns[0].SetValue(i, h.dualIntKeysA[idx])
+			out.Columns[1].SetValue(i, h.dualIntKeysB[idx])
 		} else {
 			for j, val := range gs.keyValues {
 				out.Columns[j].SetValue(i, val)
@@ -1238,6 +1429,12 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 		return
 	}
 
+	// Dual-int-keyed SoA fast path: merge with chain verification.
+	if h.useDualIntGroupKey && o.useDualIntGroupKey && h.intFlatAccs != nil && o.intFlatAccs != nil {
+		h.mergeDualIntGroupSoA(o)
+		return
+	}
+
 	// Normalize both sides to the generic map path so merge is uniform.
 	h.migrateToGenericMap()
 	o.migrateToGenericMap()
@@ -1390,6 +1587,153 @@ func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 	}
 }
 
+// mergeDualIntGroupSoA merges another dual-int-keyed SoA aggregate directly,
+// using composite hash lookup with chain verification for collision handling.
+func (h *HashAggregate) mergeDualIntGroupSoA(o *HashAggregate) {
+	for i := range o.intGroupStates {
+		a := o.dualIntKeysA[i]
+		b := o.dualIntKeysB[i]
+
+		// Look up in h using chain verification
+		var gsIdx int32 = -1
+		ck := dualIntHash(a, b)
+		if head, ok := h.intGroupIndex.Get(ck); ok {
+			for gi := head; gi >= 0; gi = h.dualIntNextGroup[gi] {
+				if h.dualIntKeysA[gi] == a && h.dualIntKeysB[gi] == b {
+					gsIdx = gi
+					break
+				}
+			}
+		}
+
+		if gsIdx >= 0 {
+			// Existing group: merge flat accumulators
+			for ai := range h.intFlatAccs {
+				hfa := &h.intFlatAccs[ai]
+				ofa := &o.intFlatAccs[ai]
+				idx := int(gsIdx)
+				hfa.count[idx] += ofa.count[i]
+				if hfa.sumI64 != nil {
+					hfa.sumI64[idx] += ofa.sumI64[i]
+				}
+				if hfa.sumF64 != nil {
+					hfa.sumF64[idx] += ofa.sumF64[i]
+				}
+				if hfa.sumDec != nil {
+					hfa.sumDec[idx] = hfa.sumDec[idx].Add(ofa.sumDec[i])
+				}
+				if ofa.hasMin != nil && ofa.hasMin[i] {
+					if hfa.hasMin[idx] {
+						if hfa.isFloat {
+							if ofa.minF64[i] < hfa.minF64[idx] {
+								hfa.minF64[idx] = ofa.minF64[i]
+							}
+						} else if hfa.isDecimal {
+							if ofa.minDec[i].Less(hfa.minDec[idx]) {
+								hfa.minDec[idx] = ofa.minDec[i]
+							}
+						} else {
+							if ofa.minI64[i] < hfa.minI64[idx] {
+								hfa.minI64[idx] = ofa.minI64[i]
+							}
+						}
+					} else {
+						hfa.hasMin[idx] = true
+						if hfa.minI64 != nil {
+							hfa.minI64[idx] = ofa.minI64[i]
+						}
+						if hfa.minF64 != nil {
+							hfa.minF64[idx] = ofa.minF64[i]
+						}
+						if hfa.minDec != nil {
+							hfa.minDec[idx] = ofa.minDec[i]
+						}
+					}
+				}
+				if ofa.hasMax != nil && ofa.hasMax[i] {
+					if hfa.hasMax[idx] {
+						if hfa.isFloat {
+							if ofa.maxF64[i] > hfa.maxF64[idx] {
+								hfa.maxF64[idx] = ofa.maxF64[i]
+							}
+						} else if hfa.isDecimal {
+							if !ofa.maxDec[i].Less(hfa.maxDec[idx]) {
+								hfa.maxDec[idx] = ofa.maxDec[i]
+							}
+						} else {
+							if ofa.maxI64[i] > hfa.maxI64[idx] {
+								hfa.maxI64[idx] = ofa.maxI64[i]
+							}
+						}
+					} else {
+						hfa.hasMax[idx] = true
+						if hfa.maxI64 != nil {
+							hfa.maxI64[idx] = ofa.maxI64[i]
+						}
+						if hfa.maxF64 != nil {
+							hfa.maxF64[idx] = ofa.maxF64[i]
+						}
+						if hfa.maxDec != nil {
+							hfa.maxDec[idx] = ofa.maxDec[i]
+						}
+					}
+				}
+			}
+		} else {
+			// New group
+			newIdx := int32(len(h.intGroupStates))
+			h.intGroupStates = append(h.intGroupStates, o.intGroupStates[i])
+			h.dualIntKeysA = append(h.dualIntKeysA, a)
+			h.dualIntKeysB = append(h.dualIntKeysB, b)
+			// Chain to existing head if composite hash exists
+			if head, ok := h.intGroupIndex.Get(ck); ok {
+				h.dualIntNextGroup = append(h.dualIntNextGroup, head)
+			} else {
+				h.dualIntNextGroup = append(h.dualIntNextGroup, -1)
+			}
+			h.intGroupIndex.Put(ck, newIdx)
+			for ai := range h.intFlatAccs {
+				hfa := &h.intFlatAccs[ai]
+				ofa := &o.intFlatAccs[ai]
+				hfa.count = append(hfa.count, ofa.count[i])
+				if hfa.sumI64 != nil {
+					hfa.sumI64 = append(hfa.sumI64, ofa.sumI64[i])
+				}
+				if hfa.sumF64 != nil {
+					hfa.sumF64 = append(hfa.sumF64, ofa.sumF64[i])
+				}
+				if hfa.sumDec != nil {
+					hfa.sumDec = append(hfa.sumDec, ofa.sumDec[i])
+				}
+				if hfa.minI64 != nil {
+					hfa.minI64 = append(hfa.minI64, ofa.minI64[i])
+				}
+				if hfa.maxI64 != nil {
+					hfa.maxI64 = append(hfa.maxI64, ofa.maxI64[i])
+				}
+				if hfa.minF64 != nil {
+					hfa.minF64 = append(hfa.minF64, ofa.minF64[i])
+				}
+				if hfa.maxF64 != nil {
+					hfa.maxF64 = append(hfa.maxF64, ofa.maxF64[i])
+				}
+				if hfa.minDec != nil {
+					hfa.minDec = append(hfa.minDec, ofa.minDec[i])
+				}
+				if hfa.maxDec != nil {
+					hfa.maxDec = append(hfa.maxDec, ofa.maxDec[i])
+				}
+				if hfa.hasMin != nil {
+					hfa.hasMin = append(hfa.hasMin, ofa.hasMin[i])
+				}
+				if hfa.hasMax != nil {
+					hfa.hasMax = append(hfa.hasMax, ofa.hasMax[i])
+				}
+			}
+		}
+	}
+}
+
 // migrateToGenericMap converts int/compact group key state to the generic
 // map[string]*groupState path. No-op if already using the generic path.
 func (h *HashAggregate) migrateToGenericMap() {
@@ -1397,6 +1741,31 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.materializeFlatAccums()
 	if h.useCompactGroupKey {
 		h.migrateCompactToGeneric()
+		return
+	}
+	if h.useDualIntGroupKey {
+		// Migrate dual-int group key → generic path
+		h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
+		h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
+		h.serializedKeys = make([]string, 0, len(h.intGroupStates))
+		h.keys = make([][]any, 0, len(h.intGroupStates))
+		for i, gs := range h.intGroupStates {
+			if gs.keyValues == nil {
+				gs.keyValues = []any{h.dualIntKeysA[i], h.dualIntKeysB[i]}
+			}
+			h.keyBuf = h.keyBuf[:0]
+			key := serializeKey(h.keyBuf, gs.keyValues)
+			h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
+			h.strGroupStates = append(h.strGroupStates, gs)
+			h.serializedKeys = append(h.serializedKeys, key)
+			h.keys = append(h.keys, gs.keyValues)
+		}
+		h.useDualIntGroupKey = false
+		h.intGroupStates = nil
+		h.intGroupIndex = nil
+		h.dualIntKeysA = nil
+		h.dualIntKeysB = nil
+		h.dualIntNextGroup = nil
 		return
 	}
 	if !h.useIntGroupKey {
