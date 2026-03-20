@@ -1231,8 +1231,14 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 		return
 	}
 
+	// Int-keyed SoA fast path: merge flat accumulators directly without
+	// materializing per-group Accumulator structs or migrating to generic map.
+	if h.useIntGroupKey && o.useIntGroupKey && h.intFlatAccs != nil && o.intFlatAccs != nil {
+		h.mergeIntGroupSoA(o)
+		return
+	}
+
 	// Normalize both sides to the generic map path so merge is uniform.
-	// This runs once at the end, so O(N_groups) overhead is negligible.
 	h.migrateToGenericMap()
 	o.migrateToGenericMap()
 
@@ -1252,6 +1258,134 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 			h.strGroupStates = append(h.strGroupStates, oGS)
 			h.keys = append(h.keys, oGS.keyValues)
 			h.serializedKeys = append(h.serializedKeys, key)
+		}
+	}
+}
+
+// mergeIntGroupSoA merges another int-keyed SoA aggregate directly, avoiding
+// materializeFlatAccums + migrateToGenericMap + per-group Accumulator.Merge.
+// Operates on flat arrays (count, sumI64, sumF64, min, max) with int hash lookup.
+func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
+	for i, oGS := range o.intGroupStates {
+		gsIdx, found := h.intGroupIndex.Get(oGS.intKey)
+		if found {
+			// Existing group: merge flat accumulators in-place
+			for ai := range h.intFlatAccs {
+				hfa := &h.intFlatAccs[ai]
+				ofa := &o.intFlatAccs[ai]
+				idx := int(gsIdx)
+				hfa.count[idx] += ofa.count[i]
+				if hfa.sumI64 != nil {
+					hfa.sumI64[idx] += ofa.sumI64[i]
+				}
+				if hfa.sumF64 != nil {
+					hfa.sumF64[idx] += ofa.sumF64[i]
+				}
+				if hfa.sumDec != nil {
+					hfa.sumDec[idx] = hfa.sumDec[idx].Add(ofa.sumDec[i])
+				}
+				if ofa.hasMin != nil && ofa.hasMin[i] {
+					if hfa.hasMin[idx] {
+						if hfa.isFloat {
+							if ofa.minF64[i] < hfa.minF64[idx] {
+								hfa.minF64[idx] = ofa.minF64[i]
+							}
+						} else if hfa.isDecimal {
+							if ofa.minDec[i].Less(hfa.minDec[idx]) {
+								hfa.minDec[idx] = ofa.minDec[i]
+							}
+						} else {
+							if ofa.minI64[i] < hfa.minI64[idx] {
+								hfa.minI64[idx] = ofa.minI64[i]
+							}
+						}
+					} else {
+						hfa.hasMin[idx] = true
+						if hfa.minI64 != nil {
+							hfa.minI64[idx] = ofa.minI64[i]
+						}
+						if hfa.minF64 != nil {
+							hfa.minF64[idx] = ofa.minF64[i]
+						}
+						if hfa.minDec != nil {
+							hfa.minDec[idx] = ofa.minDec[i]
+						}
+					}
+				}
+				if ofa.hasMax != nil && ofa.hasMax[i] {
+					if hfa.hasMax[idx] {
+						if hfa.isFloat {
+							if ofa.maxF64[i] > hfa.maxF64[idx] {
+								hfa.maxF64[idx] = ofa.maxF64[i]
+							}
+						} else if hfa.isDecimal {
+							if ofa.maxDec[i].Less(hfa.maxDec[idx]) {
+								// other is less, keep ours
+							} else {
+								hfa.maxDec[idx] = ofa.maxDec[i]
+							}
+						} else {
+							if ofa.maxI64[i] > hfa.maxI64[idx] {
+								hfa.maxI64[idx] = ofa.maxI64[i]
+							}
+						}
+					} else {
+						hfa.hasMax[idx] = true
+						if hfa.maxI64 != nil {
+							hfa.maxI64[idx] = ofa.maxI64[i]
+						}
+						if hfa.maxF64 != nil {
+							hfa.maxF64[idx] = ofa.maxF64[i]
+						}
+						if hfa.maxDec != nil {
+							hfa.maxDec[idx] = ofa.maxDec[i]
+						}
+					}
+				}
+			}
+		} else {
+			// New group: append to all flat arrays
+			newIdx := int32(len(h.intGroupStates))
+			h.intGroupIndex.Put(oGS.intKey, newIdx)
+			h.intGroupStates = append(h.intGroupStates, oGS)
+			for ai := range h.intFlatAccs {
+				hfa := &h.intFlatAccs[ai]
+				ofa := &o.intFlatAccs[ai]
+				hfa.count = append(hfa.count, ofa.count[i])
+				if hfa.sumI64 != nil {
+					hfa.sumI64 = append(hfa.sumI64, ofa.sumI64[i])
+				}
+				if hfa.sumF64 != nil {
+					hfa.sumF64 = append(hfa.sumF64, ofa.sumF64[i])
+				}
+				if hfa.sumDec != nil {
+					hfa.sumDec = append(hfa.sumDec, ofa.sumDec[i])
+				}
+				if hfa.minI64 != nil {
+					hfa.minI64 = append(hfa.minI64, ofa.minI64[i])
+				}
+				if hfa.maxI64 != nil {
+					hfa.maxI64 = append(hfa.maxI64, ofa.maxI64[i])
+				}
+				if hfa.minF64 != nil {
+					hfa.minF64 = append(hfa.minF64, ofa.minF64[i])
+				}
+				if hfa.maxF64 != nil {
+					hfa.maxF64 = append(hfa.maxF64, ofa.maxF64[i])
+				}
+				if hfa.minDec != nil {
+					hfa.minDec = append(hfa.minDec, ofa.minDec[i])
+				}
+				if hfa.maxDec != nil {
+					hfa.maxDec = append(hfa.maxDec, ofa.maxDec[i])
+				}
+				if hfa.hasMin != nil {
+					hfa.hasMin = append(hfa.hasMin, ofa.hasMin[i])
+				}
+				if hfa.hasMax != nil {
+					hfa.hasMax = append(hfa.hasMax, ofa.hasMax[i])
+				}
+			}
 		}
 	}
 }

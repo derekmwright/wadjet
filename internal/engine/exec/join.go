@@ -1172,6 +1172,11 @@ func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 		if keyIdx := h.probeKeyIdx[0]; keyIdx >= 0 {
 			pairs = p.inlineIntProbe(in.Columns[keyIdx], in, pairs)
 		}
+	} else if h.useDualIntKey && h.JoinType == InnerJoin && h.arenaMatched == nil {
+		h.resolveProbeKeyIdx(in)
+		if h.probeKeyIdx[0] >= 0 && h.probeKeyIdx[1] >= 0 {
+			pairs = p.inlineDualIntProbe(in.Columns[h.probeKeyIdx[0]], in.Columns[h.probeKeyIdx[1]], in, pairs)
+		}
 	} else {
 		probeRow := func(row int) {
 			buildMatches := p.lookupBuild(in, row)
@@ -1370,6 +1375,251 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 				}
 				for ref := head; ref >= 0; ref = arenaNext[ref] {
 					pairs = append(pairs, matchPair{probeRow: i, ref: arena[ref], matched: true})
+				}
+			}
+		}
+	}
+	return pairs
+}
+
+// inlineDualIntProbe is the fast probe path for dual int key inner joins.
+// Inlines composite hash computation + chain traversal with typed key verification,
+// eliminating per-row lookupBuild/dualIntKeyFromVectors function call overhead.
+func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.RecordBatch, pairs []matchPair) []matchPair {
+	h := p.join
+	arena := h.arena
+	arenaNext := h.arenaNext
+	idx := h.intIndex
+	bloom := h.bloom
+	bloomMask := h.bloomMask
+	hasBloom := bloom != nil
+	buildBatches := h.buildBatches
+	bkIdx0, bkIdx1 := h.buildKeyIdx[0], h.buildKeyIdx[1]
+
+	// Pre-extract typed probe data arrays (branch predictor handles per-loop dispatch).
+	var pd0i32 []int32
+	var pd0i64 []int64
+	var pd1i32 []int32
+	var pd1i64 []int64
+	switch col0.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		pd0i32 = col0.Int32Data
+	default:
+		pd0i64 = col0.Int64Data
+	}
+	switch col1.Type {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		pd1i32 = col1.Int32Data
+	default:
+		pd1i64 = col1.Int64Data
+	}
+
+	// Cache build-side typed arrays for chain verification (switch on batch boundary).
+	var bd0i32 []int32
+	var bd0i64 []int64
+	var bd1i32 []int32
+	var bd1i64 []int64
+	prevBatch := int32(-1)
+
+	switchBuild := func(batchIdx int32) {
+		bc0 := buildBatches[batchIdx].Columns[bkIdx0]
+		bc1 := buildBatches[batchIdx].Columns[bkIdx1]
+		switch bc0.Type {
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+			bd0i32 = bc0.Int32Data
+			bd0i64 = nil
+		default:
+			bd0i64 = bc0.Int64Data
+			bd0i32 = nil
+		}
+		switch bc1.Type {
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+			bd1i32 = bc1.Int32Data
+			bd1i64 = nil
+		default:
+			bd1i64 = bc1.Int64Data
+			bd1i32 = nil
+		}
+		prevBatch = batchIdx
+	}
+
+	noNulls := !col0.Nulls.HasNulls() && !col1.Nulls.HasNulls()
+
+	if in.Sel != nil {
+		if noNulls {
+			for _, si := range in.Sel {
+				var a, b int64
+				if pd0i32 != nil {
+					a = int64(pd0i32[si])
+				} else {
+					a = pd0i64[si]
+				}
+				if pd1i32 != nil {
+					b = int64(pd1i32[si])
+				} else {
+					b = pd1i64[si]
+				}
+				ck := dualIntHash(a, b)
+				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(ck)) {
+					continue
+				}
+				head, ok := idx.Get(ck)
+				if !ok {
+					continue
+				}
+				for ri := head; ri >= 0; ri = arenaNext[ri] {
+					r := arena[ri]
+					if r.batchIdx != prevBatch {
+						switchBuild(r.batchIdx)
+					}
+					var ba, bb int64
+					if bd0i32 != nil {
+						ba = int64(bd0i32[r.rowIdx])
+					} else {
+						ba = bd0i64[r.rowIdx]
+					}
+					if bd1i32 != nil {
+						bb = int64(bd1i32[r.rowIdx])
+					} else {
+						bb = bd1i64[r.rowIdx]
+					}
+					if ba == a && bb == b {
+						pairs = append(pairs, matchPair{probeRow: int(si), ref: r, matched: true})
+					}
+				}
+			}
+		} else {
+			for _, si := range in.Sel {
+				if col0.Nulls.IsNullFast(int(si)) || col1.Nulls.IsNullFast(int(si)) {
+					continue
+				}
+				var a, b int64
+				if pd0i32 != nil {
+					a = int64(pd0i32[si])
+				} else {
+					a = pd0i64[si]
+				}
+				if pd1i32 != nil {
+					b = int64(pd1i32[si])
+				} else {
+					b = pd1i64[si]
+				}
+				ck := dualIntHash(a, b)
+				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(ck)) {
+					continue
+				}
+				head, ok := idx.Get(ck)
+				if !ok {
+					continue
+				}
+				for ri := head; ri >= 0; ri = arenaNext[ri] {
+					r := arena[ri]
+					if r.batchIdx != prevBatch {
+						switchBuild(r.batchIdx)
+					}
+					var ba, bb int64
+					if bd0i32 != nil {
+						ba = int64(bd0i32[r.rowIdx])
+					} else {
+						ba = bd0i64[r.rowIdx]
+					}
+					if bd1i32 != nil {
+						bb = int64(bd1i32[r.rowIdx])
+					} else {
+						bb = bd1i64[r.rowIdx]
+					}
+					if ba == a && bb == b {
+						pairs = append(pairs, matchPair{probeRow: int(si), ref: r, matched: true})
+					}
+				}
+			}
+		}
+	} else {
+		if noNulls {
+			for i := 0; i < in.Len; i++ {
+				var a, b int64
+				if pd0i32 != nil {
+					a = int64(pd0i32[i])
+				} else {
+					a = pd0i64[i]
+				}
+				if pd1i32 != nil {
+					b = int64(pd1i32[i])
+				} else {
+					b = pd1i64[i]
+				}
+				ck := dualIntHash(a, b)
+				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(ck)) {
+					continue
+				}
+				head, ok := idx.Get(ck)
+				if !ok {
+					continue
+				}
+				for ri := head; ri >= 0; ri = arenaNext[ri] {
+					r := arena[ri]
+					if r.batchIdx != prevBatch {
+						switchBuild(r.batchIdx)
+					}
+					var ba, bb int64
+					if bd0i32 != nil {
+						ba = int64(bd0i32[r.rowIdx])
+					} else {
+						ba = bd0i64[r.rowIdx]
+					}
+					if bd1i32 != nil {
+						bb = int64(bd1i32[r.rowIdx])
+					} else {
+						bb = bd1i64[r.rowIdx]
+					}
+					if ba == a && bb == b {
+						pairs = append(pairs, matchPair{probeRow: i, ref: r, matched: true})
+					}
+				}
+			}
+		} else {
+			for i := 0; i < in.Len; i++ {
+				if col0.Nulls.IsNullFast(i) || col1.Nulls.IsNullFast(i) {
+					continue
+				}
+				var a, b int64
+				if pd0i32 != nil {
+					a = int64(pd0i32[i])
+				} else {
+					a = pd0i64[i]
+				}
+				if pd1i32 != nil {
+					b = int64(pd1i32[i])
+				} else {
+					b = pd1i64[i]
+				}
+				ck := dualIntHash(a, b)
+				if hasBloom && !bloomContains(bloom, bloomMask, bloomHashInt(ck)) {
+					continue
+				}
+				head, ok := idx.Get(ck)
+				if !ok {
+					continue
+				}
+				for ri := head; ri >= 0; ri = arenaNext[ri] {
+					r := arena[ri]
+					if r.batchIdx != prevBatch {
+						switchBuild(r.batchIdx)
+					}
+					var ba, bb int64
+					if bd0i32 != nil {
+						ba = int64(bd0i32[r.rowIdx])
+					} else {
+						ba = bd0i64[r.rowIdx]
+					}
+					if bd1i32 != nil {
+						bb = int64(bd1i32[r.rowIdx])
+					} else {
+						bb = bd1i64[r.rowIdx]
+					}
+					if ba == a && bb == b {
+						pairs = append(pairs, matchPair{probeRow: i, ref: r, matched: true})
+					}
 				}
 			}
 		}
