@@ -89,6 +89,8 @@ type HashAggregate struct {
 	batchAggKernels []kernel.BatchAggKernel // batch-level kernels (scalar aggregate fast path)
 	scalarAccs     []kernel.Accumulator    // accumulators for scalar aggregate fast path
 	isScalarAgg    bool                    // true when len(GroupByCols)==0 and all aggs are batch-able
+	aggF64Extract  []float64Extractor      // pre-resolved float64 extractors per agg column (variance, corr, etc.)
+	aggF64Extract2 []float64Extractor      // pre-resolved float64 extractors for second column (corr, covar)
 
 	// Single-column integer GROUP BY fast path: uses intHashTable
 	// instead of serializing keys to strings and using map[string].
@@ -258,6 +260,29 @@ type minMaxByState struct {
 	isMin    bool
 }
 
+// float64Extractor reads a float64 value from a vector at a given row index.
+// Pre-resolved during Init to eliminate per-row type switches in updateGroup.
+type float64Extractor func(v *batch.Vector, row int) float64
+
+// resolveFloat64Extractor returns a typed float64 extractor for the given column type.
+// Returns nil if the type cannot be converted to float64.
+func resolveFloat64Extractor(typ batch.TypeID) float64Extractor {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp:
+		return func(v *batch.Vector, row int) float64 { return float64(v.Int64Data[row]) }
+	case batch.TypeInt32:
+		return func(v *batch.Vector, row int) float64 { return float64(v.Int32Data[row]) }
+	case batch.TypeFloat64:
+		return func(v *batch.Vector, row int) float64 { return v.Float64Data[row] }
+	case batch.TypeFloat32:
+		return func(v *batch.Vector, row int) float64 { return float64(v.Float32Data[row]) }
+	case batch.TypeDecimal:
+		return func(v *batch.Vector, row int) float64 { return v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale) }
+	default:
+		return nil
+	}
+}
+
 func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 	return &HashAggregate{
 		GroupByCols: groupByCols,
@@ -368,6 +393,34 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			h.aggColIdx2[i] = b.ColumnIndex(agg.InputCol2)
 		}
 	}
+
+	// Pre-resolve float64 extractors for aggregates that need per-row numeric conversion
+	// (variance, stddev, corr, covar, percentile, mode, median, min_by, max_by).
+	// This eliminates the per-row type switch in updateGroup.
+	h.aggF64Extract = make([]float64Extractor, len(h.Aggs))
+	h.aggF64Extract2 = make([]float64Extractor, len(h.Aggs))
+	for i, agg := range h.Aggs {
+		switch agg.Func {
+		case AggStddev, AggVariance, AggStddevPop, AggVarPop,
+			AggPercentileCont, AggPercentileDisc, AggMedian, AggMode:
+			if idx := h.aggColIdx[i]; idx >= 0 {
+				h.aggF64Extract[i] = resolveFloat64Extractor(b.Columns[idx].Type)
+			}
+		case AggCorr, AggCovarSamp, AggCovarPop:
+			if idx := h.aggColIdx[i]; idx >= 0 {
+				h.aggF64Extract[i] = resolveFloat64Extractor(b.Columns[idx].Type)
+			}
+			if idx := h.aggColIdx2[i]; idx >= 0 {
+				h.aggF64Extract2[i] = resolveFloat64Extractor(b.Columns[idx].Type)
+			}
+		case AggMinBy, AggMaxBy:
+			// Second column is the comparison column (needs float64 conversion)
+			if idx := h.aggColIdx2[i]; idx >= 0 {
+				h.aggF64Extract2[i] = resolveFloat64Extractor(b.Columns[idx].Type)
+			}
+		}
+	}
+
 	h.resolved = true
 
 	// Check if all aggregates use simple kernel updaters (no COUNT(DISTINCT),
@@ -1244,21 +1297,11 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if v.Nulls.IsNullFast(row) {
 				continue
 			}
-			state := gs.extraState[i].(*varianceState)
-			var fval float64
-			switch v.Type {
-			case batch.TypeInt64, batch.TypeTimestamp:
-				fval = float64(v.Int64Data[row])
-			case batch.TypeInt32:
-				fval = float64(v.Int32Data[row])
-			case batch.TypeFloat64:
-				fval = v.Float64Data[row]
-			case batch.TypeFloat32:
-				fval = float64(v.Float32Data[row])
-			default:
+			extract := h.aggF64Extract[i]
+			if extract == nil {
 				continue
 			}
-			state.update(fval)
+			gs.extraState[i].(*varianceState).update(extract(v, row))
 
 		case AggApproxDistinct:
 			idx := h.aggColIdx[i]
@@ -1285,8 +1328,11 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if v1.Nulls.IsNullFast(row) || v2.Nulls.IsNullFast(row) {
 				continue
 			}
-			state := gs.extraState[i].(*covarianceState)
-			state.update(vecToFloat64(v1, row), vecToFloat64(v2, row))
+			e1, e2 := h.aggF64Extract[i], h.aggF64Extract2[i]
+			if e1 == nil || e2 == nil {
+				continue
+			}
+			gs.extraState[i].(*covarianceState).update(e1(v1, row), e2(v2, row))
 
 		case AggPercentileCont, AggPercentileDisc, AggMedian:
 			idx := h.aggColIdx[i]
@@ -1297,8 +1343,11 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if v.Nulls.IsNullFast(row) {
 				continue
 			}
-			state := gs.extraState[i].(*collectState)
-			state.values = append(state.values, vecToFloat64(v, row))
+			extract := h.aggF64Extract[i]
+			if extract == nil {
+				continue
+			}
+			gs.extraState[i].(*collectState).values = append(gs.extraState[i].(*collectState).values, extract(v, row))
 
 		case AggMode:
 			idx := h.aggColIdx[i]
@@ -1309,8 +1358,11 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if v.Nulls.IsNullFast(row) {
 				continue
 			}
-			state := gs.extraState[i].(*collectState)
-			state.values = append(state.values, vecToFloat64(v, row))
+			extract := h.aggF64Extract[i]
+			if extract == nil {
+				continue
+			}
+			gs.extraState[i].(*collectState).values = append(gs.extraState[i].(*collectState).values, extract(v, row))
 
 		case AggMinBy, AggMaxBy:
 			idx1 := h.aggColIdx[i]
@@ -1323,8 +1375,12 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if v1.Nulls.IsNullFast(row) || v2.Nulls.IsNullFast(row) {
 				continue
 			}
+			extract2 := h.aggF64Extract2[i]
+			if extract2 == nil {
+				continue
+			}
 			state := gs.extraState[i].(*minMaxByState)
-			cmpVal := vecToFloat64(v2, row)
+			cmpVal := extract2(v2, row)
 			if !state.hasValue ||
 				(state.isMin && cmpVal < state.bestCmp) ||
 				(!state.isMin && cmpVal > state.bestCmp) {
