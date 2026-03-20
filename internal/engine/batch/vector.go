@@ -94,11 +94,24 @@ type BytesColumn struct {
 
 // NewBytesColumn creates a new BytesColumn with the given capacity.
 // Pre-allocates offsets for positional access (all offsets start at 0 = empty strings).
+// Data arena is pre-sized to capacity*32 bytes (average 32 bytes per string), which
+// eliminates the 2-5 reallocations that would otherwise occur as Data grows from 0.
 func NewBytesColumn(capacity int) BytesColumn {
 	offsets := make([]uint32, capacity+1)
 	return BytesColumn{
 		Offsets: offsets,
-		Data:    make([]byte, 0, capacity*16), // estimate 16 bytes per value
+		Data:    make([]byte, 0, capacity*32),
+	}
+}
+
+// PreAllocBytes ensures the Data arena has at least n bytes of capacity.
+// Use this when the expected total byte size is known (e.g., from Parquet metadata)
+// to avoid reallocations during sequential Set calls.
+func (bc *BytesColumn) PreAllocBytes(n int) {
+	if cap(bc.Data) < n {
+		newData := make([]byte, len(bc.Data), n)
+		copy(newData, bc.Data)
+		bc.Data = newData
 	}
 }
 
