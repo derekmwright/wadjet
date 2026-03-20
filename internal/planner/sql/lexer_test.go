@@ -105,6 +105,37 @@ func TestLexNumber(t *testing.T) {
 	}
 }
 
+func TestLexScientificNotation(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  string
+	}{
+		{"1e10", "1e10"},
+		{"1E10", "1E10"},
+		{"3.14e+2", "3.14e+2"},
+		{"1e-05", "1e-05"},
+		{"2.5E-3", "2.5E-3"},
+		{"1E+0", "1E+0"},
+	} {
+		tokens := collectTokens(tc.input)
+		if tokens[0].typ != TokenNumber {
+			t.Errorf("%s: expected TokenNumber, got %d", tc.input, tokens[0].typ)
+		}
+		if tokens[0].val != tc.want {
+			t.Errorf("%s: expected %q, got %q", tc.input, tc.want, tokens[0].val)
+		}
+	}
+
+	// Verify "1e-05 + 2" lexes as number, plus, number
+	tokens := collectTokens("1e-05 + 2")
+	if len(tokens) != 4 { // number, plus, number, EOF
+		t.Fatalf("expected 4 tokens, got %d", len(tokens))
+	}
+	if tokens[0].val != "1e-05" {
+		t.Errorf("expected '1e-05', got %q", tokens[0].val)
+	}
+}
+
 func TestLexCreateFunction(t *testing.T) {
 	tokens := collectTokens("CREATE OR REPLACE FUNCTION weighted(val, weight) AS")
 	expected := []TokenType{

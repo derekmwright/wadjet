@@ -96,7 +96,7 @@ func main() {
 		loadData(ctx, db, sf)
 	}
 	if !*dataOnly {
-		runBenchmark(ctx, db, *runs, *profDir)
+		runBenchmark(ctx, db, sf, *runs, *profDir)
 	}
 
 	if *memProf != "" {
@@ -328,7 +328,7 @@ func loadData(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor) {
 	log.Printf("Data loaded: %d rows in %v (%.0f rows/s)", rows, time.Since(start), float64(rows)/time.Since(start).Seconds())
 }
 
-func runBenchmark(ctx context.Context, db *wadjet.DB, runs int, profDir string) {
+func runBenchmark(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor, runs int, profDir string) {
 	queryNums := make([]int, 0, len(tpch.TPCHQueries))
 	for n := range tpch.TPCHQueries {
 		queryNums = append(queryNums, n)
@@ -356,7 +356,7 @@ func runBenchmark(ctx context.Context, db *wadjet.DB, runs int, profDir string) 
 		var totalElapsed time.Duration
 
 		for _, qNum := range queryNums {
-			q := tpch.TPCHQueries[qNum]
+			q := tpch.GetQuery(qNum, sf)
 			runtime.GC()
 
 			var memBefore, memAfter runtime.MemStats

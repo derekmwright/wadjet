@@ -400,7 +400,7 @@ func lexParseDescribe(sql string, l *lexer) (*ParsedQuery, error) {
 		Type: QueryDescribe,
 		SQL:  sql,
 		Describe: &DescribeInfo{
-			TableName: tok.val,
+			TableName: strings.ToLower(tok.val),
 		},
 	}, nil
 }
@@ -430,7 +430,7 @@ func lexParseShow(sql string, l *lexer) (*ParsedQuery, error) {
 			Type: QueryDescribe,
 			SQL:  sql,
 			Describe: &DescribeInfo{
-				TableName: nameTok.val,
+				TableName: strings.ToLower(nameTok.val),
 			},
 		}, nil
 

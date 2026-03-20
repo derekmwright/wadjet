@@ -445,6 +445,41 @@ func TestPGWireShowColumns(t *testing.T) {
 	client.terminate()
 }
 
+// TestPGWireDescribeAfterCreateTable reproduces issue #6: DESCRIBE returns
+// "table not found" for tables created via pgwire CREATE TABLE.
+func TestPGWireDescribeAfterCreateTable(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	// Create table via pgwire SQL
+	_, _, tag := client.simpleQuery("CREATE TABLE findings (id INT64, tenant_id STRING, severity STRING NOT NULL) PARTITION BY (tenant_id)")
+	t.Logf("CREATE TABLE: tag=%s", tag)
+
+	// DESCRIBE should find the table
+	columns, rows, tag := client.simpleQuery("DESCRIBE findings")
+	t.Logf("DESCRIBE findings: columns=%v rows=%v tag=%s", columns, rows, tag)
+	if len(rows) < 3 {
+		t.Errorf("expected at least 3 rows from DESCRIBE, got %d", len(rows))
+	}
+
+	// SHOW COLUMNS FROM should also work
+	columns, rows, tag = client.simpleQuery("SHOW COLUMNS FROM findings")
+	t.Logf("SHOW COLUMNS FROM findings: columns=%v rows=%v tag=%s", columns, rows, tag)
+	if len(rows) < 3 {
+		t.Errorf("expected at least 3 rows from SHOW COLUMNS, got %d", len(rows))
+	}
+
+	client.terminate()
+}
+
 func TestPGWireConcurrentConnections(t *testing.T) {
 	db := setupTestDB(t)
 	srv := startTestServer(t, db)

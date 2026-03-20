@@ -258,6 +258,9 @@ func TestParseDescribe(t *testing.T) {
 		{"describe users;", "users"},
 		{"SHOW COLUMNS FROM events", "events"},
 		{"show columns from users;", "users"},
+		{"DESCRIBE Events", "events"},     // case normalization
+		{"DESC Findings", "findings"},     // case normalization
+		{"SHOW COLUMNS FROM MyTable", "mytable"}, // case normalization
 	}
 
 	for _, tt := range tests {

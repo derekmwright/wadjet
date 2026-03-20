@@ -2,8 +2,10 @@
 package wadjet
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 
@@ -242,14 +244,26 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 }
 
 func (db *DB) describe(ctx context.Context, tableName string) (*QueryResult, error) {
+	tableName = strings.ToLower(tableName)
 	table, err := db.catalog.GetTable(ctx, tableName)
 	if err != nil {
+		// Fallback: discover schema from Parquet files in object storage.
+		// This handles cases where catalog metadata was lost (e.g., restart
+		// without persistent KV) but data files still exist.
+		if schema, discoverErr := db.discoverTableSchema(ctx, tableName); discoverErr == nil {
+			return db.describeSchema(tableName, schema, nil), nil
+		}
 		return nil, fmt.Errorf("table %q: %w", tableName, err)
 	}
 
+	return db.describeSchema(tableName, table.Schema, table.PartitionKeys), nil
+}
+
+// describeSchema formats a schema as a DESCRIBE result.
+func (db *DB) describeSchema(tableName string, schema parquet.Schema, partitionKeys []string) *QueryResult {
 	columns := []string{"column_name", "type", "nullable"}
-	rows := make([]map[string]any, len(table.Schema.Columns))
-	for i, col := range table.Schema.Columns {
+	rows := make([]map[string]any, len(schema.Columns))
+	for i, col := range schema.Columns {
 		nullable := "NO"
 		if col.Nullable {
 			nullable = "YES"
@@ -261,8 +275,7 @@ func (db *DB) describe(ctx context.Context, tableName string) (*QueryResult, err
 		}
 	}
 
-	// Add partition key info
-	if len(table.PartitionKeys) > 0 {
+	if len(partitionKeys) > 0 {
 		rows = append(rows, map[string]any{
 			"column_name": "",
 			"type":        "",
@@ -270,7 +283,7 @@ func (db *DB) describe(ctx context.Context, tableName string) (*QueryResult, err
 		})
 		rows = append(rows, map[string]any{
 			"column_name": "Partition Keys",
-			"type":        strings.Join(table.PartitionKeys, ", "),
+			"type":        strings.Join(partitionKeys, ", "),
 			"nullable":    "",
 		})
 	}
@@ -278,7 +291,36 @@ func (db *DB) describe(ctx context.Context, tableName string) (*QueryResult, err
 	return &QueryResult{
 		Columns: columns,
 		Rows:    rows,
-	}, nil
+	}
+}
+
+// discoverTableSchema reads schema from the first Parquet file found for a table.
+func (db *DB) discoverTableSchema(ctx context.Context, tableName string) (parquet.Schema, error) {
+	prefix := "tables/" + tableName + "/"
+	objects, err := db.store.List(ctx, db.bucket, objstore.ListOptions{Prefix: prefix})
+	if err != nil {
+		return parquet.Schema{}, err
+	}
+	for _, obj := range objects {
+		if !strings.HasSuffix(obj.Key, ".parquet") {
+			continue
+		}
+		rc, _, err := db.store.Get(ctx, db.bucket, obj.Key)
+		if err != nil {
+			continue
+		}
+		data, readErr := io.ReadAll(rc)
+		rc.Close()
+		if readErr != nil {
+			continue
+		}
+		rdr, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			continue
+		}
+		return rdr.Schema(), nil
+	}
+	return parquet.Schema{}, fmt.Errorf("no parquet files found for table %q", tableName)
 }
 
 // deriveColumns extracts ordered column names from the SELECT projection.

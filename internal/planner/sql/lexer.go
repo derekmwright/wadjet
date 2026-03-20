@@ -628,8 +628,9 @@ func lexString(l *lexer) stateFn {
 	}
 }
 
-// lexNumber scans an integer or decimal number.
+// lexNumber scans an integer, decimal, or scientific notation number.
 // The first digit has already been consumed by lexStart.
+// Accepts: 123, 3.14, 1e10, 1E-5, 3.14e+2
 func lexNumber(l *lexer) stateFn {
 	seenDot := false
 	for {
@@ -644,6 +645,16 @@ func lexNumber(l *lexer) stateFn {
 			continue
 		}
 		break
+	}
+	// Scientific notation: e/E followed by optional +/- and digits
+	if r := l.peek(); r == 'e' || r == 'E' {
+		l.next() // consume e/E
+		if r := l.peek(); r == '+' || r == '-' {
+			l.next() // consume sign
+		}
+		for l.peek() >= '0' && l.peek() <= '9' {
+			l.next()
+		}
 	}
 	l.emit(TokenNumber)
 	return nil
