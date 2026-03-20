@@ -3891,10 +3891,10 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 
 		// Apply delete markers: skip rows marked for deletion
 		if delSet := inner.deleteMarkers[file.Path]; len(delSet) > 0 {
-			sel := make([]uint16, 0, b.Len)
+			sel := make([]uint32, 0, b.Len)
 			for i := 0; i < b.Len; i++ {
 				if !delSet[int64(i)] {
-					sel = append(sel, uint16(i))
+					sel = append(sel, uint32(i))
 				}
 			}
 			if len(sel) == 0 {

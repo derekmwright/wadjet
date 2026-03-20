@@ -1142,7 +1142,7 @@ type matchPair struct {
 type HashJoinProbe struct {
 	join       *HashJoin
 	pairsBuf   []matchPair // reusable buffer to avoid per-batch allocation
-	semiSelBuf []uint16    // reusable selection vector for semi/anti join output
+	semiSelBuf []uint32    // reusable selection vector for semi/anti join output
 	lookupBuf  []buildRef  // reusable buffer for lookupBuild results
 	indexBuf   []int       // reusable buffer for probe-side gather indices
 	keyBuf     []byte      // per-probe key serialization buffer (avoids race on shared h.keyBuf)
@@ -1674,7 +1674,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 // Uses a selection vector on the input batch to avoid copying rows.
 func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if cap(p.semiSelBuf) < in.Len {
-		p.semiSelBuf = make([]uint16, 0, in.Len)
+		p.semiSelBuf = make([]uint32, 0, in.Len)
 	}
 	sel := p.semiSelBuf[:0]
 
@@ -1703,7 +1703,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			checkIntRow := func(row int) {
 				if hasNulls && keyCol.Nulls.IsNullFast(row) {
 					if !isSemi {
-						sel = append(sel, uint16(row))
+						sel = append(sel, uint32(row))
 					}
 					return
 				}
@@ -1716,14 +1716,14 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 				// Bloom filter pre-check
 				if hasBloom && !h.bloomMayContain(bloomHashInt(key)) {
 					if !isSemi {
-						sel = append(sel, uint16(row))
+						sel = append(sel, uint32(row))
 					}
 					return
 				}
 				_, exists := h.intIndex.Get(key)
 				emit := (isSemi && exists) || (!isSemi && !exists)
 				if emit {
-					sel = append(sel, uint16(row))
+					sel = append(sel, uint32(row))
 				}
 			}
 
@@ -1764,7 +1764,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			checkRow := func(row int) {
 				if hasNulls && keyCol.Nulls.IsNullFast(row) {
 					if !isSemi {
-						sel = append(sel, uint16(row))
+						sel = append(sel, uint32(row))
 					}
 					return
 				}
@@ -1776,7 +1776,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 				}
 				if hasBloom && !h.bloomMayContain(bloomHashInt(key)) {
 					if !isSemi {
-						sel = append(sel, uint16(row))
+						sel = append(sel, uint32(row))
 					}
 					return
 				}
@@ -1787,7 +1787,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 					if e.key == intHashEmpty {
 						// Key not in table — no match possible
 						if !isSemi {
-							sel = append(sel, uint16(row))
+							sel = append(sel, uint32(row))
 						}
 						return
 					}
@@ -1803,7 +1803,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 						}
 						emit := (isSemi && hasMatch) || (!isSemi && !hasMatch)
 						if emit {
-							sel = append(sel, uint16(row))
+							sel = append(sel, uint32(row))
 						}
 						return
 					}
@@ -1844,7 +1844,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			}
 			emit := (isSemi && hasMatch) || (!isSemi && !hasMatch)
 			if emit {
-				sel = append(sel, uint16(row))
+				sel = append(sel, uint32(row))
 			}
 		}
 

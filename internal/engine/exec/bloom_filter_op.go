@@ -20,7 +20,7 @@ type BloomFilterOp struct {
 	useDualIntKey bool     // two-column integer fast path
 	keyIdx        []int    // resolved column indices (lazy)
 	resolved      bool
-	selBuf        []uint16 // scratch for selection vector
+	selBuf        []uint32 // scratch for selection vector
 	keyBuf        []byte   // scratch for multi-column key serialization
 }
 
@@ -42,7 +42,7 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 
 	activeLen := in.ActiveLen()
 	if cap(op.selBuf) < activeLen {
-		op.selBuf = make([]uint16, 0, activeLen)
+		op.selBuf = make([]uint32, 0, activeLen)
 	}
 	sel := op.selBuf[:0]
 
@@ -86,14 +86,14 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 					data := col.Int32Data
 					for i := 0; i < in.Len; i++ {
 						if bloomContains(op.bloom, op.bloomMask, bloomHashInt(int64(data[i]))) {
-							sel = append(sel, uint16(i))
+							sel = append(sel, uint32(i))
 						}
 					}
 				default:
 					data := col.Int64Data
 					for i := 0; i < in.Len; i++ {
 						if bloomContains(op.bloom, op.bloomMask, bloomHashInt(data[i])) {
-							sel = append(sel, uint16(i))
+							sel = append(sel, uint32(i))
 						}
 					}
 				}
@@ -104,7 +104,7 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 					}
 					key, ok := intKeyFromVector(col, i)
 					if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(key)) {
-						sel = append(sel, uint16(i))
+						sel = append(sel, uint32(i))
 					}
 				}
 			}
@@ -135,14 +135,14 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 					a := intValFromCol(col0, i)
 					b := intValFromCol(col1, i)
 					if bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
-						sel = append(sel, uint16(i))
+						sel = append(sel, uint32(i))
 					}
 				}
 			} else {
 				for i := 0; i < in.Len; i++ {
 					a, b, ok := dualIntKeyFromVectors(col0, col1, i)
 					if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
-						sel = append(sel, uint16(i))
+						sel = append(sel, uint32(i))
 					}
 				}
 			}
@@ -158,7 +158,7 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 		} else {
 			for i := 0; i < in.Len; i++ {
 				if op.probeKeyHash(in, i) {
-					sel = append(sel, uint16(i))
+					sel = append(sel, uint32(i))
 				}
 			}
 		}

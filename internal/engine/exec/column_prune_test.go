@@ -75,7 +75,7 @@ func TestColumnPrune_SelectionVector(t *testing.T) {
 		{"id": int64(3), "extra": "c"},
 	}
 	b := batch.FromRows(schema, rows)
-	b.Sel = []uint16{0, 2} // only rows 0 and 2
+	b.Sel = []uint32{0, 2} // only rows 0 and 2
 
 	prune := NewColumnPrune([]string{"id"})
 	prune.Init(context.Background())

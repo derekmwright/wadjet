@@ -32,7 +32,7 @@ const (
 // Filter is a UnaryOperator that filters rows using a selection vector.
 type Filter struct {
 	Pred   Predicate
-	selBuf []uint16 // reusable selection vector to avoid per-batch allocation
+	selBuf []uint32 // reusable selection vector to avoid per-batch allocation
 }
 
 func NewFilter(pred Predicate) *Filter {
@@ -43,7 +43,7 @@ func (f *Filter) Init(_ context.Context) error { return nil }
 
 func (f *Filter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if cap(f.selBuf) < in.Len {
-		f.selBuf = make([]uint16, 0, in.Len)
+		f.selBuf = make([]uint32, 0, in.Len)
 	}
 	sel := f.selBuf[:0]
 
@@ -56,7 +56,7 @@ func (f *Filter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Recor
 	} else {
 		for i := 0; i < in.Len; i++ {
 			if f.Pred(in, i) {
-				sel = append(sel, uint16(i))
+				sel = append(sel, uint32(i))
 			}
 		}
 	}
@@ -339,7 +339,7 @@ type KernelFilter struct {
 	Value    any
 	colIdx   int
 	kern     kernel.FilterKernel
-	outSel   []uint16
+	outSel   []uint32
 	resolved bool
 }
 
@@ -362,7 +362,7 @@ func (f *KernelFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch
 			typ := in.Columns[f.colIdx].Type
 			f.kern = kernel.ResolveFilterKernel(typ, toKernelOp(f.Op), f.Value)
 		}
-		f.outSel = make([]uint16, 0, in.Len)
+		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
 	}
 
@@ -394,7 +394,7 @@ type InFilter struct {
 	Negate   bool
 	colIdx   int
 	kern     kernel.FilterKernel
-	outSel   []uint16
+	outSel   []uint32
 	resolved bool
 }
 
@@ -415,7 +415,7 @@ func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 			typ := in.Columns[f.colIdx].Type
 			f.kern = kernel.ResolveInFilterKernel(typ, f.Values, f.Negate)
 		}
-		f.outSel = make([]uint16, 0, in.Len)
+		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
 	}
 	if f.colIdx < 0 || f.kern == nil {
@@ -442,7 +442,7 @@ type LikeFilter struct {
 	Negate   bool
 	colIdx   int
 	kern     kernel.FilterKernel
-	outSel   []uint16
+	outSel   []uint32
 	resolved bool
 }
 
@@ -462,7 +462,7 @@ func (f *LikeFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.R
 		if f.colIdx >= 0 {
 			f.kern = kernel.ResolveLikeFilterKernel(f.Pattern, f.Negate)
 		}
-		f.outSel = make([]uint16, 0, in.Len)
+		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
 	}
 	if f.colIdx < 0 || f.kern == nil {
@@ -592,7 +592,7 @@ func (f *ChainFilter) Clone() UnaryOperator {
 // Both branches run on the same input batch; results are merged with dedup.
 type OrFilter struct {
 	Left, Right UnaryOperator
-	mergeBuf    []uint16
+	mergeBuf    []uint32
 }
 
 func NewOrFilter(left, right UnaryOperator) *OrFilter {
@@ -621,7 +621,7 @@ func (f *OrFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 	if err != nil {
 		return nil, err
 	}
-	var leftSel []uint16
+	var leftSel []uint32
 	if leftResult != nil {
 		leftSel = leftResult.Sel
 	}
@@ -633,7 +633,7 @@ func (f *OrFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 	if err != nil {
 		return nil, err
 	}
-	var rightSel []uint16
+	var rightSel []uint32
 	if rightResult != nil {
 		rightSel = rightResult.Sel
 	}
@@ -654,7 +654,7 @@ func (f *OrFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.R
 	// Merge two sorted selection vectors (both are in ascending order)
 	needed := len(leftSel) + len(rightSel)
 	if cap(f.mergeBuf) < needed {
-		f.mergeBuf = make([]uint16, 0, needed)
+		f.mergeBuf = make([]uint32, 0, needed)
 	}
 	merged := f.mergeBuf[:0]
 	i, j := 0, 0
@@ -727,7 +727,7 @@ type ColColFilter struct {
 	leftIdx  int
 	rightIdx int
 	kern     kernel.ColColFilterKernel
-	outSel   []uint16
+	outSel   []uint32
 	resolved bool
 }
 
@@ -753,7 +753,7 @@ func (f *ColColFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch
 			typ := in.Columns[f.leftIdx].Type
 			f.kern = kernel.ResolveColColFilterKernel(typ, toKernelOp(f.Op))
 		}
-		f.outSel = make([]uint16, 0, in.Len)
+		f.outSel = make([]uint32, 0, in.Len)
 		f.resolved = true
 	}
 

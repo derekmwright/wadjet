@@ -540,11 +540,11 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 
 		// Apply delete markers with row offset adjustment
 		if delSet := inner.deleteMarkers[unit.fileEntry.Path]; len(delSet) > 0 {
-			sel := make([]uint16, 0, b.Len)
+			sel := make([]uint32, 0, b.Len)
 			for i := 0; i < b.Len; i++ {
 				absRow := unit.rgRowOffset + int64(i)
 				if !delSet[absRow] {
-					sel = append(sel, uint16(i))
+					sel = append(sel, uint32(i))
 				}
 			}
 			if len(sel) == 0 {

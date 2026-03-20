@@ -40,7 +40,7 @@ func TestFilterWithSelectionVector(t *testing.T) {
 		{"val": int64(30)},
 		{"val": int64(40)},
 	})
-	b.Sel = []uint16{1, 3} // only 20 and 40
+	b.Sel = []uint32{1, 3} // only 20 and 40
 
 	filter := NewFilter(ColumnCompare("val", OpGt, int64(25)))
 	filter.Init(context.Background())
@@ -540,7 +540,7 @@ func TestProjectWithSelectionVector(t *testing.T) {
 		{"a": 20.0, "b": 7.0},
 		{"a": 30.0, "b": 1.0},
 	})
-	b.Sel = []uint16{0, 2}
+	b.Sel = []uint32{0, 2}
 
 	proj := NewProject([]ProjectColumn{
 		{Name: "a", Type: parquet.TypeFloat64, Expr: ColumnRef("a")},
@@ -752,7 +752,7 @@ func TestDistinctWithSelVector(t *testing.T) {
 		{"val": int64(3)},
 		{"val": int64(1)},
 	})
-	b.Sel = []uint16{0, 2, 3}
+	b.Sel = []uint32{0, 2, 3}
 
 	d := NewDistinct()
 	d.Init(context.Background())

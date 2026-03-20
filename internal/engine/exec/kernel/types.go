@@ -158,11 +158,11 @@ type RowAggUpdater func(acc *Accumulator, vec *batch.Vector, row int)
 
 // BatchAggKernel processes an entire column (or selection) into an accumulator.
 // Used for non-grouped aggregation or pre-aggregated groups.
-type BatchAggKernel func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int)
+type BatchAggKernel func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int)
 
 // FilterKernel evaluates a column against a pre-resolved constant for all rows,
 // returning the indices of matching rows.
-type FilterKernel func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16
+type FilterKernel func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32
 
 // SortCompareKernel compares one row from vector a against one row from vector b.
 // Returns -1, 0, or 1. Null handling is included.

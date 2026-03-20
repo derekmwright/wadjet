@@ -592,7 +592,7 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	// Phase 1: Hash lookup — build group index array.
 	// gi[i] maps iteration index i to its group state index, or -1 for null keys.
 	var gi []int32
-	var sel []uint16
+	var sel []uint32
 	var iterLen int
 	hasNullKeys := false
 
@@ -722,7 +722,7 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 
 	// Phase 1: Hash lookup — build group index array with chain verification.
 	var gi []int32
-	var sel []uint16
+	var sel []uint32
 	var iterLen int
 	hasNullKeys := false
 
@@ -954,7 +954,7 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 
 	// Phase 1: Hash lookup — build group index array.
 	var gi []int32
-	var sel []uint16
+	var sel []uint32
 	var iterLen int
 	hasNullKeys := false
 
@@ -1991,7 +1991,7 @@ func resolveBatchAggKernel(fn AggFunc, colIdx int, b *batch.RecordBatch) kernel.
 	case AggCount:
 		if colIdx < 0 {
 			// COUNT(*) — counts all rows
-			return func(acc *kernel.Accumulator, _ *batch.Vector, sel []uint16, vecLen int) {
+			return func(acc *kernel.Accumulator, _ *batch.Vector, sel []uint32, vecLen int) {
 				if sel != nil {
 					acc.Count += int64(len(sel))
 				} else {

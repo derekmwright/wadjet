@@ -164,7 +164,7 @@ func (s *Sort) finalizeWithSpill() error {
 // sortEntry identifies a row within the accumulated batches by batch and row index.
 type sortEntry struct {
 	batchIdx uint32
-	rowIdx   uint16
+	rowIdx   uint32
 }
 
 // finalizeColumnar sorts using typed column comparisons on an index array.
@@ -182,7 +182,7 @@ func (s *Sort) finalizeColumnar() error {
 			}
 		} else {
 			for i := 0; i < b.Len; i++ {
-				entries = append(entries, sortEntry{batchIdx: uint32(bi), rowIdx: uint16(i)})
+				entries = append(entries, sortEntry{batchIdx: uint32(bi), rowIdx: uint32(i)})
 			}
 		}
 	}
@@ -322,12 +322,12 @@ func (s *Sort) Truncate(n int) {
 			continue
 		}
 		// Truncate this batch
-		sel := make([]uint16, remaining)
+		sel := make([]uint32, remaining)
 		if b.Sel != nil {
 			copy(sel, b.Sel[:remaining])
 		} else {
 			for j := range sel {
-				sel[j] = uint16(j)
+				sel[j] = uint32(j)
 			}
 		}
 		b.Sel = sel

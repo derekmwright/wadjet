@@ -45,14 +45,14 @@ func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Record
 			// Partial skip: trim the front of this batch
 			skip := int(l.Offset - seen)
 			l.seen.Store(l.Offset)
-			sel := make([]uint16, 0, activeLen-int64(skip))
+			sel := make([]uint32, 0, activeLen-int64(skip))
 			if in.Sel != nil {
 				for i := skip; i < len(in.Sel); i++ {
 					sel = append(sel, in.Sel[i])
 				}
 			} else {
 				for i := skip; i < int(activeLen); i++ {
-					sel = append(sel, uint16(i))
+					sel = append(sel, uint32(i))
 				}
 			}
 			in.Sel = sel
@@ -70,7 +70,7 @@ func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Record
 	}
 
 	// Truncate to remaining
-	sel := make([]uint16, 0, remaining)
+	sel := make([]uint32, 0, remaining)
 	if in.Sel != nil {
 		for _, idx := range in.Sel {
 			if int64(len(sel)) >= remaining {
@@ -80,7 +80,7 @@ func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Record
 		}
 	} else {
 		for i := 0; i < int(remaining); i++ {
-			sel = append(sel, uint16(i))
+			sel = append(sel, uint32(i))
 		}
 	}
 
@@ -141,9 +141,9 @@ func (t *TopN) Finalize(ctx context.Context) error {
 		}
 		if b.Len > remaining {
 			// Truncate this batch via selection vector
-			sel := make([]uint16, remaining)
+			sel := make([]uint32, remaining)
 			for j := range sel {
-				sel[j] = uint16(j)
+				sel[j] = uint32(j)
 			}
 			b.Sel = sel
 			t.inner.sorted = t.inner.sorted[:i+1]

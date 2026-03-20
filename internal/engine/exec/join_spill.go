@@ -956,12 +956,12 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 
 // partitionProbeBatch splits a probe batch by partition, writing spilled-partition
 // rows to disk. Returns a selection vector of rows belonging to in-memory partitions.
-func (p *HashJoinProbe) partitionProbeBatch(in *batch.RecordBatch) ([]uint16, error) {
+func (p *HashJoinProbe) partitionProbeBatch(in *batch.RecordBatch) ([]uint32, error) {
 	h := p.join
 	ss := h.spillState
 
 	// Compute partition for each row and separate in-memory vs spilled
-	var inMemSel []uint16
+	var inMemSel []uint32
 	spillRows := make(map[int][]int) // partID → row indices
 
 	iterateRows := func(row int) {
@@ -969,7 +969,7 @@ func (p *HashJoinProbe) partitionProbeBatch(in *batch.RecordBatch) ([]uint16, er
 		if ss.spilledParts[partID] {
 			spillRows[partID] = append(spillRows[partID], row)
 		} else {
-			inMemSel = append(inMemSel, uint16(row))
+			inMemSel = append(inMemSel, uint32(row))
 		}
 	}
 

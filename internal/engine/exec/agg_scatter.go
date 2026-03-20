@@ -75,7 +75,7 @@ func (fa *flatAccumArrays) appendGroup() {
 // sel: if non-nil, data is accessed at sel[i]; if nil, data is accessed at i.
 // n: number of direct rows (used when sel is nil).
 
-func scatterSumInt[T ~int32 | ~int64](sumArr, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint16, n int) {
+func scatterSumInt[T ~int32 | ~int64](sumArr, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		for si := range sel {
@@ -95,7 +95,7 @@ func scatterSumInt[T ~int32 | ~int64](sumArr, countArr []int64, data []T, gi []i
 	}
 }
 
-func scatterSumFloat[T ~float32 | ~float64](sumArr []float64, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint16, n int) {
+func scatterSumFloat[T ~float32 | ~float64](sumArr []float64, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		for si := range sel {
@@ -115,7 +115,7 @@ func scatterSumFloat[T ~float32 | ~float64](sumArr []float64, countArr []int64, 
 	}
 }
 
-func scatterSumDecimal(sumArr []batch.Int128, countArr []int64, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint16, n int) {
+func scatterSumDecimal(sumArr []batch.Int128, countArr []int64, data []batch.Int128, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		for si := range sel {
@@ -135,7 +135,7 @@ func scatterSumDecimal(sumArr []batch.Int128, countArr []int64, data []batch.Int
 	}
 }
 
-func scatterCount(countArr []int64, gi []int32, nulls *batch.Bitmap, sel []uint16, n int) {
+func scatterCount(countArr []int64, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		for si := range sel {
@@ -161,7 +161,7 @@ func scatterCountStar(countArr []int64, gi []int32, n int) {
 	}
 }
 
-func scatterMinInt[T ~int32 | ~int64](minArr []int64, hasMin []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint16, n int) {
+func scatterMinInt[T ~int32 | ~int64](minArr []int64, hasMin []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		for si := range sel {
@@ -187,7 +187,7 @@ func scatterMinInt[T ~int32 | ~int64](minArr []int64, hasMin []bool, data []T, g
 	}
 }
 
-func scatterMinFloat[T ~float32 | ~float64](minArr []float64, hasMin []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint16, n int) {
+func scatterMinFloat[T ~float32 | ~float64](minArr []float64, hasMin []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		for si := range sel {
@@ -213,7 +213,7 @@ func scatterMinFloat[T ~float32 | ~float64](minArr []float64, hasMin []bool, dat
 	}
 }
 
-func scatterMaxInt[T ~int32 | ~int64](maxArr []int64, hasMax []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint16, n int) {
+func scatterMaxInt[T ~int32 | ~int64](maxArr []int64, hasMax []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		for si := range sel {
@@ -239,7 +239,7 @@ func scatterMaxInt[T ~int32 | ~int64](maxArr []int64, hasMax []bool, data []T, g
 	}
 }
 
-func scatterMaxFloat[T ~float32 | ~float64](maxArr []float64, hasMax []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint16, n int) {
+func scatterMaxFloat[T ~float32 | ~float64](maxArr []float64, hasMax []bool, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
 		for si := range sel {
@@ -267,7 +267,7 @@ func scatterMaxFloat[T ~float32 | ~float64](maxArr []float64, hasMax []bool, dat
 
 // scatterFlatAggUpdate dispatches to the right scatter function for one aggregate.
 // Type switch runs once per aggregate per batch, not per row.
-func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batch.Vector, sel []uint16, n int) {
+func scatterFlatAggUpdate(fa *flatAccumArrays, gi []int32, fn AggFunc, col *batch.Vector, sel []uint32, n int) {
 	switch fn {
 	case AggSum, AggAvg:
 		switch col.Type {
