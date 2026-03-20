@@ -1675,7 +1675,8 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		if m.fromProbe {
 			gatherVector(dst, in.Columns[m.srcIdx], probeIndices)
 		} else {
-			gatherBuildVector(dst, m.srcIdx, pairs, p.join.buildBatches)
+			allMatched := p.join.JoinType != LeftJoin && p.join.JoinType != FullOuterJoin
+			gatherBuildVector(dst, m.srcIdx, pairs, p.join.buildBatches, allMatched)
 		}
 	}
 
@@ -2443,162 +2444,284 @@ func (p *HashJoinProbe) leftHasColumn(name string, leftSchema []parquet.Column) 
 // function call and type dispatch overhead vs per-row copyVectorValue.
 // Batch pointer caching and null-free fast paths are inlined (closures don't
 // inline in Go when they capture mutable variables).
-func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBatches []*batch.RecordBatch) {
+//
+// When allMatched is true (inner/right joins), the per-row !pair.matched branch
+// is skipped entirely, generating tighter loops with no null-for-unmatched logic.
+func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBatches []*batch.RecordBatch, allMatched bool) {
 	switch dst.Type {
 	case batch.TypeBool:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BoolData[di] = src.BoolData[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.BoolData[di] = src.BoolData[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BoolData[di] = src.BoolData[si]
+				}
 			}
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int32Data[di] = src.Int32Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Int32Data[di] = src.Int32Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int32Data[di] = src.Int32Data[si]
+				}
 			}
 		}
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int64Data[di] = src.Int64Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Int64Data[di] = src.Int64Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int64Data[di] = src.Int64Data[si]
+				}
 			}
 		}
 	case batch.TypeFloat32:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float32Data[di] = src.Float32Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Float32Data[di] = src.Float32Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float32Data[di] = src.Float32Data[si]
+				}
 			}
 		}
 	case batch.TypeFloat64:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float64Data[di] = src.Float64Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Float64Data[di] = src.Float64Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float64Data[di] = src.Float64Data[si]
+				}
 			}
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BytesData.Set(di, src.BytesData.Value(si))
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.BytesData.Set(di, src.BytesData.Value(si))
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BytesData.Set(di, src.BytesData.Value(si))
+				}
 			}
 		}
 	case batch.TypeDecimal:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				}
 			}
 		}
 	default:
-		for di, pair := range pairs {
-			if !pair.matched {
-				setVectorNull(dst, di)
-			} else {
+		if allMatched {
+			for di, pair := range pairs {
 				buildBatch := buildBatches[pair.ref.batchIdx]
 				copyVectorValue(dst, di, buildBatch.Columns[srcIdx], int(pair.ref.rowIdx))
+			}
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					setVectorNull(dst, di)
+				} else {
+					buildBatch := buildBatches[pair.ref.batchIdx]
+					copyVectorValue(dst, di, buildBatch.Columns[srcIdx], int(pair.ref.rowIdx))
+				}
 			}
 		}
 	}
