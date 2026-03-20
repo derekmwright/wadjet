@@ -1502,17 +1502,30 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 func (h *HashAggregate) outputSchema() []parquet.Column {
 	cols := make([]parquet.Column, 0, len(h.GroupByCols)+len(h.Aggs)+len(h.NullGroupCols))
+
+	// Pre-compute output names: strip table qualifiers unless stripping would
+	// create duplicate column names (e.g., GROUP BY n1.n_name, n2.n_name must
+	// keep qualifiers so downstream projections can distinguish them).
+	outNames := make([]string, len(h.GroupByCols))
+	baseCounts := make(map[string]int, len(h.GroupByCols))
 	for i, name := range h.GroupByCols {
+		base := name
+		if dot := strings.IndexByte(name, '.'); dot >= 0 {
+			base = name[dot+1:]
+		}
+		outNames[i] = base
+		baseCounts[base]++
+	}
+	for i, name := range h.GroupByCols {
+		if baseCounts[outNames[i]] > 1 {
+			outNames[i] = name // keep qualified to avoid ambiguity
+		}
+	}
+
+	for i, name := range outNames {
 		typ := parquet.TypeString // default fallback
 		if i < len(h.groupColTypes) && h.groupColTypes[i] != 0 {
 			typ = parquet.TypeID(h.groupColTypes[i])
-		}
-		// Strip table qualifier (e.g., "e.user_id" → "user_id") so output
-		// column names match the unqualified names expected by downstream
-		// operators and QueryResult. The qualified name is only needed
-		// internally for column resolution via columnIndexFallback.
-		if dot := strings.IndexByte(name, '.'); dot >= 0 {
-			name = name[dot+1:]
 		}
 		cols = append(cols, parquet.Column{Name: name, Type: typ, Nullable: true})
 	}
