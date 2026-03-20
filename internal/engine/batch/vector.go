@@ -123,6 +123,19 @@ func (bc *BytesColumn) BulkSet(dstOffset int, srcData []byte, srcOffsets []uint3
 	}
 }
 
+// BulkCopy copies a contiguous range [srcOff, srcOff+count) from src into
+// dst at [dstOff, dstOff+count). Uses a single Data append + offset arithmetic
+// instead of per-element Set calls, reducing memmove overhead for batch merging.
+func (dst *BytesColumn) BulkCopy(dstOff int, src *BytesColumn, srcOff, count int) {
+	baseOff := uint32(len(dst.Data))
+	srcStart := src.Offsets[srcOff]
+	srcEnd := src.Offsets[srcOff+count]
+	dst.Data = append(dst.Data, src.Data[srcStart:srcEnd]...)
+	for i := 0; i < count; i++ {
+		dst.Offsets[dstOff+i+1] = baseOff + (src.Offsets[srcOff+i+1] - srcStart)
+	}
+}
+
 // Value returns the byte slice at position i.
 func (bc *BytesColumn) Value(i int) []byte {
 	start := bc.Offsets[i]

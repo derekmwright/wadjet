@@ -481,7 +481,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				h.useStrGroupKey = true
 				h.strGroupKeyCol = idx
 				if h.strGroupIndex == nil {
-					h.strGroupIndex = newStrHashTable(4096)
+					h.strGroupIndex = newStrHashTable(htInitSize)
 				}
 				if h.intFlatAccs == nil {
 					h.initFlatAccums(b)
