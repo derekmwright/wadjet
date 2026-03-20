@@ -791,13 +791,11 @@ func (c *pgConn) handleSyntheticSelect(sql, upper string) bool {
 		return true
 	}
 
-	// Any other constant SELECT without FROM — try to return a simple result
-	// e.g. "SELECT 'test'" or "SELECT 1 AS id"
-	// Fall back: return a single row with a generic column
-	c.sendSingleRow([]string{"?column?"}, map[string]any{
-		"?column?": "",
-	})
-	return true
+	// Any other SELECT without FROM — delegate to the query engine which
+	// handles table-less SELECTs via DualSource (e.g., SELECT CURRENT_DATE,
+	// SELECT 1+1, SELECT NOW()). Return false so handleQuery falls through
+	// to db.Query().
+	return false
 }
 
 // handleShow handles SHOW statements from PostgreSQL clients.
