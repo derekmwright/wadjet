@@ -96,9 +96,11 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		return
 	}
 
-	// Save needed columns on join nodes so the physical planner can insert
-	// intermediate projections to drop unneeded columns between joins.
-	if n.Type == NodeJoin && len(needs) > 0 {
+	// Save needed columns on join nodes so the physical planner can apply
+	// OutputFilter to skip gathering unneeded columns. Only set when the
+	// parent explicitly restricts columns (parentNeeds non-empty); otherwise
+	// the join must output all columns (e.g., SELECT * FROM a JOIN b).
+	if n.Type == NodeJoin && len(parentNeeds) > 0 {
 		cols := make([]string, 0, len(needs))
 		for col := range needs {
 			cols = append(cols, col)

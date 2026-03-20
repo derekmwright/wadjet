@@ -1187,6 +1187,13 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 		if i < len(h.groupColTypes) && h.groupColTypes[i] != 0 {
 			typ = parquet.TypeID(h.groupColTypes[i])
 		}
+		// Strip table qualifier (e.g., "e.user_id" → "user_id") so output
+		// column names match the unqualified names expected by downstream
+		// operators and QueryResult. The qualified name is only needed
+		// internally for column resolution via columnIndexFallback.
+		if dot := strings.IndexByte(name, '.'); dot >= 0 {
+			name = name[dot+1:]
+		}
 		cols = append(cols, parquet.Column{Name: name, Type: typ, Nullable: true})
 	}
 	for _, agg := range h.Aggs {
