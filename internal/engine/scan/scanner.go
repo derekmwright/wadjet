@@ -62,7 +62,6 @@ type Scanner struct {
 	// Only used when NOT using ReaderAt path
 	prefetchCh chan prefetchedFile
 
-	mu sync.Mutex // protects Next() for parallel pipeline workers
 }
 
 type prefetchedFile struct {
@@ -203,8 +202,6 @@ func (s *Scanner) startPrefetch(ctx context.Context, idx int) {
 }
 
 func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	for s.fileIdx < len(s.files) {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("scan cancelled: %w", err)

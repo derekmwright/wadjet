@@ -260,6 +260,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 	var firstErr atomic.Value // stores first error
+	var sourceMu sync.Mutex // serializes Source.Next() calls across workers
 
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -283,7 +284,9 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 					}
 				}
 
+				sourceMu.Lock()
 				b, err := p.Source.Next(workerCtx)
+				sourceMu.Unlock()
 				if err != nil {
 					if workerCtx.Err() != nil {
 						return // context cancelled, not a real error
