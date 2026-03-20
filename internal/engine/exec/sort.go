@@ -295,10 +295,7 @@ func (s *Sort) finalizeColumnar() error {
 		out := batch.NewRecordBatch(s.schema, len(chunk))
 		// Column-first iteration for better cache locality on destination arrays.
 		for j := range s.schema {
-			dst := out.Columns[j]
-			for i, e := range chunk {
-				copyVectorValue(dst, i, batches[e.batchIdx].Columns[j], int(e.rowIdx))
-			}
+			gatherSortVector(out.Columns[j], j, chunk, batches)
 		}
 		s.sorted = append(s.sorted, out)
 		pos = end
@@ -482,6 +479,139 @@ func gatherVector(dst, src *batch.Vector, srcRows []int) {
 					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
 				}
 			}
+		}
+	}
+}
+
+// gatherSortVector copies scattered rows from multiple source batches into a
+// contiguous destination vector. Uses the prevBatch caching pattern to avoid
+// redundant batch lookups when consecutive entries reference the same batch.
+// Hoists the type switch outside the loop, eliminating per-row overhead.
+func gatherSortVector(dst *batch.Vector, colIdx int, entries []sortEntry, batches []*batch.RecordBatch) {
+	switch dst.Type {
+	case batch.TypeBool:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.BoolData[di] = src.BoolData[si]
+			}
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Int32Data[di] = src.Int32Data[si]
+			}
+		}
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Int64Data[di] = src.Int64Data[si]
+			}
+		}
+	case batch.TypeFloat32:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Float32Data[di] = src.Float32Data[si]
+			}
+		}
+	case batch.TypeFloat64:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Float64Data[di] = src.Float64Data[si]
+			}
+		}
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+				dst.BytesData.Set(di, nil)
+			} else {
+				dst.BytesData.Set(di, src.BytesData.Value(si))
+			}
+		}
+	case batch.TypeDecimal:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			}
+		}
+	default:
+		for di, e := range entries {
+			copyVectorValue(dst, di, batches[e.batchIdx].Columns[colIdx], int(e.rowIdx))
 		}
 	}
 }
