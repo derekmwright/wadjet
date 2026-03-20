@@ -116,6 +116,11 @@ type HashAggregate struct {
 	useCompactGroupKey bool
 	compactKeys        []string // serialized binary keys for fallback migration
 
+	// Single-column string GROUP BY fast path: uses strHashTable with SoA scatter.
+	// Two-phase approach like consumeBatchIntGroup but with string key hashing.
+	useStrGroupKey bool
+	strGroupKeyCol int // column index for the string group-by key
+
 	// String hash table for generic GROUP BY: open-addressing with arena-stored keys.
 	// Replaces map[string]*groupState to eliminate GC scanning overhead.
 	strGroupIndex  *strHashTable
@@ -426,6 +431,27 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 	}
 
+	// Single-column string GROUP BY fast path:
+	// When grouping by one string/bytes column with simple aggregates,
+	// use two-phase SoA scatter like consumeBatchIntGroup.
+	if !h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey &&
+		!h.isScalarAgg && len(h.GroupByCols) == 1 && allSimpleAggs {
+		idx := h.groupColIdx[0]
+		if idx >= 0 {
+			typ := h.groupColTypes[0]
+			if typ == batch.TypeString || typ == batch.TypeBytes {
+				h.useStrGroupKey = true
+				h.strGroupKeyCol = idx
+				if h.strGroupIndex == nil {
+					h.strGroupIndex = newStrHashTable(4096)
+				}
+				if h.intFlatAccs == nil {
+					h.initFlatAccums(b)
+				}
+			}
+		}
+	}
+
 	// Resolve batch-level kernels for scalar aggregate fast path
 	if len(h.GroupByCols) == 0 {
 		h.batchAggKernels = make([]kernel.BatchAggKernel, len(h.Aggs))
@@ -483,6 +509,12 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	// Multi-column compact GROUP BY fast path
 	if h.useCompactGroupKey {
 		h.consumeBatchCompactGroup(b)
+		return
+	}
+
+	// Single-column string GROUP BY fast path
+	if h.useStrGroupKey {
+		h.consumeBatchStrGroup(b)
 		return
 	}
 
@@ -864,6 +896,103 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 					h.processRow(b, j)
 				}
 				return
+			}
+		}
+	}
+}
+
+// consumeBatchStrGroup is the fast path for single-column string GROUP BY.
+// Uses strHashTable for group lookup with SoA flat accumulator scatter.
+// Two-phase approach matches consumeBatchIntGroup: hash lookup then typed scatter.
+func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
+	gkVec := b.Columns[h.strGroupKeyCol]
+	hasNulls := gkVec.Nulls.HasNulls()
+	strIdx := h.strGroupIndex
+	colIdx := h.aggColIdx
+	nAggs := len(h.Aggs)
+
+	// Phase 1: Hash lookup — build group index array.
+	var gi []int32
+	var sel []uint16
+	var iterLen int
+	hasNullKeys := false
+
+	if b.Sel != nil {
+		iterLen = len(b.Sel)
+		sel = b.Sel
+		gi = h.ensureGroupIndexBuf(iterLen)
+		for si, selIdx := range b.Sel {
+			row := int(selIdx)
+			if hasNulls && gkVec.Nulls.IsNullFast(row) {
+				gi[si] = -1
+				hasNullKeys = true
+				continue
+			}
+			key := gkVec.BytesData.Value(row)
+			gsIdx, found := strIdx.GetOrInsert(key, int32(len(h.strGroupStates)))
+			if found {
+				gi[si] = gsIdx
+			} else {
+				keyStr := string(key)
+				h.strGroupStates = append(h.strGroupStates, &groupState{keyValues: []any{keyStr}})
+				h.keys = append(h.keys, []any{keyStr})
+				h.serializedKeys = append(h.serializedKeys, keyStr)
+				for ai := range h.intFlatAccs {
+					h.intFlatAccs[ai].appendGroup()
+				}
+				gi[si] = gsIdx
+			}
+		}
+	} else {
+		iterLen = b.Len
+		gi = h.ensureGroupIndexBuf(iterLen)
+		for row := 0; row < iterLen; row++ {
+			if hasNulls && gkVec.Nulls.IsNullFast(row) {
+				gi[row] = -1
+				hasNullKeys = true
+				continue
+			}
+			key := gkVec.BytesData.Value(row)
+			gsIdx, found := strIdx.GetOrInsert(key, int32(len(h.strGroupStates)))
+			if found {
+				gi[row] = gsIdx
+			} else {
+				keyStr := string(key)
+				h.strGroupStates = append(h.strGroupStates, &groupState{keyValues: []any{keyStr}})
+				h.keys = append(h.keys, []any{keyStr})
+				h.serializedKeys = append(h.serializedKeys, keyStr)
+				for ai := range h.intFlatAccs {
+					h.intFlatAccs[ai].appendGroup()
+				}
+				gi[row] = gsIdx
+			}
+		}
+	}
+
+	// Phase 2: Per-aggregate typed scatter update using flat arrays.
+	for i := 0; i < nAggs; i++ {
+		fa := &h.intFlatAccs[i]
+		ci := colIdx[i]
+		if ci >= 0 {
+			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
+		} else if h.Aggs[i].Func == AggCount {
+			scatterCountStar(fa.count, gi, iterLen)
+		}
+	}
+
+	// Handle null-key rows via generic path.
+	if hasNullKeys {
+		if sel != nil {
+			for si, selIdx := range sel {
+				if gi[si] < 0 {
+					h.processRow(b, int(selIdx))
+				}
+			}
+		} else {
+			for row := 0; row < iterLen; row++ {
+				if gi[row] < 0 {
+					h.processRow(b, row)
+				}
 			}
 		}
 	}
@@ -2080,6 +2209,58 @@ func (h *HashAggregate) materializeFlatAccums() {
 		return
 	}
 	nAggs := len(h.Aggs)
+	// String GROUP BY uses strGroupStates with SoA flat accumulators.
+	if h.useStrGroupKey {
+		for gi, gs := range h.strGroupStates {
+			if gs.accs == nil {
+				gs.accs = make([]kernel.Accumulator, nAggs)
+			}
+			for ai := range h.intFlatAccs {
+				fa := &h.intFlatAccs[ai]
+				acc := &gs.accs[ai]
+				acc.Count = fa.count[gi]
+				acc.IsFloat = fa.isFloat
+				acc.IsDecimal = fa.isDecimal
+				acc.DecScale = fa.decScale
+				if fa.sumI64 != nil {
+					acc.SumI64 = fa.sumI64[gi]
+				}
+				if fa.sumF64 != nil {
+					acc.SumF64 = fa.sumF64[gi]
+				}
+				if fa.sumDec != nil {
+					acc.SumDec = fa.sumDec[gi]
+				}
+				if fa.minI64 != nil {
+					acc.MinI64 = fa.minI64[gi]
+					acc.HasMin = fa.hasMin[gi]
+				}
+				if fa.maxI64 != nil {
+					acc.MaxI64 = fa.maxI64[gi]
+					acc.HasMax = fa.hasMax[gi]
+				}
+				if fa.minF64 != nil {
+					acc.MinF64 = fa.minF64[gi]
+					acc.HasMin = fa.hasMin[gi]
+				}
+				if fa.maxF64 != nil {
+					acc.MaxF64 = fa.maxF64[gi]
+					acc.HasMax = fa.hasMax[gi]
+				}
+				if fa.minDec != nil {
+					acc.MinDec = fa.minDec[gi]
+					acc.HasMin = fa.hasMin[gi]
+				}
+				if fa.maxDec != nil {
+					acc.MaxDec = fa.maxDec[gi]
+					acc.HasMax = fa.hasMax[gi]
+				}
+			}
+		}
+		h.intFlatAccs = nil
+		h.groupIndexBuf = nil
+		return
+	}
 	for gi, gs := range h.intGroupStates {
 		if gs.accs == nil {
 			gs.accs = make([]kernel.Accumulator, nAggs)
