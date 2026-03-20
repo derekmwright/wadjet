@@ -34,7 +34,9 @@ func TestComputeRequiredColumns_FilterWithColumn(t *testing.T) {
 	filter := NewFilter(scan, []Predicate{
 		{Column: "status", Op: "=", Value: "active"},
 	})
-	computeRequiredColumns(filter)
+	// Wrap in project — bare filters with nil parentNeeds mean "all columns".
+	proj := NewProject(filter, []Projection{{Column: "status"}})
+	computeRequiredColumns(proj)
 
 	needed := map[string]bool{}
 	for _, c := range scan.RequiredColumns {
@@ -54,7 +56,9 @@ func TestComputeRequiredColumns_FilterWithAST(t *testing.T) {
 			Right: &plansql.Lit{Value: "18", Kind: plansql.LitNumber},
 		}},
 	})
-	computeRequiredColumns(filter)
+	// Wrap in project — bare filters with nil parentNeeds mean "all columns".
+	proj := NewProject(filter, []Projection{{Column: "name"}})
+	computeRequiredColumns(proj)
 
 	needed := map[string]bool{}
 	for _, c := range scan.RequiredColumns {
@@ -63,6 +67,9 @@ func TestComputeRequiredColumns_FilterWithAST(t *testing.T) {
 	if !needed["age"] {
 		t.Errorf("expected age in required, got %v", scan.RequiredColumns)
 	}
+	if !needed["name"] {
+		t.Errorf("expected name in required, got %v", scan.RequiredColumns)
+	}
 }
 
 func TestComputeRequiredColumns_Aggregate(t *testing.T) {
@@ -70,6 +77,7 @@ func TestComputeRequiredColumns_Aggregate(t *testing.T) {
 	agg := NewAggregate(scan, []string{"dept"}, []AggExpr{
 		{Func: "sum", InputCol: "amount", OutputCol: "total"},
 	})
+	// Aggregate is a column-restricting node — it creates needs even with nil parent.
 	computeRequiredColumns(agg)
 
 	needed := map[string]bool{}
@@ -87,7 +95,9 @@ func TestComputeRequiredColumns_Aggregate(t *testing.T) {
 func TestComputeRequiredColumns_Sort(t *testing.T) {
 	scan := NewScan("events", "e")
 	sort := NewSort(scan, []OrderExpr{{Column: "ts"}})
-	computeRequiredColumns(sort)
+	// Wrap in project — bare sorts with nil parentNeeds mean "all columns".
+	proj := NewProject(sort, []Projection{{Column: "ts"}, {Column: "val"}})
+	computeRequiredColumns(proj)
 
 	needed := map[string]bool{}
 	for _, c := range scan.RequiredColumns {
@@ -95,6 +105,9 @@ func TestComputeRequiredColumns_Sort(t *testing.T) {
 	}
 	if !needed["ts"] {
 		t.Error("expected ts in required")
+	}
+	if !needed["val"] {
+		t.Error("expected val in required")
 	}
 }
 
@@ -104,8 +117,19 @@ func TestComputeRequiredColumns_Window(t *testing.T) {
 		{Func: "row_number", OutputCol: "rn", InputCol: "amt",
 			PartitionBy: []string{"dept"}, OrderBy: []OrderExpr{{Column: "salary"}}},
 	})
-	computeRequiredColumns(win)
 
+	// Without a parent projection, nil parentNeeds means "all columns" —
+	// scans should read everything (no RequiredColumns set).
+	computeRequiredColumns(win)
+	if len(scan.RequiredColumns) != 0 {
+		t.Errorf("bare window: expected no column restriction, got %v", scan.RequiredColumns)
+	}
+
+	// With a parent projection that restricts columns, the window's refs
+	// should propagate to the scan.
+	scan.RequiredColumns = nil
+	proj := NewProject(win, []Projection{{Column: "amt"}, {Column: "rn"}})
+	computeRequiredColumns(proj)
 	needed := map[string]bool{}
 	for _, c := range scan.RequiredColumns {
 		needed[c] = true
@@ -125,9 +149,19 @@ func TestComputeRequiredColumns_Join(t *testing.T) {
 	left := NewScan("events", "e")
 	right := NewScan("users", "u")
 	join := NewJoin(left, right, "inner", "e.id = u.id")
-	computeRequiredColumns(join)
 
-	// Both sides should have id in required
+	// Without a parent projection, nil parentNeeds means "all columns" —
+	// scans should read everything (no RequiredColumns set).
+	computeRequiredColumns(join)
+	if len(left.RequiredColumns) != 0 {
+		t.Errorf("bare join: expected no column restriction on left, got %v", left.RequiredColumns)
+	}
+
+	// With a parent projection that restricts columns, join keys propagate.
+	left.RequiredColumns = nil
+	right.RequiredColumns = nil
+	proj := NewProject(join, []Projection{{Column: "id"}, {Column: "name"}})
+	computeRequiredColumns(proj)
 	leftNeeded := map[string]bool{}
 	for _, c := range left.RequiredColumns {
 		leftNeeded[c] = true

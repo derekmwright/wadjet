@@ -78,7 +78,51 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 		return
 	}
 
-	// Merge parent needs with this node's own column references
+	// nil parentNeeds means "all columns" (SELECT * semantics). Only
+	// column-restricting nodes (Project, Aggregate) should create a concrete
+	// needs set; pass-through nodes (Sort, Filter, Limit, Distinct) propagate
+	// nil so downstream scans read all columns and joins skip OutputFilter.
+	if parentNeeds == nil {
+		if n.Type == NodeScan {
+			// No RequiredColumns → scan reads all columns.
+			return
+		}
+		// Project and Aggregate restrict output columns — they create the
+		// initial needs set even when the parent wants all columns.
+		if n.Type == NodeProject || n.Type == NodeAggregate {
+			needs := make(map[string]bool, 8)
+			collectNodeColumnRefs(n, needs)
+			if len(needs) > 0 {
+				for _, child := range n.Children {
+					pushColumnNeeds(child, needs)
+				}
+				return
+			}
+		}
+		// SEMI/ANTI join build side never contributes columns to output,
+		// so restrict it even in "all columns" mode.
+		if n.Type == NodeJoin && len(n.Children) == 2 &&
+			(strings.EqualFold(n.JoinType, "semi") || strings.EqualFold(n.JoinType, "anti")) {
+			pushColumnNeeds(n.Children[0], nil)
+			buildNeeds := make(map[string]bool, 8)
+			if n.JoinCond != "" {
+				extractJoinColumnRefs(n.JoinCond, buildNeeds)
+			}
+			if n.JoinFilter != "" {
+				extractJoinColumnRefs(n.JoinFilter, buildNeeds)
+			}
+			pushColumnNeeds(n.Children[1], buildNeeds)
+			return
+		}
+		// All other nodes: propagate nil (all columns) to children.
+		for _, child := range n.Children {
+			pushColumnNeeds(child, nil)
+		}
+		return
+	}
+
+	// parentNeeds is non-nil — parent wants specific columns.
+	// Merge parent needs with this node's own column references.
 	needs := make(map[string]bool, len(parentNeeds)+8)
 	for col := range parentNeeds {
 		needs[col] = true
@@ -97,10 +141,8 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 	}
 
 	// Save needed columns on join nodes so the physical planner can apply
-	// OutputFilter to skip gathering unneeded columns. Only set when the
-	// parent explicitly restricts columns (parentNeeds non-empty); otherwise
-	// the join must output all columns (e.g., SELECT * FROM a JOIN b).
-	if n.Type == NodeJoin && len(parentNeeds) > 0 {
+	// OutputFilter to skip gathering unneeded columns.
+	if n.Type == NodeJoin {
 		cols := make([]string, 0, len(needs))
 		for col := range needs {
 			cols = append(cols, col)
@@ -112,9 +154,7 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 	// Only push join key + filter column refs to the build side, not parent needs.
 	if n.Type == NodeJoin && len(n.Children) == 2 &&
 		(strings.EqualFold(n.JoinType, "semi") || strings.EqualFold(n.JoinType, "anti")) {
-		// Probe side (child[0]) gets full needs
 		pushColumnNeeds(n.Children[0], needs)
-		// Build side (child[1]) only needs join key + filter columns
 		buildNeeds := make(map[string]bool, 8)
 		if n.JoinCond != "" {
 			extractJoinColumnRefs(n.JoinCond, buildNeeds)
@@ -136,9 +176,7 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 			jt == "left" || jt == "right" || jt == "cross" {
 			leftAvail := collectSubtreeColumns(n.Children[0])
 			rightAvail := collectSubtreeColumns(n.Children[1])
-			// Only partition if we have column metadata from both sides
 			if len(leftAvail) > 0 && len(rightAvail) > 0 {
-				// Join keys go to both sides
 				joinRefs := make(map[string]bool, 8)
 				if n.JoinCond != "" {
 					extractJoinColumnRefs(n.JoinCond, joinRefs)
