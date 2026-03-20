@@ -192,16 +192,17 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 }
 
 // arenaAppendInt adds a buildRef to the arena and chains it under an int64 key.
+// Uses Put's return value to get the old chain head in a single hash probe,
+// avoiding a redundant Get + Put double-probe.
 func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
 	idx := int32(len(h.arena))
 	h.arena = append(h.arena, ref)
-	head, ok := h.intIndex.Get(key)
-	if ok {
-		h.arenaNext = append(h.arenaNext, head)
+	old, existed := h.intIndex.Put(key, idx)
+	if existed {
+		h.arenaNext = append(h.arenaNext, old)
 	} else {
 		h.arenaNext = append(h.arenaNext, -1)
 	}
-	h.intIndex.Put(key, idx)
 }
 
 func (h *HashJoin) arenaAppendStr(ref buildRef) {
