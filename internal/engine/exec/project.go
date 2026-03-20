@@ -11,13 +11,17 @@ import (
 type Expression func(b *batch.RecordBatch, row int) any
 
 // ColumnRef creates an expression that reads a column value.
+// The column index is resolved on first call and cached for subsequent rows.
 func ColumnRef(name string) Expression {
+	cachedIdx := -2 // -2 = unresolved
 	return func(b *batch.RecordBatch, row int) any {
-		v := b.ColumnByName(name)
-		if v == nil {
+		if cachedIdx == -2 {
+			cachedIdx = b.ColumnIndex(name)
+		}
+		if cachedIdx < 0 {
 			return nil
 		}
-		return v.GetValue(row)
+		return b.Columns[cachedIdx].GetValue(row)
 	}
 }
 
