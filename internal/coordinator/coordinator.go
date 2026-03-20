@@ -961,13 +961,15 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 // scheduleDownstreamStages materializes inline results and publishes tasks for
 // newly-ready stages. Called from a background goroutine, not the NATS callback.
 func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, completedStageID string, done chan<- struct{}) {
+	// Always materialize the completed stage's inline results, even if no
+	// downstream stages are ready yet. A later stage completion may trigger
+	// downstream scheduling that needs these results already on S3.
+	c.materializeInlineResults(ctx, queryID, completedStageID)
+
 	readyStages := c.tracker.GetReadyStages(queryID)
 	if len(readyStages) == 0 {
 		return
 	}
-
-	// Materialize inline results to S3 for downstream consumption
-	c.materializeInlineResults(ctx, queryID, completedStageID)
 
 	// Collect result files from completed stages
 	depResults := c.collectDepResults(queryID)
@@ -1076,20 +1078,10 @@ func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, sta
 }
 
 // collectDepResults gathers result file paths from completed stages.
+// Uses the tracker's lock-safe CollectResultPaths to avoid reading
+// stage.Results through an unsynchronized shallow copy.
 func (c *Coordinator) collectDepResults(queryID string) map[string][]string {
-	info := c.tracker.Get(queryID)
-	if info == nil {
-		return nil
-	}
-	depResults := make(map[string][]string)
-	for stageID, stage := range info.Stages {
-		for _, r := range stage.Results {
-			if r.Success && r.ResultPath != "" {
-				depResults[stageID] = append(depResults[stageID], r.ResultPath)
-			}
-		}
-	}
-	return depResults
+	return c.tracker.CollectResultPaths(queryID)
 }
 
 // readFinalResults reads the result files from the final (last) stage.

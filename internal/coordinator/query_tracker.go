@@ -256,6 +256,28 @@ func (qt *QueryTracker) UpdateResultPath(queryID, stageID, taskID, path string) 
 	}
 }
 
+// CollectResultPaths gathers all result file paths from completed stages
+// under a single lock acquisition. This avoids the race where a shallow
+// copy's stage pointers are read without synchronization.
+func (qt *QueryTracker) CollectResultPaths(queryID string) map[string][]string {
+	qt.mu.RLock()
+	defer qt.mu.RUnlock()
+
+	q, ok := qt.queries[queryID]
+	if !ok {
+		return nil
+	}
+	depResults := make(map[string][]string)
+	for stageID, stage := range q.Stages {
+		for _, r := range stage.Results {
+			if r.Success && r.ResultPath != "" {
+				depResults[stageID] = append(depResults[stageID], r.ResultPath)
+			}
+		}
+	}
+	return depResults
+}
+
 // Cancel marks a query as cancelled.
 func (qt *QueryTracker) Cancel(queryID string) {
 	qt.mu.Lock()

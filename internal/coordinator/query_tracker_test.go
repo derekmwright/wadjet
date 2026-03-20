@@ -541,6 +541,50 @@ func TestQueryTrackerConcurrentAccess(t *testing.T) {
 	}
 }
 
+// --- CollectResultPaths ---
+
+func TestCollectResultPaths(t *testing.T) {
+	qt := NewQueryTracker()
+	stages := map[string]*StageInfo{
+		"s0": {StageID: "s0", TotalTasks: 2},
+		"s1": {StageID: "s1", TotalTasks: 1, Dependencies: []string{"s0"}},
+	}
+	qt.Register("q1", "SQL", stages, []string{"s0", "s1"})
+	qt.Start("q1")
+
+	// Record s0 results — one with path, one inline (no path yet)
+	qt.RecordResult(distributed.ResultNotification{
+		QueryID: "q1", StageID: "s0", TaskID: "t1",
+		Success: true, ResultPath: "path/t1.parquet", NumRows: 10,
+	})
+	qt.RecordResult(distributed.ResultNotification{
+		QueryID: "q1", StageID: "s0", TaskID: "t2",
+		Success: true, InlineData: []byte("data"), NumRows: 5,
+	})
+
+	// Before materialization: only t1 has a path
+	paths := qt.CollectResultPaths("q1")
+	if len(paths["s0"]) != 1 {
+		t.Errorf("expected 1 path for s0 before materialization, got %d", len(paths["s0"]))
+	}
+
+	// Simulate materialization of t2
+	qt.UpdateResultPath("q1", "s0", "t2", "path/t2.parquet")
+
+	// After materialization: both have paths
+	paths = qt.CollectResultPaths("q1")
+	if len(paths["s0"]) != 2 {
+		t.Errorf("expected 2 paths for s0 after materialization, got %d", len(paths["s0"]))
+	}
+}
+
+func TestCollectResultPathsMissing(t *testing.T) {
+	qt := NewQueryTracker()
+	if qt.CollectResultPaths("nonexistent") != nil {
+		t.Error("expected nil for missing query")
+	}
+}
+
 // --- RecordResult with no ResultPath should not add to ResultFiles ---
 
 func TestRecordResultNoResultPath(t *testing.T) {
