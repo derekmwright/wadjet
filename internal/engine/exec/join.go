@@ -3,9 +3,11 @@ package exec
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
@@ -386,11 +388,23 @@ func estimateBatchBytes(b *batch.RecordBatch) int64 {
 }
 
 // Build consumes all rows from the build (right) side into the columnar hash table.
+// Uses parallel workers when the build side is large enough to benefit from
+// concurrent hash table construction with per-worker local tables.
 func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	if err := source.Init(ctx); err != nil {
 		return fmt.Errorf("build source init: %w", err)
 	}
 	defer source.Close()
+
+	// Use parallel build when: enough CPUs, no spill/memory tracking (complex
+	// interactions with partitioning), and not key-only mode (rare, fast already).
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > 1 && h.Spill == nil && h.MemTracker == nil && !h.SemiAntiKeyOnly {
+		return h.buildParallel(ctx, source, workers)
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -645,6 +659,329 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 
 	h.buildDone = true
 	return nil
+}
+
+// localBuild accumulates hash table state for one parallel build worker.
+// Each worker builds into its own local hash table and arena to avoid
+// contention. After all workers finish, locals are merged into the main
+// HashJoin state.
+type localBuild struct {
+	batches   []*batch.RecordBatch
+	arena     []buildRef
+	arenaNext []int32
+	intIndex  *intHashTable
+	strIndex  *strHashTable
+	keyBuf    []byte
+	buildRows int64
+}
+
+func (lb *localBuild) appendInt(key int64, ref buildRef) {
+	idx := int32(len(lb.arena))
+	lb.arena = append(lb.arena, ref)
+	if prev, ok := lb.intIndex.Put(key, idx); ok {
+		lb.arenaNext = append(lb.arenaNext, prev)
+	} else {
+		lb.arenaNext = append(lb.arenaNext, -1)
+	}
+}
+
+func (lb *localBuild) appendStr(ref buildRef, key []byte) {
+	idx := int32(len(lb.arena))
+	lb.arena = append(lb.arena, ref)
+	if prev, ok := lb.strIndex.GetOrInsert(key, idx); ok {
+		lb.arenaNext = append(lb.arenaNext, prev)
+	} else {
+		lb.arenaNext = append(lb.arenaNext, -1)
+	}
+}
+
+// buildParallel uses per-worker local hash tables for concurrent build.
+// Each worker reads batches (serialized by mutex), inserts into its local
+// table (no contention, fits in L2 cache), then all locals are merged.
+func (h *HashJoin) buildParallel(ctx context.Context, source Source, workers int) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("join build cancelled: %w", err)
+	}
+
+	// Read first batch to initialize schema, key indices, and hash type.
+	first, err := source.Next(ctx)
+	if err != nil {
+		return fmt.Errorf("build source next: %w", err)
+	}
+	if first == nil {
+		h.buildDone = true
+		return nil
+	}
+
+	h.buildSchema = first.Schema
+	h.buildKeyIdx = make([]int, len(h.RightKeys))
+	for i, col := range h.RightKeys {
+		h.buildKeyIdx[i] = first.ColumnIndex(col)
+	}
+	h.tryEnableIntKey(first)
+
+	// Create per-worker local accumulators.
+	hint := 64
+	if h.BuildRowHint > 0 {
+		hint = int(h.BuildRowHint) / workers
+		if hint < 64 {
+			hint = 64
+		}
+	}
+	locals := make([]*localBuild, workers)
+	for i := range locals {
+		lb := &localBuild{
+			keyBuf: make([]byte, 0, 128),
+		}
+		if h.useIntKey || h.useDualIntKey {
+			lb.intIndex = newIntHashTable(hint)
+		} else {
+			lb.strIndex = newStrHashTable(hint)
+		}
+		if h.BuildRowHint > 0 {
+			lb.arena = make([]buildRef, 0, hint)
+			lb.arenaNext = make([]int32, 0, hint)
+		}
+		locals[i] = lb
+	}
+
+	// Process first batch in worker 0's local.
+	h.processLocalBatch(locals[0], first)
+
+	// Launch workers.
+	var sourceMu sync.Mutex
+	var wg sync.WaitGroup
+	var firstErr atomic.Value
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(lb *localBuild) {
+			defer wg.Done()
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				sourceMu.Lock()
+				b, err := source.Next(ctx)
+				sourceMu.Unlock()
+				if err != nil {
+					firstErr.CompareAndSwap(nil, fmt.Errorf("build source next: %w", err))
+					return
+				}
+				if b == nil {
+					return
+				}
+				h.processLocalBatch(lb, b)
+			}
+		}(locals[i])
+	}
+	wg.Wait()
+
+	if v := firstErr.Load(); v != nil {
+		return v.(error)
+	}
+
+	// Merge all local builds into the main hash join state.
+	h.mergeLocalBuilds(locals)
+
+	// Allocate matched bitmap for right/full outer join tracking.
+	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
+		h.arenaMatched = make([]bool, len(h.arena))
+	}
+
+	h.buildBloom()
+	h.buildDone = true
+	return nil
+}
+
+// processLocalBatch inserts one batch into a worker-local build accumulator.
+// Caller must not hold any locks — this function is lock-free per worker.
+func (h *HashJoin) processLocalBatch(lb *localBuild, b *batch.RecordBatch) {
+	b.Detach()
+	batchIdx := int32(len(lb.batches))
+	lb.batches = append(lb.batches, b)
+
+	if h.useIntKey {
+		col := b.Columns[h.buildKeyIdx[0]]
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				key, ok := intKeyFromVector(col, int(si))
+				if !ok {
+					continue
+				}
+				lb.appendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
+				lb.buildRows++
+			}
+		} else if !col.Nulls.HasNulls() {
+			switch col.Type {
+			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+				data := col.Int32Data
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					lb.appendInt(int64(data[rowIdx]), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				}
+			default:
+				data := col.Int64Data
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					lb.appendInt(data[rowIdx], buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				}
+			}
+			lb.buildRows += int64(b.Len)
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				key, ok := intKeyFromVector(col, rowIdx)
+				if !ok {
+					continue
+				}
+				lb.appendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				lb.buildRows++
+			}
+		}
+	} else if h.useDualIntKey {
+		col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
+				if !ok {
+					continue
+				}
+				lb.appendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
+				lb.buildRows++
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
+				if !ok {
+					continue
+				}
+				lb.appendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				lb.buildRows++
+			}
+		}
+	} else {
+		if lb.strIndex == nil {
+			lb.strIndex = newStrHashTable(64)
+		}
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				lb.keyBuf = lb.keyBuf[:0]
+				for _, idx := range h.buildKeyIdx {
+					if idx < 0 {
+						lb.keyBuf = append(lb.keyBuf, 1)
+						continue
+					}
+					v := b.Columns[idx]
+					if v.Nulls.IsNullFast(int(si)) {
+						lb.keyBuf = append(lb.keyBuf, 1)
+					} else {
+						lb.keyBuf = append(lb.keyBuf, 0)
+						lb.keyBuf = appendColumnValue(lb.keyBuf, v, int(si), v.Type)
+					}
+				}
+				lb.appendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(si)}, lb.keyBuf)
+				lb.buildRows++
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				lb.keyBuf = lb.keyBuf[:0]
+				for _, idx := range h.buildKeyIdx {
+					if idx < 0 {
+						lb.keyBuf = append(lb.keyBuf, 1)
+						continue
+					}
+					v := b.Columns[idx]
+					if v.Nulls.IsNullFast(rowIdx) {
+						lb.keyBuf = append(lb.keyBuf, 1)
+					} else {
+						lb.keyBuf = append(lb.keyBuf, 0)
+						lb.keyBuf = appendColumnValue(lb.keyBuf, v, rowIdx, v.Type)
+					}
+				}
+				lb.appendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)}, lb.keyBuf)
+				lb.buildRows++
+			}
+		}
+	}
+}
+
+// mergeLocalBuilds combines per-worker local accumulators into the main
+// HashJoin state. Concatenates batches and arenas, then re-inserts hash
+// table entries with adjusted indices. O(distinct_keys) hash work, not
+// O(total_rows), since each key appears once per local table.
+func (h *HashJoin) mergeLocalBuilds(locals []*localBuild) {
+	// Count totals for pre-allocation.
+	var totalArena, totalBatches int
+	for _, lb := range locals {
+		totalArena += len(lb.arena)
+		totalBatches += len(lb.batches)
+		h.buildRows += lb.buildRows
+	}
+
+	h.buildBatches = make([]*batch.RecordBatch, 0, totalBatches)
+	h.arena = make([]buildRef, 0, totalArena)
+	h.arenaNext = make([]int32, 0, totalArena)
+
+	// Pre-size the merged hash table for the total row count.
+	if h.useIntKey || h.useDualIntKey {
+		h.intIndex = newIntHashTable(int(h.buildRows))
+	} else {
+		h.strIndex = newStrHashTable(int(h.buildRows))
+	}
+
+	for _, lb := range locals {
+		batchOffset := int32(len(h.buildBatches))
+		arenaOffset := int32(len(h.arena))
+
+		// Append batches.
+		h.buildBatches = append(h.buildBatches, lb.batches...)
+
+		// Append arena with adjusted batchIdx.
+		for _, ref := range lb.arena {
+			h.arena = append(h.arena, buildRef{
+				batchIdx: ref.batchIdx + batchOffset,
+				rowIdx:   ref.rowIdx,
+			})
+		}
+
+		// Append arenaNext with adjusted chain links.
+		for _, next := range lb.arenaNext {
+			if next >= 0 {
+				h.arenaNext = append(h.arenaNext, next+arenaOffset)
+			} else {
+				h.arenaNext = append(h.arenaNext, -1)
+			}
+		}
+
+		// Re-insert hash entries with adjusted arena indices.
+		// When a key exists in the merged table, link the local chain's
+		// tail to the existing merged chain head.
+		if h.useIntKey || h.useDualIntKey {
+			lb.intIndex.ForEach(func(key int64, localHead int32) {
+				adjustedHead := localHead + arenaOffset
+				if existingHead, found := h.intIndex.Get(key); found {
+					// Find tail of the local chain (now in merged arenaNext).
+					tail := adjustedHead
+					for h.arenaNext[tail] >= 0 {
+						tail = h.arenaNext[tail]
+					}
+					h.arenaNext[tail] = existingHead
+				}
+				h.intIndex.Put(key, adjustedHead)
+			})
+		} else if lb.strIndex != nil {
+			lb.strIndex.ForEach(func(key []byte) {
+				localHead, _ := lb.strIndex.Get(key)
+				adjustedHead := localHead + arenaOffset
+				if existingHead, found := h.strIndex.Get(key); found {
+					tail := adjustedHead
+					for h.arenaNext[tail] >= 0 {
+						tail = h.arenaNext[tail]
+					}
+					h.arenaNext[tail] = existingHead
+				}
+				h.strIndex.Put(key, adjustedHead)
+			})
+		}
+	}
 }
 
 // buildBloom populates the bloom filter from the build-side hash table keys.
