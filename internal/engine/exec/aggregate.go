@@ -395,15 +395,14 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	}
 
 	// Pre-sizing hint: use InputRowHint to estimate initial hash table capacity.
-	// Use inputRows/8 capped at 256K — conservative to avoid over-allocating
-	// for low-cardinality GROUP BY (Q1: 6M rows → 4 groups) while still
-	// reducing growth for high-cardinality (Q18: 6M rows → 1.5M groups).
-	// At 256K initial, Q18 grows from 256K → 1.5M in ~3 doublings vs 9.
+	// Use inputRows/8 capped at 2M — balances memory usage against growth cost.
+	// At SF10, high-cardinality GROUP BY (Q17: l_partkey with ~2M distinct values)
+	// needs a large initial size to avoid expensive rehash doublings.
 	htInitSize := 4096
 	if h.InputRowHint > int64(htInitSize)*8 {
 		est := int(h.InputRowHint / 8)
-		if est > 256*1024 {
-			est = 256 * 1024
+		if est > 2*1024*1024 {
+			est = 2 * 1024 * 1024
 		}
 		htInitSize = est
 	}
@@ -2216,8 +2215,8 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	initCap := 4096
 	if h.InputRowHint > int64(initCap)*8 {
 		est := int(h.InputRowHint / 8)
-		if est > 256*1024 {
-			est = 256 * 1024
+		if est > 2*1024*1024 {
+			est = 2 * 1024 * 1024
 		}
 		initCap = est
 	}
