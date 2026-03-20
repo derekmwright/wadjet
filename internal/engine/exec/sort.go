@@ -187,12 +187,13 @@ func (s *Sort) finalizeColumnar() error {
 		}
 	}
 
-	// Resolve sort key column indices and pre-resolve typed comparison kernels
+	// Resolve sort key column indices and pre-resolve typed comparison kernels.
+	// Null ordering (NULLS FIRST vs NULLS LAST) is baked into the kernel selection,
+	// so the comparison loop has no per-row null checks.
 	type resolvedKey struct {
-		colIdx    int
-		order     SortOrder
-		nullsLast bool
-		compare   kernel.SortCompareKernel
+		colIdx  int
+		order   SortOrder
+		compare kernel.SortCompareKernel
 	}
 	firstBatch := s.batches[0]
 	resolved := make([]resolvedKey, len(s.Keys))
@@ -200,6 +201,7 @@ func (s *Sort) finalizeColumnar() error {
 		idx := firstBatch.ColumnIndex(key.Column)
 		var cmp kernel.SortCompareKernel
 		if idx >= 0 {
+			colType := firstBatch.Columns[idx].Type
 			// Check if this column is null-free across all batches.
 			allNullFree := true
 			for _, b := range s.batches {
@@ -209,15 +211,21 @@ func (s *Sort) finalizeColumnar() error {
 				}
 			}
 			if allNullFree {
-				cmp = kernel.ResolveSortCompareNoNulls(firstBatch.Columns[idx].Type)
+				// No nulls: skip null bitmap checks entirely.
+				cmp = kernel.ResolveSortCompareNoNulls(colType)
+			} else if key.NullsLast {
+				// Has nulls with NULLS LAST: null > non-null baked into kernel.
+				cmp = kernel.ResolveSortCompareNullsLast(colType)
 			} else {
-				cmp = kernel.ResolveSortCompare(firstBatch.Columns[idx].Type)
+				// Has nulls with NULLS FIRST (default): null < non-null.
+				cmp = kernel.ResolveSortCompare(colType)
 			}
 		}
-		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, nullsLast: key.NullsLast, compare: cmp}
+		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, compare: cmp}
 	}
 
 	// Sort comparison function used by both full sort and TopN heap.
+	// Null ordering is fully handled by the selected kernel — no post-hoc checks needed.
 	batches := s.batches
 	lessFunc := func(ei, ej sortEntry) bool {
 		bi, bj := batches[ei.batchIdx], batches[ej.batchIdx]
@@ -226,16 +234,7 @@ func (s *Sort) finalizeColumnar() error {
 			if key.colIdx < 0 {
 				continue
 			}
-			vi := bi.Columns[key.colIdx]
-			vj := bj.Columns[key.colIdx]
-			cmp := key.compare(vi, ri, vj, rj)
-			if cmp != 0 && key.nullsLast {
-				aiNull := vi.Nulls.IsNull(ri)
-				bjNull := vj.Nulls.IsNull(rj)
-				if aiNull || bjNull {
-					cmp = -cmp // flip null ordering
-				}
-			}
+			cmp := key.compare(bi.Columns[key.colIdx], ri, bj.Columns[key.colIdx], rj)
 			if cmp == 0 {
 				continue
 			}

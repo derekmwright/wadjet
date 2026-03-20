@@ -232,3 +232,160 @@ func sortCompareStringNoNulls(a *batch.Vector, ai int, b *batch.Vector, bi int) 
 	}
 	return 0
 }
+
+// --- Nulls-last sort compare variants ---
+// These use NULLS LAST ordering: null > non-null, so nulls sort after all non-null values.
+// This avoids a redundant post-comparison null check in the sort loop.
+
+// ResolveSortCompareNullsLast returns a sort compare function with NULLS LAST ordering.
+func ResolveSortCompareNullsLast(typ batch.TypeID) SortCompareKernel {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return sortCompareInt64NullsLast
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return sortCompareInt32NullsLast
+	case batch.TypeFloat64:
+		return sortCompareFloat64NullsLast
+	case batch.TypeFloat32:
+		return sortCompareFloat32NullsLast
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		return sortCompareStringNullsLast
+	case batch.TypeBool:
+		return sortCompareBoolNullsLast
+	default:
+		return func(a *batch.Vector, ai int, b *batch.Vector, bi int) int { return 0 }
+	}
+}
+
+func sortCompareInt64NullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	aN := a.Nulls.IsNullFast(ai)
+	bN := b.Nulls.IsNullFast(bi)
+	if aN && bN {
+		return 0
+	}
+	if aN {
+		return 1
+	}
+	if bN {
+		return -1
+	}
+	av, bv := a.Int64Data[ai], b.Int64Data[bi]
+	if av < bv {
+		return -1
+	}
+	if av > bv {
+		return 1
+	}
+	return 0
+}
+
+func sortCompareInt32NullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	aN := a.Nulls.IsNullFast(ai)
+	bN := b.Nulls.IsNullFast(bi)
+	if aN && bN {
+		return 0
+	}
+	if aN {
+		return 1
+	}
+	if bN {
+		return -1
+	}
+	av, bv := a.Int32Data[ai], b.Int32Data[bi]
+	if av < bv {
+		return -1
+	}
+	if av > bv {
+		return 1
+	}
+	return 0
+}
+
+func sortCompareFloat64NullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	aN := a.Nulls.IsNullFast(ai)
+	bN := b.Nulls.IsNullFast(bi)
+	if aN && bN {
+		return 0
+	}
+	if aN {
+		return 1
+	}
+	if bN {
+		return -1
+	}
+	av, bv := a.Float64Data[ai], b.Float64Data[bi]
+	if av < bv {
+		return -1
+	}
+	if av > bv {
+		return 1
+	}
+	return 0
+}
+
+func sortCompareFloat32NullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	aN := a.Nulls.IsNullFast(ai)
+	bN := b.Nulls.IsNullFast(bi)
+	if aN && bN {
+		return 0
+	}
+	if aN {
+		return 1
+	}
+	if bN {
+		return -1
+	}
+	av, bv := a.Float32Data[ai], b.Float32Data[bi]
+	if av < bv {
+		return -1
+	}
+	if av > bv {
+		return 1
+	}
+	return 0
+}
+
+func sortCompareStringNullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	aN := a.Nulls.IsNullFast(ai)
+	bN := b.Nulls.IsNullFast(bi)
+	if aN && bN {
+		return 0
+	}
+	if aN {
+		return 1
+	}
+	if bN {
+		return -1
+	}
+	as := a.BytesData.UnsafeStringValue(ai)
+	bs := b.BytesData.UnsafeStringValue(bi)
+	if as < bs {
+		return -1
+	}
+	if as > bs {
+		return 1
+	}
+	return 0
+}
+
+func sortCompareBoolNullsLast(a *batch.Vector, ai int, b *batch.Vector, bi int) int {
+	aN := a.Nulls.IsNullFast(ai)
+	bN := b.Nulls.IsNullFast(bi)
+	if aN && bN {
+		return 0
+	}
+	if aN {
+		return 1
+	}
+	if bN {
+		return -1
+	}
+	av, bv := a.BoolData[ai], b.BoolData[bi]
+	if av == bv {
+		return 0
+	}
+	if !av {
+		return -1
+	}
+	return 1
+}
