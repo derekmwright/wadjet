@@ -2876,6 +2876,23 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 			return nil
 		}
 		return append(leftOps, rightOps...)
+	case *expr.Between:
+		// col BETWEEN low AND high → two kernel filters: col >= low AND col <= high
+		if col, ok := v.Expr.(*expr.ColRef); ok {
+			if lo, lok := v.Low.(*expr.Lit); lok {
+				if hi, hok := v.Hi.(*expr.Lit); hok {
+					if v.Not {
+						// NOT BETWEEN → col < low OR col > high
+						// Can't do OR in a single chain; fall through
+					} else {
+						return []exec.UnaryOperator{
+							exec.NewKernelFilter(col.Name, exec.OpGe, lo.Val),
+							exec.NewKernelFilter(col.Name, exec.OpLe, hi.Val),
+						}
+					}
+				}
+			}
+		}
 	case *expr.In:
 		// col IN (lit, lit, ...) or col NOT IN (lit, lit, ...)
 		if col, ok := v.Expr.(*expr.ColRef); ok {
