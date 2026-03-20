@@ -19,6 +19,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -3806,20 +3807,31 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 		}
 
 		file := inner.files[idx]
-		rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), file.Path)
-		if err != nil {
-			continue
-		}
-
-		data, err := readAll(rc)
-		rc.Close()
-		if err != nil {
-			continue
-		}
-
-		reader, err := parquet.NewReader(bytesReader(data), int64(len(data)))
-		if err != nil {
-			continue
+		var reader *parquet.Reader
+		if ras, ok := inner.cat.Store().(objstore.ReaderAtStore); ok {
+			rac, size, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), file.Path)
+			if err != nil {
+				continue
+			}
+			reader, err = parquet.NewReader(rac, size)
+			if err != nil {
+				rac.Close()
+				continue
+			}
+		} else {
+			rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), file.Path)
+			if err != nil {
+				continue
+			}
+			data, err := readAll(rc)
+			rc.Close()
+			if err != nil {
+				continue
+			}
+			reader, err = parquet.NewReader(bytesReader(data), int64(len(data)))
+			if err != nil {
+				continue
+			}
 		}
 
 		b := readBatchDirect(reader, inner.schema, inner.requiredCols, inner.scanPreds...)

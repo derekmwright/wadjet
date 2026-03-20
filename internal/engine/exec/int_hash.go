@@ -1,16 +1,27 @@
 package exec
 
+// intHashEntry stores a key-value pair co-located in memory.
+// Size: 16 bytes (8 key + 4 val + 4 padding). Four entries fit in one 64-byte
+// cache line, so a probe hit reads both key and value in a single cache access
+// instead of two separate array lookups (SoA layout).
+type intHashEntry struct {
+	key int64
+	val int32
+}
+
 // intHashTable is an open-addressing hash table mapping int64 keys to int32 values.
 // Used for the integer join key fast path. Linear probing with Fibonacci hashing
 // gives excellent cache locality and avoids the GC overhead of Go's built-in map.
 //
+// Array-of-Structs layout: key and value are co-located so that a probe hit
+// loads both from the same cache line, halving cache misses vs separate arrays.
+//
 // Empty slots are indicated by the sentinel key value (intHashEmpty).
 // Deleted slots are not needed since we never remove entries during build/probe.
 type intHashTable struct {
-	keys []int64
-	vals []int32
-	mask uint64 // len(keys) - 1, for power-of-two modular indexing
-	size int    // number of occupied slots
+	entries []intHashEntry
+	mask    uint64 // len(entries) - 1, for power-of-two modular indexing
+	size    int    // number of occupied slots
 }
 
 const intHashEmpty int64 = -0x7FFFFFFFFFFFFFFF // sentinel for empty slot
@@ -23,14 +34,13 @@ func newIntHashTable(n int) *intHashTable {
 	for cap < target {
 		cap <<= 1
 	}
-	keys := make([]int64, cap)
-	for i := range keys {
-		keys[i] = intHashEmpty
+	entries := make([]intHashEntry, cap)
+	for i := range entries {
+		entries[i].key = intHashEmpty
 	}
 	return &intHashTable{
-		keys: keys,
-		vals: make([]int32, cap),
-		mask: uint64(cap - 1),
+		entries: entries,
+		mask:    uint64(cap - 1),
 	}
 }
 
@@ -46,20 +56,20 @@ func fibHash(key int64) uint64 {
 func (h *intHashTable) Put(key int64, val int32) (int32, bool) {
 	idx := fibHash(key) & h.mask
 	for {
-		k := h.keys[idx]
-		if k == intHashEmpty {
-			h.keys[idx] = key
-			h.vals[idx] = val
+		e := &h.entries[idx]
+		if e.key == intHashEmpty {
+			e.key = key
+			e.val = val
 			h.size++
 			// Grow if load exceeds 70%
-			if h.size*10 > len(h.keys)*7 {
+			if h.size*10 > len(h.entries)*7 {
 				h.grow()
 			}
 			return 0, false
 		}
-		if k == key {
-			old := h.vals[idx]
-			h.vals[idx] = val
+		if e.key == key {
+			old := e.val
+			e.val = val
 			return old, true
 		}
 		idx = (idx + 1) & h.mask
@@ -70,12 +80,12 @@ func (h *intHashTable) Put(key int64, val int32) (int32, bool) {
 func (h *intHashTable) Get(key int64) (int32, bool) {
 	idx := fibHash(key) & h.mask
 	for {
-		k := h.keys[idx]
-		if k == intHashEmpty {
+		e := &h.entries[idx]
+		if e.key == intHashEmpty {
 			return 0, false
 		}
-		if k == key {
-			return h.vals[idx], true
+		if e.key == key {
+			return e.val, true
 		}
 		idx = (idx + 1) & h.mask
 	}
@@ -86,36 +96,34 @@ func (h *intHashTable) Len() int { return h.size }
 
 // ForEach iterates over all entries in the table.
 func (h *intHashTable) ForEach(fn func(key int64, val int32)) {
-	for i, k := range h.keys {
-		if k != intHashEmpty {
-			fn(k, h.vals[i])
+	for i := range h.entries {
+		if h.entries[i].key != intHashEmpty {
+			fn(h.entries[i].key, h.entries[i].val)
 		}
 	}
 }
 
 // grow doubles the table capacity and rehashes all entries.
 func (h *intHashTable) grow() {
-	newCap := len(h.keys) * 2
-	newKeys := make([]int64, newCap)
-	for i := range newKeys {
-		newKeys[i] = intHashEmpty
+	newCap := len(h.entries) * 2
+	newEntries := make([]intHashEntry, newCap)
+	for i := range newEntries {
+		newEntries[i].key = intHashEmpty
 	}
-	newVals := make([]int32, newCap)
 	newMask := uint64(newCap - 1)
 
-	for i, k := range h.keys {
-		if k == intHashEmpty {
+	for i := range h.entries {
+		e := &h.entries[i]
+		if e.key == intHashEmpty {
 			continue
 		}
-		idx := fibHash(k) & newMask
-		for newKeys[idx] != intHashEmpty {
+		idx := fibHash(e.key) & newMask
+		for newEntries[idx].key != intHashEmpty {
 			idx = (idx + 1) & newMask
 		}
-		newKeys[idx] = k
-		newVals[idx] = h.vals[i]
+		newEntries[idx] = *e
 	}
 
-	h.keys = newKeys
-	h.vals = newVals
+	h.entries = newEntries
 	h.mask = newMask
 }

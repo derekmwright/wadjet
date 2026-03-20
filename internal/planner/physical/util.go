@@ -17,6 +17,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -445,18 +446,31 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 					return
 				}
 				entry := inner.files[idx]
-				rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
-				if err != nil {
-					continue
-				}
-				data, err := readAll(rc)
-				rc.Close()
-				if err != nil {
-					continue
-				}
-				reader, err := parquet.NewReader(bytesReader(data), int64(len(data)))
-				if err != nil {
-					continue
+				var reader *parquet.Reader
+				if ras, ok := inner.cat.Store().(objstore.ReaderAtStore); ok {
+					rac, size, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), entry.Path)
+					if err != nil {
+						continue
+					}
+					reader, err = parquet.NewReader(rac, size)
+					if err != nil {
+						rac.Close()
+						continue
+					}
+				} else {
+					rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
+					if err != nil {
+						continue
+					}
+					data, err := readAll(rc)
+					rc.Close()
+					if err != nil {
+						continue
+					}
+					reader, err = parquet.NewReader(bytesReader(data), int64(len(data)))
+					if err != nil {
+						continue
+					}
 				}
 				results[idx] = fileResult{reader: reader, entry: entry}
 			}

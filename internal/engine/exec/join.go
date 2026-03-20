@@ -1712,9 +1712,8 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			hasBloom := h.bloom != nil
 
 			// Pre-cache hash table internals for inline lookup
-			htKeys := h.intIndex.keys
+			htEntries := h.intIndex.entries
 			htMask := h.intIndex.mask
-			htVals := h.intIndex.vals
 			arena := h.arena
 			arenaNext := h.arenaNext
 			buildBatches := h.buildBatches
@@ -1739,34 +1738,34 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 					}
 					return
 				}
-				// Inline intIndex.Get: fibHash + linear probe
+				// Inline intIndex.Get: fibHash + linear probe (AoS layout)
 				htIdx := fibHash(key) & htMask
 				for {
-					k := htKeys[htIdx]
-					if k == intHashEmpty {
+					e := &htEntries[htIdx]
+					if e.key == intHashEmpty {
 						// Key not in table — no match possible
 						if !isSemi {
 							sel = append(sel, uint16(row))
 						}
 						return
 					}
-					if k == key {
-						break
+					if e.key == key {
+						// Key found — walk chain and evaluate filter, break on first match
+						var hasMatch bool
+						for ai := e.val; ai >= 0; ai = arenaNext[ai] {
+							ref := arena[ai]
+							if filter(in, row, buildBatches[ref.batchIdx], int(ref.rowIdx)) {
+								hasMatch = true
+								break
+							}
+						}
+						emit := (isSemi && hasMatch) || (!isSemi && !hasMatch)
+						if emit {
+							sel = append(sel, uint16(row))
+						}
+						return
 					}
 					htIdx = (htIdx + 1) & htMask
-				}
-				// Key found — walk chain and evaluate filter, break on first match
-				var hasMatch bool
-				for ai := htVals[htIdx]; ai >= 0; ai = arenaNext[ai] {
-					ref := arena[ai]
-					if filter(in, row, buildBatches[ref.batchIdx], int(ref.rowIdx)) {
-						hasMatch = true
-						break
-					}
-				}
-				emit := (isSemi && hasMatch) || (!isSemi && !hasMatch)
-				if emit {
-					sel = append(sel, uint16(row))
 				}
 			}
 

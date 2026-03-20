@@ -1271,15 +1271,15 @@ func TestIntHashTablePreSizing(t *testing.T) {
 	// Pre-sized table should not need any grow() calls
 	n := 100000
 	ht := newIntHashTable(n)
-	initialCap := len(ht.keys)
+	initialCap := len(ht.entries)
 
 	for i := 0; i < n; i++ {
 		ht.Put(int64(i), int32(i))
 	}
 
-	if len(ht.keys) != initialCap {
+	if len(ht.entries) != initialCap {
 		t.Errorf("hash table grew from %d to %d with %d entries (pre-sized for %d)",
-			initialCap, len(ht.keys), n, n)
+			initialCap, len(ht.entries), n, n)
 	}
 	if ht.Len() != n {
 		t.Errorf("expected %d entries, got %d", n, ht.Len())
