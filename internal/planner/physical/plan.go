@@ -2876,19 +2876,38 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 			return nil
 		}
 		return append(leftOps, rightOps...)
+	case *expr.Or:
+		leftOps := extractFilterOps(v.Left)
+		rightOps := extractFilterOps(v.Right)
+		if leftOps != nil && rightOps != nil {
+			var left, right exec.UnaryOperator
+			if len(leftOps) == 1 {
+				left = leftOps[0]
+			} else {
+				left = exec.NewChainFilter(leftOps)
+			}
+			if len(rightOps) == 1 {
+				right = rightOps[0]
+			} else {
+				right = exec.NewChainFilter(rightOps)
+			}
+			return []exec.UnaryOperator{exec.NewOrFilter(left, right)}
+		}
 	case *expr.Between:
 		// col BETWEEN low AND high → two kernel filters: col >= low AND col <= high
+		// col NOT BETWEEN low AND high → col < low OR col > high
 		if col, ok := v.Expr.(*expr.ColRef); ok {
 			if lo, lok := v.Low.(*expr.Lit); lok {
 				if hi, hok := v.Hi.(*expr.Lit); hok {
 					if v.Not {
-						// NOT BETWEEN → col < low OR col > high
-						// Can't do OR in a single chain; fall through
-					} else {
-						return []exec.UnaryOperator{
-							exec.NewKernelFilter(col.Name, exec.OpGe, lo.Val),
-							exec.NewKernelFilter(col.Name, exec.OpLe, hi.Val),
-						}
+						return []exec.UnaryOperator{exec.NewOrFilter(
+							exec.NewKernelFilter(col.Name, exec.OpLt, lo.Val),
+							exec.NewKernelFilter(col.Name, exec.OpGt, hi.Val),
+						)}
+					}
+					return []exec.UnaryOperator{
+						exec.NewKernelFilter(col.Name, exec.OpGe, lo.Val),
+						exec.NewKernelFilter(col.Name, exec.OpLe, hi.Val),
 					}
 				}
 			}

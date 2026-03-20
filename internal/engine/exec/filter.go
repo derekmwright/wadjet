@@ -588,6 +588,121 @@ func (f *ChainFilter) Clone() UnaryOperator {
 	return &ChainFilter{Ops: cloned}
 }
 
+// OrFilter evaluates two filter branches and unions their selection vectors.
+// Both branches run on the same input batch; results are merged with dedup.
+type OrFilter struct {
+	Left, Right UnaryOperator
+	mergeBuf    []uint16
+}
+
+func NewOrFilter(left, right UnaryOperator) *OrFilter {
+	return &OrFilter{Left: left, Right: right}
+}
+
+func (f *OrFilter) Init(ctx context.Context) error {
+	if err := f.Left.Init(ctx); err != nil {
+		return err
+	}
+	return f.Right.Init(ctx)
+}
+
+func (f *OrFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if in == nil {
+		return nil, nil
+	}
+	// Save original selection state
+	origSel := in.Sel
+	origLen := in.Len
+
+	// Evaluate left branch
+	in.Sel = origSel
+	in.Len = origLen
+	leftResult, err := f.Left.Execute(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	var leftSel []uint16
+	if leftResult != nil {
+		leftSel = leftResult.Sel
+	}
+
+	// Evaluate right branch on original input
+	in.Sel = origSel
+	in.Len = origLen
+	rightResult, err := f.Right.Execute(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	var rightSel []uint16
+	if rightResult != nil {
+		rightSel = rightResult.Sel
+	}
+
+	// Union selection vectors
+	if len(leftSel) == 0 && len(rightSel) == 0 {
+		return nil, nil
+	}
+	if len(leftSel) == 0 {
+		in.Sel = rightSel
+		return in, nil
+	}
+	if len(rightSel) == 0 {
+		in.Sel = leftSel
+		return in, nil
+	}
+
+	// Merge two sorted selection vectors (both are in ascending order)
+	needed := len(leftSel) + len(rightSel)
+	if cap(f.mergeBuf) < needed {
+		f.mergeBuf = make([]uint16, 0, needed)
+	}
+	merged := f.mergeBuf[:0]
+	i, j := 0, 0
+	for i < len(leftSel) && j < len(rightSel) {
+		if leftSel[i] < rightSel[j] {
+			merged = append(merged, leftSel[i])
+			i++
+		} else if leftSel[i] > rightSel[j] {
+			merged = append(merged, rightSel[j])
+			j++
+		} else {
+			merged = append(merged, leftSel[i])
+			i++
+			j++
+		}
+	}
+	for ; i < len(leftSel); i++ {
+		merged = append(merged, leftSel[i])
+	}
+	for ; j < len(rightSel); j++ {
+		merged = append(merged, rightSel[j])
+	}
+	f.mergeBuf = merged
+	in.Sel = merged
+	return in, nil
+}
+
+func (f *OrFilter) Close() error {
+	f.Left.Close()
+	f.Right.Close()
+	return nil
+}
+
+func (f *OrFilter) Clone() UnaryOperator {
+	var l, r UnaryOperator
+	if c, ok := f.Left.(Cloneable); ok {
+		l = c.Clone()
+	} else {
+		l = f.Left
+	}
+	if c, ok := f.Right.(Cloneable); ok {
+		r = c.Clone()
+	} else {
+		r = f.Right
+	}
+	return &OrFilter{Left: l, Right: r}
+}
+
 func toFloat64(v any) float64 {
 	switch tv := v.(type) {
 	case float64:
