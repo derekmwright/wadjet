@@ -242,6 +242,7 @@ locals {
     export WADJET_BUCKET="${local.bucket_name}"
     export WADJET_REGION="${var.region}"
     export BENCHMARK_RUNS="${var.benchmark_runs}"
+    export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
     cd /root/wadjet
     bash deploy/benchmark/run-benchmark.sh standalone SF${var.scale_factor} 2>&1 | tee /root/benchmark.log
   EOF
