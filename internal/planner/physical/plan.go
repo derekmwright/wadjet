@@ -2738,8 +2738,13 @@ func (p *Planner) buildFilterOp(pred logical.Predicate, outerTables map[string]b
 			compiled, err = expr.CompileWithRunner(pred.ASTExpr, p.subqueryRunner)
 		}
 		if err == nil {
-			// Try to extract vectorized filter for simple comparison patterns
+			// Try to extract vectorized filter for simple comparison patterns.
+			// First try full vectorization, then partial (vectorize what we can
+			// from AND chains, keep the rest as row-at-a-time predicates).
 			if vf := tryVectorizeFilter(compiled); vf != nil {
+				return vf
+			}
+			if vf := tryPartialVectorize(compiled); vf != nil {
 				return vf
 			}
 			return exec.NewFilter(wrapPredicate(compiled))
@@ -2774,6 +2779,48 @@ func tryVectorizeFilter(e expr.Expr) exec.UnaryOperator {
 		return ops[0]
 	}
 	return exec.NewChainFilter(ops)
+}
+
+// tryPartialVectorize handles AND chains where some operands are vectorizable and
+// some are not. Vectorized operands run first (narrowing the selection vector),
+// followed by row-at-a-time predicates for the rest. This is better than falling
+// back entirely to row-at-a-time when any part of an AND chain isn't vectorizable.
+func tryPartialVectorize(e expr.Expr) exec.UnaryOperator {
+	parts := flattenAnds(e)
+	if len(parts) < 2 {
+		return nil // not an AND chain
+	}
+	var vectorized []exec.UnaryOperator
+	var nonVectorized []expr.Expr
+	for _, part := range parts {
+		ops := extractFilterOps(part)
+		if ops != nil {
+			vectorized = append(vectorized, ops...)
+		} else {
+			nonVectorized = append(nonVectorized, part)
+		}
+	}
+	if len(vectorized) == 0 {
+		return nil
+	}
+	// Put vectorized filters first to narrow selection, then slow predicates
+	allOps := make([]exec.UnaryOperator, 0, len(vectorized)+len(nonVectorized))
+	allOps = append(allOps, vectorized...)
+	for _, e := range nonVectorized {
+		allOps = append(allOps, exec.NewFilter(wrapPredicate(e)))
+	}
+	if len(allOps) == 1 {
+		return allOps[0]
+	}
+	return exec.NewChainFilter(allOps)
+}
+
+// flattenAnds recursively flattens nested AND expressions into a flat list.
+func flattenAnds(e expr.Expr) []expr.Expr {
+	if and, ok := e.(*expr.And); ok {
+		return append(flattenAnds(and.Left), flattenAnds(and.Right)...)
+	}
+	return []expr.Expr{e}
 }
 
 // extractFilterOps recursively extracts vectorizable filter ops from AND combinations.
