@@ -165,6 +165,331 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 	}
 }
 
+// --- IN filter kernels ---
+
+// ResolveInFilterKernel creates a FilterKernel that checks set membership.
+// The set is built once; the inner loop does a hash lookup per element.
+func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKernel {
+	switch typ {
+	case batch.TypeInt64, batch.TypeTimestamp:
+		set := make(map[int64]struct{}, len(values))
+		for _, v := range values {
+			set[toInt64(v)] = struct{}{}
+		}
+		return inFilterInt64(getInt64Data, set, negate)
+	case batch.TypeInt32, batch.TypeDate, batch.TypePort, batch.TypeProtocol:
+		set := make(map[int32]struct{}, len(values))
+		for _, v := range values {
+			set[int32(toInt64(v))] = struct{}{}
+		}
+		return inFilterInt32(getInt32Data, set, negate)
+	case batch.TypeFloat64:
+		set := make(map[float64]struct{}, len(values))
+		for _, v := range values {
+			set[toFloat64(v)] = struct{}{}
+		}
+		return inFilterFloat64(set, negate)
+	case batch.TypeString, batch.TypeUUID, batch.TypeIPv6, batch.TypeCIDR:
+		set := make(map[string]struct{}, len(values))
+		for _, v := range values {
+			set[toString(v)] = struct{}{}
+		}
+		return inFilterString(set, negate)
+	default:
+		return nil
+	}
+}
+
+func inFilterInt64(getData func(v *batch.Vector) []int64, set map[int64]struct{}, negate bool) FilterKernel {
+	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+		data := getData(vec)
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					if !vec.Nulls.IsNullFast(int(idx)) {
+						_, found := set[data[idx]]
+						if found != negate {
+							out = append(out, idx)
+						}
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					_, found := set[data[idx]]
+					if found != negate {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !vec.Nulls.IsNullFast(i) {
+						_, found := set[data[i]]
+						if found != negate {
+							out = append(out, uint16(i))
+						}
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					_, found := set[data[i]]
+					if found != negate {
+						out = append(out, uint16(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
+func inFilterInt32(getData func(v *batch.Vector) []int32, set map[int32]struct{}, negate bool) FilterKernel {
+	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+		data := getData(vec)
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					if !vec.Nulls.IsNullFast(int(idx)) {
+						_, found := set[data[idx]]
+						if found != negate {
+							out = append(out, idx)
+						}
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					_, found := set[data[idx]]
+					if found != negate {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !vec.Nulls.IsNullFast(i) {
+						_, found := set[data[i]]
+						if found != negate {
+							out = append(out, uint16(i))
+						}
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					_, found := set[data[i]]
+					if found != negate {
+						out = append(out, uint16(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
+func inFilterFloat64(set map[float64]struct{}, negate bool) FilterKernel {
+	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+		data := vec.Float64Data
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			for _, idx := range sel {
+				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+					continue
+				}
+				_, found := set[data[idx]]
+				if found != negate {
+					out = append(out, idx)
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				if hasNulls && vec.Nulls.IsNullFast(i) {
+					continue
+				}
+				_, found := set[data[i]]
+				if found != negate {
+					out = append(out, uint16(i))
+				}
+			}
+		}
+		return out
+	}
+}
+
+func inFilterString(set map[string]struct{}, negate bool) FilterKernel {
+	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			for _, idx := range sel {
+				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+					continue
+				}
+				_, found := set[vec.BytesData.UnsafeStringValue(int(idx))]
+				if found != negate {
+					out = append(out, idx)
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				if hasNulls && vec.Nulls.IsNullFast(i) {
+					continue
+				}
+				_, found := set[vec.BytesData.UnsafeStringValue(i)]
+				if found != negate {
+					out = append(out, uint16(i))
+				}
+			}
+		}
+		return out
+	}
+}
+
+// --- LIKE filter kernel ---
+
+// ResolveLikeFilterKernel creates a FilterKernel for SQL LIKE pattern matching.
+// Converts SQL LIKE patterns (% and _) to optimized matching functions.
+func ResolveLikeFilterKernel(pattern string, negate bool) FilterKernel {
+	matcher := compileLikePattern(pattern)
+	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			for _, idx := range sel {
+				if hasNulls && vec.Nulls.IsNullFast(int(idx)) {
+					continue
+				}
+				if matcher(vec.BytesData.UnsafeStringValue(int(idx))) != negate {
+					out = append(out, idx)
+				}
+			}
+		} else {
+			for i := 0; i < vecLen; i++ {
+				if hasNulls && vec.Nulls.IsNullFast(i) {
+					continue
+				}
+				if matcher(vec.BytesData.UnsafeStringValue(i)) != negate {
+					out = append(out, uint16(i))
+				}
+			}
+		}
+		return out
+	}
+}
+
+// compileLikePattern converts a SQL LIKE pattern to an optimized match function.
+// Handles common cases with specialized string operations instead of regex.
+func compileLikePattern(pattern string) func(string) bool {
+	// Optimize common patterns:
+	// '%suffix' → strings.HasSuffix
+	// 'prefix%' → strings.HasPrefix
+	// '%contains%' → strings.Contains
+	// 'prefix%suffix' → HasPrefix + HasSuffix + len check
+	hasLeadingWild := len(pattern) > 0 && pattern[0] == '%'
+	hasTrailingWild := len(pattern) > 0 && pattern[len(pattern)-1] == '%'
+
+	// Check if the pattern has any special chars beyond leading/trailing %
+	inner := pattern
+	if hasLeadingWild {
+		inner = inner[1:]
+	}
+	if hasTrailingWild && len(inner) > 0 {
+		inner = inner[:len(inner)-1]
+	}
+
+	// If inner has no wildcards, use fast string operations
+	hasInnerWild := false
+	for _, c := range inner {
+		if c == '%' || c == '_' {
+			hasInnerWild = true
+			break
+		}
+	}
+
+	if !hasInnerWild {
+		switch {
+		case hasLeadingWild && hasTrailingWild:
+			// %contains%
+			return func(s string) bool {
+				return len(s) >= len(inner) && containsStr(s, inner)
+			}
+		case hasLeadingWild:
+			// %suffix
+			return func(s string) bool {
+				return len(s) >= len(inner) && s[len(s)-len(inner):] == inner
+			}
+		case hasTrailingWild:
+			// prefix%
+			return func(s string) bool {
+				return len(s) >= len(inner) && s[:len(inner)] == inner
+			}
+		default:
+			// exact match
+			return func(s string) bool { return s == inner }
+		}
+	}
+
+	// Fallback: recursive matching for complex patterns
+	return func(s string) bool { return matchLike(s, pattern) }
+}
+
+// containsStr is a simple string contains check (avoids strings import in kernel).
+func containsStr(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	if len(substr) > len(s) {
+		return false
+	}
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+// matchLike implements recursive SQL LIKE pattern matching.
+func matchLike(s, pattern string) bool {
+	for len(pattern) > 0 {
+		switch pattern[0] {
+		case '%':
+			// Skip consecutive %
+			for len(pattern) > 0 && pattern[0] == '%' {
+				pattern = pattern[1:]
+			}
+			if len(pattern) == 0 {
+				return true
+			}
+			for i := 0; i <= len(s); i++ {
+				if matchLike(s[i:], pattern) {
+					return true
+				}
+			}
+			return false
+		case '_':
+			if len(s) == 0 {
+				return false
+			}
+			s = s[1:]
+			pattern = pattern[1:]
+		default:
+			if len(s) == 0 || s[0] != pattern[0] {
+				return false
+			}
+			s = s[1:]
+			pattern = pattern[1:]
+		}
+	}
+	return len(s) == 0
+}
+
 // --- Type conversion helpers ---
 
 func toInt64(v any) int64 {

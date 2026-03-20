@@ -2829,6 +2829,34 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 			return nil
 		}
 		return append(leftOps, rightOps...)
+	case *expr.In:
+		// col IN (lit, lit, ...) or col NOT IN (lit, lit, ...)
+		if col, ok := v.Expr.(*expr.ColRef); ok {
+			values := make([]any, 0, len(v.Values))
+			for _, val := range v.Values {
+				if lit, ok := val.(*expr.Lit); ok {
+					values = append(values, lit.Val)
+				} else {
+					return nil // non-literal in IN list
+				}
+			}
+			return []exec.UnaryOperator{exec.NewInFilter(col.Name, values, v.Not)}
+		}
+	case *expr.Like:
+		// col LIKE 'pattern' or col NOT LIKE 'pattern'
+		if col, ok := v.Expr.(*expr.ColRef); ok {
+			if pat, ok := v.Pattern.(*expr.Lit); ok {
+				if s, ok := pat.Val.(string); ok {
+					return []exec.UnaryOperator{exec.NewLikeFilter(col.Name, s, v.Not)}
+				}
+			}
+		}
+	case *expr.Not:
+		// NOT (expr) — try to vectorize the inner expression
+		inner := extractFilterOps(v.Operand)
+		if inner != nil {
+			return inner
+		}
 	}
 	return nil
 }

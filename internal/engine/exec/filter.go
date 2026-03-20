@@ -387,6 +387,101 @@ func (f *KernelFilter) Clone() UnaryOperator {
 	return &KernelFilter{ColName: f.ColName, Op: f.Op, Value: f.Value}
 }
 
+// InFilter uses a vectorized kernel for set membership testing (IN / NOT IN).
+type InFilter struct {
+	ColName  string
+	Values   []any
+	Negate   bool
+	colIdx   int
+	kern     kernel.FilterKernel
+	outSel   []uint16
+	resolved bool
+}
+
+func NewInFilter(colName string, values []any, negate bool) *InFilter {
+	return &InFilter{ColName: colName, Values: values, Negate: negate}
+}
+
+func (f *InFilter) Init(_ context.Context) error { return nil }
+
+func (f *InFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if !f.resolved {
+		f.colIdx = in.ColumnIndex(f.ColName)
+		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
+			parts := strings.SplitN(f.ColName, ".", 2)
+			f.colIdx = in.ColumnIndex(parts[1])
+		}
+		if f.colIdx >= 0 {
+			typ := in.Columns[f.colIdx].Type
+			f.kern = kernel.ResolveInFilterKernel(typ, f.Values, f.Negate)
+		}
+		f.outSel = make([]uint16, 0, in.Len)
+		f.resolved = true
+	}
+	if f.colIdx < 0 || f.kern == nil {
+		return nil, nil
+	}
+	sel := f.kern(in.Columns[f.colIdx], in.Sel, in.Len, f.outSel)
+	if len(sel) == 0 {
+		return nil, nil
+	}
+	in.Sel = sel
+	return in, nil
+}
+
+func (f *InFilter) Close() error { return nil }
+
+func (f *InFilter) Clone() UnaryOperator {
+	return &InFilter{ColName: f.ColName, Values: f.Values, Negate: f.Negate}
+}
+
+// LikeFilter uses a vectorized kernel for SQL LIKE pattern matching.
+type LikeFilter struct {
+	ColName  string
+	Pattern  string
+	Negate   bool
+	colIdx   int
+	kern     kernel.FilterKernel
+	outSel   []uint16
+	resolved bool
+}
+
+func NewLikeFilter(colName, pattern string, negate bool) *LikeFilter {
+	return &LikeFilter{ColName: colName, Pattern: pattern, Negate: negate}
+}
+
+func (f *LikeFilter) Init(_ context.Context) error { return nil }
+
+func (f *LikeFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if !f.resolved {
+		f.colIdx = in.ColumnIndex(f.ColName)
+		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
+			parts := strings.SplitN(f.ColName, ".", 2)
+			f.colIdx = in.ColumnIndex(parts[1])
+		}
+		if f.colIdx >= 0 {
+			f.kern = kernel.ResolveLikeFilterKernel(f.Pattern, f.Negate)
+		}
+		f.outSel = make([]uint16, 0, in.Len)
+		f.resolved = true
+	}
+	if f.colIdx < 0 || f.kern == nil {
+		return nil, nil
+	}
+	sel := f.kern(in.Columns[f.colIdx], in.Sel, in.Len, f.outSel)
+	if len(sel) == 0 {
+		return nil, nil
+	}
+	in.Sel = sel
+	return in, nil
+}
+
+func (f *LikeFilter) Close() error { return nil }
+
+func (f *LikeFilter) Clone() UnaryOperator {
+	return &LikeFilter{ColName: f.ColName, Pattern: f.Pattern, Negate: f.Negate}
+}
+
 func toKernelOp(op CompareOp) kernel.CompareOp {
 	switch op {
 	case OpEq:
