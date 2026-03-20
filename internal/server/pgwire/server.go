@@ -558,11 +558,17 @@ func (c *pgConn) describeSQL(sql string) {
 	// Check introspection queries — these return synthetic results
 	upper := strings.ToUpper(sql)
 	normalized := strings.Join(strings.Fields(upper), " ")
-	if strings.HasPrefix(normalized, "SHOW ") ||
+
+	// SHOW TABLES and SHOW COLUMNS FROM are handled by the query engine
+	// (QueryShowTables / QueryDescribe), so fall through to the real
+	// query execution below to discover correct column metadata.
+	isEngineShow := strings.HasPrefix(normalized, "SHOW TABLES") ||
+		strings.HasPrefix(normalized, "SHOW COLUMNS ")
+	if !isEngineShow && (strings.HasPrefix(normalized, "SHOW ") ||
 		strings.Contains(normalized, "PG_CATALOG") ||
 		strings.Contains(normalized, "INFORMATION_SCHEMA") ||
 		strings.Contains(normalized, "PG_TYPE") ||
-		strings.Contains(normalized, "PG_CLASS") {
+		strings.Contains(normalized, "PG_CLASS")) {
 		// Return text columns based on SELECT list
 		cols := extractSelectColumns(sql)
 		if len(cols) == 0 {
@@ -785,13 +791,11 @@ func (c *pgConn) handleSyntheticSelect(sql, upper string) bool {
 		return true
 	}
 
-	// Any other constant SELECT without FROM — try to return a simple result
-	// e.g. "SELECT 'test'" or "SELECT 1 AS id"
-	// Fall back: return a single row with a generic column
-	c.sendSingleRow([]string{"?column?"}, map[string]any{
-		"?column?": "",
-	})
-	return true
+	// Any other SELECT without FROM — delegate to the query engine which
+	// handles table-less SELECTs via DualSource (e.g., SELECT CURRENT_DATE,
+	// SELECT 1+1, SELECT NOW()). Return false so handleQuery falls through
+	// to db.Query().
+	return false
 }
 
 // handleShow handles SHOW statements from PostgreSQL clients.
@@ -821,11 +825,11 @@ func (c *pgConn) handleShow(upper string) bool {
 		c.sendSingleRow([]string{"DateStyle"}, map[string]any{
 			"DateStyle": "ISO, MDY",
 		})
+	case strings.HasPrefix(upper, "SHOW TABLES"), strings.HasPrefix(upper, "SHOW COLUMNS "):
+		// Route SHOW TABLES and SHOW COLUMNS FROM through the query engine,
+		// which parses them as QueryShowTables / QueryDescribe respectively.
+		return false
 	default:
-		// SHOW TABLES, SHOW COLUMNS FROM, etc. are handled by the query engine.
-		if strings.HasPrefix(upper, "SHOW TABLES") || strings.HasPrefix(upper, "SHOW COLUMNS ") {
-			return false
-		}
 		// Unknown SHOW — return empty
 		c.sendSingleRow([]string{"setting"}, map[string]any{
 			"setting": "",
