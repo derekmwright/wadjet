@@ -205,13 +205,14 @@ func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int
 		defLevels := page.DefinitionLevels()
 		data := page.Data()
 
-		if defLevels == nil {
-			// Non-nullable column — direct copy
+		if defLevels == nil || page.NumNulls() == 0 {
+			// Non-nullable column or nullable page with no actual nulls — direct copy.
+			// Skips per-element definition level checks and uses bulk copy().
 			if err := CopyTypedDataDirect(vec, offset, data, pageRows, typ); err != nil {
 				return err
 			}
 		} else {
-			// Nullable column — scatter using definition levels
+			// Nullable column with actual nulls — scatter using definition levels
 			if err := CopyTypedDataScatter(vec, offset, data, defLevels, byte(maxDefLevel), pageRows, typ); err != nil {
 				return err
 			}

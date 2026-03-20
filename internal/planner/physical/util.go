@@ -156,7 +156,7 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 
 				if colType == batch.TypeDecimal {
 					readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
-				} else if defLevels == nil {
+				} else if defLevels == nil || page.NumNulls() == 0 {
 					scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
 				} else {
 					scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
@@ -650,7 +650,7 @@ func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.Reco
 
 			if colType == batch.TypeDecimal {
 				readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
-			} else if defLevels == nil {
+			} else if defLevels == nil || page.NumNulls() == 0 {
 				scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
 			} else {
 				scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
