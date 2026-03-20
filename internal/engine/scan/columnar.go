@@ -275,12 +275,9 @@ func CopyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, 
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
 		rawData, offsets := data.ByteArray()
 		if offsets != nil {
-			// Offset-based layout
-			for i := 0; i < n; i++ {
-				start := offsets[i]
-				end := offsets[i+1]
-				vec.BytesData.Set(offset+i, rawData[start:end])
-			}
+			// Bulk copy: single append of contiguous data + offset arithmetic.
+			// Replaces n individual Set calls, reducing memmove overhead.
+			vec.BytesData.BulkSet(offset, rawData, offsets, n)
 		} else {
 			// PLAIN encoding: 4-byte length prefix per value
 			pos := 0

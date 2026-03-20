@@ -110,6 +110,19 @@ func (bc *BytesColumn) Set(i int, val []byte) {
 	bc.Offsets[i+1] = uint32(len(bc.Data))
 }
 
+// BulkSet copies a contiguous block of byte array data into the column,
+// computing offsets from the source offset array. This replaces n individual
+// Set calls with a single bulk append + offset arithmetic, reducing memmove
+// overhead for Parquet page loading.
+func (bc *BytesColumn) BulkSet(dstOffset int, srcData []byte, srcOffsets []uint32, n int) {
+	baseOff := uint32(len(bc.Data))
+	srcBase := srcOffsets[0]
+	bc.Data = append(bc.Data, srcData[srcBase:srcOffsets[n]]...)
+	for i := 0; i < n; i++ {
+		bc.Offsets[dstOffset+i+1] = baseOff + (srcOffsets[i+1] - srcBase)
+	}
+}
+
 // Value returns the byte slice at position i.
 func (bc *BytesColumn) Value(i int) []byte {
 	start := bc.Offsets[i]
