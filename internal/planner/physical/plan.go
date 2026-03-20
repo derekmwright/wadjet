@@ -1092,6 +1092,10 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if len(leftKeys) == 0 {
 			return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
 		}
+		// Fix key assignment using plan-level column info: ensure left keys are
+		// probe-side and right keys are build-side. This avoids the expensive
+		// post-build FixKeyAssignment hash table rebuild.
+		fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
 	}
 
 	hj := exec.NewHashJoin(joinType, leftKeys, rightKeys)
@@ -1563,6 +1567,49 @@ func parseJoinKeys(cond string) (leftKeys, rightKeys []string) {
 		rightKeys = append(rightKeys, right)
 	}
 	return
+}
+
+// fixJoinKeyOrder ensures left keys are probe-side and right keys are build-side
+// by checking against the build subtree's available columns from the plan.
+// This avoids the expensive post-build FixKeyAssignment hash table rebuild
+// which was 31% of Q09's time at SF10.
+func fixJoinKeyOrder(leftKeys, rightKeys []string, buildNode *logical.Node) {
+	buildCols := collectPlanColumns(buildNode)
+	if len(buildCols) == 0 {
+		return
+	}
+	for i := range leftKeys {
+		leftInBuild := buildCols[leftKeys[i]]
+		rightInBuild := buildCols[rightKeys[i]]
+		if leftInBuild && !rightInBuild {
+			leftKeys[i], rightKeys[i] = rightKeys[i], leftKeys[i]
+		}
+	}
+}
+
+// collectPlanColumns returns all column names available from scan nodes
+// in the logical plan subtree (lowercased).
+func collectPlanColumns(n *logical.Node) map[string]bool {
+	if n == nil {
+		return nil
+	}
+	result := make(map[string]bool)
+	collectPlanColumnsRec(n, result)
+	return result
+}
+
+func collectPlanColumnsRec(n *logical.Node, result map[string]bool) {
+	if n == nil {
+		return
+	}
+	if n.Type == logical.NodeScan {
+		for _, col := range n.ScanColumns {
+			result[strings.ToLower(col)] = true
+		}
+	}
+	for _, child := range n.Children {
+		collectPlanColumnsRec(child, result)
+	}
 }
 
 func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
