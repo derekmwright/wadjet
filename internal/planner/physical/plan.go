@@ -943,6 +943,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			p.walkStages(child, stages, parentID)
 		}
 
+	case logical.NodeDual:
+		// Table-less SELECT: single-row source, runs locally on coordinator.
+		stageID := fmt.Sprintf("dual-%d", len(*stages))
+		*stages = append(*stages, Stage{
+			ID:    stageID,
+			Type:  "dual",
+			Tasks: 1,
+		})
+
 	case logical.NodeFilter:
 		// Walk children first. If a child is a scan, attach filter expressions
 		// to the scan stage for predicate pushdown.
@@ -1060,6 +1069,8 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 		return p.buildSetOp(ctx, node, "intersect")
 	case logical.NodeExcept:
 		return p.buildSetOp(ctx, node, "except")
+	case logical.NodeDual:
+		return &exec.DualSource{}, nil, &exec.CollectSink{}, nil
 	default:
 		return nil, nil, nil, fmt.Errorf("unsupported plan node: %s", node.Type)
 	}

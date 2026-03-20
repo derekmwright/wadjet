@@ -383,6 +383,24 @@ func (p *Pipeline) Close() error {
 	return firstErr
 }
 
+// DualSource emits a single batch with 1 row and 0 columns, then EOF.
+// Used for table-less SELECT (e.g., SELECT CURRENT_DATE, SELECT 1+1).
+type DualSource struct {
+	done bool
+}
+
+func (d *DualSource) Init(_ context.Context) error { return nil }
+
+func (d *DualSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if d.done {
+		return nil, nil
+	}
+	d.done = true
+	return &batch.RecordBatch{Len: 1}, nil
+}
+
+func (d *DualSource) Close() error { return nil }
+
 // SliceSource is a simple Source that yields batches from a slice of rows.
 type SliceSource struct {
 	schema []parquet.Column

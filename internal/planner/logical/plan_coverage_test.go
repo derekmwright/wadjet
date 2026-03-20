@@ -704,12 +704,17 @@ func TestGetOutputColNames(t *testing.T) {
 // --- BuildFromSelect error paths ---
 
 func TestBuildFromSelect_NoFromClause(t *testing.T) {
+	// Table-less SELECT should produce a Dual node, not an error.
 	info := &plansql.SelectInfo{
 		Columns: []plansql.SelectColumn{{Expr: "1"}},
 	}
-	_, err := BuildFromSelect(info)
-	if err == nil {
-		t.Error("expected error for no FROM clause")
+	plan, err := BuildFromSelect(info)
+	if err != nil {
+		t.Fatalf("unexpected error for table-less SELECT: %v", err)
+	}
+	dual := findNodeType(plan, NodeDual)
+	if dual == nil {
+		t.Error("expected Dual node in plan for table-less SELECT")
 	}
 }
 
