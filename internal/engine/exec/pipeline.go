@@ -102,7 +102,54 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 		}
 	}
 
+	// Flush spilled partition data from Grace Hash Join operators.
+	// Results are pushed through the remaining operator chain and into the sink.
+	if err := p.flushSpilledOps(ctx, p.Ops); err != nil {
+		return err
+	}
+
 	return p.Sink.Finalize(ctx)
+}
+
+// flushSpilledOps checks each operator for pending spilled data and pushes
+// results through the remaining operators into the sink.
+func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator) error {
+	for opIdx, op := range ops {
+		fo, ok := op.(FlushableOperator)
+		if !ok || !fo.HasPendingFlush() {
+			continue
+		}
+		remainingOps := ops[opIdx+1:]
+		for {
+			b, err := fo.NextFlush(ctx)
+			if err != nil {
+				return fmt.Errorf("flushing spilled data: %w", err)
+			}
+			if b == nil {
+				break
+			}
+			for _, rop := range remainingOps {
+				prev := b
+				b, err = rop.Execute(ctx, b)
+				if err != nil {
+					return fmt.Errorf("operator execute (flush): %w", err)
+				}
+				if b != prev && prev != nil {
+					prev.Release()
+				}
+				if b == nil {
+					break
+				}
+			}
+			if b != nil {
+				if err := p.Sink.Consume(ctx, b); err != nil {
+					return fmt.Errorf("sink consume (flush): %w", err)
+				}
+				b.Release()
+			}
+		}
+	}
+	return nil
 }
 
 // runParallel processes batches through cloned operator chains in parallel.
@@ -306,6 +353,11 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		for _, op := range opChains[i] {
 			op.Close()
 		}
+	}
+
+	// Flush spilled partition data (use original op chain — worker 0).
+	if err := p.flushSpilledOps(ctx, p.Ops); err != nil {
+		return err
 	}
 
 	return p.Sink.Finalize(ctx)

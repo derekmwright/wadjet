@@ -56,9 +56,8 @@ type HashJoin struct {
 	MemTracker *memory.Tracker
 
 	// Spill-to-disk (optional). When set, build-side batches are spilled to disk
-	// when memory pressure exceeds 80% of budget, then re-loaded before probing.
-	Spill      *memory.SpillManager
-	spillFiles []string
+	// when memory pressure exceeds 80% of budget using Grace Hash Join partitioning.
+	Spill *memory.SpillManager
 
 	// arenaMatched tracks which build-side arena entries have been matched during
 	// probing. Only allocated for RightJoin and FullOuterJoin.
@@ -96,6 +95,16 @@ type HashJoin struct {
 	// this rejects non-matching probe rows without touching the hash table.
 	bloom     []uint64
 	bloomMask uint64
+
+	// Grace Hash Join spill state. Non-nil when build-side data has been
+	// partitioned and spilled to disk due to memory pressure.
+	spillState *spillState
+
+	// spillOutputFilter and spillLeftSchema are captured during the first
+	// probe Execute() so spilled partition processing can reproduce the
+	// output schema. Only set when spillState is non-nil.
+	spillOutputFilter map[string]bool
+	spillLeftSchema   []parquet.Column
 }
 
 // BloomPushdownOp returns a UnaryOperator that pre-filters probe batches using
@@ -494,8 +503,8 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}
 
 		// Spill to disk if memory pressure is high
-		if h.Spill != nil && h.Spill.ShouldSpill() && len(h.buildBatches) > 0 {
-			if err := h.spillBuildBatches(); err != nil {
+		if h.Spill != nil && h.Spill.ShouldSpill() && (len(h.buildBatches) > 0 || h.spillState != nil) {
+			if err := h.spillBuildBatches(0); err != nil {
 				h.mu.Unlock()
 				return fmt.Errorf("spilling build side: %w", err)
 			}
@@ -506,9 +515,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			cost := estimateBatchBytes(b)
 			if err := h.MemTracker.Reserve(cost); err != nil {
 				// Try spilling before giving up
-				if h.Spill != nil && len(h.buildBatches) > 0 {
-					if spillErr := h.spillBuildBatches(); spillErr == nil {
-						h.MemTracker.Reset()
+				if h.Spill != nil {
+					if spillErr := h.spillBuildBatches(cost); spillErr == nil {
+						// After spill, tracker is reset to reflect only in-memory partitions.
+						// Try Reserve again — should succeed if enough was spilled.
 						if err2 := h.MemTracker.Reserve(cost); err2 != nil {
 							h.mu.Unlock()
 							return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
@@ -521,6 +531,14 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						err, h.buildRows, len(h.buildBatches))
 				}
 			}
+		}
+
+		// If spill state is active, route new batches through partitioning
+		if h.spillState != nil {
+			b.Detach()
+			h.partitionBuildBatch(b)
+			h.mu.Unlock()
+			continue
 		}
 
 		// Skip Compact() — iterate through Sel (if any) directly.
@@ -608,10 +626,11 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.mu.Unlock()
 	}
 
-	// Re-load spilled data before probing
-	if len(h.spillFiles) > 0 {
-		if err := h.reloadSpilledBuild(); err != nil {
-			return fmt.Errorf("reloading spilled build data: %w", err)
+	// When Grace Hash Join is active, rebuild hash table from in-memory partitions only.
+	// Spilled partitions will be processed one at a time during probe flush.
+	if h.spillState != nil {
+		if err := h.reloadInMemoryPartitions(); err != nil {
+			return fmt.Errorf("rebuilding in-memory partitions: %w", err)
 		}
 	}
 
@@ -726,104 +745,121 @@ func bloomHashBytes(key []byte) uint64 {
 
 
 
-// spillBuildBatches writes current build batches to disk and clears in-memory state.
-// Must be called with h.mu held.
-func (h *HashJoin) spillBuildBatches() error {
-	var rows []map[string]any
-	for _, b := range h.buildBatches {
-		rows = append(rows, b.ToRows()...)
+// spillBuildBatches partitions current build batches by hash and spills the
+// largest partition(s) to disk. Must be called with h.mu held.
+// neededBytes is the amount of additional memory needed (0 = just reduce to
+// under 80% threshold). When non-zero, partitions are spilled until
+// in-memory usage + neededBytes fits within budget.
+func (h *HashJoin) spillBuildBatches(neededBytes int64) error {
+	ss := h.spillState
+	if ss == nil {
+		// First spill: initialize partition state and redistribute existing batches
+		dir := h.Spill.SpillDir()
+		ss = newSpillState(dir, h.buildSchema)
+		h.spillState = ss
+
+		// Redistribute existing build batches into partitions
+		for _, b := range h.buildBatches {
+			h.partitionBuildBatch(b)
+		}
+
+		// Clear the flat build state — partitions now own the data
+		h.buildBatches = nil
+		h.arena = h.arena[:0]
+		h.arenaNext = h.arenaNext[:0]
+		if h.useIntKey || h.useDualIntKey {
+			h.intIndex = newIntHashTable(64)
+		} else {
+			h.strIndex = newStrHashTable(64)
+		}
+		h.buildRows = 0
 	}
-	path, err := h.Spill.SpillRows(rows)
-	if err != nil {
-		return err
+
+	// Spill largest partition(s) until memory pressure is resolved
+	for {
+		// Re-sync tracker with actual in-memory usage
+		var inMem int64
+		for p, mem := range ss.partMemory {
+			if !ss.spilledParts[p] {
+				inMem += mem
+			}
+		}
+		if h.MemTracker != nil {
+			h.MemTracker.Reset()
+			h.MemTracker.ForceReserve(inMem)
+		}
+
+		// Check if we've freed enough
+		if neededBytes > 0 {
+			// Spill until there's room for the incoming batch
+			if h.MemTracker == nil || inMem+neededBytes <= h.MemTracker.Budget() {
+				break
+			}
+		} else {
+			// Proactive spill: stop when under 80% threshold
+			if h.MemTracker == nil || !h.Spill.ShouldSpill() {
+				break
+			}
+		}
+
+		partID := ss.largestInMemoryPartition()
+		if partID < 0 {
+			break // nothing left to spill
+		}
+		if _, err := ss.spillBuildPartition(partID); err != nil {
+			return err
+		}
 	}
-	h.spillFiles = append(h.spillFiles, path)
-	// Clear in-memory state
-	h.buildBatches = h.buildBatches[:0]
-	h.arena = h.arena[:0]
-	h.arenaNext = h.arenaNext[:0]
-	if h.useIntKey {
-		h.intIndex = newIntHashTable(64)
-	} else {
-		h.strIndex = newStrHashTable(64)
-	}
-	h.buildRows = 0
-	if h.MemTracker != nil {
-		h.MemTracker.Reset()
-	}
+
 	return nil
 }
 
-// reloadSpilledBuild reads all spilled build data and rebuilds the hash index.
-func (h *HashJoin) reloadSpilledBuild() error {
-	// Collect existing in-memory rows
-	var allRows []map[string]any
-	for _, b := range h.buildBatches {
-		allRows = append(allRows, b.ToRows()...)
+// reloadInMemoryPartitions rebuilds the hash table from in-memory partitions only.
+// Spilled partitions are NOT loaded — they'll be processed one at a time during probe.
+func (h *HashJoin) reloadInMemoryPartitions() error {
+	ss := h.spillState
+	if ss == nil {
+		return nil
 	}
 
-	// Read spilled data
-	for _, path := range h.spillFiles {
-		rows, err := memory.ReadSpilledRows(path)
-		if err != nil {
-			return err
+	// Count in-memory rows for pre-allocation
+	var totalRows int
+	for partID, batches := range ss.partBuildBatches {
+		if ss.spilledParts[partID] {
+			continue
 		}
-		allRows = append(allRows, rows...)
+		for _, b := range batches {
+			totalRows += b.Len
+		}
 	}
-	h.spillFiles = nil
 
-	// Rebuild from all rows with pre-sized hash table
+	// Reset build state
 	h.buildBatches = nil
-	rowCount := len(allRows)
-	// Pre-allocate arena to avoid slice growth during rebuild
-	if cap(h.arena) < rowCount {
-		h.arena = make([]buildRef, 0, rowCount)
-	} else {
-		h.arena = h.arena[:0]
-	}
-	if cap(h.arenaNext) < rowCount {
-		h.arenaNext = make([]int32, 0, rowCount)
-	} else {
-		h.arenaNext = h.arenaNext[:0]
-	}
-	if h.useIntKey || h.useDualIntKey {
-		h.intIndex = newIntHashTable(rowCount)
-	} else {
-		h.strIndex = newStrHashTable(rowCount)
-	}
 	h.buildRows = 0
-	if h.MemTracker != nil {
-		h.MemTracker.Reset()
+	h.arena = make([]buildRef, 0, totalRows)
+	h.arenaNext = make([]int32, 0, totalRows)
+	if h.useIntKey || h.useDualIntKey {
+		h.intIndex = newIntHashTable(totalRows)
+	} else {
+		h.strIndex = newStrHashTable(totalRows)
 	}
 
-	// Convert to batches in chunks
-	for pos := 0; pos < len(allRows); {
-		end := pos + batch.DefaultBatchSize
-		if end > len(allRows) {
-			end = len(allRows)
+	// Rebuild hash table from in-memory partitions
+	for partID, batches := range ss.partBuildBatches {
+		if ss.spilledParts[partID] {
+			continue
 		}
-		b := batch.FromRows(h.buildSchema, allRows[pos:end])
-		batchIdx := int32(len(h.buildBatches))
-		h.buildBatches = append(h.buildBatches, b)
-		if h.useIntKey {
-			col := b.Columns[h.buildKeyIdx[0]]
-			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				key, ok := intKeyFromVector(col, rowIdx)
-				if !ok {
-					continue
-				}
-				h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
-				h.buildRows++
-			}
-		} else {
-			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				h.buildKeyFromBatch(b, rowIdx)
-				h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
-				h.buildRows++
+		for _, b := range batches {
+			batchIdx := int32(len(h.buildBatches))
+			h.buildBatches = append(h.buildBatches, b)
+			if h.SemiAntiKeyOnly {
+				h.indexBuildBatchKeyOnly(b)
+			} else {
+				h.indexBuildBatch(b, batchIdx)
 			}
 		}
-		pos = end
 	}
+
 	return nil
 }
 
@@ -1126,6 +1162,10 @@ type HashJoinProbe struct {
 	// in multi-way join pipelines where intermediate batches are released
 	// back to the pool after the next operator consumes them.
 	outPool *batch.BatchPool
+
+	// Grace Hash Join flush state — populated when spilled partitions are processed
+	spillFlushResults []*batch.RecordBatch
+	spillFlushIdx     int
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
@@ -1163,10 +1203,30 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 	}
 }
 
-func (p *HashJoinProbe) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if p.join.JoinType == CrossJoin {
 		outSchema := p.outputSchema(in.Schema)
 		return p.executeCrossJoin(in, outSchema)
+	}
+
+	// When Grace Hash Join is active, partition probe rows and only probe
+	// in-memory partitions. Spilled-partition rows are buffered to disk.
+	if p.join.spillState != nil && len(p.join.spillState.spilledParts) > 0 {
+		// Capture probe schema for spilled partition processing
+		if p.join.spillLeftSchema == nil {
+			p.join.spillLeftSchema = in.Schema
+			p.join.spillOutputFilter = p.OutputFilter
+		}
+
+		inMemSel, err := p.partitionProbeBatch(in)
+		if err != nil {
+			return nil, fmt.Errorf("partitioning probe batch: %w", err)
+		}
+		if len(inMemSel) == 0 {
+			return nil, nil // all rows went to spilled partitions
+		}
+		// Set selection vector to only include in-memory partition rows
+		in.Sel = inMemSel
 	}
 
 	if p.join.JoinType == SemiJoin || p.join.JoinType == AntiJoin {

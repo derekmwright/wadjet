@@ -2113,7 +2113,11 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 	a.cachedOutput.Len = in.Len
 	a.cachedOutput.Sel = in.Sel // pass through selection vector (nil if materialized)
 
-	// Share existing column vectors (zero-copy for pass-through columns)
+	// Share existing column vectors (zero-copy for pass-through columns).
+	// Detach the input batch from its pool so that the pipeline's
+	// prev.Release() becomes a no-op — the shared column data must remain
+	// valid while cachedOutput is consumed by downstream operators/sinks.
+	in.Detach()
 	for j := 0; j < len(in.Schema); j++ {
 		a.cachedOutput.Columns[j] = in.Columns[j]
 	}

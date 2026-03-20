@@ -59,6 +59,14 @@ type MergeableSink interface {
 	MergeSink(other SinkSource)
 }
 
+// FlushableOperator is implemented by operators that may need to emit
+// additional batches after the main pipeline loop completes. Used by the
+// Grace Hash Join to process spilled partitions after the streaming probe.
+type FlushableOperator interface {
+	HasPendingFlush() bool
+	NextFlush(ctx context.Context) (*batch.RecordBatch, error)
+}
+
 // ScanStatsProvider is implemented by sources that can report scan statistics.
 type ScanStatsProvider interface {
 	RowsScanned() int64
