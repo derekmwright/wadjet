@@ -122,3 +122,70 @@ func TestIntervalInWhereClause(t *testing.T) {
 		}
 	}
 }
+
+// TestIntervalWithDateColumn tests INTERVAL comparison when scan_date is TypeDate
+// (int32 epoch days), not TypeString. This is the case reported in issue #8 comment
+// where the comparison returned false despite correct date arithmetic.
+func TestIntervalWithDateColumn(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "scan_date", Type: parquet.TypeDate},
+			{Name: "finding", Type: parquet.TypeString},
+		},
+	}
+	if err := db.CreateTable(ctx, "findings_date", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	rows := []map[string]any{
+		{"id": int64(1), "scan_date": now.AddDate(0, 0, -5).Format("2006-01-02"), "finding": "recent"},
+		{"id": int64(2), "scan_date": now.AddDate(0, 0, -10).Format("2006-01-02"), "finding": "recent"},
+		{"id": int64(3), "scan_date": now.AddDate(0, 0, -60).Format("2006-01-02"), "finding": "old"},
+		{"id": int64(4), "scan_date": now.AddDate(0, 0, -90).Format("2006-01-02"), "finding": "old"},
+	}
+	ing := db.NewIngester("findings_date", schema, nil, ingest.Config{MaxBufferRows: 100, RowGroupSize: 100})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// WHERE clause with TypeDate column
+	result, err := db.Query(ctx, "SELECT id, scan_date, finding FROM findings_date WHERE scan_date >= CURRENT_DATE - INTERVAL '30 days' ORDER BY id")
+	if err != nil {
+		t.Fatalf("query error: %v", err)
+	}
+	t.Logf("TypeDate WHERE: %d rows returned", len(result.Rows))
+	for _, row := range result.Rows {
+		t.Logf("  id=%v scan_date=%v finding=%v", row["id"], row["scan_date"], row["finding"])
+	}
+	if len(result.Rows) != 2 {
+		t.Errorf("expected 2 recent rows, got %d", len(result.Rows))
+	}
+
+	// Comparison in SELECT with TypeDate column
+	result2, err := db.Query(ctx, "SELECT scan_date, scan_date >= CURRENT_DATE - INTERVAL '30 days' as passes FROM findings_date ORDER BY scan_date DESC")
+	if err != nil {
+		t.Fatalf("comparison query error: %v", err)
+	}
+	for _, row := range result2.Rows {
+		scanDate := fmt.Sprintf("%v", row["scan_date"])
+		passes := fmt.Sprintf("%v", row["passes"])
+		isRecent := scanDate >= now.AddDate(0, 0, -30).Format("2006-01-02")
+		expected := fmt.Sprintf("%v", isRecent)
+		t.Logf("scan_date=%s passes=%s (expected %s)", scanDate, passes, expected)
+		if passes != expected {
+			t.Errorf("scan_date=%s: got passes=%s, want %s", scanDate, passes, expected)
+		}
+	}
+}

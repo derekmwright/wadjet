@@ -2058,6 +2058,34 @@ func ToInt64(v any) int64 {
 	}
 }
 
+// parseTemporalInt64 converts a date/timestamp string to the same int64 unit
+// as the reference value. TypeDate columns use epoch days (small int64 values),
+// TypeTimestamp columns use epoch milliseconds (large int64 values).
+// The threshold 500_000 (~year 3339 in days) safely distinguishes the two.
+func parseTemporalInt64(ref int64, s string) int64 {
+	if ref < 500_000 && ref > -500_000 {
+		// Reference is epoch days — parse the string as days too.
+		return parseDateToEpochDays(s)
+	}
+	return parseTimestampToEpochMs(s)
+}
+
+// parseDateToEpochDays parses a date/timestamp string into epoch days.
+func parseDateToEpochDays(s string) int64 {
+	for _, layout := range []string{
+		"2006-01-02",
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			epoch := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+			return int64(t.Sub(epoch).Hours() / 24)
+		}
+	}
+	return 0
+}
+
 // parseTimestampToEpochMs parses common timestamp string formats into epoch milliseconds.
 func parseTimestampToEpochMs(s string) int64 {
 	for _, layout := range []string{
@@ -2191,11 +2219,12 @@ func compare(a, b any, op CmpOp) bool {
 			}
 		}
 	}
-	// Mixed int64/string: implicit timestamp casting (e.g., ts_col > '2024-01-15')
+	// Mixed int64/string: implicit date/timestamp casting.
+	// TypeDate columns store epoch days (int32→int64), TypeTimestamp stores epoch ms.
+	// Date strings ("YYYY-MM-DD") are exactly 10 chars with no time component.
 	if ai, ok := a.(int64); ok {
 		if bs, ok := b.(string); ok {
-			bi := parseTimestampToEpochMs(bs)
-			if bi != 0 {
+			if bi := parseTemporalInt64(ai, bs); bi != 0 || ai == 0 {
 				switch op {
 				case CmpEq:
 					return ai == bi
@@ -2215,8 +2244,7 @@ func compare(a, b any, op CmpOp) bool {
 	}
 	if as, ok := a.(string); ok {
 		if bi, ok := b.(int64); ok {
-			ai := parseTimestampToEpochMs(as)
-			if ai != 0 {
+			if ai := parseTemporalInt64(bi, as); ai != 0 || bi == 0 {
 				switch op {
 				case CmpEq:
 					return ai == bi
