@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -59,6 +60,7 @@ type spillState struct {
 	// Probe-side: per-partition buffered batches (flushed to disk files)
 	partProbeFiles   map[int][]string
 	partProbeWriters map[int]*spillBatchWriter
+	probeMu          sync.Mutex // protects partProbeWriters during parallel probe
 
 	// Track memory per partition for choosing what to spill
 	partMemory map[int]int64
@@ -116,7 +118,10 @@ func (s *spillState) spillBuildPartition(partID int) (int64, error) {
 }
 
 // writeProbeRow buffers a probe batch for a spilled partition.
+// Thread-safe: called concurrently from parallel pipeline workers.
 func (s *spillState) writeProbeRow(partID int, b *batch.RecordBatch) error {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
 	w, ok := s.partProbeWriters[partID]
 	if !ok {
 		var err error
@@ -956,12 +961,12 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 
 // partitionProbeBatch splits a probe batch by partition, writing spilled-partition
 // rows to disk. Returns a selection vector of rows belonging to in-memory partitions.
-func (p *HashJoinProbe) partitionProbeBatch(in *batch.RecordBatch) ([]uint16, error) {
+func (p *HashJoinProbe) partitionProbeBatch(in *batch.RecordBatch) ([]uint32, error) {
 	h := p.join
 	ss := h.spillState
 
 	// Compute partition for each row and separate in-memory vs spilled
-	var inMemSel []uint16
+	var inMemSel []uint32
 	spillRows := make(map[int][]int) // partID → row indices
 
 	iterateRows := func(row int) {
@@ -969,7 +974,7 @@ func (p *HashJoinProbe) partitionProbeBatch(in *batch.RecordBatch) ([]uint16, er
 		if ss.spilledParts[partID] {
 			spillRows[partID] = append(spillRows[partID], row)
 		} else {
-			inMemSel = append(inMemSel, uint16(row))
+			inMemSel = append(inMemSel, uint32(row))
 		}
 	}
 
@@ -1071,6 +1076,7 @@ func compactBatchForRows(in *batch.RecordBatch, rows []int) *batch.RecordBatch {
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
+					dst.BytesData.Set(di, nil) // maintain offset continuity
 				} else {
 					dst.BytesData.Set(di, col.BytesData.Value(si))
 				}

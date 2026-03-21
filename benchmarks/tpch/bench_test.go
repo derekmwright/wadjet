@@ -374,7 +374,7 @@ func TestTPCHQueriesLarge(t *testing.T) {
 	sort.Ints(queryNums)
 
 	for _, qNum := range queryNums {
-		q := TPCHQueries[qNum]
+		q := GetQuery(qNum, sf)
 
 		runtime.GC()
 
@@ -432,7 +432,7 @@ func BenchmarkTPCHLarge(b *testing.B) {
 	sort.Ints(queryNums)
 
 	for _, qNum := range queryNums {
-		q := TPCHQueries[qNum]
+		q := GetQuery(qNum, sf)
 
 		runtime.GC()
 

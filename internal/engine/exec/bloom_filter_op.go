@@ -20,14 +20,29 @@ type BloomFilterOp struct {
 	useDualIntKey bool     // two-column integer fast path
 	keyIdx        []int    // resolved column indices (lazy)
 	resolved      bool
-	selBuf        []uint16 // scratch for selection vector
+	selBuf        []uint32 // scratch for selection vector
 	keyBuf        []byte   // scratch for multi-column key serialization
+
+	// Adaptive disabling: if the bloom filter isn't filtering enough rows,
+	// the hash computation + random memory accesses cost more than they save.
+	// Track rejection rate over the first 8 batches; disable if <5% rejected.
+	totalChecked int
+	totalPassed  int
+	batchesSeen  int
+	disabled     bool
 }
 
 func (op *BloomFilterOp) Init(_ context.Context) error { return nil }
 
 func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if in == nil || in.ActiveLen() == 0 {
+		return in, nil
+	}
+
+	// Adaptive bypass: if the bloom filter isn't rejecting enough rows,
+	// skip it entirely. The hash + two random reads per row cost more
+	// than the probe savings when rejection rate is below 5%.
+	if op.disabled {
 		return in, nil
 	}
 
@@ -42,7 +57,7 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 
 	activeLen := in.ActiveLen()
 	if cap(op.selBuf) < activeLen {
-		op.selBuf = make([]uint16, 0, activeLen)
+		op.selBuf = make([]uint32, 0, activeLen)
 	}
 	sel := op.selBuf[:0]
 
@@ -86,14 +101,14 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 					data := col.Int32Data
 					for i := 0; i < in.Len; i++ {
 						if bloomContains(op.bloom, op.bloomMask, bloomHashInt(int64(data[i]))) {
-							sel = append(sel, uint16(i))
+							sel = append(sel, uint32(i))
 						}
 					}
 				default:
 					data := col.Int64Data
 					for i := 0; i < in.Len; i++ {
 						if bloomContains(op.bloom, op.bloomMask, bloomHashInt(data[i])) {
-							sel = append(sel, uint16(i))
+							sel = append(sel, uint32(i))
 						}
 					}
 				}
@@ -104,7 +119,7 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 					}
 					key, ok := intKeyFromVector(col, i)
 					if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(key)) {
-						sel = append(sel, uint16(i))
+						sel = append(sel, uint32(i))
 					}
 				}
 			}
@@ -135,14 +150,14 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 					a := intValFromCol(col0, i)
 					b := intValFromCol(col1, i)
 					if bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
-						sel = append(sel, uint16(i))
+						sel = append(sel, uint32(i))
 					}
 				}
 			} else {
 				for i := 0; i < in.Len; i++ {
 					a, b, ok := dualIntKeyFromVectors(col0, col1, i)
 					if ok && bloomContains(op.bloom, op.bloomMask, bloomHashInt(dualIntHash(a, b))) {
-						sel = append(sel, uint16(i))
+						sel = append(sel, uint32(i))
 					}
 				}
 			}
@@ -158,7 +173,7 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 		} else {
 			for i := 0; i < in.Len; i++ {
 				if op.probeKeyHash(in, i) {
-					sel = append(sel, uint16(i))
+					sel = append(sel, uint32(i))
 				}
 			}
 		}
@@ -167,6 +182,22 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 	if len(sel) == 0 {
 		return nil, nil
 	}
+
+	// Track rejection rate for adaptive disabling.
+	// After 8 batches, if <5% of rows are rejected, the bloom filter
+	// costs more than it saves and is disabled for remaining batches.
+	if !op.disabled {
+		op.totalChecked += activeLen
+		op.totalPassed += len(sel)
+		op.batchesSeen++
+		if op.batchesSeen >= 8 && op.totalChecked > 0 {
+			rejected := op.totalChecked - op.totalPassed
+			if rejected*20 < op.totalChecked { // <5% rejection
+				op.disabled = true
+			}
+		}
+	}
+
 	op.selBuf = sel
 	in.Sel = sel
 	return in, nil
@@ -225,4 +256,39 @@ func bloomContains(bloom []uint64, mask, hash uint64) bool {
 	b1 := hash & 63
 	b2 := (hash >> 6) & 63
 	return (bloom[h1]>>b1)&1 != 0 && (bloom[h2]>>b2)&1 != 0
+}
+
+// BloomScanFilter holds bloom filter data for row-group-level scan pushdown.
+type BloomScanFilter struct {
+	Bloom     []uint64 // shared, read-only
+	BloomMask uint64
+	Column    string // probe-side join key column name
+	UseIntKey bool   // true for single integer column join key
+}
+
+// BloomScanFilter returns a BloomScanFilter for scan-level pushdown.
+// Only applicable for single-column integer join keys.
+// Returns nil if not applicable.
+func (op *BloomFilterOp) BloomScanFilter() *BloomScanFilter {
+	if !op.useIntKey || len(op.leftKeys) != 1 {
+		return nil
+	}
+	return &BloomScanFilter{
+		Bloom:     op.bloom,
+		BloomMask: op.bloomMask,
+		Column:    op.leftKeys[0],
+		UseIntKey: true,
+	}
+}
+
+// BloomHashInt computes the bloom filter hash for an integer key.
+// Exported for use by the scan layer for row-group-level pruning.
+func BloomHashInt(key int64) uint64 {
+	return bloomHashInt(key)
+}
+
+// BloomContains checks if a hash may be in the bloom filter.
+// Exported for use by the scan layer for row-group-level pruning.
+func BloomContains(bloom []uint64, mask, hash uint64) bool {
+	return bloomContains(bloom, mask, hash)
 }

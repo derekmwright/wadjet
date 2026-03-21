@@ -943,6 +943,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			p.walkStages(child, stages, parentID)
 		}
 
+	case logical.NodeDual:
+		// Table-less SELECT: single-row source, runs locally on coordinator.
+		stageID := fmt.Sprintf("dual-%d", len(*stages))
+		*stages = append(*stages, Stage{
+			ID:    stageID,
+			Type:  "dual",
+			Tasks: 1,
+		})
+
 	case logical.NodeFilter:
 		// Walk children first. If a child is a scan, attach filter expressions
 		// to the scan stage for predicate pushdown.
@@ -1060,6 +1069,8 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 		return p.buildSetOp(ctx, node, "intersect")
 	case logical.NodeExcept:
 		return p.buildSetOp(ctx, node, "except")
+	case logical.NodeDual:
+		return &exec.DualSource{}, nil, &exec.CollectSink{}, nil
 	default:
 		return nil, nil, nil, fmt.Errorf("unsupported plan node: %s", node.Type)
 	}
@@ -1170,6 +1181,14 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// out via selection vector before they reach the probe operator.
 	if bf := hj.BloomPushdownOp(); bf != nil {
 		leftOps = append(leftOps, bf)
+
+		// Push bloom filter deeper into the scan layer for row-group-level
+		// pruning. If the probe source is a catalog scan with integer join
+		// keys, attach a BloomScanFilter so entire row groups whose key
+		// range has no hits in the bloom filter are skipped before I/O.
+		if bsf := bf.BloomScanFilter(); bsf != nil {
+			attachBloomToScanSource(leftSource, bsf)
+		}
 	}
 	probe := hj.Probe()
 	// Push output filter into the probe to avoid materializing intermediate
@@ -2695,9 +2714,15 @@ type catalogScanSource struct {
 	requiredCols    []string
 	scanPreds       []logical.Predicate
 	inner           exec.Source
-	cache           *scanCached // non-nil when this table is scanned multiple times
-	replayIdx       int         // position in cache replay
-	isReplay        bool        // true when reading from cache instead of scanning
+	cache           *scanCached           // non-nil when this table is scanned multiple times
+	replayIdx       int                   // position in cache replay
+	isReplay        bool                  // true when reading from cache instead of scanning
+	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
+}
+
+// SetBloomFilter attaches a bloom filter for scan-level row group pruning.
+func (s *catalogScanSource) SetBloomFilter(bf *exec.BloomScanFilter) {
+	s.bloomFilter = bf
 }
 
 func (s *catalogScanSource) Init(ctx context.Context) error {
@@ -2709,6 +2734,11 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 	}
 	// First scan (or no cache) — scan from storage.
 	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, s.requiredCols, s.scanPreds)
+	if s.bloomFilter != nil {
+		if ses, ok := sc.(*scannerExecSource); ok {
+			ses.bloomFilter = s.bloomFilter
+		}
+	}
 	s.inner = sc
 	return s.inner.Init(ctx)
 }
@@ -3128,6 +3158,17 @@ func frontLoadBlooms(source exec.Source, ops []exec.UnaryOperator) []exec.UnaryO
 		return ops
 	}
 	return append(front, rest...)
+}
+
+// attachBloomToScanSource walks the probe-side source chain to find a
+// catalogScanSource and attaches a bloom filter for row-group-level pruning.
+func attachBloomToScanSource(source exec.Source, bsf *exec.BloomScanFilter) {
+	switch s := source.(type) {
+	case *catalogScanSource:
+		s.SetBloomFilter(bsf)
+	case *pipelineSource:
+		attachBloomToScanSource(s.source, bsf)
+	}
 }
 
 // findScanRowEstimate returns the total row estimate from scan nodes in a subtree.
@@ -3664,6 +3705,7 @@ type scannerExecSource struct {
 	requiredCols    []string
 	scanPreds       []logical.Predicate
 	scanner         *scanSourceInner
+	bloomFilter     *exec.BloomScanFilter
 }
 
 type scanSourceInner struct {
@@ -3690,6 +3732,9 @@ type scanSourceInner struct {
 	errCh   chan error
 	wg      sync.WaitGroup
 	cancel  context.CancelFunc
+
+	// Bloom filter pushdown from hash join build side.
+	bloomFilter *exec.BloomScanFilter
 }
 
 // scanPredicate is a simple predicate for row-group stats pruning.
@@ -3750,6 +3795,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		requiredCols:  s.requiredCols,
 		scanPreds:     sp,
 		deleteMarkers: delMarkers,
+		bloomFilter:   s.bloomFilter,
 		batchCh:       make(chan *batch.RecordBatch, 4),
 		errCh:         make(chan error, 1),
 		cancel:        cancel,
@@ -3891,10 +3937,10 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 
 		// Apply delete markers: skip rows marked for deletion
 		if delSet := inner.deleteMarkers[file.Path]; len(delSet) > 0 {
-			sel := make([]uint16, 0, b.Len)
+			sel := make([]uint32, 0, b.Len)
 			for i := 0; i < b.Len; i++ {
 				if !delSet[int64(i)] {
-					sel = append(sel, uint16(i))
+					sel = append(sel, uint32(i))
 				}
 			}
 			if len(sel) == 0 {

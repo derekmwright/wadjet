@@ -23,6 +23,7 @@ const (
 	NodeUnion
 	NodeIntersect
 	NodeExcept
+	NodeDual // single-row, zero-column source for table-less SELECT
 )
 
 func (n NodeType) String() string {
@@ -51,6 +52,8 @@ func (n NodeType) String() string {
 		return "Intersect"
 	case NodeExcept:
 		return "Except"
+	case NodeDual:
+		return "Dual"
 	default:
 		return fmt.Sprintf("Unknown(%d)", int(n))
 	}

@@ -419,7 +419,7 @@ func TestBatchSumDecimalWithSel(t *testing.T) {
 	vec := makeDecimalVec([]int64{100, 200, 300}, nil, 2)
 	k := ResolveBatchSum(batch.TypeDecimal)
 	var acc Accumulator
-	sel := []uint16{0, 2}
+	sel := []uint32{0, 2}
 	k(&acc, vec, sel, 3)
 	if acc.Count != 2 {
 		t.Fatalf("expected count=2, got %d", acc.Count)
@@ -459,7 +459,7 @@ func TestBatchCountWithSel(t *testing.T) {
 	vec := makeIntVec([]int64{10, 20, 30, 40}, []int{1})
 	k := ResolveBatchCount()
 	var acc Accumulator
-	sel := []uint16{0, 1, 3}
+	sel := []uint32{0, 1, 3}
 	k(&acc, vec, sel, 4)
 	if acc.Count != 2 { // index 1 is null, so 0 and 3 = 2
 		t.Fatalf("expected count=2, got %d", acc.Count)
@@ -480,7 +480,7 @@ func TestBatchCountNoNullsWithSel(t *testing.T) {
 	vec := makeIntVec([]int64{10, 20, 30}, nil)
 	k := ResolveBatchCount()
 	var acc Accumulator
-	sel := []uint16{0, 2}
+	sel := []uint32{0, 2}
 	k(&acc, vec, sel, 3)
 	if acc.Count != 2 {
 		t.Fatalf("expected count=2, got %d", acc.Count)
@@ -493,7 +493,7 @@ func TestBatchSumInt64SelWithNulls(t *testing.T) {
 	vec := makeIntVec([]int64{10, 20, 30, 40, 50}, []int{2})
 	k := ResolveBatchSum(batch.TypeInt64)
 	var acc Accumulator
-	sel := []uint16{0, 2, 4}
+	sel := []uint32{0, 2, 4}
 	k(&acc, vec, sel, 5)
 	// sel={0,2,4}, index 2 is null, so 10+50=60
 	if acc.SumI64 != 60 {
@@ -640,7 +640,7 @@ func TestFilterKernelAllOps(t *testing.T) {
 
 	for _, tt := range tests {
 		k := ResolveFilterKernel(batch.TypeInt64, tt.op, tt.val)
-		out := make([]uint16, 0, 3)
+		out := make([]uint32, 0, 3)
 		result := k(vec, nil, 3, out)
 		if len(result) != tt.count {
 			t.Fatalf("op=%d val=%d: expected %d matches, got %d", tt.op, tt.val, tt.count, len(result))
@@ -651,7 +651,7 @@ func TestFilterKernelAllOps(t *testing.T) {
 func TestFilterKernelFloat32(t *testing.T) {
 	vec := makeFloat32Vec([]float32{1.0, 2.0, 3.0}, nil)
 	k := ResolveFilterKernel(batch.TypeFloat32, OpGt, float64(1.5))
-	out := make([]uint16, 0, 3)
+	out := make([]uint32, 0, 3)
 	result := k(vec, nil, 3, out)
 	if len(result) != 2 { // 2.0, 3.0
 		t.Fatalf("expected 2 matches, got %d", len(result))
@@ -661,7 +661,7 @@ func TestFilterKernelFloat32(t *testing.T) {
 func TestFilterKernelInt32(t *testing.T) {
 	vec := makeInt32Vec([]int32{10, 20, 30}, nil)
 	k := ResolveFilterKernel(batch.TypeInt32, OpEq, int64(20))
-	out := make([]uint16, 0, 3)
+	out := make([]uint32, 0, 3)
 	result := k(vec, nil, 3, out)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 match, got %d", len(result))
@@ -678,8 +678,8 @@ func TestFilterKernelUnsupported(t *testing.T) {
 func TestFilterKernelStringWithSel(t *testing.T) {
 	vec := makeStringVec([]string{"alice", "bob", "charlie"})
 	k := ResolveFilterKernel(batch.TypeString, OpEq, "bob")
-	sel := []uint16{0, 1}
-	out := make([]uint16, 0, 2)
+	sel := []uint32{0, 1}
+	out := make([]uint32, 0, 2)
 	result := k(vec, sel, 3, out)
 	if len(result) != 1 || result[0] != 1 {
 		t.Fatalf("expected [1], got %v", result)
@@ -799,7 +799,7 @@ func TestFilterKernelIPv4(t *testing.T) {
 	if k == nil {
 		t.Fatal("expected non-nil kernel")
 	}
-	out := make([]uint16, 0, 2)
+	out := make([]uint32, 0, 2)
 	result := k(v, nil, 2, out)
 	if len(result) != 1 || result[0] != 0 {
 		t.Fatalf("expected [0], got %v", result)
@@ -815,7 +815,7 @@ func TestFilterKernelMAC(t *testing.T) {
 	if k == nil {
 		t.Fatal("expected non-nil kernel")
 	}
-	out := make([]uint16, 0, 2)
+	out := make([]uint32, 0, 2)
 	result := k(v, nil, 2, out)
 	if len(result) != 1 || result[0] != 0 {
 		t.Fatalf("expected [0], got %v", result)
@@ -829,7 +829,7 @@ func TestFilterKernelPort(t *testing.T) {
 	v.Int32Data[2] = 22
 
 	k := ResolveFilterKernel(batch.TypePort, OpEq, int64(443))
-	out := make([]uint16, 0, 3)
+	out := make([]uint32, 0, 3)
 	result := k(v, nil, 3, out)
 	if len(result) != 1 || result[0] != 1 {
 		t.Fatalf("expected [1], got %v", result)
@@ -843,7 +843,7 @@ func TestFilterKernelDuration(t *testing.T) {
 	v.Int64Data[2] = 300
 
 	k := ResolveFilterKernel(batch.TypeDuration, OpGt, int64(150))
-	out := make([]uint16, 0, 3)
+	out := make([]uint32, 0, 3)
 	result := k(v, nil, 3, out)
 	if len(result) != 2 { // 200 and 300
 		t.Fatalf("expected 2 matches, got %d", len(result))
@@ -857,7 +857,7 @@ func TestFilterKernelDate(t *testing.T) {
 	v.Int32Data[2] = 300
 
 	k := ResolveFilterKernel(batch.TypeDate, OpLt, int64(200))
-	out := make([]uint16, 0, 3)
+	out := make([]uint32, 0, 3)
 	result := k(v, nil, 3, out)
 	if len(result) != 1 { // 100
 		t.Fatalf("expected 1 match, got %d", len(result))

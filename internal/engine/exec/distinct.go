@@ -25,13 +25,13 @@ func (d *Distinct) Init(_ context.Context) error {
 }
 
 func (d *Distinct) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	sel := make([]uint16, 0, in.Len)
+	sel := make([]uint32, 0, in.Len)
 
 	checkRow := func(row int) {
 		key := d.rowKey(in, row)
 		if _, exists := d.seen[key]; !exists {
 			d.seen[key] = struct{}{}
-			sel = append(sel, uint16(row))
+			sel = append(sel, uint32(row))
 		}
 	}
 	if in.Sel != nil {

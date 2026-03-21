@@ -648,7 +648,7 @@ func TestCompact(t *testing.T) {
 			{"id": int64(2), "name": "bob", "score": 80.0, "active": false, "age": int32(25), "rate": float32(2.0)},
 			{"id": int64(3), "name": "carol", "score": 95.0, "active": true, "age": int32(35), "rate": float32(1.0)},
 		})
-		b.Sel = []uint16{0, 2}
+		b.Sel = []uint32{0, 2}
 		out := b.Compact()
 		if out.Len != 2 {
 			t.Fatalf("expected 2 rows, got %d", out.Len)
@@ -670,7 +670,7 @@ func TestCompact(t *testing.T) {
 			{"val": nil},
 			{"val": int64(42)},
 		})
-		b.Sel = []uint16{0, 1}
+		b.Sel = []uint32{0, 1}
 		out := b.Compact()
 		rows := out.ToRows()
 		if rows[0]["val"] != nil {
@@ -688,7 +688,7 @@ func TestCompact(t *testing.T) {
 		b := NewRecordBatch(schema, 2)
 		b.Columns[0].DecimalData.Data[0] = Int128From(100)
 		b.Columns[0].DecimalData.Data[1] = Int128From(200)
-		b.Sel = []uint16{1}
+		b.Sel = []uint32{1}
 		out := b.Compact()
 		if out.Len != 1 {
 			t.Fatalf("expected 1 row, got %d", out.Len)

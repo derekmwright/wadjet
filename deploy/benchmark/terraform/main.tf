@@ -242,6 +242,7 @@ locals {
     export WADJET_BUCKET="${local.bucket_name}"
     export WADJET_REGION="${var.region}"
     export BENCHMARK_RUNS="${var.benchmark_runs}"
+    export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
     cd /root/wadjet
     bash deploy/benchmark/run-benchmark.sh standalone SF${var.scale_factor} 2>&1 | tee /root/benchmark.log
   EOF
@@ -264,11 +265,12 @@ locals {
 resource "aws_instance" "standalone" {
   count = var.mode == "standalone" ? 1 : 0
 
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.worker_instance_type
-  vpc_security_group_ids = [aws_security_group.bench.id]
-  iam_instance_profile   = aws_iam_instance_profile.bench.name
-  subnet_id              = data.aws_subnets.default.ids[0]
+  ami                                  = data.aws_ami.al2023.id
+  instance_type                        = var.worker_instance_type
+  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
+  vpc_security_group_ids               = [aws_security_group.bench.id]
+  iam_instance_profile                 = aws_iam_instance_profile.bench.name
+  subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
     volume_size = var.scale_factor <= 10 ? 50 : 200
@@ -291,9 +293,10 @@ resource "aws_instance" "standalone" {
   user_data = base64encode(local.standalone_user_data)
 
   tags = {
-    Name = "wadjet-bench-standalone"
-    Role = "standalone"
-    SF   = "SF${var.scale_factor}"
+    Name    = "wadjet-bench-standalone"
+    Role    = "standalone"
+    SF      = "SF${var.scale_factor}"
+    Project = "wadjet-bench"
   }
 }
 
@@ -302,11 +305,12 @@ resource "aws_instance" "standalone" {
 resource "aws_instance" "coordinator" {
   count = var.mode == "distributed" ? 1 : 0
 
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.coordinator_instance_type
-  vpc_security_group_ids = [aws_security_group.bench.id]
-  iam_instance_profile   = aws_iam_instance_profile.bench.name
-  subnet_id              = data.aws_subnets.default.ids[0]
+  ami                                  = data.aws_ami.al2023.id
+  instance_type                        = var.coordinator_instance_type
+  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
+  vpc_security_group_ids               = [aws_security_group.bench.id]
+  iam_instance_profile                 = aws_iam_instance_profile.bench.name
+  subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
     volume_size = var.scale_factor <= 10 ? 50 : 200
@@ -329,20 +333,22 @@ resource "aws_instance" "coordinator" {
   user_data = base64encode(local.coordinator_user_data)
 
   tags = {
-    Name = "wadjet-bench-coordinator"
-    Role = "coordinator"
-    SF   = "SF${var.scale_factor}"
+    Name    = "wadjet-bench-coordinator"
+    Role    = "coordinator"
+    SF      = "SF${var.scale_factor}"
+    Project = "wadjet-bench"
   }
 }
 
 resource "aws_instance" "worker" {
   count = var.mode == "distributed" ? var.worker_count : 0
 
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.worker_instance_type
-  vpc_security_group_ids = [aws_security_group.bench.id]
-  iam_instance_profile   = aws_iam_instance_profile.bench.name
-  subnet_id              = data.aws_subnets.default.ids[0]
+  ami                                  = data.aws_ami.al2023.id
+  instance_type                        = var.worker_instance_type
+  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
+  vpc_security_group_ids               = [aws_security_group.bench.id]
+  iam_instance_profile                 = aws_iam_instance_profile.bench.name
+  subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
     volume_size = var.scale_factor <= 10 ? 50 : 200
@@ -388,8 +394,9 @@ resource "aws_instance" "worker" {
   )
 
   tags = {
-    Name = "wadjet-bench-worker-${count.index}"
-    Role = "worker"
-    SF   = "SF${var.scale_factor}"
+    Name    = "wadjet-bench-worker-${count.index}"
+    Role    = "worker"
+    SF      = "SF${var.scale_factor}"
+    Project = "wadjet-bench"
   }
 }

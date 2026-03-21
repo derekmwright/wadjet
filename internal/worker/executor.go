@@ -175,19 +175,19 @@ func (e *Executor) applyBatchFilters(b *batch.RecordBatch, filterExprs []string)
 			continue
 		}
 
-		var sel []uint16
+		var sel []uint32
 		if b.Sel != nil {
-			sel = make([]uint16, 0, len(b.Sel))
+			sel = make([]uint32, 0, len(b.Sel))
 			for _, idx := range b.Sel {
 				if filter(b, int(idx)) {
 					sel = append(sel, idx)
 				}
 			}
 		} else {
-			sel = make([]uint16, 0, b.Len)
+			sel = make([]uint32, 0, b.Len)
 			for i := 0; i < b.Len; i++ {
 				if filter(b, i) {
-					sel = append(sel, uint16(i))
+					sel = append(sel, uint32(i))
 				}
 			}
 		}
@@ -395,9 +395,9 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 		last := resultBatches[len(resultBatches)-1]
 		trimLen := int64(last.ActiveLen()) - excess
 		if trimLen > 0 {
-			sel := make([]uint16, trimLen)
+			sel := make([]uint32, trimLen)
 			for i := range sel {
-				sel[i] = uint16(i)
+				sel[i] = uint32(i)
 			}
 			last.Sel = sel
 		}
@@ -643,7 +643,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 
 			// Partition rows by hash
 			nRows := b.ActiveLen()
-			partitionRows := make([][]uint16, numPartitions)
+			partitionRows := make([][]uint32, numPartitions)
 			for ri := 0; ri < nRows; ri++ {
 				rowIdx := ri
 				if b.Sel != nil {
@@ -655,7 +655,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 					h = shuffleHashValue(b.Columns[ki], rowIdx, h)
 				}
 				pid := int(h % uint64(numPartitions))
-				partitionRows[pid] = append(partitionRows[pid], uint16(rowIdx))
+				partitionRows[pid] = append(partitionRows[pid], uint32(rowIdx))
 			}
 
 			// Write partitioned rows immediately to Parquet writers

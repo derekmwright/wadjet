@@ -17,7 +17,6 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -403,6 +402,12 @@ type rgUnit struct {
 	rgRowOffset int64 // cumulative row offset within the file (for delete markers)
 }
 
+// prefetchResult holds a speculatively read row group batch and its unit index.
+type prefetchResult struct {
+	idx   int
+	batch *batch.RecordBatch
+}
+
 // buildRGUnits reads all files concurrently and builds a flat list of row group
 // work units. Predicate-based row group pruning is applied during enumeration.
 func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
@@ -446,31 +451,20 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 					return
 				}
 				entry := inner.files[idx]
-				var reader *parquet.Reader
-				if ras, ok := inner.cat.Store().(objstore.ReaderAtStore); ok {
-					rac, size, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), entry.Path)
-					if err != nil {
-						continue
-					}
-					reader, err = parquet.NewReader(rac, size)
-					if err != nil {
-						rac.Close()
-						continue
-					}
-				} else {
-					rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
-					if err != nil {
-						continue
-					}
-					data, err := readAll(rc)
-					rc.Close()
-					if err != nil {
-						continue
-					}
-					reader, err = parquet.NewReader(bytesReader(data), int64(len(data)))
-					if err != nil {
-						continue
-					}
+				// Always download entire file: a single S3 GET is far cheaper
+				// than N range reads per column page during rgWorker processing.
+				rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
+				if err != nil {
+					continue
+				}
+				data, err := readAll(rc)
+				rc.Close()
+				if err != nil {
+					continue
+				}
+				reader, err := parquet.NewReader(bytesReader(data), int64(len(data)))
+				if err != nil {
+					continue
 				}
 				results[idx] = fileResult{reader: reader, entry: entry}
 			}
@@ -478,7 +472,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 	readWg.Wait()
 
-	// Enumerate row groups from all files, applying predicate-based pruning
+	// Enumerate row groups from all files, applying predicate-based and bloom pruning
 	for _, fr := range results {
 		if fr.reader == nil {
 			continue
@@ -488,10 +482,11 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 
 		var rowOffset int64
 		for rgIdx, rg := range rgs {
+			stats := fr.reader.RowGroupStats(rgIdx)
+			pruned := false
+
 			// Predicate-based row group pruning
 			if len(inner.scanPreds) > 0 {
-				stats := fr.reader.RowGroupStats(rgIdx)
-				pruned := false
 				for _, pred := range inner.scanPreds {
 					op := mapPredOp(pred.Op)
 					if op >= 0 {
@@ -502,10 +497,18 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 						}
 					}
 				}
-				if pruned {
-					rowOffset += rg.NumRows()
-					continue
+			}
+
+			// Bloom filter row group pruning
+			if !pruned && inner.bloomFilter != nil {
+				if canBloomPruneRowGroup(inner.bloomFilter, stats) {
+					pruned = true
 				}
+			}
+
+			if pruned {
+				rowOffset += rg.NumRows()
+				continue
 			}
 
 			inner.rgUnits = append(inner.rgUnits, rgUnit{
@@ -519,32 +522,112 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 }
 
-// rgWorker processes row group work units in parallel.
+// canBloomPruneRowGroup checks whether a row group can be skipped based on
+// bloom filter analysis of the join key column's min/max statistics.
+// For integer join keys with a small range (<=1024), every value is checked
+// against the bloom filter. If ALL return "not present", the row group is skipped.
+func canBloomPruneRowGroup(bf *exec.BloomScanFilter, stats parquet.RowGroupStats) bool {
+	if !bf.UseIntKey {
+		return false
+	}
+	colStats, ok := stats.Columns[bf.Column]
+	if !ok || !colStats.HasStats {
+		return false
+	}
+	if colStats.MinValue == nil || colStats.MaxValue == nil {
+		return false
+	}
+	if colStats.NullCount == stats.NumRows {
+		return false
+	}
+
+	minVal := toBloomInt64(colStats.MinValue)
+	maxVal := toBloomInt64(colStats.MaxValue)
+	if minVal == 0 && maxVal == 0 && !isIntType(colStats.MinValue) {
+		return false
+	}
+
+	const maxRangeSize = 1024
+	rangeSize := maxVal - minVal + 1
+	if rangeSize <= 0 || rangeSize > maxRangeSize {
+		return false
+	}
+
+	for v := minVal; v <= maxVal; v++ {
+		if exec.BloomContains(bf.Bloom, bf.BloomMask, exec.BloomHashInt(v)) {
+			return false
+		}
+	}
+	return true
+}
+
+func toBloomInt64(v any) int64 {
+	switch tv := v.(type) {
+	case int64:
+		return tv
+	case int32:
+		return int64(tv)
+	case int:
+		return int64(tv)
+	case float64:
+		return int64(tv)
+	case float32:
+		return int64(tv)
+	default:
+		return 0
+	}
+}
+
+func isIntType(v any) bool {
+	switch v.(type) {
+	case int64, int32, int:
+		return true
+	default:
+		return false
+	}
+}
+
+// rgWorker processes row group work units in parallel. Each worker
+// speculatively prefetches one row group ahead AFTER sending the current
+// batch downstream. This overlaps I/O with consumer processing without
+// delaying batch delivery.
 func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	defer inner.wg.Done()
 
+	var prefetched *prefetchResult
+
 	for {
-		idx := int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
-		if idx >= len(inner.rgUnits) {
-			return
-		}
 		if ctx.Err() != nil {
 			return
 		}
 
-		unit := inner.rgUnits[idx]
-		b := inner.readRG(unit)
+		var idx int
+		var b *batch.RecordBatch
+
+		if prefetched != nil {
+			idx = prefetched.idx
+			b = prefetched.batch
+			prefetched = nil
+		} else {
+			idx = int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
+			if idx >= len(inner.rgUnits) {
+				return
+			}
+			b = inner.readRG(inner.rgUnits[idx])
+		}
+
 		if b == nil || b.Len == 0 {
 			continue
 		}
 
 		// Apply delete markers with row offset adjustment
+		unit := inner.rgUnits[idx]
 		if delSet := inner.deleteMarkers[unit.fileEntry.Path]; len(delSet) > 0 {
-			sel := make([]uint16, 0, b.Len)
+			sel := make([]uint32, 0, b.Len)
 			for i := 0; i < b.Len; i++ {
 				absRow := unit.rgRowOffset + int64(i)
 				if !delSet[absRow] {
-					sel = append(sel, uint16(i))
+					sel = append(sel, uint32(i))
 				}
 			}
 			if len(sel) == 0 {
@@ -557,10 +640,24 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 
 		atomic.AddInt64(&inner.rowsScanned, int64(b.ActiveLen()))
 
+		// Send batch downstream FIRST, then prefetch while consumer processes.
 		select {
 		case inner.batchCh <- b:
 		case <-ctx.Done():
 			return
+		}
+
+		// Prefetch next row group while consumer processes the current one.
+		// Each worker holds at most 1 extra row group (~10MB at SF10).
+		// 8 workers * 1 RG = ~80MB overhead, negligible on a 32GB machine.
+		if prefetched == nil {
+			nextIdx := int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
+			if nextIdx < len(inner.rgUnits) {
+				prefetched = &prefetchResult{
+					idx:   nextIdx,
+					batch: inner.readRG(inner.rgUnits[nextIdx]),
+				}
+			}
 		}
 	}
 }
@@ -590,6 +687,12 @@ func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []pa
 
 // readRowGroupInto reads a single row group into an existing RecordBatch.
 // The batch must already have the correct schema and sufficient capacity.
+//
+// When there are 2+ projected columns, column reads are launched in parallel
+// goroutines to overlap S3 range-read latency. Each column writes to its own
+// independent Vector in the batch, so no synchronization is needed between
+// column readers. For a single column the sequential path is kept to avoid
+// goroutine overhead.
 func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.RecordBatch, schema []parquet.Column, requiredCols []string) {
 	numRows := int(rg.NumRows())
 	if numRows == 0 {
@@ -618,49 +721,59 @@ func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.Reco
 	chunks := rg.ColumnChunks()
 
 	for _, m := range mappings {
-		col := b.Columns[m.batchIdx]
-		colType := readSchema[m.batchIdx].Type
-		rowOffset := 0
-
-		if m.fileIdx >= len(chunks) {
-			continue
-		}
-
-		// Get max definition level for null handling
-		pqCol := scan.FindColumnByIndex(file.Root(), m.fileIdx)
-		maxDefLevel := byte(0)
-		if pqCol != nil {
-			maxDefLevel = byte(pqCol.MaxDefinitionLevel())
-		}
-
-		pages := chunks[m.fileIdx].Pages()
-		for {
-			page, err := pages.ReadPage()
-			if err != nil || page == nil {
-				break
-			}
-
-			pageRows := int(page.NumRows())
-			if pageRows == 0 {
-				continue
-			}
-
-			defLevels := page.DefinitionLevels()
-			data := page.Data()
-
-			if colType == batch.TypeDecimal {
-				readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
-			} else if defLevels == nil || page.NumNulls() == 0 {
-				scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
-			} else {
-				scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
-			}
-			rowOffset += pageRows
-		}
-		pages.Close()
+		readColumnInto(file, chunks, b, readSchema, m.fileIdx, m.batchIdx)
 	}
 
 	b.Len = numRows
+}
+
+// readColumnInto reads all pages of a single column chunk into the batch vector.
+// Safe to call concurrently for different columns since each writes to its own Vector.
+func readColumnInto(file *goparquet.File, chunks []goparquet.ColumnChunk, b *batch.RecordBatch, readSchema []parquet.Column, fileIdx, batchIdx int) error {
+	col := b.Columns[batchIdx]
+	colType := readSchema[batchIdx].Type
+	rowOffset := 0
+
+	if fileIdx >= len(chunks) {
+		return nil
+	}
+
+	// Get max definition level for null handling
+	pqCol := scan.FindColumnByIndex(file.Root(), fileIdx)
+	maxDefLevel := byte(0)
+	if pqCol != nil {
+		maxDefLevel = byte(pqCol.MaxDefinitionLevel())
+	}
+
+	pages := chunks[fileIdx].Pages()
+	defer pages.Close()
+	for {
+		page, err := pages.ReadPage()
+		if err != nil || page == nil {
+			if err != nil {
+				return err
+			}
+			break
+		}
+
+		pageRows := int(page.NumRows())
+		if pageRows == 0 {
+			continue
+		}
+
+		defLevels := page.DefinitionLevels()
+		data := page.Data()
+
+		if colType == batch.TypeDecimal {
+			readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
+		} else if defLevels == nil || page.NumNulls() == 0 {
+			scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
+		} else {
+			scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
+		}
+		rowOffset += pageRows
+	}
+	return nil
 }
 
 // buildReadSchema applies column projection to the table schema.

@@ -21,7 +21,7 @@ func TestFilterIPv4(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeIPv4")
 	}
-	outSel := make([]uint16, 0, 4)
+	outSel := make([]uint32, 0, 4)
 	sel := kern(b.Columns[0], nil, 4, outSel)
 	if len(sel) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(sel))
@@ -44,7 +44,7 @@ func TestFilterIPv4LessThan(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeIPv4 OpLt")
 	}
-	outSel := make([]uint16, 0, 3)
+	outSel := make([]uint32, 0, 3)
 	sel := kern(b.Columns[0], nil, 3, outSel)
 	if len(sel) != 1 || sel[0] != 0 {
 		t.Fatalf("expected [0] (10.0.0.1 < 172.16.0.1), got %v", sel)
@@ -64,7 +64,7 @@ func TestFilterMAC(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeMAC")
 	}
-	outSel := make([]uint16, 0, 3)
+	outSel := make([]uint32, 0, 3)
 	sel := kern(b.Columns[0], nil, 3, outSel)
 	if len(sel) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(sel))
@@ -84,7 +84,7 @@ func TestFilterIPv6(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeIPv6")
 	}
-	outSel := make([]uint16, 0, 3)
+	outSel := make([]uint32, 0, 3)
 	sel := kern(b.Columns[0], nil, 3, outSel)
 	if len(sel) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(sel))
@@ -107,7 +107,7 @@ func TestFilterCIDR(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeCIDR")
 	}
-	outSel := make([]uint16, 0, 3)
+	outSel := make([]uint32, 0, 3)
 	sel := kern(b.Columns[0], nil, 3, outSel)
 	if len(sel) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(sel))
@@ -128,7 +128,7 @@ func TestFilterPort(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypePort")
 	}
-	outSel := make([]uint16, 0, 4)
+	outSel := make([]uint32, 0, 4)
 	sel := kern(b.Columns[0], nil, 4, outSel)
 	if len(sel) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(sel))
@@ -149,7 +149,7 @@ func TestFilterDuration(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeDuration")
 	}
-	outSel := make([]uint16, 0, 3)
+	outSel := make([]uint32, 0, 3)
 	sel := kern(b.Columns[0], nil, 3, outSel)
 	if len(sel) != 1 || sel[0] != 1 {
 		t.Fatalf("expected [1] (5s > 1ms), got %v", sel)
@@ -172,7 +172,7 @@ func TestFilterUUID(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeUUID")
 	}
-	outSel := make([]uint16, 0, 3)
+	outSel := make([]uint32, 0, 3)
 	sel := kern(b.Columns[0], nil, 3, outSel)
 	if len(sel) != 2 {
 		t.Fatalf("expected 2 matches, got %d", len(sel))
@@ -198,7 +198,7 @@ func TestFilterDate(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeDate")
 	}
-	outSel := make([]uint16, 0, 3)
+	outSel := make([]uint32, 0, 3)
 	sel := kern(b.Columns[0], nil, 3, outSel)
 	if len(sel) != 2 {
 		t.Fatalf("expected 2 matches (2026-03-15 and 2026-06-01 > 2026-01-01), got %d: %v", len(sel), sel)
@@ -219,7 +219,7 @@ func TestFilterIPv4WithNulls(t *testing.T) {
 	if kern == nil {
 		t.Fatal("ResolveFilterKernel returned nil for TypeIPv4")
 	}
-	outSel := make([]uint16, 0, 4)
+	outSel := make([]uint32, 0, 4)
 	sel := kern(b.Columns[0], nil, 4, outSel)
 	if len(sel) != 2 {
 		t.Fatalf("expected 2 matches (nulls excluded), got %d: %v", len(sel), sel)

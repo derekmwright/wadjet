@@ -301,57 +301,47 @@ func CopyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, 
 
 // CopyTypedDataScatter copies nullable page data into a Vector, scattering
 // values according to definition levels and setting nulls in the bitmap.
+//
+// Optimized for Parquet's run-length encoded definition levels: detects
+// contiguous runs of valid or null values and uses bulk copy()/SetNullRange
+// instead of per-element checks. Falls back to per-element processing for
+// bool and byte-array types where bulk copy is not straightforward.
 func CopyTypedDataScatter(vec *batch.Vector, offset int, data pqencoding.Values, defLevels []byte, maxDefLevel byte, n int, typ pqt.TypeID) error {
 	switch typ {
 	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
 		src := data.Int64()
-		valIdx := 0
-		for i := 0; i < n; i++ {
-			if defLevels[i] == maxDefLevel {
-				vec.Int64Data[offset+i] = src[valIdx]
-				valIdx++
-			} else {
-				vec.Nulls.SetNull(offset + i)
-			}
-		}
+		scatterRunsTyped(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+			copy(vec.Int64Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
 
 	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
 		src := data.Int32()
-		valIdx := 0
-		for i := 0; i < n; i++ {
-			if defLevels[i] == maxDefLevel {
-				vec.Int32Data[offset+i] = src[valIdx]
-				valIdx++
-			} else {
-				vec.Nulls.SetNull(offset + i)
-			}
-		}
+		scatterRunsTyped(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+			copy(vec.Int32Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
 
 	case pqt.TypeFloat64:
 		src := data.Double()
-		valIdx := 0
-		for i := 0; i < n; i++ {
-			if defLevels[i] == maxDefLevel {
-				vec.Float64Data[offset+i] = src[valIdx]
-				valIdx++
-			} else {
-				vec.Nulls.SetNull(offset + i)
-			}
-		}
+		scatterRunsTyped(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+			copy(vec.Float64Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
 
 	case pqt.TypeFloat32:
 		src := data.Float()
-		valIdx := 0
-		for i := 0; i < n; i++ {
-			if defLevels[i] == maxDefLevel {
-				vec.Float32Data[offset+i] = src[valIdx]
-				valIdx++
-			} else {
-				vec.Nulls.SetNull(offset + i)
-			}
-		}
+		scatterRunsTyped(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+			copy(vec.Float32Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
 
 	case pqt.TypeBool:
+		// Bool uses packed bit encoding — per-element is required
 		boolBytes := data.Boolean()
 		valIdx := 0
 		for i := 0; i < n; i++ {
@@ -401,4 +391,37 @@ func CopyTypedDataScatter(vec *batch.Vector, offset int, data pqencoding.Values,
 		}
 	}
 	return nil
+}
+
+// scatterRunsTyped walks defLevels detecting contiguous runs of valid or null
+// values and dispatches bulk operations. For valid runs, onValid receives the
+// destination index, source value index, and run length so the caller can use
+// copy() on the appropriate typed slice. For null runs, onNull receives the
+// destination index and run length for bulk bitmap clearing.
+func scatterRunsTyped(
+	defLevels []byte, maxDefLevel byte, n int,
+	onValid func(dstStart, srcStart, count int),
+	onNull func(dstStart, count int),
+) {
+	valIdx := 0 // index into the non-null source values
+	i := 0
+	for i < n {
+		if defLevels[i] == maxDefLevel {
+			// Start of a valid run — find how far it extends
+			runStart := i
+			srcStart := valIdx
+			for i < n && defLevels[i] == maxDefLevel {
+				i++
+				valIdx++
+			}
+			onValid(runStart, srcStart, i-runStart)
+		} else {
+			// Start of a null run — find how far it extends
+			runStart := i
+			for i < n && defLevels[i] != maxDefLevel {
+				i++
+			}
+			onNull(runStart, i-runStart)
+		}
+	}
 }

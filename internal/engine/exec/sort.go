@@ -164,7 +164,7 @@ func (s *Sort) finalizeWithSpill() error {
 // sortEntry identifies a row within the accumulated batches by batch and row index.
 type sortEntry struct {
 	batchIdx uint32
-	rowIdx   uint16
+	rowIdx   uint32
 }
 
 // finalizeColumnar sorts using typed column comparisons on an index array.
@@ -182,17 +182,18 @@ func (s *Sort) finalizeColumnar() error {
 			}
 		} else {
 			for i := 0; i < b.Len; i++ {
-				entries = append(entries, sortEntry{batchIdx: uint32(bi), rowIdx: uint16(i)})
+				entries = append(entries, sortEntry{batchIdx: uint32(bi), rowIdx: uint32(i)})
 			}
 		}
 	}
 
-	// Resolve sort key column indices and pre-resolve typed comparison kernels
+	// Resolve sort key column indices and pre-resolve typed comparison kernels.
+	// Null ordering (NULLS FIRST vs NULLS LAST) is baked into the kernel selection,
+	// so the comparison loop has no per-row null checks.
 	type resolvedKey struct {
-		colIdx    int
-		order     SortOrder
-		nullsLast bool
-		compare   kernel.SortCompareKernel
+		colIdx  int
+		order   SortOrder
+		compare kernel.SortCompareKernel
 	}
 	firstBatch := s.batches[0]
 	resolved := make([]resolvedKey, len(s.Keys))
@@ -200,6 +201,7 @@ func (s *Sort) finalizeColumnar() error {
 		idx := firstBatch.ColumnIndex(key.Column)
 		var cmp kernel.SortCompareKernel
 		if idx >= 0 {
+			colType := firstBatch.Columns[idx].Type
 			// Check if this column is null-free across all batches.
 			allNullFree := true
 			for _, b := range s.batches {
@@ -209,15 +211,21 @@ func (s *Sort) finalizeColumnar() error {
 				}
 			}
 			if allNullFree {
-				cmp = kernel.ResolveSortCompareNoNulls(firstBatch.Columns[idx].Type)
+				// No nulls: skip null bitmap checks entirely.
+				cmp = kernel.ResolveSortCompareNoNulls(colType)
+			} else if key.NullsLast {
+				// Has nulls with NULLS LAST: null > non-null baked into kernel.
+				cmp = kernel.ResolveSortCompareNullsLast(colType)
 			} else {
-				cmp = kernel.ResolveSortCompare(firstBatch.Columns[idx].Type)
+				// Has nulls with NULLS FIRST (default): null < non-null.
+				cmp = kernel.ResolveSortCompare(colType)
 			}
 		}
-		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, nullsLast: key.NullsLast, compare: cmp}
+		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, compare: cmp}
 	}
 
 	// Sort comparison function used by both full sort and TopN heap.
+	// Null ordering is fully handled by the selected kernel — no post-hoc checks needed.
 	batches := s.batches
 	lessFunc := func(ei, ej sortEntry) bool {
 		bi, bj := batches[ei.batchIdx], batches[ej.batchIdx]
@@ -226,16 +234,7 @@ func (s *Sort) finalizeColumnar() error {
 			if key.colIdx < 0 {
 				continue
 			}
-			vi := bi.Columns[key.colIdx]
-			vj := bj.Columns[key.colIdx]
-			cmp := key.compare(vi, ri, vj, rj)
-			if cmp != 0 && key.nullsLast {
-				aiNull := vi.Nulls.IsNull(ri)
-				bjNull := vj.Nulls.IsNull(rj)
-				if aiNull || bjNull {
-					cmp = -cmp // flip null ordering
-				}
-			}
+			cmp := key.compare(bi.Columns[key.colIdx], ri, bj.Columns[key.colIdx], rj)
 			if cmp == 0 {
 				continue
 			}
@@ -295,10 +294,7 @@ func (s *Sort) finalizeColumnar() error {
 		out := batch.NewRecordBatch(s.schema, len(chunk))
 		// Column-first iteration for better cache locality on destination arrays.
 		for j := range s.schema {
-			dst := out.Columns[j]
-			for i, e := range chunk {
-				copyVectorValue(dst, i, batches[e.batchIdx].Columns[j], int(e.rowIdx))
-			}
+			gatherSortVector(out.Columns[j], j, chunk, batches)
 		}
 		s.sorted = append(s.sorted, out)
 		pos = end
@@ -322,12 +318,12 @@ func (s *Sort) Truncate(n int) {
 			continue
 		}
 		// Truncate this batch
-		sel := make([]uint16, remaining)
+		sel := make([]uint32, remaining)
 		if b.Sel != nil {
 			copy(sel, b.Sel[:remaining])
 		} else {
 			for j := range sel {
-				sel[j] = uint16(j)
+				sel[j] = uint32(j)
 			}
 		}
 		b.Sel = sel
@@ -482,6 +478,139 @@ func gatherVector(dst, src *batch.Vector, srcRows []int) {
 					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
 				}
 			}
+		}
+	}
+}
+
+// gatherSortVector copies scattered rows from multiple source batches into a
+// contiguous destination vector. Uses the prevBatch caching pattern to avoid
+// redundant batch lookups when consecutive entries reference the same batch.
+// Hoists the type switch outside the loop, eliminating per-row overhead.
+func gatherSortVector(dst *batch.Vector, colIdx int, entries []sortEntry, batches []*batch.RecordBatch) {
+	switch dst.Type {
+	case batch.TypeBool:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.BoolData[di] = src.BoolData[si]
+			}
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Int32Data[di] = src.Int32Data[si]
+			}
+		}
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Int64Data[di] = src.Int64Data[si]
+			}
+		}
+	case batch.TypeFloat32:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Float32Data[di] = src.Float32Data[si]
+			}
+		}
+	case batch.TypeFloat64:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.Float64Data[di] = src.Float64Data[si]
+			}
+		}
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+				dst.BytesData.Set(di, nil)
+			} else {
+				dst.BytesData.Set(di, src.BytesData.Value(si))
+			}
+		}
+	case batch.TypeDecimal:
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else {
+				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			}
+		}
+	default:
+		for di, e := range entries {
+			copyVectorValue(dst, di, batches[e.batchIdx].Columns[colIdx], int(e.rowIdx))
 		}
 	}
 }

@@ -62,6 +62,51 @@ func (b *Bitmap) SetNull(i int) {
 	b.hasNulls = 1
 }
 
+// SetNullRange sets bits [start, start+count) to 0 (null) using word-level
+// operations. For runs spanning full 64-bit words, entire words are zeroed
+// in a single assignment instead of 64 individual bit clears.
+func (b *Bitmap) SetNullRange(start, count int) {
+	if count <= 0 || start < 0 || start >= b.len {
+		return
+	}
+	end := start + count
+	if end > b.len {
+		end = b.len
+	}
+	b.hasNulls = 1
+
+	startWord := start / 64
+	endWord := (end - 1) / 64
+	startBit := uint(start % 64)
+	endBit := uint((end - 1) % 64)
+
+	if startWord == endWord {
+		// Range fits in a single word: clear bits [startBit..endBit]
+		mask := uint64(0)
+		for i := startBit; i <= endBit; i++ {
+			mask |= 1 << i
+		}
+		b.data[startWord] &^= mask
+		return
+	}
+
+	// Clear tail bits of first word
+	if startBit > 0 {
+		mask := ^((uint64(1) << startBit) - 1) // bits [startBit..63]
+		b.data[startWord] &^= mask
+		startWord++
+	}
+
+	// Zero full words in the middle
+	for w := startWord; w < endWord; w++ {
+		b.data[w] = 0
+	}
+
+	// Clear head bits of last word
+	mask := (uint64(1) << (endBit + 1)) - 1 // bits [0..endBit]
+	b.data[endWord] &^= mask
+}
+
 // SetValid sets the bit at position i to 1 (non-null).
 func (b *Bitmap) SetValid(i int) {
 	if i < 0 || i >= b.len {

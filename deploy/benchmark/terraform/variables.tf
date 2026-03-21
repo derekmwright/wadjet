@@ -80,6 +80,12 @@ variable "bin_version" {
   default     = "latest"
 }
 
+variable "generate_data" {
+  description = "Set to true to regenerate TPC-H data instead of using pre-seeded bucket"
+  type        = bool
+  default     = false
+}
+
 # Recommended instance types per scale factor (Graviton3 ARM):
 #   SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
 #   SF10:  c7g.4xlarge  (16 vCPU, 32 GB) — $0.58/hr

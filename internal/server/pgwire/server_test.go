@@ -428,6 +428,143 @@ func TestPGWireShowTables(t *testing.T) {
 	client.terminate()
 }
 
+func TestPGWireShowColumns(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	columns, rows, tag := client.simpleQuery("SHOW COLUMNS FROM users")
+	t.Logf("SHOW COLUMNS FROM users: columns=%v rows=%v tag=%s", columns, rows, tag)
+
+	if len(rows) < 3 {
+		t.Errorf("expected at least 3 columns for users table, got %d rows", len(rows))
+	}
+
+	client.terminate()
+}
+
+// TestPGWireShowColumnsReturnsMetadata is a regression test for issue #5:
+// SHOW COLUMNS FROM was returning {"setting":""} instead of column metadata.
+// The bug was in handleShow where SHOW COLUMNS FROM was intercepted by the
+// catch-all default case rather than being routed to the query engine.
+func TestPGWireShowColumnsReturnsMetadata(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	columns, rows, tag := client.simpleQuery("SHOW COLUMNS FROM users")
+	t.Logf("SHOW COLUMNS FROM users: columns=%v rows=%v tag=%s", columns, rows, tag)
+
+	// Must return actual column metadata, not {"setting":""}
+	if len(columns) != 3 {
+		t.Fatalf("expected 3 column headers (column_name, type, nullable), got %d: %v", len(columns), columns)
+	}
+	if columns[0] != "column_name" {
+		t.Errorf("expected first column header 'column_name', got %q", columns[0])
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows (id, name, score), got %d", len(rows))
+	}
+	// Verify first row contains actual metadata, not empty strings
+	if rows[0][0] == "" {
+		t.Error("expected non-empty column name in first row, got empty string")
+	}
+	if rows[0][1] == "" {
+		t.Error("expected non-empty type in first row, got empty string")
+	}
+
+	// DESCRIBE should return identical results
+	descCols, descRows, _ := client.simpleQuery("DESCRIBE users")
+	if len(descRows) != len(rows) {
+		t.Errorf("DESCRIBE and SHOW COLUMNS FROM should return same row count: DESCRIBE=%d, SHOW COLUMNS=%d",
+			len(descRows), len(rows))
+	}
+	_ = descCols
+
+	client.terminate()
+}
+
+// TestPGWireCurrentDateNotNull is a regression test for issue #7:
+// SELECT CURRENT_DATE via pgwire returned NULL/empty because the pgwire
+// synthetic SELECT handler intercepted it before the query engine could
+// evaluate the expression via DualSource.
+func TestPGWireCurrentDateNotNull(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{"current_date", "SELECT CURRENT_DATE"},
+		{"current_timestamp", "SELECT CURRENT_TIMESTAMP"},
+		{"now", "SELECT NOW()"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			columns, rows, tag := client.simpleQuery(tt.sql)
+			t.Logf("%s: columns=%v rows=%v tag=%s", tt.sql, columns, rows, tag)
+
+			if len(rows) != 1 {
+				t.Fatalf("expected 1 row, got %d", len(rows))
+			}
+			if len(rows[0]) < 1 {
+				t.Fatal("expected at least 1 column value")
+			}
+			val := rows[0][0]
+			if val == "" || val == "NULL" {
+				t.Errorf("%s returned empty/NULL value %q — expected a date or timestamp", tt.sql, val)
+			}
+			t.Logf("%s = %s", tt.sql, val)
+		})
+	}
+
+	client.terminate()
+}
+
+// TestPGWireDescribeAfterCreateTable reproduces issue #6: DESCRIBE returns
+// "table not found" for tables created via pgwire CREATE TABLE.
+func TestPGWireDescribeAfterCreateTable(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := startTestServer(t, db)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	// Create table via pgwire SQL
+	_, _, tag := client.simpleQuery("CREATE TABLE findings (id INT64, tenant_id STRING, severity STRING NOT NULL) PARTITION BY (tenant_id)")
+	t.Logf("CREATE TABLE: tag=%s", tag)
+
+	// DESCRIBE should find the table
+	columns, rows, tag := client.simpleQuery("DESCRIBE findings")
+	t.Logf("DESCRIBE findings: columns=%v rows=%v tag=%s", columns, rows, tag)
+	if len(rows) < 3 {
+		t.Errorf("expected at least 3 rows from DESCRIBE, got %d", len(rows))
+	}
+
+	// SHOW COLUMNS FROM should also work
+	columns, rows, tag = client.simpleQuery("SHOW COLUMNS FROM findings")
+	t.Logf("SHOW COLUMNS FROM findings: columns=%v rows=%v tag=%s", columns, rows, tag)
+	if len(rows) < 3 {
+		t.Errorf("expected at least 3 rows from SHOW COLUMNS, got %d", len(rows))
+	}
+
+	client.terminate()
+}
+
 func TestPGWireConcurrentConnections(t *testing.T) {
 	db := setupTestDB(t)
 	srv := startTestServer(t, db)

@@ -97,7 +97,7 @@ func TestRecordBatch_SelectionVector(t *testing.T) {
 	}
 
 	b := FromRows(schema, rows)
-	b.Sel = []uint16{1, 3} // select only rows 1 and 3
+	b.Sel = []uint32{1, 3} // select only rows 1 and 3
 
 	if b.ActiveLen() != 2 {
 		t.Fatalf("expected 2 active rows, got %d", b.ActiveLen())

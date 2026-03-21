@@ -3,8 +3,11 @@ package exec
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
@@ -385,11 +388,23 @@ func estimateBatchBytes(b *batch.RecordBatch) int64 {
 }
 
 // Build consumes all rows from the build (right) side into the columnar hash table.
+// Uses parallel workers when the build side is large enough to benefit from
+// concurrent hash table construction with per-worker local tables.
 func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	if err := source.Init(ctx); err != nil {
 		return fmt.Errorf("build source init: %w", err)
 	}
 	defer source.Close()
+
+	// Use parallel build when: enough CPUs, no spill/memory tracking (complex
+	// interactions with partitioning), and not key-only mode (rare, fast already).
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > 1 && h.Spill == nil && h.MemTracker == nil && !h.SemiAntiKeyOnly {
+		return h.buildParallel(ctx, source, workers)
+	}
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -644,6 +659,329 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 
 	h.buildDone = true
 	return nil
+}
+
+// localBuild accumulates hash table state for one parallel build worker.
+// Each worker builds into its own local hash table and arena to avoid
+// contention. After all workers finish, locals are merged into the main
+// HashJoin state.
+type localBuild struct {
+	batches   []*batch.RecordBatch
+	arena     []buildRef
+	arenaNext []int32
+	intIndex  *intHashTable
+	strIndex  *strHashTable
+	keyBuf    []byte
+	buildRows int64
+}
+
+func (lb *localBuild) appendInt(key int64, ref buildRef) {
+	idx := int32(len(lb.arena))
+	lb.arena = append(lb.arena, ref)
+	if prev, ok := lb.intIndex.Put(key, idx); ok {
+		lb.arenaNext = append(lb.arenaNext, prev)
+	} else {
+		lb.arenaNext = append(lb.arenaNext, -1)
+	}
+}
+
+func (lb *localBuild) appendStr(ref buildRef, key []byte) {
+	idx := int32(len(lb.arena))
+	lb.arena = append(lb.arena, ref)
+	if prev, ok := lb.strIndex.GetOrInsert(key, idx); ok {
+		lb.arenaNext = append(lb.arenaNext, prev)
+	} else {
+		lb.arenaNext = append(lb.arenaNext, -1)
+	}
+}
+
+// buildParallel uses per-worker local hash tables for concurrent build.
+// Each worker reads batches (serialized by mutex), inserts into its local
+// table (no contention, fits in L2 cache), then all locals are merged.
+func (h *HashJoin) buildParallel(ctx context.Context, source Source, workers int) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("join build cancelled: %w", err)
+	}
+
+	// Read first batch to initialize schema, key indices, and hash type.
+	first, err := source.Next(ctx)
+	if err != nil {
+		return fmt.Errorf("build source next: %w", err)
+	}
+	if first == nil {
+		h.buildDone = true
+		return nil
+	}
+
+	h.buildSchema = first.Schema
+	h.buildKeyIdx = make([]int, len(h.RightKeys))
+	for i, col := range h.RightKeys {
+		h.buildKeyIdx[i] = first.ColumnIndex(col)
+	}
+	h.tryEnableIntKey(first)
+
+	// Create per-worker local accumulators.
+	hint := 64
+	if h.BuildRowHint > 0 {
+		hint = int(h.BuildRowHint) / workers
+		if hint < 64 {
+			hint = 64
+		}
+	}
+	locals := make([]*localBuild, workers)
+	for i := range locals {
+		lb := &localBuild{
+			keyBuf: make([]byte, 0, 128),
+		}
+		if h.useIntKey || h.useDualIntKey {
+			lb.intIndex = newIntHashTable(hint)
+		} else {
+			lb.strIndex = newStrHashTable(hint)
+		}
+		if h.BuildRowHint > 0 {
+			lb.arena = make([]buildRef, 0, hint)
+			lb.arenaNext = make([]int32, 0, hint)
+		}
+		locals[i] = lb
+	}
+
+	// Process first batch in worker 0's local.
+	h.processLocalBatch(locals[0], first)
+
+	// Launch workers.
+	var sourceMu sync.Mutex
+	var wg sync.WaitGroup
+	var firstErr atomic.Value
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(lb *localBuild) {
+			defer wg.Done()
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				sourceMu.Lock()
+				b, err := source.Next(ctx)
+				sourceMu.Unlock()
+				if err != nil {
+					firstErr.CompareAndSwap(nil, fmt.Errorf("build source next: %w", err))
+					return
+				}
+				if b == nil {
+					return
+				}
+				h.processLocalBatch(lb, b)
+			}
+		}(locals[i])
+	}
+	wg.Wait()
+
+	if v := firstErr.Load(); v != nil {
+		return v.(error)
+	}
+
+	// Merge all local builds into the main hash join state.
+	h.mergeLocalBuilds(locals)
+
+	// Allocate matched bitmap for right/full outer join tracking.
+	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
+		h.arenaMatched = make([]bool, len(h.arena))
+	}
+
+	h.buildBloom()
+	h.buildDone = true
+	return nil
+}
+
+// processLocalBatch inserts one batch into a worker-local build accumulator.
+// Caller must not hold any locks — this function is lock-free per worker.
+func (h *HashJoin) processLocalBatch(lb *localBuild, b *batch.RecordBatch) {
+	b.Detach()
+	batchIdx := int32(len(lb.batches))
+	lb.batches = append(lb.batches, b)
+
+	if h.useIntKey {
+		col := b.Columns[h.buildKeyIdx[0]]
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				key, ok := intKeyFromVector(col, int(si))
+				if !ok {
+					continue
+				}
+				lb.appendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
+				lb.buildRows++
+			}
+		} else if !col.Nulls.HasNulls() {
+			switch col.Type {
+			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+				data := col.Int32Data
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					lb.appendInt(int64(data[rowIdx]), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				}
+			default:
+				data := col.Int64Data
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					lb.appendInt(data[rowIdx], buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				}
+			}
+			lb.buildRows += int64(b.Len)
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				key, ok := intKeyFromVector(col, rowIdx)
+				if !ok {
+					continue
+				}
+				lb.appendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				lb.buildRows++
+			}
+		}
+	} else if h.useDualIntKey {
+		col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
+				if !ok {
+					continue
+				}
+				lb.appendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
+				lb.buildRows++
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
+				if !ok {
+					continue
+				}
+				lb.appendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
+				lb.buildRows++
+			}
+		}
+	} else {
+		if lb.strIndex == nil {
+			lb.strIndex = newStrHashTable(64)
+		}
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				lb.keyBuf = lb.keyBuf[:0]
+				for _, idx := range h.buildKeyIdx {
+					if idx < 0 {
+						lb.keyBuf = append(lb.keyBuf, 1)
+						continue
+					}
+					v := b.Columns[idx]
+					if v.Nulls.IsNullFast(int(si)) {
+						lb.keyBuf = append(lb.keyBuf, 1)
+					} else {
+						lb.keyBuf = append(lb.keyBuf, 0)
+						lb.keyBuf = appendColumnValue(lb.keyBuf, v, int(si), v.Type)
+					}
+				}
+				lb.appendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(si)}, lb.keyBuf)
+				lb.buildRows++
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				lb.keyBuf = lb.keyBuf[:0]
+				for _, idx := range h.buildKeyIdx {
+					if idx < 0 {
+						lb.keyBuf = append(lb.keyBuf, 1)
+						continue
+					}
+					v := b.Columns[idx]
+					if v.Nulls.IsNullFast(rowIdx) {
+						lb.keyBuf = append(lb.keyBuf, 1)
+					} else {
+						lb.keyBuf = append(lb.keyBuf, 0)
+						lb.keyBuf = appendColumnValue(lb.keyBuf, v, rowIdx, v.Type)
+					}
+				}
+				lb.appendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)}, lb.keyBuf)
+				lb.buildRows++
+			}
+		}
+	}
+}
+
+// mergeLocalBuilds combines per-worker local accumulators into the main
+// HashJoin state. Concatenates batches and arenas, then re-inserts hash
+// table entries with adjusted indices. O(distinct_keys) hash work, not
+// O(total_rows), since each key appears once per local table.
+func (h *HashJoin) mergeLocalBuilds(locals []*localBuild) {
+	// Count totals for pre-allocation.
+	var totalArena, totalBatches int
+	for _, lb := range locals {
+		totalArena += len(lb.arena)
+		totalBatches += len(lb.batches)
+		h.buildRows += lb.buildRows
+	}
+
+	h.buildBatches = make([]*batch.RecordBatch, 0, totalBatches)
+	h.arena = make([]buildRef, 0, totalArena)
+	h.arenaNext = make([]int32, 0, totalArena)
+
+	// Pre-size the merged hash table for the total row count.
+	if h.useIntKey || h.useDualIntKey {
+		h.intIndex = newIntHashTable(int(h.buildRows))
+	} else {
+		h.strIndex = newStrHashTable(int(h.buildRows))
+	}
+
+	for _, lb := range locals {
+		batchOffset := int32(len(h.buildBatches))
+		arenaOffset := int32(len(h.arena))
+
+		// Append batches.
+		h.buildBatches = append(h.buildBatches, lb.batches...)
+
+		// Append arena with adjusted batchIdx.
+		for _, ref := range lb.arena {
+			h.arena = append(h.arena, buildRef{
+				batchIdx: ref.batchIdx + batchOffset,
+				rowIdx:   ref.rowIdx,
+			})
+		}
+
+		// Append arenaNext with adjusted chain links.
+		for _, next := range lb.arenaNext {
+			if next >= 0 {
+				h.arenaNext = append(h.arenaNext, next+arenaOffset)
+			} else {
+				h.arenaNext = append(h.arenaNext, -1)
+			}
+		}
+
+		// Re-insert hash entries with adjusted arena indices.
+		// When a key exists in the merged table, link the local chain's
+		// tail to the existing merged chain head.
+		if h.useIntKey || h.useDualIntKey {
+			lb.intIndex.ForEach(func(key int64, localHead int32) {
+				adjustedHead := localHead + arenaOffset
+				if existingHead, found := h.intIndex.Get(key); found {
+					// Find tail of the local chain (now in merged arenaNext).
+					tail := adjustedHead
+					for h.arenaNext[tail] >= 0 {
+						tail = h.arenaNext[tail]
+					}
+					h.arenaNext[tail] = existingHead
+				}
+				h.intIndex.Put(key, adjustedHead)
+			})
+		} else if lb.strIndex != nil {
+			lb.strIndex.ForEach(func(key []byte) {
+				localHead, _ := lb.strIndex.Get(key)
+				adjustedHead := localHead + arenaOffset
+				if existingHead, found := h.strIndex.Get(key); found {
+					tail := adjustedHead
+					for h.arenaNext[tail] >= 0 {
+						tail = h.arenaNext[tail]
+					}
+					h.arenaNext[tail] = existingHead
+				}
+				h.strIndex.Put(key, adjustedHead)
+			})
+		}
+	}
 }
 
 // buildBloom populates the bloom filter from the build-side hash table keys.
@@ -1142,7 +1480,7 @@ type matchPair struct {
 type HashJoinProbe struct {
 	join       *HashJoin
 	pairsBuf   []matchPair // reusable buffer to avoid per-batch allocation
-	semiSelBuf []uint16    // reusable selection vector for semi/anti join output
+	semiSelBuf []uint32    // reusable selection vector for semi/anti join output
 	lookupBuf  []buildRef  // reusable buffer for lookupBuild results
 	indexBuf   []int       // reusable buffer for probe-side gather indices
 	keyBuf     []byte      // per-probe key serialization buffer (avoids race on shared h.keyBuf)
@@ -1294,6 +1632,17 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		return nil, nil
 	}
 
+	// Sort pairs by build batch index so gatherBuildVector accesses each
+	// build batch's column vectors contiguously. The per-type gather loops
+	// cache the current src vector and skip reload while batchIdx is unchanged;
+	// grouping pairs by batch maximizes that cache hit rate and keeps the
+	// underlying column data in L1/L2 across the entire run.
+	if len(p.join.buildBatches) > 1 {
+		slices.SortFunc(pairs, func(a, b matchPair) int {
+			return int(a.ref.batchIdx) - int(b.ref.batchIdx)
+		})
+	}
+
 	// Build output batch using precomputed column source mapping.
 	// Use pooled batch when output fits within DefaultBatchSize to avoid
 	// per-batch allocation. The pipeline releases intermediate batches
@@ -1326,7 +1675,8 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		if m.fromProbe {
 			gatherVector(dst, in.Columns[m.srcIdx], probeIndices)
 		} else {
-			gatherBuildVector(dst, m.srcIdx, pairs, p.join.buildBatches)
+			allMatched := p.join.JoinType != LeftJoin && p.join.JoinType != FullOuterJoin
+			gatherBuildVector(dst, m.srcIdx, pairs, p.join.buildBatches, allMatched)
 		}
 	}
 
@@ -1674,7 +2024,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 // Uses a selection vector on the input batch to avoid copying rows.
 func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if cap(p.semiSelBuf) < in.Len {
-		p.semiSelBuf = make([]uint16, 0, in.Len)
+		p.semiSelBuf = make([]uint32, 0, in.Len)
 	}
 	sel := p.semiSelBuf[:0]
 
@@ -1703,7 +2053,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			checkIntRow := func(row int) {
 				if hasNulls && keyCol.Nulls.IsNullFast(row) {
 					if !isSemi {
-						sel = append(sel, uint16(row))
+						sel = append(sel, uint32(row))
 					}
 					return
 				}
@@ -1716,14 +2066,14 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 				// Bloom filter pre-check
 				if hasBloom && !h.bloomMayContain(bloomHashInt(key)) {
 					if !isSemi {
-						sel = append(sel, uint16(row))
+						sel = append(sel, uint32(row))
 					}
 					return
 				}
 				_, exists := h.intIndex.Get(key)
 				emit := (isSemi && exists) || (!isSemi && !exists)
 				if emit {
-					sel = append(sel, uint16(row))
+					sel = append(sel, uint32(row))
 				}
 			}
 
@@ -1764,7 +2114,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			checkRow := func(row int) {
 				if hasNulls && keyCol.Nulls.IsNullFast(row) {
 					if !isSemi {
-						sel = append(sel, uint16(row))
+						sel = append(sel, uint32(row))
 					}
 					return
 				}
@@ -1776,7 +2126,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 				}
 				if hasBloom && !h.bloomMayContain(bloomHashInt(key)) {
 					if !isSemi {
-						sel = append(sel, uint16(row))
+						sel = append(sel, uint32(row))
 					}
 					return
 				}
@@ -1787,7 +2137,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 					if e.key == intHashEmpty {
 						// Key not in table — no match possible
 						if !isSemi {
-							sel = append(sel, uint16(row))
+							sel = append(sel, uint32(row))
 						}
 						return
 					}
@@ -1803,7 +2153,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 						}
 						emit := (isSemi && hasMatch) || (!isSemi && !hasMatch)
 						if emit {
-							sel = append(sel, uint16(row))
+							sel = append(sel, uint32(row))
 						}
 						return
 					}
@@ -1844,7 +2194,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			}
 			emit := (isSemi && hasMatch) || (!isSemi && !hasMatch)
 			if emit {
-				sel = append(sel, uint16(row))
+				sel = append(sel, uint32(row))
 			}
 		}
 
@@ -2094,162 +2444,284 @@ func (p *HashJoinProbe) leftHasColumn(name string, leftSchema []parquet.Column) 
 // function call and type dispatch overhead vs per-row copyVectorValue.
 // Batch pointer caching and null-free fast paths are inlined (closures don't
 // inline in Go when they capture mutable variables).
-func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBatches []*batch.RecordBatch) {
+//
+// When allMatched is true (inner/right joins), the per-row !pair.matched branch
+// is skipped entirely, generating tighter loops with no null-for-unmatched logic.
+func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBatches []*batch.RecordBatch, allMatched bool) {
 	switch dst.Type {
 	case batch.TypeBool:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BoolData[di] = src.BoolData[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.BoolData[di] = src.BoolData[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BoolData[di] = src.BoolData[si]
+				}
 			}
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int32Data[di] = src.Int32Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Int32Data[di] = src.Int32Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int32Data[di] = src.Int32Data[si]
+				}
 			}
 		}
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int64Data[di] = src.Int64Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Int64Data[di] = src.Int64Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Int64Data[di] = src.Int64Data[si]
+				}
 			}
 		}
 	case batch.TypeFloat32:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float32Data[di] = src.Float32Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Float32Data[di] = src.Float32Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float32Data[di] = src.Float32Data[si]
+				}
 			}
 		}
 	case batch.TypeFloat64:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float64Data[di] = src.Float64Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.Float64Data[di] = src.Float64Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.Float64Data[di] = src.Float64Data[si]
+				}
 			}
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BytesData.Set(di, src.BytesData.Value(si))
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.BytesData.Set(di, src.BytesData.Value(si))
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.BytesData.Set(di, src.BytesData.Value(si))
+				}
 			}
 		}
 	case batch.TypeDecimal:
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
-		for di, pair := range pairs {
-			if !pair.matched {
-				dst.Nulls.SetNull(di)
-				continue
+		if allMatched {
+			for di, pair := range pairs {
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				}
 			}
-			if bi := pair.ref.batchIdx; bi != prevBatch {
-				src = buildBatches[bi].Columns[srcIdx]
-				prevBatch = bi
-				srcHasNulls = src.Nulls.HasNulls()
-			}
-			si := int(pair.ref.rowIdx)
-			if srcHasNulls && src.Nulls.IsNullFast(si) {
-				dst.Nulls.SetNull(di)
-			} else {
-				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					dst.Nulls.SetNull(di)
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+					srcHasNulls = src.Nulls.HasNulls()
+				}
+				si := int(pair.ref.rowIdx)
+				if srcHasNulls && src.Nulls.IsNullFast(si) {
+					dst.Nulls.SetNull(di)
+				} else {
+					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				}
 			}
 		}
 	default:
-		for di, pair := range pairs {
-			if !pair.matched {
-				setVectorNull(dst, di)
-			} else {
+		if allMatched {
+			for di, pair := range pairs {
 				buildBatch := buildBatches[pair.ref.batchIdx]
 				copyVectorValue(dst, di, buildBatch.Columns[srcIdx], int(pair.ref.rowIdx))
+			}
+		} else {
+			for di, pair := range pairs {
+				if !pair.matched {
+					setVectorNull(dst, di)
+				} else {
+					buildBatch := buildBatches[pair.ref.batchIdx]
+					copyVectorValue(dst, di, buildBatch.Columns[srcIdx], int(pair.ref.rowIdx))
+				}
 			}
 		}
 	}

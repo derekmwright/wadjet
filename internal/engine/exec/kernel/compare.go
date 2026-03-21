@@ -45,7 +45,7 @@ func resolveCompare[T Ordered](op CompareOp) func(a, b T) bool {
 // against a pre-resolved constant. The generic is monomorphized at compile time.
 func compareFilterImpl[T Ordered](getData func(v *batch.Vector) []T, val T, op CompareOp) FilterKernel {
 	cmpFn := resolveCompare[T](op)
-	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		data := getData(vec)
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
@@ -67,13 +67,13 @@ func compareFilterImpl[T Ordered](getData func(v *batch.Vector) []T, val T, op C
 			if hasNulls {
 				for i := 0; i < vecLen; i++ {
 					if !vec.Nulls.IsNullFast(i) && cmpFn(data[i], val) {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			} else {
 				for i := 0; i < vecLen; i++ {
 					if cmpFn(data[i], val) {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			}
@@ -129,7 +129,7 @@ func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel
 // within the comparison function and never stored.
 func compareFilterString(op CompareOp, val string) FilterKernel {
 	cmpFn := resolveCompare[string](op)
-	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
 		if sel != nil {
@@ -150,13 +150,13 @@ func compareFilterString(op CompareOp, val string) FilterKernel {
 			if hasNulls {
 				for i := 0; i < vecLen; i++ {
 					if !vec.Nulls.IsNullFast(i) && cmpFn(vec.BytesData.UnsafeStringValue(i), val) {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			} else {
 				for i := 0; i < vecLen; i++ {
 					if cmpFn(vec.BytesData.UnsafeStringValue(i), val) {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			}
@@ -207,7 +207,7 @@ func ResolveInFilterKernel(typ batch.TypeID, values []any, negate bool) FilterKe
 }
 
 func inFilterInt64(getData func(v *batch.Vector) []int64, set map[int64]struct{}, negate bool) FilterKernel {
-	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		data := getData(vec)
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
@@ -235,7 +235,7 @@ func inFilterInt64(getData func(v *batch.Vector) []int64, set map[int64]struct{}
 					if !vec.Nulls.IsNullFast(i) {
 						_, found := set[data[i]]
 						if found != negate {
-							out = append(out, uint16(i))
+							out = append(out, uint32(i))
 						}
 					}
 				}
@@ -243,7 +243,7 @@ func inFilterInt64(getData func(v *batch.Vector) []int64, set map[int64]struct{}
 				for i := 0; i < vecLen; i++ {
 					_, found := set[data[i]]
 					if found != negate {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			}
@@ -253,7 +253,7 @@ func inFilterInt64(getData func(v *batch.Vector) []int64, set map[int64]struct{}
 }
 
 func inFilterInt32(getData func(v *batch.Vector) []int32, set map[int32]struct{}, negate bool) FilterKernel {
-	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		data := getData(vec)
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
@@ -281,7 +281,7 @@ func inFilterInt32(getData func(v *batch.Vector) []int32, set map[int32]struct{}
 					if !vec.Nulls.IsNullFast(i) {
 						_, found := set[data[i]]
 						if found != negate {
-							out = append(out, uint16(i))
+							out = append(out, uint32(i))
 						}
 					}
 				}
@@ -289,7 +289,7 @@ func inFilterInt32(getData func(v *batch.Vector) []int32, set map[int32]struct{}
 				for i := 0; i < vecLen; i++ {
 					_, found := set[data[i]]
 					if found != negate {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			}
@@ -299,7 +299,7 @@ func inFilterInt32(getData func(v *batch.Vector) []int32, set map[int32]struct{}
 }
 
 func inFilterFloat64(set map[float64]struct{}, negate bool) FilterKernel {
-	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		data := vec.Float64Data
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
@@ -320,7 +320,7 @@ func inFilterFloat64(set map[float64]struct{}, negate bool) FilterKernel {
 				}
 				_, found := set[data[i]]
 				if found != negate {
-					out = append(out, uint16(i))
+					out = append(out, uint32(i))
 				}
 			}
 		}
@@ -329,7 +329,7 @@ func inFilterFloat64(set map[float64]struct{}, negate bool) FilterKernel {
 }
 
 func inFilterString(set map[string]struct{}, negate bool) FilterKernel {
-	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
 		if sel != nil {
@@ -349,7 +349,7 @@ func inFilterString(set map[string]struct{}, negate bool) FilterKernel {
 				}
 				_, found := set[vec.BytesData.UnsafeStringValue(i)]
 				if found != negate {
-					out = append(out, uint16(i))
+					out = append(out, uint32(i))
 				}
 			}
 		}
@@ -363,7 +363,7 @@ func inFilterString(set map[string]struct{}, negate bool) FilterKernel {
 // Converts SQL LIKE patterns (% and _) to optimized matching functions.
 func ResolveLikeFilterKernel(pattern string, negate bool) FilterKernel {
 	matcher := compileLikePattern(pattern)
-	return func(vec *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
 		hasNulls := vec.Nulls.HasNulls()
 		if sel != nil {
@@ -381,7 +381,7 @@ func ResolveLikeFilterKernel(pattern string, negate bool) FilterKernel {
 					continue
 				}
 				if matcher(vec.BytesData.UnsafeStringValue(i)) != negate {
-					out = append(out, uint16(i))
+					out = append(out, uint32(i))
 				}
 			}
 		}
@@ -628,12 +628,12 @@ func parseIPv6ToRawString(s string) string {
 }
 
 // ColColFilterKernel compares two columns element-wise, returning matching row indices.
-type ColColFilterKernel func(left, right *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16
+type ColColFilterKernel func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32
 
 // colColFilterImpl creates a ColColFilterKernel for comparing two typed columns.
 func colColFilterImpl[T Ordered](getData func(v *batch.Vector) []T, op CompareOp) ColColFilterKernel {
 	cmpFn := resolveCompare[T](op)
-	return func(left, right *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		ld := getData(left)
 		rd := getData(right)
 		out := outSel[:0]
@@ -659,13 +659,13 @@ func colColFilterImpl[T Ordered](getData func(v *batch.Vector) []T, op CompareOp
 			if hasNulls {
 				for i := 0; i < vecLen; i++ {
 					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(ld[i], rd[i]) {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			} else {
 				for i := 0; i < vecLen; i++ {
 					if cmpFn(ld[i], rd[i]) {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			}
@@ -679,7 +679,7 @@ func colColFilterImpl[T Ordered](getData func(v *batch.Vector) []T, op CompareOp
 // within the comparison function and never stored.
 func colColFilterString(op CompareOp) ColColFilterKernel {
 	cmpFn := resolveCompare[string](op)
-	return func(left, right *batch.Vector, sel []uint16, vecLen int, outSel []uint16) []uint16 {
+	return func(left, right *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
 		out := outSel[:0]
 		hasNulls := left.Nulls.HasNulls() || right.Nulls.HasNulls()
 		if sel != nil {
@@ -702,13 +702,13 @@ func colColFilterString(op CompareOp) ColColFilterKernel {
 			if hasNulls {
 				for i := 0; i < vecLen; i++ {
 					if !left.Nulls.IsNullFast(i) && !right.Nulls.IsNullFast(i) && cmpFn(left.BytesData.UnsafeStringValue(i), right.BytesData.UnsafeStringValue(i)) {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			} else {
 				for i := 0; i < vecLen; i++ {
 					if cmpFn(left.BytesData.UnsafeStringValue(i), right.BytesData.UnsafeStringValue(i)) {
-						out = append(out, uint16(i))
+						out = append(out, uint32(i))
 					}
 				}
 			}

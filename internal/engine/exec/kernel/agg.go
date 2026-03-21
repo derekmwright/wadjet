@@ -4,7 +4,7 @@ import "github.com/citc-tech/wadjet/internal/engine/batch"
 
 // --- Generic aggregate slice functions (monomorphized at compile time) ---
 
-func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint16, vecLen int) (T, int64) {
+func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint32, vecLen int) (T, int64) {
 	var sum T
 	var count int64
 	if sel != nil {
@@ -39,7 +39,7 @@ func sumSlice[T Numeric](data []T, nulls *batch.Bitmap, sel []uint16, vecLen int
 	return sum, count
 }
 
-func countSlice(nulls *batch.Bitmap, sel []uint16, vecLen int) int64 {
+func countSlice(nulls *batch.Bitmap, sel []uint32, vecLen int) int64 {
 	if sel != nil {
 		if !nulls.HasNulls() {
 			return int64(len(sel))
@@ -431,33 +431,33 @@ func ResolveRowCount(countStar bool) RowAggUpdater {
 func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeDuration:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			s, c := sumSlice(vec.Int64Data, &vec.Nulls, sel, vecLen)
 			acc.SumI64 += s
 			acc.Count += c
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeDate:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			s, c := sumSlice(vec.Int32Data, &vec.Nulls, sel, vecLen)
 			acc.SumI64 += int64(s)
 			acc.Count += c
 		}
 	case batch.TypeFloat64:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			s, c := sumSlice(vec.Float64Data, &vec.Nulls, sel, vecLen)
 			acc.SumF64 += s
 			acc.Count += c
 			acc.IsFloat = true
 		}
 	case batch.TypeFloat32:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			s, c := sumSlice(vec.Float32Data, &vec.Nulls, sel, vecLen)
 			acc.SumF64 += float64(s)
 			acc.Count += c
 			acc.IsFloat = true
 		}
 	case batch.TypeDecimal:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			data := vec.DecimalData.Data
 			nulls := &vec.Nulls
 			if sel != nil {
@@ -485,7 +485,7 @@ func ResolveBatchSum(typ batch.TypeID) BatchAggKernel {
 
 // ResolveBatchCount returns a batch-level count kernel.
 func ResolveBatchCount() BatchAggKernel {
-	return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+	return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 		acc.Count += countSlice(&vec.Nulls, sel, vecLen)
 	}
 }
@@ -494,25 +494,25 @@ func ResolveBatchCount() BatchAggKernel {
 func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			minSliceInt64(acc, vec.Int64Data, &vec.Nulls, sel, vecLen)
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			minSliceInt32(acc, vec.Int32Data, &vec.Nulls, sel, vecLen)
 		}
 	case batch.TypeFloat64:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			minSliceFloat64(acc, vec.Float64Data, &vec.Nulls, sel, vecLen)
 			acc.IsFloat = true
 		}
 	case batch.TypeFloat32:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			minSliceFloat32(acc, vec.Float32Data, &vec.Nulls, sel, vecLen)
 			acc.IsFloat = true
 		}
 	case batch.TypeDecimal:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			data := vec.DecimalData.Data
 			nulls := &vec.Nulls
 			if sel != nil {
@@ -548,25 +548,25 @@ func ResolveBatchMin(typ batch.TypeID) BatchAggKernel {
 func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
 	switch typ {
 	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			maxSliceInt64(acc, vec.Int64Data, &vec.Nulls, sel, vecLen)
 		}
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			maxSliceInt32(acc, vec.Int32Data, &vec.Nulls, sel, vecLen)
 		}
 	case batch.TypeFloat64:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			maxSliceFloat64(acc, vec.Float64Data, &vec.Nulls, sel, vecLen)
 			acc.IsFloat = true
 		}
 	case batch.TypeFloat32:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			maxSliceFloat32(acc, vec.Float32Data, &vec.Nulls, sel, vecLen)
 			acc.IsFloat = true
 		}
 	case batch.TypeDecimal:
-		return func(acc *Accumulator, vec *batch.Vector, sel []uint16, vecLen int) {
+		return func(acc *Accumulator, vec *batch.Vector, sel []uint32, vecLen int) {
 			data := vec.DecimalData.Data
 			nulls := &vec.Nulls
 			if sel != nil {
@@ -600,7 +600,7 @@ func ResolveBatchMax(typ batch.TypeID) BatchAggKernel {
 
 // --- Batch-level min/max helper functions ---
 
-func minSliceInt64(acc *Accumulator, data []int64, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+func minSliceInt64(acc *Accumulator, data []int64, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
@@ -644,7 +644,7 @@ func minSliceInt64(acc *Accumulator, data []int64, nulls *batch.Bitmap, sel []ui
 	}
 }
 
-func minSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+func minSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
@@ -688,7 +688,7 @@ func minSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []ui
 	}
 }
 
-func minSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+func minSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
@@ -732,7 +732,7 @@ func minSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel 
 	}
 }
 
-func minSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+func minSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
@@ -776,7 +776,7 @@ func minSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel 
 	}
 }
 
-func maxSliceInt64(acc *Accumulator, data []int64, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+func maxSliceInt64(acc *Accumulator, data []int64, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
@@ -820,7 +820,7 @@ func maxSliceInt64(acc *Accumulator, data []int64, nulls *batch.Bitmap, sel []ui
 	}
 }
 
-func maxSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+func maxSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
@@ -864,7 +864,7 @@ func maxSliceInt32(acc *Accumulator, data []int32, nulls *batch.Bitmap, sel []ui
 	}
 }
 
-func maxSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+func maxSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {
@@ -908,7 +908,7 @@ func maxSliceFloat64(acc *Accumulator, data []float64, nulls *batch.Bitmap, sel 
 	}
 }
 
-func maxSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel []uint16, vecLen int) {
+func maxSliceFloat32(acc *Accumulator, data []float32, nulls *batch.Bitmap, sel []uint32, vecLen int) {
 	if sel != nil {
 		if nulls.HasNulls() {
 			for _, idx := range sel {

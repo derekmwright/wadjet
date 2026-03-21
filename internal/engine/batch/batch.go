@@ -10,7 +10,7 @@ type RecordBatch struct {
 	Columns []*Vector
 	Schema  []parquet.Column
 	Len     int
-	Sel     []uint16 // selection vector: indices of active rows (nil = all rows active)
+	Sel     []uint32 // selection vector: indices of active rows (nil = all rows active)
 	pool    *BatchPool
 }
 

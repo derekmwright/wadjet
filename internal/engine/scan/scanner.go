@@ -363,10 +363,10 @@ func (s *Scanner) decodeRowGroups(ctx context.Context, reader *pqt.Reader, file 
 
 	// Apply delete markers: skip rows marked for deletion (merge-on-read)
 	if delSet := s.deleteMarkers[file.path]; len(delSet) > 0 {
-		sel := make([]uint16, 0, result.Len)
+		sel := make([]uint32, 0, result.Len)
 		for i := 0; i < result.Len; i++ {
 			if !delSet[int64(i)] {
-				sel = append(sel, uint16(i))
+				sel = append(sel, uint32(i))
 			}
 		}
 		if len(sel) == 0 {

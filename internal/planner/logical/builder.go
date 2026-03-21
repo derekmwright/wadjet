@@ -52,7 +52,9 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 			return nil, err
 		}
 	} else {
-		return nil, fmt.Errorf("no FROM clause")
+		// Table-less SELECT (e.g., SELECT CURRENT_DATE, SELECT 1+1).
+		// Use a single-row dual source so the projection evaluates once.
+		plan = &Node{Type: NodeDual}
 	}
 
 	// WHERE clause

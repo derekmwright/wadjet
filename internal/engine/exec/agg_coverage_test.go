@@ -657,7 +657,7 @@ func TestSortWithSelectionVector(t *testing.T) {
 		{"val": int64(20)},
 		{"val": int64(40)},
 	})
-	b.Sel = []uint16{0, 2, 3} // 30, 20, 40
+	b.Sel = []uint32{0, 2, 3} // 30, 20, 40
 
 	s := NewSort([]SortKey{{Column: "val", Order: Ascending}})
 	s.Init(context.Background())
