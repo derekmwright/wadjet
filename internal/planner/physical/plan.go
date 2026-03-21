@@ -772,11 +772,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 
 	case logical.NodeAggregate:
-		stageID := fmt.Sprintf("aggregate-%d", len(*stages))
 		preCount := len(*stages)
 		for _, child := range node.Children {
-			p.walkStages(child, stages, &stageID)
+			p.walkStages(child, stages, nil)
 		}
+		stageID := fmt.Sprintf("aggregate-%d", len(*stages))
 		var aggSpecs []AggSpec
 		for _, agg := range node.AggExprs {
 			aggSpecs = append(aggSpecs, AggSpec{
@@ -800,11 +800,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		*stages = append(*stages, stage)
 
 	case logical.NodeSort:
-		sortStageID := fmt.Sprintf("sort-%d", len(*stages))
 		preCount := len(*stages)
 		for _, child := range node.Children {
-			p.walkStages(child, stages, &sortStageID)
+			p.walkStages(child, stages, nil)
 		}
+		sortStageID := fmt.Sprintf("sort-%d", len(*stages))
 		var sortKeys []SortKeySpec
 		for _, ob := range node.OrderBy {
 			sortKeys = append(sortKeys, SortKeySpec{Column: ob.Column, Desc: ob.Desc, NullsLast: resolveNullsLast(ob)})
@@ -847,18 +847,15 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 
 	case logical.NodeJoin:
-		stageID := fmt.Sprintf("join-%d", len(*stages))
-
 		// Track leaf stages from each child separately so we get the
 		// correct left (probe) and right (build) dependencies — even
 		// when a child is itself a multi-stage subtree (e.g., nested join).
 		var childLeaves [][]string
 		for _, child := range node.Children {
 			childStart := len(*stages)
-			p.walkStages(child, stages, &stageID)
+			p.walkStages(child, stages, nil)
 			childLeaves = append(childLeaves, leafStages((*stages)[childStart:]))
 		}
-
 		isBroadcast := p.isBroadcastCandidate(node)
 		joinType := "hash_join"
 		if isBroadcast {
@@ -921,6 +918,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		if numPartitions > 0 {
 			joinTasks = numPartitions
 		}
+		stageID := fmt.Sprintf("join-%d", len(*stages))
 		stage := Stage{
 			ID:            stageID,
 			Type:          joinType,
@@ -976,11 +974,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 
 	case logical.NodeWindow:
-		stageID := fmt.Sprintf("window-%d", len(*stages))
 		preCount := len(*stages)
 		for _, child := range node.Children {
-			p.walkStages(child, stages, &stageID)
+			p.walkStages(child, stages, nil)
 		}
+		stageID := fmt.Sprintf("window-%d", len(*stages))
 		var winCols []WindowColSpec
 		for _, we := range node.WindowExprs {
 			var orderBy []SortKeySpec

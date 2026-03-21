@@ -152,7 +152,7 @@ func (qt *QueryTracker) GetReadyStages(queryID string) []string {
 		allDepsComplete := true
 		for _, dep := range stage.Dependencies {
 			depStage := q.Stages[dep]
-			if depStage.DoneTasks < depStage.TotalTasks {
+			if depStage == nil || depStage.DoneTasks < depStage.TotalTasks {
 				allDepsComplete = false
 				break
 			}
