@@ -43,6 +43,7 @@ type StageInfo struct {
 	TotalTasks   int
 	DoneTasks    int
 	FailedTasks  int
+	Scheduled    bool     // true once tasks have been dispatched (prevents re-scheduling)
 	Dependencies []string // stage IDs that must complete before this stage
 	Results      []distributed.ResultNotification
 }
@@ -142,11 +143,11 @@ func (qt *QueryTracker) GetReadyStages(queryID string) []string {
 	var ready []string
 	for _, stageID := range q.StageOrder {
 		stage := q.Stages[stageID]
+		if stage.Scheduled {
+			continue // already dispatched
+		}
 		if stage.DoneTasks+stage.FailedTasks >= stage.TotalTasks {
 			continue // already done
-		}
-		if stage.DoneTasks > 0 || stage.FailedTasks > 0 {
-			continue // in progress
 		}
 
 		allDepsComplete := true
@@ -158,6 +159,7 @@ func (qt *QueryTracker) GetReadyStages(queryID string) []string {
 			}
 		}
 		if allDepsComplete {
+			stage.Scheduled = true
 			ready = append(ready, stageID)
 		}
 	}
@@ -198,6 +200,33 @@ func (qt *QueryTracker) Get(queryID string) *QueryInfo {
 	// Return a shallow copy
 	copy := *q
 	return &copy
+}
+
+// StageFailed returns the error message if a completed stage has all tasks
+// failed (no successful tasks). Returns "" if the stage succeeded or is
+// still in progress.
+func (qt *QueryTracker) StageFailed(queryID, stageID string) string {
+	qt.mu.RLock()
+	defer qt.mu.RUnlock()
+
+	q, ok := qt.queries[queryID]
+	if !ok {
+		return ""
+	}
+	stage, ok := q.Stages[stageID]
+	if !ok || stage.DoneTasks+stage.FailedTasks < stage.TotalTasks {
+		return "" // not complete yet
+	}
+	if stage.DoneTasks > 0 {
+		return "" // at least some tasks succeeded
+	}
+	// All tasks failed — collect first error
+	for _, r := range stage.Results {
+		if r.Error != "" {
+			return r.Error
+		}
+	}
+	return "all tasks failed"
 }
 
 // IsComplete returns true if all stages of the query are done.
