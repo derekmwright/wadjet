@@ -350,21 +350,30 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	reapCounter := 0
+	tickCounter := 0
+	var cachedMemUsed, cachedMemTotal int64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			var memStats runtime.MemStats
-			runtime.ReadMemStats(&memStats)
+			// ReadMemStats is a stop-the-world operation. Only sample
+			// every 6th tick (~60s) to avoid stalling heartbeats under
+			// heavy GC pressure from large hash table builds.
+			tickCounter++
+			if tickCounter%6 == 1 {
+				var memStats runtime.MemStats
+				runtime.ReadMemStats(&memStats)
+				cachedMemUsed = int64(memStats.Alloc)
+				cachedMemTotal = int64(memStats.Sys)
+			}
 
 			hb := distributed.WorkerHeartbeat{
 				WorkerID:    w.config.WorkerID,
 				ClusterID:   w.config.ClusterID,
 				ActiveTasks: len(sem),
-				MemoryUsed:  int64(memStats.Alloc),
-				MemoryTotal: int64(memStats.Sys),
+				MemoryUsed:  cachedMemUsed,
+				MemoryTotal: cachedMemTotal,
 				Timestamp:   time.Now(),
 			}
 
@@ -376,9 +385,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 			w.nc.Publish(distributed.SubjectHeartbeat, data)
 
 			// Reap old cancellation entries every ~60s (6 heartbeat ticks)
-			reapCounter++
-			if reapCounter >= 6 {
-				reapCounter = 0
+			if tickCounter%6 == 0 {
 				w.reapCancelled(10 * time.Minute)
 			}
 		}
