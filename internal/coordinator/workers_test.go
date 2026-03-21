@@ -42,12 +42,14 @@ func TestWorkerRegistryReapStale(t *testing.T) {
 
 	wr.record(distributed.WorkerHeartbeat{
 		WorkerID:  "w-stale",
-		Timestamp: time.Now().Add(-1 * time.Hour),
+		Timestamp: time.Now(),
 	})
 	wr.record(distributed.WorkerHeartbeat{
 		WorkerID:  "w-active",
 		Timestamp: time.Now(),
 	})
+	// Simulate stale worker by backdating LastSeen directly
+	wr.workers["w-stale"].LastSeen = time.Now().Add(-1 * time.Hour)
 
 	reaped := wr.ReapStale()
 	if reaped != 1 {

@@ -69,7 +69,10 @@ func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
 	info.ClusterID = hb.ClusterID
 	info.MemoryUsed = hb.MemoryUsed
 	info.MemoryTotal = hb.MemoryTotal
-	info.LastSeen = hb.Timestamp
+	// Use coordinator-side time for LastSeen. The heartbeat message
+	// arriving proves the worker is alive — even if the worker's
+	// goroutine was GC-frozen and its embedded timestamp is stale.
+	info.LastSeen = time.Now()
 }
 
 // ActiveWorkers returns workers that have sent a heartbeat recently.
