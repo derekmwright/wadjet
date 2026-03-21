@@ -20,6 +20,8 @@ SF="${2:-SF1}"
 WORKER_COUNT="${3:-3}"
 RUNS="${BENCHMARK_RUNS:-3}"
 GENERATE="${GENERATE_DATA:-0}"
+SKIP="${SKIP_QUERIES:-}"
+TIMEOUT="${QUERY_TIMEOUT:-10m}"
 
 BUCKET="${WADJET_BUCKET:?Set WADJET_BUCKET}"
 REGION="${WADJET_REGION:?Set WADJET_REGION}"
@@ -84,11 +86,16 @@ fi
 if [ "$MODE" = "standalone" ]; then
   log "Running TPC-H SF${SCALE} standalone benchmark (${RUNS} runs)..."
 
+  SKIP_FLAGS=()
+  [ -n "$SKIP" ] && SKIP_FLAGS=(--skip-queries="${SKIP}")
+  [ -n "$TIMEOUT" ] && SKIP_FLAGS+=( --query-timeout="${TIMEOUT}" )
+
   /usr/local/bin/tpch-bench \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
+    "${SKIP_FLAGS[@]}" \
     --cpuprofile="${PROF_DIR}/cpu-standalone.prof" \
     --memprofile="${PROF_DIR}/mem-standalone.prof" \
     --profdir="${PROF_DIR}" \
@@ -97,12 +104,17 @@ if [ "$MODE" = "standalone" ]; then
 elif [ "$MODE" = "distributed" ]; then
   log "Running TPC-H SF${SCALE} distributed benchmark (${RUNS} runs, ${WORKER_COUNT} workers)..."
 
+  SKIP_FLAGS=()
+  [ -n "$SKIP" ] && SKIP_FLAGS=(--skip-queries="${SKIP}")
+  [ -n "$TIMEOUT" ] && SKIP_FLAGS+=( --query-timeout="${TIMEOUT}" )
+
   /usr/local/bin/tpch-bench \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     --workers="${WORKER_COUNT}" \
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
+    "${SKIP_FLAGS[@]}" \
     --nats-port=4222 \
     --cpuprofile="${PROF_DIR}/cpu-distributed.prof" \
     --memprofile="${PROF_DIR}/mem-distributed.prof" \
