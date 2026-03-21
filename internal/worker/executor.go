@@ -1011,18 +1011,18 @@ func (e *Executor) writeBatchResult(ctx context.Context, task distributed.Task, 
 
 	resultPath := task.ResultPrefix + task.ID + ".parquet"
 
-	// Try in-memory result store first (avoids S3 write for same-node stages)
-	if e.resultStore != nil && e.resultStore.Put(task.QueryID, resultPath, data) {
-		result.ResultPath = resultPath
-		return nil
-	}
-
-	// Fall back to S3
+	// Always write to S3 so results are visible to all workers.
 	_, err = e.store.Put(ctx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
 	if err != nil {
 		return fmt.Errorf("writing result to S3: %w", err)
 	}
 	result.ResultPath = resultPath
+
+	// Also cache locally for same-node reads (avoids S3 round-trip
+	// when the next stage runs on this worker).
+	if e.resultStore != nil {
+		e.resultStore.Put(task.QueryID, resultPath, data)
+	}
 	return nil
 }
 
