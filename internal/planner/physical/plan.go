@@ -2715,6 +2715,7 @@ type catalogScanSource struct {
 	scanPreds       []logical.Predicate
 	inner           exec.Source
 	cache           *scanCached           // non-nil when this table is scanned multiple times
+	cacheMu         sync.Mutex            // protects cache append and replay index
 	replayIdx       int                   // position in cache replay
 	isReplay        bool                  // true when reading from cache instead of scanning
 	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
@@ -2745,11 +2746,14 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 
 func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if s.isReplay {
+		s.cacheMu.Lock()
 		if s.replayIdx >= len(s.cache.batches) {
+			s.cacheMu.Unlock()
 			return nil, nil
 		}
 		cached := s.cache.batches[s.replayIdx]
 		s.replayIdx++
+		s.cacheMu.Unlock()
 		// Return a shallow copy: shared column vectors (read-only), independent Sel.
 		// This prevents downstream operators from corrupting cached data via in-place
 		// Sel mutation.
@@ -2761,28 +2765,33 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 		copy(clone.Columns, cached.Columns)
 		return clone, nil
 	}
+	// inner.Next() is thread-safe for channel-based scan sources
 	b, err := s.inner.Next(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if s.cache != nil && !s.cache.done {
-		if b == nil {
-			s.cache.done = true
-		} else {
-			// Detach from pool so the pipeline's b.Release() is a no-op.
-			// Without this, the pool recycles the batch and the scanner
-			// overwrites the Vectors that the cache references.
-			b.Detach()
-			// Cache a shallow copy so the first consumer's operators don't
-			// corrupt cached data by setting Sel in-place.
-			cached := &batch.RecordBatch{
-				Schema:  b.Schema,
-				Columns: make([]*batch.Vector, len(b.Columns)),
-				Len:     b.Len,
+	if s.cache != nil {
+		s.cacheMu.Lock()
+		if !s.cache.done {
+			if b == nil {
+				s.cache.done = true
+			} else {
+				// Detach from pool so the pipeline's b.Release() is a no-op.
+				// Without this, the pool recycles the batch and the scanner
+				// overwrites the Vectors that the cache references.
+				b.Detach()
+				// Cache a shallow copy so the first consumer's operators don't
+				// corrupt cached data by setting Sel in-place.
+				cached := &batch.RecordBatch{
+					Schema:  b.Schema,
+					Columns: make([]*batch.Vector, len(b.Columns)),
+					Len:     b.Len,
+				}
+				copy(cached.Columns, b.Columns)
+				s.cache.batches = append(s.cache.batches, cached)
 			}
-			copy(cached.Columns, b.Columns)
-			s.cache.batches = append(s.cache.batches, cached)
 		}
+		s.cacheMu.Unlock()
 	}
 	return b, err
 }
