@@ -199,13 +199,16 @@ func (s *Sort) finalizeColumnar() error {
 	resolved := make([]resolvedKey, len(s.Keys))
 	for i, key := range s.Keys {
 		idx := firstBatch.ColumnIndex(key.Column)
+		if idx >= len(firstBatch.Columns) {
+			idx = -1 // schema/column count mismatch — skip this key
+		}
 		var cmp kernel.SortCompareKernel
 		if idx >= 0 {
 			colType := firstBatch.Columns[idx].Type
 			// Check if this column is null-free across all batches.
 			allNullFree := true
 			for _, b := range s.batches {
-				if b.Columns[idx].Nulls.HasNulls() {
+				if idx >= len(b.Columns) || b.Columns[idx].Nulls.HasNulls() {
 					allNullFree = false
 					break
 				}
