@@ -331,6 +331,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			continue
 		}
 		tasks := c.createTasksForStage(queryID, s, nil)
+		// Update tracker with actual task count (may differ from planner
+		// estimate due to file coalescing in createScanTasks).
+		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
 		if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
 			c.tracker.Fail(queryID, err.Error())
 			return nil, fmt.Errorf("publishing leaf tasks: %w", err)
@@ -1386,6 +1389,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 			continue
 		}
 		tasks := c.createTasksForStage(queryID, s, nil)
+		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
 		if err := c.scheduler.PublishTasks(asyncCtx, tasks); err != nil {
 			asyncCancel()
 			c.tracker.Fail(queryID, err.Error())
