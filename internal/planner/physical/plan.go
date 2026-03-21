@@ -3721,9 +3721,8 @@ type scanSourceInner struct {
 	hasNestedTypes bool                      // true if schema has ARRAY/ROW/MAP types
 
 	// row-group-level parallel scan
-	rgUnits     []rgUnit // flat list of row group work units
-	rgIdx       int64    // atomic index for parallel RG workers
-	memoryLimit int64    // detected memory limit for prefetch gating (0 = no prefetch)
+	rgUnits []rgUnit // flat list of row group work units
+	rgIdx   int64    // atomic index for parallel RG workers
 
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
@@ -3796,7 +3795,6 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		requiredCols:  s.requiredCols,
 		scanPreds:     sp,
 		deleteMarkers: delMarkers,
-		memoryLimit:   memory.DetectMemoryLimit(),
 		bloomFilter:   s.bloomFilter,
 		batchCh:       make(chan *batch.RecordBatch, 4),
 		errCh:         make(chan error, 1),

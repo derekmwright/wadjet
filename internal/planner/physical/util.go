@@ -395,11 +395,6 @@ func decimalFromBytes(b []byte) batch.Int128 {
 
 // --- Row-group-level parallel scan ---
 
-// prefetchHeapThreshold is the fraction of the memory limit below which a
-// worker will speculatively prefetch the next row group. Set to 60% to leave
-// ample headroom for concurrent workers and downstream operators.
-const prefetchHeapThreshold = 0.60
-
 // rgUnit is a work unit for parallel row-group scanning.
 type rgUnit struct {
 	pqFile      *goparquet.File
@@ -604,11 +599,10 @@ func isIntType(v any) bool {
 	}
 }
 
-// rgWorker processes row group work units in parallel. When the system has
-// memory headroom (heap < 60% of the detected limit), it speculatively
-// prefetches the next row group to overlap I/O with downstream processing.
-// Each worker prefetches at most 1 row group ahead, stored in a worker-local
-// variable (no shared cache).
+// rgWorker processes row group work units in parallel. Each worker
+// speculatively prefetches one row group ahead AFTER sending the current
+// batch downstream. This overlaps I/O with consumer processing without
+// delaying batch delivery.
 func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	defer inner.wg.Done()
 
@@ -632,19 +626,6 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 				return
 			}
 			b = inner.readRG(inner.rgUnits[idx])
-		}
-
-		// Before sending downstream, speculatively prefetch the next row group
-		// if memory allows. Claim the index atomically so no other worker reads
-		// the same unit.
-		if prefetched == nil && inner.canPrefetch() {
-			nextIdx := int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
-			if nextIdx < len(inner.rgUnits) {
-				prefetched = &prefetchResult{
-					idx:   nextIdx,
-					batch: inner.readRG(inner.rgUnits[nextIdx]),
-				}
-			}
 		}
 
 		if b == nil || b.Len == 0 {
@@ -671,25 +652,26 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 
 		atomic.AddInt64(&inner.rowsScanned, int64(b.ActiveLen()))
 
+		// Send batch downstream FIRST, then prefetch while consumer processes.
 		select {
 		case inner.batchCh <- b:
 		case <-ctx.Done():
 			return
 		}
-	}
-}
 
-// canPrefetch returns true if the current heap usage is below the prefetch
-// threshold (60% of the detected memory limit). Returns false if no memory
-// limit was detected, disabling prefetch gracefully.
-func (inner *scanSourceInner) canPrefetch() bool {
-	if inner.memoryLimit <= 0 {
-		return false
+		// Prefetch next row group while consumer processes the current one.
+		// Each worker holds at most 1 extra row group (~10MB at SF10).
+		// 8 workers * 1 RG = ~80MB overhead, negligible on a 32GB machine.
+		if prefetched == nil {
+			nextIdx := int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
+			if nextIdx < len(inner.rgUnits) {
+				prefetched = &prefetchResult{
+					idx:   nextIdx,
+					batch: inner.readRG(inner.rgUnits[nextIdx]),
+				}
+			}
+		}
 	}
-	threshold := uint64(float64(inner.memoryLimit) * prefetchHeapThreshold)
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	return ms.HeapAlloc < threshold
 }
 
 // readRG reads a row group using the pool when the size matches.
