@@ -511,6 +511,9 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 // PlanDistributed generates a stage DAG for distributed execution.
 // Returns stages with dependency ordering suitable for coordinator dispatch.
 func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]Stage, error) {
+	// Ensure scan nodes have column metadata — needed by fixJoinKeyOrder
+	// to assign shuffle keys to the correct child side.
+	p.AnnotateScanColumns(ctx, node)
 	stages := p.generateStages(node)
 	if err := p.enforceQueryLimits(stages, node); err != nil {
 		return nil, err
@@ -878,6 +881,13 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		var leftKeys, rightKeys []string
 		if jt != "cross" {
 			leftKeys, rightKeys = parseJoinKeys(node.JoinCond)
+			// parseJoinKeys assigns left/right based on position in the "="
+			// expression, not based on which child subtree owns the column.
+			// Fix the assignment so leftKeys are from the probe (left) child
+			// and rightKeys are from the build (right) child.
+			if len(node.Children) >= 2 {
+				fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+			}
 		}
 
 		// Insert shuffle stages for non-broadcast joins when distributed
