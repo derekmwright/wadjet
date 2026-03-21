@@ -422,9 +422,12 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	var readWg sync.WaitGroup
 	var readIdx int64
 
-	readWorkers := runtime.NumCPU() * 2
+	readWorkers := runtime.NumCPU()
 	if readWorkers > len(inner.files) {
 		readWorkers = len(inner.files)
+	}
+	if readWorkers > 16 {
+		readWorkers = 16
 	}
 	if readWorkers < 1 {
 		readWorkers = 1
