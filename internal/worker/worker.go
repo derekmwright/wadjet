@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"runtime"
 	"sync"
 	"time"
 
@@ -351,29 +350,17 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 	defer ticker.Stop()
 
 	tickCounter := 0
-	var cachedMemUsed, cachedMemTotal int64
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// ReadMemStats is a stop-the-world operation. Only sample
-			// every 6th tick (~60s) to avoid stalling heartbeats under
-			// heavy GC pressure from large hash table builds.
 			tickCounter++
-			if tickCounter%6 == 1 {
-				var memStats runtime.MemStats
-				runtime.ReadMemStats(&memStats)
-				cachedMemUsed = int64(memStats.Alloc)
-				cachedMemTotal = int64(memStats.Sys)
-			}
 
 			hb := distributed.WorkerHeartbeat{
 				WorkerID:    w.config.WorkerID,
 				ClusterID:   w.config.ClusterID,
 				ActiveTasks: len(sem),
-				MemoryUsed:  cachedMemUsed,
-				MemoryTotal: cachedMemTotal,
 				Timestamp:   time.Now(),
 			}
 
