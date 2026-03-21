@@ -234,7 +234,7 @@ func (s *Sort) finalizeColumnar() error {
 		bi, bj := batches[ei.batchIdx], batches[ej.batchIdx]
 		ri, rj := int(ei.rowIdx), int(ej.rowIdx)
 		for _, key := range resolved {
-			if key.colIdx < 0 {
+			if key.colIdx < 0 || key.colIdx >= len(bi.Columns) || key.colIdx >= len(bj.Columns) {
 				continue
 			}
 			cmp := key.compare(bi.Columns[key.colIdx], ri, bj.Columns[key.colIdx], rj)
@@ -297,7 +297,18 @@ func (s *Sort) finalizeColumnar() error {
 		out := batch.NewRecordBatch(s.schema, len(chunk))
 		// Column-first iteration for better cache locality on destination arrays.
 		for j := range s.schema {
-			gatherSortVector(out.Columns[j], j, chunk, batches)
+			// Verify all source batches have this column; if any don't,
+			// the output column stays zero-valued (null-filled on demand).
+			allHaveCol := true
+			for _, e := range chunk {
+				if j >= len(batches[e.batchIdx].Columns) {
+					allHaveCol = false
+					break
+				}
+			}
+			if allHaveCol {
+				gatherSortVector(out.Columns[j], j, chunk, batches)
+			}
 		}
 		s.sorted = append(s.sorted, out)
 		pos = end
