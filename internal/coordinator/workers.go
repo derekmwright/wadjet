@@ -36,7 +36,7 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger) *WorkerRegistry {
 
 	wr := &WorkerRegistry{
 		workers: make(map[string]*WorkerInfo),
-		stale:   30 * time.Second,
+		stale:   3 * time.Minute,
 		logger:  logger,
 	}
 
