@@ -1137,8 +1137,10 @@ func (c *Coordinator) collectDepResults(queryID string) map[string][]string {
 	return c.tracker.CollectResultPaths(queryID)
 }
 
-// readFinalResults reads the result files from the final (last) stage.
-// Returns columnar batches to avoid per-row map[string]any heap pressure.
+// readFinalResults reads the final stage results. Only inline results (small,
+// already in memory via NATS) are materialized into batches. Large results
+// that were written to S3 are returned as file paths — the coordinator never
+// pulls bulk data through its own heap.
 func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stages []physical.Stage) ([]*batch.RecordBatch, []string, int64, error) {
 	if len(stages) == 0 {
 		return nil, nil, 0, nil
@@ -1153,7 +1155,6 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		return nil, nil, 0, nil
 	}
 
-	store := c.catalog.Store()
 	var allBatches []*batch.RecordBatch
 	var columns []string
 	var totalRows int64
@@ -1163,25 +1164,14 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 			continue
 		}
 
-		var data []byte
-		if len(r.InlineData) > 0 {
-			data = r.InlineData
-		} else if r.ResultPath != "" {
-			rc, _, err := store.Get(ctx, c.config.ResultBucket, r.ResultPath)
-			if err != nil {
-				c.logger.Warn("failed to read result file", "path", r.ResultPath, "error", err)
-				continue
-			}
-			data, err = io.ReadAll(rc)
-			rc.Close()
-			if err != nil {
-				continue
-			}
-		} else {
+		// Only materialize inline results (small, already in coordinator memory).
+		// Large results stay on S3 — callers use ResultFiles to read directly.
+		if len(r.InlineData) == 0 {
+			totalRows += r.NumRows
 			continue
 		}
 
-		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+		reader, err := parquet.NewReader(bytes.NewReader(r.InlineData), int64(len(r.InlineData)))
 		if err != nil {
 			continue
 		}
@@ -1197,6 +1187,51 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		}
 
 		// Direct columnar read — keeps data as batches, no row materialization
+		batches, err := scan.ReadFileBatches(reader, schema, nil)
+		if err != nil {
+			continue
+		}
+		for _, b := range batches {
+			totalRows += int64(b.ActiveLen())
+		}
+		allBatches = append(allBatches, batches...)
+	}
+
+	return allBatches, columns, totalRows, nil
+}
+
+// ReadResultFiles reads result Parquet files from S3 and returns columnar batches.
+// This is intended for callers (tpch-bench, CLI) that need full result data —
+// they pull from S3 directly instead of routing through the coordinator's heap.
+func ReadResultFiles(ctx context.Context, store objstore.Store, bucket string, paths []string) ([]*batch.RecordBatch, []string, int64, error) {
+	var allBatches []*batch.RecordBatch
+	var columns []string
+	var totalRows int64
+
+	for _, path := range paths {
+		rc, _, err := store.Get(ctx, bucket, path)
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			continue
+		}
+
+		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			continue
+		}
+
+		schema := reader.Schema().Columns
+		if len(columns) == 0 && len(schema) > 0 {
+			columns = make([]string, len(schema))
+			for i, col := range schema {
+				columns[i] = col.Name
+			}
+		}
+
 		batches, err := scan.ReadFileBatches(reader, schema, nil)
 		if err != nil {
 			continue

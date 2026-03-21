@@ -78,11 +78,12 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	var db *wadjet.DB
+	var coord *coordinator.Coordinator
 	isDistributed := *workers > 0 && *s3Endpoint != ""
 	useS3 := *s3Endpoint != ""
 
 	if isDistributed {
-		db = setupDistributed(ctx, logger, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *natsPort, *workers)
+		db, coord = setupDistributed(ctx, logger, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *natsPort, *workers)
 	} else if useS3 {
 		db = setupS3Standalone(ctx, *s3Endpoint, *s3Region, *s3Bucket, *ssl)
 	} else {
@@ -96,7 +97,29 @@ func main() {
 		loadData(ctx, db, sf)
 	}
 	if !*dataOnly {
-		runBenchmark(ctx, db, sf, *runs, *profDir)
+		var qf queryFn
+		if coord != nil {
+			// Distributed: route queries through coordinator → workers.
+			// Coordinator only handles inline results (<256KB); large
+			// results stay on S3 and are counted without reading bytes.
+			qf = func(ctx context.Context, sql string) (int64, error) {
+				r, err := coord.ExecuteSQL(ctx, sql)
+				if err != nil {
+					return 0, err
+				}
+				return r.TotalRows, nil
+			}
+		} else {
+			// Standalone: local execution
+			qf = func(ctx context.Context, sql string) (int64, error) {
+				r, err := db.Query(ctx, sql)
+				if err != nil {
+					return 0, err
+				}
+				return int64(len(r.Rows)), nil
+			}
+		}
+		runBenchmark(ctx, qf, sf, *runs, *profDir)
 	}
 
 	if *memProf != "" {
@@ -109,6 +132,9 @@ func main() {
 		f.Close()
 	}
 }
+
+// queryFn executes a SQL query and returns (row count, error).
+type queryFn func(ctx context.Context, sql string) (int64, error)
 
 func setupStandalone(ctx context.Context) *wadjet.DB {
 	store := objstore.NewMemStore()
@@ -135,7 +161,7 @@ func setupS3Standalone(ctx context.Context, endpoint, region, bucket string, ssl
 	return db
 }
 
-func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region, bucket string, ssl bool, nPort, workerCount int) *wadjet.DB {
+func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region, bucket string, ssl bool, nPort, workerCount int) (*wadjet.DB, *coordinator.Coordinator) {
 	// S3 store (IAM credentials auto-detected)
 	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
 		Endpoint: endpoint,
@@ -223,7 +249,7 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		log.Fatalf("opening DB: %v", err)
 	}
 
-	return db
+	return db, coord
 }
 
 func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool) {
@@ -329,7 +355,7 @@ func loadData(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor) {
 	log.Printf("Data loaded: %d rows in %v (%.0f rows/s)", rows, time.Since(start), float64(rows)/time.Since(start).Seconds())
 }
 
-func runBenchmark(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor, runs int, profDir string) {
+func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int, profDir string) {
 	queryNums := make([]int, 0, len(tpch.TPCHQueries))
 	for n := range tpch.TPCHQueries {
 		queryNums = append(queryNums, n)
@@ -372,7 +398,7 @@ func runBenchmark(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor, runs 
 			}
 
 			start := time.Now()
-			qResult, err := db.Query(ctx, q.SQL)
+			rowCount, err := qf(ctx, q.SQL)
 			elapsed := time.Since(start)
 			totalElapsed += elapsed
 
@@ -389,13 +415,11 @@ func runBenchmark(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor, runs 
 				Query:     qNum,
 				Name:      q.Name,
 				Elapsed:   elapsed,
+				Rows:      int(rowCount),
 				HeapMB:    int64(memAfter.HeapAlloc) / (1024 * 1024),
 				DeltaMB:   heapDelta / (1024 * 1024),
 				GCPauseNs: gcPause,
 				Err:       err,
-			}
-			if err == nil {
-				r.Rows = len(qResult.Rows)
 			}
 			results = append(results, r)
 
