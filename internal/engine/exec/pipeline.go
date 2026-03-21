@@ -404,6 +404,7 @@ type SliceSource struct {
 	rows   []map[string]any
 	offset int
 	pool   *batch.BatchPool
+	mu     sync.Mutex
 }
 
 // Column is imported from parquet for convenience.
@@ -421,7 +422,9 @@ func (s *SliceSource) Init(_ context.Context) error {
 }
 
 func (s *SliceSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	s.mu.Lock()
 	if s.offset >= len(s.rows) {
+		s.mu.Unlock()
 		return nil, nil
 	}
 
@@ -432,6 +435,7 @@ func (s *SliceSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 	chunk := s.rows[s.offset:end]
 	s.offset = end
+	s.mu.Unlock()
 
 	return batch.FromRows(s.schema, chunk), nil
 }
