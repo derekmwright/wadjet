@@ -422,10 +422,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	var readWg sync.WaitGroup
 	var readIdx int64
 
-	readWorkers := runtime.NumCPU()
-	if readWorkers > 8 {
-		readWorkers = 8
-	}
+	readWorkers := runtime.NumCPU() * 2
 	if readWorkers > len(inner.files) {
 		readWorkers = len(inner.files)
 	}
@@ -520,6 +517,8 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 }
 
 // rgWorker processes row group work units in parallel.
+// Each worker claims units atomically and kicks off prefetches for upcoming
+// units so their S3 data is already downloaded when a worker gets to them.
 func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	defer inner.wg.Done()
 
@@ -532,8 +531,21 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 			return
 		}
 
+		// Kick off async prefetch for a future row group. Each worker
+		// prefetches the unit that is N positions ahead (where N is the
+		// prefetch semaphore capacity), so when it loops back around
+		// the data is already in the cache.
+		inner.startPrefetch(ctx, idx)
+
+		// Check if this unit was already prefetched
 		unit := inner.rgUnits[idx]
-		b := inner.readRG(unit)
+		var b *batch.RecordBatch
+		if cached, ok := inner.prefetchCache.LoadAndDelete(idx); ok {
+			b = cached.(*batch.RecordBatch)
+		} else {
+			b = inner.readRG(unit)
+		}
+
 		if b == nil || b.Len == 0 {
 			continue
 		}
@@ -563,6 +575,55 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// startPrefetch asynchronously pre-reads an upcoming row group into the cache.
+// The target index is `currentIdx + prefetchDistance` where prefetchDistance
+// equals the semaphore capacity. This ensures each worker's next-likely unit
+// is already being fetched by the time it finishes its current unit.
+func (inner *scanSourceInner) startPrefetch(ctx context.Context, currentIdx int) {
+	if inner.prefetchSem == nil {
+		return
+	}
+
+	target := currentIdx + cap(inner.prefetchSem)
+	if target >= len(inner.rgUnits) {
+		return
+	}
+
+	// Don't prefetch if already cached
+	if _, loaded := inner.prefetchCache.Load(target); loaded {
+		return
+	}
+
+	// Try to acquire semaphore without blocking — if all slots are busy,
+	// other goroutines are already prefetching so skip this one.
+	select {
+	case inner.prefetchSem <- struct{}{}:
+	default:
+		return
+	}
+
+	go func(idx int) {
+		defer func() { <-inner.prefetchSem }()
+
+		if ctx.Err() != nil {
+			return
+		}
+		// Re-check: another worker may have already read or prefetched this unit
+		if _, loaded := inner.prefetchCache.Load(idx); loaded {
+			return
+		}
+		// Don't prefetch if a worker has already passed this index
+		if int(atomic.LoadInt64(&inner.rgIdx)) > idx {
+			return
+		}
+		unit := inner.rgUnits[idx]
+		b := inner.readRG(unit)
+		if b != nil && b.Len > 0 {
+			inner.prefetchCache.Store(idx, b)
+		}
+	}(target)
 }
 
 // readRG reads a row group using the pool when the size matches.
@@ -617,13 +678,14 @@ func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.Reco
 
 	chunks := rg.ColumnChunks()
 
-	for _, m := range mappings {
+	// readColumn reads all pages for a single column mapping into the batch.
+	readColumn := func(m colMapping) {
 		col := b.Columns[m.batchIdx]
 		colType := readSchema[m.batchIdx].Type
 		rowOffset := 0
 
 		if m.fileIdx >= len(chunks) {
-			continue
+			return
 		}
 
 		// Get max definition level for null handling
@@ -658,6 +720,25 @@ func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.Reco
 			rowOffset += pageRows
 		}
 		pages.Close()
+	}
+
+	if len(mappings) >= 4 {
+		// Parallel column reads — each column targets a different vector in the
+		// batch so there are no data races. Each ReadPage triggers an S3 range
+		// read, so overlapping the I/O across columns hides latency.
+		var colWg sync.WaitGroup
+		colWg.Add(len(mappings))
+		for _, m := range mappings {
+			go func(m colMapping) {
+				defer colWg.Done()
+				readColumn(m)
+			}(m)
+		}
+		colWg.Wait()
+	} else {
+		for _, m := range mappings {
+			readColumn(m)
+		}
 	}
 
 	b.Len = numRows
