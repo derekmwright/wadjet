@@ -186,9 +186,9 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 		t.Errorf("stage 3 should be 'merge_sort', got %q", stages[3].Type)
 	}
 
-	// Sort depends on both previous stages
-	if len(stages[2].Dependencies) < 2 {
-		t.Errorf("sort stage should depend on scan and aggregate stages, got %v", stages[2].Dependencies)
+	// Sort depends only on aggregate (its immediate predecessor), not scan
+	if len(stages[2].Dependencies) != 1 || stages[2].Dependencies[0] != stages[1].ID {
+		t.Errorf("sort stage should depend only on aggregate stage %q, got %v", stages[1].ID, stages[2].Dependencies)
 	}
 	if len(stages[2].SortKeys) != 1 {
 		t.Fatalf("expected 1 sort key, got %d", len(stages[2].SortKeys))

@@ -803,6 +803,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 	case logical.NodeSort:
 		sortStageID := fmt.Sprintf("sort-%d", len(*stages))
+		preCount := len(*stages)
 		for _, child := range node.Children {
 			p.walkStages(child, stages, &sortStageID)
 		}
@@ -818,9 +819,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			Tasks:    1,
 			SortKeys: sortKeys,
 		}
-		for _, s := range *stages {
-			sortStage.Dependencies = append(sortStage.Dependencies, s.ID)
-		}
+		// Only depend on leaf stages from subtree (not transitive deps like scan).
+		sortStage.Dependencies = leafStages((*stages)[preCount:])
 		*stages = append(*stages, sortStage)
 
 		// Phase 2: merge sort (single task merges pre-sorted partial results)
@@ -974,6 +974,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 	case logical.NodeWindow:
 		stageID := fmt.Sprintf("window-%d", len(*stages))
+		preCount := len(*stages)
 		for _, child := range node.Children {
 			p.walkStages(child, stages, &stageID)
 		}
@@ -998,9 +999,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			Tasks:      1,
 			WindowCols: winCols,
 		}
-		for _, s := range *stages {
-			stage.Dependencies = append(stage.Dependencies, s.ID)
-		}
+		// Only depend on leaf stages from subtree (not transitive deps like scan).
+		stage.Dependencies = leafStages((*stages)[preCount:])
 		*stages = append(*stages, stage)
 
 	default:
@@ -3503,6 +3503,25 @@ func findAggregateAncestor(node *logical.Node) *logical.Node {
 		return findAggregateAncestor(node.Children[0])
 	}
 	return nil
+}
+
+// leafStages returns the IDs of stages that are not depended upon by any other
+// stage in the slice. These are the "output" stages of a subtree whose results
+// the parent stage should read.
+func leafStages(stages []Stage) []string {
+	depended := make(map[string]bool, len(stages))
+	for _, s := range stages {
+		for _, d := range s.Dependencies {
+			depended[d] = true
+		}
+	}
+	var leaves []string
+	for _, s := range stages {
+		if !depended[s.ID] {
+			leaves = append(leaves, s.ID)
+		}
+	}
+	return leaves
 }
 
 // resolveNullsLast determines whether nulls should sort last for a given order expression.
