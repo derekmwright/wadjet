@@ -92,6 +92,18 @@ variable "run_duckdb_comparison" {
   default     = false
 }
 
+variable "skip_queries" {
+  description = "Comma-separated query numbers to skip (e.g. '2,17')"
+  type        = string
+  default     = ""
+}
+
+variable "query_timeout" {
+  description = "Per-query timeout (Go duration, e.g. '10m', '30m'). 0 = no timeout."
+  type        = string
+  default     = "10m"
+}
+
 # Recommended instance types per scale factor (Graviton3 ARM):
 #   SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
 #   SF10:  c7g.4xlarge  (16 vCPU, 32 GB) — $0.58/hr

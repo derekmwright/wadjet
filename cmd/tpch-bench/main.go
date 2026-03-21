@@ -45,6 +45,8 @@ func main() {
 		runs       = flag.Int("runs", 1, "Number of benchmark runs")
 		dataOnly   = flag.Bool("data-only", false, "Generate and upload data only, skip benchmark queries")
 		skipLoad   = flag.Bool("skip-load", false, "Skip data generation; discover existing parquet files from S3")
+		skipQueries = flag.String("skip-queries", "", "Comma-separated query numbers to skip (e.g. 2,17)")
+		queryTimeout = flag.Duration("query-timeout", 10*time.Minute, "Per-query timeout (0 = no timeout)")
 		cpuProf    = flag.String("cpuprofile", "", "Write CPU profile to file")
 		memProf    = flag.String("memprofile", "", "Write memory profile to file")
 		profDir    = flag.String("profdir", "", "Directory for per-query profiles")
@@ -118,7 +120,20 @@ func main() {
 				return int64(len(r.Rows)), nil
 			}
 		}
-		runBenchmark(ctx, qf, sf, *runs, *profDir)
+		// Parse skip-queries flag
+		skip := make(map[int]bool)
+		if *skipQueries != "" {
+			for _, s := range strings.Split(*skipQueries, ",") {
+				s = strings.TrimSpace(s)
+				if n, err := fmt.Sscanf(s, "%d", new(int)); n == 1 && err == nil {
+					var qn int
+					fmt.Sscanf(s, "%d", &qn)
+					skip[qn] = true
+				}
+			}
+		}
+
+		runBenchmark(ctx, qf, sf, *runs, *profDir, skip, *queryTimeout)
 	}
 
 	if *memProf != "" {
@@ -341,7 +356,7 @@ func loadData(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor) {
 	log.Printf("Data loaded: %d rows in %v (%.0f rows/s)", rows, time.Since(start), float64(rows)/time.Since(start).Seconds())
 }
 
-func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int, profDir string) {
+func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int, profDir string, skipSet map[int]bool, perQueryTimeout time.Duration) {
 	queryNums := make([]int, 0, len(tpch.TPCHQueries))
 	for n := range tpch.TPCHQueries {
 		queryNums = append(queryNums, n)
@@ -369,6 +384,11 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 		var totalElapsed time.Duration
 
 		for _, qNum := range queryNums {
+			if skipSet[qNum] {
+				fmt.Printf("Q%02d %-30s  SKIPPED\n", qNum, tpch.GetQuery(qNum, sf).Name)
+				continue
+			}
+
 			q := tpch.GetQuery(qNum, sf)
 			runtime.GC()
 
@@ -383,9 +403,20 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 				pprof.StartCPUProfile(cpuFile)
 			}
 
+			// Per-query timeout
+			qCtx := ctx
+			var qCancel context.CancelFunc
+			if perQueryTimeout > 0 {
+				qCtx, qCancel = context.WithTimeout(ctx, perQueryTimeout)
+			}
+
 			start := time.Now()
-			rowCount, err := qf(ctx, q.SQL)
+			rowCount, err := qf(qCtx, q.SQL)
 			elapsed := time.Since(start)
+
+			if qCancel != nil {
+				qCancel()
+			}
 			totalElapsed += elapsed
 
 			if cpuFile != nil {
