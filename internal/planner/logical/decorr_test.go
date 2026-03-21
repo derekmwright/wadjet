@@ -228,6 +228,63 @@ func TestQ20Decorrelation(t *testing.T) {
 }
 
 
+func TestQ02Decorrelation(t *testing.T) {
+	q02 := `SELECT
+			s_acctbal, s_name, n_name, p_partkey, p_mfgr,
+			s_address, s_phone, s_comment
+		FROM part
+		JOIN partsupp ON p_partkey = ps_partkey
+		JOIN supplier ON s_suppkey = ps_suppkey
+		JOIN nation ON s_nationkey = n_nationkey
+		JOIN region ON n_regionkey = r_regionkey
+		WHERE r_name = 'EUROPE'
+			AND p_size = 15
+			AND p_type LIKE '%BRASS'
+			AND ps_supplycost = (
+				SELECT MIN(ps_supplycost)
+				FROM partsupp
+				JOIN supplier ON s_suppkey = ps_suppkey
+				JOIN nation ON s_nationkey = n_nationkey
+				JOIN region ON n_regionkey = r_regionkey
+				WHERE ps_partkey = p_partkey
+					AND r_name = 'EUROPE'
+			)
+		ORDER BY s_acctbal DESC, n_name, s_name, p_partkey
+		LIMIT 100`
+
+	parsed, err := plansql.Parse(q02)
+	if err != nil {
+		t.Fatal("Parse error:", err)
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal("Extract error:", err)
+	}
+
+	plan, err := BuildFromSelect(info)
+	if err != nil {
+		t.Fatal("Build error:", err)
+	}
+
+	annotateScanColumnsForTest(plan)
+
+	t.Log("=== Before optimize ===")
+	printPlanT(t, plan, 0)
+
+	optimized := Optimize(plan, annotateScanColumnsForTest)
+	t.Log("\n=== After optimize ===")
+	printPlanT(t, optimized, 0)
+
+	hasLeft := findNodeMatch(optimized, func(n *Node) bool {
+		return n.Type == NodeJoin && n.JoinType == "left"
+	})
+	if hasLeft {
+		t.Log("SUCCESS: Scalar subquery was decorrelated into LEFT JOIN")
+	} else {
+		t.Error("FAIL: No LEFT JOIN found - decorrelation did not fire for Q02")
+	}
+}
+
 // annotateScanColumnsForTest populates ScanColumns on Scan nodes with
 // TPC-H table schemas. This simulates what the physical planner does
 // via AnnotateScanColumns before calling Optimize.
