@@ -28,7 +28,8 @@ import (
 type Config struct {
 	NATSUrl        string
 	ResultBucket   string
-	MaxInflight    int // max concurrent queries, 0 = default (64)
+	MaxInflight    int           // max concurrent queries, 0 = default (64)
+	QueryTimeout   time.Duration // max time for a query to complete, 0 = default (30m)
 }
 
 // queryMeta stores per-query metadata needed for later result retrieval.
@@ -356,6 +357,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 
 	// Read results from the final stage
 	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, physStages)
+
+	// Synchronous path: we have all data locally, clean up queryMetas
+	// immediately. The tracker entry is kept for status/list APIs and
+	// reaped by StartQueryReaper after the TTL.
+	c.mu.Lock()
+	delete(c.queryMetas, queryID)
+	c.mu.Unlock()
+
 	if err != nil {
 		return &SQLResult{
 			QueryID:     queryID,
@@ -925,9 +934,16 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 		}
 
 		// Stage completed — notify the background scheduler goroutine.
-		// Use blocking send to guarantee delivery. The background goroutine
-		// drains this channel promptly so backpressure here is acceptable.
-		stageCh <- stageEvent{stageID: result.StageID}
+		// Non-blocking send to avoid deadlocking the NATS callback.
+		// If the channel is full (pathological case), spawn a goroutine
+		// to deliver the event without blocking.
+		select {
+		case stageCh <- stageEvent{stageID: result.StageID}:
+		default:
+			go func(sid string) {
+				stageCh <- stageEvent{stageID: sid}
+			}(result.StageID)
+		}
 	})
 	if err != nil {
 		c.logger.Error("failed to subscribe to results", "error", err, "subject", subject)
@@ -1008,7 +1024,9 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 	}
 }
 
-// cleanupQuery removes subscription and metadata entries for a finished query.
+// cleanupQuery removes subscription and stage entries for a finished query.
+// queryMetas and tracker entries are retained for GetQueryResults and reaped
+// by StartQueryReaper after a TTL.
 func (c *Coordinator) cleanupQuery(queryID string) {
 	c.mu.Lock()
 	if cancel, ok := c.resultSubs[queryID]; ok {
@@ -1016,8 +1034,37 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 		delete(c.resultSubs, queryID)
 	}
 	delete(c.stageSpecs, queryID)
-	// Keep queryMetas — needed for GetQueryResults
 	c.mu.Unlock()
+}
+
+// queryReaperTTL is how long completed/failed/cancelled queries stay in memory
+// before being reaped. This gives GetQueryResults time to be called for async queries.
+const queryReaperTTL = 5 * time.Minute
+
+// StartQueryReaper starts a background goroutine that periodically removes
+// completed, failed, and cancelled queries from the tracker and queryMetas maps.
+// This prevents unbounded memory growth from accumulated query metadata.
+func (c *Coordinator) StartQueryReaper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reaped := c.tracker.ReapCompleted(queryReaperTTL)
+				if len(reaped) > 0 {
+					c.mu.Lock()
+					for _, id := range reaped {
+						delete(c.queryMetas, id)
+					}
+					c.mu.Unlock()
+					c.logger.Debug("reaped completed queries", "count", len(reaped))
+				}
+			}
+		}
+	}()
 }
 
 // materializeInlineResults writes inline results to S3 so downstream stages can read them.
@@ -1059,12 +1106,18 @@ func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, sta
 		return
 	}
 
-	// Parallel writes
+	// Parallel writes with bounded concurrency to prevent goroutine explosion.
+	// 16 concurrent S3 puts is plenty for throughput without overwhelming
+	// the coordinator or the S3 endpoint.
+	const maxConcurrent = 16
+	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
 	for _, w := range pending {
 		wg.Add(1)
+		sem <- struct{}{} // acquire
 		go func(w work) {
 			defer wg.Done()
+			defer func() { <-sem }() // release
 			_, err := store.Put(ctx, c.config.ResultBucket, w.path,
 				bytes.NewReader(w.r.InlineData), int64(len(w.r.InlineData)), "application/octet-stream")
 			if err != nil {
@@ -1281,9 +1334,12 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	c.tracker.Register(queryID, sql, trackerStages, stageOrder)
 	c.tracker.Start(queryID)
 
-	// Use a background context for the subscription and task publishing since
-	// this runs asynchronously after the caller returns.
-	asyncCtx := context.Background()
+	// Use a timeout context so stuck queries don't leak resources forever.
+	queryTimeout := c.config.QueryTimeout
+	if queryTimeout <= 0 {
+		queryTimeout = 30 * time.Minute
+	}
+	asyncCtx, asyncCancel := context.WithTimeout(context.Background(), queryTimeout)
 
 	// Subscribe for results with multi-stage scheduling (non-blocking callback)
 	doneCh := make(chan struct{}, 1)
@@ -1296,10 +1352,26 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		}
 		tasks := c.createTasksForStage(queryID, s, nil)
 		if err := c.scheduler.PublishTasks(asyncCtx, tasks); err != nil {
+			asyncCancel()
 			c.tracker.Fail(queryID, err.Error())
 			return "", "", fmt.Errorf("publishing leaf tasks: %w", err)
 		}
 	}
+
+	// Watchdog: fail the query if it exceeds the timeout, clean up resources
+	// when the query completes normally.
+	go func() {
+		select {
+		case <-doneCh:
+			asyncCancel()
+		case <-asyncCtx.Done():
+			if asyncCtx.Err() == context.DeadlineExceeded {
+				c.logger.Warn("query timed out", "query_id", queryID, "timeout", queryTimeout)
+				c.tracker.Fail(queryID, fmt.Sprintf("query exceeded %s timeout", queryTimeout))
+				c.cleanupQuery(queryID)
+			}
+		}
+	}()
 
 	return queryID, planStr, nil
 }
