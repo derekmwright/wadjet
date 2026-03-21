@@ -773,6 +773,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 	case logical.NodeAggregate:
 		stageID := fmt.Sprintf("aggregate-%d", len(*stages))
+		preCount := len(*stages)
 		for _, child := range node.Children {
 			p.walkStages(child, stages, &stageID)
 		}
@@ -794,11 +795,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			GroupByCols: groupBy,
 			AggSpecs:    aggSpecs,
 		}
-		for _, s := range *stages {
-			if s.Type == "scan" {
-				stage.Dependencies = append(stage.Dependencies, s.ID)
-			}
-		}
+		// Only depend on leaf stages from subtree (not transitive deps).
+		stage.Dependencies = leafStages((*stages)[preCount:])
 		*stages = append(*stages, stage)
 
 	case logical.NodeSort:
@@ -850,10 +848,17 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 	case logical.NodeJoin:
 		stageID := fmt.Sprintf("join-%d", len(*stages))
-		stagesBefore := len(*stages)
+
+		// Track leaf stages from each child separately so we get the
+		// correct left (probe) and right (build) dependencies — even
+		// when a child is itself a multi-stage subtree (e.g., nested join).
+		var childLeaves [][]string
 		for _, child := range node.Children {
+			childStart := len(*stages)
 			p.walkStages(child, stages, &stageID)
+			childLeaves = append(childLeaves, leafStages((*stages)[childStart:]))
 		}
+
 		isBroadcast := p.isBroadcastCandidate(node)
 		joinType := "hash_join"
 		if isBroadcast {
@@ -862,13 +867,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 		// Identify left (probe) and right (build) dependency stages
 		var leftDep, rightDep string
-		stagesAfter := *stages
-		newStages := stagesAfter[stagesBefore:]
-		if len(newStages) >= 2 {
-			leftDep = newStages[0].ID  // first child = left
-			rightDep = newStages[1].ID // second child = right
-		} else if len(newStages) == 1 {
-			leftDep = newStages[0].ID
+		if len(childLeaves) >= 1 && len(childLeaves[0]) > 0 {
+			leftDep = childLeaves[0][len(childLeaves[0])-1]
+		}
+		if len(childLeaves) >= 2 && len(childLeaves[1]) > 0 {
+			rightDep = childLeaves[1][len(childLeaves[1])-1]
 		}
 
 		// Map logical join type to canonical short form
