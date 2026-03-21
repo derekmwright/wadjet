@@ -395,12 +395,23 @@ func decimalFromBytes(b []byte) batch.Int128 {
 
 // --- Row-group-level parallel scan ---
 
+// prefetchHeapThreshold is the fraction of the memory limit below which a
+// worker will speculatively prefetch the next row group. Set to 60% to leave
+// ample headroom for concurrent workers and downstream operators.
+const prefetchHeapThreshold = 0.60
+
 // rgUnit is a work unit for parallel row-group scanning.
 type rgUnit struct {
 	pqFile      *goparquet.File
 	fileEntry   catalog.FileEntry
 	rg          goparquet.RowGroup
 	rgRowOffset int64 // cumulative row offset within the file (for delete markers)
+}
+
+// prefetchResult holds a speculatively read row group batch and its unit index.
+type prefetchResult struct {
+	idx   int
+	batch *batch.RecordBatch
 }
 
 // buildRGUnits reads all files concurrently and builds a flat list of row group
@@ -478,7 +489,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 	readWg.Wait()
 
-	// Enumerate row groups from all files, applying predicate-based pruning
+	// Enumerate row groups from all files, applying predicate-based and bloom pruning
 	for _, fr := range results {
 		if fr.reader == nil {
 			continue
@@ -488,10 +499,11 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 
 		var rowOffset int64
 		for rgIdx, rg := range rgs {
+			stats := fr.reader.RowGroupStats(rgIdx)
+			pruned := false
+
 			// Predicate-based row group pruning
 			if len(inner.scanPreds) > 0 {
-				stats := fr.reader.RowGroupStats(rgIdx)
-				pruned := false
 				for _, pred := range inner.scanPreds {
 					op := mapPredOp(pred.Op)
 					if op >= 0 {
@@ -502,10 +514,18 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 						}
 					}
 				}
-				if pruned {
-					rowOffset += rg.NumRows()
-					continue
+			}
+
+			// Bloom filter row group pruning
+			if !pruned && inner.bloomFilter != nil {
+				if canBloomPruneRowGroup(inner.bloomFilter, stats) {
+					pruned = true
 				}
+			}
+
+			if pruned {
+				rowOffset += rg.NumRows()
+				continue
 			}
 
 			inner.rgUnits = append(inner.rgUnits, rgUnit{
@@ -519,26 +539,120 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 }
 
-// rgWorker processes row group work units in parallel.
+// canBloomPruneRowGroup checks whether a row group can be skipped based on
+// bloom filter analysis of the join key column's min/max statistics.
+// For integer join keys with a small range (<=1024), every value is checked
+// against the bloom filter. If ALL return "not present", the row group is skipped.
+func canBloomPruneRowGroup(bf *exec.BloomScanFilter, stats parquet.RowGroupStats) bool {
+	if !bf.UseIntKey {
+		return false
+	}
+	colStats, ok := stats.Columns[bf.Column]
+	if !ok || !colStats.HasStats {
+		return false
+	}
+	if colStats.MinValue == nil || colStats.MaxValue == nil {
+		return false
+	}
+	if colStats.NullCount == stats.NumRows {
+		return false
+	}
+
+	minVal := toBloomInt64(colStats.MinValue)
+	maxVal := toBloomInt64(colStats.MaxValue)
+	if minVal == 0 && maxVal == 0 && !isIntType(colStats.MinValue) {
+		return false
+	}
+
+	const maxRangeSize = 1024
+	rangeSize := maxVal - minVal + 1
+	if rangeSize <= 0 || rangeSize > maxRangeSize {
+		return false
+	}
+
+	for v := minVal; v <= maxVal; v++ {
+		if exec.BloomContains(bf.Bloom, bf.BloomMask, exec.BloomHashInt(v)) {
+			return false
+		}
+	}
+	return true
+}
+
+func toBloomInt64(v any) int64 {
+	switch tv := v.(type) {
+	case int64:
+		return tv
+	case int32:
+		return int64(tv)
+	case int:
+		return int64(tv)
+	case float64:
+		return int64(tv)
+	case float32:
+		return int64(tv)
+	default:
+		return 0
+	}
+}
+
+func isIntType(v any) bool {
+	switch v.(type) {
+	case int64, int32, int:
+		return true
+	default:
+		return false
+	}
+}
+
+// rgWorker processes row group work units in parallel. When the system has
+// memory headroom (heap < 60% of the detected limit), it speculatively
+// prefetches the next row group to overlap I/O with downstream processing.
+// Each worker prefetches at most 1 row group ahead, stored in a worker-local
+// variable (no shared cache).
 func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	defer inner.wg.Done()
 
+	var prefetched *prefetchResult
+
 	for {
-		idx := int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
-		if idx >= len(inner.rgUnits) {
-			return
-		}
 		if ctx.Err() != nil {
 			return
 		}
 
-		unit := inner.rgUnits[idx]
-		b := inner.readRG(unit)
+		var idx int
+		var b *batch.RecordBatch
+
+		if prefetched != nil {
+			idx = prefetched.idx
+			b = prefetched.batch
+			prefetched = nil
+		} else {
+			idx = int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
+			if idx >= len(inner.rgUnits) {
+				return
+			}
+			b = inner.readRG(inner.rgUnits[idx])
+		}
+
+		// Before sending downstream, speculatively prefetch the next row group
+		// if memory allows. Claim the index atomically so no other worker reads
+		// the same unit.
+		if prefetched == nil && inner.canPrefetch() {
+			nextIdx := int(atomic.AddInt64(&inner.rgIdx, 1) - 1)
+			if nextIdx < len(inner.rgUnits) {
+				prefetched = &prefetchResult{
+					idx:   nextIdx,
+					batch: inner.readRG(inner.rgUnits[nextIdx]),
+				}
+			}
+		}
+
 		if b == nil || b.Len == 0 {
 			continue
 		}
 
 		// Apply delete markers with row offset adjustment
+		unit := inner.rgUnits[idx]
 		if delSet := inner.deleteMarkers[unit.fileEntry.Path]; len(delSet) > 0 {
 			sel := make([]uint32, 0, b.Len)
 			for i := 0; i < b.Len; i++ {
@@ -563,6 +677,19 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// canPrefetch returns true if the current heap usage is below the prefetch
+// threshold (60% of the detected memory limit). Returns false if no memory
+// limit was detected, disabling prefetch gracefully.
+func (inner *scanSourceInner) canPrefetch() bool {
+	if inner.memoryLimit <= 0 {
+		return false
+	}
+	threshold := uint64(float64(inner.memoryLimit) * prefetchHeapThreshold)
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return ms.HeapAlloc < threshold
 }
 
 // readRG reads a row group using the pool when the size matches.

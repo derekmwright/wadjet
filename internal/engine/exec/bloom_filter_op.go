@@ -257,3 +257,38 @@ func bloomContains(bloom []uint64, mask, hash uint64) bool {
 	b2 := (hash >> 6) & 63
 	return (bloom[h1]>>b1)&1 != 0 && (bloom[h2]>>b2)&1 != 0
 }
+
+// BloomScanFilter holds bloom filter data for row-group-level scan pushdown.
+type BloomScanFilter struct {
+	Bloom     []uint64 // shared, read-only
+	BloomMask uint64
+	Column    string // probe-side join key column name
+	UseIntKey bool   // true for single integer column join key
+}
+
+// BloomScanFilter returns a BloomScanFilter for scan-level pushdown.
+// Only applicable for single-column integer join keys.
+// Returns nil if not applicable.
+func (op *BloomFilterOp) BloomScanFilter() *BloomScanFilter {
+	if !op.useIntKey || len(op.leftKeys) != 1 {
+		return nil
+	}
+	return &BloomScanFilter{
+		Bloom:     op.bloom,
+		BloomMask: op.bloomMask,
+		Column:    op.leftKeys[0],
+		UseIntKey: true,
+	}
+}
+
+// BloomHashInt computes the bloom filter hash for an integer key.
+// Exported for use by the scan layer for row-group-level pruning.
+func BloomHashInt(key int64) uint64 {
+	return bloomHashInt(key)
+}
+
+// BloomContains checks if a hash may be in the bloom filter.
+// Exported for use by the scan layer for row-group-level pruning.
+func BloomContains(bloom []uint64, mask, hash uint64) bool {
+	return bloomContains(bloom, mask, hash)
+}

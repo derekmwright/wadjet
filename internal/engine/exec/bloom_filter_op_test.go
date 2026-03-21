@@ -183,6 +183,102 @@ func TestBloomFilterOp_Clone(t *testing.T) {
 	}
 }
 
+func TestBloomFilterOp_ScanFilter_IntKey(t *testing.T) {
+	// BloomScanFilter should be created for single-column integer joins.
+	buildSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString},
+	}
+	buildRows := []map[string]any{
+		{"id": int64(100), "val": "a"},
+		{"id": int64(200), "val": "b"},
+		{"id": int64(300), "val": "c"},
+	}
+
+	hj := buildHashJoin(t, InnerJoin, []string{"id"}, []string{"id"}, buildSchema, buildRows)
+	bf := hj.BloomPushdownOp()
+	if bf == nil {
+		t.Fatal("expected bloom filter op")
+	}
+
+	bsf := bf.BloomScanFilter()
+	if bsf == nil {
+		t.Fatal("expected BloomScanFilter for single int key")
+	}
+	if bsf.Column != "id" {
+		t.Errorf("expected column 'id', got %q", bsf.Column)
+	}
+	if !bsf.UseIntKey {
+		t.Error("expected UseIntKey=true")
+	}
+	if len(bsf.Bloom) == 0 {
+		t.Error("bloom data should not be empty")
+	}
+
+	// Verify bloom data contains the build keys
+	for _, key := range []int64{100, 200, 300} {
+		if !BloomContains(bsf.Bloom, bsf.BloomMask, BloomHashInt(key)) {
+			t.Errorf("bloom filter should contain build key %d", key)
+		}
+	}
+
+	// Verify bloom data probably doesn't contain non-build keys
+	// (Not all will be excluded due to false positives, but most should be)
+	excluded := 0
+	for v := int64(1); v <= 50; v++ {
+		if !BloomContains(bsf.Bloom, bsf.BloomMask, BloomHashInt(v)) {
+			excluded++
+		}
+	}
+	if excluded == 0 {
+		t.Error("expected at least some non-build keys to be excluded by bloom filter")
+	}
+}
+
+func TestBloomFilterOp_ScanFilter_StringKey_Nil(t *testing.T) {
+	// BloomScanFilter should be nil for string join keys.
+	buildSchema := []parquet.Column{
+		{Name: "name", Type: parquet.TypeString},
+	}
+	buildRows := []map[string]any{
+		{"name": "alice"},
+		{"name": "bob"},
+	}
+
+	hj := buildHashJoin(t, InnerJoin, []string{"name"}, []string{"name"}, buildSchema, buildRows)
+	bf := hj.BloomPushdownOp()
+	if bf == nil {
+		t.Fatal("expected bloom filter op")
+	}
+
+	bsf := bf.BloomScanFilter()
+	if bsf != nil {
+		t.Error("expected nil BloomScanFilter for string key")
+	}
+}
+
+func TestBloomFilterOp_ScanFilter_MultiKey_Nil(t *testing.T) {
+	// BloomScanFilter should be nil for multi-column join keys.
+	buildSchema := []parquet.Column{
+		{Name: "a", Type: parquet.TypeInt64},
+		{Name: "b", Type: parquet.TypeInt64},
+	}
+	buildRows := []map[string]any{
+		{"a": int64(1), "b": int64(2)},
+	}
+
+	hj := buildHashJoin(t, InnerJoin, []string{"a", "b"}, []string{"a", "b"}, buildSchema, buildRows)
+	bf := hj.BloomPushdownOp()
+	if bf == nil {
+		t.Fatal("expected bloom filter op")
+	}
+
+	bsf := bf.BloomScanFilter()
+	if bsf != nil {
+		t.Error("expected nil BloomScanFilter for multi-column key")
+	}
+}
+
 func TestBloomFilterOp_Pipeline(t *testing.T) {
 	ctx := context.Background()
 
