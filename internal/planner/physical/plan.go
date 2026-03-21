@@ -1844,8 +1844,11 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// __agg_0 * 0.0001), use TypeFloat64.
 		outType := parquet.TypeString
 		if proj.ASTExpr != nil && !proj.IsAgg {
-			if _, isBinOp := proj.ASTExpr.(*plansql.BinaryOp); isBinOp {
-				outType = parquet.TypeFloat64
+			if binOp, isBinOp := proj.ASTExpr.(*plansql.BinaryOp); isBinOp {
+				// Date ± interval produces a date string, not a number.
+				if !binOpInvolvesInterval(binOp) {
+					outType = parquet.TypeFloat64
+				}
 			}
 		}
 
@@ -2048,6 +2051,30 @@ func replaceAggWithColRef(node plansql.Node, target *plansql.FuncCallNode, colNa
 		return &plansql.CastNode{Inner: replaceAggWithColRef(n.Inner, target, colName), TypeName: n.TypeName}
 	default:
 		return node
+	}
+}
+
+// binOpInvolvesInterval returns true if either operand of a BinaryOp is an
+// IntervalLit or a date/timestamp function (current_date, current_timestamp).
+// Date ± interval produces a date string, not a numeric value.
+func binOpInvolvesInterval(b *plansql.BinaryOp) bool {
+	return nodeIsDateOrInterval(b.Left) || nodeIsDateOrInterval(b.Right)
+}
+
+func nodeIsDateOrInterval(n plansql.Node) bool {
+	switch v := n.(type) {
+	case *plansql.IntervalLit:
+		return true
+	case *plansql.FuncCallNode:
+		lower := strings.ToLower(v.Name)
+		return lower == "current_date" || lower == "current_timestamp" ||
+			lower == "current_time" || lower == "now" ||
+			lower == "date_add" || lower == "date_sub"
+	case *plansql.BinaryOp:
+		// Nested: (CURRENT_DATE - INTERVAL '1' DAY) + INTERVAL '2' HOUR
+		return binOpInvolvesInterval(v)
+	default:
+		return false
 	}
 }
 
