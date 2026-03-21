@@ -925,6 +925,19 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 			return
 		}
 
+		// If every task in this stage failed, abort the query.
+		if errMsg := c.tracker.StageFailed(queryID, result.StageID); errMsg != "" {
+			c.logger.Error("stage failed, aborting query",
+				"query_id", queryID, "stage_id", result.StageID, "error", errMsg)
+			c.tracker.Fail(queryID, fmt.Sprintf("stage %s: %s", result.StageID, errMsg))
+			c.cleanupQuery(queryID)
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+			return
+		}
+
 		// Check if entire query is done
 		if c.tracker.IsComplete(queryID) {
 			c.tracker.Complete(queryID)
