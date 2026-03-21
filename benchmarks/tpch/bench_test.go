@@ -90,7 +90,17 @@ func TestTPCHDataGen(t *testing.T) {
 	}
 }
 
+// expectedRowsSF001 defines the expected row counts for each TPC-H query at SF0.01.
+// These are deterministic because the data generator uses fixed seeds.
+// Q18 and Q22 legitimately return 0 rows at this small scale factor.
+var expectedRowsSF001 = map[int]int{
+	1: 6, 2: 5, 3: 10, 4: 5, 5: 5, 6: 1, 7: 4, 8: 2,
+	9: 150, 10: 20, 11: 235, 12: 2, 13: 100, 14: 1, 15: 1,
+	16: 293, 17: 1, 18: 0, 19: 1, 20: 3, 21: 1, 22: 0,
+}
+
 // TestTPCHQueries runs each TPC-H query at SF0.01 to verify correctness.
+// Validates both execution success and expected row counts.
 func TestTPCHQueries(t *testing.T) {
 	db := setupTPCH(t, SF001)
 	ctx := context.Background()
@@ -114,6 +124,14 @@ func TestTPCHQueries(t *testing.T) {
 			}
 
 			t.Logf("Q%02d: %d rows in %v", qNum, len(result.Rows), elapsed)
+
+			// Validate row count against expected
+			if expected, ok := expectedRowsSF001[qNum]; ok {
+				if len(result.Rows) != expected {
+					t.Errorf("Q%02d row count: got %d, want %d", qNum, len(result.Rows), expected)
+				}
+			}
+
 			// Log first few rows for inspection
 			maxRows := 3
 			if len(result.Rows) < maxRows {
