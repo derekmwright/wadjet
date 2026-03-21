@@ -234,7 +234,7 @@ locals {
 
   build_script = local.use_prebuilt ? local.prebuilt_script : local.source_build_script
 
-  # Standalone: build + auto-run benchmark
+  # Standalone: build + auto-run benchmark (+ optional DuckDB comparison)
   standalone_user_data = <<-EOF
     ${local.build_script}
 
@@ -244,7 +244,30 @@ locals {
     export BENCHMARK_RUNS="${var.benchmark_runs}"
     export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
     cd /root/wadjet
+
+    %{if var.run_duckdb_comparison}
+    # Disable auto-shutdown in run-benchmark.sh so DuckDB comparison can run after
+    sed -i 's/^sudo shutdown.*/#&/' deploy/benchmark/run-benchmark.sh
+    %{endif}
+
     bash deploy/benchmark/run-benchmark.sh standalone SF${var.scale_factor} 2>&1 | tee /root/benchmark.log
+
+    %{if var.run_duckdb_comparison}
+    # Download DuckDB comparison script from S3 (not in git clone)
+    aws s3 cp "s3://${local.bucket_name}/scripts/run-duckdb-comparison.sh" /root/wadjet/deploy/benchmark/run-duckdb-comparison.sh --region ${var.region}
+    chmod +x /root/wadjet/deploy/benchmark/run-duckdb-comparison.sh
+
+    # Run DuckDB head-to-head comparison against the same S3 data
+    export Q11_FRACTION=$(python3 -c "print(f'{0.0001/${var.scale_factor}:.10f}')")
+    export RESULTS_DIR=/root/benchmark-results
+    bash /root/wadjet/deploy/benchmark/run-duckdb-comparison.sh "$WADJET_BUCKET" "$WADJET_REGION" 2>&1 | tee /root/duckdb-comparison.log
+
+    # Upload DuckDB results alongside Wadjet results
+    TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+    aws s3 cp /root/benchmark-results/ "s3://$WADJET_BUCKET/results/$TIMESTAMP/" --recursive --region "$WADJET_REGION"
+
+    sudo shutdown -h now
+    %{endif}
   EOF
 
   # Coordinator: build + auto-run distributed benchmark
