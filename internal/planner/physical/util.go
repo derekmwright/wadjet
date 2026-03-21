@@ -732,29 +732,8 @@ func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.Reco
 
 	chunks := rg.ColumnChunks()
 
-	if len(mappings) <= 1 {
-		// Single column — sequential path, no goroutine overhead
-		for _, m := range mappings {
-			readColumnInto(file, chunks, b, readSchema, m.fileIdx, m.batchIdx)
-		}
-	} else {
-		// Multiple columns — read in parallel to overlap I/O latency
-		var wg sync.WaitGroup
-		var firstErr atomic.Value
-		wg.Add(len(mappings))
-		for _, m := range mappings {
-			go func(fileIdx, batchIdx int) {
-				defer wg.Done()
-				if err := readColumnInto(file, chunks, b, readSchema, fileIdx, batchIdx); err != nil {
-					firstErr.CompareAndSwap(nil, err)
-				}
-			}(m.fileIdx, m.batchIdx)
-		}
-		wg.Wait()
-		// Errors from column reads are non-fatal here (matches prior behavior
-		// where page read errors silently break the loop). The firstErr is
-		// captured but not returned because the caller signature is void.
-		_ = firstErr.Load()
+	for _, m := range mappings {
+		readColumnInto(file, chunks, b, readSchema, m.fileIdx, m.batchIdx)
 	}
 
 	b.Len = numRows
