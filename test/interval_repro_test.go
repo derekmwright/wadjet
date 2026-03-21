@@ -105,4 +105,20 @@ func TestIntervalInWhereClause(t *testing.T) {
 			t.Errorf("expected only 'recent' findings, got %v", row["finding"])
 		}
 	}
+
+	// Comparison in SELECT (not WHERE): scan_date >= CURRENT_DATE - INTERVAL '30 days' AS passes
+	result2, err := db.Query(ctx, "SELECT scan_date, scan_date >= CURRENT_DATE - INTERVAL '30 days' as passes FROM findings ORDER BY scan_date DESC")
+	if err != nil {
+		t.Fatalf("comparison query error: %v", err)
+	}
+	for _, row := range result2.Rows {
+		scanDate := fmt.Sprintf("%v", row["scan_date"])
+		passes := fmt.Sprintf("%v", row["passes"])
+		isRecent := scanDate >= now.AddDate(0, 0, -30).Format("2006-01-02")
+		expected := fmt.Sprintf("%v", isRecent)
+		t.Logf("scan_date=%s passes=%s (expected %s)", scanDate, passes, expected)
+		if passes != expected {
+			t.Errorf("scan_date=%s: got passes=%s, want %s", scanDate, passes, expected)
+		}
+	}
 }
