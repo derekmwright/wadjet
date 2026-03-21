@@ -590,6 +590,12 @@ func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []pa
 
 // readRowGroupInto reads a single row group into an existing RecordBatch.
 // The batch must already have the correct schema and sufficient capacity.
+//
+// When there are 2+ projected columns, column reads are launched in parallel
+// goroutines to overlap S3 range-read latency. Each column writes to its own
+// independent Vector in the batch, so no synchronization is needed between
+// column readers. For a single column the sequential path is kept to avoid
+// goroutine overhead.
 func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.RecordBatch, schema []parquet.Column, requiredCols []string) {
 	numRows := int(rg.NumRows())
 	if numRows == 0 {
@@ -617,50 +623,81 @@ func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.Reco
 
 	chunks := rg.ColumnChunks()
 
-	for _, m := range mappings {
-		col := b.Columns[m.batchIdx]
-		colType := readSchema[m.batchIdx].Type
-		rowOffset := 0
-
-		if m.fileIdx >= len(chunks) {
-			continue
+	if len(mappings) <= 1 {
+		// Single column — sequential path, no goroutine overhead
+		for _, m := range mappings {
+			readColumnInto(file, chunks, b, readSchema, m.fileIdx, m.batchIdx)
 		}
-
-		// Get max definition level for null handling
-		pqCol := scan.FindColumnByIndex(file.Root(), m.fileIdx)
-		maxDefLevel := byte(0)
-		if pqCol != nil {
-			maxDefLevel = byte(pqCol.MaxDefinitionLevel())
+	} else {
+		// Multiple columns — read in parallel to overlap I/O latency
+		var wg sync.WaitGroup
+		var firstErr atomic.Value
+		wg.Add(len(mappings))
+		for _, m := range mappings {
+			go func(fileIdx, batchIdx int) {
+				defer wg.Done()
+				if err := readColumnInto(file, chunks, b, readSchema, fileIdx, batchIdx); err != nil {
+					firstErr.CompareAndSwap(nil, err)
+				}
+			}(m.fileIdx, m.batchIdx)
 		}
-
-		pages := chunks[m.fileIdx].Pages()
-		for {
-			page, err := pages.ReadPage()
-			if err != nil || page == nil {
-				break
-			}
-
-			pageRows := int(page.NumRows())
-			if pageRows == 0 {
-				continue
-			}
-
-			defLevels := page.DefinitionLevels()
-			data := page.Data()
-
-			if colType == batch.TypeDecimal {
-				readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
-			} else if defLevels == nil || page.NumNulls() == 0 {
-				scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
-			} else {
-				scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
-			}
-			rowOffset += pageRows
-		}
-		pages.Close()
+		wg.Wait()
+		// Errors from column reads are non-fatal here (matches prior behavior
+		// where page read errors silently break the loop). The firstErr is
+		// captured but not returned because the caller signature is void.
+		_ = firstErr.Load()
 	}
 
 	b.Len = numRows
+}
+
+// readColumnInto reads all pages of a single column chunk into the batch vector.
+// Safe to call concurrently for different columns since each writes to its own Vector.
+func readColumnInto(file *goparquet.File, chunks []goparquet.ColumnChunk, b *batch.RecordBatch, readSchema []parquet.Column, fileIdx, batchIdx int) error {
+	col := b.Columns[batchIdx]
+	colType := readSchema[batchIdx].Type
+	rowOffset := 0
+
+	if fileIdx >= len(chunks) {
+		return nil
+	}
+
+	// Get max definition level for null handling
+	pqCol := scan.FindColumnByIndex(file.Root(), fileIdx)
+	maxDefLevel := byte(0)
+	if pqCol != nil {
+		maxDefLevel = byte(pqCol.MaxDefinitionLevel())
+	}
+
+	pages := chunks[fileIdx].Pages()
+	defer pages.Close()
+	for {
+		page, err := pages.ReadPage()
+		if err != nil || page == nil {
+			if err != nil {
+				return err
+			}
+			break
+		}
+
+		pageRows := int(page.NumRows())
+		if pageRows == 0 {
+			continue
+		}
+
+		defLevels := page.DefinitionLevels()
+		data := page.Data()
+
+		if colType == batch.TypeDecimal {
+			readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
+		} else if defLevels == nil || page.NumNulls() == 0 {
+			scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
+		} else {
+			scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
+		}
+		rowOffset += pageRows
+	}
+	return nil
 }
 
 // buildReadSchema applies column projection to the table schema.
