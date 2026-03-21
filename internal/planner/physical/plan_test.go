@@ -635,3 +635,135 @@ func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 		}
 	}
 }
+
+// TestPlanDistributed_MultiWayJoinShuffleKeys verifies that shuffle stages in
+// a multi-way join (A ⋈ B ⋈ C) have correctly assigned key columns.
+// Regression: parseJoinKeys assigned left/right based on position in "="
+// rather than which child subtree owns the column, causing "shuffle key X
+// not found in schema" errors when the second join's shuffle read from the
+// wrong upstream stage.
+func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create 3 large tables: customer, orders, lineitem
+	for _, tbl := range []struct {
+		name string
+		cols []parquet.Column
+		n    int
+	}{
+		{"customer", []parquet.Column{
+			{Name: "c_custkey", Type: parquet.TypeInt64},
+			{Name: "c_name", Type: parquet.TypeString},
+		}, 15},
+		{"orders", []parquet.Column{
+			{Name: "o_orderkey", Type: parquet.TypeInt64},
+			{Name: "o_custkey", Type: parquet.TypeInt64},
+		}, 20},
+		{"lineitem", []parquet.Column{
+			{Name: "l_orderkey", Type: parquet.TypeInt64},
+			{Name: "l_quantity", Type: parquet.TypeFloat64},
+		}, 100},
+	} {
+		if err := cat.CreateTable(ctx, tbl.name, parquet.Schema{Columns: tbl.cols}, nil); err != nil {
+			t.Fatal(err)
+		}
+		files := make([]catalog.FileEntry, tbl.n)
+		for i := range files {
+			files[i] = catalog.FileEntry{
+				Path:      fmt.Sprintf("tables/%s/chunk_%03d.parquet", tbl.name, i),
+				SizeBytes: 10 * 1024 * 1024,
+				NumRows:   100000,
+			}
+		}
+		if err := cat.AddFiles(ctx, tbl.name, map[string]string{}, "tables/"+tbl.name+"/", files); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	planner := NewPlanner(cat)
+	planner.WorkerCount = 4
+
+	// Build left-deep join: (customer ⋈ orders) ⋈ lineitem
+	// Join condition deliberately puts the key from the RIGHT child table
+	// on the LEFT side of "=" to exercise the fixJoinKeyOrder logic.
+	custScan := logical.NewScan("customer", "c")
+	ordScan := logical.NewScan("orders", "o")
+	join1 := logical.NewJoin(custScan, ordScan, "inner", "c.c_custkey = o.o_custkey")
+
+	liScan := logical.NewScan("lineitem", "l")
+	// Note: l_orderkey is from lineitem (right child) but appears on LEFT of "=".
+	// Without fixJoinKeyOrder, the left shuffle would get key "l_orderkey" but
+	// depend on join1 output (which has customer+orders columns, not lineitem).
+	join2 := logical.NewJoin(join1, liScan, "inner", "l.l_orderkey = o.o_orderkey")
+
+	stages, err := planner.PlanDistributed(ctx, join2)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+
+	// Collect shuffle stages and their dependencies
+	stageByID := make(map[string]Stage)
+	for _, s := range stages {
+		stageByID[s.ID] = s
+	}
+
+	var shuffles []Stage
+	for _, s := range stages {
+		if s.Type == "shuffle" {
+			shuffles = append(shuffles, s)
+		}
+	}
+
+	// Should have 4 shuffle stages: 2 for join1, 2 for join2
+	if len(shuffles) != 4 {
+		t.Fatalf("expected 4 shuffle stages, got %d", len(shuffles))
+	}
+
+	// Find the second pair of shuffles (for join2) — they depend on
+	// join1's output (or lineitem scan).
+	custCols := map[string]bool{"c_custkey": true, "c_name": true}
+	ordCols := map[string]bool{"o_orderkey": true, "o_custkey": true}
+	liCols := map[string]bool{"l_orderkey": true, "l_quantity": true}
+	join1Cols := make(map[string]bool)
+	for k := range custCols {
+		join1Cols[k] = true
+	}
+	for k := range ordCols {
+		join1Cols[k] = true
+	}
+
+	for _, s := range shuffles {
+		if len(s.Dependencies) != 1 {
+			continue
+		}
+		dep := stageByID[s.Dependencies[0]]
+
+		// Determine which column set the dependency produces
+		var depCols map[string]bool
+		switch {
+		case dep.Type == "scan" && dep.TableName == "customer":
+			depCols = custCols
+		case dep.Type == "scan" && dep.TableName == "orders":
+			depCols = ordCols
+		case dep.Type == "scan" && dep.TableName == "lineitem":
+			depCols = liCols
+		default:
+			// Depends on join or another shuffle — check if it's the
+			// join1 output (customer+orders columns).
+			depCols = join1Cols
+		}
+
+		// Every shuffle key must exist in the dependency's column set
+		for _, key := range s.ShuffleKeys {
+			if !depCols[key] {
+				t.Errorf("shuffle %s (depends on %s %s) has key %q not in dependency columns %v",
+					s.ID, dep.Type, dep.ID, key, depCols)
+			}
+		}
+	}
+}

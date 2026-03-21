@@ -440,13 +440,17 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 
 	joinType := mapExecJoinType(task.JoinType)
 
+	// For inner/semi/anti joins with no build data, there can be no matches.
+	if len(buildBatches) == 0 && joinType != exec.LeftJoin && joinType != exec.FullOuterJoin {
+		return nil
+	}
+
 	hj := exec.NewHashJoin(joinType, task.JoinLeftKeys, task.JoinRightKeys)
 
-	// Build the hash table from right side batches
-	if len(buildBatches) > 0 {
-		if err := hj.Build(ctx, &batchSource{batches: buildBatches}); err != nil {
-			return fmt.Errorf("building hash table: %w", err)
-		}
+	// Build the hash table from right side batches.
+	// Build even with empty data to mark buildDone for the probe phase.
+	if err := hj.Build(ctx, &batchSource{batches: buildBatches}); err != nil {
+		return fmt.Errorf("building hash table: %w", err)
 	}
 
 	// For RIGHT and FULL OUTER joins, we may still have results even
@@ -622,6 +626,19 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 							keyIdxs[i] = j
 							found = true
 							break
+						}
+					}
+					// Fallback: match suffix after "." for qualified names
+					// (e.g., join output may have "n2.n_nationkey" for self-joins)
+					if !found {
+						for j, col := range schema {
+							if dotIdx := strings.LastIndex(col.Name, "."); dotIdx >= 0 {
+								if col.Name[dotIdx+1:] == key {
+									keyIdxs[i] = j
+									found = true
+									break
+								}
+							}
 						}
 					}
 					if !found {
