@@ -781,3 +781,101 @@ func TestListQueriesAfterSubmit(t *testing.T) {
 		t.Error("expected to find our query in the list")
 	}
 }
+
+// --- QueryTracker.Delete ---
+
+func TestQueryTrackerDelete(t *testing.T) {
+	qt := NewQueryTracker()
+	qt.Register("q1", "SELECT 1", map[string]*StageInfo{
+		"s0": {StageID: "s0", TotalTasks: 1},
+	}, []string{"s0"})
+
+	if qt.Get("q1") == nil {
+		t.Fatal("expected query to exist")
+	}
+
+	qt.Delete("q1")
+
+	if qt.Get("q1") != nil {
+		t.Fatal("expected query to be deleted")
+	}
+
+	// Deleting non-existent should not panic
+	qt.Delete("nonexistent")
+}
+
+// --- QueryTracker.ReapCompleted ---
+
+func TestQueryTrackerReapCompleted(t *testing.T) {
+	qt := NewQueryTracker()
+
+	// Register three queries in different states
+	qt.Register("old-done", "SELECT 1", map[string]*StageInfo{}, nil)
+	qt.Complete("old-done")
+
+	qt.Register("old-failed", "SELECT bad", map[string]*StageInfo{}, nil)
+	qt.Fail("old-failed", "syntax error")
+
+	qt.Register("still-running", "SELECT 2", map[string]*StageInfo{
+		"s0": {StageID: "s0", TotalTasks: 1},
+	}, []string{"s0"})
+	qt.Start("still-running")
+
+	// Backdate the completed/failed queries so they appear old
+	qt.mu.Lock()
+	qt.queries["old-done"].EndTime = time.Now().Add(-10 * time.Minute)
+	qt.queries["old-failed"].EndTime = time.Now().Add(-10 * time.Minute)
+	qt.mu.Unlock()
+
+	// Reap with 5-minute TTL
+	reaped := qt.ReapCompleted(5 * time.Minute)
+	if len(reaped) != 2 {
+		t.Fatalf("expected 2 reaped, got %d", len(reaped))
+	}
+
+	// Completed and failed should be gone
+	if qt.Get("old-done") != nil {
+		t.Error("expected old-done to be reaped")
+	}
+	if qt.Get("old-failed") != nil {
+		t.Error("expected old-failed to be reaped")
+	}
+
+	// Running query should still exist
+	if qt.Get("still-running") == nil {
+		t.Error("expected still-running to survive reaping")
+	}
+}
+
+// --- ExecuteSQL cleans up queryMetas ---
+
+func TestExecuteSQLCleansUpQueryMeta(t *testing.T) {
+	ctx, coord, store := setupDistributed(t)
+	cat := coord.catalog
+
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{
+		{"id": int64(1)},
+	}
+	ingestTestData(t, ctx, store, cat, "cleanup_test", schema, rows)
+
+	result, err := coord.ExecuteSQL(ctx, "SELECT * FROM cleanup_test")
+	if err != nil {
+		t.Fatalf("ExecuteSQL: %v", err)
+	}
+
+	// After synchronous ExecuteSQL returns, queryMetas should be cleaned up
+	coord.mu.Lock()
+	_, metaExists := coord.queryMetas[result.QueryID]
+	coord.mu.Unlock()
+	if metaExists {
+		t.Error("expected queryMetas to be cleaned up after synchronous ExecuteSQL")
+	}
+
+	// Tracker entry is kept for status/list APIs — reaped by StartQueryReaper
+	if coord.tracker.Get(result.QueryID) == nil {
+		t.Error("expected tracker entry to still exist for status APIs")
+	}
+}

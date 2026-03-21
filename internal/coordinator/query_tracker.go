@@ -289,6 +289,33 @@ func (qt *QueryTracker) Cancel(queryID string) {
 	}
 }
 
+// Delete removes a query from the tracker entirely.
+func (qt *QueryTracker) Delete(queryID string) {
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
+	delete(qt.queries, queryID)
+}
+
+// ReapCompleted returns and removes query IDs in a terminal state
+// (completed, failed, cancelled) whose EndTime is older than maxAge.
+func (qt *QueryTracker) ReapCompleted(maxAge time.Duration) []string {
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
+
+	cutoff := time.Now().Add(-maxAge)
+	var reaped []string
+	for id, q := range qt.queries {
+		switch q.State {
+		case QueryStateCompleted, QueryStateFailed, QueryStateCancelled:
+			if !q.EndTime.IsZero() && q.EndTime.Before(cutoff) {
+				delete(qt.queries, id)
+				reaped = append(reaped, id)
+			}
+		}
+	}
+	return reaped
+}
+
 // List returns all tracked queries (shallow copies).
 func (qt *QueryTracker) List() []*QueryInfo {
 	qt.mu.RLock()

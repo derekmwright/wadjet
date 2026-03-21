@@ -603,8 +603,9 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		ResultBucket: bucket,
 	}, cat, nc, js, logger)
 
-	// Start heartbeat monitoring and result cleanup
+	// Start heartbeat monitoring, query reaping, and result cleanup
 	coord.Workers().StartReaper(ctx)
+	coord.StartQueryReaper(ctx)
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
 
 	// Build config manager and auth provider for hot-reload
@@ -786,6 +787,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		ResultBucket: bucket,
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
+	coord.StartQueryReaper(ctx)
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
 
 	m := metrics.New()

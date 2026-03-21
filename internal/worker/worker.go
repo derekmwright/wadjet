@@ -51,7 +51,7 @@ type Worker struct {
 	wg     sync.WaitGroup
 
 	cancelledMu sync.RWMutex
-	cancelled   map[string]struct{} // queryID → cancelled
+	cancelled   map[string]time.Time // queryID → cancellation time
 }
 
 // New creates a new Worker.
@@ -84,7 +84,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		js:        js,
 		executor:  executor,
 		logger:    logger,
-		cancelled: make(map[string]struct{}),
+		cancelled: make(map[string]time.Time),
 	}
 }
 
@@ -127,7 +127,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	cancelSub, err := w.nc.Subscribe(distributed.CancelSubjectAll(), func(msg *nats.Msg) {
 		queryID := string(msg.Data)
 		w.cancelledMu.Lock()
-		w.cancelled[queryID] = struct{}{}
+		w.cancelled[queryID] = time.Now()
 		w.cancelledMu.Unlock()
 		w.logger.Debug("query cancelled", "query_id", queryID)
 	})
@@ -323,6 +323,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
+	reapCounter := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -346,6 +347,26 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 			}
 
 			w.nc.Publish(distributed.SubjectHeartbeat, data)
+
+			// Reap old cancellation entries every ~60s (6 heartbeat ticks)
+			reapCounter++
+			if reapCounter >= 6 {
+				reapCounter = 0
+				w.reapCancelled(10 * time.Minute)
+			}
+		}
+	}
+}
+
+// reapCancelled removes cancellation entries older than maxAge.
+func (w *Worker) reapCancelled(maxAge time.Duration) {
+	w.cancelledMu.Lock()
+	defer w.cancelledMu.Unlock()
+
+	cutoff := time.Now().Add(-maxAge)
+	for id, cancelledAt := range w.cancelled {
+		if cancelledAt.Before(cutoff) {
+			delete(w.cancelled, id)
 		}
 	}
 }
