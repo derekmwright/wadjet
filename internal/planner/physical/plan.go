@@ -1023,9 +1023,18 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 }
 
 // isBroadcastCandidate returns true if the right (build) side of a join is
-// small enough to broadcast to all workers (heuristic: <= 10 files).
+// small enough to broadcast to all workers AND the left (probe) side is a
+// simple scan (not a join result). When the probe side comes from another
+// join, it can be arbitrarily large, so we must shuffle both sides to
+// parallelize the join across workers.
 func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if len(joinNode.Children) < 2 {
+		return false
+	}
+	// Don't broadcast when the probe side is a join result — it could be
+	// massive and must be partitioned across workers, not sent to one.
+	leftChild := joinNode.Children[0]
+	if leftChild.Type == logical.NodeJoin {
 		return false
 	}
 	rightChild := joinNode.Children[1]
