@@ -265,11 +265,12 @@ locals {
 resource "aws_instance" "standalone" {
   count = var.mode == "standalone" ? 1 : 0
 
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.worker_instance_type
-  vpc_security_group_ids = [aws_security_group.bench.id]
-  iam_instance_profile   = aws_iam_instance_profile.bench.name
-  subnet_id              = data.aws_subnets.default.ids[0]
+  ami                                  = data.aws_ami.al2023.id
+  instance_type                        = var.worker_instance_type
+  instance_initiated_shutdown_behavior = "terminate"
+  vpc_security_group_ids               = [aws_security_group.bench.id]
+  iam_instance_profile                 = aws_iam_instance_profile.bench.name
+  subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
     volume_size = var.scale_factor <= 10 ? 50 : 200
@@ -303,11 +304,12 @@ resource "aws_instance" "standalone" {
 resource "aws_instance" "coordinator" {
   count = var.mode == "distributed" ? 1 : 0
 
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.coordinator_instance_type
-  vpc_security_group_ids = [aws_security_group.bench.id]
-  iam_instance_profile   = aws_iam_instance_profile.bench.name
-  subnet_id              = data.aws_subnets.default.ids[0]
+  ami                                  = data.aws_ami.al2023.id
+  instance_type                        = var.coordinator_instance_type
+  instance_initiated_shutdown_behavior = "terminate"
+  vpc_security_group_ids               = [aws_security_group.bench.id]
+  iam_instance_profile                 = aws_iam_instance_profile.bench.name
+  subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
     volume_size = var.scale_factor <= 10 ? 50 : 200
@@ -339,11 +341,12 @@ resource "aws_instance" "coordinator" {
 resource "aws_instance" "worker" {
   count = var.mode == "distributed" ? var.worker_count : 0
 
-  ami                    = data.aws_ami.al2023.id
-  instance_type          = var.worker_instance_type
-  vpc_security_group_ids = [aws_security_group.bench.id]
-  iam_instance_profile   = aws_iam_instance_profile.bench.name
-  subnet_id              = data.aws_subnets.default.ids[0]
+  ami                                  = data.aws_ami.al2023.id
+  instance_type                        = var.worker_instance_type
+  instance_initiated_shutdown_behavior = "terminate"
+  vpc_security_group_ids               = [aws_security_group.bench.id]
+  iam_instance_profile                 = aws_iam_instance_profile.bench.name
+  subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
     volume_size = var.scale_factor <= 10 ? 50 : 200
