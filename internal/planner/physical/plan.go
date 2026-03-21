@@ -3696,10 +3696,6 @@ type scanSourceInner struct {
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
 
-	// prefetch — pre-read upcoming row groups to hide S3 latency
-	prefetchCache sync.Map      // map[int]*batch.RecordBatch
-	prefetchSem   chan struct{} // semaphore limiting concurrent prefetches
-
 	// parallel scan
 	batchCh chan *batch.RecordBatch
 	errCh   chan error
@@ -3765,6 +3761,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		requiredCols:  s.requiredCols,
 		scanPreds:     sp,
 		deleteMarkers: delMarkers,
+		batchCh:       make(chan *batch.RecordBatch, 4),
 		errCh:         make(chan error, 1),
 		cancel:        cancel,
 	}
@@ -3784,39 +3781,32 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 
 	if inner.hasNestedTypes {
 		// Nested types need row-level reading — fall back to file-level workers
-		workers := runtime.NumCPU() * 2
+		workers := runtime.NumCPU()
+		if workers > 8 {
+			workers = 8
+		}
 		if workers > len(files) {
 			workers = len(files)
 		}
 		if workers < 1 {
 			workers = 1
 		}
-		inner.batchCh = make(chan *batch.RecordBatch, min(32, workers*2))
 		inner.wg.Add(workers)
 		for i := 0; i < workers; i++ {
 			go inner.scanWorker(scanCtx)
 		}
 	} else {
-		// Row-group-level parallel scan — more workers than CPUs since S3
-		// reads are I/O-bound (only ~14% of wall time is on-CPU)
-		workers := runtime.NumCPU() * 2
+		// Row-group-level parallel scan — full CPU utilization
+		workers := runtime.NumCPU()
+		if workers > 8 {
+			workers = 8
+		}
 		if workers > len(inner.rgUnits) {
 			workers = len(inner.rgUnits)
 		}
 		if workers < 1 {
 			workers = 1
 		}
-		inner.batchCh = make(chan *batch.RecordBatch, min(32, workers*2))
-
-		// Prefetch pool: pre-read upcoming row groups to hide S3 latency.
-		// Limit concurrent prefetches to the number of workers so we don't
-		// overwhelm the network or allocate unbounded memory.
-		prefetchAhead := workers
-		if prefetchAhead > 16 {
-			prefetchAhead = 16
-		}
-		inner.prefetchSem = make(chan struct{}, prefetchAhead)
-
 		inner.wg.Add(workers)
 		for i := 0; i < workers; i++ {
 			go inner.rgWorker(scanCtx)
