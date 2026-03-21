@@ -267,7 +267,7 @@ resource "aws_instance" "standalone" {
 
   ami                                  = data.aws_ami.al2023.id
   instance_type                        = var.worker_instance_type
-  instance_initiated_shutdown_behavior = "terminate"
+  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
   vpc_security_group_ids               = [aws_security_group.bench.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench.name
   subnet_id                            = data.aws_subnets.default.ids[0]
@@ -293,9 +293,10 @@ resource "aws_instance" "standalone" {
   user_data = base64encode(local.standalone_user_data)
 
   tags = {
-    Name = "wadjet-bench-standalone"
-    Role = "standalone"
-    SF   = "SF${var.scale_factor}"
+    Name    = "wadjet-bench-standalone"
+    Role    = "standalone"
+    SF      = "SF${var.scale_factor}"
+    Project = "wadjet-bench"
   }
 }
 
@@ -306,7 +307,7 @@ resource "aws_instance" "coordinator" {
 
   ami                                  = data.aws_ami.al2023.id
   instance_type                        = var.coordinator_instance_type
-  instance_initiated_shutdown_behavior = "terminate"
+  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
   vpc_security_group_ids               = [aws_security_group.bench.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench.name
   subnet_id                            = data.aws_subnets.default.ids[0]
@@ -332,9 +333,10 @@ resource "aws_instance" "coordinator" {
   user_data = base64encode(local.coordinator_user_data)
 
   tags = {
-    Name = "wadjet-bench-coordinator"
-    Role = "coordinator"
-    SF   = "SF${var.scale_factor}"
+    Name    = "wadjet-bench-coordinator"
+    Role    = "coordinator"
+    SF      = "SF${var.scale_factor}"
+    Project = "wadjet-bench"
   }
 }
 
@@ -343,7 +345,7 @@ resource "aws_instance" "worker" {
 
   ami                                  = data.aws_ami.al2023.id
   instance_type                        = var.worker_instance_type
-  instance_initiated_shutdown_behavior = "terminate"
+  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
   vpc_security_group_ids               = [aws_security_group.bench.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench.name
   subnet_id                            = data.aws_subnets.default.ids[0]
@@ -392,8 +394,9 @@ resource "aws_instance" "worker" {
   )
 
   tags = {
-    Name = "wadjet-bench-worker-${count.index}"
-    Role = "worker"
-    SF   = "SF${var.scale_factor}"
+    Name    = "wadjet-bench-worker-${count.index}"
+    Role    = "worker"
+    SF      = "SF${var.scale_factor}"
+    Project = "wadjet-bench"
   }
 }
