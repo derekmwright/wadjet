@@ -334,12 +334,16 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 
 	msg.Ack()
 
-	w.logger.Info("task completed",
+	logAttrs := []any{
 		"task_id", task.ID,
 		"success", result.Success,
 		"rows", result.NumRows,
 		"duration", result.Duration,
-	)
+	}
+	if result.Error != "" {
+		logAttrs = append(logAttrs, "error", result.Error)
+	}
+	w.logger.Info("task completed", logAttrs...)
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
