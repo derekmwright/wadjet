@@ -30,7 +30,6 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
-	"github.com/citc-tech/wadjet/internal/worker"
 	"github.com/citc-tech/wadjet/wadjet"
 )
 
@@ -205,19 +204,8 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		log.Fatalf("catalog init: %v", err)
 	}
 
-	// Local worker on coordinator node
-	w := worker.New(worker.Config{
-		NATSUrl:          embeddedNATS.ClientURL(),
-		ClusterID:        "local",
-		MaxConcurrent:    4,
-		CacheBytes:       256 * 1024 * 1024,
-		ResultStoreBytes: 512 * 1024 * 1024,
-	}, store, nc, js, logger)
-	if err := w.Start(ctx); err != nil {
-		log.Fatalf("worker start: %v", err)
-	}
-
-	// Coordinator
+	// Coordinator — no embedded worker so it stays out of the data path.
+	// All data tasks run on the remote workers.
 	coord := coordinator.New(coordinator.Config{
 		NATSUrl:      embeddedNATS.ClientURL(),
 		ResultBucket: bucket,
@@ -229,14 +217,12 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	log.Printf("Waiting for %d remote workers to connect...", workerCount)
 	deadline := time.Now().Add(10 * time.Minute)
 	for time.Now().Before(deadline) {
-		// Count() includes local worker
 		total := coord.Workers().Count()
-		remote := total - 1
-		if remote >= workerCount {
-			log.Printf("All %d remote workers connected (%d total)", workerCount, total)
+		if total >= workerCount {
+			log.Printf("All %d remote workers connected", workerCount)
 			break
 		}
-		log.Printf("  %d/%d remote workers...", remote, workerCount)
+		log.Printf("  %d/%d remote workers...", total, workerCount)
 		time.Sleep(5 * time.Second)
 	}
 
