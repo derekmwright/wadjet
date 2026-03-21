@@ -292,7 +292,30 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		}
 	}()
 
-	result := w.executor.Execute(taskCtx, task, w.config.WorkerID)
+	// Recover from panics in task execution to prevent crashing
+	// the entire worker process on schema mismatches or other bugs.
+	var result distributed.ResultNotification
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				w.logger.Error("task panicked",
+					"task_id", task.ID,
+					"query_id", task.QueryID,
+					"panic", fmt.Sprintf("%v", r),
+				)
+				result = distributed.ResultNotification{
+					TaskID:    task.ID,
+					QueryID:   task.QueryID,
+					StageID:   task.StageID,
+					WorkerID:  w.config.WorkerID,
+					Error:     fmt.Sprintf("task panicked: %v", r),
+					Duration:  0,
+					Timestamp: time.Now(),
+				}
+			}
+		}()
+		result = w.executor.Execute(taskCtx, task, w.config.WorkerID)
+	}()
 
 	// Publish result notification
 	subject := distributed.ResultSubject(task.QueryID, task.StageID, task.ID)
