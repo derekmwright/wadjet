@@ -177,6 +177,12 @@ func (b *Bitmap) Words() []uint64 {
 	return b.data
 }
 
+// InvalidateCache forces the next HasNulls() call to rescan the bitmap data.
+// Must be called after modifying bitmap words directly via Words().
+func (b *Bitmap) InvalidateCache() {
+	b.hasNulls = -1
+}
+
 // ResetNonNull resets the bitmap to all non-null (all bits 1) for n elements,
 // reusing the existing backing slice when capacity allows. This avoids
 // allocation on the batch pool hot path.
