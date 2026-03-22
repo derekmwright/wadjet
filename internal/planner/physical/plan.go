@@ -730,6 +730,33 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	return stages
 }
 
+// resolveShuffleKey resolves a join key name through any Project alias nodes
+// in the child subtree. For example, a CTE with `l_suppkey AS supplier_no`
+// creates a Project that renames the column — the shuffle key `supplier_no`
+// must be mapped back to `l_suppkey` so the executor can find it in the data.
+func resolveShuffleKey(key string, child *logical.Node) string {
+	if child == nil {
+		return key
+	}
+	// Walk down through pass-through nodes looking for a Project with an alias.
+	for n := child; n != nil; {
+		if n.Type == logical.NodeProject {
+			for _, proj := range n.Projections {
+				if strings.EqualFold(proj.Alias, key) && proj.Column != "" {
+					return proj.Column
+				}
+			}
+		}
+		// Continue down to single-child nodes (Filter, Sort, Limit, Project, Aggregate)
+		if len(n.Children) == 1 {
+			n = n.Children[0]
+		} else {
+			break
+		}
+	}
+	return key
+}
+
 func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *string) {
 	switch node.Type {
 	case logical.NodeScan:
@@ -888,6 +915,17 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// and rightKeys are from the build (right) child.
 			if len(node.Children) >= 2 {
 				fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+			}
+		}
+
+		// Resolve join keys through CTE/Project aliases so shuffle keys
+		// match the actual column names in the data (e.g., supplier_no → l_suppkey).
+		if len(node.Children) >= 2 {
+			for i, key := range leftKeys {
+				leftKeys[i] = resolveShuffleKey(key, node.Children[0])
+			}
+			for i, key := range rightKeys {
+				rightKeys[i] = resolveShuffleKey(key, node.Children[1])
 			}
 		}
 

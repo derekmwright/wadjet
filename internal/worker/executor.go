@@ -420,11 +420,11 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	rwg.Add(2)
 	go func() {
 		defer rwg.Done()
-		buildBatches, buildErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.BuildFiles, task.Columns)
+		buildBatches, buildErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
 	}()
 	go func() {
 		defer rwg.Done()
-		probeBatches, probeErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, task.Columns)
+		probeBatches, probeErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
 	}()
 	rwg.Wait()
 	if buildErr != nil {
