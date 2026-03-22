@@ -72,7 +72,7 @@ func TestEstimateBatchBytes(t *testing.T) {
 		{Name: "d", Type: parquet.TypeDecimal},
 	}
 	b := batch.NewRecordBatch(schema, 10)
-	size := estimateBatchBytes(b)
+	size := EstimateBatchBytes(b)
 	if size <= 0 {
 		t.Fatalf("expected positive size, got %d", size)
 	}
