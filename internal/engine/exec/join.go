@@ -1656,6 +1656,7 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		out.Len = len(pairs)
 		for _, col := range out.Columns {
 			col.Len = len(pairs)
+			col.Nulls.ResetNonNull(len(pairs))
 		}
 	} else {
 		out = batch.NewRecordBatch(outSchema, len(pairs))

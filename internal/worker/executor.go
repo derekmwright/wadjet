@@ -1437,7 +1437,7 @@ func batchToParquetRows(b *batch.RecordBatch, schema []parquet.Column) []goparqu
 // For nullable columns, sets definition level 1 for non-null values (parquet-go
 // uses definition levels to distinguish null from present in OPTIONAL columns).
 func vectorToParquetValue(vec *batch.Vector, idx int, typ parquet.TypeID, nullable bool, colIdx int) goparquet.Value {
-	if vec.Nulls.IsNullFast(idx) {
+	if vec.Nulls.IsNull(idx) {
 		return goparquet.Value{}.Level(0, 0, colIdx)
 	}
 
