@@ -104,6 +104,12 @@ variable "query_timeout" {
   default     = "10m"
 }
 
+variable "max_concurrent" {
+  description = "Maximum concurrent tasks per worker (lower = less memory, slower execution)"
+  type        = number
+  default     = 4
+}
+
 # Recommended instance types per scale factor (Graviton3 ARM):
 #   SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
 #   SF10:  c7g.4xlarge  (16 vCPU, 32 GB) — $0.58/hr

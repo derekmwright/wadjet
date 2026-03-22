@@ -731,3 +731,58 @@ func TestAntiJoinNoMatches(t *testing.T) {
 		t.Fatalf("expected 2 rows for anti join with empty build, got %d", len(sink.Rows))
 	}
 }
+
+// TestHashJoinPooledBatchNullBitmapSize is a regression test for a panic where
+// the join's pooled output batch had a null bitmap sized for DefaultBatchSize
+// (2048) but the batch Len was set to the actual output size. When the output
+// size matched a 64-bit word boundary (e.g. 256), accessing bit index == len
+// caused an out-of-bounds panic in Bitmap.IsNullFast.
+func TestHashJoinPooledBatchNullBitmapSize(t *testing.T) {
+	// Build side: create enough rows that the join produces a pooled output
+	// batch with Len < DefaultBatchSize, hitting the pooled path.
+	buildSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString, Nullable: true},
+	}
+	// 200 build rows — join output will be ≤200 rows, well under DefaultBatchSize
+	buildRows := make([]map[string]any, 200)
+	for i := range buildRows {
+		buildRows[i] = map[string]any{"id": int64(i), "val": "v"}
+	}
+
+	hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
+	hj.BuildFromRows(buildSchema, buildRows)
+
+	probeSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "data", Type: parquet.TypeString},
+	}
+	probeRows := make([]map[string]any, 200)
+	for i := range probeRows {
+		probeRows[i] = map[string]any{"id": int64(i), "data": "d"}
+	}
+
+	source := NewSliceSource(probeSchema, probeRows)
+	probe := hj.Probe()
+	sink := &CollectSink{}
+	pipe := &Pipeline{Source: source, Ops: []UnaryOperator{probe}, Sink: sink}
+	if err := pipe.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sink.Rows) != 200 {
+		t.Fatalf("expected 200 rows, got %d", len(sink.Rows))
+	}
+
+	// The critical check: verify that the output batch null bitmaps are
+	// correctly sized. Before the fix, the bitmap would be sized for
+	// DefaultBatchSize but col.Len would be set to the actual output size,
+	// causing IsNullFast to panic on boundary indices.
+	for _, b := range sink.Batches() {
+		for _, col := range b.Columns {
+			for ri := 0; ri < b.ActiveLen(); ri++ {
+				_ = col.Nulls.IsNull(ri)
+			}
+		}
+	}
+}

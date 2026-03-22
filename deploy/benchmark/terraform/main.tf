@@ -406,11 +406,13 @@ resource "aws_instance" "worker" {
         --ssl \
         --bucket="${local.bucket_name}" \
         --region="${var.region}" \
-        --storage-type=s3 &
+        --storage-type=s3 \
+        --max-concurrent=${var.max_concurrent} &
       WORKER_PID=$!
       sleep 5
       if kill -0 $WORKER_PID 2>/dev/null; then
         echo "WORKER_STARTED=1" >> /etc/environment
+        wait $WORKER_PID
         break
       fi
       echo "Worker attempt $i failed, retrying in 10s..."
