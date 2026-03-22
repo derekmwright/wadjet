@@ -457,6 +457,8 @@ func readColumnData(data []byte, pos int, vec *batch.Vector, numRows int, typ pa
 	for i := len(words); i < bitmapWords; i++ {
 		pos += 8
 	}
+	// Invalidate the HasNulls() cache since we overwrote bitmap words directly.
+	vec.Nulls.InvalidateCache()
 
 	// Read column data
 	switch typ {

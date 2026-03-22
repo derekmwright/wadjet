@@ -1525,7 +1525,7 @@ func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, sta
 		if !r.Success || len(r.InlineData) == 0 || r.ResultPath != "" {
 			continue
 		}
-		path := fmt.Sprintf("queries/%s/%s/%s.parquet", queryID, stageID, r.TaskID)
+		path := fmt.Sprintf("queries/%s/%s/%s.wshf", queryID, stageID, r.TaskID)
 		pending = append(pending, work{idx: i, path: path, r: r})
 	}
 	if len(pending) == 0 {

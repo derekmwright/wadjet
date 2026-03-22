@@ -68,6 +68,7 @@ func readShuffleColumn(data []byte, pos int, vec *batch.Vector, numRows int, typ
 	for i := len(words); i < bitmapWords; i++ {
 		pos += 8
 	}
+	vec.Nulls.InvalidateCache()
 
 	switch typ {
 	case parquet.TypeBool:
