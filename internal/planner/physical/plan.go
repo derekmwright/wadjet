@@ -1073,9 +1073,12 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// Insert shuffle stages for non-broadcast joins when distributed
 		numPartitions := 0
 		if !isBroadcast && jt != "cross" && len(leftKeys) > 0 && p.WorkerCount > 1 {
-			numPartitions = p.WorkerCount
-			if numPartitions < 2 {
-				numPartitions = 4
+			// Use 4x workers as partition count to reduce per-task join memory.
+			// Each partition receives 1/numPartitions of the shuffled data, so
+			// higher counts reduce peak hash table memory on each worker.
+			numPartitions = p.WorkerCount * 4
+			if numPartitions < 8 {
+				numPartitions = 8
 			}
 
 			// Compute columns the shuffle must preserve: join keys + all
