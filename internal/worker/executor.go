@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/heap"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -142,7 +143,7 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 
 func (e *Executor) executeScan(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
 	// Read all scan files concurrently (parallel S3 GETs)
-	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.Files, task.Columns)
+	allBatches, err := e.readInputFilesBatches(ctx, task.ResultBucket, task.Files, task.Columns)
 	if err != nil {
 		return err
 	}
@@ -296,7 +297,7 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 	}
 
 	// Read input files directly into columnar batches
-	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, neededCols)
+	allBatches, err := e.readInputFilesBatches(ctx, task.ResultBucket, task.InputFiles, neededCols)
 	if err != nil {
 		return err
 	}
@@ -391,7 +392,7 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 		return e.executeMergeSorted(ctx, task, result)
 	}
 
-	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
+	allBatches, err := e.readInputFilesBatches(ctx, task.ResultBucket, task.InputFiles, nil)
 	if err != nil {
 		return err
 	}
@@ -741,11 +742,11 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	rwg.Add(2)
 	go func() {
 		defer rwg.Done()
-		buildBatches, buildErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
+		buildBatches, buildErr = e.readInputFilesBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
 	}()
 	go func() {
 		defer rwg.Done()
-		probeBatches, probeErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
+		probeBatches, probeErr = e.readInputFilesBatches(ctx, task.ResultBucket, task.InputFiles, nil)
 	}()
 	rwg.Wait()
 	if buildErr != nil {
@@ -838,7 +839,7 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 }
 
 func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
+	allBatches, err := e.readInputFilesBatches(ctx, task.ResultBucket, task.InputFiles, nil)
 	if err != nil {
 		return err
 	}
@@ -928,16 +929,16 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		numPartitions = 1
 	}
 
-	// Per-partition Parquet writers — initialized from first batch's schema.
+	// Per-partition binary columnar writers — initialized from first batch's schema.
 	var (
-		partWriters []*parquet.Writer
+		partWriters []*shuffleWriter
 		partBufs    []*bytes.Buffer
 		keyIdxs     []int
 		totalRows   int64
 	)
 
 	// Read all input files concurrently (parallel S3 GETs)
-	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, task.Columns)
+	allBatches, err := e.readInputFilesBatches(ctx, task.ResultBucket, task.InputFiles, task.Columns)
 	if err != nil {
 		return fmt.Errorf("reading shuffle inputs: %w", err)
 	}
@@ -979,14 +980,14 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			}
 
 			partBufs = make([]*bytes.Buffer, numPartitions)
-			partWriters = make([]*parquet.Writer, numPartitions)
+			partWriters = make([]*shuffleWriter, numPartitions)
 			for pid := 0; pid < numPartitions; pid++ {
 				partBufs[pid] = &bytes.Buffer{}
-				pw, pwErr := parquet.NewWriter(partBufs[pid], parquet.Schema{Columns: schema}, parquet.DefaultWriterConfig())
-				if pwErr != nil {
-					return fmt.Errorf("creating partition %d writer: %w", pid, pwErr)
+				sw := newShuffleWriter(partBufs[pid], schema)
+				if err := sw.writeHeader(); err != nil {
+					return fmt.Errorf("writing partition %d header: %w", pid, err)
 				}
-				partWriters[pid] = pw
+				partWriters[pid] = sw
 			}
 		}
 
@@ -1007,22 +1008,15 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			partitionRows[pid] = append(partitionRows[pid], uint32(rowIdx))
 		}
 
-		// Write partitioned rows immediately to Parquet writers
+		// Write partitioned rows as columnar chunks (no row materialization)
 		for pid := 0; pid < numPartitions; pid++ {
 			if len(partitionRows[pid]) == 0 {
 				continue
 			}
-			pb := &batch.RecordBatch{
-				Columns: b.Columns,
-				Schema:  b.Schema,
-				Len:     b.Len,
-				Sel:     partitionRows[pid],
-			}
-			pqRows := batchToParquetRows(pb, b.Schema)
-			if err := partWriters[pid].WriteParquetRows(pqRows); err != nil {
+			if err := partWriters[pid].writeChunk(b.Columns, partitionRows[pid], len(partitionRows[pid])); err != nil {
 				return fmt.Errorf("writing to partition %d: %w", pid, err)
 			}
-			totalRows += int64(len(pqRows))
+			totalRows += int64(len(partitionRows[pid]))
 		}
 	}
 
@@ -1030,10 +1024,11 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		return nil // no data
 	}
 
-	// Close all writers (flushes in-memory buffers, no I/O)
+	// Patch chunk counts into each buffer's header
 	for pid := 0; pid < numPartitions; pid++ {
-		if err := partWriters[pid].Close(); err != nil {
-			return fmt.Errorf("closing partition %d writer: %w", pid, err)
+		buf := partBufs[pid].Bytes()
+		if len(buf) >= 8 {
+			binary.LittleEndian.PutUint32(buf[4:8], partWriters[pid].numChunks)
 		}
 	}
 
@@ -1050,11 +1045,11 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 
 	for pid := 0; pid < numPartitions; pid++ {
 		data := partBufs[pid].Bytes()
-		if len(data) == 0 {
+		if len(data) <= 10 { // header only, no chunks
 			continue
 		}
 
-		partPath := fmt.Sprintf("%s%s-p%d.parquet", task.ResultPrefix, task.ID, pid)
+		partPath := fmt.Sprintf("%s%s-p%d.wshf", task.ResultPrefix, task.ID, pid)
 		uploadResults[pid].path = partPath
 
 		wg.Add(1)
@@ -1277,6 +1272,63 @@ func (e *Executor) readParquetFilesConcurrentBatches(ctx context.Context, bucket
 
 			batches, err := e.readParquetFileBatches(ctx, bucket, filePath, selectedCols)
 			results[idx] = result{batches: batches, err: err}
+		}(i, f)
+	}
+	wg.Wait()
+
+	var allBatches []*batch.RecordBatch
+	for i, r := range results {
+		if r.err != nil {
+			return nil, fmt.Errorf("reading file %s: %w", files[i], r.err)
+		}
+		allBatches = append(allBatches, r.batches...)
+	}
+	return allBatches, nil
+}
+
+// readInputFilesBatches reads files that may be in binary shuffle format (.wshf)
+// or Parquet format, auto-detecting based on file magic bytes.
+func (e *Executor) readInputFilesBatches(ctx context.Context, bucket string, files []string, selectedCols []string) ([]*batch.RecordBatch, error) {
+	if len(files) == 0 {
+		return nil, nil
+	}
+
+	type result struct {
+		batches []*batch.RecordBatch
+		err     error
+	}
+	results := make([]result, len(files))
+
+	const maxConcurrency = 8
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+
+	for i, f := range files {
+		wg.Add(1)
+		go func(idx int, filePath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			data, err := e.getFileData(ctx, bucket, filePath)
+			if err != nil {
+				results[idx] = result{err: err}
+				return
+			}
+
+			if isShuffleFormat(data) {
+				batches, err := shuffleReadBatches(data)
+				results[idx] = result{batches: batches, err: err}
+			} else {
+				reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+				if err != nil {
+					results[idx] = result{err: err}
+					return
+				}
+				schema := reader.Schema().Columns
+				batches, err := scan.ReadFileBatches(reader, schema, selectedCols)
+				results[idx] = result{batches: batches, err: err}
+			}
 		}(i, f)
 	}
 	wg.Wait()

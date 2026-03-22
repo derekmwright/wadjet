@@ -537,7 +537,7 @@ func TestExecuteShuffle(t *testing.T) {
 			continue
 		}
 		nonEmptyPartitions++
-		readRows, err := executor.readParquetFileBatches(ctx, "results", path, nil)
+		readRows, err := executor.readInputFilesBatches(ctx, "results", []string{path}, nil)
 		if err != nil {
 			t.Fatalf("reading partition %d: %v", pid, err)
 		}
