@@ -2211,14 +2211,15 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	}
 
 done:
-	p.semiSelBuf = sel // save grown slice for reuse
-
 	if len(sel) == 0 {
 		return nil, nil
 	}
 
-	// Use selection vector instead of copying — zero allocation output
-	in.Sel = sel
+	// Copy the selection vector so that reuse of semiSelBuf on the next
+	// call doesn't corrupt this batch's Sel (they share the backing array).
+	out := make([]uint32, len(sel))
+	copy(out, sel)
+	in.Sel = out
 	return in, nil
 }
 
