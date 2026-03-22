@@ -266,9 +266,21 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 // string, executes them using the planner's standalone pipeline, and substitutes
 // the scalar results as literals. This is needed for distributed mode where
 // workers don't have catalog access to execute subqueries themselves.
+//
+// Subqueries that reference CTEs are left unresolved — the coordinator will
+// resolve them from intermediate results to avoid float-precision divergence
+// between standalone and distributed computation paths.
 func (p *Planner) resolveFilterSubqueries(exprStr string) string {
 	// Quick check: no subquery to resolve
 	if !strings.Contains(strings.ToUpper(exprStr), "SELECT") {
+		return exprStr
+	}
+
+	// If the subquery references a CTE computed by the distributed pipeline,
+	// defer resolution to the coordinator. This ensures the scalar value
+	// comes from the same float computation path as the pipeline results,
+	// avoiding precision divergence (e.g., Q15 total_revenue = MAX(...)).
+	if p.subqueryReferencesCTE(exprStr) {
 		return exprStr
 	}
 
@@ -288,6 +300,20 @@ func (p *Planner) resolveFilterSubqueries(exprStr string) string {
 		return resolved.String()
 	}
 	return exprStr
+}
+
+// subqueryReferencesCTE returns true if the expression contains a scalar
+// subquery whose FROM clause references a CTE defined in the current query.
+func (p *Planner) subqueryReferencesCTE(exprStr string) bool {
+	upper := strings.ToUpper(exprStr)
+	for _, cte := range p.ctes {
+		// Check if the CTE name appears after FROM in the subquery.
+		// Use case-insensitive match since SQL is case-insensitive.
+		if strings.Contains(upper, "FROM "+strings.ToUpper(cte.Name)) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveSubqueryAST recursively walks an AST node, replacing SubqueryNode

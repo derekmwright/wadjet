@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -402,6 +405,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 // createTasksForStage creates distributed tasks for a given stage.
 // For intermediate stages, depResults maps dependency stageID → result file paths.
 func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, depResults map[string][]string) []distributed.Task {
+	// Resolve any unresolved scalar subqueries in filter expressions using
+	// intermediate results from completed dependency stages. This ensures
+	// float values come from the same computation path as the pipeline data.
+	c.resolveStageFilterSubqueries(&stage, depResults)
+
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 
 	var tasks []distributed.Task
@@ -658,6 +666,254 @@ func (c *Coordinator) createFinalAggregateTasks(queryID string, stage physical.S
 		ResultPrefix:  resultPrefix,
 		CreatedAt:     time.Now(),
 	}}
+}
+
+// resolveStageFilterSubqueries resolves any unresolved scalar subqueries in a
+// stage's FilterExprs by computing aggregates from intermediate results of
+// dependency stages. This avoids float-precision divergence between standalone
+// subquery execution and the distributed pipeline.
+func (c *Coordinator) resolveStageFilterSubqueries(stage *physical.Stage, depResults map[string][]string) {
+	if len(stage.FilterExprs) == 0 || depResults == nil {
+		return
+	}
+
+	for i, expr := range stage.FilterExprs {
+		if !strings.Contains(strings.ToUpper(expr), "SELECT") {
+			continue
+		}
+		resolved := c.resolveFilterExpr(expr, stage, depResults)
+		if resolved != expr {
+			c.logger.Debug("resolved filter subquery",
+				"original", expr, "resolved", resolved)
+			stage.FilterExprs[i] = resolved
+		}
+	}
+}
+
+// resolveFilterExpr parses a filter expression, finds SubqueryNode elements,
+// and replaces them with scalar values computed from intermediate results.
+func (c *Coordinator) resolveFilterExpr(expr string, stage *physical.Stage, depResults map[string][]string) string {
+	ast, err := plansql.ParseExpression(expr)
+	if err != nil {
+		return expr
+	}
+
+	resolved := c.resolveSubqueryAST(ast, stage, depResults)
+	if resolved != nil {
+		return resolved.String()
+	}
+	return expr
+}
+
+// resolveSubqueryAST recursively walks an AST, replacing SubqueryNode elements
+// with literal values computed from intermediate results.
+func (c *Coordinator) resolveSubqueryAST(node plansql.Node, stage *physical.Stage, depResults map[string][]string) plansql.Node {
+	if node == nil {
+		return nil
+	}
+	switch n := node.(type) {
+	case *plansql.SubqueryNode:
+		val, err := c.evalSubqueryFromResults(n.SQL, stage, depResults)
+		if err != nil {
+			c.logger.Debug("subquery resolution failed, leaving raw", "sql", n.SQL, "error", err)
+			return node
+		}
+		return coordScalarToLiteral(val)
+	case *plansql.CmpExpr:
+		return &plansql.CmpExpr{
+			Left:  c.resolveSubqueryAST(n.Left, stage, depResults),
+			Op:    n.Op,
+			Right: c.resolveSubqueryAST(n.Right, stage, depResults),
+		}
+	case *plansql.BinaryOp:
+		return &plansql.BinaryOp{
+			Left:  c.resolveSubqueryAST(n.Left, stage, depResults),
+			Op:    n.Op,
+			Right: c.resolveSubqueryAST(n.Right, stage, depResults),
+		}
+	case *plansql.UnaryOp:
+		return &plansql.UnaryOp{
+			Op:    n.Op,
+			Inner: c.resolveSubqueryAST(n.Inner, stage, depResults),
+		}
+	case *plansql.ParenNode:
+		inner := c.resolveSubqueryAST(n.Inner, stage, depResults)
+		if inner != nil {
+			return &plansql.ParenNode{Inner: inner}
+		}
+		return node
+	default:
+		return node
+	}
+}
+
+// evalSubqueryFromResults evaluates a simple scalar subquery (AGG(col) FROM table)
+// by reading the column from intermediate result files of dependency stages.
+func (c *Coordinator) evalSubqueryFromResults(sql string, stage *physical.Stage, depResults map[string][]string) (any, error) {
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		return nil, fmt.Errorf("parse subquery: %w", err)
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		return nil, fmt.Errorf("extract subquery: %w", err)
+	}
+	if len(info.Columns) != 1 {
+		return nil, fmt.Errorf("expected 1 column in scalar subquery, got %d", len(info.Columns))
+	}
+
+	// Extract aggregate function and column from the select expression.
+	// Handles patterns like MAX(total_revenue), MIN(col), SUM(col), etc.
+	aggFunc, aggCol := parseSimpleAgg(info.Columns[0].Expr)
+	if aggFunc == "" {
+		return nil, fmt.Errorf("unsupported subquery expression: %s", info.Columns[0].Expr)
+	}
+
+	// Read column values from all dependency stages' intermediate results.
+	// The correct stage is the one whose output contains the column.
+	var values []float64
+	for _, depID := range stage.Dependencies {
+		files := depResults[depID]
+		for _, filePath := range files {
+			vals, err := c.readColumnFloat64(filePath, aggCol)
+			if err != nil {
+				continue // column not in this stage's output
+			}
+			values = append(values, vals...)
+		}
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("column %q not found in dependency results", aggCol)
+	}
+
+	// Compute aggregate
+	switch aggFunc {
+	case "MAX":
+		result := math.Inf(-1)
+		for _, v := range values {
+			if v > result {
+				result = v
+			}
+		}
+		return result, nil
+	case "MIN":
+		result := math.Inf(1)
+		for _, v := range values {
+			if v < result {
+				result = v
+			}
+		}
+		return result, nil
+	case "SUM":
+		var result float64
+		for _, v := range values {
+			result += v
+		}
+		return result, nil
+	case "AVG":
+		var sum float64
+		for _, v := range values {
+			sum += v
+		}
+		return sum / float64(len(values)), nil
+	case "COUNT":
+		return int64(len(values)), nil
+	default:
+		return nil, fmt.Errorf("unsupported aggregate %q", aggFunc)
+	}
+}
+
+// parseSimpleAgg extracts the aggregate function name and column from
+// an expression like "MAX(total_revenue)" or "SUM(col)".
+func parseSimpleAgg(expr string) (string, string) {
+	expr = strings.TrimSpace(expr)
+	paren := strings.IndexByte(expr, '(')
+	if paren < 0 || !strings.HasSuffix(expr, ")") {
+		return "", ""
+	}
+	fn := strings.ToUpper(strings.TrimSpace(expr[:paren]))
+	col := strings.TrimSpace(expr[paren+1 : len(expr)-1])
+	switch fn {
+	case "MAX", "MIN", "SUM", "AVG", "COUNT":
+		return fn, col
+	}
+	return "", ""
+}
+
+// readColumnFloat64 reads a single column from a parquet result file and
+// returns its values as float64. Returns error if the column is not found.
+func (c *Coordinator) readColumnFloat64(filePath, column string) ([]float64, error) {
+	store := c.catalog.Store()
+	rc, _, err := store.Get(context.Background(), c.config.ResultBucket, filePath)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+
+	schema := reader.Schema().Columns
+	batches, err := scan.ReadFileBatches(reader, schema, []string{column})
+	if err != nil {
+		return nil, err
+	}
+
+	var values []float64
+	for _, b := range batches {
+		vec := b.ColumnByName(column)
+		if vec == nil {
+			continue
+		}
+		for j := 0; j < b.ActiveLen(); j++ {
+			idx := j
+			if b.Sel != nil {
+				idx = int(b.Sel[j])
+			}
+			if vec.Nulls.IsNullFast(idx) {
+				continue
+			}
+			switch vec.Type {
+			case batch.TypeFloat64:
+				values = append(values, vec.Float64Data[idx])
+			case batch.TypeFloat32:
+				values = append(values, float64(vec.Float32Data[idx]))
+			case batch.TypeInt64:
+				values = append(values, float64(vec.Int64Data[idx]))
+			case batch.TypeInt32:
+				values = append(values, float64(vec.Int32Data[idx]))
+			}
+		}
+	}
+
+	if len(values) == 0 {
+		return nil, fmt.Errorf("column %q: no values found", column)
+	}
+	return values, nil
+}
+
+// coordScalarToLiteral converts a Go value to a plansql AST literal node.
+func coordScalarToLiteral(v any) plansql.Node {
+	switch val := v.(type) {
+	case float64:
+		return &plansql.Lit{Value: strconv.FormatFloat(val, 'f', -1, 64), Kind: plansql.LitNumber}
+	case float32:
+		return &plansql.Lit{Value: strconv.FormatFloat(float64(val), 'f', -1, 32), Kind: plansql.LitNumber}
+	case int64:
+		return &plansql.Lit{Value: fmt.Sprintf("%d", val), Kind: plansql.LitNumber}
+	case int:
+		return &plansql.Lit{Value: fmt.Sprintf("%d", val), Kind: plansql.LitNumber}
+	case string:
+		return &plansql.Lit{Value: val, Kind: plansql.LitString}
+	default:
+		return &plansql.Lit{Value: fmt.Sprint(v), Kind: plansql.LitNumber}
+	}
 }
 
 func (c *Coordinator) createSortTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
