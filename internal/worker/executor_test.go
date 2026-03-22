@@ -602,10 +602,10 @@ func TestSelfJoinBuildTableAlias(t *testing.T) {
 	// Read back and verify n2.n_name is in the output
 	resultPath := result.ResultPath
 	if resultPath == "" && len(result.InlineData) > 0 {
-		resultPath = "output/inline-result.parquet"
+		resultPath = "output/inline-result.wshf"
 		store.Put(ctx, "results", resultPath, bytes.NewReader(result.InlineData), int64(len(result.InlineData)), "")
 	}
-	batches, err := executor.readParquetFileBatches(ctx, "results", resultPath, nil)
+	batches, err := executor.readInputFilesBatches(ctx, "results", []string{resultPath}, nil)
 	if err != nil {
 		t.Fatalf("reading result: %v", err)
 	}
@@ -674,10 +674,10 @@ func TestSelfJoinWithoutAlias(t *testing.T) {
 
 	resultPath := result.ResultPath
 	if resultPath == "" && len(result.InlineData) > 0 {
-		resultPath = "output2/inline-result.parquet"
+		resultPath = "output2/inline-result.wshf"
 		store.Put(ctx, "results", resultPath, bytes.NewReader(result.InlineData), int64(len(result.InlineData)), "")
 	}
-	batches, err := executor.readParquetFileBatches(ctx, "results", resultPath, nil)
+	batches, err := executor.readInputFilesBatches(ctx, "results", []string{resultPath}, nil)
 	if err != nil {
 		t.Fatalf("reading result: %v", err)
 	}

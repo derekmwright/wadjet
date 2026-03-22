@@ -1410,20 +1410,32 @@ func (e *Executor) serializeBatches(batches []*batch.RecordBatch) ([]byte, error
 	schema := batches[0].Schema
 
 	var buf bytes.Buffer
-	pw, err := parquet.NewWriter(&buf, parquet.Schema{Columns: schema}, parquet.DefaultWriterConfig())
-	if err != nil {
-		return nil, fmt.Errorf("creating parquet writer: %w", err)
+	sw := newShuffleWriter(&buf, schema)
+	if err := sw.writeHeader(); err != nil {
+		return nil, fmt.Errorf("writing header: %w", err)
 	}
 	for _, b := range batches {
-		pqRows := batchToParquetRows(b, schema)
-		if err := pw.WriteParquetRows(pqRows); err != nil {
-			return nil, fmt.Errorf("writing rows: %w", err)
+		nRows := b.ActiveLen()
+		if nRows == 0 {
+			continue
+		}
+		if b.Sel != nil {
+			if err := sw.writeChunk(b.Columns, b.Sel, nRows); err != nil {
+				return nil, fmt.Errorf("writing chunk: %w", err)
+			}
+		} else {
+			if err := sw.writeChunk(b.Columns, nil, nRows); err != nil {
+				return nil, fmt.Errorf("writing chunk: %w", err)
+			}
 		}
 	}
-	if err := pw.Close(); err != nil {
-		return nil, fmt.Errorf("closing writer: %w", err)
+
+	// Patch chunk count
+	data := buf.Bytes()
+	if len(data) >= 8 {
+		binary.LittleEndian.PutUint32(data[4:8], sw.numChunks)
 	}
-	return buf.Bytes(), nil
+	return data, nil
 }
 
 // batchToParquetRows converts a RecordBatch directly to parquet.Row values
@@ -1557,7 +1569,7 @@ func (e *Executor) writeBatchResult(ctx context.Context, task distributed.Task, 
 		return nil
 	}
 
-	resultPath := task.ResultPrefix + task.ID + ".parquet"
+	resultPath := task.ResultPrefix + task.ID + ".wshf"
 
 	// Always write to S3 so results are visible to all workers.
 	_, err = e.store.Put(ctx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")

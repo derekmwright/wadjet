@@ -855,15 +855,23 @@ func (c *Coordinator) readColumnFloat64(filePath, column string) ([]float64, err
 		return nil, err
 	}
 
-	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, err
-	}
-
-	schema := reader.Schema().Columns
-	batches, err := scan.ReadFileBatches(reader, schema, []string{column})
-	if err != nil {
-		return nil, err
+	// Auto-detect format: binary shuffle (WSHF) or Parquet (PAR1)
+	var batches []*batch.RecordBatch
+	if len(data) >= 4 && string(data[:4]) == "WSHF" {
+		batches, err = readShuffleBatches(data)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			return nil, err
+		}
+		schema := reader.Schema().Columns
+		batches, err = scan.ReadFileBatches(reader, schema, []string{column})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var values []float64
@@ -1606,26 +1614,39 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 			continue
 		}
 
-		reader, err := parquet.NewReader(bytes.NewReader(r.InlineData), int64(len(r.InlineData)))
-		if err != nil {
-			c.logger.Debug("parquet reader error", "err", err)
-			continue
-		}
+		var batches []*batch.RecordBatch
 
-		schema := reader.Schema().Columns
-
-		// Extract column names from schema
-		if len(columns) == 0 && len(schema) > 0 {
-			columns = make([]string, len(schema))
-			for i, col := range schema {
-				columns[i] = col.Name
+		// Auto-detect format: binary shuffle (WSHF) or Parquet (PAR1)
+		if len(r.InlineData) >= 4 && string(r.InlineData[:4]) == "WSHF" {
+			var err error
+			batches, err = readShuffleBatches(r.InlineData)
+			if err != nil {
+				c.logger.Debug("shuffle read error", "err", err)
+				continue
 			}
-		}
-
-		// Direct columnar read — keeps data as batches, no row materialization
-		batches, err := scan.ReadFileBatches(reader, schema, nil)
-		if err != nil {
-			continue
+			if len(batches) > 0 && len(columns) == 0 {
+				columns = make([]string, len(batches[0].Schema))
+				for i, col := range batches[0].Schema {
+					columns[i] = col.Name
+				}
+			}
+		} else {
+			reader, err := parquet.NewReader(bytes.NewReader(r.InlineData), int64(len(r.InlineData)))
+			if err != nil {
+				c.logger.Debug("parquet reader error", "err", err)
+				continue
+			}
+			schema := reader.Schema().Columns
+			if len(columns) == 0 && len(schema) > 0 {
+				columns = make([]string, len(schema))
+				for i, col := range schema {
+					columns[i] = col.Name
+				}
+			}
+			batches, err = scan.ReadFileBatches(reader, schema, nil)
+			if err != nil {
+				continue
+			}
 		}
 		for _, b := range batches {
 			totalRows += int64(b.ActiveLen())
@@ -1655,22 +1676,35 @@ func ReadResultFiles(ctx context.Context, store objstore.Store, bucket string, p
 			continue
 		}
 
-		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
-		if err != nil {
-			continue
-		}
-
-		schema := reader.Schema().Columns
-		if len(columns) == 0 && len(schema) > 0 {
-			columns = make([]string, len(schema))
-			for i, col := range schema {
-				columns[i] = col.Name
+		// Auto-detect format: binary shuffle (WSHF) or Parquet (PAR1)
+		var batches []*batch.RecordBatch
+		if len(data) >= 4 && string(data[:4]) == "WSHF" {
+			batches, err = readShuffleBatches(data)
+			if err != nil {
+				continue
 			}
-		}
-
-		batches, err := scan.ReadFileBatches(reader, schema, nil)
-		if err != nil {
-			continue
+			if len(batches) > 0 && len(columns) == 0 {
+				columns = make([]string, len(batches[0].Schema))
+				for i, col := range batches[0].Schema {
+					columns[i] = col.Name
+				}
+			}
+		} else {
+			reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+			if err != nil {
+				continue
+			}
+			schema := reader.Schema().Columns
+			if len(columns) == 0 && len(schema) > 0 {
+				columns = make([]string, len(schema))
+				for i, col := range schema {
+					columns[i] = col.Name
+				}
+			}
+			batches, err = scan.ReadFileBatches(reader, schema, nil)
+			if err != nil {
+				continue
+			}
 		}
 		for _, b := range batches {
 			totalRows += int64(b.ActiveLen())
