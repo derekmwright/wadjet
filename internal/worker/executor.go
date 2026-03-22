@@ -2,22 +2,23 @@ package worker
 
 import (
 	"bytes"
+	"container/heap"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"os"
-	"sync"
-	"time"
-
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/metrics"
@@ -328,6 +329,11 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 }
 
 func (e *Executor) executeSort(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	// k-way merge: inputs are pre-sorted, merge without re-sorting
+	if task.MergePreSorted && len(task.InputFiles) > 1 {
+		return e.executeMergeSorted(ctx, task, result)
+	}
+
 	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
 	if err != nil {
 		return err
@@ -410,6 +416,264 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 	}
 
 	return e.writeBatchResult(ctx, task, resultBatches, result)
+}
+
+// mergeRun represents a cursor over the pre-sorted batches from a single input file.
+type mergeRun struct {
+	batches  []*batch.RecordBatch
+	batchIdx int
+	rowIdx   int // position within current batch (respects Sel)
+}
+
+func (r *mergeRun) currentBatch() *batch.RecordBatch { return r.batches[r.batchIdx] }
+
+func (r *mergeRun) currentRow() int {
+	b := r.currentBatch()
+	if b.Sel != nil {
+		return int(b.Sel[r.rowIdx])
+	}
+	return r.rowIdx
+}
+
+func (r *mergeRun) advance() bool {
+	b := r.currentBatch()
+	r.rowIdx++
+	if r.rowIdx >= b.ActiveLen() {
+		r.batchIdx++
+		r.rowIdx = 0
+		return r.batchIdx < len(r.batches)
+	}
+	return true
+}
+
+func (r *mergeRun) exhausted() bool {
+	return r.batchIdx >= len(r.batches)
+}
+
+// mergeHeap implements container/heap.Interface for k-way merge of sorted runs.
+type mergeHeap struct {
+	runs []*mergeRun
+	less func(a, b *mergeRun) bool
+}
+
+func (h *mergeHeap) Len() int            { return len(h.runs) }
+func (h *mergeHeap) Less(i, j int) bool  { return h.less(h.runs[i], h.runs[j]) }
+func (h *mergeHeap) Swap(i, j int)       { h.runs[i], h.runs[j] = h.runs[j], h.runs[i] }
+func (h *mergeHeap) Push(x any)          { h.runs = append(h.runs, x.(*mergeRun)) }
+func (h *mergeHeap) Pop() any {
+	old := h.runs
+	n := len(old)
+	x := old[n-1]
+	old[n-1] = nil // avoid memory leak
+	h.runs = old[:n-1]
+	return x
+}
+
+// executeMergeSorted performs a k-way merge of pre-sorted input files.
+// Each input file is already sorted by the sort keys (produced by a parallel sort stage).
+// Instead of re-sorting O(n log n), this merges in O(n log k) where k = number of files.
+func (e *Executor) executeMergeSorted(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	// Read each input file's batches separately (preserve per-file sort order).
+	type fileResult struct {
+		batches []*batch.RecordBatch
+		err     error
+	}
+	fileResults := make([]fileResult, len(task.InputFiles))
+
+	const maxConcurrency = 8
+	sem := make(chan struct{}, maxConcurrency)
+	var wg sync.WaitGroup
+
+	for i, f := range task.InputFiles {
+		wg.Add(1)
+		go func(idx int, filePath string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			batches, err := e.readParquetFileBatches(ctx, task.ResultBucket, filePath, nil)
+			fileResults[idx] = fileResult{batches: batches, err: err}
+		}(i, f)
+	}
+	wg.Wait()
+
+	// Build merge runs from non-empty file results.
+	var runs []*mergeRun
+	var schema []parquet.Column
+	for i, fr := range fileResults {
+		if fr.err != nil {
+			return fmt.Errorf("reading file %s: %w", task.InputFiles[i], fr.err)
+		}
+		if len(fr.batches) == 0 {
+			continue
+		}
+		if schema == nil {
+			schema = fr.batches[0].Schema
+		}
+		runs = append(runs, &mergeRun{batches: fr.batches})
+	}
+
+	if len(runs) == 0 {
+		return nil
+	}
+
+	// Resolve sort keys to column indices and typed comparison kernels.
+	type resolvedKey struct {
+		colIdx  int
+		desc    bool
+		compare kernel.SortCompareKernel
+	}
+	firstBatch := runs[0].batches[0]
+	resolved := make([]resolvedKey, 0, len(task.SortKeys))
+	for _, sk := range task.SortKeys {
+		idx := firstBatch.ColumnIndex(sk.Column)
+		if idx < 0 || idx >= len(firstBatch.Columns) {
+			continue
+		}
+		colType := firstBatch.Columns[idx].Type
+		// Use standard null-handling comparison (NULLS FIRST by default).
+		cmp := kernel.ResolveSortCompare(colType)
+		resolved = append(resolved, resolvedKey{colIdx: idx, desc: sk.Desc, compare: cmp})
+	}
+
+	// Build comparison function for the merge heap.
+	lessFunc := func(a, b *mergeRun) bool {
+		ab, bb := a.currentBatch(), b.currentBatch()
+		ar, br := a.currentRow(), b.currentRow()
+		for _, key := range resolved {
+			if key.colIdx >= len(ab.Columns) || key.colIdx >= len(bb.Columns) {
+				continue
+			}
+			cmp := key.compare(ab.Columns[key.colIdx], ar, bb.Columns[key.colIdx], br)
+			if cmp == 0 {
+				continue
+			}
+			if key.desc {
+				return cmp > 0
+			}
+			return cmp < 0
+		}
+		return false
+	}
+
+	// Initialize the min-heap with one entry per non-empty run.
+	h := &mergeHeap{
+		runs: make([]*mergeRun, 0, len(runs)),
+		less: lessFunc,
+	}
+	for _, r := range runs {
+		if !r.exhausted() {
+			h.runs = append(h.runs, r)
+		}
+	}
+	heap.Init(h)
+
+	// Merge: pop minimum row, copy to output batch, advance cursor, push back.
+	var resultBatches []*batch.RecordBatch
+	var totalRows int64
+	outBatch := batch.NewRecordBatch(schema, batch.DefaultBatchSize)
+	outPos := 0
+
+	for h.Len() > 0 {
+		// Check limit
+		if task.Limit > 0 && totalRows >= int64(task.Limit) {
+			break
+		}
+
+		minRun := h.runs[0]
+		srcBatch := minRun.currentBatch()
+		srcRow := minRun.currentRow()
+
+		// Copy one row from source to output batch.
+		for j := range schema {
+			if j < len(srcBatch.Columns) && j < len(outBatch.Columns) {
+				mergeCopyValue(outBatch.Columns[j], outPos, srcBatch.Columns[j], srcRow)
+			}
+		}
+		outPos++
+		totalRows++
+
+		// Flush output batch when full.
+		if outPos >= batch.DefaultBatchSize {
+			outBatch.Len = outPos
+			resultBatches = append(resultBatches, outBatch)
+			outBatch = batch.NewRecordBatch(schema, batch.DefaultBatchSize)
+			outPos = 0
+		}
+
+		// Advance the run cursor.
+		if minRun.advance() {
+			heap.Fix(h, 0) // re-heapify with new current row
+		} else {
+			heap.Pop(h) // run exhausted, remove from heap
+		}
+	}
+
+	// Flush final partial batch.
+	if outPos > 0 {
+		outBatch.Len = outPos
+		// Trim over-allocated vectors by setting a selection vector for exact length.
+		if outPos < batch.DefaultBatchSize {
+			sel := make([]uint32, outPos)
+			for i := range sel {
+				sel[i] = uint32(i)
+			}
+			outBatch.Sel = sel
+		}
+		resultBatches = append(resultBatches, outBatch)
+	}
+
+	// Trim last batch if limit causes overshoot.
+	if task.Limit > 0 && totalRows > int64(task.Limit) {
+		excess := totalRows - int64(task.Limit)
+		last := resultBatches[len(resultBatches)-1]
+		trimLen := int64(last.ActiveLen()) - excess
+		if trimLen > 0 {
+			sel := make([]uint32, trimLen)
+			for i := range sel {
+				sel[i] = uint32(i)
+			}
+			last.Sel = sel
+		}
+		totalRows = int64(task.Limit)
+	}
+
+	result.NumRows = totalRows
+	if totalRows == 0 {
+		return nil
+	}
+
+	return e.writeBatchResult(ctx, task, resultBatches, result)
+}
+
+// mergeCopyValue copies a single value from src[si] to dst[di] using typed access.
+// For bytes-based types, values must be copied in sequential order for dst (di = 0, 1, 2, ...).
+func mergeCopyValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
+	if src.Nulls.IsNull(si) {
+		dst.Nulls.SetNull(di)
+		switch dst.Type {
+		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+			dst.BytesData.Set(di, nil)
+		}
+		return
+	}
+	dst.Nulls.SetValid(di)
+	switch dst.Type {
+	case batch.TypeBool:
+		dst.BoolData[di] = src.BoolData[si]
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		dst.Int32Data[di] = src.Int32Data[si]
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		dst.Int64Data[di] = src.Int64Data[si]
+	case batch.TypeFloat32:
+		dst.Float32Data[di] = src.Float32Data[si]
+	case batch.TypeFloat64:
+		dst.Float64Data[di] = src.Float64Data[si]
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		dst.BytesData.Set(di, src.BytesData.Value(si))
+	case batch.TypeDecimal:
+		dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+	}
 }
 
 func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
@@ -582,9 +846,9 @@ func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, res
 }
 
 // executeShuffle hash-partitions input batches by key columns and writes
-// one output file per partition. Processes files one at a time to avoid
-// holding the entire input in memory — only one file's batches plus the
-// per-partition Parquet writer buffers are resident at any point.
+// one output file per partition. Reads all input files concurrently via
+// parallel S3 GETs, then partitions all batches and uploads partition
+// files in parallel (up to 8 concurrent uploads).
 func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
 	if len(task.InputFiles) == 0 {
 		return nil
@@ -603,121 +867,147 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		totalRows   int64
 	)
 
-	// Process input files one at a time (streaming)
-	for _, inputFile := range task.InputFiles {
-		batches, err := e.readParquetFileBatches(ctx, task.ResultBucket, inputFile, task.Columns)
-		if err != nil {
-			return fmt.Errorf("reading shuffle input %s: %w", inputFile, err)
+	// Read all input files concurrently (parallel S3 GETs)
+	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, task.Columns)
+	if err != nil {
+		return fmt.Errorf("reading shuffle inputs: %w", err)
+	}
+
+	for _, b := range allBatches {
+		if b.ActiveLen() == 0 {
+			continue
 		}
 
-		for _, b := range batches {
-			if b.ActiveLen() == 0 {
-				continue
-			}
-
-			// Lazy-initialize writers and key indices from first batch
-			if partWriters == nil {
-				schema := b.Schema
-				keyIdxs = make([]int, len(task.ShuffleKeys))
-				for i, key := range task.ShuffleKeys {
-					found := false
-					for j, col := range schema {
-						if col.Name == key {
-							keyIdxs[i] = j
-							found = true
-							break
-						}
+		// Lazy-initialize writers and key indices from first batch
+		if partWriters == nil {
+			schema := b.Schema
+			keyIdxs = make([]int, len(task.ShuffleKeys))
+			for i, key := range task.ShuffleKeys {
+				found := false
+				for j, col := range schema {
+					if col.Name == key {
+						keyIdxs[i] = j
+						found = true
+						break
 					}
-					// Fallback: match suffix after "." for qualified names
-					// (e.g., join output may have "n2.n_nationkey" for self-joins)
-					if !found {
-						for j, col := range schema {
-							if dotIdx := strings.LastIndex(col.Name, "."); dotIdx >= 0 {
-								if col.Name[dotIdx+1:] == key {
-									keyIdxs[i] = j
-									found = true
-									break
-								}
+				}
+				// Fallback: match suffix after "." for qualified names
+				// (e.g., join output may have "n2.n_nationkey" for self-joins)
+				if !found {
+					for j, col := range schema {
+						if dotIdx := strings.LastIndex(col.Name, "."); dotIdx >= 0 {
+							if col.Name[dotIdx+1:] == key {
+								keyIdxs[i] = j
+								found = true
+								break
 							}
 						}
 					}
-					if !found {
-						return fmt.Errorf("shuffle key %q not found in schema", key)
-					}
 				}
-
-				partBufs = make([]*bytes.Buffer, numPartitions)
-				partWriters = make([]*parquet.Writer, numPartitions)
-				for pid := 0; pid < numPartitions; pid++ {
-					partBufs[pid] = &bytes.Buffer{}
-					pw, pwErr := parquet.NewWriter(partBufs[pid], parquet.Schema{Columns: schema}, parquet.DefaultWriterConfig())
-					if pwErr != nil {
-						return fmt.Errorf("creating partition %d writer: %w", pid, pwErr)
-					}
-					partWriters[pid] = pw
+				if !found {
+					return fmt.Errorf("shuffle key %q not found in schema", key)
 				}
 			}
 
-			// Partition rows by hash
-			nRows := b.ActiveLen()
-			partitionRows := make([][]uint32, numPartitions)
-			for ri := 0; ri < nRows; ri++ {
-				rowIdx := ri
-				if b.Sel != nil {
-					rowIdx = int(b.Sel[ri])
-				}
-
-				h := uint64(14695981039346656037) // FNV-1a offset basis
-				for _, ki := range keyIdxs {
-					h = shuffleHashValue(b.Columns[ki], rowIdx, h)
-				}
-				pid := int(h % uint64(numPartitions))
-				partitionRows[pid] = append(partitionRows[pid], uint32(rowIdx))
-			}
-
-			// Write partitioned rows immediately to Parquet writers
+			partBufs = make([]*bytes.Buffer, numPartitions)
+			partWriters = make([]*parquet.Writer, numPartitions)
 			for pid := 0; pid < numPartitions; pid++ {
-				if len(partitionRows[pid]) == 0 {
-					continue
+				partBufs[pid] = &bytes.Buffer{}
+				pw, pwErr := parquet.NewWriter(partBufs[pid], parquet.Schema{Columns: schema}, parquet.DefaultWriterConfig())
+				if pwErr != nil {
+					return fmt.Errorf("creating partition %d writer: %w", pid, pwErr)
 				}
-				pb := &batch.RecordBatch{
-					Columns: b.Columns,
-					Schema:  b.Schema,
-					Len:     b.Len,
-					Sel:     partitionRows[pid],
-				}
-				rows := pb.ToRows()
-				if err := partWriters[pid].WriteRows(rows); err != nil {
-					return fmt.Errorf("writing to partition %d: %w", pid, err)
-				}
-				totalRows += int64(len(rows))
+				partWriters[pid] = pw
 			}
 		}
-		// batches from this file are now unreferenced — GC can reclaim
+
+		// Partition rows by hash
+		nRows := b.ActiveLen()
+		partitionRows := make([][]uint32, numPartitions)
+		for ri := 0; ri < nRows; ri++ {
+			rowIdx := ri
+			if b.Sel != nil {
+				rowIdx = int(b.Sel[ri])
+			}
+
+			h := uint64(14695981039346656037) // FNV-1a offset basis
+			for _, ki := range keyIdxs {
+				h = shuffleHashValue(b.Columns[ki], rowIdx, h)
+			}
+			pid := int(h % uint64(numPartitions))
+			partitionRows[pid] = append(partitionRows[pid], uint32(rowIdx))
+		}
+
+		// Write partitioned rows immediately to Parquet writers
+		for pid := 0; pid < numPartitions; pid++ {
+			if len(partitionRows[pid]) == 0 {
+				continue
+			}
+			pb := &batch.RecordBatch{
+				Columns: b.Columns,
+				Schema:  b.Schema,
+				Len:     b.Len,
+				Sel:     partitionRows[pid],
+			}
+			rows := pb.ToRows()
+			if err := partWriters[pid].WriteRows(rows); err != nil {
+				return fmt.Errorf("writing to partition %d: %w", pid, err)
+			}
+			totalRows += int64(len(rows))
+		}
 	}
 
 	if partWriters == nil {
 		return nil // no data
 	}
 
-	// Close writers and upload partition files
-	resultFiles := make([]string, numPartitions)
+	// Close all writers (flushes in-memory buffers, no I/O)
 	for pid := 0; pid < numPartitions; pid++ {
 		if err := partWriters[pid].Close(); err != nil {
 			return fmt.Errorf("closing partition %d writer: %w", pid, err)
 		}
+	}
+
+	// Upload partition files concurrently (parallel S3 PUTs)
+	type uploadResult struct {
+		path string
+		err  error
+	}
+	uploadResults := make([]uploadResult, numPartitions)
+
+	const maxUploadConcurrency = 8
+	sem := make(chan struct{}, maxUploadConcurrency)
+	var wg sync.WaitGroup
+
+	for pid := 0; pid < numPartitions; pid++ {
 		data := partBufs[pid].Bytes()
 		if len(data) == 0 {
 			continue
 		}
 
 		partPath := fmt.Sprintf("%s%s-p%d.parquet", task.ResultPrefix, task.ID, pid)
-		_, putErr := e.store.Put(ctx, task.ResultBucket, partPath,
-			bytes.NewReader(data), int64(len(data)), "application/octet-stream")
-		if putErr != nil {
-			return fmt.Errorf("writing partition %d to store: %w", pid, putErr)
+		uploadResults[pid].path = partPath
+
+		wg.Add(1)
+		go func(id int, path string, buf []byte) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			_, putErr := e.store.Put(ctx, task.ResultBucket, path,
+				bytes.NewReader(buf), int64(len(buf)), "application/octet-stream")
+			uploadResults[id].err = putErr
+		}(pid, partPath, data)
+	}
+	wg.Wait()
+
+	// Collect results and check for errors
+	resultFiles := make([]string, numPartitions)
+	for pid := 0; pid < numPartitions; pid++ {
+		if uploadResults[pid].err != nil {
+			return fmt.Errorf("writing partition %d to store: %w", pid, uploadResults[pid].err)
 		}
-		resultFiles[pid] = partPath
+		resultFiles[pid] = uploadResults[pid].path
 	}
 
 	result.NumRows = totalRows

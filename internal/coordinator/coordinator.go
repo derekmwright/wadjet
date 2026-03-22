@@ -689,16 +689,17 @@ func (c *Coordinator) createMergeSortTasks(queryID string, stage physical.Stage,
 	}
 
 	return []distributed.Task{{
-		ID:           uuid.New().String()[:8],
-		QueryID:      queryID,
-		StageID:      stage.ID,
-		Type:         distributed.TaskTypeSort,
-		SortKeys:     sortKeys,
-		Limit:        stage.Limit,
-		InputFiles:   inputFiles,
-		ResultBucket: c.config.ResultBucket,
-		ResultPrefix: resultPrefix,
-		CreatedAt:    time.Now(),
+		ID:             uuid.New().String()[:8],
+		QueryID:        queryID,
+		StageID:        stage.ID,
+		Type:           distributed.TaskTypeSort,
+		SortKeys:       sortKeys,
+		Limit:          stage.Limit,
+		MergePreSorted: true,
+		InputFiles:     inputFiles,
+		ResultBucket:   c.config.ResultBucket,
+		ResultPrefix:   resultPrefix,
+		CreatedAt:      time.Now(),
 	}}
 }
 
