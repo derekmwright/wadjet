@@ -1047,20 +1047,32 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 	specs := c.stageSpecs[queryID]
 	c.mu.Unlock()
 
+	// Prepare and publish tasks for all ready stages concurrently.
+	// Independent stages (e.g., left and right scan sides of a join) can
+	// be scheduled in parallel, reducing stage boundary latency.
+	type stageWork struct {
+		stageID string
+		tasks   []distributed.Task
+	}
+	var work []stageWork
 	for _, stageID := range readyStages {
 		spec, ok := specs[stageID]
 		if !ok {
 			c.logger.Error("no stage spec found", "stage_id", stageID)
 			continue
 		}
-
 		tasks := c.createTasksForStage(queryID, spec, depResults)
 		c.tracker.SetStageTasks(queryID, stageID, len(tasks))
+		work = append(work, stageWork{stageID: stageID, tasks: tasks})
+	}
 
-		if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
+	// Publish all stage tasks — use goroutines if multiple stages are ready
+	if len(work) == 1 {
+		sw := work[0]
+		if err := c.scheduler.PublishTasks(ctx, sw.tasks); err != nil {
 			c.logger.Error("failed to publish stage tasks",
-				"stage_id", stageID, "error", err)
-			c.tracker.Fail(queryID, fmt.Sprintf("publishing stage %s: %v", stageID, err))
+				"stage_id", sw.stageID, "error", err)
+			c.tracker.Fail(queryID, fmt.Sprintf("publishing stage %s: %v", sw.stageID, err))
 			c.cleanupQuery(queryID)
 			select {
 			case done <- struct{}{}:
@@ -1068,12 +1080,47 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 			}
 			return
 		}
-
 		c.logger.Info("scheduled stage",
 			"query_id", queryID,
-			"stage_id", stageID,
-			"tasks", len(tasks),
+			"stage_id", sw.stageID,
+			"tasks", len(sw.tasks),
 		)
+	} else if len(work) > 1 {
+		var publishErr error
+		var publishErrStage string
+		var wg sync.WaitGroup
+		for _, sw := range work {
+			wg.Add(1)
+			go func(sw stageWork) {
+				defer wg.Done()
+				if err := c.scheduler.PublishTasks(ctx, sw.tasks); err != nil {
+					c.mu.Lock()
+					if publishErr == nil {
+						publishErr = err
+						publishErrStage = sw.stageID
+					}
+					c.mu.Unlock()
+					return
+				}
+				c.logger.Info("scheduled stage",
+					"query_id", queryID,
+					"stage_id", sw.stageID,
+					"tasks", len(sw.tasks),
+				)
+			}(sw)
+		}
+		wg.Wait()
+		if publishErr != nil {
+			c.logger.Error("failed to publish stage tasks",
+				"stage_id", publishErrStage, "error", publishErr)
+			c.tracker.Fail(queryID, fmt.Sprintf("publishing stage %s: %v", publishErrStage, publishErr))
+			c.cleanupQuery(queryID)
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+			return
+		}
 	}
 }
 
