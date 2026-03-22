@@ -59,6 +59,7 @@ var (
 	geoipASNDB       string
 	useSSL           bool
 	s3Region         string
+	maxConcurrent    int
 )
 
 func main() {
@@ -89,6 +90,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 512*1024*1024, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
 	rootCmd.PersistentFlags().StringVar(&pgAddr, "pg-addr", ":5433", "PostgreSQL wire protocol listen address")
+	rootCmd.PersistentFlags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum concurrent tasks per worker")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 
@@ -581,7 +583,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	w := worker.New(worker.Config{
 		NATSUrl:          embeddedNATS.ClientURL(),
 		ClusterID:        clusterID,
-		MaxConcurrent:    4,
+		MaxConcurrent:    maxConcurrent,
 		CacheBytes:       256 * 1024 * 1024,
 		MemoryBudget:     memoryBudget,
 		SpillDir:         spillDir,
@@ -915,7 +917,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	w := worker.New(worker.Config{
 		NATSUrl:          natsAddr,
 		ClusterID:        clusterID,
-		MaxConcurrent:    4,
+		MaxConcurrent:    maxConcurrent,
 		CacheBytes:       256 * 1024 * 1024,
 		MemoryBudget:     memoryBudget,
 		SpillDir:         spillDir,
