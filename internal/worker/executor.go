@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	goparquet "github.com/parquet-go/parquet-go"
+
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -949,11 +951,11 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 				Len:     b.Len,
 				Sel:     partitionRows[pid],
 			}
-			rows := pb.ToRows()
-			if err := partWriters[pid].WriteRows(rows); err != nil {
+			pqRows := batchToParquetRows(pb, b.Schema)
+			if err := partWriters[pid].WriteParquetRows(pqRows); err != nil {
 				return fmt.Errorf("writing to partition %d: %w", pid, err)
 			}
-			totalRows += int64(len(rows))
+			totalRows += int64(len(pqRows))
 		}
 	}
 
@@ -1290,8 +1292,8 @@ func (e *Executor) serializeBatches(batches []*batch.RecordBatch) ([]byte, error
 		return nil, fmt.Errorf("creating parquet writer: %w", err)
 	}
 	for _, b := range batches {
-		rows := b.ToRows()
-		if err := pw.WriteRows(rows); err != nil {
+		pqRows := batchToParquetRows(b, schema)
+		if err := pw.WriteParquetRows(pqRows); err != nil {
 			return nil, fmt.Errorf("writing rows: %w", err)
 		}
 	}
@@ -1299,6 +1301,122 @@ func (e *Executor) serializeBatches(batches []*batch.RecordBatch) ([]byte, error
 		return nil, fmt.Errorf("closing writer: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// batchToParquetRows converts a RecordBatch directly to parquet.Row values
+// using typed column access, bypassing the map[string]any intermediate.
+// This avoids per-row map allocation and interface boxing.
+//
+// Columns are emitted in alphabetical order to match parquet-go's internal
+// schema ordering (Group.Fields() sorts by name).
+func batchToParquetRows(b *batch.RecordBatch, schema []parquet.Column) []goparquet.Row {
+	nRows := b.ActiveLen()
+	nCols := len(schema)
+	if nRows == 0 {
+		return nil
+	}
+
+	// Build sorted column order: parquet-go sorts Group fields alphabetically.
+	// Map from sorted position → original schema index.
+	type colMapping struct {
+		sortedIdx int
+		origIdx   int
+		col       parquet.Column
+	}
+	sorted := make([]colMapping, nCols)
+	for i, col := range schema {
+		sorted[i] = colMapping{origIdx: i, col: col}
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].col.Name < sorted[j].col.Name
+	})
+	for i := range sorted {
+		sorted[i].sortedIdx = i
+	}
+
+	rows := make([]goparquet.Row, nRows)
+	for i := range rows {
+		rows[i] = make(goparquet.Row, nCols)
+	}
+
+	for _, cm := range sorted {
+		ci := cm.origIdx
+		ri_out := cm.sortedIdx
+		if ci >= len(b.Columns) {
+			continue
+		}
+		vec := b.Columns[ci]
+		col := cm.col
+		nullable := col.Nullable
+		if b.Sel != nil {
+			for ri, idx := range b.Sel {
+				rows[ri][ri_out] = vectorToParquetValue(vec, int(idx), col.Type, nullable, ri_out)
+			}
+		} else {
+			for ri := 0; ri < nRows; ri++ {
+				rows[ri][ri_out] = vectorToParquetValue(vec, ri, col.Type, nullable, ri_out)
+			}
+		}
+	}
+	return rows
+}
+
+// vectorToParquetValue converts a single vector element to a parquet.Value.
+// Operates directly on typed column data — no interface boxing or map allocation.
+// For nullable columns, sets definition level 1 for non-null values (parquet-go
+// uses definition levels to distinguish null from present in OPTIONAL columns).
+func vectorToParquetValue(vec *batch.Vector, idx int, typ parquet.TypeID, nullable bool, colIdx int) goparquet.Value {
+	if vec.Nulls.IsNullFast(idx) {
+		return goparquet.Value{}.Level(0, 0, colIdx)
+	}
+
+	var v goparquet.Value
+	switch typ {
+	case parquet.TypeBool:
+		v = goparquet.BooleanValue(vec.BoolData[idx])
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+		v = goparquet.Int32Value(vec.Int32Data[idx])
+	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+		v = goparquet.Int64Value(vec.Int64Data[idx])
+	case parquet.TypeFloat32:
+		v = goparquet.FloatValue(vec.Float32Data[idx])
+	case parquet.TypeFloat64:
+		v = goparquet.DoubleValue(vec.Float64Data[idx])
+	case parquet.TypeString, parquet.TypeCIDR:
+		v = goparquet.ByteArrayValue(vec.BytesData.Value(idx))
+	case parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeUUID:
+		v = goparquet.ByteArrayValue(vec.BytesData.Value(idx))
+	default:
+		// Fallback for other types (Decimal, Array, Map, Row): use GetValue boxing
+		raw := vec.GetValue(idx)
+		if raw == nil {
+			return goparquet.Value{}.Level(0, 0, colIdx)
+		}
+		switch tv := raw.(type) {
+		case bool:
+			v = goparquet.BooleanValue(tv)
+		case int32:
+			v = goparquet.Int32Value(tv)
+		case int64:
+			v = goparquet.Int64Value(tv)
+		case float32:
+			v = goparquet.FloatValue(tv)
+		case float64:
+			v = goparquet.DoubleValue(tv)
+		case string:
+			v = goparquet.ByteArrayValue([]byte(tv))
+		case []byte:
+			v = goparquet.ByteArrayValue(tv)
+		default:
+			return goparquet.Value{}.Level(0, 0, colIdx)
+		}
+	}
+
+	defLevel := 0
+	if nullable {
+		defLevel = 1
+	}
+	return v.Level(0, defLevel, colIdx)
 }
 
 // writeBatchResult serializes batches and writes via inline/ResultStore/S3 tiering.

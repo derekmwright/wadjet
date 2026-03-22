@@ -145,6 +145,12 @@ func (w *Writer) WriteRows(rows []map[string]any) error {
 	return err
 }
 
+// WriteParquetRows writes pre-built parquet.Row values directly, bypassing map conversion.
+func (w *Writer) WriteParquetRows(rows []goparquet.Row) error {
+	_, err := w.pw.WriteRows(rows)
+	return err
+}
+
 // prepareRows converts network/typed values in maps to parquet-compatible representations.
 func (w *Writer) prepareRows(rows []map[string]any) {
 	// Fast path: check if any columns need conversion
