@@ -549,7 +549,23 @@ func (e *Executor) executeMergeSorted(ctx context.Context, task distributed.Task
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			batches, err := e.readParquetFileBatches(ctx, task.ResultBucket, filePath, nil)
+			data, err := e.getFileData(ctx, task.ResultBucket, filePath)
+			if err != nil {
+				fileResults[idx] = fileResult{err: err}
+				return
+			}
+			var batches []*batch.RecordBatch
+			if isShuffleFormat(data) {
+				batches, err = shuffleReadBatches(data)
+			} else {
+				reader, rErr := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+				if rErr != nil {
+					fileResults[idx] = fileResult{err: rErr}
+					return
+				}
+				schema := reader.Schema().Columns
+				batches, err = scan.ReadFileBatches(reader, schema, nil)
+			}
 			fileResults[idx] = fileResult{batches: batches, err: err}
 		}(i, f)
 	}
