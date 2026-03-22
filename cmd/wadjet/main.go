@@ -124,7 +124,10 @@ func serveCmd() *cobra.Command {
 				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit)
 
 				if memoryBudget == 0 {
-					memoryBudget = int64(float64(memLimit) * 0.75)
+					// Use 50% of detected memory for per-task budget. This leaves
+				// headroom for Go runtime, goroutine stacks, file I/O buffers,
+				// and garbage from the previous task awaiting GC collection.
+				memoryBudget = memLimit / 2
 					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget)
 				}
 			}

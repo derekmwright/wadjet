@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -335,6 +336,15 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	msg.Ack()
+
+	// Force GC after memory-intensive tasks to reclaim build/probe batches
+	// and hash table memory before the next task allocates. Without this,
+	// garbage from the previous task can push RSS past physical memory
+	// before Go's GC cycle triggers.
+	switch task.Type {
+	case "join", "aggregate", "sort", "window":
+		runtime.GC()
+	}
 
 	logAttrs := []any{
 		"task_id", task.ID,
