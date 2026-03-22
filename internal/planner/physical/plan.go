@@ -995,6 +995,9 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		joinTasks := 1
 		if numPartitions > 0 {
 			joinTasks = numPartitions
+		} else if isBroadcast && p.WorkerCount > 1 {
+			// Parallel broadcast: split probe side across workers
+			joinTasks = p.WorkerCount
 		}
 		stageID := fmt.Sprintf("join-%d", len(*stages))
 		stage := Stage{
@@ -1092,18 +1095,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 }
 
 // isBroadcastCandidate returns true if the right (build) side of a join is
-// small enough to broadcast to all workers AND the left (probe) side is a
-// simple scan (not a join result). When the probe side comes from another
-// join, it can be arbitrarily large, so we must shuffle both sides to
-// parallelize the join across workers.
+// small enough to broadcast to all workers. When broadcast, the build side
+// is sent to every worker and the probe side is split round-robin across
+// workers — no shuffle stages needed for either side.
 func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if len(joinNode.Children) < 2 {
-		return false
-	}
-	// Don't broadcast when the probe side is a join result — it could be
-	// massive and must be partitioned across workers, not sent to one.
-	leftChild := joinNode.Children[0]
-	if leftChild.Type == logical.NodeJoin {
 		return false
 	}
 	rightChild := joinNode.Children[1]

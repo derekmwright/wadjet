@@ -787,6 +787,38 @@ func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resu
 		buildFiles = depResults[stage.RightDepStage]
 	}
 
+	// Parallel broadcast join: split probe files across tasks, each gets full build files.
+	// Eliminates shuffle overhead when the build side is small enough to broadcast.
+	if stage.Tasks > 1 && len(probeFiles) > 0 {
+		numTasks := stage.Tasks
+		if numTasks > len(probeFiles) {
+			numTasks = len(probeFiles)
+		}
+		tasks := make([]distributed.Task, numTasks)
+		for i := range tasks {
+			tasks[i] = distributed.Task{
+				ID:            fmt.Sprintf("%s-b%d", uuid.New().String()[:8], i),
+				QueryID:       queryID,
+				StageID:       stage.ID,
+				Type:          distributed.TaskTypeJoin,
+				Columns:       stage.Columns,
+				JoinType:      stage.JoinType,
+				JoinLeftKeys:  stage.JoinLeftKeys,
+				JoinRightKeys: stage.JoinRightKeys,
+				BuildFiles:    buildFiles,
+				ResultBucket:  c.config.ResultBucket,
+				ResultPrefix:  resultPrefix,
+				CreatedAt:     time.Now(),
+			}
+		}
+		// Round-robin distribute probe files across tasks
+		for i, f := range probeFiles {
+			idx := i % numTasks
+			tasks[idx].InputFiles = append(tasks[idx].InputFiles, f)
+		}
+		return tasks
+	}
+
 	return []distributed.Task{{
 		ID:            uuid.New().String()[:8],
 		QueryID:       queryID,
