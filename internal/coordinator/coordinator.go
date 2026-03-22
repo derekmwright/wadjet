@@ -1360,12 +1360,23 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 		return
 	}
 
-	// Collect result files from completed stages
-	depResults := c.collectDepResults(queryID)
-
+	// Materialize inline results for ALL dependencies of ready stages.
+	// When multiple stages complete near-simultaneously, the completed
+	// stage's materialization above only covers one stage. Other deps
+	// may also have inline results that haven't been materialized yet.
 	c.mu.Lock()
 	specs := c.stageSpecs[queryID]
 	c.mu.Unlock()
+	for _, stageID := range readyStages {
+		if spec, ok := specs[stageID]; ok {
+			for _, depID := range spec.Dependencies {
+				c.materializeInlineResults(ctx, queryID, depID)
+			}
+		}
+	}
+
+	// Collect result files from completed stages
+	depResults := c.collectDepResults(queryID)
 
 	// Prepare and publish tasks for all ready stages concurrently.
 	// Independent stages (e.g., left and right scan sides of a join) can

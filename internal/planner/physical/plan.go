@@ -1260,12 +1260,15 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if len(joinNode.Children) < 2 {
 		return false
 	}
-	rightChild := joinNode.Children[1]
-	if rightChild.Type != logical.NodeScan {
+	// Walk through Filter/Project/Limit wrappers to find the underlying Scan.
+	// Small dimension tables (e.g., region with r_name='EUROPE') are often
+	// wrapped in Filter nodes, but are still small enough to broadcast.
+	scan := findScanNode(joinNode.Children[1])
+	if scan == nil {
 		return false
 	}
 	// Estimate size from file count
-	manifest, err := p.catalog.GetManifest(context.Background(), rightChild.TableName)
+	manifest, err := p.catalog.GetManifest(context.Background(), scan.TableName)
 	if err != nil {
 		return false
 	}
@@ -1275,6 +1278,24 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	}
 	// Heuristic: assume ~10MB per file, broadcast if < 10 files
 	return totalFiles <= 10
+}
+
+// findScanNode walks through pass-through nodes (Filter, Project, Limit)
+// to find the underlying Scan node, if any.
+func findScanNode(n *logical.Node) *logical.Node {
+	for n != nil {
+		switch n.Type {
+		case logical.NodeScan:
+			return n
+		case logical.NodeFilter, logical.NodeProject, logical.NodeLimit:
+			if len(n.Children) == 1 {
+				n = n.Children[0]
+				continue
+			}
+		}
+		return nil
+	}
+	return nil
 }
 
 func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
