@@ -952,3 +952,59 @@ func TestLRUCacheUpdateSizeAccounting(t *testing.T) {
 		t.Errorf("expected 1 entry, got %d", cache.Len())
 	}
 }
+
+// TestExtractColRefsStringLiterals verifies that extractColRefs skips
+// single-quoted string literals. Regression test for Q08 SF10 where 'BRAZIL'
+// was incorrectly extracted as a column reference.
+func TestExtractColRefsStringLiterals(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "simple column",
+			input:    "l_shipdate",
+			expected: []string{"l_shipdate"},
+		},
+		{
+			name:     "qualified column",
+			input:    "n2.n_name",
+			expected: []string{"n2.n_name"},
+		},
+		{
+			name:     "expression with function",
+			input:    "substr(l_shipdate, 1, 4)",
+			expected: []string{"l_shipdate"},
+		},
+		{
+			name:     "CASE WHEN with string literal",
+			input:    "CASE WHEN n2.n_name = 'BRAZIL' THEN l_extendedprice * (1 - l_discount) ELSE 0 END",
+			expected: []string{"n2.n_name", "l_extendedprice", "l_discount"},
+		},
+		{
+			name:     "multiple string literals",
+			input:    "CASE WHEN n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY' THEN volume ELSE 0 END",
+			expected: []string{"n1.n_name", "n2.n_name", "volume"},
+		},
+		{
+			name:     "expression with no string literals",
+			input:    "l_extendedprice * (1 - l_discount)",
+			expected: []string{"l_extendedprice", "l_discount"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractColRefs(tt.input)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("extractColRefs(%q): got %v, want %v", tt.input, got, tt.expected)
+			}
+			for i, g := range got {
+				if g != tt.expected[i] {
+					t.Errorf("extractColRefs(%q)[%d]: got %q, want %q", tt.input, i, g, tt.expected[i])
+				}
+			}
+		})
+	}
+}

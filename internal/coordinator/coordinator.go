@@ -769,11 +769,12 @@ func (c *Coordinator) evalSubqueryFromResults(sql string, stage *physical.Stage,
 		return nil, fmt.Errorf("unsupported subquery expression: %s", info.Columns[0].Expr)
 	}
 
-	// Read column values from all dependency stages' intermediate results.
-	// The correct stage is the one whose output contains the column.
+	// Read column values from ALL completed stages' intermediate results.
+	// With shuffle stages, the CTE aggregate that produces the target column
+	// may not be a direct dependency — it can be a transitive dependency
+	// behind shuffle stages. Search all available results.
 	var values []float64
-	for _, depID := range stage.Dependencies {
-		files := depResults[depID]
+	for _, files := range depResults {
 		for _, filePath := range files {
 			vals, err := c.readColumnFloat64(filePath, aggCol)
 			if err != nil {

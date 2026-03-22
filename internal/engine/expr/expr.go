@@ -77,7 +77,7 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 		}
 		e.resolved = true
 	}
-	if e.idx < 0 {
+	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return nil
 	}
 	// Struct field access: extract named field from ROW value
@@ -146,7 +146,7 @@ func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 		}
 		e.resolved = true
 	}
-	if e.idx < 0 {
+	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return 0, false
 	}
 	return b.Columns[e.idx].GetNumericFloat64(row)
@@ -165,7 +165,7 @@ func (e *ColRef) EvalString(b *batch.RecordBatch, row int) (string, bool) {
 		}
 		e.resolved = true
 	}
-	if e.idx < 0 {
+	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return "", false
 	}
 	return b.Columns[e.idx].GetString(row)
@@ -184,7 +184,7 @@ func (e *ColRef) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 		}
 		e.resolved = true
 	}
-	if e.idx < 0 {
+	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return 0, false
 	}
 	v := b.Columns[e.idx]
