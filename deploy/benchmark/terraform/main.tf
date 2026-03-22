@@ -283,6 +283,8 @@ locals {
     export QUERY_TIMEOUT="${var.query_timeout}"
     cd /root/wadjet
     bash deploy/benchmark/run-benchmark.sh distributed SF${var.scale_factor} ${var.worker_count} 2>&1 | tee /root/benchmark.log
+    # Upload results to S3 before shutdown
+    aws s3 cp /root/benchmark.log "s3://${local.bucket_name}/results/benchmark-$(date +%Y%m%d-%H%M%S).log" --region ${var.region}
   EOF
 }
 

@@ -786,6 +786,15 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	hj := exec.NewHashJoin(joinType, task.JoinLeftKeys, task.JoinRightKeys)
 	hj.BuildTableAlias = task.BuildTableAlias
 
+	// Wire spill manager if memory budget is set
+	spill, tracker := e.newSpillManager(task.ID)
+	if spill != nil {
+		hj.Spill = spill
+		hj.MemTracker = tracker
+		defer spill.Cleanup()
+		defer e.recordSpillMetrics(spill, tracker)
+	}
+
 	// Set semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
 	if task.JoinFilter != "" && (joinType == exec.SemiJoin || joinType == exec.AntiJoin) {
 		hj.SemiAntiFilter = physical.BuildSemiAntiFilter(task.JoinFilter)
