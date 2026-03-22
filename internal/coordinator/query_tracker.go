@@ -262,6 +262,21 @@ func (qt *QueryTracker) SetStageTasks(queryID, stageID string, count int) {
 	}
 }
 
+// MarkScheduled marks a stage as already dispatched, preventing
+// GetReadyStages from re-scheduling it.
+func (qt *QueryTracker) MarkScheduled(queryID, stageID string) {
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
+
+	q, ok := qt.queries[queryID]
+	if !ok {
+		return
+	}
+	if stage, ok := q.Stages[stageID]; ok {
+		stage.Scheduled = true
+	}
+}
+
 // UpdateResultPath updates the result path for a specific task result.
 // Used when inline results are materialized to S3 for downstream stages.
 func (qt *QueryTracker) UpdateResultPath(queryID, stageID, taskID, path string) {

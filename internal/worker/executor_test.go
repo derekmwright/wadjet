@@ -553,6 +553,148 @@ func TestExecuteShuffle(t *testing.T) {
 	}
 }
 
+func TestSelfJoinBuildTableAlias(t *testing.T) {
+	// Reproduces the Q08 bug: nation n1 JOIN ... JOIN nation n2. Without
+	// BuildTableAlias, duplicate columns from the build side are dropped,
+	// losing n2.n_name which the CASE WHEN expression needs.
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache)
+	ctx := context.Background()
+
+	// Create "probe" side: result of a prior join that already has nation n1 columns
+	probeRows := []map[string]any{
+		{"s_suppkey": int64(1), "s_nationkey": int64(10), "n_nationkey": int64(20), "n_name": "FRANCE"},
+		{"s_suppkey": int64(2), "s_nationkey": int64(10), "n_nationkey": int64(21), "n_name": "GERMANY"},
+		{"s_suppkey": int64(3), "s_nationkey": int64(11), "n_nationkey": int64(22), "n_name": "BRAZIL"},
+	}
+	writeTestParquet(t, store, "results", "input/probe.parquet", probeRows)
+
+	// Create "build" side: nation table (same schema as n1, but this is n2)
+	buildRows := []map[string]any{
+		{"n_nationkey": int64(10), "n_name": "BRAZIL"},
+		{"n_nationkey": int64(11), "n_name": "FRANCE"},
+	}
+	writeTestParquet(t, store, "results", "input/build.parquet", buildRows)
+
+	// Join on s_nationkey = n_nationkey WITH BuildTableAlias
+	joinTask := distributed.Task{
+		ID: "j1", QueryID: "q-self", StageID: "s1",
+		Type:            distributed.TaskTypeJoin,
+		JoinType:        "inner",
+		JoinLeftKeys:    []string{"s_nationkey"},
+		JoinRightKeys:   []string{"n_nationkey"},
+		BuildTableAlias: "n2",
+		InputFiles:      []string{"input/probe.parquet"},
+		BuildFiles:      []string{"input/build.parquet"},
+		ResultBucket:    "results",
+		ResultPrefix:    "output/",
+	}
+
+	result := executor.Execute(ctx, joinTask, "w1")
+	if !result.Success {
+		t.Fatalf("join failed: %s", result.Error)
+	}
+	if result.NumRows != 3 {
+		t.Fatalf("expected 3 rows, got %d", result.NumRows)
+	}
+
+	// Read back and verify n2.n_name is in the output
+	resultPath := result.ResultPath
+	if resultPath == "" && len(result.InlineData) > 0 {
+		resultPath = "output/inline-result.parquet"
+		store.Put(ctx, "results", resultPath, bytes.NewReader(result.InlineData), int64(len(result.InlineData)), "")
+	}
+	batches, err := executor.readParquetFileBatches(ctx, "results", resultPath, nil)
+	if err != nil {
+		t.Fatalf("reading result: %v", err)
+	}
+	for _, b := range batches {
+		n2Idx := b.ColumnIndex("n2.n_name")
+		if n2Idx < 0 {
+			// Dump schema for debugging
+			var names []string
+			for _, col := range b.Schema {
+				names = append(names, col.Name)
+			}
+			t.Fatalf("n2.n_name column missing from output schema: %v", names)
+		}
+		// Verify the n2 values: row 0&1 should have BRAZIL (s_nationkey=10), row 2 FRANCE (s_nationkey=11)
+		rows := b.ToRows()
+		for _, r := range rows {
+			n2Name, ok := r["n2.n_name"]
+			if !ok {
+				t.Fatalf("n2.n_name not in row: %v", r)
+			}
+			n1Name := r["n_name"]
+			t.Logf("row: s_suppkey=%v n_name=%v (n1) n2.n_name=%v (n2)", r["s_suppkey"], n1Name, n2Name)
+		}
+	}
+}
+
+// TestSelfJoinWithoutAlias verifies that self-joins without BuildTableAlias drop
+// duplicate columns (backward-compatible behavior).
+func TestSelfJoinWithoutAlias(t *testing.T) {
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache)
+	ctx := context.Background()
+
+	probeRows := []map[string]any{
+		{"key": int64(1), "n_name": "A"},
+		{"key": int64(2), "n_name": "B"},
+	}
+	buildRows := []map[string]any{
+		{"key": int64(1), "n_name": "X"},
+		{"key": int64(2), "n_name": "Y"},
+	}
+	writeTestParquet(t, store, "results", "input/probe2.parquet", probeRows)
+	writeTestParquet(t, store, "results", "input/build2.parquet", buildRows)
+
+	joinTask := distributed.Task{
+		ID: "j2", QueryID: "q-self2", StageID: "s2",
+		Type:          distributed.TaskTypeJoin,
+		JoinType:      "inner",
+		JoinLeftKeys:  []string{"key"},
+		JoinRightKeys: []string{"key"},
+		// No BuildTableAlias — duplicate n_name should be dropped
+		InputFiles:   []string{"input/probe2.parquet"},
+		BuildFiles:   []string{"input/build2.parquet"},
+		ResultBucket: "results",
+		ResultPrefix: "output2/",
+	}
+
+	result := executor.Execute(ctx, joinTask, "w1")
+	if !result.Success {
+		t.Fatalf("join failed: %s", result.Error)
+	}
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 rows, got %d", result.NumRows)
+	}
+
+	resultPath := result.ResultPath
+	if resultPath == "" && len(result.InlineData) > 0 {
+		resultPath = "output2/inline-result.parquet"
+		store.Put(ctx, "results", resultPath, bytes.NewReader(result.InlineData), int64(len(result.InlineData)), "")
+	}
+	batches, err := executor.readParquetFileBatches(ctx, "results", resultPath, nil)
+	if err != nil {
+		t.Fatalf("reading result: %v", err)
+	}
+	for _, b := range batches {
+		// n_name from build side should be dropped (no alias)
+		n2Idx := b.ColumnIndex("n2.n_name")
+		if n2Idx >= 0 {
+			t.Fatal("n2.n_name should not exist without BuildTableAlias")
+		}
+		// Only probe-side n_name should exist
+		nIdx := b.ColumnIndex("n_name")
+		if nIdx < 0 {
+			t.Fatal("n_name should exist from probe side")
+		}
+	}
+}
+
 func TestShuffleConsistentPartitioning(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)

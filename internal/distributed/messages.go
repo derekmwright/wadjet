@@ -45,10 +45,12 @@ type Task struct {
 	MergePreSorted bool          `json:"merge_pre_sorted,omitempty"` // true for merge_sort: inputs are pre-sorted
 
 	// Join-specific
-	JoinType      string   `json:"join_type,omitempty"`       // inner, left, right, full, cross
-	JoinLeftKeys  []string `json:"join_left_keys,omitempty"`  // probe side key columns
-	JoinRightKeys []string `json:"join_right_keys,omitempty"` // build side key columns
-	BuildFiles    []string `json:"build_files,omitempty"`     // build (right) side input files
+	JoinType        string   `json:"join_type,omitempty"`        // inner, left, right, full, cross
+	JoinLeftKeys    []string `json:"join_left_keys,omitempty"`   // probe side key columns
+	JoinRightKeys   []string `json:"join_right_keys,omitempty"`  // build side key columns
+	BuildFiles      []string `json:"build_files,omitempty"`      // build (right) side input files
+	BuildTableAlias string   `json:"build_table_alias,omitempty"` // build-side alias for column disambiguation
+	JoinFilter      string   `json:"join_filter,omitempty"`       // semi/anti join inequality filter expression
 
 	// Window-specific
 	WindowCols []WindowColSpec `json:"window_cols,omitempty"`

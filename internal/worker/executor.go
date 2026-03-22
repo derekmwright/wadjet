@@ -21,9 +21,12 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/metrics"
+	"github.com/citc-tech/wadjet/internal/planner/physical"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -173,9 +176,15 @@ func (e *Executor) executeScan(ctx context.Context, task distributed.Task, resul
 // selection vectors, avoiding row-level map[string]any allocation.
 func (e *Executor) applyBatchFilters(b *batch.RecordBatch, filterExprs []string) *batch.RecordBatch {
 	for _, filterSQL := range filterExprs {
-		filter := buildSimpleFilter(filterSQL)
+		// Use full expression compiler first — handles LIKE, IN,
+		// column-to-column comparisons, and all other SQL predicates.
+		filter := buildCompiledFilter(filterSQL)
 		if filter == nil {
-			continue
+			// Fall back to simple col-op-literal parser
+			filter = buildSimpleFilter(filterSQL)
+			if filter == nil {
+				continue
+			}
 		}
 
 		var sel []uint32
@@ -201,6 +210,27 @@ func (e *Executor) applyBatchFilters(b *batch.RecordBatch, filterExprs []string)
 		b.Sel = sel
 	}
 	return b
+}
+
+// buildCompiledFilter uses the full SQL expression parser + compiler to create
+// a filter function. Handles LIKE, IN, column-to-column comparisons, etc.
+func buildCompiledFilter(filterSQL string) func(*batch.RecordBatch, int) bool {
+	astNode, err := plansql.ParseExpression(filterSQL)
+	if err != nil {
+		return nil
+	}
+	compiled, err := expr.Compile(astNode)
+	if err != nil {
+		return nil
+	}
+	return func(b *batch.RecordBatch, row int) bool {
+		v := compiled.Eval(b, row)
+		if v == nil {
+			return false
+		}
+		bv, ok := v.(bool)
+		return ok && bv
+	}
 }
 
 // buildSimpleFilter creates a predicate function from a SQL expression string.
@@ -267,6 +297,16 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 
 	if len(allBatches) == 0 {
 		return nil
+	}
+
+	// Pre-compute expression GROUP BY columns and aggregate inputs.
+	// In standalone mode, the planner inserts aggPreProject for this. In distributed
+	// mode, we evaluate expressions here and add them as new columns.
+	exprCols := collectAggExpressions(task.GroupByCols, task.Aggregates)
+	if len(exprCols) > 0 {
+		for i, b := range allBatches {
+			allBatches[i] = addComputedColumns(b, exprCols)
+		}
 	}
 
 	// Build and execute aggregate
@@ -712,6 +752,12 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	}
 
 	hj := exec.NewHashJoin(joinType, task.JoinLeftKeys, task.JoinRightKeys)
+	hj.BuildTableAlias = task.BuildTableAlias
+
+	// Set semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
+	if task.JoinFilter != "" && (joinType == exec.SemiJoin || joinType == exec.AntiJoin) {
+		hj.SemiAntiFilter = physical.BuildSemiAntiFilter(task.JoinFilter)
+	}
 
 	// Build the hash table from right side batches.
 	// Build even with empty data to mark buildDone for the probe phase.
@@ -760,6 +806,12 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 				resultBatches = append(resultBatches, unmatchedBatch)
 			}
 		}
+	}
+
+	// Apply post-join filter expressions (e.g., WHERE conditions that couldn't
+	// be pushed to scan, like decorrelated subquery filters or nation-name filters).
+	if len(task.FilterExprs) > 0 {
+		resultBatches, totalRows = applyFilterExprs(resultBatches, task.FilterExprs)
 	}
 
 	result.NumRows = totalRows
@@ -1123,6 +1175,10 @@ func mapExecJoinType(jt string) exec.JoinType {
 		return exec.FullOuterJoin
 	case "cross":
 		return exec.CrossJoin
+	case "semi":
+		return exec.SemiJoin
+	case "anti":
+		return exec.AntiJoin
 	default:
 		return exec.InnerJoin
 	}
@@ -1556,29 +1612,310 @@ func (e *Executor) recordSpillMetrics(spill *memory.SpillManager, tracker *memor
 }
 
 // aggregateNeededCols returns the minimal set of columns needed for an
-// aggregate task: group-by columns + aggregate input columns. Returns nil
-// (read all) if no columns are specified (safety fallback).
+// aggregate task: group-by columns + aggregate input columns. Extracts raw
+// column references from expression strings (e.g., "substr(l_shipdate, 1, 4)"
+// → "l_shipdate"). Returns nil (read all) if no columns are specified.
 func aggregateNeededCols(groupBy []string, aggs []distributed.AggSpec) []string {
 	seen := make(map[string]struct{})
 	var cols []string
-	for _, col := range groupBy {
-		if _, ok := seen[col]; !ok {
-			seen[col] = struct{}{}
-			cols = append(cols, col)
+	addRef := func(s string) {
+		for _, ref := range extractColRefs(s) {
+			if _, ok := seen[ref]; !ok {
+				seen[ref] = struct{}{}
+				cols = append(cols, ref)
+			}
 		}
+	}
+	for _, col := range groupBy {
+		addRef(col)
 	}
 	for _, a := range aggs {
 		if a.InputCol != "" {
-			if _, ok := seen[a.InputCol]; !ok {
-				seen[a.InputCol] = struct{}{}
-				cols = append(cols, a.InputCol)
-			}
+			addRef(a.InputCol)
 		}
 	}
 	if len(cols) == 0 {
 		return nil
 	}
 	return cols
+}
+
+// extractColRefs extracts raw column references from a string that may be
+// a simple column name ("l_shipdate"), a qualified name ("n1.n_name"), or
+// an expression ("substr(l_shipdate, 1, 4)"). Returns the string itself for
+// simple/qualified names; extracts identifier tokens from expressions.
+func extractColRefs(s string) []string {
+	// Simple or qualified column name
+	isSimple := true
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.') {
+			isSimple = false
+			break
+		}
+	}
+	if isSimple {
+		return []string{s}
+	}
+
+	// Expression: tokenize and extract column-like identifiers
+	var refs []string
+	seen := make(map[string]bool)
+	start := -1
+	runes := []rune(s)
+	for i, c := range runes {
+		isIdent := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '.' || (c >= '0' && c <= '9')
+		if isIdent {
+			if start == -1 {
+				start = i
+			}
+		} else {
+			if start >= 0 {
+				tok := string(runes[start:i])
+				start = -1
+				if isColRef(tok) && !seen[tok] {
+					refs = append(refs, tok)
+					seen[tok] = true
+				}
+			}
+		}
+	}
+	if start >= 0 {
+		tok := string(runes[start:])
+		if isColRef(tok) && !seen[tok] {
+			refs = append(refs, tok)
+			seen[tok] = true
+		}
+	}
+	return refs
+}
+
+func isColRef(tok string) bool {
+	if len(tok) == 0 {
+		return false
+	}
+	allDigit := true
+	for _, c := range tok {
+		if c < '0' || c > '9' {
+			allDigit = false
+			break
+		}
+	}
+	if allDigit {
+		return false
+	}
+	lower := strings.ToLower(tok)
+	switch lower {
+	case "case", "when", "then", "else", "end", "and", "or", "not", "in",
+		"is", "null", "true", "false", "like", "between", "as", "asc", "desc",
+		"substr", "sum", "count", "min", "max", "avg":
+		return false
+	}
+	return true
+}
+
+// isExprString returns true if s contains operators, function calls, or other
+// non-identifier characters indicating it's an expression rather than a column name.
+func isExprString(s string) bool {
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.') {
+			return true
+		}
+	}
+	return false
+}
+
+// aggExprCol represents a compiled expression column that needs to be added
+// to each batch before the aggregate can process it.
+type aggExprCol struct {
+	name     string
+	compiled expr.Expr
+}
+
+// collectAggExpressions finds expression strings in GROUP BY columns and
+// aggregate inputs, parses and compiles them, and returns the compiled
+// expressions. Returns nil if no expressions are found.
+func collectAggExpressions(groupByCols []string, aggSpecs []distributed.AggSpec) []aggExprCol {
+	var result []aggExprCol
+	seen := make(map[string]bool)
+
+	addExpr := func(s string) {
+		if !isExprString(s) || seen[s] {
+			return
+		}
+		seen[s] = true
+		astNode, err := plansql.ParseExpression(s)
+		if err != nil {
+			return
+		}
+		compiled, err := expr.Compile(astNode)
+		if err != nil {
+			return
+		}
+		result = append(result, aggExprCol{name: s, compiled: compiled})
+	}
+
+	for _, col := range groupByCols {
+		addExpr(col)
+	}
+	for _, a := range aggSpecs {
+		if a.InputCol != "" {
+			addExpr(a.InputCol)
+		}
+	}
+	return result
+}
+
+// addComputedColumns evaluates expression columns and appends them to the batch.
+// The input batch's columns are shared (not copied) for efficiency.
+func addComputedColumns(in *batch.RecordBatch, exprCols []aggExprCol) *batch.RecordBatch {
+	n := in.Len
+
+	// Build extended schema
+	outSchema := make([]parquet.Column, len(in.Schema), len(in.Schema)+len(exprCols))
+	copy(outSchema, in.Schema)
+
+	// Evaluate expressions to determine types and values
+	newVecs := make([]*batch.Vector, len(exprCols))
+	for ci, ec := range exprCols {
+		// Determine type from first non-nil value
+		typ := parquet.TypeFloat64 // default
+		for ri := 0; ri < n && ri < 1; ri++ {
+			row := ri
+			if in.Sel != nil && len(in.Sel) > 0 {
+				row = int(in.Sel[ri])
+			}
+			v := ec.compiled.Eval(in, row)
+			if v != nil {
+				switch v.(type) {
+				case string, []byte:
+					typ = parquet.TypeString
+				case int, int32:
+					typ = parquet.TypeInt32
+				case int64:
+					typ = parquet.TypeInt64
+				case float32:
+					typ = parquet.TypeFloat32
+				case float64:
+					typ = parquet.TypeFloat64
+				case bool:
+					typ = parquet.TypeString // bools stored as string for safety
+				}
+				break
+			}
+		}
+
+		outSchema = append(outSchema, parquet.Column{Name: ec.name, Type: typ, Nullable: true})
+		vec := batch.NewVector(typ, n)
+		if in.Sel != nil {
+			for outRow, idx := range in.Sel {
+				v := ec.compiled.Eval(in, int(idx))
+				if v != nil {
+					vec.SetValue(outRow, v)
+				} else {
+					vec.Nulls.SetNull(outRow)
+				}
+			}
+		} else {
+			for ri := 0; ri < n; ri++ {
+				v := ec.compiled.Eval(in, ri)
+				if v != nil {
+					vec.SetValue(ri, v)
+				} else {
+					vec.Nulls.SetNull(ri)
+				}
+			}
+		}
+		newVecs[ci] = vec
+	}
+
+	// Build output batch: share input columns + append new computed columns
+	outCols := make([]*batch.Vector, len(in.Columns)+len(newVecs))
+	copy(outCols, in.Columns)
+	copy(outCols[len(in.Columns):], newVecs)
+
+	out := &batch.RecordBatch{
+		Schema:  outSchema,
+		Columns: outCols,
+		Len:     n,
+	}
+	// Clear selection vector since we materialized computed columns densely
+	if in.Sel != nil {
+		out.Len = len(in.Sel)
+	}
+	return out
+}
+
+// applyFilterExprs evaluates SQL filter expressions on result batches,
+// keeping only rows where ALL filters evaluate to true.
+func applyFilterExprs(batches []*batch.RecordBatch, filterExprs []string) ([]*batch.RecordBatch, int64) {
+	// Compile filter expressions
+	var filters []expr.Expr
+	for _, fe := range filterExprs {
+		astNode, err := plansql.ParseExpression(fe)
+		if err != nil {
+			continue
+		}
+		compiled, err := expr.Compile(astNode)
+		if err != nil {
+			continue
+		}
+		filters = append(filters, compiled)
+	}
+	if len(filters) == 0 {
+		var total int64
+		for _, b := range batches {
+			total += int64(b.ActiveLen())
+		}
+		return batches, total
+	}
+
+	var result []*batch.RecordBatch
+	var totalRows int64
+	for _, b := range batches {
+		n := b.ActiveLen()
+		if n == 0 {
+			continue
+		}
+
+		// Build selection vector of rows that pass all filters
+		var sel []uint32
+		for ri := 0; ri < n; ri++ {
+			row := ri
+			if b.Sel != nil {
+				row = int(b.Sel[ri])
+			}
+			pass := true
+			for _, f := range filters {
+				v := f.Eval(b, row)
+				if v == nil {
+					pass = false
+					break
+				}
+				switch bv := v.(type) {
+				case bool:
+					if !bv {
+						pass = false
+					}
+				default:
+					pass = false
+				}
+				if !pass {
+					break
+				}
+			}
+			if pass {
+				sel = append(sel, uint32(row))
+			}
+		}
+
+		if len(sel) > 0 {
+			filtered := *b
+			filtered.Sel = sel
+			result = append(result, &filtered)
+			totalRows += int64(len(sel))
+		}
+	}
+	return result, totalRows
 }
 
 func parseAggFunc(s string) exec.AggFunc {
