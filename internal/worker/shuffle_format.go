@@ -144,7 +144,7 @@ func (sw *shuffleWriter) writeColumnData(vec *batch.Vector, sel []uint32, numRow
 	case parquet.TypeFloat64:
 		return sw.writeFloat64Data(vec.Float64Data, sel, numRows)
 	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-		return sw.writeBytesData(&vec.BytesData, sel, numRows)
+		return sw.writeBytesData(&vec.BytesData, &vec.Nulls, sel, numRows)
 	case parquet.TypeDecimal:
 		return sw.writeDecimalData(vec, sel, numRows)
 	default:
@@ -273,20 +273,32 @@ func (sw *shuffleWriter) writeBoolData(data []bool, sel []uint32, numRows int) e
 	return err
 }
 
-func (sw *shuffleWriter) writeBytesData(bc *batch.BytesColumn, sel []uint32, numRows int) error {
+func (sw *shuffleWriter) writeBytesData(bc *batch.BytesColumn, nulls *batch.Bitmap, sel []uint32, numRows int) error {
 	// Gather all byte slices, write: totalDataLen + data + offsets
 	// Format: uint32(totalDataLen) + data + uint32[numRows] (end offsets)
+	//
+	// Null-bitmap-aware: skip bc.Value() for null rows because join output
+	// (gatherBuildVector) may not call BytesData.Set for unmatched rows,
+	// leaving Offsets[i+1]=0 while Offsets[i]>0 which panics on Value(i).
 	var totalLen uint32
 	offsets := make([]uint32, numRows)
 
 	if sel != nil {
 		for i, si := range sel {
+			if nulls.IsNull(int(si)) {
+				offsets[i] = totalLen
+				continue
+			}
 			val := bc.Value(int(si))
 			totalLen += uint32(len(val))
 			offsets[i] = totalLen
 		}
 	} else {
 		for i := 0; i < numRows; i++ {
+			if nulls.IsNull(i) {
+				offsets[i] = totalLen
+				continue
+			}
 			val := bc.Value(i)
 			totalLen += uint32(len(val))
 			offsets[i] = totalLen
@@ -302,6 +314,9 @@ func (sw *shuffleWriter) writeBytesData(bc *batch.BytesColumn, sel []uint32, num
 	// Write concatenated data
 	if sel != nil {
 		for _, si := range sel {
+			if nulls.IsNull(int(si)) {
+				continue
+			}
 			val := bc.Value(int(si))
 			if len(val) > 0 {
 				if _, err := sw.w.Write(val); err != nil {
@@ -311,6 +326,9 @@ func (sw *shuffleWriter) writeBytesData(bc *batch.BytesColumn, sel []uint32, num
 		}
 	} else {
 		for i := 0; i < numRows; i++ {
+			if nulls.IsNull(i) {
+				continue
+			}
 			val := bc.Value(i)
 			if len(val) > 0 {
 				if _, err := sw.w.Write(val); err != nil {
