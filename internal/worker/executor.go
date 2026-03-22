@@ -420,11 +420,11 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	rwg.Add(2)
 	go func() {
 		defer rwg.Done()
-		buildBatches, buildErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
+		buildBatches, buildErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.BuildFiles, task.Columns)
 	}()
 	go func() {
 		defer rwg.Done()
-		probeBatches, probeErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, nil)
+		probeBatches, probeErr = e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, task.Columns)
 	}()
 	rwg.Wait()
 	if buildErr != nil {
@@ -605,7 +605,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 
 	// Process input files one at a time (streaming)
 	for _, inputFile := range task.InputFiles {
-		batches, err := e.readParquetFileBatches(ctx, task.ResultBucket, inputFile, nil)
+		batches, err := e.readParquetFileBatches(ctx, task.ResultBucket, inputFile, task.Columns)
 		if err != nil {
 			return fmt.Errorf("reading shuffle input %s: %w", inputFile, err)
 		}

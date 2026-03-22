@@ -3,6 +3,7 @@ package physical
 import (
 	"context"
 	"fmt"
+	"sort"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/planner/logical"
@@ -765,5 +766,150 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 					s.ID, dep.Type, dep.ID, key, depCols)
 			}
 		}
+	}
+}
+
+// TestPlanDistributed_ColumnPruning verifies that distributed scan, shuffle,
+// and join stages carry only the columns needed by downstream operators.
+// Regression: before this fix, all stages read ALL columns from Parquet,
+// causing 50-70% unnecessary I/O in multi-join queries on wide tables.
+func TestPlanDistributed_ColumnPruning(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wide lineitem table (16 columns, like TPC-H)
+	liSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "l_orderkey", Type: parquet.TypeInt64},
+		{Name: "l_partkey", Type: parquet.TypeInt64},
+		{Name: "l_suppkey", Type: parquet.TypeInt64},
+		{Name: "l_linenumber", Type: parquet.TypeInt64},
+		{Name: "l_quantity", Type: parquet.TypeFloat64},
+		{Name: "l_extendedprice", Type: parquet.TypeFloat64},
+		{Name: "l_discount", Type: parquet.TypeFloat64},
+		{Name: "l_tax", Type: parquet.TypeFloat64},
+		{Name: "l_returnflag", Type: parquet.TypeString},
+		{Name: "l_linestatus", Type: parquet.TypeString},
+		{Name: "l_shipdate", Type: parquet.TypeString},
+		{Name: "l_commitdate", Type: parquet.TypeString},
+		{Name: "l_receiptdate", Type: parquet.TypeString},
+		{Name: "l_shipinstruct", Type: parquet.TypeString},
+		{Name: "l_shipmode", Type: parquet.TypeString},
+		{Name: "l_comment", Type: parquet.TypeString},
+	}}
+	if err := cat.CreateTable(ctx, "lineitem", liSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	liFiles := make([]catalog.FileEntry, 50)
+	for i := range liFiles {
+		liFiles[i] = catalog.FileEntry{
+			Path:      fmt.Sprintf("tables/lineitem/chunk_%03d.parquet", i),
+			SizeBytes: 10 * 1024 * 1024,
+			NumRows:   500000,
+		}
+	}
+	if err := cat.AddFiles(ctx, "lineitem", map[string]string{}, "tables/lineitem/", liFiles); err != nil {
+		t.Fatal(err)
+	}
+
+	// Orders table (narrower)
+	ordSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "o_orderkey", Type: parquet.TypeInt64},
+		{Name: "o_custkey", Type: parquet.TypeInt64},
+		{Name: "o_orderstatus", Type: parquet.TypeString},
+		{Name: "o_totalprice", Type: parquet.TypeFloat64},
+		{Name: "o_orderdate", Type: parquet.TypeString},
+	}}
+	if err := cat.CreateTable(ctx, "orders", ordSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ordFiles := make([]catalog.FileEntry, 20)
+	for i := range ordFiles {
+		ordFiles[i] = catalog.FileEntry{
+			Path:      fmt.Sprintf("tables/orders/chunk_%03d.parquet", i),
+			SizeBytes: 10 * 1024 * 1024,
+			NumRows:   100000,
+		}
+	}
+	if err := cat.AddFiles(ctx, "orders", map[string]string{}, "tables/orders/", ordFiles); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build plan: SELECT SUM(l_extendedprice) FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+	// Only needs: l_orderkey (join key), l_extendedprice (aggregate input),
+	// o_orderkey (join key) — NOT the other 13 lineitem or 4 orders columns
+	liScan := logical.NewScan("lineitem", "l")
+	ordScan := logical.NewScan("orders", "o")
+	join := logical.NewJoin(liScan, ordScan, "inner", "l.l_orderkey = o.o_orderkey")
+	agg := &logical.Node{
+		Type:     logical.NodeAggregate,
+		Children: []*logical.Node{join},
+		AggExprs: []logical.AggExpr{
+			{Func: "sum", InputCol: "l_extendedprice", OutputCol: "total"},
+		},
+	}
+
+	// Run optimizer to compute RequiredColumns/NeededColumns
+	planner := NewPlanner(cat)
+	planner.WorkerCount = 4
+	planner.AnnotateScanColumns(ctx, agg)
+	optimized := logical.Optimize(agg, func(plan *logical.Node) {
+		planner.AnnotateScanColumns(ctx, plan)
+	})
+
+	stages, err := planner.PlanDistributed(ctx, optimized)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+
+	// Verify scan stages have column pruning
+	for _, s := range stages {
+		if s.Type != "scan" {
+			continue
+		}
+		if len(s.Columns) == 0 {
+			t.Errorf("scan stage %s (%s): expected column pruning (Columns set), got nil", s.ID, s.TableName)
+			continue
+		}
+		if s.TableName == "lineitem" && len(s.Columns) >= 16 {
+			t.Errorf("lineitem scan: expected column pruning (<16 columns), got %d: %v", len(s.Columns), s.Columns)
+		}
+	}
+
+	// Verify shuffle stages have column pruning (if present)
+	for _, s := range stages {
+		if s.Type != "shuffle" {
+			continue
+		}
+		if len(s.Columns) == 0 {
+			t.Errorf("shuffle stage %s: expected column pruning (Columns set), got nil", s.ID)
+			continue
+		}
+		// Shuffle columns should include join keys + aggregate inputs
+		colSet := make(map[string]bool)
+		for _, c := range s.Columns {
+			colSet[c] = true
+		}
+		// Must have join keys
+		for _, key := range s.ShuffleKeys {
+			if !colSet[key] {
+				t.Errorf("shuffle %s: shuffle key %q not in Columns %v", s.ID, key, s.Columns)
+			}
+		}
+		// Should NOT have all 16 lineitem columns
+		if len(s.Columns) >= 16 {
+			t.Errorf("shuffle %s: expected pruned columns, got %d: %v", s.ID, len(s.Columns), s.Columns)
+		}
+	}
+
+	// Print stage summary for debugging
+	for _, s := range stages {
+		cols := make([]string, len(s.Columns))
+		copy(cols, s.Columns)
+		sort.Strings(cols)
+		t.Logf("stage %s [%s] table=%s columns=%v", s.ID, s.Type, s.TableName, cols)
 	}
 }

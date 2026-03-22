@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 
 	goparquet "github.com/parquet-go/parquet-go"
 	pqencoding "github.com/parquet-go/parquet-go/encoding"
@@ -55,14 +56,19 @@ func readFileBatchesViaRows(reader *pqt.Reader, readSchema []pqt.Column, selecte
 }
 
 // projectSchema filters schema to only include columns in selectedCols.
+// Matches both exact names and unqualified suffixes (e.g., "n_nationkey"
+// matches schema column "n2.n_nationkey" from join output).
 func projectSchema(schema []pqt.Column, selectedCols []string) []pqt.Column {
 	needed := make(map[string]bool, len(selectedCols))
 	for _, c := range selectedCols {
-		needed[c] = true
+		needed[strings.ToLower(c)] = true
 	}
 	filtered := make([]pqt.Column, 0, len(selectedCols))
 	for _, col := range schema {
-		if needed[col.Name] {
+		lname := strings.ToLower(col.Name)
+		if needed[lname] {
+			filtered = append(filtered, col)
+		} else if dotIdx := strings.LastIndex(lname, "."); dotIdx >= 0 && needed[lname[dotIdx+1:]] {
 			filtered = append(filtered, col)
 		}
 	}

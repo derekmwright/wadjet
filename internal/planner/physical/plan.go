@@ -760,6 +760,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			Type:            "scan",
 			Tasks:           tasks,
 			TableName:       node.TableName,
+			Columns:         node.RequiredColumns,
 			PartitionFilter: partFilter,
 			ScanFiles:       scanFiles,
 			EstimatedBytes:  estBytes,
@@ -898,12 +899,40 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				numPartitions = 4
 			}
 
+			// Compute columns the shuffle must preserve: join keys + all
+			// columns needed downstream (from the join's NeededColumns).
+			// Both sides get the full set — the Parquet reader ignores
+			// columns that don't exist in the file.
+			var shuffleCols []string
+			if len(node.NeededColumns) > 0 {
+				seen := make(map[string]bool, len(node.NeededColumns)+len(leftKeys)+len(rightKeys))
+				for _, col := range node.NeededColumns {
+					if !seen[col] {
+						shuffleCols = append(shuffleCols, col)
+						seen[col] = true
+					}
+				}
+				for _, col := range leftKeys {
+					if !seen[col] {
+						shuffleCols = append(shuffleCols, col)
+						seen[col] = true
+					}
+				}
+				for _, col := range rightKeys {
+					if !seen[col] {
+						shuffleCols = append(shuffleCols, col)
+						seen[col] = true
+					}
+				}
+			}
+
 			// Left (probe) side shuffle
 			leftShuffleID := fmt.Sprintf("shuffle-%d", len(*stages))
 			*stages = append(*stages, Stage{
 				ID:            leftShuffleID,
 				Type:          "shuffle",
 				Tasks:         1,
+				Columns:       shuffleCols,
 				ShuffleKeys:   leftKeys,
 				NumPartitions: numPartitions,
 				Dependencies:  []string{leftDep},
@@ -915,6 +944,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				ID:            rightShuffleID,
 				Type:          "shuffle",
 				Tasks:         1,
+				Columns:       shuffleCols,
 				ShuffleKeys:   rightKeys,
 				NumPartitions: numPartitions,
 				Dependencies:  []string{rightDep},
@@ -933,6 +963,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			ID:            stageID,
 			Type:          joinType,
 			Tasks:         joinTasks,
+			Columns:       node.NeededColumns,
 			JoinType:      jt,
 			JoinLeftKeys:  leftKeys,
 			JoinRightKeys: rightKeys,
