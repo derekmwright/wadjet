@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // --- Execute dispatch and error handling ---
@@ -1006,5 +1008,79 @@ func TestExtractColRefsStringLiterals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// mixedTypeExpr simulates a CASE expression that returns float64 for some rows
+// and int64 for others (e.g. CASE WHEN p_type LIKE 'PROMO%' THEN price*discount ELSE 0 END).
+type mixedTypeExpr struct {
+	// rows where the condition is true return float64; others return int64(0)
+	trueRows map[int]bool
+}
+
+func (e *mixedTypeExpr) Eval(b *batch.RecordBatch, row int) any {
+	if e.trueRows[row] {
+		return float64(42.5)
+	}
+	return int64(0) // ELSE 0 compiles as int64
+}
+
+// TestAddComputedColumnsMixedNumericTypes verifies that addComputedColumns
+// always produces Float64 vectors for numeric expressions, even when the first
+// row returns int64. This prevents type-mismatch panics in downstream aggregate
+// kernels (regression test for Q14 distributed aggregate panic).
+func TestAddComputedColumnsMixedNumericTypes(t *testing.T) {
+	// Batch where row 0 hits the ELSE branch (int64), rows 1-3 hit THEN (float64)
+	schema := []parquet.Column{
+		{Name: "price", Type: parquet.TypeFloat64},
+	}
+	b := batch.NewRecordBatch(schema, 4)
+	for i := 0; i < 4; i++ {
+		b.Columns[0].Float64Data[i] = float64(i + 1)
+	}
+
+	exprCols := []aggExprCol{
+		{
+			name:     "case_result",
+			compiled: &mixedTypeExpr{trueRows: map[int]bool{1: true, 2: true, 3: true}},
+		},
+	}
+
+	out := addComputedColumns(b, exprCols)
+
+	// The computed column must be Float64, not Int64
+	compIdx := len(schema) // last column
+	if compIdx >= len(out.Columns) {
+		t.Fatalf("expected computed column at index %d, got %d columns", compIdx, len(out.Columns))
+	}
+	vec := out.Columns[compIdx]
+	if vec.Type != batch.TypeFloat64 {
+		t.Fatalf("computed column type = %v, want Float64 (TypeFloat64)", vec.Type)
+	}
+
+	// Row 0: int64(0) should be stored as float64(0)
+	if vec.Float64Data[0] != 0.0 {
+		t.Errorf("row 0: got %v, want 0.0", vec.Float64Data[0])
+	}
+	// Row 1: float64(42.5)
+	if vec.Float64Data[1] != 42.5 {
+		t.Errorf("row 1: got %v, want 42.5", vec.Float64Data[1])
+	}
+
+	// Run a second batch where row 0 hits THEN (float64) — type should still be Float64
+	b2 := batch.NewRecordBatch(schema, 4)
+	for i := 0; i < 4; i++ {
+		b2.Columns[0].Float64Data[i] = float64(i + 10)
+	}
+	exprCols2 := []aggExprCol{
+		{
+			name:     "case_result",
+			compiled: &mixedTypeExpr{trueRows: map[int]bool{0: true, 1: true}},
+		},
+	}
+	out2 := addComputedColumns(b2, exprCols2)
+	vec2 := out2.Columns[compIdx]
+	if vec2.Type != batch.TypeFloat64 {
+		t.Fatalf("batch 2: computed column type = %v, want Float64", vec2.Type)
 	}
 }

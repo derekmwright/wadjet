@@ -1822,8 +1822,12 @@ func addComputedColumns(in *batch.RecordBatch, exprCols []aggExprCol) *batch.Rec
 	// Evaluate expressions to determine types and values
 	newVecs := make([]*batch.Vector, len(exprCols))
 	for ci, ec := range exprCols {
-		// Determine type from first non-nil value
-		typ := parquet.TypeFloat64 // default
+		// Determine type from first non-nil value.
+		// Default to float64 for numeric types — CASE expressions can return
+		// different numeric types per row (e.g. float64 from THEN, int64 from ELSE 0),
+		// so we must use a consistent type across all batches. Only override for
+		// non-numeric types (string, bool).
+		typ := parquet.TypeFloat64 // default for all numeric expressions
 		for ri := 0; ri < n && ri < 1; ri++ {
 			row := ri
 			if in.Sel != nil && len(in.Sel) > 0 {
@@ -1834,14 +1838,6 @@ func addComputedColumns(in *batch.RecordBatch, exprCols []aggExprCol) *batch.Rec
 				switch v.(type) {
 				case string, []byte:
 					typ = parquet.TypeString
-				case int, int32:
-					typ = parquet.TypeInt32
-				case int64:
-					typ = parquet.TypeInt64
-				case float32:
-					typ = parquet.TypeFloat32
-				case float64:
-					typ = parquet.TypeFloat64
 				case bool:
 					typ = parquet.TypeString // bools stored as string for safety
 				}
