@@ -53,6 +53,11 @@ type Task struct {
 	BuildTableAlias string   `json:"build_table_alias,omitempty"` // build-side alias for column disambiguation
 	JoinFilter      string   `json:"join_filter,omitempty"`       // semi/anti join inequality filter expression
 
+	// Fused join: additional broadcast joins absorbed into a single task.
+	// The worker builds hash tables for each fused join, then chains probes
+	// batch-by-batch: probe → join1 → join2 → ... → output.
+	FusedJoins []FusedJoinSpec `json:"fused_joins,omitempty"`
+
 	// Window-specific
 	WindowCols []WindowColSpec `json:"window_cols,omitempty"`
 
@@ -95,6 +100,19 @@ type WindowColSpec struct {
 	OutputCol   string        `json:"output_col"`
 	PartitionBy []string      `json:"partition_by,omitempty"`
 	OrderBy     []SortKeySpec `json:"order_by,omitempty"`
+}
+
+// FusedJoinSpec describes an additional broadcast join absorbed into a task.
+// The worker builds the hash table from BuildFiles, then probes each batch
+// through this join before passing it to the next fused join (or output).
+type FusedJoinSpec struct {
+	JoinType        string   `json:"join_type"`
+	JoinLeftKeys    []string `json:"join_left_keys"`    // keys from the probe stream
+	JoinRightKeys   []string `json:"join_right_keys"`   // keys in build files
+	BuildFiles      []string `json:"build_files"`       // build-side files (broadcast)
+	BuildTableAlias string   `json:"build_table_alias,omitempty"`
+	JoinFilter      string   `json:"join_filter,omitempty"`
+	FilterExprs     []string `json:"filter_exprs,omitempty"` // post-join filters for this step
 }
 
 // ResultNotification is sent by workers when a task completes.

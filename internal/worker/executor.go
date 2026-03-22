@@ -751,28 +751,15 @@ func mergeCopyValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 }
 
 func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	// Read build (right) and probe (left) sides concurrently
-	var buildBatches, probeBatches []*batch.RecordBatch
-	var buildErr, probeErr error
-	var rwg sync.WaitGroup
-	rwg.Add(2)
-	go func() {
-		defer rwg.Done()
-		buildBatches, buildErr = e.readInputFilesBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
-	}()
-	go func() {
-		defer rwg.Done()
-		probeBatches, probeErr = e.readInputFilesBatches(ctx, task.ResultBucket, task.InputFiles, nil)
-	}()
-	rwg.Wait()
-	if buildErr != nil {
-		return fmt.Errorf("reading build files: %w", buildErr)
-	}
-	if probeErr != nil {
-		return fmt.Errorf("reading probe files: %w", probeErr)
+	// Read build (right) side only — probe side is streamed file-by-file
+	// to keep peak memory at O(build + one_probe_file) instead of
+	// O(build + all_probe_files).
+	buildBatches, err := e.readInputFilesBatches(ctx, task.ResultBucket, task.BuildFiles, nil)
+	if err != nil {
+		return fmt.Errorf("reading build files: %w", err)
 	}
 
-	if len(probeBatches) == 0 && len(buildBatches) == 0 {
+	if len(task.InputFiles) == 0 && len(buildBatches) == 0 {
 		return nil
 	}
 
@@ -787,20 +774,12 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	hj.BuildTableAlias = task.BuildTableAlias
 
 	// Wire spill manager if memory budget is set.
-	// Pre-charge the tracker with input batch sizes so the spill threshold
-	// accounts for already-loaded data (build + probe batches are fully
-	// materialized before Build is called).
 	spill, tracker := e.newSpillManager(task.ID)
 	if spill != nil {
 		hj.Spill = spill
 		hj.MemTracker = tracker
 		defer spill.Cleanup()
 		defer e.recordSpillMetrics(spill, tracker)
-
-		// Account for probe-side memory that stays resident during build+probe.
-		for _, pb := range probeBatches {
-			tracker.ForceReserve(exec.EstimateBatchBytes(pb))
-		}
 	}
 
 	// Set semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
@@ -809,14 +788,41 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	}
 
 	// Build the hash table from right side batches.
-	// Build even with empty data to mark buildDone for the probe phase.
 	if err := hj.Build(ctx, &batchSource{batches: buildBatches}); err != nil {
 		return fmt.Errorf("building hash table: %w", err)
 	}
 
+	// Build fused join hash tables (broadcast joins absorbed into this task).
+	// Each fused join has its own small build side loaded from S3.
+	var fusedProbes []*exec.HashJoinProbe
+	var fusedTypes []exec.JoinType
+	var fusedFilters [][]string
+	for i, fj := range task.FusedJoins {
+		fjBuild, err := e.readInputFilesBatches(ctx, task.ResultBucket, fj.BuildFiles, nil)
+		if err != nil {
+			return fmt.Errorf("reading fused join %d build files: %w", i, err)
+		}
+		fjType := mapExecJoinType(fj.JoinType)
+		fjHJ := exec.NewHashJoin(fjType, fj.JoinLeftKeys, fj.JoinRightKeys)
+		fjHJ.BuildTableAlias = fj.BuildTableAlias
+		if fj.JoinFilter != "" && (fjType == exec.SemiJoin || fjType == exec.AntiJoin) {
+			fjHJ.SemiAntiFilter = physical.BuildSemiAntiFilter(fj.JoinFilter)
+		}
+		if err := fjHJ.Build(ctx, &batchSource{batches: fjBuild}); err != nil {
+			return fmt.Errorf("building fused join %d hash table: %w", i, err)
+		}
+		fjProbe := fjHJ.Probe()
+		if err := fjProbe.Init(ctx); err != nil {
+			return fmt.Errorf("init fused join %d probe: %w", i, err)
+		}
+		fusedProbes = append(fusedProbes, fjProbe)
+		fusedTypes = append(fusedTypes, fjType)
+		fusedFilters = append(fusedFilters, fj.FilterExprs)
+	}
+
 	// For RIGHT and FULL OUTER joins, we may still have results even
 	// with no probe rows (unmatched build-side rows).
-	if len(probeBatches) == 0 && joinType != exec.RightJoin && joinType != exec.FullOuterJoin {
+	if len(task.InputFiles) == 0 && joinType != exec.RightJoin && joinType != exec.FullOuterJoin {
 		return nil
 	}
 
@@ -827,25 +833,59 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 
 	var resultBatches []*batch.RecordBatch
 	var totalRows int64
+	var probeSchema []parquet.Column
 
-	// Probe with left side batches
-	for _, pb := range probeBatches {
-		rb, err := probe.Execute(ctx, pb)
+	// Stream probe files one at a time to avoid materializing all probe data.
+	for _, probeFile := range task.InputFiles {
+		fileBatches, err := e.readInputFilesBatches(ctx, task.ResultBucket, []string{probeFile}, nil)
 		if err != nil {
-			return err
+			return fmt.Errorf("reading probe file %s: %w", probeFile, err)
 		}
-		if rb != nil && rb.ActiveLen() > 0 {
-			totalRows += int64(rb.ActiveLen())
-			resultBatches = append(resultBatches, rb)
+		for _, pb := range fileBatches {
+			if probeSchema == nil {
+				probeSchema = pb.Schema
+			}
+			rb := pb
+			// Chain through fused joins FIRST: enrich probe stream with
+			// columns from absorbed broadcast joins before the primary probe.
+			// Original pipeline: probe → fused_join1 → fused_join2 → primary_join
+			for fi, fp := range fusedProbes {
+				rb, err = fp.Execute(ctx, rb)
+				if err != nil {
+					return fmt.Errorf("fused join %d probe: %w", fi, err)
+				}
+				if rb == nil || rb.ActiveLen() == 0 {
+					break
+				}
+				// Apply per-step filters after the fused join
+				if len(fusedFilters[fi]) > 0 {
+					filtered, _ := applyFilterExprs([]*batch.RecordBatch{rb}, fusedFilters[fi])
+					if len(filtered) == 0 {
+						rb = nil
+						break
+					}
+					rb = filtered[0]
+				}
+			}
+			if rb == nil || rb.ActiveLen() == 0 {
+				continue
+			}
+			// Now probe against the primary join's hash table
+			rb, err = probe.Execute(ctx, rb)
+			if err != nil {
+				return err
+			}
+			if rb != nil && rb.ActiveLen() > 0 {
+				totalRows += int64(rb.ActiveLen())
+				resultBatches = append(resultBatches, rb)
+			}
 		}
+		// fileBatches goes out of scope here — GC can reclaim before next file
 	}
 
 	// For RIGHT and FULL OUTER joins, flush unmatched build-side rows
 	if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
-		var probeSchema []parquet.Column
-		if len(probeBatches) > 0 {
-			probeSchema = probeBatches[0].Schema
-		} else if len(buildBatches) > 0 {
+		if probeSchema == nil && len(buildBatches) > 0 {
 			probeSchema = buildBatches[0].Schema
 		}
 		if probeSchema != nil {
