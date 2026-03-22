@@ -1096,7 +1096,7 @@ func (c *Coordinator) createShuffleTasks(queryID string, stage physical.Stage, r
 func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
 	// Partitioned join: one task per partition, routed by shuffle output
 	if stage.NumPartitions > 1 {
-		return c.createPartitionedJoinTasks(queryID, stage, resultPrefix)
+		return c.createPartitionedJoinTasks(queryID, stage, resultPrefix, depResults)
 	}
 
 	var probeFiles, buildFiles []string
@@ -1106,6 +1106,9 @@ func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resu
 	if stage.RightDepStage != "" {
 		buildFiles = depResults[stage.RightDepStage]
 	}
+
+	// Resolve fused join build files from dependency results
+	fusedJoins := c.resolveFusedJoins(stage.FusedJoins, depResults)
 
 	// Parallel broadcast join: split probe files across tasks, each gets full build files.
 	// Eliminates shuffle overhead when the build side is small enough to broadcast.
@@ -1128,6 +1131,7 @@ func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resu
 				BuildTableAlias: stage.BuildTableAlias,
 				JoinFilter:      stage.JoinFilter,
 				BuildFiles:      buildFiles,
+				FusedJoins:      fusedJoins,
 				FilterExprs:     stage.FilterExprs,
 				ResultBucket:    c.config.ResultBucket,
 				ResultPrefix:    resultPrefix,
@@ -1155,6 +1159,7 @@ func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resu
 		JoinFilter:      stage.JoinFilter,
 		InputFiles:      probeFiles,
 		BuildFiles:      buildFiles,
+		FusedJoins:      fusedJoins,
 		FilterExprs:     stage.FilterExprs,
 		ResultBucket:    c.config.ResultBucket,
 		ResultPrefix:    resultPrefix,
@@ -1162,11 +1167,35 @@ func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resu
 	}}
 }
 
+// resolveFusedJoins converts physical FusedJoinSpecs to distributed FusedJoinSpecs
+// by resolving build-side file paths from dependency results.
+func (c *Coordinator) resolveFusedJoins(specs []physical.FusedJoinSpec, depResults map[string][]string) []distributed.FusedJoinSpec {
+	if len(specs) == 0 {
+		return nil
+	}
+	result := make([]distributed.FusedJoinSpec, len(specs))
+	for i, spec := range specs {
+		result[i] = distributed.FusedJoinSpec{
+			JoinType:        spec.JoinType,
+			JoinLeftKeys:    spec.JoinLeftKeys,
+			JoinRightKeys:   spec.JoinRightKeys,
+			BuildFiles:      depResults[spec.BuildDepStage],
+			BuildTableAlias: spec.BuildTableAlias,
+			JoinFilter:      spec.JoinFilter,
+			FilterExprs:     spec.FilterExprs,
+		}
+	}
+	return result
+}
+
 // createPartitionedJoinTasks creates one join task per partition. Each task
 // receives only the shuffle output files for its partition from both sides.
-func (c *Coordinator) createPartitionedJoinTasks(queryID string, stage physical.Stage, resultPrefix string) []distributed.Task {
+func (c *Coordinator) createPartitionedJoinTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
 	leftParts := c.collectShufflePartitions(queryID, stage.LeftDepStage, stage.NumPartitions)
 	rightParts := c.collectShufflePartitions(queryID, stage.RightDepStage, stage.NumPartitions)
+
+	// Resolve fused join build files from dependency results
+	fusedJoins := c.resolveFusedJoins(stage.FusedJoins, depResults)
 
 	tasks := make([]distributed.Task, 0, stage.NumPartitions)
 	for pid := 0; pid < stage.NumPartitions; pid++ {
@@ -1183,6 +1212,7 @@ func (c *Coordinator) createPartitionedJoinTasks(queryID string, stage physical.
 			JoinFilter:      stage.JoinFilter,
 			InputFiles:      leftParts[pid],
 			BuildFiles:      rightParts[pid],
+			FusedJoins:      fusedJoins,
 			FilterExprs:     stage.FilterExprs,
 			PartitionID:     pid,
 			ResultBucket:    c.config.ResultBucket,

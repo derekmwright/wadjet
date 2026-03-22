@@ -62,6 +62,10 @@ type Stage struct {
 	BuildTableAlias string // build-side table alias for column disambiguation in self-joins
 	JoinFilter      string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
 
+	// Fused broadcast joins absorbed into this stage (avoids separate
+	// shuffle+join stages for small dimension tables like nation, region).
+	FusedJoins []FusedJoinSpec
+
 	// Window metadata
 	WindowCols []WindowColSpec
 
@@ -82,6 +86,17 @@ type WindowColSpec struct {
 	PartitionBy []string
 	OrderBy     []SortKeySpec
 	Frame       *logical.WindowFrameSpec
+}
+
+// FusedJoinSpec describes a broadcast join absorbed into a parent join stage.
+type FusedJoinSpec struct {
+	JoinType        string
+	JoinLeftKeys    []string
+	JoinRightKeys   []string
+	BuildDepStage   string // stage providing build-side data
+	BuildTableAlias string
+	JoinFilter      string
+	FilterExprs     []string
 }
 
 // AggSpec defines an aggregation in a stage.
@@ -856,7 +871,128 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 func (p *Planner) generateStages(node *logical.Node) []Stage {
 	var stages []Stage
 	p.walkStages(node, &stages, nil)
+	if p.WorkerCount > 1 {
+		stages = fuseJoinStages(stages)
+	}
 	return stages
+}
+
+// fuseJoinStages absorbs broadcast join stages into their downstream consumer
+// join stage when the broadcast join's output feeds directly as the probe or
+// build side of another join. This avoids materializing the intermediate result
+// to S3 and re-reading it — the worker chains probes batch-by-batch instead.
+//
+// Example: join-A (lineitem ⨝ part) → join-B (broadcast_join with nation)
+// becomes: join-A with FusedJoins=[nation join spec], join-B removed.
+func fuseJoinStages(stages []Stage) []Stage {
+	stageByID := make(map[string]*Stage, len(stages))
+	for i := range stages {
+		stageByID[stages[i].ID] = &stages[i]
+	}
+
+	// Find broadcast join stages that can be absorbed.
+	// A broadcast join can be fused into its consumer if:
+	// 1. It's a broadcast_join (small build side, no shuffle)
+	// 2. Exactly one other stage depends on its output
+	// 3. That consumer is also a join stage
+	absorbed := make(map[string]bool)
+
+	// Count how many stages depend on each stage
+	depCount := make(map[string]int)
+	for i := range stages {
+		for _, dep := range stages[i].Dependencies {
+			depCount[dep]++
+		}
+	}
+
+	for i := range stages {
+		s := &stages[i]
+		if s.Type != "broadcast_join" {
+			continue
+		}
+		// Only absorb leaf broadcast joins (no existing fused joins).
+		// Deep fusion chains are fragile and unnecessary — single-level
+		// handles the important case (small dimension tables like nation).
+		if len(s.FusedJoins) > 0 {
+			continue
+		}
+		// Only fuse if exactly one consumer depends on this stage
+		if depCount[s.ID] != 1 {
+			continue
+		}
+		// Find the consumer stage
+		var consumer *Stage
+		for j := range stages {
+			if stages[j].ID == s.ID {
+				continue
+			}
+			for _, dep := range stages[j].Dependencies {
+				if dep == s.ID {
+					consumer = &stages[j]
+					break
+				}
+			}
+			if consumer != nil {
+				break
+			}
+		}
+		if consumer == nil {
+			continue
+		}
+		// Consumer must be a join stage
+		if consumer.Type != "hash_join" && consumer.Type != "broadcast_join" {
+			continue
+		}
+
+		// Absorb: move this broadcast join's spec into the consumer as a FusedJoin.
+		// The consumer's probe stream will be chained through this join.
+		consumer.FusedJoins = append(consumer.FusedJoins, FusedJoinSpec{
+			JoinType:        s.JoinType,
+			JoinLeftKeys:    s.JoinLeftKeys,
+			JoinRightKeys:   s.JoinRightKeys,
+			BuildDepStage:   s.RightDepStage,
+			BuildTableAlias: s.BuildTableAlias,
+			JoinFilter:      s.JoinFilter,
+			FilterExprs:     s.FilterExprs,
+		})
+
+		// Rewire: consumer's dependency on this stage → dependency on this stage's probe dep
+		for k, dep := range consumer.Dependencies {
+			if dep == s.ID {
+				if s.LeftDepStage != "" {
+					consumer.Dependencies[k] = s.LeftDepStage
+				}
+				// Update LeftDepStage/RightDepStage if they pointed to the absorbed stage
+				if consumer.LeftDepStage == s.ID {
+					consumer.LeftDepStage = s.LeftDepStage
+				}
+				if consumer.RightDepStage == s.ID {
+					consumer.RightDepStage = s.LeftDepStage
+				}
+				break
+			}
+		}
+
+		// Add the build-side dependency of the fused join to consumer's deps
+		if s.RightDepStage != "" {
+			consumer.Dependencies = append(consumer.Dependencies, s.RightDepStage)
+		}
+
+		absorbed[s.ID] = true
+	}
+
+	if len(absorbed) == 0 {
+		return stages
+	}
+
+	// Remove absorbed stages
+	result := make([]Stage, 0, len(stages)-len(absorbed))
+	for _, s := range stages {
+		if !absorbed[s.ID] {
+			result = append(result, s)
+		}
+	}
+	return result
 }
 
 // resolveShuffleKey resolves a join key name through any Project alias nodes
