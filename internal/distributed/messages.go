@@ -43,6 +43,7 @@ type Task struct {
 	SortKeys       []SortKeySpec `json:"sort_keys,omitempty"`
 	Limit          int           `json:"limit,omitempty"`
 	MergePreSorted bool          `json:"merge_pre_sorted,omitempty"` // true for merge_sort: inputs are pre-sorted
+	MergePartials  bool          `json:"merge_partials,omitempty"`   // true for final_aggregate: re-aggregate partial results
 
 	// Join-specific
 	JoinType        string   `json:"join_type,omitempty"`        // inner, left, right, full, cross

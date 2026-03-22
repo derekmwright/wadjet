@@ -286,8 +286,14 @@ func parseFilterValue(s string) any {
 }
 
 func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	// Build column projection: only read group-by columns + aggregate input columns
-	neededCols := aggregateNeededCols(task.GroupByCols, task.Aggregates)
+	// Build column projection: only read group-by columns + aggregate input columns.
+	// For merge tasks, read all columns — partial aggregate output columns may have
+	// expression-derived names (e.g., "substr(l_shipdate, 1, 4)") that don't decompose
+	// into raw column references.
+	var neededCols []string
+	if !task.MergePartials {
+		neededCols = aggregateNeededCols(task.GroupByCols, task.Aggregates)
+	}
 
 	// Read input files directly into columnar batches
 	allBatches, err := e.readParquetFilesConcurrentBatches(ctx, task.ResultBucket, task.InputFiles, neededCols)
@@ -302,23 +308,27 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 	// Pre-compute expression GROUP BY columns and aggregate inputs.
 	// In standalone mode, the planner inserts aggPreProject for this. In distributed
 	// mode, we evaluate expressions here and add them as new columns.
-	exprCols := collectAggExpressions(task.GroupByCols, task.Aggregates)
-	if len(exprCols) > 0 {
-		for i, b := range allBatches {
-			allBatches[i] = addComputedColumns(b, exprCols)
+	// Skip for merge tasks — partial aggregate already materialized expression columns.
+	if !task.MergePartials {
+		exprCols := collectAggExpressions(task.GroupByCols, task.Aggregates)
+		if len(exprCols) > 0 {
+			for i, b := range allBatches {
+				allBatches[i] = addComputedColumns(b, exprCols)
+			}
 		}
 	}
 
 	// Build and execute aggregate
 	aggs := make([]exec.AggColumn, len(task.Aggregates))
 	for i, a := range task.Aggregates {
+		aggFunc := a.Func
 		aggs[i] = exec.AggColumn{
-			Func:      parseAggFunc(a.Func),
-			InputCol:  a.InputCol,
-			OutputCol: a.OutputCol,
+			Func:       parseAggFunc(aggFunc),
+			InputCol:   a.InputCol,
+			OutputCol:  a.OutputCol,
 			OutputType: parquet.TypeFloat64,
 		}
-		if a.Func == "count" {
+		if aggFunc == "count" || aggFunc == "count_star" {
 			aggs[i].OutputType = parquet.TypeInt64
 		}
 	}
@@ -360,6 +370,11 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 		}
 		totalRows += int64(rb.ActiveLen())
 		resultBatches = append(resultBatches, rb)
+	}
+
+	// Apply HAVING / post-aggregate filter expressions
+	if len(task.FilterExprs) > 0 && len(resultBatches) > 0 {
+		resultBatches, totalRows = applyFilterExprs(resultBatches, task.FilterExprs)
 	}
 
 	result.NumRows = totalRows
