@@ -1659,6 +1659,7 @@ func aggregateNeededCols(groupBy []string, aggs []distributed.AggSpec) []string 
 // a simple column name ("l_shipdate"), a qualified name ("n1.n_name"), or
 // an expression ("substr(l_shipdate, 1, 4)"). Returns the string itself for
 // simple/qualified names; extracts identifier tokens from expressions.
+// Skips string literals in single quotes (e.g., 'BRAZIL' is NOT a column ref).
 func extractColRefs(s string) []string {
 	// Simple or qualified column name
 	isSimple := true
@@ -1672,12 +1673,32 @@ func extractColRefs(s string) []string {
 		return []string{s}
 	}
 
-	// Expression: tokenize and extract column-like identifiers
+	// Expression: tokenize and extract column-like identifiers.
+	// Skip over single-quoted string literals to avoid treating values
+	// like 'BRAZIL' as column references.
 	var refs []string
 	seen := make(map[string]bool)
 	start := -1
 	runes := []rune(s)
+	inQuote := false
 	for i, c := range runes {
+		if c == '\'' {
+			// Flush any pending token before entering/leaving quote
+			if start >= 0 && !inQuote {
+				tok := string(runes[start:i])
+				start = -1
+				if isColRef(tok) && !seen[tok] {
+					refs = append(refs, tok)
+					seen[tok] = true
+				}
+			}
+			inQuote = !inQuote
+			start = -1
+			continue
+		}
+		if inQuote {
+			continue
+		}
 		isIdent := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '.' || (c >= '0' && c <= '9')
 		if isIdent {
 			if start == -1 {
@@ -1694,7 +1715,7 @@ func extractColRefs(s string) []string {
 			}
 		}
 	}
-	if start >= 0 {
+	if start >= 0 && !inQuote {
 		tok := string(runes[start:])
 		if isColRef(tok) && !seen[tok] {
 			refs = append(refs, tok)
@@ -1722,7 +1743,16 @@ func isColRef(tok string) bool {
 	switch lower {
 	case "case", "when", "then", "else", "end", "and", "or", "not", "in",
 		"is", "null", "true", "false", "like", "between", "as", "asc", "desc",
-		"substr", "sum", "count", "min", "max", "avg":
+		"substr", "sum", "count", "min", "max", "avg",
+		"extract", "coalesce", "cast", "exists", "any", "all", "some",
+		"upper", "lower", "trim", "length", "concat", "replace",
+		"abs", "round", "floor", "ceil", "ceiling", "mod",
+		"year", "month", "day", "hour", "minute", "second",
+		"select", "from", "where", "having", "group", "by", "order",
+		"inner", "outer", "left", "right", "full", "cross", "join", "on",
+		"union", "intersect", "except", "distinct", "limit", "offset",
+		"over", "partition", "rows", "range", "unbounded", "preceding",
+		"following", "current", "row":
 		return false
 	}
 	return true
