@@ -741,7 +741,9 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logger) error {
 	// Start embedded NATS (with optional leaf node connections)
+	// Bind to 0.0.0.0 so remote workers can connect.
 	natsCfg := distributed.DefaultNATSConfig()
+	natsCfg.Host = "0.0.0.0"
 	natsCfg.Port = natsPort
 	natsCfg.ClusterID = clusterID
 	natsCfg.LeafRemotes = leafRemotes
