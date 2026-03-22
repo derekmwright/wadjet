@@ -70,7 +70,7 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 
 	// Track memory usage for spill pressure detection
 	if s.Spill != nil {
-		s.Spill.TrackBatch(estimateBatchBytes(b))
+		s.Spill.TrackBatch(EstimateBatchBytes(b))
 	}
 
 	// Spill to disk if memory pressure is high

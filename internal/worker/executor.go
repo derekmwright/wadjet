@@ -786,13 +786,21 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	hj := exec.NewHashJoin(joinType, task.JoinLeftKeys, task.JoinRightKeys)
 	hj.BuildTableAlias = task.BuildTableAlias
 
-	// Wire spill manager if memory budget is set
+	// Wire spill manager if memory budget is set.
+	// Pre-charge the tracker with input batch sizes so the spill threshold
+	// accounts for already-loaded data (build + probe batches are fully
+	// materialized before Build is called).
 	spill, tracker := e.newSpillManager(task.ID)
 	if spill != nil {
 		hj.Spill = spill
 		hj.MemTracker = tracker
 		defer spill.Cleanup()
 		defer e.recordSpillMetrics(spill, tracker)
+
+		// Account for probe-side memory that stays resident during build+probe.
+		for _, pb := range probeBatches {
+			tracker.ForceReserve(exec.EstimateBatchBytes(pb))
+		}
 	}
 
 	// Set semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")

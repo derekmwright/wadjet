@@ -361,8 +361,8 @@ func (h *HashJoin) intProbeKey(in *batch.RecordBatch, row int) (int64, bool) {
 	return intKeyFromVector(in.Columns[h.probeKeyIdx[0]], row)
 }
 
-// estimateBatchBytes estimates the memory footprint of a RecordBatch.
-func estimateBatchBytes(b *batch.RecordBatch) int64 {
+// EstimateBatchBytes estimates the memory footprint of a RecordBatch.
+func EstimateBatchBytes(b *batch.RecordBatch) int64 {
 	var size int64
 	for _, v := range b.Columns {
 		switch v.Type {
@@ -527,7 +527,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 
 		// Track memory if budget is set
 		if h.MemTracker != nil {
-			cost := estimateBatchBytes(b)
+			cost := EstimateBatchBytes(b)
 			if err := h.MemTracker.Reserve(cost); err != nil {
 				// Try spilling before giving up
 				if h.Spill != nil {
