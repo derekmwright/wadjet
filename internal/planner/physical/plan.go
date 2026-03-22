@@ -54,11 +54,13 @@ type Stage struct {
 	Limit    int
 
 	// Join metadata
-	JoinType      string // inner, left, right, full, cross
-	JoinLeftKeys  []string
-	JoinRightKeys []string
-	LeftDepStage  string // stage providing probe (left) side
-	RightDepStage string // stage providing build (right) side
+	JoinType        string // inner, left, right, full, cross
+	JoinLeftKeys    []string
+	JoinRightKeys   []string
+	LeftDepStage    string // stage providing probe (left) side
+	RightDepStage   string // stage providing build (right) side
+	BuildTableAlias string // build-side table alias for column disambiguation in self-joins
+	JoinFilter      string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
 
 	// Window metadata
 	WindowCols []WindowColSpec
@@ -1012,6 +1014,17 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			RightDepStage: rightDep,
 			NumPartitions: numPartitions,
 		}
+		// Propagate build-side table alias for column disambiguation in self-joins
+		// (e.g., nation n1 JOIN nation n2 — prevents duplicate columns from being dropped).
+		if len(node.Children) >= 2 {
+			if alias := findScanAlias(node.Children[1]); alias != "" {
+				stage.BuildTableAlias = alias
+			}
+		}
+		// Propagate semi/anti join inequality filters
+		if node.JoinFilter != "" {
+			stage.JoinFilter = node.JoinFilter
+		}
 		if leftDep != "" {
 			stage.Dependencies = append(stage.Dependencies, leftDep)
 		}
@@ -1036,21 +1049,23 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		})
 
 	case logical.NodeFilter:
-		// Walk children first. If a child is a scan, attach filter expressions
-		// to the scan stage for predicate pushdown.
+		// Walk children first. Try to push filter expressions down to the
+		// appropriate stage: scan stages get predicate pushdown, join/aggregate
+		// stages evaluate filters post-execution.
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}
-		// Attach filter expressions to the most recent scan stage
 		if len(node.Predicates) > 0 && len(*stages) > 0 {
 			lastStage := &(*stages)[len(*stages)-1]
-			if lastStage.Type == "scan" {
-				for _, pred := range node.Predicates {
-					if pred.Raw != "" {
-						lastStage.FilterExprs = append(lastStage.FilterExprs, pred.Raw)
-					} else if pred.ASTExpr != nil {
-						lastStage.FilterExprs = append(lastStage.FilterExprs, pred.ASTExpr.String())
-					}
+			for _, pred := range node.Predicates {
+				var exprStr string
+				if pred.Raw != "" {
+					exprStr = pred.Raw
+				} else if pred.ASTExpr != nil {
+					exprStr = pred.ASTExpr.String()
+				}
+				if exprStr != "" {
+					lastStage.FilterExprs = append(lastStage.FilterExprs, exprStr)
 				}
 			}
 		}
@@ -1244,7 +1259,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// For semi/anti joins with non-equality filter conditions (from decorrelated EXISTS),
 	// compile the filter into a function that checks each candidate build row.
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
-		hj.SemiAntiFilter = buildSemiAntiFilter(node.JoinFilter)
+		hj.SemiAntiFilter = BuildSemiAntiFilter(node.JoinFilter)
 	}
 
 	// For SEMI/ANTI joins, prune build-side batches to only columns needed by
@@ -1394,14 +1409,14 @@ func mapExecJoinType(jt string) exec.JoinType {
 	}
 }
 
-// buildSemiAntiFilter compiles a non-equality join filter string (e.g., "l_suppkey != l_suppkey")
+// BuildSemiAntiFilter compiles a non-equality join filter string (e.g., "l_suppkey != l_suppkey")
 // into a function that evaluates the condition on probe and build batch rows.
 // Convention: left of operator = probe column, right = build column.
 //
 // The returned closure lazily resolves column indices on first call and caches
 // them, avoiding per-row ColumnByName lookups. Comparisons use typed dispatch
 // (int32, int64, float64, string) instead of fmt.Sprint conversion.
-func buildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
+func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
 	type filterCond struct {
 		probeCol string
 		op       string
@@ -3314,6 +3329,83 @@ func findScanRowEstimate(node *logical.Node) int64 {
 		total += findScanRowEstimate(child)
 	}
 	return total
+}
+
+// extractColumnRefs extracts raw column name references from a string that
+// may be a simple column ("l_shipdate"), a qualified column ("n1.n_name"),
+// or an expression ("substr(l_shipdate, 1, 4)", "l_extendedprice * (1 - l_discount)").
+// Returns the string itself if it's a simple/qualified column name.
+func extractColumnRefs(s string) []string {
+	// Simple or qualified column name: contains only alphanumerics, underscores, dots
+	isSimple := true
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.') {
+			isSimple = false
+			break
+		}
+	}
+	if isSimple {
+		return []string{s}
+	}
+
+	// Expression: extract identifier tokens that look like column references.
+	// Tokenize by splitting on non-identifier characters, then filter out
+	// SQL keywords and numeric literals.
+	var refs []string
+	seen := make(map[string]bool)
+	start := -1
+	for i, c := range s {
+		isIdent := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '.' || (c >= '0' && c <= '9')
+		if isIdent {
+			if start == -1 {
+				start = i
+			}
+		} else {
+			if start >= 0 {
+				tok := s[start:i]
+				start = -1
+				if isColumnRef(tok) && !seen[tok] {
+					refs = append(refs, tok)
+					seen[tok] = true
+				}
+			}
+		}
+	}
+	if start >= 0 {
+		tok := s[start:]
+		if isColumnRef(tok) && !seen[tok] {
+			refs = append(refs, tok)
+			seen[tok] = true
+		}
+	}
+	return refs
+}
+
+// isColumnRef returns true if a token looks like a column reference:
+// not a number, not a SQL keyword, contains at least one underscore or letter.
+func isColumnRef(tok string) bool {
+	if len(tok) == 0 {
+		return false
+	}
+	// Pure number
+	allDigit := true
+	for _, c := range tok {
+		if c < '0' || c > '9' {
+			allDigit = false
+			break
+		}
+	}
+	if allDigit {
+		return false
+	}
+	// SQL keywords to skip
+	lower := strings.ToLower(tok)
+	switch lower {
+	case "case", "when", "then", "else", "end", "and", "or", "not", "in",
+		"is", "null", "true", "false", "like", "between", "as", "asc", "desc":
+		return false
+	}
+	return true
 }
 
 // findScanAlias returns the table alias of the scan node in a subtree.

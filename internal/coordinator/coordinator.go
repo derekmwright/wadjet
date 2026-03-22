@@ -281,6 +281,15 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}
 
+	// Log stage summary for debugging
+	for _, s := range physStages {
+		c.logger.Debug("distributed stage", "query", queryID, "stage", s.ID, "type", s.Type,
+			"tasks", s.Tasks, "deps", s.Dependencies, "joinType", s.JoinType,
+			"leftKeys", s.JoinLeftKeys, "rightKeys", s.JoinRightKeys,
+			"filters", s.FilterExprs, "joinFilter", s.JoinFilter,
+			"buildAlias", s.BuildTableAlias)
+	}
+
 	// Expand scans to target remote clusters when table exists on multiple clusters
 	physStages = planner.ExpandFederatedScans(physStages)
 
@@ -331,9 +340,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			continue
 		}
 		tasks := c.createTasksForStage(queryID, s, nil)
-		// Update tracker with actual task count (may differ from planner
-		// estimate due to file coalescing in createScanTasks).
+		// Update tracker with actual task count and mark as scheduled
+		// (prevents GetReadyStages from re-scheduling these).
 		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
+		c.tracker.MarkScheduled(queryID, s.ID)
 		if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
 			c.tracker.Fail(queryID, err.Error())
 			return nil, fmt.Errorf("publishing leaf tasks: %w", err)
@@ -797,18 +807,21 @@ func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resu
 		tasks := make([]distributed.Task, numTasks)
 		for i := range tasks {
 			tasks[i] = distributed.Task{
-				ID:            fmt.Sprintf("%s-b%d", uuid.New().String()[:8], i),
-				QueryID:       queryID,
-				StageID:       stage.ID,
-				Type:          distributed.TaskTypeJoin,
-				Columns:       stage.Columns,
-				JoinType:      stage.JoinType,
-				JoinLeftKeys:  stage.JoinLeftKeys,
-				JoinRightKeys: stage.JoinRightKeys,
-				BuildFiles:    buildFiles,
-				ResultBucket:  c.config.ResultBucket,
-				ResultPrefix:  resultPrefix,
-				CreatedAt:     time.Now(),
+				ID:              fmt.Sprintf("%s-b%d", uuid.New().String()[:8], i),
+				QueryID:         queryID,
+				StageID:         stage.ID,
+				Type:            distributed.TaskTypeJoin,
+				Columns:         stage.Columns,
+				JoinType:        stage.JoinType,
+				JoinLeftKeys:    stage.JoinLeftKeys,
+				JoinRightKeys:   stage.JoinRightKeys,
+				BuildTableAlias: stage.BuildTableAlias,
+				JoinFilter:      stage.JoinFilter,
+				BuildFiles:      buildFiles,
+				FilterExprs:     stage.FilterExprs,
+				ResultBucket:    c.config.ResultBucket,
+				ResultPrefix:    resultPrefix,
+				CreatedAt:       time.Now(),
 			}
 		}
 		// Round-robin distribute probe files across tasks
@@ -820,19 +833,22 @@ func (c *Coordinator) createJoinTasks(queryID string, stage physical.Stage, resu
 	}
 
 	return []distributed.Task{{
-		ID:            uuid.New().String()[:8],
-		QueryID:       queryID,
-		StageID:       stage.ID,
-		Type:          distributed.TaskTypeJoin,
-		Columns:       stage.Columns,
-		JoinType:      stage.JoinType,
-		JoinLeftKeys:  stage.JoinLeftKeys,
-		JoinRightKeys: stage.JoinRightKeys,
-		InputFiles:    probeFiles,
-		BuildFiles:    buildFiles,
-		ResultBucket:  c.config.ResultBucket,
-		ResultPrefix:  resultPrefix,
-		CreatedAt:     time.Now(),
+		ID:              uuid.New().String()[:8],
+		QueryID:         queryID,
+		StageID:         stage.ID,
+		Type:            distributed.TaskTypeJoin,
+		Columns:         stage.Columns,
+		JoinType:        stage.JoinType,
+		JoinLeftKeys:    stage.JoinLeftKeys,
+		JoinRightKeys:   stage.JoinRightKeys,
+		BuildTableAlias: stage.BuildTableAlias,
+		JoinFilter:      stage.JoinFilter,
+		InputFiles:      probeFiles,
+		BuildFiles:      buildFiles,
+		FilterExprs:     stage.FilterExprs,
+		ResultBucket:    c.config.ResultBucket,
+		ResultPrefix:    resultPrefix,
+		CreatedAt:       time.Now(),
 	}}
 }
 
@@ -845,20 +861,23 @@ func (c *Coordinator) createPartitionedJoinTasks(queryID string, stage physical.
 	tasks := make([]distributed.Task, 0, stage.NumPartitions)
 	for pid := 0; pid < stage.NumPartitions; pid++ {
 		tasks = append(tasks, distributed.Task{
-			ID:            fmt.Sprintf("%s-p%d", uuid.New().String()[:8], pid),
-			QueryID:       queryID,
-			StageID:       stage.ID,
-			Type:          distributed.TaskTypeJoin,
-			Columns:       stage.Columns,
-			JoinType:      stage.JoinType,
-			JoinLeftKeys:  stage.JoinLeftKeys,
-			JoinRightKeys: stage.JoinRightKeys,
-			InputFiles:    leftParts[pid],
-			BuildFiles:    rightParts[pid],
-			PartitionID:   pid,
-			ResultBucket:  c.config.ResultBucket,
-			ResultPrefix:  resultPrefix,
-			CreatedAt:     time.Now(),
+			ID:              fmt.Sprintf("%s-p%d", uuid.New().String()[:8], pid),
+			QueryID:         queryID,
+			StageID:         stage.ID,
+			Type:            distributed.TaskTypeJoin,
+			Columns:         stage.Columns,
+			JoinType:        stage.JoinType,
+			JoinLeftKeys:    stage.JoinLeftKeys,
+			JoinRightKeys:   stage.JoinRightKeys,
+			BuildTableAlias: stage.BuildTableAlias,
+			JoinFilter:      stage.JoinFilter,
+			InputFiles:      leftParts[pid],
+			BuildFiles:      rightParts[pid],
+			FilterExprs:     stage.FilterExprs,
+			PartitionID:     pid,
+			ResultBucket:    c.config.ResultBucket,
+			ResultPrefix:    resultPrefix,
+			CreatedAt:       time.Now(),
 		})
 	}
 	return tasks
@@ -1251,6 +1270,7 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 
 	// Get results for the final stage
 	results := c.tracker.StageResults(queryID, finalStage.ID)
+	c.logger.Debug("readFinalResults", "query", queryID, "finalStage", finalStage.ID, "numResults", len(results))
 	if len(results) == 0 {
 		return nil, nil, 0, nil
 	}
@@ -1260,6 +1280,8 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 	var totalRows int64
 
 	for _, r := range results {
+		c.logger.Debug("result entry", "taskID", r.TaskID, "success", r.Success,
+			"inlineLen", len(r.InlineData), "numRows", r.NumRows, "resultPath", r.ResultPath)
 		if !r.Success {
 			continue
 		}
@@ -1273,6 +1295,7 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 
 		reader, err := parquet.NewReader(bytes.NewReader(r.InlineData), int64(len(r.InlineData)))
 		if err != nil {
+			c.logger.Debug("parquet reader error", "err", err)
 			continue
 		}
 

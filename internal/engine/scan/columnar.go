@@ -56,12 +56,20 @@ func readFileBatchesViaRows(reader *pqt.Reader, readSchema []pqt.Column, selecte
 }
 
 // projectSchema filters schema to only include columns in selectedCols.
-// Matches both exact names and unqualified suffixes (e.g., "n_nationkey"
-// matches schema column "n2.n_nationkey" from join output).
+// Handles qualified name mismatches in both directions:
+//   - schema "n2.n_nationkey" matches needed "n_nationkey" (strip schema prefix)
+//   - schema "n_name" matches needed "n1.n_name" (strip needed prefix)
 func projectSchema(schema []pqt.Column, selectedCols []string) []pqt.Column {
 	needed := make(map[string]bool, len(selectedCols))
+	// Also index unqualified suffixes of qualified needed names so that
+	// schema column "n_name" matches needed "n1.n_name".
+	neededSuffix := make(map[string]bool, len(selectedCols))
 	for _, c := range selectedCols {
-		needed[strings.ToLower(c)] = true
+		lc := strings.ToLower(c)
+		needed[lc] = true
+		if dotIdx := strings.LastIndex(lc, "."); dotIdx >= 0 {
+			neededSuffix[lc[dotIdx+1:]] = true
+		}
 	}
 	filtered := make([]pqt.Column, 0, len(selectedCols))
 	for _, col := range schema {
@@ -69,6 +77,10 @@ func projectSchema(schema []pqt.Column, selectedCols []string) []pqt.Column {
 		if needed[lname] {
 			filtered = append(filtered, col)
 		} else if dotIdx := strings.LastIndex(lname, "."); dotIdx >= 0 && needed[lname[dotIdx+1:]] {
+			// schema "n2.n_nationkey" matches needed "n_nationkey"
+			filtered = append(filtered, col)
+		} else if neededSuffix[lname] {
+			// schema "n_name" matches needed "n1.n_name"
 			filtered = append(filtered, col)
 		}
 	}
