@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -297,17 +298,19 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
+				stack := string(debug.Stack())
 				w.logger.Error("task panicked",
 					"task_id", task.ID,
 					"query_id", task.QueryID,
 					"panic", fmt.Sprintf("%v", r),
+					"stack", stack,
 				)
 				result = distributed.ResultNotification{
 					TaskID:    task.ID,
 					QueryID:   task.QueryID,
 					StageID:   task.StageID,
 					WorkerID:  w.config.WorkerID,
-					Error:     fmt.Sprintf("task panicked: %v", r),
+					Error:     fmt.Sprintf("task panicked: %v\n%s", r, stack),
 					Duration:  0,
 					Timestamp: time.Now(),
 				}

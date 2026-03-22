@@ -410,6 +410,8 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 		tasks = c.createScanTasks(queryID, stage, resultPrefix)
 	case "aggregate":
 		tasks = c.createAggregateTasks(queryID, stage, resultPrefix, depResults)
+	case "final_aggregate":
+		tasks = c.createFinalAggregateTasks(queryID, stage, resultPrefix, depResults)
 	case "sort":
 		tasks = c.createSortTasks(queryID, stage, resultPrefix, depResults)
 	case "merge_sort":
@@ -613,6 +615,49 @@ func (c *Coordinator) createAggregateTasks(queryID string, stage physical.Stage,
 	}
 
 	return tasks
+}
+
+func (c *Coordinator) createFinalAggregateTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
+	totalFiles := 0
+	for _, depID := range stage.Dependencies {
+		totalFiles += len(depResults[depID])
+	}
+	inputFiles := make([]string, 0, totalFiles)
+	for _, depID := range stage.Dependencies {
+		inputFiles = append(inputFiles, depResults[depID]...)
+	}
+
+	// Rewrite aggregate specs for merge semantics:
+	// - COUNT → SUM (sum partial counts)
+	// - SUM/MIN/MAX stay the same (composable)
+	// - InputCol becomes the OutputCol from the partial stage
+	var aggSpecs []distributed.AggSpec
+	for _, a := range stage.AggSpecs {
+		mergeFunc := a.Func
+		if mergeFunc == "count" || mergeFunc == "count_star" {
+			mergeFunc = "sum"
+		}
+		aggSpecs = append(aggSpecs, distributed.AggSpec{
+			Func:      mergeFunc,
+			InputCol:  a.OutputCol, // read from partial aggregate output
+			OutputCol: a.OutputCol,
+		})
+	}
+
+	return []distributed.Task{{
+		ID:            uuid.New().String()[:8],
+		QueryID:       queryID,
+		StageID:       stage.ID,
+		Type:          distributed.TaskTypeAggregate,
+		GroupByCols:   stage.GroupByCols,
+		Aggregates:    aggSpecs,
+		MergePartials: true,
+		FilterExprs:   stage.FilterExprs, // HAVING filters applied after re-aggregation
+		InputFiles:    inputFiles,
+		ResultBucket:  c.config.ResultBucket,
+		ResultPrefix:  resultPrefix,
+		CreatedAt:     time.Now(),
+	}}
 }
 
 func (c *Coordinator) createSortTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {

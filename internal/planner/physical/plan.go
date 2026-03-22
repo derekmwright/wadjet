@@ -262,6 +262,103 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	return collectSink.ToRows(), nil
 }
 
+// resolveFilterSubqueries finds embedded SQL subqueries in a filter expression
+// string, executes them using the planner's standalone pipeline, and substitutes
+// the scalar results as literals. This is needed for distributed mode where
+// workers don't have catalog access to execute subqueries themselves.
+func (p *Planner) resolveFilterSubqueries(exprStr string) string {
+	// Quick check: no subquery to resolve
+	if !strings.Contains(strings.ToUpper(exprStr), "SELECT") {
+		return exprStr
+	}
+
+	ctx := p.planCtx
+	if ctx == nil {
+		return exprStr
+	}
+
+	// Parse the expression to find SubqueryNode elements
+	ast, err := plansql.ParseExpression(exprStr)
+	if err != nil {
+		return exprStr
+	}
+
+	resolved := p.resolveSubqueryAST(ctx, ast)
+	if resolved != nil {
+		return resolved.String()
+	}
+	return exprStr
+}
+
+// resolveSubqueryAST recursively walks an AST node, replacing SubqueryNode
+// elements with literal values obtained by executing the subquery.
+func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node) plansql.Node {
+	if node == nil {
+		return nil
+	}
+
+	switch n := node.(type) {
+	case *plansql.SubqueryNode:
+		rows, err := p.executeSubquery(ctx, n.SQL)
+		if err != nil || len(rows) == 0 {
+			return node
+		}
+		// Extract scalar value from first row, first column
+		for _, v := range rows[0] {
+			return scalarToLiteral(v)
+		}
+		return node
+
+	case *plansql.CmpExpr:
+		return &plansql.CmpExpr{
+			Left:  p.resolveSubqueryAST(ctx, n.Left),
+			Op:    n.Op,
+			Right: p.resolveSubqueryAST(ctx, n.Right),
+		}
+
+	case *plansql.BinaryOp:
+		return &plansql.BinaryOp{
+			Left:  p.resolveSubqueryAST(ctx, n.Left),
+			Op:    n.Op,
+			Right: p.resolveSubqueryAST(ctx, n.Right),
+		}
+
+	case *plansql.UnaryOp:
+		return &plansql.UnaryOp{
+			Op:    n.Op,
+			Inner: p.resolveSubqueryAST(ctx, n.Inner),
+		}
+
+	case *plansql.ParenNode:
+		inner := p.resolveSubqueryAST(ctx, n.Inner)
+		if inner != nil {
+			return &plansql.ParenNode{Inner: inner}
+		}
+		return node
+
+	default:
+		return node
+	}
+}
+
+// scalarToLiteral converts a Go value to an AST literal node.
+func scalarToLiteral(v any) plansql.Node {
+	switch val := v.(type) {
+	case float64:
+		return &plansql.Lit{Value: strconv.FormatFloat(val, 'f', -1, 64), Kind: plansql.LitNumber}
+	case float32:
+		return &plansql.Lit{Value: strconv.FormatFloat(float64(val), 'f', -1, 32), Kind: plansql.LitNumber}
+	case int64:
+		return &plansql.Lit{Value: fmt.Sprintf("%d", val), Kind: plansql.LitNumber}
+	case int:
+		return &plansql.Lit{Value: fmt.Sprintf("%d", val), Kind: plansql.LitNumber}
+	case string:
+		return &plansql.Lit{Value: val, Kind: plansql.LitString}
+	default:
+		return &plansql.Lit{Value: fmt.Sprint(v), Kind: plansql.LitNumber}
+	}
+}
+
 // AnnotateScanColumns walks the logical plan tree and populates ScanColumns
 // on Scan nodes from the catalog. This enables the logical optimizer to resolve
 // unqualified column references for filter pushdown through joins.
@@ -513,6 +610,10 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 // PlanDistributed generates a stage DAG for distributed execution.
 // Returns stages with dependency ordering suitable for coordinator dispatch.
 func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]Stage, error) {
+	p.planCtx = ctx // store for scalar subquery evaluation during stage generation
+	if len(node.CTEs) > 0 {
+		p.ctes = node.CTEs
+	}
 	// Ensure scan nodes have column metadata — needed by fixJoinKeyOrder
 	// to assign shuffle keys to the correct child side.
 	p.AnnotateScanColumns(ctx, node)
@@ -821,6 +922,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		groupBy := make([]string, len(node.GroupBy))
 		copy(groupBy, node.GroupBy)
 
+		// Phase 1: partial aggregate (coordinator splits into parallel tasks at runtime)
 		stage := Stage{
 			ID:          stageID,
 			Type:        "aggregate",
@@ -831,6 +933,17 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// Only depend on leaf stages from subtree (not transitive deps).
 		stage.Dependencies = leafStages((*stages)[preCount:])
 		*stages = append(*stages, stage)
+
+		// Phase 2: final aggregate (single task re-aggregates partial results)
+		finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
+		*stages = append(*stages, Stage{
+			ID:           finalStageID,
+			Type:         "final_aggregate",
+			Tasks:        1,
+			GroupByCols:  groupBy,
+			AggSpecs:     aggSpecs,
+			Dependencies: []string{stageID},
+		})
 
 	case logical.NodeSort:
 		preCount := len(*stages)
@@ -1064,7 +1177,11 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				} else if pred.ASTExpr != nil {
 					exprStr = pred.ASTExpr.String()
 				}
+				// Resolve scalar subqueries in-place — workers don't have catalog
+				// access to execute them. The planner evaluates subqueries here
+				// during stage generation and substitutes literal results.
 				if exprStr != "" {
+					exprStr = p.resolveFilterSubqueries(exprStr)
 					lastStage.FilterExprs = append(lastStage.FilterExprs, exprStr)
 				}
 			}

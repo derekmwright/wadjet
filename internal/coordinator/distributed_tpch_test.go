@@ -129,10 +129,28 @@ func TestDistributedTPCH(t *testing.T) {
 		qNum     int
 		expected int
 	}{
+		{1, 6},
 		{2, 5},
+		{3, 10},
+		{4, 5},
+		{5, 5},
+		{6, 1},
 		{7, 4},
 		{8, 2},
+		{9, 150},
+		{10, 20},
+		{11, 235},
+		{12, 2},
+		{13, 100},
+		{14, 1},
+		{15, 1},
+		{16, 293},
+		{17, 1},
+		{18, 0}, // 0 rows at SF0.01
+		{19, 1},
+		{20, 3},
 		{21, 1},
+		{22, 0}, // 0 rows at SF0.01
 	}
 
 	t.Logf("Worker count: %d", coord.workers.Count())
