@@ -294,19 +294,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			"buildAlias", s.BuildTableAlias)
 	}
 
-	// Deep join chain detection: if the plan has 4+ join stages, route the
-	// entire query to a single worker as a standalone pipeline. The S3
-	// materialization overhead of N join stages exceeds the parallelism
-	// benefit — standalone pipeline mode streams through all joins in-memory.
-	joinCount := 0
-	for _, s := range physStages {
-		if strings.Contains(s.Type, "join") {
-			joinCount++
-		}
-	}
-	if joinCount >= 4 {
-		c.logger.Info("deep join chain detected, routing to single worker pipeline",
-			"query", queryID, "join_stages", joinCount)
+	// Cost-based routing: compare S3 materialization overhead of distributed
+	// execution (shuffle/sort stages) against parallelism benefit of splitting
+	// scans across workers. Route as single-worker pipeline when overhead
+	// exceeds benefit.
+	if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
+		c.logger.Info("routing to single worker pipeline (cost-based)",
+			"query", queryID, "stages", len(physStages))
 		physStages = []physical.Stage{{
 			ID:    "pipeline-0",
 			Type:  "pipeline",

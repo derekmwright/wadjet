@@ -686,6 +686,56 @@ func EstimateCost(stages []Stage, node *logical.Node) QueryCost {
 	return cost
 }
 
+// ShouldRoutePipeline returns true when a query should be routed to a single
+// worker as a standalone pipeline rather than distributed across workers.
+//
+// The decision compares estimated S3 materialization overhead from shuffle/sort
+// stages against the parallelism benefit of distributing scans. Each shuffle
+// stage writes intermediate results to S3 and reads them back (~2.5s per stage
+// at SF10). This overhead dominates for queries where standalone parallel
+// pipeline execution (16 cores) already processes the data efficiently.
+func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
+	if workerCount <= 1 {
+		return true
+	}
+
+	var shuffleStages, sortStages int
+	var totalScanBytes int64
+	for _, s := range stages {
+		switch {
+		case s.Type == "shuffle":
+			shuffleStages++
+		case s.Type == "sort" || s.Type == "merge_sort":
+			sortStages++
+		case s.Type == "scan":
+			totalScanBytes += s.EstimatedBytes
+		}
+	}
+
+	// Each shuffle stage incurs S3 write + read + task dispatch overhead.
+	// Measured at SF10: ~2.5s per shuffle stage (write partitioned Parquet,
+	// read back on downstream workers, NATS task dispatch latency).
+	const shuffleCostSec = 2.5
+	// Sort stages write intermediate results to S3 for merge_sort.
+	const sortCostSec = 1.5
+	// Base coordination overhead per query (planner, task creation, result merge).
+	const baseCostSec = 1.0
+
+	distributedOverhead := float64(shuffleStages)*shuffleCostSec +
+		float64(sortStages)*sortCostSec + baseCostSec
+
+	// Parallelism benefit: workers split scan I/O. Standalone achieves
+	// ~500 MB/s aggregate S3 read throughput with parallel pipeline on
+	// 16 cores. Distribution across N workers multiplies this, minus
+	// dispatch latency.
+	const scanBandwidthBytesPerSec = 500 * 1024 * 1024 // 500 MB/s per node
+	standaloneTimeSec := float64(totalScanBytes) / scanBandwidthBytesPerSec
+	distributedScanTimeSec := standaloneTimeSec/float64(workerCount) + baseCostSec
+	parallelismBenefit := standaloneTimeSec - distributedScanTimeSec
+
+	return distributedOverhead > parallelismBenefit
+}
+
 func hasFilterOrPartition(n *logical.Node) bool {
 	if n == nil {
 		return false
