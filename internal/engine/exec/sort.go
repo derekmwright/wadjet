@@ -465,6 +465,13 @@ func gatherVector(dst, src *batch.Vector, srcRows []int) {
 			}
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		// Pre-calculate total byte size to avoid growslice in Set's append.
+		totalBytes := 0
+		srcOff := src.BytesData.Offsets
+		for _, si := range srcRows {
+			totalBytes += int(srcOff[si+1] - srcOff[si])
+		}
+		dst.BytesData.PreAllocBytes(totalBytes)
 		if !hasNulls {
 			for di, si := range srcRows {
 				dst.BytesData.Set(di, src.BytesData.Value(si))
