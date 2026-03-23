@@ -88,11 +88,63 @@ func getInt32Data(v *batch.Vector) []int32     { return v.Int32Data }
 func getFloat64Data(v *batch.Vector) []float64 { return v.Float64Data }
 func getFloat32Data(v *batch.Vector) []float32 { return v.Float32Data }
 
+// compareFilterBool creates a FilterKernel for boolean columns.
+// Only Eq and Ne are meaningful for booleans.
+func compareFilterBool(op CompareOp, val bool) FilterKernel {
+	wantTrue := (op == OpEq && val) || (op == OpNe && !val)
+	return func(vec *batch.Vector, sel []uint32, vecLen int, outSel []uint32) []uint32 {
+		data := vec.BoolData
+		out := outSel[:0]
+		hasNulls := vec.Nulls.HasNulls()
+		if sel != nil {
+			if hasNulls {
+				for _, idx := range sel {
+					if !vec.Nulls.IsNullFast(int(idx)) && data[idx] == wantTrue {
+						out = append(out, idx)
+					}
+				}
+			} else {
+				for _, idx := range sel {
+					if data[idx] == wantTrue {
+						out = append(out, idx)
+					}
+				}
+			}
+		} else {
+			if hasNulls {
+				for i := 0; i < vecLen; i++ {
+					if !vec.Nulls.IsNullFast(i) && data[i] == wantTrue {
+						out = append(out, uint32(i))
+					}
+				}
+			} else {
+				for i := 0; i < vecLen; i++ {
+					if data[i] == wantTrue {
+						out = append(out, uint32(i))
+					}
+				}
+			}
+		}
+		return out
+	}
+}
+
+func toBool(v any) bool {
+	switch tv := v.(type) {
+	case bool:
+		return tv
+	default:
+		return false
+	}
+}
+
 // ResolveFilterKernel creates a FilterKernel for comparing a column of the
 // given type against a constant value. The type dispatch happens once here;
 // the returned function has no type switches in its inner loop.
 func ResolveFilterKernel(typ batch.TypeID, op CompareOp, value any) FilterKernel {
 	switch typ {
+	case batch.TypeBool:
+		return compareFilterBool(op, toBool(value))
 	case batch.TypeInt64, batch.TypeTimestamp:
 		return compareFilterImpl(getInt64Data, toInt64(value), op)
 	case batch.TypeInt32:

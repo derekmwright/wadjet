@@ -3503,6 +3503,11 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 				}
 			}
 		}
+	case *expr.IsNull:
+		// col IS NULL / col IS NOT NULL — vectorized null bitmap scan
+		if col, ok := v.Operand.(*expr.ColRef); ok {
+			return []exec.UnaryOperator{exec.NewNullCheckFilter(col.Name, !v.Not)}
+		}
 	case *expr.Not:
 		// NOT (expr) — try to vectorize the inner expression
 		inner := extractFilterOps(v.Operand)
@@ -3817,7 +3822,7 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 			col := cleanExpr(strings.TrimSpace(parts[0]))
 			valStr := strings.TrimSpace(parts[1])
 			val := parseValue(valStr)
-			return exec.NewFilter(exec.ColumnCompare(col, o.op, val))
+			return exec.NewKernelFilter(col, o.op, val)
 		}
 	}
 
@@ -3827,23 +3832,23 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 		col := cleanExpr(strings.TrimSpace(raw[:idx]))
 		pattern := strings.TrimSpace(raw[idx+len(" NOT LIKE "):])
 		pattern = strings.Trim(pattern, "'")
-		return exec.NewFilter(exec.ColumnLike(col, pattern, true))
+		return exec.NewLikeFilter(col, pattern, true)
 	}
 	if idx := strings.Index(upper, " LIKE "); idx >= 0 {
 		col := cleanExpr(strings.TrimSpace(raw[:idx]))
 		pattern := strings.TrimSpace(raw[idx+len(" LIKE "):])
 		pattern = strings.Trim(pattern, "'")
-		return exec.NewFilter(exec.ColumnLike(col, pattern, false))
+		return exec.NewLikeFilter(col, pattern, false)
 	}
 
-	// IS NULL / IS NOT NULL
+	// IS NULL / IS NOT NULL — vectorized null bitmap scan
 	if strings.Contains(upper, "IS NOT NULL") {
 		col := cleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NOT NULL")]))
-		return exec.NewFilter(exec.ColumnCompare(col, exec.OpIsNotNull, nil))
+		return exec.NewNullCheckFilter(col, false)
 	}
 	if strings.Contains(upper, "IS NULL") {
 		col := cleanExpr(strings.TrimSpace(raw[:strings.Index(upper, "IS NULL")]))
-		return exec.NewFilter(exec.ColumnCompare(col, exec.OpIsNull, nil))
+		return exec.NewNullCheckFilter(col, true)
 	}
 
 	// BETWEEN: "col between X and Y" → col >= X AND col <= Y
@@ -3854,27 +3859,26 @@ func parseSimplePredicate(raw string) exec.UnaryOperator {
 		if andIdx >= 0 {
 			lo := parseValue(strings.TrimSpace(rest[:andIdx]))
 			hi := parseValue(strings.TrimSpace(rest[andIdx+len(" AND "):]))
-			return exec.NewFilter(exec.And(
-				exec.ColumnCompare(col, exec.OpGe, lo),
-				exec.ColumnCompare(col, exec.OpLe, hi),
-			))
+			return exec.NewChainFilter([]exec.UnaryOperator{
+				exec.NewKernelFilter(col, exec.OpGe, lo),
+				exec.NewKernelFilter(col, exec.OpLe, hi),
+			})
 		}
 	}
 
-	// IN: "col in (v1, v2, v3)" → col = v1 OR col = v2 OR col = v3
+	// IN: "col in (v1, v2, v3)" → vectorized set membership
 	if idx := strings.Index(upper, " IN "); idx >= 0 {
 		col := cleanExpr(strings.TrimSpace(raw[:idx]))
 		rest := strings.TrimSpace(raw[idx+len(" IN "):])
 		rest = strings.TrimPrefix(rest, "(")
 		rest = strings.TrimSuffix(rest, ")")
 		parts := strings.Split(rest, ",")
-		var preds []exec.Predicate
+		values := make([]any, 0, len(parts))
 		for _, part := range parts {
-			val := parseValue(strings.TrimSpace(part))
-			preds = append(preds, exec.ColumnCompare(col, exec.OpEq, val))
+			values = append(values, parseValue(strings.TrimSpace(part)))
 		}
-		if len(preds) > 0 {
-			return exec.NewFilter(exec.Or(preds...))
+		if len(values) > 0 {
+			return exec.NewInFilter(col, values, false)
 		}
 	}
 
