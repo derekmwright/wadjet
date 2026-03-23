@@ -102,6 +102,29 @@ func (h *intHashTable) Get(key int64) (int32, bool) {
 	}
 }
 
+// GetOrInsert looks up a key. If found, returns the value and true.
+// If not found, inserts with the given value and returns the value and false.
+// Combines lookup and insert in a single probe chain (one hash, one walk).
+func (h *intHashTable) GetOrInsert(key int64, val int32) (int32, bool) {
+	idx := fibHash(key) & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.key == intHashEmpty {
+			e.key = key
+			e.val = val
+			h.size++
+			if h.size*10 > len(h.entries)*7 {
+				h.grow()
+			}
+			return val, false
+		}
+		if e.key == key {
+			return e.val, true
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
 // Len returns the number of entries in the table.
 func (h *intHashTable) Len() int { return h.size }
 

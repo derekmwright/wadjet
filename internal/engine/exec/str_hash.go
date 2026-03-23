@@ -1,5 +1,10 @@
 package exec
 
+import (
+	"bytes"
+	"encoding/binary"
+)
+
 // strHashTable is an open-addressing hash table mapping byte-slice keys to int32 values.
 // Used for string-keyed GROUP BY to avoid GC overhead of Go's built-in map[string].
 //
@@ -45,14 +50,20 @@ func newStrHashTable(n int) *strHashTable {
 	}
 }
 
-// wyhash-inspired fast hash for byte slices.
-// Uses the same mixing constants as wyhash for excellent distribution.
+// strHash hashes a byte slice using FNV-1a-style mixing.
+// Processes 8 bytes at a time for keys >= 8 bytes to reduce loop iterations.
 func strHash(key []byte) uint64 {
-	var h uint64 = 0x517cc1b727220a95 // seed
+	h := uint64(0x517cc1b727220a95) // seed
+	// Process 8 bytes at a time
+	for len(key) >= 8 {
+		k := binary.LittleEndian.Uint64(key)
+		h = (h ^ k) * 0x9e3779b97f4a7c15
+		key = key[8:]
+	}
+	// Process remaining bytes
 	for _, b := range key {
 		h = (h ^ uint64(b)) * 0x9e3779b97f4a7c15
 	}
-	// Final mix
 	h ^= h >> 33
 	h *= 0xff51afd7ed558ccd
 	h ^= h >> 33
@@ -179,15 +190,7 @@ func (h *strHashTable) ForEach(fn func(key []byte)) {
 }
 
 // strKeyEqual compares two byte slices for equality.
-// Inlined by the compiler for short keys.
+// Uses bytes.Equal which has assembly-optimized comparison.
 func strKeyEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return bytes.Equal(a, b)
 }
