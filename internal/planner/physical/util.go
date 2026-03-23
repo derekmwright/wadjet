@@ -24,6 +24,26 @@ func readAll(rc io.ReadCloser) ([]byte, error) {
 	return io.ReadAll(rc)
 }
 
+// readAllSized reads an io.ReadCloser into a pre-allocated buffer when the
+// file size is known. Avoids io.ReadAll's grow-from-512-bytes pattern which
+// causes O(log n) reallocations and copies for large files (e.g., 40MB Parquet
+// file triggers ~17 doublings with ~80MB of intermediate copy overhead).
+func readAllSized(rc io.ReadCloser, sizeBytes int64) ([]byte, error) {
+	if sizeBytes <= 0 {
+		return io.ReadAll(rc)
+	}
+	buf := make([]byte, sizeBytes)
+	n, err := io.ReadFull(rc, buf)
+	if err == io.ErrUnexpectedEOF {
+		// File was smaller than expected — return what we got
+		return buf[:n], nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
 func bytesReader(data []byte) *bytes.Reader {
 	return bytes.NewReader(data)
 }
@@ -454,7 +474,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 				if err != nil {
 					continue
 				}
-				data, err := readAll(rc)
+				data, err := readAllSized(rc, entry.SizeBytes)
 				rc.Close()
 				if err != nil {
 					continue

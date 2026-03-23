@@ -1633,10 +1633,12 @@ func (h *HashJoin) FixKeyAssignment() {
 func (h *HashJoin) Probe() *HashJoinProbe {
 	// Pre-allocate scratch buffers to avoid repeated slice growth during
 	// parallel pipeline execution. Each clone gets its own buffers.
+	// pairsBuf sized at 16x batch size to handle 1:N join fan-out without
+	// growslice (avg ~4:1 for TPC-H lineitem→orders, with skew up to 8-10x).
 	return &HashJoinProbe{
 		join:     h,
-		pairsBuf: make([]matchPair, 0, 4*batch.DefaultBatchSize),
-		indexBuf: make([]int, 0, 4*batch.DefaultBatchSize),
+		pairsBuf: make([]matchPair, 0, 16*batch.DefaultBatchSize),
+		indexBuf: make([]int, 0, 16*batch.DefaultBatchSize),
 		keyBuf:   make([]byte, 0, 128),
 	}
 }
@@ -1702,8 +1704,9 @@ func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) {
 }
 
 // joinOutputPoolSize is the capacity for join output batch pooling.
-// 4x DefaultBatchSize handles most 1:N join outputs without fresh allocation.
-const joinOutputPoolSize = 4 * batch.DefaultBatchSize
+// 16x DefaultBatchSize handles most 1:N join outputs without fresh allocation,
+// including skewed batches with high fan-out.
+const joinOutputPoolSize = 16 * batch.DefaultBatchSize
 
 // matchPair tracks a probe-build row match for output construction.
 // probeRow is int32 (batch sizes ≤8192) to compact the struct from 24→16 bytes,
