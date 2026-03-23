@@ -447,13 +447,33 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// scans across workers. Route as single-worker pipeline when overhead
 	// exceeds benefit.
 	if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
-		c.logger.Info("routing to single worker pipeline (cost-based)",
-			"query", queryID, "stages", len(physStages))
-		physStages = []physical.Stage{{
-			ID:    "pipeline-0",
-			Type:  "pipeline",
-			Tasks: 1,
-		}}
+		if physical.ShouldSplitScan(physStages, c.workers.Count()) {
+			// Scan-split pipeline: distribute S3 reads across workers,
+			// run compute (joins/aggs/sorts) on a single pipeline worker.
+			// This avoids shuffle overhead while parallelizing I/O.
+			scanStages := physical.ExtractScanStages(physStages)
+			scanDeps := make([]string, len(scanStages))
+			for i, s := range scanStages {
+				scanDeps[i] = s.ID
+			}
+			pipelineStage := physical.Stage{
+				ID:           "pipeline-0",
+				Type:         "pipeline",
+				Tasks:        1,
+				Dependencies: scanDeps,
+			}
+			physStages = append(scanStages, pipelineStage)
+			c.logger.Info("routing to scan-split pipeline (cost-based)",
+				"query", queryID, "scan_stages", len(scanStages))
+		} else {
+			c.logger.Info("routing to single worker pipeline (cost-based)",
+				"query", queryID, "stages", len(physStages))
+			physStages = []physical.Stage{{
+				ID:    "pipeline-0",
+				Type:  "pipeline",
+				Tasks: 1,
+			}}
+		}
 	}
 
 	// Expand scans to target remote clusters when table exists on multiple clusters
@@ -599,7 +619,7 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 	case "window":
 		tasks = c.createWindowTasks(queryID, stage, resultPrefix, depResults)
 	case "pipeline":
-		tasks = c.createPipelineTasks(queryID, stage, resultPrefix)
+		tasks = c.createPipelineTasks(queryID, stage, resultPrefix, depResults)
 	default:
 		return nil
 	}
@@ -625,9 +645,14 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 // createPipelineTasks creates a single task that runs the entire query as a
 // standalone pipeline on one worker. Used for deep join chains where the S3
 // materialization overhead of N stages exceeds the parallelism benefit.
-func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, resultPrefix string) []distributed.Task {
+//
+// When the pipeline depends on pre-scanned data (scan-split mode), the task
+// includes PreScannedInputs mapping table names to their scan result files.
+// The worker reads these instead of scanning from the object store directly.
+func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
 	c.mu.Lock()
 	qm := c.queryMetas[queryID]
+	specs := c.stageSpecs[queryID]
 	c.mu.Unlock()
 
 	sqlText := ""
@@ -635,7 +660,7 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 		sqlText = qm.sqlText
 	}
 
-	return []distributed.Task{{
+	task := distributed.Task{
 		ID:           uuid.New().String()[:8],
 		QueryID:      queryID,
 		StageID:      stage.ID,
@@ -645,7 +670,22 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 		ResultBucket: c.config.ResultBucket,
 		ResultPrefix: resultPrefix,
 		CreatedAt:    time.Now(),
-	}}
+	}
+
+	// Scan-split mode: populate pre-scanned inputs from dependency results
+	if len(stage.Dependencies) > 0 && depResults != nil {
+		preScanned := make(map[string][]string)
+		for _, depID := range stage.Dependencies {
+			if spec, ok := specs[depID]; ok && spec.Type == "scan" && spec.TableName != "" {
+				preScanned[spec.TableName] = append(preScanned[spec.TableName], depResults[depID]...)
+			}
+		}
+		if len(preScanned) > 0 {
+			task.PreScannedInputs = preScanned
+		}
+	}
+
+	return []distributed.Task{task}
 }
 
 // coalesceScanTargetBytes is the minimum total bytes per scan task.

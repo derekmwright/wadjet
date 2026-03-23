@@ -1088,6 +1088,48 @@ func TestSliceSourceClose(t *testing.T) {
 	}
 }
 
+func TestBatchSource(t *testing.T) {
+	ctx := context.Background()
+
+	b1 := &batch.RecordBatch{Len: 3}
+	b2 := &batch.RecordBatch{Len: 5}
+	source := NewBatchSource([]*batch.RecordBatch{b1, b2})
+
+	if err := source.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := source.Next(ctx)
+	if err != nil || got != b1 {
+		t.Fatalf("expected b1, got %v err %v", got, err)
+	}
+
+	got, err = source.Next(ctx)
+	if err != nil || got != b2 {
+		t.Fatalf("expected b2, got %v err %v", got, err)
+	}
+
+	got, err = source.Next(ctx)
+	if err != nil || got != nil {
+		t.Fatalf("expected nil after exhaustion, got %v err %v", got, err)
+	}
+
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBatchSourceEmpty(t *testing.T) {
+	ctx := context.Background()
+	source := NewBatchSource(nil)
+	_ = source.Init(ctx)
+
+	got, err := source.Next(ctx)
+	if err != nil || got != nil {
+		t.Fatalf("expected nil from empty source, got %v err %v", got, err)
+	}
+}
+
 // --- compareAny tests ---
 
 func TestCompareAny(t *testing.T) {

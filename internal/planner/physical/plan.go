@@ -145,6 +145,11 @@ type Planner struct {
 	spillMgr       *memory.SpillManager // shared per-query spill manager (lazy-initialized)
 	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
 	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
+
+	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
+	// When populated, buildScan uses these batches instead of reading from the
+	// object store, allowing parallel scan I/O with single-worker compute.
+	MaterializedInputs map[string][]*batch.RecordBatch
 }
 
 // getSpillManager returns a shared per-query spill manager, creating it on
@@ -1013,6 +1018,48 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 	return distributedOverhead > parallelismBenefit
 }
 
+// ShouldSplitScan determines whether a pipeline-mode query should distribute
+// its scan I/O across workers while keeping compute on a single worker.
+// This is the middle ground between full pipeline (all on one worker) and full
+// distributed (shuffle between stages): parallel S3 reads with zero shuffle cost.
+//
+// Returns true when the scan is large enough that parallel I/O outweighs the
+// task dispatch + result materialization overhead (~200ms per task).
+func ShouldSplitScan(stages []Stage, workerCount int) bool {
+	if workerCount <= 1 {
+		return false
+	}
+
+	var totalScanBytes int64
+	var totalScanFiles int
+	for _, s := range stages {
+		if s.Type == "scan" {
+			totalScanBytes += s.EstimatedBytes
+			totalScanFiles += len(s.ScanFiles)
+		}
+	}
+
+	// Need enough files to distribute across workers and enough data to
+	// justify the task dispatch + WSHF result materialization overhead.
+	const minScanBytes = 256 * 1024 * 1024 // 256 MB
+	const minScanFiles = 4
+
+	return totalScanBytes >= minScanBytes && totalScanFiles >= minScanFiles
+}
+
+// ExtractScanStages returns only the scan stages from a stage list.
+// Used to build scan-split pipeline plans where scans are distributed
+// and compute runs on a single pipeline worker.
+func ExtractScanStages(stages []Stage) []Stage {
+	var scans []Stage
+	for _, s := range stages {
+		if s.Type == "scan" {
+			scans = append(scans, s)
+		}
+	}
+	return scans
+}
+
 func hasFilterOrPartition(n *logical.Node) bool {
 	if n == nil {
 		return false
@@ -1804,6 +1851,13 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
+	// Scan-split pipeline mode: use pre-scanned data instead of reading from S3
+	if p.MaterializedInputs != nil {
+		if batches, ok := p.MaterializedInputs[node.TableName]; ok && len(batches) > 0 {
+			return exec.NewBatchSource(batches), nil, &exec.CollectSink{}, nil
+		}
+	}
+
 	// Table functions (read_json, read_csv, etc.) bypass the catalog scan
 	if node.IsTableFunc {
 		if node.FuncName == "unnest" {

@@ -1341,6 +1341,24 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	if e.memoryBudget > 0 {
 		planner.MemoryBudget = e.memoryBudget
 	}
+
+	// Scan-split pipeline mode: read pre-scanned data from distributed scan
+	// tasks and inject as materialized inputs. The physical planner will use
+	// BatchSource instead of scanning from the object store.
+	if len(task.PreScannedInputs) > 0 {
+		materializedInputs := make(map[string][]*batch.RecordBatch, len(task.PreScannedInputs))
+		for tableName, files := range task.PreScannedInputs {
+			batches, readErr := e.readInputFilesBatches(ctx, bucket, files, nil)
+			if readErr != nil {
+				return fmt.Errorf("reading pre-scanned input for %s: %w", tableName, readErr)
+			}
+			materializedInputs[tableName] = batches
+			e.logger.Debug("loaded pre-scanned input",
+				"table", tableName, "files", len(files), "batches", len(batches))
+		}
+		planner.MaterializedInputs = materializedInputs
+	}
+
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
 		return fmt.Errorf("physical plan: %w", err)

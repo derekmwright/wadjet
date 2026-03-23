@@ -33,6 +33,10 @@ type Task struct {
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline
 	DataBucket string `json:"data_bucket,omitempty"` // bucket containing source data (tables)
 
+	// Scan-split pipeline: table scans distributed across workers, compute on one worker.
+	// Maps table name → result file paths from pre-scanned data.
+	PreScannedInputs map[string][]string `json:"pre_scanned_inputs,omitempty"`
+
 	// Scan-specific
 	Files           []string          `json:"files,omitempty"`
 	PartitionFilter map[string]string `json:"partition_filter,omitempty"`
