@@ -12,8 +12,10 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/wadjet"
@@ -30,6 +32,7 @@ type Server struct {
 	done         chan struct{}
 	tlsConfig    *tls.Config
 	maxConns     int
+	queryTimeout time.Duration
 	authProvider *auth.Provider // nil = no auth enforcement
 }
 
@@ -38,6 +41,7 @@ type Config struct {
 	Addr           string         // listen address, e.g. ":5433"
 	TLSConfig      *tls.Config    // nil = plain TCP
 	MaxConnections int            // 0 = unlimited
+	QueryTimeout   time.Duration  // 0 = no timeout
 	AuthProvider   *auth.Provider // nil = no auth enforcement
 }
 
@@ -52,6 +56,7 @@ func NewServer(db *wadjet.DB, cfg Config, logger *slog.Logger) *Server {
 		done:         make(chan struct{}),
 		tlsConfig:    cfg.TLSConfig,
 		maxConns:     cfg.MaxConnections,
+		queryTimeout: cfg.QueryTimeout,
 		authProvider: cfg.AuthProvider,
 	}
 }
@@ -67,9 +72,9 @@ func (s *Server) Start(addr string) error {
 		ln = netutil.LimitListener(ln, s.maxConns)
 	}
 
-	if s.tlsConfig != nil {
-		ln = tls.NewListener(ln, s.tlsConfig)
-	}
+	// TLS is negotiated per-connection via the PostgreSQL SSLRequest protocol,
+	// not by wrapping the listener. The client sends SSLRequest, we respond 'S',
+	// then upgrade the raw connection to TLS before the regular StartupMessage.
 
 	s.listener = ln
 	s.logger.Info("PostgreSQL wire protocol server listening", "addr", addr,
@@ -129,7 +134,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		db:           s.db,
 		logger:       s.logger,
 		buf:          make([]byte, 0, 4096),
+		tlsConfig:    s.tlsConfig,
+		queryTimeout: s.queryTimeout,
 		stmts:        make(map[string]string),
+		sessionVars:  make(map[string]string),
 		txState:      'I',
 		authProvider: s.authProvider,
 	}
@@ -138,14 +146,19 @@ func (s *Server) handleConn(conn net.Conn) {
 
 // pgConn handles a single PostgreSQL client connection.
 type pgConn struct {
-	conn   net.Conn
-	db     *wadjet.DB
-	logger *slog.Logger
-	buf    []byte
+	conn         net.Conn
+	db           *wadjet.DB
+	logger       *slog.Logger
+	buf          []byte
+	tlsConfig    *tls.Config    // non-nil = offer TLS upgrade on SSLRequest
+	queryTimeout time.Duration  // server-level default; overridden by statement_timeout
 
 	// Authentication
 	authProvider *auth.Provider  // nil = no auth
 	identity     *auth.Identity  // set after successful auth
+
+	// Session variables (SET key = value)
+	sessionVars map[string]string
 
 	// Extended Query protocol state
 	preparedSQL     string            // last parsed statement SQL
@@ -223,8 +236,19 @@ func (c *pgConn) handleStartup() error {
 
 	// Handle SSL request (80877103)
 	if version == 80877103 {
-		// Decline SSL — send 'N'
-		c.conn.Write([]byte{'N'})
+		if c.tlsConfig != nil {
+			// Accept SSL — upgrade connection to TLS
+			c.conn.Write([]byte{'S'})
+			tlsConn := tls.Server(c.conn, c.tlsConfig)
+			if err := tlsConn.Handshake(); err != nil {
+				return fmt.Errorf("TLS handshake: %w", err)
+			}
+			c.conn = tlsConn
+			c.logger.Debug("pgwire TLS connection established")
+		} else {
+			// Decline SSL — send 'N'
+			c.conn.Write([]byte{'N'})
+		}
 		// Re-read the actual startup message
 		return c.handleStartup()
 	}
@@ -320,13 +344,50 @@ func (c *pgConn) authenticate(params map[string]string) error {
 	return nil
 }
 
-// queryContext returns a context enriched with the connection's identity.
-func (c *pgConn) queryContext() context.Context {
+// queryContext returns a context enriched with the connection's identity and timeout.
+func (c *pgConn) queryContext() (context.Context, context.CancelFunc) {
 	ctx := context.Background()
 	if c.identity != nil {
 		ctx = auth.ContextWithIdentity(ctx, c.identity)
 	}
-	return ctx
+	// Session-level statement_timeout overrides server default
+	timeout := c.queryTimeout
+	if v, ok := c.sessionVars["statement_timeout"]; ok {
+		if ms, err := strconv.ParseInt(v, 10, 64); err == nil && ms > 0 {
+			timeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+	if timeout > 0 {
+		return context.WithTimeout(ctx, timeout)
+	}
+	return ctx, func() {}
+}
+
+// handleSet parses "SET key = value" / "SET key TO value" and stores the session variable.
+func (c *pgConn) handleSet(sql string) {
+	// Strip "SET " prefix, handle optional "LOCAL" or "SESSION" keywords
+	s := strings.TrimSpace(sql[4:])
+	upper := strings.ToUpper(s)
+	if strings.HasPrefix(upper, "LOCAL ") || strings.HasPrefix(upper, "SESSION ") {
+		s = strings.TrimSpace(s[strings.IndexByte(s, ' ')+1:])
+	}
+
+	// Split on " = " or " TO "
+	var key, val string
+	if idx := strings.Index(strings.ToUpper(s), " TO "); idx >= 0 {
+		key = strings.TrimSpace(s[:idx])
+		val = strings.TrimSpace(s[idx+4:])
+	} else if idx := strings.IndexByte(s, '='); idx >= 0 {
+		key = strings.TrimSpace(s[:idx])
+		val = strings.TrimSpace(s[idx+1:])
+	} else {
+		return // can't parse, silently accept
+	}
+
+	// Strip quotes from value
+	val = strings.Trim(val, "'\"")
+	key = strings.ToLower(key)
+	c.sessionVars[key] = val
 }
 
 func (c *pgConn) handleQuery(sql string) {
@@ -367,8 +428,13 @@ func (c *pgConn) handleQuery(sql string) {
 		c.sendReadyForQuery()
 		return
 	}
-	if strings.HasPrefix(upper, "SET ") ||
-		strings.HasPrefix(upper, "RESET ") ||
+	if strings.HasPrefix(upper, "SET ") {
+		c.handleSet(sql)
+		c.sendCommandComplete("SET")
+		c.sendReadyForQuery()
+		return
+	}
+	if strings.HasPrefix(upper, "RESET ") ||
 		strings.HasPrefix(upper, "DISCARD ") ||
 		strings.HasPrefix(upper, "DEALLOCATE") {
 		c.sendCommandComplete("SET")
@@ -386,7 +452,8 @@ func (c *pgConn) handleQuery(sql string) {
 	if strings.HasPrefix(upper, "INSERT ") ||
 		strings.HasPrefix(upper, "UPDATE ") ||
 		strings.HasPrefix(upper, "DELETE ") {
-		ctx := c.queryContext()
+		ctx, cancel := c.queryContext()
+		defer cancel()
 		result, err := c.db.Execute(ctx, sql)
 		if err != nil {
 			c.sendError("ERROR", "42000", err.Error())
@@ -398,7 +465,8 @@ func (c *pgConn) handleQuery(sql string) {
 		return
 	}
 
-	ctx := c.queryContext()
+	ctx, cancel := c.queryContext()
+	defer cancel()
 	result, err := c.db.Query(ctx, sql)
 	if err != nil {
 		c.sendError("ERROR", "42000", err.Error())
@@ -580,7 +648,8 @@ func (c *pgConn) describeSQL(sql string) {
 	}
 
 	// Execute the real query to get typed column metadata
-	ctx := c.queryContext()
+	ctx, cancel := c.queryContext()
+	defer cancel()
 	result, err := c.db.Query(ctx, sql)
 	if err != nil {
 		// Can't describe — send NoData rather than error (the error
@@ -632,8 +701,12 @@ func (c *pgConn) handleExecute(payload []byte) {
 		c.sendCommandComplete("ROLLBACK")
 		return
 	}
-	if strings.HasPrefix(upper, "SET ") ||
-		strings.HasPrefix(upper, "RESET ") ||
+	if strings.HasPrefix(upper, "SET ") {
+		c.handleSet(sql)
+		c.sendCommandComplete("SET")
+		return
+	}
+	if strings.HasPrefix(upper, "RESET ") ||
 		strings.HasPrefix(upper, "DISCARD ") ||
 		strings.HasPrefix(upper, "DEALLOCATE") ||
 		strings.HasPrefix(upper, "CLOSE") {
@@ -646,7 +719,8 @@ func (c *pgConn) handleExecute(payload []byte) {
 		return
 	}
 
-	ctx := c.queryContext()
+	ctx, cancel := c.queryContext()
+	defer cancel()
 	result, err := c.db.Query(ctx, sql)
 	if err != nil {
 		c.sendError("ERROR", "42000", err.Error())
