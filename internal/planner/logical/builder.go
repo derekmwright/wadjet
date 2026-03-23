@@ -51,10 +51,14 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 				}
 				plan = NewJoin(plan, right, jt, joinCond)
 			} else {
-				right, err := resolveTableOrCTE(plansql.TableRef{
+				rightRef := plansql.TableRef{
 					Name:  join.RightTable,
 					Alias: join.RightAlias,
-				}, ctes)
+				}
+				if join.RightTableRef != nil {
+					rightRef = *join.RightTableRef
+				}
+				right, err := resolveTableOrCTE(rightRef, ctes)
 				if err != nil {
 					return nil, err
 				}
@@ -815,6 +819,8 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		node.FuncName = strings.ToLower(table.Name)
 		node.FuncArgs = table.FuncArgs
 		node.FuncNamedArgs = table.FuncNamedArgs
+		node.WithOrdinality = table.WithOrdinality
+		node.FuncColAliases = table.ColumnAliases
 		return node, nil
 	}
 

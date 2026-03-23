@@ -1806,6 +1806,13 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	// Table functions (read_json, read_csv, etc.) bypass the catalog scan
 	if node.IsTableFunc {
+		if node.FuncName == "unnest" {
+			source, err := newUnnestSource(node.FuncArgs, node.WithOrdinality, node.FuncColAliases)
+			if err != nil {
+				return nil, nil, nil, fmt.Errorf("unnest: %w", err)
+			}
+			return source, nil, &exec.CollectSink{}, nil
+		}
 		source, err := buildTableFunctionSource(node.FuncName, node.FuncArgs, node.FuncNamedArgs)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("table function %s: %w", node.FuncName, err)
