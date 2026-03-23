@@ -66,6 +66,84 @@ func (fa *flatAccumArrays) appendGroup() {
 	}
 }
 
+// ensureCapacity pre-grows all non-nil arrays so that n additional
+// appendGroup calls won't trigger growslice reallocation. Called
+// before the hash lookup phase with n = batch row count as an upper
+// bound on new groups this batch can create.
+func (fa *flatAccumArrays) ensureCapacity(n int) {
+	fa.count = ensureSliceCap(fa.count, n)
+	if fa.sumI64 != nil {
+		fa.sumI64 = ensureSliceCap(fa.sumI64, n)
+	}
+	if fa.sumF64 != nil {
+		fa.sumF64 = ensureSliceCapF64(fa.sumF64, n)
+	}
+	if fa.sumDec != nil {
+		fa.sumDec = ensureSliceCapInt128(fa.sumDec, n)
+	}
+	if fa.minI64 != nil {
+		fa.minI64 = ensureSliceCap(fa.minI64, n)
+	}
+	if fa.maxI64 != nil {
+		fa.maxI64 = ensureSliceCap(fa.maxI64, n)
+	}
+	if fa.minF64 != nil {
+		fa.minF64 = ensureSliceCapF64(fa.minF64, n)
+	}
+	if fa.maxF64 != nil {
+		fa.maxF64 = ensureSliceCapF64(fa.maxF64, n)
+	}
+	if fa.minDec != nil {
+		fa.minDec = ensureSliceCapInt128(fa.minDec, n)
+	}
+	if fa.maxDec != nil {
+		fa.maxDec = ensureSliceCapInt128(fa.maxDec, n)
+	}
+	if fa.hasMin != nil {
+		fa.hasMin = ensureSliceCapBool(fa.hasMin, n)
+	}
+	if fa.hasMax != nil {
+		fa.hasMax = ensureSliceCapBool(fa.hasMax, n)
+	}
+}
+
+// ensureSliceCap grows the capacity of s to fit n more appends without reallocation.
+func ensureSliceCap(s []int64, n int) []int64 {
+	if cap(s)-len(s) >= n {
+		return s
+	}
+	ns := make([]int64, len(s), len(s)+n)
+	copy(ns, s)
+	return ns
+}
+
+func ensureSliceCapF64(s []float64, n int) []float64 {
+	if cap(s)-len(s) >= n {
+		return s
+	}
+	ns := make([]float64, len(s), len(s)+n)
+	copy(ns, s)
+	return ns
+}
+
+func ensureSliceCapInt128(s []batch.Int128, n int) []batch.Int128 {
+	if cap(s)-len(s) >= n {
+		return s
+	}
+	ns := make([]batch.Int128, len(s), len(s)+n)
+	copy(ns, s)
+	return ns
+}
+
+func ensureSliceCapBool(s []bool, n int) []bool {
+	if cap(s)-len(s) >= n {
+		return s
+	}
+	ns := make([]bool, len(s), len(s)+n)
+	copy(ns, s)
+	return ns
+}
+
 // --- Generic scatter functions for SoA aggregate updates ---
 //
 // Each operates on contiguous arrays, eliminating per-row function pointer

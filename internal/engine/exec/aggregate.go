@@ -681,6 +681,14 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 	colIdx := h.aggColIdx
 	nAggs := len(h.Aggs)
 
+	// Pre-reserve accumulator capacity so per-group append() calls in the
+	// hash lookup loop don't trigger growslice reallocations. The batch size
+	// is an upper bound on new groups this batch can create.
+	batchRows := b.ActiveLen()
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].ensureCapacity(batchRows)
+	}
+
 	// Phase 1: Hash lookup — build group index array.
 	// gi[i] maps iteration index i to its group state index, or -1 for null keys.
 	var gi []int32
@@ -809,6 +817,12 @@ func (h *HashAggregate) consumeBatchDualIntGroup(b *batch.RecordBatch) {
 	intIdx := h.intGroupIndex
 	colIdx := h.aggColIdx
 	nAggs := len(h.Aggs)
+
+	// Pre-reserve accumulator capacity for this batch.
+	batchRows := b.ActiveLen()
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].ensureCapacity(batchRows)
+	}
 
 	// Phase 1: Hash lookup — build group index array with chain verification.
 	var gi []int32
@@ -1041,6 +1055,12 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 	strIdx := h.strGroupIndex
 	colIdx := h.aggColIdx
 	nAggs := len(h.Aggs)
+
+	// Pre-reserve accumulator capacity (same rationale as consumeBatchIntGroup).
+	batchRows := b.ActiveLen()
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].ensureCapacity(batchRows)
+	}
 
 	// Phase 1: Hash lookup — build group index array.
 	var gi []int32

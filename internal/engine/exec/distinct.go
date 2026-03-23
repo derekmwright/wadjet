@@ -11,6 +11,7 @@ import (
 type Distinct struct {
 	seen   map[string]struct{}
 	keyBuf []byte
+	selBuf []uint32 // reused across Execute calls to avoid per-batch allocation
 }
 
 // NewDistinct creates a new Distinct operator.
@@ -25,7 +26,10 @@ func (d *Distinct) Init(_ context.Context) error {
 }
 
 func (d *Distinct) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
-	sel := make([]uint32, 0, in.Len)
+	if cap(d.selBuf) < in.Len {
+		d.selBuf = make([]uint32, 0, in.Len)
+	}
+	sel := d.selBuf[:0]
 
 	checkRow := func(row int) {
 		key := d.rowKey(in, row)
@@ -49,6 +53,7 @@ func (d *Distinct) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Rec
 	}
 
 	in.Sel = sel
+	d.selBuf = sel
 	return in, nil
 }
 
