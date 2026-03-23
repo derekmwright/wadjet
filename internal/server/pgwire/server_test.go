@@ -14,6 +14,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -1269,5 +1270,251 @@ func TestPGWireSetSessionVars(t *testing.T) {
 		}
 	}
 	client.terminate()
+}
+
+// sendCopyData sends a CopyData message ('d') with the given payload.
+func (c *pgClient) sendCopyData(data string) {
+	c.writeMsg('d', []byte(data))
+}
+
+// sendCopyDone sends a CopyDone message ('c').
+func (c *pgClient) sendCopyDone() {
+	c.writeMsg('c', nil)
+}
+
+func TestPGWireCopyFromSTDIN(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("test", "wadjet")
+
+	// Send COPY command
+	copySQL := "COPY users (id, name, score) FROM STDIN"
+	client.writeMsg('Q', append([]byte(copySQL), 0))
+
+	// Expect CopyInResponse ('G')
+	typ, payload, err := client.readMsg()
+	if err != nil {
+		t.Fatalf("reading CopyInResponse: %v", err)
+	}
+	if typ != 'G' {
+		if typ == 'E' {
+			t.Fatalf("got error instead of CopyInResponse: %s", client.parseError(payload))
+		}
+		t.Fatalf("expected CopyInResponse ('G'), got '%c'", typ)
+	}
+
+	// Verify format = text (0) and 3 columns
+	if payload[0] != 0 {
+		t.Errorf("expected text format (0), got %d", payload[0])
+	}
+	numCols := int(binary.BigEndian.Uint16(payload[1:3]))
+	if numCols != 3 {
+		t.Errorf("expected 3 columns, got %d", numCols)
+	}
+
+	// Send CopyData with tab-delimited rows
+	client.sendCopyData("10\talice2\t99.9\n")
+	client.sendCopyData("11\tbob2\t88.8\n")
+	client.sendCopyData("12\tcarol2\t77.7\n")
+
+	// Send CopyDone
+	client.sendCopyDone()
+
+	// Expect CommandComplete + ReadyForQuery
+	typ, payload, err = client.readMsg()
+	if err != nil {
+		t.Fatalf("reading CommandComplete: %v", err)
+	}
+	if typ == 'E' {
+		t.Fatalf("got error: %s", client.parseError(payload))
+	}
+	if typ != 'C' {
+		t.Fatalf("expected CommandComplete ('C'), got '%c'", typ)
+	}
+	tag := readCString(payload)
+	if tag != "COPY 3" {
+		t.Errorf("expected 'COPY 3', got %q", tag)
+	}
+
+	// ReadyForQuery
+	typ, _, err = client.readMsg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != 'Z' {
+		t.Fatalf("expected ReadyForQuery, got '%c'", typ)
+	}
+
+	// Verify the data was ingested by querying all rows and checking count
+	_, rows, _ := client.simpleQuery("SELECT id, name FROM users ORDER BY id")
+	// Original 3 rows + 3 COPY'd rows = 6
+	if len(rows) != 6 {
+		t.Fatalf("expected 6 total rows after COPY, got %d: %v", len(rows), rows)
+	}
+	// Last 3 rows should be the COPY'd data (ordered by id: 1,2,3,10,11,12)
+	if rows[3][1] != "alice2" {
+		t.Errorf("expected COPY'd name='alice2', got %q", rows[3][1])
+	}
+	if rows[4][1] != "bob2" {
+		t.Errorf("expected COPY'd name='bob2', got %q", rows[4][1])
+	}
+
+	client.terminate()
+}
+
+func TestPGWireCopyFromSTDIN_AllColumns(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("test", "wadjet")
+
+	// COPY without column list = all columns in schema order
+	client.writeMsg('Q', append([]byte("COPY users FROM STDIN"), 0))
+
+	typ, _, err := client.readMsg()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typ != 'G' {
+		t.Fatalf("expected CopyInResponse, got '%c'", typ)
+	}
+
+	client.sendCopyData("20\tdan\t70.0\n")
+	client.sendCopyDone()
+
+	typ, payload, _ := client.readMsg()
+	if typ == 'E' {
+		t.Fatalf("got error: %s", client.parseError(payload))
+	}
+	tag := readCString(payload)
+	if tag != "COPY 1" {
+		t.Errorf("expected 'COPY 1', got %q", tag)
+	}
+
+	// Drain ReadyForQuery
+	client.readMsg()
+
+	client.terminate()
+}
+
+func TestPGWireCopyFromSTDIN_NullValues(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Create a table with nullable columns
+	ctx := context.Background()
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "label", Type: parquet.TypeString, Nullable: true},
+		},
+	}
+	if err := db.CreateTable(ctx, "nullable_test", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("test", "wadjet")
+
+	client.writeMsg('Q', append([]byte("COPY nullable_test FROM STDIN"), 0))
+	typ, _, _ := client.readMsg()
+	if typ != 'G' {
+		t.Fatalf("expected CopyInResponse, got '%c'", typ)
+	}
+
+	// \\N is PostgreSQL NULL representation in COPY text format
+	client.sendCopyData("1\thello\n")
+	client.sendCopyData("2\t\\N\n")
+	client.sendCopyDone()
+
+	typ, payload, _ := client.readMsg()
+	if typ == 'E' {
+		t.Fatalf("got error: %s", client.parseError(payload))
+	}
+	tag := readCString(payload)
+	if tag != "COPY 2" {
+		t.Errorf("expected 'COPY 2', got %q", tag)
+	}
+
+	client.readMsg() // ReadyForQuery
+	client.terminate()
+}
+
+func TestPGWireCopyFromSTDIN_BadTable(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("test", "wadjet")
+
+	client.writeMsg('Q', append([]byte("COPY nonexistent FROM STDIN"), 0))
+
+	// Should get error + ReadyForQuery
+	typ, payload, _ := client.readMsg()
+	if typ != 'E' {
+		t.Fatalf("expected error for nonexistent table, got '%c'", typ)
+	}
+	errMsg := client.parseError(payload)
+	if !strings.Contains(errMsg, "nonexistent") {
+		t.Errorf("error should mention table name: %s", errMsg)
+	}
+
+	// ReadyForQuery
+	typ, _, _ = client.readMsg()
+	if typ != 'Z' {
+		t.Fatalf("expected ReadyForQuery after error, got '%c'", typ)
+	}
+
+	client.terminate()
+}
+
+func TestParseCopySQL(t *testing.T) {
+	tests := []struct {
+		sql       string
+		table     string
+		columns   []string
+		delimiter rune
+	}{
+		{
+			sql:       "COPY users FROM STDIN",
+			table:     "users",
+			delimiter: '\t',
+		},
+		{
+			sql:       "COPY users (id, name, score) FROM STDIN",
+			table:     "users",
+			columns:   []string{"id", "name", "score"},
+			delimiter: '\t',
+		},
+		{
+			sql:       "COPY users FROM STDIN WITH (FORMAT CSV)",
+			table:     "users",
+			delimiter: ',',
+		},
+		{
+			sql:       "COPY users FROM STDIN WITH (DELIMITER '|')",
+			table:     "users",
+			delimiter: '|',
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.sql, func(t *testing.T) {
+			table, cols, delim := parseCopySQL(tt.sql)
+			if table != tt.table {
+				t.Errorf("table: got %q, want %q", table, tt.table)
+			}
+			if len(cols) != len(tt.columns) {
+				t.Fatalf("columns: got %v, want %v", cols, tt.columns)
+			}
+			for i := range cols {
+				if cols[i] != tt.columns[i] {
+					t.Errorf("column %d: got %q, want %q", i, cols[i], tt.columns[i])
+				}
+			}
+			if delim != tt.delimiter {
+				t.Errorf("delimiter: got %q, want %q", delim, tt.delimiter)
+			}
+		})
+	}
 }
 

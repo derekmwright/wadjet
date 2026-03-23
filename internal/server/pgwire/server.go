@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/citc-tech/wadjet/wadjet"
 	"golang.org/x/net/netutil"
 )
@@ -390,6 +392,240 @@ func (c *pgConn) handleSet(sql string) {
 	c.sessionVars[key] = val
 }
 
+// parseCopySQL extracts the table name and optional column list from a
+// COPY table [(col1, col2, ...)] FROM STDIN statement.
+func parseCopySQL(sql string) (table string, columns []string, delimiter rune) {
+	delimiter = '\t' // PostgreSQL default
+	upper := strings.ToUpper(sql)
+
+	// Strip "COPY " prefix
+	rest := strings.TrimSpace(sql[5:])
+
+	// Find table name (up to '(' or whitespace)
+	var tableName string
+	if idx := strings.IndexAny(rest, " (\t"); idx >= 0 {
+		tableName = rest[:idx]
+		rest = strings.TrimSpace(rest[idx:])
+	} else {
+		tableName = rest
+		rest = ""
+	}
+	table = strings.Trim(tableName, "\"")
+
+	// Parse optional column list
+	if len(rest) > 0 && rest[0] == '(' {
+		end := strings.IndexByte(rest, ')')
+		if end > 0 {
+			colStr := rest[1:end]
+			for _, c := range strings.Split(colStr, ",") {
+				col := strings.TrimSpace(c)
+				col = strings.Trim(col, "\"")
+				if col != "" {
+					columns = append(columns, col)
+				}
+			}
+			rest = strings.TrimSpace(rest[end+1:])
+		}
+	}
+
+	// Check for delimiter option: WITH (DELIMITER 'x') or WITH DELIMITER 'x'
+	if idx := strings.Index(upper, "DELIMITER"); idx >= 0 {
+		after := strings.TrimSpace(sql[idx+9:])
+		after = strings.TrimLeft(after, "( ")
+		if len(after) >= 3 && after[0] == '\'' {
+			delimiter = rune(after[1])
+		}
+	}
+
+	// CSV format uses comma by default
+	if strings.Contains(upper, "FORMAT CSV") || strings.Contains(upper, "(FORMAT CSV") ||
+		strings.Contains(upper, "CSV") && !strings.Contains(upper, "DELIMITER") {
+		if !strings.Contains(upper, "DELIMITER") {
+			delimiter = ','
+		}
+	}
+
+	return table, columns, delimiter
+}
+
+// handleCopyIn implements the PostgreSQL COPY FROM STDIN protocol.
+// It sends a CopyInResponse, reads CopyData messages until CopyDone,
+// then ingests the rows into the target table.
+func (c *pgConn) handleCopyIn(sql string) {
+	ctx, cancel := c.queryContext()
+	defer cancel()
+
+	tableName, copyColumns, delimiter := parseCopySQL(sql)
+
+	// Look up table schema
+	tableMeta, err := c.db.Catalog().GetTable(ctx, tableName)
+	if err != nil {
+		c.sendError("ERROR", "42P01", fmt.Sprintf("table %q does not exist", tableName))
+		return
+	}
+
+	// Determine column ordering
+	var columns []string
+	if len(copyColumns) > 0 {
+		columns = copyColumns
+	} else {
+		columns = make([]string, len(tableMeta.Schema.Columns))
+		for i, col := range tableMeta.Schema.Columns {
+			columns[i] = col.Name
+		}
+	}
+
+	// Build type map for value conversion
+	typeMap := make(map[string]parquet.TypeID, len(tableMeta.Schema.Columns))
+	for _, col := range tableMeta.Schema.Columns {
+		typeMap[col.Name] = col.Type
+	}
+
+	numCols := int16(len(columns))
+
+	// Send CopyInResponse: 'G' + format(1 byte) + num_cols(int16) + col_formats(int16 each)
+	payload := make([]byte, 0, 3+2*int(numCols))
+	payload = append(payload, 0) // text format overall
+	payload = appendInt16(payload, numCols)
+	for range numCols {
+		payload = appendInt16(payload, 0) // text format per column
+	}
+	c.sendMsg('G', payload)
+
+	// Read CopyData messages and accumulate rows
+	const flushBatch = 10000
+	var rows []map[string]any
+	var rowCount int64
+
+	ing := ingest.New(c.db.Catalog(), tableName, tableMeta.Schema,
+		tableMeta.PartitionKeys, ingest.DefaultConfig())
+
+	for {
+		msgType, msgPayload, err := c.readMessage()
+		if err != nil {
+			c.logger.Debug("COPY read error", "err", err)
+			return
+		}
+
+		switch msgType {
+		case 'd': // CopyData
+			// Parse tab-delimited rows from the data chunk
+			data := string(msgPayload)
+			for _, line := range strings.Split(data, "\n") {
+				line = strings.TrimRight(line, "\r")
+				if line == "" || line == "\\." {
+					continue
+				}
+				fields := strings.Split(line, string(delimiter))
+				if len(fields) != len(columns) {
+					c.sendError("ERROR", "22P04",
+						fmt.Sprintf("COPY: expected %d columns, got %d", len(columns), len(fields)))
+					// Drain remaining messages until CopyDone/CopyFail
+					c.drainCopy()
+					return
+				}
+
+				row := make(map[string]any, len(columns))
+				for i, colName := range columns {
+					val := fields[i]
+					// Handle PostgreSQL NULL representation
+					if val == "\\N" {
+						row[colName] = nil
+						continue
+					}
+					// Unescape backslash sequences
+					val = unescapeCopyText(val)
+					v, err := wadjet.ConvertValue(val, typeMap[colName])
+					if err != nil {
+						c.sendError("ERROR", "22P02",
+							fmt.Sprintf("COPY: column %q: %v", colName, err))
+						c.drainCopy()
+						return
+					}
+					row[colName] = v
+				}
+				rows = append(rows, row)
+				rowCount++
+
+				// Batch flush to avoid unbounded memory
+				if len(rows) >= flushBatch {
+					if err := ing.Ingest(ctx, rows); err != nil {
+						c.sendError("ERROR", "XX000", fmt.Sprintf("COPY ingest: %v", err))
+						c.drainCopy()
+						return
+					}
+					rows = rows[:0]
+				}
+			}
+
+		case 'c': // CopyDone
+			// Ingest remaining rows
+			if len(rows) > 0 {
+				if err := ing.Ingest(ctx, rows); err != nil {
+					c.sendError("ERROR", "XX000", fmt.Sprintf("COPY ingest: %v", err))
+					return
+				}
+			}
+			if err := ing.FlushAll(ctx); err != nil {
+				c.sendError("ERROR", "XX000", fmt.Sprintf("COPY flush: %v", err))
+				return
+			}
+			c.sendCommandComplete(fmt.Sprintf("COPY %d", rowCount))
+			return
+
+		case 'f': // CopyFail
+			errMsg := readCString(msgPayload)
+			c.logger.Debug("COPY cancelled by client", "reason", errMsg)
+			c.sendError("ERROR", "57014", fmt.Sprintf("COPY cancelled: %s", errMsg))
+			return
+
+		default:
+			c.sendError("ERROR", "08P01",
+				fmt.Sprintf("unexpected message type during COPY: %c", msgType))
+			return
+		}
+	}
+}
+
+// drainCopy reads and discards messages until CopyDone or CopyFail is received.
+func (c *pgConn) drainCopy() {
+	for {
+		msgType, _, err := c.readMessage()
+		if err != nil || msgType == 'c' || msgType == 'f' {
+			return
+		}
+	}
+}
+
+// unescapeCopyText handles PostgreSQL COPY text format escape sequences.
+func unescapeCopyText(s string) string {
+	if !strings.Contains(s, "\\") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			switch s[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+			case 'r':
+				b.WriteByte('\r')
+			case 't':
+				b.WriteByte('\t')
+			case '\\':
+				b.WriteByte('\\')
+			default:
+				b.WriteByte(s[i+1])
+			}
+			i++
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
 func (c *pgConn) handleQuery(sql string) {
 	sql = strings.TrimSpace(sql)
 	if sql == "" {
@@ -444,6 +680,13 @@ func (c *pgConn) handleQuery(sql string) {
 
 	// Handle introspection/synthetic queries (SELECT 1, version(), pg_catalog, etc.)
 	if c.handleIntrospection(sql, upper) {
+		c.sendReadyForQuery()
+		return
+	}
+
+	// Handle COPY FROM STDIN
+	if strings.HasPrefix(upper, "COPY ") && strings.Contains(upper, "FROM STDIN") {
+		c.handleCopyIn(sql)
 		c.sendReadyForQuery()
 		return
 	}

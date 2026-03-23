@@ -346,6 +346,11 @@ func buildWherePredicate(whereSQL string) (func(*batch.RecordBatch, int) bool, e
 
 // convertValue converts a string value from the parser to the appropriate Go type
 // based on the target column's type.
+// ConvertValue converts a string value to the appropriate Go type for a given Parquet type.
+func ConvertValue(s string, typ parquet.TypeID) (any, error) {
+	return convertValue(s, typ)
+}
+
 func convertValue(s string, typ parquet.TypeID) (any, error) {
 	s = strings.TrimSpace(s)
 
