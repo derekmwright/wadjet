@@ -35,7 +35,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-const inlineResultThreshold = 1024 * 1024 // 1 MB — avoids S3 round-trip for dimension tables and aggregation results
+const inlineResultThreshold = 256 * 1024 // 256 KB — avoids S3 round-trip for small dimension tables and aggregation results
 
 // maxBufferedRows caps in-memory row accumulation during scan tasks to prevent
 // unbounded memory growth. When this limit is reached, rows are flushed to the

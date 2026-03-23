@@ -278,7 +278,7 @@ locals {
     /usr/local/bin/wadjet serve \
       --mode=coordinator \
       --pg-addr=:5432 \
-      --nats-addr=:4222 \
+      --nats-port=4222 \
       --endpoint="s3.${var.region}.amazonaws.com" \
       --ssl \
       --bucket="${local.bucket_name}" \

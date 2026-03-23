@@ -504,8 +504,8 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 // coalesceScanTargetBytes is the minimum total bytes per scan task.
 // Files smaller than this are grouped together to reduce task overhead.
 // Larger batches reduce NATS dispatch + S3 write overhead at the cost of
-// slightly coarser work distribution. 64 MB balances overhead vs parallelism.
-const coalesceScanTargetBytes int64 = 64 * 1024 * 1024 // 64 MB
+// slightly coarser work distribution. 32 MB balances overhead vs parallelism.
+const coalesceScanTargetBytes int64 = 32 * 1024 * 1024 // 32 MB
 
 func (c *Coordinator) createScanTasks(queryID string, stage physical.Stage, resultPrefix string) []distributed.Task {
 	if len(stage.ScanFiles) == 0 {
