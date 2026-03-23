@@ -502,6 +502,99 @@ func (f *LikeFilter) Clone() UnaryOperator {
 	return &LikeFilter{ColName: f.ColName, Pattern: f.Pattern, Negate: f.Negate}
 }
 
+// NullCheckFilter is a vectorized filter for IS NULL / IS NOT NULL predicates.
+// Scans the null bitmap directly — no per-row type switch or function call overhead.
+type NullCheckFilter struct {
+	ColName  string
+	CheckNull bool // true = IS NULL, false = IS NOT NULL
+	colIdx   int
+	outSel   []uint32
+	resolved bool
+}
+
+func NewNullCheckFilter(colName string, checkNull bool) *NullCheckFilter {
+	return &NullCheckFilter{ColName: colName, CheckNull: checkNull}
+}
+
+func (f *NullCheckFilter) Init(_ context.Context) error { return nil }
+
+func (f *NullCheckFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if !f.resolved {
+		f.colIdx = in.ColumnIndex(f.ColName)
+		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
+			parts := strings.SplitN(f.ColName, ".", 2)
+			f.colIdx = in.ColumnIndex(parts[1])
+		}
+		f.outSel = make([]uint32, 0, in.Len)
+		f.resolved = true
+	}
+	if f.colIdx < 0 {
+		if f.CheckNull {
+			return nil, nil // column not found, nothing is null
+		}
+		return in, nil // column not found, treat as all non-null
+	}
+
+	col := in.Columns[f.colIdx]
+
+	// Fast path: no nulls in this batch's column.
+	if !col.Nulls.HasNulls() {
+		if f.CheckNull {
+			return nil, nil // IS NULL: no rows match
+		}
+		return in, nil // IS NOT NULL: all rows match
+	}
+
+	// Compact in-place when a prior selection exists.
+	outBuf := f.outSel
+	if in.Sel != nil {
+		outBuf = in.Sel
+	}
+	sel := outBuf[:0]
+
+	if f.CheckNull {
+		if in.Sel != nil {
+			for _, idx := range in.Sel {
+				if col.Nulls.IsNullFast(int(idx)) {
+					sel = append(sel, idx)
+				}
+			}
+		} else {
+			for i := 0; i < in.Len; i++ {
+				if col.Nulls.IsNullFast(i) {
+					sel = append(sel, uint32(i))
+				}
+			}
+		}
+	} else {
+		if in.Sel != nil {
+			for _, idx := range in.Sel {
+				if !col.Nulls.IsNullFast(int(idx)) {
+					sel = append(sel, idx)
+				}
+			}
+		} else {
+			for i := 0; i < in.Len; i++ {
+				if !col.Nulls.IsNullFast(i) {
+					sel = append(sel, uint32(i))
+				}
+			}
+		}
+	}
+
+	if len(sel) == 0 {
+		return nil, nil
+	}
+	in.Sel = sel
+	return in, nil
+}
+
+func (f *NullCheckFilter) Close() error { return nil }
+
+func (f *NullCheckFilter) Clone() UnaryOperator {
+	return &NullCheckFilter{ColName: f.ColName, CheckNull: f.CheckNull}
+}
+
 func toKernelOp(op CompareOp) kernel.CompareOp {
 	switch op {
 	case OpEq:

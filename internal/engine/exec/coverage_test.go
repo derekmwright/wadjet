@@ -1407,3 +1407,114 @@ func TestStrHashTablePreSizing(t *testing.T) {
 		t.Errorf("hash table grew from %d to %d with %d entries", initialCap, len(ht.entries), n)
 	}
 }
+
+func TestNullCheckFilter(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "val", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{
+		{"val": int64(1)},
+		{"val": nil},
+		{"val": int64(3)},
+		{"val": nil},
+		{"val": int64(5)},
+	}
+
+	// IS NULL should select rows 1 and 3
+	t.Run("IsNull", func(t *testing.T) {
+		source := NewSliceSource(schema, rows)
+		f := NewNullCheckFilter("val", true)
+		sink := &CollectSink{}
+		pipe := &Pipeline{Source: source, Ops: []UnaryOperator{f}, Sink: sink}
+		if err := pipe.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(sink.Rows) != 2 {
+			t.Fatalf("IS NULL: expected 2 rows, got %d", len(sink.Rows))
+		}
+	})
+
+	// IS NOT NULL should select rows 0, 2, 4
+	t.Run("IsNotNull", func(t *testing.T) {
+		source := NewSliceSource(schema, rows)
+		f := NewNullCheckFilter("val", false)
+		sink := &CollectSink{}
+		pipe := &Pipeline{Source: source, Ops: []UnaryOperator{f}, Sink: sink}
+		if err := pipe.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(sink.Rows) != 3 {
+			t.Fatalf("IS NOT NULL: expected 3 rows, got %d", len(sink.Rows))
+		}
+		for _, row := range sink.Rows {
+			if row["val"] == nil {
+				t.Fatal("IS NOT NULL returned a null row")
+			}
+		}
+	})
+
+	// IS NULL on column with no nulls should return nothing
+	t.Run("NoNulls", func(t *testing.T) {
+		noNullRows := []map[string]any{
+			{"val": int64(1)},
+			{"val": int64(2)},
+		}
+		source := NewSliceSource(schema, noNullRows)
+		f := NewNullCheckFilter("val", true)
+		sink := &CollectSink{}
+		pipe := &Pipeline{Source: source, Ops: []UnaryOperator{f}, Sink: sink}
+		if err := pipe.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(sink.Rows) != 0 {
+			t.Fatalf("IS NULL on null-free column: expected 0 rows, got %d", len(sink.Rows))
+		}
+	})
+
+	// IS NOT NULL on column with no nulls should return everything
+	t.Run("AllNonNull", func(t *testing.T) {
+		noNullRows := []map[string]any{
+			{"val": int64(1)},
+			{"val": int64(2)},
+		}
+		source := NewSliceSource(schema, noNullRows)
+		f := NewNullCheckFilter("val", false)
+		sink := &CollectSink{}
+		pipe := &Pipeline{Source: source, Ops: []UnaryOperator{f}, Sink: sink}
+		if err := pipe.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if len(sink.Rows) != 2 {
+			t.Fatalf("IS NOT NULL on null-free column: expected 2 rows, got %d", len(sink.Rows))
+		}
+	})
+
+	// Chain with prior filter (selection vector compaction)
+	t.Run("WithPriorFilter", func(t *testing.T) {
+		source := NewSliceSource(schema, rows)
+		kf := NewKernelFilter("val", OpGt, int64(2))
+		ncf := NewNullCheckFilter("val", false)
+		sink := &CollectSink{}
+		pipe := &Pipeline{Source: source, Ops: []UnaryOperator{kf, ncf}, Sink: sink}
+		if err := pipe.Run(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		// KernelFilter(val > 2) selects {3, 5}, NullCheck IS NOT NULL keeps both
+		if len(sink.Rows) != 2 {
+			t.Fatalf("chained filter: expected 2 rows, got %d", len(sink.Rows))
+		}
+	})
+
+	// Clone produces independent instance
+	t.Run("Clone", func(t *testing.T) {
+		f := NewNullCheckFilter("val", true)
+		clone := f.Clone()
+		if clone == f {
+			t.Fatal("Clone returned same pointer")
+		}
+		cf := clone.(*NullCheckFilter)
+		if cf.ColName != "val" || cf.CheckNull != true {
+			t.Fatal("Clone has wrong fields")
+		}
+	})
+}
