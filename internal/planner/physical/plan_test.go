@@ -1071,15 +1071,15 @@ func TestShouldSplitScan(t *testing.T) {
 		},
 		{
 			name:      "small scan not worth splitting",
-			stages:    []Stage{{Type: "scan", EstimatedBytes: 100 << 20, ScanFiles: makeFiles(4)}},
+			stages:    []Stage{{Type: "scan", EstimatedBytes: 100 << 20, ScanFiles: makeFiles(6)}},
 			workers:   3,
-			wantSplit: false, // 100 MB < 256 MB threshold
+			wantSplit: false, // 100 MB < 192 MB threshold (3 workers × 64 MB)
 		},
 		{
 			name:      "too few files not worth splitting",
-			stages:    []Stage{{Type: "scan", EstimatedBytes: 512 << 20, ScanFiles: makeFiles(2)}},
+			stages:    []Stage{{Type: "scan", EstimatedBytes: 512 << 20, ScanFiles: makeFiles(4)}},
 			workers:   3,
-			wantSplit: false, // only 2 files
+			wantSplit: false, // 4 files < 6 min (3 workers × 2 files)
 		},
 		{
 			name: "large scan with enough files → split",
