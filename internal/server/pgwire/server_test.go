@@ -1468,6 +1468,65 @@ func TestPGWireCopyFromSTDIN_BadTable(t *testing.T) {
 	client.terminate()
 }
 
+func TestPGWireQueryAdmissionControl(t *testing.T) {
+	db := setupTestDB(t)
+	// Limit to 1 concurrent query
+	srv := NewServer(db, Config{MaxConcurrentQry: 1}, nil)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Shutdown)
+
+	// First client — should work fine
+	client1 := newPGClient(t, srv.Addr())
+	client1.startup("test", "wadjet")
+
+	_, rows, tag := client1.simpleQuery("SELECT * FROM users")
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+	if !strings.HasPrefix(tag, "SELECT") {
+		t.Errorf("expected SELECT tag, got %q", tag)
+	}
+
+	// Second client in parallel — should also work (sequential queries)
+	client2 := newPGClient(t, srv.Addr())
+	client2.startup("test", "wadjet")
+
+	_, rows2, _ := client2.simpleQuery("SELECT * FROM users")
+	if len(rows2) != 3 {
+		t.Fatalf("expected 3 rows from client2, got %d", len(rows2))
+	}
+
+	client1.terminate()
+	client2.terminate()
+}
+
+func TestPGWireQueryAdmissionUnlimited(t *testing.T) {
+	db := setupTestDB(t)
+	// MaxConcurrentQry=0 means unlimited
+	srv := NewServer(db, Config{MaxConcurrentQry: 0}, nil)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Shutdown)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("test", "wadjet")
+
+	_, rows, _ := client.simpleQuery("SELECT * FROM users")
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+
+	// Verify queue counter is 0
+	if q := srv.QueuedQueries(); q != 0 {
+		t.Errorf("expected 0 queued queries, got %d", q)
+	}
+
+	client.terminate()
+}
+
 func TestParseCopySQL(t *testing.T) {
 	tests := []struct {
 		sql       string

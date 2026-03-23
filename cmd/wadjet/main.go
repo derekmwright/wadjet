@@ -58,6 +58,7 @@ var (
 	pgTLSCert        string
 	pgTLSKey         string
 	queryTimeout     string
+	maxConcurrentQry int
 	natsStoreDir     string
 	geoipCityDB      string
 	geoipASNDB       string
@@ -97,6 +98,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&pgTLSCert, "pg-tls-cert", "", "TLS certificate file for PostgreSQL wire protocol")
 	rootCmd.PersistentFlags().StringVar(&pgTLSKey, "pg-tls-key", "", "TLS private key file for PostgreSQL wire protocol")
 	rootCmd.PersistentFlags().StringVar(&queryTimeout, "query-timeout", "0", "Default query timeout (e.g. 30s, 5m, 0=unlimited)")
+	rootCmd.PersistentFlags().IntVar(&maxConcurrentQry, "max-concurrent-queries", 0, "Maximum concurrent queries (0=unlimited)")
 	rootCmd.PersistentFlags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum concurrent tasks per worker")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
@@ -725,8 +727,9 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	}
 	pgQueryTimeout, _ := time.ParseDuration(queryTimeout)
 	pgCfg := pgwire.Config{
-		AuthProvider: provider,
-		QueryTimeout: pgQueryTimeout,
+		AuthProvider:     provider,
+		QueryTimeout:     pgQueryTimeout,
+		MaxConcurrentQry: maxConcurrentQry,
 	}
 	if pgTLSCert != "" && pgTLSKey != "" {
 		cert, err := tls.LoadX509KeyPair(pgTLSCert, pgTLSKey)

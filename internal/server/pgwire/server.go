@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/auth"
@@ -36,15 +37,18 @@ type Server struct {
 	maxConns     int
 	queryTimeout time.Duration
 	authProvider *auth.Provider // nil = no auth enforcement
+	querySem     chan struct{}  // nil = unlimited concurrent queries
+	queryQueue   int64         // atomic: number of queries waiting for admission
 }
 
 // Config holds configuration for the pgwire server.
 type Config struct {
-	Addr           string         // listen address, e.g. ":5433"
-	TLSConfig      *tls.Config    // nil = plain TCP
-	MaxConnections int            // 0 = unlimited
-	QueryTimeout   time.Duration  // 0 = no timeout
-	AuthProvider   *auth.Provider // nil = no auth enforcement
+	Addr              string         // listen address, e.g. ":5433"
+	TLSConfig         *tls.Config    // nil = plain TCP
+	MaxConnections    int            // 0 = unlimited
+	MaxConcurrentQry  int            // 0 = unlimited concurrent queries
+	QueryTimeout      time.Duration  // 0 = no timeout
+	AuthProvider      *auth.Provider // nil = no auth enforcement
 }
 
 // NewServer creates a new PostgreSQL wire protocol server.
@@ -52,7 +56,7 @@ func NewServer(db *wadjet.DB, cfg Config, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{
+	s := &Server{
 		db:           db,
 		logger:       logger,
 		done:         make(chan struct{}),
@@ -61,6 +65,39 @@ func NewServer(db *wadjet.DB, cfg Config, logger *slog.Logger) *Server {
 		queryTimeout: cfg.QueryTimeout,
 		authProvider: cfg.AuthProvider,
 	}
+	if cfg.MaxConcurrentQry > 0 {
+		s.querySem = make(chan struct{}, cfg.MaxConcurrentQry)
+	}
+	return s
+}
+
+// acquireQuery blocks until a query slot is available, or ctx is cancelled.
+// Returns true if acquired, false if the context was cancelled.
+func (s *Server) acquireQuery(ctx context.Context) bool {
+	if s.querySem == nil {
+		return true
+	}
+	atomic.AddInt64(&s.queryQueue, 1)
+	defer atomic.AddInt64(&s.queryQueue, -1)
+	select {
+	case s.querySem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// releaseQuery returns a query slot to the pool.
+func (s *Server) releaseQuery() {
+	if s.querySem == nil {
+		return
+	}
+	<-s.querySem
+}
+
+// QueuedQueries returns the number of queries waiting for admission.
+func (s *Server) QueuedQueries() int64 {
+	return atomic.LoadInt64(&s.queryQueue)
 }
 
 // Start begins listening for connections on the given address.
@@ -134,6 +171,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	c := &pgConn{
 		conn:         conn,
 		db:           s.db,
+		server:       s,
 		logger:       s.logger,
 		buf:          make([]byte, 0, 4096),
 		tlsConfig:    s.tlsConfig,
@@ -150,6 +188,7 @@ func (s *Server) handleConn(conn net.Conn) {
 type pgConn struct {
 	conn         net.Conn
 	db           *wadjet.DB
+	server       *Server        // back-pointer for query admission
 	logger       *slog.Logger
 	buf          []byte
 	tlsConfig    *tls.Config    // non-nil = offer TLS upgrade on SSLRequest
@@ -697,7 +736,13 @@ func (c *pgConn) handleQuery(sql string) {
 		strings.HasPrefix(upper, "DELETE ") {
 		ctx, cancel := c.queryContext()
 		defer cancel()
+		if !c.server.acquireQuery(ctx) {
+			c.sendError("ERROR", "53300", "query queue timeout")
+			c.sendReadyForQuery()
+			return
+		}
 		result, err := c.db.Execute(ctx, sql)
+		c.server.releaseQuery()
 		if err != nil {
 			c.sendError("ERROR", "42000", err.Error())
 			c.sendReadyForQuery()
@@ -710,7 +755,13 @@ func (c *pgConn) handleQuery(sql string) {
 
 	ctx, cancel := c.queryContext()
 	defer cancel()
+	if !c.server.acquireQuery(ctx) {
+		c.sendError("ERROR", "53300", "query queue timeout")
+		c.sendReadyForQuery()
+		return
+	}
 	result, err := c.db.Query(ctx, sql)
+	c.server.releaseQuery()
 	if err != nil {
 		c.sendError("ERROR", "42000", err.Error())
 		c.sendReadyForQuery()
