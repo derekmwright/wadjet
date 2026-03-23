@@ -62,7 +62,7 @@ func TestReadRowGroupInto_ParallelColumns(t *testing.T) {
 	rg := rgs[0]
 	numRows := int(rg.NumRows())
 	b := batch.NewRecordBatch(schema.Columns, numRows)
-	readRowGroupInto(pqFile, rg, b, schema.Columns, nil)
+	readRowGroupInto(pqFile, rg, b, schema.Columns, nil, nil)
 
 	if b.Len != len(rows) {
 		t.Fatalf("expected %d rows, got %d", len(rows), b.Len)
@@ -145,7 +145,7 @@ func TestReadRowGroupInto_SingleColumn(t *testing.T) {
 	rg := rgs[0]
 	numRows := int(rg.NumRows())
 	b := batch.NewRecordBatch(schema.Columns, numRows)
-	readRowGroupInto(pqFile, rg, b, schema.Columns, nil)
+	readRowGroupInto(pqFile, rg, b, schema.Columns, nil, nil)
 
 	if b.Len != len(rows) {
 		t.Fatalf("expected %d rows, got %d", len(rows), b.Len)
@@ -207,7 +207,7 @@ func TestReadRowGroupInto_WithProjection(t *testing.T) {
 	rg := rgs[0]
 	numRows := int(rg.NumRows())
 	b := batch.NewRecordBatch(readSchema, numRows)
-	readRowGroupInto(pqFile, rg, b, schema.Columns, projected)
+	readRowGroupInto(pqFile, rg, b, schema.Columns, projected, nil)
 
 	if b.Len != len(rows) {
 		t.Fatalf("expected %d rows, got %d", len(rows), b.Len)
@@ -275,7 +275,7 @@ func TestReadRowGroupInto_NullableColumns(t *testing.T) {
 	rg := rgs[0]
 	numRows := int(rg.NumRows())
 	b := batch.NewRecordBatch(schema.Columns, numRows)
-	readRowGroupInto(pqFile, rg, b, schema.Columns, nil)
+	readRowGroupInto(pqFile, rg, b, schema.Columns, nil, nil)
 
 	if b.Len != len(rows) {
 		t.Fatalf("expected %d rows, got %d", len(rows), b.Len)
