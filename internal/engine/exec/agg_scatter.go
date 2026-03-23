@@ -156,18 +156,37 @@ func ensureSliceCapBool(s []bool, n int) []bool {
 func scatterSumInt[T ~int32 | ~int64](sumArr, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
-		for si := range sel {
-			row := int(sel[si])
-			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
-				sumArr[idx] += int64(data[row])
-				countArr[idx]++
+		if !hasNulls {
+			for si := range sel {
+				row := int(sel[si])
+				if idx := gi[si]; idx >= 0 {
+					sumArr[idx] += int64(data[row])
+					countArr[idx]++
+				}
+			}
+		} else {
+			for si := range sel {
+				row := int(sel[si])
+				if idx := gi[si]; idx >= 0 && !nulls.IsNullFast(row) {
+					sumArr[idx] += int64(data[row])
+					countArr[idx]++
+				}
 			}
 		}
 	} else {
-		for row := 0; row < n; row++ {
-			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
-				sumArr[idx] += int64(data[row])
-				countArr[idx]++
+		if !hasNulls {
+			for row := 0; row < n; row++ {
+				if idx := gi[row]; idx >= 0 {
+					sumArr[idx] += int64(data[row])
+					countArr[idx]++
+				}
+			}
+		} else {
+			for row := 0; row < n; row++ {
+				if idx := gi[row]; idx >= 0 && !nulls.IsNullFast(row) {
+					sumArr[idx] += int64(data[row])
+					countArr[idx]++
+				}
 			}
 		}
 	}
@@ -176,18 +195,37 @@ func scatterSumInt[T ~int32 | ~int64](sumArr, countArr []int64, data []T, gi []i
 func scatterSumFloat[T ~float32 | ~float64](sumArr []float64, countArr []int64, data []T, gi []int32, nulls *batch.Bitmap, sel []uint32, n int) {
 	hasNulls := nulls.HasNulls()
 	if sel != nil {
-		for si := range sel {
-			row := int(sel[si])
-			if idx := gi[si]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
-				sumArr[idx] += float64(data[row])
-				countArr[idx]++
+		if !hasNulls {
+			for si := range sel {
+				row := int(sel[si])
+				if idx := gi[si]; idx >= 0 {
+					sumArr[idx] += float64(data[row])
+					countArr[idx]++
+				}
+			}
+		} else {
+			for si := range sel {
+				row := int(sel[si])
+				if idx := gi[si]; idx >= 0 && !nulls.IsNullFast(row) {
+					sumArr[idx] += float64(data[row])
+					countArr[idx]++
+				}
 			}
 		}
 	} else {
-		for row := 0; row < n; row++ {
-			if idx := gi[row]; idx >= 0 && !(hasNulls && nulls.IsNullFast(row)) {
-				sumArr[idx] += float64(data[row])
-				countArr[idx]++
+		if !hasNulls {
+			for row := 0; row < n; row++ {
+				if idx := gi[row]; idx >= 0 {
+					sumArr[idx] += float64(data[row])
+					countArr[idx]++
+				}
+			}
+		} else {
+			for row := 0; row < n; row++ {
+				if idx := gi[row]; idx >= 0 && !nulls.IsNullFast(row) {
+					sumArr[idx] += float64(data[row])
+					countArr[idx]++
+				}
 			}
 		}
 	}
