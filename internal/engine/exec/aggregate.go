@@ -1722,15 +1722,14 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 		key := o.serializedKeys[i]
 		oGS := o.strGroupStates[i]
 
-		gsIdx, found := h.strGroupIndex.Get([]byte(key))
+		newIdx := int32(len(h.strGroupStates))
+		gsIdx, found := h.strGroupIndex.GetOrInsert([]byte(key), newIdx)
 		if found {
 			gs := h.strGroupStates[gsIdx]
 			for j := range gs.accs {
 				gs.accs[j].Merge(&oGS.accs[j])
 			}
 		} else {
-			newIdx := int32(len(h.strGroupStates))
-			h.strGroupIndex.Put([]byte(key), newIdx)
 			h.strGroupStates = append(h.strGroupStates, oGS)
 			h.keys = append(h.keys, oGS.keyValues)
 			h.serializedKeys = append(h.serializedKeys, key)
@@ -1743,7 +1742,8 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 // Operates on flat arrays (count, sumI64, sumF64, min, max) with int hash lookup.
 func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 	for i, oGS := range o.intGroupStates {
-		gsIdx, found := h.intGroupIndex.Get(oGS.intKey)
+		newIdx := int32(len(h.intGroupStates))
+		gsIdx, found := h.intGroupIndex.GetOrInsert(oGS.intKey, newIdx)
 		if found {
 			// Existing group: merge flat accumulators in-place
 			for ai := range h.intFlatAccs {
@@ -1820,9 +1820,7 @@ func (h *HashAggregate) mergeIntGroupSoA(o *HashAggregate) {
 				}
 			}
 		} else {
-			// New group: append to all flat arrays
-			newIdx := int32(len(h.intGroupStates))
-			h.intGroupIndex.Put(oGS.intKey, newIdx)
+			// New group: append to all flat arrays (already inserted by GetOrInsert)
 			h.intGroupStates = append(h.intGroupStates, oGS)
 			for ai := range h.intFlatAccs {
 				hfa := &h.intFlatAccs[ai]

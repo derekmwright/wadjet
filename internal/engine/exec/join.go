@@ -1169,51 +1169,48 @@ func (h *HashJoin) mergeLocalBuilds(locals []*localBuild) {
 		// Append batches.
 		h.buildBatches = append(h.buildBatches, lb.batches...)
 
-		// Append arena with adjusted batchIdx.
-		for _, ref := range lb.arena {
-			h.arena = append(h.arena, buildRef{
-				batchIdx: ref.batchIdx + batchOffset,
-				rowIdx:   ref.rowIdx,
-			})
+		// Bulk-copy arena and adjust batchIdx in-place (sequential write
+		// is more cache-friendly than per-element struct creation).
+		arenaStart := len(h.arena)
+		h.arena = append(h.arena, lb.arena...)
+		for i := arenaStart; i < len(h.arena); i++ {
+			h.arena[i].batchIdx += batchOffset
 		}
 
-		// Append arenaNext with adjusted chain links.
-		for _, next := range lb.arenaNext {
-			if next >= 0 {
-				h.arenaNext = append(h.arenaNext, next+arenaOffset)
-			} else {
-				h.arenaNext = append(h.arenaNext, -1)
+		// Bulk-copy arenaNext and adjust chain links in-place.
+		nextStart := len(h.arenaNext)
+		h.arenaNext = append(h.arenaNext, lb.arenaNext...)
+		for i := nextStart; i < len(h.arenaNext); i++ {
+			if h.arenaNext[i] >= 0 {
+				h.arenaNext[i] += arenaOffset
 			}
 		}
 
 		// Re-insert hash entries with adjusted arena indices.
-		// When a key exists in the merged table, link the local chain's
-		// tail to the existing merged chain head.
+		// Uses Put directly (returns old value) instead of Get+Put,
+		// saving one hash table probe per key during merge.
 		if h.useIntKey || h.useDualIntKey {
 			lb.intIndex.ForEach(func(key int64, localHead int32) {
 				adjustedHead := localHead + arenaOffset
-				if existingHead, found := h.intIndex.Get(key); found {
-					// Find tail of the local chain (now in merged arenaNext).
+				if existingHead, existed := h.intIndex.Put(key, adjustedHead); existed {
+					// Link local chain tail to existing merged chain head.
 					tail := adjustedHead
 					for h.arenaNext[tail] >= 0 {
 						tail = h.arenaNext[tail]
 					}
 					h.arenaNext[tail] = existingHead
 				}
-				h.intIndex.Put(key, adjustedHead)
 			})
 		} else if lb.strIndex != nil {
-			lb.strIndex.ForEach(func(key []byte) {
-				localHead, _ := lb.strIndex.Get(key)
+			lb.strIndex.ForEachWithValue(func(key []byte, localHead int32) {
 				adjustedHead := localHead + arenaOffset
-				if existingHead, found := h.strIndex.Get(key); found {
+				if existingHead, existed := h.strIndex.Put(key, adjustedHead); existed {
 					tail := adjustedHead
 					for h.arenaNext[tail] >= 0 {
 						tail = h.arenaNext[tail]
 					}
 					h.arenaNext[tail] = existingHead
 				}
-				h.strIndex.Put(key, adjustedHead)
 			})
 		}
 	}
@@ -1709,8 +1706,10 @@ func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) {
 const joinOutputPoolSize = 4 * batch.DefaultBatchSize
 
 // matchPair tracks a probe-build row match for output construction.
+// probeRow is int32 (batch sizes ≤8192) to compact the struct from 24→16 bytes,
+// reducing sort swap cost and improving cache utilization during gather.
 type matchPair struct {
-	probeRow int
+	probeRow int32
 	ref      buildRef
 	matched  bool
 }
@@ -1840,13 +1839,13 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 
 			if len(buildMatches) == 0 {
 				if h.JoinType == LeftJoin || h.JoinType == FullOuterJoin {
-					pairs = append(pairs, matchPair{probeRow: row})
+					pairs = append(pairs, matchPair{probeRow: int32(row)})
 				}
 				return
 			}
 
 			for _, ref := range buildMatches {
-				pairs = append(pairs, matchPair{probeRow: row, ref: ref, matched: true})
+				pairs = append(pairs, matchPair{probeRow: int32(row), ref: ref, matched: true})
 			}
 
 			if h.arenaMatched != nil {
@@ -1890,22 +1889,25 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	if len(pairs) <= batch.DefaultBatchSize {
 		if p.outPool == nil {
 			p.outPool = batch.NewBatchPool(outSchema, batch.DefaultBatchSize)
+			p.outPool.PreWarm(2)
 		}
 		out = p.outPool.Get()
+		// Pool.Get() calls Reset(batchSize) which already clears nulls for
+		// all rows 0..batchSize-1. Only need to set the actual row count.
 		out.Len = len(pairs)
 		for _, col := range out.Columns {
 			col.Len = len(pairs)
-			col.Nulls.ResetNonNull(len(pairs))
 		}
 	} else if len(pairs) <= joinOutputPoolSize {
 		if p.largeOutPool == nil {
 			p.largeOutPool = batch.NewBatchPool(outSchema, joinOutputPoolSize)
+			p.largeOutPool.PreWarm(2)
 		}
 		out = p.largeOutPool.GetForSize(len(pairs))
+		// GetForSize calls Reset(numRows) which already handles nulls.
 		out.Len = len(pairs)
 		for _, col := range out.Columns {
 			col.Len = len(pairs)
-			col.Nulls.ResetNonNull(len(pairs))
 		}
 	} else {
 		out = batch.NewRecordBatch(outSchema, len(pairs))
@@ -1918,7 +1920,7 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	}
 	probeIndices := p.indexBuf[:len(pairs)]
 	for i, pair := range pairs {
-		probeIndices[i] = pair.probeRow
+		probeIndices[i] = int(pair.probeRow)
 	}
 
 	allMatched := p.join.JoinType != LeftJoin && p.join.JoinType != FullOuterJoin
@@ -1960,7 +1962,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 						continue
 					}
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
-						pairs = append(pairs, matchPair{probeRow: int(si), ref: arena[ref], matched: true})
+						pairs = append(pairs, matchPair{probeRow: int32(si), ref: arena[ref], matched: true})
 					}
 				}
 			default:
@@ -1971,7 +1973,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 						continue
 					}
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
-						pairs = append(pairs, matchPair{probeRow: int(si), ref: arena[ref], matched: true})
+						pairs = append(pairs, matchPair{probeRow: int32(si), ref: arena[ref], matched: true})
 					}
 				}
 			}
@@ -1989,7 +1991,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 					continue
 				}
 				for ref := head; ref >= 0; ref = arenaNext[ref] {
-					pairs = append(pairs, matchPair{probeRow: int(si), ref: arena[ref], matched: true})
+					pairs = append(pairs, matchPair{probeRow: int32(si), ref: arena[ref], matched: true})
 				}
 			}
 		}
@@ -2004,7 +2006,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 						continue
 					}
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
-						pairs = append(pairs, matchPair{probeRow: i, ref: arena[ref], matched: true})
+						pairs = append(pairs, matchPair{probeRow: int32(i), ref: arena[ref], matched: true})
 					}
 				}
 			default:
@@ -2015,7 +2017,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 						continue
 					}
 					for ref := head; ref >= 0; ref = arenaNext[ref] {
-						pairs = append(pairs, matchPair{probeRow: i, ref: arena[ref], matched: true})
+						pairs = append(pairs, matchPair{probeRow: int32(i), ref: arena[ref], matched: true})
 					}
 				}
 			}
@@ -2033,7 +2035,7 @@ func (p *HashJoinProbe) inlineIntProbe(keyCol *batch.Vector, in *batch.RecordBat
 					continue
 				}
 				for ref := head; ref >= 0; ref = arenaNext[ref] {
-					pairs = append(pairs, matchPair{probeRow: i, ref: arena[ref], matched: true})
+					pairs = append(pairs, matchPair{probeRow: int32(i), ref: arena[ref], matched: true})
 				}
 			}
 		}
@@ -2137,7 +2139,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 						bb = bd1i64[r.rowIdx]
 					}
 					if ba == a && bb == b {
-						pairs = append(pairs, matchPair{probeRow: int(si), ref: r, matched: true})
+						pairs = append(pairs, matchPair{probeRow: int32(si), ref: r, matched: true})
 					}
 				}
 			}
@@ -2179,7 +2181,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 						bb = bd1i64[r.rowIdx]
 					}
 					if ba == a && bb == b {
-						pairs = append(pairs, matchPair{probeRow: int(si), ref: r, matched: true})
+						pairs = append(pairs, matchPair{probeRow: int32(si), ref: r, matched: true})
 					}
 				}
 			}
@@ -2220,7 +2222,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 						bb = bd1i64[r.rowIdx]
 					}
 					if ba == a && bb == b {
-						pairs = append(pairs, matchPair{probeRow: i, ref: r, matched: true})
+						pairs = append(pairs, matchPair{probeRow: int32(i), ref: r, matched: true})
 					}
 				}
 			}
@@ -2262,7 +2264,7 @@ func (p *HashJoinProbe) inlineDualIntProbe(col0, col1 *batch.Vector, in *batch.R
 						bb = bd1i64[r.rowIdx]
 					}
 					if ba == a && bb == b {
-						pairs = append(pairs, matchPair{probeRow: i, ref: r, matched: true})
+						pairs = append(pairs, matchPair{probeRow: int32(i), ref: r, matched: true})
 					}
 				}
 			}
@@ -2542,7 +2544,7 @@ func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parq
 	}
 	crossProbeIdx := p.indexBuf[:len(pairs)]
 	for i, cp := range pairs {
-		crossProbeIdx[i] = cp.probeRow
+		crossProbeIdx[i] = int(cp.probeRow)
 	}
 
 	for outColIdx, m := range mapping {
