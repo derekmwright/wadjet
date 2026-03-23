@@ -662,8 +662,9 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 // colMapEntry maps a file column index to a batch column index.
 // Computed once per scan source and reused across all row groups.
 type colMapEntry struct {
-	fileIdx  int
-	batchIdx int
+	fileIdx     int
+	batchIdx    int
+	maxDefLevel byte // cached max definition level for null handling
 }
 
 // getColMappings returns the cached file→batch column mapping, computing it
@@ -675,12 +676,17 @@ func (inner *scanSourceInner) getColMappings(file *goparquet.File, readSchema []
 		return inner.colMappings
 	}
 	fileColumns := file.Schema().Columns()
+	root := file.Root()
 	mappings := make([]colMapEntry, 0, len(readSchema))
 	for bi, sc := range readSchema {
 		for fi, path := range fileColumns {
 			name := path[len(path)-1]
 			if name == sc.Name {
-				mappings = append(mappings, colMapEntry{fileIdx: fi, batchIdx: bi})
+				var mdl byte
+				if pqCol := scan.FindColumnByIndex(root, fi); pqCol != nil {
+					mdl = byte(pqCol.MaxDefinitionLevel())
+				}
+				mappings = append(mappings, colMapEntry{fileIdx: fi, batchIdx: bi, maxDefLevel: mdl})
 				break
 			}
 		}
@@ -748,15 +754,15 @@ func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.Reco
 	chunks := rg.ColumnChunks()
 
 	for _, m := range mappings {
-		readColumnInto(file, chunks, b, readSchema, m.fileIdx, m.batchIdx)
+		readColumnIntoWithDef(file, chunks, b, readSchema, m.fileIdx, m.batchIdx, m.maxDefLevel, cachedMappings != nil)
 	}
 
 	b.Len = numRows
 }
 
-// readColumnInto reads all pages of a single column chunk into the batch vector.
-// Safe to call concurrently for different columns since each writes to its own Vector.
-func readColumnInto(file *goparquet.File, chunks []goparquet.ColumnChunk, b *batch.RecordBatch, readSchema []parquet.Column, fileIdx, batchIdx int) error {
+// readColumnIntoWithDef reads all pages of a single column chunk into the batch vector.
+// When hasCachedDef is true, cachedMaxDef is used instead of traversing the schema tree.
+func readColumnIntoWithDef(file *goparquet.File, chunks []goparquet.ColumnChunk, b *batch.RecordBatch, readSchema []parquet.Column, fileIdx, batchIdx int, cachedMaxDef byte, hasCachedDef bool) error {
 	col := b.Columns[batchIdx]
 	colType := readSchema[batchIdx].Type
 	rowOffset := 0
@@ -765,11 +771,14 @@ func readColumnInto(file *goparquet.File, chunks []goparquet.ColumnChunk, b *bat
 		return nil
 	}
 
-	// Get max definition level for null handling
-	pqCol := scan.FindColumnByIndex(file.Root(), fileIdx)
-	maxDefLevel := byte(0)
-	if pqCol != nil {
-		maxDefLevel = byte(pqCol.MaxDefinitionLevel())
+	var pqCol *goparquet.Column
+	maxDefLevel := cachedMaxDef
+	if !hasCachedDef {
+		pqCol = scan.FindColumnByIndex(file.Root(), fileIdx)
+		maxDefLevel = 0
+		if pqCol != nil {
+			maxDefLevel = byte(pqCol.MaxDefinitionLevel())
+		}
 	}
 
 	pages := chunks[fileIdx].Pages()
@@ -792,6 +801,9 @@ func readColumnInto(file *goparquet.File, chunks []goparquet.ColumnChunk, b *bat
 		data := page.Data()
 
 		if colType == batch.TypeDecimal {
+			if pqCol == nil {
+				pqCol = scan.FindColumnByIndex(file.Root(), fileIdx)
+			}
 			readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
 		} else if defLevels == nil || page.NumNulls() == 0 {
 			scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
