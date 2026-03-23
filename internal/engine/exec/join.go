@@ -396,15 +396,19 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	}
 	defer source.Close()
 
-	// Use parallel build when: enough CPUs and no spill/memory tracking
-	// (complex interactions with partitioning).
 	workers := runtime.NumCPU()
-	if workers > 1 && h.Spill == nil && h.MemTracker == nil {
-		if h.SemiAntiKeyOnly {
-			return h.buildParallelKeyOnly(ctx, source, workers)
-		}
-		return h.buildParallel(ctx, source, workers)
+
+	// Key-only builds (semi/anti joins without filter) store no batches —
+	// only the key index and bloom filter. Parallel is safe since there is
+	// no merge overhead (each worker inserts directly into the shared table).
+	if workers > 1 && h.SemiAntiKeyOnly {
+		return h.buildParallelKeyOnly(ctx, source, workers)
 	}
+
+	// Full builds use serial insertion. buildParallel creates per-worker
+	// local tables then merges them, but the merge re-inserts every key
+	// and costs as much as the parallel insertion saved (~9s for 60M rows).
+	// Serial without spill is a tight loop at ~0.6s/60M rows.
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -763,6 +767,13 @@ func (h *HashJoin) buildParallel(ctx context.Context, source Source, workers int
 				}
 				sourceMu.Lock()
 				b, err := source.Next(ctx)
+				if b != nil && b.Sel != nil {
+					// Snapshot selection vector — filter operators reuse a
+					// shared buffer that the next source.Next() overwrites.
+					sel := make([]uint32, len(b.Sel))
+					copy(sel, b.Sel)
+					b.Sel = sel
+				}
 				sourceMu.Unlock()
 				if err != nil {
 					firstErr.CompareAndSwap(nil, fmt.Errorf("build source next: %w", err))
@@ -856,6 +867,11 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 				}
 				sourceMu.Lock()
 				b, err := source.Next(ctx)
+				if b != nil && b.Sel != nil {
+					sel := make([]uint32, len(b.Sel))
+					copy(sel, b.Sel)
+					b.Sel = sel
+				}
 				sourceMu.Unlock()
 				if err != nil {
 					firstErr.CompareAndSwap(nil, fmt.Errorf("build source next: %w", err))
