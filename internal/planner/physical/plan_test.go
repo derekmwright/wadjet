@@ -927,3 +927,74 @@ func TestPlanDistributed_ColumnPruning(t *testing.T) {
 		t.Logf("stage %s [%s] table=%s columns=%v", s.ID, s.Type, s.TableName, cols)
 	}
 }
+
+func TestShouldRoutePipeline(t *testing.T) {
+	tests := []struct {
+		name     string
+		stages   []Stage
+		workers  int
+		wantPipe bool
+	}{
+		{
+			name:     "single worker always pipeline",
+			stages:   []Stage{{Type: "scan", EstimatedBytes: 1 << 30}},
+			workers:  1,
+			wantPipe: true,
+		},
+		{
+			name: "small scan with shuffles → pipeline",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 100 << 20}, // 100 MB
+				{Type: "scan", EstimatedBytes: 50 << 20},  // 50 MB
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "hash_join"},
+			},
+			workers:  3,
+			wantPipe: true, // 5s shuffle overhead > 0.2s parallelism benefit
+		},
+		{
+			name: "large scan no shuffles → distributed",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 6 << 30}, // 6 GB
+				{Type: "aggregate"},
+			},
+			workers:  3,
+			wantPipe: false, // 1s overhead < 8s parallelism benefit
+		},
+		{
+			name: "large scan with many shuffles → pipeline",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 2 << 30}, // 2 GB
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "hash_join"},
+				{Type: "sort"},
+				{Type: "merge_sort"},
+			},
+			workers:  3,
+			wantPipe: true, // 10s + 3s > 1.7s benefit
+		},
+		{
+			name: "huge scan outweighs shuffle overhead → distributed",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 20 << 30}, // 20 GB
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "hash_join"},
+			},
+			workers:  3,
+			wantPipe: false, // 6s overhead < 25s parallelism benefit
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ShouldRoutePipeline(tt.stages, tt.workers)
+			if got != tt.wantPipe {
+				t.Errorf("ShouldRoutePipeline() = %v, want %v", got, tt.wantPipe)
+			}
+		})
+	}
+}
