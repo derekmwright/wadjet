@@ -326,3 +326,64 @@ func TestLexRest(t *testing.T) {
 		t.Logf("rest after CREATE: %q (expected to start with whitespace or FUNCTION)", rest)
 	}
 }
+
+func TestLexJSONArrow(t *testing.T) {
+	tokens := collectTokens("col -> 'key'")
+	expected := []TokenType{TokenIdent, TokenJSONArrow, TokenString, TokenEOF}
+	if len(tokens) != len(expected) {
+		t.Fatalf("expected %d tokens, got %d: %v", len(expected), len(tokens), tokens)
+	}
+	for i, exp := range expected {
+		if tokens[i].typ != exp {
+			t.Errorf("token %d: expected %v, got %v (%q)", i, exp, tokens[i].typ, tokens[i].val)
+		}
+	}
+}
+
+func TestLexJSONDoubleArrow(t *testing.T) {
+	tokens := collectTokens("col ->> 'key'")
+	expected := []TokenType{TokenIdent, TokenJSONDoubleArrow, TokenString, TokenEOF}
+	if len(tokens) != len(expected) {
+		t.Fatalf("expected %d tokens, got %d: %v", len(expected), len(tokens), tokens)
+	}
+	for i, exp := range expected {
+		if tokens[i].typ != exp {
+			t.Errorf("token %d: expected %v, got %v (%q)", i, exp, tokens[i].typ, tokens[i].val)
+		}
+	}
+}
+
+func TestLexJSONArrowVsMinus(t *testing.T) {
+	// Ensure -> is distinct from -
+	tokens := collectTokens("a - b -> 'c' ->> 'd'")
+	expected := []TokenType{
+		TokenIdent, TokenMinus, TokenIdent,
+		TokenJSONArrow, TokenString,
+		TokenJSONDoubleArrow, TokenString,
+		TokenEOF,
+	}
+	if len(tokens) != len(expected) {
+		t.Fatalf("expected %d tokens, got %d: %v", len(expected), len(tokens), tokens)
+	}
+	for i, exp := range expected {
+		if tokens[i].typ != exp {
+			t.Errorf("token %d: expected %v, got %v (%q)", i, exp, tokens[i].typ, tokens[i].val)
+		}
+	}
+}
+
+func TestLexJSONArrowChain(t *testing.T) {
+	tokens := collectTokens("data -> 'a' ->> 'b'")
+	expected := []TokenType{
+		TokenIdent, TokenJSONArrow, TokenString,
+		TokenJSONDoubleArrow, TokenString, TokenEOF,
+	}
+	if len(tokens) != len(expected) {
+		t.Fatalf("expected %d tokens, got %d: %v", len(expected), len(tokens), tokens)
+	}
+	for i, exp := range expected {
+		if tokens[i].typ != exp {
+			t.Errorf("token %d: expected %v, got %v (%q)", i, exp, tokens[i].typ, tokens[i].val)
+		}
+	}
+}

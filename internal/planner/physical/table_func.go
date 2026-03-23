@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"database/sql"
@@ -64,6 +65,8 @@ func buildTableFunctionSource(funcName string, args []string, namedArgs map[stri
 			return nil, fmt.Errorf("mysql_query requires 2 arguments (connection_string, sql_query)")
 		}
 		return &dbScanSource{driver: "mysql", connStr: args[0], query: args[1]}, nil
+	case "generate_series":
+		return newGenerateSeriesSource(args)
 	default:
 		return nil, fmt.Errorf("unknown table function: %s", funcName)
 	}
@@ -356,4 +359,92 @@ func (s *dbScanSource) Close() error {
 	}
 	return firstErr
 }
+
+// generateSeriesSource produces rows for generate_series(start, stop[, step]).
+// Emits a single int64 column named "generate_series".
+type generateSeriesSource struct {
+	start, stop, step int64
+	cur               int64
+	done              bool
+}
+
+func newGenerateSeriesSource(args []string) (*generateSeriesSource, error) {
+	if len(args) < 2 {
+		return nil, fmt.Errorf("generate_series requires 2-3 arguments (start, stop[, step])")
+	}
+	start, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("generate_series: invalid start %q: %w", args[0], err)
+	}
+	stop, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("generate_series: invalid stop %q: %w", args[1], err)
+	}
+	step := int64(1)
+	if len(args) >= 3 {
+		step, err = strconv.ParseInt(args[2], 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("generate_series: invalid step %q: %w", args[2], err)
+		}
+		if step == 0 {
+			return nil, fmt.Errorf("generate_series: step cannot be zero")
+		}
+	}
+	if start > stop && step > 0 {
+		step = -step
+	}
+	return &generateSeriesSource{start: start, stop: stop, step: step}, nil
+}
+
+func (s *generateSeriesSource) Init(_ context.Context) error {
+	s.cur = s.start
+	s.done = false
+	return nil
+}
+
+func (s *generateSeriesSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.done {
+		return nil, nil
+	}
+
+	schema := []parquet.Column{
+		{Name: "generate_series", Type: parquet.TypeInt64},
+	}
+
+	// Generate up to DefaultBatchSize rows per batch
+	n := 0
+	vals := make([]int64, 0, batch.DefaultBatchSize)
+	for n < batch.DefaultBatchSize {
+		if s.step > 0 && s.cur > s.stop {
+			break
+		}
+		if s.step < 0 && s.cur < s.stop {
+			break
+		}
+		vals = append(vals, s.cur)
+		s.cur += s.step
+		n++
+	}
+
+	if n == 0 {
+		s.done = true
+		return nil, nil
+	}
+
+	b := batch.NewRecordBatch(schema, n)
+	copy(b.Columns[0].Int64Data[:n], vals)
+	b.Len = n
+
+	// Check if we've exhausted the series
+	if s.step > 0 && s.cur > s.stop {
+		s.done = true
+	}
+	if s.step < 0 && s.cur < s.stop {
+		s.done = true
+	}
+
+	return b, nil
+}
+
+func (s *generateSeriesSource) Close() error { return nil }
 

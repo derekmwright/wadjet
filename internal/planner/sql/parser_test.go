@@ -1884,3 +1884,146 @@ func TestTablesample(t *testing.T) {
 		})
 	}
 }
+
+func TestParseJSONArrow(t *testing.T) {
+	tests := []struct {
+		name     string
+		sql      string
+		funcName string
+		pathArg  string
+	}{
+		{
+			name:     "arrow with string key",
+			sql:      "SELECT data -> 'name' FROM t",
+			funcName: "json_extract",
+			pathArg:  "$.name",
+		},
+		{
+			name:     "double arrow with string key",
+			sql:      "SELECT data ->> 'name' FROM t",
+			funcName: "json_extract_scalar",
+			pathArg:  "$.name",
+		},
+		{
+			name:     "arrow with integer index",
+			sql:      "SELECT data -> 0 FROM t",
+			funcName: "json_extract",
+			pathArg:  "$[0]",
+		},
+		{
+			name:     "double arrow with integer index",
+			sql:      "SELECT data ->> 1 FROM t",
+			funcName: "json_extract_scalar",
+			pathArg:  "$[1]",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := Parse(tt.sql)
+			if err != nil {
+				t.Fatalf("Parse(%q) error: %v", tt.sql, err)
+			}
+			info, err := ExtractSelect(parsed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(info.Columns) == 0 {
+				t.Fatal("expected columns")
+			}
+			fn, ok := info.Columns[0].ASTExpr.(*FuncCallNode)
+			if !ok {
+				t.Fatalf("expected FuncCallNode, got %T", info.Columns[0].ASTExpr)
+			}
+			if fn.Name != tt.funcName {
+				t.Errorf("function name: got %q, want %q", fn.Name, tt.funcName)
+			}
+			if len(fn.Args) != 2 {
+				t.Fatalf("expected 2 args, got %d", len(fn.Args))
+			}
+			pathLit, ok := fn.Args[1].(*Lit)
+			if !ok {
+				t.Fatalf("expected Lit path arg, got %T", fn.Args[1])
+			}
+			if pathLit.Value != tt.pathArg {
+				t.Errorf("path arg: got %q, want %q", pathLit.Value, tt.pathArg)
+			}
+		})
+	}
+}
+
+func TestParseJSONArrowChain(t *testing.T) {
+	// data -> 'a' ->> 'b' should parse as (data -> 'a') ->> 'b'
+	parsed, err := Parse("SELECT data -> 'nested' ->> 'field' FROM t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Columns) == 0 {
+		t.Fatal("expected columns")
+	}
+	// Outer should be json_extract_scalar
+	outer, ok := info.Columns[0].ASTExpr.(*FuncCallNode)
+	if !ok {
+		t.Fatalf("expected FuncCallNode, got %T", info.Columns[0].ASTExpr)
+	}
+	if outer.Name != "json_extract_scalar" {
+		t.Errorf("outer function: got %q, want json_extract_scalar", outer.Name)
+	}
+	// Inner should be json_extract
+	inner, ok := outer.Args[0].(*FuncCallNode)
+	if !ok {
+		t.Fatalf("expected inner FuncCallNode, got %T", outer.Args[0])
+	}
+	if inner.Name != "json_extract" {
+		t.Errorf("inner function: got %q, want json_extract", inner.Name)
+	}
+}
+
+func TestParseGenerateSeriesTableFunction(t *testing.T) {
+	parsed, err := Parse("SELECT * FROM generate_series(1, 10)")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Tables) == 0 {
+		t.Fatal("expected tables")
+	}
+	tbl := info.Tables[0]
+	if !tbl.IsFunction {
+		t.Error("expected IsFunction=true")
+	}
+	if tbl.Name != "generate_series" {
+		t.Errorf("expected name 'generate_series', got %q", tbl.Name)
+	}
+	if len(tbl.FuncArgs) != 2 {
+		t.Fatalf("expected 2 args, got %d", len(tbl.FuncArgs))
+	}
+}
+
+func TestParseGenerateSeriesWithStep(t *testing.T) {
+	parsed, err := Parse("SELECT * FROM generate_series(0, 100, 5) AS gs")
+	if err != nil {
+		t.Fatalf("Parse error: %v", err)
+	}
+	info, err := ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl := info.Tables[0]
+	if !tbl.IsFunction {
+		t.Error("expected IsFunction=true")
+	}
+	if len(tbl.FuncArgs) != 3 {
+		t.Fatalf("expected 3 args, got %d", len(tbl.FuncArgs))
+	}
+	if tbl.Alias != "gs" {
+		t.Errorf("expected alias 'gs', got %q", tbl.Alias)
+	}
+}
