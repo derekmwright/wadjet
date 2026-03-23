@@ -2513,6 +2513,7 @@ type aggPreProject struct {
 	computedCap       int                 // row capacity of cached computed vectors
 	canPassSelThrough bool                // true if all computed columns are numeric (no BytesColumn)
 	checkedSelPass    bool                // true after first call resolves canPassSelThrough
+	matPool           *batch.BatchPool    // pool for materialize buffers (avoids per-call allocation)
 }
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
@@ -2540,6 +2541,13 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 
 	hasSel := in.Sel != nil
 	if hasSel && !a.canPassSelThrough {
+		in = a.materialize(in)
+		hasSel = false
+	}
+	// When vectorized eval is available, materialize to get the dense non-sel
+	// path. The materialize copy cost (~24KB for 500 rows × 6 cols) is far
+	// cheaper than per-row Float64Eval (0.65s vs 0.07s vectorized at SF1).
+	if hasSel && a.hasVecFloat64() {
 		in = a.materialize(in)
 		hasSel = false
 	}
@@ -2657,41 +2665,28 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 
 // materialize compacts a batch with a selection vector into a dense batch
 // with only the selected rows, removing the selection vector.
+// Uses a pooled batch to avoid per-call allocation overhead. GatherColumn
+// handles both data and null bitmap gathering internally.
 func (a *aggPreProject) materialize(in *batch.RecordBatch) *batch.RecordBatch {
 	n := len(in.Sel)
-	out := batch.NewRecordBatch(in.Schema, n)
+	if a.matPool == nil {
+		a.matPool = batch.NewBatchPool(in.Schema, batch.DefaultBatchSize)
+	}
+	out := a.matPool.GetForSize(n)
 	for j := range in.Schema {
-		src := in.Columns[j]
-		dst := out.Columns[j]
-		for di, si := range in.Sel {
-			if src.Nulls.IsNullFast(int(si)) {
-				dst.Nulls.SetNull(di)
-				if dst.Type == batch.TypeString || dst.Type == batch.TypeBytes ||
-					dst.Type == batch.TypeIPv6 || dst.Type == batch.TypeCIDR || dst.Type == batch.TypeUUID {
-					dst.BytesData.Set(di, nil)
-				}
-			} else {
-				dst.Nulls.SetValid(di)
-				switch dst.Type {
-				case batch.TypeBool:
-					dst.BoolData[di] = src.BoolData[si]
-				case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-					dst.Int32Data[di] = src.Int32Data[si]
-				case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-					dst.Int64Data[di] = src.Int64Data[si]
-				case batch.TypeFloat32:
-					dst.Float32Data[di] = src.Float32Data[si]
-				case batch.TypeFloat64:
-					dst.Float64Data[di] = src.Float64Data[si]
-				case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-					dst.BytesData.Set(di, src.BytesData.Value(int(si)))
-				case batch.TypeDecimal:
-					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
-				}
-			}
-		}
+		exec.GatherColumn(out.Columns[j], in.Columns[j], in.Sel)
 	}
 	return out
+}
+
+// hasVecFloat64 returns true if any computed column has vectorized float64 eval.
+func (a *aggPreProject) hasVecFloat64() bool {
+	for _, c := range a.computed {
+		if c.VecFloat64Eval != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *aggPreProject) Close() error { return nil }
