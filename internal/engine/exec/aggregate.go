@@ -548,6 +548,13 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				h.intGroupStates = make([]*groupState, 0, htInitSize)
 				h.gsPool.preAlloc(htInitSize)
 			}
+			if h.intFlatAccs == nil {
+				if len(h.intGroupStates) > 0 {
+					h.rebuildFlatAccums(b)
+				} else {
+					h.initFlatAccums(b)
+				}
+			}
 		}
 	}
 
@@ -948,102 +955,149 @@ func (h *HashAggregate) ensureGroupIndexBuf(n int) []int32 {
 }
 
 // consumeBatchCompactGroup is the fast path for multi-column GROUP BY where
-// the binary-encoded key fits in int64. Uses intHashTable for group lookup.
+// the binary-encoded key fits in int64. Uses intHashTable for group lookup
+// with SoA flat accumulator scatter (two-phase like consumeBatchIntGroup).
+// Phase 1: Hash lookup builds group index array.
+// Phase 2: Per-aggregate typed scatter update (one pass per agg, no per-row dispatch).
 // Falls back to generic path if any key exceeds 8 bytes.
 func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
-	// batchUpdaters already set by consumeBatch.
+	intIdx := h.intGroupIndex
+	colIdx := h.aggColIdx
+	nAggs := len(h.Aggs)
 
-	processRow := func(row int) bool {
+	// Pre-reserve accumulator capacity.
+	batchRows := b.ActiveLen()
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].ensureCapacity(batchRows)
+	}
+
+	// Phase 1: Encode keys, hash lookup, build group index array.
+	var gi []int32
+	var sel []uint32
+	var iterLen int
+
+	encodeKey := func(row int) bool {
 		h.keyBuf = h.keyBuf[:0]
-		for i, idx := range h.groupColIdx {
+		for ci, idx := range h.groupColIdx {
 			if idx < 0 {
-				h.keyBuf = append(h.keyBuf, 1) // null flag
+				h.keyBuf = append(h.keyBuf, 1)
 				continue
 			}
 			v := b.Columns[idx]
 			if v.Nulls.IsNullFast(row) {
-				h.keyBuf = append(h.keyBuf, 1) // null flag
+				h.keyBuf = append(h.keyBuf, 1)
 				continue
 			}
-			h.keyBuf = append(h.keyBuf, 0) // not-null flag
-			h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[i])
+			h.keyBuf = append(h.keyBuf, 0)
+			h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[ci])
 		}
+		return len(h.keyBuf) <= 8
+	}
 
-		if len(h.keyBuf) > 8 {
-			return false // key too long, need fallback
-		}
-
-		key := packKeyInt64(h.keyBuf)
-		newIdx := int32(len(h.intGroupStates))
-		gsIdx, ok := h.intGroupIndex.GetOrInsert(key, newIdx)
-		if ok {
-			gs := h.intGroupStates[gsIdx]
-			for i := range h.Aggs {
-				updater := h.batchUpdaters[i]
-				if updater == nil {
-					continue
-				}
-				idx := h.aggColIdx[i]
-				if idx >= 0 {
-					updater(&gs.accs[i], b.Columns[idx], row)
-				} else {
-					updater(&gs.accs[i], nil, row) // COUNT(*)
-				}
-			}
-			return true
-		}
-
-		// New group
+	newGroup := func(row int, key int64) {
+		intIdx.CheckGrow()
 		keyVals := make([]any, len(h.GroupByCols))
-		for i, idx := range h.groupColIdx {
+		for ki, idx := range h.groupColIdx {
 			if idx >= 0 {
-				keyVals[i] = b.Columns[idx].GetValue(row)
+				keyVals[ki] = b.Columns[idx].GetValue(row)
 			}
 		}
-		// useCompactGroupKey requires allSimpleAggs — skip distinctSets/extraState.
 		gs := h.gsPool.alloc()
 		gs.keyValues = keyVals
-		gs.accs = make([]kernel.Accumulator, len(h.Aggs))
-
 		h.intGroupStates = append(h.intGroupStates, gs)
 		h.compactKeys = append(h.compactKeys, string(h.keyBuf))
 		h.keys = append(h.keys, keyVals)
-
-		for i := range h.Aggs {
-			updater := h.batchUpdaters[i]
-			if updater == nil {
-				continue
-			}
-			idx := h.aggColIdx[i]
-			if idx >= 0 {
-				updater(&gs.accs[i], b.Columns[idx], row)
-			} else {
-				updater(&gs.accs[i], nil, row) // COUNT(*)
-			}
+		for ai := range h.intFlatAccs {
+			h.intFlatAccs[ai].appendGroup()
 		}
-		return true
 	}
 
 	if b.Sel != nil {
-		for i, idx := range b.Sel {
-			if !processRow(int(idx)) {
-				// Key exceeded 8 bytes — migrate to generic path
-				h.migrateCompactToGeneric()
-				for j := i; j < len(b.Sel); j++ {
-					h.processRow(b, int(b.Sel[j]))
-				}
+		iterLen = len(b.Sel)
+		sel = b.Sel
+		gi = h.ensureGroupIndexBuf(iterLen)
+		for si, selIdx := range b.Sel {
+			row := int(selIdx)
+			if !encodeKey(row) {
+				h.compactFallback(b, gi, sel, si, iterLen)
 				return
+			}
+			key := packKeyInt64(h.keyBuf)
+			newIdx := int32(len(h.intGroupStates))
+			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
+			if ok {
+				gi[si] = gsIdx
+			} else {
+				newGroup(row, key)
+				gi[si] = newIdx
 			}
 		}
 	} else {
-		for i := 0; i < b.Len; i++ {
-			if !processRow(i) {
-				h.migrateCompactToGeneric()
-				for j := i; j < b.Len; j++ {
-					h.processRow(b, j)
-				}
+		iterLen = b.Len
+		gi = h.ensureGroupIndexBuf(iterLen)
+		for row := 0; row < iterLen; row++ {
+			if !encodeKey(row) {
+				h.compactFallback(b, gi, nil, row, iterLen)
 				return
 			}
+			key := packKeyInt64(h.keyBuf)
+			newIdx := int32(len(h.intGroupStates))
+			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
+			if ok {
+				gi[row] = gsIdx
+			} else {
+				newGroup(row, key)
+				gi[row] = newIdx
+			}
+		}
+	}
+
+	// Phase 2: Per-aggregate typed scatter update using flat arrays.
+	for i := 0; i < nAggs; i++ {
+		fa := &h.intFlatAccs[i]
+		ci := colIdx[i]
+		if ci >= 0 {
+			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
+		} else if h.Aggs[i].Func == AggCount {
+			scatterCountStar(fa.count, gi, iterLen)
+		}
+	}
+}
+
+// compactFallback handles the case where a compact key exceeds 8 bytes.
+// Scatters the already-indexed rows via Phase 2, materializes SoA accumulators,
+// migrates to generic path, and processes remaining rows per-row.
+func (h *HashAggregate) compactFallback(b *batch.RecordBatch, gi []int32, sel []uint32, fallbackAt int, totalRows int) {
+	// Phase 2 for rows already indexed.
+	if fallbackAt > 0 {
+		colIdx := h.aggColIdx
+		truncSel := sel
+		if truncSel != nil {
+			truncSel = truncSel[:fallbackAt]
+		}
+		for i := 0; i < len(h.Aggs); i++ {
+			fa := &h.intFlatAccs[i]
+			ci := colIdx[i]
+			if ci >= 0 {
+				scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], truncSel, fallbackAt)
+			} else if h.Aggs[i].Func == AggCount {
+				scatterCountStar(fa.count, gi[:fallbackAt], fallbackAt)
+			}
+		}
+	}
+
+	// Materialize SoA → AoS and migrate to generic.
+	h.materializeFlatAccums()
+	h.migrateCompactToGeneric()
+
+	// Process remaining rows (including the fallback row) generically.
+	if sel != nil {
+		for j := fallbackAt; j < totalRows; j++ {
+			h.processRow(b, int(sel[j]))
+		}
+	} else {
+		for j := fallbackAt; j < totalRows; j++ {
+			h.processRow(b, j)
 		}
 	}
 }
