@@ -189,6 +189,16 @@ func (h *strHashTable) ForEach(fn func(key []byte)) {
 	}
 }
 
+// ForEachWithValue calls fn for each key-value pair. Saves a separate
+// Get lookup when the caller needs both key and value (e.g., merge phase).
+func (h *strHashTable) ForEachWithValue(fn func(key []byte, val int32)) {
+	for _, e := range h.entries {
+		if e.offset >= 0 {
+			fn(h.arena[e.offset:e.offset+e.keyLen], e.val)
+		}
+	}
+}
+
 // strKeyEqual compares two byte slices for equality.
 // Uses bytes.Equal which has assembly-optimized comparison.
 func strKeyEqual(a, b []byte) bool {
