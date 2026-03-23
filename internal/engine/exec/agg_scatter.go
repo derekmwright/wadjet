@@ -108,11 +108,18 @@ func (fa *flatAccumArrays) ensureCapacity(n int) {
 }
 
 // ensureSliceCap grows the capacity of s to fit n more appends without reallocation.
+// Uses multiplicative growth (at least 2x) to amortize allocation cost. Without this,
+// additive growth by batch size (2048) causes a reallocation nearly every batch when
+// only a few new groups are created per batch.
 func ensureSliceCap(s []int64, n int) []int64 {
 	if cap(s)-len(s) >= n {
 		return s
 	}
-	ns := make([]int64, len(s), len(s)+n)
+	newCap := len(s) + n
+	if double := cap(s) * 2; double > newCap {
+		newCap = double
+	}
+	ns := make([]int64, len(s), newCap)
 	copy(ns, s)
 	return ns
 }
@@ -121,7 +128,11 @@ func ensureSliceCapF64(s []float64, n int) []float64 {
 	if cap(s)-len(s) >= n {
 		return s
 	}
-	ns := make([]float64, len(s), len(s)+n)
+	newCap := len(s) + n
+	if double := cap(s) * 2; double > newCap {
+		newCap = double
+	}
+	ns := make([]float64, len(s), newCap)
 	copy(ns, s)
 	return ns
 }
@@ -130,7 +141,11 @@ func ensureSliceCapInt128(s []batch.Int128, n int) []batch.Int128 {
 	if cap(s)-len(s) >= n {
 		return s
 	}
-	ns := make([]batch.Int128, len(s), len(s)+n)
+	newCap := len(s) + n
+	if double := cap(s) * 2; double > newCap {
+		newCap = double
+	}
+	ns := make([]batch.Int128, len(s), newCap)
 	copy(ns, s)
 	return ns
 }
@@ -139,7 +154,11 @@ func ensureSliceCapBool(s []bool, n int) []bool {
 	if cap(s)-len(s) >= n {
 		return s
 	}
-	ns := make([]bool, len(s), len(s)+n)
+	newCap := len(s) + n
+	if double := cap(s) * 2; double > newCap {
+		newCap = double
+	}
+	ns := make([]bool, len(s), newCap)
 	copy(ns, s)
 	return ns
 }

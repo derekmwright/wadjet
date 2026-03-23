@@ -714,10 +714,11 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 				key = gkVec.Int64Data[row]
 			}
 			newIdx := int32(len(h.intGroupStates))
-			gsIdx, ok := intIdx.GetOrInsert(key, newIdx)
+			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
 				gi[si] = gsIdx
 			} else {
+				intIdx.CheckGrow()
 				gs := h.gsPool.alloc()
 				gs.intKey = key
 				h.intGroupStates = append(h.intGroupStates, gs)
@@ -743,10 +744,11 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 				key = gkVec.Int64Data[row]
 			}
 			newIdx := int32(len(h.intGroupStates))
-			gsIdx, ok := intIdx.GetOrInsert(key, newIdx)
+			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
 				gi[row] = gsIdx
 			} else {
+				intIdx.CheckGrow()
 				gs := h.gsPool.alloc()
 				gs.intKey = key
 				h.intGroupStates = append(h.intGroupStates, gs)
