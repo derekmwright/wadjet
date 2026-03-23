@@ -2909,6 +2909,24 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			}
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		// Pre-calculate total byte size to avoid growslice in Set's append.
+		{
+			var src *batch.Vector
+			prevBatch := int32(-1)
+			totalBytes := 0
+			for _, pair := range pairs {
+				if !pair.matched {
+					continue
+				}
+				if bi := pair.ref.batchIdx; bi != prevBatch {
+					src = buildBatches[bi].Columns[srcIdx]
+					prevBatch = bi
+				}
+				si := int(pair.ref.rowIdx)
+				totalBytes += int(src.BytesData.Offsets[si+1] - src.BytesData.Offsets[si])
+			}
+			dst.BytesData.PreAllocBytes(totalBytes)
+		}
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true

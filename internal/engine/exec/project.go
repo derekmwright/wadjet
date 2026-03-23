@@ -243,6 +243,13 @@ func projectGatherColumn(dst, src *batch.Vector, sel []uint32) {
 			dst.BoolData[i] = src.BoolData[idx]
 		}
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		// Pre-calculate total byte size to avoid growslice
+		totalBytes := 0
+		srcOff := src.BytesData.Offsets
+		for _, idx := range sel {
+			totalBytes += int(srcOff[idx+1] - srcOff[idx])
+		}
+		dst.BytesData.PreAllocBytes(totalBytes)
 		for i, idx := range sel {
 			dst.BytesData.Set(i, src.BytesData.Value(int(idx)))
 		}
