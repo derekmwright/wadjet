@@ -94,13 +94,14 @@ type BytesColumn struct {
 
 // NewBytesColumn creates a new BytesColumn with the given capacity.
 // Pre-allocates offsets for positional access (all offsets start at 0 = empty strings).
-// Data arena is pre-sized to capacity*32 bytes (average 32 bytes per string), which
-// eliminates the 2-5 reallocations that would otherwise occur as Data grows from 0.
+// Data arena is lazily allocated: starts empty and grows on first use. Hot paths
+// (scan BulkSet, gather PreAllocBytes) know the exact size they need, so eager
+// pre-allocation just wastes memclr on unused capacity. For pooled batches, the
+// grown capacity is retained across Reset cycles.
 func NewBytesColumn(capacity int) BytesColumn {
 	offsets := make([]uint32, capacity+1)
 	return BytesColumn{
 		Offsets: offsets,
-		Data:    make([]byte, 0, capacity*32),
 	}
 }
 
