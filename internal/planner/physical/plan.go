@@ -2574,12 +2574,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// __agg_0 * 0.0001), use TypeFloat64.
 		outType := parquet.TypeString
 		if proj.ASTExpr != nil && !proj.IsAgg {
-			if binOp, isBinOp := proj.ASTExpr.(*plansql.BinaryOp); isBinOp {
-				// Date ± interval produces a date string, not a number.
-				if !binOpInvolvesInterval(binOp) {
-					outType = parquet.TypeFloat64
-				}
-			}
+			outType = inferProjectionType(proj.ASTExpr, outType)
 		}
 
 		pc := exec.ProjectColumn{
@@ -2837,6 +2832,51 @@ func replaceAggWithColRef(node plansql.Node, target *plansql.FuncCallNode, colNa
 // binOpInvolvesInterval returns true if either operand of a BinaryOp is an
 // IntervalLit or a date/timestamp function (current_date, current_timestamp).
 // Date ± interval produces a date string, not a numeric value.
+// inferProjectionType infers the output parquet type from an AST expression node.
+// Returns the inferred type, or the fallback if inference isn't possible.
+func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.TypeID {
+	switch n := node.(type) {
+	case *plansql.BinaryOp:
+		if !binOpInvolvesInterval(n) {
+			return parquet.TypeFloat64
+		}
+	case *plansql.FuncCallNode:
+		if isNumericFunc(n.Name) {
+			return parquet.TypeFloat64
+		}
+	case *plansql.CastNode:
+		return inferCastType(n.TypeName)
+	}
+	return fallback
+}
+
+// isNumericFunc returns true for scalar functions known to return numeric output.
+func isNumericFunc(name string) bool {
+	switch strings.ToLower(name) {
+	case "round", "abs", "ceil", "ceiling", "floor", "sqrt", "ln", "log", "log2",
+		"log10", "exp", "pow", "power", "sign", "trunc", "truncate",
+		"sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+		"radians", "degrees", "pi", "mod", "greatest", "least",
+		"coalesce", "nullif", "random":
+		return true
+	}
+	return false
+}
+
+// inferCastType maps SQL type names to parquet types for CAST expressions.
+func inferCastType(typeName string) parquet.TypeID {
+	switch strings.ToUpper(strings.TrimSpace(typeName)) {
+	case "INTEGER", "INT", "BIGINT", "INT64":
+		return parquet.TypeInt64
+	case "REAL", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "FLOAT64", "NUMERIC", "DECIMAL":
+		return parquet.TypeFloat64
+	case "BOOLEAN", "BOOL":
+		return parquet.TypeBool
+	default:
+		return parquet.TypeString
+	}
+}
+
 func binOpInvolvesInterval(b *plansql.BinaryOp) bool {
 	return nodeIsDateOrInterval(b.Left) || nodeIsDateOrInterval(b.Right)
 }
