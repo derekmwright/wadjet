@@ -1638,8 +1638,8 @@ func (h *HashJoin) Probe() *HashJoinProbe {
 	// parallel pipeline execution. Each clone gets its own buffers.
 	return &HashJoinProbe{
 		join:     h,
-		pairsBuf: make([]matchPair, 0, 2*batch.DefaultBatchSize),
-		indexBuf: make([]int, 0, 2*batch.DefaultBatchSize),
+		pairsBuf: make([]matchPair, 0, 4*batch.DefaultBatchSize),
+		indexBuf: make([]int, 0, 4*batch.DefaultBatchSize),
 		keyBuf:   make([]byte, 0, 128),
 	}
 }

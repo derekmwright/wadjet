@@ -44,6 +44,21 @@ func NewBatchPool(schema []parquet.Column, batchSize int) *BatchPool {
 // BatchSize returns the row count this pool is configured for.
 func (p *BatchPool) BatchSize() int { return p.batchSize }
 
+// PreWarm pre-allocates n batches into the pool. Call before parallel workers
+// start to avoid allocation contention during the scan hot path.
+func (p *BatchPool) PreWarm(n int) {
+	if n > p.maxPool {
+		n = p.maxPool
+	}
+	p.mu.Lock()
+	for i := 0; i < n && len(p.pool) < p.maxPool; i++ {
+		b := NewRecordBatch(p.schema, p.batchSize)
+		b.pool = p
+		p.pool = append(p.pool, b)
+	}
+	p.mu.Unlock()
+}
+
 // Get returns a batch from the pool, or allocates a new one.
 func (p *BatchPool) Get() *RecordBatch {
 	p.mu.Lock()
