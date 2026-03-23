@@ -1704,6 +1704,10 @@ func (p *HashJoinProbe) buildProbeKey(b *batch.RecordBatch, row int) {
 	}
 }
 
+// joinOutputPoolSize is the capacity for join output batch pooling.
+// 4x DefaultBatchSize handles most 1:N join outputs without fresh allocation.
+const joinOutputPoolSize = 4 * batch.DefaultBatchSize
+
 // matchPair tracks a probe-build row match for output construction.
 type matchPair struct {
 	probeRow int
@@ -1734,7 +1738,8 @@ type HashJoinProbe struct {
 	// when the output schema is known. Eliminates per-batch allocation
 	// in multi-way join pipelines where intermediate batches are released
 	// back to the pool after the next operator consumes them.
-	outPool *batch.BatchPool
+	outPool      *batch.BatchPool
+	largeOutPool *batch.BatchPool // for outputs > DefaultBatchSize
 
 	// Grace Hash Join flush state — populated when spilled partitions are processed
 	spillFlushResults []*batch.RecordBatch
@@ -1879,9 +1884,8 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	}
 
 	// Build output batch using precomputed column source mapping.
-	// Use pooled batch when output fits within DefaultBatchSize to avoid
-	// per-batch allocation. The pipeline releases intermediate batches
-	// back to this pool after the next operator consumes them.
+	// Two-pool strategy: standard pool for ≤DefaultBatchSize (common case,
+	// cache-friendly), large pool for oversized 1:N outputs (avoids fresh alloc).
 	var out *batch.RecordBatch
 	if len(pairs) <= batch.DefaultBatchSize {
 		if p.outPool == nil {
@@ -1893,11 +1897,22 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 			col.Len = len(pairs)
 			col.Nulls.ResetNonNull(len(pairs))
 		}
+	} else if len(pairs) <= joinOutputPoolSize {
+		if p.largeOutPool == nil {
+			p.largeOutPool = batch.NewBatchPool(outSchema, joinOutputPoolSize)
+		}
+		out = p.largeOutPool.GetForSize(len(pairs))
+		out.Len = len(pairs)
+		for _, col := range out.Columns {
+			col.Len = len(pairs)
+			col.Nulls.ResetNonNull(len(pairs))
+		}
 	} else {
 		out = batch.NewRecordBatch(outSchema, len(pairs))
 	}
 
-	// Pre-extract probe row indices for bulk gather
+	// Pre-extract probe row indices for bulk gather (packed int array
+	// has better cache locality than reading from 16-byte matchPair stride).
 	if cap(p.indexBuf) < len(pairs) {
 		p.indexBuf = make([]int, len(pairs))
 	}
