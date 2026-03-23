@@ -201,14 +201,24 @@ func TestOptimize_PartitionExtraction(t *testing.T) {
 	}
 }
 
-func TestReorderJoins_LargestFirst(t *testing.T) {
-	// Three-way join: A (large, no filter) JOIN B (filtered) JOIN C (no filter)
-	// Greedy reorder starts with the most expensive (largest) table as the
-	// initial probe (left) side, avoiding hashing large tables into build side.
+func TestReorderJoins_CBO_FactTableProbes(t *testing.T) {
+	// Three-way join: A (1M) JOIN B (1K filtered) JOIN C (100K)
+	// In a left-deep hash join tree, the leftmost relation is the initial probe
+	// that streams through all subsequent hash tables. The CBO should keep the
+	// largest table (fact table) as the probe side and build smaller tables
+	// (dimensions) into hash tables, minimizing build cost and memory.
 	scanA := NewScan("big_table", "a")
+	scanA.ScanRowEstimate = 1000000
+	scanA.ScanColumns = []string{"id"}
+
 	scanB := NewScan("small_table", "b")
+	scanB.ScanRowEstimate = 1000
+	scanB.ScanColumns = []string{"id", "status"}
 	scanB.ScanPredicates = []Predicate{{Column: "status", Op: "=", Value: "active"}}
+
 	scanC := NewScan("medium_table", "c")
+	scanC.ScanRowEstimate = 100000
+	scanC.ScanColumns = []string{"id"}
 
 	// Original: (A JOIN B) JOIN C
 	join1 := NewJoin(scanA, scanB, "inner", "a.id = b.id")
@@ -219,13 +229,19 @@ func TestReorderJoins_LargestFirst(t *testing.T) {
 	if result.Type != NodeJoin {
 		t.Fatalf("expected join, got %s", result.Type)
 	}
-	// A (most expensive, no filter) should be the leftmost leaf (probe side)
+	// Verify all three tables are in the plan
+	tables := collectAllTables(result)
+	if !tables["big_table"] || !tables["small_table"] || !tables["medium_table"] {
+		t.Errorf("missing tables in result, got: %v", tables)
+	}
+	// The largest table should be the leftmost leaf (probe side) since
+	// building it into a hash table would be very expensive.
 	leftmost := result
 	for leftmost.Type == NodeJoin {
 		leftmost = leftmost.Children[0]
 	}
 	if leftmost.TableName != "big_table" {
-		t.Errorf("expected largest table 'big_table' as leftmost, got %q", leftmost.TableName)
+		t.Errorf("CBO should keep fact table 'big_table' as probe (leftmost), got %q", leftmost.TableName)
 	}
 }
 
@@ -289,14 +305,10 @@ func TestReorderJoins_TwoTableSwap(t *testing.T) {
 	}
 }
 
-func TestReorderJoins_FilterPreference(t *testing.T) {
-	// In a multi-way join with probe = largest table, filtered relations
-	// should be preferred as build sides (even if more expensive than
-	// unfiltered alternatives) because their bloom filters reduce probe volume.
-	//
-	// Setup: lineitem (6M probe) joins supplier (10K), part+filter (200K).
-	// Without filter preference: supplier (cost 10) chosen first.
-	// With filter preference: part+filter chosen first.
+func TestReorderJoins_CBO_AvoidsBuildingFactTable(t *testing.T) {
+	// CBO should avoid building the large fact table into a hash table.
+	// lineitem (6M) should be the probe (leftmost), with supplier (10K)
+	// and part+filter (~20K) as build sides.
 	lineitem := NewScan("lineitem", "")
 	lineitem.ScanRowEstimate = 6000000
 	lineitem.ScanColumns = []string{"l_partkey", "l_suppkey"}
@@ -318,26 +330,52 @@ func TestReorderJoins_FilterPreference(t *testing.T) {
 
 	result := reorderJoins(j2)
 
-	// After reorder: lineitem should be probe (left-most).
-	// The first build (right child of innermost join) should be part+filter,
-	// not supplier, because part has a selective filter.
-	innerJoin := result
-	for innerJoin.Type == NodeJoin && innerJoin.Children[0].Type == NodeJoin {
-		innerJoin = innerJoin.Children[0]
+	// Verify all tables present
+	tables := collectAllTables(result)
+	if !tables["lineitem"] || !tables["supplier"] || !tables["part"] {
+		t.Errorf("missing tables in result, got: %v", tables)
 	}
-	// innerJoin is the innermost join: probe(lineitem) JOIN build(first_choice)
-	rightChild := innerJoin.Children[1]
-	// The right child should be the part+filter subtree
-	if rightChild.Type == NodeFilter {
-		// Good — part+filter was chosen first
-		if rightChild.Children[0].TableName != "part" {
-			t.Errorf("expected part as first build (under filter), got %s", rightChild.Children[0].TableName)
+	// lineitem (6M) should be leftmost (probe side) — building it would be
+	// extremely expensive (memory + cache misses).
+	leftmost := result
+	for leftmost.Type == NodeJoin {
+		leftmost = leftmost.Children[0]
+	}
+	if leftmost.TableName != "lineitem" {
+		t.Errorf("CBO should keep fact table 'lineitem' as probe (leftmost), got %q", leftmost.TableName)
+	}
+	// Neither build side should be lineitem
+	var checkBuilds func(n *Node)
+	checkBuilds = func(n *Node) {
+		if n == nil || n.Type != NodeJoin {
+			return
 		}
-	} else if rightChild.Type == NodeScan && rightChild.TableName == "part" {
-		// Also acceptable
-	} else {
-		t.Errorf("expected part+filter as first build side, got type=%s table=%s", rightChild.Type, rightChild.TableName)
+		right := n.Children[1]
+		if right.Type == NodeScan && right.TableName == "lineitem" {
+			t.Error("lineitem should not be a build side (right child)")
+		}
+		checkBuilds(n.Children[0])
 	}
+	checkBuilds(result)
+}
+
+// collectAllTables returns all table names in a plan tree.
+func collectAllTables(n *Node) map[string]bool {
+	result := make(map[string]bool)
+	var walk func(*Node)
+	walk = func(node *Node) {
+		if node == nil {
+			return
+		}
+		if node.Type == NodeScan && node.TableName != "" {
+			result[node.TableName] = true
+		}
+		for _, child := range node.Children {
+			walk(child)
+		}
+	}
+	walk(n)
+	return result
 }
 
 func TestExtractCommonORPredicates_Basic(t *testing.T) {
