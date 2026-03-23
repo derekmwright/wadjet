@@ -2412,7 +2412,14 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					Type: parquet.TypeFloat64,
 					Expr: wrapExpr(compiled),
 				}
-				// Use vectorized evaluation when available (entire column at once),
+				// Use general vectorized evaluation when available.
+				if ve, ok := compiled.(expr.VecExpr); ok {
+					evalVec := ve.EvalVec
+					pc.VecEval = func(b *batch.RecordBatch, out *batch.Vector, n int) {
+						evalVec(b, out, n)
+					}
+				}
+				// Use vectorized float64 evaluation when available (entire column at once),
 				// falling back to typed per-row eval.
 				if ve, ok := compiled.(expr.VecFloat64Expr); ok {
 					pc.VecFloat64Eval = ve.EvalFloat64Vec
@@ -2741,7 +2748,9 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 				}
 			}
 		} else {
-			if c.VecFloat64Eval != nil {
+			if c.VecEval != nil {
+				c.VecEval(in, col, in.Len)
+			} else if c.VecFloat64Eval != nil {
 				c.VecFloat64Eval(in, col.Float64Data, in.Len)
 			} else if c.Float64Eval != nil {
 				for i := 0; i < in.Len; i++ {
@@ -2788,10 +2797,10 @@ func (a *aggPreProject) materialize(in *batch.RecordBatch) *batch.RecordBatch {
 	return out
 }
 
-// hasVecFloat64 returns true if any computed column has vectorized float64 eval.
+// hasVecFloat64 returns true if any computed column has vectorized eval.
 func (a *aggPreProject) hasVecFloat64() bool {
 	for _, c := range a.computed {
-		if c.VecFloat64Eval != nil {
+		if c.VecEval != nil || c.VecFloat64Eval != nil {
 			return true
 		}
 	}
