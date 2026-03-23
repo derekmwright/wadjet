@@ -124,6 +124,12 @@ type HashAggregate struct {
 	useStrGroupKey bool
 	strGroupKeyCol int // column index for the string group-by key
 
+	// Multi-column generic GROUP BY SoA fast path: binary key serialization
+	// with strHashTable lookup and SoA flat accumulator scatter.
+	// Used when GROUP BY has multiple columns that don't fit compact/int/str paths
+	// but all aggregates are simple (SUM, COUNT, MIN, MAX, AVG).
+	useGenericSoA bool
+
 	// String hash table for generic GROUP BY: open-addressing with arena-stored keys.
 	// Replaces map[string]*groupState to eliminate GC scanning overhead.
 	strGroupIndex  *strHashTable
@@ -589,6 +595,31 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 	}
 
+	// Multi-column generic GROUP BY SoA fast path:
+	// When all other fast paths are exhausted but aggregates are simple,
+	// use strHashTable with binary key serialization and SoA scatter.
+	// Benefits Q7, Q9, Q10, Q18 at SF10 (multi-column GROUP BY with strings).
+	if !h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey &&
+		!h.useStrGroupKey && !h.isScalarAgg && len(h.GroupByCols) > 0 && allSimpleAggs {
+		h.useGenericSoA = true
+		if h.strGroupIndex == nil {
+			h.strGroupIndex = newStrHashTable(htInitSize)
+		}
+		if h.strGroupStates == nil {
+			h.strGroupStates = make([]*groupState, 0, htInitSize)
+			h.keys = make([][]any, 0, htInitSize)
+			h.serializedKeys = make([]string, 0, htInitSize)
+			h.gsPool.preAlloc(htInitSize)
+		}
+		if h.intFlatAccs == nil {
+			if len(h.strGroupStates) > 0 {
+				h.rebuildFlatAccums(b)
+			} else {
+				h.initFlatAccums(b)
+			}
+		}
+	}
+
 	// Resolve batch-level kernels for scalar aggregate fast path
 	if len(h.GroupByCols) == 0 {
 		h.batchAggKernels = make([]kernel.BatchAggKernel, len(h.Aggs))
@@ -652,6 +683,12 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	// Single-column string GROUP BY fast path
 	if h.useStrGroupKey {
 		h.consumeBatchStrGroup(b)
+		return
+	}
+
+	// Multi-column generic GROUP BY SoA fast path
+	if h.useGenericSoA {
+		h.consumeBatchGenericSoA(b)
 		return
 	}
 
@@ -1205,6 +1242,102 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 					h.processRow(b, row)
 				}
 			}
+		}
+	}
+}
+
+// consumeBatchGenericSoA is the SoA fast path for multi-column GROUP BY
+// that doesn't fit int/dual-int/compact/single-string paths.
+// Uses binary key serialization into strHashTable with two-phase scatter.
+// Phase 1: Serialize keys, hash lookup, build group index array.
+// Phase 2: Per-aggregate typed scatter update (one pass per agg, no per-row dispatch).
+func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
+	strIdx := h.strGroupIndex
+	colIdx := h.aggColIdx
+	nAggs := len(h.Aggs)
+
+	batchRows := b.ActiveLen()
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].ensureCapacity(batchRows)
+	}
+
+	// Phase 1: Serialize keys, hash lookup, build group index array.
+	var gi []int32
+	var sel []uint32
+	var iterLen int
+
+	serializeKey := func(row int) {
+		h.keyBuf = h.keyBuf[:0]
+		for ci, idx := range h.groupColIdx {
+			if idx < 0 {
+				h.keyBuf = append(h.keyBuf, 1)
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				h.keyBuf = append(h.keyBuf, 1)
+				continue
+			}
+			h.keyBuf = append(h.keyBuf, 0)
+			h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[ci])
+		}
+	}
+
+	newGroup := func(row int) {
+		keyVals := make([]any, len(h.GroupByCols))
+		for ki, idx := range h.groupColIdx {
+			if idx >= 0 {
+				keyVals[ki] = b.Columns[idx].GetValue(row)
+			}
+		}
+		gs := h.gsPool.alloc()
+		gs.keyValues = keyVals
+		h.strGroupStates = append(h.strGroupStates, gs)
+		h.keys = append(h.keys, keyVals)
+		h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
+		for ai := range h.intFlatAccs {
+			h.intFlatAccs[ai].appendGroup()
+		}
+	}
+
+	if b.Sel != nil {
+		iterLen = len(b.Sel)
+		sel = b.Sel
+		gi = h.ensureGroupIndexBuf(iterLen)
+		for si, selIdx := range b.Sel {
+			row := int(selIdx)
+			serializeKey(row)
+			gsIdx, found := strIdx.GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
+			if found {
+				gi[si] = gsIdx
+			} else {
+				newGroup(row)
+				gi[si] = gsIdx
+			}
+		}
+	} else {
+		iterLen = b.Len
+		gi = h.ensureGroupIndexBuf(iterLen)
+		for row := 0; row < iterLen; row++ {
+			serializeKey(row)
+			gsIdx, found := strIdx.GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
+			if found {
+				gi[row] = gsIdx
+			} else {
+				newGroup(row)
+				gi[row] = gsIdx
+			}
+		}
+	}
+
+	// Phase 2: Per-aggregate typed scatter update using flat arrays.
+	for i := 0; i < nAggs; i++ {
+		fa := &h.intFlatAccs[i]
+		ci := colIdx[i]
+		if ci >= 0 {
+			scatterFlatAggUpdate(fa, gi, h.Aggs[i].Func, b.Columns[ci], sel, iterLen)
+		} else if h.Aggs[i].Func == AggCount {
+			scatterCountStar(fa.count, gi, iterLen)
 		}
 	}
 }
@@ -2440,8 +2573,8 @@ func (h *HashAggregate) materializeFlatAccums() {
 		return
 	}
 	nAggs := len(h.Aggs)
-	// String GROUP BY uses strGroupStates with SoA flat accumulators.
-	if h.useStrGroupKey {
+	// String GROUP BY and generic SoA use strGroupStates with SoA flat accumulators.
+	if h.useStrGroupKey || h.useGenericSoA {
 		for gi, gs := range h.strGroupStates {
 			if gs.accs == nil {
 				gs.accs = make([]kernel.Accumulator, nAggs)
@@ -2551,7 +2684,7 @@ func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
 	h.initFlatAccums(b)
 
 	var groups []*groupState
-	if h.useStrGroupKey {
+	if h.useStrGroupKey || h.useGenericSoA {
 		groups = h.strGroupStates
 	} else {
 		groups = h.intGroupStates
