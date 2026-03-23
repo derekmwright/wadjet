@@ -205,3 +205,182 @@ func TestCanBloomPruneRowGroup_StringKeyNotSupported(t *testing.T) {
 		t.Error("expected string-key bloom filter to NOT prune row groups")
 	}
 }
+
+// --- Dynamic range pruning tests ---
+
+func TestCanRangePruneRowGroup_SkipNonOverlapping(t *testing.T) {
+	ranges := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(100), MaxValue: int64(200)},
+	}
+	stats := parquet.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]parquet.ColumnStats{
+			"id": {HasStats: true, MinValue: int64(500), MaxValue: int64(600)},
+		},
+	}
+	if !canRangePruneRowGroup(ranges, stats) {
+		t.Error("expected row group [500,600] to be pruned (build range [100,200])")
+	}
+}
+
+func TestCanRangePruneRowGroup_KeepOverlapping(t *testing.T) {
+	ranges := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(100), MaxValue: int64(200)},
+	}
+	stats := parquet.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]parquet.ColumnStats{
+			"id": {HasStats: true, MinValue: int64(150), MaxValue: int64(250)},
+		},
+	}
+	if canRangePruneRowGroup(ranges, stats) {
+		t.Error("expected row group [150,250] to be kept (overlaps build range [100,200])")
+	}
+}
+
+func TestCanRangePruneRowGroup_ExactOverlap(t *testing.T) {
+	ranges := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(100), MaxValue: int64(200)},
+	}
+	stats := parquet.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]parquet.ColumnStats{
+			"id": {HasStats: true, MinValue: int64(100), MaxValue: int64(200)},
+		},
+	}
+	if canRangePruneRowGroup(ranges, stats) {
+		t.Error("expected row group [100,200] to be kept (exact overlap)")
+	}
+}
+
+func TestCanRangePruneRowGroup_BuildAboveRowGroup(t *testing.T) {
+	ranges := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(500), MaxValue: int64(600)},
+	}
+	stats := parquet.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]parquet.ColumnStats{
+			"id": {HasStats: true, MinValue: int64(100), MaxValue: int64(200)},
+		},
+	}
+	if !canRangePruneRowGroup(ranges, stats) {
+		t.Error("expected row group [100,200] to be pruned (build range [500,600])")
+	}
+}
+
+func TestCanRangePruneRowGroup_NoStats(t *testing.T) {
+	ranges := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(100), MaxValue: int64(200)},
+	}
+	stats := parquet.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]parquet.ColumnStats{
+			"id": {HasStats: false},
+		},
+	}
+	if canRangePruneRowGroup(ranges, stats) {
+		t.Error("expected row group without stats to NOT be pruned")
+	}
+}
+
+func TestCanRangePruneRowGroup_StringRange(t *testing.T) {
+	ranges := []exec.DynamicRange{
+		{Column: "name", MinValue: "delta", MaxValue: "foxtrot"},
+	}
+	// Row group range [alpha, charlie] < build min "delta" → prune
+	stats := parquet.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]parquet.ColumnStats{
+			"name": {HasStats: true, MinValue: "alpha", MaxValue: "charlie"},
+		},
+	}
+	if !canRangePruneRowGroup(ranges, stats) {
+		t.Error("expected string row group [alpha,charlie] to be pruned (build [delta,foxtrot])")
+	}
+
+	// Row group range [echo, golf] overlaps build [delta, foxtrot] → keep
+	stats2 := parquet.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]parquet.ColumnStats{
+			"name": {HasStats: true, MinValue: "echo", MaxValue: "golf"},
+		},
+	}
+	if canRangePruneRowGroup(ranges, stats2) {
+		t.Error("expected string row group [echo,golf] to be kept (overlaps build [delta,foxtrot])")
+	}
+}
+
+func TestCanRangePruneRowGroup_MissingColumn(t *testing.T) {
+	ranges := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(100), MaxValue: int64(200)},
+	}
+	stats := parquet.RowGroupStats{
+		NumRows: 100,
+		Columns: map[string]parquet.ColumnStats{
+			"other_col": {HasStats: true, MinValue: int64(500), MaxValue: int64(600)},
+		},
+	}
+	if canRangePruneRowGroup(ranges, stats) {
+		t.Error("expected row group to NOT be pruned when filter column is missing from stats")
+	}
+}
+
+func TestBuildKeyRange_IntKey(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{
+		{"id": int64(50)},
+		{"id": int64(100)},
+		{"id": int64(25)},
+		{"id": int64(75)},
+	}
+	hj := exec.NewHashJoin(exec.InnerJoin, []string{"probe_id"}, []string{"id"})
+	src := exec.NewSliceSource(schema, rows)
+	if err := hj.Build(t.Context(), src); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	ranges := hj.BuildKeyRange()
+	if len(ranges) != 1 {
+		t.Fatalf("expected 1 range, got %d", len(ranges))
+	}
+	r := ranges[0]
+	if r.Column != "probe_id" {
+		t.Errorf("expected column 'probe_id', got %q", r.Column)
+	}
+	if r.MinValue.(int64) != 25 {
+		t.Errorf("expected min 25, got %v", r.MinValue)
+	}
+	if r.MaxValue.(int64) != 100 {
+		t.Errorf("expected max 100, got %v", r.MaxValue)
+	}
+}
+
+func TestBuildKeyRange_EmptyBuild(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+	hj := exec.NewHashJoin(exec.InnerJoin, []string{"probe_id"}, []string{"id"})
+	src := exec.NewSliceSource(schema, nil)
+	if err := hj.Build(t.Context(), src); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if ranges := hj.BuildKeyRange(); ranges != nil {
+		t.Errorf("expected nil ranges for empty build, got %v", ranges)
+	}
+}
+
+func TestBuildKeyRange_LeftJoinReturnsNil(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{{"id": int64(1)}}
+	hj := exec.NewHashJoin(exec.LeftJoin, []string{"id"}, []string{"id"})
+	src := exec.NewSliceSource(schema, rows)
+	if err := hj.Build(t.Context(), src); err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if ranges := hj.BuildKeyRange(); ranges != nil {
+		t.Errorf("expected nil ranges for LEFT JOIN, got %v", ranges)
+	}
+}

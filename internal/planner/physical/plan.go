@@ -1927,6 +1927,13 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			attachBloomToScanSource(leftSource, bsf)
 		}
 	}
+
+	// Push dynamic min/max range filter to the scan layer for row-group pruning.
+	// Complements the bloom filter: works for all types (string, date, wide int
+	// ranges) and is cheaper to evaluate (single range comparison per row group).
+	if ranges := hj.BuildKeyRange(); len(ranges) > 0 {
+		attachDynamicFilterToScanSource(leftSource, ranges)
+	}
 	probe := hj.Probe()
 	// Push output filter into the probe to avoid materializing intermediate
 	// columns not needed by upstream operators. In multi-way joins, this
@@ -3584,12 +3591,18 @@ type catalogScanSource struct {
 	cacheMu         sync.Mutex            // protects cache append and replay index
 	replayIdx       int                   // position in cache replay
 	isReplay        bool                  // true when reading from cache instead of scanning
-	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
+	bloomFilter     *exec.BloomScanFilter   // bloom filter pushdown from hash join build side
+	dynamicFilter   []exec.DynamicRange     // dynamic min/max range filter from hash join build side
 }
 
 // SetBloomFilter attaches a bloom filter for scan-level row group pruning.
 func (s *catalogScanSource) SetBloomFilter(bf *exec.BloomScanFilter) {
 	s.bloomFilter = bf
+}
+
+// SetDynamicFilter attaches a dynamic min/max range filter for row group pruning.
+func (s *catalogScanSource) SetDynamicFilter(ranges []exec.DynamicRange) {
+	s.dynamicFilter = ranges
 }
 
 func (s *catalogScanSource) Init(ctx context.Context) error {
@@ -3601,9 +3614,12 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 	}
 	// First scan (or no cache) — scan from storage.
 	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, s.requiredCols, s.scanPreds)
-	if s.bloomFilter != nil {
-		if ses, ok := sc.(*scannerExecSource); ok {
+	if ses, ok := sc.(*scannerExecSource); ok {
+		if s.bloomFilter != nil {
 			ses.bloomFilter = s.bloomFilter
+		}
+		if s.dynamicFilter != nil {
+			ses.dynamicFilter = s.dynamicFilter
 		}
 	}
 	s.inner = sc
@@ -4048,6 +4064,17 @@ func attachBloomToScanSource(source exec.Source, bsf *exec.BloomScanFilter) {
 		s.SetBloomFilter(bsf)
 	case *pipelineSource:
 		attachBloomToScanSource(s.source, bsf)
+	}
+}
+
+// attachDynamicFilterToScanSource walks the probe-side source chain to find a
+// catalogScanSource and attaches a dynamic min/max range filter for row-group pruning.
+func attachDynamicFilterToScanSource(source exec.Source, ranges []exec.DynamicRange) {
+	switch s := source.(type) {
+	case *catalogScanSource:
+		s.SetDynamicFilter(ranges)
+	case *pipelineSource:
+		attachDynamicFilterToScanSource(s.source, ranges)
 	}
 }
 
@@ -4677,6 +4704,7 @@ type scannerExecSource struct {
 	scanPreds       []logical.Predicate
 	scanner         *scanSourceInner
 	bloomFilter     *exec.BloomScanFilter
+	dynamicFilter   []exec.DynamicRange
 }
 
 type scanSourceInner struct {
@@ -4710,6 +4738,9 @@ type scanSourceInner struct {
 
 	// Bloom filter pushdown from hash join build side.
 	bloomFilter *exec.BloomScanFilter
+
+	// Dynamic min/max range filter from hash join build side.
+	dynamicFilter []exec.DynamicRange
 }
 
 // scanPredicate is a simple predicate for row-group stats pruning.
@@ -4771,6 +4802,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		scanPreds:     sp,
 		deleteMarkers: delMarkers,
 		bloomFilter:   s.bloomFilter,
+		dynamicFilter: s.dynamicFilter,
 		batchCh:       make(chan *batch.RecordBatch, runtime.NumCPU()),
 		errCh:         make(chan error, 1),
 		cancel:        cancel,

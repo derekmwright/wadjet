@@ -6,6 +6,8 @@ import (
 	"io"
 	"math"
 
+	"github.com/klauspost/compress/s2"
+
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -577,9 +579,52 @@ func readDecimalData(data []byte, pos int, vec *batch.Vector, numRows int) (int,
 	return pos, nil
 }
 
-// isShuffleFormat returns true if the data starts with the shuffle magic bytes.
+// isShuffleFormat returns true if the data starts with the shuffle magic bytes
+// (either uncompressed WSHF or compressed WSHC).
 func isShuffleFormat(data []byte) bool {
-	return len(data) >= 4 &&
-		data[0] == shuffleMagic[0] && data[1] == shuffleMagic[1] &&
-		data[2] == shuffleMagic[2] && data[3] == shuffleMagic[3]
+	if len(data) < 4 {
+		return false
+	}
+	return (data[0] == shuffleMagic[0] && data[1] == shuffleMagic[1] &&
+		data[2] == shuffleMagic[2] && data[3] == shuffleMagic[3]) ||
+		(data[0] == compressedMagic[0] && data[1] == compressedMagic[1] &&
+			data[2] == compressedMagic[2] && data[3] == compressedMagic[3])
+}
+
+// compressedMagic identifies a compressed WSHF payload.
+var compressedMagic = [4]byte{'W', 'S', 'H', 'C'}
+
+// CompressShuffleData compresses raw WSHF data using S2 (Snappy-compatible).
+// Returns data with "WSHC" magic prefix followed by the S2-compressed payload.
+// If the compressed output is not smaller, the original WSHF data is returned.
+func CompressShuffleData(data []byte) []byte {
+	if len(data) < 64 {
+		return data // too small to benefit
+	}
+	compressed := s2.Encode(nil, data)
+	// Only use compression if it saves at least 10%
+	if len(compressed) >= len(data)*9/10 {
+		return data
+	}
+	out := make([]byte, 4+len(compressed))
+	copy(out[:4], compressedMagic[:])
+	copy(out[4:], compressed)
+	return out
+}
+
+// DecompressShuffleData detects and decompresses a WSHC payload back to raw WSHF.
+// If the data is already plain WSHF (or non-shuffle), it is returned unchanged.
+func DecompressShuffleData(data []byte) ([]byte, error) {
+	if len(data) < 4 {
+		return data, nil
+	}
+	if data[0] != compressedMagic[0] || data[1] != compressedMagic[1] ||
+		data[2] != compressedMagic[2] || data[3] != compressedMagic[3] {
+		return data, nil // not compressed
+	}
+	decoded, err := s2.Decode(nil, data[4:])
+	if err != nil {
+		return nil, fmt.Errorf("decompressing shuffle data: %w", err)
+	}
+	return decoded, nil
 }

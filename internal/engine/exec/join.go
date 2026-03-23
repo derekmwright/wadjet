@@ -99,6 +99,11 @@ type HashJoin struct {
 	bloom     []uint64
 	bloomMask uint64
 
+	// Dynamic filter: min/max of build-side join key column(s).
+	// Collected during Build() for range-based row-group pruning on the probe side.
+	buildKeyMin []any
+	buildKeyMax []any
+
 	// Grace Hash Join spill state. Non-nil when build-side data has been
 	// partitioned and spilled to disk due to memory pressure.
 	spillState *spillState
@@ -133,6 +138,219 @@ func (h *HashJoin) BloomPushdownOp() *BloomFilterOp {
 		leftKeys:      h.LeftKeys,
 		useIntKey:     h.useIntKey,
 		useDualIntKey: h.useDualIntKey,
+	}
+}
+
+// DynamicRange holds min/max values for a probe-side join key column,
+// collected during build. Used for row-group-level scan pruning.
+type DynamicRange struct {
+	Column   string // probe-side join key column name
+	MinValue any
+	MaxValue any
+}
+
+// BuildKeyRange returns the min/max range of each build-side join key column.
+// Column names are mapped to probe-side names (LeftKeys) since the scan knows
+// its own columns. Must be called after Build() completes. Returns nil if no
+// rows were built or if the join type doesn't support range pushdown.
+func (h *HashJoin) BuildKeyRange() []DynamicRange {
+	switch h.JoinType {
+	case InnerJoin, SemiJoin, RightJoin:
+		// safe — non-matching probe rows produce no output
+	default:
+		return nil
+	}
+	if h.buildRows == 0 || len(h.buildKeyMin) == 0 {
+		return nil
+	}
+	ranges := make([]DynamicRange, 0, len(h.LeftKeys))
+	for i, col := range h.LeftKeys {
+		if i < len(h.buildKeyMin) && h.buildKeyMin[i] != nil {
+			ranges = append(ranges, DynamicRange{
+				Column:   col,
+				MinValue: h.buildKeyMin[i],
+				MaxValue: h.buildKeyMax[i],
+			})
+		}
+	}
+	if len(ranges) == 0 {
+		return nil
+	}
+	return ranges
+}
+
+// updateKeyMinMax updates the running min/max for each build-side key column
+// from the given batch. Called under h.mu.Lock during Build().
+func (h *HashJoin) updateKeyMinMax(b *batch.RecordBatch) {
+	if len(h.buildKeyIdx) == 0 {
+		return
+	}
+	if h.buildKeyMin == nil {
+		h.buildKeyMin = make([]any, len(h.buildKeyIdx))
+		h.buildKeyMax = make([]any, len(h.buildKeyIdx))
+	}
+	for ki, colIdx := range h.buildKeyIdx {
+		if colIdx < 0 || colIdx >= len(b.Columns) {
+			continue
+		}
+		col := b.Columns[colIdx]
+		iterRows := func(fn func(row int)) {
+			if b.Sel != nil {
+				for _, si := range b.Sel {
+					fn(int(si))
+				}
+			} else {
+				for i := 0; i < b.Len; i++ {
+					fn(i)
+				}
+			}
+		}
+		switch col.Type {
+		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+			var lo, hi int64
+			first := true
+			iterRows(func(row int) {
+				if col.Nulls.IsNull(row) {
+					return
+				}
+				v := int64(col.Int32Data[row])
+				if first {
+					lo, hi = v, v
+					first = false
+				} else {
+					if v < lo {
+						lo = v
+					}
+					if v > hi {
+						hi = v
+					}
+				}
+			})
+			if !first {
+				if h.buildKeyMin[ki] == nil {
+					h.buildKeyMin[ki] = lo
+					h.buildKeyMax[ki] = hi
+				} else {
+					prev := h.buildKeyMin[ki].(int64)
+					if lo < prev {
+						h.buildKeyMin[ki] = lo
+					}
+					prev = h.buildKeyMax[ki].(int64)
+					if hi > prev {
+						h.buildKeyMax[ki] = hi
+					}
+				}
+			}
+		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+			var lo, hi int64
+			first := true
+			iterRows(func(row int) {
+				if col.Nulls.IsNull(row) {
+					return
+				}
+				v := col.Int64Data[row]
+				if first {
+					lo, hi = v, v
+					first = false
+				} else {
+					if v < lo {
+						lo = v
+					}
+					if v > hi {
+						hi = v
+					}
+				}
+			})
+			if !first {
+				if h.buildKeyMin[ki] == nil {
+					h.buildKeyMin[ki] = lo
+					h.buildKeyMax[ki] = hi
+				} else {
+					prev := h.buildKeyMin[ki].(int64)
+					if lo < prev {
+						h.buildKeyMin[ki] = lo
+					}
+					prev = h.buildKeyMax[ki].(int64)
+					if hi > prev {
+						h.buildKeyMax[ki] = hi
+					}
+				}
+			}
+		case batch.TypeFloat64:
+			var lo, hi float64
+			first := true
+			iterRows(func(row int) {
+				if col.Nulls.IsNull(row) {
+					return
+				}
+				v := col.Float64Data[row]
+				if first {
+					lo, hi = v, v
+					first = false
+				} else {
+					if v < lo {
+						lo = v
+					}
+					if v > hi {
+						hi = v
+					}
+				}
+			})
+			if !first {
+				if h.buildKeyMin[ki] == nil {
+					h.buildKeyMin[ki] = lo
+					h.buildKeyMax[ki] = hi
+				} else {
+					prev := h.buildKeyMin[ki].(float64)
+					if lo < prev {
+						h.buildKeyMin[ki] = lo
+					}
+					prev = h.buildKeyMax[ki].(float64)
+					if hi > prev {
+						h.buildKeyMax[ki] = hi
+					}
+				}
+			}
+		case batch.TypeString:
+			var lo, hi string
+			first := true
+			iterRows(func(row int) {
+				if col.Nulls.IsNull(row) {
+					return
+				}
+				v := col.GetValue(row)
+				s, ok := v.(string)
+				if !ok {
+					return
+				}
+				if first {
+					lo, hi = s, s
+					first = false
+				} else {
+					if s < lo {
+						lo = s
+					}
+					if s > hi {
+						hi = s
+					}
+				}
+			})
+			if !first {
+				if h.buildKeyMin[ki] == nil {
+					h.buildKeyMin[ki] = lo
+					h.buildKeyMax[ki] = hi
+				} else {
+					prev := h.buildKeyMin[ki].(string)
+					if lo < prev {
+						h.buildKeyMin[ki] = lo
+					}
+					prev = h.buildKeyMax[ki].(string)
+					if hi > prev {
+						h.buildKeyMax[ki] = hi
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -447,6 +665,8 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}
 
 		if h.SemiAntiKeyOnly {
+			// Collect min/max even for key-only builds.
+			h.updateKeyMinMax(b)
 			// Key-only build: populate index without storing batches or arena refs.
 			// Semi/anti joins only need key existence, not row data.
 			if h.useIntKey {
@@ -559,6 +779,9 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			h.mu.Unlock()
 			continue
 		}
+
+		// Collect min/max for dynamic filter pushdown before key indexing.
+		h.updateKeyMinMax(b)
 
 		// Skip Compact() — iterate through Sel (if any) directly.
 		// Avoids copying entire batch just to remove selection vector gaps.

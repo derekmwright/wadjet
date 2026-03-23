@@ -5,9 +5,24 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/klauspost/compress/s2"
+
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
+
+// decompressShuffleData detects compressed shuffle data (magic "WSHC") and
+// decompresses it back to raw WSHF format. Non-compressed data is returned as-is.
+func decompressShuffleData(data []byte) ([]byte, error) {
+	if len(data) >= 4 && data[0] == 'W' && data[1] == 'S' && data[2] == 'H' && data[3] == 'C' {
+		decoded, err := s2.Decode(nil, data[4:])
+		if err != nil {
+			return nil, fmt.Errorf("decompressing shuffle data: %w", err)
+		}
+		return decoded, nil
+	}
+	return data, nil
+}
 
 // readShuffleBatches reads the binary columnar shuffle format (WSHF) into RecordBatches.
 // This is a copy of worker.shuffleReadBatches to avoid circular imports.
