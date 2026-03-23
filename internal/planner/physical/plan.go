@@ -962,7 +962,7 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 
 	var shuffleStages, sortStages int
 	var totalScanBytes int64
-	var hasSemiAnti bool
+	var hasSemiAnti, hasFusedAgg bool
 	for _, s := range stages {
 		switch {
 		case s.Type == "shuffle":
@@ -971,6 +971,9 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 			sortStages++
 		case s.Type == "scan":
 			totalScanBytes += s.EstimatedBytes
+			if len(s.FusedAggSpecs) > 0 {
+				hasFusedAgg = true
+			}
 		case s.Type == "hash_join":
 			if s.JoinType == "semi" || s.JoinType == "anti" {
 				hasSemiAnti = true
@@ -997,10 +1000,20 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 	distributedOverhead := float64(shuffleStages)*perShuffleSec +
 		float64(sortStages)*sortCostSec + baseCostSec
 
+	// Fused scan-aggregate eliminates the scan→aggregate S3 round-trip.
+	// The distributed path has lower overhead when aggregation is fused
+	// (scan tasks produce partial aggregates, only final merge goes through S3).
+	if hasFusedAgg {
+		distributedOverhead -= baseCostSec // remove one stage's overhead
+		if distributedOverhead < 0.1 {
+			distributedOverhead = 0.1
+		}
+	}
+
 	// Parallelism benefit: I/O + compute.
-	// Effective scan bandwidth accounts for predicate pushdown and column
-	// pruning — only a fraction of raw Parquet bytes are read from S3.
-	// Measured at SF10: effective ~1.5 GB/s on c7g.4xlarge with 16 cores.
+	// With scan-split pipeline, scan I/O is distributed even in pipeline mode.
+	// So the benefit of full distributed is mainly from compute parallelism
+	// and avoiding the scan-split result materialization overhead.
 	const scanBandwidthGBPerSec = 1.5
 	scanTimeSec := scanGB / scanBandwidthGBPerSec
 
@@ -1045,10 +1058,15 @@ func ShouldSplitScan(stages []Stage, workerCount int) bool {
 		}
 	}
 
-	// Need enough files to distribute across workers and enough data to
-	// justify the task dispatch + WSHF result materialization overhead.
-	const minScanBytes = 256 * 1024 * 1024 // 256 MB
-	const minScanFiles = 4
+	// Need enough files to give each worker meaningful work (at least 2 files
+	// per worker) and enough data to justify task dispatch + result
+	// materialization overhead (~200ms per task). Scale thresholds with worker
+	// count: more workers need more data to amortize overhead.
+	const minBytesPerWorker = 64 * 1024 * 1024 // 64 MB per worker minimum
+	const minFilesPerWorker = 2
+
+	minScanBytes := int64(workerCount) * minBytesPerWorker
+	minScanFiles := workerCount * minFilesPerWorker
 
 	return totalScanBytes >= minScanBytes && totalScanFiles >= minScanFiles
 }
