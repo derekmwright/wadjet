@@ -39,6 +39,7 @@ type Config struct {
 type queryMeta struct {
 	stages       []physical.Stage
 	planStr      string
+	sqlText      string // original SQL for pipeline tasks
 	identityName string // caller identity for task propagation
 	identityRole string
 }
@@ -293,6 +294,26 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			"buildAlias", s.BuildTableAlias)
 	}
 
+	// Deep join chain detection: if the plan has 4+ join stages, route the
+	// entire query to a single worker as a standalone pipeline. The S3
+	// materialization overhead of N join stages exceeds the parallelism
+	// benefit — standalone pipeline mode streams through all joins in-memory.
+	joinCount := 0
+	for _, s := range physStages {
+		if strings.Contains(s.Type, "join") {
+			joinCount++
+		}
+	}
+	if joinCount >= 4 {
+		c.logger.Info("deep join chain detected, routing to single worker pipeline",
+			"query", queryID, "join_stages", joinCount)
+		physStages = []physical.Stage{{
+			ID:    "pipeline-0",
+			Type:  "pipeline",
+			Tasks: 1,
+		}}
+	}
+
 	// Expand scans to target remote clusters when table exists on multiple clusters
 	physStages = planner.ExpandFederatedScans(physStages)
 
@@ -310,7 +331,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		specMap[s.ID] = s
 	}
 	c.stageSpecs[queryID] = specMap
-	qm := &queryMeta{stages: physStages, planStr: planStr}
+	qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql}
 	if id := auth.IdentityFromContext(ctx); id != nil {
 		qm.identityName = id.Name
 		qm.identityRole = id.Role
@@ -430,6 +451,8 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 		tasks = c.createJoinTasks(queryID, stage, resultPrefix, depResults)
 	case "window":
 		tasks = c.createWindowTasks(queryID, stage, resultPrefix, depResults)
+	case "pipeline":
+		tasks = c.createPipelineTasks(queryID, stage, resultPrefix)
 	default:
 		return nil
 	}
@@ -450,6 +473,32 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 		}
 	}
 	return tasks
+}
+
+// createPipelineTasks creates a single task that runs the entire query as a
+// standalone pipeline on one worker. Used for deep join chains where the S3
+// materialization overhead of N stages exceeds the parallelism benefit.
+func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, resultPrefix string) []distributed.Task {
+	c.mu.Lock()
+	qm := c.queryMetas[queryID]
+	c.mu.Unlock()
+
+	sqlText := ""
+	if qm != nil {
+		sqlText = qm.sqlText
+	}
+
+	return []distributed.Task{{
+		ID:           uuid.New().String()[:8],
+		QueryID:      queryID,
+		StageID:      stage.ID,
+		Type:         distributed.TaskTypePipeline,
+		SQLText:      sqlText,
+		DataBucket:   c.config.ResultBucket,
+		ResultBucket: c.config.ResultBucket,
+		ResultPrefix: resultPrefix,
+		CreatedAt:    time.Now(),
+	}}
 }
 
 // coalesceScanTargetBytes is the minimum total bytes per scan task.

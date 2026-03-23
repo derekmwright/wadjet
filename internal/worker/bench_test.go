@@ -127,7 +127,7 @@ func BenchmarkExecutorSort_S3Path(b *testing.B) {
 		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
 			store, _ := benchSetup(b, numRows)
 			cache := NewLRUCache(64 * 1024 * 1024)
-			executor := NewExecutor(store, cache)
+			executor := NewExecutor(store, cache, nil)
 			ctx := context.Background()
 
 			task := distributed.Task{
@@ -158,7 +158,7 @@ func BenchmarkExecutorSort_ResultStore(b *testing.B) {
 		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
 			store, _ := benchSetup(b, numRows)
 			cache := NewLRUCache(64 * 1024 * 1024)
-			executor := NewExecutor(store, cache)
+			executor := NewExecutor(store, cache, nil)
 			rs := NewResultStore(256 * 1024 * 1024) // 256 MB
 			executor.SetResultStore(rs)
 			ctx := context.Background()
@@ -193,7 +193,7 @@ func BenchmarkExecutorAggregate_S3Path(b *testing.B) {
 		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
 			store, _ := benchSetup(b, numRows)
 			cache := NewLRUCache(64 * 1024 * 1024)
-			executor := NewExecutor(store, cache)
+			executor := NewExecutor(store, cache, nil)
 			ctx := context.Background()
 
 			task := distributed.Task{
@@ -228,7 +228,7 @@ func BenchmarkExecutorAggregate_ResultStore(b *testing.B) {
 		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
 			store, _ := benchSetup(b, numRows)
 			cache := NewLRUCache(64 * 1024 * 1024)
-			executor := NewExecutor(store, cache)
+			executor := NewExecutor(store, cache, nil)
 			rs := NewResultStore(256 * 1024 * 1024)
 			executor.SetResultStore(rs)
 			ctx := context.Background()
@@ -268,7 +268,7 @@ func BenchmarkTwoStagePipeline_S3(b *testing.B) {
 		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
 			store, _ := benchSetup(b, numRows)
 			cache := NewLRUCache(64 * 1024 * 1024)
-			executor := NewExecutor(store, cache)
+			executor := NewExecutor(store, cache, nil)
 			ctx := context.Background()
 
 			b.ResetTimer()
@@ -325,7 +325,7 @@ func BenchmarkTwoStagePipeline_ResultStore(b *testing.B) {
 		b.Run(fmt.Sprintf("rows=%d", numRows), func(b *testing.B) {
 			store, _ := benchSetup(b, numRows)
 			cache := NewLRUCache(64 * 1024 * 1024)
-			executor := NewExecutor(store, cache)
+			executor := NewExecutor(store, cache, nil)
 			rs := NewResultStore(256 * 1024 * 1024)
 			executor.SetResultStore(rs)
 			ctx := context.Background()
@@ -388,7 +388,7 @@ func BenchmarkTwoStagePipeline_ResultStore(b *testing.B) {
 func BenchmarkExecutorSort_NoSpill(b *testing.B) {
 	store, _ := benchSetup(b, 1000)
 	cache := NewLRUCache(64 * 1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	// No memory budget = no spill manager created
 	ctx := context.Background()
 
@@ -416,7 +416,7 @@ func BenchmarkExecutorSort_NoSpill(b *testing.B) {
 func BenchmarkExecutorSort_WithBudget(b *testing.B) {
 	store, _ := benchSetup(b, 1000)
 	cache := NewLRUCache(64 * 1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	// Large budget — SpillManager exists but never triggers
 	executor.SetMemoryBudget(1024*1024*1024, b.TempDir()) // 1 GB
 	ctx := context.Background()
@@ -445,7 +445,7 @@ func BenchmarkExecutorSort_WithBudget(b *testing.B) {
 func BenchmarkExecutorSort_SpillForced(b *testing.B) {
 	store, _ := benchSetup(b, 1000)
 	cache := NewLRUCache(64 * 1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	// Tiny budget — forces spill
 	executor.SetMemoryBudget(256, b.TempDir())
 	ctx := context.Background()

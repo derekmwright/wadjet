@@ -53,7 +53,11 @@ func TestShuffleCorrectness(t *testing.T) {
 	if err := store.MakeBucket(ctx, "test"); err != nil {
 		t.Fatal(err)
 	}
-	cat := catalog.NewWithStore(store, "test")
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("creating NATS KV: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}
