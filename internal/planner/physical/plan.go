@@ -1820,7 +1820,11 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		return source, nil, &exec.CollectSink{}, nil
 	}
 	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates)
-	return scanner, nil, &exec.CollectSink{}, nil
+	var ops []exec.UnaryOperator
+	if node.SampleMethod != "" && node.SamplePercent > 0 {
+		ops = append(ops, newSampleOperator(node.SampleMethod, node.SamplePercent))
+	}
+	return scanner, ops, &exec.CollectSink{}, nil
 }
 
 func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {

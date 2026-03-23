@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -551,4 +552,53 @@ func inferUnnestType(vals []string) parquet.TypeID {
 	}
 	return parquet.TypeString
 }
+
+// sampleOperator implements TABLESAMPLE BERNOULLI and SYSTEM sampling.
+// BERNOULLI: row-level — each row independently included with probability p.
+// SYSTEM: batch-level — each batch included/excluded as a whole with probability p.
+type sampleOperator struct {
+	method  string  // "BERNOULLI" or "SYSTEM"
+	pct     float64 // 0-100
+	rng     *rand.Rand
+}
+
+func newSampleOperator(method string, pct float64) *sampleOperator {
+	return &sampleOperator{
+		method: method,
+		pct:    pct,
+		rng:    rand.New(rand.NewSource(rand.Int63())),
+	}
+}
+
+func (s *sampleOperator) Init(_ context.Context) error { return nil }
+
+func (s *sampleOperator) Execute(_ context.Context, b *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if b == nil || b.Len == 0 {
+		return b, nil
+	}
+
+	threshold := s.pct / 100.0
+
+	if s.method == "SYSTEM" {
+		// Block-level: include or exclude entire batch
+		if s.rng.Float64() >= threshold {
+			b.Len = 0
+			return b, nil
+		}
+		return b, nil
+	}
+
+	// BERNOULLI: row-level sampling via selection vector
+	sel := make([]uint32, 0, b.Len)
+	for i := range b.Len {
+		if s.rng.Float64() < threshold {
+			sel = append(sel, uint32(i))
+		}
+	}
+	b.Sel = sel
+	b.Len = len(sel)
+	return b, nil
+}
+
+func (s *sampleOperator) Close() error { return nil }
 
