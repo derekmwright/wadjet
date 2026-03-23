@@ -41,6 +41,10 @@ type Int64Expression func(b *batch.RecordBatch, row int) (int64, bool)
 // VecFloat64Expression evaluates float64 for all rows at once.
 type VecFloat64Expression func(b *batch.RecordBatch, dst []float64, n int) bool
 
+// VecExpression evaluates an entire column at once, writing to the output vector.
+// More general than VecFloat64Expression — handles any output type (string, int, etc.).
+type VecExpression func(b *batch.RecordBatch, out *batch.Vector, n int)
+
 // ProjectColumn defines an output column of a projection.
 type ProjectColumn struct {
 	Name            string
@@ -50,6 +54,7 @@ type ProjectColumn struct {
 	Int64Eval       Int64Expression      // optional typed path
 	VecFloat64Eval  VecFloat64Expression // optional vectorized path (entire column at once)
 	VecFloat64Clone func() VecFloat64Expression // creates a clone with independent scratch buffers
+	VecEval         VecExpression            // optional vectorized evaluation for any output type
 	SourceCol       string               // source column name for type resolution on renames
 	DirectCopy      string               // if set, bulk copy this input column (no per-row eval)
 }
@@ -153,6 +158,8 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			col := out.Columns[j]
 			if srcIdx := p.directSrcIdx[j]; srcIdx >= 0 {
 				projectCopyColumn(col, in.Columns[srcIdx], in.Len)
+			} else if proj.VecEval != nil {
+				proj.VecEval(in, col, in.Len)
 			} else if proj.VecFloat64Eval != nil {
 				proj.VecFloat64Eval(in, col.Float64Data, in.Len)
 			} else if proj.Float64Eval != nil {

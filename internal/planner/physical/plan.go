@@ -2339,6 +2339,17 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		if isDirectCopy {
 			pc.DirectCopy = colRef
 		}
+		// Use vectorized column evaluation when the expression supports it.
+		// VecExpr handles any output type (string, numeric, etc.) and is checked
+		// before the Float64-specific paths.
+		if compiledExpr != nil {
+			if ve, ok := compiledExpr.(expr.VecExpr); ok {
+				evalVec := ve.EvalVec
+				pc.VecEval = func(b *batch.RecordBatch, out *batch.Vector, n int) {
+					evalVec(b, out, n)
+				}
+			}
+		}
 		// Use typed evaluation to avoid interface{} boxing in the inner loop.
 		// Only safe when the output type is explicitly Float64 (arithmetic exprs),
 		// not when resolved from input schema (could be Decimal, Timestamp, etc.).

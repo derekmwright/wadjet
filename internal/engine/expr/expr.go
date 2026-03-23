@@ -43,6 +43,12 @@ type BoolExpr interface {
 	EvalBool(b *batch.RecordBatch, row int) bool
 }
 
+// VecExpr evaluates an expression for an entire batch at once, writing results
+// directly to the output vector. This avoids per-row interface dispatch and boxing.
+type VecExpr interface {
+	EvalVec(b *batch.RecordBatch, out *batch.Vector, n int)
+}
+
 // --- Leaf nodes ---
 
 // ColRef reads a column value from the batch.
@@ -989,8 +995,10 @@ func (e *ArrayLitExpr) Eval(b *batch.RecordBatch, row int) any {
 type FuncCall struct {
 	Name string
 	Args []Expr
-	args []any       // pre-allocated args buffer (avoids alloc per call)
-	fn   ScalarFunc  // cached function pointer (avoids RWMutex per row)
+	args []any          // pre-allocated args buffer (avoids alloc per call)
+	fn   ScalarFunc     // cached function pointer (avoids RWMutex per row)
+	vecFn VecScalarFunc // cached vectorized function (nil until first lookup)
+	vecResolved bool    // true after first vectorized lookup
 }
 
 func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
@@ -1010,6 +1018,105 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 		}
 	}
 	return e.fn(e.args)
+}
+
+// EvalVec evaluates the function for an entire batch, writing results to out.
+// Falls back to per-row Eval if no vectorized implementation exists or if
+// argument types can't be resolved to column vectors.
+func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
+	if !e.vecResolved {
+		e.vecFn = DefaultRegistry.LookupVec(e.Name)
+		e.vecResolved = true
+	}
+	if e.vecFn == nil {
+		for i := 0; i < n; i++ {
+			out.SetValue(i, e.Eval(b, i))
+		}
+		return
+	}
+
+	// Resolve argument vectors: ColRef → column directly, Lit → const vector.
+	// Allocated per-call to avoid data races across parallel pipeline clones.
+	argVecs := make([]*batch.Vector, len(e.Args))
+	for i, arg := range e.Args {
+		switch a := arg.(type) {
+		case *ColRef:
+			if !a.resolved {
+				a.Eval(b, 0) // force column index resolution
+			}
+			if a.idx < 0 || a.idx >= len(b.Columns) {
+				e.evalVecPerRow(b, out, n)
+				return
+			}
+			argVecs[i] = b.Columns[a.idx]
+		case *Lit:
+			cv := makeConstVector(a.Val, n)
+			if cv == nil {
+				e.evalVecPerRow(b, out, n)
+				return
+			}
+			argVecs[i] = cv
+		default:
+			// Complex expression arg — check if it supports VecExpr
+			if ve, ok := arg.(VecExpr); ok {
+				scratch := batch.NewVector(out.Type, n)
+				ve.EvalVec(b, scratch, n)
+				argVecs[i] = scratch
+			} else {
+				e.evalVecPerRow(b, out, n)
+				return
+			}
+		}
+	}
+
+	e.vecFn(argVecs, out, n)
+}
+
+func (e *FuncCall) evalVecPerRow(b *batch.RecordBatch, out *batch.Vector, n int) {
+	for i := 0; i < n; i++ {
+		out.SetValue(i, e.Eval(b, i))
+	}
+}
+
+// makeConstVector creates a vector filled with a constant value.
+func makeConstVector(val any, n int) *batch.Vector {
+	switch v := val.(type) {
+	case float64:
+		vec := batch.NewVector(batch.TypeFloat64, n)
+		for i := 0; i < n; i++ {
+			vec.Float64Data[i] = v
+		}
+		return vec
+	case int64:
+		vec := batch.NewVector(batch.TypeInt64, n)
+		for i := 0; i < n; i++ {
+			vec.Int64Data[i] = v
+		}
+		return vec
+	case int:
+		return makeConstVector(int64(v), n)
+	case string:
+		vec := batch.NewVector(batch.TypeString, n)
+		b := []byte(v)
+		for i := 0; i < n; i++ {
+			vec.BytesData.Set(i, b)
+		}
+		return vec
+	case bool:
+		vec := batch.NewVector(batch.TypeBool, n)
+		for i := 0; i < n; i++ {
+			vec.BoolData[i] = v
+		}
+		return vec
+	case nil:
+		vec := batch.NewVector(batch.TypeString, n)
+		for i := 0; i < n; i++ {
+			vec.Nulls.SetNull(i)
+		}
+		return vec
+	default:
+		return nil
+	}
 }
 
 // numericFuncCall wraps a FuncCall to implement Float64Expr and Int64Expr
@@ -1038,15 +1145,24 @@ func (e *numericFuncCall) EvalInt64(b *batch.RecordBatch, row int) (int64, bool)
 // ScalarFunc is a scalar function implementation.
 type ScalarFunc func(args []any) any
 
+// VecScalarFunc is a vectorized scalar function that operates on entire columns
+// at once, reading from input vectors and writing to an output vector.
+// This avoids per-row interface dispatch and boxing overhead.
+type VecScalarFunc func(args []*batch.Vector, out *batch.Vector, n int)
+
 // FuncRegistry is a concurrent-safe registry of scalar functions.
 type FuncRegistry struct {
-	mu    sync.RWMutex
-	funcs map[string]ScalarFunc
+	mu       sync.RWMutex
+	funcs    map[string]ScalarFunc
+	vecFuncs map[string]VecScalarFunc
 }
 
 // NewFuncRegistry creates a new empty function registry.
 func NewFuncRegistry() *FuncRegistry {
-	return &FuncRegistry{funcs: make(map[string]ScalarFunc)}
+	return &FuncRegistry{
+		funcs:    make(map[string]ScalarFunc),
+		vecFuncs: make(map[string]VecScalarFunc),
+	}
 }
 
 // Register adds or replaces a scalar function.
@@ -1069,6 +1185,21 @@ func (r *FuncRegistry) Unregister(name string) bool {
 func (r *FuncRegistry) Lookup(name string) ScalarFunc {
 	r.mu.RLock()
 	fn := r.funcs[strings.ToLower(name)]
+	r.mu.RUnlock()
+	return fn
+}
+
+// RegisterVec adds a vectorized implementation for a scalar function.
+func (r *FuncRegistry) RegisterVec(name string, fn VecScalarFunc) {
+	r.mu.Lock()
+	r.vecFuncs[strings.ToLower(name)] = fn
+	r.mu.Unlock()
+}
+
+// LookupVec returns the vectorized function with the given name, or nil if not found.
+func (r *FuncRegistry) LookupVec(name string) VecScalarFunc {
+	r.mu.RLock()
+	fn := r.vecFuncs[strings.ToLower(name)]
 	r.mu.RUnlock()
 	return fn
 }
@@ -1494,6 +1625,39 @@ func init() {
 	}
 	for name, fn := range builtins {
 		DefaultRegistry.funcs[name] = fn
+	}
+
+	// Vectorized implementations: operate on entire columns instead of per-row.
+	vecBuiltins := map[string]VecScalarFunc{
+		"upper":      vecUpper,
+		"lower":      vecLower,
+		"length":     vecLength,
+		"len":        vecLength,
+		"trim":       vecTrim,
+		"ltrim":      vecLTrim,
+		"rtrim":      vecRTrim,
+		"substr":     vecSubstr,
+		"substring":  vecSubstr,
+		"replace":    vecReplace,
+		"reverse":    vecReverse,
+		"left":       vecLeft,
+		"right":      vecRight,
+		"concat":     vecConcat,
+		"starts_with": vecStartsWith,
+		"ends_with":  vecEndsWith,
+		"contains":   vecContains,
+		"abs":        vecAbs,
+		"ceil":       vecCeil,
+		"floor":      vecFloor,
+		"round":      vecRound,
+		"year":       vecYear,
+		"month":      vecMonth,
+		"day":        vecDay,
+		"hour":       vecHour,
+		"extract":    vecExtract,
+	}
+	for name, fn := range vecBuiltins {
+		DefaultRegistry.vecFuncs[name] = fn
 	}
 }
 
@@ -7023,4 +7187,491 @@ func fnArrayMax(args []any) any {
 		}
 	}
 	return max
+}
+
+// --- Vectorized scalar function implementations ---
+//
+// These operate on entire columns (batch.Vector) instead of per-row values,
+// eliminating interface dispatch, boxing/unboxing, and string↔[]byte conversion.
+
+// vecReadFloat64 reads a float64 from a vector at the given index,
+// handling both Float64 and Int64 source types.
+func vecReadFloat64(v *batch.Vector, i int) float64 {
+	switch v.Type {
+	case batch.TypeFloat64:
+		return v.Float64Data[i]
+	case batch.TypeInt64, batch.TypeTimestamp:
+		return float64(v.Int64Data[i])
+	case batch.TypeInt32:
+		return float64(v.Int32Data[i])
+	case batch.TypeFloat32:
+		return float64(v.Float32Data[i])
+	default:
+		return 0
+	}
+}
+
+func vecUpper(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	totalBytes := int(src.BytesData.Offsets[n] - src.BytesData.Offsets[0])
+	out.BytesData.PreAllocBytes(totalBytes)
+
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		start := len(out.BytesData.Data)
+		out.BytesData.Data = append(out.BytesData.Data, b...)
+		for j := start; j < len(out.BytesData.Data); j++ {
+			c := out.BytesData.Data[j]
+			if c >= 'a' && c <= 'z' {
+				out.BytesData.Data[j] = c - 32
+			}
+		}
+		out.BytesData.Offsets[i+1] = uint32(len(out.BytesData.Data))
+	}
+}
+
+func vecLower(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	totalBytes := int(src.BytesData.Offsets[n] - src.BytesData.Offsets[0])
+	out.BytesData.PreAllocBytes(totalBytes)
+
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		start := len(out.BytesData.Data)
+		out.BytesData.Data = append(out.BytesData.Data, b...)
+		for j := start; j < len(out.BytesData.Data); j++ {
+			c := out.BytesData.Data[j]
+			if c >= 'A' && c <= 'Z' {
+				out.BytesData.Data[j] = c + 32
+			}
+		}
+		out.BytesData.Offsets[i+1] = uint32(len(out.BytesData.Data))
+	}
+}
+
+func vecLength(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(src.BytesData.Offsets[i+1] - src.BytesData.Offsets[i])
+	}
+}
+
+func vecTrim(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		// Trim ASCII whitespace from both ends
+		lo, hi := 0, len(b)
+		for lo < hi && (b[lo] == ' ' || b[lo] == '\t' || b[lo] == '\n' || b[lo] == '\r') {
+			lo++
+		}
+		for hi > lo && (b[hi-1] == ' ' || b[hi-1] == '\t' || b[hi-1] == '\n' || b[hi-1] == '\r') {
+			hi--
+		}
+		out.BytesData.Set(i, b[lo:hi])
+	}
+}
+
+func vecLTrim(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		lo := 0
+		for lo < len(b) && (b[lo] == ' ' || b[lo] == '\t' || b[lo] == '\n' || b[lo] == '\r') {
+			lo++
+		}
+		out.BytesData.Set(i, b[lo:])
+	}
+}
+
+func vecRTrim(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		hi := len(b)
+		for hi > 0 && (b[hi-1] == ' ' || b[hi-1] == '\t' || b[hi-1] == '\n' || b[hi-1] == '\r') {
+			hi--
+		}
+		out.BytesData.Set(i, b[:hi])
+	}
+}
+
+func vecSubstr(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	hasLen := len(args) >= 3
+
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		start := int(vecReadFloat64(args[1], i)) - 1 // SQL is 1-indexed
+		if start < 0 {
+			start = 0
+		}
+		if start >= len(b) {
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		end := len(b)
+		if hasLen {
+			length := int(vecReadFloat64(args[2], i))
+			end = start + length
+			if end > len(b) {
+				end = len(b)
+			}
+		}
+		out.BytesData.Set(i, b[start:end])
+	}
+}
+
+func vecReplace(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls() || args[1].Nulls.HasNulls() || args[2].Nulls.HasNulls()
+
+	for i := 0; i < n; i++ {
+		if hasNulls && (src.Nulls.IsNullFast(i) || args[1].Nulls.IsNullFast(i) || args[2].Nulls.IsNullFast(i)) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		s := src.BytesData.StringValue(i)
+		old := args[1].BytesData.StringValue(i)
+		new := args[2].BytesData.StringValue(i)
+		result := strings.ReplaceAll(s, old, new)
+		out.BytesData.Set(i, []byte(result))
+	}
+}
+
+func vecReverse(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		rev := make([]byte, len(b))
+		for j, k := 0, len(b)-1; j <= k; j, k = j+1, k-1 {
+			rev[j], rev[k] = b[k], b[j]
+		}
+		out.BytesData.Set(i, rev)
+	}
+}
+
+func vecLeft(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		count := int(vecReadFloat64(args[1], i))
+		if count < 0 {
+			out.BytesData.Set(i, nil)
+		} else if count >= len(b) {
+			out.BytesData.Set(i, b)
+		} else {
+			out.BytesData.Set(i, b[:count])
+		}
+	}
+}
+
+func vecRight(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		b := src.BytesData.Value(i)
+		count := int(vecReadFloat64(args[1], i))
+		if count < 0 {
+			out.BytesData.Set(i, nil)
+		} else if count >= len(b) {
+			out.BytesData.Set(i, b)
+		} else {
+			out.BytesData.Set(i, b[len(b)-count:])
+		}
+	}
+}
+
+func vecConcat(args []*batch.Vector, out *batch.Vector, n int) {
+	for i := 0; i < n; i++ {
+		isNull := false
+		for _, arg := range args {
+			if arg.Nulls.HasNulls() && arg.Nulls.IsNullFast(i) {
+				isNull = true
+				break
+			}
+		}
+		if isNull {
+			out.Nulls.SetNull(i)
+			out.BytesData.Set(i, nil)
+			continue
+		}
+		// Calculate total length then build in one shot
+		total := 0
+		for _, arg := range args {
+			total += int(arg.BytesData.Offsets[i+1] - arg.BytesData.Offsets[i])
+		}
+		buf := make([]byte, 0, total)
+		for _, arg := range args {
+			buf = append(buf, arg.BytesData.Value(i)...)
+		}
+		out.BytesData.Set(i, buf)
+	}
+}
+
+func vecStartsWith(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	prefix := args[1]
+	hasNulls := src.Nulls.HasNulls() || prefix.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && (src.Nulls.IsNullFast(i) || prefix.Nulls.IsNullFast(i)) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		s := src.BytesData.Value(i)
+		p := prefix.BytesData.Value(i)
+		result := len(s) >= len(p)
+		if result {
+			for j := 0; j < len(p); j++ {
+				if s[j] != p[j] {
+					result = false
+					break
+				}
+			}
+		}
+		out.BoolData[i] = result
+	}
+}
+
+func vecEndsWith(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	suffix := args[1]
+	hasNulls := src.Nulls.HasNulls() || suffix.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && (src.Nulls.IsNullFast(i) || suffix.Nulls.IsNullFast(i)) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		s := src.BytesData.Value(i)
+		p := suffix.BytesData.Value(i)
+		result := len(s) >= len(p)
+		if result {
+			off := len(s) - len(p)
+			for j := 0; j < len(p); j++ {
+				if s[off+j] != p[j] {
+					result = false
+					break
+				}
+			}
+		}
+		out.BoolData[i] = result
+	}
+}
+
+func vecContains(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	sub := args[1]
+	hasNulls := src.Nulls.HasNulls() || sub.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && (src.Nulls.IsNullFast(i) || sub.Nulls.IsNullFast(i)) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		s := src.BytesData.StringValue(i)
+		p := sub.BytesData.StringValue(i)
+		out.BoolData[i] = strings.Contains(s, p)
+	}
+}
+
+// --- Vectorized math functions ---
+
+func vecAbs(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = math.Abs(vecReadFloat64(src, i))
+	}
+}
+
+func vecCeil(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = math.Ceil(vecReadFloat64(src, i))
+	}
+}
+
+func vecFloor(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = math.Floor(vecReadFloat64(src, i))
+	}
+}
+
+func vecRound(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	precision := 0
+	if len(args) >= 2 {
+		precision = int(vecReadFloat64(args[1], 0))
+	}
+	pow := math.Pow(10, float64(precision))
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = math.Round(vecReadFloat64(src, i)*pow) / pow
+	}
+}
+
+// --- Vectorized date/time functions ---
+
+func vecYear(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(time.Unix(src.Int64Data[i], 0).UTC().Year())
+	}
+}
+
+func vecMonth(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(time.Unix(src.Int64Data[i], 0).UTC().Month())
+	}
+}
+
+func vecDay(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(time.Unix(src.Int64Data[i], 0).UTC().Day())
+	}
+}
+
+func vecHour(args []*batch.Vector, out *batch.Vector, n int) {
+	src := args[0]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		out.Float64Data[i] = float64(time.Unix(src.Int64Data[i], 0).UTC().Hour())
+	}
+}
+
+func vecExtract(args []*batch.Vector, out *batch.Vector, n int) {
+	if len(args) < 2 {
+		return
+	}
+	// First arg is the unit string (constant in practice)
+	unit := strings.ToLower(args[0].BytesData.StringValue(0))
+	src := args[1]
+	hasNulls := src.Nulls.HasNulls()
+	for i := 0; i < n; i++ {
+		if hasNulls && src.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		t := time.Unix(src.Int64Data[i], 0).UTC()
+		switch unit {
+		case "year":
+			out.Float64Data[i] = float64(t.Year())
+		case "month":
+			out.Float64Data[i] = float64(t.Month())
+		case "day":
+			out.Float64Data[i] = float64(t.Day())
+		case "hour":
+			out.Float64Data[i] = float64(t.Hour())
+		case "minute":
+			out.Float64Data[i] = float64(t.Minute())
+		case "second":
+			out.Float64Data[i] = float64(t.Second())
+		case "dow", "dayofweek":
+			out.Float64Data[i] = float64(t.Weekday())
+		case "doy", "dayofyear":
+			out.Float64Data[i] = float64(t.YearDay())
+		case "quarter":
+			out.Float64Data[i] = float64((t.Month()-1)/3 + 1)
+		case "epoch":
+			out.Float64Data[i] = float64(src.Int64Data[i])
+		}
+	}
 }
