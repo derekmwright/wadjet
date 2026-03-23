@@ -274,17 +274,17 @@ locals {
   coordinator_user_data = <<-EOF
     ${local.build_script}
 
-    # Auto-run distributed benchmark (starts NATS, waits for workers)
-    export WADJET_BUCKET="${local.bucket_name}"
-    export WADJET_REGION="${var.region}"
-    export BENCHMARK_RUNS="${var.benchmark_runs}"
-    export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
-    export SKIP_QUERIES="${var.skip_queries}"
-    export QUERY_TIMEOUT="${var.query_timeout}"
-    cd /root/wadjet
-    bash deploy/benchmark/run-benchmark.sh distributed SF${var.scale_factor} ${var.worker_count} 2>&1 | tee /root/benchmark.log
-    # Upload results to S3 before shutdown
-    aws s3 cp /root/benchmark.log "s3://${local.bucket_name}/results/benchmark-$(date +%Y%m%d-%H%M%S).log" --region ${var.region}
+    # Start wadjet coordinator (NATS embedded, workers connect to us)
+    /usr/local/bin/wadjet serve \
+      --mode=coordinator \
+      --pg-addr=:5432 \
+      --nats-addr=:4222 \
+      --endpoint="s3.${var.region}.amazonaws.com" \
+      --ssl \
+      --bucket="${local.bucket_name}" \
+      --region="${var.region}" \
+      --storage-type=s3 &
+    echo "COORDINATOR_STARTED=1" >> /etc/environment
   EOF
 }
 

@@ -35,7 +35,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-const inlineResultThreshold = 256 * 1024 // 256 KB — avoids S3 round-trip for common aggregation/LIMIT results
+const inlineResultThreshold = 1024 * 1024 // 1 MB — avoids S3 round-trip for dimension tables and aggregation results
 
 // maxBufferedRows caps in-memory row accumulation during scan tasks to prevent
 // unbounded memory growth. When this limit is reached, rows are flushed to the
@@ -1323,11 +1323,10 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	}
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
-	// Build standalone physical plan (single pipeline, no stages)
-	if e.memoryBudget > 0 {
-		planner.MemoryBudget = e.memoryBudget
-		planner.SpillDir = e.spillDir
-	}
+	// Build standalone physical plan (single pipeline, no stages).
+	// Intentionally skip setting MemoryBudget — pipeline tasks are full
+	// queries that need maximum performance (parallel hash join build,
+	// no spill overhead). GOMEMLIMIT protects against OOM.
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
 		return fmt.Errorf("physical plan: %w", err)
