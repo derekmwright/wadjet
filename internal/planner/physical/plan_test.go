@@ -948,10 +948,10 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "scan", EstimatedBytes: 50 << 20},  // 50 MB
 				{Type: "shuffle"},
 				{Type: "shuffle"},
-				{Type: "hash_join"},
+				{Type: "hash_join", JoinType: "inner"},
 			},
 			workers:  3,
-			wantPipe: true, // 5s shuffle overhead > 0.2s parallelism benefit
+			wantPipe: true, // shuffle overhead > negative parallelism benefit (scan too small)
 		},
 		{
 			name: "large scan no shuffles → distributed",
@@ -960,7 +960,7 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "aggregate"},
 			},
 			workers:  3,
-			wantPipe: false, // 1s overhead < 8s parallelism benefit
+			wantPipe: false, // 0.5s overhead < 4.2s parallelism benefit
 		},
 		{
 			name: "large scan with many shuffles → pipeline",
@@ -970,12 +970,12 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "shuffle"},
 				{Type: "shuffle"},
 				{Type: "shuffle"},
-				{Type: "hash_join"},
+				{Type: "hash_join", JoinType: "inner"},
 				{Type: "sort"},
 				{Type: "merge_sort"},
 			},
 			workers:  3,
-			wantPipe: true, // 10s + 3s > 1.7s benefit
+			wantPipe: true, // 5.3s overhead > 1.1s parallelism benefit
 		},
 		{
 			name: "huge scan outweighs shuffle overhead → distributed",
@@ -983,10 +983,56 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "scan", EstimatedBytes: 20 << 30}, // 20 GB
 				{Type: "shuffle"},
 				{Type: "shuffle"},
-				{Type: "hash_join"},
+				{Type: "hash_join", JoinType: "inner"},
 			},
 			workers:  3,
-			wantPipe: false, // 6s overhead < 25s parallelism benefit
+			wantPipe: false, // 5.5s overhead < 15s parallelism benefit
+		},
+		{
+			name: "large scan 2 shuffles inner join → distributed (Q12-like)",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 7500 << 20}, // 7.3 GB (lineitem)
+				{Type: "scan", EstimatedBytes: 1700 << 20}, // 1.7 GB (orders)
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "hash_join", JoinType: "inner"},
+				{Type: "aggregate"},
+				{Type: "final_aggregate"},
+				{Type: "sort"},
+				{Type: "merge_sort"},
+			},
+			workers:  3,
+			wantPipe: false, // 5.3s overhead < 6.5s benefit (inner join, compute parallelism)
+		},
+		{
+			name: "large scan 2 shuffles semi join → pipeline (Q04-like)",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 7500 << 20}, // 7.3 GB (lineitem)
+				{Type: "scan", EstimatedBytes: 1700 << 20}, // 1.7 GB (orders)
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "hash_join", JoinType: "semi"},
+				{Type: "aggregate"},
+				{Type: "final_aggregate"},
+				{Type: "sort"},
+				{Type: "merge_sort"},
+			},
+			workers:  3,
+			wantPipe: true, // 5.3s overhead > 2.0s benefit (semi join discount)
+		},
+		{
+			name: "large scan 2 shuffles no sort → distributed (Q14-like)",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 7500 << 20}, // 7.3 GB (lineitem)
+				{Type: "scan", EstimatedBytes: 250 << 20},  // 240 MB (part)
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "hash_join", JoinType: "inner"},
+				{Type: "aggregate"},
+				{Type: "final_aggregate"},
+			},
+			workers:  3,
+			wantPipe: false, // 3.0s overhead < 5.0s benefit
 		},
 	}
 	for _, tt := range tests {

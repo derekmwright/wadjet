@@ -689,11 +689,14 @@ func EstimateCost(stages []Stage, node *logical.Node) QueryCost {
 // ShouldRoutePipeline returns true when a query should be routed to a single
 // worker as a standalone pipeline rather than distributed across workers.
 //
-// The decision compares estimated S3 materialization overhead from shuffle/sort
-// stages against the parallelism benefit of distributing scans. Each shuffle
-// stage writes intermediate results to S3 and reads them back (~2.5s per stage
-// at SF10). This overhead dominates for queries where standalone parallel
-// pipeline execution (16 cores) already processes the data efficiently.
+// The decision compares estimated distributed overhead (S3 shuffles, sort
+// materialization) against the parallelism benefit of distributing both I/O
+// and compute across workers.
+//
+// Key model features:
+//   - Shuffle cost scales with data volume (small filtered scans shuffle less)
+//   - Parallelism benefit includes compute (join/agg/sort), not just scan I/O
+//   - Semi/anti joins get a benefit discount (shuffle full tables, discard most rows)
 func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 	if workerCount <= 1 {
 		return true
@@ -701,6 +704,7 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 
 	var shuffleStages, sortStages int
 	var totalScanBytes int64
+	var hasSemiAnti bool
 	for _, s := range stages {
 		switch {
 		case s.Type == "shuffle":
@@ -709,29 +713,55 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 			sortStages++
 		case s.Type == "scan":
 			totalScanBytes += s.EstimatedBytes
+		case s.Type == "hash_join":
+			if s.JoinType == "semi" || s.JoinType == "anti" {
+				hasSemiAnti = true
+			}
 		}
 	}
 
-	// Each shuffle stage incurs S3 write + read + task dispatch overhead.
-	// Measured at SF10: ~2.5s per shuffle stage (write partitioned Parquet,
-	// read back on downstream workers, NATS task dispatch latency).
-	const shuffleCostSec = 2.5
-	// Sort stages write intermediate results to S3 for merge_sort.
-	const sortCostSec = 1.5
-	// Base coordination overhead per query (planner, task creation, result merge).
-	const baseCostSec = 1.0
+	scanGB := float64(totalScanBytes) / (1 << 30)
 
-	distributedOverhead := float64(shuffleStages)*shuffleCostSec +
+	// Shuffle cost scales with data volume: S3 write+read is proportional to
+	// the data flowing through the shuffle. Fixed component covers task dispatch
+	// and S3 metadata operations. Per-GB component measured at SF10: ~0.3s/GB
+	// across the cluster (parallel writes from N workers).
+	const shuffleFixedSec = 0.5
+	const shufflePerGBSec = 0.3
+	perShuffleSec := shuffleFixedSec + scanGB*shufflePerGBSec/float64(workerCount)
+	if perShuffleSec > 3.0 {
+		perShuffleSec = 3.0 // cap for very large datasets
+	}
+
+	const sortCostSec = 1.0
+	const baseCostSec = 0.5
+
+	distributedOverhead := float64(shuffleStages)*perShuffleSec +
 		float64(sortStages)*sortCostSec + baseCostSec
 
-	// Parallelism benefit: workers split scan I/O. Standalone achieves
-	// ~500 MB/s aggregate S3 read throughput with parallel pipeline on
-	// 16 cores. Distribution across N workers multiplies this, minus
-	// dispatch latency.
-	const scanBandwidthBytesPerSec = 500 * 1024 * 1024 // 500 MB/s per node
-	standaloneTimeSec := float64(totalScanBytes) / scanBandwidthBytesPerSec
-	distributedScanTimeSec := standaloneTimeSec/float64(workerCount) + baseCostSec
-	parallelismBenefit := standaloneTimeSec - distributedScanTimeSec
+	// Parallelism benefit: I/O + compute.
+	// Effective scan bandwidth accounts for predicate pushdown and column
+	// pruning — only a fraction of raw Parquet bytes are read from S3.
+	// Measured at SF10: effective ~1.5 GB/s on c7g.4xlarge with 16 cores.
+	const scanBandwidthGBPerSec = 1.5
+	scanTimeSec := scanGB / scanBandwidthGBPerSec
+
+	// Compute time: join build/probe, aggregation, sort all scale with
+	// data volume and benefit from distributed CPU parallelism.
+	const computePerGBSec = 0.5
+	computeTimeSec := scanGB * computePerGBSec
+
+	totalTimeSec := scanTimeSec + computeTimeSec
+	distributedTimeSec := totalTimeSec/float64(workerCount) + baseCostSec
+	parallelismBenefit := totalTimeSec - distributedTimeSec
+
+	// Semi/anti joins (EXISTS/NOT EXISTS) are poor candidates for distribution:
+	// both sides are fully shuffled but the join output is much smaller than
+	// input. In pipeline mode the hash table is built locally and probed with
+	// early termination, avoiding the shuffle overhead entirely.
+	if hasSemiAnti {
+		parallelismBenefit *= 0.3
+	}
 
 	return distributedOverhead > parallelismBenefit
 }
