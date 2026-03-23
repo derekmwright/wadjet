@@ -2,6 +2,7 @@ package logical
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
@@ -2389,18 +2390,17 @@ func reorderJoins(n *Node) *Node {
 	var edges []joinEdge
 	flattenJoinChain(n, &rels, &edges)
 	if len(rels) <= 2 {
-		// For 2-way inner joins, ensure the larger relation is on the
-		// probe (left) side and the smaller on the build (right) side.
-		// The hash join builds right into a hash table (materialized),
-		// so the smaller side should be the build side.
-		leftCost := estimateRelCost(n.Children[0])
-		rightCost := estimateRelCost(n.Children[1])
-		if leftCost < rightCost {
+		// For 2-way inner joins, use cardinality estimates to decide
+		// probe vs build side. Larger relation should probe (stream),
+		// smaller should build (hash table).
+		leftStats := estimateSubtreeStats(n.Children[0])
+		rightStats := estimateSubtreeStats(n.Children[1])
+		if leftStats.Rows < rightStats.Rows {
 			n.Children[0], n.Children[1] = n.Children[1], n.Children[0]
 		}
 		return n
 	}
-	return greedyJoinReorder(rels, edges)
+	return costBasedJoinReorder(rels, edges)
 }
 
 // hasCTERef returns true if the subtree contains a CTE reference scan.
@@ -2693,6 +2693,152 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 	}
 
 	return plan
+}
+
+// costBasedJoinReorder uses dynamic programming (for up to 16 relations) or
+// enhanced greedy to find the join order that minimizes total hash join cost,
+// estimated from cardinality propagation through the join tree.
+func costBasedJoinReorder(rels []*Node, edges []joinEdge) *Node {
+	if len(rels) <= 16 {
+		plan := dpJoinReorder(rels, edges)
+		// Validate: if the DP produced any inner join with an empty
+		// condition (cross join where one shouldn't be), fall back to
+		// the greedy algorithm which handles disconnected components.
+		if hasEmptyJoinCond(plan) {
+			return greedyJoinReorder(rels, edges)
+		}
+		return plan
+	}
+	return greedyJoinReorder(rels, edges)
+}
+
+// hasEmptyJoinCond checks if the left-deep join spine has any inner join
+// with an empty condition. Only walks the spine (DP-created joins), not
+// leaf subtrees (original relations) which may legitimately contain
+// cross-join-like structures from decorrelation.
+func hasEmptyJoinCond(n *Node) bool {
+	for n != nil && n.Type == NodeJoin {
+		if isInnerJoin(n) && n.JoinCond == "" {
+			return true
+		}
+		n = n.Children[0]
+	}
+	return false
+}
+
+// dpEntry stores the optimal plan for a subset of relations in the DP table.
+type dpEntry struct {
+	cost   float64
+	rows   float64
+	colNDV map[string]float64
+	plan   *Node
+}
+
+// dpJoinReorder uses bitmask dynamic programming to find the optimal left-deep
+// join order. For N relations, it evaluates O(2^N × N) states. Each state
+// represents a subset of relations joined together, and the transition adds
+// one more relation as the build side of a new hash join.
+func dpJoinReorder(rels []*Node, edges []joinEdge) *Node {
+	n := len(rels)
+
+	// Pre-compute statistics for each base relation
+	baseStats := make([]RelStats, n)
+	for i, rel := range rels {
+		baseStats[i] = estimateSubtreeStats(rel)
+	}
+
+	// DP table indexed by bitmask of included relations
+	maxMask := 1 << n
+	dp := make([]dpEntry, maxMask)
+	for i := range dp {
+		dp[i].cost = math.Inf(1)
+	}
+
+	// Base cases: single relations (no join cost)
+	for i := 0; i < n; i++ {
+		mask := 1 << i
+		dp[mask] = dpEntry{
+			cost:   0,
+			rows:   baseStats[i].Rows,
+			colNDV: baseStats[i].ColNDV,
+			plan:   rels[i],
+		}
+	}
+
+	// Fill DP table bottom-up by extending each reachable subset
+	for mask := 1; mask < maxMask; mask++ {
+		if math.IsInf(dp[mask].cost, 1) {
+			continue
+		}
+
+		// Try adding each relation not yet in the set
+		for j := 0; j < n; j++ {
+			if mask&(1<<j) != 0 {
+				continue // j already joined
+			}
+
+			newMask := mask | (1 << j)
+
+			// Collect all edges connecting j to relations in the current set
+			var allConds []string
+			joinType := "inner"
+			connected := false
+			for _, e := range edges {
+				jLeft := e.leftIdx == j && (mask&(1<<e.rightIdx)) != 0
+				jRight := e.rightIdx == j && (mask&(1<<e.leftIdx)) != 0
+				if jLeft || jRight {
+					connected = true
+					if e.joinCond != "" {
+						allConds = append(allConds, e.joinCond)
+					}
+					joinType = e.joinType
+				}
+			}
+
+			var joinCond string
+			var outputRows float64
+			var joinCost float64
+
+			if connected {
+				joinCond = strings.Join(allConds, " AND ")
+
+				// Estimate output cardinality using column NDV
+				leftStats := RelStats{Rows: dp[mask].rows, ColNDV: dp[mask].colNDV}
+				leftNDV, rightNDV := resolveJoinKeyNDVs(joinCond, leftStats, baseStats[j])
+				outputRows = estimateJoinCard(dp[mask].rows, baseStats[j].Rows, leftNDV, rightNDV, joinType)
+
+				// Hash join cost: build j (right side), probe current set (left side)
+				joinCost = hashJoinCost(dp[mask].rows, baseStats[j].Rows)
+			} else {
+				// Cross join — heavy penalty to avoid unless necessary
+				joinCond = ""
+				outputRows = dp[mask].rows * baseStats[j].Rows
+				joinCost = outputRows * 10
+			}
+
+			totalCost := dp[mask].cost + joinCost
+
+			if totalCost < dp[newMask].cost {
+				newPlan := NewJoin(dp[mask].plan, rels[j], joinType, joinCond)
+				ndvs := mergeNDVs(dp[mask].colNDV, baseStats[j].ColNDV, outputRows)
+
+				dp[newMask] = dpEntry{
+					cost:   totalCost,
+					rows:   outputRows,
+					colNDV: ndvs,
+					plan:   newPlan,
+				}
+			}
+		}
+	}
+
+	fullMask := maxMask - 1
+	if math.IsInf(dp[fullMask].cost, 1) {
+		// Disconnected graph — fall back to greedy
+		return greedyJoinReorder(rels, edges)
+	}
+
+	return dp[fullMask].plan
 }
 
 // hasSelectiveFilter checks whether a relation subtree contains a filter
