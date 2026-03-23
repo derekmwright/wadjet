@@ -54,6 +54,8 @@ type Coordinator struct {
 	tracker   *QueryTracker
 	workers   *WorkerRegistry
 	cleaner   *ResultCleaner
+	leader    *LeaderElection   // nil = always leader (standalone mode)
+	queryStore *QueryStateStore // nil = no persistence (standalone mode)
 	logger    *slog.Logger
 
 	mu         sync.Mutex
@@ -101,6 +103,136 @@ func (c *Coordinator) Cleaner(store objstore.Store, bucket string) *ResultCleane
 	return c.cleaner
 }
 
+// SetLeaderElection attaches a leader election instance to the coordinator.
+// When set, the coordinator will only accept queries if it is the current leader.
+// If nil (default), the coordinator is always considered leader (standalone mode).
+func (c *Coordinator) SetLeaderElection(le *LeaderElection) {
+	c.leader = le
+}
+
+// SetQueryStateStore attaches a query state store for HA persistence.
+// When set, query state transitions are persisted to NATS KV so a new leader
+// can recover in-flight queries after failover.
+func (c *Coordinator) SetQueryStateStore(qs *QueryStateStore) {
+	c.queryStore = qs
+}
+
+// isLeaderOrStandalone returns true if this coordinator can accept queries.
+// Returns true in standalone mode (no leader election) or if elected leader.
+func (c *Coordinator) isLeaderOrStandalone() bool {
+	if c.leader == nil {
+		return true // standalone mode
+	}
+	return c.leader.IsLeader()
+}
+
+// RecoverQueries is called when this coordinator becomes leader after a failover.
+// It reads active query states from the store and logs them for manual or
+// automated recovery.
+func (c *Coordinator) RecoverQueries(ctx context.Context) error {
+	if c.queryStore == nil {
+		return nil
+	}
+
+	active, err := c.queryStore.ListActive(ctx)
+	if err != nil {
+		return fmt.Errorf("listing active queries for recovery: %w", err)
+	}
+
+	if len(active) == 0 {
+		c.logger.Info("no active queries to recover after failover")
+		return nil
+	}
+
+	for _, q := range active {
+		c.logger.Warn("found orphaned query after failover",
+			"query_id", q.ID, "status", q.Status, "sql", q.SQL,
+			"started_at", q.StartedAt, "leader_id", q.LeaderID)
+		q.Status = "failed"
+		if err := c.queryStore.Save(ctx, q); err != nil {
+			c.logger.Error("failed to mark orphaned query as failed",
+				"query_id", q.ID, "error", err)
+		}
+	}
+
+	c.logger.Info("failover recovery complete", "orphaned_queries", len(active))
+	return nil
+}
+
+// StartLeaderWatch starts a background goroutine that watches for leadership
+// changes and triggers recovery when this coordinator becomes leader.
+func (c *Coordinator) StartLeaderWatch(ctx context.Context) {
+	if c.leader == nil {
+		return
+	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case isLeader := <-c.leader.LeaderChanged():
+				if isLeader {
+					c.logger.Info("leadership acquired, starting recovery")
+					if err := c.RecoverQueries(ctx); err != nil {
+						c.logger.Error("failover recovery failed", "error", err)
+					}
+				} else {
+					c.logger.Warn("leadership lost, queries will fail on this instance")
+				}
+			}
+		}
+	}()
+}
+
+// saveQueryState persists query state (best-effort, no-op if store is nil).
+func (c *Coordinator) saveQueryState(ctx context.Context, queryID, sql, status string, completedStages []string) {
+	if c.queryStore == nil {
+		return
+	}
+	leaderID := ""
+	if c.leader != nil {
+		leaderID = c.leader.id
+	}
+	state := &PersistentQueryState{
+		ID:              queryID,
+		SQL:             sql,
+		CompletedStages: completedStages,
+		Status:          status,
+		LeaderID:        leaderID,
+		StartedAt:       time.Now(),
+	}
+	if err := c.queryStore.Save(ctx, state); err != nil {
+		c.logger.Warn("failed to save query state", "query_id", queryID, "error", err)
+	}
+}
+
+// deleteQueryState removes a query from the state store (best-effort).
+func (c *Coordinator) deleteQueryState(ctx context.Context, queryID string) {
+	if c.queryStore == nil {
+		return
+	}
+	if err := c.queryStore.Delete(ctx, queryID); err != nil {
+		c.logger.Warn("failed to delete query state", "query_id", queryID, "error", err)
+	}
+}
+
+// persistStageCompletion updates the persisted query state with a newly completed stage.
+func (c *Coordinator) persistStageCompletion(ctx context.Context, queryID, completedStageID string) {
+	if c.queryStore == nil {
+		return
+	}
+	state, err := c.queryStore.Get(ctx, queryID)
+	if err != nil {
+		return
+	}
+	state.CompletedStages = append(state.CompletedStages, completedStageID)
+	if err := c.queryStore.Save(ctx, state); err != nil {
+		c.logger.Warn("failed to persist stage completion",
+			"query_id", queryID, "stage_id", completedStageID, "error", err)
+	}
+}
+
 // QueryResult represents the outcome of a query execution.
 type QueryResult struct {
 	QueryID     string        `json:"query_id"`
@@ -114,6 +246,14 @@ type QueryResult struct {
 // SubmitScanQuery submits a simple scan query for distributed execution.
 // This is the primary entry point before the SQL planner is available.
 func (c *Coordinator) SubmitScanQuery(ctx context.Context, tableName string, columns []string, partFilter map[string]string) (*QueryResult, error) {
+	if !c.isLeaderOrStandalone() {
+		leaderID := ""
+		if c.leader != nil {
+			leaderID = c.leader.CurrentLeader(ctx)
+		}
+		return nil, fmt.Errorf("not leader: coordinator %s is leader", leaderID)
+	}
+
 	queryID := uuid.New().String()[:8]
 
 	manifest, err := c.catalog.GetManifest(ctx, tableName)
@@ -234,6 +374,14 @@ func (r *SQLResult) Rows() []map[string]any {
 
 // ExecuteSQL parses SQL, plans, distributes across workers, and collects results.
 func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, error) {
+	if !c.isLeaderOrStandalone() {
+		leaderID := ""
+		if c.leader != nil {
+			leaderID = c.leader.CurrentLeader(ctx)
+		}
+		return nil, fmt.Errorf("not leader: coordinator %s is leader", leaderID)
+	}
+
 	// Backpressure: limit concurrent inflight queries.
 	select {
 	case c.querySem <- struct{}{}:
@@ -348,6 +496,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	c.tracker.Register(queryID, sql, trackerStages, stageOrder)
 	c.tracker.Start(queryID)
 
+	// HA: persist query state after planning
+	c.saveQueryState(ctx, queryID, sql, "executing", nil)
+
 	// Subscribe for results with multi-stage scheduling
 	doneCh := make(chan struct{}, 1)
 	c.subscribeResultsMultiStage(ctx, queryID, doneCh)
@@ -395,6 +546,8 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	c.mu.Lock()
 	delete(c.queryMetas, queryID)
 	c.mu.Unlock()
+
+	c.deleteQueryState(ctx, queryID)
 
 	if err != nil {
 		return &SQLResult{
@@ -1439,6 +1592,8 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 	// downstream scheduling that needs these results already on S3.
 	c.materializeInlineResults(ctx, queryID, completedStageID)
 
+	c.persistStageCompletion(ctx, queryID, completedStageID)
+
 	readyStages := c.tracker.GetReadyStages(queryID)
 	if len(readyStages) == 0 {
 		return
@@ -1840,6 +1995,14 @@ func (c *Coordinator) Tracker() *QueryTracker {
 // SubmitSQL parses, plans, and dispatches a query without blocking for results.
 // Returns the query ID and plan string immediately.
 func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string, planStr string, err error) {
+	if !c.isLeaderOrStandalone() {
+		leaderID := ""
+		if c.leader != nil {
+			leaderID = c.leader.CurrentLeader(ctx)
+		}
+		return "", "", fmt.Errorf("not leader: coordinator %s is leader", leaderID)
+	}
+
 	queryID = uuid.New().String()[:8]
 
 	// Parse
