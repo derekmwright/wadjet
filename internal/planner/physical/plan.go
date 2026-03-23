@@ -2266,6 +2266,11 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		if compiledExpr != nil && outType == parquet.TypeFloat64 {
 			if ve, ok := compiledExpr.(expr.VecFloat64Expr); ok {
 				pc.VecFloat64Eval = ve.EvalFloat64Vec
+				if binop, ok := ve.(*expr.BinOpFloat64); ok {
+					pc.VecFloat64Clone = func() exec.VecFloat64Expression {
+						return binop.CloneVec().EvalFloat64Vec
+					}
+				}
 			}
 			if fe, ok := compiledExpr.(expr.Float64Expr); ok {
 				pc.Float64Eval = fe.EvalFloat64
@@ -2321,6 +2326,11 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 				// falling back to typed per-row eval.
 				if ve, ok := compiled.(expr.VecFloat64Expr); ok {
 					pc.VecFloat64Eval = ve.EvalFloat64Vec
+					if binop, ok := ve.(*expr.BinOpFloat64); ok {
+						pc.VecFloat64Clone = func() exec.VecFloat64Expression {
+							return binop.CloneVec().EvalFloat64Vec
+						}
+					}
 				}
 				if fe, ok := compiled.(expr.Float64Expr); ok {
 					pc.Float64Eval = fe.EvalFloat64
@@ -2399,7 +2409,7 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 						Type: parquet.TypeString,
 						Expr: wrapExpr(compiled),
 					})
-					groupByCols[i] = synName
+						groupByCols[i] = synName
 				}
 			}
 		}
@@ -2518,9 +2528,18 @@ type aggPreProject struct {
 
 func (a *aggPreProject) Init(_ context.Context) error { return nil }
 
-// Clone returns a copy that shares the same computed expressions (stateless).
+// Clone returns a copy with deep-cloned VecFloat64Eval expression trees.
+// Each parallel worker must have its own BinOpFloat64.vecBuf scratch buffers
+// to avoid data races during concurrent vectorized evaluation.
 func (a *aggPreProject) Clone() exec.UnaryOperator {
-	return &aggPreProject{computed: a.computed}
+	clonedComputed := make([]exec.ProjectColumn, len(a.computed))
+	copy(clonedComputed, a.computed)
+	for i, c := range clonedComputed {
+		if c.VecFloat64Clone != nil {
+			clonedComputed[i].VecFloat64Eval = c.VecFloat64Clone()
+		}
+	}
+	return &aggPreProject{computed: clonedComputed}
 }
 
 func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {

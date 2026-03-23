@@ -43,14 +43,15 @@ type VecFloat64Expression func(b *batch.RecordBatch, dst []float64, n int) bool
 
 // ProjectColumn defines an output column of a projection.
 type ProjectColumn struct {
-	Name           string
-	Type           parquet.TypeID
-	Expr           Expression
-	Float64Eval    Float64Expression    // optional typed path (avoids interface{} boxing)
-	Int64Eval      Int64Expression      // optional typed path
-	VecFloat64Eval VecFloat64Expression // optional vectorized path (entire column at once)
-	SourceCol      string               // source column name for type resolution on renames
-	DirectCopy     string               // if set, bulk copy this input column (no per-row eval)
+	Name            string
+	Type            parquet.TypeID
+	Expr            Expression
+	Float64Eval     Float64Expression    // optional typed path (avoids interface{} boxing)
+	Int64Eval       Int64Expression      // optional typed path
+	VecFloat64Eval  VecFloat64Expression // optional vectorized path (entire column at once)
+	VecFloat64Clone func() VecFloat64Expression // creates a clone with independent scratch buffers
+	SourceCol       string               // source column name for type resolution on renames
+	DirectCopy      string               // if set, bulk copy this input column (no per-row eval)
 }
 
 // Project is a UnaryOperator that selects and computes columns.
@@ -188,7 +189,14 @@ func (p *Project) Close() error { return nil }
 // Clone returns a new Project that shares the same (immutable) projections.
 // Each clone gets its own pool (created lazily on first Execute).
 func (p *Project) Clone() UnaryOperator {
-	return &Project{Projections: p.Projections}
+	cloned := make([]ProjectColumn, len(p.Projections))
+	copy(cloned, p.Projections)
+	for i, proj := range cloned {
+		if proj.VecFloat64Clone != nil {
+			cloned[i].VecFloat64Eval = proj.VecFloat64Clone()
+		}
+	}
+	return &Project{Projections: cloned}
 }
 
 // projectCopyColumn bulk-copies n rows from src to dst using type-specific memcpy.
