@@ -2175,6 +2175,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// e.g., format_bytes(SUM(rx_bytes)). Replace the inner aggregate
 		// AST node with a ColRef to the aggregate output column, then
 		// compile the modified AST as a scalar expression.
+		var compiledExpr expr.Expr
 		if expression == nil && proj.IsAgg && proj.ASTExpr != nil && isOverAggregate {
 			innerAgg := plansql.FindNestedAggregate(proj.ASTExpr)
 			if innerAgg != nil {
@@ -2200,6 +2201,7 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 					compiled, compErr := expr.CompileWithRunner(rewritten, p.subqueryRunner)
 					if compErr == nil {
 						expression = wrapExpr(compiled)
+						compiledExpr = compiled
 					}
 				}
 			}
@@ -2221,8 +2223,10 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			}
 			if compErr == nil {
 				expression = wrapExpr(compiled)
+				compiledExpr = compiled
 			}
 		}
+		isDirectCopy := expression == nil
 		if expression == nil {
 			expression = exec.ColumnRef(colRef)
 		}
@@ -2250,6 +2254,24 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		// source column so Project.Execute can resolve the correct type.
 		if name != colRef {
 			pc.SourceCol = colRef
+		}
+		// For simple column references (no computed expression), use bulk vector
+		// copy instead of per-row evaluation.
+		if isDirectCopy {
+			pc.DirectCopy = colRef
+		}
+		// Use typed evaluation to avoid interface{} boxing in the inner loop.
+		// Only safe when the output type is explicitly Float64 (arithmetic exprs),
+		// not when resolved from input schema (could be Decimal, Timestamp, etc.).
+		if compiledExpr != nil && outType == parquet.TypeFloat64 {
+			if ve, ok := compiledExpr.(expr.VecFloat64Expr); ok {
+				pc.VecFloat64Eval = ve.EvalFloat64Vec
+			}
+			if fe, ok := compiledExpr.(expr.Float64Expr); ok {
+				pc.Float64Eval = fe.EvalFloat64
+			} else if ie, ok := compiledExpr.(expr.Int64Expr); ok {
+				pc.Int64Eval = ie.EvalInt64
+			}
 		}
 		projCols = append(projCols, pc)
 	}
@@ -2295,7 +2317,11 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 					Type: parquet.TypeFloat64,
 					Expr: wrapExpr(compiled),
 				}
-				// Use typed evaluation to avoid interface{} boxing in the inner loop
+				// Use vectorized evaluation when available (entire column at once),
+				// falling back to typed per-row eval.
+				if ve, ok := compiled.(expr.VecFloat64Expr); ok {
+					pc.VecFloat64Eval = ve.EvalFloat64Vec
+				}
 				if fe, ok := compiled.(expr.Float64Expr); ok {
 					pc.Float64Eval = fe.EvalFloat64
 				} else if ie, ok := compiled.(expr.Int64Expr); ok {
@@ -2598,7 +2624,9 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 				}
 			}
 		} else {
-			if c.Float64Eval != nil {
+			if c.VecFloat64Eval != nil {
+				c.VecFloat64Eval(in, col.Float64Data, in.Len)
+			} else if c.Float64Eval != nil {
 				for i := 0; i < in.Len; i++ {
 					v, ok := c.Float64Eval(in, i)
 					if ok {

@@ -171,6 +171,55 @@ func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 	}
 }
 
+// EvalFloat64Vec evaluates the column for all rows [0, n) into dst.
+func (e *ColRef) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool {
+	if !e.resolved {
+		e.idx = b.ColumnIndex(e.Name)
+		if e.idx < 0 && strings.Contains(e.Name, ".") {
+			parts := strings.SplitN(e.Name, ".", 2)
+			e.idx = b.ColumnIndex(parts[1])
+		}
+		if e.idx >= 0 {
+			e.typ = b.Columns[e.idx].Type
+		}
+		e.resolved = true
+	}
+	if e.idx < 0 || e.idx >= len(b.Columns) {
+		for i := 0; i < n; i++ {
+			dst[i] = 0
+		}
+		return true
+	}
+	v := b.Columns[e.idx]
+	switch e.typ {
+	case batch.TypeFloat64:
+		copy(dst[:n], v.Float64Data[:n])
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		for i := 0; i < n; i++ {
+			dst[i] = float64(v.Int64Data[i])
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		for i := 0; i < n; i++ {
+			dst[i] = float64(v.Int32Data[i])
+		}
+	case batch.TypeFloat32:
+		for i := 0; i < n; i++ {
+			dst[i] = float64(v.Float32Data[i])
+		}
+	case batch.TypeDecimal:
+		scale := v.DecimalData.Scale
+		for i := 0; i < n; i++ {
+			dst[i] = v.DecimalData.Data[i].ToFloat64(scale)
+		}
+	default:
+		for i := 0; i < n; i++ {
+			dst[i] = 0
+		}
+		return true
+	}
+	return v.Nulls.HasNulls()
+}
+
 // EvalString reads the column value as string without boxing.
 func (e *ColRef) EvalString(b *batch.RecordBatch, row int) (string, bool) {
 	if !e.resolved {
@@ -247,6 +296,21 @@ func (e *Lit) EvalInt64(_ *batch.RecordBatch, _ int) (int64, bool) {
 	return ToInt64(e.Val), true
 }
 
+// EvalFloat64Vec fills dst[0:n] with the literal value.
+func (e *Lit) EvalFloat64Vec(_ *batch.RecordBatch, dst []float64, n int) bool {
+	if e.Val == nil {
+		for i := 0; i < n; i++ {
+			dst[i] = 0
+		}
+		return true // all null
+	}
+	v := ToFloat64(e.Val)
+	for i := 0; i < n; i++ {
+		dst[i] = v
+	}
+	return false
+}
+
 // --- Typed expression interfaces for zero-boxing hot paths ---
 
 // Float64Expr evaluates to float64 without boxing.
@@ -257,6 +321,13 @@ type Float64Expr interface {
 // Int64Expr evaluates to int64 without boxing.
 type Int64Expr interface {
 	EvalInt64(b *batch.RecordBatch, row int) (int64, bool)
+}
+
+// VecFloat64Expr evaluates an expression for all rows [0, n) at once,
+// writing results to dst. Returns true if any output is null.
+// Eliminates per-row function call overhead (~5 calls/row/expression).
+type VecFloat64Expr interface {
+	EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool
 }
 
 // arithOp is a pre-resolved opcode for arithmetic operations.
@@ -385,6 +456,7 @@ type BinOpFloat64 struct {
 	Op          string
 	opCode      arithOp
 	opResolved  bool
+	vecBuf      []float64 // scratch buffer for vectorized evaluation
 }
 
 func (e *BinOpFloat64) resolveOp() {
@@ -435,6 +507,70 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 	default:
 		return 0, false
 	}
+}
+
+// EvalFloat64Vec evaluates left and right operands in bulk, then applies the
+// arithmetic op in a tight loop. Eliminates ~5 function calls per row.
+func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool {
+	if !e.opResolved {
+		e.opCode = resolveArithOp(e.Op)
+		e.opResolved = true
+	}
+
+	// Check if children support vectorized evaluation
+	leftVec, leftOK := e.Left.(VecFloat64Expr)
+	rightVec, rightOK := e.Right.(VecFloat64Expr)
+	if !leftOK || !rightOK {
+		// Fallback to per-row evaluation
+		hasNull := false
+		for i := 0; i < n; i++ {
+			v, ok := e.EvalFloat64(b, i)
+			dst[i] = v
+			if !ok {
+				hasNull = true
+			}
+		}
+		return hasNull
+	}
+
+	// Evaluate right into dst, left into scratch buffer.
+	// Reuse scratch slice across calls; grow only if needed.
+	rightNull := rightVec.EvalFloat64Vec(b, dst, n)
+	if cap(e.vecBuf) < n {
+		e.vecBuf = make([]float64, n)
+	}
+	tmp := e.vecBuf[:n]
+	leftNull := leftVec.EvalFloat64Vec(b, tmp, n)
+
+	// Apply op in tight loop (compiler can auto-vectorize these)
+	switch e.opCode {
+	case arithAdd:
+		for i := 0; i < n; i++ {
+			dst[i] = tmp[i] + dst[i]
+		}
+	case arithSub:
+		for i := 0; i < n; i++ {
+			dst[i] = tmp[i] - dst[i]
+		}
+	case arithMul:
+		for i := 0; i < n; i++ {
+			dst[i] = tmp[i] * dst[i]
+		}
+	case arithDiv:
+		for i := 0; i < n; i++ {
+			if dst[i] != 0 {
+				dst[i] = tmp[i] / dst[i]
+			}
+		}
+	case arithMod:
+		for i := 0; i < n; i++ {
+			if dst[i] != 0 {
+				dst[i] = float64(int64(tmp[i]) % int64(dst[i]))
+			}
+		}
+	}
+
+	return leftNull || rightNull
 }
 
 // BinOpInt64 is a typed binary op that operates on int64 without boxing.

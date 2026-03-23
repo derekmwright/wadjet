@@ -183,6 +183,19 @@ func (b *Bitmap) InvalidateCache() {
 	b.hasNulls = -1
 }
 
+// CopyFrom copies the first n bits from src into b. Both bitmaps must have
+// capacity for n bits. Uses word-level copy for the bulk and masks the final word.
+func (b *Bitmap) CopyFrom(src *Bitmap, n int) {
+	words := (n + 63) / 64
+	copy(b.data[:words], src.data[:words])
+	// Mask excess bits in the last word to match n
+	if rem := n % 64; rem > 0 {
+		b.data[words-1] &= (uint64(1) << rem) - 1
+	}
+	b.len = n
+	b.hasNulls = src.hasNulls
+}
+
 // ResetNonNull resets the bitmap to all non-null (all bits 1) for n elements,
 // reusing the existing backing slice when capacity allows. This avoids
 // allocation on the batch pool hot path.
