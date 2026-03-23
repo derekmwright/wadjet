@@ -120,40 +120,35 @@ func TestPlanDistributed_AggregateScan(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	if len(stages) != 3 {
-		t.Fatalf("expected 3 stages (scan, aggregate, final_aggregate), got %d", len(stages))
+	// Fused scan-aggregate: scan (with fused agg) + final_aggregate
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stages (fused scan-agg + final_aggregate), got %d", len(stages))
 	}
 
 	scanStage := stages[0]
-	aggStage := stages[1]
-	finalAggStage := stages[2]
+	finalAggStage := stages[1]
 
 	if scanStage.Type != "scan" {
 		t.Errorf("first stage should be 'scan', got %q", scanStage.Type)
 	}
-	if aggStage.Type != "aggregate" {
-		t.Errorf("second stage should be 'aggregate', got %q", aggStage.Type)
-	}
 	if finalAggStage.Type != "final_aggregate" {
-		t.Errorf("third stage should be 'final_aggregate', got %q", finalAggStage.Type)
+		t.Errorf("second stage should be 'final_aggregate', got %q", finalAggStage.Type)
 	}
-	if len(aggStage.Dependencies) == 0 {
-		t.Fatal("aggregate stage should depend on scan stage")
+
+	// Verify fused aggregation on scan
+	if len(scanStage.FusedAggGroupBy) != 1 || scanStage.FusedAggGroupBy[0] != "user_id" {
+		t.Errorf("expected fused group-by [user_id], got %v", scanStage.FusedAggGroupBy)
 	}
-	if aggStage.Dependencies[0] != scanStage.ID {
-		t.Errorf("aggregate depends on %q, want %q", aggStage.Dependencies[0], scanStage.ID)
+	if len(scanStage.FusedAggSpecs) != 1 {
+		t.Fatalf("expected 1 fused agg spec, got %d", len(scanStage.FusedAggSpecs))
 	}
-	if len(finalAggStage.Dependencies) != 1 || finalAggStage.Dependencies[0] != aggStage.ID {
-		t.Errorf("final_aggregate should depend on aggregate %q, got %v", aggStage.ID, finalAggStage.Dependencies)
+	if scanStage.FusedAggSpecs[0].Func != "count" || scanStage.FusedAggSpecs[0].OutputCol != "cnt" {
+		t.Errorf("unexpected fused agg spec: %+v", scanStage.FusedAggSpecs[0])
 	}
-	if len(aggStage.GroupByCols) != 1 || aggStage.GroupByCols[0] != "user_id" {
-		t.Errorf("unexpected group-by cols: %v", aggStage.GroupByCols)
-	}
-	if len(aggStage.AggSpecs) != 1 {
-		t.Fatalf("expected 1 agg spec, got %d", len(aggStage.AggSpecs))
-	}
-	if aggStage.AggSpecs[0].Func != "count" || aggStage.AggSpecs[0].OutputCol != "cnt" {
-		t.Errorf("unexpected agg spec: %+v", aggStage.AggSpecs[0])
+
+	// final_aggregate depends on scan
+	if len(finalAggStage.Dependencies) != 1 || finalAggStage.Dependencies[0] != scanStage.ID {
+		t.Errorf("final_aggregate should depend on scan %q, got %v", scanStage.ID, finalAggStage.Dependencies)
 	}
 }
 
@@ -177,39 +172,42 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	if len(stages) != 5 {
-		t.Fatalf("expected 5 stages (scan, aggregate, final_aggregate, sort, merge_sort), got %d", len(stages))
+	// Fused: scan (with fused agg) + final_aggregate + sort + merge_sort
+	if len(stages) != 4 {
+		t.Fatalf("expected 4 stages (fused scan-agg, final_aggregate, sort, merge_sort), got %d", len(stages))
 	}
 
 	if stages[0].Type != "scan" {
 		t.Errorf("stage 0 should be 'scan', got %q", stages[0].Type)
 	}
-	if stages[1].Type != "aggregate" {
-		t.Errorf("stage 1 should be 'aggregate', got %q", stages[1].Type)
+	if stages[1].Type != "final_aggregate" {
+		t.Errorf("stage 1 should be 'final_aggregate', got %q", stages[1].Type)
 	}
-	if stages[2].Type != "final_aggregate" {
-		t.Errorf("stage 2 should be 'final_aggregate', got %q", stages[2].Type)
+	if stages[2].Type != "sort" {
+		t.Errorf("stage 2 should be 'sort', got %q", stages[2].Type)
 	}
-	if stages[3].Type != "sort" {
-		t.Errorf("stage 3 should be 'sort', got %q", stages[3].Type)
-	}
-	if stages[4].Type != "merge_sort" {
-		t.Errorf("stage 4 should be 'merge_sort', got %q", stages[4].Type)
+	if stages[3].Type != "merge_sort" {
+		t.Errorf("stage 3 should be 'merge_sort', got %q", stages[3].Type)
 	}
 
-	// final_aggregate depends on aggregate
+	// Verify fused aggregation on scan
+	if len(stages[0].FusedAggSpecs) == 0 {
+		t.Fatal("scan stage should have fused aggregate specs")
+	}
+
+	// final_aggregate depends on scan (fused agg)
+	if len(stages[1].Dependencies) != 1 || stages[1].Dependencies[0] != stages[0].ID {
+		t.Errorf("final_aggregate should depend on scan %q, got %v", stages[0].ID, stages[1].Dependencies)
+	}
+	// Sort depends only on final_aggregate
 	if len(stages[2].Dependencies) != 1 || stages[2].Dependencies[0] != stages[1].ID {
-		t.Errorf("final_aggregate should depend on aggregate %q, got %v", stages[1].ID, stages[2].Dependencies)
+		t.Errorf("sort stage should depend only on final_aggregate stage %q, got %v", stages[1].ID, stages[2].Dependencies)
 	}
-	// Sort depends only on final_aggregate (its immediate predecessor), not scan
-	if len(stages[3].Dependencies) != 1 || stages[3].Dependencies[0] != stages[2].ID {
-		t.Errorf("sort stage should depend only on final_aggregate stage %q, got %v", stages[2].ID, stages[3].Dependencies)
+	if len(stages[2].SortKeys) != 1 {
+		t.Fatalf("expected 1 sort key, got %d", len(stages[2].SortKeys))
 	}
-	if len(stages[3].SortKeys) != 1 {
-		t.Fatalf("expected 1 sort key, got %d", len(stages[3].SortKeys))
-	}
-	if stages[3].SortKeys[0].Column != "cnt" || !stages[3].SortKeys[0].Desc {
-		t.Errorf("unexpected sort key: %+v", stages[3].SortKeys[0])
+	if stages[2].SortKeys[0].Column != "cnt" || !stages[2].SortKeys[0].Desc {
+		t.Errorf("unexpected sort key: %+v", stages[2].SortKeys[0])
 	}
 
 	// Merge sort depends only on the sort stage
@@ -393,22 +391,27 @@ func TestExpandFederatedScans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Before expansion: 1 scan + 1 aggregate + 1 final_aggregate
-	if len(stages) != 3 {
-		t.Fatalf("expected 3 stages before expansion, got %d", len(stages))
+	// Before expansion: 1 scan (with fused agg) + 1 final_aggregate
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stages before expansion (fused scan-agg + final), got %d", len(stages))
+	}
+
+	// Verify fused aggregation on scan stage
+	if len(stages[0].FusedAggSpecs) == 0 {
+		t.Fatal("expected fused aggregate specs on scan stage")
 	}
 
 	// Expand
 	expanded := planner.ExpandFederatedScans(stages)
 
-	// After expansion: 2 scan stages (one per cluster) + 1 aggregate + 1 final_aggregate
+	// After expansion: 2 scan stages (one per cluster, both with fused agg) + 1 final_aggregate
 	scanStages := 0
 	aggStages := 0
 	for _, s := range expanded {
 		switch s.Type {
 		case "scan":
 			scanStages++
-		case "aggregate", "final_aggregate":
+		case "final_aggregate":
 			aggStages++
 		}
 	}
@@ -416,8 +419,8 @@ func TestExpandFederatedScans(t *testing.T) {
 	if scanStages != 2 {
 		t.Fatalf("expected 2 scan stages after expansion, got %d", scanStages)
 	}
-	if aggStages != 2 {
-		t.Fatalf("expected 2 aggregate stages (partial + final), got %d", aggStages)
+	if aggStages != 1 {
+		t.Fatalf("expected 1 final_aggregate stage, got %d", aggStages)
 	}
 
 	// Verify cluster IDs on scan stages
@@ -437,11 +440,11 @@ func TestExpandFederatedScans(t *testing.T) {
 		t.Errorf("expected scan stages for central and afb-east, got %v", clusterIDs)
 	}
 
-	// Verify partial aggregate depends on both scan stages
+	// Verify final_aggregate depends on both scan stages
 	for _, s := range expanded {
-		if s.Type == "aggregate" {
+		if s.Type == "final_aggregate" {
 			if len(s.Dependencies) != 2 {
-				t.Errorf("aggregate should depend on 2 scan stages, got %d: %v", len(s.Dependencies), s.Dependencies)
+				t.Errorf("final_aggregate should depend on 2 scan stages, got %d: %v", len(s.Dependencies), s.Dependencies)
 			}
 		}
 	}

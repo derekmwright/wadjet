@@ -43,6 +43,10 @@ type Task struct {
 	Columns         []string          `json:"columns,omitempty"`
 	FilterExprs     []string          `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
 
+	// Fused scan-aggregate: partial aggregation done at scan level
+	ScanAggGroupBy []string  `json:"scan_agg_group_by,omitempty"`
+	ScanAggSpecs   []AggSpec `json:"scan_agg_specs,omitempty"`
+
 	// Aggregate-specific
 	GroupByCols []string     `json:"group_by_cols,omitempty"`
 	Aggregates  []AggSpec    `json:"aggregates,omitempty"`

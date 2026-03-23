@@ -695,18 +695,41 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 const coalesceScanTargetBytes int64 = 32 * 1024 * 1024 // 32 MB
 
 func (c *Coordinator) createScanTasks(queryID string, stage physical.Stage, resultPrefix string) []distributed.Task {
+	// Convert fused aggregate specs once (shared by all tasks)
+	var scanAggSpecs []distributed.AggSpec
+	if len(stage.FusedAggSpecs) > 0 {
+		scanAggSpecs = make([]distributed.AggSpec, len(stage.FusedAggSpecs))
+		for i, a := range stage.FusedAggSpecs {
+			scanAggSpecs[i] = distributed.AggSpec{
+				Func:      a.Func,
+				InputCol:  a.InputCol,
+				OutputCol: a.OutputCol,
+			}
+		}
+	}
+
+	makeScanTask := func(files []string) distributed.Task {
+		t := distributed.Task{
+			ID:              uuid.New().String()[:8],
+			QueryID:         queryID,
+			StageID:         stage.ID,
+			Type:            distributed.TaskTypeScan,
+			TableName:       stage.TableName,
+			Files:           files,
+			Columns:         stage.Columns,
+			PartitionFilter: stage.PartitionFilter,
+			FilterExprs:     stage.FilterExprs,
+			ScanAggGroupBy:  stage.FusedAggGroupBy,
+			ScanAggSpecs:    scanAggSpecs,
+			ResultBucket:    c.config.ResultBucket,
+			ResultPrefix:    resultPrefix,
+			CreatedAt:       time.Now(),
+		}
+		return t
+	}
+
 	if len(stage.ScanFiles) == 0 {
-		// Create at least one empty task so the stage completes
-		return []distributed.Task{{
-			ID:           uuid.New().String()[:8],
-			QueryID:      queryID,
-			StageID:      stage.ID,
-			Type:         distributed.TaskTypeScan,
-			TableName:    stage.TableName,
-			ResultBucket: c.config.ResultBucket,
-			ResultPrefix: resultPrefix,
-			CreatedAt:    time.Now(),
-		}}
+		return []distributed.Task{makeScanTask(nil)}
 	}
 
 	// Look up file sizes from the catalog for coalescing
@@ -724,20 +747,7 @@ func (c *Coordinator) createScanTasks(queryID string, stage physical.Stage, resu
 
 		// Flush batch when target reached or file size unknown (treat as large)
 		if batchBytes >= coalesceScanTargetBytes || fileSize == 0 {
-			tasks = append(tasks, distributed.Task{
-				ID:              uuid.New().String()[:8],
-				QueryID:         queryID,
-				StageID:         stage.ID,
-				Type:            distributed.TaskTypeScan,
-				TableName:       stage.TableName,
-				Files:           batch,
-				Columns:         stage.Columns,
-				PartitionFilter: stage.PartitionFilter,
-				FilterExprs:     stage.FilterExprs,
-				ResultBucket:    c.config.ResultBucket,
-				ResultPrefix:    resultPrefix,
-				CreatedAt:       time.Now(),
-			})
+			tasks = append(tasks, makeScanTask(batch))
 			batch = nil
 			batchBytes = 0
 		}
@@ -745,20 +755,7 @@ func (c *Coordinator) createScanTasks(queryID string, stage physical.Stage, resu
 
 	// Flush remaining
 	if len(batch) > 0 {
-		tasks = append(tasks, distributed.Task{
-			ID:              uuid.New().String()[:8],
-			QueryID:         queryID,
-			StageID:         stage.ID,
-			Type:            distributed.TaskTypeScan,
-			TableName:       stage.TableName,
-			Files:           batch,
-			Columns:         stage.Columns,
-			PartitionFilter: stage.PartitionFilter,
-			FilterExprs:     stage.FilterExprs,
-			ResultBucket:    c.config.ResultBucket,
-			ResultPrefix:    resultPrefix,
-			CreatedAt:       time.Now(),
-		})
+		tasks = append(tasks, makeScanTask(batch))
 	}
 
 	return tasks

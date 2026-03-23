@@ -73,6 +73,12 @@ type Stage struct {
 	ShuffleKeys   []string // columns to hash-partition on
 	NumPartitions int      // number of output partitions (also used on join stages)
 
+	// Fused scan-aggregate: partial aggregation is performed at the scan
+	// level, eliminating the scan→aggregate S3 round-trip. Workers produce
+	// partial aggregate results instead of raw rows.
+	FusedAggGroupBy []string
+	FusedAggSpecs   []AggSpec
+
 	// Cost estimation (populated at plan time from manifest metadata)
 	EstimatedBytes int64
 	EstimatedRows  int64
@@ -1060,6 +1066,21 @@ func ExtractScanStages(stages []Stage) []Stage {
 	return scans
 }
 
+// canFuseScanAggregate returns true when child stages are all scans (or
+// filter-pushed scans). This means partial aggregation can be fused directly
+// into scan tasks, eliminating the separate aggregate stage and its S3 round-trip.
+func canFuseScanAggregate(childStages []Stage) bool {
+	if len(childStages) == 0 {
+		return false
+	}
+	for _, s := range childStages {
+		if s.Type != "scan" {
+			return false
+		}
+	}
+	return true
+}
+
 func hasFilterOrPartition(n *logical.Node) bool {
 	if n == nil {
 		return false
@@ -1443,7 +1464,6 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, child := range node.Children {
 			p.walkStages(child, stages, nil)
 		}
-		stageID := fmt.Sprintf("aggregate-%d", len(*stages))
 		var aggSpecs []AggSpec
 		for _, agg := range node.AggExprs {
 			aggSpecs = append(aggSpecs, AggSpec{
@@ -1455,28 +1475,57 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		groupBy := make([]string, len(node.GroupBy))
 		copy(groupBy, node.GroupBy)
 
-		// Phase 1: partial aggregate (coordinator splits into parallel tasks at runtime)
-		stage := Stage{
-			ID:          stageID,
-			Type:        "aggregate",
-			Tasks:       1,
-			GroupByCols: groupBy,
-			AggSpecs:    aggSpecs,
-		}
-		// Only depend on leaf stages from subtree (not transitive deps).
-		stage.Dependencies = leafStages((*stages)[preCount:])
-		*stages = append(*stages, stage)
+		// Optimization: fuse aggregation into scan when the only child
+		// stages are scans (no joins or sorts in between). This eliminates
+		// the scan→aggregate S3 round-trip by doing partial aggregation at
+		// the scan level. Each scan task produces partial aggregate results
+		// instead of raw rows, massively reducing data volume.
+		childStages := (*stages)[preCount:]
+		if canFuseScanAggregate(childStages) {
+			for i := range *stages {
+				if i < preCount {
+					continue
+				}
+				if (*stages)[i].Type == "scan" {
+					(*stages)[i].FusedAggGroupBy = groupBy
+					(*stages)[i].FusedAggSpecs = aggSpecs
+				}
+			}
+			// Skip the separate aggregate stage — scans produce partial aggs.
+			// Final aggregate merges partial results from all scan tasks.
+			leafIDs := leafStages(childStages)
+			finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
+			*stages = append(*stages, Stage{
+				ID:           finalStageID,
+				Type:         "final_aggregate",
+				Tasks:        1,
+				GroupByCols:  groupBy,
+				AggSpecs:     aggSpecs,
+				Dependencies: leafIDs,
+			})
+		} else {
+			// Standard two-phase distributed aggregation
+			stageID := fmt.Sprintf("aggregate-%d", len(*stages))
+			stage := Stage{
+				ID:          stageID,
+				Type:        "aggregate",
+				Tasks:       1,
+				GroupByCols: groupBy,
+				AggSpecs:    aggSpecs,
+			}
+			stage.Dependencies = leafStages(childStages)
+			*stages = append(*stages, stage)
 
-		// Phase 2: final aggregate (single task re-aggregates partial results)
-		finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
-		*stages = append(*stages, Stage{
-			ID:           finalStageID,
-			Type:         "final_aggregate",
-			Tasks:        1,
-			GroupByCols:  groupBy,
-			AggSpecs:     aggSpecs,
-			Dependencies: []string{stageID},
-		})
+			finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
+			*stages = append(*stages, Stage{
+				ID:           finalStageID,
+				Type:         "final_aggregate",
+				Tasks:        1,
+				GroupByCols:  groupBy,
+				AggSpecs:     aggSpecs,
+				Dependencies: []string{stageID},
+			})
+		}
 
 	case logical.NodeSort:
 		preCount := len(*stages)
