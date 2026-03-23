@@ -717,6 +717,17 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 	nameLower := strings.ToLower(table.Name)
 	for _, cte := range ctes {
 		if cte.Name == nameLower {
+			// Recursive CTEs are materialized by the physical planner via
+			// fixed-point iteration (materializeRecursiveCTE). Don't expand
+			// the body here — that would cause infinite recursion on the
+			// self-reference. Just create a tagged scan that buildPipeline
+			// resolves from cteCache.
+			if cte.Recursive {
+				node := NewScan(cte.Name, table.Alias)
+				node.CTEName = cte.Name
+				return node, nil
+			}
+
 			// Parse the CTE body SQL
 			parsed, err := plansql.Parse(cte.SQL)
 			if err != nil {

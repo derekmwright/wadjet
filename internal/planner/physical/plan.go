@@ -263,17 +263,20 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 		return nil, fmt.Errorf("subquery execution plan error: %w", err)
 	}
 
+	// Ensure a CollectSink — buildPipeline may return nil sink for
+	// non-blocking plans (e.g., CTE cache lookups, table-less SELECTs).
+	collectSink, ok := sink.(*exec.CollectSink)
+	if !ok {
+		collectSink = &exec.CollectSink{}
+		sink = collectSink
+	}
+
 	// Execute
 	pipeline := &exec.Pipeline{Source: source, Ops: ops, Sink: sink}
 	if err := pipeline.Run(ctx); err != nil {
 		return nil, fmt.Errorf("subquery execution error: %w", err)
 	}
 
-	// Collect results from the sink
-	collectSink, ok := sink.(*exec.CollectSink)
-	if !ok {
-		return nil, fmt.Errorf("unexpected sink type for subquery")
-	}
 	return collectSink.ToRows(), nil
 }
 
@@ -474,6 +477,10 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 	p.cteCache = make(map[string]*cteMaterialized)
 
 	for _, cte := range root.CTEs {
+		if cte.Recursive {
+			p.materializeRecursiveCTE(ctx, cte)
+			continue
+		}
 		if refCounts[cte.Name] < 2 {
 			continue
 		}
@@ -482,41 +489,281 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 		if err != nil {
 			continue // fall back to inline expansion
 		}
-		// Derive schema from the CTE's parsed SELECT list
-		pq, err := plansql.Parse(cte.SQL)
-		if err != nil {
+		schema := p.inferCTESchema(cte.SQL, rows)
+		if schema == nil {
 			continue
-		}
-		info, err := plansql.ExtractSelect(pq)
-		if err != nil {
-			continue
-		}
-		schema := make([]parquet.Column, len(info.Columns))
-		for i, col := range info.Columns {
-			name := col.Alias
-			if name == "" {
-				name = col.Expr
-			}
-			// Infer type from first data row
-			typ := parquet.TypeString
-			if len(rows) > 0 {
-				if v, ok := rows[0][name]; ok {
-					switch v.(type) {
-					case int64:
-						typ = parquet.TypeInt64
-					case int32:
-						typ = parquet.TypeInt32
-					case float64:
-						typ = parquet.TypeFloat64
-					case bool:
-						typ = parquet.TypeBool
-					}
-				}
-			}
-			schema[i] = parquet.Column{Name: name, Type: typ, Nullable: true}
 		}
 		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: rows}
 	}
+}
+
+// inferCTESchema derives column types from a CTE's SQL and data rows.
+func (p *Planner) inferCTESchema(sql string, rows []map[string]any) []parquet.Column {
+	pq, err := plansql.Parse(sql)
+	if err != nil {
+		return nil
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		return nil
+	}
+	schema := make([]parquet.Column, len(info.Columns))
+	for i, col := range info.Columns {
+		name := col.Alias
+		if name == "" {
+			name = col.Expr
+		}
+		typ := parquet.TypeString
+		if len(rows) > 0 {
+			if v, ok := rows[0][name]; ok {
+				switch v.(type) {
+				case int64:
+					typ = parquet.TypeInt64
+				case int32:
+					typ = parquet.TypeInt32
+				case float64:
+					typ = parquet.TypeFloat64
+				case bool:
+					typ = parquet.TypeBool
+				case string:
+					// Check if the string value is actually a numeric literal
+					// (SELECT 1 returns "1" as a string from the expression evaluator)
+					s := v.(string)
+					if _, err := strconv.ParseInt(s, 10, 64); err == nil {
+						typ = parquet.TypeInt64
+						// Convert all rows' values from string to int64
+						for _, row := range rows {
+							if sv, ok := row[name].(string); ok {
+								if iv, err := strconv.ParseInt(sv, 10, 64); err == nil {
+									row[name] = iv
+								}
+							}
+						}
+					} else if _, err := strconv.ParseFloat(s, 64); err == nil {
+						typ = parquet.TypeFloat64
+						for _, row := range rows {
+							if sv, ok := row[name].(string); ok {
+								if fv, err := strconv.ParseFloat(sv, 64); err == nil {
+									row[name] = fv
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		schema[i] = parquet.Column{Name: name, Type: typ, Nullable: true}
+	}
+	return schema
+}
+
+const maxRecursiveIterations = 1000
+
+// materializeRecursiveCTE executes a recursive CTE using fixed-point iteration.
+// The CTE body must contain UNION ALL separating the anchor query from the
+// recursive query. The recursive query references the CTE name itself.
+func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDef) {
+	anchorSQL, recursiveSQL, ok := splitRecursiveUnion(cte.SQL)
+	if !ok {
+		// No UNION ALL found — fall back to non-recursive execution
+		rows, err := p.executeSubquery(ctx, cte.SQL)
+		if err != nil {
+			return
+		}
+		schema := p.inferCTESchema(cte.SQL, rows)
+		if schema != nil {
+			p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: rows}
+		}
+		return
+	}
+
+	// Step 1: Execute anchor query
+	anchorRows, err := p.executeSubquery(ctx, anchorSQL)
+	if err != nil {
+		return
+	}
+	if len(anchorRows) == 0 {
+		schema := p.inferCTESchema(anchorSQL, nil)
+		if schema != nil {
+			p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: nil}
+		}
+		return
+	}
+
+	// Infer schema from anchor results
+	schema := p.inferCTESchema(anchorSQL, anchorRows)
+	if schema == nil {
+		return
+	}
+
+	// Apply column aliases if specified: WITH t(a, b) AS (...)
+	if len(cte.Columns) > 0 && len(cte.Columns) <= len(schema) {
+		anchorRows = renameRowColumns(anchorRows, schema, cte.Columns)
+		for i, name := range cte.Columns {
+			schema[i].Name = name
+		}
+	}
+
+	// Accumulate all results
+	allRows := make([]map[string]any, len(anchorRows))
+	copy(allRows, anchorRows)
+
+	// Derive the expected column names from the schema (aliases already applied).
+	schemaNames := make([]string, len(schema))
+	for i, col := range schema {
+		schemaNames[i] = col.Name
+	}
+
+	// Parse the recursive SQL to get its output column names so we can
+	// positionally rename them to match the CTE schema. Strip table alias
+	// prefixes (e.g., "e.id" → "id") because the Project operator outputs
+	// unqualified column names.
+	var recursiveColNames []string
+	if rpq, err := plansql.Parse(recursiveSQL); err == nil {
+		if ri, err := plansql.ExtractSelect(rpq); err == nil {
+			for _, col := range ri.Columns {
+				name := col.Alias
+				if name == "" {
+					name = cleanExpr(col.Expr)
+				}
+				recursiveColNames = append(recursiveColNames, name)
+			}
+		}
+	}
+
+	// Step 2: Fixed-point iteration
+	workTable := anchorRows
+	for iter := 0; iter < maxRecursiveIterations; iter++ {
+		// Seed the CTE cache with the current work table so the recursive
+		// query's reference to the CTE name resolves to these rows.
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: workTable}
+
+		newRows, err := p.executeSubquery(ctx, recursiveSQL)
+		if err != nil {
+			break
+		}
+		if len(newRows) == 0 {
+			break
+		}
+
+		// Rename output columns to match CTE schema. The recursive SQL may
+		// produce different column names (e.g., "n + 1" vs "n").
+		newRows = renameRowColumnsFromTo(newRows, recursiveColNames, schemaNames)
+
+		allRows = append(allRows, newRows...)
+		workTable = newRows
+	}
+
+	// Store final accumulated results
+	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: allRows}
+}
+
+// splitRecursiveUnion splits a recursive CTE body at the top-level UNION ALL.
+// Returns (anchor, recursive, true) or ("", "", false) if no UNION ALL found.
+func splitRecursiveUnion(sql string) (anchor, recursive string, ok bool) {
+	upper := strings.ToUpper(sql)
+	depth := 0
+	inStr := false
+	for i := 0; i < len(sql); i++ {
+		ch := sql[i]
+		if inStr {
+			if ch == '\'' {
+				if i+1 < len(sql) && sql[i+1] == '\'' {
+					i++ // escaped quote
+				} else {
+					inStr = false
+				}
+			}
+			continue
+		}
+		if ch == '\'' {
+			inStr = true
+			continue
+		}
+		if ch == '(' {
+			depth++
+		} else if ch == ')' {
+			depth--
+		}
+		// Only match UNION ALL at depth 0 (not inside subqueries)
+		if depth == 0 && i+9 < len(upper) {
+			if upper[i:i+5] == "UNION" {
+				rest := strings.TrimSpace(upper[i+5:])
+				if strings.HasPrefix(rest, "ALL") {
+					// Find the exact position after "UNION ALL"
+					unionEnd := i + 5
+					for unionEnd < len(sql) && (sql[unionEnd] == ' ' || sql[unionEnd] == '\t' || sql[unionEnd] == '\n' || sql[unionEnd] == '\r') {
+						unionEnd++
+					}
+					unionEnd += 3 // skip "ALL"
+					anchor = strings.TrimSpace(sql[:i])
+					recursive = strings.TrimSpace(sql[unionEnd:])
+					return anchor, recursive, true
+				}
+			}
+		}
+	}
+	return "", "", false
+}
+
+// renameRowColumnsFromTo remaps row keys from srcNames[i] to dstNames[i].
+func renameRowColumnsFromTo(rows []map[string]any, srcNames, dstNames []string) []map[string]any {
+	if len(rows) == 0 || len(srcNames) == 0 || len(dstNames) == 0 {
+		return rows
+	}
+	needsRename := false
+	for i := range srcNames {
+		if i < len(dstNames) && srcNames[i] != dstNames[i] {
+			needsRename = true
+			break
+		}
+	}
+	if !needsRename {
+		return rows
+	}
+	result := make([]map[string]any, len(rows))
+	for ri, row := range rows {
+		newRow := make(map[string]any, len(row))
+		for k, v := range row {
+			newRow[k] = v
+		}
+		for i, src := range srcNames {
+			if i < len(dstNames) && src != dstNames[i] {
+				newRow[dstNames[i]] = row[src]
+				delete(newRow, src)
+			}
+		}
+		result[ri] = newRow
+	}
+	return result
+}
+
+// renameRowColumns remaps row keys from schema column names to the target aliases.
+func renameRowColumns(rows []map[string]any, schema []parquet.Column, aliases []string) []map[string]any {
+	// Check if rename is needed
+	needsRename := false
+	for i, alias := range aliases {
+		if i < len(schema) && schema[i].Name != alias {
+			needsRename = true
+			break
+		}
+	}
+	if !needsRename {
+		return rows
+	}
+	result := make([]map[string]any, len(rows))
+	for ri, row := range rows {
+		newRow := make(map[string]any, len(row))
+		for i, col := range schema {
+			if i < len(aliases) {
+				newRow[aliases[i]] = row[col.Name]
+			} else {
+				newRow[col.Name] = row[col.Name]
+			}
+		}
+		result[ri] = newRow
+	}
+	return result
 }
 
 // mergeDuplicateScans detects tables scanned multiple times in a query
@@ -1520,7 +1767,7 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 	if node.CTEName != "" && p.cteCache != nil {
 		if mat, ok := p.cteCache[node.CTEName]; ok {
 			source := exec.NewSliceSource(mat.schema, mat.rows)
-			return source, nil, nil, nil
+			return source, nil, &exec.CollectSink{}, nil
 		}
 	}
 
