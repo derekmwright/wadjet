@@ -18,7 +18,9 @@ import (
 
 const (
 	// maxPoolPerClass is the maximum number of batches cached per size class.
-	maxPoolPerClass = 16
+	// Sized to accommodate parallel workers (typically runtime.NumCPU) plus
+	// pipeline depth, avoiding discard-then-reallocate churn.
+	maxPoolPerClass = 32
 )
 
 // BatchPool manages reusable RecordBatch allocations with size-class bucketing.
