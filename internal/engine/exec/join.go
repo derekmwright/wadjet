@@ -3123,17 +3123,40 @@ func setVectorNull(dst *batch.Vector, row int) {
 
 // semiProbeInt64 is the inlined semi-join probe for int64 keys without nulls or bloom.
 // Emits rows whose key EXISTS in the hash table.
+// Hash lookup is fully inlined (no idx.Get call) to eliminate per-row function overhead.
 func semiProbeInt64(idx *intHashTable, data []int64, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	entries := idx.entries
+	mask := idx.mask
 	if inSel != nil {
 		for _, si := range inSel {
-			if _, ok := idx.Get(data[si]); ok {
-				sel = append(sel, si)
+			key := data[si]
+			htIdx := fibHash(key) & mask
+			for {
+				e := &entries[htIdx]
+				if e.key == intHashEmpty {
+					break
+				}
+				if e.key == key {
+					sel = append(sel, si)
+					break
+				}
+				htIdx = (htIdx + 1) & mask
 			}
 		}
 	} else {
 		for i := 0; i < inLen; i++ {
-			if _, ok := idx.Get(data[i]); ok {
-				sel = append(sel, uint32(i))
+			key := data[i]
+			htIdx := fibHash(key) & mask
+			for {
+				e := &entries[htIdx]
+				if e.key == intHashEmpty {
+					break
+				}
+				if e.key == key {
+					sel = append(sel, uint32(i))
+					break
+				}
+				htIdx = (htIdx + 1) & mask
 			}
 		}
 	}
@@ -3142,16 +3165,38 @@ func semiProbeInt64(idx *intHashTable, data []int64, inSel []uint32, inLen int, 
 
 // semiProbeInt32 is the inlined semi-join probe for int32 keys without nulls or bloom.
 func semiProbeInt32(idx *intHashTable, data []int32, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	entries := idx.entries
+	mask := idx.mask
 	if inSel != nil {
 		for _, si := range inSel {
-			if _, ok := idx.Get(int64(data[si])); ok {
-				sel = append(sel, si)
+			key := int64(data[si])
+			htIdx := fibHash(key) & mask
+			for {
+				e := &entries[htIdx]
+				if e.key == intHashEmpty {
+					break
+				}
+				if e.key == key {
+					sel = append(sel, si)
+					break
+				}
+				htIdx = (htIdx + 1) & mask
 			}
 		}
 	} else {
 		for i := 0; i < inLen; i++ {
-			if _, ok := idx.Get(int64(data[i])); ok {
-				sel = append(sel, uint32(i))
+			key := int64(data[i])
+			htIdx := fibHash(key) & mask
+			for {
+				e := &entries[htIdx]
+				if e.key == intHashEmpty {
+					break
+				}
+				if e.key == key {
+					sel = append(sel, uint32(i))
+					break
+				}
+				htIdx = (htIdx + 1) & mask
 			}
 		}
 	}
@@ -3161,15 +3206,45 @@ func semiProbeInt32(idx *intHashTable, data []int32, inSel []uint32, inLen int, 
 // antiProbeInt64 is the inlined anti-join probe for int64 keys without nulls or bloom.
 // Emits rows whose key does NOT exist in the hash table.
 func antiProbeInt64(idx *intHashTable, data []int64, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	entries := idx.entries
+	mask := idx.mask
 	if inSel != nil {
 		for _, si := range inSel {
-			if _, ok := idx.Get(data[si]); !ok {
+			key := data[si]
+			htIdx := fibHash(key) & mask
+			found := false
+			for {
+				e := &entries[htIdx]
+				if e.key == intHashEmpty {
+					break
+				}
+				if e.key == key {
+					found = true
+					break
+				}
+				htIdx = (htIdx + 1) & mask
+			}
+			if !found {
 				sel = append(sel, si)
 			}
 		}
 	} else {
 		for i := 0; i < inLen; i++ {
-			if _, ok := idx.Get(data[i]); !ok {
+			key := data[i]
+			htIdx := fibHash(key) & mask
+			found := false
+			for {
+				e := &entries[htIdx]
+				if e.key == intHashEmpty {
+					break
+				}
+				if e.key == key {
+					found = true
+					break
+				}
+				htIdx = (htIdx + 1) & mask
+			}
+			if !found {
 				sel = append(sel, uint32(i))
 			}
 		}
@@ -3179,15 +3254,45 @@ func antiProbeInt64(idx *intHashTable, data []int64, inSel []uint32, inLen int, 
 
 // antiProbeInt32 is the inlined anti-join probe for int32 keys without nulls or bloom.
 func antiProbeInt32(idx *intHashTable, data []int32, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	entries := idx.entries
+	mask := idx.mask
 	if inSel != nil {
 		for _, si := range inSel {
-			if _, ok := idx.Get(int64(data[si])); !ok {
+			key := int64(data[si])
+			htIdx := fibHash(key) & mask
+			found := false
+			for {
+				e := &entries[htIdx]
+				if e.key == intHashEmpty {
+					break
+				}
+				if e.key == key {
+					found = true
+					break
+				}
+				htIdx = (htIdx + 1) & mask
+			}
+			if !found {
 				sel = append(sel, si)
 			}
 		}
 	} else {
 		for i := 0; i < inLen; i++ {
-			if _, ok := idx.Get(int64(data[i])); !ok {
+			key := int64(data[i])
+			htIdx := fibHash(key) & mask
+			found := false
+			for {
+				e := &entries[htIdx]
+				if e.key == intHashEmpty {
+					break
+				}
+				if e.key == key {
+					found = true
+					break
+				}
+				htIdx = (htIdx + 1) & mask
+			}
+			if !found {
 				sel = append(sel, uint32(i))
 			}
 		}
