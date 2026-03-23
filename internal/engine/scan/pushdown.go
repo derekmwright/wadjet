@@ -66,6 +66,12 @@ func CanPruneRowGroup(pred StatsPredicate, stats pqt.RowGroupStats) bool {
 	}
 }
 
+// CompareValues compares two typed values (int32, int64, float32, float64, string).
+// Returns -1, 0, or 1. Exported for use by dynamic filter row-group pruning.
+func CompareValues(a, b any) int {
+	return compareValues(a, b)
+}
+
 func compareValues(a, b any) int {
 	if a == nil && b == nil {
 		return 0

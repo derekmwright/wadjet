@@ -523,6 +523,13 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 				}
 			}
 
+			// Dynamic min/max range row group pruning
+			if !pruned && len(inner.dynamicFilter) > 0 {
+				if canRangePruneRowGroup(inner.dynamicFilter, stats) {
+					pruned = true
+				}
+			}
+
 			if pruned {
 				rowOffset += rg.NumRows()
 				continue
@@ -602,6 +609,33 @@ func isIntType(v any) bool {
 	default:
 		return false
 	}
+}
+
+// canRangePruneRowGroup checks whether a row group can be skipped based on
+// dynamic min/max range filters from the hash join build side. A row group
+// is pruned if its value range has no overlap with the build-side range for
+// any filter column.
+func canRangePruneRowGroup(ranges []exec.DynamicRange, stats parquet.RowGroupStats) bool {
+	for _, r := range ranges {
+		colStats, ok := stats.Columns[r.Column]
+		if !ok || !colStats.HasStats {
+			continue
+		}
+		if colStats.MinValue == nil || colStats.MaxValue == nil {
+			continue
+		}
+		if colStats.NullCount == stats.NumRows {
+			continue
+		}
+		// No overlap: row group max < build min, or row group min > build max
+		if scan.CompareValues(colStats.MaxValue, r.MinValue) < 0 {
+			return true
+		}
+		if scan.CompareValues(colStats.MinValue, r.MaxValue) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // rgWorker processes row group work units in parallel. Each worker

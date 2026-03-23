@@ -1123,7 +1123,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	var wg sync.WaitGroup
 
 	for pid := 0; pid < numPartitions; pid++ {
-		data := partBufs[pid].Bytes()
+		data := CompressShuffleData(partBufs[pid].Bytes())
 		if len(data) <= 10 { // header only, no chunks
 			continue
 		}
@@ -1493,6 +1493,11 @@ func (e *Executor) readInputFilesBatches(ctx context.Context, bucket string, fil
 				return
 			}
 
+			data, decErr := DecompressShuffleData(data)
+			if decErr != nil {
+				results[idx] = result{err: decErr}
+				return
+			}
 			if isShuffleFormat(data) {
 				batches, err := shuffleReadBatches(data)
 				results[idx] = result{batches: batches, err: err}
@@ -1612,7 +1617,9 @@ func (e *Executor) serializeBatches(batches []*batch.RecordBatch) ([]byte, error
 	if len(data) >= 8 {
 		binary.LittleEndian.PutUint32(data[4:8], sw.numChunks)
 	}
-	return data, nil
+
+	// Compress for inter-node transfer
+	return CompressShuffleData(data), nil
 }
 
 // batchToParquetRows converts a RecordBatch directly to parquet.Row values

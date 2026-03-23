@@ -1053,6 +1053,12 @@ func (c *Coordinator) readColumnFloat64(filePath, column string) ([]float64, err
 		return nil, err
 	}
 
+	// Decompress if compressed shuffle format
+	data, err = decompressShuffleData(data)
+	if err != nil {
+		return nil, err
+	}
+
 	// Auto-detect format: binary shuffle (WSHF) or Parquet (PAR1)
 	var batches []*batch.RecordBatch
 	if len(data) >= 4 && string(data[:4]) == "WSHF" {
@@ -1846,10 +1852,17 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 
 		var batches []*batch.RecordBatch
 
+		// Decompress if compressed shuffle format
+		inlineData, decErr := decompressShuffleData(r.InlineData)
+		if decErr != nil {
+			c.logger.Debug("shuffle decompress error", "err", decErr)
+			continue
+		}
+
 		// Auto-detect format: binary shuffle (WSHF) or Parquet (PAR1)
-		if len(r.InlineData) >= 4 && string(r.InlineData[:4]) == "WSHF" {
+		if len(inlineData) >= 4 && string(inlineData[:4]) == "WSHF" {
 			var err error
-			batches, err = readShuffleBatches(r.InlineData)
+			batches, err = readShuffleBatches(inlineData)
 			if err != nil {
 				c.logger.Debug("shuffle read error", "err", err)
 				continue
@@ -1861,7 +1874,7 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 				}
 			}
 		} else {
-			reader, err := parquet.NewReader(bytes.NewReader(r.InlineData), int64(len(r.InlineData)))
+			reader, err := parquet.NewReader(bytes.NewReader(inlineData), int64(len(inlineData)))
 			if err != nil {
 				c.logger.Debug("parquet reader error", "err", err)
 				continue
@@ -1902,6 +1915,12 @@ func ReadResultFiles(ctx context.Context, store objstore.Store, bucket string, p
 		}
 		data, err := io.ReadAll(rc)
 		rc.Close()
+		if err != nil {
+			continue
+		}
+
+		// Decompress if compressed shuffle format
+		data, err = decompressShuffleData(data)
 		if err != nil {
 			continue
 		}
