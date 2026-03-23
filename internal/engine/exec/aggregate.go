@@ -565,6 +565,12 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				if h.strGroupIndex == nil {
 					h.strGroupIndex = newStrHashTable(htInitSize)
 				}
+				if h.strGroupStates == nil {
+					h.strGroupStates = make([]*groupState, 0, htInitSize)
+					h.keys = make([][]any, 0, htInitSize)
+					h.serializedKeys = make([]string, 0, htInitSize)
+					h.gsPool.preAlloc(htInitSize)
+				}
 				if h.intFlatAccs == nil {
 					if len(h.strGroupStates) > 0 {
 						h.rebuildFlatAccums(b)
