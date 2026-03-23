@@ -705,12 +705,11 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			} else {
 				key = gkVec.Int64Data[row]
 			}
-			gsIdx, ok := intIdx.Get(key)
+			newIdx := int32(len(h.intGroupStates))
+			gsIdx, ok := intIdx.GetOrInsert(key, newIdx)
 			if ok {
 				gi[si] = gsIdx
 			} else {
-				newIdx := int32(len(h.intGroupStates))
-				intIdx.Put(key, newIdx)
 				gs := h.gsPool.alloc()
 				gs.intKey = key
 				h.intGroupStates = append(h.intGroupStates, gs)
@@ -735,12 +734,11 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			} else {
 				key = gkVec.Int64Data[row]
 			}
-			gsIdx, ok := intIdx.Get(key)
+			newIdx := int32(len(h.intGroupStates))
+			gsIdx, ok := intIdx.GetOrInsert(key, newIdx)
 			if ok {
 				gi[row] = gsIdx
 			} else {
-				newIdx := int32(len(h.intGroupStates))
-				intIdx.Put(key, newIdx)
 				gs := h.gsPool.alloc()
 				gs.intKey = key
 				h.intGroupStates = append(h.intGroupStates, gs)
@@ -960,7 +958,9 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 		}
 
 		key := packKeyInt64(h.keyBuf)
-		if gsIdx, ok := h.intGroupIndex.Get(key); ok {
+		newIdx := int32(len(h.intGroupStates))
+		gsIdx, ok := h.intGroupIndex.GetOrInsert(key, newIdx)
+		if ok {
 			gs := h.intGroupStates[gsIdx]
 			for i := range h.Aggs {
 				updater := h.batchUpdaters[i]
@@ -989,8 +989,6 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 		gs.keyValues = keyVals
 		gs.accs = make([]kernel.Accumulator, len(h.Aggs))
 
-		newIdx := int32(len(h.intGroupStates))
-		h.intGroupIndex.Put(key, newIdx)
 		h.intGroupStates = append(h.intGroupStates, gs)
 		h.compactKeys = append(h.compactKeys, string(h.keyBuf))
 		h.keys = append(h.keys, keyVals)
