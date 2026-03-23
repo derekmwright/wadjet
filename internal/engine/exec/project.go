@@ -51,7 +51,8 @@ type ProjectColumn struct {
 // Project is a UnaryOperator that selects and computes columns.
 type Project struct {
 	Projections  []ProjectColumn
-	cachedSchema []parquet.Column // reused across batches after first resolution
+	cachedSchema []parquet.Column   // reused across batches after first resolution
+	outPool      *batch.BatchPool   // output batch pool — eliminates per-batch allocation
 }
 
 func NewProject(projections []ProjectColumn) *Project {
@@ -86,7 +87,13 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 	}
 
 	activeLen := in.ActiveLen()
-	out := batch.NewRecordBatch(schema, activeLen)
+	// Use pooled output batch to avoid per-batch allocation. Downstream sinks
+	// that store batches (Sort) call Detach() which unlinks from the pool,
+	// while sinks that only read (Aggregate) allow proper pool recycling.
+	if p.outPool == nil {
+		p.outPool = batch.NewBatchPool(schema, batch.DefaultBatchSize)
+	}
+	out := p.outPool.GetForSize(activeLen)
 
 	// Use typed evaluation paths per-column to avoid interface{} boxing.
 	// This applies to both selection-vector and non-sel paths.
@@ -152,7 +159,7 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 func (p *Project) Close() error { return nil }
 
 // Clone returns a new Project that shares the same (immutable) projections.
-// Project has no per-instance scratch buffers, so sharing is safe.
+// Each clone gets its own pool (created lazily on first Execute).
 func (p *Project) Clone() UnaryOperator {
 	return &Project{Projections: p.Projections}
 }

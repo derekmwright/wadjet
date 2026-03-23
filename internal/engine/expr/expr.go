@@ -134,6 +134,8 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 
 // EvalFloat64 reads the column value as float64 without any boxing.
 // Returns (0, false) if null or column not found.
+// Uses cached column type to dispatch directly to the typed data slice,
+// avoiding the extra function call and redundant type switch in GetNumericFloat64.
 func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 	if !e.resolved {
 		e.idx = b.ColumnIndex(e.Name)
@@ -149,7 +151,24 @@ func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return 0, false
 	}
-	return b.Columns[e.idx].GetNumericFloat64(row)
+	v := b.Columns[e.idx]
+	if v.Nulls.IsNullFast(row) {
+		return 0, false
+	}
+	switch e.typ {
+	case batch.TypeFloat64:
+		return v.Float64Data[row], true
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		return float64(v.Int64Data[row]), true
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return float64(v.Int32Data[row]), true
+	case batch.TypeFloat32:
+		return float64(v.Float32Data[row]), true
+	case batch.TypeDecimal:
+		return v.DecimalData.Data[row].ToFloat64(v.DecimalData.Scale), true
+	default:
+		return 0, false
+	}
 }
 
 // EvalString reads the column value as string without boxing.
@@ -188,7 +207,7 @@ func (e *ColRef) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 		return 0, false
 	}
 	v := b.Columns[e.idx]
-	if v.Nulls.IsNull(row) {
+	if v.Nulls.IsNullFast(row) {
 		return 0, false
 	}
 	switch e.typ {
@@ -196,9 +215,12 @@ func (e *ColRef) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 		return v.Int64Data[row], true
 	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 		return int64(v.Int32Data[row]), true
+	case batch.TypeFloat64:
+		return int64(v.Float64Data[row]), true
+	case batch.TypeFloat32:
+		return int64(v.Float32Data[row]), true
 	default:
-		f, ok := v.GetNumericFloat64(row)
-		return int64(f), ok
+		return 0, false
 	}
 }
 
@@ -235,6 +257,37 @@ type Float64Expr interface {
 // Int64Expr evaluates to int64 without boxing.
 type Int64Expr interface {
 	EvalInt64(b *batch.RecordBatch, row int) (int64, bool)
+}
+
+// arithOp is a pre-resolved opcode for arithmetic operations.
+// Using an integer switch instead of string comparison eliminates
+// per-row string matching in BinOpFloat64/BinOpInt64 hot paths.
+type arithOp uint8
+
+const (
+	arithAdd arithOp = iota
+	arithSub
+	arithMul
+	arithDiv
+	arithMod
+	arithUnknown
+)
+
+func resolveArithOp(op string) arithOp {
+	switch op {
+	case "+":
+		return arithAdd
+	case "-":
+		return arithSub
+	case "*":
+		return arithMul
+	case "/":
+		return arithDiv
+	case "%":
+		return arithMod
+	default:
+		return arithUnknown
+	}
 }
 
 // --- Interval type ---
@@ -325,9 +378,20 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 }
 
 // BinOpFloat64 is a typed binary op that operates on float64 without boxing.
+// Uses a pre-resolved arithOp opcode for the hot EvalFloat64 path to avoid
+// per-row string comparison on the Op field.
 type BinOpFloat64 struct {
 	Left, Right Float64Expr
 	Op          string
+	opCode      arithOp
+	opResolved  bool
+}
+
+func (e *BinOpFloat64) resolveOp() {
+	if !e.opResolved {
+		e.opCode = resolveArithOp(e.Op)
+		e.opResolved = true
+	}
 }
 
 func (e *BinOpFloat64) Eval(b *batch.RecordBatch, row int) any {
@@ -347,19 +411,23 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 	if !rok {
 		return 0, false
 	}
-	switch e.Op {
-	case "+":
+	if !e.opResolved {
+		e.opCode = resolveArithOp(e.Op)
+		e.opResolved = true
+	}
+	switch e.opCode {
+	case arithAdd:
 		return lf + rf, true
-	case "-":
+	case arithSub:
 		return lf - rf, true
-	case "*":
+	case arithMul:
 		return lf * rf, true
-	case "/":
+	case arithDiv:
 		if rf == 0 {
 			return 0, false
 		}
 		return lf / rf, true
-	case "%":
+	case arithMod:
 		if rf == 0 {
 			return 0, false
 		}
@@ -370,9 +438,12 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 }
 
 // BinOpInt64 is a typed binary op that operates on int64 without boxing.
+// Uses a pre-resolved arithOp opcode for the hot EvalInt64 path.
 type BinOpInt64 struct {
 	Left, Right Int64Expr
 	Op          string
+	opCode      arithOp
+	opResolved  bool
 }
 
 func (e *BinOpInt64) Eval(b *batch.RecordBatch, row int) any {
@@ -392,19 +463,23 @@ func (e *BinOpInt64) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 	if !rok {
 		return 0, false
 	}
-	switch e.Op {
-	case "+":
+	if !e.opResolved {
+		e.opCode = resolveArithOp(e.Op)
+		e.opResolved = true
+	}
+	switch e.opCode {
+	case arithAdd:
 		return lv + rv, true
-	case "-":
+	case arithSub:
 		return lv - rv, true
-	case "*":
+	case arithMul:
 		return lv * rv, true
-	case "/":
+	case arithDiv:
 		if rv == 0 {
 			return 0, false
 		}
 		return lv / rv, true
-	case "%":
+	case arithMod:
 		if rv == 0 {
 			return 0, false
 		}
