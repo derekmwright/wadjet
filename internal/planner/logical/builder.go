@@ -36,14 +36,30 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		}
 
 		for _, join := range info.Joins {
-			right, err := resolveTableOrCTE(plansql.TableRef{
-				Name:  join.RightTable,
-				Alias: join.RightAlias,
-			}, ctes)
-			if err != nil {
-				return nil, err
+			if join.Lateral && strings.HasPrefix(join.RightTable, "(") {
+				// LATERAL subquery: decorrelate by extracting correlated
+				// WHERE predicates and moving them to the join condition.
+				right, joinCond, err := buildLateralSubquery(plan, join, ctes)
+				if err != nil {
+					return nil, err
+				}
+				// Cross join with correlated predicates → inner join
+				// (cross join skips key parsing in the physical planner)
+				jt := join.Type
+				if joinCond != "" && strings.EqualFold(strings.TrimSpace(jt), "cross join") {
+					jt = "join"
+				}
+				plan = NewJoin(plan, right, jt, joinCond)
+			} else {
+				right, err := resolveTableOrCTE(plansql.TableRef{
+					Name:  join.RightTable,
+					Alias: join.RightAlias,
+				}, ctes)
+				if err != nil {
+					return nil, err
+				}
+				plan = NewJoin(plan, right, join.Type, join.Condition)
 			}
-			plan = NewJoin(plan, right, join.Type, join.Condition)
 		}
 	} else if len(info.Tables) > 0 {
 		var err error
@@ -837,4 +853,245 @@ func getOutputColNames(info *plansql.SelectInfo) []string {
 		}
 	}
 	return names
+}
+
+// buildLateralSubquery decorrelates a LATERAL subquery join by:
+// 1. Collecting left-side table aliases
+// 2. Parsing the subquery and splitting WHERE into correlated vs local predicates
+// 3. Building the inner plan with only local predicates
+// 4. Returning the inner plan and the combined join condition
+func buildLateralSubquery(left *Node, join plansql.JoinInfo, ctes []plansql.CTEDef) (*Node, string, error) {
+	// Collect left-side table aliases to detect correlated references
+	leftAliases := collectLogicalAliases(left)
+
+	// Parse the subquery
+	inner := join.RightTable[1 : len(join.RightTable)-1]
+	parsed, err := plansql.Parse(inner)
+	if err != nil {
+		return nil, "", fmt.Errorf("parsing LATERAL subquery: %w", err)
+	}
+	subInfo, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		return nil, "", fmt.Errorf("extracting SELECT from LATERAL subquery: %w", err)
+	}
+
+	// Split WHERE clause into correlated and local predicates
+	var correlatedParts []string
+	var localParts []string
+	if subInfo.Where != "" {
+		parts := splitANDPredicates(subInfo.Where)
+		for _, p := range parts {
+			if referencesAliases(p, leftAliases) {
+				correlatedParts = append(correlatedParts, p)
+			} else {
+				localParts = append(localParts, p)
+			}
+		}
+	}
+
+	// Rebuild the inner plan with only local WHERE predicates.
+	// Always clear WhereExpr — it's the AST for the original full WHERE and
+	// would conflict with the modified Where string.
+	subInfo.WhereExpr = nil
+	if len(localParts) > 0 {
+		subInfo.Where = strings.Join(localParts, " AND ")
+	} else {
+		subInfo.Where = ""
+	}
+
+	// For aggregated LATERAL subqueries, add the correlated inner column
+	// to GROUP BY so the aggregate applies per-group rather than globally.
+	// e.g., SELECT COUNT(*) FROM t WHERE t.id = o.id
+	//     → SELECT t.id, COUNT(*) FROM t GROUP BY t.id
+	hasAgg := false
+	for _, col := range subInfo.Columns {
+		if col.IsAgg {
+			hasAgg = true
+			break
+		}
+	}
+	if hasAgg && len(correlatedParts) > 0 {
+		for _, cp := range correlatedParts {
+			innerCol := extractInnerColumn(cp, leftAliases)
+			if innerCol != "" {
+				// Add to GROUP BY if not already present
+				found := false
+				for _, g := range subInfo.GroupBy {
+					if strings.EqualFold(g, innerCol) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					subInfo.GroupBy = append(subInfo.GroupBy, innerCol)
+				}
+			}
+		}
+	}
+
+	right, err := BuildFromSelectWithCTEs(subInfo, ctes)
+	if err != nil {
+		return nil, "", fmt.Errorf("building LATERAL subquery plan: %w", err)
+	}
+	if join.RightAlias != "" {
+		setSubtreeAlias(right, join.RightAlias)
+	}
+
+	// Normalize correlated equalities so the outer reference is on the left
+	// and the inner reference on the right. This ensures parseJoinKeys in
+	// the physical planner assigns probe keys (left child = outer table)
+	// and build keys (right child = inner table) correctly.
+	for i, part := range correlatedParts {
+		correlatedParts[i] = normalizeCorrelatedEquality(part, leftAliases)
+	}
+
+	// Build the join condition from correlated predicates + original ON clause
+	var condParts []string
+	condParts = append(condParts, correlatedParts...)
+	if join.Condition != "" && !strings.EqualFold(strings.TrimSpace(join.Condition), "true") {
+		condParts = append(condParts, join.Condition)
+	}
+	joinCond := strings.Join(condParts, " AND ")
+
+	return right, joinCond, nil
+}
+
+// collectLogicalAliases collects table names and aliases from scan nodes.
+func collectLogicalAliases(n *Node) map[string]bool {
+	aliases := make(map[string]bool)
+	var walk func(n *Node)
+	walk = func(n *Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == NodeScan {
+			aliases[strings.ToLower(n.TableName)] = true
+			if n.TableAlias != "" {
+				aliases[strings.ToLower(n.TableAlias)] = true
+			}
+		}
+		for _, c := range n.Children {
+			walk(c)
+		}
+	}
+	walk(n)
+	return aliases
+}
+
+// splitANDPredicates splits a WHERE expression on top-level AND boundaries,
+// respecting parentheses nesting.
+func splitANDPredicates(where string) []string {
+	var parts []string
+	depth := 0
+	inStr := false
+	start := 0
+	upper := strings.ToUpper(where)
+
+	for i := 0; i < len(where); i++ {
+		ch := where[i]
+		if inStr {
+			if ch == '\'' {
+				if i+1 < len(where) && where[i+1] == '\'' {
+					i++
+				} else {
+					inStr = false
+				}
+			}
+			continue
+		}
+		if ch == '\'' {
+			inStr = true
+			continue
+		}
+		if ch == '(' {
+			depth++
+		} else if ch == ')' {
+			depth--
+		}
+		if depth == 0 && i+4 <= len(upper) && upper[i:i+3] == "AND" {
+			// Ensure it's a word boundary (not part of an identifier)
+			before := i == 0 || where[i-1] == ' ' || where[i-1] == ')'
+			after := i+3 >= len(where) || where[i+3] == ' ' || where[i+3] == '('
+			if before && after {
+				parts = append(parts, strings.TrimSpace(where[start:i]))
+				start = i + 3
+			}
+		}
+	}
+	if start < len(where) {
+		parts = append(parts, strings.TrimSpace(where[start:]))
+	}
+	return parts
+}
+
+// referencesAliases returns true if the expression contains a qualified
+// column reference (alias.column) where alias is in the given set.
+func referencesAliases(expr string, aliases map[string]bool) bool {
+	lower := strings.ToLower(expr)
+	for alias := range aliases {
+		// Look for alias.column pattern, ensuring it's a word boundary
+		// (not a substring of an identifier like "o" matching "order_id")
+		prefix := alias + "."
+		idx := strings.Index(lower, prefix)
+		if idx >= 0 {
+			// Check that the character before is not alphanumeric/underscore
+			if idx == 0 || !isIdentChar(lower[idx-1]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isIdentChar returns true if the byte is a valid identifier character.
+func isIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+// extractInnerColumn extracts the inner (non-outer) column from a correlated
+// equality predicate like "order_id = o.id". Returns the unqualified inner column.
+func extractInnerColumn(expr string, outerAliases map[string]bool) string {
+	eqIdx := strings.Index(expr, "=")
+	if eqIdx < 0 {
+		return ""
+	}
+	if eqIdx > 0 && (expr[eqIdx-1] == '!' || expr[eqIdx-1] == '<' || expr[eqIdx-1] == '>') {
+		return ""
+	}
+	left := strings.TrimSpace(expr[:eqIdx])
+	right := strings.TrimSpace(expr[eqIdx+1:])
+
+	if referencesAliases(left, outerAliases) {
+		return right
+	}
+	if referencesAliases(right, outerAliases) {
+		return left
+	}
+	return ""
+}
+
+// normalizeCorrelatedEquality ensures the outer reference is on the left
+// side of an equality predicate. This is needed so parseJoinKeys assigns
+// probe keys to the outer (left) child and build keys to the inner (right).
+func normalizeCorrelatedEquality(expr string, outerAliases map[string]bool) string {
+	eqIdx := strings.Index(expr, "=")
+	if eqIdx < 0 {
+		return expr
+	}
+	// Skip != and >=, <=
+	if eqIdx > 0 && (expr[eqIdx-1] == '!' || expr[eqIdx-1] == '<' || expr[eqIdx-1] == '>') {
+		return expr
+	}
+
+	left := strings.TrimSpace(expr[:eqIdx])
+	right := strings.TrimSpace(expr[eqIdx+1:])
+
+	leftIsOuter := referencesAliases(left, outerAliases)
+	rightIsOuter := referencesAliases(right, outerAliases)
+
+	// If inner is on left and outer is on right, swap
+	if rightIsOuter && !leftIsOuter {
+		return right + " = " + left
+	}
+	return expr
 }
