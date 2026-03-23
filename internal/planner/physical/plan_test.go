@@ -1044,3 +1044,95 @@ func TestShouldRoutePipeline(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldSplitScan(t *testing.T) {
+	makeFiles := func(n int) []string {
+		files := make([]string, n)
+		for i := range files {
+			files[i] = fmt.Sprintf("file-%d.parquet", i)
+		}
+		return files
+	}
+
+	tests := []struct {
+		name      string
+		stages    []Stage
+		workers   int
+		wantSplit bool
+	}{
+		{
+			name:      "single worker never splits",
+			stages:    []Stage{{Type: "scan", EstimatedBytes: 1 << 30, ScanFiles: makeFiles(10)}},
+			workers:   1,
+			wantSplit: false,
+		},
+		{
+			name:      "small scan not worth splitting",
+			stages:    []Stage{{Type: "scan", EstimatedBytes: 100 << 20, ScanFiles: makeFiles(4)}},
+			workers:   3,
+			wantSplit: false, // 100 MB < 256 MB threshold
+		},
+		{
+			name:      "too few files not worth splitting",
+			stages:    []Stage{{Type: "scan", EstimatedBytes: 512 << 20, ScanFiles: makeFiles(2)}},
+			workers:   3,
+			wantSplit: false, // only 2 files
+		},
+		{
+			name: "large scan with enough files → split",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 7500 << 20, ScanFiles: makeFiles(96)},
+				{Type: "shuffle"},
+				{Type: "hash_join", JoinType: "inner"},
+			},
+			workers:   3,
+			wantSplit: true,
+		},
+		{
+			name: "multiple scan stages totaled under threshold",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 100 << 20, ScanFiles: makeFiles(3)},
+				{Type: "scan", EstimatedBytes: 100 << 20, ScanFiles: makeFiles(2)},
+			},
+			workers:   3,
+			wantSplit: false, // 200 MB < 256 MB threshold
+		},
+		{
+			name: "multiple large scan stages → split",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 7500 << 20, ScanFiles: makeFiles(96)},
+				{Type: "scan", EstimatedBytes: 1700 << 20, ScanFiles: makeFiles(24)},
+			},
+			workers:   3,
+			wantSplit: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ShouldSplitScan(tt.stages, tt.workers)
+			if got != tt.wantSplit {
+				t.Errorf("ShouldSplitScan() = %v, want %v", got, tt.wantSplit)
+			}
+		})
+	}
+}
+
+func TestExtractScanStages(t *testing.T) {
+	stages := []Stage{
+		{ID: "scan-0", Type: "scan", TableName: "lineitem"},
+		{ID: "scan-1", Type: "scan", TableName: "orders"},
+		{ID: "shuffle-0", Type: "shuffle"},
+		{ID: "hash_join-0", Type: "hash_join"},
+		{ID: "aggregate-0", Type: "aggregate"},
+	}
+	scans := ExtractScanStages(stages)
+	if len(scans) != 2 {
+		t.Fatalf("expected 2 scan stages, got %d", len(scans))
+	}
+	if scans[0].TableName != "lineitem" {
+		t.Errorf("scan[0].TableName = %q, want %q", scans[0].TableName, "lineitem")
+	}
+	if scans[1].TableName != "orders" {
+		t.Errorf("scan[1].TableName = %q, want %q", scans[1].TableName, "orders")
+	}
+}

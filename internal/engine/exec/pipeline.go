@@ -398,6 +398,32 @@ func (d *DualSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 func (d *DualSource) Close() error { return nil }
 
+// BatchSource is a source that yields pre-loaded record batches.
+// Used by scan-split pipeline mode where scan I/O is distributed across
+// workers and the compute pipeline reads from materialized scan results.
+type BatchSource struct {
+	batches []*batch.RecordBatch
+	idx     int
+}
+
+// NewBatchSource creates a source from pre-loaded record batches.
+func NewBatchSource(batches []*batch.RecordBatch) *BatchSource {
+	return &BatchSource{batches: batches}
+}
+
+func (s *BatchSource) Init(_ context.Context) error { return nil }
+
+func (s *BatchSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.idx >= len(s.batches) {
+		return nil, nil
+	}
+	b := s.batches[s.idx]
+	s.idx++
+	return b, nil
+}
+
+func (s *BatchSource) Close() error { return nil }
+
 // SliceSource is a simple Source that yields batches from a slice of rows.
 type SliceSource struct {
 	schema []parquet.Column
