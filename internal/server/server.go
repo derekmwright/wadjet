@@ -256,7 +256,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle DML (INSERT/UPDATE/DELETE)
-	if parsed.Type == plansql.QueryInsert || parsed.Type == plansql.QueryUpdate || parsed.Type == plansql.QueryDelete {
+	if parsed.Type == plansql.QueryInsert || parsed.Type == plansql.QueryUpdate || parsed.Type == plansql.QueryDelete || parsed.Type == plansql.QueryMerge {
 		s.handleDML(w, r, req.SQL, start)
 		return
 	}

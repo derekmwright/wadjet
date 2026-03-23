@@ -39,8 +39,10 @@ func (db *DB) Execute(ctx context.Context, sql string) (*ExecResult, error) {
 		return db.executeDelete(ctx, parsed.Delete)
 	case plansql.QueryUpdate:
 		return db.executeUpdate(ctx, parsed.Update)
+	case plansql.QueryMerge:
+		return db.executeMerge(ctx, parsed.Merge)
 	default:
-		return nil, fmt.Errorf("Execute only supports INSERT/UPDATE/DELETE, got %v", parsed.Type)
+		return nil, fmt.Errorf("Execute only supports INSERT/UPDATE/DELETE/MERGE, got %v", parsed.Type)
 	}
 }
 
@@ -239,6 +241,383 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 		RowsAffected: totalUpdated,
 		Command:      "UPDATE",
 	}, nil
+}
+
+// executeMerge handles MERGE INTO target USING source ON condition WHEN ...
+// It reads both target and source tables, joins on the ON condition, then applies
+// WHEN MATCHED (UPDATE/DELETE) and WHEN NOT MATCHED (INSERT) clauses.
+func (db *DB) executeMerge(ctx context.Context, info *plansql.MergeInfo) (*ExecResult, error) {
+	targetMeta, err := db.catalog.GetTable(ctx, info.Target)
+	if err != nil {
+		return nil, fmt.Errorf("target table %q: %w", info.Target, err)
+	}
+
+	// Read all source rows via a query
+	sourceSQL := fmt.Sprintf("SELECT * FROM %s", info.Source)
+	sourceResult, err := db.Query(ctx, sourceSQL)
+	if err != nil {
+		return nil, fmt.Errorf("reading source %q: %w", info.Source, err)
+	}
+
+	// Read all target rows via a query
+	targetSQL := fmt.Sprintf("SELECT * FROM %s", info.Target)
+	targetResult, err := db.Query(ctx, targetSQL)
+	if err != nil {
+		return nil, fmt.Errorf("reading target %q: %w", info.Target, err)
+	}
+
+	// Build type map for value conversion in SET/VALUES clauses
+	typeMap := make(map[string]parquet.TypeID, len(targetMeta.Schema.Columns))
+	for _, col := range targetMeta.Schema.Columns {
+		typeMap[col.Name] = col.Type
+	}
+
+	targetAlias := info.TargetAlias
+	if targetAlias == "" {
+		targetAlias = info.Target
+	}
+	sourceAlias := info.SourceAlias
+	if sourceAlias == "" {
+		sourceAlias = info.Source
+	}
+
+	// Parse ON condition into equality key pairs for row matching
+	onKeys, err := parseOnKeys(info.OnCondition, targetAlias, sourceAlias)
+	if err != nil {
+		return nil, fmt.Errorf("parsing ON condition: %w", err)
+	}
+
+	// For each source row, check if it matches any target row
+	matchedTargetIndices := make(map[int]bool)
+	var rowsAffected int64
+	var insertRows []map[string]any
+	var deleteMarkers []catalog.DeleteMarker
+	var updateRows []map[string]any
+
+	for _, srcRow := range sourceResult.Rows {
+		matched := false
+		for tIdx, tgtRow := range targetResult.Rows {
+			if matchByKeys(srcRow, tgtRow, onKeys) {
+				matched = true
+				merged := buildMergedRow(srcRow, sourceAlias, tgtRow, targetAlias)
+				// Apply first matching WHEN MATCHED clause
+				for _, wc := range info.WhenClauses {
+					if !wc.Matched {
+						continue
+					}
+					switch strings.ToUpper(wc.Action) {
+					case "UPDATE":
+						matchedTargetIndices[tIdx] = true
+						updatedRow := make(map[string]any, len(tgtRow))
+						for k, v := range tgtRow {
+							updatedRow[k] = v
+						}
+						if err := applySetClauses(updatedRow, wc.SQL, merged, typeMap); err != nil {
+							return nil, fmt.Errorf("applying SET: %w", err)
+						}
+						updateRows = append(updateRows, updatedRow)
+						rowsAffected++
+					case "DELETE":
+						matchedTargetIndices[tIdx] = true
+						rowsAffected++
+					}
+					break
+				}
+			}
+		}
+		if !matched {
+			for _, wc := range info.WhenClauses {
+				if wc.Matched {
+					continue
+				}
+				if strings.ToUpper(wc.Action) == "INSERT" {
+					newRow, err := buildInsertRow(wc.SQL, srcRow, sourceAlias, typeMap)
+					if err != nil {
+						return nil, fmt.Errorf("building INSERT row: %w", err)
+					}
+					insertRows = append(insertRows, newRow)
+					rowsAffected++
+				}
+				break
+			}
+		}
+	}
+
+	// Delete all matched target rows (they'll be re-inserted if UPDATE, or dropped if DELETE)
+	if len(matchedTargetIndices) > 0 {
+		// We need to find the actual file positions of matched target rows.
+		// Re-scan the target table to map logical row indices to file positions.
+		manifest, err := db.catalog.GetManifest(ctx, info.Target)
+		if err != nil {
+			return nil, fmt.Errorf("reading manifest: %w", err)
+		}
+
+		logicalIdx := 0
+		for _, part := range manifest.Partitions {
+			for _, file := range part.Files {
+				b, err := db.readParquetFile(ctx, file.Path, targetMeta.Schema.Columns)
+				if err != nil {
+					return nil, fmt.Errorf("reading file %s: %w", file.Path, err)
+				}
+				if b == nil {
+					continue
+				}
+				var fileIndices []int64
+				for i := 0; i < b.Len; i++ {
+					if matchedTargetIndices[logicalIdx] {
+						fileIndices = append(fileIndices, int64(i))
+					}
+					logicalIdx++
+				}
+				if len(fileIndices) > 0 {
+					deleteMarkers = append(deleteMarkers, catalog.DeleteMarker{
+						FilePath:   file.Path,
+						RowIndices: fileIndices,
+					})
+				}
+			}
+		}
+
+		if len(deleteMarkers) > 0 {
+			if err := db.catalog.AddDeleteMarkers(ctx, info.Target, deleteMarkers); err != nil {
+				return nil, fmt.Errorf("recording delete markers: %w", err)
+			}
+		}
+	}
+
+	// Insert new/updated rows
+	allInserts := append(updateRows, insertRows...)
+	if len(allInserts) > 0 {
+		ing := ingest.New(db.catalog, info.Target, targetMeta.Schema, targetMeta.PartitionKeys, ingest.DefaultConfig())
+		if err := ing.Ingest(ctx, allInserts); err != nil {
+			return nil, fmt.Errorf("ingesting rows: %w", err)
+		}
+		if err := ing.FlushAll(ctx); err != nil {
+			return nil, fmt.Errorf("flushing rows: %w", err)
+		}
+	}
+
+	return &ExecResult{
+		RowsAffected: rowsAffected,
+		Command:      "MERGE",
+	}, nil
+}
+
+// buildMergedRow creates a row with columns from both source and target,
+// qualified with their aliases for ON condition evaluation.
+func buildMergedRow(srcRow map[string]any, srcAlias string, tgtRow map[string]any, tgtAlias string) map[string]any {
+	merged := make(map[string]any, len(srcRow)+len(tgtRow))
+	for k, v := range tgtRow {
+		merged[k] = v
+		merged[tgtAlias+"."+k] = v
+	}
+	for k, v := range srcRow {
+		merged[k] = v
+		merged[srcAlias+"."+k] = v
+	}
+	return merged
+}
+
+// buildAliasedRow creates a row with alias-qualified column names.
+func buildAliasedRow(row map[string]any, alias string) map[string]any {
+	result := make(map[string]any, len(row)*2)
+	for k, v := range row {
+		result[k] = v
+		result[alias+"."+k] = v
+	}
+	return result
+}
+
+// onKeyPair represents an equality condition extracted from MERGE ON: target.col = source.col.
+type onKeyPair struct {
+	TargetCol string
+	SourceCol string
+}
+
+// parseOnKeys parses the ON condition into equality key pairs.
+// Handles "t.id = s.id" and "t.id = s.id AND t.name = s.name".
+func parseOnKeys(onCond, targetAlias, sourceAlias string) ([]onKeyPair, error) {
+	cond := strings.TrimSpace(onCond)
+	// Split on top-level AND
+	var parts []string
+	upper := strings.ToUpper(cond)
+	for {
+		idx := strings.Index(upper, " AND ")
+		if idx < 0 {
+			parts = append(parts, strings.TrimSpace(cond))
+			break
+		}
+		parts = append(parts, strings.TrimSpace(cond[:idx]))
+		cond = cond[idx+5:]
+		upper = upper[idx+5:]
+	}
+
+	var keys []onKeyPair
+	for _, part := range parts {
+		eqIdx := strings.Index(part, "=")
+		if eqIdx < 0 {
+			return nil, fmt.Errorf("unsupported ON condition (expected equality): %s", part)
+		}
+		left := strings.TrimSpace(part[:eqIdx])
+		right := strings.TrimSpace(part[eqIdx+1:])
+
+		lAlias, lCol := splitQualifiedCol(left)
+		rAlias, rCol := splitQualifiedCol(right)
+
+		var pair onKeyPair
+		if lAlias == targetAlias && rAlias == sourceAlias {
+			pair = onKeyPair{TargetCol: lCol, SourceCol: rCol}
+		} else if lAlias == sourceAlias && rAlias == targetAlias {
+			pair = onKeyPair{TargetCol: rCol, SourceCol: lCol}
+		} else {
+			return nil, fmt.Errorf("ON condition columns must reference target (%s) and source (%s): %s", targetAlias, sourceAlias, part)
+		}
+		keys = append(keys, pair)
+	}
+	return keys, nil
+}
+
+// splitQualifiedCol splits "alias.col" into ("alias", "col"). Returns ("", col) if unqualified.
+func splitQualifiedCol(col string) (string, string) {
+	if dotIdx := strings.LastIndex(col, "."); dotIdx >= 0 {
+		return col[:dotIdx], col[dotIdx+1:]
+	}
+	return "", col
+}
+
+// matchByKeys checks if a source row and target row match on all ON key pairs.
+func matchByKeys(srcRow, tgtRow map[string]any, keys []onKeyPair) bool {
+	for _, k := range keys {
+		if srcRow[k.SourceCol] != tgtRow[k.TargetCol] {
+			return false
+		}
+	}
+	return true
+}
+
+// applySetClauses applies "SET col = expr, ..." to a row.
+// The merged row provides both source and target column values for expressions.
+func applySetClauses(row map[string]any, setSQL string, merged map[string]any, typeMap map[string]parquet.TypeID) error {
+	// Strip SET keyword prefix (parser includes it in the raw SQL)
+	sql := strings.TrimSpace(setSQL)
+	if strings.HasPrefix(strings.ToUpper(sql), "SET ") {
+		sql = sql[4:]
+	}
+	// Parse "col1 = expr1, col2 = expr2" from SET clause
+	parts := splitSetClauses(sql)
+	for _, part := range parts {
+		eqIdx := strings.Index(part, "=")
+		if eqIdx < 0 {
+			continue
+		}
+		col := strings.TrimSpace(part[:eqIdx])
+		// Strip table alias prefix (e.g., "t.name" → "name")
+		if dotIdx := strings.LastIndex(col, "."); dotIdx >= 0 {
+			col = col[dotIdx+1:]
+		}
+		valExpr := strings.TrimSpace(part[eqIdx+1:])
+
+		// Resolve the value from the merged row
+		val := resolveSetValue(valExpr, merged, typeMap[col])
+		row[col] = val
+	}
+	return nil
+}
+
+// splitSetClauses splits "col1 = val1, col2 = val2" respecting parentheses.
+func splitSetClauses(s string) []string {
+	var parts []string
+	depth := 0
+	inStr := false
+	start := 0
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inStr {
+			if ch == '\'' {
+				inStr = false
+			}
+			continue
+		}
+		if ch == '\'' {
+			inStr = true
+		} else if ch == '(' {
+			depth++
+		} else if ch == ')' {
+			depth--
+		} else if ch == ',' && depth == 0 {
+			parts = append(parts, strings.TrimSpace(s[start:i]))
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		parts = append(parts, strings.TrimSpace(s[start:]))
+	}
+	return parts
+}
+
+// resolveSetValue resolves a SET expression value from the merged row context.
+func resolveSetValue(expr string, merged map[string]any, targetType parquet.TypeID) any {
+	expr = strings.TrimSpace(expr)
+
+	// Try direct column reference (e.g., "s.name")
+	if v, ok := merged[expr]; ok {
+		return v
+	}
+	// Try without quotes
+	if len(expr) >= 2 && expr[0] == '\'' && expr[len(expr)-1] == '\'' {
+		v, _ := convertValue(expr, targetType)
+		return v
+	}
+	// Try as literal
+	v, err := convertValue(expr, targetType)
+	if err == nil {
+		return v
+	}
+	return expr
+}
+
+// buildInsertRow builds a new row from the INSERT clause of a WHEN NOT MATCHED.
+// SQL format: "(col1, col2) VALUES (expr1, expr2)"
+func buildInsertRow(insertSQL string, srcRow map[string]any, srcAlias string, typeMap map[string]parquet.TypeID) (map[string]any, error) {
+	merged := buildAliasedRow(srcRow, srcAlias)
+	sql := strings.TrimSpace(insertSQL)
+
+	// Parse column list
+	colStart := strings.Index(sql, "(")
+	colEnd := strings.Index(sql, ")")
+	if colStart < 0 || colEnd < 0 {
+		return nil, fmt.Errorf("invalid INSERT syntax: %s", sql)
+	}
+	colList := sql[colStart+1 : colEnd]
+	columns := splitSetClauses(colList)
+	for i := range columns {
+		columns[i] = strings.TrimSpace(columns[i])
+	}
+
+	// Parse VALUES
+	rest := sql[colEnd+1:]
+	valIdx := strings.Index(strings.ToUpper(rest), "VALUES")
+	if valIdx < 0 {
+		return nil, fmt.Errorf("expected VALUES in INSERT: %s", sql)
+	}
+	valSQL := rest[valIdx+6:]
+	valStart := strings.Index(valSQL, "(")
+	valEnd := strings.LastIndex(valSQL, ")")
+	if valStart < 0 || valEnd < 0 {
+		return nil, fmt.Errorf("invalid VALUES syntax: %s", valSQL)
+	}
+	values := splitSetClauses(valSQL[valStart+1 : valEnd])
+
+	if len(columns) != len(values) {
+		return nil, fmt.Errorf("column count (%d) != value count (%d)", len(columns), len(values))
+	}
+
+	row := make(map[string]any, len(columns))
+	for i, col := range columns {
+		val := resolveSetValue(strings.TrimSpace(values[i]), merged, typeMap[col])
+		row[col] = val
+	}
+	return row, nil
 }
 
 // scanFileForDeletes reads a Parquet file and returns indices of rows matching the predicate.
