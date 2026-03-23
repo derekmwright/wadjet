@@ -659,12 +659,43 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	}
 }
 
+// colMapEntry maps a file column index to a batch column index.
+// Computed once per scan source and reused across all row groups.
+type colMapEntry struct {
+	fileIdx  int
+	batchIdx int
+}
+
+// getColMappings returns the cached file→batch column mapping, computing it
+// on first call. Thread-safe for parallel rgWorkers.
+func (inner *scanSourceInner) getColMappings(file *goparquet.File, readSchema []parquet.Column) []colMapEntry {
+	inner.colMapMu.Lock()
+	defer inner.colMapMu.Unlock()
+	if inner.colMappings != nil {
+		return inner.colMappings
+	}
+	fileColumns := file.Schema().Columns()
+	mappings := make([]colMapEntry, 0, len(readSchema))
+	for bi, sc := range readSchema {
+		for fi, path := range fileColumns {
+			name := path[len(path)-1]
+			if name == sc.Name {
+				mappings = append(mappings, colMapEntry{fileIdx: fi, batchIdx: bi})
+				break
+			}
+		}
+	}
+	inner.colMappings = mappings
+	return mappings
+}
+
 // readRG reads a row group using the pool when the size matches.
 func (inner *scanSourceInner) readRG(unit rgUnit) *batch.RecordBatch {
 	numRows := int(unit.rg.NumRows())
 	if inner.pool != nil && numRows == inner.pool.BatchSize() {
 		b := inner.pool.Get()
-		readRowGroupInto(unit.pqFile, unit.rg, b, inner.schema, inner.requiredCols)
+		cm := inner.getColMappings(unit.pqFile, b.Schema)
+		readRowGroupInto(unit.pqFile, unit.rg, b, inner.schema, inner.requiredCols, cm)
 		return b
 	}
 	return readRowGroupDirect(unit.pqFile, unit.rg, inner.schema, inner.requiredCols)
@@ -678,7 +709,7 @@ func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []pa
 	}
 	readSchema := buildReadSchema(schema, requiredCols)
 	b := batch.NewRecordBatch(readSchema, numRows)
-	readRowGroupInto(file, rg, b, schema, requiredCols)
+	readRowGroupInto(file, rg, b, schema, requiredCols, nil)
 	return b
 }
 
@@ -690,7 +721,7 @@ func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []pa
 // independent Vector in the batch, so no synchronization is needed between
 // column readers. For a single column the sequential path is kept to avoid
 // goroutine overhead.
-func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.RecordBatch, schema []parquet.Column, requiredCols []string) {
+func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.RecordBatch, schema []parquet.Column, requiredCols []string, cachedMappings []colMapEntry) {
 	numRows := int(rg.NumRows())
 	if numRows == 0 {
 		return
@@ -698,19 +729,18 @@ func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.Reco
 
 	readSchema := b.Schema
 
-	// Map batch schema columns to parquet file column indices
-	fileColumns := file.Schema().Columns()
-	type colMapping struct {
-		fileIdx  int
-		batchIdx int
-	}
-	mappings := make([]colMapping, 0, len(readSchema))
-	for bi, sc := range readSchema {
-		for fi, path := range fileColumns {
-			name := path[len(path)-1]
-			if name == sc.Name {
-				mappings = append(mappings, colMapping{fileIdx: fi, batchIdx: bi})
-				break
+	mappings := cachedMappings
+	if mappings == nil {
+		// Compute mapping inline (no cache available)
+		fileColumns := file.Schema().Columns()
+		mappings = make([]colMapEntry, 0, len(readSchema))
+		for bi, sc := range readSchema {
+			for fi, path := range fileColumns {
+				name := path[len(path)-1]
+				if name == sc.Name {
+					mappings = append(mappings, colMapEntry{fileIdx: fi, batchIdx: bi})
+					break
+				}
 			}
 		}
 	}

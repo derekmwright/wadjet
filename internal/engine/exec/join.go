@@ -2283,7 +2283,11 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	isSemi := h.JoinType == SemiJoin
 	hasFilter := h.SemiAntiFilter != nil
 
-	// Fast path: int-key semi/anti without filter — inline everything
+	// Fast path: int-key semi/anti without filter — fully inlined typed loops.
+	// Eliminates closure overhead by splitting into typed branches outside the loop.
+	// Each branch has a single comparison + hash lookup with no per-row branching
+	// on type/null/bloom/semi-vs-anti. For Q21's 3 semi/anti joins at SF10,
+	// this eliminates ~600K closure calls per batch.
 	if h.useIntKey && !hasFilter {
 		if !h.probeResolved {
 			h.probeKeyIdx = make([]int, len(h.LeftKeys))
@@ -2298,43 +2302,59 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 			hasNulls := keyCol.Nulls.HasNulls()
 			isInt32 := keyCol.Type == batch.TypeInt32 || keyCol.Type == batch.TypePort ||
 				keyCol.Type == batch.TypeProtocol || keyCol.Type == batch.TypeDate
-
 			hasBloom := h.bloom != nil
+			intIdx := h.intIndex
 
-			checkIntRow := func(row int) {
-				if hasNulls && keyCol.Nulls.IsNullFast(row) {
-					if !isSemi {
-						sel = append(sel, uint32(row))
+			// Dispatch to the tightest possible loop based on type/null/bloom/semi.
+			// Common case first: int64, no nulls, no bloom.
+			if !hasNulls && !hasBloom {
+				if isSemi {
+					if isInt32 {
+						sel = semiProbeInt32(intIdx, keyCol.Int32Data, in.Sel, in.Len, sel)
+					} else {
+						sel = semiProbeInt64(intIdx, keyCol.Int64Data, in.Sel, in.Len, sel)
 					}
-					return
-				}
-				var key int64
-				if isInt32 {
-					key = int64(keyCol.Int32Data[row])
 				} else {
-					key = keyCol.Int64Data[row]
-				}
-				// Bloom filter pre-check
-				if hasBloom && !h.bloomMayContain(bloomHashInt(key)) {
-					if !isSemi {
-						sel = append(sel, uint32(row))
+					if isInt32 {
+						sel = antiProbeInt32(intIdx, keyCol.Int32Data, in.Sel, in.Len, sel)
+					} else {
+						sel = antiProbeInt64(intIdx, keyCol.Int64Data, in.Sel, in.Len, sel)
 					}
-					return
-				}
-				_, exists := h.intIndex.Get(key)
-				emit := (isSemi && exists) || (!isSemi && !exists)
-				if emit {
-					sel = append(sel, uint32(row))
-				}
-			}
-
-			if in.Sel != nil {
-				for _, idx := range in.Sel {
-					checkIntRow(int(idx))
 				}
 			} else {
-				for i := 0; i < in.Len; i++ {
-					checkIntRow(i)
+				// Fallback for nulls or bloom: per-row checks needed
+				checkIntRow := func(row int) {
+					if hasNulls && keyCol.Nulls.IsNullFast(row) {
+						if !isSemi {
+							sel = append(sel, uint32(row))
+						}
+						return
+					}
+					var key int64
+					if isInt32 {
+						key = int64(keyCol.Int32Data[row])
+					} else {
+						key = keyCol.Int64Data[row]
+					}
+					if hasBloom && !h.bloomMayContain(bloomHashInt(key)) {
+						if !isSemi {
+							sel = append(sel, uint32(row))
+						}
+						return
+					}
+					_, exists := intIdx.Get(key)
+					if (isSemi && exists) || (!isSemi && !exists) {
+						sel = append(sel, uint32(row))
+					}
+				}
+				if in.Sel != nil {
+					for _, idx := range in.Sel {
+						checkIntRow(int(idx))
+					}
+				} else {
+					for i := 0; i < in.Len; i++ {
+						checkIntRow(i)
+					}
 				}
 			}
 			goto done
@@ -3076,4 +3096,78 @@ func setVectorNull(dst *batch.Vector, row int) {
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 		dst.BytesData.Set(row, nil)
 	}
+}
+
+// semiProbeInt64 is the inlined semi-join probe for int64 keys without nulls or bloom.
+// Emits rows whose key EXISTS in the hash table.
+func semiProbeInt64(idx *intHashTable, data []int64, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	if inSel != nil {
+		for _, si := range inSel {
+			if _, ok := idx.Get(data[si]); ok {
+				sel = append(sel, si)
+			}
+		}
+	} else {
+		for i := 0; i < inLen; i++ {
+			if _, ok := idx.Get(data[i]); ok {
+				sel = append(sel, uint32(i))
+			}
+		}
+	}
+	return sel
+}
+
+// semiProbeInt32 is the inlined semi-join probe for int32 keys without nulls or bloom.
+func semiProbeInt32(idx *intHashTable, data []int32, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	if inSel != nil {
+		for _, si := range inSel {
+			if _, ok := idx.Get(int64(data[si])); ok {
+				sel = append(sel, si)
+			}
+		}
+	} else {
+		for i := 0; i < inLen; i++ {
+			if _, ok := idx.Get(int64(data[i])); ok {
+				sel = append(sel, uint32(i))
+			}
+		}
+	}
+	return sel
+}
+
+// antiProbeInt64 is the inlined anti-join probe for int64 keys without nulls or bloom.
+// Emits rows whose key does NOT exist in the hash table.
+func antiProbeInt64(idx *intHashTable, data []int64, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	if inSel != nil {
+		for _, si := range inSel {
+			if _, ok := idx.Get(data[si]); !ok {
+				sel = append(sel, si)
+			}
+		}
+	} else {
+		for i := 0; i < inLen; i++ {
+			if _, ok := idx.Get(data[i]); !ok {
+				sel = append(sel, uint32(i))
+			}
+		}
+	}
+	return sel
+}
+
+// antiProbeInt32 is the inlined anti-join probe for int32 keys without nulls or bloom.
+func antiProbeInt32(idx *intHashTable, data []int32, inSel []uint32, inLen int, sel []uint32) []uint32 {
+	if inSel != nil {
+		for _, si := range inSel {
+			if _, ok := idx.Get(int64(data[si])); !ok {
+				sel = append(sel, si)
+			}
+		}
+	} else {
+		for i := 0; i < inLen; i++ {
+			if _, ok := idx.Get(int64(data[i])); !ok {
+				sel = append(sel, uint32(i))
+			}
+		}
+	}
+	return sel
 }

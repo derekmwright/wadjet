@@ -4255,6 +4255,10 @@ type scanSourceInner struct {
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
 
+	// cached column mapping — computed once, reused across all row groups
+	colMappings []colMapEntry // fileIdx → batchIdx mapping (nil = not yet computed)
+	colMapMu    sync.Mutex
+
 	// parallel scan
 	batchCh chan *batch.RecordBatch
 	errCh   chan error
