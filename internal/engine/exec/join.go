@@ -1921,12 +1921,12 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		probeIndices[i] = pair.probeRow
 	}
 
+	allMatched := p.join.JoinType != LeftJoin && p.join.JoinType != FullOuterJoin
 	for outColIdx, m := range mapping {
 		dst := out.Columns[outColIdx]
 		if m.fromProbe {
 			gatherVector(dst, in.Columns[m.srcIdx], probeIndices)
 		} else {
-			allMatched := p.join.JoinType != LeftJoin && p.join.JoinType != FullOuterJoin
 			gatherBuildVector(dst, m.srcIdx, pairs, p.join.buildBatches, allMatched)
 		}
 	}
