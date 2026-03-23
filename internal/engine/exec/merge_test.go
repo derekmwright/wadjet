@@ -305,3 +305,125 @@ func TestMergeableSinkCompactGroupKey(t *testing.T) {
 		}
 	}
 }
+
+func TestMergeableSinkSort(t *testing.T) {
+	// Test Sort as MergeableSink: parallel workers accumulate batches
+	// independently, merge combines them, Finalize sorts everything.
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "name", Type: parquet.TypeString},
+	}
+
+	numRows := 10000
+	var rows []map[string]any
+	for i := 0; i < numRows; i++ {
+		rows = append(rows, map[string]any{
+			"id":   int64(numRows - i), // reverse order
+			"name": "row" + string(rune('A'+i%26)),
+		})
+	}
+
+	sortOp := NewSort([]SortKey{{Column: "id", Order: Ascending}})
+
+	pipe := &Pipeline{
+		Source:  NewSliceSource(schema, rows),
+		Ops:    nil,
+		Sink:   sortOp,
+		Workers: 4,
+	}
+
+	ctx := context.Background()
+	if err := pipe.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify sorted order
+	var prev int64
+	count := 0
+	for {
+		out, err := sortOp.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for i := 0; i < out.ActiveLen(); i++ {
+			ri := i
+			if out.Sel != nil {
+				ri = int(out.Sel[i])
+			}
+			val := out.Columns[0].Int64Data[ri]
+			if val <= prev {
+				t.Fatalf("not sorted: got %d after %d at position %d", val, prev, count)
+			}
+			prev = val
+			count++
+		}
+	}
+	if count != numRows {
+		t.Fatalf("expected %d rows, got %d", numRows, count)
+	}
+}
+
+func TestMergeableSinkSortWithLimit(t *testing.T) {
+	// Test Sort MergeableSink with TopN limit.
+	schema := []parquet.Column{
+		{Name: "val", Type: parquet.TypeInt64},
+	}
+
+	numRows := 10000
+	limit := 100
+	var rows []map[string]any
+	for i := 0; i < numRows; i++ {
+		rows = append(rows, map[string]any{
+			"val": int64(numRows - i),
+		})
+	}
+
+	sortOp := NewSort([]SortKey{{Column: "val", Order: Ascending}})
+	sortOp.Limit = limit
+
+	pipe := &Pipeline{
+		Source:  NewSliceSource(schema, rows),
+		Ops:    nil,
+		Sink:   sortOp,
+		Workers: 4,
+	}
+
+	ctx := context.Background()
+	if err := pipe.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	var prev int64
+	count := 0
+	for {
+		out, err := sortOp.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for i := 0; i < out.ActiveLen(); i++ {
+			ri := i
+			if out.Sel != nil {
+				ri = int(out.Sel[i])
+			}
+			val := out.Columns[0].Int64Data[ri]
+			if val <= prev {
+				t.Fatalf("not sorted: got %d after %d", val, prev)
+			}
+			prev = val
+			count++
+		}
+	}
+	if count != limit {
+		t.Fatalf("expected %d rows (limit), got %d", limit, count)
+	}
+	// Last value should be the limit-th smallest = 100
+	if prev != int64(limit) {
+		t.Fatalf("expected last value %d, got %d", limit, prev)
+	}
+}

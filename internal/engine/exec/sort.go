@@ -346,6 +346,27 @@ func (s *Sort) Truncate(n int) {
 	}
 }
 
+// CloneSink returns a new Sort with the same configuration but fresh state.
+// Used by parallel pipeline execution: each worker gets its own cloned sink,
+// eliminating mutex contention during the parallel Consume phase.
+func (s *Sort) CloneSink() SinkSource {
+	return &Sort{
+		Keys:   s.Keys,
+		Limit:  s.Limit,
+		schema: s.schema,
+	}
+}
+
+// MergeSink merges another Sort's accumulated batches into this one.
+// Called after all parallel workers finish to combine partial batch lists
+// before the single-threaded Finalize sort.
+func (s *Sort) MergeSink(other SinkSource) {
+	o := other.(*Sort)
+	s.batches = append(s.batches, o.batches...)
+	s.totalRows += o.totalRows
+	o.batches = nil
+}
+
 func (s *Sort) Close() error { return nil }
 
 // Next returns sorted results in batches.
