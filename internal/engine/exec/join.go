@@ -399,9 +399,6 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// Use parallel build when: enough CPUs, no spill/memory tracking (complex
 	// interactions with partitioning), and not key-only mode (rare, fast already).
 	workers := runtime.NumCPU()
-	if workers > 8 {
-		workers = 8
-	}
 	if workers > 1 && h.Spill == nil && h.MemTracker == nil && !h.SemiAntiKeyOnly {
 		return h.buildParallel(ctx, source, workers)
 	}

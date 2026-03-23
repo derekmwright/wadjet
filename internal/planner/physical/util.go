@@ -428,9 +428,6 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	var readIdx int64
 
 	readWorkers := runtime.NumCPU()
-	if readWorkers > 8 {
-		readWorkers = 8
-	}
 	if readWorkers > len(inner.files) {
 		readWorkers = len(inner.files)
 	}
