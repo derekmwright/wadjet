@@ -181,18 +181,15 @@ func (f *FileStore) Head(_ context.Context, bucket, key string) (ObjectInfo, err
 		return ObjectInfo{}, fmt.Errorf("stat file: %w", err)
 	}
 
-	// Read file to compute ETag (consistent with Get)
-	f.mu.RLock()
-	data, err := os.ReadFile(path)
-	f.mu.RUnlock()
-	if err != nil {
-		return ObjectInfo{}, fmt.Errorf("reading file for etag: %w", err)
-	}
+	// Derive ETag from file metadata (mtime + size) instead of reading the
+	// entire file for MD5. Head() is meant to be lightweight — callers that
+	// need content-based ETags should use Get().
+	etag := fmt.Sprintf("%x-%x", info.ModTime().UnixNano(), info.Size())
 
 	return ObjectInfo{
 		Key:          key,
 		Size:         info.Size(),
-		ETag:         fmt.Sprintf("%x", md5.Sum(data)),
+		ETag:         etag,
 		LastModified: info.ModTime(),
 	}, nil
 }

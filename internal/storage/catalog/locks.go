@@ -63,18 +63,54 @@ func (lm *LockManager) acquire(ctx context.Context, key string) (*Lock, error) {
 				rev:  rev,
 				done: make(chan struct{}),
 			}
-			// Start TTL refresh loop
 			go lock.refreshLoop()
 			return lock, nil
 		}
 
-		// Key already exists — wait and retry
+		// Key exists — watch for deletion/expiry instead of polling.
+		// Falls back to polling if the watcher can't be created.
+		if !lm.waitForRelease(ctx, key) {
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// waitForRelease blocks until the lock key is deleted or expires, using a
+// NATS KV watcher for event-driven notification. Falls back to polling if
+// the watcher cannot be created. Returns false only if ctx is cancelled.
+func (lm *LockManager) waitForRelease(ctx context.Context, key string) bool {
+	watcher, err := lm.kv.Watch(ctx, key)
+	if err != nil {
+		// Watcher unavailable — fall back to poll
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return false
 		case <-time.After(lockPollInterval):
-			// Check if lock expired (TTL handles this automatically in NATS KV)
-			continue
+			return true
+		}
+	}
+	defer watcher.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case entry := <-watcher.Updates():
+			if entry == nil {
+				// Initial values done — check if key is already gone
+				_, err := lm.kv.Get(ctx, key)
+				if err != nil {
+					return true // key gone, try to acquire
+				}
+				continue
+			}
+			op := entry.Operation()
+			if op == jetstream.KeyValueDelete || op == jetstream.KeyValuePurge {
+				return true // lock released or expired
+			}
+		case <-time.After(lockTTL + time.Second):
+			// Safety timeout: if watcher misses TTL expiry, retry anyway
+			return true
 		}
 	}
 }

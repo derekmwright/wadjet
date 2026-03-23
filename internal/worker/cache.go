@@ -29,14 +29,18 @@ func NewLRUCache(maxBytes int64) *LRUCache {
 	}
 }
 
-// Get retrieves a value from the cache.
+// Get retrieves a copy of the cached value. The returned slice is safe to
+// mutate (e.g., decompress) without corrupting the cached data.
 func (c *LRUCache) Get(key string) ([]byte, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if elem, ok := c.items[key]; ok {
 		c.evict.MoveToFront(elem)
-		return elem.Value.(*cacheEntry).data, true
+		src := elem.Value.(*cacheEntry).data
+		cp := make([]byte, len(src))
+		copy(cp, src)
+		return cp, true
 	}
 	return nil, false
 }

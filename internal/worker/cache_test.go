@@ -43,6 +43,20 @@ func TestLRUCache_Eviction(t *testing.T) {
 	}
 }
 
+func TestLRUCache_CopyOnRead(t *testing.T) {
+	cache := NewLRUCache(100)
+	cache.Put("k1", []byte("original"))
+
+	// Get returns a copy — mutating it must not affect the cached value
+	v1, _ := cache.Get("k1")
+	v1[0] = 'X'
+
+	v2, _ := cache.Get("k1")
+	if string(v2) != "original" {
+		t.Fatalf("cache corrupted: expected 'original', got %q", v2)
+	}
+}
+
 func TestLRUCache_Update(t *testing.T) {
 	cache := NewLRUCache(100)
 
