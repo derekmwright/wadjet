@@ -45,7 +45,7 @@ func writeTestParquet(t *testing.T, store objstore.Store, bucket, path string, r
 func TestExecuteSort(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -78,7 +78,7 @@ func TestExecuteSort(t *testing.T) {
 func TestExecuteSortWithLimit(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -114,7 +114,7 @@ func TestExecuteSortWithLimit(t *testing.T) {
 func TestExecuteJoin(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	// Build (right) side: users
@@ -159,7 +159,7 @@ func TestExecuteJoin(t *testing.T) {
 func TestExecuteJoinLeftJoin(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	buildRows := []map[string]any{
@@ -201,7 +201,7 @@ func TestExecuteJoinLeftJoin(t *testing.T) {
 func newExecutorWithBudget(t *testing.T, store objstore.Store, budget int64) *Executor {
 	t.Helper()
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	executor.SetMemoryBudget(budget, t.TempDir())
 	executor.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	return executor
@@ -284,7 +284,7 @@ func TestExecuteAggregateWithSpill(t *testing.T) {
 func TestExecuteSortNoSpillUnlimited(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	// budget=0 means unlimited — no spill manager created
 	executor.SetMemoryBudget(0, "")
 	ctx := context.Background()
@@ -319,7 +319,7 @@ func TestExecuteSortNoSpillUnlimited(t *testing.T) {
 func TestExecuteWithResultStore(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	rs := NewResultStore(1024 * 1024) // 1 MB result store
 	executor.SetResultStore(rs)
 	ctx := context.Background()
@@ -382,7 +382,7 @@ func TestExecuteWithResultStore(t *testing.T) {
 func TestExecuteResultStoreFallbackToS3(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	// Tiny result store — will be too small for the result
 	rs := NewResultStore(10) // 10 bytes
 	executor.SetResultStore(rs)
@@ -431,7 +431,7 @@ func TestExecuteResultStoreFallbackToS3(t *testing.T) {
 func TestExecuteResultStoreCleanup(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	rs := NewResultStore(1024 * 1024)
 	executor.SetResultStore(rs)
 	ctx := context.Background()
@@ -492,7 +492,7 @@ func TestExecuteResultStoreCleanup(t *testing.T) {
 func TestExecuteShuffle(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	// Create rows with a key column that will be partitioned
@@ -559,7 +559,7 @@ func TestSelfJoinBuildTableAlias(t *testing.T) {
 	// losing n2.n_name which the CASE WHEN expression needs.
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	// Create "probe" side: result of a prior join that already has nation n1 columns
@@ -637,7 +637,7 @@ func TestSelfJoinBuildTableAlias(t *testing.T) {
 func TestSelfJoinWithoutAlias(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	probeRows := []map[string]any{
@@ -698,7 +698,7 @@ func TestSelfJoinWithoutAlias(t *testing.T) {
 func TestShuffleConsistentPartitioning(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	// Create two tables with matching keys that should land in the same partition

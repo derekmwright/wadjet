@@ -26,8 +26,11 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/metrics"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -42,6 +45,7 @@ const maxBufferedRows = 500_000
 // Executor dispatches task types to the appropriate execution logic.
 type Executor struct {
 	store        objstore.Store
+	js           jetstream.JetStream // for catalog access in pipeline tasks
 	cache        *LRUCache
 	resultStore  *ResultStore // in-memory result passing between stages (nil = disabled)
 	memoryBudget int64        // per-task memory budget in bytes (0 = unlimited)
@@ -51,8 +55,8 @@ type Executor struct {
 }
 
 // NewExecutor creates a new task executor.
-func NewExecutor(store objstore.Store, cache *LRUCache) *Executor {
-	return &Executor{store: store, cache: cache, logger: slog.Default()}
+func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) *Executor {
+	return &Executor{store: store, js: js, cache: cache, logger: slog.Default()}
 }
 
 // SetMemoryBudget configures the per-task memory budget and spill directory.
@@ -126,6 +130,8 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		err = e.executeWindow(ctx, task, &result)
 	case distributed.TaskTypeShuffle:
 		err = e.executeShuffle(ctx, task, &result)
+	case distributed.TaskTypePipeline:
+		err = e.executePipeline(ctx, task, &result)
 	default:
 		err = fmt.Errorf("unsupported task type: %s", task.Type)
 	}
@@ -1265,6 +1271,105 @@ func mapExecJoinType(jt string) exec.JoinType {
 	default:
 		return exec.InnerJoin
 	}
+}
+
+// executePipeline runs an entire SQL query as a standalone pipeline on this
+// worker. Used for deep join chains where the S3 materialization overhead of
+// N distributed stages exceeds the benefit of parallelism. The worker creates
+// a catalog from NATS KV, builds a standalone physical plan, and streams the
+// entire query through in-memory pipelines — identical to standalone mode.
+func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	if task.SQLText == "" {
+		return fmt.Errorf("pipeline task missing SQL text")
+	}
+	if e.js == nil {
+		return fmt.Errorf("pipeline task requires JetStream for catalog access")
+	}
+
+	bucket := task.DataBucket
+	if bucket == "" {
+		bucket = task.ResultBucket
+	}
+
+	// Create a catalog from NATS KV (same metadata the coordinator uses)
+	kv, err := catalog.NewNATSKV(e.js)
+	if err != nil {
+		return fmt.Errorf("creating catalog KV: %w", err)
+	}
+	cat := catalog.New(kv, e.store, bucket)
+	if err := cat.Init(ctx); err != nil {
+		return fmt.Errorf("initializing catalog: %w", err)
+	}
+
+	// Parse SQL
+	parsed, err := plansql.Parse(task.SQLText)
+	if err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	selectInfo, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		return fmt.Errorf("extract: %w", err)
+	}
+
+	// Build and optimize logical plan
+	logicalPlan, err := logical.BuildFromSelect(selectInfo)
+	if err != nil {
+		return fmt.Errorf("logical plan: %w", err)
+	}
+	planner := physical.NewPlanner(cat)
+	planner.AnnotateScanColumns(ctx, logicalPlan)
+	scanAnnotator := func(plan *logical.Node) {
+		planner.AnnotateScanColumns(ctx, plan)
+	}
+	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+
+	// Build standalone physical plan (single pipeline, no stages)
+	if e.memoryBudget > 0 {
+		planner.MemoryBudget = e.memoryBudget
+		planner.SpillDir = e.spillDir
+	}
+	physPlan, err := planner.Plan(ctx, logicalPlan)
+	if err != nil {
+		return fmt.Errorf("physical plan: %w", err)
+	}
+	if physPlan.Cleanup != nil {
+		defer physPlan.Cleanup()
+	}
+
+	pipeline := physPlan.Pipeline
+	if pipeline == nil {
+		return nil
+	}
+
+	// Execute the pipeline — same path as standalone mode
+	if err := pipeline.Run(ctx); err != nil {
+		return fmt.Errorf("pipeline execution: %w", err)
+	}
+
+	// Collect results from the pipeline's sink
+	collectSink, ok := pipeline.Sink.(*exec.CollectSink)
+	if !ok {
+		return fmt.Errorf("pipeline sink is not CollectSink")
+	}
+	batches := collectSink.Batches()
+	var totalRows int64
+	for _, b := range batches {
+		totalRows += int64(b.ActiveLen())
+	}
+
+	e.logger.Info("pipeline task completed",
+		"task_id", task.ID,
+		"sql_length", len(task.SQLText),
+		"rows", totalRows,
+		"batches", len(batches),
+	)
+
+	result.NumRows = totalRows
+	if totalRows == 0 {
+		return nil
+	}
+
+	return e.writeBatchResult(ctx, task, batches, result)
 }
 
 // getFileData retrieves raw Parquet bytes with 3-tier caching:

@@ -17,7 +17,7 @@ import (
 func TestExecuteUnsupportedTaskType(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	task := distributed.Task{
@@ -48,7 +48,7 @@ func TestExecuteUnsupportedTaskType(t *testing.T) {
 func TestExecuteScanEmptyFiles(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	task := distributed.Task{
@@ -73,7 +73,7 @@ func TestExecuteScanEmptyFiles(t *testing.T) {
 func TestExecuteScanSingleFile(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -104,7 +104,7 @@ func TestExecuteScanSingleFile(t *testing.T) {
 func TestExecuteScanMissingFile(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	task := distributed.Task{
@@ -129,7 +129,7 @@ func TestExecuteScanMissingFile(t *testing.T) {
 func TestExecuteScanWithColumnProjection(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -161,7 +161,7 @@ func TestExecuteScanWithColumnProjection(t *testing.T) {
 func TestExecuteAggregateEmptyInput(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	task := distributed.Task{
@@ -190,7 +190,7 @@ func TestExecuteAggregateEmptyInput(t *testing.T) {
 func TestExecuteAggregateCount(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -226,7 +226,7 @@ func TestExecuteAggregateCount(t *testing.T) {
 func TestExecuteAggregateMinMax(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -263,7 +263,7 @@ func TestExecuteAggregateMinMax(t *testing.T) {
 func TestExecuteSortEmptyInput(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	task := distributed.Task{
@@ -289,7 +289,7 @@ func TestExecuteSortEmptyInput(t *testing.T) {
 func TestExecuteSortAscending(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -322,7 +322,7 @@ func TestExecuteSortAscending(t *testing.T) {
 func TestExecuteJoinEmptyBothSides(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	task := distributed.Task{
@@ -353,7 +353,7 @@ func TestExecuteJoinEmptyBothSides(t *testing.T) {
 func TestExecuteWindowBasic(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -393,7 +393,7 @@ func TestExecuteWindowBasic(t *testing.T) {
 func TestExecuteWindowEmptyInput(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	task := distributed.Task{
@@ -421,7 +421,7 @@ func TestExecuteWindowEmptyInput(t *testing.T) {
 func TestExecuteWindowWithRank(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -465,7 +465,7 @@ func TestExecuteWindowWithRank(t *testing.T) {
 func TestExecuteWindowAggFunctions(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -733,7 +733,7 @@ func TestParseFilterValue(t *testing.T) {
 func TestReadParquetFilesConcurrentMultiple(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	// Write 3 files
@@ -758,7 +758,7 @@ func TestReadParquetFilesConcurrentMultiple(t *testing.T) {
 func TestReadParquetFilesConcurrentSingleFile(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -779,7 +779,7 @@ func TestReadParquetFilesConcurrentSingleFile(t *testing.T) {
 func TestReadParquetFilesConcurrentEmpty(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	result, err := executor.readParquetFilesConcurrent(ctx, "results", nil, nil)
@@ -794,7 +794,7 @@ func TestReadParquetFilesConcurrentEmpty(t *testing.T) {
 func TestReadParquetFilesConcurrentError(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	_, err := executor.readParquetFilesConcurrent(ctx, "results",
@@ -809,7 +809,7 @@ func TestReadParquetFilesConcurrentError(t *testing.T) {
 func TestNewSpillManagerZeroBudget(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	executor.SetMemoryBudget(0, "")
 
 	spill, tracker := executor.newSpillManager("task-1")
@@ -824,7 +824,7 @@ func TestNewSpillManagerZeroBudget(t *testing.T) {
 func TestNewSpillManagerWithBudget(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	executor.SetMemoryBudget(1024*1024, t.TempDir())
 
 	spill, tracker := executor.newSpillManager("task-2")
@@ -842,7 +842,7 @@ func TestNewSpillManagerWithBudget(t *testing.T) {
 func TestNewSpillManagerDefaultDir(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	executor.SetMemoryBudget(1024*1024, "") // empty dir = use temp dir
 
 	spill, tracker := executor.newSpillManager("task-3")
@@ -874,7 +874,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestExecuteScanWithFilterExprs(t *testing.T) {
 	store := newTestStore(t, "results")
 	cache := NewLRUCache(1024 * 1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	ctx := context.Background()
 
 	rows := []map[string]any{
@@ -910,14 +910,14 @@ func TestExecuteScanWithFilterExprs(t *testing.T) {
 func TestSetMetricsNil(t *testing.T) {
 	store := objstore.NewMemStore()
 	cache := NewLRUCache(1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	executor.SetMetrics(nil) // should not panic
 }
 
 func TestSetLoggerCustom(t *testing.T) {
 	store := objstore.NewMemStore()
 	cache := NewLRUCache(1024)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, nil)
 	customLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	executor.SetLogger(customLogger) // should not panic
 }

@@ -71,7 +71,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	}
 
 	cache := NewLRUCache(cfg.CacheBytes)
-	executor := NewExecutor(store, cache)
+	executor := NewExecutor(store, cache, js)
 	executor.SetMemoryBudget(cfg.MemoryBudget, cfg.SpillDir)
 	executor.SetLogger(logger)
 	if cfg.ResultStoreBytes > 0 {

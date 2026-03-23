@@ -50,12 +50,17 @@ func setupTPCHDistributed(t *testing.T) (context.Context, *Coordinator) {
 		t.Fatalf("setting up streams: %v", err)
 	}
 
-	// In-memory object store + catalog
+	// In-memory object store + NATS KV-backed catalog (so pipeline tasks
+	// can reconstruct the catalog from the same NATS KV)
 	store := objstore.NewMemStore()
 	if err := store.MakeBucket(ctx, "test"); err != nil {
 		t.Fatal(err)
 	}
-	cat := catalog.NewWithStore(store, "test")
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("creating NATS KV: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}
