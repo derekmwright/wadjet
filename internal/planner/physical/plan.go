@@ -619,9 +619,6 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	switch source.(type) {
 	case *catalogScanSource, *scannerExecSource:
 		pipelineWorkers = runtime.NumCPU()
-		if pipelineWorkers > 8 {
-			pipelineWorkers = 8
-		}
 	}
 
 	plan := &PhysicalPlan{
@@ -4088,11 +4085,7 @@ func extractFilterBuildColumns(filter string) []string {
 func innerPipelineWorkers(src exec.Source) int {
 	switch src.(type) {
 	case *catalogScanSource, *scannerExecSource:
-		w := runtime.NumCPU()
-		if w > 8 {
-			w = 8
-		}
-		return w
+		return runtime.NumCPU()
 	}
 	return 0
 }
@@ -4331,7 +4324,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		scanPreds:     sp,
 		deleteMarkers: delMarkers,
 		bloomFilter:   s.bloomFilter,
-		batchCh:       make(chan *batch.RecordBatch, 4),
+		batchCh:       make(chan *batch.RecordBatch, runtime.NumCPU()),
 		errCh:         make(chan error, 1),
 		cancel:        cancel,
 	}
@@ -4352,9 +4345,6 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	if inner.hasNestedTypes {
 		// Nested types need row-level reading — fall back to file-level workers
 		workers := runtime.NumCPU()
-		if workers > 8 {
-			workers = 8
-		}
 		if workers > len(files) {
 			workers = len(files)
 		}
@@ -4368,9 +4358,6 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 	} else {
 		// Row-group-level parallel scan — full CPU utilization
 		workers := runtime.NumCPU()
-		if workers > 8 {
-			workers = 8
-		}
 		if workers > len(inner.rgUnits) {
 			workers = len(inner.rgUnits)
 		}
