@@ -2,9 +2,17 @@ package pgwire
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -1084,3 +1092,182 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func testTLSConfig(t *testing.T) *tls.Config {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &tls.Config{Certificates: []tls.Certificate{cert}}
+}
+
+func TestPGWireSSLUpgrade(t *testing.T) {
+	db := setupTestDB(t)
+	tlsCfg := testTLSConfig(t)
+
+	srv := NewServer(db, Config{TLSConfig: tlsCfg}, nil)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Shutdown)
+
+	conn, err := net.DialTimeout("tcp", srv.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Send SSL request
+	sslReq := binary.BigEndian.AppendUint32(nil, 8)
+	sslReq = binary.BigEndian.AppendUint32(sslReq, 80877103)
+	conn.Write(sslReq)
+
+	// Should get 'S' (SSL accepted)
+	var resp [1]byte
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(conn, resp[:]); err != nil {
+		t.Fatal(err)
+	}
+	if resp[0] != 'S' {
+		t.Fatalf("expected 'S' for SSL accept, got %c", resp[0])
+	}
+
+	// Upgrade to TLS and send startup
+	tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake failed: %v", err)
+	}
+
+	// Now send regular startup over TLS
+	client := &pgClient{conn: tlsConn, t: t}
+	client.startup("testuser", "testdb")
+
+	// Execute a query over the encrypted connection
+	_, rows, _ := client.simpleQuery("SELECT * FROM users")
+	if len(rows) != 3 {
+		t.Errorf("expected 3 rows over TLS, got %d", len(rows))
+	}
+	client.terminate()
+}
+
+func TestPGWireSSLDeclineWhenNoTLS(t *testing.T) {
+	db := setupTestDB(t)
+
+	// No TLS config — should decline SSL
+	srv := startTestServer(t, db)
+
+	conn, err := net.DialTimeout("tcp", srv.Addr(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	sslReq := binary.BigEndian.AppendUint32(nil, 8)
+	sslReq = binary.BigEndian.AppendUint32(sslReq, 80877103)
+	conn.Write(sslReq)
+
+	var resp [1]byte
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	io.ReadFull(conn, resp[:])
+	if resp[0] != 'N' {
+		t.Fatalf("expected 'N' for SSL decline (no TLS config), got %c", resp[0])
+	}
+}
+
+func TestPGWireQueryTimeout(t *testing.T) {
+	db := setupTestDB(t)
+
+	// Server with 50ms timeout — enough for simple queries
+	srv := NewServer(db, Config{QueryTimeout: 50 * time.Millisecond}, nil)
+	if err := srv.Start("127.0.0.1:0"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(srv.Shutdown)
+
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	// Simple query should succeed within timeout
+	_, rows, _ := client.simpleQuery("SELECT * FROM users")
+	if len(rows) != 3 {
+		t.Errorf("expected 3 rows, got %d", len(rows))
+	}
+	client.terminate()
+}
+
+func TestPGWireStatementTimeout(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	// SET statement_timeout should be accepted
+	_, _, tag := client.simpleQuery("SET statement_timeout = 5000")
+	if tag != "SET" {
+		t.Errorf("expected SET tag, got %q", tag)
+	}
+
+	// SET with TO syntax
+	_, _, tag = client.simpleQuery("SET statement_timeout TO '10000'")
+	if tag != "SET" {
+		t.Errorf("expected SET tag, got %q", tag)
+	}
+
+	// Queries should still work
+	_, rows, _ := client.simpleQuery("SELECT * FROM users")
+	if len(rows) != 3 {
+		t.Errorf("expected 3 rows, got %d", len(rows))
+	}
+	client.terminate()
+}
+
+func TestPGWireSetSessionVars(t *testing.T) {
+	db := setupTestDB(t)
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	// JDBC sends these during connection setup
+	tests := []string{
+		"SET client_encoding = 'UTF8'",
+		"SET extra_float_digits = 3",
+		"SET application_name = 'MyApp'",
+		"SET search_path = 'public'",
+		"SET timezone = 'UTC'",
+		"SET DateStyle = 'ISO'",
+		"SET SESSION statement_timeout = 30000",
+		"SET LOCAL work_mem = '64MB'",
+	}
+	for _, sql := range tests {
+		_, _, tag := client.simpleQuery(sql)
+		if tag != "SET" {
+			t.Errorf("%s: expected SET tag, got %q", sql, tag)
+		}
+	}
+	client.terminate()
+}
+

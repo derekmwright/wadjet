@@ -12,6 +12,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/peterh/liner"
 
@@ -54,6 +55,9 @@ var (
 	spillDir         string
 	resultStoreBytes int64
 	pgAddr           string
+	pgTLSCert        string
+	pgTLSKey         string
+	queryTimeout     string
 	natsStoreDir     string
 	geoipCityDB      string
 	geoipASNDB       string
@@ -90,6 +94,9 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 512*1024*1024, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
 	rootCmd.PersistentFlags().StringVar(&pgAddr, "pg-addr", ":5433", "PostgreSQL wire protocol listen address")
+	rootCmd.PersistentFlags().StringVar(&pgTLSCert, "pg-tls-cert", "", "TLS certificate file for PostgreSQL wire protocol")
+	rootCmd.PersistentFlags().StringVar(&pgTLSKey, "pg-tls-key", "", "TLS private key file for PostgreSQL wire protocol")
+	rootCmd.PersistentFlags().StringVar(&queryTimeout, "query-timeout", "0", "Default query timeout (e.g. 30s, 5m, 0=unlimited)")
 	rootCmd.PersistentFlags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum concurrent tasks per worker")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
@@ -716,7 +723,19 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	if err != nil {
 		return fmt.Errorf("opening DB for pgwire: %w", err)
 	}
-	pgSrv := pgwire.NewServer(pgDB, pgwire.Config{AuthProvider: provider}, logger)
+	pgQueryTimeout, _ := time.ParseDuration(queryTimeout)
+	pgCfg := pgwire.Config{
+		AuthProvider: provider,
+		QueryTimeout: pgQueryTimeout,
+	}
+	if pgTLSCert != "" && pgTLSKey != "" {
+		cert, err := tls.LoadX509KeyPair(pgTLSCert, pgTLSKey)
+		if err != nil {
+			return fmt.Errorf("loading pgwire TLS cert: %w", err)
+		}
+		pgCfg.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+	}
+	pgSrv := pgwire.NewServer(pgDB, pgCfg, logger)
 
 	errCh := make(chan error, 3)
 	go func() {
