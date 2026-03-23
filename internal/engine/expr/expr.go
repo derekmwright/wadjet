@@ -1057,15 +1057,11 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 			}
 			argVecs[i] = cv
 		default:
-			// Complex expression arg — check if it supports VecExpr
-			if ve, ok := arg.(VecExpr); ok {
-				scratch := batch.NewVector(out.Type, n)
-				ve.EvalVec(b, scratch, n)
-				argVecs[i] = scratch
-			} else {
-				e.evalVecPerRow(b, out, n)
-				return
-			}
+			// Complex expression arg (nested functions, CASE, etc.) —
+			// fall back to per-row for safety. Extending to nested VecExpr
+			// requires knowing each arg's output type at eval time.
+			e.evalVecPerRow(b, out, n)
+			return
 		}
 	}
 
