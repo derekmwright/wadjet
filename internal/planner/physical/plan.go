@@ -4343,6 +4343,8 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		readSchema := inner.readSchema()
 		if rgSize > 0 && len(readSchema) > 0 {
 			inner.pool = batch.NewBatchPool(readSchema, rgSize)
+			// Pre-warm pool so parallel workers don't contend on allocation
+			inner.pool.PreWarm(runtime.NumCPU())
 		}
 	}
 
