@@ -824,7 +824,13 @@ func resolveTableOrCTE(table plansql.TableRef, ctes []plansql.CTEDef) (*Node, er
 		return node, nil
 	}
 
-	return NewScan(table.Name, table.Alias), nil
+	node := NewScan(table.Name, table.Alias)
+	if table.SampleMethod != "" {
+		node.SampleMethod = strings.ToUpper(table.SampleMethod)
+		pct, _ := strconv.ParseFloat(table.SamplePercent, 64)
+		node.SamplePercent = pct
+	}
+	return node, nil
 }
 
 // setSubtreeAlias sets the table alias on all Scan nodes in a subtree,
