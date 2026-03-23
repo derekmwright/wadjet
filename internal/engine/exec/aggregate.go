@@ -73,7 +73,8 @@ type HashAggregate struct {
 	GroupByCols   []string
 	Aggs          []AggColumn
 	Spill         *memory.SpillManager // optional: enables spill-to-disk
-	NullGroupCols []string             // GROUPING SETS: columns to output as NULL
+	NullGroupCols []string             // GROUPING SETS: columns to output as NULL (legacy per-node)
+	GroupingSets  [][]int             // single-pass grouping sets: column indices within GroupByCols per set
 	InputRowHint  int64                // estimated input rows for pre-sizing hash table
 
 	mu            sync.Mutex
@@ -148,6 +149,7 @@ type HashAggregate struct {
 type groupState struct {
 	keyValues    []any
 	intKey       int64 // single int64 key for int-keyed groups (avoids []any boxing)
+	setID        int   // grouping set index (-1 = not a grouping set)
 	accs         []kernel.Accumulator
 	distinctSets []map[string]struct{} // per-agg distinct value sets (nil if not COUNT(DISTINCT))
 	extraState   []any                 // per-agg custom state (string_agg builder, variance state, etc.)
@@ -476,6 +478,21 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		htInitSize = est
 	}
 
+	// Grouping sets force the generic path — keys are prefixed with set ID
+	// and only subset columns are serialized per set.
+	if len(h.GroupingSets) > 0 {
+		allSimpleAggs = false // prevent SoA fast paths
+		if h.strGroupIndex == nil {
+			h.strGroupIndex = newStrHashTable(htInitSize)
+		}
+		if h.strGroupStates == nil {
+			h.strGroupStates = make([]*groupState, 0, htInitSize)
+			h.keys = make([][]any, 0, htInitSize)
+			h.serializedKeys = make([]string, 0, htInitSize)
+			h.gsPool.preAlloc(htInitSize)
+		}
+	}
+
 	// Single-column integer GROUP BY fast path:
 	// Use intHashTable when grouping by one integer-typed column.
 	if len(h.GroupByCols) == 1 && h.groupColIdx[0] >= 0 {
@@ -689,6 +706,20 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	// Multi-column generic GROUP BY SoA fast path
 	if h.useGenericSoA {
 		h.consumeBatchGenericSoA(b)
+		return
+	}
+
+	// Grouping sets single-pass: insert each row once per set
+	if len(h.GroupingSets) > 0 {
+		if b.Sel != nil {
+			for _, idx := range b.Sel {
+				h.processRowGroupingSets(b, int(idx))
+			}
+		} else {
+			for i := 0; i < b.Len; i++ {
+				h.processRowGroupingSets(b, i)
+			}
+		}
 		return
 	}
 
@@ -1448,6 +1479,94 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	h.updateGroup(gs, b, row)
 }
 
+// processRowGroupingSets inserts a row into each grouping set. The key is
+// prefixed with the set index byte, and only columns in the set are serialized.
+// Columns not in the set are stored as nil in keyValues so the output path
+// can emit NULLs for excluded columns.
+func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
+	for setIdx, colIndices := range h.GroupingSets {
+		h.keyBuf = h.keyBuf[:0]
+		h.keyBuf = append(h.keyBuf, byte(setIdx)) // set prefix
+
+		// Serialize only the columns in this set
+		for _, ci := range colIndices {
+			idx := h.groupColIdx[ci]
+			if idx < 0 {
+				h.keyBuf = append(h.keyBuf, 1) // null flag
+				continue
+			}
+			v := b.Columns[idx]
+			if v.Nulls.IsNullFast(row) {
+				h.keyBuf = append(h.keyBuf, 1)
+				continue
+			}
+			h.keyBuf = append(h.keyBuf, 0)
+			h.keyBuf = appendColumnValue(h.keyBuf, v, row, h.groupColTypes[ci])
+		}
+
+		groupIdx, found := h.strGroupIndex.GetOrInsert(h.keyBuf, int32(len(h.strGroupStates)))
+		if found {
+			h.updateGroup(h.strGroupStates[groupIdx], b, row)
+			continue
+		}
+
+		// New group — store all GroupByCols values, NULLing excluded columns
+		inSet := make(map[int]bool, len(colIndices))
+		for _, ci := range colIndices {
+			inSet[ci] = true
+		}
+		keyVals := make([]any, len(h.GroupByCols))
+		for i, idx := range h.groupColIdx {
+			if inSet[i] && idx >= 0 {
+				keyVals[i] = b.Columns[idx].GetValue(row)
+			}
+			// columns not in set stay nil
+		}
+		gs := h.gsPool.alloc()
+		gs.keyValues = keyVals
+		gs.setID = setIdx
+		gs.accs = make([]kernel.Accumulator, len(h.Aggs))
+		if h.needsDistinct {
+			gs.distinctSets = make([]map[string]struct{}, len(h.Aggs))
+		}
+		if h.needsExtra {
+			gs.extraState = make([]any, len(h.Aggs))
+		}
+		for i, agg := range h.Aggs {
+			switch agg.Func {
+			case AggCountDistinct, AggApproxDistinct:
+				if gs.distinctSets != nil {
+					gs.distinctSets[i] = make(map[string]struct{})
+				}
+			case AggStringAgg:
+				sep := agg.Separator
+				if sep == "" {
+					sep = ","
+				}
+				gs.extraState[i] = &stringAggState{sep: sep}
+			case AggStddev, AggVariance, AggStddevPop, AggVarPop:
+				gs.extraState[i] = &varianceState{}
+			case AggBoolAnd:
+				gs.extraState[i] = true
+			case AggBoolOr:
+				gs.extraState[i] = false
+			case AggCorr, AggCovarSamp, AggCovarPop:
+				gs.extraState[i] = &covarianceState{}
+			case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
+				gs.extraState[i] = &collectState{}
+			case AggMinBy:
+				gs.extraState[i] = &minMaxByState{isMin: true}
+			case AggMaxBy:
+				gs.extraState[i] = &minMaxByState{isMin: false}
+			}
+		}
+		h.strGroupStates = append(h.strGroupStates, gs)
+		h.keys = append(h.keys, keyVals)
+		h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
+		h.updateGroup(gs, b, row)
+	}
+}
+
 // updateGroup updates a group's accumulators with values from a single row.
 func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row int) {
 	for i, agg := range h.Aggs {
@@ -1892,6 +2011,7 @@ func (h *HashAggregate) CloneSink() SinkSource {
 		GroupByCols:   h.GroupByCols,
 		Aggs:          h.Aggs,
 		NullGroupCols: h.NullGroupCols,
+		GroupingSets:  h.GroupingSets,
 		// No spill manager — partial aggregates are small enough
 	}
 	return clone

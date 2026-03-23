@@ -376,42 +376,30 @@ func TestBuildFromSelectGroupingSets(t *testing.T) {
 	pp := plan.PrettyPrint(0)
 	t.Logf("Plan:\n%s", pp)
 
-	// With 3 grouping sets, the plan should contain UNION ALL nodes
-	// combining 3 Aggregate nodes.
-	// Structure: Project → Union → (Union, Agg2)
-	//                        ↓
-	//                   (Agg0, Agg1)
-
-	// Count all aggregate nodes in the plan
+	// Single-pass: one aggregate node with GroupingSets metadata, no UNION ALL
 	aggNodes := findAllNodeType(plan, NodeAggregate)
-	if len(aggNodes) != 3 {
-		t.Fatalf("expected 3 Aggregate nodes (one per grouping set), got %d", len(aggNodes))
+	if len(aggNodes) != 1 {
+		t.Fatalf("expected 1 Aggregate node (single-pass grouping sets), got %d", len(aggNodes))
 	}
 
-	// Count union nodes
+	// Should have no UNION ALL nodes
 	unionNodes := findAllNodeType(plan, NodeUnion)
-	if len(unionNodes) != 2 {
-		t.Fatalf("expected 2 Union nodes, got %d", len(unionNodes))
+	if len(unionNodes) != 0 {
+		t.Fatalf("expected 0 Union nodes (single-pass), got %d", len(unionNodes))
 	}
 
-	// Verify each union is UNION ALL
-	for i, u := range unionNodes {
-		if !u.UnionAll {
-			t.Errorf("union node %d: expected UNION ALL", i)
-		}
+	// GroupingSets should contain 3 sets: (region, product), (region), ()
+	if len(aggNodes[0].GroupingSets) != 3 {
+		t.Fatalf("expected 3 grouping sets, got %d", len(aggNodes[0].GroupingSets))
 	}
-
-	// First aggregate: GROUP BY (region, product) — no null cols
-	if len(aggNodes[0].GroupingSetNulls) != 0 {
-		t.Errorf("set 0: expected 0 null cols, got %v", aggNodes[0].GroupingSetNulls)
+	if len(aggNodes[0].GroupingSets[0]) != 2 {
+		t.Errorf("set 0: expected 2 cols, got %d", len(aggNodes[0].GroupingSets[0]))
 	}
-	// Second aggregate: GROUP BY (region) — product is null
-	if len(aggNodes[1].GroupingSetNulls) != 1 || aggNodes[1].GroupingSetNulls[0] != "product" {
-		t.Errorf("set 1: expected null cols [product], got %v", aggNodes[1].GroupingSetNulls)
+	if len(aggNodes[0].GroupingSets[1]) != 1 {
+		t.Errorf("set 1: expected 1 col, got %d", len(aggNodes[0].GroupingSets[1]))
 	}
-	// Third aggregate: GROUP BY () — both null
-	if len(aggNodes[2].GroupingSetNulls) != 2 {
-		t.Errorf("set 2: expected 2 null cols, got %v", aggNodes[2].GroupingSetNulls)
+	if len(aggNodes[0].GroupingSets[2]) != 0 {
+		t.Errorf("set 2: expected 0 cols, got %d", len(aggNodes[0].GroupingSets[2]))
 	}
 }
 
@@ -433,15 +421,18 @@ func TestBuildFromSelectCube(t *testing.T) {
 	pp := plan.PrettyPrint(0)
 	t.Logf("Plan:\n%s", pp)
 
-	// CUBE(a,b) = 4 grouping sets → 4 aggregate nodes, 3 union nodes
+	// CUBE(a,b) = 4 grouping sets → single aggregate with 4 sets
 	aggNodes := findAllNodeType(plan, NodeAggregate)
-	if len(aggNodes) != 4 {
-		t.Fatalf("expected 4 Aggregate nodes for CUBE(a,b), got %d", len(aggNodes))
+	if len(aggNodes) != 1 {
+		t.Fatalf("expected 1 Aggregate node (single-pass), got %d", len(aggNodes))
+	}
+	if len(aggNodes[0].GroupingSets) != 4 {
+		t.Fatalf("expected 4 grouping sets for CUBE(a,b), got %d", len(aggNodes[0].GroupingSets))
 	}
 
 	unionNodes := findAllNodeType(plan, NodeUnion)
-	if len(unionNodes) != 3 {
-		t.Fatalf("expected 3 Union nodes, got %d", len(unionNodes))
+	if len(unionNodes) != 0 {
+		t.Fatalf("expected 0 Union nodes (single-pass), got %d", len(unionNodes))
 	}
 }
 
@@ -463,15 +454,18 @@ func TestBuildFromSelectRollup(t *testing.T) {
 	pp := plan.PrettyPrint(0)
 	t.Logf("Plan:\n%s", pp)
 
-	// ROLLUP(year, month) = 3 sets: (year,month), (year), ()
+	// ROLLUP(year, month) = 3 sets → single aggregate
 	aggNodes := findAllNodeType(plan, NodeAggregate)
-	if len(aggNodes) != 3 {
-		t.Fatalf("expected 3 Aggregate nodes for ROLLUP(year,month), got %d", len(aggNodes))
+	if len(aggNodes) != 1 {
+		t.Fatalf("expected 1 Aggregate node (single-pass), got %d", len(aggNodes))
+	}
+	if len(aggNodes[0].GroupingSets) != 3 {
+		t.Fatalf("expected 3 grouping sets for ROLLUP(year,month), got %d", len(aggNodes[0].GroupingSets))
 	}
 
 	unionNodes := findAllNodeType(plan, NodeUnion)
-	if len(unionNodes) != 2 {
-		t.Fatalf("expected 2 Union nodes, got %d", len(unionNodes))
+	if len(unionNodes) != 0 {
+		t.Fatalf("expected 0 Union nodes (single-pass), got %d", len(unionNodes))
 	}
 }
 

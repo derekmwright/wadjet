@@ -94,6 +94,86 @@ func TestHashAggregate(t *testing.T) {
 	}
 }
 
+func TestHashAggregateGroupingSets(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "region", Type: parquet.TypeString},
+		{Name: "product", Type: parquet.TypeString},
+		{Name: "sales", Type: parquet.TypeFloat64},
+	}
+
+	rows := []map[string]any{
+		{"region": "east", "product": "A", "sales": 10.0},
+		{"region": "east", "product": "B", "sales": 20.0},
+		{"region": "west", "product": "A", "sales": 30.0},
+		{"region": "west", "product": "B", "sales": 40.0},
+	}
+
+	// GROUPING SETS ((region, product), (region), ())
+	// Columns: region=0, product=1
+	agg := NewHashAggregate([]string{"region", "product"}, []AggColumn{
+		{Func: AggSum, InputCol: "sales", OutputCol: "total", OutputType: parquet.TypeFloat64},
+	})
+	agg.GroupingSets = [][]int{
+		{0, 1}, // (region, product)
+		{0},    // (region)
+		{},     // ()
+	}
+
+	source := NewSliceSource(schema, rows)
+	pipe := &Pipeline{Source: source, Ops: nil, Sink: agg}
+	if err := pipe.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var allRows []map[string]any
+	ctx := context.Background()
+	for {
+		b, err := agg.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+		allRows = append(allRows, b.ToRows()...)
+	}
+
+	// Expect: 4 (region,product) + 2 (region) + 1 (grand total) = 7 groups
+	if len(allRows) != 7 {
+		t.Fatalf("expected 7 groups, got %d: %v", len(allRows), allRows)
+	}
+
+	// Verify grand total (both region and product should be nil)
+	var grandTotal float64
+	var foundGrand bool
+	for _, row := range allRows {
+		if row["region"] == nil && row["product"] == nil {
+			grandTotal = row["total"].(float64)
+			foundGrand = true
+		}
+	}
+	if !foundGrand {
+		t.Fatal("expected grand total group (both cols nil)")
+	}
+	if grandTotal != 100.0 {
+		t.Fatalf("expected grand total=100.0, got %v", grandTotal)
+	}
+
+	// Verify region-only totals (product should be nil)
+	regionTotals := map[string]float64{}
+	for _, row := range allRows {
+		if row["region"] != nil && row["product"] == nil {
+			regionTotals[row["region"].(string)] = row["total"].(float64)
+		}
+	}
+	if regionTotals["east"] != 30.0 {
+		t.Fatalf("expected east total=30.0, got %v", regionTotals["east"])
+	}
+	if regionTotals["west"] != 70.0 {
+		t.Fatalf("expected west total=70.0, got %v", regionTotals["west"])
+	}
+}
+
 func TestHashAggregateCountDistinct(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "group", Type: parquet.TypeString},

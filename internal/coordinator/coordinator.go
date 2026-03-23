@@ -1609,14 +1609,35 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 	// When multiple stages complete near-simultaneously, the completed
 	// stage's materialization above only covers one stage. Other deps
 	// may also have inline results that haven't been materialized yet.
+	// Deduplicate and materialize concurrently for reduced inter-stage latency.
 	c.mu.Lock()
 	specs := c.stageSpecs[queryID]
 	c.mu.Unlock()
+	seen := make(map[string]bool)
+	var depsToMaterialize []string
 	for _, stageID := range readyStages {
 		if spec, ok := specs[stageID]; ok {
 			for _, depID := range spec.Dependencies {
-				c.materializeInlineResults(ctx, queryID, depID)
+				if !seen[depID] {
+					seen[depID] = true
+					depsToMaterialize = append(depsToMaterialize, depID)
+				}
 			}
+		}
+	}
+	if len(depsToMaterialize) > 1 {
+		var matWg sync.WaitGroup
+		for _, depID := range depsToMaterialize {
+			matWg.Add(1)
+			go func(sid string) {
+				defer matWg.Done()
+				c.materializeInlineResults(ctx, queryID, sid)
+			}(depID)
+		}
+		matWg.Wait()
+	} else {
+		for _, depID := range depsToMaterialize {
+			c.materializeInlineResults(ctx, queryID, depID)
 		}
 	}
 
