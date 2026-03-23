@@ -499,10 +499,11 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 					return err
 				}
 				ji := JoinInfo{
-					Type:       "cross join",
-					RightTable: rightTable.Name,
-					RightAlias: rightTable.Alias,
-					Lateral:    true,
+					Type:          "cross join",
+					RightTable:    rightTable.Name,
+					RightAlias:    rightTable.Alias,
+					RightTableRef: &rightTable,
+					Lateral:       true,
 				}
 				if p.isKeyword(TokenKWOn) {
 					p.advance()
@@ -540,10 +541,11 @@ func (p *selectParser) parseFromClause(info *SelectInfo) error {
 		}
 
 		ji := JoinInfo{
-			Type:       joinType,
-			RightTable: rightTable.Name,
-			RightAlias: rightTable.Alias,
-			Lateral:    lateral,
+			Type:          joinType,
+			RightTable:    rightTable.Name,
+			RightAlias:    rightTable.Alias,
+			RightTableRef: &rightTable,
+			Lateral:       lateral,
 		}
 
 		// Parse ON condition

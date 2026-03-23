@@ -73,11 +73,13 @@ type Node struct {
 	ScanPredicates  []Predicate       // pushed-down filter predicates for row group pruning
 	ScanRowEstimate int64             // estimated row count from manifest (0 = unknown)
 
-	// Table Function (e.g., read_json, read_csv)
-	IsTableFunc    bool              // true if this scan reads from a table function
-	FuncName       string            // function name (e.g., "read_json")
-	FuncArgs       []string          // positional arguments (e.g., URL/path)
-	FuncNamedArgs  map[string]string // named arguments (e.g., delimiter="|")
+	// Table Function (e.g., read_json, read_csv, unnest)
+	IsTableFunc     bool              // true if this scan reads from a table function
+	FuncName        string            // function name (e.g., "read_json")
+	FuncArgs        []string          // positional arguments (e.g., URL/path)
+	FuncNamedArgs   map[string]string // named arguments (e.g., delimiter="|")
+	WithOrdinality  bool              // UNNEST(...) WITH ORDINALITY
+	FuncColAliases  []string          // AS alias(col1, col2, ...)
 
 	// Filter
 	Predicates []Predicate

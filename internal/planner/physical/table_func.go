@@ -448,3 +448,107 @@ func (s *generateSeriesSource) Next(_ context.Context) (*batch.RecordBatch, erro
 
 func (s *generateSeriesSource) Close() error { return nil }
 
+// unnestSource expands a list of values into rows, one per element.
+// Supports: SELECT * FROM unnest(1, 2, 3) AS u(val)
+// With ordinality adds a 1-based index column.
+type unnestSource struct {
+	values         []string
+	withOrdinality bool
+	colName        string
+	ordColName     string
+	done           bool
+}
+
+func newUnnestSource(args []string, withOrdinality bool, colAliases []string) (*unnestSource, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("unnest requires at least 1 argument")
+	}
+	colName := "unnest"
+	ordColName := "ordinality"
+	if len(colAliases) > 0 {
+		colName = colAliases[0]
+	}
+	if len(colAliases) > 1 {
+		ordColName = colAliases[1]
+	}
+	return &unnestSource{
+		values:         args,
+		withOrdinality: withOrdinality,
+		colName:        colName,
+		ordColName:     ordColName,
+	}, nil
+}
+
+func (s *unnestSource) Init(_ context.Context) error {
+	s.done = false
+	return nil
+}
+
+func (s *unnestSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.done {
+		return nil, nil
+	}
+	s.done = true
+
+	n := len(s.values)
+	typ := inferUnnestType(s.values)
+
+	schema := []parquet.Column{{Name: s.colName, Type: typ}}
+	if s.withOrdinality {
+		schema = append(schema, parquet.Column{Name: s.ordColName, Type: parquet.TypeInt64})
+	}
+
+	b := batch.NewRecordBatch(schema, n)
+	b.Len = n
+
+	// Fill the value column
+	for i, raw := range s.values {
+		v := strings.TrimSpace(raw)
+		switch typ {
+		case parquet.TypeInt64:
+			val, _ := strconv.ParseInt(v, 10, 64)
+			b.Columns[0].Int64Data[i] = val
+		case parquet.TypeFloat64:
+			val, _ := strconv.ParseFloat(v, 64)
+			b.Columns[0].Float64Data[i] = val
+		case parquet.TypeString:
+			if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+				v = v[1 : len(v)-1]
+			}
+			b.Columns[0].BytesData.Set(i, []byte(v))
+		}
+	}
+
+	// Fill ordinality column (1-based)
+	if s.withOrdinality {
+		for i := range n {
+			b.Columns[1].Int64Data[i] = int64(i + 1)
+		}
+	}
+
+	return b, nil
+}
+
+func (s *unnestSource) Close() error { return nil }
+
+// inferUnnestType detects the type from the first value.
+func inferUnnestType(vals []string) parquet.TypeID {
+	if len(vals) == 0 {
+		return parquet.TypeString
+	}
+	v := strings.TrimSpace(vals[0])
+	// Quoted string
+	if len(v) >= 2 && v[0] == '\'' && v[len(v)-1] == '\'' {
+		return parquet.TypeString
+	}
+	// Try integer
+	if _, err := strconv.ParseInt(v, 10, 64); err == nil {
+		return parquet.TypeInt64
+	}
+	// Try float
+	if _, err := strconv.ParseFloat(v, 64); err == nil {
+		return parquet.TypeFloat64
+	}
+	return parquet.TypeString
+}
+

@@ -341,13 +341,14 @@ type SelectColumn struct {
 
 // JoinInfo describes a JOIN clause.
 type JoinInfo struct {
-	Type       string // join, left join, right join, full outer join, cross join
-	LeftTable  string
-	RightTable string
-	RightAlias string
-	Condition  string
-	CondExpr   Node
-	Lateral    bool // LATERAL join — right side can reference left side columns
+	Type          string // join, left join, right join, full outer join, cross join
+	LeftTable     string
+	RightTable    string
+	RightAlias    string
+	RightTableRef *TableRef // full right-side table ref (includes function info)
+	Condition     string
+	CondExpr      Node
+	Lateral       bool // LATERAL join — right side can reference left side columns
 }
 
 // OrderByItem describes an ORDER BY element.
