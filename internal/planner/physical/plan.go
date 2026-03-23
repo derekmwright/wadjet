@@ -4470,7 +4470,7 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			data, err := readAll(rc)
+			data, err := readAllSized(rc, file.SizeBytes)
 			rc.Close()
 			if err != nil {
 				continue

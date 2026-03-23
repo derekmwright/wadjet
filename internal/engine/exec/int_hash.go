@@ -125,6 +125,38 @@ func (h *intHashTable) GetOrInsert(key int64, val int32) (int32, bool) {
 	}
 }
 
+// GetOrInsertNoGrow is like GetOrInsert but defers the growth check.
+// The caller must call CheckGrow() after a batch of inserts to maintain
+// the load factor invariant. This variant is inlineable (cost < 80) unlike
+// GetOrInsert (cost 132), eliminating function call overhead in hot loops
+// like consumeBatchIntGroup which calls this millions of times.
+func (h *intHashTable) GetOrInsertNoGrow(key int64, val int32) (int32, bool) {
+	idx := fibHash(key) & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.key == intHashEmpty {
+			e.key = key
+			e.val = val
+			h.size++
+			return val, false
+		}
+		if e.key == key {
+			return e.val, true
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
+// CheckGrow grows the table if load factor exceeds 70%.
+// Must be called after a batch of GetOrInsertNoGrow calls.
+//
+//go:noinline
+func (h *intHashTable) CheckGrow() {
+	if h.size*10 > len(h.entries)*7 {
+		h.grow()
+	}
+}
+
 // Len returns the number of entries in the table.
 func (h *intHashTable) Len() int { return h.size }
 
