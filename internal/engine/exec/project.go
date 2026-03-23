@@ -218,6 +218,12 @@ func projectCopyColumn(dst, src *batch.Vector, n int) {
 	dst.Nulls.CopyFrom(&src.Nulls, n)
 }
 
+// GatherColumn copies selected rows from src to contiguous dst positions.
+// Exported for use by aggPreProject materialize.
+func GatherColumn(dst, src *batch.Vector, sel []uint32) {
+	projectGatherColumn(dst, src, sel)
+}
+
 // projectGatherColumn copies selected rows from src to contiguous dst positions.
 // Used when the input has a selection vector.
 func projectGatherColumn(dst, src *batch.Vector, sel []uint32) {
