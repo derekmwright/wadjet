@@ -166,6 +166,13 @@ func (e *Executor) executeScan(ctx context.Context, task distributed.Task, resul
 		allBatches = filtered
 	}
 
+	// Fused scan-aggregate: perform partial aggregation at the scan level
+	// to reduce data volume before writing results. Eliminates the separate
+	// aggregate stage S3 round-trip (e.g., 60M rows → 4 aggregate groups).
+	if len(task.ScanAggSpecs) > 0 {
+		return e.executeFusedScanAggregate(ctx, task, allBatches, result)
+	}
+
 	var totalRows int64
 	for _, b := range allBatches {
 		totalRows += int64(b.ActiveLen())
@@ -177,6 +184,88 @@ func (e *Executor) executeScan(ctx context.Context, task distributed.Task, resul
 
 	result.NumRows = totalRows
 	return e.writeBatchResult(ctx, task, allBatches, result)
+}
+
+// executeFusedScanAggregate performs partial aggregation on scanned batches,
+// producing aggregate results instead of raw rows. This eliminates the
+// scan→aggregate S3 round-trip by fusing both operations into one task.
+func (e *Executor) executeFusedScanAggregate(ctx context.Context, task distributed.Task, allBatches []*batch.RecordBatch, result *distributed.ResultNotification) error {
+	if len(allBatches) == 0 {
+		return nil
+	}
+
+	// Pre-compute expression GROUP BY columns and aggregate inputs
+	exprCols := collectAggExpressions(task.ScanAggGroupBy, task.ScanAggSpecs)
+	if len(exprCols) > 0 {
+		for i, b := range allBatches {
+			allBatches[i] = addComputedColumns(b, exprCols)
+		}
+	}
+
+	// Build aggregate operator
+	aggs := make([]exec.AggColumn, len(task.ScanAggSpecs))
+	for i, a := range task.ScanAggSpecs {
+		aggFunc := a.Func
+		aggs[i] = exec.AggColumn{
+			Func:       parseAggFunc(aggFunc),
+			InputCol:   a.InputCol,
+			OutputCol:  a.OutputCol,
+			OutputType: parquet.TypeFloat64,
+		}
+		if aggFunc == "count" || aggFunc == "count_star" {
+			aggs[i].OutputType = parquet.TypeInt64
+		}
+	}
+
+	agg := exec.NewHashAggregate(task.ScanAggGroupBy, aggs)
+
+	// Wire spill manager if memory budget is set
+	spill, tracker := e.newSpillManager(task.ID)
+	if spill != nil {
+		agg.Spill = spill
+		defer spill.Cleanup()
+		defer e.recordSpillMetrics(spill, tracker)
+	}
+
+	if err := agg.Init(ctx); err != nil {
+		return err
+	}
+
+	for _, b := range allBatches {
+		if err := agg.Consume(ctx, b); err != nil {
+			return err
+		}
+	}
+	if err := agg.Finalize(ctx); err != nil {
+		return err
+	}
+
+	var resultBatches []*batch.RecordBatch
+	var totalRows int64
+	for {
+		rb, err := agg.Next(ctx)
+		if err != nil {
+			return err
+		}
+		if rb == nil {
+			break
+		}
+		totalRows += int64(rb.ActiveLen())
+		resultBatches = append(resultBatches, rb)
+	}
+
+	e.logger.Info("fused scan-aggregate completed",
+		"task_id", task.ID,
+		"input_batches", len(allBatches),
+		"output_rows", totalRows,
+	)
+
+	result.NumRows = totalRows
+	if totalRows == 0 {
+		return nil
+	}
+
+	return e.writeBatchResult(ctx, task, resultBatches, result)
 }
 
 // applyBatchFilters applies SQL filter expressions to a RecordBatch using
