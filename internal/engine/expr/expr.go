@@ -509,6 +509,30 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 	}
 }
 
+// CloneVec creates a deep copy of the BinOpFloat64 tree with fresh scratch
+// buffers. Required for parallel pipeline execution where multiple workers
+// must not share mutable vecBuf state. Stateless leaf nodes (ColRef, Literal)
+// are shared; only BinOpFloat64 nodes (which own vecBuf) are cloned.
+func (e *BinOpFloat64) CloneVec() *BinOpFloat64 {
+	clone := &BinOpFloat64{
+		Op:         e.Op,
+		opCode:     e.opCode,
+		opResolved: e.opResolved,
+		// vecBuf intentionally nil — each clone allocates on first use
+	}
+	if child, ok := e.Left.(*BinOpFloat64); ok {
+		clone.Left = child.CloneVec()
+	} else {
+		clone.Left = e.Left
+	}
+	if child, ok := e.Right.(*BinOpFloat64); ok {
+		clone.Right = child.CloneVec()
+	} else {
+		clone.Right = e.Right
+	}
+	return clone
+}
+
 // EvalFloat64Vec evaluates left and right operands in bulk, then applies the
 // arithmetic op in a tight loop. Eliminates ~5 function calls per row.
 func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool {
