@@ -1196,6 +1196,30 @@ func (p *selectParser) parseUnary() (Node, error) {
 	return p.parsePostfix()
 }
 
+// jsonPathArg converts a -> / ->> right-hand side to a json_extract path argument.
+// Integer keys become "$[N]" (array index), string/ident keys become "$.key" (object field).
+func jsonPathArg(node Node) Node {
+	switch n := node.(type) {
+	case *Lit:
+		if n.Kind == LitString {
+			return &Lit{Value: "$." + n.Value, Kind: LitString}
+		}
+		if n.Kind == LitNumber {
+			return &Lit{Value: "$[" + n.Value + "]", Kind: LitString}
+		}
+		return node
+	case *ColRef:
+		// Unquoted identifier treated as field name
+		name := n.Column
+		if n.Table != "" {
+			name = n.Table + "." + name
+		}
+		return &Lit{Value: "$." + name, Kind: LitString}
+	default:
+		return node
+	}
+}
+
 // parsePostfix handles :: type cast and subscript access (left to right).
 func (p *selectParser) parsePostfix() (Node, error) {
 	expr, err := p.parsePrimary()
@@ -1230,6 +1254,28 @@ func (p *selectParser) parsePostfix() (Node, error) {
 			expr = &FuncCallNode{
 				Name: "element_at",
 				Args: []Node{expr, index},
+			}
+		case TokenJSONArrow:
+			// JSON field access: expr -> key → json_extract(expr, key)
+			p.advance()
+			right, err := p.parsePrimary()
+			if err != nil {
+				return nil, fmt.Errorf("expected expression after ->")
+			}
+			expr = &FuncCallNode{
+				Name: "json_extract",
+				Args: []Node{expr, jsonPathArg(right)},
+			}
+		case TokenJSONDoubleArrow:
+			// JSON text access: expr ->> key → json_extract_scalar(expr, key)
+			p.advance()
+			right, err := p.parsePrimary()
+			if err != nil {
+				return nil, fmt.Errorf("expected expression after ->>")
+			}
+			expr = &FuncCallNode{
+				Name: "json_extract_scalar",
+				Args: []Node{expr, jsonPathArg(right)},
 			}
 		default:
 			return expr, nil

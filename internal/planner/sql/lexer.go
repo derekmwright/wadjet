@@ -36,6 +36,8 @@ const (
 	TokenPercent // %
 	TokenConcat      // ||
 	TokenDoubleColon // ::
+	TokenJSONArrow       // ->
+	TokenJSONDoubleArrow // ->>
 	TokenEq          // =
 	TokenNotEq   // != or <>
 	TokenLT      // <
@@ -526,7 +528,17 @@ func lexStart(l *lexer) stateFn {
 		l.emit(TokenPlus)
 		return nil
 	case r == '-':
-		l.emit(TokenMinus)
+		if l.peek() == '>' {
+			l.next()
+			if l.peek() == '>' {
+				l.next()
+				l.emit(TokenJSONDoubleArrow) // ->>
+			} else {
+				l.emit(TokenJSONArrow) // ->
+			}
+		} else {
+			l.emit(TokenMinus)
+		}
 		return nil
 	case r == '/':
 		l.emit(TokenSlash)

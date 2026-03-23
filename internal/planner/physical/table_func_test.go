@@ -434,6 +434,179 @@ func TestTableFuncDBScan_SourceCreated(t *testing.T) {
 	}
 }
 
+func TestGenerateSeries_Basic(t *testing.T) {
+	source, err := buildTableFunctionSource("generate_series", []string{"1", "5"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	b, err := source.Next(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil {
+		t.Fatal("expected batch")
+	}
+	if b.Len != 5 {
+		t.Fatalf("expected 5 rows, got %d", b.Len)
+	}
+	for i := 0; i < 5; i++ {
+		got := b.Columns[0].Int64Data[i]
+		want := int64(i + 1)
+		if got != want {
+			t.Errorf("row %d: got %d, want %d", i, got, want)
+		}
+	}
+	if b.Schema[0].Name != "generate_series" {
+		t.Errorf("expected column name 'generate_series', got %q", b.Schema[0].Name)
+	}
+
+	b2, err := source.Next(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2 != nil {
+		t.Error("expected nil after exhaustion")
+	}
+}
+
+func TestGenerateSeries_WithStep(t *testing.T) {
+	source, err := buildTableFunctionSource("generate_series", []string{"0", "10", "3"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	b, err := source.Next(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil {
+		t.Fatal("expected batch")
+	}
+	// 0, 3, 6, 9 = 4 values
+	if b.Len != 4 {
+		t.Fatalf("expected 4 rows, got %d", b.Len)
+	}
+	expected := []int64{0, 3, 6, 9}
+	for i, want := range expected {
+		if b.Columns[0].Int64Data[i] != want {
+			t.Errorf("row %d: got %d, want %d", i, b.Columns[0].Int64Data[i], want)
+		}
+	}
+}
+
+func TestGenerateSeries_Descending(t *testing.T) {
+	source, err := buildTableFunctionSource("generate_series", []string{"5", "1"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	b, err := source.Next(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil {
+		t.Fatal("expected batch")
+	}
+	if b.Len != 5 {
+		t.Fatalf("expected 5 rows, got %d", b.Len)
+	}
+	expected := []int64{5, 4, 3, 2, 1}
+	for i, want := range expected {
+		if b.Columns[0].Int64Data[i] != want {
+			t.Errorf("row %d: got %d, want %d", i, b.Columns[0].Int64Data[i], want)
+		}
+	}
+}
+
+func TestGenerateSeries_NegativeStep(t *testing.T) {
+	source, err := buildTableFunctionSource("generate_series", []string{"10", "0", "-2"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	b, err := source.Next(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil {
+		t.Fatal("expected batch")
+	}
+	// 10, 8, 6, 4, 2, 0 = 6 values
+	if b.Len != 6 {
+		t.Fatalf("expected 6 rows, got %d", b.Len)
+	}
+	expected := []int64{10, 8, 6, 4, 2, 0}
+	for i, want := range expected {
+		if b.Columns[0].Int64Data[i] != want {
+			t.Errorf("row %d: got %d, want %d", i, b.Columns[0].Int64Data[i], want)
+		}
+	}
+}
+
+func TestGenerateSeries_SingleValue(t *testing.T) {
+	source, err := buildTableFunctionSource("generate_series", []string{"5", "5"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	b, err := source.Next(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b == nil {
+		t.Fatal("expected batch")
+	}
+	if b.Len != 1 {
+		t.Fatalf("expected 1 row, got %d", b.Len)
+	}
+	if b.Columns[0].Int64Data[0] != 5 {
+		t.Errorf("expected 5, got %d", b.Columns[0].Int64Data[0])
+	}
+}
+
+func TestGenerateSeries_Errors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"too few args", []string{"1"}},
+		{"no args", nil},
+		{"invalid start", []string{"abc", "5"}},
+		{"invalid stop", []string{"1", "xyz"}},
+		{"invalid step", []string{"1", "5", "foo"}},
+		{"zero step", []string{"1", "5", "0"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildTableFunctionSource("generate_series", tt.args, nil)
+			if err == nil {
+				t.Error("expected error")
+			}
+		})
+	}
+}
+
 func TestSplitURL(t *testing.T) {
 	tests := []struct {
 		url    string
