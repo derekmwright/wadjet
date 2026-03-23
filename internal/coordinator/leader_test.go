@@ -239,7 +239,7 @@ func TestQueryStateStore_SaveAndGet(t *testing.T) {
 	// Verify timestamps round-trip through JSON
 	// JSON time marshaling truncates to seconds by default, so we compare
 	// with second precision
-	if got.StartedAt.Truncate(time.Second) != now.Truncate(time.Second) {
+	if !got.StartedAt.Truncate(time.Second).Equal(now.Truncate(time.Second)) {
 		t.Errorf("StartedAt: got %v, want %v", got.StartedAt, now)
 	}
 }
