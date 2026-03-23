@@ -271,20 +271,19 @@ locals {
   EOF
 
   # Coordinator: build + auto-run distributed benchmark
+  # tpch-bench starts its own embedded NATS on :4222 and waits for workers.
+  # Do NOT start "wadjet serve" here — it would grab port 4222 and conflict.
   coordinator_user_data = <<-EOF
     ${local.build_script}
 
-    # Start wadjet coordinator (NATS embedded, workers connect to us)
-    /usr/local/bin/wadjet serve \
-      --mode=coordinator \
-      --pg-addr=:5432 \
-      --nats-port=4222 \
-      --endpoint="s3.${var.region}.amazonaws.com" \
-      --ssl \
-      --bucket="${local.bucket_name}" \
-      --region="${var.region}" \
-      --storage-type=s3 &
-    echo "COORDINATOR_STARTED=1" >> /etc/environment
+    # Auto-run distributed benchmark (tpch-bench embeds its own coordinator + NATS)
+    export WADJET_BUCKET="${local.bucket_name}"
+    export WADJET_REGION="${var.region}"
+    export BENCHMARK_RUNS="${var.benchmark_runs}"
+    export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
+    cd /root/wadjet
+
+    bash deploy/benchmark/run-benchmark.sh distributed SF${var.scale_factor} ${var.worker_count} 2>&1 | tee /root/benchmark.log
   EOF
 }
 
@@ -399,26 +398,32 @@ resource "aws_instance" "worker" {
   user_data = base64encode(<<-EOF
     ${local.build_script}
 
-    # Start wadjet worker connecting to coordinator (retry until NATS is ready)
-    for i in $(seq 1 60); do
+    # Wait for coordinator NATS to be reachable before starting worker
+    COORD_IP="${aws_instance.coordinator[0].private_ip}"
+    echo "Waiting for NATS on $COORD_IP:4222..."
+    for i in $(seq 1 120); do
+      if timeout 2 bash -c "echo > /dev/tcp/$COORD_IP/4222" 2>/dev/null; then
+        echo "NATS reachable after $i attempts"
+        break
+      fi
+      sleep 5
+    done
+
+    # Start wadjet worker (retry on failure — coordinator may restart during benchmark)
+    while true; do
       /usr/local/bin/wadjet serve \
         --mode=worker \
-        --nats-url="nats://${aws_instance.coordinator[0].private_ip}:4222" \
+        --nats-url="nats://$COORD_IP:4222" \
         --endpoint="s3.${var.region}.amazonaws.com" \
         --ssl \
         --bucket="${local.bucket_name}" \
         --region="${var.region}" \
         --storage-type=s3 \
-        --max-concurrent=${var.max_concurrent} &
-      WORKER_PID=$!
+        --max-concurrent=${var.max_concurrent}
+      EXIT_CODE=$?
+      echo "Worker exited with code $EXIT_CODE, restarting in 5s..."
+      echo "WORKER_STARTED=1" >> /etc/environment
       sleep 5
-      if kill -0 $WORKER_PID 2>/dev/null; then
-        echo "WORKER_STARTED=1" >> /etc/environment
-        wait $WORKER_PID
-        break
-      fi
-      echo "Worker attempt $i failed, retrying in 10s..."
-      sleep 10
     done
   EOF
   )
