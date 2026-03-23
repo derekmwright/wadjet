@@ -396,10 +396,13 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	}
 	defer source.Close()
 
-	// Use parallel build when: enough CPUs, no spill/memory tracking (complex
-	// interactions with partitioning), and not key-only mode (rare, fast already).
+	// Use parallel build when: enough CPUs and no spill/memory tracking
+	// (complex interactions with partitioning).
 	workers := runtime.NumCPU()
-	if workers > 1 && h.Spill == nil && h.MemTracker == nil && !h.SemiAntiKeyOnly {
+	if workers > 1 && h.Spill == nil && h.MemTracker == nil {
+		if h.SemiAntiKeyOnly {
+			return h.buildParallelKeyOnly(ctx, source, workers)
+		}
 		return h.buildParallel(ctx, source, workers)
 	}
 
@@ -789,6 +792,241 @@ func (h *HashJoin) buildParallel(ctx context.Context, source Source, workers int
 	h.buildBloom()
 	h.buildDone = true
 	return nil
+}
+
+// buildParallelKeyOnly is a parallel build path for semi/anti joins that only
+// need key existence (no batch storage, no arena). Each worker builds a local
+// hash table, then tables are merged by inserting all keys into the main table.
+// For Q21-style queries this parallelizes two 6M-row lineitem builds.
+func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, workers int) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("join build cancelled: %w", err)
+	}
+
+	first, err := source.Next(ctx)
+	if err != nil {
+		return fmt.Errorf("build source next: %w", err)
+	}
+	if first == nil {
+		h.buildDone = true
+		return nil
+	}
+
+	h.buildSchema = first.Schema
+	h.buildKeyIdx = make([]int, len(h.RightKeys))
+	for i, col := range h.RightKeys {
+		h.buildKeyIdx[i] = first.ColumnIndex(col)
+	}
+	h.tryEnableIntKey(first)
+
+	// Per-worker local hash tables (key-only, no arena/batch storage).
+	hint := 64
+	if h.BuildRowHint > 0 {
+		hint = int(h.BuildRowHint) / workers
+		if hint < 64 {
+			hint = 64
+		}
+	}
+	locals := make([]*localKeyBuild, workers)
+	for i := range locals {
+		lb := &localKeyBuild{keyBuf: make([]byte, 0, 128)}
+		if h.useIntKey || h.useDualIntKey {
+			lb.intIndex = newIntHashTable(hint)
+		} else {
+			lb.strIndex = newStrHashTable(hint)
+		}
+		locals[i] = lb
+	}
+
+	// Insert first batch into worker 0.
+	h.insertKeyOnlyBatch(locals[0], first)
+
+	// Launch workers.
+	var sourceMu sync.Mutex
+	var wg sync.WaitGroup
+	var firstErr atomic.Value
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(lb *localKeyBuild) {
+			defer wg.Done()
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				sourceMu.Lock()
+				b, err := source.Next(ctx)
+				sourceMu.Unlock()
+				if err != nil {
+					firstErr.CompareAndSwap(nil, fmt.Errorf("build source next: %w", err))
+					return
+				}
+				if b == nil {
+					return
+				}
+				h.insertKeyOnlyBatch(lb, b)
+			}
+		}(locals[i])
+	}
+	wg.Wait()
+
+	if v := firstErr.Load(); v != nil {
+		return v.(error)
+	}
+
+	// Merge: count total rows, pick largest local table as base, insert rest.
+	var totalRows int64
+	bestIdx := 0
+	var bestSize int
+	for i, lb := range locals {
+		totalRows += lb.rows
+		var sz int
+		if h.useIntKey || h.useDualIntKey {
+			sz = lb.intIndex.Len()
+		} else if lb.strIndex != nil {
+			sz = lb.strIndex.Len()
+		}
+		if sz > bestSize {
+			bestSize = sz
+			bestIdx = i
+		}
+	}
+	h.buildRows = totalRows
+
+	// Adopt the largest table directly, merge others into it.
+	if h.useIntKey || h.useDualIntKey {
+		h.intIndex = locals[bestIdx].intIndex
+		for i, lb := range locals {
+			if i == bestIdx {
+				continue
+			}
+			lb.intIndex.ForEach(func(key int64, _ int32) {
+				h.intIndex.Put(key, 0)
+			})
+		}
+	} else {
+		h.strIndex = locals[bestIdx].strIndex
+		for i, lb := range locals {
+			if i == bestIdx {
+				continue
+			}
+			if lb.strIndex != nil {
+				lb.strIndex.ForEach(func(key []byte) {
+					h.strIndex.GetOrInsert(key, 0)
+				})
+			}
+		}
+	}
+
+	h.buildBloom()
+	h.buildDone = true
+	return nil
+}
+
+// localKeyBuild is a per-worker accumulator for parallel key-only hash join build.
+type localKeyBuild struct {
+	intIndex *intHashTable
+	strIndex *strHashTable
+	rows     int64
+	keyBuf   []byte
+}
+
+// insertKeyOnlyBatch inserts keys from a batch into a local key-only hash table.
+func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
+	if h.useIntKey {
+		col := b.Columns[h.buildKeyIdx[0]]
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				key, ok := intKeyFromVector(col, int(si))
+				if !ok {
+					continue
+				}
+				lk.intIndex.Put(key, 0)
+			}
+		} else if !col.Nulls.HasNulls() {
+			switch col.Type {
+			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+				data := col.Int32Data
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					lk.intIndex.Put(int64(data[rowIdx]), 0)
+				}
+			default:
+				data := col.Int64Data
+				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+					lk.intIndex.Put(data[rowIdx], 0)
+				}
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				key, ok := intKeyFromVector(col, rowIdx)
+				if !ok {
+					continue
+				}
+				lk.intIndex.Put(key, 0)
+			}
+		}
+	} else if h.useDualIntKey {
+		col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
+				if !ok {
+					continue
+				}
+				lk.intIndex.Put(dualIntHash(a, bb), 0)
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
+				if !ok {
+					continue
+				}
+				lk.intIndex.Put(dualIntHash(a, bb), 0)
+			}
+		}
+	} else {
+		if lk.strIndex == nil {
+			lk.strIndex = newStrHashTable(64)
+		}
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				lk.keyBuf = lk.keyBuf[:0]
+				for _, idx := range h.buildKeyIdx {
+					if idx < 0 {
+						lk.keyBuf = append(lk.keyBuf, 1)
+						continue
+					}
+					v := b.Columns[idx]
+					if v.Nulls.IsNullFast(int(si)) {
+						lk.keyBuf = append(lk.keyBuf, 1)
+					} else {
+						lk.keyBuf = append(lk.keyBuf, 0)
+						lk.keyBuf = appendColumnValue(lk.keyBuf, v, int(si), v.Type)
+					}
+				}
+				lk.strIndex.GetOrInsert(lk.keyBuf, 0)
+			}
+		} else {
+			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
+				lk.keyBuf = lk.keyBuf[:0]
+				for _, idx := range h.buildKeyIdx {
+					if idx < 0 {
+						lk.keyBuf = append(lk.keyBuf, 1)
+						continue
+					}
+					v := b.Columns[idx]
+					if v.Nulls.IsNullFast(rowIdx) {
+						lk.keyBuf = append(lk.keyBuf, 1)
+					} else {
+						lk.keyBuf = append(lk.keyBuf, 0)
+						lk.keyBuf = appendColumnValue(lk.keyBuf, v, rowIdx, v.Type)
+					}
+				}
+				lk.strIndex.GetOrInsert(lk.keyBuf, 0)
+			}
+		}
+	}
+	lk.rows += int64(b.ActiveLen())
 }
 
 // processLocalBatch inserts one batch into a worker-local build accumulator.
