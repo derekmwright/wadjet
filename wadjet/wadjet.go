@@ -132,7 +132,7 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return db.dropTableSQL(ctx, parsed.DropTable)
 	case plansql.QueryShowTables:
 		return db.showTables(ctx)
-	case plansql.QueryInsert, plansql.QueryUpdate, plansql.QueryDelete:
+	case plansql.QueryInsert, plansql.QueryUpdate, plansql.QueryDelete, plansql.QueryMerge:
 		result, err := db.Execute(ctx, sql)
 		if err != nil {
 			return nil, err
