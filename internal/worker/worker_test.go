@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/nats-io/nats.go"
@@ -338,6 +340,67 @@ func TestWorkerIsCancelled(t *testing.T) {
 
 	if !w.isCancelled("q-test") {
 		t.Error("should be cancelled after publishing cancel message")
+	}
+}
+
+func TestApplyRuntimeFilter(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString},
+	}
+
+	b := batch.FromRows(schema, []map[string]any{
+		{"id": int64(1), "val": "a"},
+		{"id": int64(5), "val": "b"},
+		{"id": int64(10), "val": "c"},
+		{"id": int64(15), "val": "d"},
+		{"id": int64(20), "val": "e"},
+	})
+
+	// Filter: id must be in [5, 15]
+	ranges := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(5), MaxValue: int64(15)},
+	}
+
+	result := applyRuntimeFilter(b, ranges)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if result.ActiveLen() != 3 {
+		t.Fatalf("expected 3 rows (5,10,15), got %d", result.ActiveLen())
+	}
+
+	// Verify the correct rows are selected
+	for i := 0; i < result.ActiveLen(); i++ {
+		row := int(result.Sel[i])
+		id := b.Columns[0].GetValue(row).(int64)
+		if id < 5 || id > 15 {
+			t.Errorf("row %d: id=%d should have been filtered", i, id)
+		}
+	}
+
+	// All rows pass
+	wideRange := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(0), MaxValue: int64(100)},
+	}
+	result2 := applyRuntimeFilter(b, wideRange)
+	if result2.Sel != nil {
+		t.Error("expected no selection vector when all rows pass")
+	}
+
+	// No rows pass
+	narrowRange := []exec.DynamicRange{
+		{Column: "id", MinValue: int64(100), MaxValue: int64(200)},
+	}
+	result3 := applyRuntimeFilter(b, narrowRange)
+	if result3 != nil {
+		t.Error("expected nil when no rows pass")
+	}
+
+	// Nil batch
+	result4 := applyRuntimeFilter(nil, ranges)
+	if result4 != nil {
+		t.Error("expected nil for nil input")
 	}
 }
 

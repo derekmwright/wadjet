@@ -93,7 +93,8 @@ type Node struct {
 	GroupBy          []string
 	GroupByExprs     []plansql.Node // AST for GROUP BY expressions (may be nil)
 	AggExprs         []AggExpr
-	GroupingSetNulls []string // columns that should be NULL in this grouping set
+	GroupingSetNulls []string   // columns that should be NULL in this grouping set (legacy, per-node)
+	GroupingSets     [][]string // single-pass grouping sets: each entry lists the columns in that set
 
 	// Sort
 	OrderBy []OrderExpr

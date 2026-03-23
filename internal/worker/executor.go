@@ -837,6 +837,10 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 		return err
 	}
 
+	// Extract build-side key ranges for runtime filtering of probe batches.
+	// Rows outside the build range can't match — skip them before probing.
+	buildRanges := hj.BuildKeyRange()
+
 	var resultBatches []*batch.RecordBatch
 	var totalRows int64
 	var probeSchema []parquet.Column
@@ -852,6 +856,13 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 				probeSchema = pb.Schema
 			}
 			rb := pb
+			// Apply build-side runtime filter: skip probe rows outside build key range.
+			if len(buildRanges) > 0 {
+				rb = applyRuntimeFilter(rb, buildRanges)
+				if rb == nil || rb.ActiveLen() == 0 {
+					continue
+				}
+			}
 			// Chain through fused joins FIRST: enrich probe stream with
 			// columns from absorbed broadcast joins before the primary probe.
 			// Original pipeline: probe → fused_join1 → fused_join2 → primary_join
@@ -1324,9 +1335,12 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
 	// Build standalone physical plan (single pipeline, no stages).
-	// Intentionally skip setting MemoryBudget — pipeline tasks are full
-	// queries that need maximum performance (parallel hash join build,
-	// no spill overhead). GOMEMLIMIT protects against OOM.
+	// Set memory budget so the planner can install spill managers on
+	// pipeline-breaking operators. Without this, concurrent pipeline tasks
+	// bypass memory tracking and risk OOM under multi-join pressure.
+	if e.memoryBudget > 0 {
+		planner.MemoryBudget = e.memoryBudget
+	}
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
 		return fmt.Errorf("physical plan: %w", err)
@@ -2205,6 +2219,52 @@ func applyFilterExprs(batches []*batch.RecordBatch, filterExprs []string) ([]*ba
 		}
 	}
 	return result, totalRows
+}
+
+// applyRuntimeFilter uses build-side key ranges to pre-filter probe batches.
+// Rows whose join key falls outside the build range cannot match and are excluded
+// via a selection vector, avoiding unnecessary hash table probes.
+func applyRuntimeFilter(b *batch.RecordBatch, ranges []exec.DynamicRange) *batch.RecordBatch {
+	if b == nil || b.ActiveLen() == 0 {
+		return b
+	}
+	n := b.ActiveLen()
+	var sel []uint32
+	for ri := 0; ri < n; ri++ {
+		row := ri
+		if b.Sel != nil {
+			row = int(b.Sel[ri])
+		}
+		pass := true
+		for _, dr := range ranges {
+			ci := b.ColumnIndex(dr.Column)
+			if ci < 0 {
+				continue
+			}
+			v := b.Columns[ci]
+			if v.Nulls.IsNullFast(row) {
+				pass = false
+				break
+			}
+			val := v.GetValue(row)
+			if scan.CompareValues(val, dr.MinValue) < 0 || scan.CompareValues(val, dr.MaxValue) > 0 {
+				pass = false
+				break
+			}
+		}
+		if pass {
+			sel = append(sel, uint32(row))
+		}
+	}
+	if len(sel) == n {
+		return b // all rows pass — no filtering needed
+	}
+	if len(sel) == 0 {
+		return nil
+	}
+	filtered := *b
+	filtered.Sel = sel
+	return &filtered
 }
 
 func parseAggFunc(s string) exec.AggFunc {

@@ -2485,6 +2485,11 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 	}
 
+	// CSE: deduplicate identical computed expressions across projections.
+	// When the same expression appears multiple times (e.g., EXTRACT(year FROM date)
+	// in both SELECT and ORDER BY), compute it once and reuse via ColumnRef.
+	projExprDedup := make(map[string]string) // expr string → first output column name
+
 	var projCols []exec.ProjectColumn
 	for _, proj := range node.Projections {
 		colRef := proj.Column
@@ -2552,22 +2557,30 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 
 		if expression == nil && proj.ASTExpr != nil && !proj.IsAgg {
-			outerTables := collectTableAliases(child)
-			outerCols := collectOuterColumns(child)
-			var compiled expr.Expr
-			var compErr error
-			if len(outerTables) > 0 {
-				if len(outerCols) > 0 {
-					compiled, compErr = expr.CompileWithFullScope(proj.ASTExpr, p.subqueryRunner, outerTables, outerCols)
-				} else {
-					compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
-				}
+			// CSE: if we already compiled this exact expression for a prior
+			// projection column, reuse it via a ColumnRef instead of re-evaluating.
+			exprKey := proj.ASTExpr.String()
+			if prevCol, ok := projExprDedup[exprKey]; ok {
+				expression = exec.ColumnRef(prevCol)
 			} else {
-				compiled, compErr = expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
-			}
-			if compErr == nil {
-				expression = wrapExpr(compiled)
-				compiledExpr = compiled
+				outerTables := collectTableAliases(child)
+				outerCols := collectOuterColumns(child)
+				var compiled expr.Expr
+				var compErr error
+				if len(outerTables) > 0 {
+					if len(outerCols) > 0 {
+						compiled, compErr = expr.CompileWithFullScope(proj.ASTExpr, p.subqueryRunner, outerTables, outerCols)
+					} else {
+						compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
+					}
+				} else {
+					compiled, compErr = expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
+				}
+				if compErr == nil {
+					expression = wrapExpr(compiled)
+					compiledExpr = compiled
+					projExprDedup[exprKey] = name
+				}
 			}
 		}
 		isDirectCopy := expression == nil
@@ -2787,10 +2800,25 @@ func (p *Planner) buildAggregate(ctx context.Context, node *logical.Node) (exec.
 		hashAgg.Spill = sm
 	}
 
-	// For GROUPING SETS: wrap with a projection that adds NULL columns
-	// for the group-by columns not in this particular set.
+	// For GROUPING SETS: single-pass mode — convert column names to indices
 	var postOps []exec.UnaryOperator
-	if len(node.GroupingSetNulls) > 0 {
+	if len(node.GroupingSets) > 0 {
+		colIndex := make(map[string]int, len(groupByCols))
+		for i, c := range groupByCols {
+			colIndex[c] = i
+		}
+		sets := make([][]int, len(node.GroupingSets))
+		for i, set := range node.GroupingSets {
+			indices := make([]int, 0, len(set))
+			for _, col := range set {
+				if idx, ok := colIndex[col]; ok {
+					indices = append(indices, idx)
+				}
+			}
+			sets[i] = indices
+		}
+		hashAgg.GroupingSets = sets
+	} else if len(node.GroupingSetNulls) > 0 {
 		hashAgg.NullGroupCols = node.GroupingSetNulls
 	}
 

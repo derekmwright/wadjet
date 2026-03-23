@@ -625,53 +625,28 @@ func convertBound(b plansql.FrameBound) WindowBound {
 	return wb
 }
 
-// buildGroupingSets creates a plan that runs multiple aggregate passes
-// (one per grouping set) and combines them with UNION ALL.
-// Columns not present in a given grouping set produce NULL in the output.
+// buildGroupingSets creates a single aggregate node that processes all grouping
+// sets in one pass. The HashAggregate inserts each row once per set with a
+// set-prefixed key, avoiding N rescans of the input.
 func buildGroupingSets(inputPlan *Node, allGroupCols []string, aggs []AggExpr, sets [][]string) *Node {
 	if len(sets) == 0 {
 		return NewAggregate(inputPlan, allGroupCols, aggs)
 	}
 
-	// Build one aggregate node per grouping set.
-	var plans []*Node
-	for _, set := range sets {
-		setMap := make(map[string]bool, len(set))
-		for _, c := range set {
-			setMap[cleanExpr(c)] = true
+	// Normalize set columns
+	cleanSets := make([][]string, len(sets))
+	for i, set := range sets {
+		cs := make([]string, len(set))
+		for j, c := range set {
+			cs[j] = cleanExpr(c)
 		}
-
-		// The GROUP BY for this set is only the columns in this set
-		var setCols []string
-		for _, c := range set {
-			setCols = append(setCols, cleanExpr(c))
-		}
-
-		// Build aggregate for this grouping set
-		aggNode := NewAggregate(inputPlan, setCols, aggs)
-
-		// Mark which columns from allGroupCols are NOT in this set
-		// (they need to be NULL). We do this via the GroupingSetNulls field.
-		var nullCols []string
-		for _, c := range allGroupCols {
-			if !setMap[c] {
-				nullCols = append(nullCols, c)
-			}
-		}
-		aggNode.GroupingSetNulls = nullCols
-
-		plans = append(plans, aggNode)
+		cleanSets[i] = cs
 	}
 
-	// Combine with UNION ALL
-	if len(plans) == 1 {
-		return plans[0]
-	}
-	result := plans[0]
-	for i := 1; i < len(plans); i++ {
-		result = NewUnion(result, plans[i], true) // UNION ALL
-	}
-	return result
+	// Single aggregate over all group columns, with GroupingSets metadata
+	aggNode := NewAggregate(inputPlan, allGroupCols, aggs)
+	aggNode.GroupingSets = cleanSets
+	return aggNode
 }
 
 // buildSetOpPlan constructs a logical plan for a set operation (UNION, INTERSECT, EXCEPT).
