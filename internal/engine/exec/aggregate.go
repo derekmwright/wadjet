@@ -169,6 +169,16 @@ func (p *groupStatePool) alloc() *groupState {
 	return gs
 }
 
+// preAlloc pre-allocates a single large initial chunk to avoid repeated
+// chunk allocations during the hot consume loop. Only useful before any
+// alloc() calls (when the pool is empty).
+func (p *groupStatePool) preAlloc(n int) {
+	if len(p.chunks) == 0 && n > groupStateChunkSize {
+		p.chunks = append(p.chunks, make([]groupState, n))
+		p.pos = 0
+	}
+}
+
 // stringAggState accumulates strings with a separator.
 type stringAggState struct {
 	parts []string
@@ -471,6 +481,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			h.useIntGroupKey = true
 			h.intGroupIndex = newIntHashTable(htInitSize)
 			h.intGroupKeyCol = h.groupColIdx[0]
+			if h.intGroupStates == nil {
+				h.intGroupStates = make([]*groupState, 0, htInitSize)
+				h.gsPool.preAlloc(htInitSize)
+			}
 			if h.intFlatAccs == nil {
 				if len(h.intGroupStates) > 0 {
 					h.rebuildFlatAccums(b)
@@ -492,6 +506,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 				h.useDualIntGroupKey = true
 				h.dualIntGroupKeyCols = [2]int{idx0, idx1}
 				h.intGroupIndex = newIntHashTable(htInitSize)
+				if h.intGroupStates == nil {
+					h.intGroupStates = make([]*groupState, 0, htInitSize)
+					h.gsPool.preAlloc(htInitSize)
+				}
 				if h.intFlatAccs == nil {
 					if len(h.intGroupStates) > 0 {
 						h.rebuildFlatAccums(b)
@@ -526,6 +544,10 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		if canCompact && estimatedWidth <= 8 {
 			h.useCompactGroupKey = true
 			h.intGroupIndex = newIntHashTable(htInitSize)
+			if h.intGroupStates == nil {
+				h.intGroupStates = make([]*groupState, 0, htInitSize)
+				h.gsPool.preAlloc(htInitSize)
+			}
 		}
 	}
 

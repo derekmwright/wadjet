@@ -113,10 +113,12 @@ type TopN struct {
 }
 
 func NewTopN(keys []SortKey, n int) *TopN {
+	s := NewSort(keys)
+	s.Limit = n
 	return &TopN{
 		Keys:  keys,
 		N:     n,
-		inner: NewSort(keys),
+		inner: s,
 	}
 }
 
