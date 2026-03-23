@@ -2378,6 +2378,12 @@ func reorderJoins(n *Node) *Node {
 	if !isInnerJoin(n) {
 		return n
 	}
+	// Don't reorder joins involving CTE references — the CTE's cardinality is
+	// unknown at plan time, so cost estimates are unreliable and reordering can
+	// break key assignment when both tables share column names.
+	if hasCTERef(n.Children[0]) || hasCTERef(n.Children[1]) {
+		return n
+	}
 	// Flatten the join chain
 	var rels []*Node
 	var edges []joinEdge
@@ -2395,6 +2401,22 @@ func reorderJoins(n *Node) *Node {
 		return n
 	}
 	return greedyJoinReorder(rels, edges)
+}
+
+// hasCTERef returns true if the subtree contains a CTE reference scan.
+func hasCTERef(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.CTEName != "" {
+		return true
+	}
+	for _, c := range n.Children {
+		if hasCTERef(c) {
+			return true
+		}
+	}
+	return false
 }
 
 // isInnerJoin returns true for INNER joins (or empty join type which defaults to inner).
