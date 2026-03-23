@@ -378,7 +378,11 @@ func setupWithNATSAndCatalog(t *testing.T) (context.Context, *Coordinator, objst
 		t.Fatal(err)
 	}
 
-	cat := catalog.NewWithStore(store, "test")
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("creating NATS KV: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}

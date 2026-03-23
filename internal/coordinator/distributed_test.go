@@ -48,13 +48,19 @@ func setupDistributed(t *testing.T) (context.Context, *Coordinator, objstore.Sto
 		t.Fatalf("setting up streams: %v", err)
 	}
 
-	// Create in-memory object store and catalog
+	// Create in-memory object store and NATS-backed catalog.
+	// Using NATS KV (not NewMemKV) so workers can access table metadata
+	// when executing pipeline tasks that need catalog lookups.
 	store := objstore.NewMemStore()
 	if err := store.MakeBucket(ctx, "test"); err != nil {
 		t.Fatal(err)
 	}
 
-	cat := catalog.NewWithStore(store, "test")
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("creating NATS KV: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}
@@ -271,7 +277,11 @@ func setupDistributedWithBudget(t *testing.T, memBudget int64, resultStoreBytes 
 		t.Fatal(err)
 	}
 
-	cat := catalog.NewWithStore(store, "test")
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("creating NATS KV: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}
