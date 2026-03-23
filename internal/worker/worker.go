@@ -78,6 +78,23 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		executor.SetResultStore(NewResultStore(cfg.ResultStoreBytes))
 	}
 
+	// NATS KV result cache: enables cross-worker inter-stage result transfer
+	// without S3 round-trips. Workers write small results here instead of S3.
+	if js != nil {
+		kv, kvErr := js.CreateOrUpdateKeyValue(context.Background(), jetstream.KeyValueConfig{
+			Bucket:   "wadjet_results_data",
+			TTL:      5 * time.Minute,
+			MaxBytes: 1024 * 1024 * 1024, // 1 GB total
+			Storage:  jetstream.MemoryStorage,
+		})
+		if kvErr == nil {
+			executor.SetResultKV(kv)
+			logger.Info("NATS KV result cache enabled", "bucket", "wadjet_results_data")
+		} else {
+			logger.Debug("NATS KV result cache unavailable, using S3 only", "error", kvErr)
+		}
+	}
+
 	return &Worker{
 		config:    cfg,
 		store:     store,
