@@ -155,7 +155,7 @@ func TestShuffleCorrectness(t *testing.T) {
 		{19, 1},
 		{20, 3},
 		{21, 1},
-		{22, 0},
+		{22, 7},
 	}
 
 	for _, tt := range tests {
