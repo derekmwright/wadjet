@@ -162,6 +162,80 @@ func (h *strHashTable) GetOrInsert(key []byte, val int32) (int32, bool) {
 	}
 }
 
+// PutNoGrow inserts a key-value pair without checking the load factor.
+// The caller must call CheckGrow() after a batch of inserts. This variant
+// defers growth to reduce overhead in hot loops like hash join build.
+func (h *strHashTable) PutNoGrow(key []byte, val int32) (int32, bool) {
+	hash := strHash(key)
+	tag := uint32(hash)
+	idx := hash & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.offset == -1 {
+			offset := int32(len(h.arena))
+			h.arena = append(h.arena, key...)
+			e.offset = offset
+			e.keyLen = int32(len(key))
+			e.val = val
+			e.hashTag = tag
+			h.size++
+			return 0, false
+		}
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.arena[e.offset:e.offset+e.keyLen], key) {
+			old := e.val
+			e.val = val
+			return old, true
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
+// GetOrInsertNoGrow is like GetOrInsert but defers the growth check.
+// The caller must call CheckGrow() after a batch of inserts.
+func (h *strHashTable) GetOrInsertNoGrow(key []byte, val int32) (int32, bool) {
+	hash := strHash(key)
+	tag := uint32(hash)
+	idx := hash & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.offset == -1 {
+			offset := int32(len(h.arena))
+			h.arena = append(h.arena, key...)
+			e.offset = offset
+			e.keyLen = int32(len(key))
+			e.val = val
+			e.hashTag = tag
+			h.size++
+			return val, false
+		}
+		if e.hashTag == tag && e.keyLen == int32(len(key)) && strKeyEqual(h.arena[e.offset:e.offset+e.keyLen], key) {
+			return e.val, true
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
+// CheckGrow grows the table if load factor exceeds 70%.
+// Must be called after a batch of PutNoGrow/GetOrInsertNoGrow calls.
+//
+//go:noinline
+func (h *strHashTable) CheckGrow() {
+	if h.size*10 > len(h.entries)*7 {
+		h.grow()
+	}
+}
+
+// EnsureCapacity grows the table so that `additional` more entries can be
+// inserted via PutNoGrow without exceeding the 70% load factor.
+// Call once per batch before a PutNoGrow loop.
+//
+//go:noinline
+func (h *strHashTable) EnsureCapacity(additional int) {
+	for (h.size+additional)*10 > len(h.entries)*7 {
+		h.grow()
+	}
+}
+
 // Len returns the number of entries.
 func (h *strHashTable) Len() int { return h.size }
 
