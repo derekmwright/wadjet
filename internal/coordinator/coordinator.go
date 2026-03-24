@@ -56,8 +56,9 @@ type Coordinator struct {
 	cleaner   *ResultCleaner
 	leader    *LeaderElection   // nil = always leader (standalone mode)
 	queryStore *QueryStateStore // nil = no persistence (standalone mode)
-	resultKV  jetstream.KeyValue // NATS KV for fast inter-stage result transfer (nil = S3 only)
-	logger    *slog.Logger
+	resultKV       jetstream.KeyValue    // NATS KV for fast inter-stage result transfer (nil = S3 only)
+	resultObjStore jetstream.ObjectStore // NATS Object Store for large inter-stage results (nil = S3 only)
+	logger         *slog.Logger
 
 	mu         sync.Mutex
 	resultSubs map[string]context.CancelFunc          // queryID -> cancel
@@ -104,6 +105,22 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 			logger.Info("coordinator NATS KV result cache enabled", "bucket", "wadjet_results_data")
 		} else {
 			logger.Debug("coordinator NATS KV result cache unavailable, using S3 only", "error", kvErr)
+		}
+
+		// NATS Object Store: handles large results (> 4 MB) that exceed KV limits.
+		// Workers use this tier to transfer scan-split results without S3 round-trips.
+		obs, obsErr := js.CreateOrUpdateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
+			Bucket:      "wadjet_results_obj",
+			TTL:         5 * time.Minute,
+			MaxBytes:    2 * 1024 * 1024 * 1024, // 2 GB total
+			Storage:     jetstream.MemoryStorage,
+			Compression: true,
+		})
+		if obsErr == nil {
+			c.resultObjStore = obs
+			logger.Info("coordinator NATS Object Store enabled", "bucket", "wadjet_results_obj")
+		} else {
+			logger.Debug("coordinator NATS Object Store unavailable, large results will use S3", "error", obsErr)
 		}
 	}
 
