@@ -1269,17 +1269,6 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 				}
 			}
 
-			// NATS Object Store for large partitions (> 4 MB)
-			if e.resultObjStore != nil {
-				objKey := natsObjKey(path)
-				if _, objErr := e.resultObjStore.PutBytes(ctx, objKey, buf); objErr == nil {
-					if e.resultStore != nil {
-						e.resultStore.Put(task.QueryID, path, buf)
-					}
-					return
-				}
-			}
-
 			_, putErr := e.store.Put(ctx, task.ResultBucket, path,
 				bytes.NewReader(buf), int64(len(buf)), "application/octet-stream")
 			uploadResults[id].err = putErr
