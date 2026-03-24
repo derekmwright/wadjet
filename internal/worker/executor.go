@@ -40,7 +40,7 @@ const inlineResultThreshold = 512 * 1024 // 512 KB — avoids S3 round-trip for 
 // natsKVResultThreshold is the max result size stored in NATS KV for
 // cross-worker inter-stage transfer. Results below this threshold skip S3
 // entirely, reducing inter-stage latency from ~500ms to ~10ms.
-const natsKVResultThreshold = 900 * 1024 // 900 KB — within NATS JetStream max message default
+const natsKVResultThreshold = 4 * 1024 * 1024 // 4 MB — within NATS 8 MB max payload
 
 // maxBufferedRows caps in-memory row accumulation during scan tasks to prevent
 // unbounded memory growth. When this limit is reached, rows are flushed to the

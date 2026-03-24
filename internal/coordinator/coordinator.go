@@ -715,7 +715,7 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 // Files smaller than this are grouped together to reduce task overhead.
 // Larger batches reduce NATS dispatch + S3 write overhead at the cost of
 // slightly coarser work distribution. 32 MB balances overhead vs parallelism.
-const coalesceScanTargetBytes int64 = 32 * 1024 * 1024 // 32 MB
+const coalesceScanTargetBytes int64 = 64 * 1024 * 1024 // 64 MB
 
 func (c *Coordinator) createScanTasks(queryID string, stage physical.Stage, resultPrefix string) []distributed.Task {
 	// Convert fused aggregate specs once (shared by all tasks)
@@ -1832,7 +1832,7 @@ func natsKVKey(path string) string {
 
 // natsKVResultThreshold is the max result size written to NATS KV.
 // Must match the worker's threshold so both sides agree on where data lives.
-const natsKVResultThreshold = 900 * 1024 // 900 KB
+const natsKVResultThreshold = 4 * 1024 * 1024 // 4 MB — within NATS 8 MB max payload
 
 // materializeInlineResults writes inline results so downstream stages can read them.
 // When NATS KV is available, small results are written there (~1ms) instead of S3 (~250ms).
@@ -1935,136 +1935,218 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		return nil, nil, 0, nil
 	}
 
-	var allBatches []*batch.RecordBatch
-	var columns []string
-	var totalRows int64
+	// Separate inline results (need decompression) from S3-only results (just count rows).
+	type inlineWork struct {
+		idx  int
+		data []byte
+	}
+	var pending []inlineWork
+	var s3Rows int64
 
-	for _, r := range results {
+	for i, r := range results {
 		c.logger.Debug("result entry", "taskID", r.TaskID, "success", r.Success,
 			"inlineLen", len(r.InlineData), "numRows", r.NumRows, "resultPath", r.ResultPath)
 		if !r.Success {
 			continue
 		}
-
-		// Only materialize inline results (small, already in coordinator memory).
-		// Large results stay on S3 — callers use ResultFiles to read directly.
 		if len(r.InlineData) == 0 {
-			totalRows += r.NumRows
+			s3Rows += r.NumRows
 			continue
 		}
-
-		var batches []*batch.RecordBatch
-
-		// Decompress if compressed shuffle format
-		inlineData, decErr := decompressShuffleData(r.InlineData)
-		if decErr != nil {
-			c.logger.Debug("shuffle decompress error", "err", decErr)
-			continue
-		}
-
-		// Auto-detect format: binary shuffle (WSHF) or Parquet (PAR1)
-		if len(inlineData) >= 4 && string(inlineData[:4]) == "WSHF" {
-			var err error
-			batches, err = readShuffleBatches(inlineData)
-			if err != nil {
-				c.logger.Debug("shuffle read error", "err", err)
-				continue
-			}
-			if len(batches) > 0 && len(columns) == 0 {
-				columns = make([]string, len(batches[0].Schema))
-				for i, col := range batches[0].Schema {
-					columns[i] = col.Name
-				}
-			}
-		} else {
-			reader, err := parquet.NewReader(bytes.NewReader(inlineData), int64(len(inlineData)))
-			if err != nil {
-				c.logger.Debug("parquet reader error", "err", err)
-				continue
-			}
-			schema := reader.Schema().Columns
-			if len(columns) == 0 && len(schema) > 0 {
-				columns = make([]string, len(schema))
-				for i, col := range schema {
-					columns[i] = col.Name
-				}
-			}
-			batches, err = scan.ReadFileBatches(reader, schema, nil)
-			if err != nil {
-				continue
-			}
-		}
-		for _, b := range batches {
-			totalRows += int64(b.ActiveLen())
-		}
-		allBatches = append(allBatches, batches...)
+		pending = append(pending, inlineWork{idx: i, data: r.InlineData})
 	}
 
+	if len(pending) == 0 {
+		return nil, nil, s3Rows, nil
+	}
+
+	// Decompress and deserialize inline results concurrently
+	type decoded struct {
+		batches []*batch.RecordBatch
+		columns []string
+		rows    int64
+	}
+	slot := make([]decoded, len(pending))
+
+	if len(pending) == 1 {
+		b, cols, rows := c.decodeInlineResult(pending[0].data)
+		slot[0] = decoded{batches: b, columns: cols, rows: rows}
+	} else {
+		var wg sync.WaitGroup
+		for i, w := range pending {
+			wg.Add(1)
+			go func(idx int, data []byte) {
+				defer wg.Done()
+				b, cols, rows := c.decodeInlineResult(data)
+				slot[idx] = decoded{batches: b, columns: cols, rows: rows}
+			}(i, w.data)
+		}
+		wg.Wait()
+	}
+
+	var allBatches []*batch.RecordBatch
+	var columns []string
+	totalRows := s3Rows
+	for _, d := range slot {
+		if len(d.columns) > 0 && len(columns) == 0 {
+			columns = d.columns
+		}
+		totalRows += d.rows
+		allBatches = append(allBatches, d.batches...)
+	}
 	return allBatches, columns, totalRows, nil
+}
+
+// decodeInlineResult decompresses and deserializes a single inline result.
+func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []string, int64) {
+	inlineData, err := decompressShuffleData(data)
+	if err != nil {
+		c.logger.Debug("shuffle decompress error", "err", err)
+		return nil, nil, 0
+	}
+
+	var batches []*batch.RecordBatch
+	var columns []string
+	if len(inlineData) >= 4 && string(inlineData[:4]) == "WSHF" {
+		batches, err = readShuffleBatches(inlineData)
+		if err != nil {
+			c.logger.Debug("shuffle read error", "err", err)
+			return nil, nil, 0
+		}
+		if len(batches) > 0 {
+			columns = make([]string, len(batches[0].Schema))
+			for i, col := range batches[0].Schema {
+				columns[i] = col.Name
+			}
+		}
+	} else {
+		reader, err := parquet.NewReader(bytes.NewReader(inlineData), int64(len(inlineData)))
+		if err != nil {
+			c.logger.Debug("parquet reader error", "err", err)
+			return nil, nil, 0
+		}
+		schema := reader.Schema().Columns
+		if len(schema) > 0 {
+			columns = make([]string, len(schema))
+			for i, col := range schema {
+				columns[i] = col.Name
+			}
+		}
+		batches, err = scan.ReadFileBatches(reader, schema, nil)
+		if err != nil {
+			return nil, nil, 0
+		}
+	}
+
+	var totalRows int64
+	for _, b := range batches {
+		totalRows += int64(b.ActiveLen())
+	}
+	return batches, columns, totalRows
 }
 
 // ReadResultFiles reads result Parquet files from S3 and returns columnar batches.
 // This is intended for callers (tpch-bench, CLI) that need full result data —
 // they pull from S3 directly instead of routing through the coordinator's heap.
 func ReadResultFiles(ctx context.Context, store objstore.Store, bucket string, paths []string) ([]*batch.RecordBatch, []string, int64, error) {
+	if len(paths) == 0 {
+		return nil, nil, 0, nil
+	}
+
+	// Single file: skip goroutine overhead
+	if len(paths) == 1 {
+		batches, cols, rows, err := readOneResultFile(ctx, store, bucket, paths[0])
+		return batches, cols, rows, err
+	}
+
+	// Parallel reads with bounded concurrency
+	type fileResult struct {
+		batches []*batch.RecordBatch
+		columns []string
+		rows    int64
+	}
+	results := make([]fileResult, len(paths))
+	const maxConcurrent = 8
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
+
+	for i, path := range paths {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(idx int, p string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			batches, cols, rows, _ := readOneResultFile(ctx, store, bucket, p)
+			results[idx] = fileResult{batches: batches, columns: cols, rows: rows}
+		}(i, path)
+	}
+	wg.Wait()
+
 	var allBatches []*batch.RecordBatch
 	var columns []string
 	var totalRows int64
+	for _, r := range results {
+		if len(r.columns) > 0 && len(columns) == 0 {
+			columns = r.columns
+		}
+		totalRows += r.rows
+		allBatches = append(allBatches, r.batches...)
+	}
+	return allBatches, columns, totalRows, nil
+}
 
-	for _, path := range paths {
-		rc, _, err := store.Get(ctx, bucket, path)
-		if err != nil {
-			continue
-		}
-		data, err := io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			continue
-		}
-
-		// Decompress if compressed shuffle format
-		data, err = decompressShuffleData(data)
-		if err != nil {
-			continue
-		}
-
-		// Auto-detect format: binary shuffle (WSHF) or Parquet (PAR1)
-		var batches []*batch.RecordBatch
-		if len(data) >= 4 && string(data[:4]) == "WSHF" {
-			batches, err = readShuffleBatches(data)
-			if err != nil {
-				continue
-			}
-			if len(batches) > 0 && len(columns) == 0 {
-				columns = make([]string, len(batches[0].Schema))
-				for i, col := range batches[0].Schema {
-					columns[i] = col.Name
-				}
-			}
-		} else {
-			reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
-			if err != nil {
-				continue
-			}
-			schema := reader.Schema().Columns
-			if len(columns) == 0 && len(schema) > 0 {
-				columns = make([]string, len(schema))
-				for i, col := range schema {
-					columns[i] = col.Name
-				}
-			}
-			batches, err = scan.ReadFileBatches(reader, schema, nil)
-			if err != nil {
-				continue
-			}
-		}
-		for _, b := range batches {
-			totalRows += int64(b.ActiveLen())
-		}
-		allBatches = append(allBatches, batches...)
+func readOneResultFile(ctx context.Context, store objstore.Store, bucket, path string) ([]*batch.RecordBatch, []string, int64, error) {
+	rc, _, err := store.Get(ctx, bucket, path)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, nil, 0, err
 	}
 
-	return allBatches, columns, totalRows, nil
+	data, err = decompressShuffleData(data)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+
+	var batches []*batch.RecordBatch
+	var columns []string
+	if len(data) >= 4 && string(data[:4]) == "WSHF" {
+		batches, err = readShuffleBatches(data)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		if len(batches) > 0 {
+			columns = make([]string, len(batches[0].Schema))
+			for i, col := range batches[0].Schema {
+				columns[i] = col.Name
+			}
+		}
+	} else {
+		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		schema := reader.Schema().Columns
+		if len(schema) > 0 {
+			columns = make([]string, len(schema))
+			for i, col := range schema {
+				columns[i] = col.Name
+			}
+		}
+		batches, err = scan.ReadFileBatches(reader, schema, nil)
+		if err != nil {
+			return nil, nil, 0, err
+		}
+	}
+
+	var totalRows int64
+	for _, b := range batches {
+		totalRows += int64(b.ActiveLen())
+	}
+	return batches, columns, totalRows, nil
 }
 
 func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done chan<- struct{}) {
