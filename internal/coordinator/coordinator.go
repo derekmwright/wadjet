@@ -474,12 +474,14 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		canScanSplit := physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !hasSelfJoins
 		probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 
-		if canProbeSplit && (hasSelfJoins || joinCount >= 3) {
+		if canProbeSplit && hasSelfJoins {
 			// Probe-split pipeline: partition the dominant probe table's files
 			// across workers. Each worker scans build tables in full and probes
 			// its file partition. Coordinator merges partial results.
-			// Used for self-join queries and join-heavy queries (3+ joins) where
-			// parallel compute outweighs redundant build-side S3 reads.
+			// Currently limited to self-join queries where the merge logic is
+			// proven correct (Q18, Q21). General multi-join probe-split needs
+			// a more robust merge that handles column name aliasing.
+			// TODO: extend to joinCount >= 3 once merge handles all patterns.
 			workerCount := c.workers.Count()
 			probeSplitMergeInfo = logical.ExtractMergeInfo(logicalPlan)
 			physStages = []physical.Stage{{
