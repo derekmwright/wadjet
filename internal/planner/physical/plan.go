@@ -1074,6 +1074,24 @@ func ShouldSplitScan(stages []Stage, workerCount int) bool {
 	return totalScanBytes >= minScanBytes && totalScanFiles >= minScanFiles
 }
 
+// HasSubqueries checks if a SQL query contains subqueries (IN SELECT, EXISTS,
+// scalar subquery). Queries with subqueries can't use scan-split pipeline
+// because subqueries create additional scan nodes that aren't in the stage list.
+func HasSubqueries(sql string) bool {
+	upper := strings.ToUpper(sql)
+	// Check for common subquery patterns
+	return strings.Contains(upper, "IN (SELECT") ||
+		strings.Contains(upper, "IN(SELECT") ||
+		strings.Contains(upper, "EXISTS (SELECT") ||
+		strings.Contains(upper, "EXISTS(SELECT") ||
+		// Scalar subqueries in WHERE: "> (SELECT", "= (SELECT", etc.
+		strings.Contains(upper, "> (SELECT") ||
+		strings.Contains(upper, "< (SELECT") ||
+		strings.Contains(upper, "= (SELECT") ||
+		// CTE with self-referencing subqueries
+		(strings.Contains(upper, "WITH ") && strings.Count(upper, "SELECT") > 2)
+}
+
 // ExtractScanStages returns only the scan stages from a stage list.
 // Used to build scan-split pipeline plans where scans are distributed
 // and compute runs on a single pipeline worker.
