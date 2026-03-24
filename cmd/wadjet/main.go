@@ -65,6 +65,7 @@ var (
 	useSSL           bool
 	s3Region         string
 	maxConcurrent    int
+	cacheBytes       int64
 )
 
 func main() {
@@ -134,10 +135,17 @@ func serveCmd() *cobra.Command {
 
 				if memoryBudget == 0 {
 					// Use 50% of detected memory for per-task budget. This leaves
-				// headroom for Go runtime, goroutine stacks, file I/O buffers,
-				// and garbage from the previous task awaiting GC collection.
-				memoryBudget = memLimit / 2
+					// headroom for Go runtime, goroutine stacks, file I/O buffers,
+					// and garbage from the previous task awaiting GC collection.
+					memoryBudget = memLimit / 2
 					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget)
+				}
+				if cacheBytes == 0 {
+					// Use 25% of memory for cross-query S3 file cache. At SF10
+					// (~12 GB Parquet data), this avoids re-reading files from S3
+					// on every query. On c7g.4xlarge (32 GB), this gives ~8 GB cache.
+					cacheBytes = memLimit / 4
+					logger.Info("auto-detected file cache size", "cache_bytes", cacheBytes)
 				}
 			}
 
@@ -596,7 +604,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		NATSUrl:          embeddedNATS.ClientURL(),
 		ClusterID:        clusterID,
 		MaxConcurrent:    maxConcurrent,
-		CacheBytes:       256 * 1024 * 1024,
+		CacheBytes:       cacheBytes,
 		MemoryBudget:     memoryBudget,
 		SpillDir:         spillDir,
 		ResultStoreBytes: resultStoreBytes,
@@ -943,7 +951,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		NATSUrl:          natsAddr,
 		ClusterID:        clusterID,
 		MaxConcurrent:    maxConcurrent,
-		CacheBytes:       256 * 1024 * 1024,
+		CacheBytes:       cacheBytes,
 		MemoryBudget:     memoryBudget,
 		SpillDir:         spillDir,
 		ResultStoreBytes: resultStoreBytes,

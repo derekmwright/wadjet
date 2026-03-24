@@ -45,6 +45,21 @@ func (c *LRUCache) Get(key string) ([]byte, bool) {
 	return nil, false
 }
 
+// GetRef retrieves the cached value without copying. The caller MUST NOT
+// modify the returned slice. Safe for read-only use (e.g., Parquet decoding)
+// because Go's GC keeps the backing array alive even if the cache evicts
+// the entry while the caller still holds a reference.
+func (c *LRUCache) GetRef(key string) ([]byte, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if elem, ok := c.items[key]; ok {
+		c.evict.MoveToFront(elem)
+		return elem.Value.(*cacheEntry).data, true
+	}
+	return nil, false
+}
+
 // Put adds a value to the cache, evicting old entries if needed.
 func (c *LRUCache) Put(key string, data []byte) {
 	c.mu.Lock()

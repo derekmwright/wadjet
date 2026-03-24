@@ -1414,12 +1414,15 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		bucket = task.ResultBucket
 	}
 
-	// Create a catalog from NATS KV (same metadata the coordinator uses)
+	// Create a catalog from NATS KV (same metadata the coordinator uses).
+	// Wrap the object store with CachedStore so that scanners benefit from
+	// the worker's cross-query LRU file cache instead of re-reading S3.
 	kv, err := catalog.NewNATSKV(e.js)
 	if err != nil {
 		return fmt.Errorf("creating catalog KV: %w", err)
 	}
-	cat := catalog.New(kv, e.store, bucket)
+	cachedStore := NewCachedStore(e.store, e.cache)
+	cat := catalog.New(kv, cachedStore, bucket)
 	if err := cat.Init(ctx); err != nil {
 		return fmt.Errorf("initializing catalog: %w", err)
 	}
