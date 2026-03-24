@@ -464,43 +464,44 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			"buildAlias", s.BuildTableAlias)
 	}
 
-	// Cost-based routing: compare S3 materialization overhead of distributed
-	// execution (shuffle/sort stages) against parallelism benefit of splitting
-	// scans across workers. Route as single-worker pipeline when overhead
-	// exceeds benefit.
+	// Probe-split routing: partition the dominant probe table's files across
+	// workers, avoiding S3 shuffle overhead entirely. Check this first since
+	// probe-split bypasses the distributed cost model — no shuffle stages
+	// means no S3 round-trips between stages.
 	var probeSplitMergeInfo *logical.MergeInfo
-	if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
-		joinCount := physical.CountJoinStages(physStages)
+	joinCount := physical.CountJoinStages(physStages)
+	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
+	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
+	canMerge := mergeInfo != nil && mergeInfo.HasAggregate
+
+	if canProbeSplit && canMerge && joinCount >= 2 {
+		// Probe-split pipeline: each worker scans build tables in full and
+		// probes its file partition. Coordinator re-aggregates partial results.
+		// This avoids all S3 shuffle round-trips, which is especially
+		// beneficial for self-join queries with many distributed stages.
+		hasSelfJoins := physical.HasSelfJoins(physStages)
+		workerCount := c.workers.Count()
+		probeSplitMergeInfo = mergeInfo
+		physStages = []physical.Stage{{
+			ID:              "pipeline-0",
+			Type:            "pipeline",
+			Tasks:           workerCount,
+			ProbeSplitAlias: probeAlias,
+			ProbeSplitFiles: probeFiles,
+		}}
+		c.logger.Info("routing to probe-split pipeline",
+			"query", queryID, "probe_alias", probeAlias,
+			"probe_files", len(probeFiles), "workers", workerCount,
+			"joins", joinCount, "self_joins", hasSelfJoins,
+			"has_merge", probeSplitMergeInfo != nil)
+	} else if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
+		// Cost-based routing for non-probe-split queries: compare S3
+		// materialization overhead of distributed execution against
+		// parallelism benefit of splitting scans across workers.
 		hasSelfJoins := physical.HasSelfJoins(physStages)
 		canScanSplit := physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !hasSelfJoins
-		probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 
-		// Probe-split requires a top-level aggregate so the coordinator can
-		// re-aggregate partial results from each worker. Self-join queries
-		// have redundant build-side scans but still benefit from parallel
-		// compute when join count is high enough.
-		mergeInfo := logical.ExtractMergeInfo(logicalPlan)
-		canMerge := mergeInfo != nil && mergeInfo.HasAggregate
-
-		if canProbeSplit && canMerge && joinCount >= 2 {
-			// Probe-split pipeline: partition the dominant probe table's files
-			// across workers. Each worker scans build tables in full and probes
-			// its file partition. Coordinator merges partial results.
-			workerCount := c.workers.Count()
-			probeSplitMergeInfo = mergeInfo
-			physStages = []physical.Stage{{
-				ID:              "pipeline-0",
-				Type:            "pipeline",
-				Tasks:           workerCount,
-				ProbeSplitAlias: probeAlias,
-				ProbeSplitFiles: probeFiles,
-			}}
-			c.logger.Info("routing to probe-split pipeline",
-				"query", queryID, "probe_alias", probeAlias,
-				"probe_files", len(probeFiles), "workers", workerCount,
-				"joins", joinCount, "self_joins", hasSelfJoins,
-				"has_merge", probeSplitMergeInfo != nil)
-		} else if canScanSplit {
+		if canScanSplit {
 			// Scan-split pipeline: distribute S3 reads across workers,
 			// run compute (joins/aggs/sorts) on a single pipeline worker.
 			// Excluded when subqueries remain un-decorrelated (scan node count
