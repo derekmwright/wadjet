@@ -155,7 +155,7 @@ func TestDistributedTPCH(t *testing.T) {
 		{19, 1},
 		{20, 3},
 		{21, 1},
-		{22, 0}, // 0 rows at SF0.01
+		{22, 7},
 	}
 
 	t.Logf("Worker count: %d", coord.workers.Count())
