@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -881,5 +883,124 @@ func TestExecuteSQLCleansUpQueryMeta(t *testing.T) {
 	// Tracker entry is kept for status/list APIs — reaped by StartQueryReaper
 	if coord.tracker.Get(result.QueryID) == nil {
 		t.Error("expected tracker entry to still exist for status APIs")
+	}
+}
+
+// TestReAggregatePartialsMerge verifies that mergeProbePartials correctly
+// deduplicates partial aggregate results from multiple workers. This simulates
+// the Q10 scenario: 7-column GROUP BY with SUM aggregate, 4 worker partials.
+func TestReAggregatePartialsMerge(t *testing.T) {
+	coord := &Coordinator{}
+
+	// Schema: c_custkey(int64), c_name(string), c_acctbal(float64),
+	//         c_phone(string), n_name(string), c_address(string),
+	//         c_comment(string), revenue(float64)
+	schema := []parquet.Column{
+		{Name: "c_custkey", Type: parquet.TypeInt64},
+		{Name: "c_name", Type: parquet.TypeString},
+		{Name: "c_acctbal", Type: parquet.TypeFloat64},
+		{Name: "c_phone", Type: parquet.TypeString},
+		{Name: "n_name", Type: parquet.TypeString},
+		{Name: "c_address", Type: parquet.TypeString},
+		{Name: "c_comment", Type: parquet.TypeString},
+		{Name: "revenue", Type: parquet.TypeFloat64},
+	}
+
+	columns := make([]string, len(schema))
+	for i, c := range schema {
+		columns[i] = c.Name
+	}
+
+	mi := &logical.MergeInfo{
+		GroupBy:      []string{"c_custkey", "c_name", "c_acctbal", "c_phone", "n_name", "c_address", "c_comment"},
+		AggExprs:     []logical.AggExpr{{Func: "sum", InputCol: "revenue", OutputCol: "revenue"}},
+		OrderBy:      []logical.OrderExpr{{Column: "revenue", Desc: true}},
+		Limit:        20,
+		HasAggregate: true,
+	}
+
+	// Simulate 4 worker partial results. Customer 1 appears on workers 0,1,2.
+	// Customer 2 appears on workers 0,3. Customer 3 appears only on worker 1.
+	makeBatch := func(rows [][]any) *batch.RecordBatch {
+		b := batch.NewRecordBatch(schema, len(rows))
+		for ri, row := range rows {
+			b.Columns[0].Int64Data[ri] = row[0].(int64)             // c_custkey
+			b.Columns[1].BytesData.Set(ri, []byte(row[1].(string))) // c_name
+			b.Columns[2].Float64Data[ri] = row[2].(float64)         // c_acctbal
+			b.Columns[3].BytesData.Set(ri, []byte(row[3].(string))) // c_phone
+			b.Columns[4].BytesData.Set(ri, []byte(row[4].(string))) // n_name
+			b.Columns[5].BytesData.Set(ri, []byte(row[5].(string))) // c_address
+			b.Columns[6].BytesData.Set(ri, []byte(row[6].(string))) // c_comment
+			b.Columns[7].Float64Data[ri] = row[7].(float64)         // revenue
+			for ci := range schema {
+				b.Columns[ci].Nulls.SetValid(ri)
+			}
+		}
+		b.Len = len(rows)
+		return b
+	}
+
+	batches := []*batch.RecordBatch{
+		// Worker 0: cust 1 (rev 100), cust 2 (rev 200)
+		makeBatch([][]any{
+			{int64(1), "Cust#1", 1000.50, "555-0001", "USA", "123 Main St", "comment1", 100.0},
+			{int64(2), "Cust#2", 2000.75, "555-0002", "Canada", "456 Oak Ave", "comment2", 200.0},
+		}),
+		// Worker 1: cust 1 (rev 150), cust 3 (rev 300)
+		makeBatch([][]any{
+			{int64(1), "Cust#1", 1000.50, "555-0001", "USA", "123 Main St", "comment1", 150.0},
+			{int64(3), "Cust#3", 3000.00, "555-0003", "UK", "789 Elm Rd", "comment3", 300.0},
+		}),
+		// Worker 2: cust 1 (rev 50)
+		makeBatch([][]any{
+			{int64(1), "Cust#1", 1000.50, "555-0001", "USA", "123 Main St", "comment1", 50.0},
+		}),
+		// Worker 3: cust 2 (rev 100)
+		makeBatch([][]any{
+			{int64(2), "Cust#2", 2000.75, "555-0002", "Canada", "456 Oak Ave", "comment2", 100.0},
+		}),
+	}
+
+	merged, totalRows, err := coord.mergeProbePartials(batches, columns, mi)
+	if err != nil {
+		t.Fatalf("mergeProbePartials error: %v", err)
+	}
+
+	// Should deduplicate to 3 customers, sorted by revenue DESC
+	if totalRows != 3 {
+		t.Errorf("totalRows = %d, want 3", totalRows)
+	}
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 merged batch, got %d", len(merged))
+	}
+
+	b := merged[0]
+	if b.Len != 3 {
+		t.Fatalf("merged batch Len = %d, want 3", b.Len)
+	}
+
+	// Check merged revenue values (after sort by revenue DESC):
+	// Cust 1: 100+150+50 = 300, Cust 2: 200+100 = 300, Cust 3: 300
+	// All have revenue 300, order depends on stable sort
+	// Just verify the revenues are correct
+	revenues := make(map[int64]float64)
+	for i := 0; i < b.Len; i++ {
+		row := i
+		if b.Sel != nil {
+			row = int(b.Sel[i])
+		}
+		custKey := b.Columns[0].Int64Data[row]
+		rev := b.Columns[7].Float64Data[row]
+		revenues[custKey] = rev
+	}
+
+	if revenues[1] != 300.0 {
+		t.Errorf("Cust#1 revenue = %f, want 300.0", revenues[1])
+	}
+	if revenues[2] != 300.0 {
+		t.Errorf("Cust#2 revenue = %f, want 300.0", revenues[2])
+	}
+	if revenues[3] != 300.0 {
+		t.Errorf("Cust#3 revenue = %f, want 300.0", revenues[3])
 	}
 }

@@ -475,14 +475,21 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		canScanSplit := physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !hasSelfJoins
 		probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 
-		if canProbeSplit && (hasSelfJoins || joinCount >= 3) {
+		// Probe-split requires mergeable results: either a top-level aggregate
+		// (partial results can be re-aggregated) or self-joins (results are
+		// disjoint per worker). Non-aggregate multi-join queries would produce
+		// duplicate rows across workers with no way to deduplicate.
+		mergeInfo := logical.ExtractMergeInfo(logicalPlan)
+		canMerge := hasSelfJoins || (mergeInfo != nil && mergeInfo.HasAggregate)
+
+		if canProbeSplit && canMerge && (hasSelfJoins || joinCount >= 3) {
 			// Probe-split pipeline: partition the dominant probe table's files
 			// across workers. Each worker scans build tables in full and probes
 			// its file partition. Coordinator merges partial results.
 			// Used for self-join queries and join-heavy queries (3+ joins) where
 			// parallel compute outweighs redundant build-side S3 reads.
 			workerCount := c.workers.Count()
-			probeSplitMergeInfo = logical.ExtractMergeInfo(logicalPlan)
+			probeSplitMergeInfo = mergeInfo
 			physStages = []physical.Stage{{
 				ID:              "pipeline-0",
 				Type:            "pipeline",
@@ -606,14 +613,15 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		}, fmt.Errorf("query failed: %s", info.Error)
 	}
 
-	// Read results from the final stage
-	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, physStages)
-
-	// Probe-split merge: re-aggregate partial results from N workers,
-	// then apply the original sort + limit.
+	// Probe-split merge: check if we need to re-aggregate partial results.
 	c.mu.Lock()
 	qmForMerge := c.queryMetas[queryID]
 	c.mu.Unlock()
+
+	// Read results from the final stage. When probe-split merge is needed,
+	// force full materialization so S3-stored results are fetched for merging.
+	needsMerge := qmForMerge != nil && qmForMerge.mergeInfo != nil
+	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, physStages, needsMerge)
 	if qmForMerge != nil && qmForMerge.mergeInfo != nil && len(batches) > 0 {
 		merged, mergedRows, mergeErr := c.mergeProbePartials(batches, columns, qmForMerge.mergeInfo)
 		if mergeErr != nil {
@@ -2009,7 +2017,10 @@ func (c *Coordinator) collectDepResults(queryID string) map[string][]string {
 // already in memory via NATS) are materialized into batches. Large results
 // that were written to S3 are returned as file paths — the coordinator never
 // pulls bulk data through its own heap.
-func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stages []physical.Stage) ([]*batch.RecordBatch, []string, int64, error) {
+//
+// When fetchAll is true (probe-split merge), S3-stored results are also fetched
+// and decoded so the coordinator can re-aggregate partial results.
+func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stages []physical.Stage, fetchAll bool) ([]*batch.RecordBatch, []string, int64, error) {
 	if len(stages) == 0 {
 		return nil, nil, 0, nil
 	}
@@ -2039,7 +2050,18 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 			continue
 		}
 		if len(r.InlineData) == 0 {
-			s3Rows += r.NumRows
+			if fetchAll && r.ResultPath != "" {
+				// Probe-split merge: fetch S3-stored result for re-aggregation
+				data, fetchErr := c.fetchResultData(ctx, queryID, r.ResultPath)
+				if fetchErr != nil {
+					c.logger.Error("failed to fetch S3 result for merge", "path", r.ResultPath, "error", fetchErr)
+					s3Rows += r.NumRows
+					continue
+				}
+				pending = append(pending, inlineWork{idx: i, data: data})
+			} else {
+				s3Rows += r.NumRows
+			}
 			continue
 		}
 		pending = append(pending, inlineWork{idx: i, data: r.InlineData})
@@ -2132,6 +2154,26 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 		totalRows += int64(b.ActiveLen())
 	}
 	return batches, columns, totalRows
+}
+
+// fetchResultData retrieves a result blob from NATS KV or S3.
+// Used by probe-split merge when results exceed the inline threshold.
+func (c *Coordinator) fetchResultData(ctx context.Context, queryID, path string) ([]byte, error) {
+	// Try NATS KV first (fastest)
+	if c.resultKV != nil {
+		entry, err := c.resultKV.Get(ctx, natsKVKey(path))
+		if err == nil {
+			return entry.Value(), nil
+		}
+	}
+	// Fall back to S3
+	store := c.catalog.Store()
+	reader, _, err := store.Get(ctx, c.config.ResultBucket, path)
+	if err != nil {
+		return nil, fmt.Errorf("fetching result from S3: %w", err)
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
 }
 
 // mergeProbePartials re-aggregates partial results from probe-split pipeline
@@ -2894,7 +2936,7 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		}, nil
 	}
 
-	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, meta.stages)
+	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, meta.stages, false)
 	if err != nil {
 		return &SQLResult{
 			QueryID:     queryID,
