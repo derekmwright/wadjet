@@ -1074,36 +1074,31 @@ func ShouldSplitScan(stages []Stage, workerCount int) bool {
 	return totalScanBytes >= minScanBytes && totalScanFiles >= minScanFiles
 }
 
-// HasSubqueries checks if a SQL query contains subqueries (IN SELECT, EXISTS,
-// scalar subquery). Queries with subqueries can't use scan-split pipeline
-// because subqueries create additional scan nodes that aren't in the stage list.
-func HasSubqueries(sql string) bool {
-	// Collapse all whitespace (newlines, tabs) to single spaces, then remove
-	// spaces after '(' so "IN (\n\tSELECT" normalizes to "IN (SELECT".
-	upper := strings.ToUpper(strings.Join(strings.Fields(sql), " "))
-	upper = strings.ReplaceAll(upper, "( ", "(")
-	return strings.Contains(upper, "IN (SELECT") ||
-		strings.Contains(upper, "IN(SELECT") ||
-		strings.Contains(upper, "EXISTS (SELECT") ||
-		strings.Contains(upper, "EXISTS(SELECT") ||
-		strings.Contains(upper, "> (SELECT") ||
-		strings.Contains(upper, "< (SELECT") ||
-		strings.Contains(upper, "= (SELECT") ||
-		(strings.Contains(upper, "WITH ") && strings.Count(upper, "SELECT") > 2)
-}
-
-// HasSelfJoins returns true if any table is scanned more than once in the
-// stage list (e.g., nation n1 JOIN nation n2). Self-joins can't safely use
-// scan-split pipeline because the counter-based ScanAlias scheme depends on
-// identical traversal order between coordinator walkStages and worker buildScan.
+// HasSelfJoins returns true if any large table is scanned more than once in
+// the stage list. Self-joins on tiny tables (< 1 MB, e.g., nation with 25
+// rows) are exempt because the scan-split overhead is negligible and
+// blocking scan-split forces the entire query (including large table scans)
+// to run on a single worker.
 func HasSelfJoins(stages []Stage) bool {
-	seen := make(map[string]bool)
+	type tableInfo struct {
+		count int
+		bytes int64
+	}
+	tables := make(map[string]*tableInfo)
 	for _, s := range stages {
 		if s.Type == "scan" {
-			if seen[s.TableName] {
-				return true
+			if t, ok := tables[s.TableName]; ok {
+				t.count++
+				t.bytes += s.EstimatedBytes
+			} else {
+				tables[s.TableName] = &tableInfo{count: 1, bytes: s.EstimatedBytes}
 			}
-			seen[s.TableName] = true
+		}
+	}
+	const smallTableThreshold int64 = 1024 * 1024 // 1 MB
+	for _, t := range tables {
+		if t.count > 1 && t.bytes > smallTableThreshold {
+			return true
 		}
 	}
 	return false

@@ -1113,3 +1113,77 @@ func TestResolveOrderByColumn_ColumnAlias(t *testing.T) {
 		t.Fatal("expected non-nil plan")
 	}
 }
+
+// --- HasRemainingSubqueries ---
+
+func TestHasRemainingSubqueries_NoSubqueries(t *testing.T) {
+	plan := &Node{
+		Type: NodeFilter,
+		Predicates: []Predicate{
+			{Column: "status", Op: "=", Value: "active", Raw: "status = 'active'"},
+		},
+		Children: []*Node{{Type: NodeScan, TableName: "orders"}},
+	}
+	if HasRemainingSubqueries(plan) {
+		t.Error("expected false for plain filter")
+	}
+}
+
+func TestHasRemainingSubqueries_ExistsNode(t *testing.T) {
+	plan := &Node{
+		Type: NodeFilter,
+		Predicates: []Predicate{
+			{ASTExpr: &plansql.ExistsNode{SQL: "SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey"}},
+		},
+		Children: []*Node{{Type: NodeScan, TableName: "orders"}},
+	}
+	if !HasRemainingSubqueries(plan) {
+		t.Error("expected true for EXISTS predicate")
+	}
+}
+
+func TestHasRemainingSubqueries_InSubquery(t *testing.T) {
+	plan := &Node{
+		Type: NodeFilter,
+		Predicates: []Predicate{
+			{ASTExpr: &plansql.InExpr{
+				Values: []plansql.Node{&plansql.SubqueryNode{SQL: "SELECT l_orderkey FROM lineitem"}},
+			}},
+		},
+		Children: []*Node{{Type: NodeScan, TableName: "orders"}},
+	}
+	if !HasRemainingSubqueries(plan) {
+		t.Error("expected true for IN subquery predicate")
+	}
+}
+
+func TestHasRemainingSubqueries_DecorrelatedJoin(t *testing.T) {
+	plan := &Node{
+		Type:     NodeJoin,
+		JoinType: "semi",
+		Children: []*Node{
+			{Type: NodeScan, TableName: "orders"},
+			{Type: NodeScan, TableName: "lineitem"},
+		},
+	}
+	if HasRemainingSubqueries(plan) {
+		t.Error("expected false for decorrelated semi-join")
+	}
+}
+
+func TestHasRemainingSubqueries_NestedExists(t *testing.T) {
+	inner := &Node{
+		Type: NodeFilter,
+		Predicates: []Predicate{
+			{ASTExpr: &plansql.ExistsNode{SQL: "SELECT 1 FROM t2", Not: true}},
+		},
+		Children: []*Node{{Type: NodeScan, TableName: "t2"}},
+	}
+	plan := &Node{
+		Type:     NodeProject,
+		Children: []*Node{inner},
+	}
+	if !HasRemainingSubqueries(plan) {
+		t.Error("expected true for nested EXISTS")
+	}
+}

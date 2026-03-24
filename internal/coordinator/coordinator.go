@@ -467,11 +467,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// scans across workers. Route as single-worker pipeline when overhead
 	// exceeds benefit.
 	if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
-		if physical.ShouldSplitScan(physStages, c.workers.Count()) && !physical.HasSubqueries(sql) && !physical.HasSelfJoins(physStages) {
+		if physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !physical.HasSelfJoins(physStages) {
 			// Scan-split pipeline: distribute S3 reads across workers,
 			// run compute (joins/aggs/sorts) on a single pipeline worker.
-			// Excluded for queries with subqueries (scan node count mismatch)
-			// and self-joins (traversal order mismatch between walkStages and buildScan).
+			// Excluded when subqueries remain un-decorrelated (scan node count
+			// mismatch) and self-joins on large tables (traversal order mismatch).
 			scanStages := physical.ExtractScanStages(physStages)
 			scanDeps := make([]string, len(scanStages))
 			for i, s := range scanStages {
