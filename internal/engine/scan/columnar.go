@@ -182,28 +182,70 @@ func readRowGroupColumnar(rg goparquet.RowGroup, schema []pqt.Column, pqFile *go
 	return b, nil
 }
 
+// columnAliases maps catalog column names to known alternate names found in
+// external Parquet datasets (e.g. Polars TPC-H uses "comments" for "l_comment").
+var columnAliases = map[string][]string{
+	"l_comment": {"comments"},
+}
+
 // findParquetColumn returns the index of the column with the given name
-// in the parquet file's column paths, or -1 if not found.
+// in the parquet file's column paths, or -1 if not found. Falls back to
+// known aliases when the exact name is absent.
 func findParquetColumn(pqCols [][]string, name string) int {
 	for i, path := range pqCols {
 		if len(path) > 0 && path[len(path)-1] == name {
 			return i
 		}
 	}
+	// Try known aliases
+	for _, alias := range columnAliases[name] {
+		for i, path := range pqCols {
+			if len(path) > 0 && path[len(path)-1] == alias {
+				return i
+			}
+		}
+	}
 	return -1
 }
 
+// storageClass returns a normalized type representing the physical storage
+// format used in a Vector. Types sharing a storage class have identical
+// in-memory layout (e.g. TypeIPv4 and TypeInt64 both use Int64Data).
+func storageClass(t pqt.TypeID) pqt.TypeID {
+	switch t {
+	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
+		return pqt.TypeInt64
+	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
+		return pqt.TypeInt32
+	case pqt.TypeFloat64:
+		return pqt.TypeFloat64
+	case pqt.TypeFloat32:
+		return pqt.TypeFloat32
+	case pqt.TypeBool:
+		return pqt.TypeBool
+	default: // String, Bytes, IPv6, CIDR, UUID
+		return pqt.TypeString
+	}
+}
+
 // readColumnChunk reads all pages from a column chunk into a Vector.
-func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int, typ pqt.TypeID, pqFile *goparquet.File, colIdx int) error {
+// When the file's physical type differs from the catalog type, values are
+// coerced (e.g. INT64→INT32, INT64→Float64, DATE→String).
+func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int, catalogType pqt.TypeID, pqFile *goparquet.File, colIdx int) error {
 	pages := chunk.Pages()
 	defer pages.Close()
 
-	// Get max definition level for null handling
+	// Get max definition level and detect file-vs-catalog type mismatch
 	pqCol := FindColumnByIndex(pqFile.Root(), colIdx)
 	maxDefLevel := 0
+	fileType := catalogType
 	if pqCol != nil {
 		maxDefLevel = pqCol.MaxDefinitionLevel()
+		fileType = pqt.GoTypeToTypeID(pqCol)
 	}
+	// Only coerce when storage classes differ (e.g. INT64→INT32 needs narrowing).
+	// Same-storage types (e.g. INT64 and IPv4) can use the catalog type directly.
+	coerce := storageClass(fileType) != storageClass(catalogType)
 
 	offset := 0
 	for {
@@ -224,15 +266,24 @@ func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int
 		data := page.Data()
 
 		if defLevels == nil || page.NumNulls() == 0 {
-			// Non-nullable column or nullable page with no actual nulls — direct copy.
-			// Skips per-element definition level checks and uses bulk copy().
-			if err := CopyTypedDataDirect(vec, offset, data, pageRows, typ); err != nil {
-				return err
+			if coerce {
+				if err := copyCoercedDirect(vec, offset, data, pageRows, fileType, catalogType); err != nil {
+					return err
+				}
+			} else {
+				if err := CopyTypedDataDirect(vec, offset, data, pageRows, catalogType); err != nil {
+					return err
+				}
 			}
 		} else {
-			// Nullable column with actual nulls — scatter using definition levels
-			if err := CopyTypedDataScatter(vec, offset, data, defLevels, byte(maxDefLevel), pageRows, typ); err != nil {
-				return err
+			if coerce {
+				if err := copyCoercedScatter(vec, offset, data, defLevels, byte(maxDefLevel), pageRows, fileType, catalogType); err != nil {
+					return err
+				}
+			} else {
+				if err := CopyTypedDataScatter(vec, offset, data, defLevels, byte(maxDefLevel), pageRows, catalogType); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -442,4 +493,70 @@ func scatterRunsTyped(
 			onNull(runStart, i-runStart)
 		}
 	}
+}
+
+// copyCoercedDirect converts non-nullable page data from fileType to catalogType.
+// Handles common Parquet type mismatches: INT64→INT32, INT64→Float64, Date→String.
+func copyCoercedDirect(vec *batch.Vector, offset int, data pqencoding.Values, n int, fileType, catalogType pqt.TypeID) error {
+	switch {
+	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeInt32:
+		src := data.Int64()
+		for i := 0; i < n; i++ {
+			vec.Int32Data[offset+i] = int32(src[i])
+		}
+	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeFloat64:
+		src := data.Int64()
+		for i := 0; i < n; i++ {
+			vec.Float64Data[offset+i] = float64(src[i])
+		}
+	case (fileType == pqt.TypeDate || fileType == pqt.TypeInt32) && catalogType == pqt.TypeString:
+		// DATE or INT32 (days since epoch) → "YYYY-MM-DD" string
+		src := data.Int32()
+		for i := 0; i < n; i++ {
+			vec.BytesData.Set(offset+i, []byte(batch.FormatDate(src[i])))
+		}
+	default:
+		return fmt.Errorf("unsupported type coercion: %v → %v", fileType, catalogType)
+	}
+	return nil
+}
+
+// copyCoercedScatter converts nullable page data from fileType to catalogType,
+// respecting definition levels for null handling.
+func copyCoercedScatter(vec *batch.Vector, offset int, data pqencoding.Values, defLevels []byte, maxDefLevel byte, n int, fileType, catalogType pqt.TypeID) error {
+	switch {
+	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeInt32:
+		src := data.Int64()
+		scatterRunsTyped(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+			for i := 0; i < count; i++ {
+				vec.Int32Data[offset+dstStart+i] = int32(src[srcStart+i])
+			}
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
+	case fileType == pqt.TypeInt64 && catalogType == pqt.TypeFloat64:
+		src := data.Int64()
+		scatterRunsTyped(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+			for i := 0; i < count; i++ {
+				vec.Float64Data[offset+dstStart+i] = float64(src[srcStart+i])
+			}
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
+	case (fileType == pqt.TypeDate || fileType == pqt.TypeInt32) && catalogType == pqt.TypeString:
+		src := data.Int32()
+		valIdx := 0
+		for i := 0; i < n; i++ {
+			if defLevels[i] == maxDefLevel {
+				vec.BytesData.Set(offset+i, []byte(batch.FormatDate(src[valIdx])))
+				valIdx++
+			} else {
+				vec.Nulls.SetNull(offset + i)
+				vec.BytesData.Set(offset+i, nil)
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported type coercion: %v → %v", fileType, catalogType)
+	}
+	return nil
 }
