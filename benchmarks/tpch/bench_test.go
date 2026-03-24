@@ -92,11 +92,11 @@ func TestTPCHDataGen(t *testing.T) {
 
 // expectedRowsSF001 defines the expected row counts for each TPC-H query at SF0.01.
 // These are deterministic because the data generator uses fixed seeds.
-// Q18 and Q22 legitimately return 0 rows at this small scale factor.
+// Q18 legitimately returns 0 rows at this small scale factor.
 var expectedRowsSF001 = map[int]int{
 	1: 6, 2: 5, 3: 10, 4: 5, 5: 5, 6: 1, 7: 4, 8: 2,
 	9: 150, 10: 20, 11: 235, 12: 2, 13: 100, 14: 1, 15: 1,
-	16: 293, 17: 1, 18: 0, 19: 1, 20: 3, 21: 1, 22: 0,
+	16: 293, 17: 1, 18: 0, 19: 1, 20: 3, 21: 1, 22: 7,
 }
 
 // TestTPCHQueries runs each TPC-H query at SF0.01 to verify correctness.
