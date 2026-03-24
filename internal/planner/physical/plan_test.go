@@ -1139,3 +1139,26 @@ func TestExtractScanStages(t *testing.T) {
 		t.Errorf("scan[1].TableName = %q, want %q", scans[1].TableName, "orders")
 	}
 }
+
+func TestHasSubqueries(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"simple select", "SELECT * FROM orders", false},
+		{"join", "SELECT * FROM orders JOIN lineitem ON o_orderkey = l_orderkey", false},
+		{"IN subquery", "SELECT * FROM orders WHERE o_custkey IN (SELECT c_custkey FROM customer)", true},
+		{"EXISTS", "SELECT * FROM orders WHERE EXISTS (SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey)", true},
+		{"scalar subquery", "SELECT * FROM customer WHERE c_acctbal > (SELECT AVG(c_acctbal) FROM customer)", true},
+		{"CTE simple", "WITH cte AS (SELECT 1) SELECT * FROM cte", false},
+		{"CTE with subquery", "WITH rev AS (SELECT SUM(x) FROM t) SELECT * FROM s WHERE s.a = (SELECT MAX(x) FROM rev)", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasSubqueries(tt.sql); got != tt.want {
+				t.Errorf("HasSubqueries(%q) = %v, want %v", tt.sql, got, tt.want)
+			}
+		})
+	}
+}
