@@ -50,17 +50,26 @@ func (s *CachedStore) Get(ctx context.Context, bucket, key string) (io.ReadClose
 	return io.NopCloser(bytes.NewReader(data)), info, nil
 }
 
-// GetReaderAt serves random-access reads from the cache. If the file is not
-// cached, it downloads the full file first. This is intentional: at SF10,
-// a single S3 GET (~50ms) is cheaper than multiple range requests, and the
-// cached file benefits all subsequent queries on this worker.
+// GetReaderAt serves random-access reads from the cache. On cache hit, it
+// returns a zero-latency in-memory reader. On cache miss, it delegates to
+// the inner store's ReaderAt (S3 range reads) to avoid downloading full
+// files when only a few columns are needed. The cache is populated by
+// Get() calls (used by scan-split tasks) so subsequent pipeline queries
+// on the same worker benefit from cached full files.
 func (s *CachedStore) GetReaderAt(ctx context.Context, bucket, key string) (objstore.ReaderAtCloser, int64, error) {
 	cacheKey := bucket + "/" + key
 	if data, ok := s.cache.GetRef(cacheKey); ok {
 		return &nopCloseReaderAt{bytes.NewReader(data)}, int64(len(data)), nil
 	}
 
-	// Download full file and cache it
+	// Cache miss: delegate to inner store's range-read API if available.
+	// Downloading full files on miss would penalize column-pruned queries
+	// (e.g., Q07 reading 3 of 16 lineitem columns: 1 GB vs 3.5 GB).
+	if ras, ok := s.inner.(objstore.ReaderAtStore); ok {
+		return ras.GetReaderAt(ctx, bucket, key)
+	}
+
+	// Inner store doesn't support ReaderAt: download full file and cache.
 	rc, _, err := s.inner.Get(ctx, bucket, key)
 	if err != nil {
 		return nil, 0, err
