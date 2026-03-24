@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2210,15 +2211,18 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 	}
 
 	// Build a map from group key → merged row values.
-	// Use string key encoding for simplicity (partial results are small).
+	// Keys are encoded as raw bytes (no fmt.Fprint overhead).
 	type mergedRow struct {
-		groupVals []any   // group-by column values
+		groupVals []any     // group-by column values
 		aggVals   []float64 // aggregate values
 	}
 	groups := make(map[string]*mergedRow)
 	var groupOrder []string // preserve insertion order
 
 	schema := batches[0].Schema
+
+	// Reusable key buffer — avoids per-row allocation
+	keyBuf := make([]byte, 0, 256)
 
 	for _, b := range batches {
 		nRows := b.ActiveLen()
@@ -2229,18 +2233,49 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 				row = int(sel[ri])
 			}
 
-			// Build group key
-			var keyBuf strings.Builder
+			// Build group key using direct byte encoding
+			keyBuf = keyBuf[:0]
 			groupVals := make([]any, len(groupByIdx))
 			for gi, ci := range groupByIdx {
-				val := extractValue(b.Columns[ci], row, schema[ci].Type)
-				groupVals[gi] = val
 				if gi > 0 {
-					keyBuf.WriteByte(0)
+					keyBuf = append(keyBuf, 0)
 				}
-				fmt.Fprint(&keyBuf, val)
+				switch schema[ci].Type {
+				case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+					v := b.Columns[ci].Int32Data[row]
+					groupVals[gi] = v
+					keyBuf = strconv.AppendInt(keyBuf, int64(v), 10)
+				case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+					v := b.Columns[ci].Int64Data[row]
+					groupVals[gi] = v
+					keyBuf = strconv.AppendInt(keyBuf, v, 10)
+				case parquet.TypeFloat32:
+					v := b.Columns[ci].Float32Data[row]
+					groupVals[gi] = v
+					keyBuf = strconv.AppendFloat(keyBuf, float64(v), 'g', -1, 32)
+				case parquet.TypeFloat64:
+					v := b.Columns[ci].Float64Data[row]
+					groupVals[gi] = v
+					keyBuf = strconv.AppendFloat(keyBuf, v, 'g', -1, 64)
+				case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+					v := b.Columns[ci].BytesData.Value(row)
+					groupVals[gi] = string(v)
+					keyBuf = append(keyBuf, v...)
+				case parquet.TypeBool:
+					v := b.Columns[ci].BoolData[row]
+					groupVals[gi] = v
+					if v {
+						keyBuf = append(keyBuf, '1')
+					} else {
+						keyBuf = append(keyBuf, '0')
+					}
+				default:
+					val := extractValue(b.Columns[ci], row, schema[ci].Type)
+					groupVals[gi] = val
+					keyBuf = fmt.Appendf(keyBuf, "%v", val)
+				}
 			}
-			key := keyBuf.String()
+			key := string(keyBuf)
 
 			mr, exists := groups[key]
 			if !exists {
@@ -2321,16 +2356,9 @@ func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string
 		indices[i] = i
 	}
 
-	// Simple insertion sort — good enough for <100K rows
-	for i := 1; i < nRows; i++ {
-		key := indices[i]
-		j := i - 1
-		for j >= 0 && compareBatchRows(b, indices[j], key, orderBy, colIdx, schema) > 0 {
-			indices[j+1] = indices[j]
-			j--
-		}
-		indices[j+1] = key
-	}
+	slices.SortFunc(indices, func(i, j int) int {
+		return compareBatchRows(b, i, j, orderBy, colIdx, schema)
+	})
 
 	// Apply permutation: set selection vector
 	sel := make([]uint32, nRows)
