@@ -42,6 +42,7 @@ type queryMeta struct {
 	sqlText      string // original SQL for pipeline tasks
 	identityName string // caller identity for task propagation
 	identityRole string
+	mergeInfo    *logical.MergeInfo // non-nil for probe-split queries needing merge
 }
 
 // Coordinator accepts queries, plans them, dispatches tasks, and tracks results.
@@ -486,6 +487,32 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			physStages = append(scanStages, pipelineStage)
 			c.logger.Info("routing to scan-split pipeline (cost-based)",
 				"query", queryID, "scan_stages", len(scanStages))
+		} else if probeAlias, probeFiles, ok := physical.CanProbeSplit(physStages, c.workers.Count()); ok && physical.HasSelfJoins(physStages) {
+			// Probe-split pipeline: partition the dominant probe table's files
+			// across workers. Each worker scans build tables in full and probes
+			// its file partition. Coordinator merges partial results.
+			workerCount := c.workers.Count()
+			mergeInfo := logical.ExtractMergeInfo(logicalPlan)
+			physStages = []physical.Stage{{
+				ID:              "pipeline-0",
+				Type:            "pipeline",
+				Tasks:           workerCount,
+				ProbeSplitAlias: probeAlias,
+				ProbeSplitFiles: probeFiles,
+			}}
+			c.logger.Info("routing to probe-split pipeline",
+				"query", queryID, "probe_alias", probeAlias,
+				"probe_files", len(probeFiles), "workers", workerCount,
+				"has_merge", mergeInfo != nil)
+			// Store merge info for post-execution result merge.
+			qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: mergeInfo}
+			if id := auth.IdentityFromContext(ctx); id != nil {
+				qm.identityName = id.Name
+				qm.identityRole = id.Role
+			}
+			c.mu.Lock()
+			c.queryMetas[queryID] = qm
+			c.mu.Unlock()
 		} else {
 			c.logger.Info("routing to single worker pipeline (cost-based)",
 				"query", queryID, "stages", len(physStages))
@@ -580,6 +607,21 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 
 	// Read results from the final stage
 	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, physStages)
+
+	// Probe-split merge: re-aggregate partial results from N workers,
+	// then apply the original sort + limit.
+	c.mu.Lock()
+	qmForMerge := c.queryMetas[queryID]
+	c.mu.Unlock()
+	if qmForMerge != nil && qmForMerge.mergeInfo != nil && len(batches) > 0 {
+		merged, mergedRows, mergeErr := c.mergeProbePartials(batches, columns, qmForMerge.mergeInfo)
+		if mergeErr != nil {
+			c.logger.Error("probe-split merge failed", "query", queryID, "error", mergeErr)
+		} else {
+			batches = merged
+			totalRows = mergedRows
+		}
+	}
 
 	// Synchronous path: we have all data locally, clean up queryMetas
 	// immediately. The tracker entry is kept for status/list APIs and
@@ -681,6 +723,29 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 		sqlText = qm.sqlText
 	}
 
+	// Probe-split mode: create N tasks, each with a subset of the probe
+	// table's files. Build tables are scanned in full by each worker.
+	if stage.ProbeSplitAlias != "" && len(stage.ProbeSplitFiles) > 0 && stage.Tasks > 1 {
+		filePartitions := splitFilesEvenly(stage.ProbeSplitFiles, stage.Tasks)
+		tasks := make([]distributed.Task, len(filePartitions))
+		for i, files := range filePartitions {
+			tasks[i] = distributed.Task{
+				ID:               uuid.New().String()[:8],
+				QueryID:          queryID,
+				StageID:          stage.ID,
+				Type:             distributed.TaskTypePipeline,
+				SQLText:          sqlText,
+				DataBucket:       c.config.ResultBucket,
+				ResultBucket:     c.config.ResultBucket,
+				ResultPrefix:     resultPrefix,
+				ScanFileFilter:   map[string][]string{stage.ProbeSplitAlias: files},
+				PartialAggregate: qm != nil && qm.mergeInfo != nil && qm.mergeInfo.HasAggregate,
+				CreatedAt:        time.Now(),
+			}
+		}
+		return tasks
+	}
+
 	task := distributed.Task{
 		ID:           uuid.New().String()[:8],
 		QueryID:      queryID,
@@ -709,6 +774,29 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 	}
 
 	return []distributed.Task{task}
+}
+
+// splitFilesEvenly distributes files across n partitions as evenly as possible.
+func splitFilesEvenly(files []string, n int) [][]string {
+	if n <= 0 || len(files) == 0 {
+		return nil
+	}
+	if n > len(files) {
+		n = len(files)
+	}
+	parts := make([][]string, n)
+	base := len(files) / n
+	extra := len(files) % n
+	offset := 0
+	for i := 0; i < n; i++ {
+		size := base
+		if i < extra {
+			size++
+		}
+		parts[i] = files[offset : offset+size]
+		offset += size
+	}
+	return parts
 }
 
 // coalesceScanTargetBytes is the minimum total bytes per scan task.
@@ -2043,6 +2131,360 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 		totalRows += int64(b.ActiveLen())
 	}
 	return batches, columns, totalRows
+}
+
+// mergeProbePartials re-aggregates partial results from probe-split pipeline
+// workers and applies the original sort + limit. Each worker produced partial
+// aggregates for its file partition; this merges them into the final result.
+//
+// For small result sets (typical: <100K rows), this runs in-memory on the
+// coordinator with negligible overhead.
+func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns []string, mi *logical.MergeInfo) ([]*batch.RecordBatch, int64, error) {
+	if len(batches) == 0 {
+		return nil, 0, nil
+	}
+
+	// Build column name → index mapping
+	colIdx := make(map[string]int, len(columns))
+	for i, col := range columns {
+		colIdx[col] = i
+	}
+
+	if mi.HasAggregate && len(mi.GroupBy) > 0 {
+		batches = c.reAggregatePartials(batches, columns, colIdx, mi)
+	}
+
+	// Apply sort
+	if len(mi.OrderBy) > 0 {
+		c.sortBatches(batches, columns, colIdx, mi.OrderBy)
+	}
+
+	// Apply limit
+	if mi.Limit > 0 {
+		batches = limitBatches(batches, mi.Limit)
+	}
+
+	var totalRows int64
+	for _, b := range batches {
+		totalRows += int64(b.ActiveLen())
+	}
+	return batches, totalRows, nil
+}
+
+// reAggregatePartials merges partial aggregate results by group-by key.
+// For COUNT → SUM, SUM → SUM, MIN → MIN, MAX → MAX.
+func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, mi *logical.MergeInfo) []*batch.RecordBatch {
+	if len(batches) == 0 || len(mi.AggExprs) == 0 {
+		return batches
+	}
+
+	// Resolve group-by and aggregate column indices
+	groupByIdx := make([]int, len(mi.GroupBy))
+	for i, col := range mi.GroupBy {
+		groupByIdx[i] = colIdx[col]
+	}
+
+	type aggCol struct {
+		idx      int
+		mergeOp  string // "sum", "min", "max"
+		origFunc string
+	}
+	var aggCols []aggCol
+	for _, ae := range mi.AggExprs {
+		idx, ok := colIdx[ae.OutputCol]
+		if !ok {
+			continue
+		}
+		mergeOp := "sum" // COUNT, SUM → SUM
+		switch strings.ToLower(ae.Func) {
+		case "min":
+			mergeOp = "min"
+		case "max":
+			mergeOp = "max"
+		}
+		aggCols = append(aggCols, aggCol{idx: idx, mergeOp: mergeOp, origFunc: ae.Func})
+	}
+
+	if len(aggCols) == 0 {
+		return batches
+	}
+
+	// Build a map from group key → merged row values.
+	// Use string key encoding for simplicity (partial results are small).
+	type mergedRow struct {
+		groupVals []any   // group-by column values
+		aggVals   []float64 // aggregate values
+	}
+	groups := make(map[string]*mergedRow)
+	var groupOrder []string // preserve insertion order
+
+	schema := batches[0].Schema
+
+	for _, b := range batches {
+		nRows := b.ActiveLen()
+		sel := b.Sel
+		for ri := 0; ri < nRows; ri++ {
+			row := ri
+			if sel != nil {
+				row = int(sel[ri])
+			}
+
+			// Build group key
+			var keyBuf strings.Builder
+			groupVals := make([]any, len(groupByIdx))
+			for gi, ci := range groupByIdx {
+				val := extractValue(b.Columns[ci], row, schema[ci].Type)
+				groupVals[gi] = val
+				if gi > 0 {
+					keyBuf.WriteByte(0)
+				}
+				fmt.Fprint(&keyBuf, val)
+			}
+			key := keyBuf.String()
+
+			mr, exists := groups[key]
+			if !exists {
+				mr = &mergedRow{
+					groupVals: groupVals,
+					aggVals:   make([]float64, len(aggCols)),
+				}
+				// Initialize all aggregate values from first row
+				for ai, ac := range aggCols {
+					mr.aggVals[ai] = extractFloat64(b.Columns[ac.idx], row, schema[ac.idx].Type)
+				}
+				groups[key] = mr
+				groupOrder = append(groupOrder, key)
+				continue
+			}
+
+			// Merge aggregate values into existing group
+			for ai, ac := range aggCols {
+				v := extractFloat64(b.Columns[ac.idx], row, schema[ac.idx].Type)
+				switch ac.mergeOp {
+				case "sum":
+					mr.aggVals[ai] += v
+				case "min":
+					if v < mr.aggVals[ai] {
+						mr.aggVals[ai] = v
+					}
+				case "max":
+					if v > mr.aggVals[ai] {
+						mr.aggVals[ai] = v
+					}
+				}
+			}
+		}
+	}
+
+	// Build result batch(es) from merged groups
+	result := batch.NewRecordBatch(schema, len(groupOrder))
+	for ri, key := range groupOrder {
+		mr := groups[key]
+
+		// Set group-by columns
+		for gi, ci := range groupByIdx {
+			setValueFromAny(result.Columns[ci], ri, mr.groupVals[gi], schema[ci].Type)
+		}
+
+		// Set aggregate columns
+		for ai, ac := range aggCols {
+			setFloat64Value(result.Columns[ac.idx], ri, mr.aggVals[ai], schema[ac.idx].Type)
+		}
+
+		// Mark all columns as valid (not null)
+		for ci := range schema {
+			result.Columns[ci].Nulls.SetValid(ri)
+		}
+	}
+	result.Len = len(groupOrder)
+
+	return []*batch.RecordBatch{result}
+}
+
+// sortBatches performs a simple in-memory sort of batches by the given order keys.
+// Used for merging probe-split partial results (typically <100K rows).
+func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, orderBy []logical.OrderExpr) {
+	if len(batches) != 1 {
+		return // reAggregatePartials produces a single batch
+	}
+	b := batches[0]
+	nRows := b.Len
+	if nRows <= 1 {
+		return
+	}
+
+	schema := b.Schema
+
+	// Build index permutation and sort it
+	indices := make([]int, nRows)
+	for i := range indices {
+		indices[i] = i
+	}
+
+	// Simple insertion sort — good enough for <100K rows
+	for i := 1; i < nRows; i++ {
+		key := indices[i]
+		j := i - 1
+		for j >= 0 && compareBatchRows(b, indices[j], key, orderBy, colIdx, schema) > 0 {
+			indices[j+1] = indices[j]
+			j--
+		}
+		indices[j+1] = key
+	}
+
+	// Apply permutation: set selection vector
+	sel := make([]uint32, nRows)
+	for i, idx := range indices {
+		sel[i] = uint32(idx)
+	}
+	b.Sel = sel
+}
+
+// compareBatchRows compares two rows in a batch by the order-by keys.
+// Returns negative if row a < row b, positive if a > b, 0 if equal.
+func compareBatchRows(b *batch.RecordBatch, a, bIdx int, orderBy []logical.OrderExpr, colIdx map[string]int, schema []parquet.Column) int {
+	for _, ob := range orderBy {
+		ci, ok := colIdx[ob.Column]
+		if !ok {
+			continue
+		}
+		va := extractFloat64(b.Columns[ci], a, schema[ci].Type)
+		vb := extractFloat64(b.Columns[ci], bIdx, schema[ci].Type)
+
+		var cmp int
+		switch {
+		case va < vb:
+			cmp = -1
+		case va > vb:
+			cmp = 1
+		default:
+			// For string columns, compare as strings
+			if schema[ci].Type == parquet.TypeString {
+				sa := extractStringValue(b.Columns[ci], a)
+				sb := extractStringValue(b.Columns[ci], bIdx)
+				cmp = strings.Compare(sa, sb)
+			}
+		}
+		if ob.Desc {
+			cmp = -cmp
+		}
+		if cmp != 0 {
+			return cmp
+		}
+	}
+	return 0
+}
+
+// limitBatches truncates batches to at most limit rows total.
+func limitBatches(batches []*batch.RecordBatch, limit int) []*batch.RecordBatch {
+	var result []*batch.RecordBatch
+	remaining := limit
+	for _, b := range batches {
+		n := b.ActiveLen()
+		if n <= remaining {
+			result = append(result, b)
+			remaining -= n
+		} else {
+			// Truncate this batch
+			if b.Sel != nil {
+				b.Sel = b.Sel[:remaining]
+			} else {
+				sel := make([]uint32, remaining)
+				for i := range sel {
+					sel[i] = uint32(i)
+				}
+				b.Sel = sel
+			}
+			result = append(result, b)
+			break
+		}
+	}
+	return result
+}
+
+// extractValue reads a typed value from a vector column at the given row.
+func extractValue(vec *batch.Vector, row int, typ parquet.TypeID) any {
+	switch typ {
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+		return vec.Int32Data[row]
+	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+		return vec.Int64Data[row]
+	case parquet.TypeFloat32:
+		return vec.Float32Data[row]
+	case parquet.TypeFloat64:
+		return vec.Float64Data[row]
+	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+		return string(vec.BytesData.Value(row))
+	case parquet.TypeBool:
+		return vec.BoolData[row]
+	default:
+		return nil
+	}
+}
+
+// extractFloat64 converts a typed vector value to float64 for numeric operations.
+func extractFloat64(vec *batch.Vector, row int, typ parquet.TypeID) float64 {
+	switch typ {
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+		return float64(vec.Int32Data[row])
+	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+		return float64(vec.Int64Data[row])
+	case parquet.TypeFloat32:
+		return float64(vec.Float32Data[row])
+	case parquet.TypeFloat64:
+		return vec.Float64Data[row]
+	default:
+		return 0
+	}
+}
+
+// extractStringValue reads a string value from a bytes-backed vector column.
+func extractStringValue(vec *batch.Vector, row int) string {
+	return string(vec.BytesData.Value(row))
+}
+
+// setValueFromAny writes a value to a vector column at the given row.
+func setValueFromAny(vec *batch.Vector, row int, val any, typ parquet.TypeID) {
+	switch typ {
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+		if v, ok := val.(int32); ok {
+			vec.Int32Data[row] = v
+		}
+	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+		if v, ok := val.(int64); ok {
+			vec.Int64Data[row] = v
+		}
+	case parquet.TypeFloat32:
+		if v, ok := val.(float32); ok {
+			vec.Float32Data[row] = v
+		}
+	case parquet.TypeFloat64:
+		if v, ok := val.(float64); ok {
+			vec.Float64Data[row] = v
+		}
+	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+		if v, ok := val.(string); ok {
+			vec.BytesData.Set(row, []byte(v))
+		}
+	case parquet.TypeBool:
+		if v, ok := val.(bool); ok {
+			vec.BoolData[row] = v
+		}
+	}
+}
+
+// setFloat64Value writes a float64 value to a vector column in its native type.
+func setFloat64Value(vec *batch.Vector, row int, val float64, typ parquet.TypeID) {
+	switch typ {
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+		vec.Int32Data[row] = int32(val)
+	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+		vec.Int64Data[row] = int64(val)
+	case parquet.TypeFloat32:
+		vec.Float32Data[row] = float32(val)
+	case parquet.TypeFloat64:
+		vec.Float64Data[row] = val
+	}
 }
 
 // ReadResultFiles reads result Parquet files from S3 and returns columnar batches.

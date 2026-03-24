@@ -80,6 +80,11 @@ type Stage struct {
 	FusedAggGroupBy []string
 	FusedAggSpecs   []AggSpec
 
+	// Probe-split pipeline: partition the probe table's files across workers.
+	// Each worker scans build tables in full and probes its file partition.
+	ProbeSplitAlias string   // scan alias to partition (e.g., "lineitem")
+	ProbeSplitFiles []string // full file list to split across tasks
+
 	// Cost estimation (populated at plan time from manifest metadata)
 	EstimatedBytes int64
 	EstimatedRows  int64
@@ -158,7 +163,13 @@ type Planner struct {
 	// object store, allowing parallel scan I/O with single-worker compute.
 	// Keyed by scan alias: "table" or "table:N" for self-joins.
 	MaterializedInputs map[string][]*batch.RecordBatch
-	scanCounter        map[string]int // tracks N-th scan of each table for MaterializedInputs lookup
+
+	// ScanFileFilter restricts which files each scan alias reads. Used in
+	// probe-split pipeline mode where the probe table is partitioned across
+	// workers while build tables read all files. Keyed by scan alias.
+	ScanFileFilter map[string][]string
+
+	scanCounter map[string]int // tracks N-th scan of each table for alias resolution
 }
 
 // getSpillManager returns a shared per-query spill manager, creating it on
@@ -1120,6 +1131,46 @@ func ExtractScanStages(stages []Stage) []Stage {
 	return scans
 }
 
+// CanProbeSplit returns the scan alias and file list for probe-split pipeline
+// routing. Probe-split distributes the dominant probe table's files across
+// workers while each worker scans build tables in full. This enables parallel
+// execution for self-join queries that can't use scan-split.
+//
+// Returns the probe scan alias, its file list, and true if probe-split is viable.
+func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFiles []string, ok bool) {
+	if workerCount <= 1 {
+		return "", nil, false
+	}
+
+	// Find tables scanned more than once (self-joined).
+	tableCount := make(map[string]int)
+	for _, s := range stages {
+		if s.Type == "scan" {
+			tableCount[s.TableName]++
+		}
+	}
+
+	// Among self-joined tables, find the scan alias with the most bytes.
+	// This is typically the main probe scan in the join chain.
+	var bestAlias string
+	var bestFiles []string
+	var bestBytes int64
+	for _, s := range stages {
+		if s.Type == "scan" && tableCount[s.TableName] > 1 && s.EstimatedBytes > bestBytes {
+			bestAlias = s.ScanAlias
+			bestFiles = s.ScanFiles
+			bestBytes = s.EstimatedBytes
+		}
+	}
+
+	// Need enough files to give each worker meaningful work.
+	if bestAlias == "" || len(bestFiles) < workerCount*2 || bestBytes < 64*1024*1024 {
+		return "", nil, false
+	}
+
+	return bestAlias, bestFiles, true
+}
+
 // canFuseScanAggregate returns true when child stages are all scans (or
 // filter-pushed scans). This means partial aggregation can be fused directly
 // into scan tasks, eliminating the separate aggregate stage and its S3 round-trip.
@@ -1969,19 +2020,21 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	// Scan-split pipeline mode: use pre-scanned data instead of reading from S3.
-	// Scan alias uses same scheme as walkStages: "table" for first, "table:N" for duplicates.
-	if p.MaterializedInputs != nil {
-		if p.scanCounter == nil {
-			p.scanCounter = make(map[string]int)
-		}
-		n := p.scanCounter[node.TableName]
-		p.scanCounter[node.TableName] = n + 1
+	// Track scan alias for both MaterializedInputs and ScanFileFilter.
+	// Alias scheme matches walkStages: "table" for first, "table:N" for duplicates.
+	if p.scanCounter == nil {
+		p.scanCounter = make(map[string]int)
+	}
+	n := p.scanCounter[node.TableName]
+	p.scanCounter[node.TableName] = n + 1
 
-		scanAlias := node.TableName
-		if n > 0 {
-			scanAlias = fmt.Sprintf("%s:%d", node.TableName, n)
-		}
+	scanAlias := node.TableName
+	if n > 0 {
+		scanAlias = fmt.Sprintf("%s:%d", node.TableName, n)
+	}
+
+	// Scan-split pipeline mode: use pre-scanned data instead of reading from S3.
+	if p.MaterializedInputs != nil {
 		if batches, ok := p.MaterializedInputs[scanAlias]; ok && len(batches) > 0 {
 			return exec.NewBatchSource(batches), nil, &exec.CollectSink{}, nil
 		}
@@ -2003,6 +2056,16 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		return source, nil, &exec.CollectSink{}, nil
 	}
 	scanner := p.newScanner(ctx, node.TableName, node.PartitionFilter, node.RequiredColumns, node.ScanPredicates)
+
+	// Probe-split pipeline mode: restrict this scan to only allowed files.
+	if p.ScanFileFilter != nil {
+		if files, ok := p.ScanFileFilter[scanAlias]; ok {
+			if cs, ok := scanner.(*catalogScanSource); ok {
+				cs.allowedFiles = files
+			}
+		}
+	}
+
 	var ops []exec.UnaryOperator
 	if node.SampleMethod != "" && node.SamplePercent > 0 {
 		ops = append(ops, newSampleOperator(node.SampleMethod, node.SamplePercent))
@@ -3811,6 +3874,7 @@ type catalogScanSource struct {
 	partitionFilter map[string]string
 	requiredCols    []string
 	scanPreds       []logical.Predicate
+	allowedFiles    []string // probe-split: only scan these files (nil = all)
 	inner           exec.Source
 	cache           *scanCached           // non-nil when this table is scanned multiple times
 	replayIdx       int                   // position in cache replay
@@ -3863,6 +3927,9 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 		}
 		if s.dynamicFilter != nil {
 			ses.dynamicFilter = s.dynamicFilter
+		}
+		if s.allowedFiles != nil {
+			ses.allowedFiles = s.allowedFiles
 		}
 	}
 	s.inner = sc
@@ -4947,6 +5014,7 @@ type scannerExecSource struct {
 	partitionFilter map[string]string
 	requiredCols    []string
 	scanPreds       []logical.Predicate
+	allowedFiles    []string // probe-split: only scan these files (nil = all)
 	scanner         *scanSourceInner
 	bloomFilter     *exec.BloomScanFilter
 	dynamicFilter   []exec.DynamicRange
@@ -5014,6 +5082,21 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 			}
 		}
 		files = append(files, p.Files...)
+	}
+
+	// Probe-split: restrict to only allowed files for this scan alias.
+	if len(s.allowedFiles) > 0 {
+		allowed := make(map[string]bool, len(s.allowedFiles))
+		for _, f := range s.allowedFiles {
+			allowed[f] = true
+		}
+		filtered := files[:0]
+		for _, f := range files {
+			if allowed[f.Path] {
+				filtered = append(filtered, f)
+			}
+		}
+		files = filtered
 	}
 
 	scanCtx, cancel := context.WithCancel(ctx)
