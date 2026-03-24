@@ -1162,13 +1162,16 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 	return bestAlias, bestFiles, true
 }
 
-// CountJoinStages returns the number of join stages in the stage list.
+// CountJoinStages returns the total number of joins in the stage list,
+// including hash_join and broadcast_join stages plus fused joins that were
+// absorbed into parent stages by fuseJoinStages().
 func CountJoinStages(stages []Stage) int {
 	n := 0
 	for _, s := range stages {
-		if s.Type == "join" {
+		if s.Type == "hash_join" || s.Type == "broadcast_join" {
 			n++
 		}
+		n += len(s.FusedJoins)
 	}
 	return n
 }
