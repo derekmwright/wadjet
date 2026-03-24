@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -881,6 +880,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.arenaMatched = make([]bool, len(h.arena))
 	}
 
+	// Consolidate build batches into a single contiguous batch to eliminate
+	// O(n log n) pair sorting during probe and improve gather cache locality.
+	h.consolidateBuild()
+
 	// Build bloom filter for fast negative lookups during probe.
 	h.buildBloom()
 
@@ -1022,6 +1025,8 @@ func (h *HashJoin) buildParallel(ctx context.Context, source Source, workers int
 	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
 		h.arenaMatched = make([]bool, len(h.arena))
 	}
+
+	h.consolidateBuild()
 
 	h.buildBloom()
 	h.buildDone = true
@@ -1507,6 +1512,112 @@ func (h *HashJoin) bloomMayContain(hash uint64) bool {
 	return bloomContains(h.bloom, h.bloomMask, hash)
 }
 
+// consolidateBuild merges all build batches into a single contiguous batch.
+// This eliminates the O(n log n) pair sort in the probe phase (sort is skipped
+// when len(buildBatches) == 1) and improves gatherBuildVector cache locality
+// by removing per-pair batch switching. Cost: one-time O(n) copy during build.
+func (h *HashJoin) consolidateBuild() {
+	if len(h.buildBatches) <= 1 || h.spillState != nil || h.SemiAntiKeyOnly {
+		return
+	}
+
+	// Compute total rows and cumulative offsets per batch.
+	// Copy ALL rows (including unselected) so arena rowIdx values remain valid
+	// at their new offset positions.
+	totalRows := 0
+	offsets := make([]int, len(h.buildBatches))
+	for i, b := range h.buildBatches {
+		offsets[i] = totalRows
+		totalRows += b.Len
+	}
+	if totalRows == 0 {
+		return
+	}
+
+	// Allocate the consolidated batch.
+	consolidated := batch.NewRecordBatch(h.buildSchema, totalRows)
+	consolidated.Len = totalRows
+
+	// Copy data from each batch at its cumulative offset.
+	for batchIdx, b := range h.buildBatches {
+		off := offsets[batchIdx]
+		for colIdx, src := range b.Columns {
+			dst := consolidated.Columns[colIdx]
+			// Null bitmap
+			if src.Nulls.HasNulls() {
+				for i := 0; i < b.Len; i++ {
+					if src.Nulls.IsNullFast(i) {
+						dst.Nulls.SetNull(off + i)
+					}
+				}
+			}
+			// Typed data
+			switch dst.Type {
+			case batch.TypeBool:
+				copy(dst.BoolData[off:off+b.Len], src.BoolData[:b.Len])
+			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+				copy(dst.Int32Data[off:off+b.Len], src.Int32Data[:b.Len])
+			case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+				copy(dst.Int64Data[off:off+b.Len], src.Int64Data[:b.Len])
+			case batch.TypeFloat32:
+				copy(dst.Float32Data[off:off+b.Len], src.Float32Data[:b.Len])
+			case batch.TypeFloat64:
+				copy(dst.Float64Data[off:off+b.Len], src.Float64Data[:b.Len])
+			case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+				dst.BytesData.BulkCopy(off, &src.BytesData, 0, b.Len)
+			case batch.TypeDecimal:
+				copy(dst.DecimalData.Data[off:off+b.Len], src.DecimalData.Data[:b.Len])
+			}
+		}
+	}
+
+	// Remap arena entries: all point to batch 0 with offset-adjusted row indices.
+	for i := range h.arena {
+		h.arena[i].rowIdx += int32(offsets[h.arena[i].batchIdx])
+		h.arena[i].batchIdx = 0
+	}
+
+	h.buildBatches = []*batch.RecordBatch{consolidated}
+}
+
+// countingSortPairs sorts matchPairs by batchIdx using counting sort.
+// O(n+k) where k = numBatches, much faster than O(n log n) comparison sort
+// for the typical case of many pairs with few distinct batch indices.
+// Uses buf as scratch space (caller manages reuse).
+func countingSortPairs(pairs []matchPair, numBatches int, buf *[]matchPair) {
+	n := len(pairs)
+	if n <= 1 || numBatches <= 1 {
+		return
+	}
+
+	// Count occurrences of each batchIdx.
+	counts := make([]int, numBatches)
+	for i := 0; i < n; i++ {
+		counts[pairs[i].ref.batchIdx]++
+	}
+
+	// Prefix sums → scatter offsets.
+	offset := 0
+	for i := 0; i < numBatches; i++ {
+		c := counts[i]
+		counts[i] = offset
+		offset += c
+	}
+
+	// Scatter into output buffer.
+	if cap(*buf) < n {
+		*buf = make([]matchPair, n)
+	}
+	out := (*buf)[:n]
+	for i := 0; i < n; i++ {
+		bi := pairs[i].ref.batchIdx
+		out[counts[bi]] = pairs[i]
+		counts[bi]++
+	}
+
+	copy(pairs, out)
+}
+
 // dualIntHash combines two int64 keys into a single int64 composite key
 // for the intHashTable. Uses different golden-ratio multipliers to minimize
 // collisions. Hash collisions are handled by chain traversal with exact
@@ -1960,6 +2071,7 @@ type matchPair struct {
 type HashJoinProbe struct {
 	join       *HashJoin
 	pairsBuf   []matchPair // reusable buffer to avoid per-batch allocation
+	sortBuf    []matchPair // reusable buffer for counting sort scratch space
 	semiSelBuf []uint32    // reusable selection vector for semi/anti join output
 	lookupBuf  []buildRef  // reusable buffer for lookupBuild results
 	indexBuf   []int       // reusable buffer for probe-side gather indices
@@ -2118,10 +2230,9 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	// cache the current src vector and skip reload while batchIdx is unchanged;
 	// grouping pairs by batch maximizes that cache hit rate and keeps the
 	// underlying column data in L1/L2 across the entire run.
+	// After consolidateBuild, len(buildBatches)==1 so this is typically skipped.
 	if len(p.join.buildBatches) > 1 {
-		slices.SortFunc(pairs, func(a, b matchPair) int {
-			return int(a.ref.batchIdx) - int(b.ref.batchIdx)
-		})
+		countingSortPairs(pairs, len(p.join.buildBatches), &p.sortBuf)
 	}
 
 	// Build output batch using precomputed column source mapping.
