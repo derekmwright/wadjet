@@ -1881,6 +1881,16 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 // queryMetas and tracker entries are retained for GetQueryResults and reaped
 // by StartQueryReaper after a TTL.
 func (c *Coordinator) cleanupQuery(queryID string) {
+	// Collect NATS KV keys before dropping state — tracker still has paths.
+	var kvKeys []string
+	if c.resultKV != nil {
+		for _, paths := range c.tracker.CollectResultPaths(queryID) {
+			for _, p := range paths {
+				kvKeys = append(kvKeys, natsKVKey(p))
+			}
+		}
+	}
+
 	c.mu.Lock()
 	if cancel, ok := c.resultSubs[queryID]; ok {
 		cancel()
@@ -1888,6 +1898,24 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 	}
 	delete(c.stageSpecs, queryID)
 	c.mu.Unlock()
+
+	// Purge KV entries async — frees NATS memory without blocking the caller.
+	if len(kvKeys) > 0 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			purged := 0
+			for _, key := range kvKeys {
+				if err := c.resultKV.Purge(ctx, key); err == nil {
+					purged++
+				}
+			}
+			if purged > 0 {
+				c.logger.Debug("purged query KV entries",
+					"query_id", queryID, "purged", purged, "total", len(kvKeys))
+			}
+		}()
+	}
 }
 
 // queryReaperTTL is how long completed/failed/cancelled queries stay in memory
