@@ -467,6 +467,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// execution (shuffle/sort stages) against parallelism benefit of splitting
 	// scans across workers. Route as single-worker pipeline when overhead
 	// exceeds benefit.
+	var probeSplitMergeInfo *logical.MergeInfo
 	if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
 		if physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !physical.HasSelfJoins(physStages) {
 			// Scan-split pipeline: distribute S3 reads across workers,
@@ -492,7 +493,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			// across workers. Each worker scans build tables in full and probes
 			// its file partition. Coordinator merges partial results.
 			workerCount := c.workers.Count()
-			mergeInfo := logical.ExtractMergeInfo(logicalPlan)
+			probeSplitMergeInfo = logical.ExtractMergeInfo(logicalPlan)
 			physStages = []physical.Stage{{
 				ID:              "pipeline-0",
 				Type:            "pipeline",
@@ -503,16 +504,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			c.logger.Info("routing to probe-split pipeline",
 				"query", queryID, "probe_alias", probeAlias,
 				"probe_files", len(probeFiles), "workers", workerCount,
-				"has_merge", mergeInfo != nil)
-			// Store merge info for post-execution result merge.
-			qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: mergeInfo}
-			if id := auth.IdentityFromContext(ctx); id != nil {
-				qm.identityName = id.Name
-				qm.identityRole = id.Role
-			}
-			c.mu.Lock()
-			c.queryMetas[queryID] = qm
-			c.mu.Unlock()
+				"has_merge", probeSplitMergeInfo != nil)
 		} else {
 			c.logger.Info("routing to single worker pipeline (cost-based)",
 				"query", queryID, "stages", len(physStages))
@@ -541,7 +533,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		specMap[s.ID] = s
 	}
 	c.stageSpecs[queryID] = specMap
-	qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql}
+	qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: probeSplitMergeInfo}
 	if id := auth.IdentityFromContext(ctx); id != nil {
 		qm.identityName = id.Name
 		qm.identityRole = id.Role
