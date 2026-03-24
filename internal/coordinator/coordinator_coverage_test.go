@@ -1004,3 +1004,62 @@ func TestReAggregatePartialsMerge(t *testing.T) {
 		t.Errorf("Cust#3 revenue = %f, want 300.0", revenues[3])
 	}
 }
+
+// TestTopKMerge verifies that mergeProbePartials with a small LIMIT
+// uses the top-K heap path and produces correct sorted results.
+func TestTopKMerge(t *testing.T) {
+	coord := &Coordinator{}
+
+	schema := []parquet.Column{
+		{Name: "key", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeFloat64},
+	}
+	columns := []string{"key", "val"}
+
+	// 100 rows, LIMIT 3 — triggers top-K path (100 > 3*4=12)
+	b := batch.NewRecordBatch(schema, 100)
+	for i := 0; i < 100; i++ {
+		b.Columns[0].Int64Data[i] = int64(i)
+		b.Columns[0].Nulls.SetValid(i)
+		b.Columns[1].Float64Data[i] = float64(100 - i) // 100, 99, ..., 1
+		b.Columns[1].Nulls.SetValid(i)
+	}
+	b.Len = 100
+
+	mi := &logical.MergeInfo{
+		GroupBy:      []string{"key"},
+		AggExprs:     []logical.AggExpr{{Func: "sum", InputCol: "val", OutputCol: "val"}},
+		OrderBy:      []logical.OrderExpr{{Column: "val", Desc: true}},
+		Limit:        3,
+		HasAggregate: true,
+	}
+
+	merged, totalRows, err := coord.mergeProbePartials([]*batch.RecordBatch{b}, columns, mi)
+	if err != nil {
+		t.Fatalf("mergeProbePartials error: %v", err)
+	}
+	if totalRows != 3 {
+		t.Errorf("totalRows = %d, want 3", totalRows)
+	}
+	if len(merged) != 1 {
+		t.Fatalf("expected 1 batch, got %d", len(merged))
+	}
+
+	out := merged[0]
+	if out.Len != 3 {
+		t.Fatalf("out.Len = %d, want 3", out.Len)
+	}
+
+	// Top 3 by val DESC: key=0 val=100, key=1 val=99, key=2 val=98
+	for i := 0; i < 3; i++ {
+		row := i
+		if out.Sel != nil {
+			row = int(out.Sel[i])
+		}
+		gotVal := out.Columns[1].Float64Data[row]
+		wantVal := float64(100 - i)
+		if gotVal != wantVal {
+			t.Errorf("row %d: val = %f, want %f", i, gotVal, wantVal)
+		}
+	}
+}

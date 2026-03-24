@@ -2219,14 +2219,17 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 		batches = c.reAggregatePartials(batches, columns, colIdx, mi)
 	}
 
-	// Apply sort
-	if len(mi.OrderBy) > 0 {
-		c.sortBatches(batches, columns, colIdx, mi.OrderBy)
-	}
-
-	// Apply limit
-	if mi.Limit > 0 {
-		batches = limitBatches(batches, mi.Limit)
+	// Apply sort + limit. When the limit is much smaller than the row count,
+	// use a top-K heap select to avoid sorting the full result set.
+	if len(mi.OrderBy) > 0 && mi.Limit > 0 && len(batches) == 1 && batches[0].Len > mi.Limit*4 {
+		c.topKBatches(batches, columns, colIdx, mi.OrderBy, mi.Limit)
+	} else {
+		if len(mi.OrderBy) > 0 {
+			c.sortBatches(batches, columns, colIdx, mi.OrderBy)
+		}
+		if mi.Limit > 0 {
+			batches = limitBatches(batches, mi.Limit)
+		}
 	}
 
 	var totalRows int64
@@ -2430,6 +2433,79 @@ func (c *Coordinator) sortBatches(batches []*batch.RecordBatch, columns []string
 		sel[i] = uint32(idx)
 	}
 	b.Sel = sel
+}
+
+// topKBatches selects the top-k rows by order-by keys using a min-heap,
+// avoiding O(n log n) full sort when only k << n results are needed.
+func (c *Coordinator) topKBatches(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, orderBy []logical.OrderExpr, k int) {
+	if len(batches) != 1 {
+		return
+	}
+	b := batches[0]
+	nRows := b.Len
+	if nRows <= k {
+		return
+	}
+
+	schema := b.Schema
+
+	// Min-heap where "minimum" = worst in desired sort order (last to keep).
+	// compareBatchRows returns < 0 when i sorts before j, so the heap's
+	// "less" is reversed: the root is the row that sorts LAST among the top-k.
+	h := make([]int, k)
+	for i := 0; i < k; i++ {
+		h[i] = i
+	}
+
+	cmp := func(a, b int) int {
+		return compareBatchRows(batches[0], a, b, orderBy, colIdx, schema)
+	}
+
+	// worst-first: h[i] sorts after h[j] → "less" for heap
+	hless := func(i, j int) bool { return cmp(h[i], h[j]) > 0 }
+
+	siftDown := func(root, n int) {
+		for {
+			child := 2*root + 1
+			if child >= n {
+				break
+			}
+			if child+1 < n && hless(child+1, child) {
+				child++
+			}
+			if hless(root, child) {
+				break
+			}
+			h[root], h[child] = h[child], h[root]
+			root = child
+		}
+	}
+
+	// Build heap from initial k elements
+	for i := k/2 - 1; i >= 0; i-- {
+		siftDown(i, k)
+	}
+
+	// Process remaining rows: replace root if new row is better
+	for i := k; i < nRows; i++ {
+		if cmp(i, h[0]) < 0 {
+			h[0] = i
+			siftDown(0, k)
+		}
+	}
+
+	// Sort the k winners in desired order
+	slices.SortFunc(h, func(a, b int) int {
+		return cmp(a, b)
+	})
+
+	// Set selection vector and truncate
+	sel := make([]uint32, k)
+	for i, idx := range h {
+		sel[i] = uint32(idx)
+	}
+	b.Sel = sel
+	b.Len = k
 }
 
 // compareBatchRows compares two rows in a batch by the order-by keys.
