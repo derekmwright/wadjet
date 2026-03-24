@@ -34,7 +34,8 @@ type Task struct {
 	DataBucket string `json:"data_bucket,omitempty"` // bucket containing source data (tables)
 
 	// Scan-split pipeline: table scans distributed across workers, compute on one worker.
-	// Maps table name → result file paths from pre-scanned data.
+	// Maps scan alias → result file paths from pre-scanned data.
+	// Alias is unique per scan node: "table" or "table:N" for self-joins.
 	PreScannedInputs map[string][]string `json:"pre_scanned_inputs,omitempty"`
 
 	// Scan-specific

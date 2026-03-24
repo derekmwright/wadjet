@@ -692,12 +692,14 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 		CreatedAt:    time.Now(),
 	}
 
-	// Scan-split mode: populate pre-scanned inputs from dependency results
+	// Scan-split mode: populate pre-scanned inputs from dependency results.
+	// Key by ScanAlias (unique per scan node) to handle self-joins where the
+	// same table is scanned multiple times with different column projections.
 	if len(stage.Dependencies) > 0 && depResults != nil {
 		preScanned := make(map[string][]string)
 		for _, depID := range stage.Dependencies {
-			if spec, ok := specs[depID]; ok && spec.Type == "scan" && spec.TableName != "" {
-				preScanned[spec.TableName] = append(preScanned[spec.TableName], depResults[depID]...)
+			if spec, ok := specs[depID]; ok && spec.Type == "scan" && spec.ScanAlias != "" {
+				preScanned[spec.ScanAlias] = append(preScanned[spec.ScanAlias], depResults[depID]...)
 			}
 		}
 		if len(preScanned) > 0 {
