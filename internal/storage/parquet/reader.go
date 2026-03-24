@@ -230,7 +230,7 @@ func extractColumn(col *goparquet.Column) Column {
 	if col.Leaf() {
 		return Column{
 			Name:     col.Name(),
-			Type:     goTypeToTypeID(col),
+			Type:     GoTypeToTypeID(col),
 			Nullable: col.Optional(),
 		}
 	}
@@ -290,7 +290,7 @@ func extractColumn(col *goparquet.Column) Column {
 func collectLeafColumns(col *goparquet.Column, columns *[]Column) {
 	if col.Leaf() {
 		name := flattenColumnPath(col)
-		typ := goTypeToTypeID(col)
+		typ := GoTypeToTypeID(col)
 		nullable := col.Optional()
 		*columns = append(*columns, Column{
 			Name:     name,
@@ -371,7 +371,9 @@ func compareNative(a, b any) int {
 	return 0
 }
 
-func goTypeToTypeID(col *goparquet.Column) TypeID {
+// GoTypeToTypeID maps a parquet-go column to a Wadjet TypeID based on the
+// column's logical and physical type. Exported for use by the scan package.
+func GoTypeToTypeID(col *goparquet.Column) TypeID {
 	lt := col.Type().LogicalType()
 	if lt != nil {
 		if lt.UTF8 != nil {
@@ -379,6 +381,9 @@ func goTypeToTypeID(col *goparquet.Column) TypeID {
 		}
 		if lt.Timestamp != nil {
 			return TypeTimestamp
+		}
+		if lt.Date != nil {
+			return TypeDate
 		}
 		if lt.Decimal != nil {
 			return TypeDecimal

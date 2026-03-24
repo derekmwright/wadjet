@@ -279,11 +279,11 @@ func TestGetValueIPv6Short(t *testing.T) {
 func TestFormatDateAndParseDateString(t *testing.T) {
 	t.Run("formatDate", func(t *testing.T) {
 		// Epoch = 1970-01-01
-		if got := formatDate(0); got != "1970-01-01" {
+		if got := FormatDate(0); got != "1970-01-01" {
 			t.Fatalf("expected 1970-01-01, got %q", got)
 		}
 		// Day 365 = 1971-01-01
-		if got := formatDate(365); got != "1971-01-01" {
+		if got := FormatDate(365); got != "1971-01-01" {
 			t.Fatalf("expected 1971-01-01, got %q", got)
 		}
 	})

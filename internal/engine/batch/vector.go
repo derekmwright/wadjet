@@ -317,7 +317,7 @@ func (v *Vector) GetValue(i int) any {
 		}
 		return ""
 	case TypeDate:
-		return formatDate(v.Int32Data[i])
+		return FormatDate(v.Int32Data[i])
 	case TypeDecimal:
 		return v.DecimalData.Data[i].FormatDecimal(v.DecimalData.Scale)
 	case TypeArray, TypeMap:
@@ -795,8 +795,8 @@ func parseUUID(s string) []byte {
 
 var epochDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// formatDate formats days-since-epoch as "2006-01-02".
-func formatDate(days int32) string {
+// FormatDate formats days-since-epoch as "2006-01-02".
+func FormatDate(days int32) string {
 	t := epochDate.AddDate(0, 0, int(days))
 	return t.Format("2006-01-02")
 }
