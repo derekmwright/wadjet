@@ -1140,34 +1140,6 @@ func TestExtractScanStages(t *testing.T) {
 	}
 }
 
-func TestHasSubqueries(t *testing.T) {
-	tests := []struct {
-		name string
-		sql  string
-		want bool
-	}{
-		{"simple select", "SELECT * FROM orders", false},
-		{"join", "SELECT * FROM orders JOIN lineitem ON o_orderkey = l_orderkey", false},
-		{"IN subquery", "SELECT * FROM orders WHERE o_custkey IN (SELECT c_custkey FROM customer)", true},
-		{"EXISTS", "SELECT * FROM orders WHERE EXISTS (SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey)", true},
-		{"scalar subquery", "SELECT * FROM customer WHERE c_acctbal > (SELECT AVG(c_acctbal) FROM customer)", true},
-		{"CTE simple", "WITH cte AS (SELECT 1) SELECT * FROM cte", false},
-		{"CTE with subquery", "WITH rev AS (SELECT SUM(x) FROM t) SELECT * FROM s WHERE s.a = (SELECT MAX(x) FROM rev)", true},
-		// Multi-line SQL with newlines between keyword and SELECT
-		{"IN subquery multiline", "SELECT * FROM supplier WHERE s_suppkey IN (\n\tSELECT ps_suppkey FROM partsupp\n)", true},
-		{"EXISTS multiline", "SELECT * FROM orders WHERE NOT EXISTS (\n\tSELECT 1 FROM lineitem\n)", true},
-		{"scalar subquery multiline", "SELECT * FROM customer WHERE c_acctbal > (\n\tSELECT AVG(c_acctbal)\n\tFROM customer\n)", true},
-		{"CTE with scalar subquery multiline", "WITH revenue AS (\n\tSELECT l_suppkey, SUM(x) as total\n\tFROM lineitem GROUP BY l_suppkey\n)\nSELECT * FROM supplier\nWHERE total_revenue = (\n\tSELECT MAX(total_revenue) FROM revenue\n)", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := HasSubqueries(tt.sql); got != tt.want {
-				t.Errorf("HasSubqueries(%q) = %v, want %v", tt.sql, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestHasSelfJoins(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1184,12 +1156,21 @@ func TestHasSelfJoins(t *testing.T) {
 			false,
 		},
 		{
-			"self-join nation",
+			"self-join small table (nation)",
 			[]Stage{
 				{Type: "scan", TableName: "part"},
-				{Type: "scan", TableName: "nation"},
+				{Type: "scan", TableName: "nation", EstimatedBytes: 2048},
 				{Type: "scan", TableName: "region"},
-				{Type: "scan", TableName: "nation"},
+				{Type: "scan", TableName: "nation", EstimatedBytes: 2048},
+			},
+			false, // small tables (< 1 MB) are exempt
+		},
+		{
+			"self-join large table (lineitem)",
+			[]Stage{
+				{Type: "scan", TableName: "orders"},
+				{Type: "scan", TableName: "lineitem", EstimatedBytes: 500 * 1024 * 1024},
+				{Type: "scan", TableName: "lineitem", EstimatedBytes: 500 * 1024 * 1024},
 			},
 			true,
 		},

@@ -2146,6 +2146,67 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 	return joinNode
 }
 
+// HasRemainingSubqueries walks an optimized logical plan and returns true if
+// any filter predicate still contains un-decorrelated subquery references
+// (EXISTS, NOT EXISTS, IN (SELECT), scalar subqueries). After successful
+// decorrelation these become semi/anti join nodes and the predicates are
+// removed. If this returns false, the scan-node structure is deterministic
+// and safe for scan-split distribution.
+func HasRemainingSubqueries(n *Node) bool {
+	if n == nil {
+		return false
+	}
+	if n.Type == NodeFilter {
+		for _, pred := range n.Predicates {
+			if findExistsNode(pred.ASTExpr) != nil {
+				return true
+			}
+			if inExpr, subq := findInSubqueryNode(pred.ASTExpr); inExpr != nil && subq != nil {
+				return true
+			}
+			if hasScalarSubquery(pred.ASTExpr) {
+				return true
+			}
+		}
+	}
+	for _, child := range n.Children {
+		if HasRemainingSubqueries(child) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasScalarSubquery checks if an AST node contains a scalar subquery reference.
+func hasScalarSubquery(node plansql.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch n := node.(type) {
+	case *plansql.SubqueryNode:
+		return true
+	case *plansql.ExistsNode:
+		return true
+	case *plansql.ParenNode:
+		return hasScalarSubquery(n.Inner)
+	case *plansql.CmpExpr:
+		return hasScalarSubquery(n.Left) || hasScalarSubquery(n.Right)
+	case *plansql.AndNode:
+		return hasScalarSubquery(n.Left) || hasScalarSubquery(n.Right)
+	case *plansql.OrNode:
+		return hasScalarSubquery(n.Left) || hasScalarSubquery(n.Right)
+	case *plansql.NotNode:
+		return hasScalarSubquery(n.Inner)
+	case *plansql.InExpr:
+		for _, v := range n.Values {
+			if hasScalarSubquery(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // findExistsNode checks if a predicate AST node is an EXISTS/NOT EXISTS.
 func findExistsNode(node plansql.Node) *plansql.ExistsNode {
 	if node == nil {
