@@ -40,6 +40,7 @@ type Stage struct {
 
 	// Scan metadata
 	TableName       string
+	ScanAlias       string // unique scan identity: "table" or "table:N" for Nth duplicate
 	Columns         []string
 	PartitionFilter map[string]string
 	ScanFiles       []string // files to distribute across scan tasks
@@ -155,7 +156,9 @@ type Planner struct {
 	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
 	// When populated, buildScan uses these batches instead of reading from the
 	// object store, allowing parallel scan I/O with single-worker compute.
+	// Keyed by scan alias: "table" or "table:N" for self-joins.
 	MaterializedInputs map[string][]*batch.RecordBatch
+	scanCounter        map[string]int // tracks N-th scan of each table for MaterializedInputs lookup
 }
 
 // getSpillManager returns a shared per-query spill manager, creating it on
@@ -1457,11 +1460,26 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				tasks = len(scanFiles)
 			}
 		}
+		// Build unique ScanAlias: "table" for first scan, "table:1", "table:2"
+		// for duplicates. This disambiguates multiple scans of the same table
+		// (e.g., self-joins) in scan-split pipeline mode.
+		scanAlias := node.TableName
+		dupCount := 0
+		for _, s := range *stages {
+			if s.Type == "scan" && s.TableName == node.TableName {
+				dupCount++
+			}
+		}
+		if dupCount > 0 {
+			scanAlias = fmt.Sprintf("%s:%d", node.TableName, dupCount)
+		}
+
 		stage := Stage{
 			ID:              stageID,
 			Type:            "scan",
 			Tasks:           tasks,
 			TableName:       node.TableName,
+			ScanAlias:       scanAlias,
 			Columns:         node.RequiredColumns,
 			PartitionFilter: partFilter,
 			ScanFiles:       scanFiles,
@@ -1918,9 +1936,20 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	// Scan-split pipeline mode: use pre-scanned data instead of reading from S3
+	// Scan-split pipeline mode: use pre-scanned data instead of reading from S3.
+	// Scan alias uses same scheme as walkStages: "table" for first, "table:N" for duplicates.
 	if p.MaterializedInputs != nil {
-		if batches, ok := p.MaterializedInputs[node.TableName]; ok && len(batches) > 0 {
+		if p.scanCounter == nil {
+			p.scanCounter = make(map[string]int)
+		}
+		n := p.scanCounter[node.TableName]
+		p.scanCounter[node.TableName] = n + 1
+
+		scanAlias := node.TableName
+		if n > 0 {
+			scanAlias = fmt.Sprintf("%s:%d", node.TableName, n)
+		}
+		if batches, ok := p.MaterializedInputs[scanAlias]; ok && len(batches) > 0 {
 			return exec.NewBatchSource(batches), nil, &exec.CollectSink{}, nil
 		}
 	}
