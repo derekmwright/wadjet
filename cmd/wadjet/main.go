@@ -131,7 +131,14 @@ func serveCmd() *cobra.Command {
 			if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
 				goMemLimit := memLimit * 9 / 10
 				debug.SetMemoryLimit(goMemLimit)
-				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit)
+				// Disable percentage-based GC trigger and rely solely on GOMEMLIMIT.
+				// Workers keep a large LRU file cache (25% of memory) as long-lived
+				// heap. With GOGC=100, GC assist forces marking tax on every allocation
+				// proportional to live data — causing 2-3x query slowdowns when the
+				// cache is populated. GOGC=off + GOMEMLIMIT is Go's recommended
+				// configuration for workloads with large stable live data.
+				debug.SetGCPercent(-1)
+				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", "off")
 
 				if memoryBudget == 0 {
 					// Use 50% of detected memory for per-task budget. This leaves
