@@ -11,11 +11,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
@@ -25,12 +27,14 @@ import (
 
 	tpch "github.com/citc-tech/wadjet/benchmarks/tpch"
 	"github.com/citc-tech/wadjet/internal/coordinator"
-	"github.com/citc-tech/wadjet/internal/engine/memory"
 	distrib "github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/worker"
 	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/nats-io/nats.go"
 )
 
 func main() {
@@ -65,11 +69,15 @@ func main() {
 		}()
 	}
 
-	// Set GOMEMLIMIT to prevent OOM on bare metal / EC2 instances
+	// Set GOMEMLIMIT to prevent OOM on bare metal / EC2 instances.
+	// GOGC=off disables percentage-based GC triggering — GOMEMLIMIT alone
+	// acts as the safety net. This avoids GC assist overhead when the LRU
+	// file cache creates a large long-lived heap.
 	if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
 		goMemLimit := memLimit * 9 / 10
 		debug.SetMemoryLimit(goMemLimit)
-		log.Printf("Set GOMEMLIMIT=%d (%.1f GB) from detected limit %d",
+		debug.SetGCPercent(-1)
+		log.Printf("Set GOMEMLIMIT=%d (%.1f GB), GOGC=off from detected limit %d",
 			goMemLimit, float64(goMemLimit)/(1024*1024*1024), memLimit)
 	}
 
@@ -80,11 +88,12 @@ func main() {
 
 	var db *wadjet.DB
 	var coord *coordinator.Coordinator
+	var nc *nats.Conn
 	isDistributed := *workers > 0 && *s3Endpoint != ""
 	useS3 := *s3Endpoint != ""
 
 	if isDistributed {
-		db, coord = setupDistributed(ctx, logger, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *natsPort, *workers)
+		db, coord, nc = setupDistributed(ctx, logger, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *natsPort, *workers)
 	} else if useS3 {
 		db = setupS3Standalone(ctx, *s3Endpoint, *s3Region, *s3Bucket, *ssl)
 	} else {
@@ -97,6 +106,11 @@ func main() {
 	} else {
 		loadData(ctx, db, sf)
 	}
+	// Start worker CPU profiling before benchmark
+	if nc != nil && *profDir != "" {
+		startWorkerProfiling(nc)
+	}
+
 	if !*dataOnly {
 		var qf queryFn
 		if coord != nil {
@@ -134,6 +148,11 @@ func main() {
 		}
 
 		runBenchmark(ctx, qf, sf, *runs, *profDir, skip, *queryTimeout)
+	}
+
+	// Collect worker profiles after benchmark
+	if nc != nil && *profDir != "" {
+		collectWorkerProfiles(nc, *workers, *profDir)
 	}
 
 	if *memProf != "" {
@@ -175,7 +194,7 @@ func setupS3Standalone(ctx context.Context, endpoint, region, bucket string, ssl
 	return db
 }
 
-func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region, bucket string, ssl bool, nPort, workerCount int) (*wadjet.DB, *coordinator.Coordinator) {
+func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region, bucket string, ssl bool, nPort, workerCount int) (*wadjet.DB, *coordinator.Coordinator, *nats.Conn) {
 	// S3 store (IAM credentials auto-detected)
 	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
 		Endpoint: endpoint,
@@ -250,7 +269,7 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		log.Fatalf("opening DB: %v", err)
 	}
 
-	return db, coord
+	return db, coord, nc
 }
 
 func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool) {
@@ -474,4 +493,65 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 			}
 		}
 	}
+}
+
+// startWorkerProfiling tells all workers to begin CPU profiling.
+func startWorkerProfiling(nc *nats.Conn) {
+	inbox := nats.NewInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	if err != nil {
+		log.Printf("warning: could not subscribe for profile start responses: %v", err)
+		return
+	}
+	defer sub.Unsubscribe()
+
+	nc.PublishRequest(distrib.SubjectProfileStart, inbox, nil)
+
+	// Wait for at least one acknowledgment
+	for {
+		_, err := sub.NextMsg(2 * time.Second)
+		if err != nil {
+			break
+		}
+	}
+	log.Println("Worker CPU profiling started")
+}
+
+// collectWorkerProfiles stops CPU profiling on all workers and saves their
+// CPU + heap profiles to profDir.
+func collectWorkerProfiles(nc *nats.Conn, workerCount int, profDir string) {
+	inbox := nats.NewInbox()
+	sub, err := nc.SubscribeSync(inbox)
+	if err != nil {
+		log.Printf("warning: could not subscribe for profile collection: %v", err)
+		return
+	}
+	defer sub.Unsubscribe()
+
+	nc.PublishRequest(distrib.SubjectProfileCollect, inbox, nil)
+
+	collected := 0
+	for collected < workerCount {
+		msg, err := sub.NextMsg(30 * time.Second)
+		if err != nil {
+			break
+		}
+		var wp worker.WorkerProfile
+		if err := json.Unmarshal(msg.Data, &wp); err != nil {
+			log.Printf("warning: could not unmarshal worker profile: %v", err)
+			continue
+		}
+		if len(wp.CPU) > 0 {
+			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-cpu.prof", wp.WorkerID))
+			os.WriteFile(path, wp.CPU, 0644)
+			log.Printf("Saved worker CPU profile: %s (%d bytes)", path, len(wp.CPU))
+		}
+		if len(wp.Heap) > 0 {
+			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-heap.prof", wp.WorkerID))
+			os.WriteFile(path, wp.Heap, 0644)
+			log.Printf("Saved worker heap profile: %s (%d bytes)", path, len(wp.Heap))
+		}
+		collected++
+	}
+	log.Printf("Collected profiles from %d/%d workers", collected, workerCount)
 }

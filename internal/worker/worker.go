@@ -1,11 +1,14 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"sync"
 	"time"
 
@@ -53,6 +56,10 @@ type Worker struct {
 
 	cancelledMu sync.RWMutex
 	cancelled   map[string]time.Time // queryID → cancellation time
+
+	// CPU profiling state — started/stopped via NATS profile requests.
+	profMu  sync.Mutex
+	profBuf *bytes.Buffer // nil when not profiling
 }
 
 // New creates a new Worker.
@@ -152,6 +159,14 @@ func (w *Worker) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("subscribing to cancellations: %w", err)
 	}
+
+	// Subscribe to profile requests (NATS request/reply)
+	w.nc.Subscribe(distributed.SubjectProfileStart, func(msg *nats.Msg) {
+		w.handleProfileStart(msg)
+	})
+	w.nc.Subscribe(distributed.SubjectProfileCollect, func(msg *nats.Msg) {
+		w.handleProfileCollect(msg)
+	})
 
 	// Unsubscribe on shutdown
 	go func() {
@@ -420,4 +435,64 @@ func (w *Worker) reapCancelled(maxAge time.Duration) {
 			delete(w.cancelled, id)
 		}
 	}
+}
+
+// WorkerProfile is the JSON envelope for profile data sent over NATS.
+type WorkerProfile struct {
+	WorkerID string `json:"worker_id"`
+	CPU      []byte `json:"cpu,omitempty"`  // pprof CPU profile (gzip-compressed)
+	Heap     []byte `json:"heap,omitempty"` // pprof heap profile (gzip-compressed)
+}
+
+// handleProfileStart begins CPU profiling to an in-memory buffer.
+func (w *Worker) handleProfileStart(msg *nats.Msg) {
+	w.profMu.Lock()
+	defer w.profMu.Unlock()
+
+	if w.profBuf != nil {
+		// Already profiling — stop the old one first
+		pprof.StopCPUProfile()
+	}
+
+	w.profBuf = &bytes.Buffer{}
+	if err := pprof.StartCPUProfile(w.profBuf); err != nil {
+		w.logger.Error("failed to start CPU profile", "error", err)
+		w.profBuf = nil
+		msg.Respond([]byte("error: " + err.Error()))
+		return
+	}
+	w.logger.Info("CPU profiling started")
+	msg.Respond([]byte("ok"))
+}
+
+// handleProfileCollect stops CPU profiling, collects a heap snapshot,
+// and responds with both profiles as JSON.
+func (w *Worker) handleProfileCollect(msg *nats.Msg) {
+	w.profMu.Lock()
+	defer w.profMu.Unlock()
+
+	var cpuData []byte
+	if w.profBuf != nil {
+		pprof.StopCPUProfile()
+		cpuData = w.profBuf.Bytes()
+		w.profBuf = nil
+		w.logger.Info("CPU profiling stopped", "bytes", len(cpuData))
+	}
+
+	// Heap snapshot
+	runtime.GC()
+	var heapBuf bytes.Buffer
+	pprof.WriteHeapProfile(&heapBuf)
+
+	resp := WorkerProfile{
+		WorkerID: w.config.WorkerID,
+		CPU:      cpuData,
+		Heap:     heapBuf.Bytes(),
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		msg.Respond([]byte("error: " + err.Error()))
+		return
+	}
+	msg.Respond(data)
 }

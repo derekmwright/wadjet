@@ -25,6 +25,10 @@ const (
 	// Catalog locks — NATS KV
 	SubjectCatalogLock = "wadjet.catalog.lock"
 
+	// Worker profile collection — Core NATS request/reply
+	SubjectProfileStart   = "wadjet.workers.profile.start"
+	SubjectProfileCollect = "wadjet.workers.profile.collect"
+
 	// Stream names
 	StreamTasks   = "WADJET_TASKS"
 	StreamResults = "WADJET_RESULTS"
