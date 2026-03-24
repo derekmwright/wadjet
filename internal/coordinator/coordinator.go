@@ -112,8 +112,8 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 		obs, obsErr := js.CreateOrUpdateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
 			Bucket:      "wadjet_results_obj",
 			TTL:         5 * time.Minute,
-			MaxBytes:    4 * 1024 * 1024 * 1024, // 4 GB total
-			Storage:     jetstream.FileStorage,
+			MaxBytes:    2 * 1024 * 1024 * 1024, // 2 GB total
+			Storage:     jetstream.MemoryStorage,
 			Compression: true,
 		})
 		if obsErr == nil {
