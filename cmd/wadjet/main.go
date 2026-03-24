@@ -112,6 +112,7 @@ func main() {
 	rootCmd.AddCommand(shellCmd())
 	rootCmd.AddCommand(clustersCmd())
 	rootCmd.AddCommand(mcpCmd())
+	rootCmd.AddCommand(catalogCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -637,6 +638,11 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	coord.StartQueryReaper(ctx)
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
 
+	// Start catalog snapshotter
+	snapCfg := buildSnapshotConfig(fileCfg)
+	snapshotter := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, logger)
+	snapshotter.Start(ctx)
+
 	// Build config manager and auth provider for hot-reload
 	srvCfg := server.Config{
 		Addr:        httpAddr,
@@ -834,6 +840,15 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	coord.StartQueryReaper(ctx)
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
 
+	// Start catalog snapshotter (leader-only in distributed mode)
+	var coordFileCfg *config.Config
+	if configFile != "" {
+		coordFileCfg, _ = config.Load(configFile)
+	}
+	coordSnapCfg := buildSnapshotConfig(coordFileCfg)
+	coordSnap := coordinator.NewCatalogSnapshotter(cat, store, bucket, coordSnapCfg, logger)
+	coordSnap.Start(ctx)
+
 	m := metrics.New()
 
 	srvCfg := server.Config{
@@ -975,6 +990,168 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 
 // wireUDFPersistence loads persisted UDFs from the catalog and sets up
 // a callback so future UDF changes are automatically saved to KV.
+// buildSnapshotConfig converts the YAML/env CatalogSnapshot config into the
+// coordinator's SnapshotConfig. Returns defaults when no config file is loaded.
+func catalogCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "catalog",
+		Short: "Catalog management commands",
+	}
+	cmd.AddCommand(catalogSnapshotCmd())
+	cmd.AddCommand(catalogRestoreCmd())
+	cmd.AddCommand(catalogListSnapshotsCmd())
+	return cmd
+}
+
+func catalogSnapshotCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "snapshot",
+		Short: "Take a catalog snapshot now",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			store, err := newStore()
+			if err != nil {
+				return err
+			}
+			cat := catalog.NewWithStore(store, bucket)
+			if err := cat.Init(ctx); err != nil {
+				return fmt.Errorf("initializing catalog: %w", err)
+			}
+
+			var fileCfg *config.Config
+			if configFile != "" {
+				fileCfg, _ = config.Load(configFile)
+			}
+			snapCfg := buildSnapshotConfig(fileCfg)
+			s := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, nil)
+
+			snap, err := s.TakeSnapshot(ctx)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Snapshot saved: %s (%d entries)\n", snap.Timestamp.Format(time.RFC3339), len(snap.Entries))
+			return nil
+		},
+	}
+}
+
+func catalogRestoreCmd() *cobra.Command {
+	var snapshotKey string
+	cmd := &cobra.Command{
+		Use:   "restore",
+		Short: "Restore catalog from a snapshot (latest by default)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			store, err := newStore()
+			if err != nil {
+				return err
+			}
+			cat := catalog.NewWithStore(store, bucket)
+			if err := cat.Init(ctx); err != nil {
+				return fmt.Errorf("initializing catalog: %w", err)
+			}
+
+			var fileCfg *config.Config
+			if configFile != "" {
+				fileCfg, _ = config.Load(configFile)
+			}
+			snapCfg := buildSnapshotConfig(fileCfg)
+			s := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, nil)
+
+			if snapshotKey != "" {
+				snap, err := s.LoadSnapshot(ctx, snapshotKey)
+				if err != nil {
+					return err
+				}
+				if err := s.Restore(ctx, snap); err != nil {
+					return err
+				}
+				fmt.Printf("Restored from %s (%d entries, %s)\n", snapshotKey, len(snap.Entries), snap.Timestamp.Format(time.RFC3339))
+			} else {
+				snap, err := s.RestoreLatest(ctx)
+				if err != nil {
+					return err
+				}
+				fmt.Printf("Restored latest snapshot (%d entries, %s)\n", len(snap.Entries), snap.Timestamp.Format(time.RFC3339))
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&snapshotKey, "from", "", "Specific snapshot key to restore (default: latest)")
+	return cmd
+}
+
+func catalogListSnapshotsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "snapshots",
+		Short: "List available catalog snapshots",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := context.Background()
+			store, err := newStore()
+			if err != nil {
+				return err
+			}
+			cat := catalog.NewWithStore(store, bucket)
+
+			var fileCfg *config.Config
+			if configFile != "" {
+				fileCfg, _ = config.Load(configFile)
+			}
+			snapCfg := buildSnapshotConfig(fileCfg)
+			s := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, nil)
+
+			snapshots, err := s.ListSnapshots(ctx)
+			if err != nil {
+				return err
+			}
+			if len(snapshots) == 0 {
+				fmt.Println("No snapshots found.")
+				return nil
+			}
+			for _, obj := range snapshots {
+				fmt.Printf("  %s  (%d bytes)\n", obj.Key, obj.Size)
+			}
+			return nil
+		},
+	}
+}
+
+func buildSnapshotConfig(fileCfg *config.Config) coordinator.SnapshotConfig {
+	cfg := coordinator.SnapshotConfig{
+		Enabled:    true,
+		LeaderOnly: true,
+	}
+
+	if fileCfg == nil {
+		return cfg
+	}
+	snap := fileCfg.CatalogSnapshot
+
+	if snap.Enabled != nil {
+		cfg.Enabled = *snap.Enabled
+	}
+	if snap.Interval != "" {
+		if d, err := time.ParseDuration(snap.Interval); err == nil {
+			cfg.Interval = d
+		}
+	}
+	if snap.Retention > 0 {
+		cfg.Retention = snap.Retention
+	}
+	if snap.Prefix != "" {
+		cfg.Prefix = snap.Prefix
+	}
+	if snap.Debounce != "" {
+		if d, err := time.ParseDuration(snap.Debounce); err == nil {
+			cfg.Debounce = d
+		}
+	}
+	if snap.LeaderOnly != nil {
+		cfg.LeaderOnly = *snap.LeaderOnly
+	}
+	return cfg
+}
+
 func wireUDFPersistence(cat *catalog.Catalog, logger *slog.Logger) {
 	// Load existing UDFs from KV
 	kvDefs, err := cat.LoadUDFs()
