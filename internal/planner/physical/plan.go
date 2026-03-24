@@ -1078,18 +1078,35 @@ func ShouldSplitScan(stages []Stage, workerCount int) bool {
 // scalar subquery). Queries with subqueries can't use scan-split pipeline
 // because subqueries create additional scan nodes that aren't in the stage list.
 func HasSubqueries(sql string) bool {
-	upper := strings.ToUpper(sql)
-	// Check for common subquery patterns
+	// Collapse all whitespace (newlines, tabs) to single spaces, then remove
+	// spaces after '(' so "IN (\n\tSELECT" normalizes to "IN (SELECT".
+	upper := strings.ToUpper(strings.Join(strings.Fields(sql), " "))
+	upper = strings.ReplaceAll(upper, "( ", "(")
 	return strings.Contains(upper, "IN (SELECT") ||
 		strings.Contains(upper, "IN(SELECT") ||
 		strings.Contains(upper, "EXISTS (SELECT") ||
 		strings.Contains(upper, "EXISTS(SELECT") ||
-		// Scalar subqueries in WHERE: "> (SELECT", "= (SELECT", etc.
 		strings.Contains(upper, "> (SELECT") ||
 		strings.Contains(upper, "< (SELECT") ||
 		strings.Contains(upper, "= (SELECT") ||
-		// CTE with self-referencing subqueries
 		(strings.Contains(upper, "WITH ") && strings.Count(upper, "SELECT") > 2)
+}
+
+// HasSelfJoins returns true if any table is scanned more than once in the
+// stage list (e.g., nation n1 JOIN nation n2). Self-joins can't safely use
+// scan-split pipeline because the counter-based ScanAlias scheme depends on
+// identical traversal order between coordinator walkStages and worker buildScan.
+func HasSelfJoins(stages []Stage) bool {
+	seen := make(map[string]bool)
+	for _, s := range stages {
+		if s.Type == "scan" {
+			if seen[s.TableName] {
+				return true
+			}
+			seen[s.TableName] = true
+		}
+	}
+	return false
 }
 
 // ExtractScanStages returns only the scan stages from a stage list.
