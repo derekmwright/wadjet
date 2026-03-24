@@ -223,14 +223,44 @@ func ExtractMergeInfo(plan *Node) *MergeInfo {
 			n = n.Children[0]
 		}
 	}
-	// Skip Project wrapper (pass-through projections)
+	// Capture Project rename mappings so we can translate logical aggregate
+	// column names to the post-projection names that appear in worker batches.
+	var projections []Projection
 	if n.Type == NodeProject && len(n.Children) > 0 {
+		projections = n.Projections
 		n = n.Children[0]
 	}
 	if n.Type == NodeAggregate {
-		mi.GroupBy = n.GroupBy
-		mi.AggExprs = n.AggExprs
+		mi.GroupBy = append([]string(nil), n.GroupBy...)
+		mi.AggExprs = append([]AggExpr(nil), n.AggExprs...)
 		mi.HasAggregate = true
+		// Apply projection renames: map pre-projection names to aliases
+		if len(projections) > 0 {
+			rename := make(map[string]string, len(projections))
+			for _, p := range projections {
+				src := p.Column
+				if src == "" {
+					src = p.Expr
+				}
+				dst := p.Alias
+				if dst == "" {
+					dst = src
+				}
+				if src != dst {
+					rename[src] = dst
+				}
+			}
+			for i, col := range mi.GroupBy {
+				if alias, ok := rename[col]; ok {
+					mi.GroupBy[i] = alias
+				}
+			}
+			for i, ae := range mi.AggExprs {
+				if alias, ok := rename[ae.OutputCol]; ok {
+					mi.AggExprs[i].OutputCol = alias
+				}
+			}
+		}
 		return mi
 	}
 	// Non-aggregate query — still need sort + limit merge

@@ -779,3 +779,107 @@ func TestOptimize_JoinReorder(t *testing.T) {
 		t.Fatal("Optimize returned nil")
 	}
 }
+
+// --- ExtractMergeInfo ---
+
+func TestExtractMergeInfoProjectRename(t *testing.T) {
+	// Simulate: SELECT n_name AS nation, SUM(revenue) AS total_rev
+	//           FROM ... GROUP BY n_name ORDER BY total_rev DESC LIMIT 10
+	//
+	// Logical plan: Limit → Sort → Project(n_name→nation, revenue→total_rev) → Aggregate
+	agg := &Node{
+		Type:    NodeAggregate,
+		GroupBy: []string{"n_name"},
+		AggExprs: []AggExpr{
+			{Func: "sum", InputCol: "revenue", OutputCol: "revenue"},
+		},
+	}
+	proj := &Node{
+		Type: NodeProject,
+		Projections: []Projection{
+			{Column: "n_name", Alias: "nation"},
+			{Expr: "revenue", Alias: "total_rev", IsAgg: true},
+		},
+		Children: []*Node{agg},
+	}
+	sort := &Node{
+		Type:     NodeSort,
+		OrderBy:  []OrderExpr{{Column: "total_rev", Desc: true}},
+		Children: []*Node{proj},
+	}
+	limit := &Node{
+		Type:     NodeLimit,
+		LimitVal: 10,
+		Children: []*Node{sort},
+	}
+
+	mi := ExtractMergeInfo(limit)
+	if mi == nil {
+		t.Fatal("ExtractMergeInfo returned nil")
+	}
+	if !mi.HasAggregate {
+		t.Fatal("expected HasAggregate=true")
+	}
+	// GroupBy should be remapped to post-projection name
+	if len(mi.GroupBy) != 1 || mi.GroupBy[0] != "nation" {
+		t.Errorf("GroupBy = %v, want [nation]", mi.GroupBy)
+	}
+	// AggExpr OutputCol should be remapped to post-projection name
+	if len(mi.AggExprs) != 1 || mi.AggExprs[0].OutputCol != "total_rev" {
+		t.Errorf("AggExprs[0].OutputCol = %q, want %q", mi.AggExprs[0].OutputCol, "total_rev")
+	}
+	if mi.Limit != 10 {
+		t.Errorf("Limit = %d, want 10", mi.Limit)
+	}
+}
+
+func TestExtractMergeInfoNoProjectRename(t *testing.T) {
+	// When Project has no renames, names should pass through unchanged.
+	agg := &Node{
+		Type:    NodeAggregate,
+		GroupBy: []string{"n_name"},
+		AggExprs: []AggExpr{
+			{Func: "sum", InputCol: "revenue", OutputCol: "total_rev"},
+		},
+	}
+	proj := &Node{
+		Type: NodeProject,
+		Projections: []Projection{
+			{Column: "n_name", Alias: "n_name"},
+			{Expr: "total_rev", Alias: "total_rev", IsAgg: true},
+		},
+		Children: []*Node{agg},
+	}
+
+	mi := ExtractMergeInfo(proj)
+	if mi == nil {
+		t.Fatal("ExtractMergeInfo returned nil")
+	}
+	if mi.GroupBy[0] != "n_name" {
+		t.Errorf("GroupBy[0] = %q, want %q", mi.GroupBy[0], "n_name")
+	}
+	if mi.AggExprs[0].OutputCol != "total_rev" {
+		t.Errorf("AggExprs[0].OutputCol = %q, want %q", mi.AggExprs[0].OutputCol, "total_rev")
+	}
+}
+
+func TestExtractMergeInfoNoProject(t *testing.T) {
+	// Plan with no Project node at all — names come directly from Aggregate.
+	agg := &Node{
+		Type:    NodeAggregate,
+		GroupBy: []string{"l_returnflag"},
+		AggExprs: []AggExpr{
+			{Func: "sum", InputCol: "l_quantity", OutputCol: "sum_qty"},
+		},
+	}
+	mi := ExtractMergeInfo(agg)
+	if mi == nil {
+		t.Fatal("ExtractMergeInfo returned nil")
+	}
+	if mi.GroupBy[0] != "l_returnflag" {
+		t.Errorf("GroupBy[0] = %q, want %q", mi.GroupBy[0], "l_returnflag")
+	}
+	if mi.AggExprs[0].OutputCol != "sum_qty" {
+		t.Errorf("AggExprs[0].OutputCol = %q, want %q", mi.AggExprs[0].OutputCol, "sum_qty")
+	}
+}
