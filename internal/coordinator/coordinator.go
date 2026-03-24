@@ -56,6 +56,7 @@ type Coordinator struct {
 	cleaner   *ResultCleaner
 	leader    *LeaderElection   // nil = always leader (standalone mode)
 	queryStore *QueryStateStore // nil = no persistence (standalone mode)
+	resultKV  jetstream.KeyValue // NATS KV for fast inter-stage result transfer (nil = S3 only)
 	logger    *slog.Logger
 
 	mu         sync.Mutex
@@ -87,6 +88,25 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 		queryMetas: make(map[string]*queryMeta),
 		querySem:   make(chan struct{}, maxInflight),
 	}
+
+	// NATS KV result cache: coordinator writes inline results here instead of S3.
+	// Workers already read from this bucket (tier 2 in getFileData), so this
+	// eliminates the S3 round-trip at stage boundaries for small results.
+	if js != nil {
+		kv, kvErr := js.CreateOrUpdateKeyValue(context.Background(), jetstream.KeyValueConfig{
+			Bucket:   "wadjet_results_data",
+			TTL:      5 * time.Minute,
+			MaxBytes: 1024 * 1024 * 1024, // 1 GB total
+			Storage:  jetstream.MemoryStorage,
+		})
+		if kvErr == nil {
+			c.resultKV = kv
+			logger.Info("coordinator NATS KV result cache enabled", "bucket", "wadjet_results_data")
+		} else {
+			logger.Debug("coordinator NATS KV result cache unavailable, using S3 only", "error", kvErr)
+		}
+	}
+
 	return c
 }
 
@@ -1801,8 +1821,19 @@ func (c *Coordinator) StartQueryReaper(ctx context.Context) {
 	}()
 }
 
-// materializeInlineResults writes inline results to S3 so downstream stages can read them.
-// Updates the tracker's result entries with the materialized file paths.
+// natsKVKey converts an S3 result path to a valid NATS KV key.
+// NATS KV keys don't support '.' so we replace with '_'.
+func natsKVKey(path string) string {
+	return strings.ReplaceAll(path, ".", "_")
+}
+
+// natsKVResultThreshold is the max result size written to NATS KV.
+// Must match the worker's threshold so both sides agree on where data lives.
+const natsKVResultThreshold = 900 * 1024 // 900 KB
+
+// materializeInlineResults writes inline results so downstream stages can read them.
+// When NATS KV is available, small results are written there (~1ms) instead of S3 (~250ms).
+// Large results fall back to S3. Updates the tracker's result entries with materialized paths.
 // Writes are parallelized to minimize wall-clock time at stage boundaries.
 func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, stageID string) {
 	results := c.tracker.StageResults(queryID, stageID)
@@ -1829,9 +1860,7 @@ func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, sta
 	// Single result: skip goroutine overhead
 	if len(pending) == 1 {
 		w := pending[0]
-		_, err := store.Put(ctx, c.config.ResultBucket, w.path,
-			bytes.NewReader(w.r.InlineData), int64(len(w.r.InlineData)), "application/octet-stream")
-		if err != nil {
+		if err := c.materializeOne(ctx, store, w.path, w.r.InlineData); err != nil {
 			c.logger.Error("failed to materialize inline result", "path", w.path, "error", err)
 			return
 		}
@@ -1841,8 +1870,6 @@ func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, sta
 	}
 
 	// Parallel writes with bounded concurrency to prevent goroutine explosion.
-	// 16 concurrent S3 puts is plenty for throughput without overwhelming
-	// the coordinator or the S3 endpoint.
 	const maxConcurrent = 16
 	sem := make(chan struct{}, maxConcurrent)
 	var wg sync.WaitGroup
@@ -1852,9 +1879,7 @@ func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, sta
 		go func(w work) {
 			defer wg.Done()
 			defer func() { <-sem }() // release
-			_, err := store.Put(ctx, c.config.ResultBucket, w.path,
-				bytes.NewReader(w.r.InlineData), int64(len(w.r.InlineData)), "application/octet-stream")
-			if err != nil {
+			if err := c.materializeOne(ctx, store, w.path, w.r.InlineData); err != nil {
 				c.logger.Error("failed to materialize inline result", "path", w.path, "error", err)
 				return
 			}
@@ -1862,6 +1887,23 @@ func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, sta
 		}(w)
 	}
 	wg.Wait()
+}
+
+// materializeOne writes a single inline result to the fastest available store.
+// NATS KV is preferred for results under natsKVResultThreshold; S3 is the fallback.
+func (c *Coordinator) materializeOne(ctx context.Context, store objstore.Store, path string, data []byte) error {
+	// Fast path: NATS KV for small results (workers read from KV in tier 2)
+	if c.resultKV != nil && len(data) <= natsKVResultThreshold {
+		if _, kvErr := c.resultKV.Put(ctx, natsKVKey(path), data); kvErr == nil {
+			return nil
+		}
+		// Fall through to S3 on KV failure
+	}
+
+	// Slow path: S3
+	_, err := store.Put(ctx, c.config.ResultBucket, path,
+		bytes.NewReader(data), int64(len(data)), "application/octet-stream")
+	return err
 }
 
 // collectDepResults gathers result file paths from completed stages.
