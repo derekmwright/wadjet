@@ -184,6 +184,71 @@ type OrderExpr struct {
 	NullsFirst *bool // nil = default, true = NULLS FIRST, false = NULLS LAST
 }
 
+// StripTopSortLimit removes the outermost Sort and Limit nodes from a logical
+// plan. Used by probe-split pipeline: each worker produces partial aggregates
+// without ordering or truncation; the coordinator merges and applies final
+// sort + limit.
+func StripTopSortLimit(plan *Node) *Node {
+	if plan == nil {
+		return nil
+	}
+	n := plan
+	if n.Type == NodeLimit && len(n.Children) > 0 {
+		n = n.Children[0]
+	}
+	if n.Type == NodeSort && len(n.Children) > 0 {
+		n = n.Children[0]
+	}
+	return n
+}
+
+// ExtractMergeInfo extracts the top-level aggregate and sort/limit information
+// needed to merge probe-split partial results. Returns nil if the plan doesn't
+// have a top-level aggregate (probe-split merge not needed).
+func ExtractMergeInfo(plan *Node) *MergeInfo {
+	if plan == nil {
+		return nil
+	}
+	mi := &MergeInfo{}
+	n := plan
+	if n.Type == NodeLimit {
+		mi.Limit = n.LimitVal
+		if len(n.Children) > 0 {
+			n = n.Children[0]
+		}
+	}
+	if n.Type == NodeSort {
+		mi.OrderBy = n.OrderBy
+		if len(n.Children) > 0 {
+			n = n.Children[0]
+		}
+	}
+	// Skip Project wrapper (pass-through projections)
+	if n.Type == NodeProject && len(n.Children) > 0 {
+		n = n.Children[0]
+	}
+	if n.Type == NodeAggregate {
+		mi.GroupBy = n.GroupBy
+		mi.AggExprs = n.AggExprs
+		mi.HasAggregate = true
+		return mi
+	}
+	// Non-aggregate query — still need sort + limit merge
+	if mi.Limit > 0 || len(mi.OrderBy) > 0 {
+		return mi
+	}
+	return nil
+}
+
+// MergeInfo describes how to merge probe-split partial results.
+type MergeInfo struct {
+	GroupBy      []string
+	AggExprs     []AggExpr
+	OrderBy      []OrderExpr
+	Limit        int
+	HasAggregate bool
+}
+
 // InjectRowFilter walks the logical plan tree and wraps Scan nodes for the
 // given table with an additional Filter node containing the row filter predicate.
 // This is used by row-level security policies to restrict which rows a role can see.

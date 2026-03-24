@@ -1492,6 +1492,23 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		planner.MaterializedInputs = materializedInputs
 	}
 
+	// Probe-split pipeline mode: restrict scan files for the probe table.
+	// Each worker reads its assigned partition of the probe table while
+	// scanning build tables in full.
+	if len(task.ScanFileFilter) > 0 {
+		planner.ScanFileFilter = task.ScanFileFilter
+		e.logger.Debug("probe-split scan file filter",
+			"aliases", len(task.ScanFileFilter))
+	}
+
+	// Partial aggregate mode: strip top Sort+Limit so each worker produces
+	// complete partial aggregates. The coordinator merges and applies final
+	// ordering.
+	if task.PartialAggregate {
+		logicalPlan = logical.StripTopSortLimit(logicalPlan)
+		e.logger.Debug("stripped top sort/limit for partial aggregate")
+	}
+
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
 		return fmt.Errorf("physical plan: %w", err)

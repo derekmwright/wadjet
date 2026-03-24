@@ -38,6 +38,17 @@ type Task struct {
 	// Alias is unique per scan node: "table" or "table:N" for self-joins.
 	PreScannedInputs map[string][]string `json:"pre_scanned_inputs,omitempty"`
 
+	// Probe-split pipeline: the probe table's files are partitioned across workers
+	// while build tables are scanned in full by each worker. Maps scan alias →
+	// allowed file paths. Only the probe scan alias has a restricted file list;
+	// other scans read all files normally.
+	ScanFileFilter map[string][]string `json:"scan_file_filter,omitempty"`
+
+	// PartialAggregate is set on probe-split pipeline tasks to indicate that
+	// the top-level Sort and Limit should be stripped. Each worker produces
+	// complete partial aggregates; the coordinator merges them.
+	PartialAggregate bool `json:"partial_aggregate,omitempty"`
+
 	// Scan-specific
 	Files           []string          `json:"files,omitempty"`
 	PartitionFilter map[string]string `json:"partition_filter,omitempty"`
