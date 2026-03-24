@@ -49,16 +49,15 @@ const maxBufferedRows = 500_000
 
 // Executor dispatches task types to the appropriate execution logic.
 type Executor struct {
-	store          objstore.Store
-	js             jetstream.JetStream    // for catalog access in pipeline tasks
-	cache          *LRUCache
-	resultStore    *ResultStore           // in-memory result passing between stages (nil = disabled)
-	resultKV       jetstream.KeyValue     // NATS KV for cross-worker inter-stage results (nil = disabled)
-	resultObjStore jetstream.ObjectStore  // NATS Object Store for large cross-worker results (nil = disabled)
-	memoryBudget   int64                  // per-task memory budget in bytes (0 = unlimited)
-	spillDir       string                 // directory for spill files
-	metrics        *metrics.Metrics
-	logger         *slog.Logger
+	store        objstore.Store
+	js           jetstream.JetStream // for catalog access in pipeline tasks
+	cache        *LRUCache
+	resultStore  *ResultStore        // in-memory result passing between stages (nil = disabled)
+	resultKV     jetstream.KeyValue  // NATS KV for cross-worker inter-stage results (nil = disabled)
+	memoryBudget int64               // per-task memory budget in bytes (0 = unlimited)
+	spillDir     string              // directory for spill files
+	metrics      *metrics.Metrics
+	logger       *slog.Logger
 }
 
 // NewExecutor creates a new task executor.
@@ -82,14 +81,6 @@ func (e *Executor) SetResultStore(rs *ResultStore) {
 // inter-stage latency from ~500ms (S3 round-trip) to ~10ms (NATS KV).
 func (e *Executor) SetResultKV(kv jetstream.KeyValue) {
 	e.resultKV = kv
-}
-
-// SetResultObjStore attaches a NATS Object Store for large cross-worker result
-// transfer. Results above natsKVResultThreshold (4 MB) are stored here instead
-// of S3, reducing inter-stage latency from ~500ms to ~20-50ms. The Object Store
-// handles chunking transparently for arbitrarily large results.
-func (e *Executor) SetResultObjStore(os jetstream.ObjectStore) {
-	e.resultObjStore = os
 }
 
 // SetMetrics attaches Prometheus metrics for spill/memory tracking.
@@ -1269,17 +1260,6 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 				}
 			}
 
-			// NATS Object Store for large partitions (> 4 MB)
-			if e.resultObjStore != nil {
-				objKey := natsObjKey(path)
-				if _, objErr := e.resultObjStore.PutBytes(ctx, objKey, buf); objErr == nil {
-					if e.resultStore != nil {
-						e.resultStore.Put(task.QueryID, path, buf)
-					}
-					return
-				}
-			}
-
 			_, putErr := e.store.Put(ctx, task.ResultBucket, path,
 				bytes.NewReader(buf), int64(len(buf)), "application/octet-stream")
 			uploadResults[id].err = putErr
@@ -1559,23 +1539,13 @@ func (e *Executor) getFileData(ctx context.Context, bucket, path string) ([]byte
 		}
 	}
 
-	// Tier 3: NATS Object Store (large cross-worker results, ~20-50ms)
-	if e.resultObjStore != nil {
-		objKey := natsObjKey(path)
-		if data, objErr := e.resultObjStore.GetBytes(ctx, objKey); objErr == nil {
-			// Populate LRU cache for subsequent reads
-			e.cache.Put(bucket+"/"+path, data)
-			return data, nil
-		}
-	}
-
-	// Tier 4: LRU cache (cached S3 reads)
+	// Tier 3: LRU cache (cached S3 reads)
 	cacheKey := bucket + "/" + path
 	if data, ok := e.cache.Get(cacheKey); ok {
 		return data, nil
 	}
 
-	// Tier 5: S3 object store (slowest, ~250-500ms)
+	// Tier 4: S3 object store (slowest, ~250-500ms)
 	rc, _, err := e.store.Get(ctx, bucket, path)
 	if err != nil {
 		return nil, err
@@ -1987,21 +1957,6 @@ func (e *Executor) writeBatchResult(ctx context.Context, task distributed.Task, 
 		// Fall through to S3 on NATS KV error
 	}
 
-	// NATS Object Store fast path: for large results (> 4 MB) that exceed
-	// NATS KV max, use Object Store instead of S3. Chunks transparently,
-	// ~20-50ms vs ~500ms for S3 round-trip.
-	if e.resultObjStore != nil {
-		objKey := natsObjKey(resultPath)
-		if _, objErr := e.resultObjStore.PutBytes(ctx, objKey, data); objErr == nil {
-			result.ResultPath = resultPath
-			if e.resultStore != nil {
-				e.resultStore.Put(task.QueryID, resultPath, data)
-			}
-			return nil
-		}
-		// Fall through to S3 on Object Store error
-	}
-
 	// Write to S3 so results are visible to all workers.
 	_, err = e.store.Put(ctx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
 	if err != nil {
@@ -2021,13 +1976,6 @@ func (e *Executor) writeBatchResult(ctx context.Context, task distributed.Task, 
 // NATS KV keys don't support '.' so we replace with '_'.
 func natsKVKey(path string) string {
 	return strings.ReplaceAll(path, ".", "_")
-}
-
-// natsObjKey converts an S3 result path to a valid NATS Object Store key.
-// Object Store keys cannot contain '/' so we replace with '_'.
-func natsObjKey(path string) string {
-	r := strings.ReplaceAll(path, "/", "_")
-	return strings.ReplaceAll(r, ".", "_")
 }
 
 // batchSource wraps a slice of RecordBatches as an exec.Source.

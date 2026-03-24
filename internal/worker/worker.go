@@ -100,22 +100,6 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		} else {
 			logger.Debug("NATS KV result cache unavailable, using S3 only", "error", kvErr)
 		}
-
-		// NATS Object Store: handles large results (> 4 MB) that exceed KV limits.
-		// Chunking is transparent — avoids S3 round-trip for scan-split results.
-		obs, obsErr := js.CreateOrUpdateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
-			Bucket:      "wadjet_results_obj",
-			TTL:         5 * time.Minute,
-			MaxBytes:    2 * 1024 * 1024 * 1024, // 2 GB total
-			Storage:     jetstream.MemoryStorage,
-			Compression: true,
-		})
-		if obsErr == nil {
-			executor.SetResultObjStore(obs)
-			logger.Info("NATS Object Store result cache enabled", "bucket", "wadjet_results_obj")
-		} else {
-			logger.Debug("NATS Object Store unavailable, large results will use S3", "error", obsErr)
-		}
 	}
 
 	return &Worker{
