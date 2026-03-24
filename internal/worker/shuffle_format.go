@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"unsafe"
 
 	"github.com/klauspost/compress/s2"
 
@@ -40,6 +41,7 @@ type shuffleWriter struct {
 	schema    []parquet.Column
 	numChunks uint32
 	buf       []byte // reusable scratch buffer
+	gatherBuf []byte // reusable buffer for gathering selected rows
 }
 
 func newShuffleWriter(w io.Writer, schema []parquet.Column) *shuffleWriter {
@@ -48,6 +50,14 @@ func newShuffleWriter(w io.Writer, schema []parquet.Column) *shuffleWriter {
 		schema: schema,
 		buf:    make([]byte, 8),
 	}
+}
+
+// ensureGather returns a byte slice of at least n bytes from the reusable buffer.
+func (sw *shuffleWriter) ensureGather(n int) []byte {
+	if cap(sw.gatherBuf) < n {
+		sw.gatherBuf = make([]byte, n)
+	}
+	return sw.gatherBuf[:n]
 }
 
 // writeHeader writes the file header (magic + placeholder chunk count + schema).
@@ -126,11 +136,10 @@ func (sw *shuffleWriter) writeColumnData(vec *batch.Vector, sel []uint32, numRow
 		words := vec.Nulls.Words()
 		copy(bitmapBuf, words[:min(len(words), bitmapWords)])
 	}
-	for _, word := range bitmapBuf {
-		binary.LittleEndian.PutUint64(sw.buf[:8], word)
-		if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-			return err
-		}
+	// Write all bitmap words at once via direct memory reinterpretation.
+	bitmapBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(bitmapBuf))), len(bitmapBuf)*8)
+	if _, err := sw.w.Write(bitmapBytes); err != nil {
+		return err
 	}
 
 	// Write column data based on type
@@ -155,99 +164,81 @@ func (sw *shuffleWriter) writeColumnData(vec *batch.Vector, sel []uint32, numRow
 }
 
 func (sw *shuffleWriter) writeInt32Data(data []int32, sel []uint32, numRows int) error {
-	dataLen := uint32(numRows * 4)
-	binary.LittleEndian.PutUint32(sw.buf[:4], dataLen)
+	nbytes := numRows * 4
+	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(nbytes))
 	if _, err := sw.w.Write(sw.buf[:4]); err != nil {
 		return err
 	}
 	if sel != nil {
-		for _, si := range sel {
-			binary.LittleEndian.PutUint32(sw.buf[:4], uint32(data[si]))
-			if _, err := sw.w.Write(sw.buf[:4]); err != nil {
-				return err
-			}
+		gb := sw.ensureGather(nbytes)
+		for i, si := range sel {
+			binary.LittleEndian.PutUint32(gb[i*4:], uint32(data[si]))
 		}
-	} else {
-		for i := 0; i < numRows; i++ {
-			binary.LittleEndian.PutUint32(sw.buf[:4], uint32(data[i]))
-			if _, err := sw.w.Write(sw.buf[:4]); err != nil {
-				return err
-			}
-		}
+		_, err := sw.w.Write(gb[:nbytes])
+		return err
 	}
-	return nil
+	// No selection: write slice memory directly (little-endian platforms).
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(data[:numRows]))), nbytes)
+	_, err := sw.w.Write(raw)
+	return err
 }
 
 func (sw *shuffleWriter) writeInt64Data(data []int64, sel []uint32, numRows int) error {
-	dataLen := uint32(numRows * 8)
-	binary.LittleEndian.PutUint32(sw.buf[:4], dataLen)
+	nbytes := numRows * 8
+	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(nbytes))
 	if _, err := sw.w.Write(sw.buf[:4]); err != nil {
 		return err
 	}
 	if sel != nil {
-		for _, si := range sel {
-			binary.LittleEndian.PutUint64(sw.buf[:8], uint64(data[si]))
-			if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-				return err
-			}
+		gb := sw.ensureGather(nbytes)
+		for i, si := range sel {
+			binary.LittleEndian.PutUint64(gb[i*8:], uint64(data[si]))
 		}
-	} else {
-		for i := 0; i < numRows; i++ {
-			binary.LittleEndian.PutUint64(sw.buf[:8], uint64(data[i]))
-			if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-				return err
-			}
-		}
+		_, err := sw.w.Write(gb[:nbytes])
+		return err
 	}
-	return nil
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(data[:numRows]))), nbytes)
+	_, err := sw.w.Write(raw)
+	return err
 }
 
 func (sw *shuffleWriter) writeFloat32Data(data []float32, sel []uint32, numRows int) error {
-	dataLen := uint32(numRows * 4)
-	binary.LittleEndian.PutUint32(sw.buf[:4], dataLen)
+	nbytes := numRows * 4
+	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(nbytes))
 	if _, err := sw.w.Write(sw.buf[:4]); err != nil {
 		return err
 	}
 	if sel != nil {
-		for _, si := range sel {
-			binary.LittleEndian.PutUint32(sw.buf[:4], math.Float32bits(data[si]))
-			if _, err := sw.w.Write(sw.buf[:4]); err != nil {
-				return err
-			}
+		gb := sw.ensureGather(nbytes)
+		for i, si := range sel {
+			binary.LittleEndian.PutUint32(gb[i*4:], math.Float32bits(data[si]))
 		}
-	} else {
-		for i := 0; i < numRows; i++ {
-			binary.LittleEndian.PutUint32(sw.buf[:4], math.Float32bits(data[i]))
-			if _, err := sw.w.Write(sw.buf[:4]); err != nil {
-				return err
-			}
-		}
+		_, err := sw.w.Write(gb[:nbytes])
+		return err
 	}
-	return nil
+	// float32 IEEE 754 memory layout matches the wire format on little-endian.
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(data[:numRows]))), nbytes)
+	_, err := sw.w.Write(raw)
+	return err
 }
 
 func (sw *shuffleWriter) writeFloat64Data(data []float64, sel []uint32, numRows int) error {
-	dataLen := uint32(numRows * 8)
-	binary.LittleEndian.PutUint32(sw.buf[:4], dataLen)
+	nbytes := numRows * 8
+	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(nbytes))
 	if _, err := sw.w.Write(sw.buf[:4]); err != nil {
 		return err
 	}
 	if sel != nil {
-		for _, si := range sel {
-			binary.LittleEndian.PutUint64(sw.buf[:8], math.Float64bits(data[si]))
-			if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-				return err
-			}
+		gb := sw.ensureGather(nbytes)
+		for i, si := range sel {
+			binary.LittleEndian.PutUint64(gb[i*8:], math.Float64bits(data[si]))
 		}
-	} else {
-		for i := 0; i < numRows; i++ {
-			binary.LittleEndian.PutUint64(sw.buf[:8], math.Float64bits(data[i]))
-			if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-				return err
-			}
-		}
+		_, err := sw.w.Write(gb[:nbytes])
+		return err
 	}
-	return nil
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(data[:numRows]))), nbytes)
+	_, err := sw.w.Write(raw)
+	return err
 }
 
 func (sw *shuffleWriter) writeBoolData(data []bool, sel []uint32, numRows int) error {
@@ -340,55 +331,38 @@ func (sw *shuffleWriter) writeBytesData(bc *batch.BytesColumn, nulls *batch.Bitm
 		}
 	}
 
-	// Write offsets
-	for _, off := range offsets {
-		binary.LittleEndian.PutUint32(sw.buf[:4], off)
-		if _, err := sw.w.Write(sw.buf[:4]); err != nil {
-			return err
-		}
-	}
-	return nil
+	// Write all offsets at once via direct memory reinterpretation.
+	offBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(offsets))), len(offsets)*4)
+	_, err := sw.w.Write(offBytes)
+	return err
 }
 
 func (sw *shuffleWriter) writeDecimalData(vec *batch.Vector, sel []uint32, numRows int) error {
 	// Decimal: write as 16-byte Int128 pairs (lo, hi)
-	dataLen := uint32(numRows * 16)
-	binary.LittleEndian.PutUint32(sw.buf[:4], dataLen)
+	nbytes := numRows * 16
+	binary.LittleEndian.PutUint32(sw.buf[:4], uint32(nbytes))
 	if _, err := sw.w.Write(sw.buf[:4]); err != nil {
 		return err
 	}
 	if vec.DecimalData.Data == nil {
-		// Write zeros
-		zeros := make([]byte, dataLen)
+		zeros := make([]byte, nbytes)
 		_, err := sw.w.Write(zeros)
 		return err
 	}
 	if sel != nil {
-		for _, si := range sel {
+		gb := sw.ensureGather(nbytes)
+		for i, si := range sel {
 			d := vec.DecimalData.Data[si]
-			binary.LittleEndian.PutUint64(sw.buf[:8], d.Lo)
-			if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-				return err
-			}
-			binary.LittleEndian.PutUint64(sw.buf[:8], uint64(d.Hi))
-			if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-				return err
-			}
+			binary.LittleEndian.PutUint64(gb[i*16:], d.Lo)
+			binary.LittleEndian.PutUint64(gb[i*16+8:], uint64(d.Hi))
 		}
-	} else {
-		for i := 0; i < numRows; i++ {
-			d := vec.DecimalData.Data[i]
-			binary.LittleEndian.PutUint64(sw.buf[:8], d.Lo)
-			if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-				return err
-			}
-			binary.LittleEndian.PutUint64(sw.buf[:8], uint64(d.Hi))
-			if _, err := sw.w.Write(sw.buf[:8]); err != nil {
-				return err
-			}
-		}
+		_, err := sw.w.Write(gb[:nbytes])
+		return err
 	}
-	return nil
+	// Int128 struct {Lo uint64; Hi int64} has matching little-endian layout.
+	raw := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(vec.DecimalData.Data[:numRows]))), nbytes)
+	_, err := sw.w.Write(raw)
+	return err
 }
 
 // shuffleReadBatches reads all chunks from a binary shuffle file into RecordBatches.
@@ -447,18 +421,19 @@ func shuffleReadBatches(data []byte) ([]*batch.RecordBatch, error) {
 }
 
 func readColumnData(data []byte, pos int, vec *batch.Vector, numRows int, typ parquet.TypeID) (int, error) {
-	// Read null bitmap
+	// Read null bitmap via bulk copy.
 	bitmapWords := int(binary.LittleEndian.Uint32(data[pos:]))
 	pos += 4
 	words := vec.Nulls.Words()
-	for i := 0; i < bitmapWords && i < len(words); i++ {
-		words[i] = binary.LittleEndian.Uint64(data[pos:])
-		pos += 8
+	copyWords := bitmapWords
+	if copyWords > len(words) {
+		copyWords = len(words)
 	}
-	// Skip remaining bitmap words if vector bitmap is smaller
-	for i := len(words); i < bitmapWords; i++ {
-		pos += 8
+	if copyWords > 0 {
+		dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(words[:copyWords]))), copyWords*8)
+		copy(dstBytes, data[pos:pos+copyWords*8])
 	}
+	pos += bitmapWords * 8
 	// Invalidate the HasNulls() cache since we overwrote bitmap words directly.
 	vec.Nulls.InvalidateCache()
 
@@ -484,47 +459,35 @@ func readColumnData(data []byte, pos int, vec *batch.Vector, numRows int, typ pa
 }
 
 func readInt32Data(data []byte, pos int, dst []int32, numRows int) (int, error) {
-	dataLen := int(binary.LittleEndian.Uint32(data[pos:]))
-	pos += 4
-	_ = dataLen
-	for i := 0; i < numRows; i++ {
-		dst[i] = int32(binary.LittleEndian.Uint32(data[pos:]))
-		pos += 4
-	}
-	return pos, nil
+	pos += 4 // skip dataLen header
+	nbytes := numRows * 4
+	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(dst[:numRows]))), nbytes)
+	copy(dstBytes, data[pos:pos+nbytes])
+	return pos + nbytes, nil
 }
 
 func readInt64Data(data []byte, pos int, dst []int64, numRows int) (int, error) {
-	dataLen := int(binary.LittleEndian.Uint32(data[pos:]))
 	pos += 4
-	_ = dataLen
-	for i := 0; i < numRows; i++ {
-		dst[i] = int64(binary.LittleEndian.Uint64(data[pos:]))
-		pos += 8
-	}
-	return pos, nil
+	nbytes := numRows * 8
+	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(dst[:numRows]))), nbytes)
+	copy(dstBytes, data[pos:pos+nbytes])
+	return pos + nbytes, nil
 }
 
 func readFloat32Data(data []byte, pos int, dst []float32, numRows int) (int, error) {
-	dataLen := int(binary.LittleEndian.Uint32(data[pos:]))
 	pos += 4
-	_ = dataLen
-	for i := 0; i < numRows; i++ {
-		dst[i] = math.Float32frombits(binary.LittleEndian.Uint32(data[pos:]))
-		pos += 4
-	}
-	return pos, nil
+	nbytes := numRows * 4
+	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(dst[:numRows]))), nbytes)
+	copy(dstBytes, data[pos:pos+nbytes])
+	return pos + nbytes, nil
 }
 
 func readFloat64Data(data []byte, pos int, dst []float64, numRows int) (int, error) {
-	dataLen := int(binary.LittleEndian.Uint32(data[pos:]))
 	pos += 4
-	_ = dataLen
-	for i := 0; i < numRows; i++ {
-		dst[i] = math.Float64frombits(binary.LittleEndian.Uint64(data[pos:]))
-		pos += 8
-	}
-	return pos, nil
+	nbytes := numRows * 8
+	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(dst[:numRows]))), nbytes)
+	copy(dstBytes, data[pos:pos+nbytes])
+	return pos + nbytes, nil
 }
 
 func readBoolData(data []byte, pos int, dst []bool, numRows int) (int, error) {
@@ -545,38 +508,33 @@ func readBytesData(data []byte, pos int, dst *batch.BytesColumn, numRows int) (i
 	allData := data[pos : pos+totalDataLen]
 	pos += totalDataLen
 
-	// Read offsets
+	// Read offsets via bulk copy.
 	offsets := make([]uint32, numRows)
-	for i := 0; i < numRows; i++ {
-		offsets[i] = binary.LittleEndian.Uint32(data[pos:])
-		pos += 4
-	}
+	offBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(offsets))), numRows*4)
+	copy(offBytes, data[pos:pos+numRows*4])
+	pos += numRows * 4
 
-	// Reconstruct BytesColumn
-	var prevOff uint32
-	for i := 0; i < numRows; i++ {
-		end := offsets[i]
-		dst.Set(i, allData[prevOff:end])
-		prevOff = end
+	// Bulk-copy all string data into the BytesColumn, then set offsets.
+	dst.Data = append(dst.Data[:0], allData...)
+	if cap(dst.Offsets) < numRows+1 {
+		dst.Offsets = make([]uint32, numRows+1)
+	} else {
+		dst.Offsets = dst.Offsets[:numRows+1]
 	}
+	dst.Offsets[0] = 0
+	copy(dst.Offsets[1:], offsets)
 	return pos, nil
 }
 
 func readDecimalData(data []byte, pos int, vec *batch.Vector, numRows int) (int, error) {
-	dataLen := int(binary.LittleEndian.Uint32(data[pos:]))
-	pos += 4
-	_ = dataLen
+	pos += 4 // skip dataLen header
+	nbytes := numRows * 16
 	if vec.DecimalData.Data == nil {
-		pos += numRows * 16
-		return pos, nil
+		return pos + nbytes, nil
 	}
-	for i := 0; i < numRows; i++ {
-		vec.DecimalData.Data[i].Lo = binary.LittleEndian.Uint64(data[pos:])
-		pos += 8
-		vec.DecimalData.Data[i].Hi = int64(binary.LittleEndian.Uint64(data[pos:]))
-		pos += 8
-	}
-	return pos, nil
+	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(vec.DecimalData.Data[:numRows]))), nbytes)
+	copy(dstBytes, data[pos:pos+nbytes])
+	return pos + nbytes, nil
 }
 
 // isShuffleFormat returns true if the data starts with the shuffle magic bytes
