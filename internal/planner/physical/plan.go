@@ -208,11 +208,14 @@ type cteMaterialized struct {
 
 // scanCached stores columnar scan results for a table that is scanned multiple
 // times within a single query (e.g., decorrelated subqueries). The first scan
-// populates the cache, and subsequent scans replay from it.
+// populates the cache, and subsequent scans replay from it. Thread-safe for
+// concurrent builds: subsequent scans block on ready until the first completes.
 type scanCached struct {
+	mu      sync.Mutex
 	batches []*batch.RecordBatch
 	schema  []parquet.Column
-	done    bool // true when the first scan is complete
+	done    bool          // true when the first scan is complete
+	ready   chan struct{} // closed when first scan completes; nil until first scan claims the cache
 }
 
 // NewPlanner creates a new physical planner.
@@ -2063,8 +2066,28 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		ops:    rightOps,
 	}
 
-	if err := hj.Build(ctx, buildSource); err != nil {
-		return nil, nil, nil, fmt.Errorf("building hash table: %w", err)
+	// Launch hash table build in a goroutine while concurrently preparing
+	// the left (probe) side. For multi-way joins, the left side recursively
+	// calls buildJoin → each level overlaps its build with the next level's
+	// preparation, so all independent hash table builds run concurrently.
+	buildDone := make(chan struct{})
+	var buildErr error
+	go func() {
+		defer close(buildDone)
+		if err := hj.Build(ctx, buildSource); err != nil {
+			buildErr = fmt.Errorf("building hash table: %w", err)
+		}
+	}()
+
+	// Left side (probe) streams through — prepared concurrently with build.
+	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])
+	// Wait for build to complete before accessing hash table state.
+	<-buildDone
+	if buildErr != nil {
+		return nil, nil, nil, buildErr
+	}
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("building join left side: %w", err)
 	}
 
 	// Fix key assignment: parseJoinKeys takes columns from the SQL literally
@@ -2085,12 +2108,6 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
 		keepCols := extractFilterBuildColumns(node.JoinFilter)
 		hj.PruneBuildColumns(keepCols)
-	}
-
-	// Left side (probe) streams through
-	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("building join left side: %w", err)
 	}
 
 	// Insert bloom filter pre-check before probe for early row elimination.
@@ -3796,7 +3813,6 @@ type catalogScanSource struct {
 	scanPreds       []logical.Predicate
 	inner           exec.Source
 	cache           *scanCached           // non-nil when this table is scanned multiple times
-	cacheMu         sync.Mutex            // protects cache append and replay index
 	replayIdx       int                   // position in cache replay
 	isReplay        bool                  // true when reading from cache instead of scanning
 	bloomFilter     *exec.BloomScanFilter   // bloom filter pushdown from hash join build side
@@ -3814,11 +3830,30 @@ func (s *catalogScanSource) SetDynamicFilter(ranges []exec.DynamicRange) {
 }
 
 func (s *catalogScanSource) Init(ctx context.Context) error {
-	if s.cache != nil && s.cache.done {
-		// Second (or later) scan of this table — replay from cache.
-		s.isReplay = true
-		s.replayIdx = 0
-		return nil
+	if s.cache != nil {
+		s.cache.mu.Lock()
+		if s.cache.done {
+			s.cache.mu.Unlock()
+			// Scan already complete — replay from cache.
+			s.isReplay = true
+			s.replayIdx = 0
+			return nil
+		}
+		if s.cache.ready != nil {
+			// Another goroutine is populating the cache. Wait for it.
+			s.cache.mu.Unlock()
+			select {
+			case <-s.cache.ready:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			s.isReplay = true
+			s.replayIdx = 0
+			return nil
+		}
+		// First scan claims the cache.
+		s.cache.ready = make(chan struct{})
+		s.cache.mu.Unlock()
 	}
 	// First scan (or no cache) — scan from storage.
 	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, s.requiredCols, s.scanPreds)
@@ -3836,14 +3871,13 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 
 func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if s.isReplay {
-		s.cacheMu.Lock()
+		// cache.batches is stable (read-only) after cache.done=true, and
+		// replayIdx is per-source — no mutex needed for replay reads.
 		if s.replayIdx >= len(s.cache.batches) {
-			s.cacheMu.Unlock()
 			return nil, nil
 		}
 		cached := s.cache.batches[s.replayIdx]
 		s.replayIdx++
-		s.cacheMu.Unlock()
 		// Return a shallow copy: shared column vectors (read-only), independent Sel.
 		// This prevents downstream operators from corrupting cached data via in-place
 		// Sel mutation.
@@ -3861,10 +3895,13 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 		return nil, err
 	}
 	if s.cache != nil {
-		s.cacheMu.Lock()
+		s.cache.mu.Lock()
 		if !s.cache.done {
 			if b == nil {
 				s.cache.done = true
+				if s.cache.ready != nil {
+					close(s.cache.ready)
+				}
 			} else {
 				// Detach from pool so the pipeline's b.Release() is a no-op.
 				// Without this, the pool recycles the batch and the scanner
@@ -3881,7 +3918,7 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 				s.cache.batches = append(s.cache.batches, cached)
 			}
 		}
-		s.cacheMu.Unlock()
+		s.cache.mu.Unlock()
 	}
 	return b, err
 }
