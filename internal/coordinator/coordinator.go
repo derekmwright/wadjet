@@ -475,19 +475,18 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		canScanSplit := physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !hasSelfJoins
 		probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 
-		// Probe-split requires mergeable results: either a top-level aggregate
-		// (partial results can be re-aggregated) or self-joins (results are
-		// disjoint per worker). Non-aggregate multi-join queries would produce
-		// duplicate rows across workers with no way to deduplicate.
+		// Probe-split requires a top-level aggregate so the coordinator can
+		// re-aggregate partial results from each worker. Self-join queries are
+		// excluded because only one scan alias is partitioned — the other
+		// references to the same table scan all files on every worker,
+		// negating the parallelism benefit and adding merge overhead.
 		mergeInfo := logical.ExtractMergeInfo(logicalPlan)
-		canMerge := hasSelfJoins || (mergeInfo != nil && mergeInfo.HasAggregate)
+		canMerge := mergeInfo != nil && mergeInfo.HasAggregate
 
-		if canProbeSplit && canMerge && (hasSelfJoins || joinCount >= 3) {
+		if canProbeSplit && canMerge && !hasSelfJoins && joinCount >= 2 {
 			// Probe-split pipeline: partition the dominant probe table's files
 			// across workers. Each worker scans build tables in full and probes
 			// its file partition. Coordinator merges partial results.
-			// Used for self-join queries and join-heavy queries (3+ joins) where
-			// parallel compute outweighs redundant build-side S3 reads.
 			workerCount := c.workers.Count()
 			probeSplitMergeInfo = mergeInfo
 			physStages = []physical.Stage{{
@@ -2043,6 +2042,12 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 	var pending []inlineWork
 	var s3Rows int64
 
+	type s3Fetch struct {
+		idx  int
+		path string
+	}
+	var s3Fetches []s3Fetch
+
 	for i, r := range results {
 		c.logger.Debug("result entry", "taskID", r.TaskID, "success", r.Success,
 			"inlineLen", len(r.InlineData), "numRows", r.NumRows, "resultPath", r.ResultPath)
@@ -2051,20 +2056,37 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		}
 		if len(r.InlineData) == 0 {
 			if fetchAll && r.ResultPath != "" {
-				// Probe-split merge: fetch S3-stored result for re-aggregation
-				data, fetchErr := c.fetchResultData(ctx, queryID, r.ResultPath)
-				if fetchErr != nil {
-					c.logger.Error("failed to fetch S3 result for merge", "path", r.ResultPath, "error", fetchErr)
-					s3Rows += r.NumRows
-					continue
-				}
-				pending = append(pending, inlineWork{idx: i, data: data})
+				s3Fetches = append(s3Fetches, s3Fetch{idx: i, path: r.ResultPath})
 			} else {
 				s3Rows += r.NumRows
 			}
 			continue
 		}
 		pending = append(pending, inlineWork{idx: i, data: r.InlineData})
+	}
+
+	// Fetch S3-stored results in parallel for probe-split merge
+	if len(s3Fetches) > 0 {
+		fetchData := make([][]byte, len(s3Fetches))
+		var wg sync.WaitGroup
+		for fi, sf := range s3Fetches {
+			wg.Add(1)
+			go func(i int, path string) {
+				defer wg.Done()
+				data, err := c.fetchResultData(ctx, queryID, path)
+				if err != nil {
+					c.logger.Error("failed to fetch S3 result for merge", "path", path, "error", err)
+					return
+				}
+				fetchData[i] = data
+			}(fi, sf.path)
+		}
+		wg.Wait()
+		for fi, sf := range s3Fetches {
+			if fetchData[fi] != nil {
+				pending = append(pending, inlineWork{idx: sf.idx, data: fetchData[fi]})
+			}
+		}
 	}
 
 	if len(pending) == 0 {
