@@ -476,14 +476,13 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 
 		// Probe-split requires a top-level aggregate so the coordinator can
-		// re-aggregate partial results from each worker. Self-join queries are
-		// excluded because only one scan alias is partitioned — the other
-		// references to the same table scan all files on every worker,
-		// negating the parallelism benefit and adding merge overhead.
+		// re-aggregate partial results from each worker. Self-join queries
+		// have redundant build-side scans but still benefit from parallel
+		// compute when join count is high enough.
 		mergeInfo := logical.ExtractMergeInfo(logicalPlan)
 		canMerge := mergeInfo != nil && mergeInfo.HasAggregate
 
-		if canProbeSplit && canMerge && !hasSelfJoins && joinCount >= 2 {
+		if canProbeSplit && canMerge && joinCount >= 2 {
 			// Probe-split pipeline: partition the dominant probe table's files
 			// across workers. Each worker scans build tables in full and probes
 			// its file partition. Coordinator merges partial results.
