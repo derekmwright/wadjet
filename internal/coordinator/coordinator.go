@@ -469,7 +469,32 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// exceeds benefit.
 	var probeSplitMergeInfo *logical.MergeInfo
 	if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
-		if physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !physical.HasSelfJoins(physStages) {
+		joinCount := physical.CountJoinStages(physStages)
+		hasSelfJoins := physical.HasSelfJoins(physStages)
+		canScanSplit := physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !hasSelfJoins
+		probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
+
+		if canProbeSplit && (hasSelfJoins || joinCount >= 3) {
+			// Probe-split pipeline: partition the dominant probe table's files
+			// across workers. Each worker scans build tables in full and probes
+			// its file partition. Coordinator merges partial results.
+			// Used for self-join queries and join-heavy queries (3+ joins) where
+			// parallel compute outweighs redundant build-side S3 reads.
+			workerCount := c.workers.Count()
+			probeSplitMergeInfo = logical.ExtractMergeInfo(logicalPlan)
+			physStages = []physical.Stage{{
+				ID:              "pipeline-0",
+				Type:            "pipeline",
+				Tasks:           workerCount,
+				ProbeSplitAlias: probeAlias,
+				ProbeSplitFiles: probeFiles,
+			}}
+			c.logger.Info("routing to probe-split pipeline",
+				"query", queryID, "probe_alias", probeAlias,
+				"probe_files", len(probeFiles), "workers", workerCount,
+				"joins", joinCount, "self_joins", hasSelfJoins,
+				"has_merge", probeSplitMergeInfo != nil)
+		} else if canScanSplit {
 			// Scan-split pipeline: distribute S3 reads across workers,
 			// run compute (joins/aggs/sorts) on a single pipeline worker.
 			// Excluded when subqueries remain un-decorrelated (scan node count
@@ -488,23 +513,6 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			physStages = append(scanStages, pipelineStage)
 			c.logger.Info("routing to scan-split pipeline (cost-based)",
 				"query", queryID, "scan_stages", len(scanStages))
-		} else if probeAlias, probeFiles, ok := physical.CanProbeSplit(physStages, c.workers.Count()); ok && physical.HasSelfJoins(physStages) {
-			// Probe-split pipeline: partition the dominant probe table's files
-			// across workers. Each worker scans build tables in full and probes
-			// its file partition. Coordinator merges partial results.
-			workerCount := c.workers.Count()
-			probeSplitMergeInfo = logical.ExtractMergeInfo(logicalPlan)
-			physStages = []physical.Stage{{
-				ID:              "pipeline-0",
-				Type:            "pipeline",
-				Tasks:           workerCount,
-				ProbeSplitAlias: probeAlias,
-				ProbeSplitFiles: probeFiles,
-			}}
-			c.logger.Info("routing to probe-split pipeline",
-				"query", queryID, "probe_alias", probeAlias,
-				"probe_files", len(probeFiles), "workers", workerCount,
-				"has_merge", probeSplitMergeInfo != nil)
 		} else {
 			c.logger.Info("routing to single worker pipeline (cost-based)",
 				"query", queryID, "stages", len(physStages))

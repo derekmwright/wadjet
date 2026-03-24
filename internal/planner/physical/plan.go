@@ -1134,7 +1134,7 @@ func ExtractScanStages(stages []Stage) []Stage {
 // CanProbeSplit returns the scan alias and file list for probe-split pipeline
 // routing. Probe-split distributes the dominant probe table's files across
 // workers while each worker scans build tables in full. This enables parallel
-// execution for self-join queries that can't use scan-split.
+// execution for join-heavy queries where compute is the bottleneck.
 //
 // Returns the probe scan alias, its file list, and true if probe-split is viable.
 func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFiles []string, ok bool) {
@@ -1142,21 +1142,12 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 		return "", nil, false
 	}
 
-	// Find tables scanned more than once (self-joined).
-	tableCount := make(map[string]int)
-	for _, s := range stages {
-		if s.Type == "scan" {
-			tableCount[s.TableName]++
-		}
-	}
-
-	// Among self-joined tables, find the scan alias with the most bytes.
-	// This is typically the main probe scan in the join chain.
+	// Find the largest scan — this is the probe candidate.
 	var bestAlias string
 	var bestFiles []string
 	var bestBytes int64
 	for _, s := range stages {
-		if s.Type == "scan" && tableCount[s.TableName] > 1 && s.EstimatedBytes > bestBytes {
+		if s.Type == "scan" && s.EstimatedBytes > bestBytes {
 			bestAlias = s.ScanAlias
 			bestFiles = s.ScanFiles
 			bestBytes = s.EstimatedBytes
@@ -1169,6 +1160,17 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 	}
 
 	return bestAlias, bestFiles, true
+}
+
+// CountJoinStages returns the number of join stages in the stage list.
+func CountJoinStages(stages []Stage) int {
+	n := 0
+	for _, s := range stages {
+		if s.Type == "join" {
+			n++
+		}
+	}
+	return n
 }
 
 // canFuseScanAggregate returns true when child stages are all scans (or

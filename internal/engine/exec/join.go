@@ -421,12 +421,12 @@ func (h *HashJoin) tryEnableIntKey(b *batch.RecordBatch) {
 }
 
 // arenaAppendInt adds a buildRef to the arena and chains it under an int64 key.
-// Uses Put's return value to get the old chain head in a single hash probe,
-// avoiding a redundant Get + Put double-probe.
+// Uses PutNoGrow to defer growth checks — caller must call intIndex.CheckGrow()
+// after each batch to maintain the load factor invariant.
 func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
 	idx := int32(len(h.arena))
 	h.arena = append(h.arena, ref)
-	old, existed := h.intIndex.Put(key, idx)
+	old, existed := h.intIndex.PutNoGrow(key, idx)
 	if existed {
 		h.arenaNext = append(h.arenaNext, old)
 	} else {
@@ -437,7 +437,7 @@ func (h *HashJoin) arenaAppendInt(key int64, ref buildRef) {
 func (h *HashJoin) arenaAppendStr(ref buildRef) {
 	idx := int32(len(h.arena))
 	h.arena = append(h.arena, ref)
-	head, existed := h.strIndex.Put(h.keyBuf, idx)
+	head, existed := h.strIndex.PutNoGrow(h.keyBuf, idx)
 	if existed {
 		h.arenaNext = append(h.arenaNext, head)
 	} else {
@@ -668,6 +668,14 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			h.updateKeyMinMax(b)
 			// Key-only build: populate index without storing batches or arena refs.
 			// Semi/anti joins only need key existence, not row data.
+			// Uses PutNoGrow/GetOrInsertNoGrow for deferred growth — one CheckGrow
+			// per batch instead of per row.
+			batchRows := b.ActiveLen()
+			if h.useIntKey || h.useDualIntKey {
+				h.intIndex.EnsureCapacity(batchRows)
+			} else if h.strIndex != nil {
+				h.strIndex.EnsureCapacity(batchRows)
+			}
 			if h.useIntKey {
 				col := b.Columns[h.buildKeyIdx[0]]
 				if b.Sel != nil {
@@ -676,19 +684,19 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						if !ok {
 							continue
 						}
-						h.intIndex.Put(key, 0)
+						h.intIndex.PutNoGrow(key, 0)
 					}
 				} else if !col.Nulls.HasNulls() {
 					switch col.Type {
 					case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 						data := col.Int32Data
 						for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-							h.intIndex.Put(int64(data[rowIdx]), 0)
+							h.intIndex.PutNoGrow(int64(data[rowIdx]), 0)
 						}
 					default:
 						data := col.Int64Data
 						for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-							h.intIndex.Put(data[rowIdx], 0)
+							h.intIndex.PutNoGrow(data[rowIdx], 0)
 						}
 					}
 				} else {
@@ -697,9 +705,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						if !ok {
 							continue
 						}
-						h.intIndex.Put(key, 0)
+						h.intIndex.PutNoGrow(key, 0)
 					}
 				}
+				h.intIndex.CheckGrow()
 			} else if h.useDualIntKey {
 				col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
 				if b.Sel != nil {
@@ -708,7 +717,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						if !ok {
 							continue
 						}
-						h.intIndex.Put(dualIntHash(a, bb), 0)
+						h.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
 					}
 				} else {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -716,9 +725,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						if !ok {
 							continue
 						}
-						h.intIndex.Put(dualIntHash(a, bb), 0)
+						h.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
 					}
 				}
+				h.intIndex.CheckGrow()
 			} else {
 				if h.strIndex == nil {
 					h.strIndex = newStrHashTable(64)
@@ -726,14 +736,15 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				if b.Sel != nil {
 					for _, si := range b.Sel {
 						h.buildKeyFromBatch(b, int(si))
-						h.strIndex.GetOrInsert(h.keyBuf, 0)
+						h.strIndex.GetOrInsertNoGrow(h.keyBuf, 0)
 					}
 				} else {
 					for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
 						h.buildKeyFromBatch(b, rowIdx)
-						h.strIndex.GetOrInsert(h.keyBuf, 0)
+						h.strIndex.GetOrInsertNoGrow(h.keyBuf, 0)
 					}
 				}
+				h.strIndex.CheckGrow()
 			}
 			h.buildRows += int64(b.ActiveLen())
 			h.mu.Unlock()
@@ -788,6 +799,14 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		b.Detach() // prevent pooled batches from being recycled — build stores references
 		batchIdx := int32(len(h.buildBatches))
 		h.buildBatches = append(h.buildBatches, b)
+
+		// Pre-grow hash table for this batch so PutNoGrow won't overflow.
+		batchRows := b.ActiveLen()
+		if h.useIntKey || h.useDualIntKey {
+			h.intIndex.EnsureCapacity(batchRows)
+		} else if h.strIndex != nil {
+			h.strIndex.EnsureCapacity(batchRows)
+		}
 
 		if h.useIntKey {
 			col := b.Columns[h.buildKeyIdx[0]]
@@ -864,6 +883,13 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				}
 			}
 		}
+		// Deferred growth check: PutNoGrow skips per-row growth checks for
+		// inlineability. One check per batch (2048 rows) instead of per row.
+		if h.useIntKey || h.useDualIntKey {
+			h.intIndex.CheckGrow()
+		} else if h.strIndex != nil {
+			h.strIndex.CheckGrow()
+		}
 		h.mu.Unlock()
 	}
 
@@ -908,7 +934,7 @@ type localBuild struct {
 func (lb *localBuild) appendInt(key int64, ref buildRef) {
 	idx := int32(len(lb.arena))
 	lb.arena = append(lb.arena, ref)
-	if prev, ok := lb.intIndex.Put(key, idx); ok {
+	if prev, ok := lb.intIndex.PutNoGrow(key, idx); ok {
 		lb.arenaNext = append(lb.arenaNext, prev)
 	} else {
 		lb.arenaNext = append(lb.arenaNext, -1)
@@ -918,7 +944,7 @@ func (lb *localBuild) appendInt(key int64, ref buildRef) {
 func (lb *localBuild) appendStr(ref buildRef, key []byte) {
 	idx := int32(len(lb.arena))
 	lb.arena = append(lb.arena, ref)
-	if prev, ok := lb.strIndex.GetOrInsert(key, idx); ok {
+	if prev, ok := lb.strIndex.PutNoGrow(key, idx); ok {
 		lb.arenaNext = append(lb.arenaNext, prev)
 	} else {
 		lb.arenaNext = append(lb.arenaNext, -1)
@@ -1176,7 +1202,14 @@ type localKeyBuild struct {
 }
 
 // insertKeyOnlyBatch inserts keys from a batch into a local key-only hash table.
+// Uses PutNoGrow/GetOrInsertNoGrow for deferred growth — one CheckGrow per batch.
 func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
+	batchRows := b.ActiveLen()
+	if h.useIntKey || h.useDualIntKey {
+		lk.intIndex.EnsureCapacity(batchRows)
+	} else if lk.strIndex != nil {
+		lk.strIndex.EnsureCapacity(batchRows)
+	}
 	if h.useIntKey {
 		col := b.Columns[h.buildKeyIdx[0]]
 		if b.Sel != nil {
@@ -1185,19 +1218,19 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 				if !ok {
 					continue
 				}
-				lk.intIndex.Put(key, 0)
+				lk.intIndex.PutNoGrow(key, 0)
 			}
 		} else if !col.Nulls.HasNulls() {
 			switch col.Type {
 			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 				data := col.Int32Data
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					lk.intIndex.Put(int64(data[rowIdx]), 0)
+					lk.intIndex.PutNoGrow(int64(data[rowIdx]), 0)
 				}
 			default:
 				data := col.Int64Data
 				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					lk.intIndex.Put(data[rowIdx], 0)
+					lk.intIndex.PutNoGrow(data[rowIdx], 0)
 				}
 			}
 		} else {
@@ -1206,9 +1239,10 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 				if !ok {
 					continue
 				}
-				lk.intIndex.Put(key, 0)
+				lk.intIndex.PutNoGrow(key, 0)
 			}
 		}
+		lk.intIndex.CheckGrow()
 	} else if h.useDualIntKey {
 		col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
 		if b.Sel != nil {
@@ -1217,7 +1251,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 				if !ok {
 					continue
 				}
-				lk.intIndex.Put(dualIntHash(a, bb), 0)
+				lk.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -1225,9 +1259,10 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 				if !ok {
 					continue
 				}
-				lk.intIndex.Put(dualIntHash(a, bb), 0)
+				lk.intIndex.PutNoGrow(dualIntHash(a, bb), 0)
 			}
 		}
+		lk.intIndex.CheckGrow()
 	} else {
 		if lk.strIndex == nil {
 			lk.strIndex = newStrHashTable(64)
@@ -1248,7 +1283,7 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 						lk.keyBuf = appendColumnValue(lk.keyBuf, v, int(si), v.Type)
 					}
 				}
-				lk.strIndex.GetOrInsert(lk.keyBuf, 0)
+				lk.strIndex.GetOrInsertNoGrow(lk.keyBuf, 0)
 			}
 		} else {
 			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
@@ -1266,9 +1301,10 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 						lk.keyBuf = appendColumnValue(lk.keyBuf, v, rowIdx, v.Type)
 					}
 				}
-				lk.strIndex.GetOrInsert(lk.keyBuf, 0)
+				lk.strIndex.GetOrInsertNoGrow(lk.keyBuf, 0)
 			}
 		}
+		lk.strIndex.CheckGrow()
 	}
 	lk.rows += int64(b.ActiveLen())
 }
@@ -1279,6 +1315,14 @@ func (h *HashJoin) processLocalBatch(lb *localBuild, b *batch.RecordBatch) {
 	b.Detach()
 	batchIdx := int32(len(lb.batches))
 	lb.batches = append(lb.batches, b)
+
+	// Pre-grow for this batch.
+	batchRows := b.ActiveLen()
+	if h.useIntKey || h.useDualIntKey {
+		lb.intIndex.EnsureCapacity(batchRows)
+	} else if lb.strIndex != nil {
+		lb.strIndex.EnsureCapacity(batchRows)
+	}
 
 	if h.useIntKey {
 		col := b.Columns[h.buildKeyIdx[0]]
@@ -1379,6 +1423,12 @@ func (h *HashJoin) processLocalBatch(lb *localBuild, b *batch.RecordBatch) {
 				lb.buildRows++
 			}
 		}
+	}
+	// Deferred growth check after batch.
+	if h.useIntKey || h.useDualIntKey {
+		lb.intIndex.CheckGrow()
+	} else if lb.strIndex != nil {
+		lb.strIndex.CheckGrow()
 	}
 }
 
@@ -1843,6 +1893,10 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 		for i, col := range h.RightKeys {
 			h.buildKeyIdx[i] = b.ColumnIndex(col)
 		}
+		// Pre-size hash table for all rows to avoid growth during PutNoGrow.
+		if h.BuildRowHint == 0 {
+			h.BuildRowHint = int64(len(rows))
+		}
 		h.tryEnableIntKey(b)
 	}
 	b.Detach() // prevent pooled batches from being recycled — build stores references
@@ -1858,6 +1912,7 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 			h.arenaAppendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
+		h.intIndex.CheckGrow()
 	} else {
 		if h.strIndex == nil {
 			h.strIndex = newStrHashTable(64)
@@ -1867,6 +1922,7 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 			h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
 			h.buildRows++
 		}
+		h.strIndex.CheckGrow()
 	}
 	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
 		h.arenaMatched = make([]bool, len(h.arena))
@@ -1948,6 +2004,7 @@ func (h *HashJoin) FixKeyAssignment() {
 					h.arenaAppendInt(key, buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
+				h.intIndex.CheckGrow()
 			}
 		} else if h.useDualIntKey {
 			h.intIndex = newIntHashTable(totalBuildRows)
@@ -1961,6 +2018,7 @@ func (h *HashJoin) FixKeyAssignment() {
 					h.arenaAppendInt(dualIntHash(a, bb), buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
+				h.intIndex.CheckGrow()
 			}
 		} else {
 			h.strIndex = newStrHashTable(totalBuildRows)
@@ -1970,6 +2028,7 @@ func (h *HashJoin) FixKeyAssignment() {
 					h.arenaAppendStr(buildRef{batchIdx: int32(batchIdx), rowIdx: int32(rowIdx)})
 					h.buildRows++
 				}
+				h.strIndex.CheckGrow()
 			}
 		}
 

@@ -147,12 +147,46 @@ func (h *intHashTable) GetOrInsertNoGrow(key int64, val int32) (int32, bool) {
 	}
 }
 
+// PutNoGrow inserts or updates a key-value pair without checking the load factor.
+// The caller must call CheckGrow() after a batch of inserts. This variant is
+// inlineable (cost < 80), eliminating function call overhead in hot loops like
+// hash join build which calls Put millions of times.
+func (h *intHashTable) PutNoGrow(key int64, val int32) (int32, bool) {
+	idx := fibHash(key) & h.mask
+	for {
+		e := &h.entries[idx]
+		if e.key == intHashEmpty {
+			e.key = key
+			e.val = val
+			h.size++
+			return 0, false
+		}
+		if e.key == key {
+			old := e.val
+			e.val = val
+			return old, true
+		}
+		idx = (idx + 1) & h.mask
+	}
+}
+
 // CheckGrow grows the table if load factor exceeds 70%.
-// Must be called after a batch of GetOrInsertNoGrow calls.
+// Must be called after a batch of GetOrInsertNoGrow/PutNoGrow calls.
 //
 //go:noinline
 func (h *intHashTable) CheckGrow() {
 	if h.size*10 > len(h.entries)*7 {
+		h.grow()
+	}
+}
+
+// EnsureCapacity grows the table so that `additional` more entries can be
+// inserted via PutNoGrow without exceeding the 70% load factor.
+// Call once per batch before a PutNoGrow loop.
+//
+//go:noinline
+func (h *intHashTable) EnsureCapacity(additional int) {
+	for (h.size+additional)*10 > len(h.entries)*7 {
 		h.grow()
 	}
 }
