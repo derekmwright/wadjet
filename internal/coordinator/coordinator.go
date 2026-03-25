@@ -34,6 +34,7 @@ type Config struct {
 	ResultBucket   string
 	MaxInflight    int           // max concurrent queries, 0 = default (64)
 	QueryTimeout   time.Duration // max time for a query to complete, 0 = default (30m)
+	WorkerStaleTTL time.Duration // time after which a silent worker is reaped, 0 = default (30s)
 }
 
 // queryMeta stores per-query metadata needed for later result retrieval.
@@ -84,7 +85,7 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 		js:         js,
 		scheduler:  NewScheduler(nc, logger),
 		tracker:    NewQueryTracker(),
-		workers:    NewWorkerRegistry(nc, logger),
+		workers:    NewWorkerRegistry(nc, logger, cfg.WorkerStaleTTL),
 		logger:     logger,
 		resultSubs: make(map[string]context.CancelFunc),
 		queryMetas: make(map[string]*queryMeta),

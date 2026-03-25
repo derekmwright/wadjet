@@ -714,7 +714,7 @@ func TestWorkerRegistryWithNATSSubscription(t *testing.T) {
 	}
 	defer nc.Close()
 
-	wr := NewWorkerRegistry(nc, logger)
+	wr := NewWorkerRegistry(nc, logger, 0)
 	defer wr.Close()
 
 	// Publish a heartbeat
