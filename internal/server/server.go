@@ -100,6 +100,7 @@ func New(cfg Config, logger *slog.Logger) *Server {
 	s.mux.Get("/v1/tables/{name}", s.handleGetTable)
 	s.mux.Delete("/v1/tables/{name}", s.handleDeleteTable)
 	s.mux.Get("/v1/health", s.handleHealth)
+	s.mux.Get("/v1/ready", s.handleReady)
 	if s.metrics != nil {
 		s.mux.Handle("/metrics", s.metrics.Handler())
 	}
@@ -868,6 +869,35 @@ func (s *Server) handleGetTable(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
+	resp := map[string]any{"status": "ready"}
+	code := http.StatusOK
+
+	// Check catalog availability
+	if s.catalog != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if _, err := s.catalog.ListTables(ctx); err != nil {
+			resp["status"] = "not_ready"
+			resp["catalog"] = err.Error()
+			code = http.StatusServiceUnavailable
+		}
+	}
+
+	// Check worker availability (distributed mode)
+	if s.coord != nil {
+		workers := s.coord.Workers().Count()
+		resp["workers"] = workers
+		if workers == 0 {
+			resp["status"] = "not_ready"
+			resp["workers_error"] = "no active workers"
+			code = http.StatusServiceUnavailable
+		}
+	}
+
+	writeJSON(w, code, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
