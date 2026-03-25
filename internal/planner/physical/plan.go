@@ -2106,10 +2106,13 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.BuildTableAlias = alias
 	}
 
-	// Spill-to-disk is disabled for hash join builds. The Grace Hash Join
-	// partitioning adds ~6s overhead on Q21 (SF10) due to partitionBuildBatch
-	// and shared MemTracker accumulation across joins triggering premature spill.
-	// GOMEMLIMIT provides soft memory pressure via GC without this overhead.
+	// Grace Hash Join spill-to-disk: prevents OOM on large build sides (e.g.
+	// SF100 orders table at 150M rows). The shared MemTracker means multi-join
+	// queries may spill earlier than strictly necessary, but OOM is worse.
+	if sm := p.getSpillManager(); sm != nil {
+		hj.Spill = sm
+		hj.MemTracker = p.getMemTracker()
+	}
 
 	// For semi/anti joins without a filter, enable key-only build:
 	// only build the key index and bloom filter, skip batch storage and arena refs.
