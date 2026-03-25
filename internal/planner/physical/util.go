@@ -173,6 +173,12 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 				defLevels := page.DefinitionLevels()
 				data := page.Data()
 
+				// Dictionary-encoded pages return INT32 indices; resolve them.
+				if dict := page.Dictionary(); dict != nil {
+					fileType := parquet.TypeIDFromParquetType(chunks[m.fileIdx].Type())
+					data = scan.ResolveDictionary(dict, data, pageRows, fileType)
+				}
+
 				if colType == batch.TypeDecimal {
 					readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
 				} else if defLevels == nil || page.NumNulls() == 0 {
@@ -853,6 +859,12 @@ func readColumnIntoWithDef(file *goparquet.File, chunks []goparquet.ColumnChunk,
 
 		defLevels := page.DefinitionLevels()
 		data := page.Data()
+
+		// Dictionary-encoded pages return INT32 indices; resolve them.
+		if dict := page.Dictionary(); dict != nil {
+			fileType := parquet.TypeIDFromParquetType(chunks[fileIdx].Type())
+			data = scan.ResolveDictionary(dict, data, pageRows, fileType)
+		}
 
 		if colType == batch.TypeDecimal {
 			if pqCol == nil {

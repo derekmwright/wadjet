@@ -235,14 +235,21 @@ func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int
 	pages := chunk.Pages()
 	defer pages.Close()
 
-	// Get max definition level and detect file-vs-catalog type mismatch
+	// Detect file type from the chunk's own type metadata — this is always
+	// correct regardless of schema tree traversal quirks.
+	fileType := pqt.TypeIDFromParquetType(chunk.Type())
+
+	// Get max definition level from schema column (needed for null handling).
 	pqCol := FindColumnByIndex(pqFile.Root(), colIdx)
 	maxDefLevel := 0
-	fileType := catalogType
 	if pqCol != nil {
 		maxDefLevel = pqCol.MaxDefinitionLevel()
-		fileType = pqt.GoTypeToTypeID(pqCol)
+	} else {
+		// Flat schema fallback: optional fields have maxDefLevel=1.
+		// If pages have definition levels, they must be optional.
+		maxDefLevel = 1
 	}
+
 	// Only coerce when storage classes differ (e.g. INT64→INT32 needs narrowing).
 	// Same-storage types (e.g. INT64 and IPv4) can use the catalog type directly.
 	coerce := storageClass(fileType) != storageClass(catalogType)
@@ -265,13 +272,23 @@ func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int
 		defLevels := page.DefinitionLevels()
 		data := page.Data()
 
+		// Dictionary-encoded pages return INT32 indices from Data(), not the
+		// actual column values. Resolve them so downstream copy functions get
+		// values in the file's physical type.
+		if dict := page.Dictionary(); dict != nil {
+			data = ResolveDictionary(dict, data, pageRows, fileType)
+		}
+
 		if defLevels == nil || page.NumNulls() == 0 {
 			if coerce {
 				if err := copyCoercedDirect(vec, offset, data, pageRows, fileType, catalogType); err != nil {
 					return err
 				}
 			} else {
-				if err := CopyTypedDataDirect(vec, offset, data, pageRows, catalogType); err != nil {
+				// Use fileType for data extraction — the file's physical encoding
+				// determines which data.*() method works. Since storageClass matches,
+				// the vector write target is the same as catalogType.
+				if err := CopyTypedDataDirect(vec, offset, data, pageRows, fileType); err != nil {
 					return err
 				}
 			}
@@ -281,7 +298,7 @@ func readColumnChunk(vec *batch.Vector, chunk goparquet.ColumnChunk, numRows int
 					return err
 				}
 			} else {
-				if err := CopyTypedDataScatter(vec, offset, data, defLevels, byte(maxDefLevel), pageRows, catalogType); err != nil {
+				if err := CopyTypedDataScatter(vec, offset, data, defLevels, byte(maxDefLevel), pageRows, fileType); err != nil {
 					return err
 				}
 			}
@@ -492,6 +509,75 @@ func scatterRunsTyped(
 			}
 			onNull(runStart, i-runStart)
 		}
+	}
+}
+
+// ResolveDictionary converts dictionary-encoded page data (INT32 indices) into
+// actual column values by looking up each index in the dictionary page.
+// This is needed because parquet-go's indexedPage.Data() returns raw indices.
+func ResolveDictionary(dict goparquet.Dictionary, indices pqencoding.Values, n int, fileType pqt.TypeID) pqencoding.Values {
+	idx := indices.Int32()
+	dictData := dict.Page().Data()
+
+	switch fileType {
+	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
+		src := dictData.Int64()
+		dst := make([]int64, n)
+		for i := 0; i < n; i++ {
+			dst[i] = src[idx[i]]
+		}
+		return pqencoding.Int64Values(dst)
+
+	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
+		src := dictData.Int32()
+		dst := make([]int32, n)
+		for i := 0; i < n; i++ {
+			dst[i] = src[idx[i]]
+		}
+		return pqencoding.Int32Values(dst)
+
+	case pqt.TypeFloat64:
+		src := dictData.Double()
+		dst := make([]float64, n)
+		for i := 0; i < n; i++ {
+			dst[i] = src[idx[i]]
+		}
+		return pqencoding.DoubleValues(dst)
+
+	case pqt.TypeFloat32:
+		src := dictData.Float()
+		dst := make([]float32, n)
+		for i := 0; i < n; i++ {
+			dst[i] = src[idx[i]]
+		}
+		return pqencoding.FloatValues(dst)
+
+	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
+		// ByteArray dictionary: look up each index through the Dictionary.Index
+		// interface since byte array data layout varies across dictionaries.
+		var buf []byte
+		offsets := make([]uint32, n+1)
+		for i := 0; i < n; i++ {
+			v := dict.Index(idx[i])
+			b := v.ByteArray()
+			offsets[i] = uint32(len(buf))
+			buf = append(buf, b...)
+		}
+		offsets[n] = uint32(len(buf))
+		return pqencoding.ByteArrayValues(buf, offsets)
+
+	default:
+		// Fallback: use Value interface (slower but always correct).
+		var buf []byte
+		offsets := make([]uint32, n+1)
+		for i := 0; i < n; i++ {
+			v := dict.Index(idx[i])
+			b := v.ByteArray()
+			offsets[i] = uint32(len(buf))
+			buf = append(buf, b...)
+		}
+		offsets[n] = uint32(len(buf))
+		return pqencoding.ByteArrayValues(buf, offsets)
 	}
 }
 
