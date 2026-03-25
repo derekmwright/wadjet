@@ -110,11 +110,26 @@ func (cs *CatalogSnapshotter) Notify() {
 }
 
 // Start launches the background snapshot loop. It listens for both periodic
-// ticks and debounced mutation notifications.
+// ticks and debounced mutation notifications. On startup, if the catalog KV
+// is empty and a snapshot exists in object storage, it auto-restores.
 func (cs *CatalogSnapshotter) Start(ctx context.Context) {
 	if !cs.config.Enabled {
 		cs.logger.Info("catalog snapshots disabled")
 		return
+	}
+
+	// Auto-restore: if the catalog has no tables, try recovering from snapshot.
+	tables, err := cs.catalog.ListTables(ctx)
+	if err == nil && len(tables) == 0 {
+		snap, restoreErr := cs.RestoreLatest(ctx)
+		if restoreErr != nil {
+			cs.logger.Warn("no catalog snapshot to restore", "error", restoreErr)
+		} else {
+			cs.logger.Info("auto-restored catalog from snapshot",
+				"entries", len(snap.Entries),
+				"timestamp", snap.Timestamp.Format(time.RFC3339),
+			)
+		}
 	}
 
 	go cs.run(ctx)
