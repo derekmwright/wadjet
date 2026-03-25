@@ -66,6 +66,7 @@ var (
 	s3Region         string
 	maxConcurrent    int
 	cacheBytes       int64
+	logLevel         string
 )
 
 func main() {
@@ -103,6 +104,7 @@ func main() {
 	rootCmd.PersistentFlags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum concurrent tasks per worker")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
+	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(queryCmd())
@@ -127,7 +129,7 @@ func serveCmd() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
-			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(logLevel)}))
 
 			if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
 				goMemLimit := memLimit * 9 / 10
@@ -1361,6 +1363,19 @@ func loadGeoIP(cfg *config.Config, logger *slog.Logger) error {
 	}
 	logger.Info("GeoIP databases loaded", "city", cityDB, "asn", asnDB)
 	return nil
+}
+
+func parseLogLevel(s string) slog.Level {
+	switch strings.ToLower(s) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }
 
 func buildTLSConfig(cfg config.AuthMTLS) (*tls.Config, error) {
