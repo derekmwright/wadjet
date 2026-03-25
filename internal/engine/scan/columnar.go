@@ -332,6 +332,36 @@ func FindColumnByIndex(root *goparquet.Column, idx int) *goparquet.Column {
 	return found
 }
 
+// CopyPageData is the high-level entry point for copying a Parquet page into a
+// batch Vector. It handles dictionary resolution, type coercion detection, and
+// dispatches to the correct typed copy path. Use this from callers outside the
+// scan package instead of calling CopyTypedDataDirect/Scatter directly.
+func CopyPageData(vec *batch.Vector, offset int, page goparquet.Page, chunkType goparquet.Type, maxDefLevel byte, catalogType pqt.TypeID) error {
+	pageRows := int(page.NumRows())
+	defLevels := page.DefinitionLevels()
+	data := page.Data()
+	fileType := pqt.TypeIDFromParquetType(chunkType)
+
+	// Dictionary-encoded pages return INT32 indices; resolve them.
+	if dict := page.Dictionary(); dict != nil {
+		data = ResolveDictionary(dict, data, pageRows, fileType)
+	}
+
+	coerce := storageClass(fileType) != storageClass(catalogType)
+
+	if defLevels == nil || page.NumNulls() == 0 {
+		if coerce {
+			return copyCoercedDirect(vec, offset, data, pageRows, fileType, catalogType)
+		}
+		return CopyTypedDataDirect(vec, offset, data, pageRows, fileType)
+	}
+
+	if coerce {
+		return copyCoercedScatter(vec, offset, data, defLevels, maxDefLevel, pageRows, fileType, catalogType)
+	}
+	return CopyTypedDataScatter(vec, offset, data, defLevels, maxDefLevel, pageRows, fileType)
+}
+
 // CopyTypedDataDirect copies non-nullable page data directly into a Vector.
 func CopyTypedDataDirect(vec *batch.Vector, offset int, data pqencoding.Values, n int, typ pqt.TypeID) error {
 	switch typ {

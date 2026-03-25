@@ -170,21 +170,12 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 					continue
 				}
 
-				defLevels := page.DefinitionLevels()
-				data := page.Data()
-
-				// Dictionary-encoded pages return INT32 indices; resolve them.
-				if dict := page.Dictionary(); dict != nil {
-					fileType := parquet.TypeIDFromParquetType(chunks[m.fileIdx].Type())
-					data = scan.ResolveDictionary(dict, data, pageRows, fileType)
-				}
-
 				if colType == batch.TypeDecimal {
+					defLevels := page.DefinitionLevels()
+					data := page.Data()
 					readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
-				} else if defLevels == nil || page.NumNulls() == 0 {
-					scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
 				} else {
-					scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
+					scan.CopyPageData(col, rowOffset, page, chunks[m.fileIdx].Type(), maxDefLevel, colType)
 				}
 				rowOffset += pageRows
 			}
@@ -857,24 +848,17 @@ func readColumnIntoWithDef(file *goparquet.File, chunks []goparquet.ColumnChunk,
 			continue
 		}
 
-		defLevels := page.DefinitionLevels()
-		data := page.Data()
-
-		// Dictionary-encoded pages return INT32 indices; resolve them.
-		if dict := page.Dictionary(); dict != nil {
-			fileType := parquet.TypeIDFromParquetType(chunks[fileIdx].Type())
-			data = scan.ResolveDictionary(dict, data, pageRows, fileType)
-		}
-
 		if colType == batch.TypeDecimal {
 			if pqCol == nil {
 				pqCol = scan.FindColumnByIndex(file.Root(), fileIdx)
 			}
+			defLevels := page.DefinitionLevels()
+			data := page.Data()
 			readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
-		} else if defLevels == nil || page.NumNulls() == 0 {
-			scan.CopyTypedDataDirect(col, rowOffset, data, pageRows, colType)
 		} else {
-			scan.CopyTypedDataScatter(col, rowOffset, data, defLevels, maxDefLevel, pageRows, colType)
+			if err := scan.CopyPageData(col, rowOffset, page, chunks[fileIdx].Type(), maxDefLevel, colType); err != nil {
+				return err
+			}
 		}
 		rowOffset += pageRows
 	}
