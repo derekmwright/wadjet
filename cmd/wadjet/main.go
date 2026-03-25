@@ -986,8 +986,18 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		return fmt.Errorf("starting worker: %w", err)
 	}
 
-	<-ctx.Done()
-	w.Stop()
+	// SIGQUIT triggers graceful drain: stop accepting new tasks, finish
+	// in-flight work, then exit. SIGINT/SIGTERM still do a hard stop.
+	drainCh := make(chan os.Signal, 1)
+	signal.Notify(drainCh, syscall.SIGQUIT)
+
+	select {
+	case <-ctx.Done():
+		w.Stop()
+	case <-drainCh:
+		logger.Info("SIGQUIT received, draining worker...")
+		w.Drain()
+	}
 	return nil
 }
 
