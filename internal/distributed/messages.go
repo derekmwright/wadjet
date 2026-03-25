@@ -169,6 +169,7 @@ type WorkerHeartbeat struct {
 	ActiveTasks  int       `json:"active_tasks"`
 	MemoryUsed   int64     `json:"memory_used"`
 	MemoryTotal  int64     `json:"memory_total"`
+	Draining     bool      `json:"draining,omitempty"` // true when worker is draining
 	Timestamp    time.Time `json:"timestamp"`
 }
 

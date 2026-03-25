@@ -51,8 +51,10 @@ type Worker struct {
 	logger   *slog.Logger
 	metrics  *metrics.Metrics
 
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	drainCh  chan struct{} // closed when drain is requested
+	drainOnce sync.Once
 
 	cancelledMu sync.RWMutex
 	cancelled   map[string]time.Time // queryID → cancellation time
@@ -110,6 +112,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		executor:  executor,
 		logger:    logger,
 		cancelled: make(map[string]time.Time),
+		drainCh:   make(chan struct{}),
 	}
 }
 
@@ -160,6 +163,13 @@ func (w *Worker) Start(ctx context.Context) error {
 		return fmt.Errorf("subscribing to cancellations: %w", err)
 	}
 
+	// Subscribe to drain requests (sent by coordinator or admin)
+	drainSubject := fmt.Sprintf("wadjet.worker.%s.drain", w.config.WorkerID)
+	w.nc.Subscribe(drainSubject, func(msg *nats.Msg) {
+		w.logger.Info("received drain request via NATS")
+		w.drainOnce.Do(func() { close(w.drainCh) })
+	})
+
 	// Subscribe to profile requests (NATS request/reply)
 	w.nc.Subscribe(distributed.SubjectProfileStart, func(msg *nats.Msg) {
 		w.handleProfileStart(msg)
@@ -199,6 +209,32 @@ func (w *Worker) Start(ctx context.Context) error {
 	return nil
 }
 
+// Drain puts the worker into drain mode: it stops pulling new tasks and waits
+// for all in-flight tasks to complete, then cancels the context so heartbeat
+// and other background loops exit. Use this for zero-downtime rolling updates.
+func (w *Worker) Drain() {
+	w.drainOnce.Do(func() {
+		w.logger.Info("worker entering drain mode", "worker_id", w.config.WorkerID)
+		close(w.drainCh)
+	})
+	// Wait for in-flight tasks to finish, then stop.
+	w.wg.Wait()
+	if w.cancel != nil {
+		w.cancel()
+	}
+	w.logger.Info("worker drained and stopped", "worker_id", w.config.WorkerID)
+}
+
+// Draining returns true if the worker is in drain mode.
+func (w *Worker) Draining() bool {
+	select {
+	case <-w.drainCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // Stop gracefully stops the worker. The shared per-cluster consumer is left in
 // place so other workers can continue pulling tasks.
 func (w *Worker) Stop() {
@@ -215,6 +251,10 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 	// amortize the NATS round-trip overhead.
 	for {
 		if ctx.Err() != nil {
+			return
+		}
+		// In drain mode, stop pulling new tasks.
+		if w.Draining() {
 			return
 		}
 
@@ -406,6 +446,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 				WorkerID:    w.config.WorkerID,
 				ClusterID:   w.config.ClusterID,
 				ActiveTasks: len(sem),
+				Draining:    w.Draining(),
 				Timestamp:   time.Now(),
 			}
 

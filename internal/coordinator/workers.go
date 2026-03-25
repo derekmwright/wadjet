@@ -16,6 +16,7 @@ type WorkerInfo struct {
 	ClusterID   string
 	MemoryUsed  int64
 	MemoryTotal int64
+	Draining    bool
 	LastSeen    time.Time
 }
 
@@ -74,13 +75,16 @@ func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
 	info.ClusterID = hb.ClusterID
 	info.MemoryUsed = hb.MemoryUsed
 	info.MemoryTotal = hb.MemoryTotal
+	info.Draining = hb.Draining
 	// Use coordinator-side time for LastSeen. The heartbeat message
 	// arriving proves the worker is alive — even if the worker's
 	// goroutine was GC-frozen and its embedded timestamp is stale.
 	info.LastSeen = time.Now()
 }
 
-// ActiveWorkers returns workers that have sent a heartbeat recently.
+// ActiveWorkers returns workers that have sent a heartbeat recently and are
+// not draining. Draining workers are finishing in-flight tasks and will not
+// accept new work.
 func (wr *WorkerRegistry) ActiveWorkers() []*WorkerInfo {
 	wr.mu.RLock()
 	defer wr.mu.RUnlock()
@@ -88,7 +92,7 @@ func (wr *WorkerRegistry) ActiveWorkers() []*WorkerInfo {
 	cutoff := time.Now().Add(-wr.stale)
 	var active []*WorkerInfo
 	for _, w := range wr.workers {
-		if w.LastSeen.After(cutoff) {
+		if w.LastSeen.After(cutoff) && !w.Draining {
 			copy := *w
 			active = append(active, &copy)
 		}
