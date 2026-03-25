@@ -141,19 +141,20 @@ func serveCmd() *cobra.Command {
 				debug.SetGCPercent(-1)
 				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", "off")
 
-				if memoryBudget == 0 {
-					// Use 50% of detected memory for per-task budget. This leaves
-					// headroom for Go runtime, goroutine stacks, file I/O buffers,
-					// and garbage from the previous task awaiting GC collection.
-					memoryBudget = memLimit / 2
-					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget)
-				}
 				if cacheBytes == 0 {
-					// Use 25% of memory for cross-query S3 file cache. At SF10
+					// Use 20% of memory for cross-query S3 file cache. At SF10
 					// (~12 GB Parquet data), this avoids re-reading files from S3
-					// on every query. On c7g.4xlarge (32 GB), this gives ~8 GB cache.
-					cacheBytes = memLimit / 4
+					// on every query. On c7g.4xlarge (32 GB), this gives ~6.4 GB cache.
+					cacheBytes = memLimit / 5
 					logger.Info("auto-detected file cache size", "cache_bytes", cacheBytes)
+				}
+				if memoryBudget == 0 {
+					// Per-task spill budget: available memory minus cache and runtime
+					// overhead. Hash table internal structures (index, arena, chains)
+					// add ~30% untracked overhead on top of tracked batch data, so the
+					// budget must leave room for that plus Go GC working set.
+					memoryBudget = (memLimit - cacheBytes) * 2 / 5
+					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget)
 				}
 			}
 
