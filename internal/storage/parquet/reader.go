@@ -374,7 +374,15 @@ func compareNative(a, b any) int {
 // GoTypeToTypeID maps a parquet-go column to a Wadjet TypeID based on the
 // column's logical and physical type. Exported for use by the scan package.
 func GoTypeToTypeID(col *goparquet.Column) TypeID {
-	lt := col.Type().LogicalType()
+	return TypeIDFromParquetType(col.Type())
+}
+
+// TypeIDFromParquetType maps a parquet Type (from a Column or ColumnChunk) to
+// our TypeID. This is the canonical type-detection path — it handles logical
+// type annotations (DATE, TIMESTAMP, DECIMAL, INTEGER) and falls back to the
+// physical kind.
+func TypeIDFromParquetType(t goparquet.Type) TypeID {
+	lt := t.LogicalType()
 	if lt != nil {
 		if lt.UTF8 != nil {
 			return TypeString
@@ -396,7 +404,7 @@ func GoTypeToTypeID(col *goparquet.Column) TypeID {
 		}
 	}
 
-	switch col.Type().Kind() {
+	switch t.Kind() {
 	case goparquet.Boolean:
 		return TypeBool
 	case goparquet.Int32:
