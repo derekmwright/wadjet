@@ -243,6 +243,7 @@ locals {
     export WADJET_REGION="${var.region}"
     export BENCHMARK_RUNS="${var.benchmark_runs}"
     export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
+    export DATA_PREFIX="${var.data_prefix}"
     cd /root/wadjet
 
     %{if var.run_duckdb_comparison}
@@ -281,6 +282,7 @@ locals {
     export WADJET_REGION="${var.region}"
     export BENCHMARK_RUNS="${var.benchmark_runs}"
     export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
+    export DATA_PREFIX="${var.data_prefix}"
     cd /root/wadjet
 
     bash deploy/benchmark/run-benchmark.sh distributed SF${var.scale_factor} ${var.worker_count} 2>&1 | tee /root/benchmark.log

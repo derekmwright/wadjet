@@ -22,6 +22,7 @@ RUNS="${BENCHMARK_RUNS:-3}"
 GENERATE="${GENERATE_DATA:-0}"
 SKIP="${SKIP_QUERIES:-}"
 TIMEOUT="${QUERY_TIMEOUT:-10m}"
+DATA_PREFIX="${DATA_PREFIX-tables/}"
 
 BUCKET="${WADJET_BUCKET:?Set WADJET_BUCKET}"
 REGION="${WADJET_REGION:?Set WADJET_REGION}"
@@ -93,6 +94,7 @@ if [ "$MODE" = "standalone" ]; then
   /usr/local/bin/tpch-bench \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
+    --data-prefix="${DATA_PREFIX}" \
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
@@ -112,6 +114,7 @@ elif [ "$MODE" = "distributed" ]; then
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     --workers="${WORKER_COUNT}" \
+    --data-prefix="${DATA_PREFIX}" \
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \

@@ -110,6 +110,12 @@ variable "max_concurrent" {
   default     = 4
 }
 
+variable "data_prefix" {
+  description = "S3 prefix for table data (e.g. 'tables/' or '' for root-level paths)"
+  type        = string
+  default     = "tables/"
+}
+
 # Recommended instance types per scale factor (Graviton3 ARM):
 #   SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
 #   SF10:  c7g.4xlarge  (16 vCPU, 32 GB) — $0.58/hr
