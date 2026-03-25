@@ -85,6 +85,13 @@ type Stage struct {
 	ProbeSplitAlias string   // scan alias to partition (e.g., "lineitem")
 	ProbeSplitFiles []string // full file list to split across tasks
 
+	// Multi-level merge: partitions upstream results among parallel merge groups.
+	// When MergeGroupCount > 0, this stage processes only the MergeGroup-th
+	// fraction of its dependency results. Independent merge groups run on
+	// different workers for parallel merging.
+	MergeGroup      int // 0-based index of this merge group
+	MergeGroupCount int // total groups (0 = not grouped, process all results)
+
 	// Cost estimation (populated at plan time from manifest metadata)
 	EstimatedBytes int64
 	EstimatedRows  int64
@@ -892,7 +899,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	// concurrent Next() calls (channel-based scan sources).
 	pipelineWorkers := 0
 	switch source.(type) {
-	case *catalogScanSource, *scannerExecSource:
+	case *catalogScanSource, *scannerExecSource, *deferredJoinBridge:
 		pipelineWorkers = runtime.NumCPU()
 	}
 
@@ -1619,15 +1626,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// Skip the separate aggregate stage — scans produce partial aggs.
 			// Final aggregate merges partial results from all scan tasks.
 			leafIDs := leafStages(childStages)
-			finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
-			*stages = append(*stages, Stage{
-				ID:           finalStageID,
-				Type:         "final_aggregate",
-				Tasks:        1,
-				GroupByCols:  groupBy,
-				AggSpecs:     aggSpecs,
-				Dependencies: leafIDs,
-			})
+			emitMergeAggregateTree(stages, leafIDs, groupBy, aggSpecs, childStages)
 		} else {
 			// Standard two-phase distributed aggregation
 			stageID := fmt.Sprintf("aggregate-%d", len(*stages))
@@ -1674,15 +1673,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		sortStage.Dependencies = leafStages((*stages)[preCount:])
 		*stages = append(*stages, sortStage)
 
-		// Phase 2: merge sort (single task merges pre-sorted partial results)
-		mergeStageID := fmt.Sprintf("merge_sort-%d", len(*stages))
-		*stages = append(*stages, Stage{
-			ID:           mergeStageID,
-			Type:         "merge_sort",
-			Tasks:        1,
-			SortKeys:     sortKeys,
-			Dependencies: []string{sortStageID},
-		})
+		// Phase 2: merge sort — multi-level tree when many partial sort tasks.
+		emitMergeSortTree(stages, sortStageID, sortKeys, (*stages)[preCount:])
 
 	case logical.NodeLimit:
 		// Pass limit info down to sort stage if child is sort
@@ -2121,8 +2113,23 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 
 	// Pass build-side row estimate to pre-allocate arena and hash table.
-	if est := findScanRowEstimate(node.Children[1]); est > 0 {
+	est := findScanRowEstimate(node.Children[1])
+	if est > 0 {
 		hj.BuildRowHint = est
+	}
+
+	// Determine if build should be deferred: large semi/anti key-only builds
+	// overlap with the early probe pipeline for better I/O utilization.
+	const deferBuildThreshold int64 = 1_000_000
+	deferBuild := est > deferBuildThreshold && hj.SemiAntiKeyOnly
+
+	// Pre-compute post-build operations that can run in the build goroutine.
+	var keepCols []string
+	if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
+		keepCols = extractFilterBuildColumns(node.JoinFilter)
+	}
+	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
+		hj.SemiAntiFilter = BuildSemiAntiFilter(node.JoinFilter)
 	}
 
 	// Build right side (small table) into hash table
@@ -2147,18 +2154,61 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		defer close(buildDone)
 		if err := hj.Build(ctx, buildSource); err != nil {
 			buildErr = fmt.Errorf("building hash table: %w", err)
+			return
+		}
+		// For deferred builds, post-build setup runs in the goroutine so
+		// probes can start immediately when the barrier fires.
+		if deferBuild {
+			hj.FixKeyAssignment()
+			if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
+				hj.PruneBuildColumns(keepCols)
+			}
 		}
 	}()
 
 	// Left side (probe) streams through — prepared concurrently with build.
 	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])
-	// Wait for build to complete before accessing hash table state.
+	if err != nil {
+		<-buildDone // prevent goroutine leak
+		return nil, nil, nil, fmt.Errorf("building join left side: %w", err)
+	}
+
+	if deferBuild {
+		// Pipeline break: run early probes (scan → inner joins) as a child
+		// pipeline that overlaps with the deferred build. The bridge collects
+		// filtered batches, waits for the build barrier, then replays them
+		// through the deferred probe operators.
+		probe := hj.Probe()
+		if len(node.NeededColumns) > 0 {
+			filter := make(map[string]bool, len(node.NeededColumns))
+			for _, col := range node.NeededColumns {
+				filter[col] = true
+			}
+			probe.OutputFilter = filter
+		}
+
+		bridge := &deferredJoinBridge{
+			childSource: leftSource,
+			childOps:    leftOps,
+			barrier:     buildDone,
+			buildErr:    &buildErr,
+			workers:     runtime.NumCPU(),
+		}
+
+		if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
+			return &joinFlushSource{
+				inner:    bridge,
+				innerOps: []exec.UnaryOperator{probe},
+				probe:    probe,
+			}, nil, &exec.CollectSink{}, nil
+		}
+		return bridge, []exec.UnaryOperator{probe}, &exec.CollectSink{}, nil
+	}
+
+	// Immediate: wait for build to complete before accessing hash table state.
 	<-buildDone
 	if buildErr != nil {
 		return nil, nil, nil, buildErr
-	}
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("building join left side: %w", err)
 	}
 
 	// Fix key assignment: parseJoinKeys takes columns from the SQL literally
@@ -2167,17 +2217,12 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// After building, we know the build schema; swap any misassigned pairs.
 	hj.FixKeyAssignment()
 
-	// For semi/anti joins with non-equality filter conditions (from decorrelated EXISTS),
-	// compile the filter into a function that checks each candidate build row.
-	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
-		hj.SemiAntiFilter = BuildSemiAntiFilter(node.JoinFilter)
-	}
+	// SemiAntiFilter already set above (pre-goroutine).
 
 	// For SEMI/ANTI joins, prune build-side batches to only columns needed by
 	// the SemiAntiFilter. The build side never appears in the output, so after
 	// the hash index is built, only filter columns need to be retained.
 	if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
-		keepCols := extractFilterBuildColumns(node.JoinFilter)
 		hj.PruneBuildColumns(keepCols)
 	}
 
@@ -2228,6 +2273,71 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	}
 
 	return leftSource, leftOps, &exec.CollectSink{}, nil
+}
+
+// deferredJoinBridge creates a pipeline break for deferred hash join builds.
+// Init runs the child pipeline (scan → early probes) with parallel workers,
+// overlapping with the deferred build goroutine. After the child pipeline
+// completes, it waits for the build barrier, then replays collected batches
+// as a Source for the deferred probe operators.
+type deferredJoinBridge struct {
+	childSource exec.Source
+	childOps    []exec.UnaryOperator
+	barrier     <-chan struct{}
+	buildErr    *error
+	workers     int
+
+	batches []*batch.RecordBatch
+	idx     int
+	mu      sync.Mutex
+}
+
+func (d *deferredJoinBridge) Init(ctx context.Context) error {
+	// Run child pipeline (scan → early probes) to collect filtered batches.
+	// This overlaps with the deferred build goroutine(s) running in background.
+	sink := &exec.CollectSink{}
+	pipe := &exec.Pipeline{
+		Source:  d.childSource,
+		Ops:     d.childOps,
+		Sink:    sink,
+		Workers: d.workers,
+	}
+	if err := pipe.Run(ctx); err != nil {
+		// Wait for build goroutine to prevent leak
+		select {
+		case <-d.barrier:
+		default:
+		}
+		return fmt.Errorf("deferred join child pipeline: %w", err)
+	}
+	d.batches = sink.Batches()
+
+	// Wait for deferred build to complete
+	select {
+	case <-d.barrier:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if *d.buildErr != nil {
+		return *d.buildErr
+	}
+	return nil
+}
+
+func (d *deferredJoinBridge) Next(_ context.Context) (*batch.RecordBatch, error) {
+	d.mu.Lock()
+	if d.idx >= len(d.batches) {
+		d.mu.Unlock()
+		return nil, nil
+	}
+	b := d.batches[d.idx]
+	d.idx++
+	d.mu.Unlock()
+	return b, nil
+}
+
+func (d *deferredJoinBridge) Close() error {
+	return nil
 }
 
 // joinFlushSource wraps a join probe pipeline and appends unmatched build-side
@@ -4825,6 +4935,129 @@ func leafStages(stages []Stage) []string {
 	return leaves
 }
 
+// mergeFanout is the maximum number of upstream results a single merge task
+// should handle. When upstream tasks exceed this, a multi-level merge tree
+// is emitted with intermediate merge stages for parallel merging.
+const mergeFanout = 16
+
+// estimateUpstreamTasks sums the Tasks field of leaf stages in a subtree.
+func estimateUpstreamTasks(childStages []Stage, leafIDs []string) int {
+	leafSet := make(map[string]bool, len(leafIDs))
+	for _, id := range leafIDs {
+		leafSet[id] = true
+	}
+	total := 0
+	for _, s := range childStages {
+		if leafSet[s.ID] {
+			if s.Tasks > 0 {
+				total += s.Tasks
+			} else {
+				total++
+			}
+		}
+	}
+	return total
+}
+
+// emitMergeAggregateTree emits a final_aggregate stage, or a two-level merge
+// tree when upstream tasks exceed mergeFanout for parallel merging.
+func emitMergeAggregateTree(stages *[]Stage, leafIDs []string, groupBy []string, aggSpecs []AggSpec, childStages []Stage) {
+	upstream := estimateUpstreamTasks(childStages, leafIDs)
+	if upstream <= mergeFanout {
+		// Single-level: one final_aggregate merges all results
+		finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
+		*stages = append(*stages, Stage{
+			ID:           finalStageID,
+			Type:         "final_aggregate",
+			Tasks:        1,
+			GroupByCols:  groupBy,
+			AggSpecs:     aggSpecs,
+			Dependencies: leafIDs,
+		})
+		return
+	}
+
+	// Multi-level: split into groups of mergeFanout
+	numGroups := (upstream + mergeFanout - 1) / mergeFanout
+	intermIDs := make([]string, numGroups)
+	for g := 0; g < numGroups; g++ {
+		id := fmt.Sprintf("merge_aggregate-%d-%d", len(*stages), g)
+		intermIDs[g] = id
+		*stages = append(*stages, Stage{
+			ID:              id,
+			Type:            "final_aggregate",
+			Tasks:           1,
+			GroupByCols:     groupBy,
+			AggSpecs:        aggSpecs,
+			Dependencies:    leafIDs,
+			MergeGroup:      g,
+			MergeGroupCount: numGroups,
+		})
+	}
+	// Final merge of intermediate results
+	finalStageID := fmt.Sprintf("final_aggregate-%d", len(*stages))
+	*stages = append(*stages, Stage{
+		ID:           finalStageID,
+		Type:         "final_aggregate",
+		Tasks:        1,
+		GroupByCols:  groupBy,
+		AggSpecs:     aggSpecs,
+		Dependencies: intermIDs,
+	})
+}
+
+// emitMergeSortTree emits a merge_sort stage, or a two-level merge tree
+// when upstream sort tasks exceed mergeFanout.
+func emitMergeSortTree(stages *[]Stage, sortStageID string, sortKeys []SortKeySpec, childStages []Stage) {
+	// Estimate upstream sort tasks from child scan tasks
+	upstream := 0
+	for _, s := range childStages {
+		if s.Tasks > 0 {
+			upstream += s.Tasks
+		} else {
+			upstream++
+		}
+	}
+	if upstream <= mergeFanout {
+		// Single-level: one merge_sort merges all partial results
+		mergeStageID := fmt.Sprintf("merge_sort-%d", len(*stages))
+		*stages = append(*stages, Stage{
+			ID:           mergeStageID,
+			Type:         "merge_sort",
+			Tasks:        1,
+			SortKeys:     sortKeys,
+			Dependencies: []string{sortStageID},
+		})
+		return
+	}
+
+	// Multi-level: split into groups of mergeFanout
+	numGroups := (upstream + mergeFanout - 1) / mergeFanout
+	intermIDs := make([]string, numGroups)
+	for g := 0; g < numGroups; g++ {
+		id := fmt.Sprintf("merge_sort-%d-%d", len(*stages), g)
+		intermIDs[g] = id
+		*stages = append(*stages, Stage{
+			ID:              id,
+			Type:            "merge_sort",
+			Tasks:           1,
+			SortKeys:        sortKeys,
+			Dependencies:    []string{sortStageID},
+			MergeGroup:      g,
+			MergeGroupCount: numGroups,
+		})
+	}
+	// Final merge of intermediate sorted results
+	finalMergeID := fmt.Sprintf("merge_sort-%d", len(*stages))
+	*stages = append(*stages, Stage{
+		ID:           finalMergeID,
+		Type:         "merge_sort",
+		Tasks:        1,
+		SortKeys:     sortKeys,
+		Dependencies: intermIDs,
+	})
+}
+
 // resolveNullsLast determines whether nulls should sort last for a given order expression.
 // Default SQL behavior: NULLS LAST for ASC, NULLS FIRST for DESC.
 // When NullsFirst is explicitly set, use the explicit value.
@@ -4881,7 +5114,7 @@ func extractFilterBuildColumns(filter string) []string {
 // a concurrent-safe scan source.
 func innerPipelineWorkers(src exec.Source) int {
 	switch src.(type) {
-	case *catalogScanSource, *scannerExecSource:
+	case *catalogScanSource, *scannerExecSource, *deferredJoinBridge:
 		return runtime.NumCPU()
 	}
 	return 0

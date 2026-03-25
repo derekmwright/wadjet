@@ -989,6 +989,20 @@ func (c *Coordinator) createFinalAggregateTasks(queryID string, stage physical.S
 		inputFiles = append(inputFiles, depResults[depID]...)
 	}
 
+	// Multi-level merge: partition results among merge groups
+	if stage.MergeGroupCount > 0 && len(inputFiles) > 0 {
+		groupSize := (len(inputFiles) + stage.MergeGroupCount - 1) / stage.MergeGroupCount
+		start := stage.MergeGroup * groupSize
+		end := start + groupSize
+		if start > len(inputFiles) {
+			start = len(inputFiles)
+		}
+		if end > len(inputFiles) {
+			end = len(inputFiles)
+		}
+		inputFiles = inputFiles[start:end]
+	}
+
 	// Rewrite aggregate specs for merge semantics:
 	// - COUNT → SUM (sum partial counts)
 	// - SUM/MIN/MAX stay the same (composable)
@@ -1361,6 +1375,20 @@ func (c *Coordinator) createMergeSortTasks(queryID string, stage physical.Stage,
 	inputFiles := make([]string, 0, totalFiles)
 	for _, depID := range stage.Dependencies {
 		inputFiles = append(inputFiles, depResults[depID]...)
+	}
+
+	// Multi-level merge: partition results among merge groups
+	if stage.MergeGroupCount > 0 && len(inputFiles) > 0 {
+		groupSize := (len(inputFiles) + stage.MergeGroupCount - 1) / stage.MergeGroupCount
+		start := stage.MergeGroup * groupSize
+		end := start + groupSize
+		if start > len(inputFiles) {
+			start = len(inputFiles)
+		}
+		if end > len(inputFiles) {
+			end = len(inputFiles)
+		}
+		inputFiles = inputFiles[start:end]
 	}
 
 	var sortKeys []distributed.SortKeySpec

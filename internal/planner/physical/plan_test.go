@@ -6,6 +6,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -1190,5 +1191,187 @@ func TestHasSelfJoins(t *testing.T) {
 				t.Errorf("HasSelfJoins() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMultiLevelMergeAggregateTree(t *testing.T) {
+	// Create leaf stages that exceed mergeFanout (16) to trigger multi-level merge.
+	var stages []Stage
+	leafIDs := make([]string, 20)
+	for i := 0; i < 20; i++ {
+		id := fmt.Sprintf("scan-%d", i)
+		leafIDs[i] = id
+		stages = append(stages, Stage{ID: id, Type: "scan", Tasks: 1})
+	}
+	groupBy := []string{"region"}
+	aggSpecs := []AggSpec{{Func: "count_star", OutputCol: "cnt"}}
+
+	emitMergeAggregateTree(&stages, leafIDs, groupBy, aggSpecs, stages[:20])
+
+	// Should have 20 scans + intermediate merge stages + 1 final merge
+	var intermediates, finals []Stage
+	for _, s := range stages[20:] {
+		if s.MergeGroupCount > 0 {
+			intermediates = append(intermediates, s)
+		} else if s.Type == "final_aggregate" {
+			finals = append(finals, s)
+		}
+	}
+
+	if len(intermediates) == 0 {
+		t.Fatal("expected intermediate merge stages, got none")
+	}
+	if len(finals) != 1 {
+		t.Fatalf("expected 1 final stage, got %d", len(finals))
+	}
+
+	// Final stage depends on intermediate stages
+	finalDeps := make(map[string]bool)
+	for _, d := range finals[0].Dependencies {
+		finalDeps[d] = true
+	}
+	for _, interm := range intermediates {
+		if !finalDeps[interm.ID] {
+			t.Errorf("final stage missing dependency on %s", interm.ID)
+		}
+	}
+
+	// Verify intermediate stages have correct MergeGroup/MergeGroupCount
+	for i, interm := range intermediates {
+		if interm.MergeGroup != i {
+			t.Errorf("intermediate %d: MergeGroup=%d, want %d", i, interm.MergeGroup, i)
+		}
+		if interm.MergeGroupCount != len(intermediates) {
+			t.Errorf("intermediate %d: MergeGroupCount=%d, want %d", i, interm.MergeGroupCount, len(intermediates))
+		}
+	}
+
+	t.Logf("Multi-level merge: %d scans → %d intermediates → 1 final", 20, len(intermediates))
+}
+
+func TestMultiLevelMergeNotTriggered(t *testing.T) {
+	// With <= 16 upstream tasks, should emit single-level merge.
+	var stages []Stage
+	leafIDs := make([]string, 8)
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("scan-%d", i)
+		leafIDs[i] = id
+		stages = append(stages, Stage{ID: id, Type: "scan", Tasks: 1})
+	}
+
+	emitMergeAggregateTree(&stages, leafIDs, []string{"g"}, []AggSpec{{Func: "sum", InputCol: "x", OutputCol: "sx"}}, stages[:8])
+
+	// Should have 8 scans + 1 final_aggregate (no intermediates)
+	mergeStages := stages[8:]
+	if len(mergeStages) != 1 {
+		t.Fatalf("expected 1 merge stage for %d upstream tasks, got %d", 8, len(mergeStages))
+	}
+	if mergeStages[0].MergeGroupCount != 0 {
+		t.Errorf("single-level merge should have MergeGroupCount=0, got %d", mergeStages[0].MergeGroupCount)
+	}
+}
+
+func TestMultiLevelMergeSortTree(t *testing.T) {
+	// Create enough child stages to trigger multi-level merge sort.
+	var stages []Stage
+	for i := 0; i < 20; i++ {
+		stages = append(stages, Stage{ID: fmt.Sprintf("scan-%d", i), Type: "scan", Tasks: 1})
+	}
+	sortStageID := "sort-20"
+	stages = append(stages, Stage{ID: sortStageID, Type: "sort", Tasks: 1})
+
+	sortKeys := []SortKeySpec{{Column: "total", Desc: true}}
+	emitMergeSortTree(&stages, sortStageID, sortKeys, stages[:20])
+
+	var intermediates, finals []Stage
+	for _, s := range stages[21:] { // skip scans + sort stage
+		if s.MergeGroupCount > 0 {
+			intermediates = append(intermediates, s)
+		} else if s.Type == "merge_sort" {
+			finals = append(finals, s)
+		}
+	}
+
+	if len(intermediates) == 0 {
+		t.Fatal("expected intermediate merge_sort stages")
+	}
+	if len(finals) != 1 {
+		t.Fatalf("expected 1 final merge_sort, got %d", len(finals))
+	}
+	t.Logf("Multi-level merge sort: %d partials → %d intermediates → 1 final", 20, len(intermediates))
+}
+
+func TestDeferredJoinBridge(t *testing.T) {
+	// Verify that deferredJoinBridge collects child pipeline batches
+	// and waits for the build barrier before returning.
+	ctx := context.Background()
+
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString},
+	}
+	rows := []map[string]any{
+		{"id": int64(1), "val": "a"},
+		{"id": int64(2), "val": "b"},
+		{"id": int64(3), "val": "c"},
+	}
+	source := exec.NewSliceSource(schema, rows)
+	barrier := make(chan struct{})
+	var buildErr error
+
+	bridge := &deferredJoinBridge{
+		childSource: source,
+		childOps:    nil,
+		barrier:     barrier,
+		buildErr:    &buildErr,
+		workers:     1,
+	}
+
+	// Simulate build completing
+	close(barrier)
+
+	if err := bridge.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	// Should be able to read all batches
+	count := 0
+	for {
+		b, err := bridge.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		count += b.Len
+	}
+	if count != 3 {
+		t.Errorf("expected 3 rows, got %d", count)
+	}
+}
+
+func TestDeferredJoinBridgeBuildError(t *testing.T) {
+	ctx := context.Background()
+	source := exec.NewSliceSource(nil, nil)
+	barrier := make(chan struct{})
+	buildErr := fmt.Errorf("build failed: out of memory")
+
+	bridge := &deferredJoinBridge{
+		childSource: source,
+		childOps:    nil,
+		barrier:     barrier,
+		buildErr:    &buildErr,
+		workers:     1,
+	}
+
+	close(barrier)
+
+	err := bridge.Init(ctx)
+	if err == nil {
+		t.Fatal("expected error from build failure")
+	}
+	if err.Error() != "build failed: out of memory" {
+		t.Errorf("unexpected error: %v", err)
 	}
 }
