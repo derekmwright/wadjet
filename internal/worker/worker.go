@@ -338,14 +338,27 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	w.logger.Info("executing task",
+	// Inject trace context from the task into the Go context
+	logAttrsStart := []any{
 		"task_id", task.ID,
 		"type", task.Type,
 		"query_id", task.QueryID,
-	)
+	}
+	if task.TraceID != "" {
+		logAttrsStart = append(logAttrsStart, "trace_id", task.TraceID)
+	}
+	w.logger.Info("executing task", logAttrsStart...)
 
-	// Create a cancellable context for this task
+	// Create a cancellable context for this task, with trace propagation
 	taskCtx, taskCancel := context.WithCancel(ctx)
+	if task.TraceID != "" {
+		tc := distributed.TraceContext{
+			TraceID:    task.TraceID,
+			SpanID:     task.SpanID,
+			TraceFlags: task.TraceFlags,
+		}
+		taskCtx = distributed.ContextWithTrace(taskCtx, tc)
+	}
 	defer taskCancel()
 
 	// Monitor for cancellation during execution
@@ -392,6 +405,10 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		result = w.executor.Execute(taskCtx, task, w.config.WorkerID)
 	}()
 
+	// Propagate trace context to result notification
+	result.TraceID = task.TraceID
+	result.SpanID = task.SpanID
+
 	// Publish result notification
 	subject := distributed.ResultSubject(task.QueryID, task.StageID, task.ID)
 	data, err := distributed.Marshal(result)
@@ -418,16 +435,19 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		runtime.GC()
 	}
 
-	logAttrs := []any{
+	logAttrsEnd := []any{
 		"task_id", task.ID,
 		"success", result.Success,
 		"rows", result.NumRows,
 		"duration", result.Duration,
 	}
-	if result.Error != "" {
-		logAttrs = append(logAttrs, "error", result.Error)
+	if task.TraceID != "" {
+		logAttrsEnd = append(logAttrsEnd, "trace_id", task.TraceID)
 	}
-	w.logger.Info("task completed", logAttrs...)
+	if result.Error != "" {
+		logAttrsEnd = append(logAttrsEnd, "error", result.Error)
+	}
+	w.logger.Info("task completed", logAttrsEnd...)
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {

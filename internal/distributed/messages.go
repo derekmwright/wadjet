@@ -91,6 +91,11 @@ type Task struct {
 	NumPartitions int      `json:"num_partitions,omitempty"`  // number of output partitions
 	PartitionID   int      `json:"partition_id,omitempty"`    // which partition this join task handles
 
+	// Distributed tracing context (W3C Trace Context format)
+	TraceID  string `json:"trace_id,omitempty"`  // 32-char hex
+	SpanID   string `json:"span_id,omitempty"`   // 16-char hex parent span
+	TraceFlags byte  `json:"trace_flags,omitempty"` // 0x01 = sampled
+
 	// Identity context (for access control enforcement at workers)
 	IdentityName string `json:"identity_name,omitempty"`
 	IdentityRole string `json:"identity_role,omitempty"`
@@ -157,6 +162,10 @@ type ResultNotification struct {
 
 	// Small result fast path (< 256 KB): inline result data
 	InlineData []byte `json:"inline_data,omitempty"`
+
+	// Distributed tracing context (from originating task)
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"` // worker's span for this task
 
 	Duration  time.Duration `json:"duration"`
 	Timestamp time.Time     `json:"timestamp"`

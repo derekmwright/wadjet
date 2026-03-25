@@ -44,6 +44,7 @@ type queryMeta struct {
 	sqlText      string // original SQL for pipeline tasks
 	identityName string // caller identity for task propagation
 	identityRole string
+	trace        distributed.TraceContext // distributed tracing context
 	mergeInfo    *logical.MergeInfo // non-nil for probe-split queries needing merge
 }
 
@@ -550,6 +551,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	}
 	c.stageSpecs[queryID] = specMap
 	qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: probeSplitMergeInfo}
+	// Propagate or create distributed trace context
+	tc := distributed.TraceFromContext(ctx)
+	if tc.TraceID == "" {
+		tc = distributed.NewTraceContext()
+	}
+	qm.trace = tc
 	if id := auth.IdentityFromContext(ctx); id != nil {
 		qm.identityName = id.Name
 		qm.identityRole = id.Role
@@ -709,6 +716,9 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 		if qm != nil {
 			tasks[i].IdentityName = qm.identityName
 			tasks[i].IdentityRole = qm.identityRole
+			tasks[i].TraceID = qm.trace.TraceID
+			tasks[i].SpanID = qm.trace.SpanID
+			tasks[i].TraceFlags = qm.trace.TraceFlags
 		}
 	}
 	return tasks
