@@ -29,14 +29,19 @@ type WorkerRegistry struct {
 }
 
 // NewWorkerRegistry creates a worker registry that subscribes to heartbeats.
-func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger) *WorkerRegistry {
+// staleTTL controls how long since the last heartbeat before a worker is
+// considered dead. Pass 0 to use the default (30s).
+func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duration) *WorkerRegistry {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if staleTTL <= 0 {
+		staleTTL = 30 * time.Second
 	}
 
 	wr := &WorkerRegistry{
 		workers: make(map[string]*WorkerInfo),
-		stale:   1 * time.Hour,
+		stale:   staleTTL,
 		logger:  logger,
 	}
 
