@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/citc-tech/wadjet/internal/auth"
@@ -354,12 +355,16 @@ func deriveColumns(info *plansql.SelectInfo, rows []map[string]any) []string {
 		}
 	}
 
-	// Fallback: get from first row
+	// Fallback: get from first row. Sort for deterministic column ordering —
+	// Go map iteration is non-deterministic, which caused column order
+	// mismatches between RowDescription and DataRow in the pgwire Extended
+	// Query Protocol (GitHub issue #9).
 	if len(rows) > 0 {
 		cols := make([]string, 0, len(rows[0]))
 		for k := range rows[0] {
 			cols = append(cols, k)
 		}
+		sort.Strings(cols)
 		return cols
 	}
 	return nil

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	_ "github.com/lib/pq"
 
 	"github.com/citc-tech/wadjet/wadjet"
@@ -268,4 +269,150 @@ func TestLibPQMultipleStatements(t *testing.T) {
 			t.Errorf("iteration %d: expected 3, got %d", i, cnt)
 		}
 	}
+}
+
+// Regression test for GitHub issue #9: SELECT col1, col2 returns NULL values
+// through pgx v5 client, but SELECT * works.
+func TestPgxColumnProjection(t *testing.T) {
+	_, srv := setupRealDB(t)
+	addr := srv.Addr()
+	ctx := context.Background()
+
+	connStr := fmt.Sprintf("host=127.0.0.1 port=%s user=wadjet dbname=wadjet sslmode=disable",
+		addr[len("127.0.0.1:"):])
+
+	// pgx v5 uses extended protocol with binary format by default.
+	// Use QueryExecModeSimpleProtocol for simple protocol tests.
+	conn, err := pgx.Connect(ctx, connStr)
+	if err != nil {
+		t.Fatalf("pgx connect: %v", err)
+	}
+	defer conn.Close(ctx)
+
+	// Test 1: Simple protocol — SELECT col1, col2 (the reported regression)
+	t.Run("simple_protocol_projection", func(t *testing.T) {
+		rows, err := conn.Query(ctx, "SELECT name, score FROM users ORDER BY id",
+			pgx.QueryExecModeSimpleProtocol)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		var count int
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				t.Fatalf("Values: %v", err)
+			}
+			fds := rows.FieldDescriptions()
+			for i, fd := range fds {
+				if vals[i] == nil {
+					t.Errorf("row %d col %q: value is nil", count, fd.Name)
+				}
+			}
+			t.Logf("row %d: name=%v score=%v", count, vals[0], vals[1])
+			count++
+		}
+		if count != 3 {
+			t.Fatalf("expected 3 rows, got %d", count)
+		}
+	})
+
+	// Test 2: Simple protocol — SELECT * (should work)
+	t.Run("simple_protocol_star", func(t *testing.T) {
+		rows, err := conn.Query(ctx, "SELECT * FROM users ORDER BY id",
+			pgx.QueryExecModeSimpleProtocol)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		var count int
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				t.Fatalf("Values: %v", err)
+			}
+			count++
+			_ = vals
+		}
+		if count != 3 {
+			t.Fatalf("expected 3 rows, got %d", count)
+		}
+	})
+
+	// Test 3: Simple protocol with WHERE
+	t.Run("simple_protocol_where", func(t *testing.T) {
+		rows, err := conn.Query(ctx, "SELECT name, score FROM users WHERE id = 1",
+			pgx.QueryExecModeSimpleProtocol)
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		var count int
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				t.Fatalf("Values: %v", err)
+			}
+			if vals[0] == nil {
+				t.Errorf("name is nil")
+			}
+			if vals[1] == nil {
+				t.Errorf("score is nil")
+			}
+			t.Logf("filtered: name=%v score=%v", vals[0], vals[1])
+			count++
+		}
+		if count != 1 {
+			t.Fatalf("expected 1 row, got %d", count)
+		}
+	})
+
+	// Test 4: Extended protocol (binary format) — SELECT col1, col2
+	t.Run("extended_protocol_projection", func(t *testing.T) {
+		rows, err := conn.Query(ctx, "SELECT name, score FROM users ORDER BY id")
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		var count int
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				t.Errorf("row %d Values error: %v", count, err)
+				count++
+				continue
+			}
+			fds := rows.FieldDescriptions()
+			for i, fd := range fds {
+				if vals[i] == nil {
+					t.Errorf("row %d col %q: value is nil", count, fd.Name)
+				}
+			}
+			t.Logf("ext row %d: name=%v score=%v", count, vals[0], vals[1])
+			count++
+		}
+		if count != 3 {
+			t.Fatalf("expected 3 rows, got %d", count)
+		}
+	})
+
+	// Test 5: Extended protocol — SELECT * (binary format)
+	t.Run("extended_protocol_star", func(t *testing.T) {
+		rows, err := conn.Query(ctx, "SELECT * FROM users ORDER BY id")
+		if err != nil {
+			t.Fatalf("query: %v", err)
+		}
+		defer rows.Close()
+		var count int
+		for rows.Next() {
+			_, err := rows.Values()
+			if err != nil {
+				t.Errorf("row %d Values error: %v", count, err)
+			}
+			count++
+		}
+		if count != 3 {
+			t.Fatalf("expected 3 rows, got %d", count)
+		}
+	})
 }
