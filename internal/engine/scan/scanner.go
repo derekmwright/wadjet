@@ -58,9 +58,10 @@ type Scanner struct {
 	deleteMarkers map[string]map[int64]bool // file path -> set of row indices to skip
 	scanPool      *batch.BatchPool // reuse batch allocations across files
 
-	// Async prefetch: downloads next file while current is being decoded
-	// Only used when NOT using ReaderAt path
-	prefetchCh chan prefetchedFile
+	// Async prefetch: downloads files ahead while current is being decoded.
+	// Only used when NOT using ReaderAt path.
+	prefetchCh  chan prefetchedFile
+	prefetchIdx int // next file index to start prefetching
 
 }
 
@@ -174,10 +175,18 @@ func (s *Scanner) Init(ctx context.Context) error {
 	}
 	s.scanPool = batch.NewBatchPool(scanSchema, 128*1024)
 
-	// Start prefetching the first file (only for full-download path)
+	// Start prefetching files ahead (only for full-download path).
+	// Launch up to 4 concurrent downloads to hide S3 latency.
 	if len(s.files) > 0 && !s.useReaderAt {
-		s.prefetchCh = make(chan prefetchedFile, 1)
-		s.startPrefetch(ctx, 0)
+		depth := 4
+		if len(s.files) < depth {
+			depth = len(s.files)
+		}
+		s.prefetchCh = make(chan prefetchedFile, depth)
+		for i := 0; i < depth; i++ {
+			s.startPrefetch(ctx, i)
+		}
+		s.prefetchIdx = depth
 	}
 
 	return nil
@@ -224,8 +233,9 @@ func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
 				return nil, ctx.Err()
 			}
 
-			if s.fileIdx < len(s.files) {
-				s.startPrefetch(ctx, s.fileIdx)
+			if s.prefetchIdx < len(s.files) {
+				s.startPrefetch(ctx, s.prefetchIdx)
+				s.prefetchIdx++
 			}
 
 			if pf.err != nil {

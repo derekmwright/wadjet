@@ -1,6 +1,7 @@
 package batch
 
 import (
+	"runtime"
 	"sync"
 
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -16,12 +17,21 @@ import (
 // The pool abstraction here makes that swap straightforward — only Get() and the
 // underlying NewRecordBatch call need to change. Operator code stays the same.
 
-const (
-	// maxPoolPerClass is the maximum number of batches cached per size class.
-	// Sized to accommodate parallel workers (typically runtime.NumCPU) plus
-	// pipeline depth, avoiding discard-then-reallocate churn.
-	maxPoolPerClass = 32
-)
+// maxPoolPerClass scales with CPU count to accommodate parallel pipeline workers.
+// Each worker may hold 2-3 batches in-flight (scan → filter → aggregate), so
+// we need enough cached batches to avoid allocate/GC churn under parallelism.
+var maxPoolPerClass = maxPoolSize()
+
+func maxPoolSize() int {
+	n := runtime.NumCPU() * 4
+	if n < 32 {
+		n = 32
+	}
+	if n > 256 {
+		n = 256
+	}
+	return n
+}
 
 // BatchPool manages reusable RecordBatch allocations with size-class bucketing.
 // Batches are pooled by their schema and row count to avoid allocation on the
