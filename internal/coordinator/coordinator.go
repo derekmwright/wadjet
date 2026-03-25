@@ -3,6 +3,7 @@ package coordinator
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -39,13 +40,14 @@ type Config struct {
 
 // queryMeta stores per-query metadata needed for later result retrieval.
 type queryMeta struct {
-	stages       []physical.Stage
-	planStr      string
-	sqlText      string // original SQL for pipeline tasks
-	identityName string // caller identity for task propagation
-	identityRole string
-	trace        distributed.TraceContext // distributed tracing context
-	mergeInfo    *logical.MergeInfo // non-nil for probe-split queries needing merge
+	stages             []physical.Stage
+	planStr            string
+	sqlText            string // original SQL for pipeline tasks
+	identityName       string // caller identity for task propagation
+	identityRole       string
+	trace              distributed.TraceContext // distributed tracing context
+	policyDecisionJSON json.RawMessage          // pre-evaluated ABAC decisions for worker enforcement
+	mergeInfo          *logical.MergeInfo // non-nil for probe-split queries needing merge
 }
 
 // Coordinator accepts queries, plans them, dispatches tasks, and tracks results.
@@ -561,6 +563,16 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		qm.identityName = id.Name
 		qm.identityRole = id.Role
 	}
+	// Serialize ABAC table decisions for worker-side enforcement
+	if td := auth.TableDecisionsFromContext(ctx); len(td) > 0 {
+		sd := auth.SerializedDecision{
+			Allowed:        true,
+			TableDecisions: map[string]*auth.TableDecision(td),
+		}
+		if data, err := json.Marshal(sd); err == nil {
+			qm.policyDecisionJSON = data
+		}
+	}
 	c.queryMetas[queryID] = qm
 	c.mu.Unlock()
 
@@ -719,6 +731,7 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 			tasks[i].TraceID = qm.trace.TraceID
 			tasks[i].SpanID = qm.trace.SpanID
 			tasks[i].TraceFlags = qm.trace.TraceFlags
+			tasks[i].PolicyDecisionJSON = qm.policyDecisionJSON
 		}
 	}
 	return tasks
