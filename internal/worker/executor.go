@@ -5,6 +5,7 @@ import (
 	"container/heap"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 
 	goparquet "github.com/parquet-go/parquet-go"
 
+	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -129,6 +131,13 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		Timestamp: time.Now(),
 	}
 
+	// Worker-side ABAC enforcement: validate column access policies before execution.
+	if err := e.enforcePolicyDecision(task); err != nil {
+		result.Duration = time.Since(start)
+		result.Error = fmt.Sprintf("policy enforcement: %s", err)
+		return result
+	}
+
 	var err error
 	switch task.Type {
 	case distributed.TaskTypeScan:
@@ -158,6 +167,56 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	}
 
 	return result
+}
+
+// enforcePolicyDecision validates ABAC column policies at the worker before
+// task execution. If a denied column appears in the task's requested columns,
+// the task is rejected. This provides defense-in-depth: the coordinator
+// applies row filters at planning time, and the worker re-checks column
+// policies at execution time.
+func (e *Executor) enforcePolicyDecision(task distributed.Task) error {
+	if len(task.PolicyDecisionJSON) == 0 {
+		return nil
+	}
+	var sd auth.SerializedDecision
+	if err := json.Unmarshal(task.PolicyDecisionJSON, &sd); err != nil {
+		return fmt.Errorf("unmarshaling policy decision: %w", err)
+	}
+	if !sd.Allowed {
+		return fmt.Errorf("access denied by policy")
+	}
+
+	// Check column-level policies for the task's target table
+	tableName := task.TableName
+	if tableName == "" {
+		return nil // non-table tasks (aggregate, sort, etc.) don't need column checks
+	}
+	td, ok := sd.TableDecisions[tableName]
+	if !ok || td == nil {
+		return nil
+	}
+	if !td.Allowed {
+		return fmt.Errorf("access denied for table %q: %s", tableName, td.Reason)
+	}
+
+	// Check each requested column against column-level decisions
+	requestedCols := make(map[string]bool, len(task.Columns))
+	for _, c := range task.Columns {
+		requestedCols[c] = true
+	}
+	for _, cd := range td.Columns {
+		if !cd.Allowed && requestedCols[cd.Column] {
+			return fmt.Errorf("access denied for column %q in table %q", cd.Column, tableName)
+		}
+	}
+	if e.logger != nil {
+		e.logger.Debug("worker policy enforcement passed",
+			"task_id", task.ID,
+			"table", tableName,
+			"columns", len(td.Columns),
+		)
+	}
+	return nil
 }
 
 func (e *Executor) executeScan(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {

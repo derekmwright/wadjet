@@ -771,3 +771,64 @@ func TestShuffleConsistentPartitioning(t *testing.T) {
 		}
 	}
 }
+
+func TestEnforcePolicyDecision(t *testing.T) {
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache, nil)
+	executor.SetLogger(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	t.Run("no_policy", func(t *testing.T) {
+		task := distributed.Task{TableName: "users", Columns: []string{"id", "name"}}
+		if err := executor.enforcePolicyDecision(task); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("allowed", func(t *testing.T) {
+		policy := `{"allowed":true,"table_decisions":{"users":{"allowed":true,"columns":[{"column":"id","allowed":true}]}}}`
+		task := distributed.Task{
+			TableName:          "users",
+			Columns:            []string{"id"},
+			PolicyDecisionJSON: []byte(policy),
+		}
+		if err := executor.enforcePolicyDecision(task); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("denied_table", func(t *testing.T) {
+		policy := `{"allowed":true,"table_decisions":{"users":{"allowed":false,"reason":"classified"}}}`
+		task := distributed.Task{
+			TableName:          "users",
+			Columns:            []string{"id"},
+			PolicyDecisionJSON: []byte(policy),
+		}
+		if err := executor.enforcePolicyDecision(task); err == nil {
+			t.Fatal("expected error for denied table")
+		}
+	})
+
+	t.Run("denied_column", func(t *testing.T) {
+		policy := `{"allowed":true,"table_decisions":{"users":{"allowed":true,"columns":[{"column":"ssn","allowed":false}]}}}`
+		task := distributed.Task{
+			TableName:          "users",
+			Columns:            []string{"id", "ssn"},
+			PolicyDecisionJSON: []byte(policy),
+		}
+		if err := executor.enforcePolicyDecision(task); err == nil {
+			t.Fatal("expected error for denied column")
+		}
+	})
+
+	t.Run("global_denied", func(t *testing.T) {
+		policy := `{"allowed":false}`
+		task := distributed.Task{
+			TableName:          "users",
+			PolicyDecisionJSON: []byte(policy),
+		}
+		if err := executor.enforcePolicyDecision(task); err == nil {
+			t.Fatal("expected error for globally denied policy")
+		}
+	})
+}
