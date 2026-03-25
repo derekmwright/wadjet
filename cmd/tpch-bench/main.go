@@ -54,6 +54,7 @@ func main() {
 		cpuProf    = flag.String("cpuprofile", "", "Write CPU profile to file")
 		memProf    = flag.String("memprofile", "", "Write memory profile to file")
 		profDir    = flag.String("profdir", "", "Directory for per-query profiles")
+		dataPrefix = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
 	)
 	flag.Parse()
 
@@ -102,7 +103,7 @@ func main() {
 
 	sf := tpch.ScaleFactor(float64(*scale))
 	if *skipLoad {
-		discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl)
+		discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix)
 	} else {
 		loadData(ctx, db, sf)
 	}
@@ -272,7 +273,7 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	return db, coord, nc
 }
 
-func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool) {
+func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool, dataPrefix string) {
 	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
 		Endpoint: endpoint,
 		UseSSL:   ssl,
@@ -295,7 +296,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 	// Discover existing parquet files for each table
 	totalFiles := 0
 	for name := range tpch.AllTables {
-		prefix := "tables/" + name + "/"
+		prefix := dataPrefix + name + "/"
 		objects, err := store.List(ctx, bucket, objstore.ListOptions{Prefix: prefix})
 		if err != nil {
 			log.Fatalf("listing %s files: %v", name, err)
