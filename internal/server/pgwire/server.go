@@ -207,6 +207,7 @@ type pgConn struct {
 	stmts           map[string]string // named prepared statements
 	described       bool              // true if Describe was sent for current portal
 	resultFmtCodes  []int16           // result format codes from Bind (0=text, 1=binary)
+	describeResult  *wadjet.QueryResult // cached Describe result for Execute reuse
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
@@ -810,6 +811,7 @@ func (c *pgConn) handleParse(payload []byte) {
 		c.stmts[name] = sql
 	}
 	c.described = false
+	c.describeResult = nil // invalidate cached result for new statement
 
 	// Send ParseComplete ('1')
 	c.sendMsg('1', nil)
@@ -941,7 +943,10 @@ func (c *pgConn) describeSQL(sql string) {
 		return
 	}
 
-	// Execute the real query to get typed column metadata
+	// Execute the real query to get typed column metadata.
+	// Cache the result so Execute can reuse it instead of re-executing,
+	// which avoids column order mismatches for SELECT * (map iteration
+	// order is non-deterministic in Go).
 	ctx, cancel := c.queryContext()
 	defer cancel()
 	result, err := c.db.Query(ctx, sql)
@@ -951,6 +956,7 @@ func (c *pgConn) describeSQL(sql string) {
 		c.sendMsg('n', nil)
 		return
 	}
+	c.describeResult = result
 
 	if len(result.ColumnMetas) > 0 {
 		c.sendTypedRowDescription(result.ColumnMetas)
@@ -1013,12 +1019,23 @@ func (c *pgConn) handleExecute(payload []byte) {
 		return
 	}
 
-	ctx, cancel := c.queryContext()
-	defer cancel()
-	result, err := c.db.Query(ctx, sql)
-	if err != nil {
-		c.sendError("ERROR", "42000", err.Error())
-		return
+	// Reuse the cached result from Describe when available. This avoids
+	// re-executing the query AND ensures column order matches the
+	// RowDescription (critical for SELECT * where Go map iteration order
+	// is non-deterministic).
+	var result *wadjet.QueryResult
+	if c.describeResult != nil {
+		result = c.describeResult
+		c.describeResult = nil
+	} else {
+		ctx, cancel := c.queryContext()
+		defer cancel()
+		var err error
+		result, err = c.db.Query(ctx, sql)
+		if err != nil {
+			c.sendError("ERROR", "42000", err.Error())
+			return
+		}
 	}
 
 	columns := result.Columns
@@ -1838,6 +1855,7 @@ func (c *pgConn) sendDataRow(columns []string, row map[string]any) {
 
 // sendDataRowFormatted sends a DataRow using the format codes from Bind.
 // Columns with format code 1 (binary) get binary-encoded values.
+// metas provides type info for correct binary encoding (may be nil for text-only).
 func (c *pgConn) sendDataRowFormatted(columns []string, row map[string]any, fmtCodes []int16) {
 	c.buf = c.buf[:0]
 	c.buf = appendInt16(c.buf, int16(len(columns)))
