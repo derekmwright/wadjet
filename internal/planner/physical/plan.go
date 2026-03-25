@@ -4404,13 +4404,20 @@ func findScanRowEstimate(node *logical.Node) int64 {
 	if node.Type == logical.NodeScan {
 		return node.ScanRowEstimate
 	}
-	// For aggregates, row count is much smaller than scan (assume 10% or 100K max)
+	// For aggregates, row count is much smaller than scan (assume 10% or 2M max).
+	// At SF100, high-cardinality GROUP BY (e.g. Q17: ~20M l_partkey values)
+	// can produce millions of groups; 100K was too low and forced repeated
+	// hash table doublings during execution.
 	if node.Type == logical.NodeAggregate {
 		est := findScanRowEstimate(node.Children[0])
-		if est > 100000 {
-			return 100000
+		reduced := est / 10
+		if reduced > 2_000_000 {
+			reduced = 2_000_000
 		}
-		return est / 10
+		if reduced < 1 {
+			reduced = 1
+		}
+		return reduced
 	}
 	var total int64
 	for _, child := range node.Children {
