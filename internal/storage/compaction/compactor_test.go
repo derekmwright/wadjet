@@ -232,3 +232,56 @@ func readAll(rc interface{ Read([]byte) (int, error) }) ([]byte, error) {
 	_, err := buf.ReadFrom(rc.(interface{ Read([]byte) (int, error) }))
 	return buf.Bytes(), err
 }
+
+func TestBackgroundCompactor_SweepsAllTables(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+		},
+	}
+
+	// Create two tables, each with enough files to trigger compaction.
+	for _, table := range []string{"alpha", "beta"} {
+		if err := cat.CreateTable(ctx, table, schema, nil); err != nil {
+			t.Fatal(err)
+		}
+		partPath := fmt.Sprintf("tables/%s/data", table)
+		for i := 0; i < 12; i++ {
+			path := fmt.Sprintf("%s/chunk_%04d.parquet", partPath, i)
+			size := writeTestFile(t, store, "test-bucket", path, schema, []map[string]any{
+				{"id": int64(i)},
+			})
+			if err := cat.AddFiles(ctx, table, nil, partPath, []catalog.FileEntry{
+				{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// Run the sweep directly (don't start the ticker-based loop).
+	bc := NewBackgroundCompactor(cat, BackgroundConfig{
+		Enabled:    true,
+		Compaction: Config{MinFiles: 5, MaxFileSizeBytes: 32 * 1024 * 1024, MaxFilesPerPass: 50},
+	}, nil)
+	bc.sweep(ctx)
+
+	// Both tables should now have 1 file each.
+	for _, table := range []string{"alpha", "beta"} {
+		manifest, err := cat.GetManifest(ctx, table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(manifest.Partitions) != 1 {
+			t.Fatalf("table %s: expected 1 partition, got %d", table, len(manifest.Partitions))
+		}
+		if len(manifest.Partitions[0].Files) != 1 {
+			t.Errorf("table %s: expected 1 file after compaction, got %d",
+				table, len(manifest.Partitions[0].Files))
+		}
+	}
+}
