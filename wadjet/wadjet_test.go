@@ -2,6 +2,7 @@ package wadjet
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -398,4 +399,83 @@ func TestCurrentDateNotNull(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWithRecursiveCTE verifies end-to-end WITH RECURSIVE execution.
+func TestWithRecursiveCTE(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "parent_id", Type: parquet.TypeInt64, Nullable: true},
+			{Name: "name", Type: parquet.TypeString},
+		},
+	}
+	if err := db.CreateTable(ctx, "org", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ing := db.NewIngester("org", schema, nil, ingest.Config{MaxBufferRows: 100, RowGroupSize: 100})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"id": int64(1), "parent_id": nil, "name": "CEO"},
+		{"id": int64(2), "parent_id": int64(1), "name": "VP Eng"},
+		{"id": int64(3), "parent_id": int64(1), "name": "VP Sales"},
+		{"id": int64(4), "parent_id": int64(2), "name": "Tech Lead"},
+		{"id": int64(5), "parent_id": int64(4), "name": "Developer"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("generate_series", func(t *testing.T) {
+		// Pure recursive CTE without table dependency — generates 1..10
+		result, err := db.Query(ctx, `
+			WITH RECURSIVE cnt(n) AS (
+				SELECT 1
+				UNION ALL
+				SELECT n + 1 FROM cnt WHERE n < 10
+			)
+			SELECT n FROM cnt ORDER BY n
+		`)
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+		if len(result.Rows) != 10 {
+			t.Fatalf("expected 10 rows, got %d", len(result.Rows))
+		}
+		for i, row := range result.Rows {
+			n := row["n"]
+			expected := float64(i + 1)
+			if fmt.Sprintf("%v", n) != fmt.Sprintf("%v", expected) {
+				t.Errorf("row %d: expected n=%v, got %v", i, expected, n)
+			}
+		}
+	})
+
+	t.Run("non_recursive_cte", func(t *testing.T) {
+		// Standard CTE (not recursive) referencing table data
+		result, err := db.Query(ctx, `
+			WITH managers AS (
+				SELECT id, name FROM org WHERE parent_id IS NULL
+			)
+			SELECT name FROM managers
+		`)
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+		if len(result.Rows) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(result.Rows))
+		}
+		if result.Rows[0]["name"] != "CEO" {
+			t.Errorf("expected CEO, got %v", result.Rows[0]["name"])
+		}
+	})
 }
