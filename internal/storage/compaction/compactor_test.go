@@ -227,6 +227,87 @@ func TestCompactTable_SkipsBelowThreshold(t *testing.T) {
 	}
 }
 
+// TestCompactTable_MultiPassCompaction verifies that when a partition has more
+// files than MaxFilesPerPass, multiple passes run back-to-back within a single
+// CompactTable call until the partition is fully compacted.
+func TestCompactTable_MultiPassCompaction(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+		},
+	}
+	if err := cat.CreateTable(ctx, "multipass", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create 30 files — with MaxFilesPerPass=10, needs 3+ passes
+	const numFiles = 30
+	partPath := "tables/multipass/data"
+	for i := 0; i < numFiles; i++ {
+		path := fmt.Sprintf("%s/chunk_%04d.parquet", partPath, i)
+		size := writeTestFile(t, store, "test-bucket", path, schema, []map[string]any{
+			{"id": int64(i)},
+		})
+		if err := cat.AddFiles(ctx, "multipass", nil, partPath, []catalog.FileEntry{
+			{Path: path, SizeBytes: size, NumRows: 1, CreatedAt: time.Now().UTC()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := Config{MinFiles: 5, MaxFileSizeBytes: 32 * 1024 * 1024, MaxFilesPerPass: 10}
+	c := New(cat, nil, cfg)
+	result, err := c.CompactTable(ctx, "multipass")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// All 30 files should be compacted (multi-pass)
+	if result.FilesRemoved != numFiles {
+		t.Errorf("files removed: got %d, want %d", result.FilesRemoved, numFiles)
+	}
+	if result.RowsMerged != numFiles {
+		t.Errorf("rows merged: got %d, want %d", result.RowsMerged, numFiles)
+	}
+
+	// Verify single file remains
+	manifest, _ := cat.GetManifest(ctx, "multipass")
+	if len(manifest.Partitions[0].Files) != 1 {
+		t.Errorf("expected 1 file after multi-pass compaction, got %d",
+			len(manifest.Partitions[0].Files))
+	}
+}
+
+// TestAdaptivePassSize verifies that small files get a larger pass size.
+func TestAdaptivePassSize(t *testing.T) {
+	c := &Compactor{config: Config{MaxFilesPerPass: 50}}
+
+	// 1000 tiny files at 1KB each → target 256MB / 1KB = 262144 max per pass
+	files := make([]catalog.FileEntry, 1000)
+	for i := range files {
+		files[i] = catalog.FileEntry{SizeBytes: 1024}
+	}
+	part := catalog.PartitionEntry{Files: files}
+	got := c.adaptivePassSize(part)
+	if got < 1000 {
+		t.Errorf("tiny files: expected pass size >= 1000 (all files), got %d", got)
+	}
+
+	// 100 files at 10MB each → target 256MB / 10MB = 25, but floor is MaxFilesPerPass=50
+	files = make([]catalog.FileEntry, 100)
+	for i := range files {
+		files[i] = catalog.FileEntry{SizeBytes: 10 * 1024 * 1024}
+	}
+	part = catalog.PartitionEntry{Files: files}
+	got = c.adaptivePassSize(part)
+	if got != 50 {
+		t.Errorf("10MB files: expected pass size = 50 (floor), got %d", got)
+	}
+}
+
 func readAll(rc interface{ Read([]byte) (int, error) }) ([]byte, error) {
 	var buf bytes.Buffer
 	_, err := buf.ReadFrom(rc.(interface{ Read([]byte) (int, error) }))

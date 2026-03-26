@@ -60,94 +60,136 @@ type Result struct {
 	BytesAfter         int64
 }
 
-// CompactTable runs compaction for all partitions of a table.
+// CompactTable runs compaction for all partitions of a table. When a partition
+// has more files than can be merged in one pass, multiple passes run back-to-back
+// until the partition is fully compacted (no 5-minute wait between passes).
 func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result, error) {
 	tableMeta, err := c.catalog.GetTable(ctx, tableName)
 	if err != nil {
 		return nil, fmt.Errorf("getting table metadata: %w", err)
 	}
 
-	manifest, err := c.catalog.GetManifest(ctx, tableName)
-	if err != nil {
-		return nil, fmt.Errorf("getting manifest: %w", err)
-	}
-
-	// Build delete marker lookup: filepath → set of row indices
-	deleteSet := buildDeleteSet(manifest.DeleteMarkers)
-
 	result := &Result{Table: tableName}
 
-	for _, part := range manifest.Partitions {
-		if !c.shouldCompact(part) {
-			continue
+	// Multi-pass loop: re-read manifest after each pass to pick up changes,
+	// and continue until no partitions need compaction.
+	for pass := 0; ; pass++ {
+		if ctx.Err() != nil {
+			return result, ctx.Err()
 		}
 
-		files := part.Files
-		if len(files) > c.config.MaxFilesPerPass {
-			files = files[:c.config.MaxFilesPerPass]
-		}
-
-		merged, err := c.mergeFiles(ctx, files, tableMeta.Schema, deleteSet)
+		manifest, err := c.catalog.GetManifest(ctx, tableName)
 		if err != nil {
-			c.logger.Warn("compaction failed for partition",
-				"table", tableName, "partition", part.Path, "error", err)
-			continue
+			return nil, fmt.Errorf("getting manifest: %w", err)
 		}
+		deleteSet := buildDeleteSet(manifest.DeleteMarkers)
 
-		if len(merged.rows) == 0 {
-			// All rows were deleted — just remove the old files
+		compactedAny := false
+		for _, part := range manifest.Partitions {
+			if !c.shouldCompact(part) {
+				continue
+			}
+
+			maxFiles := c.adaptivePassSize(part)
+			files := part.Files
+			if len(files) > maxFiles {
+				files = files[:maxFiles]
+			}
+
+			merged, err := c.mergeFiles(ctx, files, tableMeta.Schema, deleteSet)
+			if err != nil {
+				c.logger.Warn("compaction failed for partition",
+					"table", tableName, "partition", part.Path, "error", err)
+				continue
+			}
+
+			if len(merged.rows) == 0 {
+				oldPaths := filePaths(files)
+				if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
+					return nil, fmt.Errorf("removing empty partition files: %w", err)
+				}
+				c.deleteFromStore(ctx, oldPaths)
+				result.FilesRemoved += len(files)
+				result.PartitionsCompacted++
+				compactedAny = true
+				continue
+			}
+
+			newPath := fmt.Sprintf("%s/compacted_%d.parquet", part.Path, time.Now().UnixNano())
+			written, err := c.writeMergedFile(ctx, newPath, tableMeta.Schema, merged.rows)
+			if err != nil {
+				return nil, fmt.Errorf("writing merged file: %w", err)
+			}
+
 			oldPaths := filePaths(files)
 			if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
-				return nil, fmt.Errorf("removing empty partition files: %w", err)
+				return nil, fmt.Errorf("removing old files from manifest: %w", err)
 			}
+
+			newEntry := catalog.FileEntry{
+				Path:      newPath,
+				SizeBytes: written.size,
+				NumRows:   int64(len(merged.rows)),
+				CreatedAt: time.Now().UTC(),
+			}
+			if err := c.catalog.AddFiles(ctx, tableName, part.Values, part.Path, []catalog.FileEntry{newEntry}); err != nil {
+				return nil, fmt.Errorf("adding merged file to manifest: %w", err)
+			}
+
 			c.deleteFromStore(ctx, oldPaths)
-			result.FilesRemoved += len(files)
+
 			result.PartitionsCompacted++
-			continue
+			result.FilesRemoved += len(files)
+			result.FilesCreated++
+			result.RowsMerged += int64(len(merged.rows))
+			result.BytesBefore += merged.bytesBefore
+			result.BytesAfter += written.size
+			compactedAny = true
+
+			c.logger.Info("compacted partition",
+				"table", tableName,
+				"partition", part.Path,
+				"pass", pass,
+				"files_merged", len(files),
+				"rows", len(merged.rows),
+			)
 		}
 
-		// Write merged file
-		newPath := fmt.Sprintf("%s/compacted_%d.parquet", part.Path, time.Now().UnixNano())
-		written, err := c.writeMergedFile(ctx, newPath, tableMeta.Schema, merged.rows)
-		if err != nil {
-			return nil, fmt.Errorf("writing merged file: %w", err)
+		if !compactedAny {
+			break // no partitions needed compaction — done
 		}
-
-		// Atomic manifest update: remove old, add new
-		oldPaths := filePaths(files)
-		if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
-			return nil, fmt.Errorf("removing old files from manifest: %w", err)
-		}
-
-		newEntry := catalog.FileEntry{
-			Path:      newPath,
-			SizeBytes: written.size,
-			NumRows:   int64(len(merged.rows)),
-			CreatedAt: time.Now().UTC(),
-		}
-		if err := c.catalog.AddFiles(ctx, tableName, part.Values, part.Path, []catalog.FileEntry{newEntry}); err != nil {
-			return nil, fmt.Errorf("adding merged file to manifest: %w", err)
-		}
-
-		// Async-safe: delete old files from object store after manifest update
-		c.deleteFromStore(ctx, oldPaths)
-
-		result.PartitionsCompacted++
-		result.FilesRemoved += len(files)
-		result.FilesCreated++
-		result.RowsMerged += int64(len(merged.rows))
-		result.BytesBefore += merged.bytesBefore
-		result.BytesAfter += written.size
-
-		c.logger.Info("compacted partition",
-			"table", tableName,
-			"partition", part.Path,
-			"files_merged", len(files),
-			"rows", len(merged.rows),
-		)
 	}
 
 	return result, nil
+}
+
+// adaptivePassSize returns the max files to merge in one pass, scaling up for
+// small files where memory usage per file is low. Targets ~256 MB in-memory
+// per pass but never goes below the configured MaxFilesPerPass.
+func (c *Compactor) adaptivePassSize(part catalog.PartitionEntry) int {
+	n := len(part.Files)
+	if n == 0 {
+		return c.config.MaxFilesPerPass
+	}
+	var totalSize int64
+	for _, f := range part.Files {
+		totalSize += f.SizeBytes
+	}
+	avgSize := totalSize / int64(n)
+	if avgSize <= 0 {
+		avgSize = 1
+	}
+
+	// For small files, scale up to fit ~256 MB in memory per pass.
+	const targetBytes = 256 * 1024 * 1024
+	maxFiles := int(targetBytes / avgSize)
+	if maxFiles < c.config.MaxFilesPerPass {
+		maxFiles = c.config.MaxFilesPerPass
+	}
+	if maxFiles > n {
+		maxFiles = n
+	}
+	return maxFiles
 }
 
 // shouldCompact returns true if a partition has too many files or files are too small.
