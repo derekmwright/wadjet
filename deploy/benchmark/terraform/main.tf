@@ -245,6 +245,7 @@ locals {
     # Auto-run standalone benchmark
     export WADJET_BUCKET="${local.bucket_name}"
     export WADJET_REGION="${var.region}"
+    export BENCHMARK_TYPE="${var.benchmark_type}"
     export BENCHMARK_RUNS="${var.benchmark_runs}"
     export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
     export DATA_PREFIX="${var.data_prefix}"
@@ -260,14 +261,14 @@ locals {
     bash deploy/benchmark/run-benchmark.sh standalone SF${var.scale_factor} 2>&1 | tee /root/benchmark.log
 
     %{if var.run_duckdb_comparison}
-    # Download DuckDB comparison script from S3 (not in git clone)
-    aws s3 cp "s3://${local.bucket_name}/scripts/run-duckdb-comparison.sh" /root/wadjet/deploy/benchmark/run-duckdb-comparison.sh --region ${var.region}
-    chmod +x /root/wadjet/deploy/benchmark/run-duckdb-comparison.sh
-
-    # Run DuckDB head-to-head comparison against the same S3 data
-    export Q11_FRACTION=$(python3 -c "print(f'{0.0001/${var.scale_factor}:.10f}')")
     export RESULTS_DIR=/root/benchmark-results
+
+    %{if var.benchmark_type == "security"}
+    bash /root/wadjet/deploy/benchmark/run-duckdb-security-comparison.sh "$WADJET_BUCKET" "$WADJET_REGION" 2>&1 | tee /root/duckdb-comparison.log
+    %{else}
+    export Q11_FRACTION=$(python3 -c "print(f'{0.0001/${var.scale_factor}:.10f}')")
     bash /root/wadjet/deploy/benchmark/run-duckdb-comparison.sh "$WADJET_BUCKET" "$WADJET_REGION" 2>&1 | tee /root/duckdb-comparison.log
+    %{endif}
 
     # Upload DuckDB results alongside Wadjet results
     TIMESTAMP=$(date +%Y%m%d-%H%M%S)
@@ -283,9 +284,10 @@ locals {
   coordinator_user_data = <<-EOF
     ${local.build_script}
 
-    # Auto-run distributed benchmark (tpch-bench embeds its own coordinator + NATS)
+    # Auto-run distributed benchmark (bench binary embeds its own coordinator + NATS)
     export WADJET_BUCKET="${local.bucket_name}"
     export WADJET_REGION="${var.region}"
+    export BENCHMARK_TYPE="${var.benchmark_type}"
     export BENCHMARK_RUNS="${var.benchmark_runs}"
     export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
     export DATA_PREFIX="${var.data_prefix}"
