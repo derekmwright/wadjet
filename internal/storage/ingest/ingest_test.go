@@ -432,3 +432,47 @@ func TestIngestValidation_NetworkTypes(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestMinFlushRows_SkipsTinyBuffers(t *testing.T) {
+	cat, store := setupCatalog(t)
+	cfg := DefaultConfig()
+	cfg.MinFlushRows = 50 // require 50 rows before timer flush
+	ing := New(cat, testTable, testSchema, []string{"year"}, cfg)
+	ctx := context.Background()
+
+	// Ingest 5 rows — below MinFlushRows threshold
+	rows := make([]map[string]any, 5)
+	for i := range rows {
+		rows[i] = map[string]any{"id": int64(i), "name": "x", "year": "2025"}
+	}
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+
+	// flushReady (timer path) should NOT flush — buffer too small
+	if err := ing.flushReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	objects, _ := store.List(ctx, testBucket, objstore.ListOptions{Prefix: "tables/"})
+	if len(objects) > 0 {
+		t.Errorf("flushReady should not flush %d rows (min %d), but wrote %d files",
+			5, cfg.MinFlushRows, len(objects))
+	}
+
+	// FlushAll (explicit) should always flush
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	objects, _ = store.List(ctx, testBucket, objstore.ListOptions{Prefix: "tables/"})
+	parquetCount := 0
+	for _, obj := range objects {
+		if strings.HasSuffix(obj.Key, ".parquet") {
+			parquetCount++
+		}
+	}
+	if parquetCount != 1 {
+		t.Errorf("FlushAll should flush regardless of MinFlushRows, got %d files", parquetCount)
+	}
+}

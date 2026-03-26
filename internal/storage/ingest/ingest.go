@@ -21,6 +21,7 @@ type Config struct {
 	MaxBufferRows int           // max rows before flush (default 1M)
 	FlushInterval time.Duration // max time before flush (default 60s)
 	RowGroupSize  int           // rows per row group in Parquet (default 128K)
+	MinFlushRows  int           // min rows to flush on timer (default 100; 0 = no minimum)
 }
 
 // DefaultConfig returns default ingest configuration.
@@ -30,6 +31,7 @@ func DefaultConfig() Config {
 		MaxBufferRows: 1_000_000,
 		FlushInterval: 60 * time.Second,
 		RowGroupSize:  128 * 1024,
+		MinFlushRows:  100,
 	}
 }
 
@@ -93,7 +95,7 @@ func (ing *Ingester) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				if err := ing.FlushAll(context.Background()); err != nil {
+				if err := ing.flushReady(context.Background()); err != nil {
 					ing.logger.Error("periodic flush failed", "error", err)
 				}
 			case <-ing.done:
@@ -253,13 +255,34 @@ func (ing *Ingester) Ingest(ctx context.Context, rows []map[string]any) error {
 	return nil
 }
 
-// FlushAll flushes all buffered data to storage.
+// FlushAll flushes all buffered data to storage unconditionally.
 func (ing *Ingester) FlushAll(ctx context.Context) error {
 	ing.mu.Lock()
 	defer ing.mu.Unlock()
 
 	for partPath, buf := range ing.buffers {
 		if len(buf.rows) == 0 {
+			continue
+		}
+		if err := ing.flushBuffer(ctx, partPath, buf); err != nil {
+			return fmt.Errorf("flushing partition %s: %w", partPath, err)
+		}
+	}
+	return nil
+}
+
+// flushReady flushes partitions that have accumulated enough rows.
+// Partitions below MinFlushRows are skipped to avoid creating tiny files.
+// Used by the background timer; explicit callers should use FlushAll.
+func (ing *Ingester) flushReady(ctx context.Context) error {
+	ing.mu.Lock()
+	defer ing.mu.Unlock()
+
+	for partPath, buf := range ing.buffers {
+		if len(buf.rows) == 0 {
+			continue
+		}
+		if ing.config.MinFlushRows > 0 && len(buf.rows) < ing.config.MinFlushRows {
 			continue
 		}
 		if err := ing.flushBuffer(ctx, partPath, buf); err != nil {
