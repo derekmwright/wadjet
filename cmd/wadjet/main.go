@@ -30,6 +30,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/server/mcp"
 	"github.com/citc-tech/wadjet/internal/server/pgwire"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/compaction"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/worker"
 	"github.com/citc-tech/wadjet/wadjet"
@@ -646,6 +647,13 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	snapshotter := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, logger)
 	snapshotter.Start(ctx)
 
+	// Start background compaction
+	compactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
+		Enabled:    true,
+		Compaction: compaction.DefaultConfig(),
+	}, logger)
+	compactor.Start(ctx)
+
 	// Build config manager and auth provider for hot-reload
 	srvCfg := server.Config{
 		Addr:        httpAddr,
@@ -851,6 +859,13 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	coordSnapCfg := buildSnapshotConfig(coordFileCfg)
 	coordSnap := coordinator.NewCatalogSnapshotter(cat, store, bucket, coordSnapCfg, logger)
 	coordSnap.Start(ctx)
+
+	// Start background compaction
+	coordCompactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
+		Enabled:    true,
+		Compaction: compaction.DefaultConfig(),
+	}, logger)
+	coordCompactor.Start(ctx)
 
 	m := metrics.New()
 
