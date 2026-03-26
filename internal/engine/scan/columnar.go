@@ -91,11 +91,12 @@ func projectSchema(schema []pqt.Column, selectedCols []string) []pqt.Column {
 }
 
 // hasUnsupportedColumnarTypes returns true if any column uses a type the
-// direct columnar reader cannot handle (Decimal, Array, Row, Map).
+// direct columnar reader cannot handle (Decimal, Array, Map).
+// TypeRow is supported: child fields are read as separate leaf column chunks.
 func hasUnsupportedColumnarTypes(schema []pqt.Column) bool {
 	for _, col := range schema {
 		switch col.Type {
-		case pqt.TypeDecimal, pqt.TypeArray, pqt.TypeRow, pqt.TypeMap:
+		case pqt.TypeDecimal, pqt.TypeArray, pqt.TypeMap:
 			return true
 		}
 	}
@@ -160,6 +161,24 @@ func readRowGroupColumnar(rg goparquet.RowGroup, schema []pqt.Column, pqFile *go
 
 	// Map our schema columns to parquet column indices
 	for i, col := range schema {
+		// ROW: read each child field as a separate leaf column chunk
+		if col.Type == pqt.TypeRow && len(col.Fields) > 0 {
+			for j, field := range col.Fields {
+				childPqIdx := findParquetColumnByPath(pqCols, col.Name, field.Name)
+				if childPqIdx < 0 {
+					for k := 0; k < numRows; k++ {
+						b.Columns[i].Children[j].Nulls.SetNull(k)
+					}
+					continue
+				}
+				chunk := chunks[childPqIdx]
+				if err := readColumnChunk(b.Columns[i].Children[j], chunk, numRows, field.Type, pqFile, childPqIdx); err != nil {
+					return nil, fmt.Errorf("reading ROW field %s.%s: %w", col.Name, field.Name, err)
+				}
+			}
+			continue
+		}
+
 		pqIdx := findParquetColumn(pqCols, col.Name)
 		if pqIdx < 0 {
 			// Column not in parquet file — leave as all nulls
@@ -203,6 +222,18 @@ func findParquetColumn(pqCols [][]string, name string) int {
 			if len(path) > 0 && path[len(path)-1] == alias {
 				return i
 			}
+		}
+	}
+	return -1
+}
+
+// findParquetColumnByPath finds a leaf column whose path ends with
+// [..., parentName, childName]. Used to locate ROW child fields in
+// the flattened Parquet column list.
+func findParquetColumnByPath(pqCols [][]string, parentName, childName string) int {
+	for i, path := range pqCols {
+		if len(path) >= 2 && path[len(path)-2] == parentName && path[len(path)-1] == childName {
+			return i
 		}
 	}
 	return -1
