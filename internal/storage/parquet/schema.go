@@ -31,6 +31,7 @@ const (
 	TypeArray    // variable-length array of a single element type
 	TypeRow      // struct/row with named fields
 	TypeMap      // key-value map, stored as ARRAY(ROW("key","value"))
+	TypeVector   // fixed-dimension float32 embedding vector
 )
 
 func (t TypeID) String() string {
@@ -77,6 +78,8 @@ func (t TypeID) String() string {
 		return "ROW"
 	case TypeMap:
 		return "MAP"
+	case TypeVector:
+		return "VECTOR"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(t))
 	}
@@ -98,6 +101,9 @@ func ParseTypeID(s string) (TypeID, error) {
 	}
 	if strings.HasPrefix(upper, "MAP") {
 		return TypeMap, nil
+	}
+	if strings.HasPrefix(upper, "VECTOR") {
+		return TypeVector, nil
 	}
 	switch upper {
 	case "BOOL", "BOOLEAN":
@@ -219,6 +225,13 @@ func ResolveColumn(name, typeStr string) (Column, error) {
 		case "DECIMAL", "NUMERIC":
 			p, s := ParseDecimalParams(typeStr)
 			return Column{Name: name, Type: TypeDecimal, Nullable: true, Precision: p, Scale: s}, nil
+
+		case "VECTOR":
+			dim := parseVectorDim(inner)
+			if dim <= 0 {
+				return Column{}, fmt.Errorf("VECTOR requires positive dimension, got %q", inner)
+			}
+			return Column{Name: name, Type: TypeVector, Nullable: true, Dimension: dim}, nil
 		}
 	}
 
@@ -232,6 +245,16 @@ func ResolveColumn(name, typeStr string) (Column, error) {
 		col.Precision, col.Scale = ParseDecimalParams(typeStr)
 	}
 	return col, nil
+}
+
+// parseVectorDim parses the dimension from a VECTOR(N) inner string.
+func parseVectorDim(s string) int {
+	s = strings.TrimSpace(s)
+	var dim int
+	if _, err := fmt.Sscanf(s, "%d", &dim); err != nil {
+		return 0
+	}
+	return dim
 }
 
 // splitTopLevel splits a string by commas, but only at the top level (not inside parentheses).
@@ -288,6 +311,7 @@ type Column struct {
 	Nullable  bool    `json:"nullable"`
 	Precision int     `json:"precision,omitempty"` // for DECIMAL: max digits (1-38)
 	Scale     int     `json:"scale,omitempty"`     // for DECIMAL: digits after decimal point
+	Dimension int     `json:"dimension,omitempty"` // for VECTOR: number of float32 elements
 	ElementType *Column  `json:"element_type,omitempty"` // for ARRAY: element column definition
 	Fields      []Column `json:"fields,omitempty"`       // for ROW/MAP: child field definitions
 }

@@ -83,6 +83,7 @@ const (
 	TypeArray    = parquet.TypeArray
 	TypeRow      = parquet.TypeRow
 	TypeMap      = parquet.TypeMap
+	TypeVector   = parquet.TypeVector
 )
 
 // BytesColumn stores variable-length byte data (strings, binary) with zero
@@ -200,6 +201,10 @@ type Vector struct {
 	BytesData   BytesColumn
 	DecimalData DecimalColumn // for TypeDecimal
 
+	// VECTOR type: fixed-dimension float32 embeddings
+	// Row i's vector: Float32Data[i*VectorDim : (i+1)*VectorDim]
+	VectorDim int // VECTOR: dimensionality (number of float32 elements per row)
+
 	// Nested type fields (ARRAY, ROW, MAP)
 	Offsets    []int32   // ARRAY/MAP: offsets[i]..offsets[i+1] delimit child elements for row i
 	Child      *Vector   // ARRAY: flat vector of all element values
@@ -234,6 +239,8 @@ func NewVectorWithScale(typ TypeID, length int, scale int) *Vector {
 		v.BytesData = NewBytesColumn(length)
 	case TypeDecimal:
 		v.DecimalData = NewDecimalColumn(length, scale)
+	case TypeVector:
+		// VectorDim is set by the caller via NewVectorVector or newVectorFromColumn
 	case TypeArray, TypeMap:
 		v.Offsets = make([]int32, length+1)
 		// Child vector is set by the caller after construction
@@ -241,6 +248,32 @@ func NewVectorWithScale(typ TypeID, length int, scale int) *Vector {
 		// Children and FieldNames are set by the caller after construction
 	}
 	return v
+}
+
+// NewVectorVector creates a new VECTOR column with fixed dimensionality.
+// Storage: Float32Data of length * dim, where row i occupies [i*dim, (i+1)*dim).
+func NewVectorVector(length, dim int) *Vector {
+	v := NewVector(TypeVector, length)
+	v.VectorDim = dim
+	v.Float32Data = make([]float32, length*dim)
+	return v
+}
+
+// VectorAt returns a slice of float32 values for row i of a VECTOR column.
+func (v *Vector) VectorAt(i int) []float32 {
+	if v.VectorDim <= 0 || i*v.VectorDim >= len(v.Float32Data) {
+		return nil
+	}
+	return v.Float32Data[i*v.VectorDim : (i+1)*v.VectorDim]
+}
+
+// SetVector sets the float32 values for row i of a VECTOR column.
+func (v *Vector) SetVector(i int, vals []float32) {
+	if v.VectorDim <= 0 {
+		return
+	}
+	copy(v.Float32Data[i*v.VectorDim:(i+1)*v.VectorDim], vals)
+	v.Nulls.SetValid(i)
 }
 
 // NewArrayVector creates a new ARRAY vector with the given length and element type.
@@ -320,6 +353,13 @@ func (v *Vector) GetValue(i int) any {
 		return FormatDate(v.Int32Data[i])
 	case TypeDecimal:
 		return v.DecimalData.Data[i].FormatDecimal(v.DecimalData.Scale)
+	case TypeVector:
+		if v.VectorDim <= 0 {
+			return nil
+		}
+		dst := make([]float32, v.VectorDim)
+		copy(dst, v.Float32Data[i*v.VectorDim:(i+1)*v.VectorDim])
+		return dst
 	case TypeArray, TypeMap:
 		if v.Child == nil {
 			return nil
@@ -531,6 +571,26 @@ func (v *Vector) SetValue(i int, val any) {
 			v.DecimalData.Data[i] = Int128FromFloat64(float64(tv), v.DecimalData.Scale)
 		case string:
 			v.DecimalData.Data[i] = ParseDecimalString(tv, v.DecimalData.Scale)
+		}
+	case TypeVector:
+		if v.VectorDim <= 0 {
+			return
+		}
+		switch tv := val.(type) {
+		case []float32:
+			v.SetVector(i, tv)
+		case []any:
+			off := i * v.VectorDim
+			for j := 0; j < v.VectorDim && j < len(tv); j++ {
+				switch fv := tv[j].(type) {
+				case float32:
+					v.Float32Data[off+j] = fv
+				case float64:
+					v.Float32Data[off+j] = float32(fv)
+				case int64:
+					v.Float32Data[off+j] = float32(fv)
+				}
+			}
 		}
 	case TypeArray, TypeMap:
 		if v.Child == nil {

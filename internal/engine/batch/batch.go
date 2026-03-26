@@ -32,6 +32,11 @@ func NewRecordBatch(schema []parquet.Column, numRows int) *RecordBatch {
 func newVectorFromColumn(col parquet.Column, numRows int) *Vector {
 	v := NewVectorWithScale(col.Type, numRows, col.Scale)
 	switch col.Type {
+	case TypeVector:
+		if col.Dimension > 0 {
+			v.VectorDim = col.Dimension
+			v.Float32Data = make([]float32, numRows*col.Dimension)
+		}
 	case TypeArray, TypeMap:
 		if col.ElementType != nil {
 			v.Child = newVectorFromColumn(*col.ElementType, 0)
