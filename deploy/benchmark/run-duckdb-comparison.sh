@@ -45,6 +45,11 @@ install_duckdb() {
   DUCKDB_VERSION="v1.2.1"
   DUCKDB_URL="https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-${DUCKDB_ARCH}.zip"
 
+  # Ensure unzip and bc are available (not always present on AL2023)
+  for pkg in unzip bc; do
+    command -v "$pkg" &>/dev/null || { dnf install -y "$pkg" 2>/dev/null || sudo dnf install -y "$pkg"; }
+  done
+
   cd /tmp
   curl -fsSL -o duckdb.zip "$DUCKDB_URL"
   unzip -o duckdb.zip duckdb
@@ -90,7 +95,9 @@ INSTALL httpfs;
 LOAD httpfs;
 INSTALL aws;
 LOAD aws;
-CALL load_aws_credentials();
+
+-- Persistent secret so each duckdb invocation auto-loads AWS credentials
+CREATE PERSISTENT SECRET aws_creds (TYPE S3, PROVIDER CREDENTIAL_CHAIN);
 SET s3_region='${REGION}';
 SET threads TO $(nproc);
 SET memory_limit='$(( $(free -b 2>/dev/null | awk '/Mem:/{print $2}' || echo 8589934592) * 8 / 10 / 1073741824 ))GB';
@@ -541,30 +548,33 @@ log ""
 log "$(printf '%-5s %-35s %10s %10s %8s %8s' 'Query' 'Name' 'DuckDB' 'Wadjet' 'DuckRows' 'WadRows')"
 log "$(printf '%-5s %-35s %10s %10s %8s %8s' '-----' '-----' '------' '------' '--------' '-------')"
 
-# Wadjet SF10 results from March 21 (commit 407c764, c7g.4xlarge)
+# Parse Wadjet results from the most recent tpch-bench run in the same results dir.
 declare -A WADJET_TIMES WADJET_ROWS
-WADJET_TIMES[1]=8.937;  WADJET_ROWS[1]=6
-WADJET_TIMES[2]=2.468;  WADJET_ROWS[2]=100
-WADJET_TIMES[3]=10.487; WADJET_ROWS[3]=10
-WADJET_TIMES[4]=11.846; WADJET_ROWS[4]=5
-WADJET_TIMES[5]=8.778;  WADJET_ROWS[5]=5
-WADJET_TIMES[6]=5.878;  WADJET_ROWS[6]=1
-WADJET_TIMES[7]=9.35;   WADJET_ROWS[7]=4
-WADJET_TIMES[8]=9.325;  WADJET_ROWS[8]=2
-WADJET_TIMES[9]=11.927; WADJET_ROWS[9]=150
-WADJET_TIMES[10]=8.812; WADJET_ROWS[10]=20
-WADJET_TIMES[11]=2.563; WADJET_ROWS[11]=9961
-WADJET_TIMES[12]=9.006; WADJET_ROWS[12]=2
-WADJET_TIMES[13]=3.548; WADJET_ROWS[13]=100
-WADJET_TIMES[14]=6.129; WADJET_ROWS[14]=1
-WADJET_TIMES[15]=6.049; WADJET_ROWS[15]=1
-WADJET_TIMES[16]=1.414; WADJET_ROWS[16]=27839
-WADJET_TIMES[17]=7.802; WADJET_ROWS[17]=1
-WADJET_TIMES[18]=13.755; WADJET_ROWS[18]=100
-WADJET_TIMES[19]=6.126; WADJET_ROWS[19]=1
-WADJET_TIMES[20]=10.568; WADJET_ROWS[20]=1889
-WADJET_TIMES[21]=17.645; WADJET_ROWS[21]=100
-WADJET_TIMES[22]=2.636; WADJET_ROWS[22]=5
+
+WADJET_RESULT=$(ls -t "${RESULTS_DIR}"/*-SF*-*.txt 2>/dev/null | grep -v duckdb | head -1)
+if [ -n "$WADJET_RESULT" ]; then
+  log "Wadjet results from: $(basename "$WADJET_RESULT")"
+  while IFS= read -r line; do
+    # Parse: "Q01 Pricing Summary   8.937s   6 rows  heap ..."
+    QNUM=$(echo "$line" | grep -oP '^Q\K[0-9]+')
+    [ -z "$QNUM" ] && continue
+    QNUM=$((10#$QNUM))
+
+    TIME_STR=$(echo "$line" | grep -oP '[0-9.]+(?:ms|s)' | head -1)
+    if [[ "$TIME_STR" == *ms ]]; then
+      TIME_S=$(echo "scale=3; ${TIME_STR%ms} / 1000" | bc)
+    else
+      TIME_S="${TIME_STR%s}"
+    fi
+
+    ROW_COUNT=$(echo "$line" | grep -oP '[0-9]+(?= rows)')
+
+    WADJET_TIMES[$QNUM]="$TIME_S"
+    WADJET_ROWS[$QNUM]="$ROW_COUNT"
+  done < <(grep -P '^Q[0-9]+ .* [0-9.]+(ms|s) +[0-9]+ rows' "$WADJET_RESULT" | head -22)
+else
+  log "WARNING: No Wadjet results file found in ${RESULTS_DIR} — comparison will show N/A"
+fi
 
 MATCH_COUNT=0
 MISMATCH_COUNT=0
