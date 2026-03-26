@@ -63,6 +63,17 @@ type Scanner struct {
 	prefetchCh  chan prefetchedFile
 	prefetchIdx int // next file index to start prefetching
 
+	// ReaderAt prefetch: opens next files' ReaderAt handles in the background
+	// to overlap S3 metadata reads with decode of the current file.
+	raPrefetchCh  chan prefetchedReaderAt
+	raPrefetchIdx int
+}
+
+type prefetchedReaderAt struct {
+	file scanFile
+	ra   objstore.ReaderAtCloser
+	size int64
+	err  error
 }
 
 type prefetchedFile struct {
@@ -163,9 +174,11 @@ func (s *Scanner) Init(ctx context.Context) error {
 		"files_to_scan", len(s.files),
 	)
 
-	// Use random-access reads when the store supports it and we have column projection
-	_, hasReaderAt := s.cat.Store().(objstore.ReaderAtStore)
-	s.useReaderAt = hasReaderAt && len(s.selectedColumns) > 0
+	// Use random-access reads whenever the store supports it. Even without
+	// column projection, ReaderAt avoids buffering the entire file in memory
+	// before decode — parquet-go reads metadata first, then only the needed
+	// column chunks via targeted ReadAt calls (S3 range requests).
+	_, s.useReaderAt = s.cat.Store().(objstore.ReaderAtStore)
 
 	// Create batch pool for reuse across files — avoids re-allocating vectors
 	// for every file read. 128K rows covers the default row group size.
@@ -175,18 +188,31 @@ func (s *Scanner) Init(ctx context.Context) error {
 	}
 	s.scanPool = batch.NewBatchPool(scanSchema, 128*1024)
 
-	// Start prefetching files ahead (only for full-download path).
-	// Launch up to 4 concurrent downloads to hide S3 latency.
-	if len(s.files) > 0 && !s.useReaderAt {
-		depth := 4
-		if len(s.files) < depth {
-			depth = len(s.files)
+	// Start prefetching files ahead to hide S3 latency.
+	if len(s.files) > 0 {
+		if s.useReaderAt {
+			// ReaderAt path: prefetch opens S3 handles and reads metadata ahead.
+			depth := 2
+			if len(s.files) < depth {
+				depth = len(s.files)
+			}
+			s.raPrefetchCh = make(chan prefetchedReaderAt, depth)
+			for i := 0; i < depth; i++ {
+				s.startReaderAtPrefetch(ctx, i)
+			}
+			s.raPrefetchIdx = depth
+		} else {
+			// Full-download path: prefetch downloads entire files ahead.
+			depth := 4
+			if len(s.files) < depth {
+				depth = len(s.files)
+			}
+			s.prefetchCh = make(chan prefetchedFile, depth)
+			for i := 0; i < depth; i++ {
+				s.startPrefetch(ctx, i)
+			}
+			s.prefetchIdx = depth
 		}
-		s.prefetchCh = make(chan prefetchedFile, depth)
-		for i := 0; i < depth; i++ {
-			s.startPrefetch(ctx, i)
-		}
-		s.prefetchIdx = depth
 	}
 
 	return nil
@@ -210,6 +236,17 @@ func (s *Scanner) startPrefetch(ctx context.Context, idx int) {
 	}()
 }
 
+// startReaderAtPrefetch opens a ReaderAt handle for the file at idx in the
+// background. For S3, this initiates the connection and downloads metadata.
+func (s *Scanner) startReaderAtPrefetch(ctx context.Context, idx int) {
+	file := s.files[idx]
+	go func() {
+		ras := s.cat.Store().(objstore.ReaderAtStore)
+		ra, size, err := ras.GetReaderAt(ctx, s.cat.Bucket(), file.path)
+		s.raPrefetchCh <- prefetchedReaderAt{file: file, ra: ra, size: size, err: err}
+	}()
+}
+
 func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	for s.fileIdx < len(s.files) {
 		if err := ctx.Err(); err != nil {
@@ -222,7 +259,32 @@ func (s *Scanner) Next(ctx context.Context) (*batch.RecordBatch, error) {
 		var b *batch.RecordBatch
 		var err error
 
-		if s.useReaderAt {
+		if s.useReaderAt && s.raPrefetchCh != nil {
+			// ReaderAt path with prefetch
+			var pra prefetchedReaderAt
+			select {
+			case pra = <-s.raPrefetchCh:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+
+			// Start prefetching the next file
+			if s.raPrefetchIdx < len(s.files) {
+				s.startReaderAtPrefetch(ctx, s.raPrefetchIdx)
+				s.raPrefetchIdx++
+			}
+
+			if pra.err != nil {
+				if pra.err == objstore.ErrNotFound {
+					s.logger.Warn("file not found, skipping", "path", pra.file.path)
+					continue
+				}
+				return nil, fmt.Errorf("opening file %s: %w", pra.file.path, pra.err)
+			}
+
+			b, err = s.decodeReaderAt(ctx, pra.ra, pra.size, pra.file)
+			pra.ra.Close()
+		} else if s.useReaderAt {
 			b, err = s.readFileReaderAt(ctx, file)
 		} else {
 			// Full-download path with async prefetch
@@ -279,6 +341,11 @@ func (s *Scanner) readFileReaderAt(ctx context.Context, file scanFile) (*batch.R
 	}
 	defer ra.Close()
 
+	return s.decodeReaderAt(ctx, ra, size, file)
+}
+
+// decodeReaderAt decodes a Parquet file from a pre-opened ReaderAt handle.
+func (s *Scanner) decodeReaderAt(ctx context.Context, ra io.ReaderAt, size int64, file scanFile) (*batch.RecordBatch, error) {
 	reader, err := pqt.NewReader(ra, size)
 	if err != nil {
 		return nil, fmt.Errorf("opening parquet reader: %w", err)
