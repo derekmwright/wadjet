@@ -196,9 +196,10 @@ locals {
     aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/security-bench" /usr/local/bin/security-bench --region ${var.region} || true
     chmod +x /usr/local/bin/wadjet /usr/local/bin/tpch-bench /usr/local/bin/security-bench 2>/dev/null || true
 
-    # Clone repo for benchmark scripts only
-    dnf install -y git
-    git clone --depth=1 https://github.com/citc-tech/wadjet.git /root/wadjet
+    # Download deploy scripts from S3 (staged alongside binaries by stage-binaries.sh)
+    mkdir -p /root/wadjet/deploy/benchmark
+    aws s3 sync "s3://${local.bucket_name}/bin/${var.bin_version}/scripts/" /root/wadjet/deploy/benchmark/ --region ${var.region}
+    chmod +x /root/wadjet/deploy/benchmark/*.sh
 
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
     echo "WADJET_REGION=${var.region}" >> /etc/environment

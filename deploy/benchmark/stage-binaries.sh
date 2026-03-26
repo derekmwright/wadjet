@@ -28,11 +28,19 @@ GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/wadjet" ./cmd/wadjet
 GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/tpch-bench" ./cmd/tpch-bench
 GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/security-bench" ./cmd/security-bench
 
-echo "Uploading to s3://${BUCKET}/bin/{${GIT_SHA},latest}/..."
+echo "Uploading binaries to s3://${BUCKET}/bin/{${GIT_SHA},latest}/..."
 for ver in "$GIT_SHA" "latest"; do
   aws s3 cp "${OUTDIR}/wadjet" "s3://${BUCKET}/bin/${ver}/wadjet" --region "$REGION" --quiet
   aws s3 cp "${OUTDIR}/tpch-bench" "s3://${BUCKET}/bin/${ver}/tpch-bench" --region "$REGION" --quiet
   aws s3 cp "${OUTDIR}/security-bench" "s3://${BUCKET}/bin/${ver}/security-bench" --region "$REGION" --quiet
+done
+
+# Upload deploy scripts alongside binaries so instances don't depend on git clone
+echo "Uploading deploy scripts to s3://${BUCKET}/bin/{${GIT_SHA},latest}/scripts/..."
+for ver in "$GIT_SHA" "latest"; do
+  aws s3 sync "${REPO_ROOT}/deploy/benchmark/" "s3://${BUCKET}/bin/${ver}/scripts/" \
+    --region "$REGION" --quiet \
+    --exclude "terraform/*" --exclude "*.tfstate*" --exclude ".terraform*"
 done
 
 WADJET_SIZE=$(du -h "${OUTDIR}/wadjet" | cut -f1)

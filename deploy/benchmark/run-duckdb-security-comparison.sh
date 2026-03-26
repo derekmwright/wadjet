@@ -46,6 +46,11 @@ install_duckdb() {
   DUCKDB_VERSION="v1.2.1"
   DUCKDB_URL="https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-${DUCKDB_ARCH}.zip"
 
+  # Ensure unzip and bc are available (not always present on AL2023)
+  for pkg in unzip bc; do
+    command -v "$pkg" &>/dev/null || { dnf install -y "$pkg" 2>/dev/null || sudo dnf install -y "$pkg"; }
+  done
+
   cd /tmp
   curl -fsSL -o duckdb.zip "$DUCKDB_URL"
   unzip -o duckdb.zip duckdb
@@ -96,7 +101,9 @@ INSTALL httpfs;
 LOAD httpfs;
 INSTALL aws;
 LOAD aws;
-CALL load_aws_credentials();
+
+-- Persistent secret so each duckdb invocation auto-loads AWS credentials
+CREATE PERSISTENT SECRET aws_creds (TYPE S3, PROVIDER CREDENTIAL_CHAIN);
 SET s3_region='${REGION}';
 SET threads TO $(nproc);
 SET memory_limit='$(( $(free -b 2>/dev/null | awk '/Mem:/{print $2}' || echo 8589934592) * 8 / 10 / 1073741824 ))GB';
@@ -328,31 +335,35 @@ log ""
 log "$(printf '%-5s %-35s %10s %10s %8s %8s' 'Query' 'Name' 'DuckDB' 'Wadjet' 'DuckRows' 'WadRows')"
 log "$(printf '%-5s %-35s %10s %10s %8s %8s' '-----' '-----' '------' '------' '--------' '-------')"
 
-# Wadjet baseline: populate from a security-bench run, or leave as N/A.
-# Update these after your first security-bench run on the same hardware.
+# Parse Wadjet results from the most recent security-bench run in the same results dir.
 declare -A WADJET_TIMES WADJET_ROWS
 
-# SF1 WSL2 baseline (from local run — replace with EC2 numbers after deploy)
-WADJET_TIMES[1]=0.604;  WADJET_ROWS[1]=25
-WADJET_TIMES[2]=0.078;  WADJET_ROWS[2]=3
-WADJET_TIMES[3]=0.131;  WADJET_ROWS[3]=50
-WADJET_TIMES[4]=0.219;  WADJET_ROWS[4]=24
-WADJET_TIMES[5]=0.060;  WADJET_ROWS[5]=100
-WADJET_TIMES[6]=0.070;  WADJET_ROWS[6]=25
-WADJET_TIMES[7]=0.030;  WADJET_ROWS[7]=9
-WADJET_TIMES[8]=0.026;  WADJET_ROWS[8]=50
-WADJET_TIMES[9]=0.033;  WADJET_ROWS[9]=25
-WADJET_TIMES[10]=0.061; WADJET_ROWS[10]=22992
-WADJET_TIMES[11]=0.014; WADJET_ROWS[11]=3
-WADJET_TIMES[12]=0.020; WADJET_ROWS[12]=25
-WADJET_TIMES[13]=0.026; WADJET_ROWS[13]=4015
-WADJET_TIMES[14]=0.014; WADJET_ROWS[14]=100
-WADJET_TIMES[15]=0.006; WADJET_ROWS[15]=10
-WADJET_TIMES[16]=0.020; WADJET_ROWS[16]=10089
-WADJET_TIMES[17]=0.018; WADJET_ROWS[17]=25
-WADJET_TIMES[18]=0.035; WADJET_ROWS[18]=10
-WADJET_TIMES[19]=0.061; WADJET_ROWS[19]=50
-WADJET_TIMES[20]=0.023; WADJET_ROWS[20]=50
+WADJET_RESULT=$(ls -t "${RESULTS_DIR}"/*-SF*-*.txt 2>/dev/null | head -1)
+if [ -n "$WADJET_RESULT" ]; then
+  log "Wadjet results from: $(basename "$WADJET_RESULT")"
+  while IFS= read -r line; do
+    # Parse: "Q01 Top Talkers by Bytes   6.862s   25 rows  heap ..."
+    QNUM=$(echo "$line" | grep -oP '^Q\K[0-9]+')
+    [ -z "$QNUM" ] && continue
+    QNUM=$((10#$QNUM))  # strip leading zero
+
+    # Extract time: "6.862s" or "802ms"
+    TIME_STR=$(echo "$line" | grep -oP '[0-9.]+(?:ms|s)' | head -1)
+    if [[ "$TIME_STR" == *ms ]]; then
+      TIME_S=$(echo "scale=3; ${TIME_STR%ms} / 1000" | bc)
+    else
+      TIME_S="${TIME_STR%s}"
+    fi
+
+    # Extract row count: number before " rows"
+    ROW_COUNT=$(echo "$line" | grep -oP '[0-9]+(?= rows)')
+
+    WADJET_TIMES[$QNUM]="$TIME_S"
+    WADJET_ROWS[$QNUM]="$ROW_COUNT"
+  done < <(grep -P '^Q[0-9]+ .* [0-9.]+(ms|s) +[0-9]+ rows' "$WADJET_RESULT" | head -20)
+else
+  log "WARNING: No Wadjet results file found in ${RESULTS_DIR} — comparison will show N/A"
+fi
 
 MATCH_COUNT=0
 MISMATCH_COUNT=0
