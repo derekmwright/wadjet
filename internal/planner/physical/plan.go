@@ -3572,6 +3572,14 @@ func (p *Planner) buildLimit(ctx context.Context, node *logical.Node) (exec.Sour
 		return nil, nil, nil, err
 	}
 
+	// Push LIMIT hint to scan source: enables lazy file downloading instead
+	// of the eager "download all files upfront" strategy. Safe when no pipeline
+	// breaker (sort/aggregate/join) sits between LIMIT and SCAN — if there is
+	// one, the source won't be a catalogScanSource and the assertion fails.
+	if cs, ok := source.(*catalogScanSource); ok {
+		cs.rowLimit = int64(node.LimitVal) + int64(node.OffsetVal)
+	}
+
 	limit := exec.NewLimit(int64(node.LimitVal), int64(node.OffsetVal))
 	ops = append(ops, limit)
 
@@ -3999,6 +4007,7 @@ type catalogScanSource struct {
 	isReplay        bool                  // true when reading from cache instead of scanning
 	bloomFilter     *exec.BloomScanFilter   // bloom filter pushdown from hash join build side
 	dynamicFilter   []exec.DynamicRange     // dynamic min/max range filter from hash join build side
+	rowLimit        int64                   // LIMIT pushdown: enables lazy file downloading (0 = eager)
 }
 
 // SetBloomFilter attaches a bloom filter for scan-level row group pruning.
@@ -4048,6 +4057,9 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 		}
 		if s.allowedFiles != nil {
 			ses.allowedFiles = s.allowedFiles
+		}
+		if s.rowLimit > 0 {
+			ses.rowLimit = s.rowLimit
 		}
 	}
 	s.inner = sc
@@ -5266,6 +5278,7 @@ type scannerExecSource struct {
 	scanner         *scanSourceInner
 	bloomFilter     *exec.BloomScanFilter
 	dynamicFilter   []exec.DynamicRange
+	rowLimit        int64 // LIMIT pushdown: enables lazy file downloading (0 = eager)
 }
 
 type scanSourceInner struct {
@@ -5279,6 +5292,7 @@ type scanSourceInner struct {
 	rowsScanned    int64
 	deleteMarkers  map[string]map[int64]bool // file path -> set of row indices to skip
 	hasNestedTypes bool                      // true if schema has ARRAY/ROW/MAP types
+	rowLimit       int64                     // >0: lazy file downloading (LIMIT pushdown)
 
 	// row-group-level parallel scan
 	rgUnits []rgUnit // flat list of row group work units
@@ -5369,6 +5383,12 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		}
 	}
 
+	// Use a smaller batch channel for LIMIT queries to bound in-flight downloads.
+	batchChSize := runtime.NumCPU()
+	if s.rowLimit > 0 {
+		batchChSize = 2
+	}
+
 	inner := &scanSourceInner{
 		cat:           s.catalog,
 		tableName:     s.tableName,
@@ -5379,28 +5399,18 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		deleteMarkers: delMarkers,
 		bloomFilter:   s.bloomFilter,
 		dynamicFilter: s.dynamicFilter,
-		batchCh:       make(chan *batch.RecordBatch, runtime.NumCPU()),
+		rowLimit:      s.rowLimit,
+		batchCh:       make(chan *batch.RecordBatch, batchChSize),
 		errCh:         make(chan error, 1),
 		cancel:        cancel,
 	}
 	s.scanner = inner
 
-	// Build row-group-level work units (reads files, enumerates RGs, prunes)
-	inner.buildRGUnits(scanCtx)
-
-	// Initialize batch pool from the most common row group size
-	if !inner.hasNestedTypes && len(inner.rgUnits) > 0 {
-		rgSize := int(inner.rgUnits[0].rg.NumRows())
-		readSchema := inner.readSchema()
-		if rgSize > 0 && len(readSchema) > 0 {
-			inner.pool = batch.NewBatchPool(readSchema, rgSize)
-			// Pre-warm pool so parallel workers don't contend on allocation
-			inner.pool.PreWarm(runtime.NumCPU())
-		}
-	}
-
-	if inner.hasNestedTypes {
-		// Nested types need row-level reading — fall back to file-level workers
+	if inner.rowLimit > 0 || inner.hasNestedTypes {
+		// Lazy file-level scan: download files on-demand, one at a time per worker.
+		// Used for LIMIT pushdown (avoids downloading all files upfront) and
+		// nested types (which need row-level reading).
+		// Workers stop when context is cancelled (pipeline cancels after LIMIT satisfied).
 		workers := runtime.NumCPU()
 		if workers > len(files) {
 			workers = len(files)
@@ -5413,7 +5423,20 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 			go inner.scanWorker(scanCtx)
 		}
 	} else {
-		// Row-group-level parallel scan — full CPU utilization
+		// Eager row-group-level parallel scan: download all files, enumerate
+		// row groups, apply predicate pruning, then process RGs in parallel.
+		inner.buildRGUnits(scanCtx)
+
+		// Initialize batch pool from the most common row group size
+		if len(inner.rgUnits) > 0 {
+			rgSize := int(inner.rgUnits[0].rg.NumRows())
+			readSchema := inner.readSchema()
+			if rgSize > 0 && len(readSchema) > 0 {
+				inner.pool = batch.NewBatchPool(readSchema, rgSize)
+				inner.pool.PreWarm(runtime.NumCPU())
+			}
+		}
+
 		workers := runtime.NumCPU()
 		if workers > len(inner.rgUnits) {
 			workers = len(inner.rgUnits)
