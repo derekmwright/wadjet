@@ -105,6 +105,11 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	w.batches = append(w.batches, b)
 	w.totalRows += b.ActiveLen()
 
+	// Track memory usage for spill pressure detection
+	if w.Spill != nil {
+		w.Spill.TrackBatch(EstimateBatchBytes(b))
+	}
+
 	// Spill to disk if memory pressure is high
 	if w.Spill != nil && w.Spill.ShouldSpill() && len(w.batches) > 0 {
 		var rows []map[string]any
@@ -118,6 +123,7 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 		w.spillFiles = append(w.spillFiles, path)
 		w.batches = w.batches[:0]
 		w.totalRows = 0
+		w.Spill.ResetTracking()
 	}
 	return nil
 }
