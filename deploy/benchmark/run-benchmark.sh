@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 #
-# Wadjet TPC-H benchmark runner for EC2 instances.
+# Wadjet benchmark runner for EC2 instances.
+# Supports both TPC-H and security benchmarks via BENCHMARK_TYPE.
 #
 # Usage:
 #   ./run-benchmark.sh standalone SF1           # Single-node SF1 (uses S3 data)
 #   ./run-benchmark.sh distributed SF1 3        # Distributed SF1, 3 workers
 #
 # Environment (set by Terraform user data):
-#   WADJET_BUCKET  — S3 bucket name
-#   WADJET_REGION  — AWS region
-#   GENERATE_DATA  — Set to "1" to regenerate data instead of using pre-seeded bucket
+#   WADJET_BUCKET   — S3 bucket name
+#   WADJET_REGION   — AWS region
+#   GENERATE_DATA   — Set to "1" to regenerate data instead of using pre-seeded bucket
+#   BENCHMARK_TYPE  — "tpch" (default) or "security"
 #
 # Outputs results to /root/benchmark-results/
 
@@ -23,6 +25,14 @@ GENERATE="${GENERATE_DATA:-0}"
 SKIP="${SKIP_QUERIES:-}"
 TIMEOUT="${QUERY_TIMEOUT:-10m}"
 DATA_PREFIX="${DATA_PREFIX-tables/}"
+BENCH_TYPE="${BENCHMARK_TYPE:-tpch}"
+
+# Select benchmark binary
+case "$BENCH_TYPE" in
+  tpch)     BENCH_BIN="/usr/local/bin/tpch-bench" ; BENCH_LABEL="TPC-H" ;;
+  security) BENCH_BIN="/usr/local/bin/security-bench" ; BENCH_LABEL="Security" ;;
+  *) echo "Unknown BENCHMARK_TYPE: $BENCH_TYPE (use tpch or security)"; exit 1 ;;
+esac
 
 BUCKET="${WADJET_BUCKET:?Set WADJET_BUCKET}"
 REGION="${WADJET_REGION:?Set WADJET_REGION}"
@@ -46,7 +56,7 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RESULT_FILE"; }
 
 # Capture system info
 {
-  echo "=== Wadjet TPC-H Benchmark ==="
+  echo "=== Wadjet ${BENCH_LABEL} Benchmark ==="
   echo "Mode:         $MODE"
   echo "Scale Factor: $SF (${SCALE}x)"
   echo "Workers:      $WORKER_COUNT"
@@ -85,13 +95,13 @@ fi
 # ---- Run benchmark ----
 
 if [ "$MODE" = "standalone" ]; then
-  log "Running TPC-H SF${SCALE} standalone benchmark (${RUNS} runs)..."
+  log "Running ${BENCH_LABEL} SF${SCALE} standalone benchmark (${RUNS} runs)..."
 
   SKIP_FLAGS=()
   [ -n "$SKIP" ] && SKIP_FLAGS=(--skip-queries="${SKIP}")
   [ -n "$TIMEOUT" ] && SKIP_FLAGS+=( --query-timeout="${TIMEOUT}" )
 
-  /usr/local/bin/tpch-bench \
+  "$BENCH_BIN" \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     --data-prefix="${DATA_PREFIX}" \
@@ -104,13 +114,13 @@ if [ "$MODE" = "standalone" ]; then
     2>&1 | tee -a "$RESULT_FILE"
 
 elif [ "$MODE" = "distributed" ]; then
-  log "Running TPC-H SF${SCALE} distributed benchmark (${RUNS} runs, ${WORKER_COUNT} workers)..."
+  log "Running ${BENCH_LABEL} SF${SCALE} distributed benchmark (${RUNS} runs, ${WORKER_COUNT} workers)..."
 
   SKIP_FLAGS=()
   [ -n "$SKIP" ] && SKIP_FLAGS=(--skip-queries="${SKIP}")
   [ -n "$TIMEOUT" ] && SKIP_FLAGS+=( --query-timeout="${TIMEOUT}" )
 
-  /usr/local/bin/tpch-bench \
+  "$BENCH_BIN" \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     --workers="${WORKER_COUNT}" \
