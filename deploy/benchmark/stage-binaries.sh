@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Cross-compile wadjet + tpch-bench for arm64 and stage on S3.
+# Cross-compile wadjet + tpch-bench + security-bench for arm64 and stage on S3.
 #
 # Usage:
 #   ./stage-binaries.sh                          # Stage to default bucket
@@ -9,8 +9,10 @@
 # Uploads to:
 #   s3://<bucket>/bin/<git-sha>/wadjet
 #   s3://<bucket>/bin/<git-sha>/tpch-bench
+#   s3://<bucket>/bin/<git-sha>/security-bench
 #   s3://<bucket>/bin/latest/wadjet
 #   s3://<bucket>/bin/latest/tpch-bench
+#   s3://<bucket>/bin/latest/security-bench
 
 set -euo pipefail
 
@@ -20,21 +22,24 @@ REGION="${2:-us-east-2}"
 GIT_SHA="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 OUTDIR="$(mktemp -d)"
 
-echo "Building wadjet + tpch-bench for linux/arm64 (${GIT_SHA})..."
+echo "Building wadjet + tpch-bench + security-bench for linux/arm64 (${GIT_SHA})..."
 cd "$REPO_ROOT"
 GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/wadjet" ./cmd/wadjet
 GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/tpch-bench" ./cmd/tpch-bench
+GOOS=linux GOARCH=arm64 go build -o "${OUTDIR}/security-bench" ./cmd/security-bench
 
 echo "Uploading to s3://${BUCKET}/bin/{${GIT_SHA},latest}/..."
 for ver in "$GIT_SHA" "latest"; do
   aws s3 cp "${OUTDIR}/wadjet" "s3://${BUCKET}/bin/${ver}/wadjet" --region "$REGION" --quiet
   aws s3 cp "${OUTDIR}/tpch-bench" "s3://${BUCKET}/bin/${ver}/tpch-bench" --region "$REGION" --quiet
+  aws s3 cp "${OUTDIR}/security-bench" "s3://${BUCKET}/bin/${ver}/security-bench" --region "$REGION" --quiet
 done
 
 WADJET_SIZE=$(du -h "${OUTDIR}/wadjet" | cut -f1)
-BENCH_SIZE=$(du -h "${OUTDIR}/tpch-bench" | cut -f1)
+TPCH_SIZE=$(du -h "${OUTDIR}/tpch-bench" | cut -f1)
+SEC_SIZE=$(du -h "${OUTDIR}/security-bench" | cut -f1)
 rm -rf "$OUTDIR"
 
-echo "Done. wadjet=${WADJET_SIZE}, tpch-bench=${BENCH_SIZE}"
+echo "Done. wadjet=${WADJET_SIZE}, tpch-bench=${TPCH_SIZE}, security-bench=${SEC_SIZE}"
 echo "  s3://${BUCKET}/bin/${GIT_SHA}/"
 echo "  s3://${BUCKET}/bin/latest/"

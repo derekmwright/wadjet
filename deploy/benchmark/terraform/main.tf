@@ -193,7 +193,8 @@ locals {
     # Download pre-built arm64 binaries from the data bucket
     aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/wadjet" /usr/local/bin/wadjet --region ${var.region}
     aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/tpch-bench" /usr/local/bin/tpch-bench --region ${var.region}
-    chmod +x /usr/local/bin/wadjet /usr/local/bin/tpch-bench
+    aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/security-bench" /usr/local/bin/security-bench --region ${var.region} || true
+    chmod +x /usr/local/bin/wadjet /usr/local/bin/tpch-bench /usr/local/bin/security-bench 2>/dev/null || true
 
     # Clone repo for benchmark scripts only
     dnf install -y git
@@ -201,6 +202,7 @@ locals {
 
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
     echo "WADJET_REGION=${var.region}" >> /etc/environment
+    echo "BENCHMARK_TYPE=${var.benchmark_type}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -226,9 +228,11 @@ locals {
     cd wadjet
     go build -o /usr/local/bin/wadjet ./cmd/wadjet
     go build -o /usr/local/bin/tpch-bench ./cmd/tpch-bench
+    go build -o /usr/local/bin/security-bench ./cmd/security-bench
 
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
     echo "WADJET_REGION=${var.region}" >> /etc/environment
+    echo "BENCHMARK_TYPE=${var.benchmark_type}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
