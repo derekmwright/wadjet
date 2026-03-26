@@ -2,8 +2,11 @@ package exec
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"testing"
 
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -304,6 +307,217 @@ func TestWindowPartitionCount(t *testing.T) {
 				t.Errorf("sales dept_size: got %d, want 2", cnt)
 			}
 		}
+	}
+}
+
+// TestWindowSpillToDisk verifies that the Window operator correctly spills
+// input batches to disk under memory pressure and produces correct results.
+func TestWindowSpillToDisk(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "dept", Type: parquet.TypeString},
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "salary", Type: parquet.TypeFloat64},
+	}
+
+	// 5000 rows across 2 departments — produces 3 batches at DefaultBatchSize=2048
+	const totalRows = 5000
+	var rows []map[string]any
+	for i := 0; i < totalRows; i++ {
+		dept := "eng"
+		if i%2 == 1 {
+			dept = "sales"
+		}
+		rows = append(rows, map[string]any{
+			"dept":   dept,
+			"id":     int64(i),
+			"salary": float64(totalRows - i),
+		})
+	}
+
+	tmpDir, err := os.MkdirTemp("", "window-spill-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Budget of 250KB — triggers spill after ~1 batch (each batch ≈200KB)
+	tracker := memory.NewTracker("test", 250_000)
+	sm, err := memory.NewSpillManager(tmpDir, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sm.Cleanup()
+
+	win := NewWindow([]WindowColumn{
+		{
+			Func:        WinRowNumber,
+			OutputCol:   "rn",
+			OutputType:  parquet.TypeInt64,
+			PartitionBy: []string{"dept"},
+			OrderBy:     []SortKey{{Column: "salary", Order: Descending}},
+		},
+	})
+	win.Spill = sm
+
+	source := NewSliceSource(schema, rows)
+	pipe := &Pipeline{Source: source, Ops: nil, Sink: win}
+	ctx := context.Background()
+	if err := pipe.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify spill was triggered
+	spilledFiles := sm.SpilledFiles()
+	if len(spilledFiles) == 0 {
+		t.Fatal("expected spill to trigger, but no spill files were created")
+	}
+	t.Logf("spilled %d files", len(spilledFiles))
+
+	// Collect all output batches
+	var allRows []map[string]any
+	for {
+		b, err := win.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+		allRows = append(allRows, b.ToRows()...)
+	}
+
+	if len(allRows) != totalRows {
+		t.Fatalf("expected %d rows, got %d", totalRows, len(allRows))
+	}
+
+	// Verify ROW_NUMBER is correct per partition
+	engCount, salesCount := 0, 0
+	engRNs := make(map[int64]bool)
+	salesRNs := make(map[int64]bool)
+	for _, row := range allRows {
+		dept := row["dept"].(string)
+		rn := row["rn"].(int64)
+		switch dept {
+		case "eng":
+			engCount++
+			if engRNs[rn] {
+				t.Fatalf("duplicate eng rn: %d", rn)
+			}
+			engRNs[rn] = true
+		case "sales":
+			salesCount++
+			if salesRNs[rn] {
+				t.Fatalf("duplicate sales rn: %d", rn)
+			}
+			salesRNs[rn] = true
+		default:
+			t.Fatalf("unexpected dept: %s", dept)
+		}
+	}
+
+	// 5000 rows split evenly: 2500 eng (even ids), 2500 sales (odd ids)
+	if engCount != 2500 {
+		t.Errorf("eng rows: got %d, want 2500", engCount)
+	}
+	if salesCount != 2500 {
+		t.Errorf("sales rows: got %d, want 2500", salesCount)
+	}
+
+	// ROW_NUMBER should be 1..2500 for each partition
+	for i := int64(1); i <= 2500; i++ {
+		if !engRNs[i] {
+			t.Fatalf("eng missing rn=%d", i)
+		}
+		if !salesRNs[i] {
+			t.Fatalf("sales missing rn=%d", i)
+		}
+	}
+}
+
+// TestWindowSpillRunningSum verifies spill correctness with an aggregate
+// window function (SUM with ORDER BY → running total).
+func TestWindowSpillRunningSum(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeFloat64},
+	}
+
+	const totalRows = 5000
+	var rows []map[string]any
+	var expectedSum float64
+	for i := 0; i < totalRows; i++ {
+		v := float64(i + 1)
+		rows = append(rows, map[string]any{
+			"id":  int64(i),
+			"val": v,
+		})
+		expectedSum += v
+	}
+
+	tmpDir, err := os.MkdirTemp("", "window-spill-sum-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tracker := memory.NewTracker("test", 250_000)
+	sm, err := memory.NewSpillManager(tmpDir, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sm.Cleanup()
+
+	win := NewWindow([]WindowColumn{
+		{
+			Func:       WinSum,
+			InputCol:   "val",
+			OutputCol:  "running_total",
+			OutputType: parquet.TypeFloat64,
+			OrderBy:    []SortKey{{Column: "id", Order: Ascending}},
+		},
+	})
+	win.Spill = sm
+
+	source := NewSliceSource(schema, rows)
+	pipe := &Pipeline{Source: source, Ops: nil, Sink: win}
+	ctx := context.Background()
+	if err := pipe.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sm.SpilledFiles()) == 0 {
+		t.Fatal("expected spill to trigger")
+	}
+
+	// Collect results
+	var allRows []map[string]any
+	for {
+		b, err := win.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+		allRows = append(allRows, b.ToRows()...)
+	}
+
+	if len(allRows) != totalRows {
+		t.Fatalf("expected %d rows, got %d", totalRows, len(allRows))
+	}
+
+	// Find the row with the last id (highest running total = sum of all)
+	var maxRunning float64
+	for _, row := range allRows {
+		rt := row["running_total"].(float64)
+		if rt > maxRunning {
+			maxRunning = rt
+		}
+	}
+
+	// The maximum running total should equal sum(1..5000) = 12502500
+	if fmt.Sprintf("%.0f", maxRunning) != fmt.Sprintf("%.0f", expectedSum) {
+		t.Errorf("max running total: got %.0f, want %.0f", maxRunning, expectedSum)
 	}
 }
 
