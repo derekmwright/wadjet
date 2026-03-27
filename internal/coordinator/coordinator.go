@@ -16,6 +16,10 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/telemetry"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
@@ -63,6 +67,7 @@ type Coordinator struct {
 	leader    *LeaderElection   // nil = always leader (standalone mode)
 	queryStore *QueryStateStore // nil = no persistence (standalone mode)
 	resultKV  jetstream.KeyValue // NATS KV for fast inter-stage result transfer (nil = S3 only)
+	otel      *telemetry.Provider // nil = no OTel tracing
 	logger    *slog.Logger
 
 	mu         sync.Mutex
@@ -119,6 +124,11 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 // Workers returns the worker registry for inspecting active workers.
 func (c *Coordinator) Workers() *WorkerRegistry {
 	return c.workers
+}
+
+// SetTelemetry enables OpenTelemetry tracing on the coordinator.
+func (c *Coordinator) SetTelemetry(tp *telemetry.Provider) {
+	c.otel = tp
 }
 
 // Cleaner returns the result cleaner, creating it if needed.
@@ -419,6 +429,18 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	start := time.Now()
 	queryID := uuid.New().String()[:8]
 
+	// Start OTel span for the query if tracing is enabled
+	if c.otel != nil {
+		var span trace.Span
+		ctx, span = c.otel.StartSpan(ctx, "coordinator.ExecuteSQL",
+			attribute.String("query.id", queryID),
+			attribute.String("query.sql", sql),
+		)
+		defer func() {
+			span.End()
+		}()
+	}
+
 	// Parse
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
@@ -553,10 +575,18 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	}
 	c.stageSpecs[queryID] = specMap
 	qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: probeSplitMergeInfo}
-	// Propagate or create distributed trace context
+	// Propagate or create distributed trace context.
+	// If OTel tracing is active, use the OTel span's IDs so worker spans
+	// appear as children in the trace backend.
 	tc := distributed.TraceFromContext(ctx)
 	if tc.TraceID == "" {
-		tc = distributed.NewTraceContext()
+		if otelTraceID := telemetry.TraceIDFromContext(ctx); otelTraceID != "" {
+			tc.TraceID = otelTraceID
+			tc.SpanID = telemetry.SpanIDFromContext(ctx)
+			tc.TraceFlags = 0x01
+		} else {
+			tc = distributed.NewTraceContext()
+		}
 	}
 	qm.trace = tc
 	if id := auth.IdentityFromContext(ctx); id != nil {

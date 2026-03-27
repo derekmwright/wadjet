@@ -21,6 +21,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/config"
 	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/expr"
@@ -40,6 +41,7 @@ type Config struct {
 	Addr              string
 	Catalog           *catalog.Catalog
 	Coordinator       *coordinator.Coordinator // nil = local execution only
+	DLQ               *coordinator.DLQ         // nil = no DLQ (standalone mode)
 	Auth              *auth.Authenticator      // nil = no authentication (static mode)
 	Authz             *auth.Authorizer         // nil = no authorization (static mode)
 	Policies          *auth.PolicySet          // nil = no cell-level policies (static mode)
@@ -59,6 +61,7 @@ type Server struct {
 	catalog  *catalog.Catalog
 	planner  *physical.Planner
 	coord    *coordinator.Coordinator // nil = local execution
+	dlq      *coordinator.DLQ         // nil = no DLQ
 	logger   *slog.Logger
 	mux      chi.Router
 	server   *http.Server
@@ -80,6 +83,7 @@ func New(cfg Config, logger *slog.Logger) *Server {
 		catalog:  cfg.Catalog,
 		planner:  physical.NewPlanner(cfg.Catalog),
 		coord:    cfg.Coordinator,
+		dlq:      cfg.DLQ,
 		logger:   logger,
 		mux:      chi.NewRouter(),
 		provider: cfg.Provider,
@@ -101,6 +105,9 @@ func New(cfg Config, logger *slog.Logger) *Server {
 	s.mux.Delete("/v1/tables/{name}", s.handleDeleteTable)
 	s.mux.Get("/v1/health", s.handleHealth)
 	s.mux.Get("/v1/ready", s.handleReady)
+	s.mux.Get("/v1/dlq", s.handleListDLQ)
+	s.mux.Get("/v1/dlq/{entryID}", s.handleGetDLQ)
+	s.mux.Delete("/v1/dlq", s.handlePurgeDLQ)
 	if s.metrics != nil {
 		s.mux.Handle("/metrics", s.metrics.Handler())
 	}
@@ -898,6 +905,54 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 	}
 
 	writeJSON(w, code, resp)
+}
+
+func (s *Server) handleListDLQ(w http.ResponseWriter, r *http.Request) {
+	if s.dlq == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"entries": []any{}, "count": 0})
+		return
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	entries, err := s.dlq.List(r.Context(), limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if entries == nil {
+		entries = []distributed.DLQEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "count": len(entries)})
+}
+
+func (s *Server) handleGetDLQ(w http.ResponseWriter, r *http.Request) {
+	if s.dlq == nil {
+		writeError(w, http.StatusNotFound, "DLQ not available")
+		return
+	}
+	entryID := chi.URLParam(r, "entryID")
+	entry, err := s.dlq.Get(r.Context(), entryID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, entry)
+}
+
+func (s *Server) handlePurgeDLQ(w http.ResponseWriter, r *http.Request) {
+	if s.dlq == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		return
+	}
+	if err := s.dlq.Purge(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "purged"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

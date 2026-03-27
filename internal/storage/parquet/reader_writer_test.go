@@ -286,48 +286,48 @@ func TestNewReader_InvalidData(t *testing.T) {
 
 func TestCompareNative(t *testing.T) {
 	// int64 comparisons
-	if compareNative(int64(1), int64(2)) >= 0 {
+	if CompareNative(int64(1), int64(2)) >= 0 {
 		t.Error("1 < 2 should be negative")
 	}
-	if compareNative(int64(2), int64(1)) <= 0 {
+	if CompareNative(int64(2), int64(1)) <= 0 {
 		t.Error("2 > 1 should be positive")
 	}
-	if compareNative(int64(5), int64(5)) != 0 {
+	if CompareNative(int64(5), int64(5)) != 0 {
 		t.Error("5 == 5 should be zero")
 	}
 
 	// float64 comparisons
-	if compareNative(float64(1.0), float64(2.0)) >= 0 {
+	if CompareNative(float64(1.0), float64(2.0)) >= 0 {
 		t.Error("1.0 < 2.0 should be negative")
 	}
-	if compareNative(float64(2.0), float64(1.0)) <= 0 {
+	if CompareNative(float64(2.0), float64(1.0)) <= 0 {
 		t.Error("2.0 > 1.0 should be positive")
 	}
-	if compareNative(float64(3.14), float64(3.14)) != 0 {
+	if CompareNative(float64(3.14), float64(3.14)) != 0 {
 		t.Error("3.14 == 3.14 should be zero")
 	}
 
 	// string comparisons
-	if compareNative("abc", "xyz") >= 0 {
+	if CompareNative("abc", "xyz") >= 0 {
 		t.Error("abc < xyz should be negative")
 	}
-	if compareNative("xyz", "abc") <= 0 {
+	if CompareNative("xyz", "abc") <= 0 {
 		t.Error("xyz > abc should be positive")
 	}
-	if compareNative("same", "same") != 0 {
+	if CompareNative("same", "same") != 0 {
 		t.Error("same == same should be zero")
 	}
 
 	// Mismatched types return 0
-	if compareNative(int64(1), "string") != 0 {
+	if CompareNative(int64(1), "string") != 0 {
 		t.Error("mismatched types should return 0")
 	}
-	if compareNative(int64(1), float64(1.0)) != 0 {
+	if CompareNative(int64(1), float64(1.0)) != 0 {
 		t.Error("int64 vs float64 should return 0")
 	}
 
 	// Unsupported type returns 0
-	if compareNative(true, true) != 0 {
+	if CompareNative(true, true) != 0 {
 		t.Error("unsupported type should return 0")
 	}
 }

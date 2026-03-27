@@ -28,6 +28,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/server"
 	"github.com/citc-tech/wadjet/internal/server/mcp"
+	"github.com/citc-tech/wadjet/internal/telemetry"
 	"github.com/citc-tech/wadjet/internal/server/pgwire"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/compaction"
@@ -68,6 +69,11 @@ var (
 	maxConcurrent    int
 	cacheBytes       int64
 	logLevel         string
+	natsTLSCert      string
+	natsTLSKey       string
+	natsTLSCA        string
+	otelEndpoint     string
+	otelInsecure     bool
 )
 
 func main() {
@@ -94,6 +100,11 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&natsStoreDir, "nats-store-dir", "", "NATS JetStream storage directory (default: ~/.wadjet/nats)")
 	rootCmd.PersistentFlags().StringVar(&clusterID, "cluster-id", "local", "Cluster identifier for federation")
 	rootCmd.PersistentFlags().StringSliceVar(&leafRemotes, "leaf-remote", nil, "Remote NATS URLs for leaf node connections (repeatable)")
+	rootCmd.PersistentFlags().StringVar(&natsTLSCert, "nats-tls-cert", "", "TLS certificate file for NATS mTLS")
+	rootCmd.PersistentFlags().StringVar(&natsTLSKey, "nats-tls-key", "", "TLS private key file for NATS mTLS")
+	rootCmd.PersistentFlags().StringVar(&natsTLSCA, "nats-tls-ca", "", "CA certificate file for NATS mTLS peer verification")
+	rootCmd.PersistentFlags().StringVar(&otelEndpoint, "otel-endpoint", "", "OTLP gRPC endpoint for tracing (e.g., localhost:4317)")
+	rootCmd.PersistentFlags().BoolVar(&otelInsecure, "otel-insecure", false, "Use plaintext gRPC for OTLP exporter")
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = auto-detect from cgroup, or unlimited)")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 512*1024*1024, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
@@ -165,6 +176,9 @@ func serveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Wrap store with circuit breaker for S3 resilience
+			store = objstore.NewCircuitStore(store, objstore.DefaultCircuitConfig(), logger)
 
 			switch mode {
 			case "standalone":
@@ -332,7 +346,7 @@ func clustersCmd() *cobra.Command {
 				natsAddr = fmt.Sprintf("nats://127.0.0.1:%d", natsPort)
 			}
 
-			nc, err := distributed.Connect(natsAddr)
+			nc, err := distributed.Connect(natsAddr, nil)
 			if err != nil {
 				return fmt.Errorf("connecting to NATS: %w", err)
 			}
@@ -809,6 +823,8 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	if natsStoreDir != "" {
 		natsCfg.StoreDir = natsStoreDir
 	}
+	// Apply NATS mTLS config from CLI flags or env overrides
+	applyNATSTLS(&natsCfg, logger)
 	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
 	if err != nil {
 		return fmt.Errorf("starting NATS: %w", err)
@@ -847,6 +863,14 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		NATSUrl:      embeddedNATS.ClientURL(),
 		ResultBucket: bucket,
 	}, cat, nc, js, logger)
+
+	// Initialize OTel tracing if configured
+	otelTP := initTelemetry(ctx, logger)
+	if otelTP != nil {
+		coord.SetTelemetry(otelTP)
+		defer otelTP.Shutdown(context.Background())
+	}
+
 	coord.Workers().StartReaper(ctx)
 	coord.StartQueryReaper(ctx)
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
@@ -868,11 +892,13 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	coordCompactor.Start(ctx)
 
 	m := metrics.New()
+	dlq := coordinator.NewDLQ(js)
 
 	srvCfg := server.Config{
 		Addr:        httpAddr,
 		Catalog:     cat,
 		Coordinator: coord,
+		DLQ:         dlq,
 		Metrics:     m,
 	}
 
@@ -966,7 +992,19 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		natsAddr = fmt.Sprintf("nats://127.0.0.1:%d", natsPort)
 	}
 
-	nc, err := distributed.Connect(natsAddr)
+	// Build NATS client TLS config if mTLS is configured
+	var natsTLSCfg *tls.Config
+	tlsCert, tlsKey, tlsCA := resolveNATSTLSPaths()
+	if tlsCert != "" && tlsKey != "" && tlsCA != "" {
+		var err error
+		natsTLSCfg, err = distributed.BuildNATSClientTLS(tlsCert, tlsKey, tlsCA)
+		if err != nil {
+			return fmt.Errorf("building NATS TLS config: %w", err)
+		}
+		logger.Info("NATS mTLS enabled", "ca", tlsCA, "cert", tlsCert)
+	}
+
+	nc, err := distributed.Connect(natsAddr, natsTLSCfg)
 	if err != nil {
 		return fmt.Errorf("connecting to NATS: %w", err)
 	}
@@ -996,6 +1034,13 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		SpillDir:         spillDir,
 		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)
+
+	// Initialize OTel tracing on worker
+	workerOtelTP := initTelemetry(ctx, logger)
+	if workerOtelTP != nil {
+		w.SetTelemetry(workerOtelTP)
+		defer workerOtelTP.Shutdown(context.Background())
+	}
 
 	if err := w.Start(ctx); err != nil {
 		return fmt.Errorf("starting worker: %w", err)
@@ -1409,6 +1454,72 @@ func buildTLSConfig(cfg config.AuthMTLS) (*tls.Config, error) {
 		return nil, err
 	}
 	return auth.NewTLSConfig(cfg.CertFile, cfg.KeyFile, clientCA)
+}
+
+// resolveNATSTLSPaths returns TLS cert/key/CA paths from CLI flags, env vars, or config file.
+// CLI flags take priority, then env vars, then config file values.
+func resolveNATSTLSPaths() (cert, key, ca string) {
+	cert, key, ca = natsTLSCert, natsTLSKey, natsTLSCA
+	// Env vars override CLI flags (already handled by applyEnvOverrides on config),
+	// but CLI flags are direct — check env only if flag is empty.
+	if cert == "" {
+		cert = os.Getenv("WADJET_NATS_TLS_CERT")
+	}
+	if key == "" {
+		key = os.Getenv("WADJET_NATS_TLS_KEY")
+	}
+	if ca == "" {
+		ca = os.Getenv("WADJET_NATS_TLS_CA")
+	}
+	return
+}
+
+// initTelemetry creates an OTel TracerProvider if an OTLP endpoint is configured.
+// Returns nil if no endpoint is set (tracing disabled).
+func initTelemetry(ctx context.Context, logger *slog.Logger) *telemetry.Provider {
+	endpoint := otelEndpoint
+	insecure := otelInsecure
+	var sampleRate float64
+
+	// CLI flags take precedence; fall back to env vars / config file
+	if endpoint == "" {
+		endpoint = os.Getenv("WADJET_OTEL_ENDPOINT")
+	}
+	if endpoint == "" {
+		return nil
+	}
+	if !insecure {
+		insecure = os.Getenv("WADJET_OTEL_INSECURE") == "true" || os.Getenv("WADJET_OTEL_INSECURE") == "1"
+	}
+	if v := os.Getenv("WADJET_OTEL_SAMPLE_RATE"); v != "" {
+		fmt.Sscanf(v, "%f", &sampleRate)
+	}
+	if sampleRate <= 0 {
+		sampleRate = 1.0
+	}
+
+	tp, err := telemetry.Init(ctx, telemetry.Config{
+		Endpoint:   endpoint,
+		Insecure:   insecure,
+		SampleRate: sampleRate,
+	}, logger)
+	if err != nil {
+		logger.Error("failed to initialize OpenTelemetry", "error", err)
+		return nil
+	}
+	return tp
+}
+
+// applyNATSTLS sets TLS fields on a NATSConfig from CLI flags/env vars.
+// Used by runCoordinator to configure mTLS on the embedded NATS server.
+func applyNATSTLS(cfg *distributed.NATSConfig, logger *slog.Logger) {
+	cert, key, ca := resolveNATSTLSPaths()
+	if cert != "" && key != "" && ca != "" {
+		cfg.TLSCert = cert
+		cfg.TLSKey = key
+		cfg.TLSCA = ca
+		logger.Info("NATS mTLS enabled on server", "ca", ca, "cert", cert)
+	}
 }
 
 func mcpCmd() *cobra.Command {

@@ -29,9 +29,14 @@ const (
 	SubjectProfileStart   = "wadjet.workers.profile.start"
 	SubjectProfileCollect = "wadjet.workers.profile.collect"
 
+	// Dead-letter queue — failed tasks for inspection/retry
+	SubjectDLQ    = "wadjet.dlq"
+	SubjectDLQAll = "wadjet.dlq.>"
+
 	// Stream names
 	StreamTasks   = "WADJET_TASKS"
 	StreamResults = "WADJET_RESULTS"
+	StreamDLQ     = "WADJET_DLQ"
 
 	// KV bucket for catalog locks
 	KVCatalogLocks = "wadjet_catalog_locks"
@@ -61,6 +66,11 @@ func ResultSubject(queryID, stageID, taskID string) string {
 // QueryResultSubject returns the wildcard subject for all results of a query.
 func QueryResultSubject(queryID string) string {
 	return SubjectResults + "." + queryID + ".>"
+}
+
+// DLQSubject returns the NATS subject for a DLQ entry.
+func DLQSubject(queryID, taskID string) string {
+	return SubjectDLQ + "." + queryID + "." + taskID
 }
 
 // CancelSubject returns the NATS subject for cancelling a specific query.

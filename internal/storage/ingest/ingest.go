@@ -327,12 +327,16 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 		return fmt.Errorf("uploading parquet file: %w", err)
 	}
 
+	// Extract column statistics from the written Parquet file
+	colStats := extractColumnStats(data)
+
 	// Update catalog manifest
 	fileEntry := catalog.FileEntry{
-		Path:      filePath,
-		SizeBytes: int64(len(data)),
-		NumRows:   int64(len(buf.rows)),
-		CreatedAt: time.Now().UTC(),
+		Path:        filePath,
+		SizeBytes:   int64(len(data)),
+		NumRows:     int64(len(buf.rows)),
+		CreatedAt:   time.Now().UTC(),
+		ColumnStats: colStats,
 	}
 
 	if err := ing.catalog.AddFiles(ctx, ing.tableName, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
@@ -372,6 +376,50 @@ func (ing *Ingester) formatPartitionValue(key string, v any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+// extractColumnStats reads Parquet metadata from written data to extract
+// per-column min/max/null statistics for the catalog.
+func extractColumnStats(data []byte) map[string]catalog.FileColumnStats {
+	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil
+	}
+	nrg := reader.NumRowGroups()
+	if nrg == 0 {
+		return nil
+	}
+
+	merged := make(map[string]catalog.FileColumnStats)
+	for i := 0; i < nrg; i++ {
+		rgs := reader.RowGroupStats(i)
+		for col, cs := range rgs.Columns {
+			if !cs.HasStats {
+				continue
+			}
+			cur, ok := merged[col]
+			if !ok {
+				cur = catalog.FileColumnStats{
+					MinValue:  cs.MinValue,
+					MaxValue:  cs.MaxValue,
+					NullCount: cs.NullCount,
+				}
+			} else {
+				cur.NullCount += cs.NullCount
+				if cs.MinValue != nil && (cur.MinValue == nil || parquet.CompareNative(cs.MinValue, cur.MinValue) < 0) {
+					cur.MinValue = cs.MinValue
+				}
+				if cs.MaxValue != nil && (cur.MaxValue == nil || parquet.CompareNative(cs.MaxValue, cur.MaxValue) > 0) {
+					cur.MaxValue = cs.MaxValue
+				}
+			}
+			merged[col] = cur
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 func estimateRowSize(row map[string]any) int {

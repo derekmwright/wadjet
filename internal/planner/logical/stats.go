@@ -103,10 +103,47 @@ func estimateScanStats(n *Node) RelStats {
 
 	ndv := make(map[string]float64, len(n.ScanColumns))
 	for _, col := range n.ScanColumns {
-		ndv[strings.ToLower(col)] = estimateColumnNDV(col, rows)
+		lc := strings.ToLower(col)
+		if cs, ok := n.ScanColStats[lc]; ok && cs.MinValue != nil && cs.MaxValue != nil {
+			ndv[lc] = estimateNDVFromStats(cs, rows)
+		} else {
+			ndv[lc] = estimateColumnNDV(col, rows)
+		}
 	}
 
 	return RelStats{Rows: math.Max(1, rows), ColNDV: ndv}
+}
+
+// estimateNDVFromStats estimates distinct values using actual min/max stats.
+// For numeric types, uses (max-min+1) capped at row count.
+// For strings, falls back to a fraction of rows.
+func estimateNDVFromStats(cs ScanColumnStats, tableRows float64) float64 {
+	minF, minOk := toFloat(cs.MinValue)
+	maxF, maxOk := toFloat(cs.MaxValue)
+	if minOk && maxOk {
+		rangeNDV := maxF - minF + 1
+		if rangeNDV < 1 {
+			rangeNDV = 1
+		}
+		return math.Min(rangeNDV, tableRows)
+	}
+	// String or non-numeric: assume moderate cardinality
+	return math.Min(tableRows, math.Max(10, math.Sqrt(tableRows)*10))
+}
+
+func toFloat(v any) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case int64:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	default:
+		return 0, false
+	}
 }
 
 // estimateColumnNDV estimates distinct values for a column based on naming heuristics.

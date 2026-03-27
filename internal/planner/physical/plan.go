@@ -463,6 +463,20 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 				}
 			}
 			node.ScanRowEstimate = total
+
+			// Aggregate per-column stats for CBO selectivity estimation
+			if colStats, err := p.catalog.AggregateColumnStats(ctx, node.TableName); err == nil && colStats != nil {
+				scanStats := make(map[string]logical.ScanColumnStats, len(colStats))
+				for col, cs := range colStats {
+					scanStats[col] = logical.ScanColumnStats{
+						MinValue:  cs.MinValue,
+						MaxValue:  cs.MaxValue,
+						NullCount: cs.NullCount,
+						TotalRows: cs.TotalRows,
+					}
+				}
+				node.ScanColStats = scanStats
+			}
 		}
 	}
 	for _, child := range node.Children {
