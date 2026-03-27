@@ -93,7 +93,7 @@ func run(cmd *cobra.Command, args []string) error {
 	// Connect to shared NATS catalog if configured
 	var metaKV catalog.MetaKV
 	if natsURL != "" {
-		nc, err := distributed.Connect(natsURL)
+		nc, err := distributed.Connect(natsURL, nil)
 		if err != nil {
 			return fmt.Errorf("connecting to NATS at %s: %w", natsURL, err)
 		}

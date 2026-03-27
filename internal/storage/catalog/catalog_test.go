@@ -484,6 +484,99 @@ func TestAddDeleteMarkers_Merge(t *testing.T) {
 	}
 }
 
+func TestAggregateColumnStats(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	schema := testSchema()
+
+	if err := cat.CreateTable(ctx, "metrics", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Add files with column stats
+	files := []FileEntry{
+		{
+			Path: "data/chunk_0001.parquet", SizeBytes: 1024, NumRows: 100,
+			CreatedAt: time.Now().UTC(),
+			ColumnStats: map[string]FileColumnStats{
+				"id":   {MinValue: int64(1), MaxValue: int64(100), NullCount: 0},
+				"name": {MinValue: "alice", MaxValue: "zara", NullCount: 5},
+			},
+		},
+		{
+			Path: "data/chunk_0002.parquet", SizeBytes: 2048, NumRows: 200,
+			CreatedAt: time.Now().UTC(),
+			ColumnStats: map[string]FileColumnStats{
+				"id":   {MinValue: int64(50), MaxValue: int64(300), NullCount: 0},
+				"name": {MinValue: "bob", MaxValue: "yvonne", NullCount: 10},
+			},
+		},
+	}
+	if err := cat.AddFiles(ctx, "metrics", nil, "data/", files); err != nil {
+		t.Fatal(err)
+	}
+
+	agg, err := cat.AggregateColumnStats(ctx, "metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agg == nil {
+		t.Fatal("expected non-nil aggregated stats")
+	}
+
+	// id: min=1, max=300, nulls=0
+	// Note: JSON roundtrip converts int64 → float64
+	idStats := agg["id"]
+	idMin, _ := toStatFloat(idStats.MinValue)
+	idMax, _ := toStatFloat(idStats.MaxValue)
+	if idMin != 1 {
+		t.Errorf("id MinValue: got %v, want 1", idStats.MinValue)
+	}
+	if idMax != 300 {
+		t.Errorf("id MaxValue: got %v, want 300", idStats.MaxValue)
+	}
+	if idStats.NullCount != 0 {
+		t.Errorf("id NullCount: got %d, want 0", idStats.NullCount)
+	}
+
+	// name: min=alice, max=zara, nulls=15
+	nameStats := agg["name"]
+	if nameStats.MinValue != "alice" {
+		t.Errorf("name MinValue: got %v, want alice", nameStats.MinValue)
+	}
+	if nameStats.MaxValue != "zara" {
+		t.Errorf("name MaxValue: got %v, want zara", nameStats.MaxValue)
+	}
+	if nameStats.NullCount != 15 {
+		t.Errorf("name NullCount: got %d, want 15", nameStats.NullCount)
+	}
+	if nameStats.TotalRows != 300 {
+		t.Errorf("name TotalRows: got %d, want 300", nameStats.TotalRows)
+	}
+}
+
+func TestAggregateColumnStats_NoStats(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	if err := cat.CreateTable(ctx, "empty", testSchema(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Files without column stats
+	files := []FileEntry{
+		{Path: "data/chunk.parquet", SizeBytes: 100, NumRows: 10, CreatedAt: time.Now().UTC()},
+	}
+	if err := cat.AddFiles(ctx, "empty", nil, "data/", files); err != nil {
+		t.Fatal(err)
+	}
+
+	agg, err := cat.AggregateColumnStats(ctx, "empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agg != nil {
+		t.Errorf("expected nil stats for files without column stats, got %v", agg)
+	}
+}
+
 func TestRemoveFiles_CleansDeleteMarkers(t *testing.T) {
 	cat, ctx := setupCatalog(t)
 	schema := testSchema()

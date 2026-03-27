@@ -433,6 +433,47 @@ func TestIngestValidation_NetworkTypes(t *testing.T) {
 	}
 }
 
+func TestFlushExtractsColumnStats(t *testing.T) {
+	cat, _ := setupCatalog(t)
+	cfg := DefaultConfig()
+	ing := New(cat, testTable, testSchema, nil, cfg)
+	ctx := context.Background()
+
+	rows := []map[string]any{
+		{"id": int64(10), "name": "alice", "year": "2025"},
+		{"id": int64(20), "name": "bob", "year": "2025"},
+		{"id": int64(5), "name": "zara", "year": "2026"},
+	}
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := cat.GetManifest(ctx, testTable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Partitions) == 0 || len(manifest.Partitions[0].Files) == 0 {
+		t.Fatal("expected at least one file in manifest")
+	}
+
+	fe := manifest.Partitions[0].Files[0]
+	if fe.ColumnStats == nil {
+		t.Fatal("expected ColumnStats to be populated after flush")
+	}
+
+	idStats, ok := fe.ColumnStats["id"]
+	if !ok {
+		t.Fatal("expected 'id' column in ColumnStats")
+	}
+	// Parquet stats report int64 min/max
+	if idStats.MinValue == nil || idStats.MaxValue == nil {
+		t.Fatal("expected non-nil min/max for 'id'")
+	}
+}
+
 func TestMinFlushRows_SkipsTinyBuffers(t *testing.T) {
 	cat, store := setupCatalog(t)
 	cfg := DefaultConfig()

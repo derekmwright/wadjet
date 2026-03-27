@@ -107,13 +107,13 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 				pageMax := ci.MaxValue(p)
 				if !pageMin.IsNull() {
 					native := parquetValueToNative(pageMin)
-					if cs.MinValue == nil || compareNative(native, cs.MinValue) < 0 {
+					if cs.MinValue == nil || CompareNative(native, cs.MinValue) < 0 {
 						cs.MinValue = native
 					}
 				}
 				if !pageMax.IsNull() {
 					native := parquetValueToNative(pageMax)
-					if cs.MaxValue == nil || compareNative(native, cs.MaxValue) > 0 {
+					if cs.MaxValue == nil || CompareNative(native, cs.MaxValue) > 0 {
 						cs.MaxValue = native
 					}
 				}
@@ -334,8 +334,8 @@ func parquetValueToNative(v goparquet.Value) any {
 	}
 }
 
-// compareNative compares two native Go values for ordering.
-func compareNative(a, b any) int {
+// CompareNative compares two native Go values for ordering.
+func CompareNative(a, b any) int {
 	switch av := a.(type) {
 	case int64:
 		if bv, ok := b.(int64); ok {

@@ -190,6 +190,20 @@ type QueryManifest struct {
 	TotalBytes  int64    `json:"total_bytes"`
 }
 
+// DLQEntry records a failed task for inspection and potential retry.
+type DLQEntry struct {
+	EntryID   string    `json:"entry_id"`
+	TaskID    string    `json:"task_id"`
+	QueryID   string    `json:"query_id"`
+	StageID   string    `json:"stage_id"`
+	WorkerID  string    `json:"worker_id"`
+	TaskType  TaskType  `json:"task_type"`
+	Error     string    `json:"error"`
+	Reason    string    `json:"reason"` // "execution_error", "panic", "marshal_error", "publish_error"
+	TaskData  []byte    `json:"task_data,omitempty"` // original task JSON for replay
+	Timestamp time.Time `json:"timestamp"`
+}
+
 // Marshal serializes a message. Uses gob for ResultNotification (avoids
 // base64 overhead on InlineData), JSON for everything else.
 func Marshal(v any) ([]byte, error) {

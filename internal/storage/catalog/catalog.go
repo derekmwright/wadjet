@@ -86,12 +86,30 @@ type PartitionEntry struct {
 	Files  []FileEntry       `json:"files"`
 }
 
+// FileColumnStats contains per-column min/max/null statistics for a single file.
+// Extracted from Parquet row group metadata at write time.
+type FileColumnStats struct {
+	MinValue  any   `json:"min_value,omitempty"`
+	MaxValue  any   `json:"max_value,omitempty"`
+	NullCount int64 `json:"null_count"`
+}
+
 // FileEntry describes a single Parquet file within a partition.
 type FileEntry struct {
-	Path      string    `json:"path"`
-	SizeBytes int64     `json:"size_bytes"`
-	NumRows   int64     `json:"num_rows"`
-	CreatedAt time.Time `json:"created_at"`
+	Path        string                      `json:"path"`
+	SizeBytes   int64                       `json:"size_bytes"`
+	NumRows     int64                       `json:"num_rows"`
+	CreatedAt   time.Time                   `json:"created_at"`
+	ColumnStats map[string]FileColumnStats  `json:"column_stats,omitempty"`
+}
+
+// TableColumnStats holds aggregated per-column statistics across all files.
+// Used by the optimizer for selectivity estimation.
+type TableColumnStats struct {
+	MinValue  any
+	MaxValue  any
+	NullCount int64
+	TotalRows int64
 }
 
 // New creates a new Catalog backed by the given KV store and object store.
@@ -491,6 +509,95 @@ func (c *Catalog) DropTable(_ context.Context, name string) error {
 	meta.Tables = tables
 	meta.UpdatedAt = time.Now().UTC()
 	return c.putJSON(c.key("meta"), meta)
+}
+
+// AggregateColumnStats computes table-level column statistics by merging
+// per-file stats across all partitions. Returns nil for columns without stats.
+func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map[string]TableColumnStats, error) {
+	manifest, err := c.GetManifest(context.Background(), tableName)
+	if err != nil {
+		return nil, err
+	}
+
+	agg := make(map[string]TableColumnStats)
+	var totalRows int64
+	for _, part := range manifest.Partitions {
+		for _, f := range part.Files {
+			totalRows += f.NumRows
+			for col, cs := range f.ColumnStats {
+				cur := agg[col]
+				cur.NullCount += cs.NullCount
+				cur.TotalRows += f.NumRows
+				if cs.MinValue != nil {
+					if cur.MinValue == nil || compareStatValues(cs.MinValue, cur.MinValue) < 0 {
+						cur.MinValue = cs.MinValue
+					}
+				}
+				if cs.MaxValue != nil {
+					if cur.MaxValue == nil || compareStatValues(cs.MaxValue, cur.MaxValue) > 0 {
+						cur.MaxValue = cs.MaxValue
+					}
+				}
+				agg[col] = cur
+			}
+		}
+	}
+
+	// Fill TotalRows for columns that didn't appear in all files
+	for col, cs := range agg {
+		if cs.TotalRows < totalRows {
+			cs.TotalRows = totalRows
+		}
+		agg[col] = cs
+	}
+
+	if len(agg) == 0 {
+		return nil, nil
+	}
+	return agg, nil
+}
+
+// compareStatValues compares two statistic values for ordering.
+func compareStatValues(a, b any) int {
+	// JSON unmarshals numbers as float64
+	af, aOk := toStatFloat(a)
+	bf, bOk := toStatFloat(b)
+	if aOk && bOk {
+		if af < bf {
+			return -1
+		}
+		if af > bf {
+			return 1
+		}
+		return 0
+	}
+	as, aOk := a.(string)
+	bs, bOk := b.(string)
+	if aOk && bOk {
+		if as < bs {
+			return -1
+		}
+		if as > bs {
+			return 1
+		}
+		return 0
+	}
+	return 0
+}
+
+func toStatFloat(v any) (float64, bool) {
+	switch val := v.(type) {
+	case float64:
+		return val, true
+	case int64:
+		return float64(val), true
+	case int32:
+		return float64(val), true
+	case int:
+		return float64(val), true
+	default:
+		return 0, false
+	}
 }
 
 // --- Federation ---

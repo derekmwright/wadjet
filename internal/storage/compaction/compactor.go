@@ -127,10 +127,11 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 			}
 
 			newEntry := catalog.FileEntry{
-				Path:      newPath,
-				SizeBytes: written.size,
-				NumRows:   int64(len(merged.rows)),
-				CreatedAt: time.Now().UTC(),
+				Path:        newPath,
+				SizeBytes:   written.size,
+				NumRows:     int64(len(merged.rows)),
+				CreatedAt:   time.Now().UTC(),
+				ColumnStats: written.columnStats,
 			}
 			if err := c.catalog.AddFiles(ctx, tableName, part.Values, part.Path, []catalog.FileEntry{newEntry}); err != nil {
 				return nil, fmt.Errorf("adding merged file to manifest: %w", err)
@@ -258,7 +259,8 @@ func (c *Compactor) mergeFiles(ctx context.Context, files []catalog.FileEntry, s
 }
 
 type writeResult struct {
-	size int64
+	size        int64
+	columnStats map[string]catalog.FileColumnStats
 }
 
 func (c *Compactor) writeMergedFile(ctx context.Context, path string, schema parquet.Schema, rows []map[string]any) (*writeResult, error) {
@@ -275,13 +277,60 @@ func (c *Compactor) writeMergedFile(ctx context.Context, path string, schema par
 		return nil, fmt.Errorf("closing writer: %w", err)
 	}
 
-	size := int64(buf.Len())
-	_, err = c.catalog.Store().Put(ctx, c.catalog.Bucket(), path, bytes.NewReader(buf.Bytes()), size, "application/octet-stream")
+	data := buf.Bytes()
+	size := int64(len(data))
+	_, err = c.catalog.Store().Put(ctx, c.catalog.Bucket(), path, bytes.NewReader(data), size, "application/octet-stream")
 	if err != nil {
 		return nil, fmt.Errorf("uploading merged file: %w", err)
 	}
 
-	return &writeResult{size: size}, nil
+	// Extract column stats from the written file
+	colStats := extractColumnStats(data)
+
+	return &writeResult{size: size, columnStats: colStats}, nil
+}
+
+// extractColumnStats reads Parquet metadata to extract per-column min/max/null stats.
+func extractColumnStats(data []byte) map[string]catalog.FileColumnStats {
+	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil
+	}
+	nrg := reader.NumRowGroups()
+	if nrg == 0 {
+		return nil
+	}
+
+	merged := make(map[string]catalog.FileColumnStats)
+	for i := 0; i < nrg; i++ {
+		rgs := reader.RowGroupStats(i)
+		for col, cs := range rgs.Columns {
+			if !cs.HasStats {
+				continue
+			}
+			cur, ok := merged[col]
+			if !ok {
+				cur = catalog.FileColumnStats{
+					MinValue:  cs.MinValue,
+					MaxValue:  cs.MaxValue,
+					NullCount: cs.NullCount,
+				}
+			} else {
+				cur.NullCount += cs.NullCount
+				if cs.MinValue != nil && (cur.MinValue == nil || parquet.CompareNative(cs.MinValue, cur.MinValue) < 0) {
+					cur.MinValue = cs.MinValue
+				}
+				if cs.MaxValue != nil && (cur.MaxValue == nil || parquet.CompareNative(cs.MaxValue, cur.MaxValue) > 0) {
+					cur.MaxValue = cs.MaxValue
+				}
+			}
+			merged[col] = cur
+		}
+	}
+	if len(merged) == 0 {
+		return nil
+	}
+	return merged
 }
 
 func (c *Compactor) deleteFromStore(ctx context.Context, paths []string) {

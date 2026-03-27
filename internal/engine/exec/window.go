@@ -129,40 +129,25 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 }
 
 func (w *Window) Finalize(_ context.Context) error {
-	// Collect all data as batches
+	if len(w.spillFiles) > 0 {
+		return w.finalizeWithSpill()
+	}
+	return w.finalizeColumnar()
+}
+
+// finalizeColumnar is the fast path when no spill occurred — operates entirely
+// on column vectors without row materialization.
+func (w *Window) finalizeColumnar() error {
 	allBatches := w.batches
 	w.batches = nil
 
-	// Read spill files back as batches
-	for _, f := range w.spillFiles {
-		spilled, err := memory.ReadSpilledRows(f)
-		if err != nil {
-			return err
-		}
-		if len(spilled) > 0 {
-			allBatches = append(allBatches, batch.FromRows(w.schema, spilled))
-		}
-	}
-	w.spillFiles = nil
-
-	// Concatenate into single combined batch
 	combined := windowConcatBatches(allBatches, w.schema)
 	if combined == nil || combined.Len == 0 {
 		return nil
 	}
 
-	// Build output schema: original columns + window columns
-	outSchema := make([]parquet.Column, len(w.schema))
-	copy(outSchema, w.schema)
-	for _, wc := range w.Columns {
-		outSchema = append(outSchema, parquet.Column{
-			Name:     wc.OutputCol,
-			Type:     wc.OutputType,
-			Nullable: true,
-		})
-	}
+	outSchema := w.buildOutputSchema()
 
-	// Add window output vectors to combined batch (initialized as all-null)
 	for _, wc := range w.Columns {
 		vec := batch.NewVector(wc.OutputType, combined.Len)
 		vec.Nulls = batch.NewBitmapAllNull(combined.Len)
@@ -174,13 +159,11 @@ func (w *Window) Finalize(_ context.Context) error {
 		})
 	}
 
-	// Compute each window function directly on column vectors
 	numOrigCols := len(w.schema)
 	for i, wc := range w.Columns {
 		computeWindowColumnar(combined, numOrigCols+i, wc)
 	}
 
-	// Slice combined batch into output batches
 	for pos := 0; pos < combined.Len; {
 		end := pos + batch.DefaultBatchSize
 		if end > combined.Len {
@@ -195,6 +178,68 @@ func (w *Window) Finalize(_ context.Context) error {
 		pos = end
 	}
 	return nil
+}
+
+// finalizeWithSpill handles the spill path — reads spilled rows and computes
+// window functions in row-oriented mode to avoid materializing a giant combined
+// columnar batch (which would defeat the purpose of spilling).
+func (w *Window) finalizeWithSpill() error {
+	// Collect all data as rows — in-memory batches + spill files
+	var allRows []map[string]any
+	for _, b := range w.batches {
+		allRows = append(allRows, b.ToRows()...)
+	}
+	w.batches = nil
+
+	for _, f := range w.spillFiles {
+		spilled, err := memory.ReadSpilledRows(f)
+		if err != nil {
+			return err
+		}
+		allRows = append(allRows, spilled...)
+	}
+	w.spillFiles = nil
+
+	if len(allRows) == 0 {
+		return nil
+	}
+
+	// Initialize window output columns in each row
+	for _, row := range allRows {
+		for _, wc := range w.Columns {
+			row[wc.OutputCol] = nil
+		}
+	}
+
+	// Compute each window function on the row slice
+	for _, wc := range w.Columns {
+		computeWindowRowOriented(allRows, wc)
+	}
+
+	// Materialize into output batches
+	outSchema := w.buildOutputSchema()
+	for pos := 0; pos < len(allRows); {
+		end := pos + batch.DefaultBatchSize
+		if end > len(allRows) {
+			end = len(allRows)
+		}
+		w.result = append(w.result, batch.FromRows(outSchema, allRows[pos:end]))
+		pos = end
+	}
+	return nil
+}
+
+func (w *Window) buildOutputSchema() []parquet.Column {
+	outSchema := make([]parquet.Column, len(w.schema))
+	copy(outSchema, w.schema)
+	for _, wc := range w.Columns {
+		outSchema = append(outSchema, parquet.Column{
+			Name:     wc.OutputCol,
+			Type:     wc.OutputType,
+			Nullable: true,
+		})
+	}
+	return outSchema
 }
 
 func (w *Window) Close() error { return nil }
@@ -823,6 +868,323 @@ func computePartitionColumnar(combined *batch.RecordBatch, winVec *batch.Vector,
 		} else {
 			for i := 0; i < n; i++ {
 				winVec.Nulls.SetNull(start + i)
+			}
+		}
+	}
+}
+
+// --- Row-oriented window computation (spill path) ---
+
+// computeWindowRowOriented computes a single window function over row data.
+// Used when spill occurred to avoid materializing a giant columnar batch.
+func computeWindowRowOriented(rows []map[string]any, wc WindowColumn) {
+	if len(rows) == 0 {
+		return
+	}
+
+	// Sort by partition+order keys
+	sort.SliceStable(rows, func(a, b int) bool {
+		for _, pk := range wc.PartitionBy {
+			cmp := compareAny(rows[a][pk], rows[b][pk])
+			if cmp != 0 {
+				return cmp < 0
+			}
+		}
+		for _, ok := range wc.OrderBy {
+			cmp := compareAny(rows[a][ok.Column], rows[b][ok.Column])
+			if cmp != 0 {
+				if ok.Order == Descending {
+					return cmp > 0
+				}
+				return cmp < 0
+			}
+		}
+		return false
+	})
+
+	// Walk partitions
+	i := 0
+	for i < len(rows) {
+		partEnd := i + 1
+		for partEnd < len(rows) && samePartitionRows(rows[i], rows[partEnd], wc.PartitionBy) {
+			partEnd++
+		}
+		computePartitionRowOriented(rows[i:partEnd], wc)
+		i = partEnd
+	}
+}
+
+func samePartitionRows(a, b map[string]any, partCols []string) bool {
+	for _, col := range partCols {
+		if compareAny(a[col], b[col]) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func sameOrderRows(a, b map[string]any, orderCols []SortKey) bool {
+	for _, ok := range orderCols {
+		if compareAny(a[ok.Column], b[ok.Column]) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func rowFloat64(row map[string]any, col string) float64 {
+	v := row[col]
+	if v == nil {
+		return 0
+	}
+	switch val := v.(type) {
+	case float64:
+		return val
+	case float32:
+		return float64(val)
+	case int64:
+		return float64(val)
+	case int32:
+		return float64(val)
+	case int:
+		return float64(val)
+	default:
+		return 0
+	}
+}
+
+// computePartitionRowOriented computes a window function for one partition.
+func computePartitionRowOriented(part []map[string]any, wc WindowColumn) {
+	n := len(part)
+	outCol := wc.OutputCol
+
+	switch wc.Func {
+	case WinRowNumber:
+		for i := 0; i < n; i++ {
+			part[i][outCol] = int64(i + 1)
+		}
+
+	case WinRank:
+		rank := int64(1)
+		for i := 0; i < n; i++ {
+			if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy) {
+				rank = int64(i + 1)
+			}
+			part[i][outCol] = rank
+		}
+
+	case WinDenseRank:
+		rank := int64(1)
+		for i := 0; i < n; i++ {
+			if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy) {
+				rank++
+			}
+			part[i][outCol] = rank
+		}
+
+	case WinSum:
+		if len(wc.OrderBy) > 0 {
+			var sum float64
+			for i := 0; i < n; i++ {
+				sum += rowFloat64(part[i], wc.InputCol)
+				part[i][outCol] = sum
+			}
+		} else {
+			var sum float64
+			for i := 0; i < n; i++ {
+				sum += rowFloat64(part[i], wc.InputCol)
+			}
+			for i := 0; i < n; i++ {
+				part[i][outCol] = sum
+			}
+		}
+
+	case WinCount:
+		if len(wc.OrderBy) > 0 {
+			for i := 0; i < n; i++ {
+				part[i][outCol] = int64(i + 1)
+			}
+		} else {
+			count := int64(n)
+			for i := 0; i < n; i++ {
+				part[i][outCol] = count
+			}
+		}
+
+	case WinAvg:
+		if len(wc.OrderBy) > 0 {
+			var sum float64
+			for i := 0; i < n; i++ {
+				sum += rowFloat64(part[i], wc.InputCol)
+				part[i][outCol] = sum / float64(i+1)
+			}
+		} else {
+			var sum float64
+			for i := 0; i < n; i++ {
+				sum += rowFloat64(part[i], wc.InputCol)
+			}
+			avg := sum / float64(n)
+			for i := 0; i < n; i++ {
+				part[i][outCol] = avg
+			}
+		}
+
+	case WinMin:
+		if len(wc.OrderBy) > 0 {
+			var minVal any
+			for i := 0; i < n; i++ {
+				v := part[i][wc.InputCol]
+				if minVal == nil || (v != nil && compareAny(v, minVal) < 0) {
+					minVal = v
+				}
+				part[i][outCol] = minVal
+			}
+		} else {
+			var minVal any
+			for i := 0; i < n; i++ {
+				v := part[i][wc.InputCol]
+				if minVal == nil || (v != nil && compareAny(v, minVal) < 0) {
+					minVal = v
+				}
+			}
+			for i := 0; i < n; i++ {
+				part[i][outCol] = minVal
+			}
+		}
+
+	case WinMax:
+		if len(wc.OrderBy) > 0 {
+			var maxVal any
+			for i := 0; i < n; i++ {
+				v := part[i][wc.InputCol]
+				if maxVal == nil || (v != nil && compareAny(v, maxVal) > 0) {
+					maxVal = v
+				}
+				part[i][outCol] = maxVal
+			}
+		} else {
+			var maxVal any
+			for i := 0; i < n; i++ {
+				v := part[i][wc.InputCol]
+				if maxVal == nil || (v != nil && compareAny(v, maxVal) > 0) {
+					maxVal = v
+				}
+			}
+			for i := 0; i < n; i++ {
+				part[i][outCol] = maxVal
+			}
+		}
+
+	case WinLag:
+		offset := wc.LagLeadOffset
+		if offset <= 0 {
+			offset = 1
+		}
+		for i := 0; i < n; i++ {
+			if i-offset >= 0 {
+				part[i][outCol] = part[i-offset][wc.InputCol]
+			} else if wc.LagLeadDefault != nil {
+				part[i][outCol] = wc.LagLeadDefault
+			}
+		}
+
+	case WinLead:
+		offset := wc.LagLeadOffset
+		if offset <= 0 {
+			offset = 1
+		}
+		for i := 0; i < n; i++ {
+			if i+offset < n {
+				part[i][outCol] = part[i+offset][wc.InputCol]
+			} else if wc.LagLeadDefault != nil {
+				part[i][outCol] = wc.LagLeadDefault
+			}
+		}
+
+	case WinFirstValue:
+		if n > 0 {
+			first := part[0][wc.InputCol]
+			for i := 0; i < n; i++ {
+				part[i][outCol] = first
+			}
+		}
+
+	case WinLastValue:
+		if len(wc.OrderBy) > 0 {
+			for i := 0; i < n; i++ {
+				part[i][outCol] = part[i][wc.InputCol]
+			}
+		} else if n > 0 {
+			last := part[n-1][wc.InputCol]
+			for i := 0; i < n; i++ {
+				part[i][outCol] = last
+			}
+		}
+
+	case WinNtile:
+		buckets := wc.NtileBuckets
+		if buckets <= 0 {
+			buckets = 1
+		}
+		base := n / buckets
+		remainder := n % buckets
+		bucket := int64(1)
+		count := 0
+		limit := base
+		if remainder > 0 {
+			limit++
+		}
+		for i := 0; i < n; i++ {
+			part[i][outCol] = bucket
+			count++
+			if count >= limit && int(bucket) < buckets {
+				bucket++
+				count = 0
+				if int(bucket) <= remainder {
+					limit = base + 1
+				} else {
+					limit = base
+				}
+			}
+		}
+
+	case WinPercentRank:
+		if n <= 1 {
+			for i := 0; i < n; i++ {
+				part[i][outCol] = float64(0)
+			}
+		} else {
+			rank := int64(1)
+			for i := 0; i < n; i++ {
+				if i > 0 && !sameOrderRows(part[i-1], part[i], wc.OrderBy) {
+					rank = int64(i + 1)
+				}
+				part[i][outCol] = float64(rank-1) / float64(n-1)
+			}
+		}
+
+	case WinCumeDist:
+		for i := 0; i < n; {
+			j := i + 1
+			for j < n && sameOrderRows(part[i], part[j], wc.OrderBy) {
+				j++
+			}
+			cd := float64(j) / float64(n)
+			for k := i; k < j; k++ {
+				part[k][outCol] = cd
+			}
+			i = j
+		}
+
+	case WinNthValue:
+		nth := wc.NthValueN
+		if nth <= 0 {
+			nth = 1
+		}
+		if nth <= n {
+			val := part[nth-1][wc.InputCol]
+			for i := 0; i < n; i++ {
+				part[i][outCol] = val
 			}
 		}
 	}

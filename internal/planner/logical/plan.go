@@ -7,6 +7,14 @@ import (
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
+// ScanColumnStats holds aggregated column statistics from the catalog.
+type ScanColumnStats struct {
+	MinValue  any
+	MaxValue  any
+	NullCount int64
+	TotalRows int64
+}
+
 // NodeType identifies the kind of logical plan node.
 type NodeType int
 
@@ -72,6 +80,7 @@ type Node struct {
 	PartitionFilter map[string]string // extracted partition key filters (year, month, day, hour)
 	ScanPredicates  []Predicate       // pushed-down filter predicates for row group pruning
 	ScanRowEstimate int64             // estimated row count from manifest (0 = unknown)
+	ScanColStats    map[string]ScanColumnStats // aggregated column stats from catalog (nil = unavailable)
 	SampleMethod    string            // TABLESAMPLE method: BERNOULLI, SYSTEM
 	SamplePercent   float64           // percentage for TABLESAMPLE (0-100)
 

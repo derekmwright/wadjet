@@ -15,6 +15,10 @@ import (
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/telemetry"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -62,6 +66,8 @@ type Worker struct {
 	// CPU profiling state — started/stopped via NATS profile requests.
 	profMu  sync.Mutex
 	profBuf *bytes.Buffer // nil when not profiling
+
+	otel *telemetry.Provider // nil = no OTel tracing
 }
 
 // New creates a new Worker.
@@ -246,6 +252,11 @@ func (w *Worker) Stop() {
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }
 
+// SetTelemetry enables OpenTelemetry tracing on the worker.
+func (w *Worker) SetTelemetry(tp *telemetry.Provider) {
+	w.otel = tp
+}
+
 func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem chan struct{}) {
 	// Batch fetch: pull up to available concurrency slots at once to
 	// amortize the NATS round-trip overhead.
@@ -361,6 +372,19 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	}
 	defer taskCancel()
 
+	// Start OTel child span linked to coordinator's trace
+	if w.otel != nil && task.TraceID != "" {
+		var span trace.Span
+		taskCtx, span = w.otel.StartRemoteSpan(taskCtx, "worker.ExecuteTask",
+			task.TraceID, task.SpanID,
+			attribute.String("task.id", task.ID),
+			attribute.String("task.type", string(task.Type)),
+			attribute.String("query.id", task.QueryID),
+			attribute.String("worker.id", w.config.WorkerID),
+		)
+		defer span.End()
+	}
+
 	// Monitor for cancellation during execution
 	go func() {
 		ticker := time.NewTicker(500 * time.Millisecond)
@@ -414,14 +438,25 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	data, err := distributed.Marshal(result)
 	if err != nil {
 		w.logger.Error("failed to marshal result", "error", err)
+		w.publishDLQ(task, "marshal_error", fmt.Sprintf("marshal result: %v", err))
 		msg.Nak()
 		return
 	}
 
 	if err := w.nc.Publish(subject, data); err != nil {
 		w.logger.Error("failed to publish result", "error", err)
+		w.publishDLQ(task, "publish_error", fmt.Sprintf("publish result: %v", err))
 		msg.Nak()
 		return
+	}
+
+	// Publish failed tasks to the DLQ for inspection
+	if !result.Success {
+		reason := "execution_error"
+		if len(result.Error) >= 13 && result.Error[:13] == "task panicked" {
+			reason = "panic"
+		}
+		w.publishDLQ(task, reason, result.Error)
 	}
 
 	msg.Ack()
@@ -448,6 +483,32 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		logAttrsEnd = append(logAttrsEnd, "error", result.Error)
 	}
 	w.logger.Info("task completed", logAttrsEnd...)
+}
+
+// publishDLQ sends a failed task to the dead-letter queue for later inspection.
+func (w *Worker) publishDLQ(task distributed.Task, reason, errMsg string) {
+	taskData, _ := json.Marshal(task)
+	entry := distributed.DLQEntry{
+		EntryID:   uuid.NewString(),
+		TaskID:    task.ID,
+		QueryID:   task.QueryID,
+		StageID:   task.StageID,
+		WorkerID:  w.config.WorkerID,
+		TaskType:  task.Type,
+		Error:     errMsg,
+		Reason:    reason,
+		TaskData:  taskData,
+		Timestamp: time.Now(),
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		w.logger.Error("failed to marshal DLQ entry", "task_id", task.ID, "error", err)
+		return
+	}
+	subj := distributed.DLQSubject(task.QueryID, task.ID)
+	if err := w.nc.Publish(subj, data); err != nil {
+		w.logger.Error("failed to publish to DLQ", "task_id", task.ID, "error", err)
+	}
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {

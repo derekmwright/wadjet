@@ -24,6 +24,14 @@ type Config struct {
 	GeoIP           GeoIP           `yaml:"geoip"`
 	QueryLimits     QueryLimits     `yaml:"query_limits"`     // global query cost limits
 	CatalogSnapshot CatalogSnapshot `yaml:"catalog_snapshot"` // periodic catalog backup
+	Telemetry       Telemetry       `yaml:"telemetry"`        // OpenTelemetry tracing export
+}
+
+// Telemetry configures OpenTelemetry tracing export.
+type Telemetry struct {
+	Endpoint   string  `yaml:"endpoint"`    // OTLP gRPC endpoint (e.g., "localhost:4317")
+	Insecure   bool    `yaml:"insecure"`    // use plaintext gRPC (no TLS)
+	SampleRate float64 `yaml:"sample_rate"` // 0.0-1.0 (default: 1.0 = always)
 }
 
 // CatalogSnapshot configures periodic catalog metadata snapshots to object storage.
@@ -154,6 +162,9 @@ type NATS struct {
 	StoreDir    string   `yaml:"store_dir"`    // JetStream storage directory
 	ClusterID   string   `yaml:"cluster_id"`   // unique cluster identifier (e.g., "central", "afb-east")
 	LeafRemotes []string `yaml:"leaf_remotes"` // remote NATS URLs for leaf node connections
+	TLSCert     string   `yaml:"tls_cert"`     // TLS certificate file (server or client)
+	TLSKey      string   `yaml:"tls_key"`      // TLS private key file
+	TLSCA       string   `yaml:"tls_ca"`       // CA certificate for verifying peers (enables mTLS)
 }
 
 // HTTP configures the HTTP API server.
@@ -266,6 +277,9 @@ func LoadOrDefault(path string) *Config {
 //	WADJET_NATS_URL               - NATS URL (worker mode)
 //	WADJET_NATS_CLUSTER_ID        - cluster identifier
 //	WADJET_NATS_LEAF_REMOTES      - comma-separated remote NATS URLs
+//	WADJET_NATS_TLS_CERT          - NATS TLS certificate file
+//	WADJET_NATS_TLS_KEY           - NATS TLS private key file
+//	WADJET_NATS_TLS_CA            - NATS TLS CA file (enables mTLS)
 //	WADJET_WORKER_MAX_CONCURRENT  - max concurrent tasks
 //	WADJET_WORKER_MEMORY_BUDGET   - per-task memory budget (bytes)
 //	WADJET_WORKER_SPILL_DIR       - spill directory
@@ -277,6 +291,9 @@ func LoadOrDefault(path string) *Config {
 //	WADJET_CATALOG_SNAPSHOT_PREFIX    - S3 key prefix
 //	WADJET_CATALOG_SNAPSHOT_DEBOUNCE  - duration (e.g. "30s")
 //	WADJET_CATALOG_SNAPSHOT_LEADER_ONLY - true/false
+//	WADJET_OTEL_ENDPOINT          - OTLP gRPC endpoint (e.g. localhost:4317)
+//	WADJET_OTEL_INSECURE          - true/false (plaintext gRPC)
+//	WADJET_OTEL_SAMPLE_RATE       - 0.0-1.0 sampling rate
 func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("WADJET_MODE"); v != "" {
 		cfg.Mode = v
@@ -321,6 +338,15 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("WADJET_NATS_LEAF_REMOTES"); v != "" {
 		cfg.NATS.LeafRemotes = strings.Split(v, ",")
+	}
+	if v := os.Getenv("WADJET_NATS_TLS_CERT"); v != "" {
+		cfg.NATS.TLSCert = v
+	}
+	if v := os.Getenv("WADJET_NATS_TLS_KEY"); v != "" {
+		cfg.NATS.TLSKey = v
+	}
+	if v := os.Getenv("WADJET_NATS_TLS_CA"); v != "" {
+		cfg.NATS.TLSCA = v
 	}
 	if v := os.Getenv("WADJET_WORKER_MAX_CONCURRENT"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -377,5 +403,16 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_LEADER_ONLY"); v != "" {
 		b := strings.EqualFold(v, "true") || v == "1"
 		cfg.CatalogSnapshot.LeaderOnly = &b
+	}
+	if v := os.Getenv("WADJET_OTEL_ENDPOINT"); v != "" {
+		cfg.Telemetry.Endpoint = v
+	}
+	if v := os.Getenv("WADJET_OTEL_INSECURE"); v != "" {
+		cfg.Telemetry.Insecure = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv("WADJET_OTEL_SAMPLE_RATE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.Telemetry.SampleRate = f
+		}
 	}
 }

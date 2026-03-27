@@ -2,6 +2,8 @@ package distributed
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -18,10 +20,13 @@ import (
 type NATSConfig struct {
 	Host        string
 	Port        int
-	StoreDir    string // JetStream storage directory
-	MaxPayload  int32  // max message payload in bytes (default 8 MB)
-	ClusterID   string // unique cluster identifier (e.g., "central", "afb-east")
+	StoreDir    string   // JetStream storage directory
+	MaxPayload  int32    // max message payload in bytes (default 8 MB)
+	ClusterID   string   // unique cluster identifier (e.g., "central", "afb-east")
 	LeafRemotes []string // remote NATS URLs for leaf node connections (edge → central)
+	TLSCert     string   // TLS certificate file (server cert for coordinator)
+	TLSKey      string   // TLS private key file
+	TLSCA       string   // CA certificate for verifying client certs (enables mTLS)
 }
 
 // DefaultNATSConfig returns a default NATS configuration.
@@ -65,6 +70,33 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 		ServerName:     cfg.ClusterID,
 	}
 
+	// Configure mTLS on the NATS server if cert/key/CA are provided.
+	if cfg.TLSCert != "" && cfg.TLSKey != "" && cfg.TLSCA != "" {
+		caCert, err := os.ReadFile(cfg.TLSCA)
+		if err != nil {
+			return nil, fmt.Errorf("reading NATS CA file: %w", err)
+		}
+		caPool := x509.NewCertPool()
+		if !caPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("parsing NATS CA certificate from %s", cfg.TLSCA)
+		}
+
+		serverCert, err := tls.LoadX509KeyPair(cfg.TLSCert, cfg.TLSKey)
+		if err != nil {
+			return nil, fmt.Errorf("loading NATS server certificate: %w", err)
+		}
+
+		opts.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{serverCert},
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+			ClientCAs:    caPool,
+			MinVersion:   tls.VersionTLS12,
+		}
+		opts.TLS = true
+		opts.TLSVerify = true // require client certs
+		opts.TLSTimeout = 5  // seconds
+	}
+
 	// Configure leaf node connections to remote clusters
 	if len(cfg.LeafRemotes) > 0 {
 		var remotes []*natsserver.RemoteLeafOpts
@@ -100,6 +132,9 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 	}
 	if len(cfg.LeafRemotes) > 0 {
 		logFields = append(logFields, "leaf_remotes", cfg.LeafRemotes)
+	}
+	if cfg.TLSCert != "" {
+		logFields = append(logFields, "tls", true)
 	}
 	logger.Info("embedded NATS started", logFields...)
 
@@ -153,12 +188,26 @@ func SetupStreams(ctx context.Context, js jetstream.JetStream) error {
 		return fmt.Errorf("creating results stream: %w", err)
 	}
 
+	// Dead-letter queue: retains failed tasks for 48 hours for inspection/retry
+	_, err = js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name:      StreamDLQ,
+		Subjects:  []string{SubjectDLQAll},
+		Retention: jetstream.LimitsPolicy,
+		MaxAge:    48 * time.Hour,
+		MaxMsgs:   10000,
+		Storage:   jetstream.FileStorage,
+	})
+	if err != nil {
+		return fmt.Errorf("creating DLQ stream: %w", err)
+	}
+
 	return nil
 }
 
 // Connect creates a NATS client connection over TCP.
-func Connect(url string) (*nats.Conn, error) {
-	nc, err := nats.Connect(url,
+// If tlsCfg is non-nil, the connection uses TLS (mTLS when client certs are configured).
+func Connect(url string, tlsCfg *tls.Config) (*nats.Conn, error) {
+	opts := []nats.Option{
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(time.Second),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
@@ -169,11 +218,40 @@ func Connect(url string) (*nats.Conn, error) {
 		nats.ReconnectHandler(func(_ *nats.Conn) {
 			slog.Info("NATS reconnected")
 		}),
-	)
+	}
+	if tlsCfg != nil {
+		opts = append(opts, nats.Secure(tlsCfg))
+	}
+
+	nc, err := nats.Connect(url, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to NATS: %w", err)
 	}
 	return nc, nil
+}
+
+// BuildNATSClientTLS creates a TLS config for a NATS client (worker connecting to coordinator).
+// certFile/keyFile are the client certificate and key; caFile is the CA that signed the server cert.
+func BuildNATSClientTLS(certFile, keyFile, caFile string) (*tls.Config, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("loading NATS client certificate: %w", err)
+	}
+
+	caCert, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("reading NATS CA file: %w", err)
+	}
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("parsing NATS CA certificate from %s", caFile)
+	}
+
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		RootCAs:      caPool,
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
 
 // ConnectInProcess creates a NATS client connection using in-process communication.
