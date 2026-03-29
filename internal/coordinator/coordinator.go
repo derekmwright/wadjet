@@ -525,7 +525,8 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		// materialization overhead of distributed execution against
 		// parallelism benefit of splitting scans across workers.
 		hasSelfJoins := physical.HasSelfJoins(physStages)
-		canScanSplit := physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !hasSelfJoins
+		hasFusedAgg := physical.HasFusedAggregate(physStages)
+		canScanSplit := physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !hasSelfJoins && !hasFusedAgg
 
 		if canScanSplit {
 			// Scan-split pipeline: distribute S3 reads across workers,

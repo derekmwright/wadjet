@@ -1139,6 +1139,20 @@ func HasSelfJoins(stages []Stage) bool {
 	return false
 }
 
+// HasFusedAggregate returns true if any scan stage has fused aggregate specs.
+// Queries with fused scan-aggregate should use the full distributed path
+// (scan → merge_aggregate) rather than scan-split, because fused aggregation
+// reduces data volume at the scan level (e.g., 55M rows → 4 groups for Q01).
+// Scan-split would strip the fused specs and ship all raw rows through S3.
+func HasFusedAggregate(stages []Stage) bool {
+	for _, s := range stages {
+		if s.Type == "scan" && len(s.FusedAggSpecs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // ExtractScanStages returns only the scan stages from a stage list.
 // Used to build scan-split pipeline plans where scans are distributed
 // and compute runs on a single pipeline worker.
