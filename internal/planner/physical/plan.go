@@ -2137,6 +2137,16 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	const deferBuildThreshold int64 = 1_000_000
 	deferBuild := est > deferBuildThreshold && hj.SemiAntiKeyOnly
 
+	// Reverse bloom: for very large semi join builds (>10M rows), run the
+	// probe side first, build a bloom from its join key values, then filter
+	// the build scan. Sacrifices I/O overlap for massive scan reduction
+	// (e.g. Q21 EXISTS: 60M lineitem rows reduced when only ~500K orders match).
+	// Only for SemiJoin and AntiJoin — the bloom filter has no false negatives,
+	// so all matching build-side rows pass through. Anti joins correctly detect
+	// absence because every build key matching a probe key is preserved.
+	const reverseBloomThreshold int64 = 10_000_000
+	useReverseBloom := est > reverseBloomThreshold && (joinType == exec.SemiJoin || joinType == exec.AntiJoin)
+
 	// Pre-compute post-build operations that can run in the build goroutine.
 	var keepCols []string
 	if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
@@ -2162,17 +2172,27 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// the left (probe) side. For multi-way joins, the left side recursively
 	// calls buildJoin → each level overlaps its build with the next level's
 	// preparation, so all independent hash table builds run concurrently.
+	//
+	// For reverse bloom, the build goroutine waits for a signal before
+	// starting — the probe side's child pipeline must finish first so we
+	// can inject a bloom filter into the build-side scan.
+	var buildStart chan struct{}
+	if useReverseBloom {
+		buildStart = make(chan struct{})
+	}
 	buildDone := make(chan struct{})
 	var buildErr error
+	var rbBuildSource exec.Source = buildSource // may be wrapped with bloom
 	go func() {
 		defer close(buildDone)
-		if err := hj.Build(ctx, buildSource); err != nil {
+		if buildStart != nil {
+			<-buildStart // wait for reverse bloom injection
+		}
+		if err := hj.Build(ctx, rbBuildSource); err != nil {
 			buildErr = fmt.Errorf("building hash table: %w", err)
 			return
 		}
-		// For deferred builds, post-build setup runs in the goroutine so
-		// probes can start immediately when the barrier fires.
-		if deferBuild {
+		if deferBuild || useReverseBloom {
 			hj.FixKeyAssignment()
 			if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
 				hj.PruneBuildColumns(keepCols)
@@ -2183,8 +2203,39 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// Left side (probe) streams through — prepared concurrently with build.
 	leftSource, leftOps, _, err := p.buildPipeline(ctx, node.Children[0])
 	if err != nil {
+		if buildStart != nil {
+			close(buildStart)
+		}
 		<-buildDone // prevent goroutine leak
 		return nil, nil, nil, fmt.Errorf("building join left side: %w", err)
+	}
+
+	if useReverseBloom {
+		// Reverse bloom: run probe-side child pipeline first, build a bloom
+		// from its join key values, inject as filter on build-side scan, then
+		// signal the build goroutine to start with the filtered scan.
+		probe := hj.Probe()
+		if len(node.NeededColumns) > 0 {
+			filter := make(map[string]bool, len(node.NeededColumns))
+			for _, col := range node.NeededColumns {
+				filter[col] = true
+			}
+			probe.OutputFilter = filter
+		}
+
+		bridge := &reverseBloomBridge{
+			childSource:    leftSource,
+			childOps:       leftOps,
+			rbBuildSource:  &rbBuildSource,
+			buildSource:    buildSource,
+			buildStart:     buildStart,
+			barrier:        buildDone,
+			buildErr:       &buildErr,
+			probeKey:       leftKeys[0],
+			buildKey:       rightKeys[0],
+			workers:        innerPipelineWorkers(leftSource),
+		}
+		return bridge, []exec.UnaryOperator{probe}, &exec.CollectSink{}, nil
 	}
 
 	if deferBuild {
@@ -2206,7 +2257,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			childOps:    leftOps,
 			barrier:     buildDone,
 			buildErr:    &buildErr,
-			workers:     runtime.NumCPU(),
+			workers:     innerPipelineWorkers(leftSource),
 		}
 
 		if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
@@ -2351,6 +2402,97 @@ func (d *deferredJoinBridge) Next(_ context.Context) (*batch.RecordBatch, error)
 }
 
 func (d *deferredJoinBridge) Close() error {
+	return nil
+}
+
+// reverseBloomBridge runs the probe-side child pipeline first, builds a bloom
+// filter from the collected join key values, injects it into the build-side
+// scan, then signals the build goroutine to start. This drastically reduces
+// build-side I/O for semi/anti joins where the probe result is much smaller
+// than the build table (e.g. Q21: 60M lineitem rows reduced to ~2M when only
+// ~500K orders match).
+type reverseBloomBridge struct {
+	childSource   exec.Source
+	childOps      []exec.UnaryOperator
+	rbBuildSource *exec.Source // pointer to the goroutine's build source (swappable)
+	buildSource   exec.Source  // original build source (unwrapped)
+	buildStart    chan struct{}
+	barrier       <-chan struct{}
+	buildErr      *error
+	probeKey      string // probe-side column to extract bloom from
+	buildKey      string // build-side column to filter
+	workers       int
+
+	batches []*batch.RecordBatch
+	idx     int
+	mu      sync.Mutex
+}
+
+func (rb *reverseBloomBridge) Init(ctx context.Context) error {
+	// Phase 1: Run child pipeline to collect probe-side batches.
+	sink := &exec.CollectSink{}
+	pipe := &exec.Pipeline{
+		Source:  rb.childSource,
+		Ops:    rb.childOps,
+		Sink:   sink,
+		Workers: rb.workers,
+	}
+	if err := pipe.Run(ctx); err != nil {
+		close(rb.buildStart)
+		<-rb.barrier
+		return fmt.Errorf("reverse bloom child pipeline: %w", err)
+	}
+	rb.batches = sink.Batches()
+
+	// Phase 2: Build bloom from collected batches' join key column.
+	bloom, bloomMask := exec.BuildBloomFromBatches(rb.batches, rb.probeKey)
+
+	// Phase 3: Inject bloom filter into build-side pipeline.
+	if bloom != nil {
+		useIntKey := false
+		if len(rb.batches) > 0 {
+			if ci := rb.batches[0].ColumnIndex(rb.probeKey); ci >= 0 {
+				col := rb.batches[0].Columns[ci]
+				useIntKey = col.Type == batch.TypeInt32 || col.Type == batch.TypeInt64 ||
+					col.Type == batch.TypePort || col.Type == batch.TypeProtocol ||
+					col.Type == batch.TypeDate
+			}
+		}
+		bloomOp := exec.NewBloomFilterOp(bloom, bloomMask, []string{rb.buildKey}, useIntKey)
+		*rb.rbBuildSource = &pipelineSource{
+			source: rb.buildSource,
+			ops:    []exec.UnaryOperator{bloomOp},
+		}
+	}
+
+	// Phase 4: Signal build goroutine to start with the bloom-filtered scan.
+	close(rb.buildStart)
+
+	// Wait for build to complete.
+	select {
+	case <-rb.barrier:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if *rb.buildErr != nil {
+		return *rb.buildErr
+	}
+	return nil
+}
+
+func (rb *reverseBloomBridge) Next(_ context.Context) (*batch.RecordBatch, error) {
+	rb.mu.Lock()
+	if rb.idx >= len(rb.batches) {
+		rb.mu.Unlock()
+		return nil, nil
+	}
+	b := rb.batches[rb.idx]
+	rb.idx++
+	rb.mu.Unlock()
+	return b, nil
+}
+
+func (rb *reverseBloomBridge) Close() error {
 	return nil
 }
 
@@ -5330,6 +5472,10 @@ type scanSourceInner struct {
 
 	// Dynamic min/max range filter from hash join build side.
 	dynamicFilter []exec.DynamicRange
+
+	// failedFiles counts files that failed to read during buildRGUnits.
+	// When > 0, Init returns an error to prevent silent data loss.
+	failedFiles int
 }
 
 // scanPredicate is a simple predicate for row-group stats pruning.
@@ -5440,6 +5586,13 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		// Eager row-group-level parallel scan: download all files, enumerate
 		// row groups, apply predicate pruning, then process RGs in parallel.
 		inner.buildRGUnits(scanCtx)
+
+		// Fail the scan if all files failed to read — prevents silent 0-row
+		// results that are indistinguishable from correct empty results.
+		if inner.failedFiles > 0 && len(inner.rgUnits) == 0 && len(inner.files) > 0 {
+			cancel()
+			return fmt.Errorf("scan %s: all %d files failed to read (%d failures)", s.tableName, len(inner.files), inner.failedFiles)
+		}
 
 		// Initialize batch pool from the most common row group size
 		if len(inner.rgUnits) > 0 {

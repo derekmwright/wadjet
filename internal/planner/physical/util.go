@@ -41,6 +41,15 @@ func readAllSized(rc io.ReadCloser, sizeBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Read any remaining data beyond sizeBytes. This handles the case
+	// where the catalog entry has an incorrect (stale) SizeBytes. Parquet
+	// files have their footer at the end — truncating silently produces
+	// unreadable files that are then silently skipped by buildRGUnits.
+	extra, _ := io.ReadAll(rc)
+	if len(extra) > 0 {
+		buf = append(buf[:n], extra...)
+		return buf, nil
+	}
 	return buf[:n], nil
 }
 
@@ -441,6 +450,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 
 	results := make([]fileResult, len(inner.files))
+	var failedFiles atomic.Int64
 	var readWg sync.WaitGroup
 	var readIdx int64
 
@@ -469,15 +479,18 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 				// than N range reads per column page during rgWorker processing.
 				rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
 				if err != nil {
+					failedFiles.Add(1)
 					continue
 				}
 				data, err := readAllSized(rc, entry.SizeBytes)
 				rc.Close()
 				if err != nil {
+					failedFiles.Add(1)
 					continue
 				}
 				reader, err := parquet.NewReader(bytesReader(data), int64(len(data)))
 				if err != nil {
+					failedFiles.Add(1)
 					continue
 				}
 				results[idx] = fileResult{reader: reader, entry: entry}
@@ -485,6 +498,10 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 		}()
 	}
 	readWg.Wait()
+
+	if failed := failedFiles.Load(); failed > 0 {
+		inner.failedFiles = int(failed)
+	}
 
 	// Enumerate row groups from all files, applying predicate-based and bloom pruning
 	for _, fr := range results {
