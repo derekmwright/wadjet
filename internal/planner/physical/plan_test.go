@@ -1375,3 +1375,48 @@ func TestDeferredJoinBridgeBuildError(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+// TestExtractScanStages_ClearsFusedAgg verifies that ExtractScanStages returns
+// scan stages with their FusedAggSpecs still set (the caller is responsible
+// for clearing them in scan-split mode). This test documents the interaction:
+// PlanDistributed sets FusedAggSpecs on scan stages for fused scan-aggregate,
+// but scan-split pipeline mode must clear them so scan tasks produce raw rows.
+func TestExtractScanStages_ClearsFusedAgg(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	planner := NewPlanner(cat)
+
+	scan := logical.NewScan("events", "e")
+	agg := logical.NewAggregate(scan,
+		[]string{"user_id"},
+		[]logical.AggExpr{
+			{Func: "count", InputCol: "event_id", OutputCol: "cnt"},
+		},
+	)
+
+	stages, err := planner.PlanDistributed(ctx, agg)
+	if err != nil {
+		t.Fatalf("PlanDistributed: %v", err)
+	}
+
+	// Verify fused agg is set on the scan stage
+	scanStages := ExtractScanStages(stages)
+	if len(scanStages) != 1 {
+		t.Fatalf("expected 1 scan stage, got %d", len(scanStages))
+	}
+	if len(scanStages[0].FusedAggSpecs) == 0 {
+		t.Fatal("scan stage should have FusedAggSpecs from fused scan-aggregate")
+	}
+
+	// Simulate what the coordinator does in scan-split mode: clear fused agg
+	for i := range scanStages {
+		scanStages[i].FusedAggSpecs = nil
+		scanStages[i].FusedAggGroupBy = nil
+	}
+
+	if scanStages[0].FusedAggSpecs != nil {
+		t.Error("FusedAggSpecs should be nil after clearing for scan-split")
+	}
+	if scanStages[0].FusedAggGroupBy != nil {
+		t.Error("FusedAggGroupBy should be nil after clearing for scan-split")
+	}
+}

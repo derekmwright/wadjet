@@ -182,3 +182,183 @@ func TestShuffleCorrectness(t *testing.T) {
 		})
 	}
 }
+
+// TestScanSplitFusedAgg verifies that scan-split pipeline mode correctly clears
+// fused aggregate specs from scan stages. Without the fix, scan tasks produce
+// partial aggregates instead of raw rows, causing the pipeline to get column
+// mismatches and return 0 rows (reproduced Q01/Q20 returning 0 on SF10).
+func TestScanSplitFusedAgg(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	t.Cleanup(cancel)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	natsCfg := distributed.DefaultNATSConfig()
+	natsCfg.Port = -1
+	natsCfg.StoreDir = t.TempDir()
+	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
+	if err != nil {
+		t.Fatalf("starting NATS: %v", err)
+	}
+	t.Cleanup(embeddedNATS.Shutdown)
+
+	nc, err := distributed.ConnectInProcess(embeddedNATS.Server())
+	if err != nil {
+		t.Fatalf("connecting to NATS: %v", err)
+	}
+	t.Cleanup(func() { nc.Close() })
+
+	js, err := distributed.NewJetStream(nc)
+	if err != nil {
+		t.Fatalf("creating JetStream: %v", err)
+	}
+	if err := distributed.SetupStreams(ctx, js); err != nil {
+		t.Fatalf("setting up streams: %v", err)
+	}
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("creating NATS KV: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("catalog init: %v", err)
+	}
+
+	// Load TPC-H data, splitting lineitem into multiple files to trigger
+	// scan-split. ShouldSplitScan requires totalScanFiles >= workerCount*2.
+	data := tpch.Generate(tpch.SF001)
+	for tableName, schema := range tpch.AllTables {
+		if err := cat.CreateTable(ctx, tableName, schema, nil); err != nil {
+			t.Fatalf("creating table %s: %v", tableName, err)
+		}
+		rows := data[tableName]
+		if len(rows) == 0 {
+			continue
+		}
+
+		if tableName == "lineitem" && len(rows) > 20 {
+			// Split lineitem into 8 files to trigger scan-split with 3 workers
+			chunkSize := len(rows) / 8
+			if chunkSize < 1 {
+				chunkSize = 1
+			}
+			var entries []catalog.FileEntry
+			for ci := 0; ci < 8; ci++ {
+				start := ci * chunkSize
+				end := start + chunkSize
+				if ci == 7 {
+					end = len(rows) // last chunk gets remainder
+				}
+				if start >= len(rows) {
+					break
+				}
+				chunk := rows[start:end]
+				var buf bytes.Buffer
+				pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+				if err != nil {
+					t.Fatalf("parquet writer for %s chunk %d: %v", tableName, ci, err)
+				}
+				if err := pw.WriteRows(chunk); err != nil {
+					t.Fatalf("writing %s chunk %d: %v", tableName, ci, err)
+				}
+				if err := pw.Close(); err != nil {
+					t.Fatalf("closing %s chunk %d: %v", tableName, ci, err)
+				}
+				filePath := fmt.Sprintf("tables/%s/chunk_%04d.parquet", tableName, ci)
+				pdata := buf.Bytes()
+				if _, err := store.Put(ctx, "test", filePath, bytes.NewReader(pdata), int64(len(pdata)), "application/octet-stream"); err != nil {
+					t.Fatalf("storing %s chunk %d: %v", tableName, ci, err)
+				}
+				// Inflate SizeBytes so ShouldSplitScan sees enough data
+				// to trigger scan-split (needs totalScanBytes >= workerCount * 64MB).
+				// The actual file content is small but the planner only reads metadata.
+				entries = append(entries, catalog.FileEntry{
+					Path:      filePath,
+					SizeBytes: 32 * 1024 * 1024, // 32 MB per chunk → 256 MB total
+					NumRows:   int64(len(chunk)),
+					CreatedAt: time.Now(),
+				})
+			}
+			if err := cat.AddFiles(ctx, tableName, map[string]string{}, "tables/"+tableName+"/", entries); err != nil {
+				t.Fatalf("adding %s to manifest: %v", tableName, err)
+			}
+			continue
+		}
+
+		var buf bytes.Buffer
+		pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+		if err != nil {
+			t.Fatalf("parquet writer for %s: %v", tableName, err)
+		}
+		if err := pw.WriteRows(rows); err != nil {
+			t.Fatalf("writing %s rows: %v", tableName, err)
+		}
+		if err := pw.Close(); err != nil {
+			t.Fatalf("closing %s writer: %v", tableName, err)
+		}
+		filePath := fmt.Sprintf("tables/%s/chunk_0001.parquet", tableName)
+		pdata := buf.Bytes()
+		if _, err := store.Put(ctx, "test", filePath, bytes.NewReader(pdata), int64(len(pdata)), "application/octet-stream"); err != nil {
+			t.Fatalf("storing %s parquet: %v", tableName, err)
+		}
+		if err := cat.AddFiles(ctx, tableName, map[string]string{}, "tables/"+tableName+"/", []catalog.FileEntry{{
+			Path:      filePath,
+			SizeBytes: int64(len(pdata)),
+			NumRows:   int64(len(rows)),
+			CreatedAt: time.Now(),
+		}}); err != nil {
+			t.Fatalf("adding %s to manifest: %v", tableName, err)
+		}
+	}
+
+	// Start 3 workers
+	for i := 0; i < 3; i++ {
+		w := worker.New(worker.Config{
+			NATSUrl:       embeddedNATS.ClientURL(),
+			MaxConcurrent: 4,
+			CacheBytes:    64 * 1024 * 1024,
+		}, store, nc, js, logger)
+		if err := w.Start(ctx); err != nil {
+			t.Fatalf("starting worker %d: %v", i, err)
+		}
+		t.Cleanup(w.Stop)
+	}
+
+	coord := New(Config{
+		NATSUrl:      embeddedNATS.ClientURL(),
+		ResultBucket: "test",
+	}, cat, nc, js, logger)
+
+	// Inject fake heartbeats so coordinator sees 3 workers
+	for i := 0; i < 3; i++ {
+		coord.workers.record(distributed.WorkerHeartbeat{
+			WorkerID:  fmt.Sprintf("scan-split-worker-%d", i),
+			Timestamp: time.Now(),
+		})
+	}
+
+	// Q01 (Pricing Summary Report) is the canonical fused scan-aggregate query:
+	// SELECT ... FROM lineitem WHERE ... GROUP BY ... ORDER BY ...
+	// With 8 lineitem files and 3 workers, this should trigger scan-split.
+	// Before the fix, scan tasks would produce partial aggregates (fused agg),
+	// and the pipeline would get column mismatches → 0 rows.
+	q1 := tpch.TPCHQueries[1]
+	result, err := coord.ExecuteSQL(ctx, q1.SQL)
+	if err != nil {
+		t.Fatalf("Q01 ExecuteSQL failed: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("Q01 error: %s", result.Error)
+	}
+	rows := result.Rows()
+	t.Logf("Q01: %d rows (plan:\n%s)", len(rows), result.Plan)
+	if len(rows) != 6 {
+		// SF0.01 Q01 returns 6 rows (distinct l_returnflag × l_linestatus groups)
+		t.Errorf("Q01: got %d rows, want 6", len(rows))
+	}
+}
