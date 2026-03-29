@@ -5491,6 +5491,35 @@ type scanSourceInner struct {
 	// When > 0, Init returns an error to prevent silent data loss.
 	failedFiles  int
 	firstFileErr error // sample error from the first file failure
+
+	// pooledBufs tracks []byte buffers obtained from readBufPool during
+	// buildRGUnits. These are returned to the pool when the scan source
+	// is closed, enabling cross-query buffer reuse.
+	pooledBufsMu sync.Mutex
+	pooledBufs   [][]byte
+}
+
+// trackPooledBuf records a buffer obtained from readBufPool so it can be
+// returned when the scan source is closed. Thread-safe for parallel readers.
+func (inner *scanSourceInner) trackPooledBuf(buf []byte) {
+	inner.pooledBufsMu.Lock()
+	inner.pooledBufs = append(inner.pooledBufs, buf)
+	inner.pooledBufsMu.Unlock()
+}
+
+// releasePooledBufs returns all tracked buffers to readBufPool.
+// Safe to call multiple times — subsequent calls are no-ops.
+func (inner *scanSourceInner) releasePooledBufs() {
+	inner.pooledBufsMu.Lock()
+	bufs := inner.pooledBufs
+	inner.pooledBufs = nil
+	inner.pooledBufsMu.Unlock()
+	// Nil out rgUnits to break pqFile → bytes.Reader → []byte reference
+	// chain before returning buffers, so GC doesn't pin old data.
+	inner.rgUnits = nil
+	for _, buf := range bufs {
+		putReadBuf(buf)
+	}
 }
 
 // scanPredicate is a simple predicate for row-group stats pruning.
@@ -5664,8 +5693,11 @@ func (s *scannerExecSource) Next(ctx context.Context) (*batch.RecordBatch, error
 }
 
 func (s *scannerExecSource) Close() error {
-	if s.scanner != nil && s.scanner.cancel != nil {
-		s.scanner.cancel()
+	if s.scanner != nil {
+		if s.scanner.cancel != nil {
+			s.scanner.cancel()
+		}
+		s.scanner.releasePooledBufs()
 	}
 	return nil
 }
@@ -5707,11 +5739,12 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 			if err != nil {
 				continue
 			}
-			data, err := readAllSized(rc, file.SizeBytes)
+			data, err := readAllSized(rc, file.SizeBytes, true)
 			rc.Close()
 			if err != nil {
 				continue
 			}
+			inner.trackPooledBuf(data)
 			reader, err = parquet.NewReader(bytesReader(data), int64(len(data)))
 			if err != nil {
 				continue
