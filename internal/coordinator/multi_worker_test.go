@@ -344,9 +344,10 @@ func TestScanSplitFusedAgg(t *testing.T) {
 
 	// Q01 (Pricing Summary Report) is the canonical fused scan-aggregate query:
 	// SELECT ... FROM lineitem WHERE ... GROUP BY ... ORDER BY ...
-	// With 8 lineitem files and 3 workers, this should trigger scan-split.
-	// Before the fix, scan tasks would produce partial aggregates (fused agg),
-	// and the pipeline would get column mismatches → 0 rows.
+	// With 8 lineitem files and 3 workers, fused-agg queries now skip
+	// scan-split and use the full distributed path (fused scan → merge_aggregate).
+	// This is both correct AND fast: fused agg reduces 55M rows to ~4 groups
+	// at the scan level, avoiding the need to ship raw rows through S3.
 	q1 := tpch.TPCHQueries[1]
 	result, err := coord.ExecuteSQL(ctx, q1.SQL)
 	if err != nil {
