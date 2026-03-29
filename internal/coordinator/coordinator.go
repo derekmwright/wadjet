@@ -533,6 +533,16 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			// Excluded when subqueries remain un-decorrelated (scan node count
 			// mismatch) and self-joins on large tables (traversal order mismatch).
 			scanStages := physical.ExtractScanStages(physStages)
+			// Clear fused aggregate specs from scan stages. In scan-split
+			// mode, scan tasks must produce raw filtered rows — the pipeline
+			// worker runs the full query (including aggregation) from SQL.
+			// Leaving FusedAggSpecs causes scan tasks to emit partial
+			// aggregates, which the pipeline's re-parsed plan cannot consume
+			// (column mismatch → 0 rows).
+			for i := range scanStages {
+				scanStages[i].FusedAggSpecs = nil
+				scanStages[i].FusedAggGroupBy = nil
+			}
 			scanDeps := make([]string, len(scanStages))
 			for i, s := range scanStages {
 				scanDeps[i] = s.ID
