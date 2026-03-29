@@ -103,6 +103,12 @@ type HashJoin struct {
 	buildKeyMin []any
 	buildKeyMax []any
 
+	// trackedMem tracks how much memory THIS join has reserved from the shared
+	// MemTracker. Used during spill to release only this join's contribution
+	// rather than resetting the entire shared tracker (which would wipe other
+	// concurrent builds' accounting).
+	trackedMem int64
+
 	// Grace Hash Join spill state. Non-nil when build-side data has been
 	// partitioned and spilled to disk due to memory pressure.
 	spillState *spillState
@@ -569,6 +575,12 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 	return p.lookupBuf
 }
 
+// TrackedMem returns how much memory this join has reserved from the shared tracker.
+func (h *HashJoin) TrackedMem() int64 { return h.trackedMem }
+
+// SpillState returns the spill state (nil if no spill has occurred). Test-only.
+func (h *HashJoin) SpillState() *spillState { return h.spillState }
+
 // intProbeKey extracts the int64 probe key for the int fast path.
 func (h *HashJoin) intProbeKey(in *batch.RecordBatch, row int) (int64, bool) {
 	h.resolveProbeKeyIdx(in)
@@ -766,8 +778,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				// Try spilling before giving up
 				if h.Spill != nil {
 					if spillErr := h.spillBuildBatches(cost); spillErr == nil {
-						// After spill, tracker is reset to reflect only in-memory partitions.
-						// Try Reserve again — should succeed if enough was spilled.
+						// After spill, this join's trackedMem was reduced. Try again.
 						if err2 := h.MemTracker.Reserve(cost); err2 != nil {
 							h.mu.Unlock()
 							return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
@@ -780,6 +791,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 						err, h.buildRows, len(h.buildBatches))
 				}
 			}
+			h.trackedMem += cost
 		}
 
 		// If spill state is active, route new batches through partitioning
@@ -1747,16 +1759,17 @@ func (h *HashJoin) spillBuildBatches(neededBytes int64) error {
 
 	// Spill largest partition(s) until memory pressure is resolved
 	for {
-		// Re-sync tracker with actual in-memory usage
+		// Re-sync tracker: release only what THIS join freed by spilling.
+		// Other concurrent builds' tracked memory must not be disturbed.
 		var inMem int64
 		for p, mem := range ss.partMemory {
 			if !ss.spilledParts[p] {
 				inMem += mem
 			}
 		}
-		if h.MemTracker != nil {
-			h.MemTracker.Reset()
-			h.MemTracker.ForceReserve(inMem)
+		if h.MemTracker != nil && h.trackedMem > inMem {
+			h.MemTracker.Release(h.trackedMem - inMem)
+			h.trackedMem = inMem
 		}
 
 		// Check if we've freed enough

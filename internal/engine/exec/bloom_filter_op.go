@@ -292,3 +292,85 @@ func BloomHashInt(key int64) uint64 {
 func BloomContains(bloom []uint64, mask, hash uint64) bool {
 	return bloomContains(bloom, mask, hash)
 }
+
+// NewBloomFilterOp creates a BloomFilterOp from pre-built bloom data.
+// Used for reverse bloom pushdown where the probe side's key set filters
+// the build side's scan.
+func NewBloomFilterOp(bloom []uint64, bloomMask uint64, keys []string, useIntKey bool) *BloomFilterOp {
+	return &BloomFilterOp{
+		bloom:     bloom,
+		bloomMask: bloomMask,
+		leftKeys:  keys, // "left" from the op's perspective = the column to check
+		useIntKey: useIntKey,
+	}
+}
+
+// BuildBloomFromBatches constructs a bloom filter from a column across
+// multiple batches. Returns nil bloom if no rows. Used for reverse bloom
+// pushdown: the probe side's join key values filter the build side's scan.
+func BuildBloomFromBatches(batches []*batch.RecordBatch, keyCol string) (bloom []uint64, bloomMask uint64) {
+	totalRows := 0
+	for _, b := range batches {
+		totalRows += b.ActiveLen()
+	}
+	if totalRows == 0 {
+		return nil, 0
+	}
+
+	// Allocate bloom: ~10 bits per key for ~1% FPR
+	nSlots := 1
+	for nSlots*64 < totalRows*10 {
+		nSlots *= 2
+	}
+	if nSlots < 8 {
+		nSlots = 8
+	}
+	bloom = make([]uint64, nSlots)
+	bloomMask = uint64(nSlots - 1)
+
+	set := func(hash uint64) {
+		h1 := hash & bloomMask
+		h2 := (hash >> 17) & bloomMask
+		b1 := hash & 63
+		b2 := (hash >> 6) & 63
+		bloom[h1] |= 1 << b1
+		bloom[h2] |= 1 << b2
+	}
+
+	for _, b := range batches {
+		colIdx := b.ColumnIndex(keyCol)
+		if colIdx < 0 {
+			continue
+		}
+		col := b.Columns[colIdx]
+		isInt := col.Type == batch.TypeInt32 || col.Type == batch.TypeInt64 ||
+			col.Type == batch.TypePort || col.Type == batch.TypeProtocol ||
+			col.Type == batch.TypeDate
+
+		if b.Sel != nil {
+			for _, si := range b.Sel {
+				row := int(si)
+				if col.Nulls.IsNull(row) {
+					continue
+				}
+				if isInt {
+					set(bloomHashInt(intValFromCol(col, row)))
+				} else {
+					set(bloomHashBytes(col.BytesData.Value(row)))
+				}
+			}
+		} else {
+			for row := 0; row < b.Len; row++ {
+				if col.Nulls.IsNull(row) {
+					continue
+				}
+				if isInt {
+					set(bloomHashInt(intValFromCol(col, row)))
+				} else {
+					set(bloomHashBytes(col.BytesData.Value(row)))
+				}
+			}
+		}
+	}
+	return bloom, bloomMask
+}

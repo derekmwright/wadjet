@@ -187,19 +187,32 @@ locals {
   # Pull pre-built binaries from S3 (~10s vs ~5min build)
   prebuilt_script = <<-SCRIPT
     #!/bin/bash
-    set -euo pipefail
+    set -uo pipefail
     export HOME=/root
 
+    # Retry helper: retries a command up to 5 times with exponential backoff
+    retry() {
+      local max=5 delay=2
+      for i in $(seq 1 $max); do
+        "$@" && return 0
+        echo "Attempt $i/$max failed: $*" >&2
+        sleep $delay
+        delay=$((delay * 2))
+      done
+      echo "FATAL: $* failed after $max attempts" >&2
+      return 1
+    }
+
     # Download pre-built arm64 binaries from the data bucket
-    aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/wadjet" /usr/local/bin/wadjet --region ${var.region}
-    aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/tpch-bench" /usr/local/bin/tpch-bench --region ${var.region}
+    retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/wadjet" /usr/local/bin/wadjet --region ${var.region}
+    retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/tpch-bench" /usr/local/bin/tpch-bench --region ${var.region}
     aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/security-bench" /usr/local/bin/security-bench --region ${var.region} || true
     chmod +x /usr/local/bin/wadjet /usr/local/bin/tpch-bench /usr/local/bin/security-bench 2>/dev/null || true
 
     # Download deploy scripts from S3 (staged alongside binaries by stage-binaries.sh)
     mkdir -p /root/wadjet/deploy/benchmark
-    aws s3 sync "s3://${local.bucket_name}/bin/${var.bin_version}/scripts/" /root/wadjet/deploy/benchmark/ --region ${var.region}
-    chmod +x /root/wadjet/deploy/benchmark/*.sh
+    aws s3 sync "s3://${local.bucket_name}/bin/${var.bin_version}/scripts/" /root/wadjet/deploy/benchmark/ --region ${var.region} || true
+    chmod +x /root/wadjet/deploy/benchmark/*.sh 2>/dev/null || true
 
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
     echo "WADJET_REGION=${var.region}" >> /etc/environment
@@ -411,16 +424,28 @@ resource "aws_instance" "worker" {
   user_data = base64encode(<<-EOF
     ${local.build_script}
 
+    # Verify binary was downloaded successfully
+    if [ ! -x /usr/local/bin/wadjet ]; then
+      echo "FATAL: wadjet binary not found or not executable" >&2
+      exit 1
+    fi
+
     # Wait for coordinator NATS to be reachable before starting worker
     COORD_IP="${aws_instance.coordinator[0].private_ip}"
     echo "Waiting for NATS on $COORD_IP:4222..."
+    NATS_READY=0
     for i in $(seq 1 120); do
       if timeout 2 bash -c "echo > /dev/tcp/$COORD_IP/4222" 2>/dev/null; then
         echo "NATS reachable after $i attempts"
+        NATS_READY=1
         break
       fi
       sleep 5
     done
+    if [ "$NATS_READY" -eq 0 ]; then
+      echo "FATAL: NATS not reachable after 120 attempts" >&2
+      exit 1
+    fi
 
     # Start wadjet worker (retry on failure — coordinator may restart during benchmark)
     while true; do
@@ -432,7 +457,7 @@ resource "aws_instance" "worker" {
         --bucket="${local.bucket_name}" \
         --region="${var.region}" \
         --storage-type=s3 \
-        --max-concurrent=${var.max_concurrent}
+        --max-concurrent=${var.max_concurrent} 2>&1
       EXIT_CODE=$?
       echo "Worker exited with code $EXIT_CODE, restarting in 5s..."
       echo "WORKER_STARTED=1" >> /etc/environment

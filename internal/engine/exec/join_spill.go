@@ -10,10 +10,16 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
+
+// spillFileSeq is a global atomic counter for unique spill file names.
+// Eliminates TOCTOU race in the previous os.Stat-based approach where
+// concurrent hash joins could claim the same filename.
+var spillFileSeq atomic.Int64
 
 // Grace Hash Join spill-to-disk implementation.
 //
@@ -232,12 +238,13 @@ type spillBatchWriter struct {
 }
 
 func newSpillBatchWriter(dir, prefix string) (*spillBatchWriter, error) {
-	path := filepath.Join(dir, fmt.Sprintf("%s-%d.bin", prefix, os.Getpid()))
+	seq := spillFileSeq.Add(1)
+	path := filepath.Join(dir, fmt.Sprintf("%s-%d.%d.bin", prefix, os.Getpid(), seq))
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, fmt.Errorf("creating spill file: %w", err)
 	}
-	w := bufio.NewWriterSize(f, 256*1024)
+	w := bufio.NewWriterSize(f, 1024*1024)
 	// Reserve space for batch count (will be written on close)
 	var buf [4]byte
 	w.Write(buf[:4])
@@ -284,15 +291,8 @@ func (sw *spillBatchWriter) close() (string, error) {
 
 // writeSpillBatches writes multiple batches to a new spill file.
 func writeSpillBatches(dir string, batches []*batch.RecordBatch) (string, error) {
-	path := filepath.Join(dir, fmt.Sprintf("build-spill-%d.bin", os.Getpid()))
-	// Use a unique suffix to avoid collisions
-	for i := 0; ; i++ {
-		candidate := fmt.Sprintf("%s.%d", path, i)
-		if _, err := os.Stat(candidate); os.IsNotExist(err) {
-			path = candidate
-			break
-		}
-	}
+	seq := spillFileSeq.Add(1)
+	path := filepath.Join(dir, fmt.Sprintf("build-spill-%d.%d.bin", os.Getpid(), seq))
 
 	f, err := os.Create(path)
 	if err != nil {
@@ -300,7 +300,7 @@ func writeSpillBatches(dir string, batches []*batch.RecordBatch) (string, error)
 	}
 	defer f.Close()
 
-	w := bufio.NewWriterSize(f, 256*1024)
+	w := bufio.NewWriterSize(f, 1024*1024)
 
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(len(batches)))
@@ -326,7 +326,7 @@ func readSpillBatches(path string) ([]*batch.RecordBatch, error) {
 	}
 	defer f.Close()
 
-	r := bufio.NewReaderSize(f, 256*1024)
+	r := bufio.NewReaderSize(f, 1024*1024)
 
 	var buf [4]byte
 	if _, err := io.ReadFull(r, buf[:]); err != nil {
@@ -625,9 +625,30 @@ func readColumnData(r *bufio.Reader, v *batch.Vector, n int, buf []byte) error {
 
 // ---- Spilled Partition Processing ----
 
+// preloadedBuild holds pre-fetched build batches for a spilled partition.
+type preloadedBuild struct {
+	batches []*batch.RecordBatch
+	err     error
+}
+
+// loadBuildBatches reads all build spill files for a partition from disk.
+func (h *HashJoin) loadBuildBatches(partID int) ([]*batch.RecordBatch, error) {
+	ss := h.spillState
+	var buildBatches []*batch.RecordBatch
+	for _, path := range ss.partBuildFiles[partID] {
+		batches, err := readSpillBatches(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading build spill: %w", err)
+		}
+		buildBatches = append(buildBatches, batches...)
+	}
+	return buildBatches, nil
+}
+
 // processSpilledPartitions processes all spilled partitions one at a time.
 // For each partition: loads build data, builds hash table, replays probe data,
 // and returns result batches. Only one partition's data is in memory at a time.
+// Uses pre-fetching: loads partition N+1's build data while processing partition N.
 func (h *HashJoin) processSpilledPartitions(ctx context.Context) ([]*batch.RecordBatch, error) {
 	ss := h.spillState
 	if ss == nil {
@@ -639,18 +660,63 @@ func (h *HashJoin) processSpilledPartitions(ctx context.Context) ([]*batch.Recor
 		return nil, fmt.Errorf("closing probe writers: %w", err)
 	}
 
+	// Collect partition IDs for ordered iteration (needed for pre-fetch)
+	partIDs := make([]int, 0, len(ss.spilledParts))
+	for id := range ss.spilledParts {
+		partIDs = append(partIDs, id)
+	}
+
 	var allResults []*batch.RecordBatch
 
-	for partID := range ss.spilledParts {
+	// Pre-fetch first partition's build data
+	var prefetch *preloadedBuild
+	if len(partIDs) > 0 {
+		ch := make(chan preloadedBuild, 1)
+		go func() {
+			b, err := h.loadBuildBatches(partIDs[0])
+			ch <- preloadedBuild{b, err}
+		}()
+		pf := <-ch
+		prefetch = &pf
+	}
+
+	for i, partID := range partIDs {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 
-		results, err := h.processOnePartition(ctx, partID)
+		// Use pre-fetched build data for this partition
+		buildBatches := prefetch.batches
+		if prefetch.err != nil {
+			return nil, fmt.Errorf("processing spilled partition %d: %w", partID, prefetch.err)
+		}
+
+		// Start pre-fetching next partition's build data while we process this one
+		var nextCh chan preloadedBuild
+		if i+1 < len(partIDs) {
+			nextCh = make(chan preloadedBuild, 1)
+			nextPartID := partIDs[i+1]
+			go func() {
+				b, err := h.loadBuildBatches(nextPartID)
+				nextCh <- preloadedBuild{b, err}
+			}()
+		}
+
+		results, err := h.processOnePartitionWithBuild(ctx, partID, buildBatches)
 		if err != nil {
+			// Drain prefetch goroutine before returning
+			if nextCh != nil {
+				<-nextCh
+			}
 			return nil, fmt.Errorf("processing spilled partition %d: %w", partID, err)
 		}
 		allResults = append(allResults, results...)
+
+		// Collect pre-fetched data for next iteration
+		if nextCh != nil {
+			pf := <-nextCh
+			prefetch = &pf
+		}
 	}
 
 	return allResults, nil
@@ -659,21 +725,20 @@ func (h *HashJoin) processSpilledPartitions(ctx context.Context) ([]*batch.Recor
 // processOnePartition loads one spilled partition's build data, constructs a
 // temporary hash table, then replays probe data against it.
 func (h *HashJoin) processOnePartition(ctx context.Context, partID int) ([]*batch.RecordBatch, error) {
-	ss := h.spillState
-
-	// Load build batches for this partition
-	var buildBatches []*batch.RecordBatch
-	for _, path := range ss.partBuildFiles[partID] {
-		batches, err := readSpillBatches(path)
-		if err != nil {
-			return nil, fmt.Errorf("reading build spill: %w", err)
-		}
-		buildBatches = append(buildBatches, batches...)
+	buildBatches, err := h.loadBuildBatches(partID)
+	if err != nil {
+		return nil, err
 	}
+	return h.processOnePartitionWithBuild(ctx, partID, buildBatches)
+}
 
+// processOnePartitionWithBuild processes a partition using pre-loaded build batches.
+func (h *HashJoin) processOnePartitionWithBuild(ctx context.Context, partID int, buildBatches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
 	if len(buildBatches) == 0 {
 		return nil, nil
 	}
+
+	ss := h.spillState
 
 	// Build a temporary hash join for this partition
 	tmpJoin := &HashJoin{

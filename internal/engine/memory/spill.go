@@ -66,10 +66,13 @@ func (sm *SpillManager) TrackBatch(bytes int64) {
 	}
 }
 
-// ResetTracking resets the memory tracker after spilling frees memory.
-func (sm *SpillManager) ResetTracking() {
-	if sm.tracker != nil {
-		sm.tracker.Reset()
+// ReleaseTracking releases the given amount from the memory tracker after
+// spilling frees memory. Callers must track their own reserved amount and
+// pass the delta. Do NOT use Reset() on shared trackers — it wipes other
+// concurrent operators' accounting.
+func (sm *SpillManager) ReleaseTracking(bytes int64) {
+	if sm.tracker != nil && bytes > 0 {
+		sm.tracker.Release(bytes)
 	}
 }
 
