@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"runtime"
 	"strings"
@@ -451,6 +452,7 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 
 	results := make([]fileResult, len(inner.files))
 	var failedFiles atomic.Int64
+	var firstErr atomic.Value // stores first error for diagnostics
 	var readWg sync.WaitGroup
 	var readIdx int64
 
@@ -479,18 +481,24 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 				// than N range reads per column page during rgWorker processing.
 				rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
 				if err != nil {
-					failedFiles.Add(1)
+					if failedFiles.Add(1) == 1 {
+						firstErr.Store(fmt.Errorf("get %s: %w", entry.Path, err))
+					}
 					continue
 				}
 				data, err := readAllSized(rc, entry.SizeBytes)
 				rc.Close()
 				if err != nil {
-					failedFiles.Add(1)
+					if failedFiles.Add(1) == 1 {
+						firstErr.Store(fmt.Errorf("read %s: %w", entry.Path, err))
+					}
 					continue
 				}
 				reader, err := parquet.NewReader(bytesReader(data), int64(len(data)))
 				if err != nil {
-					failedFiles.Add(1)
+					if failedFiles.Add(1) == 1 {
+						firstErr.Store(fmt.Errorf("parquet %s (%d bytes): %w", entry.Path, len(data), err))
+					}
 					continue
 				}
 				results[idx] = fileResult{reader: reader, entry: entry}
@@ -501,6 +509,9 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 
 	if failed := failedFiles.Load(); failed > 0 {
 		inner.failedFiles = int(failed)
+		if v := firstErr.Load(); v != nil {
+			inner.firstFileErr = v.(error)
+		}
 	}
 
 	// Enumerate row groups from all files, applying predicate-based and bloom pruning

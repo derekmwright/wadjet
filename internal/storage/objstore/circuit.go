@@ -206,14 +206,20 @@ func (cs *CircuitStore) PutIfMatch(ctx context.Context, bucket, key string, r io
 }
 
 // Get implements Store.
+// Get cannot use the standard do() wrapper because do() defers cancel() on
+// the timeout context. Since Get returns a streaming ReadCloser, canceling
+// the context before the caller reads the body kills the HTTP connection,
+// causing every io.ReadAll(rc) to fail with "context canceled".
 func (cs *CircuitStore) Get(ctx context.Context, bucket, key string) (io.ReadCloser, ObjectInfo, error) {
-	var rc io.ReadCloser
-	var info ObjectInfo
-	err := cs.do(ctx, func(c context.Context) error {
-		var e error
-		rc, info, e = cs.inner.Get(c, bucket, key)
-		return e
-	})
+	if err := cs.beforeRequest(); err != nil {
+		return nil, ObjectInfo{}, err
+	}
+	rc, info, err := cs.inner.Get(ctx, bucket, key)
+	if err != nil {
+		cs.onFailure(err)
+		return nil, info, err
+	}
+	cs.onSuccess()
 	return rc, info, err
 }
 
@@ -265,19 +271,22 @@ func (cs *CircuitStore) MakeBucket(ctx context.Context, bucket string) error {
 }
 
 // GetReaderAt implements ReaderAtStore if the underlying store supports it.
+// Like Get, this cannot use do() because it returns a streaming handle.
 func (cs *CircuitStore) GetReaderAt(ctx context.Context, bucket, key string) (ReaderAtCloser, int64, error) {
 	ras, ok := cs.inner.(ReaderAtStore)
 	if !ok {
 		return nil, 0, fmt.Errorf("underlying store does not support ReaderAt")
 	}
-	var ra ReaderAtCloser
-	var size int64
-	err := cs.do(ctx, func(c context.Context) error {
-		var e error
-		ra, size, e = ras.GetReaderAt(c, bucket, key)
-		return e
-	})
-	return ra, size, err
+	if err := cs.beforeRequest(); err != nil {
+		return nil, 0, err
+	}
+	ra, size, err := ras.GetReaderAt(ctx, bucket, key)
+	if err != nil {
+		cs.onFailure(err)
+		return nil, 0, err
+	}
+	cs.onSuccess()
+	return ra, size, nil
 }
 
 // Unwrap returns the underlying store.
