@@ -41,6 +41,7 @@ type Sort struct {
 	mu         sync.Mutex
 	batches    []*batch.RecordBatch // columnar storage
 	totalRows  int
+	trackedMem int64 // memory reserved from shared tracker by this operator
 	spillFiles []string
 	sorted     []*batch.RecordBatch // materialized sorted results
 	pos        int
@@ -70,7 +71,9 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 
 	// Track memory usage for spill pressure detection
 	if s.Spill != nil {
-		s.Spill.TrackBatch(EstimateBatchBytes(b))
+		cost := EstimateBatchBytes(b)
+		s.Spill.TrackBatch(cost)
+		s.trackedMem += cost
 	}
 
 	// Spill to disk if memory pressure is high
@@ -86,7 +89,8 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		s.spillFiles = append(s.spillFiles, path)
 		s.batches = s.batches[:0]
 		s.totalRows = 0
-		s.Spill.ResetTracking()
+		s.Spill.ReleaseTracking(s.trackedMem)
+		s.trackedMem = 0
 	}
 	return nil
 }

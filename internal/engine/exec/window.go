@@ -73,6 +73,7 @@ type Window struct {
 	mu         sync.Mutex
 	batches    []*batch.RecordBatch
 	totalRows  int
+	trackedMem int64 // memory reserved from shared tracker by this operator
 	schema     []parquet.Column
 	spillFiles []string
 
@@ -107,7 +108,9 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 
 	// Track memory usage for spill pressure detection
 	if w.Spill != nil {
-		w.Spill.TrackBatch(EstimateBatchBytes(b))
+		cost := EstimateBatchBytes(b)
+		w.Spill.TrackBatch(cost)
+		w.trackedMem += cost
 	}
 
 	// Spill to disk if memory pressure is high
@@ -123,7 +126,8 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 		w.spillFiles = append(w.spillFiles, path)
 		w.batches = w.batches[:0]
 		w.totalRows = 0
-		w.Spill.ResetTracking()
+		w.Spill.ReleaseTracking(w.trackedMem)
+		w.trackedMem = 0
 	}
 	return nil
 }

@@ -414,6 +414,165 @@ func TestGraceHashJoinSpill_Parallel(t *testing.T) {
 	}
 }
 
+// TestConcurrentBuildSharedTracker verifies that two hash joins sharing a single
+// MemTracker don't corrupt each other's accounting when one spills. Previously,
+// spillBuildBatches() called tracker.Reset() which zeroed ALL concurrent builds'
+// tracked memory, causing unchecked allocation and OOM in multi-way joins (Q21).
+func TestConcurrentBuildSharedTracker(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString},
+	}
+
+	const buildN = 10000
+	makeRows := func(offset int) []map[string]any {
+		rows := make([]map[string]any, buildN)
+		for i := range rows {
+			rows[i] = map[string]any{
+				"id":  int64(offset + i),
+				"val": "row-data-padding-for-size",
+			}
+		}
+		return rows
+	}
+
+	tmpDir, err := os.MkdirTemp("", "concurrent-build-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Shared tracker: each build produces ~980KB (5 batches × 196KB).
+	// Budget of 1.4MB lets both builds get at least 2 batches before
+	// combined usage triggers spill (80% of 1.4MB = 1.12MB threshold),
+	// even if one build monopolizes early scheduling.
+	budget := int64(1_400_000)
+	sharedTracker := memory.NewTracker("shared", budget)
+	sm, err := memory.NewSpillManager(tmpDir, sharedTracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sm.Cleanup()
+
+	hjA := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
+	hjA.Spill = sm
+	hjA.MemTracker = sharedTracker
+
+	hjB := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
+	hjB.Spill = sm
+	hjB.MemTracker = sharedTracker
+
+	// Build both concurrently — this is the real-world scenario in multi-way
+	// joins where buildJoin() launches goroutines for each join level.
+	ctx := context.Background()
+	var errA, errB error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		errA = hjA.Build(ctx, NewSliceSource(schema, makeRows(0)))
+	}()
+	errB = hjB.Build(ctx, NewSliceSource(schema, makeRows(buildN)))
+	<-done
+
+	if errA != nil {
+		t.Fatalf("Join A Build failed: %v", errA)
+	}
+	if errB != nil {
+		t.Fatalf("Join B Build failed: %v", errB)
+	}
+
+	usedFinal := sharedTracker.Used()
+	trackedA := hjA.TrackedMem()
+	trackedB := hjB.TrackedMem()
+	t.Logf("final: tracker.Used=%d, joinA.trackedMem=%d, joinB.trackedMem=%d",
+		usedFinal, trackedA, trackedB)
+
+	// KEY INVARIANT: tracker.Used() must equal the sum of both joins' tracked memory.
+	// Before the fix, spillBuildBatches() called Reset() which zeroed the tracker,
+	// then ForceReserve'd only the spilling join's in-memory amount — erasing the
+	// other join's accounting. This caused unchecked allocation and OOM.
+	sumTracked := trackedA + trackedB
+	if usedFinal != sumTracked {
+		t.Errorf("tracker.Used()=%d != joinA.trackedMem(%d) + joinB.trackedMem(%d) = %d",
+			usedFinal, trackedA, trackedB, sumTracked)
+	}
+
+	// Both joins should have positive tracked memory (both ingested data)
+	if trackedA <= 0 {
+		t.Error("expected join A to have positive trackedMem")
+	}
+	if trackedB <= 0 {
+		t.Error("expected join B to have positive trackedMem")
+	}
+
+	// At least one should have spilled under this budget
+	spilledA := hjA.SpillState() != nil
+	spilledB := hjB.SpillState() != nil
+	if !spilledA && !spilledB {
+		t.Error("expected at least one join to spill under budget")
+	}
+	t.Logf("spilled: A=%v B=%v", spilledA, spilledB)
+}
+
+// TestConcurrentSpillFileNaming verifies that concurrent calls to
+// writeSpillBatches produce unique file paths. Before the fix, a TOCTOU
+// race in the os.Stat-based naming allowed two goroutines to claim the
+// same filename, causing "file not found" when one join's cleanup deleted
+// the other's data.
+func TestConcurrentSpillFileNaming(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "spill-naming-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+	}
+	b := fromRowsForTest(schema, []map[string]any{{"id": int64(1)}})
+
+	const goroutines = 20
+	paths := make([]string, goroutines)
+	errs := make([]error, goroutines)
+	done := make(chan struct{})
+
+	for i := 0; i < goroutines; i++ {
+		go func(idx int) {
+			defer func() { done <- struct{}{} }()
+			paths[idx], errs[idx] = writeSpillBatches(tmpDir, []*batch.RecordBatch{b})
+		}(i)
+	}
+	for i := 0; i < goroutines; i++ {
+		<-done
+	}
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+	}
+
+	// All paths must be unique
+	seen := make(map[string]int)
+	for i, p := range paths {
+		if prev, ok := seen[p]; ok {
+			t.Errorf("duplicate path: goroutine %d and %d both got %s", prev, i, p)
+		}
+		seen[p] = i
+	}
+
+	// All files must be readable
+	for i, p := range paths {
+		batches, err := readSpillBatches(p)
+		if err != nil {
+			t.Errorf("goroutine %d file unreadable: %v", i, err)
+		}
+		if len(batches) != 1 || batches[0].Len != 1 {
+			t.Errorf("goroutine %d: expected 1 batch with 1 row", i)
+		}
+	}
+}
+
 func fromRowsForTest(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch {
 	return batch.FromRows(schema, rows)
 }

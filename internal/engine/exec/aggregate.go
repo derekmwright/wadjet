@@ -679,6 +679,13 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 		}
 	}
 
+	// Rebuild flat accumulators if they were cleared by materializeFlatAccums
+	// (e.g. after parallel merge). This happens when flushSpilledOps replays
+	// spilled batches through Consume after the merge phase.
+	if h.intFlatAccs == nil && (h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey || h.useStrGroupKey || h.useGenericSoA) {
+		h.rebuildFlatAccums(b)
+	}
+
 	// Single-column integer GROUP BY fast path
 	if h.useIntGroupKey {
 		h.consumeBatchIntGroup(b)
