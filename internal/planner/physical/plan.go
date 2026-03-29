@@ -5475,7 +5475,8 @@ type scanSourceInner struct {
 
 	// failedFiles counts files that failed to read during buildRGUnits.
 	// When > 0, Init returns an error to prevent silent data loss.
-	failedFiles int
+	failedFiles  int
+	firstFileErr error // sample error from the first file failure
 }
 
 // scanPredicate is a simple predicate for row-group stats pruning.
@@ -5591,7 +5592,11 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		// results that are indistinguishable from correct empty results.
 		if inner.failedFiles > 0 && len(inner.rgUnits) == 0 && len(inner.files) > 0 {
 			cancel()
-			return fmt.Errorf("scan %s: all %d files failed to read (%d failures)", s.tableName, len(inner.files), inner.failedFiles)
+			sampleErr := ""
+			if inner.firstFileErr != nil {
+				sampleErr = fmt.Sprintf(": %v", inner.firstFileErr)
+			}
+			return fmt.Errorf("scan %s: all %d files failed to read (%d failures)%s", s.tableName, len(inner.files), inner.failedFiles, sampleErr)
 		}
 
 		// Initialize batch pool from the most common row group size
