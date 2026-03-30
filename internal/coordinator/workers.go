@@ -37,7 +37,11 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 		logger = slog.Default()
 	}
 	if staleTTL <= 0 {
-		staleTTL = 30 * time.Second
+		// Default: 2 minutes. Workers under heavy compute load with
+		// GOGC=off may not schedule their heartbeat goroutine for
+		// extended periods. 30s was too aggressive and caused false
+		// stale reaping during SF100 query processing.
+		staleTTL = 2 * time.Minute
 	}
 
 	wr := &WorkerRegistry{
