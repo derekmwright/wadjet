@@ -41,6 +41,9 @@ for ver in "$GIT_SHA" "latest"; do
   aws s3 sync "${REPO_ROOT}/deploy/benchmark/" "s3://${BUCKET}/bin/${ver}/scripts/" \
     --region "$REGION" --quiet \
     --exclude "terraform/*" --exclude "*.tfstate*" --exclude ".terraform*"
+  # Upload benchmark profiles (read by tpch-bench --config)
+  aws s3 sync "${REPO_ROOT}/deploy/benchmark/profiles/" "s3://${BUCKET}/bin/${ver}/profiles/" \
+    --region "$REGION" --quiet
 done
 
 WADJET_SIZE=$(du -h "${OUTDIR}/wadjet" | cut -f1)

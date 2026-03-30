@@ -10,7 +10,9 @@ terraform {
 }
 
 provider "aws" {
-  region = var.region
+  # When using a profile, region comes from the YAML.
+  # For ad-hoc runs without a profile, set var.region directly.
+  region = local.eff_region
 }
 
 data "aws_vpc" "default" {
@@ -30,7 +32,7 @@ data "aws_ami" "al2023" {
 
   filter {
     name   = "name"
-    values = [var.arch == "arm64" ? "al2023-ami-*-arm64" : "al2023-ami-*-x86_64"]
+    values = [local.eff_arch == "arm64" ? "al2023-ami-*-arm64" : "al2023-ami-*-x86_64"]
   }
 
   filter {
@@ -43,10 +45,37 @@ data "aws_ami" "al2023" {
 # If data_bucket is set, use an existing bucket (preserves data across cluster rebuilds).
 # Otherwise, create an ephemeral bucket with 7-day expiry.
 
+# --- Profile-driven configuration ---
+# When var.profile is set, read the YAML profile and derive all benchmark
+# config from it. Individual variables serve as fallbacks for ad-hoc runs.
 locals {
-  create_bucket = var.data_bucket == ""
-  bucket_name   = local.create_bucket ? aws_s3_bucket.benchmark[0].bucket : var.data_bucket
-  bucket_arn    = local.create_bucket ? aws_s3_bucket.benchmark[0].arn : "arn:aws:s3:::${var.data_bucket}"
+  has_profile = var.profile != ""
+  p           = local.has_profile ? yamldecode(file("../profiles/${var.profile}.yaml")) : {
+    storage   = { bucket = "", region = "", data_prefix = "tables/" }
+    cluster   = { mode = "standalone", workers = 0, coordinator_instance = "c7g.2xlarge", worker_instance = "c7g.2xlarge", arch = "arm64", use_spot = true }
+    benchmark = { scale_factor = 1, runs = 1, query_timeout = "10m", skip_load = false, skip_queries = [] }
+  }
+
+  # Effective values: profile wins when set, otherwise use individual vars
+  eff_region       = local.has_profile ? local.p.storage.region : var.region
+  eff_scale        = local.has_profile ? local.p.benchmark.scale_factor : var.scale_factor
+  eff_mode         = local.has_profile ? local.p.cluster.mode : var.mode
+  eff_workers      = local.has_profile ? local.p.cluster.workers : var.worker_count
+  eff_coord_type   = local.has_profile ? lookup(local.p.cluster, "coordinator_instance", "c7g.2xlarge") : var.coordinator_instance_type
+  eff_worker_type  = local.has_profile ? local.p.cluster.worker_instance : var.worker_instance_type
+  eff_arch         = local.has_profile ? local.p.cluster.arch : var.arch
+  eff_spot         = local.has_profile ? local.p.cluster.use_spot : var.use_spot
+  eff_data_bucket  = local.has_profile ? local.p.storage.bucket : var.data_bucket
+  eff_runs         = local.has_profile ? local.p.benchmark.runs : var.benchmark_runs
+  eff_prefix       = local.has_profile ? local.p.storage.data_prefix : var.data_prefix
+  eff_timeout      = local.has_profile ? local.p.benchmark.query_timeout : var.query_timeout
+  eff_generate     = local.has_profile ? !lookup(local.p.benchmark, "skip_load", false) : var.generate_data
+  eff_skip_queries = local.has_profile ? join(",", [for q in lookup(local.p.benchmark, "skip_queries", []) : tostring(q)]) : var.skip_queries
+  eff_bench_type   = local.has_profile ? lookup(local.p.benchmark, "type", "tpch") : var.benchmark_type
+
+  create_bucket = local.eff_data_bucket == ""
+  bucket_name   = local.create_bucket ? aws_s3_bucket.benchmark[0].bucket : local.eff_data_bucket
+  bucket_arn    = local.create_bucket ? aws_s3_bucket.benchmark[0].arn : "arn:aws:s3:::${local.eff_data_bucket}"
 }
 
 resource "aws_s3_bucket" "benchmark" {
@@ -77,7 +106,7 @@ data "aws_route_tables" "default" {
 
 resource "aws_vpc_endpoint" "s3" {
   vpc_id       = data.aws_vpc.default.id
-  service_name = "com.amazonaws.${var.region}.s3"
+  service_name = "com.amazonaws.${local.eff_region}.s3"
 
   route_table_ids = data.aws_route_tables.default.ids
 }
@@ -182,7 +211,7 @@ resource "aws_iam_instance_profile" "bench" {
 # --- User data scripts ---
 
 locals {
-  use_prebuilt = var.bin_version != "" && var.data_bucket != ""
+  use_prebuilt = var.bin_version != "" && local.eff_data_bucket != ""
 
   # Pull pre-built binaries from S3 (~10s vs ~5min build)
   prebuilt_script = <<-SCRIPT
@@ -204,19 +233,24 @@ locals {
     }
 
     # Download pre-built arm64 binaries from the data bucket
-    retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/wadjet" /usr/local/bin/wadjet --region ${var.region}
-    retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/tpch-bench" /usr/local/bin/tpch-bench --region ${var.region}
-    aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/security-bench" /usr/local/bin/security-bench --region ${var.region} || true
+    retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/wadjet" /usr/local/bin/wadjet --region ${local.eff_region}
+    retry aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/tpch-bench" /usr/local/bin/tpch-bench --region ${local.eff_region}
+    aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/security-bench" /usr/local/bin/security-bench --region ${local.eff_region} || true
     chmod +x /usr/local/bin/wadjet /usr/local/bin/tpch-bench /usr/local/bin/security-bench 2>/dev/null || true
 
     # Download deploy scripts from S3 (staged alongside binaries by stage-binaries.sh)
     mkdir -p /root/wadjet/deploy/benchmark
-    aws s3 sync "s3://${local.bucket_name}/bin/${var.bin_version}/scripts/" /root/wadjet/deploy/benchmark/ --region ${var.region} || true
+    aws s3 sync "s3://${local.bucket_name}/bin/${var.bin_version}/scripts/" /root/wadjet/deploy/benchmark/ --region ${local.eff_region} || true
     chmod +x /root/wadjet/deploy/benchmark/*.sh 2>/dev/null || true
 
+    # Download benchmark profile (read by tpch-bench --config)
+    %{if local.has_profile}
+    aws s3 cp "s3://${local.bucket_name}/bin/${var.bin_version}/profiles/${var.profile}.yaml" /usr/local/bin/benchmark-profile.yaml --region ${local.eff_region} || true
+    %{endif}
+
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
-    echo "WADJET_REGION=${var.region}" >> /etc/environment
-    echo "BENCHMARK_TYPE=${var.benchmark_type}" >> /etc/environment
+    echo "WADJET_REGION=${local.eff_region}" >> /etc/environment
+    echo "BENCHMARK_TYPE=${local.eff_bench_type}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -245,12 +279,15 @@ locals {
     go build -o /usr/local/bin/security-bench ./cmd/security-bench
 
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
-    echo "WADJET_REGION=${var.region}" >> /etc/environment
-    echo "BENCHMARK_TYPE=${var.benchmark_type}" >> /etc/environment
+    echo "WADJET_REGION=${local.eff_region}" >> /etc/environment
+    echo "BENCHMARK_TYPE=${local.eff_bench_type}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
   build_script = local.use_prebuilt ? local.prebuilt_script : local.source_build_script
+
+  # Profile env var: set when a benchmark profile is available on the instance
+  profile_env = local.has_profile ? "export BENCHMARK_PROFILE=/usr/local/bin/benchmark-profile.yaml" : "# No profile"
 
   # Standalone: build + auto-run benchmark (+ optional DuckDB comparison)
   standalone_user_data = <<-EOF
@@ -258,13 +295,14 @@ locals {
 
     # Auto-run standalone benchmark
     export WADJET_BUCKET="${local.bucket_name}"
-    export WADJET_REGION="${var.region}"
-    export BENCHMARK_TYPE="${var.benchmark_type}"
-    export BENCHMARK_RUNS="${var.benchmark_runs}"
-    export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
-    export DATA_PREFIX="${var.data_prefix}"
-    export SKIP_QUERIES="${var.skip_queries}"
-    export QUERY_TIMEOUT="${var.query_timeout}"
+    export WADJET_REGION="${local.eff_region}"
+    export BENCHMARK_TYPE="${local.eff_bench_type}"
+    export BENCHMARK_RUNS="${local.eff_runs}"
+    export GENERATE_DATA="${local.eff_generate ? "1" : "0"}"
+    export DATA_PREFIX="${local.eff_prefix}"
+    export SKIP_QUERIES="${local.eff_skip_queries}"
+    export QUERY_TIMEOUT="${local.eff_timeout}"
+    ${local.profile_env}
     cd /root/wadjet
 
     %{if var.run_duckdb_comparison}
@@ -272,15 +310,15 @@ locals {
     sed -i 's/^sudo shutdown.*/#&/' deploy/benchmark/run-benchmark.sh
     %{endif}
 
-    bash deploy/benchmark/run-benchmark.sh standalone SF${var.scale_factor} 2>&1 | tee /root/benchmark.log
+    bash deploy/benchmark/run-benchmark.sh standalone SF${local.eff_scale} 2>&1 | tee /root/benchmark.log
 
     %{if var.run_duckdb_comparison}
     export RESULTS_DIR=/root/benchmark-results
 
-    %{if var.benchmark_type == "security"}
+    %{if local.eff_bench_type == "security"}
     bash /root/wadjet/deploy/benchmark/run-duckdb-security-comparison.sh "$WADJET_BUCKET" "$WADJET_REGION" 2>&1 | tee /root/duckdb-comparison.log
     %{else}
-    export Q11_FRACTION=$(python3 -c "print(f'{0.0001/${var.scale_factor}:.10f}')")
+    export Q11_FRACTION=$(python3 -c "print(f'{0.0001/${local.eff_scale}:.10f}')")
     bash /root/wadjet/deploy/benchmark/run-duckdb-comparison.sh "$WADJET_BUCKET" "$WADJET_REGION" 2>&1 | tee /root/duckdb-comparison.log
     %{endif}
 
@@ -300,40 +338,41 @@ locals {
 
     # Auto-run distributed benchmark (bench binary embeds its own coordinator + NATS)
     export WADJET_BUCKET="${local.bucket_name}"
-    export WADJET_REGION="${var.region}"
-    export BENCHMARK_TYPE="${var.benchmark_type}"
-    export BENCHMARK_RUNS="${var.benchmark_runs}"
-    export GENERATE_DATA="${var.generate_data ? "1" : "0"}"
-    export DATA_PREFIX="${var.data_prefix}"
-    export SKIP_QUERIES="${var.skip_queries}"
-    export QUERY_TIMEOUT="${var.query_timeout}"
+    export WADJET_REGION="${local.eff_region}"
+    export BENCHMARK_TYPE="${local.eff_bench_type}"
+    export BENCHMARK_RUNS="${local.eff_runs}"
+    export GENERATE_DATA="${local.eff_generate ? "1" : "0"}"
+    export DATA_PREFIX="${local.eff_prefix}"
+    export SKIP_QUERIES="${local.eff_skip_queries}"
+    export QUERY_TIMEOUT="${local.eff_timeout}"
+    ${local.profile_env}
     cd /root/wadjet
 
-    bash deploy/benchmark/run-benchmark.sh distributed SF${var.scale_factor} ${var.worker_count} 2>&1 | tee /root/benchmark.log
+    bash deploy/benchmark/run-benchmark.sh distributed SF${local.eff_scale} ${local.eff_workers} 2>&1 | tee /root/benchmark.log
   EOF
 }
 
 # --- Standalone mode: single instance ---
 
 resource "aws_instance" "standalone" {
-  count = var.mode == "standalone" ? 1 : 0
+  count = local.eff_mode == "standalone" ? 1 : 0
 
   ami                                  = data.aws_ami.al2023.id
-  instance_type                        = var.worker_instance_type
-  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
+  instance_type                        = local.eff_worker_type
+  instance_initiated_shutdown_behavior = local.eff_spot ? null : "terminate"
   vpc_security_group_ids               = [aws_security_group.bench.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench.name
   subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
-    volume_size = var.scale_factor <= 10 ? 50 : 200
+    volume_size = local.eff_scale <= 10 ? 50 : 200
     volume_type = "gp3"
     throughput  = 250
     iops        = 3000
   }
 
   dynamic "instance_market_options" {
-    for_each = var.use_spot ? [1] : []
+    for_each = local.eff_spot ? [1] : []
     content {
       market_type = "spot"
       spot_options {
@@ -348,7 +387,7 @@ resource "aws_instance" "standalone" {
   tags = {
     Name    = "wadjet-bench-standalone"
     Role    = "standalone"
-    SF      = "SF${var.scale_factor}"
+    SF      = "SF${local.eff_scale}"
     Project = "wadjet-bench"
   }
 }
@@ -356,24 +395,24 @@ resource "aws_instance" "standalone" {
 # --- Distributed mode: coordinator + workers ---
 
 resource "aws_instance" "coordinator" {
-  count = var.mode == "distributed" ? 1 : 0
+  count = local.eff_mode == "distributed" ? 1 : 0
 
   ami                                  = data.aws_ami.al2023.id
-  instance_type                        = var.coordinator_instance_type
-  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
+  instance_type                        = local.eff_coord_type
+  instance_initiated_shutdown_behavior = local.eff_spot ? null : "terminate"
   vpc_security_group_ids               = [aws_security_group.bench.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench.name
   subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
-    volume_size = var.scale_factor <= 10 ? 50 : 200
+    volume_size = local.eff_scale <= 10 ? 50 : 200
     volume_type = "gp3"
     throughput  = 250
     iops        = 3000
   }
 
   dynamic "instance_market_options" {
-    for_each = var.use_spot ? [1] : []
+    for_each = local.eff_spot ? [1] : []
     content {
       market_type = "spot"
       spot_options {
@@ -388,30 +427,30 @@ resource "aws_instance" "coordinator" {
   tags = {
     Name    = "wadjet-bench-coordinator"
     Role    = "coordinator"
-    SF      = "SF${var.scale_factor}"
+    SF      = "SF${local.eff_scale}"
     Project = "wadjet-bench"
   }
 }
 
 resource "aws_instance" "worker" {
-  count = var.mode == "distributed" ? var.worker_count : 0
+  count = local.eff_mode == "distributed" ? local.eff_workers : 0
 
   ami                                  = data.aws_ami.al2023.id
-  instance_type                        = var.worker_instance_type
-  instance_initiated_shutdown_behavior = var.use_spot ? null : "terminate"
+  instance_type                        = local.eff_worker_type
+  instance_initiated_shutdown_behavior = local.eff_spot ? null : "terminate"
   vpc_security_group_ids               = [aws_security_group.bench.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench.name
   subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
-    volume_size = var.scale_factor <= 10 ? 50 : 200
+    volume_size = local.eff_scale <= 10 ? 50 : 200
     volume_type = "gp3"
     throughput  = 250
     iops        = 3000
   }
 
   dynamic "instance_market_options" {
-    for_each = var.use_spot ? [1] : []
+    for_each = local.eff_spot ? [1] : []
     content {
       market_type = "spot"
       spot_options {
@@ -466,10 +505,10 @@ resource "aws_instance" "worker" {
       /usr/local/bin/wadjet serve \
         --mode=worker \
         --nats-url="nats://$COORD_IP:4222" \
-        --endpoint="s3.${var.region}.amazonaws.com" \
+        --endpoint="s3.${local.eff_region}.amazonaws.com" \
         --ssl \
         --bucket="${local.bucket_name}" \
-        --region="${var.region}" \
+        --region="${local.eff_region}" \
         --storage-type=s3 \
         --max-concurrent=${var.max_concurrent} \
         --spill-dir="$SPILL_DIR" \
@@ -486,7 +525,7 @@ resource "aws_instance" "worker" {
   tags = {
     Name    = "wadjet-bench-worker-${count.index}"
     Role    = "worker"
-    SF      = "SF${var.scale_factor}"
+    SF      = "SF${local.eff_scale}"
     Project = "wadjet-bench"
   }
 }

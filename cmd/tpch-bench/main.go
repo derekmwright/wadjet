@@ -39,24 +39,86 @@ import (
 
 func main() {
 	var (
-		scale      = flag.Int("scale", 1, "TPC-H scale factor (1, 10, 100)")
-		s3Endpoint = flag.String("endpoint", "", "S3 endpoint (empty = in-memory standalone)")
-		s3Bucket   = flag.String("bucket", "wadjet-bench-sf1", "S3 bucket name")
-		s3Region   = flag.String("region", "", "S3 region")
-		ssl        = flag.Bool("ssl", false, "Use TLS for S3")
-		workers    = flag.Int("workers", 0, "Expected external workers (0 = standalone in-memory)")
-		natsPort   = flag.Int("nats-port", 4222, "NATS listen port (distributed mode)")
-		runs       = flag.Int("runs", 1, "Number of benchmark runs")
-		dataOnly   = flag.Bool("data-only", false, "Generate and upload data only, skip benchmark queries")
-		skipLoad   = flag.Bool("skip-load", false, "Skip data generation; discover existing parquet files from S3")
+		configPath  = flag.String("config", "", "Path to benchmark profile YAML (values override defaults; CLI flags override profile)")
+		scale       = flag.Int("scale", 1, "TPC-H scale factor (1, 10, 100)")
+		s3Endpoint  = flag.String("endpoint", "", "S3 endpoint (empty = in-memory standalone)")
+		s3Bucket    = flag.String("bucket", "wadjet-bench-sf1", "S3 bucket name")
+		s3Region    = flag.String("region", "", "S3 region")
+		ssl         = flag.Bool("ssl", false, "Use TLS for S3")
+		workers     = flag.Int("workers", 0, "Expected external workers (0 = standalone in-memory)")
+		natsPort    = flag.Int("nats-port", 4222, "NATS listen port (distributed mode)")
+		runs        = flag.Int("runs", 1, "Number of benchmark runs")
+		dataOnly    = flag.Bool("data-only", false, "Generate and upload data only, skip benchmark queries")
+		skipLoad    = flag.Bool("skip-load", false, "Skip data generation; discover existing parquet files from S3")
 		skipQueries = flag.String("skip-queries", "", "Comma-separated query numbers to skip (e.g. 2,17)")
 		queryTimeout = flag.Duration("query-timeout", 10*time.Minute, "Per-query timeout (0 = no timeout)")
-		cpuProf    = flag.String("cpuprofile", "", "Write CPU profile to file")
-		memProf    = flag.String("memprofile", "", "Write memory profile to file")
-		profDir    = flag.String("profdir", "", "Directory for per-query profiles")
-		dataPrefix = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
+		cpuProf     = flag.String("cpuprofile", "", "Write CPU profile to file")
+		memProf     = flag.String("memprofile", "", "Write memory profile to file")
+		profDir     = flag.String("profdir", "", "Directory for per-query profiles")
+		dataPrefix  = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
 	)
 	flag.Parse()
+
+	// Apply profile: values from YAML override flag defaults, but
+	// explicitly-set CLI flags take precedence over the profile.
+	if *configPath != "" {
+		profile, err := loadProfile(*configPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("Loaded profile: %s (%s)", profile.Name, *configPath)
+
+		setFlags := make(map[string]bool)
+		flag.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+		if !setFlags["scale"] && profile.Benchmark.ScaleFactor > 0 {
+			*scale = profile.Benchmark.ScaleFactor
+		}
+		if !setFlags["endpoint"] && profile.Storage.Region != "" {
+			*s3Endpoint = profile.s3Endpoint()
+		}
+		if !setFlags["bucket"] && profile.Storage.Bucket != "" {
+			*s3Bucket = profile.Storage.Bucket
+		}
+		if !setFlags["region"] && profile.Storage.Region != "" {
+			*s3Region = profile.Storage.Region
+		}
+		if !setFlags["ssl"] && profile.Storage.Region != "" {
+			*ssl = true // S3 always uses TLS
+		}
+		if !setFlags["workers"] && profile.Cluster.Workers > 0 {
+			*workers = profile.Cluster.Workers
+		}
+		if !setFlags["runs"] && profile.Benchmark.Runs > 0 {
+			*runs = profile.Benchmark.Runs
+		}
+		if !setFlags["skip-load"] && profile.Benchmark.SkipLoad {
+			*skipLoad = true
+		}
+		// data-prefix: always apply from profile (even "") unless explicitly set.
+		// This is the field that caused the SF100 deploy failure — the default
+		// "tables/" is wrong for buckets with data at root level.
+		if !setFlags["data-prefix"] {
+			*dataPrefix = profile.Storage.DataPrefix
+		}
+		if !setFlags["query-timeout"] && profile.Benchmark.QueryTimeout != "" {
+			d, err := time.ParseDuration(profile.Benchmark.QueryTimeout)
+			if err != nil {
+				log.Fatalf("invalid query_timeout in profile: %v", err)
+			}
+			*queryTimeout = d
+		}
+		if !setFlags["skip-queries"] && len(profile.Benchmark.SkipQueries) > 0 {
+			parts := make([]string, len(profile.Benchmark.SkipQueries))
+			for i, q := range profile.Benchmark.SkipQueries {
+				parts[i] = fmt.Sprintf("%d", q)
+			}
+			*skipQueries = strings.Join(parts, ",")
+		}
+
+		log.Printf("  scale=%d bucket=%s region=%s prefix=%q workers=%d timeout=%v",
+			*scale, *s3Bucket, *s3Region, *dataPrefix, *workers, *queryTimeout)
+	}
 
 	if *cpuProf != "" {
 		f, err := os.Create(*cpuProf)

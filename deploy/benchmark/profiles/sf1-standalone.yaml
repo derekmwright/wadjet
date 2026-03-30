@@ -1,0 +1,25 @@
+# SF1 Standalone — single-node TPC-H benchmark
+#
+# Quick validation: runs all 22 queries on one instance.
+# Data generated in-memory or loaded from pre-seeded S3.
+
+name: SF1 Standalone
+description: Single-node TPC-H SF1 for quick validation
+
+storage:
+  bucket: wadjet-bench-sf10-use2
+  region: us-east-2
+  data_prefix: "tables/"
+
+cluster:
+  mode: standalone
+  workers: 0
+  worker_instance: c7g.2xlarge
+  arch: arm64
+  use_spot: true
+
+benchmark:
+  scale_factor: 1
+  runs: 3
+  query_timeout: 10m
+  skip_load: false

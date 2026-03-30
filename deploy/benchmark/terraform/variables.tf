@@ -1,5 +1,11 @@
+variable "profile" {
+  description = "Benchmark profile name (e.g., sf100-distributed). Reads ../profiles/<profile>.yaml as the single source of truth for benchmark config. When set, overrides scale_factor, mode, worker_count, instance types, data_bucket, data_prefix, query_timeout, etc."
+  type        = string
+  default     = ""
+}
+
 variable "region" {
-  description = "AWS region"
+  description = "AWS region (overridden by profile when set)"
   type        = string
   default     = "us-east-2"
 }

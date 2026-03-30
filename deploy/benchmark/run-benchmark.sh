@@ -26,6 +26,7 @@ SKIP="${SKIP_QUERIES:-}"
 TIMEOUT="${QUERY_TIMEOUT:-10m}"
 DATA_PREFIX="${DATA_PREFIX-tables/}"
 BENCH_TYPE="${BENCHMARK_TYPE:-tpch}"
+PROFILE="${BENCHMARK_PROFILE:-}"
 
 # Select benchmark binary
 case "$BENCH_TYPE" in
@@ -94,6 +95,12 @@ fi
 
 # ---- Run benchmark ----
 
+# Build common flags. When a profile is set, tpch-bench reads bucket/region/
+# prefix/scale/timeout from the YAML — only profiling flags are needed here.
+# Without a profile, we pass everything explicitly via CLI flags.
+PROFILE_FLAG=()
+[ -n "$PROFILE" ] && PROFILE_FLAG=(--config="${PROFILE}")
+
 if [ "$MODE" = "standalone" ]; then
   log "Running ${BENCH_LABEL} SF${SCALE} standalone benchmark (${RUNS} runs)..."
 
@@ -102,6 +109,7 @@ if [ "$MODE" = "standalone" ]; then
   [ -n "$TIMEOUT" ] && SKIP_FLAGS+=( --query-timeout="${TIMEOUT}" )
 
   "$BENCH_BIN" \
+    "${PROFILE_FLAG[@]}" \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     --data-prefix="${DATA_PREFIX}" \
@@ -116,11 +124,18 @@ if [ "$MODE" = "standalone" ]; then
 elif [ "$MODE" = "distributed" ]; then
   log "Running ${BENCH_LABEL} SF${SCALE} distributed benchmark (${RUNS} runs, ${WORKER_COUNT} workers)..."
 
+  # tpch-bench is self-contained for distributed mode:
+  # - Starts embedded NATS on :4222 (workers connect here)
+  # - Creates coordinator internally
+  # - Registers all TPC-H tables in NATS KV catalog
+  # - Waits for --workers=N workers to connect
+  # - Runs all 22 queries through the coordinator
   SKIP_FLAGS=()
   [ -n "$SKIP" ] && SKIP_FLAGS=(--skip-queries="${SKIP}")
   [ -n "$TIMEOUT" ] && SKIP_FLAGS+=( --query-timeout="${TIMEOUT}" )
 
   "$BENCH_BIN" \
+    "${PROFILE_FLAG[@]}" \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     --workers="${WORKER_COUNT}" \

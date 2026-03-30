@@ -1,0 +1,28 @@
+# SF10 Distributed — 3-worker TPC-H benchmark
+#
+# Medium-scale benchmark for performance regression testing.
+# Data pre-seeded in S3 under tables/ prefix.
+# Coordinator: c7g.2xlarge (8 vCPU, 16 GB)
+# Workers: c7g.4xlarge (16 vCPU, 32 GB) x3
+
+name: SF10 Distributed
+description: 3-worker TPC-H SF10 for performance regression testing
+
+storage:
+  bucket: wadjet-bench-sf10-use2
+  region: us-east-2
+  data_prefix: "tables/"
+
+cluster:
+  mode: distributed
+  workers: 3
+  coordinator_instance: c7g.2xlarge
+  worker_instance: c7g.4xlarge
+  arch: arm64
+  use_spot: true
+
+benchmark:
+  scale_factor: 10
+  runs: 1
+  query_timeout: 10m
+  skip_load: true
