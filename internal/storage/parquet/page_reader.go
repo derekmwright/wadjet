@@ -1,0 +1,363 @@
+package parquet
+
+import (
+	"fmt"
+	"io"
+)
+
+// PageData holds the decoded contents of a single Parquet data page.
+type PageData struct {
+	NumValues       int
+	NumRows         int
+	NumNulls        int
+	Data            Values  // decoded column values (non-null values only)
+	DefinitionLevels []int32 // nil if column is required (no nulls)
+	RepetitionLevels []int32 // nil for flat schemas (no nesting)
+}
+
+// DictionaryData holds the decoded contents of a dictionary page.
+type DictionaryData struct {
+	NumValues int
+	Data      Values // dictionary entries
+}
+
+// ColumnPageReader reads pages from a single column chunk.
+// It provides an iterator interface: call NextPage() until it returns nil.
+type ColumnPageReader struct {
+	data       []byte          // raw column chunk bytes
+	off        int             // current read position
+	endOff     int             // end of column data
+	codec      CompressionCodec
+	physType   PhysicalType
+	typeLength int             // for FIXED_LEN_BYTE_ARRAY
+	maxDefLevel int            // 0 if column is required
+	maxRepLevel int            // 0 for flat schemas
+}
+
+// NewColumnPageReader creates a page reader for a column chunk.
+//
+// Parameters:
+//   - fileData: the entire file bytes (or the relevant region)
+//   - cm: column metadata from the footer
+//   - maxDefLevel: maximum definition level (0 for required columns)
+//   - maxRepLevel: maximum repetition level (0 for flat schemas)
+func NewColumnPageReader(fileData []byte, cm *ColumnMetaData, maxDefLevel, maxRepLevel int) *ColumnPageReader {
+	startOff := int(cm.DataPageOffset)
+	if cm.DictionaryPageOffset > 0 && cm.DictionaryPageOffset < cm.DataPageOffset {
+		startOff = int(cm.DictionaryPageOffset)
+	}
+	endOff := startOff + int(cm.TotalCompressedSize)
+	if endOff > len(fileData) {
+		endOff = len(fileData)
+	}
+
+	// Determine type length for FIXED_LEN_BYTE_ARRAY.
+	typeLength := 0
+	if cm.Type == PhysicalFixedLenByteArray {
+		// Type length should be inferred from schema; for now use data size / num_values.
+		// This will be refined when the schema tree is available.
+		typeLength = 0 // caller should set this
+	}
+
+	return &ColumnPageReader{
+		data:        fileData,
+		off:         startOff,
+		endOff:      endOff,
+		codec:       cm.Codec,
+		physType:    cm.Type,
+		typeLength:  typeLength,
+		maxDefLevel: maxDefLevel,
+		maxRepLevel: maxRepLevel,
+	}
+}
+
+// SetTypeLength sets the type length for FIXED_LEN_BYTE_ARRAY columns.
+func (r *ColumnPageReader) SetTypeLength(n int) {
+	r.typeLength = n
+}
+
+// NextPage reads and decodes the next page. Returns nil at end of column.
+func (r *ColumnPageReader) NextPage() (*PageData, error) {
+	for r.off < r.endOff {
+		ph, headerSize, err := DecodePageHeader(r.data[r.off:])
+		if err != nil {
+			return nil, fmt.Errorf("reading page header at offset %d: %w", r.off, err)
+		}
+		r.off += headerSize
+
+		compressedData := r.data[r.off : r.off+int(ph.CompressedPageSize)]
+		r.off += int(ph.CompressedPageSize)
+
+		switch ph.Type {
+		case PageDataV1:
+			return r.decodeDataPageV1(ph, compressedData)
+		case PageDataV2:
+			return r.decodeDataPageV2(ph, compressedData)
+		case PageDictionary:
+			// Dictionary pages are handled separately via NextDictionary.
+			// Skip for now — caller should call NextDictionary first.
+			continue
+		default:
+			// Skip unknown page types (e.g., index pages).
+			continue
+		}
+	}
+	return nil, nil // end of column
+}
+
+// NextDictionary reads the dictionary page if present.
+// Must be called before NextPage if the column uses dictionary encoding.
+// Returns nil if no dictionary page exists.
+func (r *ColumnPageReader) NextDictionary() (*DictionaryData, error) {
+	if r.off >= r.endOff {
+		return nil, nil
+	}
+
+	ph, headerSize, err := DecodePageHeader(r.data[r.off:])
+	if err != nil {
+		return nil, fmt.Errorf("reading page header: %w", err)
+	}
+
+	if ph.Type != PageDictionary {
+		return nil, nil // not a dictionary page — rewind not needed since we didn't advance
+	}
+
+	r.off += headerSize
+	compressedData := r.data[r.off : r.off+int(ph.CompressedPageSize)]
+	r.off += int(ph.CompressedPageSize)
+
+	// Decompress.
+	pageData, err := Decompress(r.codec, compressedData, int(ph.UncompressedPageSize))
+	if err != nil {
+		return nil, fmt.Errorf("decompressing dictionary page: %w", err)
+	}
+
+	numValues := int(ph.DictionaryPageHeader.NumValues)
+	vals := r.decodePlainValues(pageData, numValues)
+
+	return &DictionaryData{NumValues: numValues, Data: vals}, nil
+}
+
+func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (*PageData, error) {
+	dph := ph.DataPageHeader
+	if dph == nil {
+		return nil, fmt.Errorf("data page v1 missing DataPageHeader")
+	}
+
+	// Decompress the entire page (levels + data are compressed together in v1).
+	pageData, err := Decompress(r.codec, compressed, int(ph.UncompressedPageSize))
+	if err != nil {
+		return nil, fmt.Errorf("decompressing data page: %w", err)
+	}
+
+	numValues := int(dph.NumValues)
+	off := 0
+
+	// Decode repetition levels.
+	var repLevels []int32
+	if r.maxRepLevel > 0 {
+		bitWidth := bitsRequired(r.maxRepLevel)
+		decoded, consumed, err := DecodeRLEInt32WithLength(pageData[off:], bitWidth, numValues)
+		if err != nil {
+			return nil, fmt.Errorf("decoding repetition levels: %w", err)
+		}
+		repLevels = decoded
+		off += consumed
+	}
+
+	// Decode definition levels.
+	var defLevels []int32
+	numNulls := 0
+	if r.maxDefLevel > 0 {
+		bitWidth := bitsRequired(r.maxDefLevel)
+		decoded, consumed, err := DecodeRLEInt32WithLength(pageData[off:], bitWidth, numValues)
+		if err != nil {
+			return nil, fmt.Errorf("decoding definition levels: %w", err)
+		}
+		defLevels = decoded
+		off += consumed
+
+		// Count non-null values.
+		for _, dl := range defLevels {
+			if dl < int32(r.maxDefLevel) {
+				numNulls++
+			}
+		}
+	}
+
+	// Remaining bytes are the encoded column data.
+	valuesData := pageData[off:]
+	nonNullCount := numValues - numNulls
+
+	vals, err := r.decodeValues(valuesData, nonNullCount, dph.Encoding)
+	if err != nil {
+		return nil, fmt.Errorf("decoding v1 data: %w", err)
+	}
+
+	// Estimate numRows from numValues for flat schemas (no repetition levels).
+	numRows := numValues
+
+	return &PageData{
+		NumValues:        numValues,
+		NumRows:          numRows,
+		NumNulls:         numNulls,
+		Data:             vals,
+		DefinitionLevels: defLevels,
+		RepetitionLevels: repLevels,
+	}, nil
+}
+
+func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (*PageData, error) {
+	dph := ph.DataPageHeaderV2
+	if dph == nil {
+		return nil, fmt.Errorf("data page v2 missing DataPageHeaderV2")
+	}
+
+	numValues := int(dph.NumValues)
+	numRows := int(dph.NumRows)
+	numNulls := int(dph.NumNulls)
+	off := 0
+
+	// In v2, repetition and definition levels are stored uncompressed
+	// before the (optionally compressed) data section.
+
+	// Decode repetition levels (uncompressed).
+	var repLevels []int32
+	repLen := int(dph.RepetitionLevelsByteLength)
+	if repLen > 0 && r.maxRepLevel > 0 {
+		bitWidth := bitsRequired(r.maxRepLevel)
+		decoded, err := DecodeRLEInt32(compressed[off:off+repLen], bitWidth, numValues)
+		if err != nil {
+			return nil, fmt.Errorf("decoding v2 repetition levels: %w", err)
+		}
+		repLevels = decoded
+	}
+	off += repLen
+
+	// Decode definition levels (uncompressed).
+	var defLevels []int32
+	defLen := int(dph.DefinitionLevelsByteLength)
+	if defLen > 0 && r.maxDefLevel > 0 {
+		bitWidth := bitsRequired(r.maxDefLevel)
+		decoded, err := DecodeRLEInt32(compressed[off:off+defLen], bitWidth, numValues)
+		if err != nil {
+			return nil, fmt.Errorf("decoding v2 definition levels: %w", err)
+		}
+		defLevels = decoded
+	}
+	off += defLen
+
+	// Decompress the data section (levels were NOT compressed in v2).
+	dataSection := compressed[off:]
+	if dph.IsCompressed {
+		decompressed, err := Decompress(r.codec, dataSection, int(ph.UncompressedPageSize)-repLen-defLen)
+		if err != nil {
+			return nil, fmt.Errorf("decompressing v2 data: %w", err)
+		}
+		dataSection = decompressed
+	}
+
+	nonNullCount := numValues - numNulls
+	vals, err := r.decodeValues(dataSection, nonNullCount, dph.Encoding)
+	if err != nil {
+		return nil, fmt.Errorf("decoding v2 data: %w", err)
+	}
+
+	return &PageData{
+		NumValues:        numValues,
+		NumRows:          numRows,
+		NumNulls:         numNulls,
+		Data:             vals,
+		DefinitionLevels: defLevels,
+		RepetitionLevels: repLevels,
+	}, nil
+}
+
+// decodeValues decodes column values using the specified encoding.
+func (r *ColumnPageReader) decodeValues(data []byte, n int, enc Encoding) (Values, error) {
+	switch enc {
+	case EncodingPlain:
+		return r.decodePlainValues(data, n), nil
+	case EncodingRLEDictionary, EncodingPlainDictionary:
+		if len(data) == 0 || n == 0 {
+			return Values{physType: PhysicalInt32, count: 0}, nil
+		}
+		bitWidth := int(data[0])
+		indices, err := DecodeRLEInt32(data[1:], bitWidth, n)
+		if err != nil {
+			return Values{}, fmt.Errorf("decoding dictionary indices: %w", err)
+		}
+		return PlainInt32Values(indices), nil
+	case EncodingDeltaBinaryPacked:
+		switch r.physType {
+		case PhysicalInt32:
+			return DecodeDeltaBinaryPackedInt32(data, n)
+		case PhysicalInt64:
+			return DecodeDeltaBinaryPackedInt64(data, n)
+		default:
+			return Values{}, fmt.Errorf("DELTA_BINARY_PACKED not supported for %s", r.physType)
+		}
+	case EncodingDeltaLengthByteArray:
+		return DecodeDeltaLengthByteArray(data, n)
+	case EncodingDeltaByteArray:
+		return DecodeDeltaByteArray(data, n)
+	case EncodingRLE:
+		// RLE encoding for boolean columns.
+		if r.physType == PhysicalBoolean {
+			return DecodePlainBoolean(data, n), nil
+		}
+		return Values{}, fmt.Errorf("RLE encoding only supported for BOOLEAN, got %s", r.physType)
+	default:
+		return Values{}, fmt.Errorf("unsupported encoding: %s", enc)
+	}
+}
+
+// decodePlainValues decodes PLAIN-encoded values based on the column's physical type.
+func (r *ColumnPageReader) decodePlainValues(data []byte, n int) Values {
+	if n == 0 {
+		return Values{physType: r.physType}
+	}
+	switch r.physType {
+	case PhysicalBoolean:
+		return DecodePlainBoolean(data, n)
+	case PhysicalInt32:
+		return DecodePlainInt32(data, n)
+	case PhysicalInt64:
+		return DecodePlainInt64(data, n)
+	case PhysicalFloat:
+		return DecodePlainFloat(data, n)
+	case PhysicalDouble:
+		return DecodePlainDouble(data, n)
+	case PhysicalByteArray:
+		return DecodePlainByteArray(data, n)
+	case PhysicalFixedLenByteArray:
+		return DecodePlainFixedLenByteArray(data, n, r.typeLength)
+	case PhysicalInt96:
+		// INT96: 12 bytes per value, treat as fixed-length byte array.
+		return DecodePlainFixedLenByteArray(data, n, 12)
+	default:
+		return Values{physType: r.physType}
+	}
+}
+
+// bitsRequired returns the number of bits needed to represent value v.
+func bitsRequired(v int) int {
+	if v == 0 {
+		return 0
+	}
+	bits := 0
+	for v > 0 {
+		bits++
+		v >>= 1
+	}
+	return bits
+}
+
+// Close releases resources. Currently a no-op since we use slices into
+// the caller's byte buffer, but included for interface compatibility.
+func (r *ColumnPageReader) Close() error {
+	return nil
+}
+
+// Ensure ColumnPageReader satisfies io.Closer.
+var _ io.Closer = (*ColumnPageReader)(nil)
