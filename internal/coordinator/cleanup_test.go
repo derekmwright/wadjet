@@ -139,6 +139,38 @@ func TestCleanStaleNoStaleObjects(t *testing.T) {
 	}
 }
 
+func TestCleanStaleSkipsActiveQueries(t *testing.T) {
+	store := testStore(t, "results")
+	ctx := context.Background()
+
+	putObject(t, store, "results", "queries/q-active/scan-0/task-1.parquet")
+	putObject(t, store, "results", "queries/q-active/scan-0/task-2.parquet")
+	putObject(t, store, "results", "queries/q-done/scan-0/task-1.parquet")
+
+	rc := NewResultCleaner(store, "results", 1*time.Nanosecond, nil)
+	rc.SetActiveQueriesFunc(func() map[string]struct{} {
+		return map[string]struct{}{"q-active": {}}
+	})
+	time.Sleep(2 * time.Millisecond)
+
+	deleted, err := rc.CleanStale(ctx)
+	if err != nil {
+		t.Fatalf("CleanStale: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("expected 1 deleted (q-done only), got %d", deleted)
+	}
+
+	// q-active files should still exist
+	objects, err := store.List(ctx, "results", objstore.ListOptions{Prefix: "queries/q-active/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 2 {
+		t.Errorf("expected 2 active query files preserved, got %d", len(objects))
+	}
+}
+
 // --- QueryIDFromPath ---
 
 func TestQueryIDFromPath(t *testing.T) {

@@ -541,6 +541,46 @@ func TestQueryTrackerConcurrentAccess(t *testing.T) {
 	}
 }
 
+// --- ActiveQueryIDs ---
+
+func TestActiveQueryIDs(t *testing.T) {
+	qt := NewQueryTracker()
+	qt.Register("q-pending", "SQL", map[string]*StageInfo{}, nil)
+	qt.Register("q-running", "SQL", map[string]*StageInfo{}, nil)
+	qt.Start("q-running")
+	qt.Register("q-done", "SQL", map[string]*StageInfo{}, nil)
+	qt.Start("q-done")
+	qt.Complete("q-done")
+	qt.Register("q-failed", "SQL", map[string]*StageInfo{}, nil)
+	qt.Start("q-failed")
+	qt.Fail("q-failed", "err")
+
+	active := qt.ActiveQueryIDs()
+	if _, ok := active["q-pending"]; !ok {
+		t.Error("pending query should be active")
+	}
+	if _, ok := active["q-running"]; !ok {
+		t.Error("running query should be active")
+	}
+	if _, ok := active["q-done"]; ok {
+		t.Error("completed query should not be active")
+	}
+	if _, ok := active["q-failed"]; ok {
+		t.Error("failed query should not be active")
+	}
+	if len(active) != 2 {
+		t.Errorf("expected 2 active queries, got %d", len(active))
+	}
+}
+
+func TestActiveQueryIDsEmpty(t *testing.T) {
+	qt := NewQueryTracker()
+	active := qt.ActiveQueryIDs()
+	if len(active) != 0 {
+		t.Errorf("expected 0 active queries, got %d", len(active))
+	}
+}
+
 // --- CollectResultPaths ---
 
 func TestCollectResultPaths(t *testing.T) {
