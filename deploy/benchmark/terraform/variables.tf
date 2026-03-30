@@ -110,6 +110,12 @@ variable "max_concurrent" {
   default     = 4
 }
 
+variable "cache_bytes" {
+  description = "Worker LRU file cache size in bytes (0 = auto-detect based on memory and budget)"
+  type        = number
+  default     = 0
+}
+
 variable "data_prefix" {
   description = "S3 prefix for table data (e.g. 'tables/' or '' for root-level paths)"
   type        = string

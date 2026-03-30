@@ -107,6 +107,8 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&otelInsecure, "otel-insecure", false, "Use plaintext gRPC for OTLP exporter")
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = auto-detect from cgroup, or unlimited)")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
+	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
+
 	rootCmd.PersistentFlags().Int64Var(&resultStoreBytes, "result-store", 512*1024*1024, "In-memory result store capacity in bytes (0 = disabled, results pass through S3)")
 	rootCmd.PersistentFlags().StringVar(&pgAddr, "pg-addr", ":5433", "PostgreSQL wire protocol listen address")
 	rootCmd.PersistentFlags().StringVar(&pgTLSCert, "pg-tls-cert", "", "TLS certificate file for PostgreSQL wire protocol")
@@ -156,10 +158,28 @@ func serveCmd() *cobra.Command {
 				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", "off")
 
 				if cacheBytes == 0 {
-					// Use 20% of memory for cross-query S3 file cache. At SF10
-					// (~12 GB Parquet data), this avoids re-reading files from S3
-					// on every query. On c7g.4xlarge (32 GB), this gives ~6.4 GB cache.
-					cacheBytes = memLimit / 5
+					if memoryBudget > 0 {
+						// With explicit memory budget, scale cache to fit alongside
+						// task memory. Pipeline dead objects accumulate with GOGC=off,
+						// so leave headroom = budget * concurrent * 2 for GC lag.
+						maxConc := int64(maxConcurrent)
+						if maxConc < 1 {
+							maxConc = 1
+						}
+						taskFootprint := memoryBudget * maxConc * 2
+						headroom := memLimit / 10
+						available := memLimit - taskFootprint - headroom
+						if available < 256*1024*1024 {
+							available = 256 * 1024 * 1024
+						}
+						if defaultCache := memLimit / 5; available > defaultCache {
+							available = defaultCache
+						}
+						cacheBytes = available
+					} else {
+						// Default: 20% of memory for cross-query S3 file cache.
+						cacheBytes = memLimit / 5
+					}
 					logger.Info("auto-detected file cache size", "cache_bytes", cacheBytes)
 				}
 				if memoryBudget == 0 {
