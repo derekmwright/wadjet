@@ -47,7 +47,7 @@ func TestRowColumnarRead(t *testing.T) {
 	}
 
 	// Confirm the schema has TypeRow (not flattened to leaves)
-	if !hasUnsupportedColumnarTypes(schema.Columns) {
+	if !HasUnsupportedColumnarTypes(schema.Columns) {
 		// TypeRow should NOT trigger the fallback anymore
 	} else {
 		t.Fatal("TypeRow should not trigger unsupported type fallback")

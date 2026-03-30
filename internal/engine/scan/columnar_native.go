@@ -20,13 +20,13 @@ func ReadFileBatchesNative(fr *pqt.FileReader, schema []pqt.Column, selectedCols
 	// Schemas with types unsupported by the columnar reader return an error.
 	// Callers with Array/Map/Decimal columns should use ReadFileBatches (parquet-go)
 	// until the native reader supports those types.
-	if hasUnsupportedColumnarTypes(readSchema) {
+	if HasUnsupportedColumnarTypes(readSchema) {
 		return nil, fmt.Errorf("native reader does not support Array/Map/Decimal types yet")
 	}
 
 	var batches []*batch.RecordBatch
 	for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
-		b, err := readRowGroupNative(fr, rgIdx, readSchema, nil)
+		b, err := ReadRowGroupNative(fr, rgIdx, readSchema, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -37,9 +37,9 @@ func ReadFileBatchesNative(fr *pqt.FileReader, schema []pqt.Column, selectedCols
 	return batches, nil
 }
 
-// readRowGroupNative reads a row group using our custom page reader,
+// ReadRowGroupNative reads a row group using our custom page reader,
 // bypassing parquet-go entirely for the data path.
-func readRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool) (*batch.RecordBatch, error) {
+func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool) (*batch.RecordBatch, error) {
 	numRows := int(fr.RowGroupNumRows(rgIdx))
 	if numRows == 0 {
 		return nil, nil

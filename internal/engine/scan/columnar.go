@@ -23,7 +23,7 @@ func ReadFileBatches(reader *pqt.Reader, schema []pqt.Column, selectedCols []str
 	}
 
 	// Schemas with types unsupported by the columnar reader fall back to rows
-	if hasUnsupportedColumnarTypes(readSchema) {
+	if HasUnsupportedColumnarTypes(readSchema) {
 		return readFileBatchesViaRows(reader, readSchema, selectedCols)
 	}
 
@@ -90,10 +90,10 @@ func projectSchema(schema []pqt.Column, selectedCols []string) []pqt.Column {
 	return schema
 }
 
-// hasUnsupportedColumnarTypes returns true if any column uses a type the
+// HasUnsupportedColumnarTypes returns true if any column uses a type the
 // direct columnar reader cannot handle (Decimal, Array, Map).
 // TypeRow is supported: child fields are read as separate leaf column chunks.
-func hasUnsupportedColumnarTypes(schema []pqt.Column) bool {
+func HasUnsupportedColumnarTypes(schema []pqt.Column) bool {
 	for _, col := range schema {
 		switch col.Type {
 		case pqt.TypeDecimal, pqt.TypeArray, pqt.TypeMap:

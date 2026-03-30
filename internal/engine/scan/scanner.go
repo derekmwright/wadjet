@@ -394,7 +394,7 @@ func (s *Scanner) decodeRowGroupsNative(ctx context.Context, fr *pqt.FileReader,
 			}
 		}
 
-		b, err := readRowGroupNative(fr, rgIdx, schema, s.scanPool)
+		b, err := ReadRowGroupNative(fr, rgIdx, schema, s.scanPool)
 		if err != nil {
 			return nil, fmt.Errorf("reading row group %d: %w", rgIdx, err)
 		}
