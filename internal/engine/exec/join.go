@@ -109,6 +109,12 @@ type HashJoin struct {
 	// concurrent builds' accounting).
 	trackedMem int64
 
+	// trackedHashOverhead tracks how much hash table overhead has been charged
+	// to the memory tracker via EstimateBatchBytes (40 bytes/row). When the
+	// actual hash table grows beyond this (e.g., string arenas, grow() doubling),
+	// the delta is reserved so spill triggers at the right threshold.
+	trackedHashOverhead int64
+
 	// Grace Hash Join spill state. Non-nil when build-side data has been
 	// partitioned and spilled to disk due to memory pressure.
 	spillState *spillState
@@ -590,6 +596,40 @@ func (h *HashJoin) intProbeKey(in *batch.RecordBatch, row int) (int64, bool) {
 	return intKeyFromVector(in.Columns[h.probeKeyIdx[0]], row)
 }
 
+// hashTableOverhead returns the actual heap bytes consumed by the hash table
+// index structures (entries, arenas, chains, bloom). This excludes build-side
+// batch data, which is tracked separately.
+func (h *HashJoin) hashTableOverhead() int64 {
+	var size int64
+	if h.intIndex != nil {
+		size += h.intIndex.MemoryUsage()
+	}
+	if h.strIndex != nil {
+		size += h.strIndex.MemoryUsage()
+	}
+	size += int64(cap(h.arena)) * 8     // buildRef = 8 bytes
+	size += int64(cap(h.arenaNext)) * 4  // int32 = 4 bytes
+	size += int64(cap(h.arenaMatched))   // bool = 1 byte
+	size += int64(len(h.bloom)) * 8      // uint64 = 8 bytes
+	return size
+}
+
+// reconcileHashMemory checks if the hash table has grown beyond what
+// EstimateBatchBytes charged (40 bytes/row) and reserves the delta.
+// Called periodically during Build to keep the tracker accurate.
+func (h *HashJoin) reconcileHashMemory() {
+	if h.MemTracker == nil {
+		return
+	}
+	actual := h.hashTableOverhead()
+	if actual > h.trackedHashOverhead {
+		delta := actual - h.trackedHashOverhead
+		h.MemTracker.Reserve(delta) // best-effort; don't fail the build
+		h.trackedHashOverhead = actual
+		h.trackedMem += delta
+	}
+}
+
 // EstimateBatchBytes estimates the memory footprint of a RecordBatch.
 func EstimateBatchBytes(b *batch.RecordBatch) int64 {
 	var size int64
@@ -902,6 +942,11 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		} else if h.strIndex != nil {
 			h.strIndex.CheckGrow()
 		}
+
+		// Reconcile hash table memory: grow() may have doubled the entries
+		// array, consuming much more than EstimateBatchBytes predicted.
+		h.reconcileHashMemory()
+
 		h.mu.Unlock()
 	}
 
@@ -924,6 +969,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 
 	// Build bloom filter for fast negative lookups during probe.
 	h.buildBloom()
+
+	// Final reconciliation: bloom + arenaMatched allocations happened outside
+	// the per-batch tracking loop. Charge them to the memory tracker.
+	h.reconcileHashMemory()
 
 	h.buildDone = true
 	return nil

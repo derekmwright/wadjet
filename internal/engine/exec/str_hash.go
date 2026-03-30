@@ -239,6 +239,12 @@ func (h *strHashTable) EnsureCapacity(additional int) {
 // Len returns the number of entries.
 func (h *strHashTable) Len() int { return h.size }
 
+// MemoryUsage returns the total heap bytes consumed by the hash table
+// (entries array + key arena).
+func (h *strHashTable) MemoryUsage() int64 {
+	return int64(cap(h.entries))*16 + int64(cap(h.arena)) // sizeof(strEntry) = 16
+}
+
 // grow doubles the table capacity and rehashes entries.
 // The arena stays the same — only the index is rebuilt.
 // Uses stored hashTag for index computation instead of re-reading keys

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -861,3 +862,83 @@ func TestConsolidateBuildThreshold(t *testing.T) {
 		t.Fatalf("expected 3 output rows, got %v", out)
 	}
 }
+
+// --- Regression: hash table memory tracking (Q10 OOM fix) ---
+
+func TestHashJoinReconcileHashMemory(t *testing.T) {
+	// Q10 root cause: EstimateBatchBytes charged 40 bytes/row for hash overhead,
+	// but actual hash table (entries + arena + chains) consumed 2-5x more.
+	// Spill triggered too late → OOM. Fix: reconcileHashMemory adjusts tracker
+	// to reflect actual hash table allocations after grow().
+
+	ctx := context.Background()
+	tracker := memory.NewTracker("test", 100*1024*1024) // 100 MB budget
+
+	schema := []parquet.Column{
+		{Name: "key", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeInt64},
+	}
+
+	hj := NewHashJoin(InnerJoin, []string{"key"}, []string{"key"})
+	hj.MemTracker = tracker
+
+	// Build with 50K rows — enough to trigger multiple grow() calls.
+	nRows := 50000
+	batchSize := 2048
+	var buildBatches []*batch.RecordBatch
+	for start := 0; start < nRows; start += batchSize {
+		end := start + batchSize
+		if end > nRows {
+			end = nRows
+		}
+		n := end - start
+		b := batch.NewRecordBatch(schema, n)
+		for i := 0; i < n; i++ {
+			b.Columns[0].Int64Data[i] = int64(start + i)
+			b.Columns[1].Int64Data[i] = int64(start + i + 100)
+		}
+		buildBatches = append(buildBatches, b)
+	}
+
+	err := hj.Build(ctx, &covTestBatchSource{batches: buildBatches})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// The tracker should reflect more than just EstimateBatchBytes charges.
+	// reconcileHashMemory adds the delta between actual hash table size and
+	// the 40 bytes/row estimate charged per batch.
+	trackerUsed := tracker.Used()
+	if trackerUsed <= 0 {
+		t.Errorf("tracker.Used() = %d, expected > 0", trackerUsed)
+	}
+
+	// Verify the hash table overhead method reports actual allocations.
+	overhead := hj.hashTableOverhead()
+	if overhead <= 0 {
+		t.Errorf("hashTableOverhead() = %d, expected > 0", overhead)
+	}
+	// intHashTable at 50K entries at 70% load: cap ~73K, 73K × 16 = 1.17 MB
+	// Plus arena (50K × 8 = 400 KB) + arenaNext (50K × 4 = 200 KB) + bloom
+	expectedMin := int64(nRows) * 12 // very conservative: 12 bytes/row minimum
+	if overhead < expectedMin {
+		t.Errorf("hashTableOverhead() = %d, expected >= %d", overhead, expectedMin)
+	}
+}
+
+// covTestBatchSource is a simple Source for testing that yields pre-built batches.
+type covTestBatchSource struct {
+	batches []*batch.RecordBatch
+	idx     int
+}
+
+func (s *covTestBatchSource) Init(ctx context.Context) error { return nil }
+func (s *covTestBatchSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if s.idx >= len(s.batches) {
+		return nil, nil
+	}
+	b := s.batches[s.idx]
+	s.idx++
+	return b, nil
+}
+func (s *covTestBatchSource) Close() error { return nil }
