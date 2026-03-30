@@ -127,7 +127,22 @@ variable "benchmark_type" {
   }
 }
 
-# Recommended instance types per scale factor (Graviton3 ARM):
-#   SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
-#   SF10:  c7g.4xlarge  (16 vCPU, 32 GB) — $0.58/hr
-#   SF100: c7g.8xlarge  (32 vCPU, 64 GB) — $1.15/hr
+variable "arch" {
+  description = "CPU architecture: arm64 (Graviton) or x86_64 (Intel/AMD)"
+  type        = string
+  default     = "arm64"
+
+  validation {
+    condition     = contains(["arm64", "x86_64"], var.arch)
+    error_message = "arch must be arm64 or x86_64"
+  }
+}
+
+# Recommended instance types per scale factor:
+#   Graviton3 ARM (c7g):
+#     SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
+#     SF10:  c7g.4xlarge  (16 vCPU, 32 GB) — $0.58/hr
+#     SF100: c7g.8xlarge  (32 vCPU, 64 GB) — $1.15/hr
+#   Intel Sapphire Rapids (c7i):
+#     SF10:  c7i.4xlarge  (16 vCPU, 32 GB) — $0.71/hr
+#     SF10 coordinator: c7i.2xlarge (8 vCPU, 16 GB) — $0.36/hr
