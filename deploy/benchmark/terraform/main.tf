@@ -32,7 +32,8 @@ data "aws_ami" "al2023" {
 
   filter {
     name   = "name"
-    values = [local.eff_arch == "arm64" ? "al2023-ami-*-arm64" : "al2023-ami-*-x86_64"]
+    # Exclude "minimal" AMI — it doesn't include SSM agent.
+    values = [local.eff_arch == "arm64" ? "al2023-ami-2023.*-kernel-*-arm64" : "al2023-ami-2023.*-kernel-*-x86_64"]
   }
 
   filter {
