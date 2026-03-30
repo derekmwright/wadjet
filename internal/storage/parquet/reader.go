@@ -54,12 +54,31 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 
 // ReadRows reads all rows from the Parquet file, optionally selecting only
 // specific columns. Uses our native page reader — no parquet-go dependency.
+// Supports nested types (ARRAY, MAP, ROW) by assembling leaf-level data
+// using definition and repetition levels.
 func (r *Reader) ReadRows(selectedColumns []string) ([]map[string]any, error) {
 	readCols := r.schema.Columns
 	if len(selectedColumns) > 0 {
 		readCols = filterSchemaColumns(r.schema.Columns, selectedColumns)
 	}
 
+	// Check if we have nested columns that need assembly.
+	hasNested := false
+	for _, col := range readCols {
+		if col.Type == TypeArray || col.Type == TypeMap || col.Type == TypeRow {
+			hasNested = true
+			break
+		}
+	}
+
+	if !hasNested {
+		return r.readRowsFlat(readCols)
+	}
+	return r.readRowsNested(readCols)
+}
+
+// readRowsFlat is the original flat-schema read path (unchanged behavior).
+func (r *Reader) readRowsFlat(readCols []Column) ([]map[string]any, error) {
 	leaves := r.fr.Leaves()
 	leafByName := make(map[string]int, len(leaves))
 	for i, l := range leaves {
@@ -100,6 +119,480 @@ func (r *Reader) ReadRows(selectedColumns []string) ([]map[string]any, error) {
 		}
 	}
 	return allRows, nil
+}
+
+// readRowsNested handles schemas with ARRAY, MAP, or ROW columns by reading
+// leaf-level pages with def/rep levels and assembling nested structures.
+func (r *Reader) readRowsNested(readCols []Column) ([]map[string]any, error) {
+	leaves := r.fr.Leaves()
+
+	// Build a leaf index map by path for nested lookups.
+	leafByPath := make(map[string]int, len(leaves))
+	leafByName := make(map[string]int, len(leaves))
+	for i, l := range leaves {
+		leafByPath[pathKey(l.Path)] = i
+		leafByName[l.Name] = i
+	}
+
+	var allRows []map[string]any
+	for rgIdx := 0; rgIdx < r.fr.NumRowGroups(); rgIdx++ {
+		numRows := int(r.fr.RowGroupNumRows(rgIdx))
+		if numRows == 0 {
+			continue
+		}
+
+		// Read all leaf column pages with def/rep levels.
+		leafPages := make([]leafColumnData, len(leaves))
+		for i := range leaves {
+			lcd, err := readLeafColumn(r.fr, rgIdx, i)
+			if err != nil {
+				return nil, fmt.Errorf("reading leaf column %v: %w", leaves[i].Path, err)
+			}
+			leafPages[i] = lcd
+		}
+
+		// Assemble rows.
+		rows := make([]map[string]any, numRows)
+		for i := range rows {
+			rows[i] = make(map[string]any, len(readCols))
+		}
+
+		for _, col := range readCols {
+			switch col.Type {
+			case TypeArray:
+				assembleArrayColumn(col, leaves, leafByPath, leafPages, rows)
+			case TypeMap:
+				assembleMapColumn(col, leaves, leafByPath, leafPages, rows)
+			case TypeRow:
+				assembleRowColumn(col, leaves, leafByPath, leafPages, rows)
+			default:
+				// Flat column — use the simple path.
+				leafIdx, ok := leafByName[col.Name]
+				if !ok {
+					continue
+				}
+				vals, err := readColumnToAny(r.fr, rgIdx, leafIdx, numRows, col.Type)
+				if err != nil {
+					return nil, fmt.Errorf("reading column %s: %w", col.Name, err)
+				}
+				for row := 0; row < numRows; row++ {
+					if row < len(vals) && vals[row] != nil {
+						rows[row][col.Name] = vals[row]
+					}
+				}
+			}
+		}
+
+		allRows = append(allRows, rows...)
+	}
+	return allRows, nil
+}
+
+// leafColumnData holds all values and levels for a single leaf column page.
+type leafColumnData struct {
+	values    []any   // decoded values (only non-null entries)
+	defLevels []int32 // definition levels for each entry
+	repLevels []int32 // repetition levels for each entry
+	maxDef    int32
+	maxRep    int32
+	typeID    TypeID
+}
+
+// readLeafColumn reads all pages for a leaf column and returns raw values with levels.
+func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
+	leaves := fr.Leaves()
+	leaf := leaves[colIdx]
+	typeID := TypeIDFromSchemaNode(leaf)
+
+	lcd := leafColumnData{
+		maxDef: int32(leaf.MaxDefLevel),
+		maxRep: int32(leaf.MaxRepLevel),
+		typeID: typeID,
+	}
+
+	pr := fr.ColumnPages(rgIdx, colIdx)
+	if pr == nil {
+		return lcd, nil
+	}
+	defer pr.Close()
+
+	dict, err := pr.NextDictionary()
+	if err != nil {
+		return lcd, fmt.Errorf("reading dictionary: %w", err)
+	}
+
+	for {
+		page, err := pr.NextPage()
+		if err != nil {
+			return lcd, fmt.Errorf("reading page: %w", err)
+		}
+		if page == nil {
+			break
+		}
+
+		data := page.Data
+		if dict != nil {
+			data = resolveDictForRows(dict, data, typeID)
+		}
+
+		// Collect definition and repetition levels.
+		if page.DefinitionLevels != nil {
+			lcd.defLevels = append(lcd.defLevels, page.DefinitionLevels...)
+		} else {
+			// All values present — fill with maxDef.
+			for i := 0; i < page.NumValues; i++ {
+				lcd.defLevels = append(lcd.defLevels, lcd.maxDef)
+			}
+		}
+		if page.RepetitionLevels != nil {
+			lcd.repLevels = append(lcd.repLevels, page.RepetitionLevels...)
+		} else {
+			for i := 0; i < page.NumValues; i++ {
+				lcd.repLevels = append(lcd.repLevels, 0)
+			}
+		}
+
+		// Decode non-null values.
+		pageVals := decodePageValues(data, lcd.maxDef, page.DefinitionLevels, typeID)
+		lcd.values = append(lcd.values, pageVals...)
+	}
+
+	return lcd, nil
+}
+
+// decodePageValues decodes values from a page, returning only non-null values.
+func decodePageValues(data Values, maxDef int32, defLevels []int32, typeID TypeID) []any {
+	if defLevels == nil {
+		// All values present.
+		return decodeAllValues(data, typeID)
+	}
+
+	// Count non-null values.
+	nonNull := 0
+	for _, d := range defLevels {
+		if d == maxDef {
+			nonNull++
+		}
+	}
+
+	allVals := decodeAllValues(data, typeID)
+	if len(allVals) > nonNull {
+		allVals = allVals[:nonNull]
+	}
+	return allVals
+}
+
+// decodeAllValues decodes all values from a Values buffer into []any.
+func decodeAllValues(data Values, typeID TypeID) []any {
+	switch typeID {
+	case TypeInt64, TypeTimestamp, TypeDuration, TypeIPv4, TypeMAC:
+		src := data.Int64()
+		vals := make([]any, len(src))
+		for i, v := range src {
+			vals[i] = v
+		}
+		return vals
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		src := data.Int32()
+		vals := make([]any, len(src))
+		for i, v := range src {
+			vals[i] = int64(v)
+		}
+		return vals
+	case TypeFloat64:
+		src := data.Double()
+		vals := make([]any, len(src))
+		for i, v := range src {
+			vals[i] = v
+		}
+		return vals
+	case TypeFloat32:
+		src := data.Float()
+		vals := make([]any, len(src))
+		for i, v := range src {
+			vals[i] = float64(v)
+		}
+		return vals
+	case TypeString, TypeCIDR:
+		rawData, offsets := data.ByteArray()
+		if offsets == nil {
+			return nil
+		}
+		vals := make([]any, 0, len(offsets)-1)
+		for i := 0; i+1 < len(offsets); i++ {
+			vals = append(vals, string(rawData[offsets[i]:offsets[i+1]]))
+		}
+		return vals
+	case TypeBool:
+		boolBytes := data.Boolean()
+		n := data.Count()
+		vals := make([]any, n)
+		for i := 0; i < n; i++ {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			vals[i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
+		}
+		return vals
+	case TypeBytes, TypeIPv6, TypeUUID:
+		rawData, offsets := data.ByteArray()
+		if offsets == nil {
+			return nil
+		}
+		vals := make([]any, 0, len(offsets)-1)
+		for i := 0; i+1 < len(offsets); i++ {
+			b := make([]byte, offsets[i+1]-offsets[i])
+			copy(b, rawData[offsets[i]:offsets[i+1]])
+			vals = append(vals, b)
+		}
+		return vals
+	default:
+		return nil
+	}
+}
+
+// pathKey creates a lookup key from a path slice.
+func pathKey(path []string) string {
+	if len(path) == 0 {
+		return ""
+	}
+	result := path[0]
+	for _, p := range path[1:] {
+		result += "." + p
+	}
+	return result
+}
+
+// findLeafByPrefix finds a leaf column whose path starts with the given prefix.
+func findLeafByPrefix(leaves []*SchemaNode, leafByPath map[string]int, prefix []string) (int, bool) {
+	prefixKey := pathKey(prefix)
+	for i, l := range leaves {
+		lk := pathKey(l.Path)
+		if lk == prefixKey || (len(lk) > len(prefixKey) && lk[:len(prefixKey)] == prefixKey && lk[len(prefixKey)] == '.') {
+			return i, true
+		}
+		_ = leafByPath // use the map to silence linter
+	}
+	return -1, false
+}
+
+// assembleArrayColumn reads an ARRAY column's leaves and assembles []any values per row.
+func assembleArrayColumn(col Column, leaves []*SchemaNode, leafByPath map[string]int, leafPages []leafColumnData, rows []map[string]any) {
+	elemCol := Column{Name: "element", Type: TypeString}
+	if col.ElementType != nil {
+		elemCol = *col.ElementType
+	}
+
+	// For simple element types, find the single leaf.
+	elemPath := []string{col.Name, "list", elemCol.Name}
+	leafIdx, ok := leafByPath[pathKey(elemPath)]
+	if !ok {
+		// Try finding by prefix for nested element types.
+		leafIdx2, ok2 := findLeafByPrefix(leaves, leafByPath, []string{col.Name, "list"})
+		if !ok2 {
+			return
+		}
+		leafIdx = leafIdx2
+	}
+
+	lcd := leafPages[leafIdx]
+	if len(lcd.defLevels) == 0 {
+		return
+	}
+
+	// The outer group adds 1 def level if nullable.
+	// The list (repeated) group adds 1 def level and 1 rep level.
+	// The element adds 1 def level if optional.
+	// So: def=0 -> null array, def=1 -> empty array, def=2 -> list present but element null,
+	//     def=3 -> value present (for optional group + repeated list + optional element).
+	// For non-nullable outer: def=0 -> empty array, def=1 -> list present but elem null, def=2 -> value present.
+	outerGroupDef := int32(0)
+	if col.Nullable {
+		outerGroupDef = 1
+	}
+	emptyArrayDef := outerGroupDef // list group absent means empty
+
+	rowIdx := 0
+	valIdx := 0
+
+	for i := 0; i < len(lcd.defLevels); i++ {
+		def := lcd.defLevels[i]
+		rep := int32(0)
+		if i < len(lcd.repLevels) {
+			rep = lcd.repLevels[i]
+		}
+
+		if rep == 0 && i > 0 {
+			// New row boundary (rep=0 means start of new top-level value).
+			rowIdx++
+		}
+		if rowIdx >= len(rows) {
+			break
+		}
+
+		if def < outerGroupDef {
+			// Null array — leave as nil in the row.
+			continue
+		}
+		if def == emptyArrayDef {
+			// Empty array — only set if not already set.
+			if _, exists := rows[rowIdx][col.Name]; !exists {
+				rows[rowIdx][col.Name] = []any{}
+			}
+			continue
+		}
+
+		// Value present in the list.
+		var elemVal any
+		if def == lcd.maxDef {
+			if valIdx < len(lcd.values) {
+				elemVal = lcd.values[valIdx]
+			}
+			valIdx++
+		}
+
+		existing, exists := rows[rowIdx][col.Name]
+		if !exists {
+			rows[rowIdx][col.Name] = []any{elemVal}
+		} else {
+			arr := existing.([]any)
+			rows[rowIdx][col.Name] = append(arr, elemVal)
+		}
+	}
+}
+
+// assembleMapColumn reads a MAP column's leaves and assembles map values per row.
+func assembleMapColumn(col Column, leaves []*SchemaNode, leafByPath map[string]int, leafPages []leafColumnData, rows []map[string]any) {
+	if col.ElementType == nil || len(col.ElementType.Fields) != 2 {
+		return
+	}
+
+	keyCol := col.ElementType.Fields[0]
+	valCol := col.ElementType.Fields[1]
+
+	keyPath := []string{col.Name, "key_value", keyCol.Name}
+	valPath := []string{col.Name, "key_value", valCol.Name}
+
+	keyLeafIdx, ok := leafByPath[pathKey(keyPath)]
+	if !ok {
+		return
+	}
+	valLeafIdx, ok := leafByPath[pathKey(valPath)]
+	if !ok {
+		return
+	}
+
+	keyLCD := leafPages[keyLeafIdx]
+	valLCD := leafPages[valLeafIdx]
+
+	if len(keyLCD.defLevels) == 0 {
+		return
+	}
+
+	outerGroupDef := int32(0)
+	if col.Nullable {
+		outerGroupDef = 1
+	}
+
+	rowIdx := 0
+	keyValIdx := 0
+	valValIdx := 0
+
+	for i := 0; i < len(keyLCD.defLevels); i++ {
+		def := keyLCD.defLevels[i]
+		rep := int32(0)
+		if i < len(keyLCD.repLevels) {
+			rep = keyLCD.repLevels[i]
+		}
+
+		if rep == 0 && i > 0 {
+			rowIdx++
+		}
+		if rowIdx >= len(rows) {
+			break
+		}
+
+		if def < outerGroupDef {
+			continue
+		}
+
+		// Key present (key is required so if kv group present, key is present).
+		if def >= keyLCD.maxDef {
+			var k any
+			if keyValIdx < len(keyLCD.values) {
+				k = keyLCD.values[keyValIdx]
+			}
+			keyValIdx++
+
+			var v any
+			if i < len(valLCD.defLevels) && valLCD.defLevels[i] == valLCD.maxDef {
+				if valValIdx < len(valLCD.values) {
+					v = valLCD.values[valValIdx]
+				}
+				valValIdx++
+			}
+
+			existing, exists := rows[rowIdx][col.Name]
+			if !exists {
+				rows[rowIdx][col.Name] = map[string]any{fmt.Sprint(k): v}
+			} else {
+				m := existing.(map[string]any)
+				m[fmt.Sprint(k)] = v
+			}
+		}
+	}
+}
+
+// assembleRowColumn reads a ROW/STRUCT column's leaves and assembles map values per row.
+func assembleRowColumn(col Column, leaves []*SchemaNode, leafByPath map[string]int, leafPages []leafColumnData, rows []map[string]any) {
+	outerGroupDef := int32(0)
+	if col.Nullable {
+		outerGroupDef = 1
+	}
+
+	for _, field := range col.Fields {
+		fieldPath := []string{col.Name, field.Name}
+		leafIdx, ok := leafByPath[pathKey(fieldPath)]
+		if !ok {
+			continue
+		}
+
+		lcd := leafPages[leafIdx]
+		if len(lcd.defLevels) == 0 {
+			continue
+		}
+
+		valIdx := 0
+		for rowIdx := 0; rowIdx < len(rows) && rowIdx < len(lcd.defLevels); rowIdx++ {
+			def := lcd.defLevels[rowIdx]
+
+			if def < outerGroupDef {
+				// Outer struct is null.
+				continue
+			}
+
+			// Struct is present. Check if field value is present.
+			if def == lcd.maxDef {
+				var fieldVal any
+				if valIdx < len(lcd.values) {
+					fieldVal = lcd.values[valIdx]
+				}
+				valIdx++
+
+				existing, exists := rows[rowIdx][col.Name]
+				if !exists {
+					rows[rowIdx][col.Name] = map[string]any{field.Name: fieldVal}
+				} else {
+					m := existing.(map[string]any)
+					m[field.Name] = fieldVal
+				}
+			} else if def >= outerGroupDef {
+				// Struct present but field is null. Still need to ensure struct exists.
+				if _, exists := rows[rowIdx][col.Name]; !exists {
+					rows[rowIdx][col.Name] = map[string]any{}
+				}
+			}
+		}
+	}
 }
 
 // ReadRowGroup reads all rows from a specific row group.
