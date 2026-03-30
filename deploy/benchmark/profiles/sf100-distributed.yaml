@@ -1,0 +1,33 @@
+# SF100 Distributed — 3-worker TPC-H benchmark at full scale
+#
+# Full-scale benchmark for OOM/spill validation and competitive comparison.
+# Data copied from Polars public bucket into our account, stored at ROOT
+# level (lineitem/, orders/, etc.) — NOT under tables/ prefix.
+# Workers use c7gd.4xlarge for NVMe spill-to-disk.
+#
+# Coordinator: c7g.2xlarge  (8 vCPU, 16 GB)
+# Workers:     c7gd.4xlarge (16 vCPU, 32 GB, 1x237 GB NVMe) x3
+
+name: SF100 Distributed
+description: 3-worker TPC-H SF100 for OOM/spill validation
+
+storage:
+  bucket: wadjet-bench-sf100-use2
+  region: us-east-2
+  # IMPORTANT: SF100 data is at root level, not under tables/.
+  # The bucket contains: lineitem/, orders/, customer/, etc.
+  data_prefix: ""
+
+cluster:
+  mode: distributed
+  workers: 3
+  coordinator_instance: c7g.2xlarge
+  worker_instance: c7gd.4xlarge
+  arch: arm64
+  use_spot: true
+
+benchmark:
+  scale_factor: 100
+  runs: 1
+  query_timeout: 30m
+  skip_load: true

@@ -2,6 +2,23 @@
 /unifi-ingest
 /tpch-seed
 /wadjet
+/wadjet-arm64
+/wadjet-amd64
+/tpch-bench
+/tpch-bench-arm64
+/tpch-bench-local
+
+# Terraform
+*.plan
+terraform.tfstate
+terraform.tfstate.*.backup
+.terraform.lock.hcl
+.terraform/
+
+# Stale context / results
+/_context/
+/results/
+.claude-signal
 
 # Claude Code
 .claude/

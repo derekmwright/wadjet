@@ -47,3 +47,48 @@ tasks:
       - task: vet
       - task: lint
       - task: test
+
+  # --- Benchmark deploy pipeline ---
+  # Usage:
+  #   task bench:stage PROFILE=sf100-distributed     # Build + upload binaries
+  #   task bench:deploy PROFILE=sf100-distributed    # Stage + terraform apply
+  #   task bench:teardown                             # Destroy infrastructure
+  #   task bench:ssh                                  # SSM into coordinator
+
+  bench:stage:
+    desc: Cross-compile and stage binaries + profiles to S3
+    requires:
+      vars: [PROFILE]
+    vars:
+      BUCKET:
+        sh: 'python3 -c "import yaml; p=yaml.safe_load(open(''deploy/benchmark/profiles/{{.PROFILE}}.yaml'')); print(p[''storage''][''bucket''])"'
+      REGION:
+        sh: 'python3 -c "import yaml; p=yaml.safe_load(open(''deploy/benchmark/profiles/{{.PROFILE}}.yaml'')); print(p[''storage''][''region''])"'
+    cmds:
+      - ./deploy/benchmark/stage-binaries.sh {{.BUCKET}} {{.REGION}}
+
+  bench:deploy:
+    desc: Stage binaries and deploy benchmark cluster from profile
+    requires:
+      vars: [PROFILE]
+    cmds:
+      - task: bench:stage
+        vars: { PROFILE: "{{.PROFILE}}" }
+      - cd deploy/benchmark/terraform && tofu apply -var="profile={{.PROFILE}}"
+
+  bench:plan:
+    desc: Show terraform plan for a benchmark profile (dry run)
+    requires:
+      vars: [PROFILE]
+    cmds:
+      - cd deploy/benchmark/terraform && tofu plan -var="profile={{.PROFILE}}"
+
+  bench:teardown:
+    desc: Destroy benchmark infrastructure
+    cmds:
+      - cd deploy/benchmark/terraform && tofu destroy
+
+  bench:ssh:
+    desc: SSM into coordinator instance
+    cmds:
+      - cd deploy/benchmark/terraform && tofu output -raw ssm_coordinator | bash
