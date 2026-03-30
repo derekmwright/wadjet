@@ -150,7 +150,7 @@ func (w *Worker) Start(ctx context.Context) error {
 		Durable:       consumerName,
 		FilterSubject: filterSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       5 * time.Minute,
+		AckWait:       30 * time.Minute,
 		MaxDeliver:    3,
 	})
 	if err != nil {
@@ -385,19 +385,26 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		defer span.End()
 	}
 
-	// Monitor for cancellation during execution
+	// Monitor for cancellation and send NATS in-progress heartbeats.
+	// The heartbeat resets the AckWait timer so that long-running tasks
+	// (e.g., SF100 pipeline stages that take 10+ minutes) are not
+	// redelivered to other workers.
 	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
+		cancelTicker := time.NewTicker(500 * time.Millisecond)
+		defer cancelTicker.Stop()
+		heartbeat := time.NewTicker(2 * time.Minute)
+		defer heartbeat.Stop()
 		for {
 			select {
 			case <-taskCtx.Done():
 				return
-			case <-ticker.C:
+			case <-cancelTicker.C:
 				if w.isCancelled(task.QueryID) {
 					taskCancel()
 					return
 				}
+			case <-heartbeat.C:
+				msg.InProgress()
 			}
 		}
 	}()
