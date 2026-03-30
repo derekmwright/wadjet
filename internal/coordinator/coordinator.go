@@ -2111,20 +2111,22 @@ func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, sta
 }
 
 // materializeOne writes a single inline result to the fastest available store.
-// NATS KV is preferred for results under natsKVResultThreshold; S3 is the fallback.
+// materializeOne writes inline result data to durable storage (S3) and
+// optionally populates NATS KV as a fast read cache.
 func (c *Coordinator) materializeOne(ctx context.Context, store objstore.Store, path string, data []byte) error {
-	// Fast path: NATS KV for small results (workers read from KV in tier 2)
-	if c.resultKV != nil && len(data) <= natsKVResultThreshold {
-		if _, kvErr := c.resultKV.Put(ctx, natsKVKey(path), data); kvErr == nil {
-			return nil
-		}
-		// Fall through to S3 on KV failure
-	}
-
-	// Slow path: S3
+	// Always write to S3 (durable). KV entries have a 5-minute TTL and
+	// can expire before downstream stages read them.
 	_, err := store.Put(ctx, c.config.ResultBucket, path,
 		bytes.NewReader(data), int64(len(data)), "application/octet-stream")
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Best-effort KV cache for fast cross-worker reads (~10ms vs ~500ms).
+	if c.resultKV != nil && len(data) <= natsKVResultThreshold {
+		c.resultKV.Put(ctx, natsKVKey(path), data)
+	}
+	return nil
 }
 
 // collectDepResults gathers result file paths from completed stages.
@@ -2189,25 +2191,26 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 
 	// Fetch S3-stored results in parallel for probe-split merge
 	if len(s3Fetches) > 0 {
-		fetchData := make([][]byte, len(s3Fetches))
+		type fetchResult struct {
+			data []byte
+			err  error
+		}
+		fetchResults := make([]fetchResult, len(s3Fetches))
 		var wg sync.WaitGroup
 		for fi, sf := range s3Fetches {
 			wg.Add(1)
 			go func(i int, path string) {
 				defer wg.Done()
 				data, err := c.fetchResultData(ctx, queryID, path)
-				if err != nil {
-					c.logger.Error("failed to fetch S3 result for merge", "path", path, "error", err)
-					return
-				}
-				fetchData[i] = data
+				fetchResults[i] = fetchResult{data: data, err: err}
 			}(fi, sf.path)
 		}
 		wg.Wait()
 		for fi, sf := range s3Fetches {
-			if fetchData[fi] != nil {
-				pending = append(pending, inlineWork{idx: sf.idx, data: fetchData[fi]})
+			if fetchResults[fi].err != nil {
+				return nil, nil, 0, fmt.Errorf("fetching result %s: %w", sf.path, fetchResults[fi].err)
 			}
+			pending = append(pending, inlineWork{idx: sf.idx, data: fetchResults[fi].data})
 		}
 	}
 

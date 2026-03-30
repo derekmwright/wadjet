@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
@@ -1054,4 +1055,65 @@ func TestAddComputedColumnsMixedNumericTypes(t *testing.T) {
 	if vec2.Type != batch.TypeFloat64 {
 		t.Fatalf("batch 2: computed column type = %v, want Float64", vec2.Type)
 	}
+}
+
+// --- Regression: writeBatchResult always writes to S3 (Q04 fix) ---
+
+func TestWriteBatchResultAlwaysWritesToS3(t *testing.T) {
+	// Q04 root cause: results were written to NATS KV only (no S3).
+	// KV entries expired after 5-minute TTL, causing "object not found"
+	// when downstream pipeline stages read them 11+ minutes later.
+	// Fix: always write to S3 as durable store; KV is a cache.
+
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache, nil)
+	// No NATS KV set — simulates the S3-only path.
+
+	// Create enough batches to exceed inlineResultThreshold (512 KB).
+	// Use pseudo-random data to defeat compression.
+	nCols := 16
+	nRows := 2048
+	schema := make([]parquet.Column, nCols)
+	for i := range schema {
+		schema[i] = parquet.Column{Name: fmt.Sprintf("c%d", i), Type: parquet.TypeInt64}
+	}
+	var batches []*batch.RecordBatch
+	seed := int64(0x517cc1b727220a95) // FNV seed
+	for bIdx := 0; bIdx < 10; bIdx++ {
+		b := batch.NewRecordBatch(schema, nRows)
+		for c := 0; c < nCols; c++ {
+			for r := 0; r < nRows; r++ {
+				seed = seed*6364136223846793005 + 1442695040888963407 // LCG
+				b.Columns[c].Int64Data[r] = seed
+			}
+		}
+		batches = append(batches, b)
+	}
+
+	task := distributed.Task{
+		ID:           "t1",
+		QueryID:      "q1",
+		StageID:      "s1",
+		ResultBucket: "results",
+		ResultPrefix: "queries/q1/s1/",
+	}
+	var result distributed.ResultNotification
+
+	err := executor.writeBatchResult(context.Background(), task, batches, &result)
+	if err != nil {
+		t.Fatalf("writeBatchResult: %v", err)
+	}
+
+	// Verify the result was written to S3
+	if result.ResultPath == "" {
+		t.Fatal("expected ResultPath to be set")
+	}
+
+	// Verify the file exists in the object store
+	rc, _, err := store.Get(context.Background(), "results", result.ResultPath)
+	if err != nil {
+		t.Fatalf("S3 file missing after writeBatchResult: %v", err)
+	}
+	rc.Close()
 }
