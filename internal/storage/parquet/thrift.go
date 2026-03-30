@@ -188,6 +188,10 @@ func (d *thriftDecoder) readFieldHeader(lastFieldID *int16) (int16, thriftType, 
 }
 
 // readListHeader reads a list header, returning the element type and count.
+// maxThriftCollectionSize prevents OOM from malicious/corrupted metadata.
+// A Parquet file with millions of schema elements or row groups is not realistic.
+const maxThriftCollectionSize = 1_000_000
+
 func (d *thriftDecoder) readListHeader() (thriftType, int, error) {
 	b, err := d.readByte()
 	if err != nil {
@@ -202,6 +206,9 @@ func (d *thriftDecoder) readListHeader() (thriftType, int, error) {
 			return 0, 0, fmt.Errorf("thrift: reading list size: %w", err)
 		}
 		size = int(n)
+	}
+	if size < 0 || size > maxThriftCollectionSize {
+		return 0, 0, fmt.Errorf("thrift: list size %d exceeds maximum %d", size, maxThriftCollectionSize)
 	}
 	return elemType, size, nil
 }
@@ -249,6 +256,9 @@ func (d *thriftDecoder) skipField(t thriftType) error {
 		}
 		if size == 0 {
 			return nil // empty map
+		}
+		if size > maxThriftCollectionSize {
+			return fmt.Errorf("thrift: map size %d exceeds maximum %d", size, maxThriftCollectionSize)
 		}
 		b, err := d.readByte()
 		if err != nil {

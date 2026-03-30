@@ -95,9 +95,15 @@ func decodeDeltaBinaryPacked(data []byte, n int) ([]int64, error) {
 	if totalValues == 0 {
 		return nil, nil
 	}
+	if numMiniblocks == 0 {
+		return nil, fmt.Errorf("delta: numMiniblocks is 0")
+	}
+	if blockSize > 1<<20 || numMiniblocks > 1<<20 || totalValues > 10_000_000 {
+		return nil, fmt.Errorf("delta: unreasonable params: blockSize=%d numMiniblocks=%d totalValues=%d", blockSize, numMiniblocks, totalValues)
+	}
 
 	count := int(totalValues)
-	if n < count {
+	if count > n {
 		count = n
 	}
 
@@ -184,11 +190,17 @@ func DecodeDeltaLengthByteArray(data []byte, n int) (Values, error) {
 	// Find where the length data ends by re-scanning the header.
 	// We need to know the byte offset where the actual byte data starts.
 	lengthDataEnd := findDeltaDataEnd(data, n)
+	if lengthDataEnd > len(data) {
+		return Values{}, fmt.Errorf("delta_length_byte_array: length data end %d exceeds data %d", lengthDataEnd, len(data))
+	}
 
 	// Build offsets and packed data.
 	offsets := make([]uint32, len(lengths)+1)
 	var totalLen uint32
 	for i, l := range lengths {
+		if l < 0 {
+			return Values{}, fmt.Errorf("delta_length_byte_array: negative length %d at index %d", l, i)
+		}
 		offsets[i] = totalLen
 		totalLen += uint32(l)
 	}
@@ -229,6 +241,10 @@ func findDeltaDataEnd(data []byte, n int) int {
 	numMiniblocks := readVarint()
 	totalValues := readVarint()
 	readZigzag() // first value
+
+	if numMiniblocks == 0 || totalValues == 0 {
+		return off
+	}
 
 	remaining := int(totalValues) - 1
 	miniblockSize := int(blockSize) / int(numMiniblocks)
@@ -281,9 +297,19 @@ func DecodeDeltaByteArray(data []byte, n int) (Values, error) {
 	if err != nil {
 		return Values{}, fmt.Errorf("delta_byte_array: decoding prefix lengths: %w", err)
 	}
+	// Clamp n to actual decoded count.
+	if len(prefixLengths) < n {
+		n = len(prefixLengths)
+	}
+	if n == 0 {
+		return ByteArrayValues(nil, nil), nil
+	}
 
 	// Find where prefix length data ends.
 	suffixStart := findDeltaDataEnd(data, n)
+	if suffixStart > len(data) {
+		return Values{}, fmt.Errorf("delta_byte_array: suffix start %d exceeds data length %d", suffixStart, len(data))
+	}
 
 	// Decode suffixes.
 	suffixValues, err := DecodeDeltaLengthByteArray(data[suffixStart:], n)
@@ -292,6 +318,10 @@ func DecodeDeltaByteArray(data []byte, n int) (Values, error) {
 	}
 
 	suffixData, suffixOffsets := suffixValues.ByteArray()
+	// Clamp to actual suffix count.
+	if len(suffixOffsets) > 0 && n > len(suffixOffsets)-1 {
+		n = len(suffixOffsets) - 1
+	}
 
 	// Reconstruct full values.
 	var packed []byte

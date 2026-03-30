@@ -214,20 +214,35 @@ func (d *RLEDecoder) decodeAllBatch(dst []int32) (int, error) {
 		} else {
 			// Bit-packed run: batch decode
 			groupCount := int(header >> 1)
+			if groupCount <= 0 {
+				continue
+			}
 			numValues := groupCount * 8
+			// Guard against integer overflow (groupCount * 8 can wrap negative).
+			if numValues < 0 || numValues/8 != groupCount {
+				return pos, fmt.Errorf("rle: bit-packed group count overflow: %d", groupCount)
+			}
+			// Clamp to remaining capacity to prevent absurd allocations.
+			remaining := len(dst) - pos
+			if numValues > remaining {
+				numValues = remaining
+			}
 			byteCount := groupCount * d.bitWidth
+			if byteCount < 0 {
+				return pos, fmt.Errorf("rle: bit-packed byte count overflow")
+			}
 			if d.off+byteCount > len(d.data) {
 				byteCount = len(d.data) - d.off
 			}
 			decoded := DecodeBitPacked(d.data[d.off:d.off+byteCount], d.bitWidth, numValues)
 			d.off += byteCount
 
-			copyN := numValues
-			if pos+copyN > len(dst) {
-				copyN = len(dst) - pos
+			n := len(decoded)
+			if pos+n > len(dst) {
+				n = len(dst) - pos
 			}
-			copy(dst[pos:], decoded[:copyN])
-			pos += copyN
+			copy(dst[pos:pos+n], decoded[:n])
+			pos += n
 		}
 	}
 	return pos, nil
