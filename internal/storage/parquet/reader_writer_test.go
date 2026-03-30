@@ -111,8 +111,8 @@ func TestFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if reader.File() == nil {
-		t.Fatal("expected non-nil File()")
+	if reader.FileReader() == nil {
+		t.Fatal("expected non-nil FileReader()")
 	}
 }
 
@@ -671,49 +671,6 @@ func TestRoundTrip_BytesType(t *testing.T) {
 	}
 	if len(result) != 1 {
 		t.Fatalf("expected 1 row, got %d", len(result))
-	}
-}
-
-func TestColumnToNode_AllBaseTypes(t *testing.T) {
-	types := []TypeID{
-		TypeBool, TypeInt32, TypeInt64, TypeFloat32, TypeFloat64,
-		TypeString, TypeBytes, TypeTimestamp,
-		TypeIPv4, TypeIPv6, TypeMAC, TypeDuration,
-		TypeCIDR, TypePort, TypeProtocol, TypeUUID, TypeDate,
-	}
-
-	for _, typ := range types {
-		col := Column{Name: "test", Type: typ, Nullable: true}
-		node, err := columnToNode(col)
-		if err != nil {
-			t.Errorf("columnToNode(%v): %v", typ, err)
-		}
-		if node == nil {
-			t.Errorf("columnToNode(%v) returned nil node", typ)
-		}
-	}
-}
-
-func TestColumnToNode_Decimal(t *testing.T) {
-	col := Column{Name: "amount", Type: TypeDecimal, Precision: 10, Scale: 2, Nullable: true}
-	_, err := columnToNode(col)
-	if err != nil {
-		t.Fatalf("columnToNode(Decimal): %v", err)
-	}
-
-	// Small precision (fits in Int64)
-	col2 := Column{Name: "small", Type: TypeDecimal, Precision: 5, Scale: 2}
-	_, err = columnToNode(col2)
-	if err != nil {
-		t.Fatalf("columnToNode(Decimal small): %v", err)
-	}
-}
-
-func TestColumnToNode_UnsupportedType(t *testing.T) {
-	col := Column{Name: "bad", Type: TypeID(999)}
-	_, err := columnToNode(col)
-	if err == nil {
-		t.Fatal("expected error for unsupported type")
 	}
 }
 

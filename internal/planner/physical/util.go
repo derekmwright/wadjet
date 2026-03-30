@@ -3,16 +3,12 @@ package physical
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
-
-	goparquet "github.com/parquet-go/parquet-go"
-	pqencoding "github.com/parquet-go/parquet-go/encoding"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -108,63 +104,29 @@ func fromRows(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch
 }
 
 // readBatchDirect reads a parquet file directly into a RecordBatch using
-// column-at-a-time page reading. This avoids the row-reconstruction overhead
-// of parquet-go's ReadRows and eliminates the map[string]any intermediate.
-// For schemas with nested types (ARRAY, ROW, MAP), falls back to row-level reading.
+// column-at-a-time page reading via the native FileReader. This avoids
+// parquet-go entirely. For schemas with nested types (ARRAY, MAP), falls
+// back to row-level reading.
 func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string, preds ...scanPredicate) *batch.RecordBatch {
-	// Nested types require rep/def level decoding — fall back to row reader
+	// Nested types: fall back to row reader
 	pqSchema := parquet.Schema{Columns: schema}
 	if pqSchema.HasNestedColumns() {
 		return readBatchViaRows(pqReader, schema, requiredCols)
 	}
 
-	file := pqReader.File()
-	rowGroups := file.RowGroups()
-	if len(rowGroups) == 0 {
+	fr := pqReader.FileReader()
+	numRGs := fr.NumRowGroups()
+	if numRGs == 0 {
 		return nil
 	}
 
-	// Determine which columns to read and build the batch schema
-	readSchema := schema
-	if len(requiredCols) > 0 {
-		needed := make(map[string]bool, len(requiredCols))
-		for _, c := range requiredCols {
-			needed[c] = true
-		}
-		filtered := make([]parquet.Column, 0, len(requiredCols))
-		for _, col := range schema {
-			if needed[col.Name] {
-				filtered = append(filtered, col)
-			}
-		}
-		if len(filtered) > 0 {
-			readSchema = filtered
-		}
-	}
+	readSchema := buildReadSchema(schema, requiredCols)
 
-	// Map batch schema columns to parquet file column indices
-	fileColumns := file.Schema().Columns() // [][]string
-	type colMapping struct {
-		fileIdx  int // index in parquet file's column chunks
-		batchIdx int // index in our batch schema
-	}
-	mappings := make([]colMapping, 0, len(readSchema))
-	for bi, sc := range readSchema {
-		for fi, path := range fileColumns {
-			name := path[len(path)-1]
-			if name == sc.Name {
-				mappings = append(mappings, colMapping{fileIdx: fi, batchIdx: bi})
-				break
-			}
-		}
-	}
-
-	// Filter row groups using stats-based predicate pruning
-	activeRGs := rowGroups
-	if len(preds) > 0 {
-		activeRGs = make([]goparquet.RowGroup, 0, len(rowGroups))
-		for i, rg := range rowGroups {
-			stats := pqReader.RowGroupStats(i)
+	// Collect active (non-pruned) row group indices.
+	activeRGs := make([]int, 0, numRGs)
+	for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
+		if len(preds) > 0 {
+			stats := pqReader.RowGroupStats(rgIdx)
 			pruned := false
 			for _, pred := range preds {
 				op := mapPredOp(pred.Op)
@@ -176,70 +138,55 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 					}
 				}
 			}
-			if !pruned {
-				activeRGs = append(activeRGs, rg)
+			if pruned {
+				continue
 			}
 		}
+		activeRGs = append(activeRGs, rgIdx)
 	}
 
-	// Count total rows across active row groups
+	if len(activeRGs) == 0 {
+		return nil
+	}
+
+	// Count total rows across active row groups.
 	var totalRows int64
-	for _, rg := range activeRGs {
-		totalRows += rg.NumRows()
+	for _, rgIdx := range activeRGs {
+		totalRows += fr.RowGroupNumRows(rgIdx)
 	}
 	if totalRows == 0 {
 		return nil
 	}
 
-	b := batch.NewRecordBatch(readSchema, int(totalRows))
-
-	// Read column-by-column across active row groups using direct typed page reads.
-	// This bypasses parquet-go's Value interface, using page.Data() for zero-copy
-	// typed array access (memcpy for int64/int32/float slices).
-	for _, m := range mappings {
-		col := b.Columns[m.batchIdx]
-		colType := readSchema[m.batchIdx].Type
-		rowOffset := 0
-
-		// Get max definition level for null handling (once per column)
-		pqCol := scan.FindColumnByIndex(file.Root(), m.fileIdx)
-		maxDefLevel := byte(0)
-		if pqCol != nil {
-			maxDefLevel = byte(pqCol.MaxDefinitionLevel())
+	// Read each active row group via the native reader and merge.
+	var batches []*batch.RecordBatch
+	for _, rgIdx := range activeRGs {
+		b, err := scan.ReadRowGroupNative(fr, rgIdx, readSchema, nil)
+		if err != nil {
+			continue
 		}
-
-		for _, rg := range activeRGs {
-			chunks := rg.ColumnChunks()
-			if m.fileIdx >= len(chunks) {
-				continue
-			}
-			pages := chunks[m.fileIdx].Pages()
-			for {
-				page, err := pages.ReadPage()
-				if err != nil || page == nil {
-					break
-				}
-
-				pageRows := int(page.NumRows())
-				if pageRows == 0 {
-					continue
-				}
-
-				if colType == batch.TypeDecimal {
-					defLevels := page.DefinitionLevels()
-					data := page.Data()
-					readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
-				} else {
-					scan.CopyPageData(col, rowOffset, page, chunks[m.fileIdx].Type(), maxDefLevel, colType)
-				}
-				rowOffset += pageRows
-			}
-			pages.Close()
+		if b != nil {
+			batches = append(batches, b)
 		}
 	}
 
-	b.Len = int(totalRows)
-	return b
+	if len(batches) == 0 {
+		return nil
+	}
+	if len(batches) == 1 {
+		return batches[0]
+	}
+
+	result := batch.NewRecordBatch(readSchema, int(totalRows))
+	offset := 0
+	for _, b := range batches {
+		for j := range readSchema {
+			copyVecRange(result.Columns[j], offset, b.Columns[j], 0, b.Len)
+		}
+		offset += b.Len
+	}
+	result.Len = offset
+	return result
 }
 
 // readBatchViaRows reads a parquet file using parquet-go's row-level reader,
@@ -299,134 +246,6 @@ func mapPredOp(op string) exec.CompareOp {
 	}
 }
 
-// buildProjectedParquetSchema creates a parquet-go schema with only the requested columns.
-func buildProjectedParquetSchema(file *goparquet.File, selectedColumns []string) *goparquet.Schema {
-	fileSchema := file.Schema()
-	fields := fileSchema.Fields()
-
-	needed := make(map[string]bool, len(selectedColumns))
-	for _, c := range selectedColumns {
-		needed[c] = true
-	}
-
-	group := make(goparquet.Group)
-	for _, f := range fields {
-		if needed[f.Name()] {
-			group[f.Name()] = f
-		}
-	}
-
-	if len(group) == 0 {
-		return nil
-	}
-	return goparquet.NewSchema(fileSchema.Name(), group)
-}
-
-// readDecimalPage reads decimal data from a parquet page directly into a Vector,
-// dispatching on the physical storage type (INT32, INT64, or byte array).
-func readDecimalPage(col *batch.Vector, offset int, data pqencoding.Values, defLevels []byte, maxDefLevel byte, n int, pqCol *goparquet.Column) {
-	kind := pqCol.Type().Kind()
-
-	if defLevels == nil {
-		// Non-nullable column — direct copy
-		switch kind {
-		case goparquet.Int64:
-			src := data.Int64()
-			for i := 0; i < n; i++ {
-				col.DecimalData.Data[offset+i] = batch.Int128From(src[i])
-			}
-		case goparquet.Int32:
-			src := data.Int32()
-			for i := 0; i < n; i++ {
-				col.DecimalData.Data[offset+i] = batch.Int128From(int64(src[i]))
-			}
-		case goparquet.FixedLenByteArray, goparquet.ByteArray:
-			rawData, offsets := data.ByteArray()
-			if offsets != nil {
-				for i := 0; i < n; i++ {
-					start := offsets[i]
-					end := offsets[i+1]
-					col.DecimalData.Data[offset+i] = decimalFromBytes(rawData[start:end])
-				}
-			} else {
-				pos := 0
-				for i := 0; i < n; i++ {
-					if pos+4 > len(rawData) {
-						break
-					}
-					length := int(binary.LittleEndian.Uint32(rawData[pos:]))
-					pos += 4
-					if pos+length > len(rawData) {
-						break
-					}
-					col.DecimalData.Data[offset+i] = decimalFromBytes(rawData[pos : pos+length])
-					pos += length
-				}
-			}
-		}
-	} else {
-		// Nullable column — scatter using definition levels
-		switch kind {
-		case goparquet.Int64:
-			src := data.Int64()
-			valIdx := 0
-			for i := 0; i < n; i++ {
-				if defLevels[i] == maxDefLevel {
-					col.DecimalData.Data[offset+i] = batch.Int128From(src[valIdx])
-					valIdx++
-				} else {
-					col.Nulls.SetNull(offset + i)
-				}
-			}
-		case goparquet.Int32:
-			src := data.Int32()
-			valIdx := 0
-			for i := 0; i < n; i++ {
-				if defLevels[i] == maxDefLevel {
-					col.DecimalData.Data[offset+i] = batch.Int128From(int64(src[valIdx]))
-					valIdx++
-				} else {
-					col.Nulls.SetNull(offset + i)
-				}
-			}
-		case goparquet.FixedLenByteArray, goparquet.ByteArray:
-			rawData, offsets := data.ByteArray()
-			valIdx := 0
-			if offsets != nil {
-				for i := 0; i < n; i++ {
-					if defLevels[i] == maxDefLevel {
-						start := offsets[valIdx]
-						end := offsets[valIdx+1]
-						col.DecimalData.Data[offset+i] = decimalFromBytes(rawData[start:end])
-						valIdx++
-					} else {
-						col.Nulls.SetNull(offset + i)
-					}
-				}
-			} else {
-				pos := 0
-				for i := 0; i < n; i++ {
-					if defLevels[i] == maxDefLevel {
-						if pos+4 > len(rawData) {
-							break
-						}
-						length := int(binary.LittleEndian.Uint32(rawData[pos:]))
-						pos += 4
-						if pos+length > len(rawData) {
-							break
-						}
-						col.DecimalData.Data[offset+i] = decimalFromBytes(rawData[pos : pos+length])
-						pos += length
-						valIdx++
-					} else {
-						col.Nulls.SetNull(offset + i)
-					}
-				}
-			}
-		}
-	}
-}
-
 // decimalFromBytes converts big-endian bytes to Int128.
 func decimalFromBytes(b []byte) batch.Int128 {
 	if len(b) == 0 {
@@ -468,15 +287,11 @@ func decimalFromBytes(b []byte) batch.Int128 {
 
 // rgUnit is a work unit for parallel row-group scanning.
 type rgUnit struct {
-	pqFile      *goparquet.File
-	fileEntry   catalog.FileEntry
-	rg          goparquet.RowGroup
-	rgRowOffset int64 // cumulative row offset within the file (for delete markers)
-
-	// Native reader fields — when nativeReader is non-nil, the native page
-	// decoder is used instead of parquet-go's ReadPage path.
+	fileEntry    catalog.FileEntry
+	rgRowOffset  int64 // cumulative row offset within the file (for delete markers)
 	nativeReader *parquet.FileReader
 	rgIndex      int // row group index within the native reader
+	numRows      int64
 }
 
 // prefetchResult holds a speculatively read row group batch and its unit index.
@@ -574,11 +389,16 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 		if fr.reader == nil {
 			continue
 		}
-		pqFile := fr.reader.File()
-		rgs := pqFile.RowGroups()
+		nativeRdr := fr.nativeReader
+		if nativeRdr == nil {
+			// If native reader failed, use the Reader's built-in FileReader.
+			nativeRdr = fr.reader.FileReader()
+		}
+		numRGs := nativeRdr.NumRowGroups()
 
 		var rowOffset int64
-		for rgIdx, rg := range rgs {
+		for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
+			rgNumRows := nativeRdr.RowGroupNumRows(rgIdx)
 			stats := fr.reader.RowGroupStats(rgIdx)
 			pruned := false
 
@@ -611,19 +431,18 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 			}
 
 			if pruned {
-				rowOffset += rg.NumRows()
+				rowOffset += rgNumRows
 				continue
 			}
 
 			inner.rgUnits = append(inner.rgUnits, rgUnit{
-				pqFile:       pqFile,
 				fileEntry:    fr.entry,
-				rg:           rg,
 				rgRowOffset:  rowOffset,
-				nativeReader: fr.nativeReader,
+				nativeReader: nativeRdr,
 				rgIndex:      rgIdx,
+				numRows:      rgNumRows,
 			})
-			rowOffset += rg.NumRows()
+			rowOffset += rgNumRows
 		}
 	}
 }
@@ -795,170 +614,44 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 	}
 }
 
-// colMapEntry maps a file column index to a batch column index.
-// Computed once per scan source and reused across all row groups.
-type colMapEntry struct {
-	fileIdx     int
-	batchIdx    int
-	maxDefLevel byte // cached max definition level for null handling
-}
-
-// getColMappings returns the cached file→batch column mapping, computing it
-// on first call. Thread-safe for parallel rgWorkers.
-func (inner *scanSourceInner) getColMappings(file *goparquet.File, readSchema []parquet.Column) []colMapEntry {
-	inner.colMapMu.Lock()
-	defer inner.colMapMu.Unlock()
-	if inner.colMappings != nil {
-		return inner.colMappings
-	}
-	fileColumns := file.Schema().Columns()
-	root := file.Root()
-	mappings := make([]colMapEntry, 0, len(readSchema))
-	for bi, sc := range readSchema {
-		for fi, path := range fileColumns {
-			name := path[len(path)-1]
-			if name == sc.Name {
-				var mdl byte
-				if pqCol := scan.FindColumnByIndex(root, fi); pqCol != nil {
-					mdl = byte(pqCol.MaxDefinitionLevel())
-				}
-				mappings = append(mappings, colMapEntry{fileIdx: fi, batchIdx: bi, maxDefLevel: mdl})
-				break
-			}
-		}
-	}
-	inner.colMappings = mappings
-	return mappings
-}
-
-// readRG reads a row group using the native page decoder when available,
-// falling back to parquet-go's ReadPage path otherwise.
+// readRG reads a row group using the native page decoder.
 func (inner *scanSourceInner) readRG(unit rgUnit) *batch.RecordBatch {
-	// Native path: bypass parquet-go entirely — decode pages directly into vectors.
-	if inner.useNative && unit.nativeReader != nil {
-		b, err := scan.ReadRowGroupNative(unit.nativeReader, unit.rgIndex, inner.readSchema(), inner.pool)
-		if err == nil {
-			return b
-		}
-		// Fall through to parquet-go on error (e.g. unsupported encoding).
-	}
-
-	// parquet-go fallback path.
-	numRows := int(unit.rg.NumRows())
-	if inner.pool != nil && numRows == inner.pool.BatchSize() {
-		b := inner.pool.Get()
-		cm := inner.getColMappings(unit.pqFile, b.Schema)
-		readRowGroupInto(unit.pqFile, unit.rg, b, inner.schema, inner.requiredCols, cm)
-		return b
-	}
-	return readRowGroupDirect(unit.pqFile, unit.rg, inner.schema, inner.requiredCols)
-}
-
-// readRowGroupDirect reads a single row group into a fresh RecordBatch.
-func readRowGroupDirect(file *goparquet.File, rg goparquet.RowGroup, schema []parquet.Column, requiredCols []string) *batch.RecordBatch {
-	numRows := int(rg.NumRows())
-	if numRows == 0 {
+	if unit.nativeReader == nil {
 		return nil
 	}
-	readSchema := buildReadSchema(schema, requiredCols)
-	b := batch.NewRecordBatch(readSchema, numRows)
-	readRowGroupInto(file, rg, b, schema, requiredCols, nil)
+	b, err := scan.ReadRowGroupNative(unit.nativeReader, unit.rgIndex, inner.readSchema(), inner.pool)
+	if err != nil {
+		return nil
+	}
 	return b
 }
 
-// readRowGroupInto reads a single row group into an existing RecordBatch.
-// The batch must already have the correct schema and sufficient capacity.
-//
-// When there are 2+ projected columns, column reads are launched in parallel
-// goroutines to overlap S3 range-read latency. Each column writes to its own
-// independent Vector in the batch, so no synchronization is needed between
-// column readers. For a single column the sequential path is kept to avoid
-// goroutine overhead.
-func readRowGroupInto(file *goparquet.File, rg goparquet.RowGroup, b *batch.RecordBatch, schema []parquet.Column, requiredCols []string, cachedMappings []colMapEntry) {
-	numRows := int(rg.NumRows())
-	if numRows == 0 {
-		return
-	}
-
-	readSchema := b.Schema
-
-	mappings := cachedMappings
-	if mappings == nil {
-		// Compute mapping inline (no cache available)
-		fileColumns := file.Schema().Columns()
-		mappings = make([]colMapEntry, 0, len(readSchema))
-		for bi, sc := range readSchema {
-			for fi, path := range fileColumns {
-				name := path[len(path)-1]
-				if name == sc.Name {
-					mappings = append(mappings, colMapEntry{fileIdx: fi, batchIdx: bi})
-					break
-				}
+// copyVecRange copies count values from src[srcOff..] to dst[dstOff..] using
+// bulk typed copies. One type switch per column instead of per row.
+func copyVecRange(dst *batch.Vector, dstOff int, src *batch.Vector, srcOff, count int) {
+	if src.Nulls.HasNulls() {
+		for i := 0; i < count; i++ {
+			if src.Nulls.IsNullFast(srcOff + i) {
+				dst.Nulls.SetNull(dstOff + i)
 			}
 		}
 	}
-
-	chunks := rg.ColumnChunks()
-
-	for _, m := range mappings {
-		readColumnIntoWithDef(file, chunks, b, readSchema, m.fileIdx, m.batchIdx, m.maxDefLevel, cachedMappings != nil)
+	switch dst.Type {
+	case batch.TypeBool:
+		copy(dst.BoolData[dstOff:dstOff+count], src.BoolData[srcOff:srcOff+count])
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		copy(dst.Int32Data[dstOff:dstOff+count], src.Int32Data[srcOff:srcOff+count])
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		copy(dst.Int64Data[dstOff:dstOff+count], src.Int64Data[srcOff:srcOff+count])
+	case batch.TypeFloat32:
+		copy(dst.Float32Data[dstOff:dstOff+count], src.Float32Data[srcOff:srcOff+count])
+	case batch.TypeFloat64:
+		copy(dst.Float64Data[dstOff:dstOff+count], src.Float64Data[srcOff:srcOff+count])
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		dst.BytesData.BulkCopy(dstOff, &src.BytesData, srcOff, count)
+	case batch.TypeDecimal:
+		copy(dst.DecimalData.Data[dstOff:dstOff+count], src.DecimalData.Data[srcOff:srcOff+count])
 	}
-
-	b.Len = numRows
-}
-
-// readColumnIntoWithDef reads all pages of a single column chunk into the batch vector.
-// When hasCachedDef is true, cachedMaxDef is used instead of traversing the schema tree.
-func readColumnIntoWithDef(file *goparquet.File, chunks []goparquet.ColumnChunk, b *batch.RecordBatch, readSchema []parquet.Column, fileIdx, batchIdx int, cachedMaxDef byte, hasCachedDef bool) error {
-	col := b.Columns[batchIdx]
-	colType := readSchema[batchIdx].Type
-	rowOffset := 0
-
-	if fileIdx >= len(chunks) {
-		return nil
-	}
-
-	var pqCol *goparquet.Column
-	maxDefLevel := cachedMaxDef
-	if !hasCachedDef {
-		pqCol = scan.FindColumnByIndex(file.Root(), fileIdx)
-		maxDefLevel = 0
-		if pqCol != nil {
-			maxDefLevel = byte(pqCol.MaxDefinitionLevel())
-		}
-	}
-
-	pages := chunks[fileIdx].Pages()
-	defer pages.Close()
-	for {
-		page, err := pages.ReadPage()
-		if err != nil || page == nil {
-			if err != nil {
-				return err
-			}
-			break
-		}
-
-		pageRows := int(page.NumRows())
-		if pageRows == 0 {
-			continue
-		}
-
-		if colType == batch.TypeDecimal {
-			if pqCol == nil {
-				pqCol = scan.FindColumnByIndex(file.Root(), fileIdx)
-			}
-			defLevels := page.DefinitionLevels()
-			data := page.Data()
-			readDecimalPage(col, rowOffset, data, defLevels, maxDefLevel, pageRows, pqCol)
-		} else {
-			if err := scan.CopyPageData(col, rowOffset, page, chunks[fileIdx].Type(), maxDefLevel, colType); err != nil {
-				return err
-			}
-		}
-		rowOffset += pageRows
-	}
-	return nil
 }
 
 // buildReadSchema applies column projection to the table schema.

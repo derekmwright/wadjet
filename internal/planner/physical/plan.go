@@ -5473,9 +5473,6 @@ type scanSourceInner struct {
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
 
-	// cached column mapping — computed once, reused across all row groups
-	colMappings    []colMapEntry    // fileIdx → batchIdx mapping (nil = not yet computed)
-	colMapMu       sync.Mutex
 	cachedReadSchema []parquet.Column // projected schema, computed once
 
 	// parallel scan
@@ -5647,7 +5644,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 
 		// Initialize batch pool from the most common row group size
 		if len(inner.rgUnits) > 0 {
-			rgSize := int(inner.rgUnits[0].rg.NumRows())
+			rgSize := int(inner.rgUnits[0].numRows)
 			readSchema := inner.readSchema()
 			if rgSize > 0 && len(readSchema) > 0 {
 				inner.pool = batch.NewBatchPool(readSchema, rgSize)

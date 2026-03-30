@@ -409,49 +409,10 @@ func (s *Scanner) decodeRowGroupsNative(ctx context.Context, fr *pqt.FileReader,
 }
 
 // decodeRowGroups reads row groups from a parquet reader, applying stats-based
-// pruning and row-level filtering. Uses parquet-go — retained for callers
-// outside the scanner (worker, coordinator, server).
+// pruning and row-level filtering. Delegates to the native FileReader path.
 func (s *Scanner) decodeRowGroups(ctx context.Context, reader *pqt.Reader, file scanFile) (*batch.RecordBatch, error) {
-	schema := s.schema
-	if len(s.selectedColumns) > 0 {
-		schema = filterSchema(s.schema, s.selectedColumns)
-	}
-
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
-
-	numRGs := len(rgs)
-	s.stats.TotalRowGroups += numRGs
-
-	var batches []*batch.RecordBatch
-	for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
-		if len(s.statsPredicates) > 0 {
-			rgStats := reader.RowGroupStats(rgIdx)
-			pruned := false
-			for _, pred := range s.statsPredicates {
-				if CanPruneRowGroup(pred, rgStats) {
-					pruned = true
-					break
-				}
-			}
-			if pruned {
-				s.stats.PrunedRowGroups++
-				continue
-			}
-		}
-
-		b, err := readRowGroupColumnar(rgs[rgIdx], schema, pqFile, s.scanPool)
-		if err != nil {
-			return nil, fmt.Errorf("reading row group %d: %w", rgIdx, err)
-		}
-		if b == nil {
-			continue
-		}
-		s.stats.RowsScanned += int64(b.Len)
-		batches = append(batches, b)
-	}
-
-	return s.mergeBatchesAndFilter(ctx, schema, batches, file)
+	fr := reader.FileReader()
+	return s.decodeRowGroupsNative(ctx, fr, file)
 }
 
 // mergeBatchesAndFilter merges row-group batches into a single RecordBatch,

@@ -37,22 +37,21 @@ func TestColumnarReadNetworkTypes(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Read via columnar path
+	// Read via native columnar path
 	data := buf.Bytes()
 	reader, err := pqt.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatalf("NewReader: %v", err)
 	}
 
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
-	if len(rgs) == 0 {
+	fr := reader.FileReader()
+	if fr.NumRowGroups() == 0 {
 		t.Fatal("no row groups")
 	}
 
-	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile, nil)
+	rb, err := ReadRowGroupNative(fr, 0, schema.Columns, nil)
 	if err != nil {
-		t.Fatalf("readRowGroupColumnar: %v", err)
+		t.Fatalf("ReadRowGroupNative: %v", err)
 	}
 	if rb == nil {
 		t.Fatal("got nil RecordBatch")
@@ -139,11 +138,10 @@ func TestColumnarReadUUIDAndDate(t *testing.T) {
 		t.Fatalf("NewReader: %v", err)
 	}
 
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
-	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile, nil)
+	fr := reader.FileReader()
+	rb, err := ReadRowGroupNative(fr, 0, schema.Columns, nil)
 	if err != nil {
-		t.Fatalf("readRowGroupColumnar: %v", err)
+		t.Fatalf("ReadRowGroupNative: %v", err)
 	}
 	if rb.Len != 2 {
 		t.Fatalf("expected 2 rows, got %d", rb.Len)
@@ -210,11 +208,10 @@ func TestColumnarReadSIEMTypes(t *testing.T) {
 		t.Fatalf("NewReader: %v", err)
 	}
 
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
-	rb, err := readRowGroupColumnar(rgs[0], schema.Columns, pqFile, nil)
+	fr := reader.FileReader()
+	rb, err := ReadRowGroupNative(fr, 0, schema.Columns, nil)
 	if err != nil {
-		t.Fatalf("readRowGroupColumnar: %v", err)
+		t.Fatalf("ReadRowGroupNative: %v", err)
 	}
 
 	// Verify Port
