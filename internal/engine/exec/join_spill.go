@@ -1143,7 +1143,7 @@ func compactBatchForRows(in *batch.RecordBatch, rows []int) *batch.RecordBatch {
 					dst.Nulls.SetNull(di)
 					dst.BytesData.Set(di, nil) // maintain offset continuity
 				} else {
-					dst.BytesData.Set(di, col.BytesData.Value(si))
+					dst.BytesData.SetFrom(di, &col.BytesData, si)
 				}
 			}
 		case batch.TypeDecimal:

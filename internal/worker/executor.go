@@ -226,16 +226,21 @@ func (e *Executor) executeScan(ctx context.Context, task distributed.Task, resul
 		return err
 	}
 
-	// Apply pushed-down filter predicates as selection vectors
+	// Apply pushed-down filter predicates as selection vectors.
+	// Uses vectorized kernel filters for simple predicates (col op literal,
+	// IN, BETWEEN, LIKE) and falls back to per-row eval for complex ones.
 	if len(task.FilterExprs) > 0 {
-		var filtered []*batch.RecordBatch
-		for _, b := range allBatches {
-			b = e.applyBatchFilters(b, task.FilterExprs)
-			if b != nil && b.ActiveLen() > 0 {
-				filtered = append(filtered, b)
+		filters := compileBatchFilters(task.FilterExprs)
+		if len(filters) > 0 {
+			var filtered []*batch.RecordBatch
+			for _, b := range allBatches {
+				b = applyBatchFilters(b, filters)
+				if b != nil && b.ActiveLen() > 0 {
+					filtered = append(filtered, b)
+				}
 			}
+			allBatches = filtered
 		}
-		allBatches = filtered
 	}
 
 	// Fused scan-aggregate: perform partial aggregation at the scan level
@@ -340,49 +345,236 @@ func (e *Executor) executeFusedScanAggregate(ctx context.Context, task distribut
 	return e.writeBatchResult(ctx, task, resultBatches, result)
 }
 
-// applyBatchFilters applies SQL filter expressions to a RecordBatch using
-// selection vectors, avoiding row-level map[string]any allocation.
-func (e *Executor) applyBatchFilters(b *batch.RecordBatch, filterExprs []string) *batch.RecordBatch {
+// batchFilter applies a filter to an entire batch at once using selection vectors.
+type batchFilter func(b *batch.RecordBatch) *batch.RecordBatch
+
+// compileBatchFilters creates batch-level filters from SQL expressions.
+// Uses vectorized kernel filters for simple predicates (col op literal, IN,
+// BETWEEN, LIKE) and falls back to per-row expression evaluation for complex ones.
+func compileBatchFilters(filterExprs []string) []batchFilter {
+	filters := make([]batchFilter, 0, len(filterExprs))
 	for _, filterSQL := range filterExprs {
-		// Use full expression compiler first — handles LIKE, IN,
-		// column-to-column comparisons, and all other SQL predicates.
-		filter := buildCompiledFilter(filterSQL)
-		if filter == nil {
-			// Fall back to simple col-op-literal parser
-			filter = buildSimpleFilter(filterSQL)
-			if filter == nil {
+		f := buildKernelBatchFilter(filterSQL)
+		if f == nil {
+			f = buildExprBatchFilter(filterSQL)
+			if f == nil {
 				continue
 			}
 		}
+		filters = append(filters, f)
+	}
+	return filters
+}
 
-		var sel []uint32
-		if b.Sel != nil {
-			sel = make([]uint32, 0, len(b.Sel))
-			for _, idx := range b.Sel {
-				if filter(b, int(idx)) {
-					sel = append(sel, idx)
-				}
-			}
-		} else {
-			sel = make([]uint32, 0, b.Len)
-			for i := 0; i < b.Len; i++ {
-				if filter(b, i) {
-					sel = append(sel, uint32(i))
-				}
-			}
-		}
-
-		if len(sel) == 0 {
+// applyBatchFilters applies batch-level filters sequentially, threading
+// the selection vector through each filter.
+func applyBatchFilters(b *batch.RecordBatch, filters []batchFilter) *batch.RecordBatch {
+	for _, filter := range filters {
+		b = filter(b)
+		if b == nil {
 			return nil
 		}
-		b.Sel = sel
 	}
 	return b
 }
 
-// buildCompiledFilter uses the full SQL expression parser + compiler to create
-// a filter function. Handles LIKE, IN, column-to-column comparisons, etc.
-func buildCompiledFilter(filterSQL string) func(*batch.RecordBatch, int) bool {
+// buildKernelBatchFilter tries to create a vectorized kernel filter from a SQL
+// expression. Returns nil if the expression is too complex for kernel evaluation.
+func buildKernelBatchFilter(filterSQL string) batchFilter {
+	astNode, err := plansql.ParseExpression(filterSQL)
+	if err != nil {
+		return nil
+	}
+	return kernelFilterFromAST(astNode)
+}
+
+// kernelFilterFromAST recursively extracts kernel-eligible filter patterns from AST nodes.
+func kernelFilterFromAST(node plansql.Node) batchFilter {
+	switch n := node.(type) {
+	case *plansql.CmpExpr:
+		col, val, op, ok := extractColOpLit(n)
+		if !ok {
+			return nil
+		}
+		kf := exec.NewKernelFilter(col, op, val)
+		return wrapUnaryOp(kf)
+
+	case *plansql.InExpr:
+		colRef, ok := n.Left.(*plansql.ColRef)
+		if !ok {
+			return nil
+		}
+		vals := make([]any, 0, len(n.Values))
+		for _, v := range n.Values {
+			lit, ok := v.(*plansql.Lit)
+			if !ok {
+				return nil
+			}
+			vals = append(vals, parseLitVal(lit))
+		}
+		inf := exec.NewInFilter(colRefName(colRef), vals, n.Not)
+		return wrapUnaryOp(inf)
+
+	case *plansql.BetweenExpr:
+		if n.Not {
+			return nil
+		}
+		colRef, ok := n.Left.(*plansql.ColRef)
+		if !ok {
+			return nil
+		}
+		lowLit, ok := n.Low.(*plansql.Lit)
+		if !ok {
+			return nil
+		}
+		highLit, ok := n.High.(*plansql.Lit)
+		if !ok {
+			return nil
+		}
+		col := colRefName(colRef)
+		ge := exec.NewKernelFilter(col, exec.OpGe, parseLitVal(lowLit))
+		le := exec.NewKernelFilter(col, exec.OpLe, parseLitVal(highLit))
+		geBatch := wrapUnaryOp(ge)
+		leBatch := wrapUnaryOp(le)
+		return func(b *batch.RecordBatch) *batch.RecordBatch {
+			b = geBatch(b)
+			if b == nil {
+				return nil
+			}
+			return leBatch(b)
+		}
+
+	case *plansql.LikeExpr:
+		colRef, ok := n.Left.(*plansql.ColRef)
+		if !ok {
+			return nil
+		}
+		patLit, ok := n.Pattern.(*plansql.Lit)
+		if !ok {
+			return nil
+		}
+		lf := exec.NewLikeFilter(colRefName(colRef), patLit.Value, n.Not)
+		return wrapUnaryOp(lf)
+
+	case *plansql.AndNode:
+		left := kernelFilterFromAST(n.Left)
+		right := kernelFilterFromAST(n.Right)
+		if left != nil && right != nil {
+			return func(b *batch.RecordBatch) *batch.RecordBatch {
+				b = left(b)
+				if b == nil {
+					return nil
+				}
+				return right(b)
+			}
+		}
+		return nil
+
+	case *plansql.ParenNode:
+		return kernelFilterFromAST(n.Inner)
+
+	default:
+		return nil
+	}
+}
+
+// wrapUnaryOp wraps a filter UnaryOperator (KernelFilter, InFilter, LikeFilter)
+// into a batchFilter function.
+func wrapUnaryOp(op exec.UnaryOperator) batchFilter {
+	return func(b *batch.RecordBatch) *batch.RecordBatch {
+		out, err := op.Execute(context.Background(), b)
+		if err != nil || out == nil {
+			return nil
+		}
+		return out
+	}
+}
+
+// extractColOpLit extracts (column_name, literal_value, compare_op) from a CmpExpr.
+// Handles both "col op lit" and "lit op col" (flipping the operator).
+func extractColOpLit(n *plansql.CmpExpr) (string, any, exec.CompareOp, bool) {
+	op := cmpStrToOp(n.Op)
+	if op < 0 {
+		return "", nil, 0, false
+	}
+	// col op lit
+	if colRef, ok := n.Left.(*plansql.ColRef); ok {
+		if lit, ok := n.Right.(*plansql.Lit); ok {
+			return colRefName(colRef), parseLitVal(lit), exec.CompareOp(op), true
+		}
+	}
+	// lit op col → flip operator
+	if lit, ok := n.Left.(*plansql.Lit); ok {
+		if colRef, ok := n.Right.(*plansql.ColRef); ok {
+			return colRefName(colRef), parseLitVal(lit), flipOp(exec.CompareOp(op)), true
+		}
+	}
+	return "", nil, 0, false
+}
+
+func colRefName(c *plansql.ColRef) string {
+	if c.Table != "" {
+		return c.Table + "." + c.Column
+	}
+	return c.Column
+}
+
+func cmpStrToOp(op string) exec.CompareOp {
+	switch op {
+	case "=":
+		return exec.OpEq
+	case "!=", "<>":
+		return exec.OpNe
+	case "<":
+		return exec.OpLt
+	case "<=":
+		return exec.OpLe
+	case ">":
+		return exec.OpGt
+	case ">=":
+		return exec.OpGe
+	default:
+		return -1
+	}
+}
+
+func flipOp(op exec.CompareOp) exec.CompareOp {
+	switch op {
+	case exec.OpLt:
+		return exec.OpGt
+	case exec.OpLe:
+		return exec.OpGe
+	case exec.OpGt:
+		return exec.OpLt
+	case exec.OpGe:
+		return exec.OpLe
+	default:
+		return op
+	}
+}
+
+func parseLitVal(lit *plansql.Lit) any {
+	switch lit.Kind {
+	case plansql.LitNumber:
+		if i, err := strconv.ParseInt(lit.Value, 10, 64); err == nil {
+			return i
+		}
+		if f, err := strconv.ParseFloat(lit.Value, 64); err == nil {
+			return f
+		}
+		return lit.Value
+	case plansql.LitString:
+		return lit.Value
+	case plansql.LitBool:
+		return strings.EqualFold(lit.Value, "true")
+	default:
+		return lit.Value
+	}
+}
+
+// buildExprBatchFilter wraps the generic per-row expression evaluator in a
+// batchFilter. Used as fallback for complex expressions that can't use kernels.
+func buildExprBatchFilter(filterSQL string) batchFilter {
 	astNode, err := plansql.ParseExpression(filterSQL)
 	if err != nil {
 		return nil
@@ -391,66 +583,31 @@ func buildCompiledFilter(filterSQL string) func(*batch.RecordBatch, int) bool {
 	if err != nil {
 		return nil
 	}
-	return func(b *batch.RecordBatch, row int) bool {
-		v := compiled.Eval(b, row)
-		if v == nil {
-			return false
-		}
-		bv, ok := v.(bool)
-		return ok && bv
-	}
-}
-
-// buildSimpleFilter creates a predicate function from a SQL expression string.
-func buildSimpleFilter(filterSQL string) func(*batch.RecordBatch, int) bool {
-	// Parse operators in order of precedence
-	operators := []struct {
-		sql string
-		op  exec.CompareOp
-	}{
-		{">=", exec.OpGe},
-		{"<=", exec.OpLe},
-		{"!=", exec.OpNe},
-		{">", exec.OpGt},
-		{"<", exec.OpLt},
-		{"=", exec.OpEq},
-	}
-
-	for _, o := range operators {
-		parts := strings.SplitN(filterSQL, o.sql, 2)
-		if len(parts) == 2 {
-			col := cleanFilterExpr(strings.TrimSpace(parts[0]))
-			valStr := strings.TrimSpace(parts[1])
-			val := parseFilterValue(valStr)
-			pred := exec.ColumnCompare(col, o.op, val)
-			return func(b *batch.RecordBatch, row int) bool {
-				return pred(b, row)
+	return func(b *batch.RecordBatch) *batch.RecordBatch {
+		var sel []uint32
+		if b.Sel != nil {
+			sel = make([]uint32, 0, len(b.Sel))
+			for _, idx := range b.Sel {
+				v := compiled.Eval(b, int(idx))
+				if bv, ok := v.(bool); ok && bv {
+					sel = append(sel, idx)
+				}
+			}
+		} else {
+			sel = make([]uint32, 0, b.Len)
+			for i := 0; i < b.Len; i++ {
+				v := compiled.Eval(b, i)
+				if bv, ok := v.(bool); ok && bv {
+					sel = append(sel, uint32(i))
+				}
 			}
 		}
+		if len(sel) == 0 {
+			return nil
+		}
+		b.Sel = sel
+		return b
 	}
-	return nil
-}
-
-func cleanFilterExpr(s string) string {
-	s = strings.TrimSpace(s)
-	if parts := strings.SplitN(s, ".", 2); len(parts) == 2 {
-		return parts[1]
-	}
-	return s
-}
-
-func parseFilterValue(s string) any {
-	s = strings.TrimSpace(s)
-	if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
-		return s[1 : len(s)-1]
-	}
-	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
-		return i
-	}
-	if f, err := strconv.ParseFloat(s, 64); err == nil {
-		return f
-	}
-	return s
 }
 
 func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
@@ -911,7 +1068,7 @@ func mergeCopyValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 	case batch.TypeFloat64:
 		dst.Float64Data[di] = src.Float64Data[si]
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		dst.BytesData.Set(di, src.BytesData.Value(si))
+		dst.BytesData.SetFrom(di, &src.BytesData, si)
 	case batch.TypeDecimal:
 		dst.DecimalData.Data[di] = src.DecimalData.Data[si]
 	}

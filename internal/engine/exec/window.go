@@ -304,9 +304,13 @@ func windowCopyVectorRange(dst, src *batch.Vector, dstOff, srcOff, count int) {
 	case batch.TypeFloat64:
 		copy(dst.Float64Data[dstOff:dstOff+count], src.Float64Data[srcOff:srcOff+count])
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		for i := 0; i < count; i++ {
-			if !src.Nulls.IsNullFast(srcOff + i) {
-				dst.BytesData.Set(dstOff+i, src.BytesData.Value(srcOff+i))
+		if !src.Nulls.HasNulls() {
+			dst.BytesData.BulkCopy(dstOff, &src.BytesData, srcOff, count)
+		} else {
+			for i := 0; i < count; i++ {
+				if !src.Nulls.IsNullFast(srcOff + i) {
+					dst.BytesData.SetFrom(dstOff+i, &src.BytesData, srcOff+i)
+				}
 			}
 		}
 	case batch.TypeDecimal:
@@ -379,7 +383,7 @@ func windowGatherVector(dst, src *batch.Vector, perm []int) {
 				dst.Nulls.SetNull(i)
 				dst.BytesData.Set(i, nil)
 			} else {
-				dst.BytesData.Set(i, src.BytesData.Value(p))
+				dst.BytesData.SetFrom(i, &src.BytesData, p)
 			}
 		}
 	case batch.TypeDecimal:
