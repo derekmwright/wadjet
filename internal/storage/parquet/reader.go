@@ -35,6 +35,19 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 	return &Reader{fr: fr, schema: fr.Schema()}, nil
 }
 
+// NewReaderFromBytes creates a Parquet reader from a byte slice.
+// Zero-copy: the slice is used directly by the underlying FileReader
+// without allocating a separate copy. Use this when the data is already
+// in memory (e.g. from readAllSized or a cache) to avoid the O(n) copy
+// that NewReader performs via OpenFileReader.
+func NewReaderFromBytes(data []byte) (*Reader, error) {
+	fr, err := OpenFileReaderFromBytes(data)
+	if err != nil {
+		return nil, fmt.Errorf("opening parquet file: %w", err)
+	}
+	return &Reader{fr: fr, schema: fr.Schema()}, nil
+}
+
 // Schema returns the schema of the Parquet file.
 func (r *Reader) Schema() Schema { return r.schema }
 

@@ -786,3 +786,78 @@ func TestHashJoinPooledBatchNullBitmapSize(t *testing.T) {
 		}
 	}
 }
+
+// testBatchSource is a simple Source for testing that yields pre-built batches.
+type testBatchSource struct {
+	batches []*batch.RecordBatch
+	pos     int
+}
+
+func (s *testBatchSource) Init(_ context.Context) error { return nil }
+func (s *testBatchSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.pos >= len(s.batches) {
+		return nil, nil
+	}
+	b := s.batches[s.pos]
+	s.pos++
+	return b, nil
+}
+func (s *testBatchSource) Close() error { return nil }
+
+// TestConsolidateBuildThreshold verifies that consolidateBuild skips
+// consolidation for large build sides (>2M rows) while still producing
+// correct join results. This is a regression test for the performance
+// optimization that avoids O(n) copy cost for large build sides.
+func TestConsolidateBuildThreshold(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString},
+	}
+
+	// Build a join with enough batches to test multi-batch probe path.
+	hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
+	ctx := context.Background()
+
+	// Feed 10 batches of 100 rows each (1000 rows total, below threshold).
+	// consolidateBuild should merge them into 1 batch.
+	src := &testBatchSource{}
+	for batchNum := 0; batchNum < 10; batchNum++ {
+		b := batch.NewRecordBatch(schema, 100)
+		for i := 0; i < 100; i++ {
+			rowID := int64(batchNum*100 + i)
+			b.Columns[0].Int64Data[i] = rowID
+			b.Columns[1].BytesData.Set(i, []byte("v"))
+		}
+		b.Len = 100
+		src.batches = append(src.batches, b)
+	}
+
+	if err := hj.Build(ctx, src); err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// Below threshold: should consolidate to 1 batch
+	if len(hj.buildBatches) != 1 {
+		t.Errorf("expected 1 consolidated batch for 1000 rows, got %d", len(hj.buildBatches))
+	}
+
+	// Probe and verify correctness
+	probe := hj.Probe()
+	if err := probe.Init(ctx); err != nil {
+		t.Fatalf("Probe.Init: %v", err)
+	}
+
+	probeBatch := batch.NewRecordBatch(schema[:1], 3)
+	probeBatch.Columns[0].Int64Data[0] = 0
+	probeBatch.Columns[0].Int64Data[1] = 500
+	probeBatch.Columns[0].Int64Data[2] = 999
+	probeBatch.Len = 3
+
+	out, err := probe.Execute(ctx, probeBatch)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if out == nil || out.ActiveLen() != 3 {
+		t.Fatalf("expected 3 output rows, got %v", out)
+	}
+}

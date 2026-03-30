@@ -5747,7 +5747,7 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 				continue
 			}
 			inner.trackPooledBuf(data)
-			reader, err = parquet.NewReader(bytesReader(data), int64(len(data)))
+			reader, err = parquet.NewReaderFromBytes(data)
 			if err != nil {
 				continue
 			}

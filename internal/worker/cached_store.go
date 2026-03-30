@@ -40,10 +40,23 @@ func (s *CachedStore) Get(ctx context.Context, bucket, key string) (io.ReadClose
 	if err != nil {
 		return nil, info, err
 	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		return nil, info, fmt.Errorf("reading %s/%s: %w", bucket, key, err)
+	var data []byte
+	if info.Size > 0 {
+		// Pre-allocate buffer using known file size to avoid io.ReadAll's
+		// O(log n) doubling strategy (512 → 1K → ... → 40MB = ~17 copies).
+		buf := make([]byte, info.Size)
+		n, readErr := io.ReadFull(rc, buf)
+		rc.Close()
+		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			return nil, info, fmt.Errorf("reading %s/%s: %w", bucket, key, readErr)
+		}
+		data = buf[:n]
+	} else {
+		data, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return nil, info, fmt.Errorf("reading %s/%s: %w", bucket, key, err)
+		}
 	}
 
 	s.cache.Put(cacheKey, data)
@@ -70,14 +83,25 @@ func (s *CachedStore) GetReaderAt(ctx context.Context, bucket, key string) (objs
 	}
 
 	// Inner store doesn't support ReaderAt: download full file and cache.
-	rc, _, err := s.inner.Get(ctx, bucket, key)
+	rc, info, err := s.inner.Get(ctx, bucket, key)
 	if err != nil {
 		return nil, 0, err
 	}
-	data, err := io.ReadAll(rc)
-	rc.Close()
-	if err != nil {
-		return nil, 0, fmt.Errorf("reading %s/%s: %w", bucket, key, err)
+	var data []byte
+	if info.Size > 0 {
+		buf := make([]byte, info.Size)
+		n, readErr := io.ReadFull(rc, buf)
+		rc.Close()
+		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			return nil, 0, fmt.Errorf("reading %s/%s: %w", bucket, key, readErr)
+		}
+		data = buf[:n]
+	} else {
+		data, err = io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return nil, 0, fmt.Errorf("reading %s/%s: %w", bucket, key, err)
+		}
 	}
 
 	s.cache.Put(cacheKey, data)

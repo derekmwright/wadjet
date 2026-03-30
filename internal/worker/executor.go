@@ -1095,6 +1095,17 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 	hj := exec.NewHashJoin(joinType, task.JoinLeftKeys, task.JoinRightKeys)
 	hj.BuildTableAlias = task.BuildTableAlias
 
+	// Pre-size hash table from build batch row counts to avoid repeated
+	// grow+rehash cycles. Without this, the table starts at 64 entries
+	// and doubles ~20 times for a 60M-row build side.
+	var buildRowCount int64
+	for _, b := range buildBatches {
+		buildRowCount += int64(b.Len)
+	}
+	if buildRowCount > 0 {
+		hj.BuildRowHint = buildRowCount
+	}
+
 	// Wire spill manager if memory budget is set.
 	spill, tracker := e.newSpillManager(task.ID)
 	if spill != nil {
@@ -1135,6 +1146,13 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 				fjType := mapExecJoinType(fj.JoinType)
 				fjHJ := exec.NewHashJoin(fjType, fj.JoinLeftKeys, fj.JoinRightKeys)
 				fjHJ.BuildTableAlias = fj.BuildTableAlias
+				var fjRowCount int64
+				for _, b := range fjBuild {
+					fjRowCount += int64(b.Len)
+				}
+				if fjRowCount > 0 {
+					fjHJ.BuildRowHint = fjRowCount
+				}
 				if fj.JoinFilter != "" && (fjType == exec.SemiJoin || fjType == exec.AntiJoin) {
 					fjHJ.SemiAntiFilter = physical.BuildSemiAntiFilter(fj.JoinFilter)
 				}

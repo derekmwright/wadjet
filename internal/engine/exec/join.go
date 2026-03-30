@@ -1587,13 +1587,22 @@ func (h *HashJoin) consolidateBuild() {
 	// Copy ALL rows (including unselected) so arena rowIdx values remain valid
 	// at their new offset positions.
 	totalRows := 0
+	for _, b := range h.buildBatches {
+		totalRows += b.Len
+	}
+
+	// For large build sides, the O(n) copy cost exceeds the benefit of
+	// eliminating the probe-phase pair sort. The break-even is ~2M rows
+	// based on SF10 profiling (consolidateBuild was 7.8% of CPU time).
+	if totalRows > 2_000_000 {
+		return
+	}
+
+	totalRows = 0
 	offsets := make([]int, len(h.buildBatches))
 	for i, b := range h.buildBatches {
 		offsets[i] = totalRows
 		totalRows += b.Len
-	}
-	if totalRows == 0 {
-		return
 	}
 
 	// Allocate the consolidated batch.
