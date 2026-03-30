@@ -360,6 +360,22 @@ func (qt *QueryTracker) ReapCompleted(maxAge time.Duration) []string {
 	return reaped
 }
 
+// ActiveQueryIDs returns the set of query IDs in a non-terminal state
+// (pending or running). Used by ResultCleaner to avoid deleting
+// intermediate files for in-flight queries.
+func (qt *QueryTracker) ActiveQueryIDs() map[string]struct{} {
+	qt.mu.RLock()
+	defer qt.mu.RUnlock()
+
+	active := make(map[string]struct{})
+	for id, q := range qt.queries {
+		if q.State == QueryStatePending || q.State == QueryStateRunning {
+			active[id] = struct{}{}
+		}
+	}
+	return active
+}
+
 // List returns all tracked queries (shallow copies).
 func (qt *QueryTracker) List() []*QueryInfo {
 	qt.mu.RLock()

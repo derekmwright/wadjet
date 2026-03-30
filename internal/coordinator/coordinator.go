@@ -135,6 +135,7 @@ func (c *Coordinator) SetTelemetry(tp *telemetry.Provider) {
 func (c *Coordinator) Cleaner(store objstore.Store, bucket string) *ResultCleaner {
 	if c.cleaner == nil {
 		c.cleaner = NewResultCleaner(store, bucket, 0, c.logger)
+		c.cleaner.SetActiveQueriesFunc(c.tracker.ActiveQueryIDs)
 	}
 	return c.cleaner
 }

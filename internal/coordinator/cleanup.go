@@ -12,10 +12,11 @@ import (
 
 // ResultCleaner manages cleanup of query result files in object storage.
 type ResultCleaner struct {
-	store  objstore.Store
-	bucket string
-	ttl    time.Duration
-	logger *slog.Logger
+	store         objstore.Store
+	bucket        string
+	ttl           time.Duration
+	logger        *slog.Logger
+	activeQueries func() map[string]struct{} // returns IDs of in-flight queries
 }
 
 // NewResultCleaner creates a result cleaner.
@@ -32,6 +33,13 @@ func NewResultCleaner(store objstore.Store, bucket string, ttl time.Duration, lo
 		ttl:    ttl,
 		logger: logger,
 	}
+}
+
+// SetActiveQueriesFunc registers a callback that returns the set of
+// query IDs currently in-flight. CleanStale will skip files belonging
+// to these queries regardless of age.
+func (rc *ResultCleaner) SetActiveQueriesFunc(fn func() map[string]struct{}) {
+	rc.activeQueries = fn
 }
 
 // CleanQuery removes all result files for a specific query.
@@ -55,25 +63,40 @@ func (rc *ResultCleaner) CleanQuery(ctx context.Context, queryID string) (int, e
 	return deleted, nil
 }
 
-// CleanStale removes result files older than the TTL.
+// CleanStale removes result files older than the TTL, skipping files
+// that belong to queries currently in-flight.
 func (rc *ResultCleaner) CleanStale(ctx context.Context) (int, error) {
 	objects, err := rc.store.List(ctx, rc.bucket, objstore.ListOptions{Prefix: "queries/"})
 	if err != nil {
 		return 0, fmt.Errorf("listing results: %w", err)
 	}
 
+	// Build the set of active query IDs to protect.
+	var active map[string]struct{}
+	if rc.activeQueries != nil {
+		active = rc.activeQueries()
+	}
+
 	cutoff := time.Now().Add(-rc.ttl)
 	deleted := 0
+	skipped := 0
 	for _, obj := range objects {
 		if obj.LastModified.Before(cutoff) {
+			if active != nil {
+				qid := QueryIDFromPath(obj.Key)
+				if _, ok := active[qid]; ok {
+					skipped++
+					continue
+				}
+			}
 			if err := rc.store.Delete(ctx, rc.bucket, obj.Key); err == nil {
 				deleted++
 			}
 		}
 	}
 
-	if deleted > 0 {
-		rc.logger.Info("cleaned stale results", "deleted", deleted, "ttl", rc.ttl)
+	if deleted > 0 || skipped > 0 {
+		rc.logger.Info("cleaned stale results", "deleted", deleted, "skipped_active", skipped, "ttl", rc.ttl)
 	}
 	return deleted, nil
 }
