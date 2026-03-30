@@ -142,6 +142,7 @@ type HashAggregate struct {
 	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles    []string
+	trackedGroupMem int64 // bytes charged to Spill tracker for group state growth
 	outputPos     int              // position in keys for batched Next() output
 	gsPool        groupStatePool   // chunk allocator for groupState (reduces GC pressure)
 }
@@ -184,6 +185,63 @@ func (p *groupStatePool) preAlloc(n int) {
 	if len(p.chunks) == 0 && n > groupStateChunkSize {
 		p.chunks = append(p.chunks, make([]groupState, n))
 		p.pos = 0
+	}
+}
+
+// groupMemoryUsage returns the estimated heap bytes consumed by the aggregate's
+// group state: hash tables, flat accumulator arrays, group state pool, and key
+// arrays. This does NOT include input batch data (tracked separately by
+// SpillManager.TrackBatch).
+func (h *HashAggregate) groupMemoryUsage() int64 {
+	var size int64
+	if h.intGroupIndex != nil {
+		size += h.intGroupIndex.MemoryUsage()
+	}
+	if h.strGroupIndex != nil {
+		size += h.strGroupIndex.MemoryUsage()
+	}
+	// Group state pool: each chunk is a contiguous array of groupState structs.
+	// groupState is ~120 bytes (keys, accs slices, intKey, setID).
+	for _, chunk := range h.gsPool.chunks {
+		size += int64(cap(chunk)) * 120
+	}
+	// SoA flat accumulator arrays: 8 bytes per element for int64/float64 fields.
+	for _, fa := range h.intFlatAccs {
+		size += int64(cap(fa.count)) * 8
+		size += int64(cap(fa.sumI64)) * 8
+		size += int64(cap(fa.sumF64)) * 8
+		size += int64(cap(fa.sumDec)) * 16 // Int128
+		size += int64(cap(fa.minI64)) * 8
+		size += int64(cap(fa.maxI64)) * 8
+		size += int64(cap(fa.minF64)) * 8
+		size += int64(cap(fa.maxF64)) * 8
+		size += int64(cap(fa.minDec)) * 16
+		size += int64(cap(fa.maxDec)) * 16
+		size += int64(cap(fa.hasMin))
+		size += int64(cap(fa.hasMax))
+	}
+	// Dual-int key arrays
+	size += int64(cap(h.dualIntKeysA)) * 8
+	size += int64(cap(h.dualIntKeysB)) * 8
+	size += int64(cap(h.dualIntNextGroup)) * 4
+	// Group state pointer slices
+	size += int64(cap(h.intGroupStates)) * 8
+	size += int64(cap(h.strGroupStates)) * 8
+	return size
+}
+
+// reconcileGroupMemory tracks group state growth in the spill manager so that
+// ShouldSpill() triggers at the correct threshold. Without this, spill only
+// sees input batch cost while group states grow unbounded.
+func (h *HashAggregate) reconcileGroupMemory() {
+	if h.Spill == nil {
+		return
+	}
+	actual := h.groupMemoryUsage()
+	if actual > h.trackedGroupMem {
+		delta := actual - h.trackedGroupMem
+		h.Spill.TrackBatch(delta)
+		h.trackedGroupMem = actual
 	}
 }
 
@@ -352,6 +410,13 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 
 	// Iterate rows
 	h.consumeBatch(b)
+
+	// Track group state memory growth so spill triggers at the right time.
+	// consumeBatch grows hash tables and accumulator arrays, but TrackBatch
+	// above only saw input batch size. Without this, group states at SF100
+	// can grow to 20+ GB untracked while ShouldSpill sees only batch cost.
+	h.reconcileGroupMemory()
+
 	return nil
 }
 
