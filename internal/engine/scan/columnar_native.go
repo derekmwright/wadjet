@@ -18,10 +18,10 @@ func ReadFileBatchesNative(fr *pqt.FileReader, schema []pqt.Column, selectedCols
 	}
 
 	// Schemas with types unsupported by the columnar reader return an error.
-	// Callers with Array/Map/Decimal columns should use ReadFileBatches (parquet-go)
-	// until the native reader supports those types.
+	// Callers with Array/Map columns should use ReadFileBatches which falls
+	// back to row-based reading for those types.
 	if HasUnsupportedColumnarTypes(readSchema) {
-		return nil, fmt.Errorf("native reader does not support Array/Map/Decimal types yet")
+		return nil, fmt.Errorf("native reader does not support Array/Map types yet")
 	}
 
 	var batches []*batch.RecordBatch

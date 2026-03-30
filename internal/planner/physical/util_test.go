@@ -5,14 +5,14 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-// TestReadRowGroupInto_ParallelColumns verifies that readRowGroupInto produces
-// correct results when reading multiple columns in parallel. It writes a
-// multi-column Parquet file, reads it back via readRowGroupInto (which uses
-// parallel goroutines for 2+ columns), and compares against expected values.
-func TestReadRowGroupInto_ParallelColumns(t *testing.T) {
+// TestReadRowGroupNative_ParallelColumns verifies that ReadRowGroupNative produces
+// correct results when reading multiple columns. It writes a multi-column Parquet
+// file, reads it back via the native reader, and compares against expected values.
+func TestReadRowGroupNative_ParallelColumns(t *testing.T) {
 	schema := parquet.Schema{
 		Columns: []parquet.Column{
 			{Name: "id", Type: parquet.TypeInt64},
@@ -45,24 +45,22 @@ func TestReadRowGroupInto_ParallelColumns(t *testing.T) {
 		t.Fatalf("closing writer: %v", err)
 	}
 
-	// Read it back
+	// Read it back via native reader
 	data := buf.Bytes()
 	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatalf("creating parquet reader: %v", err)
 	}
 
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
-	if len(rgs) == 0 {
+	fr := reader.FileReader()
+	if fr.NumRowGroups() == 0 {
 		t.Fatal("expected at least 1 row group")
 	}
 
-	// Read all columns via readRowGroupInto (parallel path: 4 columns)
-	rg := rgs[0]
-	numRows := int(rg.NumRows())
-	b := batch.NewRecordBatch(schema.Columns, numRows)
-	readRowGroupInto(pqFile, rg, b, schema.Columns, nil, nil)
+	b, err := scan.ReadRowGroupNative(fr, 0, schema.Columns, nil)
+	if err != nil {
+		t.Fatalf("ReadRowGroupNative: %v", err)
+	}
 
 	if b.Len != len(rows) {
 		t.Fatalf("expected %d rows, got %d", len(rows), b.Len)
@@ -101,9 +99,9 @@ func TestReadRowGroupInto_ParallelColumns(t *testing.T) {
 	}
 }
 
-// TestReadRowGroupInto_SingleColumn verifies the sequential path (1 column)
+// TestReadRowGroupNative_SingleColumn verifies the sequential path (1 column)
 // produces correct results.
-func TestReadRowGroupInto_SingleColumn(t *testing.T) {
+func TestReadRowGroupNative_SingleColumn(t *testing.T) {
 	schema := parquet.Schema{
 		Columns: []parquet.Column{
 			{Name: "value", Type: parquet.TypeInt64},
@@ -136,16 +134,15 @@ func TestReadRowGroupInto_SingleColumn(t *testing.T) {
 		t.Fatalf("creating parquet reader: %v", err)
 	}
 
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
-	if len(rgs) == 0 {
+	fr := reader.FileReader()
+	if fr.NumRowGroups() == 0 {
 		t.Fatal("expected at least 1 row group")
 	}
 
-	rg := rgs[0]
-	numRows := int(rg.NumRows())
-	b := batch.NewRecordBatch(schema.Columns, numRows)
-	readRowGroupInto(pqFile, rg, b, schema.Columns, nil, nil)
+	b, err := scan.ReadRowGroupNative(fr, 0, schema.Columns, nil)
+	if err != nil {
+		t.Fatalf("ReadRowGroupNative: %v", err)
+	}
 
 	if b.Len != len(rows) {
 		t.Fatalf("expected %d rows, got %d", len(rows), b.Len)
@@ -159,9 +156,9 @@ func TestReadRowGroupInto_SingleColumn(t *testing.T) {
 	}
 }
 
-// TestReadRowGroupInto_WithProjection verifies that column projection works
-// correctly with parallel reads (only a subset of columns are read).
-func TestReadRowGroupInto_WithProjection(t *testing.T) {
+// TestReadRowGroupNative_WithProjection verifies that column projection works
+// correctly with the native reader (only a subset of columns are read).
+func TestReadRowGroupNative_WithProjection(t *testing.T) {
 	schema := parquet.Schema{
 		Columns: []parquet.Column{
 			{Name: "id", Type: parquet.TypeInt64},
@@ -195,19 +192,17 @@ func TestReadRowGroupInto_WithProjection(t *testing.T) {
 		t.Fatalf("creating parquet reader: %v", err)
 	}
 
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
-	if len(rgs) == 0 {
+	fr := reader.FileReader()
+	if fr.NumRowGroups() == 0 {
 		t.Fatal("expected at least 1 row group")
 	}
 
-	// Read only id and score (2 columns — triggers parallel path)
-	projected := []string{"id", "score"}
-	readSchema := buildReadSchema(schema.Columns, projected)
-	rg := rgs[0]
-	numRows := int(rg.NumRows())
-	b := batch.NewRecordBatch(readSchema, numRows)
-	readRowGroupInto(pqFile, rg, b, schema.Columns, projected, nil)
+	// Read only id and score (2 columns)
+	readSchema := buildReadSchema(schema.Columns, []string{"id", "score"})
+	b, err := scan.ReadRowGroupNative(fr, 0, readSchema, nil)
+	if err != nil {
+		t.Fatalf("ReadRowGroupNative: %v", err)
+	}
 
 	if b.Len != len(rows) {
 		t.Fatalf("expected %d rows, got %d", len(rows), b.Len)
@@ -228,9 +223,9 @@ func TestReadRowGroupInto_WithProjection(t *testing.T) {
 	}
 }
 
-// TestReadRowGroupInto_NullableColumns verifies parallel reads handle nullable
+// TestReadRowGroupNative_NullableColumns verifies native reads handle nullable
 // columns correctly (definition levels with actual nulls).
-func TestReadRowGroupInto_NullableColumns(t *testing.T) {
+func TestReadRowGroupNative_NullableColumns(t *testing.T) {
 	schema := parquet.Schema{
 		Columns: []parquet.Column{
 			{Name: "id", Type: parquet.TypeInt64},
@@ -266,16 +261,15 @@ func TestReadRowGroupInto_NullableColumns(t *testing.T) {
 		t.Fatalf("creating parquet reader: %v", err)
 	}
 
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
-	if len(rgs) == 0 {
+	fr := reader.FileReader()
+	if fr.NumRowGroups() == 0 {
 		t.Fatal("expected at least 1 row group")
 	}
 
-	rg := rgs[0]
-	numRows := int(rg.NumRows())
-	b := batch.NewRecordBatch(schema.Columns, numRows)
-	readRowGroupInto(pqFile, rg, b, schema.Columns, nil, nil)
+	b, err := scan.ReadRowGroupNative(fr, 0, schema.Columns, nil)
+	if err != nil {
+		t.Fatalf("ReadRowGroupNative: %v", err)
+	}
 
 	if b.Len != len(rows) {
 		t.Fatalf("expected %d rows, got %d", len(rows), b.Len)
@@ -320,10 +314,9 @@ func TestReadRowGroupInto_NullableColumns(t *testing.T) {
 	}
 }
 
-// TestReadRowGroupDirect_ParallelConsistency verifies that readRowGroupDirect
-// (which calls readRowGroupInto) produces the same result across multiple
-// invocations, confirming no race conditions in the parallel column reads.
-func TestReadRowGroupDirect_ParallelConsistency(t *testing.T) {
+// TestReadBatchDirect_Consistency verifies that readBatchDirect produces the
+// same result across multiple invocations via the native reader path.
+func TestReadBatchDirect_Consistency(t *testing.T) {
 	schema := parquet.Schema{
 		Columns: []parquet.Column{
 			{Name: "a", Type: parquet.TypeInt64},
@@ -360,16 +353,14 @@ func TestReadRowGroupDirect_ParallelConsistency(t *testing.T) {
 
 	data := buf.Bytes()
 
-	// Read the same row group 10 times and verify consistency
+	// Read the same data 10 times and verify consistency
 	for iter := 0; iter < 10; iter++ {
 		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			t.Fatalf("iter %d: creating parquet reader: %v", iter, err)
 		}
 
-		pqFile := reader.File()
-		rg := pqFile.RowGroups()[0]
-		b := readRowGroupDirect(pqFile, rg, schema.Columns, nil)
+		b := readBatchDirect(reader, schema.Columns, nil)
 
 		if b == nil || b.Len != numRows {
 			t.Fatalf("iter %d: expected %d rows, got %v", iter, numRows, b)
@@ -392,3 +383,6 @@ func TestReadRowGroupDirect_ParallelConsistency(t *testing.T) {
 		}
 	}
 }
+
+// Ensure batch import is used.
+var _ = batch.TypeBool

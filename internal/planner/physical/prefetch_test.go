@@ -5,53 +5,46 @@ import (
 	"context"
 	"testing"
 
-	goparquet "github.com/parquet-go/parquet-go"
-
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-// writeTestParquetMultiRG writes row sets to separate parquet row groups.
+// writeTestParquetMultiRG writes row sets to a parquet file with small row groups
+// so that multiple row groups are produced.
 func writeTestParquetMultiRG(t *testing.T, schema parquet.Schema, rowSets ...[]map[string]any) []byte {
 	t.Helper()
-	group := make(goparquet.Group)
-	for _, col := range schema.Columns {
-		switch col.Type {
-		case parquet.TypeInt64:
-			group[col.Name] = goparquet.Int(64)
-		case parquet.TypeString:
-			group[col.Name] = goparquet.String()
-		default:
-			t.Fatalf("unsupported test type: %v", col.Type)
-		}
+
+	cfg := parquet.DefaultWriterConfig()
+	cfg.Compression = parquet.CompressionNone
+	// Set small row group size so each rowSet becomes its own row group.
+	if len(rowSets) > 0 {
+		cfg.RowGroupSize = len(rowSets[0])
 	}
-	pqSchema := goparquet.NewSchema("test", group)
 
 	var buf bytes.Buffer
-	pw := goparquet.NewGenericWriter[map[string]any](&buf, pqSchema)
+	w, err := parquet.NewWriter(&buf, schema, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, rows := range rowSets {
-		if _, err := pw.Write(rows); err != nil {
-			t.Fatal(err)
-		}
-		if err := pw.Flush(); err != nil {
+		if err := w.WriteRows(rows); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := pw.Close(); err != nil {
+	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
 }
 
-func openParquetFile(t *testing.T, data []byte) *goparquet.File {
+func openNativeReader(t *testing.T, data []byte) *parquet.FileReader {
 	t.Helper()
-	r := bytes.NewReader(data)
-	f, err := goparquet.OpenFile(r, int64(len(data)))
+	fr, err := parquet.OpenFileReaderFromBytes(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return f
+	return fr
 }
 
 func TestRGWorker_WithPrefetch(t *testing.T) {
@@ -72,22 +65,23 @@ func TestRGWorker_WithPrefetch(t *testing.T) {
 	}
 
 	data := writeTestParquetMultiRG(t, schema, rg1, rg2, rg3)
-	pqFile := openParquetFile(t, data)
-	rgs := pqFile.RowGroups()
-	if len(rgs) < 2 {
-		t.Fatalf("expected at least 2 row groups, got %d", len(rgs))
+	fr := openNativeReader(t, data)
+	numRGs := fr.NumRowGroups()
+	if numRGs < 2 {
+		t.Fatalf("expected at least 2 row groups, got %d", numRGs)
 	}
 
-	units := make([]rgUnit, len(rgs))
+	units := make([]rgUnit, numRGs)
 	var totalRows int64
-	for i, rg := range rgs {
-		units[i] = rgUnit{pqFile: pqFile, rg: rg, rgRowOffset: totalRows}
-		totalRows += rg.NumRows()
+	for i := 0; i < numRGs; i++ {
+		rgRows := fr.RowGroupNumRows(i)
+		units[i] = rgUnit{nativeReader: fr, rgIndex: i, rgRowOffset: totalRows, numRows: rgRows}
+		totalRows += rgRows
 	}
 
 	batchSchema := schema.Columns
 	readSchema := buildReadSchema(batchSchema, nil)
-	rgSize := int(rgs[0].NumRows())
+	rgSize := int(units[0].numRows)
 
 	inner := &scanSourceInner{
 		schema:  batchSchema,
@@ -138,22 +132,23 @@ func TestRGWorker_MultipleWorkers(t *testing.T) {
 	}
 
 	data := writeTestParquetMultiRG(t, schema, rowSets...)
-	pqFile := openParquetFile(t, data)
-	rgs := pqFile.RowGroups()
-	if len(rgs) < 3 {
-		t.Fatalf("expected at least 3 row groups, got %d", len(rgs))
+	fr := openNativeReader(t, data)
+	numRGs := fr.NumRowGroups()
+	if numRGs < 3 {
+		t.Fatalf("expected at least 3 row groups, got %d", numRGs)
 	}
 
-	units := make([]rgUnit, len(rgs))
+	units := make([]rgUnit, numRGs)
 	var totalRows int64
-	for i, rg := range rgs {
-		units[i] = rgUnit{pqFile: pqFile, rg: rg, rgRowOffset: totalRows}
-		totalRows += rg.NumRows()
+	for i := 0; i < numRGs; i++ {
+		rgRows := fr.RowGroupNumRows(i)
+		units[i] = rgUnit{nativeReader: fr, rgIndex: i, rgRowOffset: totalRows, numRows: rgRows}
+		totalRows += rgRows
 	}
 
 	batchSchema := schema.Columns
 	readSchema := buildReadSchema(batchSchema, nil)
-	rgSize := int(rgs[0].NumRows())
+	rgSize := int(units[0].numRows)
 
 	inner := &scanSourceInner{
 		schema:  batchSchema,
@@ -186,7 +181,7 @@ func TestRGWorker_MultipleWorkers(t *testing.T) {
 
 	if gotRows != totalRows {
 		t.Errorf("total rows: got %d, want %d (with %d workers, %d RGs)",
-			gotRows, totalRows, workers, len(rgs))
+			gotRows, totalRows, workers, numRGs)
 	}
 }
 
@@ -205,12 +200,12 @@ func TestRGWorker_ContextCancellation(t *testing.T) {
 	}
 
 	data := writeTestParquetMultiRG(t, schema, rg1, rg2)
-	pqFile := openParquetFile(t, data)
-	rgs := pqFile.RowGroups()
+	fr := openNativeReader(t, data)
+	numRGs := fr.NumRowGroups()
 
-	units := make([]rgUnit, len(rgs))
-	for i, rg := range rgs {
-		units[i] = rgUnit{pqFile: pqFile, rg: rg}
+	units := make([]rgUnit, numRGs)
+	for i := 0; i < numRGs; i++ {
+		units[i] = rgUnit{nativeReader: fr, rgIndex: i, numRows: fr.RowGroupNumRows(i)}
 	}
 
 	inner := &scanSourceInner{
@@ -250,25 +245,27 @@ func TestRGWorker_DeleteMarkers(t *testing.T) {
 	}
 
 	data := writeTestParquetMultiRG(t, schema, rg1, rg2)
-	pqFile := openParquetFile(t, data)
-	rgs := pqFile.RowGroups()
-	if len(rgs) == 0 {
+	fr := openNativeReader(t, data)
+	numRGs := fr.NumRowGroups()
+	if numRGs == 0 {
 		t.Fatal("no row groups produced")
 	}
 
 	filePath := "test/file.parquet"
 	deleteSet := map[int64]bool{0: true, 1: true}
 
-	units := make([]rgUnit, len(rgs))
+	units := make([]rgUnit, numRGs)
 	var totalRows int64
-	for i, rg := range rgs {
+	for i := 0; i < numRGs; i++ {
+		rgRows := fr.RowGroupNumRows(i)
 		units[i] = rgUnit{
-			pqFile:      pqFile,
-			fileEntry:   catalog.FileEntry{Path: filePath},
-			rg:          rg,
-			rgRowOffset: totalRows,
+			fileEntry:    catalog.FileEntry{Path: filePath},
+			nativeReader: fr,
+			rgIndex:      i,
+			rgRowOffset:  totalRows,
+			numRows:      rgRows,
 		}
-		totalRows += rg.NumRows()
+		totalRows += rgRows
 	}
 
 	inner := &scanSourceInner{

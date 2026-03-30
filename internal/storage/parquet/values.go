@@ -78,6 +78,9 @@ func RawValues(typ PhysicalType, data []byte, count int) Values {
 // Count returns the number of values.
 func (v Values) Count() int { return v.count }
 
+// PhysType returns the physical Parquet type of the values.
+func (v Values) PhysType() PhysicalType { return v.physType }
+
 // Int32 returns the data as a slice of int32.
 // Valid only when physType is PhysicalInt32.
 func (v Values) Int32() []int32 {

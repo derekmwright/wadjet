@@ -164,9 +164,4 @@ func BenchmarkShuffleWriteVsParquet(b *testing.B) {
 		}
 	})
 
-	b.Run("parquet_rows", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			batchToParquetRows(rb, schema)
-		}
-	})
 }

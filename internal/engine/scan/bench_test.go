@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	goparquet "github.com/parquet-go/parquet-go"
-
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -85,7 +83,7 @@ func BenchmarkReadRowOriented(b *testing.B) {
 	}
 }
 
-// BenchmarkReadColumnar benchmarks the new path: readRowGroupColumnar directly
+// BenchmarkReadColumnar benchmarks the native columnar path: ReadRowGroupNative directly
 func BenchmarkReadColumnar(b *testing.B) {
 	for _, n := range []int{1000, 10_000, 100_000} {
 		data := generateParquetData(n, false)
@@ -104,11 +102,10 @@ func BenchmarkReadColumnar(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				pqFile := reader.File()
-				rgs := pqFile.RowGroups()
+				fr := reader.FileReader()
 				var total int
-				for _, rg := range rgs {
-					rb, err := readRowGroupColumnar(rg, schema, pqFile, nil)
+				for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
+					rb, err := ReadRowGroupNative(fr, rgIdx, schema, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -143,11 +140,10 @@ func BenchmarkReadColumnarNullable(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				pqFile := reader.File()
-				rgs := pqFile.RowGroups()
+				fr := reader.FileReader()
 				var total int
-				for _, rg := range rgs {
-					rb, err := readRowGroupColumnar(rg, schema, pqFile, nil)
+				for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
+					rb, err := ReadRowGroupNative(fr, rgIdx, schema, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -201,10 +197,9 @@ func BenchmarkReadProjection(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
-				pqFile := reader.File()
-				rgs := pqFile.RowGroups()
-				for _, rg := range rgs {
-					rb, err := readRowGroupColumnar(rg, schema, pqFile, nil)
+				fr := reader.FileReader()
+				for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
+					rb, err := ReadRowGroupNative(fr, rgIdx, schema, nil)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -237,20 +232,19 @@ func TestColumnarReadCorrectness(t *testing.T) {
 	}
 	rowBatch := batch.FromRows(schema, rows)
 
-	// Columnar path
+	// Columnar path (native)
 	reader2, err := pqt.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	pqFile := reader2.File()
-	rgs := pqFile.RowGroups()
-	if len(rgs) == 0 {
+	fr := reader2.FileReader()
+	if fr.NumRowGroups() == 0 {
 		t.Fatal("no row groups")
 	}
 
 	var colBatches []*batch.RecordBatch
-	for _, rg := range rgs {
-		rb, err := readRowGroupColumnar(rg, schema, pqFile, nil)
+	for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
+		rb, err := ReadRowGroupNative(fr, rgIdx, schema, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -305,11 +299,10 @@ func TestColumnarReadWithProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
+	fr := reader.FileReader()
 
-	for _, rg := range rgs {
-		rb, err := readRowGroupColumnar(rg, projectedSchema, pqFile, nil)
+	for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
+		rb, err := ReadRowGroupNative(fr, rgIdx, projectedSchema, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -348,11 +341,10 @@ func TestColumnarReadMissingColumn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pqFile := reader.File()
-	rgs := pqFile.RowGroups()
+	fr := reader.FileReader()
 
-	for _, rg := range rgs {
-		rb, err := readRowGroupColumnar(rg, schemaWithExtra, pqFile, nil)
+	for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
+		rb, err := ReadRowGroupNative(fr, rgIdx, schemaWithExtra, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -383,9 +375,4 @@ func BenchmarkFindParquetColumn(b *testing.B) {
 		_ = findParquetColumn(cols, "col_049")
 		_ = findParquetColumn(cols, "nonexistent")
 	}
-}
-
-func init() {
-	// Ensure goparquet is used (it's imported for RowGroup type in benchmarks)
-	_ = goparquet.Boolean
 }

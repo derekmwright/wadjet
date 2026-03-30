@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"testing"
 
+	goparquet "github.com/parquet-go/parquet-go"
+
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -11,6 +13,32 @@ import (
 // TestRowColumnarRead verifies that TypeRow columns are read via the direct
 // columnar path instead of falling back to row-based reading.
 func TestRowColumnarRead(t *testing.T) {
+	// Use parquet-go to write a file with a nested struct column, since our
+	// native writer does not support TypeRow yet.
+	type Person struct {
+		Name string `parquet:"name"`
+		Age  int64  `parquet:"age"`
+	}
+	type Record struct {
+		ID     int64   `parquet:"id"`
+		Person *Person `parquet:"person,optional"`
+	}
+
+	rows := []Record{
+		{ID: 1, Person: &Person{Name: "alice", Age: 30}},
+		{ID: 2, Person: &Person{Name: "bob", Age: 25}},
+		{ID: 3, Person: &Person{Name: "carol", Age: 35}},
+	}
+
+	var buf bytes.Buffer
+	writer := goparquet.NewGenericWriter[Record](&buf)
+	if _, err := writer.Write(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	schema := pqt.Schema{
 		Columns: []pqt.Column{
 			{Name: "id", Type: pqt.TypeInt64},
@@ -21,25 +49,6 @@ func TestRowColumnarRead(t *testing.T) {
 		},
 	}
 
-	rows := []map[string]any{
-		{"id": int64(1), "person": map[string]any{"name": "alice", "age": int64(30)}},
-		{"id": int64(2), "person": map[string]any{"name": "bob", "age": int64(25)}},
-		{"id": int64(3), "person": map[string]any{"name": "carol", "age": int64(35)}},
-	}
-
-	// Write Parquet file with ROW column
-	var buf bytes.Buffer
-	w, err := pqt.NewWriter(&buf, schema, pqt.DefaultWriterConfig())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := w.WriteRows(rows); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-
 	// Read back via columnar reader
 	reader, err := pqt.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
 	if err != nil {
@@ -47,9 +56,7 @@ func TestRowColumnarRead(t *testing.T) {
 	}
 
 	// Confirm the schema has TypeRow (not flattened to leaves)
-	if !HasUnsupportedColumnarTypes(schema.Columns) {
-		// TypeRow should NOT trigger the fallback anymore
-	} else {
+	if HasUnsupportedColumnarTypes(schema.Columns) {
 		t.Fatal("TypeRow should not trigger unsupported type fallback")
 	}
 
@@ -106,31 +113,28 @@ func TestRowColumnarRead(t *testing.T) {
 // TestRowColumnarReadWithProjection verifies that column projection works
 // when a ROW column is in the schema.
 func TestRowColumnarReadWithProjection(t *testing.T) {
-	schema := pqt.Schema{
-		Columns: []pqt.Column{
-			{Name: "id", Type: pqt.TypeInt64},
-			{Name: "info", Type: pqt.TypeRow, Nullable: true, Fields: []pqt.Column{
-				{Name: "label", Type: pqt.TypeString},
-				{Name: "score", Type: pqt.TypeFloat64},
-			}},
-			{Name: "extra", Type: pqt.TypeString},
-		},
+	// Use parquet-go to write a file with nested struct + extra column.
+	type Info struct {
+		Label string  `parquet:"label"`
+		Score float64 `parquet:"score"`
+	}
+	type Record struct {
+		ID    int64  `parquet:"id"`
+		Info  *Info  `parquet:"info,optional"`
+		Extra string `parquet:"extra"`
 	}
 
-	rows := []map[string]any{
-		{"id": int64(1), "info": map[string]any{"label": "a", "score": 1.5}, "extra": "x"},
-		{"id": int64(2), "info": map[string]any{"label": "b", "score": 2.5}, "extra": "y"},
+	rows := []Record{
+		{ID: 1, Info: &Info{Label: "a", Score: 1.5}, Extra: "x"},
+		{ID: 2, Info: &Info{Label: "b", Score: 2.5}, Extra: "y"},
 	}
 
 	var buf bytes.Buffer
-	w, err := pqt.NewWriter(&buf, schema, pqt.DefaultWriterConfig())
-	if err != nil {
+	writer := goparquet.NewGenericWriter[Record](&buf)
+	if _, err := writer.Write(rows); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.WriteRows(rows); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
+	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
 

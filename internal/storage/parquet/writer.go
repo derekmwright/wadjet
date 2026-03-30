@@ -7,21 +7,9 @@ import (
 	"net"
 	"strings"
 	"time"
-
-	goparquet "github.com/parquet-go/parquet-go"
-	"github.com/parquet-go/parquet-go/compress/gzip"
-	"github.com/parquet-go/parquet-go/compress/lz4"
-	"github.com/parquet-go/parquet-go/compress/snappy"
-	"github.com/parquet-go/parquet-go/compress/uncompressed"
-	"github.com/parquet-go/parquet-go/compress/zstd"
 )
 
 // Compression identifies a compression codec for Parquet pages.
-//
-// Note: the underlying parquet-go gzip.Codec has a quirk where its zero value
-// (Level=0) maps to gzip.NoCompression rather than gzip.DefaultCompression.
-// Wadjet works around this by explicitly setting Level to DefaultCompression
-// when CompressionGzip is selected.
 type Compression int
 
 const (
@@ -67,23 +55,6 @@ func ParseCompression(s string) (Compression, error) {
 	}
 }
 
-func compressionCodec(c Compression) goparquet.WriterOption {
-	switch c {
-	case CompressionZstd:
-		return goparquet.Compression(&zstd.Codec{})
-	case CompressionGzip:
-		// Work around parquet-go quirk: gzip.Codec{} zero-initializes Level
-		// to 0 which is gzip.NoCompression, not gzip.DefaultCompression (-1).
-		return goparquet.Compression(&gzip.Codec{Level: gzip.DefaultCompression})
-	case CompressionLZ4:
-		return goparquet.Compression(&lz4.Codec{})
-	case CompressionNone:
-		return goparquet.Compression(&uncompressed.Codec{})
-	default:
-		return goparquet.Compression(&snappy.Codec{})
-	}
-}
-
 // WriterConfig configures the Parquet writer.
 type WriterConfig struct {
 	RowGroupSize   int         // target number of rows per row group (default 128*1024)
@@ -100,14 +71,11 @@ func DefaultWriterConfig() WriterConfig {
 	}
 }
 
-// Writer writes rows to a Parquet file.
-// Uses NativeWriter for flat schemas and falls back to parquet-go for complex
-// types (Array, Map, Row) until NativeWriter gains nested type support.
+// Writer writes rows to a Parquet file using the native Parquet writer.
 type Writer struct {
 	schema Schema
 	config WriterConfig
-	nw     *NativeWriter                         // used for flat schemas
-	pw     *goparquet.GenericWriter[map[string]any] // fallback for complex schemas
+	nw     *NativeWriter
 }
 
 // NewWriter creates a Parquet writer that writes to the given io.Writer.
@@ -116,26 +84,15 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 		cfg.RowGroupSize = 128 * 1024
 	}
 
-	wr := &Writer{
+	if schemaHasComplexTypes(schema) {
+		return nil, fmt.Errorf("complex types (Array, Map, Row) not yet supported by native writer")
+	}
+
+	return &Writer{
 		schema: schema,
 		config: cfg,
-	}
-
-	if schemaHasComplexTypes(schema) {
-		pqSchema, err := buildParquetSchema(schema)
-		if err != nil {
-			return nil, fmt.Errorf("building parquet schema: %w", err)
-		}
-		pw := goparquet.NewGenericWriter[map[string]any](w, pqSchema,
-			goparquet.MaxRowsPerRowGroup(int64(cfg.RowGroupSize)),
-			compressionCodec(cfg.Compression),
-		)
-		wr.pw = pw
-	} else {
-		wr.nw = NewNativeWriter(w, schema, cfg)
-	}
-
-	return wr, nil
+		nw:     NewNativeWriter(w, schema, cfg),
+	}, nil
 }
 
 // schemaHasComplexTypes returns true if any column uses Array, Map, or Row types.
@@ -154,10 +111,6 @@ func schemaHasComplexTypes(schema Schema) bool {
 // representations to the internal binary format before writing.
 func (w *Writer) WriteRows(rows []map[string]any) error {
 	w.prepareRows(rows)
-	if w.pw != nil {
-		_, err := w.pw.Write(rows)
-		return err
-	}
 	return w.nw.WriteMapRows(rows)
 }
 
@@ -245,110 +198,7 @@ func (w *Writer) prepareRows(rows []map[string]any) {
 
 // Close finalizes the Parquet file and closes the writer.
 func (w *Writer) Close() error {
-	if w.pw != nil {
-		return w.pw.Close()
-	}
 	return w.nw.Close()
-}
-
-func buildParquetSchema(schema Schema) (*goparquet.Schema, error) {
-	nodes := make([]goparquet.Node, len(schema.Columns))
-	for i, col := range schema.Columns {
-		node, err := columnToNode(col)
-		if err != nil {
-			return nil, fmt.Errorf("column %s: %w", col.Name, err)
-		}
-		nodes[i] = node
-	}
-	group := goparquet.Group{}
-	for i, col := range schema.Columns {
-		group[col.Name] = nodes[i]
-	}
-	return goparquet.NewSchema("wadjet", group), nil
-}
-
-func columnToNode(col Column) (goparquet.Node, error) {
-	var node goparquet.Node
-	switch col.Type {
-	case TypeBool:
-		node = goparquet.Leaf(goparquet.BooleanType)
-	case TypeInt32:
-		node = goparquet.Int(32)
-	case TypeInt64:
-		node = goparquet.Int(64)
-	case TypeFloat32:
-		node = goparquet.Leaf(goparquet.FloatType)
-	case TypeFloat64:
-		node = goparquet.Leaf(goparquet.DoubleType)
-	case TypeString:
-		node = goparquet.String()
-	case TypeBytes:
-		node = goparquet.Leaf(goparquet.ByteArrayType)
-	case TypeTimestamp:
-		node = goparquet.Timestamp(goparquet.Millisecond)
-	case TypeIPv4, TypeMAC, TypeDuration:
-		node = goparquet.Int(64)
-	case TypeIPv6:
-		node = goparquet.Leaf(goparquet.ByteArrayType)
-	case TypeCIDR:
-		node = goparquet.String()
-	case TypePort, TypeProtocol:
-		node = goparquet.Int(32)
-	case TypeUUID:
-		node = goparquet.Leaf(goparquet.ByteArrayType)
-	case TypeDate:
-		node = goparquet.Int(32)
-	case TypeDecimal:
-		// Store DECIMAL as Parquet DECIMAL with fixed-length byte array
-		prec := col.Precision
-		if prec <= 0 {
-			prec = 38
-		}
-		scale := col.Scale
-		node = goparquet.Decimal(scale, prec, goparquet.Int64Type)
-	case TypeArray:
-		if col.ElementType == nil {
-			return nil, fmt.Errorf("ARRAY column missing element type")
-		}
-		elemNode, err := columnToNode(*col.ElementType)
-		if err != nil {
-			return nil, fmt.Errorf("ARRAY element: %w", err)
-		}
-		node = goparquet.List(elemNode)
-	case TypeMap:
-		if col.ElementType == nil || len(col.ElementType.Fields) != 2 {
-			return nil, fmt.Errorf("MAP column missing key/value fields")
-		}
-		keyNode, err := columnToNode(col.ElementType.Fields[0])
-		if err != nil {
-			return nil, fmt.Errorf("MAP key: %w", err)
-		}
-		valNode, err := columnToNode(col.ElementType.Fields[1])
-		if err != nil {
-			return nil, fmt.Errorf("MAP value: %w", err)
-		}
-		node = goparquet.Map(keyNode, valNode)
-	case TypeRow:
-		if len(col.Fields) == 0 {
-			return nil, fmt.Errorf("ROW column has no fields")
-		}
-		group := goparquet.Group{}
-		for _, f := range col.Fields {
-			fNode, err := columnToNode(f)
-			if err != nil {
-				return nil, fmt.Errorf("ROW field %s: %w", f.Name, err)
-			}
-			group[f.Name] = fNode
-		}
-		node = group
-	default:
-		return nil, fmt.Errorf("unsupported type: %v", col.Type)
-	}
-
-	if col.Nullable {
-		node = goparquet.Optional(node)
-	}
-	return node, nil
 }
 
 var epochDate = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
