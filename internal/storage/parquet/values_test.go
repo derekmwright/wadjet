@@ -1,0 +1,520 @@
+package parquet
+
+import (
+	"encoding/binary"
+	"math"
+	"testing"
+)
+
+// --- Round-trip tests: construct → access → verify ---
+
+func TestPlainInt32Values(t *testing.T) {
+	tests := []struct {
+		name string
+		vals []int32
+	}{
+		{"empty", nil},
+		{"single", []int32{42}},
+		{"multiple", []int32{1, -1, 0, math.MaxInt32, math.MinInt32}},
+		{"zeros", []int32{0, 0, 0}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := PlainInt32Values(tt.vals)
+			if got := v.Count(); got != len(tt.vals) {
+				t.Fatalf("Count() = %d, want %d", got, len(tt.vals))
+			}
+			got := v.Int32()
+			if len(tt.vals) == 0 {
+				if got != nil {
+					t.Fatalf("Int32() = %v, want nil for empty", got)
+				}
+				return
+			}
+			if len(got) != len(tt.vals) {
+				t.Fatalf("Int32() len = %d, want %d", len(got), len(tt.vals))
+			}
+			for i, want := range tt.vals {
+				if got[i] != want {
+					t.Errorf("Int32()[%d] = %d, want %d", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestPlainInt64Values(t *testing.T) {
+	tests := []struct {
+		name string
+		vals []int64
+	}{
+		{"empty", nil},
+		{"single", []int64{42}},
+		{"extremes", []int64{math.MaxInt64, math.MinInt64, 0, -1}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := PlainInt64Values(tt.vals)
+			if got := v.Count(); got != len(tt.vals) {
+				t.Fatalf("Count() = %d, want %d", got, len(tt.vals))
+			}
+			got := v.Int64()
+			if len(tt.vals) == 0 {
+				if got != nil {
+					t.Fatalf("Int64() = %v, want nil for empty", got)
+				}
+				return
+			}
+			for i, want := range tt.vals {
+				if got[i] != want {
+					t.Errorf("Int64()[%d] = %d, want %d", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestPlainFloat32Values(t *testing.T) {
+	tests := []struct {
+		name string
+		vals []float32
+	}{
+		{"empty", nil},
+		{"basic", []float32{1.5, -0.0, 3.14}},
+		{"special", []float32{float32(math.Inf(1)), float32(math.Inf(-1)), float32(math.NaN()), 0}},
+		{"extremes", []float32{math.MaxFloat32, math.SmallestNonzeroFloat32}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := PlainFloat32Values(tt.vals)
+			if got := v.Count(); got != len(tt.vals) {
+				t.Fatalf("Count() = %d, want %d", got, len(tt.vals))
+			}
+			got := v.Float()
+			if len(tt.vals) == 0 {
+				if got != nil {
+					t.Fatalf("Float() = %v, want nil for empty", got)
+				}
+				return
+			}
+			for i, want := range tt.vals {
+				if math.IsNaN(float64(want)) {
+					if !math.IsNaN(float64(got[i])) {
+						t.Errorf("Float()[%d] = %v, want NaN", i, got[i])
+					}
+				} else if got[i] != want {
+					t.Errorf("Float()[%d] = %v, want %v", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestPlainFloat64Values(t *testing.T) {
+	tests := []struct {
+		name string
+		vals []float64
+	}{
+		{"empty", nil},
+		{"basic", []float64{1.5, -0.0, 3.14159265358979}},
+		{"special", []float64{math.Inf(1), math.Inf(-1), math.NaN()}},
+		{"extremes", []float64{math.MaxFloat64, math.SmallestNonzeroFloat64}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := PlainFloat64Values(tt.vals)
+			if got := v.Count(); got != len(tt.vals) {
+				t.Fatalf("Count() = %d, want %d", got, len(tt.vals))
+			}
+			got := v.Double()
+			if len(tt.vals) == 0 {
+				if got != nil {
+					t.Fatalf("Double() = %v, want nil for empty", got)
+				}
+				return
+			}
+			for i, want := range tt.vals {
+				if math.IsNaN(want) {
+					if !math.IsNaN(got[i]) {
+						t.Errorf("Double()[%d] = %v, want NaN", i, got[i])
+					}
+				} else if got[i] != want {
+					t.Errorf("Double()[%d] = %v, want %v", i, got[i], want)
+				}
+			}
+		})
+	}
+}
+
+func TestByteArrayValues(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		offsets []uint32
+		count   int
+	}{
+		{"empty_nil", nil, nil, 0},
+		{"empty_offsets", nil, []uint32{0}, 0},
+		{"single", []byte("hello"), []uint32{0, 5}, 1},
+		{"multiple", []byte("helloworld"), []uint32{0, 5, 10}, 2},
+		{"with_empty_string", []byte("helloworld"), []uint32{0, 5, 5, 10}, 3},
+		{"all_empty", nil, []uint32{0, 0, 0}, 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := ByteArrayValues(tt.data, tt.offsets)
+			if got := v.Count(); got != tt.count {
+				t.Fatalf("Count() = %d, want %d", got, tt.count)
+			}
+			gotData, gotOffsets := v.ByteArray()
+			if len(gotData) != len(tt.data) {
+				t.Errorf("data len = %d, want %d", len(gotData), len(tt.data))
+			}
+			if len(gotOffsets) != len(tt.offsets) {
+				t.Errorf("offsets len = %d, want %d", len(gotOffsets), len(tt.offsets))
+			}
+		})
+	}
+}
+
+// --- Index accessor tests (used for statistics) ---
+
+func TestInt32At(t *testing.T) {
+	vals := []int32{100, -200, math.MaxInt32, math.MinInt32}
+	v := PlainInt32Values(vals)
+	for i, want := range vals {
+		if got := v.Int32At(i); got != want {
+			t.Errorf("Int32At(%d) = %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestInt64At(t *testing.T) {
+	vals := []int64{100, -200, math.MaxInt64, math.MinInt64}
+	v := PlainInt64Values(vals)
+	for i, want := range vals {
+		if got := v.Int64At(i); got != want {
+			t.Errorf("Int64At(%d) = %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestFloatAt(t *testing.T) {
+	vals := []float32{1.5, -3.14, math.MaxFloat32}
+	v := PlainFloat32Values(vals)
+	for i, want := range vals {
+		if got := v.FloatAt(i); got != want {
+			t.Errorf("FloatAt(%d) = %v, want %v", i, got, want)
+		}
+	}
+}
+
+func TestDoubleAt(t *testing.T) {
+	vals := []float64{1.5, -3.14159, math.MaxFloat64}
+	v := PlainFloat64Values(vals)
+	for i, want := range vals {
+		if got := v.DoubleAt(i); got != want {
+			t.Errorf("DoubleAt(%d) = %v, want %v", i, got, want)
+		}
+	}
+}
+
+// --- PLAIN decoding tests (simulating raw Parquet page data) ---
+
+func TestDecodePlainInt32(t *testing.T) {
+	want := []int32{1, -1, 0, 42, math.MaxInt32}
+	data := make([]byte, len(want)*4)
+	for i, val := range want {
+		binary.LittleEndian.PutUint32(data[i*4:], uint32(val))
+	}
+	v := DecodePlainInt32(data, len(want))
+	if v.Count() != len(want) {
+		t.Fatalf("Count() = %d, want %d", v.Count(), len(want))
+	}
+	got := v.Int32()
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("Int32()[%d] = %d, want %d", i, got[i], w)
+		}
+	}
+}
+
+func TestDecodePlainInt64(t *testing.T) {
+	want := []int64{1, -1, math.MaxInt64, math.MinInt64}
+	data := make([]byte, len(want)*8)
+	for i, val := range want {
+		binary.LittleEndian.PutUint64(data[i*8:], uint64(val))
+	}
+	v := DecodePlainInt64(data, len(want))
+	if v.Count() != len(want) {
+		t.Fatalf("Count() = %d, want %d", v.Count(), len(want))
+	}
+	got := v.Int64()
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("Int64()[%d] = %d, want %d", i, got[i], w)
+		}
+	}
+}
+
+func TestDecodePlainFloat(t *testing.T) {
+	want := []float32{1.5, -0.0, math.MaxFloat32}
+	data := make([]byte, len(want)*4)
+	for i, val := range want {
+		binary.LittleEndian.PutUint32(data[i*4:], math.Float32bits(val))
+	}
+	v := DecodePlainFloat(data, len(want))
+	got := v.Float()
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("Float()[%d] = %v, want %v", i, got[i], w)
+		}
+	}
+}
+
+func TestDecodePlainDouble(t *testing.T) {
+	want := []float64{1.5, -0.0, math.MaxFloat64, math.SmallestNonzeroFloat64}
+	data := make([]byte, len(want)*8)
+	for i, val := range want {
+		binary.LittleEndian.PutUint64(data[i*8:], math.Float64bits(val))
+	}
+	v := DecodePlainDouble(data, len(want))
+	got := v.Double()
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("Double()[%d] = %v, want %v", i, got[i], w)
+		}
+	}
+}
+
+func TestDecodePlainBoolean(t *testing.T) {
+	tests := []struct {
+		name string
+		n    int
+		bits []byte
+		want []bool
+	}{
+		{"8_bools", 8, []byte{0b10110010}, []bool{false, true, false, false, true, true, false, true}},
+		{"3_bools", 3, []byte{0b101}, []bool{true, false, true}},
+		{"empty", 0, nil, nil},
+		{"16_bools", 16, []byte{0xFF, 0x00},
+			[]bool{true, true, true, true, true, true, true, true,
+				false, false, false, false, false, false, false, false}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := DecodePlainBoolean(tt.bits, tt.n)
+			if v.Count() != tt.n {
+				t.Fatalf("Count() = %d, want %d", v.Count(), tt.n)
+			}
+			raw := v.Boolean()
+			for i, want := range tt.want {
+				byteIdx := i / 8
+				bitIdx := uint(i % 8)
+				got := raw[byteIdx]&(1<<bitIdx) != 0
+				if got != want {
+					t.Errorf("Boolean bit %d = %v, want %v", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestDecodePlainByteArray(t *testing.T) {
+	t.Run("normal", func(t *testing.T) {
+		// Build PLAIN-encoded BYTE_ARRAY: [4-byte LE length][data]...
+		strings := []string{"hello", "world", "", "x"}
+		var buf []byte
+		for _, s := range strings {
+			length := make([]byte, 4)
+			binary.LittleEndian.PutUint32(length, uint32(len(s)))
+			buf = append(buf, length...)
+			buf = append(buf, s...)
+		}
+
+		v := DecodePlainByteArray(buf, len(strings))
+		if v.Count() != len(strings) {
+			t.Fatalf("Count() = %d, want %d", v.Count(), len(strings))
+		}
+		data, offsets := v.ByteArray()
+		for i, want := range strings {
+			got := string(data[offsets[i]:offsets[i+1]])
+			if got != want {
+				t.Errorf("value[%d] = %q, want %q", i, got, want)
+			}
+		}
+	})
+
+	t.Run("empty_input", func(t *testing.T) {
+		v := DecodePlainByteArray(nil, 0)
+		if v.Count() != 0 {
+			t.Fatalf("Count() = %d, want 0", v.Count())
+		}
+	})
+
+	t.Run("all_empty_strings", func(t *testing.T) {
+		// Three zero-length byte arrays.
+		buf := make([]byte, 12) // 3 × 4-byte zero-length prefixes
+		v := DecodePlainByteArray(buf, 3)
+		if v.Count() != 3 {
+			t.Fatalf("Count() = %d, want 3", v.Count())
+		}
+		data, offsets := v.ByteArray()
+		for i := 0; i < 3; i++ {
+			got := string(data[offsets[i]:offsets[i+1]])
+			if got != "" {
+				t.Errorf("value[%d] = %q, want empty", i, got)
+			}
+		}
+	})
+
+	t.Run("truncated_data", func(t *testing.T) {
+		// Data truncated mid-length-prefix — should return partial results.
+		buf := []byte{5, 0, 0, 0, 'h', 'e', 'l', 'l', 'o', 3, 0}
+		v := DecodePlainByteArray(buf, 2)
+		// Should handle gracefully — first value decoded, second truncated.
+		if v.Count() < 1 {
+			t.Fatalf("Count() = %d, want >= 1", v.Count())
+		}
+	})
+}
+
+func TestDecodePlainFixedLenByteArray(t *testing.T) {
+	tests := []struct {
+		name       string
+		typeLength int
+		n          int
+		data       []byte
+	}{
+		{"uuid_16byte", 16, 2, make([]byte, 32)},
+		{"decimal_4byte", 4, 3, make([]byte, 12)},
+		{"single", 8, 1, []byte{1, 2, 3, 4, 5, 6, 7, 8}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Fill with identifiable pattern.
+			for i := range tt.data {
+				tt.data[i] = byte(i)
+			}
+			v := DecodePlainFixedLenByteArray(tt.data, tt.n, tt.typeLength)
+			if v.Count() != tt.n {
+				t.Fatalf("Count() = %d, want %d", v.Count(), tt.n)
+			}
+			data, offsets := v.ByteArray()
+			for i := 0; i < tt.n; i++ {
+				got := data[offsets[i]:offsets[i+1]]
+				if len(got) != tt.typeLength {
+					t.Errorf("value[%d] length = %d, want %d", i, len(got), tt.typeLength)
+				}
+				// Verify first byte of each value matches expected pattern.
+				expectedFirst := byte(i * tt.typeLength)
+				if got[0] != expectedFirst {
+					t.Errorf("value[%d][0] = %d, want %d", i, got[0], expectedFirst)
+				}
+			}
+		})
+	}
+}
+
+// --- RawValues test ---
+
+func TestRawValues(t *testing.T) {
+	data := make([]byte, 20) // 5 × 4 bytes
+	for i := 0; i < 5; i++ {
+		binary.LittleEndian.PutUint32(data[i*4:], uint32(i*10))
+	}
+	v := RawValues(PhysicalInt32, data, 5)
+	if v.Count() != 5 {
+		t.Fatalf("Count() = %d, want 5", v.Count())
+	}
+	got := v.Int32()
+	for i, want := range []int32{0, 10, 20, 30, 40} {
+		if got[i] != want {
+			t.Errorf("Int32()[%d] = %d, want %d", i, got[i], want)
+		}
+	}
+}
+
+// --- Format type tests ---
+
+func TestPhysicalTypeString(t *testing.T) {
+	tests := []struct {
+		t    PhysicalType
+		want string
+	}{
+		{PhysicalBoolean, "BOOLEAN"},
+		{PhysicalInt32, "INT32"},
+		{PhysicalInt64, "INT64"},
+		{PhysicalInt96, "INT96"},
+		{PhysicalFloat, "FLOAT"},
+		{PhysicalDouble, "DOUBLE"},
+		{PhysicalByteArray, "BYTE_ARRAY"},
+		{PhysicalFixedLenByteArray, "FIXED_LEN_BYTE_ARRAY"},
+		{PhysicalType(99), "UNKNOWN"},
+	}
+	for _, tt := range tests {
+		if got := tt.t.String(); got != tt.want {
+			t.Errorf("%d.String() = %q, want %q", tt.t, got, tt.want)
+		}
+	}
+}
+
+func TestPhysicalTypeByteWidth(t *testing.T) {
+	tests := []struct {
+		t    PhysicalType
+		want int
+	}{
+		{PhysicalBoolean, 0},
+		{PhysicalInt32, 4},
+		{PhysicalFloat, 4},
+		{PhysicalInt64, 8},
+		{PhysicalDouble, 8},
+		{PhysicalInt96, 12},
+		{PhysicalByteArray, 0},
+		{PhysicalFixedLenByteArray, 0},
+	}
+	for _, tt := range tests {
+		if got := tt.t.ByteWidth(); got != tt.want {
+			t.Errorf("%s.ByteWidth() = %d, want %d", tt.t, got, tt.want)
+		}
+	}
+}
+
+func TestEncodingString(t *testing.T) {
+	tests := []struct {
+		e    Encoding
+		want string
+	}{
+		{EncodingPlain, "PLAIN"},
+		{EncodingRLE, "RLE"},
+		{EncodingDeltaBinaryPacked, "DELTA_BINARY_PACKED"},
+		{EncodingRLEDictionary, "RLE_DICTIONARY"},
+		{EncodingByteStreamSplit, "BYTE_STREAM_SPLIT"},
+		{Encoding(99), "UNKNOWN"},
+	}
+	for _, tt := range tests {
+		if got := tt.e.String(); got != tt.want {
+			t.Errorf("%d.String() = %q, want %q", tt.e, got, tt.want)
+		}
+	}
+}
+
+func TestCompressionCodecString(t *testing.T) {
+	tests := []struct {
+		c    CompressionCodec
+		want string
+	}{
+		{CodecNone, "UNCOMPRESSED"},
+		{CodecSnappy, "SNAPPY"},
+		{CodecGzip, "GZIP"},
+		{CodecLZ4, "LZ4"},
+		{CodecZstd, "ZSTD"},
+		{CodecLZ4Raw, "LZ4_RAW"},
+		{CompressionCodec(99), "UNKNOWN"},
+	}
+	for _, tt := range tests {
+		if got := tt.c.String(); got != tt.want {
+			t.Errorf("%d.String() = %q, want %q", tt.c, got, tt.want)
+		}
+	}
+}

@@ -167,9 +167,18 @@ refactor(scan): extract predicate pushdown into separate module
 - **Typed kernels**: Resolve type once per batch/column, dispatch to typed function. No per-row type switches in hot paths.
 - **Batch size**: 2048 rows (`batch.DefaultBatchSize`). Do not change without benchmarking.
 
+### Parquet Package Safety
+
+The `internal/storage/parquet/` package is **critical infrastructure** — any data corruption here is catastrophic and could silently affect every query. Changes to this package require:
+
+- **Exhaustive unit tests**: Every encoding/decoding path must be round-trip tested with edge cases (empty data, single value, max values, NaN, zero-length strings, etc.)
+- **Fuzz testing**: Decoders that parse untrusted data (Thrift metadata, page data) should have fuzz tests
+- **Bit-exact verification**: Verify output against files produced by Apache Parquet reference implementations (parquet-go, PyArrow)
+- **No unsafe shortcuts**: Validate lengths and offsets before `unsafe.Slice` casts — an off-by-one corrupts memory silently
+- **TPC-H correctness gate**: All 22 queries must pass at SF0.01 after any parquet change, before merging
+
 ### What NOT to Do
 
-- Don't write custom Parquet encoding — use `parquet-go`.
 - Don't add SIMD intrinsics — the Go compiler handles vectorization.
 - Don't mock the object store in tests — use `objstore.NewMemStore()`.
 - Don't add features to the SQL parser using a parser generator — it's recursive descent by design.
