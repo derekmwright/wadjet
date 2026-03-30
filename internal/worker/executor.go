@@ -1700,11 +1700,14 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
 	// Build standalone physical plan (single pipeline, no stages).
-	// Set memory budget so the planner can install spill managers on
-	// pipeline-breaking operators. Without this, concurrent pipeline tasks
-	// bypass memory tracking and risk OOM under multi-join pressure.
+	// Set memory budget and spill directory so the planner can install spill
+	// managers on pipeline-breaking operators. Without this, concurrent pipeline
+	// tasks bypass memory tracking and risk OOM under multi-join pressure.
 	if e.memoryBudget > 0 {
 		planner.MemoryBudget = e.memoryBudget
+	}
+	if e.spillDir != "" {
+		planner.SpillDir = e.spillDir
 	}
 
 	// Scan-split pipeline mode: read pre-scanned data from distributed scan
@@ -2141,6 +2144,7 @@ func (s *batchSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 		return nil, nil
 	}
 	b := s.batches[s.idx]
+	s.batches[s.idx] = nil // release reference so GC can reclaim after spill
 	s.idx++
 	return b, nil
 }

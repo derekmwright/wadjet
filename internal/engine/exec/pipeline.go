@@ -418,6 +418,7 @@ func (s *BatchSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 		return nil, nil
 	}
 	b := s.batches[s.idx]
+	s.batches[s.idx] = nil // release reference so GC can reclaim after spill
 	s.idx++
 	return b, nil
 }

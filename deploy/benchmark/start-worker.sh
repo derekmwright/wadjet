@@ -26,4 +26,5 @@ exec wadjet serve \
   --storage.endpoint="${S3_ENDPOINT}" \
   --bucket="${BUCKET}" \
   --storage-type=s3 \
-  ${MEMORY_BUDGET:+--memory-budget=$MEMORY_BUDGET}
+  ${MEMORY_BUDGET:+--memory-budget=$MEMORY_BUDGET} \
+  ${SPILL_DIR:+--spill-dir=$SPILL_DIR}

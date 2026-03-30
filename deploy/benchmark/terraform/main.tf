@@ -430,6 +430,20 @@ resource "aws_instance" "worker" {
       exit 1
     fi
 
+    # Mount NVMe instance store (c7gd, i4g, etc.) for spill-to-disk.
+    # Falls back to /tmp on instances without NVMe (c7g, etc.).
+    SPILL_DIR="/tmp"
+    NVME_DEV=$(lsblk -dno NAME,TYPE | awk '$2=="disk" && $1~/nvme[0-9]+n1/ && $1!~/nvme0n1/{print "/dev/"$1; exit}')
+    if [ -n "$NVME_DEV" ]; then
+      echo "Formatting NVMe instance store: $NVME_DEV"
+      mkfs.xfs -f "$NVME_DEV"
+      mkdir -p /mnt/nvme
+      mount "$NVME_DEV" /mnt/nvme
+      mkdir -p /mnt/nvme/spill
+      SPILL_DIR="/mnt/nvme/spill"
+      echo "NVMe spill directory ready at $SPILL_DIR"
+    fi
+
     # Wait for coordinator NATS to be reachable before starting worker
     COORD_IP="${aws_instance.coordinator[0].private_ip}"
     echo "Waiting for NATS on $COORD_IP:4222..."
@@ -457,7 +471,10 @@ resource "aws_instance" "worker" {
         --bucket="${local.bucket_name}" \
         --region="${var.region}" \
         --storage-type=s3 \
-        --max-concurrent=${var.max_concurrent} 2>&1
+        --max-concurrent=${var.max_concurrent} \
+        --spill-dir="$SPILL_DIR" \
+        ${var.memory_budget > 0 ? "--memory-budget=${var.memory_budget}" : ""} \
+        ${var.cache_bytes > 0 ? "--cache-bytes=${var.cache_bytes}" : ""} 2>&1
       EXIT_CODE=$?
       echo "Worker exited with code $EXIT_CODE, restarting in 5s..."
       echo "WORKER_STARTED=1" >> /etc/environment
