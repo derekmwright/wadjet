@@ -154,7 +154,7 @@ func (b *RecordBatch) Compact() *RecordBatch {
 			case TypeFloat64:
 				dst.Float64Data[di] = src.Float64Data[si]
 			case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
-				dst.BytesData.Set(di, src.BytesData.Value(int(si)))
+				dst.BytesData.SetFrom(di, &src.BytesData, int(si))
 			case TypeDecimal:
 				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
 			case TypeArray, TypeMap:

@@ -2146,8 +2146,9 @@ type HashJoinProbe struct {
 	sortBuf    []matchPair // reusable buffer for counting sort scratch space
 	semiSelBuf []uint32    // reusable selection vector for semi/anti join output
 	lookupBuf  []buildRef  // reusable buffer for lookupBuild results
-	indexBuf   []int       // reusable buffer for probe-side gather indices
-	keyBuf     []byte      // per-probe key serialization buffer (avoids race on shared h.keyBuf)
+	indexBuf      []int  // reusable buffer for probe-side gather indices
+	buildIndexBuf []int  // reusable buffer for build-side gather indices
+	keyBuf        []byte // per-probe key serialization buffer (avoids race on shared h.keyBuf)
 
 	// Cached output schema and column mapping (computed once on first batch)
 	cachedSchema  []parquet.Column
@@ -2349,10 +2350,29 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	}
 
 	allMatched := p.join.JoinType != LeftJoin && p.join.JoinType != FullOuterJoin
+
+	// When build side is consolidated to a single batch and all rows are matched
+	// (inner/right/semi/cross joins), extract build row indices into a flat array
+	// and reuse gatherVector. This avoids iterating 16-byte matchPair structs
+	// when only the 4-byte rowIdx is needed, improving cache utilization by 4x.
+	useFastBuildGather := allMatched && len(p.join.buildBatches) == 1
+	var buildIndices []int
+	if useFastBuildGather {
+		if cap(p.buildIndexBuf) < len(pairs) {
+			p.buildIndexBuf = make([]int, len(pairs))
+		}
+		buildIndices = p.buildIndexBuf[:len(pairs)]
+		for i, pair := range pairs {
+			buildIndices[i] = int(pair.ref.rowIdx)
+		}
+	}
+
 	for outColIdx, m := range mapping {
 		dst := out.Columns[outColIdx]
 		if m.fromProbe {
 			gatherVector(dst, in.Columns[m.srcIdx], probeIndices)
+		} else if useFastBuildGather {
+			gatherVector(dst, p.join.buildBatches[0].Columns[m.srcIdx], buildIndices)
 		} else {
 			gatherBuildVector(dst, m.srcIdx, pairs, p.join.buildBatches, allMatched)
 		}
@@ -3366,7 +3386,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
 				} else {
-					dst.BytesData.Set(di, src.BytesData.Value(si))
+					dst.BytesData.SetFrom(di, &src.BytesData, si)
 				}
 			}
 		} else {
@@ -3384,7 +3404,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
 				} else {
-					dst.BytesData.Set(di, src.BytesData.Value(si))
+					dst.BytesData.SetFrom(di, &src.BytesData, si)
 				}
 			}
 		}
@@ -3512,7 +3532,7 @@ func gatherCrossBuildVector(dst *batch.Vector, srcIdx int, pairs []crossPair, bu
 				dst.BytesData.Set(di, nil)
 			} else {
 				dst.Nulls.SetValid(di)
-				dst.BytesData.Set(di, src.BytesData.Value(si))
+				dst.BytesData.SetFrom(di, &src.BytesData, si)
 			}
 		}
 	case batch.TypeDecimal:

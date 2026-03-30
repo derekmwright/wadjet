@@ -151,6 +151,17 @@ func (dst *BytesColumn) BulkCopy(dstOff int, src *BytesColumn, srcOff, count int
 	}
 }
 
+// SetFrom copies a single value from src at position si into dst at position di.
+// Combines Value + Set into one call, avoiding the intermediate slice creation
+// and reducing function call overhead in gather loops. Values must be set in
+// order (di = 0, 1, 2, ...) because later offsets depend on prior data length.
+func (dst *BytesColumn) SetFrom(di int, src *BytesColumn, si int) {
+	srcStart := src.Offsets[si]
+	srcEnd := src.Offsets[si+1]
+	dst.Data = append(dst.Data, src.Data[srcStart:srcEnd]...)
+	dst.Offsets[di+1] = uint32(len(dst.Data))
+}
+
 // Value returns the byte slice at position i.
 func (bc *BytesColumn) Value(i int) []byte {
 	start := bc.Offsets[i]

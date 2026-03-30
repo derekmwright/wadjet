@@ -407,7 +407,7 @@ func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 	case batch.TypeFloat64:
 		dst.Float64Data[di] = src.Float64Data[si]
 	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		dst.BytesData.Set(di, src.BytesData.Value(si))
+		dst.BytesData.SetFrom(di, &src.BytesData, si)
 	case batch.TypeDecimal:
 		dst.DecimalData.Data[di] = src.DecimalData.Data[si]
 	}
@@ -499,7 +499,7 @@ func gatherVector(dst, src *batch.Vector, srcRows []int) {
 		dst.BytesData.PreAllocBytes(totalBytes)
 		if !hasNulls {
 			for di, si := range srcRows {
-				dst.BytesData.Set(di, src.BytesData.Value(si))
+				dst.BytesData.SetFrom(di, &src.BytesData, si)
 			}
 		} else {
 			for di, si := range srcRows {
@@ -507,7 +507,7 @@ func gatherVector(dst, src *batch.Vector, srcRows []int) {
 					dst.Nulls.SetNull(di)
 					dst.BytesData.Set(di, nil)
 				} else {
-					dst.BytesData.Set(di, src.BytesData.Value(si))
+					dst.BytesData.SetFrom(di, &src.BytesData, si)
 				}
 			}
 		}
@@ -634,7 +634,7 @@ func gatherSortVector(dst *batch.Vector, colIdx int, entries []sortEntry, batche
 				dst.Nulls.SetNull(di)
 				dst.BytesData.Set(di, nil)
 			} else {
-				dst.BytesData.Set(di, src.BytesData.Value(si))
+				dst.BytesData.SetFrom(di, &src.BytesData, si)
 			}
 		}
 	case batch.TypeDecimal:

@@ -272,7 +272,7 @@ func projectGatherColumn(dst, src *batch.Vector, sel []uint32) {
 		}
 		dst.BytesData.PreAllocBytes(totalBytes)
 		for i, idx := range sel {
-			dst.BytesData.Set(i, src.BytesData.Value(int(idx)))
+			dst.BytesData.SetFrom(i, &src.BytesData, int(idx))
 		}
 	case batch.TypeDecimal:
 		for i, idx := range sel {

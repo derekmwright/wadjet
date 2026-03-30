@@ -645,86 +645,57 @@ func TestSchemaFromRows(t *testing.T) {
 	}
 }
 
-func TestBuildSimpleFilter(t *testing.T) {
+func TestCompileBatchFilters(t *testing.T) {
 	tests := []struct {
 		name   string
 		filter string
 		isNil  bool
 	}{
-		{"equals", "col = 42", false},
-		{"not_equals", "col != 42", false},
-		{"greater_than", "col > 42", false},
-		{"less_than", "col < 42", false},
-		{"gte", "col >= 42", false},
-		{"lte", "col <= 42", false},
-		{"no_operator", "no_operator_here", true},
-		{"string_value", "name = 'alice'", false},
-		{"float_value", "price > 9.99", false},
+		{"simple_eq", "col = 42", false},
+		{"simple_ne", "col != 42", false},
+		{"simple_gt", "col > 42", false},
+		{"simple_lt", "col < 42", false},
+		{"simple_gte", "col >= 42", false},
+		{"simple_lte", "col <= 42", false},
+		{"string_eq", "name = 'alice'", false},
+		{"float_gt", "price > 9.99", false},
 		{"qualified_col", "t.col = 42", false},
+		{"in_list", "col IN (1, 2, 3)", false},
+		{"like_pattern", "name LIKE '%test%'", false},
+		{"between", "col BETWEEN 1 AND 10", false},
+		{"and_compound", "col > 1 AND col < 10", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fn := buildSimpleFilter(tt.filter)
-			if tt.isNil && fn != nil {
-				t.Error("expected nil filter function")
+			filters := compileBatchFilters([]string{tt.filter})
+			if tt.isNil && len(filters) > 0 {
+				t.Error("expected no filters")
 			}
-			if !tt.isNil && fn == nil {
-				t.Error("expected non-nil filter function")
-			}
-		})
-	}
-}
-
-func TestCleanFilterExpr(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"col", "col"},
-		{"  col  ", "col"},
-		{"t.col", "col"},
-		{"schema.col", "col"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := cleanFilterExpr(tt.input)
-			if got != tt.want {
-				t.Errorf("cleanFilterExpr(%q): got %q, want %q", tt.input, got, tt.want)
+			if !tt.isNil && len(filters) == 0 {
+				t.Error("expected at least one filter")
 			}
 		})
 	}
 }
 
-func TestParseFilterValue(t *testing.T) {
-	tests := []struct {
-		input string
-		want  any
-	}{
-		{"42", int64(42)},
-		{"3.14", float64(3.14)},
-		{"'hello'", "hello"},
-		{"plain", "plain"},
-		{"  42  ", int64(42)},
-		{"  'quoted'  ", "quoted"},
+func TestKernelBatchFilterApply(t *testing.T) {
+	// Verify that kernel batch filters work end-to-end on actual batches
+	filters := compileBatchFilters([]string{"col > 5"})
+	if len(filters) == 0 {
+		t.Fatal("expected filter to compile")
 	}
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			got := parseFilterValue(tt.input)
-			switch want := tt.want.(type) {
-			case int64:
-				if v, ok := got.(int64); !ok || v != want {
-					t.Errorf("got %v (%T), want %v", got, got, want)
-				}
-			case float64:
-				if v, ok := got.(float64); !ok || v != want {
-					t.Errorf("got %v (%T), want %v", got, got, want)
-				}
-			case string:
-				if v, ok := got.(string); !ok || v != want {
-					t.Errorf("got %v (%T), want %q", got, got, want)
-				}
-			}
-		})
+
+	b := batch.NewRecordBatch([]parquet.Column{{Name: "col", Type: parquet.TypeInt64}}, 10)
+	for i := 0; i < 10; i++ {
+		b.Columns[0].Int64Data[i] = int64(i)
+	}
+
+	result := applyBatchFilters(b, filters)
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if len(result.Sel) != 4 { // 6,7,8,9
+		t.Errorf("expected 4 rows, got %d", len(result.Sel))
 	}
 }
 
