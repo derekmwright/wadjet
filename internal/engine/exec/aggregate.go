@@ -1783,10 +1783,17 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 			continue
 		}
 		b := batch.FromRows(h.inputSchema, rows)
-		// Re-resolve indices for the reconstructed batch
-		// (column order may differ from original)
-		h.resolved = false
-		h.resolveIndices(b)
+		// Resolve indices only if not already resolved. Do NOT force
+		// re-resolution (h.resolved = false) — after a parallel merge
+		// (MergeSink), the aggregate has been migrated from compact/int
+		// key mode to generic string mode. Re-resolving would switch
+		// back to compact mode with a fresh intGroupStates, losing all
+		// merged groups and causing index-out-of-bounds in Next().
+		// The spilled batch uses h.inputSchema (same column order as
+		// the original), so re-resolution is unnecessary.
+		if !h.resolved {
+			h.resolveIndices(b)
+		}
 		h.consumeBatch(b)
 	}
 	h.spillFiles = nil

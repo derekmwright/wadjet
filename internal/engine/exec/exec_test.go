@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -532,5 +533,117 @@ func TestColumnLike(t *testing.T) {
 				t.Fatalf("pattern %q not=%v: expected %d rows, got %d", tt.pattern, tt.not, tt.expected, len(sink.Rows))
 			}
 		})
+	}
+}
+
+// TestHashAggregateMergeThenSpillFinalize reproduces a panic where MergeSink
+// migrates compact-key groups to generic mode, then Finalize re-resolves
+// indices and switches back to compact mode with a fresh intGroupStates,
+// losing the merged groups. This caused index-out-of-bounds in Next().
+// Regression test for SF100 Q09 panic: aggregate.go:1848.
+func TestHashAggregateMergeThenSpillFinalize(t *testing.T) {
+	// Use compact-eligible keys: two Int32 columns (4+4 = 8 bytes, fits int64).
+	schema := []parquet.Column{
+		{Name: "year", Type: parquet.TypeInt32},
+		{Name: "region", Type: parquet.TypeInt32},
+		{Name: "amount", Type: parquet.TypeFloat64},
+	}
+
+	ctx := context.Background()
+
+	// Set up spill directory. Use a budget large enough for one batch but
+	// not two — the first batch is consumed normally, the second is spilled.
+	spillDir := t.TempDir()
+	tracker := memory.NewTracker("test", 100_000) // 100 KB
+	sm, err := memory.NewSpillManager(spillDir, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Primary aggregate with spill enabled.
+	primary := NewHashAggregate([]string{"year", "region"}, []AggColumn{
+		{Func: AggSum, InputCol: "amount", OutputCol: "total", OutputType: parquet.TypeFloat64},
+	})
+	primary.Spill = sm
+	if err := primary.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Feed batch 1 to primary (consumed normally — under budget).
+	b1 := batch.FromRows(schema, []map[string]any{
+		{"year": int32(2024), "region": int32(1), "amount": 10.0},
+		{"year": int32(2025), "region": int32(2), "amount": 20.0},
+	})
+	if err := primary.Consume(ctx, b1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Push tracker over 80% threshold so next Consume spills.
+	tracker.ForceReserve(90_000)
+
+	// Feed batch 2 to primary — tracker is now over budget, should be spilled.
+	b2 := batch.FromRows(schema, []map[string]any{
+		{"year": int32(2024), "region": int32(1), "amount": 30.0},
+		{"year": int32(2026), "region": int32(3), "amount": 50.0},
+	})
+	if err := primary.Consume(ctx, b2); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(primary.spillFiles) == 0 {
+		t.Fatal("expected spill files but none were created")
+	}
+
+	// Clone aggregate with different groups (simulates worker 1).
+	clone := primary.CloneSink().(*HashAggregate)
+	if err := clone.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	b3 := batch.FromRows(schema, []map[string]any{
+		{"year": int32(2024), "region": int32(1), "amount": 100.0},
+		{"year": int32(2027), "region": int32(4), "amount": 200.0},
+	})
+	if err := clone.Consume(ctx, b3); err != nil {
+		t.Fatal(err)
+	}
+
+	// Merge clone into primary — this migrates compact → generic.
+	primary.MergeSink(clone)
+
+	// Finalize processes spilled rows. Before the fix, this would
+	// re-resolve indices, switch back to compact mode, and lose merged groups.
+	if err := primary.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Next() should return all groups without panicking.
+	var allRows []map[string]any
+	for {
+		out, err := primary.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		allRows = append(allRows, out.ToRows()...)
+	}
+
+	// Should have groups from primary batch 1, spilled batch 2, and merged clone.
+	// Groups: (2024,1), (2025,2), (2026,3), (2027,4) — 4 distinct groups.
+	if len(allRows) < 3 {
+		t.Fatalf("expected at least 3 groups, got %d: %v", len(allRows), allRows)
+	}
+
+	// Verify (2024,1) total includes all sources: 10 + 30 + 100 = 140.
+	for _, row := range allRows {
+		y, _ := row["year"].(int32)
+		r, _ := row["region"].(int32)
+		if y == 2024 && r == 1 {
+			total, _ := row["total"].(float64)
+			if total != 140.0 {
+				t.Fatalf("expected total=140 for (2024,1), got %v", total)
+			}
+		}
 	}
 }
