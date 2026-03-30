@@ -25,6 +25,7 @@ type ColumnStats struct {
 type Reader struct {
 	file   *goparquet.File
 	schema Schema
+	meta   *FileMetaData // cached footer for fast stats access
 }
 
 // NewReader creates a Parquet reader from an io.ReaderAt.
@@ -36,9 +37,15 @@ func NewReader(r io.ReaderAt, size int64) (*Reader, error) {
 
 	schema := extractSchema(f)
 
+	// Cache the footer metadata for fast statistics access.
+	// This avoids the expensive page-scanning fallback when ColumnIndex
+	// pages are absent (e.g. files written by NativeWriter).
+	meta, _ := ReadFileMetaData(r, size)
+
 	return &Reader{
 		file:   f,
 		schema: schema,
+		meta:   meta,
 	}, nil
 }
 
@@ -85,8 +92,8 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 
 		ci, err := cc.ColumnIndex()
 		if err != nil {
-			// No ColumnIndex pages — fall back to scanning data pages.
-			stats.Columns[colName] = r.statsFromPages(cc)
+			// No ColumnIndex pages — use cached footer metadata.
+			stats.Columns[colName] = r.statsFromMeta(index, colName)
 			continue
 		}
 
@@ -126,38 +133,40 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 	return stats
 }
 
-// statsFromPages collects column statistics by iterating data pages.
-// Used as a fallback when ColumnIndex pages are not present in the file.
-func (r *Reader) statsFromPages(cc goparquet.ColumnChunk) ColumnStats {
-	pages := cc.Pages()
-	defer pages.Close()
-
-	cs := ColumnStats{}
-	for {
-		page, err := pages.ReadPage()
-		if err != nil || page == nil {
-			break
-		}
-		cs.NullCount += page.NumNulls()
-		pageMin, pageMax, ok := page.Bounds()
-		if !ok {
+// statsFromMeta reads column statistics from the cached footer metadata.
+// This is O(1) — no page decompression or scanning required.
+func (r *Reader) statsFromMeta(rgIdx int, colName string) ColumnStats {
+	if r.meta == nil || rgIdx >= len(r.meta.RowGroups) {
+		return ColumnStats{}
+	}
+	rg := &r.meta.RowGroups[rgIdx]
+	for _, cc := range rg.Columns {
+		if cc.MetaData == nil {
 			continue
 		}
-		cs.HasStats = true
-		if !pageMin.IsNull() {
-			native := parquetValueToNative(pageMin)
-			if cs.MinValue == nil || CompareNative(native, cs.MinValue) < 0 {
-				cs.MinValue = native
+		cm := cc.MetaData
+		name := cm.PathInSchema[len(cm.PathInSchema)-1]
+		if name != colName {
+			continue
+		}
+		cs := ColumnStats{HasStats: cm.Statistics != nil}
+		if cs.HasStats {
+			s := cm.Statistics
+			cs.NullCount = s.NullCount
+			if len(s.MinValue) > 0 {
+				cs.MinValue = statsToNative(s.MinValue, cm.Type)
+			} else if len(s.Min) > 0 {
+				cs.MinValue = statsToNative(s.Min, cm.Type)
+			}
+			if len(s.MaxValue) > 0 {
+				cs.MaxValue = statsToNative(s.MaxValue, cm.Type)
+			} else if len(s.Max) > 0 {
+				cs.MaxValue = statsToNative(s.Max, cm.Type)
 			}
 		}
-		if !pageMax.IsNull() {
-			native := parquetValueToNative(pageMax)
-			if cs.MaxValue == nil || CompareNative(native, cs.MaxValue) > 0 {
-				cs.MaxValue = native
-			}
-		}
+		return cs
 	}
-	return cs
+	return ColumnStats{}
 }
 
 // ReadRows reads all rows from the Parquet file, optionally selecting only specific columns.
