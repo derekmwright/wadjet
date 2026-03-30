@@ -1500,19 +1500,21 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			// NATS KV fast path for small partitions
-			if e.resultKV != nil && len(buf) <= natsKVResultThreshold {
-				if _, kvErr := e.resultKV.Put(ctx, natsKVKey(path), buf); kvErr == nil {
-					if e.resultStore != nil {
-						e.resultStore.Put(task.QueryID, path, buf)
-					}
-					return
-				}
-			}
-
+			// Always write to S3 (durable). KV is a best-effort cache.
 			_, putErr := e.store.Put(ctx, task.ResultBucket, path,
 				bytes.NewReader(buf), int64(len(buf)), "application/octet-stream")
 			uploadResults[id].err = putErr
+			if putErr != nil {
+				return
+			}
+
+			// Populate KV cache for fast cross-worker reads.
+			if e.resultKV != nil && len(buf) <= natsKVResultThreshold {
+				e.resultKV.Put(ctx, natsKVKey(path), buf) // best-effort
+			}
+			if e.resultStore != nil {
+				e.resultStore.Put(task.QueryID, path, buf)
+			}
 		}(pid, partPath, data)
 	}
 	wg.Wait()
@@ -2096,30 +2098,23 @@ func (e *Executor) writeBatchResult(ctx context.Context, task distributed.Task, 
 
 	resultPath := task.ResultPrefix + task.ID + ".wshf"
 
-	// NATS KV fast path: for medium results (too large for inline, small
-	// enough for NATS KV), write to NATS KV instead of S3. This reduces
-	// inter-stage latency from ~500ms (S3 round-trip) to ~10ms (NATS KV).
-	if e.resultKV != nil && len(data) <= natsKVResultThreshold {
-		kvKey := natsKVKey(resultPath)
-		if _, putErr := e.resultKV.Put(ctx, kvKey, data); putErr == nil {
-			result.ResultPath = resultPath
-			if e.resultStore != nil {
-				e.resultStore.Put(task.QueryID, resultPath, data)
-			}
-			return nil
-		}
-		// Fall through to S3 on NATS KV error
-	}
-
-	// Write to S3 so results are visible to all workers.
+	// Always write to S3 as the durable store. NATS KV has a 5-minute TTL
+	// and 1 GB size cap — entries can expire or be evicted before downstream
+	// stages read them (e.g., SF100 Q04 pipeline takes 11+ minutes).
 	_, err = e.store.Put(ctx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
 	if err != nil {
 		return fmt.Errorf("writing result to S3: %w", err)
 	}
 	result.ResultPath = resultPath
 
-	// Also cache locally for same-node reads (avoids S3 round-trip
-	// when the next stage runs on this worker).
+	// Also populate NATS KV as a fast read cache for cross-worker reads.
+	// Workers check KV (tier 2, ~10ms) before falling back to S3 (~500ms).
+	if e.resultKV != nil && len(data) <= natsKVResultThreshold {
+		kvKey := natsKVKey(resultPath)
+		e.resultKV.Put(ctx, kvKey, data) // best-effort; S3 is the source of truth
+	}
+
+	// Cache locally for same-node reads.
 	if e.resultStore != nil {
 		e.resultStore.Put(task.QueryID, resultPath, data)
 	}
