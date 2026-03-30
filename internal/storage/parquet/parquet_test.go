@@ -59,7 +59,6 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestRoundTripArray(t *testing.T) {
-	t.Skip("native writer does not support Array type yet")
 	schema := Schema{
 		Columns: []Column{
 			{Name: "id", Type: TypeInt64},
@@ -102,7 +101,6 @@ func TestRoundTripArray(t *testing.T) {
 }
 
 func TestRoundTripMap(t *testing.T) {
-	t.Skip("native writer does not support Map type yet")
 	schema := Schema{
 		Columns: []Column{
 			{Name: "id", Type: TypeInt64},
@@ -151,7 +149,6 @@ func TestRoundTripMap(t *testing.T) {
 }
 
 func TestRoundTripRow(t *testing.T) {
-	t.Skip("native writer does not support Row type yet")
 	schema := Schema{
 		Columns: []Column{
 			{Name: "id", Type: TypeInt64},
@@ -200,7 +197,6 @@ func TestRoundTripRow(t *testing.T) {
 }
 
 func TestNestedArrayOfArrays(t *testing.T) {
-	t.Skip("native writer does not support nested Array type yet")
 	// Nested ARRAY(ARRAY(INT64))
 	schema := Schema{
 		Columns: []Column{

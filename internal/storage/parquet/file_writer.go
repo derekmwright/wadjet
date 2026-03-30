@@ -14,6 +14,7 @@ import (
 
 // NativeWriter writes Parquet files without depending on parquet-go.
 // It uses PLAIN encoding, RLE definition levels, and configurable compression.
+// Supports flat columns as well as nested types (ARRAY/LIST, MAP, ROW/STRUCT).
 //
 // Usage:
 //
@@ -26,18 +27,31 @@ type NativeWriter struct {
 	config WriterConfig
 	codec  CompressionCodec
 
-	// Accumulates rows until row group flush.
-	colBufs []columnBuffer
-	numRows int
+	// One leaf buffer per leaf column in the flattened schema.
+	leafBufs []leafBuffer
+	// Maps top-level column index to its leaf range [startLeaf, endLeaf).
+	colLeafRanges []leafRange
+	numRows       int
 
-	written int64 // total bytes written to w so far
+	written   int64 // total bytes written to w so far
 	rowGroups []RowGroup
 }
 
-// columnBuffer accumulates values for a single column.
-type columnBuffer struct {
-	col      Column
+// leafRange identifies a contiguous range of leaf buffers for a top-level column.
+type leafRange struct {
+	start int // inclusive
+	end   int // exclusive
+}
+
+// leafBuffer accumulates values for a single leaf column, supporting
+// multi-level definition and repetition levels for nested schemas.
+type leafBuffer struct {
+	col      Column   // the leaf column definition
 	physical PhysicalType
+	path     []string // full path from schema root (e.g. ["tags", "list", "element"])
+
+	maxDefLevel int32
+	maxRepLevel int32
 
 	// PLAIN-encoded value data for fixed-width types.
 	data []byte
@@ -48,17 +62,19 @@ type columnBuffer struct {
 	boolBuf []byte
 	boolPos int
 
-	nulls    []bool // true = null at this row position
-	numNulls int64
-	count    int // total values (including nulls)
+	// Multi-level definition and repetition levels.
+	defLevels []int32
+	repLevels []int32
+	numNulls  int64
+	count     int // total entries (values + nulls/absent markers)
 
 	// Statistics tracking.
-	hasStats bool
-	minI32, maxI32 int32
-	minI64, maxI64 int64
-	minF32, maxF32 float32
-	minF64, maxF64 float64
-	minBytes, maxBytes []byte
+	hasStats               bool
+	minI32, maxI32         int32
+	minI64, maxI64         int64
+	minF32, maxF32         float32
+	minF64, maxF64         float64
+	minBytes, maxBytes     []byte
 }
 
 // NewNativeWriter creates a Parquet writer that writes to the given io.Writer.
@@ -87,20 +103,97 @@ func NewNativeWriter(w io.Writer, schema Schema, cfg WriterConfig) *NativeWriter
 		config: cfg,
 		codec:  codec,
 	}
-	nw.initColumns()
+	nw.initLeafBuffers()
 	return nw
 }
 
-func (nw *NativeWriter) initColumns() {
-	nw.colBufs = make([]columnBuffer, len(nw.schema.Columns))
+// initLeafBuffers flattens the schema into leaf columns and creates a
+// leafBuffer for each one. For flat schemas this is 1:1 with schema columns.
+func (nw *NativeWriter) initLeafBuffers() {
+	nw.leafBufs = nil
+	nw.colLeafRanges = make([]leafRange, len(nw.schema.Columns))
+
 	for i, col := range nw.schema.Columns {
-		nw.colBufs[i] = columnBuffer{
-			col:      col,
-			physical: wadjetTypeToPhysical(col.Type),
-		}
+		startIdx := len(nw.leafBufs)
+		nw.flattenColumn(col, nil, 0, 0)
+		nw.colLeafRanges[i] = leafRange{start: startIdx, end: len(nw.leafBufs)}
+	}
+}
+
+// flattenColumn recursively walks a Column and appends a leafBuffer for each
+// leaf it finds. path, defLevel, repLevel track the nesting context.
+func (nw *NativeWriter) flattenColumn(col Column, parentPath []string, defLevel, repLevel int32) {
+	switch col.Type {
+	case TypeArray:
+		// LIST schema: optional group <name> (LIST) { repeated group list { optional <elem> element } }
+		// The outer group is optional if col.Nullable.
+		curDef := defLevel
 		if col.Nullable {
-			nw.colBufs[i].nulls = make([]bool, 0, 1024)
+			curDef++ // outer group presence
 		}
+		curDef++   // list group (repeated) adds 1 to def
+		curRep := repLevel + 1 // repeated adds 1 to rep
+
+		elemCol := Column{Name: "element", Type: TypeString, Nullable: true}
+		if col.ElementType != nil {
+			elemCol = *col.ElementType
+			elemCol.Nullable = true // elements are always optional in LIST schema
+		}
+		elemPath := append(append([]string(nil), parentPath...), col.Name, "list")
+		nw.flattenColumn(elemCol, elemPath, curDef, curRep)
+
+	case TypeMap:
+		// MAP schema: optional group <name> (MAP) { repeated group key_value (MAP_KEY_VALUE) { required key, optional value } }
+		curDef := defLevel
+		if col.Nullable {
+			curDef++ // outer group presence
+		}
+		curDef++   // key_value group (repeated) adds 1 to def
+		curRep := repLevel + 1 // repeated adds 1 to rep
+
+		if col.ElementType != nil && col.ElementType.Type == TypeRow && len(col.ElementType.Fields) == 2 {
+			kvPath := append(append([]string(nil), parentPath...), col.Name, "key_value")
+			keyCol := col.ElementType.Fields[0]
+			valCol := col.ElementType.Fields[1]
+
+			// Key is required within key_value.
+			keyPath := make([]string, len(kvPath))
+			copy(keyPath, kvPath)
+			nw.flattenColumn(keyCol, keyPath, curDef, curRep)
+
+			// Value is optional within key_value.
+			valPath := make([]string, len(kvPath))
+			copy(valPath, kvPath)
+			nw.flattenColumn(valCol, valPath, curDef+1, curRep) // +1 for optional value
+		}
+
+	case TypeRow:
+		// STRUCT schema: optional group <name> { fields... }
+		curDef := defLevel
+		if col.Nullable {
+			curDef++ // group presence
+		}
+		groupPath := append(append([]string(nil), parentPath...), col.Name)
+		for _, field := range col.Fields {
+			nw.flattenColumn(field, groupPath, curDef, repLevel)
+		}
+
+	default:
+		// Leaf column.
+		curDef := defLevel
+		if col.Nullable {
+			curDef++ // leaf presence
+		}
+		fullPath := append(append([]string(nil), parentPath...), col.Name)
+
+		lb := leafBuffer{
+			col:         col,
+			physical:    wadjetTypeToPhysical(col.Type),
+			path:        fullPath,
+			maxDefLevel: curDef,
+			maxRepLevel: repLevel,
+		}
+		nw.leafBufs = append(nw.leafBufs, lb)
 	}
 }
 
@@ -127,16 +220,18 @@ func wadjetTypeToPhysical(t TypeID) PhysicalType {
 
 // WriteMapRows writes rows from map[string]any format.
 // Network types are converted to their binary storage format.
+// Nested types (ARRAY, MAP, ROW) are decomposed into leaf-level
+// (value, defLevel, repLevel) triples.
 func (nw *NativeWriter) WriteMapRows(rows []map[string]any) error {
 	for _, row := range rows {
-		for i := range nw.colBufs {
-			cb := &nw.colBufs[i]
-			val, ok := row[cb.col.Name]
-			if !ok || val == nil {
-				cb.appendNull()
-				continue
+		for colIdx, col := range nw.schema.Columns {
+			val, ok := row[col.Name]
+			if !ok {
+				val = nil
 			}
-			cb.appendValue(val)
+			lr := nw.colLeafRanges[colIdx]
+			leafIdx := lr.start
+			nw.decomposeValue(col, val, 0, 0, &leafIdx)
 		}
 		nw.numRows++
 
@@ -147,6 +242,230 @@ func (nw *NativeWriter) WriteMapRows(rows []map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// decomposeValue walks a value according to col's type definition and appends
+// (value, defLevel, repLevel) triples to the appropriate leaf buffers.
+// leafIdx is advanced as leaves are visited.
+func (nw *NativeWriter) decomposeValue(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+	switch col.Type {
+	case TypeArray:
+		nw.decomposeArray(col, val, defLevel, repLevel, leafIdx)
+	case TypeMap:
+		nw.decomposeMap(col, val, defLevel, repLevel, leafIdx)
+	case TypeRow:
+		nw.decomposeRow(col, val, defLevel, repLevel, leafIdx)
+	default:
+		nw.decomposeLeaf(col, val, defLevel, repLevel, leafIdx)
+	}
+}
+
+// decomposeLeaf handles a primitive leaf column.
+func (nw *NativeWriter) decomposeLeaf(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+	lb := &nw.leafBufs[*leafIdx]
+	*leafIdx++
+
+	if val == nil {
+		lb.appendEntry(defLevel, repLevel)
+		return
+	}
+	// Value is present — def level is maxDefLevel.
+	lb.appendEntryWithValue(lb.maxDefLevel, repLevel, val)
+}
+
+// decomposeArray handles ARRAY (LIST) type columns.
+func (nw *NativeWriter) decomposeArray(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+	elemCol := Column{Name: "element", Type: TypeString}
+	if col.ElementType != nil {
+		elemCol = *col.ElementType
+	}
+
+	if val == nil {
+		// Entire array is null. Emit null at current def level for all leaves.
+		curDef := defLevel // outer group absent
+		nw.emitNullForSubtree(elemCol, curDef, repLevel, leafIdx)
+		return
+	}
+
+	arr, ok := val.([]any)
+	if !ok {
+		// Try to handle as a typed slice — shouldn't normally happen.
+		nw.emitNullForSubtree(elemCol, defLevel, repLevel, leafIdx)
+		return
+	}
+
+	// Advance defLevel past the outer optional group.
+	innerDef := defLevel
+	if col.Nullable {
+		innerDef++ // outer group is present
+	}
+
+	if len(arr) == 0 {
+		// Empty array — outer group present but list group has no entries.
+		// def = innerDef (list is empty, so repeated group absent).
+		nw.emitNullForSubtree(elemCol, innerDef, repLevel, leafIdx)
+		return
+	}
+
+	// Non-empty array: each element gets def at least innerDef+1 (list group present).
+	listDef := innerDef + 1
+	listRep := repLevel + 1
+
+	for i, elem := range arr {
+		elemRep := listRep
+		if i == 0 {
+			elemRep = repLevel // first element uses parent rep level
+		}
+		saveLeafIdx := *leafIdx
+		nw.decomposeValue(elemCol, elem, listDef, elemRep, leafIdx)
+		// Reset leafIdx for next element — all elements write to the same leaves.
+		if i < len(arr)-1 {
+			*leafIdx = saveLeafIdx
+		}
+	}
+}
+
+// decomposeMap handles MAP type columns.
+func (nw *NativeWriter) decomposeMap(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+	if col.ElementType == nil || len(col.ElementType.Fields) != 2 {
+		// Malformed MAP — skip leaves.
+		return
+	}
+
+	keyCol := col.ElementType.Fields[0]
+	valCol := col.ElementType.Fields[1]
+
+	if val == nil {
+		// Entire map is null.
+		nw.emitNullForSubtree(keyCol, defLevel, repLevel, leafIdx)
+		nw.emitNullForSubtree(valCol, defLevel, repLevel, leafIdx)
+		return
+	}
+
+	m, ok := val.(map[string]any)
+	if !ok {
+		nw.emitNullForSubtree(keyCol, defLevel, repLevel, leafIdx)
+		nw.emitNullForSubtree(valCol, defLevel, repLevel, leafIdx)
+		return
+	}
+
+	innerDef := defLevel
+	if col.Nullable {
+		innerDef++ // outer MAP group is present
+	}
+
+	if len(m) == 0 {
+		// Empty map.
+		nw.emitNullForSubtree(keyCol, innerDef, repLevel, leafIdx)
+		nw.emitNullForSubtree(valCol, innerDef, repLevel, leafIdx)
+		return
+	}
+
+	// Non-empty map: iterate key-value pairs.
+	kvDef := innerDef + 1 // key_value group is present
+	kvRep := repLevel + 1
+
+	first := true
+	keyLeafIdx := *leafIdx
+	// Count leaves for key subtree so we know where value leaves start.
+	keyLeafCount := countLeaves(keyCol)
+	valLeafIdx := keyLeafIdx + keyLeafCount
+
+	for k, v := range m {
+		elemRep := kvRep
+		if first {
+			elemRep = repLevel
+			first = false
+		}
+		tmpKeyIdx := keyLeafIdx
+		tmpValIdx := valLeafIdx
+		nw.decomposeValue(keyCol, k, kvDef, elemRep, &tmpKeyIdx)
+		// Value in MAP is optional, so it gets +1 def from key_value group.
+		nw.decomposeValue(valCol, v, kvDef+1, elemRep, &tmpValIdx)
+	}
+
+	// Advance leafIdx past all map leaves.
+	*leafIdx = valLeafIdx + countLeaves(valCol)
+}
+
+// decomposeRow handles ROW/STRUCT type columns.
+func (nw *NativeWriter) decomposeRow(col Column, val any, defLevel, repLevel int32, leafIdx *int) {
+	innerDef := defLevel
+	if col.Nullable {
+		innerDef++ // group presence
+	}
+
+	if val == nil {
+		// Entire struct is null — emit null for each field.
+		for _, field := range col.Fields {
+			nw.emitNullForSubtree(field, defLevel, repLevel, leafIdx)
+		}
+		return
+	}
+
+	m, ok := val.(map[string]any)
+	if !ok {
+		for _, field := range col.Fields {
+			nw.emitNullForSubtree(field, defLevel, repLevel, leafIdx)
+		}
+		return
+	}
+
+	// Struct present — decompose each field.
+	for _, field := range col.Fields {
+		fieldVal := m[field.Name]
+		nw.decomposeValue(field, fieldVal, innerDef, repLevel, leafIdx)
+	}
+}
+
+// emitNullForSubtree emits a null entry (with the given def/rep) for every
+// leaf under the given column subtree.
+func (nw *NativeWriter) emitNullForSubtree(col Column, defLevel, repLevel int32, leafIdx *int) {
+	switch col.Type {
+	case TypeArray:
+		elemCol := Column{Name: "element", Type: TypeString}
+		if col.ElementType != nil {
+			elemCol = *col.ElementType
+		}
+		nw.emitNullForSubtree(elemCol, defLevel, repLevel, leafIdx)
+	case TypeMap:
+		if col.ElementType != nil && len(col.ElementType.Fields) == 2 {
+			nw.emitNullForSubtree(col.ElementType.Fields[0], defLevel, repLevel, leafIdx)
+			nw.emitNullForSubtree(col.ElementType.Fields[1], defLevel, repLevel, leafIdx)
+		}
+	case TypeRow:
+		for _, field := range col.Fields {
+			nw.emitNullForSubtree(field, defLevel, repLevel, leafIdx)
+		}
+	default:
+		lb := &nw.leafBufs[*leafIdx]
+		lb.appendEntry(defLevel, repLevel)
+		*leafIdx++
+	}
+}
+
+// countLeaves returns the number of leaf columns in a column subtree.
+func countLeaves(col Column) int {
+	switch col.Type {
+	case TypeArray:
+		if col.ElementType != nil {
+			return countLeaves(*col.ElementType)
+		}
+		return 1
+	case TypeMap:
+		if col.ElementType != nil && len(col.ElementType.Fields) == 2 {
+			return countLeaves(col.ElementType.Fields[0]) + countLeaves(col.ElementType.Fields[1])
+		}
+		return 0
+	case TypeRow:
+		n := 0
+		for _, f := range col.Fields {
+			n += countLeaves(f)
+		}
+		return n
+	default:
+		return 1
+	}
 }
 
 // Close flushes any remaining rows and writes the file footer.
@@ -187,14 +506,14 @@ func (nw *NativeWriter) flushRowGroup() error {
 	numRows := int64(nw.numRows)
 	var totalSize, totalCompressed int64
 
-	columns := make([]ColumnChunk, len(nw.colBufs))
-	for i := range nw.colBufs {
-		cb := &nw.colBufs[i]
+	columns := make([]ColumnChunk, len(nw.leafBufs))
+	for i := range nw.leafBufs {
+		lb := &nw.leafBufs[i]
 		chunkOffset := nw.written
 
-		uncompressed, compressed, err := nw.writeColumnChunk(cb)
+		uncompressed, compressed, err := nw.writeColumnChunk(lb)
 		if err != nil {
-			return fmt.Errorf("writing column %s: %w", cb.col.Name, err)
+			return fmt.Errorf("writing column %s: %w", lb.path, err)
 		}
 		totalSize += uncompressed
 		totalCompressed += compressed
@@ -202,20 +521,20 @@ func (nw *NativeWriter) flushRowGroup() error {
 		columns[i] = ColumnChunk{
 			FileOffset: chunkOffset,
 			MetaData: &ColumnMetaData{
-				Type:                  cb.physical,
+				Type:                  lb.physical,
 				Encodings:             []Encoding{EncodingPlain, EncodingRLE},
-				PathInSchema:          []string{cb.col.Name},
+				PathInSchema:          lb.path,
 				Codec:                 nw.codec,
-				NumValues:             int64(cb.count),
+				NumValues:             int64(lb.count),
 				TotalUncompressedSize: uncompressed,
 				TotalCompressedSize:   compressed,
 				DataPageOffset:        chunkOffset,
-				Statistics:            cb.buildStats(),
+				Statistics:            lb.buildStats(),
 			},
 		}
 
-		// Reset column buffer for next row group.
-		cb.reset()
+		// Reset leaf buffer for next row group.
+		lb.reset()
 	}
 
 	nw.rowGroups = append(nw.rowGroups, RowGroup{
@@ -230,19 +549,23 @@ func (nw *NativeWriter) flushRowGroup() error {
 	return nil
 }
 
-func (nw *NativeWriter) writeColumnChunk(cb *columnBuffer) (uncompressed, compressed int64, err error) {
-	// Build page data: definition levels (if nullable) + PLAIN-encoded values.
+func (nw *NativeWriter) writeColumnChunk(lb *leafBuffer) (uncompressed, compressed int64, err error) {
 	var pageBuf bytes.Buffer
 
-	maxDefLevel := int32(0)
-	if cb.col.Nullable {
-		maxDefLevel = 1
+	// Write repetition levels (RLE encoded with 4-byte LE length prefix).
+	if lb.maxRepLevel > 0 {
+		bitWidth := bitsRequiredForMax(lb.maxRepLevel)
+		repData := encodeLevelsRLE(lb.repLevels, lb.count, bitWidth)
+		var lenBuf [4]byte
+		binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(repData)))
+		pageBuf.Write(lenBuf[:])
+		pageBuf.Write(repData)
 	}
 
 	// Write definition levels (RLE encoded with 4-byte LE length prefix).
-	if maxDefLevel > 0 {
-		defData := encodeDefLevelsRLE(cb.nulls, cb.count)
-		// 4-byte LE length prefix.
+	if lb.maxDefLevel > 0 {
+		bitWidth := bitsRequiredForMax(lb.maxDefLevel)
+		defData := encodeLevelsRLE(lb.defLevels, lb.count, bitWidth)
 		var lenBuf [4]byte
 		binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(defData)))
 		pageBuf.Write(lenBuf[:])
@@ -250,7 +573,7 @@ func (nw *NativeWriter) writeColumnChunk(cb *columnBuffer) (uncompressed, compre
 	}
 
 	// Write PLAIN-encoded values.
-	pageBuf.Write(cb.plainData())
+	pageBuf.Write(lb.plainData())
 
 	uncompressedData := pageBuf.Bytes()
 	uncompressedSize := int32(len(uncompressedData))
@@ -262,17 +585,17 @@ func (nw *NativeWriter) writeColumnChunk(cb *columnBuffer) (uncompressed, compre
 	}
 	compressedSize := int32(len(compressedData))
 
-	// Build page header with page-level statistics.
+	// Build page header.
 	ph := &PageHeader{
 		Type:                 PageDataV1,
 		UncompressedPageSize: uncompressedSize,
 		CompressedPageSize:   compressedSize,
 		DataPageHeader: &DataPageHeader{
-			NumValues:               int32(cb.count),
+			NumValues:               int32(lb.count),
 			Encoding:                EncodingPlain,
 			DefinitionLevelEncoding: EncodingRLE,
 			RepetitionLevelEncoding: EncodingRLE,
-			Statistics:              cb.buildStats(),
+			Statistics:              lb.buildStats(),
 		},
 	}
 
@@ -329,6 +652,7 @@ func (nw *NativeWriter) writeFooter() error {
 }
 
 // buildSchemaElements creates the flattened schema tree for the footer.
+// Handles flat columns and nested types (ARRAY/LIST, MAP, ROW/STRUCT).
 func buildSchemaElements(schema Schema) []SchemaElement {
 	// Root element (message).
 	root := SchemaElement{
@@ -338,162 +662,288 @@ func buildSchemaElements(schema Schema) []SchemaElement {
 	elements := []SchemaElement{root}
 
 	for _, col := range schema.Columns {
-		se := SchemaElement{
-			Name: col.Name,
-		}
-		pt := wadjetTypeToPhysical(col.Type)
-		se.Type = &pt
-
-		if col.Nullable {
-			se.RepetitionType = FieldOptional
-		} else {
-			se.RepetitionType = FieldRequired
-		}
-
-		// Set converted type and logical type for annotations.
-		switch col.Type {
-		case TypeString, TypeCIDR:
-			ct := ConvertedUTF8
-			se.ConvertedType = &ct
-			se.LogicalType = &LogicalType{Type: LogicalString}
-		case TypeTimestamp:
-			ct := ConvertedTimestampMillis
-			se.ConvertedType = &ct
-			se.LogicalType = &LogicalType{
-				Type:            LogicalTimestampMillis,
-				IsAdjustedToUTC: true,
-			}
-		case TypeDate:
-			ct := ConvertedDate
-			se.ConvertedType = &ct
-			se.LogicalType = &LogicalType{Type: LogicalDate}
-		case TypeInt32:
-			ct := ConvertedInt32
-			se.ConvertedType = &ct
-			se.LogicalType = &LogicalType{Type: LogicalInteger, BitWidth: 32, IsSigned: true}
-		case TypeInt64:
-			ct := ConvertedInt64
-			se.ConvertedType = &ct
-			se.LogicalType = &LogicalType{Type: LogicalInteger, BitWidth: 64, IsSigned: true}
-		case TypeDecimal:
-			ct := ConvertedDecimal
-			se.ConvertedType = &ct
-			prec := col.Precision
-			if prec <= 0 {
-				prec = 38
-			}
-			se.Precision = int32(prec)
-			se.Scale = int32(col.Scale)
-			se.LogicalType = &LogicalType{
-				Type:      LogicalDecimal,
-				Precision: prec,
-				Scale:     col.Scale,
-			}
-		}
-
-		elements = append(elements, se)
+		buildColumnSchemaElements(col, &elements)
 	}
 	return elements
 }
 
-// --- Column buffer methods ---
-
-func (cb *columnBuffer) appendNull() {
-	if cb.nulls != nil {
-		cb.nulls = append(cb.nulls, true)
+// buildColumnSchemaElements recursively emits SchemaElements for a single column.
+func buildColumnSchemaElements(col Column, elements *[]SchemaElement) {
+	switch col.Type {
+	case TypeArray:
+		buildArraySchemaElements(col, elements)
+	case TypeMap:
+		buildMapSchemaElements(col, elements)
+	case TypeRow:
+		buildRowSchemaElements(col, elements)
+	default:
+		buildLeafSchemaElement(col, elements)
 	}
-	cb.numNulls++
-	cb.count++
 }
 
-func (cb *columnBuffer) appendValue(val any) {
-	if cb.nulls != nil {
-		cb.nulls = append(cb.nulls, false)
+// buildArraySchemaElements emits the standard Parquet LIST schema:
+//
+//	optional group <name> (LIST) {
+//	  repeated group list {
+//	    optional <element_type> element
+//	  }
+//	}
+func buildArraySchemaElements(col Column, elements *[]SchemaElement) {
+	rep := FieldOptional
+	if !col.Nullable {
+		rep = FieldRequired
 	}
-	cb.count++
+	ct := ConvertedList
+	// Outer group with ConvertedType=LIST.
+	outer := SchemaElement{
+		Name:          col.Name,
+		NumChildren:   1,
+		RepetitionType: rep,
+		ConvertedType: &ct,
+		LogicalType:   &LogicalType{Type: LogicalList},
+	}
+	*elements = append(*elements, outer)
 
-	switch cb.physical {
+	// Repeated "list" group.
+	listGroup := SchemaElement{
+		Name:          "list",
+		NumChildren:   1,
+		RepetitionType: FieldRepeated,
+	}
+	*elements = append(*elements, listGroup)
+
+	// Element column.
+	elemCol := Column{Name: "element", Type: TypeString, Nullable: true}
+	if col.ElementType != nil {
+		elemCol = *col.ElementType
+		elemCol.Nullable = true // elements are always optional in LIST
+	}
+	buildColumnSchemaElements(elemCol, elements)
+}
+
+// buildMapSchemaElements emits the standard Parquet MAP schema:
+//
+//	optional group <name> (MAP) {
+//	  repeated group key_value (MAP_KEY_VALUE) {
+//	    required <key_type> key
+//	    optional <value_type> value
+//	  }
+//	}
+func buildMapSchemaElements(col Column, elements *[]SchemaElement) {
+	rep := FieldOptional
+	if !col.Nullable {
+		rep = FieldRequired
+	}
+	ct := ConvertedMap
+	outer := SchemaElement{
+		Name:          col.Name,
+		NumChildren:   1,
+		RepetitionType: rep,
+		ConvertedType: &ct,
+		LogicalType:   &LogicalType{Type: LogicalMap},
+	}
+	*elements = append(*elements, outer)
+
+	kvCt := ConvertedMapKeyValue
+	kvGroup := SchemaElement{
+		Name:          "key_value",
+		NumChildren:   2,
+		RepetitionType: FieldRepeated,
+		ConvertedType: &kvCt,
+	}
+	*elements = append(*elements, kvGroup)
+
+	if col.ElementType != nil && col.ElementType.Type == TypeRow && len(col.ElementType.Fields) == 2 {
+		keyCol := col.ElementType.Fields[0]
+		keyCol.Nullable = false // keys are required
+		buildColumnSchemaElements(keyCol, elements)
+
+		valCol := col.ElementType.Fields[1]
+		valCol.Nullable = true // values are optional
+		buildColumnSchemaElements(valCol, elements)
+	}
+}
+
+// buildRowSchemaElements emits the Parquet STRUCT schema:
+//
+//	optional group <name> {
+//	  optional <type> field1
+//	  optional <type> field2
+//	  ...
+//	}
+func buildRowSchemaElements(col Column, elements *[]SchemaElement) {
+	rep := FieldOptional
+	if !col.Nullable {
+		rep = FieldRequired
+	}
+	group := SchemaElement{
+		Name:          col.Name,
+		NumChildren:   int32(len(col.Fields)),
+		RepetitionType: rep,
+	}
+	*elements = append(*elements, group)
+
+	for _, field := range col.Fields {
+		buildColumnSchemaElements(field, elements)
+	}
+}
+
+// buildLeafSchemaElement emits a single leaf SchemaElement.
+func buildLeafSchemaElement(col Column, elements *[]SchemaElement) {
+	se := SchemaElement{
+		Name: col.Name,
+	}
+	pt := wadjetTypeToPhysical(col.Type)
+	se.Type = &pt
+
+	if col.Nullable {
+		se.RepetitionType = FieldOptional
+	} else {
+		se.RepetitionType = FieldRequired
+	}
+
+	// Set converted type and logical type for annotations.
+	switch col.Type {
+	case TypeString, TypeCIDR:
+		ct := ConvertedUTF8
+		se.ConvertedType = &ct
+		se.LogicalType = &LogicalType{Type: LogicalString}
+	case TypeTimestamp:
+		ct := ConvertedTimestampMillis
+		se.ConvertedType = &ct
+		se.LogicalType = &LogicalType{
+			Type:            LogicalTimestampMillis,
+			IsAdjustedToUTC: true,
+		}
+	case TypeDate:
+		ct := ConvertedDate
+		se.ConvertedType = &ct
+		se.LogicalType = &LogicalType{Type: LogicalDate}
+	case TypeInt32:
+		ct := ConvertedInt32
+		se.ConvertedType = &ct
+		se.LogicalType = &LogicalType{Type: LogicalInteger, BitWidth: 32, IsSigned: true}
+	case TypeInt64:
+		ct := ConvertedInt64
+		se.ConvertedType = &ct
+		se.LogicalType = &LogicalType{Type: LogicalInteger, BitWidth: 64, IsSigned: true}
+	case TypeDecimal:
+		ct := ConvertedDecimal
+		se.ConvertedType = &ct
+		prec := col.Precision
+		if prec <= 0 {
+			prec = 38
+		}
+		se.Precision = int32(prec)
+		se.Scale = int32(col.Scale)
+		se.LogicalType = &LogicalType{
+			Type:      LogicalDecimal,
+			Precision: prec,
+			Scale:     col.Scale,
+		}
+	}
+
+	*elements = append(*elements, se)
+}
+
+// --- Leaf buffer methods ---
+
+// appendEntry appends a null/absent entry with the given def/rep levels.
+func (lb *leafBuffer) appendEntry(defLevel, repLevel int32) {
+	lb.defLevels = append(lb.defLevels, defLevel)
+	lb.repLevels = append(lb.repLevels, repLevel)
+	lb.numNulls++
+	lb.count++
+}
+
+// appendEntryWithValue appends a value entry with the given def/rep levels.
+func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) {
+	lb.defLevels = append(lb.defLevels, defLevel)
+	lb.repLevels = append(lb.repLevels, repLevel)
+	lb.count++
+
+	switch lb.physical {
 	case PhysicalBoolean:
 		b := toBool(val)
-		cb.appendBool(b)
+		lb.appendBool(b)
 	case PhysicalInt32:
-		v := toInt32(val, cb.col.Type)
-		cb.appendInt32(v)
+		v := toInt32(val, lb.col.Type)
+		lb.appendInt32(v)
 	case PhysicalInt64:
-		v := toInt64(val, cb.col.Type)
-		cb.appendInt64(v)
+		v := toInt64(val, lb.col.Type)
+		lb.appendInt64(v)
 	case PhysicalFloat:
 		v := toFloat32(val)
-		cb.appendFloat32(v)
+		lb.appendFloat32(v)
 	case PhysicalDouble:
 		v := toFloat64(val)
-		cb.appendFloat64(v)
+		lb.appendFloat64(v)
 	case PhysicalByteArray:
-		b := toBytes(val, cb.col.Type)
-		cb.appendByteArray(b)
+		b := toBytes(val, lb.col.Type)
+		lb.appendByteArray(b)
 	}
 }
 
-func (cb *columnBuffer) appendBool(v bool) {
-	if cb.boolPos%8 == 0 {
-		cb.boolBuf = append(cb.boolBuf, 0)
+func (lb *leafBuffer) appendBool(v bool) {
+	if lb.boolPos%8 == 0 {
+		lb.boolBuf = append(lb.boolBuf, 0)
 	}
 	if v {
-		cb.boolBuf[len(cb.boolBuf)-1] |= 1 << (cb.boolPos % 8)
+		lb.boolBuf[len(lb.boolBuf)-1] |= 1 << (lb.boolPos % 8)
 	}
-	cb.boolPos++
+	lb.boolPos++
 }
 
-func (cb *columnBuffer) appendInt32(v int32) {
+func (lb *leafBuffer) appendInt32(v int32) {
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(v))
-	cb.data = append(cb.data, buf[:]...)
-	cb.updateStatsI32(v)
+	lb.data = append(lb.data, buf[:]...)
+	lb.updateStatsI32(v)
 }
 
-func (cb *columnBuffer) appendInt64(v int64) {
+func (lb *leafBuffer) appendInt64(v int64) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], uint64(v))
-	cb.data = append(cb.data, buf[:]...)
-	cb.updateStatsI64(v)
+	lb.data = append(lb.data, buf[:]...)
+	lb.updateStatsI64(v)
 }
 
-func (cb *columnBuffer) appendFloat32(v float32) {
+func (lb *leafBuffer) appendFloat32(v float32) {
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], math.Float32bits(v))
-	cb.data = append(cb.data, buf[:]...)
-	cb.updateStatsF32(v)
+	lb.data = append(lb.data, buf[:]...)
+	lb.updateStatsF32(v)
 }
 
-func (cb *columnBuffer) appendFloat64(v float64) {
+func (lb *leafBuffer) appendFloat64(v float64) {
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
-	cb.data = append(cb.data, buf[:]...)
-	cb.updateStatsF64(v)
+	lb.data = append(lb.data, buf[:]...)
+	lb.updateStatsF64(v)
 }
 
-func (cb *columnBuffer) appendByteArray(b []byte) {
-	cb.offsets = append(cb.offsets, uint32(len(cb.packed)))
-	cb.packed = append(cb.packed, b...)
-	cb.updateStatsBytes(b)
+func (lb *leafBuffer) appendByteArray(b []byte) {
+	lb.offsets = append(lb.offsets, uint32(len(lb.packed)))
+	lb.packed = append(lb.packed, b...)
+	lb.updateStatsBytes(b)
 }
 
-func (cb *columnBuffer) plainData() []byte {
-	switch cb.physical {
+func (lb *leafBuffer) plainData() []byte {
+	switch lb.physical {
 	case PhysicalBoolean:
-		return cb.boolBuf
+		return lb.boolBuf
 	case PhysicalByteArray:
 		// PLAIN byte array: each value prefixed with 4-byte LE length.
 		var buf bytes.Buffer
-		for i := 0; i < len(cb.offsets); i++ {
-			start := cb.offsets[i]
+		for i := 0; i < len(lb.offsets); i++ {
+			start := lb.offsets[i]
 			var end uint32
-			if i+1 < len(cb.offsets) {
-				end = cb.offsets[i+1]
+			if i+1 < len(lb.offsets) {
+				end = lb.offsets[i+1]
 			} else {
-				end = uint32(len(cb.packed))
+				end = uint32(len(lb.packed))
 			}
-			val := cb.packed[start:end]
+			val := lb.packed[start:end]
 			var lenBuf [4]byte
 			binary.LittleEndian.PutUint32(lenBuf[:], uint32(len(val)))
 			buf.Write(lenBuf[:])
@@ -501,118 +951,117 @@ func (cb *columnBuffer) plainData() []byte {
 		}
 		return buf.Bytes()
 	default:
-		return cb.data
+		return lb.data
 	}
 }
 
-func (cb *columnBuffer) reset() {
-	cb.data = cb.data[:0]
-	cb.offsets = cb.offsets[:0]
-	cb.packed = cb.packed[:0]
-	cb.boolBuf = cb.boolBuf[:0]
-	cb.boolPos = 0
-	if cb.nulls != nil {
-		cb.nulls = cb.nulls[:0]
-	}
-	cb.numNulls = 0
-	cb.count = 0
-	cb.hasStats = false
-	cb.minBytes = nil
-	cb.maxBytes = nil
+func (lb *leafBuffer) reset() {
+	lb.data = lb.data[:0]
+	lb.offsets = lb.offsets[:0]
+	lb.packed = lb.packed[:0]
+	lb.boolBuf = lb.boolBuf[:0]
+	lb.boolPos = 0
+	lb.defLevels = lb.defLevels[:0]
+	lb.repLevels = lb.repLevels[:0]
+	lb.numNulls = 0
+	lb.count = 0
+	lb.hasStats = false
+	lb.minBytes = nil
+	lb.maxBytes = nil
 }
 
-func (cb *columnBuffer) updateStatsI32(v int32) {
-	if !cb.hasStats {
-		cb.minI32, cb.maxI32 = v, v
-		cb.hasStats = true
+func (lb *leafBuffer) updateStatsI32(v int32) {
+	if !lb.hasStats {
+		lb.minI32, lb.maxI32 = v, v
+		lb.hasStats = true
 	} else {
-		if v < cb.minI32 {
-			cb.minI32 = v
+		if v < lb.minI32 {
+			lb.minI32 = v
 		}
-		if v > cb.maxI32 {
-			cb.maxI32 = v
+		if v > lb.maxI32 {
+			lb.maxI32 = v
 		}
 	}
 }
 
-func (cb *columnBuffer) updateStatsI64(v int64) {
-	if !cb.hasStats {
-		cb.minI64, cb.maxI64 = v, v
-		cb.hasStats = true
+func (lb *leafBuffer) updateStatsI64(v int64) {
+	if !lb.hasStats {
+		lb.minI64, lb.maxI64 = v, v
+		lb.hasStats = true
 	} else {
-		if v < cb.minI64 {
-			cb.minI64 = v
+		if v < lb.minI64 {
+			lb.minI64 = v
 		}
-		if v > cb.maxI64 {
-			cb.maxI64 = v
+		if v > lb.maxI64 {
+			lb.maxI64 = v
 		}
 	}
 }
 
-func (cb *columnBuffer) updateStatsF32(v float32) {
-	if !cb.hasStats || v < cb.minF32 {
-		cb.minF32 = v
+func (lb *leafBuffer) updateStatsF32(v float32) {
+	if !lb.hasStats || v < lb.minF32 {
+		lb.minF32 = v
 	}
-	if !cb.hasStats || v > cb.maxF32 {
-		cb.maxF32 = v
+	if !lb.hasStats || v > lb.maxF32 {
+		lb.maxF32 = v
 	}
-	cb.hasStats = true
+	lb.hasStats = true
 }
 
-func (cb *columnBuffer) updateStatsF64(v float64) {
-	if !cb.hasStats || v < cb.minF64 {
-		cb.minF64 = v
+func (lb *leafBuffer) updateStatsF64(v float64) {
+	if !lb.hasStats || v < lb.minF64 {
+		lb.minF64 = v
 	}
-	if !cb.hasStats || v > cb.maxF64 {
-		cb.maxF64 = v
+	if !lb.hasStats || v > lb.maxF64 {
+		lb.maxF64 = v
 	}
-	cb.hasStats = true
+	lb.hasStats = true
 }
 
-func (cb *columnBuffer) updateStatsBytes(b []byte) {
-	if !cb.hasStats {
-		cb.minBytes = append([]byte(nil), b...)
-		cb.maxBytes = append([]byte(nil), b...)
-		cb.hasStats = true
+func (lb *leafBuffer) updateStatsBytes(b []byte) {
+	if !lb.hasStats {
+		lb.minBytes = append([]byte(nil), b...)
+		lb.maxBytes = append([]byte(nil), b...)
+		lb.hasStats = true
 	} else {
-		if bytes.Compare(b, cb.minBytes) < 0 {
-			cb.minBytes = append(cb.minBytes[:0], b...)
+		if bytes.Compare(b, lb.minBytes) < 0 {
+			lb.minBytes = append(lb.minBytes[:0], b...)
 		}
-		if bytes.Compare(b, cb.maxBytes) > 0 {
-			cb.maxBytes = append(cb.maxBytes[:0], b...)
+		if bytes.Compare(b, lb.maxBytes) > 0 {
+			lb.maxBytes = append(lb.maxBytes[:0], b...)
 		}
 	}
 }
 
-func (cb *columnBuffer) buildStats() *Statistics {
-	s := &Statistics{NullCount: cb.numNulls}
-	if !cb.hasStats {
+func (lb *leafBuffer) buildStats() *Statistics {
+	s := &Statistics{NullCount: lb.numNulls}
+	if !lb.hasStats {
 		return s
 	}
-	switch cb.physical {
+	switch lb.physical {
 	case PhysicalInt32:
 		s.MinValue = make([]byte, 4)
 		s.MaxValue = make([]byte, 4)
-		binary.LittleEndian.PutUint32(s.MinValue, uint32(cb.minI32))
-		binary.LittleEndian.PutUint32(s.MaxValue, uint32(cb.maxI32))
+		binary.LittleEndian.PutUint32(s.MinValue, uint32(lb.minI32))
+		binary.LittleEndian.PutUint32(s.MaxValue, uint32(lb.maxI32))
 	case PhysicalInt64:
 		s.MinValue = make([]byte, 8)
 		s.MaxValue = make([]byte, 8)
-		binary.LittleEndian.PutUint64(s.MinValue, uint64(cb.minI64))
-		binary.LittleEndian.PutUint64(s.MaxValue, uint64(cb.maxI64))
+		binary.LittleEndian.PutUint64(s.MinValue, uint64(lb.minI64))
+		binary.LittleEndian.PutUint64(s.MaxValue, uint64(lb.maxI64))
 	case PhysicalFloat:
 		s.MinValue = make([]byte, 4)
 		s.MaxValue = make([]byte, 4)
-		binary.LittleEndian.PutUint32(s.MinValue, math.Float32bits(cb.minF32))
-		binary.LittleEndian.PutUint32(s.MaxValue, math.Float32bits(cb.maxF32))
+		binary.LittleEndian.PutUint32(s.MinValue, math.Float32bits(lb.minF32))
+		binary.LittleEndian.PutUint32(s.MaxValue, math.Float32bits(lb.maxF32))
 	case PhysicalDouble:
 		s.MinValue = make([]byte, 8)
 		s.MaxValue = make([]byte, 8)
-		binary.LittleEndian.PutUint64(s.MinValue, math.Float64bits(cb.minF64))
-		binary.LittleEndian.PutUint64(s.MaxValue, math.Float64bits(cb.maxF64))
+		binary.LittleEndian.PutUint64(s.MinValue, math.Float64bits(lb.minF64))
+		binary.LittleEndian.PutUint64(s.MaxValue, math.Float64bits(lb.maxF64))
 	case PhysicalByteArray:
-		s.MinValue = append([]byte(nil), cb.minBytes...)
-		s.MaxValue = append([]byte(nil), cb.maxBytes...)
+		s.MinValue = append([]byte(nil), lb.minBytes...)
+		s.MaxValue = append([]byte(nil), lb.maxBytes...)
 	}
 	return s
 }
@@ -732,31 +1181,45 @@ func convertStringToBytes(s string, colType TypeID) []byte {
 	}
 }
 
-// --- RLE encoding for definition levels ---
+// --- RLE encoding for definition and repetition levels ---
 
 // encodeDefLevelsRLE encodes definition levels using RLE/bit-packing hybrid.
 // For nullable columns, bitWidth=1: 0=null, 1=present.
+// This is a backward-compatible wrapper around encodeLevelsRLE for flat schemas.
 func encodeDefLevelsRLE(nulls []bool, count int) []byte {
+	levels := make([]int32, count)
+	for i := 0; i < count; i++ {
+		if i >= len(nulls) || !nulls[i] {
+			levels[i] = 1 // present
+		}
+		// else levels[i] = 0 (null)
+	}
+	return encodeLevelsRLE(levels, count, 1)
+}
+
+// encodeLevelsRLE encodes int32 levels using RLE/bit-packing hybrid encoding
+// at the given bit width. Works for any max level (not just 0/1).
+func encodeLevelsRLE(levels []int32, count int, bitWidth int) []byte {
 	if count == 0 {
 		return nil
 	}
 
 	var buf []byte
+	valueBytes := (bitWidth + 7) / 8
 
-	// Encode as consecutive RLE runs.
 	i := 0
 	for i < count {
-		val := byte(1) // present
-		if i < len(nulls) && nulls[i] {
-			val = 0 // null
+		val := int32(0)
+		if i < len(levels) {
+			val = levels[i]
 		}
 
 		// Count consecutive same values.
 		runLen := 1
 		for i+runLen < count {
-			nextVal := byte(1)
-			if i+runLen < len(nulls) && nulls[i+runLen] {
-				nextVal = 0
+			nextVal := int32(0)
+			if i+runLen < len(levels) {
+				nextVal = levels[i+runLen]
 			}
 			if nextVal != val {
 				break
@@ -766,12 +1229,28 @@ func encodeDefLevelsRLE(nulls []bool, count int) []byte {
 
 		// RLE header: count << 1 (LSB=0 for RLE mode).
 		buf = appendVarint(buf, uint64(runLen)<<1)
-		// Value: 1 byte (bitWidth=1 → ceil(1/8) = 1).
-		buf = append(buf, val)
+		// Value: ceil(bitWidth/8) bytes, little-endian.
+		for b := 0; b < valueBytes; b++ {
+			buf = append(buf, byte(val>>(uint(b)*8)))
+		}
 		i += runLen
 	}
 
 	return buf
+}
+
+// bitsRequiredForMax returns the number of bits needed to represent values 0..maxVal.
+func bitsRequiredForMax(maxVal int32) int {
+	if maxVal <= 0 {
+		return 0
+	}
+	bits := 0
+	v := maxVal
+	for v > 0 {
+		bits++
+		v >>= 1
+	}
+	return bits
 }
 
 func appendVarint(buf []byte, v uint64) []byte {

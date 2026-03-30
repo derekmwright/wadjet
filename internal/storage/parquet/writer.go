@@ -84,26 +84,11 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 		cfg.RowGroupSize = 128 * 1024
 	}
 
-	if schemaHasComplexTypes(schema) {
-		return nil, fmt.Errorf("complex types (Array, Map, Row) not yet supported by native writer")
-	}
-
 	return &Writer{
 		schema: schema,
 		config: cfg,
 		nw:     NewNativeWriter(w, schema, cfg),
 	}, nil
-}
-
-// schemaHasComplexTypes returns true if any column uses Array, Map, or Row types.
-func schemaHasComplexTypes(schema Schema) bool {
-	for _, col := range schema.Columns {
-		switch col.Type {
-		case TypeArray, TypeMap, TypeRow:
-			return true
-		}
-	}
-	return false
 }
 
 // WriteRows writes a batch of rows to the Parquet file.
