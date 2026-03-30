@@ -1146,6 +1146,21 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 				fjType := mapExecJoinType(fj.JoinType)
 				fjHJ := exec.NewHashJoin(fjType, fj.JoinLeftKeys, fj.JoinRightKeys)
 				fjHJ.BuildTableAlias = fj.BuildTableAlias
+				// Share memory tracker with primary join so all hash table
+				// memory counts against the same budget. Without this, fused
+				// joins (e.g., orders 150M, partsupp 80M at SF100) build
+				// untracked hash tables that cause OOM.
+				if tracker != nil {
+					fjHJ.MemTracker = tracker
+					fjDir := e.spillDir
+					if fjDir == "" {
+						fjDir = os.TempDir()
+					}
+					if fjSpill, smErr := memory.NewSpillManager(fjDir, tracker); smErr == nil {
+						fjHJ.Spill = fjSpill
+						defer fjSpill.Cleanup()
+					}
+				}
 				var fjRowCount int64
 				for _, b := range fjBuild {
 					fjRowCount += int64(b.Len)

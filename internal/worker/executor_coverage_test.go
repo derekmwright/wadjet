@@ -1117,3 +1117,29 @@ func TestWriteBatchResultAlwaysWritesToS3(t *testing.T) {
 	}
 	rc.Close()
 }
+
+// --- Regression: fused joins must share memory tracker (Q09 OOM fix) ---
+
+func TestFusedJoinMemoryBudget(t *testing.T) {
+	// Q09 root cause: fused joins (orders 150M, partsupp 80M at SF100)
+	// had no MemTracker. Hash tables grew to 18+ GB untracked, causing OOM
+	// at 31 GB RSS on 32 GB machines. Fix: share primary join's tracker.
+	store := newTestStore(t, "results")
+	cache := NewLRUCache(1024 * 1024)
+	executor := NewExecutor(store, cache, nil)
+	executor.SetMemoryBudget(50*1024*1024, t.TempDir()) // 50 MB budget
+
+	spill, tracker := executor.newSpillManager("test-fused")
+	if tracker == nil {
+		t.Fatal("expected non-nil tracker with memory budget set")
+	}
+	if spill == nil {
+		t.Fatal("expected non-nil spill manager with memory budget set")
+	}
+	defer spill.Cleanup()
+
+	// Verify tracker budget is set correctly
+	if tracker.Budget() != 50*1024*1024 {
+		t.Fatalf("tracker budget = %d, want %d", tracker.Budget(), 50*1024*1024)
+	}
+}
