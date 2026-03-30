@@ -361,17 +361,15 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 					continue
 				}
 				inner.trackPooledBuf(data)
-				reader, err := parquet.NewReader(bytesReader(data), int64(len(data)))
+				reader, err := parquet.NewReaderFromBytes(data)
 				if err != nil {
 					if failedFiles.Add(1) == 1 {
 						firstErr.Store(fmt.Errorf("parquet %s (%d bytes): %w", entry.Path, len(data), err))
 					}
 					continue
 				}
-				// Also create a native FileReader for the direct page decode path.
-				// If this fails (e.g. unsupported encoding), we fall back to parquet-go.
-				nativeRdr, _ := parquet.OpenFileReaderFromBytes(data)
-				results[idx] = fileResult{reader: reader, nativeReader: nativeRdr, entry: entry}
+				// The Reader wraps a FileReader using data directly (zero-copy).
+				results[idx] = fileResult{reader: reader, nativeReader: reader.FileReader(), entry: entry}
 			}
 		}()
 	}
