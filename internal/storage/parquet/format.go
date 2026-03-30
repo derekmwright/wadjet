@@ -108,8 +108,10 @@ const (
 	CodecNone   CompressionCodec = 0
 	CodecSnappy CompressionCodec = 1
 	CodecGzip   CompressionCodec = 2
-	CodecLZ4    CompressionCodec = 3
-	CodecZstd   CompressionCodec = 4
+	CodecLZO    CompressionCodec = 3
+	CodecBrotli CompressionCodec = 4
+	CodecLZ4    CompressionCodec = 5
+	CodecZstd   CompressionCodec = 6
 	CodecLZ4Raw CompressionCodec = 7
 )
 
@@ -121,6 +123,10 @@ func (c CompressionCodec) String() string {
 		return "SNAPPY"
 	case CodecGzip:
 		return "GZIP"
+	case CodecLZO:
+		return "LZO"
+	case CodecBrotli:
+		return "BROTLI"
 	case CodecLZ4:
 		return "LZ4"
 	case CodecZstd:

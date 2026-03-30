@@ -262,7 +262,7 @@ func (nw *NativeWriter) writeColumnChunk(cb *columnBuffer) (uncompressed, compre
 	}
 	compressedSize := int32(len(compressedData))
 
-	// Build page header.
+	// Build page header with page-level statistics.
 	ph := &PageHeader{
 		Type:                 PageDataV1,
 		UncompressedPageSize: uncompressedSize,
@@ -272,6 +272,7 @@ func (nw *NativeWriter) writeColumnChunk(cb *columnBuffer) (uncompressed, compre
 			Encoding:                EncodingPlain,
 			DefinitionLevelEncoding: EncodingRLE,
 			RepetitionLevelEncoding: EncodingRLE,
+			Statistics:              cb.buildStats(),
 		},
 	}
 

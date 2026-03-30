@@ -17,9 +17,9 @@ func ReadFileBatchesNative(fr *pqt.FileReader, schema []pqt.Column, selectedCols
 		readSchema = projectSchema(schema, selectedCols)
 	}
 
-	// Schemas with types unsupported by the columnar reader fall back to rows.
-	// NOTE: row-based fallback still requires parquet-go (ReadRows). For now,
-	// only the columnar path is native.
+	// Schemas with types unsupported by the columnar reader return an error.
+	// Callers with Array/Map/Decimal columns should use ReadFileBatches (parquet-go)
+	// until the native reader supports those types.
 	if hasUnsupportedColumnarTypes(readSchema) {
 		return nil, fmt.Errorf("native reader does not support Array/Map/Decimal types yet")
 	}
