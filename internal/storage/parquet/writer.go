@@ -101,10 +101,13 @@ func DefaultWriterConfig() WriterConfig {
 }
 
 // Writer writes rows to a Parquet file.
+// Uses NativeWriter for flat schemas and falls back to parquet-go for complex
+// types (Array, Map, Row) until NativeWriter gains nested type support.
 type Writer struct {
 	schema Schema
 	config WriterConfig
-	pw     *goparquet.GenericWriter[map[string]any]
+	nw     *NativeWriter                         // used for flat schemas
+	pw     *goparquet.GenericWriter[map[string]any] // fallback for complex schemas
 }
 
 // NewWriter creates a Parquet writer that writes to the given io.Writer.
@@ -113,27 +116,37 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 		cfg.RowGroupSize = 128 * 1024
 	}
 
-	parquetSchema, err := buildParquetSchema(schema)
-	if err != nil {
-		return nil, fmt.Errorf("building parquet schema: %w", err)
-	}
-
-	opts := []goparquet.WriterOption{
-		parquetSchema,
-		compressionCodec(cfg.Compression),
-		goparquet.CreatedBy("wadjet", "0.1.0", ""),
-	}
-	if cfg.PageBufferSize > 0 {
-		opts = append(opts, goparquet.PageBufferSize(cfg.PageBufferSize))
-	}
-
-	pw := goparquet.NewGenericWriter[map[string]any](w, opts...)
-
-	return &Writer{
+	wr := &Writer{
 		schema: schema,
 		config: cfg,
-		pw:     pw,
-	}, nil
+	}
+
+	if schemaHasComplexTypes(schema) {
+		pqSchema, err := buildParquetSchema(schema)
+		if err != nil {
+			return nil, fmt.Errorf("building parquet schema: %w", err)
+		}
+		pw := goparquet.NewGenericWriter[map[string]any](w, pqSchema,
+			goparquet.MaxRowsPerRowGroup(int64(cfg.RowGroupSize)),
+			compressionCodec(cfg.Compression),
+		)
+		wr.pw = pw
+	} else {
+		wr.nw = NewNativeWriter(w, schema, cfg)
+	}
+
+	return wr, nil
+}
+
+// schemaHasComplexTypes returns true if any column uses Array, Map, or Row types.
+func schemaHasComplexTypes(schema Schema) bool {
+	for _, col := range schema.Columns {
+		switch col.Type {
+		case TypeArray, TypeMap, TypeRow:
+			return true
+		}
+	}
+	return false
 }
 
 // WriteRows writes a batch of rows to the Parquet file.
@@ -141,14 +154,11 @@ func NewWriter(w io.Writer, schema Schema, cfg WriterConfig) (*Writer, error) {
 // representations to the internal binary format before writing.
 func (w *Writer) WriteRows(rows []map[string]any) error {
 	w.prepareRows(rows)
-	_, err := w.pw.Write(rows)
-	return err
-}
-
-// WriteParquetRows writes pre-built parquet.Row values directly, bypassing map conversion.
-func (w *Writer) WriteParquetRows(rows []goparquet.Row) error {
-	_, err := w.pw.WriteRows(rows)
-	return err
+	if w.pw != nil {
+		_, err := w.pw.Write(rows)
+		return err
+	}
+	return w.nw.WriteMapRows(rows)
 }
 
 // prepareRows converts network/typed values in maps to parquet-compatible representations.
@@ -235,7 +245,10 @@ func (w *Writer) prepareRows(rows []map[string]any) {
 
 // Close finalizes the Parquet file and closes the writer.
 func (w *Writer) Close() error {
-	return w.pw.Close()
+	if w.pw != nil {
+		return w.pw.Close()
+	}
+	return w.nw.Close()
 }
 
 func buildParquetSchema(schema Schema) (*goparquet.Schema, error) {

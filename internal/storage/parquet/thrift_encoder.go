@@ -508,6 +508,12 @@ func (e *thriftEncoder) encodeDataPageHeader(dph *DataPageHeader) {
 	e.writeFieldHeader(4, thriftI32, &lastFieldID)
 	e.writeI32(int32(dph.RepetitionLevelEncoding))
 
+	// field 5: statistics (optional)
+	if dph.Statistics != nil {
+		e.writeFieldHeader(5, thriftStruct, &lastFieldID)
+		e.encodeStatistics(dph.Statistics)
+	}
+
 	e.writeStop()
 }
 

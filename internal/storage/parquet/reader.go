@@ -85,7 +85,8 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 
 		ci, err := cc.ColumnIndex()
 		if err != nil {
-			stats.Columns[colName] = ColumnStats{HasStats: false}
+			// No ColumnIndex pages — fall back to scanning data pages.
+			stats.Columns[colName] = r.statsFromPages(cc)
 			continue
 		}
 
@@ -123,6 +124,40 @@ func (r *Reader) RowGroupStats(index int) RowGroupStats {
 	}
 
 	return stats
+}
+
+// statsFromPages collects column statistics by iterating data pages.
+// Used as a fallback when ColumnIndex pages are not present in the file.
+func (r *Reader) statsFromPages(cc goparquet.ColumnChunk) ColumnStats {
+	pages := cc.Pages()
+	defer pages.Close()
+
+	cs := ColumnStats{}
+	for {
+		page, err := pages.ReadPage()
+		if err != nil || page == nil {
+			break
+		}
+		cs.NullCount += page.NumNulls()
+		pageMin, pageMax, ok := page.Bounds()
+		if !ok {
+			continue
+		}
+		cs.HasStats = true
+		if !pageMin.IsNull() {
+			native := parquetValueToNative(pageMin)
+			if cs.MinValue == nil || CompareNative(native, cs.MinValue) < 0 {
+				cs.MinValue = native
+			}
+		}
+		if !pageMax.IsNull() {
+			native := parquetValueToNative(pageMax)
+			if cs.MaxValue == nil || CompareNative(native, cs.MaxValue) > 0 {
+				cs.MaxValue = native
+			}
+		}
+	}
+	return cs
 }
 
 // ReadRows reads all rows from the Parquet file, optionally selecting only specific columns.
