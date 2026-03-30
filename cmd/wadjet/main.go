@@ -146,49 +146,53 @@ func serveCmd() *cobra.Command {
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(logLevel)}))
 
 			if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
-				goMemLimit := memLimit * 9 / 10
+				maxConc := int64(maxConcurrent)
+				if maxConc < 1 {
+					maxConc = 1
+				}
+
+				// Memory envelope: 75% of detected limit. Leaves 25% headroom
+				// for OS page cache, kernel buffers, and non-Go allocations.
+				// (Previous 90% left only 3 GB on 32 GB machines — not enough.)
+				goMemLimit := memLimit * 3 / 4
 				debug.SetMemoryLimit(goMemLimit)
 				// Disable percentage-based GC trigger and rely solely on GOMEMLIMIT.
-				// Workers keep a large LRU file cache (25% of memory) as long-lived
-				// heap. With GOGC=100, GC assist forces marking tax on every allocation
-				// proportional to live data — causing 2-3x query slowdowns when the
-				// cache is populated. GOGC=off + GOMEMLIMIT is Go's recommended
-				// configuration for workloads with large stable live data.
+				// Workers keep an LRU file cache as long-lived heap. With GOGC=100,
+				// GC assist forces marking tax on every allocation proportional to
+				// live data — causing 2-3x query slowdowns when the cache is populated.
+				// GOGC=off + GOMEMLIMIT is Go's recommended configuration for
+				// workloads with large stable live data.
 				debug.SetGCPercent(-1)
 				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", "off")
 
 				if cacheBytes == 0 {
 					if memoryBudget > 0 {
 						// With explicit memory budget, scale cache to fit alongside
-						// task memory. Pipeline dead objects accumulate with GOGC=off,
-						// so leave headroom = budget * concurrent * 2 for GC lag.
-						maxConc := int64(maxConcurrent)
-						if maxConc < 1 {
-							maxConc = 1
-						}
-						taskFootprint := memoryBudget * maxConc * 2
-						headroom := memLimit / 10
-						available := memLimit - taskFootprint - headroom
+						// task memory. Each task uses ~3x its tracked budget in total
+						// RSS (tracked + hash table arenas + intermediate batches).
+						taskFootprint := memoryBudget * maxConc * 3
+						headroom := goMemLimit / 10
+						available := goMemLimit - taskFootprint - headroom
 						if available < 256*1024*1024 {
 							available = 256 * 1024 * 1024
 						}
-						if defaultCache := memLimit / 5; available > defaultCache {
-							available = defaultCache
+						if maxCache := goMemLimit / 5; available > maxCache {
+							available = maxCache
 						}
 						cacheBytes = available
 					} else {
-						// Default: 20% of memory for cross-query S3 file cache.
-						cacheBytes = memLimit / 5
+						// Default: 10% of envelope for cross-query S3 file cache.
+						cacheBytes = goMemLimit / 10
 					}
 					logger.Info("auto-detected file cache size", "cache_bytes", cacheBytes)
 				}
 				if memoryBudget == 0 {
-					// Per-task spill budget: available memory minus cache and runtime
-					// overhead. Hash table internal structures (index, arena, chains)
-					// add ~30% untracked overhead on top of tracked batch data, so the
-					// budget must leave room for that plus Go GC working set.
-					memoryBudget = (memLimit - cacheBytes) * 2 / 5
-					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget)
+					// Per-task spill budget. Each task consumes ~3x its tracked
+					// budget in total RSS due to untracked hash table arenas,
+					// intermediate pipeline batches, and Go GC working set.
+					// Formula: (envelope - cache) / (3 * maxConcurrent)
+					memoryBudget = (goMemLimit - cacheBytes) / (3 * maxConc)
+					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget, "max_concurrent", maxConc)
 				}
 			}
 
