@@ -16,6 +16,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/expr"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
@@ -5465,15 +5466,17 @@ type scanSourceInner struct {
 	rowLimit       int64                     // >0: lazy file downloading (LIMIT pushdown)
 
 	// row-group-level parallel scan
-	rgUnits []rgUnit // flat list of row group work units
-	rgIdx   int64    // atomic index for parallel RG workers
+	rgUnits   []rgUnit // flat list of row group work units
+	rgIdx     int64    // atomic index for parallel RG workers
+	useNative bool     // true if native page decoder can be used (no Decimal/Array/Map)
 
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
 
 	// cached column mapping — computed once, reused across all row groups
-	colMappings []colMapEntry // fileIdx → batchIdx mapping (nil = not yet computed)
-	colMapMu    sync.Mutex
+	colMappings    []colMapEntry    // fileIdx → batchIdx mapping (nil = not yet computed)
+	colMapMu       sync.Mutex
+	cachedReadSchema []parquet.Column // projected schema, computed once
 
 	// parallel scan
 	batchCh chan *batch.RecordBatch
@@ -5650,6 +5653,8 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 				inner.pool = batch.NewBatchPool(readSchema, rgSize)
 				inner.pool.PreWarm(runtime.NumCPU())
 			}
+			// Pre-compute whether native page decoding can be used.
+			inner.useNative = !scan.HasUnsupportedColumnarTypes(readSchema)
 		}
 
 		workers := runtime.NumCPU()
@@ -5784,7 +5789,11 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 
 // readSchema returns the column-projected schema for this scan.
 func (inner *scanSourceInner) readSchema() []parquet.Column {
+	if inner.cachedReadSchema != nil {
+		return inner.cachedReadSchema
+	}
 	if len(inner.requiredCols) == 0 {
+		inner.cachedReadSchema = inner.schema
 		return inner.schema
 	}
 	needed := make(map[string]bool, len(inner.requiredCols))
@@ -5798,8 +5807,10 @@ func (inner *scanSourceInner) readSchema() []parquet.Column {
 		}
 	}
 	if len(filtered) > 0 {
+		inner.cachedReadSchema = filtered
 		return filtered
 	}
+	inner.cachedReadSchema = inner.schema
 	return inner.schema
 }
 

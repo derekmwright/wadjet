@@ -472,6 +472,11 @@ type rgUnit struct {
 	fileEntry   catalog.FileEntry
 	rg          goparquet.RowGroup
 	rgRowOffset int64 // cumulative row offset within the file (for delete markers)
+
+	// Native reader fields — when nativeReader is non-nil, the native page
+	// decoder is used instead of parquet-go's ReadPage path.
+	nativeReader *parquet.FileReader
+	rgIndex      int // row group index within the native reader
 }
 
 // prefetchResult holds a speculatively read row group batch and its unit index.
@@ -491,8 +496,9 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 
 	type fileResult struct {
-		reader *parquet.Reader
-		entry  catalog.FileEntry
+		reader       *parquet.Reader
+		nativeReader *parquet.FileReader
+		entry        catalog.FileEntry
 	}
 
 	results := make([]fileResult, len(inner.files))
@@ -547,7 +553,10 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 					}
 					continue
 				}
-				results[idx] = fileResult{reader: reader, entry: entry}
+				// Also create a native FileReader for the direct page decode path.
+				// If this fails (e.g. unsupported encoding), we fall back to parquet-go.
+				nativeRdr, _ := parquet.OpenFileReaderFromBytes(data)
+				results[idx] = fileResult{reader: reader, nativeReader: nativeRdr, entry: entry}
 			}
 		}()
 	}
@@ -607,10 +616,12 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 			}
 
 			inner.rgUnits = append(inner.rgUnits, rgUnit{
-				pqFile:      pqFile,
-				fileEntry:   fr.entry,
-				rg:          rg,
-				rgRowOffset: rowOffset,
+				pqFile:       pqFile,
+				fileEntry:    fr.entry,
+				rg:           rg,
+				rgRowOffset:  rowOffset,
+				nativeReader: fr.nativeReader,
+				rgIndex:      rgIdx,
 			})
 			rowOffset += rg.NumRows()
 		}
@@ -820,8 +831,19 @@ func (inner *scanSourceInner) getColMappings(file *goparquet.File, readSchema []
 	return mappings
 }
 
-// readRG reads a row group using the pool when the size matches.
+// readRG reads a row group using the native page decoder when available,
+// falling back to parquet-go's ReadPage path otherwise.
 func (inner *scanSourceInner) readRG(unit rgUnit) *batch.RecordBatch {
+	// Native path: bypass parquet-go entirely — decode pages directly into vectors.
+	if inner.useNative && unit.nativeReader != nil {
+		b, err := scan.ReadRowGroupNative(unit.nativeReader, unit.rgIndex, inner.readSchema(), inner.pool)
+		if err == nil {
+			return b
+		}
+		// Fall through to parquet-go on error (e.g. unsupported encoding).
+	}
+
+	// parquet-go fallback path.
 	numRows := int(unit.rg.NumRows())
 	if inner.pool != nil && numRows == inner.pool.BatchSize() {
 		b := inner.pool.Get()
