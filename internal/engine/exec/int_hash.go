@@ -194,6 +194,11 @@ func (h *intHashTable) EnsureCapacity(additional int) {
 // Len returns the number of entries in the table.
 func (h *intHashTable) Len() int { return h.size }
 
+// MemoryUsage returns the total heap bytes consumed by the hash table.
+func (h *intHashTable) MemoryUsage() int64 {
+	return int64(cap(h.entries)) * 16 // sizeof(intHashEntry) = 16
+}
+
 // ForEach iterates over all entries in the table.
 func (h *intHashTable) ForEach(fn func(key int64, val int32)) {
 	for i := range h.entries {
