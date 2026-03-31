@@ -58,9 +58,14 @@ func TestSpillManagerShouldSpill(t *testing.T) {
 		t.Fatal("should not spill at 0% usage")
 	}
 
-	tracker.Reserve(85)
+	tracker.Reserve(55)
+	if sm.ShouldSpill() {
+		t.Fatal("should not spill at 55% usage")
+	}
+
+	tracker.Reserve(10) // now at 65%
 	if !sm.ShouldSpill() {
-		t.Fatal("should spill at 85% usage")
+		t.Fatal("should spill at 65% usage")
 	}
 }
 

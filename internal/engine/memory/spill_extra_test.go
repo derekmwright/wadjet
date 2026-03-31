@@ -219,23 +219,23 @@ func TestShouldSpillThreshold(t *testing.T) {
 		t.Error("0% should not spill")
 	}
 
-	// 79% - should not spill (threshold is 80%)
-	tracker.Reserve(79)
+	// 59% - should not spill (threshold is 60%)
+	tracker.Reserve(59)
 	if sm.ShouldSpill() {
-		t.Error("79% should not spill")
+		t.Error("59% should not spill")
 	}
 
-	// Release back to 0 and reserve 80%
-	tracker.Release(79)
-	tracker.Reserve(80)
+	// Release back to 0 and reserve 60%
+	tracker.Release(59)
+	tracker.Reserve(60)
 	if sm.ShouldSpill() {
-		t.Error("exactly 80% should not spill (> not >=)")
+		t.Error("exactly 60% should not spill (> not >=)")
 	}
 
-	// 81% - should spill
-	tracker.Release(80)
-	tracker.Reserve(81)
+	// 61% - should spill
+	tracker.Release(60)
+	tracker.Reserve(61)
 	if !sm.ShouldSpill() {
-		t.Error("81% should trigger spill")
+		t.Error("61% should trigger spill")
 	}
 }

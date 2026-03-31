@@ -190,12 +190,12 @@ func serveCmd() *cobra.Command {
 					logger.Info("auto-detected file cache size", "cache_bytes", cacheBytes)
 				}
 				if memoryBudget == 0 {
-					// Per-task spill budget. Each task consumes ~5x its tracked
-					// budget in total RSS due to hash table overhead (grow()
-					// doubles entries), SoA accumulator arrays, Go GC working
-					// set, scanner buffers, and Parquet decompression buffers.
-					// Formula: (envelope - cache) / (5 * maxConcurrent)
-					memoryBudget = (goMemLimit - cacheBytes) / (5 * maxConc)
+					// Per-task spill budget. Reduced from 5x to 4x: hash table
+					// reconciliation now uses ForceReserve for accurate tracking,
+					// and spill threshold lowered to 60%, enabling tighter budgets
+					// without OOM risk on multi-join queries.
+					// Formula: (envelope - cache) / (4 * maxConcurrent)
+					memoryBudget = (goMemLimit - cacheBytes) / (4 * maxConc)
 					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget, "max_concurrent", maxConc)
 				}
 			}

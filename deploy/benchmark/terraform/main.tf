@@ -53,23 +53,23 @@ locals {
   has_profile = var.profile != ""
   _raw_p      = local.has_profile ? yamldecode(file("../profiles/${var.profile}.yaml")) : null
 
-  # Effective values: profile wins when set, otherwise use individual vars.
-  # Using try() to safely access profile fields that may be absent in the YAML.
-  eff_region       = local.has_profile ? try(local._raw_p.storage.region, var.region) : var.region
-  eff_scale        = local.has_profile ? try(local._raw_p.benchmark.scale_factor, var.scale_factor) : var.scale_factor
-  eff_mode         = local.has_profile ? try(local._raw_p.cluster.mode, var.mode) : var.mode
-  eff_workers      = local.has_profile ? try(local._raw_p.cluster.workers, var.worker_count) : var.worker_count
-  eff_coord_type   = local.has_profile ? try(local._raw_p.cluster.coordinator_instance, var.coordinator_instance_type) : var.coordinator_instance_type
-  eff_worker_type  = local.has_profile ? try(local._raw_p.cluster.worker_instance, var.worker_instance_type) : var.worker_instance_type
-  eff_arch         = local.has_profile ? try(local._raw_p.cluster.arch, var.arch) : var.arch
-  eff_spot         = local.has_profile ? try(local._raw_p.cluster.use_spot, var.use_spot) : var.use_spot
-  eff_data_bucket  = local.has_profile ? try(local._raw_p.storage.bucket, var.data_bucket) : var.data_bucket
-  eff_runs         = local.has_profile ? try(local._raw_p.benchmark.runs, var.benchmark_runs) : var.benchmark_runs
-  eff_prefix       = local.has_profile ? try(local._raw_p.storage.data_prefix, var.data_prefix) : var.data_prefix
-  eff_timeout      = local.has_profile ? try(local._raw_p.benchmark.query_timeout, var.query_timeout) : var.query_timeout
-  eff_generate     = local.has_profile ? try(!local._raw_p.benchmark.skip_load, var.generate_data) : var.generate_data
-  eff_skip_queries = local.has_profile ? try(join(",", [for q in local._raw_p.benchmark.skip_queries : tostring(q)]), var.skip_queries) : var.skip_queries
-  eff_bench_type   = local.has_profile ? try(local._raw_p.benchmark.type, var.benchmark_type) : var.benchmark_type
+  # Effective values: explicit -var wins > profile > ultimate default.
+  # Variables use null defaults so we can detect explicit overrides.
+  eff_region       = var.region != null ? var.region : (local.has_profile ? try(local._raw_p.storage.region, "us-east-2") : "us-east-2")
+  eff_scale        = var.scale_factor != null ? var.scale_factor : (local.has_profile ? try(local._raw_p.benchmark.scale_factor, 1) : 1)
+  eff_mode         = var.mode != null ? var.mode : (local.has_profile ? try(local._raw_p.cluster.mode, "standalone") : "standalone")
+  eff_workers      = var.worker_count != null ? var.worker_count : (local.has_profile ? try(local._raw_p.cluster.workers, 3) : 3)
+  eff_coord_type   = var.coordinator_instance_type != null ? var.coordinator_instance_type : (local.has_profile ? try(local._raw_p.cluster.coordinator_instance, "c7g.2xlarge") : "c7g.2xlarge")
+  eff_worker_type  = var.worker_instance_type != null ? var.worker_instance_type : (local.has_profile ? try(local._raw_p.cluster.worker_instance, "c7g.2xlarge") : "c7g.2xlarge")
+  eff_arch         = var.arch != null ? var.arch : (local.has_profile ? try(local._raw_p.cluster.arch, "arm64") : "arm64")
+  eff_spot         = var.use_spot != null ? var.use_spot : (local.has_profile ? try(local._raw_p.cluster.use_spot, true) : true)
+  eff_data_bucket  = var.data_bucket != null ? var.data_bucket : (local.has_profile ? try(local._raw_p.storage.bucket, "") : "")
+  eff_runs         = var.benchmark_runs != null ? var.benchmark_runs : (local.has_profile ? try(local._raw_p.benchmark.runs, 1) : 1)
+  eff_prefix       = var.data_prefix != null ? var.data_prefix : (local.has_profile ? try(local._raw_p.storage.data_prefix, "tables/") : "tables/")
+  eff_timeout      = var.query_timeout != null ? var.query_timeout : (local.has_profile ? try(local._raw_p.benchmark.query_timeout, "10m") : "10m")
+  eff_generate     = var.generate_data != null ? var.generate_data : (local.has_profile ? try(!local._raw_p.benchmark.skip_load, false) : false)
+  eff_skip_queries = var.skip_queries != null ? var.skip_queries : (local.has_profile ? try(join(",", [for q in local._raw_p.benchmark.skip_queries : tostring(q)]), "") : "")
+  eff_bench_type   = var.benchmark_type != null ? var.benchmark_type : (local.has_profile ? try(local._raw_p.benchmark.type, "tpch") : "tpch")
 
   create_bucket = local.eff_data_bucket == ""
   bucket_name   = local.create_bucket ? aws_s3_bucket.benchmark[0].bucket : local.eff_data_bucket
