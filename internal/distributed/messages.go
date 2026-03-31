@@ -169,17 +169,32 @@ type ResultNotification struct {
 
 	Duration  time.Duration `json:"duration"`
 	Timestamp time.Time     `json:"timestamp"`
+
+	// Task execution stats (populated by worker for debugging)
+	TaskStats *TaskStats `json:"task_stats,omitempty"`
+}
+
+// TaskStats captures per-task execution metrics for debugging.
+type TaskStats struct {
+	MemUsed    int64 `json:"mem_used"`    // memory tracker usage at completion
+	MemBudget  int64 `json:"mem_budget"`  // memory budget for this task
+	SpillFiles int   `json:"spill_files"` // number of spill files written
+	SpillBytes int64 `json:"spill_bytes"` // total bytes spilled to disk
+	RSS        int64 `json:"rss"`         // worker process RSS at task completion
 }
 
 // WorkerHeartbeat is periodically sent by workers.
 type WorkerHeartbeat struct {
-	WorkerID     string    `json:"worker_id"`
-	ClusterID    string    `json:"cluster_id,omitempty"` // cluster this worker belongs to
-	ActiveTasks  int       `json:"active_tasks"`
-	MemoryUsed   int64     `json:"memory_used"`
-	MemoryTotal  int64     `json:"memory_total"`
-	Draining     bool      `json:"draining,omitempty"` // true when worker is draining
-	Timestamp    time.Time `json:"timestamp"`
+	WorkerID      string    `json:"worker_id"`
+	ClusterID     string    `json:"cluster_id,omitempty"` // cluster this worker belongs to
+	ActiveTasks   int       `json:"active_tasks"`
+	MemoryUsed    int64     `json:"memory_used"`
+	MemoryTotal   int64     `json:"memory_total"`
+	RSS           int64     `json:"rss,omitempty"`             // process RSS from /proc/self/status
+	NumGoroutines int       `json:"num_goroutines,omitempty"`
+	SpillDiskUsed int64     `json:"spill_disk_used,omitempty"` // bytes used in spill directory
+	Draining      bool      `json:"draining,omitempty"`        // true when worker is draining
+	Timestamp     time.Time `json:"timestamp"`
 }
 
 // QueryManifest describes the final results of a query.

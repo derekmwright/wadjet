@@ -530,12 +530,20 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 		case <-ticker.C:
 			tickCounter++
 
+			var memStats runtime.MemStats
+			runtime.ReadMemStats(&memStats)
+
 			hb := distributed.WorkerHeartbeat{
-				WorkerID:    w.config.WorkerID,
-				ClusterID:   w.config.ClusterID,
-				ActiveTasks: len(sem),
-				Draining:    w.Draining(),
-				Timestamp:   time.Now(),
+				WorkerID:      w.config.WorkerID,
+				ClusterID:     w.config.ClusterID,
+				ActiveTasks:   len(sem),
+				MemoryUsed:    int64(memStats.Alloc),
+				MemoryTotal:   int64(memStats.Sys),
+				RSS:           distributed.ProcessRSS(),
+				NumGoroutines: distributed.NumGoroutines(),
+				SpillDiskUsed: distributed.DirDiskUsage(w.config.SpillDir),
+				Draining:      w.Draining(),
+				Timestamp:     time.Now(),
 			}
 
 			data, err := distributed.Marshal(hb)

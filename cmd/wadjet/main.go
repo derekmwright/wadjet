@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -74,6 +75,7 @@ var (
 	natsTLSCA        string
 	otelEndpoint     string
 	otelInsecure     bool
+	metricsAddr      string
 )
 
 func main() {
@@ -115,6 +117,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&pgTLSKey, "pg-tls-key", "", "TLS private key file for PostgreSQL wire protocol")
 	rootCmd.PersistentFlags().StringVar(&queryTimeout, "query-timeout", "0", "Default query timeout (e.g. 30s, 5m, 0=unlimited)")
 	rootCmd.PersistentFlags().IntVar(&maxConcurrentQry, "max-concurrent-queries", 0, "Maximum concurrent queries (0=unlimited)")
+	rootCmd.PersistentFlags().StringVar(&metricsAddr, "metrics-addr", ":9100", "Prometheus metrics listen address (worker mode)")
 	rootCmd.PersistentFlags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum concurrent tasks per worker")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
@@ -1059,6 +1062,22 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		SpillDir:         spillDir,
 		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)
+
+	// Initialize Prometheus metrics
+	m := metrics.New()
+	w.SetMetrics(m)
+
+	// Start /metrics HTTP endpoint for Prometheus scraping
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", m.Handler())
+	metricsSrv := &http.Server{Addr: metricsAddr, Handler: metricsMux}
+	go func() {
+		logger.Info("worker metrics server listening", "addr", metricsAddr)
+		if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			logger.Error("metrics server error", "error", err)
+		}
+	}()
+	defer metricsSrv.Shutdown(context.Background())
 
 	// Initialize OTel tracing on worker
 	workerOtelTP := initTelemetry(ctx, logger)
