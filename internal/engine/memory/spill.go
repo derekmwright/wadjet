@@ -27,13 +27,17 @@ const (
 	spillEndMarker     byte = 0x00
 )
 
+// spillFileSeq is a global atomic counter for unique spill file names.
+// Prevents filename collisions when multiple SpillManagers (from concurrent
+// tasks on the same worker) write to the same directory.
+var spillFileSeq atomic.Int64
+
 // SpillManager handles spilling data to disk when memory budget is exceeded.
 type SpillManager struct {
 	dir     string
 	tracker *Tracker
 	mu      sync.Mutex
 	files   []string
-	nextID  atomic.Int64
 }
 
 // NewSpillManager creates a spill manager that writes temp files to the given directory.
@@ -83,8 +87,8 @@ func (sm *SpillManager) SpillRows(rows []map[string]any) (string, error) {
 		return "", nil
 	}
 
-	id := sm.nextID.Add(1)
-	path := filepath.Join(sm.dir, fmt.Sprintf("spill-%d.bin", id))
+	id := spillFileSeq.Add(1)
+	path := filepath.Join(sm.dir, fmt.Sprintf("spill-%d.%d.bin", os.Getpid(), id))
 
 	f, err := os.Create(path)
 	if err != nil {

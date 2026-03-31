@@ -163,6 +163,66 @@ func TestSpillEmptyRows(t *testing.T) {
 	}
 }
 
+// TestSpillConcurrentManagers verifies that multiple SpillManagers sharing the
+// same base directory produce unique file names. Before the fix, per-instance
+// atomic counters caused collisions (spill-1.bin vs spill-1.bin) when concurrent
+// tasks ran on the same worker — one task's Cleanup would delete another's files.
+func TestSpillConcurrentManagers(t *testing.T) {
+	baseDir := t.TempDir()
+	tracker := NewTracker("test", 100*1024*1024)
+
+	const numManagers = 4
+	const filesPerManager = 5
+	managers := make([]*SpillManager, numManagers)
+	allPaths := make([][]string, numManagers)
+
+	// Create multiple SpillManagers sharing the same base directory,
+	// simulating concurrent tasks on the same worker.
+	for i := range managers {
+		sm, err := NewSpillManager(baseDir, tracker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		managers[i] = sm
+	}
+
+	// Write spill files from all managers concurrently.
+	rows := []map[string]any{{"id": int64(1), "val": "test"}}
+	for i, sm := range managers {
+		for j := 0; j < filesPerManager; j++ {
+			path, err := sm.SpillRows(rows)
+			if err != nil {
+				t.Fatalf("manager %d file %d: %v", i, j, err)
+			}
+			allPaths[i] = append(allPaths[i], path)
+		}
+	}
+
+	// Verify no path collisions across managers.
+	seen := make(map[string]int)
+	for i, paths := range allPaths {
+		for _, p := range paths {
+			if prev, ok := seen[p]; ok {
+				t.Fatalf("path collision: manager %d and %d both produced %s", prev, i, p)
+			}
+			seen[p] = i
+		}
+	}
+
+	// Verify that cleaning up one manager doesn't break another's files.
+	managers[0].Cleanup()
+	for _, path := range allPaths[1] {
+		if _, err := ReadSpilledRows(path); err != nil {
+			t.Fatalf("manager 1 file unreadable after manager 0 cleanup: %v", err)
+		}
+	}
+
+	// Clean up remaining.
+	for _, sm := range managers[1:] {
+		sm.Cleanup()
+	}
+}
+
 func TestSpillLargeDataset(t *testing.T) {
 	tracker := NewTracker("test", 100*1024*1024)
 	sm, err := NewSpillManager(t.TempDir(), tracker)
