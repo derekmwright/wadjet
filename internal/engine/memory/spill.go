@@ -58,7 +58,7 @@ func (sm *SpillManager) ShouldSpill() bool {
 	if sm.tracker == nil || sm.tracker.Budget() <= 0 {
 		return false
 	}
-	return sm.tracker.Used() > sm.tracker.Budget()*80/100 // spill at 80%
+	return sm.tracker.Used() > sm.tracker.Budget()*60/100 // spill at 60%
 }
 
 // TrackBatch adds an estimated batch size to the memory tracker.

@@ -1,53 +1,53 @@
 variable "profile" {
-  description = "Benchmark profile name (e.g., sf100-distributed). Reads ../profiles/<profile>.yaml as the single source of truth for benchmark config. When set, overrides scale_factor, mode, worker_count, instance types, data_bucket, data_prefix, query_timeout, etc."
+  description = "Benchmark profile name (e.g., sf100-distributed). Reads ../profiles/<profile>.yaml for benchmark config. Individual -var flags override profile values when explicitly set."
   type        = string
   default     = ""
 }
 
 variable "region" {
-  description = "AWS region (overridden by profile when set)"
+  description = "AWS region (null = use profile or default us-east-2)"
   type        = string
-  default     = "us-east-2"
+  default     = null
 }
 
 variable "scale_factor" {
-  description = "TPC-H scale factor (1, 10, or 100)"
+  description = "TPC-H scale factor (1, 10, or 100). null = use profile or default 1."
   type        = number
-  default     = 1
+  default     = null
 
   validation {
-    condition     = contains([1, 10, 100], var.scale_factor)
+    condition     = var.scale_factor == null || contains([1, 10, 100], var.scale_factor)
     error_message = "scale_factor must be 1, 10, or 100"
   }
 }
 
 variable "mode" {
-  description = "Benchmark mode: standalone or distributed"
+  description = "Benchmark mode: standalone or distributed. null = use profile or default standalone."
   type        = string
-  default     = "standalone"
+  default     = null
 
   validation {
-    condition     = contains(["standalone", "distributed"], var.mode)
+    condition     = var.mode == null || contains(["standalone", "distributed"], var.mode)
     error_message = "mode must be standalone or distributed"
   }
 }
 
 variable "coordinator_instance_type" {
-  description = "EC2 instance type for coordinator (distributed mode)"
+  description = "EC2 instance type for coordinator (distributed mode). null = use profile or default c7g.2xlarge."
   type        = string
-  default     = "c7g.2xlarge"
+  default     = null
 }
 
 variable "worker_instance_type" {
-  description = "EC2 instance type for standalone or worker nodes"
+  description = "EC2 instance type for standalone or worker nodes. null = use profile or default c7g.2xlarge."
   type        = string
-  default     = "c7g.2xlarge"
+  default     = null
 }
 
 variable "worker_count" {
-  description = "Number of workers (distributed mode only)"
+  description = "Number of workers (distributed mode only). null = use profile or default 3."
   type        = number
-  default     = 3
+  default     = null
 }
 
 variable "go_version" {
@@ -63,21 +63,21 @@ variable "memory_budget" {
 }
 
 variable "benchmark_runs" {
-  description = "Number of benchmark runs per query (use 1 for profiling, 3 for final benchmarks)"
+  description = "Number of benchmark runs per query. null = use profile or default 1."
   type        = number
-  default     = 1
+  default     = null
 }
 
 variable "use_spot" {
-  description = "Use spot instances (~60-70% cheaper, risk of reclamation mid-benchmark)"
+  description = "Use spot instances. null = use profile or default true."
   type        = bool
-  default     = true
+  default     = null
 }
 
 variable "data_bucket" {
-  description = "Existing S3 bucket with TPC-H data. If empty, creates an ephemeral bucket. Use this to preserve data across cluster rebuilds."
+  description = "Existing S3 bucket with TPC-H data. null = use profile; empty string = create ephemeral bucket."
   type        = string
-  default     = ""
+  default     = null
 }
 
 variable "bin_version" {
@@ -87,9 +87,9 @@ variable "bin_version" {
 }
 
 variable "generate_data" {
-  description = "Set to true to regenerate TPC-H data instead of using pre-seeded bucket"
+  description = "Set to true to regenerate TPC-H data instead of using pre-seeded bucket. null = use profile."
   type        = bool
-  default     = false
+  default     = null
 }
 
 variable "run_duckdb_comparison" {
@@ -99,15 +99,15 @@ variable "run_duckdb_comparison" {
 }
 
 variable "skip_queries" {
-  description = "Comma-separated query numbers to skip (e.g. '2,17')"
+  description = "Comma-separated query numbers to skip (e.g. '2,17'). null = use profile."
   type        = string
-  default     = ""
+  default     = null
 }
 
 variable "query_timeout" {
-  description = "Per-query timeout (Go duration, e.g. '10m', '30m'). 0 = no timeout."
+  description = "Per-query timeout (Go duration, e.g. '10m', '30m'). null = use profile or default 10m."
   type        = string
-  default     = "10m"
+  default     = null
 }
 
 variable "max_concurrent" {
@@ -123,29 +123,29 @@ variable "cache_bytes" {
 }
 
 variable "data_prefix" {
-  description = "S3 prefix for table data (e.g. 'tables/' or '' for root-level paths)"
+  description = "S3 prefix for table data (e.g. 'tables/' or '' for root-level paths). null = use profile."
   type        = string
-  default     = "tables/"
+  default     = null
 }
 
 variable "benchmark_type" {
-  description = "Benchmark suite to run: tpch or security"
+  description = "Benchmark suite to run: tpch or security. null = use profile or default tpch."
   type        = string
-  default     = "tpch"
+  default     = null
 
   validation {
-    condition     = contains(["tpch", "security"], var.benchmark_type)
+    condition     = var.benchmark_type == null || contains(["tpch", "security"], var.benchmark_type)
     error_message = "benchmark_type must be tpch or security"
   }
 }
 
 variable "arch" {
-  description = "CPU architecture: arm64 (Graviton) or x86_64 (Intel/AMD)"
+  description = "CPU architecture: arm64 (Graviton) or x86_64 (Intel/AMD). null = use profile or default arm64."
   type        = string
-  default     = "arm64"
+  default     = null
 
   validation {
-    condition     = contains(["arm64", "x86_64"], var.arch)
+    condition     = var.arch == null || contains(["arm64", "x86_64"], var.arch)
     error_message = "arch must be arm64 or x86_64"
   }
 }

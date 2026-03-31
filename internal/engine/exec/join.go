@@ -624,7 +624,7 @@ func (h *HashJoin) reconcileHashMemory() {
 	actual := h.hashTableOverhead()
 	if actual > h.trackedHashOverhead {
 		delta := actual - h.trackedHashOverhead
-		h.MemTracker.Reserve(delta) // best-effort; don't fail the build
+		h.MemTracker.ForceReserve(delta) // always track; triggers ShouldSpill sooner
 		h.trackedHashOverhead = actual
 		h.trackedMem += delta
 	}
