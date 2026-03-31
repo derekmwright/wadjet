@@ -1762,13 +1762,23 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 			return
 		}
 
-		c.logger.Debug("received result",
+		logAttrs := []any{
 			"task_id", result.TaskID,
 			"query_id", result.QueryID,
 			"stage_id", result.StageID,
 			"success", result.Success,
 			"rows", result.NumRows,
-		)
+		}
+		if s := result.TaskStats; s != nil {
+			logAttrs = append(logAttrs,
+				"mem_used", s.MemUsed,
+				"mem_budget", s.MemBudget,
+				"spill_files", s.SpillFiles,
+				"spill_bytes", s.SpillBytes,
+				"rss", s.RSS,
+			)
+		}
+		c.logger.Debug("received result", logAttrs...)
 
 		stageComplete := c.tracker.RecordResult(result)
 		if !stageComplete {

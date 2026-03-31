@@ -164,6 +164,11 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		result.Success = true
 	}
 
+	// Ensure TaskStats is always populated (fallback for tasks without spill)
+	if result.TaskStats == nil {
+		result.TaskStats = &distributed.TaskStats{RSS: distributed.ProcessRSS()}
+	}
+
 	return result
 }
 
@@ -299,7 +304,7 @@ func (e *Executor) executeFusedScanAggregate(ctx context.Context, task distribut
 	if spill != nil {
 		agg.Spill = spill
 		defer spill.Cleanup()
-		defer e.recordSpillMetrics(spill, tracker)
+		defer func() { result.TaskStats = e.collectTaskStats(spill, tracker) }()
 	}
 
 	if err := agg.Init(ctx); err != nil {
@@ -663,7 +668,7 @@ func (e *Executor) executeAggregate(ctx context.Context, task distributed.Task, 
 	if spill != nil {
 		agg.Spill = spill
 		defer spill.Cleanup()
-		defer e.recordSpillMetrics(spill, tracker)
+		defer func() { result.TaskStats = e.collectTaskStats(spill, tracker) }()
 	}
 
 	if err := agg.Init(ctx); err != nil {
@@ -739,7 +744,7 @@ func (e *Executor) executeSort(ctx context.Context, task distributed.Task, resul
 	if spill != nil {
 		sortOp.Spill = spill
 		defer spill.Cleanup()
-		defer e.recordSpillMetrics(spill, tracker)
+		defer func() { result.TaskStats = e.collectTaskStats(spill, tracker) }()
 	}
 
 	if err := sortOp.Init(ctx); err != nil {
@@ -1112,7 +1117,7 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 		hj.Spill = spill
 		hj.MemTracker = tracker
 		defer spill.Cleanup()
-		defer e.recordSpillMetrics(spill, tracker)
+		defer func() { result.TaskStats = e.collectTaskStats(spill, tracker) }()
 	}
 
 	// Set semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
@@ -1333,7 +1338,7 @@ func (e *Executor) executeWindow(ctx context.Context, task distributed.Task, res
 	if spill != nil {
 		winOp.Spill = spill
 		defer spill.Cleanup()
-		defer e.recordSpillMetrics(spill, tracker)
+		defer func() { result.TaskStats = e.collectTaskStats(spill, tracker) }()
 	}
 
 	if err := winOp.Init(ctx); err != nil {
@@ -2221,30 +2226,37 @@ func schemaFromRows(rows []map[string]any) []parquet.Column {
 	return cols
 }
 
-// recordSpillMetrics updates Prometheus counters with spill stats after a task completes.
-func (e *Executor) recordSpillMetrics(spill *memory.SpillManager, tracker *memory.Tracker) {
-	if e.metrics == nil {
-		return
+// collectTaskStats gathers spill/memory stats for a completed task.
+// Updates Prometheus counters and returns stats for the result notification.
+func (e *Executor) collectTaskStats(spill *memory.SpillManager, tracker *memory.Tracker) *distributed.TaskStats {
+	stats := &distributed.TaskStats{
+		RSS: distributed.ProcessRSS(),
 	}
 
-	files := spill.SpilledFiles()
-	if len(files) > 0 {
-		e.metrics.SpillEvents.Add(float64(len(files)))
-
-		// Sum spill file sizes
-		var totalBytes int64
+	if spill != nil {
+		files := spill.SpilledFiles()
+		stats.SpillFiles = len(files)
 		for _, f := range files {
 			if info, err := os.Stat(f); err == nil {
-				totalBytes += info.Size()
+				stats.SpillBytes += info.Size()
 			}
 		}
-		e.metrics.SpillBytesWritten.Add(float64(totalBytes))
+		if e.metrics != nil && stats.SpillFiles > 0 {
+			e.metrics.SpillEvents.Add(float64(stats.SpillFiles))
+			e.metrics.SpillBytesWritten.Add(float64(stats.SpillBytes))
+		}
 	}
 
 	if tracker != nil {
-		e.metrics.MemoryBudgetBytes.Set(float64(tracker.Budget()))
-		e.metrics.MemoryUsedBytes.Set(float64(tracker.Used()))
+		stats.MemUsed = tracker.Used()
+		stats.MemBudget = tracker.Budget()
+		if e.metrics != nil {
+			e.metrics.MemoryBudgetBytes.Set(float64(stats.MemBudget))
+			e.metrics.MemoryUsedBytes.Set(float64(stats.MemUsed))
+		}
 	}
+
+	return stats
 }
 
 // aggregateNeededCols returns the minimal set of columns needed for an
