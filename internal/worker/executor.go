@@ -1130,72 +1130,53 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 		return fmt.Errorf("building hash table: %w", err)
 	}
 
-	// Build fused join hash tables in parallel (broadcast joins absorbed into
-	// this task). Each fused join has its own independent build side — no
-	// shared state between builds, so concurrent construction is safe.
+	// Build fused join hash tables sequentially (broadcast joins absorbed
+	// into this task). Sequential construction avoids concurrent peak memory
+	// from multiple large hash tables building at once — at SF100, orders
+	// (18 GB) + partsupp (10 GB) building simultaneously would OOM before
+	// either can trigger a spill.
 	fusedProbes := make([]*exec.HashJoinProbe, len(task.FusedJoins))
 	fusedTypes := make([]exec.JoinType, len(task.FusedJoins))
 	fusedFilters := make([][]string, len(task.FusedJoins))
-	if len(task.FusedJoins) > 0 {
-		fusedErrs := make([]error, len(task.FusedJoins))
-		var fusedWG sync.WaitGroup
-		for i, fj := range task.FusedJoins {
-			fusedWG.Add(1)
-			go func(idx int, fj distributed.FusedJoinSpec) {
-				defer fusedWG.Done()
-				fjBuild, err := e.readInputFilesBatches(ctx, task.ResultBucket, fj.BuildFiles, nil)
-				if err != nil {
-					fusedErrs[idx] = fmt.Errorf("reading fused join %d build files: %w", idx, err)
-					return
-				}
-				fjType := mapExecJoinType(fj.JoinType)
-				fjHJ := exec.NewHashJoin(fjType, fj.JoinLeftKeys, fj.JoinRightKeys)
-				fjHJ.BuildTableAlias = fj.BuildTableAlias
-				// Share memory tracker with primary join so all hash table
-				// memory counts against the same budget. Without this, fused
-				// joins (e.g., orders 150M, partsupp 80M at SF100) build
-				// untracked hash tables that cause OOM.
-				if tracker != nil {
-					fjHJ.MemTracker = tracker
-					fjDir := e.spillDir
-					if fjDir == "" {
-						fjDir = os.TempDir()
-					}
-					if fjSpill, smErr := memory.NewSpillManager(fjDir, tracker); smErr == nil {
-						fjHJ.Spill = fjSpill
-						defer fjSpill.Cleanup()
-					}
-				}
-				var fjRowCount int64
-				for _, b := range fjBuild {
-					fjRowCount += int64(b.Len)
-				}
-				if fjRowCount > 0 {
-					fjHJ.BuildRowHint = fjRowCount
-				}
-				if fj.JoinFilter != "" && (fjType == exec.SemiJoin || fjType == exec.AntiJoin) {
-					fjHJ.SemiAntiFilter = physical.BuildSemiAntiFilter(fj.JoinFilter)
-				}
-				if err := fjHJ.Build(ctx, &batchSource{batches: fjBuild}); err != nil {
-					fusedErrs[idx] = fmt.Errorf("building fused join %d hash table: %w", idx, err)
-					return
-				}
-				fjProbe := fjHJ.Probe()
-				if err := fjProbe.Init(ctx); err != nil {
-					fusedErrs[idx] = fmt.Errorf("init fused join %d probe: %w", idx, err)
-					return
-				}
-				fusedProbes[idx] = fjProbe
-				fusedTypes[idx] = fjType
-				fusedFilters[idx] = fj.FilterExprs
-			}(i, fj)
+	for i, fj := range task.FusedJoins {
+		fjBuild, err := e.readInputFilesBatches(ctx, task.ResultBucket, fj.BuildFiles, nil)
+		if err != nil {
+			return fmt.Errorf("reading fused join %d build files: %w", i, err)
 		}
-		fusedWG.Wait()
-		for _, err := range fusedErrs {
-			if err != nil {
-				return err
+		fjType := mapExecJoinType(fj.JoinType)
+		fjHJ := exec.NewHashJoin(fjType, fj.JoinLeftKeys, fj.JoinRightKeys)
+		fjHJ.BuildTableAlias = fj.BuildTableAlias
+		if tracker != nil {
+			fjHJ.MemTracker = tracker
+			fjDir := e.spillDir
+			if fjDir == "" {
+				fjDir = os.TempDir()
+			}
+			if fjSpill, smErr := memory.NewSpillManager(fjDir, tracker); smErr == nil {
+				fjHJ.Spill = fjSpill
+				defer fjSpill.Cleanup()
 			}
 		}
+		var fjRowCount int64
+		for _, b := range fjBuild {
+			fjRowCount += int64(b.Len)
+		}
+		if fjRowCount > 0 {
+			fjHJ.BuildRowHint = fjRowCount
+		}
+		if fj.JoinFilter != "" && (fjType == exec.SemiJoin || fjType == exec.AntiJoin) {
+			fjHJ.SemiAntiFilter = physical.BuildSemiAntiFilter(fj.JoinFilter)
+		}
+		if err := fjHJ.Build(ctx, &batchSource{batches: fjBuild}); err != nil {
+			return fmt.Errorf("building fused join %d hash table: %w", i, err)
+		}
+		fjProbe := fjHJ.Probe()
+		if err := fjProbe.Init(ctx); err != nil {
+			return fmt.Errorf("init fused join %d probe: %w", i, err)
+		}
+		fusedProbes[i] = fjProbe
+		fusedTypes[i] = fjType
+		fusedFilters[i] = fj.FilterExprs
 	}
 
 	// For RIGHT and FULL OUTER joins, we may still have results even

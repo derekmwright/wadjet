@@ -622,10 +622,10 @@ func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 		t.Fatalf("expected 1 join stage, got %d", len(joins))
 	}
 
-	// Verify shuffle properties (numPartitions = workerCount * 4 = 16)
+	// Verify shuffle properties (numPartitions = workerCount * 8 = 32)
 	for _, s := range shuffles {
-		if s.NumPartitions != 16 {
-			t.Errorf("shuffle %s: expected 16 partitions, got %d", s.ID, s.NumPartitions)
+		if s.NumPartitions != 32 {
+			t.Errorf("shuffle %s: expected 32 partitions, got %d", s.ID, s.NumPartitions)
 		}
 		if len(s.ShuffleKeys) == 0 {
 			t.Errorf("shuffle %s: no shuffle keys", s.ID)
@@ -634,11 +634,11 @@ func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 
 	// Verify join stage is partitioned
 	js := joins[0]
-	if js.NumPartitions != 16 {
-		t.Errorf("join: expected 16 partitions, got %d", js.NumPartitions)
+	if js.NumPartitions != 32 {
+		t.Errorf("join: expected 32 partitions, got %d", js.NumPartitions)
 	}
-	if js.Tasks != 16 {
-		t.Errorf("join: expected 16 tasks, got %d", js.Tasks)
+	if js.Tasks != 32 {
+		t.Errorf("join: expected 32 tasks, got %d", js.Tasks)
 	}
 	// Join should depend on shuffle stages, not scan stages
 	for _, dep := range js.Dependencies {

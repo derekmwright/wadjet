@@ -1775,12 +1775,14 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		// Insert shuffle stages for non-broadcast joins when distributed
 		numPartitions := 0
 		if !isBroadcast && jt != "cross" && len(leftKeys) > 0 && p.WorkerCount > 1 {
-			// Use 4x workers as partition count to reduce per-task join memory.
+			// Use 8x workers as partition count to reduce per-task join memory.
 			// Each partition receives 1/numPartitions of the shuffled data, so
 			// higher counts reduce peak hash table memory on each worker.
-			numPartitions = p.WorkerCount * 4
-			if numPartitions < 8 {
-				numPartitions = 8
+			// At SF100 with 3 workers, 24 partitions halves per-partition
+			// memory compared to the previous 12.
+			numPartitions = p.WorkerCount * 8
+			if numPartitions < 16 {
+				numPartitions = 16
 			}
 
 			// Compute columns the shuffle must preserve: join keys + all
@@ -1977,12 +1979,16 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if err != nil {
 		return false
 	}
-	totalFiles := 0
+	var totalBytes int64
 	for _, part := range manifest.Partitions {
-		totalFiles += len(part.Files)
+		for _, f := range part.Files {
+			totalBytes += f.SizeBytes
+		}
 	}
-	// Heuristic: assume ~10MB per file, broadcast if < 10 files
-	return totalFiles <= 10
+	// Broadcast if build side is under 100 MB.  At SF100 partsupp is ~10 GB
+	// and was incorrectly broadcast under the old file-count heuristic,
+	// forcing every worker to build a 10 GB hash table.
+	return totalBytes <= 100*1024*1024
 }
 
 // findScanNode walks through pass-through nodes (Filter, Project, Limit)
