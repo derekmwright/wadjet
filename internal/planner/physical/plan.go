@@ -1002,6 +1002,7 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 	var shuffleStages, sortStages int
 	var totalScanBytes int64
 	var hasSemiAnti, hasFusedAgg bool
+	joinCount := 0
 	for _, s := range stages {
 		switch {
 		case s.Type == "shuffle":
@@ -1013,11 +1014,21 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 			if len(s.FusedAggSpecs) > 0 {
 				hasFusedAgg = true
 			}
-		case s.Type == "hash_join":
+		case s.Type == "hash_join" || s.Type == "broadcast_join":
 			if s.JoinType == "semi" || s.JoinType == "anti" {
 				hasSemiAnti = true
 			}
+			joinCount++
 		}
+		joinCount += len(s.FusedJoins)
+	}
+
+	// Deep join chains with large data MUST distribute — a single worker
+	// cannot hold 3+ hash tables in memory at SF100 scale. The cost model
+	// below was tuned for SF10 where data fits; at SF100 it incorrectly
+	// picks pipeline mode, causing OOM.
+	if joinCount >= 3 && totalScanBytes > 1<<30 {
+		return false
 	}
 
 	scanGB := float64(totalScanBytes) / (1 << 30)
@@ -1190,8 +1201,15 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 		}
 	}
 
-	// Need enough files to give each worker meaningful work.
-	if bestAlias == "" || len(bestFiles) < workerCount*2 || bestBytes < 64*1024*1024 {
+	// Need enough files to give each worker meaningful work. For large
+	// datasets (> 1 GB), relax from 2 files/worker to 1 file/worker since
+	// each file is substantial. At SF100, tables may have only 3-6 files
+	// but each is multi-GB.
+	minFiles := workerCount * 2
+	if bestBytes > 1<<30 {
+		minFiles = workerCount
+	}
+	if bestAlias == "" || len(bestFiles) < minFiles || bestBytes < 64*1024*1024 {
 		return "", nil, false
 	}
 
