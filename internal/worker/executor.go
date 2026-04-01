@@ -117,6 +117,37 @@ func (e *Executor) newSpillManager(taskID string) (*memory.SpillManager, *memory
 	return sm, tracker
 }
 
+// newSpillManagerScaled creates a Tracker + SpillManager with a budget scaled
+// by the number of concurrent hash tables. Join tasks with N fused joins need
+// N+1 hash tables in memory simultaneously during probing. Without scaling,
+// each table gets 1/(N+1) of the budget, triggering premature spill.
+func (e *Executor) newSpillManagerScaled(taskID string, joinCount int) (*memory.SpillManager, *memory.Tracker) {
+	if e.memoryBudget <= 0 {
+		return nil, nil
+	}
+
+	budget := e.memoryBudget
+	if joinCount > 1 {
+		budget = e.memoryBudget * int64(joinCount)
+	}
+
+	tracker := memory.NewTracker(taskID, budget)
+
+	dir := e.spillDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+
+	sm, err := memory.NewSpillManager(dir, tracker)
+	if err != nil {
+		e.logger.Warn("failed to create spill manager, running without spill",
+			"task_id", taskID, "error", err)
+		return nil, tracker
+	}
+
+	return sm, tracker
+}
+
 // Execute runs a task and returns the result notification.
 func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID string) distributed.ResultNotification {
 	start := time.Now()
@@ -1111,8 +1142,12 @@ func (e *Executor) executeJoin(ctx context.Context, task distributed.Task, resul
 		hj.BuildRowHint = buildRowCount
 	}
 
-	// Wire spill manager if memory budget is set.
-	spill, tracker := e.newSpillManager(task.ID)
+	// Wire spill manager if memory budget is set. Scale budget up for
+	// fused joins: each fused join builds a hash table that must coexist
+	// in memory with the primary join's hash table during probing.
+	// Without scaling, a task with 3 fused joins gets 1/4 the effective
+	// budget per join, triggering premature spill on every table.
+	spill, tracker := e.newSpillManagerScaled(task.ID, 1+len(task.FusedJoins))
 	if spill != nil {
 		hj.Spill = spill
 		hj.MemTracker = tracker
