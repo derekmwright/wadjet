@@ -1,8 +1,10 @@
 package coordinator
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 
 	"github.com/klauspost/compress/s2"
@@ -15,7 +17,8 @@ import (
 // decompresses it back to raw WSHF format. Non-compressed data is returned as-is.
 func decompressShuffleData(data []byte) ([]byte, error) {
 	if len(data) >= 4 && data[0] == 'W' && data[1] == 'S' && data[2] == 'H' && data[3] == 'C' {
-		decoded, err := s2.Decode(nil, data[4:])
+		r := s2.NewReader(bytes.NewReader(data[4:]))
+		decoded, err := io.ReadAll(r)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing shuffle data: %w", err)
 		}

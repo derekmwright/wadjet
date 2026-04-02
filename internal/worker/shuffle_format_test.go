@@ -140,6 +140,72 @@ func TestShuffleFormatDetection(t *testing.T) {
 	}
 }
 
+func TestShuffleCompressedRoundTrip(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: false},
+		{Name: "name", Type: parquet.TypeString, Nullable: false},
+	}
+
+	// Create enough data that S2 compression actually kicks in (needs >10% savings).
+	const rowCount = 2048
+	rb := batch.NewRecordBatch(schema, rowCount)
+	for i := 0; i < rowCount; i++ {
+		rb.Columns[0].Int64Data[i] = int64(i)
+		rb.Columns[1].BytesData.Set(i, []byte("repeated-value-for-compression"))
+	}
+
+	var buf bytes.Buffer
+	sw := newShuffleWriter(&buf, schema)
+	if err := sw.writeHeader(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sw.writeChunk(rb.Columns, nil, rowCount); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	raw[4] = byte(sw.numChunks)
+
+	// Compress to WSHC format
+	compressed := CompressShuffleData(raw)
+	if len(compressed) < 4 {
+		t.Fatal("compressed data too short")
+	}
+	if string(compressed[:4]) != "WSHC" {
+		t.Fatalf("expected WSHC magic, got %q (data may be too small to compress)", compressed[:4])
+	}
+
+	// Verify WSHC is detected as shuffle format
+	if !isShuffleFormat(compressed) {
+		t.Error("compressed shuffle data should be detected as shuffle format")
+	}
+
+	// Decompress and read — must succeed
+	decompressed, err := DecompressShuffleData(compressed)
+	if err != nil {
+		t.Fatalf("DecompressShuffleData: %v", err)
+	}
+	batches, err := shuffleReadBatches(decompressed)
+	if err != nil {
+		t.Fatalf("shuffleReadBatches after decompress: %v", err)
+	}
+	if len(batches) != 1 || batches[0].Len != rowCount {
+		t.Fatalf("expected 1 batch with %d rows, got %d batches", rowCount, len(batches))
+	}
+	if batches[0].Columns[0].Int64Data[0] != 0 {
+		t.Errorf("got id=%d, want 0", batches[0].Columns[0].Int64Data[0])
+	}
+	if batches[0].Columns[0].Int64Data[rowCount-1] != int64(rowCount-1) {
+		t.Errorf("got last id=%d, want %d", batches[0].Columns[0].Int64Data[rowCount-1], rowCount-1)
+	}
+
+	// Reading compressed data WITHOUT decompressing must fail
+	// (this was the bug in executeMergeSorted)
+	_, err = shuffleReadBatches(compressed)
+	if err == nil {
+		t.Error("reading WSHC data without decompressing should fail")
+	}
+}
+
 func BenchmarkShuffleWriteVsParquet(b *testing.B) {
 	schema := []parquet.Column{
 		{Name: "key", Type: parquet.TypeInt64, Nullable: false},

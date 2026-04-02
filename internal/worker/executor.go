@@ -912,6 +912,11 @@ func (e *Executor) executeMergeSorted(ctx context.Context, task distributed.Task
 				fileResults[idx] = fileResult{err: err}
 				return
 			}
+			data, err = DecompressShuffleData(data)
+			if err != nil {
+				fileResults[idx] = fileResult{err: fmt.Errorf("decompressing shuffle data: %w", err)}
+				return
+			}
 			var batches []*batch.RecordBatch
 			if isShuffleFormat(data) {
 				batches, err = shuffleReadBatches(data)

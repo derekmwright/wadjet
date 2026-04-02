@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -552,22 +553,29 @@ func isShuffleFormat(data []byte) bool {
 // compressedMagic identifies a compressed WSHF payload.
 var compressedMagic = [4]byte{'W', 'S', 'H', 'C'}
 
-// CompressShuffleData compresses raw WSHF data using S2 (Snappy-compatible).
-// Returns data with "WSHC" magic prefix followed by the S2-compressed payload.
+// CompressShuffleData compresses raw WSHF data using S2 streaming format.
+// Returns data with "WSHC" magic prefix followed by the S2 stream.
+// Uses streaming (not block) format to support arbitrarily large payloads.
 // If the compressed output is not smaller, the original WSHF data is returned.
 func CompressShuffleData(data []byte) []byte {
 	if len(data) < 64 {
 		return data // too small to benefit
 	}
-	compressed := s2.Encode(nil, data)
-	// Only use compression if it saves at least 10%
-	if len(compressed) >= len(data)*9/10 {
+	var buf bytes.Buffer
+	buf.Grow(len(data)/2 + 4)
+	buf.Write(compressedMagic[:])
+	w := s2.NewWriter(&buf)
+	if _, err := w.Write(data); err != nil {
 		return data
 	}
-	out := make([]byte, 4+len(compressed))
-	copy(out[:4], compressedMagic[:])
-	copy(out[4:], compressed)
-	return out
+	if err := w.Close(); err != nil {
+		return data
+	}
+	// Only use compression if it saves at least 10%
+	if buf.Len() >= len(data)*9/10 {
+		return data
+	}
+	return buf.Bytes()
 }
 
 // DecompressShuffleData detects and decompresses a WSHC payload back to raw WSHF.
@@ -580,7 +588,8 @@ func DecompressShuffleData(data []byte) ([]byte, error) {
 		data[2] != compressedMagic[2] || data[3] != compressedMagic[3] {
 		return data, nil // not compressed
 	}
-	decoded, err := s2.Decode(nil, data[4:])
+	r := s2.NewReader(bytes.NewReader(data[4:]))
+	decoded, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("decompressing shuffle data: %w", err)
 	}
