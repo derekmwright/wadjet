@@ -397,7 +397,7 @@ resource "aws_instance" "coordinator" {
 
   ami                                  = data.aws_ami.al2023.id
   instance_type                        = local.eff_coord_type
-  instance_initiated_shutdown_behavior = local.eff_spot ? null : "terminate"
+  instance_initiated_shutdown_behavior = "stop"
   vpc_security_group_ids               = [aws_security_group.bench.id]
   iam_instance_profile                 = aws_iam_instance_profile.bench.name
   subnet_id                            = data.aws_subnets.default.ids[0]
@@ -409,16 +409,10 @@ resource "aws_instance" "coordinator" {
     iops        = 3000
   }
 
-  dynamic "instance_market_options" {
-    for_each = local.eff_spot ? [1] : []
-    content {
-      market_type = "spot"
-      spot_options {
-        instance_interruption_behavior = "terminate"
-        spot_instance_type             = "one-time"
-      }
-    }
-  }
+  # Coordinator always runs on-demand — it's cheap (c7g.2xlarge = $0.29/hr)
+  # and the entire benchmark fails if it gets spot-terminated. Workers use
+  # spot since they auto-reconnect on restart.
+  # shutdown_behavior = stop so we can inspect logs if the benchmark crashes.
 
   user_data = base64encode(local.coordinator_user_data)
 
