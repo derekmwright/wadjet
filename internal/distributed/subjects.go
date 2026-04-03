@@ -25,6 +25,11 @@ const (
 	// Catalog locks — NATS KV
 	SubjectCatalogLock = "wadjet.catalog.lock"
 
+	// Query active check — Core NATS request/reply
+	// Workers ask coordinator if a query is still active before executing
+	// stale tasks pulled from JetStream.
+	SubjectQueryActive = "wadjet.query.active"
+
 	// Worker profile collection — Core NATS request/reply
 	SubjectProfileStart   = "wadjet.workers.profile.start"
 	SubjectProfileCollect = "wadjet.workers.profile.collect"

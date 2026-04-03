@@ -309,6 +309,7 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
 	coord.StartQueryReaper(ctx)
+	coord.StartQueryActiveHandler()
 
 	// Wait for remote workers
 	log.Printf("Waiting for %d remote workers to connect...", workerCount)

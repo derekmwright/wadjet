@@ -327,12 +327,24 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	// Skip tasks for cancelled queries
+	// Skip tasks for cancelled queries (local cache from broadcast)
 	if w.isCancelled(task.QueryID) {
 		w.logger.Debug("skipping task for cancelled query",
 			"task_id", task.ID, "query_id", task.QueryID)
 		msg.Term()
 		return
+	}
+
+	// Check with coordinator if query is still active. Catches stale tasks
+	// that linger in JetStream after a query was killed (e.g., watchdog).
+	// ~1ms overhead per task, prevents minutes of wasted work.
+	if resp, err := w.nc.Request(distributed.SubjectQueryActive, []byte(task.QueryID), 2*time.Second); err == nil {
+		if string(resp.Data) == "0" {
+			w.logger.Info("skipping task for inactive query",
+				"task_id", task.ID, "query_id", task.QueryID)
+			msg.Term()
+			return
+		}
 	}
 
 	// Inject trace context from the task into the Go context

@@ -2051,6 +2051,22 @@ func (c *Coordinator) StartQueryReaper(ctx context.Context) {
 	}()
 }
 
+// StartQueryActiveHandler subscribes to query-active check requests from workers.
+// Workers ask "is query X still active?" before executing tasks pulled from
+// JetStream, preventing wasted work on queries killed by the watchdog.
+func (c *Coordinator) StartQueryActiveHandler() {
+	c.nc.Subscribe(distributed.SubjectQueryActive, func(msg *nats.Msg) {
+		queryID := string(msg.Data)
+		info := c.tracker.Get(queryID)
+		active := info != nil && (info.State == QueryStatePending || info.State == QueryStateRunning)
+		if active {
+			msg.Respond([]byte("1"))
+		} else {
+			msg.Respond([]byte("0"))
+		}
+	})
+}
+
 // materializeInlineResults writes inline results to S3 so downstream stages can
 // read them. Updates the tracker's result entries with materialized paths.
 // Writes are parallelized to minimize wall-clock time at stage boundaries.
