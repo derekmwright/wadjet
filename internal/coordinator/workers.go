@@ -26,6 +26,7 @@ type WorkerRegistry struct {
 	workers map[string]*WorkerInfo
 	stale   time.Duration // workers not heard from in this long are considered dead
 	logger  *slog.Logger
+	nc      *nats.Conn
 	sub     *nats.Subscription
 }
 
@@ -51,6 +52,7 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 		workers: make(map[string]*WorkerInfo),
 		stale:   staleTTL,
 		logger:  logger,
+		nc:      nc,
 	}
 
 	sub, err := nc.Subscribe(distributed.SubjectHeartbeat, func(msg *nats.Msg) {
@@ -113,6 +115,9 @@ func (wr *WorkerRegistry) Count() int {
 }
 
 // ReapStale removes workers that haven't sent a heartbeat recently.
+// Reaped workers receive a drain message so they stop pulling new tasks
+// from the JetStream consumer. If the worker is truly dead, the drain
+// is a no-op; if it's alive but GC-stalled, it will stop accepting work.
 func (wr *WorkerRegistry) ReapStale() int {
 	wr.mu.Lock()
 	defer wr.mu.Unlock()
@@ -123,6 +128,12 @@ func (wr *WorkerRegistry) ReapStale() int {
 		if w.LastSeen.Before(cutoff) {
 			delete(wr.workers, id)
 			wr.logger.Info("worker reaped (stale)", "worker_id", id)
+			// Tell the worker to stop pulling tasks. Best-effort: if the
+			// worker process is dead, the NATS connection is already gone.
+			if wr.nc != nil {
+				drainSubject := "wadjet.worker." + id + ".drain"
+				wr.nc.Publish(drainSubject, nil)
+			}
 			reaped++
 		}
 	}

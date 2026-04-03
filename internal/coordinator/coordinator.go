@@ -1846,8 +1846,9 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 
 	// Stale-stage watchdog: detects stages where result notifications were
 	// lost (raw NATS publish is fire-and-forget) and fails the query instead
-	// of waiting forever. Checks every 2 minutes; fails after 10 minutes
-	// with no progress on a scheduled stage.
+	// of waiting forever. Checks every 2 minutes; fails after 20 minutes
+	// with no progress on a scheduled stage. The 20-minute threshold allows
+	// for AckWait redelivery (5 min) + full pipeline execution on SF100.
 	go func() {
 		ticker := time.NewTicker(2 * time.Minute)
 		defer ticker.Stop()
@@ -1856,13 +1857,13 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 			case <-cancelCtx.Done():
 				return
 			case <-ticker.C:
-				stalled := c.tracker.StalledStages(queryID, 10*time.Minute)
+				stalled := c.tracker.StalledStages(queryID, 20*time.Minute)
 				if len(stalled) == 0 {
 					continue
 				}
 				c.logger.Error("stages stalled — failing query",
 					"query_id", queryID, "stalled_stages", stalled)
-				c.tracker.Fail(queryID, fmt.Sprintf("stages %v stalled: tasks did not report results within 10m", stalled))
+				c.tracker.Fail(queryID, fmt.Sprintf("stages %v stalled: tasks did not report results within 20m", stalled))
 				c.cleanupQuery(queryID)
 				select {
 				case done <- struct{}{}:
