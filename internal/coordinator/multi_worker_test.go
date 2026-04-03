@@ -230,7 +230,7 @@ func TestScanSplitFusedAgg(t *testing.T) {
 	}
 
 	// Load TPC-H data, splitting lineitem into multiple files to trigger
-	// scan-split. ShouldSplitScan requires totalScanFiles >= workerCount*2.
+	// probe-split. CanProbeSplit requires enough files to distribute across workers.
 	data := tpch.Generate(tpch.SF001)
 	for tableName, schema := range tpch.AllTables {
 		if err := cat.CreateTable(ctx, tableName, schema, nil); err != nil {
@@ -242,7 +242,7 @@ func TestScanSplitFusedAgg(t *testing.T) {
 		}
 
 		if tableName == "lineitem" && len(rows) > 20 {
-			// Split lineitem into 8 files to trigger scan-split with 3 workers
+			// Split lineitem into 8 files to trigger probe-split with 3 workers
 			chunkSize := len(rows) / 8
 			if chunkSize < 1 {
 				chunkSize = 1
@@ -274,8 +274,8 @@ func TestScanSplitFusedAgg(t *testing.T) {
 				if _, err := store.Put(ctx, "test", filePath, bytes.NewReader(pdata), int64(len(pdata)), "application/octet-stream"); err != nil {
 					t.Fatalf("storing %s chunk %d: %v", tableName, ci, err)
 				}
-				// Inflate SizeBytes so ShouldSplitScan sees enough data
-				// to trigger scan-split (needs totalScanBytes >= workerCount * 64MB).
+				// Inflate SizeBytes so CanProbeSplit sees enough data
+				// to trigger probe-split distribution across workers.
 				// The actual file content is small but the planner only reads metadata.
 				entries = append(entries, catalog.FileEntry{
 					Path:      filePath,

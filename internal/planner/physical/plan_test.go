@@ -955,7 +955,7 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "hash_join", JoinType: "inner"},
 			},
 			workers:  3,
-			wantPipe: true, // shuffle overhead > negative parallelism benefit (scan too small)
+			wantPipe: true, // 150 MB < 1.5 GB (2 shuffles × 768 MB)
 		},
 		{
 			name: "large scan no shuffles → distributed",
@@ -964,7 +964,7 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "aggregate"},
 			},
 			workers:  3,
-			wantPipe: false, // 0.5s overhead < 4.2s parallelism benefit
+			wantPipe: false, // 6 GB > 768 MB (no shuffles → 1 × 768 MB)
 		},
 		{
 			name: "large scan with many shuffles → pipeline",
@@ -975,11 +975,9 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "shuffle"},
 				{Type: "shuffle"},
 				{Type: "hash_join", JoinType: "inner"},
-				{Type: "sort"},
-				{Type: "merge_sort"},
 			},
 			workers:  3,
-			wantPipe: true, // 5.3s overhead > 1.1s parallelism benefit
+			wantPipe: true, // 2 GB < 3 GB (4 shuffles × 768 MB)
 		},
 		{
 			name: "huge scan outweighs shuffle overhead → distributed",
@@ -990,10 +988,10 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "hash_join", JoinType: "inner"},
 			},
 			workers:  3,
-			wantPipe: false, // 5.5s overhead < 15s parallelism benefit
+			wantPipe: false, // 20 GB > 1.5 GB (2 shuffles × 768 MB)
 		},
 		{
-			name: "large scan 2 shuffles inner join → distributed (Q12-like)",
+			name: "large scan 2 shuffles → distributed (Q12-like)",
 			stages: []Stage{
 				{Type: "scan", EstimatedBytes: 7500 << 20}, // 7.3 GB (lineitem)
 				{Type: "scan", EstimatedBytes: 1700 << 20}, // 1.7 GB (orders)
@@ -1002,57 +1000,25 @@ func TestShouldRoutePipeline(t *testing.T) {
 				{Type: "hash_join", JoinType: "inner"},
 				{Type: "aggregate"},
 				{Type: "final_aggregate"},
-				{Type: "sort"},
-				{Type: "merge_sort"},
 			},
 			workers:  3,
-			wantPipe: false, // 5.3s overhead < 6.5s benefit (inner join, compute parallelism)
+			wantPipe: false, // 9 GB > 1.5 GB (2 shuffles × 768 MB)
 		},
 		{
-			name: "large scan 2 shuffles semi join → pipeline (Q04-like)",
+			name: "deep join chain large data → forced distributed",
 			stages: []Stage{
 				{Type: "scan", EstimatedBytes: 7500 << 20}, // 7.3 GB (lineitem)
 				{Type: "scan", EstimatedBytes: 1700 << 20}, // 1.7 GB (orders)
+				{Type: "scan", EstimatedBytes: 250 << 20},  // 250 MB (supplier)
 				{Type: "shuffle"},
-				{Type: "shuffle"},
-				{Type: "hash_join", JoinType: "semi"},
-				{Type: "aggregate"},
-				{Type: "final_aggregate"},
-				{Type: "sort"},
-				{Type: "merge_sort"},
-			},
-			workers:  3,
-			wantPipe: true, // 5.3s overhead > 2.0s benefit (semi join discount)
-		},
-		{
-			name: "huge scan 2 shuffles semi join → distributed (Q04 SF100-like)",
-			stages: []Stage{
-				{Type: "scan", EstimatedBytes: 25 << 30}, // 25 GB (lineitem SF100 compressed)
-				{Type: "scan", EstimatedBytes: 3 << 30},  // 3 GB (orders SF100 compressed)
-				{Type: "shuffle"},
-				{Type: "shuffle"},
-				{Type: "hash_join", JoinType: "semi"},
-				{Type: "aggregate"},
-				{Type: "final_aggregate"},
-				{Type: "sort"},
-				{Type: "merge_sort"},
-			},
-			workers:  3,
-			wantPipe: false, // >10 GB scan: 0.7x discount, parallelism wins
-		},
-		{
-			name: "large scan 2 shuffles no sort → distributed (Q14-like)",
-			stages: []Stage{
-				{Type: "scan", EstimatedBytes: 7500 << 20}, // 7.3 GB (lineitem)
-				{Type: "scan", EstimatedBytes: 250 << 20},  // 240 MB (part)
 				{Type: "shuffle"},
 				{Type: "shuffle"},
 				{Type: "hash_join", JoinType: "inner"},
-				{Type: "aggregate"},
-				{Type: "final_aggregate"},
+				{Type: "hash_join", JoinType: "inner"},
+				{Type: "hash_join", JoinType: "semi"},
 			},
 			workers:  3,
-			wantPipe: false, // 3.0s overhead < 5.0s benefit
+			wantPipe: false, // 3+ joins with >1 GB → forced distributed
 		},
 	}
 	for _, tt := range tests {
@@ -1176,98 +1142,6 @@ func TestCanProbeSplit(t *testing.T) {
 				t.Errorf("CanProbeSplit() alias = %q, want %q", alias, tt.wantAlias)
 			}
 		})
-	}
-}
-
-func TestShouldSplitScan(t *testing.T) {
-	makeFiles := func(n int) []string {
-		files := make([]string, n)
-		for i := range files {
-			files[i] = fmt.Sprintf("file-%d.parquet", i)
-		}
-		return files
-	}
-
-	tests := []struct {
-		name      string
-		stages    []Stage
-		workers   int
-		wantSplit bool
-	}{
-		{
-			name:      "single worker never splits",
-			stages:    []Stage{{Type: "scan", EstimatedBytes: 1 << 30, ScanFiles: makeFiles(10)}},
-			workers:   1,
-			wantSplit: false,
-		},
-		{
-			name:      "small scan not worth splitting",
-			stages:    []Stage{{Type: "scan", EstimatedBytes: 100 << 20, ScanFiles: makeFiles(6)}},
-			workers:   3,
-			wantSplit: false, // 100 MB < 192 MB threshold (3 workers × 64 MB)
-		},
-		{
-			name:      "too few files not worth splitting",
-			stages:    []Stage{{Type: "scan", EstimatedBytes: 512 << 20, ScanFiles: makeFiles(4)}},
-			workers:   3,
-			wantSplit: false, // 4 files < 6 min (3 workers × 2 files)
-		},
-		{
-			name: "large scan with enough files → split",
-			stages: []Stage{
-				{Type: "scan", EstimatedBytes: 7500 << 20, ScanFiles: makeFiles(96)},
-				{Type: "shuffle"},
-				{Type: "hash_join", JoinType: "inner"},
-			},
-			workers:   3,
-			wantSplit: true,
-		},
-		{
-			name: "multiple scan stages totaled under threshold",
-			stages: []Stage{
-				{Type: "scan", EstimatedBytes: 100 << 20, ScanFiles: makeFiles(3)},
-				{Type: "scan", EstimatedBytes: 100 << 20, ScanFiles: makeFiles(2)},
-			},
-			workers:   3,
-			wantSplit: false, // 200 MB < 256 MB threshold
-		},
-		{
-			name: "multiple large scan stages → split",
-			stages: []Stage{
-				{Type: "scan", EstimatedBytes: 7500 << 20, ScanFiles: makeFiles(96)},
-				{Type: "scan", EstimatedBytes: 1700 << 20, ScanFiles: makeFiles(24)},
-			},
-			workers:   3,
-			wantSplit: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ShouldSplitScan(tt.stages, tt.workers)
-			if got != tt.wantSplit {
-				t.Errorf("ShouldSplitScan() = %v, want %v", got, tt.wantSplit)
-			}
-		})
-	}
-}
-
-func TestExtractScanStages(t *testing.T) {
-	stages := []Stage{
-		{ID: "scan-0", Type: "scan", TableName: "lineitem"},
-		{ID: "scan-1", Type: "scan", TableName: "orders"},
-		{ID: "shuffle-0", Type: "shuffle"},
-		{ID: "hash_join-0", Type: "hash_join"},
-		{ID: "aggregate-0", Type: "aggregate"},
-	}
-	scans := ExtractScanStages(stages)
-	if len(scans) != 2 {
-		t.Fatalf("expected 2 scan stages, got %d", len(scans))
-	}
-	if scans[0].TableName != "lineitem" {
-		t.Errorf("scan[0].TableName = %q, want %q", scans[0].TableName, "lineitem")
-	}
-	if scans[1].TableName != "orders" {
-		t.Errorf("scan[1].TableName = %q, want %q", scans[1].TableName, "orders")
 	}
 }
 
@@ -1506,47 +1380,3 @@ func TestDeferredJoinBridgeBuildError(t *testing.T) {
 	}
 }
 
-// TestExtractScanStages_ClearsFusedAgg verifies that ExtractScanStages returns
-// scan stages with their FusedAggSpecs still set (the caller is responsible
-// for clearing them in scan-split mode). This test documents the interaction:
-// PlanDistributed sets FusedAggSpecs on scan stages for fused scan-aggregate,
-// but scan-split pipeline mode must clear them so scan tasks produce raw rows.
-func TestExtractScanStages_ClearsFusedAgg(t *testing.T) {
-	cat, ctx := setupCatalog(t)
-	planner := NewPlanner(cat)
-
-	scan := logical.NewScan("events", "e")
-	agg := logical.NewAggregate(scan,
-		[]string{"user_id"},
-		[]logical.AggExpr{
-			{Func: "count", InputCol: "event_id", OutputCol: "cnt"},
-		},
-	)
-
-	stages, err := planner.PlanDistributed(ctx, agg)
-	if err != nil {
-		t.Fatalf("PlanDistributed: %v", err)
-	}
-
-	// Verify fused agg is set on the scan stage
-	scanStages := ExtractScanStages(stages)
-	if len(scanStages) != 1 {
-		t.Fatalf("expected 1 scan stage, got %d", len(scanStages))
-	}
-	if len(scanStages[0].FusedAggSpecs) == 0 {
-		t.Fatal("scan stage should have FusedAggSpecs from fused scan-aggregate")
-	}
-
-	// Simulate what the coordinator does in scan-split mode: clear fused agg
-	for i := range scanStages {
-		scanStages[i].FusedAggSpecs = nil
-		scanStages[i].FusedAggGroupBy = nil
-	}
-
-	if scanStages[0].FusedAggSpecs != nil {
-		t.Error("FusedAggSpecs should be nil after clearing for scan-split")
-	}
-	if scanStages[0].FusedAggGroupBy != nil {
-		t.Error("FusedAggGroupBy should be nil after clearing for scan-split")
-	}
-}

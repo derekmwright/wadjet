@@ -986,151 +986,51 @@ func EstimateCost(stages []Stage, node *logical.Node) QueryCost {
 // ShouldRoutePipeline returns true when a query should be routed to a single
 // worker as a standalone pipeline rather than distributed across workers.
 //
-// The decision compares estimated distributed overhead (S3 shuffles, sort
-// materialization) against the parallelism benefit of distributing both I/O
-// and compute across workers.
-//
-// Key model features:
-//   - Shuffle cost scales with data volume (small filtered scans shuffle less)
-//   - Parallelism benefit includes compute (join/agg/sort), not just scan I/O
-//   - Semi/anti joins get a benefit discount (shuffle full tables, discard most rows)
+// The decision compares total scan volume against a per-shuffle-stage threshold.
+// More shuffle stages means more S3 round-trip overhead, so more data is needed
+// to justify distribution. Most join queries are handled by probe-split before
+// reaching this function, so this primarily decides routing for aggregate-only
+// queries and edge cases where probe-split is not viable.
 func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 	if workerCount <= 1 {
 		return true
 	}
 
-	var shuffleStages, sortStages int
+	var shuffleStages int
 	var totalScanBytes int64
-	var hasSemiAnti, hasFusedAgg bool
 	joinCount := 0
 	for _, s := range stages {
-		switch {
-		case s.Type == "shuffle":
+		switch s.Type {
+		case "shuffle":
 			shuffleStages++
-		case s.Type == "sort" || s.Type == "merge_sort":
-			sortStages++
-		case s.Type == "scan":
+		case "scan":
 			totalScanBytes += s.EstimatedBytes
-			if len(s.FusedAggSpecs) > 0 {
-				hasFusedAgg = true
-			}
-		case s.Type == "hash_join" || s.Type == "broadcast_join":
-			if s.JoinType == "semi" || s.JoinType == "anti" {
-				hasSemiAnti = true
-			}
+		case "hash_join", "broadcast_join":
 			joinCount++
 		}
 		joinCount += len(s.FusedJoins)
 	}
 
 	// Deep join chains with large data MUST distribute — a single worker
-	// cannot hold 3+ hash tables in memory at SF100 scale. The cost model
-	// below was tuned for SF10 where data fits; at SF100 it incorrectly
-	// picks pipeline mode, causing OOM.
+	// cannot hold 3+ hash tables in memory at SF100 scale.
 	if joinCount >= 3 && totalScanBytes > 1<<30 {
 		return false
 	}
 
-	scanGB := float64(totalScanBytes) / (1 << 30)
-
-	// Shuffle cost scales with data volume: S3 write+read is proportional to
-	// the data flowing through the shuffle. Fixed component covers task dispatch
-	// and S3 metadata operations. Per-GB component measured at SF10: ~0.3s/GB
-	// across the cluster (parallel writes from N workers).
-	const shuffleFixedSec = 0.5
-	const shufflePerGBSec = 0.3
-	perShuffleSec := shuffleFixedSec + scanGB*shufflePerGBSec/float64(workerCount)
-	if perShuffleSec > 3.0 {
-		perShuffleSec = 3.0 // cap for very large datasets
+	// Single worker is faster when S3 shuffle overhead exceeds parallelism
+	// benefit. Each shuffle stage adds ~0.5s fixed + data transfer cost,
+	// so more shuffles require proportionally more data to justify.
+	const bytesPerShuffle int64 = 768 << 20 // 768 MB
+	shuffleCount := shuffleStages
+	if shuffleCount < 1 {
+		shuffleCount = 1
 	}
-
-	const sortCostSec = 1.0
-	const baseCostSec = 0.5
-
-	distributedOverhead := float64(shuffleStages)*perShuffleSec +
-		float64(sortStages)*sortCostSec + baseCostSec
-
-	// Fused scan-aggregate eliminates the scan→aggregate S3 round-trip.
-	// The distributed path has lower overhead when aggregation is fused
-	// (scan tasks produce partial aggregates, only final merge goes through S3).
-	if hasFusedAgg {
-		distributedOverhead -= baseCostSec // remove one stage's overhead
-		if distributedOverhead < 0.1 {
-			distributedOverhead = 0.1
-		}
-	}
-
-	// Parallelism benefit: I/O + compute.
-	// With scan-split pipeline, scan I/O is distributed even in pipeline mode.
-	// So the benefit of full distributed is mainly from compute parallelism
-	// and avoiding the scan-split result materialization overhead.
-	const scanBandwidthGBPerSec = 1.5
-	scanTimeSec := scanGB / scanBandwidthGBPerSec
-
-	// Compute time: join build/probe, aggregation, sort all scale with
-	// data volume and benefit from distributed CPU parallelism.
-	const computePerGBSec = 0.5
-	computeTimeSec := scanGB * computePerGBSec
-
-	totalTimeSec := scanTimeSec + computeTimeSec
-	distributedTimeSec := totalTimeSec/float64(workerCount) + baseCostSec
-	parallelismBenefit := totalTimeSec - distributedTimeSec
-
-	// Semi/anti joins (EXISTS/NOT EXISTS) benefit less from distribution at
-	// small scale: both sides are shuffled but the join output is small, and
-	// pipeline mode builds the hash table locally with early termination.
-	// At large scale (>10 GB), the hash table build dominates and distribution
-	// is essential — a single worker can't process 600M-row lineitem in time.
-	if hasSemiAnti {
-		if totalScanBytes > 10<<30 {
-			parallelismBenefit *= 0.7
-		} else {
-			parallelismBenefit *= 0.3
-		}
-	}
-
-	return distributedOverhead > parallelismBenefit
-}
-
-// ShouldSplitScan determines whether a pipeline-mode query should distribute
-// its scan I/O across workers while keeping compute on a single worker.
-// This is the middle ground between full pipeline (all on one worker) and full
-// distributed (shuffle between stages): parallel S3 reads with zero shuffle cost.
-//
-// Returns true when the scan is large enough that parallel I/O outweighs the
-// task dispatch + result materialization overhead (~200ms per task).
-func ShouldSplitScan(stages []Stage, workerCount int) bool {
-	if workerCount <= 1 {
-		return false
-	}
-
-	var totalScanBytes int64
-	var totalScanFiles int
-	for _, s := range stages {
-		if s.Type == "scan" {
-			totalScanBytes += s.EstimatedBytes
-			totalScanFiles += len(s.ScanFiles)
-		}
-	}
-
-	// Need enough files to give each worker meaningful work (at least 2 files
-	// per worker) and enough data to justify task dispatch + result
-	// materialization overhead (~200ms per task). Scale thresholds with worker
-	// count: more workers need more data to amortize overhead.
-	const minBytesPerWorker = 64 * 1024 * 1024 // 64 MB per worker minimum
-	const minFilesPerWorker = 2
-
-	minScanBytes := int64(workerCount) * minBytesPerWorker
-	minScanFiles := workerCount * minFilesPerWorker
-
-	return totalScanBytes >= minScanBytes && totalScanFiles >= minScanFiles
+	return totalScanBytes < int64(shuffleCount)*bytesPerShuffle
 }
 
 // HasSelfJoins returns true if any large table is scanned more than once in
 // the stage list. Self-joins on tiny tables (< 1 MB, e.g., nation with 25
-// rows) are exempt because the scan-split overhead is negligible and
-// blocking scan-split forces the entire query (including large table scans)
-// to run on a single worker.
+// rows) are exempt — they don't affect routing decisions.
 func HasSelfJoins(stages []Stage) bool {
 	type tableInfo struct {
 		count int
@@ -1154,33 +1054,6 @@ func HasSelfJoins(stages []Stage) bool {
 		}
 	}
 	return false
-}
-
-// HasFusedAggregate returns true if any scan stage has fused aggregate specs.
-// Queries with fused scan-aggregate should use the full distributed path
-// (scan → merge_aggregate) rather than scan-split, because fused aggregation
-// reduces data volume at the scan level (e.g., 55M rows → 4 groups for Q01).
-// Scan-split would strip the fused specs and ship all raw rows through S3.
-func HasFusedAggregate(stages []Stage) bool {
-	for _, s := range stages {
-		if s.Type == "scan" && len(s.FusedAggSpecs) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-// ExtractScanStages returns only the scan stages from a stage list.
-// Used to build scan-split pipeline plans where scans are distributed
-// and compute runs on a single pipeline worker.
-func ExtractScanStages(stages []Stage) []Stage {
-	var scans []Stage
-	for _, s := range stages {
-		if s.Type == "scan" {
-			scans = append(scans, s)
-		}
-	}
-	return scans
 }
 
 // CanProbeSplit returns the scan alias and file list for probe-split pipeline
