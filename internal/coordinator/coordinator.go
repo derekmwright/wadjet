@@ -1844,6 +1844,35 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 		}
 	}()
 
+	// Stale-stage watchdog: detects stages where result notifications were
+	// lost (raw NATS publish is fire-and-forget) and fails the query instead
+	// of waiting forever. Checks every 2 minutes; fails after 10 minutes
+	// with no progress on a scheduled stage.
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-cancelCtx.Done():
+				return
+			case <-ticker.C:
+				stalled := c.tracker.StalledStages(queryID, 10*time.Minute)
+				if len(stalled) == 0 {
+					continue
+				}
+				c.logger.Error("stages stalled — failing query",
+					"query_id", queryID, "stalled_stages", stalled)
+				c.tracker.Fail(queryID, fmt.Sprintf("stages %v stalled: tasks did not report results within 10m", stalled))
+				c.cleanupQuery(queryID)
+				select {
+				case done <- struct{}{}:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
 	go func() {
 		<-cancelCtx.Done()
 		sub.Unsubscribe()
@@ -3044,6 +3073,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		}
 		tasks := c.createTasksForStage(queryID, s, nil)
 		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
+		c.tracker.MarkScheduled(queryID, s.ID)
 		if err := c.scheduler.PublishTasks(asyncCtx, tasks); err != nil {
 			asyncCancel()
 			c.tracker.Fail(queryID, err.Error())

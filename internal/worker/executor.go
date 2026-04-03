@@ -2139,10 +2139,13 @@ func (e *Executor) writeBatchResult(ctx context.Context, task distributed.Task, 
 
 	resultPath := task.ResultPrefix + task.ID + ".wshf"
 
-	// Always write to S3 as the durable store. NATS KV has a 5-minute TTL
-	// and 1 GB size cap — entries can expire or be evicted before downstream
-	// stages read them (e.g., SF100 Q04 pipeline takes 11+ minutes).
-	_, err = e.store.Put(ctx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
+	// Use a detached context with generous timeout for S3 writes. The task
+	// context can be cancelled (e.g., query abort) while the upload is
+	// in-flight, and large results (SF100 joins can produce hundreds of MB)
+	// need more time than the HTTP transport's ResponseHeaderTimeout.
+	writeCtx, writeCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer writeCancel()
+	_, err = e.store.Put(writeCtx, task.ResultBucket, resultPath, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
 	if err != nil {
 		return fmt.Errorf("writing result to S3: %w", err)
 	}

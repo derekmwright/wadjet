@@ -43,8 +43,9 @@ type StageInfo struct {
 	TotalTasks   int
 	DoneTasks    int
 	FailedTasks  int
-	Scheduled    bool     // true once tasks have been dispatched (prevents re-scheduling)
-	Dependencies []string // stage IDs that must complete before this stage
+	Scheduled    bool      // true once tasks have been dispatched (prevents re-scheduling)
+	ScheduledAt  time.Time // when tasks were dispatched (zero if not yet scheduled)
+	Dependencies []string  // stage IDs that must complete before this stage
 	Results      []distributed.ResultNotification
 }
 
@@ -160,6 +161,7 @@ func (qt *QueryTracker) GetReadyStages(queryID string) []string {
 		}
 		if allDepsComplete {
 			stage.Scheduled = true
+			stage.ScheduledAt = time.Now()
 			ready = append(ready, stageID)
 		}
 	}
@@ -274,7 +276,35 @@ func (qt *QueryTracker) MarkScheduled(queryID, stageID string) {
 	}
 	if stage, ok := q.Stages[stageID]; ok {
 		stage.Scheduled = true
+		stage.ScheduledAt = time.Now()
 	}
+}
+
+// StalledStages returns stages that have been scheduled for longer than the
+// given threshold but still have unreported tasks. Used by the coordinator
+// watchdog to detect and fail queries where result notifications were lost.
+func (qt *QueryTracker) StalledStages(queryID string, threshold time.Duration) []string {
+	qt.mu.RLock()
+	defer qt.mu.RUnlock()
+
+	q, ok := qt.queries[queryID]
+	if !ok || q.State != QueryStateRunning {
+		return nil
+	}
+
+	now := time.Now()
+	var stalled []string
+	for _, stageID := range q.StageOrder {
+		stage := q.Stages[stageID]
+		if !stage.Scheduled || stage.ScheduledAt.IsZero() {
+			continue
+		}
+		pending := stage.TotalTasks - stage.DoneTasks - stage.FailedTasks
+		if pending > 0 && now.Sub(stage.ScheduledAt) > threshold {
+			stalled = append(stalled, stageID)
+		}
+	}
+	return stalled
 }
 
 // UpdateResultPath updates the result path for a specific task result.

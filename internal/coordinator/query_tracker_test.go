@@ -627,6 +627,58 @@ func TestCollectResultPathsMissing(t *testing.T) {
 
 // --- RecordResult with no ResultPath should not add to ResultFiles ---
 
+func TestStalledStages(t *testing.T) {
+	qt := NewQueryTracker()
+	stages := map[string]*StageInfo{
+		"s0": {StageID: "s0", TotalTasks: 2},
+		"s1": {StageID: "s1", TotalTasks: 1, Dependencies: []string{"s0"}},
+	}
+	qt.Register("q1", "SQL", stages, []string{"s0", "s1"})
+	qt.Start("q1")
+	qt.SetStageTasks("q1", "s0", 2)
+	qt.MarkScheduled("q1", "s0")
+
+	// No stall yet — just scheduled
+	if stalled := qt.StalledStages("q1", 10*time.Minute); len(stalled) != 0 {
+		t.Errorf("expected no stalled stages, got %v", stalled)
+	}
+
+	// Backdate ScheduledAt to simulate stall
+	qt.mu.Lock()
+	qt.queries["q1"].Stages["s0"].ScheduledAt = time.Now().Add(-15 * time.Minute)
+	qt.mu.Unlock()
+
+	// Only 0 of 2 tasks reported — should be stalled
+	stalled := qt.StalledStages("q1", 10*time.Minute)
+	if len(stalled) != 1 || stalled[0] != "s0" {
+		t.Errorf("expected [s0] stalled, got %v", stalled)
+	}
+
+	// Record one result — still 1 pending, still stalled
+	qt.RecordResult(distributed.ResultNotification{
+		QueryID: "q1", StageID: "s0", TaskID: "t1", Success: true,
+	})
+	stalled = qt.StalledStages("q1", 10*time.Minute)
+	if len(stalled) != 1 {
+		t.Errorf("expected 1 stalled stage with 1 pending task, got %v", stalled)
+	}
+
+	// Record second result — stage complete, no longer stalled
+	qt.RecordResult(distributed.ResultNotification{
+		QueryID: "q1", StageID: "s0", TaskID: "t2", Success: true,
+	})
+	stalled = qt.StalledStages("q1", 10*time.Minute)
+	if len(stalled) != 0 {
+		t.Errorf("expected no stalled stages after completion, got %v", stalled)
+	}
+
+	// Unscheduled stage should not be detected
+	stalled = qt.StalledStages("q1", 10*time.Minute)
+	if len(stalled) != 0 {
+		t.Errorf("unscheduled s1 should not be stalled, got %v", stalled)
+	}
+}
+
 func TestRecordResultNoResultPath(t *testing.T) {
 	qt := NewQueryTracker()
 	stages := map[string]*StageInfo{
