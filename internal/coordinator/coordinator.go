@@ -503,51 +503,15 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			"joins", joinCount, "self_joins", hasSelfJoins,
 			"has_merge", probeSplitMergeInfo != nil)
 	} else if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
-		// Cost-based routing for non-probe-split queries: compare S3
-		// materialization overhead of distributed execution against
-		// parallelism benefit of splitting scans across workers.
-		hasSelfJoins := physical.HasSelfJoins(physStages)
-		hasFusedAgg := physical.HasFusedAggregate(physStages)
-		canScanSplit := physical.ShouldSplitScan(physStages, c.workers.Count()) && !logical.HasRemainingSubqueries(logicalPlan) && !hasSelfJoins && !hasFusedAgg
-
-		if canScanSplit {
-			// Scan-split pipeline: distribute S3 reads across workers,
-			// run compute (joins/aggs/sorts) on a single pipeline worker.
-			// Excluded when subqueries remain un-decorrelated (scan node count
-			// mismatch) and self-joins on large tables (traversal order mismatch).
-			scanStages := physical.ExtractScanStages(physStages)
-			// Clear fused aggregate specs from scan stages. In scan-split
-			// mode, scan tasks must produce raw filtered rows — the pipeline
-			// worker runs the full query (including aggregation) from SQL.
-			// Leaving FusedAggSpecs causes scan tasks to emit partial
-			// aggregates, which the pipeline's re-parsed plan cannot consume
-			// (column mismatch → 0 rows).
-			for i := range scanStages {
-				scanStages[i].FusedAggSpecs = nil
-				scanStages[i].FusedAggGroupBy = nil
-			}
-			scanDeps := make([]string, len(scanStages))
-			for i, s := range scanStages {
-				scanDeps[i] = s.ID
-			}
-			pipelineStage := physical.Stage{
-				ID:           "pipeline-0",
-				Type:         "pipeline",
-				Tasks:        1,
-				Dependencies: scanDeps,
-			}
-			physStages = append(scanStages, pipelineStage)
-			c.logger.Info("routing to scan-split pipeline (cost-based)",
-				"query", queryID, "scan_stages", len(scanStages))
-		} else {
-			c.logger.Info("routing to single worker pipeline (cost-based)",
-				"query", queryID, "stages", len(physStages))
-			physStages = []physical.Stage{{
-				ID:    "pipeline-0",
-				Type:  "pipeline",
-				Tasks: 1,
-			}}
-		}
+		// Cost-based routing: shuffle overhead outweighs parallelism benefit,
+		// so run the entire query on a single worker.
+		c.logger.Info("routing to single worker pipeline (cost-based)",
+			"query", queryID, "stages", len(physStages))
+		physStages = []physical.Stage{{
+			ID:    "pipeline-0",
+			Type:  "pipeline",
+			Tasks: 1,
+		}}
 	}
 
 	// Expand scans to target remote clusters when table exists on multiple clusters
@@ -760,17 +724,12 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 	return tasks
 }
 
-// createPipelineTasks creates a single task that runs the entire query as a
-// standalone pipeline on one worker. Used for deep join chains where the S3
-// materialization overhead of N stages exceeds the parallelism benefit.
-//
-// When the pipeline depends on pre-scanned data (scan-split mode), the task
-// includes PreScannedInputs mapping table names to their scan result files.
-// The worker reads these instead of scanning from the object store directly.
+// createPipelineTasks creates tasks that run the query as a pipeline on workers.
+// In probe-split mode, creates N tasks each with a file partition. Otherwise,
+// creates a single task that runs the entire query on one worker.
 func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, resultPrefix string, depResults map[string][]string) []distributed.Task {
 	c.mu.Lock()
 	qm := c.queryMetas[queryID]
-	specs := c.stageSpecs[queryID]
 	c.mu.Unlock()
 
 	sqlText := ""
@@ -811,21 +770,6 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 		ResultBucket: c.config.ResultBucket,
 		ResultPrefix: resultPrefix,
 		CreatedAt:    time.Now(),
-	}
-
-	// Scan-split mode: populate pre-scanned inputs from dependency results.
-	// Key by ScanAlias (unique per scan node) to handle self-joins where the
-	// same table is scanned multiple times with different column projections.
-	if len(stage.Dependencies) > 0 && depResults != nil {
-		preScanned := make(map[string][]string)
-		for _, depID := range stage.Dependencies {
-			if spec, ok := specs[depID]; ok && spec.Type == "scan" && spec.ScanAlias != "" {
-				preScanned[spec.ScanAlias] = append(preScanned[spec.ScanAlias], depResults[depID]...)
-			}
-		}
-		if len(preScanned) > 0 {
-			task.PreScannedInputs = preScanned
-		}
 	}
 
 	return []distributed.Task{task}
