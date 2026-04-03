@@ -248,6 +248,53 @@ func TestRecordResultMissingStage(t *testing.T) {
 	}
 }
 
+func TestRecordResultDedup(t *testing.T) {
+	qt := NewQueryTracker()
+	stages := map[string]*StageInfo{
+		"s0": {StageID: "s0", TotalTasks: 2},
+	}
+	qt.Register("q1", "SELECT 1", stages, []string{"s0"})
+	qt.Start("q1")
+
+	result := distributed.ResultNotification{
+		QueryID:    "q1",
+		StageID:    "s0",
+		TaskID:     "t1",
+		Success:    true,
+		ResultPath: "result1.parquet",
+		NumRows:    100,
+	}
+
+	// First recording
+	complete := qt.RecordResult(result)
+	if complete {
+		t.Error("expected incomplete after 1 of 2")
+	}
+
+	// Duplicate (worker retry) — should be ignored
+	complete = qt.RecordResult(result)
+	if complete {
+		t.Error("duplicate should not trigger completion")
+	}
+
+	info := qt.Get("q1")
+	if info.TotalRows != 100 {
+		t.Errorf("TotalRows after dedup: got %d, want 100", info.TotalRows)
+	}
+	if info.Stages["s0"].DoneTasks != 1 {
+		t.Errorf("DoneTasks after dedup: got %d, want 1", info.Stages["s0"].DoneTasks)
+	}
+
+	// Second unique task completes the stage
+	complete = qt.RecordResult(distributed.ResultNotification{
+		QueryID: "q1", StageID: "s0", TaskID: "t2",
+		Success: true, NumRows: 200,
+	})
+	if !complete {
+		t.Error("expected complete after 2 unique tasks")
+	}
+}
+
 // --- IsComplete ---
 
 func TestIsComplete(t *testing.T) {

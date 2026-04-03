@@ -128,11 +128,17 @@ func (wr *WorkerRegistry) ReapStale() int {
 		if w.LastSeen.Before(cutoff) {
 			delete(wr.workers, id)
 			wr.logger.Info("worker reaped (stale)", "worker_id", id)
-			// Tell the worker to stop pulling tasks. Best-effort: if the
-			// worker process is dead, the NATS connection is already gone.
+			// Tell the worker to stop pulling tasks. Use request/reply
+			// with a short timeout — if the worker is truly dead, the
+			// NATS connection is gone and this times out harmlessly.
 			if wr.nc != nil {
 				drainSubject := "wadjet.worker." + id + ".drain"
-				wr.nc.Publish(drainSubject, nil)
+				if _, err := wr.nc.Request(drainSubject, nil, 5*time.Second); err != nil {
+					wr.logger.Debug("drain request failed (worker likely dead)",
+						"worker_id", id, "error", err)
+				} else {
+					wr.logger.Info("worker acknowledged drain", "worker_id", id)
+				}
 			}
 			reaped++
 		}

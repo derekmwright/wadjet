@@ -37,11 +37,6 @@ import (
 
 const inlineResultThreshold = 512 * 1024 // 512 KB — avoids S3 round-trip for small dimension tables and aggregation results
 
-// natsKVResultThreshold is the max result size stored in NATS KV for
-// cross-worker inter-stage transfer. Results below this threshold skip S3
-// entirely, reducing inter-stage latency from ~500ms to ~10ms.
-const natsKVResultThreshold = 4 * 1024 * 1024 // 4 MB — within NATS 8 MB max payload
-
 // maxBufferedRows caps in-memory row accumulation during scan tasks to prevent
 // unbounded memory growth. When this limit is reached, rows are flushed to the
 // result file and the buffer is reused. Set to 0 for unlimited (legacy behavior).
@@ -53,7 +48,6 @@ type Executor struct {
 	js           jetstream.JetStream // for catalog access in pipeline tasks
 	cache        *LRUCache
 	resultStore  *ResultStore        // in-memory result passing between stages (nil = disabled)
-	resultKV     jetstream.KeyValue  // NATS KV for cross-worker inter-stage results (nil = disabled)
 	memoryBudget int64               // per-task memory budget in bytes (0 = unlimited)
 	spillDir     string              // directory for spill files
 	metrics      *metrics.Metrics
@@ -74,13 +68,6 @@ func (e *Executor) SetMemoryBudget(budget int64, spillDir string) {
 // SetResultStore attaches an in-memory result store for inter-stage result passing.
 func (e *Executor) SetResultStore(rs *ResultStore) {
 	e.resultStore = rs
-}
-
-// SetResultKV attaches a NATS KV store for cross-worker inter-stage result transfer.
-// Results below natsKVResultThreshold are stored here instead of S3, reducing
-// inter-stage latency from ~500ms (S3 round-trip) to ~10ms (NATS KV).
-func (e *Executor) SetResultKV(kv jetstream.KeyValue) {
-	e.resultKV = kv
 }
 
 // SetMetrics attaches Prometheus metrics for spill/memory tracking.
@@ -1549,10 +1536,6 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 				return
 			}
 
-			// Populate KV cache for fast cross-worker reads.
-			if e.resultKV != nil && len(buf) <= natsKVResultThreshold {
-				e.resultKV.Put(ctx, natsKVKey(path), buf) // best-effort
-			}
 			if e.resultStore != nil {
 				e.resultStore.Put(task.QueryID, path, buf)
 			}
@@ -1845,18 +1828,7 @@ func (e *Executor) getFileData(ctx context.Context, bucket, path string) ([]byte
 		}
 	}
 
-	// Tier 2: NATS KV result store (cross-worker, ~10ms vs ~500ms for S3)
-	if e.resultKV != nil {
-		kvKey := natsKVKey(path)
-		if entry, kvErr := e.resultKV.Get(ctx, kvKey); kvErr == nil {
-			data := entry.Value()
-			// Populate LRU cache for subsequent reads
-			e.cache.Put(bucket+"/"+path, data)
-			return data, nil
-		}
-	}
-
-	// Tier 3: LRU cache (cached S3 reads)
+	// Tier 2: LRU cache (cached S3 reads)
 	cacheKey := bucket + "/" + path
 	if data, ok := e.cache.Get(cacheKey); ok {
 		return data, nil
@@ -2155,24 +2127,11 @@ func (e *Executor) writeBatchResult(ctx context.Context, task distributed.Task, 
 	}
 	result.ResultPath = resultPath
 
-	// Also populate NATS KV as a fast read cache for cross-worker reads.
-	// Workers check KV (tier 2, ~10ms) before falling back to S3 (~500ms).
-	if e.resultKV != nil && len(data) <= natsKVResultThreshold {
-		kvKey := natsKVKey(resultPath)
-		e.resultKV.Put(ctx, kvKey, data) // best-effort; S3 is the source of truth
-	}
-
 	// Cache locally for same-node reads.
 	if e.resultStore != nil {
 		e.resultStore.Put(task.QueryID, resultPath, data)
 	}
 	return nil
-}
-
-// natsKVKey converts an S3 result path to a valid NATS KV key.
-// NATS KV keys don't support '.' so we replace with '_'.
-func natsKVKey(path string) string {
-	return strings.ReplaceAll(path, ".", "_")
 }
 
 // batchSource wraps a slice of RecordBatches as an exec.Source.

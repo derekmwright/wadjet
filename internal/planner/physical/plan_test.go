@@ -1065,6 +1065,120 @@ func TestShouldRoutePipeline(t *testing.T) {
 	}
 }
 
+func TestCanProbeSplit(t *testing.T) {
+	makeFiles := func(n int) []string {
+		files := make([]string, n)
+		for i := range files {
+			files[i] = fmt.Sprintf("file-%d.parquet", i)
+		}
+		return files
+	}
+
+	tests := []struct {
+		name      string
+		stages    []Stage
+		workers   int
+		wantAlias string
+		wantOK    bool
+	}{
+		{
+			name:    "single worker never probe-splits",
+			stages:  []Stage{{Type: "scan", ScanAlias: "t", ScanFiles: makeFiles(10), EstimatedBytes: 1 << 30}},
+			workers: 1,
+			wantOK:  false,
+		},
+		{
+			name: "picks largest scan as probe",
+			stages: []Stage{
+				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
+				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(6), EstimatedBytes: 1700 << 20},
+				{Type: "hash_join", JoinType: "inner"},
+			},
+			workers:   3,
+			wantAlias: "lineitem",
+			wantOK:    true,
+		},
+		{
+			name: "semi join — excludes build table, picks outer as probe",
+			stages: []Stage{
+				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
+				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(6), EstimatedBytes: 1700 << 20},
+				{Type: "hash_join", JoinType: "semi", BuildTableAlias: "lineitem"},
+			},
+			workers:   3,
+			wantAlias: "orders",
+			wantOK:    true,
+		},
+		{
+			name: "anti join — excludes build table, picks outer as probe",
+			stages: []Stage{
+				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
+				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(6), EstimatedBytes: 1700 << 20},
+				{Type: "hash_join", JoinType: "anti", BuildTableAlias: "lineitem"},
+			},
+			workers:   3,
+			wantAlias: "orders",
+			wantOK:    true,
+		},
+		{
+			name: "semi join via fused join — excludes build table",
+			stages: []Stage{
+				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
+				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(6), EstimatedBytes: 1700 << 20},
+				{Type: "hash_join", JoinType: "inner", FusedJoins: []FusedJoinSpec{
+					{JoinType: "semi", BuildTableAlias: "lineitem"},
+				}},
+			},
+			workers:   3,
+			wantAlias: "orders",
+			wantOK:    true,
+		},
+		{
+			name: "inner join — largest scan is probe regardless of build alias",
+			stages: []Stage{
+				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
+				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(6), EstimatedBytes: 1700 << 20},
+				{Type: "hash_join", JoinType: "inner", BuildTableAlias: "lineitem"},
+			},
+			workers:   3,
+			wantAlias: "lineitem",
+			wantOK:    true,
+		},
+		{
+			name: "too few files after exclusion",
+			stages: []Stage{
+				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
+				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(2), EstimatedBytes: 100 << 20},
+				{Type: "hash_join", JoinType: "semi", BuildTableAlias: "lineitem"},
+			},
+			workers:   3,
+			wantOK:    false, // orders has only 2 files, need 6 (3×2)
+		},
+		{
+			name: "large outer table after exclusion — relaxed min files",
+			stages: []Stage{
+				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(6), EstimatedBytes: 25 << 30},
+				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(3), EstimatedBytes: 3 << 30},
+				{Type: "hash_join", JoinType: "semi", BuildTableAlias: "lineitem"},
+			},
+			workers:   3,
+			wantAlias: "orders",
+			wantOK:    true, // orders > 1GB so minFiles = 3 (workerCount)
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			alias, _, ok := CanProbeSplit(tt.stages, tt.workers)
+			if ok != tt.wantOK {
+				t.Errorf("CanProbeSplit() ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && alias != tt.wantAlias {
+				t.Errorf("CanProbeSplit() alias = %q, want %q", alias, tt.wantAlias)
+			}
+		})
+	}
+}
+
 func TestShouldSplitScan(t *testing.T) {
 	makeFiles := func(n int) []string {
 		files := make([]string, n)

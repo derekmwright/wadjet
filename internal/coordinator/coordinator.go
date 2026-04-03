@@ -66,7 +66,6 @@ type Coordinator struct {
 	cleaner   *ResultCleaner
 	leader    *LeaderElection   // nil = always leader (standalone mode)
 	queryStore *QueryStateStore // nil = no persistence (standalone mode)
-	resultKV  jetstream.KeyValue // NATS KV for fast inter-stage result transfer (nil = S3 only)
 	otel      *telemetry.Provider // nil = no OTel tracing
 	logger    *slog.Logger
 
@@ -98,24 +97,6 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 		resultSubs: make(map[string]context.CancelFunc),
 		queryMetas: make(map[string]*queryMeta),
 		querySem:   make(chan struct{}, maxInflight),
-	}
-
-	// NATS KV result cache: coordinator writes inline results here instead of S3.
-	// Workers already read from this bucket (tier 2 in getFileData), so this
-	// eliminates the S3 round-trip at stage boundaries for small results.
-	if js != nil {
-		kv, kvErr := js.CreateOrUpdateKeyValue(context.Background(), jetstream.KeyValueConfig{
-			Bucket:   "wadjet_results_data",
-			TTL:      5 * time.Minute,
-			MaxBytes: 1024 * 1024 * 1024, // 1 GB total
-			Storage:  jetstream.MemoryStorage,
-		})
-		if kvErr == nil {
-			c.resultKV = kv
-			logger.Info("coordinator NATS KV result cache enabled", "bucket", "wadjet_results_data")
-		} else {
-			logger.Debug("coordinator NATS KV result cache unavailable, using S3 only", "error", kvErr)
-		}
 	}
 
 	return c
@@ -499,9 +480,9 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	joinCount := physical.CountJoinStages(physStages)
 	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
-	canMerge := mergeInfo != nil && mergeInfo.HasAggregate
+	canMerge := mergeInfo != nil
 
-	if canProbeSplit && canMerge && joinCount >= 2 {
+	if canProbeSplit && canMerge && joinCount >= 1 {
 		// Probe-split pipeline: each worker scans build tables in full and
 		// probes its file partition. Coordinator re-aggregates partial results.
 		// This avoids all S3 shuffle round-trips, which is especially
@@ -1780,6 +1761,11 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 		}
 		c.logger.Debug("received result", logAttrs...)
 
+		// ACK the worker's request/reply so it knows we received the result.
+		if msg.Reply != "" {
+			msg.Respond([]byte("ok"))
+		}
+
 		stageComplete := c.tracker.RecordResult(result)
 		if !stageComplete {
 			return
@@ -2026,16 +2012,6 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 // queryMetas and tracker entries are retained for GetQueryResults and reaped
 // by StartQueryReaper after a TTL.
 func (c *Coordinator) cleanupQuery(queryID string) {
-	// Collect NATS KV keys before dropping state — tracker still has paths.
-	var kvKeys []string
-	if c.resultKV != nil {
-		for _, paths := range c.tracker.CollectResultPaths(queryID) {
-			for _, p := range paths {
-				kvKeys = append(kvKeys, natsKVKey(p))
-			}
-		}
-	}
-
 	c.mu.Lock()
 	if cancel, ok := c.resultSubs[queryID]; ok {
 		cancel()
@@ -2043,24 +2019,6 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 	}
 	delete(c.stageSpecs, queryID)
 	c.mu.Unlock()
-
-	// Purge KV entries async — frees NATS memory without blocking the caller.
-	if len(kvKeys) > 0 {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			purged := 0
-			for _, key := range kvKeys {
-				if err := c.resultKV.Purge(ctx, key); err == nil {
-					purged++
-				}
-			}
-			if purged > 0 {
-				c.logger.Debug("purged query KV entries",
-					"query_id", queryID, "purged", purged, "total", len(kvKeys))
-			}
-		}()
-	}
 }
 
 // queryReaperTTL is how long completed/failed/cancelled queries stay in memory
@@ -2093,19 +2051,8 @@ func (c *Coordinator) StartQueryReaper(ctx context.Context) {
 	}()
 }
 
-// natsKVKey converts an S3 result path to a valid NATS KV key.
-// NATS KV keys don't support '.' so we replace with '_'.
-func natsKVKey(path string) string {
-	return strings.ReplaceAll(path, ".", "_")
-}
-
-// natsKVResultThreshold is the max result size written to NATS KV.
-// Must match the worker's threshold so both sides agree on where data lives.
-const natsKVResultThreshold = 4 * 1024 * 1024 // 4 MB — within NATS 8 MB max payload
-
-// materializeInlineResults writes inline results so downstream stages can read them.
-// When NATS KV is available, small results are written there (~1ms) instead of S3 (~250ms).
-// Large results fall back to S3. Updates the tracker's result entries with materialized paths.
+// materializeInlineResults writes inline results to S3 so downstream stages can
+// read them. Updates the tracker's result entries with materialized paths.
 // Writes are parallelized to minimize wall-clock time at stage boundaries.
 func (c *Coordinator) materializeInlineResults(ctx context.Context, queryID, stageID string) {
 	results := c.tracker.StageResults(queryID, stageID)
@@ -2169,15 +2116,7 @@ func (c *Coordinator) materializeOne(ctx context.Context, store objstore.Store, 
 	// can expire before downstream stages read them.
 	_, err := store.Put(ctx, c.config.ResultBucket, path,
 		bytes.NewReader(data), int64(len(data)), "application/octet-stream")
-	if err != nil {
-		return err
-	}
-
-	// Best-effort KV cache for fast cross-worker reads (~10ms vs ~500ms).
-	if c.resultKV != nil && len(data) <= natsKVResultThreshold {
-		c.resultKV.Put(ctx, natsKVKey(path), data)
-	}
-	return nil
+	return err
 }
 
 // collectDepResults gathers result file paths from completed stages.
@@ -2354,17 +2293,9 @@ func (c *Coordinator) decodeInlineResult(data []byte) ([]*batch.RecordBatch, []s
 	return batches, columns, totalRows
 }
 
-// fetchResultData retrieves a result blob from NATS KV or S3.
+// fetchResultData retrieves a result blob from S3.
 // Used by probe-split merge when results exceed the inline threshold.
 func (c *Coordinator) fetchResultData(ctx context.Context, queryID, path string) ([]byte, error) {
-	// Try NATS KV first (fastest)
-	if c.resultKV != nil {
-		entry, err := c.resultKV.Get(ctx, natsKVKey(path))
-		if err == nil {
-			return entry.Value(), nil
-		}
-	}
-	// Fall back to S3
 	store := c.catalog.Store()
 	reader, _, err := store.Get(ctx, c.config.ResultBucket, path)
 	if err != nil {
@@ -2950,6 +2881,10 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 			"stage_id", result.StageID,
 			"success", result.Success,
 		)
+
+		if msg.Reply != "" {
+			msg.Respond([]byte("ok"))
+		}
 
 		stageComplete := c.tracker.RecordResult(result)
 		if stageComplete && c.tracker.IsComplete(queryID) {

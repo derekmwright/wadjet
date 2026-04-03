@@ -47,6 +47,7 @@ type StageInfo struct {
 	ScheduledAt  time.Time // when tasks were dispatched (zero if not yet scheduled)
 	Dependencies []string  // stage IDs that must complete before this stage
 	Results      []distributed.ResultNotification
+	SeenTasks    map[string]bool // dedup: task IDs already recorded (handles retries)
 }
 
 // QueryInfo tracks the full state of a query.
@@ -101,7 +102,8 @@ func (qt *QueryTracker) Start(queryID string) {
 	}
 }
 
-// RecordResult records a task result for a query stage.
+// RecordResult records a task result for a query stage. Idempotent — duplicate
+// results from worker retries are silently ignored.
 // Returns true if the stage is now complete.
 func (qt *QueryTracker) RecordResult(result distributed.ResultNotification) (stageComplete bool) {
 	qt.mu.Lock()
@@ -116,6 +118,15 @@ func (qt *QueryTracker) RecordResult(result distributed.ResultNotification) (sta
 	if !ok {
 		return false
 	}
+
+	// Dedup: skip if this task result was already recorded (worker retry).
+	if stage.SeenTasks == nil {
+		stage.SeenTasks = make(map[string]bool)
+	}
+	if stage.SeenTasks[result.TaskID] {
+		return false
+	}
+	stage.SeenTasks[result.TaskID] = true
 
 	stage.Results = append(stage.Results, result)
 	if result.Success {

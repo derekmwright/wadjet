@@ -93,23 +93,6 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		executor.SetResultStore(NewResultStore(cfg.ResultStoreBytes))
 	}
 
-	// NATS KV result cache: enables cross-worker inter-stage result transfer
-	// without S3 round-trips. Workers write small results here instead of S3.
-	if js != nil {
-		kv, kvErr := js.CreateOrUpdateKeyValue(context.Background(), jetstream.KeyValueConfig{
-			Bucket:   "wadjet_results_data",
-			TTL:      5 * time.Minute,
-			MaxBytes: 1024 * 1024 * 1024, // 1 GB total
-			Storage:  jetstream.MemoryStorage,
-		})
-		if kvErr == nil {
-			executor.SetResultKV(kv)
-			logger.Info("NATS KV result cache enabled", "bucket", "wadjet_results_data")
-		} else {
-			logger.Debug("NATS KV result cache unavailable, using S3 only", "error", kvErr)
-		}
-	}
-
 	return &Worker{
 		config:    cfg,
 		store:     store,
@@ -174,6 +157,9 @@ func (w *Worker) Start(ctx context.Context) error {
 	w.nc.Subscribe(drainSubject, func(msg *nats.Msg) {
 		w.logger.Info("received drain request via NATS")
 		w.drainOnce.Do(func() { close(w.drainCh) })
+		if msg.Reply != "" {
+			msg.Respond([]byte("ok"))
+		}
 	})
 
 	// Subscribe to profile requests (NATS request/reply)
@@ -450,9 +436,25 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	if err := w.nc.Publish(subject, data); err != nil {
-		w.logger.Error("failed to publish result", "error", err)
-		w.publishDLQ(task, "publish_error", fmt.Sprintf("publish result: %v", err))
+	// Request/reply: coordinator ACKs receipt so we know the result arrived.
+	// Retry with backoff if no response — eliminates silent result loss that
+	// previously required the stale-stage watchdog.
+	var publishErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			w.logger.Warn("retrying result publish",
+				"task_id", task.ID, "attempt", attempt+1)
+		}
+		_, publishErr = w.nc.Request(subject, data, 10*time.Second)
+		if publishErr == nil {
+			break
+		}
+	}
+	if publishErr != nil {
+		w.logger.Error("failed to publish result after retries",
+			"error", publishErr, "task_id", task.ID)
+		w.publishDLQ(task, "publish_error", fmt.Sprintf("publish result: %v", publishErr))
 		msg.Nak()
 		return
 	}

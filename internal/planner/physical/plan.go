@@ -1194,12 +1194,31 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 		return "", nil, false
 	}
 
-	// Find the largest scan — this is the probe candidate.
+	// For semi/anti joins, the build table (inner side) must NOT be
+	// partitioned — each worker needs all build rows to correctly evaluate
+	// EXISTS/NOT EXISTS. Collect build-side aliases to exclude them.
+	excludeProbe := make(map[string]bool)
+	for _, s := range stages {
+		if s.JoinType == "semi" || s.JoinType == "anti" {
+			if s.BuildTableAlias != "" {
+				excludeProbe[s.BuildTableAlias] = true
+			}
+		}
+		for _, fj := range s.FusedJoins {
+			if fj.JoinType == "semi" || fj.JoinType == "anti" {
+				if fj.BuildTableAlias != "" {
+					excludeProbe[fj.BuildTableAlias] = true
+				}
+			}
+		}
+	}
+
+	// Find the largest scan that is eligible as probe.
 	var bestAlias string
 	var bestFiles []string
 	var bestBytes int64
 	for _, s := range stages {
-		if s.Type == "scan" && s.EstimatedBytes > bestBytes {
+		if s.Type == "scan" && s.EstimatedBytes > bestBytes && !excludeProbe[s.ScanAlias] {
 			bestAlias = s.ScanAlias
 			bestFiles = s.ScanFiles
 			bestBytes = s.EstimatedBytes
