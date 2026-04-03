@@ -1775,8 +1775,10 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// scanning build tables in full.
 	if len(task.ScanFileFilter) > 0 {
 		planner.ScanFileFilter = task.ScanFileFilter
-		e.logger.Debug("probe-split scan file filter",
-			"aliases", len(task.ScanFileFilter))
+		for alias, files := range task.ScanFileFilter {
+			e.logger.Info("probe-split scan file filter",
+				"task_id", task.ID, "alias", alias, "files", len(files))
+		}
 	}
 
 	// Partial aggregate mode: strip top Sort+Limit so each worker produces
@@ -1821,6 +1823,8 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		"sql_length", len(task.SQLText),
 		"rows", totalRows,
 		"batches", len(batches),
+		"probe_split", len(task.ScanFileFilter) > 0,
+		"partial_agg", task.PartialAggregate,
 	)
 
 	result.NumRows = totalRows

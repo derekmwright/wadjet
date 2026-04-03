@@ -1846,9 +1846,11 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 
 	// Stale-stage watchdog: detects stages where result notifications were
 	// lost (raw NATS publish is fire-and-forget) and fails the query instead
-	// of waiting forever. Checks every 2 minutes; fails after 20 minutes
-	// with no progress on a scheduled stage. The 20-minute threshold allows
-	// for AckWait redelivery (5 min) + full pipeline execution on SF100.
+	// of waiting forever. Checks every 2 minutes with two thresholds:
+	//   - 20 min with NO active workers → tasks are truly lost
+	//   - 40 min regardless → hard upper bound even with live workers
+	// At SF100, probe-split pipeline tasks legitimately run 20-30 min with
+	// workers at 95% memory. Only fail early if workers are actually dead.
 	go func() {
 		ticker := time.NewTicker(2 * time.Minute)
 		defer ticker.Stop()
@@ -1857,13 +1859,22 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 			case <-cancelCtx.Done():
 				return
 			case <-ticker.C:
-				stalled := c.tracker.StalledStages(queryID, 20*time.Minute)
+				// With active workers, use a generous threshold — tasks
+				// are likely still running, just slow (GC pressure, large
+				// hash table builds). Without workers, fail faster.
+				activeWorkers := c.workers.Count()
+				threshold := 40 * time.Minute
+				if activeWorkers == 0 {
+					threshold = 20 * time.Minute
+				}
+				stalled := c.tracker.StalledStages(queryID, threshold)
 				if len(stalled) == 0 {
 					continue
 				}
 				c.logger.Error("stages stalled — failing query",
-					"query_id", queryID, "stalled_stages", stalled)
-				c.tracker.Fail(queryID, fmt.Sprintf("stages %v stalled: tasks did not report results within 20m", stalled))
+					"query_id", queryID, "stalled_stages", stalled,
+					"active_workers", activeWorkers, "threshold", threshold)
+				c.tracker.Fail(queryID, fmt.Sprintf("stages %v stalled: tasks did not report results within %v (active_workers=%d)", stalled, threshold, activeWorkers))
 				c.cleanupQuery(queryID)
 				select {
 				case done <- struct{}{}:

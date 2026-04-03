@@ -1076,12 +1076,17 @@ func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
 	distributedTimeSec := totalTimeSec/float64(workerCount) + baseCostSec
 	parallelismBenefit := totalTimeSec - distributedTimeSec
 
-	// Semi/anti joins (EXISTS/NOT EXISTS) are poor candidates for distribution:
-	// both sides are fully shuffled but the join output is much smaller than
-	// input. In pipeline mode the hash table is built locally and probed with
-	// early termination, avoiding the shuffle overhead entirely.
+	// Semi/anti joins (EXISTS/NOT EXISTS) benefit less from distribution at
+	// small scale: both sides are shuffled but the join output is small, and
+	// pipeline mode builds the hash table locally with early termination.
+	// At large scale (>10 GB), the hash table build dominates and distribution
+	// is essential — a single worker can't process 600M-row lineitem in time.
 	if hasSemiAnti {
-		parallelismBenefit *= 0.3
+		if totalScanBytes > 10<<30 {
+			parallelismBenefit *= 0.7
+		} else {
+			parallelismBenefit *= 0.3
+		}
 	}
 
 	return distributedOverhead > parallelismBenefit

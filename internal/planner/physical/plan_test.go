@@ -1025,6 +1025,22 @@ func TestShouldRoutePipeline(t *testing.T) {
 			wantPipe: true, // 5.3s overhead > 2.0s benefit (semi join discount)
 		},
 		{
+			name: "huge scan 2 shuffles semi join → distributed (Q04 SF100-like)",
+			stages: []Stage{
+				{Type: "scan", EstimatedBytes: 25 << 30}, // 25 GB (lineitem SF100 compressed)
+				{Type: "scan", EstimatedBytes: 3 << 30},  // 3 GB (orders SF100 compressed)
+				{Type: "shuffle"},
+				{Type: "shuffle"},
+				{Type: "hash_join", JoinType: "semi"},
+				{Type: "aggregate"},
+				{Type: "final_aggregate"},
+				{Type: "sort"},
+				{Type: "merge_sort"},
+			},
+			workers:  3,
+			wantPipe: false, // >10 GB scan: 0.7x discount, parallelism wins
+		},
+		{
 			name: "large scan 2 shuffles no sort → distributed (Q14-like)",
 			stages: []Stage{
 				{Type: "scan", EstimatedBytes: 7500 << 20}, // 7.3 GB (lineitem)
