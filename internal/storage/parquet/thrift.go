@@ -553,6 +553,11 @@ func (d *thriftDecoder) decodeLogicalType() (*LogicalType, error) {
 			if err := d.skipField(ft); err != nil {
 				return nil, err
 			}
+		case 100: // VECTOR {dimension} — wadjet extension
+			lt.Type = LogicalVector
+			if err := d.decodeVectorLogicalType(lt); err != nil {
+				return nil, err
+			}
 		default:
 			if err := d.skipField(ft); err != nil {
 				return nil, err
@@ -584,6 +589,31 @@ func (d *thriftDecoder) decodeDecimalLogicalType(lt *LogicalType) error {
 				return err
 			}
 			lt.Precision = int(v)
+		default:
+			if err := d.skipField(ft); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (d *thriftDecoder) decodeVectorLogicalType(lt *LogicalType) error {
+	var lastFieldID int16
+	for {
+		fieldID, ft, err := d.readFieldHeader(&lastFieldID)
+		if err != nil {
+			return err
+		}
+		if ft == thriftStop {
+			return nil
+		}
+		switch fieldID {
+		case 1: // dimension: i32
+			v, err := d.readI32()
+			if err != nil {
+				return err
+			}
+			lt.Dimension = int(v)
 		default:
 			if err := d.skipField(ft); err != nil {
 				return err

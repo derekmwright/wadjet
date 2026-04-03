@@ -291,6 +291,13 @@ func (e *thriftEncoder) encodeLogicalType(lt *LogicalType) {
 	case LogicalUUID:
 		e.writeFieldHeader(14, thriftStruct, &lastFieldID)
 		e.writeStop()
+	case LogicalVector:
+		// Wadjet extension: field 100 with dimension as i32
+		e.writeFieldHeader(100, thriftStruct, &lastFieldID)
+		var vecLast int16
+		e.writeFieldHeader(1, thriftI32, &vecLast)
+		e.writeI32(int32(lt.Dimension))
+		e.writeStop()
 	}
 	e.writeStop()
 }

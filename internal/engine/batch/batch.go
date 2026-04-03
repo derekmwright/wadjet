@@ -157,6 +157,13 @@ func (b *RecordBatch) Compact() *RecordBatch {
 				dst.BytesData.SetFrom(di, &src.BytesData, int(si))
 			case TypeDecimal:
 				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			case TypeVector:
+				dim := src.VectorDim
+				if dim > 0 {
+					srcOff := int(si) * dim
+					dstOff := di * dim
+					copy(dst.Float32Data[dstOff:dstOff+dim], src.Float32Data[srcOff:srcOff+dim])
+				}
 			case TypeArray, TypeMap:
 				if src.Child != nil && dst.Child != nil {
 					start := int(src.Offsets[si])

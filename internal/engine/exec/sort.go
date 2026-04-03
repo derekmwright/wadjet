@@ -410,6 +410,11 @@ func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
 		dst.BytesData.SetFrom(di, &src.BytesData, si)
 	case batch.TypeDecimal:
 		dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+	case batch.TypeVector:
+		dim := src.VectorDim
+		if dim > 0 {
+			copy(dst.Float32Data[di*dim:(di+1)*dim], src.Float32Data[si*dim:(si+1)*dim])
+		}
 	}
 }
 
@@ -522,6 +527,23 @@ func gatherVector(dst, src *batch.Vector, srcRows []int) {
 					dst.Nulls.SetNull(di)
 				} else {
 					dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+				}
+			}
+		}
+	case batch.TypeVector:
+		dim := src.VectorDim
+		if dim > 0 {
+			if !hasNulls {
+				for di, si := range srcRows {
+					copy(dst.Float32Data[di*dim:(di+1)*dim], src.Float32Data[si*dim:(si+1)*dim])
+				}
+			} else {
+				for di, si := range srcRows {
+					if src.Nulls.IsNullFast(si) {
+						dst.Nulls.SetNull(di)
+					} else {
+						copy(dst.Float32Data[di*dim:(di+1)*dim], src.Float32Data[si*dim:(si+1)*dim])
+					}
 				}
 			}
 		}
@@ -652,6 +674,27 @@ func gatherSortVector(dst *batch.Vector, colIdx int, entries []sortEntry, batche
 				dst.Nulls.SetNull(di)
 			} else {
 				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
+			}
+		}
+	case batch.TypeVector:
+		dim := dst.VectorDim
+		var src *batch.Vector
+		prevBatch := uint32(0xFFFFFFFF)
+		srcHasNulls := true
+		for di, e := range entries {
+			if e.batchIdx != prevBatch {
+				src = batches[e.batchIdx].Columns[colIdx]
+				prevBatch = e.batchIdx
+				srcHasNulls = src.Nulls.HasNulls()
+				if src.VectorDim > 0 {
+					dim = src.VectorDim
+				}
+			}
+			si := int(e.rowIdx)
+			if srcHasNulls && src.Nulls.IsNullFast(si) {
+				dst.Nulls.SetNull(di)
+			} else if dim > 0 {
+				copy(dst.Float32Data[di*dim:(di+1)*dim], src.Float32Data[si*dim:(si+1)*dim])
 			}
 		}
 	default:

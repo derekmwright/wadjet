@@ -90,11 +90,24 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 					typ = in.Schema[idx].Type
 				}
 			}
-			schema[i] = parquet.Column{
+			col := parquet.Column{
 				Name:     proj.Name,
 				Type:     typ,
 				Nullable: true,
 			}
+			// Preserve type metadata for parameterized types.
+			if srcIdx := in.ColumnIndex(proj.Name); srcIdx >= 0 {
+				col.Dimension = in.Schema[srcIdx].Dimension
+				col.Scale = in.Schema[srcIdx].Scale
+				col.Precision = in.Schema[srcIdx].Precision
+			} else if proj.SourceCol != "" {
+				if srcIdx := in.ColumnIndex(proj.SourceCol); srcIdx >= 0 {
+					col.Dimension = in.Schema[srcIdx].Dimension
+					col.Scale = in.Schema[srcIdx].Scale
+					col.Precision = in.Schema[srcIdx].Precision
+				}
+			}
+			schema[i] = col
 		}
 		p.cachedSchema = schema
 	}
@@ -224,6 +237,12 @@ func projectCopyColumn(dst, src *batch.Vector, n int) {
 		dst.BytesData.BulkCopy(0, &src.BytesData, 0, n)
 	case batch.TypeDecimal:
 		copy(dst.DecimalData.Data[:n], src.DecimalData.Data[:n])
+	case batch.TypeVector:
+		dim := src.VectorDim
+		if dim > 0 {
+			dst.VectorDim = dim
+			copy(dst.Float32Data[:n*dim], src.Float32Data[:n*dim])
+		}
 	default:
 		// Fallback for nested/unknown types: per-row copy
 		for i := 0; i < n; i++ {
@@ -277,6 +296,16 @@ func projectGatherColumn(dst, src *batch.Vector, sel []uint32) {
 	case batch.TypeDecimal:
 		for i, idx := range sel {
 			dst.DecimalData.Data[i] = src.DecimalData.Data[idx]
+		}
+	case batch.TypeVector:
+		dim := src.VectorDim
+		if dim > 0 {
+			dst.VectorDim = dim
+			for i, idx := range sel {
+				srcOff := int(idx) * dim
+				dstOff := i * dim
+				copy(dst.Float32Data[dstOff:dstOff+dim], src.Float32Data[srcOff:srcOff+dim])
+			}
 		}
 	default:
 		for i, idx := range sel {

@@ -213,6 +213,8 @@ func wadjetTypeToPhysical(t TypeID) PhysicalType {
 		return PhysicalByteArray
 	case TypeDecimal:
 		return PhysicalInt64
+	case TypeVector:
+		return PhysicalFixedLenByteArray
 	default:
 		return PhysicalByteArray
 	}
@@ -841,6 +843,12 @@ func buildLeafSchemaElement(col Column, elements *[]SchemaElement) {
 			Precision: prec,
 			Scale:     col.Scale,
 		}
+	case TypeVector:
+		se.TypeLength = int32(col.Dimension * 4) // dim × sizeof(float32)
+		se.LogicalType = &LogicalType{
+			Type:      LogicalVector,
+			Dimension: col.Dimension,
+		}
 	}
 
 	*elements = append(*elements, se)
@@ -881,6 +889,9 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) {
 	case PhysicalByteArray:
 		b := toBytes(val, lb.col.Type)
 		lb.appendByteArray(b)
+	case PhysicalFixedLenByteArray:
+		b := toBytes(val, lb.col.Type)
+		lb.data = append(lb.data, b...)
 	}
 }
 
@@ -1148,6 +1159,13 @@ func toBytes(v any, colType TypeID) []byte {
 		return t
 	case string:
 		return convertStringToBytes(t, colType)
+	case []float32:
+		// VECTOR type: encode as little-endian float32 bytes
+		buf := make([]byte, len(t)*4)
+		for i, f := range t {
+			binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
+		}
+		return buf
 	default:
 		return nil
 	}

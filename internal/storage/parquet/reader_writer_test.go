@@ -690,3 +690,51 @@ func writeParquet(t *testing.T, schema Schema, rows []map[string]any) []byte {
 	}
 	return buf.Bytes()
 }
+
+func TestVectorRoundTrip(t *testing.T) {
+	schema := Schema{
+		Columns: []Column{
+			{Name: "id", Type: TypeInt64},
+			{Name: "embedding", Type: TypeVector, Nullable: true, Dimension: 4},
+		},
+	}
+
+	rows := []map[string]any{
+		{"id": int64(1), "embedding": []float32{0.1, 0.2, 0.3, 0.4}},
+		{"id": int64(2), "embedding": []float32{1.0, 2.0, 3.0, 4.0}},
+		{"id": int64(3), "embedding": nil},
+	}
+
+	var buf bytes.Buffer
+	pw, err := NewWriter(&buf, schema, DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.WriteRows(rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data := buf.Bytes()
+	fr, err := OpenFileReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := fr.Schema()
+	if len(s.Columns) != 2 {
+		t.Fatalf("expected 2 columns, got %d", len(s.Columns))
+	}
+	embCol := s.Columns[1]
+	if embCol.Type != TypeVector {
+		t.Fatalf("expected TypeVector, got %v", embCol.Type)
+	}
+	if embCol.Dimension != 4 {
+		t.Fatalf("expected dimension 4, got %d", embCol.Dimension)
+	}
+	if n := fr.RowGroupNumRows(0); n != 3 {
+		t.Fatalf("expected 3 rows, got %d", n)
+	}
+}

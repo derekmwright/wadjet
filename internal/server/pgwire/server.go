@@ -1260,6 +1260,8 @@ func pgTypeOID(typeName string) int {
 		return 1114 // timestamp
 	case "DATE":
 		return 1082 // date
+	case "VECTOR":
+		return 25 // text (pgvector uses custom OID, but text works for display)
 	default:
 		return 25 // text
 	}
@@ -1934,6 +1936,17 @@ func appendBinaryValue(buf []byte, val any) []byte {
 // Produces SQL-like formatting for nested types (arrays, maps, structs).
 func formatPgValue(val any) string {
 	switch tv := val.(type) {
+	case []float32:
+		var buf strings.Builder
+		buf.WriteByte('[')
+		for i, f := range tv {
+			if i > 0 {
+				buf.WriteString(",")
+			}
+			buf.WriteString(fmt.Sprintf("%g", f))
+		}
+		buf.WriteByte(']')
+		return buf.String()
 	case []any:
 		var buf strings.Builder
 		buf.WriteByte('[')

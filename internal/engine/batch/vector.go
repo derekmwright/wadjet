@@ -771,6 +771,8 @@ func FormatValue(v any) string {
 		return "NULL"
 	}
 	switch tv := v.(type) {
+	case []float32:
+		return formatFloat32Slice(tv)
 	case []any:
 		return formatArrayValue(tv)
 	case map[string]any:
@@ -780,6 +782,19 @@ func FormatValue(v any) string {
 	default:
 		return fmt.Sprint(v)
 	}
+}
+
+func formatFloat32Slice(v []float32) string {
+	var buf strings.Builder
+	buf.WriteByte('[')
+	for i, f := range v {
+		if i > 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString(fmt.Sprintf("%g", f))
+	}
+	buf.WriteByte(']')
+	return buf.String()
 }
 
 func formatArrayValue(arr []any) string {

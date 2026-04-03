@@ -242,11 +242,18 @@ func schemaFromTree(root *SchemaNode, leaves []*SchemaNode) Schema {
 // nodeToColumn converts a SchemaNode to our Column type.
 func nodeToColumn(n *SchemaNode) Column {
 	if n.IsLeaf() {
-		return Column{
+		col := Column{
 			Name:     n.Name,
 			Type:     TypeIDFromSchemaNode(n),
 			Nullable: n.IsOptional(),
 		}
+		if col.Type == TypeVector && n.LogicalType != nil {
+			col.Dimension = n.LogicalType.Dimension
+		}
+		if col.Type == TypeVector && col.Dimension <= 0 && n.TypeLength > 0 {
+			col.Dimension = int(n.TypeLength) / 4 // TypeLength = dim × sizeof(float32)
+		}
+		return col
 	}
 
 	// Group node — detect LIST/MAP/STRUCT patterns.
@@ -313,6 +320,8 @@ func TypeIDFromSchemaNode(n *SchemaNode) TypeID {
 			return TypeString
 		case LogicalEnum:
 			return TypeString
+		case LogicalVector:
+			return TypeVector
 		}
 	}
 

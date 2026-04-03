@@ -3,6 +3,7 @@ package scan
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -237,6 +238,19 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 		}
 		return pqt.PlainFloat32Values(dst)
 
+	case pqt.TypeVector:
+		// VECTOR stored as FIXED_LEN_BYTE_ARRAY: resolve dictionary indices.
+		dictData, dictOffsets := dict.Data.ByteArray()
+		var buf []byte
+		offsets := make([]uint32, n+1)
+		for i := 0; i < n; i++ {
+			idx := indices[i]
+			offsets[i] = uint32(len(buf))
+			buf = append(buf, dictData[dictOffsets[idx]:dictOffsets[idx+1]]...)
+		}
+		offsets[n] = uint32(len(buf))
+		return pqt.ByteArrayValues(buf, offsets)
+
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
 		dictData, dictOffsets := dict.Data.ByteArray()
 		var buf []byte
@@ -289,6 +303,26 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 			byteIdx := i / 8
 			bitIdx := uint(i % 8)
 			vec.BoolData[offset+i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
+		}
+
+	case pqt.TypeVector:
+		// FIXED_LEN_BYTE_ARRAY: decode little-endian float32 bytes into Float32Data.
+		rawData, offsets := data.ByteArray()
+		dim := vec.VectorDim
+		if dim <= 0 {
+			break
+		}
+		for i := 0; i < n; i++ {
+			var val []byte
+			if offsets != nil {
+				val = rawData[offsets[i]:offsets[i+1]]
+			} else if i*dim*4+dim*4 <= len(rawData) {
+				val = rawData[i*dim*4 : (i+1)*dim*4]
+			}
+			dstOff := (offset + i) * dim
+			for j := 0; j < dim && j*4+4 <= len(val); j++ {
+				vec.Float32Data[dstOff+j] = math.Float32frombits(binary.LittleEndian.Uint32(val[j*4:]))
+			}
 		}
 
 	case pqt.TypeString, pqt.TypeBytes, pqt.TypeIPv6, pqt.TypeCIDR, pqt.TypeUUID:
@@ -358,6 +392,30 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 				byteIdx := valIdx / 8
 				bitIdx := uint(valIdx % 8)
 				vec.BoolData[offset+i] = byteIdx < len(boolBytes) && (boolBytes[byteIdx]&(1<<bitIdx)) != 0
+				valIdx++
+			} else {
+				vec.Nulls.SetNull(offset + i)
+			}
+		}
+
+	case pqt.TypeVector:
+		// FIXED_LEN_BYTE_ARRAY with nullable scatter.
+		rawData, offsets := data.ByteArray()
+		dim := vec.VectorDim
+		if dim <= 0 {
+			break
+		}
+		valIdx := 0
+		for i := 0; i < n; i++ {
+			if defLevels[i] == maxDefLevel {
+				var val []byte
+				if offsets != nil {
+					val = rawData[offsets[valIdx]:offsets[valIdx+1]]
+				}
+				dstOff := (offset + i) * dim
+				for j := 0; j < dim && j*4+4 <= len(val); j++ {
+					vec.Float32Data[dstOff+j] = math.Float32frombits(binary.LittleEndian.Uint32(val[j*4:]))
+				}
 				valIdx++
 			} else {
 				vec.Nulls.SetNull(offset + i)

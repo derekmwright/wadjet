@@ -208,6 +208,7 @@ const (
 	LogicalBSON
 	LogicalUUID
 	LogicalFloat16
+	LogicalVector // wadjet extension: fixed-dimension float32 embedding vector
 )
 
 // LogicalType carries the new-style logical type with parameters.
@@ -218,4 +219,5 @@ type LogicalType struct {
 	Precision int  // for DECIMAL
 	Scale     int  // for DECIMAL
 	IsAdjustedToUTC bool // for TIMESTAMP/TIME
+	Dimension int  // for VECTOR: number of float32 elements
 }
