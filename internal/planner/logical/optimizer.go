@@ -2151,7 +2151,7 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 // (EXISTS, NOT EXISTS, IN (SELECT), scalar subqueries). After successful
 // decorrelation these become semi/anti join nodes and the predicates are
 // removed. If this returns false, the scan-node structure is deterministic
-// and safe for scan-split distribution.
+// and safe for distributed execution.
 func HasRemainingSubqueries(n *Node) bool {
 	if n == nil {
 		return false

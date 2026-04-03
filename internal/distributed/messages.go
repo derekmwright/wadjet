@@ -33,11 +33,6 @@ type Task struct {
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline
 	DataBucket string `json:"data_bucket,omitempty"` // bucket containing source data (tables)
 
-	// Scan-split pipeline: table scans distributed across workers, compute on one worker.
-	// Maps scan alias → result file paths from pre-scanned data.
-	// Alias is unique per scan node: "table" or "table:N" for self-joins.
-	PreScannedInputs map[string][]string `json:"pre_scanned_inputs,omitempty"`
-
 	// Probe-split pipeline: the probe table's files are partitioned across workers
 	// while build tables are scanned in full by each worker. Maps scan alias →
 	// allowed file paths. Only the probe scan alias has a restricted file list;

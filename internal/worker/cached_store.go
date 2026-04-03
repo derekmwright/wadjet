@@ -67,8 +67,8 @@ func (s *CachedStore) Get(ctx context.Context, bucket, key string) (io.ReadClose
 // returns a zero-latency in-memory reader. On cache miss, it delegates to
 // the inner store's ReaderAt (S3 range reads) to avoid downloading full
 // files when only a few columns are needed. The cache is populated by
-// Get() calls (used by scan-split tasks) so subsequent pipeline queries
-// on the same worker benefit from cached full files.
+// Get() calls so subsequent pipeline queries on the same worker benefit
+// from cached full files.
 func (s *CachedStore) GetReaderAt(ctx context.Context, bucket, key string) (objstore.ReaderAtCloser, int64, error) {
 	cacheKey := bucket + "/" + key
 	if data, ok := s.cache.GetRef(cacheKey); ok {

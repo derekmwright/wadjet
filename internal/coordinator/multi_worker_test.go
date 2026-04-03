@@ -183,11 +183,11 @@ func TestShuffleCorrectness(t *testing.T) {
 	}
 }
 
-// TestScanSplitFusedAgg verifies that scan-split pipeline mode correctly clears
-// fused aggregate specs from scan stages. Without the fix, scan tasks produce
-// partial aggregates instead of raw rows, causing the pipeline to get column
-// mismatches and return 0 rows (reproduced Q01/Q20 returning 0 on SF10).
-func TestScanSplitFusedAgg(t *testing.T) {
+// TestDistributedFusedAgg verifies that distributed execution with fused
+// scan-aggregate correctly produces results. Queries like Q01 fuse GROUP BY
+// into the scan stage so each worker produces partial aggregates that the
+// coordinator merges.
+func TestDistributedFusedAgg(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
 
@@ -337,17 +337,16 @@ func TestScanSplitFusedAgg(t *testing.T) {
 	// Inject fake heartbeats so coordinator sees 3 workers
 	for i := 0; i < 3; i++ {
 		coord.workers.record(distributed.WorkerHeartbeat{
-			WorkerID:  fmt.Sprintf("scan-split-worker-%d", i),
+			WorkerID:  fmt.Sprintf("distributed-worker-%d", i),
 			Timestamp: time.Now(),
 		})
 	}
 
 	// Q01 (Pricing Summary Report) is the canonical fused scan-aggregate query:
 	// SELECT ... FROM lineitem WHERE ... GROUP BY ... ORDER BY ...
-	// With 8 lineitem files and 3 workers, fused-agg queries now skip
-	// scan-split and use the full distributed path (fused scan → merge_aggregate).
-	// This is both correct AND fast: fused agg reduces 55M rows to ~4 groups
-	// at the scan level, avoiding the need to ship raw rows through S3.
+	// With 8 lineitem files and 3 workers, fused-agg queries use the
+	// distributed path (fused scan → merge_aggregate). Fused agg reduces
+	// 55M rows to ~4 groups at the scan level, avoiding raw row transfer.
 	q1 := tpch.TPCHQueries[1]
 	result, err := coord.ExecuteSQL(ctx, q1.SQL)
 	if err != nil {

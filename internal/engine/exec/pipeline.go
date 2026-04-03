@@ -399,8 +399,6 @@ func (d *DualSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 func (d *DualSource) Close() error { return nil }
 
 // BatchSource is a source that yields pre-loaded record batches.
-// Used by scan-split pipeline mode where scan I/O is distributed across
-// workers and the compute pipeline reads from materialized scan results.
 type BatchSource struct {
 	batches []*batch.RecordBatch
 	idx     int

@@ -166,12 +166,6 @@ type Planner struct {
 	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
 	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
 
-	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
-	// When populated, buildScan uses these batches instead of reading from the
-	// object store, allowing parallel scan I/O with single-worker compute.
-	// Keyed by scan alias: "table" or "table:N" for self-joins.
-	MaterializedInputs map[string][]*batch.RecordBatch
-
 	// ScanFileFilter restricts which files each scan alias reads. Used in
 	// probe-split pipeline mode where the probe table is partitioned across
 	// workers while build tables read all files. Keyed by scan alias.
@@ -1502,7 +1496,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		// Build unique ScanAlias: "table" for first scan, "table:1", "table:2"
 		// for duplicates. This disambiguates multiple scans of the same table
-		// (e.g., self-joins) in scan-split pipeline mode.
+		// (e.g., self-joins) for probe-split file filtering.
 		scanAlias := node.TableName
 		dupCount := 0
 		for _, s := range *stages {
@@ -1967,7 +1961,7 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	// Track scan alias for both MaterializedInputs and ScanFileFilter.
+	// Track scan alias for ScanFileFilter.
 	// Alias scheme matches walkStages: "table" for first, "table:N" for duplicates.
 	if p.scanCounter == nil {
 		p.scanCounter = make(map[string]int)
@@ -1978,13 +1972,6 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 	scanAlias := node.TableName
 	if n > 0 {
 		scanAlias = fmt.Sprintf("%s:%d", node.TableName, n)
-	}
-
-	// Scan-split pipeline mode: use pre-scanned data instead of reading from S3.
-	if p.MaterializedInputs != nil {
-		if batches, ok := p.MaterializedInputs[scanAlias]; ok && len(batches) > 0 {
-			return exec.NewBatchSource(batches), nil, &exec.CollectSink{}, nil
-		}
 	}
 
 	// Table functions (read_json, read_csv, etc.) bypass the catalog scan
