@@ -277,11 +277,11 @@ func ExtractMergeInfo(plan *Node) *MergeInfo {
 		mi.HasDistinct = true
 		return mi
 	}
-	// Non-aggregate query — still need sort + limit merge
-	if mi.Limit > 0 || len(mi.OrderBy) > 0 {
-		return mi
-	}
-	return nil
+	// Non-aggregate, non-distinct query: merge by concatenation (UNION ALL).
+	// Sort/limit are applied after concatenation if present. Even bare joins
+	// with no ORDER BY or GROUP BY can probe-split — each worker produces its
+	// partition's rows and the coordinator concatenates them.
+	return mi
 }
 
 // MergeInfo describes how to merge probe-split partial results.
