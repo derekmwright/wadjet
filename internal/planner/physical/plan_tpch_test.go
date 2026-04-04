@@ -410,6 +410,195 @@ func TestTPCHSelfJoinAliases(t *testing.T) {
 	}
 }
 
+// tpchPlanQueryMap contains all 22 TPC-H queries for routing validation.
+var tpchPlanQueryMap = map[int]string{
+	1: `SELECT l_returnflag, l_linestatus, SUM(l_quantity) as sum_qty, SUM(l_extendedprice) as sum_base_price, SUM(l_extendedprice * (1 - l_discount)) as sum_disc_price, SUM(l_extendedprice * (1 - l_discount) * (1 + l_tax)) as sum_charge, AVG(l_quantity) as avg_qty, AVG(l_extendedprice) as avg_price, AVG(l_discount) as avg_disc, COUNT(*) as count_order FROM lineitem WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag, l_linestatus ORDER BY l_returnflag, l_linestatus`,
+	2: tpchPlanQueries["Q02"],
+	3: `SELECT l_orderkey, SUM(l_extendedprice * (1 - l_discount)) as revenue, o_orderdate, o_shippriority FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON l_orderkey = o_orderkey WHERE c_mktsegment = 'BUILDING' AND o_orderdate < '1995-03-15' AND l_shipdate > '1995-03-15' GROUP BY l_orderkey, o_orderdate, o_shippriority ORDER BY revenue DESC, o_orderdate LIMIT 10`,
+	4: `SELECT o_orderpriority, COUNT(*) as order_count FROM orders WHERE o_orderdate >= '1993-07-01' AND o_orderdate < '1993-10-01' AND EXISTS (SELECT 1 FROM lineitem WHERE l_orderkey = o_orderkey AND l_commitdate < l_receiptdate) GROUP BY o_orderpriority ORDER BY o_orderpriority`,
+	5: `SELECT n_name, SUM(l_extendedprice * (1 - l_discount)) as revenue FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON l_orderkey = o_orderkey JOIN supplier ON l_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey JOIN region ON n_regionkey = r_regionkey WHERE c_nationkey = s_nationkey AND r_name = 'ASIA' AND o_orderdate >= '1994-01-01' AND o_orderdate < '1995-01-01' GROUP BY n_name ORDER BY revenue DESC`,
+	6: `SELECT SUM(l_extendedprice * l_discount) as revenue FROM lineitem WHERE l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01' AND l_discount >= 0.05 AND l_discount <= 0.07 AND l_quantity < 24`,
+	7: tpchPlanQueries["Q07"],
+	8: tpchPlanQueries["Q08"],
+	9: `SELECT n_name as nation, SUBSTR(o_orderdate, 1, 4) as o_year, SUM(l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity) as sum_profit FROM part JOIN lineitem ON p_partkey = l_partkey JOIN supplier ON s_suppkey = l_suppkey JOIN partsupp ON ps_suppkey = l_suppkey AND ps_partkey = l_partkey JOIN orders ON o_orderkey = l_orderkey JOIN nation ON s_nationkey = n_nationkey WHERE p_name LIKE '%green%' GROUP BY n_name, SUBSTR(o_orderdate, 1, 4) ORDER BY nation, o_year DESC`,
+	10: `SELECT c_custkey, c_name, SUM(l_extendedprice * (1 - l_discount)) as revenue, c_acctbal, n_name, c_address, c_phone, c_comment FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON l_orderkey = o_orderkey JOIN nation ON c_nationkey = n_nationkey WHERE o_orderdate >= '1993-10-01' AND o_orderdate < '1994-01-01' AND l_returnflag = 'R' GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment ORDER BY revenue DESC LIMIT 20`,
+	11: `SELECT ps_partkey, SUM(ps_supplycost * ps_availqty) as value FROM partsupp JOIN supplier ON ps_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey WHERE n_name = 'GERMANY' GROUP BY ps_partkey HAVING SUM(ps_supplycost * ps_availqty) > (SELECT SUM(ps_supplycost * ps_availqty) * 0.0001 FROM partsupp JOIN supplier ON ps_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey WHERE n_name = 'GERMANY') ORDER BY value DESC`,
+	12: `SELECT l_shipmode, SUM(CASE WHEN o_orderpriority = '1-URGENT' OR o_orderpriority = '2-HIGH' THEN 1 ELSE 0 END) as high_line_count, SUM(CASE WHEN o_orderpriority != '1-URGENT' AND o_orderpriority != '2-HIGH' THEN 1 ELSE 0 END) as low_line_count FROM orders JOIN lineitem ON o_orderkey = l_orderkey WHERE l_shipmode IN ('MAIL', 'SHIP') AND l_commitdate < l_receiptdate AND l_shipdate < l_commitdate AND l_receiptdate >= '1994-01-01' AND l_receiptdate < '1995-01-01' GROUP BY l_shipmode ORDER BY l_shipmode`,
+	13: `SELECT c_custkey, COUNT(o_orderkey) as c_count FROM customer LEFT JOIN orders ON c_custkey = o_custkey AND o_comment NOT LIKE '%special%requests%' GROUP BY c_custkey ORDER BY c_count DESC, c_custkey LIMIT 100`,
+	14: `SELECT SUM(CASE WHEN p_type LIKE 'PROMO%%' THEN l_extendedprice * (1 - l_discount) ELSE 0 END) as promo_revenue, SUM(l_extendedprice * (1 - l_discount)) as total_revenue FROM lineitem JOIN part ON l_partkey = p_partkey WHERE l_shipdate >= '1995-09-01' AND l_shipdate < '1995-10-01'`,
+	15: `WITH revenue AS (SELECT l_suppkey as supplier_no, SUM(l_extendedprice * (1 - l_discount)) as total_revenue FROM lineitem WHERE l_shipdate >= '1996-01-01' AND l_shipdate < '1996-04-01' GROUP BY l_suppkey) SELECT s_suppkey, s_name, s_address, s_phone, total_revenue FROM supplier JOIN revenue ON s_suppkey = supplier_no WHERE total_revenue = (SELECT MAX(total_revenue) FROM revenue) ORDER BY s_suppkey`,
+	16: `SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) as supplier_cnt FROM partsupp JOIN part ON p_partkey = ps_partkey WHERE p_brand != 'Brand#45' AND p_type NOT LIKE 'MEDIUM POLISHED%%' AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9) GROUP BY p_brand, p_type, p_size ORDER BY supplier_cnt DESC, p_brand, p_type, p_size`,
+	17: `SELECT SUM(l_extendedprice) / 7.0 as avg_yearly FROM lineitem JOIN part ON p_partkey = l_partkey WHERE p_brand = 'Brand#23' AND p_container = 'MED BOX' AND l_quantity < (SELECT 0.2 * AVG(l_quantity) FROM lineitem WHERE l_partkey = p_partkey)`,
+	18: `SELECT c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, SUM(l_quantity) as total_qty FROM customer JOIN orders ON c_custkey = o_custkey JOIN lineitem ON o_orderkey = l_orderkey WHERE o_orderkey IN (SELECT l_orderkey FROM lineitem GROUP BY l_orderkey HAVING SUM(l_quantity) > 300) GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice ORDER BY o_totalprice DESC, o_orderdate LIMIT 100`,
+	19: `SELECT SUM(l_extendedprice * (1 - l_discount)) as revenue FROM lineitem JOIN part ON p_partkey = l_partkey WHERE (p_brand = 'Brand#12' AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG') AND l_quantity >= 1 AND l_quantity <= 11 AND p_size >= 1 AND p_size <= 5 AND l_shipmode IN ('AIR', 'REG AIR') AND l_shipinstruct = 'DELIVER IN PERSON') OR (p_brand = 'Brand#23' AND p_container IN ('MED BAG', 'MED BOX', 'MED PACK', 'MED PKG') AND l_quantity >= 10 AND l_quantity <= 20 AND p_size >= 1 AND p_size <= 10 AND l_shipmode IN ('AIR', 'REG AIR') AND l_shipinstruct = 'DELIVER IN PERSON') OR (p_brand = 'Brand#34' AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG') AND l_quantity >= 20 AND l_quantity <= 30 AND p_size >= 1 AND p_size <= 15 AND l_shipmode IN ('AIR', 'REG AIR') AND l_shipinstruct = 'DELIVER IN PERSON')`,
+	20: `SELECT s_name, s_address FROM supplier JOIN nation ON s_nationkey = n_nationkey WHERE n_name = 'CANADA' AND s_suppkey IN (SELECT ps_suppkey FROM partsupp WHERE ps_partkey IN (SELECT p_partkey FROM part WHERE p_name LIKE 'forest%%') AND ps_availqty > (SELECT 0.5 * SUM(l_quantity) FROM lineitem WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey AND l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01')) ORDER BY s_name`,
+	21: tpchPlanQueries["Q21"],
+	22: `SELECT SUBSTR(c_phone, 1, 2) as cntrycode, COUNT(*) as numcust, SUM(c_acctbal) as totacctbal FROM customer WHERE SUBSTR(c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17') AND c_acctbal > (SELECT AVG(c_acctbal) FROM customer WHERE c_acctbal > 0.00 AND SUBSTR(c_phone, 1, 2) IN ('13', '31', '23', '29', '30', '18', '17')) AND NOT EXISTS (SELECT 1 FROM orders WHERE o_custkey = c_custkey) GROUP BY SUBSTR(c_phone, 1, 2) ORDER BY cntrycode`,
+}
+
+// TestTPCHRoutingDecisions verifies that every TPC-H query routes to a sane
+// execution path at SF10 scale. This catches silent regressions where routing
+// simplifications cause queries to take a worse path (e.g., single-worker for
+// a 6GB multi-join query, or distributed for a 50MB scan).
+//
+// The test generates physical stages for each query and simulates the
+// coordinator's three-way routing decision:
+//   1. Probe-split pipeline (preferred for join-heavy queries)
+//   2. Single-worker pipeline (small data or high shuffle overhead)
+//   3. Full distributed multi-stage (large data with shuffles)
+func TestTPCHRoutingDecisions(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	workerCount := 3
+
+	// routingPath describes which execution path the coordinator would choose.
+	type routingPath string
+	const (
+		probeSplit  routingPath = "probe-split"
+		singleWorker routingPath = "single-worker"
+		distributed  routingPath = "distributed"
+	)
+
+	// classifyRoute simulates the coordinator's routing decision.
+	classifyRoute := func(stages []Stage, logicalPlan *logical.Node) routingPath {
+		joinCount := CountJoinStages(stages)
+		_, _, canProbe := CanProbeSplit(stages, workerCount)
+		mergeInfo := logical.ExtractMergeInfo(logicalPlan)
+
+		if canProbe && mergeInfo != nil && joinCount >= 1 {
+			return probeSplit
+		}
+		if ShouldRoutePipeline(stages, workerCount) {
+			return singleWorker
+		}
+		return distributed
+	}
+
+	// Each test case specifies the expected routing path and constraints.
+	tests := []struct {
+		qNum     int
+		sql      string
+		expected routingPath
+		reason   string // why this routing is correct
+	}{
+		// No joins — single scan + aggregate. SF10 lineitem is ~6GB across 600 files.
+		// No shuffles → threshold is 768MB. 6GB > 768MB → distributed (fused scan-agg).
+		{1, "", distributed, "large scan-aggregate benefits from parallel fused-agg"},
+		{6, "", distributed, "single-table aggregate on large lineitem"},
+
+		// 1-2 joins with large probe table → probe-split
+		{3, "", probeSplit, "lineitem-orders join, lineitem as probe"},
+		{5, "", probeSplit, "5-way join, largest table as probe"},
+		{10, "", probeSplit, "customer-orders-lineitem, lineitem as probe"},
+		{12, "", probeSplit, "lineitem-orders join, lineitem as probe"},
+		{14, "", probeSplit, "lineitem-part join, lineitem as probe"},
+
+		// Semi/anti joins — build side excluded from probe, but outer can still probe
+		{4, "", probeSplit, "orders with EXISTS lineitem semi-join, orders as probe"},
+
+		// Multi-way joins (3+) with large data → distributed or probe-split
+		{2, "", probeSplit, "5-way join with correlated subquery"},
+		{7, "", probeSplit, "self-join on nation, large join chain"},
+		{8, "", probeSplit, "8-way join, largest scan as probe"},
+		{9, "", probeSplit, "5-way join, lineitem as probe"},
+
+		// Queries that may route to probe-split or distributed depending on stage shape
+		{11, "", probeSplit, "partsupp-supplier-nation join"},
+		{13, "", probeSplit, "customer LEFT JOIN orders"},
+		{15, "", probeSplit, "lineitem aggregate with supplier join"},
+		{16, "", probeSplit, "part-partsupp with NOT IN subquery"},
+		{17, "", probeSplit, "lineitem-part with scalar subquery"},
+		{18, "", probeSplit, "customer-orders-lineitem with IN subquery"},
+		{19, "", probeSplit, "lineitem-part with OR conditions"},
+		{20, "", probeSplit, "supplier with EXISTS on partsupp-lineitem"},
+
+		// Complex semi/anti join chains
+		{21, "", probeSplit, "supplier-lineitem with EXISTS+NOT EXISTS"},
+		{22, "", probeSplit, "anti-join excludes orders as build, customer is probe"},
+	}
+
+	for _, tc := range tests {
+		name := fmt.Sprintf("Q%02d", tc.qNum)
+		t.Run(name, func(t *testing.T) {
+			// Get the actual TPC-H SQL
+			sql := tc.sql
+			if sql == "" {
+				qDef, ok := tpchPlanQueryMap[tc.qNum]
+				if !ok {
+					t.Skipf("Q%02d not in plan query map", tc.qNum)
+					return
+				}
+				sql = qDef
+			}
+
+			// Build logical plan
+			parsed, err := plansql.Parse(sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			selectInfo, err := plansql.ExtractSelect(parsed)
+			if err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			logicalPlan, err := logical.BuildFromSelect(selectInfo)
+			if err != nil {
+				t.Fatalf("logical plan: %v", err)
+			}
+
+			scanAnnotator := func(plan *logical.Node) {
+				NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+			}
+			scanAnnotator(logicalPlan)
+			logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+
+			// Generate physical stages
+			planner := NewPlanner(cat)
+			planner.WorkerCount = workerCount
+			stages, err := planner.PlanDistributed(ctx, logicalPlan)
+			if err != nil {
+				t.Fatalf("plan distributed: %v", err)
+			}
+
+			// Classify routing
+			got := classifyRoute(stages, logicalPlan)
+
+			// Log stage summary for debugging failures
+			var totalScanBytes int64
+			joinCount := 0
+			shuffleCount := 0
+			for _, s := range stages {
+				if s.Type == "scan" {
+					totalScanBytes += s.EstimatedBytes
+				}
+				if s.Type == "hash_join" || s.Type == "broadcast_join" {
+					joinCount++
+				}
+				joinCount += len(s.FusedJoins)
+				if s.Type == "shuffle" {
+					shuffleCount++
+				}
+			}
+			t.Logf("route=%-14s joins=%d shuffles=%d scanMB=%d stages=%d",
+				got, joinCount, shuffleCount, totalScanBytes>>20, len(stages))
+
+			if got != tc.expected {
+				// Log full stage detail on mismatch
+				for _, s := range stages {
+					extra := ""
+					if s.JoinType != "" {
+						extra = fmt.Sprintf(" joinType=%s", s.JoinType)
+					}
+					if s.ScanAlias != "" {
+						extra += fmt.Sprintf(" alias=%s", s.ScanAlias)
+					}
+					t.Logf("  %-20s type=%-16s bytes=%dMB files=%d%s",
+						s.ID, s.Type, s.EstimatedBytes>>20, len(s.ScanFiles), extra)
+				}
+				t.Errorf("Q%02d: got %s, want %s (%s)", tc.qNum, got, tc.expected, tc.reason)
+			}
+		})
+	}
+}
+
 func TestTPCHShuffleKeysResolvable(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 
