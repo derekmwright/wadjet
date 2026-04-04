@@ -1887,6 +1887,26 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		return out, nil
 	}
 
+	// Scalar aggregate with no input: Consume was never called so isScalarAgg
+	// was never set, but we still need to emit a single row with identity values
+	// (0 for COUNT/SUM, NULL for MIN/MAX/AVG). This happens when all input
+	// batches were filtered out before reaching the aggregate.
+	if len(h.GroupByCols) == 0 && h.outputPos == 0 && len(h.keys) == 0 &&
+		!h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey {
+		h.outputPos = 1
+		schema := h.outputSchema()
+		out := batch.NewRecordBatch(schema, 1)
+		for j, agg := range h.Aggs {
+			switch agg.Func {
+			case AggCount, AggSum:
+				out.Columns[j].SetValue(0, int64(0))
+			default:
+				out.Columns[j].Nulls.SetNull(0)
+			}
+		}
+		return out, nil
+	}
+
 	totalGroups := len(h.keys)
 	if h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey {
 		totalGroups = len(h.intGroupStates)
