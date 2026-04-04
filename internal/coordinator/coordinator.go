@@ -590,7 +590,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		if len(s.Dependencies) > 0 {
 			continue
 		}
-		tasks := c.createTasksForStage(queryID, s, nil)
+		tasks, err := c.createTasksForStage(queryID, s, nil)
+		if err != nil {
+			c.tracker.Fail(queryID, err.Error())
+			return nil, fmt.Errorf("creating tasks for stage %s: %w", s.ID, err)
+		}
 		// Update tracker with actual task count and mark as scheduled
 		// (prevents GetReadyStages from re-scheduling these).
 		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
@@ -670,7 +674,8 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 
 // createTasksForStage creates distributed tasks for a given stage.
 // For intermediate stages, depResults maps dependency stageID → result file paths.
-func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, depResults map[string][]string) []distributed.Task {
+// Returns an error for unknown stage types to prevent silent task creation failures.
+func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, depResults map[string][]string) ([]distributed.Task, error) {
 	// Resolve any unresolved scalar subqueries in filter expressions using
 	// intermediate results from completed dependency stages. This ensures
 	// float values come from the same computation path as the pipeline data.
@@ -699,7 +704,7 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 	case "pipeline":
 		tasks = c.createPipelineTasks(queryID, stage, resultPrefix, depResults)
 	default:
-		return nil
+		return nil, fmt.Errorf("unknown stage type %q for stage %s", stage.Type, stage.ID)
 	}
 
 	// Propagate cluster routing and identity context
@@ -721,7 +726,7 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 			tasks[i].PolicyDecisionJSON = qm.policyDecisionJSON
 		}
 	}
-	return tasks
+	return tasks, nil
 }
 
 // createPipelineTasks creates tasks that run the query as a pipeline on workers.
@@ -1890,7 +1895,13 @@ func (c *Coordinator) scheduleDownstreamStages(ctx context.Context, queryID, com
 			c.logger.Error("no stage spec found", "stage_id", stageID)
 			continue
 		}
-		tasks := c.createTasksForStage(queryID, spec, depResults)
+		tasks, err := c.createTasksForStage(queryID, spec, depResults)
+		if err != nil {
+			c.logger.Error("failed to create tasks for stage",
+				"query", queryID, "stage", stageID, "error", err)
+			c.tracker.Fail(queryID, err.Error())
+			return
+		}
 		c.tracker.SetStageTasks(queryID, stageID, len(tasks))
 		work = append(work, stageWork{stageID: stageID, tasks: tasks})
 	}
@@ -3020,7 +3031,12 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		if len(s.Dependencies) > 0 {
 			continue
 		}
-		tasks := c.createTasksForStage(queryID, s, nil)
+		tasks, err := c.createTasksForStage(queryID, s, nil)
+		if err != nil {
+			asyncCancel()
+			c.tracker.Fail(queryID, err.Error())
+			return "", "", fmt.Errorf("creating tasks for stage %s: %w", s.ID, err)
+		}
 		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
 		c.tracker.MarkScheduled(queryID, s.ID)
 		if err := c.scheduler.PublishTasks(asyncCtx, tasks); err != nil {
