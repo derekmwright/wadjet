@@ -1616,6 +1616,9 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 		}
 		c.logger.Debug("received result", logAttrs...)
 
+		if c.workers.Liveness != nil {
+			c.workers.Liveness.Remove(result.TaskID)
+		}
 		stageComplete := c.tracker.RecordResult(result)
 		if !stageComplete {
 			return
@@ -1708,19 +1711,17 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		return "", "", fmt.Errorf("physical plan: %w", err)
 	}
 
-	// Route all queries through pipeline execution
+	// Route to probe-split or single-worker pipeline (same as ExecuteSQL)
+	var probeSplitMergeInfo *logical.MergeInfo
 	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
-	canMerge := mergeInfo != nil && mergeInfo.HasAggregate
 
-	var probeSplitMergeInfo *logical.MergeInfo
-	if canProbeSplit && canMerge && physical.CountJoinStages(physStages) >= 2 {
-		workerCount := c.workers.Count()
+	if canProbeSplit && mergeInfo != nil {
 		probeSplitMergeInfo = mergeInfo
 		physStages = []physical.Stage{{
 			ID:              "pipeline-0",
 			Type:            "pipeline",
-			Tasks:           workerCount,
+			Tasks:           c.workers.Count(),
 			ProbeSplitAlias: probeAlias,
 			ProbeSplitFiles: probeFiles,
 		}}
@@ -1781,6 +1782,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		}
 		tasks := c.createTasksForStage(queryID, s, nil)
 		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
+		c.tracker.MarkScheduled(queryID, s.ID)
 		if err := c.scheduler.PublishTasks(asyncCtx, tasks); err != nil {
 			asyncCancel()
 			c.tracker.Fail(queryID, err.Error())
@@ -1906,7 +1908,8 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 		}, nil
 	}
 
-	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, meta.stages, false)
+	needsMerge := meta.mergeInfo != nil
+	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, meta.stages, needsMerge)
 	if err != nil {
 		return &SQLResult{
 			QueryID:     queryID,
@@ -1915,6 +1918,15 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 			Elapsed:     elapsed,
 			Plan:        planStr,
 		}, nil
+	}
+
+	// Apply probe-split merge if needed (same as ExecuteSQL path)
+	if meta.mergeInfo != nil && len(batches) > 0 {
+		merged, mergedRows, mergeErr := c.mergeProbePartials(batches, columns, meta.mergeInfo)
+		if mergeErr == nil {
+			batches = merged
+			totalRows = mergedRows
+		}
 	}
 
 	return &SQLResult{

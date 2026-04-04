@@ -52,12 +52,18 @@ func setupTestServer(t *testing.T) (*httptest.Server, objstore.Store, *catalog.C
 		t.Fatalf("setting up streams: %v", err)
 	}
 
-	// Create in-memory object store and catalog
+	// Create in-memory object store and NATS-backed catalog.
+	// Pipeline tasks execute on workers that create their own catalog from
+	// NATS KV, so the catalog must be NATS-backed for metadata to be shared.
 	store := objstore.NewMemStore()
 	if err := store.MakeBucket(ctx, "test"); err != nil {
 		t.Fatal(err)
 	}
-	cat := catalog.NewWithStore(store, "test")
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("creating NATS KV: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
 	if err := cat.Init(ctx); err != nil {
 		t.Fatalf("catalog init: %v", err)
 	}
