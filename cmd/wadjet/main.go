@@ -17,6 +17,7 @@ import (
 
 	"github.com/peterh/liner"
 
+	"github.com/citc-tech/wadjet/internal/embedding"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 
 	"github.com/citc-tech/wadjet/internal/auth"
@@ -769,6 +770,22 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		}
 	}
 
+	// Configure embedding provider if API key is set
+	if apiKey := os.Getenv("WADJET_OPENAI_API_KEY"); apiKey != "" {
+		embedModel := os.Getenv("WADJET_EMBED_MODEL")
+		if embedModel == "" {
+			embedModel = "text-embedding-3-small"
+		}
+		embedCache := embedding.NewCache(50000)
+		embedProvider := embedding.NewOpenAI(embedding.OpenAIConfig{
+			APIKey: apiKey,
+			Model:  embedModel,
+		}, embedCache)
+		embedding.SetProvider(embedProvider)
+		embedding.RegisterFunctions()
+		logger.Info("embedding provider configured", "model", embedModel, "dim", embedProvider.Dimension())
+	}
+
 	// Start HTTP server
 	srv := server.New(srvCfg, logger)
 
@@ -975,6 +992,22 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 			watcher := config.NewWatcher(config.WatcherConfig{Path: configFile}, cfgMgr, logger)
 			go watcher.Watch(ctx)
 		}
+	}
+
+	// Configure embedding provider for coordinator mode
+	if apiKey := os.Getenv("WADJET_OPENAI_API_KEY"); apiKey != "" {
+		embedModel := os.Getenv("WADJET_EMBED_MODEL")
+		if embedModel == "" {
+			embedModel = "text-embedding-3-small"
+		}
+		embedCache := embedding.NewCache(50000)
+		embedProvider := embedding.NewOpenAI(embedding.OpenAIConfig{
+			APIKey: apiKey,
+			Model:  embedModel,
+		}, embedCache)
+		embedding.SetProvider(embedProvider)
+		embedding.RegisterFunctions()
+		logger.Info("embedding provider configured", "model", embedModel, "dim", embedProvider.Dimension())
 	}
 
 	srv := server.New(srvCfg, logger)
