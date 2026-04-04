@@ -11,13 +11,7 @@ import (
 type TaskType string
 
 const (
-	TaskTypeScan      TaskType = "scan"
-	TaskTypeAggregate TaskType = "aggregate"
-	TaskTypeJoin      TaskType = "join"
-	TaskTypeSort      TaskType = "sort"
-	TaskTypeWindow    TaskType = "window"
-	TaskTypeShuffle   TaskType = "shuffle"
-	TaskTypePipeline  TaskType = "pipeline" // full query executed as standalone pipeline on one worker
+	TaskTypePipeline TaskType = "pipeline" // full query executed as standalone pipeline on one worker
 )
 
 // Task is the unit of distributed work published to NATS JetStream.
@@ -32,6 +26,11 @@ type Task struct {
 	// Pipeline-specific (full query on one worker)
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline
 	DataBucket string `json:"data_bucket,omitempty"` // bucket containing source data (tables)
+
+	// Scan-split pipeline: table scans distributed across workers, compute on one worker.
+	// Maps scan alias → result file paths from pre-scanned data.
+	// Alias is unique per scan node: "table" or "table:N" for self-joins.
+	PreScannedInputs map[string][]string `json:"pre_scanned_inputs,omitempty"`
 
 	// Probe-split pipeline: the probe table's files are partitioned across workers
 	// while build tables are scanned in full by each worker. Maps scan alias →

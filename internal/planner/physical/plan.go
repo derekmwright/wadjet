@@ -166,6 +166,12 @@ type Planner struct {
 	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
 	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
 
+	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
+	// When populated, buildScan uses these batches instead of reading from the
+	// object store, allowing parallel scan I/O with single-worker compute.
+	// Keyed by scan alias: "table" or "table:N" for self-joins.
+	MaterializedInputs map[string][]*batch.RecordBatch
+
 	// ScanFileFilter restricts which files each scan alias reads. Used in
 	// probe-split pipeline mode where the probe table is partitioned across
 	// workers while build tables read all files. Keyed by scan alias.
@@ -977,79 +983,6 @@ func EstimateCost(stages []Stage, node *logical.Node) QueryCost {
 	return cost
 }
 
-// ShouldRoutePipeline returns true when a query should be routed to a single
-// worker as a standalone pipeline rather than distributed across workers.
-//
-// The decision compares total scan volume against a per-shuffle-stage threshold.
-// More shuffle stages means more S3 round-trip overhead, so more data is needed
-// to justify distribution. Most join queries are handled by probe-split before
-// reaching this function, so this primarily decides routing for aggregate-only
-// queries and edge cases where probe-split is not viable.
-func ShouldRoutePipeline(stages []Stage, workerCount int) bool {
-	if workerCount <= 1 {
-		return true
-	}
-
-	var shuffleStages int
-	var totalScanBytes int64
-	joinCount := 0
-	for _, s := range stages {
-		switch s.Type {
-		case "shuffle":
-			shuffleStages++
-		case "scan":
-			totalScanBytes += s.EstimatedBytes
-		case "hash_join", "broadcast_join":
-			joinCount++
-		}
-		joinCount += len(s.FusedJoins)
-	}
-
-	// Deep join chains with large data MUST distribute — a single worker
-	// cannot hold 3+ hash tables in memory at SF100 scale.
-	if joinCount >= 3 && totalScanBytes > 1<<30 {
-		return false
-	}
-
-	// Single worker is faster when S3 shuffle overhead exceeds parallelism
-	// benefit. Each shuffle stage adds ~0.5s fixed + data transfer cost,
-	// so more shuffles require proportionally more data to justify.
-	const bytesPerShuffle int64 = 768 << 20 // 768 MB
-	shuffleCount := shuffleStages
-	if shuffleCount < 1 {
-		shuffleCount = 1
-	}
-	return totalScanBytes < int64(shuffleCount)*bytesPerShuffle
-}
-
-// HasSelfJoins returns true if any large table is scanned more than once in
-// the stage list. Self-joins on tiny tables (< 1 MB, e.g., nation with 25
-// rows) are exempt — they don't affect routing decisions.
-func HasSelfJoins(stages []Stage) bool {
-	type tableInfo struct {
-		count int
-		bytes int64
-	}
-	tables := make(map[string]*tableInfo)
-	for _, s := range stages {
-		if s.Type == "scan" {
-			if t, ok := tables[s.TableName]; ok {
-				t.count++
-				t.bytes += s.EstimatedBytes
-			} else {
-				tables[s.TableName] = &tableInfo{count: 1, bytes: s.EstimatedBytes}
-			}
-		}
-	}
-	const smallTableThreshold int64 = 1024 * 1024 // 1 MB
-	for _, t := range tables {
-		if t.count > 1 && t.bytes > smallTableThreshold {
-			return true
-		}
-	}
-	return false
-}
-
 // CanProbeSplit returns the scan alias and file list for probe-split pipeline
 // routing. Probe-split distributes the dominant probe table's files across
 // workers while each worker scans build tables in full. This enables parallel
@@ -1061,31 +994,12 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 		return "", nil, false
 	}
 
-	// For semi/anti joins, the build table (inner side) must NOT be
-	// partitioned — each worker needs all build rows to correctly evaluate
-	// EXISTS/NOT EXISTS. Collect build-side aliases to exclude them.
-	excludeProbe := make(map[string]bool)
-	for _, s := range stages {
-		if s.JoinType == "semi" || s.JoinType == "anti" {
-			if s.BuildTableAlias != "" {
-				excludeProbe[s.BuildTableAlias] = true
-			}
-		}
-		for _, fj := range s.FusedJoins {
-			if fj.JoinType == "semi" || fj.JoinType == "anti" {
-				if fj.BuildTableAlias != "" {
-					excludeProbe[fj.BuildTableAlias] = true
-				}
-			}
-		}
-	}
-
-	// Find the largest scan that is eligible as probe.
+	// Find the largest scan — this is the probe candidate.
 	var bestAlias string
 	var bestFiles []string
 	var bestBytes int64
 	for _, s := range stages {
-		if s.Type == "scan" && s.EstimatedBytes > bestBytes && !excludeProbe[s.ScanAlias] {
+		if s.Type == "scan" && s.EstimatedBytes > bestBytes {
 			bestAlias = s.ScanAlias
 			bestFiles = s.ScanFiles
 			bestBytes = s.EstimatedBytes
@@ -1496,7 +1410,7 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		// Build unique ScanAlias: "table" for first scan, "table:1", "table:2"
 		// for duplicates. This disambiguates multiple scans of the same table
-		// (e.g., self-joins) for probe-split file filtering.
+		// (e.g., self-joins) in scan-split pipeline mode.
 		scanAlias := node.TableName
 		dupCount := 0
 		for _, s := range *stages {
@@ -1961,7 +1875,7 @@ func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.S
 }
 
 func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
-	// Track scan alias for ScanFileFilter.
+	// Track scan alias for both MaterializedInputs and ScanFileFilter.
 	// Alias scheme matches walkStages: "table" for first, "table:N" for duplicates.
 	if p.scanCounter == nil {
 		p.scanCounter = make(map[string]int)
@@ -1972,6 +1886,13 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 	scanAlias := node.TableName
 	if n > 0 {
 		scanAlias = fmt.Sprintf("%s:%d", node.TableName, n)
+	}
+
+	// Scan-split pipeline mode: use pre-scanned data instead of reading from S3.
+	if p.MaterializedInputs != nil {
+		if batches, ok := p.MaterializedInputs[scanAlias]; ok && len(batches) > 0 {
+			return exec.NewBatchSource(batches), nil, &exec.CollectSink{}, nil
+		}
 	}
 
 	// Table functions (read_json, read_csv, etc.) bypass the catalog scan
