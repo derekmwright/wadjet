@@ -104,6 +104,44 @@ FROM http_logs
 
 Nested types are fully supported in Parquet read (LIST/MAP/STRUCT pattern detection) and display output.
 
+### Vector Type
+
+| Type | Storage | Parquet | Use Cases |
+|------|---------|---------|-----------|
+| `VECTOR(N)` | N x float32 per row | FIXED_LEN_BYTE_ARRAY | Embeddings, similarity search |
+
+`VECTOR(N)` stores fixed-dimension float32 vectors for embedding-based workflows. Each row occupies exactly N x 4 bytes with zero overhead.
+
+```sql
+-- Create a table with embedding column
+CREATE TABLE doc_embeddings (
+    doc_id INT64,
+    title STRING,
+    embedding VECTOR(1536)
+)
+
+-- Generate embeddings from text (requires WADJET_OPENAI_API_KEY)
+SELECT embed('lateral movement detected') AS vec
+
+-- Semantic similarity search
+SELECT doc_id, title,
+       cosine_similarity(embedding, embed('credential theft')) AS score
+FROM doc_embeddings
+ORDER BY score DESC LIMIT 10
+```
+
+**Vector functions:** `cosine_similarity(a, b)`, `l2_distance(a, b)`, `dot_product(a, b)`, `vector_norm(a)`, `vector_dims(a)`
+
+**Embedding functions:** `embed(text)`, `embed_model()`, `embed_dim()`
+
+Configure the embedding provider via environment variables:
+```bash
+export WADJET_OPENAI_API_KEY=sk-...
+export WADJET_EMBED_MODEL=text-embedding-3-small  # default
+```
+
+Supported models: `text-embedding-3-small` (1536-dim), `text-embedding-3-large` (3072-dim). Embeddings are cached in an LRU cache (50K entries) to avoid repeat API calls.
+
 ## Nullability
 
 Every column supports null values via a **null bitmap** — one bit per row indicating presence or absence. This has minimal storage overhead (1 bit per row) and enables three-valued logic in expressions.

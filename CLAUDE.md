@@ -61,6 +61,7 @@ SQL text
 | `internal/worker/` | Distributed task executor |
 | `internal/server/pgwire/` | PostgreSQL wire protocol |
 | `internal/auth/` | API keys, JWT, mTLS, RBAC, ABAC policy engine, identity enrichment |
+| `internal/embedding/` | embed() SQL function — OpenAI provider, LRU cache, pluggable interface |
 | `internal/iceberg/` | Apache Iceberg metadata reader |
 | `benchmarks/tpch/` | TPC-H benchmark suite (22 queries) |
 
@@ -100,9 +101,9 @@ type Sink interface {
 
 ### Type System
 
-21 types: Bool, Int32, Int64, Float32, Float64, String, Bytes, Timestamp, IPv4, IPv6, CIDR, MAC, Port, Protocol, Duration, UUID, Date, Decimal, Array, Row, Map.
+22 types: Bool, Int32, Int64, Float32, Float64, String, Bytes, Timestamp, IPv4, IPv6, CIDR, MAC, Port, Protocol, Duration, UUID, Date, Decimal, Array, Row, Map, Vector.
 
-Network-native types (IPv4, IPv6, CIDR, MAC, Port, Protocol) are first-class with dedicated vector storage and 80+ network functions.
+Network-native types (IPv4, IPv6, CIDR, MAC, Port, Protocol) are first-class with dedicated vector storage and 80+ network functions. VECTOR(N) stores fixed-dimension float32 embeddings with cosine_similarity, l2_distance, dot_product.
 
 ### Storage
 
@@ -114,7 +115,9 @@ Network-native types (IPv4, IPv6, CIDR, MAC, Port, Protocol) are first-class wit
 ### Distribution
 
 - **Modes**: `standalone` (all-in-one), `coordinator` (plan+dispatch), `worker` (execute)
-- **NATS JetStream**: Task queues, result subscriptions, metadata KV
+- **Pipeline-only execution**: All queries run as full SQL pipelines on workers. No inter-stage S3 shuffles.
+- **Probe-split**: Partition the largest table's files across workers, each runs the full query, coordinator merges partial results (re-aggregation, sort, dedup).
+- **NATS JetStream**: Task queues with request/reply result delivery, metadata KV
 - **Federation**: NATS leaf nodes connect edge clusters to central
 
 ## Commit Convention
@@ -131,7 +134,7 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 
 **Types:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`
 
-**Scopes:** `planner`, `engine`, `exec`, `expr`, `batch`, `scan`, `storage`, `parquet`, `catalog`, `pgwire`, `auth`, `worker`, `coordinator`, `ingest`, `iceberg`, `tpch`
+**Scopes:** `planner`, `engine`, `exec`, `expr`, `batch`, `scan`, `storage`, `parquet`, `catalog`, `pgwire`, `auth`, `worker`, `coordinator`, `ingest`, `iceberg`, `embedding`, `tpch`
 
 Examples:
 ```

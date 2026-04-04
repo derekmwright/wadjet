@@ -30,11 +30,11 @@ The coordinator is the single entry point for queries:
 
 1. Receives SQL via HTTP or gRPC API
 2. Parses and plans the query
-3. Breaks the physical plan into distributed stages
-4. For federated queries, expands scan stages per-cluster via `ExpandFederatedScans`
-5. Publishes tasks to NATS with cluster-scoped subjects (`wadjet.tasks.<cluster-id>.<type>.<query-id>.<stage-id>`)
-6. Waits for result notifications from workers
-7. Merges partial results into a final response
+3. Routes to probe-split pipeline (preferred) or single-worker pipeline (fallback)
+4. For probe-split: partitions the largest table's files across workers, publishes pipeline tasks
+5. For federated queries, expands scan stages per-cluster via `ExpandFederatedScans`
+6. Waits for result notifications from workers (request/reply with ACK)
+7. Merges partial results: re-aggregation, sort/limit, DISTINCT dedup
 
 The coordinator also embeds a NATS server (no external NATS required).
 
@@ -44,11 +44,11 @@ Workers are stateless compute nodes that:
 
 1. Connect to the coordinator's NATS server
 2. Subscribe to the `tasks` JetStream consumer, filtered by cluster ID
-3. Pull and execute tasks (scan, aggregate, join, sort, window)
-4. Read data from S3 (checking in-memory result store, then LRU cache, then S3)
-5. Write intermediate results to result store (if enabled and capacity available) or S3
-6. Publish completion notifications (results < 64 KB are inlined in the notification)
-7. Send heartbeats every 10 seconds (with cluster ID)
+3. Check if query is still active before executing (prevents stale task waste)
+4. Execute pipeline tasks: full SQL on the worker, with optional probe-split file filter
+5. Read data from S3 (checking LRU cache first)
+6. Publish result notifications with request/reply ACK (results < 64 KB are inlined)
+7. Send heartbeats every 10 seconds (with cluster ID and active task IDs for liveness tracking)
 
 ### NATS JetStream
 

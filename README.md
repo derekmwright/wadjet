@@ -45,7 +45,9 @@ Full analytical SQL via a custom recursive descent parser:
 - Fixed-point DECIMAL(p,s) type with Int128 arithmetic (DuckDB-style scaled integers)
 - Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters
-- 273 built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN)
+- VECTOR(N) type for embedding storage with cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims
+- `embed()` SQL function — OpenAI text-embedding-3-small/large with batched API calls and LRU cache
+- 280+ built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
 - 23 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
 - User-defined functions (CREATE FUNCTION)
 
@@ -70,6 +72,17 @@ SELECT hour, bytes,
        RANK() OVER (ORDER BY bytes DESC) AS traffic_rank
 FROM hourly
 ORDER BY hour
+```
+
+```sql
+-- Semantic search with embeddings
+SELECT alert_id, description,
+       cosine_similarity(embed(description), embed('credential theft')) AS score
+FROM alerts
+ORDER BY score DESC LIMIT 10
+
+-- Store embeddings in VECTOR columns
+CREATE TABLE doc_embeddings (doc_id INT64, embedding VECTOR(1536))
 ```
 
 ### Execution Engine
@@ -108,8 +121,10 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 
 ### Distributed
 
+- **Pipeline-only execution** — all queries run as full SQL on workers, no inter-stage S3 shuffles
+- **Probe-split parallelism** — partition the largest table's files across workers, each runs full SQL on its slice, coordinator merges partials
 - **Embedded NATS** for coordination — no external dependencies beyond object storage
-- **JetStream task queues** with automatic redelivery on worker failure
+- **JetStream task queues** with request/reply result delivery and automatic redelivery
 - **Federation** across clusters via NATS leaf nodes
 - **Inline fast path** — results under 64 KB bypass S3 entirely
 
@@ -259,6 +274,7 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 | [Performance Tuning](docs/tuning.md) | Memory budgets, spill tuning, environment profiles |
 | [Operations](docs/operations.md) | Monitoring, Prometheus metrics, troubleshooting |
 | [Network Analytics](docs/network-analytics.md) | End-to-end workflow: devices → Bento → Wadjet → app |
+| [Disaster Recovery](docs/disaster-recovery.md) | Recovery scenarios, verification procedures, RTO/RPO |
 
 ## TPC-H Benchmark Queries
 

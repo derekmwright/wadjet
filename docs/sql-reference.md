@@ -1228,6 +1228,37 @@ Array literal syntax: `ARRAY[1, 2, 3]`
 | `MAP_ENTRIES(map)` | Convert to ARRAY(ROW(key, value)) | `MAP_ENTRIES(headers)` |
 | `MAP_FROM_ENTRIES(entries)` | Construct MAP from entry array | `MAP_FROM_ENTRIES(pairs)` |
 
+### Vector Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `COSINE_SIMILARITY(a, b)` | Cosine similarity between vectors, returns FLOAT64 in [-1, 1] | `COSINE_SIMILARITY(embed('cat'), embed('dog'))` |
+| `L2_DISTANCE(a, b)` | Euclidean distance between vectors | `L2_DISTANCE(v1, v2)` |
+| `DOT_PRODUCT(a, b)` | Dot product of two vectors | `DOT_PRODUCT(v1, v2)` |
+| `VECTOR_NORM(a)` | L2 norm of a vector | `VECTOR_NORM(embedding)` |
+| `VECTOR_DIMS(a)` | Number of dimensions in a vector | `VECTOR_DIMS(embedding)` → `1536` |
+
+### Embedding Functions
+
+Requires `WADJET_OPENAI_API_KEY` environment variable.
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `EMBED(text)` | Generate embedding vector from text | `EMBED('lateral movement')` |
+| `EMBED_MODEL()` | Current embedding model name | `EMBED_MODEL()` → `'text-embedding-3-small'` |
+| `EMBED_DIM()` | Current embedding dimension | `EMBED_DIM()` → `1536` |
+
+```sql
+-- Semantic search
+SELECT alert_id, description,
+       COSINE_SIMILARITY(EMBED(description), EMBED('credential theft')) AS score
+FROM alerts
+ORDER BY score DESC LIMIT 10
+
+-- Store pre-computed embeddings
+CREATE TABLE doc_embeddings (doc_id INT64, embedding VECTOR(1536))
+```
+
 ### UUID Functions
 
 | Function | Description | Example |
