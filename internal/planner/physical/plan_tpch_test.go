@@ -453,12 +453,12 @@ func TestTPCHRoutingDecisions(t *testing.T) {
 	// routingPath describes which execution path the coordinator would choose.
 	type routingPath string
 	const (
-		probeSplit  routingPath = "probe-split"
+		probeSplit   routingPath = "probe-split"
 		singleWorker routingPath = "single-worker"
-		distributed  routingPath = "distributed"
 	)
 
 	// classifyRoute simulates the coordinator's routing decision.
+	// All queries are either probe-split or single-worker pipeline.
 	classifyRoute := func(stages []Stage, logicalPlan *logical.Node) routingPath {
 		_, _, canProbe := CanProbeSplit(stages, workerCount)
 		mergeInfo := logical.ExtractMergeInfo(logicalPlan)
@@ -466,10 +466,7 @@ func TestTPCHRoutingDecisions(t *testing.T) {
 		if canProbe && mergeInfo != nil {
 			return probeSplit
 		}
-		if ShouldRoutePipeline(stages, workerCount) {
-			return singleWorker
-		}
-		return distributed
+		return singleWorker
 	}
 
 	// Each test case specifies the expected routing path and constraints.

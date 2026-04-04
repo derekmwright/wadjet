@@ -11,7 +11,7 @@ func TestTaskJSONRoundTrip(t *testing.T) {
 		ID:        "task-1",
 		QueryID:   "q-100",
 		StageID:   "s-0",
-		Type:      TaskTypeScan,
+		Type:      TaskType("scan"),
 		TableName: "orders",
 		Files:     []string{"part-0000.parquet", "part-0001.parquet"},
 		Columns:   []string{"id", "amount"},
@@ -147,7 +147,7 @@ func TestUnmarshalAutoDetectsFormat(t *testing.T) {
 	}
 
 	// JSON-encoded Task.
-	task := Task{ID: "t-2", QueryID: "q-2", Type: TaskTypeAggregate}
+	task := Task{ID: "t-2", QueryID: "q-2", Type: TaskType("aggregate")}
 	jsonData, err := Marshal(task)
 	if err != nil {
 		t.Fatalf("Marshal json: %v", err)
@@ -272,7 +272,7 @@ func TestTaskClusterIDRoundTrip(t *testing.T) {
 		ID:        "task-1",
 		QueryID:   "q-100",
 		StageID:   "s-0",
-		Type:      TaskTypeScan,
+		Type:      TaskType("scan"),
 		ClusterID: "afb-east",
 		TableName: "sensor_data",
 		CreatedAt: time.Date(2026, 3, 15, 0, 0, 0, 0, time.UTC),

@@ -37,8 +37,8 @@ func TestQueryTrackerRegisterAndGet(t *testing.T) {
 	qt := NewQueryTracker()
 
 	stages := map[string]*StageInfo{
-		"s0": {StageID: "s0", Type: distributed.TaskTypeScan, TotalTasks: 3},
-		"s1": {StageID: "s1", Type: distributed.TaskTypeAggregate, TotalTasks: 1, Dependencies: []string{"s0"}},
+		"s0": {StageID: "s0", Type: distributed.TaskType("scan"), TotalTasks: 3},
+		"s1": {StageID: "s1", Type: distributed.TaskType("aggregate"), TotalTasks: 1, Dependencies: []string{"s0"}},
 	}
 	qt.Register("q1", "SELECT * FROM t", stages, []string{"s0", "s1"})
 

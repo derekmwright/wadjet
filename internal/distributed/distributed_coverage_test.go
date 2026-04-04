@@ -116,7 +116,7 @@ func TestTaskWithAllTypesRoundTrip(t *testing.T) {
 				ID:          "agg-1",
 				QueryID:     "q-1",
 				StageID:     "s-1",
-				Type:        TaskTypeAggregate,
+				Type:        TaskType("aggregate"),
 				GroupByCols: []string{"region", "product"},
 				Aggregates: []AggSpec{
 					{Func: "sum", InputCol: "amount", OutputCol: "total"},
@@ -135,7 +135,7 @@ func TestTaskWithAllTypesRoundTrip(t *testing.T) {
 				ID:      "sort-1",
 				QueryID: "q-2",
 				StageID: "s-0",
-				Type:    TaskTypeSort,
+				Type:    TaskType("sort"),
 				SortKeys: []SortKeySpec{
 					{Column: "timestamp", Desc: true},
 					{Column: "name", Desc: false},
@@ -153,7 +153,7 @@ func TestTaskWithAllTypesRoundTrip(t *testing.T) {
 				ID:            "join-1",
 				QueryID:       "q-3",
 				StageID:       "s-2",
-				Type:          TaskTypeJoin,
+				Type:          TaskType("join"),
 				JoinType:      "left",
 				JoinLeftKeys:  []string{"user_id"},
 				JoinRightKeys: []string{"id"},
@@ -170,7 +170,7 @@ func TestTaskWithAllTypesRoundTrip(t *testing.T) {
 				ID:      "win-1",
 				QueryID: "q-4",
 				StageID: "s-1",
-				Type:    TaskTypeWindow,
+				Type:    TaskType("window"),
 				WindowCols: []WindowColSpec{
 					{
 						Func:        "row_number",
@@ -198,7 +198,7 @@ func TestTaskWithAllTypesRoundTrip(t *testing.T) {
 				ID:              "scan-1",
 				QueryID:         "q-5",
 				StageID:         "s-0",
-				Type:            TaskTypeScan,
+				Type:            TaskType("scan"),
 				ClusterID:       "afb-east",
 				TableName:       "classified_events",
 				Files:           []string{"part-0001.parquet"},
@@ -384,7 +384,7 @@ func TestTaskPolicyDecisionJSONRoundTrip(t *testing.T) {
 		ID:                 "task-policy",
 		QueryID:            "q-policy",
 		StageID:            "s-0",
-		Type:               TaskTypeScan,
+		Type:               TaskType("scan"),
 		PolicyDecisionJSON: policyJSON,
 		CreatedAt:          time.Now().UTC().Truncate(time.Second),
 	}

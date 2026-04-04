@@ -11,7 +11,6 @@ import (
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
-	"github.com/citc-tech/wadjet/internal/planner/physical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -570,99 +569,6 @@ func TestGetQueryStatusWithStages(t *testing.T) {
 	t.Logf("Status: %s, stages: %d, elapsed: %s", status.State, len(status.Stages), status.Elapsed)
 }
 
-// --- createJoinTasks and createWindowTasks ---
-
-func TestCreateJoinTasks(t *testing.T) {
-	ctx, coord, _ := setupWithNATSAndCatalog(t)
-	_ = ctx
-
-	// Set up a queryMeta
-	coord.mu.Lock()
-	coord.queryMetas["q-join"] = &queryMeta{identityName: "user1", identityRole: "analyst"}
-	coord.mu.Unlock()
-
-	stage := physical.Stage{
-		ID:            "join-stage",
-		Type:          "hash_join",
-		JoinType:      "inner",
-		JoinLeftKeys:  []string{"user_id"},
-		JoinRightKeys: []string{"id"},
-		LeftDepStage:  "scan-left",
-		RightDepStage: "scan-right",
-	}
-
-	depResults := map[string][]string{
-		"scan-left":  {"probe/file1.parquet", "probe/file2.parquet"},
-		"scan-right": {"build/file1.parquet"},
-	}
-
-	tasks := coord.createJoinTasks("q-join", stage, "output/", depResults)
-	if len(tasks) != 1 {
-		t.Fatalf("expected 1 join task, got %d", len(tasks))
-	}
-	task := tasks[0]
-	if task.Type != distributed.TaskTypeJoin {
-		t.Errorf("Type: got %q, want %q", task.Type, distributed.TaskTypeJoin)
-	}
-	if task.JoinType != "inner" {
-		t.Errorf("JoinType: got %q, want %q", task.JoinType, "inner")
-	}
-	if len(task.InputFiles) != 2 {
-		t.Errorf("InputFiles: got %d, want 2", len(task.InputFiles))
-	}
-	if len(task.BuildFiles) != 1 {
-		t.Errorf("BuildFiles: got %d, want 1", len(task.BuildFiles))
-	}
-}
-
-func TestCreateWindowTasks(t *testing.T) {
-	ctx, coord, _ := setupWithNATSAndCatalog(t)
-	_ = ctx
-
-	coord.mu.Lock()
-	coord.queryMetas["q-win"] = &queryMeta{}
-	coord.mu.Unlock()
-
-	stage := physical.Stage{
-		ID:           "win-stage",
-		Type:         "window",
-		Dependencies: []string{"agg-stage"},
-		WindowCols: []physical.WindowColSpec{
-			{
-				Func:        "row_number",
-				OutputCol:   "rn",
-				PartitionBy: []string{"dept"},
-				OrderBy:     []physical.SortKeySpec{{Column: "salary", Desc: true}},
-			},
-			{
-				Func:      "sum",
-				InputCol:  "salary",
-				OutputCol: "total",
-			},
-		},
-	}
-
-	depResults := map[string][]string{
-		"agg-stage": {"agg/result1.parquet", "agg/result2.parquet"},
-	}
-
-	tasks := coord.createWindowTasks("q-win", stage, "output/", depResults)
-	if len(tasks) != 1 {
-		t.Fatalf("expected 1 window task, got %d", len(tasks))
-	}
-	task := tasks[0]
-	if task.Type != distributed.TaskTypeWindow {
-		t.Errorf("Type: got %q, want %q", task.Type, distributed.TaskTypeWindow)
-	}
-	if len(task.WindowCols) != 2 {
-		t.Errorf("WindowCols: got %d, want 2", len(task.WindowCols))
-	}
-	if len(task.InputFiles) != 2 {
-		t.Errorf("InputFiles: got %d, want 2", len(task.InputFiles))
-	}
-}
-
-// --- CancelQuery on a running query ---
 
 func TestCancelQueryRunning(t *testing.T) {
 	ctx, coord, store := setupDistributed(t)

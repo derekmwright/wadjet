@@ -264,7 +264,7 @@ func TestWorkerHandlesTask(t *testing.T) {
 		ID:           "scan-test",
 		QueryID:      "q-test",
 		StageID:      "s0",
-		Type:         distributed.TaskTypeScan,
+		Type:         distributed.TaskType("scan"),
 		Files:        []string{"input/data.parquet"},
 		ResultBucket: "results",
 		ResultPrefix: "output/",
