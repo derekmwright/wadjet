@@ -482,11 +482,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
 	canMerge := mergeInfo != nil
 
-	if canProbeSplit && canMerge && joinCount >= 1 {
-		// Probe-split pipeline: each worker scans build tables in full and
-		// probes its file partition. Coordinator re-aggregates partial results.
-		// This avoids all S3 shuffle round-trips, which is especially
-		// beneficial for self-join queries with many distributed stages.
+	if canProbeSplit && canMerge {
+		// Probe-split pipeline: partition the largest scan's files across
+		// workers, each runs the full query on its partition. For join queries,
+		// each worker scans build tables in full and probes its file partition.
+		// For scan-aggregates (Q01/Q06), each worker aggregates its file chunk.
+		// Coordinator re-aggregates partial results.
 		hasSelfJoins := physical.HasSelfJoins(physStages)
 		workerCount := c.workers.Count()
 		probeSplitMergeInfo = mergeInfo

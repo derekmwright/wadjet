@@ -460,11 +460,10 @@ func TestTPCHRoutingDecisions(t *testing.T) {
 
 	// classifyRoute simulates the coordinator's routing decision.
 	classifyRoute := func(stages []Stage, logicalPlan *logical.Node) routingPath {
-		joinCount := CountJoinStages(stages)
 		_, _, canProbe := CanProbeSplit(stages, workerCount)
 		mergeInfo := logical.ExtractMergeInfo(logicalPlan)
 
-		if canProbe && mergeInfo != nil && joinCount >= 1 {
+		if canProbe && mergeInfo != nil {
 			return probeSplit
 		}
 		if ShouldRoutePipeline(stages, workerCount) {
@@ -480,10 +479,10 @@ func TestTPCHRoutingDecisions(t *testing.T) {
 		expected routingPath
 		reason   string // why this routing is correct
 	}{
-		// No joins — single scan + aggregate. SF10 lineitem is ~6GB across 600 files.
-		// No shuffles → threshold is 768MB. 6GB > 768MB → distributed (fused scan-agg).
-		{1, "", distributed, "large scan-aggregate benefits from parallel fused-agg"},
-		{6, "", distributed, "single-table aggregate on large lineitem"},
+		// No joins — single scan + aggregate. Probe-split partitions lineitem
+		// files across workers, each aggregates its chunk, coordinator re-aggregates.
+		{1, "", probeSplit, "scan-aggregate: partition lineitem, re-aggregate partials"},
+		{6, "", probeSplit, "scan-aggregate: partition lineitem, re-aggregate partials"},
 
 		// 1-2 joins with large probe table → probe-split
 		{3, "", probeSplit, "lineitem-orders join, lineitem as probe"},
