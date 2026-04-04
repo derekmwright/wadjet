@@ -1,0 +1,277 @@
+=== Wadjet TPC-H Benchmark ===
+Mode:         distributed
+Scale Factor: SF10 (10x)
+Workers:      3
+Runs:         1
+Instance:     
+Instance ID:  
+Bucket:       wadjet-bench-sf10-use2
+Date:         2026-03-24T00:28:15Z
+
+--- CPU ---
+CPU(s):                                  16
+Thread(s) per core:                      1
+Core(s) per socket:                      16
+Socket(s):                               1
+
+--- Memory ---
+               total        used        free      shared  buff/cache   available
+Mem:            30Gi       342Mi        29Gi       0.0Ki       685Mi        30Gi
+
+[00:28:15] Using pre-seeded data from s3://wadjet-bench-sf10-use2 (set GENERATE_DATA=1 to regenerate)
+[00:28:15] Running TPC-H SF10 distributed benchmark (1 runs, 3 workers)...
+2026/03/24 00:28:15 Set GOMEMLIMIT=29724066201 (27.7 GB) from detected limit 33026740224
+time=2026-03-24T00:28:15.090Z level=INFO msg="embedded NATS started" host=0.0.0.0 port=4222
+time=2026-03-24T00:28:15.136Z level=INFO msg="coordinator NATS KV result cache enabled" bucket=wadjet_results_data
+2026/03/24 00:28:15 Waiting for 3 remote workers to connect...
+2026/03/24 00:28:15   0/3 remote workers...
+2026/03/24 00:28:20   0/3 remote workers...
+2026/03/24 00:28:25   0/3 remote workers...
+2026/03/24 00:28:30   0/3 remote workers...
+2026/03/24 00:28:35   0/3 remote workers...
+time=2026-03-24T00:28:38.197Z level=INFO msg="worker registered" worker_id=worker-3f0c2ba3 cluster_id=local
+time=2026-03-24T00:28:38.532Z level=INFO msg="worker registered" worker_id=worker-b77a83fb cluster_id=local
+2026/03/24 00:28:40   2/3 remote workers...
+2026/03/24 00:28:45   2/3 remote workers...
+time=2026-03-24T00:28:48.440Z level=INFO msg="worker registered" worker_id=worker-5d5b3d47 cluster_id=local
+2026/03/24 00:28:50 All 3 remote workers connected
+2026/03/24 00:28:50 Discovered 20 files for table part
+2026/03/24 00:28:50 Discovered 80 files for table partsupp
+2026/03/24 00:28:50 Discovered 15 files for table customer
+2026/03/24 00:28:50 Discovered 150 files for table orders
+2026/03/24 00:28:50 Discovered 600 files for table lineitem
+2026/03/24 00:28:50 Discovered 1 files for table region
+2026/03/24 00:28:50 Discovered 1 files for table nation
+2026/03/24 00:28:50 Discovered 1 files for table supplier
+2026/03/24 00:28:50 Data discovery complete: 868 total files across 8 tables
+
+=== Run 1/1 ===
+time=2026-03-24T00:28:50.434Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:28:52.960Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:52.960Z level=INFO msg="scheduled stage" query_id=6a2c45f4 stage_id=final_aggregate-1 tasks=1
+time=2026-03-24T00:28:52.965Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:52.965Z level=INFO msg="scheduled stage" query_id=6a2c45f4 stage_id=sort-2 tasks=1
+time=2026-03-24T00:28:52.968Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:52.968Z level=INFO msg="scheduled stage" query_id=6a2c45f4 stage_id=merge_sort-3 tasks=1
+Q01 Pricing Summary Report           2.538s      6 rows  heap   +4MB  gc  0.3ms  OK
+time=2026-03-24T00:28:52.976Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=0fa96536 scan_stages=9
+time=2026-03-24T00:28:52.977Z level=INFO msg="published tasks" count=20
+time=2026-03-24T00:28:52.977Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:28:52.977Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:52.977Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:52.977Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:52.978Z level=INFO msg="published tasks" count=20
+time=2026-03-24T00:28:52.978Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:52.978Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:52.978Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:53.904Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:53.904Z level=INFO msg="scheduled stage" query_id=0fa96536 stage_id=pipeline-0 tasks=1
+Q02 Minimum Cost Supplier            3.112s    100 rows  heap   +4MB  gc  0.2ms  OK
+time=2026-03-24T00:28:56.090Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=4bfc8415 scan_stages=3
+time=2026-03-24T00:28:56.091Z level=INFO msg="published tasks" count=4
+time=2026-03-24T00:28:56.091Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:28:56.100Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:28:59.075Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:28:59.075Z level=INFO msg="scheduled stage" query_id=4bfc8415 stage_id=pipeline-0 tasks=1
+Q03 Shipping Priority                8.656s     10 rows  heap   +8MB  gc  0.4ms  OK
+time=2026-03-24T00:29:04.748Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=f6424075 scan_stages=2
+time=2026-03-24T00:29:04.750Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:29:04.750Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:29:07.880Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:07.880Z level=INFO msg="scheduled stage" query_id=f6424075 stage_id=pipeline-0 tasks=1
+Q04 Order Priority Checking          5.855s      5 rows  heap  +23MB  gc  0.8ms  OK
+time=2026-03-24T00:29:10.606Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=f28c2ca6 scan_stages=6
+time=2026-03-24T00:29:10.608Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:10.608Z level=INFO msg="published tasks" count=4
+time=2026-03-24T00:29:10.609Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:29:10.609Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:29:10.609Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:10.609Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:13.226Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:13.226Z level=INFO msg="scheduled stage" query_id=f28c2ca6 stage_id=pipeline-0 tasks=1
+Q05 Local Supplier Volume            9.638s      5 rows  heap  +13MB  gc  0.0ms  OK
+time=2026-03-24T00:29:20.247Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:29:21.893Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:21.893Z level=INFO msg="scheduled stage" query_id=34b493b1 stage_id=final_aggregate-1 tasks=1
+Q06 Forecasting Revenue Change       1.653s      1 rows  heap   +7MB  gc  0.0ms  OK
+time=2026-03-24T00:29:21.903Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=542439ae scan_stages=6
+time=2026-03-24T00:29:21.904Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:21.905Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:29:21.905Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:29:21.905Z level=INFO msg="published tasks" count=4
+time=2026-03-24T00:29:21.905Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:21.905Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:24.552Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:24.553Z level=INFO msg="scheduled stage" query_id=542439ae stage_id=pipeline-0 tasks=1
+Q07 Volume Shipping                 15.467s      4 rows  heap  +11MB  gc  0.0ms  OK
+time=2026-03-24T00:29:37.375Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=d70954ec scan_stages=8
+time=2026-03-24T00:29:37.377Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:29:37.377Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:29:37.377Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:37.377Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:29:37.378Z level=INFO msg="published tasks" count=4
+time=2026-03-24T00:29:37.378Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:37.378Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:37.378Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:40.379Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:40.379Z level=INFO msg="scheduled stage" query_id=d70954ec stage_id=pipeline-0 tasks=1
+Q08 National Market Share            6.201s      0 rows  heap  +14MB  gc  0.0ms  OK
+time=2026-03-24T00:29:43.577Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=ad6b04af scan_stages=6
+time=2026-03-24T00:29:43.580Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:29:43.580Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:29:43.580Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:43.580Z level=INFO msg="published tasks" count=20
+time=2026-03-24T00:29:43.580Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:29:43.580Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:47.022Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:47.022Z level=INFO msg="scheduled stage" query_id=ad6b04af stage_id=pipeline-0 tasks=1
+Q09 Product Type Profit Measure      10.57s    150 rows  heap   +7MB  gc  0.1ms  OK
+time=2026-03-24T00:29:54.148Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=b0381df3 scan_stages=4
+time=2026-03-24T00:29:54.151Z level=INFO msg="published tasks" count=4
+time=2026-03-24T00:29:54.151Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:29:54.152Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:29:54.152Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:56.336Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:29:56.336Z level=INFO msg="scheduled stage" query_id=b0381df3 stage_id=pipeline-0 tasks=1
+Q10 Returned Item Reporting           6.14s     20 rows  heap  +36MB  gc  0.2ms  OK
+time=2026-03-24T00:30:01.263Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=a3f677c2 scan_stages=3
+time=2026-03-24T00:30:01.265Z level=INFO msg="published tasks" count=20
+time=2026-03-24T00:30:01.265Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:01.265Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:01.707Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:01.707Z level=INFO msg="scheduled stage" query_id=a3f677c2 stage_id=pipeline-0 tasks=1
+Q11 Important Stock Identification   3.358s   9961 rows  heap +1234MB  gc  0.9ms  OK
+time=2026-03-24T00:30:03.655Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=eba02e45 scan_stages=2
+time=2026-03-24T00:30:03.656Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:30:03.657Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:05.881Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:05.881Z level=INFO msg="scheduled stage" query_id=eba02e45 stage_id=pipeline-0 tasks=1
+Q12 Shipping Modes and Order Priority   2.955s      2 rows  heap  +12MB  gc  0.3ms  OK
+time=2026-03-24T00:30:06.618Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=49d69ae9 scan_stages=2
+time=2026-03-24T00:30:06.621Z level=INFO msg="published tasks" count=4
+time=2026-03-24T00:30:06.621Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:30:07.165Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:07.165Z level=INFO msg="scheduled stage" query_id=49d69ae9 stage_id=pipeline-0 tasks=1
+Q13 Customer Distribution            4.992s    100 rows  heap   +4MB  gc  0.0ms  OK
+time=2026-03-24T00:30:11.615Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:11.616Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:12.004Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:12.004Z level=INFO msg="scheduled stage" query_id=f01198ce stage_id=shuffle-2 tasks=3
+time=2026-03-24T00:30:13.102Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:13.102Z level=INFO msg="scheduled stage" query_id=f01198ce stage_id=shuffle-3 tasks=3
+time=2026-03-24T00:30:13.244Z level=INFO msg="published tasks" count=12
+time=2026-03-24T00:30:13.244Z level=INFO msg="scheduled stage" query_id=f01198ce stage_id=join-4 tasks=12
+time=2026-03-24T00:30:13.419Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:13.419Z level=INFO msg="scheduled stage" query_id=f01198ce stage_id=aggregate-5 tasks=3
+time=2026-03-24T00:30:13.503Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:13.503Z level=INFO msg="scheduled stage" query_id=f01198ce stage_id=final_aggregate-6 tasks=1
+Q14 Promotion Effect                 1.894s      1 rows  heap  +73MB  gc  0.3ms  OK
+time=2026-03-24T00:30:13.510Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=f828db28 scan_stages=2
+time=2026-03-24T00:30:13.517Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:13.518Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:14.976Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:14.976Z level=INFO msg="scheduled stage" query_id=f828db28 stage_id=pipeline-0 tasks=1
+Q15 Top Supplier                     1.567s      0 rows  heap +109MB  gc  0.2ms  OK
+time=2026-03-24T00:30:15.080Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=f7e4e9ff scan_stages=2
+time=2026-03-24T00:30:15.081Z level=INFO msg="published tasks" count=20
+time=2026-03-24T00:30:15.081Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:15.567Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:15.567Z level=INFO msg="scheduled stage" query_id=f7e4e9ff stage_id=pipeline-0 tasks=1
+Q16 Parts/Supplier Relationship      1.192s  27839 rows  heap  +36MB  gc  0.0ms  OK
+time=2026-03-24T00:30:16.278Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:16.278Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:16.281Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:18.373Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:18.373Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=shuffle-3 tasks=3
+time=2026-03-24T00:30:18.404Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:18.404Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=shuffle-2 tasks=3
+time=2026-03-24T00:30:20.808Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:20.808Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=final_aggregate-6 tasks=1
+time=2026-03-24T00:30:23.704Z level=INFO msg="published tasks" count=12
+time=2026-03-24T00:30:23.704Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=join-4 tasks=12
+time=2026-03-24T00:30:24.002Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:24.002Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=shuffle-8 tasks=1
+time=2026-03-24T00:30:25.128Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:25.128Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=shuffle-7 tasks=3
+time=2026-03-24T00:30:25.139Z level=INFO msg="published tasks" count=12
+time=2026-03-24T00:30:25.139Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=join-9 tasks=12
+time=2026-03-24T00:30:25.219Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:25.219Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=aggregate-10 tasks=3
+time=2026-03-24T00:30:25.231Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:25.231Z level=INFO msg="scheduled stage" query_id=04988668 stage_id=final_aggregate-11 tasks=1
+Q17 Small-Quantity-Order Revenue     8.958s      1 rows  heap  +36MB  gc  0.0ms  OK
+time=2026-03-24T00:30:25.244Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=ae5ec6ad scan_stages=4
+time=2026-03-24T00:30:25.245Z level=INFO msg="published tasks" count=4
+time=2026-03-24T00:30:25.245Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:30:25.246Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:25.247Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:28.591Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:28.591Z level=INFO msg="scheduled stage" query_id=ae5ec6ad stage_id=pipeline-0 tasks=1
+Q18 Large Volume Customer           18.777s    100 rows  heap  +12MB  gc  0.0ms  OK
+time=2026-03-24T00:30:44.025Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:44.025Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:45.575Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:45.575Z level=INFO msg="scheduled stage" query_id=d85121a3 stage_id=shuffle-2 tasks=3
+time=2026-03-24T00:30:45.699Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:45.699Z level=INFO msg="scheduled stage" query_id=d85121a3 stage_id=shuffle-3 tasks=3
+time=2026-03-24T00:30:45.970Z level=INFO msg="published tasks" count=12
+time=2026-03-24T00:30:45.970Z level=INFO msg="scheduled stage" query_id=d85121a3 stage_id=join-4 tasks=12
+time=2026-03-24T00:30:46.214Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:46.214Z level=INFO msg="scheduled stage" query_id=d85121a3 stage_id=aggregate-5 tasks=3
+time=2026-03-24T00:30:46.228Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:46.228Z level=INFO msg="scheduled stage" query_id=d85121a3 stage_id=final_aggregate-6 tasks=1
+Q19 Discounted Revenue               2.206s      1 rows  heap +209MB  gc  0.4ms  OK
+time=2026-03-24T00:30:46.236Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=d6e0ab65 scan_stages=5
+time=2026-03-24T00:30:46.237Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:46.237Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:46.237Z level=INFO msg="published tasks" count=20
+time=2026-03-24T00:30:46.237Z level=INFO msg="published tasks" count=3
+time=2026-03-24T00:30:46.238Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:48.696Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:48.696Z level=INFO msg="scheduled stage" query_id=d6e0ab65 stage_id=pipeline-0 tasks=1
+Q20 Potential Part Promotion         3.361s      0 rows  heap  +12MB  gc  0.0ms  OK
+time=2026-03-24T00:30:49.604Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=6d31c0fc scan_stages=6
+time=2026-03-24T00:30:49.605Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:49.606Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:49.606Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:30:49.606Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:49.607Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:49.608Z level=INFO msg="published tasks" count=100
+time=2026-03-24T00:30:59.475Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:30:59.475Z level=INFO msg="scheduled stage" query_id=6d31c0fc stage_id=pipeline-0 tasks=1
+Q21 Suppliers Who Kept Orders Waiting  41.018s    100 rows  heap  +16MB  gc  0.0ms  OK
+time=2026-03-24T00:31:30.951Z level=INFO msg="routing to scan-split pipeline (cost-based)" query=56b85492 scan_stages=2
+time=2026-03-24T00:31:30.954Z level=INFO msg="published tasks" count=4
+time=2026-03-24T00:31:30.954Z level=INFO msg="published tasks" count=25
+time=2026-03-24T00:31:31.482Z level=INFO msg="published tasks" count=1
+time=2026-03-24T00:31:31.482Z level=INFO msg="scheduled stage" query_id=56b85492 stage_id=pipeline-0 tasks=1
+Q22 Global Sales Opportunity         1.825s      5 rows  heap +319MB  gc  0.5ms  OK
+
+--- Summary (Run 1) ---
+Query Description                          Time     Rows Heap Delta   GC Pause
+----- -----                               -----    -----      -----      -----
+Q01   Pricing Summary Report             2.538s        6       +4MB      0.3ms
+Q02   Minimum Cost Supplier              3.112s      100       +4MB      0.2ms
+Q03   Shipping Priority                  8.656s       10       +8MB      0.4ms
+Q04   Order Priority Checking            5.855s        5      +23MB      0.8ms
+Q05   Local Supplier Volume              9.638s        5      +13MB      0.0ms
+Q06   Forecasting Revenue Change         1.653s        1       +7MB      0.0ms
+Q07   Volume Shipping                   15.467s        4      +11MB      0.0ms
+Q08   National Market Share              6.201s        0      +14MB      0.0ms
+Q09   Product Type Profit Measure        10.57s      150       +7MB      0.1ms
+Q10   Returned Item Reporting             6.14s       20      +36MB      0.2ms
+Q11   Important Stock Identification     3.358s     9961    +1234MB      0.9ms
+Q12   Shipping Modes and Order Priority     2.955s        2      +12MB      0.3ms
+Q13   Customer Distribution              4.992s      100       +4MB      0.0ms
+Q14   Promotion Effect                   1.894s        1      +73MB      0.3ms
+Q15   Top Supplier                       1.567s        0     +109MB      0.2ms
+Q16   Parts/Supplier Relationship        1.192s    27839      +36MB      0.0ms
+Q17   Small-Quantity-Order Revenue       8.958s        1      +36MB      0.0ms
+Q18   Large Volume Customer             18.777s      100      +12MB      0.0ms
+Q19   Discounted Revenue                 2.206s        1     +209MB      0.4ms
+Q20   Potential Part Promotion           3.361s        0      +12MB      0.0ms
+Q21   Suppliers Who Kept Orders Waiting    41.018s      100      +16MB      0.0ms
+Q22   Global Sales Opportunity           1.825s        5     +319MB      0.5ms
+      TOTAL                           2m41.931s
+[00:31:32] 
+[00:31:32] === Uploading results to S3 ===

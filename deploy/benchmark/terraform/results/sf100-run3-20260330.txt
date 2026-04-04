@@ -1,0 +1,44 @@
+SF100 Distributed Benchmark — Run 3
+Date: 2026-03-30 22:30 EDT (2026-03-31 02:30 UTC)
+Commit: 25b6782 feat(worker): publish per-task stats and enriched heartbeats via NATS
+Profile: sf100-distributed (30m per-query timeout — 5m override did not take effect)
+Cluster: 1x c7g.2xlarge coordinator + 3x c7gd.4xlarge workers (spot)
+Region: us-east-2
+Data: wadjet-bench-sf100-use2 (pre-seeded, root level)
+
+=== Results ===
+
+Q01 Pricing Summary Report         1m46.729s      4 rows  OK
+Q02 Minimum Cost Supplier           13.612s      0 rows  FAIL (memory budget exceeded: 1.1GB budget, 1.13GB used)
+Q03 Shipping Priority              7m20.41s     10 rows  OK
+Q04 Order Priority Checking        27m7.793s      5 rows  OK
+Q05 Local Supplier Volume           40.747s      0 rows  OK (suspect: 0 rows)
+Q06 Forecasting Revenue Change      24.974s      1 rows  OK
+Q07+ Volume Shipping               >22min        —      workers OOM'd during 5-join probe-split pipeline
+
+=== Worker Health at Q07 (~12 min in) ===
+
+Worker 0 (i-07e2afe9ce9e5b4e6): 29.7 GB RSS, 18 GB spill on NVMe
+Worker 1 (i-0afa9f1112cc5bf4b): 22.0 GB RSS, 7.6 GB spill on NVMe
+Worker 2 (i-0487178cb1cf48e2f): 29.3 GB RSS, 19 GB spill on NVMe
+
+Workers 0 and 2 reaped as stale (OOM-killed) at ~03:30 UTC during Q07.
+
+=== Key Observations ===
+
+1. Spill fix (25b6782) working: no spill file collision errors this run
+2. Q01-Q06 results identical to run 2 (stable, reproducible)
+3. Q02 consistently fails: 1.1GB per-task budget too small for 4-deep nested hash join
+4. Q05 returns 0 rows on both runs — needs correctness investigation
+5. Q07 OOM: workers hit 30GB RSS (of 32GB total) with 18-19GB spill before being killed
+6. Profile YAML query_timeout overrides -var; need to fix precedence or add CLI override
+
+=== Comparison to Run 2 (same commit minus worker stats) ===
+
+Q01: 1m48s → 1m47s  (same)
+Q02: 13s   → 14s    (same, FAIL)
+Q03: 7m38s → 7m20s  (slightly faster)
+Q04: 27m0s → 27m8s  (same)
+Q05: 35s   → 41s    (same, 0 rows)
+Q06: 25s   → 25s    (same)
+Q07: 21m47s → OOM   (same pattern)

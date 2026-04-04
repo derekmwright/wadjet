@@ -1,0 +1,717 @@
+=== Wadjet TPC-H Benchmark ===
+Mode:         distributed
+Scale Factor: SF10 (10x)
+Workers:      3
+Runs:         1
+Instance:     
+Instance ID:  
+Bucket:       wadjet-bench-sf10-use2
+Date:         2026-03-22T01:08:42Z
+
+--- CPU ---
+CPU(s):                                  16
+Thread(s) per core:                      1
+Core(s) per socket:                      16
+Socket(s):                               1
+
+--- Memory ---
+               total        used        free      shared  buff/cache   available
+Mem:            30Gi       353Mi        29Gi       0.0Ki       682Mi        30Gi
+
+[01:08:42] Using pre-seeded data from s3://wadjet-bench-sf10-use2 (set GENERATE_DATA=1 to regenerate)
+[01:08:42] Running TPC-H SF10 distributed benchmark (1 runs, 3 workers)...
+2026/03/22 01:08:42 Set GOMEMLIMIT=29724066201 (27.7 GB) from detected limit 33026740224
+time=2026-03-22T01:08:42.915Z level=INFO msg="embedded NATS started" host=0.0.0.0 port=4222
+2026/03/22 01:08:42 Waiting for 3 remote workers to connect...
+2026/03/22 01:08:42   0/3 remote workers...
+2026/03/22 01:08:47   0/3 remote workers...
+2026/03/22 01:08:52   0/3 remote workers...
+2026/03/22 01:08:57   0/3 remote workers...
+2026/03/22 01:09:02   0/3 remote workers...
+time=2026-03-22T01:09:07.079Z level=INFO msg="worker registered" worker_id=worker-e9504c56 cluster_id=local
+time=2026-03-22T01:09:07.594Z level=INFO msg="worker registered" worker_id=worker-0fccdd2c cluster_id=local
+time=2026-03-22T01:09:07.950Z level=INFO msg="worker registered" worker_id=worker-8e17acc5 cluster_id=local
+2026/03/22 01:09:07 All 3 remote workers connected
+2026/03/22 01:09:08 Discovered 1 files for table region
+2026/03/22 01:09:08 Discovered 1 files for table nation
+2026/03/22 01:09:08 Discovered 1 files for table supplier
+2026/03/22 01:09:08 Discovered 20 files for table part
+2026/03/22 01:09:08 Discovered 80 files for table partsupp
+2026/03/22 01:09:08 Discovered 15 files for table customer
+2026/03/22 01:09:08 Discovered 150 files for table orders
+2026/03/22 01:09:08 Discovered 600 files for table lineitem
+2026/03/22 01:09:08 Data discovery complete: 868 total files across 8 tables
+
+=== Run 1/1 ===
+time=2026-03-22T01:09:08.188Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:09:14.533Z level=INFO msg="published tasks" count=8
+time=2026-03-22T01:09:14.533Z level=INFO msg="scheduled stage" query_id=432376f5 stage_id=aggregate-1 tasks=8
+time=2026-03-22T01:09:15.575Z level=INFO msg="published tasks" count=2
+time=2026-03-22T01:09:15.575Z level=INFO msg="scheduled stage" query_id=432376f5 stage_id=sort-2 tasks=2
+time=2026-03-22T01:09:15.630Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:15.630Z level=INFO msg="scheduled stage" query_id=432376f5 stage_id=merge_sort-3 tasks=1
+Q01 Pricing Summary Report           7.482s     48 rows  heap   +5MB  gc  0.2ms  OK
+time=2026-03-22T01:09:15.678Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:09:15.678Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:09:15.678Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:15.678Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:15.678Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:15.679Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:09:15.679Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:15.679Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:15.679Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=scan-16 tasks=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=scan-9 tasks=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=scan-18 tasks=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:09:16.188Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:09:16.188Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=scan-1 tasks=3
+time=2026-03-22T01:09:16.188Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=scan-13 tasks=20
+time=2026-03-22T01:09:16.188Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:09:16.188Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=scan-0 tasks=20
+time=2026-03-22T01:09:16.188Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=scan-5 tasks=1
+time=2026-03-22T01:09:16.188Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=scan-14 tasks=1
+time=2026-03-22T01:09:16.232Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:16.232Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=shuffle-11 tasks=1
+time=2026-03-22T01:09:16.233Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:16.233Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=shuffle-3 tasks=1
+time=2026-03-22T01:09:16.300Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:09:16.300Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:09:16.814Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:09:16.814Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=join-15 tasks=3
+time=2026-03-22T01:09:18.459Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:09:18.459Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=join-4 tasks=3
+time=2026-03-22T01:09:18.590Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:18.590Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=join-6 tasks=1
+time=2026-03-22T01:09:18.731Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:18.731Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=join-8 tasks=1
+time=2026-03-22T01:09:18.764Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:18.764Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=shuffle-10 tasks=1
+time=2026-03-22T01:09:18.764Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:09:18.764Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=join-12 tasks=3
+time=2026-03-22T01:09:18.803Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:09:18.803Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=shuffle-21 tasks=1
+time=2026-03-22T01:09:22.609Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:09:22.609Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=join-17 tasks=3
+time=2026-03-22T01:09:37.142Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:09:37.142Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=join-19 tasks=3
+time=2026-03-22T01:10:07.199Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:07.199Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=aggregate-20 tasks=1
+time=2026-03-22T01:10:17.225Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:17.225Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=shuffle-22 tasks=1
+time=2026-03-22T01:10:17.961Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:17.961Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=join-23 tasks=3
+time=2026-03-22T01:10:18.130Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:18.130Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=sort-24 tasks=1
+time=2026-03-22T01:10:18.131Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:18.131Z level=INFO msg="scheduled stage" query_id=dc26872a stage_id=merge_sort-25 tasks=1
+Q02 Minimum Cost Supplier          1m2.457s      0 rows  heap   +7MB  gc  0.4ms  OK
+time=2026-03-22T01:10:18.136Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:10:18.137Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:10:18.138Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:10:18.385Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:18.385Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:10:18.385Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:10:18.385Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=scan-1 tasks=25
+time=2026-03-22T01:10:18.386Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:10:18.386Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=scan-5 tasks=100
+time=2026-03-22T01:10:19.195Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:19.195Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:10:22.104Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:22.104Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=shuffle-7 tasks=3
+time=2026-03-22T01:10:26.266Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:26.266Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=join-4 tasks=3
+time=2026-03-22T01:10:27.092Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:27.092Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=shuffle-6 tasks=3
+time=2026-03-22T01:10:28.932Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:28.932Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=join-8 tasks=3
+time=2026-03-22T01:10:31.013Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:31.013Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=aggregate-9 tasks=1
+time=2026-03-22T01:10:32.711Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:32.711Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=sort-10 tasks=1
+time=2026-03-22T01:10:34.219Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:34.219Z level=INFO msg="scheduled stage" query_id=add0ffe1 stage_id=merge_sort-11 tasks=1
+Q03 Shipping Priority               16.127s     10 rows  heap   +3MB  gc  0.4ms  OK
+time=2026-03-22T01:10:34.266Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:10:34.267Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:10:34.948Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:34.948Z level=INFO msg="scheduled stage" query_id=f509cda9 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:10:34.949Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:10:34.949Z level=INFO msg="scheduled stage" query_id=f509cda9 stage_id=scan-1 tasks=100
+time=2026-03-22T01:10:38.224Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:38.224Z level=INFO msg="scheduled stage" query_id=f509cda9 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:10:43.913Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:43.913Z level=INFO msg="scheduled stage" query_id=f509cda9 stage_id=join-4 tasks=3
+time=2026-03-22T01:10:45.813Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:45.813Z level=INFO msg="scheduled stage" query_id=f509cda9 stage_id=aggregate-5 tasks=1
+time=2026-03-22T01:10:45.954Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:45.954Z level=INFO msg="scheduled stage" query_id=f509cda9 stage_id=sort-6 tasks=1
+time=2026-03-22T01:10:46.008Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:46.008Z level=INFO msg="scheduled stage" query_id=f509cda9 stage_id=merge_sort-7 tasks=1
+Q04 Order Priority Checking         11.785s      5 rows  heap  +10MB  gc  0.6ms  OK
+time=2026-03-22T01:10:46.054Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:46.055Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:10:46.058Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:10:46.058Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:10:46.058Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:46.058Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:46.110Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:46.110Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=scan-10 tasks=1
+time=2026-03-22T01:10:46.110Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:46.110Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=scan-15 tasks=1
+time=2026-03-22T01:10:46.110Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:46.110Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=shuffle-12 tasks=1
+time=2026-03-22T01:10:46.110Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:10:46.110Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=scan-1 tasks=4
+time=2026-03-22T01:10:46.110Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:10:46.110Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=scan-2 tasks=25
+time=2026-03-22T01:10:46.111Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:10:46.111Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=scan-6 tasks=100
+time=2026-03-22T01:10:46.304Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:46.304Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:10:46.863Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:46.863Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=shuffle-4 tasks=3
+time=2026-03-22T01:10:50.030Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:10:50.030Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=shuffle-17 tasks=1
+time=2026-03-22T01:10:50.359Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:50.359Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=shuffle-8 tasks=3
+time=2026-03-22T01:10:54.299Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:54.299Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=join-5 tasks=3
+time=2026-03-22T01:10:54.907Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:10:54.907Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=shuffle-7 tasks=3
+time=2026-03-22T01:11:02.862Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:02.862Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=join-9 tasks=3
+time=2026-03-22T01:11:07.589Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:07.589Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=join-11 tasks=3
+time=2026-03-22T01:11:13.807Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:13.807Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=shuffle-13 tasks=3
+time=2026-03-22T01:11:17.634Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:17.634Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=join-14 tasks=3
+time=2026-03-22T01:11:22.279Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:22.279Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=shuffle-16 tasks=3
+time=2026-03-22T01:11:26.033Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:26.033Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=join-18 tasks=3
+time=2026-03-22T01:11:28.419Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:28.419Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=aggregate-19 tasks=1
+time=2026-03-22T01:11:28.994Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:28.994Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=sort-20 tasks=1
+time=2026-03-22T01:11:29.053Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:29.053Z level=INFO msg="scheduled stage" query_id=d85a2ac6 stage_id=merge_sort-21 tasks=1
+Q05 Local Supplier Volume           43.039s      5 rows  heap  +10MB  gc  0.1ms  OK
+time=2026-03-22T01:11:29.098Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:11:31.073Z level=INFO msg="published tasks" count=8
+time=2026-03-22T01:11:31.073Z level=INFO msg="scheduled stage" query_id=8f7145c6 stage_id=aggregate-1 tasks=8
+Q06 Forecasting Revenue Change       2.082s      8 rows  heap  +25MB  gc  0.6ms  OK
+time=2026-03-22T01:11:31.184Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:31.186Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:11:31.186Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:31.189Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:11:31.189Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:11:31.189Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:31.334Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:31.334Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=scan-17 tasks=1
+time=2026-03-22T01:11:31.334Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:31.334Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=scan-5 tasks=1
+time=2026-03-22T01:11:31.334Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:11:31.334Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=scan-13 tasks=4
+time=2026-03-22T01:11:31.335Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:31.335Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-2 tasks=1
+time=2026-03-22T01:11:31.335Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:11:31.335Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=scan-9 tasks=25
+time=2026-03-22T01:11:31.335Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:11:31.335Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=scan-1 tasks=100
+time=2026-03-22T01:11:33.848Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:33.848Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-7 tasks=1
+time=2026-03-22T01:11:34.101Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:34.101Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:11:34.471Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:11:34.471Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-19 tasks=1
+time=2026-03-22T01:11:34.587Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:34.587Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-11 tasks=3
+time=2026-03-22T01:11:34.647Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:34.647Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-15 tasks=3
+time=2026-03-22T01:11:41.884Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:41.884Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=join-4 tasks=3
+time=2026-03-22T01:11:49.286Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:49.286Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-6 tasks=3
+time=2026-03-22T01:11:53.957Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:53.957Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=join-8 tasks=3
+time=2026-03-22T01:11:59.456Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:11:59.456Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-10 tasks=3
+time=2026-03-22T01:12:05.274Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:05.274Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=join-12 tasks=3
+time=2026-03-22T01:12:12.507Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:12.507Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-14 tasks=3
+time=2026-03-22T01:12:18.680Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:18.680Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=join-16 tasks=3
+time=2026-03-22T01:12:25.342Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:25.342Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=shuffle-18 tasks=3
+time=2026-03-22T01:12:31.542Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:31.542Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=join-20 tasks=3
+time=2026-03-22T01:12:36.833Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:36.833Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=aggregate-21 tasks=1
+time=2026-03-22T01:12:39.744Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:39.744Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=sort-22 tasks=1
+time=2026-03-22T01:12:39.801Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:39.801Z level=INFO msg="scheduled stage" query_id=7b88194f stage_id=merge_sort-23 tasks=1
+Q07 Volume Shipping                1m8.653s     25 rows  heap  +17MB  gc  0.0ms  OK
+time=2026-03-22T01:12:39.848Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:12:39.848Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:39.851Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:12:39.851Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:39.851Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:12:39.855Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:39.855Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:39.858Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=scan-21 tasks=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=scan-17 tasks=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=scan-9 tasks=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:12:43.961Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=scan-11 tasks=4
+time=2026-03-22T01:12:43.961Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=scan-15 tasks=1
+time=2026-03-22T01:12:43.961Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:12:43.961Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:43.961Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:12:43.961Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=scan-5 tasks=25
+time=2026-03-22T01:12:43.962Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:12:43.962Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=scan-0 tasks=100
+time=2026-03-22T01:12:44.283Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:44.283Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:12:44.467Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:12:44.467Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=shuffle-19 tasks=1
+time=2026-03-22T01:12:44.545Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:44.545Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=shuffle-7 tasks=3
+time=2026-03-22T01:12:44.588Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:44.588Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=shuffle-13 tasks=3
+time=2026-03-22T01:12:59.072Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:12:59.072Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=join-4 tasks=3
+time=2026-03-22T01:13:00.912Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:00.912Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=shuffle-6 tasks=3
+time=2026-03-22T01:13:01.055Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:01.055Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=join-8 tasks=3
+time=2026-03-22T01:13:01.462Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:01.462Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=join-10 tasks=3
+time=2026-03-22T01:13:01.701Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:01.701Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=shuffle-12 tasks=3
+time=2026-03-22T01:13:01.826Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:01.826Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=join-14 tasks=3
+time=2026-03-22T01:13:02.075Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:02.075Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=join-16 tasks=3
+time=2026-03-22T01:13:02.361Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:02.361Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=shuffle-18 tasks=3
+time=2026-03-22T01:13:02.589Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:02.589Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=join-20 tasks=3
+time=2026-03-22T01:13:02.646Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:13:02.646Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=join-22 tasks=1
+time=2026-03-22T01:13:02.689Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:13:02.689Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=aggregate-23 tasks=1
+time=2026-03-22T01:13:02.689Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:13:02.689Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=sort-24 tasks=1
+time=2026-03-22T01:13:02.690Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:13:02.690Z level=INFO msg="scheduled stage" query_id=ed759acb stage_id=merge_sort-25 tasks=1
+Q08 National Market Share           22.852s      0 rows  heap  +18MB  gc  0.0ms  OK
+time=2026-03-22T01:13:02.706Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:13:02.706Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:02.706Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:13:02.706Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:13:02.706Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:13:02.706Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:13:07.146Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:13:07.146Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=scan-15 tasks=1
+time=2026-03-22T01:13:07.146Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:13:07.146Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=scan-7 tasks=20
+time=2026-03-22T01:13:07.146Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:07.146Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=scan-1 tasks=3
+time=2026-03-22T01:13:07.146Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:13:07.146Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=scan-11 tasks=25
+time=2026-03-22T01:13:07.147Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:13:07.147Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=scan-0 tasks=100
+time=2026-03-22T01:13:07.411Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:07.411Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:13:07.472Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:07.472Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:13:07.890Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:07.890Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=shuffle-9 tasks=3
+time=2026-03-22T01:13:08.422Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:08.422Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=shuffle-13 tasks=3
+time=2026-03-22T01:13:25.586Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:25.586Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=join-4 tasks=3
+time=2026-03-22T01:13:42.647Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:13:42.647Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=join-6 tasks=3
+time=2026-03-22T01:14:06.509Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:14:06.509Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=shuffle-8 tasks=3
+time=2026-03-22T01:14:26.183Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:14:26.183Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=join-10 tasks=3
+time=2026-03-22T01:14:51.452Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:14:51.452Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=shuffle-12 tasks=3
+time=2026-03-22T01:15:10.918Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:15:10.918Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=join-14 tasks=3
+time=2026-03-22T01:15:31.384Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:15:31.384Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=join-16 tasks=3
+time=2026-03-22T01:16:22.218Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:22.218Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=aggregate-17 tasks=1
+time=2026-03-22T01:16:40.726Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:40.726Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=sort-18 tasks=1
+time=2026-03-22T01:16:40.787Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:40.787Z level=INFO msg="scheduled stage" query_id=eef061f0 stage_id=merge_sort-19 tasks=1
+Q09 Product Type Profit Measure    3m38.123s     25 rows  heap   +5MB  gc  0.1ms  OK
+time=2026-03-22T01:16:40.831Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:16:40.833Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:16:40.834Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:16:40.834Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:41.762Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:16:41.762Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=scan-0 tasks=4
+time=2026-03-22T01:16:41.762Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:41.762Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:41.762Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:16:41.762Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=scan-9 tasks=1
+time=2026-03-22T01:16:41.762Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:16:41.762Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=scan-5 tasks=100
+time=2026-03-22T01:16:41.779Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:41.779Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:16:43.983Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:43.983Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=shuffle-7 tasks=3
+time=2026-03-22T01:16:47.468Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:47.468Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=join-4 tasks=3
+time=2026-03-22T01:16:48.354Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:48.354Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=shuffle-6 tasks=3
+time=2026-03-22T01:16:48.933Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:48.933Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=join-8 tasks=3
+time=2026-03-22T01:16:50.688Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:50.688Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=join-10 tasks=3
+time=2026-03-22T01:16:52.205Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:52.205Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=aggregate-11 tasks=1
+time=2026-03-22T01:16:54.700Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:54.700Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=sort-12 tasks=1
+time=2026-03-22T01:16:55.228Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:55.228Z level=INFO msg="scheduled stage" query_id=48d9ba83 stage_id=merge_sort-13 tasks=1
+Q10 Returned Item Reporting         14.437s     20 rows  heap  +20MB  gc  0.4ms  OK
+time=2026-03-22T01:16:55.270Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:16:55.270Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:55.270Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:55.702Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:55.702Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=shuffle-5 tasks=1
+time=2026-03-22T01:16:55.702Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:16:55.702Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=scan-1 tasks=1
+time=2026-03-22T01:16:55.702Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:16:55.702Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=scan-0 tasks=20
+time=2026-03-22T01:16:55.981Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:55.981Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=join-2 tasks=3
+time=2026-03-22T01:16:58.208Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:58.209Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=shuffle-4 tasks=3
+time=2026-03-22T01:16:59.998Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:16:59.998Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=join-6 tasks=3
+time=2026-03-22T01:17:00.339Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:00.339Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=aggregate-7 tasks=1
+time=2026-03-22T01:17:00.574Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:00.574Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=sort-8 tasks=1
+time=2026-03-22T01:17:00.703Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:00.703Z level=INFO msg="scheduled stage" query_id=2b28a014 stage_id=merge_sort-9 tasks=1
+Q11 Important Stock Identification   5.565s  268632 rows  heap   +5MB  gc  0.0ms  OK
+time=2026-03-22T01:17:00.838Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:17:00.839Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:01.744Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:01.744Z level=INFO msg="scheduled stage" query_id=176a74c0 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:17:01.744Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:01.744Z level=INFO msg="scheduled stage" query_id=176a74c0 stage_id=scan-1 tasks=100
+time=2026-03-22T01:17:04.907Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:04.907Z level=INFO msg="scheduled stage" query_id=176a74c0 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:17:09.164Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:09.164Z level=INFO msg="scheduled stage" query_id=176a74c0 stage_id=join-4 tasks=3
+time=2026-03-22T01:17:11.780Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:11.780Z level=INFO msg="scheduled stage" query_id=176a74c0 stage_id=aggregate-5 tasks=1
+time=2026-03-22T01:17:12.585Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:12.585Z level=INFO msg="scheduled stage" query_id=176a74c0 stage_id=sort-6 tasks=1
+time=2026-03-22T01:17:12.642Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:12.642Z level=INFO msg="scheduled stage" query_id=176a74c0 stage_id=merge_sort-7 tasks=1
+Q12 Shipping Modes and Order Priority  11.844s      7 rows  heap   +7MB  gc  0.1ms  OK
+time=2026-03-22T01:17:12.684Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:17:12.689Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:17:12.907Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:12.907Z level=INFO msg="scheduled stage" query_id=081b1ad4 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:17:12.907Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:17:12.907Z level=INFO msg="scheduled stage" query_id=081b1ad4 stage_id=scan-1 tasks=25
+time=2026-03-22T01:17:13.447Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:13.447Z level=INFO msg="scheduled stage" query_id=081b1ad4 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:17:14.901Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:14.901Z level=INFO msg="scheduled stage" query_id=081b1ad4 stage_id=join-4 tasks=3
+time=2026-03-22T01:17:18.224Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:18.224Z level=INFO msg="scheduled stage" query_id=081b1ad4 stage_id=aggregate-5 tasks=1
+time=2026-03-22T01:17:19.539Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:19.539Z level=INFO msg="scheduled stage" query_id=081b1ad4 stage_id=sort-6 tasks=1
+time=2026-03-22T01:17:20.493Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:20.493Z level=INFO msg="scheduled stage" query_id=081b1ad4 stage_id=merge_sort-7 tasks=1
+Q13 Customer Distribution            7.848s    100 rows  heap   +5MB  gc  0.0ms  OK
+time=2026-03-22T01:17:20.536Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:20.537Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:21.052Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:21.052Z level=INFO msg="scheduled stage" query_id=4cd57767 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:17:21.052Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:21.052Z level=INFO msg="scheduled stage" query_id=4cd57767 stage_id=scan-1 tasks=100
+time=2026-03-22T01:17:22.395Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:22.395Z level=INFO msg="scheduled stage" query_id=4cd57767 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:17:24.000Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:24.000Z level=INFO msg="scheduled stage" query_id=4cd57767 stage_id=join-4 tasks=3
+time=2026-03-22T01:17:24.359Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:24.359Z level=INFO msg="scheduled stage" query_id=4cd57767 stage_id=aggregate-5 tasks=1
+Q14 Promotion Effect                 3.934s      1 rows  heap  +46MB  gc  0.7ms  OK
+time=2026-03-22T01:17:24.473Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:24.475Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:24.716Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:24.716Z level=INFO msg="scheduled stage" query_id=f6252bcd stage_id=shuffle-3 tasks=1
+time=2026-03-22T01:17:24.716Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:24.716Z level=INFO msg="scheduled stage" query_id=f6252bcd stage_id=scan-1 tasks=100
+time=2026-03-22T01:17:26.401Z level=INFO msg="published tasks" count=8
+time=2026-03-22T01:17:26.401Z level=INFO msg="scheduled stage" query_id=f6252bcd stage_id=aggregate-2 tasks=8
+time=2026-03-22T01:17:28.384Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:28.384Z level=INFO msg="scheduled stage" query_id=f6252bcd stage_id=shuffle-4 tasks=3
+time=2026-03-22T01:17:28.509Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:28.509Z level=INFO msg="scheduled stage" query_id=f6252bcd stage_id=join-5 tasks=3
+time=2026-03-22T01:17:28.855Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:28.855Z level=INFO msg="scheduled stage" query_id=f6252bcd stage_id=sort-6 tasks=1
+time=2026-03-22T01:17:29.724Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:29.724Z level=INFO msg="scheduled stage" query_id=f6252bcd stage_id=merge_sort-7 tasks=1
+Q15 Top Supplier                     5.923s  761285 rows  heap  +12MB  gc  0.0ms  OK
+time=2026-03-22T01:17:30.399Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:17:30.399Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:30.912Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:30.912Z level=INFO msg="scheduled stage" query_id=bcf92a30 stage_id=scan-1 tasks=3
+time=2026-03-22T01:17:30.912Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:30.912Z level=INFO msg="scheduled stage" query_id=bcf92a30 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:17:31.330Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:31.330Z level=INFO msg="scheduled stage" query_id=bcf92a30 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:17:31.911Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:31.911Z level=INFO msg="scheduled stage" query_id=bcf92a30 stage_id=join-4 tasks=3
+time=2026-03-22T01:17:33.307Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:33.307Z level=INFO msg="scheduled stage" query_id=bcf92a30 stage_id=aggregate-5 tasks=1
+time=2026-03-22T01:17:35.002Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:35.002Z level=INFO msg="scheduled stage" query_id=bcf92a30 stage_id=sort-6 tasks=1
+time=2026-03-22T01:17:35.422Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:35.422Z level=INFO msg="scheduled stage" query_id=bcf92a30 stage_id=merge_sort-7 tasks=1
+Q16 Parts/Supplier Relationship      5.186s  179497 rows  heap   +4MB  gc  0.0ms  OK
+time=2026-03-22T01:17:35.589Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:35.589Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:35.590Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:38.692Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:38.692Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:17:38.693Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:38.693Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=scan-0 tasks=100
+time=2026-03-22T01:17:38.693Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:38.693Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=scan-5 tasks=100
+time=2026-03-22T01:17:38.796Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:38.796Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:17:41.674Z level=INFO msg="published tasks" count=8
+time=2026-03-22T01:17:41.674Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=aggregate-6 tasks=8
+time=2026-03-22T01:17:49.044Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:49.044Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=shuffle-8 tasks=3
+time=2026-03-22T01:17:54.370Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:54.370Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=join-4 tasks=3
+time=2026-03-22T01:17:55.587Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:55.587Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=shuffle-7 tasks=3
+time=2026-03-22T01:17:55.685Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:55.685Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=join-9 tasks=3
+time=2026-03-22T01:17:56.467Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:17:56.467Z level=INFO msg="scheduled stage" query_id=037a4839 stage_id=aggregate-10 tasks=1
+Q17 Small-Quantity-Order Revenue    20.929s      1 rows  heap  +22MB  gc  0.0ms  OK
+time=2026-03-22T01:17:56.522Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:17:56.522Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:17:56.523Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:56.523Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:56.970Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:56.970Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:17:56.970Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:17:56.970Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=scan-1 tasks=25
+time=2026-03-22T01:17:56.971Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:56.971Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=scan-5 tasks=100
+time=2026-03-22T01:17:56.971Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:17:56.971Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=scan-9 tasks=100
+time=2026-03-22T01:17:57.909Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:57.909Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:17:59.667Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:17:59.667Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=shuffle-7 tasks=3
+time=2026-03-22T01:18:01.624Z level=INFO msg="published tasks" count=8
+time=2026-03-22T01:18:01.624Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=aggregate-10 tasks=8
+time=2026-03-22T01:18:08.821Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:18:08.821Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=shuffle-12 tasks=3
+time=2026-03-22T01:18:08.859Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:18:08.859Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=join-4 tasks=3
+time=2026-03-22T01:18:14.446Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:18:14.446Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=shuffle-6 tasks=3
+time=2026-03-22T01:18:18.636Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:18:18.636Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=join-8 tasks=3
+time=2026-03-22T01:18:36.626Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:18:36.626Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=shuffle-11 tasks=3
+time=2026-03-22T01:18:55.070Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:18:55.070Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=join-13 tasks=3
+time=2026-03-22T01:19:16.071Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:19:16.071Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=aggregate-14 tasks=1
+time=2026-03-22T01:19:56.433Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:19:56.433Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=sort-15 tasks=1
+time=2026-03-22T01:20:24.326Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:24.326Z level=INFO msg="scheduled stage" query_id=e3bdab4d stage_id=merge_sort-16 tasks=1
+Q18 Large Volume Customer          2m27.909s    100 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-03-22T01:20:24.435Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:24.435Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:26.937Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:26.937Z level=INFO msg="scheduled stage" query_id=4d78cf2d stage_id=scan-1 tasks=3
+time=2026-03-22T01:20:26.937Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:26.937Z level=INFO msg="scheduled stage" query_id=4d78cf2d stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:20:27.292Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:27.292Z level=INFO msg="scheduled stage" query_id=4d78cf2d stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:20:29.475Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:29.475Z level=INFO msg="scheduled stage" query_id=4d78cf2d stage_id=join-4 tasks=3
+time=2026-03-22T01:20:33.071Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:33.071Z level=INFO msg="scheduled stage" query_id=4d78cf2d stage_id=aggregate-5 tasks=1
+Q19 Discounted Revenue               9.722s      1 rows  heap   +7MB  gc  0.0ms  OK
+time=2026-03-22T01:20:34.159Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:34.159Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:34.160Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:20:34.160Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:34.161Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:34.224Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:34.224Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=scan-0 tasks=1
+time=2026-03-22T01:20:34.224Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:34.224Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=shuffle-3 tasks=1
+time=2026-03-22T01:20:34.224Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:34.224Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=scan-6 tasks=3
+time=2026-03-22T01:20:34.224Z level=INFO msg="published tasks" count=20
+time=2026-03-22T01:20:34.224Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=scan-5 tasks=20
+time=2026-03-22T01:20:34.224Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:34.224Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=scan-10 tasks=100
+time=2026-03-22T01:20:34.359Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:34.359Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=shuffle-2 tasks=1
+time=2026-03-22T01:20:34.904Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:34.904Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=shuffle-7 tasks=3
+time=2026-03-22T01:20:34.937Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:34.937Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=shuffle-8 tasks=3
+time=2026-03-22T01:20:36.837Z level=INFO msg="published tasks" count=8
+time=2026-03-22T01:20:36.837Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=aggregate-11 tasks=8
+time=2026-03-22T01:20:39.307Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:39.307Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=join-4 tasks=3
+time=2026-03-22T01:20:39.637Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:39.637Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=shuffle-15 tasks=1
+time=2026-03-22T01:20:40.164Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:40.164Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=join-9 tasks=3
+time=2026-03-22T01:20:40.386Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:40.386Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=shuffle-13 tasks=3
+time=2026-03-22T01:20:41.579Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:41.579Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=shuffle-12 tasks=3
+time=2026-03-22T01:20:42.812Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:42.812Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=join-14 tasks=3
+time=2026-03-22T01:20:46.959Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:46.959Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=shuffle-16 tasks=3
+time=2026-03-22T01:20:48.201Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:48.201Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=join-17 tasks=3
+time=2026-03-22T01:20:48.647Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:48.647Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=sort-18 tasks=1
+time=2026-03-22T01:20:48.998Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:48.998Z level=INFO msg="scheduled stage" query_id=7175a02e stage_id=merge_sort-19 tasks=1
+Q20 Potential Part Promotion        15.097s  462085 rows  heap  +15MB  gc  0.0ms  OK
+time=2026-03-22T01:20:49.261Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:49.262Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:49.262Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:20:49.262Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:49.262Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:49.263Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:49.433Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:49.433Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=scan-9 tasks=1
+time=2026-03-22T01:20:49.433Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:20:49.433Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=scan-5 tasks=25
+time=2026-03-22T01:20:49.438Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:49.438Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-2 tasks=1
+time=2026-03-22T01:20:49.438Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:49.438Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=scan-1 tasks=100
+time=2026-03-22T01:20:49.438Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:49.438Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=scan-17 tasks=100
+time=2026-03-22T01:20:49.438Z level=INFO msg="published tasks" count=100
+time=2026-03-22T01:20:49.438Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=scan-13 tasks=100
+time=2026-03-22T01:20:50.602Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:50.602Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-3 tasks=1
+time=2026-03-22T01:20:51.000Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:51.000Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-11 tasks=1
+time=2026-03-22T01:20:51.091Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:51.091Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-7 tasks=3
+time=2026-03-22T01:20:53.099Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:53.099Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-15 tasks=3
+time=2026-03-22T01:20:54.241Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:54.241Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-19 tasks=1
+time=2026-03-22T01:20:58.809Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:58.809Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=join-4 tasks=3
+time=2026-03-22T01:20:58.987Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:58.987Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-6 tasks=1
+time=2026-03-22T01:20:59.224Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:59.224Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=join-8 tasks=3
+time=2026-03-22T01:20:59.479Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:59.479Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-10 tasks=1
+time=2026-03-22T01:20:59.479Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:20:59.479Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=join-12 tasks=3
+time=2026-03-22T01:20:59.520Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:20:59.520Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-14 tasks=1
+time=2026-03-22T01:21:03.487Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:21:03.487Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=join-16 tasks=3
+time=2026-03-22T01:21:05.326Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:21:05.326Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=shuffle-18 tasks=1
+time=2026-03-22T01:21:05.330Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:21:05.330Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=join-20 tasks=3
+time=2026-03-22T01:21:05.330Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:21:05.330Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=aggregate-21 tasks=1
+time=2026-03-22T01:21:05.331Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:21:05.331Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=sort-22 tasks=1
+time=2026-03-22T01:21:05.332Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:21:05.332Z level=INFO msg="scheduled stage" query_id=6444b9fd stage_id=merge_sort-23 tasks=1
+Q21 Suppliers Who Kept Orders Waiting  16.075s      0 rows  heap  +16MB  gc  6.1ms  OK
+time=2026-03-22T01:21:05.347Z level=INFO msg="published tasks" count=4
+time=2026-03-22T01:21:05.347Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:21:05.760Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:21:05.760Z level=INFO msg="scheduled stage" query_id=fa2265e7 stage_id=shuffle-2 tasks=3
+time=2026-03-22T01:21:05.760Z level=INFO msg="published tasks" count=25
+time=2026-03-22T01:21:05.760Z level=INFO msg="scheduled stage" query_id=fa2265e7 stage_id=scan-1 tasks=25
+time=2026-03-22T01:21:06.018Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:21:06.018Z level=INFO msg="scheduled stage" query_id=fa2265e7 stage_id=shuffle-3 tasks=3
+time=2026-03-22T01:21:07.040Z level=INFO msg="published tasks" count=3
+time=2026-03-22T01:21:07.040Z level=INFO msg="scheduled stage" query_id=fa2265e7 stage_id=join-4 tasks=3
+time=2026-03-22T01:21:10.937Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:21:10.937Z level=INFO msg="scheduled stage" query_id=fa2265e7 stage_id=aggregate-5 tasks=1
+time=2026-03-22T01:21:11.952Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:21:11.952Z level=INFO msg="scheduled stage" query_id=fa2265e7 stage_id=sort-6 tasks=1
+time=2026-03-22T01:21:12.014Z level=INFO msg="published tasks" count=1
+time=2026-03-22T01:21:12.014Z level=INFO msg="scheduled stage" query_id=fa2265e7 stage_id=merge_sort-7 tasks=1
+Q22 Global Sales Opportunity           6.7s      1 rows  heap   +6MB  gc  0.0ms  OK
+
+--- Summary (Run 1) ---
+Query Description                          Time     Rows Heap Delta   GC Pause
+----- -----                               -----    -----      -----      -----
+Q01   Pricing Summary Report             7.482s       48       +5MB      0.2ms
+Q02   Minimum Cost Supplier            1m2.457s        0       +7MB      0.4ms
+Q03   Shipping Priority                 16.127s       10       +3MB      0.4ms
+Q04   Order Priority Checking           11.785s        5      +10MB      0.6ms
+Q05   Local Supplier Volume             43.039s        5      +10MB      0.1ms
+Q06   Forecasting Revenue Change         2.082s        8      +25MB      0.6ms
+Q07   Volume Shipping                  1m8.653s       25      +17MB      0.0ms
+Q08   National Market Share             22.852s        0      +18MB      0.0ms
+Q09   Product Type Profit Measure     3m38.123s       25       +5MB      0.1ms
+Q10   Returned Item Reporting           14.437s       20      +20MB      0.4ms
+Q11   Important Stock Identification     5.565s   268632       +5MB      0.0ms
+Q12   Shipping Modes and Order Priority    11.844s        7       +7MB      0.1ms
+Q13   Customer Distribution              7.848s      100       +5MB      0.0ms
+Q14   Promotion Effect                   3.934s        1      +46MB      0.7ms
+Q15   Top Supplier                       5.923s   761285      +12MB      0.0ms
+Q16   Parts/Supplier Relationship        5.186s   179497       +4MB      0.0ms
+Q17   Small-Quantity-Order Revenue      20.929s        1      +22MB      0.0ms
+Q18   Large Volume Customer           2m27.909s      100       +3MB      0.1ms
+Q19   Discounted Revenue                 9.722s        1       +7MB      0.0ms
+Q20   Potential Part Promotion          15.097s   462085      +15MB      0.0ms
+Q21   Suppliers Who Kept Orders Waiting    16.075s        0      +16MB      6.1ms
+Q22   Global Sales Opportunity             6.7s        1       +6MB      0.0ms
+      TOTAL                           12m3.768s
+[01:21:12] 
+[01:21:12] === Uploading results to S3 ===
