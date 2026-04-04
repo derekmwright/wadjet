@@ -503,10 +503,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			"probe_files", len(probeFiles), "workers", workerCount,
 			"joins", joinCount, "self_joins", hasSelfJoins,
 			"has_merge", probeSplitMergeInfo != nil)
-	} else if physical.ShouldRoutePipeline(physStages, c.workers.Count()) {
-		// Cost-based routing: shuffle overhead outweighs parallelism benefit,
-		// so run the entire query on a single worker.
-		c.logger.Info("routing to single worker pipeline (cost-based)",
+	} else {
+		// Probe-split not viable (not enough files or tiny scan) — run the
+		// entire query on a single worker. This is always correct: the worker
+		// executes the full SQL as a standalone pipeline.
+		c.logger.Info("routing to single worker pipeline (probe-split not viable)",
 			"query", queryID, "stages", len(physStages))
 		physStages = []physical.Stage{{
 			ID:    "pipeline-0",
@@ -2974,11 +2975,37 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		return "", "", fmt.Errorf("physical plan: %w", err)
 	}
 
+	// Route to probe-split or single-worker pipeline (same as ExecuteSQL)
+	var probeSplitMergeInfoAsync *logical.MergeInfo
+	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
+	mergeInfoAsync := logical.ExtractMergeInfo(logicalPlan)
+
+	if canProbeSplit && mergeInfoAsync != nil {
+		probeSplitMergeInfoAsync = mergeInfoAsync
+		physStages = []physical.Stage{{
+			ID:              "pipeline-0",
+			Type:            "pipeline",
+			Tasks:           c.workers.Count(),
+			ProbeSplitAlias: probeAlias,
+			ProbeSplitFiles: probeFiles,
+		}}
+		c.logger.Info("async: routing to probe-split pipeline",
+			"query", queryID, "probe_alias", probeAlias,
+			"probe_files", len(probeFiles))
+	} else {
+		physStages = []physical.Stage{{
+			ID:   "pipeline-0",
+			Type: "pipeline",
+			Tasks: 1,
+		}}
+		c.logger.Info("async: routing to single worker pipeline",
+			"query", queryID)
+	}
+
 	// Expand scans to target remote clusters when table exists on multiple clusters
 	physStages = planner.ExpandFederatedScans(physStages)
 
 	if len(physStages) == 0 {
-		// No work to do — register as immediately completed
 		c.tracker.Register(queryID, sql, map[string]*StageInfo{}, nil)
 		c.tracker.Start(queryID)
 		c.tracker.Complete(queryID)
@@ -2988,28 +3015,23 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		return queryID, planStr, nil
 	}
 
-	// Store stage specs and metadata
+	// Store metadata
 	c.mu.Lock()
-	if c.stageSpecs == nil {
-		c.stageSpecs = make(map[string]map[string]physical.Stage)
+	c.queryMetas[queryID] = &queryMeta{
+		stages:    physStages,
+		planStr:   planStr,
+		mergeInfo: probeSplitMergeInfoAsync,
 	}
-	specMap := make(map[string]physical.Stage, len(physStages))
-	for _, s := range physStages {
-		specMap[s.ID] = s
-	}
-	c.stageSpecs[queryID] = specMap
-	c.queryMetas[queryID] = &queryMeta{stages: physStages, planStr: planStr}
 	c.mu.Unlock()
 
-	// Register stages with tracker
+	// Register single pipeline stage with tracker
 	trackerStages := make(map[string]*StageInfo, len(physStages))
 	var stageOrder []string
 	for _, s := range physStages {
 		trackerStages[s.ID] = &StageInfo{
-			StageID:      s.ID,
-			Type:         distributed.TaskType(s.Type),
-			TotalTasks:   s.Tasks,
-			Dependencies: s.Dependencies,
+			StageID:    s.ID,
+			Type:       distributed.TaskType(s.Type),
+			TotalTasks: s.Tasks,
 		}
 		stageOrder = append(stageOrder, s.ID)
 	}
@@ -3023,15 +3045,12 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	}
 	asyncCtx, asyncCancel := context.WithTimeout(context.Background(), queryTimeout)
 
-	// Subscribe for results with multi-stage scheduling (non-blocking callback)
+	// Subscribe for pipeline results (same handler as probe-split in ExecuteSQL)
 	doneCh := make(chan struct{}, 1)
-	c.subscribeResultsMultiStage(asyncCtx, queryID, doneCh)
+	c.subscribeResults(asyncCtx, queryID, doneCh)
 
-	// Publish leaf stage tasks
+	// Publish pipeline tasks
 	for _, s := range physStages {
-		if len(s.Dependencies) > 0 {
-			continue
-		}
 		tasks, err := c.createTasksForStage(queryID, s, nil)
 		if err != nil {
 			asyncCancel()
@@ -3043,7 +3062,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		if err := c.scheduler.PublishTasks(asyncCtx, tasks); err != nil {
 			asyncCancel()
 			c.tracker.Fail(queryID, err.Error())
-			return "", "", fmt.Errorf("publishing leaf tasks: %w", err)
+			return "", "", fmt.Errorf("publishing tasks: %w", err)
 		}
 	}
 
