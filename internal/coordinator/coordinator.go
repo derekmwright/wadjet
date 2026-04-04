@@ -436,9 +436,8 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	var probeSplitMergeInfo *logical.MergeInfo
 	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
-	canMerge := mergeInfo != nil && mergeInfo.HasAggregate
 
-	if canProbeSplit && canMerge && physical.CountJoinStages(physStages) >= 2 {
+	if canProbeSplit && mergeInfo != nil {
 		workerCount := c.workers.Count()
 		probeSplitMergeInfo = mergeInfo
 		physStages = []physical.Stage{{
