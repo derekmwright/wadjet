@@ -883,3 +883,43 @@ func TestExtractMergeInfoNoProject(t *testing.T) {
 		t.Errorf("AggExprs[0].OutputCol = %q, want %q", mi.AggExprs[0].OutputCol, "sum_qty")
 	}
 }
+
+func TestExtractMergeInfoDistinct(t *testing.T) {
+	// SELECT DISTINCT a, b FROM t ORDER BY a
+	scan := NewScan("t", "t")
+	proj := NewProject(scan, []Projection{
+		{Column: "a", Alias: "a"},
+		{Column: "b", Alias: "b"},
+	})
+	distinct := NewDistinct(proj)
+	sorted := NewSort(distinct, []OrderExpr{{Column: "a"}})
+
+	mi := ExtractMergeInfo(sorted)
+	if mi == nil {
+		t.Fatal("ExtractMergeInfo returned nil for DISTINCT query")
+	}
+	if !mi.HasDistinct {
+		t.Error("expected HasDistinct = true")
+	}
+	if len(mi.OrderBy) != 1 || mi.OrderBy[0].Column != "a" {
+		t.Errorf("OrderBy = %v, want [{a}]", mi.OrderBy)
+	}
+}
+
+func TestExtractMergeInfoDistinctNoSort(t *testing.T) {
+	// SELECT DISTINCT a, b FROM t  (no ORDER BY)
+	scan := NewScan("t", "t")
+	proj := NewProject(scan, []Projection{
+		{Column: "a", Alias: "a"},
+		{Column: "b", Alias: "b"},
+	})
+	distinct := NewDistinct(proj)
+
+	mi := ExtractMergeInfo(distinct)
+	if mi == nil {
+		t.Fatal("ExtractMergeInfo returned nil for DISTINCT without ORDER BY")
+	}
+	if !mi.HasDistinct {
+		t.Error("expected HasDistinct = true")
+	}
+}

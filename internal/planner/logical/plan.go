@@ -272,6 +272,11 @@ func ExtractMergeInfo(plan *Node) *MergeInfo {
 		}
 		return mi
 	}
+	// DISTINCT: dedup across partials. Equivalent to GROUP BY all output columns.
+	if n.Type == NodeDistinct {
+		mi.HasDistinct = true
+		return mi
+	}
 	// Non-aggregate query — still need sort + limit merge
 	if mi.Limit > 0 || len(mi.OrderBy) > 0 {
 		return mi
@@ -286,6 +291,7 @@ type MergeInfo struct {
 	OrderBy      []OrderExpr
 	Limit        int
 	HasAggregate bool
+	HasDistinct  bool // DISTINCT requires deduplication across partials
 }
 
 // InjectRowFilter walks the logical plan tree and wraps Scan nodes for the

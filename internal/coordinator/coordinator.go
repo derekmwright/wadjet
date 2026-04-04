@@ -2285,6 +2285,9 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 	if mi.HasAggregate && len(mi.GroupBy) > 0 {
 		batches = c.reAggregatePartials(batches, columns, colIdx, mi)
 	}
+	if mi.HasDistinct {
+		batches = c.deduplicatePartials(batches, columns)
+	}
 
 	// Apply sort + limit. When the limit is much smaller than the row count,
 	// use a top-K heap select to avoid sorting the full result set.
@@ -2304,6 +2307,43 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 		totalRows += int64(b.ActiveLen())
 	}
 	return batches, totalRows, nil
+}
+
+// deduplicatePartials removes duplicate rows across probe-split partial results.
+// Each worker already applied DISTINCT to its partition, but the same row may
+// appear in multiple partitions if it matches multiple probe files.
+func (c *Coordinator) deduplicatePartials(batches []*batch.RecordBatch, columns []string) []*batch.RecordBatch {
+	if len(batches) == 0 {
+		return batches
+	}
+
+	// Convert to rows for hash-based dedup. For typical DISTINCT queries
+	// the result set is small (coordinator-side merge), so row-oriented
+	// dedup is fine.
+	type rowKey string
+	seen := make(map[rowKey]bool)
+	var unique []map[string]any
+
+	for _, b := range batches {
+		rows := b.ToRows()
+		for _, row := range rows {
+			// Build a composite key from all column values
+			var key strings.Builder
+			for _, col := range columns {
+				fmt.Fprintf(&key, "%v\x00", row[col])
+			}
+			k := rowKey(key.String())
+			if !seen[k] {
+				seen[k] = true
+				unique = append(unique, row)
+			}
+		}
+	}
+
+	if len(unique) == 0 {
+		return nil
+	}
+	return []*batch.RecordBatch{batch.FromRows(batches[0].Schema, unique)}
 }
 
 // reAggregatePartials merges partial aggregate results by group-by key.

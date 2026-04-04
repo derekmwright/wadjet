@@ -1063,3 +1063,61 @@ func TestTopKMerge(t *testing.T) {
 		}
 	}
 }
+
+// TestDeduplicatePartials verifies that mergeProbePartials with HasDistinct
+// removes duplicate rows that appear in multiple worker partitions.
+func TestDeduplicatePartials(t *testing.T) {
+	coord := &Coordinator{}
+
+	schema := []parquet.Column{
+		{Name: "region", Type: parquet.TypeString},
+		{Name: "status", Type: parquet.TypeString},
+	}
+	columns := []string{"region", "status"}
+
+	mi := &logical.MergeInfo{
+		HasDistinct: true,
+		OrderBy:     []logical.OrderExpr{{Column: "region"}},
+	}
+
+	makeBatch := func(rows [][]string) *batch.RecordBatch {
+		b := batch.NewRecordBatch(schema, len(rows))
+		for ri, row := range rows {
+			b.Columns[0].BytesData.Set(ri, []byte(row[0]))
+			b.Columns[1].BytesData.Set(ri, []byte(row[1]))
+			b.Columns[0].Nulls.SetValid(ri)
+			b.Columns[1].Nulls.SetValid(ri)
+		}
+		b.Len = len(rows)
+		return b
+	}
+
+	batches := []*batch.RecordBatch{
+		makeBatch([][]string{{"US", "active"}, {"EU", "active"}}),
+		makeBatch([][]string{{"US", "active"}, {"EU", "inactive"}}),
+		makeBatch([][]string{{"EU", "active"}}),
+	}
+
+	merged, totalRows, err := coord.mergeProbePartials(batches, columns, mi)
+	if err != nil {
+		t.Fatalf("mergeProbePartials error: %v", err)
+	}
+	if totalRows != 3 {
+		t.Fatalf("expected 3 unique rows, got %d", totalRows)
+	}
+
+	var rows []map[string]any
+	for _, b := range merged {
+		rows = append(rows, b.ToRows()...)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+
+	if rows[0]["region"] != "EU" {
+		t.Errorf("row 0: region = %v, want EU", rows[0]["region"])
+	}
+	if rows[2]["region"] != "US" {
+		t.Errorf("row 2: region = %v, want US", rows[2]["region"])
+	}
+}
