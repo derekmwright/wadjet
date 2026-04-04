@@ -183,6 +183,7 @@ type WorkerHeartbeat struct {
 	WorkerID      string    `json:"worker_id"`
 	ClusterID     string    `json:"cluster_id,omitempty"` // cluster this worker belongs to
 	ActiveTasks   int       `json:"active_tasks"`
+	ActiveTaskIDs []string  `json:"active_task_ids,omitempty"` // task IDs currently executing
 	MemoryUsed    int64     `json:"memory_used"`
 	MemoryTotal   int64     `json:"memory_total"`
 	RSS           int64     `json:"rss,omitempty"`             // process RSS from /proc/self/status

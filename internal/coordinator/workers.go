@@ -20,14 +20,57 @@ type WorkerInfo struct {
 	LastSeen    time.Time
 }
 
+// TaskLiveness tracks when each in-flight task was last reported active.
+// Updated from worker heartbeats. Used to detect stuck tasks.
+type TaskLiveness struct {
+	mu    sync.RWMutex
+	tasks map[string]time.Time // task ID → last heartbeat time
+}
+
+func NewTaskLiveness() *TaskLiveness {
+	return &TaskLiveness{tasks: make(map[string]time.Time)}
+}
+
+// Update records that the given task IDs are actively running.
+func (tl *TaskLiveness) Update(taskIDs []string, now time.Time) {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	for _, id := range taskIDs {
+		tl.tasks[id] = now
+	}
+}
+
+// Remove stops tracking the given task (completed or failed).
+func (tl *TaskLiveness) Remove(taskID string) {
+	tl.mu.Lock()
+	delete(tl.tasks, taskID)
+	tl.mu.Unlock()
+}
+
+// StuckTasks returns task IDs that haven't been reported in a heartbeat
+// for longer than the given threshold.
+func (tl *TaskLiveness) StuckTasks(threshold time.Duration) []string {
+	tl.mu.RLock()
+	defer tl.mu.RUnlock()
+	cutoff := time.Now().Add(-threshold)
+	var stuck []string
+	for id, lastSeen := range tl.tasks {
+		if lastSeen.Before(cutoff) {
+			stuck = append(stuck, id)
+		}
+	}
+	return stuck
+}
+
 // WorkerRegistry tracks active workers from heartbeats.
 type WorkerRegistry struct {
-	mu      sync.RWMutex
-	workers map[string]*WorkerInfo
-	stale   time.Duration // workers not heard from in this long are considered dead
-	logger  *slog.Logger
-	nc      *nats.Conn
-	sub     *nats.Subscription
+	mu       sync.RWMutex
+	workers  map[string]*WorkerInfo
+	stale    time.Duration // workers not heard from in this long are considered dead
+	logger   *slog.Logger
+	nc       *nats.Conn
+	sub      *nats.Subscription
+	Liveness *TaskLiveness // per-task progress tracking from heartbeats
 }
 
 // NewWorkerRegistry creates a worker registry that subscribes to heartbeats.
@@ -49,10 +92,11 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 	}
 
 	wr := &WorkerRegistry{
-		workers: make(map[string]*WorkerInfo),
-		stale:   staleTTL,
-		logger:  logger,
-		nc:      nc,
+		workers:  make(map[string]*WorkerInfo),
+		stale:    staleTTL,
+		logger:   logger,
+		nc:       nc,
+		Liveness: NewTaskLiveness(),
 	}
 
 	sub, err := nc.Subscribe(distributed.SubjectHeartbeat, func(msg *nats.Msg) {
@@ -88,7 +132,13 @@ func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
 	// Use coordinator-side time for LastSeen. The heartbeat message
 	// arriving proves the worker is alive — even if the worker's
 	// goroutine was GC-frozen and its embedded timestamp is stale.
-	info.LastSeen = time.Now()
+	now := time.Now()
+	info.LastSeen = now
+
+	// Update per-task liveness from heartbeat
+	if len(hb.ActiveTaskIDs) > 0 && wr.Liveness != nil {
+		wr.Liveness.Update(hb.ActiveTaskIDs, now)
+	}
 }
 
 // ActiveWorkers returns workers that have sent a heartbeat recently and are

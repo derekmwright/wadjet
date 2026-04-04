@@ -1710,6 +1710,7 @@ func (c *Coordinator) subscribeResultsMultiStage(ctx context.Context, queryID st
 			msg.Respond([]byte("ok"))
 		}
 
+		c.workers.Liveness.Remove(result.TaskID)
 		stageComplete := c.tracker.RecordResult(result)
 		if !stageComplete {
 			return
@@ -2886,6 +2887,7 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 			msg.Respond([]byte("ok"))
 		}
 
+		c.workers.Liveness.Remove(result.TaskID)
 		stageComplete := c.tracker.RecordResult(result)
 		if stageComplete && c.tracker.IsComplete(queryID) {
 			c.tracker.Complete(queryID)

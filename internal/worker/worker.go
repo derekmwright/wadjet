@@ -63,6 +63,9 @@ type Worker struct {
 	cancelledMu sync.RWMutex
 	cancelled   map[string]time.Time // queryID → cancellation time
 
+	activeTasksMu sync.RWMutex
+	activeTasks   map[string]struct{} // task IDs currently executing
+
 	// CPU profiling state — started/stopped via NATS profile requests.
 	profMu  sync.Mutex
 	profBuf *bytes.Buffer // nil when not profiling
@@ -100,7 +103,8 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		js:        js,
 		executor:  executor,
 		logger:    logger,
-		cancelled: make(map[string]time.Time),
+		cancelled:   make(map[string]time.Time),
+		activeTasks: make(map[string]struct{}),
 		drainCh:   make(chan struct{}),
 	}
 }
@@ -347,6 +351,16 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		}
 	}
 
+	// Track active task for heartbeat progress reporting
+	w.activeTasksMu.Lock()
+	w.activeTasks[task.ID] = struct{}{}
+	w.activeTasksMu.Unlock()
+	defer func() {
+		w.activeTasksMu.Lock()
+		delete(w.activeTasks, task.ID)
+		w.activeTasksMu.Unlock()
+	}()
+
 	// Inject trace context from the task into the Go context
 	logAttrsStart := []any{
 		"task_id", task.ID,
@@ -547,10 +561,19 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 			var memStats runtime.MemStats
 			runtime.ReadMemStats(&memStats)
 
+			// Snapshot active task IDs for progress reporting
+			w.activeTasksMu.RLock()
+			taskIDs := make([]string, 0, len(w.activeTasks))
+			for id := range w.activeTasks {
+				taskIDs = append(taskIDs, id)
+			}
+			w.activeTasksMu.RUnlock()
+
 			hb := distributed.WorkerHeartbeat{
 				WorkerID:      w.config.WorkerID,
 				ClusterID:     w.config.ClusterID,
 				ActiveTasks:   len(sem),
+				ActiveTaskIDs: taskIDs,
 				MemoryUsed:    int64(memStats.Alloc),
 				MemoryTotal:   int64(memStats.Sys),
 				RSS:           distributed.ProcessRSS(),

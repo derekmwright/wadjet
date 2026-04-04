@@ -89,3 +89,71 @@ func TestWorkerRegistryCount(t *testing.T) {
 		t.Fatalf("expected still 2 workers, got %d", wr.Count())
 	}
 }
+
+func TestTaskLiveness(t *testing.T) {
+	tl := NewTaskLiveness()
+
+	now := time.Now()
+	tl.Update([]string{"task-1", "task-2", "task-3"}, now)
+
+	// All tasks are fresh — none stuck
+	stuck := tl.StuckTasks(30 * time.Second)
+	if len(stuck) != 0 {
+		t.Errorf("expected 0 stuck tasks, got %d", len(stuck))
+	}
+
+	// Simulate task-1 going stale
+	tl.mu.Lock()
+	tl.tasks["task-1"] = now.Add(-2 * time.Minute)
+	tl.mu.Unlock()
+
+	stuck = tl.StuckTasks(60 * time.Second)
+	if len(stuck) != 1 || stuck[0] != "task-1" {
+		t.Errorf("expected [task-1] stuck, got %v", stuck)
+	}
+
+	// Remove completed task
+	tl.Remove("task-1")
+	stuck = tl.StuckTasks(60 * time.Second)
+	if len(stuck) != 0 {
+		t.Errorf("expected 0 stuck after remove, got %d", len(stuck))
+	}
+}
+
+func TestTaskLivenessFromHeartbeat(t *testing.T) {
+	wr := &WorkerRegistry{
+		workers:  make(map[string]*WorkerInfo),
+		stale:    30 * time.Second,
+		logger:   slog.Default(),
+		Liveness: NewTaskLiveness(),
+	}
+
+	hb := distributed.WorkerHeartbeat{
+		WorkerID:      "w-1",
+		ActiveTaskIDs: []string{"task-a", "task-b"},
+		Timestamp:     time.Now(),
+	}
+	wr.record(hb)
+
+	// Both tasks should be tracked
+	wr.Liveness.mu.RLock()
+	if len(wr.Liveness.tasks) != 2 {
+		t.Errorf("expected 2 tracked tasks, got %d", len(wr.Liveness.tasks))
+	}
+	wr.Liveness.mu.RUnlock()
+
+	// Second heartbeat drops task-b (completed)
+	hb2 := distributed.WorkerHeartbeat{
+		WorkerID:      "w-1",
+		ActiveTaskIDs: []string{"task-a"},
+		Timestamp:     time.Now(),
+	}
+	wr.record(hb2)
+
+	// task-a should be refreshed, task-b still tracked (not auto-removed)
+	wr.Liveness.mu.RLock()
+	if _, ok := wr.Liveness.tasks["task-a"]; !ok {
+		t.Error("task-a should still be tracked")
+	}
+	wr.Liveness.mu.RUnlock()
+}
