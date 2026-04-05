@@ -793,12 +793,14 @@ func (e *Executor) buildProbePartitionBlooms(
 		return nil
 	}
 
-	// Build bloom filters from probe key values
-	const bloomSize = 1 << 20 // 1M entries — ~1MB per bloom
-	bloomMask := uint64(bloomSize - 1)
+	// Build bloom filters from probe key values.
+	// bloomSlots is the number of uint64 WORDS (not bits). bloomMask masks
+	// the word index, matching how bloomContains uses bloom[hash & mask].
+	const bloomSlots = 1 << 16 // 64K words = 512KB per bloom, ~4M bits
+	bloomMask := uint64(bloomSlots - 1)
 	blooms := make(map[string][]uint64) // probeCol → bloom bits
 	for _, col := range probeCols {
-		blooms[col] = make([]uint64, bloomSize/64)
+		blooms[col] = make([]uint64, bloomSlots)
 	}
 
 	for _, filePath := range probeFiles {
@@ -841,13 +843,19 @@ func (e *Executor) buildProbePartitionBlooms(
 					if vals.Count() > 0 {
 						if int32s := vals.Int32(); len(int32s) > 0 {
 							for _, v := range int32s[:vals.Count()] {
-								h := exec.BloomHashInt(int64(v))
-								bloom[h&bloomMask/64] |= 1 << (h & 63)
+								hash := exec.BloomHashInt(int64(v))
+								h1 := hash & bloomMask
+								h2 := (hash >> 17) & bloomMask
+								bloom[h1] |= 1 << (hash & 63)
+								bloom[h2] |= 1 << ((hash >> 6) & 63)
 							}
 						} else if int64s := vals.Int64(); len(int64s) > 0 {
 							for _, v := range int64s[:vals.Count()] {
-								h := exec.BloomHashInt(v)
-								bloom[h&bloomMask/64] |= 1 << (h & 63)
+								hash := exec.BloomHashInt(v)
+								h1 := hash & bloomMask
+								h2 := (hash >> 17) & bloomMask
+								bloom[h1] |= 1 << (hash & 63)
+								bloom[h2] |= 1 << ((hash >> 6) & 63)
 							}
 						}
 					}
