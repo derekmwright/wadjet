@@ -447,3 +447,21 @@ func (qt *QueryTracker) StageResults(queryID, stageID string) []distributed.Resu
 	copy(results, stage.Results)
 	return results
 }
+
+// ClearResults drops all stored result data (InlineData) for a query.
+// Called after results have been read and merged to free memory immediately
+// rather than waiting for the reaper TTL.
+func (qt *QueryTracker) ClearResults(queryID string) {
+	qt.mu.Lock()
+	defer qt.mu.Unlock()
+
+	q, ok := qt.queries[queryID]
+	if !ok {
+		return
+	}
+	for _, stage := range q.Stages {
+		for i := range stage.Results {
+			stage.Results[i].InlineData = nil
+		}
+	}
+}

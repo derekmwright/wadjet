@@ -497,6 +497,11 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 			rowCount, err := qf(qCtx, q.SQL)
 			elapsed := time.Since(start)
 
+			// Force GC to collect previous query's result batches before
+			// measuring heap delta. With GOGC=off, GC only runs under
+			// GOMEMLIMIT pressure — previous batches stay allocated.
+			runtime.GC()
+
 			if qCancel != nil {
 				qCancel()
 			}

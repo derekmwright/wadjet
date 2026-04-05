@@ -577,6 +577,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		}
 	}
 
+	// Release tracker's inline result data — it's been decoded into batches.
+	// Without this, the raw compressed bytes stay in memory until the reaper
+	// cleans up the tracker entry (up to 5 minutes).
+	c.tracker.ClearResults(queryID)
+
 	// Synchronous path: we have all data locally, clean up queryMetas
 	// immediately. The tracker entry is kept for status/list APIs and
 	// reaped by StartQueryReaper after the TTL.
