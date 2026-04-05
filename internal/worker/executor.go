@@ -323,7 +323,13 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// Probe partition bloom: pre-scan probe files to build bloom filters
 	// for join key columns. These are attached to build-side scans to skip
 	// rows that can't match any probe key — reducing build-side I/O by ~(N-1)/N.
-	if len(task.ScanFileFilter) > 0 {
+	// Only enabled with >3 probe files — at small scale the bloom overhead
+	// exceeds the benefit and can cause false negatives on tiny datasets.
+	probeFileCount := 0
+	for _, files := range task.ScanFileFilter {
+		probeFileCount += len(files)
+	}
+	if probeFileCount > 3 {
 		blooms := e.buildProbePartitionBlooms(ctx, logicalPlan, task.ScanFileFilter, cat, bucket)
 		if len(blooms) > 0 {
 			planner.ProbePartitionBlooms = blooms

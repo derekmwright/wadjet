@@ -1891,7 +1891,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	// was never set, but we still need to emit a single row with identity values
 	// (0 for COUNT/SUM, NULL for MIN/MAX/AVG). This happens when all input
 	// batches were filtered out before reaching the aggregate.
-	if len(h.GroupByCols) == 0 && h.outputPos == 0 && len(h.keys) == 0 &&
+	if len(h.GroupByCols) == 0 && len(h.Aggs) > 0 && h.outputPos == 0 && len(h.keys) == 0 &&
 		!h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey {
 		h.outputPos = 1
 		schema := h.outputSchema()
