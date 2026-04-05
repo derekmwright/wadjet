@@ -822,13 +822,28 @@ func (e *Executor) buildProbePartitionBlooms(
 		"bloom_slots", bloomSlots, "bloom_mb", bloomSlots*8/1024/1024)
 
 	for _, filePath := range probeFiles {
-		data, err := e.readFileBytes(ctx, bucket, filePath)
-		if err != nil {
-			continue
+		// Try ReaderAt to avoid loading entire file into memory.
+		// Falls back to full read if store doesn't support random access.
+		var fr *parquet.FileReader
+		if ras, ok := e.store.(objstore.ReaderAtStore); ok {
+			ra, size, err := ras.GetReaderAt(ctx, bucket, filePath)
+			if err == nil {
+				fr, err = parquet.OpenFileReader(ra, size)
+				if err != nil {
+					ra.Close()
+				}
+				defer ra.Close()
+			}
 		}
-		fr, err := parquet.OpenFileReaderFromBytes(data)
-		if err != nil {
-			continue
+		if fr == nil {
+			data, err := e.readFileBytes(ctx, bucket, filePath)
+			if err != nil {
+				continue
+			}
+			fr, err = parquet.OpenFileReaderFromBytes(data)
+			if err != nil {
+				continue
+			}
 		}
 		schema := fr.Schema()
 
