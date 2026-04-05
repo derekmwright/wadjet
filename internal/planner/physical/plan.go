@@ -1934,33 +1934,24 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 	}
 
-	// Attach probe partition bloom filters to non-probe table scans.
-	// These blooms were pre-built from the probe partition's join key values
-	// and skip build-side rows that can't match any probe key.
+	var ops []exec.UnaryOperator
+
+	// Inject probe partition bloom filters as BloomFilterOp operators.
+	// These filter out build-side rows whose join key is not in the probe
+	// partition's bloom, reducing hash table memory by ~(N-1)/N.
 	if len(p.ProbePartitionBlooms) > 0 {
-		if cs, ok := scanner.(*catalogScanSource); ok {
-			for colName, bloom := range p.ProbePartitionBlooms {
-				// Check if this scan has the bloom's column
-				for _, reqCol := range node.RequiredColumns {
-					if reqCol == colName {
-						cs.bloomFilter = bloom
-						break
-					}
-				}
-				// Also check full schema if RequiredColumns not set
-				if cs.bloomFilter == nil {
-					for _, col := range node.ScanColumns {
-						if col == colName {
-							cs.bloomFilter = bloom
-							break
-						}
-					}
+		allCols := append(node.RequiredColumns, node.ScanColumns...)
+		for colName, bloom := range p.ProbePartitionBlooms {
+			for _, col := range allCols {
+				if col == colName {
+					bloomOp := exec.NewBloomFilterOp(bloom.Bloom, bloom.BloomMask,
+						[]string{colName}, bloom.UseIntKey)
+					ops = append(ops, bloomOp)
+					break
 				}
 			}
 		}
 	}
-
-	var ops []exec.UnaryOperator
 	if node.SampleMethod != "" && node.SamplePercent > 0 {
 		ops = append(ops, newSampleOperator(node.SampleMethod, node.SamplePercent))
 	}
