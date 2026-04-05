@@ -967,38 +967,25 @@ func TestCanProbeSplit(t *testing.T) {
 			wantOK:    true,
 		},
 		{
-			name: "semi join — excludes build table, picks outer as probe",
+			name: "semi join — largest scan is probe (RightSemiJoin handles local swap)",
 			stages: []Stage{
 				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
 				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(6), EstimatedBytes: 1700 << 20},
 				{Type: "hash_join", JoinType: "semi", BuildTableAlias: "lineitem"},
 			},
 			workers:   3,
-			wantAlias: "orders",
+			wantAlias: "lineitem",
 			wantOK:    true,
 		},
 		{
-			name: "anti join — excludes build table, picks outer as probe",
+			name: "anti join — largest scan is probe (RightAntiJoin handles local swap)",
 			stages: []Stage{
 				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
 				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(6), EstimatedBytes: 1700 << 20},
 				{Type: "hash_join", JoinType: "anti", BuildTableAlias: "lineitem"},
 			},
 			workers:   3,
-			wantAlias: "orders",
-			wantOK:    true,
-		},
-		{
-			name: "semi join via fused join — excludes build table",
-			stages: []Stage{
-				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
-				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(6), EstimatedBytes: 1700 << 20},
-				{Type: "hash_join", JoinType: "inner", FusedJoins: []FusedJoinSpec{
-					{JoinType: "semi", BuildTableAlias: "lineitem"},
-				}},
-			},
-			workers:   3,
-			wantAlias: "orders",
+			wantAlias: "lineitem",
 			wantOK:    true,
 		},
 		{
@@ -1013,25 +1000,26 @@ func TestCanProbeSplit(t *testing.T) {
 			wantOK:    true,
 		},
 		{
-			name: "too few files after exclusion",
+			name: "small scan with many files still picked as probe",
 			stages: []Stage{
 				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(12), EstimatedBytes: 7500 << 20},
 				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(2), EstimatedBytes: 100 << 20},
 				{Type: "hash_join", JoinType: "semi", BuildTableAlias: "lineitem"},
 			},
 			workers:   3,
-			wantOK:    false, // orders has only 2 files, need 6 (3×2)
+			wantAlias: "lineitem",
+			wantOK:    true,
 		},
 		{
-			name: "large outer table after exclusion — relaxed min files",
+			name: "large table relaxed min files",
 			stages: []Stage{
 				{Type: "scan", ScanAlias: "lineitem", ScanFiles: makeFiles(6), EstimatedBytes: 25 << 30},
 				{Type: "scan", ScanAlias: "orders", ScanFiles: makeFiles(3), EstimatedBytes: 3 << 30},
 				{Type: "hash_join", JoinType: "semi", BuildTableAlias: "lineitem"},
 			},
 			workers:   3,
-			wantAlias: "orders",
-			wantOK:    true, // orders > 1GB so minFiles = 3 (workerCount)
+			wantAlias: "lineitem",
+			wantOK:    true, // lineitem is largest, 6 files ≥ 3 (workerCount, relaxed for >1GB)
 		},
 	}
 	for _, tt := range tests {
