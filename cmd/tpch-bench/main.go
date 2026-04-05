@@ -180,7 +180,15 @@ func main() {
 			// Distributed: route queries through coordinator → workers.
 			// Coordinator only handles inline results (<256KB); large
 			// results stay on S3 and are counted without reading bytes.
+			expectedWorkers := *workers
 			qf = func(ctx context.Context, sql string) (int64, error) {
+				// Wait for workers to recover if previous query crashed them.
+				for retries := 0; retries < 30 && coord.Workers().Count() < expectedWorkers; retries++ {
+					if retries == 0 {
+						log.Printf("  waiting for workers (%d/%d)...", coord.Workers().Count(), expectedWorkers)
+					}
+					time.Sleep(2 * time.Second)
+				}
 				r, err := coord.ExecuteSQL(ctx, sql)
 				if err != nil {
 					return 0, err
