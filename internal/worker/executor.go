@@ -793,15 +793,27 @@ func (e *Executor) buildProbePartitionBlooms(
 		return nil
 	}
 
-	// Build bloom filters from probe key values.
-	// bloomSlots is the number of uint64 WORDS (not bits). bloomMask masks
-	// the word index, matching how bloomContains uses bloom[hash & mask].
-	const bloomSlots = 1 << 16 // 64K words = 512KB per bloom, ~4M bits
+	// Size bloom based on probe partition: estimate ~10M rows per file,
+	// ~25% unique keys per column, 10 bits/key for <1% FPR.
+	// Round up to power-of-2 for mask-based indexing.
+	estimatedRows := int64(len(probeFiles)) * 10_000_000
+	estimatedUnique := estimatedRows / 4 // ~25% unique keys
+	bitsNeeded := estimatedUnique * 10   // 10 bits/key for 1% FPR
+	bloomSlots := int64(1 << 16)         // minimum 64K words
+	for bloomSlots*64 < bitsNeeded {
+		bloomSlots *= 2
+	}
+	if bloomSlots > 1<<23 { // cap at 8M words = 64MB
+		bloomSlots = 1 << 23
+	}
 	bloomMask := uint64(bloomSlots - 1)
 	blooms := make(map[string][]uint64) // probeCol → bloom bits
 	for _, col := range probeCols {
 		blooms[col] = make([]uint64, bloomSlots)
 	}
+	e.logger.Info("probe partition bloom sized",
+		"probe_files", len(probeFiles), "est_unique_keys", estimatedUnique,
+		"bloom_slots", bloomSlots, "bloom_mb", bloomSlots*8/1024/1024)
 
 	for _, filePath := range probeFiles {
 		data, err := e.readFileBytes(ctx, bucket, filePath)
