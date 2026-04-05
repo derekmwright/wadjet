@@ -1940,7 +1940,16 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 	// These filter out build-side rows whose join key is not in the probe
 	// partition's bloom, reducing hash table memory by ~(N-1)/N.
 	if len(p.ProbePartitionBlooms) > 0 {
+		// Collect known column names. When RequiredColumns is nil (inner join
+		// build sides read all columns), fall back to the full table schema.
 		allCols := append(node.RequiredColumns, node.ScanColumns...)
+		if len(allCols) == 0 {
+			if meta, err := p.catalog.GetTable(ctx, node.TableName); err == nil {
+				for _, col := range meta.Schema.Columns {
+					allCols = append(allCols, col.Name)
+				}
+			}
+		}
 		for colName, bloom := range p.ProbePartitionBlooms {
 			for _, col := range allCols {
 				if col == colName {
