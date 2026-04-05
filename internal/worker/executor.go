@@ -320,6 +320,18 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 			"aliases", len(task.ScanFileFilter))
 	}
 
+	// Probe partition bloom: pre-scan probe files to build bloom filters
+	// for join key columns. These are attached to build-side scans to skip
+	// rows that can't match any probe key — reducing build-side I/O by ~(N-1)/N.
+	if len(task.ScanFileFilter) > 0 {
+		blooms := e.buildProbePartitionBlooms(ctx, logicalPlan, task.ScanFileFilter, cat, bucket)
+		if len(blooms) > 0 {
+			planner.ProbePartitionBlooms = blooms
+			e.logger.Info("probe partition blooms",
+				"count", len(blooms), "task_id", task.ID)
+		}
+	}
+
 	// Partial aggregate mode: strip top Sort+Limit so each worker produces
 	// complete partial aggregates. The coordinator merges and applies final
 	// ordering.
@@ -689,3 +701,202 @@ func (e *Executor) collectTaskStats(spill *memory.SpillManager, tracker *memory.
 // aggregate task: group-by columns + aggregate input columns. Extracts raw
 // column references from expression strings (e.g., "substr(l_shipdate, 1, 4)"
 // → "l_shipdate"). Returns nil (read all) if no columns are specified.
+
+// buildProbePartitionBlooms pre-scans probe partition files to extract join key
+// values and builds bloom filters for matching build-side columns. This allows
+// build-side scans to skip rows that can't match any probe key.
+//
+// For Q09 at SF100 with 3 workers: each worker has 1/3 of lineitem. The bloom
+// filters on l_orderkey/l_partkey/l_suppkey eliminate ~67% of orders/part/
+// partsupp/supplier rows before hash table construction.
+func (e *Executor) buildProbePartitionBlooms(
+	ctx context.Context,
+	plan *logical.Node,
+	scanFileFilter map[string][]string,
+	cat *catalog.Catalog,
+	bucket string,
+) map[string]*exec.BloomScanFilter {
+	// Find probe table name from ScanFileFilter
+	var probeTable string
+	for alias := range scanFileFilter {
+		probeTable = alias
+		break
+	}
+	if probeTable == "" {
+		return nil
+	}
+
+	// Walk logical plan to find join conditions: probe_col = build_col
+	type keyMapping struct {
+		probeCol string
+		buildCol string
+	}
+	var mappings []keyMapping
+	var walkJoins func(n *logical.Node)
+	walkJoins = func(n *logical.Node) {
+		if n == nil {
+			return
+		}
+		if n.Type == logical.NodeJoin && n.JoinCond != "" {
+			// Parse "a = b AND c = d" style conditions
+			for _, part := range strings.Split(n.JoinCond, " AND ") {
+				part = strings.TrimSpace(part)
+				eqIdx := strings.Index(part, " = ")
+				if eqIdx < 0 {
+					continue
+				}
+				left := strings.TrimSpace(part[:eqIdx])
+				right := strings.TrimSpace(part[eqIdx+3:])
+
+				// Determine which side is the probe table
+				leftBase := left
+				if dot := strings.LastIndex(left, "."); dot >= 0 {
+					leftBase = left[dot+1:]
+				}
+				rightBase := right
+				if dot := strings.LastIndex(right, "."); dot >= 0 {
+					rightBase = right[dot+1:]
+				}
+
+				// Check if left is from probe table (starts with probe table's column prefix)
+				if isProbeColumn(leftBase, probeTable) {
+					mappings = append(mappings, keyMapping{probeCol: leftBase, buildCol: rightBase})
+				} else if isProbeColumn(rightBase, probeTable) {
+					mappings = append(mappings, keyMapping{probeCol: rightBase, buildCol: leftBase})
+				}
+			}
+		}
+		for _, child := range n.Children {
+			walkJoins(child)
+		}
+	}
+	walkJoins(plan)
+
+	if len(mappings) == 0 {
+		return nil
+	}
+
+	// Deduplicate probe columns to scan
+	probeColSet := make(map[string]bool)
+	for _, m := range mappings {
+		probeColSet[m.probeCol] = true
+	}
+	probeCols := make([]string, 0, len(probeColSet))
+	for col := range probeColSet {
+		probeCols = append(probeCols, col)
+	}
+
+	// Pre-scan probe partition files — only read join key columns
+	probeFiles := scanFileFilter[probeTable]
+	if len(probeFiles) == 0 {
+		return nil
+	}
+
+	// Build bloom filters from probe key values
+	const bloomSize = 1 << 20 // 1M entries — ~1MB per bloom
+	bloomMask := uint64(bloomSize - 1)
+	blooms := make(map[string][]uint64) // probeCol → bloom bits
+	for _, col := range probeCols {
+		blooms[col] = make([]uint64, bloomSize/64)
+	}
+
+	for _, filePath := range probeFiles {
+		data, err := e.readFileBytes(ctx, bucket, filePath)
+		if err != nil {
+			continue
+		}
+		fr, err := parquet.OpenFileReaderFromBytes(data)
+		if err != nil {
+			continue
+		}
+		schema := fr.Schema()
+
+		// Find column indices for probe key columns
+		colIdx := make(map[string]int)
+		for _, col := range probeCols {
+			for i, sc := range schema.Columns {
+				if sc.Name == col {
+					colIdx[col] = i
+					break
+				}
+			}
+		}
+
+		// Read each row group and extract key values
+		for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
+			for col, idx := range colIdx {
+				bloom := blooms[col]
+				pr := fr.ColumnPages(rgIdx, idx)
+				if pr == nil {
+					continue
+				}
+				for {
+					page, err := pr.NextPage()
+					if err != nil || page == nil {
+						break
+					}
+					// Extract integer keys and add to bloom
+					vals := page.Data
+					if vals.Count() > 0 {
+						if int32s := vals.Int32(); len(int32s) > 0 {
+							for _, v := range int32s[:vals.Count()] {
+								h := exec.BloomHashInt(int64(v))
+								bloom[h&bloomMask/64] |= 1 << (h & 63)
+							}
+						} else if int64s := vals.Int64(); len(int64s) > 0 {
+							for _, v := range int64s[:vals.Count()] {
+								h := exec.BloomHashInt(v)
+								bloom[h&bloomMask/64] |= 1 << (h & 63)
+							}
+						}
+					}
+				}
+				pr.Close()
+			}
+		}
+	}
+
+	// Map probe blooms to build-side column names
+	result := make(map[string]*exec.BloomScanFilter)
+	for _, m := range mappings {
+		if bloom, ok := blooms[m.probeCol]; ok {
+			result[m.buildCol] = &exec.BloomScanFilter{
+				Bloom:     bloom,
+				BloomMask: bloomMask,
+				Column:    m.buildCol,
+				UseIntKey: true,
+			}
+		}
+	}
+
+	return result
+}
+
+// isProbeColumn checks if a column name belongs to the probe table.
+// Uses TPC-H naming conventions: l_ for lineitem, o_ for orders, etc.
+func isProbeColumn(col, probeTable string) bool {
+	prefixes := map[string]string{
+		"lineitem": "l_",
+		"orders":   "o_",
+		"customer": "c_",
+		"part":     "p_",
+		"partsupp": "ps_",
+		"supplier": "s_",
+		"nation":   "n_",
+		"region":   "r_",
+	}
+	if prefix, ok := prefixes[probeTable]; ok {
+		return strings.HasPrefix(col, prefix)
+	}
+	return false
+}
+
+// readFileBytes reads a file from the object store into memory.
+func (e *Executor) readFileBytes(ctx context.Context, bucket, path string) ([]byte, error) {
+	reader, _, err := e.store.Get(ctx, bucket, path)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	return io.ReadAll(reader)
+}

@@ -177,6 +177,14 @@ type Planner struct {
 	// workers while build tables read all files. Keyed by scan alias.
 	ScanFileFilter map[string][]string
 
+	// ProbePartitionBlooms maps build-table column names to bloom filters
+	// built from the probe partition's join key values. When a non-probe scan
+	// reads a column with a matching bloom, rows not in the bloom are skipped.
+	// This reduces build-side I/O proportional to the probe partition size:
+	// with N workers, ~(N-1)/N of build rows are filtered out.
+	// Keyed by build-side column name (e.g., "o_orderkey").
+	ProbePartitionBlooms map[string]*exec.BloomScanFilter
+
 	scanCounter map[string]int // tracks N-th scan of each table for alias resolution
 }
 
@@ -1922,6 +1930,32 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		if files, ok := p.ScanFileFilter[scanAlias]; ok {
 			if cs, ok := scanner.(*catalogScanSource); ok {
 				cs.allowedFiles = files
+			}
+		}
+	}
+
+	// Attach probe partition bloom filters to non-probe table scans.
+	// These blooms were pre-built from the probe partition's join key values
+	// and skip build-side rows that can't match any probe key.
+	if len(p.ProbePartitionBlooms) > 0 {
+		if cs, ok := scanner.(*catalogScanSource); ok {
+			for colName, bloom := range p.ProbePartitionBlooms {
+				// Check if this scan has the bloom's column
+				for _, reqCol := range node.RequiredColumns {
+					if reqCol == colName {
+						cs.bloomFilter = bloom
+						break
+					}
+				}
+				// Also check full schema if RequiredColumns not set
+				if cs.bloomFilter == nil {
+					for _, col := range node.ScanColumns {
+						if col == colName {
+							cs.bloomFilter = bloom
+							break
+						}
+					}
+				}
 			}
 		}
 	}
