@@ -738,8 +738,9 @@ func (e *Executor) buildProbePartitionBlooms(
 			return
 		}
 		if n.Type == logical.NodeJoin && n.JoinCond != "" {
-			// Parse "a = b AND c = d" style conditions
-			for _, part := range strings.Split(n.JoinCond, " AND ") {
+			// Parse "a = b AND c = d" style conditions (case-insensitive)
+			cond := strings.ReplaceAll(n.JoinCond, " and ", " AND ")
+			for _, part := range strings.Split(cond, " AND ") {
 				part = strings.TrimSpace(part)
 				eqIdx := strings.Index(part, " = ")
 				if eqIdx < 0 {
