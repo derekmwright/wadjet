@@ -61,6 +61,19 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 	}
 	sel := op.selBuf[:0]
 
+	// If key column not found, pass all rows through (don't filter).
+	// This happens when the bloom targets a different scan than expected.
+	allFound := true
+	for _, idx := range op.keyIdx {
+		if idx < 0 {
+			allFound = false
+			break
+		}
+	}
+	if !allFound {
+		return in, nil
+	}
+
 	if op.useIntKey && len(op.keyIdx) == 1 && op.keyIdx[0] >= 0 {
 		col := in.Columns[op.keyIdx[0]]
 		if in.Sel != nil {
