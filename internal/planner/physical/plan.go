@@ -2030,15 +2030,19 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	const deferBuildThreshold int64 = 1_000_000
 	deferBuild := est > deferBuildThreshold && hj.SemiAntiKeyOnly
 
-	// Reverse bloom: for very large semi join builds (>10M rows), run the
-	// probe side first, build a bloom from its join key values, then filter
-	// the build scan. Sacrifices I/O overlap for massive scan reduction
-	// (e.g. Q21 EXISTS: 60M lineitem rows reduced when only ~500K orders match).
-	// Only for SemiJoin and AntiJoin — the bloom filter has no false negatives,
-	// so all matching build-side rows pass through. Anti joins correctly detect
-	// absence because every build key matching a probe key is preserved.
+	// Reverse bloom: for very large builds (>10M rows), run the probe side
+	// first, build a bloom from its join key values, then filter the build
+	// scan. Sacrifices I/O overlap for massive scan reduction.
+	//
+	// For semi/anti joins: bloom has no false negatives, correctness preserved.
+	// For inner joins with large builds (>50M rows): each probe-split worker
+	// only sees 1/N of the probe keys, so ~(N-1)/N of build rows are filtered
+	// out. At SF100 with 3 workers, this reduces orders (150M) to ~50M and
+	// partsupp (80M) to ~27M per worker — fitting in 4GB memory budget.
 	const reverseBloomThreshold int64 = 10_000_000
-	useReverseBloom := est > reverseBloomThreshold && (joinType == exec.SemiJoin || joinType == exec.AntiJoin)
+	const reverseBloomInnerThreshold int64 = 50_000_000
+	useReverseBloom := (est > reverseBloomThreshold && (joinType == exec.SemiJoin || joinType == exec.AntiJoin)) ||
+		(est > reverseBloomInnerThreshold && joinType == exec.InnerJoin)
 
 	// Pre-compute post-build operations that can run in the build goroutine.
 	var keepCols []string
