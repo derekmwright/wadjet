@@ -1983,6 +1983,36 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.MemTracker = p.getMemTracker()
 	}
 
+	// Semi/anti join build/probe swap: when the inner (build) table is much
+	// larger than the outer (probe) table, swap to RightSemiJoin/RightAntiJoin.
+	// This builds the SMALL outer table as hash table and streams the LARGE
+	// inner table as probe, then emits matched (semi) or unmatched (anti)
+	// build rows. Dramatically reduces memory: e.g. Q04 at SF100 goes from
+	// 16GB lineitem hash table to 1.7GB orders hash table per worker.
+	rightEst := findScanRowEstimate(node.Children[1])
+	leftEst := findScanRowEstimate(node.Children[0])
+	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) &&
+		rightEst > 0 && leftEst > 0 && rightEst > 3*leftEst {
+		// Swap: build the small outer table, probe with the large inner table
+		if joinType == exec.SemiJoin {
+			joinType = exec.RightSemiJoin
+		} else {
+			joinType = exec.RightAntiJoin
+		}
+		hj.JoinType = joinType
+		// Swap children
+		node.Children[0], node.Children[1] = node.Children[1], node.Children[0]
+		// Swap keys and update the hash join
+		leftKeys, rightKeys = rightKeys, leftKeys
+		hj.LeftKeys = leftKeys
+		hj.RightKeys = rightKeys
+		fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+		// Update build-side alias after swap
+		if alias := findScanAlias(node.Children[1]); alias != "" {
+			hj.BuildTableAlias = alias
+		}
+	}
+
 	// For semi/anti joins without a filter, enable key-only build:
 	// only build the key index and bloom filter, skip batch storage and arena refs.
 	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter == "" {
@@ -2200,6 +2230,18 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		}, nil, &exec.CollectSink{}, nil
 	}
 
+	// For RightSemiJoin/RightAntiJoin, the probe phase marks matched build
+	// entries but outputs nothing. After probing, emit matched (semi) or
+	// unmatched (anti) build rows.
+	if joinType == exec.RightSemiJoin || joinType == exec.RightAntiJoin {
+		return &rightSemiFlushSource{
+			inner:    leftSource,
+			innerOps: leftOps,
+			probe:    probe,
+			joinType: joinType,
+		}, nil, &exec.CollectSink{}, nil
+	}
+
 	return leftSource, leftOps, &exec.CollectSink{}, nil
 }
 
@@ -2404,6 +2446,58 @@ func (s *joinFlushSource) Next(ctx context.Context) (*batch.RecordBatch, error) 
 }
 
 func (s *joinFlushSource) Close() error {
+	return s.pipeline.Close()
+}
+
+// rightSemiFlushSource wraps a join probe pipeline for RightSemiJoin/RightAntiJoin.
+// During probing, no rows are output (probe marks matched build entries).
+// After probing completes, emits matched (RightSemi) or unmatched (RightAnti) build rows.
+type rightSemiFlushSource struct {
+	inner    exec.Source
+	innerOps []exec.UnaryOperator
+	probe    *exec.HashJoinProbe
+	joinType exec.JoinType
+	pipeline *pipelineSource
+	flushed  bool
+	result   *batch.RecordBatch
+}
+
+func (s *rightSemiFlushSource) Init(ctx context.Context) error {
+	s.pipeline = &pipelineSource{source: s.inner, ops: s.innerOps}
+	return s.pipeline.Init(ctx)
+}
+
+func (s *rightSemiFlushSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if !s.flushed {
+		// Drain the probe pipeline — RightSemi/RightAnti probe returns nil
+		// for each batch (just marks matched entries), so we loop until exhausted.
+		for {
+			b, err := s.pipeline.Next(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if b == nil {
+				break
+			}
+			// probe.Execute returned nil for each batch, but the pipeline
+			// source wraps probe as an op, so we just keep pulling
+		}
+		s.flushed = true
+		if s.joinType == exec.RightSemiJoin {
+			s.result = s.probe.FlushMatched()
+		} else {
+			s.result = s.probe.FlushAntiMatched()
+		}
+	}
+	if s.result != nil {
+		b := s.result
+		s.result = nil
+		return b, nil
+	}
+	return nil, nil
+}
+
+func (s *rightSemiFlushSource) Close() error {
 	return s.pipeline.Close()
 }
 

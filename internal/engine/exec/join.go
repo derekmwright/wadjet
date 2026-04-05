@@ -22,8 +22,10 @@ const (
 	RightJoin
 	FullOuterJoin
 	CrossJoin
-	SemiJoin // returns left row if match found, no duplicates
-	AntiJoin // returns left row only if NO match found
+	SemiJoin      // returns left row if match found, no duplicates
+	AntiJoin      // returns left row only if NO match found
+	RightSemiJoin // builds LEFT (small), probes RIGHT (large), returns matched build rows
+	RightAntiJoin // builds LEFT (small), probes RIGHT (large), returns unmatched build rows
 )
 
 // buildRef is a pointer to a single row in the columnar build-side storage.
@@ -958,8 +960,9 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}
 	}
 
-	// Allocate matched bitmap for right/full outer join tracking
-	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
+	// Allocate matched bitmap for right/full outer join and right semi/anti tracking
+	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin ||
+		h.JoinType == RightSemiJoin || h.JoinType == RightAntiJoin) && len(h.arena) > 0 {
 		h.arenaMatched = make([]bool, len(h.arena))
 	}
 
@@ -2295,6 +2298,14 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		return p.executeSemiAntiJoin(in)
 	}
 
+	// RightSemiJoin/RightAntiJoin: probe marks matched build entries
+	// but doesn't output probe rows. Matched/unmatched build rows are
+	// emitted later via Next() after all probing completes.
+	if p.join.JoinType == RightSemiJoin || p.join.JoinType == RightAntiJoin {
+		p.markMatchedBuildEntries(in)
+		return nil, nil // no output during probe phase
+	}
+
 	// Cache output schema and column mapping on first batch (avoids per-batch allocation)
 	if p.cachedSchema == nil {
 		p.cachedSchema, p.cachedMapping = p.outputSchemaWithMapping(in.Schema)
@@ -3006,6 +3017,53 @@ type crossPair struct {
 	buildRow int
 }
 
+// markMatchedBuildEntries probes the input batch against the hash table and
+// marks matching build-side entries in arenaMatched. Used by RightSemiJoin and
+// RightAntiJoin where we don't output probe rows during probing — instead,
+// matched/unmatched build rows are emitted after all probing completes.
+func (p *HashJoinProbe) markMatchedBuildEntries(in *batch.RecordBatch) {
+	h := p.join
+	// Resolve probe key indices first (acquires h.mu internally)
+	h.resolveProbeKeyIdx(in)
+	// Then mark matches without locking — RightSemiJoin probe is single-threaded
+	if in.Sel != nil {
+		for _, idx := range in.Sel {
+			p.markKeyMatchedLocked(in, int(idx))
+		}
+	} else {
+		for i := 0; i < in.Len; i++ {
+			p.markKeyMatchedLocked(in, i)
+		}
+	}
+}
+
+// markKeyMatchedLocked is markKeyMatched without locking — caller must hold h.mu.
+func (p *HashJoinProbe) markKeyMatchedLocked(in *batch.RecordBatch, row int) {
+	h := p.join
+	if h.useIntKey {
+		key, ok := h.intProbeKey(in, row)
+		if !ok {
+			return
+		}
+		head, ok := h.intIndex.Get(key)
+		if !ok {
+			return
+		}
+		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
+			h.arenaMatched[idx] = true
+		}
+	} else if h.strIndex != nil {
+		p.buildProbeKey(in, row)
+		head, ok := h.strIndex.Get(p.keyBuf)
+		if !ok {
+			return
+		}
+		for idx := head; idx >= 0; idx = h.arenaNext[idx] {
+			h.arenaMatched[idx] = true
+		}
+	}
+}
+
 func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parquet.Column) (*batch.RecordBatch, error) {
 	_, mapping := p.outputSchemaWithMapping(in.Schema)
 
@@ -3060,6 +3118,87 @@ func (p *HashJoinProbe) executeCrossJoin(in *batch.RecordBatch, outSchema []parq
 	}
 
 	return out, nil
+}
+
+// FlushMatched returns a RecordBatch containing build-side rows that WERE
+// matched during probing. For RightSemiJoin only. Returns build-side columns only.
+func (p *HashJoinProbe) FlushMatched() *batch.RecordBatch {
+	if p.join.JoinType != RightSemiJoin {
+		return nil
+	}
+
+	var refs []buildRef
+	for i, ref := range p.join.arena {
+		if p.join.arenaMatched != nil && p.join.arenaMatched[i] {
+			refs = append(refs, ref)
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+
+	// Deduplicate: multiple arena entries can reference the same build row
+	// (when multiple probe rows match the same build key). Use a seen set
+	// to avoid emitting duplicate build rows.
+	seen := make(map[int32]bool, len(refs))
+	var unique []buildRef
+	for _, ref := range refs {
+		if !seen[ref.rowIdx] {
+			seen[ref.rowIdx] = true
+			unique = append(unique, ref)
+		}
+	}
+	refs = unique
+
+	// Output only build-side columns
+	out := batch.NewRecordBatch(p.join.buildSchema, len(refs))
+	for colIdx := range p.join.buildSchema {
+		dst := out.Columns[colIdx]
+		for outRow, ref := range refs {
+			if int(ref.batchIdx) >= len(p.join.buildBatches) {
+				continue
+			}
+			buildBatch := p.join.buildBatches[ref.batchIdx]
+			if int(ref.rowIdx) >= buildBatch.Len {
+				continue
+			}
+			copyVectorValue(dst, outRow, buildBatch.Columns[colIdx], int(ref.rowIdx))
+		}
+	}
+	return out
+}
+
+// FlushAntiMatched returns build-side rows that were NOT matched. For RightAntiJoin.
+func (p *HashJoinProbe) FlushAntiMatched() *batch.RecordBatch {
+	if p.join.JoinType != RightAntiJoin {
+		return nil
+	}
+
+	var refs []buildRef
+	for i, ref := range p.join.arena {
+		if p.join.arenaMatched == nil || !p.join.arenaMatched[i] {
+			refs = append(refs, ref)
+		}
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+
+	out := batch.NewRecordBatch(p.join.buildSchema, len(refs))
+	for colIdx := range p.join.buildSchema {
+		dst := out.Columns[colIdx]
+		for outRow, ref := range refs {
+			if int(ref.batchIdx) >= len(p.join.buildBatches) {
+				continue
+			}
+			buildBatch := p.join.buildBatches[ref.batchIdx]
+			if int(ref.rowIdx) >= buildBatch.Len {
+				continue
+			}
+			copyVectorValue(dst, outRow, buildBatch.Columns[colIdx], int(ref.rowIdx))
+		}
+	}
+	return out
 }
 
 // FlushUnmatched returns a RecordBatch containing build-side rows that were never
