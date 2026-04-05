@@ -1013,8 +1013,14 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 		colIdx[col] = i
 	}
 
-	if mi.HasAggregate && len(mi.GroupBy) > 0 {
-		batches = c.reAggregatePartials(batches, columns, colIdx, mi)
+	if mi.HasAggregate {
+		if len(mi.GroupBy) > 0 {
+			batches = c.reAggregatePartials(batches, columns, colIdx, mi)
+		} else {
+			// Scalar aggregate (no GROUP BY): merge N worker partials into 1 row.
+			// Each worker returned 1 row with partial SUM/COUNT/MIN/MAX.
+			batches = c.mergeScalarAggregates(batches, columns, colIdx, mi)
+		}
 	}
 	if mi.HasDistinct {
 		batches = c.deduplicatePartials(batches, columns)
@@ -1070,6 +1076,118 @@ func (c *Coordinator) deduplicatePartials(batches []*batch.RecordBatch, columns 
 
 // reAggregatePartials merges partial aggregate results by group-by key.
 // For COUNT → SUM, SUM → SUM, MIN → MIN, MAX → MAX.
+// mergeScalarAggregates merges N partial scalar aggregate rows into 1.
+// For SUM/COUNT: sum all partials. For MIN: take min. For MAX: take max.
+func (c *Coordinator) mergeScalarAggregates(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, mi *logical.MergeInfo) []*batch.RecordBatch {
+	if len(batches) == 0 || len(mi.AggExprs) == 0 {
+		return batches
+	}
+
+	// Collect all rows across batches
+	var rows []map[string]any
+	for _, b := range batches {
+		rows = append(rows, b.ToRows()...)
+	}
+	if len(rows) <= 1 {
+		return batches
+	}
+
+	// Merge into single row
+	merged := make(map[string]any, len(columns))
+	for _, ae := range mi.AggExprs {
+		idx, ok := colIdx[ae.OutputCol]
+		if !ok {
+			continue
+		}
+		_ = idx
+
+		switch strings.ToLower(ae.Func) {
+		case "sum", "count":
+			var total float64
+			for _, row := range rows {
+				v := row[ae.OutputCol]
+				if v != nil {
+					switch tv := v.(type) {
+					case float64:
+						total += tv
+					case int64:
+						total += float64(tv)
+					}
+				}
+			}
+			merged[ae.OutputCol] = total
+		case "min":
+			var minVal any
+			for _, row := range rows {
+				v := row[ae.OutputCol]
+				if v == nil {
+					continue
+				}
+				if minVal == nil || compareAnyValues(v, minVal) < 0 {
+					minVal = v
+				}
+			}
+			merged[ae.OutputCol] = minVal
+		case "max":
+			var maxVal any
+			for _, row := range rows {
+				v := row[ae.OutputCol]
+				if v == nil {
+					continue
+				}
+				if maxVal == nil || compareAnyValues(v, maxVal) > 0 {
+					maxVal = v
+				}
+			}
+			merged[ae.OutputCol] = maxVal
+		default:
+			// AVG and others: take first non-nil value (imprecise but safe)
+			for _, row := range rows {
+				if v := row[ae.OutputCol]; v != nil {
+					merged[ae.OutputCol] = v
+					break
+				}
+			}
+		}
+	}
+
+	return []*batch.RecordBatch{batch.FromRows(batches[0].Schema, []map[string]any{merged})}
+}
+
+// compareAnyValues compares two values for min/max merge.
+func compareAnyValues(a, b any) int {
+	switch av := a.(type) {
+	case float64:
+		bv, _ := b.(float64)
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case int64:
+		bv, _ := b.(int64)
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	case string:
+		bv, _ := b.(string)
+		if av < bv {
+			return -1
+		}
+		if av > bv {
+			return 1
+		}
+		return 0
+	}
+	return 0
+}
+
 func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns []string, colIdx map[string]int, mi *logical.MergeInfo) []*batch.RecordBatch {
 	if len(batches) == 0 || len(mi.AggExprs) == 0 {
 		return batches
