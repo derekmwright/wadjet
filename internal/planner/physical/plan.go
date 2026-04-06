@@ -86,6 +86,13 @@ type Stage struct {
 	ProbeSplitAlias string   // scan alias to partition (e.g., "lineitem")
 	ProbeSplitFiles []string // full file list to split across tasks
 
+	// BuildCachePreScans holds pre-scanned result file paths for large build
+	// tables. When populated by the coordinator (after pre-scanning them once),
+	// workers load these cached files via PreScannedInputs instead of scanning
+	// the large source table N times — eliminating the N× build-side duplication
+	// that causes OOM on Q09 at SF100. Keyed by scan alias (e.g., "orders").
+	BuildCachePreScans map[string][]string
+
 	// Multi-level merge: partitions upstream results among parallel merge groups.
 	// When MergeGroupCount > 0, this stage processes only the MergeGroup-th
 	// fraction of its dependency results. Independent merge groups run on
@@ -1032,6 +1039,27 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 	}
 
 	return bestAlias, bestFiles, true
+}
+
+// LargeBuildScans returns scan stages that are build-side (not the probe alias)
+// and whose estimated size exceeds the given threshold. These are candidates for
+// the build-side broadcast cache: the coordinator pre-scans them once, caches the
+// result in S3, and each worker loads the shared cache instead of independently
+// scanning the large source table N times.
+func LargeBuildScans(stages []Stage, probeAlias string, thresholdBytes int64) []Stage {
+	var large []Stage
+	for _, s := range stages {
+		if s.Type != "scan" {
+			continue
+		}
+		if s.ScanAlias == probeAlias {
+			continue // skip probe table
+		}
+		if s.EstimatedBytes >= thresholdBytes {
+			large = append(large, s)
+		}
+	}
+	return large
 }
 
 // CountJoinStages returns the total number of joins in the stage list,
