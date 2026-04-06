@@ -825,14 +825,17 @@ func (e *Executor) buildProbePartitionBlooms(
 		// Try ReaderAt to avoid loading entire file into memory.
 		// Falls back to full read if store doesn't support random access.
 		var fr *parquet.FileReader
+		var ra objstore.ReaderAtCloser
 		if ras, ok := e.store.(objstore.ReaderAtStore); ok {
-			ra, size, err := ras.GetReaderAt(ctx, bucket, filePath)
+			var size int64
+			var err error
+			ra, size, err = ras.GetReaderAt(ctx, bucket, filePath)
 			if err == nil {
 				fr, err = parquet.OpenFileReader(ra, size)
 				if err != nil {
 					ra.Close()
+					ra = nil
 				}
-				defer ra.Close()
 			}
 		}
 		if fr == nil {
@@ -895,6 +898,10 @@ func (e *Executor) buildProbePartitionBlooms(
 				}
 				pr.Close()
 			}
+		}
+		// Close resources for this file before next iteration.
+		if ra != nil {
+			ra.Close()
 		}
 	}
 

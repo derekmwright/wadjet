@@ -3139,12 +3139,12 @@ func (p *HashJoinProbe) FlushMatched() *batch.RecordBatch {
 
 	// Deduplicate: multiple arena entries can reference the same build row
 	// (when multiple probe rows match the same build key). Use a seen set
-	// to avoid emitting duplicate build rows.
-	seen := make(map[int32]bool, len(refs))
+	// keyed on (batchIdx, rowIdx) to avoid emitting duplicate build rows.
+	seen := make(map[buildRef]bool, len(refs))
 	var unique []buildRef
 	for _, ref := range refs {
-		if !seen[ref.rowIdx] {
-			seen[ref.rowIdx] = true
+		if !seen[ref] {
+			seen[ref] = true
 			unique = append(unique, ref)
 		}
 	}
@@ -3184,6 +3184,19 @@ func (p *HashJoinProbe) FlushAntiMatched() *batch.RecordBatch {
 		return nil
 	}
 
+	// Deduplicate: multiple arena entries can reference the same build row.
+	// Key on full (batchIdx, rowIdx) pair to avoid dropping rows from
+	// different batches that happen to share the same rowIdx.
+	seen := make(map[buildRef]bool, len(refs))
+	var unique []buildRef
+	for _, ref := range refs {
+		if !seen[ref] {
+			seen[ref] = true
+			unique = append(unique, ref)
+		}
+	}
+	refs = unique
+
 	out := batch.NewRecordBatch(p.join.buildSchema, len(refs))
 	for colIdx := range p.join.buildSchema {
 		dst := out.Columns[colIdx]
@@ -3220,6 +3233,19 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 	if len(refs) == 0 {
 		return nil
 	}
+
+	// Deduplicate: multiple arena entries can reference the same build row
+	// (hash chain entries for duplicate keys). Key on full (batchIdx, rowIdx)
+	// to avoid emitting duplicate unmatched rows.
+	seen := make(map[buildRef]bool, len(refs))
+	var unique []buildRef
+	for _, ref := range refs {
+		if !seen[ref] {
+			seen[ref] = true
+			unique = append(unique, ref)
+		}
+	}
+	refs = unique
 
 	outSchema, mapping := p.outputSchemaWithMapping(leftSchema)
 	out := batch.NewRecordBatch(outSchema, len(refs))
