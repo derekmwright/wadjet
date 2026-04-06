@@ -349,6 +349,91 @@ func filePaths(files []catalog.FileEntry) []string {
 	return paths
 }
 
+// ForceCompactFile rewrites a single data file, applying any pending delete
+// markers for that file. Used by delete marker GC to physically purge deleted
+// rows from files whose markers have aged out. The old file is removed from
+// the manifest and object store, replaced by the rewritten file.
+func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, filePath string) error {
+	tableMeta, err := c.catalog.GetTable(ctx, tableName)
+	if err != nil {
+		return fmt.Errorf("getting table metadata: %w", err)
+	}
+
+	manifest, err := c.catalog.GetManifest(ctx, tableName)
+	if err != nil {
+		return fmt.Errorf("getting manifest: %w", err)
+	}
+
+	// Find the file entry and its partition
+	var targetFile *catalog.FileEntry
+	var partPath string
+	var partValues map[string]string
+	for _, p := range manifest.Partitions {
+		for i := range p.Files {
+			if p.Files[i].Path == filePath {
+				targetFile = &p.Files[i]
+				partPath = p.Path
+				partValues = p.Values
+				break
+			}
+		}
+		if targetFile != nil {
+			break
+		}
+	}
+	if targetFile == nil {
+		return nil // file no longer exists, nothing to do
+	}
+
+	deleteSet := buildDeleteSet(manifest.DeleteMarkers)
+
+	// Merge the single file (which applies delete markers internally)
+	merged, err := c.mergeFiles(ctx, []catalog.FileEntry{*targetFile}, tableMeta.Schema, deleteSet)
+	if err != nil {
+		return fmt.Errorf("reading file for rewrite: %w", err)
+	}
+
+	// Remove the old file from manifest + store
+	if err := c.catalog.RemoveFiles(ctx, tableName, []string{filePath}); err != nil {
+		return fmt.Errorf("removing old file: %w", err)
+	}
+	c.deleteFromStore(ctx, []string{filePath})
+
+	// If all rows were deleted, we're done — file is gone
+	if len(merged.rows) == 0 {
+		c.logger.Info("force compact: file fully deleted",
+			"table", tableName, "file", filePath)
+		return nil
+	}
+
+	// Write the new file with deleted rows physically removed
+	newPath := fmt.Sprintf("%s/rewrite_%d.parquet", partPath, time.Now().UnixNano())
+	written, err := c.writeMergedFile(ctx, newPath, tableMeta.Schema, merged.rows)
+	if err != nil {
+		return fmt.Errorf("writing rewritten file: %w", err)
+	}
+
+	newEntry := catalog.FileEntry{
+		Path:        newPath,
+		SizeBytes:   written.size,
+		NumRows:     int64(len(merged.rows)),
+		CreatedAt:   time.Now().UTC(),
+		ColumnStats: written.columnStats,
+	}
+	if err := c.catalog.AddFiles(ctx, tableName, partValues, partPath, []catalog.FileEntry{newEntry}); err != nil {
+		return fmt.Errorf("adding rewritten file: %w", err)
+	}
+
+	c.logger.Info("force compact: file rewritten",
+		"table", tableName,
+		"old_file", filePath,
+		"new_file", newPath,
+		"rows_before", targetFile.NumRows,
+		"rows_after", len(merged.rows),
+	)
+	return nil
+}
+
 func buildDeleteSet(markers []catalog.DeleteMarker) map[string]map[int64]bool {
 	ds := make(map[string]map[int64]bool)
 	for _, m := range markers {
