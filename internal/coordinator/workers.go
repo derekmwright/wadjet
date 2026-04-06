@@ -81,14 +81,15 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 		logger = slog.Default()
 	}
 	if staleTTL <= 0 {
-		// Default: 5 minutes. Workers under heavy compute load with
+		// Default: 10 minutes. Workers under heavy compute load with
 		// GOGC=off may not schedule their heartbeat goroutine for
-		// 30+ seconds. At SF100, all workers hit peak GC pressure
-		// simultaneously during large hash table builds, causing
-		// synchronized heartbeat starvation and mass stale reaping.
-		// 2 minutes was too aggressive; 5 minutes provides enough
-		// buffer while still detecting truly dead workers.
-		staleTTL = 5 * time.Minute
+		// 30+ seconds. At SF100, build-cache pre-scans and large hash
+		// table builds can stall heartbeats for minutes. The previous
+		// 5-minute TTL caused stale reaping during build cache scans
+		// of ~8GB tables from S3. 10 minutes provides enough buffer
+		// while still detecting truly dead workers within a reasonable
+		// window.
+		staleTTL = 10 * time.Minute
 	}
 
 	wr := &WorkerRegistry{

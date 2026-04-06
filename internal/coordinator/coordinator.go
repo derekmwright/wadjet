@@ -447,11 +447,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		// that OOMs Q09 at SF100 (orders ~15GB × 3 workers = ~45GB).
 		buildCache, buildCacheErr := c.preScanBuildTables(ctx, queryID, sql, physStages, probeAlias)
 		if buildCacheErr != nil {
-			// Non-fatal: fall back to each worker scanning build tables independently.
-			// This may OOM at very large scale but is functionally correct.
-			c.logger.Warn("build cache pre-scan failed, falling back to per-worker scan",
-				"query", queryID, "error", buildCacheErr)
-			buildCache = nil
+			return nil, fmt.Errorf("build cache pre-scan failed for query %s: %w", queryID, buildCacheErr)
 		}
 
 		physStages = []physical.Stage{{
@@ -1862,9 +1858,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		probeSplitMergeInfo = mergeInfo
 		buildCache, buildCacheErr := c.preScanBuildTables(ctx, queryID, sql, physStages, probeAlias)
 		if buildCacheErr != nil {
-			c.logger.Warn("build cache pre-scan failed, falling back to per-worker scan",
-				"query", queryID, "error", buildCacheErr)
-			buildCache = nil
+			return "", "", fmt.Errorf("build cache pre-scan failed for query %s: %w", queryID, buildCacheErr)
 		}
 		physStages = []physical.Stage{{
 			ID:                 "pipeline-0",

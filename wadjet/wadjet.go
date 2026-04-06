@@ -27,7 +27,8 @@ type DB struct {
 	store        objstore.Store
 	catalog      *catalog.Catalog
 	bucket       string
-	planner      *physical.Planner
+	memoryBudget int64
+	spillDir     string
 	logger       *slog.Logger
 	authProvider *auth.Provider // nil = no auth enforcement
 }
@@ -59,18 +60,25 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		return nil, fmt.Errorf("initializing catalog: %w", err)
 	}
 
-	planner := physical.NewPlanner(cat)
-	planner.MemoryBudget = cfg.MemoryBudget
-	planner.SpillDir = cfg.SpillDir
-
 	return &DB{
 		store:        cfg.Store,
 		catalog:      cat,
 		bucket:       cfg.Bucket,
-		planner:      planner,
+		memoryBudget: cfg.MemoryBudget,
+		spillDir:     cfg.SpillDir,
 		logger:       cfg.Logger,
 		authProvider: cfg.AuthProvider,
 	}, nil
+}
+
+// newPlanner creates a fresh Planner for a single query. The Planner carries
+// per-query mutable state (scanCounter, scanCache, planCtx) so it must not be
+// shared across concurrent calls.
+func (db *DB) newPlanner() *physical.Planner {
+	p := physical.NewPlanner(db.catalog)
+	p.MemoryBudget = db.memoryBudget
+	p.SpillDir = db.spillDir
+	return p
 }
 
 // CreateTable creates a new table with the given schema and partition keys.
@@ -156,8 +164,10 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return nil, fmt.Errorf("building logical plan: %w", err)
 	}
 
+	planner := db.newPlanner()
+
 	// Annotate scan columns before ABAC enforcement so column policies can resolve
-	db.planner.AnnotateScanColumns(ctx, logicalPlan)
+	planner.AnnotateScanColumns(ctx, logicalPlan)
 
 	// ABAC enforcement: inject row filters and column policies at plan level
 	logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
@@ -165,11 +175,11 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return nil, err
 	}
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
-		db.planner.AnnotateScanColumns(ctx, plan)
+		planner.AnnotateScanColumns(ctx, plan)
 	})
 	planStr := logicalPlan.PrettyPrint(0)
 
-	physPlan, err := db.planner.Plan(ctx, logicalPlan)
+	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
 		return nil, fmt.Errorf("building physical plan: %w", err)
 	}
@@ -216,7 +226,8 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 		return nil, fmt.Errorf("building logical plan: %w", err)
 	}
 
-	db.planner.AnnotateScanColumns(ctx, logicalPlan)
+	planner := db.newPlanner()
+	planner.AnnotateScanColumns(ctx, logicalPlan)
 
 	// ABAC enforcement: inject row filters and column policies at plan level
 	logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
@@ -224,16 +235,16 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 		return nil, err
 	}
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
-		db.planner.AnnotateScanColumns(ctx, plan)
+		planner.AnnotateScanColumns(ctx, plan)
 	})
 	plan := logicalPlan.PrettyPrint(0)
 
 	if parsed.Explain.Analyze {
-		return db.explainAnalyze(ctx, logicalPlan, plan, parsed.Explain.Verbose)
+		return db.explainAnalyze(ctx, logicalPlan, plan, parsed.Explain.Verbose, planner)
 	}
 
 	if parsed.Explain.Verbose {
-		physPlan, err := db.planner.Plan(ctx, logicalPlan)
+		physPlan, err := planner.Plan(ctx, logicalPlan)
 		if err != nil {
 			return nil, fmt.Errorf("building physical plan: %w", err)
 		}
@@ -256,8 +267,8 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 
 // explainAnalyze builds and executes the query with profiling wrappers,
 // then returns the plan annotated with actual execution statistics.
-func (db *DB) explainAnalyze(ctx context.Context, logicalPlan *logical.Node, logicalStr string, verbose bool) (*QueryResult, error) {
-	physPlan, err := db.planner.Plan(ctx, logicalPlan)
+func (db *DB) explainAnalyze(ctx context.Context, logicalPlan *logical.Node, logicalStr string, verbose bool, planner *physical.Planner) (*QueryResult, error) {
+	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
 		return nil, fmt.Errorf("building physical plan: %w", err)
 	}

@@ -58,9 +58,8 @@ type Config struct {
 // Server is the Wadjet HTTP API server.
 type Server struct {
 	config   Config
-	catalog  *catalog.Catalog
-	planner  *physical.Planner
-	coord    *coordinator.Coordinator // nil = local execution
+	catalog *catalog.Catalog
+	coord   *coordinator.Coordinator // nil = local execution
 	dlq      *coordinator.DLQ         // nil = no DLQ
 	logger   *slog.Logger
 	mux      chi.Router
@@ -80,9 +79,8 @@ func New(cfg Config, logger *slog.Logger) *Server {
 
 	s := &Server{
 		config:   cfg,
-		catalog:  cfg.Catalog,
-		planner:  physical.NewPlanner(cfg.Catalog),
-		coord:    cfg.Coordinator,
+		catalog: cfg.Catalog,
+		coord:   cfg.Coordinator,
 		dlq:      cfg.DLQ,
 		logger:   logger,
 		mux:      chi.NewRouter(),
@@ -118,6 +116,13 @@ func New(cfg Config, logger *slog.Logger) *Server {
 // Mux returns the underlying chi router for registering additional routes (e.g. admin API).
 func (s *Server) Mux() chi.Router {
 	return s.mux
+}
+
+// newPlanner creates a fresh Planner for a single request. The Planner carries
+// per-query mutable state (scanCounter, scanCache, cteCache) so it must not be
+// shared across concurrent requests.
+func (s *Server) newPlanner() *physical.Planner {
+	return physical.NewPlanner(s.catalog)
 }
 
 // Start starts the HTTP server.
@@ -422,18 +427,19 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Annotate scan columns from catalog so optimizer can resolve unqualified refs
-	s.planner.AnnotateScanColumns(r.Context(), logicalPlan)
+	planner := s.newPlanner()
+	planner.AnnotateScanColumns(r.Context(), logicalPlan)
 
 	// Optimize — pass scan annotator for new scans created during IN decorrelation
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
-		s.planner.AnnotateScanColumns(r.Context(), plan)
+		planner.AnnotateScanColumns(r.Context(), plan)
 	})
 
 	// Apply query cost limits (per-role or global)
-	s.planner.QueryLimits = s.resolveQueryLimits(r)
+	planner.QueryLimits = s.resolveQueryLimits(r)
 
 	// Build physical plan
-	physPlan, err := s.planner.Plan(r.Context(), logicalPlan)
+	physPlan, err := planner.Plan(r.Context(), logicalPlan)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "physical plan error: "+err.Error())
 		return
@@ -1157,14 +1163,15 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		writeError(w, http.StatusBadRequest, "plan build error: "+err.Error())
 		return
 	}
-	s.planner.AnnotateScanColumns(r.Context(), logicalPlan)
+	planner := s.newPlanner()
+	planner.AnnotateScanColumns(r.Context(), logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
-		s.planner.AnnotateScanColumns(r.Context(), plan)
+		planner.AnnotateScanColumns(r.Context(), plan)
 	})
 	planStr := logicalPlan.PrettyPrint(0)
 
 	if parsed.Explain.Verbose {
-		physPlan, err := s.planner.Plan(r.Context(), logicalPlan)
+		physPlan, err := planner.Plan(r.Context(), logicalPlan)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "physical plan error: "+err.Error())
 			return

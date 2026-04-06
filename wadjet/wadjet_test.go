@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -733,4 +734,61 @@ func TestExplainAnalyzeABACEnforcement(t *testing.T) {
 			t.Errorf("expected row filter predicate in plan, got:\n%s", plan)
 		}
 	})
+}
+
+// TestConcurrentQueryNoPanic is a regression test for the concurrent map write
+// panic in buildScan. The Planner held mutable per-query state (scanCounter,
+// scanCache, planCtx) on the DB struct, causing fatal races when multiple
+// pgwire connections called Query concurrently. Each call must now use an
+// independent Planner instance.
+func TestConcurrentQueryNoPanic(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "val", Type: parquet.TypeString},
+		},
+	}
+	if err := db.CreateTable(ctx, "concurrent_test", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ing := db.NewIngester("concurrent_test", schema, nil, ingest.Config{
+		MaxBufferRows: 100,
+		RowGroupSize:  100,
+	})
+	rows := make([]map[string]any, 10)
+	for i := range rows {
+		rows[i] = map[string]any{"id": int64(i), "val": fmt.Sprintf("v%d", i)}
+	}
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	const goroutines = 20
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	for i := range goroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, errs[idx] = db.Query(ctx, "SELECT id, val FROM concurrent_test WHERE id > 0")
+		}(i)
+	}
+	wg.Wait()
+
+	for i, e := range errs {
+		if e != nil {
+			t.Errorf("goroutine %d: %v", i, e)
+		}
+	}
 }

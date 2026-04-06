@@ -53,3 +53,12 @@ Thumbs.db
 # Local config
 *.local.yaml
 .env
+.env.*
+.envrc
+.mcp.json
+
+# Codeparty agent workspaces
+.codeparty/
+
+# Terraform state backups
+*.tfstate.backup

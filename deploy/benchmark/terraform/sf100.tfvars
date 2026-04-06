@@ -1,0 +1,13 @@
+region               = "us-east-2"
+scale_factor         = 100
+mode                 = "distributed"
+coordinator_instance_type = "c7g.2xlarge"
+worker_instance_type = "c7gd.4xlarge"
+worker_count         = 3
+data_bucket          = "wadjet-bench-sf100-use2"
+data_prefix          = ""
+bin_version          = "latest"
+generate_data        = false
+benchmark_runs       = 1
+query_timeout        = "30m"
+use_spot             = false

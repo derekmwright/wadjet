@@ -366,6 +366,88 @@ func (sw *shuffleWriter) writeDecimalData(vec *batch.Vector, sel []uint32, numRo
 	return err
 }
 
+// shuffleChunkReader iterates over chunks in a WSHF byte slice one at a time,
+// allocating a single RecordBatch per Next call. Callers hold only one batch
+// in memory at a time instead of materializing the entire file up front.
+type shuffleChunkReader struct {
+	data      []byte
+	schema    []parquet.Column
+	numChunks uint32
+	chunk     uint32
+	pos       int
+}
+
+// newShuffleChunkReader parses the WSHF header and returns a reader positioned
+// at the first chunk. The caller retains ownership of data — it must remain
+// valid for the lifetime of the reader.
+func newShuffleChunkReader(data []byte) (*shuffleChunkReader, error) {
+	if len(data) < 10 {
+		return nil, fmt.Errorf("shuffle file too small: %d bytes", len(data))
+	}
+	if data[0] != shuffleMagic[0] || data[1] != shuffleMagic[1] ||
+		data[2] != shuffleMagic[2] || data[3] != shuffleMagic[3] {
+		return nil, fmt.Errorf("invalid shuffle magic: %q", data[:4])
+	}
+
+	pos := 4
+	numChunks := binary.LittleEndian.Uint32(data[pos:])
+	pos += 4
+	numCols := int(binary.LittleEndian.Uint16(data[pos:]))
+	pos += 2
+
+	schema := make([]parquet.Column, numCols)
+	for i := 0; i < numCols; i++ {
+		if pos+2 > len(data) {
+			return nil, fmt.Errorf("truncated schema at column %d", i)
+		}
+		nameLen := int(binary.LittleEndian.Uint16(data[pos:]))
+		pos += 2
+		if pos+nameLen+1 > len(data) {
+			return nil, fmt.Errorf("truncated schema name at column %d", i)
+		}
+		schema[i].Name = string(data[pos : pos+nameLen])
+		pos += nameLen
+		schema[i].Type = parquet.TypeID(data[pos])
+		schema[i].Nullable = true
+		pos++
+	}
+
+	return &shuffleChunkReader{
+		data:      data,
+		schema:    schema,
+		numChunks: numChunks,
+		pos:       pos,
+	}, nil
+}
+
+// Next returns the next RecordBatch from the file, or (nil, nil) when all chunks
+// have been consumed. Allocates exactly one RecordBatch per non-empty chunk.
+func (r *shuffleChunkReader) Next() (*batch.RecordBatch, error) {
+	for r.chunk < r.numChunks {
+		if r.pos+4 > len(r.data) {
+			return nil, nil
+		}
+		numRows := int(binary.LittleEndian.Uint32(r.data[r.pos:]))
+		r.pos += 4
+		r.chunk++
+
+		if numRows == 0 {
+			continue
+		}
+
+		b := batch.NewRecordBatch(r.schema, numRows)
+		for ci := range r.schema {
+			var err error
+			r.pos, err = readColumnData(r.data, r.pos, b.Columns[ci], numRows, r.schema[ci].Type)
+			if err != nil {
+				return nil, fmt.Errorf("reading column %d (%s) chunk %d: %w", ci, r.schema[ci].Name, r.chunk-1, err)
+			}
+		}
+		return b, nil
+	}
+	return nil, nil
+}
+
 // shuffleReadBatches reads all chunks from a binary shuffle file into RecordBatches.
 func shuffleReadBatches(data []byte) ([]*batch.RecordBatch, error) {
 	if len(data) < 10 {

@@ -294,21 +294,18 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		planner.SpillDir = e.spillDir
 	}
 
-	// Scan-split pipeline mode: read pre-scanned data from distributed scan
-	// tasks and inject as materialized inputs. The physical planner will use
-	// BatchSource instead of scanning from the object store.
+	// Scan-split pipeline mode: create lazy streaming sources for pre-scanned
+	// build-cache files. Each source downloads and parses files one at a time,
+	// yielding batches on demand. This avoids materializing the entire build
+	// side into memory — the hash join's grace spill handles memory pressure.
 	if len(task.PreScannedInputs) > 0 {
-		materializedInputs := make(map[string][]*batch.RecordBatch, len(task.PreScannedInputs))
+		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs))
 		for tableName, files := range task.PreScannedInputs {
-			batches, readErr := e.readInputFilesBatches(ctx, bucket, files, nil)
-			if readErr != nil {
-				return fmt.Errorf("reading pre-scanned input for %s: %w", tableName, readErr)
-			}
-			materializedInputs[tableName] = batches
-			e.logger.Debug("loaded pre-scanned input",
-				"table", tableName, "files", len(files), "batches", len(batches))
+			streamingSources[tableName] = newCachedFileStreamSource(e, bucket, files)
+			e.logger.Debug("streaming pre-scanned input",
+				"table", tableName, "files", len(files))
 		}
-		planner.MaterializedInputs = materializedInputs
+		planner.StreamingSources = streamingSources
 	}
 
 	// Probe-split pipeline mode: restrict scan files for the probe table.
@@ -874,25 +871,29 @@ func (e *Executor) buildProbePartitionBlooms(
 					if err != nil || page == nil {
 						break
 					}
-					// Extract integer keys and add to bloom
+					// Extract integer keys and add to bloom.
+					// Dispatch on PhysType, not on which accessor returns
+					// non-nil: Int32() reinterprets raw bytes unconditionally,
+					// so it always returns a non-nil slice for non-empty data
+					// regardless of the actual physical type. Checking PhysType
+					// first prevents INT64 keys from being truncated to 32 bits.
 					vals := page.Data
-					if vals.Count() > 0 {
-						if int32s := vals.Int32(); len(int32s) > 0 {
-							for _, v := range int32s[:vals.Count()] {
-								hash := exec.BloomHashInt(int64(v))
-								h1 := hash & bloomMask
-								h2 := (hash >> 17) & bloomMask
-								bloom[h1] |= 1 << (hash & 63)
-								bloom[h2] |= 1 << ((hash >> 6) & 63)
-							}
-						} else if int64s := vals.Int64(); len(int64s) > 0 {
-							for _, v := range int64s[:vals.Count()] {
-								hash := exec.BloomHashInt(v)
-								h1 := hash & bloomMask
-								h2 := (hash >> 17) & bloomMask
-								bloom[h1] |= 1 << (hash & 63)
-								bloom[h2] |= 1 << ((hash >> 6) & 63)
-							}
+					switch vals.PhysType() {
+					case parquet.PhysicalInt32:
+						for _, v := range vals.Int32()[:vals.Count()] {
+							hash := exec.BloomHashInt(int64(v))
+							h1 := hash & bloomMask
+							h2 := (hash >> 17) & bloomMask
+							bloom[h1] |= 1 << (hash & 63)
+							bloom[h2] |= 1 << ((hash >> 6) & 63)
+						}
+					case parquet.PhysicalInt64:
+						for _, v := range vals.Int64()[:vals.Count()] {
+							hash := exec.BloomHashInt(v)
+							h1 := hash & bloomMask
+							h2 := (hash >> 17) & bloomMask
+							bloom[h1] |= 1 << (hash & 63)
+							bloom[h2] |= 1 << ((hash >> 6) & 63)
 						}
 					}
 				}

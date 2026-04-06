@@ -1004,3 +1004,43 @@ func TestNew_NilLogger(t *testing.T) {
 		t.Fatal("expected default logger to be set")
 	}
 }
+
+// TestHandleQuery_ConcurrentRequests verifies that concurrent query requests
+// do not cause data races. Before the fix, the server shared a single Planner
+// across all requests, causing "concurrent map writes" in buildScan.
+func TestHandleQuery_ConcurrentRequests(t *testing.T) {
+	srv, cat := newTestServer(t)
+	ctx := context.Background()
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString},
+	}}
+	cat.CreateTable(ctx, "conc_test", schema, nil)
+
+	ts := httptest.NewServer(srv.Mux())
+	defer ts.Close()
+
+	const goroutines = 10
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			body := `{"sql":"SELECT id, val FROM conc_test"}`
+			resp, err := http.Post(ts.URL+"/v1/queries", "application/json", bytes.NewBufferString(body))
+			if err != nil {
+				errs <- err
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				errs <- fmt.Errorf("expected 200, got %d", resp.StatusCode)
+				return
+			}
+			errs <- nil
+		}()
+	}
+	for i := 0; i < goroutines; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent request failed: %v", err)
+		}
+	}
+}

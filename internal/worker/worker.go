@@ -137,7 +137,7 @@ func (w *Worker) Start(ctx context.Context) error {
 		Durable:       consumerName,
 		FilterSubject: filterSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       5 * time.Minute,
+		AckWait:       10 * time.Minute,
 		MaxDeliver:    3,
 	})
 	if err != nil {
