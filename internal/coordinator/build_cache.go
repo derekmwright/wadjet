@@ -40,7 +40,11 @@ const buildCacheTimeout = 8 * time.Minute
 // This eliminates the N× build-side memory duplication that OOMs Q09 at SF100
 // (e.g., 3 workers × 15GB orders hash tables = ~45GB peak vs 15GB with caching).
 func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID string, sql string, stages []physical.Stage, probeAlias string) (map[string][]string, error) {
-	largeBuildScans := physical.LargeBuildScans(stages, probeAlias, buildCacheThreshold)
+	threshold := int64(buildCacheThreshold)
+	if c.BuildCacheThreshold > 0 {
+		threshold = c.BuildCacheThreshold
+	}
+	largeBuildScans := physical.LargeBuildScans(stages, probeAlias, threshold)
 	if len(largeBuildScans) == 0 {
 		return nil, nil
 	}
