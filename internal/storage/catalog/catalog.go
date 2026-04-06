@@ -581,6 +581,14 @@ func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge ti
 // delete marker row indices that were applied during the rewrite. Any row
 // indices added concurrently (by a DELETE after GC started) are preserved.
 //
+// NOTE: Surviving concurrent markers still reference the old file path after
+// the swap. These become dangling markers since the old file no longer exists.
+// This is by design — the next GC sweep detects them as orphans and cleans
+// them up. The deleted rows they reference will be visible in query results
+// for at most one GC cycle (~5 min default). Remapping marker paths and row
+// indices inside the CAS loop was rejected due to complexity and increased
+// CAS conflict surface (see security review, 2026-04-05).
+//
 // If newFile is nil, the old file is simply removed (all rows were deleted).
 func (c *Catalog) SwapFileForGC(_ context.Context, tableName string, oldPath string, newFile *FileEntry, partValues map[string]string, partPath string, appliedIndices map[int64]bool) error {
 	c.invalidateManifestCache(tableName)
