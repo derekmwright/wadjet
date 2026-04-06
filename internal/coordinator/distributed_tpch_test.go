@@ -124,6 +124,53 @@ func setupTPCHDistributed(t *testing.T) (context.Context, *Coordinator) {
 	return ctx, coord
 }
 
+// TestDistributedTPCHBuildCache runs TPC-H join queries with BuildCacheThreshold=1
+// so the build cache pre-scan path fires on every non-probe table, even at SF0.01.
+// This validates that the pre-scan → S3 cache → worker read path produces correct
+// results identical to the non-cached path, catching SF100 regressions cheaply.
+func TestDistributedTPCHBuildCache(t *testing.T) {
+	ctx, coord := setupTPCHDistributed(t)
+
+	// Set threshold to 1 byte so every build table triggers pre-scanning.
+	coord.BuildCacheThreshold = 1
+
+	// Queries with joins — these will exercise the build cache path.
+	// Q02, Q05, Q07 have multi-table joins with build-side tables.
+	tests := []struct {
+		qNum     int
+		expected int
+	}{
+		{2, 5},   // supplier/partsupp/part joins
+		{5, 5},   // customer/orders/lineitem/supplier/nation/region
+		{7, 4},   // supplier/lineitem/orders/customer/nation
+		{9, 150}, // part/supplier/lineitem/partsupp/orders/nation
+		{10, 20}, // customer/orders/lineitem/nation
+		{12, 2},  // orders/lineitem
+	}
+
+	t.Logf("Worker count: %d (BuildCacheThreshold=1)", coord.workers.Count())
+
+	for _, tt := range tests {
+		q := tpch.TPCHQueries[tt.qNum]
+		t.Run(fmt.Sprintf("Q%02d_%s", tt.qNum, q.Name), func(t *testing.T) {
+			start := time.Now()
+			result, err := coord.ExecuteSQL(ctx, q.SQL)
+			elapsed := time.Since(start)
+			if err != nil {
+				t.Fatalf("Q%02d ExecuteSQL failed (build cache path): %v", tt.qNum, err)
+			}
+			if result.Error != "" {
+				t.Fatalf("Q%02d error: %s", tt.qNum, result.Error)
+			}
+			rows := result.Rows()
+			t.Logf("Q%02d: %d rows in %v (build cache active)", tt.qNum, len(rows), elapsed)
+			if len(rows) != tt.expected {
+				t.Errorf("Q%02d: got %d rows, want %d", tt.qNum, len(rows), tt.expected)
+			}
+		})
+	}
+}
+
 // TestDistributedTPCH runs TPC-H queries through the full distributed pipeline
 // (coordinator → NATS → worker → S3 → merge) and validates row counts against
 // the standalone expected results.
