@@ -72,7 +72,7 @@ func TestGCDeleteMarkers_AgedRewrite(t *testing.T) {
 		t.Errorf("expected 0 orphans, got %d", len(orphan))
 	}
 	if len(rewrite) != 2 {
-		t.Fatalf("expected 2 rewrite paths, got %d", len(rewrite))
+		t.Fatalf("expected 2 rewrite targets, got %d", len(rewrite))
 	}
 
 	// Rewrite markers should still be in manifest (ForceCompactFile needs them)
@@ -86,8 +86,12 @@ func TestGCDeleteMarkers_AgedRewrite(t *testing.T) {
 
 	// After ForceCompactFile, markers should be cleaned via SwapFileForGC
 	c := New(cat, nil, DefaultConfig())
-	for _, fp := range rewrite {
-		if err := c.ForceCompactFile(ctx, "events", fp); err != nil {
+	for fp, indices := range rewrite {
+		gcSet := make(map[int64]bool, len(indices))
+		for _, idx := range indices {
+			gcSet[idx] = true
+		}
+		if err := c.ForceCompactFile(ctx, "events", fp, gcSet); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -209,7 +213,8 @@ func TestForceCompactFile_RewritesWithDeleteMarkers(t *testing.T) {
 	}
 
 	c := New(cat, nil, DefaultConfig())
-	if err := c.ForceCompactFile(ctx, "events", path); err != nil {
+	gcSet := map[int64]bool{1: true}
+	if err := c.ForceCompactFile(ctx, "events", path, gcSet); err != nil {
 		t.Fatal(err)
 	}
 
@@ -272,7 +277,8 @@ func TestForceCompactFile_AllRowsDeleted(t *testing.T) {
 	}
 
 	c := New(cat, nil, DefaultConfig())
-	if err := c.ForceCompactFile(ctx, "events", path); err != nil {
+	gcSet := map[int64]bool{0: true, 1: true}
+	if err := c.ForceCompactFile(ctx, "events", path, gcSet); err != nil {
 		t.Fatal(err)
 	}
 
@@ -300,7 +306,7 @@ func TestForceCompactFile_MissingFile(t *testing.T) {
 
 	c := New(cat, nil, DefaultConfig())
 	// Should be a no-op, not an error
-	if err := c.ForceCompactFile(ctx, "events", "nonexistent.parquet"); err != nil {
+	if err := c.ForceCompactFile(ctx, "events", "nonexistent.parquet", map[int64]bool{0: true}); err != nil {
 		t.Errorf("ForceCompactFile on missing file should be no-op, got error: %v", err)
 	}
 }
@@ -452,7 +458,7 @@ func TestForceCompactFile_ConcurrentDeletePreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(rewrite) != 1 {
-		t.Fatalf("expected 1 rewrite path, got %d", len(rewrite))
+		t.Fatalf("expected 1 rewrite target, got %d", len(rewrite))
 	}
 
 	// CONCURRENT DELETE: add a new marker for row 3 (dave) AFTER GC scan
@@ -466,8 +472,14 @@ func TestForceCompactFile_ConcurrentDeletePreserved(t *testing.T) {
 	// ForceCompactFile should apply the aged marker (row 1) but preserve
 	// the concurrent marker (row 3)
 	c := New(cat, nil, DefaultConfig())
-	if err := c.ForceCompactFile(ctx, "events", rewrite[0]); err != nil {
-		t.Fatal(err)
+	for fp, indices := range rewrite {
+		gcSet := make(map[int64]bool, len(indices))
+		for _, idx := range indices {
+			gcSet[idx] = true
+		}
+		if err := c.ForceCompactFile(ctx, "events", fp, gcSet); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	manifest, err := cat.GetManifest(ctx, "events")
@@ -574,8 +586,10 @@ func TestForceCompactFile_DoubleGCSkipped(t *testing.T) {
 		t.Fatal("expected to acquire lock")
 	}
 
+	gcSet := map[int64]bool{0: true}
+
 	// Second call should be a no-op (lock held)
-	if err := c.ForceCompactFile(ctx, "events", path); err != nil {
+	if err := c.ForceCompactFile(ctx, "events", path, gcSet); err != nil {
 		t.Errorf("expected no-op when GC lock held, got error: %v", err)
 	}
 
@@ -594,7 +608,7 @@ func TestForceCompactFile_DoubleGCSkipped(t *testing.T) {
 
 	// Release lock and retry — now it should work
 	c.releaseGCLock(path)
-	if err := c.ForceCompactFile(ctx, "events", path); err != nil {
+	if err := c.ForceCompactFile(ctx, "events", path, gcSet); err != nil {
 		t.Fatal(err)
 	}
 
@@ -657,8 +671,14 @@ func TestGCDeleteMarkers_ZeroCreatedAtTwoSweeps(t *testing.T) {
 
 	// Complete the GC via ForceCompactFile
 	c := New(cat, nil, DefaultConfig())
-	if err := c.ForceCompactFile(ctx, "events", rewrite[0]); err != nil {
-		t.Fatal(err)
+	for fp, indices := range rewrite {
+		gcSet := make(map[int64]bool, len(indices))
+		for _, idx := range indices {
+			gcSet[idx] = true
+		}
+		if err := c.ForceCompactFile(ctx, "events", fp, gcSet); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	manifest, err := cat.GetManifest(ctx, "events")
