@@ -248,6 +248,44 @@ func TestParseExplainVerbose(t *testing.T) {
 	}
 }
 
+func TestParseExplainAnalyze(t *testing.T) {
+	parsed, err := Parse("EXPLAIN ANALYZE SELECT * FROM events WHERE id > 5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Type != QueryExplain {
+		t.Fatalf("expected QueryExplain, got %v", parsed.Type)
+	}
+	if parsed.Explain == nil {
+		t.Fatal("Explain info is nil")
+	}
+	if !parsed.Explain.Analyze {
+		t.Error("should have analyze flag")
+	}
+	if parsed.Explain.Verbose {
+		t.Error("should not be verbose")
+	}
+	if parsed.Explain.InnerSQL != "SELECT * FROM events WHERE id > 5" {
+		t.Errorf("unexpected inner SQL: %s", parsed.Explain.InnerSQL)
+	}
+}
+
+func TestParseExplainAnalyzeVerbose(t *testing.T) {
+	parsed, err := Parse("EXPLAIN ANALYZE VERBOSE SELECT id FROM events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Type != QueryExplain {
+		t.Fatalf("expected QueryExplain, got %v", parsed.Type)
+	}
+	if !parsed.Explain.Analyze {
+		t.Error("should have analyze flag")
+	}
+	if !parsed.Explain.Verbose {
+		t.Error("should be verbose")
+	}
+}
+
 func TestParseDescribe(t *testing.T) {
 	tests := []struct {
 		sql       string

@@ -60,6 +60,7 @@ const (
 	TokenKWFrom
 	TokenKWExplain
 	TokenKWVerbose
+	TokenKWAnalyze
 	TokenKWDescribe
 	TokenKWDesc
 	TokenKWWith
@@ -165,6 +166,7 @@ var keywords = map[string]TokenType{
 	"FROM":      TokenKWFrom,
 	"EXPLAIN":   TokenKWExplain,
 	"VERBOSE":   TokenKWVerbose,
+	"ANALYZE":   TokenKWAnalyze,
 	"DESCRIBE":  TokenKWDescribe,
 	"DESC":      TokenKWDesc,
 	"WITH":      TokenKWWith,

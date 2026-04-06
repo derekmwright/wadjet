@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -476,6 +477,260 @@ func TestWithRecursiveCTE(t *testing.T) {
 		}
 		if result.Rows[0]["name"] != "CEO" {
 			t.Errorf("expected CEO, got %v", result.Rows[0]["name"])
+		}
+	})
+}
+
+func TestExplainAnalyze(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "severity", Type: parquet.TypeString},
+		},
+	}
+	if err := db.CreateTable(ctx, "findings", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ing := db.NewIngester("findings", schema, nil, ingest.Config{
+		MaxBufferRows: 100,
+		RowGroupSize:  100,
+	})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"id": int64(1), "severity": "high"},
+		{"id": int64(2), "severity": "low"},
+		{"id": int64(3), "severity": "high"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("basic", func(t *testing.T) {
+		result, err := db.Query(ctx, "EXPLAIN ANALYZE SELECT * FROM findings WHERE severity = 'high'")
+		if err != nil {
+			t.Fatalf("EXPLAIN ANALYZE failed: %v", err)
+		}
+
+		if len(result.Columns) != 1 || result.Columns[0] != "plan" {
+			t.Fatalf("expected single 'plan' column, got %v", result.Columns)
+		}
+
+		plan := result.Plan
+
+		// Must contain logical plan section
+		if !strings.Contains(plan, "-- Logical Plan --") {
+			t.Error("missing logical plan section")
+		}
+
+		// Must contain execution stats section
+		if !strings.Contains(plan, "-- Execution Stats --") {
+			t.Error("missing execution stats section")
+		}
+
+		// Must contain operator stats with timing
+		if !strings.Contains(plan, "rows_in=") || !strings.Contains(plan, "rows_out=") {
+			t.Error("missing row count stats")
+		}
+		if !strings.Contains(plan, "time=") {
+			t.Error("missing timing stats")
+		}
+
+		// Must report total rows
+		if !strings.Contains(plan, "Total rows returned:") {
+			t.Error("missing total rows")
+		}
+
+		t.Logf("EXPLAIN ANALYZE output:\n%s", plan)
+	})
+
+	t.Run("verbose", func(t *testing.T) {
+		result, err := db.Query(ctx, "EXPLAIN ANALYZE VERBOSE SELECT * FROM findings")
+		if err != nil {
+			t.Fatalf("EXPLAIN ANALYZE VERBOSE failed: %v", err)
+		}
+
+		plan := result.Plan
+
+		// Must contain both logical and physical plan sections
+		if !strings.Contains(plan, "-- Logical Plan --") {
+			t.Error("missing logical plan section")
+		}
+		if !strings.Contains(plan, "-- Physical Plan --") {
+			t.Error("missing physical plan section")
+		}
+		if !strings.Contains(plan, "-- Execution Stats --") {
+			t.Error("missing execution stats section")
+		}
+
+		t.Logf("EXPLAIN ANALYZE VERBOSE output:\n%s", plan)
+	})
+
+	t.Run("plain_explain_unchanged", func(t *testing.T) {
+		// Verify that plain EXPLAIN (no ANALYZE) still works and does NOT execute
+		result, err := db.Query(ctx, "EXPLAIN SELECT * FROM findings")
+		if err != nil {
+			t.Fatalf("EXPLAIN failed: %v", err)
+		}
+
+		plan := result.Plan
+
+		// Should NOT contain execution stats
+		if strings.Contains(plan, "-- Execution Stats --") {
+			t.Error("plain EXPLAIN should not contain execution stats")
+		}
+		if strings.Contains(plan, "Total rows returned:") {
+			t.Error("plain EXPLAIN should not contain total rows")
+		}
+	})
+}
+
+func TestExplainAnalyzeABACEnforcement(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "severity", Type: parquet.TypeString},
+			{Name: "secret_col", Type: parquet.TypeString},
+		},
+	}
+	if err := db.CreateTable(ctx, "findings", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ing := db.NewIngester("findings", schema, nil, ingest.Config{
+		MaxBufferRows: 100,
+		RowGroupSize:  100,
+	})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"id": int64(1), "severity": "high", "secret_col": "classified-a"},
+		{"id": int64(2), "severity": "low", "secret_col": "classified-b"},
+		{"id": int64(3), "severity": "high", "secret_col": "classified-c"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up ABAC: deny secret_col and inject row filter severity='high'
+	evaluator := auth.NewPolicyEvaluator([]auth.AccessControlPolicy{
+		{
+			Name:    "test-policy",
+			Version: 1,
+			Enabled: true,
+			Rules: []auth.PolicyRule{
+				{
+					ID:        "restrict-findings",
+					EffectStr: "allow",
+					Priority:  10,
+					Subjects: []auth.Condition{
+						{Attribute: "subject.role", Op: "eq", Value: "analyst"},
+					},
+					Resources: []auth.Condition{
+						{Attribute: "resource.name", Op: "eq", Value: "findings"},
+					},
+					Actions: []auth.Action{auth.ActionRead},
+					Obligations: []auth.Obligation{
+						{Type: "deny_column", Target: "secret_col"},
+						{Type: "row_filter", Value: "severity = 'high'"},
+					},
+				},
+			},
+		},
+	})
+
+	authn, authz := auth.New(auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{
+			{Key: "test-key", Name: "analyst", Role: "analyst"},
+		},
+		Roles: []auth.RoleConfig{
+			{Name: "analyst", Tables: []string{"*"}, Allow: []string{"read"}},
+		},
+	})
+	provider := auth.NewProvider(authn, authz, nil, nil)
+	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
+	db.SetAuthProvider(provider)
+
+	identity := &auth.Identity{
+		Name:   "analyst",
+		Role:   "analyst",
+		Method: "apikey",
+	}
+	authCtx := auth.ContextWithIdentity(ctx, identity)
+
+	t.Run("explain_analyze_respects_deny_column", func(t *testing.T) {
+		// EXPLAIN ANALYZE with SELECT * -- secret_col should be stripped by ABAC
+		result, err := db.Query(authCtx, "EXPLAIN ANALYZE SELECT * FROM findings")
+		if err != nil {
+			t.Fatalf("EXPLAIN ANALYZE failed: %v", err)
+		}
+		plan := result.Plan
+		t.Logf("EXPLAIN ANALYZE deny_column plan:\n%s", plan)
+
+		// The denied column must not appear in plan output
+		if strings.Contains(plan, "secret_col") {
+			t.Errorf("denied column 'secret_col' should not appear in EXPLAIN ANALYZE output, plan:\n%s", plan)
+		}
+	})
+
+	t.Run("explain_respects_deny_column", func(t *testing.T) {
+		// EXPLAIN with SELECT * -- secret_col should be stripped by ABAC
+		result, err := db.Query(authCtx, "EXPLAIN SELECT * FROM findings")
+		if err != nil {
+			t.Fatalf("EXPLAIN failed: %v", err)
+		}
+		plan := result.Plan
+		t.Logf("EXPLAIN deny_column plan:\n%s", plan)
+
+		// The denied column must not appear in plan output
+		if strings.Contains(plan, "secret_col") {
+			t.Errorf("denied column 'secret_col' should not appear in EXPLAIN output, plan:\n%s", plan)
+		}
+	})
+
+	t.Run("explain_analyze_respects_row_filter", func(t *testing.T) {
+		result, err := db.Query(authCtx, "EXPLAIN ANALYZE SELECT id, severity FROM findings")
+		if err != nil {
+			t.Fatalf("EXPLAIN ANALYZE failed: %v", err)
+		}
+
+		plan := result.Plan
+		t.Logf("EXPLAIN ANALYZE with ABAC:\n%s", plan)
+
+		// Row filter severity='high' should limit results to 2 rows, not 3
+		if !strings.Contains(plan, "Total rows returned: 2") {
+			t.Errorf("expected exactly 2 rows (row filter severity='high'), plan:\n%s", plan)
+		}
+	})
+
+	t.Run("explain_shows_row_filter_in_plan", func(t *testing.T) {
+		result, err := db.Query(authCtx, "EXPLAIN SELECT id, severity FROM findings")
+		if err != nil {
+			t.Fatalf("EXPLAIN failed: %v", err)
+		}
+
+		plan := result.Plan
+		t.Logf("EXPLAIN with ABAC:\n%s", plan)
+
+		// The row filter should appear in the logical plan
+		if !strings.Contains(plan, "severity") {
+			t.Errorf("expected row filter predicate in plan, got:\n%s", plan)
 		}
 	})
 }

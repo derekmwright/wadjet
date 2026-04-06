@@ -217,10 +217,20 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	}
 
 	db.planner.AnnotateScanColumns(ctx, logicalPlan)
+
+	// ABAC enforcement: inject row filters and column policies at plan level
+	logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
+	if err != nil {
+		return nil, err
+	}
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		db.planner.AnnotateScanColumns(ctx, plan)
 	})
 	plan := logicalPlan.PrettyPrint(0)
+
+	if parsed.Explain.Analyze {
+		return db.explainAnalyze(ctx, logicalPlan, plan, parsed.Explain.Verbose)
+	}
 
 	if parsed.Explain.Verbose {
 		physPlan, err := db.planner.Plan(ctx, logicalPlan)
@@ -241,6 +251,66 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 		Columns: []string{"plan"},
 		Rows:    rows,
 		Plan:    plan,
+	}, nil
+}
+
+// explainAnalyze builds and executes the query with profiling wrappers,
+// then returns the plan annotated with actual execution statistics.
+func (db *DB) explainAnalyze(ctx context.Context, logicalPlan *logical.Node, logicalStr string, verbose bool) (*QueryResult, error) {
+	physPlan, err := db.planner.Plan(ctx, logicalPlan)
+	if err != nil {
+		return nil, fmt.Errorf("building physical plan: %w", err)
+	}
+	if physPlan.Cleanup != nil {
+		defer physPlan.Cleanup()
+	}
+
+	pipeline := physPlan.Pipeline
+
+	// Wrap all operators with profiling decorators before execution
+	collector := exec.WrapPipeline(pipeline)
+
+	if err := pipeline.Run(ctx); err != nil {
+		return nil, fmt.Errorf("executing query for EXPLAIN ANALYZE: %w", err)
+	}
+	defer pipeline.Close()
+
+	// Count result rows from the sink
+	var totalRows int64
+	if profiledSink, ok := pipeline.Sink.(*exec.ProfiledSink); ok {
+		if inner, ok := profiledSink.Inner().(*exec.CollectSink); ok {
+			totalRows = int64(len(inner.ToRows()))
+		}
+	}
+
+	// Build annotated output
+	var out strings.Builder
+	out.WriteString("-- Logical Plan --\n")
+	out.WriteString(logicalStr)
+
+	if verbose {
+		out.WriteString("\n\n-- Physical Plan --\n")
+		out.WriteString(physPlan.PrettyPrint())
+	}
+
+	out.WriteString("\n\n-- Execution Stats --\n")
+	for _, line := range exec.FormatAnalyzeStats(collector.Stats()) {
+		out.WriteString(line)
+		out.WriteString("\n")
+	}
+	out.WriteString(fmt.Sprintf("\nTotal rows returned: %d", totalRows))
+
+	planStr := out.String()
+	lines := strings.Split(planStr, "\n")
+	rows := make([]map[string]any, len(lines))
+	for i, line := range lines {
+		rows[i] = map[string]any{"plan": line}
+	}
+
+	return &QueryResult{
+		Columns: []string{"plan"},
+		Rows:    rows,
+		Plan:    planStr,
 	}, nil
 }
 
