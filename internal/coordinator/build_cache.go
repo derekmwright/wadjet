@@ -18,6 +18,12 @@ import (
 // the N× duplication causes OOM (e.g., orders at SF100 ≈ 15GB, partsupp ≈ 8GB).
 const buildCacheThreshold = 2 * 1024 * 1024 * 1024 // 2 GB
 
+// buildCacheGroupSize is the number of Parquet files per pre-scan task.
+// Partitioning the pre-scan across multiple tasks prevents a single worker from
+// accumulating all rows of a large table (e.g., partsupp ~11.8GB) in RAM before
+// writing to S3. Each task writes one .wshf cache file to a group-specific prefix.
+const buildCacheGroupSize = 8
+
 // preScanBuildTables pre-scans large build-side tables before dispatching
 // probe-split pipeline tasks. For each build scan stage whose EstimatedBytes
 // exceeds buildCacheThreshold, this dispatches a single-worker scan pipeline
@@ -39,46 +45,86 @@ func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID stri
 		"tables", len(largeBuildScans),
 	)
 
-	// Pre-scan each large build table concurrently using scan-only pipeline tasks.
-	// Each task selects all rows from the table and writes the result as a .wshf file.
+	// Pre-scan each large build table concurrently. Each table is further split
+	// into groups of buildCacheGroupSize files to avoid a single worker accumulating
+	// all rows of a large table (e.g., partsupp ~11.8GB) in RAM before writing to S3.
 	type scanResult struct {
 		alias string
 		files []string
 		err   error
 	}
-	results := make([]scanResult, len(largeBuildScans))
+
+	// Count total goroutines: one per (table, fileGroup) pair.
+	type tableGroup struct {
+		stage    physical.Stage
+		groupIdx int
+		files    []string
+	}
+	var groups []tableGroup
+	for _, stage := range largeBuildScans {
+		fileGroups := chunkFiles(stage.ScanFiles, buildCacheGroupSize)
+		for gi, fg := range fileGroups {
+			groups = append(groups, tableGroup{stage: stage, groupIdx: gi, files: fg})
+		}
+	}
+
+	results := make([]scanResult, len(groups))
 	var wg sync.WaitGroup
 
-	for i, stage := range largeBuildScans {
+	for i, g := range groups {
 		wg.Add(1)
-		go func(idx int, s physical.Stage) {
+		go func(idx int, tg tableGroup) {
 			defer wg.Done()
-			files, err := c.preScanOneTable(ctx, parentQueryID, s)
-			results[idx] = scanResult{alias: s.ScanAlias, files: files, err: err}
-		}(i, stage)
+			files, err := c.preScanOneTable(ctx, parentQueryID, tg.stage, tg.groupIdx, tg.files)
+			results[idx] = scanResult{alias: tg.stage.ScanAlias, files: files, err: err}
+		}(i, g)
 	}
 	wg.Wait()
 
+	// Merge results: collect all output file paths per alias.
 	cacheMap := make(map[string][]string, len(largeBuildScans))
 	for _, r := range results {
 		if r.err != nil {
 			return nil, fmt.Errorf("pre-scanning build table %s: %w", r.alias, r.err)
 		}
-		if len(r.files) > 0 {
-			cacheMap[r.alias] = r.files
-			c.logger.Info("build cache ready",
-				"alias", r.alias, "files", len(r.files))
+		cacheMap[r.alias] = append(cacheMap[r.alias], r.files...)
+	}
+	for alias, files := range cacheMap {
+		if len(files) == 0 {
+			delete(cacheMap, alias)
+			continue
 		}
+		c.logger.Info("build cache ready", "alias", alias, "files", len(files))
 	}
 
 	return cacheMap, nil
 }
 
-// preScanOneTable dispatches a single pipeline task to scan the build table
-// and write its rows to S3. Returns the result file paths.
-func (c *Coordinator) preScanOneTable(ctx context.Context, parentQueryID string, stage physical.Stage) ([]string, error) {
-	cacheQueryID := fmt.Sprintf("bc-%s-%s", parentQueryID, stage.ScanAlias)
-	resultPrefix := fmt.Sprintf("queries/%s/build-cache/%s/", parentQueryID, stage.ScanAlias)
+// chunkFiles splits a slice of file paths into chunks of at most size elements.
+func chunkFiles(files []string, size int) [][]string {
+	if len(files) == 0 {
+		return [][]string{nil} // one group with no filter = full table scan
+	}
+	var chunks [][]string
+	for len(files) > 0 {
+		n := size
+		if n > len(files) {
+			n = len(files)
+		}
+		chunks = append(chunks, files[:n])
+		files = files[n:]
+	}
+	return chunks
+}
+
+// preScanOneTable dispatches a single pipeline task to scan a subset of files
+// from the build table and write the rows to S3. groupIdx disambiguates multiple
+// tasks for the same table when the file list is split into chunks.
+// If fileSubset is non-nil, a ScanFileFilter is set on the task so only those
+// files are read; a nil fileSubset means scan all files (full table).
+func (c *Coordinator) preScanOneTable(ctx context.Context, parentQueryID string, stage physical.Stage, groupIdx int, fileSubset []string) ([]string, error) {
+	cacheQueryID := fmt.Sprintf("bc-%s-%s-%d", parentQueryID, stage.ScanAlias, groupIdx)
+	resultPrefix := fmt.Sprintf("queries/%s/build-cache/%s/%d/", parentQueryID, stage.ScanAlias, groupIdx)
 
 	// Construct minimal SQL to scan just this table with the columns needed.
 	// We select all columns so the workers get full rows for hash table construction.
@@ -94,6 +140,12 @@ func (c *Coordinator) preScanOneTable(ctx context.Context, parentQueryID string,
 		ResultBucket: c.config.ResultBucket,
 		ResultPrefix: resultPrefix,
 		CreatedAt:    time.Now(),
+	}
+
+	// Restrict the scan to only the assigned file subset so each group task
+	// reads a bounded slice of the table rather than the full dataset.
+	if fileSubset != nil {
+		task.ScanFileFilter = map[string][]string{stage.ScanAlias: fileSubset}
 	}
 
 	// Cluster routing

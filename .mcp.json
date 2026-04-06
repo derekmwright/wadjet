@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "holocron": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer holo_live_3e252fdb1b38118855bcfb86a96c0dd99da22e0f5c5470e0"
+      }
+    }
+  }
+}

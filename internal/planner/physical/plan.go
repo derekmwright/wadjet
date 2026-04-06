@@ -179,6 +179,12 @@ type Planner struct {
 	// Keyed by scan alias: "table" or "table:N" for self-joins.
 	MaterializedInputs map[string][]*batch.RecordBatch
 
+	// StreamingSources holds lazy sources for scan-split pipeline mode.
+	// Unlike MaterializedInputs, these yield batches on demand without
+	// materializing all data upfront. Checked before MaterializedInputs.
+	// Keyed by scan alias: "table" or "table:N" for self-joins.
+	StreamingSources map[string]exec.Source
+
 	// ScanFileFilter restricts which files each scan alias reads. Used in
 	// probe-split pipeline mode where the probe table is partitioned across
 	// workers while build tables read all files. Keyed by scan alias.
@@ -1929,7 +1935,14 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 		scanAlias = fmt.Sprintf("%s:%d", node.TableName, n)
 	}
 
-	// Scan-split pipeline mode: use pre-scanned data instead of reading from S3.
+	// Scan-split pipeline mode: use streaming or materialized pre-scanned data.
+	// StreamingSources is preferred — yields batches lazily without upfront
+	// memory allocation. Falls back to MaterializedInputs for compatibility.
+	if p.StreamingSources != nil {
+		if src, ok := p.StreamingSources[scanAlias]; ok {
+			return src, nil, &exec.CollectSink{}, nil
+		}
+	}
 	if p.MaterializedInputs != nil {
 		if batches, ok := p.MaterializedInputs[scanAlias]; ok && len(batches) > 0 {
 			return exec.NewBatchSource(batches), nil, &exec.CollectSink{}, nil

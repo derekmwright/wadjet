@@ -24,7 +24,7 @@ cluster:
   coordinator_instance: c7g.2xlarge
   worker_instance: c7gd.4xlarge
   arch: arm64
-  use_spot: true
+  use_spot: false
 
 benchmark:
   scale_factor: 100
