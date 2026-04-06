@@ -62,7 +62,7 @@ func (p *ProfiledSource) Init(ctx context.Context) error {
 func (p *ProfiledSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	start := time.Now()
 	b, err := p.inner.Next(ctx)
-	p.stats.WallTime += time.Since(start)
+	atomic.AddInt64((*int64)(&p.stats.WallTime), int64(time.Since(start)))
 	atomic.AddInt64(&p.stats.Calls, 1)
 	if b != nil {
 		atomic.AddInt64(&p.stats.RowsOut, int64(b.ActiveLen()))
@@ -104,7 +104,7 @@ func (p *ProfiledOperator) Execute(ctx context.Context, in *batch.RecordBatch) (
 	}
 	start := time.Now()
 	out, err := p.inner.Execute(ctx, in)
-	p.stats.WallTime += time.Since(start)
+	atomic.AddInt64((*int64)(&p.stats.WallTime), int64(time.Since(start)))
 	atomic.AddInt64(&p.stats.Calls, 1)
 	atomic.AddInt64(&p.stats.RowsIn, rowsIn)
 	if out != nil {
@@ -131,11 +131,20 @@ func (p *ProfiledOperator) Done() bool {
 }
 
 // Clone delegates to the inner operator if it implements Cloneable.
+// Returns a new ProfiledOperator wrapping the cloned inner, with fresh stats.
 func (p *ProfiledOperator) Clone() UnaryOperator {
 	if c, ok := p.inner.(Cloneable); ok {
-		return c.Clone()
+		return &ProfiledOperator{
+			inner: c.Clone(),
+			stats: &ProfileStats{Name: p.stats.Name},
+		}
 	}
-	return p
+	// Inner is not cloneable — return a new wrapper with its own stats
+	// to avoid shared-stats corruption.
+	return &ProfiledOperator{
+		inner: p.inner,
+		stats: &ProfileStats{Name: p.stats.Name},
+	}
 }
 
 // ProfiledSink wraps a Sink to collect timing and row count stats.
@@ -163,7 +172,7 @@ func (p *ProfiledSink) Consume(ctx context.Context, b *batch.RecordBatch) error 
 	}
 	start := time.Now()
 	err := p.inner.Consume(ctx, b)
-	p.stats.WallTime += time.Since(start)
+	atomic.AddInt64((*int64)(&p.stats.WallTime), int64(time.Since(start)))
 	atomic.AddInt64(&p.stats.Calls, 1)
 	atomic.AddInt64(&p.stats.RowsIn, rowsIn)
 	return err
@@ -172,7 +181,7 @@ func (p *ProfiledSink) Consume(ctx context.Context, b *batch.RecordBatch) error 
 func (p *ProfiledSink) Finalize(ctx context.Context) error {
 	start := time.Now()
 	err := p.inner.Finalize(ctx)
-	p.stats.WallTime += time.Since(start)
+	atomic.AddInt64((*int64)(&p.stats.WallTime), int64(time.Since(start)))
 	return err
 }
 

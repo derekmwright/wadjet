@@ -217,6 +217,12 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	}
 
 	db.planner.AnnotateScanColumns(ctx, logicalPlan)
+
+	// ABAC enforcement: inject row filters and column policies at plan level
+	logicalPlan, err = db.enforceAccessPolicies(ctx, selectInfo, logicalPlan)
+	if err != nil {
+		return nil, err
+	}
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		db.planner.AnnotateScanColumns(ctx, plan)
 	})
