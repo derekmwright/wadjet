@@ -82,6 +82,7 @@ type CTEDef struct {
 // ExplainInfo holds details for an EXPLAIN statement.
 type ExplainInfo struct {
 	Verbose  bool
+	Analyze  bool
 	InnerSQL string
 }
 
@@ -360,9 +361,15 @@ type OrderByItem struct {
 
 // --- Lexer-based pre-parse functions ---
 
-// lexParseExplain handles: EXPLAIN [VERBOSE] <query>
+// lexParseExplain handles: EXPLAIN [ANALYZE] [VERBOSE] <query>
 func lexParseExplain(sql string, l *lexer) (*ParsedQuery, error) {
 	l.nextToken() // consume EXPLAIN
+
+	analyze := false
+	if l.peekToken().typ == TokenKWAnalyze {
+		l.nextToken() // consume ANALYZE
+		analyze = true
+	}
 
 	verbose := false
 	if l.peekToken().typ == TokenKWVerbose {
@@ -383,6 +390,7 @@ func lexParseExplain(sql string, l *lexer) (*ParsedQuery, error) {
 		SelectInfo: inner.SelectInfo,
 		Explain: &ExplainInfo{
 			Verbose:  verbose,
+			Analyze:  analyze,
 			InnerSQL: rest,
 		},
 	}, nil

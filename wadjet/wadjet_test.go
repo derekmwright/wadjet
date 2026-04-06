@@ -479,3 +479,115 @@ func TestWithRecursiveCTE(t *testing.T) {
 		}
 	})
 }
+
+func TestExplainAnalyze(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "severity", Type: parquet.TypeString},
+		},
+	}
+	if err := db.CreateTable(ctx, "findings", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ing := db.NewIngester("findings", schema, nil, ingest.Config{
+		MaxBufferRows: 100,
+		RowGroupSize:  100,
+	})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"id": int64(1), "severity": "high"},
+		{"id": int64(2), "severity": "low"},
+		{"id": int64(3), "severity": "high"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("basic", func(t *testing.T) {
+		result, err := db.Query(ctx, "EXPLAIN ANALYZE SELECT * FROM findings WHERE severity = 'high'")
+		if err != nil {
+			t.Fatalf("EXPLAIN ANALYZE failed: %v", err)
+		}
+
+		if len(result.Columns) != 1 || result.Columns[0] != "plan" {
+			t.Fatalf("expected single 'plan' column, got %v", result.Columns)
+		}
+
+		plan := result.Plan
+
+		// Must contain logical plan section
+		if !strings.Contains(plan, "-- Logical Plan --") {
+			t.Error("missing logical plan section")
+		}
+
+		// Must contain execution stats section
+		if !strings.Contains(plan, "-- Execution Stats --") {
+			t.Error("missing execution stats section")
+		}
+
+		// Must contain operator stats with timing
+		if !strings.Contains(plan, "rows_in=") || !strings.Contains(plan, "rows_out=") {
+			t.Error("missing row count stats")
+		}
+		if !strings.Contains(plan, "time=") {
+			t.Error("missing timing stats")
+		}
+
+		// Must report total rows
+		if !strings.Contains(plan, "Total rows returned:") {
+			t.Error("missing total rows")
+		}
+
+		t.Logf("EXPLAIN ANALYZE output:\n%s", plan)
+	})
+
+	t.Run("verbose", func(t *testing.T) {
+		result, err := db.Query(ctx, "EXPLAIN ANALYZE VERBOSE SELECT * FROM findings")
+		if err != nil {
+			t.Fatalf("EXPLAIN ANALYZE VERBOSE failed: %v", err)
+		}
+
+		plan := result.Plan
+
+		// Must contain both logical and physical plan sections
+		if !strings.Contains(plan, "-- Logical Plan --") {
+			t.Error("missing logical plan section")
+		}
+		if !strings.Contains(plan, "-- Physical Plan --") {
+			t.Error("missing physical plan section")
+		}
+		if !strings.Contains(plan, "-- Execution Stats --") {
+			t.Error("missing execution stats section")
+		}
+
+		t.Logf("EXPLAIN ANALYZE VERBOSE output:\n%s", plan)
+	})
+
+	t.Run("plain_explain_unchanged", func(t *testing.T) {
+		// Verify that plain EXPLAIN (no ANALYZE) still works and does NOT execute
+		result, err := db.Query(ctx, "EXPLAIN SELECT * FROM findings")
+		if err != nil {
+			t.Fatalf("EXPLAIN failed: %v", err)
+		}
+
+		plan := result.Plan
+
+		// Should NOT contain execution stats
+		if strings.Contains(plan, "-- Execution Stats --") {
+			t.Error("plain EXPLAIN should not contain execution stats")
+		}
+		if strings.Contains(plan, "Total rows returned:") {
+			t.Error("plain EXPLAIN should not contain total rows")
+		}
+	})
+}
