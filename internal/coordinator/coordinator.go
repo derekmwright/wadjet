@@ -440,17 +440,33 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	if canProbeSplit && mergeInfo != nil {
 		workerCount := c.workers.Count()
 		probeSplitMergeInfo = mergeInfo
+
+		// Build-side broadcast cache: pre-scan large build tables once so all
+		// workers load a shared S3 result instead of independently scanning
+		// large source tables N times. Eliminates the N× hash table duplication
+		// that OOMs Q09 at SF100 (orders ~15GB × 3 workers = ~45GB).
+		buildCache, buildCacheErr := c.preScanBuildTables(ctx, queryID, sql, physStages, probeAlias)
+		if buildCacheErr != nil {
+			// Non-fatal: fall back to each worker scanning build tables independently.
+			// This may OOM at very large scale but is functionally correct.
+			c.logger.Warn("build cache pre-scan failed, falling back to per-worker scan",
+				"query", queryID, "error", buildCacheErr)
+			buildCache = nil
+		}
+
 		physStages = []physical.Stage{{
-			ID:              "pipeline-0",
-			Type:            "pipeline",
-			Tasks:           workerCount,
-			ProbeSplitAlias: probeAlias,
-			ProbeSplitFiles: probeFiles,
+			ID:                 "pipeline-0",
+			Type:               "pipeline",
+			Tasks:              workerCount,
+			ProbeSplitAlias:    probeAlias,
+			ProbeSplitFiles:    probeFiles,
+			BuildCachePreScans: buildCache,
 		}}
 		c.logger.Info("routing to probe-split pipeline",
 			"query", queryID, "probe_alias", probeAlias,
 			"probe_files", len(probeFiles), "workers", workerCount,
-			"has_merge", probeSplitMergeInfo != nil)
+			"has_merge", probeSplitMergeInfo != nil,
+			"build_cache_tables", len(buildCache))
 	} else {
 		c.logger.Info("routing to single worker pipeline",
 			"query", queryID)
@@ -662,6 +678,9 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 
 	// Probe-split mode: create N tasks, each with a subset of the probe
 	// table's files. Build tables are scanned in full by each worker.
+	// When BuildCachePreScans is populated, large build tables are loaded from
+	// pre-scanned S3 cache files via PreScannedInputs instead of scanning from
+	// source — eliminating N× build-side duplication that causes OOM at SF100.
 	if stage.ProbeSplitAlias != "" && len(stage.ProbeSplitFiles) > 0 && stage.Tasks > 1 {
 		filePartitions := splitFilesEvenly(stage.ProbeSplitFiles, stage.Tasks)
 		tasks := make([]distributed.Task, len(filePartitions))
@@ -676,6 +695,7 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 				ResultBucket:     c.config.ResultBucket,
 				ResultPrefix:     resultPrefix,
 				ScanFileFilter:   map[string][]string{stage.ProbeSplitAlias: files},
+				PreScannedInputs: stage.BuildCachePreScans,
 				PartialAggregate: qm != nil && qm.mergeInfo != nil && qm.mergeInfo.HasAggregate,
 				CreatedAt:        time.Now(),
 			}
@@ -1840,12 +1860,19 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 
 	if canProbeSplit && mergeInfo != nil {
 		probeSplitMergeInfo = mergeInfo
+		buildCache, buildCacheErr := c.preScanBuildTables(ctx, queryID, sql, physStages, probeAlias)
+		if buildCacheErr != nil {
+			c.logger.Warn("build cache pre-scan failed, falling back to per-worker scan",
+				"query", queryID, "error", buildCacheErr)
+			buildCache = nil
+		}
 		physStages = []physical.Stage{{
-			ID:              "pipeline-0",
-			Type:            "pipeline",
-			Tasks:           c.workers.Count(),
-			ProbeSplitAlias: probeAlias,
-			ProbeSplitFiles: probeFiles,
+			ID:                 "pipeline-0",
+			Type:               "pipeline",
+			Tasks:              c.workers.Count(),
+			ProbeSplitAlias:    probeAlias,
+			ProbeSplitFiles:    probeFiles,
+			BuildCachePreScans: buildCache,
 		}}
 	} else {
 		physStages = []physical.Stage{{
