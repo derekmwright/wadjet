@@ -473,8 +473,13 @@ func (c *Catalog) RemoveFiles(_ context.Context, tableName string, filePaths []s
 // paths that need a forced rewrite (marker aged, file still exists) and orphan
 // paths (marker aged, file already gone — orphan markers are removed from the
 // manifest). Rewrite markers are left in the manifest so ForceCompactFile can
-// apply them during the file rewrite; RemoveFiles cleans them as a side effect.
-func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge time.Duration) (rewritePaths []string, orphanPaths []string, err error) {
+// apply them during the file rewrite; SwapFileForGC removes only the applied
+// markers atomically.
+//
+// Zero-value CreatedAt markers (pre-existing before the GC feature) are
+// backfilled with the current time so they become eligible for GC in the next
+// cycle rather than being immortal.
+func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge time.Duration) (rewriteTargets map[string][]int64, orphanPaths []string, err error) {
 	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
 	const maxRetries = 10
@@ -499,21 +504,30 @@ func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge ti
 			}
 		}
 
-		// Partition markers: keep (fresh), rewrite (aged + file exists), orphan (aged + file gone)
-		rewritePaths = nil
+		// Partition markers into: keep (fresh), rewrite (aged + file exists),
+		// orphan (aged + file gone). Backfill zero-value CreatedAt so legacy
+		// markers become GC-eligible next cycle.
+		rewriteTargets = nil
 		orphanPaths = nil
-		rewriteSeen := make(map[string]bool)
 		orphanSeen := make(map[string]bool)
+		backfilled := false
 
-		for _, dm := range manifest.DeleteMarkers {
-			if dm.CreatedAt.IsZero() || dm.CreatedAt.After(cutoff) {
+		now := time.Now().UTC()
+		for i := range manifest.DeleteMarkers {
+			dm := &manifest.DeleteMarkers[i]
+			if dm.CreatedAt.IsZero() {
+				dm.CreatedAt = now
+				backfilled = true
+				continue // freshly backfilled — skip this cycle
+			}
+			if dm.CreatedAt.After(cutoff) {
 				continue // fresh marker
 			}
 			if fileSet[dm.FilePath] {
-				if !rewriteSeen[dm.FilePath] {
-					rewritePaths = append(rewritePaths, dm.FilePath)
-					rewriteSeen[dm.FilePath] = true
+				if rewriteTargets == nil {
+					rewriteTargets = make(map[string][]int64)
 				}
+				rewriteTargets[dm.FilePath] = append(rewriteTargets[dm.FilePath], dm.RowIndices...)
 			} else {
 				if !orphanSeen[dm.FilePath] {
 					orphanPaths = append(orphanPaths, dm.FilePath)
@@ -522,12 +536,13 @@ func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge ti
 			}
 		}
 
-		if len(rewritePaths) == 0 && len(orphanPaths) == 0 {
+		needsUpdate := backfilled || len(orphanPaths) > 0
+
+		if len(rewriteTargets) == 0 && len(orphanPaths) == 0 && !backfilled {
 			return nil, nil, nil
 		}
 
-		// Only remove orphan markers. Rewrite markers stay in the manifest
-		// so ForceCompactFile can apply them during the file rewrite.
+		// Remove orphan markers; keep rewrite markers for ForceCompactFile.
 		if len(orphanPaths) > 0 {
 			var keepMarkers []DeleteMarker
 			for _, dm := range manifest.DeleteMarkers {
@@ -536,7 +551,10 @@ func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge ti
 				}
 			}
 			manifest.DeleteMarkers = keepMarkers
-			manifest.UpdatedAt = time.Now().UTC()
+		}
+
+		if needsUpdate {
+			manifest.UpdatedAt = now
 
 			updated, err := json.Marshal(manifest)
 			if err != nil {
@@ -552,9 +570,91 @@ func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge ti
 				return nil, nil, err
 			}
 		}
-		return rewritePaths, orphanPaths, nil
+		return rewriteTargets, orphanPaths, nil
 	}
 	return nil, nil, fmt.Errorf("GC delete markers failed after %d CAS retries (table %q)", maxRetries, tableName)
+}
+
+// SwapFileForGC atomically replaces an old file with a rewritten file in the
+// manifest. In a single CAS operation it: (1) removes the old file from the
+// partition, (2) adds the new file entry, and (3) removes only the specific
+// delete marker row indices that were applied during the rewrite. Any row
+// indices added concurrently (by a DELETE after GC started) are preserved.
+//
+// If newFile is nil, the old file is simply removed (all rows were deleted).
+func (c *Catalog) SwapFileForGC(_ context.Context, tableName string, oldPath string, newFile *FileEntry, partValues map[string]string, partPath string, appliedIndices map[int64]bool) error {
+	c.invalidateManifestCache(tableName)
+	key := c.key("manifest." + tableName)
+	const maxRetries = 10
+
+	for retry := 0; retry < maxRetries; retry++ {
+		raw, rev, err := c.kv.Get(key)
+		if err != nil {
+			return fmt.Errorf("reading manifest for %q: %w", tableName, err)
+		}
+
+		var manifest PartitionManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return fmt.Errorf("decoding manifest: %w", err)
+		}
+
+		// Remove old file from partition and add new file
+		for i := range manifest.Partitions {
+			if manifest.Partitions[i].Path != partPath {
+				continue
+			}
+			filtered := manifest.Partitions[i].Files[:0]
+			for _, f := range manifest.Partitions[i].Files {
+				if f.Path != oldPath {
+					filtered = append(filtered, f)
+				}
+			}
+			if newFile != nil {
+				filtered = append(filtered, *newFile)
+			}
+			manifest.Partitions[i].Files = filtered
+			break
+		}
+
+		// Remove only the applied row indices from delete markers.
+		// If concurrent DELETEs added new indices, those survive.
+		var updatedMarkers []DeleteMarker
+		for _, dm := range manifest.DeleteMarkers {
+			if dm.FilePath != oldPath {
+				updatedMarkers = append(updatedMarkers, dm)
+				continue
+			}
+			// Keep only indices that were NOT applied
+			var remaining []int64
+			for _, idx := range dm.RowIndices {
+				if !appliedIndices[idx] {
+					remaining = append(remaining, idx)
+				}
+			}
+			if len(remaining) > 0 {
+				updatedMarkers = append(updatedMarkers, DeleteMarker{
+					FilePath:   dm.FilePath,
+					RowIndices: remaining,
+					CreatedAt:  dm.CreatedAt,
+				})
+			}
+		}
+		manifest.DeleteMarkers = updatedMarkers
+		manifest.UpdatedAt = time.Now().UTC()
+
+		updated, err := json.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("marshaling manifest: %w", err)
+		}
+
+		_, err = c.kv.Update(key, updated, rev)
+		if err == ErrRevisionMismatch {
+			casBackoff(retry)
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("file swap for GC failed after %d CAS retries (table %q)", maxRetries, tableName)
 }
 
 // UDFDef mirrors expr.UDFDef for persistence without import cycles.

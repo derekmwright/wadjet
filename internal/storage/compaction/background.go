@@ -11,7 +11,9 @@ import (
 const DefaultCompactionInterval = 5 * time.Minute
 
 // DefaultGCMinAge is the minimum age before delete markers are eligible for GC.
-const DefaultGCMinAge = 10 * time.Minute
+// Set to 30 minutes to safely exceed the duration of long-running analytical
+// queries, preventing GC from rewriting files that are being scanned.
+const DefaultGCMinAge = 30 * time.Minute
 
 // BackgroundConfig controls the periodic compaction loop.
 type BackgroundConfig struct {
@@ -106,7 +108,7 @@ func (bc *BackgroundCompactor) sweep(ctx context.Context) {
 		}
 
 		// GC aged delete markers: rewrite files with pending deletes, drop orphans
-		rewritePaths, orphanPaths, err := bc.catalog.GCDeleteMarkers(ctx, table, bc.config.GCMinAge)
+		rewriteTargets, orphanPaths, err := bc.catalog.GCDeleteMarkers(ctx, table, bc.config.GCMinAge)
 		if err != nil {
 			bc.logger.Warn("delete marker GC failed", "table", table, "error", err)
 			continue
@@ -115,11 +117,15 @@ func (bc *BackgroundCompactor) sweep(ctx context.Context) {
 			bc.logger.Info("delete marker GC: dropped orphan markers",
 				"table", table, "count", len(orphanPaths))
 		}
-		for _, fp := range rewritePaths {
+		for fp, indices := range rewriteTargets {
 			if ctx.Err() != nil {
 				return
 			}
-			if err := bc.compactor.ForceCompactFile(ctx, table, fp); err != nil {
+			gcSet := make(map[int64]bool, len(indices))
+			for _, idx := range indices {
+				gcSet[idx] = true
+			}
+			if err := bc.compactor.ForceCompactFile(ctx, table, fp, gcSet); err != nil {
 				bc.logger.Warn("force compact failed",
 					"table", table, "file", fp, "error", err)
 			}

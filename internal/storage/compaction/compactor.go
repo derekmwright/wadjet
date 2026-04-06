@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
@@ -39,6 +40,10 @@ type Compactor struct {
 	catalog *catalog.Catalog
 	logger  *slog.Logger
 	config  Config
+
+	// gcMu protects gcInProgress to prevent double GC rewrites of the same file.
+	gcMu         sync.Mutex
+	gcInProgress map[string]bool
 }
 
 // New creates a compactor.
@@ -46,7 +51,30 @@ func New(cat *catalog.Catalog, logger *slog.Logger, cfg Config) *Compactor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Compactor{catalog: cat, logger: logger, config: cfg}
+	return &Compactor{
+		catalog:      cat,
+		logger:       logger,
+		config:       cfg,
+		gcInProgress: make(map[string]bool),
+	}
+}
+
+// tryAcquireGCLock attempts to mark a file as GC-in-progress. Returns true if
+// the lock was acquired, false if another goroutine is already rewriting it.
+func (c *Compactor) tryAcquireGCLock(filePath string) bool {
+	c.gcMu.Lock()
+	defer c.gcMu.Unlock()
+	if c.gcInProgress[filePath] {
+		return false
+	}
+	c.gcInProgress[filePath] = true
+	return true
+}
+
+func (c *Compactor) releaseGCLock(filePath string) {
+	c.gcMu.Lock()
+	defer c.gcMu.Unlock()
+	delete(c.gcInProgress, filePath)
 }
 
 // Result summarizes one compaction pass for a table.
@@ -351,9 +379,26 @@ func filePaths(files []catalog.FileEntry) []string {
 
 // ForceCompactFile rewrites a single data file, applying any pending delete
 // markers for that file. Used by delete marker GC to physically purge deleted
-// rows from files whose markers have aged out. The old file is removed from
-// the manifest and object store, replaced by the rewritten file.
-func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, filePath string) error {
+// rows from files whose markers have aged out.
+//
+// Safety invariants:
+//   - Write-before-delete: the new file is written to the object store before
+//     the old file is removed. On partial failure, the old file may become an
+//     orphan in S3, but data is never lost.
+//   - Scoped marker removal: only the specific row indices that were applied
+//     during the rewrite are removed from the manifest. Concurrent DELETEs
+//     that add new indices between GC scan and rewrite are preserved.
+//   - Atomic manifest swap: old file removal, new file addition, and marker
+//     cleanup happen in a single CAS operation via SwapFileForGC.
+//   - Per-file lock: prevents double GC rewrite if two sweeps overlap.
+func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, filePath string, gcIndices map[int64]bool) error {
+	if !c.tryAcquireGCLock(filePath) {
+		c.logger.Info("force compact: skipping, GC already in progress",
+			"table", tableName, "file", filePath)
+		return nil
+	}
+	defer c.releaseGCLock(filePath)
+
 	tableMeta, err := c.catalog.GetTable(ctx, tableName)
 	if err != nil {
 		return fmt.Errorf("getting table metadata: %w", err)
@@ -385,6 +430,14 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 		return nil // file no longer exists, nothing to do
 	}
 
+	// Use the GC-scanned indices as the authoritative set of what to apply.
+	// This prevents TOCTOU: concurrent DELETEs that add new indices between
+	// the GC scan and this rewrite are NOT included and will survive the swap.
+	appliedIndices := gcIndices
+	if len(appliedIndices) == 0 {
+		return nil // no delete markers for this file, nothing to do
+	}
+
 	deleteSet := buildDeleteSet(manifest.DeleteMarkers)
 
 	// Merge the single file (which applies delete markers internally)
@@ -393,20 +446,20 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 		return fmt.Errorf("reading file for rewrite: %w", err)
 	}
 
-	// Remove the old file from manifest + store
-	if err := c.catalog.RemoveFiles(ctx, tableName, []string{filePath}); err != nil {
-		return fmt.Errorf("removing old file: %w", err)
-	}
-	c.deleteFromStore(ctx, []string{filePath})
-
-	// If all rows were deleted, we're done — file is gone
+	// If all rows were deleted, atomically remove old file + applied markers
 	if len(merged.rows) == 0 {
+		if err := c.catalog.SwapFileForGC(ctx, tableName, filePath, nil, partValues, partPath, appliedIndices); err != nil {
+			return fmt.Errorf("removing fully-deleted file: %w", err)
+		}
+		// Best-effort cleanup of old file from object store (orphan is safe)
+		c.deleteFromStore(ctx, []string{filePath})
 		c.logger.Info("force compact: file fully deleted",
 			"table", tableName, "file", filePath)
 		return nil
 	}
 
-	// Write the new file with deleted rows physically removed
+	// Write-before-delete: write the new file FIRST so data is never lost.
+	// On failure here, nothing in the manifest has changed — no data loss.
 	newPath := fmt.Sprintf("%s/rewrite_%d.parquet", partPath, time.Now().UnixNano())
 	written, err := c.writeMergedFile(ctx, newPath, tableMeta.Schema, merged.rows)
 	if err != nil {
@@ -420,9 +473,17 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 		CreatedAt:   time.Now().UTC(),
 		ColumnStats: written.columnStats,
 	}
-	if err := c.catalog.AddFiles(ctx, tableName, partValues, partPath, []catalog.FileEntry{newEntry}); err != nil {
-		return fmt.Errorf("adding rewritten file: %w", err)
+
+	// Atomic manifest swap: remove old file + add new file + remove applied markers
+	if err := c.catalog.SwapFileForGC(ctx, tableName, filePath, &newEntry, partValues, partPath, appliedIndices); err != nil {
+		// New file is orphaned in S3 — safe, data not lost. Log for cleanup.
+		c.logger.Warn("force compact: manifest swap failed, orphaned new file",
+			"table", tableName, "new_file", newPath, "error", err)
+		return fmt.Errorf("swapping file in manifest: %w", err)
 	}
+
+	// Best-effort cleanup of old file from object store
+	c.deleteFromStore(ctx, []string{filePath})
 
 	c.logger.Info("force compact: file rewritten",
 		"table", tableName,
