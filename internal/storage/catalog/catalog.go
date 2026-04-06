@@ -66,17 +66,18 @@ type TableMeta struct {
 
 // PartitionManifest tracks all partitions and their files for a table.
 type PartitionManifest struct {
-	Table        string           `json:"table"`
-	Partitions   []PartitionEntry `json:"partitions"`
-	DeleteMarkers []DeleteMarker  `json:"delete_markers,omitempty"` // merge-on-read deletes
-	UpdatedAt    time.Time        `json:"updated_at"`
+	Table         string           `json:"table"`
+	Partitions    []PartitionEntry `json:"partitions"`
+	DeleteMarkers []DeleteMarker   `json:"delete_markers,omitempty"` // merge-on-read deletes
+	UpdatedAt     time.Time        `json:"updated_at"`
 }
 
 // DeleteMarker records rows to skip during scan (merge-on-read).
 // Each marker identifies deleted rows within a specific data file.
 type DeleteMarker struct {
-	FilePath   string  `json:"file_path"`   // path of the data file containing deleted rows
-	RowIndices []int64 `json:"row_indices"` // 0-based row indices to skip
+	FilePath   string    `json:"file_path"`   // path of the data file containing deleted rows
+	RowIndices []int64   `json:"row_indices"` // 0-based row indices to skip
+	CreatedAt  time.Time `json:"created_at"`  // when this marker was created
 }
 
 // PartitionEntry describes a single partition.
@@ -96,11 +97,11 @@ type FileColumnStats struct {
 
 // FileEntry describes a single Parquet file within a partition.
 type FileEntry struct {
-	Path        string                      `json:"path"`
-	SizeBytes   int64                       `json:"size_bytes"`
-	NumRows     int64                       `json:"num_rows"`
-	CreatedAt   time.Time                   `json:"created_at"`
-	ColumnStats map[string]FileColumnStats  `json:"column_stats,omitempty"`
+	Path        string                     `json:"path"`
+	SizeBytes   int64                      `json:"size_bytes"`
+	NumRows     int64                      `json:"num_rows"`
+	CreatedAt   time.Time                  `json:"created_at"`
+	ColumnStats map[string]FileColumnStats `json:"column_stats,omitempty"`
 }
 
 // TableColumnStats holds aggregated per-column statistics across all files.
@@ -359,16 +360,38 @@ func (c *Catalog) AddDeleteMarkers(_ context.Context, tableName string, markers 
 			}
 		}
 
-		// Rebuild merged markers
+		// Rebuild merged markers, preserving earliest CreatedAt per file
+		existingTimes := make(map[string]time.Time)
+		for _, dm := range manifest.DeleteMarkers {
+			if !dm.CreatedAt.IsZero() {
+				if t, ok := existingTimes[dm.FilePath]; !ok || dm.CreatedAt.Before(t) {
+					existingTimes[dm.FilePath] = dm.CreatedAt
+				}
+			}
+		}
+		for _, dm := range markers {
+			if !dm.CreatedAt.IsZero() {
+				if t, ok := existingTimes[dm.FilePath]; !ok || dm.CreatedAt.Before(t) {
+					existingTimes[dm.FilePath] = dm.CreatedAt
+				}
+			}
+		}
+
+		now := time.Now().UTC()
 		manifest.DeleteMarkers = nil
 		for filePath, indices := range existing {
 			rows := make([]int64, 0, len(indices))
 			for idx := range indices {
 				rows = append(rows, idx)
 			}
+			createdAt := now
+			if t, ok := existingTimes[filePath]; ok {
+				createdAt = t
+			}
 			manifest.DeleteMarkers = append(manifest.DeleteMarkers, DeleteMarker{
 				FilePath:   filePath,
 				RowIndices: rows,
+				CreatedAt:  createdAt,
 			})
 		}
 		manifest.UpdatedAt = time.Now().UTC()
@@ -444,6 +467,202 @@ func (c *Catalog) RemoveFiles(_ context.Context, tableName string, filePaths []s
 		return err
 	}
 	return fmt.Errorf("file removal failed after %d CAS retries (table %q)", maxRetries, tableName)
+}
+
+// GCDeleteMarkers identifies delete markers older than minAge. Returns file
+// paths that need a forced rewrite (marker aged, file still exists) and orphan
+// paths (marker aged, file already gone — orphan markers are removed from the
+// manifest). Rewrite markers are left in the manifest so ForceCompactFile can
+// apply them during the file rewrite; SwapFileForGC removes only the applied
+// markers atomically.
+//
+// Zero-value CreatedAt markers (pre-existing before the GC feature) are
+// backfilled with the current time so they become eligible for GC in the next
+// cycle rather than being immortal.
+func (c *Catalog) GCDeleteMarkers(_ context.Context, tableName string, minAge time.Duration) (rewriteTargets map[string][]int64, orphanPaths []string, err error) {
+	c.invalidateManifestCache(tableName)
+	key := c.key("manifest." + tableName)
+	const maxRetries = 10
+	cutoff := time.Now().Add(-minAge)
+
+	for retry := 0; retry < maxRetries; retry++ {
+		raw, rev, err := c.kv.Get(key)
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading manifest for %q: %w", tableName, err)
+		}
+
+		var manifest PartitionManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return nil, nil, fmt.Errorf("decoding manifest: %w", err)
+		}
+
+		// Build set of files that exist in the manifest
+		fileSet := make(map[string]bool)
+		for _, p := range manifest.Partitions {
+			for _, f := range p.Files {
+				fileSet[f.Path] = true
+			}
+		}
+
+		// Partition markers into: keep (fresh), rewrite (aged + file exists),
+		// orphan (aged + file gone). Backfill zero-value CreatedAt so legacy
+		// markers become GC-eligible next cycle.
+		rewriteTargets = nil
+		orphanPaths = nil
+		orphanSeen := make(map[string]bool)
+		backfilled := false
+
+		now := time.Now().UTC()
+		for i := range manifest.DeleteMarkers {
+			dm := &manifest.DeleteMarkers[i]
+			if dm.CreatedAt.IsZero() {
+				dm.CreatedAt = now
+				backfilled = true
+				continue // freshly backfilled — skip this cycle
+			}
+			if dm.CreatedAt.After(cutoff) {
+				continue // fresh marker
+			}
+			if fileSet[dm.FilePath] {
+				if rewriteTargets == nil {
+					rewriteTargets = make(map[string][]int64)
+				}
+				rewriteTargets[dm.FilePath] = append(rewriteTargets[dm.FilePath], dm.RowIndices...)
+			} else {
+				if !orphanSeen[dm.FilePath] {
+					orphanPaths = append(orphanPaths, dm.FilePath)
+					orphanSeen[dm.FilePath] = true
+				}
+			}
+		}
+
+		needsUpdate := backfilled || len(orphanPaths) > 0
+
+		if len(rewriteTargets) == 0 && len(orphanPaths) == 0 && !backfilled {
+			return nil, nil, nil
+		}
+
+		// Remove orphan markers; keep rewrite markers for ForceCompactFile.
+		if len(orphanPaths) > 0 {
+			var keepMarkers []DeleteMarker
+			for _, dm := range manifest.DeleteMarkers {
+				if !orphanSeen[dm.FilePath] {
+					keepMarkers = append(keepMarkers, dm)
+				}
+			}
+			manifest.DeleteMarkers = keepMarkers
+		}
+
+		if needsUpdate {
+			manifest.UpdatedAt = now
+
+			updated, err := json.Marshal(manifest)
+			if err != nil {
+				return nil, nil, fmt.Errorf("marshaling manifest: %w", err)
+			}
+
+			_, err = c.kv.Update(key, updated, rev)
+			if err == ErrRevisionMismatch {
+				casBackoff(retry)
+				continue
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		return rewriteTargets, orphanPaths, nil
+	}
+	return nil, nil, fmt.Errorf("GC delete markers failed after %d CAS retries (table %q)", maxRetries, tableName)
+}
+
+// SwapFileForGC atomically replaces an old file with a rewritten file in the
+// manifest. In a single CAS operation it: (1) removes the old file from the
+// partition, (2) adds the new file entry, and (3) removes only the specific
+// delete marker row indices that were applied during the rewrite. Any row
+// indices added concurrently (by a DELETE after GC started) are preserved.
+//
+// NOTE: Surviving concurrent markers still reference the old file path after
+// the swap. These become dangling markers since the old file no longer exists.
+// This is by design — the next GC sweep detects them as orphans and cleans
+// them up. The deleted rows they reference will be visible in query results
+// for at most one GC cycle (~5 min default). Remapping marker paths and row
+// indices inside the CAS loop was rejected due to complexity and increased
+// CAS conflict surface (see security review, 2026-04-05).
+//
+// If newFile is nil, the old file is simply removed (all rows were deleted).
+func (c *Catalog) SwapFileForGC(_ context.Context, tableName string, oldPath string, newFile *FileEntry, partValues map[string]string, partPath string, appliedIndices map[int64]bool) error {
+	c.invalidateManifestCache(tableName)
+	key := c.key("manifest." + tableName)
+	const maxRetries = 10
+
+	for retry := 0; retry < maxRetries; retry++ {
+		raw, rev, err := c.kv.Get(key)
+		if err != nil {
+			return fmt.Errorf("reading manifest for %q: %w", tableName, err)
+		}
+
+		var manifest PartitionManifest
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			return fmt.Errorf("decoding manifest: %w", err)
+		}
+
+		// Remove old file from partition and add new file
+		for i := range manifest.Partitions {
+			if manifest.Partitions[i].Path != partPath {
+				continue
+			}
+			filtered := manifest.Partitions[i].Files[:0]
+			for _, f := range manifest.Partitions[i].Files {
+				if f.Path != oldPath {
+					filtered = append(filtered, f)
+				}
+			}
+			if newFile != nil {
+				filtered = append(filtered, *newFile)
+			}
+			manifest.Partitions[i].Files = filtered
+			break
+		}
+
+		// Remove only the applied row indices from delete markers.
+		// If concurrent DELETEs added new indices, those survive.
+		var updatedMarkers []DeleteMarker
+		for _, dm := range manifest.DeleteMarkers {
+			if dm.FilePath != oldPath {
+				updatedMarkers = append(updatedMarkers, dm)
+				continue
+			}
+			// Keep only indices that were NOT applied
+			var remaining []int64
+			for _, idx := range dm.RowIndices {
+				if !appliedIndices[idx] {
+					remaining = append(remaining, idx)
+				}
+			}
+			if len(remaining) > 0 {
+				updatedMarkers = append(updatedMarkers, DeleteMarker{
+					FilePath:   dm.FilePath,
+					RowIndices: remaining,
+					CreatedAt:  dm.CreatedAt,
+				})
+			}
+		}
+		manifest.DeleteMarkers = updatedMarkers
+		manifest.UpdatedAt = time.Now().UTC()
+
+		updated, err := json.Marshal(manifest)
+		if err != nil {
+			return fmt.Errorf("marshaling manifest: %w", err)
+		}
+
+		_, err = c.kv.Update(key, updated, rev)
+		if err == ErrRevisionMismatch {
+			casBackoff(retry)
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("file swap for GC failed after %d CAS retries (table %q)", maxRetries, tableName)
 }
 
 // UDFDef mirrors expr.UDFDef for persistence without import cycles.

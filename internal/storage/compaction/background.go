@@ -10,6 +10,11 @@ import (
 
 const DefaultCompactionInterval = 5 * time.Minute
 
+// DefaultGCMinAge is the minimum age before delete markers are eligible for GC.
+// Set to 30 minutes to safely exceed the duration of long-running analytical
+// queries, preventing GC from rewriting files that are being scanned.
+const DefaultGCMinAge = 30 * time.Minute
+
 // BackgroundConfig controls the periodic compaction loop.
 type BackgroundConfig struct {
 	// Enabled controls whether background compaction runs. Default: true.
@@ -18,6 +23,9 @@ type BackgroundConfig struct {
 	Interval time.Duration
 	// Compaction controls compaction trigger thresholds.
 	Compaction Config
+	// GCMinAge is the minimum age before delete markers are garbage collected
+	// and their files are force-rewritten. Zero uses DefaultGCMinAge.
+	GCMinAge time.Duration
 }
 
 // BackgroundCompactor runs periodic compaction sweeps across all tables.
@@ -35,6 +43,9 @@ func NewBackgroundCompactor(cat *catalog.Catalog, cfg BackgroundConfig, logger *
 	}
 	if cfg.Interval == 0 {
 		cfg.Interval = DefaultCompactionInterval
+	}
+	if cfg.GCMinAge == 0 {
+		cfg.GCMinAge = DefaultGCMinAge
 	}
 	return &BackgroundCompactor{
 		compactor: New(cat, logger, cfg.Compaction),
@@ -94,6 +105,30 @@ func (bc *BackgroundCompactor) sweep(ctx context.Context) {
 				"files_created", result.FilesCreated,
 				"rows_merged", result.RowsMerged,
 			)
+		}
+
+		// GC aged delete markers: rewrite files with pending deletes, drop orphans
+		rewriteTargets, orphanPaths, err := bc.catalog.GCDeleteMarkers(ctx, table, bc.config.GCMinAge)
+		if err != nil {
+			bc.logger.Warn("delete marker GC failed", "table", table, "error", err)
+			continue
+		}
+		if len(orphanPaths) > 0 {
+			bc.logger.Info("delete marker GC: dropped orphan markers",
+				"table", table, "count", len(orphanPaths))
+		}
+		for fp, indices := range rewriteTargets {
+			if ctx.Err() != nil {
+				return
+			}
+			gcSet := make(map[int64]bool, len(indices))
+			for _, idx := range indices {
+				gcSet[idx] = true
+			}
+			if err := bc.compactor.ForceCompactFile(ctx, table, fp, gcSet); err != nil {
+				bc.logger.Warn("force compact failed",
+					"table", table, "file", fp, "error", err)
+			}
 		}
 	}
 }
