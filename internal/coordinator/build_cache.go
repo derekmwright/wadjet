@@ -24,6 +24,11 @@ const buildCacheThreshold = 2 * 1024 * 1024 * 1024 // 2 GB
 // writing to S3. Each task writes one .wshf cache file to a group-specific prefix.
 const buildCacheGroupSize = 8
 
+// buildCacheTimeout is the maximum time to wait for a single build cache
+// pre-scan to complete. If exceeded, the coordinator falls back to per-worker
+// scanning (which may OOM at very large scale but is functionally correct).
+const buildCacheTimeout = 8 * time.Minute
+
 // preScanBuildTables pre-scans large build-side tables before dispatching
 // probe-split pipeline tasks. For each build scan stage whose EstimatedBytes
 // exceeds buildCacheThreshold, this dispatches a single-worker scan pipeline
@@ -122,7 +127,9 @@ func chunkFiles(files []string, size int) [][]string {
 // tasks for the same table when the file list is split into chunks.
 // If fileSubset is non-nil, a ScanFileFilter is set on the task so only those
 // files are read; a nil fileSubset means scan all files (full table).
-func (c *Coordinator) preScanOneTable(ctx context.Context, parentQueryID string, stage physical.Stage, groupIdx int, fileSubset []string) ([]string, error) {
+func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID string, stage physical.Stage, groupIdx int, fileSubset []string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, buildCacheTimeout)
+	defer cancel()
 	cacheQueryID := fmt.Sprintf("bc-%s-%s-%d", parentQueryID, stage.ScanAlias, groupIdx)
 	resultPrefix := fmt.Sprintf("queries/%s/build-cache/%s/%d/", parentQueryID, stage.ScanAlias, groupIdx)
 
