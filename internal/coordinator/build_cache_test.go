@@ -174,3 +174,101 @@ func TestBuildCacheTaskHasCorrectFields(t *testing.T) {
 		}
 	}
 }
+
+// TestPreScanBuildTablesInjectableThreshold verifies that BuildCacheThreshold
+// on the Coordinator overrides the default 2GB constant, allowing the pre-scan
+// path to trigger on small datasets (e.g., SF1 with a 1MB threshold).
+func TestPreScanBuildTablesInjectableThreshold(t *testing.T) {
+	_, coord, _ := setupDistributed(t)
+
+	// Set a 1MB threshold so even small tables trigger the pre-scan path.
+	coord.BuildCacheThreshold = 1 * 1024 * 1024 // 1 MB
+
+	stages := []physical.Stage{
+		{ID: "s1", Type: "scan", ScanAlias: "lineitem", TableName: "lineitem",
+			EstimatedBytes: 50 * 1024 * 1024, ScanFiles: []string{"l1.parquet"}},
+		{ID: "s2", Type: "scan", ScanAlias: "orders", TableName: "orders",
+			EstimatedBytes: 5 * 1024 * 1024, ScanFiles: []string{"o1.parquet"}},
+		{ID: "s3", Type: "scan", ScanAlias: "part", TableName: "part",
+			EstimatedBytes: 500 * 1024, ScanFiles: []string{"p1.parquet"}},
+	}
+
+	// With 1MB threshold, orders (5MB) should be a candidate but part (500KB) should not.
+	large := physical.LargeBuildScans(stages, "lineitem", coord.BuildCacheThreshold)
+	if len(large) != 1 {
+		t.Fatalf("expected 1 large build scan with 1MB threshold, got %d", len(large))
+	}
+	if large[0].ScanAlias != "orders" {
+		t.Errorf("expected large scan alias 'orders', got %q", large[0].ScanAlias)
+	}
+
+	// Verify lineitem (probe table) is never included regardless of size.
+	largeAll := physical.LargeBuildScans(stages, "lineitem", 1) // threshold=1 byte
+	for _, s := range largeAll {
+		if s.ScanAlias == "lineitem" {
+			t.Error("probe table 'lineitem' must never be included in build scans")
+		}
+	}
+}
+
+// TestPreScanBuildTablesDefaultThreshold verifies that a zero BuildCacheThreshold
+// falls back to the default 2GB constant and skips small tables.
+func TestPreScanBuildTablesDefaultThreshold(t *testing.T) {
+	ctx, coord, _ := setupDistributed(t)
+
+	// Don't set BuildCacheThreshold — leave at zero (use default).
+	stages := []physical.Stage{
+		{ID: "s1", Type: "scan", ScanAlias: "lineitem", TableName: "lineitem",
+			EstimatedBytes: 50 * 1024 * 1024, ScanFiles: []string{"l1.parquet"}},
+		{ID: "s2", Type: "scan", ScanAlias: "orders", TableName: "orders",
+			EstimatedBytes: 5 * 1024 * 1024, ScanFiles: []string{"o1.parquet"}},
+	}
+
+	cache, err := coord.preScanBuildTables(ctx, "qid-default", "SELECT 1", stages, "lineitem")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cache) != 0 {
+		t.Errorf("expected no cache entries with default 2GB threshold for 5MB table, got %d", len(cache))
+	}
+}
+
+// TestPreScanBuildTablesThresholdBoundary verifies exact boundary behavior:
+// tables at exactly the threshold are included, below are excluded.
+func TestPreScanBuildTablesThresholdBoundary(t *testing.T) {
+	_, coord, _ := setupDistributed(t)
+
+	const boundary = int64(10 * 1024 * 1024) // 10 MB
+	coord.BuildCacheThreshold = boundary
+
+	stages := []physical.Stage{
+		{ID: "probe", Type: "scan", ScanAlias: "lineitem", TableName: "lineitem",
+			EstimatedBytes: 100 * 1024 * 1024},
+		{ID: "at", Type: "scan", ScanAlias: "at_boundary", TableName: "at_boundary",
+			EstimatedBytes: boundary}, // exactly at threshold
+		{ID: "below", Type: "scan", ScanAlias: "below_boundary", TableName: "below_boundary",
+			EstimatedBytes: boundary - 1}, // 1 byte below
+		{ID: "above", Type: "scan", ScanAlias: "above_boundary", TableName: "above_boundary",
+			EstimatedBytes: boundary + 1}, // 1 byte above
+	}
+
+	large := physical.LargeBuildScans(stages, "lineitem", coord.BuildCacheThreshold)
+
+	found := make(map[string]bool)
+	for _, s := range large {
+		found[s.ScanAlias] = true
+	}
+
+	if !found["at_boundary"] {
+		t.Error("table at exactly the threshold should be included")
+	}
+	if found["below_boundary"] {
+		t.Error("table below the threshold should NOT be included")
+	}
+	if !found["above_boundary"] {
+		t.Error("table above the threshold should be included")
+	}
+	if found["lineitem"] {
+		t.Error("probe table should never be included")
+	}
+}

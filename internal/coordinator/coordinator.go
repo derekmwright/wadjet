@@ -69,6 +69,10 @@ type Coordinator struct {
 	otel      *telemetry.Provider // nil = no OTel tracing
 	logger    *slog.Logger
 
+	// BuildCacheThreshold overrides the default build cache threshold (bytes).
+	// Zero means use the default (2GB). Exported for testing with small datasets.
+	BuildCacheThreshold int64
+
 	mu         sync.Mutex
 	resultSubs map[string]context.CancelFunc          // queryID -> cancel
 	queryMetas map[string]*queryMeta                  // queryID -> metadata for result retrieval
