@@ -25,7 +25,9 @@ type BloomFilterOp struct {
 
 	// Adaptive disabling: if the bloom filter isn't filtering enough rows,
 	// the hash computation + random memory accesses cost more than they save.
-	// Track rejection rate over the first 8 batches; disable if <5% rejected.
+	// Track rejection rate over the first 32 batches; disable if <5% rejected.
+	// 32 batches (vs 8) avoids premature disable from partition skew where
+	// early batches all come from the same key range.
 	totalChecked int
 	totalPassed  int
 	batchesSeen  int
@@ -197,13 +199,13 @@ func (op *BloomFilterOp) Execute(_ context.Context, in *batch.RecordBatch) (*bat
 	}
 
 	// Track rejection rate for adaptive disabling.
-	// After 8 batches, if <5% of rows are rejected, the bloom filter
+	// After 32 batches, if <5% of rows are rejected, the bloom filter
 	// costs more than it saves and is disabled for remaining batches.
 	if !op.disabled {
 		op.totalChecked += activeLen
 		op.totalPassed += len(sel)
 		op.batchesSeen++
-		if op.batchesSeen >= 8 && op.totalChecked > 0 {
+		if op.batchesSeen >= 32 && op.totalChecked > 0 {
 			rejected := op.totalChecked - op.totalPassed
 			if rejected*20 < op.totalChecked { // <5% rejection
 				op.disabled = true
