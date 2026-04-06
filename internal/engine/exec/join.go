@@ -3234,6 +3234,19 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 		return nil
 	}
 
+	// Deduplicate: multiple arena entries can reference the same build row
+	// (hash chain entries for duplicate keys). Key on full (batchIdx, rowIdx)
+	// to avoid emitting duplicate unmatched rows.
+	seen := make(map[buildRef]bool, len(refs))
+	var unique []buildRef
+	for _, ref := range refs {
+		if !seen[ref] {
+			seen[ref] = true
+			unique = append(unique, ref)
+		}
+	}
+	refs = unique
+
 	outSchema, mapping := p.outputSchemaWithMapping(leftSchema)
 	out := batch.NewRecordBatch(outSchema, len(refs))
 

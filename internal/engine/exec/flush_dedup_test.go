@@ -242,3 +242,95 @@ func TestFlushAntiMatchedCrossBatchDedup(t *testing.T) {
 		}
 	}
 }
+
+// TestFlushUnmatchedDedup verifies that FlushUnmatched deduplicates build rows
+// when the arena has multiple entries for the same build row (hash chain entries
+// for duplicate keys). Each unique unmatched build row should appear exactly once.
+func TestFlushUnmatchedDedup(t *testing.T) {
+	buildSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt32},
+		{Name: "val", Type: parquet.TypeString},
+	}
+
+	hj := NewHashJoin(RightJoin, []string{"id"}, []string{"id"})
+	hj.BuildFromRows(buildSchema, []map[string]any{
+		{"id": int32(1), "val": "a"},
+		{"id": int32(2), "val": "b"},
+		{"id": int32(3), "val": "c"},
+	})
+
+	probeSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt32},
+		{Name: "extra", Type: parquet.TypeString},
+	}
+	// Probe only id=1, leaving id=2 and id=3 unmatched.
+	// Send duplicate probe rows to create multiple arena entries for the
+	// same build row, exercising the dedup path.
+	probeBatch := batch.FromRows(probeSchema, []map[string]any{
+		{"id": int32(1), "extra": "x"},
+		{"id": int32(1), "extra": "y"}, // duplicate to exercise dedup
+	})
+
+	probe := hj.Probe()
+	_, err := probe.Execute(context.Background(), probeBatch)
+	if err != nil {
+		t.Fatalf("probe execute: %v", err)
+	}
+
+	result := probe.FlushUnmatched(probeSchema)
+	if result == nil {
+		t.Fatal("expected non-nil FlushUnmatched result")
+	}
+
+	// Should have exactly 2 unmatched build rows (id=2 and id=3), not more
+	if result.Len != 2 {
+		t.Fatalf("expected 2 unmatched rows, got %d", result.Len)
+	}
+}
+
+// TestFlushUnmatchedCrossBatchDedup is a regression test for the cross-batch
+// dedup bug in FlushUnmatched. Unmatched rows from different build batches
+// with the same rowIdx must both appear in the output.
+func TestFlushUnmatchedCrossBatchDedup(t *testing.T) {
+	buildSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt32},
+		{Name: "val", Type: parquet.TypeString},
+	}
+
+	hj := NewHashJoin(FullOuterJoin, []string{"id"}, []string{"id"})
+	// Build two separate batches so rowIdx 0 exists in both.
+	hj.BuildFromRows(buildSchema, []map[string]any{
+		{"id": int32(1), "val": "batch0-row0"},
+		{"id": int32(2), "val": "batch0-row1"},
+	})
+	hj.BuildFromRows(buildSchema, []map[string]any{
+		{"id": int32(3), "val": "batch1-row0"}, // rowIdx=0 in batch 1
+		{"id": int32(4), "val": "batch1-row1"},
+	})
+
+	probeSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt32},
+		{Name: "extra", Type: parquet.TypeString},
+	}
+	// Probe only id=1 -- ids 2, 3, 4 should be unmatched.
+	probeBatch := batch.FromRows(probeSchema, []map[string]any{
+		{"id": int32(1), "extra": "x"},
+	})
+
+	probe := hj.Probe()
+	_, err := probe.Execute(context.Background(), probeBatch)
+	if err != nil {
+		t.Fatalf("probe execute: %v", err)
+	}
+
+	result := probe.FlushUnmatched(probeSchema)
+	if result == nil {
+		t.Fatal("expected non-nil FlushUnmatched result")
+	}
+
+	// 3 unmatched rows: id=2 (batch0), id=3 (batch1), id=4 (batch1)
+	// A rowIdx-only dedup would incorrectly keep only 2 rows.
+	if result.Len != 3 {
+		t.Fatalf("expected 3 unmatched build rows across 2 batches, got %d", result.Len)
+	}
+}
