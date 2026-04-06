@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -63,11 +64,10 @@ func sendRPC(t *testing.T, in io.Writer, method string, params any, id int) {
 	fmt.Fprintf(in, "%s\n", data)
 }
 
-func readResponse(t *testing.T, out *bytes.Buffer) jsonRPCResponse {
+func readResponse(t *testing.T, r *bufio.Reader) jsonRPCResponse {
 	t.Helper()
-	// Read until we get a complete line
 	for {
-		line, err := out.ReadString('\n')
+		line, err := r.ReadString('\n')
 		if err != nil {
 			t.Fatalf("reading response: %v", err)
 		}
@@ -83,25 +83,30 @@ func readResponse(t *testing.T, out *bytes.Buffer) jsonRPCResponse {
 	}
 }
 
+// runStdio starts ServeStdio in a goroutine with an io.Pipe for output,
+// returning a bufio.Reader that safely reads server responses without races.
+func runStdio(t *testing.T, srv *Server, in io.Reader) *bufio.Reader {
+	t.Helper()
+	pr, pw := io.Pipe()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	t.Cleanup(func() { pw.Close() })
+	go srv.ServeStdio(ctx, in, pw)
+	return bufio.NewReader(pr)
+}
+
 func TestInitialize(t *testing.T) {
 	db := setupTestDB(t)
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "initialize", map[string]any{
 		"protocolVersion": "2024-11-05",
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "test", "version": "1.0"},
 	}, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error.Message)
@@ -127,16 +132,9 @@ func TestToolsList(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "tools/list", nil, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error.Message)
@@ -172,18 +170,11 @@ func TestToolListTables(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "tools/call", map[string]any{
 		"name": "list_tables",
 	}, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error.Message)
@@ -206,19 +197,12 @@ func TestToolDescribeTable(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "tools/call", map[string]any{
 		"name":      "describe_table",
 		"arguments": map[string]any{"table": "flow_logs"},
 	}, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error.Message)
@@ -256,19 +240,12 @@ func TestToolDescribeTableNotFound(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "tools/call", map[string]any{
 		"name":      "describe_table",
 		"arguments": map[string]any{"table": "nonexistent"},
 	}, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	data, _ := json.Marshal(resp.Result)
 	var result callToolResult
@@ -284,19 +261,12 @@ func TestToolQuery(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "tools/call", map[string]any{
 		"name":      "query",
 		"arguments": map[string]any{"sql": "SHOW TABLES"},
 	}, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error.Message)
@@ -333,20 +303,13 @@ func TestToolQueryLimit(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	// Query with an explicit limit
 	sendRPC(t, in, "tools/call", map[string]any{
 		"name":      "query",
 		"arguments": map[string]any{"sql": "SHOW TABLES", "limit": 5},
 	}, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error.Message)
@@ -366,19 +329,12 @@ func TestToolExplain(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "tools/call", map[string]any{
 		"name":      "explain",
 		"arguments": map[string]any{"sql": "SELECT * FROM flow_logs"},
 	}, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error.Message)
@@ -401,16 +357,9 @@ func TestPing(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "ping", nil, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %v", resp.Error.Message)
@@ -422,16 +371,9 @@ func TestUnknownMethod(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "nonexistent/method", nil, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	if resp.Error == nil {
 		t.Fatal("expected error for unknown method")
@@ -532,18 +474,11 @@ func TestToolUnknown(t *testing.T) {
 	srv := NewServer(db, nil)
 
 	in := &bytes.Buffer{}
-	out := &bytes.Buffer{}
-
 	sendRPC(t, in, "tools/call", map[string]any{
 		"name": "nonexistent_tool",
 	}, 1)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	go srv.ServeStdio(ctx, in, out)
-	time.Sleep(100 * time.Millisecond)
-
+	out := runStdio(t, srv, in)
 	resp := readResponse(t, out)
 	data, _ := json.Marshal(resp.Result)
 	var result callToolResult
