@@ -24,7 +24,9 @@ RUNS="${BENCHMARK_RUNS:-3}"
 GENERATE="${GENERATE_DATA:-0}"
 SKIP="${SKIP_QUERIES:-}"
 TIMEOUT="${QUERY_TIMEOUT:-10m}"
-DATA_PREFIX="${DATA_PREFIX-tables/}"
+# DATA_PREFIX intentionally left unset here so we can distinguish
+# "caller explicitly set it" from "use the default". The default ("tables/")
+# is applied later, only when no profile is in use.
 BENCH_TYPE="${BENCHMARK_TYPE:-tpch}"
 PROFILE="${BENCHMARK_PROFILE:-}"
 
@@ -101,6 +103,18 @@ fi
 PROFILE_FLAG=()
 [ -n "$PROFILE" ] && PROFILE_FLAG=(--config="${PROFILE}")
 
+# Decide whether to pass --data-prefix on the CLI:
+#   - If DATA_PREFIX is explicitly set in the environment, honor it (overrides profile).
+#   - Else if no profile is set, fall back to the legacy default "tables/".
+#   - Else (profile set, env unset): omit the flag and let the profile's
+#     data_prefix win — including the empty-string case for SF100.
+DATA_PREFIX_FLAG=()
+if [ -n "${DATA_PREFIX+x}" ]; then
+  DATA_PREFIX_FLAG=(--data-prefix="${DATA_PREFIX}")
+elif [ -z "$PROFILE" ]; then
+  DATA_PREFIX_FLAG=(--data-prefix="tables/")
+fi
+
 if [ "$MODE" = "standalone" ]; then
   log "Running ${BENCH_LABEL} SF${SCALE} standalone benchmark (${RUNS} runs)..."
 
@@ -112,7 +126,7 @@ if [ "$MODE" = "standalone" ]; then
     "${PROFILE_FLAG[@]}" \
     --scale="${SCALE}" \
     --runs="${RUNS}" \
-    --data-prefix="${DATA_PREFIX}" \
+    "${DATA_PREFIX_FLAG[@]}" \
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
@@ -139,7 +153,7 @@ elif [ "$MODE" = "distributed" ]; then
     --scale="${SCALE}" \
     --runs="${RUNS}" \
     --workers="${WORKER_COUNT}" \
-    --data-prefix="${DATA_PREFIX}" \
+    "${DATA_PREFIX_FLAG[@]}" \
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
