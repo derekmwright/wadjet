@@ -294,21 +294,18 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		planner.SpillDir = e.spillDir
 	}
 
-	// Scan-split pipeline mode: read pre-scanned data from distributed scan
-	// tasks and inject as materialized inputs. The physical planner will use
-	// BatchSource instead of scanning from the object store.
+	// Scan-split pipeline mode: create lazy streaming sources for pre-scanned
+	// build-cache files. Each source downloads and parses files one at a time,
+	// yielding batches on demand. This avoids materializing the entire build
+	// side into memory — the hash join's grace spill handles memory pressure.
 	if len(task.PreScannedInputs) > 0 {
-		materializedInputs := make(map[string][]*batch.RecordBatch, len(task.PreScannedInputs))
+		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs))
 		for tableName, files := range task.PreScannedInputs {
-			batches, readErr := e.readInputFilesBatches(ctx, bucket, files, nil)
-			if readErr != nil {
-				return fmt.Errorf("reading pre-scanned input for %s: %w", tableName, readErr)
-			}
-			materializedInputs[tableName] = batches
-			e.logger.Debug("loaded pre-scanned input",
-				"table", tableName, "files", len(files), "batches", len(batches))
+			streamingSources[tableName] = newCachedFileStreamSource(e, bucket, files)
+			e.logger.Debug("streaming pre-scanned input",
+				"table", tableName, "files", len(files))
 		}
-		planner.MaterializedInputs = materializedInputs
+		planner.StreamingSources = streamingSources
 	}
 
 	// Probe-split pipeline mode: restrict scan files for the probe table.
