@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"sync"
@@ -22,7 +23,9 @@ const buildCacheThreshold = 2 * 1024 * 1024 * 1024 // 2 GB
 // Partitioning the pre-scan across multiple tasks prevents a single worker from
 // accumulating all rows of a large table (e.g., partsupp ~11.8GB) in RAM before
 // writing to S3. Each task writes one .wshf cache file to a group-specific prefix.
-const buildCacheGroupSize = 8
+// Declared as var (not const) so regression tests can lower it to force multiple
+// groups on tiny SF0.01 tables and exercise the file-splitting correctness path.
+var buildCacheGroupSize = 8
 
 // buildCacheTimeout is the maximum time to wait for a single build cache
 // pre-scan to complete. If exceeded, the coordinator falls back to per-worker
@@ -155,8 +158,16 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 
 	// Restrict the scan to only the assigned file subset so each group task
 	// reads a bounded slice of the table rather than the full dataset.
+	//
+	// CRITICAL: key by stage.TableName, NOT stage.ScanAlias. The pre-scan SQL
+	// is "SELECT * FROM <TableName>" which, when re-planned on the worker, has
+	// exactly one scan with alias == TableName (no ":N" suffix). If the original
+	// query had duplicate scans of this table (e.g. Q02's correlated subquery:
+	// ScanAlias="partsupp:1"), keying the filter by ScanAlias would miss the
+	// worker's lookup and every group task would silently scan the full table —
+	// defeating the entire purpose of file-group splitting and OOM'ing at SF100.
 	if fileSubset != nil {
-		task.ScanFileFilter = map[string][]string{stage.ScanAlias: fileSubset}
+		task.ScanFileFilter = map[string][]string{stage.TableName: fileSubset}
 	}
 
 	// Cluster routing
@@ -180,6 +191,8 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 	done := make(chan struct{}, 1)
 	subject := distributed.QueryResultSubject(cacheQueryID)
 	var resultPath string
+	var resultInline []byte
+	var resultRows int64
 	var resultErr string
 	var resultMu sync.Mutex
 
@@ -193,6 +206,8 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 			resultErr = r.Error
 		} else {
 			resultPath = r.ResultPath
+			resultInline = r.InlineData
+			resultRows = r.NumRows
 		}
 		resultMu.Unlock()
 		select {
@@ -222,9 +237,29 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 	if resultErr != "" {
 		return nil, fmt.Errorf("build cache scan failed: %s", resultErr)
 	}
-	if resultPath == "" {
-		// Empty table — no rows to cache. Workers will get an empty scan result.
+	if resultPath != "" {
+		return []string{resultPath}, nil
+	}
+	if resultRows == 0 {
+		// Genuinely empty scan — nothing to cache. Workers will get no rows
+		// from this group; merged cache map correctly reflects that.
 		return nil, nil
 	}
-	return []string{resultPath}, nil
+	if len(resultInline) > 0 {
+		// Worker inlined the result because it fit under inlineResultThreshold
+		// (default 512KB). Without writing it to S3 ourselves, downstream probe-
+		// split workers would have no file to read from and would silently miss
+		// the rows in this group — producing wrong Q02 row counts at SF0.01 and
+		// worse corruption at larger scales. Promote inline data to S3 so the
+		// cache path is always backed by a real file.
+		path := resultPrefix + task.ID + ".wshf"
+		if _, putErr := c.catalog.Store().Put(ctx, c.config.ResultBucket, path,
+			bytes.NewReader(resultInline), int64(len(resultInline)),
+			"application/octet-stream"); putErr != nil {
+			return nil, fmt.Errorf("promoting inline build cache result to S3: %w", putErr)
+		}
+		return []string{path}, nil
+	}
+	// Success, but no path, no inline, no rows — treat as empty.
+	return nil, nil
 }
