@@ -403,27 +403,29 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 // path triggers when scanning very large build tables.
 func (e *Executor) executeBuildCachePreScan(ctx context.Context, task distributed.Task, pipeline *exec.Pipeline, result *distributed.ResultNotification) error {
 	streamSink := newShuffleStreamSink(e.spillDir)
-	if err := streamSink.Init(ctx); err != nil {
-		return fmt.Errorf("init build cache stream sink: %w", err)
-	}
-	// Make sure we always close the file handle and remove the spill file,
-	// even on error paths.
-	spillPath := streamSink.FilePath()
-	defer func() {
-		_ = streamSink.Close()
-		if spillPath != "" {
-			_ = os.Remove(spillPath)
-		}
-	}()
 
 	// Replace CollectSink with the streaming sink. The pipeline doesn't care
 	// what sink it has — it just calls Consume on each batch.
+	//
+	// IMPORTANT: do NOT call streamSink.Init here. Pipeline.Run will call
+	// p.Sink.Init(ctx) itself; calling it twice would create two temp files
+	// (the first one then orphaned and uploaded as a 0-byte blob).
 	pipeline.Sink = streamSink
+
+	// Make sure we always close the file handle and remove the spill file,
+	// even on error paths. spillPath is captured AFTER Run (after Init).
+	defer func() {
+		_ = streamSink.Close()
+		if path := streamSink.FilePath(); path != "" {
+			_ = os.Remove(path)
+		}
+	}()
 
 	if err := pipeline.Run(ctx); err != nil {
 		return fmt.Errorf("build cache pre-scan pipeline: %w", err)
 	}
 
+	spillPath := streamSink.FilePath()
 	totalRows := streamSink.NumRows()
 	e.logger.Info("build cache pre-scan completed",
 		"task_id", task.ID,
@@ -437,6 +439,9 @@ func (e *Executor) executeBuildCachePreScan(ctx context.Context, task distribute
 		// Empty table: nothing to upload. Coordinator handles the no-rows case.
 		return nil
 	}
+	if spillPath == "" {
+		return fmt.Errorf("build cache pre-scan reported %d rows but no spill file path", totalRows)
+	}
 
 	// Re-open the spill file for upload (the writer keeps an fd, but the
 	// streaming Put needs its own reader positioned at the start).
@@ -448,6 +453,9 @@ func (e *Executor) executeBuildCachePreScan(ctx context.Context, task distribute
 	fi, err := f.Stat()
 	if err != nil {
 		return fmt.Errorf("stat spill file: %w", err)
+	}
+	if fi.Size() == 0 {
+		return fmt.Errorf("build cache pre-scan reported %d rows but spill file is empty", totalRows)
 	}
 	resultPath := task.ResultPrefix + task.ID + ".wshf"
 	if _, err := e.store.Put(ctx, task.ResultBucket, resultPath, f, fi.Size(), "application/octet-stream"); err != nil {
