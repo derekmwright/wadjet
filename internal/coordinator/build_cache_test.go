@@ -178,12 +178,6 @@ func TestBuildCacheTaskHasCorrectFields(t *testing.T) {
 // TestPreScanBuildTablesInjectableThreshold verifies that BuildCacheThreshold
 // on the Coordinator overrides the default 2GB constant, allowing the pre-scan
 // path to trigger on small datasets (e.g., SF1 with a 1MB threshold).
-//
-// LargeBuildScans only returns scans when there are 2 or more (a single large
-// build table is handled fine by per-worker scan + spillable hash join, and
-// the cache adds spill+S3 round-trip overhead with no benefit), so this test
-// uses two large build tables — orders and customer — to also satisfy that
-// minimum.
 func TestPreScanBuildTablesInjectableThreshold(t *testing.T) {
 	_, coord, _ := setupDistributed(t)
 
@@ -195,35 +189,17 @@ func TestPreScanBuildTablesInjectableThreshold(t *testing.T) {
 			EstimatedBytes: 50 * 1024 * 1024, ScanFiles: []string{"l1.parquet"}},
 		{ID: "s2", Type: "scan", ScanAlias: "orders", TableName: "orders",
 			EstimatedBytes: 5 * 1024 * 1024, ScanFiles: []string{"o1.parquet"}},
-		{ID: "s3", Type: "scan", ScanAlias: "customer", TableName: "customer",
-			EstimatedBytes: 4 * 1024 * 1024, ScanFiles: []string{"c1.parquet"}},
-		{ID: "s4", Type: "scan", ScanAlias: "part", TableName: "part",
+		{ID: "s3", Type: "scan", ScanAlias: "part", TableName: "part",
 			EstimatedBytes: 500 * 1024, ScanFiles: []string{"p1.parquet"}},
 	}
 
-	// With 1MB threshold, orders (5MB) and customer (4MB) should be candidates,
-	// part (500KB) should not, lineitem (probe) should not.
+	// With 1MB threshold, orders (5MB) should be a candidate but part (500KB) should not.
 	large := physical.LargeBuildScans(stages, "lineitem", coord.BuildCacheThreshold)
-	if len(large) != 2 {
-		t.Fatalf("expected 2 large build scans with 1MB threshold, got %d", len(large))
+	if len(large) != 1 {
+		t.Fatalf("expected 1 large build scan with 1MB threshold, got %d", len(large))
 	}
-	gotAliases := map[string]bool{}
-	for _, s := range large {
-		gotAliases[s.ScanAlias] = true
-	}
-	if !gotAliases["orders"] || !gotAliases["customer"] {
-		t.Errorf("expected large scans to include 'orders' and 'customer', got %v", gotAliases)
-	}
-
-	// Single-large-build queries deliberately skip the cache (returns nil).
-	stagesOneLarge := []physical.Stage{
-		{ID: "s1", Type: "scan", ScanAlias: "lineitem", TableName: "lineitem",
-			EstimatedBytes: 50 * 1024 * 1024, ScanFiles: []string{"l1.parquet"}},
-		{ID: "s2", Type: "scan", ScanAlias: "orders", TableName: "orders",
-			EstimatedBytes: 5 * 1024 * 1024, ScanFiles: []string{"o1.parquet"}},
-	}
-	if got := physical.LargeBuildScans(stagesOneLarge, "lineitem", coord.BuildCacheThreshold); got != nil {
-		t.Errorf("expected nil for single large build, got %d scans", len(got))
+	if large[0].ScanAlias != "orders" {
+		t.Errorf("expected large scan alias 'orders', got %q", large[0].ScanAlias)
 	}
 
 	// Verify lineitem (probe table) is never included regardless of size.
