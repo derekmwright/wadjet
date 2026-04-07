@@ -1004,6 +1004,14 @@ func EstimateCost(stages []Stage, node *logical.Node) QueryCost {
 	return cost
 }
 
+// ProbeSplitMinBytes is the minimum size of the largest scan required to
+// activate probe-split. Below this, the orchestration overhead exceeds the
+// parallelism benefit. Exported so tests can lower it to exercise the
+// distributed path on tiny datasets — otherwise every test silently runs
+// the single-worker path and distributed-only bugs (like the SF100 build
+// cache Q02 regression) never get caught.
+var ProbeSplitMinBytes int64 = 64 * 1024 * 1024
+
 // CanProbeSplit returns the scan alias and file list for probe-split pipeline
 // routing. Probe-split distributes the dominant probe table's files across
 // workers while each worker scans build tables in full. This enables parallel
@@ -1040,7 +1048,7 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 	if bestBytes > 1<<30 {
 		minFiles = workerCount
 	}
-	if bestAlias == "" || len(bestFiles) < minFiles || bestBytes < 64*1024*1024 {
+	if bestAlias == "" || len(bestFiles) < minFiles || bestBytes < ProbeSplitMinBytes {
 		return "", nil, false
 	}
 
@@ -4171,7 +4179,13 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 	return src
 }
 
-// catalogScanSource adapts the scan.Scanner to exec.Source
+// catalogScanSource adapts the scan.Scanner to exec.Source.
+//
+// Note: Pipeline.runParallel calls Source.Next() concurrently from multiple
+// worker goroutines on a single source instance, so replayIdx must be atomic.
+// Previously it was a plain int and the race detector caught it producing
+// non-deterministic Q02 row counts (4/5/6 rows depending on which goroutine
+// won the increment).
 type catalogScanSource struct {
 	catalog         *catalog.Catalog
 	tableName       string
@@ -4181,11 +4195,11 @@ type catalogScanSource struct {
 	allowedFiles    []string // probe-split: only scan these files (nil = all)
 	inner           exec.Source
 	cache           *scanCached           // non-nil when this table is scanned multiple times
-	replayIdx       int                   // position in cache replay
+	replayIdx       atomic.Int64          // position in cache replay (atomic for parallel pipeline)
 	isReplay        bool                  // true when reading from cache instead of scanning
-	bloomFilter     *exec.BloomScanFilter   // bloom filter pushdown from hash join build side
-	dynamicFilter   []exec.DynamicRange     // dynamic min/max range filter from hash join build side
-	rowLimit        int64                   // LIMIT pushdown: enables lazy file downloading (0 = eager)
+	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
+	dynamicFilter   []exec.DynamicRange   // dynamic min/max range filter from hash join build side
+	rowLimit        int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
 }
 
 // SetBloomFilter attaches a bloom filter for scan-level row group pruning.
@@ -4205,7 +4219,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 			s.cache.mu.Unlock()
 			// Scan already complete — replay from cache.
 			s.isReplay = true
-			s.replayIdx = 0
+			s.replayIdx.Store(0)
 			return nil
 		}
 		if s.cache.ready != nil {
@@ -4217,7 +4231,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 				return ctx.Err()
 			}
 			s.isReplay = true
-			s.replayIdx = 0
+			s.replayIdx.Store(0)
 			return nil
 		}
 		// First scan claims the cache.
@@ -4246,13 +4260,14 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 
 func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if s.isReplay {
-		// cache.batches is stable (read-only) after cache.done=true, and
-		// replayIdx is per-source — no mutex needed for replay reads.
-		if s.replayIdx >= len(s.cache.batches) {
+		// cache.batches is stable (read-only) after cache.done=true.
+		// replayIdx is atomic because Pipeline.runParallel may call Next()
+		// from multiple worker goroutines on this same source instance.
+		idx := s.replayIdx.Add(1) - 1
+		if idx >= int64(len(s.cache.batches)) {
 			return nil, nil
 		}
-		cached := s.cache.batches[s.replayIdx]
-		s.replayIdx++
+		cached := s.cache.batches[idx]
 		// Return a shallow copy: shared column vectors (read-only), independent Sel.
 		// This prevents downstream operators from corrupting cached data via in-place
 		// Sel mutation.

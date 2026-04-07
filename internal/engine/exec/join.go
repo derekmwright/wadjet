@@ -79,10 +79,10 @@ type HashJoin struct {
 
 	// Pre-resolved column indices and reusable key buffer for typed serialization.
 	// Avoids fmt.Sprint + GetValue boxing on every row.
-	keyBuf       []byte
-	buildKeyIdx  []int // column indices for RightKeys in build batches
-	probeKeyIdx  []int // column indices for LeftKeys in probe batches
-	probeResolved bool
+	keyBuf        []byte
+	buildKeyIdx   []int // column indices for RightKeys in build batches
+	probeKeyIdx   []int // column indices for LeftKeys in probe batches
+	probeResolved atomic.Bool
 
 	// SemiAntiKeyOnly enables a lightweight build for semi/anti joins that have
 	// no SemiAntiFilter. Only the key index and bloom filter are built — batch
@@ -476,13 +476,7 @@ func (p *HashJoinProbe) existsInBuild(in *batch.RecordBatch, row int) bool {
 		return ok
 	}
 	if h.useDualIntKey {
-		if !h.probeResolved {
-			h.probeKeyIdx = make([]int, len(h.LeftKeys))
-			for i, col := range h.LeftKeys {
-				h.probeKeyIdx[i] = in.ColumnIndex(col)
-			}
-			h.probeResolved = true
-		}
+		h.resolveProbeKeyIdx(in)
 		col0, col1 := in.Columns[h.probeKeyIdx[0]], in.Columns[h.probeKeyIdx[1]]
 		a, b, ok := dualIntKeyFromVectors(col0, col1, row)
 		if !ok {
@@ -529,13 +523,7 @@ func (p *HashJoinProbe) lookupBuild(in *batch.RecordBatch, row int) []buildRef {
 		return p.lookupBuf
 	}
 	if h.useDualIntKey {
-		if !h.probeResolved {
-			h.probeKeyIdx = make([]int, len(h.LeftKeys))
-			for i, col := range h.LeftKeys {
-				h.probeKeyIdx[i] = in.ColumnIndex(col)
-			}
-			h.probeResolved = true
-		}
+		h.resolveProbeKeyIdx(in)
 		col0, col1 := in.Columns[h.probeKeyIdx[0]], in.Columns[h.probeKeyIdx[1]]
 		a, b, ok := dualIntKeyFromVectors(col0, col1, row)
 		if !ok {
@@ -2031,7 +2019,7 @@ func (h *HashJoin) FixKeyAssignment() {
 		if leftInBuild && !rightInBuild {
 			h.LeftKeys[i], h.RightKeys[i] = h.RightKeys[i], h.LeftKeys[i]
 			needsRebuild = true
-			h.probeResolved = false // force re-resolution of probe key indices
+			h.probeResolved.Store(false) // force re-resolution of probe key indices
 		}
 	}
 
@@ -2146,22 +2134,23 @@ func (h *HashJoin) buildKeyFromBatch(b *batch.RecordBatch, rowIdx int) {
 }
 
 // resolveProbeKeyIdx lazily resolves probe-side column indices.
-// Safe for concurrent calls: probeResolved is set after probeKeyIdx is fully
-// populated, and repeated resolution produces identical results.
+// Safe for concurrent calls: probeResolved (atomic.Bool) provides the
+// happens-before edge for the writes to probeKeyIdx, so workers in the
+// parallel pipeline can hit this lazy path concurrently without racing.
 func (h *HashJoin) resolveProbeKeyIdx(b *batch.RecordBatch) {
-	if h.probeResolved {
+	if h.probeResolved.Load() {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.probeResolved {
+	if h.probeResolved.Load() {
 		return // another goroutine resolved while we waited
 	}
 	h.probeKeyIdx = make([]int, len(h.LeftKeys))
 	for i, col := range h.LeftKeys {
 		h.probeKeyIdx[i] = b.ColumnIndex(col)
 	}
-	h.probeResolved = true
+	h.probeResolved.Store(true)
 }
 
 // buildProbeKey fills p.keyBuf with the serialized probe key for a row.
@@ -2805,13 +2794,7 @@ func (p *HashJoinProbe) executeSemiAntiJoin(in *batch.RecordBatch) (*batch.Recor
 	// on type/null/bloom/semi-vs-anti. For Q21's 3 semi/anti joins at SF10,
 	// this eliminates ~600K closure calls per batch.
 	if h.useIntKey && !hasFilter {
-		if !h.probeResolved {
-			h.probeKeyIdx = make([]int, len(h.LeftKeys))
-			for i, col := range h.LeftKeys {
-				h.probeKeyIdx[i] = in.ColumnIndex(col)
-			}
-			h.probeResolved = true
-		}
+		h.resolveProbeKeyIdx(in)
 		keyIdx := h.probeKeyIdx[0]
 		if keyIdx >= 0 {
 			keyCol := in.Columns[keyIdx]
