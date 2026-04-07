@@ -356,6 +356,16 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		return nil
 	}
 
+	// Build-cache pre-scan tasks (StageID == "build-cache-scan") read whole
+	// tables that may not fit in worker memory. Replace the default CollectSink
+	// with a streaming shuffle sink that writes each batch to a spill file as
+	// it arrives, so memory stays bounded by one batch instead of growing to
+	// the full table size. Without this, scanning partsupp at SF100 (~12GB)
+	// peaks at ~24GB during serializeBatches and OOM-kills the worker.
+	if task.StageID == "build-cache-scan" && e.spillDir != "" {
+		return e.executeBuildCachePreScan(ctx, task, pipeline, result)
+	}
+
 	// Execute the pipeline — same path as standalone mode
 	if err := pipeline.Run(ctx); err != nil {
 		return fmt.Errorf("pipeline execution: %w", err)
@@ -385,6 +395,67 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	}
 
 	return e.writeBatchResult(ctx, task, batches, result)
+}
+
+// executeBuildCachePreScan runs a build-cache pre-scan pipeline with a
+// streaming sink that writes batches to a local spill file as they arrive,
+// then uploads the file to S3. Avoids the OOM that the default CollectSink
+// path triggers when scanning very large build tables.
+func (e *Executor) executeBuildCachePreScan(ctx context.Context, task distributed.Task, pipeline *exec.Pipeline, result *distributed.ResultNotification) error {
+	streamSink := newShuffleStreamSink(e.spillDir)
+	if err := streamSink.Init(ctx); err != nil {
+		return fmt.Errorf("init build cache stream sink: %w", err)
+	}
+	// Make sure we always close the file handle and remove the spill file,
+	// even on error paths.
+	spillPath := streamSink.FilePath()
+	defer func() {
+		_ = streamSink.Close()
+		if spillPath != "" {
+			_ = os.Remove(spillPath)
+		}
+	}()
+
+	// Replace CollectSink with the streaming sink. The pipeline doesn't care
+	// what sink it has — it just calls Consume on each batch.
+	pipeline.Sink = streamSink
+
+	if err := pipeline.Run(ctx); err != nil {
+		return fmt.Errorf("build cache pre-scan pipeline: %w", err)
+	}
+
+	totalRows := streamSink.NumRows()
+	e.logger.Info("build cache pre-scan completed",
+		"task_id", task.ID,
+		"table_sql", task.SQLText,
+		"rows", totalRows,
+		"spill_file", spillPath,
+	)
+
+	result.NumRows = totalRows
+	if totalRows == 0 {
+		// Empty table: nothing to upload. Coordinator handles the no-rows case.
+		return nil
+	}
+
+	// Re-open the spill file for upload (the writer keeps an fd, but the
+	// streaming Put needs its own reader positioned at the start).
+	f, err := os.Open(spillPath)
+	if err != nil {
+		return fmt.Errorf("opening spill file for upload: %w", err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat spill file: %w", err)
+	}
+	resultPath := task.ResultPrefix + task.ID + ".wshf"
+	if _, err := e.store.Put(ctx, task.ResultBucket, resultPath, f, fi.Size(), "application/octet-stream"); err != nil {
+		return fmt.Errorf("uploading build cache result to S3: %w", err)
+	}
+	result.ResultPath = resultPath
+	result.SizeBytes = fi.Size()
+	return nil
 }
 
 // getFileData retrieves raw Parquet bytes with 3-tier caching:
