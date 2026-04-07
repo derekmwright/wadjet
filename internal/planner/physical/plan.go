@@ -4279,38 +4279,51 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 		copy(clone.Columns, cached.Columns)
 		return clone, nil
 	}
-	// inner.Next() is thread-safe for channel-based scan sources
-	b, err := s.inner.Next(ctx)
-	if err != nil {
-		return nil, err
-	}
+
+	// When this scan is populating a shared cache, the entire pull-and-cache
+	// step must run under cache.mu — otherwise the parallel pipeline races
+	// where one worker pulls nil and sets cache.done=true while OTHER workers
+	// still hold real batches that they've pulled but not yet appended. Those
+	// late workers see done==true and skip the append, silently dropping
+	// rows that the second (replay) scanner of this same table needs. This
+	// surfaced as Q02's intermittent 4-rows-instead-of-5 result at SF0.01.
 	if s.cache != nil {
 		s.cache.mu.Lock()
-		if !s.cache.done {
-			if b == nil {
-				s.cache.done = true
-				if s.cache.ready != nil {
-					close(s.cache.ready)
-				}
-			} else {
-				// Detach from pool so the pipeline's b.Release() is a no-op.
-				// Without this, the pool recycles the batch and the scanner
-				// overwrites the Vectors that the cache references.
-				b.Detach()
-				// Cache a shallow copy so the first consumer's operators don't
-				// corrupt cached data by setting Sel in-place.
-				cached := &batch.RecordBatch{
-					Schema:  b.Schema,
-					Columns: make([]*batch.Vector, len(b.Columns)),
-					Len:     b.Len,
-				}
-				copy(cached.Columns, b.Columns)
-				s.cache.batches = append(s.cache.batches, cached)
-			}
+		defer s.cache.mu.Unlock()
+		if s.cache.done {
+			// Another worker finished the scan while we were waiting on the
+			// lock. Tell our caller "no more batches" so they fall through.
+			return nil, nil
 		}
-		s.cache.mu.Unlock()
+		b, err := s.inner.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			s.cache.done = true
+			if s.cache.ready != nil {
+				close(s.cache.ready)
+			}
+			return nil, nil
+		}
+		// Detach from pool so the pipeline's b.Release() is a no-op.
+		// Without this, the pool recycles the batch and the scanner
+		// overwrites the Vectors that the cache references.
+		b.Detach()
+		// Cache a shallow copy so the first consumer's operators don't
+		// corrupt cached data by setting Sel in-place.
+		cached := &batch.RecordBatch{
+			Schema:  b.Schema,
+			Columns: make([]*batch.Vector, len(b.Columns)),
+			Len:     b.Len,
+		}
+		copy(cached.Columns, b.Columns)
+		s.cache.batches = append(s.cache.batches, cached)
+		return b, nil
 	}
-	return b, err
+
+	// No cache: inner.Next() is thread-safe for channel-based scan sources.
+	return s.inner.Next(ctx)
 }
 
 func (s *catalogScanSource) Close() error {
