@@ -54,17 +54,20 @@ type VecExpr interface {
 
 // ColRef reads a column value from the batch.
 // Caches the column index and type after first resolution for zero-allocation
-// reads on numeric types.
+// reads on numeric types. The cache is guarded by sync.Once so concurrent
+// callers (parallel pipeline workers sharing this *ColRef via captured
+// expression closures) don't race on the resolution writes.
 type ColRef struct {
 	Name        string
-	resolved    bool
+	resolveOnce sync.Once
 	idx         int
 	typ         batch.TypeID
 	structField string // for ROW field access (e.g., "person.name" → structField="name")
 }
 
-func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
-	if !e.resolved {
+// resolve performs first-time column lookup. Idempotent under sync.Once.
+func (e *ColRef) resolve(b *batch.RecordBatch) {
+	e.resolveOnce.Do(func() {
 		e.idx = b.ColumnIndex(e.Name)
 		if e.idx < 0 && strings.Contains(e.Name, ".") {
 			parts := strings.SplitN(e.Name, ".", 2)
@@ -82,8 +85,11 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 		if e.idx >= 0 {
 			e.typ = b.Columns[e.idx].Type
 		}
-		e.resolved = true
-	}
+	})
+}
+
+func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
+	e.resolve(b)
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return nil
 	}
@@ -144,17 +150,7 @@ func (e *ColRef) Eval(b *batch.RecordBatch, row int) any {
 // Uses cached column type to dispatch directly to the typed data slice,
 // avoiding the extra function call and redundant type switch in GetNumericFloat64.
 func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
-	if !e.resolved {
-		e.idx = b.ColumnIndex(e.Name)
-		if e.idx < 0 && strings.Contains(e.Name, ".") {
-			parts := strings.SplitN(e.Name, ".", 2)
-			e.idx = b.ColumnIndex(parts[1])
-		}
-		if e.idx >= 0 {
-			e.typ = b.Columns[e.idx].Type
-		}
-		e.resolved = true
-	}
+	e.resolve(b)
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return 0, false
 	}
@@ -180,17 +176,7 @@ func (e *ColRef) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
 
 // EvalFloat64Vec evaluates the column for all rows [0, n) into dst.
 func (e *ColRef) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool {
-	if !e.resolved {
-		e.idx = b.ColumnIndex(e.Name)
-		if e.idx < 0 && strings.Contains(e.Name, ".") {
-			parts := strings.SplitN(e.Name, ".", 2)
-			e.idx = b.ColumnIndex(parts[1])
-		}
-		if e.idx >= 0 {
-			e.typ = b.Columns[e.idx].Type
-		}
-		e.resolved = true
-	}
+	e.resolve(b)
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		for i := 0; i < n; i++ {
 			dst[i] = 0
@@ -229,17 +215,7 @@ func (e *ColRef) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool
 
 // EvalString reads the column value as string without boxing.
 func (e *ColRef) EvalString(b *batch.RecordBatch, row int) (string, bool) {
-	if !e.resolved {
-		e.idx = b.ColumnIndex(e.Name)
-		if e.idx < 0 && strings.Contains(e.Name, ".") {
-			parts := strings.SplitN(e.Name, ".", 2)
-			e.idx = b.ColumnIndex(parts[1])
-		}
-		if e.idx >= 0 {
-			e.typ = b.Columns[e.idx].Type
-		}
-		e.resolved = true
-	}
+	e.resolve(b)
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return "", false
 	}
@@ -248,17 +224,7 @@ func (e *ColRef) EvalString(b *batch.RecordBatch, row int) (string, bool) {
 
 // EvalInt64 reads the column value as int64 without boxing.
 func (e *ColRef) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
-	if !e.resolved {
-		e.idx = b.ColumnIndex(e.Name)
-		if e.idx < 0 && strings.Contains(e.Name, ".") {
-			parts := strings.SplitN(e.Name, ".", 2)
-			e.idx = b.ColumnIndex(parts[1])
-		}
-		if e.idx >= 0 {
-			e.typ = b.Columns[e.idx].Type
-		}
-		e.resolved = true
-	}
+	e.resolve(b)
 	if e.idx < 0 || e.idx >= len(b.Columns) {
 		return 0, false
 	}
@@ -993,42 +959,53 @@ func (e *ArrayLitExpr) Eval(b *batch.RecordBatch, row int) any {
 }
 
 // FuncCall represents a scalar function call.
+//
+// Note: this struct holds NO per-call mutable state. A previous version cached
+// an args buffer on the receiver to avoid per-call allocation, but that was
+// unsafe under parallel pipeline execution: aggPreProject closures (and other
+// wrapped-expression paths) capture the same *FuncCall by pointer rather than
+// cloning it per worker, so concurrent goroutines stomped on the shared args
+// buffer and produced non-deterministic Q02 row counts at SF0.01 (and worse
+// at SF100). The fn / vecFn lookup caches are guarded by sync.Once so concurrent
+// first-time lookups don't race either.
 type FuncCall struct {
 	Name string
 	Args []Expr
-	args []any          // pre-allocated args buffer (avoids alloc per call)
-	fn   ScalarFunc     // cached function pointer (avoids RWMutex per row)
-	vecFn VecScalarFunc // cached vectorized function (nil until first lookup)
-	vecResolved bool    // true after first vectorized lookup
+
+	fnOnce sync.Once
+	fn     ScalarFunc
+
+	vecOnce sync.Once
+	vecFn   VecScalarFunc
 }
 
 func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
-	// Lazily allocate args buffer once
-	if e.args == nil {
-		e.args = make([]any, len(e.Args))
-	}
+	// Allocate args on every call so concurrent goroutines sharing this
+	// *FuncCall don't stomp on each other. For small N (the common case)
+	// the Go compiler routinely stack-allocates this slice, so the cost
+	// vs the old per-receiver cache is negligible.
+	args := make([]any, len(e.Args))
 	for i, a := range e.Args {
-		e.args[i] = a.Eval(b, row)
+		args[i] = a.Eval(b, row)
 	}
 	// Cache function pointer to avoid RWMutex contention on every row.
-	// The registry is read-only during query execution, so this is safe.
-	if e.fn == nil {
+	// sync.Once ensures concurrent first-time lookups don't race.
+	e.fnOnce.Do(func() {
 		e.fn = DefaultRegistry.Lookup(e.Name)
-		if e.fn == nil {
-			return nil
-		}
+	})
+	if e.fn == nil {
+		return nil
 	}
-	return e.fn(e.args)
+	return e.fn(args)
 }
 
 // EvalVec evaluates the function for an entire batch, writing results to out.
 // Falls back to per-row Eval if no vectorized implementation exists or if
 // argument types can't be resolved to column vectors.
 func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
-	if !e.vecResolved {
+	e.vecOnce.Do(func() {
 		e.vecFn = DefaultRegistry.LookupVec(e.Name)
-		e.vecResolved = true
-	}
+	})
 	if e.vecFn == nil {
 		for i := 0; i < n; i++ {
 			out.SetValue(i, e.Eval(b, i))
@@ -1042,9 +1019,7 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 	for i, arg := range e.Args {
 		switch a := arg.(type) {
 		case *ColRef:
-			if !a.resolved {
-				a.Eval(b, 0) // force column index resolution
-			}
+			a.resolve(b)
 			if a.idx < 0 || a.idx >= len(b.Columns) {
 				e.evalVecPerRow(b, out, n)
 				return

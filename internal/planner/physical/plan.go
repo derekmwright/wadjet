@@ -1004,6 +1004,14 @@ func EstimateCost(stages []Stage, node *logical.Node) QueryCost {
 	return cost
 }
 
+// ProbeSplitMinBytes is the minimum size of the largest scan required to
+// activate probe-split. Below this, the orchestration overhead exceeds the
+// parallelism benefit. Exported so tests can lower it to exercise the
+// distributed path on tiny datasets — otherwise every test silently runs
+// the single-worker path and distributed-only bugs (like the SF100 build
+// cache Q02 regression) never get caught.
+var ProbeSplitMinBytes int64 = 64 * 1024 * 1024
+
 // CanProbeSplit returns the scan alias and file list for probe-split pipeline
 // routing. Probe-split distributes the dominant probe table's files across
 // workers while each worker scans build tables in full. This enables parallel
@@ -1040,7 +1048,7 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 	if bestBytes > 1<<30 {
 		minFiles = workerCount
 	}
-	if bestAlias == "" || len(bestFiles) < minFiles || bestBytes < 64*1024*1024 {
+	if bestAlias == "" || len(bestFiles) < minFiles || bestBytes < ProbeSplitMinBytes {
 		return "", nil, false
 	}
 
@@ -4171,7 +4179,13 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 	return src
 }
 
-// catalogScanSource adapts the scan.Scanner to exec.Source
+// catalogScanSource adapts the scan.Scanner to exec.Source.
+//
+// Note: Pipeline.runParallel calls Source.Next() concurrently from multiple
+// worker goroutines on a single source instance, so replayIdx must be atomic.
+// Previously it was a plain int and the race detector caught it producing
+// non-deterministic Q02 row counts (4/5/6 rows depending on which goroutine
+// won the increment).
 type catalogScanSource struct {
 	catalog         *catalog.Catalog
 	tableName       string
@@ -4181,11 +4195,11 @@ type catalogScanSource struct {
 	allowedFiles    []string // probe-split: only scan these files (nil = all)
 	inner           exec.Source
 	cache           *scanCached           // non-nil when this table is scanned multiple times
-	replayIdx       int                   // position in cache replay
+	replayIdx       atomic.Int64          // position in cache replay (atomic for parallel pipeline)
 	isReplay        bool                  // true when reading from cache instead of scanning
-	bloomFilter     *exec.BloomScanFilter   // bloom filter pushdown from hash join build side
-	dynamicFilter   []exec.DynamicRange     // dynamic min/max range filter from hash join build side
-	rowLimit        int64                   // LIMIT pushdown: enables lazy file downloading (0 = eager)
+	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
+	dynamicFilter   []exec.DynamicRange   // dynamic min/max range filter from hash join build side
+	rowLimit        int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
 }
 
 // SetBloomFilter attaches a bloom filter for scan-level row group pruning.
@@ -4205,7 +4219,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 			s.cache.mu.Unlock()
 			// Scan already complete — replay from cache.
 			s.isReplay = true
-			s.replayIdx = 0
+			s.replayIdx.Store(0)
 			return nil
 		}
 		if s.cache.ready != nil {
@@ -4217,7 +4231,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 				return ctx.Err()
 			}
 			s.isReplay = true
-			s.replayIdx = 0
+			s.replayIdx.Store(0)
 			return nil
 		}
 		// First scan claims the cache.
@@ -4246,13 +4260,14 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 
 func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
 	if s.isReplay {
-		// cache.batches is stable (read-only) after cache.done=true, and
-		// replayIdx is per-source — no mutex needed for replay reads.
-		if s.replayIdx >= len(s.cache.batches) {
+		// cache.batches is stable (read-only) after cache.done=true.
+		// replayIdx is atomic because Pipeline.runParallel may call Next()
+		// from multiple worker goroutines on this same source instance.
+		idx := s.replayIdx.Add(1) - 1
+		if idx >= int64(len(s.cache.batches)) {
 			return nil, nil
 		}
-		cached := s.cache.batches[s.replayIdx]
-		s.replayIdx++
+		cached := s.cache.batches[idx]
 		// Return a shallow copy: shared column vectors (read-only), independent Sel.
 		// This prevents downstream operators from corrupting cached data via in-place
 		// Sel mutation.
@@ -4264,38 +4279,51 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 		copy(clone.Columns, cached.Columns)
 		return clone, nil
 	}
-	// inner.Next() is thread-safe for channel-based scan sources
-	b, err := s.inner.Next(ctx)
-	if err != nil {
-		return nil, err
-	}
+
+	// When this scan is populating a shared cache, the entire pull-and-cache
+	// step must run under cache.mu — otherwise the parallel pipeline races
+	// where one worker pulls nil and sets cache.done=true while OTHER workers
+	// still hold real batches that they've pulled but not yet appended. Those
+	// late workers see done==true and skip the append, silently dropping
+	// rows that the second (replay) scanner of this same table needs. This
+	// surfaced as Q02's intermittent 4-rows-instead-of-5 result at SF0.01.
 	if s.cache != nil {
 		s.cache.mu.Lock()
-		if !s.cache.done {
-			if b == nil {
-				s.cache.done = true
-				if s.cache.ready != nil {
-					close(s.cache.ready)
-				}
-			} else {
-				// Detach from pool so the pipeline's b.Release() is a no-op.
-				// Without this, the pool recycles the batch and the scanner
-				// overwrites the Vectors that the cache references.
-				b.Detach()
-				// Cache a shallow copy so the first consumer's operators don't
-				// corrupt cached data by setting Sel in-place.
-				cached := &batch.RecordBatch{
-					Schema:  b.Schema,
-					Columns: make([]*batch.Vector, len(b.Columns)),
-					Len:     b.Len,
-				}
-				copy(cached.Columns, b.Columns)
-				s.cache.batches = append(s.cache.batches, cached)
-			}
+		defer s.cache.mu.Unlock()
+		if s.cache.done {
+			// Another worker finished the scan while we were waiting on the
+			// lock. Tell our caller "no more batches" so they fall through.
+			return nil, nil
 		}
-		s.cache.mu.Unlock()
+		b, err := s.inner.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			s.cache.done = true
+			if s.cache.ready != nil {
+				close(s.cache.ready)
+			}
+			return nil, nil
+		}
+		// Detach from pool so the pipeline's b.Release() is a no-op.
+		// Without this, the pool recycles the batch and the scanner
+		// overwrites the Vectors that the cache references.
+		b.Detach()
+		// Cache a shallow copy so the first consumer's operators don't
+		// corrupt cached data by setting Sel in-place.
+		cached := &batch.RecordBatch{
+			Schema:  b.Schema,
+			Columns: make([]*batch.Vector, len(b.Columns)),
+			Len:     b.Len,
+		}
+		copy(cached.Columns, b.Columns)
+		s.cache.batches = append(s.cache.batches, cached)
+		return b, nil
 	}
-	return b, err
+
+	// No cache: inner.Next() is thread-safe for channel-based scan sources.
+	return s.inner.Next(ctx)
 }
 
 func (s *catalogScanSource) Close() error {
@@ -5480,7 +5508,8 @@ type scanSourceInner struct {
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
 
-	cachedReadSchema []parquet.Column // projected schema, computed once
+	cachedReadSchema     []parquet.Column // projected schema, computed once
+	cachedReadSchemaOnce sync.Once        // guards cachedReadSchema for concurrent rgWorker access
 
 	// parallel scan
 	batchCh chan *batch.RecordBatch
@@ -5792,30 +5821,32 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 }
 
 // readSchema returns the column-projected schema for this scan.
+// Multiple rgWorker goroutines call this concurrently for the same source,
+// so the cache is guarded by sync.Once to avoid a data race on the
+// cachedReadSchema field.
 func (inner *scanSourceInner) readSchema() []parquet.Column {
-	if inner.cachedReadSchema != nil {
-		return inner.cachedReadSchema
-	}
-	if len(inner.requiredCols) == 0 {
-		inner.cachedReadSchema = inner.schema
-		return inner.schema
-	}
-	needed := make(map[string]bool, len(inner.requiredCols))
-	for _, c := range inner.requiredCols {
-		needed[c] = true
-	}
-	filtered := make([]parquet.Column, 0, len(inner.requiredCols))
-	for _, col := range inner.schema {
-		if needed[col.Name] {
-			filtered = append(filtered, col)
+	inner.cachedReadSchemaOnce.Do(func() {
+		if len(inner.requiredCols) == 0 {
+			inner.cachedReadSchema = inner.schema
+			return
 		}
-	}
-	if len(filtered) > 0 {
-		inner.cachedReadSchema = filtered
-		return filtered
-	}
-	inner.cachedReadSchema = inner.schema
-	return inner.schema
+		needed := make(map[string]bool, len(inner.requiredCols))
+		for _, c := range inner.requiredCols {
+			needed[c] = true
+		}
+		filtered := make([]parquet.Column, 0, len(inner.requiredCols))
+		for _, col := range inner.schema {
+			if needed[col.Name] {
+				filtered = append(filtered, col)
+			}
+		}
+		if len(filtered) > 0 {
+			inner.cachedReadSchema = filtered
+		} else {
+			inner.cachedReadSchema = inner.schema
+		}
+	})
+	return inner.cachedReadSchema
 }
 
 func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, error) {
