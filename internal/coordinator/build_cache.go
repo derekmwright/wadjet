@@ -12,6 +12,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"golang.org/x/sync/errgroup"
 )
 
 // buildCacheThreshold is the minimum build-side table size (in bytes) that
@@ -92,25 +93,32 @@ func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID stri
 		}
 	}
 
+	// Run all groups in parallel under a shared cancellable context. As soon
+	// as one group fails, errgroup cancels groupCtx so the other in-flight
+	// pre-scans abort instead of running to completion against a query that's
+	// already known to fail. Without this, a Q09 SF100 build cache failure on
+	// one orders group would still pay for the other 8 groups' minutes of S3
+	// scan time before surfacing the error.
 	results := make([]scanResult, len(groups))
-	var wg sync.WaitGroup
-
-	for i, g := range groups {
-		wg.Add(1)
-		go func(idx int, tg tableGroup) {
-			defer wg.Done()
-			files, err := c.preScanOneTable(ctx, parentQueryID, tg.stage, tg.groupIdx, tg.files)
+	g, groupCtx := errgroup.WithContext(ctx)
+	for i, tg := range groups {
+		idx, tg := i, tg
+		g.Go(func() error {
+			files, err := c.preScanOneTable(groupCtx, parentQueryID, tg.stage, tg.groupIdx, tg.files)
 			results[idx] = scanResult{alias: tg.stage.ScanAlias, files: files, err: err}
-		}(i, g)
+			if err != nil {
+				return fmt.Errorf("pre-scanning build table %s: %w", tg.stage.ScanAlias, err)
+			}
+			return nil
+		})
 	}
-	wg.Wait()
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
 
 	// Merge results: collect all output file paths per alias.
 	cacheMap := make(map[string][]string, len(largeBuildScans))
 	for _, r := range results {
-		if r.err != nil {
-			return nil, fmt.Errorf("pre-scanning build table %s: %w", r.alias, r.err)
-		}
 		cacheMap[r.alias] = append(cacheMap[r.alias], r.files...)
 	}
 	for alias, files := range cacheMap {
