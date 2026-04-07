@@ -260,6 +260,8 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 		}
 		return []string{path}, nil
 	}
-	// Success, but no path, no inline, no rows — treat as empty.
-	return nil, nil
+	// NumRows > 0 but neither ResultPath nor InlineData — the worker lost
+	// the data somewhere. Treating this as empty would silently drop rows
+	// from the build cache and produce wrong query results downstream.
+	return nil, fmt.Errorf("build cache scan returned %d rows but no result path or inline data", resultRows)
 }

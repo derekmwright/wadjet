@@ -4196,7 +4196,7 @@ type catalogScanSource struct {
 	inner           exec.Source
 	cache           *scanCached           // non-nil when this table is scanned multiple times
 	replayIdx       atomic.Int64          // position in cache replay (atomic for parallel pipeline)
-	isReplay        bool                  // true when reading from cache instead of scanning
+	isReplay        bool                  // true when reading from cache instead of scanning; written once in Init before runParallel starts, so no synchronization needed
 	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
 	dynamicFilter   []exec.DynamicRange   // dynamic min/max range filter from hash join build side
 	rowLimit        int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
