@@ -5495,7 +5495,8 @@ type scanSourceInner struct {
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
 
-	cachedReadSchema []parquet.Column // projected schema, computed once
+	cachedReadSchema     []parquet.Column // projected schema, computed once
+	cachedReadSchemaOnce sync.Once        // guards cachedReadSchema for concurrent rgWorker access
 
 	// parallel scan
 	batchCh chan *batch.RecordBatch
@@ -5807,30 +5808,32 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 }
 
 // readSchema returns the column-projected schema for this scan.
+// Multiple rgWorker goroutines call this concurrently for the same source,
+// so the cache is guarded by sync.Once to avoid a data race on the
+// cachedReadSchema field.
 func (inner *scanSourceInner) readSchema() []parquet.Column {
-	if inner.cachedReadSchema != nil {
-		return inner.cachedReadSchema
-	}
-	if len(inner.requiredCols) == 0 {
-		inner.cachedReadSchema = inner.schema
-		return inner.schema
-	}
-	needed := make(map[string]bool, len(inner.requiredCols))
-	for _, c := range inner.requiredCols {
-		needed[c] = true
-	}
-	filtered := make([]parquet.Column, 0, len(inner.requiredCols))
-	for _, col := range inner.schema {
-		if needed[col.Name] {
-			filtered = append(filtered, col)
+	inner.cachedReadSchemaOnce.Do(func() {
+		if len(inner.requiredCols) == 0 {
+			inner.cachedReadSchema = inner.schema
+			return
 		}
-	}
-	if len(filtered) > 0 {
-		inner.cachedReadSchema = filtered
-		return filtered
-	}
-	inner.cachedReadSchema = inner.schema
-	return inner.schema
+		needed := make(map[string]bool, len(inner.requiredCols))
+		for _, c := range inner.requiredCols {
+			needed[c] = true
+		}
+		filtered := make([]parquet.Column, 0, len(inner.requiredCols))
+		for _, col := range inner.schema {
+			if needed[col.Name] {
+				filtered = append(filtered, col)
+			}
+		}
+		if len(filtered) > 0 {
+			inner.cachedReadSchema = filtered
+		} else {
+			inner.cachedReadSchema = inner.schema
+		}
+	})
+	return inner.cachedReadSchema
 }
 
 func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, error) {
