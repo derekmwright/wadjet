@@ -660,6 +660,19 @@ func CompressShuffleData(data []byte) []byte {
 	return buf.Bytes()
 }
 
+// streamDecompressShuffle reads the s2 body that follows a WSHC magic header
+// from src and writes the decompressed bytes to dst. The caller is responsible
+// for writing the WSHF magic header to dst beforehand if needed. This is used
+// by the build-cache stream source to transcode WSHC payloads to WSHF on disk
+// without first materializing the entire compressed body in memory.
+func streamDecompressShuffle(src io.Reader, dst io.Writer) error {
+	r := s2.NewReader(src)
+	if _, err := io.Copy(dst, r); err != nil {
+		return fmt.Errorf("decompressing shuffle stream: %w", err)
+	}
+	return nil
+}
+
 // DecompressShuffleData detects and decompresses a WSHC payload back to raw WSHF.
 // If the data is already plain WSHF (or non-shuffle), it is returned unchanged.
 func DecompressShuffleData(data []byte) ([]byte, error) {
