@@ -19,13 +19,24 @@ import (
 // the N× duplication causes OOM (e.g., orders at SF100 ≈ 15GB, partsupp ≈ 8GB).
 const buildCacheThreshold = 2 * 1024 * 1024 * 1024 // 2 GB
 
-// buildCacheGroupSize is the number of Parquet files per pre-scan task.
-// Partitioning the pre-scan across multiple tasks prevents a single worker from
-// accumulating all rows of a large table (e.g., partsupp ~11.8GB) in RAM before
-// writing to S3. Each task writes one .wshf cache file to a group-specific prefix.
-// Declared as var (not const) so regression tests can lower it to force multiple
-// groups on tiny SF0.01 tables and exercise the file-splitting correctness path.
-var buildCacheGroupSize = 8
+// buildCacheGroupSize is the number of Parquet files per pre-scan task. It
+// also bounds the size of each individual cache (.wshf) file, which matters
+// because cachedFileStreamSource currently downloads each cache file fully
+// into memory via getFileData → io.ReadAll before streaming chunks out of
+// the resulting byte slice. With group size 8 a single SF100 partsupp cache
+// file is ~10 GB, which OOM-kills any worker that needs to load it during
+// the probe phase. Group size 2 caps each cache file at ~2.5 GB, comfortably
+// within the per-worker memory budget on c7gd.4xlarge (32 GB) instances.
+//
+// The right long-term fix is to make cachedFileStreamSource read incrementally
+// from S3 (or download to local NVMe and mmap), at which point this constant
+// can go back up to optimise S3 round-trip count. Until then, prefer many
+// small cache files over a few huge ones.
+//
+// Declared as var (not const) so regression tests can lower it further to
+// force multiple groups on tiny SF0.01 tables and exercise the file-splitting
+// correctness path.
+var buildCacheGroupSize = 2
 
 // buildCacheTimeout is the maximum time to wait for a single build cache
 // pre-scan to complete. If exceeded, the coordinator falls back to per-worker
@@ -140,8 +151,14 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 	cacheQueryID := fmt.Sprintf("bc-%s-%s-%d", parentQueryID, stage.ScanAlias, groupIdx)
 	resultPrefix := fmt.Sprintf("queries/%s/build-cache/%s/%d/", parentQueryID, stage.ScanAlias, groupIdx)
 
-	// Construct minimal SQL to scan just this table with the columns needed.
-	// We select all columns so the workers get full rows for hash table construction.
+	// Construct minimal SQL to scan just this table. Today this uses SELECT *
+	// because the downstream consumer (StreamingSources path in the planner)
+	// expects the cached batches to have the same schema as the original scan
+	// node, and the original scan's column-projection happens at plan time on
+	// names that may not survive a SQL round-trip (qualified vs unqualified
+	// column references). Doing column pruning here would require coordinated
+	// schema rewriting on the consumer side. Tracked as a follow-up: pruning
+	// could shrink the cache file by 3-5x on wide tables like orders.
 	scanSQL := fmt.Sprintf("SELECT * FROM %s", stage.TableName)
 
 	task := distributed.Task{

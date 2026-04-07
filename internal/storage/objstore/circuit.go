@@ -185,24 +185,53 @@ func (cs *CircuitStore) do(ctx context.Context, fn func(context.Context) error) 
 
 // Put implements Store.
 func (cs *CircuitStore) Put(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string) (string, error) {
-	var etag string
-	err := cs.do(ctx, func(c context.Context) error {
-		var e error
-		etag, e = cs.inner.Put(c, bucket, key, r, size, contentType)
-		return e
-	})
+	timeout := cs.putTimeout(size)
+	if err := cs.beforeRequest(); err != nil {
+		return "", err
+	}
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	etag, err := cs.inner.Put(tctx, bucket, key, r, size, contentType)
+	if err != nil {
+		cs.onFailure(err)
+	} else {
+		cs.onSuccess()
+	}
 	return etag, err
 }
 
 // PutIfMatch implements Store.
 func (cs *CircuitStore) PutIfMatch(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string, expectedETag string) (string, error) {
-	var etag string
-	err := cs.do(ctx, func(c context.Context) error {
-		var e error
-		etag, e = cs.inner.PutIfMatch(c, bucket, key, r, size, contentType, expectedETag)
-		return e
-	})
+	timeout := cs.putTimeout(size)
+	if err := cs.beforeRequest(); err != nil {
+		return "", err
+	}
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	etag, err := cs.inner.PutIfMatch(tctx, bucket, key, r, size, contentType, expectedETag)
+	if err != nil {
+		cs.onFailure(err)
+	} else {
+		cs.onSuccess()
+	}
 	return etag, err
+}
+
+// putTimeout returns a size-aware timeout for upload operations. The fixed
+// 10-second RequestTimeout is fine for the small results that originally
+// flowed through this store (~MB), but build-cache pre-scan tasks now upload
+// multi-GB shuffle files. Allow at least RequestTimeout, plus enough headroom
+// to push the payload at ~20 MB/s effective same-region S3 throughput.
+func (cs *CircuitStore) putTimeout(size int64) time.Duration {
+	timeout := cs.config.RequestTimeout
+	if size > 0 {
+		// 20 MB/s ⇒ size_bytes / (20 * 1<<20 bytes/s) seconds
+		sized := time.Duration(size/(20*1024*1024)) * time.Second
+		if sized > timeout {
+			timeout = sized
+		}
+	}
+	return timeout
 }
 
 // Get implements Store.

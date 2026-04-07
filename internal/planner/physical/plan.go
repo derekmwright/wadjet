@@ -1060,6 +1060,19 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 // the build-side broadcast cache: the coordinator pre-scans them once, caches the
 // result in S3, and each worker loads the shared cache instead of independently
 // scanning the large source table N times.
+//
+// Important: the cache is only worthwhile when MULTIPLE large build tables
+// would otherwise compound a worker's hash-table footprint. A single large
+// build table (e.g. Q02's partsupp:1) fits comfortably in a single worker's
+// memory and the cache adds 5+ minutes of spill+S3 round-trip overhead for
+// no real benefit. With two or more, the per-worker hash-table footprint
+// becomes the bottleneck and the cache pays for itself by deduplicating
+// the source scan and giving the planner a single shuffle-format input
+// per table that the workers can stream lazily.
+//
+// So: only return the large build scans when there are at least two of them.
+// One large table → empty result → cache skipped → per-worker scan + spillable
+// hash join handles it. Two or more → cache the lot.
 func LargeBuildScans(stages []Stage, probeAlias string, thresholdBytes int64) []Stage {
 	var large []Stage
 	for _, s := range stages {
@@ -1072,6 +1085,9 @@ func LargeBuildScans(stages []Stage, probeAlias string, thresholdBytes int64) []
 		if s.EstimatedBytes >= thresholdBytes {
 			large = append(large, s)
 		}
+	}
+	if len(large) < 2 {
+		return nil
 	}
 	return large
 }
