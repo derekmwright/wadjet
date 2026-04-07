@@ -425,7 +425,15 @@ func newShuffleChunkReader(data []byte) (*shuffleChunkReader, error) {
 func (r *shuffleChunkReader) Next() (*batch.RecordBatch, error) {
 	for r.chunk < r.numChunks {
 		if r.pos+4 > len(r.data) {
-			return nil, nil
+			// We promised numChunks worth of data in the header but the file
+			// is too short to even hold the next chunk's row-count word. This
+			// is a truncated/corrupt file. Returning a silent EOF here would
+			// drop the remaining rows on the floor — at SF100 that turned
+			// into wrong query results (e.g. Q05 returning 0 rows when build
+			// cache files were truncated). Surface as an error so the worker
+			// fails the task instead of completing with missing data.
+			return nil, fmt.Errorf("shuffle file truncated: chunk %d/%d header at offset %d (file size %d)",
+				r.chunk, r.numChunks, r.pos, len(r.data))
 		}
 		numRows := int(binary.LittleEndian.Uint32(r.data[r.pos:]))
 		r.pos += 4
@@ -482,7 +490,8 @@ func shuffleReadBatches(data []byte) ([]*batch.RecordBatch, error) {
 	batches := make([]*batch.RecordBatch, 0, numChunks)
 	for chunk := uint32(0); chunk < numChunks; chunk++ {
 		if pos+4 > len(data) {
-			break
+			return nil, fmt.Errorf("shuffle file truncated: chunk %d/%d header at offset %d (file size %d)",
+				chunk, numChunks, pos, len(data))
 		}
 		numRows := int(binary.LittleEndian.Uint32(data[pos:]))
 		pos += 4

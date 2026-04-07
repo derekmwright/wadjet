@@ -121,6 +121,55 @@ func TestShuffleFormatRoundTrip(t *testing.T) {
 	}
 }
 
+// TestShuffleChunkReaderTruncatedFile is a regression test for the SF100 build
+// cache silent-row-loss bug. The reader used to return (nil, nil) — a clean
+// EOF — when the header promised more chunks than the file actually contained,
+// causing downstream queries to silently complete with missing rows. The fix
+// surfaces a real error so the worker fails the task instead.
+func TestShuffleChunkReaderTruncatedFile(t *testing.T) {
+	// Build a tiny one-chunk shuffle file, then lie in the header about how
+	// many chunks it contains.
+	schema := []parquet.Column{{Name: "id", Type: parquet.TypeInt64, Nullable: true}}
+
+	b := batch.NewRecordBatch(schema, 2)
+	b.Columns[0].Int64Data[0] = 1
+	b.Columns[0].Int64Data[1] = 2
+
+	var buf bytes.Buffer
+	sw := newShuffleWriter(&buf, schema)
+	if err := sw.writeHeader(); err != nil {
+		t.Fatal(err)
+	}
+	if err := sw.writeChunk(b.Columns, nil, 2); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	// Patch the chunk count header to claim 5 chunks even though only 1 was
+	// actually written. This is exactly the shape a streaming write would take
+	// if a multi-chunk write was interrupted partway through.
+	data[4] = 5
+
+	// shuffleReadBatches must error rather than silently returning the partial
+	// data.
+	if _, err := shuffleReadBatches(data); err == nil {
+		t.Error("shuffleReadBatches: want error on truncated file, got nil")
+	}
+
+	// shuffleChunkReader.Next must error after consuming the one valid chunk
+	// rather than silently returning EOF.
+	r, err := newShuffleChunkReader(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := r.Next()
+	if err != nil || first == nil {
+		t.Fatalf("first chunk: err=%v batch=%v", err, first)
+	}
+	if _, err := r.Next(); err == nil {
+		t.Error("shuffleChunkReader.Next: want truncation error after first chunk, got nil")
+	}
+}
+
 func TestShuffleFormatDetection(t *testing.T) {
 	// Binary shuffle format
 	shuffleData := []byte{'W', 'S', 'H', 'F', 0, 0, 0, 0}
