@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,6 +121,17 @@ func (w *Worker) SetMetrics(m *metrics.Metrics) {
 // Start begins the worker task loop and heartbeat.
 func (w *Worker) Start(ctx context.Context) error {
 	ctx, w.cancel = context.WithCancel(ctx)
+
+	// Sweep stale build-cache spill files left over from a previous worker
+	// crash. Without this, a c7gd.4xlarge worker that crashes mid-query at
+	// SF100 leaves multi-GB *.wshf files on the NVMe spill volume; subsequent
+	// runs accumulate them and eventually exhaust the disk. Files are named
+	// "build-cache-*.wshf" (write-side sink) and "build-cache-load-*.wshf"
+	// (read-side mmap source) — both safe to delete on startup since any
+	// in-flight reader/writer would be holding an open fd into them.
+	if w.config.SpillDir != "" {
+		w.sweepStaleBuildCacheFiles()
+	}
 
 	// Use cluster-scoped filter so this worker only pulls tasks for its cluster.
 	// If ClusterID is empty, subscribe to all tasks (backward compatible).
@@ -245,6 +259,48 @@ func (w *Worker) Stop() {
 // SetTelemetry enables OpenTelemetry tracing on the worker.
 func (w *Worker) SetTelemetry(tp *telemetry.Provider) {
 	w.otel = tp
+}
+
+// sweepStaleBuildCacheFiles deletes leftover build-cache spill files in the
+// configured spill directory. Called once at startup. Errors are logged but
+// not fatal — the worker can still operate (it just may run out of disk if
+// crashes are frequent enough).
+func (w *Worker) sweepStaleBuildCacheFiles() {
+	dir := w.config.SpillDir
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// Spill dir may not exist yet on a fresh worker; that's fine.
+		if !os.IsNotExist(err) {
+			w.logger.Warn("scanning spill dir for stale build-cache files",
+				"dir", dir, "error", err)
+		}
+		return
+	}
+	var removed int
+	var bytesFreed int64
+	for _, e := range entries {
+		name := e.Name()
+		// Two prefixes are used by the build-cache pipeline:
+		//   build-cache-*.wshf       — write-side spill from shuffleStreamSink
+		//   build-cache-load-*.wshf  — read-side mmap source download
+		if !strings.HasPrefix(name, "build-cache-") || !strings.HasSuffix(name, ".wshf") {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		if info, statErr := e.Info(); statErr == nil {
+			bytesFreed += info.Size()
+		}
+		if rmErr := os.Remove(full); rmErr != nil {
+			w.logger.Warn("removing stale build-cache file",
+				"path", full, "error", rmErr)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		w.logger.Info("swept stale build-cache spill files",
+			"dir", dir, "files", removed, "bytes_freed", bytesFreed)
+	}
 }
 
 func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem chan struct{}) {
