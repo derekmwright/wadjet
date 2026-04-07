@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,6 +124,44 @@ func (c *Coordinator) preScanBuildTables(ctx context.Context, parentQueryID stri
 	return cacheMap, nil
 }
 
+// prunedScanColumns returns the subset of stage.Columns that actually exist on
+// the table's schema. The optimizer's column-pruning pass over-approximates by
+// putting every referenced column from the surrounding join chain on every
+// scan node, so a partsupp:1 stage might list region/part/nation columns
+// alongside its own. The downstream scanner silently filters those out, but
+// the SQL parser used by the build-cache pre-scan task doesn't — so we have to
+// intersect against the real schema here before constructing SELECT lists.
+//
+// Returns nil on any catalog lookup error or when stage.Columns is empty,
+// which causes the caller to fall back to SELECT *.
+func (c *Coordinator) prunedScanColumns(ctx context.Context, stage physical.Stage) []string {
+	if len(stage.Columns) == 0 {
+		return nil
+	}
+	tbl, err := c.catalog.GetTable(ctx, stage.TableName)
+	if err != nil || tbl == nil {
+		return nil
+	}
+	valid := make(map[string]bool, len(tbl.Schema.Columns))
+	for _, col := range tbl.Schema.Columns {
+		valid[col.Name] = true
+	}
+	// Walk stage.Columns in order so the SELECT list is deterministic
+	// regardless of map iteration order, and dedupe along the way.
+	seen := make(map[string]bool, len(stage.Columns))
+	out := make([]string, 0, len(stage.Columns))
+	for _, c := range stage.Columns {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		if valid[c] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // chunkFiles splits a slice of file paths into chunks of at most size elements.
 func chunkFiles(files []string, size int) [][]string {
 	if len(files) == 0 {
@@ -151,15 +190,20 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 	cacheQueryID := fmt.Sprintf("bc-%s-%s-%d", parentQueryID, stage.ScanAlias, groupIdx)
 	resultPrefix := fmt.Sprintf("queries/%s/build-cache/%s/%d/", parentQueryID, stage.ScanAlias, groupIdx)
 
-	// Construct minimal SQL to scan just this table. Today this uses SELECT *
-	// because the downstream consumer (StreamingSources path in the planner)
-	// expects the cached batches to have the same schema as the original scan
-	// node, and the original scan's column-projection happens at plan time on
-	// names that may not survive a SQL round-trip (qualified vs unqualified
-	// column references). Doing column pruning here would require coordinated
-	// schema rewriting on the consumer side. Tracked as a follow-up: pruning
-	// could shrink the cache file by 3-5x on wide tables like orders.
+	// Construct SQL to scan just this table with the columns the downstream
+	// query actually uses. The optimizer's column-pruning pass populates
+	// stage.Columns with all columns referenced anywhere in the join/subquery
+	// chain — including columns from OTHER tables (e.g. partsupp:1's stage
+	// in Q02 lists r_name, p_mfgr, s_phone, etc. that don't exist in
+	// partsupp). The downstream scanner silently filters those out against
+	// the parquet schema, but the SQL parser doesn't, so we have to
+	// intersect with the actual table schema before building the SELECT
+	// list. Falling back to SELECT * is correct but bloats the cache by
+	// 3-5x for wide tables like orders.
 	scanSQL := fmt.Sprintf("SELECT * FROM %s", stage.TableName)
+	if cols := c.prunedScanColumns(parentCtx, stage); len(cols) > 0 {
+		scanSQL = fmt.Sprintf("SELECT %s FROM %s", strings.Join(cols, ", "), stage.TableName)
+	}
 
 	task := distributed.Task{
 		ID:           uuid.New().String()[:8],

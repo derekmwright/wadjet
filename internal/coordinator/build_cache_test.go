@@ -6,6 +6,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // TestCreatePipelineTasksBuildCache verifies that BuildCachePreScans on a
@@ -230,6 +231,72 @@ func TestPreScanBuildTablesDefaultThreshold(t *testing.T) {
 	}
 	if len(cache) != 0 {
 		t.Errorf("expected no cache entries with default 2GB threshold for 5MB table, got %d", len(cache))
+	}
+}
+
+// TestPrunedScanColumnsFiltersAlienColumns verifies that prunedScanColumns
+// strips columns that don't exist on the table's schema. The optimizer's
+// column-pruning pass over-approximates by listing columns from neighbouring
+// scans on every Stage.Columns slice (e.g. partsupp:1's stage in Q02 lists
+// r_name, p_mfgr, etc.). The build-cache pre-scan SQL goes through the parser,
+// which fails on invalid columns — so the intersect step here is what keeps
+// the cache path from blowing up Q02 at SF100.
+func TestPrunedScanColumnsFiltersAlienColumns(t *testing.T) {
+	ctx, coord, _ := setupDistributed(t)
+
+	// Create a small table with a known schema.
+	schema := []parquet.Column{
+		{Name: "ps_partkey", Type: parquet.TypeInt64},
+		{Name: "ps_suppkey", Type: parquet.TypeInt64},
+		{Name: "ps_supplycost", Type: parquet.TypeFloat64},
+	}
+	if err := coord.catalog.CreateTable(ctx, "ps_test", parquet.Schema{Columns: schema}, nil); err != nil {
+		t.Fatalf("creating table: %v", err)
+	}
+
+	// Stage.Columns over-approximates: contains real columns from partsupp
+	// PLUS columns belonging to other tables in the join chain. The pruner
+	// must drop the alien ones AND dedupe.
+	stage := physical.Stage{
+		ScanAlias: "partsupp:1",
+		TableName: "ps_test",
+		Columns: []string{
+			"ps_partkey",   // real
+			"r_name",       // alien (from region)
+			"ps_suppkey",   // real
+			"p_mfgr",       // alien (from part)
+			"ps_partkey",   // duplicate — should be deduped
+			"ps_supplycost", // real
+			"s_phone",      // alien (from supplier)
+		},
+	}
+
+	got := coord.prunedScanColumns(ctx, stage)
+	want := []string{"ps_partkey", "ps_suppkey", "ps_supplycost"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d columns %v, want %d %v", len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("col %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestPrunedScanColumnsEmptyAndUnknown returns nil for empty input or unknown
+// table, which forces the caller to fall back to SELECT *.
+func TestPrunedScanColumnsEmptyAndUnknown(t *testing.T) {
+	ctx, coord, _ := setupDistributed(t)
+
+	// Empty Columns → nil.
+	if got := coord.prunedScanColumns(ctx, physical.Stage{TableName: "anything"}); got != nil {
+		t.Errorf("empty columns: got %v, want nil", got)
+	}
+
+	// Unknown table → nil (catalog lookup error).
+	stage := physical.Stage{TableName: "no_such_table", Columns: []string{"a", "b"}}
+	if got := coord.prunedScanColumns(ctx, stage); got != nil {
+		t.Errorf("unknown table: got %v, want nil", got)
 	}
 }
 

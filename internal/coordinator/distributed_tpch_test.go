@@ -196,6 +196,52 @@ func setupTPCHDistributed(t *testing.T) (context.Context, *Coordinator) {
 	return ctx, coord
 }
 
+// TestDistributedTPCHBuildCachePartialOrders is a regression test for the
+// SF100 Q05 0-rows bug. At SF100 only the orders table exceeds the default
+// 2 GB build-cache threshold, so the cache fires for orders but not for the
+// other build tables (customer/supplier/nation/region). Q05 came back with
+// 0 rows in that configuration even though it returned the correct 5 rows
+// when the cache was forced on every build table (BuildCacheThreshold=1) at
+// SF0.01.
+//
+// This test reproduces the SF100 cache distribution at SF0.01 by setting a
+// threshold that lands between the smallest "big" table (orders) and the
+// largest "small" table (any of customer/supplier/nation/region), so only
+// orders is cached. To also mimic SF100's multi-cache-file pattern (orders
+// gets split into ~9 files at SF100 with groupSize=2), force buildCacheGroupSize
+// to 1 so orders' source files split into one cache file each.
+func TestDistributedTPCHBuildCachePartialOrders(t *testing.T) {
+	origMinBytes := physical.ProbeSplitMinBytes
+	physical.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+
+	origGroupSize := buildCacheGroupSize
+	buildCacheGroupSize = 1
+	t.Cleanup(func() { buildCacheGroupSize = origGroupSize })
+
+	ctx, coord := setupTPCHDistributed(t)
+
+	// Threshold lands between orders and customer at SF0.01.
+	coord.BuildCacheThreshold = 30 * 1024
+
+	q := tpch.TPCHQueries[5]
+	result, err := coord.ExecuteSQL(ctx, q.SQL)
+	if err != nil {
+		t.Fatalf("Q05 ExecuteSQL failed: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("Q05 error: %s", result.Error)
+	}
+	rows := result.Rows()
+	t.Logf("Q05 (orders-only cache, groupSize=1): %d rows", len(rows))
+	for i, r := range rows {
+		t.Logf("  row %d: %v", i, r)
+	}
+	if len(rows) != 5 {
+		t.Errorf("Q05: got %d rows, want 5", len(rows))
+	}
+}
+
 // TestDistributedTPCHBuildCache runs TPC-H join queries with BuildCacheThreshold=1
 // so the build cache pre-scan path fires on every non-probe table, even at SF0.01.
 // This validates that the pre-scan → S3 cache → worker read path produces correct
