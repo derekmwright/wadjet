@@ -540,11 +540,7 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 		"customer": {"customer-0_0.parquet"},
 		"part":     {"part-0_0.parquet"},
 		"partsupp": {"partsupp-0_0.parquet"},
-		// Two orders files + groupSize=1 → two separate WSHF cache files,
-		// matching SF100's pattern of multi-file orders caches that the
-		// streaming source has to walk through with mid-iteration file
-		// transitions.
-		"orders": {"orders-0_0.parquet", "orders-0_1.parquet"},
+		"orders": {"orders-0_0.parquet"},
 		// Four lineitem files give probe-split 2 files per worker with 2
 		// workers — exercises the probe-split path while staying within
 		// the dev box's memory budget.

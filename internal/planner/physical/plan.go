@@ -1014,12 +1014,25 @@ var ProbeSplitMinBytes int64 = 64 * 1024 * 1024
 
 // ReverseBloomThreshold and ReverseBloomInnerThreshold gate the reverse-bloom
 // optimization (see buildJoin). Declared as vars so regression tests can lower
-// them to fire on tiny SF0.x datasets — otherwise the path only runs at SF100+
-// scale and SF100-only bugs in it never get caught locally.
+// them to fire on tiny SF0.x datasets, AND so they can be raised at runtime
+// to disable the optimization while we hunt the SF100 Q05 0-rows bug whose
+// triggering code path is somewhere in this optimization. The semi/anti
+// threshold is left at 10M because we have no evidence of bugs there yet.
+//
+// Init reads WADJET_REVERSE_BLOOM_INNER_THRESHOLD if set, so the bench can
+// disable the inner-join path on SF100 without rebuilding the binary.
 var (
 	ReverseBloomThreshold      int64 = 10_000_000
 	ReverseBloomInnerThreshold int64 = 50_000_000
 )
+
+func init() {
+	if v := os.Getenv("WADJET_REVERSE_BLOOM_INNER_THRESHOLD"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			ReverseBloomInnerThreshold = n
+		}
+	}
+}
 
 // CanProbeSplit returns the scan alias and file list for probe-split pipeline
 // routing. Probe-split distributes the dominant probe table's files across
