@@ -3,6 +3,7 @@ package parquet
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"testing"
 
 	goparquet "github.com/parquet-go/parquet-go"
@@ -221,6 +222,83 @@ func TestReadFileMetaDataTooSmall(t *testing.T) {
 	_, err := ReadFileMetaData(r, 4)
 	if err == nil {
 		t.Error("expected error for file too small")
+	}
+}
+
+// eofGreedyReaderAt wraps a *bytes.Reader and returns io.EOF together with
+// the requested data whenever the read reaches the end of the underlying
+// data — exactly what minio-go's *minio.Object.ReadAt does for S3 objects
+// when the read range touches the last byte. The io.ReaderAt contract
+// allows this:
+//
+//	If ReadAt is reading from an input source with a known end, ReadAt
+//	may return either err == EOF or err == nil after reading the final
+//	bytes.
+//
+// Regression coverage for the SF100 schema-autodetect failure where this
+// reader (via minio-go) caused ReadFileMetaData / ValidateHeader to fail
+// with "parquet: reading trailer: EOF" even though every requested byte
+// had been delivered.
+type eofGreedyReaderAt struct {
+	data []byte
+}
+
+func (e *eofGreedyReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 || off >= int64(len(e.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, e.data[off:])
+	if int(off)+n >= len(e.data) {
+		return n, io.EOF
+	}
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// TestReadFileMetaDataTolerantOfEOFGreedyReader is a regression test for
+// the SF100 schema-autodetect failure: minio-go returns (n, io.EOF) when
+// reading the parquet trailer at offset (size-8), and the previous
+// ReadFileMetaData treated that as fatal even though the bytes had been
+// successfully delivered.
+func TestReadFileMetaDataTolerantOfEOFGreedyReader(t *testing.T) {
+	// Build a minimal valid parquet file in-memory using the writer.
+	var buf bytes.Buffer
+	w, err := NewWriter(&buf, Schema{Columns: []Column{
+		{Name: "id", Type: TypeInt64, Nullable: true},
+	}}, DefaultWriterConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteRows([]map[string]any{{"id": int64(1)}, {"id": int64(2)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+
+	// Sanity: a normal bytes.Reader works.
+	if _, err := ReadFileMetaData(bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatalf("baseline (bytes.Reader) failed: %v", err)
+	}
+
+	// Now exercise the EOF-greedy path.
+	greedy := &eofGreedyReaderAt{data: data}
+	md, err := ReadFileMetaData(greedy, int64(len(data)))
+	if err != nil {
+		t.Fatalf("EOF-greedy reader: %v (this is the SF100 bug)", err)
+	}
+	if md == nil {
+		t.Fatal("EOF-greedy reader: nil metadata")
+	}
+
+	// ValidateHeader must also tolerate (n, EOF) — the header is at offset 0
+	// but minio-go can still return EOF on small files where 4 bytes IS the
+	// entire object's first read.
+	if err := ValidateHeader(greedy); err != nil {
+		t.Fatalf("ValidateHeader on EOF-greedy reader: %v", err)
 	}
 }
 

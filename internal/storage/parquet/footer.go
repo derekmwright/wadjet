@@ -30,6 +30,29 @@ const (
 	minFileSize = 4 + trailerSize
 )
 
+// readAtFull is a tolerant ReadAt that treats (n == len(p), err == io.EOF)
+// as a successful read instead of a failure. Per the io.ReaderAt contract:
+//
+//	If ReadAt is reading from an input source with a known end, ReadAt may
+//	return either err == EOF or err == nil after reading the final bytes.
+//
+// minio-go's *minio.Object.ReadAt happily returns (n, io.EOF) when you read
+// the very last bytes of an S3 object — for example the parquet trailer at
+// (size-8). The previous code in ReadFileMetaData / ValidateHeader treated
+// any non-nil error as fatal and broke schema autodetection against the
+// SF100 bucket. The full-file read path in OpenFileReader already tolerated
+// EOF; the trailer/footer/header readers were just inconsistent.
+func readAtFull(r io.ReaderAt, p []byte, off int64) error {
+	n, err := r.ReadAt(p, off)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	if n != len(p) {
+		return fmt.Errorf("short read: got %d bytes, want %d", n, len(p))
+	}
+	return nil
+}
+
 // ReadFileMetaData reads the FileMetaData from a Parquet file.
 // It reads the trailing 8 bytes to get the footer length, then reads
 // and decodes the Thrift-encoded footer.
@@ -40,7 +63,7 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 
 	// Read trailer: [footer_length: 4 bytes LE][magic: 4 bytes]
 	trailer := make([]byte, trailerSize)
-	if _, err := r.ReadAt(trailer, fileSize-trailerSize); err != nil {
+	if err := readAtFull(r, trailer, fileSize-trailerSize); err != nil {
 		return nil, fmt.Errorf("parquet: reading trailer: %w", err)
 	}
 
@@ -63,7 +86,7 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 	// Read the footer bytes.
 	footerOffset := fileSize - trailerSize - footerLen
 	footer := make([]byte, footerLen)
-	if _, err := r.ReadAt(footer, footerOffset); err != nil {
+	if err := readAtFull(r, footer, footerOffset); err != nil {
 		return nil, fmt.Errorf("parquet: reading footer: %w", err)
 	}
 
@@ -78,7 +101,7 @@ func ReadFileMetaData(r io.ReaderAt, fileSize int64) (*FileMetaData, error) {
 // ValidateHeader checks that the file starts with the Parquet magic bytes.
 func ValidateHeader(r io.ReaderAt) error {
 	header := make([]byte, 4)
-	if _, err := r.ReadAt(header, 0); err != nil {
+	if err := readAtFull(r, header, 0); err != nil {
 		return fmt.Errorf("parquet: reading header: %w", err)
 	}
 	if [4]byte(header) != parquetMagic {

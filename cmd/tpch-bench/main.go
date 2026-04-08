@@ -423,14 +423,23 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 }
 
 // probeParquetSchema reads a single parquet file's schema directly from the
-// object store. We download the full file rather than range-reading the
-// footer because minio-go's ReaderAt path returned EOF against the SF100
-// bucket when probing — suspected lazy-stat issue inside minio.Object that
-// returns size 0 before any read has happened. Full download adds a few
-// seconds of startup time per table (sub-300 MB files) and only runs once,
-// so the simplicity wins.
+// object store. Uses GetReaderAt so the parquet reader can read just the
+// trailer (~8 bytes) and the footer (~KB) instead of the whole file.
 func probeParquetSchema(ctx context.Context, store objstore.Store, bucket, key string) (parquet.Schema, error) {
-	rc, info, err := store.Get(ctx, bucket, key)
+	if ras, ok := store.(objstore.ReaderAtStore); ok {
+		ra, sz, err := ras.GetReaderAt(ctx, bucket, key)
+		if err != nil {
+			return parquet.Schema{}, fmt.Errorf("opening reader-at: %w", err)
+		}
+		defer ra.Close()
+		r, err := parquet.NewReader(ra, sz)
+		if err != nil {
+			return parquet.Schema{}, fmt.Errorf("parquet reader: %w", err)
+		}
+		return r.Schema(), nil
+	}
+	// Fallback for stores without ReaderAt support — full download.
+	rc, _, err := store.Get(ctx, bucket, key)
 	if err != nil {
 		return parquet.Schema{}, fmt.Errorf("get: %w", err)
 	}
@@ -438,9 +447,6 @@ func probeParquetSchema(ctx context.Context, store objstore.Store, bucket, key s
 	buf, err := io.ReadAll(rc)
 	if err != nil {
 		return parquet.Schema{}, fmt.Errorf("read: %w", err)
-	}
-	if int64(len(buf)) != info.Size && info.Size > 0 {
-		return parquet.Schema{}, fmt.Errorf("short read: got %d, want %d", len(buf), info.Size)
 	}
 	r, err := parquet.NewReaderFromBytes(buf)
 	if err != nil {
