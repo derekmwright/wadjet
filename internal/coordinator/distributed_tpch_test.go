@@ -542,10 +542,7 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 		"customer": {"customer-0_0.parquet"},
 		"part":     {"part-0_0.parquet"},
 		"partsupp": {"partsupp-0_0.parquet"},
-		"orders": {"orders-0_0.parquet"},
-		// Four lineitem files give probe-split 2 files per worker with 2
-		// workers. Bump to 6 lineitem + 2 orders when running with
-		// WADJET_HEAP_PROFILE=1 to exercise the SF100-class memory path.
+		"orders":   {"orders-0_0.parquet"},
 		"lineitem": {"lineitem-0_0.parquet", "lineitem-0_1.parquet", "lineitem-0_2.parquet", "lineitem-0_3.parquet"},
 	}
 
@@ -699,6 +696,9 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 // multi-cache-file pattern, this test should reproduce 0 rows locally if the
 // bug is in the parts of the system we exercise here.
 func TestDistributedTPCHBuildCachePolarsQ05(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping SF0.3 Polars repro test in -short mode (heavy: ~55s, ~500MB)")
+	}
 	origMinBytes := physical.ProbeSplitMinBytes
 	physical.ProbeSplitMinBytes = 1
 	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
@@ -774,6 +774,9 @@ func TestDistributedTPCHBuildCachePolarsQ05(t *testing.T) {
 // gets split into ~9 files at SF100 with groupSize=2), force buildCacheGroupSize
 // to 1 so orders' source files split into one cache file each.
 func TestDistributedTPCHBuildCachePartialOrders(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping multi-cache-file SF0.01 repro test in -short mode")
+	}
 	origMinBytes := physical.ProbeSplitMinBytes
 	physical.ProbeSplitMinBytes = 1
 	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })

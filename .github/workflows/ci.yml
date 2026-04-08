@@ -20,7 +20,14 @@ jobs:
         run: go build ./...
 
       - name: Unit Tests
-        run: go test ./internal/... -timeout 5m
+        # -short skips heavy SF0.3 Polars/multi-cache-file local repro tests
+        # that exist for hunting SF100 distributed bugs offline. They each
+        # spin up a multi-worker embedded NATS coordinator and easily push
+        # the 7 GB hosted runner past its memory limit when run alongside
+        # the rest of the suite in parallel.
+        # -p 2 caps test-package parallelism so two heavy packages don't
+        # overlap on the runner's RAM.
+        run: go test -short -p 2 ./internal/... -timeout 5m
 
       - name: TPC-H Correctness (SF0.01)
         run: go test -v -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
