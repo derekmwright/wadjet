@@ -133,7 +133,7 @@ type QueryMeasurement struct {
 	Query         string    `json:"query"`
 	WallMs        int64     `json:"wall_ms"`
 	PeakHeapMB    int64     `json:"peak_heap_mb"`
-	AllocsBytes   int64     `json:"allocs_bytes"`
+	AllocCount   int64     `json:"alloc_count"`
 	SpillBytes    int64     `json:"spill_bytes"`
 	RowCount      int64    `json:"row_count"`
 	RowChecksum   string    `json:"row_checksum"`
@@ -222,8 +222,8 @@ func TestBaselineRoundTrip(t *testing.T) {
 				WallMsTolerancePct:  25,
 				PeakHeapMB:          14336,
 				PeakHeapTolerancePct: 15,
-				AllocsBytes:         47000000000,
-				AllocsTolerancePct:  20,
+				AllocCount:         47000000000,
+				AllocCountTolerancePct:  20,
 				SpillBytesWritten:   8500000000,
 				SpillTolerancePct:   30,
 				RowCount:            5,
@@ -234,7 +234,7 @@ func TestBaselineRoundTrip(t *testing.T) {
 			"large_slice": {
 				WallMsMultiplier: 0.20,
 				HeapMultiplier:   0.55,
-				AllocsMultiplier: 0.50,
+				AllocCountMultiplier: 0.50,
 				SpillMultiplier:  0.45,
 			},
 		},
@@ -303,8 +303,8 @@ type QueryBaseline struct {
 	WallMsTolerancePct   float64 `json:"wall_ms_tolerance_pct"`
 	PeakHeapMB           int64   `json:"peak_heap_mb"`
 	PeakHeapTolerancePct float64 `json:"peak_heap_tolerance_pct"`
-	AllocsBytes          int64   `json:"allocs_bytes"`
-	AllocsTolerancePct   float64 `json:"allocs_tolerance_pct"`
+	AllocCount          int64   `json:"alloc_count"`
+	AllocCountTolerancePct   float64 `json:"alloc_count_tolerance_pct"`
 	SpillBytesWritten    int64   `json:"spill_bytes_written"`
 	SpillTolerancePct    float64 `json:"spill_tolerance_pct"`
 	RowCount             int64   `json:"row_count"`
@@ -316,7 +316,7 @@ type QueryBaseline struct {
 type Projection struct {
 	WallMsMultiplier float64 `json:"wall_ms_multiplier"`
 	HeapMultiplier   float64 `json:"heap_multiplier"`
-	AllocsMultiplier float64 `json:"allocs_multiplier"`
+	AllocCountMultiplier float64 `json:"alloc_count_multiplier"`
 	SpillMultiplier  float64 `json:"spill_multiplier"`
 }
 
@@ -380,7 +380,7 @@ func TestProjectLocalToGolden(t *testing.T) {
 			"large_slice": {
 				WallMsMultiplier: 0.20,
 				HeapMultiplier:   0.55,
-				AllocsMultiplier: 0.50,
+				AllocCountMultiplier: 0.50,
 				SpillMultiplier:  0.45,
 			},
 		},
@@ -388,7 +388,7 @@ func TestProjectLocalToGolden(t *testing.T) {
 	local := QueryMeasurement{
 		WallMs:      24000,
 		PeakHeapMB:  7884, // 14336 * 0.55
-		AllocsBytes: 23500000000,
+		AllocCount: 23500000000,
 		SpillBytes:  3825000000,
 	}
 	projected, err := bf.Project("large_slice", local)
@@ -412,8 +412,8 @@ func TestCompareDetectsRegression(t *testing.T) {
 				WallMsTolerancePct: 25,
 				PeakHeapMB:         14336,
 				PeakHeapTolerancePct: 15,
-				AllocsBytes:        47000000000,
-				AllocsTolerancePct: 20,
+				AllocCount:        47000000000,
+				AllocCountTolerancePct: 20,
 				SpillBytesWritten:  8500000000,
 				SpillTolerancePct:  30,
 				RowCount:           5,
@@ -424,7 +424,7 @@ func TestCompareDetectsRegression(t *testing.T) {
 
 	// Within tolerance — pass
 	good := QueryMeasurement{
-		Query: "q05", WallMs: 130000, PeakHeapMB: 14000, AllocsBytes: 48000000000,
+		Query: "q05", WallMs: 130000, PeakHeapMB: 14000, AllocCount: 48000000000,
 		SpillBytes: 8000000000, RowCount: 5, RowChecksum: "abc123",
 	}
 	deltas := bf.Compare(good)
@@ -436,7 +436,7 @@ func TestCompareDetectsRegression(t *testing.T) {
 
 	// 2x slower — should regress
 	bad := QueryMeasurement{
-		Query: "q05", WallMs: 240000, PeakHeapMB: 14000, AllocsBytes: 48000000000,
+		Query: "q05", WallMs: 240000, PeakHeapMB: 14000, AllocCount: 48000000000,
 		SpillBytes: 8000000000, RowCount: 5, RowChecksum: "abc123",
 	}
 	deltas = bf.Compare(bad)
@@ -496,8 +496,8 @@ func (bf *BaselineFile) Project(sliceKey string, local QueryMeasurement) (QueryM
 	if pf.HeapMultiplier > 0 {
 		projected.PeakHeapMB = int64(float64(local.PeakHeapMB) / pf.HeapMultiplier)
 	}
-	if pf.AllocsMultiplier > 0 {
-		projected.AllocsBytes = int64(float64(local.AllocsBytes) / pf.AllocsMultiplier)
+	if pf.AllocCountMultiplier > 0 {
+		projected.AllocCount = int64(float64(local.AllocCount) / pf.AllocCountMultiplier)
 	}
 	if pf.SpillMultiplier > 0 {
 		projected.SpillBytes = int64(float64(local.SpillBytes) / pf.SpillMultiplier)
@@ -537,7 +537,7 @@ func (bf *BaselineFile) Compare(m QueryMeasurement) []QueryDelta {
 
 	check("wall_ms", float64(qb.WallMsP50), float64(m.WallMs), qb.WallMsTolerancePct)
 	check("peak_heap_mb", float64(qb.PeakHeapMB), float64(m.PeakHeapMB), qb.PeakHeapTolerancePct)
-	check("allocs_bytes", float64(qb.AllocsBytes), float64(m.AllocsBytes), qb.AllocsTolerancePct)
+	check("alloc_count", float64(qb.AllocCount), float64(m.AllocCount), qb.AllocCountTolerancePct)
 	check("spill_bytes", float64(qb.SpillBytesWritten), float64(m.SpillBytes), qb.SpillTolerancePct)
 
 	// Row count and checksum: exact match required.
@@ -891,8 +891,8 @@ func TestCollectorAggregatesPeak(t *testing.T) {
 		t.Errorf("expected peak >= 800 MB, got %d", m.PeakHeapMB)
 	}
 	// Allocs delta = 4000 - 1000 = 3000
-	if m.AllocsBytes != 3000 {
-		t.Errorf("expected allocs delta 3000, got %d", m.AllocsBytes)
+	if m.AllocCount != 3000 {
+		t.Errorf("expected allocs delta 3000, got %d", m.AllocCount)
 	}
 }
 
@@ -1019,7 +1019,7 @@ func (c *MeasurementCollector) EndWindow(query string) QueryMeasurement {
 		StartedAt:     w.startedAt,
 		WallMs:        time.Since(w.startedAt).Milliseconds(),
 		PeakHeapMB:    w.peakHeapMB,
-		AllocsBytes:   int64(w.endMallocs - w.startMallocs),
+		AllocCount:   int64(w.endMallocs - w.startMallocs),
 		SpillBytes:    w.totalSpill,
 		GoroutinePeak: w.goroutinePeak,
 	}
@@ -2405,13 +2405,13 @@ Write `benchmarks/tpch/baseline-sf100.json`:
     "small_slice": {
       "wall_ms_multiplier": 0.04,
       "heap_multiplier": 0.18,
-      "allocs_multiplier": 0.16,
+      "alloc_count_multiplier": 0.16,
       "spill_multiplier": 0.10
     },
     "large_slice": {
       "wall_ms_multiplier": 0.20,
       "heap_multiplier": 0.55,
-      "allocs_multiplier": 0.50,
+      "alloc_count_multiplier": 0.50,
       "spill_multiplier": 0.45
     }
   }
@@ -2551,8 +2551,8 @@ func TestRunsCleanThroughFakeCluster(t *testing.T) {
 	if m.PeakHeapMB < 500 {
 		t.Errorf("expected peak >= 500 MB, got %d", m.PeakHeapMB)
 	}
-	if m.AllocsBytes != 4000 {
-		t.Errorf("expected allocs delta 4000, got %d", m.AllocsBytes)
+	if m.AllocCount != 4000 {
+		t.Errorf("expected allocs delta 4000, got %d", m.AllocCount)
 	}
 
 	// Build a baseline that matches and check Compare returns no regressions.

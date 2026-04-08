@@ -48,7 +48,7 @@ type QueryMeasurement struct {
 	Query         string    `json:"query"`
 	WallMs        int64     `json:"wall_ms"`
 	PeakHeapMB    int64     `json:"peak_heap_mb"`
-	AllocsBytes   int64     `json:"allocs_bytes"`
+	AllocCount    int64     `json:"alloc_count"`
 	SpillBytes    int64     `json:"spill_bytes"`
 	RowCount      int64     `json:"row_count"`
 	RowChecksum   string    `json:"row_checksum"`
