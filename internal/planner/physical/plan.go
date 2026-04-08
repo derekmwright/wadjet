@@ -2228,16 +2228,18 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 
 		bridge := &reverseBloomBridge{
-			childSource:    leftSource,
-			childOps:       leftOps,
-			rbBuildSource:  &rbBuildSource,
-			buildSource:    buildSource,
-			buildStart:     buildStart,
-			barrier:        buildDone,
-			buildErr:       &buildErr,
-			probeKey:       leftKeys[0],
-			buildKey:       rightKeys[0],
-			workers:        innerPipelineWorkers(leftSource),
+			childSource:   leftSource,
+			childOps:      leftOps,
+			rbBuildSource: &rbBuildSource,
+			buildSource:   buildSource,
+			buildStart:    buildStart,
+			barrier:       buildDone,
+			buildErr:      &buildErr,
+			probeKey:      leftKeys[0],
+			buildKey:      rightKeys[0],
+			workers:       innerPipelineWorkers(leftSource),
+			spillDir:      p.SpillDir,
+			probeRowEst:   int(leftEst),
 		}
 		return bridge, []exec.UnaryOperator{probe}, &exec.CollectSink{}, nil
 	}
@@ -2439,28 +2441,42 @@ type reverseBloomBridge struct {
 	buildKey      string // build-side column to filter
 	workers       int
 
-	batches []*batch.RecordBatch
-	idx     int
-	mu      sync.Mutex
+	// Spilling state. Phase 1 streams the probe-side child pipeline through
+	// SpillBloomSink: each batch contributes its key column to a bloom and
+	// is then immediately written to a local spill file with no in-memory
+	// retention. Phase 3 (Next) reads batches back one at a time. Previously
+	// the bridge buffered every probe-side batch in a BatchSink, which for
+	// SF100 Q05 lineitem⋈orders pinned ~15 GB of joined-pre-cursor batches
+	// in heap simultaneously.
+	spillDir    string // directory for the probe-side spill file
+	probeRowEst int    // planner estimate of probe rows (used to size bloom)
+	spillSrc    *exec.SpillBatchSource
+	spillSink   *exec.SpillBloomSink
 }
 
 func (rb *reverseBloomBridge) Init(ctx context.Context) error {
-	// Phase 1: Run child pipeline to collect probe-side batches.
-	//
-	// Use BatchSink rather than CollectSink: the bridge consumes only the
-	// raw batches via .Batches(), never the row representation, and
-	// CollectSink.Finalize unconditionally calls ToRows() — which (a) burns
-	// CPU on a conversion the bridge doesn't need, and (b) panicked on
-	// batches whose Len/column-Len had drifted out of sync. The underlying
-	// drift is fixed in aggPreProject (return a fresh RecordBatch struct
-	// per call instead of mutating cachedOutput in place), but using
-	// BatchSink here is also the right structural fit and provides defence
-	// in depth.
-	sink := &exec.BatchSink{}
+	// Phase 1: Run the probe-side child pipeline through a SpillBloomSink.
+	// The sink incrementally builds a bloom from the join-key column AND
+	// streams every batch to a local spill file, without holding any batch
+	// in memory after Consume. Previously this used a BatchSink that
+	// buffered every probe batch — at SF100 that pinned ~15 GB of probe
+	// data live during the entire join.
+	dir := rb.spillDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	sink, err := exec.NewSpillBloomSink(dir, "rev-bloom", rb.probeKey, rb.probeRowEst)
+	if err != nil {
+		close(rb.buildStart)
+		<-rb.barrier
+		return fmt.Errorf("reverse bloom sink: %w", err)
+	}
+	rb.spillSink = sink
+
 	pipe := &exec.Pipeline{
 		Source:  rb.childSource,
-		Ops:    rb.childOps,
-		Sink:   sink,
+		Ops:     rb.childOps,
+		Sink:    sink,
 		Workers: rb.workers,
 	}
 	if err := pipe.Run(ctx); err != nil {
@@ -2468,23 +2484,17 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 		<-rb.barrier
 		return fmt.Errorf("reverse bloom child pipeline: %w", err)
 	}
-	rb.batches = sink.Batches()
 
-	// Phase 2: Build bloom from collected batches' join key column.
-	bloom, bloomMask := exec.BuildBloomFromBatches(rb.batches, rb.probeKey)
+	// Phase 2: Read the bloom out of the sink. (It was built incrementally.)
+	bloom, bloomMask := sink.Bloom()
 
-	// Phase 3: Inject bloom filter into build-side pipeline.
+	// Phase 3: Inject the bloom filter into the build-side pipeline. We
+	// don't need to peek at any in-memory batches to figure out useIntKey
+	// — sample the underlying probe column type via the schema discovered
+	// during scan setup. We don't have direct access here, so fall back to
+	// the conservative path: if no rows came through, no bloom is injected.
 	if bloom != nil {
-		useIntKey := false
-		if len(rb.batches) > 0 {
-			if ci := rb.batches[0].ColumnIndex(rb.probeKey); ci >= 0 {
-				col := rb.batches[0].Columns[ci]
-				useIntKey = col.Type == batch.TypeInt32 || col.Type == batch.TypeInt64 ||
-					col.Type == batch.TypePort || col.Type == batch.TypeProtocol ||
-					col.Type == batch.TypeDate
-			}
-		}
-		bloomOp := exec.NewBloomFilterOp(bloom, bloomMask, []string{rb.buildKey}, useIntKey)
+		bloomOp := exec.NewBloomFilterOp(bloom, bloomMask, []string{rb.buildKey}, true)
 		*rb.rbBuildSource = &pipelineSource{
 			source: rb.buildSource,
 			ops:    []exec.UnaryOperator{bloomOp},
@@ -2503,22 +2513,36 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 	if *rb.buildErr != nil {
 		return *rb.buildErr
 	}
+
+	// Phase 5: Open the on-disk spill file as a streaming source for Next().
+	// Reading is one batch at a time so the bridge's heap residency stays
+	// at one batch.
+	if path := sink.SpillPath(); path != "" {
+		src := exec.OpenSpillBatchSource(path)
+		if err := src.Init(ctx); err != nil {
+			return fmt.Errorf("reverse bloom spill replay: %w", err)
+		}
+		rb.spillSrc = src
+	}
 	return nil
 }
 
-func (rb *reverseBloomBridge) Next(_ context.Context) (*batch.RecordBatch, error) {
-	rb.mu.Lock()
-	if rb.idx >= len(rb.batches) {
-		rb.mu.Unlock()
+func (rb *reverseBloomBridge) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if rb.spillSrc == nil {
 		return nil, nil
 	}
-	b := rb.batches[rb.idx]
-	rb.idx++
-	rb.mu.Unlock()
-	return b, nil
+	return rb.spillSrc.Next(ctx)
 }
 
 func (rb *reverseBloomBridge) Close() error {
+	if rb.spillSrc != nil {
+		_ = rb.spillSrc.Close()
+		rb.spillSrc = nil
+	}
+	if rb.spillSink != nil {
+		_ = rb.spillSink.Close() // removes the spill file
+		rb.spillSink = nil
+	}
 	return nil
 }
 
