@@ -8,9 +8,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Binary spill format type tags
@@ -52,13 +55,75 @@ func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
 	}, nil
 }
 
-// ShouldSpill returns true if the tracker's memory budget is exhausted.
-// Operators should call TrackBatch() to register their allocations.
+// ShouldSpill returns true when the operator should spill to disk.
+//
+// It checks two independent signals:
+//
+//  1. **Per-tracker budget** — the original cooperative signal: each operator
+//     reports its tracked allocations and spills when its share of the budget
+//     is exhausted. Cheap (atomic load) and accurate when every allocation
+//     paths through the tracker.
+//
+//  2. **Process-wide heap pressure** — checks runtime.MemStats.HeapAlloc
+//     against GOMEMLIMIT and triggers spill when the heap approaches the
+//     soft limit. This catches allocations that bypass the tracker (probe
+//     pipeline batches, gather buffers, scan source channel buffers, every
+//     non-build operator that doesn't currently report memory). Without
+//     this signal, the SF100 deploy would hit 31 GB anon-rss with a 1.4 GB
+//     tracker budget — the tracker's view of memory was 22× smaller than
+//     reality, and the per-tracker spill check stayed under threshold while
+//     the process climbed past physical RAM.
+//
+// runtime.ReadMemStats is moderately expensive (sub-millisecond), so the
+// reading is rate-limited to once per 100 ms across all callers.
 func (sm *SpillManager) ShouldSpill() bool {
-	if sm.tracker == nil || sm.tracker.Budget() <= 0 {
+	if sm.tracker != nil && sm.tracker.Budget() > 0 &&
+		sm.tracker.Used() > sm.tracker.Budget()*60/100 {
+		return true
+	}
+	return heapPressureExceeded()
+}
+
+// heapPressureRatio is the fraction of GOMEMLIMIT at which we trigger
+// spill. 0.7 = spill when the heap is at 70% of the soft memory limit.
+// Tunable upward for more aggressive caching, downward for more aggressive
+// spilling on memory-tight workloads.
+const heapPressureRatio = 0.7
+
+var (
+	heapPressureMu        sync.Mutex
+	heapPressureLastCheck time.Time
+	heapPressureLastValue bool
+	heapPressureMemLimit  int64 // cached debug.SetMemoryLimit value
+)
+
+// heapPressureExceeded reads runtime.MemStats and returns true if the
+// heap is using more than heapPressureRatio of GOMEMLIMIT. Result is
+// cached for 100 ms to keep the per-call overhead near zero on hot paths.
+func heapPressureExceeded() bool {
+	heapPressureMu.Lock()
+	defer heapPressureMu.Unlock()
+
+	if time.Since(heapPressureLastCheck) < 100*time.Millisecond {
+		return heapPressureLastValue
+	}
+	heapPressureLastCheck = time.Now()
+
+	if heapPressureMemLimit == 0 {
+		// debug.SetMemoryLimit(-1) is the standard "read current limit" idiom.
+		heapPressureMemLimit = debug.SetMemoryLimit(-1)
+	}
+	if heapPressureMemLimit <= 0 || heapPressureMemLimit == math.MaxInt64 {
+		// No GOMEMLIMIT set — heap pressure check is disabled.
+		heapPressureLastValue = false
 		return false
 	}
-	return sm.tracker.Used() > sm.tracker.Budget()*60/100 // spill at 60%
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	threshold := int64(float64(heapPressureMemLimit) * heapPressureRatio)
+	heapPressureLastValue = int64(ms.HeapAlloc) > threshold
+	return heapPressureLastValue
 }
 
 // TrackBatch adds an estimated batch size to the memory tracker.

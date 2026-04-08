@@ -197,6 +197,37 @@ func serveCmd() *cobra.Command {
 					// without OOM risk on multi-join queries.
 					// Formula: (envelope - cache) / (4 * maxConcurrent)
 					memoryBudget = (goMemLimit - cacheBytes) / (4 * maxConc)
+
+					// Auto-tune maxConc DOWN when the per-task budget would be
+					// too small to fit a SF100-class join. The 4x factor models
+					// task overhead but cannot rescue a worker whose hash tables
+					// alone need 8 GB at SF100 from a 1.4 GB budget — at SF100
+					// the original maxConc=4 / 30GB-machine combo gives each
+					// task ~1.4 GB and the worker OOMs at 31 GB anon-rss when
+					// multiple tasks pick up the same query in parallel.
+					//
+					// Minimum target: 2 GB per task. If we'd be under, reduce
+					// maxConc until we hit it (or until maxConc=1). Each query
+					// in distributed/probe-split mode dispatches one task per
+					// worker, so maxConc above ~2 only helps with concurrent
+					// queries from different sessions — which is rare in
+					// benchmarks and tunable upward via --max-concurrent when
+					// the workload actually needs it.
+					const minBudgetPerTask int64 = 2 * 1024 * 1024 * 1024
+					if memoryBudget < minBudgetPerTask && maxConc > 1 {
+						origConc := maxConc
+						for memoryBudget < minBudgetPerTask && maxConc > 1 {
+							maxConc--
+							memoryBudget = (goMemLimit - cacheBytes) / (4 * maxConc)
+						}
+						maxConcurrent = int(maxConc)
+						logger.Info("auto-tuned max_concurrent down to fit memory budget",
+							"orig_max_concurrent", origConc,
+							"new_max_concurrent", maxConc,
+							"budget_bytes", memoryBudget,
+							"min_budget_target", minBudgetPerTask)
+					}
+
 					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget, "max_concurrent", maxConc)
 				}
 			}
