@@ -2264,6 +2264,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			barrier:     buildDone,
 			buildErr:    &buildErr,
 			workers:     innerPipelineWorkers(leftSource),
+			spillDir:    p.SpillDir,
 		}
 
 		if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
@@ -2370,15 +2371,33 @@ type deferredJoinBridge struct {
 	buildErr    *error
 	workers     int
 
-	batches []*batch.RecordBatch
-	idx     int
-	mu      sync.Mutex
+	// Spilling state. Phase 1 streams the child pipeline through SpillSink
+	// (compact-on-write so Sel-bearing batches replay correctly). Phase 2
+	// reads them back one at a time via SpillBatchSource. Heap residency in
+	// the bridge stays at one batch instead of the entire probe-side input.
+	spillDir  string
+	spillSink *exec.SpillSink
+	spillSrc  *exec.SpillBatchSource
 }
 
 func (d *deferredJoinBridge) Init(ctx context.Context) error {
-	// Run child pipeline (scan → early probes) to collect filtered batches.
-	// This overlaps with the deferred build goroutine(s) running in background.
-	sink := &exec.CollectSink{}
+	// Run child pipeline (scan → early probes) into a SpillSink that
+	// streams every batch to disk with no in-memory retention. This
+	// overlaps with the deferred build goroutine(s) running in background.
+	dir := d.spillDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	sink, err := exec.NewSpillSink(dir, "deferred-join")
+	if err != nil {
+		select {
+		case <-d.barrier:
+		default:
+		}
+		return fmt.Errorf("deferred join spill sink: %w", err)
+	}
+	d.spillSink = sink
+
 	pipe := &exec.Pipeline{
 		Source:  d.childSource,
 		Ops:     d.childOps,
@@ -2386,14 +2405,12 @@ func (d *deferredJoinBridge) Init(ctx context.Context) error {
 		Workers: d.workers,
 	}
 	if err := pipe.Run(ctx); err != nil {
-		// Wait for build goroutine to prevent leak
 		select {
 		case <-d.barrier:
 		default:
 		}
 		return fmt.Errorf("deferred join child pipeline: %w", err)
 	}
-	d.batches = sink.Batches()
 
 	// Wait for deferred build to complete
 	select {
@@ -2404,22 +2421,34 @@ func (d *deferredJoinBridge) Init(ctx context.Context) error {
 	if *d.buildErr != nil {
 		return *d.buildErr
 	}
+
+	// Open the spill file as a streaming source for replay.
+	if path := sink.SpillPath(); path != "" {
+		src := exec.OpenSpillBatchSource(path)
+		if err := src.Init(ctx); err != nil {
+			return fmt.Errorf("deferred join spill replay: %w", err)
+		}
+		d.spillSrc = src
+	}
 	return nil
 }
 
-func (d *deferredJoinBridge) Next(_ context.Context) (*batch.RecordBatch, error) {
-	d.mu.Lock()
-	if d.idx >= len(d.batches) {
-		d.mu.Unlock()
+func (d *deferredJoinBridge) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	if d.spillSrc == nil {
 		return nil, nil
 	}
-	b := d.batches[d.idx]
-	d.idx++
-	d.mu.Unlock()
-	return b, nil
+	return d.spillSrc.Next(ctx)
 }
 
 func (d *deferredJoinBridge) Close() error {
+	if d.spillSrc != nil {
+		_ = d.spillSrc.Close()
+		d.spillSrc = nil
+	}
+	if d.spillSink != nil {
+		_ = d.spillSink.Close()
+		d.spillSink = nil
+	}
 	return nil
 }
 

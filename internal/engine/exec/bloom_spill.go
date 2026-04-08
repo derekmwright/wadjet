@@ -203,6 +203,92 @@ func (s *SpillBloomSink) RowsSeen() int {
 	return s.rowsSeen
 }
 
+// SpillSink is a Sink that streams batches straight to a columnar spill
+// file with no in-memory retention. It's the same as SpillBloomSink minus
+// the bloom-build path — useful for pipeline-break bridges (deferred-join
+// bridge, scan-shuffle, etc.) that need to materialize a child pipeline
+// for replay but not derive any side data from it.
+type SpillSink struct {
+	mu        sync.Mutex
+	writer    *spillBatchWriter
+	spillPath string
+	closed    bool
+	rowsSeen  int
+}
+
+// NewSpillSink creates a sink that writes consumed batches to a new spill
+// file under dir/prefix.
+func NewSpillSink(dir, prefix string) (*SpillSink, error) {
+	w, err := newSpillBatchWriter(dir, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("creating spill sink: %w", err)
+	}
+	return &SpillSink{writer: w}, nil
+}
+
+func (s *SpillSink) Init(_ context.Context) error { return nil }
+
+func (s *SpillSink) Consume(_ context.Context, b *batch.RecordBatch) error {
+	if b == nil || b.ActiveLen() == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return fmt.Errorf("spill sink already closed")
+	}
+	// Compact through any selection vector — writeColumnarBatch ignores Sel.
+	toWrite := b
+	if b.Sel != nil {
+		toWrite = b.Compact()
+	}
+	if err := s.writer.writeBatch(toWrite); err != nil {
+		return fmt.Errorf("spill sink write: %w", err)
+	}
+	s.rowsSeen += b.ActiveLen()
+	return nil
+}
+
+func (s *SpillSink) Finalize(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	path, err := s.writer.close()
+	if err != nil {
+		return fmt.Errorf("spill sink finalize: %w", err)
+	}
+	s.spillPath = path
+	return nil
+}
+
+func (s *SpillSink) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.spillPath != "" {
+		_ = os.Remove(s.spillPath)
+		s.spillPath = ""
+	}
+	return nil
+}
+
+// SpillPath returns the path of the on-disk spill file (empty if no rows
+// were consumed). Valid only after Finalize.
+func (s *SpillSink) SpillPath() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.spillPath
+}
+
+// RowsSeen returns the total number of (active) rows consumed.
+func (s *SpillSink) RowsSeen() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rowsSeen
+}
+
 // SpillBatchSource is a Source that streams batches back from a spill file
 // written by SpillBloomSink (or any spillBatchWriter). One batch is read
 // from disk per Next call.
