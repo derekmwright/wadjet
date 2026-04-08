@@ -10,7 +10,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -405,7 +404,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 			continue
 		}
 
-		schema, err := probeParquetSchema(ctx, store, bucket, firstParquet.Key, firstParquet.Size)
+		schema, err := probeParquetSchema(ctx, store, bucket, firstParquet.Key)
 		if err != nil {
 			log.Printf("WARNING: probing %s/%s failed (%v); falling back to hardcoded schema", name, firstParquet.Key, err)
 			schema = tpch.AllTables[name]
@@ -424,33 +423,26 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 }
 
 // probeParquetSchema reads a single parquet file's schema directly from the
-// object store. Uses GetReaderAt so the parquet reader can seek to the footer
-// rather than downloading the whole file (parquet metadata is at the end).
-// Falls back to a full Get if the store doesn't support range reads.
-func probeParquetSchema(ctx context.Context, store objstore.Store, bucket, key string, size int64) (parquet.Schema, error) {
-	if ras, ok := store.(objstore.ReaderAtStore); ok {
-		ra, sz, err := ras.GetReaderAt(ctx, bucket, key)
-		if err != nil {
-			return parquet.Schema{}, fmt.Errorf("opening reader-at: %w", err)
-		}
-		defer ra.Close()
-		r, err := parquet.NewReader(ra, sz)
-		if err != nil {
-			return parquet.Schema{}, fmt.Errorf("parquet reader: %w", err)
-		}
-		return r.Schema(), nil
-	}
-	// Fallback: full download. Should not happen for MinIO/S3 in practice.
-	rc, _, err := store.Get(ctx, bucket, key)
+// object store. We download the full file rather than range-reading the
+// footer because minio-go's ReaderAt path returned EOF against the SF100
+// bucket when probing — suspected lazy-stat issue inside minio.Object that
+// returns size 0 before any read has happened. Full download adds a few
+// seconds of startup time per table (sub-300 MB files) and only runs once,
+// so the simplicity wins.
+func probeParquetSchema(ctx context.Context, store objstore.Store, bucket, key string) (parquet.Schema, error) {
+	rc, info, err := store.Get(ctx, bucket, key)
 	if err != nil {
 		return parquet.Schema{}, fmt.Errorf("get: %w", err)
 	}
 	defer rc.Close()
-	buf := make([]byte, size)
-	if _, err := io.ReadFull(rc, buf); err != nil {
+	buf, err := io.ReadAll(rc)
+	if err != nil {
 		return parquet.Schema{}, fmt.Errorf("read: %w", err)
 	}
-	r, err := parquet.NewReader(bytes.NewReader(buf), size)
+	if int64(len(buf)) != info.Size && info.Size > 0 {
+		return parquet.Schema{}, fmt.Errorf("short read: got %d, want %d", len(buf), info.Size)
+	}
+	r, err := parquet.NewReaderFromBytes(buf)
 	if err != nil {
 		return parquet.Schema{}, fmt.Errorf("parquet reader: %w", err)
 	}
