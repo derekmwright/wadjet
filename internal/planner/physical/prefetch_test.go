@@ -75,7 +75,7 @@ func TestRGWorker_WithPrefetch(t *testing.T) {
 	var totalRows int64
 	for i := 0; i < numRGs; i++ {
 		rgRows := fr.RowGroupNumRows(i)
-		units[i] = rgUnit{nativeReader: fr, rgIndex: i, rgRowOffset: totalRows, numRows: rgRows}
+		units[i] = rgUnit{slot: newPreloadedFileSlot(catalog.FileEntry{}, fr), rgIndex: i, rgRowOffset: totalRows, numRows: rgRows}
 		totalRows += rgRows
 	}
 
@@ -142,7 +142,7 @@ func TestRGWorker_MultipleWorkers(t *testing.T) {
 	var totalRows int64
 	for i := 0; i < numRGs; i++ {
 		rgRows := fr.RowGroupNumRows(i)
-		units[i] = rgUnit{nativeReader: fr, rgIndex: i, rgRowOffset: totalRows, numRows: rgRows}
+		units[i] = rgUnit{slot: newPreloadedFileSlot(catalog.FileEntry{}, fr), rgIndex: i, rgRowOffset: totalRows, numRows: rgRows}
 		totalRows += rgRows
 	}
 
@@ -205,7 +205,7 @@ func TestRGWorker_ContextCancellation(t *testing.T) {
 
 	units := make([]rgUnit, numRGs)
 	for i := 0; i < numRGs; i++ {
-		units[i] = rgUnit{nativeReader: fr, rgIndex: i, numRows: fr.RowGroupNumRows(i)}
+		units[i] = rgUnit{slot: newPreloadedFileSlot(catalog.FileEntry{}, fr), rgIndex: i, numRows: fr.RowGroupNumRows(i)}
 	}
 
 	inner := &scanSourceInner{
@@ -259,11 +259,10 @@ func TestRGWorker_DeleteMarkers(t *testing.T) {
 	for i := 0; i < numRGs; i++ {
 		rgRows := fr.RowGroupNumRows(i)
 		units[i] = rgUnit{
-			fileEntry:    catalog.FileEntry{Path: filePath},
-			nativeReader: fr,
-			rgIndex:      i,
-			rgRowOffset:  totalRows,
-			numRows:      rgRows,
+			slot:        newPreloadedFileSlot(catalog.FileEntry{Path: filePath}, fr),
+			rgIndex:     i,
+			rgRowOffset: totalRows,
+			numRows:     rgRows,
 		}
 		totalRows += rgRows
 	}

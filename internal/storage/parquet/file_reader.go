@@ -61,6 +61,42 @@ func OpenFileReader(r io.ReaderAt, size int64) (*FileReader, error) {
 	}, nil
 }
 
+// OpenFileReaderMetadata opens a Parquet file in metadata-only mode by reading
+// just the footer (typically a few KB) via the supplied io.ReaderAt — without
+// loading the file's row group / page bytes into memory. The returned reader
+// supports schema inspection, NumRows / NumRowGroups, RowGroupNumRows, and
+// RowGroupStats, but its data-reading methods (ColumnPages, ReadRowGroup) will
+// fail because there is no backing data buffer.
+//
+// Use this when planning a scan — to apply predicate / bloom / partition
+// pruning across many files without paying the per-file heap cost of a full
+// load. Once a row group is selected for actual reading, open the file again
+// with OpenFileReader (or OpenFileReaderFromBytes) to get the page-decoding
+// path.
+//
+// This is the structural fix for the SF100 OOM hunt: the previous scan path
+// downloaded every parquet file in the worker's partition into a heap []byte
+// before processing, which at SF100 lineitem (21 files × 283 MB per worker)
+// added ~6 GB of heap pressure per scan.
+func OpenFileReaderMetadata(r io.ReaderAt, size int64) (*FileReader, error) {
+	meta, err := ReadFileMetaData(r, size)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateHeader(r); err != nil {
+		return nil, err
+	}
+	root, leaves := BuildSchemaTree(meta.Schema)
+	schema := schemaFromTree(root, leaves)
+	return &FileReader{
+		data:       nil, // metadata-only — page reads will fail
+		meta:       meta,
+		schemaRoot: root,
+		leaves:     leaves,
+		schema:     schema,
+	}, nil
+}
+
 // OpenFileReaderFromBytes opens a Parquet file from a byte slice.
 // Zero-copy: the slice is used directly without copying.
 func OpenFileReaderFromBytes(data []byte) (*FileReader, error) {

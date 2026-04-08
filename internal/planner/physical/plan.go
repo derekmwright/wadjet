@@ -5566,9 +5566,10 @@ type scanSourceInner struct {
 	rowLimit       int64                     // >0: lazy file downloading (LIMIT pushdown)
 
 	// row-group-level parallel scan
-	rgUnits   []rgUnit // flat list of row group work units
-	rgIdx     int64    // atomic index for parallel RG workers
-	useNative bool     // true if native page decoder can be used (no Decimal/Array/Map)
+	rgUnits   []rgUnit      // flat list of row group work units
+	rgIdx     int64         // atomic index for parallel RG workers
+	useNative bool          // true if native page decoder can be used (no Decimal/Array/Map)
+	loadSem   chan struct{} // bounded semaphore for in-flight file LOADs (data, not metadata)
 
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
