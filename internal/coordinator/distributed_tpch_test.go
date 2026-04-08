@@ -563,10 +563,11 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 		"part":     {"part-0_0.parquet"},
 		"partsupp": {"partsupp-0_0.parquet"},
 		"orders":   {"orders-0_0.parquet"},
-		// 4 lineitem files keeps the test inside ~10 GB peak heap. Bump to
-		// 6 lineitem + 2 orders when manually exercising the SF100-class
-		// memory path; that's ~14 GB peak with the new streaming spill paths
-		// (vs ~35 GB with the old buffered reverse-bloom bridge).
+		// 4 lineitem files keeps the test inside ~6 GB peak heap. Bump to
+		// 6 lineitem + 2 orders to exercise the SF100-class memory path
+		// (~10 GB peak with the streaming reverse-bloom + grace-spill paths,
+		// down from ~35 GB before those fixes landed). Both configurations
+		// give bit-identical results to the no-reverse-bloom ground truth.
 		"lineitem": {"lineitem-0_0.parquet", "lineitem-0_1.parquet", "lineitem-0_2.parquet", "lineitem-0_3.parquet"},
 	}
 
