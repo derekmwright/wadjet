@@ -319,30 +319,77 @@ func writeSpillBatches(dir string, batches []*batch.RecordBatch) (string, error)
 }
 
 // readSpillBatches reads all batches from a columnar spill file.
+// Used by the build-side reload path which is bounded; the probe-side
+// streaming path uses spillBatchReader.
 func readSpillBatches(path string) ([]*batch.RecordBatch, error) {
-	f, err := os.Open(path)
+	r, err := openSpillBatchReader(path)
 	if err != nil {
-		return nil, fmt.Errorf("opening spill file: %w", err)
+		return nil, err
 	}
-	defer f.Close()
+	defer r.Close()
 
-	r := bufio.NewReaderSize(f, 1024*1024)
-
-	var buf [4]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
-		return nil, fmt.Errorf("reading batch count: %w", err)
-	}
-	numBatches := int(binary.LittleEndian.Uint32(buf[:]))
-
-	batches := make([]*batch.RecordBatch, 0, numBatches)
-	for i := 0; i < numBatches; i++ {
-		b, err := readColumnarBatch(r)
+	batches := make([]*batch.RecordBatch, 0, r.numBatches)
+	for {
+		b, err := r.Next()
 		if err != nil {
-			return nil, fmt.Errorf("reading batch %d: %w", i, err)
+			return nil, err
+		}
+		if b == nil {
+			break
 		}
 		batches = append(batches, b)
 	}
 	return batches, nil
+}
+
+// spillBatchReader streams batches one at a time from a columnar spill
+// file. Used by the spill-flush probe path so we don't pin every probe
+// batch from a partition in memory at once.
+type spillBatchReader struct {
+	f          *os.File
+	r          *bufio.Reader
+	numBatches int
+	idx        int
+}
+
+func openSpillBatchReader(path string) (*spillBatchReader, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening spill file: %w", err)
+	}
+	r := bufio.NewReaderSize(f, 1024*1024)
+	var buf [4]byte
+	if _, err := io.ReadFull(r, buf[:]); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("reading batch count: %w", err)
+	}
+	return &spillBatchReader{
+		f:          f,
+		r:          r,
+		numBatches: int(binary.LittleEndian.Uint32(buf[:])),
+	}, nil
+}
+
+// Next reads the next batch from the file, or returns (nil, nil) at EOF.
+func (sr *spillBatchReader) Next() (*batch.RecordBatch, error) {
+	if sr.idx >= sr.numBatches {
+		return nil, nil
+	}
+	b, err := readColumnarBatch(sr.r)
+	if err != nil {
+		return nil, fmt.Errorf("reading batch %d: %w", sr.idx, err)
+	}
+	sr.idx++
+	return b, nil
+}
+
+func (sr *spillBatchReader) Close() error {
+	if sr.f == nil {
+		return nil
+	}
+	err := sr.f.Close()
+	sr.f = nil
+	return err
 }
 
 // writeColumnarBatch writes a single RecordBatch in columnar binary format.
@@ -645,102 +692,20 @@ func (h *HashJoin) loadBuildBatches(partID int) ([]*batch.RecordBatch, error) {
 	return buildBatches, nil
 }
 
-// processSpilledPartitions processes all spilled partitions one at a time.
-// For each partition: loads build data, builds hash table, replays probe data,
-// and returns result batches. Only one partition's data is in memory at a time.
-// Uses pre-fetching: loads partition N+1's build data while processing partition N.
-func (h *HashJoin) processSpilledPartitions(ctx context.Context) ([]*batch.RecordBatch, error) {
-	ss := h.spillState
-	if ss == nil {
-		return nil, nil
-	}
+// NOTE: the previous processSpilledPartitions helper has been replaced by
+// HashJoinProbe.NextFlush, which walks spilled partitions lazily one at a
+// time and yields each output batch as it's produced. The old eager-collect
+// helper accumulated every joined batch from every spilled partition into a
+// single in-memory slice and was the dominant heap consumer for SF100 Q05.
 
-	// Close probe writers to flush buffered data
-	if err := ss.closeProbeWriters(); err != nil {
-		return nil, fmt.Errorf("closing probe writers: %w", err)
-	}
-
-	// Collect partition IDs for ordered iteration (needed for pre-fetch)
-	partIDs := make([]int, 0, len(ss.spilledParts))
-	for id := range ss.spilledParts {
-		partIDs = append(partIDs, id)
-	}
-
-	var allResults []*batch.RecordBatch
-
-	// Pre-fetch first partition's build data
-	var prefetch *preloadedBuild
-	if len(partIDs) > 0 {
-		ch := make(chan preloadedBuild, 1)
-		go func() {
-			b, err := h.loadBuildBatches(partIDs[0])
-			ch <- preloadedBuild{b, err}
-		}()
-		pf := <-ch
-		prefetch = &pf
-	}
-
-	for i, partID := range partIDs {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-
-		// Use pre-fetched build data for this partition
-		buildBatches := prefetch.batches
-		if prefetch.err != nil {
-			return nil, fmt.Errorf("processing spilled partition %d: %w", partID, prefetch.err)
-		}
-
-		// Start pre-fetching next partition's build data while we process this one
-		var nextCh chan preloadedBuild
-		if i+1 < len(partIDs) {
-			nextCh = make(chan preloadedBuild, 1)
-			nextPartID := partIDs[i+1]
-			go func() {
-				b, err := h.loadBuildBatches(nextPartID)
-				nextCh <- preloadedBuild{b, err}
-			}()
-		}
-
-		results, err := h.processOnePartitionWithBuild(ctx, partID, buildBatches)
-		if err != nil {
-			// Drain prefetch goroutine before returning
-			if nextCh != nil {
-				<-nextCh
-			}
-			return nil, fmt.Errorf("processing spilled partition %d: %w", partID, err)
-		}
-		allResults = append(allResults, results...)
-
-		// Collect pre-fetched data for next iteration
-		if nextCh != nil {
-			pf := <-nextCh
-			prefetch = &pf
-		}
-	}
-
-	return allResults, nil
-}
-
-// processOnePartition loads one spilled partition's build data, constructs a
-// temporary hash table, then replays probe data against it.
-func (h *HashJoin) processOnePartition(ctx context.Context, partID int) ([]*batch.RecordBatch, error) {
-	buildBatches, err := h.loadBuildBatches(partID)
-	if err != nil {
-		return nil, err
-	}
-	return h.processOnePartitionWithBuild(ctx, partID, buildBatches)
-}
-
-// processOnePartitionWithBuild processes a partition using pre-loaded build batches.
-func (h *HashJoin) processOnePartitionWithBuild(ctx context.Context, partID int, buildBatches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
+// buildTempJoinFromBatches constructs a temporary HashJoin over a single
+// spilled partition's pre-loaded build batches. Used by the streaming
+// spill-flush path to assemble per-partition state without producing any
+// joined output up-front.
+func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (*HashJoin, error) {
 	if len(buildBatches) == 0 {
 		return nil, nil
 	}
-
-	ss := h.spillState
-
-	// Build a temporary hash join for this partition
 	tmpJoin := &HashJoin{
 		JoinType:        h.JoinType,
 		LeftKeys:        h.LeftKeys,
@@ -751,14 +716,12 @@ func (h *HashJoin) processOnePartitionWithBuild(ctx context.Context, partID int,
 		keyBuf:          make([]byte, 0, 128),
 	}
 
-	// Count total rows for pre-sizing
 	totalRows := 0
 	for _, b := range buildBatches {
 		totalRows += b.Len
 	}
 	tmpJoin.BuildRowHint = int64(totalRows)
 
-	// Build hash table from loaded batches
 	tmpJoin.buildSchema = buildBatches[0].Schema
 	tmpJoin.buildKeyIdx = make([]int, len(tmpJoin.RightKeys))
 	for i, col := range tmpJoin.RightKeys {
@@ -766,7 +729,6 @@ func (h *HashJoin) processOnePartitionWithBuild(ctx context.Context, partID int,
 	}
 	tmpJoin.tryEnableIntKey(buildBatches[0])
 
-	// Pre-allocate
 	if !tmpJoin.SemiAntiKeyOnly {
 		tmpJoin.arena = make([]buildRef, 0, totalRows)
 		tmpJoin.arenaNext = make([]int32, 0, totalRows)
@@ -775,7 +737,6 @@ func (h *HashJoin) processOnePartitionWithBuild(ctx context.Context, partID int,
 	for _, b := range buildBatches {
 		batchIdx := int32(len(tmpJoin.buildBatches))
 		tmpJoin.buildBatches = append(tmpJoin.buildBatches, b)
-
 		if tmpJoin.SemiAntiKeyOnly {
 			tmpJoin.indexBuildBatchKeyOnly(b)
 		} else {
@@ -788,48 +749,7 @@ func (h *HashJoin) processOnePartitionWithBuild(ctx context.Context, partID int,
 	}
 	tmpJoin.buildBloom()
 	tmpJoin.buildDone = true
-
-	// Create probe operator
-	probe := tmpJoin.Probe()
-	probe.OutputFilter = h.spillOutputFilter
-	if err := probe.Init(ctx); err != nil {
-		return nil, err
-	}
-
-	// Load and replay probe batches
-	var results []*batch.RecordBatch
-	for _, path := range ss.partProbeFiles[partID] {
-		probeBatches, err := readSpillBatches(path)
-		if err != nil {
-			return nil, fmt.Errorf("reading probe spill: %w", err)
-		}
-		for _, pb := range probeBatches {
-			out, err := probe.Execute(ctx, pb)
-			if err != nil {
-				return nil, err
-			}
-			if out != nil {
-				out.Detach()
-				results = append(results, out)
-			}
-		}
-	}
-
-	// For right/full outer: flush unmatched build rows
-	if tmpJoin.JoinType == RightJoin || tmpJoin.JoinType == FullOuterJoin {
-		if unmatched := probe.FlushUnmatched(h.spillLeftSchema); unmatched != nil {
-			results = append(results, unmatched)
-		}
-	}
-
-	// Free partition data
-	tmpJoin.buildBatches = nil
-	tmpJoin.arena = nil
-	tmpJoin.arenaNext = nil
-	tmpJoin.intIndex = nil
-	tmpJoin.strIndex = nil
-
-	return results, nil
+	return tmpJoin, nil
 }
 
 // indexBuildBatch indexes a build batch into the hash table (full row storage path).
@@ -984,44 +904,220 @@ func (h *HashJoin) indexBuildBatchKeyOnly(b *batch.RecordBatch) {
 
 // ---- FlushableOperator implementation for HashJoinProbe ----
 
-// HasPendingFlush returns true if there are spilled partitions to process.
+// HasPendingFlush returns true if there are spilled partitions still left to
+// process.
 func (p *HashJoinProbe) HasPendingFlush() bool {
 	ss := p.join.spillState
 	if ss == nil {
 		return false
 	}
-	// Before first NextFlush call: check if there are spilled partitions
-	if p.spillFlushResults == nil {
+	// Before first NextFlush call: any spilled partitions to begin with?
+	if !p.spillFlushInit {
 		return len(ss.spilledParts) > 0
 	}
-	// After processing: check if there are remaining results to emit
-	return p.spillFlushIdx < len(p.spillFlushResults)
+	// Mid-flush: more probe data in the current partition or more partitions?
+	if p.spillFlushTmpJoin != nil && !p.spillFlushDone {
+		return true
+	}
+	return p.spillFlushPartIdx < len(p.spillFlushPartIDs)
 }
 
-// NextFlush returns the next result batch from spilled partition processing.
-// On first call, processes all spilled partitions and caches results.
+// NextFlush returns the next result batch from spilled-partition processing,
+// fully streaming. One partition is held in memory at a time; within that
+// partition probe batches are read from disk one at a time and the resulting
+// joined batch is yielded immediately. The previous implementation
+// accumulated every joined output from every spilled partition into a single
+// in-memory slice before yielding any — for SF100 Q05 lineitem⋈orders that
+// pinned tens of GB of joined output simultaneously.
 func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, error) {
-	if p.spillFlushResults == nil {
-		// Process all spilled partitions
-		results, err := p.join.processSpilledPartitions(ctx)
-		if err != nil {
-			return nil, err
-		}
-		p.spillFlushResults = results
-		p.spillFlushIdx = 0
-	}
-
-	if p.spillFlushIdx >= len(p.spillFlushResults) {
-		// Cleanup spill files
-		if p.join.spillState != nil {
-			p.join.spillState.cleanup()
-		}
+	ss := p.join.spillState
+	if ss == nil {
 		return nil, nil
 	}
 
-	b := p.spillFlushResults[p.spillFlushIdx]
-	p.spillFlushIdx++
-	return b, nil
+	// One-time init: collect partition IDs and close probe writers so probe
+	// spill files are flushed and readable.
+	if !p.spillFlushInit {
+		if err := ss.closeProbeWriters(); err != nil {
+			return nil, fmt.Errorf("closing probe writers: %w", err)
+		}
+		p.spillFlushPartIDs = make([]int, 0, len(ss.spilledParts))
+		for id := range ss.spilledParts {
+			p.spillFlushPartIDs = append(p.spillFlushPartIDs, id)
+		}
+		// Kick off the first partition's build prefetch.
+		if len(p.spillFlushPartIDs) > 0 {
+			p.spillFlushPrefetch = make(chan preloadedBuild, 1)
+			firstID := p.spillFlushPartIDs[0]
+			go func() {
+				b, err := p.join.loadBuildBatches(firstID)
+				p.spillFlushPrefetch <- preloadedBuild{b, err}
+			}()
+		}
+		p.spillFlushInit = true
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		// If we don't have an open partition, advance to the next one.
+		if p.spillFlushTmpJoin == nil {
+			if p.spillFlushPartIdx >= len(p.spillFlushPartIDs) {
+				// All partitions consumed.
+				ss.cleanup()
+				return nil, nil
+			}
+			if err := p.openNextSpillPartition(ctx); err != nil {
+				return nil, err
+			}
+			// openNextSpillPartition may have set spillFlushTmpJoin=nil if the
+			// partition had no build rows; loop to advance.
+			if p.spillFlushTmpJoin == nil {
+				continue
+			}
+		}
+
+		// Try to read the next probe batch from the current partition.
+		out, err := p.nextSpilledProbeBatch(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if out != nil {
+			return out, nil
+		}
+
+		// Current partition exhausted: emit any unmatched build rows for
+		// right/full-outer, then close it down.
+		if !p.spillFlushDone {
+			p.spillFlushDone = true
+			if p.spillFlushTmpJoin.JoinType == RightJoin || p.spillFlushTmpJoin.JoinType == FullOuterJoin {
+				if unmatched := p.spillFlushTmpProbe.FlushUnmatched(p.join.spillLeftSchema); unmatched != nil {
+					unmatched.Detach()
+					// Close the partition AFTER returning the unmatched batch.
+					// Mark it done so the next call advances.
+					p.closeCurrentSpillPartition()
+					return unmatched, nil
+				}
+			}
+		}
+		p.closeCurrentSpillPartition()
+		// Loop to advance to the next partition.
+	}
+}
+
+// openNextSpillPartition advances to the next spilled partition: receives
+// its pre-fetched build batches, builds a temp HashJoin, kicks off the next
+// partition's prefetch, and opens its first probe spill file.
+func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
+	partID := p.spillFlushPartIDs[p.spillFlushPartIdx]
+	p.spillFlushPartIdx++
+
+	pf := <-p.spillFlushPrefetch
+	if pf.err != nil {
+		return fmt.Errorf("processing spilled partition %d: %w", partID, pf.err)
+	}
+
+	// Kick off the next partition's prefetch (overlap I/O with build+probe).
+	if p.spillFlushPartIdx < len(p.spillFlushPartIDs) {
+		nextID := p.spillFlushPartIDs[p.spillFlushPartIdx]
+		p.spillFlushPrefetch = make(chan preloadedBuild, 1)
+		go func() {
+			b, err := p.join.loadBuildBatches(nextID)
+			p.spillFlushPrefetch <- preloadedBuild{b, err}
+		}()
+	} else {
+		p.spillFlushPrefetch = nil
+	}
+
+	if len(pf.batches) == 0 {
+		// No build rows for this partition: nothing to probe against.
+		p.spillFlushDone = true
+		return nil
+	}
+
+	tmpJoin, err := p.join.buildTempJoinFromBatches(pf.batches)
+	if err != nil {
+		return fmt.Errorf("building hash table for spilled partition %d: %w", partID, err)
+	}
+	probe := tmpJoin.Probe()
+	probe.OutputFilter = p.join.spillOutputFilter
+	if err := probe.Init(ctx); err != nil {
+		return fmt.Errorf("initialising probe for spilled partition %d: %w", partID, err)
+	}
+
+	p.spillFlushTmpJoin = tmpJoin
+	p.spillFlushTmpProbe = probe
+	p.spillFlushProbeFiles = p.join.spillState.partProbeFiles[partID]
+	p.spillFlushProbeFileIx = 0
+	p.spillFlushDone = false
+	return nil
+}
+
+// nextSpilledProbeBatch reads the next probe batch from disk for the current
+// partition and runs it through the temp probe operator. Returns (nil, nil)
+// when the current partition's probe data is exhausted.
+func (p *HashJoinProbe) nextSpilledProbeBatch(ctx context.Context) (*batch.RecordBatch, error) {
+	for {
+		// Open a probe file if we don't have one.
+		if p.spillFlushReader == nil {
+			if p.spillFlushProbeFileIx >= len(p.spillFlushProbeFiles) {
+				return nil, nil // partition exhausted
+			}
+			path := p.spillFlushProbeFiles[p.spillFlushProbeFileIx]
+			p.spillFlushProbeFileIx++
+			r, err := openSpillBatchReader(path)
+			if err != nil {
+				return nil, fmt.Errorf("opening probe spill: %w", err)
+			}
+			p.spillFlushReader = r
+		}
+
+		pb, err := p.spillFlushReader.Next()
+		if err != nil {
+			return nil, fmt.Errorf("reading probe spill: %w", err)
+		}
+		if pb == nil {
+			// End of this file; close it and try the next.
+			p.spillFlushReader.Close()
+			p.spillFlushReader = nil
+			continue
+		}
+
+		out, err := p.spillFlushTmpProbe.Execute(ctx, pb)
+		if err != nil {
+			return nil, fmt.Errorf("probing spilled partition: %w", err)
+		}
+		if out != nil {
+			out.Detach()
+			return out, nil
+		}
+		// Probe produced no output for this batch (e.g., no matches in
+		// inner join); read the next one.
+	}
+}
+
+// closeCurrentSpillPartition tears down all per-partition state to make the
+// build batches and hash tables eligible for GC before the next partition is
+// opened.
+func (p *HashJoinProbe) closeCurrentSpillPartition() {
+	if p.spillFlushReader != nil {
+		p.spillFlushReader.Close()
+		p.spillFlushReader = nil
+	}
+	if p.spillFlushTmpJoin != nil {
+		p.spillFlushTmpJoin.buildBatches = nil
+		p.spillFlushTmpJoin.arena = nil
+		p.spillFlushTmpJoin.arenaNext = nil
+		p.spillFlushTmpJoin.intIndex = nil
+		p.spillFlushTmpJoin.strIndex = nil
+		p.spillFlushTmpJoin = nil
+	}
+	p.spillFlushTmpProbe = nil
+	p.spillFlushProbeFiles = nil
+	p.spillFlushProbeFileIx = 0
+	p.spillFlushDone = false
 }
 
 // partitionProbeBatch splits a probe batch by partition, writing spilled-partition

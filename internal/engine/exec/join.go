@@ -2236,9 +2236,23 @@ type HashJoinProbe struct {
 	outPool      *batch.BatchPool
 	largeOutPool *batch.BatchPool // for outputs > DefaultBatchSize
 
-	// Grace Hash Join flush state — populated when spilled partitions are processed
-	spillFlushResults []*batch.RecordBatch
-	spillFlushIdx     int
+	// Grace Hash Join flush state. Spilled partitions are processed fully
+	// streaming: one partition at a time, one probe batch at a time, one
+	// joined output batch at a time. Previous implementations accumulated
+	// every output batch from every spilled partition into a single slice
+	// before yielding any — for SF100 Q05 lineitem⋈orders that was tens of
+	// GB of joined batches alive simultaneously.
+	spillFlushInit     bool
+	spillFlushPartIDs  []int               // ordered partition IDs to process
+	spillFlushPartIdx  int                 // index of next partition to process
+	spillFlushPrefetch chan preloadedBuild // pre-fetch channel for next partition's build data
+	// Per-current-partition state.
+	spillFlushTmpJoin     *HashJoin          // hash join built for the current partition
+	spillFlushTmpProbe    *HashJoinProbe     // probe operator for the current partition
+	spillFlushProbeFiles  []string           // probe spill files for the current partition
+	spillFlushProbeFileIx int                // next file to open in spillFlushProbeFiles
+	spillFlushReader      *spillBatchReader  // open reader for the current probe file
+	spillFlushDone        bool               // current partition's probe batches all consumed; emit unmatched/move on
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {
