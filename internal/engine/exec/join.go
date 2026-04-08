@@ -1784,18 +1784,21 @@ func bloomHashBytes(key []byte) uint64 {
 func (h *HashJoin) spillBuildBatches(neededBytes int64) error {
 	ss := h.spillState
 	if ss == nil {
-		// First spill: initialize partition state and redistribute existing batches
+		// First spill: initialize partition state and redistribute existing
+		// batches. Drop each batch from h.buildBatches as soon as its rows
+		// have been copied into a partition so the original column data is
+		// GC-eligible during the redistribution loop. Without this drop the
+		// peak heap during spill includes BOTH the full flat build state
+		// AND the new partition data — at SF100 that's an extra ~3 GB of
+		// transient pressure that pushes workers over GOMEMLIMIT during
+		// the very moment they're trying to relieve memory pressure.
 		dir := h.Spill.SpillDir()
 		ss = newSpillState(dir, h.buildSchema)
 		h.spillState = ss
 
-		// Redistribute existing build batches into partitions
-		for _, b := range h.buildBatches {
-			h.partitionBuildBatch(b)
-		}
-
-		// Clear the flat build state — partitions now own the data
-		h.buildBatches = nil
+		// Reset hash table state BEFORE redistribution so the partition
+		// path gets a clean intIndex/strIndex to insert into. The arena
+		// still owns its capacity but the slice is empty for re-use.
 		h.arena = h.arena[:0]
 		h.arenaNext = h.arenaNext[:0]
 		if h.useIntKey || h.useDualIntKey {
@@ -1804,6 +1807,18 @@ func (h *HashJoin) spillBuildBatches(neededBytes int64) error {
 			h.strIndex = newStrHashTable(64)
 		}
 		h.buildRows = 0
+
+		// Redistribute existing build batches into partitions, dropping
+		// each from the flat slice as it's consumed so peak heap during
+		// the redistribution loop is bounded by (partitions in flight)
+		// rather than (full flat state + full partition state).
+		flat := h.buildBatches
+		h.buildBatches = nil
+		for i := range flat {
+			b := flat[i]
+			flat[i] = nil
+			h.partitionBuildBatch(b)
+		}
 	}
 
 	// Spill largest partition(s) until memory pressure is resolved
