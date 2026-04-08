@@ -493,6 +493,19 @@ func (s *BatchSink) Init(_ context.Context) error {
 func (s *BatchSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
 	b.Detach()
+	// Snapshot the selection vector. Many UnaryOperators (KernelFilter,
+	// AndFilter, OrFilter, the comparison/expression filters) reuse a
+	// per-instance scratch buffer for the output Sel and then assign
+	// `in.Sel = sel`. The returned batch's Sel field is a slice into that
+	// scratch buffer, which gets clobbered on the operator's next Execute
+	// call. Sinks that hold batches across calls (like this one — the
+	// reverse-bloom bridge collects the entire child pipeline before
+	// consuming) would otherwise see garbage Sel data on later iteration.
+	if b.Sel != nil {
+		selCopy := make([]uint32, len(b.Sel))
+		copy(selCopy, b.Sel)
+		b.Sel = selCopy
+	}
 	s.batches = append(s.batches, b)
 	s.mu.Unlock()
 	return nil
@@ -525,6 +538,14 @@ func (s *CollectSink) Init(_ context.Context) error {
 func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
 	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
+	// Snapshot the selection vector — see BatchSink.Consume for the full
+	// rationale. Filter operators reuse outSel across calls; sinks that
+	// hold batches across calls would otherwise see clobbered Sel data.
+	if b.Sel != nil {
+		selCopy := make([]uint32, len(b.Sel))
+		copy(selCopy, b.Sel)
+		b.Sel = selCopy
+	}
 	s.batches = append(s.batches, b)
 	s.mu.Unlock()
 	return nil
