@@ -2436,12 +2436,13 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 	//
 	// Use BatchSink rather than CollectSink: the bridge consumes only the
 	// raw batches via .Batches(), never the row representation, and
-	// CollectSink.Finalize unconditionally calls ToRows() for backward
-	// compatibility — which not only burns CPU but panics on any batch whose
-	// b.Len exceeds the underlying bitmap's word capacity. Both happened in
-	// the SF100 Q05 deploy: nested reverse-bloom bridges produced batches
-	// from prior join layers whose construction tripped the ToRows panic,
-	// crashing the probe-side child pipeline and erasing all results.
+	// CollectSink.Finalize unconditionally calls ToRows() — which (a) burns
+	// CPU on a conversion the bridge doesn't need, and (b) panicked on
+	// batches whose Len/column-Len had drifted out of sync. The underlying
+	// drift is fixed in aggPreProject (return a fresh RecordBatch struct
+	// per call instead of mutating cachedOutput in place), but using
+	// BatchSink here is also the right structural fit and provides defence
+	// in depth.
 	sink := &exec.BatchSink{}
 	pipe := &exec.Pipeline{
 		Source:  rb.childSource,
@@ -3547,7 +3548,8 @@ func isSimpleColRef(node plansql.Node) bool {
 type aggPreProject struct {
 	computed          []exec.ProjectColumn
 	cachedSchema      []parquet.Column    // cached output schema (computed once)
-	cachedOutput      *batch.RecordBatch  // reused output batch across calls
+	cachedOutput      *batch.RecordBatch  // most recent output (NOT reused — fresh struct each Execute call to avoid clobbering downstream's stored references; only the underlying Vectors are pooled via computedVectors)
+	computedVectors   []*batch.Vector     // pooled computed-column vectors (reused across calls, sized to computedCap)
 	computedCap       int                 // row capacity of cached computed vectors
 	canPassSelThrough bool                // true if all computed columns are numeric (no BytesColumn)
 	checkedSelPass    bool                // true after first call resolves canPassSelThrough
@@ -3615,20 +3617,29 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 
 	computedOffset := len(in.Schema)
 
-	if a.cachedOutput == nil || in.Len > a.computedCap {
-		// First call or input exceeds computed vector capacity — allocate
-		a.cachedOutput = &batch.RecordBatch{
-			Schema:  a.cachedSchema,
-			Columns: make([]*batch.Vector, len(a.cachedSchema)),
-		}
+	// We reuse the COMPUTED vectors across Execute calls (the typed data
+	// slices and null bitmaps are sized to a.computedCap) but we MUST NOT
+	// reuse the *RecordBatch struct itself, because downstream sinks may
+	// store batch pointers across calls (CollectSink does, the reverse-
+	// bloom bridge does, etc.). Mutating a previously-returned batch's
+	// Len / Columns silently corrupts whatever the sink has — manifesting
+	// as Q05's panic in CollectSink.ToRows when the sink iterated a batch
+	// whose Len had been bumped past the underlying column data's length
+	// by a subsequent Execute call.
+	//
+	// Allocate a fresh RecordBatch struct every call. The struct itself is
+	// tiny (header only); the heavy state (Vectors, BytesColumn buffers)
+	// is still pooled via a.computedVectors.
+	if a.computedVectors == nil || in.Len > a.computedCap {
+		a.computedVectors = make([]*batch.Vector, len(a.computed))
 		for k, c := range a.computed {
-			a.cachedOutput.Columns[computedOffset+k] = batch.NewVector(c.Type, in.Len)
+			a.computedVectors[k] = batch.NewVector(c.Type, in.Len)
 		}
 		a.computedCap = in.Len
 	} else {
 		// Reuse computed vectors — reset null bitmaps and bytes columns
 		for k := range a.computed {
-			col := a.cachedOutput.Columns[computedOffset+k]
+			col := a.computedVectors[k]
 			col.Len = in.Len
 			col.Nulls.ResetNonNull(in.Len)
 			switch col.Type {
@@ -3637,23 +3648,30 @@ func (a *aggPreProject) Execute(_ context.Context, in *batch.RecordBatch) (*batc
 			}
 		}
 	}
-	a.cachedOutput.Len = in.Len
-	a.cachedOutput.Sel = in.Sel // pass through selection vector (nil if materialized)
 
-	// Share existing column vectors (zero-copy for pass-through columns).
-	// Detach the input batch from its pool so that the pipeline's
-	// prev.Release() becomes a no-op — the shared column data must remain
-	// valid while cachedOutput is consumed by downstream operators/sinks.
+	cols := make([]*batch.Vector, len(a.cachedSchema))
+	// Pass-through columns share Vector pointers with the input. Detach the
+	// input from its pool so prev.Release() becomes a no-op — the shared
+	// column data must remain valid while this output is consumed downstream.
 	in.Detach()
 	for j := 0; j < len(in.Schema); j++ {
-		a.cachedOutput.Columns[j] = in.Columns[j]
+		cols[j] = in.Columns[j]
+	}
+	for k := range a.computed {
+		cols[computedOffset+k] = a.computedVectors[k]
+	}
+	a.cachedOutput = &batch.RecordBatch{
+		Schema:  a.cachedSchema,
+		Columns: cols,
+		Len:     in.Len,
+		Sel:     in.Sel,
 	}
 
 	// Compute expression columns.
 	// When selection vector is present and all computed columns are numeric,
 	// write values only at selected indices (avoiding full materialize).
 	for k, c := range a.computed {
-		col := a.cachedOutput.Columns[computedOffset+k]
+		col := a.computedVectors[k]
 		if hasSel {
 			if c.Float64Eval != nil {
 				for _, idx := range in.Sel {
