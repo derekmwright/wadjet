@@ -480,6 +480,15 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 	physical.ReverseBloomInnerThreshold = 1
 	t.Cleanup(func() { physical.ReverseBloomInnerThreshold = origRev })
 
+	// SF100 splits the orders source files into 9 cache files (groupSize=2,
+	// 17 source files). With our local sample of 1 orders source file, the
+	// default groupSize=2 produces 1 cache file. Force groupSize=1 so we
+	// also get a multi-WSHF-cache-file pattern even with one source file.
+	// Mostly cosmetic with one source file but matches the SF100 path.
+	origGroupSize := buildCacheGroupSize
+	buildCacheGroupSize = 1
+	t.Cleanup(func() { buildCacheGroupSize = origGroupSize })
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	t.Cleanup(cancel)
 
@@ -531,11 +540,14 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 		"customer": {"customer-0_0.parquet"},
 		"part":     {"part-0_0.parquet"},
 		"partsupp": {"partsupp-0_0.parquet"},
-		"orders": {"orders-0_0.parquet"},
+		// Two orders files + groupSize=1 → two separate WSHF cache files,
+		// matching SF100's pattern of multi-file orders caches that the
+		// streaming source has to walk through with mid-iteration file
+		// transitions.
+		"orders": {"orders-0_0.parquet", "orders-0_1.parquet"},
 		// Four lineitem files give probe-split 2 files per worker with 2
 		// workers — exercises the probe-split path while staying within
-		// the dev box's memory budget (each worker hashes ~10M orders rows
-		// for the build, vs SF100's 50M-per-worker which OOMs locally).
+		// the dev box's memory budget.
 		"lineitem": {"lineitem-0_0.parquet", "lineitem-0_1.parquet", "lineitem-0_2.parquet", "lineitem-0_3.parquet"},
 	}
 
