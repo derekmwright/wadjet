@@ -312,6 +312,7 @@ type fileSlot struct {
 	reader       *parquet.Reader     // full reader (data + metadata) once loaded
 	nativeReader *parquet.FileReader // alias of reader.FileReader()
 	metaReader   *parquet.FileReader // metadata-only — used during pruning before any rg load
+	dataBuf      []byte              // pooled buffer holding the file bytes; returned to pool on releaseRG
 	rgRemaining  atomic.Int64        // refcount of unprocessed row groups; release on 0
 }
 
@@ -368,17 +369,25 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 		s.loadErr = fmt.Errorf("read %s: %w", s.entry.Path, err)
 		return nil, s.loadErr
 	}
-	inner.trackPooledBuf(data)
 	reader, err := parquet.NewReaderFromBytes(data)
 	if err != nil {
 		if inner.loadSem != nil {
 			<-inner.loadSem
 		}
+		// Buffer wasn't installed in a slot — return it directly.
+		putReadBuf(data)
 		s.loadErr = fmt.Errorf("parquet %s (%d bytes): %w", s.entry.Path, len(data), err)
 		return nil, s.loadErr
 	}
 	s.reader = reader
 	s.nativeReader = reader.FileReader()
+	// Hold the pooled buffer on the SLOT (not the global tracked list) so
+	// releaseRG can return it to readBufPool as soon as the slot's last
+	// row group is consumed. The previous design tracked all loaded
+	// buffers in inner.pooledBufs and only returned them at scan close,
+	// which defeated the lazy loader's bounded-in-flight design — buffers
+	// stayed live for the entire scan even after their slot was released.
+	s.dataBuf = data
 	// metaReader is no longer needed once the full reader is in place.
 	s.metaReader = nil
 	return s.nativeReader, nil
@@ -394,7 +403,15 @@ func (s *fileSlot) releaseRG(inner *scanSourceInner) {
 	wasLoaded := s.loaded && s.loadErr == nil && s.reader != nil
 	s.reader = nil
 	s.nativeReader = nil
+	buf := s.dataBuf
+	s.dataBuf = nil
 	s.mu.Unlock()
+	// Return the file's pooled buffer to the read buf pool so it's
+	// immediately available for the next file the loader brings in. This
+	// is what makes the bounded loader semaphore actually bound peak heap.
+	if buf != nil {
+		putReadBuf(buf)
+	}
 	if wasLoaded && inner.loadSem != nil {
 		<-inner.loadSem
 	}
