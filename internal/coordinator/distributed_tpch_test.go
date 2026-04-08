@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
-	"runtime/debug"
 	"runtime/pprof"
 	"testing"
 	"time"
@@ -467,24 +466,9 @@ func setupTPCHDistributedPolars(t *testing.T) (context.Context, *Coordinator) {
 //	    aws s3 cp s3://wadjet-bench-sf100-use2/$t/0_0.parquet $t-0_0.parquet \
 //	      --region us-east-2; done
 func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping SF100-class memory test in -short mode (uses 10+ GB heap)")
-	}
 	const sampleDir = "/tmp/sf100-sample"
 	if _, err := os.Stat(sampleDir); os.IsNotExist(err) {
 		t.Skipf("SF100 sample dir %s missing — see test comment for setup", sampleDir)
-	}
-
-	// Pin GOMEMLIMIT for the duration of this test if the user hasn't set
-	// one. The streaming spill paths (heap-pressure spill in HashJoin and
-	// the reverse-bloom-bridge spill) only fire when the runtime knows the
-	// soft memory limit. Without GOMEMLIMIT, this test will grow heap to
-	// 30+ GB and OOM-kill the test process. We undo this on test exit so
-	// other tests in the package run with the original limit.
-	if os.Getenv("GOMEMLIMIT") == "" {
-		const memLimit int64 = 12 * 1024 * 1024 * 1024 // 12 GiB
-		prev := debug.SetMemoryLimit(memLimit)
-		t.Cleanup(func() { debug.SetMemoryLimit(prev) })
 	}
 
 	origMinBytes := physical.ProbeSplitMinBytes
@@ -495,11 +479,7 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 	// fires for the customer×orders join. With our 10M-row sample we'd miss
 	// that path. Force it on for realism.
 	origRev := physical.ReverseBloomInnerThreshold
-	if os.Getenv("WADJET_DISABLE_REVERSE_BLOOM") == "1" {
-		physical.ReverseBloomInnerThreshold = 1 << 60
-	} else {
-		physical.ReverseBloomInnerThreshold = 1
-	}
+	physical.ReverseBloomInnerThreshold = 1
 	t.Cleanup(func() { physical.ReverseBloomInnerThreshold = origRev })
 
 	// SF100 splits the orders source files into 9 cache files (groupSize=2,
@@ -563,11 +543,6 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 		"part":     {"part-0_0.parquet"},
 		"partsupp": {"partsupp-0_0.parquet"},
 		"orders":   {"orders-0_0.parquet"},
-		// 4 lineitem files keeps the test inside ~6 GB peak heap. Bump to
-		// 6 lineitem + 2 orders to exercise the SF100-class memory path
-		// (~10 GB peak with the streaming reverse-bloom + grace-spill paths,
-		// down from ~35 GB before those fixes landed). Both configurations
-		// give bit-identical results to the no-reverse-bloom ground truth.
 		"lineitem": {"lineitem-0_0.parquet", "lineitem-0_1.parquet", "lineitem-0_2.parquet", "lineitem-0_3.parquet"},
 	}
 
@@ -640,12 +615,7 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 	// where memory goes during Q05 execution. Profiles are written to the
 	// test temp dir and printed on test exit.
 	if os.Getenv("WADJET_HEAP_PROFILE") == "1" {
-		profileDir := os.Getenv("WADJET_HEAP_PROFILE_DIR")
-		if profileDir == "" {
-			profileDir = t.TempDir()
-		} else {
-			os.MkdirAll(profileDir, 0755)
-		}
+		profileDir := t.TempDir()
 		stop := make(chan struct{})
 		go func() {
 			ticker := time.NewTicker(2 * time.Second)
