@@ -249,6 +249,8 @@ locals {
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
     echo "WADJET_REGION=${local.eff_region}" >> /etc/environment
     echo "BENCHMARK_TYPE=${local.eff_bench_type}" >> /etc/environment
+    echo "WADJET_REVERSE_BLOOM_INNER_THRESHOLD=${var.reverse_bloom_inner_threshold}" >> /etc/environment
+    echo "WADJET_JOIN_DEBUG=${var.join_debug}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -279,6 +281,8 @@ locals {
     echo "WADJET_BUCKET=${local.bucket_name}" >> /etc/environment
     echo "WADJET_REGION=${local.eff_region}" >> /etc/environment
     echo "BENCHMARK_TYPE=${local.eff_bench_type}" >> /etc/environment
+    echo "WADJET_REVERSE_BLOOM_INNER_THRESHOLD=${var.reverse_bloom_inner_threshold}" >> /etc/environment
+    echo "WADJET_JOIN_DEBUG=${var.join_debug}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -343,6 +347,8 @@ locals {
     export DATA_PREFIX="${local.eff_prefix}"
     export SKIP_QUERIES="${local.eff_skip_queries}"
     export QUERY_TIMEOUT="${local.eff_timeout}"
+    export WADJET_REVERSE_BLOOM_INNER_THRESHOLD="${var.reverse_bloom_inner_threshold}"
+    export WADJET_JOIN_DEBUG="${var.join_debug}"
     ${local.profile_env}
     cd /root/wadjet
 
@@ -454,6 +460,12 @@ resource "aws_instance" "worker" {
 
   user_data = base64encode(<<-EOF
     ${local.build_script}
+
+    # Export tunables that the wadjet binary reads via os.Getenv at startup.
+    # /etc/environment is not read by inline cloud-init shells, so the env
+    # vars must be export'd here BEFORE the worker process is launched.
+    export WADJET_REVERSE_BLOOM_INNER_THRESHOLD="${var.reverse_bloom_inner_threshold}"
+    export WADJET_JOIN_DEBUG="${var.join_debug}"
 
     # Verify binary was downloaded successfully
     if [ ! -x /usr/local/bin/wadjet ]; then

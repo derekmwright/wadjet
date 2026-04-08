@@ -380,23 +380,21 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 			continue
 		}
 
-		files := make([]catalog.FileEntry, 0, len(objects))
-		var firstParquet objstore.ObjectInfo
+		// Pre-collect parquet objects so we can probe each for both schema
+		// (first file) AND row counts (every file). Without real row counts
+		// in the catalog, the worker's planner sees ScanRowEstimate=0 for
+		// every table — including lineitem at 600M rows — and the cost-based
+		// join reorder picks an arbitrary order. At SF100 that surfaced as
+		// Q05 returning 0 rows because lineitem ended up on the BUILD side
+		// of a join with batches=0 (the build pipeline's first scan call
+		// somehow returned no rows under the bad ordering).
+		var pqObjects []objstore.ObjectInfo
 		for _, obj := range objects {
-			if !strings.HasSuffix(obj.Key, ".parquet") {
-				continue
+			if strings.HasSuffix(obj.Key, ".parquet") {
+				pqObjects = append(pqObjects, obj)
 			}
-			if firstParquet.Key == "" {
-				firstParquet = obj
-			}
-			files = append(files, catalog.FileEntry{
-				Path:      obj.Key,
-				SizeBytes: obj.Size,
-				NumRows:   0, // unknown, scanner reads from parquet footer
-				CreatedAt: obj.LastModified,
-			})
 		}
-		if firstParquet.Key == "" {
+		if len(pqObjects) == 0 {
 			log.Printf("WARNING: no parquet files for table %s, using hardcoded schema", name)
 			if err := db.CreateTable(ctx, name, tpch.AllTables[name], nil); err != nil && !strings.Contains(err.Error(), "already exists") {
 				log.Fatalf("create table %s: %v", name, err)
@@ -404,22 +402,74 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 			continue
 		}
 
-		schema, err := probeParquetSchema(ctx, store, bucket, firstParquet.Key)
+		schema, err := probeParquetSchema(ctx, store, bucket, pqObjects[0].Key)
 		if err != nil {
-			log.Printf("WARNING: probing %s/%s failed (%v); falling back to hardcoded schema", name, firstParquet.Key, err)
+			log.Printf("WARNING: probing %s/%s failed (%v); falling back to hardcoded schema", name, pqObjects[0].Key, err)
 			schema = tpch.AllTables[name]
 		}
 		if err := db.CreateTable(ctx, name, schema, nil); err != nil && !strings.Contains(err.Error(), "already exists") {
 			log.Fatalf("create table %s: %v", name, err)
 		}
 
+		// Probe the parquet footer of every file to populate NumRows in the
+		// catalog. The footer is small (KBs) so this is one quick range read
+		// per file. With real NumRows, ScanRowEstimate flows through the
+		// optimizer and the join reorder picks the right build/probe sides.
+		files := make([]catalog.FileEntry, 0, len(pqObjects))
+		var totalRows int64
+		for _, obj := range pqObjects {
+			numRows, perr := probeParquetRowCount(ctx, store, bucket, obj.Key)
+			if perr != nil {
+				log.Printf("WARNING: row count probe failed for %s/%s: %v", name, obj.Key, perr)
+				numRows = 0
+			}
+			totalRows += numRows
+			files = append(files, catalog.FileEntry{
+				Path:      obj.Key,
+				SizeBytes: obj.Size,
+				NumRows:   numRows,
+				CreatedAt: obj.LastModified,
+			})
+		}
 		if err := db.Catalog().AddFiles(ctx, name, nil, "", files); err != nil {
 			log.Fatalf("registering %s files: %v", name, err)
 		}
 		totalFiles += len(files)
-		log.Printf("Discovered %d files for table %s (%d cols autodetected)", len(files), name, len(schema.Columns))
+		log.Printf("Discovered %d files for table %s (%d cols, %d rows)", len(files), name, len(schema.Columns), totalRows)
 	}
 	log.Printf("Data discovery complete: %d total files across %d tables", totalFiles, len(tpch.AllTables))
+}
+
+// probeParquetRowCount returns the total row count of a parquet file by
+// reading just the footer via GetReaderAt. Used at startup so the catalog
+// has real NumRows for cost-based join reordering.
+func probeParquetRowCount(ctx context.Context, store objstore.Store, bucket, key string) (int64, error) {
+	if ras, ok := store.(objstore.ReaderAtStore); ok {
+		ra, sz, err := ras.GetReaderAt(ctx, bucket, key)
+		if err != nil {
+			return 0, fmt.Errorf("opening reader-at: %w", err)
+		}
+		defer ra.Close()
+		r, err := parquet.NewReader(ra, sz)
+		if err != nil {
+			return 0, fmt.Errorf("parquet reader: %w", err)
+		}
+		return r.NumRows(), nil
+	}
+	rc, _, err := store.Get(ctx, bucket, key)
+	if err != nil {
+		return 0, fmt.Errorf("get: %w", err)
+	}
+	defer rc.Close()
+	buf, err := io.ReadAll(rc)
+	if err != nil {
+		return 0, fmt.Errorf("read: %w", err)
+	}
+	r, err := parquet.NewReaderFromBytes(buf)
+	if err != nil {
+		return 0, fmt.Errorf("parquet reader: %w", err)
+	}
+	return r.NumRows(), nil
 }
 
 // probeParquetSchema reads a single parquet file's schema directly from the

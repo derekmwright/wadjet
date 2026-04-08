@@ -150,6 +150,18 @@ variable "arch" {
   }
 }
 
+variable "reverse_bloom_inner_threshold" {
+  description = "Build-side row count above which inner-join reverse-bloom fires. 0 = use code default (50M). Set to a huge number (e.g. 999999999999) to disable the optimization for hunting bugs."
+  type        = number
+  default     = 0
+}
+
+variable "join_debug" {
+  description = "Set to 1 to enable HashJoin diagnostic prints (DBG HashJoin.Build, DBG HashJoinProbe.Close)."
+  type        = string
+  default     = ""
+}
+
 # Recommended instance types per scale factor:
 #   Graviton3 ARM (c7g):
 #     SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
