@@ -10,10 +10,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -32,6 +34,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/citc-tech/wadjet/internal/worker"
 	"github.com/citc-tech/wadjet/wadjet"
 	"github.com/nats-io/nats.go"
@@ -354,17 +357,18 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		log.Fatalf("creating S3 store for discovery: %v", err)
 	}
 
-	// Register table schemas in catalog
-	for name, schema := range tpch.AllTables {
-		if err := db.CreateTable(ctx, name, schema, nil); err != nil {
-			if strings.Contains(err.Error(), "already exists") {
-				continue
-			}
-			log.Fatalf("create table %s: %v", name, err)
-		}
-	}
-
-	// Discover existing parquet files for each table
+	// Discover existing parquet files for each table, then probe the first
+	// file to learn the actual column types. The hardcoded benchmarks/tpch
+	// schemas use TypeInt32/TypeString throughout, which matches the local
+	// datagen but NOT the Polars-generated SF100 parquet (which uses INT64
+	// and DATE). Registering the hardcoded schema against Polars data leads
+	// to silent type-truncation in the cache pre-scan path: o_orderkey
+	// truncates from int64 → int32 (works by luck for low keys, fails for
+	// hash joins like Q05's c_custkey = o_custkey), and o_orderdate gets
+	// represented as a string column even though the bytes on disk are
+	// int32 days. Detecting the real schema once at startup costs one S3
+	// round-trip per table (range read of the parquet footer) and removes
+	// an entire class of correctness bugs.
 	totalFiles := 0
 	for name := range tpch.AllTables {
 		prefix := dataPrefix + name + "/"
@@ -378,9 +382,13 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		}
 
 		files := make([]catalog.FileEntry, 0, len(objects))
+		var firstParquet objstore.ObjectInfo
 		for _, obj := range objects {
 			if !strings.HasSuffix(obj.Key, ".parquet") {
 				continue
+			}
+			if firstParquet.Key == "" {
+				firstParquet = obj
 			}
 			files = append(files, catalog.FileEntry{
 				Path:      obj.Key,
@@ -389,14 +397,64 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 				CreatedAt: obj.LastModified,
 			})
 		}
+		if firstParquet.Key == "" {
+			log.Printf("WARNING: no parquet files for table %s, using hardcoded schema", name)
+			if err := db.CreateTable(ctx, name, tpch.AllTables[name], nil); err != nil && !strings.Contains(err.Error(), "already exists") {
+				log.Fatalf("create table %s: %v", name, err)
+			}
+			continue
+		}
+
+		schema, err := probeParquetSchema(ctx, store, bucket, firstParquet.Key, firstParquet.Size)
+		if err != nil {
+			log.Printf("WARNING: probing %s/%s failed (%v); falling back to hardcoded schema", name, firstParquet.Key, err)
+			schema = tpch.AllTables[name]
+		}
+		if err := db.CreateTable(ctx, name, schema, nil); err != nil && !strings.Contains(err.Error(), "already exists") {
+			log.Fatalf("create table %s: %v", name, err)
+		}
 
 		if err := db.Catalog().AddFiles(ctx, name, nil, "", files); err != nil {
 			log.Fatalf("registering %s files: %v", name, err)
 		}
 		totalFiles += len(files)
-		log.Printf("Discovered %d files for table %s", len(files), name)
+		log.Printf("Discovered %d files for table %s (%d cols autodetected)", len(files), name, len(schema.Columns))
 	}
 	log.Printf("Data discovery complete: %d total files across %d tables", totalFiles, len(tpch.AllTables))
+}
+
+// probeParquetSchema reads a single parquet file's schema directly from the
+// object store. Uses GetReaderAt so the parquet reader can seek to the footer
+// rather than downloading the whole file (parquet metadata is at the end).
+// Falls back to a full Get if the store doesn't support range reads.
+func probeParquetSchema(ctx context.Context, store objstore.Store, bucket, key string, size int64) (parquet.Schema, error) {
+	if ras, ok := store.(objstore.ReaderAtStore); ok {
+		ra, sz, err := ras.GetReaderAt(ctx, bucket, key)
+		if err != nil {
+			return parquet.Schema{}, fmt.Errorf("opening reader-at: %w", err)
+		}
+		defer ra.Close()
+		r, err := parquet.NewReader(ra, sz)
+		if err != nil {
+			return parquet.Schema{}, fmt.Errorf("parquet reader: %w", err)
+		}
+		return r.Schema(), nil
+	}
+	// Fallback: full download. Should not happen for MinIO/S3 in practice.
+	rc, _, err := store.Get(ctx, bucket, key)
+	if err != nil {
+		return parquet.Schema{}, fmt.Errorf("get: %w", err)
+	}
+	defer rc.Close()
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(rc, buf); err != nil {
+		return parquet.Schema{}, fmt.Errorf("read: %w", err)
+	}
+	r, err := parquet.NewReader(bytes.NewReader(buf), size)
+	if err != nil {
+		return parquet.Schema{}, fmt.Errorf("parquet reader: %w", err)
+	}
+	return r.Schema(), nil
 }
 
 func loadData(ctx context.Context, db *wadjet.DB, sf tpch.ScaleFactor) {
