@@ -471,6 +471,43 @@ func (s *SliceSource) Close() error { return nil }
 // Rows are converted lazily on first access to ToRows(), not during Finalize.
 // Use Batches() for zero-copy columnar access.
 // Thread-safe: Consume() is protected by a mutex for parallel pipeline workers.
+// BatchSink is a Sink that only stores RecordBatches, never converting to
+// rows. Use it from internal pipelines (e.g. reverseBloomBridge) that consume
+// the batches directly and never need the row representation. CollectSink's
+// Finalize unconditionally calls ToRows() for backward compatibility, which
+// is unnecessary work and — more importantly — panics if any batch has a
+// row count beyond the underlying bitmap capacity (as we hit when the
+// reverseBloomBridge collected probe-side batches at SF100).
+type BatchSink struct {
+	mu      sync.Mutex
+	batches []*batch.RecordBatch
+}
+
+func (s *BatchSink) Init(_ context.Context) error {
+	s.mu.Lock()
+	s.batches = nil
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *BatchSink) Consume(_ context.Context, b *batch.RecordBatch) error {
+	s.mu.Lock()
+	b.Detach()
+	s.batches = append(s.batches, b)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *BatchSink) Finalize(_ context.Context) error { return nil }
+func (s *BatchSink) Close() error                     { return nil }
+
+// Batches returns the collected RecordBatches. Safe to call after Finalize.
+func (s *BatchSink) Batches() []*batch.RecordBatch {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.batches
+}
+
 type CollectSink struct {
 	Rows    []map[string]any     // populated lazily on first access
 	batches []*batch.RecordBatch // columnar storage

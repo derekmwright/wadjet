@@ -1012,6 +1012,15 @@ func EstimateCost(stages []Stage, node *logical.Node) QueryCost {
 // cache Q02 regression) never get caught.
 var ProbeSplitMinBytes int64 = 64 * 1024 * 1024
 
+// ReverseBloomThreshold and ReverseBloomInnerThreshold gate the reverse-bloom
+// optimization (see buildJoin). Declared as vars so regression tests can lower
+// them to fire on tiny SF0.x datasets — otherwise the path only runs at SF100+
+// scale and SF100-only bugs in it never get caught locally.
+var (
+	ReverseBloomThreshold      int64 = 10_000_000
+	ReverseBloomInnerThreshold int64 = 50_000_000
+)
+
 // CanProbeSplit returns the scan alias and file list for probe-split pipeline
 // routing. Probe-split distributes the dominant probe table's files across
 // workers while each worker scans build tables in full. This enables parallel
@@ -2126,10 +2135,8 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// only sees 1/N of the probe keys, so ~(N-1)/N of build rows are filtered
 	// out. At SF100 with 3 workers, this reduces orders (150M) to ~50M and
 	// partsupp (80M) to ~27M per worker — fitting in 4GB memory budget.
-	const reverseBloomThreshold int64 = 10_000_000
-	const reverseBloomInnerThreshold int64 = 50_000_000
-	useReverseBloom := (est > reverseBloomThreshold && (joinType == exec.SemiJoin || joinType == exec.AntiJoin)) ||
-		(est > reverseBloomInnerThreshold && joinType == exec.InnerJoin)
+	useReverseBloom := (est > ReverseBloomThreshold && (joinType == exec.SemiJoin || joinType == exec.AntiJoin)) ||
+		(est > ReverseBloomInnerThreshold && joinType == exec.InnerJoin)
 
 	// Pre-compute post-build operations that can run in the build goroutine.
 	var keepCols []string
@@ -2426,7 +2433,16 @@ type reverseBloomBridge struct {
 
 func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 	// Phase 1: Run child pipeline to collect probe-side batches.
-	sink := &exec.CollectSink{}
+	//
+	// Use BatchSink rather than CollectSink: the bridge consumes only the
+	// raw batches via .Batches(), never the row representation, and
+	// CollectSink.Finalize unconditionally calls ToRows() for backward
+	// compatibility — which not only burns CPU but panics on any batch whose
+	// b.Len exceeds the underlying bitmap's word capacity. Both happened in
+	// the SF100 Q05 deploy: nested reverse-bloom bridges produced batches
+	// from prior join layers whose construction tripped the ToRows panic,
+	// crashing the probe-side child pipeline and erasing all results.
+	sink := &exec.BatchSink{}
 	pipe := &exec.Pipeline{
 		Source:  rb.childSource,
 		Ops:    rb.childOps,
