@@ -1797,10 +1797,14 @@ func (h *HashJoin) spillBuildBatches(neededBytes int64) error {
 		h.spillState = ss
 
 		// Reset hash table state BEFORE redistribution so the partition
-		// path gets a clean intIndex/strIndex to insert into. The arena
-		// still owns its capacity but the slice is empty for re-use.
-		h.arena = h.arena[:0]
-		h.arenaNext = h.arenaNext[:0]
+		// path gets a clean intIndex/strIndex to insert into. Set the
+		// arena/arenaNext slices to nil rather than [:0] so the backing
+		// arrays become GC-eligible — at SF100 the flat arena before the
+		// first spill can hold 1 GB+ of buildRefs and we don't want to
+		// carry that capacity forward when the partitioned path uses its
+		// own per-partition state.
+		h.arena = nil
+		h.arenaNext = nil
 		if h.useIntKey || h.useDualIntKey {
 			h.intIndex = newIntHashTable(64)
 		} else {
