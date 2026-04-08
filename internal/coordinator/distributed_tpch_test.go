@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
+	"runtime/pprof"
 	"testing"
 	"time"
 
@@ -542,8 +544,8 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 		"partsupp": {"partsupp-0_0.parquet"},
 		"orders": {"orders-0_0.parquet"},
 		// Four lineitem files give probe-split 2 files per worker with 2
-		// workers — exercises the probe-split path while staying within
-		// the dev box's memory budget.
+		// workers. Bump to 6 lineitem + 2 orders when running with
+		// WADJET_HEAP_PROFILE=1 to exercise the SF100-class memory path.
 		"lineitem": {"lineitem-0_0.parquet", "lineitem-0_1.parquet", "lineitem-0_2.parquet", "lineitem-0_3.parquet"},
 	}
 
@@ -611,6 +613,36 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 	// Customer (~195 MB) is below this; orders (~261 MB single file) is
 	// above. Caches ONLY orders, mimicking SF100.
 	coord.BuildCacheThreshold = 240 * 1024 * 1024
+
+	// Heap profiling: capture a heap profile every second so we can see
+	// where memory goes during Q05 execution. Profiles are written to the
+	// test temp dir and printed on test exit.
+	if os.Getenv("WADJET_HEAP_PROFILE") == "1" {
+		profileDir := t.TempDir()
+		stop := make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			i := 0
+			var ms runtime.MemStats
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					i++
+					runtime.ReadMemStats(&ms)
+					path := fmt.Sprintf("%s/heap-%03d-%dMB.pprof", profileDir, i, ms.HeapAlloc/(1024*1024))
+					if f, err := os.Create(path); err == nil {
+						_ = pprof.WriteHeapProfile(f)
+						f.Close()
+						t.Logf("heap profile @ heap=%dMB sys=%dMB → %s", ms.HeapAlloc/(1024*1024), ms.Sys/(1024*1024), path)
+					}
+				}
+			}
+		}()
+		t.Cleanup(func() { close(stop) })
+	}
 
 	// 2 workers (not 3) so 2 probe files per worker fits in dev box memory.
 	// Each worker hashes the full 10M-row orders cache; with 2 workers the
