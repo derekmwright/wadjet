@@ -92,3 +92,43 @@ tasks:
     desc: SSM into coordinator instance
     cmds:
       - cd deploy/benchmark/terraform && tofu output -raw ssm_coordinator | bash
+
+  # --- Distributed test harness (cmd/tpch-harness) ---
+
+  harness:build:
+    desc: Build the tpch-harness and wadjet binaries
+    cmds:
+      - go build -o tpch-harness ./cmd/tpch-harness
+      - go build -o wadjet ./cmd/wadjet
+
+  harness:smoke:
+    desc: Real-cluster smoke test against SF0.01 fixture (~30s)
+    deps: [harness:build]
+    cmds:
+      - ./tpch-harness --mode=local --slice=small --no-compare --queries=q01,q06
+
+  harness:local:
+    desc: Local fast gate using the small slice (~1-2 min)
+    deps: [harness:build]
+    cmds:
+      - ./tpch-harness --mode=local --slice=small
+
+  harness:large:
+    desc: Local pre-merge gate using the large slice (forces spill, ~5-10 min)
+    deps: [harness:build]
+    cmds:
+      - ./tpch-harness --mode=local --slice=large
+
+  harness:golden:
+    desc: Run against an existing EC2 cluster (requires COORD_URL)
+    deps: [harness:build]
+    requires:
+      vars: [COORD_URL]
+    cmds:
+      - ./tpch-harness --mode=golden --coord-url={{.COORD_URL}} --update-baseline
+
+  harness:clean:
+    desc: Remove all harness run dirs and built binaries
+    cmds:
+      - rm -rf /tmp/wadjet-harness
+      - rm -f tpch-harness

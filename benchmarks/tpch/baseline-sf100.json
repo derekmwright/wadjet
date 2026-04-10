@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "captured_at": "1970-01-01T00:00:00Z",
+  "captured_on": "scaffold — replace with values from a real golden run",
+  "queries": {},
+  "projection_factors": {
+    "small_slice": {
+      "wall_ms_multiplier": 0.04,
+      "heap_multiplier": 0.18,
+      "alloc_count_multiplier": 0.16,
+      "spill_multiplier": 0.10
+    },
+    "large_slice": {
+      "wall_ms_multiplier": 0.20,
+      "heap_multiplier": 0.55,
+      "alloc_count_multiplier": 0.50,
+      "spill_multiplier": 0.45
+    }
+  }
+}
