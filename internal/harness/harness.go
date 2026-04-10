@@ -1,0 +1,327 @@
+package harness
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/jackc/pgx/v5"
+	"github.com/nats-io/nats.go"
+)
+
+// Run is the top-level entry point. Reads cfg, sets up the run dir,
+// starts the cluster (local mode only), runs the query suite, compares
+// against the baseline, writes result.json, and returns RunResult.
+func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error) {
+	started := time.Now()
+	result := RunResult{
+		Mode:         cfg.Mode,
+		Slice:        cfg.Slice,
+		StartedAt:    started,
+		BaselinePath: cfg.BaselinePath,
+	}
+
+	// Load baseline (unless --no-compare).
+	var baseline *BaselineFile
+	if !cfg.NoCompare {
+		bf, err := LoadBaseline(cfg.BaselinePath)
+		if err != nil && !os.IsNotExist(err) {
+			return result, fmt.Errorf("loading baseline: %w", err)
+		}
+		baseline = bf
+	}
+
+	// Create run dir.
+	runDir := filepath.Join("/tmp/wadjet-harness", fmt.Sprintf("run-%d", started.Unix()))
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		return result, fmt.Errorf("creating run dir: %w", err)
+	}
+
+	// Local mode: preflight + spawn cluster.
+	var cluster *Cluster
+	var coordURL string
+	switch cfg.Mode {
+	case ModeLocal:
+		sliceCfg := SliceConfigs[cfg.Slice]
+		const numWorkers = 2
+		pf := CheckPreflight(sliceCfg, runDir, numWorkers)
+		if !pf.OK {
+			return result, fmt.Errorf("preflight failed:\n  - %s", pf.Error())
+		}
+
+		cluster = NewCluster(ClusterConfig{
+			WadjetBin:  cfg.WadjetBin,
+			RunDir:     runDir,
+			NumWorkers: numWorkers,
+			GoMemLimit: sliceCfg.GoMemLimit,
+			DataDir:    cfg.DataDir,
+			Logger:     logger,
+		})
+		if err := cluster.Start(ctx); err != nil {
+			return result, fmt.Errorf("cluster start: %w", err)
+		}
+		defer cluster.Shutdown(context.Background())
+
+		coordURL = fmt.Sprintf("postgres://wadjet@localhost%s/wadjet?sslmode=disable", cluster.PgAddr())
+
+		if err := loadSampleData(ctx, cfg.DataDir, coordURL, sliceCfg); err != nil {
+			return result, fmt.Errorf("loading sample data: %w", err)
+		}
+
+	case ModeGolden:
+		coordURL = cfg.CoordURL
+
+	default:
+		return result, fmt.Errorf("unknown mode %q", cfg.Mode)
+	}
+
+	// Subscribe to heartbeats for measurement collection.
+	collector := NewCollector()
+	hangDetector := NewHangDetector(30 * time.Second)
+	stopHB := startHeartbeatSubscriber(ctx, cluster, collector, hangDetector)
+	defer stopHB()
+
+	// Run the query suite.
+	queries := SelectQueries(cfg.Queries)
+	sliceCfg := SliceConfigs[cfg.Slice]
+	for _, qname := range queries {
+		m, err := runOneQuery(ctx, coordURL, qname, collector, hangDetector, baseline, sliceCfg)
+		if err != nil {
+			logger.Error("query failed", "q", qname, "err", err)
+			m.Hung = true
+		}
+		result.Queries = append(result.Queries, m)
+		if m.Hung {
+			result.Hangs = append(result.Hangs, qname)
+		}
+	}
+
+	// Compare against baseline.
+	if baseline != nil {
+		for _, m := range result.Queries {
+			if m.Hung {
+				continue
+			}
+			projected, err := baseline.Project(string(cfg.Slice)+"_slice", m)
+			if err != nil {
+				continue
+			}
+			projected.Query = m.Query
+			projected.RowCount = m.RowCount
+			projected.RowChecksum = m.RowChecksum
+			deltas := baseline.Compare(projected)
+			for _, d := range deltas {
+				if d.Status == "REGRESS" {
+					result.Regressions = append(result.Regressions, d)
+				}
+			}
+		}
+	}
+
+	// ExpectSpill assertion for large slice.
+	if cfg.Mode == ModeLocal && cfg.Slice == SliceLarge {
+		var totalSpill int64
+		for _, m := range result.Queries {
+			totalSpill += m.SpillBytes
+		}
+		if totalSpill == 0 {
+			result.Regressions = append(result.Regressions, QueryDelta{
+				Query:  "<run>",
+				Metric: "spill_paths_exercised",
+				Status: "REGRESS",
+			})
+		}
+	}
+
+	result.DurationMs = time.Since(started).Milliseconds()
+	result.Passed = len(result.Regressions) == 0 && len(result.Hangs) == 0
+	result.ExitCode = computeExitCode(result)
+
+	// Write result.json.
+	if cfg.OutPath != "" {
+		if err := writeResult(cfg.OutPath, result); err != nil {
+			logger.Error("writing result", "err", err)
+		}
+	}
+
+	preserveRunDirOnFailure(runDir, result)
+
+	return result, nil
+}
+
+func computeExitCode(r RunResult) int {
+	exit := ExitOK
+	for _, d := range r.Regressions {
+		if d.Metric == "row_count" || d.Metric == "row_checksum" {
+			if exit < ExitCorrectness {
+				exit = ExitCorrectness
+			}
+			continue
+		}
+		if exit < ExitRegression {
+			exit = ExitRegression
+		}
+	}
+	if len(r.Hangs) > 0 && exit < ExitRegression {
+		exit = ExitRegression
+	}
+	return exit
+}
+
+func writeResult(path string, r RunResult) error {
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+func preserveRunDirOnFailure(runDir string, r RunResult) {
+	if r.Passed {
+		_ = os.RemoveAll(runDir)
+		return
+	}
+	manifest := fmt.Sprintf(`Wadjet harness run preserved due to non-PASS result.
+
+mode:     %s
+slice:    %s
+exit:     %d
+hangs:    %v
+
+Layout:
+  logs/coord.log         — coordinator stdout/stderr
+  logs/worker-N.log      — per-worker stdout/stderr
+  spill/<role>/          — spill files (preserved for inspection)
+  nats/                  — embedded NATS jetstream store
+  result.json            — structured run result
+
+To clean up: rm -rf %s
+`, r.Mode, r.Slice, r.ExitCode, r.Hangs, runDir)
+	_ = os.WriteFile(filepath.Join(runDir, "MANIFEST.txt"), []byte(manifest), 0644)
+}
+
+func runOneQuery(
+	ctx context.Context,
+	coordURL string,
+	name string,
+	collector *MeasurementCollector,
+	hangDetector *HangDetector,
+	baseline *BaselineFile,
+	_ SliceConfig,
+) (QueryMeasurement, error) {
+	collector.StartWindow(name)
+	hangDetector.Reset()
+
+	sql, err := LoadQuery(name)
+	if err != nil {
+		if name == "micro_reverse_bloom" {
+			return RunMicroReverseBloom(ctx, coordURL, collector)
+		}
+		return collector.EndWindow(name), err
+	}
+
+	// Hard timeout: 10x baseline projection if known, else 5 min.
+	timeout := 5 * time.Minute
+	if baseline != nil {
+		if qb, ok := baseline.Queries[name]; ok && qb.WallMsP50 > 0 {
+			timeout = time.Duration(qb.WallMsP50) * 10 * time.Millisecond
+		}
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	conn, err := pgx.Connect(queryCtx, coordURL)
+	if err != nil {
+		return collector.EndWindow(name), fmt.Errorf("pgx connect: %w", err)
+	}
+	defer conn.Close(context.Background())
+
+	rows, err := conn.Query(queryCtx, sql)
+	if err != nil {
+		return collector.EndWindow(name), err
+	}
+	defer rows.Close()
+
+	hash := sha256.New()
+	var rowCount int64
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return collector.EndWindow(name), err
+		}
+		fmt.Fprintf(hash, "%v\n", vals)
+		rowCount++
+	}
+	if err := rows.Err(); err != nil {
+		return collector.EndWindow(name), err
+	}
+
+	m := collector.EndWindow(name)
+	m.RowCount = rowCount
+	m.RowChecksum = hex.EncodeToString(hash.Sum(nil))
+	return m, nil
+}
+
+// loadSampleData loads TPC-H sample files from dataDir into the cluster.
+// Stub for v1 — see distributed_tpch_test.go:538-604 for the pattern.
+func loadSampleData(_ context.Context, _ string, _ string, _ SliceConfig) error {
+	return fmt.Errorf("loadSampleData not yet implemented — see distributed_tpch_test.go for the table-load pattern")
+}
+
+// startHeartbeatSubscriber spawns a goroutine that subscribes to the
+// embedded NATS heartbeat subject and feeds samples into the collector
+// and hang detector. Returns a stop function.
+func startHeartbeatSubscriber(
+	ctx context.Context,
+	cluster *Cluster,
+	collector *MeasurementCollector,
+	hangDetector *HangDetector,
+) func() {
+	if cluster == nil || cluster.embeddedNATS == nil {
+		return func() {}
+	}
+
+	nc, err := distributed.ConnectInProcess(cluster.embeddedNATS.Server())
+	if err != nil {
+		return func() {}
+	}
+
+	sub, err := nc.Subscribe(distributed.SubjectHeartbeat, func(msg *nats.Msg) {
+		var hb distributed.WorkerHeartbeat
+		if err := distributed.Unmarshal(msg.Data, &hb); err != nil {
+			return
+		}
+		collector.Observe(hb)
+		hangDetector.Observe(hb.Timestamp, hb.NumGoroutines)
+	})
+	if err != nil {
+		nc.Close()
+		return func() {}
+	}
+
+	stopC := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-stopC:
+		case <-ctx.Done():
+		}
+		sub.Unsubscribe()
+		nc.Close()
+	}()
+
+	return func() {
+		close(stopC)
+		wg.Wait()
+	}
+}
