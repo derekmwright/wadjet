@@ -1,6 +1,7 @@
 package harness
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,7 +13,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/citc-tech/wadjet/benchmarks/tpch"
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 )
@@ -65,16 +70,22 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			DataDir:    cfg.DataDir,
 			Logger:     logger,
 		})
-		if err := cluster.Start(ctx); err != nil {
-			return result, fmt.Errorf("cluster start: %w", err)
+
+		// Two-phase startup: NATS first, seed data, then spawn processes.
+		if err := cluster.StartNATS(ctx); err != nil {
+			return result, fmt.Errorf("cluster NATS start: %w", err)
 		}
 		defer cluster.Shutdown(context.Background())
 
-		coordURL = fmt.Sprintf("postgres://wadjet@localhost%s/wadjet?sslmode=disable", cluster.PgAddr())
-
-		if err := loadSampleData(ctx, cfg.DataDir, coordURL, sliceCfg); err != nil {
+		if err := loadSampleData(ctx, cluster, cfg.DataDir, sliceCfg, logger); err != nil {
 			return result, fmt.Errorf("loading sample data: %w", err)
 		}
+
+		if err := cluster.StartProcesses(ctx); err != nil {
+			return result, fmt.Errorf("cluster process start: %w", err)
+		}
+
+		coordURL = fmt.Sprintf("postgres://wadjet@localhost%s/wadjet?sslmode=disable", cluster.PgAddr())
 
 	case ModeGolden:
 		coordURL = cfg.CoordURL
@@ -270,10 +281,103 @@ func runOneQuery(
 	return m, nil
 }
 
-// loadSampleData loads TPC-H sample files from dataDir into the cluster.
-// Stub for v1 — see distributed_tpch_test.go:538-604 for the pattern.
-func loadSampleData(_ context.Context, _ string, _ string, _ SliceConfig) error {
-	return fmt.Errorf("loadSampleData not yet implemented — see distributed_tpch_test.go for the table-load pattern")
+// loadSampleData generates TPC-H SF0.01 data, writes parquet files into the
+// FileStore directory, and registers them in the NATS KV catalog. This must
+// be called after cluster.StartNATS() and before cluster.StartProcesses()
+// so that when the coordinator and workers boot, the catalog already has
+// all tables and files registered.
+func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ SliceConfig, logger *slog.Logger) error {
+	// Connect to the embedded NATS for catalog access.
+	nc, err := distributed.ConnectInProcess(cluster.EmbeddedNATS().Server())
+	if err != nil {
+		return fmt.Errorf("connecting to NATS for catalog: %w", err)
+	}
+	defer nc.Close()
+
+	js, err := distributed.NewJetStream(nc)
+	if err != nil {
+		return fmt.Errorf("creating JetStream: %w", err)
+	}
+
+	// Set up FileStore at the data dir (same path the coordinator will use).
+	if dataDir == "" {
+		dataDir = "/tmp/wadjet-harness/data"
+	}
+	store, err := objstore.NewFileStore(dataDir)
+	if err != nil {
+		return fmt.Errorf("creating FileStore: %w", err)
+	}
+
+	const bucketName = "wadjet"
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		return fmt.Errorf("creating NATS KV: %w", err)
+	}
+	cat := catalog.New(kv, store, bucketName)
+	if err := cat.Init(ctx); err != nil {
+		return fmt.Errorf("catalog init: %w", err)
+	}
+
+	// Generate SF0.01 data and write as parquet files.
+	const chunksPerTable = 8
+	data := tpch.Generate(tpch.SF001)
+	for tableName, schema := range tpch.AllTables {
+		if err := cat.CreateTable(ctx, tableName, schema, nil); err != nil {
+			return fmt.Errorf("creating table %s: %w", tableName, err)
+		}
+		rows := data[tableName]
+		if len(rows) == 0 {
+			continue
+		}
+
+		numChunks := chunksPerTable
+		if len(rows) < numChunks {
+			numChunks = len(rows)
+		}
+		chunkSize := (len(rows) + numChunks - 1) / numChunks
+		var entries []catalog.FileEntry
+		for cIdx := 0; cIdx < numChunks; cIdx++ {
+			start := cIdx * chunkSize
+			end := start + chunkSize
+			if end > len(rows) {
+				end = len(rows)
+			}
+			if start >= end {
+				break
+			}
+			chunkRows := rows[start:end]
+
+			var buf bytes.Buffer
+			pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+			if err != nil {
+				return fmt.Errorf("parquet writer for %s: %w", tableName, err)
+			}
+			if err := pw.WriteRows(chunkRows); err != nil {
+				return fmt.Errorf("writing %s chunk %d: %w", tableName, cIdx, err)
+			}
+			if err := pw.Close(); err != nil {
+				return fmt.Errorf("closing %s chunk %d: %w", tableName, cIdx, err)
+			}
+
+			filePath := fmt.Sprintf("tables/%s/chunk_%04d.parquet", tableName, cIdx+1)
+			pdata := buf.Bytes()
+			if _, err := store.Put(ctx, bucketName, filePath, bytes.NewReader(pdata), int64(len(pdata)), "application/octet-stream"); err != nil {
+				return fmt.Errorf("storing %s chunk %d: %w", tableName, cIdx, err)
+			}
+			entries = append(entries, catalog.FileEntry{
+				Path:      filePath,
+				SizeBytes: int64(len(pdata)),
+				NumRows:   int64(len(chunkRows)),
+				CreatedAt: time.Now(),
+			})
+		}
+		if err := cat.AddFiles(ctx, tableName, map[string]string{}, "tables/"+tableName+"/", entries); err != nil {
+			return fmt.Errorf("adding %s files to catalog: %w", tableName, err)
+		}
+		logger.Info("loaded table", "table", tableName, "chunks", len(entries), "rows", len(rows))
+	}
+
+	return nil
 }
 
 // startHeartbeatSubscriber spawns a goroutine that subscribes to the

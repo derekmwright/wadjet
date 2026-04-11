@@ -65,9 +65,9 @@ func (c *Cluster) PgAddr() string {
 	return c.cfg.PgAddr
 }
 
-// Start brings up embedded NATS, spawns the coordinator and workers, and
-// blocks until all workers have registered or until ctx is cancelled.
-func (c *Cluster) Start(ctx context.Context) error {
+// StartNATS brings up the embedded NATS server and JetStream streams.
+// Call this first, then seed data into the catalog, then call StartProcesses.
+func (c *Cluster) StartNATS(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -75,7 +75,6 @@ func (c *Cluster) Start(ctx context.Context) error {
 		return fmt.Errorf("creating logs dir: %w", err)
 	}
 
-	// 1. Embedded NATS in our own process.
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = -1 // random free port
 	natsCfg.StoreDir = filepath.Join(c.cfg.RunDir, "nats")
@@ -87,7 +86,42 @@ func (c *Cluster) Start(ctx context.Context) error {
 	c.natsURL = embedded.ClientURL()
 	c.cfg.Logger.Info("embedded NATS up", "url", c.natsURL)
 
-	// 2. Spawn coordinator.
+	// Set up JetStream streams so the catalog KV and task queues are ready.
+	nc, err := distributed.ConnectInProcess(c.embeddedNATS.Server())
+	if err != nil {
+		return fmt.Errorf("connecting in-process for stream setup: %w", err)
+	}
+	defer nc.Close()
+
+	js, err := distributed.NewJetStream(nc)
+	if err != nil {
+		return fmt.Errorf("creating JetStream: %w", err)
+	}
+	if err := distributed.SetupStreams(ctx, js); err != nil {
+		return fmt.Errorf("setting up streams: %w", err)
+	}
+
+	return nil
+}
+
+// NATSURL returns the embedded NATS client URL. Only valid after StartNATS.
+func (c *Cluster) NATSURL() string {
+	return c.natsURL
+}
+
+// EmbeddedNATS returns the embedded NATS server. Only valid after StartNATS.
+func (c *Cluster) EmbeddedNATS() *distributed.EmbeddedNATS {
+	return c.embeddedNATS
+}
+
+// StartProcesses spawns the coordinator and workers, and blocks until
+// all workers have registered or until ctx is cancelled.
+// Must be called after StartNATS and after seeding the catalog.
+func (c *Cluster) StartProcesses(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Spawn coordinator.
 	coordArgs := []string{
 		"serve",
 		"--mode=coordinator",
@@ -104,7 +138,7 @@ func (c *Cluster) Start(ctx context.Context) error {
 	}
 	c.coord = coord
 
-	// 3. Spawn workers.
+	// Spawn workers.
 	for i := 0; i < c.cfg.NumWorkers; i++ {
 		role := fmt.Sprintf("worker-%d", i)
 		workerArgs := []string{
@@ -123,13 +157,23 @@ func (c *Cluster) Start(ctx context.Context) error {
 		c.workers = append(c.workers, w)
 	}
 
-	// 4. Health check: poll worker registry until NumWorkers report in.
+	// Health check: poll worker registry until NumWorkers report in.
 	if err := c.waitWorkersReady(ctx, 30*time.Second); err != nil {
 		return fmt.Errorf("workers not ready: %w", err)
 	}
 
 	c.cfg.Logger.Info("cluster ready", "workers", c.cfg.NumWorkers)
 	return nil
+}
+
+// Start is a convenience that calls StartNATS + StartProcesses. Use the
+// two-phase API (StartNATS, seed data, StartProcesses) when you need to
+// populate the catalog before the coordinator boots.
+func (c *Cluster) Start(ctx context.Context) error {
+	if err := c.StartNATS(ctx); err != nil {
+		return err
+	}
+	return c.StartProcesses(ctx)
 }
 
 func (c *Cluster) spawn(role string, args []string) (*managedProcess, error) {
