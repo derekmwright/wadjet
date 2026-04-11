@@ -29,8 +29,10 @@ func CheckPreflight(slice SliceConfig, runDir string, workerCount int) Preflight
 		errs = append(errs, fmt.Sprintf("harness requires linux (got %s)", runtime.GOOS))
 	}
 
-	// Free RAM: (GoMemLimit * workers) + 3 GB coord/harness + 4 GB OS headroom
-	requiredRAMBytes := slice.GoMemLimit*int64(workerCount) + 3*int64(GB) + 4*int64(GB)
+	// Free RAM: (GoMemLimit * workers) + 2 GB coord/harness overhead.
+	// SF0.01 data is ~10 MB so the actual heap pressure is minimal;
+	// GOMEMLIMIT is a soft cap, not a reservation.
+	requiredRAMBytes := slice.GoMemLimit*int64(workerCount) + 2*int64(GB)
 	if err := checkFreeRAM(requiredRAMBytes); err != nil {
 		errs = append(errs, err.Error())
 	}
@@ -92,8 +94,11 @@ func checkFreeDisk(runDir string, required int64) error {
 	return nil
 }
 
+// checkNoOrphanedWadjet looks for wadjet processes spawned by a prior
+// harness run (matching "wadjet serve --nats-url"). User-started standalone
+// servers or unrelated processes are ignored.
 func checkNoOrphanedWadjet() error {
-	cmd := exec.Command("pgrep", "-f", "wadjet")
+	cmd := exec.Command("pgrep", "-f", "wadjet serve --nats-url")
 	out, err := cmd.Output()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
@@ -113,7 +118,7 @@ func checkNoOrphanedWadjet() error {
 		}
 	}
 	if len(others) > 0 {
-		return fmt.Errorf("orphaned wadjet processes detected: pids %s — kill them and re-run",
+		return fmt.Errorf("orphaned harness-spawned wadjet processes detected: pids %s — kill them and re-run",
 			strings.Join(others, " "))
 	}
 	return nil

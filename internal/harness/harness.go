@@ -71,9 +71,9 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			Logger:     logger,
 		})
 
-		// Two-phase startup: NATS first, seed data, then spawn processes.
-		if err := cluster.StartNATS(ctx); err != nil {
-			return result, fmt.Errorf("cluster NATS start: %w", err)
+		// Two-phase startup: coordinator (owns NATS) first, seed data, then workers.
+		if err := cluster.StartCoordinator(ctx); err != nil {
+			return result, fmt.Errorf("starting coordinator: %w", err)
 		}
 		defer cluster.Shutdown(context.Background())
 
@@ -81,8 +81,8 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			return result, fmt.Errorf("loading sample data: %w", err)
 		}
 
-		if err := cluster.StartProcesses(ctx); err != nil {
-			return result, fmt.Errorf("cluster process start: %w", err)
+		if err := cluster.StartWorkers(ctx); err != nil {
+			return result, fmt.Errorf("starting workers: %w", err)
 		}
 
 		coordURL = fmt.Sprintf("postgres://wadjet@localhost%s/wadjet?sslmode=disable", cluster.PgAddr())
@@ -287,8 +287,8 @@ func runOneQuery(
 // so that when the coordinator and workers boot, the catalog already has
 // all tables and files registered.
 func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ SliceConfig, logger *slog.Logger) error {
-	// Connect to the embedded NATS for catalog access.
-	nc, err := distributed.ConnectInProcess(cluster.EmbeddedNATS().Server())
+	// Connect to the coordinator's NATS for catalog access.
+	nc, err := cluster.ConnectNATS()
 	if err != nil {
 		return fmt.Errorf("connecting to NATS for catalog: %w", err)
 	}
@@ -389,11 +389,11 @@ func startHeartbeatSubscriber(
 	collector *MeasurementCollector,
 	hangDetector *HangDetector,
 ) func() {
-	if cluster == nil || cluster.embeddedNATS == nil {
+	if cluster == nil {
 		return func() {}
 	}
 
-	nc, err := distributed.ConnectInProcess(cluster.embeddedNATS.Server())
+	nc, err := cluster.ConnectNATS()
 	if err != nil {
 		return func() {}
 	}

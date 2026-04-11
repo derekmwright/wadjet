@@ -50,11 +50,10 @@ func TestLoadSampleDataPopulatesCatalog(t *testing.T) {
 		t.Fatalf("SetupStreams: %v", err)
 	}
 
-	// Create a fake cluster with just the embedded NATS (no processes).
+	// Create a fake cluster pointing at the embedded NATS URL.
 	dataDir := filepath.Join(t.TempDir(), "data")
 	cluster := &Cluster{
-		embeddedNATS: embedded,
-		natsURL:      embedded.ClientURL(),
+		natsURL: embedded.ClientURL(),
 	}
 
 	sliceCfg := SliceConfigs[SliceSmall]

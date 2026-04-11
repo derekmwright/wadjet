@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -27,14 +29,17 @@ type ClusterConfig struct {
 	Logger     *slog.Logger
 }
 
-// Cluster is a process supervisor for one coordinator + N workers running
-// against an embedded NATS started in this process. Shutdown is idempotent.
+// Cluster is a process supervisor for one coordinator + N workers.
+// The coordinator owns the embedded NATS server; the harness connects
+// to it via TCP to seed catalog data and subscribe to heartbeats.
 type Cluster struct {
 	cfg ClusterConfig
 
 	mu           sync.Mutex
-	embeddedNATS *distributed.EmbeddedNATS
+	natsPort     int
 	natsURL      string
+	httpPort     int
+	grpcPort     int
 	coord        *managedProcess
 	workers      []*managedProcess
 	shutdownOnce sync.Once
@@ -65,9 +70,10 @@ func (c *Cluster) PgAddr() string {
 	return c.cfg.PgAddr
 }
 
-// StartNATS brings up the embedded NATS server and JetStream streams.
-// Call this first, then seed data into the catalog, then call StartProcesses.
-func (c *Cluster) StartNATS(ctx context.Context) error {
+// StartCoordinator spawns the coordinator process (which owns the embedded
+// NATS server) and waits until NATS is accepting connections. Call this
+// first, then seed data via ConnectNATS, then call StartWorkers.
+func (c *Cluster) StartCoordinator(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -75,59 +81,23 @@ func (c *Cluster) StartNATS(ctx context.Context) error {
 		return fmt.Errorf("creating logs dir: %w", err)
 	}
 
-	natsCfg := distributed.DefaultNATSConfig()
-	natsCfg.Port = -1 // random free port
-	natsCfg.StoreDir = filepath.Join(c.cfg.RunDir, "nats")
-	embedded, err := distributed.NewEmbeddedNATS(natsCfg, c.cfg.Logger)
-	if err != nil {
-		return fmt.Errorf("starting embedded NATS: %w", err)
-	}
-	c.embeddedNATS = embedded
-	c.natsURL = embedded.ClientURL()
-	c.cfg.Logger.Info("embedded NATS up", "url", c.natsURL)
+	// Pick random free ports for NATS, HTTP, and gRPC to avoid conflicts.
+	c.natsPort = freePort()
+	c.httpPort = freePort()
+	c.grpcPort = freePort()
+	c.natsURL = fmt.Sprintf("nats://127.0.0.1:%d", c.natsPort)
 
-	// Set up JetStream streams so the catalog KV and task queues are ready.
-	nc, err := distributed.ConnectInProcess(c.embeddedNATS.Server())
-	if err != nil {
-		return fmt.Errorf("connecting in-process for stream setup: %w", err)
-	}
-	defer nc.Close()
-
-	js, err := distributed.NewJetStream(nc)
-	if err != nil {
-		return fmt.Errorf("creating JetStream: %w", err)
-	}
-	if err := distributed.SetupStreams(ctx, js); err != nil {
-		return fmt.Errorf("setting up streams: %w", err)
-	}
-
-	return nil
-}
-
-// NATSURL returns the embedded NATS client URL. Only valid after StartNATS.
-func (c *Cluster) NATSURL() string {
-	return c.natsURL
-}
-
-// EmbeddedNATS returns the embedded NATS server. Only valid after StartNATS.
-func (c *Cluster) EmbeddedNATS() *distributed.EmbeddedNATS {
-	return c.embeddedNATS
-}
-
-// StartProcesses spawns the coordinator and workers, and blocks until
-// all workers have registered or until ctx is cancelled.
-// Must be called after StartNATS and after seeding the catalog.
-func (c *Cluster) StartProcesses(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Spawn coordinator.
+	// Use standalone mode: it starts pgwire + embedded NATS + 1 internal
+	// worker. External workers join via --nats-url in StartWorkers.
 	coordArgs := []string{
 		"serve",
-		"--mode=coordinator",
-		"--nats-url=" + c.natsURL,
+		"--mode=standalone",
+		"--nats-port=" + strconv.Itoa(c.natsPort),
 		"--pg-addr=" + c.cfg.PgAddr,
+		"--http-addr=:" + strconv.Itoa(c.httpPort),
+		"--grpc-addr=:" + strconv.Itoa(c.grpcPort),
 		"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", "coord"),
+		"--nats-store-dir=" + filepath.Join(c.cfg.RunDir, "nats"),
 	}
 	if c.cfg.DataDir != "" {
 		coordArgs = append(coordArgs, "--storage-type=file", "--data-dir="+c.cfg.DataDir)
@@ -138,7 +108,34 @@ func (c *Cluster) StartProcesses(ctx context.Context) error {
 	}
 	c.coord = coord
 
-	// Spawn workers.
+	// Wait for NATS and pgwire to accept connections.
+	if err := c.waitNATSReady(ctx, 15*time.Second); err != nil {
+		return fmt.Errorf("coordinator NATS not ready: %w", err)
+	}
+	if err := c.waitPortReady(ctx, c.cfg.PgAddr, 15*time.Second); err != nil {
+		return fmt.Errorf("coordinator pgwire not ready: %w", err)
+	}
+
+	c.cfg.Logger.Info("coordinator up", "nats", c.natsURL, "pg", c.cfg.PgAddr)
+	return nil
+}
+
+// NATSURL returns the coordinator's NATS URL. Only valid after StartCoordinator.
+func (c *Cluster) NATSURL() string {
+	return c.natsURL
+}
+
+// ConnectNATS returns a NATS connection to the coordinator's embedded NATS.
+func (c *Cluster) ConnectNATS() (*nats.Conn, error) {
+	return distributed.Connect(c.natsURL, nil)
+}
+
+// StartWorkers spawns worker processes and waits for them to register.
+// Must be called after StartCoordinator and after seeding the catalog.
+func (c *Cluster) StartWorkers(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	for i := 0; i < c.cfg.NumWorkers; i++ {
 		role := fmt.Sprintf("worker-%d", i)
 		workerArgs := []string{
@@ -157,7 +154,6 @@ func (c *Cluster) StartProcesses(ctx context.Context) error {
 		c.workers = append(c.workers, w)
 	}
 
-	// Health check: poll worker registry until NumWorkers report in.
 	if err := c.waitWorkersReady(ctx, 30*time.Second); err != nil {
 		return fmt.Errorf("workers not ready: %w", err)
 	}
@@ -166,14 +162,59 @@ func (c *Cluster) StartProcesses(ctx context.Context) error {
 	return nil
 }
 
-// Start is a convenience that calls StartNATS + StartProcesses. Use the
-// two-phase API (StartNATS, seed data, StartProcesses) when you need to
-// populate the catalog before the coordinator boots.
+// Start is a convenience that calls StartCoordinator + StartWorkers
+// without seeding data in between.
 func (c *Cluster) Start(ctx context.Context) error {
-	if err := c.StartNATS(ctx); err != nil {
+	if err := c.StartCoordinator(ctx); err != nil {
 		return err
 	}
-	return c.StartProcesses(ctx)
+	return c.StartWorkers(ctx)
+}
+
+// waitNATSReady polls until the coordinator's NATS port accepts a connection.
+func (c *Cluster) waitNATSReady(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	addr := fmt.Sprintf("127.0.0.1:%d", c.natsPort)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		// Check if coordinator crashed.
+		select {
+		case <-c.coord.exitedC:
+			return fmt.Errorf("coordinator exited before NATS was ready: %v", c.coord.exitErr)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("NATS not ready at %s after %s", addr, timeout)
+}
+
+// waitPortReady polls until the given address accepts a TCP connection.
+func (c *Cluster) waitPortReady(ctx context.Context, addr string, timeout time.Duration) error {
+	// Normalize ":15433" to "127.0.0.1:15433".
+	if addr[0] == ':' {
+		addr = "127.0.0.1" + addr
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		select {
+		case <-c.coord.exitedC:
+			return fmt.Errorf("coordinator exited before port %s was ready: %v", addr, c.coord.exitErr)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("port %s not ready after %s", addr, timeout)
 }
 
 func (c *Cluster) spawn(role string, args []string) (*managedProcess, error) {
@@ -212,9 +253,9 @@ func (c *Cluster) spawn(role string, args []string) (*managedProcess, error) {
 }
 
 func (c *Cluster) waitWorkersReady(ctx context.Context, timeout time.Duration) error {
-	nc, err := distributed.ConnectInProcess(c.embeddedNATS.Server())
+	nc, err := distributed.Connect(c.natsURL, nil)
 	if err != nil {
-		return fmt.Errorf("connecting in-process: %w", err)
+		return fmt.Errorf("connecting to NATS for worker check: %w", err)
 	}
 	defer nc.Close()
 
@@ -288,13 +329,19 @@ func (c *Cluster) shutdown(_ context.Context) error {
 		}
 	}
 
-	if c.embeddedNATS != nil {
-		c.embeddedNATS.Shutdown()
-		c.embeddedNATS = nil
-	}
-
 	if err := checkNoOrphanedWadjet(); err != nil {
 		return fmt.Errorf("post-shutdown orphan check: %w", err)
 	}
 	return nil
+}
+
+// freePort asks the kernel for an available TCP port.
+func freePort() int {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0
+	}
+	port := l.Addr().(*net.TCPAddr).Port
+	l.Close()
+	return port
 }
