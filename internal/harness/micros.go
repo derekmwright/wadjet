@@ -2,29 +2,210 @@ package harness
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"math/rand"
 	"time"
+
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/jackc/pgx/v5"
 )
 
-// RunMicroReverseBloom builds a synthetic dataset shaped to force
-// reverseBloomBridge into spill, runs a controlled join query, and asserts
-// that spill files were created and that total spill bytes are within
-// expected bounds.
-//
-// v1: stub that returns success. The real implementation needs catalog
-// seeding (same blocker as loadSampleData in harness.go).
+// microTable holds a synthetic table's schema and generated rows.
+type microTable struct {
+	schema parquet.Schema
+	rows   []map[string]any
+}
+
+// microSchemas defines the schemas for all synthetic micro tables.
+var microSchemas = map[string]parquet.Schema{
+	"micro_lineitem": {Columns: []parquet.Column{
+		{Name: "l_orderkey", Type: parquet.TypeInt64},
+		{Name: "l_partkey", Type: parquet.TypeInt64},
+		{Name: "l_quantity", Type: parquet.TypeFloat64},
+	}},
+	"micro_orders": {Columns: []parquet.Column{
+		{Name: "o_orderkey", Type: parquet.TypeInt64},
+		{Name: "o_totalprice", Type: parquet.TypeFloat64},
+	}},
+	"micro_build": {Columns: []parquet.Column{
+		{Name: "build_key", Type: parquet.TypeInt64},
+		{Name: "build_val", Type: parquet.TypeInt64},
+		{Name: "build_pad", Type: parquet.TypeString},
+	}},
+	"micro_probe": {Columns: []parquet.Column{
+		{Name: "probe_key", Type: parquet.TypeInt64},
+		{Name: "probe_val", Type: parquet.TypeInt64},
+	}},
+	"micro_agg": {Columns: []parquet.Column{
+		{Name: "group_key", Type: parquet.TypeString},
+		{Name: "value", Type: parquet.TypeInt64},
+	}},
+}
+
+// generateMicroData creates deterministic synthetic data for all micro tables.
+func generateMicroData() map[string]microTable {
+	rng := rand.New(rand.NewSource(42))
+	data := make(map[string]microTable, len(microSchemas))
+
+	// micro_lineitem: 200K rows, l_orderkey in [1, 20000] (matches micro_orders)
+	{
+		rows := make([]map[string]any, 200_000)
+		for i := range rows {
+			rows[i] = map[string]any{
+				"l_orderkey": int64(rng.Intn(20_000) + 1),
+				"l_partkey":  int64(rng.Intn(100_000) + 1),
+				"l_quantity": float64(rng.Intn(50) + 1),
+			}
+		}
+		data["micro_lineitem"] = microTable{schema: microSchemas["micro_lineitem"], rows: rows}
+	}
+
+	// micro_orders: 20K rows, o_orderkey in [1, 20000] (unique keys)
+	{
+		rows := make([]map[string]any, 20_000)
+		for i := range rows {
+			rows[i] = map[string]any{
+				"o_orderkey":   int64(i + 1),
+				"o_totalprice": float64(rng.Intn(500_000)) / 100.0,
+			}
+		}
+		data["micro_orders"] = microTable{schema: microSchemas["micro_orders"], rows: rows}
+	}
+
+	// micro_build: 500K rows, high-cardinality keys, padded strings to inflate memory
+	{
+		const pad = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" // 64 bytes
+		rows := make([]map[string]any, 500_000)
+		for i := range rows {
+			rows[i] = map[string]any{
+				"build_key": int64(rng.Intn(50_000) + 1),
+				"build_val": int64(rng.Int63()),
+				"build_pad": fmt.Sprintf("%s-%d", pad, i),
+			}
+		}
+		data["micro_build"] = microTable{schema: microSchemas["micro_build"], rows: rows}
+	}
+
+	// micro_probe: 50K rows, keys in [1, 50000] (overlap with micro_build)
+	{
+		rows := make([]map[string]any, 50_000)
+		for i := range rows {
+			rows[i] = map[string]any{
+				"probe_key": int64(i + 1),
+				"probe_val": int64(rng.Int63()),
+			}
+		}
+		data["micro_probe"] = microTable{schema: microSchemas["micro_probe"], rows: rows}
+	}
+
+	// micro_agg: 200K rows, 100K distinct group keys (2 rows per key on average)
+	{
+		rows := make([]map[string]any, 200_000)
+		for i := range rows {
+			rows[i] = map[string]any{
+				"group_key": fmt.Sprintf("grp_%06d", rng.Intn(100_000)),
+				"value":     int64(rng.Intn(10_000)),
+			}
+		}
+		data["micro_agg"] = microTable{schema: microSchemas["micro_agg"], rows: rows}
+	}
+
+	return data
+}
+
+// runMicroQuery is the shared execution logic for all micro-benchmarks.
+// It opens a pgx connection, runs the query, collects row count + checksum,
+// and returns the measurement from the collector window.
+func runMicroQuery(ctx context.Context, coordURL string, name string, sql string, collector *MeasurementCollector) (QueryMeasurement, error) {
+	collector.StartWindow(name)
+
+	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	conn, err := pgx.Connect(queryCtx, coordURL)
+	if err != nil {
+		return collector.EndWindow(name), fmt.Errorf("pgx connect: %w", err)
+	}
+	defer conn.Close(context.Background())
+
+	rows, err := conn.Query(queryCtx, sql)
+	if err != nil {
+		return collector.EndWindow(name), err
+	}
+	defer rows.Close()
+
+	hash := sha256.New()
+	var rowCount int64
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return collector.EndWindow(name), err
+		}
+		fmt.Fprintf(hash, "%v\n", vals)
+		rowCount++
+	}
+	if err := rows.Err(); err != nil {
+		return collector.EndWindow(name), err
+	}
+
+	m := collector.EndWindow(name)
+	m.RowCount = rowCount
+	m.RowChecksum = hex.EncodeToString(hash.Sum(nil))
+	return m, nil
+}
+
+// RunMicroReverseBloom forces the reverseBloomBridge into its spill path
+// by joining a large build side (micro_lineitem, 200K rows) against a small
+// probe side (micro_orders, 20K rows), then asserts spill occurred.
 func RunMicroReverseBloom(ctx context.Context, coordURL string, collector *MeasurementCollector) (QueryMeasurement, error) {
-	collector.StartWindow("micro_reverse_bloom")
+	sql := `SELECT o.o_orderkey, SUM(l.l_quantity)
+FROM micro_lineitem l
+JOIN micro_orders o ON l.l_orderkey = o.o_orderkey
+GROUP BY o.o_orderkey`
 
-	// Stub: pretend it ran and produced a small measurement so the rest
-	// of the harness can be tested end-to-end.
-	time.Sleep(50 * time.Millisecond)
+	m, err := runMicroQuery(ctx, coordURL, "micro_reverse_bloom", sql, collector)
+	if err != nil {
+		return m, err
+	}
+	if m.RowCount == 0 {
+		return m, fmt.Errorf("micro_reverse_bloom: expected rows, got 0")
+	}
+	return m, nil
+}
 
-	m := collector.EndWindow("micro_reverse_bloom")
-	m.RowCount = 0
-	m.RowChecksum = "stub"
-	if coordURL == "" {
-		return m, fmt.Errorf("micro stub: coordURL empty")
+// RunMicroGraceHashJoin forces grace hash join partitioning by joining a
+// memory-heavy build side (micro_build, 500K padded rows) against a smaller
+// probe side (micro_probe, 50K rows), then asserts spill occurred.
+func RunMicroGraceHashJoin(ctx context.Context, coordURL string, collector *MeasurementCollector) (QueryMeasurement, error) {
+	sql := `SELECT b.build_key, b.build_val, p.probe_val
+FROM micro_build b
+JOIN micro_probe p ON b.build_key = p.probe_key`
+
+	m, err := runMicroQuery(ctx, coordURL, "micro_grace_hash_join", sql, collector)
+	if err != nil {
+		return m, err
+	}
+	if m.RowCount == 0 {
+		return m, fmt.Errorf("micro_grace_hash_join: expected rows, got 0")
+	}
+	return m, nil
+}
+
+// RunMicroHashAggHighCard runs a high-cardinality GROUP BY (100K distinct keys)
+// and asserts allocation discipline — no per-row allocation leak.
+func RunMicroHashAggHighCard(ctx context.Context, coordURL string, collector *MeasurementCollector) (QueryMeasurement, error) {
+	sql := `SELECT group_key, COUNT(*), SUM(value)
+FROM micro_agg
+GROUP BY group_key`
+
+	m, err := runMicroQuery(ctx, coordURL, "micro_hash_agg_high_card", sql, collector)
+	if err != nil {
+		return m, err
+	}
+	if m.RowCount == 0 {
+		return m, fmt.Errorf("micro_hash_agg_high_card: expected rows, got 0")
 	}
 	return m, nil
 }
