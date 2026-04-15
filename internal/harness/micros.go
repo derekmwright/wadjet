@@ -204,8 +204,9 @@ GROUP BY group_key`
 	if err != nil {
 		return m, err
 	}
-	if m.RowCount == 0 {
-		return m, fmt.Errorf("micro_hash_agg_high_card: expected rows, got 0")
+	// micro_agg has 100K distinct group keys; verify exact count.
+	if m.RowCount != 100_000 {
+		return m, fmt.Errorf("micro_hash_agg_high_card: expected 100000 rows, got %d", m.RowCount)
 	}
 	return m, nil
 }

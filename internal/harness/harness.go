@@ -239,6 +239,11 @@ func captureGoroutineDumps(cluster *Cluster, query string, runDir string, logger
 			logger.Warn("pprof fetch failed", "role", role, "query", query, "err", err)
 			continue
 		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			logger.Warn("pprof non-200", "role", role, "query", query, "status", resp.StatusCode)
+			continue
+		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		dumpPath := filepath.Join(dumpDir, fmt.Sprintf("hang-%s-%s.txt", query, role))
