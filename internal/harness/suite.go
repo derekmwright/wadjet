@@ -72,7 +72,7 @@ func AllTPCHQueries() []string {
 func SelectQueries(requested []string) []string {
 	if len(requested) == 0 {
 		out := AllTPCHQueries()
-		out = append(out, "micro_reverse_bloom")
+		out = append(out, "micro_reverse_bloom", "micro_grace_hash_join", "micro_hash_agg_high_card")
 		return out
 	}
 	return requested

@@ -13,8 +13,8 @@ func TestSliceConfigs(t *testing.T) {
 
 func TestSelectQueriesEmpty(t *testing.T) {
 	got := SelectQueries(nil)
-	if len(got) != 23 {
-		t.Errorf("want 22+1 queries, got %d", len(got))
+	if len(got) != 25 { // 22 TPC-H + 3 micros
+		t.Errorf("want 22+3 queries, got %d", len(got))
 	}
 }
 

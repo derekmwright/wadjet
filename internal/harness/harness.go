@@ -268,10 +268,16 @@ func runOneQuery(
 
 	sql, err := LoadQuery(name)
 	if err != nil {
-		if name == "micro_reverse_bloom" {
+		switch name {
+		case "micro_reverse_bloom":
 			return RunMicroReverseBloom(ctx, coordURL, collector)
+		case "micro_grace_hash_join":
+			return RunMicroGraceHashJoin(ctx, coordURL, collector)
+		case "micro_hash_agg_high_card":
+			return RunMicroHashAggHighCard(ctx, coordURL, collector)
+		default:
+			return collector.EndWindow(name), err
 		}
-		return collector.EndWindow(name), err
 	}
 
 	// Hard timeout: 10x baseline projection if known, else 5 min.
@@ -418,6 +424,43 @@ func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ Sli
 			return fmt.Errorf("adding %s files to catalog: %w", tableName, err)
 		}
 		logger.Info("loaded table", "table", tableName, "chunks", len(entries), "rows", len(rows))
+	}
+
+	// Seed synthetic micro tables for micro-benchmarks.
+	microData := generateMicroData()
+	for tableName, mt := range microData {
+		if err := cat.CreateTable(ctx, tableName, mt.schema, nil); err != nil {
+			return fmt.Errorf("creating micro table %s: %w", tableName, err)
+		}
+		if len(mt.rows) == 0 {
+			continue
+		}
+		var buf bytes.Buffer
+		pw, err := parquet.NewWriter(&buf, mt.schema, parquet.DefaultWriterConfig())
+		if err != nil {
+			return fmt.Errorf("parquet writer for %s: %w", tableName, err)
+		}
+		if err := pw.WriteRows(mt.rows); err != nil {
+			return fmt.Errorf("writing %s: %w", tableName, err)
+		}
+		if err := pw.Close(); err != nil {
+			return fmt.Errorf("closing %s: %w", tableName, err)
+		}
+		filePath := fmt.Sprintf("tables/%s/chunk_0001.parquet", tableName)
+		pdata := buf.Bytes()
+		if _, err := store.Put(ctx, bucketName, filePath, bytes.NewReader(pdata), int64(len(pdata)), "application/octet-stream"); err != nil {
+			return fmt.Errorf("storing %s: %w", tableName, err)
+		}
+		entries := []catalog.FileEntry{{
+			Path:      filePath,
+			SizeBytes: int64(len(pdata)),
+			NumRows:   int64(len(mt.rows)),
+			CreatedAt: time.Now(),
+		}}
+		if err := cat.AddFiles(ctx, tableName, map[string]string{}, "tables/"+tableName+"/", entries); err != nil {
+			return fmt.Errorf("adding %s files to catalog: %w", tableName, err)
+		}
+		logger.Info("loaded micro table", "table", tableName, "rows", len(mt.rows))
 	}
 
 	return nil

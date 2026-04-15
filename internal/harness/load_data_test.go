@@ -90,6 +90,8 @@ func TestLoadSampleDataPopulatesCatalog(t *testing.T) {
 	expected := map[string]bool{
 		"region": true, "nation": true, "supplier": true, "part": true,
 		"partsupp": true, "customer": true, "orders": true, "lineitem": true,
+		"micro_lineitem": true, "micro_orders": true, "micro_build": true,
+		"micro_probe": true, "micro_agg": true,
 	}
 	if len(tables) != len(expected) {
 		t.Errorf("want %d tables, got %d: %v", len(expected), len(tables), tables)
