@@ -634,6 +634,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 				MemoryTotal:   int64(memStats.Sys),
 				RSS:           distributed.ProcessRSS(),
 				NumGoroutines: distributed.NumGoroutines(),
+				Mallocs:       memStats.Mallocs,
 				SpillDiskUsed: distributed.DirDiskUsage(w.config.SpillDir),
 				Draining:      w.Draining(),
 				Timestamp:     time.Now(),

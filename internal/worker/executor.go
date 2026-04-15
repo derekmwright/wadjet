@@ -161,6 +161,8 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		return result
 	}
 
+	peakTracker := newTaskPeakHeapTracker(ctx)
+
 	var err error
 	switch task.Type {
 	case distributed.TaskTypePipeline:
@@ -168,6 +170,8 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	default:
 		err = fmt.Errorf("unsupported task type: %s", task.Type)
 	}
+
+	peakTracker.Stop()
 
 	result.Duration = time.Since(start)
 	if err != nil {
@@ -181,6 +185,7 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	if result.TaskStats == nil {
 		result.TaskStats = &distributed.TaskStats{RSS: distributed.ProcessRSS()}
 	}
+	result.TaskStats.PeakHeapMB = peakTracker.PeakMB()
 
 	return result
 }

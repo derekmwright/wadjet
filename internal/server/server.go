@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"strconv"
 	"strings"
 	"time"
@@ -109,6 +110,15 @@ func New(cfg Config, logger *slog.Logger) *Server {
 	if s.metrics != nil {
 		s.mux.Handle("/metrics", s.metrics.Handler())
 	}
+
+	s.mux.HandleFunc("/debug/pprof/", pprof.Index)
+	s.mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	s.mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	s.mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	s.mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	s.mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	s.mux.Handle("/debug/pprof/heap", pprof.Handler("heap"))
+	s.mux.Handle("/debug/pprof/allocs", pprof.Handler("allocs"))
 
 	return s
 }

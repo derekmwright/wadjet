@@ -175,6 +175,7 @@ type TaskStats struct {
 	SpillFiles int   `json:"spill_files"` // number of spill files written
 	SpillBytes int64 `json:"spill_bytes"` // total bytes spilled to disk
 	RSS        int64 `json:"rss"`         // worker process RSS at task completion
+	PeakHeapMB int64 `json:"peak_heap_mb"` // per-task peak HeapAlloc in MB, captured by atomic-max sampler
 }
 
 // WorkerHeartbeat is periodically sent by workers.
@@ -187,6 +188,7 @@ type WorkerHeartbeat struct {
 	MemoryTotal   int64     `json:"memory_total"`
 	RSS           int64     `json:"rss,omitempty"`             // process RSS from /proc/self/status
 	NumGoroutines int       `json:"num_goroutines,omitempty"`
+	Mallocs       uint64    `json:"mallocs,omitempty"`         // cumulative allocation count from runtime.MemStats
 	SpillDiskUsed int64     `json:"spill_disk_used,omitempty"` // bytes used in spill directory
 	Draining      bool      `json:"draining,omitempty"`        // true when worker is draining
 	Timestamp     time.Time `json:"timestamp"`

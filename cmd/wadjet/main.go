@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	nethttppprof "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1136,6 +1137,14 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	// Start /metrics HTTP endpoint for Prometheus scraping
 	metricsMux := http.NewServeMux()
 	metricsMux.Handle("/metrics", m.Handler())
+	metricsMux.HandleFunc("/debug/pprof/", nethttppprof.Index)
+	metricsMux.HandleFunc("/debug/pprof/cmdline", nethttppprof.Cmdline)
+	metricsMux.HandleFunc("/debug/pprof/profile", nethttppprof.Profile)
+	metricsMux.HandleFunc("/debug/pprof/symbol", nethttppprof.Symbol)
+	metricsMux.HandleFunc("/debug/pprof/trace", nethttppprof.Trace)
+	metricsMux.Handle("/debug/pprof/goroutine", nethttppprof.Handler("goroutine"))
+	metricsMux.Handle("/debug/pprof/heap", nethttppprof.Handler("heap"))
+	metricsMux.Handle("/debug/pprof/allocs", nethttppprof.Handler("allocs"))
 	metricsSrv := &http.Server{Addr: metricsAddr, Handler: metricsMux}
 	go func() {
 		logger.Info("worker metrics server listening", "addr", metricsAddr)
