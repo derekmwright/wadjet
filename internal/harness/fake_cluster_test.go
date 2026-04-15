@@ -89,3 +89,27 @@ func TestComputeExitCodeHang(t *testing.T) {
 		t.Errorf("expected ExitRegression (%d), got %d", ExitRegression, code)
 	}
 }
+
+func TestDebugPortsMapping(t *testing.T) {
+	c := &Cluster{
+		cfg:      ClusterConfig{PgAddr: ":15433"},
+		httpPort: 8080,
+	}
+	c.workers = []*managedProcess{
+		{role: "worker-0", debugPort: 9200},
+		{role: "worker-1", debugPort: 9201},
+	}
+	ports := c.DebugPorts()
+	if ports["coord"] != 8080 {
+		t.Errorf("coord port: want 8080, got %d", ports["coord"])
+	}
+	if ports["worker-0"] != 9200 {
+		t.Errorf("worker-0 port: want 9200, got %d", ports["worker-0"])
+	}
+	if ports["worker-1"] != 9201 {
+		t.Errorf("worker-1 port: want 9201, got %d", ports["worker-1"])
+	}
+	if len(ports) != 3 {
+		t.Errorf("want 3 entries, got %d", len(ports))
+	}
+}

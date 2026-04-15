@@ -47,11 +47,12 @@ type Cluster struct {
 }
 
 type managedProcess struct {
-	role    string // "coord" or "worker-N"
-	cmd     *exec.Cmd
-	logFile *os.File
-	exitedC chan struct{} // closed when the process exits
-	exitErr error
+	role      string // "coord" or "worker-N"
+	cmd       *exec.Cmd
+	logFile   *os.File
+	exitedC   chan struct{} // closed when the process exits
+	exitErr   error
+	debugPort int // HTTP metrics/pprof port; 0 if not assigned
 }
 
 // NewCluster constructs a Cluster but does not start anything.
@@ -68,6 +69,23 @@ func NewCluster(cfg ClusterConfig) *Cluster {
 // PgAddr returns the pgwire address of the coordinator.
 func (c *Cluster) PgAddr() string {
 	return c.cfg.PgAddr
+}
+
+// DebugPorts returns a map of role → HTTP port for pprof access.
+// Only valid after StartCoordinator and StartWorkers have been called.
+func (c *Cluster) DebugPorts() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ports := make(map[string]int, 1+len(c.workers))
+	if c.httpPort > 0 {
+		ports["coord"] = c.httpPort
+	}
+	for _, w := range c.workers {
+		if w.debugPort > 0 {
+			ports[w.role] = w.debugPort
+		}
+	}
+	return ports
 }
 
 // StartCoordinator spawns the coordinator process (which owns the embedded
@@ -138,11 +156,13 @@ func (c *Cluster) StartWorkers(ctx context.Context) error {
 
 	for i := 0; i < c.cfg.NumWorkers; i++ {
 		role := fmt.Sprintf("worker-%d", i)
+		metricsPort := freePort()
 		workerArgs := []string{
 			"serve",
 			"--mode=worker",
 			"--nats-url=" + c.natsURL,
 			"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", role),
+			"--metrics-addr=:" + strconv.Itoa(metricsPort),
 		}
 		if c.cfg.DataDir != "" {
 			workerArgs = append(workerArgs, "--storage-type=file", "--data-dir="+c.cfg.DataDir)
@@ -151,6 +171,7 @@ func (c *Cluster) StartWorkers(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("spawning %s: %w", role, err)
 		}
+		w.debugPort = metricsPort
 		c.workers = append(c.workers, w)
 	}
 
