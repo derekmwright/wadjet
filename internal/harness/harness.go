@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -104,7 +106,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 	queries := SelectQueries(cfg.Queries)
 	sliceCfg := SliceConfigs[cfg.Slice]
 	for _, qname := range queries {
-		m, err := runOneQuery(ctx, coordURL, qname, collector, hangDetector, baseline, sliceCfg)
+		m, err := runOneQuery(ctx, coordURL, qname, collector, hangDetector, baseline, sliceCfg, cluster, runDir, logger)
 		if err != nil {
 			logger.Error("query failed", "q", qname, "err", err)
 			m.Hung = true
@@ -219,6 +221,36 @@ To clean up: rm -rf %s
 	_ = os.WriteFile(filepath.Join(runDir, "MANIFEST.txt"), []byte(manifest), 0644)
 }
 
+// captureGoroutineDumps fetches /debug/pprof/goroutine?debug=2 from every
+// process in the cluster and writes each dump to a file in runDir/logs/.
+// Returns the directory containing the dumps. Errors are logged, not fatal —
+// a missing dump is acceptable, a harness hang is not.
+func captureGoroutineDumps(cluster *Cluster, query string, runDir string, logger *slog.Logger) string {
+	if cluster == nil {
+		return ""
+	}
+	dumpDir := filepath.Join(runDir, "logs")
+	ports := cluster.DebugPorts()
+	client := &http.Client{Timeout: 5 * time.Second}
+	for role, port := range ports {
+		url := fmt.Sprintf("http://127.0.0.1:%d/debug/pprof/goroutine?debug=2", port)
+		resp, err := client.Get(url)
+		if err != nil {
+			logger.Warn("pprof fetch failed", "role", role, "query", query, "err", err)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		dumpPath := filepath.Join(dumpDir, fmt.Sprintf("hang-%s-%s.txt", query, role))
+		if err := os.WriteFile(dumpPath, body, 0644); err != nil {
+			logger.Warn("writing dump", "path", dumpPath, "err", err)
+		} else {
+			logger.Info("goroutine dump captured", "path", dumpPath, "bytes", len(body))
+		}
+	}
+	return dumpDir
+}
+
 func runOneQuery(
 	ctx context.Context,
 	coordURL string,
@@ -227,6 +259,9 @@ func runOneQuery(
 	hangDetector *HangDetector,
 	baseline *BaselineFile,
 	_ SliceConfig,
+	cluster *Cluster,
+	runDir string,
+	logger *slog.Logger,
 ) (QueryMeasurement, error) {
 	collector.StartWindow(name)
 	hangDetector.Reset()
@@ -272,6 +307,14 @@ func runOneQuery(
 		rowCount++
 	}
 	if err := rows.Err(); err != nil {
+		// Check if this was a timeout — if so, capture goroutine dumps.
+		if queryCtx.Err() != nil {
+			dumpPath := captureGoroutineDumps(cluster, name, runDir, logger)
+			m := collector.EndWindow(name)
+			m.Hung = true
+			m.HangDumpPath = dumpPath
+			return m, err
+		}
 		return collector.EndWindow(name), err
 	}
 
