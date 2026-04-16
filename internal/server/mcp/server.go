@@ -137,9 +137,10 @@ type serverInfo struct {
 }
 
 type initializeResult struct {
-	ProtocolVersion string       `json:"protocolVersion"`
-	Capabilities    capabilities `json:"capabilities"`
-	ServerInfo      serverInfo   `json:"serverInfo"`
+	ProtocolVersion    string         `json:"protocolVersion"`
+	Capabilities       capabilities   `json:"capabilities"`
+	ServerInfo         serverInfo     `json:"serverInfo"`
+	WadjetCapabilities map[string]any `json:"wadjet,omitempty"`
 }
 
 type capabilities struct {
@@ -249,6 +250,13 @@ func (s *Server) handleInitialize(req *jsonRPCRequest) *jsonRPCResponse {
 				Name:    serverName,
 				Version: serverVersion,
 			},
+			WadjetCapabilities: map[string]any{
+				"ddl.create_alert": map[string]any{
+					"description": "Schedule a SQL query to evaluate periodically and deliver matches to a webhook or history table.",
+					"example":     "CREATE ALERT failed_logins AS SELECT ... EVERY 5 MINUTES WEBHOOK 'https://...' INSERT INTO alert_history;",
+					"docs_uri":    "wadjet://docs/alerts",
+				},
+			},
 		},
 	}
 }
@@ -294,6 +302,10 @@ func (s *Server) dispatchTool(ctx context.Context, params callToolParams) callTo
 		return s.toolExplain(ctx, params.Arguments)
 	case "list_functions":
 		return s.toolListFunctions(ctx)
+	case "list_alerts":
+		return s.handleListAlerts(ctx)
+	case "describe_alert":
+		return s.handleDescribeAlert(ctx, params.Arguments)
 	default:
 		return errorResult(fmt.Sprintf("unknown tool: %s", params.Name))
 	}
@@ -369,6 +381,25 @@ func (s *Server) toolDefinitions() []toolInfo {
 			Name:        "list_functions",
 			Description: "List all user-defined functions (UDFs) registered in the database, including their parameters and definitions.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		},
+		{
+			Name:        "list_alerts",
+			Description: "List all CREATE ALERT definitions in this cluster.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		},
+		{
+			Name:        "describe_alert",
+			Description: "Return the full AlertMeta for a given alert plus its 10 most recent fires.",
+			InputSchema: json.RawMessage(`{
+				"type": "object",
+				"required": ["name"],
+				"properties": {
+					"name": {
+						"type": "string",
+						"description": "Name of the alert to describe"
+					}
+				}
+			}`),
 		},
 	}
 }
