@@ -18,6 +18,7 @@ import (
 
 	"github.com/peterh/liner"
 
+	"github.com/citc-tech/wadjet/internal/alerts"
 	"github.com/citc-tech/wadjet/internal/embedding"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 
@@ -699,6 +700,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Initialize Prometheus metrics (before worker.Start so spill metrics are wired)
 	m := metrics.New()
+	m.Registry.MustRegister(alerts.Collectors()...)
 	w.SetMetrics(m)
 
 	if err := w.Start(ctx); err != nil {
@@ -971,6 +973,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	coordCompactor.Start(ctx)
 
 	m := metrics.New()
+	m.Registry.MustRegister(alerts.Collectors()...)
 	dlq := coordinator.NewDLQ(js)
 
 	srvCfg := server.Config{
