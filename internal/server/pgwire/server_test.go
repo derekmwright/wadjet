@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/auth"
+	catpkg "github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -1575,5 +1576,83 @@ func TestParseCopySQL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPGWireInfoSchemaAlerts verifies that information_schema.alerts returns
+// rows for alerts seeded in the catalog.
+func TestPGWireInfoSchemaAlerts(t *testing.T) {
+	ctx := context.Background()
+	db := setupTestDB(t)
+
+	// Seed an alert directly via the catalog.
+	meta := catpkg.AlertMeta{
+		Name:            "cpu_spike",
+		QueryText:       "SELECT count(*) FROM events WHERE cpu > 90",
+		IntervalSeconds: 60,
+		Enabled:         true,
+		WebhookURL:      "https://hooks.example.com/alert",
+		InsertIntoTable: "alert_history",
+	}
+	if err := db.Catalog().CreateAlert(ctx, meta); err != nil {
+		t.Fatalf("seeding alert: %v", err)
+	}
+
+	srv := startTestServer(t, db)
+	client := newPGClient(t, srv.Addr())
+	client.startup("testuser", "testdb")
+
+	cols, rows, tag := client.simpleQuery(
+		"SELECT name, interval_seconds, enabled, webhook_url, insert_into_table, last_evaluated_at FROM information_schema.alerts",
+	)
+	t.Logf("info_schema.alerts: cols=%v rows=%v tag=%s", cols, rows, tag)
+
+	if len(rows) < 1 {
+		t.Fatal("expected at least 1 row in information_schema.alerts")
+	}
+
+	// Locate the column indices by name so the test is order-independent.
+	colIdx := make(map[string]int, len(cols))
+	for i, c := range cols {
+		colIdx[c] = i
+	}
+
+	row := rows[0]
+	if idx, ok := colIdx["name"]; ok {
+		if row[idx] != "cpu_spike" {
+			t.Errorf("name: got %q, want %q", row[idx], "cpu_spike")
+		}
+	} else {
+		t.Error("missing 'name' column in result")
+	}
+	if idx, ok := colIdx["interval_seconds"]; ok {
+		if row[idx] != "60" {
+			t.Errorf("interval_seconds: got %q, want %q", row[idx], "60")
+		}
+	} else {
+		t.Error("missing 'interval_seconds' column in result")
+	}
+	if idx, ok := colIdx["enabled"]; ok {
+		if row[idx] != "t" {
+			t.Errorf("enabled: got %q, want %q", row[idx], "t")
+		}
+	} else {
+		t.Error("missing 'enabled' column in result")
+	}
+	if idx, ok := colIdx["webhook_url"]; ok {
+		if row[idx] != "https://hooks.example.com/alert" {
+			t.Errorf("webhook_url: got %q, want %q", row[idx], "https://hooks.example.com/alert")
+		}
+	} else {
+		t.Error("missing 'webhook_url' column in result")
+	}
+	if idx, ok := colIdx["insert_into_table"]; ok {
+		if row[idx] != "alert_history" {
+			t.Errorf("insert_into_table: got %q, want %q", row[idx], "alert_history")
+		}
+	} else {
+		t.Error("missing 'insert_into_table' column in result")
+	}
+
+	client.terminate()
 }
 
