@@ -2182,3 +2182,43 @@ func TestParseAlterAlert(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCreateAlertInvalid(t *testing.T) {
+	cases := []struct {
+		name    string
+		sql     string
+		wantErr string
+	}{
+		{
+			name:    "no sink",
+			sql:     `CREATE ALERT a AS SELECT 1 FROM t EVERY 5 MINUTES`,
+			wantErr: "at least one sink",
+		},
+		{
+			name:    "interval below floor",
+			sql:     `CREATE ALERT a AS SELECT 1 FROM t EVERY 5 SECONDS WEBHOOK 'https://x'`,
+			wantErr: "interval must be >= 10 seconds",
+		},
+		{
+			name:    "bad URL scheme",
+			sql:     `CREATE ALERT a AS SELECT 1 FROM t EVERY 10 SECONDS WEBHOOK 'ftp://x'`,
+			wantErr: "WEBHOOK URL must be http",
+		},
+		{
+			name:    "invalid name",
+			sql:     `CREATE ALERT 1bad AS SELECT 1 FROM t EVERY 10 SECONDS WEBHOOK 'http://x'`,
+			wantErr: "alert name is required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.sql)
+			if err == nil {
+				t.Fatal("want error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err: want substring %q, got %q", tc.wantErr, err.Error())
+			}
+		})
+	}
+}
