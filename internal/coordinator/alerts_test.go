@@ -17,7 +17,9 @@ func newTestCoordinator(t *testing.T) *Coordinator {
 	if err := cat.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	return &Coordinator{catalog: cat}
+	c := &Coordinator{catalog: cat}
+	c.SetAlertsEnabled(true)
+	return c
 }
 
 func TestCreateAlertHandler(t *testing.T) {
@@ -56,5 +58,14 @@ func TestAlterAlertToggles(t *testing.T) {
 	m, _ := c.catalog.GetAlert(context.Background(), "a")
 	if m.Enabled {
 		t.Error("want disabled")
+	}
+}
+
+func TestCreateAlertRejectedWhenDisabled(t *testing.T) {
+	c := newTestCoordinator(t)
+	c.SetAlertsEnabled(false)
+	err := c.handleCreateAlertSQL(context.Background(), `CREATE ALERT a AS SELECT 1 FROM t EVERY 10 SECONDS WEBHOOK 'http://x'`)
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Errorf("want disabled error, got %v", err)
 	}
 }
