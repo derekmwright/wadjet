@@ -18,6 +18,7 @@ import (
 
 	"github.com/peterh/liner"
 
+	"github.com/citc-tech/wadjet/internal/alerts"
 	"github.com/citc-tech/wadjet/internal/embedding"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 
@@ -78,6 +79,7 @@ var (
 	otelEndpoint     string
 	otelInsecure     bool
 	metricsAddr      string
+	enableAlerts     bool
 )
 
 func main() {
@@ -124,6 +126,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
+	rootCmd.PersistentFlags().BoolVar(&enableAlerts, "enable-alerts", false, "enable CREATE ALERT DDL and scheduler (default: disabled)")
 
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(queryCmd())
@@ -241,11 +244,15 @@ func serveCmd() *cobra.Command {
 			// Wrap store with circuit breaker for S3 resilience
 			store = objstore.NewCircuitStore(store, objstore.DefaultCircuitConfig(), logger)
 
+			if v := os.Getenv("WADJET_ENABLE_ALERTS"); v == "1" || strings.EqualFold(v, "true") {
+				enableAlerts = true
+			}
+
 			switch mode {
 			case "standalone":
-				return runStandalone(ctx, store, logger)
+				return runStandalone(ctx, store, logger, enableAlerts)
 			case "coordinator":
-				return runCoordinator(ctx, store, logger)
+				return runCoordinator(ctx, store, logger, enableAlerts)
 			case "worker":
 				return runWorker(ctx, store, logger)
 			default:
@@ -632,7 +639,7 @@ func newStore() (objstore.Store, error) {
 	}
 }
 
-func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger) error {
+func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool) error {
 	// Start embedded NATS (with optional leaf node connections)
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = natsPort
@@ -699,6 +706,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Initialize Prometheus metrics (before worker.Start so spill metrics are wired)
 	m := metrics.New()
+	m.Registry.MustRegister(alerts.Collectors()...)
 	w.SetMetrics(m)
 
 	if err := w.Start(ctx); err != nil {
@@ -717,6 +725,13 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	coord.StartQueryReaper(ctx)
 	coord.StartQueryActiveHandler()
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
+
+	// Enable alerts feature flag; in standalone mode StartLeaderWatch is a
+	// no-op so we start the scheduler directly here if enabled.
+	coord.SetAlertsEnabled(alertsEnabled)
+	if alertsEnabled {
+		coord.StartAlertScheduler(ctx)
+	}
 
 	// Start catalog snapshotter
 	snapCfg := buildSnapshotConfig(fileCfg)
@@ -890,7 +905,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	}
 }
 
-func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logger) error {
+func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool) error {
 	// Start embedded NATS (with optional leaf node connections)
 	// Bind to 0.0.0.0 so remote workers can connect.
 	natsCfg := distributed.DefaultNATSConfig()
@@ -954,6 +969,10 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	coord.StartQueryActiveHandler()
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
 
+	// Enable alerts feature flag; in coordinator mode StartLeaderWatch manages
+	// the scheduler lifecycle on leader transitions.
+	coord.SetAlertsEnabled(alertsEnabled)
+
 	// Start catalog snapshotter (leader-only in distributed mode)
 	var coordFileCfg *config.Config
 	if configFile != "" {
@@ -971,6 +990,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	coordCompactor.Start(ctx)
 
 	m := metrics.New()
+	m.Registry.MustRegister(alerts.Collectors()...)
 	dlq := coordinator.NewDLQ(js)
 
 	srvCfg := server.Config{

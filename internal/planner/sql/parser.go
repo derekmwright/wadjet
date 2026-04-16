@@ -3,9 +3,24 @@ package sql
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// alertIntervalFloor is the minimum allowed interval for CREATE ALERT.
+// Exposed as a var for integration tests that need sub-10s cadence.
+var alertIntervalFloor = 10 * time.Second
+
+// SetAlertIntervalFloorForTest lowers the CREATE ALERT interval floor for
+// the duration of a test. Call the returned function (typically with defer)
+// to restore the production floor.
+func SetAlertIntervalFloorForTest(d time.Duration) func() {
+	prev := alertIntervalFloor
+	alertIntervalFloor = d
+	return func() { alertIntervalFloor = prev }
+}
 
 // ParsedQuery represents a parsed SQL query.
 type ParsedQuery struct {
@@ -25,6 +40,9 @@ type ParsedQuery struct {
 	Update         *UpdateInfo
 	Delete         *DeleteInfo
 	Insert         *InsertInfo
+	CreateAlert    *CreateAlertInfo
+	DropAlert      *DropAlertInfo
+	AlterAlert     *AlterAlertInfo
 	Windows        []WindowSpec   // extracted window function specs
 	CTEs           []CTEDef       // extracted CTE definitions
 	SelectInfo     *SelectInfo    // parsed SELECT info (replaces AST)
@@ -152,6 +170,28 @@ type InsertInfo struct {
 	Values  [][]string // rows of value expressions
 }
 
+// CreateAlertInfo holds details for a CREATE ALERT statement.
+type CreateAlertInfo struct {
+	Name       string
+	QueryText  string            // raw SELECT text, re-parsed at eval time
+	Interval   time.Duration     // validated >= 10s at parse time
+	WebhookURL string            // "" if no webhook sink
+	Headers    map[string]string
+	InsertInto string            // "" if no table sink; at least one sink required
+}
+
+// DropAlertInfo holds details for a DROP ALERT statement.
+type DropAlertInfo struct {
+	Name     string
+	IfExists bool
+}
+
+// AlterAlertInfo holds details for ALTER ALERT ... ENABLE|DISABLE.
+type AlterAlertInfo struct {
+	Name   string
+	Enable bool // true = ENABLE, false = DISABLE
+}
+
 // QueryType identifies the kind of SQL statement.
 type QueryType int
 
@@ -172,6 +212,9 @@ const (
 	QueryDropView
 	QueryAlterTable
 	QueryMerge
+	QueryCreateAlert
+	QueryDropAlert
+	QueryAlterAlert
 	QueryUnsupported
 )
 
@@ -479,8 +522,12 @@ func lexParseCreate(sql string, l *lexer) (*ParsedQuery, error) {
 		return lexParseCreateView(sql, l, replace)
 	}
 
+	if tok.typ == TokenKWAlert {
+		return lexParseCreateAlert(sql, l)
+	}
+
 	if tok.typ != TokenKWFunction {
-		return nil, fmt.Errorf("expected TABLE, VIEW, or FUNCTION after CREATE")
+		return nil, fmt.Errorf("expected TABLE, VIEW, FUNCTION, or ALERT after CREATE")
 	}
 
 	// Function name
@@ -565,8 +612,12 @@ func lexParseDrop(sql string, l *lexer) (*ParsedQuery, error) {
 		return lexParseDropView(sql, l)
 	}
 
+	if kindTok.typ == TokenKWAlert {
+		return lexParseDropAlert(sql, l)
+	}
+
 	if kindTok.typ != TokenKWFunction {
-		return nil, fmt.Errorf("expected TABLE, VIEW, or FUNCTION after DROP")
+		return nil, fmt.Errorf("expected TABLE, VIEW, FUNCTION, or ALERT after DROP")
 	}
 
 	ifExists := false
@@ -940,6 +991,13 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 // parseAlterTable handles: ALTER TABLE name ADD/DROP/RENAME COLUMN ...
 // ALTER has already been consumed.
 func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
+	// Peek at kind: TABLE or ALERT
+	kindTok := l.peekToken()
+	if kindTok.typ == TokenKWAlert {
+		l.nextToken() // consume ALERT
+		return lexParseAlterAlert(sql, l)
+	}
+
 	tableTok := l.nextToken()
 	if tableTok.typ != TokenKWTable {
 		return nil, fmt.Errorf("expected TABLE after ALTER")
@@ -1248,6 +1306,241 @@ func lexParseCreateView(sql string, l *lexer, replace bool) (*ParsedQuery, error
 	}, nil
 }
 
+// lexParseCreateAlert handles:
+//
+//	CREATE ALERT <name> AS <SELECT ...> EVERY <N> {SECONDS|MINUTES|HOURS}
+//	  [WEBHOOK '<url>' [HEADERS { 'K' = 'V', ... }]]
+//	  [INSERT INTO <table>]
+//
+// CREATE ALERT has already been consumed.
+func lexParseCreateAlert(sql string, l *lexer) (*ParsedQuery, error) {
+	nameTok := l.nextToken()
+	if nameTok.typ != TokenIdent {
+		return nil, fmt.Errorf("CREATE ALERT: alert name is required")
+	}
+	name := nameTok.val
+
+	asTok := l.nextToken()
+	if asTok.typ != TokenKWAs {
+		return nil, fmt.Errorf("CREATE ALERT: expected AS after alert name")
+	}
+
+	// Scan SELECT body up to the top-level EVERY keyword using the raw input
+	// (preserves whitespace/punctuation which the token stream throws away).
+	rest := l.rest()
+	before, after, ok := splitAtTopLevelKeyword(rest, "EVERY")
+	if !ok {
+		return nil, fmt.Errorf("CREATE ALERT: expected EVERY after SELECT body; example: CREATE ALERT x AS SELECT ... EVERY 5 MINUTES WEBHOOK 'https://...'")
+	}
+	queryText := strings.TrimSpace(before)
+	if queryText == "" {
+		return nil, fmt.Errorf("CREATE ALERT: SELECT body is required")
+	}
+	// Rebuild the lexer starting at EVERY so the rest of this function can
+	// consume tokens as usual.
+	l = newLexer(after)
+	everyTok := l.nextToken()
+	if everyTok.typ != TokenKWEvery {
+		return nil, fmt.Errorf("CREATE ALERT: expected EVERY, got %q", everyTok.val)
+	}
+
+	// EVERY consumed; now parse: <N> <unit>
+	nTok := l.nextToken()
+	if nTok.typ != TokenNumber {
+		return nil, fmt.Errorf("CREATE ALERT: expected number after EVERY; example: EVERY 5 MINUTES")
+	}
+	n, err := strconv.ParseInt(nTok.val, 10, 64)
+	if err != nil || n <= 0 {
+		return nil, fmt.Errorf("CREATE ALERT: interval must be a positive integer, got %q", nTok.val)
+	}
+	unitTok := l.nextToken()
+	var interval time.Duration
+	switch unitTok.typ {
+	case TokenKWSeconds:
+		interval = time.Duration(n) * time.Second
+	case TokenKWMinutes:
+		interval = time.Duration(n) * time.Minute
+	case TokenKWHours:
+		interval = time.Duration(n) * time.Hour
+	default:
+		return nil, fmt.Errorf("CREATE ALERT: expected SECONDS|MINUTES|HOURS, got %q", unitTok.val)
+	}
+	if interval < alertIntervalFloor {
+		return nil, fmt.Errorf("CREATE ALERT: interval must be >= %v, got %v", alertIntervalFloor, interval)
+	}
+
+	info := &CreateAlertInfo{
+		Name:      name,
+		QueryText: queryText,
+		Interval:  interval,
+	}
+
+	// Optional sinks: WEBHOOK, INSERT INTO. Order WEBHOOK-first allowed; also INSERT-first.
+doneSinks:
+	for {
+		peek := l.peekToken()
+		switch peek.typ {
+		case TokenKWWebhook:
+			l.nextToken() // consume WEBHOOK
+			urlTok := l.nextToken()
+			if urlTok.typ != TokenString {
+				return nil, fmt.Errorf("CREATE ALERT: WEBHOOK expects a string URL literal")
+			}
+			u, err := url.Parse(urlTok.val)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+				return nil, fmt.Errorf("CREATE ALERT: WEBHOOK URL must be http:// or https://, got %q", urlTok.val)
+			}
+			info.WebhookURL = urlTok.val
+
+			// Optional HEADERS { 'K' = 'V', ... }
+			if l.peekToken().typ == TokenKWHeaders {
+				l.nextToken() // consume HEADERS
+				if l.nextToken().typ != TokenLBrace {
+					return nil, fmt.Errorf("CREATE ALERT: expected '{' after HEADERS")
+				}
+				info.Headers = make(map[string]string)
+				for {
+					if l.peekToken().typ == TokenRBrace {
+						l.nextToken()
+						break
+					}
+					if len(info.Headers) > 0 {
+						if l.nextToken().typ != TokenComma {
+							return nil, fmt.Errorf("CREATE ALERT: expected ',' between headers")
+						}
+					}
+					keyTok := l.nextToken()
+					if keyTok.typ != TokenString {
+						return nil, fmt.Errorf("CREATE ALERT: header key must be a string literal")
+					}
+					if l.nextToken().typ != TokenEq {
+						return nil, fmt.Errorf("CREATE ALERT: expected '=' in header pair")
+					}
+					valTok := l.nextToken()
+					if valTok.typ != TokenString {
+						return nil, fmt.Errorf("CREATE ALERT: header value must be a string literal")
+					}
+					info.Headers[keyTok.val] = valTok.val
+				}
+			}
+		case TokenKWInsert:
+			l.nextToken() // consume INSERT
+			if l.nextToken().typ != TokenKWInto {
+				return nil, fmt.Errorf("CREATE ALERT: expected INTO after INSERT")
+			}
+			tTok := l.nextToken()
+			if tTok.typ != TokenIdent {
+				return nil, fmt.Errorf("CREATE ALERT: expected table name after INSERT INTO")
+			}
+			info.InsertInto = tTok.val
+		case TokenEOF:
+			break doneSinks
+		default:
+			return nil, fmt.Errorf("CREATE ALERT: unexpected token %q, expected WEBHOOK or INSERT INTO", peek.val)
+		}
+	}
+
+	if info.WebhookURL == "" && info.InsertInto == "" {
+		return nil, fmt.Errorf("CREATE ALERT: at least one sink (WEBHOOK or INSERT INTO) is required")
+	}
+	if !isValidIdent(name) {
+		return nil, fmt.Errorf("CREATE ALERT: invalid alert name %q (must match [a-zA-Z_][a-zA-Z0-9_]*, len<=128)", name)
+	}
+
+	return &ParsedQuery{
+		Type:        QueryCreateAlert,
+		SQL:         sql,
+		CreateAlert: info,
+	}, nil
+}
+
+// isValidIdent reports whether s is a valid identifier (first char letter/_, rest alnum/_, len<=128).
+func isValidIdent(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for i, r := range s {
+		first := i == 0
+		isLetter := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_'
+		isDigit := r >= '0' && r <= '9'
+		if first && !isLetter {
+			return false
+		}
+		if !first && !isLetter && !isDigit {
+			return false
+		}
+	}
+	return true
+}
+
+// splitAtTopLevelKeyword scans s left-to-right and returns the split point
+// at the first occurrence of kw (case-insensitive) that is (a) at paren-depth
+// zero, (b) outside any single-quoted string literal, and (c) bounded by
+// non-identifier characters on both sides. Returns before (text preceding kw)
+// and after (text starting at kw, kw inclusive). ok=false if not found.
+func splitAtTopLevelKeyword(s, kw string) (before, after string, ok bool) {
+	depth := 0
+	inString := false
+	kwLen := len(kw)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if c == '\'' {
+				if i+1 < len(s) && s[i+1] == '\'' {
+					i++ // doubled quote, skip
+					continue
+				}
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '\'':
+			inString = true
+			continue
+		case '(':
+			depth++
+			continue
+		case ')':
+			depth--
+			continue
+		}
+		if depth != 0 {
+			continue
+		}
+		if i+kwLen > len(s) {
+			break
+		}
+		if !strings.EqualFold(s[i:i+kwLen], kw) {
+			continue
+		}
+		if !isKWBoundary(s, i, kwLen) {
+			continue
+		}
+		return s[:i], s[i:], true
+	}
+	return "", "", false
+}
+
+// isKWBoundary reports whether s[start:start+n] is bounded on both sides
+// by characters that cannot appear in an identifier (or is at the edge).
+func isKWBoundary(s string, start, n int) bool {
+	if start > 0 {
+		p := s[start-1]
+		if (p >= 'a' && p <= 'z') || (p >= 'A' && p <= 'Z') || (p >= '0' && p <= '9') || p == '_' {
+			return false
+		}
+	}
+	end := start + n
+	if end < len(s) {
+		c := s[end]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			return false
+		}
+	}
+	return true
+}
+
 // lexParseDropView handles: DROP VIEW [IF EXISTS] <name>
 func lexParseDropView(sql string, l *lexer) (*ParsedQuery, error) {
 	ifExists := false
@@ -1272,6 +1565,53 @@ func lexParseDropView(sql string, l *lexer) (*ParsedQuery, error) {
 			Name:     strings.ToLower(tok.val),
 			IfExists: ifExists,
 		},
+	}, nil
+}
+
+// lexParseDropAlert handles: DROP ALERT [IF EXISTS] <name>
+// DROP ALERT has already been consumed.
+func lexParseDropAlert(sql string, l *lexer) (*ParsedQuery, error) {
+	ifExists := false
+	tok := l.nextToken()
+	if tok.typ == TokenKWIf {
+		existsTok := l.nextToken()
+		if existsTok.typ != TokenKWExists {
+			return nil, fmt.Errorf("expected EXISTS after IF")
+		}
+		ifExists = true
+		tok = l.nextToken()
+	}
+	if tok.typ != TokenIdent {
+		return nil, fmt.Errorf("DROP ALERT: alert name is required")
+	}
+	return &ParsedQuery{
+		Type:      QueryDropAlert,
+		SQL:       sql,
+		DropAlert: &DropAlertInfo{Name: tok.val, IfExists: ifExists},
+	}, nil
+}
+
+// lexParseAlterAlert handles: ALTER ALERT <name> {ENABLE|DISABLE}
+// ALTER ALERT has already been consumed.
+func lexParseAlterAlert(sql string, l *lexer) (*ParsedQuery, error) {
+	nameTok := l.nextToken()
+	if nameTok.typ != TokenIdent {
+		return nil, fmt.Errorf("ALTER ALERT: alert name is required")
+	}
+	actionTok := l.nextToken()
+	var enable bool
+	switch actionTok.typ {
+	case TokenKWEnable:
+		enable = true
+	case TokenKWDisable:
+		enable = false
+	default:
+		return nil, fmt.Errorf("ALTER ALERT: expected ENABLE or DISABLE, got %q", actionTok.val)
+	}
+	return &ParsedQuery{
+		Type:       QueryAlterAlert,
+		SQL:        sql,
+		AlterAlert: &AlterAlertInfo{Name: nameTok.val, Enable: enable},
 	}, nil
 }
 

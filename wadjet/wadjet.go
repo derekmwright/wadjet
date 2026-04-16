@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/citc-tech/wadjet/internal/alerts"
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/expr"
@@ -24,13 +26,15 @@ import (
 
 // DB is the main entry point for embedded usage of Wadjet.
 type DB struct {
-	store        objstore.Store
-	catalog      *catalog.Catalog
-	bucket       string
-	memoryBudget int64
-	spillDir     string
-	logger       *slog.Logger
-	authProvider *auth.Provider // nil = no auth enforcement
+	store              objstore.Store
+	catalog            *catalog.Catalog
+	bucket             string
+	memoryBudget       int64
+	spillDir           string
+	logger             *slog.Logger
+	authProvider       *auth.Provider    // nil = no auth enforcement
+	alertScheduler     *alerts.Scheduler // non-nil when EnableAlerts is set
+	alertSchedulerStop context.CancelFunc
 }
 
 // Config holds configuration for creating a DB instance.
@@ -42,6 +46,9 @@ type Config struct {
 	MemoryBudget int64           // per-query memory budget in bytes (0 = unlimited)
 	SpillDir     string          // directory for spill-to-disk files (empty = os temp dir)
 	AuthProvider *auth.Provider  // optional: enables ABAC enforcement at query level
+	// EnableAlerts turns on the CREATE ALERT scheduler in embedded mode.
+	// When true, Open() creates a Scheduler that evaluates alerts on cadence.
+	EnableAlerts bool
 }
 
 // Open creates and initializes a new Wadjet database.
@@ -60,7 +67,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		return nil, fmt.Errorf("initializing catalog: %w", err)
 	}
 
-	return &DB{
+	db := &DB{
 		store:        cfg.Store,
 		catalog:      cat,
 		bucket:       cfg.Bucket,
@@ -68,7 +75,68 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		spillDir:     cfg.SpillDir,
 		logger:       cfg.Logger,
 		authProvider: cfg.AuthProvider,
-	}, nil
+	}
+
+	if cfg.EnableAlerts {
+		ex := &dbExecutor{db: db}
+		sinkFactory := alerts.SinkFactory(func(m catalog.AlertMeta) []alerts.AlertSink {
+			var sinks []alerts.AlertSink
+			if m.WebhookURL != "" {
+				sinks = append(sinks, alerts.NewWebhookSink(m.Name, m.WebhookURL, m.WebhookHeaders, 10*time.Second))
+			}
+			if m.InsertIntoTable != "" {
+				sinks = append(sinks, &alerts.TableSink{Executor: ex})
+			}
+			return sinks
+		})
+		sched := alerts.NewScheduler(cat, ex, sinkFactory)
+		schedCtx, cancel := context.WithCancel(context.Background())
+		db.alertScheduler = sched
+		db.alertSchedulerStop = cancel
+		sched.Start(schedCtx)
+	}
+
+	return db, nil
+}
+
+// Close shuts down any background goroutines started by Open (e.g. alert scheduler).
+// It is safe to call Close multiple times.
+func (db *DB) Close() {
+	if db.alertSchedulerStop != nil {
+		db.alertSchedulerStop()
+		db.alertSchedulerStop = nil
+	}
+	if db.alertScheduler != nil {
+		db.alertScheduler.Wait()
+		db.alertScheduler = nil
+	}
+}
+
+// dbExecutor adapts *DB to the alerts.SQLExecutor interface so the alert
+// scheduler can run queries and insert history rows without importing coordinator.
+type dbExecutor struct{ db *DB }
+
+func (e *dbExecutor) Execute(ctx context.Context, sql string) error {
+	_, err := e.db.Execute(ctx, sql)
+	return err
+}
+
+func (e *dbExecutor) Query(ctx context.Context, sqlText string, limit int) ([]map[string]any, []alerts.ColumnMeta, int64, bool, error) {
+	res, err := e.db.Query(ctx, sqlText)
+	if err != nil {
+		return nil, nil, 0, false, err
+	}
+	all := res.Rows
+	schema := make([]alerts.ColumnMeta, 0, len(res.ColumnMetas))
+	for _, cm := range res.ColumnMetas {
+		schema = append(schema, alerts.ColumnMeta{Name: cm.Name, Type: cm.TypeName})
+	}
+	truncated := false
+	if limit > 0 && len(all) > limit {
+		all = all[:limit]
+		truncated = true
+	}
+	return all, schema, int64(len(res.Rows)), truncated, nil
 }
 
 // newPlanner creates a fresh Planner for a single query. The Planner carries
@@ -141,6 +209,12 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return db.dropTableSQL(ctx, parsed.DropTable)
 	case plansql.QueryShowTables:
 		return db.showTables(ctx)
+	case plansql.QueryCreateAlert:
+		return db.createAlertSQL(ctx, parsed.CreateAlert, sql)
+	case plansql.QueryDropAlert:
+		return db.dropAlertSQL(ctx, parsed.DropAlert)
+	case plansql.QueryAlterAlert:
+		return db.alterAlertSQL(ctx, parsed.AlterAlert)
 	case plansql.QueryInsert, plansql.QueryUpdate, plansql.QueryDelete, plansql.QueryMerge:
 		result, err := db.Execute(ctx, sql)
 		if err != nil {
@@ -626,6 +700,70 @@ func (db *DB) showTables(ctx context.Context) (*QueryResult, error) {
 	return &QueryResult{
 		Columns: []string{"table_name"},
 		Rows:    rows,
+	}, nil
+}
+
+// createAlertSQL handles CREATE ALERT DDL in embedded mode.
+func (db *DB) createAlertSQL(ctx context.Context, info *plansql.CreateAlertInfo, _ string) (*QueryResult, error) {
+	if db.alertScheduler == nil {
+		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
+	}
+	if err := alerts.EnsureHistoryTable(ctx, db.catalog); err != nil {
+		return nil, fmt.Errorf("ensuring alert_history: %w", err)
+	}
+	m := catalog.AlertMeta{
+		Name:            info.Name,
+		QueryText:       info.QueryText,
+		IntervalSeconds: int64(info.Interval / time.Second),
+		WebhookURL:      info.WebhookURL,
+		WebhookHeaders:  info.Headers,
+		InsertIntoTable: info.InsertInto,
+		Enabled:         true,
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := db.catalog.CreateAlert(ctx, m); err != nil {
+		return nil, err
+	}
+	return &QueryResult{
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": "CREATE ALERT"}},
+	}, nil
+}
+
+// dropAlertSQL handles DROP ALERT [IF EXISTS] DDL in embedded mode.
+func (db *DB) dropAlertSQL(ctx context.Context, info *plansql.DropAlertInfo) (*QueryResult, error) {
+	if db.alertScheduler == nil {
+		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
+	}
+	if _, err := db.catalog.GetAlert(ctx, info.Name); err != nil {
+		if info.IfExists {
+			return &QueryResult{
+				Columns: []string{"result"},
+				Rows:    []map[string]any{{"result": "DROP ALERT"}},
+			}, nil
+		}
+		return nil, err
+	}
+	if err := db.catalog.DropAlert(ctx, info.Name); err != nil {
+		return nil, err
+	}
+	return &QueryResult{
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": "DROP ALERT"}},
+	}, nil
+}
+
+// alterAlertSQL handles ALTER ALERT DDL in embedded mode.
+func (db *DB) alterAlertSQL(ctx context.Context, info *plansql.AlterAlertInfo) (*QueryResult, error) {
+	if db.alertScheduler == nil {
+		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
+	}
+	if err := db.catalog.SetAlertEnabled(ctx, info.Name, info.Enable); err != nil {
+		return nil, err
+	}
+	return &QueryResult{
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": "ALTER ALERT"}},
 	}, nil
 }
 

@@ -1278,6 +1278,11 @@ func (c *pgConn) handleCatalogQuery(normalized string) bool {
 		return c.handlePgType(normalized)
 	}
 
+	// information_schema.alerts
+	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "ALERTS") {
+		return c.handleInfoSchemaAlerts(ctx)
+	}
+
 	// information_schema.tables
 	if strings.Contains(normalized, "INFORMATION_SCHEMA") && strings.Contains(normalized, "TABLES") &&
 		!strings.Contains(normalized, "COLUMNS") {
@@ -1583,6 +1588,34 @@ func (c *pgConn) handleInfoSchemaColumns(ctx context.Context, normalized string)
 		}
 	}
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", count))
+	return true
+}
+
+// handleInfoSchemaAlerts returns information_schema.alerts data.
+func (c *pgConn) handleInfoSchemaAlerts(ctx context.Context) bool {
+	alerts, err := c.db.Catalog().ListAlerts(ctx)
+	if err != nil {
+		return false
+	}
+
+	cols := []string{"name", "interval_seconds", "enabled", "webhook_url",
+		"insert_into_table", "last_evaluated_at"}
+	c.sendRowDescription(cols)
+	for _, a := range alerts {
+		lastEval := ""
+		if !a.LastEvaluatedAt.IsZero() {
+			lastEval = a.LastEvaluatedAt.UTC().Format(time.RFC3339)
+		}
+		c.sendDataRow(cols, map[string]any{
+			"name":              a.Name,
+			"interval_seconds":  fmt.Sprintf("%d", a.IntervalSeconds),
+			"enabled":           boolStr(a.Enabled),
+			"webhook_url":       a.WebhookURL,
+			"insert_into_table": a.InsertIntoTable,
+			"last_evaluated_at": lastEval,
+		})
+	}
+	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(alerts)))
 	return true
 }
 

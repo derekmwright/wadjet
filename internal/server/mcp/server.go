@@ -137,13 +137,19 @@ type serverInfo struct {
 }
 
 type initializeResult struct {
-	ProtocolVersion string       `json:"protocolVersion"`
-	Capabilities    capabilities `json:"capabilities"`
-	ServerInfo      serverInfo   `json:"serverInfo"`
+	ProtocolVersion    string         `json:"protocolVersion"`
+	Capabilities       capabilities   `json:"capabilities"`
+	ServerInfo         serverInfo     `json:"serverInfo"`
+	WadjetCapabilities map[string]any `json:"wadjet,omitempty"`
 }
 
 type capabilities struct {
-	Tools *toolsCapability `json:"tools,omitempty"`
+	Tools     *toolsCapability     `json:"tools,omitempty"`
+	Resources *resourcesCapability `json:"resources,omitempty"`
+}
+
+type resourcesCapability struct {
+	ListChanged bool `json:"listChanged,omitempty"`
 }
 
 type toolsCapability struct {
@@ -218,6 +224,10 @@ func (s *Server) handleRequest(ctx context.Context, req *jsonRPCRequest) *jsonRP
 		return s.handleToolsList(req)
 	case "tools/call":
 		return s.handleToolsCall(ctx, req)
+	case "resources/list":
+		return s.handleResourcesList(req)
+	case "resources/read":
+		return s.handleResourcesRead(req)
 	case "ping":
 		return &jsonRPCResponse{
 			JSONRPC: "2.0",
@@ -243,11 +253,19 @@ func (s *Server) handleInitialize(req *jsonRPCRequest) *jsonRPCResponse {
 		Result: initializeResult{
 			ProtocolVersion: protocolVersion,
 			Capabilities: capabilities{
-				Tools: &toolsCapability{},
+				Tools:     &toolsCapability{},
+				Resources: &resourcesCapability{},
 			},
 			ServerInfo: serverInfo{
 				Name:    serverName,
 				Version: serverVersion,
+			},
+			WadjetCapabilities: map[string]any{
+				"ddl.create_alert": map[string]any{
+					"description": "Schedule a SQL query to evaluate periodically and deliver matches to a webhook or history table.",
+					"example":     "CREATE ALERT failed_logins AS SELECT ... EVERY 5 MINUTES WEBHOOK 'https://...' INSERT INTO alert_history;",
+					"docs_uri":    "wadjet://docs/alerts",
+				},
 			},
 		},
 	}
@@ -282,6 +300,49 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 	}
 }
 
+func (s *Server) handleResourcesList(req *jsonRPCRequest) *jsonRPCResponse {
+	return &jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: map[string]any{
+			"resources": []map[string]any{{
+				"uri":         alertsDocURI,
+				"name":        "CREATE ALERT docs",
+				"description": "Grammar, semantics, and limits for Wadjet alerts.",
+				"mimeType":    "text/markdown",
+			}},
+		},
+	}
+}
+
+func (s *Server) handleResourcesRead(req *jsonRPCRequest) *jsonRPCResponse {
+	var p struct {
+		URI string `json:"uri"`
+	}
+	_ = json.Unmarshal(req.Params, &p)
+	if p.URI != alertsDocURI {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &jsonRPCError{
+				Code:    -32602,
+				Message: "unknown resource: " + p.URI,
+			},
+		}
+	}
+	return &jsonRPCResponse{
+		JSONRPC: "2.0",
+		ID:      req.ID,
+		Result: map[string]any{
+			"contents": []map[string]any{{
+				"uri":      alertsDocURI,
+				"mimeType": "text/markdown",
+				"text":     alertsDocMD,
+			}},
+		},
+	}
+}
+
 func (s *Server) dispatchTool(ctx context.Context, params callToolParams) callToolResult {
 	switch params.Name {
 	case "list_tables":
@@ -294,6 +355,10 @@ func (s *Server) dispatchTool(ctx context.Context, params callToolParams) callTo
 		return s.toolExplain(ctx, params.Arguments)
 	case "list_functions":
 		return s.toolListFunctions(ctx)
+	case "list_alerts":
+		return s.handleListAlerts(ctx)
+	case "describe_alert":
+		return s.handleDescribeAlert(ctx, params.Arguments)
 	default:
 		return errorResult(fmt.Sprintf("unknown tool: %s", params.Name))
 	}
@@ -369,6 +434,25 @@ func (s *Server) toolDefinitions() []toolInfo {
 			Name:        "list_functions",
 			Description: "List all user-defined functions (UDFs) registered in the database, including their parameters and definitions.",
 			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		},
+		{
+			Name:        "list_alerts",
+			Description: "List all CREATE ALERT definitions in this cluster.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+		},
+		{
+			Name:        "describe_alert",
+			Description: "Return the full AlertMeta for a given alert plus its 10 most recent fires.",
+			InputSchema: json.RawMessage(`{
+				"type": "object",
+				"required": ["name"],
+				"properties": {
+					"name": {
+						"type": "string",
+						"description": "Name of the alert to describe"
+					}
+				}
+			}`),
 		},
 	}
 }
@@ -540,19 +624,34 @@ func (s *Server) toolListFunctions(ctx context.Context) callToolResult {
 		return errorResult("failed to list functions: " + err.Error())
 	}
 
-	if len(result.Rows) == 0 {
-		return textResult("No user-defined functions registered.")
+	type udfEntry struct {
+		Name   string `json:"name"`
+		Params string `json:"params,omitempty"`
+		Body   string `json:"body,omitempty"`
 	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Found %d UDF(s):\n\n", len(result.Rows)))
+	udfs := make([]udfEntry, 0, len(result.Rows))
 	for _, row := range result.Rows {
 		name, _ := row["name"].(string)
 		params, _ := row["params"].(string)
 		body, _ := row["body"].(string)
-		sb.WriteString(fmt.Sprintf("- %s%s = %s\n", name, params, body))
+		udfs = append(udfs, udfEntry{Name: name, Params: params, Body: body})
 	}
-	return textResult(sb.String())
+
+	ddlCaps := []map[string]string{
+		{"name": "CREATE ALERT", "description": "Schedule a SQL query; deliver matches to a webhook and/or alert_history."},
+		{"name": "DROP ALERT", "description": "Remove an alert definition."},
+		{"name": "ALTER ALERT ENABLE|DISABLE", "description": "Toggle evaluation without deleting the alert."},
+	}
+
+	out := map[string]any{
+		"functions":       udfs,
+		"ddl_capabilities": ddlCaps,
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return errorResult("failed to marshal functions: " + err.Error())
+	}
+	return textResult(string(data))
 }
 
 // Helpers

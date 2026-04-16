@@ -1,8 +1,10 @@
 package sql
 
 import (
+	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParse_Select(t *testing.T) {
@@ -2063,5 +2065,199 @@ func TestParseGenerateSeriesWithStep(t *testing.T) {
 	}
 	if tbl.Alias != "gs" {
 		t.Errorf("expected alias 'gs', got %q", tbl.Alias)
+	}
+}
+
+func TestParseCreateAlertMinimal(t *testing.T) {
+	sql := `CREATE ALERT my_alert AS SELECT 1 FROM t EVERY 5 MINUTES WEBHOOK 'https://x.example'`
+	pq, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryCreateAlert {
+		t.Fatalf("type: want QueryCreateAlert, got %v", pq.Type)
+	}
+	if pq.CreateAlert == nil {
+		t.Fatal("CreateAlert is nil")
+	}
+	if pq.CreateAlert.Name != "my_alert" {
+		t.Errorf("name: want my_alert, got %q", pq.CreateAlert.Name)
+	}
+	if pq.CreateAlert.Interval != 5*time.Minute {
+		t.Errorf("interval: want 5m, got %v", pq.CreateAlert.Interval)
+	}
+	if pq.CreateAlert.WebhookURL != "https://x.example" {
+		t.Errorf("url: want https://x.example, got %q", pq.CreateAlert.WebhookURL)
+	}
+	if !strings.Contains(pq.CreateAlert.QueryText, "SELECT 1 FROM t") {
+		t.Errorf("queryText missing SELECT: %q", pq.CreateAlert.QueryText)
+	}
+}
+
+func TestParseCreateAlertAllOptions(t *testing.T) {
+	sql := `CREATE ALERT a AS SELECT x FROM t EVERY 30 SECONDS WEBHOOK 'http://y.example' HEADERS { 'Authorization' = 'Token abc' } INSERT INTO alert_history`
+	pq, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.CreateAlert.Interval != 30*time.Second {
+		t.Errorf("interval: want 30s, got %v", pq.CreateAlert.Interval)
+	}
+	if pq.CreateAlert.Headers["Authorization"] != "Token abc" {
+		t.Errorf("header: want Token abc, got %q", pq.CreateAlert.Headers["Authorization"])
+	}
+	if pq.CreateAlert.InsertInto != "alert_history" {
+		t.Errorf("insert into: want alert_history, got %q", pq.CreateAlert.InsertInto)
+	}
+}
+
+func TestParseCreateAlertInsertOnly(t *testing.T) {
+	sql := `CREATE ALERT a AS SELECT 1 FROM t EVERY 1 HOURS INSERT INTO h`
+	pq, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.CreateAlert.WebhookURL != "" {
+		t.Errorf("url should be empty, got %q", pq.CreateAlert.WebhookURL)
+	}
+	if pq.CreateAlert.InsertInto != "h" {
+		t.Errorf("insert into: want h, got %q", pq.CreateAlert.InsertInto)
+	}
+	if pq.CreateAlert.Interval != time.Hour {
+		t.Errorf("interval: want 1h, got %v", pq.CreateAlert.Interval)
+	}
+}
+
+func TestParseDropAlert(t *testing.T) {
+	cases := []struct {
+		sql      string
+		name     string
+		ifExists bool
+	}{
+		{"DROP ALERT a", "a", false},
+		{"DROP ALERT IF EXISTS a", "a", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sql, func(t *testing.T) {
+			pq, err := Parse(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pq.Type != QueryDropAlert {
+				t.Fatalf("type: want QueryDropAlert, got %v", pq.Type)
+			}
+			if pq.DropAlert.Name != tc.name {
+				t.Errorf("name: want %q, got %q", tc.name, pq.DropAlert.Name)
+			}
+			if pq.DropAlert.IfExists != tc.ifExists {
+				t.Errorf("ifExists: want %v, got %v", tc.ifExists, pq.DropAlert.IfExists)
+			}
+		})
+	}
+}
+
+func TestParseAlterAlert(t *testing.T) {
+	cases := []struct {
+		sql    string
+		name   string
+		enable bool
+	}{
+		{"ALTER ALERT foo ENABLE", "foo", true},
+		{"ALTER ALERT foo DISABLE", "foo", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sql, func(t *testing.T) {
+			pq, err := Parse(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pq.Type != QueryAlterAlert {
+				t.Fatalf("type: want QueryAlterAlert, got %v", pq.Type)
+			}
+			if pq.AlterAlert.Name != tc.name {
+				t.Errorf("name: want %q, got %q", tc.name, pq.AlterAlert.Name)
+			}
+			if pq.AlterAlert.Enable != tc.enable {
+				t.Errorf("enable: want %v, got %v", tc.enable, pq.AlterAlert.Enable)
+			}
+		})
+	}
+}
+
+func TestParseCreateAlertInvalid(t *testing.T) {
+	cases := []struct {
+		name    string
+		sql     string
+		wantErr string
+	}{
+		{
+			name:    "no sink",
+			sql:     `CREATE ALERT a AS SELECT 1 FROM t EVERY 5 MINUTES`,
+			wantErr: "at least one sink",
+		},
+		{
+			name:    "interval below floor",
+			sql:     `CREATE ALERT a AS SELECT 1 FROM t EVERY 5 SECONDS WEBHOOK 'https://x'`,
+			wantErr: "interval must be >=",
+		},
+		{
+			name:    "bad URL scheme",
+			sql:     `CREATE ALERT a AS SELECT 1 FROM t EVERY 10 SECONDS WEBHOOK 'ftp://x'`,
+			wantErr: "WEBHOOK URL must be http",
+		},
+		{
+			name:    "invalid name",
+			sql:     `CREATE ALERT 1bad AS SELECT 1 FROM t EVERY 10 SECONDS WEBHOOK 'http://x'`,
+			wantErr: "alert name is required",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(tc.sql)
+			if err == nil {
+				t.Fatal("want error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("err: want substring %q, got %q", tc.wantErr, err.Error())
+			}
+		})
+	}
+}
+
+func stripCommentLines(s string) string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+func TestAlertGoldenFixturesParse(t *testing.T) {
+	restore := SetAlertIntervalFloorForTest(0)
+	defer restore()
+
+	data, err := os.ReadFile("../../../testdata/alerts/golden.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawStmts := strings.Split(string(data), ";")
+	parsed := 0
+	for i, raw := range rawStmts {
+		s := strings.TrimSpace(stripCommentLines(raw))
+		if s == "" {
+			continue
+		}
+		if _, err := Parse(s); err != nil {
+			t.Errorf("stmt %d: parse failed: %v\nSQL: %s", i, err, s)
+		} else {
+			parsed++
+		}
+	}
+	const wantStmts = 7
+	if parsed != wantStmts {
+		t.Errorf("expected %d statements parsed, got %d", wantStmts, parsed)
 	}
 }
