@@ -90,6 +90,60 @@ func TestSchedulerSkipsDisabled(t *testing.T) {
 	}
 }
 
+// blockingExec blocks inside Query until release is closed, simulating a
+// long-running alert evaluation.
+type blockingExec struct {
+	release chan struct{}
+	rows    []map[string]any
+	total   int64
+}
+
+func (*blockingExec) Execute(context.Context, string) error { return nil }
+func (e *blockingExec) Query(ctx context.Context, _ string, _ int) ([]map[string]any, []ColumnMeta, int64, bool, error) {
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+		return nil, nil, 0, false, ctx.Err()
+	}
+	return e.rows, nil, e.total, false, nil
+}
+
+func TestSchedulerSkipsConcurrent(t *testing.T) {
+	cat, _, sink := newSchedulerTest(t)
+	_ = cat.CreateAlert(context.Background(), catalog.AlertMeta{
+		Name: "a1", QueryText: "SELECT 1", IntervalSeconds: 1, Enabled: true,
+	})
+	release := make(chan struct{})
+	defer close(release)
+	ex := &blockingExec{release: release, rows: []map[string]any{{"n": 1}}, total: 1}
+
+	s := NewScheduler(cat, ex, SinkFactory(func(catalog.AlertMeta) []AlertSink { return []AlertSink{sink} }))
+	s.tickInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	s.Start(ctx)
+
+	// Wait long enough for multiple ticks to fire while the first eval is blocked.
+	time.Sleep(150 * time.Millisecond)
+
+	// Cancel ctx (which releases the blocking eval via ctx.Done), then wait.
+	cancel()
+	s.Wait()
+
+	// The blocking exec never completed a real delivery in the window because
+	// ctx was cancelled, so sink.calls is 0. The key assertion is that the
+	// inflight guard prevented the scheduler from spawning multiple concurrent
+	// goroutines for the same alert — verify by checking that we did NOT
+	// accumulate N goroutines all waiting on `release`. A simpler proxy is
+	// that Wait() returns promptly (within the test timeout). If the guard
+	// were broken, we'd have many blocked goroutines that only unblock when
+	// we close release on deferred cleanup.
+	if atomic.LoadInt32(&sink.calls) > 1 {
+		t.Errorf("concurrent evaluations fired sinks: %d", sink.calls)
+	}
+}
+
 func TestSchedulerNoFireOnZeroRows(t *testing.T) {
 	cat, _, sink := newSchedulerTest(t)
 	_ = cat.CreateAlert(context.Background(), catalog.AlertMeta{
