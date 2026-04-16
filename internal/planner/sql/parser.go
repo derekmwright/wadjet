@@ -9,6 +9,19 @@ import (
 	"time"
 )
 
+// alertIntervalFloor is the minimum allowed interval for CREATE ALERT.
+// Exposed as a var for integration tests that need sub-10s cadence.
+var alertIntervalFloor = 10 * time.Second
+
+// SetAlertIntervalFloorForTest lowers the CREATE ALERT interval floor for
+// the duration of a test. Call the returned function (typically with defer)
+// to restore the production floor.
+func SetAlertIntervalFloorForTest(d time.Duration) func() {
+	prev := alertIntervalFloor
+	alertIntervalFloor = d
+	return func() { alertIntervalFloor = prev }
+}
+
 // ParsedQuery represents a parsed SQL query.
 type ParsedQuery struct {
 	Type           QueryType
@@ -1352,8 +1365,8 @@ func lexParseCreateAlert(sql string, l *lexer) (*ParsedQuery, error) {
 	default:
 		return nil, fmt.Errorf("CREATE ALERT: expected SECONDS|MINUTES|HOURS, got %q", unitTok.val)
 	}
-	if interval < 10*time.Second {
-		return nil, fmt.Errorf("CREATE ALERT: interval must be >= 10 seconds, got %v", interval)
+	if interval < alertIntervalFloor {
+		return nil, fmt.Errorf("CREATE ALERT: interval must be >= %v, got %v", alertIntervalFloor, interval)
 	}
 
 	info := &CreateAlertInfo{

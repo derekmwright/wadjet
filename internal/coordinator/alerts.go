@@ -156,10 +156,6 @@ func (e *coordinatorExecutor) Execute(ctx context.Context, sqlText string) error
 // SQLResult.Rows() materializes RecordBatch slices into row maps; we cap at
 // limit here but count all rows for the total. This is adequate for the
 // threshold-style queries alerts use (low cardinality).
-//
-// TODO(task-17): fill in column-schema extraction once the integration test
-// exercises this path. RecordBatch.Schema() or SQLResult.Columns can be used
-// to build []alerts.ColumnMeta. For now schema is returned as nil.
 func (e *coordinatorExecutor) Query(ctx context.Context, sqlText string, limit int) ([]map[string]any, []alerts.ColumnMeta, int64, bool, error) {
 	rs, err := e.c.ExecuteSQL(ctx, sqlText)
 	if err != nil {
@@ -167,10 +163,16 @@ func (e *coordinatorExecutor) Query(ctx context.Context, sqlText string, limit i
 	}
 	all := rs.Rows()
 	total := rs.TotalRows
+	// Build column schema from the Columns list. Type information is not
+	// carried through SQLResult at this time, so Type is left empty.
+	schema := make([]alerts.ColumnMeta, 0, len(rs.Columns))
+	for _, name := range rs.Columns {
+		schema = append(schema, alerts.ColumnMeta{Name: name})
+	}
 	truncated := false
 	if limit > 0 && len(all) > limit {
 		all = all[:limit]
 		truncated = true
 	}
-	return all, nil, total, truncated, nil
+	return all, schema, total, truncated, nil
 }

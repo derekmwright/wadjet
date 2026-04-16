@@ -2197,7 +2197,7 @@ func TestParseCreateAlertInvalid(t *testing.T) {
 		{
 			name:    "interval below floor",
 			sql:     `CREATE ALERT a AS SELECT 1 FROM t EVERY 5 SECONDS WEBHOOK 'https://x'`,
-			wantErr: "interval must be >= 10 seconds",
+			wantErr: "interval must be >=",
 		},
 		{
 			name:    "bad URL scheme",

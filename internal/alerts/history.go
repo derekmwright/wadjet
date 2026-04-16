@@ -81,7 +81,7 @@ func BuildHistoryInsertSQL(fire AlertFire, results []SinkResult, now time.Time) 
 	evaluatedAt := fire.EvaluatedAt.UTC().Format(time.RFC3339Nano)
 
 	return fmt.Sprintf(
-		`INSERT INTO %s (fired_at, alert_name, evaluated_at, row_count, truncated, match_snapshot, delivery_status, sink_results, delivery_error, partition_date) VALUES (TIMESTAMP '%s', '%s', TIMESTAMP '%s', %d, %s, '%s', '%s', '%s', '%s', '%s')`,
+		`INSERT INTO %s (fired_at, alert_name, evaluated_at, row_count, truncated, match_snapshot, delivery_status, sink_results, delivery_error, partition_date) VALUES ('%s', '%s', '%s', %d, %s, '%s', '%s', '%s', '%s', '%s')`,
 		HistoryTableName,
 		firedAt,
 		sqlEscape(fire.AlertName),
