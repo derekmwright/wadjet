@@ -32,6 +32,13 @@ func (c *Coordinator) handleCreateAlertSQL(ctx context.Context, sqlText string) 
 		return fmt.Errorf("ensuring alert_history: %w", err)
 	}
 
+	// Validate InsertInto table exists (unless it's alert_history, which we just ensured).
+	if info.InsertInto != "" && info.InsertInto != alerts.HistoryTableName {
+		if _, err := c.catalog.GetTable(ctx, info.InsertInto); err != nil {
+			return fmt.Errorf("CREATE ALERT: INSERT INTO table %q not found", info.InsertInto)
+		}
+	}
+
 	m := catalog.AlertMeta{
 		Name:            info.Name,
 		QueryText:       info.QueryText,

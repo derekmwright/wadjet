@@ -61,6 +61,15 @@ func TestAlterAlertToggles(t *testing.T) {
 	}
 }
 
+func TestCreateAlertRejectsUnknownInsertTarget(t *testing.T) {
+	c := newTestCoordinator(t)
+	err := c.handleCreateAlertSQL(context.Background(),
+		`CREATE ALERT a AS SELECT 1 FROM t EVERY 10 SECONDS INSERT INTO does_not_exist`)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("want not-found error, got %v", err)
+	}
+}
+
 func TestCreateAlertRejectedWhenDisabled(t *testing.T) {
 	c := newTestCoordinator(t)
 	c.SetAlertsEnabled(false)
