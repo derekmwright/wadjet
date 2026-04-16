@@ -391,6 +391,16 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 
+	// Dispatch alert DDL before attempting SELECT extraction.
+	switch parsed.Type {
+	case plansql.QueryCreateAlert:
+		return nil, c.handleCreateAlertSQL(ctx, sql)
+	case plansql.QueryDropAlert:
+		return nil, c.handleDropAlertSQL(ctx, sql)
+	case plansql.QueryAlterAlert:
+		return nil, c.handleAlterAlertSQL(ctx, sql)
+	}
+
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		return nil, fmt.Errorf("extract: %w", err)
