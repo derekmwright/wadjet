@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/alerts"
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/telemetry"
@@ -77,6 +78,11 @@ type Coordinator struct {
 	resultSubs map[string]context.CancelFunc          // queryID -> cancel
 	queryMetas map[string]*queryMeta                  // queryID -> metadata for result retrieval
 	querySem   chan struct{}                           // limits concurrent inflight queries
+
+	// Alert scheduler fields (see alerts.go for lifecycle methods).
+	alertScheduler       *alerts.Scheduler
+	alertSchedulerCancel context.CancelFunc
+	alertsEnabled        bool
 }
 
 // New creates a new Coordinator.
@@ -216,8 +222,10 @@ func (c *Coordinator) StartLeaderWatch(ctx context.Context) {
 					if err := c.RecoverQueries(ctx); err != nil {
 						c.logger.Error("failover recovery failed", "error", err)
 					}
+					c.StartAlertScheduler(ctx)
 				} else {
 					c.logger.Warn("leadership lost, queries will fail on this instance")
+					c.StopAlertScheduler()
 				}
 			}
 		}

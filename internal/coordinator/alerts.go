@@ -80,3 +80,88 @@ func identityFromCtx(ctx context.Context) string {
 	}
 	return ""
 }
+
+// SetAlertsEnabled toggles the feature flag. When false, StartAlertScheduler
+// is a no-op. DDL-level rejection is added in Task 13.
+func (c *Coordinator) SetAlertsEnabled(on bool) {
+	c.alertsEnabled = on
+	if !on {
+		c.StopAlertScheduler()
+	}
+}
+
+// StartAlertScheduler begins scheduling alerts. Must only be called while this
+// coordinator holds leadership. Safe to call multiple times; a running scheduler
+// is stopped and replaced.
+func (c *Coordinator) StartAlertScheduler(parent context.Context) {
+	if !c.alertsEnabled {
+		return
+	}
+	c.StopAlertScheduler()
+	ctx, cancel := context.WithCancel(parent)
+	c.alertSchedulerCancel = cancel
+	c.alertScheduler = alerts.NewScheduler(c.catalog, c.asSQLExecutor(), c.alertSinkFactory)
+	c.alertScheduler.Start(ctx)
+}
+
+// StopAlertScheduler cancels the running scheduler and waits for it to exit.
+// Safe to call when no scheduler is running.
+func (c *Coordinator) StopAlertScheduler() {
+	if c.alertSchedulerCancel != nil {
+		c.alertSchedulerCancel()
+		c.alertSchedulerCancel = nil
+	}
+	if c.alertScheduler != nil {
+		c.alertScheduler.Wait()
+		c.alertScheduler = nil
+	}
+}
+
+// alertSinkFactory returns the sinks configured for the alert.
+// WebhookSink first (if URL set), TableSink last (reads prior results).
+func (c *Coordinator) alertSinkFactory(m catalog.AlertMeta) []alerts.AlertSink {
+	var sinks []alerts.AlertSink
+	if m.WebhookURL != "" {
+		sinks = append(sinks, alerts.NewWebhookSink(m.WebhookURL, m.WebhookHeaders, 10*time.Second))
+	}
+	if m.InsertIntoTable != "" {
+		sinks = append(sinks, &alerts.TableSink{Executor: c.asSQLExecutor()})
+	}
+	return sinks
+}
+
+// asSQLExecutor adapts the coordinator to alerts.SQLExecutor.
+func (c *Coordinator) asSQLExecutor() alerts.SQLExecutor {
+	return &coordinatorExecutor{c: c}
+}
+
+// coordinatorExecutor bridges alerts.SQLExecutor onto *Coordinator.
+type coordinatorExecutor struct{ c *Coordinator }
+
+func (e *coordinatorExecutor) Execute(ctx context.Context, sqlText string) error {
+	_, err := e.c.ExecuteSQL(ctx, sqlText)
+	return err
+}
+
+// Query runs a SELECT and returns rows as []map[string]any.
+// SQLResult.Rows() materializes RecordBatch slices into row maps; we cap at
+// limit here but count all rows for the total. This is adequate for the
+// threshold-style queries alerts use (low cardinality).
+//
+// TODO(task-17): fill in column-schema extraction once the integration test
+// exercises this path. RecordBatch.Schema() or SQLResult.Columns can be used
+// to build []alerts.ColumnMeta. For now schema is returned as nil.
+func (e *coordinatorExecutor) Query(ctx context.Context, sqlText string, limit int) ([]map[string]any, []alerts.ColumnMeta, int64, bool, error) {
+	rs, err := e.c.ExecuteSQL(ctx, sqlText)
+	if err != nil {
+		return nil, nil, 0, false, err
+	}
+	all := rs.Rows()
+	total := rs.TotalRows
+	truncated := false
+	if limit > 0 && len(all) > limit {
+		all = all[:limit]
+		truncated = true
+	}
+	return all, nil, total, truncated, nil
+}
