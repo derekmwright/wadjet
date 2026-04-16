@@ -26,8 +26,7 @@ type Scheduler struct {
 	inflightMu sync.Mutex
 	inflight   map[string]bool
 
-	wg     sync.WaitGroup
-	doneCh chan struct{}
+	wg sync.WaitGroup
 }
 
 // NewScheduler constructs a scheduler with a default 1s tick cadence.
@@ -39,7 +38,6 @@ func NewScheduler(cat *catalog.Catalog, exec SQLExecutor, sinks SinkFactory) *Sc
 		tickInterval: 1 * time.Second,
 		inflight:     make(map[string]bool),
 		logger:       slog.Default(),
-		doneCh:       make(chan struct{}),
 	}
 }
 
@@ -49,7 +47,6 @@ func (s *Scheduler) Start(ctx context.Context) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		defer close(s.doneCh)
 		t := time.NewTicker(s.tickInterval)
 		defer t.Stop()
 		for {
