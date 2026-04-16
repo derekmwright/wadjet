@@ -599,8 +599,12 @@ func lexParseDrop(sql string, l *lexer) (*ParsedQuery, error) {
 		return lexParseDropView(sql, l)
 	}
 
+	if kindTok.typ == TokenKWAlert {
+		return lexParseDropAlert(sql, l)
+	}
+
 	if kindTok.typ != TokenKWFunction {
-		return nil, fmt.Errorf("expected TABLE, VIEW, or FUNCTION after DROP")
+		return nil, fmt.Errorf("expected TABLE, VIEW, FUNCTION, or ALERT after DROP")
 	}
 
 	ifExists := false
@@ -974,6 +978,13 @@ func lexParseCTEs(l *lexer) ([]CTEDef, error) {
 // parseAlterTable handles: ALTER TABLE name ADD/DROP/RENAME COLUMN ...
 // ALTER has already been consumed.
 func parseAlterTable(sql string, l *lexer) (*ParsedQuery, error) {
+	// Peek at kind: TABLE or ALERT
+	kindTok := l.peekToken()
+	if kindTok.typ == TokenKWAlert {
+		l.nextToken() // consume ALERT
+		return lexParseAlterAlert(sql, l)
+	}
+
 	tableTok := l.nextToken()
 	if tableTok.typ != TokenKWTable {
 		return nil, fmt.Errorf("expected TABLE after ALTER")
@@ -1541,6 +1552,53 @@ func lexParseDropView(sql string, l *lexer) (*ParsedQuery, error) {
 			Name:     strings.ToLower(tok.val),
 			IfExists: ifExists,
 		},
+	}, nil
+}
+
+// lexParseDropAlert handles: DROP ALERT [IF EXISTS] <name>
+// DROP ALERT has already been consumed.
+func lexParseDropAlert(sql string, l *lexer) (*ParsedQuery, error) {
+	ifExists := false
+	tok := l.nextToken()
+	if tok.typ == TokenKWIf {
+		existsTok := l.nextToken()
+		if existsTok.typ != TokenKWExists {
+			return nil, fmt.Errorf("expected EXISTS after IF")
+		}
+		ifExists = true
+		tok = l.nextToken()
+	}
+	if tok.typ != TokenIdent {
+		return nil, fmt.Errorf("DROP ALERT: alert name is required")
+	}
+	return &ParsedQuery{
+		Type:      QueryDropAlert,
+		SQL:       sql,
+		DropAlert: &DropAlertInfo{Name: tok.val, IfExists: ifExists},
+	}, nil
+}
+
+// lexParseAlterAlert handles: ALTER ALERT <name> {ENABLE|DISABLE}
+// ALTER ALERT has already been consumed.
+func lexParseAlterAlert(sql string, l *lexer) (*ParsedQuery, error) {
+	nameTok := l.nextToken()
+	if nameTok.typ != TokenIdent {
+		return nil, fmt.Errorf("ALTER ALERT: alert name is required")
+	}
+	actionTok := l.nextToken()
+	var enable bool
+	switch actionTok.typ {
+	case TokenKWEnable:
+		enable = true
+	case TokenKWDisable:
+		enable = false
+	default:
+		return nil, fmt.Errorf("ALTER ALERT: expected ENABLE or DISABLE, got %q", actionTok.val)
+	}
+	return &ParsedQuery{
+		Type:       QueryAlterAlert,
+		SQL:        sql,
+		AlterAlert: &AlterAlertInfo{Name: nameTok.val, Enable: enable},
 	}, nil
 }
 

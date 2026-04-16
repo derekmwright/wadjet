@@ -2126,3 +2126,59 @@ func TestParseCreateAlertInsertOnly(t *testing.T) {
 		t.Errorf("interval: want 1h, got %v", pq.CreateAlert.Interval)
 	}
 }
+
+func TestParseDropAlert(t *testing.T) {
+	cases := []struct {
+		sql      string
+		name     string
+		ifExists bool
+	}{
+		{"DROP ALERT a", "a", false},
+		{"DROP ALERT IF EXISTS a", "a", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sql, func(t *testing.T) {
+			pq, err := Parse(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pq.Type != QueryDropAlert {
+				t.Fatalf("type: want QueryDropAlert, got %v", pq.Type)
+			}
+			if pq.DropAlert.Name != tc.name {
+				t.Errorf("name: want %q, got %q", tc.name, pq.DropAlert.Name)
+			}
+			if pq.DropAlert.IfExists != tc.ifExists {
+				t.Errorf("ifExists: want %v, got %v", tc.ifExists, pq.DropAlert.IfExists)
+			}
+		})
+	}
+}
+
+func TestParseAlterAlert(t *testing.T) {
+	cases := []struct {
+		sql    string
+		name   string
+		enable bool
+	}{
+		{"ALTER ALERT foo ENABLE", "foo", true},
+		{"ALTER ALERT foo DISABLE", "foo", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.sql, func(t *testing.T) {
+			pq, err := Parse(tc.sql)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pq.Type != QueryAlterAlert {
+				t.Fatalf("type: want QueryAlterAlert, got %v", pq.Type)
+			}
+			if pq.AlterAlert.Name != tc.name {
+				t.Errorf("name: want %q, got %q", tc.name, pq.AlterAlert.Name)
+			}
+			if pq.AlterAlert.Enable != tc.enable {
+				t.Errorf("enable: want %v, got %v", tc.enable, pq.AlterAlert.Enable)
+			}
+		})
+	}
+}
