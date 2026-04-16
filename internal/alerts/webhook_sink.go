@@ -13,9 +13,10 @@ import (
 // WebhookSink POSTs an AlertFire JSON body to a URL with configurable headers
 // and jittered exponential-backoff retries.
 type WebhookSink struct {
-	URL     string
-	Headers map[string]string
-	Client  *http.Client
+	AlertName string
+	URL       string
+	Headers   map[string]string
+	Client    *http.Client
 
 	// retries is the number of retries after the initial attempt (3 in prod).
 	retries int
@@ -25,13 +26,14 @@ type WebhookSink struct {
 
 // NewWebhookSink constructs a WebhookSink with production defaults: 3 retries,
 // 200ms base backoff (→ 200, 800, 3200 ms), and the supplied HTTP timeout.
-func NewWebhookSink(url string, headers map[string]string, timeout time.Duration) *WebhookSink {
+func NewWebhookSink(alertName, url string, headers map[string]string, timeout time.Duration) *WebhookSink {
 	return &WebhookSink{
-		URL:     url,
-		Headers: headers,
-		Client:  &http.Client{Timeout: timeout},
-		retries: 3,
-		backoff: 200 * time.Millisecond,
+		AlertName: alertName,
+		URL:       url,
+		Headers:   headers,
+		Client:    &http.Client{Timeout: timeout},
+		retries:   3,
+		backoff:   200 * time.Millisecond,
 	}
 }
 
@@ -48,6 +50,9 @@ func (s *WebhookSink) Deliver(ctx context.Context, fire AlertFire) error {
 	var lastErr error
 	for attempt := 0; attempt <= s.retries; attempt++ {
 		if attempt > 0 {
+			if s.AlertName != "" {
+				metricWebhookRetries.WithLabelValues(s.AlertName).Inc()
+			}
 			d := jitteredBackoff(s.backoff, attempt-1)
 			select {
 			case <-ctx.Done():

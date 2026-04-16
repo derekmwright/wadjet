@@ -82,7 +82,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		sinkFactory := alerts.SinkFactory(func(m catalog.AlertMeta) []alerts.AlertSink {
 			var sinks []alerts.AlertSink
 			if m.WebhookURL != "" {
-				sinks = append(sinks, alerts.NewWebhookSink(m.WebhookURL, m.WebhookHeaders, 10*time.Second))
+				sinks = append(sinks, alerts.NewWebhookSink(m.Name, m.WebhookURL, m.WebhookHeaders, 10*time.Second))
 			}
 			if m.InsertIntoTable != "" {
 				sinks = append(sinks, &alerts.TableSink{Executor: ex})

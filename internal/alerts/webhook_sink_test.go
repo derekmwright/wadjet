@@ -27,7 +27,7 @@ func TestWebhookSinkSuccess(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewWebhookSink(srv.URL, map[string]string{"X-Auth": "secret"}, 10*time.Second)
+	s := NewWebhookSink("", srv.URL, map[string]string{"X-Auth": "secret"}, 10*time.Second)
 	err := s.Deliver(context.Background(), AlertFire{AlertName: "a", EvaluatedAt: time.Now(), RowCount: 1})
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)

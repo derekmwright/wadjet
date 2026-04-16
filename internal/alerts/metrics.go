@@ -23,6 +23,11 @@ var (
 		Name: "wadjet_alert_scheduler_list_errors_total",
 		Help: "Scheduler catalog.ListAlerts errors.",
 	})
+
+	metricWebhookRetries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "wadjet_alert_webhook_retries_total",
+		Help: "Count of webhook retry attempts per alert.",
+	}, []string{"alert"})
 )
 
 // Collectors returns all Prometheus collectors for the alerts package so the
@@ -34,5 +39,6 @@ func Collectors() []prometheus.Collector {
 		metricEvalDuration,
 		metricRowsMatched,
 		metricListErrors,
+		metricWebhookRetries,
 	}
 }
