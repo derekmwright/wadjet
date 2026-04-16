@@ -3,6 +3,7 @@ package sql
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParse_Select(t *testing.T) {
@@ -2063,5 +2064,65 @@ func TestParseGenerateSeriesWithStep(t *testing.T) {
 	}
 	if tbl.Alias != "gs" {
 		t.Errorf("expected alias 'gs', got %q", tbl.Alias)
+	}
+}
+
+func TestParseCreateAlertMinimal(t *testing.T) {
+	sql := `CREATE ALERT my_alert AS SELECT 1 FROM t EVERY 5 MINUTES WEBHOOK 'https://x.example'`
+	pq, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryCreateAlert {
+		t.Fatalf("type: want QueryCreateAlert, got %v", pq.Type)
+	}
+	if pq.CreateAlert == nil {
+		t.Fatal("CreateAlert is nil")
+	}
+	if pq.CreateAlert.Name != "my_alert" {
+		t.Errorf("name: want my_alert, got %q", pq.CreateAlert.Name)
+	}
+	if pq.CreateAlert.Interval != 5*time.Minute {
+		t.Errorf("interval: want 5m, got %v", pq.CreateAlert.Interval)
+	}
+	if pq.CreateAlert.WebhookURL != "https://x.example" {
+		t.Errorf("url: want https://x.example, got %q", pq.CreateAlert.WebhookURL)
+	}
+	if !strings.Contains(pq.CreateAlert.QueryText, "SELECT 1 FROM t") {
+		t.Errorf("queryText missing SELECT: %q", pq.CreateAlert.QueryText)
+	}
+}
+
+func TestParseCreateAlertAllOptions(t *testing.T) {
+	sql := `CREATE ALERT a AS SELECT x FROM t EVERY 30 SECONDS WEBHOOK 'http://y.example' HEADERS { 'Authorization' = 'Token abc' } INSERT INTO alert_history`
+	pq, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.CreateAlert.Interval != 30*time.Second {
+		t.Errorf("interval: want 30s, got %v", pq.CreateAlert.Interval)
+	}
+	if pq.CreateAlert.Headers["Authorization"] != "Token abc" {
+		t.Errorf("header: want Token abc, got %q", pq.CreateAlert.Headers["Authorization"])
+	}
+	if pq.CreateAlert.InsertInto != "alert_history" {
+		t.Errorf("insert into: want alert_history, got %q", pq.CreateAlert.InsertInto)
+	}
+}
+
+func TestParseCreateAlertInsertOnly(t *testing.T) {
+	sql := `CREATE ALERT a AS SELECT 1 FROM t EVERY 1 HOURS INSERT INTO h`
+	pq, err := Parse(sql)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.CreateAlert.WebhookURL != "" {
+		t.Errorf("url should be empty, got %q", pq.CreateAlert.WebhookURL)
+	}
+	if pq.CreateAlert.InsertInto != "h" {
+		t.Errorf("insert into: want h, got %q", pq.CreateAlert.InsertInto)
+	}
+	if pq.CreateAlert.Interval != time.Hour {
+		t.Errorf("interval: want 1h, got %v", pq.CreateAlert.Interval)
 	}
 }

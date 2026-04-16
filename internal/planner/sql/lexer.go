@@ -28,6 +28,8 @@ const (
 	TokenDot       // .
 	TokenLBracket  // [
 	TokenRBracket  // ]
+	TokenLBrace    // {
+	TokenRBrace    // }
 
 	// Operators
 	TokenPlus    // +
@@ -624,6 +626,12 @@ func lexStart(l *lexer) stateFn {
 		return nil
 	case r == ']':
 		l.emit(TokenRBracket)
+		return nil
+	case r == '{':
+		l.emit(TokenLBrace)
+		return nil
+	case r == '}':
+		l.emit(TokenRBrace)
 		return nil
 	case r == '\'':
 		return lexString
