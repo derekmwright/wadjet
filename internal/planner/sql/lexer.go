@@ -145,6 +145,17 @@ const (
 	TokenKWUsing
 	TokenKWMatched
 
+	// Alert DDL keywords
+	TokenKWAlert
+	TokenKWEvery
+	TokenKWWebhook
+	TokenKWHeaders
+	TokenKWEnable
+	TokenKWDisable
+	TokenKWSeconds
+	TokenKWMinutes
+	TokenKWHours
+
 	// Raw capture
 	TokenRawBody // everything after AS until terminator
 )
@@ -244,6 +255,15 @@ var keywords = map[string]TokenType{
 	"MERGE":      TokenKWMerge,
 	"USING":      TokenKWUsing,
 	"MATCHED":    TokenKWMatched,
+	"ALERT":      TokenKWAlert,
+	"EVERY":      TokenKWEvery,
+	"WEBHOOK":    TokenKWWebhook,
+	"HEADERS":    TokenKWHeaders,
+	"ENABLE":     TokenKWEnable,
+	"DISABLE":    TokenKWDisable,
+	"SECONDS":    TokenKWSeconds,
+	"MINUTES":    TokenKWMinutes,
+	"HOURS":      TokenKWHours,
 }
 
 // token is a lexical token produced by the lexer.
