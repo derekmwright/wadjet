@@ -151,6 +151,115 @@ func TestDescribeAlertTool(t *testing.T) {
 	}
 }
 
+// TestResourcesListIncludesAlertsDocs verifies resources/list returns the alerts doc entry.
+func TestResourcesListIncludesAlertsDocs(t *testing.T) {
+	db := setupTestDB(t)
+	srv := NewServer(db, nil)
+
+	in := &bytes.Buffer{}
+	sendRPC(t, in, "resources/list", nil, 1)
+
+	out := runStdio(t, srv, in)
+	resp := readResponse(t, out)
+	if resp.Error != nil {
+		t.Fatalf("unexpected RPC error: %v", resp.Error.Message)
+	}
+
+	body, _ := json.Marshal(resp.Result)
+	if !strings.Contains(string(body), "wadjet://docs/alerts") {
+		t.Errorf("resources/list missing alerts doc: %s", body)
+	}
+}
+
+// TestResourcesReadAlertsDoc verifies resources/read returns the embedded markdown.
+func TestResourcesReadAlertsDoc(t *testing.T) {
+	db := setupTestDB(t)
+	srv := NewServer(db, nil)
+
+	in := &bytes.Buffer{}
+	sendRPC(t, in, "resources/read", map[string]string{"uri": "wadjet://docs/alerts"}, 1)
+
+	out := runStdio(t, srv, in)
+	resp := readResponse(t, out)
+	if resp.Error != nil {
+		t.Fatalf("unexpected RPC error: %v", resp.Error.Message)
+	}
+
+	body, _ := json.Marshal(resp.Result)
+	if !strings.Contains(string(body), "CREATE ALERT") {
+		t.Errorf("resources/read did not return alerts doc: %s", body)
+	}
+}
+
+// TestResourcesReadUnknownURI verifies resources/read returns an error for unknown URIs.
+func TestResourcesReadUnknownURI(t *testing.T) {
+	db := setupTestDB(t)
+	srv := NewServer(db, nil)
+
+	in := &bytes.Buffer{}
+	sendRPC(t, in, "resources/read", map[string]string{"uri": "wadjet://docs/nonexistent"}, 1)
+
+	out := runStdio(t, srv, in)
+	resp := readResponse(t, out)
+	if resp.Error == nil {
+		t.Fatal("expected error for unknown resource URI")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("expected error code -32602, got %d", resp.Error.Code)
+	}
+}
+
+// TestListFunctionsDDLCapabilities verifies list_functions returns the ddl_capabilities section.
+func TestListFunctionsDDLCapabilities(t *testing.T) {
+	db := setupTestDB(t)
+	srv := NewServer(db, nil)
+
+	in := &bytes.Buffer{}
+	sendRPC(t, in, "tools/call", map[string]any{
+		"name":      "list_functions",
+		"arguments": map[string]any{},
+	}, 1)
+
+	out := runStdio(t, srv, in)
+	resp := readResponse(t, out)
+	if resp.Error != nil {
+		t.Fatalf("unexpected RPC error: %v", resp.Error.Message)
+	}
+
+	data, _ := json.Marshal(resp.Result)
+	var toolResult callToolResult
+	if err := json.Unmarshal(data, &toolResult); err != nil {
+		t.Fatalf("unmarshaling tool result: %v", err)
+	}
+	if toolResult.IsError {
+		t.Fatalf("tool returned error: %v", toolResult.Content)
+	}
+	if len(toolResult.Content) == 0 {
+		t.Fatal("no content blocks returned")
+	}
+
+	text := toolResult.Content[0].Text
+	var payload struct {
+		DDLCapabilities []map[string]string `json:"ddl_capabilities"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("parsing list_functions JSON: %v\nraw: %s", err, text)
+	}
+	if len(payload.DDLCapabilities) == 0 {
+		t.Fatalf("ddl_capabilities missing from list_functions response: %s", text)
+	}
+	names := map[string]bool{}
+	for _, cap := range payload.DDLCapabilities {
+		names[cap["name"]] = true
+	}
+	if !names["CREATE ALERT"] {
+		t.Errorf("ddl_capabilities missing CREATE ALERT entry")
+	}
+	if !names["DROP ALERT"] {
+		t.Errorf("ddl_capabilities missing DROP ALERT entry")
+	}
+}
+
 // TestInitializeAdvertisesAlertCapability verifies the initialize handshake
 // includes the "wadjet.ddl.create_alert" capability key.
 func TestInitializeAdvertisesAlertCapability(t *testing.T) {
