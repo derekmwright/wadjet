@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -2220,5 +2221,43 @@ func TestParseCreateAlertInvalid(t *testing.T) {
 				t.Errorf("err: want substring %q, got %q", tc.wantErr, err.Error())
 			}
 		})
+	}
+}
+
+func stripCommentLines(s string) string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+func TestAlertGoldenFixturesParse(t *testing.T) {
+	restore := SetAlertIntervalFloorForTest(0)
+	defer restore()
+
+	data, err := os.ReadFile("../../../testdata/alerts/golden.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawStmts := strings.Split(string(data), ";")
+	parsed := 0
+	for i, raw := range rawStmts {
+		s := strings.TrimSpace(stripCommentLines(raw))
+		if s == "" {
+			continue
+		}
+		if _, err := Parse(s); err != nil {
+			t.Errorf("stmt %d: parse failed: %v\nSQL: %s", i, err, s)
+		} else {
+			parsed++
+		}
+	}
+	const wantStmts = 7
+	if parsed != wantStmts {
+		t.Errorf("expected %d statements parsed, got %d", wantStmts, parsed)
 	}
 }
