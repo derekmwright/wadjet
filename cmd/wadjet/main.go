@@ -765,16 +765,6 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		coord.StartCatalogSnapshotLoop(ctx)
 	}
 
-	// Start catalog snapshotter (legacy). Skipped when the new per-key
-	// S3-prefix snapshot system is active to avoid redundant S3 writes.
-	if snapshotPrefix == "" {
-		snapCfg := buildSnapshotConfig(fileCfg)
-		snapshotter := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, logger)
-		snapshotter.Start(ctx)
-	} else {
-		logger.Info("using new S3-prefix catalog snapshots; legacy CatalogSnapshotter disabled", "prefix", snapshotPrefix)
-	}
-
 	// Start background compaction
 	compactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
 		Enabled:    true,
@@ -1027,20 +1017,6 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		// on leader election, so we do NOT call it here.
 	}
 
-	// Start catalog snapshotter (leader-only in distributed mode). Skipped when
-	// the new per-key S3-prefix snapshot system is active to avoid redundant S3 writes.
-	if snapshotPrefix == "" {
-		var coordFileCfg *config.Config
-		if configFile != "" {
-			coordFileCfg, _ = config.Load(configFile)
-		}
-		coordSnapCfg := buildSnapshotConfig(coordFileCfg)
-		coordSnap := coordinator.NewCatalogSnapshotter(cat, store, bucket, coordSnapCfg, logger)
-		coordSnap.Start(ctx)
-	} else {
-		logger.Info("using new S3-prefix catalog snapshots; legacy CatalogSnapshotter disabled", "prefix", snapshotPrefix)
-	}
-
 	// Start background compaction
 	coordCompactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
 		Enabled:    true,
@@ -1261,16 +1237,12 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 
 // wireUDFPersistence loads persisted UDFs from the catalog and sets up
 // a callback so future UDF changes are automatically saved to KV.
-// buildSnapshotConfig converts the YAML/env CatalogSnapshot config into the
-// coordinator's SnapshotConfig. Returns defaults when no config file is loaded.
 func catalogCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "catalog",
 		Short: "Catalog management commands",
 	}
 	cmd.AddCommand(catalogSnapshotCmd())
-	cmd.AddCommand(catalogRestoreCmd())
-	cmd.AddCommand(catalogListSnapshotsCmd())
 	return cmd
 }
 
@@ -1278,178 +1250,37 @@ func catalogSnapshotCmd() *cobra.Command {
 	var coordAddr string
 	cmd := &cobra.Command{
 		Use:   "snapshot",
-		Short: "Take a catalog snapshot now",
+		Short: "Take a catalog snapshot via a running coordinator",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if coordAddr == "" {
+				return fmt.Errorf("snapshots require a running coordinator; pass --coord-addr=host:port")
+			}
+
 			ctx := context.Background()
-
-			// If coordinator address is provided, use pgwire
-			if coordAddr != "" {
-				conn, err := pgx.Connect(ctx, "postgres://wadjet@"+coordAddr+"/wadjet?sslmode=disable")
-				if err != nil {
-					return fmt.Errorf("connect to coordinator: %w", err)
-				}
-				defer conn.Close(ctx)
-
-				rows, err := conn.Query(ctx, "CREATE SNAPSHOT")
-				if err != nil {
-					return fmt.Errorf("executing CREATE SNAPSHOT: %w", err)
-				}
-				defer rows.Close()
-
-				for rows.Next() {
-					vals, err := rows.Values()
-					if err != nil {
-						return err
-					}
-					fmt.Println(vals)
-				}
-				return rows.Err()
-			}
-
-			// Otherwise, use local storage
-			store, err := newStore()
+			conn, err := pgx.Connect(ctx, "postgres://wadjet@"+coordAddr+"/wadjet?sslmode=disable")
 			if err != nil {
-				return err
+				return fmt.Errorf("connect to coordinator: %w", err)
 			}
-			cat := catalog.NewWithStore(store, bucket)
-			if err := cat.Init(ctx); err != nil {
-				return fmt.Errorf("initializing catalog: %w", err)
-			}
+			defer conn.Close(ctx)
 
-			var fileCfg *config.Config
-			if configFile != "" {
-				fileCfg, _ = config.Load(configFile)
-			}
-			snapCfg := buildSnapshotConfig(fileCfg)
-			s := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, nil)
-
-			snap, err := s.TakeSnapshot(ctx)
+			rows, err := conn.Query(ctx, "CREATE SNAPSHOT")
 			if err != nil {
-				return err
+				return fmt.Errorf("executing CREATE SNAPSHOT: %w", err)
 			}
-			fmt.Printf("Snapshot saved: %s (%d entries)\n", snap.Timestamp.Format(time.RFC3339), len(snap.Entries))
-			return nil
+			defer rows.Close()
+
+			for rows.Next() {
+				vals, err := rows.Values()
+				if err != nil {
+					return err
+				}
+				fmt.Println(vals)
+			}
+			return rows.Err()
 		},
 	}
-	cmd.Flags().StringVar(&coordAddr, "coord-addr", "", "coordinator pgwire address (host:port); if set, use pgwire instead of local storage")
+	cmd.Flags().StringVar(&coordAddr, "coord-addr", "", "coordinator pgwire address (host:port)")
 	return cmd
-}
-
-func catalogRestoreCmd() *cobra.Command {
-	var snapshotKey string
-	cmd := &cobra.Command{
-		Use:   "restore",
-		Short: "Restore catalog from a snapshot (latest by default)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-			store, err := newStore()
-			if err != nil {
-				return err
-			}
-			cat := catalog.NewWithStore(store, bucket)
-			if err := cat.Init(ctx); err != nil {
-				return fmt.Errorf("initializing catalog: %w", err)
-			}
-
-			var fileCfg *config.Config
-			if configFile != "" {
-				fileCfg, _ = config.Load(configFile)
-			}
-			snapCfg := buildSnapshotConfig(fileCfg)
-			s := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, nil)
-
-			if snapshotKey != "" {
-				snap, err := s.LoadSnapshot(ctx, snapshotKey)
-				if err != nil {
-					return err
-				}
-				if err := s.Restore(ctx, snap); err != nil {
-					return err
-				}
-				fmt.Printf("Restored from %s (%d entries, %s)\n", snapshotKey, len(snap.Entries), snap.Timestamp.Format(time.RFC3339))
-			} else {
-				snap, err := s.RestoreLatest(ctx)
-				if err != nil {
-					return err
-				}
-				fmt.Printf("Restored latest snapshot (%d entries, %s)\n", len(snap.Entries), snap.Timestamp.Format(time.RFC3339))
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&snapshotKey, "from", "", "Specific snapshot key to restore (default: latest)")
-	return cmd
-}
-
-func catalogListSnapshotsCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "snapshots",
-		Short: "List available catalog snapshots",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.Background()
-			store, err := newStore()
-			if err != nil {
-				return err
-			}
-			cat := catalog.NewWithStore(store, bucket)
-
-			var fileCfg *config.Config
-			if configFile != "" {
-				fileCfg, _ = config.Load(configFile)
-			}
-			snapCfg := buildSnapshotConfig(fileCfg)
-			s := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, nil)
-
-			snapshots, err := s.ListSnapshots(ctx)
-			if err != nil {
-				return err
-			}
-			if len(snapshots) == 0 {
-				fmt.Println("No snapshots found.")
-				return nil
-			}
-			for _, obj := range snapshots {
-				fmt.Printf("  %s  (%d bytes)\n", obj.Key, obj.Size)
-			}
-			return nil
-		},
-	}
-}
-
-func buildSnapshotConfig(fileCfg *config.Config) coordinator.SnapshotConfig {
-	cfg := coordinator.SnapshotConfig{
-		Enabled:    true,
-		LeaderOnly: true,
-	}
-
-	if fileCfg == nil {
-		return cfg
-	}
-	snap := fileCfg.CatalogSnapshot
-
-	if snap.Enabled != nil {
-		cfg.Enabled = *snap.Enabled
-	}
-	if snap.Interval != "" {
-		if d, err := time.ParseDuration(snap.Interval); err == nil {
-			cfg.Interval = d
-		}
-	}
-	if snap.Retention > 0 {
-		cfg.Retention = snap.Retention
-	}
-	if snap.Prefix != "" {
-		cfg.Prefix = snap.Prefix
-	}
-	if snap.Debounce != "" {
-		if d, err := time.ParseDuration(snap.Debounce); err == nil {
-			cfg.Debounce = d
-		}
-	}
-	if snap.LeaderOnly != nil {
-		cfg.LeaderOnly = *snap.LeaderOnly
-	}
-	return cfg
 }
 
 func wireUDFPersistence(cat *catalog.Catalog, logger *slog.Logger) {

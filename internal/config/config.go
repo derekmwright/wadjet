@@ -23,7 +23,6 @@ type Config struct {
 	Auth            Auth            `yaml:"auth"`
 	GeoIP           GeoIP           `yaml:"geoip"`
 	QueryLimits     QueryLimits     `yaml:"query_limits"`     // global query cost limits
-	CatalogSnapshot CatalogSnapshot `yaml:"catalog_snapshot"` // periodic catalog backup
 	Telemetry       Telemetry       `yaml:"telemetry"`        // OpenTelemetry tracing export
 }
 
@@ -32,16 +31,6 @@ type Telemetry struct {
 	Endpoint   string  `yaml:"endpoint"`    // OTLP gRPC endpoint (e.g., "localhost:4317")
 	Insecure   bool    `yaml:"insecure"`    // use plaintext gRPC (no TLS)
 	SampleRate float64 `yaml:"sample_rate"` // 0.0-1.0 (default: 1.0 = always)
-}
-
-// CatalogSnapshot configures periodic catalog metadata snapshots to object storage.
-type CatalogSnapshot struct {
-	Enabled    *bool  `yaml:"enabled"`     // nil = true (enabled by default)
-	Interval   string `yaml:"interval"`    // duration string, e.g. "5m" (default: 5m)
-	Retention  int    `yaml:"retention"`   // max snapshots to keep (default: 48)
-	Prefix     string `yaml:"prefix"`      // S3 key prefix (default: _catalog/snapshots)
-	Debounce   string `yaml:"debounce"`    // min time between mutation-triggered snapshots (default: 30s)
-	LeaderOnly *bool  `yaml:"leader_only"` // nil = true (only leader snapshots in distributed mode)
 }
 
 // GeoIP configures MaxMind GeoIP database paths.
@@ -285,12 +274,6 @@ func LoadOrDefault(path string) *Config {
 //	WADJET_WORKER_SPILL_DIR       - spill directory
 //	WADJET_GEOIP_CITY_DB          - GeoLite2-City.mmdb path
 //	WADJET_GEOIP_ASN_DB           - GeoLite2-ASN.mmdb path
-//	WADJET_CATALOG_SNAPSHOT_ENABLED   - true/false
-//	WADJET_CATALOG_SNAPSHOT_INTERVAL  - duration (e.g. "5m")
-//	WADJET_CATALOG_SNAPSHOT_RETENTION - max snapshots to keep
-//	WADJET_CATALOG_SNAPSHOT_PREFIX    - S3 key prefix
-//	WADJET_CATALOG_SNAPSHOT_DEBOUNCE  - duration (e.g. "30s")
-//	WADJET_CATALOG_SNAPSHOT_LEADER_ONLY - true/false
 //	WADJET_OTEL_ENDPOINT          - OTLP gRPC endpoint (e.g. localhost:4317)
 //	WADJET_OTEL_INSECURE          - true/false (plaintext gRPC)
 //	WADJET_OTEL_SAMPLE_RATE       - 0.0-1.0 sampling rate
@@ -381,28 +364,6 @@ func applyEnvOverrides(cfg *Config) {
 		if n, err := strconv.Atoi(v); err == nil {
 			cfg.QueryLimits.MaxScanFiles = n
 		}
-	}
-	if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_ENABLED"); v != "" {
-		b := strings.EqualFold(v, "true") || v == "1"
-		cfg.CatalogSnapshot.Enabled = &b
-	}
-	if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_INTERVAL"); v != "" {
-		cfg.CatalogSnapshot.Interval = v
-	}
-	if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_RETENTION"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			cfg.CatalogSnapshot.Retention = n
-		}
-	}
-	if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_PREFIX"); v != "" {
-		cfg.CatalogSnapshot.Prefix = v
-	}
-	if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_DEBOUNCE"); v != "" {
-		cfg.CatalogSnapshot.Debounce = v
-	}
-	if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_LEADER_ONLY"); v != "" {
-		b := strings.EqualFold(v, "true") || v == "1"
-		cfg.CatalogSnapshot.LeaderOnly = &b
 	}
 	if v := os.Getenv("WADJET_OTEL_ENDPOINT"); v != "" {
 		cfg.Telemetry.Endpoint = v
