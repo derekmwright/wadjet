@@ -158,6 +158,9 @@ const (
 	TokenKWMinutes
 	TokenKWHours
 
+	// Snapshot keywords
+	TokenKWSnapshot
+
 	// Raw capture
 	TokenRawBody // everything after AS until terminator
 )
@@ -266,6 +269,7 @@ var keywords = map[string]TokenType{
 	"SECONDS":    TokenKWSeconds,
 	"MINUTES":    TokenKWMinutes,
 	"HOURS":      TokenKWHours,
+	"SNAPSHOT":   TokenKWSnapshot,
 }
 
 // token is a lexical token produced by the lexer.
