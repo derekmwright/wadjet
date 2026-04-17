@@ -144,10 +144,16 @@ func main() {
 }
 
 func serveCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the Wadjet server",
-		RunE: func(cmd *cobra.Command, args []string) error {
+	}
+
+	catalogSnapshotPrefix := cmd.Flags().String("catalog-snapshot-s3-prefix", "", "S3 URL prefix (s3://bucket/path/) for catalog snapshots. Unset disables.")
+	catalogSnapshotInterval := cmd.Flags().Duration("catalog-snapshot-interval", 5*time.Minute, "Periodic catalog snapshot cadence. 0 disables periodic (explicit CREATE SNAPSHOT still works).")
+	forceRestoreCatalog := cmd.Flags().String("force-restore-catalog", "", "Restore catalog from S3 regardless of KV state. Value: 'latest' or a specific timestamp.")
+
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
@@ -247,19 +253,27 @@ func serveCmd() *cobra.Command {
 			if v := os.Getenv("WADJET_ENABLE_ALERTS"); v == "1" || strings.EqualFold(v, "true") {
 				enableAlerts = true
 			}
+			if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_PREFIX"); v != "" {
+				*catalogSnapshotPrefix = v
+			}
+			if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_INTERVAL"); v != "" {
+				if d, err := time.ParseDuration(v); err == nil {
+					*catalogSnapshotInterval = d
+				}
+			}
 
 			switch mode {
 			case "standalone":
-				return runStandalone(ctx, store, logger, enableAlerts)
+				return runStandalone(ctx, store, logger, enableAlerts, *catalogSnapshotPrefix, *catalogSnapshotInterval, *forceRestoreCatalog)
 			case "coordinator":
-				return runCoordinator(ctx, store, logger, enableAlerts)
+				return runCoordinator(ctx, store, logger, enableAlerts, *catalogSnapshotPrefix, *catalogSnapshotInterval, *forceRestoreCatalog)
 			case "worker":
 				return runWorker(ctx, store, logger)
 			default:
 				return fmt.Errorf("unknown mode: %s", mode)
 			}
-		},
-	}
+		}
+	return cmd
 }
 
 func queryCmd() *cobra.Command {
@@ -639,7 +653,7 @@ func newStore() (objstore.Store, error) {
 	}
 }
 
-func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool) error {
+func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool, snapshotPrefix string, snapshotInterval time.Duration, forceRestoreTS string) error {
 	// Start embedded NATS (with optional leaf node connections)
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = natsPort
@@ -731,6 +745,23 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	coord.SetAlertsEnabled(alertsEnabled)
 	if alertsEnabled {
 		coord.StartAlertScheduler(ctx)
+	}
+
+	// Wire CLI-driven catalog snapshot options.
+	if snapshotPrefix != "" {
+		snapBucket, snapPath, err := parseS3URL(snapshotPrefix)
+		if err != nil {
+			return fmt.Errorf("parsing --catalog-snapshot-s3-prefix: %w", err)
+		}
+		coord.SetCatalogSnapshotOptions(catalog.SnapshotOptions{
+			Store: store, Bucket: snapBucket, Prefix: snapPath,
+		})
+		coord.SetCatalogSnapshotInterval(snapshotInterval)
+		if err := coord.MaybeRestoreCatalog(ctx, forceRestoreTS); err != nil {
+			return fmt.Errorf("restoring catalog: %w", err)
+		}
+		// Standalone mode skips leader-election, so start the loop directly.
+		coord.StartCatalogSnapshotLoop(ctx)
 	}
 
 	// Start catalog snapshotter
@@ -905,7 +936,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	}
 }
 
-func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool) error {
+func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool, snapshotPrefix string, snapshotInterval time.Duration, forceRestoreTS string) error {
 	// Start embedded NATS (with optional leaf node connections)
 	// Bind to 0.0.0.0 so remote workers can connect.
 	natsCfg := distributed.DefaultNATSConfig()
@@ -972,6 +1003,23 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	// Enable alerts feature flag; in coordinator mode StartLeaderWatch manages
 	// the scheduler lifecycle on leader transitions.
 	coord.SetAlertsEnabled(alertsEnabled)
+
+	// Wire CLI-driven catalog snapshot options.
+	if snapshotPrefix != "" {
+		snapBucket, snapPath, err := parseS3URL(snapshotPrefix)
+		if err != nil {
+			return fmt.Errorf("parsing --catalog-snapshot-s3-prefix: %w", err)
+		}
+		coord.SetCatalogSnapshotOptions(catalog.SnapshotOptions{
+			Store: store, Bucket: snapBucket, Prefix: snapPath,
+		})
+		coord.SetCatalogSnapshotInterval(snapshotInterval)
+		if err := coord.MaybeRestoreCatalog(ctx, forceRestoreTS); err != nil {
+			return fmt.Errorf("restoring catalog: %w", err)
+		}
+		// In coordinator mode, StartLeaderWatch fires StartCatalogSnapshotLoop
+		// on leader election, so we do NOT call it here.
+	}
 
 	// Start catalog snapshotter (leader-only in distributed mode)
 	var coordFileCfg *config.Config
@@ -1703,4 +1751,23 @@ Configure in Claude Desktop's claude_desktop_config.json:
 			return srv.ServeStdio(ctx, os.Stdin, os.Stdout)
 		},
 	}
+}
+
+// parseS3URL splits "s3://bucket/path/..." into (bucket, path).
+// path is empty or ends with "/".
+func parseS3URL(s string) (bucket, path string, err error) {
+	rest, ok := strings.CutPrefix(s, "s3://")
+	if !ok {
+		return "", "", fmt.Errorf("not an s3:// URL: %s", s)
+	}
+	slash := strings.Index(rest, "/")
+	if slash < 0 {
+		return rest, "", nil
+	}
+	bucket = rest[:slash]
+	path = rest[slash+1:]
+	if path != "" && !strings.HasSuffix(path, "/") {
+		path += "/"
+	}
+	return bucket, path, nil
 }
