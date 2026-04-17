@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/peterh/liner"
 
 	"github.com/citc-tech/wadjet/internal/alerts"
@@ -1264,11 +1265,38 @@ func catalogCmd() *cobra.Command {
 }
 
 func catalogSnapshotCmd() *cobra.Command {
-	return &cobra.Command{
+	var coordAddr string
+	cmd := &cobra.Command{
 		Use:   "snapshot",
 		Short: "Take a catalog snapshot now",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+
+			// If coordinator address is provided, use pgwire
+			if coordAddr != "" {
+				conn, err := pgx.Connect(ctx, "postgres://wadjet@"+coordAddr+"/wadjet?sslmode=disable")
+				if err != nil {
+					return fmt.Errorf("connect to coordinator: %w", err)
+				}
+				defer conn.Close(ctx)
+
+				rows, err := conn.Query(ctx, "CREATE SNAPSHOT")
+				if err != nil {
+					return fmt.Errorf("executing CREATE SNAPSHOT: %w", err)
+				}
+				defer rows.Close()
+
+				for rows.Next() {
+					vals, err := rows.Values()
+					if err != nil {
+						return err
+					}
+					fmt.Println(vals)
+				}
+				return rows.Err()
+			}
+
+			// Otherwise, use local storage
 			store, err := newStore()
 			if err != nil {
 				return err
@@ -1293,6 +1321,8 @@ func catalogSnapshotCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&coordAddr, "coord-addr", "", "coordinator pgwire address (host:port); if set, use pgwire instead of local storage")
+	return cmd
 }
 
 func catalogRestoreCmd() *cobra.Command {
