@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -89,5 +90,98 @@ func TestSnapshotWritesManifestAndKeys(t *testing.T) {
 		if err != nil {
 			t.Errorf("snapshotted key %q missing at %q: %v", k.KVKey, fullPath, err)
 		}
+	}
+}
+
+func TestSnapshotRoundTrip(t *testing.T) {
+	src, store := newSnapshotTestCatalog(t)
+	ts, err := src.Snapshot(context.Background(), SnapshotOptions{
+		Store: store, Bucket: testBucket, Prefix: testPrefix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh KV, same store. Restore should populate it byte-for-byte.
+	dstKV := NewMemKV()
+	dst := NewWithCluster(dstKV, store, testBucket, "test")
+	got, err := dst.Restore(context.Background(), RestoreOptions{
+		SnapshotOptions: SnapshotOptions{Store: store, Bucket: testBucket, Prefix: testPrefix},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != ts {
+		t.Errorf("restored ts: want %q, got %q", ts, got)
+	}
+
+	// Compare every <clusterID>.* key from src vs dst.
+	prefix := "test."
+	srcKeys, _ := src.kv.List(prefix)
+	dstKeys, _ := dst.kv.List(prefix)
+	if len(srcKeys) != len(dstKeys) {
+		t.Fatalf("key count: src=%d dst=%d", len(srcKeys), len(dstKeys))
+	}
+	for _, k := range srcKeys {
+		a, _, _ := src.kv.Get(k)
+		b, _, _ := dst.kv.Get(k)
+		if string(a) != string(b) {
+			t.Errorf("key %q value mismatch", k)
+		}
+	}
+
+	// Table is queryable from the restored catalog.
+	tm, err := dst.GetTable(context.Background(), "orders")
+	if err != nil {
+		t.Fatalf("GetTable: %v", err)
+	}
+	if tm.Name != "orders" {
+		t.Errorf("table name: want orders, got %q", tm.Name)
+	}
+}
+
+func TestRestoreMissingLatest(t *testing.T) {
+	kv := NewMemKV()
+	store := objstore.NewMemStore()
+	cat := NewWithCluster(kv, store, testBucket, "test")
+	// No snapshot written; latest pointer is absent.
+	ts, err := cat.Restore(context.Background(), RestoreOptions{
+		SnapshotOptions: SnapshotOptions{Store: store, Bucket: testBucket, Prefix: testPrefix},
+	})
+	if err != nil {
+		t.Fatalf("Restore with no latest should be a no-op, got %v", err)
+	}
+	if ts != "" {
+		t.Errorf("no-op ts: want empty, got %q", ts)
+	}
+}
+
+func TestRestoreCorruptedManifest(t *testing.T) {
+	src, store := newSnapshotTestCatalog(t)
+	ts, err := src.Snapshot(context.Background(), SnapshotOptions{
+		Store: store, Bucket: testBucket, Prefix: testPrefix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Overwrite one of the snapshotted key files with garbage so its SHA no
+	// longer matches the manifest entry.
+	_, err = store.Put(context.Background(), testBucket,
+		testPrefix+"snapshots/"+ts+"/table/orders.json",
+		bytes.NewReader([]byte("CORRUPTED")), 9, "application/json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dst := NewWithCluster(NewMemKV(), store, testBucket, "test")
+	_, err = dst.Restore(context.Background(), RestoreOptions{
+		SnapshotOptions: SnapshotOptions{Store: store, Bucket: testBucket, Prefix: testPrefix},
+	})
+	if err == nil {
+		t.Fatal("want SHA mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "sha") && !strings.Contains(err.Error(), "integrity") {
+		t.Errorf("want integrity error, got %v", err)
 	}
 }

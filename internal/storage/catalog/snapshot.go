@@ -161,6 +161,84 @@ func s3PathToKVKey(clusterID, s3Path string) (string, error) {
 	return clusterID + "." + segment + "." + rest, nil
 }
 
+// RestoreOptions configures where to read a snapshot from.
+type RestoreOptions struct {
+	SnapshotOptions
+	// ForceTS, when non-empty, overrides the latest pointer. Use "latest"
+	// as a sentinel to mean "read the pointer" (equivalent to empty).
+	ForceTS string
+}
+
+// Restore reads a snapshot from S3 and populates every KV key it contains.
+// Returns the timestamp restored, or "" if there was nothing to restore
+// (latest pointer absent).
+//
+// Restore does NOT check whether the KV is already populated — that is the
+// caller's responsibility (see coordinator's startup hook).
+func (c *Catalog) Restore(ctx context.Context, opts RestoreOptions) (string, error) {
+	if opts.Store == nil || opts.Bucket == "" || opts.Prefix == "" {
+		return "", fmt.Errorf("Restore: Store, Bucket, Prefix are required")
+	}
+	if !strings.HasSuffix(opts.Prefix, "/") {
+		opts.Prefix += "/"
+	}
+
+	ts := opts.ForceTS
+	if ts == "" || ts == "latest" {
+		latest, err := readLatestTS(ctx, opts.SnapshotOptions)
+		if err != nil {
+			return "", fmt.Errorf("reading latest pointer: %w", err)
+		}
+		if latest == "" {
+			return "", nil // nothing to restore; fresh cluster semantics
+		}
+		ts = latest
+	}
+
+	snapRoot := opts.Prefix + "snapshots/" + ts + "/"
+
+	// Read manifest.
+	r, _, err := opts.Store.Get(ctx, opts.Bucket, snapRoot+"manifest.json")
+	if err != nil {
+		return "", fmt.Errorf("reading manifest for %q: %w", ts, err)
+	}
+	mfBody, err := io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		return "", err
+	}
+	var mf SnapshotManifest
+	if err := json.Unmarshal(mfBody, &mf); err != nil {
+		return "", fmt.Errorf("parsing manifest: %w", err)
+	}
+	if mf.ClusterID != c.clusterID {
+		return "", fmt.Errorf("snapshot cluster_id %q does not match catalog cluster_id %q", mf.ClusterID, c.clusterID)
+	}
+
+	// Fetch each key, verify SHA, write to KV.
+	for _, entry := range mf.Keys {
+		kr, _, err := opts.Store.Get(ctx, opts.Bucket, snapRoot+entry.S3Path)
+		if err != nil {
+			return "", fmt.Errorf("reading snapshot key %q: %w", entry.S3Path, err)
+		}
+		val, err := io.ReadAll(kr)
+		kr.Close()
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(val)
+		got := hex.EncodeToString(sum[:])
+		if got != entry.SHA256 {
+			return "", fmt.Errorf("integrity: sha256 mismatch for key %q (path %q): want %s, got %s",
+				entry.KVKey, entry.S3Path, entry.SHA256, got)
+		}
+		if _, err := c.kv.Put(entry.KVKey, val); err != nil {
+			return "", fmt.Errorf("writing KV key %q: %w", entry.KVKey, err)
+		}
+	}
+	return ts, nil
+}
+
 // readLatestTS reads <prefix>/latest and returns the trimmed timestamp.
 // Returns ("", nil) if the latest pointer does not exist (fresh cluster).
 // Used by Restore (Task 4).
