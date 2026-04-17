@@ -142,10 +142,24 @@ type HashAggregate struct {
 	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles    []string
+	// spillBuffer holds rows from Consume calls in the spill branch that
+	// have not yet been flushed to disk. Rows are accumulated here across
+	// many Consume calls so that each physical spill file contains a
+	// non-trivial amount of data. Without this batching the old code wrote
+	// one file per Consume, producing millions of ~4 KB files at SF100 and
+	// making Finalize unable to complete in reasonable time.
+	spillBuffer      []map[string]any
+	spillBufferBytes int64 // tracker bytes attributable to rows in spillBuffer
 	trackedGroupMem int64 // bytes charged to Spill tracker for group state growth
 	outputPos     int              // position in keys for batched Next() output
 	gsPool        groupStatePool   // chunk allocator for groupState (reduces GC pressure)
 }
+
+// spillFileTargetBytes is the approximate size at which the spill buffer is
+// flushed to a new file. Sized to amortize per-file open/close and header
+// overhead across many rows. Exposed as a var so regression tests can
+// override it to exercise the flush path deterministically.
+var spillFileTargetBytes int64 = 64 * 1024 * 1024
 
 type groupState struct {
 	keyValues    []any
@@ -392,19 +406,26 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	}
 
 	// Track memory usage for spill pressure detection
+	var batchBytes int64
 	if h.Spill != nil {
-		h.Spill.TrackBatch(EstimateBatchBytes(b))
+		batchBytes = EstimateBatchBytes(b)
+		h.Spill.TrackBatch(batchBytes)
 	}
 
 	// Spill input batch to disk if memory pressure is high.
+	// Rows are accumulated in h.spillBuffer and flushed to a new file only
+	// when the buffer crosses spillFileTargetBytes. This prevents pathological
+	// file-count explosion at SF100 (see TestHashAggregateSpillBatching).
 	// The spilled rows are re-processed during Finalize.
 	if h.Spill != nil && h.Spill.ShouldSpill() {
 		rows := b.ToRows()
-		path, err := h.Spill.SpillRows(rows)
-		if err != nil {
-			return err
+		h.spillBuffer = append(h.spillBuffer, rows...)
+		h.spillBufferBytes += batchBytes
+		if h.spillBufferBytes >= spillFileTargetBytes {
+			if err := h.flushSpillBuffer(); err != nil {
+				return err
+			}
 		}
-		h.spillFiles = append(h.spillFiles, path)
 		return nil
 	}
 
@@ -1831,8 +1852,28 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 	}
 }
 
+// flushSpillBuffer writes h.spillBuffer to a new spill file and releases the
+// tracker bytes for those rows. Caller must hold h.mu.
+func (h *HashAggregate) flushSpillBuffer() error {
+	if len(h.spillBuffer) == 0 {
+		return nil
+	}
+	path, err := h.Spill.SpillRows(h.spillBuffer)
+	if err != nil {
+		return err
+	}
+	h.spillFiles = append(h.spillFiles, path)
+	// The rows are now on disk — release the tracker bytes charged for them
+	// so ShouldSpill can flip back to false and subsequent batches can be
+	// consumed directly into the hash table again.
+	h.Spill.ReleaseTracking(h.spillBufferBytes)
+	h.spillBuffer = nil
+	h.spillBufferBytes = 0
+	return nil
+}
+
 func (h *HashAggregate) Finalize(_ context.Context) error {
-	if len(h.spillFiles) == 0 {
+	if len(h.spillFiles) == 0 && len(h.spillBuffer) == 0 {
 		return nil
 	}
 
@@ -1862,6 +1903,23 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 		h.consumeBatch(b)
 	}
 	h.spillFiles = nil
+
+	// Drain any rows that were buffered but never crossed the flush
+	// threshold — they're still in memory and can be consumed directly
+	// without a round-trip through disk.
+	if len(h.spillBuffer) > 0 {
+		b := batch.FromRows(h.inputSchema, h.spillBuffer)
+		if !h.resolved {
+			h.resolveIndices(b)
+		}
+		h.consumeBatch(b)
+		if h.Spill != nil {
+			h.Spill.ReleaseTracking(h.spillBufferBytes)
+		}
+		h.spillBuffer = nil
+		h.spillBufferBytes = 0
+	}
+
 	return nil
 }
 
