@@ -88,6 +88,7 @@ type Coordinator struct {
 	catalogSnapshotOpts     catalog.SnapshotOptions
 	catalogSnapshotInterval time.Duration
 	catalogSnapshotCancel   context.CancelFunc
+	catalogSnapshotWG       sync.WaitGroup
 }
 
 // New creates a new Coordinator.

@@ -67,7 +67,11 @@ func (c *Coordinator) StartCatalogSnapshotLoop(parent context.Context) {
 	c.StopCatalogSnapshotLoop()
 	ctx, cancel := context.WithCancel(parent)
 	c.catalogSnapshotCancel = cancel
-	go c.runCatalogSnapshotLoop(ctx)
+	c.catalogSnapshotWG.Add(1)
+	go func() {
+		defer c.catalogSnapshotWG.Done()
+		c.runCatalogSnapshotLoop(ctx)
+	}()
 }
 
 // StopCatalogSnapshotLoop cancels the running loop and waits for it to exit.
@@ -77,6 +81,7 @@ func (c *Coordinator) StopCatalogSnapshotLoop() {
 		c.catalogSnapshotCancel()
 		c.catalogSnapshotCancel = nil
 	}
+	c.catalogSnapshotWG.Wait()
 }
 
 func (c *Coordinator) runCatalogSnapshotLoop(ctx context.Context) {
