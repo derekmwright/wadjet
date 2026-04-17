@@ -83,6 +83,11 @@ type Coordinator struct {
 	alertScheduler       *alerts.Scheduler
 	alertSchedulerCancel context.CancelFunc
 	alertsEnabled        bool
+
+	// Catalog snapshot fields (see catalog_snapshot.go for lifecycle methods).
+	catalogSnapshotOpts     catalog.SnapshotOptions
+	catalogSnapshotInterval time.Duration
+	catalogSnapshotCancel   context.CancelFunc
 }
 
 // New creates a new Coordinator.
