@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -153,6 +154,57 @@ func TestRestoreMissingLatest(t *testing.T) {
 	}
 	if ts != "" {
 		t.Errorf("no-op ts: want empty, got %q", ts)
+	}
+}
+
+func TestGCSnapshotsKeepsNewest(t *testing.T) {
+	kv := NewMemKV()
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), testBucket); err != nil {
+		t.Fatal(err)
+	}
+	cat := NewWithCluster(kv, store, testBucket, "test")
+
+	// Seed 15 fake snapshot directories with decreasing timestamps.
+	now := time.Now().UTC()
+	for i := 0; i < 15; i++ {
+		ts := now.Add(-time.Duration(i) * time.Hour).Format("20060102T150405Z")
+		path := testPrefix + "snapshots/" + ts + "/manifest.json"
+		_, err := store.Put(context.Background(), testBucket, path,
+			bytes.NewReader([]byte("{}")), 2, "application/json")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Also write latest pointing at the newest (0h).
+	newestTS := now.Format("20060102T150405Z")
+	_, _ = store.Put(context.Background(), testBucket, testPrefix+"latest",
+		bytes.NewReader([]byte(newestTS+"\n")), int64(len(newestTS)+1), "text/plain")
+
+	// GC keeping 10 newest + anything <24h. All 15 are <24h old, so nothing deleted.
+	if err := cat.GCSnapshots(context.Background(), SnapshotOptions{
+		Store: store, Bucket: testBucket, Prefix: testPrefix,
+	}, 10, 24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	objs, _ := store.List(context.Background(), testBucket, objstore.ListOptions{
+		Prefix: testPrefix + "snapshots/",
+	})
+	if len(objs) != 15 {
+		t.Errorf("nothing should be deleted when all are <24h: got %d", len(objs))
+	}
+
+	// Now GC with minAge=0 — retention becomes strictly "keep 10 newest".
+	if err := cat.GCSnapshots(context.Background(), SnapshotOptions{
+		Store: store, Bucket: testBucket, Prefix: testPrefix,
+	}, 10, 0); err != nil {
+		t.Fatal(err)
+	}
+	objs, _ = store.List(context.Background(), testBucket, objstore.ListOptions{
+		Prefix: testPrefix + "snapshots/",
+	})
+	if len(objs) != 10 {
+		t.Errorf("expected 10 snapshots after GC, got %d", len(objs))
 	}
 }
 

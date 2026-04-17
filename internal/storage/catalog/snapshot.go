@@ -239,6 +239,83 @@ func (c *Catalog) Restore(ctx context.Context, opts RestoreOptions) (string, err
 	return ts, nil
 }
 
+// GCSnapshots deletes snapshot timestamps that are older than minAge AND
+// not in the `keep` newest. Never deletes the snapshot currently pointed
+// at by the latest pointer.
+func (c *Catalog) GCSnapshots(ctx context.Context, opts SnapshotOptions, keep int, minAge time.Duration) error {
+	if !strings.HasSuffix(opts.Prefix, "/") {
+		opts.Prefix += "/"
+	}
+	snapshotsPrefix := opts.Prefix + "snapshots/"
+	objs, err := opts.Store.List(ctx, opts.Bucket, objstore.ListOptions{Prefix: snapshotsPrefix})
+	if err != nil {
+		return fmt.Errorf("listing snapshots: %w", err)
+	}
+
+	// Collect unique timestamps.
+	tsSet := make(map[string]struct{})
+	for _, obj := range objs {
+		rest := strings.TrimPrefix(obj.Key, snapshotsPrefix)
+		slash := strings.Index(rest, "/")
+		if slash <= 0 {
+			continue
+		}
+		tsSet[rest[:slash]] = struct{}{}
+	}
+	tsList := make([]string, 0, len(tsSet))
+	for ts := range tsSet {
+		tsList = append(tsList, ts)
+	}
+	// Timestamp format is lexicographically sortable; newest last.
+	sort.Strings(tsList)
+
+	// Don't delete the latest pointer's target.
+	latest, err := readLatestTS(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("reading latest: %w", err)
+	}
+
+	now := time.Now().UTC()
+	// Figure out which timestamps are "keep newest" (last `keep` entries).
+	keepSet := make(map[string]struct{})
+	start := len(tsList) - keep
+	if start < 0 {
+		start = 0
+	}
+	for _, ts := range tsList[start:] {
+		keepSet[ts] = struct{}{}
+	}
+	if latest != "" {
+		keepSet[latest] = struct{}{}
+	}
+
+	for _, ts := range tsList {
+		if _, keep := keepSet[ts]; keep {
+			continue
+		}
+		if minAge > 0 {
+			t, err := time.Parse("20060102T150405Z", ts)
+			if err != nil {
+				continue // malformed; leave it alone
+			}
+			if now.Sub(t) < minAge {
+				continue // too young to delete
+			}
+		}
+		// Delete every object under snapshots/<ts>/
+		subObjs, err := opts.Store.List(ctx, opts.Bucket, objstore.ListOptions{
+			Prefix: snapshotsPrefix + ts + "/",
+		})
+		if err != nil {
+			return fmt.Errorf("listing for delete %s: %w", ts, err)
+		}
+		for _, obj := range subObjs {
+			_ = opts.Store.Delete(ctx, opts.Bucket, obj.Key) // best-effort
+		}
+	}
+	return nil
+}
+
 // readLatestTS reads <prefix>/latest and returns the trimmed timestamp.
 // Returns ("", nil) if the latest pointer does not exist (fresh cluster).
 // Used by Restore (Task 4).
