@@ -406,6 +406,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 
+	// Dispatch snapshot DDL — returns a populated result row.
+	if parsed.Type == plansql.QueryCreateSnapshot {
+		return c.handleCreateSnapshotSQL(ctx)
+	}
+
 	// Dispatch alert DDL before attempting SELECT extraction.
 	switch parsed.Type {
 	case plansql.QueryCreateAlert:

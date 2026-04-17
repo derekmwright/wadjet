@@ -2,10 +2,15 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"strings"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // SetCatalogSnapshotOptions configures the S3 target for catalog snapshots.
@@ -92,5 +97,63 @@ func (c *Coordinator) runCatalogSnapshotLoop(ctx context.Context) {
 				fmt.Printf("catalog GC error: %v\n", err)
 			}
 		}
+	}
+}
+
+// handleCreateSnapshotSQL runs an explicit catalog snapshot and returns a
+// 1-row 3-column SQLResult with {snapshot_id, prefix, key_count}.
+func (c *Coordinator) handleCreateSnapshotSQL(ctx context.Context) (*SQLResult, error) {
+	if c.catalogSnapshotOpts.Store == nil {
+		return nil, fmt.Errorf("catalog snapshots are not configured; set --catalog-snapshot-s3-prefix on the coordinator")
+	}
+	ts, err := c.catalog.Snapshot(ctx, c.catalogSnapshotOpts)
+	if err != nil {
+		return nil, err
+	}
+	keyCount := int64(0)
+	if mf, err := readSnapshotManifest(ctx, c.catalogSnapshotOpts, ts); err == nil {
+		keyCount = int64(mf.KeyCount)
+	}
+	return newCreateSnapshotResult(ts, c.catalogSnapshotOpts.Prefix, keyCount), nil
+}
+
+// readSnapshotManifest fetches the manifest.json for a completed snapshot.
+func readSnapshotManifest(ctx context.Context, opts catalog.SnapshotOptions, ts string) (*catalog.SnapshotManifest, error) {
+	prefix := opts.Prefix
+	if !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	r, _, err := opts.Store.Get(ctx, opts.Bucket, prefix+"snapshots/"+ts+"/manifest.json")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	var mf catalog.SnapshotManifest
+	if err := json.Unmarshal(body, &mf); err != nil {
+		return nil, err
+	}
+	return &mf, nil
+}
+
+// snapshotResultSchema is the 3-column schema for CREATE SNAPSHOT results.
+var snapshotResultSchema = []parquet.Column{
+	{Name: "snapshot_id", Type: parquet.TypeString},
+	{Name: "prefix", Type: parquet.TypeString},
+	{Name: "key_count", Type: parquet.TypeInt64},
+}
+
+// newCreateSnapshotResult builds a 1-row SQLResult for a completed snapshot.
+func newCreateSnapshotResult(snapshotID, prefix string, keyCount int64) *SQLResult {
+	b := batch.FromRows(snapshotResultSchema, []map[string]any{
+		{"snapshot_id": snapshotID, "prefix": prefix, "key_count": keyCount},
+	})
+	return &SQLResult{
+		Columns:   []string{"snapshot_id", "prefix", "key_count"},
+		Batches:   []*batch.RecordBatch{b},
+		TotalRows: 1,
 	}
 }

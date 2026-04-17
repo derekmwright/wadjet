@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,5 +128,52 @@ func TestSnapshotLoopNoOpWhenStoreNil(t *testing.T) {
 	c.StartCatalogSnapshotLoop(ctx)
 	if c.catalogSnapshotCancel != nil {
 		t.Error("loop started despite nil Store")
+	}
+}
+
+func TestHandleCreateSnapshotSQL(t *testing.T) {
+	c := newSnapshotTestCoord(t)
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), snapBucket); err != nil {
+		t.Fatal(err)
+	}
+	c.SetCatalogSnapshotOptions(catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	})
+
+	res, err := c.handleCreateSnapshotSQL(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Columns) != 3 {
+		t.Fatalf("want 3 cols (snapshot_id, prefix, key_count), got %d", len(res.Columns))
+	}
+	rows := res.Rows()
+	if len(rows) != 1 {
+		t.Fatalf("want 1 row, got %d", len(rows))
+	}
+	if rows[0]["prefix"] != snapPrefix {
+		t.Errorf("prefix col: want %q, got %v", snapPrefix, rows[0]["prefix"])
+	}
+	// key_count should be >= 1 (at minimum, the meta key).
+	switch v := rows[0]["key_count"].(type) {
+	case int64:
+		if v < 1 {
+			t.Errorf("key_count: want >=1, got %d", v)
+		}
+	case int:
+		if v < 1 {
+			t.Errorf("key_count: want >=1, got %d", v)
+		}
+	default:
+		t.Errorf("key_count unexpected type %T: %v", v, v)
+	}
+}
+
+func TestHandleCreateSnapshotWithoutOptions(t *testing.T) {
+	c := newSnapshotTestCoord(t)
+	_, err := c.handleCreateSnapshotSQL(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Errorf("want 'not configured' error, got %v", err)
 	}
 }
