@@ -43,6 +43,7 @@ type ParsedQuery struct {
 	CreateAlert    *CreateAlertInfo
 	DropAlert      *DropAlertInfo
 	AlterAlert     *AlterAlertInfo
+	CreateSnapshot *CreateSnapshotInfo
 	Windows        []WindowSpec   // extracted window function specs
 	CTEs           []CTEDef       // extracted CTE definitions
 	SelectInfo     *SelectInfo    // parsed SELECT info (replaces AST)
@@ -192,6 +193,10 @@ type AlterAlertInfo struct {
 	Enable bool // true = ENABLE, false = DISABLE
 }
 
+// CreateSnapshotInfo is the AST for a CREATE SNAPSHOT statement.
+// Empty in v1 — statement takes no arguments.
+type CreateSnapshotInfo struct{}
+
 // QueryType identifies the kind of SQL statement.
 type QueryType int
 
@@ -215,6 +220,7 @@ const (
 	QueryCreateAlert
 	QueryDropAlert
 	QueryAlterAlert
+	QueryCreateSnapshot
 	QueryUnsupported
 )
 
@@ -526,8 +532,16 @@ func lexParseCreate(sql string, l *lexer) (*ParsedQuery, error) {
 		return lexParseCreateAlert(sql, l)
 	}
 
+	if tok.typ == TokenKWSnapshot {
+		return &ParsedQuery{
+			Type:           QueryCreateSnapshot,
+			SQL:            sql,
+			CreateSnapshot: &CreateSnapshotInfo{},
+		}, nil
+	}
+
 	if tok.typ != TokenKWFunction {
-		return nil, fmt.Errorf("expected TABLE, VIEW, FUNCTION, or ALERT after CREATE")
+		return nil, fmt.Errorf("expected TABLE, VIEW, FUNCTION, ALERT, or SNAPSHOT after CREATE")
 	}
 
 	// Function name

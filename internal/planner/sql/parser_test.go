@@ -2261,3 +2261,16 @@ func TestAlertGoldenFixturesParse(t *testing.T) {
 		t.Errorf("expected %d statements parsed, got %d", wantStmts, parsed)
 	}
 }
+
+func TestParseCreateSnapshot(t *testing.T) {
+	pq, err := Parse("CREATE SNAPSHOT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pq.Type != QueryCreateSnapshot {
+		t.Fatalf("type: want QueryCreateSnapshot, got %v", pq.Type)
+	}
+	if pq.CreateSnapshot == nil {
+		t.Fatal("CreateSnapshot is nil")
+	}
+}

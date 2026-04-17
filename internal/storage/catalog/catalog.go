@@ -939,6 +939,19 @@ func (c *Catalog) getJSON(key string, v any) error {
 	return json.Unmarshal(data, v)
 }
 
+// IsKVEmpty returns true if no <clusterID>.meta key exists. Used by the
+// coordinator to decide whether startup should restore from a snapshot.
+func (c *Catalog) IsKVEmpty(_ context.Context) (bool, error) {
+	_, _, err := c.kv.Get(c.key("meta"))
+	if err == ErrKeyNotFound {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 func (c *Catalog) putJSON(key string, v any) error {
 	data, err := json.Marshal(v)
 	if err != nil {

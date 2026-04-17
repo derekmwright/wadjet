@@ -83,6 +83,12 @@ type Coordinator struct {
 	alertScheduler       *alerts.Scheduler
 	alertSchedulerCancel context.CancelFunc
 	alertsEnabled        bool
+
+	// Catalog snapshot fields (see catalog_snapshot.go for lifecycle methods).
+	catalogSnapshotOpts     catalog.SnapshotOptions
+	catalogSnapshotInterval time.Duration
+	catalogSnapshotCancel   context.CancelFunc
+	catalogSnapshotWG       sync.WaitGroup
 }
 
 // New creates a new Coordinator.
@@ -223,9 +229,11 @@ func (c *Coordinator) StartLeaderWatch(ctx context.Context) {
 						c.logger.Error("failover recovery failed", "error", err)
 					}
 					c.StartAlertScheduler(ctx)
+					c.StartCatalogSnapshotLoop(ctx)
 				} else {
 					c.logger.Warn("leadership lost, queries will fail on this instance")
 					c.StopAlertScheduler()
+					c.StopCatalogSnapshotLoop()
 				}
 			}
 		}
@@ -397,6 +405,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
+	}
+
+	// Dispatch snapshot DDL — returns a populated result row.
+	if parsed.Type == plansql.QueryCreateSnapshot {
+		return c.handleCreateSnapshotSQL(ctx)
 	}
 
 	// Dispatch alert DDL before attempting SELECT extraction.
