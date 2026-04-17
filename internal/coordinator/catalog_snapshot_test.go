@@ -177,3 +177,85 @@ func TestHandleCreateSnapshotWithoutOptions(t *testing.T) {
 		t.Errorf("want 'not configured' error, got %v", err)
 	}
 }
+
+func TestMaybeRestoreCatalogForceTS(t *testing.T) {
+	// Seed a snapshot.
+	srcKV := catalog.NewMemKV()
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), snapBucket); err != nil {
+		t.Fatal(err)
+	}
+	src := catalog.NewWithCluster(srcKV, store, snapBucket, "test")
+	if err := src.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_ = src.CreateTable(context.Background(), "orders", parquet.Schema{}, nil)
+	ts, err := src.Snapshot(context.Background(), catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Valid specific TS restores correctly even when the "latest" pointer would
+	// suggest otherwise (we delete latest to prove ForceTS bypasses it).
+	_ = store.Delete(context.Background(), snapBucket, snapPrefix+"latest")
+
+	dst := catalog.NewWithCluster(catalog.NewMemKV(), store, snapBucket, "test")
+	c := &Coordinator{catalog: dst}
+	c.SetCatalogSnapshotOptions(catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	})
+	if err := c.MaybeRestoreCatalog(context.Background(), ts); err != nil {
+		t.Fatalf("ForceTS restore failed: %v", err)
+	}
+	if _, err := dst.GetTable(context.Background(), "orders"); err != nil {
+		t.Errorf("expected restored table: %v", err)
+	}
+}
+
+func TestMaybeRestoreCatalogForceTSNonexistent(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), snapBucket); err != nil {
+		t.Fatal(err)
+	}
+	dst := catalog.NewWithCluster(catalog.NewMemKV(), store, snapBucket, "test")
+	c := &Coordinator{catalog: dst}
+	c.SetCatalogSnapshotOptions(catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	})
+	err := c.MaybeRestoreCatalog(context.Background(), "20260101T000000Z")
+	if err == nil {
+		t.Error("want error for nonexistent TS, got nil")
+	}
+}
+
+func TestMaybeRestoreCatalogClusterIDMismatch(t *testing.T) {
+	// Write a snapshot with cluster_id "source-cluster".
+	srcKV := catalog.NewMemKV()
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), snapBucket); err != nil {
+		t.Fatal(err)
+	}
+	src := catalog.NewWithCluster(srcKV, store, snapBucket, "source-cluster")
+	if err := src.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := src.Snapshot(context.Background(), catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Destination coordinator has cluster_id "different-cluster" — restore must reject.
+	dst := catalog.NewWithCluster(catalog.NewMemKV(), store, snapBucket, "different-cluster")
+	c := &Coordinator{catalog: dst}
+	c.SetCatalogSnapshotOptions(catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	})
+	err = c.MaybeRestoreCatalog(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "cluster_id") {
+		t.Errorf("want cluster_id mismatch error, got %v", err)
+	}
+}
