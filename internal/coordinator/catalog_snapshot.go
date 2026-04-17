@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -85,6 +86,10 @@ func (c *Coordinator) StopCatalogSnapshotLoop() {
 }
 
 func (c *Coordinator) runCatalogSnapshotLoop(ctx context.Context) {
+	lg := c.logger
+	if lg == nil {
+		lg = slog.Default()
+	}
 	t := time.NewTicker(c.catalogSnapshotInterval)
 	defer t.Stop()
 	for {
@@ -93,13 +98,13 @@ func (c *Coordinator) runCatalogSnapshotLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			if _, err := c.catalog.Snapshot(ctx, c.catalogSnapshotOpts); err != nil {
-				// Best-effort: log via stdlib. Don't die on transient S3 errors.
-				fmt.Printf("catalog snapshot tick error: %v\n", err)
+				// Best-effort: don't die on transient S3 errors.
+				lg.Warn("catalog snapshot tick error", "err", err)
 				continue
 			}
 			// GC retention: keep 10 newest + anything <24h.
 			if err := c.catalog.GCSnapshots(ctx, c.catalogSnapshotOpts, 10, 24*time.Hour); err != nil {
-				fmt.Printf("catalog GC error: %v\n", err)
+				lg.Warn("catalog snapshot GC error", "err", err)
 			}
 		}
 	}
