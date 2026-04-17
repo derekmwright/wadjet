@@ -765,10 +765,15 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		coord.StartCatalogSnapshotLoop(ctx)
 	}
 
-	// Start catalog snapshotter
-	snapCfg := buildSnapshotConfig(fileCfg)
-	snapshotter := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, logger)
-	snapshotter.Start(ctx)
+	// Start catalog snapshotter (legacy). Skipped when the new per-key
+	// S3-prefix snapshot system is active to avoid redundant S3 writes.
+	if snapshotPrefix == "" {
+		snapCfg := buildSnapshotConfig(fileCfg)
+		snapshotter := coordinator.NewCatalogSnapshotter(cat, store, bucket, snapCfg, logger)
+		snapshotter.Start(ctx)
+	} else {
+		logger.Info("using new S3-prefix catalog snapshots; legacy CatalogSnapshotter disabled", "prefix", snapshotPrefix)
+	}
 
 	// Start background compaction
 	compactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
@@ -1022,14 +1027,19 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		// on leader election, so we do NOT call it here.
 	}
 
-	// Start catalog snapshotter (leader-only in distributed mode)
-	var coordFileCfg *config.Config
-	if configFile != "" {
-		coordFileCfg, _ = config.Load(configFile)
+	// Start catalog snapshotter (leader-only in distributed mode). Skipped when
+	// the new per-key S3-prefix snapshot system is active to avoid redundant S3 writes.
+	if snapshotPrefix == "" {
+		var coordFileCfg *config.Config
+		if configFile != "" {
+			coordFileCfg, _ = config.Load(configFile)
+		}
+		coordSnapCfg := buildSnapshotConfig(coordFileCfg)
+		coordSnap := coordinator.NewCatalogSnapshotter(cat, store, bucket, coordSnapCfg, logger)
+		coordSnap.Start(ctx)
+	} else {
+		logger.Info("using new S3-prefix catalog snapshots; legacy CatalogSnapshotter disabled", "prefix", snapshotPrefix)
 	}
-	coordSnapCfg := buildSnapshotConfig(coordFileCfg)
-	coordSnap := coordinator.NewCatalogSnapshotter(cat, store, bucket, coordSnapCfg, logger)
-	coordSnap.Start(ctx)
 
 	// Start background compaction
 	coordCompactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
