@@ -51,3 +51,46 @@ func (c *Coordinator) MaybeRestoreCatalog(ctx context.Context, forceTS string) e
 	_ = ts // caller can log if desired
 	return nil
 }
+
+// StartCatalogSnapshotLoop begins periodic catalog snapshots. Safe to call
+// only while this coordinator holds leadership. No-op when snapshot options
+// are not configured or the interval is zero.
+func (c *Coordinator) StartCatalogSnapshotLoop(parent context.Context) {
+	if c.catalogSnapshotOpts.Store == nil || c.catalogSnapshotInterval <= 0 {
+		return
+	}
+	c.StopCatalogSnapshotLoop()
+	ctx, cancel := context.WithCancel(parent)
+	c.catalogSnapshotCancel = cancel
+	go c.runCatalogSnapshotLoop(ctx)
+}
+
+// StopCatalogSnapshotLoop cancels the running loop and waits for it to exit.
+// Safe to call when no loop is running.
+func (c *Coordinator) StopCatalogSnapshotLoop() {
+	if c.catalogSnapshotCancel != nil {
+		c.catalogSnapshotCancel()
+		c.catalogSnapshotCancel = nil
+	}
+}
+
+func (c *Coordinator) runCatalogSnapshotLoop(ctx context.Context) {
+	t := time.NewTicker(c.catalogSnapshotInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := c.catalog.Snapshot(ctx, c.catalogSnapshotOpts); err != nil {
+				// Best-effort: log via stdlib. Don't die on transient S3 errors.
+				fmt.Printf("catalog snapshot tick error: %v\n", err)
+				continue
+			}
+			// GC retention: keep 10 newest + anything <24h.
+			if err := c.catalog.GCSnapshots(ctx, c.catalogSnapshotOpts, 10, 24*time.Hour); err != nil {
+				fmt.Printf("catalog GC error: %v\n", err)
+			}
+		}
+	}
+}

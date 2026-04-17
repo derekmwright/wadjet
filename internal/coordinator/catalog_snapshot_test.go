@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -82,5 +83,49 @@ func TestRestoreSkippedWhenKVNonEmpty(t *testing.T) {
 	}
 	if _, err := c.catalog.GetTable(context.Background(), "from_snapshot"); err == nil {
 		t.Error("restore should have been skipped; from_snapshot should not exist")
+	}
+}
+
+func TestStartStopCatalogSnapshotLoop(t *testing.T) {
+	c := newSnapshotTestCoord(t)
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), snapBucket); err != nil {
+		t.Fatal(err)
+	}
+	c.SetCatalogSnapshotOptions(catalog.SnapshotOptions{
+		Store: store, Bucket: snapBucket, Prefix: snapPrefix,
+	})
+	c.SetCatalogSnapshotInterval(10 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.StartCatalogSnapshotLoop(ctx)
+	if c.catalogSnapshotCancel == nil {
+		t.Fatal("snapshot loop not started")
+	}
+	// Let at least one tick fire.
+	time.Sleep(50 * time.Millisecond)
+	c.StopCatalogSnapshotLoop()
+	if c.catalogSnapshotCancel != nil {
+		t.Error("cancel not cleared")
+	}
+	// Calling Stop again must be safe.
+	c.StopCatalogSnapshotLoop()
+
+	// latest pointer should exist (at least one snapshot was written).
+	if _, _, err := store.Get(context.Background(), snapBucket, snapPrefix+"latest"); err != nil {
+		t.Errorf("expected latest pointer after loop ran: %v", err)
+	}
+}
+
+func TestSnapshotLoopNoOpWhenStoreNil(t *testing.T) {
+	c := newSnapshotTestCoord(t)
+	c.SetCatalogSnapshotInterval(10 * time.Millisecond)
+	// Options not set — Store is nil.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.StartCatalogSnapshotLoop(ctx)
+	if c.catalogSnapshotCancel != nil {
+		t.Error("loop started despite nil Store")
 	}
 }

@@ -228,9 +228,11 @@ func (c *Coordinator) StartLeaderWatch(ctx context.Context) {
 						c.logger.Error("failover recovery failed", "error", err)
 					}
 					c.StartAlertScheduler(ctx)
+					c.StartCatalogSnapshotLoop(ctx)
 				} else {
 					c.logger.Warn("leadership lost, queries will fail on this instance")
 					c.StopAlertScheduler()
+					c.StopCatalogSnapshotLoop()
 				}
 			}
 		}
