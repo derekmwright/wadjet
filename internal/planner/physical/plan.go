@@ -1096,75 +1096,132 @@ type ShuffleCandidate struct {
 	BuildBytes  int64    // EstimatedBytes of the build scan (for logging)
 }
 
-// PickShuffleCandidate finds the join whose build-side scan has the largest
-// EstimatedBytes above thresholdBytes. Returns ok=false if no build exceeds
-// the threshold or if no eligible join exists.
+// PickShuffleCandidate identifies the largest non-probe scan above
+// thresholdBytes as the shuffle candidate — the table that would otherwise be
+// broadcast-duplicated as the runtime build side — and returns the join stage
+// that connects it to the probe.
 //
-// Phase 1: returns a single candidate. Phase 2 (Q09 / chained shuffles) will
-// return all candidates.
+// The approach deliberately does NOT read BuildTableAlias on the join stage
+// because in probe-split mode the planner's logical build/probe assignment is
+// inverted at runtime: the planner labels the largest scan as the build (e.g.
+// "lineitem"), but probe-split partitions that scan across workers, making the
+// second-largest scan (e.g. "orders") the actual broadcast hash table.
+// Shuffling orders instead of broadcasting it is the correction.
+//
+// Algorithm:
+//  1. probeAlias = largest scan (matches CanProbeSplit's heuristic).
+//  2. candidate = largest non-probe scan above thresholdBytes.
+//  3. Walk join stages to find one that directly references the candidate
+//     scan (via LeftDepStage or RightDepStage) or via a FusedJoin entry
+//     whose BuildTableAlias matches the candidate alias.
+//  4. Extract build/probe keys from the matching join or fused-join entry.
+//
+// Phase 1: returns the single best candidate. Phase 2 (chained shuffles)
+// will return all candidates.
 func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidate, bool) {
-	// Build alias -> scan stage lookup and stage-id -> stage lookup.
-	byAlias := map[string]Stage{}
+	// stage-id → stage lookup.
 	byID := map[string]Stage{}
 	for _, s := range stages {
 		byID[s.ID] = s
-		if s.Type == "scan" && s.ScanAlias != "" {
-			byAlias[s.ScanAlias] = s
-		}
 	}
 
-	// Identify the largest scan as the probe alias (mirrors CanProbeSplit's
-	// largest-scan heuristic).
+	// Step 1: identify probe alias (largest scan, mirrors CanProbeSplit).
 	var probeAlias string
 	var probeBytes int64
-	var probeScanID string
 	for _, s := range stages {
 		if s.Type == "scan" && s.EstimatedBytes > probeBytes {
 			probeAlias = s.ScanAlias
 			probeBytes = s.EstimatedBytes
-			probeScanID = s.ID
 		}
 	}
 
-	var best ShuffleCandidate
-	var bestBytes int64
+	// Step 2: find the largest non-probe scan above the threshold.
+	var candidateScan Stage
+	var candidateScanID string
+	var candidateFound bool
 	for _, s := range stages {
-		if s.Type != "hash_join" && s.Type != "broadcast_join" {
+		if s.Type != "scan" || s.ScanAlias == probeAlias {
 			continue
 		}
-		buildAlias := s.BuildTableAlias
-		if buildAlias == "" || buildAlias == probeAlias {
+		if s.EstimatedBytes <= thresholdBytes {
 			continue
 		}
-		buildScan, ok := byAlias[buildAlias]
-		if !ok {
-			continue
-		}
-		if buildScan.EstimatedBytes <= thresholdBytes {
-			continue
-		}
-		// Safety: the join's left (probe) dep must be the probeAlias scan
-		// directly. If it isn't, the JoinLeftKeys may reference columns from
-		// intermediate join outputs rather than the raw probeAlias Parquet
-		// files, causing "key not in schema" at shuffle time. We skip any
-		// join where the probe side is not directly the probeAlias scan.
-		if s.LeftDepStage != probeScanID {
-			continue
-		}
-		if buildScan.EstimatedBytes > bestBytes {
-			best = ShuffleCandidate{
-				JoinStageID: s.ID,
-				BuildAlias:  buildAlias,
-				ProbeAlias:  probeAlias,
-				BuildKeys:   append([]string(nil), s.JoinRightKeys...),
-				ProbeKeys:   append([]string(nil), s.JoinLeftKeys...),
-				JoinKeys:    append([]string(nil), s.JoinRightKeys...),
-				BuildBytes:  buildScan.EstimatedBytes,
-			}
-			bestBytes = buildScan.EstimatedBytes
+		if !candidateFound || s.EstimatedBytes > candidateScan.EstimatedBytes {
+			candidateScan = s
+			candidateScanID = s.ID
+			candidateFound = true
 		}
 	}
-	return best, bestBytes > 0
+	if !candidateFound {
+		return ShuffleCandidate{}, false
+	}
+
+	// Step 3: walk join stages to find the one referencing the candidate.
+	for _, j := range stages {
+		if j.Type != "hash_join" && j.Type != "broadcast_join" {
+			continue
+		}
+
+		// Direct left-dep match: candidate is on the left (probe) side of the join.
+		// Safety check: only accept if the OTHER side (right) is not an intermediate
+		// join — the left keys must be from the candidate's Parquet files.
+		if j.LeftDepStage == candidateScanID {
+			return ShuffleCandidate{
+				JoinStageID: j.ID,
+				BuildAlias:  candidateScan.ScanAlias,
+				ProbeAlias:  probeAlias,
+				BuildKeys:   append([]string(nil), j.JoinLeftKeys...),
+				ProbeKeys:   append([]string(nil), j.JoinRightKeys...),
+				JoinKeys:    append([]string(nil), j.JoinLeftKeys...),
+				BuildBytes:  candidateScan.EstimatedBytes,
+			}, true
+		}
+
+		// Direct right-dep match: candidate is on the right (build) side of the join.
+		// The left dep must be the probe scan directly (not an intermediate join)
+		// to ensure JoinLeftKeys map to raw probe Parquet columns.
+		if j.RightDepStage == candidateScanID {
+			probeScanID := ""
+			for _, s := range stages {
+				if s.Type == "scan" && s.ScanAlias == probeAlias {
+					probeScanID = s.ID
+					break
+				}
+			}
+			if j.LeftDepStage != probeScanID {
+				continue
+			}
+			return ShuffleCandidate{
+				JoinStageID: j.ID,
+				BuildAlias:  candidateScan.ScanAlias,
+				ProbeAlias:  probeAlias,
+				BuildKeys:   append([]string(nil), j.JoinRightKeys...),
+				ProbeKeys:   append([]string(nil), j.JoinLeftKeys...),
+				JoinKeys:    append([]string(nil), j.JoinRightKeys...),
+				BuildBytes:  candidateScan.EstimatedBytes,
+			}, true
+		}
+
+		// FusedJoin match: candidate is the build of a secondary join fused into
+		// this join stage. This covers Q03's shape where orders is not the top-level
+		// join's direct dep but is referenced as a fused build.
+		for _, fj := range j.FusedJoins {
+			if fj.BuildTableAlias == candidateScan.ScanAlias {
+				return ShuffleCandidate{
+					JoinStageID: j.ID,
+					BuildAlias:  candidateScan.ScanAlias,
+					ProbeAlias:  probeAlias,
+					BuildKeys:   append([]string(nil), fj.JoinRightKeys...),
+					ProbeKeys:   append([]string(nil), fj.JoinLeftKeys...),
+					JoinKeys:    append([]string(nil), fj.JoinRightKeys...),
+					BuildBytes:  candidateScan.EstimatedBytes,
+				}, true
+			}
+		}
+	}
+
+	// No join stage references the candidate.
+	return ShuffleCandidate{}, false
 }
 
 // LargeBuildScans returns scan stages that are build-side (not the probe alias)
