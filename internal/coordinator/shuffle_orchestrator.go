@@ -319,6 +319,46 @@ func assignPartitionsToWorker(w, workerCount, numParts int) []int {
 	return parts
 }
 
+// buildShufflePipelineTasks creates one probe pipeline task per worker.
+// Each task gets PreScannedInputs populated with the shard files for the
+// partitions assigned to that worker (contiguous slice of layout's partitions).
+func buildShufflePipelineTasks(
+	queryID, sql, resultBucket string,
+	layout *ShuffleLayout,
+	workerCount int,
+) []distributed.Task {
+	resultPrefix := fmt.Sprintf("queries/%s/pipeline-0/", queryID)
+	tasks := make([]distributed.Task, 0, workerCount)
+	for w := 0; w < workerCount; w++ {
+		parts := assignPartitionsToWorker(w, workerCount, layout.NumPartitions)
+		if len(parts) == 0 {
+			continue
+		}
+		var buildFiles, probeFiles []string
+		for _, p := range parts {
+			buildFiles = append(buildFiles, layout.BuildShardFiles[p]...)
+			probeFiles = append(probeFiles, layout.ProbeShardFiles[p]...)
+		}
+		tasks = append(tasks, distributed.Task{
+			ID:           uuid.New().String()[:8],
+			QueryID:      queryID,
+			StageID:      "pipeline-0",
+			Type:         distributed.TaskTypePipeline,
+			SQLText:      sql,
+			DataBucket:   resultBucket,
+			ResultBucket: resultBucket,
+			ResultPrefix: resultPrefix,
+			PartialAggregate: true,
+			PreScannedInputs: map[string][]string{
+				layout.BuildAlias: buildFiles,
+				layout.ProbeAlias: probeFiles,
+			},
+			CreatedAt: time.Now(),
+		})
+	}
+	return tasks
+}
+
 // findShuffleScanStages locates the build and probe scan stages corresponding
 // to the ShuffleCandidate's aliases.
 func findShuffleScanStages(stages []physical.Stage, cand physical.ShuffleCandidate) (build, probe physical.Stage, err error) {

@@ -52,6 +52,10 @@ type queryMeta struct {
 	trace              distributed.TraceContext // distributed tracing context
 	policyDecisionJSON json.RawMessage          // pre-evaluated ABAC decisions for worker enforcement
 	mergeInfo          *logical.MergeInfo // non-nil for probe-split queries needing merge
+	// prebuiltTasks, if non-nil for a given stage, supplies the publish loop's
+	// task list instead of calling createTasksForStage. Set by the shuffle path
+	// where each worker's task carries different PreScannedInputs.
+	prebuiltTasks map[string][]distributed.Task
 }
 
 // Coordinator accepts queries, plans them, dispatches tasks, and tracks results.
@@ -465,14 +469,47 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			"buildAlias", s.BuildTableAlias)
 	}
 
-	// Route all queries through pipeline execution. Two modes:
-	// 1. Probe-split: partition probe table files across workers (multi-task)
-	// 2. Single-worker: entire query on one worker
+	// Route all queries through pipeline execution. Three modes:
+	// 1. Shuffle-distributed: when the largest build table exceeds
+	//    shuffleBuildThreshold (4 GB), partition both join sides on the join
+	//    keys so per-worker memory scales 1/N instead of being broadcast-duplicated.
+	// 2. Probe-split: partition probe table files across workers; build tables
+	//    are broadcast (or cached). Fast path for small/medium builds.
+	// 3. Single-worker: entire query on one worker.
 	var probeSplitMergeInfo *logical.MergeInfo
+	var shuffleTasks map[string][]distributed.Task
 	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
+	shuffleCand, shuffleApplicable := physical.PickShuffleCandidate(physStages, shuffleBuildThreshold)
 
-	if canProbeSplit && mergeInfo != nil {
+	switch {
+	case shuffleApplicable && mergeInfo != nil:
+		workerCount := c.workers.Count()
+		probeSplitMergeInfo = mergeInfo
+
+		c.logger.Info("routing to shuffle-distributed",
+			"query", queryID,
+			"build_alias", shuffleCand.BuildAlias,
+			"build_bytes", shuffleCand.BuildBytes,
+			"probe_alias", shuffleCand.ProbeAlias,
+			"workers", workerCount,
+			"partitions", workerCount*shufflePartitionMultiplier)
+
+		layout, err := c.orchestrateShuffleStages(ctx, queryID, shuffleCand, physStages, workerCount)
+		if err != nil {
+			return nil, fmt.Errorf("shuffle stages failed for query %s: %w", queryID, err)
+		}
+
+		probeTasks := buildShufflePipelineTasks(queryID, sql, c.config.ResultBucket, layout, workerCount)
+
+		physStages = []physical.Stage{{
+			ID:    "pipeline-0",
+			Type:  "pipeline",
+			Tasks: len(probeTasks),
+		}}
+		shuffleTasks = map[string][]distributed.Task{"pipeline-0": probeTasks}
+
+	case canProbeSplit && mergeInfo != nil:
 		workerCount := c.workers.Count()
 		probeSplitMergeInfo = mergeInfo
 
@@ -498,7 +535,8 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			"probe_files", len(probeFiles), "workers", workerCount,
 			"has_merge", probeSplitMergeInfo != nil,
 			"build_cache_tables", len(buildCache))
-	} else {
+
+	default:
 		c.logger.Info("routing to single worker pipeline",
 			"query", queryID)
 		physStages = []physical.Stage{{
@@ -517,7 +555,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 
 	// Store query metadata for task creation and result retrieval
 	c.mu.Lock()
-	qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: probeSplitMergeInfo}
+	qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: probeSplitMergeInfo, prebuiltTasks: shuffleTasks}
 	// Propagate or create distributed trace context.
 	// If OTel tracing is active, use the OTel span's IDs so worker spans
 	// appear as children in the trace backend.
@@ -576,7 +614,23 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		if len(s.Dependencies) > 0 {
 			continue
 		}
-		tasks := c.createTasksForStage(queryID, s, nil)
+		var tasks []distributed.Task
+		if qm.prebuiltTasks != nil {
+			if pre, ok := qm.prebuiltTasks[s.ID]; ok {
+				tasks = pre
+				// Enrich each prebuilt task with query-level context (trace, identity,
+				// policy) — same enrichment that createTasksForStage applies.
+				c.mu.Lock()
+				qmLive := c.queryMetas[queryID]
+				c.mu.Unlock()
+				for i := range tasks {
+					c.enrichTaskWithQueryContext(qmLive, &tasks[i])
+				}
+			}
+		}
+		if tasks == nil {
+			tasks = c.createTasksForStage(queryID, s, nil)
+		}
 		// Update tracker with actual task count and mark as scheduled
 		// (prevents GetReadyStages from re-scheduling these).
 		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
@@ -660,6 +714,24 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 }
 
 // createTasksForStage creates distributed tasks for a given stage.
+// enrichTaskWithQueryContext propagates trace, identity, and policy fields from
+// the query's metadata into a task. Call this on every task (prebuilt or not)
+// before publishing, after qm is stored in c.queryMetas.
+func (c *Coordinator) enrichTaskWithQueryContext(qm *queryMeta, t *distributed.Task) {
+	if t.ClusterID == "" {
+		t.ClusterID = c.catalog.ClusterID()
+	}
+	if qm == nil {
+		return
+	}
+	t.IdentityName = qm.identityName
+	t.IdentityRole = qm.identityRole
+	t.TraceID = qm.trace.TraceID
+	t.SpanID = qm.trace.SpanID
+	t.TraceFlags = qm.trace.TraceFlags
+	t.PolicyDecisionJSON = qm.policyDecisionJSON
+}
+
 func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, depResults map[string][]string) []distributed.Task {
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 
@@ -674,22 +746,14 @@ func (c *Coordinator) createTasksForStage(queryID string, stage physical.Stage, 
 
 	// Propagate cluster routing and identity context
 	clusterID := stage.ClusterID
-	if clusterID == "" {
-		clusterID = c.catalog.ClusterID()
-	}
 	c.mu.Lock()
 	qm := c.queryMetas[queryID]
 	c.mu.Unlock()
 	for i := range tasks {
-		tasks[i].ClusterID = clusterID
-		if qm != nil {
-			tasks[i].IdentityName = qm.identityName
-			tasks[i].IdentityRole = qm.identityRole
-			tasks[i].TraceID = qm.trace.TraceID
-			tasks[i].SpanID = qm.trace.SpanID
-			tasks[i].TraceFlags = qm.trace.TraceFlags
-			tasks[i].PolicyDecisionJSON = qm.policyDecisionJSON
+		if clusterID != "" {
+			tasks[i].ClusterID = clusterID
 		}
+		c.enrichTaskWithQueryContext(qm, &tasks[i])
 	}
 	return tasks
 }
