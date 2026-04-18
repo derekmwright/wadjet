@@ -528,6 +528,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	if err := os.MkdirAll(spillDir, 0o755); err != nil {
 		return fmt.Errorf("shuffle task %s: creating spill dir: %w", task.ID, err)
 	}
+	defer os.RemoveAll(spillDir)
 
 	sink := newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, schema)
 	if err := sink.Init(ctx); err != nil {
@@ -579,6 +580,8 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		}
 
 		result.ResultFiles = append(result.ResultFiles, key)
+		// SizeBytes uses the local file size; the object store does not re-encode
+		// .wshf data so this matches the uploaded byte count.
 		result.SizeBytes += fi.Size()
 
 		// Remove local file best-effort.

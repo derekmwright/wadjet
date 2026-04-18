@@ -63,6 +63,9 @@ func TestExecuteShuffle_HappyPath(t *testing.T) {
 	if len(result.ResultFiles) == 0 {
 		t.Fatal("expected at least one partition file in ResultFiles")
 	}
+	if result.SizeBytes == 0 {
+		t.Errorf("result.SizeBytes = 0; expected nonzero after writing 100 rows")
+	}
 	t.Logf("shuffle: %d rows → %d partition files, %d bytes",
 		result.NumRows, len(result.ResultFiles), result.SizeBytes)
 
