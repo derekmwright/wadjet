@@ -55,6 +55,45 @@ func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
 	}, nil
 }
 
+// SpillUrgency describes how much pressure is needed before this operator
+// should spill. Operators self-classify based on the cost of their spill path.
+//
+// SpillCheap is for spill paths that are bounded and recoverable: build-side
+// hash tables, hash-aggregate hash tables. Triggering slightly early costs
+// little.
+//
+// SpillExpensive is for spill paths that stream large data to disk just to
+// read it back: probe-side bridge collectors. Triggering this unnecessarily
+// destroys wall-clock proportional to the probe table size.
+type SpillUrgency int
+
+const (
+	SpillCheap     SpillUrgency = iota // spill when budget is 60% used
+	SpillExpensive                     // spill when budget is 90% used
+)
+
+// ShouldSpillFor returns true when an operator with the given spill cost
+// class should spill. SpillCheap operators trigger at 60% of the per-tracker
+// budget; SpillExpensive operators trigger at 90%. Either class also triggers
+// if the global heap-pressure circuit breaker fires.
+func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
+	if sm.tracker != nil && sm.tracker.Budget() > 0 {
+		used := sm.tracker.Used()
+		budget := sm.tracker.Budget()
+		var threshold int64
+		switch urgency {
+		case SpillExpensive:
+			threshold = budget * 90 / 100
+		default:
+			threshold = budget * 60 / 100
+		}
+		if used > threshold {
+			return true
+		}
+	}
+	return heapPressureExceeded()
+}
+
 // ShouldSpill returns true when the operator should spill to disk.
 //
 // It checks two independent signals:
