@@ -81,8 +81,8 @@ func TestReaderAtClosePerIteration(t *testing.T) {
 		}
 	}
 
-	// Simulate the fixed loop pattern from buildProbePartitionBlooms.
-	// This mirrors the production code path: open ReaderAt, use FileReader,
+	// Simulate the ReaderAt loop pattern used when iterating parquet files.
+	// This mirrors the production pattern: open ReaderAt, use FileReader,
 	// close ReaderAt explicitly after each iteration.
 	for _, filePath := range paths {
 		ra, size, err := store.GetReaderAt(ctx, bucket, filePath)
