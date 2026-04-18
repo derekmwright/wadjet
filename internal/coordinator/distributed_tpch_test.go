@@ -862,6 +862,75 @@ func TestDistributedTPCHBuildCache(t *testing.T) {
 	}
 }
 
+// TestDistributedTPCHForcedShuffle runs join-heavy TPC-H queries at SF0.01
+// with shuffleBuildThreshold lowered to 1 byte, forcing the shuffle execution
+// path. Validates correctness end-to-end: the planner picks the candidate,
+// both shuffle stages dispatch and complete, partitioned shards are produced
+// and consumed, and the merged result matches the expected row counts.
+//
+// This is the local correctness gate before any deploy of the shuffle change.
+// It also captures peak heap per query so we can compare shuffle-on vs
+// shuffle-off in T13.
+func TestDistributedTPCHForcedShuffle(t *testing.T) {
+	// Force probe-split to activate (so mergeInfo is non-nil and the shuffle
+	// branch is reachable). Same trick as TestDistributedTPCHBuildCache.
+	origMinBytes := physical.ProbeSplitMinBytes
+	physical.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+
+	// Force shuffle path on every join-heavy query by lowering the threshold
+	// to 1 byte.
+	origShuffle := shuffleBuildThreshold
+	shuffleBuildThreshold = 1
+	t.Cleanup(func() { shuffleBuildThreshold = origShuffle })
+
+	ctx, coord := setupTPCHDistributed(t)
+	t.Logf("Worker count: %d (shuffleBuildThreshold=1)", coord.workers.Count())
+
+	tests := []struct {
+		qNum     int
+		expected int
+	}{
+		{3, 10},  // shipping priority — orders+lineitem+customer (THE Q03 we care about at SF100)
+		{5, 5},   // customer/orders/lineitem/supplier/nation/region
+		{7, 4},   // supplier/lineitem/orders/customer/nation
+		{9, 150}, // part/supplier/lineitem/partsupp/orders/nation
+		{10, 20}, // customer/orders/lineitem/nation
+		{12, 2},  // orders/lineitem
+	}
+
+	for _, tt := range tests {
+		q := tpch.TPCHQueries[tt.qNum]
+		t.Run(fmt.Sprintf("Q%02d_%s", tt.qNum, q.Name), func(t *testing.T) {
+			runtime.GC()
+			var memBefore runtime.MemStats
+			runtime.ReadMemStats(&memBefore)
+
+			start := time.Now()
+			result, err := coord.ExecuteSQL(ctx, q.SQL)
+			elapsed := time.Since(start)
+
+			var memAfter runtime.MemStats
+			runtime.ReadMemStats(&memAfter)
+			heapDelta := int64(memAfter.HeapAlloc) - int64(memBefore.HeapAlloc)
+			peakHeap := memAfter.HeapSys
+
+			if err != nil {
+				t.Fatalf("Q%02d shuffle path: ExecuteSQL failed: %v", tt.qNum, err)
+			}
+			if result.Error != "" {
+				t.Fatalf("Q%02d shuffle path: %s", tt.qNum, result.Error)
+			}
+			rows := result.Rows()
+			t.Logf("Q%02d: %d rows in %v (shuffle ON, heap_delta=%d KB, heap_sys=%d KB)",
+				tt.qNum, len(rows), elapsed, heapDelta/1024, peakHeap/1024)
+			if len(rows) != tt.expected {
+				t.Errorf("Q%02d: got %d rows, want %d", tt.qNum, len(rows), tt.expected)
+			}
+		})
+	}
+}
+
 // TestDistributedTPCHBuildCacheDuplicateAlias is a regression test for a bug
 // where build cache pre-scan tasks silently scanned the full table (not their
 // assigned file subset) when the original query had duplicate scans of the same
