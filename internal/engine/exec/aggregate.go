@@ -417,7 +417,7 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// when the buffer crosses spillFileTargetBytes. This prevents pathological
 	// file-count explosion at SF100 (see TestHashAggregateSpillBatching).
 	// The spilled rows are re-processed during Finalize.
-	if h.Spill != nil && h.Spill.ShouldSpill() {
+	if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) {
 		rows := b.ToRows()
 		h.spillBuffer = append(h.spillBuffer, rows...)
 		h.spillBufferBytes += batchBytes

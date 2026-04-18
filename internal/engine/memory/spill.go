@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -55,6 +56,45 @@ func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
 	}, nil
 }
 
+// SpillUrgency describes how much pressure is needed before this operator
+// should spill. Operators self-classify based on the cost of their spill path.
+//
+// SpillCheap is for spill paths that are bounded and recoverable: build-side
+// hash tables, hash-aggregate hash tables. Triggering slightly early costs
+// little.
+//
+// SpillExpensive is for spill paths that stream large data to disk just to
+// read it back: probe-side bridge collectors. Triggering this unnecessarily
+// destroys wall-clock proportional to the probe table size.
+type SpillUrgency int
+
+const (
+	SpillCheap     SpillUrgency = iota // spill when budget is 60% used
+	SpillExpensive                     // spill when budget is 90% used
+)
+
+// ShouldSpillFor returns true when an operator with the given spill cost
+// class should spill. SpillCheap operators trigger at 60% of the per-tracker
+// budget; SpillExpensive operators trigger at 90%. Either class also triggers
+// if the global heap-pressure circuit breaker fires.
+func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
+	if sm.tracker != nil && sm.tracker.Budget() > 0 {
+		used := sm.tracker.Used()
+		budget := sm.tracker.Budget()
+		var threshold int64
+		switch urgency {
+		case SpillExpensive:
+			threshold = budget * 90 / 100
+		default:
+			threshold = budget * 60 / 100
+		}
+		if used > threshold {
+			return true
+		}
+	}
+	return heapPressureExceeded()
+}
+
 // ShouldSpill returns true when the operator should spill to disk.
 //
 // It checks two independent signals:
@@ -84,20 +124,16 @@ func (sm *SpillManager) ShouldSpill() bool {
 	return heapPressureExceeded()
 }
 
-// heapPressureRatio is the fraction of GOMEMLIMIT at which we trigger
-// spill. 0.5 = spill when the heap is at 50% of the soft memory limit.
+// heapPressureRatio is the fraction of GOMEMLIMIT at which the global
+// heap-pressure circuit breaker fires. This is a backstop for allocation
+// paths that bypass the per-operator memory tracker. After Phase 1 of
+// the spill-trigger redesign, the tracker should be accurate enough that
+// this circuit breaker rarely or never fires; when it does, the WARN log
+// is a signal that there's an unaccounted allocation site to fix.
 //
-// At SF100 the gap between the spill trigger and the kernel OOM-killer
-// was the main failure mode: workers reached 31 GB RSS on a 32 GB box
-// while only reporting tracker-visible memory of ~1.4 GB per task,
-// because a large fraction of live memory (broadcast build caches,
-// parquet decompression buffers, spill I/O buffers) does not route
-// through the per-operator tracker. Triggering spill earlier gives the
-// runtime more headroom to react before the heap hits GOMEMLIMIT.
-//
-// Tunable upward for cache-heavy workloads on roomy instances; downward
-// for memory-tight workloads.
-const heapPressureRatio = 0.5
+// Set to 0.95 (was 0.5 in PR #38, 0.7 originally) so we only spill for
+// genuine OOM-imminent situations.
+const heapPressureRatio = 0.95
 
 var (
 	heapPressureMu        sync.Mutex
@@ -131,7 +167,17 @@ func heapPressureExceeded() bool {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	threshold := int64(float64(heapPressureMemLimit) * heapPressureRatio)
+	prev := heapPressureLastValue
 	heapPressureLastValue = int64(ms.HeapAlloc) > threshold
+	if heapPressureLastValue && !prev {
+		// Transition false→true: log loudly because the tracker missed something.
+		// This indicates an allocation site that should be added to the tracker.
+		slog.Warn("heap-pressure spill triggered (likely tracker accounting gap)",
+			"heap_alloc_mb", ms.HeapAlloc/(1<<20),
+			"threshold_mb", threshold/(1<<20),
+			"gomemlimit_mb", heapPressureMemLimit/(1<<20),
+		)
+	}
 	return heapPressureLastValue
 }
 
@@ -372,4 +418,11 @@ func (sm *SpillManager) SpilledFiles() []string {
 	result := make([]string, len(sm.files))
 	copy(result, sm.files)
 	return result
+}
+
+// Tracker returns the underlying memory tracker. May return nil if the
+// SpillManager was constructed without one. Used by call sites that need
+// to report tracker accounting outside of the operator-level spill API.
+func (sm *SpillManager) Tracker() *Tracker {
+	return sm.tracker
 }

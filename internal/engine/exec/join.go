@@ -794,7 +794,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}
 
 		// Spill to disk if memory pressure is high
-		if h.Spill != nil && h.Spill.ShouldSpill() && (len(h.buildBatches) > 0 || h.spillState != nil) {
+		if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) && (len(h.buildBatches) > 0 || h.spillState != nil) {
 			if err := h.spillBuildBatches(0); err != nil {
 				h.mu.Unlock()
 				return fmt.Errorf("spilling build side: %w", err)
@@ -1848,7 +1848,7 @@ func (h *HashJoin) spillBuildBatches(neededBytes int64) error {
 			}
 		} else {
 			// Proactive spill: stop when under 80% threshold
-			if h.MemTracker == nil || !h.Spill.ShouldSpill() {
+			if h.MemTracker == nil || !h.Spill.ShouldSpillFor(memory.SpillCheap) {
 				break
 			}
 		}

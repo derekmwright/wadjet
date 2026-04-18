@@ -77,7 +77,7 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	}
 
 	// Spill to disk if memory pressure is high
-	if s.Spill != nil && s.Spill.ShouldSpill() && len(s.batches) > 0 {
+	if s.Spill != nil && s.Spill.ShouldSpillFor(memory.SpillCheap) && len(s.batches) > 0 {
 		var rows []map[string]any
 		for _, sb := range s.batches {
 			rows = append(rows, sb.ToRows()...)
