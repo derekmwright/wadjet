@@ -1084,6 +1084,77 @@ func CanProbeSplit(stages []Stage, workerCount int) (probeAlias string, probeFil
 	return bestAlias, bestFiles, true
 }
 
+// ShuffleCandidate describes a join in the plan whose build side is large
+// enough to warrant the shuffle execution path instead of broadcast.
+type ShuffleCandidate struct {
+	JoinStageID string   // the join stage to be served by shuffled inputs
+	BuildAlias  string   // which scan stage produces the build side
+	ProbeAlias  string   // which scan stage produces the probe side (the largest scan)
+	BuildKeys   []string // build-side join keys (the join's JoinRightKeys)
+	ProbeKeys   []string // probe-side join keys (the join's JoinLeftKeys)
+	JoinKeys    []string // canonical (build-side) join key names for partitioning
+	BuildBytes  int64    // EstimatedBytes of the build scan (for logging)
+}
+
+// PickShuffleCandidate finds the join whose build-side scan has the largest
+// EstimatedBytes above thresholdBytes. Returns ok=false if no build exceeds
+// the threshold or if no eligible join exists.
+//
+// Phase 1: returns a single candidate. Phase 2 (Q09 / chained shuffles) will
+// return all candidates.
+func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidate, bool) {
+	// Build alias -> scan stage lookup.
+	byAlias := map[string]Stage{}
+	for _, s := range stages {
+		if s.Type == "scan" && s.ScanAlias != "" {
+			byAlias[s.ScanAlias] = s
+		}
+	}
+
+	// Identify the largest scan as the probe alias (mirrors CanProbeSplit's
+	// largest-scan heuristic).
+	var probeAlias string
+	var probeBytes int64
+	for _, s := range stages {
+		if s.Type == "scan" && s.EstimatedBytes > probeBytes {
+			probeAlias = s.ScanAlias
+			probeBytes = s.EstimatedBytes
+		}
+	}
+
+	var best ShuffleCandidate
+	var bestBytes int64
+	for _, s := range stages {
+		if s.Type != "hash_join" {
+			continue
+		}
+		buildAlias := s.BuildTableAlias
+		if buildAlias == "" || buildAlias == probeAlias {
+			continue
+		}
+		buildScan, ok := byAlias[buildAlias]
+		if !ok {
+			continue
+		}
+		if buildScan.EstimatedBytes <= thresholdBytes {
+			continue
+		}
+		if buildScan.EstimatedBytes > bestBytes {
+			best = ShuffleCandidate{
+				JoinStageID: s.ID,
+				BuildAlias:  buildAlias,
+				ProbeAlias:  probeAlias,
+				BuildKeys:   append([]string(nil), s.JoinRightKeys...),
+				ProbeKeys:   append([]string(nil), s.JoinLeftKeys...),
+				JoinKeys:    append([]string(nil), s.JoinRightKeys...),
+				BuildBytes:  buildScan.EstimatedBytes,
+			}
+			bestBytes = buildScan.EstimatedBytes
+		}
+	}
+	return best, bestBytes > 0
+}
+
 // LargeBuildScans returns scan stages that are build-side (not the probe alias)
 // and whose estimated size exceeds the given threshold. These are candidates for
 // the build-side broadcast cache: the coordinator pre-scans them once, caches the
