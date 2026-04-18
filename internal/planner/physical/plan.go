@@ -1103,9 +1103,11 @@ type ShuffleCandidate struct {
 // Phase 1: returns a single candidate. Phase 2 (Q09 / chained shuffles) will
 // return all candidates.
 func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidate, bool) {
-	// Build alias -> scan stage lookup.
+	// Build alias -> scan stage lookup and stage-id -> stage lookup.
 	byAlias := map[string]Stage{}
+	byID := map[string]Stage{}
 	for _, s := range stages {
+		byID[s.ID] = s
 		if s.Type == "scan" && s.ScanAlias != "" {
 			byAlias[s.ScanAlias] = s
 		}
@@ -1115,10 +1117,12 @@ func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidat
 	// largest-scan heuristic).
 	var probeAlias string
 	var probeBytes int64
+	var probeScanID string
 	for _, s := range stages {
 		if s.Type == "scan" && s.EstimatedBytes > probeBytes {
 			probeAlias = s.ScanAlias
 			probeBytes = s.EstimatedBytes
+			probeScanID = s.ID
 		}
 	}
 
@@ -1137,6 +1141,14 @@ func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidat
 			continue
 		}
 		if buildScan.EstimatedBytes <= thresholdBytes {
+			continue
+		}
+		// Safety: the join's left (probe) dep must be the probeAlias scan
+		// directly. If it isn't, the JoinLeftKeys may reference columns from
+		// intermediate join outputs rather than the raw probeAlias Parquet
+		// files, causing "key not in schema" at shuffle time. We skip any
+		// join where the probe side is not directly the probeAlias scan.
+		if s.LeftDepStage != probeScanID {
 			continue
 		}
 		if buildScan.EstimatedBytes > bestBytes {

@@ -125,7 +125,10 @@ func (c *Coordinator) runShuffleSide(
 	ctx, cancel := context.WithTimeout(ctx, shuffleStageTimeout)
 	defer cancel()
 
-	resultPrefix := fmt.Sprintf("queries/%s/shuffle/%s", parentQueryID, sideName)
+	// Convention A: resultPrefix always ends with "/" so that the worker's
+	// "%spartition=%04d/%s.wshf" format string produces a valid S3 key with
+	// the segment "partition=NNNN" cleanly separated. Never omit the slash.
+	resultPrefix := fmt.Sprintf("queries/%s/shuffle/%s/", parentQueryID, sideName)
 	shuffleQueryID := fmt.Sprintf("sh-%s-%s", sideName, parentQueryID)
 	stageID := fmt.Sprintf("shuffle-%s", sideName)
 
