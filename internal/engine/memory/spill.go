@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -123,20 +124,16 @@ func (sm *SpillManager) ShouldSpill() bool {
 	return heapPressureExceeded()
 }
 
-// heapPressureRatio is the fraction of GOMEMLIMIT at which we trigger
-// spill. 0.5 = spill when the heap is at 50% of the soft memory limit.
+// heapPressureRatio is the fraction of GOMEMLIMIT at which the global
+// heap-pressure circuit breaker fires. This is a backstop for allocation
+// paths that bypass the per-operator memory tracker. After Phase 1 of
+// the spill-trigger redesign, the tracker should be accurate enough that
+// this circuit breaker rarely or never fires; when it does, the WARN log
+// is a signal that there's an unaccounted allocation site to fix.
 //
-// At SF100 the gap between the spill trigger and the kernel OOM-killer
-// was the main failure mode: workers reached 31 GB RSS on a 32 GB box
-// while only reporting tracker-visible memory of ~1.4 GB per task,
-// because a large fraction of live memory (broadcast build caches,
-// parquet decompression buffers, spill I/O buffers) does not route
-// through the per-operator tracker. Triggering spill earlier gives the
-// runtime more headroom to react before the heap hits GOMEMLIMIT.
-//
-// Tunable upward for cache-heavy workloads on roomy instances; downward
-// for memory-tight workloads.
-const heapPressureRatio = 0.5
+// Set to 0.95 (was 0.5 in PR #38, 0.7 originally) so we only spill for
+// genuine OOM-imminent situations.
+const heapPressureRatio = 0.95
 
 var (
 	heapPressureMu        sync.Mutex
@@ -170,7 +167,17 @@ func heapPressureExceeded() bool {
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
 	threshold := int64(float64(heapPressureMemLimit) * heapPressureRatio)
+	prev := heapPressureLastValue
 	heapPressureLastValue = int64(ms.HeapAlloc) > threshold
+	if heapPressureLastValue && !prev {
+		// Transition false→true: log loudly because the tracker missed something.
+		// This indicates an allocation site that should be added to the tracker.
+		slog.Warn("heap-pressure spill triggered (likely tracker accounting gap)",
+			"heap_alloc_mb", ms.HeapAlloc/(1<<20),
+			"threshold_mb", threshold/(1<<20),
+			"gomemlimit_mb", heapPressureMemLimit/(1<<20),
+		)
+	}
 	return heapPressureLastValue
 }
 
