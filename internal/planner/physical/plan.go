@@ -190,14 +190,6 @@ type Planner struct {
 	// workers while build tables read all files. Keyed by scan alias.
 	ScanFileFilter map[string][]string
 
-	// ProbePartitionBlooms maps build-table column names to bloom filters
-	// built from the probe partition's join key values. When a non-probe scan
-	// reads a column with a matching bloom, rows not in the bloom are skipped.
-	// This reduces build-side I/O proportional to the probe partition size:
-	// with N workers, ~(N-1)/N of build rows are filtered out.
-	// Keyed by build-side column name (e.g., "o_orderkey").
-	ProbePartitionBlooms map[string]*exec.BloomScanFilter
-
 	scanCounter map[string]int // tracks N-th scan of each table for alias resolution
 }
 
@@ -2025,31 +2017,6 @@ func (p *Planner) buildScan(ctx context.Context, node *logical.Node) (exec.Sourc
 
 	var ops []exec.UnaryOperator
 
-	// Inject probe partition bloom filters as BloomFilterOp operators.
-	// These filter out build-side rows whose join key is not in the probe
-	// partition's bloom, reducing hash table memory by ~(N-1)/N.
-	if len(p.ProbePartitionBlooms) > 0 {
-		// Collect known column names. When RequiredColumns is nil (inner join
-		// build sides read all columns), fall back to the full table schema.
-		allCols := append(node.RequiredColumns, node.ScanColumns...)
-		if len(allCols) == 0 {
-			if meta, err := p.catalog.GetTable(ctx, node.TableName); err == nil {
-				for _, col := range meta.Schema.Columns {
-					allCols = append(allCols, col.Name)
-				}
-			}
-		}
-		for colName, bloom := range p.ProbePartitionBlooms {
-			for _, col := range allCols {
-				if col == colName {
-					bloomOp := exec.NewBloomFilterOp(bloom.Bloom, bloom.BloomMask,
-						[]string{colName}, bloom.UseIntKey)
-					ops = append(ops, bloomOp)
-					break
-				}
-			}
-		}
-	}
 	if node.SampleMethod != "" && node.SamplePercent > 0 {
 		ops = append(ops, newSampleOperator(node.SampleMethod, node.SamplePercent))
 	}
