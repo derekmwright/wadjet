@@ -1156,6 +1156,48 @@ func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidat
 		return ShuffleCandidate{}, false
 	}
 
+	// candidateCols is the set of column names the candidate scan exposes in its
+	// raw Parquet files. Used to validate that join keys are actually rooted in
+	// the candidate scan and not in a fused-join output (e.g. Q10: orders is the
+	// left dep of join-4, but join-4's left key c_nationkey comes from the fused
+	// customer join, not from orders' Parquet files).
+	// If Columns is empty (not annotated), validation is skipped and the original
+	// dep-match logic applies unchanged.
+	candidateCols := make(map[string]bool, len(candidateScan.Columns))
+	for _, c := range candidateScan.Columns {
+		candidateCols[c] = true
+	}
+	// keysInCols returns true iff all keys are present in cols.
+	// Returns true when cols is empty (no annotation = skip validation).
+	keysInCols := func(keys []string, cols map[string]bool) bool {
+		if len(cols) == 0 {
+			// No column annotation: cannot validate, assume valid.
+			return true
+		}
+		if len(keys) == 0 {
+			return false
+		}
+		for _, k := range keys {
+			if !cols[k] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// probeCols is the set of column names the probe scan exposes in its raw
+	// Parquet files. Used to validate that probe-side keys are directly readable
+	// from the probe table, not from an intermediate join output.
+	probeCols := make(map[string]bool)
+	for _, s := range stages {
+		if s.Type == "scan" && s.ScanAlias == probeAlias {
+			for _, c := range s.Columns {
+				probeCols[c] = true
+			}
+			break
+		}
+	}
+
 	// Step 3: walk join stages to find the one referencing the candidate.
 	for _, j := range stages {
 		if j.Type != "hash_join" && j.Type != "broadcast_join" {
@@ -1163,9 +1205,12 @@ func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidat
 		}
 
 		// Direct left-dep match: candidate is on the left (probe) side of the join.
-		// Safety check: only accept if the OTHER side (right) is not an intermediate
-		// join — the left keys must be from the candidate's Parquet files.
-		if j.LeftDepStage == candidateScanID {
+		// Guard: the join's left keys must actually live in the candidate scan's raw
+		// Parquet columns. If they don't (e.g. Q10: join-4 has LeftDepStage=orders
+		// but JoinLeftKeys=[c_nationkey] which originates from the fused customer
+		// join, not from orders files), skip this match and let the column-anchored
+		// fallback below find the correct join.
+		if j.LeftDepStage == candidateScanID && keysInCols(j.JoinLeftKeys, candidateCols) {
 			return ShuffleCandidate{
 				JoinStageID: j.ID,
 				BuildAlias:  candidateScan.ScanAlias,
@@ -1214,6 +1259,46 @@ func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidat
 					BuildKeys:   append([]string(nil), fj.JoinRightKeys...),
 					ProbeKeys:   append([]string(nil), fj.JoinLeftKeys...),
 					JoinKeys:    append([]string(nil), fj.JoinRightKeys...),
+					BuildBytes:  candidateScan.EstimatedBytes,
+				}, true
+			}
+		}
+	}
+
+	// Column-anchored fallback: the candidate appears as a left dep somewhere in
+	// the join chain, but the matching join's keys were not valid for the raw
+	// candidate scan (e.g. Q10: orders appears as the left dep of join-4 but with
+	// c_nationkey keys from a fused join output). Find any join where:
+	//   - JoinLeftKeys are all present in the candidate scan's raw columns, AND
+	//   - JoinRightKeys are all present in the probe scan's raw columns.
+	// This anchors both sides to their actual Parquet files regardless of the
+	// dep-chain topology.
+	if len(candidateCols) > 0 && len(probeCols) > 0 {
+		for _, j := range stages {
+			if j.Type != "hash_join" && j.Type != "broadcast_join" {
+				continue
+			}
+			if keysInCols(j.JoinLeftKeys, candidateCols) && keysInCols(j.JoinRightKeys, probeCols) {
+				return ShuffleCandidate{
+					JoinStageID: j.ID,
+					BuildAlias:  candidateScan.ScanAlias,
+					ProbeAlias:  probeAlias,
+					BuildKeys:   append([]string(nil), j.JoinLeftKeys...),
+					ProbeKeys:   append([]string(nil), j.JoinRightKeys...),
+					JoinKeys:    append([]string(nil), j.JoinLeftKeys...),
+					BuildBytes:  candidateScan.EstimatedBytes,
+				}, true
+			}
+			// Also check if the keys are swapped: candidate provides the right
+			// keys and probe provides the left keys.
+			if keysInCols(j.JoinRightKeys, candidateCols) && keysInCols(j.JoinLeftKeys, probeCols) {
+				return ShuffleCandidate{
+					JoinStageID: j.ID,
+					BuildAlias:  candidateScan.ScanAlias,
+					ProbeAlias:  probeAlias,
+					BuildKeys:   append([]string(nil), j.JoinRightKeys...),
+					ProbeKeys:   append([]string(nil), j.JoinLeftKeys...),
+					JoinKeys:    append([]string(nil), j.JoinRightKeys...),
 					BuildBytes:  candidateScan.EstimatedBytes,
 				}, true
 			}
