@@ -85,10 +85,19 @@ func (sm *SpillManager) ShouldSpill() bool {
 }
 
 // heapPressureRatio is the fraction of GOMEMLIMIT at which we trigger
-// spill. 0.7 = spill when the heap is at 70% of the soft memory limit.
-// Tunable upward for more aggressive caching, downward for more aggressive
-// spilling on memory-tight workloads.
-const heapPressureRatio = 0.7
+// spill. 0.5 = spill when the heap is at 50% of the soft memory limit.
+//
+// At SF100 the gap between the spill trigger and the kernel OOM-killer
+// was the main failure mode: workers reached 31 GB RSS on a 32 GB box
+// while only reporting tracker-visible memory of ~1.4 GB per task,
+// because a large fraction of live memory (broadcast build caches,
+// parquet decompression buffers, spill I/O buffers) does not route
+// through the per-operator tracker. Triggering spill earlier gives the
+// runtime more headroom to react before the heap hits GOMEMLIMIT.
+//
+// Tunable upward for cache-heavy workloads on roomy instances; downward
+// for memory-tight workloads.
+const heapPressureRatio = 0.5
 
 var (
 	heapPressureMu        sync.Mutex

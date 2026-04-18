@@ -59,9 +59,13 @@ type spillState struct {
 	numPartitions int
 	spilledParts  map[int]bool // which partitions have been spilled to disk
 
-	// Build-side: per-partition batch lists (in-memory) and spill files (on disk)
+	// Build-side: per-partition batch lists (in-memory) and spill files (on disk).
+	// partBuildWriters is a long-lived per-partition writer that appends
+	// subsequent batches for a spilled partition to a single file instead of
+	// producing one tiny file per batch (see writeBuildBatch for rationale).
 	partBuildBatches map[int][]*batch.RecordBatch
 	partBuildFiles   map[int][]string // spilled build file paths per partition
+	partBuildWriters map[int]*spillBatchWriter
 
 	// Probe-side: per-partition buffered batches (flushed to disk files)
 	partProbeFiles   map[int][]string
@@ -81,11 +85,47 @@ func newSpillState(dir string, schema []parquet.Column) *spillState {
 		spilledParts:     make(map[int]bool),
 		partBuildBatches: make(map[int][]*batch.RecordBatch),
 		partBuildFiles:   make(map[int][]string),
+		partBuildWriters: make(map[int]*spillBatchWriter),
 		partProbeFiles:   make(map[int][]string),
 		partProbeWriters: make(map[int]*spillBatchWriter),
 		partMemory:       make(map[int]int64),
 		schema:           schema,
 	}
+}
+
+// writeBuildBatch appends a build-side batch for an already-spilled partition
+// to that partition's long-lived spill writer. Creates the writer lazily on
+// first write. This replaces a prior pattern that created one tiny file per
+// batch, producing tens of thousands of ~100 KB files under SF100 workloads
+// and dominating wall time with file-open/close syscalls during probe flush.
+func (s *spillState) writeBuildBatch(partID int, b *batch.RecordBatch) error {
+	w, ok := s.partBuildWriters[partID]
+	if !ok {
+		var err error
+		w, err = newSpillBatchWriter(s.dir, "build-spill")
+		if err != nil {
+			return err
+		}
+		s.partBuildWriters[partID] = w
+	}
+	return w.writeBatch(b)
+}
+
+// closeBuildWriters flushes and closes all build-side spill writers, attaching
+// their output files to partBuildFiles. Caller must invoke this before probe
+// begins reading the spilled partitions.
+func (s *spillState) closeBuildWriters() error {
+	for partID, w := range s.partBuildWriters {
+		path, err := w.close()
+		if err != nil {
+			return err
+		}
+		if path != "" {
+			s.partBuildFiles[partID] = append(s.partBuildFiles[partID], path)
+		}
+	}
+	s.partBuildWriters = nil
+	return nil
 }
 
 // largestInMemoryPartition returns the partition ID with the most memory usage.
@@ -210,13 +250,11 @@ func (h *HashJoin) partitionBuildBatch(b *batch.RecordBatch) {
 	// Create per-partition batches
 	for partID, rows := range partRows {
 		if ss.spilledParts[partID] {
-			// This partition is already spilled — write directly to disk
+			// This partition is already spilled — append to its long-lived
+			// writer so a run of post-spill batches concatenates into a
+			// single file instead of fragmenting into one file per batch.
 			partBatch := compactBatchForRows(b, rows)
-			// Best effort: write to partition's build files
-			path, err := writeSpillBatches(ss.dir, []*batch.RecordBatch{partBatch})
-			if err == nil {
-				ss.partBuildFiles[partID] = append(ss.partBuildFiles[partID], path)
-			}
+			_ = ss.writeBuildBatch(partID, partBatch) // best-effort
 			continue
 		}
 		partBatch := compactBatchForRows(b, rows)
@@ -935,11 +973,14 @@ func (p *HashJoinProbe) NextFlush(ctx context.Context) (*batch.RecordBatch, erro
 		return nil, nil
 	}
 
-	// One-time init: collect partition IDs and close probe writers so probe
-	// spill files are flushed and readable.
+	// One-time init: collect partition IDs and close probe + build writers so
+	// spill files are flushed and readable before the probe reader opens them.
 	if !p.spillFlushInit {
 		if err := ss.closeProbeWriters(); err != nil {
 			return nil, fmt.Errorf("closing probe writers: %w", err)
+		}
+		if err := ss.closeBuildWriters(); err != nil {
+			return nil, fmt.Errorf("closing build writers: %w", err)
 		}
 		p.spillFlushPartIDs = make([]int, 0, len(ss.spilledParts))
 		for id := range ss.spilledParts {
