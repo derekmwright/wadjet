@@ -236,6 +236,8 @@ func TestParsePartitionFromPath(t *testing.T) {
 		{"no-partition-segment/file.wshf", 0, true},
 		{"queries/qid/partition=/file.wshf", 0, true}, // empty number
 		{"", 0, true},
+		{"shuffle/q1/build/partition=7/abc.wshf", 7, false},
+		{"shuffle/q1/build/partition=abc/file.wshf", 0, true},
 	}
 	for _, tc := range cases {
 		got, err := parsePartitionFromPath(tc.path)

@@ -10,7 +10,6 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
-	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
@@ -346,25 +345,3 @@ func findShuffleScanStages(stages []physical.Stage, cand physical.ShuffleCandida
 	return build, probe, nil
 }
 
-// collectShardFilesFromS3 lists all shard files under a shuffle side prefix
-// from object storage. This is a fallback reconciliation helper: if ResultFiles
-// from task notifications are incomplete (e.g., due to a bug or truncation),
-// the caller can use this to enumerate the actual output from S3.
-// Not called in the hot path — kept for diagnostic use.
-func (c *Coordinator) collectShardFilesFromS3(ctx context.Context, bucket, prefix string, numParts int) ([][]string, error) {
-	shards := make([][]string, numParts)
-	objs, err := c.catalog.Store().List(ctx, bucket, objstore.ListOptions{Prefix: prefix})
-	if err != nil {
-		return nil, fmt.Errorf("listing shuffle shards at %s/%s: %w", bucket, prefix, err)
-	}
-	for _, obj := range objs {
-		p, parseErr := parsePartitionFromPath(obj.Key)
-		if parseErr != nil {
-			continue // skip non-shard files (manifests, etc.)
-		}
-		if p >= 0 && p < numParts {
-			shards[p] = append(shards[p], obj.Key)
-		}
-	}
-	return shards, nil
-}
