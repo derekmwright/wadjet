@@ -84,7 +84,8 @@ func (s *partitionedShuffleSink) Init(_ context.Context) error {
 
 // Consume hash-partitions each row in b into its target partition, appending
 // to that partition's row buffer. Buffers are flushed when they exceed
-// flushBytes worth of accumulated rows.
+// flushBytes worth of accumulated rows. Safe for concurrent calls from
+// parallel pipeline workers — serialized via mu.
 func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -298,10 +299,8 @@ func (s *partitionedShuffleSink) flushPartition(p int) error {
 		switch col.Type {
 		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
 			col.BytesData.Data = col.BytesData.Data[:0]
-			// Keep Offsets slice; reset all to 0.
-			for i := range col.BytesData.Offsets {
-				col.BytesData.Offsets[i] = 0
-			}
+			col.BytesData.Offsets = col.BytesData.Offsets[:1]
+			col.BytesData.Offsets[0] = 0
 		}
 	}
 	return nil
@@ -309,6 +308,10 @@ func (s *partitionedShuffleSink) flushPartition(p int) error {
 
 // Finalize flushes all partition buffers, then patches the chunk count in each
 // file header (mirrors shuffleStreamSink.Finalize exactly for the patch logic).
+//
+// On error, partitions after the failing one may be left with numChunks=0
+// in their headers (an inconsistent on-disk state). Callers MUST NOT upload
+// any partition file if Finalize returns a non-nil error.
 func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -362,8 +365,12 @@ func (s *partitionedShuffleSink) Close() error {
 	return nil
 }
 
-// PartitionFiles returns the local file paths for each partition (index = partition id).
-// Empty string for a partition that received zero rows.
+// PartitionFiles returns the local file paths produced for each partition,
+// indexed by partition id. An empty string indicates the partition received
+// zero rows.
+//
+// Must be called AFTER Finalize. Calling it earlier will return empty strings
+// for partitions whose buffered rows had not yet flushed.
 func (s *partitionedShuffleSink) PartitionFiles() []string {
 	out := make([]string, s.numParts)
 	for p, pw := range s.parts {
@@ -373,16 +380,6 @@ func (s *partitionedShuffleSink) PartitionFiles() []string {
 		out[p] = pw.file.Name()
 	}
 	return out
-}
-
-// hashInt64 hashes a single int64 value using FNV-1a. Exported for use in
-// tests to verify that partition assignments match expected routing.
-func hashInt64(v int64) uint64 {
-	h := fnv.New64a()
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(v))
-	_, _ = h.Write(buf[:])
-	return h.Sum64()
 }
 
 // hashVectorValue mixes a single column value at the given row into h using

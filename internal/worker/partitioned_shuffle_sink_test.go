@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,6 +45,10 @@ func TestPartitionedShuffleSink_RoundTrip(t *testing.T) {
 	}
 
 	// Read each partition back and verify every row's hash maps back to its partition.
+	// Use hashVectorValue directly — the same code path the sink uses — so the
+	// test is sensitive to any routing divergence in partitionFor.
+	keySchema := []parquet.Column{{Name: "k", Type: parquet.TypeInt64}}
+	var scratch [8]byte
 	totalRows := 0
 	for p, path := range paths {
 		if path == "" {
@@ -51,7 +56,12 @@ func TestPartitionedShuffleSink_RoundTrip(t *testing.T) {
 		}
 		rows := readWSHFInts(t, filepath.Clean(path), "k")
 		for _, k := range rows {
-			got := int(hashInt64(k) % uint64(numParts))
+			keyBatch := batch.NewRecordBatch(keySchema, 1)
+			keyBatch.Columns[0].Int64Data[0] = k
+			keyBatch.Columns[0].Nulls.SetValid(0)
+			h := fnv.New64a()
+			hashVectorValue(h, keyBatch.Columns[0], 0, scratch[:])
+			got := int(h.Sum64() % uint64(numParts))
 			if got != p {
 				t.Errorf("row k=%d ended up in partition %d, hash maps to %d", k, p, got)
 			}
