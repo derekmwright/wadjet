@@ -34,7 +34,7 @@ type PhysicalPlan struct {
 // Stage represents a unit of distributed work with metadata for task creation.
 type Stage struct {
 	ID           string
-	Type         string // scan, aggregate, sort, hash_join, broadcast_join, window
+	Type         string // scan, aggregate, sort, hash_join, broadcast_join, window, shuffle, pipeline
 	ClusterID    string // target cluster for routing ("" = local/coordinator's cluster)
 	Dependencies []string
 	Tasks        int
@@ -103,6 +103,13 @@ type Stage struct {
 	// Cost estimation (populated at plan time from manifest metadata)
 	EstimatedBytes int64
 	EstimatedRows  int64
+
+	// Distribution describes how this stage's output is partitioned.
+	// Default zero value is {Kind: DistSingleton} which is correct for
+	// most existing stages (single-worker output). Shuffle stages set this
+	// to DistHashPartitioned with Keys and Count populated. Broadcast pre-scans
+	// (build cache) set Kind: DistBroadcast.
+	Distribution Distribution
 }
 
 // WindowColSpec defines a window function column in a stage.
