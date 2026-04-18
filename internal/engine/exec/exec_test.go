@@ -590,8 +590,11 @@ func TestHashAggregateMergeThenSpillFinalize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(primary.spillFiles) == 0 {
-		t.Fatal("expected spill files but none were created")
+	// After the spill-fragmentation fix, small spilled payloads land in the
+	// in-memory buffer rather than a new file. Either indicates the spill
+	// path was exercised.
+	if len(primary.spillFiles) == 0 && len(primary.spillBuffer) == 0 {
+		t.Fatal("expected spill path to be exercised but nothing was written or buffered")
 	}
 
 	// Clone aggregate with different groups (simulates worker 1).
@@ -644,6 +647,188 @@ func TestHashAggregateMergeThenSpillFinalize(t *testing.T) {
 			if total != 140.0 {
 				t.Fatalf("expected total=140 for (2024,1), got %v", total)
 			}
+		}
+	}
+}
+
+// TestHashAggregateSpillBatching feeds 200 small batches under a tight memory
+// budget so every Consume after the first lands in the spill branch.
+// Regression for SF100 Q03 where per-batch flushing produced millions of
+// ~4 KB spill files, making Finalize unable to complete in reasonable time.
+// With the fix, the number of spill files must be bounded by the total rows
+// spilled divided by the per-file target, not by the number of Consume calls.
+func TestHashAggregateSpillBatching(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "key", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeInt64},
+	}
+
+	ctx := context.Background()
+	spillDir := t.TempDir()
+	// 1 KB budget — any TrackBatch on a real batch will push us into the
+	// spill branch for all subsequent Consume calls.
+	tracker := memory.NewTracker("test", 1_000)
+	sm, err := memory.NewSpillManager(spillDir, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHashAggregate([]string{"key"}, []AggColumn{
+		{Func: AggSum, InputCol: "val", OutputCol: "total", OutputType: parquet.TypeInt64},
+	})
+	h.Spill = sm
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	const numBatches = 200
+	const rowsPerBatch = 10
+	expected := make(map[int64]int64) // key → sum(val)
+
+	for i := 0; i < numBatches; i++ {
+		rows := make([]map[string]any, 0, rowsPerBatch)
+		for j := 0; j < rowsPerBatch; j++ {
+			k := int64(i*rowsPerBatch + j)
+			v := int64(i + j + 1)
+			rows = append(rows, map[string]any{"key": k, "val": v})
+			expected[k] += v
+		}
+		b := batch.FromRows(schema, rows)
+		if err := h.Consume(ctx, b); err != nil {
+			t.Fatalf("Consume batch %d: %v", i, err)
+		}
+	}
+
+	// Sanity: we exercised the spill path. Before the fix this manifests as
+	// many spillFiles; after the fix it may manifest as buffered rows that
+	// haven't yet been flushed to disk.
+	if len(h.spillFiles) == 0 && len(h.spillBuffer) == 0 {
+		t.Fatal("spill path was never exercised; tracker/budget setup is wrong for this test")
+	}
+
+	// THE REGRESSION: before the fix, len(spillFiles) was ~= numBatches-1.
+	// After the fix, files accumulate only when the spill buffer crosses the
+	// per-file byte target. 200 batches of 10 small rows is ~60 KB total —
+	// well under any reasonable target — so we expect <=5 files.
+	if got := len(h.spillFiles); got > 5 {
+		t.Errorf("spill-file fragmentation: got %d files for %d batches of %d rows, want <=5",
+			got, numBatches, rowsPerBatch)
+	}
+
+	// Finalize must drain both h.spillFiles and any pending buffer and produce
+	// correct aggregation totals.
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	got := make(map[int64]int64)
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for _, row := range out.ToRows() {
+			k := row["key"].(int64)
+			v := row["total"].(int64)
+			got[k] = v
+		}
+	}
+
+	if len(got) != len(expected) {
+		t.Fatalf("group count: got %d, want %d", len(got), len(expected))
+	}
+	for k, want := range expected {
+		if got[k] != want {
+			t.Errorf("key=%d: got total=%d, want %d", k, got[k], want)
+		}
+	}
+}
+
+// TestHashAggregateSpillBufferFlush exercises the flush path by lowering
+// spillFileTargetBytes so the buffer crosses the threshold during Consume,
+// producing a bounded (non-zero) number of files.
+func TestHashAggregateSpillBufferFlush(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "key", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeInt64},
+	}
+
+	orig := spillFileTargetBytes
+	spillFileTargetBytes = 10_000 // flush aggressively, but accommodate a few batches per file
+	t.Cleanup(func() { spillFileTargetBytes = orig })
+
+	ctx := context.Background()
+	spillDir := t.TempDir()
+	tracker := memory.NewTracker("test", 1_000) // tight budget
+	sm, err := memory.NewSpillManager(spillDir, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := NewHashAggregate([]string{"key"}, []AggColumn{
+		{Func: AggSum, InputCol: "val", OutputCol: "total", OutputType: parquet.TypeInt64},
+	})
+	h.Spill = sm
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	const numBatches = 50
+	const rowsPerBatch = 50
+	expected := make(map[int64]int64)
+
+	for i := 0; i < numBatches; i++ {
+		rows := make([]map[string]any, 0, rowsPerBatch)
+		for j := 0; j < rowsPerBatch; j++ {
+			k := int64(i*rowsPerBatch + j)
+			v := int64(i + j + 1)
+			rows = append(rows, map[string]any{"key": k, "val": v})
+			expected[k] += v
+		}
+		b := batch.FromRows(schema, rows)
+		if err := h.Consume(ctx, b); err != nil {
+			t.Fatalf("Consume batch %d: %v", i, err)
+		}
+	}
+
+	// With a tiny flush threshold, we should have produced multiple files
+	// (but far fewer than numBatches).
+	if got := len(h.spillFiles); got == 0 {
+		t.Error("expected flush path to produce at least one spill file")
+	}
+	if got := len(h.spillFiles); got >= numBatches {
+		t.Errorf("flush did not batch across Consume calls: got %d files for %d batches", got, numBatches)
+	}
+
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	got := make(map[int64]int64)
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for _, row := range out.ToRows() {
+			k := row["key"].(int64)
+			v := row["total"].(int64)
+			got[k] = v
+		}
+	}
+
+	if len(got) != len(expected) {
+		t.Fatalf("group count: got %d, want %d", len(got), len(expected))
+	}
+	for k, want := range expected {
+		if got[k] != want {
+			t.Errorf("key=%d: got total=%d, want %d", k, got[k], want)
 		}
 	}
 }
