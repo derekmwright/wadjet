@@ -4241,6 +4241,10 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 			src.cache = cached
 		}
 	}
+	// Wire per-query memory tracker so parquet pooled buffers are accounted for.
+	if sm := p.getSpillManager(); sm != nil {
+		src.memTracker = sm.Tracker()
+	}
 	return src
 }
 
@@ -4265,6 +4269,7 @@ type catalogScanSource struct {
 	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
 	dynamicFilter   []exec.DynamicRange   // dynamic min/max range filter from hash join build side
 	rowLimit        int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
+	memTracker      *memory.Tracker       // per-query memory tracker; wired at construction when budget>0
 }
 
 // SetBloomFilter attaches a bloom filter for scan-level row group pruning.
@@ -4317,6 +4322,9 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 		}
 		if s.rowLimit > 0 {
 			ses.rowLimit = s.rowLimit
+		}
+		if s.memTracker != nil {
+			ses.memTracker = s.memTracker
 		}
 	}
 	s.inner = sc
@@ -5549,7 +5557,8 @@ type scannerExecSource struct {
 	scanner         *scanSourceInner
 	bloomFilter     *exec.BloomScanFilter
 	dynamicFilter   []exec.DynamicRange
-	rowLimit        int64 // LIMIT pushdown: enables lazy file downloading (0 = eager)
+	rowLimit        int64           // LIMIT pushdown: enables lazy file downloading (0 = eager)
+	memTracker      *memory.Tracker // per-query memory tracker; passed to scanSourceInner at Init
 }
 
 type scanSourceInner struct {
@@ -5599,6 +5608,16 @@ type scanSourceInner struct {
 	// is closed, enabling cross-query buffer reuse.
 	pooledBufsMu sync.Mutex
 	pooledBufs   [][]byte
+
+	// memTracker accounts for pooled buffers (parquet file []byte loads).
+	// nil-safe: when nil, tracking is a no-op. Wired by the planner at
+	// scan-source construction when a per-query spill manager is available.
+	memTracker *memory.Tracker
+
+	// trackedBufBytes is the cumulative bytes currently reported to memTracker
+	// from pooledBufs. Released atomically in releasePooledBufs to avoid
+	// double-release on idempotent close.
+	trackedBufBytes atomic.Int64
 }
 
 // trackPooledBuf records a buffer obtained from readBufPool so it can be
@@ -5607,6 +5626,12 @@ func (inner *scanSourceInner) trackPooledBuf(buf []byte) {
 	inner.pooledBufsMu.Lock()
 	inner.pooledBufs = append(inner.pooledBufs, buf)
 	inner.pooledBufsMu.Unlock()
+
+	if inner.memTracker != nil {
+		n := int64(cap(buf))
+		inner.memTracker.ForceReserve(n)
+		inner.trackedBufBytes.Add(n)
+	}
 }
 
 // releasePooledBufs returns all tracked buffers to readBufPool.
@@ -5616,6 +5641,14 @@ func (inner *scanSourceInner) releasePooledBufs() {
 	bufs := inner.pooledBufs
 	inner.pooledBufs = nil
 	inner.pooledBufsMu.Unlock()
+
+	if inner.memTracker != nil {
+		released := inner.trackedBufBytes.Swap(0)
+		if released > 0 {
+			inner.memTracker.Release(released)
+		}
+	}
+
 	// Nil out rgUnits to break pqFile → bytes.Reader → []byte reference
 	// chain before returning buffers, so GC doesn't pin old data.
 	inner.rgUnits = nil
@@ -5709,6 +5742,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		batchCh:       make(chan *batch.RecordBatch, batchChSize),
 		errCh:         make(chan error, 1),
 		cancel:        cancel,
+		memTracker:    s.memTracker,
 	}
 	s.scanner = inner
 

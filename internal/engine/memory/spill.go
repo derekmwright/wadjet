@@ -419,3 +419,10 @@ func (sm *SpillManager) SpilledFiles() []string {
 	copy(result, sm.files)
 	return result
 }
+
+// Tracker returns the underlying memory tracker. May return nil if the
+// SpillManager was constructed without one. Used by call sites that need
+// to report tracker accounting outside of the operator-level spill API.
+func (sm *SpillManager) Tracker() *Tracker {
+	return sm.tracker
+}
