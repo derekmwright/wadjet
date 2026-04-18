@@ -1125,7 +1125,7 @@ func PickShuffleCandidate(stages []Stage, thresholdBytes int64) (ShuffleCandidat
 	var best ShuffleCandidate
 	var bestBytes int64
 	for _, s := range stages {
-		if s.Type != "hash_join" {
+		if s.Type != "hash_join" && s.Type != "broadcast_join" {
 			continue
 		}
 		buildAlias := s.BuildTableAlias

@@ -62,3 +62,20 @@ func TestPickShuffleCandidate_NoJoins(t *testing.T) {
 		t.Error("expected no candidate when there are no join stages")
 	}
 }
+
+func TestPickShuffleCandidate_MatchesBroadcastJoin(t *testing.T) {
+	stages := []Stage{
+		{ID: "scan-orders", Type: "scan", ScanAlias: "orders", EstimatedBytes: 8 << 30},
+		{ID: "scan-lineitem", Type: "scan", ScanAlias: "lineitem", EstimatedBytes: 80 << 30},
+		// Same shape as the hash_join test, but the join is classified as broadcast_join.
+		{ID: "join-1", Type: "broadcast_join", BuildTableAlias: "orders",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"}},
+	}
+	cand, ok := PickShuffleCandidate(stages, 4<<30)
+	if !ok {
+		t.Fatal("expected shuffle candidate for broadcast_join above threshold")
+	}
+	if cand.JoinKeys[0] != "o_orderkey" {
+		t.Errorf("JoinKeys = %v, want [o_orderkey]", cand.JoinKeys)
+	}
+}
