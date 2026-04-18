@@ -114,7 +114,7 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	}
 
 	// Spill to disk if memory pressure is high
-	if w.Spill != nil && w.Spill.ShouldSpill() && len(w.batches) > 0 {
+	if w.Spill != nil && w.Spill.ShouldSpillFor(memory.SpillCheap) && len(w.batches) > 0 {
 		var rows []map[string]any
 		for _, sb := range w.batches {
 			rows = append(rows, sb.ToRows()...)
