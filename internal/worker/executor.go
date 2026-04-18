@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -167,6 +168,8 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	switch task.Type {
 	case distributed.TaskTypePipeline:
 		err = e.executePipeline(ctx, task, &result)
+	case distributed.TaskTypeShuffle:
+		err = e.executeShuffle(ctx, task, &result)
 	default:
 		err = fmt.Errorf("unsupported task type: %s", task.Type)
 	}
@@ -468,6 +471,131 @@ func (e *Executor) executeBuildCachePreScan(ctx context.Context, task distribute
 	}
 	result.ResultPath = resultPath
 	result.SizeBytes = fi.Size()
+	return nil
+}
+
+// executeShuffle reads source Parquet files from S3, hash-partitions every row
+// on task.ShuffleKeys into task.NumPartitions output .wshf files, and uploads
+// each non-empty partition file to S3 under
+//
+//	<ResultBucket>/<ResultPrefix>/partition=NNNN/<TaskID>.wshf
+//
+// Populated result fields: ResultFiles, NumRows, SizeBytes.
+func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	if len(task.ShuffleKeys) == 0 {
+		return fmt.Errorf("shuffle task %s: ShuffleKeys must not be empty", task.ID)
+	}
+	if task.NumPartitions <= 0 {
+		return fmt.Errorf("shuffle task %s: NumPartitions must be > 0, got %d", task.ID, task.NumPartitions)
+	}
+	if len(task.Files) == 0 {
+		return fmt.Errorf("shuffle task %s: Files must not be empty", task.ID)
+	}
+
+	bucket := task.DataBucket
+	if bucket == "" {
+		bucket = task.ResultBucket
+	}
+
+	// Read all source Parquet files into batches. Uses the executor's
+	// existing range-read + LRU cache path; no planner/catalog needed.
+	batches, err := e.readParquetFilesConcurrentBatches(ctx, bucket, task.Files, task.Columns)
+	if err != nil {
+		return fmt.Errorf("shuffle task %s: reading source files: %w", task.ID, err)
+	}
+	if len(batches) == 0 {
+		// Source files produced no rows — nothing to upload.
+		return nil
+	}
+
+	// Extract schema from first non-empty batch.
+	var schema []parquet.Column
+	for _, b := range batches {
+		if b != nil && len(b.Schema) > 0 {
+			schema = b.Schema
+			break
+		}
+	}
+	if schema == nil {
+		return fmt.Errorf("shuffle task %s: could not determine schema from source batches", task.ID)
+	}
+
+	// Set up the spill directory for the sink's partition files.
+	spillDir := filepath.Join(e.spillDir, "shuffle-"+task.ID)
+	if e.spillDir == "" {
+		spillDir = filepath.Join(os.TempDir(), "shuffle-"+task.ID)
+	}
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		return fmt.Errorf("shuffle task %s: creating spill dir: %w", task.ID, err)
+	}
+
+	sink := newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, schema)
+	if err := sink.Init(ctx); err != nil {
+		return fmt.Errorf("shuffle task %s: init sink: %w", task.ID, err)
+	}
+	defer sink.Close()
+
+	// Feed all batches into the sink and count rows.
+	var totalRows int64
+	for _, b := range batches {
+		if b == nil {
+			continue
+		}
+		n := int64(b.ActiveLen())
+		if n == 0 {
+			continue
+		}
+		if err := sink.Consume(ctx, b); err != nil {
+			return fmt.Errorf("shuffle task %s: consuming batch: %w", task.ID, err)
+		}
+		totalRows += n
+	}
+
+	if err := sink.Finalize(ctx); err != nil {
+		return fmt.Errorf("shuffle task %s: finalizing sink: %w", task.ID, err)
+	}
+
+	// Upload each non-empty partition file to S3.
+	partFiles := sink.PartitionFiles()
+	for p, localPath := range partFiles {
+		if localPath == "" {
+			continue // empty partition
+		}
+		f, err := os.Open(localPath)
+		if err != nil {
+			return fmt.Errorf("shuffle task %s: opening partition %d: %w", task.ID, p, err)
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return fmt.Errorf("shuffle task %s: stat partition %d: %w", task.ID, p, err)
+		}
+
+		key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
+		_, uploadErr := e.store.Put(ctx, task.ResultBucket, key, f, fi.Size(), "application/octet-stream")
+		f.Close()
+		if uploadErr != nil {
+			return fmt.Errorf("shuffle task %s: uploading partition %d: %w", task.ID, p, uploadErr)
+		}
+
+		result.ResultFiles = append(result.ResultFiles, key)
+		result.SizeBytes += fi.Size()
+
+		// Remove local file best-effort.
+		if removeErr := os.Remove(localPath); removeErr != nil {
+			e.logger.Warn("shuffle: failed to remove local partition file",
+				"task_id", task.ID, "partition", p, "path", localPath, "error", removeErr)
+		}
+	}
+
+	result.NumRows = totalRows
+
+	e.logger.Info("shuffle task completed",
+		"task_id", task.ID,
+		"rows", totalRows,
+		"partitions", len(result.ResultFiles),
+		"size_bytes", result.SizeBytes,
+	)
 	return nil
 }
 
