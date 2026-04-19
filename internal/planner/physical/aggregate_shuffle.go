@@ -37,6 +37,38 @@ type AggregateShuffleCandidate struct {
 	JoinProbeKeys    []string // the outer join's keys on the probe side
 }
 
+// AggregateShuffleRejectReason explains why a join stage was not chosen as
+// an aggregate-shuffle candidate. Used by PickAggregateShuffleCandidateDiag
+// so callers can log exactly which gate fired for visibility on real
+// workloads. The set of reasons is intentionally coarse (one per gate) —
+// finer-grained diagnostics belong in the caller's log line.
+type AggregateShuffleRejectReason int
+
+const (
+	AggShuffleRejectNone               AggregateShuffleRejectReason = iota
+	AggShuffleRejectNoJoin                                          // no hash_join/broadcast_join stages at all
+	AggShuffleRejectBuildNotAggregate                               // join's right dep chain doesn't terminate in an aggregate
+	AggShuffleRejectAggNotScanRooted                                // aggregate isn't rooted in a single base scan
+	AggShuffleRejectBelowThreshold                                  // input scan bytes ≤ threshold
+	AggShuffleRejectScanHasFilters                                  // input scan has pushed predicates (Phase 2 scope)
+	AggShuffleRejectKeysNotCovered                                  // aggregate GROUP BY keys don't cover join build keys
+)
+
+// AggregateShuffleDiag records the best observed rejection for telemetry.
+// When a candidate IS found, Candidate is populated and Reason == None.
+type AggregateShuffleDiag struct {
+	Candidate AggregateShuffleCandidate
+	Reason    AggregateShuffleRejectReason
+	// ObservedScanBytes holds the input scan size of the closest-matching
+	// rejected candidate (populated when we got past followToScan). Useful
+	// for tuning the threshold on real data.
+	ObservedScanBytes int64
+	// JoinStageID / InputScanAlias of the closest-matching rejected join, when
+	// available. Empty for NoJoin / BuildNotAggregate paths.
+	JoinStageID    string
+	InputScanAlias string
+}
+
 // PickAggregateShuffleCandidate scans stages for a join whose build side is a
 // derived aggregate over a scan larger than thresholdBytes. Returns the first
 // such candidate found. Phase 1: single candidate per query (matches
@@ -49,59 +81,112 @@ type AggregateShuffleCandidate struct {
 // In that case we return !found and let the caller fall back to the existing
 // probe-split or broadcast path.
 func PickAggregateShuffleCandidate(stages []Stage, thresholdBytes int64) (AggregateShuffleCandidate, bool) {
+	diag := PickAggregateShuffleCandidateDiag(stages, thresholdBytes)
+	return diag.Candidate, diag.Reason == AggShuffleRejectNone
+}
+
+// PickAggregateShuffleCandidateDiag is the diagnostic variant that also
+// returns the reason for rejection (or Candidate + Reason=None for success).
+// Use this when you want to log why detection declined — essential for
+// threshold tuning on real production data.
+func PickAggregateShuffleCandidateDiag(stages []Stage, thresholdBytes int64) AggregateShuffleDiag {
 	byID := make(map[string]Stage, len(stages))
 	for _, s := range stages {
 		byID[s.ID] = s
+	}
+
+	// Track the "best" rejection across joins so the caller has something
+	// informative to log. Priority order (most useful first):
+	//   KeysNotCovered > ScanHasFilters > BelowThreshold > AggNotScanRooted > BuildNotAggregate > NoJoin
+	// A later gate beats an earlier one because reaching it means the join
+	// structure is closer to what we accept.
+	best := AggregateShuffleDiag{Reason: AggShuffleRejectNoJoin}
+	setBest := func(r AggregateShuffleRejectReason, d AggregateShuffleDiag) {
+		if int(r) >= int(best.Reason) {
+			best = d
+			best.Reason = r
+		}
 	}
 
 	for _, j := range stages {
 		if j.Type != "hash_join" && j.Type != "broadcast_join" {
 			continue
 		}
-		// Follow the build-side dependency through transparent intermediate
-		// stages (shuffle, final_aggregate merges) until we hit either an
-		// aggregate producer or something that isn't an aggregate-on-scan.
+		// A join exists — upgrade from NoJoin.
+		if best.Reason == AggShuffleRejectNoJoin {
+			best.Reason = AggShuffleRejectBuildNotAggregate
+		}
 		aggStage, ok := followToAggregate(byID, j.RightDepStage)
 		if !ok {
+			setBest(AggShuffleRejectBuildNotAggregate, AggregateShuffleDiag{JoinStageID: j.ID})
 			continue
 		}
-		// The aggregate must be rooted in a single scan (not a join subplan) —
-		// Phase 1 scope.
 		scan, ok := followToScan(byID, aggStage)
 		if !ok {
+			setBest(AggShuffleRejectAggNotScanRooted, AggregateShuffleDiag{JoinStageID: j.ID})
 			continue
 		}
 		if scan.EstimatedBytes <= thresholdBytes {
+			setBest(AggShuffleRejectBelowThreshold, AggregateShuffleDiag{
+				JoinStageID:       j.ID,
+				InputScanAlias:    scan.ScanAlias,
+				ObservedScanBytes: scan.EstimatedBytes,
+			})
 			continue
 		}
-		// Phase 1 parity with SubstitutePreComputedAggregates: reject scans
-		// with pushed filter predicates. The substitution pass rejects them
-		// (the worker's decorrelated plan and the pre-compute SQL would
-		// diverge on predicate matching), so firing the pre-compute just
-		// wastes a scan. Q20's inner aggregate has l_shipdate filters and
-		// falls here — handled in a later phase that carries predicate
-		// signatures through the substitution match.
 		if len(scan.FilterExprs) > 0 {
+			setBest(AggShuffleRejectScanHasFilters, AggregateShuffleDiag{
+				JoinStageID:       j.ID,
+				InputScanAlias:    scan.ScanAlias,
+				ObservedScanBytes: scan.EstimatedBytes,
+			})
 			continue
 		}
-		// Alignment check: the aggregate's GROUP BY keys must cover the
-		// join's build-side keys so that partitioning by GROUP BY keys also
-		// partitions by the join key.
 		if !keysCovered(j.JoinRightKeys, aggStage.GroupByCols) {
+			setBest(AggShuffleRejectKeysNotCovered, AggregateShuffleDiag{
+				JoinStageID:       j.ID,
+				InputScanAlias:    scan.ScanAlias,
+				ObservedScanBytes: scan.EstimatedBytes,
+			})
 			continue
 		}
-		return AggregateShuffleCandidate{
-			JoinStageID:      j.ID,
-			AggregateStageID: aggStage.ID,
-			InputScanID:      scan.ID,
-			InputScanAlias:   scan.ScanAlias,
-			InputScanBytes:   scan.EstimatedBytes,
-			GroupByKeys:      append([]string(nil), aggStage.GroupByCols...),
-			JoinBuildKeys:    append([]string(nil), j.JoinRightKeys...),
-			JoinProbeKeys:    append([]string(nil), j.JoinLeftKeys...),
-		}, true
+		return AggregateShuffleDiag{
+			Candidate: AggregateShuffleCandidate{
+				JoinStageID:      j.ID,
+				AggregateStageID: aggStage.ID,
+				InputScanID:      scan.ID,
+				InputScanAlias:   scan.ScanAlias,
+				InputScanBytes:   scan.EstimatedBytes,
+				GroupByKeys:      append([]string(nil), aggStage.GroupByCols...),
+				JoinBuildKeys:    append([]string(nil), j.JoinRightKeys...),
+				JoinProbeKeys:    append([]string(nil), j.JoinLeftKeys...),
+			},
+			Reason: AggShuffleRejectNone,
+		}
 	}
-	return AggregateShuffleCandidate{}, false
+	return best
+}
+
+// String renders a reject reason as a short tag suitable for logs.
+func (r AggregateShuffleRejectReason) String() string {
+	switch r {
+	case AggShuffleRejectNone:
+		return "matched"
+	case AggShuffleRejectNoJoin:
+		return "no_join_stages"
+	case AggShuffleRejectBuildNotAggregate:
+		return "build_not_aggregate"
+	case AggShuffleRejectAggNotScanRooted:
+		return "aggregate_not_scan_rooted"
+	case AggShuffleRejectBelowThreshold:
+		return "below_threshold"
+	case AggShuffleRejectScanHasFilters:
+		return "scan_has_filters"
+	case AggShuffleRejectKeysNotCovered:
+		return "keys_not_covered"
+	default:
+		return "unknown"
+	}
 }
 
 // followToAggregate walks the dependency chain from startID through transparent

@@ -961,12 +961,12 @@ func TestDistributedTPCHQ17SF100Sample(t *testing.T) {
 	}
 
 	// Force the aggregate-shuffle pre-compute path on at this scale: the
-	// SF1-sample inner lineitem scan is ~1.2 GB, below the production 4 GB
-	// shuffleBuildThreshold. Lowering to 1 byte makes detection fire so we
-	// exercise the pre-compute + substitution end-to-end.
-	origShuffle := shuffleBuildThreshold
-	shuffleBuildThreshold = 1
-	t.Cleanup(func() { shuffleBuildThreshold = origShuffle })
+	// SF1-sample inner lineitem scan is ~1.2 GB, roughly equal to the
+	// production 1 GB aggregateShuffleThreshold. Lower to 1 byte to
+	// guarantee detection fires regardless of file size variance.
+	origAggShuffle := aggregateShuffleThreshold
+	aggregateShuffleThreshold = 1
+	t.Cleanup(func() { aggregateShuffleThreshold = origAggShuffle })
 
 	// 2 workers × 1 concurrent task each: one probe-split task per worker
 	// at a time. Without the pre-compute, Q17's inner aggregate scans full
@@ -1066,6 +1066,16 @@ func TestDistributedTPCHQ17AggregateShuffle(t *testing.T) {
 	physical.ProbeSplitMinBytes = 1
 	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
 
+	// Lower the aggregate-shuffle threshold to 1 byte so SF0.01's tiny
+	// inner lineitem scan (~3.7 MB) trips detection. Production uses 1 GB
+	// which would never fire at SF0.01.
+	origAggShuffle := aggregateShuffleThreshold
+	aggregateShuffleThreshold = 1
+	t.Cleanup(func() { aggregateShuffleThreshold = origAggShuffle })
+
+	// Also lower the base-table shuffle threshold so the routing precedence
+	// check (feat branch: aggregate-shuffle wins over base-table shuffle)
+	// still exercises both sides.
 	origShuffle := shuffleBuildThreshold
 	shuffleBuildThreshold = 1
 	t.Cleanup(func() { shuffleBuildThreshold = origShuffle })

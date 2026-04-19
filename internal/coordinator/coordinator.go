@@ -491,12 +491,15 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// savings Phase 1 would have provided.
 	var preComputedAggregates []physical.PreComputedAggregateMeta
 	if canProbeSplit && mergeInfo != nil {
-		if aggCand, ok := physical.PickAggregateShuffleCandidate(physStages, shuffleBuildThreshold); ok {
-			c.logger.Info("aggregate-shuffle candidate detected, dispatching pre-compute",
+		diag := physical.PickAggregateShuffleCandidateDiag(physStages, aggregateShuffleThreshold)
+		if diag.Reason == physical.AggShuffleRejectNone {
+			aggCand := diag.Candidate
+			c.logger.Info("aggregate-shuffle candidate matched, dispatching pre-compute",
 				"query", queryID,
 				"agg_stage", aggCand.AggregateStageID,
 				"input_scan", aggCand.InputScanAlias,
 				"input_bytes", aggCand.InputScanBytes,
+				"threshold", aggregateShuffleThreshold,
 				"group_by", aggCand.GroupByKeys)
 			cacheFiles, preErr := c.preComputeDerivedAggregate(ctx, queryID, aggCand, physStages)
 			if preErr != nil {
@@ -511,6 +514,17 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 					preComputedAggregates = append(preComputedAggregates, meta)
 				}
 			}
+		} else {
+			// Log the rejection reason + any observed candidate stats so we
+			// can tune thresholds / relax gates on real workloads without
+			// paying for another EC2 round-trip to find out.
+			c.logger.Info("aggregate-shuffle not applied",
+				"query", queryID,
+				"reason", diag.Reason.String(),
+				"observed_scan_bytes", diag.ObservedScanBytes,
+				"threshold", aggregateShuffleThreshold,
+				"nearest_join", diag.JoinStageID,
+				"nearest_scan_alias", diag.InputScanAlias)
 		}
 	}
 

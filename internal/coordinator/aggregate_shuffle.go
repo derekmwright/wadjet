@@ -42,6 +42,18 @@ func buildPreComputedAggregateMeta(
 	}, nil
 }
 
+// aggregateShuffleThreshold gates aggregate-shuffle detection independently
+// of shuffleBuildThreshold. The base-table shuffle threshold (4 GB) was
+// calibrated for SF100 where lineitem is ~37 GB; at SF10 compressed lineitem
+// is ~3.7 GB so that threshold never fired. But the broadcast-duplication
+// cost of a derived aggregate is real at SF10 too — each worker would
+// materialize the full decompressed aggregate output (~6 GB in memory for
+// Q17's 5M groups × row width) if we don't pre-compute it centrally.
+//
+// 1 GB makes SF10 lineitem trip it; SF100 easily crosses it. Tests lower to
+// 1 byte to force the path. Declared as var so tests can override.
+var aggregateShuffleThreshold int64 = 1 * 1024 * 1024 * 1024 // 1 GB
+
 // aggregateShuffleTimeout caps the pre-compute task's wall time. The
 // aggregate SQL scans its input table in full; at SF100 scale this can
 // easily take several minutes, so the timeout mirrors buildCacheTimeout.
