@@ -74,6 +74,16 @@ func PickAggregateShuffleCandidate(stages []Stage, thresholdBytes int64) (Aggreg
 		if scan.EstimatedBytes <= thresholdBytes {
 			continue
 		}
+		// Phase 1 parity with SubstitutePreComputedAggregates: reject scans
+		// with pushed filter predicates. The substitution pass rejects them
+		// (the worker's decorrelated plan and the pre-compute SQL would
+		// diverge on predicate matching), so firing the pre-compute just
+		// wastes a scan. Q20's inner aggregate has l_shipdate filters and
+		// falls here — handled in a later phase that carries predicate
+		// signatures through the substitution match.
+		if len(scan.FilterExprs) > 0 {
+			continue
+		}
 		// Alignment check: the aggregate's GROUP BY keys must cover the
 		// join's build-side keys so that partitioning by GROUP BY keys also
 		// partitions by the join key.

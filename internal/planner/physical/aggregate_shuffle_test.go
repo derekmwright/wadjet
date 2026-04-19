@@ -106,6 +106,30 @@ func TestBuildAggregateShuffleSQL_Q17(t *testing.T) {
 	}
 }
 
+// TestPickAggregateShuffleCandidate_Q20RejectedWithFilter verifies that Q20
+// (which has l_shipdate filters pushed to its inner scan) is rejected by
+// the Phase 1 detector. The substitution pass rejects scans with filters
+// because the pre-compute SQL currently can't carry predicate signatures
+// through the worker-side match. Rejecting early avoids wasting a
+// pre-compute dispatch that the worker would then decline to substitute.
+func TestPickAggregateShuffleCandidate_Q20RejectedWithFilter(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	sql := `SELECT s_name, s_address FROM supplier JOIN nation ON s_nationkey = n_nationkey
+	  WHERE n_name = 'CANADA' AND s_suppkey IN (
+	    SELECT ps_suppkey FROM partsupp WHERE ps_partkey IN (
+	      SELECT p_partkey FROM part WHERE p_name LIKE 'forest%'
+	    ) AND ps_availqty > (
+	      SELECT 0.5 * SUM(l_quantity) FROM lineitem
+	      WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey
+	        AND l_shipdate >= '1994-01-01' AND l_shipdate < '1995-01-01'
+	    )
+	  ) ORDER BY s_name`
+	stages := sqlToStages(t, cat, ctx, sql, 3)
+	if _, ok := PickAggregateShuffleCandidate(stages, 4*1024*1024*1024); ok {
+		t.Error("Q20: expected no candidate (inner scan has filter predicates); Phase 2 will handle this shape")
+	}
+}
+
 // TestPickAggregateShuffleCandidate_BelowThreshold verifies that when the
 // aggregate's input scan is below the threshold, no candidate is returned —
 // small derived aggregates stay on the current path and don't pay the extra
