@@ -405,22 +405,19 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 		h.resolveIndices(b)
 	}
 
-	// Track memory usage for spill pressure detection
-	var batchBytes int64
-	if h.Spill != nil {
-		batchBytes = EstimateBatchBytes(b)
-		h.Spill.TrackBatch(batchBytes)
-	}
-
-	// Spill input batch to disk if memory pressure is high.
-	// Rows are accumulated in h.spillBuffer and flushed to a new file only
-	// when the buffer crosses spillFileTargetBytes. This prevents pathological
-	// file-count explosion at SF100 (see TestHashAggregateSpillBatching).
-	// The spilled rows are re-processed during Finalize.
+	// Spill decision is based on current group state size, not input
+	// throughput. Input batches are transient — they're GC'd after Consume
+	// returns. Only the hash table + accumulator arrays persist, and
+	// reconcileGroupMemory (below) is what drives that tracking. An earlier
+	// design also called TrackBatch(batchBytes) on every input batch, which
+	// monotonically accumulated cumulative throughput into the tracker and
+	// forced spill-every-batch once inputBytes crossed the budget — even
+	// when the actual group state was a handful of rows (e.g. Q12 with 7
+	// shipmode groups). That inflated 250ms Q12 work to 37s of spill I/O.
 	if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) {
 		rows := b.ToRows()
 		h.spillBuffer = append(h.spillBuffer, rows...)
-		h.spillBufferBytes += batchBytes
+		h.spillBufferBytes += EstimateBatchBytes(b)
 		if h.spillBufferBytes >= spillFileTargetBytes {
 			if err := h.flushSpillBuffer(); err != nil {
 				return err
@@ -433,9 +430,8 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	h.consumeBatch(b)
 
 	// Track group state memory growth so spill triggers at the right time.
-	// consumeBatch grows hash tables and accumulator arrays, but TrackBatch
-	// above only saw input batch size. Without this, group states at SF100
-	// can grow to 20+ GB untracked while ShouldSpill sees only batch cost.
+	// consumeBatch grows hash tables and accumulator arrays; this is the
+	// sole signal for HashAggregate spill pressure.
 	h.reconcileGroupMemory()
 
 	return nil
@@ -551,15 +547,24 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 	}
 
-	// Pre-sizing hint: use InputRowHint to estimate initial hash table capacity.
-	// Use inputRows/8 capped at 16M — balances memory usage against growth cost.
-	// At SF100, high-cardinality GROUP BY (Q17: ~20M distinct l_partkey values)
-	// needs a large initial size to avoid expensive rehash doublings.
+	// Pre-sizing hint: initial hash-table capacity. InputRowHint reflects the
+	// aggregate's INPUT row count (derived from scan estimates), which is a
+	// poor proxy for GROUP CARDINALITY — the actual thing the hash table
+	// needs to hold. Q12 has 7 groups but its InputRowHint is 50M+ rows
+	// from the orders+lineitem scans; sizing the hash to inputRows/8 would
+	// preAlloc ~750MB of groupState for 7 slots (confirmed on SF1-sample
+	// distributed: Q12 group pool = 750MB).
+	//
+	// Until the planner has NDV stats, cap the initial allocation at 64K.
+	// Organic doubling handles high-cardinality cases (Q17 ~20M groups) with
+	// ~2x amortized memcopy overhead — acceptable compared to over-allocating
+	// 300–1900 MB for low-cardinality queries.
+	const htInitCap = 64 * 1024
 	htInitSize := 4096
 	if h.InputRowHint > int64(htInitSize)*8 {
 		est := int(h.InputRowHint / 8)
-		if est > 16*1024*1024 {
-			est = 16 * 1024 * 1024
+		if est > htInitCap {
+			est = htInitCap
 		}
 		htInitSize = est
 	}
@@ -2776,13 +2781,19 @@ func vecToFloat64(v *batch.Vector, row int) float64 {
 // initFlatAccums initializes SoA accumulator arrays for the intGroupKey fast path.
 // Called once from resolveIndices when useIntGroupKey is true.
 func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
+	// Flat accumulator arrays: same sizing principle as the group-state pool
+	// above. InputRowHint overshoots for low-cardinality GROUP BY (Q12: 7
+	// groups but 50M-row InputRowHint would preAlloc 2M × 8B × nAggs here).
+	// Cap at 64K slots; ensureCapacity doubles organically for high-cardinality
+	// aggregates.
 	nAggs := len(h.Aggs)
 	h.intFlatAccs = make([]flatAccumArrays, nAggs)
+	const flatInitCap = 64 * 1024
 	initCap := 4096
 	if h.InputRowHint > int64(initCap)*8 {
 		est := int(h.InputRowHint / 8)
-		if est > 2*1024*1024 {
-			est = 2 * 1024 * 1024
+		if est > flatInitCap {
+			est = flatInitCap
 		}
 		initCap = est
 	}

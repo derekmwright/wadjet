@@ -688,6 +688,274 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 	}
 }
 
+// sf100SampleCluster builds a 2-worker distributed cluster loaded with the
+// local /tmp/sf100-sample parquet files. Extracted so Q12 and Q17 repros can
+// each get a fresh process memory-wise (Q17's decorrelated subquery triggers
+// a lineitem-wide build cache that dwarfs Q12's state — running them in the
+// same process OOMs a dev box).
+func sf100SampleCluster(t *testing.T, memoryBudget int64) (context.Context, *Coordinator) {
+	return sf100SampleClusterN(t, memoryBudget, 2, 2)
+}
+
+// sf100SampleClusterN lets the caller pick worker count and max-concurrent-tasks
+// per worker — used to isolate memory-pressure issues.
+func sf100SampleClusterN(t *testing.T, memoryBudget int64, wantWorkers, maxConcurrent int) (context.Context, *Coordinator) {
+	t.Helper()
+	const sampleDir = "/tmp/sf100-sample"
+	if _, err := os.Stat(sampleDir); os.IsNotExist(err) {
+		t.Skipf("SF100 sample dir %s missing — see TestDistributedTPCHBuildCacheSF100Sample for setup", sampleDir)
+	}
+
+	origMinBytes := physical.ProbeSplitMinBytes
+	physical.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+
+	origRev := physical.ReverseBloomInnerThreshold
+	physical.ReverseBloomInnerThreshold = 1
+	t.Cleanup(func() { physical.ReverseBloomInnerThreshold = origRev })
+
+	origGroupSize := buildCacheGroupSize
+	buildCacheGroupSize = 1
+	t.Cleanup(func() { buildCacheGroupSize = origGroupSize })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	t.Cleanup(cancel)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	natsCfg := distributed.DefaultNATSConfig()
+	natsCfg.Port = -1
+	natsCfg.StoreDir = t.TempDir()
+	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
+	if err != nil {
+		t.Fatalf("NATS: %v", err)
+	}
+	t.Cleanup(embeddedNATS.Shutdown)
+
+	nc, err := distributed.ConnectInProcess(embeddedNATS.Server())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { nc.Close() })
+
+	js, err := distributed.NewJetStream(nc)
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if err := distributed.SetupStreams(ctx, js); err != nil {
+		t.Fatalf("streams: %v", err)
+	}
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("kv: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("catalog: %v", err)
+	}
+
+	// Match the Q05 test: probe tables get multiple files so probe-split fires
+	// (>= workerCount*2 files). Q12 probes lineitem; Q17 probes lineitem too.
+	tableFiles := map[string][]string{
+		"region":   {"region-0_0.parquet"},
+		"nation":   {"nation-0_0.parquet"},
+		"supplier": {"supplier-0_0.parquet"},
+		"customer": {"customer-0_0.parquet"},
+		"part":     {"part-0_0.parquet"},
+		"partsupp": {"partsupp-0_0.parquet"},
+		"orders":   {"orders-0_0.parquet"},
+		"lineitem": {"lineitem-0_0.parquet", "lineitem-0_1.parquet", "lineitem-0_2.parquet", "lineitem-0_3.parquet"},
+	}
+
+	for _, tbl := range []string{"region", "nation", "supplier", "customer", "part", "partsupp", "orders", "lineitem"} {
+		files := tableFiles[tbl]
+		var schema parquet.Schema
+		var entries []catalog.FileEntry
+		for i, fname := range files {
+			localPath := fmt.Sprintf("%s/%s", sampleDir, fname)
+			fi, err := os.Stat(localPath)
+			if err != nil {
+				t.Fatalf("stat %s: %v", localPath, err)
+			}
+			f, err := os.Open(localPath)
+			if err != nil {
+				t.Fatalf("open %s: %v", localPath, err)
+			}
+			pr, err := parquet.NewReader(f, fi.Size())
+			if err != nil {
+				f.Close()
+				t.Fatalf("parquet %s: %v", localPath, err)
+			}
+			if i == 0 {
+				schema = pr.Schema()
+			}
+			numRows := pr.NumRows()
+			f.Close()
+			raw, err := os.ReadFile(localPath)
+			if err != nil {
+				t.Fatalf("read %s: %v", localPath, err)
+			}
+			storePath := fmt.Sprintf("tables/%s/%s", tbl, fname)
+			if _, err := store.Put(ctx, "test", storePath, bytes.NewReader(raw), int64(len(raw)), "application/octet-stream"); err != nil {
+				t.Fatalf("put %s: %v", localPath, err)
+			}
+			entries = append(entries, catalog.FileEntry{
+				Path:      storePath,
+				SizeBytes: fi.Size(),
+				NumRows:   numRows,
+				CreatedAt: time.Now(),
+			})
+		}
+		if err := cat.CreateTable(ctx, tbl, schema, nil); err != nil {
+			t.Fatalf("create %s: %v", tbl, err)
+		}
+		if err := cat.AddFiles(ctx, tbl, nil, "tables/"+tbl+"/", entries); err != nil {
+			t.Fatalf("addfiles %s: %v", tbl, err)
+		}
+		var totalRows int64
+		var totalBytes int64
+		for _, e := range entries {
+			totalRows += e.NumRows
+			totalBytes += e.SizeBytes
+		}
+		t.Logf("loaded %s: %d rows %d bytes %d files", tbl, totalRows, totalBytes, len(entries))
+	}
+
+	coord := New(Config{
+		NATSUrl:      embeddedNATS.ClientURL(),
+		ResultBucket: "test",
+	}, cat, nc, js, logger)
+	// Leave BuildCacheThreshold at production default (2 GB). Orders at
+	// SF1-sample is 273 MB, well below — this matches production SF10, where
+	// orders (~1.5 GB) also stays below the default threshold, so the cache
+	// path does NOT fire. If we want to test the cache path explicitly, a
+	// separate test should force it.
+
+	for i := 0; i < wantWorkers; i++ {
+		w := worker.New(worker.Config{
+			NATSUrl:       embeddedNATS.ClientURL(),
+			MaxConcurrent: maxConcurrent,
+			CacheBytes:    256 * 1024 * 1024,
+			SpillDir:      t.TempDir(),
+			MemoryBudget:  memoryBudget,
+		}, store, nc, js, logger)
+		if err := w.Start(ctx); err != nil {
+			t.Fatalf("worker %d: %v", i, err)
+		}
+		t.Cleanup(w.Stop)
+		time.Sleep(50 * time.Millisecond)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if coord.workers.Count() >= wantWorkers {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := coord.workers.Count(); got < wantWorkers {
+		t.Fatalf("workers failed to register (got %d want %d)", got, wantWorkers)
+	}
+	return ctx, coord
+}
+
+// runSF100SampleQuery runs one TPC-H query against the sample cluster and
+// logs wall time + up to 10 result rows. Used by the Q12/Q17 local repro
+// tests to iterate on the distributed perf regression.
+//
+// Set WADJET_CPU_PROFILE=<path> to capture a CPU profile over just the
+// ExecuteSQL call (coordinator + in-process workers all run in the test
+// process, so one profile covers everything).
+func runSF100SampleQuery(t *testing.T, ctx context.Context, coord *Coordinator, qNum int) {
+	t.Helper()
+	q := tpch.TPCHQueries[qNum]
+	// Periodic memory log so OOM kills leave a breadcrumb trail — tells us
+	// which phase blew up even when the test process dies before completion.
+	// Also drop a heap profile every tick when WADJET_HEAP_PROFILE=<dir>.
+	stopMem := make(chan struct{})
+	heapDir := os.Getenv("WADJET_HEAP_PROFILE")
+	go func() {
+		tk := time.NewTicker(1 * time.Second)
+		defer tk.Stop()
+		var ms runtime.MemStats
+		i := 0
+		for {
+			select {
+			case <-stopMem:
+				return
+			case <-tk.C:
+				i++
+				runtime.ReadMemStats(&ms)
+				t.Logf("[heap] alloc=%dMB sys=%dMB inUse=%dMB",
+					ms.HeapAlloc/(1<<20), ms.Sys/(1<<20), ms.HeapInuse/(1<<20))
+				if heapDir != "" {
+					path := fmt.Sprintf("%s/q%02d-heap-%03d-%dMB.pprof", heapDir, qNum, i, ms.HeapAlloc/(1<<20))
+					if f, err := os.Create(path); err == nil {
+						_ = pprof.WriteHeapProfile(f)
+						_ = f.Close()
+					}
+				}
+			}
+		}
+	}()
+	defer close(stopMem)
+	if path := os.Getenv("WADJET_CPU_PROFILE"); path != "" {
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatalf("create cpu profile: %v", err)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			t.Fatalf("start cpu profile: %v", err)
+		}
+		defer pprof.StopCPUProfile()
+		t.Logf("CPU profile → %s", path)
+	}
+	start := time.Now()
+	result, err := coord.ExecuteSQL(ctx, q.SQL)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Q%02d ExecuteSQL: %v (elapsed %s)", qNum, err, elapsed)
+	}
+	if result.Error != "" {
+		t.Fatalf("Q%02d error: %s (elapsed %s)", qNum, result.Error, elapsed)
+	}
+	rows := result.Rows()
+	t.Logf("Q%02d (%s): %d rows in %s", qNum, q.Name, len(rows), elapsed)
+	for i, r := range rows {
+		if i >= 10 {
+			t.Logf("  ... (%d more rows)", len(rows)-10)
+			break
+		}
+		t.Logf("  row %d: %v", i, r)
+	}
+}
+
+// TestDistributedTPCHQ12SF100Sample is the local repro for the Q12 SF10
+// distributed perf regression (project_q12_q17_regression_2026-04-18).
+// Historical baseline: ~2s. Current: ~60s.
+func TestDistributedTPCHQ12SF100Sample(t *testing.T) {
+	ctx, coord := sf100SampleCluster(t, 2*1024*1024*1024)
+	runSF100SampleQuery(t, ctx, coord, 12)
+}
+
+// TestDistributedTPCHQ17SF100Sample is the local repro for the Q17 SF10
+// distributed perf regression. Q17's correlated scalar subquery decorrelates
+// into a per-worker GROUP BY l_partkey over the entire lineitem partition
+// (~2M groups) on top of a 5M-row part hash join — so the worker budget
+// has to cover both.
+func TestDistributedTPCHQ17SF100Sample(t *testing.T) {
+	// 2 workers × 1 concurrent task each: one probe-split task per worker
+	// at a time. Q17's inner aggregate scans full lineitem per task, so
+	// concurrent tasks stack up memory quickly.
+	ctx, coord := sf100SampleClusterN(t, 2*1024*1024*1024, 2, 1)
+	runSF100SampleQuery(t, ctx, coord, 17)
+}
+
 // TestDistributedTPCHBuildCachePolarsQ05 is the local repro for the SF100
 // Q05 0-rows bug. It uses Polars-style schemas (INT64 keys, DATE dates) so
 // the streaming source / filter / hash join paths exercise the same types as
