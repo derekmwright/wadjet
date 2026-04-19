@@ -152,6 +152,12 @@ func setupTPCHDistributedAtScale(t *testing.T, sf tpch.ScaleFactor) (context.Con
 			NATSUrl:       embeddedNATS.ClientURL(),
 			MaxConcurrent: 4,
 			CacheBytes:    64 * 1024 * 1024,
+			// SpillDir gates executeBuildCachePreScan — when empty, the
+			// executor skips the streaming-sink path and the cache is
+			// produced via the default result writer (which inlines or
+			// emits non-WSHF data). Production always sets this; set here
+			// too so tests exercise the same code path.
+			SpillDir: t.TempDir(),
 		}, store, nc, js, logger)
 		if err := w.Start(ctx); err != nil {
 			t.Fatalf("starting worker %d: %v", i, err)
@@ -310,6 +316,11 @@ func setupTPCHDistributed(t *testing.T) (context.Context, *Coordinator) {
 			NATSUrl:       embeddedNATS.ClientURL(),
 			MaxConcurrent: 4,
 			CacheBytes:    64 * 1024 * 1024,
+			// SpillDir gates executeBuildCachePreScan — when empty, the
+			// executor skips the streaming-sink path and cache pre-scans
+			// produce non-WSHF data. Production always sets this; set in
+			// tests too so cache pre-scans exercise the production path.
+			SpillDir: t.TempDir(),
 		}, store, nc, js, logger)
 		if err := w.Start(ctx); err != nil {
 			t.Fatalf("starting worker %d: %v", i, err)
