@@ -326,10 +326,8 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 				delete(precompAliasFiles, alias)
 			}
 		}
-		if len(used) > 0 {
-			e.logger.Debug("substituted pre-computed aggregates",
-				"count", len(used), "aliases", used)
-		}
+		e.logger.Info("pre-computed aggregate substitution",
+			"sig_count", len(sigs), "matched", len(used), "unmatched_aliases_dropped", len(sigs)-len(used))
 	}
 
 	// Build standalone physical plan (single pipeline, no stages).

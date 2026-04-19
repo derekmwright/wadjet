@@ -514,6 +514,16 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		}
 	}
 
+	// When the aggregate-shuffle pre-compute has already handled the build
+	// that PickShuffleCandidate flagged, suppress the base-table shuffle
+	// branch — the derived aggregate's source isn't a true broadcast build;
+	// it's the input to a pre-computed intermediate, and the shuffle-
+	// distributed path would try to partition it by the OUTER join's keys
+	// which aren't present on the inner scan's columns.
+	if len(preComputedAggregates) > 0 {
+		shuffleApplicable = false
+	}
+
 	switch {
 	case shuffleApplicable && mergeInfo != nil:
 		workerCount := c.workers.Count()

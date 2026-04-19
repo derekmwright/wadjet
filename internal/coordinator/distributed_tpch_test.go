@@ -1046,6 +1046,50 @@ func TestDistributedTPCHBuildCachePolarsQ05(t *testing.T) {
 	}
 }
 
+// TestDistributedTPCHQ17AggregateShuffle forces the aggregate-shuffle
+// pre-compute path on Q17 at SF0.01 by lowering shuffleBuildThreshold.
+// The inner lineitem scan at SF0.01 is ~30 KB — far below the production
+// 4 GB gate — so without the override the new path never fires. This test
+// proves the full chain works end-to-end:
+//
+//   1. PickAggregateShuffleCandidate fires on Q17's decorrelated plan.
+//   2. Coordinator dispatches preComputeDerivedAggregate, which runs the
+//      reconstructed GROUP BY l_partkey SQL on a worker and caches to S3.
+//   3. Probe-split tasks carry the signatures; worker substitutes the
+//      matching Aggregate subtree with a streaming source of the cache.
+//   4. Q17 returns its 1 expected row with the correct avg_yearly value.
+//
+// If this test passes but the SF1-sample / SF10 run doesn't, the gap is
+// scale-specific (e.g. pre-compute task memory) not structural.
+func TestDistributedTPCHQ17AggregateShuffle(t *testing.T) {
+	origMinBytes := physical.ProbeSplitMinBytes
+	physical.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+
+	origShuffle := shuffleBuildThreshold
+	shuffleBuildThreshold = 1
+	t.Cleanup(func() { shuffleBuildThreshold = origShuffle })
+
+	ctx, coord := setupTPCHDistributed(t)
+
+	q := tpch.TPCHQueries[17]
+	result, err := coord.ExecuteSQL(ctx, q.SQL)
+	if err != nil {
+		t.Fatalf("Q17 ExecuteSQL failed: %v", err)
+	}
+	if result.Error != "" {
+		t.Fatalf("Q17 error: %s", result.Error)
+	}
+	rows := result.Rows()
+	t.Logf("Q17 (aggregate-shuffle path forced): %d rows", len(rows))
+	for i, r := range rows {
+		t.Logf("  row %d: %v", i, r)
+	}
+	if len(rows) != 1 {
+		t.Errorf("Q17: got %d rows, want 1", len(rows))
+	}
+}
+
 // TestDistributedTPCHBuildCachePartialOrders is a regression test for the
 // SF100 Q05 0-rows bug. At SF100 only the orders table exceeds the default
 // 2 GB build-cache threshold, so the cache fires for orders but not for the
