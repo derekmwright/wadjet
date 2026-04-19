@@ -949,9 +949,28 @@ func TestDistributedTPCHQ12SF100Sample(t *testing.T) {
 // (~2M groups) on top of a 5M-row part hash join — so the worker budget
 // has to cover both.
 func TestDistributedTPCHQ17SF100Sample(t *testing.T) {
+	// Dev-box OOM guard: this test loads 40M lineitem rows into an in-
+	// process MemStore, runs an aggregate pre-compute that materializes
+	// 5M groups on ONE worker, and a probe-split path over 2 workers.
+	// Peak test-process heap is 12-17 GB; WSL / laptop dev environments
+	// typically kill before completion. Unlike TestDistributedTPCHQ12SF100Sample,
+	// Q17 has no smaller in-memory alternative because the inner aggregate
+	// spans full lineitem. Run on a beefy workstation or EC2 gate.
+	if os.Getenv("WADJET_HEAVY_TESTS") != "1" {
+		t.Skip("skipping Q17 SF100-sample repro — set WADJET_HEAVY_TESTS=1 on a host with ≥24 GB RAM")
+	}
+
+	// Force the aggregate-shuffle pre-compute path on at this scale: the
+	// SF1-sample inner lineitem scan is ~1.2 GB, below the production 4 GB
+	// shuffleBuildThreshold. Lowering to 1 byte makes detection fire so we
+	// exercise the pre-compute + substitution end-to-end.
+	origShuffle := shuffleBuildThreshold
+	shuffleBuildThreshold = 1
+	t.Cleanup(func() { shuffleBuildThreshold = origShuffle })
+
 	// 2 workers × 1 concurrent task each: one probe-split task per worker
-	// at a time. Q17's inner aggregate scans full lineitem per task, so
-	// concurrent tasks stack up memory quickly.
+	// at a time. Without the pre-compute, Q17's inner aggregate scans full
+	// lineitem per task and OOMs at ~17 GB total heap.
 	ctx, coord := sf100SampleClusterN(t, 2*1024*1024*1024, 2, 1)
 	runSF100SampleQuery(t, ctx, coord, 17)
 }

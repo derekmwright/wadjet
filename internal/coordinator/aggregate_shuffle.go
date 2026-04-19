@@ -13,6 +13,35 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// buildPreComputedAggregateMeta converts a candidate + cache paths into the
+// metadata shape that travels on physical.Stage and later becomes the
+// distributed.PreComputedAggregate wire message. Extracted so the
+// coordinator-routing and test paths share one construction site.
+func buildPreComputedAggregateMeta(
+	cand physical.AggregateShuffleCandidate,
+	stages []physical.Stage,
+	cacheFiles []string,
+) (physical.PreComputedAggregateMeta, error) {
+	byID := make(map[string]physical.Stage, len(stages))
+	for _, s := range stages {
+		byID[s.ID] = s
+	}
+	agg, ok := byID[cand.AggregateStageID]
+	if !ok {
+		return physical.PreComputedAggregateMeta{}, fmt.Errorf("aggregate stage %q not found", cand.AggregateStageID)
+	}
+	scan, ok := byID[cand.InputScanID]
+	if !ok {
+		return physical.PreComputedAggregateMeta{}, fmt.Errorf("input scan %q not found", cand.InputScanID)
+	}
+	return physical.PreComputedAggregateMeta{
+		InputTable:  scan.TableName,
+		GroupByCols: append([]string(nil), agg.GroupByCols...),
+		AggSpecs:    append([]physical.AggSpec(nil), agg.AggSpecs...),
+		CacheFiles:  append([]string(nil), cacheFiles...),
+	}, nil
+}
+
 // aggregateShuffleTimeout caps the pre-compute task's wall time. The
 // aggregate SQL scans its input table in full; at SF100 scale this can
 // easily take several minutes, so the timeout mirrors buildCacheTimeout.

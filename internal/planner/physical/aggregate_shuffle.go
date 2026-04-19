@@ -5,6 +5,17 @@ import (
 	"strings"
 )
 
+// PreComputedAggregateMeta travels on physical.Stage to tell task creation
+// which cache files back a derived aggregate subtree the worker should
+// substitute. Distinct from distributed.PreComputedAggregate (the wire
+// type) — the coordinator converts between them when assembling tasks.
+type PreComputedAggregateMeta struct {
+	InputTable  string
+	GroupByCols []string
+	AggSpecs    []AggSpec
+	CacheFiles  []string
+}
+
 // AggregateShuffleCandidate describes a join in the plan whose build side is a
 // derived aggregate subplan (e.g. Q17's decorrelated scalar subquery aggregate
 // over full lineitem). When the aggregate's input scan is large enough that
