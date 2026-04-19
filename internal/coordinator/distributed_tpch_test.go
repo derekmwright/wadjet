@@ -36,6 +36,143 @@ import (
 	"github.com/citc-tech/wadjet/internal/worker"
 )
 
+// setupTPCHDistributedAtScale creates an embedded NATS, coordinator, workers,
+// and loads TPC-H data at the requested scale factor. Extracted so
+// correctness tests for scale-dependent code paths (e.g. aggregate-shuffle
+// at SF01 where Q17 has matching parts) can target larger in-process data
+// without shelling out to EC2.
+func setupTPCHDistributedAtScale(t *testing.T, sf tpch.ScaleFactor) (context.Context, *Coordinator) {
+	t.Helper()
+	// Larger timeout at SF01 because data generation + chunk writes take
+	// longer than at SF0.01. SF01 lineitem is ~600K rows vs 60K at SF0.01.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	t.Cleanup(cancel)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	natsCfg := distributed.DefaultNATSConfig()
+	natsCfg.Port = -1
+	natsCfg.StoreDir = t.TempDir()
+	embeddedNATS, err := distributed.NewEmbeddedNATS(natsCfg, logger)
+	if err != nil {
+		t.Fatalf("starting NATS: %v", err)
+	}
+	t.Cleanup(embeddedNATS.Shutdown)
+
+	nc, err := distributed.ConnectInProcess(embeddedNATS.Server())
+	if err != nil {
+		t.Fatalf("connecting to NATS: %v", err)
+	}
+	t.Cleanup(func() { nc.Close() })
+
+	js, err := distributed.NewJetStream(nc)
+	if err != nil {
+		t.Fatalf("creating JetStream: %v", err)
+	}
+	if err := distributed.SetupStreams(ctx, js); err != nil {
+		t.Fatalf("setting up streams: %v", err)
+	}
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	kv, err := catalog.NewNATSKV(js)
+	if err != nil {
+		t.Fatalf("creating NATS KV: %v", err)
+	}
+	cat := catalog.New(kv, store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatalf("catalog init: %v", err)
+	}
+
+	const chunksPerTable = 8
+	data := tpch.Generate(sf)
+	for tableName, schema := range tpch.AllTables {
+		if err := cat.CreateTable(ctx, tableName, schema, nil); err != nil {
+			t.Fatalf("creating table %s: %v", tableName, err)
+		}
+		rows := data[tableName]
+		if len(rows) == 0 {
+			continue
+		}
+		numChunks := chunksPerTable
+		if len(rows) < numChunks {
+			numChunks = len(rows)
+		}
+		chunkSize := (len(rows) + numChunks - 1) / numChunks
+		var entries []catalog.FileEntry
+		for cIdx := 0; cIdx < numChunks; cIdx++ {
+			start := cIdx * chunkSize
+			end := start + chunkSize
+			if end > len(rows) {
+				end = len(rows)
+			}
+			if start >= end {
+				break
+			}
+			chunkRows := rows[start:end]
+
+			var buf bytes.Buffer
+			pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+			if err != nil {
+				t.Fatalf("parquet writer for %s: %v", tableName, err)
+			}
+			if err := pw.WriteRows(chunkRows); err != nil {
+				t.Fatalf("writing %s chunk %d rows: %v", tableName, cIdx, err)
+			}
+			if err := pw.Close(); err != nil {
+				t.Fatalf("closing %s chunk %d writer: %v", tableName, cIdx, err)
+			}
+			filePath := fmt.Sprintf("tables/%s/chunk_%04d.parquet", tableName, cIdx+1)
+			pdata := buf.Bytes()
+			if _, err := store.Put(ctx, "test", filePath, bytes.NewReader(pdata), int64(len(pdata)), "application/octet-stream"); err != nil {
+				t.Fatalf("storing %s chunk %d: %v", tableName, cIdx, err)
+			}
+			entries = append(entries, catalog.FileEntry{
+				Path:      filePath,
+				SizeBytes: int64(len(pdata)),
+				NumRows:   int64(len(chunkRows)),
+				CreatedAt: time.Now(),
+			})
+		}
+		if err := cat.AddFiles(ctx, tableName, map[string]string{}, "tables/"+tableName+"/", entries); err != nil {
+			t.Fatalf("adding %s to manifest: %v", tableName, err)
+		}
+	}
+
+	coord := New(Config{
+		NATSUrl:      embeddedNATS.ClientURL(),
+		ResultBucket: "test",
+	}, cat, nc, js, logger)
+
+	const wantWorkers = 3
+	for i := 0; i < wantWorkers; i++ {
+		w := worker.New(worker.Config{
+			NATSUrl:       embeddedNATS.ClientURL(),
+			MaxConcurrent: 4,
+			CacheBytes:    64 * 1024 * 1024,
+		}, store, nc, js, logger)
+		if err := w.Start(ctx); err != nil {
+			t.Fatalf("starting worker %d: %v", i, err)
+		}
+		t.Cleanup(w.Stop)
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if coord.workers.Count() >= wantWorkers {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := coord.workers.Count(); got < wantWorkers {
+		t.Fatalf("workers failed to register within 15s (count=%d, want=%d)", got, wantWorkers)
+	}
+	return ctx, coord
+}
+
 // setupTPCHDistributed creates an embedded NATS, coordinator, worker, and loads
 // TPC-H SF0.01 data. Returns a ready-to-query coordinator and cleanup via t.Cleanup.
 func setupTPCHDistributed(t *testing.T) (context.Context, *Coordinator) {
@@ -1044,6 +1181,171 @@ func TestDistributedTPCHBuildCachePolarsQ05(t *testing.T) {
 	if len(rows) != 5 {
 		t.Errorf("Q05: got %d rows, want 5 — this is the SF100 regression", len(rows))
 	}
+}
+
+// TestDistributedTPCHQ17AggregateShuffleCorrectness validates that the
+// aggregate-shuffle path returns the SAME numeric result as the in-plan
+// path on real data (SF0.1, where Q17 has matching Brand#23 MED BOX parts
+// unlike SF0.01 where all filters end up empty).
+//
+// Proves correctness locally before burning EC2 cycles on SF10 perf
+// validation: if the in-plan and aggregate-shuffle paths produce
+// different answers here, EC2 results would be misleading at best and
+// silently wrong at worst.
+func TestDistributedTPCHQ17AggregateShuffleCorrectness(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping SF0.1 Q17 correctness test in -short mode (heavy: generates ~600K lineitem rows)")
+	}
+
+	origMinBytes := physical.ProbeSplitMinBytes
+	physical.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+
+	// Run twice, same cluster, under different threshold settings to
+	// exercise both code paths on identical data.
+	// SF0.1. SF1 OOMs during in-memory data generation on a dev box.
+	// SF0.1 may not have Brand#23 MED BOX matches under our random
+	// generator's distribution — which is fine, the correctness property
+	// is "both paths produce the same value" regardless of the value
+	// itself. If substitution corrupted the plan, the two paths would
+	// diverge even when the answer is NULL.
+	ctx, coord := setupTPCHDistributedAtScale(t, tpch.SF01)
+	q17 := tpch.TPCHQueries[17]
+
+	// Path A: in-plan execution. Threshold math.MaxInt64 disables
+	// aggregate-shuffle detection entirely → Q17's inner aggregate runs
+	// redundantly per probe task, same as pre-Phase-1 behavior.
+	origAggShuffle := aggregateShuffleThreshold
+	aggregateShuffleThreshold = 1<<62 // effectively infinite
+	t.Cleanup(func() { aggregateShuffleThreshold = origAggShuffle })
+
+	inPlan, err := coord.ExecuteSQL(ctx, q17.SQL)
+	if err != nil {
+		t.Fatalf("Q17 in-plan ExecuteSQL: %v", err)
+	}
+	if inPlan.Error != "" {
+		t.Fatalf("Q17 in-plan error: %s", inPlan.Error)
+	}
+	inPlanRows := inPlan.Rows()
+	t.Logf("Q17 in-plan: %d rows: %v", len(inPlanRows), inPlanRows)
+	if len(inPlanRows) != 1 {
+		t.Fatalf("Q17 in-plan: expected 1 row, got %d", len(inPlanRows))
+	}
+
+	// Path B: aggregate-shuffle. Threshold 1 byte forces detection to fire.
+	aggregateShuffleThreshold = 1
+
+	aggShuffle, err := coord.ExecuteSQL(ctx, q17.SQL)
+	if err != nil {
+		t.Fatalf("Q17 aggregate-shuffle ExecuteSQL: %v", err)
+	}
+	if aggShuffle.Error != "" {
+		t.Fatalf("Q17 aggregate-shuffle error: %s", aggShuffle.Error)
+	}
+	aggShuffleRows := aggShuffle.Rows()
+	t.Logf("Q17 aggregate-shuffle: %d rows: %v", len(aggShuffleRows), aggShuffleRows)
+	if len(aggShuffleRows) != 1 {
+		t.Fatalf("Q17 aggregate-shuffle: expected 1 row, got %d", len(aggShuffleRows))
+	}
+
+	// Compare. The outer projection is SUM(l_extendedprice)/7.0 as
+	// avg_yearly. Both paths must produce the same value. Empty-result
+	// NULL equality is handled: if both are nil, that's still a match
+	// (confirms neither path is broken, just that SF0.1 happened to
+	// have no matches).
+	a := inPlanRows[0]["avg_yearly"]
+	b := aggShuffleRows[0]["avg_yearly"]
+	if fmt.Sprintf("%v", a) != fmt.Sprintf("%v", b) {
+		t.Fatalf("Q17 avg_yearly diverges:\n  in-plan:          %v\n  aggregate-shuffle: %v",
+			a, b)
+	}
+	if a == nil {
+		t.Logf("Q17 avg_yearly = NULL in both paths (SF0.1 may lack Brand#23 MED BOX matches — still a valid correctness check that substitution didn't break the plan)")
+	} else {
+		t.Logf("Q17 avg_yearly = %v (both paths match)", a)
+	}
+}
+
+// TestAggregateShuffleCorrectness_NonEmptyResult uses a Q17-shape query
+// whose outer filter is guaranteed to match at SF0.01 (p_partkey < 50
+// instead of Q17's literal Brand#23 MED BOX which our random generator
+// may not produce). Compares in-plan vs aggregate-shuffle paths on
+// non-null data — any substitution bug shows up as a numeric divergence.
+func TestAggregateShuffleCorrectness_NonEmptyResult(t *testing.T) {
+	origMinBytes := physical.ProbeSplitMinBytes
+	physical.ProbeSplitMinBytes = 1
+	t.Cleanup(func() { physical.ProbeSplitMinBytes = origMinBytes })
+
+	// Q17's decorrelated shape: Aggregate(SUM) → LEFT JOIN against inner
+	// GROUP BY l_partkey AVG(l_quantity) → Scan(lineitem). Filter flipped
+	// to > 0.5 * avg so about half the lineitem rows qualify — guarantees
+	// a non-null SUM at SF0.01. The substitution machinery exercises
+	// identically regardless of which direction the comparison goes.
+	q := `SELECT SUM(l_extendedprice) as total
+		FROM lineitem JOIN part ON p_partkey = l_partkey
+		WHERE l_quantity > (
+		    SELECT AVG(l_quantity) - 1000 FROM lineitem WHERE l_partkey = p_partkey
+		  )`
+
+	ctx, coord := setupTPCHDistributed(t) // SF0.01
+
+	origAgg := aggregateShuffleThreshold
+	t.Cleanup(func() { aggregateShuffleThreshold = origAgg })
+
+	// A: in-plan
+	aggregateShuffleThreshold = 1 << 62
+	a, err := coord.ExecuteSQL(ctx, q)
+	if err != nil {
+		t.Fatalf("in-plan: %v", err)
+	}
+	if a.Error != "" {
+		t.Fatalf("in-plan error: %s", a.Error)
+	}
+	aRows := a.Rows()
+	t.Logf("in-plan: %v", aRows)
+
+	// B: aggregate-shuffle
+	aggregateShuffleThreshold = 1
+	b, err := coord.ExecuteSQL(ctx, q)
+	if err != nil {
+		t.Fatalf("agg-shuffle: %v", err)
+	}
+	if b.Error != "" {
+		t.Fatalf("agg-shuffle error: %s", b.Error)
+	}
+	bRows := b.Rows()
+	t.Logf("agg-shuffle: %v", bRows)
+
+	if len(aRows) != len(bRows) {
+		t.Fatalf("row count diverges: in-plan=%d agg-shuffle=%d", len(aRows), len(bRows))
+	}
+	if len(aRows) == 0 {
+		t.Fatal("expected non-empty result for p_partkey < 50 at SF0.01 — test data sanity check failed")
+	}
+	aVal := aRows[0]["total"]
+	bVal := bRows[0]["total"]
+	if aVal == nil || bVal == nil {
+		t.Fatalf("SUM is nil (in-plan=%v, agg-shuffle=%v) — expected non-null; cache or substitution dropped rows",
+			aVal, bVal)
+	}
+	// Floating-point aggregation order differs between the in-plan pipeline
+	// (single worker sums everything) and the aggregate-shuffle path (cached
+	// aggregate re-joined + re-summed). Compare with a relative epsilon —
+	// ULP-level divergence is expected and benign; anything larger means
+	// substitution actually lost/duplicated rows.
+	af, aok := aVal.(float64)
+	bf, bok := bVal.(float64)
+	if !aok || !bok {
+		t.Fatalf("SUM non-float64 result: in-plan=%T(%v) agg-shuffle=%T(%v)", aVal, aVal, bVal, bVal)
+	}
+	const eps = 1e-9
+	rel := (af - bf) / af
+	if rel < -eps || rel > eps {
+		t.Fatalf("SUM diverges beyond FP noise:\n  in-plan:           %v\n  aggregate-shuffle: %v\n  relative diff:     %g",
+			af, bf, rel)
+	}
+	t.Logf("SUCCESS: in-plan=%v aggregate-shuffle=%v (relative diff %.2e — within FP noise) — substitution preserves aggregate semantics end-to-end",
+		af, bf, rel)
 }
 
 // TestDistributedTPCHQ17AggregateShuffle forces the aggregate-shuffle

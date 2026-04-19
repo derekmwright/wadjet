@@ -106,6 +106,74 @@ func TestBuildAggregateShuffleSQL_Q17(t *testing.T) {
 	}
 }
 
+// TestPickAggregateShuffleCandidate_SF10RealisticBytes reproduces the SF10
+// EC2 symptom locally: the default catalog uses 10 MB per lineitem file
+// (6 GB total), which happens to cross a 4 GB threshold. Real SF10 compressed
+// parquet is ~6.12 MB per file (3.67 GB total) — BELOW 4 GB, so the original
+// shuffleBuildThreshold never fires. This test simulates the real byte count
+// and asserts the new 1 GB aggregateShuffleThreshold does the right thing.
+//
+// Regression guard: if someone raises the default threshold back above
+// real SF10 lineitem bytes, this test fails.
+func TestPickAggregateShuffleCandidate_SF10RealisticBytes(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	// Rewrite the catalog's lineitem file-size entries to match production
+	// SF10 bytes measured via `aws s3 ls`: 3,673,081,624 bytes across 600
+	// files = ~6.12 MB/file.
+	//
+	// NOTE: setupTPCHCatalog populates each lineitem file at 10 MB. We
+	// can't rewrite the manifest trivially through the public API, so
+	// construct the stages with bytes at the known real size and exercise
+	// the Pick directly rather than through the planner.
+	const sf10LineitemTotal = int64(3673081624)
+	const sf10OrdersTotal = int64(981977465)
+	sql := `SELECT SUM(l_extendedprice) / 7.0 as avg_yearly
+		FROM lineitem JOIN part ON p_partkey = l_partkey
+		WHERE p_brand = 'Brand#23' AND p_container = 'MED BOX'
+		  AND l_quantity < (
+		    SELECT 0.2 * AVG(l_quantity) FROM lineitem WHERE l_partkey = p_partkey
+		  )`
+	stages := sqlToStages(t, cat, ctx, sql, 3)
+
+	// Rewrite lineitem scan EstimatedBytes to the real SF10 total.
+	for i := range stages {
+		if stages[i].Type != "scan" {
+			continue
+		}
+		switch stages[i].TableName {
+		case "lineitem":
+			stages[i].EstimatedBytes = sf10LineitemTotal
+		case "orders":
+			stages[i].EstimatedBytes = sf10OrdersTotal
+		}
+	}
+
+	const fourGB = int64(4 * 1024 * 1024 * 1024)
+	const oneGB = int64(1 * 1024 * 1024 * 1024)
+
+	diag4 := PickAggregateShuffleCandidateDiag(stages, fourGB)
+	if diag4.Reason == AggShuffleRejectNone {
+		t.Errorf("SF10 @ 4 GB threshold: expected rejection (below_threshold), got match with InputScanBytes=%d — old default threshold should not trigger at SF10 compressed size %d",
+			diag4.Candidate.InputScanBytes, sf10LineitemTotal)
+	} else if diag4.Reason != AggShuffleRejectBelowThreshold {
+		t.Errorf("SF10 @ 4 GB threshold: expected below_threshold rejection, got %s (observed bytes=%d)",
+			diag4.Reason.String(), diag4.ObservedScanBytes)
+	}
+	t.Logf("SF10 @ 4 GB: correctly rejected as %s (observed=%d)", diag4.Reason.String(), diag4.ObservedScanBytes)
+
+	diag1 := PickAggregateShuffleCandidateDiag(stages, oneGB)
+	if diag1.Reason != AggShuffleRejectNone {
+		t.Fatalf("SF10 @ 1 GB threshold: expected match, got rejection=%s observed=%d",
+			diag1.Reason.String(), diag1.ObservedScanBytes)
+	}
+	if diag1.Candidate.InputScanBytes != sf10LineitemTotal {
+		t.Errorf("SF10 @ 1 GB: expected InputScanBytes=%d (real SF10 lineitem), got %d",
+			sf10LineitemTotal, diag1.Candidate.InputScanBytes)
+	}
+	t.Logf("SF10 @ 1 GB: correctly matched — agg=%s scan=%s(%d bytes)",
+		diag1.Candidate.AggregateStageID, diag1.Candidate.InputScanAlias, diag1.Candidate.InputScanBytes)
+}
+
 // TestPickAggregateShuffleCandidate_Q20RejectedWithFilter verifies that Q20
 // (which has l_shipdate filters pushed to its inner scan) is rejected by
 // the Phase 1 detector. The substitution pass rejects scans with filters
