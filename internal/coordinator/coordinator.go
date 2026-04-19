@@ -481,6 +481,62 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
 	shuffleCand, shuffleApplicable := physical.PickShuffleCandidate(physStages, shuffleBuildThreshold)
+	// Option 2 Phase 1 (spec: 2026-04-18-shuffle-distributed-aggregate.md):
+	// detect joins whose build side is a derived aggregate (Q17 shape).
+	// When detected AND probe-split applicable, pre-compute the aggregate
+	// once and attach its cache paths to probe tasks so workers substitute
+	// the in-plan aggregate subtree instead of re-computing per task.
+	// Falls back silently to the regular probe-split / broadcast path on any
+	// error — the fallback preserves correctness at the cost of the memory
+	// savings Phase 1 would have provided.
+	var preComputedAggregates []physical.PreComputedAggregateMeta
+	if canProbeSplit && mergeInfo != nil {
+		diag := physical.PickAggregateShuffleCandidateDiag(physStages, aggregateShuffleThreshold)
+		if diag.Reason == physical.AggShuffleRejectNone {
+			aggCand := diag.Candidate
+			c.logger.Info("aggregate-shuffle candidate matched, dispatching pre-compute",
+				"query", queryID,
+				"agg_stage", aggCand.AggregateStageID,
+				"input_scan", aggCand.InputScanAlias,
+				"input_bytes", aggCand.InputScanBytes,
+				"threshold", aggregateShuffleThreshold,
+				"group_by", aggCand.GroupByKeys)
+			cacheFiles, preErr := c.preComputeDerivedAggregate(ctx, queryID, aggCand, physStages)
+			if preErr != nil {
+				c.logger.Warn("aggregate pre-compute failed, falling back to in-plan execution",
+					"query", queryID, "err", preErr)
+			} else if len(cacheFiles) > 0 {
+				meta, metaErr := buildPreComputedAggregateMeta(aggCand, physStages, cacheFiles)
+				if metaErr != nil {
+					c.logger.Warn("aggregate-shuffle metadata construction failed, falling back",
+						"query", queryID, "err", metaErr)
+				} else {
+					preComputedAggregates = append(preComputedAggregates, meta)
+				}
+			}
+		} else {
+			// Log the rejection reason + any observed candidate stats so we
+			// can tune thresholds / relax gates on real workloads without
+			// paying for another EC2 round-trip to find out.
+			c.logger.Info("aggregate-shuffle not applied",
+				"query", queryID,
+				"reason", diag.Reason.String(),
+				"observed_scan_bytes", diag.ObservedScanBytes,
+				"threshold", aggregateShuffleThreshold,
+				"nearest_join", diag.JoinStageID,
+				"nearest_scan_alias", diag.InputScanAlias)
+		}
+	}
+
+	// When the aggregate-shuffle pre-compute has already handled the build
+	// that PickShuffleCandidate flagged, suppress the base-table shuffle
+	// branch — the derived aggregate's source isn't a true broadcast build;
+	// it's the input to a pre-computed intermediate, and the shuffle-
+	// distributed path would try to partition it by the OUTER join's keys
+	// which aren't present on the inner scan's columns.
+	if len(preComputedAggregates) > 0 {
+		shuffleApplicable = false
+	}
 
 	switch {
 	case shuffleApplicable && mergeInfo != nil:
@@ -523,18 +579,20 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		}
 
 		physStages = []physical.Stage{{
-			ID:                 "pipeline-0",
-			Type:               "pipeline",
-			Tasks:              workerCount,
-			ProbeSplitAlias:    probeAlias,
-			ProbeSplitFiles:    probeFiles,
-			BuildCachePreScans: buildCache,
+			ID:                    "pipeline-0",
+			Type:                  "pipeline",
+			Tasks:                 workerCount,
+			ProbeSplitAlias:       probeAlias,
+			ProbeSplitFiles:       probeFiles,
+			BuildCachePreScans:    buildCache,
+			PreComputedAggregates: preComputedAggregates,
 		}}
 		c.logger.Info("routing to probe-split pipeline",
 			"query", queryID, "probe_alias", probeAlias,
 			"probe_files", len(probeFiles), "workers", workerCount,
 			"has_merge", probeSplitMergeInfo != nil,
-			"build_cache_tables", len(buildCache))
+			"build_cache_tables", len(buildCache),
+			"pre_computed_aggregates", len(preComputedAggregates))
 
 	default:
 		c.logger.Info("routing to single worker pipeline",
@@ -779,20 +837,36 @@ func (c *Coordinator) createPipelineTasks(queryID string, stage physical.Stage, 
 	if stage.ProbeSplitAlias != "" && len(stage.ProbeSplitFiles) > 0 && stage.Tasks > 1 {
 		filePartitions := splitFilesEvenly(stage.ProbeSplitFiles, stage.Tasks)
 		tasks := make([]distributed.Task, len(filePartitions))
+		// Convert physical-plane PreComputedAggregateMeta into the wire type
+		// once per task set; all probe-split tasks carry the same list.
+		var precomp []distributed.PreComputedAggregate
+		for _, m := range stage.PreComputedAggregates {
+			specs := make([]distributed.AggSpec, len(m.AggSpecs))
+			for i, s := range m.AggSpecs {
+				specs[i] = distributed.AggSpec{Func: s.Func, InputCol: s.InputCol, OutputCol: s.OutputCol}
+			}
+			precomp = append(precomp, distributed.PreComputedAggregate{
+				InputTable:  m.InputTable,
+				GroupByCols: append([]string(nil), m.GroupByCols...),
+				AggSpecs:    specs,
+				CacheFiles:  append([]string(nil), m.CacheFiles...),
+			})
+		}
 		for i, files := range filePartitions {
 			tasks[i] = distributed.Task{
-				ID:               uuid.New().String()[:8],
-				QueryID:          queryID,
-				StageID:          stage.ID,
-				Type:             distributed.TaskTypePipeline,
-				SQLText:          sqlText,
-				DataBucket:       c.config.ResultBucket,
-				ResultBucket:     c.config.ResultBucket,
-				ResultPrefix:     resultPrefix,
-				ScanFileFilter:   map[string][]string{stage.ProbeSplitAlias: files},
-				PreScannedInputs: stage.BuildCachePreScans,
-				PartialAggregate: qm != nil && qm.mergeInfo != nil && qm.mergeInfo.HasAggregate,
-				CreatedAt:        time.Now(),
+				ID:                    uuid.New().String()[:8],
+				QueryID:               queryID,
+				StageID:               stage.ID,
+				Type:                  distributed.TaskTypePipeline,
+				SQLText:               sqlText,
+				DataBucket:            c.config.ResultBucket,
+				ResultBucket:          c.config.ResultBucket,
+				ResultPrefix:          resultPrefix,
+				ScanFileFilter:        map[string][]string{stage.ProbeSplitAlias: files},
+				PreScannedInputs:      stage.BuildCachePreScans,
+				PreComputedAggregates: precomp,
+				PartialAggregate:      qm != nil && qm.mergeInfo != nil && qm.mergeInfo.HasAggregate,
+				CreatedAt:             time.Now(),
 			}
 		}
 		return tasks

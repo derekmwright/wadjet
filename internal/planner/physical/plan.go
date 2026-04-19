@@ -93,6 +93,14 @@ type Stage struct {
 	// that causes OOM on Q09 at SF100. Keyed by scan alias (e.g., "orders").
 	BuildCachePreScans map[string][]string
 
+	// PreComputedAggregates holds signatures + cache paths for derived-
+	// aggregate builds that were computed once by the coordinator before
+	// dispatch. Each probe-split task carries the same list; the worker's
+	// plan-rewrite pass matches logical Aggregate subtrees against the
+	// signatures and replaces them with synthetic scans of the cache files.
+	// Spec: 2026-04-18-shuffle-distributed-aggregate.md.
+	PreComputedAggregates []PreComputedAggregateMeta
+
 	// Multi-level merge: partitions upstream results among parallel merge groups.
 	// When MergeGroupCount > 0, this stage processes only the MergeGroup-th
 	// fraction of its dependency results. Independent merge groups run on

@@ -291,6 +291,45 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	}
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 
+	// Shuffle-distributed aggregate (spec: 2026-04-18-shuffle-distributed-
+	// aggregate.md): when the coordinator pre-computed derived aggregate
+	// subplans (e.g. Q17's decorrelated inner AVG-per-partkey), walk the
+	// logical plan and replace each matching Aggregate subtree with a
+	// synthetic scan of the cache files. Must run AFTER optimize (so the
+	// decorrelator has landed the aggregate) and BEFORE physical planning
+	// (so the scan substitution is visible to buildScan).
+	precompAliasFiles := make(map[string][]string)
+	if len(task.PreComputedAggregates) > 0 {
+		sigs := make([]logical.PreComputedAggregate, 0, len(task.PreComputedAggregates))
+		for i, pa := range task.PreComputedAggregates {
+			alias := fmt.Sprintf("__precomp_agg_%d", i)
+			aggOut := make([]string, len(pa.AggSpecs))
+			for j, spec := range pa.AggSpecs {
+				aggOut[j] = spec.OutputCol
+			}
+			sigs = append(sigs, logical.PreComputedAggregate{
+				InputTable:     pa.InputTable,
+				GroupByCols:    pa.GroupByCols,
+				AggOutputCols:  aggOut,
+				SyntheticAlias: alias,
+			})
+			precompAliasFiles[alias] = pa.CacheFiles
+		}
+		used, subErr := logical.SubstitutePreComputedAggregates(logicalPlan, sigs)
+		if subErr != nil {
+			return fmt.Errorf("substitute pre-computed aggregates: %w", subErr)
+		}
+		for alias := range precompAliasFiles {
+			if !used[alias] {
+				// Signature didn't match — fine, falls back to in-plan execution.
+				// Drop the unused alias so it doesn't pollute StreamingSources.
+				delete(precompAliasFiles, alias)
+			}
+		}
+		e.logger.Info("pre-computed aggregate substitution",
+			"sig_count", len(sigs), "matched", len(used), "unmatched_aliases_dropped", len(sigs)-len(used))
+	}
+
 	// Build standalone physical plan (single pipeline, no stages).
 	// Set memory budget and spill directory so the planner can install spill
 	// managers on pipeline-breaking operators. Without this, concurrent pipeline
@@ -306,12 +345,17 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// build-cache files. Each source downloads and parses files one at a time,
 	// yielding batches on demand. This avoids materializing the entire build
 	// side into memory — the hash join's grace spill handles memory pressure.
-	if len(task.PreScannedInputs) > 0 {
-		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs))
+	if len(task.PreScannedInputs) > 0 || len(precompAliasFiles) > 0 {
+		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs)+len(precompAliasFiles))
 		for tableName, files := range task.PreScannedInputs {
 			streamingSources[tableName] = newCachedFileStreamSource(e, bucket, files)
 			e.logger.Debug("streaming pre-scanned input",
 				"table", tableName, "files", len(files))
+		}
+		for alias, files := range precompAliasFiles {
+			streamingSources[alias] = newCachedFileStreamSource(e, bucket, files)
+			e.logger.Debug("streaming pre-computed aggregate",
+				"alias", alias, "files", len(files))
 		}
 		planner.StreamingSources = streamingSources
 	}
@@ -352,7 +396,12 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// it arrives, so memory stays bounded by one batch instead of growing to
 	// the full table size. Without this, scanning partsupp at SF100 (~12GB)
 	// peaks at ~24GB during serializeBatches and OOM-kills the worker.
-	if task.StageID == "build-cache-scan" && e.spillDir != "" {
+	// Build-cache and aggregate-cache pre-scans both produce a cached .wshf
+	// file that downstream probe tasks stream from via StreamingSources.
+	// They share the streaming-sink path to produce the WSHF format that
+	// cachedFileStreamSource expects; the default result path writes WSHC
+	// (compressed) which would fail with "invalid shuffle magic".
+	if (task.StageID == "build-cache-scan" || task.StageID == "aggregate-cache-compute") && e.spillDir != "" {
 		return e.executeBuildCachePreScan(ctx, task, pipeline, result)
 	}
 
