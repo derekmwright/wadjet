@@ -396,7 +396,12 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// it arrives, so memory stays bounded by one batch instead of growing to
 	// the full table size. Without this, scanning partsupp at SF100 (~12GB)
 	// peaks at ~24GB during serializeBatches and OOM-kills the worker.
-	if task.StageID == "build-cache-scan" && e.spillDir != "" {
+	// Build-cache and aggregate-cache pre-scans both produce a cached .wshf
+	// file that downstream probe tasks stream from via StreamingSources.
+	// They share the streaming-sink path to produce the WSHF format that
+	// cachedFileStreamSource expects; the default result path writes WSHC
+	// (compressed) which would fail with "invalid shuffle magic".
+	if (task.StageID == "build-cache-scan" || task.StageID == "aggregate-cache-compute") && e.spillDir != "" {
 		return e.executeBuildCachePreScan(ctx, task, pipeline, result)
 	}
 
