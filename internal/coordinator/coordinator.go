@@ -481,6 +481,23 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
 	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
 	shuffleCand, shuffleApplicable := physical.PickShuffleCandidate(physStages, shuffleBuildThreshold)
+	// Option 2 Phase 1 (spec: 2026-04-18-shuffle-distributed-aggregate.md):
+	// detect joins whose build side is a derived aggregate (Q17 shape). The
+	// orchestration path lands in a follow-up commit; for now this is
+	// telemetry-only so we can verify detection fires correctly on real
+	// queries without changing behavior. When orchestration ships the
+	// resulting candidate will route to a new aggregate-shuffle branch
+	// ahead of the base-table shuffle branch below.
+	if aggCand, ok := physical.PickAggregateShuffleCandidate(physStages, shuffleBuildThreshold); ok {
+		c.logger.Info("aggregate-shuffle candidate detected (orchestration pending — routing through fallback path)",
+			"query", queryID,
+			"agg_stage", aggCand.AggregateStageID,
+			"input_scan", aggCand.InputScanAlias,
+			"input_bytes", aggCand.InputScanBytes,
+			"group_by", aggCand.GroupByKeys,
+			"join_build_keys", aggCand.JoinBuildKeys,
+			"join_probe_keys", aggCand.JoinProbeKeys)
+	}
 
 	switch {
 	case shuffleApplicable && mergeInfo != nil:
