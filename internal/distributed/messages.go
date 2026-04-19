@@ -102,7 +102,33 @@ type Task struct {
 	ResultBucket string `json:"result_bucket"`
 	ResultPrefix string `json:"result_prefix"`
 
+	// PreComputedAggregates carries pre-computed derived-aggregate results
+	// that the worker should substitute for in-plan aggregate subtrees.
+	// Matches on (input_table, group_by_cols, aggregate specs); when a
+	// logical-plan aggregate node matches a signature here, the worker
+	// replaces it with a scan of the provided cache files. Populated by
+	// the coordinator when PickAggregateShuffleCandidate + preCompute
+	// succeed (spec: 2026-04-18-shuffle-distributed-aggregate.md).
+	PreComputedAggregates []PreComputedAggregate `json:"pre_computed_aggregates,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// PreComputedAggregate identifies a derived aggregate whose result has
+// already been computed and cached, paired with the S3 paths of the cache
+// files. The worker's plan-rewrite pass matches a logical Aggregate node
+// against this signature and replaces it with a scan of CacheFiles.
+//
+// Signature semantics: Phase 1 matches only aggregates that are
+// GROUP BY GroupByCols over a single scan of InputTable (no filters, no
+// nested joins). AggSpecs are checked by OutputCol name so the downstream
+// column references (e.g. __scalar_0) resolve against the cached rows
+// unchanged.
+type PreComputedAggregate struct {
+	InputTable  string    `json:"input_table"`
+	GroupByCols []string  `json:"group_by_cols"`
+	AggSpecs    []AggSpec `json:"agg_specs"`
+	CacheFiles  []string  `json:"cache_files"`
 }
 
 // AggSpec defines an aggregation in a task.
