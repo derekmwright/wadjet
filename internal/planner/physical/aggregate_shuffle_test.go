@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -64,6 +65,44 @@ func TestPickAggregateShuffleCandidate_Q12(t *testing.T) {
 	stages := sqlToStages(t, cat, ctx, sql, 3)
 	if _, ok := PickAggregateShuffleCandidate(stages, 4*1024*1024*1024); ok {
 		t.Fatal("Q12: expected no aggregate-shuffle candidate, got one")
+	}
+}
+
+// TestBuildAggregateShuffleSQL_Q17 verifies that the reconstructed SQL for
+// Q17's inner aggregate is a self-contained GROUP BY query that a worker can
+// execute standalone.
+func TestBuildAggregateShuffleSQL_Q17(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	sql := `SELECT SUM(l_extendedprice) / 7.0 as avg_yearly
+		FROM lineitem JOIN part ON p_partkey = l_partkey
+		WHERE p_brand = 'Brand#23' AND p_container = 'MED BOX'
+		  AND l_quantity < (
+		    SELECT 0.2 * AVG(l_quantity) FROM lineitem WHERE l_partkey = p_partkey
+		  )`
+	stages := sqlToStages(t, cat, ctx, sql, 3)
+	cand, ok := PickAggregateShuffleCandidate(stages, 4*1024*1024*1024)
+	if !ok {
+		t.Fatal("expected candidate")
+	}
+	sqlText, err := BuildAggregateShuffleSQL(cand, stages)
+	if err != nil {
+		t.Fatalf("BuildAggregateShuffleSQL: %v", err)
+	}
+	t.Logf("reconstructed pre-compute SQL: %s", sqlText)
+	// Structural checks — the exact projection/agg expression shape depends on
+	// planner detail but must include these pieces.
+	upper := strings.ToUpper(sqlText)
+	if !strings.Contains(upper, "SELECT") || !strings.Contains(upper, "FROM LINEITEM") {
+		t.Errorf("SQL missing SELECT...FROM lineitem: %q", sqlText)
+	}
+	if !strings.Contains(sqlText, "l_partkey") {
+		t.Errorf("SQL missing GROUP BY key l_partkey: %q", sqlText)
+	}
+	if !strings.Contains(upper, "AVG(L_QUANTITY)") {
+		t.Errorf("SQL missing AVG(l_quantity): %q", sqlText)
+	}
+	if !strings.Contains(upper, "GROUP BY") {
+		t.Errorf("SQL missing GROUP BY clause: %q", sqlText)
 	}
 }
 
