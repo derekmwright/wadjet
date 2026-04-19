@@ -60,5 +60,8 @@ Thumbs.db
 # Codeparty agent workspaces
 .codeparty/
 
+# Git worktrees
+/.worktrees/
+
 # Terraform state backups
 *.tfstate.backup
