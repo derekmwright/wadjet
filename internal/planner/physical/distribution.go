@@ -159,13 +159,13 @@ func keysEqual(a, b []string) bool {
 // default.
 func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 	switch stage.Type {
-	case "scan", "dual":
+	case StageScan, "dual":
 		// No inputs — any slot is RequiredAny by definition.
 		return RequiredDistribution{Kind: RequiredAny}
 	case StageExchangeRepartition:
 		// Exchange-repartition accepts any input and re-partitions.
 		return RequiredDistribution{Kind: RequiredAny}
-	case "hash_join":
+	case StageHashJoin:
 		switch slot {
 		case 0:
 			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.JoinLeftKeys}
@@ -174,14 +174,14 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 		default:
 			return RequiredDistribution{Kind: RequiredAny}
 		}
-	case "broadcast_join":
+	case StageBroadcastJoin:
 		// Phase 1 leaves both slots at RequiredAny — the executor handles
 		// broadcast in-process today (no explicit broadcast Exchange stage).
 		// Phase 2 inserts Exchange{Type: Replicate} between scan and the
 		// build slot, at which point the build requirement strengthens to
 		// RequiredBroadcast. See spec Risk #4.
 		return RequiredDistribution{Kind: RequiredAny}
-	case "aggregate":
+	case StageAggregate:
 		// Phase 1 conservative: today's two-phase distributed aggregate
 		// runs the partial stage on RequiredAny inputs (the partial does
 		// not require pre-clustering — it produces partials that the final
@@ -189,9 +189,9 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 		return RequiredDistribution{Kind: RequiredAny}
 	case "final_aggregate", "merge_aggregate":
 		return RequiredDistribution{Kind: RequiredAny}
-	case "sort", "merge_sort":
+	case StageSort, "merge_sort":
 		return RequiredDistribution{Kind: RequiredAny}
-	case "window":
+	case StageWindow:
 		// If any window column declares a PartitionBy, the input must be
 		// clustered on those keys. Take the first PartitionBy as the
 		// requirement (today's planner emits a single window stage per
@@ -203,7 +203,7 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 			}
 		}
 		return RequiredDistribution{Kind: RequiredAny}
-	case "pipeline", "table_func":
+	case StagePipeline, "table_func":
 		return RequiredDistribution{Kind: RequiredAny}
 	default:
 		return RequiredDistribution{Kind: RequiredAny}
@@ -221,7 +221,7 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 // scan partitioning into the property graph. See spec Risk #2.
 func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution {
 	switch stage.Type {
-	case "scan":
+	case StageScan:
 		return Distribution{Kind: DistSingleton}
 	case "dual":
 		return Distribution{Kind: DistSingleton}
@@ -231,7 +231,7 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 			Keys:  stage.ShuffleKeys,
 			Count: stage.NumPartitions,
 		}
-	case "hash_join", "broadcast_join":
+	case StageHashJoin, StageBroadcastJoin:
 		// The join inherits the probe (left) input's distribution — the
 		// join itself does not re-partition the joined output, it just
 		// pairs probe rows with matching build rows.
@@ -239,7 +239,7 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 			return probe
 		}
 		return Distribution{Kind: DistSingleton}
-	case "aggregate":
+	case StageAggregate:
 		return Distribution{Kind: DistSingleton}
 	case "final_aggregate", "merge_aggregate":
 		// Per spec §"OutputDistribution": merge-grouped finals are labeled
@@ -254,7 +254,7 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 			}
 		}
 		return Distribution{Kind: DistSingleton}
-	case "sort":
+	case StageSort:
 		return Distribution{Kind: DistSingleton}
 	case "merge_sort":
 		// Merge-grouped intermediate merges are labeled hash-partitioned on
@@ -272,7 +272,7 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 			}
 		}
 		return Distribution{Kind: DistSingleton}
-	case "window", "pipeline", "table_func":
+	case StageWindow, StagePipeline, "table_func":
 		return Distribution{Kind: DistSingleton}
 	default:
 		return Distribution{Kind: DistSingleton}
@@ -391,7 +391,7 @@ func AssertExchangeConsistency(stages []Stage) error {
 			// (single-input) is the only meaningful index — Phase 1 does
 			// not assert non-join multi-input requirements.
 			slot := 0
-			if consumer.Type == "hash_join" || consumer.Type == "broadcast_join" {
+			if consumer.Type == StageHashJoin || consumer.Type == StageBroadcastJoin {
 				s := joinSlot(consumer, depID)
 				if s < 0 {
 					// Auxiliary dep (e.g. fused-join build). Skip — no
