@@ -36,25 +36,10 @@ func (d Distribution) Equals(other Distribution) bool {
 }
 
 // SatisfiesJoinKeys reports whether this distribution allows a co-located
-// join on the given keys without re-shuffling. Broadcast always satisfies;
-// hash-partitioned satisfies iff the keys match exactly (in order).
+// join on the given keys without re-shuffling. Preserved as a thin wrapper
+// over Satisfies for existing callers.
 func (d Distribution) SatisfiesJoinKeys(joinKeys []string) bool {
-	switch d.Kind {
-	case DistBroadcast:
-		return true
-	case DistHashPartitioned:
-		if len(d.Keys) != len(joinKeys) {
-			return false
-		}
-		for i := range d.Keys {
-			if d.Keys[i] != joinKeys[i] {
-				return false
-			}
-		}
-		return true
-	default:
-		return false
-	}
+	return d.Satisfies(RequiredDistribution{Kind: RequiredClusteredOn, Keys: joinKeys})
 }
 
 // RequiredKind enumerates the partitioning a consumer needs from each input.
