@@ -1,6 +1,9 @@
 package physical
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // EnsureDistribution walks the stage DAG and inserts Exchange stages
 // wherever a child's OutputDistribution does not satisfy its parent's
@@ -13,6 +16,17 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 		byID[stages[i].ID] = len(out)
 		out = append(out, stages[i])
 	}
+
+	// Dedup cache: (childID, required-distribution) → existing exchange stage ID.
+	// Two parents with the same unmet requirement on the same child should
+	// share one inserted exchange (DAG sharing, matches Trino/Spark).
+	type cacheKey struct {
+		childID string
+		kind    RequiredKind
+		keys    string
+		count   int
+	}
+	cache := make(map[cacheKey]string)
 
 	// Walk in dependency order. `stages` is assumed topo-sorted by the
 	// planner (current invariant — dependencies appear before dependents).
@@ -39,6 +53,21 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 			if actual.Satisfies(req) {
 				continue
 			}
+			key := cacheKey{
+				childID: childID,
+				kind:    req.Kind,
+				keys:    strings.Join(req.Keys, ","),
+				count:   req.Count,
+			}
+			if existingID, hit := cache[key]; hit {
+				// Reuse the previously-inserted exchange.
+				reparent := out[i]
+				slot.set(&reparent, existingID)
+				reparent.Dependencies = replaceOne(reparent.Dependencies, childID, existingID)
+				out[i] = reparent
+				parentSnapshot = reparent
+				continue
+			}
 			exch, ok := exchangeVariantFor(req)
 			if !ok {
 				return nil, fmt.Errorf(
@@ -51,6 +80,7 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 			exch.Distribution = distributionFromRequired(req, workerCount)
 			byID[exch.ID] = len(out)
 			out = append(out, exch)
+			cache[key] = exch.ID
 			// Apply slot + dependency rewrites to the (possibly re-based)
 			// parent by index, not through a stale pointer.
 			reparent := out[i]
