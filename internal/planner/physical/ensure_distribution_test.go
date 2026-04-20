@@ -146,6 +146,33 @@ func TestEnsureDistribution_InsertsRepartition(t *testing.T) {
 	}
 }
 
+func TestEnsureDistribution_InsertsGather(t *testing.T) {
+	// Root stage is hash-partitioned; an implicit final Singleton is
+	// required. EnsureDistribution must append a Gather above it.
+	stages := []Stage{
+		{ID: "scan-0", Type: StageScan,
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"a"}, Count: 4}},
+		{
+			ID:           "agg-0",
+			Type:         StageAggregate,
+			Dependencies: []string{"scan-0"},
+			GroupByCols:  []string{"a"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"a"}, Count: 4},
+		},
+	}
+	got, err := EnsureDistribution(stages, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := got[len(got)-1]
+	if last.Type != StageExchangeGather {
+		t.Fatalf("final stage type: got %q want %q", last.Type, StageExchangeGather)
+	}
+	if last.Distribution.Kind != DistSingleton {
+		t.Errorf("gather output distribution: got %v want Singleton", last.Distribution.Kind)
+	}
+}
+
 func stageTypes(s []Stage) []string {
 	out := make([]string, len(s))
 	for i, st := range s {

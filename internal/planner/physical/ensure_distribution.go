@@ -63,6 +63,21 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 			parentSnapshot = reparent
 		}
 	}
+
+	// If the final stage's output isn't Singleton, the query root needs a
+	// Gather so the coordinator sees one output stream.
+	if len(out) > 0 {
+		root := out[len(out)-1]
+		if root.Distribution.Kind != DistSingleton && root.Type != StageExchangeGather {
+			gather := Stage{
+				Type:         StageExchangeGather,
+				ID:           fmt.Sprintf("%s-%s", StageExchangeGather, root.ID),
+				Dependencies: []string{root.ID},
+				Distribution: Distribution{Kind: DistSingleton},
+			}
+			out = append(out, gather)
+		}
+	}
 	return out, nil
 }
 
