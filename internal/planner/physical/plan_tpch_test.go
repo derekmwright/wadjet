@@ -629,3 +629,95 @@ func TestTPCHShuffleKeysResolvable(t *testing.T) {
 		})
 	}
 }
+
+// TestTPCHDistributionConsistency is the Phase 1 acceptance gate for the
+// distribution-property pass. For every Q1-Q22, runs PlanDistributed with
+// WorkerCount=4 in strict mode (BehaviorPreservingMode=false) and asserts:
+//  1. Every stage has a populated Distribution (shuffle stages explicitly
+//     DistHashPartitioned with non-zero Count).
+//  2. AssertExchangeConsistency(stages) == nil.
+//
+// Failure on any query means either the OutputDistribution /
+// RequiredChildDistribution rules are wrong or PlanDistributed emits an
+// inconsistent plan. Either way, the spec's load-bearing invariant is
+// broken and Phase 2 cannot proceed safely.
+//
+// Spec: docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md
+func TestTPCHDistributionConsistency(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	// Strict mode: any consistency violation must surface as an error.
+	prev := BehaviorPreservingMode
+	BehaviorPreservingMode = false
+	defer func() { BehaviorPreservingMode = prev }()
+
+	for qNum := 1; qNum <= 22; qNum++ {
+		sql, ok := tpchPlanQueryMap[qNum]
+		if !ok {
+			t.Logf("Q%02d not in plan query map; skipping", qNum)
+			continue
+		}
+		name := fmt.Sprintf("Q%02d", qNum)
+		t.Run(name, func(t *testing.T) {
+			parsed, err := plansql.Parse(sql)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			selectInfo, err := plansql.ExtractSelect(parsed)
+			if err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			logicalPlan, err := logical.BuildFromSelect(selectInfo)
+			if err != nil {
+				t.Fatalf("logical plan: %v", err)
+			}
+			scanAnnotator := func(plan *logical.Node) {
+				NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+			}
+			scanAnnotator(logicalPlan)
+			logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+
+			planner := NewPlanner(cat)
+			planner.WorkerCount = 4
+			stages, err := planner.PlanDistributed(ctx, logicalPlan)
+			if err != nil {
+				// In strict mode, exchange-consistency violations come back
+				// as errors prefixed "exchange consistency: ...".
+				t.Fatalf("PlanDistributed failed: %v", err)
+			}
+
+			// Assertion 1: every stage has a populated Distribution. The
+			// zero value DistSingleton is "populated" for stages that emit
+			// singleton output, but shuffle stages must carry the
+			// hash-partitioned label with non-zero Count and non-empty Keys.
+			for _, s := range stages {
+				if s.Type == "shuffle" {
+					if s.Distribution.Kind != DistHashPartitioned {
+						t.Errorf("%s shuffle stage %s: Distribution.Kind = %v, want DistHashPartitioned",
+							name, s.ID, s.Distribution.Kind)
+					}
+					if s.Distribution.Count == 0 {
+						t.Errorf("%s shuffle stage %s: Distribution.Count = 0 (not populated)",
+							name, s.ID)
+					}
+					if len(s.Distribution.Keys) == 0 {
+						t.Errorf("%s shuffle stage %s: Distribution.Keys empty (not populated)",
+							name, s.ID)
+					}
+				}
+			}
+
+			// Assertion 2: in strict mode, AssertExchangeConsistency
+			// already ran inside PlanDistributed — if it returned an
+			// error it would have aborted above. Re-run defensively to
+			// log per-stage detail on failure.
+			if err := AssertExchangeConsistency(stages); err != nil {
+				for _, s := range stages {
+					t.Logf("  %-24s type=%-16s dist=%+v",
+						s.ID, s.Type, s.Distribution)
+				}
+				t.Fatalf("%s: %v", name, err)
+			}
+		})
+	}
+}
