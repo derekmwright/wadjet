@@ -188,6 +188,13 @@ type Planner struct {
 	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
 	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
 
+	// UseEnsureDistribution runs the Phase-2 EnsureDistribution pass after
+	// assignStageDistributions. When true, BehaviorPreservingMode is flipped
+	// to false for the duration of the call (strict AssertExchangeConsistency).
+	// Temporary flag: will be deleted in Phase 2 Task 20 once the heuristic
+	// switch is gone.
+	UseEnsureDistribution bool
+
 	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
 	// When populated, buildScan uses these batches instead of reading from the
 	// object store, allowing parallel scan I/O with single-worker compute.
@@ -985,10 +992,20 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		return nil, err
 	}
 	// Phase 1 distribution-property pass: populate Stage.Distribution for
-	// every stage and assert exchange consistency. In BehaviorPreservingMode
-	// (default), violations are logged but do not fail planning. See
-	// docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md.
+	// every stage. Phase 2 (this flag) runs EnsureDistribution afterward
+	// to insert Exchange stages where child output doesn't satisfy parent
+	// input, then asserts consistency strictly.
 	assignStageDistributions(stages, p.WorkerCount)
+	if p.UseEnsureDistribution {
+		var ensureErr error
+		stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
+		if ensureErr != nil {
+			return nil, fmt.Errorf("ensure distribution: %w", ensureErr)
+		}
+		prev := BehaviorPreservingMode
+		BehaviorPreservingMode = false
+		defer func() { BehaviorPreservingMode = prev }()
+	}
 	if err := AssertExchangeConsistency(stages); err != nil {
 		// In strict mode (Phase 2 onward, or test override) this is a
 		// hard failure. BehaviorPreservingMode swallows the error inside
