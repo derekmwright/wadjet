@@ -180,3 +180,73 @@ func stageTypes(s []Stage) []string {
 	}
 	return out
 }
+
+func TestEnsureDistribution_MultiConsumerReuse(t *testing.T) {
+	// Two joins each consume the same build-scan. Both joins have the
+	// same JoinRightKeys (=["k"]), so both ask for RequiredClusteredOn{["k"]}.
+	// The shared build's DistHashPartitioned on ["wrong"] fails Satisfies
+	// against ["k"] → an exchange is needed. Expect ONE exchange, shared.
+	stages := []Stage{
+		{ID: "probe-a", Type: StageScan, Distribution: Distribution{Kind: DistSingleton}},
+		{ID: "probe-b", Type: StageScan, Distribution: Distribution{Kind: DistSingleton}},
+		{ID: "build-shared", Type: StageScan,
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"wrong"}, Count: 4}},
+		{ID: "join-a", Type: StageHashJoin,
+			LeftDepStage: "probe-a", RightDepStage: "build-shared",
+			JoinLeftKeys: []string{"k"}, JoinRightKeys: []string{"k"},
+			Distribution: Distribution{Kind: DistSingleton}},
+		{ID: "join-b", Type: StageHashJoin,
+			LeftDepStage: "probe-b", RightDepStage: "build-shared",
+			JoinLeftKeys: []string{"k"}, JoinRightKeys: []string{"k"},
+			Distribution: Distribution{Kind: DistSingleton}},
+	}
+	got, err := EnsureDistribution(stages, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exchanges int
+	var sharedID string
+	for _, s := range got {
+		if s.Type == StageExchangeRepartition {
+			exchanges++
+			sharedID = s.ID
+		}
+	}
+	if exchanges != 1 {
+		t.Fatalf("expected 1 shared exchange, got %d; stages: %v", exchanges, stageTypes(got))
+	}
+	var seen []string
+	for _, s := range got {
+		if s.Type == StageHashJoin {
+			seen = append(seen, s.RightDepStage)
+		}
+	}
+	if len(seen) != 2 || seen[0] != sharedID || seen[1] != sharedID {
+		t.Errorf("joins should both reference %q; got %v", sharedID, seen)
+	}
+}
+
+func TestEnsureDistribution_Idempotent(t *testing.T) {
+	// Hash-partitioned child on wrong keys feeding a join build slot:
+	// first pass inserts a repartition. Second pass should insert nothing.
+	stages := []Stage{
+		{ID: "scan-probe", Type: StageScan, Distribution: Distribution{Kind: DistSingleton}},
+		{ID: "scan-build", Type: StageScan,
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"wrong"}, Count: 4}},
+		{ID: "join-0", Type: StageHashJoin,
+			LeftDepStage: "scan-probe", RightDepStage: "scan-build",
+			JoinLeftKeys: []string{"a"}, JoinRightKeys: []string{"a"},
+			Distribution: Distribution{Kind: DistSingleton}},
+	}
+	once, err := EnsureDistribution(stages, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	twice, err := EnsureDistribution(once, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(once) != len(twice) {
+		t.Errorf("second pass changed stage count: %d -> %d", len(once), len(twice))
+	}
+}
