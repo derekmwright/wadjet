@@ -805,3 +805,106 @@ func TestPlanDistributed_WithEnsureDistribution_InsertsExchanges(t *testing.T) {
 		}
 	})
 }
+
+// TestTPCH_EnsureDistribution_PlannerParity is the Phase 2 acceptance gate.
+// For every Q01-Q22, it plans with UseEnsureDistribution=true and asserts:
+//  1. Plan succeeds (no error).
+//  2. AssertExchangeConsistency passes (guaranteed by PlanDistributed in strict
+//     mode, verified defensively here).
+//  3. Every StageExchangeRepartition has Distribution.Kind == DistHashPartitioned,
+//     every StageExchangeReplicate has DistBroadcast, every StageExchangeGather
+//     has DistSingleton.
+//
+// Spec: docs/superpowers/specs/2026-04-20-distribution-property-phase-2.md
+func TestTPCH_EnsureDistribution_PlannerParity(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	buildLogicalPlanEnsure := func(t *testing.T, sql string) *logical.Node {
+		t.Helper()
+		parsed, err := plansql.Parse(sql)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		selectInfo, err := plansql.ExtractSelect(parsed)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		logicalPlan, err := logical.BuildFromSelect(selectInfo)
+		if err != nil {
+			t.Fatalf("logical plan: %v", err)
+		}
+		scanAnnotator := func(plan *logical.Node) {
+			NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+		}
+		scanAnnotator(logicalPlan)
+		logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+		return logicalPlan
+	}
+
+	for qNum := 1; qNum <= 22; qNum++ {
+		sql, ok := tpchPlanQueryMap[qNum]
+		if !ok {
+			t.Logf("Q%02d not in plan query map; skipping", qNum)
+			continue
+		}
+		name := fmt.Sprintf("Q%02d", qNum)
+		t.Run(name, func(t *testing.T) {
+			node := buildLogicalPlanEnsure(t, sql)
+
+			planner := NewPlanner(cat)
+			planner.WorkerCount = 4
+			planner.UseEnsureDistribution = true
+
+			// Assertion 1: plan succeeds.
+			stages, err := planner.PlanDistributed(ctx, node)
+			if err != nil {
+				t.Fatalf("PlanDistributed with UseEnsureDistribution=true failed: %v", err)
+			}
+
+			// Assertion 2: AssertExchangeConsistency passes (strict mode).
+			// PlanDistributed already runs this in strict mode when
+			// UseEnsureDistribution=true; we re-run defensively to emit
+			// per-stage detail on any failure.
+			if err := AssertExchangeConsistency(stages); err != nil {
+				for _, s := range stages {
+					t.Logf("  %-24s type=%-20s dist=%+v", s.ID, s.Type, s.Distribution)
+				}
+				t.Fatalf("AssertExchangeConsistency failed: %v", err)
+			}
+
+			// Assertion 3: exchange stage Distribution.Kind must match the
+			// stage type exactly.
+			var exchangeCount int
+			for _, s := range stages {
+				switch s.Type {
+				case StageExchangeRepartition:
+					exchangeCount++
+					if s.Distribution.Kind != DistHashPartitioned {
+						t.Errorf("StageExchangeRepartition %s: Distribution.Kind = %v, want DistHashPartitioned",
+							s.ID, s.Distribution.Kind)
+					}
+				case StageExchangeReplicate:
+					exchangeCount++
+					if s.Distribution.Kind != DistBroadcast {
+						t.Errorf("StageExchangeReplicate %s: Distribution.Kind = %v, want DistBroadcast",
+							s.ID, s.Distribution.Kind)
+					}
+				case StageExchangeGather:
+					exchangeCount++
+					if s.Distribution.Kind != DistSingleton {
+						t.Errorf("StageExchangeGather %s: Distribution.Kind = %v, want DistSingleton",
+							s.ID, s.Distribution.Kind)
+					}
+				}
+			}
+
+			// Log summary for debugging.
+			t.Logf("stages=%d exchanges=%d", len(stages), exchangeCount)
+			for _, s := range stages {
+				if s.Type == StageExchangeRepartition || s.Type == StageExchangeReplicate || s.Type == StageExchangeGather {
+					t.Logf("  %-24s type=%-20s dist=%+v deps=%v", s.ID, s.Type, s.Distribution, s.Dependencies)
+				}
+			}
+		})
+	}
+}
