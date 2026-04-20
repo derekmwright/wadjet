@@ -1,5 +1,10 @@
 package physical
 
+import (
+	"fmt"
+	"log"
+)
+
 // DistKind is the kind of partitioning a stage's output has.
 type DistKind int
 
@@ -326,4 +331,92 @@ func assignStageDistributions(stages []Stage, workerCount int) {
 			_ = idx // idx kept for Phase 2 stages that need cross-references
 		}
 	}
+}
+
+// BehaviorPreservingMode controls assertion hardness. When true (Phase 1
+// default), AssertExchangeConsistency logs violations at WARN and returns
+// nil — every existing distributed plan continues to execute unchanged
+// even if the property algebra rules in this file are wrong. When false
+// (tests, and Phase 2 onward), violations are returned as errors and
+// callers must handle them.
+//
+// Phase 2 deletes this var and makes the assertion always strict — the
+// EnsureDistribution rule guarantees no violation can survive into the
+// emitted plan.
+var BehaviorPreservingMode = true
+
+// joinSlot derives the per-dependency slot index for a join stage by
+// matching dependency IDs against LeftDepStage / RightDepStage. Returns
+// 0 for the probe (left), 1 for the build (right), -1 if dep matches
+// neither (which means the dep is auxiliary, e.g. a fused-join build).
+func joinSlot(stage Stage, depID string) int {
+	if depID == stage.LeftDepStage {
+		return 0
+	}
+	if depID == stage.RightDepStage {
+		return 1
+	}
+	return -1
+}
+
+// AssertExchangeConsistency walks every (producer, consumer, slot) edge in
+// the stages slice and asserts that producer.Distribution.Satisfies(
+// RequiredChildDistribution(consumer, slot)). Returns the first violation
+// as an error, or nil if all edges are consistent.
+//
+// In BehaviorPreservingMode, violations are logged at WARN and nil is
+// returned — Phase 1 is purely additive and must not block any plan that
+// the heuristic switch would otherwise accept.
+//
+// Phase 2 promotes this to the satisfaction check that drives Exchange
+// insertion: a violation triggers an Exchange stage being added, not a
+// plan rejection.
+func AssertExchangeConsistency(stages []Stage) error {
+	byID := make(map[string]Stage, len(stages))
+	for _, s := range stages {
+		byID[s.ID] = s
+	}
+
+	for _, consumer := range stages {
+		for _, depID := range consumer.Dependencies {
+			producer, ok := byID[depID]
+			if !ok {
+				// Dangling dep — not a Phase 1 concern (validateStageGraph
+				// already covers this). Skip silently.
+				continue
+			}
+
+			// Determine the slot. For join stages, derive from
+			// LeftDepStage / RightDepStage. For non-join consumers, slot 0
+			// (single-input) is the only meaningful index — Phase 1 does
+			// not assert non-join multi-input requirements.
+			slot := 0
+			if consumer.Type == "hash_join" || consumer.Type == "broadcast_join" {
+				s := joinSlot(consumer, depID)
+				if s < 0 {
+					// Auxiliary dep (e.g. fused-join build). Skip — no
+					// Phase 1 rule constrains it.
+					continue
+				}
+				slot = s
+			}
+
+			req := RequiredChildDistribution(consumer, slot)
+			if !producer.Distribution.Satisfies(req) {
+				violation := fmt.Errorf(
+					"exchange consistency violation: consumer=%s (type=%s, slot=%d) requires %s%v "+
+						"but producer=%s emits Distribution{Kind=%v, Keys=%v, Count=%d}",
+					consumer.ID, consumer.Type, slot,
+					req.Kind, req.Keys,
+					producer.ID, producer.Distribution.Kind, producer.Distribution.Keys, producer.Distribution.Count,
+				)
+				if BehaviorPreservingMode {
+					log.Printf("WARN: %v", violation)
+					continue
+				}
+				return violation
+			}
+		}
+	}
+	return nil
 }

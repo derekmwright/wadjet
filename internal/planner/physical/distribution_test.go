@@ -1,6 +1,9 @@
 package physical
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDistributionEquals(t *testing.T) {
 	tests := []struct {
@@ -457,5 +460,119 @@ func TestAssignStageDistributions_OutOfOrderInput(t *testing.T) {
 				t.Errorf("join-4 Distribution = %+v, want %+v (dep resolution should not depend on input order)", s.Distribution, want)
 			}
 		}
+	}
+}
+
+func TestAssertExchangeConsistency_ConsistentPlan(t *testing.T) {
+	// scan -> shuffle (on l_orderkey) -> join.probe (RequiredClusteredOn l_orderkey)
+	// scan -> shuffle (on o_orderkey) -> join.build (RequiredClusteredOn o_orderkey)
+	// All edges satisfy: hash-partitioned-on-K satisfies clustered-on-K.
+	stages := []Stage{
+		{ID: "scan-0", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
+		{ID: "scan-1", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
+		{
+			ID: "shuffle-2", Type: "shuffle",
+			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-0"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+		{
+			ID: "shuffle-3", Type: "shuffle",
+			ShuffleKeys: []string{"o_orderkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-1"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"o_orderkey"}, Count: 16},
+		},
+		{
+			ID: "join-4", Type: "hash_join",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "shuffle-2", RightDepStage: "shuffle-3",
+			Dependencies: []string{"shuffle-2", "shuffle-3"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+	}
+
+	if err := AssertExchangeConsistency(stages); err != nil {
+		t.Fatalf("expected no error on consistent plan, got: %v", err)
+	}
+}
+
+func TestAssertExchangeConsistency_BrokenPlan_StrictMode(t *testing.T) {
+	// Save and restore the package var.
+	prev := BehaviorPreservingMode
+	BehaviorPreservingMode = false
+	defer func() { BehaviorPreservingMode = prev }()
+
+	// join requires its build slot clustered on o_orderkey, but the build
+	// dependency is hash-partitioned on c_custkey — violation.
+	stages := []Stage{
+		{ID: "scan-0", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
+		{
+			ID: "shuffle-1", Type: "shuffle",
+			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-0"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+		{ID: "scan-2", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
+		{
+			ID: "shuffle-3", Type: "shuffle",
+			ShuffleKeys: []string{"c_custkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-2"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"c_custkey"}, Count: 16},
+		},
+		{
+			ID: "join-4", Type: "hash_join",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "shuffle-1", RightDepStage: "shuffle-3",
+			Dependencies: []string{"shuffle-1", "shuffle-3"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+	}
+
+	err := AssertExchangeConsistency(stages)
+	if err == nil {
+		t.Fatal("expected error on broken plan in strict mode, got nil")
+	}
+	if !strings.Contains(err.Error(), "join-4") {
+		t.Errorf("error should mention violating consumer stage join-4, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "shuffle-3") {
+		t.Errorf("error should mention violating producer stage shuffle-3, got: %v", err)
+	}
+}
+
+func TestAssertExchangeConsistency_BrokenPlan_BehaviorPreservingMode(t *testing.T) {
+	prev := BehaviorPreservingMode
+	BehaviorPreservingMode = true
+	defer func() { BehaviorPreservingMode = prev }()
+
+	// Same broken plan as the strict-mode test.
+	stages := []Stage{
+		{ID: "scan-0", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
+		{
+			ID: "shuffle-1", Type: "shuffle",
+			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-0"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+		{ID: "scan-2", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
+		{
+			ID: "shuffle-3", Type: "shuffle",
+			ShuffleKeys: []string{"c_custkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-2"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"c_custkey"}, Count: 16},
+		},
+		{
+			ID: "join-4", Type: "hash_join",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "shuffle-1", RightDepStage: "shuffle-3",
+			Dependencies: []string{"shuffle-1", "shuffle-3"},
+			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+	}
+
+	// In BehaviorPreservingMode, AssertExchangeConsistency returns nil —
+	// the violation is logged at WARN but does not bubble up as an error.
+	if err := AssertExchangeConsistency(stages); err != nil {
+		t.Fatalf("expected nil in BehaviorPreservingMode (warn-only), got: %v", err)
 	}
 }
