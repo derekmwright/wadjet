@@ -576,3 +576,34 @@ func TestAssertExchangeConsistency_BrokenPlan_BehaviorPreservingMode(t *testing.
 		t.Fatalf("expected nil in BehaviorPreservingMode (warn-only), got: %v", err)
 	}
 }
+
+func TestPlanDistributed_PopulatesStageDistribution(t *testing.T) {
+	// Confirm PlanDistributed populates Stage.Distribution on every stage
+	// it emits. Uses the TPC-H test catalog from plan_tpch_test.go (same
+	// package) and a synthetic 2-table join.
+	cat, ctx := setupTPCHCatalog(t)
+	sql := `SELECT l_orderkey, o_orderdate
+		FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+		WHERE o_orderdate >= '1995-01-01'`
+
+	stages := sqlToStages(t, cat, ctx, sql, 4)
+
+	for _, s := range stages {
+		// Every stage must have a populated Distribution. The zero value
+		// is {Kind: DistSingleton, Keys: nil, Count: 0} which is a valid
+		// "populated" value for stages that emit singleton output. We
+		// detect "unpopulated" by checking that the wire-up actually ran
+		// — for shuffle stages, the non-zero Count is a reliable proof.
+		if s.Type == "shuffle" {
+			if s.Distribution.Kind != DistHashPartitioned {
+				t.Errorf("shuffle stage %s: Distribution.Kind = %v, want DistHashPartitioned", s.ID, s.Distribution.Kind)
+			}
+			if s.Distribution.Count == 0 {
+				t.Errorf("shuffle stage %s: Distribution.Count = 0 (assignStageDistributions not wired in)", s.ID)
+			}
+			if len(s.Distribution.Keys) == 0 {
+				t.Errorf("shuffle stage %s: Distribution.Keys empty (assignStageDistributions not wired in)", s.ID)
+			}
+		}
+	}
+}
