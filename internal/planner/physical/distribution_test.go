@@ -121,8 +121,8 @@ func TestRequiredChildDistribution(t *testing.T) {
 			want:  RequiredDistribution{Kind: RequiredAny},
 		},
 		{
-			name:  "shuffle accepts any input",
-			stage: Stage{ID: "shuffle-0", Type: "shuffle", ShuffleKeys: []string{"k"}, NumPartitions: 16},
+			name:  "exchange-repartition accepts any input",
+			stage: Stage{ID: "shuffle-0", Type: StageExchangeRepartition, ShuffleKeys: []string{"k"}, NumPartitions: 16},
 			slot:  0,
 			want:  RequiredDistribution{Kind: RequiredAny},
 		},
@@ -267,9 +267,9 @@ func TestOutputDistribution(t *testing.T) {
 			want:  Distribution{Kind: DistSingleton},
 		},
 		{
-			name: "shuffle emits hash partitioned",
+			name: "exchange-repartition emits hash partitioned",
 			stage: Stage{
-				ID: "shuffle-0", Type: "shuffle",
+				ID: "shuffle-0", Type: StageExchangeRepartition,
 				ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
 			},
 			deps: nil,
@@ -391,12 +391,12 @@ func TestAssignStageDistributions(t *testing.T) {
 		{ID: "scan-0", Type: "scan", ScanAlias: "lineitem"},
 		{ID: "scan-1", Type: "scan", ScanAlias: "orders"},
 		{
-			ID: "shuffle-2", Type: "shuffle",
+			ID: "shuffle-2", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-0"},
 		},
 		{
-			ID: "shuffle-3", Type: "shuffle",
+			ID: "shuffle-3", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"o_orderkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-1"},
 		},
@@ -438,12 +438,12 @@ func TestAssignStageDistributions_OutOfOrderInput(t *testing.T) {
 			Dependencies: []string{"shuffle-2", "shuffle-3"},
 		},
 		{
-			ID: "shuffle-2", Type: "shuffle",
+			ID: "shuffle-2", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-0"},
 		},
 		{
-			ID: "shuffle-3", Type: "shuffle",
+			ID: "shuffle-3", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"o_orderkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-1"},
 		},
@@ -471,13 +471,13 @@ func TestAssertExchangeConsistency_ConsistentPlan(t *testing.T) {
 		{ID: "scan-0", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
 		{ID: "scan-1", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
 		{
-			ID: "shuffle-2", Type: "shuffle",
+			ID: "shuffle-2", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-0"},
 			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
 		},
 		{
-			ID: "shuffle-3", Type: "shuffle",
+			ID: "shuffle-3", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"o_orderkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-1"},
 			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"o_orderkey"}, Count: 16},
@@ -507,14 +507,14 @@ func TestAssertExchangeConsistency_BrokenPlan_StrictMode(t *testing.T) {
 	stages := []Stage{
 		{ID: "scan-0", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
 		{
-			ID: "shuffle-1", Type: "shuffle",
+			ID: "shuffle-1", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-0"},
 			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
 		},
 		{ID: "scan-2", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
 		{
-			ID: "shuffle-3", Type: "shuffle",
+			ID: "shuffle-3", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"c_custkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-2"},
 			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"c_custkey"}, Count: 16},
@@ -549,14 +549,14 @@ func TestAssertExchangeConsistency_BrokenPlan_BehaviorPreservingMode(t *testing.
 	stages := []Stage{
 		{ID: "scan-0", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
 		{
-			ID: "shuffle-1", Type: "shuffle",
+			ID: "shuffle-1", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-0"},
 			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
 		},
 		{ID: "scan-2", Type: "scan", Distribution: Distribution{Kind: DistSingleton}},
 		{
-			ID: "shuffle-3", Type: "shuffle",
+			ID: "shuffle-3", Type: StageExchangeRepartition,
 			ShuffleKeys: []string{"c_custkey"}, NumPartitions: 16,
 			Dependencies: []string{"scan-2"},
 			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"c_custkey"}, Count: 16},
@@ -594,15 +594,15 @@ func TestPlanDistributed_PopulatesStageDistribution(t *testing.T) {
 		// "populated" value for stages that emit singleton output. We
 		// detect "unpopulated" by checking that the wire-up actually ran
 		// — for shuffle stages, the non-zero Count is a reliable proof.
-		if s.Type == "shuffle" {
+		if s.Type == StageExchangeRepartition {
 			if s.Distribution.Kind != DistHashPartitioned {
-				t.Errorf("shuffle stage %s: Distribution.Kind = %v, want DistHashPartitioned", s.ID, s.Distribution.Kind)
+				t.Errorf("exchange-repartition stage %s: Distribution.Kind = %v, want DistHashPartitioned", s.ID, s.Distribution.Kind)
 			}
 			if s.Distribution.Count == 0 {
-				t.Errorf("shuffle stage %s: Distribution.Count = 0 (assignStageDistributions not wired in)", s.ID)
+				t.Errorf("exchange-repartition stage %s: Distribution.Count = 0 (assignStageDistributions not wired in)", s.ID)
 			}
 			if len(s.Distribution.Keys) == 0 {
-				t.Errorf("shuffle stage %s: Distribution.Keys empty (assignStageDistributions not wired in)", s.ID)
+				t.Errorf("exchange-repartition stage %s: Distribution.Keys empty (assignStageDistributions not wired in)", s.ID)
 			}
 		}
 	}

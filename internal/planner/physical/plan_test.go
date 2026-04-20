@@ -527,7 +527,7 @@ func TestPlanDistributed_ShuffleJoin(t *testing.T) {
 
 	// Verify no shuffle stages were created for broadcast
 	for _, s := range stages {
-		if s.Type == "shuffle" {
+		if s.Type == StageExchangeRepartition {
 			t.Errorf("broadcast join should not have shuffle stages, found %s", s.ID)
 		}
 	}
@@ -607,7 +607,7 @@ func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 	var shuffles, joins []Stage
 	for _, s := range stages {
 		switch s.Type {
-		case "shuffle":
+		case StageExchangeRepartition:
 			shuffles = append(shuffles, s)
 		case "hash_join":
 			joins = append(joins, s)
@@ -733,7 +733,7 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 
 	var shuffles []Stage
 	for _, s := range stages {
-		if s.Type == "shuffle" {
+		if s.Type == StageExchangeRepartition {
 			shuffles = append(shuffles, s)
 		}
 	}
@@ -899,7 +899,7 @@ func TestPlanDistributed_ColumnPruning(t *testing.T) {
 
 	// Verify shuffle stages have column pruning (if present)
 	for _, s := range stages {
-		if s.Type != "shuffle" {
+		if s.Type != StageExchangeRepartition {
 			continue
 		}
 		if len(s.Columns) == 0 {

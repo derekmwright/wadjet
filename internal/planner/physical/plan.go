@@ -34,7 +34,7 @@ type PhysicalPlan struct {
 // Stage represents a unit of distributed work with metadata for task creation.
 type Stage struct {
 	ID           string
-	Type         string // scan, aggregate, sort, hash_join, broadcast_join, window, shuffle, pipeline
+	Type         string // see exchange.go constants (scan, aggregate, sort, hash_join, broadcast_join, window, pipeline, exchange-repartition, exchange-replicate, exchange-gather)
 	ClusterID    string // target cluster for routing ("" = local/coordinator's cluster)
 	Dependencies []string
 	Tasks        int
@@ -1975,10 +1975,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			}
 
 			// Left (probe) side shuffle
-			leftShuffleID := fmt.Sprintf("shuffle-%d", len(*stages))
+			leftShuffleID := fmt.Sprintf("exchange-repartition-%d", len(*stages))
 			*stages = append(*stages, Stage{
 				ID:            leftShuffleID,
-				Type:          "shuffle",
+				Type:          StageExchangeRepartition,
 				Tasks:         1,
 				Columns:       shuffleCols,
 				ShuffleKeys:   leftKeys,
@@ -1987,10 +1987,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			})
 
 			// Right (build) side shuffle
-			rightShuffleID := fmt.Sprintf("shuffle-%d", len(*stages))
+			rightShuffleID := fmt.Sprintf("exchange-repartition-%d", len(*stages))
 			*stages = append(*stages, Stage{
 				ID:            rightShuffleID,
-				Type:          "shuffle",
+				Type:          StageExchangeRepartition,
 				Tasks:         1,
 				Columns:       shuffleCols,
 				ShuffleKeys:   rightKeys,
