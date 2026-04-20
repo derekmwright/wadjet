@@ -138,3 +138,69 @@ func keysEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// RequiredChildDistribution returns the per-slot required distribution for a
+// stage's input. `slot` indexes into the stage's logical input list:
+//   - For joins: slot 0 is the probe (LeftDepStage), slot 1 is the build (RightDepStage).
+//   - For unary stages: slot 0 is the sole input.
+//   - For stages with no inputs (scan, dual): RequiredAny is returned for any slot.
+//
+// Never stored on Stage; recomputed by AssertExchangeConsistency. Rules are
+// derived from how walkStages already implicitly constructs the plan; see
+// the Phase 1 spec §"RequiredChildDistribution" for the per-stage table.
+//
+// Unknown stage types return RequiredAny (no constraint asserted). New stage
+// types added to the planner must add their rule here or accept the no-op
+// default.
+func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
+	switch stage.Type {
+	case "scan", "dual":
+		// No inputs — any slot is RequiredAny by definition.
+		return RequiredDistribution{Kind: RequiredAny}
+	case "shuffle":
+		// Shuffle accepts any input and re-partitions.
+		return RequiredDistribution{Kind: RequiredAny}
+	case "hash_join":
+		switch slot {
+		case 0:
+			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.JoinLeftKeys}
+		case 1:
+			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.JoinRightKeys}
+		default:
+			return RequiredDistribution{Kind: RequiredAny}
+		}
+	case "broadcast_join":
+		// Phase 1 leaves both slots at RequiredAny — the executor handles
+		// broadcast in-process today (no explicit broadcast Exchange stage).
+		// Phase 2 inserts Exchange{Type: Replicate} between scan and the
+		// build slot, at which point the build requirement strengthens to
+		// RequiredBroadcast. See spec Risk #4.
+		return RequiredDistribution{Kind: RequiredAny}
+	case "aggregate":
+		// Phase 1 conservative: today's two-phase distributed aggregate
+		// runs the partial stage on RequiredAny inputs (the partial does
+		// not require pre-clustering — it produces partials that the final
+		// stage merges). See spec Risk #1.
+		return RequiredDistribution{Kind: RequiredAny}
+	case "final_aggregate", "merge_aggregate":
+		return RequiredDistribution{Kind: RequiredAny}
+	case "sort", "merge_sort":
+		return RequiredDistribution{Kind: RequiredAny}
+	case "window":
+		// If any window column declares a PartitionBy, the input must be
+		// clustered on those keys. Take the first PartitionBy as the
+		// requirement (today's planner emits a single window stage per
+		// partition spec; multiple PartitionBy clauses become separate
+		// window stages).
+		for _, wc := range stage.WindowCols {
+			if len(wc.PartitionBy) > 0 {
+				return RequiredDistribution{Kind: RequiredClusteredOn, Keys: wc.PartitionBy}
+			}
+		}
+		return RequiredDistribution{Kind: RequiredAny}
+	case "pipeline", "table_func":
+		return RequiredDistribution{Kind: RequiredAny}
+	default:
+		return RequiredDistribution{Kind: RequiredAny}
+	}
+}

@@ -97,3 +97,149 @@ func TestDistributionSatisfies(t *testing.T) {
 		})
 	}
 }
+
+func TestRequiredChildDistribution(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage Stage
+		slot  int
+		want  RequiredDistribution
+	}{
+		{
+			name:  "scan has no inputs returns any",
+			stage: Stage{ID: "scan-0", Type: "scan"},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "dual has no inputs returns any",
+			stage: Stage{ID: "dual-0", Type: "dual"},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "shuffle accepts any input",
+			stage: Stage{ID: "shuffle-0", Type: "shuffle", ShuffleKeys: []string{"k"}, NumPartitions: 16},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name: "hash_join probe slot requires clustered on left keys",
+			stage: Stage{
+				ID: "join-0", Type: "hash_join",
+				JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+				LeftDepStage: "shuffle-l", RightDepStage: "shuffle-r",
+				Dependencies: []string{"shuffle-l", "shuffle-r"},
+			},
+			slot: 0,
+			want: RequiredDistribution{Kind: RequiredClusteredOn, Keys: []string{"l_orderkey"}},
+		},
+		{
+			name: "hash_join build slot requires clustered on right keys",
+			stage: Stage{
+				ID: "join-0", Type: "hash_join",
+				JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+				LeftDepStage: "shuffle-l", RightDepStage: "shuffle-r",
+				Dependencies: []string{"shuffle-l", "shuffle-r"},
+			},
+			slot: 1,
+			want: RequiredDistribution{Kind: RequiredClusteredOn, Keys: []string{"o_orderkey"}},
+		},
+		{
+			name: "broadcast_join probe slot requires any (Phase 1)",
+			stage: Stage{
+				ID: "join-0", Type: "broadcast_join",
+				JoinLeftKeys: []string{"l_partkey"}, JoinRightKeys: []string{"p_partkey"},
+				LeftDepStage: "scan-l", RightDepStage: "scan-r",
+				Dependencies: []string{"scan-l", "scan-r"},
+			},
+			slot: 0,
+			want: RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name: "broadcast_join build slot requires any (Phase 1)",
+			stage: Stage{
+				ID: "join-0", Type: "broadcast_join",
+				JoinLeftKeys: []string{"l_partkey"}, JoinRightKeys: []string{"p_partkey"},
+				LeftDepStage: "scan-l", RightDepStage: "scan-r",
+				Dependencies: []string{"scan-l", "scan-r"},
+			},
+			slot: 1,
+			want: RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "aggregate requires any (Phase 1 conservative — see Risk #1)",
+			stage: Stage{ID: "aggregate-0", Type: "aggregate", GroupByCols: []string{"l_returnflag"}},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "final_aggregate requires any",
+			stage: Stage{ID: "final_aggregate-0", Type: "final_aggregate", GroupByCols: []string{"l_returnflag"}},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "sort requires any",
+			stage: Stage{ID: "sort-0", Type: "sort"},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "merge_sort requires any",
+			stage: Stage{ID: "merge_sort-0", Type: "merge_sort"},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name: "window with PartitionBy requires clustered on partition keys",
+			stage: Stage{
+				ID: "window-0", Type: "window",
+				WindowCols: []WindowColSpec{{Func: "row_number", PartitionBy: []string{"o_custkey"}}},
+			},
+			slot: 0,
+			want: RequiredDistribution{Kind: RequiredClusteredOn, Keys: []string{"o_custkey"}},
+		},
+		{
+			name: "window without PartitionBy requires any",
+			stage: Stage{
+				ID: "window-0", Type: "window",
+				WindowCols: []WindowColSpec{{Func: "row_number"}},
+			},
+			slot: 0,
+			want: RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "pipeline requires any",
+			stage: Stage{ID: "pipeline-0", Type: "pipeline"},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "table_func requires any",
+			stage: Stage{ID: "tf-0", Type: "table_func"},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "unknown stage type requires any",
+			stage: Stage{ID: "?-0", Type: "mystery"},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := RequiredChildDistribution(tt.stage, tt.slot)
+			if got.Kind != tt.want.Kind {
+				t.Fatalf("Kind = %v, want %v", got.Kind, tt.want.Kind)
+			}
+			if !keysEqual(got.Keys, tt.want.Keys) {
+				t.Fatalf("Keys = %v, want %v", got.Keys, tt.want.Keys)
+			}
+			if got.Count != tt.want.Count {
+				t.Fatalf("Count = %v, want %v", got.Count, tt.want.Count)
+			}
+		})
+	}
+}
