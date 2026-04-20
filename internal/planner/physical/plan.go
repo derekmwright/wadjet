@@ -984,6 +984,18 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if err := p.enforceQueryLimits(stages, node); err != nil {
 		return nil, err
 	}
+	// Phase 1 distribution-property pass: populate Stage.Distribution for
+	// every stage and assert exchange consistency. In BehaviorPreservingMode
+	// (default), violations are logged but do not fail planning. See
+	// docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md.
+	assignStageDistributions(stages, p.WorkerCount)
+	if err := AssertExchangeConsistency(stages); err != nil {
+		// In strict mode (Phase 2 onward, or test override) this is a
+		// hard failure. BehaviorPreservingMode swallows the error inside
+		// AssertExchangeConsistency, so reaching this branch implies the
+		// caller flipped the var.
+		return nil, fmt.Errorf("exchange consistency: %w", err)
+	}
 	return stages, nil
 }
 
