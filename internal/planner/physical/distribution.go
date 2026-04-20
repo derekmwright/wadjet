@@ -273,3 +273,57 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 		return Distribution{Kind: DistSingleton}
 	}
 }
+
+// assignStageDistributions walks the stages slice in dependency order and
+// populates Stage.Distribution per the OutputDistribution rules. The walk
+// is by-ID so stages provided out of topological order are still resolved
+// correctly (matters because fuseJoinStages rewires deps after walkStages).
+//
+// workerCount is reserved for future rules (e.g. probe-split scan
+// distribution) — Phase 1 ignores it but threads it through to keep the
+// signature stable for Phase 2.
+func assignStageDistributions(stages []Stage, workerCount int) {
+	_ = workerCount // reserved for Phase 2 probe-split distribution rules
+
+	// Build an ID → index lookup so we can mutate stages in place.
+	idx := make(map[string]int, len(stages))
+	for i, s := range stages {
+		idx[s.ID] = i
+	}
+
+	// Track resolved distributions by stage ID. A stage is resolvable once
+	// all its dependencies have been resolved.
+	resolved := make(map[string]Distribution, len(stages))
+
+	// Iterate until every stage has a resolved distribution. The loop runs
+	// at most len(stages) times because each pass resolves at least one
+	// stage (the dependency graph is a DAG validated by walkStages).
+	for pass := 0; pass < len(stages) && len(resolved) < len(stages); pass++ {
+		for i := range stages {
+			s := &stages[i]
+			if _, done := resolved[s.ID]; done {
+				continue
+			}
+			// Check that every dependency has been resolved.
+			ready := true
+			for _, dep := range s.Dependencies {
+				if _, ok := resolved[dep]; !ok {
+					ready = false
+					break
+				}
+			}
+			if !ready {
+				continue
+			}
+			// Build the per-dep distribution map for OutputDistribution.
+			depMap := make(map[string]Distribution, len(s.Dependencies))
+			for _, dep := range s.Dependencies {
+				depMap[dep] = resolved[dep]
+			}
+			d := OutputDistribution(*s, depMap)
+			s.Distribution = d
+			resolved[s.ID] = d
+			_ = idx // idx kept for Phase 2 stages that need cross-references
+		}
+	}
+}

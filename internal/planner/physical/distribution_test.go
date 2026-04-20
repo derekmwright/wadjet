@@ -381,3 +381,81 @@ func TestOutputDistribution(t *testing.T) {
 		})
 	}
 }
+
+func TestAssignStageDistributions(t *testing.T) {
+	// Synthetic 3-stage plan: scan -> shuffle -> join (with another scan + shuffle as build)
+	stages := []Stage{
+		{ID: "scan-0", Type: "scan", ScanAlias: "lineitem"},
+		{ID: "scan-1", Type: "scan", ScanAlias: "orders"},
+		{
+			ID: "shuffle-2", Type: "shuffle",
+			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-0"},
+		},
+		{
+			ID: "shuffle-3", Type: "shuffle",
+			ShuffleKeys: []string{"o_orderkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-1"},
+		},
+		{
+			ID: "join-4", Type: "hash_join",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "shuffle-2", RightDepStage: "shuffle-3",
+			Dependencies: []string{"shuffle-2", "shuffle-3"},
+		},
+	}
+
+	assignStageDistributions(stages, 4)
+
+	want := map[string]Distribution{
+		"scan-0":    {Kind: DistSingleton},
+		"scan-1":    {Kind: DistSingleton},
+		"shuffle-2": {Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		"shuffle-3": {Kind: DistHashPartitioned, Keys: []string{"o_orderkey"}, Count: 16},
+		// Hash join inherits probe-side distribution (shuffle-2)
+		"join-4": {Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+	}
+	for _, s := range stages {
+		got := s.Distribution
+		w := want[s.ID]
+		if !got.Equals(w) {
+			t.Errorf("stage %s: Distribution = %+v, want %+v", s.ID, got, w)
+		}
+	}
+}
+
+func TestAssignStageDistributions_OutOfOrderInput(t *testing.T) {
+	// Stages provided out of topological order. The pass must still resolve
+	// dependencies (e.g. join-4 declared before its shuffle deps).
+	stages := []Stage{
+		{
+			ID: "join-4", Type: "hash_join",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "shuffle-2", RightDepStage: "shuffle-3",
+			Dependencies: []string{"shuffle-2", "shuffle-3"},
+		},
+		{
+			ID: "shuffle-2", Type: "shuffle",
+			ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-0"},
+		},
+		{
+			ID: "shuffle-3", Type: "shuffle",
+			ShuffleKeys: []string{"o_orderkey"}, NumPartitions: 16,
+			Dependencies: []string{"scan-1"},
+		},
+		{ID: "scan-0", Type: "scan", ScanAlias: "lineitem"},
+		{ID: "scan-1", Type: "scan", ScanAlias: "orders"},
+	}
+
+	assignStageDistributions(stages, 4)
+
+	for _, s := range stages {
+		if s.ID == "join-4" {
+			want := Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16}
+			if !s.Distribution.Equals(want) {
+				t.Errorf("join-4 Distribution = %+v, want %+v (dep resolution should not depend on input order)", s.Distribution, want)
+			}
+		}
+	}
+}
