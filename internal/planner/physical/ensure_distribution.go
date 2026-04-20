@@ -5,6 +5,21 @@ import (
 	"strings"
 )
 
+// requiredChildDistributionForTest lets tests override
+// RequiredChildDistribution to exercise error paths in EnsureDistribution.
+// Returns (req, true) to supply a value; (_, false) to fall through to
+// the production helper.
+var requiredChildDistributionForTest func(Stage, int) (RequiredDistribution, bool)
+
+func requiredChildDistribution(s Stage, slot int) RequiredDistribution {
+	if requiredChildDistributionForTest != nil {
+		if req, ok := requiredChildDistributionForTest(s, slot); ok {
+			return req
+		}
+	}
+	return RequiredChildDistribution(s, slot)
+}
+
 // EnsureDistribution walks the stage DAG and inserts Exchange stages
 // wherever a child's OutputDistribution does not satisfy its parent's
 // RequiredChildDistribution. Returns a new []Stage; does not mutate
@@ -48,7 +63,7 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 			if !ok {
 				return nil, fmt.Errorf("ensure distribution: parent %q references unknown child %q", out[i].ID, childID)
 			}
-			req := RequiredChildDistribution(parentSnapshot, slot.idx)
+			req := requiredChildDistribution(parentSnapshot, slot.idx)
 			actual := out[childIdx].Distribution
 			if actual.Satisfies(req) {
 				continue
