@@ -98,3 +98,58 @@ type RequiredDistribution struct {
 	Keys  []string
 	Count int
 }
+
+// Satisfies reports whether this distribution meets a consumer's required
+// distribution. Single mechanical predicate that mirrors Spark's
+// Partitioning.satisfies(Distribution). The truth table is documented in
+// the Phase 1 spec §"The property algebra".
+//
+//   RequiredAny:                    always true.
+//   RequiredSingleton:              only DistSingleton.
+//   RequiredBroadcast:              only DistBroadcast.
+//   RequiredClusteredOn(K):         DistBroadcast yes; DistSingleton yes;
+//                                   DistHashPartitioned iff Keys==K.
+//   RequiredHashPartitionedOn(K, N): only DistHashPartitioned with Keys==K
+//                                   and Count==N.
+func (d Distribution) Satisfies(req RequiredDistribution) bool {
+	switch req.Kind {
+	case RequiredAny:
+		return true
+	case RequiredSingleton:
+		return d.Kind == DistSingleton
+	case RequiredBroadcast:
+		return d.Kind == DistBroadcast
+	case RequiredClusteredOn:
+		switch d.Kind {
+		case DistBroadcast, DistSingleton:
+			return true
+		case DistHashPartitioned:
+			return keysEqual(d.Keys, req.Keys)
+		default:
+			return false
+		}
+	case RequiredHashPartitionedOn:
+		if d.Kind != DistHashPartitioned {
+			return false
+		}
+		if d.Count != req.Count {
+			return false
+		}
+		return keysEqual(d.Keys, req.Keys)
+	default:
+		return false
+	}
+}
+
+// keysEqual reports whether two ordered key slices are identical.
+func keysEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
