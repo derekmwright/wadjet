@@ -18,19 +18,23 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 	// planner (current invariant — dependencies appear before dependents).
 	// For each stage, inspect each input slot; splice an exchange if the
 	// satisfaction check fails.
-	for i := range out {
-		parent := &out[i]
-		slots := dependencySlots(parent)
+	//
+	// Mutations target out[i] via index (not a pointer alias) because
+	// append(out, exch) may reallocate the backing array, invalidating any
+	// *Stage captured before the append.
+	for i := 0; i < len(out); i++ {
+		parentSnapshot := out[i]
+		slots := dependencySlots(&parentSnapshot)
 		for _, slot := range slots {
-			childID := slot.get(parent)
+			childID := slot.get(&parentSnapshot)
 			if childID == "" {
 				continue
 			}
 			childIdx, ok := byID[childID]
 			if !ok {
-				return nil, fmt.Errorf("ensure distribution: parent %q references unknown child %q", parent.ID, childID)
+				return nil, fmt.Errorf("ensure distribution: parent %q references unknown child %q", out[i].ID, childID)
 			}
-			req := RequiredChildDistribution(*parent, slot.idx)
+			req := RequiredChildDistribution(parentSnapshot, slot.idx)
 			actual := out[childIdx].Distribution
 			if actual.Satisfies(req) {
 				continue
@@ -39,17 +43,24 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 			if !ok {
 				return nil, fmt.Errorf(
 					"ensure distribution: no exchange variant satisfies %v from %v (parent=%s slot=%d)",
-					req, actual, parent.ID, slot.idx,
+					req, actual, out[i].ID, slot.idx,
 				)
 			}
-			exch.ID = fmt.Sprintf("%s-%s-%d", exch.Type, parent.ID, i)
+			exch.ID = fmt.Sprintf("%s-%s-%d", exch.Type, out[i].ID, i)
 			exch.Dependencies = []string{childID}
 			exch.Distribution = distributionFromRequired(req, workerCount)
-			// Route parent's slot at the exchange.
-			slot.set(parent, exch.ID)
-			parent.Dependencies = replaceOne(parent.Dependencies, childID, exch.ID)
 			byID[exch.ID] = len(out)
 			out = append(out, exch)
+			// Apply slot + dependency rewrites to the (possibly re-based)
+			// parent by index, not through a stale pointer.
+			reparent := out[i]
+			slot.set(&reparent, exch.ID)
+			reparent.Dependencies = replaceOne(reparent.Dependencies, childID, exch.ID)
+			out[i] = reparent
+			// Keep parentSnapshot in sync so subsequent slots in this loop
+			// see the rewritten edges (prevents double-inserting if two
+			// slots pointed at the same mismatched child).
+			parentSnapshot = reparent
 		}
 	}
 	return out, nil
