@@ -173,6 +173,27 @@ func TestEnsureDistribution_InsertsGather(t *testing.T) {
 	}
 }
 
+func TestEnsureDistribution_StrictModeFailsOnGap(t *testing.T) {
+	stages := []Stage{
+		{ID: "scan-0", Type: StageScan, Distribution: Distribution{Kind: DistSingleton}},
+		{ID: "bad-parent", Type: "__test_unsatisfiable", Dependencies: []string{"scan-0"},
+			Distribution: Distribution{Kind: DistSingleton}},
+	}
+	origHook := requiredChildDistributionForTest
+	t.Cleanup(func() { requiredChildDistributionForTest = origHook })
+	requiredChildDistributionForTest = func(s Stage, slot int) (RequiredDistribution, bool) {
+		if s.Type == "__test_unsatisfiable" {
+			return RequiredDistribution{Kind: RequiredKind(-1)}, true
+		}
+		return RequiredDistribution{}, false
+	}
+
+	_, err := EnsureDistribution(stages, 4)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}
+
 func stageTypes(s []Stage) []string {
 	out := make([]string, len(s))
 	for i, st := range s {
