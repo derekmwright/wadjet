@@ -204,3 +204,72 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 		return RequiredDistribution{Kind: RequiredAny}
 	}
 }
+
+// OutputDistribution computes the partitioning a stage's output has, given
+// the resolved distributions of its dependencies. Pure function over
+// stage fields + dep map. Rules track how today's planner emits stages;
+// see the Phase 1 spec §"OutputDistribution" for the per-stage table.
+//
+// Phase 1 deliberately labels probe-split scans (Tasks > 1) as DistSingleton
+// because the per-worker file-list is opaque to the property algebra.
+// Phase 2 adds a richer label (e.g. DistRoundRobin) when the executor wires
+// scan partitioning into the property graph. See spec Risk #2.
+func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution {
+	switch stage.Type {
+	case "scan":
+		return Distribution{Kind: DistSingleton}
+	case "dual":
+		return Distribution{Kind: DistSingleton}
+	case "shuffle":
+		return Distribution{
+			Kind:  DistHashPartitioned,
+			Keys:  stage.ShuffleKeys,
+			Count: stage.NumPartitions,
+		}
+	case "hash_join", "broadcast_join":
+		// The join inherits the probe (left) input's distribution — the
+		// join itself does not re-partition the joined output, it just
+		// pairs probe rows with matching build rows.
+		if probe, ok := deps[stage.LeftDepStage]; ok {
+			return probe
+		}
+		return Distribution{Kind: DistSingleton}
+	case "aggregate":
+		return Distribution{Kind: DistSingleton}
+	case "final_aggregate", "merge_aggregate":
+		// Per spec §"OutputDistribution": merge-grouped finals are labeled
+		// hash-partitioned on group-by cols with Count=MergeGroupCount for
+		// symmetry with Trino/Spark. Lone reducers (MergeGroupCount == 0)
+		// are singleton. See spec Risk #1.
+		if stage.MergeGroupCount > 0 {
+			return Distribution{
+				Kind:  DistHashPartitioned,
+				Keys:  stage.GroupByCols,
+				Count: stage.MergeGroupCount,
+			}
+		}
+		return Distribution{Kind: DistSingleton}
+	case "sort":
+		return Distribution{Kind: DistSingleton}
+	case "merge_sort":
+		// Merge-grouped intermediate merges are labeled hash-partitioned on
+		// the sort keys (column names) for symmetry. Final merge of
+		// intermediates (MergeGroupCount == 0) is singleton.
+		if stage.MergeGroupCount > 0 {
+			keys := make([]string, len(stage.SortKeys))
+			for i, sk := range stage.SortKeys {
+				keys[i] = sk.Column
+			}
+			return Distribution{
+				Kind:  DistHashPartitioned,
+				Keys:  keys,
+				Count: stage.MergeGroupCount,
+			}
+		}
+		return Distribution{Kind: DistSingleton}
+	case "window", "pipeline", "table_func":
+		return Distribution{Kind: DistSingleton}
+	default:
+		return Distribution{Kind: DistSingleton}
+	}
+}

@@ -243,3 +243,141 @@ func TestRequiredChildDistribution(t *testing.T) {
 		})
 	}
 }
+
+func TestOutputDistribution(t *testing.T) {
+	tests := []struct {
+		name  string
+		stage Stage
+		deps  map[string]Distribution
+		want  Distribution
+	}{
+		{
+			name:  "scan emits singleton",
+			stage: Stage{ID: "scan-0", Type: "scan", ScanAlias: "lineitem"},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			name:  "dual emits singleton",
+			stage: Stage{ID: "dual-0", Type: "dual"},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			name: "shuffle emits hash partitioned",
+			stage: Stage{
+				ID: "shuffle-0", Type: "shuffle",
+				ShuffleKeys: []string{"l_orderkey"}, NumPartitions: 16,
+			},
+			deps: nil,
+			want: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+		{
+			name: "hash_join inherits probe distribution",
+			stage: Stage{
+				ID: "join-0", Type: "hash_join",
+				LeftDepStage: "shuffle-l", RightDepStage: "shuffle-r",
+				Dependencies: []string{"shuffle-l", "shuffle-r"},
+			},
+			deps: map[string]Distribution{
+				"shuffle-l": {Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+				"shuffle-r": {Kind: DistHashPartitioned, Keys: []string{"o_orderkey"}, Count: 16},
+			},
+			want: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 16},
+		},
+		{
+			name: "broadcast_join inherits probe distribution",
+			stage: Stage{
+				ID: "join-0", Type: "broadcast_join",
+				LeftDepStage: "scan-l", RightDepStage: "scan-r",
+				Dependencies: []string{"scan-l", "scan-r"},
+			},
+			deps: map[string]Distribution{
+				"scan-l": {Kind: DistSingleton},
+				"scan-r": {Kind: DistSingleton},
+			},
+			want: Distribution{Kind: DistSingleton},
+		},
+		{
+			name:  "aggregate emits singleton",
+			stage: Stage{ID: "aggregate-0", Type: "aggregate", GroupByCols: []string{"l_returnflag"}},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			name: "final_aggregate lone reducer emits singleton",
+			stage: Stage{
+				ID: "final_aggregate-0", Type: "final_aggregate",
+				GroupByCols: []string{"l_returnflag"},
+			},
+			deps: nil,
+			want: Distribution{Kind: DistSingleton},
+		},
+		{
+			name: "final_aggregate merge group emits hash partitioned",
+			stage: Stage{
+				ID: "merge_aggregate-0-0", Type: "final_aggregate",
+				GroupByCols:     []string{"l_returnflag"},
+				MergeGroup:      0,
+				MergeGroupCount: 4,
+			},
+			deps: nil,
+			want: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_returnflag"}, Count: 4},
+		},
+		{
+			name:  "sort emits singleton",
+			stage: Stage{ID: "sort-0", Type: "sort"},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			name:  "merge_sort lone emits singleton",
+			stage: Stage{ID: "merge_sort-0", Type: "merge_sort"},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			name: "merge_sort merge group emits hash partitioned",
+			stage: Stage{
+				ID: "merge_sort-0-0", Type: "merge_sort",
+				SortKeys:        []SortKeySpec{{Column: "l_orderkey"}},
+				MergeGroup:      0,
+				MergeGroupCount: 4,
+			},
+			deps: nil,
+			want: Distribution{Kind: DistHashPartitioned, Keys: []string{"l_orderkey"}, Count: 4},
+		},
+		{
+			name:  "window emits singleton",
+			stage: Stage{ID: "window-0", Type: "window"},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			name:  "pipeline emits singleton",
+			stage: Stage{ID: "pipeline-0", Type: "pipeline"},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			name:  "table_func emits singleton",
+			stage: Stage{ID: "tf-0", Type: "table_func"},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+		{
+			name:  "unknown stage type emits singleton",
+			stage: Stage{ID: "?-0", Type: "mystery"},
+			deps:  nil,
+			want:  Distribution{Kind: DistSingleton},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := OutputDistribution(tt.stage, tt.deps)
+			if !got.Equals(tt.want) {
+				t.Fatalf("OutputDistribution = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
