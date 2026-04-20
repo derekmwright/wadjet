@@ -162,8 +162,8 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 	case "scan", "dual":
 		// No inputs — any slot is RequiredAny by definition.
 		return RequiredDistribution{Kind: RequiredAny}
-	case "shuffle":
-		// Shuffle accepts any input and re-partitions.
+	case StageExchangeRepartition:
+		// Exchange-repartition accepts any input and re-partitions.
 		return RequiredDistribution{Kind: RequiredAny}
 	case "hash_join":
 		switch slot {
@@ -225,7 +225,7 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 		return Distribution{Kind: DistSingleton}
 	case "dual":
 		return Distribution{Kind: DistSingleton}
-	case "shuffle":
+	case StageExchangeRepartition:
 		return Distribution{
 			Kind:  DistHashPartitioned,
 			Keys:  stage.ShuffleKeys,

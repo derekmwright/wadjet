@@ -213,7 +213,7 @@ func followToAggregate(byID map[string]Stage, startID string) (Stage, bool) {
 			return s, true
 		}
 		// Shuffle and grouped-merge stages are transparent — follow through.
-		if s.Type == "shuffle" || s.Type == "final_aggregate" || s.Type == "merge_aggregate" {
+		if s.Type == StageExchangeRepartition || s.Type == "final_aggregate" || s.Type == "merge_aggregate" {
 			if len(s.Dependencies) == 0 {
 				return Stage{}, false
 			}

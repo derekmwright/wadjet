@@ -207,7 +207,7 @@ func validateStageGraph(t *testing.T, stages []Stage, queryName string) {
 		}
 
 		// Shuffle stages should have valid keys
-		if s.Type == "shuffle" {
+		if s.Type == StageExchangeRepartition {
 			if len(s.ShuffleKeys) == 0 {
 				t.Errorf("%s: shuffle stage %s has no shuffle keys", queryName, s.ID)
 			}
@@ -569,7 +569,7 @@ func TestTPCHRoutingDecisions(t *testing.T) {
 					joinCount++
 				}
 				joinCount += len(s.FusedJoins)
-				if s.Type == "shuffle" {
+				if s.Type == StageExchangeRepartition {
 					shuffleCount++
 				}
 			}
@@ -611,7 +611,7 @@ func TestTPCHShuffleKeysResolvable(t *testing.T) {
 			stages := sqlToStages(t, cat, ctx, sql, 3)
 
 			for _, s := range stages {
-				if s.Type != "shuffle" {
+				if s.Type != StageExchangeRepartition {
 					continue
 				}
 				for _, key := range s.ShuffleKeys {
@@ -691,7 +691,7 @@ func TestTPCHDistributionConsistency(t *testing.T) {
 			// singleton output, but shuffle stages must carry the
 			// hash-partitioned label with non-zero Count and non-empty Keys.
 			for _, s := range stages {
-				if s.Type == "shuffle" {
+				if s.Type == StageExchangeRepartition {
 					if s.Distribution.Kind != DistHashPartitioned {
 						t.Errorf("%s shuffle stage %s: Distribution.Kind = %v, want DistHashPartitioned",
 							name, s.ID, s.Distribution.Kind)
