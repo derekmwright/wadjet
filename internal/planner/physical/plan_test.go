@@ -624,18 +624,22 @@ func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 
 	// Verify shuffle properties (numPartitions = workerCount * 8 = 32)
 	for _, s := range shuffles {
-		if s.NumPartitions != 32 {
-			t.Errorf("shuffle %s: expected 32 partitions, got %d", s.ID, s.NumPartitions)
+		if s.Exchange == nil {
+			t.Errorf("shuffle %s: Exchange is nil", s.ID)
+			continue
 		}
-		if len(s.ShuffleKeys) == 0 {
+		if s.Exchange.Count != 32 {
+			t.Errorf("shuffle %s: expected 32 partitions, got %d", s.ID, s.Exchange.Count)
+		}
+		if len(s.Exchange.Keys) == 0 {
 			t.Errorf("shuffle %s: no shuffle keys", s.ID)
 		}
 	}
 
 	// Verify join stage is partitioned
 	js := joins[0]
-	if js.NumPartitions != 32 {
-		t.Errorf("join: expected 32 partitions, got %d", js.NumPartitions)
+	if js.JoinPartitionCount != 32 {
+		t.Errorf("join: expected 32 partitions, got %d", js.JoinPartitionCount)
 	}
 	if js.Tasks != 32 {
 		t.Errorf("join: expected 32 tasks, got %d", js.Tasks)
@@ -778,10 +782,12 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 		}
 
 		// Every shuffle key must exist in the dependency's column set
-		for _, key := range s.ShuffleKeys {
-			if !depCols[key] {
-				t.Errorf("shuffle %s (depends on %s %s) has key %q not in dependency columns %v",
-					s.ID, dep.Type, dep.ID, key, depCols)
+		if s.Exchange != nil {
+			for _, key := range s.Exchange.Keys {
+				if !depCols[key] {
+					t.Errorf("shuffle %s (depends on %s %s) has key %q not in dependency columns %v",
+						s.ID, dep.Type, dep.ID, key, depCols)
+				}
 			}
 		}
 	}
@@ -912,9 +918,11 @@ func TestPlanDistributed_ColumnPruning(t *testing.T) {
 			colSet[c] = true
 		}
 		// Must have join keys
-		for _, key := range s.ShuffleKeys {
-			if !colSet[key] {
-				t.Errorf("shuffle %s: shuffle key %q not in Columns %v", s.ID, key, s.Columns)
+		if s.Exchange != nil {
+			for _, key := range s.Exchange.Keys {
+				if !colSet[key] {
+					t.Errorf("shuffle %s: shuffle key %q not in Columns %v", s.ID, key, s.Columns)
+				}
 			}
 		}
 		// Should NOT have all 16 lineitem columns

@@ -71,9 +71,11 @@ type Stage struct {
 	// Window metadata
 	WindowCols []WindowColSpec
 
-	// Shuffle metadata
-	ShuffleKeys   []string // columns to hash-partition on
-	NumPartitions int      // number of output partitions (also used on join stages)
+	// JoinPartitionCount is the number of partitions for a hash-join stage
+	// that was preceded by repartition exchanges. Zero means the join is
+	// not partitioned (broadcast or single-partition). Exchange stages carry
+	// their partition count on Exchange.Count instead.
+	JoinPartitionCount int
 
 	// Fused scan-aggregate: partial aggregation is performed at the scan
 	// level, eliminating the scan→aggregate S3 round-trip. Workers produce
@@ -1998,25 +2000,29 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// Left (probe) side shuffle
 			leftShuffleID := fmt.Sprintf("exchange-repartition-%d", len(*stages))
 			*stages = append(*stages, Stage{
-				ID:            leftShuffleID,
-				Type:          StageExchangeRepartition,
-				Tasks:         1,
-				Columns:       shuffleCols,
-				ShuffleKeys:   leftKeys,
-				NumPartitions: numPartitions,
-				Dependencies:  []string{leftDep},
+				ID:      leftShuffleID,
+				Type:    StageExchangeRepartition,
+				Tasks:   1,
+				Columns: shuffleCols,
+				Exchange: &ExchangeStage{
+					Keys:  append([]string(nil), leftKeys...),
+					Count: numPartitions,
+				},
+				Dependencies: []string{leftDep},
 			})
 
 			// Right (build) side shuffle
 			rightShuffleID := fmt.Sprintf("exchange-repartition-%d", len(*stages))
 			*stages = append(*stages, Stage{
-				ID:            rightShuffleID,
-				Type:          StageExchangeRepartition,
-				Tasks:         1,
-				Columns:       shuffleCols,
-				ShuffleKeys:   rightKeys,
-				NumPartitions: numPartitions,
-				Dependencies:  []string{rightDep},
+				ID:      rightShuffleID,
+				Type:    StageExchangeRepartition,
+				Tasks:   1,
+				Columns: shuffleCols,
+				Exchange: &ExchangeStage{
+					Keys:  append([]string(nil), rightKeys...),
+					Count: numPartitions,
+				},
+				Dependencies: []string{rightDep},
 			})
 
 			leftDep = leftShuffleID
@@ -2032,16 +2038,16 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		stageID := fmt.Sprintf("join-%d", len(*stages))
 		stage := Stage{
-			ID:            stageID,
-			Type:          joinType,
-			Tasks:         joinTasks,
-			Columns:       node.NeededColumns,
-			JoinType:      jt,
-			JoinLeftKeys:  leftKeys,
-			JoinRightKeys: rightKeys,
-			LeftDepStage:  leftDep,
-			RightDepStage: rightDep,
-			NumPartitions: numPartitions,
+			ID:                 stageID,
+			Type:               joinType,
+			Tasks:              joinTasks,
+			Columns:            node.NeededColumns,
+			JoinType:           jt,
+			JoinLeftKeys:       leftKeys,
+			JoinRightKeys:      rightKeys,
+			LeftDepStage:       leftDep,
+			RightDepStage:      rightDep,
+			JoinPartitionCount: numPartitions,
 		}
 		// Propagate build-side table alias for column disambiguation in self-joins
 		// (e.g., nation n1 JOIN nation n2 — prevents duplicate columns from being dropped).

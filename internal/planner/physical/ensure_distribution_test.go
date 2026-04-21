@@ -24,12 +24,12 @@ func TestExchangeVariantFor(t *testing.T) {
 		{
 			name: "hash-partitioned -> repartition",
 			req:  RequiredDistribution{Kind: RequiredHashPartitionedOn, Keys: []string{"a", "b"}, Count: 4},
-			want: Stage{Type: StageExchangeRepartition, ShuffleKeys: []string{"a", "b"}, NumPartitions: 4},
+			want: Stage{Type: StageExchangeRepartition, Exchange: &ExchangeStage{Keys: []string{"a", "b"}, Count: 4}},
 		},
 		{
 			name: "clustered-on -> repartition",
 			req:  RequiredDistribution{Kind: RequiredClusteredOn, Keys: []string{"x"}, Count: 4},
-			want: Stage{Type: StageExchangeRepartition, ShuffleKeys: []string{"x"}, NumPartitions: 4},
+			want: Stage{Type: StageExchangeRepartition, Exchange: &ExchangeStage{Keys: []string{"x"}, Count: 4}},
 		},
 	}
 	for _, c := range cases {
@@ -42,11 +42,14 @@ func TestExchangeVariantFor(t *testing.T) {
 				t.Errorf("Type: got %q want %q", got.Type, c.want.Type)
 			}
 			if c.want.Type == StageExchangeRepartition {
-				if !reflect.DeepEqual(got.ShuffleKeys, c.want.ShuffleKeys) {
-					t.Errorf("ShuffleKeys: got %v want %v", got.ShuffleKeys, c.want.ShuffleKeys)
+				if got.Exchange == nil {
+					t.Fatalf("Exchange: got nil, want non-nil ExchangeStage")
 				}
-				if got.NumPartitions != c.want.NumPartitions {
-					t.Errorf("NumPartitions: got %d want %d", got.NumPartitions, c.want.NumPartitions)
+				if !reflect.DeepEqual(got.Exchange.Keys, c.want.Exchange.Keys) {
+					t.Errorf("Exchange.Keys: got %v want %v", got.Exchange.Keys, c.want.Exchange.Keys)
+				}
+				if got.Exchange.Count != c.want.Exchange.Count {
+					t.Errorf("Exchange.Count: got %d want %d", got.Exchange.Count, c.want.Exchange.Count)
 				}
 			}
 		})
@@ -98,8 +101,7 @@ func TestEnsureDistribution_InsertsRepartition(t *testing.T) {
 		{
 			ID:           "shuffle-build",
 			Type:         StageExchangeRepartition,
-			ShuffleKeys:  []string{"b"},
-			NumPartitions: 4,
+			Exchange:     &ExchangeStage{Keys: []string{"b"}, Count: 4},
 			Distribution: Distribution{Kind: DistHashPartitioned, Keys: []string{"b"}, Count: 4},
 		},
 		{ID: "scan-probe", Type: StageScan, Distribution: Distribution{Kind: DistSingleton}},

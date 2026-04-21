@@ -213,16 +213,20 @@ func validateStageGraph(t *testing.T, stages []Stage, queryName string) {
 
 		// Shuffle stages should have valid keys
 		if s.Type == StageExchangeRepartition {
-			if len(s.ShuffleKeys) == 0 {
-				t.Errorf("%s: shuffle stage %s has no shuffle keys", queryName, s.ID)
-			}
-			if s.NumPartitions < 2 {
-				t.Errorf("%s: shuffle stage %s has <2 partitions: %d", queryName, s.ID, s.NumPartitions)
+			if s.Exchange == nil {
+				t.Errorf("%s: repartition stage %s has nil Exchange payload", queryName, s.ID)
+			} else {
+				if len(s.Exchange.Keys) == 0 {
+					t.Errorf("%s: shuffle stage %s has no shuffle keys", queryName, s.ID)
+				}
+				if s.Exchange.Count < 2 {
+					t.Errorf("%s: shuffle stage %s has <2 partitions: %d", queryName, s.ID, s.Exchange.Count)
+				}
 			}
 		}
 
 		// Join stages with shuffle should have matching partition counts
-		if (s.Type == "hash_join" || s.Type == "broadcast_join") && s.NumPartitions > 1 {
+		if (s.Type == "hash_join" || s.Type == "broadcast_join") && s.JoinPartitionCount > 1 {
 			if s.LeftDepStage == "" || s.RightDepStage == "" {
 				t.Errorf("%s: partitioned join %s missing dep stages (left=%q, right=%q)",
 					queryName, s.ID, s.LeftDepStage, s.RightDepStage)
@@ -365,8 +369,8 @@ func TestTPCHDistributedPlans(t *testing.T) {
 				if s.BuildTableAlias != "" {
 					extra = fmt.Sprintf(" buildAlias=%s", s.BuildTableAlias)
 				}
-				if len(s.ShuffleKeys) > 0 {
-					extra += fmt.Sprintf(" shuffleKeys=%v", s.ShuffleKeys)
+				if s.Exchange != nil && len(s.Exchange.Keys) > 0 {
+					extra += fmt.Sprintf(" shuffleKeys=%v", s.Exchange.Keys)
 				}
 				if len(s.JoinLeftKeys) > 0 {
 					extra += fmt.Sprintf(" leftKeys=%v rightKeys=%v", s.JoinLeftKeys, s.JoinRightKeys)
@@ -619,7 +623,10 @@ func TestTPCHShuffleKeysResolvable(t *testing.T) {
 				if s.Type != StageExchangeRepartition {
 					continue
 				}
-				for _, key := range s.ShuffleKeys {
+				if s.Exchange == nil {
+					continue
+				}
+				for _, key := range s.Exchange.Keys {
 					// Strip any table qualifier
 					cleanKey := key
 					if dot := strings.IndexByte(key, '.'); dot >= 0 {

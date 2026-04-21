@@ -226,10 +226,13 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 	case "dual":
 		return Distribution{Kind: DistSingleton}
 	case StageExchangeRepartition:
+		if stage.Exchange == nil {
+			return Distribution{Kind: DistHashPartitioned}
+		}
 		return Distribution{
 			Kind:  DistHashPartitioned,
-			Keys:  stage.ShuffleKeys,
-			Count: stage.NumPartitions,
+			Keys:  stage.Exchange.Keys,
+			Count: stage.Exchange.Count,
 		}
 	case StageHashJoin, StageBroadcastJoin:
 		// The join inherits the probe (left) input's distribution — the

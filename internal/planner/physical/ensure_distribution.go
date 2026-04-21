@@ -200,9 +200,11 @@ func exchangeVariantFor(req RequiredDistribution) (Stage, bool) {
 		return Stage{Type: StageExchangeGather}, true
 	case RequiredHashPartitionedOn, RequiredClusteredOn:
 		return Stage{
-			Type:          StageExchangeRepartition,
-			ShuffleKeys:   append([]string(nil), req.Keys...),
-			NumPartitions: req.Count,
+			Type: StageExchangeRepartition,
+			Exchange: &ExchangeStage{
+				Keys:  append([]string(nil), req.Keys...),
+				Count: req.Count,
+			},
 		}, true
 	default:
 		return Stage{}, false
