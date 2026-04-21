@@ -22,10 +22,19 @@ const (
 )
 
 // ExchangeStage carries the per-variant payload attached to an Exchange
-// Stage. Stored on the Stage itself (not embedded) to keep Stage a flat
-// value type.
+// Stage. Stored on Stage.Exchange (pointer) so non-Exchange stages pay
+// no memory cost.
+//
+// Keys, Count are Repartition-only. Ordering is Gather-only.
+// BuildAlias, ProbeAlias, BuildBytes are populated by EnsureDistribution
+// on Repartition and (BuildAlias/ProbeAlias only) Replicate stages, so
+// the coordinator lowering pass can synthesize ShuffleCandidate without
+// calling PickShuffleCandidate.
 type ExchangeStage struct {
-	Keys     []string     // Repartition only
-	Count    int          // Repartition only
-	Ordering []SortKeySpec // Gather only (optional sort-merge gather)
+	Keys       []string      // Repartition only
+	Count      int           // Repartition only
+	Ordering   []SortKeySpec // Gather only (optional sort-merge gather)
+	BuildAlias string        // Repartition, Replicate
+	ProbeAlias string        // Repartition, Replicate
+	BuildBytes int64         // Repartition (for logging / threshold checks)
 }

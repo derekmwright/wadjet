@@ -118,6 +118,10 @@ type Stage struct {
 	// to DistHashPartitioned with Keys and Count populated. Broadcast pre-scans
 	// (build cache) set Kind: DistBroadcast.
 	Distribution Distribution
+
+	// Exchange carries per-variant metadata for StageExchange* stages.
+	// nil for non-Exchange stages.
+	Exchange *ExchangeStage
 }
 
 // WindowColSpec defines a window function column in a stage.
