@@ -551,7 +551,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			"workers", workerCount,
 			"partitions", workerCount*shufflePartitionMultiplier)
 
-		layout, err := c.orchestrateShuffleStages(ctx, queryID, shuffleCand, physStages, workerCount)
+		layout, err := c.orchestrateRepartition(ctx, queryID, shuffleCand, physStages, workerCount)
 		if err != nil {
 			return nil, fmt.Errorf("shuffle stages failed for query %s: %w", queryID, err)
 		}
