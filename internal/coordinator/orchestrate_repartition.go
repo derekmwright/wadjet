@@ -42,10 +42,10 @@ type ShuffleLayout struct {
 	ProbeShardFiles [][]string
 }
 
-// orchestrateShuffleStages runs both shuffle stages (build side and probe side)
+// orchestrateRepartition runs both shuffle stages (build side and probe side)
 // in parallel and returns the resulting shard layout. The caller is responsible
 // for dispatching the downstream probe pipeline tasks built from this layout.
-func (c *Coordinator) orchestrateShuffleStages(
+func (c *Coordinator) orchestrateRepartition(
 	ctx context.Context,
 	queryID string,
 	cand physical.ShuffleCandidate,
@@ -92,7 +92,7 @@ func (c *Coordinator) orchestrateShuffleStages(
 	})
 
 	if err := g.Wait(); err != nil {
-		return nil, fmt.Errorf("orchestrateShuffleStages: %w", err)
+		return nil, fmt.Errorf("orchestrateRepartition: %w", err)
 	}
 
 	c.logger.Info("shuffle orchestrator: both sides complete",
