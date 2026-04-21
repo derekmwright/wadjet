@@ -2,7 +2,10 @@ package physical
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +15,8 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
+
+var updateGolden = flag.Bool("update-golden", false, "update TPC-H ensure-distribution golden snapshots")
 
 // SF10-like file counts for realistic distributed planning.
 var tpchSF10Files = map[string]int{
@@ -904,6 +909,101 @@ func TestTPCH_EnsureDistribution_PlannerParity(t *testing.T) {
 				if s.Type == StageExchangeRepartition || s.Type == StageExchangeReplicate || s.Type == StageExchangeGather {
 					t.Logf("  %-24s type=%-20s dist=%+v deps=%v", s.ID, s.Type, s.Distribution, s.Dependencies)
 				}
+			}
+		})
+	}
+}
+
+// distSummary returns a stable single-word description of a Distribution for
+// use in golden snapshot files.
+func distSummary(d Distribution) string {
+	switch d.Kind {
+	case DistSingleton:
+		return "Singleton"
+	case DistBroadcast:
+		return "Broadcast"
+	case DistHashPartitioned:
+		return fmt.Sprintf("Hash(%s)/%d", strings.Join(d.Keys, ","), d.Count)
+	}
+	return "Unknown"
+}
+
+// TestTPCH_EnsureDistribution_Snapshot records the (stageID, type,
+// distribution, dependencies) sequence for every Q01-Q22 plan produced by
+// EnsureDistribution. Each query's snapshot is written to
+// internal/planner/physical/testdata/ensure_distribution/q<NN>.golden.
+//
+// Run with -update-golden to regenerate the golden files after intentional
+// plan changes.
+func TestTPCH_EnsureDistribution_Snapshot(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	buildLogicalPlanSnap := func(t *testing.T, sql string) *logical.Node {
+		t.Helper()
+		parsed, err := plansql.Parse(sql)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		selectInfo, err := plansql.ExtractSelect(parsed)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		logicalPlan, err := logical.BuildFromSelect(selectInfo)
+		if err != nil {
+			t.Fatalf("logical plan: %v", err)
+		}
+		scanAnnotator := func(plan *logical.Node) {
+			NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+		}
+		scanAnnotator(logicalPlan)
+		logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+		return logicalPlan
+	}
+
+	for qNum := 1; qNum <= 22; qNum++ {
+		sql, ok := tpchPlanQueryMap[qNum]
+		if !ok {
+			t.Logf("Q%02d not in plan query map; skipping", qNum)
+			continue
+		}
+		name := fmt.Sprintf("Q%02d", qNum)
+		t.Run(name, func(t *testing.T) {
+			node := buildLogicalPlanSnap(t, sql)
+
+			planner := NewPlanner(cat)
+			planner.WorkerCount = 4
+			planner.UseEnsureDistribution = true
+
+			stages, err := planner.PlanDistributed(ctx, node)
+			if err != nil {
+				t.Fatalf("plan: %v", err)
+			}
+
+			var buf strings.Builder
+			for _, s := range stages {
+				fmt.Fprintf(&buf, "%s\t%s\t%s", s.ID, s.Type, distSummary(s.Distribution))
+				if len(s.Dependencies) > 0 {
+					fmt.Fprintf(&buf, "\tdeps=%s", strings.Join(s.Dependencies, ","))
+				}
+				buf.WriteByte('\n')
+			}
+
+			goldenPath := filepath.Join("testdata", "ensure_distribution", strings.ToLower(name)+".golden")
+			if *updateGolden {
+				if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(goldenPath, []byte(buf.String()), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			want, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Fatalf("read golden: %v (run with -update-golden to create)", err)
+			}
+			if got := buf.String(); got != string(want) {
+				t.Errorf("snapshot diff for %s:\n--- want\n%s--- got\n%s", name, want, got)
 			}
 		})
 	}

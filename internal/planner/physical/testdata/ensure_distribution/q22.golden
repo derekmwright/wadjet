@@ -1,0 +1,22 @@
+scan-0	scan	Singleton
+scan-1	scan	Singleton
+exchange-repartition-2	exchange-repartition	Hash(c_custkey)/32	deps=scan-0
+exchange-repartition-3	exchange-repartition	Hash(o_custkey)/32	deps=scan-1
+join-4	hash_join	Hash(c_custkey)/32	deps=exchange-repartition-2,exchange-repartition-3
+aggregate-5	aggregate	Singleton	deps=join-4
+final_aggregate-6	final_aggregate	Singleton	deps=aggregate-5
+sort-7	sort	Singleton	deps=final_aggregate-6
+merge_sort-8-0	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-9-1	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-10-2	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-11-3	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-12-4	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-13-5	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-14-6	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-15-7	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-16-8	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-17-9	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-18-10	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-19-11	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-20-12	merge_sort	Hash(cntrycode)/13	deps=sort-7
+merge_sort-21	merge_sort	Singleton	deps=merge_sort-8-0,merge_sort-9-1,merge_sort-10-2,merge_sort-11-3,merge_sort-12-4,merge_sort-13-5,merge_sort-14-6,merge_sort-15-7,merge_sort-16-8,merge_sort-17-9,merge_sort-18-10,merge_sort-19-11,merge_sort-20-12
