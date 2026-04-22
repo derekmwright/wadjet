@@ -111,6 +111,32 @@ type Task struct {
 	// succeed (spec: 2026-04-18-shuffle-distributed-aggregate.md).
 	PreComputedAggregates []PreComputedAggregate `json:"pre_computed_aggregates,omitempty"`
 
+	// Inputs maps scan/alias name → S3 keys for upstream stage output.
+	// Generalizes PreScannedInputs: used for both table-scan inputs (legacy)
+	// and previous-stage-output inputs (Phase 3 native DAG). Worker source
+	// selection inspects file patterns: partition=NNNN/*.wshf → partitionShardSource;
+	// *.parquet → streamSource.
+	Inputs map[string][]string `json:"inputs,omitempty"`
+
+	// Output is the S3 prefix where this task's output is materialized.
+	// Shuffle/pipeline-intermediate: worker writes "<Output>partition=NNNN/<taskID>.wshf".
+	// Pipeline-final (before Gather): single-partition output at "<Output><taskID>.wshf".
+	// Gather: empty; worker streams to ReplySubject.
+	Output string `json:"output,omitempty"`
+
+	// ReplySubject is the NATS subject the worker publishes batch chunks to.
+	// Only set for TaskTypeGather; enables real-operator Gather semantics.
+	ReplySubject string `json:"reply_subject,omitempty"`
+
+	// GatherOrdering (Gather only) — merge-sort keys applied by the coordinator
+	// when reassembling output from multiple gather workers. Empty means no
+	// ordering; coordinator concatenates streams in arrival order.
+	GatherOrdering []SortKeySpec `json:"gather_ordering,omitempty"`
+
+	// GatherLimit (Gather only) — top-N limit applied by the coordinator
+	// after ordering. Zero means no limit.
+	GatherLimit int `json:"gather_limit,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 }
 
