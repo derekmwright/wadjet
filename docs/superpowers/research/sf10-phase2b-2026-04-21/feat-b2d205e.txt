@@ -1,0 +1,154 @@
+=== Wadjet TPC-H Benchmark ===
+Mode:         distributed
+Scale Factor: SF10 (10x)
+Workers:      3
+Runs:         1
+Instance:     
+Instance ID:  
+Bucket:       wadjet-bench-sf10-use2
+Date:         2026-04-21T23:00:18Z
+
+--- CPU ---
+CPU(s):                                  8
+Thread(s) per core:                      1
+Core(s) per socket:                      8
+Socket(s):                               1
+
+--- Memory ---
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       388Mi        13Gi       0.0Ki       1.0Gi        14Gi
+
+[23:00:18] Using pre-seeded data from s3://wadjet-bench-sf10-use2 (set GENERATE_DATA=1 to regenerate)
+[23:00:18] Running TPC-H SF10 distributed benchmark (1 runs, 3 workers)...
+2026/04/21 23:00:18 Set GOMEMLIMIT=14791348224 (13.8 GB), GOGC=off from detected limit 16434831360
+time=2026-04-21T23:00:18.906Z level=INFO msg="embedded NATS started" host=0.0.0.0 port=4222
+time=2026-04-21T23:00:18.952Z level=INFO msg="coordinator NATS KV result cache enabled" bucket=wadjet_results_data
+2026/04/21 23:00:18 Waiting for 3 remote workers to connect...
+2026/04/21 23:00:18   0/3 remote workers...
+2026/04/21 23:00:23   0/3 remote workers...
+2026/04/21 23:00:28   0/3 remote workers...
+2026/04/21 23:00:33   0/3 remote workers...
+2026/04/21 23:00:38   0/3 remote workers...
+time=2026-04-21T23:00:40.774Z level=INFO msg="worker registered" worker_id=worker-105c5232 cluster_id=local
+time=2026-04-21T23:00:41.779Z level=INFO msg="worker registered" worker_id=worker-f0b3eb2c cluster_id=local
+time=2026-04-21T23:00:42.036Z level=INFO msg="worker registered" worker_id=worker-3b2e9439 cluster_id=local
+2026/04/21 23:00:43 All 3 remote workers connected
+2026/04/21 23:00:46 Discovered 20 files for table part (9 cols, 2000000 rows)
+2026/04/21 23:01:07 Discovered 80 files for table partsupp (5 cols, 8000000 rows)
+2026/04/21 23:01:10 Discovered 15 files for table customer (8 cols, 1500000 rows)
+2026/04/21 23:01:38 Discovered 150 files for table orders (9 cols, 15000000 rows)
+2026/04/21 23:03:31 Discovered 600 files for table lineitem (16 cols, 60000000 rows)
+2026/04/21 23:03:31 Discovered 1 files for table region (3 cols, 5 rows)
+2026/04/21 23:03:32 Discovered 2 files for table nation (4 cols, 50 rows)
+2026/04/21 23:03:32 Discovered 2 files for table supplier (7 cols, 100010 rows)
+2026/04/21 23:03:32 Data discovery complete: 870 total files across 8 tables
+2026/04/21 23:03:34 Worker CPU profiling started
+
+=== Run 1/1 ===
+time=2026-04-21T23:03:34.675Z level=INFO msg="aggregate-shuffle not applied" query=1b7183c9 reason=no_join_stages observed_scan_bytes=0 threshold=1073741824 nearest_join="" nearest_scan_alias=""
+time=2026-04-21T23:03:34.676Z level=INFO msg="published tasks" count=1
+Q01 Pricing Summary Report           15.92s      6 rows  heap   +2MB  gc  0.1ms  OK
+time=2026-04-21T23:03:50.602Z level=INFO msg="aggregate-shuffle not applied" query=c157537f reason=aggregate_not_scan_rooted observed_scan_bytes=0 threshold=1073741824 nearest_join=join-20 nearest_scan_alias=""
+time=2026-04-21T23:03:50.603Z level=INFO msg="published tasks" count=1
+Q02 Minimum Cost Supplier            3.915s    100 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:03:54.522Z level=INFO msg="aggregate-shuffle not applied" query=1f6152f8 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-8 nearest_scan_alias=""
+time=2026-04-21T23:03:54.523Z level=INFO msg="published tasks" count=1
+Q03 Shipping Priority               25.917s     10 rows  heap   +3MB  gc  0.0ms  OK
+time=2026-04-21T23:04:20.442Z level=INFO msg="aggregate-shuffle not applied" query=bbcb6858 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T23:04:20.446Z level=INFO msg="published tasks" count=1
+Q04 Order Priority Checking         31.698s      5 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:04:52.145Z level=INFO msg="aggregate-shuffle not applied" query=f522c076 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-14 nearest_scan_alias=""
+time=2026-04-21T23:04:52.154Z level=INFO msg="published tasks" count=1
+Q05 Local Supplier Volume           22.343s      5 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:05:14.491Z level=INFO msg="aggregate-shuffle not applied" query=4f84c093 reason=no_join_stages observed_scan_bytes=0 threshold=1073741824 nearest_join="" nearest_scan_alias=""
+time=2026-04-21T23:05:14.491Z level=INFO msg="published tasks" count=1
+Q06 Forecasting Revenue Change      14.729s      1 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:05:29.224Z level=INFO msg="aggregate-shuffle not applied" query=4882402e reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-14 nearest_scan_alias=""
+time=2026-04-21T23:05:29.225Z level=INFO msg="published tasks" count=1
+Q07 Volume Shipping                 18.151s      4 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:05:47.380Z level=INFO msg="aggregate-shuffle not applied" query=05f7030f reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-18 nearest_scan_alias=""
+time=2026-04-21T23:05:47.381Z level=INFO msg="published tasks" count=1
+Q08 National Market Share           31.426s      6 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:06:18.807Z level=INFO msg="aggregate-shuffle not applied" query=934bed3c reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-14 nearest_scan_alias=""
+time=2026-04-21T23:06:18.809Z level=INFO msg="published tasks" count=1
+Q09 Product Type Profit Measure     19.958s    150 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:06:38.768Z level=INFO msg="aggregate-shuffle not applied" query=518fc25b reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-10 nearest_scan_alias=""
+time=2026-04-21T23:06:38.772Z level=INFO msg="published tasks" count=1
+Q10 Returned Item Reporting         24.561s     20 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:07:07.006Z level=INFO msg="aggregate-shuffle not applied" query=80d09557 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T23:07:07.010Z level=INFO msg="published tasks" count=1
+Q11 Important Stock Identification   6.633s   9961 rows  heap  +85MB  gc  0.1ms  OK
+time=2026-04-21T23:07:09.973Z level=INFO msg="aggregate-shuffle not applied" query=9590241c reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T23:07:09.974Z level=INFO msg="published tasks" count=1
+Q12 Shipping Modes and Order Priority  45.742s      7 rows  heap   +2MB  gc  0.1ms  OK
+time=2026-04-21T23:07:55.719Z level=INFO msg="aggregate-shuffle not applied" query=2eb42d7b reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T23:07:55.720Z level=INFO msg="published tasks" count=1
+Q13 Customer Distribution            5.199s    100 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:08:00.922Z level=INFO msg="aggregate-shuffle not applied" query=83d473bc reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-2 nearest_scan_alias=""
+time=2026-04-21T23:08:00.923Z level=INFO msg="published tasks" count=1
+Q14 Promotion Effect                13.453s      1 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:08:14.380Z level=INFO msg="aggregate-shuffle not applied" query=5d57ccab reason=scan_has_filters observed_scan_bytes=3673081624 threshold=1073741824 nearest_join=join-43 nearest_scan_alias=lineitem
+time=2026-04-21T23:08:14.381Z level=INFO msg="published tasks" count=1
+Q15 Top Supplier                    12.772s      1 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:08:27.156Z level=INFO msg="aggregate-shuffle not applied" query=ee6185a3 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-2 nearest_scan_alias=""
+time=2026-04-21T23:08:27.157Z level=INFO msg="published tasks" count=1
+Q16 Parts/Supplier Relationship      3.293s  27839 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:08:30.455Z level=INFO msg="aggregate-shuffle candidate matched, dispatching pre-compute" query=03e23d86 agg_stage=final_aggregate-42 input_scan=lineitem:1 input_bytes=3673081624 threshold=1073741824 group_by=[l_partkey]
+time=2026-04-21T23:08:30.455Z level=INFO msg="aggregate pre-compute: dispatching" parent_query=03e23d86 agg_stage=final_aggregate-42 input_scan=lineitem:1 input_bytes=3673081624 sql="SELECT l_partkey, AVG(l_quantity) AS __scalar_0 FROM lineitem GROUP BY l_partkey"
+time=2026-04-21T23:08:30.455Z level=INFO msg="published tasks" count=1
+time=2026-04-21T23:08:45.451Z level=INFO msg="aggregate pre-compute: complete" agg_stage=final_aggregate-42 rows=2000000 path=queries/03e23d86/aggregate-cache/final_aggregate-42/a13fe561.wshf
+time=2026-04-21T23:08:45.458Z level=INFO msg="published tasks" count=1
+Q17 Small-Quantity-Order Revenue    30.575s      1 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:09:01.035Z level=INFO msg="aggregate-shuffle candidate matched, dispatching pre-compute" query=146326be agg_stage=final_aggregate-48 input_scan=lineitem:1 input_bytes=3673081624 threshold=1073741824 group_by=[l_orderkey]
+time=2026-04-21T23:09:01.035Z level=INFO msg="aggregate pre-compute: dispatching" parent_query=146326be agg_stage=final_aggregate-48 input_scan=lineitem:1 input_bytes=3673081624 sql="SELECT l_orderkey, SUM(l_quantity) AS __having_0 FROM lineitem GROUP BY l_orderkey"
+time=2026-04-21T23:09:01.035Z level=INFO msg="published tasks" count=1
+time=2026-04-21T23:09:16.652Z level=INFO msg="aggregate pre-compute: complete" agg_stage=final_aggregate-48 rows=14997464 path=queries/146326be/aggregate-cache/final_aggregate-48/9263d964.wshf
+time=2026-04-21T23:09:16.656Z level=INFO msg="published tasks" count=1
+Q18 Large Volume Customer          10m0.001s      0 rows  heap   +2MB  gc  0.0ms  FAIL: context deadline exceeded
+time=2026-04-21T23:19:01.041Z level=INFO msg="aggregate-shuffle not applied" query=ce12f800 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-2 nearest_scan_alias=""
+time=2026-04-21T23:19:01.046Z level=INFO msg="published tasks" count=1
+Q19 Discounted Revenue              17.523s      1 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:19:18.568Z level=INFO msg="aggregate-shuffle not applied" query=e5c81223 reason=scan_has_filters observed_scan_bytes=3673081624 threshold=1073741824 nearest_join=join-48 nearest_scan_alias=lineitem
+time=2026-04-21T23:19:18.572Z level=INFO msg="published tasks" count=1
+Q20 Potential Part Promotion        20.839s   3780 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:19:39.412Z level=INFO msg="aggregate-shuffle not applied" query=6f44cf5a reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-16 nearest_scan_alias=""
+time=2026-04-21T23:19:39.413Z level=INFO msg="published tasks" count=1
+Q21 Suppliers Who Kept Orders Waiting  47.999s      0 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T23:20:28.202Z level=INFO msg="aggregate-shuffle not applied" query=8b2cb533 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T23:20:28.203Z level=INFO msg="published tasks" count=1
+Q22 Global Sales Opportunity         5.547s      5 rows  heap  +69MB  gc  0.1ms  OK
+
+--- Summary (Run 1) ---
+Query Description                          Time     Rows Heap Delta   GC Pause
+----- -----                               -----    -----      -----      -----
+Q01   Pricing Summary Report             15.92s        6       +2MB      0.1ms
+Q02   Minimum Cost Supplier              3.915s      100       +3MB      0.1ms
+Q03   Shipping Priority                 25.917s       10       +3MB      0.0ms
+Q04   Order Priority Checking           31.698s        5       +3MB      0.1ms
+Q05   Local Supplier Volume             22.343s        5       +3MB      0.1ms
+Q06   Forecasting Revenue Change        14.729s        1       +3MB      0.1ms
+Q07   Volume Shipping                   18.151s        4       +3MB      0.1ms
+Q08   National Market Share             31.426s        6       +3MB      0.1ms
+Q09   Product Type Profit Measure       19.958s      150       +3MB      0.1ms
+Q10   Returned Item Reporting           24.561s       20       +3MB      0.1ms
+Q11   Important Stock Identification     6.633s     9961      +85MB      0.1ms
+Q12   Shipping Modes and Order Priority    45.742s        7       +2MB      0.1ms
+Q13   Customer Distribution              5.199s      100       +3MB      0.1ms
+Q14   Promotion Effect                  13.453s        1       +3MB      0.1ms
+Q15   Top Supplier                      12.772s        1       +3MB      0.1ms
+Q16   Parts/Supplier Relationship        3.293s    27839       +3MB      0.1ms
+Q17   Small-Quantity-Order Revenue      30.575s        1       +3MB      0.1ms
+Q18   Large Volume Customer              FAILED        0       +2MB      0.0ms
+Q19   Discounted Revenue                17.523s        1       +3MB      0.1ms
+Q20   Potential Part Promotion          20.839s     3780       +3MB      0.1ms
+Q21   Suppliers Who Kept Orders Waiting    47.999s        0       +3MB      0.1ms
+Q22   Global Sales Opportunity           5.547s        5      +69MB      0.1ms
+      TOTAL                          16m58.193s
+2026/04/21 23:20:33 Saved worker CPU profile: /root/benchmark-results/profiles/worker-worker-3b2e9439-cpu.prof (123537 bytes)
+2026/04/21 23:20:33 Saved worker heap profile: /root/benchmark-results/profiles/worker-worker-3b2e9439-heap.prof (66552 bytes)
+2026/04/21 23:20:33 Saved worker CPU profile: /root/benchmark-results/profiles/worker-worker-f0b3eb2c-cpu.prof (126332 bytes)
+2026/04/21 23:20:33 Saved worker heap profile: /root/benchmark-results/profiles/worker-worker-f0b3eb2c-heap.prof (68616 bytes)
+time=2026-04-21T23:20:33.952Z level=INFO msg="worker reaped (stale)" worker_id=worker-105c5232
+2026/04/21 23:21:03 Collected profiles from 2/3 workers
+[23:21:03] 
+[23:21:03] === Uploading results to S3 ===
