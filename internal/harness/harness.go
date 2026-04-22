@@ -64,14 +64,24 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			return result, fmt.Errorf("preflight failed:\n  - %s", pf.Error())
 		}
 
-		cluster = NewCluster(ClusterConfig{
+		clusterCfg := ClusterConfig{
 			WadjetBin:  cfg.WadjetBin,
 			RunDir:     runDir,
 			NumWorkers: numWorkers,
 			GoMemLimit: sliceCfg.GoMemLimit,
+			PgAddr:     cfg.PgAddr,
 			DataDir:    cfg.DataDir,
 			Logger:     logger,
-		})
+		}
+		if cfg.Source == "s3" {
+			clusterCfg.StorageType = "s3"
+			clusterCfg.Bucket = cfg.Bucket
+			clusterCfg.Region = cfg.Region
+			clusterCfg.Endpoint = cfg.Endpoint
+			clusterCfg.SSL = cfg.SSL
+			clusterCfg.DataDir = "" // ignore — S3 is the source
+		}
+		cluster = NewCluster(clusterCfg)
 
 		// Two-phase startup: coordinator (owns NATS) first, seed data, then workers.
 		if err := cluster.StartCoordinator(ctx); err != nil {
@@ -79,8 +89,15 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 		}
 		defer cluster.Shutdown(context.Background())
 
-		if err := loadSampleData(ctx, cluster, cfg.DataDir, sliceCfg, logger); err != nil {
-			return result, fmt.Errorf("loading sample data: %w", err)
+		switch cfg.Source {
+		case "s3":
+			if err := primeS3Catalog(ctx, cluster, cfg.Endpoint, cfg.Region, cfg.Bucket, cfg.SSL, cfg.DataPrefix, logger); err != nil {
+				return result, fmt.Errorf("priming S3 catalog: %w", err)
+			}
+		default: // "local" or empty
+			if err := loadSampleData(ctx, cluster, cfg.DataDir, sliceCfg, logger); err != nil {
+				return result, fmt.Errorf("loading sample data: %w", err)
+			}
 		}
 
 		if err := cluster.StartWorkers(ctx); err != nil {

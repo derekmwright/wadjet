@@ -41,6 +41,15 @@ type Config struct {
 	UpdateBaseline bool
 	NoCompare      bool
 	WadjetBin      string // path to wadjet binary; auto-built if empty
+	PgAddr         string // local only; override for coordinator pgwire listen addr
+
+	// S3 source (Source=="s3" only)
+	Source     string // "local" (default) or "s3"
+	Bucket     string
+	Region     string
+	Endpoint   string
+	SSL        bool
+	DataPrefix string // prefix under Bucket containing table data (e.g. "tables/")
 }
 
 // QueryMeasurement is the result of running one query (or micro).

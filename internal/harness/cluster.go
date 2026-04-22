@@ -25,8 +25,18 @@ type ClusterConfig struct {
 	NumWorkers int
 	GoMemLimit int64
 	PgAddr     string // pgwire listen address for coordinator (default ":15433")
-	DataDir    string // local data dir (FileStore) for storage-type=file
-	Logger     *slog.Logger
+	DataDir    string // local data dir (FileStore) for StorageType=="file"
+
+	// StorageType selects the coordinator/worker storage backend.
+	// "" or "file" -> FileStore at DataDir (default)
+	// "s3"         -> MinIO/S3 at Endpoint/Region/Bucket
+	StorageType string
+	Bucket      string
+	Region      string
+	Endpoint    string
+	SSL         bool
+
+	Logger *slog.Logger
 }
 
 // Cluster is a process supervisor for one coordinator + N workers.
@@ -117,9 +127,7 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 		"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", "coord"),
 		"--nats-store-dir=" + filepath.Join(c.cfg.RunDir, "nats"),
 	}
-	if c.cfg.DataDir != "" {
-		coordArgs = append(coordArgs, "--storage-type=file", "--data-dir="+c.cfg.DataDir)
-	}
+	coordArgs = append(coordArgs, storageArgs(c.cfg)...)
 	coord, err := c.spawn("coord", coordArgs)
 	if err != nil {
 		return fmt.Errorf("spawning coordinator: %w", err)
@@ -164,9 +172,7 @@ func (c *Cluster) StartWorkers(ctx context.Context) error {
 			"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", role),
 			"--metrics-addr=:" + strconv.Itoa(metricsPort),
 		}
-		if c.cfg.DataDir != "" {
-			workerArgs = append(workerArgs, "--storage-type=file", "--data-dir="+c.cfg.DataDir)
-		}
+		workerArgs = append(workerArgs, storageArgs(c.cfg)...)
 		w, err := c.spawn(role, workerArgs)
 		if err != nil {
 			return fmt.Errorf("spawning %s: %w", role, err)
@@ -354,6 +360,30 @@ func (c *Cluster) shutdown(_ context.Context) error {
 		return fmt.Errorf("post-shutdown orphan check: %w", err)
 	}
 	return nil
+}
+
+// storageArgs returns the --storage-type/--bucket/... flags to pass to both
+// coordinator and worker based on the cluster's configured backend. Empty
+// StorageType falls back to the FileStore (DataDir) path used by local mode.
+func storageArgs(cfg ClusterConfig) []string {
+	switch cfg.StorageType {
+	case "s3":
+		args := []string{
+			"--storage-type=s3",
+			"--bucket=" + cfg.Bucket,
+			"--region=" + cfg.Region,
+			"--endpoint=" + cfg.Endpoint,
+		}
+		if cfg.SSL {
+			args = append(args, "--ssl")
+		}
+		return args
+	default: // "" or "file"
+		if cfg.DataDir != "" {
+			return []string{"--storage-type=file", "--data-dir=" + cfg.DataDir}
+		}
+		return nil
+	}
 }
 
 // freePort asks the kernel for an available TCP port.
