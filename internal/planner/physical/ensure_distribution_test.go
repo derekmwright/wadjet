@@ -73,8 +73,14 @@ func TestEnsureDistribution_NoOp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 {
-		t.Fatalf("expected 2 stages, got %d", len(got))
+	// Phase 3 native DAG: every plan terminates in Gather, including
+	// Singleton-rooted ones (used to be skipped). Input 2 stages → output
+	// 3 stages (original two + terminal gather).
+	if len(got) != 3 {
+		t.Fatalf("expected 3 stages (scan + pipe + terminal gather), got %d", len(got))
+	}
+	if got[len(got)-1].Type != StageExchangeGather {
+		t.Fatalf("expected terminal StageExchangeGather, got %s", got[len(got)-1].Type)
 	}
 }
 

@@ -12,3 +12,4 @@ merge_sort-11-3	merge_sort	Hash(value)/6	deps=sort-7
 merge_sort-12-4	merge_sort	Hash(value)/6	deps=sort-7
 merge_sort-13-5	merge_sort	Hash(value)/6	deps=sort-7
 merge_sort-14	merge_sort	Singleton	deps=merge_sort-8-0,merge_sort-9-1,merge_sort-10-2,merge_sort-11-3,merge_sort-12-4,merge_sort-13-5
+exchange-gather-merge_sort-14	exchange-gather	Singleton	deps=merge_sort-14

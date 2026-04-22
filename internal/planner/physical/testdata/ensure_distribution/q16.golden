@@ -16,3 +16,4 @@ merge_sort-14-6	merge_sort	Hash(supplier_cnt,p_brand,p_type,p_size)/9	deps=sort-
 merge_sort-15-7	merge_sort	Hash(supplier_cnt,p_brand,p_type,p_size)/9	deps=sort-7
 merge_sort-16-8	merge_sort	Hash(supplier_cnt,p_brand,p_type,p_size)/9	deps=sort-7
 merge_sort-17	merge_sort	Singleton	deps=merge_sort-8-0,merge_sort-9-1,merge_sort-10-2,merge_sort-11-3,merge_sort-12-4,merge_sort-13-5,merge_sort-14-6,merge_sort-15-7,merge_sort-16-8
+exchange-gather-merge_sort-17	exchange-gather	Singleton	deps=merge_sort-17

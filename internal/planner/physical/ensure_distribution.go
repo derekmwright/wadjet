@@ -109,11 +109,14 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 		}
 	}
 
-	// If the final stage's output isn't Singleton, the query root needs a
-	// Gather so the coordinator sees one output stream.
+	// Always emit a terminal Gather. Native-DAG execution (Phase 3) requires
+	// every distributed plan to end in Gather so executeStageDAG has a clean
+	// termination. Even single-worker Singleton-rooted plans append a trivial
+	// Gather so the coordinator receives its output via the same ReplySubject
+	// path. Matches Trino's "output fragment" invariant.
 	if len(out) > 0 {
 		root := out[len(out)-1]
-		if root.Distribution.Kind != DistSingleton && root.Type != StageExchangeGather {
+		if root.Type != StageExchangeGather {
 			gather := Stage{
 				Type:         StageExchangeGather,
 				ID:           fmt.Sprintf("%s-%s", StageExchangeGather, root.ID),
