@@ -26,12 +26,22 @@ func main() {
 		noCompare      = flag.Bool("no-compare", false, "skip baseline comparison, just emit measurements")
 		wadjetBin      = flag.String("wadjet-bin", "", "path to wadjet binary (default: $WADJET_BIN or ./wadjet)")
 		pgAddr         = flag.String("pg-addr", ":15433", "pgwire listen address for the spawned coordinator")
+		source         = flag.String("source", "local", "data source: local (files under --data-dir) or s3 (coordinator reads from --bucket)")
+		bucket         = flag.String("bucket", "wadjet-bench-sf10-use2", "S3 bucket name (source=s3)")
+		region         = flag.String("region", "us-east-2", "S3 region (source=s3)")
+		endpoint       = flag.String("endpoint", "s3.us-east-2.amazonaws.com", "S3 endpoint (source=s3)")
+		ssl            = flag.Bool("ssl", true, "use SSL for S3 (source=s3)")
+		dataPrefix     = flag.String("data-prefix", "tables/", "S3 prefix under --bucket containing table data (source=s3)")
 	)
 	flag.Parse()
 
 	if *mode == "" {
 		fmt.Fprintln(os.Stderr, "ERROR: --mode is required (local or golden)")
 		flag.Usage()
+		os.Exit(harness.ExitSetup)
+	}
+	if *source != "local" && *source != "s3" {
+		fmt.Fprintln(os.Stderr, "ERROR: --source must be 'local' or 's3'")
 		os.Exit(harness.ExitSetup)
 	}
 
@@ -46,6 +56,12 @@ func main() {
 		NoCompare:      *noCompare,
 		WadjetBin:      *wadjetBin,
 		PgAddr:         *pgAddr,
+		Source:         *source,
+		Bucket:         *bucket,
+		Region:         *region,
+		Endpoint:       *endpoint,
+		SSL:            *ssl,
+		DataPrefix:     *dataPrefix,
 	}
 	if *queries != "" {
 		cfg.Queries = strings.Split(*queries, ",")
