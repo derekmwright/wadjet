@@ -143,12 +143,177 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	return e.writeStageOutput(ctx, task, batches, result)
 }
 
+// executeStageAggregate runs a HashAggregate over a single Input, writing
+// the aggregated rows via writeStageOutput. Handles both "aggregate"
+// (partial aggregate feeding a final_aggregate) and "final_aggregate"
+// (merge partials from upstream partitions) — they share the same kernel;
+// the planner decides which columns are pass-through vs. aggregated and
+// encodes that in task.Aggregates + task.GroupByCols.
 func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	return fmt.Errorf("executeStageAggregate: not yet implemented")
+	if len(task.Inputs) != 1 {
+		return fmt.Errorf("aggregate task %s: needs exactly 1 input, got %d", task.ID, len(task.Inputs))
+	}
+	var alias string
+	var files []string
+	for k, v := range task.Inputs {
+		alias, files = k, v
+		break
+	}
+	bucket := task.DataBucket
+	if bucket == "" {
+		bucket = task.ResultBucket
+	}
+	src, err := e.sourceForAlias(bucket, alias, files)
+	if err != nil {
+		return fmt.Errorf("aggregate task %s: source: %w", task.ID, err)
+	}
+
+	aggCols := make([]exec.AggColumn, len(task.Aggregates))
+	for i, a := range task.Aggregates {
+		aggCols[i] = exec.AggColumn{
+			Func:       parseAggFuncString(a.Func),
+			InputCol:   a.InputCol,
+			OutputCol:  a.OutputCol,
+			OutputType: aggOutputTypeString(a.Func),
+		}
+	}
+	hashAgg := exec.NewHashAggregate(task.GroupByCols, aggCols)
+	if sm, _ := e.newSpillManager(task.ID); sm != nil {
+		hashAgg.Spill = sm
+	}
+
+	pipeline := &exec.Pipeline{
+		Source: src,
+		Sink:   hashAgg,
+	}
+	if err := pipeline.Run(ctx); err != nil {
+		return fmt.Errorf("aggregate task %s: pipeline: %w", task.ID, err)
+	}
+	// HashAggregate acts as a source after the sink run: drain its output
+	// batches via Next.
+	var outBatches []*batch.RecordBatch
+	for {
+		b, err := hashAgg.Next(ctx)
+		if err != nil {
+			return fmt.Errorf("aggregate task %s: next: %w", task.ID, err)
+		}
+		if b == nil {
+			break
+		}
+		outBatches = append(outBatches, b)
+	}
+	return e.writeStageOutput(ctx, task, outBatches, result)
 }
 
+// executeStageSort runs an in-memory Sort over a single Input, optionally
+// truncating to task.Limit rows (Top-K), and writes the result via
+// writeStageOutput. "merge_sort" stages consume pre-sorted partition
+// streams — they use the same code path (a total sort is a correct merge
+// output, just slower). Fine-tuned merge-sort is a follow-up.
 func (e *Executor) executeStageSort(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	return fmt.Errorf("executeStageSort: not yet implemented")
+	if len(task.Inputs) != 1 {
+		return fmt.Errorf("sort task %s: needs exactly 1 input, got %d", task.ID, len(task.Inputs))
+	}
+	if len(task.SortKeys) == 0 {
+		return fmt.Errorf("sort task %s: SortKeys required", task.ID)
+	}
+	var alias string
+	var files []string
+	for k, v := range task.Inputs {
+		alias, files = k, v
+		break
+	}
+	bucket := task.DataBucket
+	if bucket == "" {
+		bucket = task.ResultBucket
+	}
+	src, err := e.sourceForAlias(bucket, alias, files)
+	if err != nil {
+		return fmt.Errorf("sort task %s: source: %w", task.ID, err)
+	}
+
+	keys := make([]exec.SortKey, len(task.SortKeys))
+	for i, k := range task.SortKeys {
+		order := exec.Ascending
+		if k.Desc {
+			order = exec.Descending
+		}
+		keys[i] = exec.SortKey{Column: k.Column, Order: order}
+	}
+	sorter := exec.NewSort(keys)
+
+	pipeline := &exec.Pipeline{
+		Source: src,
+		Sink:   sorter,
+	}
+	if err := pipeline.Run(ctx); err != nil {
+		return fmt.Errorf("sort task %s: pipeline: %w", task.ID, err)
+	}
+	if task.Limit > 0 {
+		sorter.Truncate(task.Limit)
+	}
+	var outBatches []*batch.RecordBatch
+	for {
+		b, err := sorter.Next(ctx)
+		if err != nil {
+			return fmt.Errorf("sort task %s: next: %w", task.ID, err)
+		}
+		if b == nil {
+			break
+		}
+		outBatches = append(outBatches, b)
+	}
+	return e.writeStageOutput(ctx, task, outBatches, result)
+}
+
+// aggOutputTypeString mirrors planner/physical.aggOutputType. The native
+// AggSpec doesn't carry an output type; the worker derives it from the
+// function name. Default (sum/min/max/avg) → float64, matching the
+// coordinator's planner convention.
+func aggOutputTypeString(funcName string) parquet.TypeID {
+	switch strings.ToLower(strings.TrimSpace(funcName)) {
+	case "count", "count_distinct", "approx_distinct":
+		return parquet.TypeInt64
+	case "string_agg":
+		return parquet.TypeString
+	case "bool_and", "every", "bool_or":
+		return parquet.TypeBool
+	default:
+		return parquet.TypeFloat64
+	}
+}
+
+// parseAggFuncString maps the canonical string form carried on
+// distributed.AggSpec.Func into exec.AggFunc. Mirrors
+// planner/physical.parseAggFunc; duplicated here to avoid importing the
+// planner into the worker executor path.
+func parseAggFuncString(s string) exec.AggFunc {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "sum":
+		return exec.AggSum
+	case "count":
+		return exec.AggCount
+	case "min":
+		return exec.AggMin
+	case "max":
+		return exec.AggMax
+	case "avg":
+		return exec.AggAvg
+	case "count_distinct":
+		return exec.AggCountDistinct
+	case "string_agg":
+		return exec.AggStringAgg
+	case "bool_and", "every":
+		return exec.AggBoolAnd
+	case "bool_or":
+		return exec.AggBoolOr
+	case "stddev", "stddev_samp":
+		return exec.AggStddev
+	case "variance", "var_samp":
+		return exec.AggVariance
+	default:
+		return exec.AggSum
+	}
 }
 
 // writeStageOutput dispatches produced batches to the sink selected by
