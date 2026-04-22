@@ -95,6 +95,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	executor := NewExecutor(store, cache, js)
 	executor.SetMemoryBudget(cfg.MemoryBudget, cfg.SpillDir)
 	executor.SetLogger(logger)
+	executor.SetNATSConn(nc)
 	if cfg.ResultStoreBytes > 0 {
 		executor.SetResultStore(NewResultStore(cfg.ResultStoreBytes))
 	}

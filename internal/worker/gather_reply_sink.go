@@ -41,6 +41,9 @@ func (s *gatherReplySink) Consume(_ context.Context, b *batch.RecordBatch) error
 	if active == 0 {
 		return nil
 	}
+	if s.schema == nil {
+		s.schema = b.Schema
+	}
 
 	var buf bytes.Buffer
 	sw := newShuffleWriter(&buf, s.schema)

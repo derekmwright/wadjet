@@ -13,6 +13,7 @@ type TaskType string
 const (
 	TaskTypePipeline TaskType = "pipeline" // full query executed as standalone pipeline on one worker
 	TaskTypeShuffle  TaskType = "shuffle"  // hash-partitions input rows into N output partition files
+	TaskTypeGather   TaskType = "gather"   // streams pipeline output to ReplySubject via gatherReplySink
 )
 
 // Task is the unit of distributed work published to NATS JetStream.

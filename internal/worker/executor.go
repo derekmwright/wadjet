@@ -25,6 +25,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -46,6 +47,7 @@ const maxBufferedRows = 500_000
 type Executor struct {
 	store        objstore.Store
 	js           jetstream.JetStream // for catalog access in pipeline tasks
+	nc           *nats.Conn          // for Gather-task reply streaming (nil = Gather disabled)
 	cache        *LRUCache
 	resultStore  *ResultStore        // in-memory result passing between stages (nil = disabled)
 	resultKV     jetstream.KeyValue  // NATS KV for cross-worker inter-stage results (nil = disabled)
@@ -69,6 +71,12 @@ func (e *Executor) SetMemoryBudget(budget int64, spillDir string) {
 // SetResultStore attaches an in-memory result store for inter-stage result passing.
 func (e *Executor) SetResultStore(rs *ResultStore) {
 	e.resultStore = rs
+}
+
+// SetNATSConn attaches a NATS connection used by Gather tasks to stream
+// batches back to the coordinator's reply subject.
+func (e *Executor) SetNATSConn(nc *nats.Conn) {
+	e.nc = nc
 }
 
 // SetResultKV attaches a NATS KV store for cross-worker inter-stage result transfer.
@@ -166,7 +174,7 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 
 	var err error
 	switch task.Type {
-	case distributed.TaskTypePipeline:
+	case distributed.TaskTypePipeline, distributed.TaskTypeGather:
 		err = e.executePipeline(ctx, task, &result)
 	case distributed.TaskTypeShuffle:
 		err = e.executeShuffle(ctx, task, &result)
@@ -418,6 +426,24 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// (compressed) which would fail with "invalid shuffle magic".
 	if (task.StageID == "build-cache-scan" || task.StageID == "aggregate-cache-compute") && e.spillDir != "" {
 		return e.executeBuildCachePreScan(ctx, task, pipeline, result)
+	}
+
+	// Native-DAG Gather task: swap CollectSink for gatherReplySink so output
+	// streams to the coordinator's reply subject instead of materializing
+	// in-process. Schema is captured lazily from the first batch (gather sink
+	// copies it on first Consume).
+	if task.Type == distributed.TaskTypeGather {
+		if task.ReplySubject == "" {
+			return fmt.Errorf("gather task missing ReplySubject")
+		}
+		if e.nc == nil {
+			return fmt.Errorf("gather task requires NATS connection")
+		}
+		pipeline.Sink = newGatherReplySink(e.nc, task.ReplySubject, nil)
+		if err := pipeline.Run(ctx); err != nil {
+			return fmt.Errorf("gather pipeline: %w", err)
+		}
+		return nil
 	}
 
 	// Execute the pipeline — same path as standalone mode

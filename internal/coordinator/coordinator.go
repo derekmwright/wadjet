@@ -78,6 +78,12 @@ type Coordinator struct {
 	// Zero means use the default (2GB). Exported for testing with small datasets.
 	BuildCacheThreshold int64
 
+	// UseNativeDAG routes Exchange-annotated plans through executeStageDAG
+	// instead of the legacy four-mode switch. Default off; flipped on by the
+	// harness --use-native-dag flag to run SF10 A/B in local mode. See
+	// docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md
+	UseNativeDAG bool
+
 	mu         sync.Mutex
 	resultSubs map[string]context.CancelFunc          // queryID -> cancel
 	queryMetas map[string]*queryMeta                  // queryID -> metadata for result retrieval
@@ -459,9 +465,37 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// Generate distributed stages
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
+	if c.UseNativeDAG {
+		planner.UseEnsureDistribution = true
+	}
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return nil, fmt.Errorf("physical plan: %w", err)
+	}
+
+	// Native-DAG path (Phase 3): bypass the legacy four-mode switch when the
+	// planner emitted Exchange stages. The stage DAG executor dispatches each
+	// stage via its Type-specific helper and returns when it hits Gather.
+	if c.UseNativeDAG && hasExchangeStages(physStages) {
+		c.logger.Info("routing to native DAG executor",
+			"query", queryID, "stages", len(physStages))
+		gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())
+		if gerr != nil {
+			return &SQLResult{
+				QueryID: queryID,
+				Error:   gerr.Error(),
+				Elapsed: time.Since(start),
+				Plan:    planStr,
+			}, fmt.Errorf("native DAG: %w", gerr)
+		}
+		return &SQLResult{
+			QueryID:   queryID,
+			Columns:   gr.columns,
+			Batches:   gr.batches,
+			TotalRows: gr.totalRows,
+			Elapsed:   time.Since(start),
+			Plan:      planStr,
+		}, nil
 	}
 
 	// Log stage summary for debugging
