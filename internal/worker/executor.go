@@ -345,8 +345,8 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// build-cache files. Each source downloads and parses files one at a time,
 	// yielding batches on demand. This avoids materializing the entire build
 	// side into memory — the hash join's grace spill handles memory pressure.
-	if len(task.PreScannedInputs) > 0 || len(precompAliasFiles) > 0 {
-		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs)+len(precompAliasFiles))
+	if len(task.PreScannedInputs) > 0 || len(precompAliasFiles) > 0 || len(task.Inputs) > 0 {
+		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs)+len(precompAliasFiles)+len(task.Inputs))
 		for tableName, files := range task.PreScannedInputs {
 			streamingSources[tableName] = newCachedFileStreamSource(e, bucket, files)
 			e.logger.Debug("streaming pre-scanned input",
@@ -355,6 +355,21 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		for alias, files := range precompAliasFiles {
 			streamingSources[alias] = newCachedFileStreamSource(e, bucket, files)
 			e.logger.Debug("streaming pre-computed aggregate",
+				"alias", alias, "files", len(files))
+		}
+		// Phase 3 native-DAG: Task.Inputs carries upstream stage output keyed
+		// by scan/alias name. sourceForAlias classifies file patterns and
+		// fails fast on planner bugs that mix partitioned and flat outputs.
+		for alias, files := range task.Inputs {
+			if _, already := streamingSources[alias]; already {
+				return fmt.Errorf("alias %q populated by both Inputs and legacy pre-scanned paths", alias)
+			}
+			src, err := e.sourceForAlias(bucket, alias, files)
+			if err != nil {
+				return fmt.Errorf("source for alias %q: %w", alias, err)
+			}
+			streamingSources[alias] = src
+			e.logger.Debug("streaming stage input",
 				"alias", alias, "files", len(files))
 		}
 		planner.StreamingSources = streamingSources
