@@ -178,6 +178,8 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		err = e.executePipeline(ctx, task, &result)
 	case distributed.TaskTypeShuffle:
 		err = e.executeShuffle(ctx, task, &result)
+	case distributed.TaskTypeStage:
+		err = e.executeStage(ctx, task, &result)
 	default:
 		err = fmt.Errorf("unsupported task type: %s", task.Type)
 	}

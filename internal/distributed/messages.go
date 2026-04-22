@@ -14,6 +14,7 @@ const (
 	TaskTypePipeline TaskType = "pipeline" // full query executed as standalone pipeline on one worker
 	TaskTypeShuffle  TaskType = "shuffle"  // hash-partitions input rows into N output partition files
 	TaskTypeGather   TaskType = "gather"   // streams pipeline output to ReplySubject via gatherReplySink
+	TaskTypeStage    TaskType = "stage"    // single-operator stage fragment (native-DAG Phase 3)
 )
 
 // Task is the unit of distributed work published to NATS JetStream.
@@ -137,6 +138,21 @@ type Task struct {
 	// GatherLimit (Gather only) — top-N limit applied by the coordinator
 	// after ordering. Zero means no limit.
 	GatherLimit int `json:"gather_limit,omitempty"`
+
+	// StageType discriminates TaskTypeStage variants: "scan", "hash_join",
+	// "broadcast_join", "aggregate", "sort", "merge_sort", "window",
+	// "final_aggregate". Matches physical.Stage.Type strings. Empty for
+	// non-TaskTypeStage tasks.
+	StageType string `json:"stage_type,omitempty"`
+
+	// BuildRowHint is the planner's estimate of build-side row count,
+	// used to pre-size the hash table arena. Populated for TaskTypeStage
+	// hash_join stages. Zero means no hint (arena grows dynamically).
+	BuildRowHint int64 `json:"build_row_hint,omitempty"`
+
+	// SemiAntiKeyOnly is set on semi/anti hash_join stages without a
+	// SemiAntiFilter — enables key-only build (skip batch storage).
+	SemiAntiKeyOnly bool `json:"semi_anti_key_only,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 }
