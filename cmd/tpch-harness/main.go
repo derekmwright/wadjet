@@ -25,6 +25,7 @@ func main() {
 		updateBaseline = flag.Bool("update-baseline", false, "(golden only) write the result directly to --baseline")
 		noCompare      = flag.Bool("no-compare", false, "skip baseline comparison, just emit measurements")
 		wadjetBin      = flag.String("wadjet-bin", "", "path to wadjet binary (default: $WADJET_BIN or ./wadjet)")
+		pgAddr         = flag.String("pg-addr", ":15433", "pgwire listen address for the spawned coordinator")
 	)
 	flag.Parse()
 
@@ -44,6 +45,7 @@ func main() {
 		UpdateBaseline: *updateBaseline,
 		NoCompare:      *noCompare,
 		WadjetBin:      *wadjetBin,
+		PgAddr:         *pgAddr,
 	}
 	if *queries != "" {
 		cfg.Queries = strings.Split(*queries, ",")

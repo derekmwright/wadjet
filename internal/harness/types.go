@@ -41,6 +41,7 @@ type Config struct {
 	UpdateBaseline bool
 	NoCompare      bool
 	WadjetBin      string // path to wadjet binary; auto-built if empty
+	PgAddr         string // local only; override for coordinator pgwire listen addr
 }
 
 // QueryMeasurement is the result of running one query (or micro).

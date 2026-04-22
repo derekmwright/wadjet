@@ -69,6 +69,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			RunDir:     runDir,
 			NumWorkers: numWorkers,
 			GoMemLimit: sliceCfg.GoMemLimit,
+			PgAddr:     cfg.PgAddr,
 			DataDir:    cfg.DataDir,
 			Logger:     logger,
 		})
