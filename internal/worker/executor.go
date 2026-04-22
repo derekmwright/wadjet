@@ -543,11 +543,41 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		bucket = task.ResultBucket
 	}
 
-	// Read all source Parquet files into batches. Uses the executor's
-	// existing range-read + LRU cache path; no planner/catalog needed.
-	batches, err := e.readParquetFilesConcurrentBatches(ctx, bucket, task.Files, task.Columns)
+	// Read all source files into batches. Parquet inputs (table scans) use the
+	// concurrent parquet path; .wshf inputs (Phase 3 native-DAG: output of an
+	// upstream shuffle stage) stream through cachedFileStreamSource which
+	// handles both formats but reads serially. Mixed kinds within one Files
+	// list are a planner bug; classifyInputFiles surfaces that as an error.
+	fileKind, err := classifyInputFiles(task.Files)
 	if err != nil {
-		return fmt.Errorf("shuffle task %s: reading source files: %w", task.ID, err)
+		return fmt.Errorf("shuffle task %s: %w", task.ID, err)
+	}
+
+	var batches []*batch.RecordBatch
+	switch fileKind {
+	case inputKindParquet:
+		batches, err = e.readParquetFilesConcurrentBatches(ctx, bucket, task.Files, task.Columns)
+		if err != nil {
+			return fmt.Errorf("shuffle task %s: reading parquet source files: %w", task.ID, err)
+		}
+	case inputKindPartitioned, inputKindShuffleFlat:
+		src := newCachedFileStreamSource(e, bucket, task.Files)
+		if initErr := src.Init(ctx); initErr != nil {
+			return fmt.Errorf("shuffle task %s: init wshf source: %w", task.ID, initErr)
+		}
+		defer src.Close()
+		for {
+			b, nerr := src.Next(ctx)
+			if nerr != nil {
+				return fmt.Errorf("shuffle task %s: reading wshf source: %w", task.ID, nerr)
+			}
+			if b == nil {
+				break
+			}
+			batches = append(batches, b)
+		}
+	default:
+		return fmt.Errorf("shuffle task %s: unsupported input file kind %v", task.ID, fileKind)
 	}
 	if len(batches) == 0 {
 		// Source files produced no rows — nothing to upload.
