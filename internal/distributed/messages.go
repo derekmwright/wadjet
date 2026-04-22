@@ -164,6 +164,20 @@ type AggSpec struct {
 	OutputCol string `json:"output_col"`
 }
 
+// GatherBatchMsg is the NATS message body the worker publishes to the
+// coordinator's gather reply subject. One message per output RecordBatch,
+// terminated by one message with Terminal=true (zero RowCount, any Err set).
+//
+// Payload is a self-contained WSHF byte stream carrying a single chunk
+// (magic + chunk-count=1 + schema header + one row chunk). The coordinator
+// decodes each message independently via the worker's shuffleChunkReader.
+type GatherBatchMsg struct {
+	Terminal bool   `json:"terminal"`
+	RowCount int32  `json:"row_count"`
+	Payload  []byte `json:"payload,omitempty"` // WSHF-encoded single-chunk batch
+	Err      string `json:"err,omitempty"`     // non-empty on terminal failure
+}
+
 // SortKeySpec defines a sort key in a task.
 type SortKeySpec struct {
 	Column string `json:"column"`
