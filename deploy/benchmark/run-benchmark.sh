@@ -148,6 +148,9 @@ elif [ "$MODE" = "distributed" ]; then
   [ -n "$SKIP" ] && SKIP_FLAGS=(--skip-queries="${SKIP}")
   [ -n "$TIMEOUT" ] && SKIP_FLAGS+=( --query-timeout="${TIMEOUT}" )
 
+  NATIVE_DAG_FLAGS=()
+  [ "${USE_NATIVE_DAG:-0}" = "1" ] && NATIVE_DAG_FLAGS=(--use-native-dag)
+
   "$BENCH_BIN" \
     "${PROFILE_FLAG[@]}" \
     --scale="${SCALE}" \
@@ -157,6 +160,7 @@ elif [ "$MODE" = "distributed" ]; then
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
+    "${NATIVE_DAG_FLAGS[@]}" \
     --nats-port=4222 \
     --cpuprofile="${PROF_DIR}/cpu-distributed.prof" \
     --memprofile="${PROF_DIR}/mem-distributed.prof" \

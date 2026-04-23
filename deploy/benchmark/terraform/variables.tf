@@ -162,6 +162,12 @@ variable "join_debug" {
   default     = ""
 }
 
+variable "use_native_dag" {
+  description = "Route distributed queries through the Phase 3 native-DAG executor (feat/distribution-property-phase-3)."
+  type        = bool
+  default     = false
+}
+
 # Recommended instance types per scale factor:
 #   Graviton3 ARM (c7g):
 #     SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr
