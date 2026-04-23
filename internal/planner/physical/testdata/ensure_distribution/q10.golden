@@ -11,5 +11,4 @@ exchange-repartition-9	exchange-repartition	Hash(l_orderkey)/32	deps=scan-7
 join-10	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-8,exchange-repartition-9
 aggregate-11	aggregate	Singleton	deps=join-10
 final_aggregate-12	final_aggregate	Singleton	deps=aggregate-11
-sort-13	sort	Singleton	deps=final_aggregate-12
-exchange-gather-sort-13	exchange-gather	Singleton	deps=sort-13
+exchange-gather-final_aggregate-12	exchange-gather	Singleton	deps=final_aggregate-12

@@ -14,5 +14,4 @@ exchange-repartition-50	exchange-repartition	Hash(l_orderkey)/32	deps=final_aggr
 join-51	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-49,exchange-repartition-50
 aggregate-52	aggregate	Singleton	deps=join-51
 final_aggregate-53	final_aggregate	Singleton	deps=aggregate-52
-sort-54	sort	Singleton	deps=final_aggregate-53
-exchange-gather-sort-54	exchange-gather	Singleton	deps=sort-54
+exchange-gather-final_aggregate-53	exchange-gather	Singleton	deps=final_aggregate-53

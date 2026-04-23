@@ -210,6 +210,7 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	}
 
 	batches := collect.Batches()
+	batches = applyPostSort(ctx, task, batches)
 	return e.writeStageOutput(ctx, task, batches, result)
 }
 
@@ -272,7 +273,55 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 		}
 		outBatches = append(outBatches, b)
 	}
+	outBatches = applyPostSort(ctx, task, outBatches)
 	return e.writeStageOutput(ctx, task, outBatches, result)
+}
+
+// applyPostSort runs an in-process Sort on the given batches when the
+// planner's fuseSortIntoPredecessor pass folded a Singleton sort into
+// this stage. Returns the input unchanged when task.SortKeys is empty.
+// Also honors task.Limit for Top-K truncation when set. Output batches
+// replace the input batch slice; input batches are fed through Sort as
+// a one-shot source.
+func applyPostSort(ctx context.Context, task distributed.Task, batches []*batch.RecordBatch) []*batch.RecordBatch {
+	if len(task.SortKeys) == 0 || len(batches) == 0 {
+		return batches
+	}
+	keys := make([]exec.SortKey, len(task.SortKeys))
+	for i, k := range task.SortKeys {
+		order := exec.Ascending
+		if k.Desc {
+			order = exec.Descending
+		}
+		keys[i] = exec.SortKey{Column: k.Column, Order: order}
+	}
+	sorter := exec.NewSort(keys)
+	if err := sorter.Init(ctx); err != nil {
+		return batches
+	}
+	for _, b := range batches {
+		if b == nil {
+			continue
+		}
+		if err := sorter.Consume(ctx, b); err != nil {
+			return batches
+		}
+	}
+	if err := sorter.Finalize(ctx); err != nil {
+		return batches
+	}
+	if task.Limit > 0 {
+		sorter.Truncate(task.Limit)
+	}
+	var out []*batch.RecordBatch
+	for {
+		b, err := sorter.Next(ctx)
+		if err != nil || b == nil {
+			break
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 // executeStageSort runs an in-memory Sort over a single Input, optionally

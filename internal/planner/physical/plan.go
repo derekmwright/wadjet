@@ -1031,6 +1031,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// dep is a Singleton sort — the merge_sort is a no-op in that
 		// shape and costs a full worker round-trip per query.
 		stages = collapseRedundantFinalMergeSort(stages)
+		// Fuse Singleton sort into its Singleton predecessor (aggregate /
+		// hash_join / broadcast_join / final_aggregate) so the worker
+		// applies the sort in-process rather than serializing the
+		// pre-sort output and letting a separate sort task pick it up.
+		stages = fuseSortIntoPredecessor(stages)
 		var ensureErr error
 		stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
 		if ensureErr != nil {

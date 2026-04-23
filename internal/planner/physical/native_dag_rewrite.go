@@ -4,6 +4,107 @@ import (
 	"strings"
 )
 
+// fuseSortIntoPredecessor folds a Singleton sort stage into the compute
+// stage that produces its sole input, so the predecessor applies sort
+// in-process instead of writing intermediate output and letting a
+// separate sort task pick it up. Same savings class as
+// collapseRedundantFinalMergeSort but for the aggregate/join→sort edge:
+// one fewer stage, one fewer JetStream round-trip, one fewer
+// KV/S3 materialization per query.
+//
+// Predecessor eligibility:
+//   - Singleton distribution (sort output stays Singleton regardless of
+//     whether the predecessor was Hash-partitioned or Singleton; this
+//     pass handles only the Singleton predecessor case to preserve
+//     partition count semantics upstream).
+//   - Doesn't already carry SortKeys (we'd clobber them).
+//   - Is a compute stage type that the worker's Stage dispatcher knows
+//     how to post-sort: hash_join, broadcast_join, aggregate,
+//     final_aggregate. Other types (scan, merge_sort, window) are left
+//     alone until the worker dispatcher supports post-sort there too.
+//
+// Sort eligibility:
+//   - Type == "sort" and Singleton distribution.
+//   - Exactly one dependency.
+//
+// Correctness: the sort stage carried SortKeys + Limit; both move onto
+// the predecessor. Downstream references to the dropped sort are
+// rewritten to the predecessor. No LeftDepStage/RightDepStage rewriting
+// needed because the sort had only one plain dep (sort stages never
+// appear as a join's left/right slot).
+func fuseSortIntoPredecessor(stages []Stage) []Stage {
+	idIndex := make(map[string]int, len(stages))
+	for i := range stages {
+		idIndex[stages[i].ID] = i
+	}
+
+	droppedSort := make(map[string]string) // sort ID → predecessor ID
+	for i := range stages {
+		s := &stages[i]
+		if s.Type != "sort" {
+			continue
+		}
+		if s.Distribution.Kind != DistSingleton {
+			continue
+		}
+		if len(s.Dependencies) != 1 {
+			continue
+		}
+		predIdx, ok := idIndex[s.Dependencies[0]]
+		if !ok {
+			continue
+		}
+		pred := &stages[predIdx]
+		if pred.Distribution.Kind != DistSingleton {
+			continue
+		}
+		switch pred.Type {
+		case "hash_join", "broadcast_join", "aggregate", "final_aggregate":
+		default:
+			continue
+		}
+		if len(pred.SortKeys) > 0 {
+			continue // don't clobber existing post-sort
+		}
+		// Fold sort into predecessor.
+		pred.SortKeys = append([]SortKeySpec(nil), s.SortKeys...)
+		if s.Limit > 0 {
+			pred.Limit = s.Limit
+		}
+		droppedSort[s.ID] = pred.ID
+	}
+
+	if len(droppedSort) == 0 {
+		return stages
+	}
+
+	out := make([]Stage, 0, len(stages)-len(droppedSort))
+	for _, s := range stages {
+		if _, drop := droppedSort[s.ID]; drop {
+			continue
+		}
+		if len(s.Dependencies) > 0 {
+			newDeps := make([]string, len(s.Dependencies))
+			for i, d := range s.Dependencies {
+				if target, ok := droppedSort[d]; ok {
+					newDeps[i] = target
+				} else {
+					newDeps[i] = d
+				}
+			}
+			s.Dependencies = newDeps
+		}
+		if target, ok := droppedSort[s.LeftDepStage]; ok {
+			s.LeftDepStage = target
+		}
+		if target, ok := droppedSort[s.RightDepStage]; ok {
+			s.RightDepStage = target
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // collapseRedundantFinalMergeSort removes trivial trailing merge_sort
 // stages whose job is already done by their upstream Singleton sort.
 // The common TPC-H shape after collapseMergeTreesForNativeDAG is:
