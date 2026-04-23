@@ -542,26 +542,20 @@ func (c *Coordinator) dispatchGatherStage(
 	c.mu.Unlock()
 	c.enrichTaskWithQueryContext(qm, &task)
 
-	// Kick off the receiver in a goroutine; publish the task; wait.
-	type recvResult struct {
-		r   *gatherResult
-		err error
+	// Subscribe BEFORE publishing the task so the worker's batches and
+	// terminal marker are not lost to a race. NATS does not buffer raw-
+	// subject messages for late subscribers, so a goroutine that starts
+	// subscribing after the publish can miss every reply (observed on
+	// SF10: gather hung for 6+ minutes before the stage-level timeout
+	// fired).
+	recv, err := subscribeGather(c.nc, replySubject, 1)
+	if err != nil {
+		return nil, fmt.Errorf("subscribing gather reply: %w", err)
 	}
-	ch := make(chan recvResult, 1)
-	go func() {
-		res, err := runGatherReceiver(ctx, c.nc, replySubject, 1, gatherReceiveTimeout)
-		ch <- recvResult{r: res, err: err}
-	}()
-
 	if err := c.scheduler.PublishTasks(ctx, []distributed.Task{task}); err != nil {
 		return nil, fmt.Errorf("publishing gather task: %w", err)
 	}
 
 	_ = workerCount // future: ordered gather dispatches one task per partition
-	select {
-	case rr := <-ch:
-		return rr.r, rr.err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return recv.wait(ctx, gatherReceiveTimeout)
 }
