@@ -125,6 +125,26 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	filePath := s.files[s.fileIdx]
 	s.fileIdx++
 
+	// KV fast-path: small stage outputs (Phase 3 native-DAG) are written
+	// only to NATS KV and skip S3 entirely. Consult KV first; on miss,
+	// fall through to S3 as before. The KV key is a dot-sanitized version
+	// of the S3 key (matching writeUnpartitionedWSHF + natsKVKey).
+	if s.executor.resultKV != nil {
+		kvKey := natsKVKey(filePath)
+		if entry, kvErr := s.executor.resultKV.Get(ctx, kvKey); kvErr == nil {
+			data := entry.Value()
+			if len(data) >= 4 {
+				magic := [4]byte{data[0], data[1], data[2], data[3]}
+				wshf := magic == shuffleMagic
+				wshc := magic == compressedMagic
+				if wshf || wshc {
+					return s.openShuffleInMemory(filePath, magic[:], bytes.NewReader(data[4:]), wshc)
+				}
+				// Non-shuffle payload (e.g., parquet) — fall through to S3.
+			}
+		}
+	}
+
 	// Try the streaming path first: open a streaming reader from S3, peek
 	// at the magic bytes, and decide whether this is a WSHF (or compressed
 	// WSHC) shuffle file or some legacy Parquet payload.

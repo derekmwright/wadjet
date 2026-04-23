@@ -99,6 +99,17 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	if cfg.ResultStoreBytes > 0 {
 		executor.SetResultStore(NewResultStore(cfg.ResultStoreBytes))
 	}
+	// Best-effort bind to the coordinator's shared result KV bucket so small
+	// stage outputs can round-trip via NATS (~10ms) instead of S3 (~500ms).
+	// The coordinator creates the bucket in New(); workers just open it.
+	// If unavailable (e.g., KV disabled on coord, different NATS cluster),
+	// stage writes/reads silently fall back to S3.
+	if kv, kvErr := js.KeyValue(context.Background(), "wadjet_results_data"); kvErr == nil {
+		executor.SetResultKV(kv)
+		logger.Info("worker KV fast-path enabled", "bucket", "wadjet_results_data")
+	} else {
+		logger.Debug("worker KV fast-path unavailable", "error", kvErr)
+	}
 
 	return &Worker{
 		config:    cfg,

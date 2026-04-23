@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -485,6 +486,31 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 			return fmt.Errorf("stage task %s: stat partition %d: %w", task.ID, p, err)
 		}
 		key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
+
+		// KV fast-path per partition file: if the partition fits, KV it
+		// and skip S3. Partition sizes vary a lot within one stage (skew),
+		// so this is a per-partition decision, not per-stage.
+		if e.resultKV != nil && fi.Size() <= natsKVResultThreshold {
+			payload := make([]byte, fi.Size())
+			if _, readErr := io.ReadFull(f, payload); readErr == nil {
+				f.Close()
+				if _, putErr := e.resultKV.Put(ctx, natsKVKey(key), payload); putErr == nil {
+					result.ResultFiles = append(result.ResultFiles, key)
+					result.SizeBytes += fi.Size()
+					_ = os.Remove(localPath)
+					continue
+				}
+				// KV put failed — re-open for S3 upload.
+				f, err = os.Open(localPath)
+				if err != nil {
+					return fmt.Errorf("stage task %s: reopen partition %d for S3: %w", task.ID, p, err)
+				}
+			} else {
+				// Read failed — fall through and let S3 Put stream from file.
+				f.Seek(0, 0)
+			}
+		}
+
 		_, uploadErr := e.store.Put(ctx, task.ResultBucket, key, f, fi.Size(), "application/octet-stream")
 		f.Close()
 		if uploadErr != nil {
@@ -530,6 +556,23 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 	payload[7] = byte(numChunks >> 24)
 
 	key := fmt.Sprintf("%s%s.wshf", task.ResultPrefix, task.ID)
+
+	// KV fast-path: for small outputs, write only to NATS KV and skip the
+	// S3 upload. Downstream cachedFileStreamSource checks KV first (via
+	// natsKVKey(key)) and falls back to S3 on miss. This avoids the ~500ms
+	// S3 round-trip per stage boundary for the many small intermediate
+	// outputs in a typical TPC-H query (aggregates, merge-sort finals,
+	// broadcast-join output).
+	if e.resultKV != nil && len(payload) <= natsKVResultThreshold {
+		kvKey := natsKVKey(key)
+		if _, err := e.resultKV.Put(ctx, kvKey, payload); err == nil {
+			result.ResultFiles = append(result.ResultFiles, key)
+			result.SizeBytes += int64(len(payload))
+			return nil
+		}
+		// KV put failed — fall through to S3.
+	}
+
 	_, err := e.store.Put(ctx, task.ResultBucket, key, bytes.NewReader(payload), int64(len(payload)), "application/octet-stream")
 	if err != nil {
 		return fmt.Errorf("stage task %s: uploading wshf: %w", task.ID, err)
