@@ -3,11 +3,13 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
@@ -36,40 +38,114 @@ func (c *Coordinator) executeStageDAG(
 	if len(stages) == 0 {
 		return nil, fmt.Errorf("executeStageDAG: empty stage list")
 	}
-	outputs := make(map[string]StageOutput, len(stages))
 
-	for _, stage := range stages {
-		inputs, err := collectInputs(stage, outputs)
-		if err != nil {
-			return nil, fmt.Errorf("stage %s: %w", stage.ID, err)
+	// Separate the terminal Gather from the DAG body: Gather is always run
+	// last, on the coordinator's NATS reply subscription, and returns the
+	// final result batches. Everything else is dispatched in waves where
+	// each wave runs all ready sibling stages concurrently (sibling = all
+	// dependencies already satisfied). Without concurrent waves, plans with
+	// fan-out patterns like the multi-level merge_aggregate/merge_sort tree
+	// (80+ independent siblings per query at SF10) serialize to one stage
+	// per coordinator-to-worker round-trip — catastrophically slow.
+	var gatherStage physical.Stage
+	var hasGather bool
+	pending := make(map[string]physical.Stage, len(stages))
+	for _, s := range stages {
+		if s.Type == physical.StageExchangeGather {
+			if hasGather {
+				return nil, fmt.Errorf("executeStageDAG: plan has multiple Gather stages")
+			}
+			gatherStage = s
+			hasGather = true
+			continue
 		}
-		switch stage.Type {
-		case physical.StageExchangeRepartition:
-			out, err := c.dispatchShuffleStage(ctx, queryID, stage, inputs, workerCount)
-			if err != nil {
-				return nil, fmt.Errorf("shuffle stage %s: %w", stage.ID, err)
-			}
-			outputs[stage.ID] = out
+		pending[s.ID] = s
+	}
+	if !hasGather {
+		return nil, fmt.Errorf("executeStageDAG: plan for query %s has no Gather stage", queryID)
+	}
 
-		case physical.StageExchangeReplicate:
-			out, err := c.dispatchReplicateStage(ctx, queryID, sql, stage, inputs)
-			if err != nil {
-				return nil, fmt.Errorf("replicate stage %s: %w", stage.ID, err)
+	outputs := make(map[string]StageOutput, len(stages))
+	var outputsMu sync.Mutex
+	wave := 0
+	for len(pending) > 0 {
+		wave++
+		ready := make([]physical.Stage, 0)
+		for _, s := range pending {
+			allReady := true
+			for _, depID := range s.Dependencies {
+				if _, ok := outputs[depID]; !ok {
+					allReady = false
+					break
+				}
 			}
-			outputs[stage.ID] = out
-
-		case physical.StageExchangeGather:
-			return c.dispatchGatherStage(ctx, queryID, sql, stage, inputs, workerCount)
-
-		default:
-			out, err := c.dispatchPipelineStage(ctx, queryID, sql, stage, inputs, workerCount)
-			if err != nil {
-				return nil, fmt.Errorf("pipeline stage %s: %w", stage.ID, err)
+			if allReady {
+				ready = append(ready, s)
 			}
-			outputs[stage.ID] = out
+		}
+		if len(ready) == 0 {
+			return nil, fmt.Errorf("executeStageDAG: no ready stages but %d pending (cyclic dep or missing upstream?)", len(pending))
+		}
+		// Stable dispatch order for readable logs + reproducibility.
+		sort.Slice(ready, func(i, j int) bool { return ready[i].ID < ready[j].ID })
+
+		c.logger.Info("stage-DAG wave",
+			"query", queryID, "wave", wave, "ready_stages", len(ready),
+			"pending_after_wave", len(pending)-len(ready))
+
+		g, gctx := errgroup.WithContext(ctx)
+		waveResults := make(map[string]StageOutput, len(ready))
+		var waveMu sync.Mutex
+		for _, s := range ready {
+			s := s
+			g.Go(func() error {
+				// collectInputs reads outputs only; it's not mutated during
+				// the wave so no lock needed for reads.
+				outputsMu.Lock()
+				inputs, err := collectInputs(s, outputs)
+				outputsMu.Unlock()
+				if err != nil {
+					return fmt.Errorf("stage %s collect inputs: %w", s.ID, err)
+				}
+				var out StageOutput
+				switch s.Type {
+				case physical.StageExchangeRepartition:
+					out, err = c.dispatchShuffleStage(gctx, queryID, s, inputs, workerCount)
+				case physical.StageExchangeReplicate:
+					out, err = c.dispatchReplicateStage(gctx, queryID, sql, s, inputs)
+				default:
+					out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount)
+				}
+				if err != nil {
+					return fmt.Errorf("stage %s (%s): %w", s.ID, s.Type, err)
+				}
+				waveMu.Lock()
+				waveResults[s.ID] = out
+				waveMu.Unlock()
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return nil, err
+		}
+
+		// Publish this wave's outputs and retire its stages.
+		outputsMu.Lock()
+		for id, out := range waveResults {
+			outputs[id] = out
+		}
+		outputsMu.Unlock()
+		for id := range waveResults {
+			delete(pending, id)
 		}
 	}
-	return nil, fmt.Errorf("executeStageDAG: plan for query %s terminated without Gather stage", queryID)
+
+	// Terminal Gather.
+	inputs, err := collectInputs(gatherStage, outputs)
+	if err != nil {
+		return nil, fmt.Errorf("gather stage %s: %w", gatherStage.ID, err)
+	}
+	return c.dispatchGatherStage(ctx, queryID, sql, gatherStage, inputs, workerCount)
 }
 
 // dispatchShuffleStage executes a StageExchangeRepartition: reads upstream
