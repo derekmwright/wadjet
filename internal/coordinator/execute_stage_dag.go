@@ -39,6 +39,28 @@ func (c *Coordinator) executeStageDAG(
 		return nil, fmt.Errorf("executeStageDAG: empty stage list")
 	}
 
+	// Register parent queryID in the tracker so SubjectQueryActive replies
+	// "active" for this query. Without this the worker's pre-execute
+	// is-query-still-active probe (worker.go:402) gets "0" back and terms
+	// the task message silently. Compute stages work because
+	// dispatchComputeStage registers its own ephemeral stageQueryID; the
+	// Gather task rides on the parent queryID which is ONLY registered by
+	// the legacy ExecuteSQL code path that native-DAG bypasses at line 479.
+	trackerStages := make(map[string]*StageInfo, len(stages))
+	stageOrder := make([]string, 0, len(stages))
+	for _, s := range stages {
+		trackerStages[s.ID] = &StageInfo{
+			StageID:      s.ID,
+			Type:         distributed.TaskType(s.Type),
+			TotalTasks:   s.Tasks,
+			Dependencies: s.Dependencies,
+		}
+		stageOrder = append(stageOrder, s.ID)
+	}
+	c.tracker.Register(queryID, sql, trackerStages, stageOrder)
+	c.tracker.Start(queryID)
+	defer c.tracker.Delete(queryID)
+
 	// Separate the terminal Gather from the DAG body: Gather is always run
 	// last, on the coordinator's NATS reply subscription, and returns the
 	// final result batches. Everything else is dispatched in waves where
