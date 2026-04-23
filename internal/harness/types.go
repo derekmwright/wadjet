@@ -50,6 +50,10 @@ type Config struct {
 	Endpoint   string
 	SSL        bool
 	DataPrefix string // prefix under Bucket containing table data (e.g. "tables/")
+
+	// UseNativeDAG: pass --use-native-dag to the spawned coordinator.
+	// Phase 3 native-DAG executor. Default false (legacy path).
+	UseNativeDAG bool
 }
 
 // QueryMeasurement is the result of running one query (or micro).

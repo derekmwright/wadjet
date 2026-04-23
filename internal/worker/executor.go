@@ -174,8 +174,18 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 
 	var err error
 	switch task.Type {
-	case distributed.TaskTypePipeline, distributed.TaskTypeGather:
+	case distributed.TaskTypePipeline:
 		err = e.executePipeline(ctx, task, &result)
+	case distributed.TaskTypeGather:
+		// Native-DAG Gather: stream upstream files → gatherReplySink. No SQL.
+		// Legacy Gather (set via executePipeline sink swap) is still reachable
+		// when StageType is empty + Inputs is empty — rare today; callers
+		// should prefer Inputs-based routing.
+		if len(task.Inputs) > 0 {
+			err = e.executeGatherStage(ctx, task, &result)
+		} else {
+			err = e.executePipeline(ctx, task, &result)
+		}
 	case distributed.TaskTypeShuffle:
 		err = e.executeShuffle(ctx, task, &result)
 	case distributed.TaskTypeStage:

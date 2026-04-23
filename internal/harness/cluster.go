@@ -36,6 +36,10 @@ type ClusterConfig struct {
 	Endpoint    string
 	SSL         bool
 
+	// UseNativeDAG enables the Phase 3 native-DAG executor on the spawned
+	// coordinator via `wadjet serve --use-native-dag`. Default false.
+	UseNativeDAG bool
+
 	Logger *slog.Logger
 }
 
@@ -128,6 +132,9 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 		"--nats-store-dir=" + filepath.Join(c.cfg.RunDir, "nats"),
 	}
 	coordArgs = append(coordArgs, storageArgs(c.cfg)...)
+	if c.cfg.UseNativeDAG {
+		coordArgs = append(coordArgs, "--use-native-dag")
+	}
 	coord, err := c.spawn("coord", coordArgs)
 	if err != nil {
 		return fmt.Errorf("spawning coordinator: %w", err)

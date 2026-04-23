@@ -3,9 +3,11 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
@@ -187,9 +189,7 @@ func (c *Coordinator) dispatchPipelineStage(
 	inputs map[string]StageOutput,
 	workerCount int,
 ) (StageOutput, error) {
-	_ = ctx
 	_ = sql
-	_ = workerCount
 	// Leaf scan stage: pass through scan files as the stage's output. The
 	// files are not yet materialized through a worker — downstream Exchange
 	// stages treat ScanFiles as the upstream output.
@@ -200,13 +200,214 @@ func (c *Coordinator) dispatchPipelineStage(
 			Files: [][]string{files},
 		}, nil
 	}
-	// TODO(phase-3-followup): dispatch worker tasks for true intermediate
-	// compute stages that produce .wshf output consumed by a downstream
-	// Exchange. Requires worker support for partial-plan execution.
-	return StageOutput{}, fmt.Errorf(
-		"dispatchPipelineStage: non-leaf pipeline stage %q (type=%s) not yet implemented in native DAG",
-		stage.ID, stage.Type,
-	)
+	// Compute stage: emit workerCount TaskTypeStage tasks, each reading its
+	// slice of partitioned input and writing unpartitioned .wshf output.
+	// The stage's output is collected into a Partitioned StageOutput where
+	// partition p = the files produced by worker p — downstream Exchange
+	// stages treat this as partitioned if they need to re-hash.
+	return c.dispatchComputeStage(ctx, queryID, stage, inputs, workerCount)
+}
+
+// dispatchComputeStage handles non-leaf compute stages (hash_join,
+// broadcast_join, aggregate, final_aggregate, sort, merge_sort) by
+// emitting workerCount TaskTypeStage tasks. Each task's Inputs are
+// sliced from upstream stage outputs via partitionFilesForWorker; each
+// task writes unpartitioned .wshf output to a per-worker result key.
+func (c *Coordinator) dispatchComputeStage(
+	ctx context.Context,
+	queryID string,
+	stage physical.Stage,
+	inputs map[string]StageOutput,
+	workerCount int,
+) (StageOutput, error) {
+	if workerCount <= 0 {
+		workerCount = 1 // single-worker fallback for sparse test / bootstrap setups
+	}
+	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
+	c.logger.Debug("dispatchComputeStage entry",
+		"stage_id", stage.ID, "stage_type", stage.Type,
+		"deps", stage.Dependencies, "worker_count", workerCount,
+		"inputs_aliases", len(inputs))
+
+	// Build one task per worker. For joins, the two Inputs are keyed by
+	// build/probe alias derived from stage.Dependencies and stage.BuildTableAlias.
+	tasks := make([]distributed.Task, 0, workerCount)
+	for w := 0; w < workerCount; w++ {
+		taskInputs, err := buildTaskInputsForStage(stage, inputs, w, workerCount)
+		if err != nil {
+			return StageOutput{}, fmt.Errorf("stage %s worker %d: %w", stage.ID, w, err)
+		}
+		// Convert stage.AggSpecs → distributed.AggSpec.
+		var aggs []distributed.AggSpec
+		for _, a := range stage.AggSpecs {
+			aggs = append(aggs, distributed.AggSpec{
+				Func:      a.Func,
+				InputCol:  a.InputCol,
+				OutputCol: a.OutputCol,
+			})
+		}
+		// Convert stage.SortKeys → distributed.SortKeySpec.
+		var sorts []distributed.SortKeySpec
+		for _, s := range stage.SortKeys {
+			sorts = append(sorts, distributed.SortKeySpec{Column: s.Column, Desc: s.Desc})
+		}
+		t := distributed.Task{
+			ID:              uuid.New().String()[:8],
+			QueryID:         queryID,
+			StageID:         stage.ID,
+			Type:            distributed.TaskTypeStage,
+			StageType:       stage.Type,
+			JoinType:        stage.JoinType,
+			JoinLeftKeys:    stage.JoinLeftKeys,
+			JoinRightKeys:   stage.JoinRightKeys,
+			BuildTableAlias: stage.BuildTableAlias,
+			JoinFilter:      stage.JoinFilter,
+			GroupByCols:     stage.GroupByCols,
+			Aggregates:      aggs,
+			SortKeys:        sorts,
+			Limit:           stage.Limit,
+			Inputs:          taskInputs,
+			DataBucket:      c.config.ResultBucket,
+			ResultBucket:    c.config.ResultBucket,
+			ResultPrefix:    resultPrefix,
+			CreatedAt:       time.Now(),
+		}
+		if clusterID := c.catalog.ClusterID(); clusterID != "" {
+			t.ClusterID = clusterID
+		}
+		c.mu.Lock()
+		qm := c.queryMetas[queryID]
+		c.mu.Unlock()
+		c.enrichTaskWithQueryContext(qm, &t)
+		tasks = append(tasks, t)
+	}
+
+	// Dispatch via scheduler + shuffle-side-style result collection.
+	stageQueryID := fmt.Sprintf("st-%s-%s", stage.ID, queryID)
+	trackerStages := map[string]*StageInfo{
+		stage.ID: {
+			StageID:    stage.ID,
+			Type:       distributed.TaskTypeStage,
+			TotalTasks: len(tasks),
+		},
+	}
+	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
+	c.tracker.Start(stageQueryID)
+	defer c.tracker.Delete(stageQueryID)
+
+	subject := distributed.QueryResultSubject(stageQueryID)
+	type taskResult struct {
+		files []string
+		err   string
+	}
+	for i := range tasks {
+		tasks[i].QueryID = stageQueryID
+	}
+	collected := make([]taskResult, 0, len(tasks))
+	var mu sync.Mutex
+	done := make(chan struct{}, 1)
+	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+		var r distributed.ResultNotification
+		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
+			return
+		}
+		mu.Lock()
+		if r.Success {
+			collected = append(collected, taskResult{files: r.ResultFiles})
+		} else {
+			collected = append(collected, taskResult{err: r.Error})
+		}
+		got := len(collected)
+		mu.Unlock()
+		if got >= len(tasks) {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}
+	})
+	if err != nil {
+		return StageOutput{}, fmt.Errorf("stage %s: subscribe: %w", stage.ID, err)
+	}
+	defer sub.Unsubscribe()
+
+	c.logger.Info("dispatching compute stage",
+		"stage_id", stage.ID, "stage_type", stage.Type,
+		"tasks", len(tasks), "subject", subject)
+	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
+		return StageOutput{}, fmt.Errorf("stage %s: publish: %w", stage.ID, err)
+	}
+
+	select {
+	case <-done:
+		c.logger.Info("compute stage complete", "stage_id", stage.ID, "tasks", len(tasks))
+	case <-ctx.Done():
+		mu.Lock()
+		got := len(collected)
+		mu.Unlock()
+		return StageOutput{}, fmt.Errorf("stage %s: ctx done with %d/%d results: %w", stage.ID, got, len(tasks), ctx.Err())
+	case <-time.After(shuffleStageTimeout):
+		return StageOutput{}, fmt.Errorf("stage %s: timed out after %s", stage.ID, shuffleStageTimeout)
+	}
+
+	mu.Lock()
+	results := make([]taskResult, len(collected))
+	copy(results, collected)
+	mu.Unlock()
+
+	files := make([][]string, len(tasks))
+	for i, r := range results {
+		if r.err != "" {
+			return StageOutput{}, fmt.Errorf("stage %s: task failed: %s", stage.ID, r.err)
+		}
+		files[i] = r.files
+	}
+	return StageOutput{
+		Kind:          OutputPartitioned,
+		NumPartitions: len(tasks),
+		Files:         files,
+	}, nil
+}
+
+// buildTaskInputsForStage maps a stage's Dependencies (upstream stage IDs)
+// into Task.Inputs keyed by a per-stage alias convention:
+//   - hash_join/broadcast_join: use stage.BuildTableAlias for the build
+//     side (dep index 1) and "probe" for the other side (dep index 0).
+//   - aggregate/sort/etc: use the single dep's ID as alias.
+func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, workerCount int) (map[string][]string, error) {
+	inputs := make(map[string][]string)
+	switch stage.Type {
+	case physical.StageHashJoin, physical.StageBroadcastJoin:
+		if len(stage.Dependencies) != 2 {
+			return nil, fmt.Errorf("join stage %s expects 2 deps, got %d", stage.ID, len(stage.Dependencies))
+		}
+		probeDep := stage.LeftDepStage
+		buildDep := stage.RightDepStage
+		if probeDep == "" {
+			probeDep = stage.Dependencies[0]
+		}
+		if buildDep == "" {
+			buildDep = stage.Dependencies[1]
+		}
+		buildAlias := stage.BuildTableAlias
+		if buildAlias == "" {
+			buildAlias = "build"
+		}
+		probeAlias := "probe"
+		if probeAlias == buildAlias {
+			probeAlias = "probe_side"
+		}
+		inputs[buildAlias] = partitionFilesForWorker(upstreams[buildDep], workerIdx, workerCount)
+		inputs[probeAlias] = partitionFilesForWorker(upstreams[probeDep], workerIdx, workerCount)
+	default:
+		if len(stage.Dependencies) == 0 {
+			return nil, fmt.Errorf("stage %s has no dependencies and no ScanFiles", stage.ID)
+		}
+		// Single-input stages (aggregate/sort): use dep ID as alias.
+		depID := stage.Dependencies[0]
+		inputs[depID] = partitionFilesForWorker(upstreams[depID], workerIdx, workerCount)
+	}
+	return inputs, nil
 }
 
 // dispatchGatherStage is terminal: dispatches a single Gather task to one
@@ -224,7 +425,9 @@ func (c *Coordinator) dispatchGatherStage(
 		return nil, fmt.Errorf("gather stage %s expects 1 dep, got %d", stage.ID, len(stage.Dependencies))
 	}
 	upstream := inputs[stage.Dependencies[0]]
-	replySubject := distributed.QueryResultSubject(queryID) + ".gather"
+	// Dedicated reply subject: `wadjet.gather.<queryID>`. Avoids QueryResult
+	// wildcard overlap (wadjet.results.<queryID>.>).
+	replySubject := fmt.Sprintf("wadjet.gather.%s", queryID)
 
 	// Subscribe before publishing so we don't miss early messages.
 	var ordering []distributed.SortKeySpec

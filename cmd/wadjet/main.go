@@ -81,6 +81,7 @@ var (
 	otelInsecure     bool
 	metricsAddr      string
 	enableAlerts     bool
+	useNativeDAG     bool
 )
 
 func main() {
@@ -128,6 +129,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	rootCmd.PersistentFlags().BoolVar(&enableAlerts, "enable-alerts", false, "enable CREATE ALERT DDL and scheduler (default: disabled)")
+	rootCmd.PersistentFlags().BoolVar(&useNativeDAG, "use-native-dag", false, "route queries through Phase 3 native-DAG executor (default: legacy four-mode switch)")
 
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(queryCmd())
@@ -734,6 +736,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		NATSUrl:      embeddedNATS.ClientURL(),
 		ResultBucket: bucket,
 	}, cat, nc, js, logger)
+	coord.UseNativeDAG = useNativeDAG
 
 	// Start heartbeat monitoring, query reaping, active check, and result cleanup
 	coord.Workers().StartReaper(ctx)
@@ -983,6 +986,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		NATSUrl:      embeddedNATS.ClientURL(),
 		ResultBucket: bucket,
 	}, cat, nc, js, logger)
+	coord.UseNativeDAG = useNativeDAG
 
 	// Initialize OTel tracing if configured
 	otelTP := initTelemetry(ctx, logger)

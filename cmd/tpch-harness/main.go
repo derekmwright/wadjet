@@ -32,6 +32,7 @@ func main() {
 		endpoint       = flag.String("endpoint", "s3.us-east-2.amazonaws.com", "S3 endpoint (source=s3)")
 		ssl            = flag.Bool("ssl", true, "use SSL for S3 (source=s3)")
 		dataPrefix     = flag.String("data-prefix", "tables/", "S3 prefix under --bucket containing table data (source=s3)")
+		useNativeDAG   = flag.Bool("use-native-dag", false, "route queries through Phase 3 native-DAG executor on the spawned coordinator")
 	)
 	flag.Parse()
 
@@ -62,6 +63,7 @@ func main() {
 		Endpoint:       *endpoint,
 		SSL:            *ssl,
 		DataPrefix:     *dataPrefix,
+		UseNativeDAG:   *useNativeDAG,
 	}
 	if *queries != "" {
 		cfg.Queries = strings.Split(*queries, ",")

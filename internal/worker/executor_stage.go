@@ -43,6 +43,57 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 	return fmt.Errorf("executeStageScan: not yet implemented")
 }
 
+// executeGatherStage is the native-DAG Gather task handler: reads all
+// Inputs (the upstream stage's output files) and streams them to the
+// coordinator's reply subject via gatherReplySink. No SQL, no physical
+// plan — the upstream stage already produced the final result shape; the
+// gather worker is just a pipe.
+func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	if task.ReplySubject == "" {
+		return fmt.Errorf("gather task %s: ReplySubject required", task.ID)
+	}
+	if e.nc == nil {
+		return fmt.Errorf("gather task %s: NATS connection required", task.ID)
+	}
+	bucket := task.DataBucket
+	if bucket == "" {
+		bucket = task.ResultBucket
+	}
+
+	sink := newGatherReplySink(e.nc, task.ReplySubject, nil)
+	if err := sink.Init(ctx); err != nil {
+		return fmt.Errorf("gather task %s: sink init: %w", task.ID, err)
+	}
+	var totalRows int64
+	for alias, files := range task.Inputs {
+		src, err := e.sourceForAlias(bucket, alias, files)
+		if err != nil {
+			return fmt.Errorf("gather task %s: source for %q: %w", task.ID, alias, err)
+		}
+		if err := src.Init(ctx); err != nil {
+			return fmt.Errorf("gather task %s: init source %q: %w", task.ID, alias, err)
+		}
+		for {
+			b, err := src.Next(ctx)
+			if err != nil {
+				src.Close()
+				return fmt.Errorf("gather task %s: next: %w", task.ID, err)
+			}
+			if b == nil {
+				break
+			}
+			if err := sink.Consume(ctx, b); err != nil {
+				src.Close()
+				return fmt.Errorf("gather task %s: consume: %w", task.ID, err)
+			}
+			totalRows += int64(b.ActiveLen())
+		}
+		src.Close()
+	}
+	result.NumRows = totalRows
+	return sink.Finalize(ctx)
+}
+
 // executeStageHashJoin builds exec.HashJoin from Task fields, reads the
 // build side from Inputs[BuildTableAlias] and the probe side from the
 // other Inputs entry, runs a build→probe pipeline, and writes the
