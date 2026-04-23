@@ -3,7 +3,6 @@ package coordinator
 import (
 	"context"
 	"fmt"
-	"sort"
 	"sync"
 	"time"
 
@@ -89,77 +88,68 @@ func (c *Coordinator) executeStageDAG(
 
 	outputs := make(map[string]StageOutput, len(stages))
 	var outputsMu sync.Mutex
-	wave := 0
-	for len(pending) > 0 {
-		wave++
-		ready := make([]physical.Stage, 0)
-		for _, s := range pending {
-			allReady := true
+
+	// Per-stage completion signal. Each stage goroutine closes its `done`
+	// channel when its output is published into `outputs`. Dependent
+	// stages block on the union of their dep signals before dispatching
+	// their own work. This is a straight DAG scheduler — each stage
+	// starts as soon as its own dependencies are satisfied, instead of
+	// waiting for an entire wave to drain. Plans with parallel branches
+	// of unequal length (e.g., two sides of a shuffle join where one
+	// side has an extra filter stage) now overlap properly instead of
+	// stalling on the longest path in each wave.
+	done := make(map[string]chan struct{}, len(pending))
+	for id := range pending {
+		done[id] = make(chan struct{})
+	}
+	c.logger.Info("stage-DAG dispatch", "query", queryID, "stages", len(pending))
+
+	g, gctx := errgroup.WithContext(ctx)
+	for _, s := range pending {
+		s := s
+		g.Go(func() error {
+			// Wait on each dependency's done signal. Deps not in the
+			// `done` map are leaf stages / pre-computed outputs (e.g.,
+			// the coordinator's initial inputs) and are treated as
+			// immediately ready.
 			for _, depID := range s.Dependencies {
-				if _, ok := outputs[depID]; !ok {
-					allReady = false
-					break
+				ch, tracked := done[depID]
+				if !tracked {
+					continue
+				}
+				select {
+				case <-ch:
+				case <-gctx.Done():
+					return gctx.Err()
 				}
 			}
-			if allReady {
-				ready = append(ready, s)
+			outputsMu.Lock()
+			inputs, err := collectInputs(s, outputs)
+			outputsMu.Unlock()
+			if err != nil {
+				return fmt.Errorf("stage %s collect inputs: %w", s.ID, err)
 			}
-		}
-		if len(ready) == 0 {
-			return nil, fmt.Errorf("executeStageDAG: no ready stages but %d pending (cyclic dep or missing upstream?)", len(pending))
-		}
-		// Stable dispatch order for readable logs + reproducibility.
-		sort.Slice(ready, func(i, j int) bool { return ready[i].ID < ready[j].ID })
-
-		c.logger.Info("stage-DAG wave",
-			"query", queryID, "wave", wave, "ready_stages", len(ready),
-			"pending_after_wave", len(pending)-len(ready))
-
-		g, gctx := errgroup.WithContext(ctx)
-		waveResults := make(map[string]StageOutput, len(ready))
-		var waveMu sync.Mutex
-		for _, s := range ready {
-			s := s
-			g.Go(func() error {
-				// collectInputs reads outputs only; it's not mutated during
-				// the wave so no lock needed for reads.
-				outputsMu.Lock()
-				inputs, err := collectInputs(s, outputs)
-				outputsMu.Unlock()
-				if err != nil {
-					return fmt.Errorf("stage %s collect inputs: %w", s.ID, err)
-				}
-				var out StageOutput
-				switch s.Type {
-				case physical.StageExchangeRepartition:
-					out, err = c.dispatchShuffleStage(gctx, queryID, s, inputs, workerCount)
-				case physical.StageExchangeReplicate:
-					out, err = c.dispatchReplicateStage(gctx, queryID, sql, s, inputs)
-				default:
-					out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount)
-				}
-				if err != nil {
-					return fmt.Errorf("stage %s (%s): %w", s.ID, s.Type, err)
-				}
-				waveMu.Lock()
-				waveResults[s.ID] = out
-				waveMu.Unlock()
-				return nil
-			})
-		}
-		if err := g.Wait(); err != nil {
-			return nil, err
-		}
-
-		// Publish this wave's outputs and retire its stages.
-		outputsMu.Lock()
-		for id, out := range waveResults {
-			outputs[id] = out
-		}
-		outputsMu.Unlock()
-		for id := range waveResults {
-			delete(pending, id)
-		}
+			var out StageOutput
+			switch s.Type {
+			case physical.StageExchangeRepartition:
+				out, err = c.dispatchShuffleStage(gctx, queryID, s, inputs, workerCount)
+			case physical.StageExchangeReplicate:
+				out, err = c.dispatchReplicateStage(gctx, queryID, sql, s, inputs)
+			default:
+				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount)
+			}
+			if err != nil {
+				return fmt.Errorf("stage %s (%s): %w", s.ID, s.Type, err)
+			}
+			outputsMu.Lock()
+			outputs[s.ID] = out
+			outputsMu.Unlock()
+			close(done[s.ID])
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	// Terminal Gather.
