@@ -548,14 +548,23 @@ func (c *Coordinator) dispatchGatherStage(
 	// subscribing after the publish can miss every reply (observed on
 	// SF10: gather hung for 6+ minutes before the stage-level timeout
 	// fired).
+	c.logger.Info("gather: subscribing",
+		"query_id", queryID, "reply_subject", replySubject)
 	recv, err := subscribeGather(c.nc, replySubject, 1)
 	if err != nil {
 		return nil, fmt.Errorf("subscribing gather reply: %w", err)
 	}
+	c.logger.Info("gather: publishing task",
+		"query_id", queryID, "task_id", task.ID, "reply_subject", replySubject,
+		"input_files", len(task.Inputs[alias]))
 	if err := c.scheduler.PublishTasks(ctx, []distributed.Task{task}); err != nil {
 		return nil, fmt.Errorf("publishing gather task: %w", err)
 	}
 
 	_ = workerCount // future: ordered gather dispatches one task per partition
-	return recv.wait(ctx, gatherReceiveTimeout)
+	res, waitErr := recv.wait(ctx, gatherReceiveTimeout)
+	c.logger.Info("gather: wait returned",
+		"query_id", queryID, "msg_count", recv.msgCount.Load(),
+		"err", waitErr)
+	return res, waitErr
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -36,6 +37,7 @@ type gatherReceiver struct {
 	terminals         int
 	expectedTerminals int
 	done              chan struct{}
+	msgCount          atomic.Int64 // diagnostic: incremented on every message received
 }
 
 // subscribeGather installs the NATS subscription. Must be called BEFORE
@@ -51,6 +53,14 @@ func subscribeGather(nc *nats.Conn, subject string, expectedTerminals int) (*gat
 	if err != nil {
 		return nil, fmt.Errorf("subscribing gather subject %q: %w", subject, err)
 	}
+	// Flush so the subscription is registered on the server before any
+	// publish can race past us. (Subscribe returns after the client-side
+	// record exists, but the interest isn't propagated to the NATS
+	// server until the next flush.)
+	if err := nc.Flush(); err != nil {
+		sub.Unsubscribe()
+		return nil, fmt.Errorf("flushing gather subscription %q: %w", subject, err)
+	}
 	r.sub = sub
 	return r, nil
 }
@@ -60,6 +70,7 @@ func (r *gatherReceiver) handle(m *nats.Msg) {
 	if err := distributed.Unmarshal(m.Data, &msg); err != nil {
 		return
 	}
+	r.msgCount.Add(1)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if msg.Terminal {

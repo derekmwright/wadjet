@@ -49,6 +49,9 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 // plan — the upstream stage already produced the final result shape; the
 // gather worker is just a pipe.
 func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	e.logger.Info("executeGatherStage: entry",
+		"task_id", task.ID, "query_id", task.QueryID,
+		"reply_subject", task.ReplySubject, "inputs_aliases", len(task.Inputs))
 	if task.ReplySubject == "" {
 		return fmt.Errorf("gather task %s: ReplySubject required", task.ID)
 	}
@@ -64,8 +67,10 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 	if err := sink.Init(ctx); err != nil {
 		return fmt.Errorf("gather task %s: sink init: %w", task.ID, err)
 	}
-	var totalRows int64
+	var totalRows, batchesPublished int64
 	for alias, files := range task.Inputs {
+		e.logger.Info("executeGatherStage: opening source",
+			"task_id", task.ID, "alias", alias, "file_count", len(files))
 		src, err := e.sourceForAlias(bucket, alias, files)
 		if err != nil {
 			return fmt.Errorf("gather task %s: source for %q: %w", task.ID, alias, err)
@@ -87,11 +92,22 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 				return fmt.Errorf("gather task %s: consume: %w", task.ID, err)
 			}
 			totalRows += int64(b.ActiveLen())
+			batchesPublished++
 		}
 		src.Close()
 	}
+	e.logger.Info("executeGatherStage: finalizing",
+		"task_id", task.ID, "reply_subject", task.ReplySubject,
+		"batches_published", batchesPublished, "total_rows", totalRows)
 	result.NumRows = totalRows
-	return sink.Finalize(ctx)
+	if err := sink.Finalize(ctx); err != nil {
+		e.logger.Error("executeGatherStage: finalize failed",
+			"task_id", task.ID, "error", err)
+		return err
+	}
+	e.logger.Info("executeGatherStage: complete",
+		"task_id", task.ID, "total_rows", totalRows)
+	return nil
 }
 
 // executeStageHashJoin builds exec.HashJoin from Task fields, reads the
