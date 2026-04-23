@@ -34,6 +34,15 @@ type cachedFileStreamSource struct {
 	bucket   string
 	files    []string
 
+	// projectColumns optionally restricts parquet reads to these columns
+	// by name. Applied only when EVERY requested column exists in the
+	// file's schema — if any are missing (e.g. a derived column name that
+	// the aggregate operator will compute via pre-project), the projection
+	// is silently skipped and the full schema is read. This keeps the
+	// optimization safe in the presence of expression-based aggregates
+	// without needing to teach the source about derivation rules.
+	projectColumns []string
+
 	fileIdx int
 
 	// Active WSHF chunk reader for the current file (nil if current file is
@@ -53,6 +62,20 @@ func newCachedFileStreamSource(executor *Executor, bucket string, files []string
 		executor: executor,
 		bucket:   bucket,
 		files:    files,
+	}
+}
+
+// newCachedFileStreamSourceWithProjection is like newCachedFileStreamSource
+// but will attempt to restrict parquet reads to the named columns. The
+// projection is applied ONLY when every requested column is present in the
+// parquet file's schema — a safety guard against derived/expression names
+// that would otherwise over-prune the scan and break downstream operators.
+func newCachedFileStreamSourceWithProjection(executor *Executor, bucket string, files []string, projectColumns []string) *cachedFileStreamSource {
+	return &cachedFileStreamSource{
+		executor:       executor,
+		bucket:         bucket,
+		files:          files,
+		projectColumns: projectColumns,
 	}
 }
 
@@ -180,7 +203,41 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening parquet file %s: %w", filePath, err)
 	}
-	batches, err := scan.ReadFileBatches(reader, reader.Schema().Columns, nil)
+	projCols := reader.Schema().Columns
+	// Apply column projection only when EVERY requested column is present
+	// in the file schema. If any requested name is missing (likely a
+	// derived/expression column that will be computed by a pre-project
+	// pass), skip projection entirely and read the full schema — the
+	// downstream operator needs the raw columns to compute the derivation.
+	if len(s.projectColumns) > 0 {
+		schemaSet := make(map[string]bool, len(projCols))
+		for _, c := range projCols {
+			schemaSet[c.Name] = true
+		}
+		allPresent := true
+		for _, name := range s.projectColumns {
+			if !schemaSet[name] {
+				allPresent = false
+				break
+			}
+		}
+		if allPresent {
+			wanted := make(map[string]bool, len(s.projectColumns))
+			for _, c := range s.projectColumns {
+				wanted[c] = true
+			}
+			filtered := make([]parquet.Column, 0, len(s.projectColumns))
+			for _, c := range projCols {
+				if wanted[c.Name] {
+					filtered = append(filtered, c)
+				}
+			}
+			if len(filtered) > 0 {
+				projCols = filtered
+			}
+		}
+	}
+	batches, err := scan.ReadFileBatches(reader, projCols, nil)
 	if err != nil {
 		return fmt.Errorf("reading parquet file %s: %w", filePath, err)
 	}

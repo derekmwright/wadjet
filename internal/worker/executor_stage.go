@@ -234,7 +234,16 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	if bucket == "" {
 		bucket = task.ResultBucket
 	}
-	src, err := e.sourceForAlias(bucket, alias, files)
+	// Column projection hint: the aggregate only needs group-by columns +
+	// each aggregate's input column. When ALL of those names exist in the
+	// file schema the reader skips the rest — a big I/O win on wide tables
+	// like lineitem (16 cols → typically 4-5 used). If any name is a
+	// derived/expression output (e.g. "disc_price" for
+	// sum(l_extendedprice*(1-l_discount))), the reader detects the missing
+	// column and falls back to full-schema read so the downstream operator
+	// can still compute the derivation.
+	projCols := aggProjectionCols(task.GroupByCols, task.Aggregates)
+	src, err := e.sourceForAliasWithProjection(bucket, alias, files, projCols)
 	if err != nil {
 		return fmt.Errorf("aggregate task %s: source: %w", task.ID, err)
 	}
@@ -275,6 +284,32 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	}
 	outBatches = applyPostSort(ctx, task, outBatches)
 	return e.writeStageOutput(ctx, task, outBatches, result)
+}
+
+// aggProjectionCols returns the union of group-by columns and each
+// aggregate spec's input column — the minimum set of column names the
+// aggregate operator references. The returned list may include derived
+// names (e.g. pre-projected expression outputs); the source treats those
+// as a no-op because they won't match any file-schema column.
+func aggProjectionCols(groupBy []string, aggs []distributed.AggSpec) []string {
+	seen := make(map[string]bool, len(groupBy)+len(aggs))
+	out := make([]string, 0, len(groupBy)+len(aggs))
+	for _, c := range groupBy {
+		if c != "" && !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	for _, a := range aggs {
+		if a.InputCol != "" && !seen[a.InputCol] {
+			seen[a.InputCol] = true
+			out = append(out, a.InputCol)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // applyPostSort runs an in-process Sort on the given batches when the
