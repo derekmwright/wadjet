@@ -176,10 +176,12 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	if task.JoinFilter != "" {
 		hj.SemiAntiFilter = physical.BuildSemiAntiFilter(task.JoinFilter)
 	}
-	// Spill + memory tracker from executor budget.
-	if sm, mt := e.newSpillManager(task.ID); sm != nil {
-		hj.Spill = sm
-		hj.MemTracker = mt
+	// Worker-level shared spill + tracker. All concurrent tasks on this
+	// worker share the same budget; HashJoin.Spill triggers when cumulative
+	// usage crosses the threshold, regardless of which task allocated.
+	if e.sharedSpill != nil {
+		hj.Spill = e.sharedSpill
+		hj.MemTracker = e.sharedTracker
 	}
 
 	if err := buildSource.Init(ctx); err != nil {
@@ -245,8 +247,8 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 		}
 	}
 	hashAgg := exec.NewHashAggregate(task.GroupByCols, aggCols)
-	if sm, _ := e.newSpillManager(task.ID); sm != nil {
-		hashAgg.Spill = sm
+	if e.sharedSpill != nil {
+		hashAgg.Spill = e.sharedSpill
 	}
 
 	pipeline := &exec.Pipeline{

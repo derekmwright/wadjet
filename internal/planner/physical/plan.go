@@ -187,6 +187,15 @@ type Planner struct {
 	ctes           []plansql.CTEDef  // CTE definitions from the current query, for subquery resolution
 	MemoryBudget   int64             // per-query memory budget in bytes (0 = unlimited)
 	SpillDir       string            // directory for spill files (empty = os temp dir)
+
+	// SharedTracker / SharedSpillMgr (if set) are used in place of per-query
+	// Tracker+SpillManager creation. Workers set these to point at the
+	// executor-level pool so concurrent tasks on the same worker compete for
+	// ONE budget and spill cooperatively under pool pressure, matching the
+	// Trino/Spark unified memory manager model. When nil, getSpillManager()
+	// falls back to creating a per-query pool as before.
+	SharedTracker  *memory.Tracker
+	SharedSpillMgr *memory.SpillManager
 	QueryLimits    *config.QueryLimits // cost-based query guard (nil = no limits)
 	cteCache       map[string]*cteMaterialized // materialized CTE results
 	scanCache      map[string]*scanCached       // cached scan results for duplicate table scans
@@ -225,6 +234,11 @@ type Planner struct {
 // first call. Uses MemoryBudget if set, otherwise auto-detects from system
 // memory (cgroup or physical). Returns nil if no memory limit can be determined.
 func (p *Planner) getSpillManager() *memory.SpillManager {
+	// Shared pool (worker-level, injected by Executor) takes precedence so
+	// all concurrent tasks spill against one budget.
+	if p.SharedSpillMgr != nil {
+		return p.SharedSpillMgr
+	}
 	if p.spillMgr != nil {
 		return p.spillMgr
 	}
@@ -257,6 +271,10 @@ func (p *Planner) getSpillManager() *memory.SpillManager {
 // getMemTracker returns the shared per-query memory tracker.
 // Must be called after getSpillManager().
 func (p *Planner) getMemTracker() *memory.Tracker {
+	// Shared pool takes precedence (worker-level pool across tasks).
+	if p.SharedTracker != nil {
+		return p.SharedTracker
+	}
 	return p.memTracker
 }
 

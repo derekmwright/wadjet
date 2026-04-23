@@ -55,6 +55,16 @@ type Executor struct {
 	spillDir     string              // directory for spill files
 	metrics      *metrics.Metrics
 	logger       *slog.Logger
+
+	// Worker-level shared memory pool. All concurrent tasks Reserve against
+	// the same Tracker, so operators (HashJoin, HashAggregate) spill under
+	// cumulative worker pressure instead of per-task budgets. Matches the
+	// Trino MemoryPool / Spark ExecutionMemoryPool model: scheduling
+	// decisions stay cheap (dispatch freely, worker governs), and N
+	// concurrent tasks that would each hold their own independent hash
+	// table now share one budget and cooperatively spill.
+	sharedTracker *memory.Tracker
+	sharedSpill   *memory.SpillManager
 }
 
 // NewExecutor creates a new task executor.
@@ -62,10 +72,27 @@ func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) 
 	return &Executor{store: store, js: js, cache: cache, logger: slog.Default()}
 }
 
-// SetMemoryBudget configures the per-task memory budget and spill directory.
+// SetMemoryBudget configures the worker-level memory budget and spill
+// directory, and eagerly creates the shared Tracker + SpillManager that
+// all tasks will use. Budget is the TOTAL across concurrent tasks, not
+// per-task — callers should pass ~75% of worker RAM.
 func (e *Executor) SetMemoryBudget(budget int64, spillDir string) {
 	e.memoryBudget = budget
 	e.spillDir = spillDir
+	if budget > 0 {
+		e.sharedTracker = memory.NewTracker("worker", budget)
+		dir := spillDir
+		if dir == "" {
+			dir = os.TempDir()
+		}
+		sm, err := memory.NewSpillManager(dir, e.sharedTracker)
+		if err != nil {
+			e.logger.Warn("failed to create worker spill manager; tasks run without spill governance",
+				"error", err)
+			return
+		}
+		e.sharedSpill = sm
+	}
 }
 
 // SetResultStore attaches an in-memory result store for inter-stage result passing.
@@ -359,6 +386,16 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	}
 	if e.spillDir != "" {
 		planner.SpillDir = e.spillDir
+	}
+	// Inject the worker-level shared pool so concurrent pipeline tasks
+	// compete for one budget instead of each creating a private
+	// Tracker+SpillManager. Without this, two concurrent pipeline tasks
+	// could each allocate up to MemoryBudget and OOM the worker.
+	if e.sharedTracker != nil {
+		planner.SharedTracker = e.sharedTracker
+	}
+	if e.sharedSpill != nil {
+		planner.SharedSpillMgr = e.sharedSpill
 	}
 
 	// Scan-split pipeline mode: create lazy streaming sources for pre-scanned
