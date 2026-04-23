@@ -278,10 +278,25 @@ func (c *Coordinator) dispatchPipelineStage(
 	workerCount int,
 ) (StageOutput, error) {
 	_ = sql
-	// Leaf scan stage: pass through scan files as the stage's output. The
-	// files are not yet materialized through a worker — downstream Exchange
-	// stages treat ScanFiles as the upstream output.
+	// Leaf scan stage.
 	if stage.Type == physical.StageScan && len(inputs) == 0 {
+		// Fused scan-aggregate: the planner marked this scan to produce
+		// partial aggregates (saves the scan→aggregate round-trip in the
+		// legacy single-pipeline executor). Under native-DAG we must
+		// honor that signal by dispatching N partial-aggregate tasks —
+		// each worker reads its slice of scan files, aggregates, and
+		// emits a partial result. The downstream final_aggregate stage
+		// merges across partial outputs.
+		//
+		// Without this path, a Singleton final_aggregate over a large
+		// leaf scan ran on ONE worker reading all scan files serially —
+		// at SF10 that was the dominant cost on Q01 (87s of 87s wall
+		// time was the single-worker lineitem scan).
+		if len(stage.FusedAggSpecs) > 0 {
+			return c.dispatchScanAggregateStage(ctx, queryID, stage, workerCount)
+		}
+		// Plain scan with no fused aggregate: downstream Exchange stages
+		// treat ScanFiles as the upstream output (pass-through).
 		files := append([]string(nil), stage.ScanFiles...)
 		return StageOutput{
 			Kind:  OutputSinglePart,
@@ -294,6 +309,174 @@ func (c *Coordinator) dispatchPipelineStage(
 	// partition p = the files produced by worker p — downstream Exchange
 	// stages treat this as partitioned if they need to re-hash.
 	return c.dispatchComputeStage(ctx, queryID, stage, inputs, workerCount)
+}
+
+// dispatchScanAggregateStage dispatches N partial-aggregate tasks, one
+// per worker, each reading a disjoint slice of stage.ScanFiles. Each task
+// runs a HashAggregate on its file slice and emits a partial result as
+// its stage output. Downstream final_aggregate stages (which are almost
+// always immediately adjacent) merge the N partial outputs into the
+// logical full aggregate.
+//
+// Why scan-side fan-out: scan is the only leaf at plan time, so a
+// Singleton-distributed final_aggregate reading "the scan's output"
+// serialises to one worker reading every parquet file. Splitting the
+// scan N ways + computing partial aggregates in parallel is the same
+// map-reduce shape the legacy executor used (via emitMergeAggregateTree
+// → scan-level fused-agg + multi-level merge tree) before native-DAG
+// collapsed the tree. Now we re-introduce the fan-out, but without the
+// extra merge-tree levels: one partial step, one final merge.
+func (c *Coordinator) dispatchScanAggregateStage(
+	ctx context.Context,
+	queryID string,
+	stage physical.Stage,
+	workerCount int,
+) (StageOutput, error) {
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	fileSets := splitFilesEvenly(stage.ScanFiles, workerCount)
+	actualTasks := len(fileSets)
+	if actualTasks == 0 {
+		return StageOutput{
+			Kind:          OutputPartitioned,
+			NumPartitions: 0,
+			Files:         nil,
+		}, nil
+	}
+	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
+	c.logger.Info("dispatchScanAggregateStage",
+		"stage_id", stage.ID, "files", len(stage.ScanFiles),
+		"tasks", actualTasks, "group_by", stage.FusedAggGroupBy)
+
+	// Convert AggSpec → wire format once.
+	var aggs []distributed.AggSpec
+	for _, a := range stage.FusedAggSpecs {
+		aggs = append(aggs, distributed.AggSpec{
+			Func:      a.Func,
+			InputCol:  a.InputCol,
+			OutputCol: a.OutputCol,
+		})
+	}
+
+	tasks := make([]distributed.Task, 0, actualTasks)
+	for w, files := range fileSets {
+		t := distributed.Task{
+			ID:           uuid.New().String()[:8],
+			QueryID:      queryID,
+			StageID:      stage.ID,
+			Type:         distributed.TaskTypeStage,
+			StageType:    "aggregate",
+			TableName:    stage.TableName,
+			Columns:      stage.Columns,
+			GroupByCols:  stage.FusedAggGroupBy,
+			Aggregates:   aggs,
+			Inputs: map[string][]string{
+				// Use the scan's table name as alias so the worker's
+				// sourceForAlias opens these files via the parquet path.
+				scanAliasForStage(stage): files,
+			},
+			DataBucket:   c.config.ResultBucket,
+			ResultBucket: c.config.ResultBucket,
+			ResultPrefix: resultPrefix,
+			CreatedAt:    time.Now(),
+		}
+		if clusterID := c.catalog.ClusterID(); clusterID != "" {
+			t.ClusterID = clusterID
+		}
+		c.mu.Lock()
+		qm := c.queryMetas[queryID]
+		c.mu.Unlock()
+		c.enrichTaskWithQueryContext(qm, &t)
+		tasks = append(tasks, t)
+		_ = w
+	}
+
+	// Dispatch and collect (same pattern as dispatchComputeStage).
+	stageQueryID := fmt.Sprintf("st-%s-%s", stage.ID, queryID)
+	trackerStages := map[string]*StageInfo{
+		stage.ID: {StageID: stage.ID, Type: distributed.TaskTypeStage, TotalTasks: len(tasks)},
+	}
+	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
+	c.tracker.Start(stageQueryID)
+	defer c.tracker.Delete(stageQueryID)
+
+	for i := range tasks {
+		tasks[i].QueryID = stageQueryID
+	}
+	subject := distributed.QueryResultSubject(stageQueryID)
+	type taskResult struct {
+		files []string
+		err   string
+	}
+	collected := make([]taskResult, 0, len(tasks))
+	var mu sync.Mutex
+	done := make(chan struct{}, 1)
+	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+		var r distributed.ResultNotification
+		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
+			return
+		}
+		mu.Lock()
+		if r.Success {
+			collected = append(collected, taskResult{files: r.ResultFiles})
+		} else {
+			collected = append(collected, taskResult{err: r.Error})
+		}
+		got := len(collected)
+		mu.Unlock()
+		if got >= len(tasks) {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}
+	})
+	if err != nil {
+		return StageOutput{}, fmt.Errorf("scan-agg stage %s subscribe: %w", stage.ID, err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
+		return StageOutput{}, fmt.Errorf("scan-agg stage %s publish: %w", stage.ID, err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return StageOutput{}, ctx.Err()
+	case <-time.After(shuffleStageTimeout):
+		return StageOutput{}, fmt.Errorf("scan-agg stage %s timeout", stage.ID)
+	}
+
+	mu.Lock()
+	results := make([]taskResult, len(collected))
+	copy(results, collected)
+	mu.Unlock()
+	files := make([][]string, len(tasks))
+	for i, r := range results {
+		if r.err != "" {
+			return StageOutput{}, fmt.Errorf("scan-agg stage %s: task failed: %s", stage.ID, r.err)
+		}
+		files[i] = r.files
+	}
+	return StageOutput{
+		Kind:          OutputPartitioned,
+		NumPartitions: len(tasks),
+		Files:         files,
+	}, nil
+}
+
+// scanAliasForStage returns the alias key used when handing scan-fused
+// files to a worker's Inputs map. Falls back to the stage's TableName
+// or scan ID so the worker can resolve the parquet source.
+func scanAliasForStage(stage physical.Stage) string {
+	if stage.ScanAlias != "" {
+		return stage.ScanAlias
+	}
+	if stage.TableName != "" {
+		return stage.TableName
+	}
+	return stage.ID
 }
 
 // dispatchComputeStage handles non-leaf compute stages (hash_join,
