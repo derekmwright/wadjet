@@ -24,5 +24,4 @@ exchange-repartition-22	exchange-repartition	Hash(p_partkey)/32	deps=join-12
 exchange-repartition-23	exchange-repartition	Hash(ps_partkey)/32	deps=final_aggregate-21
 join-24	hash_join	Hash(p_partkey)/32	deps=exchange-repartition-22,exchange-repartition-23
 sort-25	sort	Singleton	deps=join-24
-merge_sort-46	merge_sort	Singleton	deps=sort-25
-exchange-gather-merge_sort-46	exchange-gather	Singleton	deps=merge_sort-46
+exchange-gather-sort-25	exchange-gather	Singleton	deps=sort-25

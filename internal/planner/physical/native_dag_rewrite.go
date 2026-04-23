@@ -4,6 +4,91 @@ import (
 	"strings"
 )
 
+// collapseRedundantFinalMergeSort removes trivial trailing merge_sort
+// stages whose job is already done by their upstream Singleton sort.
+// The common TPC-H shape after collapseMergeTreesForNativeDAG is:
+//
+//   sort-N        Singleton   SortKeys=K   deps=[...]
+//   merge_sort-M  Singleton   deps=[sort-N]
+//   gather        Singleton   deps=[merge_sort-M]
+//
+// The merge_sort-M stage is a no-op: it reads one already-sorted input
+// and re-emits it. Under native-DAG this becomes a full worker round-
+// trip (pull task, open input, emit output, write to KV/S3) per query
+// for zero algorithmic work. We drop merge_sort-M from the plan and
+// rewrite its dependents (gather, etc.) to consume sort-N directly.
+//
+// Conservative: only collapse when merge_sort has exactly one dep, that
+// dep is a sort stage with Singleton distribution, and the merge_sort
+// itself is Singleton. Partition-aware merge_sort stages that combine
+// multiple sorted shards are left alone.
+func collapseRedundantFinalMergeSort(stages []Stage) []Stage {
+	idIndex := make(map[string]int, len(stages))
+	for i := range stages {
+		idIndex[stages[i].ID] = i
+	}
+
+	removed := make(map[string]string) // merge_sort ID → sort ID (rewrite target)
+	for i := range stages {
+		ms := &stages[i]
+		if ms.Type != "merge_sort" {
+			continue
+		}
+		if ms.Distribution.Kind != DistSingleton {
+			continue
+		}
+		if len(ms.Dependencies) != 1 {
+			continue
+		}
+		depIdx, ok := idIndex[ms.Dependencies[0]]
+		if !ok {
+			continue
+		}
+		dep := stages[depIdx]
+		if dep.Type != "sort" {
+			continue
+		}
+		if dep.Distribution.Kind != DistSingleton {
+			continue
+		}
+		removed[ms.ID] = dep.ID
+	}
+	if len(removed) == 0 {
+		return stages
+	}
+
+	out := make([]Stage, 0, len(stages)-len(removed))
+	for _, s := range stages {
+		if _, drop := removed[s.ID]; drop {
+			continue
+		}
+		// Rewrite dependencies that pointed at a dropped merge_sort to
+		// point at its underlying sort.
+		if len(s.Dependencies) > 0 {
+			newDeps := make([]string, len(s.Dependencies))
+			for i, d := range s.Dependencies {
+				if target, ok := removed[d]; ok {
+					newDeps[i] = target
+				} else {
+					newDeps[i] = d
+				}
+			}
+			s.Dependencies = newDeps
+		}
+		// Hash-join and similar stages carry LeftDepStage / RightDepStage
+		// pointers separate from Dependencies; rewrite those too so the
+		// dispatcher's alias→input mapping stays consistent.
+		if target, ok := removed[s.LeftDepStage]; ok {
+			s.LeftDepStage = target
+		}
+		if target, ok := removed[s.RightDepStage]; ok {
+			s.RightDepStage = target
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // collapseMergeTreesForNativeDAG rewrites multi-level merge_aggregate /
 // merge_sort fan-out trees back into single-stage form. The trees are
 // emitted by emitMergeAggregateTree / emitMergeSortTree when the upstream

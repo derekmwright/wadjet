@@ -15,5 +15,4 @@ exchange-repartition-51	exchange-repartition	Hash(s_suppkey)/32	deps=join-2
 exchange-repartition-52	exchange-repartition	Hash(ps_suppkey)/32	deps=join-50
 join-53	hash_join	Hash(s_suppkey)/32	deps=exchange-repartition-51,exchange-repartition-52
 sort-54	sort	Singleton	deps=join-53
-merge_sort-108	merge_sort	Singleton	deps=sort-54
-exchange-gather-merge_sort-108	exchange-gather	Singleton	deps=merge_sort-108
+exchange-gather-sort-54	exchange-gather	Singleton	deps=sort-54

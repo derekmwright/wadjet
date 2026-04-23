@@ -1027,6 +1027,10 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// shape is a single-pipeline optimization that becomes a SF10-
 		// killing N-round-trip fan-out under native-DAG dispatch.
 		stages = collapseMergeTreesForNativeDAG(stages)
+		// Drop redundant trailing merge_sort Singleton stages whose sole
+		// dep is a Singleton sort — the merge_sort is a no-op in that
+		// shape and costs a full worker round-trip per query.
+		stages = collapseRedundantFinalMergeSort(stages)
 		var ensureErr error
 		stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
 		if ensureErr != nil {

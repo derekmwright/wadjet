@@ -22,5 +22,4 @@ join-20	broadcast_join	Hash(l_partkey)/32	deps=join-18,scan-19
 aggregate-21	aggregate	Singleton	deps=join-20
 final_aggregate-22	final_aggregate	Singleton	deps=aggregate-21
 sort-23	sort	Singleton	deps=final_aggregate-22
-merge_sort-81	merge_sort	Singleton	deps=sort-23
-exchange-gather-merge_sort-81	exchange-gather	Singleton	deps=merge_sort-81
+exchange-gather-sort-23	exchange-gather	Singleton	deps=sort-23

@@ -1,5 +1,4 @@
 scan-0	scan	Singleton
 final_aggregate-39	final_aggregate	Singleton	deps=scan-0
 sort-40	sort	Singleton	deps=final_aggregate-39
-merge_sort-81	merge_sort	Singleton	deps=sort-40
-exchange-gather-merge_sort-81	exchange-gather	Singleton	deps=merge_sort-81
+exchange-gather-sort-40	exchange-gather	Singleton	deps=sort-40

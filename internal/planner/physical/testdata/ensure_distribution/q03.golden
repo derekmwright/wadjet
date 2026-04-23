@@ -10,5 +10,4 @@ join-8	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-6,exchange-repart
 aggregate-9	aggregate	Singleton	deps=join-8
 final_aggregate-10	final_aggregate	Singleton	deps=aggregate-9
 sort-11	sort	Singleton	deps=final_aggregate-10
-merge_sort-65	merge_sort	Singleton	deps=sort-11
-exchange-gather-merge_sort-65	exchange-gather	Singleton	deps=merge_sort-65
+exchange-gather-sort-11	exchange-gather	Singleton	deps=sort-11

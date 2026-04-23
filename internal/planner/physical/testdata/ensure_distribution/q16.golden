@@ -6,5 +6,4 @@ join-4	hash_join	Hash(ps_partkey)/32	deps=exchange-repartition-2,exchange-repart
 aggregate-5	aggregate	Singleton	deps=join-4
 final_aggregate-6	final_aggregate	Singleton	deps=aggregate-5
 sort-7	sort	Singleton	deps=final_aggregate-6
-merge_sort-17	merge_sort	Singleton	deps=sort-7
-exchange-gather-merge_sort-17	exchange-gather	Singleton	deps=merge_sort-17
+exchange-gather-sort-7	exchange-gather	Singleton	deps=sort-7

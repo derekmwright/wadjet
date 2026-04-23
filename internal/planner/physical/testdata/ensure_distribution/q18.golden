@@ -15,5 +15,4 @@ join-51	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-49,exchange-repa
 aggregate-52	aggregate	Singleton	deps=join-51
 final_aggregate-53	final_aggregate	Singleton	deps=aggregate-52
 sort-54	sort	Singleton	deps=final_aggregate-53
-merge_sort-150	merge_sort	Singleton	deps=sort-54
-exchange-gather-merge_sort-150	exchange-gather	Singleton	deps=merge_sort-150
+exchange-gather-sort-54	exchange-gather	Singleton	deps=sort-54
