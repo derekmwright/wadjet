@@ -346,12 +346,17 @@ func (c *Coordinator) dispatchComputeStage(
 		// Unknown distribution — fall back to 1 rather than workerCount.
 		numTasks = 1
 	}
-	// Legacy planner fields sometimes override (e.g., JoinPartitionCount
-	// for shuffle-paired joins). Prefer an explicit non-zero Tasks if the
-	// planner set one — it's the most specific signal.
-	if stage.Tasks > 0 {
-		numTasks = stage.Tasks
-	}
+	// NB: stage.Tasks from the legacy planner encodes probe-split intent
+	// (e.g., Tasks=workerCount for broadcast_join means "split probe files
+	// across N workers"). That semantics assumes each task receives a
+	// DIFFERENT slice of probe files — which only works if the coordinator
+	// slices probe input per task. Native-DAG dispatch today hands every
+	// Singleton-stage task the same full probe set (partitionFilesForWorker
+	// on Singleton input returns the full list for every worker), so
+	// honoring stage.Tasks=N duplicates the full scan/join N× and triples
+	// the worker memory pressure. Until native-DAG grows probe-split
+	// semantics, Distribution is the authoritative signal and stage.Tasks
+	// is intentionally ignored here.
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	c.logger.Info("dispatchComputeStage",
 		"stage_id", stage.ID, "stage_type", stage.Type,
