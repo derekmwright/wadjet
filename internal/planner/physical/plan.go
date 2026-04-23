@@ -1003,6 +1003,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// input, then asserts consistency strictly.
 	assignStageDistributions(stages, p.WorkerCount)
 	if p.UseEnsureDistribution {
+		// Collapse multi-level merge_aggregate/merge_sort trees before the
+		// Exchange pass so the emitted Exchange stages are placed against
+		// the final merger, not the intermediate tree levels. The tree
+		// shape is a single-pipeline optimization that becomes a SF10-
+		// killing N-round-trip fan-out under native-DAG dispatch.
+		stages = collapseMergeTreesForNativeDAG(stages)
 		var ensureErr error
 		stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
 		if ensureErr != nil {
@@ -1594,7 +1600,17 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 func (p *Planner) generateStages(node *logical.Node) []Stage {
 	var stages []Stage
 	p.walkStages(node, &stages, nil)
-	if p.WorkerCount > 1 {
+	// Broadcast-join fusion is a single-pipeline-executor optimization: it
+	// moves a separate broadcast_join stage into a consumer's FusedJoins
+	// list to avoid an intermediate S3 round-trip. Under native-DAG execution
+	// (Phase 3), every stage is dispatched independently and stage boundaries
+	// are the fundamental unit — fusing collapses that structure in ways the
+	// worker's executeStageHashJoin can't consume (the consumer ends up with
+	// >2 Dependencies, and FusedJoins semantics don't round-trip through the
+	// wire-level Task contract). Skip fusion when the caller has opted into
+	// native-DAG; the extra round-trip is the correctness price we pay, and
+	// the parallel-wave dispatcher hides most of the latency.
+	if p.WorkerCount > 1 && !p.UseEnsureDistribution {
 		stages = fuseJoinStages(stages)
 	}
 	return stages
