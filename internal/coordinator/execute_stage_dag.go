@@ -321,17 +321,52 @@ func (c *Coordinator) dispatchComputeStage(
 	if workerCount <= 0 {
 		workerCount = 1 // single-worker fallback for sparse test / bootstrap setups
 	}
+	// Task count derivation:
+	//   - Singleton output: exactly 1 task. The stage produces one logical
+	//     result; running workerCount tasks on the same unpartitioned input
+	//     duplicates the output N× (caught on SF10 Q01: 18 rows instead of
+	//     6 with workerCount=3).
+	//   - Hash-partitioned output: one task per output partition. The
+	//     planner's distribution.Count is authoritative; fall back to
+	//     workerCount if unset.
+	//   - Broadcast output: 1 task producing a file every consumer reads.
+	//   - Anything else: correctness-first default of 1 task.
+	numTasks := 1
+	switch stage.Distribution.Kind {
+	case physical.DistSingleton:
+		numTasks = 1
+	case physical.DistHashPartitioned:
+		numTasks = stage.Distribution.Count
+		if numTasks <= 0 {
+			numTasks = workerCount
+		}
+	case physical.DistBroadcast:
+		numTasks = 1
+	default:
+		// Unknown distribution — fall back to 1 rather than workerCount.
+		numTasks = 1
+	}
+	// Legacy planner fields sometimes override (e.g., JoinPartitionCount
+	// for shuffle-paired joins). Prefer an explicit non-zero Tasks if the
+	// planner set one — it's the most specific signal.
+	if stage.Tasks > 0 {
+		numTasks = stage.Tasks
+	}
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
-	c.logger.Debug("dispatchComputeStage entry",
+	c.logger.Info("dispatchComputeStage",
 		"stage_id", stage.ID, "stage_type", stage.Type,
-		"deps", stage.Dependencies, "worker_count", workerCount,
+		"deps", stage.Dependencies, "num_tasks", numTasks,
+		"distribution_kind", stage.Distribution.Kind,
+		"distribution_count", stage.Distribution.Count,
 		"inputs_aliases", len(inputs))
 
-	// Build one task per worker. For joins, the two Inputs are keyed by
-	// build/probe alias derived from stage.Dependencies and stage.BuildTableAlias.
-	tasks := make([]distributed.Task, 0, workerCount)
-	for w := 0; w < workerCount; w++ {
-		taskInputs, err := buildTaskInputsForStage(stage, inputs, w, workerCount)
+	// Build one task per output partition. Input slicing uses numTasks as
+	// the divisor so each task reads its share of the upstream partitioned
+	// input — for Singleton stages every task reads the full upstream; for
+	// Hash-partitioned N-task stages each task reads its N-th partition.
+	tasks := make([]distributed.Task, 0, numTasks)
+	for w := 0; w < numTasks; w++ {
+		taskInputs, err := buildTaskInputsForStage(stage, inputs, w, numTasks)
 		if err != nil {
 			return StageOutput{}, fmt.Errorf("stage %s worker %d: %w", stage.ID, w, err)
 		}
@@ -460,8 +495,21 @@ func (c *Coordinator) dispatchComputeStage(
 		}
 		files[i] = r.files
 	}
+	// Kind reflects what the planner said this stage produces. Single-
+	// task Singleton stages label their output OutputSinglePart so
+	// downstream consumers (partitionFilesForWorker) return the full file
+	// list for every worker. Hash-partitioned stages produce Partitioned
+	// output; broadcast produces Replicated; anything else falls back to
+	// SinglePart (one worker consumed all input).
+	kind := OutputSinglePart
+	switch stage.Distribution.Kind {
+	case physical.DistHashPartitioned:
+		kind = OutputPartitioned
+	case physical.DistBroadcast:
+		kind = OutputReplicated
+	}
 	return StageOutput{
-		Kind:          OutputPartitioned,
+		Kind:          kind,
 		NumPartitions: len(tasks),
 		Files:         files,
 	}, nil
