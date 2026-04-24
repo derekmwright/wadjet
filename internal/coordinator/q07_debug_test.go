@@ -5,11 +5,80 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/citc-tech/wadjet/benchmarks/tpch"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
+	"github.com/citc-tech/wadjet/internal/planner/physical"
+	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
+
+// dumpStages prints the native-DAG stage list for a query without executing.
+// Useful for spotting plan-shape issues that produce wrong runtime output.
+func dumpStages(t *testing.T, c *Coordinator, ctx context.Context, label, sql string) {
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		t.Logf("%s: parse: %v", label, err)
+		return
+	}
+	info, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Logf("%s: extract: %v", label, err)
+		return
+	}
+	logicalPlan, err := logical.BuildFromSelect(info)
+	if err != nil {
+		t.Logf("%s: build logical: %v", label, err)
+		return
+	}
+	planner := physical.NewPlanner(c.catalog)
+	planner.WorkerCount = c.workers.Count()
+	planner.UseEnsureDistribution = true
+	scanAnnotator := func(plan *logical.Node) { planner.AnnotateScanColumns(ctx, plan) }
+	scanAnnotator(logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+	stages, err := planner.PlanDistributed(ctx, logicalPlan)
+	if err != nil {
+		t.Logf("%s: PlanDistributed: %v", label, err)
+		return
+	}
+	fmt.Printf("=== %s | %d stages ===\n", label, len(stages))
+	for _, s := range stages {
+		var bits []string
+		bits = append(bits, fmt.Sprintf("id=%s type=%s tasks=%d", s.ID, s.Type, s.Tasks))
+		if len(s.Dependencies) > 0 {
+			bits = append(bits, fmt.Sprintf("deps=%v", s.Dependencies))
+		}
+		if s.JoinType != "" {
+			bits = append(bits, fmt.Sprintf("joinType=%s left=%v right=%v", s.JoinType, s.JoinLeftKeys, s.JoinRightKeys))
+		}
+		if s.BuildTableAlias != "" {
+			bits = append(bits, fmt.Sprintf("buildAlias=%s", s.BuildTableAlias))
+		}
+		if len(s.GroupByCols) > 0 {
+			bits = append(bits, fmt.Sprintf("groupBy=%v", s.GroupByCols))
+		}
+		if len(s.AggSpecs) > 0 {
+			var aggs []string
+			for _, a := range s.AggSpecs {
+				aggs = append(aggs, fmt.Sprintf("%s(%s)->%s", a.Func, a.InputCol, a.OutputCol))
+			}
+			bits = append(bits, fmt.Sprintf("agg=[%s]", strings.Join(aggs, ",")))
+		}
+		if len(s.FilterExprs) > 0 {
+			bits = append(bits, fmt.Sprintf("filters=%v", s.FilterExprs))
+		}
+		if len(s.FusedAggSpecs) > 0 {
+			bits = append(bits, fmt.Sprintf("fusedAgg=%d", len(s.FusedAggSpecs)))
+		}
+		if s.TableName != "" {
+			bits = append(bits, fmt.Sprintf("table=%s", s.TableName))
+		}
+		fmt.Printf("  %s\n", strings.Join(bits, " "))
+	}
+}
 
 // TestQ07_SF01_DumpRows is an investigation aid for the Q07 SF0.1 native-DAG
 // 1-row drift. It runs Q07 on both legacy and native-DAG paths and prints
@@ -103,12 +172,72 @@ func TestQ07_SF01_DumpRows(t *testing.T) {
 	dump("Q07RAW_LEGACY", q07Raw, false, 0)
 	dump("Q07RAW_NATIVE", q07Raw, true, 0)
 
-	// Q08 also has nation n1 + nation n2. Does Bug B (n1 column nulled)
-	// reproduce there? If yes, same root cause; if no, Q07's join chain
-	// is the trigger.
 	q08 := tpch.TPCHQueries[8].SQL
 	dump("Q08_LEGACY", q08, false, 0)
 	dump("Q08_NATIVE", q08, true, 0)
+
+	// Probe: simple GROUP BY, no joins. Does Bug C (extra empty group row)
+	// reproduce on a single-table aggregate?
+	groupSQL := `SELECT n_name, COUNT(*) AS c FROM nation GROUP BY n_name`
+	dump("GROUP_LEGACY", groupSQL, false, 30)
+	dump("GROUP_NATIVE", groupSQL, true, 30)
+
+	// Probe: GROUP BY with a WHERE that filters out all nations on some
+	// workers. If Bug C is caused by workers that produce zero rows still
+	// emitting an empty placeholder, this should reproduce.
+	groupFilterSQL := `SELECT n_name, COUNT(*) AS c FROM nation WHERE n_regionkey = 3 GROUP BY n_name`
+	dump("GROUPFILT_LEGACY", groupFilterSQL, false, 30)
+	dump("GROUPFILT_NATIVE", groupFilterSQL, true, 30)
+
+	// Probe: Q07 minus the SELF-JOIN. One nation join only. If Bug C
+	// (extra empty row) repros here, the self-join isn't the trigger.
+	noSelfSQL := `SELECT n_name AS supp_nation, SUBSTR(l_shipdate, 1, 4) AS l_year,
+			SUM(l_extendedprice * (1 - l_discount)) AS revenue
+		FROM supplier
+		JOIN lineitem ON s_suppkey = l_suppkey
+		JOIN nation ON s_nationkey = n_nationkey
+		WHERE n_name IN ('FRANCE','GERMANY')
+		AND l_shipdate >= '1995-01-01' AND l_shipdate <= '1996-12-31'
+		GROUP BY n_name, SUBSTR(l_shipdate, 1, 4)`
+	dump("NOSELF_LEGACY", noSelfSQL, false, 0)
+	dump("NOSELF_NATIVE", noSelfSQL, true, 0)
+
+	// Q07 self-join WITHOUT the OR-WHERE. Just one nation pair direction.
+	// If Bug C (extra empty row) disappears here, the OR disjunction is
+	// the trigger. Q07RAW is similar but no GROUP BY OR — let's also
+	// reuse the full Q07 GROUP BY with AND-only WHERE.
+	q07ANDOnly := `SELECT
+			n1.n_name AS supp_nation, n2.n_name AS cust_nation,
+			SUBSTR(l_shipdate, 1, 4) AS l_year,
+			SUM(l_extendedprice * (1 - l_discount)) AS revenue
+		FROM supplier
+		JOIN lineitem ON s_suppkey = l_suppkey
+		JOIN orders ON o_orderkey = l_orderkey
+		JOIN customer ON c_custkey = o_custkey
+		JOIN nation n1 ON s_nationkey = n1.n_nationkey
+		JOIN nation n2 ON c_nationkey = n2.n_nationkey
+		WHERE n1.n_name = 'FRANCE' AND n2.n_name = 'GERMANY'
+		AND l_shipdate >= '1995-01-01' AND l_shipdate <= '1996-12-31'
+		GROUP BY n1.n_name, n2.n_name, SUBSTR(l_shipdate, 1, 4)`
+	dump("Q07AND_LEGACY", q07ANDOnly, false, 0)
+	dump("Q07AND_NATIVE", q07ANDOnly, true, 0)
+
+	// Q07 with the OR-WHERE but NO self-join. If Bug C still appears,
+	// it's the OR-disjunction over join columns, not the self-join.
+	q07ORNoSelf := `SELECT n_name AS supp_nation, SUBSTR(l_shipdate, 1, 4) AS l_year,
+			SUM(l_extendedprice * (1 - l_discount)) AS revenue
+		FROM supplier
+		JOIN lineitem ON s_suppkey = l_suppkey
+		JOIN nation ON s_nationkey = n_nationkey
+		WHERE (n_name = 'FRANCE' OR n_name = 'GERMANY')
+		AND l_shipdate >= '1995-01-01' AND l_shipdate <= '1996-12-31'
+		GROUP BY n_name, SUBSTR(l_shipdate, 1, 4)`
+	dump("Q07OR_NOSELF_LEGACY", q07ORNoSelf, false, 0)
+	dump("Q07OR_NOSELF_NATIVE", q07ORNoSelf, true, 0)
+
+	// Dump native-DAG stages for Q07 so we can inspect the plan shape.
+	dumpStages(t, coord, ctx, "Q07_STAGES", q07)
+	dumpStages(t, coord, ctx, "Q07AND_STAGES", q07ANDOnly)
 
 	// Symmetric diff to highlight which rows are unique to each side.
 	in := func(s []string, k string) bool {
