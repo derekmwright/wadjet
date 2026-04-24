@@ -275,15 +275,31 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	// and every group comes back with a nil aggregate value. The merge is
 	// really "re-aggregate the partial results", so the input for that step
 	// is the partial OutputCol.
+	//
+	// Function rewrites on merge:
+	//   COUNT → SUM: counting rows at merge time would re-count the
+	//     number of partial rows (usually == number of groups), not the
+	//     total input rows. Summing partial counts is the correct merge.
+	//   AVG   → UNSUPPORTED: AVG doesn't decompose into a single-column
+	//     partial (you need the per-group SUM and COUNT). The dispatcher
+	//     falls back to single-task scan-aggregate when AVG is present,
+	//     which means this merge path never sees AVG across multiple
+	//     partials. We still guard against it here.
 	mergeMode := task.StageType == "final_aggregate" || task.StageType == "merge_aggregate"
 	aggCols := make([]exec.AggColumn, len(task.Aggregates))
 	for i, a := range task.Aggregates {
 		inputCol := a.InputCol
-		if mergeMode && a.OutputCol != "" {
-			inputCol = a.OutputCol
+		fn := parseAggFuncString(a.Func)
+		if mergeMode {
+			if a.OutputCol != "" {
+				inputCol = a.OutputCol
+			}
+			if fn == exec.AggCount {
+				fn = exec.AggSum
+			}
 		}
 		aggCols[i] = exec.AggColumn{
-			Func:       parseAggFuncString(a.Func),
+			Func:       fn,
 			InputCol:   inputCol,
 			OutputCol:  a.OutputCol,
 			OutputType: aggOutputTypeString(a.Func),

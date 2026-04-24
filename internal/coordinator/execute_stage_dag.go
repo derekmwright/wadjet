@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -334,6 +335,21 @@ func (c *Coordinator) dispatchScanAggregateStage(
 ) (StageOutput, error) {
 	if workerCount <= 0 {
 		workerCount = 1
+	}
+	// AVG cannot merge across partials without decomposing into
+	// sum+count pair — taking the average of per-partition averages
+	// silently produces wrong values (unweighted mean). Until AVG
+	// partial decomposition lands, fall back to a single task so the
+	// whole aggregate runs on one worker and the merge step is a
+	// pass-through. Loses parallelism for AVG queries (Q01 is the
+	// notable one) but preserves correctness.
+	for _, a := range stage.FusedAggSpecs {
+		if strings.EqualFold(strings.TrimSpace(a.Func), "avg") {
+			c.logger.Info("scan-aggregate AVG fallback: single-task",
+				"stage_id", stage.ID, "func", a.Func)
+			workerCount = 1
+			break
+		}
 	}
 	fileSets := splitFilesEvenly(stage.ScanFiles, workerCount)
 	actualTasks := len(fileSets)
