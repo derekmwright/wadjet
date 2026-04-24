@@ -163,9 +163,21 @@ func (dst *BytesColumn) SetFrom(di int, src *BytesColumn, si int) {
 }
 
 // Value returns the byte slice at position i.
+//
+// Defensive against a gather-output hazard: when HashJoin's
+// gatherBuildVector skips unmatched rows without calling
+// BytesData.SetFrom, the destination Offsets may end up with
+// Offsets[i+1] == 0 while Offsets[i] > 0, producing a malformed
+// descending pair. Treat this as empty rather than panicking; the
+// null bitmap alongside the column records the "no value" state
+// authoritatively, and downstream filter / projection kernels already
+// consult it.
 func (bc *BytesColumn) Value(i int) []byte {
 	start := bc.Offsets[i]
 	end := bc.Offsets[i+1]
+	if end < start {
+		return nil
+	}
 	return bc.Data[start:end]
 }
 

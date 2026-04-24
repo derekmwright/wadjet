@@ -3614,6 +3614,12 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
+		// Offsets carry-forward for skipped rows: when a row's value
+		// isn't written (unmatched pair or null source), the
+		// destination BytesColumn still needs Offsets[di+1] to be
+		// monotonically non-decreasing so Value(i) returns a valid
+		// (empty) slice rather than a descending pair that panics in
+		// writeBytesData when the null bitmap isn't consulted.
 		if allMatched {
 			for di, pair := range pairs {
 				if bi := pair.ref.batchIdx; bi != prevBatch {
@@ -3624,6 +3630,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				si := int(pair.ref.rowIdx)
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
+					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
 				} else {
 					dst.BytesData.SetFrom(di, &src.BytesData, si)
 				}
@@ -3632,6 +3639,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			for di, pair := range pairs {
 				if !pair.matched {
 					dst.Nulls.SetNull(di)
+					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
 					continue
 				}
 				if bi := pair.ref.batchIdx; bi != prevBatch {
@@ -3642,6 +3650,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				si := int(pair.ref.rowIdx)
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
+					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
 				} else {
 					dst.BytesData.SetFrom(di, &src.BytesData, si)
 				}
