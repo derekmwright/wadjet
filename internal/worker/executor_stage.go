@@ -242,17 +242,49 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	// sum(l_extendedprice*(1-l_discount))), the reader detects the missing
 	// column and falls back to full-schema read so the downstream operator
 	// can still compute the derivation.
+	// Compile any scan-pushed filter fragments FIRST so we can extend the
+	// projection hint with filter-referenced columns — otherwise the
+	// projection may prune the very columns the filter needs (e.g. Q01's
+	// l_shipdate is referenced only by WHERE, not by GROUP BY / aggs).
+	filterOps, filterCols, err := compileFilterExprs(task.FilterExprs)
+	if err != nil {
+		return fmt.Errorf("aggregate task %s: filter compile: %w", task.ID, err)
+	}
 	projCols := aggProjectionCols(task.GroupByCols, task.Aggregates)
+	if len(filterCols) > 0 {
+		seen := make(map[string]bool, len(projCols))
+		for _, c := range projCols {
+			seen[c] = true
+		}
+		for _, c := range filterCols {
+			if !seen[c] {
+				seen[c] = true
+				projCols = append(projCols, c)
+			}
+		}
+	}
 	src, err := e.sourceForAliasWithProjection(bucket, alias, files, projCols)
 	if err != nil {
 		return fmt.Errorf("aggregate task %s: source: %w", task.ID, err)
 	}
 
+	// For final_aggregate / merge_aggregate the upstream "partial" stage
+	// already computed the aggregate and emitted the result under OutputCol
+	// (e.g. "total"). The raw InputCol ("v") isn't in the partial output, so
+	// using it here makes the merge step look up a column that doesn't exist
+	// and every group comes back with a nil aggregate value. The merge is
+	// really "re-aggregate the partial results", so the input for that step
+	// is the partial OutputCol.
+	mergeMode := task.StageType == "final_aggregate" || task.StageType == "merge_aggregate"
 	aggCols := make([]exec.AggColumn, len(task.Aggregates))
 	for i, a := range task.Aggregates {
+		inputCol := a.InputCol
+		if mergeMode && a.OutputCol != "" {
+			inputCol = a.OutputCol
+		}
 		aggCols[i] = exec.AggColumn{
 			Func:       parseAggFuncString(a.Func),
-			InputCol:   a.InputCol,
+			InputCol:   inputCol,
 			OutputCol:  a.OutputCol,
 			OutputType: aggOutputTypeString(a.Func),
 		}
@@ -264,6 +296,7 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 
 	pipeline := &exec.Pipeline{
 		Source: src,
+		Ops:    filterOps,
 		Sink:   hashAgg,
 	}
 	if err := pipeline.Run(ctx); err != nil {

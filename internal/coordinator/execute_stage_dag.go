@@ -371,6 +371,12 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			Columns:      stage.Columns,
 			GroupByCols:  stage.FusedAggGroupBy,
 			Aggregates:   aggs,
+			// Propagate scan-pushed WHERE fragments. Without this the worker
+			// aggregates every row in the file slice and ignores the query's
+			// predicate — group counts match legacy but aggregate VALUES are
+			// wrong. E.g. Q01's `WHERE l_shipdate <= '1998-09-02'` was being
+			// silently dropped in native-DAG before this plumb.
+			FilterExprs: append([]string(nil), stage.FilterExprs...),
 			Inputs: map[string][]string{
 				// Use the scan's table name as alias so the worker's
 				// sourceForAlias opens these files via the parquet path.

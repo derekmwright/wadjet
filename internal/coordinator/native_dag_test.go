@@ -55,6 +55,124 @@ func TestNativeDAG_SimpleAggregate(t *testing.T) {
 	}
 }
 
+// TestNativeDAG_SumMerge is a regression test for the partial-aggregate
+// InputCol merge bug: final_aggregate was looking up the scan's raw input
+// column ("v") in partial output that only contained {groupby, OutputCol}
+// ("total"), so every SUM returned nil. Verifies values match an expected
+// sum, not just row count (the prior TestNativeDAG_SimpleAggregate checked
+// only row count and silently passed with nil aggregates).
+func TestNativeDAG_SumMerge(t *testing.T) {
+	_, coord, store := setupDistributed(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cat := coord.catalog
+
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{
+		{"k": int64(1), "v": int64(10)},
+		{"k": int64(1), "v": int64(20)},
+		{"k": int64(2), "v": int64(30)},
+	}
+	ingestTestData(t, ctx, store, cat, "sum_merge", schema, rows)
+
+	coord.UseNativeDAG = true
+	defer func() { coord.UseNativeDAG = false }()
+	res, err := coord.ExecuteSQL(ctx, "SELECT k, SUM(v) AS total FROM sum_merge GROUP BY k")
+	if err != nil {
+		t.Fatalf("native DAG: %v", err)
+	}
+	sums := map[int64]int64{}
+	for _, r := range res.Rows() {
+		sums[toInt64(r["k"])] = toInt64(r["total"])
+	}
+	if sums[1] != 30 {
+		t.Errorf("k=1 total: got %d, want 30", sums[1])
+	}
+	if sums[2] != 30 {
+		t.Errorf("k=2 total: got %d, want 30", sums[2])
+	}
+}
+
+// TestNativeDAG_ScanAggregateWithFilter is a regression test for the bug
+// where scan-pushed WHERE clauses were silently dropped in the native-DAG
+// scan-aggregate dispatcher. Row counts matched legacy (same group keys)
+// but aggregate VALUES were wrong because every row — including rows the
+// WHERE should have excluded — was summed.
+func TestNativeDAG_ScanAggregateWithFilter(t *testing.T) {
+	_, coord, store := setupDistributed(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cat := coord.catalog
+
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+		{Name: "flag", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{
+		{"k": int64(1), "v": int64(10), "flag": int64(1)},
+		{"k": int64(1), "v": int64(100), "flag": int64(0)}, // excluded
+		{"k": int64(2), "v": int64(20), "flag": int64(1)},
+		{"k": int64(2), "v": int64(200), "flag": int64(0)}, // excluded
+	}
+	ingestTestData(t, ctx, store, cat, "filtered", schema, rows)
+
+	// Use COUNT(*) so the row-count change from filtering is directly
+	// observable even when the merge-stage partial-aggregate plumbing has
+	// an unrelated gap (InputCol naming). COUNT(*) ignores InputCol so it
+	// merges correctly across partials. With the bug regressed, native-DAG
+	// would return count=2 per group (all rows seen); with the fix, count=1.
+	sql := "SELECT k, COUNT(*) AS n FROM filtered WHERE flag = 1 GROUP BY k"
+
+	legacyRes, err := coord.ExecuteSQL(ctx, sql)
+	if err != nil {
+		t.Fatalf("legacy ExecuteSQL: %v", err)
+	}
+	legacyCounts := map[int64]int64{}
+	for _, r := range legacyRes.Rows() {
+		legacyCounts[toInt64(r["k"])] = toInt64(r["n"])
+	}
+
+	coord.UseNativeDAG = true
+	defer func() { coord.UseNativeDAG = false }()
+	natRes, err := coord.ExecuteSQL(ctx, sql)
+	if err != nil {
+		t.Fatalf("native DAG ExecuteSQL: %v", err)
+	}
+	natCounts := map[int64]int64{}
+	for _, r := range natRes.Rows() {
+		natCounts[toInt64(r["k"])] = toInt64(r["n"])
+	}
+
+	if len(legacyCounts) != 2 || legacyCounts[1] != 1 || legacyCounts[2] != 1 {
+		t.Fatalf("legacy counts unexpected: %v", legacyCounts)
+	}
+	for k, v := range legacyCounts {
+		if natCounts[k] != v {
+			t.Errorf("native-DAG count for k=%d: got %d, want %d (legacy); bug: filter was dropped", k, natCounts[k], v)
+		}
+	}
+}
+
+func toInt64(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int32:
+		return int64(x)
+	case int:
+		return int64(x)
+	case uint64:
+		return int64(x)
+	case float64:
+		return int64(x)
+	}
+	return 0
+}
+
 // TestNativeDAG_Join exercises a hash_join compute stage end-to-end by
 // running a two-table INNER JOIN through the native DAG executor.
 func TestNativeDAG_Join(t *testing.T) {
