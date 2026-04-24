@@ -80,12 +80,32 @@ func buildAggInputProjection(
 	aggs []distributed.AggSpec,
 	filterCols []string,
 ) (*exec.Project, []string, error) {
+	// Detect derived inputs. An aggregate can carry InputExpr explicitly;
+	// a GROUP BY column is "derived" when parsing it yields anything
+	// other than a bare column reference (e.g. SUBSTR(o_orderdate, 1, 4)
+	// for Q09). Without projection, HashAggregate looks up the literal
+	// expression string as a column name, misses, and buckets every row
+	// into a nil group.
 	hasDerived := false
+	derivedGroupBy := make(map[string]plansql.Node)
 	for _, a := range aggs {
 		if a.InputExpr != "" {
 			hasDerived = true
-			break
 		}
+	}
+	for _, g := range groupBy {
+		if g == "" {
+			continue
+		}
+		node, err := plansql.ParseExpression(g)
+		if err != nil {
+			continue
+		}
+		if _, bare := node.(*plansql.ColRef); bare {
+			continue
+		}
+		derivedGroupBy[g] = node
+		hasDerived = true
 	}
 	if !hasDerived {
 		return nil, nil, nil
@@ -111,6 +131,28 @@ func buildAggInputProjection(
 		})
 	}
 	for _, c := range groupBy {
+		if node, ok := derivedGroupBy[c]; ok {
+			// Compile the expression once and emit a projection under
+			// the same name HashAggregate expects.
+			collectFilterColumns(node, nil)
+			compiled, err := expr.Compile(node)
+			if err != nil {
+				return nil, nil, fmt.Errorf("compile group-by %q: %w", c, err)
+			}
+			if seen[c] {
+				continue
+			}
+			seen[c] = true
+			e := compiled
+			projCols = append(projCols, exec.ProjectColumn{
+				Name: c,
+				Type: parquet.TypeString, // actual type resolved at first batch
+				Expr: func(b *batch.RecordBatch, row int) any {
+					return e.Eval(b, row)
+				},
+			})
+			continue
+		}
 		addPassthrough(c)
 	}
 	for _, c := range filterCols {
@@ -164,7 +206,7 @@ func buildAggInputProjection(
 // the column portion — the scan alias is implicit for single-table filter
 // fragments produced by the planner.
 func collectFilterColumns(n plansql.Node, out map[string]struct{}) {
-	if n == nil {
+	if n == nil || out == nil {
 		return
 	}
 	switch v := n.(type) {
