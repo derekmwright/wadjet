@@ -179,6 +179,12 @@ type AggSpec struct {
 	Func      string `json:"func"` // sum, count, min, max, avg
 	InputCol  string `json:"input_col"`
 	OutputCol string `json:"output_col"`
+	// InputExpr is the SQL text of a derived input expression, e.g.
+	// "l_extendedprice * (1 - l_discount)". Empty for bare-column
+	// aggregates. Native-DAG workers compile this into a Project
+	// before the aggregate so HashAggregate sees a column named
+	// InputCol.
+	InputExpr string `json:"input_expr,omitempty"`
 }
 
 // GatherBatchMsg is the NATS message body the worker publishes to the

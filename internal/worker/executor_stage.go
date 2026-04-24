@@ -250,18 +250,47 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	if err != nil {
 		return fmt.Errorf("aggregate task %s: filter compile: %w", task.ID, err)
 	}
+	// Build a Project operator when any aggregate has a derived input
+	// expression (e.g. SUM(l_extendedprice * (1 - l_discount))). The
+	// logical plan's implicit pre-projection is lost in the native-DAG
+	// wire format, so without this the HashAggregate looks up a column
+	// literally named by the expression string, finds nothing, and emits
+	// nil aggregates.
+	//
+	// Skip project construction in merge mode — the partial stage already
+	// computed the derived expression and emitted it under OutputCol; the
+	// merge path rewrites InputCol = OutputCol below so HashAggregate
+	// reads that pre-computed column directly.
+	isMergeStage := task.StageType == "final_aggregate" || task.StageType == "merge_aggregate"
+	var aggProject *exec.Project
+	var aggExtraCols []string
+	if !isMergeStage {
+		aggProject, aggExtraCols, err = buildAggInputProjection(task.GroupByCols, task.Aggregates, filterCols)
+		if err != nil {
+			return fmt.Errorf("aggregate task %s: agg input project: %w", task.ID, err)
+		}
+	}
 	projCols := aggProjectionCols(task.GroupByCols, task.Aggregates)
-	if len(filterCols) > 0 {
+	// Extend the source column-projection hint with every column the
+	// filter or a derived aggregate input reads, so the parquet reader
+	// doesn't prune them from the batches it hands us.
+	extend := func(cols []string) {
 		seen := make(map[string]bool, len(projCols))
 		for _, c := range projCols {
 			seen[c] = true
 		}
-		for _, c := range filterCols {
+		for _, c := range cols {
 			if !seen[c] {
 				seen[c] = true
 				projCols = append(projCols, c)
 			}
 		}
+	}
+	if len(filterCols) > 0 {
+		extend(filterCols)
+	}
+	if len(aggExtraCols) > 0 {
+		extend(aggExtraCols)
 	}
 	src, err := e.sourceForAliasWithProjection(bucket, alias, files, projCols)
 	if err != nil {
@@ -310,9 +339,15 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 		hashAgg.Spill = e.sharedSpill
 	}
 
+	// Order: source → filters → derived-column projection → HashAggregate.
+	// Filter first so expressions only evaluate on surviving rows.
+	ops := filterOps
+	if aggProject != nil {
+		ops = append(ops, aggProject)
+	}
 	pipeline := &exec.Pipeline{
 		Source: src,
-		Ops:    filterOps,
+		Ops:    ops,
 		Sink:   hashAgg,
 	}
 	if err := pipeline.Run(ctx); err != nil {

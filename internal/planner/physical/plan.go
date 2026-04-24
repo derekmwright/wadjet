@@ -152,6 +152,12 @@ type AggSpec struct {
 	Func      string
 	InputCol  string
 	OutputCol string
+	// InputExpr is the SQL text of a derived input expression, e.g.
+	// "l_extendedprice * (1 - l_discount)". Empty when InputCol is a
+	// bare column reference. Distributed workers compile this into a
+	// Project operator before the aggregate so HashAggregate sees a
+	// column whose name matches InputCol.
+	InputExpr string
 }
 
 // SortKeySpec defines a sort key in a stage.
@@ -1855,11 +1861,22 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		var aggSpecs []AggSpec
 		for _, agg := range node.AggExprs {
-			aggSpecs = append(aggSpecs, AggSpec{
+			spec := AggSpec{
 				Func:      agg.Func,
 				InputCol:  agg.InputCol,
 				OutputCol: agg.OutputCol,
-			})
+			}
+			// Capture derived expression text when the aggregate argument
+			// is not a bare column reference (e.g.
+			// SUM(l_extendedprice * (1 - l_discount))). Downstream
+			// native-DAG workers need this to project the derived column
+			// before running HashAggregate.
+			if agg.InputExpr != nil {
+				if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+					spec.InputExpr = agg.InputExpr.String()
+				}
+			}
+			aggSpecs = append(aggSpecs, spec)
 		}
 		groupBy := make([]string, len(node.GroupBy))
 		copy(groupBy, node.GroupBy)

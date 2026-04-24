@@ -3,10 +3,12 @@ package worker
 import (
 	"fmt"
 
+	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/expr"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // compileFilterExprs parses each scan-pushed filter SQL fragment and returns
@@ -58,6 +60,103 @@ func wrapCompiledFilter(e expr.Expr) exec.Predicate {
 		}
 		return false
 	}
+}
+
+// buildAggInputProjection returns a Project operator that materializes
+// each aggregate's derived input expression into a named column that
+// HashAggregate can look up by AggSpec.InputCol. Pass-through columns
+// (GROUP BY keys, filter references, bare-column aggregate inputs) are
+// included via DirectCopy so the output batch contains everything the
+// downstream aggregate or filter needs.
+//
+// Returns (nil, nil) when no aggregate has a derived InputExpr — the
+// caller skips inserting a Project in that case.
+//
+// The referenced-columns list is the union of all bare columns each
+// derived expression reads; callers extend the source projection hint
+// with these so parquet readers don't prune them.
+func buildAggInputProjection(
+	groupBy []string,
+	aggs []distributed.AggSpec,
+	filterCols []string,
+) (*exec.Project, []string, error) {
+	hasDerived := false
+	for _, a := range aggs {
+		if a.InputExpr != "" {
+			hasDerived = true
+			break
+		}
+	}
+	if !hasDerived {
+		return nil, nil, nil
+	}
+
+	projCols := make([]exec.ProjectColumn, 0, len(groupBy)+len(aggs)+len(filterCols))
+	seen := make(map[string]bool)
+	addPassthrough := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		projCols = append(projCols, exec.ProjectColumn{
+			Name:       name,
+			DirectCopy: name,
+			SourceCol:  name,
+			// Fallback for when DirectCopy resolution misses — without
+			// this, Project.Execute panics invoking a nil Expr on any
+			// column it can't resolve by name. ColumnRef lazily resolves
+			// the column index on first call and returns nil if missing,
+			// which HashAggregate tolerates (null row value).
+			Expr: exec.ColumnRef(name),
+		})
+	}
+	for _, c := range groupBy {
+		addPassthrough(c)
+	}
+	for _, c := range filterCols {
+		addPassthrough(c)
+	}
+
+	// Union of extra columns referenced by all derived expressions,
+	// returned to the caller so scan projection includes them.
+	extraColSet := make(map[string]struct{})
+	for _, a := range aggs {
+		if a.InputExpr == "" {
+			addPassthrough(a.InputCol)
+			continue
+		}
+		node, err := plansql.ParseExpression(a.InputExpr)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse agg input %q: %w", a.InputExpr, err)
+		}
+		collectFilterColumns(node, extraColSet)
+		compiled, err := expr.Compile(node)
+		if err != nil {
+			return nil, nil, fmt.Errorf("compile agg input %q: %w", a.InputExpr, err)
+		}
+		if seen[a.InputCol] {
+			// A prior agg already declared the same derived column.
+			continue
+		}
+		seen[a.InputCol] = true
+		e := compiled
+		projCols = append(projCols, exec.ProjectColumn{
+			Name: a.InputCol,
+			Type: parquet.TypeFloat64, // arithmetic expressions yield float64 at runtime; Project resolves to actual type on first batch.
+			Expr: func(b *batch.RecordBatch, row int) any {
+				return e.Eval(b, row)
+			},
+		})
+	}
+
+	// Make sure all bare columns referenced by expressions are passed
+	// through (HashAggregate doesn't need them, but filter columns are
+	// captured separately).
+	extra := make([]string, 0, len(extraColSet))
+	for c := range extraColSet {
+		extra = append(extra, c)
+	}
+	return exec.NewProject(projCols), extra, nil
 }
 
 // collectFilterColumns walks a SQL expression AST and records the bare

@@ -372,6 +372,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			Func:      a.Func,
 			InputCol:  a.InputCol,
 			OutputCol: a.OutputCol,
+			InputExpr: a.InputExpr,
 		})
 	}
 
@@ -577,6 +578,7 @@ func (c *Coordinator) dispatchComputeStage(
 				Func:      a.Func,
 				InputCol:  a.InputCol,
 				OutputCol: a.OutputCol,
+				InputExpr: a.InputExpr,
 			})
 		}
 		// Convert stage.SortKeys → distributed.SortKeySpec.
