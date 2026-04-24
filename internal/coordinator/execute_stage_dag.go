@@ -187,7 +187,48 @@ func (c *Coordinator) executeStageDAG(
 	if err != nil {
 		return nil, fmt.Errorf("gather stage %s: %w", gatherStage.ID, err)
 	}
-	return c.dispatchGatherStage(ctx, queryID, sql, gatherStage, inputs, workerCount)
+	gr, gerr := c.dispatchGatherStage(ctx, queryID, sql, gatherStage, inputs, workerCount)
+	if gerr != nil {
+		return gr, gerr
+	}
+	// Apply SELECT-list aliases to the result schema. walkStages drops the
+	// outer NodeProject's projections, so without this the user sees raw
+	// worker column names ("n1.n_name", "substr(...)") instead of their
+	// aliases ("supp_nation", "l_year"). The Gather worker is a pipe and
+	// can't apply this — it has to happen here.
+	if gr != nil && len(gatherStage.OutputRenames) > 0 {
+		applyOutputRenames(gr, gatherStage.OutputRenames)
+	}
+	return gr, nil
+}
+
+// applyOutputRenames rewrites column names in a gather result and in each
+// batch's schema using the (From -> To) pairs. Match is case-insensitive to
+// tolerate lowercase normalization in the worker's expression compiler vs.
+// the original-cased SELECT-list expression text.
+func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
+	if gr == nil || len(renames) == 0 {
+		return
+	}
+	rename := func(name string) string {
+		for _, r := range renames {
+			if strings.EqualFold(name, r.From) {
+				return r.To
+			}
+		}
+		return name
+	}
+	for i, c := range gr.columns {
+		gr.columns[i] = rename(c)
+	}
+	for _, b := range gr.batches {
+		if b == nil {
+			continue
+		}
+		for i := range b.Schema {
+			b.Schema[i].Name = rename(b.Schema[i].Name)
+		}
+	}
 }
 
 // dispatchShuffleStage executes a StageExchangeRepartition: reads upstream

@@ -135,6 +135,22 @@ type Stage struct {
 	// eliminating the single-process vs distributed bit-pattern divergence
 	// that caused Q15 to return 0 rows at SF0.1.
 	ScalarDependencies map[string]string
+
+	// OutputRenames is the SELECT-list alias map applied by the coordinator
+	// to the Gather stage's result schema. walkStages currently passes
+	// NodeProject through without applying its projections, so without this
+	// the final result schema carries raw worker column names ("n1.n_name",
+	// "substr(l_shipdate, 1, 4)") instead of the user's aliases
+	// ("supp_nation", "l_year"). Only populated on the Gather stage.
+	OutputRenames []OutputRename
+}
+
+// OutputRename pairs a worker-emitted column name with the SELECT-list alias
+// the user wrote. The coordinator rewrites batch and result schemas after
+// Gather using these pairs.
+type OutputRename struct {
+	From string
+	To   string
 }
 
 // WindowColSpec defines a window function column in a stage.
@@ -1161,7 +1177,86 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// caller flipped the var.
 		return nil, fmt.Errorf("exchange consistency: %w", err)
 	}
+	// Attach SELECT-list aliases to the Gather stage so the coordinator can
+	// rename the final result schema. walkStages currently treats NodeProject
+	// as a passthrough — this surfaces the user's aliases that would otherwise
+	// be lost (e.g., "n1.n_name" -> "supp_nation", "substr(l_shipdate, 1, 4)"
+	// -> "l_year"). Only meaningful under the native-DAG path where Gather
+	// drives the result schema.
+	if p.UseEnsureDistribution {
+		if renames := extractOutputRenames(node); len(renames) > 0 {
+			for i := range stages {
+				if stages[i].Type == StageExchangeGather {
+					stages[i].OutputRenames = renames
+					break
+				}
+			}
+		}
+	}
 	return stages, nil
+}
+
+// extractOutputRenames inspects the logical plan tree's outermost projection
+// node and returns the SELECT-list rename map. Returns nil when the outermost
+// SELECT has only bare column references with no renames (worker's natural
+// column names already match what the user wrote) or when the outermost
+// emitting node is not a projection.
+//
+// Aggregate projections are skipped because the planner sets AggSpec.OutputCol
+// to the alias already — the worker emits the aggregate column under that name
+// and no rewrite is needed. Wrapped aggregates ("SUM(x) * 0.0001 AS scaled")
+// are NOT handled here; legacy applies them via buildProject post-aggregate.
+func extractOutputRenames(root *logical.Node) []OutputRename {
+	proj := findOutputProjectionsForRename(root)
+	if len(proj) == 0 {
+		return nil
+	}
+	var renames []OutputRename
+	for _, p := range proj {
+		if p.IsAgg || p.Alias == "" {
+			continue
+		}
+		// Prefer Expr because it preserves the table qualifier
+		// (e.g., "n1.n_name") that the worker emits as the column name.
+		// Column drops the qualifier ("n_name") and would mis-match in
+		// any query with `tbl.col AS alias`.
+		var src string
+		switch {
+		case p.Expr != "":
+			src = strings.ToLower(p.Expr)
+		case p.Column != "":
+			src = p.Column
+		default:
+			continue
+		}
+		if strings.EqualFold(src, p.Alias) {
+			continue
+		}
+		renames = append(renames, OutputRename{From: src, To: p.Alias})
+	}
+	return renames
+}
+
+// findOutputProjectionsForRename walks down through Sort/Limit/Filter wrappers
+// to the outermost NodeProject and returns its projections. Returns nil when
+// the outermost emitting node is not a projection (e.g., a top-level scan or
+// aggregate without a SELECT-list rename layer).
+func findOutputProjectionsForRename(n *logical.Node) []logical.Projection {
+	for n != nil {
+		switch n.Type {
+		case logical.NodeProject:
+			return n.Projections
+		case logical.NodeSort, logical.NodeLimit, logical.NodeFilter:
+			if len(n.Children) == 1 {
+				n = n.Children[0]
+				continue
+			}
+			return nil
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 // QueryCost summarizes the estimated cost of a query across all scan stages.
