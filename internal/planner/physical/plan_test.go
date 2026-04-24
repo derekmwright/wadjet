@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -781,12 +782,20 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 			depCols = join1Cols
 		}
 
-		// Every shuffle key must exist in the dependency's column set
+		// Every shuffle key must exist in the dependency's column set.
+		// Strip table qualifiers ("c.c_custkey" -> "c_custkey") because
+		// parseJoinKeys now preserves qualifiers (needed for self-join
+		// chain resolution); the worker's shuffle sink uses
+		// exec.ColumnIndexFallback which strips them on miss.
 		if s.Exchange != nil {
 			for _, key := range s.Exchange.Keys {
-				if !depCols[key] {
-					t.Errorf("shuffle %s (depends on %s %s) has key %q not in dependency columns %v",
-						s.ID, dep.Type, dep.ID, key, depCols)
+				bare := key
+				if dot := strings.Index(key, "."); dot >= 0 {
+					bare = key[dot+1:]
+				}
+				if !depCols[bare] {
+					t.Errorf("shuffle %s (depends on %s %s) has key %q (bare %q) not in dependency columns %v",
+						s.ID, dep.Type, dep.ID, key, bare, depCols)
 				}
 			}
 		}

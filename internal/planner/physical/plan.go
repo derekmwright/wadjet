@@ -143,6 +143,17 @@ type Stage struct {
 	// "substr(l_shipdate, 1, 4)") instead of the user's aliases
 	// ("supp_nation", "l_year"). Only populated on the Gather stage.
 	OutputRenames []OutputRename
+
+	// QualifyAllBuildCols, when true, instructs the join executor to always
+	// emit build-side columns under their qualified name
+	// ("BuildTableAlias.col_name") instead of the default behavior of
+	// qualifying only on probe-collision. Set by the planner when the same
+	// source table is scanned more than once and the scans co-path into the
+	// same join chain (Q07's "nation n1" + "nation n2"). Without this flag
+	// the FIRST self-join leaves its column unqualified, the SECOND qualifies
+	// only its own copy, and references to the FIRST alias resolve to NULL
+	// downstream.
+	QualifyAllBuildCols bool
 }
 
 // OutputRename pairs a worker-emitted column name with the SELECT-list alias
@@ -1844,7 +1855,107 @@ func (p *Planner) generateStages(node *logical.Node) []Stage {
 	if p.WorkerCount > 1 && !p.UseEnsureDistribution {
 		stages = fuseJoinStages(stages)
 	}
+	markCoPathingSelfJoinBuilds(stages)
 	return stages
+}
+
+// markCoPathingSelfJoinBuilds finds joins whose build-side scans target
+// the same source table AND whose forward-reachable stage sets intersect
+// (one join transitively depends on the other), then sets
+// QualifyAllBuildCols on both. This is the planner half of the Q07
+// self-join column-disambiguation fix.
+//
+// The narrower "co-pathing" check is required because counting same-table
+// scans across the WHOLE plan also catches scalar-subquery scans (Q02, Q17)
+// and CTE-producer scans (Q15) that are independent of the outer join chain
+// — qualifying their unrelated joins broke those queries in the first
+// attempt.
+func markCoPathingSelfJoinBuilds(stages []Stage) {
+	stageByID := make(map[string]*Stage, len(stages))
+	for i := range stages {
+		stageByID[stages[i].ID] = &stages[i]
+	}
+
+	// For each join stage, walk its build-side dep chain (transitively
+	// through any Exchange wrappers) to the underlying scan and record
+	// (joinIdx, scanTableName).
+	type joinScan struct {
+		joinIdx   int
+		joinID    string
+		tableName string
+	}
+	var joinScans []joinScan
+	for i := range stages {
+		s := &stages[i]
+		if s.Type != StageHashJoin && s.Type != StageBroadcastJoin {
+			continue
+		}
+		buildDep := s.RightDepStage
+		if buildDep == "" {
+			continue
+		}
+		// Walk through Exchange wrappers (one or two levels) to the scan.
+		cur := stageByID[buildDep]
+		for hop := 0; cur != nil && cur.Type != StageScan && hop < 3; hop++ {
+			if len(cur.Dependencies) == 0 {
+				cur = nil
+				break
+			}
+			cur = stageByID[cur.Dependencies[0]]
+		}
+		if cur == nil || cur.Type != StageScan || cur.TableName == "" {
+			continue
+		}
+		joinScans = append(joinScans, joinScan{joinIdx: i, joinID: s.ID, tableName: cur.TableName})
+	}
+
+	if len(joinScans) < 2 {
+		return
+	}
+
+	// reachable[X] = set of stage IDs reachable forward from X (X's transitive
+	// consumers). Computed by running BFS from each join via reverse-deps.
+	consumers := make(map[string][]string, len(stages))
+	for i := range stages {
+		for _, dep := range stages[i].Dependencies {
+			consumers[dep] = append(consumers[dep], stages[i].ID)
+		}
+	}
+	reachable := make(map[string]map[string]bool, len(joinScans))
+	for _, js := range joinScans {
+		reach := map[string]bool{js.joinID: true}
+		stack := []string{js.joinID}
+		for len(stack) > 0 {
+			n := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for _, c := range consumers[n] {
+				if !reach[c] {
+					reach[c] = true
+					stack = append(stack, c)
+				}
+			}
+		}
+		reachable[js.joinID] = reach
+	}
+
+	// Mark a join when another join over the SAME table is in its forward
+	// reachable set OR vice versa — i.e. the two are in the same join
+	// chain.
+	for i := range joinScans {
+		for j := range joinScans {
+			if i == j {
+				continue
+			}
+			a, b := joinScans[i], joinScans[j]
+			if a.tableName != b.tableName {
+				continue
+			}
+			if reachable[a.joinID][b.joinID] || reachable[b.joinID][a.joinID] {
+				stages[a.joinIdx].QualifyAllBuildCols = true
+				stages[b.joinIdx].QualifyAllBuildCols = true
+			}
+		}
+	}
 }
 
 // fuseJoinStages absorbs broadcast join stages into their downstream consumer
@@ -3476,8 +3587,15 @@ func parseJoinKeys(cond string) (leftKeys, rightKeys []string) {
 		if len(eqParts) != 2 {
 			continue
 		}
-		left := cleanExpr(strings.TrimSpace(eqParts[0]))
-		right := cleanExpr(strings.TrimSpace(eqParts[1]))
+		// Preserve table qualifiers ("n1.n_regionkey") so that probe-side
+		// lookups against a self-join chain's qualified output schema
+		// resolve directly. The columnIndexFallback in the join executor
+		// strips the qualifier on miss, so unqualified scan-source schemas
+		// still resolve. Stripping here would force the executor to
+		// suffix-match a qualified column from {n1.X, n2.X}, which is
+		// ambiguous and returns -1 → 0 rows from the join.
+		left := strings.TrimSpace(eqParts[0])
+		right := strings.TrimSpace(eqParts[1])
 		leftKeys = append(leftKeys, left)
 		rightKeys = append(rightKeys, right)
 	}
@@ -3488,14 +3606,24 @@ func parseJoinKeys(cond string) (leftKeys, rightKeys []string) {
 // by checking against the build subtree's available columns from the plan.
 // This avoids the expensive post-build FixKeyAssignment hash table rebuild
 // which was 31% of Q09's time at SF10.
+//
+// Build columns are unqualified (from the table scan), but join keys may now
+// preserve qualifiers (post Q07 fix). Strip the qualifier on lookup so a key
+// like "n1.n_nationkey" matches the build's unqualified "n_nationkey".
 func fixJoinKeyOrder(leftKeys, rightKeys []string, buildNode *logical.Node) {
 	buildCols := collectPlanColumns(buildNode)
 	if len(buildCols) == 0 {
 		return
 	}
+	stripQual := func(k string) string {
+		if dot := strings.Index(k, "."); dot >= 0 {
+			return k[dot+1:]
+		}
+		return k
+	}
 	for i := range leftKeys {
-		leftInBuild := buildCols[leftKeys[i]]
-		rightInBuild := buildCols[rightKeys[i]]
+		leftInBuild := buildCols[leftKeys[i]] || buildCols[stripQual(leftKeys[i])]
+		rightInBuild := buildCols[rightKeys[i]] || buildCols[stripQual(rightKeys[i])]
 		if leftInBuild && !rightInBuild {
 			leftKeys[i], rightKeys[i] = rightKeys[i], leftKeys[i]
 		}
@@ -5754,6 +5882,16 @@ func leafStages(stages []Stage) []string {
 	for _, s := range stages {
 		for _, d := range s.Dependencies {
 			depended[d] = true
+		}
+		// Stages referenced via ScalarDependencies (Q15 late-bound scalar
+		// producer chain) feed into FilterExprs through coordinator-side
+		// substitution, not as record-batch input — but they still
+		// SHOULDN'T be treated as plan-level leaves. Without this, the
+		// next sort/aggregate's leafStages call picks up the producer's
+		// terminal as a dependency and the producer's output gets
+		// erroneously routed into the sort's input pipeline.
+		for _, pid := range s.ScalarDependencies {
+			depended[pid] = true
 		}
 	}
 	var leaves []string

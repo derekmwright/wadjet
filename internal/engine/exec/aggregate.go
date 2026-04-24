@@ -437,16 +437,46 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	return nil
 }
 
-// columnIndexFallback resolves a column name with fallback for table-qualified names.
-// Tries the name as-is first, then strips a "table." prefix and retries.
+// ColumnIndexFallback is the exported alias for columnIndexFallback so other
+// packages (worker shuffle sinks) can resolve column names with the same
+// bidirectional table-qualifier fallback.
+func ColumnIndexFallback(b *batch.RecordBatch, name string) int {
+	return columnIndexFallback(b, name)
+}
+
+// columnIndexFallback resolves a column name with bidirectional fallback for
+// table-qualified names. Lookup order:
+//  1. Exact match.
+//  2. If the name is qualified ("table.col"), try the bare column ("col").
+//  3. If the name is unqualified ("col"), try every schema column whose
+//     suffix matches ".col". Returns -1 when there are 2+ matches (ambiguous,
+//     refuses to guess).
+//
+// Step 3 is required after the self-join planner pass (Q07's
+// QualifyAllBuildCols) leaves the schema with "n1.n_name" but
+// parseJoinKeys feeds the worker an unqualified "n_name" key — without
+// the unqualified→qualified fallback the join would never find the column.
 func columnIndexFallback(b *batch.RecordBatch, name string) int {
-	idx := b.ColumnIndex(name)
-	if idx < 0 {
-		if dotIdx := strings.Index(name, "."); dotIdx >= 0 {
-			idx = b.ColumnIndex(name[dotIdx+1:])
+	if idx := b.ColumnIndex(name); idx >= 0 {
+		return idx
+	}
+	if dotIdx := strings.Index(name, "."); dotIdx >= 0 {
+		return b.ColumnIndex(name[dotIdx+1:])
+	}
+	// Unqualified name with no exact match: scan for a single qualified
+	// match ".name". Reject ambiguity (>1 match) so we never silently
+	// pick the wrong column.
+	suffix := "." + name
+	match := -1
+	for i, c := range b.Schema {
+		if strings.HasSuffix(c.Name, suffix) {
+			if match >= 0 {
+				return -1 // ambiguous
+			}
+			match = i
 		}
 	}
-	return idx
+	return match
 }
 
 func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {

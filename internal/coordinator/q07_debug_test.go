@@ -238,6 +238,22 @@ func TestQ07_SF01_DumpRows(t *testing.T) {
 	// Dump native-DAG stages for Q07 so we can inspect the plan shape.
 	dumpStages(t, coord, ctx, "Q07_STAGES", q07)
 	dumpStages(t, coord, ctx, "Q07AND_STAGES", q07ANDOnly)
+	dumpStages(t, coord, ctx, "Q08_STAGES", q08)
+
+	// Q08 minus the WHERE filters — does it return any rows?
+	q08NoFilter := `SELECT
+		SUBSTR(o_orderdate, 1, 4) as o_year, SUM(l_extendedprice * (1 - l_discount)) as total_revenue
+	FROM part
+	JOIN lineitem ON p_partkey = l_partkey
+	JOIN supplier ON s_suppkey = l_suppkey
+	JOIN orders ON o_orderkey = l_orderkey
+	JOIN customer ON c_custkey = o_custkey
+	JOIN nation n1 ON c_nationkey = n1.n_nationkey
+	JOIN region ON n1.n_regionkey = r_regionkey
+	JOIN nation n2 ON s_nationkey = n2.n_nationkey
+	GROUP BY SUBSTR(o_orderdate, 1, 4)`
+	dump("Q08NF_LEGACY", q08NoFilter, false, 5)
+	dump("Q08NF_NATIVE", q08NoFilter, true, 5)
 
 	// Symmetric diff to highlight which rows are unique to each side.
 	in := func(s []string, k string) bool {

@@ -80,6 +80,11 @@ type Task struct {
 	JoinRightKeys   []string `json:"join_right_keys,omitempty"`  // build side key columns
 	BuildFiles      []string `json:"build_files,omitempty"`      // build (right) side input files
 	BuildTableAlias string   `json:"build_table_alias,omitempty"` // build-side alias for column disambiguation
+	// QualifyAllBuildCols, when true, forces the join executor to emit
+	// build-side columns under their qualified name even when no probe-side
+	// column has the same base name. Set by the planner for self-join scenarios
+	// (Q07's two scans of nation that co-path into the same join chain).
+	QualifyAllBuildCols bool   `json:"qualify_all_build_cols,omitempty"`
 	JoinFilter      string   `json:"join_filter,omitempty"`       // semi/anti join inequality filter expression
 
 	// Fused join: additional broadcast joins absorbed into a single task.

@@ -240,6 +240,7 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	joinType := mapJoinTypeString(task.JoinType)
 	hj := exec.NewHashJoin(joinType, task.JoinLeftKeys, task.JoinRightKeys)
 	hj.BuildTableAlias = task.BuildTableAlias
+	hj.QualifyAllBuildCols = task.QualifyAllBuildCols
 	if task.BuildRowHint > 0 {
 		hj.BuildRowHint = task.BuildRowHint
 	}
@@ -523,6 +524,18 @@ func applyPostFilter(ctx context.Context, task distributed.Task, batches []*batc
 		}
 		if cur.ActiveLen() == 0 {
 			continue
+		}
+		// Snapshot the selection vector before retaining the batch — Filter
+		// operators reuse outSel across calls (see exec.Filter.selBuf), so
+		// without copying, this batch's Sel would be clobbered by the next
+		// iteration's filter call. CollectSink does the same snapshot for
+		// the same reason. Without this, Q07's post-filter on join-10
+		// retains rows the OR-WHERE rejected (extra empty group + extra
+		// (FRANCE,FRANCE) and (GERMANY,GERMANY) groups in output).
+		if cur.Sel != nil {
+			selCopy := make([]uint32, len(cur.Sel))
+			copy(selCopy, cur.Sel)
+			cur.Sel = selCopy
 		}
 		out = append(out, cur)
 	}
