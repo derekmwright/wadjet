@@ -56,6 +56,22 @@ func (l *Lit) String() string {
 	}
 }
 
+// LiteralPlaceholder marks a deferred literal whose value is computed at
+// stage-dispatch time from the output of a prerequisite stage. The physical
+// planner inserts these when a filter expression's subquery references a CTE
+// whose distributed-pipeline output would diverge from single-process
+// evaluation; the native-DAG coordinator rewrites the serialized filter
+// expression by string-replacing ":<Name>" with the concrete literal before
+// dispatching the task. String renders as ":<Name>" so any code path that
+// accidentally serializes the expression before substitution produces an
+// unambiguous syntax error instead of silently coercing.
+type LiteralPlaceholder struct {
+	Name string
+}
+
+func (*LiteralPlaceholder) nodeTag() {}
+func (l *LiteralPlaceholder) String() string { return ":" + l.Name }
+
 // StarNode represents * or table.* in SELECT.
 type StarNode struct {
 	Table string

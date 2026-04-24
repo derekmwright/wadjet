@@ -124,6 +124,17 @@ type Stage struct {
 	// Exchange carries per-variant metadata for StageExchange* stages.
 	// nil for non-Exchange stages.
 	Exchange *ExchangeStage
+
+	// ScalarDependencies maps placeholder names (e.g. ":scalar_1") to
+	// producer stage IDs that emit a single-row, single-column output. The
+	// native-DAG coordinator awaits each producer, extracts the scalar from
+	// its stage output, and string-substitutes the placeholder in this
+	// stage's FilterExprs / AggSpecs.InputExpr before dispatching tasks.
+	// This lets CTE-referencing scalar subqueries share the distributed
+	// float-accumulation path with the filter-carrying stage's upstream,
+	// eliminating the single-process vs distributed bit-pattern divergence
+	// that caused Q15 to return 0 rows at SF0.1.
+	ScalarDependencies map[string]string
 }
 
 // WindowColSpec defines a window function column in a stage.
@@ -234,6 +245,11 @@ type Planner struct {
 	ScanFileFilter map[string][]string
 
 	scanCounter map[string]int // tracks N-th scan of each table for alias resolution
+
+	// scalarPlaceholderSeq allocates unique ":scalar_N" placeholder names
+	// across a single query when resolveFilterSubqueries defers CTE-
+	// referencing subqueries for late coordinator-side substitution.
+	scalarPlaceholderSeq int
 }
 
 // getSpillManager returns a shared per-query spill manager, creating it on
@@ -381,48 +397,68 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	return collectSink.ToRows(), nil
 }
 
+// deferredScalar carries a single CTE-referencing subquery whose resolution
+// has been deferred until coordinator dispatch. The placeholder is a colon-
+// prefixed identifier rendered into the serialized filter expression; the
+// coordinator substitutes it after the producer stage completes.
+type deferredScalar struct {
+	Placeholder string // e.g. "scalar_1" (no leading colon)
+	SubquerySQL string // the subquery to execute as a producer stage
+}
+
 // resolveFilterSubqueries finds embedded SQL subqueries in a filter expression
 // string, executes them using the planner's standalone pipeline, and substitutes
 // the scalar results as literals. This is needed for distributed mode where
 // workers don't have catalog access to execute subqueries themselves.
 //
-// Subqueries that reference CTEs are left unresolved — the coordinator will
-// resolve them from intermediate results to avoid float-precision divergence
-// between standalone and distributed computation paths.
-func (p *Planner) resolveFilterSubqueries(exprStr string) string {
+// Under native-DAG (UseEnsureDistribution=true), subqueries whose FROM clause
+// references a CTE are rewritten with :scalar_N placeholders instead of being
+// pre-computed. The returned deferredScalar list describes the producer stages
+// the caller must emit, and the filter-carrying stage's ScalarDependencies
+// should point to those producer stage IDs. This eliminates the float-precision
+// divergence between single-process cteCache evaluation and the distributed
+// pipeline's accumulation order (root cause of Q15 SF0.1 0-row bug).
+//
+// Non-native-DAG mode keeps the legacy behavior: CTE-referencing subqueries
+// are left unresolved (worker re-executes via SubqueryRunner), others are
+// pre-computed and substituted in place.
+func (p *Planner) resolveFilterSubqueries(exprStr string) (string, []deferredScalar) {
 	// Quick check: no subquery to resolve
 	if !strings.Contains(strings.ToUpper(exprStr), "SELECT") {
-		return exprStr
+		return exprStr, nil
 	}
 
-	// If the subquery references a CTE computed by the distributed pipeline,
-	// legacy distributed execution defers resolution because the worker
-	// re-executes the full SQL and gets matching float precision against
-	// the pipeline outputs. Native-DAG workers don't have a subquery
-	// runner, so deferring here would crash the downstream stage with
-	// "subqueries require a SubqueryRunner" (Q15). Resolve here instead —
-	// SF0.01/SF1 show the tiny float drift doesn't flip MAX borderlines
-	// for TPC-H queries.
+	// Legacy (non-native-DAG) deferral: let the worker re-run the subquery
+	// against pipeline outputs so float precision matches.
 	if !p.UseEnsureDistribution && p.subqueryReferencesCTE(exprStr) {
-		return exprStr
+		return exprStr, nil
 	}
 
 	ctx := p.planCtx
 	if ctx == nil {
-		return exprStr
+		return exprStr, nil
 	}
 
 	// Parse the expression to find SubqueryNode elements
 	ast, err := plansql.ParseExpression(exprStr)
 	if err != nil {
-		return exprStr
+		return exprStr, nil
 	}
 
-	resolved := p.resolveSubqueryAST(ctx, ast)
+	var deferred []deferredScalar
+	resolved := p.resolveSubqueryAST(ctx, ast, &deferred)
 	if resolved != nil {
-		return resolved.String()
+		return resolved.String(), deferred
 	}
-	return exprStr
+	return exprStr, deferred
+}
+
+// allocScalarPlaceholder returns the next unused placeholder name (no leading
+// colon) for this planner. Names are unique per Planner instance so that
+// multiple deferred subqueries in the same query can coexist.
+func (p *Planner) allocScalarPlaceholder() string {
+	p.scalarPlaceholderSeq++
+	return fmt.Sprintf("scalar_%d", p.scalarPlaceholderSeq)
 }
 
 // subqueryReferencesCTE returns true if the expression contains a scalar
@@ -440,14 +476,26 @@ func (p *Planner) subqueryReferencesCTE(exprStr string) bool {
 }
 
 // resolveSubqueryAST recursively walks an AST node, replacing SubqueryNode
-// elements with literal values obtained by executing the subquery.
-func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node) plansql.Node {
+// elements with either literal values obtained by executing the subquery, or
+// (when the subquery references a CTE under native-DAG) a LiteralPlaceholder
+// whose concrete value will be substituted by the coordinator. Any deferred
+// subqueries are appended to *deferred.
+func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, deferred *[]deferredScalar) plansql.Node {
 	if node == nil {
 		return nil
 	}
 
 	switch n := node.(type) {
 	case *plansql.SubqueryNode:
+		// Under native-DAG, if the subquery references a CTE we must defer
+		// evaluation so it shares the distributed accumulation path rather
+		// than running as a single-process pipeline over the cteCache
+		// (which floats-drifts vs the outer query's distributed aggregate).
+		if p.UseEnsureDistribution && p.subqueryReferencesCTE(n.SQL) {
+			name := p.allocScalarPlaceholder()
+			*deferred = append(*deferred, deferredScalar{Placeholder: name, SubquerySQL: n.SQL})
+			return &plansql.LiteralPlaceholder{Name: name}
+		}
 		rows, err := p.executeSubquery(ctx, n.SQL)
 		if err != nil || len(rows) == 0 {
 			return node
@@ -460,26 +508,26 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node) pla
 
 	case *plansql.CmpExpr:
 		return &plansql.CmpExpr{
-			Left:  p.resolveSubqueryAST(ctx, n.Left),
+			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred),
 			Op:    n.Op,
-			Right: p.resolveSubqueryAST(ctx, n.Right),
+			Right: p.resolveSubqueryAST(ctx, n.Right, deferred),
 		}
 
 	case *plansql.BinaryOp:
 		return &plansql.BinaryOp{
-			Left:  p.resolveSubqueryAST(ctx, n.Left),
+			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred),
 			Op:    n.Op,
-			Right: p.resolveSubqueryAST(ctx, n.Right),
+			Right: p.resolveSubqueryAST(ctx, n.Right, deferred),
 		}
 
 	case *plansql.UnaryOp:
 		return &plansql.UnaryOp{
 			Op:    n.Op,
-			Inner: p.resolveSubqueryAST(ctx, n.Inner),
+			Inner: p.resolveSubqueryAST(ctx, n.Inner, deferred),
 		}
 
 	case *plansql.ParenNode:
-		inner := p.resolveSubqueryAST(ctx, n.Inner)
+		inner := p.resolveSubqueryAST(ctx, n.Inner, deferred)
 		if inner != nil {
 			return &plansql.ParenNode{Inner: inner}
 		}
@@ -488,6 +536,57 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node) pla
 	default:
 		return node
 	}
+}
+
+// emitScalarProducerStages parses subquerySQL, walks its logical plan, and
+// appends the resulting distributed stages to *stages. Returns the terminal
+// stage's ID (the one whose single-row, single-column output holds the
+// scalar). The coordinator awaits this producer at dispatch time, extracts
+// the value, and substitutes it into the filter-carrying stage's expression.
+//
+// CTE definitions from the enclosing query are merged so the subquery can
+// resolve :CTE references. The terminal stage is forced to Tasks=1 so its
+// output is a single unpartitioned WSHF file suitable for scalar extraction.
+func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) (string, error) {
+	pq, err := plansql.Parse(subquerySQL)
+	if err != nil {
+		return "", fmt.Errorf("parse subquery: %w", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		return "", fmt.Errorf("extract subquery: %w", err)
+	}
+	var logicalPlan *logical.Node
+	if len(p.ctes) > 0 {
+		merged := append([]plansql.CTEDef(nil), p.ctes...)
+		merged = append(merged, info.CTEs...)
+		logicalPlan, err = logical.BuildFromSelectWithCTEs(info, merged)
+	} else {
+		logicalPlan, err = logical.BuildFromSelect(info)
+	}
+	if err != nil {
+		return "", fmt.Errorf("build subquery plan: %w", err)
+	}
+	ctx := p.planCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	p.AnnotateScanColumns(ctx, logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+		p.AnnotateScanColumns(ctx, plan)
+	})
+
+	before := len(*stages)
+	p.walkStages(logicalPlan, stages, nil)
+	if len(*stages) == before {
+		return "", fmt.Errorf("subquery emitted no stages")
+	}
+	terminal := &(*stages)[len(*stages)-1]
+	// Force Singleton: a scalar producer emits exactly one row. Tasks>1
+	// here would fan out into partitioned WSHF output that the coordinator's
+	// scalar extractor can't read.
+	terminal.Tasks = 1
+	return terminal.ID, nil
 }
 
 // scalarToLiteral converts a Go value to an AST literal node.
@@ -2155,7 +2254,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			p.walkStages(child, stages, parentID)
 		}
 		if len(node.Predicates) > 0 && len(*stages) > 0 {
-			lastStage := &(*stages)[len(*stages)-1]
+			// Capture the filter-carrying stage by INDEX (not pointer) because
+			// subsequent producer-stage emissions may append to *stages and
+			// invalidate any held pointer.
+			filterIdx := len(*stages) - 1
 			for _, pred := range node.Predicates {
 				var exprStr string
 				if pred.Raw != "" {
@@ -2163,13 +2265,45 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				} else if pred.ASTExpr != nil {
 					exprStr = pred.ASTExpr.String()
 				}
-				// Resolve scalar subqueries in-place — workers don't have catalog
-				// access to execute them. The planner evaluates subqueries here
-				// during stage generation and substitutes literal results.
-				if exprStr != "" {
-					exprStr = p.resolveFilterSubqueries(exprStr)
-					lastStage.FilterExprs = append(lastStage.FilterExprs, exprStr)
+				if exprStr == "" {
+					continue
 				}
+				// Resolve scalar subqueries. Under native-DAG, CTE-referencing
+				// subqueries are deferred to the coordinator — this call returns
+				// placeholders and the SQL for each producer we must emit.
+				resolvedExpr, deferred := p.resolveFilterSubqueries(exprStr)
+				for _, d := range deferred {
+					producerID, err := p.emitScalarProducerStages(stages, d.SubquerySQL)
+					if err != nil {
+						// Fall back: evaluate the subquery eagerly and splice
+						// a literal in place of the placeholder. Loses
+						// correctness for CTE-drift cases but keeps the query
+						// running rather than failing outright.
+						rows, sErr := p.executeSubquery(p.planCtx, d.SubquerySQL)
+						if sErr == nil && len(rows) > 0 {
+							for _, v := range rows[0] {
+								lit := scalarToLiteral(v).String()
+								resolvedExpr = strings.ReplaceAll(resolvedExpr, ":"+d.Placeholder, lit)
+								break
+							}
+						}
+						continue
+					}
+					fs := &(*stages)[filterIdx]
+					if fs.ScalarDependencies == nil {
+						fs.ScalarDependencies = make(map[string]string)
+					}
+					fs.ScalarDependencies[d.Placeholder] = producerID
+					// NOTE: producer IDs are deliberately NOT appended to
+					// Dependencies because Dependencies models data that
+					// flows into the stage as record batches; scalar
+					// producers feed into FilterExprs via late-bound
+					// string substitution instead. The coordinator's stage
+					// goroutine awaits ScalarDependencies separately.
+				}
+				// Re-index after any appends.
+				fs := &(*stages)[filterIdx]
+				fs.FilterExprs = append(fs.FilterExprs, resolvedExpr)
 			}
 		}
 

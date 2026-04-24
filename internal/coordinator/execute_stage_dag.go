@@ -124,6 +124,35 @@ func (c *Coordinator) executeStageDAG(
 					return gctx.Err()
 				}
 			}
+			// Late-bind any scalar subqueries: await each producer stage
+			// separately (producer IDs are NOT in Dependencies because
+			// their output feeds into FilterExprs via string substitution
+			// rather than flowing in as record batches), then extract the
+			// single scalar and substitute the placeholder.
+			if len(s.ScalarDependencies) > 0 {
+				for _, pid := range s.ScalarDependencies {
+					ch, tracked := done[pid]
+					if !tracked {
+						continue
+					}
+					select {
+					case <-ch:
+					case <-gctx.Done():
+						return gctx.Err()
+					}
+				}
+				outputsMu.Lock()
+				prod := make(map[string]StageOutput, len(s.ScalarDependencies))
+				for _, pid := range s.ScalarDependencies {
+					prod[pid] = outputs[pid]
+				}
+				outputsMu.Unlock()
+				var subErr error
+				s, subErr = c.substituteScalarDependencies(gctx, s, prod)
+				if subErr != nil {
+					return fmt.Errorf("stage %s scalar substitution: %w", s.ID, subErr)
+				}
+			}
 			outputsMu.Lock()
 			inputs, err := collectInputs(s, outputs)
 			outputsMu.Unlock()
