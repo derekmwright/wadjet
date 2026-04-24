@@ -296,8 +296,18 @@ func (c *Coordinator) dispatchPipelineStage(
 		if len(stage.FusedAggSpecs) > 0 {
 			return c.dispatchScanAggregateStage(ctx, queryID, stage, workerCount)
 		}
-		// Plain scan with no fused aggregate: downstream Exchange stages
-		// treat ScanFiles as the upstream output (pass-through).
+		// Plain scan with no fused aggregate. When the planner pushed
+		// filters onto this scan (e.g., Q05's `r_name = 'ASIA'`), we
+		// must actually apply them — otherwise the downstream join
+		// sees every row, cartesian-multiplies, and returns way too
+		// many results. Dispatch a filter-scan task that reads the
+		// parquet files, applies FilterExprs, and writes a WSHF output
+		// the rest of the native-DAG pipeline can consume.
+		if len(stage.FilterExprs) > 0 {
+			return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
+		}
+		// No filter: pass the raw parquet files through to the
+		// downstream stage.
 		files := append([]string(nil), stage.ScanFiles...)
 		return StageOutput{
 			Kind:  OutputSinglePart,
@@ -486,6 +496,111 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		Kind:          OutputPartitioned,
 		NumPartitions: len(tasks),
 		Files:         files,
+	}, nil
+}
+
+// dispatchScanFilterStage runs a scan-and-filter pipeline on a single
+// task. Used when a leaf scan carries scan-pushed FilterExprs but no
+// fused aggregate — without this path the filter would silently drop
+// because downstream stages see only the raw parquet files.
+func (c *Coordinator) dispatchScanFilterStage(
+	ctx context.Context,
+	queryID string,
+	stage physical.Stage,
+	workerCount int,
+) (StageOutput, error) {
+	_ = workerCount
+	if len(stage.ScanFiles) == 0 {
+		return StageOutput{Kind: OutputSinglePart, Files: [][]string{nil}}, nil
+	}
+	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
+	task := distributed.Task{
+		ID:           uuid.New().String()[:8],
+		QueryID:      queryID,
+		StageID:      stage.ID,
+		Type:         distributed.TaskTypeStage,
+		StageType:    "scan",
+		TableName:    stage.TableName,
+		Columns:      stage.Columns,
+		FilterExprs:  append([]string(nil), stage.FilterExprs...),
+		Inputs: map[string][]string{
+			scanAliasForStage(stage): append([]string(nil), stage.ScanFiles...),
+		},
+		DataBucket:   c.config.ResultBucket,
+		ResultBucket: c.config.ResultBucket,
+		ResultPrefix: resultPrefix,
+		CreatedAt:    time.Now(),
+	}
+	if clusterID := c.catalog.ClusterID(); clusterID != "" {
+		task.ClusterID = clusterID
+	}
+	c.mu.Lock()
+	qm := c.queryMetas[queryID]
+	c.mu.Unlock()
+	c.enrichTaskWithQueryContext(qm, &task)
+
+	stageQueryID := fmt.Sprintf("st-%s-%s", stage.ID, queryID)
+	trackerStages := map[string]*StageInfo{
+		stage.ID: {StageID: stage.ID, Type: distributed.TaskTypeStage, TotalTasks: 1},
+	}
+	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
+	c.tracker.Start(stageQueryID)
+	defer c.tracker.Delete(stageQueryID)
+	task.QueryID = stageQueryID
+
+	subject := distributed.QueryResultSubject(stageQueryID)
+	type taskResult struct {
+		files []string
+		err   string
+	}
+	var collected []taskResult
+	var mu sync.Mutex
+	done := make(chan struct{}, 1)
+	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+		var r distributed.ResultNotification
+		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
+			return
+		}
+		mu.Lock()
+		if r.Success {
+			collected = append(collected, taskResult{files: r.ResultFiles})
+		} else {
+			collected = append(collected, taskResult{err: r.Error})
+		}
+		got := len(collected)
+		mu.Unlock()
+		if got >= 1 {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}
+	})
+	if err != nil {
+		return StageOutput{}, fmt.Errorf("scan-filter stage %s subscribe: %w", stage.ID, err)
+	}
+	defer sub.Unsubscribe()
+	if err := c.scheduler.PublishTasks(ctx, []distributed.Task{task}); err != nil {
+		return StageOutput{}, fmt.Errorf("scan-filter stage %s publish: %w", stage.ID, err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return StageOutput{}, ctx.Err()
+	case <-time.After(shuffleStageTimeout):
+		return StageOutput{}, fmt.Errorf("scan-filter stage %s timeout", stage.ID)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(collected) == 0 {
+		return StageOutput{}, fmt.Errorf("scan-filter stage %s: no result", stage.ID)
+	}
+	if collected[0].err != "" {
+		return StageOutput{}, fmt.Errorf("scan-filter stage %s: %s", stage.ID, collected[0].err)
+	}
+	return StageOutput{
+		Kind:  OutputSinglePart,
+		Files: [][]string{collected[0].files},
 	}, nil
 }
 

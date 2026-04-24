@@ -26,7 +26,7 @@ import (
 // ReplySubject → gatherReplySink, else unpartitioned .wshf upload).
 func (e *Executor) executeStage(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
 	switch task.StageType {
-	case "scan":
+	case "scan", "filter_scan":
 		return e.executeStageScan(ctx, task, result)
 	case "hash_join", "broadcast_join":
 		return e.executeStageHashJoin(ctx, task, result)
@@ -41,7 +41,55 @@ func (e *Executor) executeStage(ctx context.Context, task distributed.Task, resu
 }
 
 func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
-	return fmt.Errorf("executeStageScan: not yet implemented")
+	if len(task.Inputs) != 1 {
+		return fmt.Errorf("scan task %s: needs exactly 1 input, got %d", task.ID, len(task.Inputs))
+	}
+	var alias string
+	var files []string
+	for k, v := range task.Inputs {
+		alias, files = k, v
+		break
+	}
+	if len(files) == 0 {
+		return e.writeStageOutput(ctx, task, nil, result)
+	}
+	bucket := task.DataBucket
+	if bucket == "" {
+		bucket = task.ResultBucket
+	}
+	filterOps, filterCols, err := compileFilterExprs(task.FilterExprs)
+	if err != nil {
+		return fmt.Errorf("scan task %s: filter compile: %w", task.ID, err)
+	}
+	// Ask the source for only the columns this stage's downstream
+	// consumer needs, plus any filter-referenced columns.
+	projCols := append([]string(nil), task.Columns...)
+	if len(filterCols) > 0 {
+		seen := make(map[string]bool, len(projCols))
+		for _, c := range projCols {
+			seen[c] = true
+		}
+		for _, c := range filterCols {
+			if !seen[c] {
+				seen[c] = true
+				projCols = append(projCols, c)
+			}
+		}
+	}
+	src, err := e.sourceForAliasWithProjection(bucket, alias, files, projCols)
+	if err != nil {
+		return fmt.Errorf("scan task %s: source: %w", task.ID, err)
+	}
+	collect := &exec.CollectSink{}
+	pipeline := &exec.Pipeline{
+		Source: src,
+		Ops:    filterOps,
+		Sink:   collect,
+	}
+	if err := pipeline.Run(ctx); err != nil {
+		return fmt.Errorf("scan task %s: pipeline: %w", task.ID, err)
+	}
+	return e.writeStageOutput(ctx, task, collect.Batches(), result)
 }
 
 // executeGatherStage is the native-DAG Gather task handler: reads all
