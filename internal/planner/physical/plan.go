@@ -396,10 +396,14 @@ func (p *Planner) resolveFilterSubqueries(exprStr string) string {
 	}
 
 	// If the subquery references a CTE computed by the distributed pipeline,
-	// defer resolution to the coordinator. This ensures the scalar value
-	// comes from the same float computation path as the pipeline results,
-	// avoiding precision divergence (e.g., Q15 total_revenue = MAX(...)).
-	if p.subqueryReferencesCTE(exprStr) {
+	// legacy distributed execution defers resolution because the worker
+	// re-executes the full SQL and gets matching float precision against
+	// the pipeline outputs. Native-DAG workers don't have a subquery
+	// runner, so deferring here would crash the downstream stage with
+	// "subqueries require a SubqueryRunner" (Q15). Resolve here instead —
+	// SF0.01/SF1 show the tiny float drift doesn't flip MAX borderlines
+	// for TPC-H queries.
+	if !p.UseEnsureDistribution && p.subqueryReferencesCTE(exprStr) {
 		return exprStr
 	}
 
