@@ -51,6 +51,13 @@ type Task struct {
 	PartitionFilter map[string]string `json:"partition_filter,omitempty"`
 	Columns         []string          `json:"columns,omitempty"`
 	FilterExprs     []string          `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
+	// PostFilterExprs are SQL filter expressions applied to the stage's
+	// OUTPUT (post-aggregate/post-join) rather than to raw scan input.
+	// Native-DAG compute stages use this for HAVING and join residual
+	// predicates. FilterExprs vs PostFilterExprs differ in column scope:
+	// FilterExprs references scan columns; PostFilterExprs references
+	// aggregate output cols or joined-schema cols.
+	PostFilterExprs []string          `json:"post_filter_exprs,omitempty"`
 
 	// Fused scan-aggregate: partial aggregation done at scan level
 	ScanAggGroupBy []string  `json:"scan_agg_group_by,omitempty"`

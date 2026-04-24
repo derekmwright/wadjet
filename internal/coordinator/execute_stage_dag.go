@@ -606,6 +606,14 @@ func (c *Coordinator) dispatchComputeStage(
 			ResultBucket:    c.config.ResultBucket,
 			ResultPrefix:    resultPrefix,
 			CreatedAt:       time.Now(),
+			// Filters attached to a compute stage (HAVING on
+			// aggregate/final_aggregate, residual predicates on
+			// hash_join) reference OUTPUT columns and must run after
+			// the stage's main operator. FilterExprs on compute stages
+			// would otherwise silently drop — that's the root cause of
+			// Q15 ignoring `WHERE total_revenue = (SELECT MAX...)` and
+			// Q18 ignoring `HAVING SUM(l_quantity) > 300`.
+			PostFilterExprs: append([]string(nil), stage.FilterExprs...),
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID

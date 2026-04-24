@@ -72,6 +72,13 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 	for alias, files := range task.Inputs {
 		e.logger.Info("executeGatherStage: opening source",
 			"task_id", task.ID, "alias", alias, "file_count", len(files))
+		if len(files) == 0 {
+			// Empty upstream: no data to gather. Skip this alias; the
+			// sink.Finalize below still sends the terminal marker so
+			// the coordinator's recv.wait() unblocks with an empty
+			// result instead of waiting forever.
+			continue
+		}
 		src, err := e.sourceForAlias(bucket, alias, files)
 		if err != nil {
 			return fmt.Errorf("gather task %s: source for %q: %w", task.ID, alias, err)
@@ -152,6 +159,21 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	if probeAlias == "" {
 		return fmt.Errorf("hash_join task %s: no probe-side alias (only %q)", task.ID, buildAlias)
 	}
+	// Empty build side: inner/semi join produces no output; anti join
+	// emits the entire probe. Short-circuit rather than erroring on
+	// classifyInputFiles's empty-file-list check. Only inner/semi is
+	// handled here; anti needs dedicated passthrough (not yet used by
+	// the SF0.01 queries that hit this path).
+	if len(buildFiles) == 0 {
+		switch strings.ToLower(task.JoinType) {
+		case "semi", "inner", "":
+			return e.writeStageOutput(ctx, task, nil, result)
+		}
+	}
+	// Empty probe: any join type produces no output rows.
+	if len(probeFiles) == 0 {
+		return e.writeStageOutput(ctx, task, nil, result)
+	}
 
 	bucket := task.DataBucket
 	if bucket == "" {
@@ -210,6 +232,10 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	}
 
 	batches := collect.Batches()
+	batches, err = applyPostFilter(ctx, task, batches)
+	if err != nil {
+		return fmt.Errorf("hash_join task %s: %w", task.ID, err)
+	}
 	batches = applyPostSort(ctx, task, batches)
 	return e.writeStageOutput(ctx, task, batches, result)
 }
@@ -229,6 +255,13 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	for k, v := range task.Inputs {
 		alias, files = k, v
 		break
+	}
+	// Empty upstream is legal — a semi-join that matched nothing, or a
+	// HAVING that rejected every partial, feeds the downstream aggregate
+	// zero files. Grouped aggregates emit zero rows; scalar aggregates
+	// emit identity values. Short-circuit via writeStageOutput(nil).
+	if len(files) == 0 {
+		return e.writeStageOutput(ctx, task, nil, result)
 	}
 	bucket := task.DataBucket
 	if bucket == "" {
@@ -366,6 +399,10 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 		}
 		outBatches = append(outBatches, b)
 	}
+	outBatches, err = applyPostFilter(ctx, task, outBatches)
+	if err != nil {
+		return fmt.Errorf("aggregate task %s: %w", task.ID, err)
+	}
 	outBatches = applyPostSort(ctx, task, outBatches)
 	return e.writeStageOutput(ctx, task, outBatches, result)
 }
@@ -394,6 +431,54 @@ func aggProjectionCols(groupBy []string, aggs []distributed.AggSpec) []string {
 		return nil
 	}
 	return out
+}
+
+// applyPostFilter runs task.PostFilterExprs against the given batches,
+// returning the surviving rows. Used for HAVING (post-aggregate) and
+// for residual predicates on hash_join output. Returns the input
+// unchanged when PostFilterExprs is empty.
+func applyPostFilter(ctx context.Context, task distributed.Task, batches []*batch.RecordBatch) ([]*batch.RecordBatch, error) {
+	if len(task.PostFilterExprs) == 0 || len(batches) == 0 {
+		return batches, nil
+	}
+	filterOps, _, err := compileFilterExprs(task.PostFilterExprs)
+	if err != nil {
+		return nil, fmt.Errorf("post-filter compile: %w", err)
+	}
+	if len(filterOps) == 0 {
+		return batches, nil
+	}
+	for _, op := range filterOps {
+		if err := op.Init(ctx); err != nil {
+			return nil, fmt.Errorf("post-filter init: %w", err)
+		}
+	}
+	out := make([]*batch.RecordBatch, 0, len(batches))
+	for _, b := range batches {
+		if b == nil {
+			continue
+		}
+		cur := b
+		for _, op := range filterOps {
+			next, err := op.Execute(ctx, cur)
+			if err != nil {
+				return nil, fmt.Errorf("post-filter exec: %w", err)
+			}
+			if next == nil {
+				cur = nil
+				break
+			}
+			cur = next
+		}
+		if cur == nil {
+			continue
+		}
+		if cur.ActiveLen() == 0 {
+			continue
+		}
+		out = append(out, cur)
+	}
+	return out, nil
 }
 
 // applyPostSort runs an in-process Sort on the given batches when the
