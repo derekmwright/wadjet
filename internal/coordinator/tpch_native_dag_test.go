@@ -48,6 +48,52 @@ func ingestTPCHTable(t *testing.T, ctx context.Context, store objstore.Store, ca
 	}
 }
 
+// ingestTPCHTableChunked streams a TPC-H table into the distributed test
+// fixture in chunks to keep memory bounded at larger scale factors.
+// CreateTable is called once; each chunk becomes its own parquet file in
+// the manifest so the worker sees >1 file per table and exercises the
+// scan-aggregate fan-out path.
+func ingestTPCHTableChunked(
+	t *testing.T,
+	ctx context.Context,
+	store objstore.Store,
+	cat *catalog.Catalog,
+	tableName string,
+	schema parquet.Schema,
+	chunks [][]map[string]any,
+) {
+	t.Helper()
+	if err := cat.CreateTable(ctx, tableName, schema, nil); err != nil {
+		t.Fatalf("creating table %s: %v", tableName, err)
+	}
+	for i, rows := range chunks {
+		var buf bytes.Buffer
+		pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := pw.WriteRows(rows); err != nil {
+			t.Fatal(err)
+		}
+		if err := pw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		data := buf.Bytes()
+		filePath := fmt.Sprintf("tables/%s/chunk_%04d.parquet", tableName, i+1)
+		if _, err := store.Put(ctx, "test", filePath, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		if err := cat.AddFiles(ctx, tableName, map[string]string{}, "tables/"+tableName+"/", []catalog.FileEntry{{
+			Path:      filePath,
+			SizeBytes: int64(len(data)),
+			NumRows:   int64(len(rows)),
+			CreatedAt: time.Now(),
+		}}); err != nil {
+			t.Fatalf("adding file to manifest for %s: %v", tableName, err)
+		}
+	}
+}
+
 // TestTPCHNativeDAG_SF001 is the local correctness gate for native-DAG
 // distributed execution. It populates SF0.01 TPC-H tables into the
 // distributed test fixture and runs each query twice — once on the legacy
