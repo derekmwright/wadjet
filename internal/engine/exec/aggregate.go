@@ -2869,6 +2869,16 @@ func (h *HashAggregate) materializeFlatAccums() {
 			}
 			for ai := range h.intFlatAccs {
 				fa := &h.intFlatAccs[ai]
+				// Defensive: a gi that wasn't appended to the SoA arrays
+				// (can happen when compact-to-generic migration runs with
+				// no rows consumed, leaving intFlatAccs cap=0 while
+				// strGroupStates carries migrated entries) would otherwise
+				// index a zero-length array and panic. Leave the
+				// accumulator at its zero value so downstream kernels
+				// emit identity output rather than crashing the worker.
+				if gi >= len(fa.count) {
+					continue
+				}
 				acc := &gs.accs[ai]
 				acc.Count = fa.count[gi]
 				acc.IsFloat = fa.isFloat
