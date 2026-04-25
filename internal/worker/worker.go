@@ -567,9 +567,24 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	// Force GC after memory-intensive tasks to reclaim build/probe batches
 	// and hash table memory before the next task allocates. Without this,
 	// garbage from the previous task can push RSS past physical memory
-	// before Go's GC cycle triggers.
+	// before Go's GC cycle triggers (gogc=off + GoMemLimit means GC only
+	// fires at the soft limit, by which time the OS may already OOM-kill).
+	//
+	// Native-DAG (TaskTypeStage) was missing from this match — Q18 SF10
+	// 2026-04-25 confirmed num_gc=0 for the entire 72s run, heap climbed
+	// monotonically to 19 GB then OS-killed the coord. Including TaskTypeStage
+	// ensures the same per-task GC discipline that legacy task types get.
+	shouldGC := false
 	switch task.Type {
 	case "join", "aggregate", "sort", "window":
+		shouldGC = true
+	case distributed.TaskTypeStage:
+		switch task.StageType {
+		case "hash_join", "broadcast_join", "aggregate", "final_aggregate", "sort", "merge_sort", "window":
+			shouldGC = true
+		}
+	}
+	if shouldGC {
 		runtime.GC()
 	}
 
