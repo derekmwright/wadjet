@@ -613,6 +613,14 @@ func (e *Executor) executeStageSort(ctx context.Context, task distributed.Task, 
 		alias, files = k, v
 		break
 	}
+	// Empty upstream is legal — a CTE / subquery / semi-join that matched
+	// nothing, an aggregate that filtered out every row, etc. Sort of zero
+	// rows is zero rows. Without this short-circuit the source classifier
+	// errors out with "empty file list" and the whole query fails (Q15
+	// CI failure 2026-04-25 — TestDistributedTPCH/Q15_Top_Supplier).
+	if len(files) == 0 {
+		return e.writeStageOutput(ctx, task, nil, result)
+	}
 	bucket := task.DataBucket
 	if bucket == "" {
 		bucket = task.ResultBucket
