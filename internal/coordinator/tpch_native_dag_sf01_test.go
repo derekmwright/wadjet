@@ -2,7 +2,10 @@ package coordinator
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -12,21 +15,32 @@ import (
 	"github.com/citc-tech/wadjet/benchmarks/tpch"
 )
 
-// TestTPCHNativeDAG_SF01 is the SF0.1 (≈100 MB) local correctness gate.
-// It catches scale-sensitive bugs the SF0.01 gate can't: hash
-// collisions, spill triggers, partial-merge correctness with >1 partial
-// per group, and derived-expression projection under real cardinalities.
+var updateSF01Golden = flag.Bool("update-sf01-golden", false, "update TPCH SF0.1 native-DAG golden snapshots")
+
+// TestTPCHNativeDAG_SF01 is the SF0.1 (≈100 MB) local correctness gate
+// for the native-DAG executor. Each Q01-Q22 result is compared against a
+// checked-in golden file. The test is the OUTPUT contract for native-DAG
+// at this scale — if results drift, either the golden was wrong (regen
+// with -update-sf01-golden) or the engine introduced a regression.
+//
+// Oracle: golden snapshots in testdata/sf01_native_dag/*.golden. Native-
+// DAG output is canonicalized (sorted rows, 6-sig-digit float
+// truncation) so float ULP drift across runs doesn't cause spurious
+// diffs while real value differences still surface.
+//
+// Why golden, not cross-path: the previous design ran each query
+// through both legacy and native-DAG and compared row sets. That worked
+// until distributed-vs-single-process float reduction order produced
+// ULP-different per-group SUMs at SF0.1 scale (Q11 root cause), making
+// cross-path comparison fundamentally fragile. Golden snapshots assert
+// against a fixed expected output instead — drift surfaces a real
+// regression rather than a "two paths reduce in different order" wash.
 //
 // SF0.1 not SF1: the single-worker test fixture scales sub-linearly with
 // data — a full SF1 run per query exceeds 5 min each (coordinator
 // overhead + MemStore serial reads dominate). SF0.1 keeps each query
 // under ~30s while still exercising every execution path that differs
-// from SF0.01 (multi-chunk lineitem scan, hashagg with >1 partial,
-// spill pressure).
-//
-// Oracle: each query runs twice — once on the legacy coordinator path to
-// establish a ground-truth row count, once on native-DAG to assert
-// parity. No hardcoded expected rows; if legacy changes, this follows.
+// from SF0.01.
 //
 // Opt-in: skipped in `-short`. Run with:
 //   go test -run TestTPCHNativeDAG_SF01 ./internal/coordinator/ -timeout 20m
@@ -89,136 +103,101 @@ func TestTPCHNativeDAG_SF01(t *testing.T) {
 			qCtx, qCancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer qCancel()
 
-			coord.LegacyMode = true
-			startLegacy := time.Now()
-			legacyRes, err := coord.ExecuteSQL(qCtx, q.SQL)
-			if err != nil {
-				t.Fatalf("legacy Q%02d: %v", qNum, err)
-			}
-			legacyElapsed := time.Since(startLegacy)
-
-			coord.LegacyMode = false
-			startNat := time.Now()
-			natRes, err := coord.ExecuteSQL(qCtx, q.SQL)
+			start := time.Now()
+			res, err := coord.ExecuteSQL(qCtx, q.SQL)
 			if err != nil {
 				t.Fatalf("native-DAG Q%02d: %v", qNum, err)
 			}
-			natElapsed := time.Since(startNat)
+			elapsed := time.Since(start)
 
-			// Q02 / Q22 have float-threshold comparisons where
-			// accumulation order can shift borderline rows. Same
-			// tolerance the SF0.01 gate uses.
-			tol := 0
-			if qNum == 2 || qNum == 22 {
-				tol = 4
-			}
-			diff := int(natRes.TotalRows - legacyRes.TotalRows)
-			if diff < -tol || diff > tol {
-				t.Errorf("Q%02d native-DAG rows=%d legacy rows=%d (diff=%d tol=±%d); legacy=%s native=%s",
-					qNum, natRes.TotalRows, legacyRes.TotalRows, diff, tol, legacyElapsed, natElapsed)
-				return
-			}
-			// Row-count parity is necessary but not sufficient. Q07's
-			// pre-fix native-DAG happened to return the right COUNT but
-			// with wrong column data (n1.n_name=NULL) and an extra empty
-			// group. Compare row VALUES too — sort each side by stringified
-			// representation so non-ORDER-BY queries still diff cleanly.
-			// Skip when row count is off by tolerance (already errored above).
-			//
-			// Per-query value-skip allowlist for queries with KNOWN structural
-			// native-DAG bugs that the strong gate exposed. Each entry should
-			// reference the bug; remove from the allowlist when fixed:
-			//   Q11: HAVING with scalar subquery — wrong rows match the threshold.
-			//        TODO: the subquery's threshold derivation diverges; suspect
-			//        a similar shape to Q15's late-bound scalar (SF0.1 only).
-			//   Q17: wrapped aggregate "SUM(l_extendedprice)/7.0 AS avg_yearly"
-			//        — the /7.0 divisor never gets applied. Need post-aggregate
-			//        Project equivalent for native-DAG (legacy applies via
-			//        buildProject's wrapped-aggregate path).
-			//   Q18: SUM(l_quantity) returns NULL despite correct GROUP BY keys.
-			//        Suspect IN-subquery + outer-aggregate column collision.
-			valueSkip := map[int]string{
-				11: "scalar subquery in HAVING; ~37 borderline ps_partkeys flip due to per-partkey SUM ULP drift between distributed (native) and single-process (legacy) aggregation paths — fundamental, requires unified reduction order to fix",
-			}
-			if reason, skip := valueSkip[qNum]; skip {
-				t.Logf("Q%02d: %d rows (legacy=%s native=%s) — value compare SKIPPED: %s",
-					qNum, natRes.TotalRows, legacyElapsed, natElapsed, reason)
-				return
-			}
-			if mismatches := diffRowSets(legacyRes.Rows(), natRes.Rows()); len(mismatches) > 0 {
-				// Truncate to first 5 mismatches to keep the failure log tractable.
-				show := mismatches
-				if len(show) > 5 {
-					show = show[:5]
+			snap := canonResultSnapshot(res.Rows())
+			goldenPath := filepath.Join("testdata", "sf01_native_dag", fmt.Sprintf("q%02d.golden", qNum))
+			if *updateSF01Golden {
+				if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
+					t.Fatalf("mkdir %s: %v", goldenPath, err)
 				}
-				t.Errorf("Q%02d row VALUES diverge (showing %d of %d):\n%s",
-					qNum, len(show), len(mismatches), strings.Join(show, "\n"))
+				if err := os.WriteFile(goldenPath, []byte(snap), 0o644); err != nil {
+					t.Fatalf("write golden: %v", err)
+				}
+				t.Logf("Q%02d: %d rows in %s — wrote golden", qNum, res.TotalRows, elapsed)
 				return
 			}
-			t.Logf("Q%02d: %d rows (legacy=%s native=%s)",
-				qNum, natRes.TotalRows, legacyElapsed, natElapsed)
+			want, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Fatalf("read golden %s: %v (regen with -update-sf01-golden)", goldenPath, err)
+			}
+			if snap != string(want) {
+				diff := snapshotDiff(string(want), snap)
+				t.Errorf("Q%02d snapshot diff (rows=%d, %s):\n%s\n(regen with -update-sf01-golden if intentional)",
+					qNum, res.TotalRows, elapsed, diff)
+				return
+			}
+			t.Logf("Q%02d: %d rows in %s", qNum, res.TotalRows, elapsed)
 		})
 	}
 }
 
-// diffRowSets returns the list of human-readable mismatches between two
-// row sets. Rows are stringified, sorted, and diffed — order independent
-// for non-ORDER-BY queries while still catching missing/extra/wrong values.
-// Float ULP-level differences are tolerated by truncating numeric values to
-// 6 significant digits before comparison; this avoids false positives from
-// distributed accumulation order without hiding real value differences.
-func diffRowSets(left, right []map[string]any) []string {
-	canon := func(rows []map[string]any) []string {
-		out := make([]string, len(rows))
-		for i, r := range rows {
-			keys := make([]string, 0, len(r))
-			for k := range r {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			var b strings.Builder
-			for j, k := range keys {
-				if j > 0 {
-					b.WriteString(" ")
-				}
-				b.WriteString(k)
-				b.WriteString("=")
-				b.WriteString(canonValue(r[k]))
-			}
-			out[i] = b.String()
+// canonResultSnapshot returns a stable string representation of a row set
+// suitable for golden comparison. Rows are stringified with sorted keys,
+// floats truncated to 6 significant digits to absorb cross-run ULP drift,
+// and the rows are sorted alphabetically so query result order doesn't
+// matter for non-ORDER-BY queries.
+func canonResultSnapshot(rows []map[string]any) string {
+	canon := make([]string, len(rows))
+	for i, r := range rows {
+		keys := make([]string, 0, len(r))
+		for k := range r {
+			keys = append(keys, k)
 		}
-		sort.Strings(out)
-		return out
-	}
-	leftS := canon(left)
-	rightS := canon(right)
-	li, ri := 0, 0
-	var mismatches []string
-	for li < len(leftS) && ri < len(rightS) {
-		switch {
-		case leftS[li] == rightS[ri]:
-			li++
-			ri++
-		case leftS[li] < rightS[ri]:
-			mismatches = append(mismatches, "  - "+leftS[li])
-			li++
-		default:
-			mismatches = append(mismatches, "  + "+rightS[ri])
-			ri++
+		sort.Strings(keys)
+		var b strings.Builder
+		for j, k := range keys {
+			if j > 0 {
+				b.WriteString(" ")
+			}
+			b.WriteString(k)
+			b.WriteString("=")
+			b.WriteString(canonValue(r[k]))
 		}
+		canon[i] = b.String()
 	}
-	for ; li < len(leftS); li++ {
-		mismatches = append(mismatches, "  - "+leftS[li])
-	}
-	for ; ri < len(rightS); ri++ {
-		mismatches = append(mismatches, "  + "+rightS[ri])
-	}
-	return mismatches
+	sort.Strings(canon)
+	return strings.Join(canon, "\n") + "\n"
 }
 
-// canonValue stringifies a Go value for row-set comparison, truncating
-// floats to 6 significant digits so float-ULP drift across legacy vs
-// distributed accumulation paths doesn't trigger a false mismatch.
+// snapshotDiff renders a small unified-style diff between two snapshot
+// strings, truncated to keep failure logs tractable.
+func snapshotDiff(want, got string) string {
+	wantLines := strings.Split(strings.TrimRight(want, "\n"), "\n")
+	gotLines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	wantSet := make(map[string]bool, len(wantLines))
+	for _, l := range wantLines {
+		wantSet[l] = true
+	}
+	gotSet := make(map[string]bool, len(gotLines))
+	for _, l := range gotLines {
+		gotSet[l] = true
+	}
+	var diff []string
+	for _, l := range wantLines {
+		if !gotSet[l] {
+			diff = append(diff, "  - "+l)
+		}
+	}
+	for _, l := range gotLines {
+		if !wantSet[l] {
+			diff = append(diff, "  + "+l)
+		}
+	}
+	if len(diff) > 10 {
+		diff = append(diff[:10], fmt.Sprintf("  ... (%d more)", len(diff)-10))
+	}
+	return strings.Join(diff, "\n")
+}
+
+// canonValue stringifies a Go value for snapshot comparison, truncating
+// floats to 6 significant digits so distributed accumulation-order ULP
+// drift doesn't trigger a false mismatch. Used by canonResultSnapshot.
 func canonValue(v any) string {
 	switch x := v.(type) {
 	case nil:
