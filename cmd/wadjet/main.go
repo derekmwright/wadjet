@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -171,14 +172,27 @@ func serveCmd() *cobra.Command {
 				// (Previous 90% left only 3 GB on 32 GB machines — not enough.)
 				goMemLimit := memLimit * 3 / 4
 				debug.SetMemoryLimit(goMemLimit)
-				// Disable percentage-based GC trigger and rely solely on GOMEMLIMIT.
-				// Workers keep an LRU file cache as long-lived heap. With GOGC=100,
-				// GC assist forces marking tax on every allocation proportional to
-				// live data — causing 2-3x query slowdowns when the cache is populated.
-				// GOGC=off + GOMEMLIMIT is Go's recommended configuration for
-				// workloads with large stable live data.
-				debug.SetGCPercent(-1)
-				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", "off")
+				// GC mode is overridable via WADJET_GOGC env var:
+				//   "off" / unset (default): rely on GOMEMLIMIT only — best for
+				//     workloads with large stable live data (LRU cache pattern)
+				//     because GC assist tax with GOGC=100 caused 2-3x query
+				//     slowdowns when the cache was populated.
+				//   "<int>" (e.g. "100"): set debug.SetGCPercent to that value —
+				//     useful for catalog-priming-heavy workloads where transient
+				//     garbage accumulates pre-query (Q18 SF10 baseline 11.5 GB
+				//     before query starts on a freshly primed coord).
+				gcMode := os.Getenv("WADJET_GOGC")
+				if gcMode == "" || strings.EqualFold(gcMode, "off") {
+					debug.SetGCPercent(-1)
+					gcMode = "off"
+				} else if pct, perr := strconv.Atoi(gcMode); perr == nil && pct > 0 {
+					debug.SetGCPercent(pct)
+					gcMode = strconv.Itoa(pct)
+				} else {
+					debug.SetGCPercent(-1)
+					gcMode = "off (invalid WADJET_GOGC)"
+				}
+				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", gcMode)
 
 				if cacheBytes == 0 {
 					if memoryBudget > 0 {
@@ -655,6 +669,19 @@ func newStore() (objstore.Store, error) {
 }
 
 func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool, snapshotPrefix string, snapshotInterval time.Duration, forceRestoreTS string) error {
+	// Opt-in heap profile dumper for OOM debugging. No-op unless
+	// WADJET_HEAP_DUMP_INTERVAL is set. See cmd/wadjet/heap_dumper.go.
+	startHeapDumper(ctx, logger)
+
+	// Periodic background GC: with the default gogc=off, large transient
+	// garbage (catalog priming, NATS message buffers) accumulates and
+	// can push baseline heap to 11+ GB before any query runs (Q18 SF10
+	// 2026-04-25, project_q18_sf10_native_dag_oom_2026-04-24). One GC
+	// every 30s reclaims this cheaply (~50ms per call) without the
+	// per-allocation GC assist tax that GOGC=100 imposes. Override via
+	// WADJET_BG_GC_INTERVAL ("off" to disable, "<duration>" otherwise).
+	startBackgroundGC(ctx, logger)
+
 	// Start embedded NATS (with optional leaf node connections)
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = natsPort
@@ -905,6 +932,10 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		pgCfg.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 	pgSrv := pgwire.NewServer(pgDB, pgCfg, logger)
+	// Route SELECT/WITH through coord.ExecuteSQL (native-DAG executor) when
+	// available — bypasses the legacy db.Query CollectSink materialization
+	// path that OOMed on Q18 SF10 (project_q18_sf10_native_dag_oom_2026-04-24).
+	pgSrv.SetCoordinator(coord)
 
 	errCh := make(chan error, 3)
 	go func() {

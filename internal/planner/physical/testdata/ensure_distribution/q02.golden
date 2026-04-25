@@ -1,0 +1,27 @@
+scan-0	scan	Singleton
+scan-1	scan	Singleton
+join-2	broadcast_join	Singleton	deps=scan-0,scan-1
+scan-3	scan	Singleton
+join-4	broadcast_join	Singleton	deps=join-2,scan-3
+scan-5	scan	Singleton
+exchange-repartition-6	exchange-repartition	Hash(s_suppkey)/32	deps=join-4
+exchange-repartition-7	exchange-repartition	Hash(ps_suppkey)/32	deps=scan-5
+join-8	hash_join	Hash(s_suppkey)/32	deps=exchange-repartition-6,exchange-repartition-7
+scan-9	scan	Singleton
+exchange-repartition-10	exchange-repartition	Hash(ps_partkey)/32	deps=join-8
+exchange-repartition-11	exchange-repartition	Hash(p_partkey)/32	deps=scan-9
+join-12	hash_join	Hash(ps_partkey)/32	deps=exchange-repartition-10,exchange-repartition-11
+scan-13	scan	Singleton
+scan-14	scan	Singleton
+join-15	broadcast_join	Singleton	deps=scan-13,scan-14
+scan-16	scan	Singleton
+join-17	broadcast_join	Singleton	deps=join-15,scan-16
+scan-18	scan	Singleton
+join-19	broadcast_join	Singleton	deps=join-17,scan-18
+aggregate-20	aggregate	Singleton	deps=join-19
+final_aggregate-21	final_aggregate	Singleton	deps=aggregate-20
+exchange-repartition-22	exchange-repartition	Hash(p_partkey)/32	deps=join-12
+exchange-repartition-23	exchange-repartition	Hash(ps_partkey)/32	deps=final_aggregate-21
+join-24	hash_join	Hash(p_partkey)/32	deps=exchange-repartition-22,exchange-repartition-23
+sort-25	sort	Singleton	deps=join-24
+exchange-gather-sort-25	exchange-gather	Singleton	deps=sort-25

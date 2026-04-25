@@ -109,7 +109,7 @@ func PickAggregateShuffleCandidateDiag(stages []Stage, thresholdBytes int64) Agg
 	}
 
 	for _, j := range stages {
-		if j.Type != "hash_join" && j.Type != "broadcast_join" {
+		if j.Type != StageHashJoin && j.Type != StageBroadcastJoin {
 			continue
 		}
 		// A join exists — upgrade from NoJoin.
@@ -209,11 +209,11 @@ func followToAggregate(byID map[string]Stage, startID string) (Stage, bool) {
 			return Stage{}, false
 		}
 		// An aggregate stage with GroupByCols populated is our target.
-		if (s.Type == "aggregate" || s.Type == "final_aggregate" || s.Type == "merge_aggregate") && len(s.GroupByCols) > 0 {
+		if (s.Type == StageAggregate || s.Type == "final_aggregate" || s.Type == "merge_aggregate") && len(s.GroupByCols) > 0 {
 			return s, true
 		}
 		// Shuffle and grouped-merge stages are transparent — follow through.
-		if s.Type == "shuffle" || s.Type == "final_aggregate" || s.Type == "merge_aggregate" {
+		if s.Type == StageExchangeRepartition || s.Type == "final_aggregate" || s.Type == "merge_aggregate" {
 			if len(s.Dependencies) == 0 {
 				return Stage{}, false
 			}
@@ -248,7 +248,7 @@ func followToScan(byID map[string]Stage, agg Stage) (Stage, bool) {
 		if !ok {
 			return Stage{}, false
 		}
-		if s.Type == "scan" {
+		if s.Type == StageScan {
 			if found && s.ID != root.ID {
 				// Multiple distinct scans reach this aggregate — not a simple
 				// aggregate-on-scan pattern. Phase 1 rejects.

@@ -34,7 +34,7 @@ type PhysicalPlan struct {
 // Stage represents a unit of distributed work with metadata for task creation.
 type Stage struct {
 	ID           string
-	Type         string // scan, aggregate, sort, hash_join, broadcast_join, window, shuffle, pipeline
+	Type         string // see exchange.go constants (scan, aggregate, sort, hash_join, broadcast_join, window, pipeline, exchange-repartition, exchange-replicate, exchange-gather)
 	ClusterID    string // target cluster for routing ("" = local/coordinator's cluster)
 	Dependencies []string
 	Tasks        int
@@ -71,9 +71,11 @@ type Stage struct {
 	// Window metadata
 	WindowCols []WindowColSpec
 
-	// Shuffle metadata
-	ShuffleKeys   []string // columns to hash-partition on
-	NumPartitions int      // number of output partitions (also used on join stages)
+	// JoinPartitionCount is the number of partitions for a hash-join stage
+	// that was preceded by repartition exchanges. Zero means the join is
+	// not partitioned (broadcast or single-partition). Exchange stages carry
+	// their partition count on Exchange.Count instead.
+	JoinPartitionCount int
 
 	// Fused scan-aggregate: partial aggregation is performed at the scan
 	// level, eliminating the scan→aggregate S3 round-trip. Workers produce
@@ -118,6 +120,54 @@ type Stage struct {
 	// to DistHashPartitioned with Keys and Count populated. Broadcast pre-scans
 	// (build cache) set Kind: DistBroadcast.
 	Distribution Distribution
+
+	// Exchange carries per-variant metadata for StageExchange* stages.
+	// nil for non-Exchange stages.
+	Exchange *ExchangeStage
+
+	// ScalarDependencies maps placeholder names (e.g. ":scalar_1") to
+	// producer stage IDs that emit a single-row, single-column output. The
+	// native-DAG coordinator awaits each producer, extracts the scalar from
+	// its stage output, and string-substitutes the placeholder in this
+	// stage's FilterExprs / AggSpecs.InputExpr before dispatching tasks.
+	// This lets CTE-referencing scalar subqueries share the distributed
+	// float-accumulation path with the filter-carrying stage's upstream,
+	// eliminating the single-process vs distributed bit-pattern divergence
+	// that caused Q15 to return 0 rows at SF0.1.
+	ScalarDependencies map[string]string
+
+	// OutputRenames is the SELECT-list alias map applied by the coordinator
+	// to the Gather stage's result schema. walkStages currently passes
+	// NodeProject through without applying its projections, so without this
+	// the final result schema carries raw worker column names ("n1.n_name",
+	// "substr(l_shipdate, 1, 4)") instead of the user's aliases
+	// ("supp_nation", "l_year"). Only populated on the Gather stage.
+	OutputRenames []OutputRename
+
+	// QualifyAllBuildCols, when true, instructs the join executor to always
+	// emit build-side columns under their qualified name
+	// ("BuildTableAlias.col_name") instead of the default behavior of
+	// qualifying only on probe-collision. Set by the planner when the same
+	// source table is scanned more than once and the scans co-path into the
+	// same join chain (Q07's "nation n1" + "nation n2"). Without this flag
+	// the FIRST self-join leaves its column unqualified, the SECOND qualifies
+	// only its own copy, and references to the FIRST alias resolve to NULL
+	// downstream.
+	QualifyAllBuildCols bool
+}
+
+// OutputRename pairs a worker-emitted column name with the SELECT-list alias
+// the user wrote. The coordinator rewrites batch and result schemas after
+// Gather using these pairs. When Expr is non-nil, the coordinator compiles
+// and evaluates the expression per row instead of doing a name rename — used
+// for wrapped aggregates ("SUM(x)/7.0 AS y" emits Expr=BinaryOp{ColRef("__agg_0"), /, 7.0}
+// because the logical planner replaces nested aggregates with refs to their
+// synthetic OutputCol). From is the primary input column (used as the
+// existence check); other column refs in Expr resolve via ColumnIndexFallback.
+type OutputRename struct {
+	From string
+	To   string
+	Expr plansql.Node
 }
 
 // WindowColSpec defines a window function column in a stage.
@@ -146,6 +196,12 @@ type AggSpec struct {
 	Func      string
 	InputCol  string
 	OutputCol string
+	// InputExpr is the SQL text of a derived input expression, e.g.
+	// "l_extendedprice * (1 - l_discount)". Empty when InputCol is a
+	// bare column reference. Distributed workers compile this into a
+	// Project operator before the aggregate so HashAggregate sees a
+	// column whose name matches InputCol.
+	InputExpr string
 }
 
 // SortKeySpec defines a sort key in a stage.
@@ -181,12 +237,28 @@ type Planner struct {
 	ctes           []plansql.CTEDef  // CTE definitions from the current query, for subquery resolution
 	MemoryBudget   int64             // per-query memory budget in bytes (0 = unlimited)
 	SpillDir       string            // directory for spill files (empty = os temp dir)
+
+	// SharedTracker / SharedSpillMgr (if set) are used in place of per-query
+	// Tracker+SpillManager creation. Workers set these to point at the
+	// executor-level pool so concurrent tasks on the same worker compete for
+	// ONE budget and spill cooperatively under pool pressure, matching the
+	// Trino/Spark unified memory manager model. When nil, getSpillManager()
+	// falls back to creating a per-query pool as before.
+	SharedTracker  *memory.Tracker
+	SharedSpillMgr *memory.SpillManager
 	QueryLimits    *config.QueryLimits // cost-based query guard (nil = no limits)
 	cteCache       map[string]*cteMaterialized // materialized CTE results
 	scanCache      map[string]*scanCached       // cached scan results for duplicate table scans
 	spillMgr       *memory.SpillManager // shared per-query spill manager (lazy-initialized)
 	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
 	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
+
+	// UseEnsureDistribution runs the Phase-2 EnsureDistribution pass after
+	// assignStageDistributions. When true, BehaviorPreservingMode is flipped
+	// to false for the duration of the call (strict AssertExchangeConsistency).
+	// Temporary flag: will be deleted in Phase 2 Task 20 once the heuristic
+	// switch is gone.
+	UseEnsureDistribution bool
 
 	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
 	// When populated, buildScan uses these batches instead of reading from the
@@ -206,12 +278,22 @@ type Planner struct {
 	ScanFileFilter map[string][]string
 
 	scanCounter map[string]int // tracks N-th scan of each table for alias resolution
+
+	// scalarPlaceholderSeq allocates unique ":scalar_N" placeholder names
+	// across a single query when resolveFilterSubqueries defers CTE-
+	// referencing subqueries for late coordinator-side substitution.
+	scalarPlaceholderSeq int
 }
 
 // getSpillManager returns a shared per-query spill manager, creating it on
 // first call. Uses MemoryBudget if set, otherwise auto-detects from system
 // memory (cgroup or physical). Returns nil if no memory limit can be determined.
 func (p *Planner) getSpillManager() *memory.SpillManager {
+	// Shared pool (worker-level, injected by Executor) takes precedence so
+	// all concurrent tasks spill against one budget.
+	if p.SharedSpillMgr != nil {
+		return p.SharedSpillMgr
+	}
 	if p.spillMgr != nil {
 		return p.spillMgr
 	}
@@ -244,6 +326,10 @@ func (p *Planner) getSpillManager() *memory.SpillManager {
 // getMemTracker returns the shared per-query memory tracker.
 // Must be called after getSpillManager().
 func (p *Planner) getMemTracker() *memory.Tracker {
+	// Shared pool takes precedence (worker-level pool across tasks).
+	if p.SharedTracker != nil {
+		return p.SharedTracker
+	}
 	return p.memTracker
 }
 
@@ -344,44 +430,68 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	return collectSink.ToRows(), nil
 }
 
+// deferredScalar carries a single CTE-referencing subquery whose resolution
+// has been deferred until coordinator dispatch. The placeholder is a colon-
+// prefixed identifier rendered into the serialized filter expression; the
+// coordinator substitutes it after the producer stage completes.
+type deferredScalar struct {
+	Placeholder string // e.g. "scalar_1" (no leading colon)
+	SubquerySQL string // the subquery to execute as a producer stage
+}
+
 // resolveFilterSubqueries finds embedded SQL subqueries in a filter expression
 // string, executes them using the planner's standalone pipeline, and substitutes
 // the scalar results as literals. This is needed for distributed mode where
 // workers don't have catalog access to execute subqueries themselves.
 //
-// Subqueries that reference CTEs are left unresolved — the coordinator will
-// resolve them from intermediate results to avoid float-precision divergence
-// between standalone and distributed computation paths.
-func (p *Planner) resolveFilterSubqueries(exprStr string) string {
+// Under native-DAG (UseEnsureDistribution=true), subqueries whose FROM clause
+// references a CTE are rewritten with :scalar_N placeholders instead of being
+// pre-computed. The returned deferredScalar list describes the producer stages
+// the caller must emit, and the filter-carrying stage's ScalarDependencies
+// should point to those producer stage IDs. This eliminates the float-precision
+// divergence between single-process cteCache evaluation and the distributed
+// pipeline's accumulation order (root cause of Q15 SF0.1 0-row bug).
+//
+// Non-native-DAG mode keeps the legacy behavior: CTE-referencing subqueries
+// are left unresolved (worker re-executes via SubqueryRunner), others are
+// pre-computed and substituted in place.
+func (p *Planner) resolveFilterSubqueries(exprStr string) (string, []deferredScalar) {
 	// Quick check: no subquery to resolve
 	if !strings.Contains(strings.ToUpper(exprStr), "SELECT") {
-		return exprStr
+		return exprStr, nil
 	}
 
-	// If the subquery references a CTE computed by the distributed pipeline,
-	// defer resolution to the coordinator. This ensures the scalar value
-	// comes from the same float computation path as the pipeline results,
-	// avoiding precision divergence (e.g., Q15 total_revenue = MAX(...)).
-	if p.subqueryReferencesCTE(exprStr) {
-		return exprStr
+	// Legacy (non-native-DAG) deferral: let the worker re-run the subquery
+	// against pipeline outputs so float precision matches.
+	if !p.UseEnsureDistribution && p.subqueryReferencesCTE(exprStr) {
+		return exprStr, nil
 	}
 
 	ctx := p.planCtx
 	if ctx == nil {
-		return exprStr
+		return exprStr, nil
 	}
 
 	// Parse the expression to find SubqueryNode elements
 	ast, err := plansql.ParseExpression(exprStr)
 	if err != nil {
-		return exprStr
+		return exprStr, nil
 	}
 
-	resolved := p.resolveSubqueryAST(ctx, ast)
+	var deferred []deferredScalar
+	resolved := p.resolveSubqueryAST(ctx, ast, &deferred)
 	if resolved != nil {
-		return resolved.String()
+		return resolved.String(), deferred
 	}
-	return exprStr
+	return exprStr, deferred
+}
+
+// allocScalarPlaceholder returns the next unused placeholder name (no leading
+// colon) for this planner. Names are unique per Planner instance so that
+// multiple deferred subqueries in the same query can coexist.
+func (p *Planner) allocScalarPlaceholder() string {
+	p.scalarPlaceholderSeq++
+	return fmt.Sprintf("scalar_%d", p.scalarPlaceholderSeq)
 }
 
 // subqueryReferencesCTE returns true if the expression contains a scalar
@@ -399,14 +509,26 @@ func (p *Planner) subqueryReferencesCTE(exprStr string) bool {
 }
 
 // resolveSubqueryAST recursively walks an AST node, replacing SubqueryNode
-// elements with literal values obtained by executing the subquery.
-func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node) plansql.Node {
+// elements with either literal values obtained by executing the subquery, or
+// (when the subquery references a CTE under native-DAG) a LiteralPlaceholder
+// whose concrete value will be substituted by the coordinator. Any deferred
+// subqueries are appended to *deferred.
+func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, deferred *[]deferredScalar) plansql.Node {
 	if node == nil {
 		return nil
 	}
 
 	switch n := node.(type) {
 	case *plansql.SubqueryNode:
+		// Under native-DAG, if the subquery references a CTE we must defer
+		// evaluation so it shares the distributed accumulation path rather
+		// than running as a single-process pipeline over the cteCache
+		// (which floats-drifts vs the outer query's distributed aggregate).
+		if p.UseEnsureDistribution && p.subqueryReferencesCTE(n.SQL) {
+			name := p.allocScalarPlaceholder()
+			*deferred = append(*deferred, deferredScalar{Placeholder: name, SubquerySQL: n.SQL})
+			return &plansql.LiteralPlaceholder{Name: name}
+		}
 		rows, err := p.executeSubquery(ctx, n.SQL)
 		if err != nil || len(rows) == 0 {
 			return node
@@ -419,26 +541,26 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node) pla
 
 	case *plansql.CmpExpr:
 		return &plansql.CmpExpr{
-			Left:  p.resolveSubqueryAST(ctx, n.Left),
+			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred),
 			Op:    n.Op,
-			Right: p.resolveSubqueryAST(ctx, n.Right),
+			Right: p.resolveSubqueryAST(ctx, n.Right, deferred),
 		}
 
 	case *plansql.BinaryOp:
 		return &plansql.BinaryOp{
-			Left:  p.resolveSubqueryAST(ctx, n.Left),
+			Left:  p.resolveSubqueryAST(ctx, n.Left, deferred),
 			Op:    n.Op,
-			Right: p.resolveSubqueryAST(ctx, n.Right),
+			Right: p.resolveSubqueryAST(ctx, n.Right, deferred),
 		}
 
 	case *plansql.UnaryOp:
 		return &plansql.UnaryOp{
 			Op:    n.Op,
-			Inner: p.resolveSubqueryAST(ctx, n.Inner),
+			Inner: p.resolveSubqueryAST(ctx, n.Inner, deferred),
 		}
 
 	case *plansql.ParenNode:
-		inner := p.resolveSubqueryAST(ctx, n.Inner)
+		inner := p.resolveSubqueryAST(ctx, n.Inner, deferred)
 		if inner != nil {
 			return &plansql.ParenNode{Inner: inner}
 		}
@@ -447,6 +569,67 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node) pla
 	default:
 		return node
 	}
+}
+
+// emitScalarProducerStages parses subquerySQL, walks its logical plan, and
+// appends the resulting distributed stages to *stages. Returns the terminal
+// stage's ID (the one whose single-row, single-column output holds the
+// scalar). The coordinator awaits this producer at dispatch time, extracts
+// the value, and substitutes it into the filter-carrying stage's expression.
+//
+// CTE definitions from the enclosing query are merged so the subquery can
+// resolve :CTE references. The terminal stage is forced to Tasks=1 so its
+// output is a single unpartitioned WSHF file suitable for scalar extraction.
+func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) (string, error) {
+	pq, err := plansql.Parse(subquerySQL)
+	if err != nil {
+		return "", fmt.Errorf("parse subquery: %w", err)
+	}
+	info, err := plansql.ExtractSelect(pq)
+	if err != nil {
+		return "", fmt.Errorf("extract subquery: %w", err)
+	}
+	var logicalPlan *logical.Node
+	if len(p.ctes) > 0 {
+		merged := append([]plansql.CTEDef(nil), p.ctes...)
+		merged = append(merged, info.CTEs...)
+		logicalPlan, err = logical.BuildFromSelectWithCTEs(info, merged)
+	} else {
+		logicalPlan, err = logical.BuildFromSelect(info)
+	}
+	if err != nil {
+		return "", fmt.Errorf("build subquery plan: %w", err)
+	}
+	ctx := p.planCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	p.AnnotateScanColumns(ctx, logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
+		p.AnnotateScanColumns(ctx, plan)
+	})
+
+	before := len(*stages)
+	p.walkStages(logicalPlan, stages, nil)
+	if len(*stages) == before {
+		return "", fmt.Errorf("subquery emitted no stages")
+	}
+	terminal := &(*stages)[len(*stages)-1]
+	// Force Singleton: a scalar producer emits exactly one row. Tasks>1
+	// here would fan out into partitioned WSHF output that the coordinator's
+	// scalar extractor can't read.
+	terminal.Tasks = 1
+	// Pin the subquery's projection on the terminal so the scalar extractor
+	// can apply post-aggregate wrappers like Q11's "SUM(...) * 0.0001". The
+	// producer chain only emits the raw aggregate (e.g. __agg_0 = SUM); the
+	// SELECT-level multiplier needs to be applied by the coordinator after
+	// reading the producer output. Reuses Stage.OutputRenames the same way
+	// Gather does — at extract time we'll detect the producer-vs-Gather
+	// case via context.
+	if renames := extractOutputRenames(logicalPlan); len(renames) > 0 {
+		terminal.OutputRenames = renames
+	}
+	return terminal.ID, nil
 }
 
 // scalarToLiteral converts a Go value to an AST literal node.
@@ -985,10 +1168,35 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		return nil, err
 	}
 	// Phase 1 distribution-property pass: populate Stage.Distribution for
-	// every stage and assert exchange consistency. In BehaviorPreservingMode
-	// (default), violations are logged but do not fail planning. See
-	// docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md.
+	// every stage. Phase 2 (this flag) runs EnsureDistribution afterward
+	// to insert Exchange stages where child output doesn't satisfy parent
+	// input, then asserts consistency strictly.
 	assignStageDistributions(stages, p.WorkerCount)
+	if p.UseEnsureDistribution {
+		// Collapse multi-level merge_aggregate/merge_sort trees before the
+		// Exchange pass so the emitted Exchange stages are placed against
+		// the final merger, not the intermediate tree levels. The tree
+		// shape is a single-pipeline optimization that becomes a SF10-
+		// killing N-round-trip fan-out under native-DAG dispatch.
+		stages = collapseMergeTreesForNativeDAG(stages)
+		// Drop redundant trailing merge_sort Singleton stages whose sole
+		// dep is a Singleton sort — the merge_sort is a no-op in that
+		// shape and costs a full worker round-trip per query.
+		stages = collapseRedundantFinalMergeSort(stages)
+		// Fuse Singleton sort into its Singleton predecessor (aggregate /
+		// hash_join / broadcast_join / final_aggregate) so the worker
+		// applies the sort in-process rather than serializing the
+		// pre-sort output and letting a separate sort task pick it up.
+		stages = fuseSortIntoPredecessor(stages)
+		var ensureErr error
+		stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
+		if ensureErr != nil {
+			return nil, fmt.Errorf("ensure distribution: %w", ensureErr)
+		}
+		prev := BehaviorPreservingMode
+		BehaviorPreservingMode = false
+		defer func() { BehaviorPreservingMode = prev }()
+	}
 	if err := AssertExchangeConsistency(stages); err != nil {
 		// In strict mode (Phase 2 onward, or test override) this is a
 		// hard failure. BehaviorPreservingMode swallows the error inside
@@ -996,7 +1204,219 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// caller flipped the var.
 		return nil, fmt.Errorf("exchange consistency: %w", err)
 	}
+	// Attach SELECT-list aliases to the Gather stage so the coordinator can
+	// rename the final result schema. walkStages currently treats NodeProject
+	// as a passthrough — this surfaces the user's aliases that would otherwise
+	// be lost (e.g., "n1.n_name" -> "supp_nation", "substr(l_shipdate, 1, 4)"
+	// -> "l_year"). Only meaningful under the native-DAG path where Gather
+	// drives the result schema.
+	if p.UseEnsureDistribution {
+		if renames := extractOutputRenames(node); len(renames) > 0 {
+			for i := range stages {
+				if stages[i].Type == StageExchangeGather {
+					stages[i].OutputRenames = renames
+					break
+				}
+			}
+		}
+	}
 	return stages, nil
+}
+
+// extractOutputRenames inspects the logical plan tree's outermost projection
+// node and returns one (source-column → alias) pair per SELECT-list item — in
+// SELECT-list order — describing the final output schema. The coordinator
+// uses this list both to RENAME columns AND to DROP columns the worker
+// emitted but the user didn't ask for (e.g., Q15's join output carries
+// supplier/lineitem internals that the SELECT list doesn't project).
+//
+// For aggregate columns, the source equals the alias (planner sets
+// AggSpec.OutputCol to the alias). Wrapped aggregates ("SUM(x)/7.0 AS x")
+// still aren't handled here — the worker emits the raw aggregate, and
+// applying the divisor needs a post-aggregate Project. Wrapped-aggregate
+// projections are passed through with their source pointing at the wrapped
+// expression text so that at least the rename is attempted (it'll miss
+// gracefully and the column drops, surfacing the bug clearly in tests).
+//
+// Returns nil when the outermost emitting node isn't a projection (e.g.,
+// top-level scan or aggregate without a SELECT-list rename layer).
+func extractOutputRenames(root *logical.Node) []OutputRename {
+	proj := findOutputProjectionsForRename(root)
+	if len(proj) == 0 {
+		return nil
+	}
+	renames := make([]OutputRename, 0, len(proj))
+	for _, p := range proj {
+		var src, target string
+		var astExpr plansql.Node
+		switch {
+		case p.IsAgg:
+			// AggSpec.OutputCol == alias; if no alias, fall back to expr.
+			target = p.Alias
+			if target == "" {
+				target = strings.ToLower(p.Expr)
+			}
+			src = target
+		case p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) && referencesSyntheticAgg(p.ASTExpr):
+			// Wrapped aggregate — the logical layer replaced aggregate calls
+			// with ColRefs to their __agg_N synthetic columns. Compile+eval
+			// at gather time so the divisor (e.g. "/7.0" in Q17's avg_yearly)
+			// gets applied. We restrict this to expressions that reference
+			// __agg_N because pure scalar expressions like SUBSTR(o_orderdate,
+			// 1, 4) are computed by the worker's GROUP BY / project pipeline
+			// and surface as a column under the expression's lowercased text
+			// — those need a plain rename, not eval (and eval would mistype
+			// SUBSTR's string output as float64).
+			target = p.Alias
+			if target == "" {
+				target = strings.ToLower(p.Expr)
+			}
+			astExpr = p.ASTExpr
+			src = firstColRefName(p.ASTExpr)
+		case p.Column != "" && p.Alias != "":
+			// Bare column reference. Worker may emit qualified ("n1.n_name")
+			// or unqualified ("n_name") depending on the upstream join chain.
+			// Prefer Expr (qualified-preserving) when it's a colref, else Column.
+			src = p.Column
+			if p.Expr != "" {
+				src = strings.ToLower(p.Expr)
+			}
+			target = p.Alias
+		case p.Expr != "":
+			src = strings.ToLower(p.Expr)
+			target = p.Alias
+			if target == "" {
+				target = src
+			}
+		case p.Column != "":
+			src = p.Column
+			target = src
+		default:
+			continue
+		}
+		renames = append(renames, OutputRename{From: src, To: target, Expr: astExpr})
+	}
+	return renames
+}
+
+// isSimpleColRefForRename is the OutputRenames-specific variant of
+// isSimpleColRef. The base helper at line 4308 also returns true for Lit
+// nodes; here we only want to skip the eval path when the projection is
+// strictly a column reference (or a parenthesized one).
+func isSimpleColRefForRename(n plansql.Node) bool {
+	if n == nil {
+		return false
+	}
+	if _, ok := n.(*plansql.ColRef); ok {
+		return true
+	}
+	if p, ok := n.(*plansql.ParenNode); ok {
+		return isSimpleColRefForRename(p.Inner)
+	}
+	return false
+}
+
+// referencesSyntheticAgg reports whether an AST contains any ColRef whose
+// name starts with "__agg_" — the marker the logical layer's nested-
+// aggregate rewrite uses for synthetic column names. Lets the gather rewrite
+// distinguish "SUM(x)/7.0" (rewritten to "__agg_0/7.0", needs eval) from
+// "SUBSTR(o_orderdate, 1, 4)" (worker-computed, needs rename).
+func referencesSyntheticAgg(n plansql.Node) bool {
+	if n == nil {
+		return false
+	}
+	switch x := n.(type) {
+	case *plansql.ColRef:
+		return strings.HasPrefix(x.Column, "__agg_")
+	case *plansql.BinaryOp:
+		return referencesSyntheticAgg(x.Left) || referencesSyntheticAgg(x.Right)
+	case *plansql.UnaryOp:
+		return referencesSyntheticAgg(x.Inner)
+	case *plansql.CmpExpr:
+		return referencesSyntheticAgg(x.Left) || referencesSyntheticAgg(x.Right)
+	case *plansql.ParenNode:
+		return referencesSyntheticAgg(x.Inner)
+	case *plansql.FuncCallNode:
+		for _, a := range x.Args {
+			if referencesSyntheticAgg(a) {
+				return true
+			}
+		}
+	case *plansql.CastNode:
+		return referencesSyntheticAgg(x.Inner)
+	case *plansql.CaseNode:
+		if referencesSyntheticAgg(x.Subject) {
+			return true
+		}
+		for _, w := range x.Whens {
+			if referencesSyntheticAgg(w.Cond) || referencesSyntheticAgg(w.Result) {
+				return true
+			}
+		}
+		return referencesSyntheticAgg(x.Else)
+	}
+	return false
+}
+
+// firstColRefName returns the first column reference name in an AST, used as
+// the existence anchor for the gather rewrite. Returns "" when no ColRef is
+// found (very rare — pure-literal projections).
+func firstColRefName(n plansql.Node) string {
+	if n == nil {
+		return ""
+	}
+	switch x := n.(type) {
+	case *plansql.ColRef:
+		if x.Table != "" {
+			return x.Table + "." + x.Column
+		}
+		return x.Column
+	case *plansql.BinaryOp:
+		if v := firstColRefName(x.Left); v != "" {
+			return v
+		}
+		return firstColRefName(x.Right)
+	case *plansql.UnaryOp:
+		return firstColRefName(x.Inner)
+	case *plansql.CmpExpr:
+		if v := firstColRefName(x.Left); v != "" {
+			return v
+		}
+		return firstColRefName(x.Right)
+	case *plansql.ParenNode:
+		return firstColRefName(x.Inner)
+	case *plansql.FuncCallNode:
+		for _, a := range x.Args {
+			if v := firstColRefName(a); v != "" {
+				return v
+			}
+		}
+	case *plansql.CastNode:
+		return firstColRefName(x.Inner)
+	}
+	return ""
+}
+
+// findOutputProjectionsForRename walks down through Sort/Limit/Filter wrappers
+// to the outermost NodeProject and returns its projections. Returns nil when
+// the outermost emitting node is not a projection (e.g., a top-level scan or
+// aggregate without a SELECT-list rename layer).
+func findOutputProjectionsForRename(n *logical.Node) []logical.Projection {
+	for n != nil {
+		switch n.Type {
+		case logical.NodeProject:
+			return n.Projections
+		case logical.NodeSort, logical.NodeLimit, logical.NodeFilter:
+			if len(n.Children) == 1 {
+				n = n.Children[0]
+				continue
+			}
+			return nil
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 // QueryCost summarizes the estimated cost of a query across all scan stages.
@@ -1571,10 +1991,120 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 func (p *Planner) generateStages(node *logical.Node) []Stage {
 	var stages []Stage
 	p.walkStages(node, &stages, nil)
-	if p.WorkerCount > 1 {
+	// Broadcast-join fusion is a single-pipeline-executor optimization: it
+	// moves a separate broadcast_join stage into a consumer's FusedJoins
+	// list to avoid an intermediate S3 round-trip. Under native-DAG execution
+	// (Phase 3), every stage is dispatched independently and stage boundaries
+	// are the fundamental unit — fusing collapses that structure in ways the
+	// worker's executeStageHashJoin can't consume (the consumer ends up with
+	// >2 Dependencies, and FusedJoins semantics don't round-trip through the
+	// wire-level Task contract). Skip fusion when the caller has opted into
+	// native-DAG; the extra round-trip is the correctness price we pay, and
+	// the parallel-wave dispatcher hides most of the latency.
+	if p.WorkerCount > 1 && !p.UseEnsureDistribution {
 		stages = fuseJoinStages(stages)
 	}
+	markCoPathingSelfJoinBuilds(stages)
 	return stages
+}
+
+// markCoPathingSelfJoinBuilds finds joins whose build-side scans target
+// the same source table AND whose forward-reachable stage sets intersect
+// (one join transitively depends on the other), then sets
+// QualifyAllBuildCols on both. This is the planner half of the Q07
+// self-join column-disambiguation fix.
+//
+// The narrower "co-pathing" check is required because counting same-table
+// scans across the WHOLE plan also catches scalar-subquery scans (Q02, Q17)
+// and CTE-producer scans (Q15) that are independent of the outer join chain
+// — qualifying their unrelated joins broke those queries in the first
+// attempt.
+func markCoPathingSelfJoinBuilds(stages []Stage) {
+	stageByID := make(map[string]*Stage, len(stages))
+	for i := range stages {
+		stageByID[stages[i].ID] = &stages[i]
+	}
+
+	// For each join stage, walk its build-side dep chain (transitively
+	// through any Exchange wrappers) to the underlying scan and record
+	// (joinIdx, scanTableName).
+	type joinScan struct {
+		joinIdx   int
+		joinID    string
+		tableName string
+	}
+	var joinScans []joinScan
+	for i := range stages {
+		s := &stages[i]
+		if s.Type != StageHashJoin && s.Type != StageBroadcastJoin {
+			continue
+		}
+		buildDep := s.RightDepStage
+		if buildDep == "" {
+			continue
+		}
+		// Walk through Exchange wrappers (one or two levels) to the scan.
+		cur := stageByID[buildDep]
+		for hop := 0; cur != nil && cur.Type != StageScan && hop < 3; hop++ {
+			if len(cur.Dependencies) == 0 {
+				cur = nil
+				break
+			}
+			cur = stageByID[cur.Dependencies[0]]
+		}
+		if cur == nil || cur.Type != StageScan || cur.TableName == "" {
+			continue
+		}
+		joinScans = append(joinScans, joinScan{joinIdx: i, joinID: s.ID, tableName: cur.TableName})
+	}
+
+	if len(joinScans) < 2 {
+		return
+	}
+
+	// reachable[X] = set of stage IDs reachable forward from X (X's transitive
+	// consumers). Computed by running BFS from each join via reverse-deps.
+	consumers := make(map[string][]string, len(stages))
+	for i := range stages {
+		for _, dep := range stages[i].Dependencies {
+			consumers[dep] = append(consumers[dep], stages[i].ID)
+		}
+	}
+	reachable := make(map[string]map[string]bool, len(joinScans))
+	for _, js := range joinScans {
+		reach := map[string]bool{js.joinID: true}
+		stack := []string{js.joinID}
+		for len(stack) > 0 {
+			n := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			for _, c := range consumers[n] {
+				if !reach[c] {
+					reach[c] = true
+					stack = append(stack, c)
+				}
+			}
+		}
+		reachable[js.joinID] = reach
+	}
+
+	// Mark a join when another join over the SAME table is in its forward
+	// reachable set OR vice versa — i.e. the two are in the same join
+	// chain.
+	for i := range joinScans {
+		for j := range joinScans {
+			if i == j {
+				continue
+			}
+			a, b := joinScans[i], joinScans[j]
+			if a.tableName != b.tableName {
+				continue
+			}
+			if reachable[a.joinID][b.joinID] || reachable[b.joinID][a.joinID] {
+				stages[a.joinIdx].QualifyAllBuildCols = true
+				stages[b.joinIdx].QualifyAllBuildCols = true
+			}
+		}
+	}
 }
 
 // fuseJoinStages absorbs broadcast join stages into their downstream consumer
@@ -1789,11 +2319,22 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		var aggSpecs []AggSpec
 		for _, agg := range node.AggExprs {
-			aggSpecs = append(aggSpecs, AggSpec{
+			spec := AggSpec{
 				Func:      agg.Func,
 				InputCol:  agg.InputCol,
 				OutputCol: agg.OutputCol,
-			})
+			}
+			// Capture derived expression text when the aggregate argument
+			// is not a bare column reference (e.g.
+			// SUM(l_extendedprice * (1 - l_discount))). Downstream
+			// native-DAG workers need this to project the derived column
+			// before running HashAggregate.
+			if agg.InputExpr != nil {
+				if _, bare := agg.InputExpr.(*plansql.ColRef); !bare {
+					spec.InputExpr = agg.InputExpr.String()
+				}
+			}
+			aggSpecs = append(aggSpecs, spec)
 		}
 		groupBy := make([]string, len(node.GroupBy))
 		copy(groupBy, node.GroupBy)
@@ -1975,27 +2516,31 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			}
 
 			// Left (probe) side shuffle
-			leftShuffleID := fmt.Sprintf("shuffle-%d", len(*stages))
+			leftShuffleID := fmt.Sprintf("exchange-repartition-%d", len(*stages))
 			*stages = append(*stages, Stage{
-				ID:            leftShuffleID,
-				Type:          "shuffle",
-				Tasks:         1,
-				Columns:       shuffleCols,
-				ShuffleKeys:   leftKeys,
-				NumPartitions: numPartitions,
-				Dependencies:  []string{leftDep},
+				ID:      leftShuffleID,
+				Type:    StageExchangeRepartition,
+				Tasks:   1,
+				Columns: shuffleCols,
+				Exchange: &ExchangeStage{
+					Keys:  append([]string(nil), leftKeys...),
+					Count: numPartitions,
+				},
+				Dependencies: []string{leftDep},
 			})
 
 			// Right (build) side shuffle
-			rightShuffleID := fmt.Sprintf("shuffle-%d", len(*stages))
+			rightShuffleID := fmt.Sprintf("exchange-repartition-%d", len(*stages))
 			*stages = append(*stages, Stage{
-				ID:            rightShuffleID,
-				Type:          "shuffle",
-				Tasks:         1,
-				Columns:       shuffleCols,
-				ShuffleKeys:   rightKeys,
-				NumPartitions: numPartitions,
-				Dependencies:  []string{rightDep},
+				ID:      rightShuffleID,
+				Type:    StageExchangeRepartition,
+				Tasks:   1,
+				Columns: shuffleCols,
+				Exchange: &ExchangeStage{
+					Keys:  append([]string(nil), rightKeys...),
+					Count: numPartitions,
+				},
+				Dependencies: []string{rightDep},
 			})
 
 			leftDep = leftShuffleID
@@ -2011,16 +2556,16 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		}
 		stageID := fmt.Sprintf("join-%d", len(*stages))
 		stage := Stage{
-			ID:            stageID,
-			Type:          joinType,
-			Tasks:         joinTasks,
-			Columns:       node.NeededColumns,
-			JoinType:      jt,
-			JoinLeftKeys:  leftKeys,
-			JoinRightKeys: rightKeys,
-			LeftDepStage:  leftDep,
-			RightDepStage: rightDep,
-			NumPartitions: numPartitions,
+			ID:                 stageID,
+			Type:               joinType,
+			Tasks:              joinTasks,
+			Columns:            node.NeededColumns,
+			JoinType:           jt,
+			JoinLeftKeys:       leftKeys,
+			JoinRightKeys:      rightKeys,
+			LeftDepStage:       leftDep,
+			RightDepStage:      rightDep,
+			JoinPartitionCount: numPartitions,
 		}
 		// Propagate build-side table alias for column disambiguation in self-joins
 		// (e.g., nation n1 JOIN nation n2 — prevents duplicate columns from being dropped).
@@ -2064,7 +2609,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			p.walkStages(child, stages, parentID)
 		}
 		if len(node.Predicates) > 0 && len(*stages) > 0 {
-			lastStage := &(*stages)[len(*stages)-1]
+			// Capture the filter-carrying stage by INDEX (not pointer) because
+			// subsequent producer-stage emissions may append to *stages and
+			// invalidate any held pointer.
+			filterIdx := len(*stages) - 1
 			for _, pred := range node.Predicates {
 				var exprStr string
 				if pred.Raw != "" {
@@ -2072,13 +2620,45 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				} else if pred.ASTExpr != nil {
 					exprStr = pred.ASTExpr.String()
 				}
-				// Resolve scalar subqueries in-place — workers don't have catalog
-				// access to execute them. The planner evaluates subqueries here
-				// during stage generation and substitutes literal results.
-				if exprStr != "" {
-					exprStr = p.resolveFilterSubqueries(exprStr)
-					lastStage.FilterExprs = append(lastStage.FilterExprs, exprStr)
+				if exprStr == "" {
+					continue
 				}
+				// Resolve scalar subqueries. Under native-DAG, CTE-referencing
+				// subqueries are deferred to the coordinator — this call returns
+				// placeholders and the SQL for each producer we must emit.
+				resolvedExpr, deferred := p.resolveFilterSubqueries(exprStr)
+				for _, d := range deferred {
+					producerID, err := p.emitScalarProducerStages(stages, d.SubquerySQL)
+					if err != nil {
+						// Fall back: evaluate the subquery eagerly and splice
+						// a literal in place of the placeholder. Loses
+						// correctness for CTE-drift cases but keeps the query
+						// running rather than failing outright.
+						rows, sErr := p.executeSubquery(p.planCtx, d.SubquerySQL)
+						if sErr == nil && len(rows) > 0 {
+							for _, v := range rows[0] {
+								lit := scalarToLiteral(v).String()
+								resolvedExpr = strings.ReplaceAll(resolvedExpr, ":"+d.Placeholder, lit)
+								break
+							}
+						}
+						continue
+					}
+					fs := &(*stages)[filterIdx]
+					if fs.ScalarDependencies == nil {
+						fs.ScalarDependencies = make(map[string]string)
+					}
+					fs.ScalarDependencies[d.Placeholder] = producerID
+					// NOTE: producer IDs are deliberately NOT appended to
+					// Dependencies because Dependencies models data that
+					// flows into the stage as record batches; scalar
+					// producers feed into FilterExprs via late-bound
+					// string substitution instead. The coordinator's stage
+					// goroutine awaits ScalarDependencies separately.
+				}
+				// Re-index after any appends.
+				fs := &(*stages)[filterIdx]
+				fs.FilterExprs = append(fs.FilterExprs, resolvedExpr)
 			}
 		}
 
@@ -3156,8 +3736,15 @@ func parseJoinKeys(cond string) (leftKeys, rightKeys []string) {
 		if len(eqParts) != 2 {
 			continue
 		}
-		left := cleanExpr(strings.TrimSpace(eqParts[0]))
-		right := cleanExpr(strings.TrimSpace(eqParts[1]))
+		// Preserve table qualifiers ("n1.n_regionkey") so that probe-side
+		// lookups against a self-join chain's qualified output schema
+		// resolve directly. The columnIndexFallback in the join executor
+		// strips the qualifier on miss, so unqualified scan-source schemas
+		// still resolve. Stripping here would force the executor to
+		// suffix-match a qualified column from {n1.X, n2.X}, which is
+		// ambiguous and returns -1 → 0 rows from the join.
+		left := strings.TrimSpace(eqParts[0])
+		right := strings.TrimSpace(eqParts[1])
 		leftKeys = append(leftKeys, left)
 		rightKeys = append(rightKeys, right)
 	}
@@ -3168,14 +3755,24 @@ func parseJoinKeys(cond string) (leftKeys, rightKeys []string) {
 // by checking against the build subtree's available columns from the plan.
 // This avoids the expensive post-build FixKeyAssignment hash table rebuild
 // which was 31% of Q09's time at SF10.
+//
+// Build columns are unqualified (from the table scan), but join keys may now
+// preserve qualifiers (post Q07 fix). Strip the qualifier on lookup so a key
+// like "n1.n_nationkey" matches the build's unqualified "n_nationkey".
 func fixJoinKeyOrder(leftKeys, rightKeys []string, buildNode *logical.Node) {
 	buildCols := collectPlanColumns(buildNode)
 	if len(buildCols) == 0 {
 		return
 	}
+	stripQual := func(k string) string {
+		if dot := strings.Index(k, "."); dot >= 0 {
+			return k[dot+1:]
+		}
+		return k
+	}
 	for i := range leftKeys {
-		leftInBuild := buildCols[leftKeys[i]]
-		rightInBuild := buildCols[rightKeys[i]]
+		leftInBuild := buildCols[leftKeys[i]] || buildCols[stripQual(leftKeys[i])]
+		rightInBuild := buildCols[rightKeys[i]] || buildCols[stripQual(rightKeys[i])]
 		if leftInBuild && !rightInBuild {
 			leftKeys[i], rightKeys[i] = rightKeys[i], leftKeys[i]
 		}
@@ -5434,6 +6031,16 @@ func leafStages(stages []Stage) []string {
 	for _, s := range stages {
 		for _, d := range s.Dependencies {
 			depended[d] = true
+		}
+		// Stages referenced via ScalarDependencies (Q15 late-bound scalar
+		// producer chain) feed into FilterExprs through coordinator-side
+		// substitution, not as record-batch input — but they still
+		// SHOULDN'T be treated as plan-level leaves. Without this, the
+		// next sort/aggregate's leafStages call picks up the producer's
+		// terminal as a dependency and the producer's output gets
+		// erroneously routed into the sort's input pipeline.
+		for _, pid := range s.ScalarDependencies {
+			depended[pid] = true
 		}
 	}
 	var leaves []string

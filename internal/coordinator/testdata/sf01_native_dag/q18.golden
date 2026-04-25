@@ -1,0 +1,7 @@
+c_custkey=11603 c_name=Customer#000011603 o_orderdate=1994-01-03 o_orderkey=51406 o_totalprice=104901 total_qty=304
+c_custkey=173 c_name=Customer#000000173 o_orderdate=1993-02-14 o_orderkey=145634 o_totalprice=186161 total_qty=307
+c_custkey=5425 c_name=Customer#000005425 o_orderdate=1992-03-11 o_orderkey=93976 o_totalprice=218247 total_qty=304
+c_custkey=5480 c_name=Customer#000005480 o_orderdate=1993-10-26 o_orderkey=97592 o_totalprice=354498 total_qty=310
+c_custkey=560 c_name=Customer#000000560 o_orderdate=1993-01-06 o_orderkey=60186 o_totalprice=235126 total_qty=327
+c_custkey=8003 c_name=Customer#000008003 o_orderdate=1995-04-22 o_orderkey=95562 o_totalprice=222317 total_qty=309
+c_custkey=9638 c_name=Customer#000009638 o_orderdate=1997-10-19 o_orderkey=93017 o_totalprice=272511 total_qty=301

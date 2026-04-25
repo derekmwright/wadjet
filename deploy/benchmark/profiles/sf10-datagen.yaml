@@ -1,0 +1,32 @@
+# SF10 Data Regeneration — single-node data generation only.
+#
+# Regenerates all 8 TPC-H tables at SF10 into the existing
+# wadjet-bench-sf10-use2 bucket. Skips ALL 22 queries so the instance
+# shuts down immediately after upload completes.
+#
+# Use when the bucket is partially populated or stale. Standalone mode
+# single on-demand instance; self-terminates via run-benchmark.sh's
+# `shutdown -h now` at end.
+
+name: SF10 Data Regeneration
+description: Regenerate SF10 TPC-H data into pre-seeded bucket (no queries)
+
+storage:
+  bucket: wadjet-bench-sf10-use2
+  region: us-east-2
+  data_prefix: "tables/"
+
+cluster:
+  mode: standalone
+  workers: 0
+  worker_instance: c7g.4xlarge
+  arch: arm64
+  use_spot: false
+
+benchmark:
+  scale_factor: 10
+  runs: 1
+  query_timeout: 10m
+  skip_load: false
+  # Skip every TPC-H query so the run is data-gen-only.
+  skip_queries: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]

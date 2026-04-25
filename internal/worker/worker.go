@@ -95,8 +95,20 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	executor := NewExecutor(store, cache, js)
 	executor.SetMemoryBudget(cfg.MemoryBudget, cfg.SpillDir)
 	executor.SetLogger(logger)
+	executor.SetNATSConn(nc)
 	if cfg.ResultStoreBytes > 0 {
 		executor.SetResultStore(NewResultStore(cfg.ResultStoreBytes))
+	}
+	// Best-effort bind to the coordinator's shared result KV bucket so small
+	// stage outputs can round-trip via NATS (~10ms) instead of S3 (~500ms).
+	// The coordinator creates the bucket in New(); workers just open it.
+	// If unavailable (e.g., KV disabled on coord, different NATS cluster),
+	// stage writes/reads silently fall back to S3.
+	if kv, kvErr := js.KeyValue(context.Background(), "wadjet_results_data"); kvErr == nil {
+		executor.SetResultKV(kv)
+		logger.Info("worker KV fast-path enabled", "bucket", "wadjet_results_data")
+	} else {
+		logger.Debug("worker KV fast-path unavailable", "error", kvErr)
 	}
 
 	return &Worker{
@@ -555,9 +567,24 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	// Force GC after memory-intensive tasks to reclaim build/probe batches
 	// and hash table memory before the next task allocates. Without this,
 	// garbage from the previous task can push RSS past physical memory
-	// before Go's GC cycle triggers.
+	// before Go's GC cycle triggers (gogc=off + GoMemLimit means GC only
+	// fires at the soft limit, by which time the OS may already OOM-kill).
+	//
+	// Native-DAG (TaskTypeStage) was missing from this match — Q18 SF10
+	// 2026-04-25 confirmed num_gc=0 for the entire 72s run, heap climbed
+	// monotonically to 19 GB then OS-killed the coord. Including TaskTypeStage
+	// ensures the same per-task GC discipline that legacy task types get.
+	shouldGC := false
 	switch task.Type {
 	case "join", "aggregate", "sort", "window":
+		shouldGC = true
+	case distributed.TaskTypeStage:
+		switch task.StageType {
+		case "hash_join", "broadcast_join", "aggregate", "final_aggregate", "sort", "merge_sort", "window":
+			shouldGC = true
+		}
+	}
+	if shouldGC {
 		runtime.GC()
 	}
 
@@ -566,6 +593,20 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		"success", result.Success,
 		"rows", result.NumRows,
 		"duration", result.Duration,
+	}
+	if task.StageID != "" {
+		logAttrsEnd = append(logAttrsEnd, "stage_id", task.StageID)
+	}
+	if task.StageType != "" {
+		logAttrsEnd = append(logAttrsEnd, "stage_type", task.StageType)
+	}
+	// PeakHeapMB is the peak Go heap during this task — sampled at 50ms
+	// cadence by taskPeakHeapTracker (executor.go:200). For Q18-class
+	// memory-constrained-scaling investigations, this is the per-stage
+	// signal that lets us locate which task's hash table / build cache /
+	// scan output is the runaway.
+	if result.TaskStats != nil && result.TaskStats.PeakHeapMB > 0 {
+		logAttrsEnd = append(logAttrsEnd, "peak_heap_mb", result.TaskStats.PeakHeapMB)
 	}
 	if task.TraceID != "" {
 		logAttrsEnd = append(logAttrsEnd, "trace_id", task.TraceID)

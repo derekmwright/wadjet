@@ -349,6 +349,7 @@ locals {
     export QUERY_TIMEOUT="${local.eff_timeout}"
     export WADJET_REVERSE_BLOOM_INNER_THRESHOLD="${var.reverse_bloom_inner_threshold}"
     export WADJET_JOIN_DEBUG="${var.join_debug}"
+    export USE_NATIVE_DAG="${var.use_native_dag ? "1" : "0"}"
     ${local.profile_env}
     cd /root/wadjet
 

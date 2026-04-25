@@ -77,6 +77,14 @@ type HashJoin struct {
 	// ambiguity (e.g., self-joins like nation n1 JOIN nation n2).
 	BuildTableAlias string
 
+	// QualifyAllBuildCols forces every build-side column into the output
+	// schema under its qualified name ("BuildTableAlias.col"), not just the
+	// columns that would collide with the probe schema. The planner sets
+	// this on co-pathing self-join scans so the FIRST self-join's column
+	// is reachable downstream by its qualified name (avoiding the NULL-via-
+	// columnIndexFallback path that breaks Q07).
+	QualifyAllBuildCols bool
+
 	// Pre-resolved column indices and reusable key buffer for typed serialization.
 	// Avoids fmt.Sprint + GetValue boxing on every row.
 	keyBuf        []byte
@@ -685,10 +693,11 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.mu.Lock()
 		if h.buildSchema == nil {
 			h.buildSchema = b.Schema
-			// Pre-resolve build key column indices
+			// Pre-resolve build key column indices. Use fallback to handle
+			// schemas with qualified columns (self-join chain output).
 			h.buildKeyIdx = make([]int, len(h.RightKeys))
 			for i, col := range h.RightKeys {
-				h.buildKeyIdx[i] = b.ColumnIndex(col)
+				h.buildKeyIdx[i] = columnIndexFallback(b, col)
 			}
 			// Try to enable int64 fast path for single-column integer keys
 			h.tryEnableIntKey(b)
@@ -2167,7 +2176,7 @@ func (h *HashJoin) resolveProbeKeyIdx(b *batch.RecordBatch) {
 	}
 	h.probeKeyIdx = make([]int, len(h.LeftKeys))
 	for i, col := range h.LeftKeys {
-		h.probeKeyIdx[i] = b.ColumnIndex(col)
+		h.probeKeyIdx[i] = columnIndexFallback(b, col)
 	}
 	h.probeResolved.Store(true)
 }
@@ -3328,19 +3337,25 @@ func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]
 	}
 
 	for i, col := range p.join.buildSchema {
-		if seen[col.Name] {
-			if p.join.BuildTableAlias != "" {
-				// Duplicate column: include with qualified name for disambiguation
-				qualCol := col
-				qualCol.Name = p.join.BuildTableAlias + "." + col.Name
-				if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
-					qualCol.Nullable = true
-				}
-				out = append(out, qualCol)
-				mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
+		isDup := seen[col.Name]
+		// Force qualification for self-join scenarios — the planner sets
+		// QualifyAllBuildCols when this build is one of two co-pathing
+		// scans of the same source table. Without it, the FIRST scan's
+		// column ships unqualified ("n_name") and downstream lookups for
+		// the qualified name ("n1.n_name") miss.
+		shouldQualify := (isDup || p.join.QualifyAllBuildCols) && p.join.BuildTableAlias != ""
+		switch {
+		case shouldQualify:
+			qualCol := col
+			qualCol.Name = p.join.BuildTableAlias + "." + col.Name
+			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
+				qualCol.Nullable = true
 			}
-			// When no alias: skip duplicate (backward compatible)
-		} else {
+			out = append(out, qualCol)
+			mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
+		case isDup:
+			// Duplicate with no alias to disambiguate by — skip (backward compatible).
+		default:
 			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
 				col.Nullable = true
 			}
@@ -3614,6 +3629,12 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 		var src *batch.Vector
 		prevBatch := int32(-1)
 		srcHasNulls := true
+		// Offsets carry-forward for skipped rows: when a row's value
+		// isn't written (unmatched pair or null source), the
+		// destination BytesColumn still needs Offsets[di+1] to be
+		// monotonically non-decreasing so Value(i) returns a valid
+		// (empty) slice rather than a descending pair that panics in
+		// writeBytesData when the null bitmap isn't consulted.
 		if allMatched {
 			for di, pair := range pairs {
 				if bi := pair.ref.batchIdx; bi != prevBatch {
@@ -3624,6 +3645,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				si := int(pair.ref.rowIdx)
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
+					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
 				} else {
 					dst.BytesData.SetFrom(di, &src.BytesData, si)
 				}
@@ -3632,6 +3654,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 			for di, pair := range pairs {
 				if !pair.matched {
 					dst.Nulls.SetNull(di)
+					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
 					continue
 				}
 				if bi := pair.ref.batchIdx; bi != prevBatch {
@@ -3642,6 +3665,7 @@ func gatherBuildVector(dst *batch.Vector, srcIdx int, pairs []matchPair, buildBa
 				si := int(pair.ref.rowIdx)
 				if srcHasNulls && src.Nulls.IsNullFast(si) {
 					dst.Nulls.SetNull(di)
+					dst.BytesData.Offsets[di+1] = dst.BytesData.Offsets[di]
 				} else {
 					dst.BytesData.SetFrom(di, &src.BytesData, si)
 				}

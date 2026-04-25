@@ -13,7 +13,25 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/internal/storage/partition"
 )
+
+// compactedFilePath returns the S3 key for a compaction output file. Mirrors
+// partition.Strategy.FilePath for the compacted_<nanos>.parquet chunk id: for
+// unpartitioned tables the path is "<tables/name>/compacted_X.parquet"; for
+// Hive-partitioned tables it is "<tables/name>/<hive-path>/compacted_X.parquet".
+//
+// Prior to this helper the compactor wrote "%s/compacted_%d.parquet" using the
+// manifest's partition path as the prefix, which is empty for unpartitioned
+// tables — yielding a leading-slash key at the bucket root and silently
+// orphaning data after the old files were deleted from the manifest.
+func compactedFilePath(tableName, partPath string) string {
+	prefix := partition.TablePrefix(tableName)
+	if partPath == "" {
+		return fmt.Sprintf("%s/compacted_%d.parquet", prefix, time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%s/%s/compacted_%d.parquet", prefix, partPath, time.Now().UnixNano())
+}
 
 // Config controls compaction trigger thresholds and limits.
 type Config struct {
@@ -143,7 +161,7 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 				continue
 			}
 
-			newPath := fmt.Sprintf("%s/compacted_%d.parquet", part.Path, time.Now().UnixNano())
+			newPath := compactedFilePath(tableName, part.Path)
 			written, err := c.writeMergedFile(ctx, newPath, tableMeta.Schema, merged.rows)
 			if err != nil {
 				return nil, fmt.Errorf("writing merged file: %w", err)
@@ -460,7 +478,14 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 
 	// Write-before-delete: write the new file FIRST so data is never lost.
 	// On failure here, nothing in the manifest has changed — no data loss.
-	newPath := fmt.Sprintf("%s/rewrite_%d.parquet", partPath, time.Now().UnixNano())
+	// Mirror compactedFilePath: use the table prefix so unpartitioned tables
+	// (empty partPath) don't land at the bucket root.
+	newPath := ""
+	if partPath == "" {
+		newPath = fmt.Sprintf("%s/rewrite_%d.parquet", partition.TablePrefix(tableName), time.Now().UnixNano())
+	} else {
+		newPath = fmt.Sprintf("%s/%s/rewrite_%d.parquet", partition.TablePrefix(tableName), partPath, time.Now().UnixNano())
+	}
 	written, err := c.writeMergedFile(ctx, newPath, tableMeta.Schema, merged.rows)
 	if err != nil {
 		return fmt.Errorf("writing rewritten file: %w", err)

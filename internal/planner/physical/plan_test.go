@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -527,7 +528,7 @@ func TestPlanDistributed_ShuffleJoin(t *testing.T) {
 
 	// Verify no shuffle stages were created for broadcast
 	for _, s := range stages {
-		if s.Type == "shuffle" {
+		if s.Type == StageExchangeRepartition {
 			t.Errorf("broadcast join should not have shuffle stages, found %s", s.ID)
 		}
 	}
@@ -607,7 +608,7 @@ func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 	var shuffles, joins []Stage
 	for _, s := range stages {
 		switch s.Type {
-		case "shuffle":
+		case StageExchangeRepartition:
 			shuffles = append(shuffles, s)
 		case "hash_join":
 			joins = append(joins, s)
@@ -624,18 +625,22 @@ func TestPlanDistributed_ShuffleJoinLargeTables(t *testing.T) {
 
 	// Verify shuffle properties (numPartitions = workerCount * 8 = 32)
 	for _, s := range shuffles {
-		if s.NumPartitions != 32 {
-			t.Errorf("shuffle %s: expected 32 partitions, got %d", s.ID, s.NumPartitions)
+		if s.Exchange == nil {
+			t.Errorf("shuffle %s: Exchange is nil", s.ID)
+			continue
 		}
-		if len(s.ShuffleKeys) == 0 {
+		if s.Exchange.Count != 32 {
+			t.Errorf("shuffle %s: expected 32 partitions, got %d", s.ID, s.Exchange.Count)
+		}
+		if len(s.Exchange.Keys) == 0 {
 			t.Errorf("shuffle %s: no shuffle keys", s.ID)
 		}
 	}
 
 	// Verify join stage is partitioned
 	js := joins[0]
-	if js.NumPartitions != 32 {
-		t.Errorf("join: expected 32 partitions, got %d", js.NumPartitions)
+	if js.JoinPartitionCount != 32 {
+		t.Errorf("join: expected 32 partitions, got %d", js.JoinPartitionCount)
 	}
 	if js.Tasks != 32 {
 		t.Errorf("join: expected 32 tasks, got %d", js.Tasks)
@@ -733,7 +738,7 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 
 	var shuffles []Stage
 	for _, s := range stages {
-		if s.Type == "shuffle" {
+		if s.Type == StageExchangeRepartition {
 			shuffles = append(shuffles, s)
 		}
 	}
@@ -777,11 +782,21 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 			depCols = join1Cols
 		}
 
-		// Every shuffle key must exist in the dependency's column set
-		for _, key := range s.ShuffleKeys {
-			if !depCols[key] {
-				t.Errorf("shuffle %s (depends on %s %s) has key %q not in dependency columns %v",
-					s.ID, dep.Type, dep.ID, key, depCols)
+		// Every shuffle key must exist in the dependency's column set.
+		// Strip table qualifiers ("c.c_custkey" -> "c_custkey") because
+		// parseJoinKeys now preserves qualifiers (needed for self-join
+		// chain resolution); the worker's shuffle sink uses
+		// exec.ColumnIndexFallback which strips them on miss.
+		if s.Exchange != nil {
+			for _, key := range s.Exchange.Keys {
+				bare := key
+				if dot := strings.Index(key, "."); dot >= 0 {
+					bare = key[dot+1:]
+				}
+				if !depCols[bare] {
+					t.Errorf("shuffle %s (depends on %s %s) has key %q (bare %q) not in dependency columns %v",
+						s.ID, dep.Type, dep.ID, key, bare, depCols)
+				}
 			}
 		}
 	}
@@ -899,7 +914,7 @@ func TestPlanDistributed_ColumnPruning(t *testing.T) {
 
 	// Verify shuffle stages have column pruning (if present)
 	for _, s := range stages {
-		if s.Type != "shuffle" {
+		if s.Type != StageExchangeRepartition {
 			continue
 		}
 		if len(s.Columns) == 0 {
@@ -912,9 +927,11 @@ func TestPlanDistributed_ColumnPruning(t *testing.T) {
 			colSet[c] = true
 		}
 		// Must have join keys
-		for _, key := range s.ShuffleKeys {
-			if !colSet[key] {
-				t.Errorf("shuffle %s: shuffle key %q not in Columns %v", s.ID, key, s.Columns)
+		if s.Exchange != nil {
+			for _, key := range s.Exchange.Keys {
+				if !colSet[key] {
+					t.Errorf("shuffle %s: shuffle key %q not in Columns %v", s.ID, key, s.Columns)
+				}
 			}
 		}
 		// Should NOT have all 16 lineitem columns

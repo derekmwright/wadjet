@@ -25,6 +25,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -46,6 +47,7 @@ const maxBufferedRows = 500_000
 type Executor struct {
 	store        objstore.Store
 	js           jetstream.JetStream // for catalog access in pipeline tasks
+	nc           *nats.Conn          // for Gather-task reply streaming (nil = Gather disabled)
 	cache        *LRUCache
 	resultStore  *ResultStore        // in-memory result passing between stages (nil = disabled)
 	resultKV     jetstream.KeyValue  // NATS KV for cross-worker inter-stage results (nil = disabled)
@@ -53,6 +55,16 @@ type Executor struct {
 	spillDir     string              // directory for spill files
 	metrics      *metrics.Metrics
 	logger       *slog.Logger
+
+	// Worker-level shared memory pool. All concurrent tasks Reserve against
+	// the same Tracker, so operators (HashJoin, HashAggregate) spill under
+	// cumulative worker pressure instead of per-task budgets. Matches the
+	// Trino MemoryPool / Spark ExecutionMemoryPool model: scheduling
+	// decisions stay cheap (dispatch freely, worker governs), and N
+	// concurrent tasks that would each hold their own independent hash
+	// table now share one budget and cooperatively spill.
+	sharedTracker *memory.Tracker
+	sharedSpill   *memory.SpillManager
 }
 
 // NewExecutor creates a new task executor.
@@ -60,15 +72,38 @@ func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) 
 	return &Executor{store: store, js: js, cache: cache, logger: slog.Default()}
 }
 
-// SetMemoryBudget configures the per-task memory budget and spill directory.
+// SetMemoryBudget configures the worker-level memory budget and spill
+// directory, and eagerly creates the shared Tracker + SpillManager that
+// all tasks will use. Budget is the TOTAL across concurrent tasks, not
+// per-task — callers should pass ~75% of worker RAM.
 func (e *Executor) SetMemoryBudget(budget int64, spillDir string) {
 	e.memoryBudget = budget
 	e.spillDir = spillDir
+	if budget > 0 {
+		e.sharedTracker = memory.NewTracker("worker", budget)
+		dir := spillDir
+		if dir == "" {
+			dir = os.TempDir()
+		}
+		sm, err := memory.NewSpillManager(dir, e.sharedTracker)
+		if err != nil {
+			e.logger.Warn("failed to create worker spill manager; tasks run without spill governance",
+				"error", err)
+			return
+		}
+		e.sharedSpill = sm
+	}
 }
 
 // SetResultStore attaches an in-memory result store for inter-stage result passing.
 func (e *Executor) SetResultStore(rs *ResultStore) {
 	e.resultStore = rs
+}
+
+// SetNATSConn attaches a NATS connection used by Gather tasks to stream
+// batches back to the coordinator's reply subject.
+func (e *Executor) SetNATSConn(nc *nats.Conn) {
+	e.nc = nc
 }
 
 // SetResultKV attaches a NATS KV store for cross-worker inter-stage result transfer.
@@ -168,8 +203,20 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	switch task.Type {
 	case distributed.TaskTypePipeline:
 		err = e.executePipeline(ctx, task, &result)
+	case distributed.TaskTypeGather:
+		// Native-DAG Gather: stream upstream files → gatherReplySink. No SQL.
+		// Legacy Gather (set via executePipeline sink swap) is still reachable
+		// when StageType is empty + Inputs is empty — rare today; callers
+		// should prefer Inputs-based routing.
+		if len(task.Inputs) > 0 {
+			err = e.executeGatherStage(ctx, task, &result)
+		} else {
+			err = e.executePipeline(ctx, task, &result)
+		}
 	case distributed.TaskTypeShuffle:
 		err = e.executeShuffle(ctx, task, &result)
+	case distributed.TaskTypeStage:
+		err = e.executeStage(ctx, task, &result)
 	default:
 		err = fmt.Errorf("unsupported task type: %s", task.Type)
 	}
@@ -340,13 +387,23 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	if e.spillDir != "" {
 		planner.SpillDir = e.spillDir
 	}
+	// Inject the worker-level shared pool so concurrent pipeline tasks
+	// compete for one budget instead of each creating a private
+	// Tracker+SpillManager. Without this, two concurrent pipeline tasks
+	// could each allocate up to MemoryBudget and OOM the worker.
+	if e.sharedTracker != nil {
+		planner.SharedTracker = e.sharedTracker
+	}
+	if e.sharedSpill != nil {
+		planner.SharedSpillMgr = e.sharedSpill
+	}
 
 	// Scan-split pipeline mode: create lazy streaming sources for pre-scanned
 	// build-cache files. Each source downloads and parses files one at a time,
 	// yielding batches on demand. This avoids materializing the entire build
 	// side into memory — the hash join's grace spill handles memory pressure.
-	if len(task.PreScannedInputs) > 0 || len(precompAliasFiles) > 0 {
-		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs)+len(precompAliasFiles))
+	if len(task.PreScannedInputs) > 0 || len(precompAliasFiles) > 0 || len(task.Inputs) > 0 {
+		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs)+len(precompAliasFiles)+len(task.Inputs))
 		for tableName, files := range task.PreScannedInputs {
 			streamingSources[tableName] = newCachedFileStreamSource(e, bucket, files)
 			e.logger.Debug("streaming pre-scanned input",
@@ -355,6 +412,21 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		for alias, files := range precompAliasFiles {
 			streamingSources[alias] = newCachedFileStreamSource(e, bucket, files)
 			e.logger.Debug("streaming pre-computed aggregate",
+				"alias", alias, "files", len(files))
+		}
+		// Phase 3 native-DAG: Task.Inputs carries upstream stage output keyed
+		// by scan/alias name. sourceForAlias classifies file patterns and
+		// fails fast on planner bugs that mix partitioned and flat outputs.
+		for alias, files := range task.Inputs {
+			if _, already := streamingSources[alias]; already {
+				return fmt.Errorf("alias %q populated by both Inputs and legacy pre-scanned paths", alias)
+			}
+			src, err := e.sourceForAlias(bucket, alias, files)
+			if err != nil {
+				return fmt.Errorf("source for alias %q: %w", alias, err)
+			}
+			streamingSources[alias] = src
+			e.logger.Debug("streaming stage input",
 				"alias", alias, "files", len(files))
 		}
 		planner.StreamingSources = streamingSources
@@ -403,6 +475,24 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// (compressed) which would fail with "invalid shuffle magic".
 	if (task.StageID == "build-cache-scan" || task.StageID == "aggregate-cache-compute") && e.spillDir != "" {
 		return e.executeBuildCachePreScan(ctx, task, pipeline, result)
+	}
+
+	// Native-DAG Gather task: swap CollectSink for gatherReplySink so output
+	// streams to the coordinator's reply subject instead of materializing
+	// in-process. Schema is captured lazily from the first batch (gather sink
+	// copies it on first Consume).
+	if task.Type == distributed.TaskTypeGather {
+		if task.ReplySubject == "" {
+			return fmt.Errorf("gather task missing ReplySubject")
+		}
+		if e.nc == nil {
+			return fmt.Errorf("gather task requires NATS connection")
+		}
+		pipeline.Sink = newGatherReplySink(e.nc, task.ReplySubject, nil)
+		if err := pipeline.Run(ctx); err != nil {
+			return fmt.Errorf("gather pipeline: %w", err)
+		}
+		return nil
 	}
 
 	// Execute the pipeline — same path as standalone mode
@@ -528,11 +618,41 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		bucket = task.ResultBucket
 	}
 
-	// Read all source Parquet files into batches. Uses the executor's
-	// existing range-read + LRU cache path; no planner/catalog needed.
-	batches, err := e.readParquetFilesConcurrentBatches(ctx, bucket, task.Files, task.Columns)
+	// Read all source files into batches. Parquet inputs (table scans) use the
+	// concurrent parquet path; .wshf inputs (Phase 3 native-DAG: output of an
+	// upstream shuffle stage) stream through cachedFileStreamSource which
+	// handles both formats but reads serially. Mixed kinds within one Files
+	// list are a planner bug; classifyInputFiles surfaces that as an error.
+	fileKind, err := classifyInputFiles(task.Files)
 	if err != nil {
-		return fmt.Errorf("shuffle task %s: reading source files: %w", task.ID, err)
+		return fmt.Errorf("shuffle task %s: %w", task.ID, err)
+	}
+
+	var batches []*batch.RecordBatch
+	switch fileKind {
+	case inputKindParquet:
+		batches, err = e.readParquetFilesConcurrentBatches(ctx, bucket, task.Files, task.Columns)
+		if err != nil {
+			return fmt.Errorf("shuffle task %s: reading parquet source files: %w", task.ID, err)
+		}
+	case inputKindPartitioned, inputKindShuffleFlat:
+		src := newCachedFileStreamSource(e, bucket, task.Files)
+		if initErr := src.Init(ctx); initErr != nil {
+			return fmt.Errorf("shuffle task %s: init wshf source: %w", task.ID, initErr)
+		}
+		defer src.Close()
+		for {
+			b, nerr := src.Next(ctx)
+			if nerr != nil {
+				return fmt.Errorf("shuffle task %s: reading wshf source: %w", task.ID, nerr)
+			}
+			if b == nil {
+				break
+			}
+			batches = append(batches, b)
+		}
+	default:
+		return fmt.Errorf("shuffle task %s: unsupported input file kind %v", task.ID, fileKind)
 	}
 	if len(batches) == 0 {
 		// Source files produced no rows — nothing to upload.

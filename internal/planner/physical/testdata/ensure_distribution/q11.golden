@@ -1,0 +1,8 @@
+scan-0	scan	Singleton
+scan-1	scan	Singleton
+join-2	broadcast_join	Singleton	deps=scan-0,scan-1
+scan-3	scan	Singleton
+join-4	broadcast_join	Singleton	deps=join-2,scan-3
+aggregate-5	aggregate	Singleton	deps=join-4
+final_aggregate-6	final_aggregate	Singleton	deps=aggregate-5
+exchange-gather-final_aggregate-6	exchange-gather	Singleton	deps=final_aggregate-6

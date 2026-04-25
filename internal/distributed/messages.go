@@ -13,6 +13,8 @@ type TaskType string
 const (
 	TaskTypePipeline TaskType = "pipeline" // full query executed as standalone pipeline on one worker
 	TaskTypeShuffle  TaskType = "shuffle"  // hash-partitions input rows into N output partition files
+	TaskTypeGather   TaskType = "gather"   // streams pipeline output to ReplySubject via gatherReplySink
+	TaskTypeStage    TaskType = "stage"    // single-operator stage fragment (native-DAG Phase 3)
 )
 
 // Task is the unit of distributed work published to NATS JetStream.
@@ -49,6 +51,13 @@ type Task struct {
 	PartitionFilter map[string]string `json:"partition_filter,omitempty"`
 	Columns         []string          `json:"columns,omitempty"`
 	FilterExprs     []string          `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
+	// PostFilterExprs are SQL filter expressions applied to the stage's
+	// OUTPUT (post-aggregate/post-join) rather than to raw scan input.
+	// Native-DAG compute stages use this for HAVING and join residual
+	// predicates. FilterExprs vs PostFilterExprs differ in column scope:
+	// FilterExprs references scan columns; PostFilterExprs references
+	// aggregate output cols or joined-schema cols.
+	PostFilterExprs []string          `json:"post_filter_exprs,omitempty"`
 
 	// Fused scan-aggregate: partial aggregation done at scan level
 	ScanAggGroupBy []string  `json:"scan_agg_group_by,omitempty"`
@@ -71,6 +80,11 @@ type Task struct {
 	JoinRightKeys   []string `json:"join_right_keys,omitempty"`  // build side key columns
 	BuildFiles      []string `json:"build_files,omitempty"`      // build (right) side input files
 	BuildTableAlias string   `json:"build_table_alias,omitempty"` // build-side alias for column disambiguation
+	// QualifyAllBuildCols, when true, forces the join executor to emit
+	// build-side columns under their qualified name even when no probe-side
+	// column has the same base name. Set by the planner for self-join scenarios
+	// (Q07's two scans of nation that co-path into the same join chain).
+	QualifyAllBuildCols bool   `json:"qualify_all_build_cols,omitempty"`
 	JoinFilter      string   `json:"join_filter,omitempty"`       // semi/anti join inequality filter expression
 
 	// Fused join: additional broadcast joins absorbed into a single task.
@@ -111,6 +125,47 @@ type Task struct {
 	// succeed (spec: 2026-04-18-shuffle-distributed-aggregate.md).
 	PreComputedAggregates []PreComputedAggregate `json:"pre_computed_aggregates,omitempty"`
 
+	// Inputs maps scan/alias name → S3 keys for upstream stage output.
+	// Generalizes PreScannedInputs: used for both table-scan inputs (legacy)
+	// and previous-stage-output inputs (Phase 3 native DAG). Worker source
+	// selection inspects file patterns: partition=NNNN/*.wshf → partitionShardSource;
+	// *.parquet → streamSource.
+	Inputs map[string][]string `json:"inputs,omitempty"`
+
+	// Output is the S3 prefix where this task's output is materialized.
+	// Shuffle/pipeline-intermediate: worker writes "<Output>partition=NNNN/<taskID>.wshf".
+	// Pipeline-final (before Gather): single-partition output at "<Output><taskID>.wshf".
+	// Gather: empty; worker streams to ReplySubject.
+	Output string `json:"output,omitempty"`
+
+	// ReplySubject is the NATS subject the worker publishes batch chunks to.
+	// Only set for TaskTypeGather; enables real-operator Gather semantics.
+	ReplySubject string `json:"reply_subject,omitempty"`
+
+	// GatherOrdering (Gather only) — merge-sort keys applied by the coordinator
+	// when reassembling output from multiple gather workers. Empty means no
+	// ordering; coordinator concatenates streams in arrival order.
+	GatherOrdering []SortKeySpec `json:"gather_ordering,omitempty"`
+
+	// GatherLimit (Gather only) — top-N limit applied by the coordinator
+	// after ordering. Zero means no limit.
+	GatherLimit int `json:"gather_limit,omitempty"`
+
+	// StageType discriminates TaskTypeStage variants: "scan", "hash_join",
+	// "broadcast_join", "aggregate", "sort", "merge_sort", "window",
+	// "final_aggregate". Matches physical.Stage.Type strings. Empty for
+	// non-TaskTypeStage tasks.
+	StageType string `json:"stage_type,omitempty"`
+
+	// BuildRowHint is the planner's estimate of build-side row count,
+	// used to pre-size the hash table arena. Populated for TaskTypeStage
+	// hash_join stages. Zero means no hint (arena grows dynamically).
+	BuildRowHint int64 `json:"build_row_hint,omitempty"`
+
+	// SemiAntiKeyOnly is set on semi/anti hash_join stages without a
+	// SemiAntiFilter — enables key-only build (skip batch storage).
+	SemiAntiKeyOnly bool `json:"semi_anti_key_only,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -136,6 +191,26 @@ type AggSpec struct {
 	Func      string `json:"func"` // sum, count, min, max, avg
 	InputCol  string `json:"input_col"`
 	OutputCol string `json:"output_col"`
+	// InputExpr is the SQL text of a derived input expression, e.g.
+	// "l_extendedprice * (1 - l_discount)". Empty for bare-column
+	// aggregates. Native-DAG workers compile this into a Project
+	// before the aggregate so HashAggregate sees a column named
+	// InputCol.
+	InputExpr string `json:"input_expr,omitempty"`
+}
+
+// GatherBatchMsg is the NATS message body the worker publishes to the
+// coordinator's gather reply subject. One message per output RecordBatch,
+// terminated by one message with Terminal=true (zero RowCount, any Err set).
+//
+// Payload is a self-contained WSHF byte stream carrying a single chunk
+// (magic + chunk-count=1 + schema header + one row chunk). The coordinator
+// decodes each message independently via the worker's shuffleChunkReader.
+type GatherBatchMsg struct {
+	Terminal bool   `json:"terminal"`
+	RowCount int32  `json:"row_count"`
+	Payload  []byte `json:"payload,omitempty"` // WSHF-encoded single-chunk batch
+	Err      string `json:"err,omitempty"`     // non-empty on terminal failure
 }
 
 // SortKeySpec defines a sort key in a task.

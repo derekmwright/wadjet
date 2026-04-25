@@ -437,16 +437,46 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	return nil
 }
 
-// columnIndexFallback resolves a column name with fallback for table-qualified names.
-// Tries the name as-is first, then strips a "table." prefix and retries.
+// ColumnIndexFallback is the exported alias for columnIndexFallback so other
+// packages (worker shuffle sinks) can resolve column names with the same
+// bidirectional table-qualifier fallback.
+func ColumnIndexFallback(b *batch.RecordBatch, name string) int {
+	return columnIndexFallback(b, name)
+}
+
+// columnIndexFallback resolves a column name with bidirectional fallback for
+// table-qualified names. Lookup order:
+//  1. Exact match.
+//  2. If the name is qualified ("table.col"), try the bare column ("col").
+//  3. If the name is unqualified ("col"), try every schema column whose
+//     suffix matches ".col". Returns -1 when there are 2+ matches (ambiguous,
+//     refuses to guess).
+//
+// Step 3 is required after the self-join planner pass (Q07's
+// QualifyAllBuildCols) leaves the schema with "n1.n_name" but
+// parseJoinKeys feeds the worker an unqualified "n_name" key — without
+// the unqualified→qualified fallback the join would never find the column.
 func columnIndexFallback(b *batch.RecordBatch, name string) int {
-	idx := b.ColumnIndex(name)
-	if idx < 0 {
-		if dotIdx := strings.Index(name, "."); dotIdx >= 0 {
-			idx = b.ColumnIndex(name[dotIdx+1:])
+	if idx := b.ColumnIndex(name); idx >= 0 {
+		return idx
+	}
+	if dotIdx := strings.Index(name, "."); dotIdx >= 0 {
+		return b.ColumnIndex(name[dotIdx+1:])
+	}
+	// Unqualified name with no exact match: scan for a single qualified
+	// match ".name". Reject ambiguity (>1 match) so we never silently
+	// pick the wrong column.
+	suffix := "." + name
+	match := -1
+	for i, c := range b.Schema {
+		if strings.HasSuffix(c.Name, suffix) {
+			if match >= 0 {
+				return -1 // ambiguous
+			}
+			match = i
 		}
 	}
-	return idx
+	return match
 }
 
 func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
@@ -468,14 +498,19 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		h.aggColIdx2[i] = -1 // default: no second column
 		if agg.Func == AggCountDistinct || agg.Func == AggApproxDistinct {
 			if agg.InputCol != "" {
-				h.aggColIdx[i] = b.ColumnIndex(agg.InputCol)
+				h.aggColIdx[i] = columnIndexFallback(b, agg.InputCol)
 			} else {
 				h.aggColIdx[i] = -1
 			}
 			continue
 		}
 		if agg.InputCol != "" {
-			idx := b.ColumnIndex(agg.InputCol)
+			// Use bidirectional fallback so qualified columns from a self-
+			// join chain ("lineitem.l_quantity") still resolve to the bare
+			// AggSpec.InputCol ("l_quantity") and vice-versa. Without this,
+			// Q18's outer SUM(l_quantity) returned NULL because the join
+			// chain's QualifyAllBuildCols renamed the column.
+			idx := columnIndexFallback(b, agg.InputCol)
 			h.aggColIdx[i] = idx
 			if idx >= 0 {
 				h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
@@ -490,7 +525,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 		// Resolve second column index for two-column aggregates
 		if agg.InputCol2 != "" {
-			h.aggColIdx2[i] = b.ColumnIndex(agg.InputCol2)
+			h.aggColIdx2[i] = columnIndexFallback(b, agg.InputCol2)
 		}
 	}
 
@@ -2869,6 +2904,16 @@ func (h *HashAggregate) materializeFlatAccums() {
 			}
 			for ai := range h.intFlatAccs {
 				fa := &h.intFlatAccs[ai]
+				// Defensive: a gi that wasn't appended to the SoA arrays
+				// (can happen when compact-to-generic migration runs with
+				// no rows consumed, leaving intFlatAccs cap=0 while
+				// strGroupStates carries migrated entries) would otherwise
+				// index a zero-length array and panic. Leave the
+				// accumulator at its zero value so downstream kernels
+				// emit identity output rather than crashing the worker.
+				if gi >= len(fa.count) {
+					continue
+				}
 				acc := &gs.accs[ai]
 				acc.Count = fa.count[gi]
 				acc.IsFloat = fa.isFloat

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,73 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
+
+// TestCompactTable_UnpartitionedTableOutputPath is a regression test for a
+// bug where the compactor built the merged output path as
+// "<part.Path>/compacted_X.parquet" — with `part.Path` empty for
+// unpartitioned tables, the key began with "/" and the compacted file
+// landed at the bucket root while the old chunks were deleted, orphaning
+// the data (no catalog entry points to it). Repeated compactor passes
+// silently emptied customer/part at SF10. The fix prepends the table
+// prefix so unpartitioned output lands under tables/<name>/.
+func TestCompactTable_UnpartitionedTableOutputPath(t *testing.T) {
+	cat, store := setupTestCatalog(t)
+	ctx := context.Background()
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+		},
+	}
+	if err := cat.CreateTable(ctx, "customer", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ingester convention for unpartitioned tables: files live directly at
+	// tables/<name>/chunk_X.parquet and the PartitionEntry.Path is "".
+	const partPath = ""
+	var partValues map[string]string
+	for i := 0; i < 15; i++ {
+		path := fmt.Sprintf("tables/customer/chunk_%04d.parquet", i)
+		size := writeTestFile(t, store, "test-bucket", path, schema, []map[string]any{
+			{"id": int64(i*10 + 1)},
+			{"id": int64(i*10 + 2)},
+		})
+		if err := cat.AddFiles(ctx, "customer", partValues, partPath, []catalog.FileEntry{
+			{Path: path, SizeBytes: size, NumRows: 2, CreatedAt: time.Now().UTC()},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.MinFiles = 5
+	c := New(cat, nil, cfg)
+	if _, err := c.CompactTable(ctx, "customer"); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, _ := cat.GetManifest(ctx, "customer")
+	if len(manifest.Partitions[0].Files) != 1 {
+		t.Fatalf("expected 1 merged file, got %d", len(manifest.Partitions[0].Files))
+	}
+	compactedPath := manifest.Partitions[0].Files[0].Path
+
+	// Regression: must live under tables/customer/, not at the bucket root.
+	if strings.HasPrefix(compactedPath, "/") {
+		t.Fatalf("compacted file has leading slash — would land at bucket root: %q", compactedPath)
+	}
+	if !strings.HasPrefix(compactedPath, "tables/customer/") {
+		t.Fatalf("compacted file not under tables/customer/: %q", compactedPath)
+	}
+
+	// Verify the data is actually reachable in the object store at that path.
+	rc, _, err := store.Get(ctx, "test-bucket", compactedPath)
+	if err != nil {
+		t.Fatalf("compacted file not reachable at %q: %v", compactedPath, err)
+	}
+	rc.Close()
+}
 
 func setupTestCatalog(t *testing.T) (*catalog.Catalog, objstore.Store) {
 	t.Helper()

@@ -1,0 +1,1385 @@
+=== Wadjet TPC-H Benchmark ===
+Mode:         distributed
+Scale Factor: SF10 (10x)
+Workers:      3
+Runs:         1
+Instance:     
+Instance ID:  
+Bucket:       wadjet-bench-sf10-use2
+Date:         2026-04-21T22:47:31Z
+
+--- CPU ---
+CPU(s):                                  8
+Thread(s) per core:                      1
+Core(s) per socket:                      8
+Socket(s):                               1
+
+--- Memory ---
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       344Mi        14Gi       0.0Ki       313Mi        14Gi
+
+[22:47:31] Using pre-seeded data from s3://wadjet-bench-sf10-use2 (set GENERATE_DATA=1 to regenerate)
+[22:47:31] Running TPC-H SF10 distributed benchmark (1 runs, 3 workers)...
+2026/04/21 22:47:31 Set GOMEMLIMIT=14791348224 (13.8 GB), GOGC=off from detected limit 16434831360
+time=2026-04-21T22:47:31.094Z level=INFO msg="embedded NATS started" host=0.0.0.0 port=4222
+time=2026-04-21T22:47:31.142Z level=INFO msg="coordinator NATS KV result cache enabled" bucket=wadjet_results_data
+2026/04/21 22:47:31 Waiting for 3 remote workers to connect...
+2026/04/21 22:47:31   0/3 remote workers...
+2026/04/21 22:47:36   0/3 remote workers...
+2026/04/21 22:47:41   0/3 remote workers...
+2026/04/21 22:47:46   0/3 remote workers...
+2026/04/21 22:47:51   0/3 remote workers...
+2026/04/21 22:47:56   0/3 remote workers...
+time=2026-04-21T22:47:56.412Z level=INFO msg="worker registered" worker_id=worker-601d1940 cluster_id=local
+time=2026-04-21T22:47:56.440Z level=INFO msg="worker registered" worker_id=worker-1a3e0222 cluster_id=local
+time=2026-04-21T22:47:56.984Z level=INFO msg="worker registered" worker_id=worker-1bd4c918 cluster_id=local
+2026/04/21 22:48:01 All 3 remote workers connected
+2026/04/21 22:48:21 Discovered 80 files for table partsupp (5 cols, 8000000 rows)
+2026/04/21 22:48:26 Discovered 15 files for table customer (8 cols, 1500000 rows)
+2026/04/21 22:49:01 Discovered 150 files for table orders (9 cols, 15000000 rows)
+2026/04/21 22:51:25 Discovered 600 files for table lineitem (16 cols, 60000000 rows)
+2026/04/21 22:51:25 Discovered 1 files for table region (3 cols, 5 rows)
+2026/04/21 22:51:25 Discovered 2 files for table nation (4 cols, 50 rows)
+2026/04/21 22:51:26 Discovered 2 files for table supplier (7 cols, 100010 rows)
+2026/04/21 22:51:30 Discovered 20 files for table part (9 cols, 2000000 rows)
+2026/04/21 22:51:30 Data discovery complete: 870 total files across 8 tables
+2026/04/21 22:51:32 Worker CPU profiling started
+
+=== Run 1/1 ===
+time=2026-04-21T22:51:32.315Z level=INFO msg="aggregate-shuffle not applied" query=ba8bd219 reason=no_join_stages observed_scan_bytes=0 threshold=1073741824 nearest_join="" nearest_scan_alias=""
+time=2026-04-21T22:51:32.315Z level=INFO msg="routing to probe-split pipeline" query=ba8bd219 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:51:32.316Z level=INFO msg="published tasks" count=3
+Q01 Pricing Summary Report           6.452s      6 rows  heap   +2MB  gc  0.1ms  OK
+time=2026-04-21T22:51:38.774Z level=INFO msg="aggregate-shuffle not applied" query=ef4d8d76 reason=aggregate_not_scan_rooted observed_scan_bytes=0 threshold=1073741824 nearest_join=join-20 nearest_scan_alias=""
+time=2026-04-21T22:51:38.774Z level=INFO msg="routing to probe-split pipeline" query=ef4d8d76 probe_alias=partsupp probe_files=80 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:51:38.774Z level=INFO msg="published tasks" count=3
+Q02 Minimum Cost Supplier            1.836s    100 rows  heap   +3MB  gc  0.2ms  OK
+time=2026-04-21T22:51:40.613Z level=INFO msg="aggregate-shuffle not applied" query=7748f149 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-8 nearest_scan_alias=""
+time=2026-04-21T22:51:40.613Z level=INFO msg="routing to probe-split pipeline" query=7748f149 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:51:40.614Z level=INFO msg="published tasks" count=3
+Q03 Shipping Priority               15.571s     10 rows  heap   +3MB  gc  0.0ms  OK
+time=2026-04-21T22:51:56.216Z level=INFO msg="aggregate-shuffle not applied" query=25846dda reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T22:51:56.216Z level=INFO msg="routing to probe-split pipeline" query=25846dda probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:51:56.217Z level=INFO msg="published tasks" count=3
+Q04 Order Priority Checking          8.969s      5 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:52:05.190Z level=INFO msg="aggregate-shuffle not applied" query=63fc6b94 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-14 nearest_scan_alias=""
+time=2026-04-21T22:52:05.190Z level=INFO msg="routing to probe-split pipeline" query=63fc6b94 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:52:05.191Z level=INFO msg="published tasks" count=3
+Q05 Local Supplier Volume            3.914s      5 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:52:09.108Z level=INFO msg="aggregate-shuffle not applied" query=d86054a0 reason=no_join_stages observed_scan_bytes=0 threshold=1073741824 nearest_join="" nearest_scan_alias=""
+time=2026-04-21T22:52:09.108Z level=INFO msg="routing to probe-split pipeline" query=d86054a0 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:52:09.119Z level=INFO msg="published tasks" count=3
+Q06 Forecasting Revenue Change        5.03s      1 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:52:14.144Z level=INFO msg="aggregate-shuffle not applied" query=7e329803 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-14 nearest_scan_alias=""
+time=2026-04-21T22:52:14.144Z level=INFO msg="routing to probe-split pipeline" query=7e329803 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:52:14.148Z level=INFO msg="published tasks" count=3
+Q07 Volume Shipping                  9.337s      4 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:52:23.489Z level=INFO msg="aggregate-shuffle not applied" query=4e6d551b reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-18 nearest_scan_alias=""
+time=2026-04-21T22:52:23.489Z level=INFO msg="routing to probe-split pipeline" query=4e6d551b probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:52:23.492Z level=INFO msg="published tasks" count=3
+Q08 National Market Share            9.088s      6 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:52:32.583Z level=INFO msg="aggregate-shuffle not applied" query=b07a174b reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-14 nearest_scan_alias=""
+time=2026-04-21T22:52:32.583Z level=INFO msg="routing to probe-split pipeline" query=b07a174b probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:52:32.584Z level=INFO msg="published tasks" count=3
+Q09 Product Type Profit Measure      9.122s    150 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:52:41.708Z level=INFO msg="aggregate-shuffle not applied" query=dab2c3f4 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-10 nearest_scan_alias=""
+time=2026-04-21T22:52:41.708Z level=INFO msg="routing to probe-split pipeline" query=dab2c3f4 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:52:41.715Z level=INFO msg="published tasks" count=3
+Q10 Returned Item Reporting         12.539s     20 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:52:57.312Z level=INFO msg="aggregate-shuffle not applied" query=d93c7122 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T22:52:57.312Z level=INFO msg="routing to probe-split pipeline" query=d93c7122 probe_alias=partsupp probe_files=80 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:52:57.314Z level=INFO msg="published tasks" count=3
+Q11 Important Stock Identification   5.796s   9961 rows  heap  +70MB  gc  0.1ms  OK
+time=2026-04-21T22:53:00.088Z level=INFO msg="aggregate-shuffle not applied" query=d6d2f851 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T22:53:00.088Z level=INFO msg="routing to probe-split pipeline" query=d6d2f851 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:53:00.090Z level=INFO msg="published tasks" count=3
+Q12 Shipping Modes and Order Priority  17.837s      7 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:53:17.929Z level=INFO msg="aggregate-shuffle not applied" query=7395b237 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T22:53:17.929Z level=INFO msg="routing to probe-split pipeline" query=7395b237 probe_alias=orders probe_files=150 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:53:17.933Z level=INFO msg="published tasks" count=3
+Q13 Customer Distribution            4.895s    100 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:53:22.853Z level=INFO msg="aggregate-shuffle not applied" query=f26d458f reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-2 nearest_scan_alias=""
+time=2026-04-21T22:53:22.853Z level=INFO msg="routing to probe-split pipeline" query=f26d458f probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:53:22.863Z level=INFO msg="published tasks" count=3
+Q14 Promotion Effect                  5.55s      1 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:53:28.408Z level=INFO msg="aggregate-shuffle not applied" query=15542066 reason=scan_has_filters observed_scan_bytes=3673081624 threshold=1073741824 nearest_join=join-43 nearest_scan_alias=lineitem
+time=2026-04-21T22:53:28.408Z level=INFO msg="routing to probe-split pipeline" query=15542066 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:53:28.415Z level=INFO msg="published tasks" count=3
+Q15 Top Supplier                      475ms      3 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:53:28.885Z level=INFO msg="aggregate-shuffle not applied" query=eb491d9c reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-2 nearest_scan_alias=""
+time=2026-04-21T22:53:28.886Z level=INFO msg="routing to probe-split pipeline" query=eb491d9c probe_alias=partsupp probe_files=80 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:53:28.891Z level=INFO msg="published tasks" count=3
+Q16 Parts/Supplier Relationship      1.103s  27839 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:53:29.995Z level=INFO msg="aggregate-shuffle candidate matched, dispatching pre-compute" query=f65d3c9c agg_stage=final_aggregate-42 input_scan=lineitem:1 input_bytes=3673081624 threshold=1073741824 group_by=[l_partkey]
+time=2026-04-21T22:53:29.995Z level=INFO msg="aggregate pre-compute: dispatching" parent_query=f65d3c9c agg_stage=final_aggregate-42 input_scan=lineitem:1 input_bytes=3673081624 sql="SELECT l_partkey, AVG(l_quantity) AS __scalar_0 FROM lineitem GROUP BY l_partkey"
+time=2026-04-21T22:53:29.995Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.980Z level=INFO msg="aggregate pre-compute: complete" agg_stage=final_aggregate-42 rows=2000000 path=queries/f65d3c9c/aggregate-cache/final_aggregate-42/78005d99.wshf
+time=2026-04-21T22:53:42.980Z level=INFO msg="build-side broadcast cache: pre-scanning large build tables" parent_query=f65d3c9c tables=1
+time=2026-04-21T22:53:42.985Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.987Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.988Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.988Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.988Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.992Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.997Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:42.999Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.000Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.001Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.399Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.399Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.399Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.399Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.399Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:43.399Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:53:51.746Z level=INFO msg="build cache ready" alias=lineitem:1 files=300
+time=2026-04-21T22:53:51.746Z level=INFO msg="routing to probe-split pipeline" query=f65d3c9c probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=1 pre_computed_aggregates=1
+time=2026-04-21T22:53:51.748Z level=INFO msg="published tasks" count=3
+Q17 Small-Quantity-Order Revenue    25.797s      1 rows  heap   +8MB  gc  0.1ms  OK
+time=2026-04-21T22:53:55.802Z level=INFO msg="aggregate-shuffle candidate matched, dispatching pre-compute" query=330b25e6 agg_stage=final_aggregate-48 input_scan=lineitem:1 input_bytes=3673081624 threshold=1073741824 group_by=[l_orderkey]
+time=2026-04-21T22:53:55.802Z level=INFO msg="aggregate pre-compute: dispatching" parent_query=330b25e6 agg_stage=final_aggregate-48 input_scan=lineitem:1 input_bytes=3673081624 sql="SELECT l_orderkey, SUM(l_quantity) AS __having_0 FROM lineitem GROUP BY l_orderkey"
+time=2026-04-21T22:53:55.802Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.389Z level=INFO msg="aggregate pre-compute: complete" agg_stage=final_aggregate-48 rows=14997464 path=queries/330b25e6/aggregate-cache/final_aggregate-48/79e47e82.wshf
+time=2026-04-21T22:54:11.389Z level=INFO msg="build-side broadcast cache: pre-scanning large build tables" parent_query=330b25e6 tables=1
+time=2026-04-21T22:54:11.393Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.393Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.397Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.401Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.403Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.404Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.404Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.404Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.404Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.404Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.404Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.404Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.404Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.405Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.406Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:11.407Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:18.597Z level=INFO msg="build cache ready" alias=lineitem:1 files=300
+time=2026-04-21T22:54:18.597Z level=INFO msg="routing to probe-split pipeline" query=330b25e6 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=1 pre_computed_aggregates=1
+time=2026-04-21T22:54:18.598Z level=INFO msg="published tasks" count=3
+Q18 Large Volume Customer           36.844s    100 rows  heap   +7MB  gc  0.1ms  OK
+time=2026-04-21T22:54:32.653Z level=INFO msg="aggregate-shuffle not applied" query=6c751ec3 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-2 nearest_scan_alias=""
+time=2026-04-21T22:54:32.653Z level=INFO msg="routing to probe-split pipeline" query=6c751ec3 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:54:32.654Z level=INFO msg="published tasks" count=3
+Q19 Discounted Revenue               5.422s      1 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:54:38.080Z level=INFO msg="aggregate-shuffle not applied" query=e18d325e reason=scan_has_filters observed_scan_bytes=3673081624 threshold=1073741824 nearest_join=join-48 nearest_scan_alias=lineitem
+time=2026-04-21T22:54:38.080Z level=INFO msg="routing to probe-split pipeline" query=e18d325e probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:54:38.081Z level=INFO msg="published tasks" count=3
+Q20 Potential Part Promotion         6.328s   6194 rows  heap   +3MB  gc  0.1ms  OK
+time=2026-04-21T22:54:44.414Z level=INFO msg="aggregate-shuffle not applied" query=55b58cf0 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-16 nearest_scan_alias=""
+time=2026-04-21T22:54:44.414Z level=INFO msg="build-side broadcast cache: pre-scanning large build tables" parent_query=55b58cf0 tables=2
+time=2026-04-21T22:54:44.422Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.426Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.428Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.429Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.429Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.433Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.433Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.433Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.433Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.434Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.434Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.434Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.437Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.441Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.443Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.443Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.443Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.443Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.443Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.443Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.443Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.444Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.446Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.451Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.452Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.453Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:54:44.454Z level=INFO msg="published tasks" count=1
+time=2026-04-21T22:55:14.915Z level=INFO msg="build cache ready" alias=lineitem:1 files=300
+time=2026-04-21T22:55:14.915Z level=INFO msg="build cache ready" alias=lineitem:2 files=300
+time=2026-04-21T22:55:14.915Z level=INFO msg="routing to probe-split pipeline" query=55b58cf0 probe_alias=lineitem probe_files=600 workers=3 has_merge=true build_cache_tables=2 pre_computed_aggregates=0
+time=2026-04-21T22:55:14.922Z level=INFO msg="published tasks" count=3
+Q21 Suppliers Who Kept Orders Waiting  2m0.93s    100 rows  heap  +10MB  gc  0.2ms  OK
+time=2026-04-21T22:56:46.089Z level=INFO msg="aggregate-shuffle not applied" query=3aeec424 reason=build_not_aggregate observed_scan_bytes=0 threshold=1073741824 nearest_join=join-4 nearest_scan_alias=""
+time=2026-04-21T22:56:46.089Z level=INFO msg="routing to probe-split pipeline" query=3aeec424 probe_alias=orders probe_files=150 workers=3 has_merge=true build_cache_tables=0 pre_computed_aggregates=0
+time=2026-04-21T22:56:46.090Z level=INFO msg="published tasks" count=3
+Q22 Global Sales Opportunity         1.803s      7 rows  heap  +87MB  gc  0.1ms  OK
+
+--- Summary (Run 1) ---
+Query Description                          Time     Rows Heap Delta   GC Pause
+----- -----                               -----    -----      -----      -----
+Q01   Pricing Summary Report             6.452s        6       +2MB      0.1ms
+Q02   Minimum Cost Supplier              1.836s      100       +3MB      0.2ms
+Q03   Shipping Priority                 15.571s       10       +3MB      0.0ms
+Q04   Order Priority Checking            8.969s        5       +3MB      0.1ms
+Q05   Local Supplier Volume              3.914s        5       +3MB      0.1ms
+Q06   Forecasting Revenue Change          5.03s        1       +3MB      0.1ms
+Q07   Volume Shipping                    9.337s        4       +3MB      0.1ms
+Q08   National Market Share              9.088s        6       +3MB      0.1ms
+Q09   Product Type Profit Measure        9.122s      150       +3MB      0.1ms
+Q10   Returned Item Reporting           12.539s       20       +3MB      0.1ms
+Q11   Important Stock Identification     5.796s     9961      +70MB      0.1ms
+Q12   Shipping Modes and Order Priority    17.837s        7       +3MB      0.1ms
+Q13   Customer Distribution              4.895s      100       +3MB      0.1ms
+Q14   Promotion Effect                    5.55s        1       +3MB      0.1ms
+Q15   Top Supplier                        475ms        3       +3MB      0.1ms
+Q16   Parts/Supplier Relationship        1.103s    27839       +3MB      0.1ms
+Q17   Small-Quantity-Order Revenue      25.797s        1       +8MB      0.1ms
+Q18   Large Volume Customer             36.844s      100       +7MB      0.1ms
+Q19   Discounted Revenue                 5.422s        1       +3MB      0.1ms
+Q20   Potential Part Promotion           6.328s     6194       +3MB      0.1ms
+Q21   Suppliers Who Kept Orders Waiting    2m0.93s      100      +10MB      0.2ms
+Q22   Global Sales Opportunity           1.803s        7      +87MB      0.1ms
+      TOTAL                           5m14.639s
+2026/04/21 22:56:47 Saved worker CPU profile: /root/benchmark-results/profiles/worker-worker-601d1940-cpu.prof (160549 bytes)
+2026/04/21 22:56:47 Saved worker heap profile: /root/benchmark-results/profiles/worker-worker-601d1940-heap.prof (99866 bytes)
+2026/04/21 22:56:47 Saved worker CPU profile: /root/benchmark-results/profiles/worker-worker-1bd4c918-cpu.prof (166392 bytes)
+2026/04/21 22:56:47 Saved worker heap profile: /root/benchmark-results/profiles/worker-worker-1bd4c918-heap.prof (99238 bytes)
+2026/04/21 22:56:47 Saved worker CPU profile: /root/benchmark-results/profiles/worker-worker-1a3e0222-cpu.prof (175537 bytes)
+2026/04/21 22:56:47 Saved worker heap profile: /root/benchmark-results/profiles/worker-worker-1a3e0222-heap.prof (102818 bytes)
+2026/04/21 22:56:47 Collected profiles from 3/3 workers
+[22:56:47] 
+[22:56:47] === Uploading results to S3 ===

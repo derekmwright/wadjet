@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -34,6 +36,15 @@ type cachedFileStreamSource struct {
 	bucket   string
 	files    []string
 
+	// projectColumns optionally restricts parquet reads to these columns
+	// by name. Applied only when EVERY requested column exists in the
+	// file's schema — if any are missing (e.g. a derived column name that
+	// the aggregate operator will compute via pre-project), the projection
+	// is silently skipped and the full schema is read. This keeps the
+	// optimization safe in the presence of expression-based aggregates
+	// without needing to teach the source about derivation rules.
+	projectColumns []string
+
 	fileIdx int
 
 	// Active WSHF chunk reader for the current file (nil if current file is
@@ -53,6 +64,20 @@ func newCachedFileStreamSource(executor *Executor, bucket string, files []string
 		executor: executor,
 		bucket:   bucket,
 		files:    files,
+	}
+}
+
+// newCachedFileStreamSourceWithProjection is like newCachedFileStreamSource
+// but will attempt to restrict parquet reads to the named columns. The
+// projection is applied ONLY when every requested column is present in the
+// parquet file's schema — a safety guard against derived/expression names
+// that would otherwise over-prune the scan and break downstream operators.
+func newCachedFileStreamSourceWithProjection(executor *Executor, bucket string, files []string, projectColumns []string) *cachedFileStreamSource {
+	return &cachedFileStreamSource{
+		executor:       executor,
+		bucket:         bucket,
+		files:          files,
+		projectColumns: projectColumns,
 	}
 }
 
@@ -125,12 +150,43 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	filePath := s.files[s.fileIdx]
 	s.fileIdx++
 
+	// KV fast-path: small stage outputs (Phase 3 native-DAG) are written
+	// only to NATS KV and skip S3 entirely. Consult KV first; on miss,
+	// fall through to S3 as before. The KV key is a dot-sanitized version
+	// of the S3 key (matching writeUnpartitionedWSHF + natsKVKey).
+	var kvErr error
+	var kvDataLen int
+	var kvMagic string
+	if s.executor.resultKV != nil {
+		kvKey := natsKVKey(filePath)
+		var entry jetstream.KeyValueEntry
+		entry, kvErr = s.executor.resultKV.Get(ctx, kvKey)
+		if kvErr == nil {
+			data := entry.Value()
+			kvDataLen = len(data)
+			if len(data) >= 4 {
+				magic := [4]byte{data[0], data[1], data[2], data[3]}
+				kvMagic = string(magic[:])
+				wshf := magic == shuffleMagic
+				wshc := magic == compressedMagic
+				if wshf || wshc {
+					return s.openShuffleInMemory(filePath, magic[:], bytes.NewReader(data[4:]), wshc)
+				}
+				// Non-shuffle payload (e.g., parquet) — fall through to S3.
+			}
+		}
+	}
+
 	// Try the streaming path first: open a streaming reader from S3, peek
 	// at the magic bytes, and decide whether this is a WSHF (or compressed
 	// WSHC) shuffle file or some legacy Parquet payload.
 	rc, _, err := s.executor.store.Get(ctx, s.bucket, filePath)
 	if err != nil {
-		return fmt.Errorf("opening cached file %s: %w", filePath, err)
+		// Both KV and store missed. Annotate so the diagnostic gap from
+		// 2026-04-25 (object not found cascade in pgwire→coord routing)
+		// is visible the next time it surfaces.
+		return fmt.Errorf("opening cached file %s (kvErr=%v, kvDataLen=%d, kvMagic=%q, bucket=%s): %w",
+			filePath, kvErr, kvDataLen, kvMagic, s.bucket, err)
 	}
 	defer rc.Close()
 
@@ -160,7 +216,41 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("opening parquet file %s: %w", filePath, err)
 	}
-	batches, err := scan.ReadFileBatches(reader, reader.Schema().Columns, nil)
+	projCols := reader.Schema().Columns
+	// Apply column projection only when EVERY requested column is present
+	// in the file schema. If any requested name is missing (likely a
+	// derived/expression column that will be computed by a pre-project
+	// pass), skip projection entirely and read the full schema — the
+	// downstream operator needs the raw columns to compute the derivation.
+	if len(s.projectColumns) > 0 {
+		schemaSet := make(map[string]bool, len(projCols))
+		for _, c := range projCols {
+			schemaSet[c.Name] = true
+		}
+		allPresent := true
+		for _, name := range s.projectColumns {
+			if !schemaSet[name] {
+				allPresent = false
+				break
+			}
+		}
+		if allPresent {
+			wanted := make(map[string]bool, len(s.projectColumns))
+			for _, c := range s.projectColumns {
+				wanted[c] = true
+			}
+			filtered := make([]parquet.Column, 0, len(s.projectColumns))
+			for _, c := range projCols {
+				if wanted[c.Name] {
+					filtered = append(filtered, c)
+				}
+			}
+			if len(filtered) > 0 {
+				projCols = filtered
+			}
+		}
+	}
+	batches, err := scan.ReadFileBatches(reader, projCols, nil)
 	if err != nil {
 		return fmt.Errorf("reading parquet file %s: %w", filePath, err)
 	}

@@ -100,15 +100,23 @@ func generateMicroData() map[string]microTable {
 		data["micro_probe"] = microTable{schema: microSchemas["micro_probe"], rows: rows}
 	}
 
-	// micro_agg: 200K rows, 100K distinct group keys (2 rows per key on average)
+	// micro_agg: 200K rows, exactly 100K distinct group keys (2 rows per key).
+	// Keys are assigned by i%100_000 so the test can assert an exact distinct
+	// count. Random sampling like rng.Intn(100_000) would give ~86.5K distinct
+	// keys (coupon-collector occupancy: 100k(1−e⁻²)) and break the assertion.
 	{
 		rows := make([]map[string]any, 200_000)
 		for i := range rows {
 			rows[i] = map[string]any{
-				"group_key": fmt.Sprintf("grp_%06d", rng.Intn(100_000)),
+				"group_key": fmt.Sprintf("grp_%06d", i%100_000),
 				"value":     int64(rng.Intn(10_000)),
 			}
 		}
+		// Shuffle row order so the keys aren't grouped contiguously — the
+		// distributed aggregator should still produce the same distinct
+		// count regardless of input order, and shuffling stresses the
+		// hash-partition path more realistically.
+		rng.Shuffle(len(rows), func(i, j int) { rows[i], rows[j] = rows[j], rows[i] })
 		data["micro_agg"] = microTable{schema: microSchemas["micro_agg"], rows: rows}
 	}
 

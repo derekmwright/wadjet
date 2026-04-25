@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -91,16 +92,13 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	defer s.mu.Unlock()
 
 	if len(s.keyIdxs) == 0 {
-		// Resolve key column indices from schema on first batch.
+		// Resolve key column indices from schema on first batch. Use
+		// the bidirectional fallback so qualified planner-emitted keys
+		// ("n1.n_name") still resolve against unqualified scan output
+		// ("n_name") and vice-versa for self-join chain output.
 		s.keyIdxs = make([]int, len(s.keys))
 		for i, k := range s.keys {
-			idx := -1
-			for j, col := range b.Schema {
-				if col.Name == k {
-					idx = j
-					break
-				}
-			}
+			idx := exec.ColumnIndexFallback(b, k)
 			if idx < 0 {
 				return fmt.Errorf("partitioned shuffle: key %q not in schema", k)
 			}

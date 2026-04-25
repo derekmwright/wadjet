@@ -1,0 +1,6 @@
+avg_disc=0.0498696 avg_price=50273.9 avg_qty=25.4922 count_order=100580 l_linestatus=F l_returnflag=A sum_base_price=5.05655e+09 sum_charge=4.99765e+09 sum_disc_price=4.80451e+09 sum_qty=2.564e+06
+avg_disc=0.0499898 avg_price=50472.8 avg_qty=25.5397 count_order=100313 l_linestatus=O l_returnflag=R sum_base_price=5.06308e+09 sum_charge=5.00255e+09 sum_disc_price=4.81009e+09 sum_qty=2.56196e+06
+avg_disc=0.0500289 avg_price=50464.7 avg_qty=25.5739 count_order=98938 l_linestatus=F l_returnflag=R sum_base_price=4.99288e+09 sum_charge=4.93194e+09 sum_disc_price=4.74281e+09 sum_qty=2.53023e+06
+avg_disc=0.0500627 avg_price=50467.9 avg_qty=25.516 count_order=99962 l_linestatus=O l_returnflag=N sum_base_price=5.04488e+09 sum_charge=4.98347e+09 sum_disc_price=4.79224e+09 sum_qty=2.55063e+06
+avg_disc=0.0501384 avg_price=50658.6 avg_qty=25.5167 count_order=99915 l_linestatus=O l_returnflag=A sum_base_price=5.06155e+09 sum_charge=4.99991e+09 sum_disc_price=4.80805e+09 sum_qty=2.5495e+06
+avg_disc=0.0501693 avg_price=50416.6 avg_qty=25.5335 count_order=99805 l_linestatus=F l_returnflag=N sum_base_price=5.03183e+09 sum_charge=4.97106e+09 sum_disc_price=4.77968e+09 sum_qty=2.54837e+06

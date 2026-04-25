@@ -2,7 +2,10 @@ package physical
 
 import (
 	"context"
+	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +15,8 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
+
+var updateGolden = flag.Bool("update-golden", false, "update TPC-H ensure-distribution golden snapshots")
 
 // SF10-like file counts for realistic distributed planning.
 var tpchSF10Files = map[string]int{
@@ -207,17 +212,21 @@ func validateStageGraph(t *testing.T, stages []Stage, queryName string) {
 		}
 
 		// Shuffle stages should have valid keys
-		if s.Type == "shuffle" {
-			if len(s.ShuffleKeys) == 0 {
-				t.Errorf("%s: shuffle stage %s has no shuffle keys", queryName, s.ID)
-			}
-			if s.NumPartitions < 2 {
-				t.Errorf("%s: shuffle stage %s has <2 partitions: %d", queryName, s.ID, s.NumPartitions)
+		if s.Type == StageExchangeRepartition {
+			if s.Exchange == nil {
+				t.Errorf("%s: repartition stage %s has nil Exchange payload", queryName, s.ID)
+			} else {
+				if len(s.Exchange.Keys) == 0 {
+					t.Errorf("%s: shuffle stage %s has no shuffle keys", queryName, s.ID)
+				}
+				if s.Exchange.Count < 2 {
+					t.Errorf("%s: shuffle stage %s has <2 partitions: %d", queryName, s.ID, s.Exchange.Count)
+				}
 			}
 		}
 
 		// Join stages with shuffle should have matching partition counts
-		if (s.Type == "hash_join" || s.Type == "broadcast_join") && s.NumPartitions > 1 {
+		if (s.Type == "hash_join" || s.Type == "broadcast_join") && s.JoinPartitionCount > 1 {
 			if s.LeftDepStage == "" || s.RightDepStage == "" {
 				t.Errorf("%s: partitioned join %s missing dep stages (left=%q, right=%q)",
 					queryName, s.ID, s.LeftDepStage, s.RightDepStage)
@@ -360,8 +369,8 @@ func TestTPCHDistributedPlans(t *testing.T) {
 				if s.BuildTableAlias != "" {
 					extra = fmt.Sprintf(" buildAlias=%s", s.BuildTableAlias)
 				}
-				if len(s.ShuffleKeys) > 0 {
-					extra += fmt.Sprintf(" shuffleKeys=%v", s.ShuffleKeys)
+				if s.Exchange != nil && len(s.Exchange.Keys) > 0 {
+					extra += fmt.Sprintf(" shuffleKeys=%v", s.Exchange.Keys)
 				}
 				if len(s.JoinLeftKeys) > 0 {
 					extra += fmt.Sprintf(" leftKeys=%v rightKeys=%v", s.JoinLeftKeys, s.JoinRightKeys)
@@ -569,7 +578,7 @@ func TestTPCHRoutingDecisions(t *testing.T) {
 					joinCount++
 				}
 				joinCount += len(s.FusedJoins)
-				if s.Type == "shuffle" {
+				if s.Type == StageExchangeRepartition {
 					shuffleCount++
 				}
 			}
@@ -611,10 +620,13 @@ func TestTPCHShuffleKeysResolvable(t *testing.T) {
 			stages := sqlToStages(t, cat, ctx, sql, 3)
 
 			for _, s := range stages {
-				if s.Type != "shuffle" {
+				if s.Type != StageExchangeRepartition {
 					continue
 				}
-				for _, key := range s.ShuffleKeys {
+				if s.Exchange == nil {
+					continue
+				}
+				for _, key := range s.Exchange.Keys {
 					// Strip any table qualifier
 					cleanKey := key
 					if dot := strings.IndexByte(key, '.'); dot >= 0 {
@@ -691,7 +703,7 @@ func TestTPCHDistributionConsistency(t *testing.T) {
 			// singleton output, but shuffle stages must carry the
 			// hash-partitioned label with non-zero Count and non-empty Keys.
 			for _, s := range stages {
-				if s.Type == "shuffle" {
+				if s.Type == StageExchangeRepartition {
 					if s.Distribution.Kind != DistHashPartitioned {
 						t.Errorf("%s shuffle stage %s: Distribution.Kind = %v, want DistHashPartitioned",
 							name, s.ID, s.Distribution.Kind)
@@ -717,6 +729,288 @@ func TestTPCHDistributionConsistency(t *testing.T) {
 						s.ID, s.Type, s.Distribution)
 				}
 				t.Fatalf("%s: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestPlanDistributed_WithEnsureDistribution_InsertsExchanges verifies that
+// setting UseEnsureDistribution=true on the Planner runs EnsureDistribution
+// during PlanDistributed. Q01 is used because it is the simplest correctness
+// gate: we verify the call succeeds (wiring test). Q05 is then checked to
+// confirm at least one StageExchange* stage is present, since it has joins
+// large enough to require exchange insertion.
+func TestPlanDistributed_WithEnsureDistribution_InsertsExchanges(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	buildLogicalPlan := func(t *testing.T, sql string) *logical.Node {
+		t.Helper()
+		parsed, err := plansql.Parse(sql)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		selectInfo, err := plansql.ExtractSelect(parsed)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		logicalPlan, err := logical.BuildFromSelect(selectInfo)
+		if err != nil {
+			t.Fatalf("logical plan: %v", err)
+		}
+		scanAnnotator := func(plan *logical.Node) {
+			NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+		}
+		scanAnnotator(logicalPlan)
+		logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+		return logicalPlan
+	}
+
+	t.Run("Q01_wiring", func(t *testing.T) {
+		// Simple wiring test: UseEnsureDistribution=true must not error on Q01.
+		planner := NewPlanner(cat)
+		planner.WorkerCount = 4
+		planner.UseEnsureDistribution = true
+
+		node := buildLogicalPlan(t, tpchPlanQueryMap[1])
+		_, err := planner.PlanDistributed(ctx, node)
+		if err != nil {
+			t.Fatalf("PlanDistributed with UseEnsureDistribution=true failed: %v", err)
+		}
+	})
+
+	t.Run("Q05_exchange_inserted", func(t *testing.T) {
+		// Q05 has multiple joins large enough to trigger exchange insertion.
+		planner := NewPlanner(cat)
+		planner.WorkerCount = 4
+		planner.UseEnsureDistribution = true
+
+		node := buildLogicalPlan(t, tpchPlanQueryMap[5])
+		stages, err := planner.PlanDistributed(ctx, node)
+		if err != nil {
+			t.Fatalf("PlanDistributed with UseEnsureDistribution=true failed: %v", err)
+		}
+		var sawExchange bool
+		for _, s := range stages {
+			if s.Type == StageExchangeRepartition || s.Type == StageExchangeReplicate || s.Type == StageExchangeGather {
+				sawExchange = true
+				break
+			}
+		}
+		if !sawExchange {
+			t.Fatal("expected at least one StageExchange* stage when UseEnsureDistribution=true")
+		}
+	})
+
+	t.Run("default_flag_false", func(t *testing.T) {
+		// Verify the default (UseEnsureDistribution=false) still works and
+		// does not require EnsureDistribution to have been run — i.e. the
+		// flag is off by default and does not change behaviour for existing
+		// callers.
+		planner := NewPlanner(cat)
+		planner.WorkerCount = 4
+		// UseEnsureDistribution is intentionally NOT set (defaults to false).
+
+		node := buildLogicalPlan(t, tpchPlanQueryMap[1])
+		_, err := planner.PlanDistributed(ctx, node)
+		if err != nil {
+			t.Fatalf("PlanDistributed default (flag=false) failed: %v", err)
+		}
+	})
+}
+
+// TestTPCH_EnsureDistribution_PlannerParity is the Phase 2 acceptance gate.
+// For every Q01-Q22, it plans with UseEnsureDistribution=true and asserts:
+//  1. Plan succeeds (no error).
+//  2. AssertExchangeConsistency passes (guaranteed by PlanDistributed in strict
+//     mode, verified defensively here).
+//  3. Every StageExchangeRepartition has Distribution.Kind == DistHashPartitioned,
+//     every StageExchangeReplicate has DistBroadcast, every StageExchangeGather
+//     has DistSingleton.
+//
+// Spec: docs/superpowers/specs/2026-04-20-distribution-property-phase-2.md
+func TestTPCH_EnsureDistribution_PlannerParity(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	buildLogicalPlanEnsure := func(t *testing.T, sql string) *logical.Node {
+		t.Helper()
+		parsed, err := plansql.Parse(sql)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		selectInfo, err := plansql.ExtractSelect(parsed)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		logicalPlan, err := logical.BuildFromSelect(selectInfo)
+		if err != nil {
+			t.Fatalf("logical plan: %v", err)
+		}
+		scanAnnotator := func(plan *logical.Node) {
+			NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+		}
+		scanAnnotator(logicalPlan)
+		logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+		return logicalPlan
+	}
+
+	for qNum := 1; qNum <= 22; qNum++ {
+		sql, ok := tpchPlanQueryMap[qNum]
+		if !ok {
+			t.Logf("Q%02d not in plan query map; skipping", qNum)
+			continue
+		}
+		name := fmt.Sprintf("Q%02d", qNum)
+		t.Run(name, func(t *testing.T) {
+			node := buildLogicalPlanEnsure(t, sql)
+
+			planner := NewPlanner(cat)
+			planner.WorkerCount = 4
+			planner.UseEnsureDistribution = true
+
+			// Assertion 1: plan succeeds.
+			stages, err := planner.PlanDistributed(ctx, node)
+			if err != nil {
+				t.Fatalf("PlanDistributed with UseEnsureDistribution=true failed: %v", err)
+			}
+
+			// Assertion 2: AssertExchangeConsistency passes (strict mode).
+			// PlanDistributed already runs this in strict mode when
+			// UseEnsureDistribution=true; we re-run defensively to emit
+			// per-stage detail on any failure.
+			if err := AssertExchangeConsistency(stages); err != nil {
+				for _, s := range stages {
+					t.Logf("  %-24s type=%-20s dist=%+v", s.ID, s.Type, s.Distribution)
+				}
+				t.Fatalf("AssertExchangeConsistency failed: %v", err)
+			}
+
+			// Assertion 3: exchange stage Distribution.Kind must match the
+			// stage type exactly.
+			var exchangeCount int
+			for _, s := range stages {
+				switch s.Type {
+				case StageExchangeRepartition:
+					exchangeCount++
+					if s.Distribution.Kind != DistHashPartitioned {
+						t.Errorf("StageExchangeRepartition %s: Distribution.Kind = %v, want DistHashPartitioned",
+							s.ID, s.Distribution.Kind)
+					}
+				case StageExchangeReplicate:
+					exchangeCount++
+					if s.Distribution.Kind != DistBroadcast {
+						t.Errorf("StageExchangeReplicate %s: Distribution.Kind = %v, want DistBroadcast",
+							s.ID, s.Distribution.Kind)
+					}
+				case StageExchangeGather:
+					exchangeCount++
+					if s.Distribution.Kind != DistSingleton {
+						t.Errorf("StageExchangeGather %s: Distribution.Kind = %v, want DistSingleton",
+							s.ID, s.Distribution.Kind)
+					}
+				}
+			}
+
+			// Log summary for debugging.
+			t.Logf("stages=%d exchanges=%d", len(stages), exchangeCount)
+			for _, s := range stages {
+				if s.Type == StageExchangeRepartition || s.Type == StageExchangeReplicate || s.Type == StageExchangeGather {
+					t.Logf("  %-24s type=%-20s dist=%+v deps=%v", s.ID, s.Type, s.Distribution, s.Dependencies)
+				}
+			}
+		})
+	}
+}
+
+// distSummary returns a stable single-word description of a Distribution for
+// use in golden snapshot files.
+func distSummary(d Distribution) string {
+	switch d.Kind {
+	case DistSingleton:
+		return "Singleton"
+	case DistBroadcast:
+		return "Broadcast"
+	case DistHashPartitioned:
+		return fmt.Sprintf("Hash(%s)/%d", strings.Join(d.Keys, ","), d.Count)
+	}
+	return "Unknown"
+}
+
+// TestTPCH_EnsureDistribution_Snapshot records the (stageID, type,
+// distribution, dependencies) sequence for every Q01-Q22 plan produced by
+// EnsureDistribution. Each query's snapshot is written to
+// internal/planner/physical/testdata/ensure_distribution/q<NN>.golden.
+//
+// Run with -update-golden to regenerate the golden files after intentional
+// plan changes.
+func TestTPCH_EnsureDistribution_Snapshot(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+
+	buildLogicalPlanSnap := func(t *testing.T, sql string) *logical.Node {
+		t.Helper()
+		parsed, err := plansql.Parse(sql)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		selectInfo, err := plansql.ExtractSelect(parsed)
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		logicalPlan, err := logical.BuildFromSelect(selectInfo)
+		if err != nil {
+			t.Fatalf("logical plan: %v", err)
+		}
+		scanAnnotator := func(plan *logical.Node) {
+			NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+		}
+		scanAnnotator(logicalPlan)
+		logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+		return logicalPlan
+	}
+
+	for qNum := 1; qNum <= 22; qNum++ {
+		sql, ok := tpchPlanQueryMap[qNum]
+		if !ok {
+			t.Logf("Q%02d not in plan query map; skipping", qNum)
+			continue
+		}
+		name := fmt.Sprintf("Q%02d", qNum)
+		t.Run(name, func(t *testing.T) {
+			node := buildLogicalPlanSnap(t, sql)
+
+			planner := NewPlanner(cat)
+			planner.WorkerCount = 4
+			planner.UseEnsureDistribution = true
+
+			stages, err := planner.PlanDistributed(ctx, node)
+			if err != nil {
+				t.Fatalf("plan: %v", err)
+			}
+
+			var buf strings.Builder
+			for _, s := range stages {
+				fmt.Fprintf(&buf, "%s\t%s\t%s", s.ID, s.Type, distSummary(s.Distribution))
+				if len(s.Dependencies) > 0 {
+					fmt.Fprintf(&buf, "\tdeps=%s", strings.Join(s.Dependencies, ","))
+				}
+				buf.WriteByte('\n')
+			}
+
+			goldenPath := filepath.Join("testdata", "ensure_distribution", strings.ToLower(name)+".golden")
+			if *updateGolden {
+				if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(goldenPath, []byte(buf.String()), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			want, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Fatalf("read golden: %v (run with -update-golden to create)", err)
+			}
+			if got := buf.String(); got != string(want) {
+				t.Errorf("snapshot diff for %s:\n--- want\n%s--- got\n%s", name, want, got)
 			}
 		})
 	}
