@@ -657,6 +657,10 @@ func newStore() (objstore.Store, error) {
 }
 
 func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logger, alertsEnabled bool, snapshotPrefix string, snapshotInterval time.Duration, forceRestoreTS string) error {
+	// Opt-in heap profile dumper for OOM debugging. No-op unless
+	// WADJET_HEAP_DUMP_INTERVAL is set. See cmd/wadjet/heap_dumper.go.
+	startHeapDumper(ctx, logger)
+
 	// Start embedded NATS (with optional leaf node connections)
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = natsPort

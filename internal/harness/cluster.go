@@ -271,6 +271,13 @@ func (c *Cluster) spawn(role string, args []string) (*managedProcess, error) {
 		// flushed before SIGKILL (project_q18_sf10_native_dag_oom_2026-04-24).
 		// Cost: ~1 line per second under load; harmless otherwise.
 		"GODEBUG=gctrace=1",
+		// Periodic heap profile dumper, opt-in via WADJET_HEAP_DUMP_INTERVAL
+		// (handled in cmd/wadjet/heap_dumper.go). Each snapshot is fsync'd
+		// so the latest survives OOM-kill. Default WADJET_HEAP_DUMP_DIR is
+		// /tmp/wadjet-heap. 5s cadence is plenty granular for the
+		// 22-second Q18 SF10 explosion phase.
+		"WADJET_HEAP_DUMP_INTERVAL=5s",
+		"WADJET_HEAP_DUMP_DIR="+filepath.Join(c.cfg.RunDir, "heap"),
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true, // own process group for clean shutdown
