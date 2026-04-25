@@ -246,6 +246,12 @@ func TestQ07_SF01_DumpRows(t *testing.T) {
 	dump("Q15_NATIVE", q15, true, 5)
 	dumpStages(t, coord, ctx, "Q15_STAGES", q15)
 
+	// Q18 NULL-aggregate dump.
+	q18 := tpch.TPCHQueries[18].SQL
+	dump("Q18_LEGACY", q18, false, 3)
+	dump("Q18_NATIVE", q18, true, 3)
+	dumpStages(t, coord, ctx, "Q18_STAGES", q18)
+
 	// Q08 minus the WHERE filters — does it return any rows?
 	q08NoFilter := `SELECT
 		SUBSTR(o_orderdate, 1, 4) as o_year, SUM(l_extendedprice * (1 - l_discount)) as total_revenue

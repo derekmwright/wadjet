@@ -498,14 +498,19 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		h.aggColIdx2[i] = -1 // default: no second column
 		if agg.Func == AggCountDistinct || agg.Func == AggApproxDistinct {
 			if agg.InputCol != "" {
-				h.aggColIdx[i] = b.ColumnIndex(agg.InputCol)
+				h.aggColIdx[i] = columnIndexFallback(b, agg.InputCol)
 			} else {
 				h.aggColIdx[i] = -1
 			}
 			continue
 		}
 		if agg.InputCol != "" {
-			idx := b.ColumnIndex(agg.InputCol)
+			// Use bidirectional fallback so qualified columns from a self-
+			// join chain ("lineitem.l_quantity") still resolve to the bare
+			// AggSpec.InputCol ("l_quantity") and vice-versa. Without this,
+			// Q18's outer SUM(l_quantity) returned NULL because the join
+			// chain's QualifyAllBuildCols renamed the column.
+			idx := columnIndexFallback(b, agg.InputCol)
 			h.aggColIdx[i] = idx
 			if idx >= 0 {
 				h.aggUpdaters[i] = resolveAggUpdater(agg.Func, b.Columns[idx].Type)
@@ -520,7 +525,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 		// Resolve second column index for two-column aggregates
 		if agg.InputCol2 != "" {
-			h.aggColIdx2[i] = b.ColumnIndex(agg.InputCol2)
+			h.aggColIdx2[i] = columnIndexFallback(b, agg.InputCol2)
 		}
 	}
 
