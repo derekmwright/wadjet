@@ -41,6 +41,20 @@ func TestQ18NativeDAGShape_Regression(t *testing.T) {
 	if err := ValidateNativeDAGShape(stages); err != nil {
 		t.Errorf("Q18 fails native-DAG shape validation: %v", err)
 	}
+
+	// Diagnostic dump: under -v, print FusedAggSpecs on scan stages so we can
+	// see whether scan→aggregate fusion is present (necessary for the Q18 SF10
+	// memory-constrained-scaling fix — see project_q18_sf10_native_dag_oom).
+	for _, s := range stages {
+		if s.Type != "scan" {
+			continue
+		}
+		if len(s.FusedAggSpecs) > 0 || len(s.FusedAggGroupBy) > 0 {
+			t.Logf("scan %s: fused agg group=%v specs=%d files=%d", s.ID, s.FusedAggGroupBy, len(s.FusedAggSpecs), len(s.ScanFiles))
+		} else {
+			t.Logf("scan %s: NO fused agg, table=%s files=%d", s.ID, s.TableName, len(s.ScanFiles))
+		}
+	}
 }
 
 // sqlToStagesWithEnsure mirrors sqlToStages but turns on UseEnsureDistribution
