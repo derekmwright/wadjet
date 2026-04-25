@@ -304,10 +304,19 @@ func runOneQuery(
 	}
 
 	// Hard timeout: 10x baseline projection if known, else 5 min.
+	// Override via WADJET_HARNESS_QUERY_TIMEOUT (Go duration string) for
+	// scenarios like SF10 with WADJET_GOGC=100 where GC overhead extends
+	// wall time well past the default — Q18 SF10 needed >3 min just to
+	// finish the IN-subquery aggregate (project_q18_sf10_native_dag_oom_2026-04-24).
 	timeout := 5 * time.Minute
 	if baseline != nil {
 		if qb, ok := baseline.Queries[name]; ok && qb.WallMsP50 > 0 {
 			timeout = time.Duration(qb.WallMsP50) * 10 * time.Millisecond
+		}
+	}
+	if override := os.Getenv("WADJET_HARNESS_QUERY_TIMEOUT"); override != "" {
+		if d, err := time.ParseDuration(override); err == nil {
+			timeout = d
 		}
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
