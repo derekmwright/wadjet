@@ -80,7 +80,10 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 	if err != nil {
 		return fmt.Errorf("scan task %s: source: %w", task.ID, err)
 	}
-	collect := &exec.CollectSink{}
+	// SkipFinalizeToRows: writeStageOutput consumes Batches() directly;
+	// the ToRows materialization Finalize would otherwise do held 21 GB
+	// of live heap on Q18 SF10 (project_q18_sf10_native_dag_oom_2026-04-24).
+	collect := &exec.CollectSink{SkipFinalizeToRows: true}
 	pipeline := &exec.Pipeline{
 		Source: src,
 		Ops:    filterOps,
@@ -269,8 +272,11 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	// Probe pipeline with CollectSink; we post-process batches into the
 	// configured output sink. CollectSink is memory-bounded by the build
 	// spill semantics (per-worker partition of probe input).
+	// SkipFinalizeToRows: we read Batches() below, never Rows. Without
+	// this flag, Finalize materializes every probe row as map[string]any
+	// — for Q18 SF10 join-8 (~60M probe rows) that's 15+ GB of pure waste.
 	probe := hj.Probe()
-	collect := &exec.CollectSink{}
+	collect := &exec.CollectSink{SkipFinalizeToRows: true}
 	pipeline := &exec.Pipeline{
 		Source: probeSource,
 		Ops:    []exec.UnaryOperator{probe},

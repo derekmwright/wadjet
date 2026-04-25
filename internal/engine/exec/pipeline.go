@@ -526,6 +526,14 @@ type CollectSink struct {
 	batches []*batch.RecordBatch // columnar storage
 	rowsDone bool
 	mu       sync.Mutex
+	// SkipFinalizeToRows, when true, makes Finalize a no-op instead of
+	// eagerly materializing ToRows. Callers that consume Batches() directly
+	// (native-DAG worker stage path) should set this — otherwise Finalize
+	// allocates a map[string]any per row of every collected batch.
+	// At SF10 Q18, this single allocation pattern held 21 GB of live heap
+	// (heap-1347079-130.pprof: CollectSink.ToRows = 68% inuse_space —
+	// project_q18_sf10_native_dag_oom_2026-04-24).
+	SkipFinalizeToRows bool
 }
 
 func (s *CollectSink) Init(_ context.Context) error {
@@ -552,6 +560,9 @@ func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 }
 
 func (s *CollectSink) Finalize(_ context.Context) error {
+	if s.SkipFinalizeToRows {
+		return nil
+	}
 	s.ToRows() // populate Rows for backward compatibility
 	return nil
 }
