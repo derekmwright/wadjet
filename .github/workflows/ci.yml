@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+    # Add ready_for_review so CI fires when a draft PR is marked ready
+    # (default types are [opened, synchronize, reopened]). The job-level
+    # `if` gate skips CI while the PR is still draft.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
   test:
