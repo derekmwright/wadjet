@@ -114,8 +114,39 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 	// termination. Even single-worker Singleton-rooted plans append a trivial
 	// Gather so the coordinator receives its output via the same ReplySubject
 	// path. Matches Trino's "output fragment" invariant.
+	//
+	// Picking the gather target: the LAST stage in the slice is wrong when
+	// walkStages emitted a Q15-style scalar-subquery producer chain after
+	// the main query's stages. The producer's terminal has no regular
+	// dependents, so the naïve "last stage" pick attaches Gather to the
+	// producer instead of the join — and the user sees the MAX(...) value
+	// instead of the joined supplier rows. The right pick is the stage with
+	// NO dependents at all (regular OR scalar). When more than one such
+	// stage exists (truly multi-rooted plans, rare), the LAST one in slice
+	// order is still the conservative choice.
 	if len(out) > 0 {
-		root := out[len(out)-1]
+		depended := make(map[string]bool, len(out))
+		for _, s := range out {
+			for _, d := range s.Dependencies {
+				depended[d] = true
+			}
+			for _, pid := range s.ScalarDependencies {
+				depended[pid] = true
+			}
+		}
+		var root Stage
+		var found bool
+		for i := len(out) - 1; i >= 0; i-- {
+			if !depended[out[i].ID] {
+				root = out[i]
+				found = true
+				break
+			}
+		}
+		if !found {
+			// All stages have dependents (cycle?) — fall back to last.
+			root = out[len(out)-1]
+		}
 		if root.Type != StageExchangeGather {
 			gather := Stage{
 				Type:         StageExchangeGather,

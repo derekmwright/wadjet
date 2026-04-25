@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,8 +119,95 @@ func TestTPCHNativeDAG_SF01(t *testing.T) {
 					qNum, natRes.TotalRows, legacyRes.TotalRows, diff, tol, legacyElapsed, natElapsed)
 				return
 			}
+			// Row-count parity is necessary but not sufficient. Q07's
+			// pre-fix native-DAG happened to return the right COUNT but
+			// with wrong column data (n1.n_name=NULL) and an extra empty
+			// group. Compare row VALUES too — sort each side by stringified
+			// representation so non-ORDER-BY queries still diff cleanly.
+			// Skip when row count is off by tolerance (already errored above).
+			if mismatches := diffRowSets(legacyRes.Rows(), natRes.Rows()); len(mismatches) > 0 {
+				// Truncate to first 5 mismatches to keep the failure log tractable.
+				show := mismatches
+				if len(show) > 5 {
+					show = show[:5]
+				}
+				t.Errorf("Q%02d row VALUES diverge (showing %d of %d):\n%s",
+					qNum, len(show), len(mismatches), strings.Join(show, "\n"))
+				return
+			}
 			t.Logf("Q%02d: %d rows (legacy=%s native=%s)",
 				qNum, natRes.TotalRows, legacyElapsed, natElapsed)
 		})
+	}
+}
+
+// diffRowSets returns the list of human-readable mismatches between two
+// row sets. Rows are stringified, sorted, and diffed — order independent
+// for non-ORDER-BY queries while still catching missing/extra/wrong values.
+// Float ULP-level differences are tolerated by truncating numeric values to
+// 6 significant digits before comparison; this avoids false positives from
+// distributed accumulation order without hiding real value differences.
+func diffRowSets(left, right []map[string]any) []string {
+	canon := func(rows []map[string]any) []string {
+		out := make([]string, len(rows))
+		for i, r := range rows {
+			keys := make([]string, 0, len(r))
+			for k := range r {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			var b strings.Builder
+			for j, k := range keys {
+				if j > 0 {
+					b.WriteString(" ")
+				}
+				b.WriteString(k)
+				b.WriteString("=")
+				b.WriteString(canonValue(r[k]))
+			}
+			out[i] = b.String()
+		}
+		sort.Strings(out)
+		return out
+	}
+	leftS := canon(left)
+	rightS := canon(right)
+	li, ri := 0, 0
+	var mismatches []string
+	for li < len(leftS) && ri < len(rightS) {
+		switch {
+		case leftS[li] == rightS[ri]:
+			li++
+			ri++
+		case leftS[li] < rightS[ri]:
+			mismatches = append(mismatches, "  - "+leftS[li])
+			li++
+		default:
+			mismatches = append(mismatches, "  + "+rightS[ri])
+			ri++
+		}
+	}
+	for ; li < len(leftS); li++ {
+		mismatches = append(mismatches, "  - "+leftS[li])
+	}
+	for ; ri < len(rightS); ri++ {
+		mismatches = append(mismatches, "  + "+rightS[ri])
+	}
+	return mismatches
+}
+
+// canonValue stringifies a Go value for row-set comparison, truncating
+// floats to 6 significant digits so float-ULP drift across legacy vs
+// distributed accumulation paths doesn't trigger a false mismatch.
+func canonValue(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "NULL"
+	case float64:
+		return fmt.Sprintf("%.6g", x)
+	case float32:
+		return fmt.Sprintf("%.6g", float64(x))
+	default:
+		return fmt.Sprint(v)
 	}
 }

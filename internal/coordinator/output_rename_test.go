@@ -23,11 +23,14 @@ func TestApplyOutputRenames(t *testing.T) {
 		batches: []*batch.RecordBatch{b},
 		columns: []string{"n1.n_name", "substr(l_shipdate, 1, 4)", "revenue"},
 	}
+	// applyOutputRenames now PROJECTS — every desired output column needs an
+	// entry, even pass-throughs. extractOutputRenames emits a self-rename
+	// (From==To) for aggregate columns whose OutputCol already equals the
+	// alias.
 	renames := []physical.OutputRename{
 		{From: "n1.n_name", To: "supp_nation"},
 		{From: "substr(l_shipdate, 1, 4)", To: "l_year"},
-		// revenue is intentionally absent — aggregate columns already use
-		// the alias as their OutputCol so no rename should be needed.
+		{From: "revenue", To: "revenue"},
 	}
 
 	applyOutputRenames(gr, renames)

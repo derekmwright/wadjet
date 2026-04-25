@@ -12,7 +12,9 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 // gatherReceiveTimeout bounds the coordinator's wait for worker terminal
@@ -202,32 +204,101 @@ func (c *Coordinator) executeStageDAG(
 	return gr, nil
 }
 
-// applyOutputRenames rewrites column names in a gather result and in each
-// batch's schema using the (From -> To) pairs. Match is case-insensitive to
-// tolerate lowercase normalization in the worker's expression compiler vs.
-// the original-cased SELECT-list expression text.
+// applyOutputRenames PROJECTS each gather batch (and gr.columns) to exactly
+// the SELECT-list output schema described by renames: drops columns the
+// worker emitted but the user didn't ask for (e.g., Q15's join carries
+// supplier/lineitem internals), and renames each kept column to the user's
+// alias. Match is case-insensitive to tolerate worker-side lowercasing of
+// expression text.
+//
+// Only applies when renames is non-empty AND every entry's source column
+// resolves in the batch — if any source is missing (wrapped aggregates not
+// yet handled), falls back to a rename-only pass so the output is at least
+// non-empty rather than truncated to nothing.
 func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 	if gr == nil || len(renames) == 0 {
 		return
 	}
-	rename := func(name string) string {
+	// Determine if every source resolves in the schema. If not, degrade
+	// to rename-only behavior to avoid hiding the entire result.
+	canProject := true
+	if len(gr.batches) > 0 && len(gr.batches[0].Schema) > 0 {
+		schema := gr.batches[0].Schema
 		for _, r := range renames {
-			if strings.EqualFold(name, r.From) {
-				return r.To
+			found := false
+			for _, c := range schema {
+				if strings.EqualFold(c.Name, r.From) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				canProject = false
+				break
 			}
 		}
-		return name
+	} else if len(gr.columns) > 0 {
+		// No batches but columns set — fall back to rename-only.
+		canProject = false
 	}
-	for i, c := range gr.columns {
-		gr.columns[i] = rename(c)
+	if !canProject {
+		// Rename-only fallback (matches old behavior).
+		rename := func(name string) string {
+			for _, r := range renames {
+				if strings.EqualFold(name, r.From) {
+					return r.To
+				}
+			}
+			return name
+		}
+		for i, c := range gr.columns {
+			gr.columns[i] = rename(c)
+		}
+		for _, b := range gr.batches {
+			if b == nil {
+				continue
+			}
+			for i := range b.Schema {
+				b.Schema[i].Name = rename(b.Schema[i].Name)
+			}
+		}
+		return
 	}
-	for _, b := range gr.batches {
+	// Project: keep only the renamed columns, in renames order.
+	gr.columns = make([]string, len(renames))
+	for i, r := range renames {
+		gr.columns[i] = r.To
+	}
+	for bi, b := range gr.batches {
 		if b == nil {
 			continue
 		}
-		for i := range b.Schema {
-			b.Schema[i].Name = rename(b.Schema[i].Name)
+		// Map each rename target to the source column index in the batch.
+		newCols := make([]*batch.Vector, len(renames))
+		newSchema := make([]parquet.Column, len(renames))
+		for i, r := range renames {
+			srcIdx := -1
+			for j, c := range b.Schema {
+				if strings.EqualFold(c.Name, r.From) {
+					srcIdx = j
+					break
+				}
+			}
+			if srcIdx < 0 {
+				// Should not happen — we checked canProject above. Defensive.
+				continue
+			}
+			newCols[i] = b.Columns[srcIdx]
+			newSchema[i] = b.Schema[srcIdx]
+			newSchema[i].Name = r.To
 		}
+		nb := &batch.RecordBatch{
+			Schema:  newSchema,
+			Columns: newCols,
+			Len:     b.Len,
+			Sel:     b.Sel,
+		}
+		gr.batches[bi] = nb
 	}
 }
 

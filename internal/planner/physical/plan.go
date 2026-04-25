@@ -1208,42 +1208,60 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 }
 
 // extractOutputRenames inspects the logical plan tree's outermost projection
-// node and returns the SELECT-list rename map. Returns nil when the outermost
-// SELECT has only bare column references with no renames (worker's natural
-// column names already match what the user wrote) or when the outermost
-// emitting node is not a projection.
+// node and returns one (source-column → alias) pair per SELECT-list item — in
+// SELECT-list order — describing the final output schema. The coordinator
+// uses this list both to RENAME columns AND to DROP columns the worker
+// emitted but the user didn't ask for (e.g., Q15's join output carries
+// supplier/lineitem internals that the SELECT list doesn't project).
 //
-// Aggregate projections are skipped because the planner sets AggSpec.OutputCol
-// to the alias already — the worker emits the aggregate column under that name
-// and no rewrite is needed. Wrapped aggregates ("SUM(x) * 0.0001 AS scaled")
-// are NOT handled here; legacy applies them via buildProject post-aggregate.
+// For aggregate columns, the source equals the alias (planner sets
+// AggSpec.OutputCol to the alias). Wrapped aggregates ("SUM(x)/7.0 AS x")
+// still aren't handled here — the worker emits the raw aggregate, and
+// applying the divisor needs a post-aggregate Project. Wrapped-aggregate
+// projections are passed through with their source pointing at the wrapped
+// expression text so that at least the rename is attempted (it'll miss
+// gracefully and the column drops, surfacing the bug clearly in tests).
+//
+// Returns nil when the outermost emitting node isn't a projection (e.g.,
+// top-level scan or aggregate without a SELECT-list rename layer).
 func extractOutputRenames(root *logical.Node) []OutputRename {
 	proj := findOutputProjectionsForRename(root)
 	if len(proj) == 0 {
 		return nil
 	}
-	var renames []OutputRename
+	renames := make([]OutputRename, 0, len(proj))
 	for _, p := range proj {
-		if p.IsAgg || p.Alias == "" {
-			continue
-		}
-		// Prefer Expr because it preserves the table qualifier
-		// (e.g., "n1.n_name") that the worker emits as the column name.
-		// Column drops the qualifier ("n_name") and would mis-match in
-		// any query with `tbl.col AS alias`.
-		var src string
+		var src, target string
 		switch {
+		case p.IsAgg:
+			// AggSpec.OutputCol == alias; if no alias, fall back to expr.
+			target = p.Alias
+			if target == "" {
+				target = strings.ToLower(p.Expr)
+			}
+			src = target
+		case p.Column != "" && p.Alias != "":
+			// Bare column reference. Worker may emit qualified ("n1.n_name")
+			// or unqualified ("n_name") depending on the upstream join chain.
+			// Prefer Expr (qualified-preserving) when it's a colref, else Column.
+			src = p.Column
+			if p.Expr != "" {
+				src = strings.ToLower(p.Expr)
+			}
+			target = p.Alias
 		case p.Expr != "":
 			src = strings.ToLower(p.Expr)
+			target = p.Alias
+			if target == "" {
+				target = src
+			}
 		case p.Column != "":
 			src = p.Column
+			target = src
 		default:
 			continue
 		}
-		if strings.EqualFold(src, p.Alias) {
-			continue
-		}
-		renames = append(renames, OutputRename{From: src, To: p.Alias})
+		renames = append(renames, OutputRename{From: src, To: target})
 	}
 	return renames
 }

@@ -62,10 +62,12 @@ func TestExtractOutputRenames_TableQualifier(t *testing.T) {
 	}
 }
 
-// TestExtractOutputRenames_NoRenameWhenAliasMatchesSource skips
-// projections whose alias equals the source — those would just
-// rename a column to itself.
-func TestExtractOutputRenames_NoRenameWhenAliasMatchesSource(t *testing.T) {
+// TestExtractOutputRenames_BareColumnSelfRename verifies bare-column
+// projections (no alias) emit a self-rename pair so the coordinator's
+// PROJECT step preserves the column. Pre-projection semantics returned
+// nothing for `SELECT n_name`; with projection enabled the entry is
+// {n_name, n_name} so n_name survives the keep-only filter.
+func TestExtractOutputRenames_BareColumnSelfRename(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 	sql := `SELECT n_name FROM nation`
 	parsed, _ := plansql.Parse(sql)
@@ -74,15 +76,21 @@ func TestExtractOutputRenames_NoRenameWhenAliasMatchesSource(t *testing.T) {
 	NewPlanner(cat).AnnotateScanColumns(ctx, logicalPlan)
 
 	renames := extractOutputRenames(logicalPlan)
-	if len(renames) != 0 {
-		t.Errorf("expected no renames for `SELECT n_name`, got %v", renames)
+	if len(renames) != 1 {
+		t.Fatalf("expected 1 rename for `SELECT n_name`, got %v", renames)
+	}
+	if renames[0].From != "n_name" || renames[0].To != "n_name" {
+		t.Errorf("got %+v, want {n_name n_name}", renames[0])
 	}
 }
 
-// TestExtractOutputRenames_SkipsAggregates verifies that aggregate
-// projections (whose AggSpec.OutputCol is already the alias) do not
-// produce renames — they already emit columns under the user's alias.
-func TestExtractOutputRenames_SkipsAggregates(t *testing.T) {
+// TestExtractOutputRenames_AggregateSelfRename verifies that aggregate
+// projections produce a self-rename entry (From == To == alias) so the
+// coordinator's PROJECT step keeps the column. Pre-projection semantics
+// would have skipped these and aggregate-only SELECTs would have returned
+// empty renames; with projection enabled, every output column needs an
+// entry to survive the keep-only pass.
+func TestExtractOutputRenames_AggregateSelfRename(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 	sql := `SELECT SUM(l_quantity) AS total FROM lineitem`
 	parsed, _ := plansql.Parse(sql)
@@ -91,8 +99,11 @@ func TestExtractOutputRenames_SkipsAggregates(t *testing.T) {
 	NewPlanner(cat).AnnotateScanColumns(ctx, logicalPlan)
 
 	renames := extractOutputRenames(logicalPlan)
-	if len(renames) != 0 {
-		t.Errorf("expected no renames for aggregate-only SELECT, got %v", renames)
+	if len(renames) != 1 {
+		t.Fatalf("expected 1 rename for aggregate-only SELECT, got %v", renames)
+	}
+	if renames[0].From != "total" || renames[0].To != "total" {
+		t.Errorf("aggregate self-rename: got %+v, want {total total}", renames[0])
 	}
 }
 
