@@ -579,6 +579,20 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		"rows", result.NumRows,
 		"duration", result.Duration,
 	}
+	if task.StageID != "" {
+		logAttrsEnd = append(logAttrsEnd, "stage_id", task.StageID)
+	}
+	if task.StageType != "" {
+		logAttrsEnd = append(logAttrsEnd, "stage_type", task.StageType)
+	}
+	// PeakHeapMB is the peak Go heap during this task — sampled at 50ms
+	// cadence by taskPeakHeapTracker (executor.go:200). For Q18-class
+	// memory-constrained-scaling investigations, this is the per-stage
+	// signal that lets us locate which task's hash table / build cache /
+	// scan output is the runaway.
+	if result.TaskStats != nil && result.TaskStats.PeakHeapMB > 0 {
+		logAttrsEnd = append(logAttrsEnd, "peak_heap_mb", result.TaskStats.PeakHeapMB)
+	}
 	if task.TraceID != "" {
 		logAttrsEnd = append(logAttrsEnd, "trace_id", task.TraceID)
 	}
