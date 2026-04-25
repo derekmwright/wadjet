@@ -141,7 +141,15 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 			Bucket:   "wadjet_results_data",
 			TTL:      5 * time.Minute,
 			MaxBytes: 1024 * 1024 * 1024, // 1 GB total
-			Storage:  jetstream.MemoryStorage,
+			// FileStorage (was MemoryStorage): for SF10+ workloads, the
+			// in-memory KV bucket added ~1 GB of non-Go RSS that pushed the
+			// coord process past the OS limit even when the Go heap was
+			// well-bounded by background GC. FileStorage keeps the fast-path
+			// semantics (TTL, fast key lookup) but pages bytes to disk, so
+			// the bucket's MaxBytes no longer pins resident memory.
+			// Latency hit is one disk seek per stage boundary on the slow
+			// path — KV cache hits stay in OS page cache.
+			Storage:  jetstream.FileStorage,
 		})
 		if kvErr == nil {
 			c.resultKV = kv
