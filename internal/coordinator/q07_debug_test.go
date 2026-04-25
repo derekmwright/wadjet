@@ -252,6 +252,12 @@ func TestQ07_SF01_DumpRows(t *testing.T) {
 	dump("Q18_NATIVE", q18, true, 3)
 	dumpStages(t, coord, ctx, "Q18_STAGES", q18)
 
+	// Q11 HAVING-with-scalar-subquery
+	q11 := tpch.TPCHQueries[11].SQL
+	dump("Q11_LEGACY", q11, false, 3)
+	dump("Q11_NATIVE", q11, true, 3)
+	dumpStages(t, coord, ctx, "Q11_STAGES", q11)
+
 	// Q08 minus the WHERE filters — does it return any rows?
 	q08NoFilter := `SELECT
 		SUBSTR(o_orderdate, 1, 4) as o_year, SUM(l_extendedprice * (1 - l_discount)) as total_revenue

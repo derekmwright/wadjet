@@ -139,7 +139,7 @@ func TestTPCHNativeDAG_SF01(t *testing.T) {
 			//   Q18: SUM(l_quantity) returns NULL despite correct GROUP BY keys.
 			//        Suspect IN-subquery + outer-aggregate column collision.
 			valueSkip := map[int]string{
-				11: "wrapped scalar subquery in HAVING",
+				11: "scalar subquery in HAVING; threshold drift between eager subquery and distributed per-group SUM flips ~5 borderline partkeys",
 			}
 			if reason, skip := valueSkip[qNum]; skip {
 				t.Logf("Q%02d: %d rows (legacy=%s native=%s) — value compare SKIPPED: %s",
