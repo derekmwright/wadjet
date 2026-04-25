@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -152,12 +154,19 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	// only to NATS KV and skip S3 entirely. Consult KV first; on miss,
 	// fall through to S3 as before. The KV key is a dot-sanitized version
 	// of the S3 key (matching writeUnpartitionedWSHF + natsKVKey).
+	var kvErr error
+	var kvDataLen int
+	var kvMagic string
 	if s.executor.resultKV != nil {
 		kvKey := natsKVKey(filePath)
-		if entry, kvErr := s.executor.resultKV.Get(ctx, kvKey); kvErr == nil {
+		var entry jetstream.KeyValueEntry
+		entry, kvErr = s.executor.resultKV.Get(ctx, kvKey)
+		if kvErr == nil {
 			data := entry.Value()
+			kvDataLen = len(data)
 			if len(data) >= 4 {
 				magic := [4]byte{data[0], data[1], data[2], data[3]}
+				kvMagic = string(magic[:])
 				wshf := magic == shuffleMagic
 				wshc := magic == compressedMagic
 				if wshf || wshc {
@@ -173,7 +182,11 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	// WSHC) shuffle file or some legacy Parquet payload.
 	rc, _, err := s.executor.store.Get(ctx, s.bucket, filePath)
 	if err != nil {
-		return fmt.Errorf("opening cached file %s: %w", filePath, err)
+		// Both KV and store missed. Annotate so the diagnostic gap from
+		// 2026-04-25 (object not found cascade in pgwire→coord routing)
+		// is visible the next time it surfaces.
+		return fmt.Errorf("opening cached file %s (kvErr=%v, kvDataLen=%d, kvMagic=%q, bucket=%s): %w",
+			filePath, kvErr, kvDataLen, kvMagic, s.bucket, err)
 	}
 	defer rc.Close()
 

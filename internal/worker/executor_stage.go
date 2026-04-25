@@ -889,8 +889,16 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 			result.ResultFiles = append(result.ResultFiles, key)
 			result.SizeBytes += int64(len(payload))
 			return nil
+		} else {
+			// KV put failed — fall through to S3. Log at Warn because silent
+			// failure here was the 2026-04-25 diagnostic gap on the pgwire→
+			// coord "object not found" cascade (project_q18_sf10_native_dag_oom).
+			// If this fires often, payloads are exceeding NATS KV's per-value
+			// max — bump the threshold or the bucket's MaxValueSize.
+			e.logger.Warn("KV put failed, falling back to store",
+				"task_id", task.ID, "key", key,
+				"payload_bytes", len(payload), "err", err)
 		}
-		// KV put failed — fall through to S3.
 	}
 
 	_, err := e.store.Put(ctx, task.ResultBucket, key, bytes.NewReader(payload), int64(len(payload)), "application/octet-stream")
