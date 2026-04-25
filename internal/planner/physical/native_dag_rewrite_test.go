@@ -69,3 +69,59 @@ func TestCollapseMergeTree_NoOp(t *testing.T) {
 		t.Fatalf("single-level plan should pass through unchanged, got %d stages", len(got))
 	}
 }
+
+// TestValidateNativeDAGShape_OK exercises the success path: a clean
+// post-collapse, post-skip-fusion plan with the shapes the dispatchers expect.
+func TestValidateNativeDAGShape_OK(t *testing.T) {
+	stages := []Stage{
+		{ID: "scan-0", Type: "scan"},
+		{ID: "scan-1", Type: "scan"},
+		{ID: "join-2", Type: "hash_join", Dependencies: []string{"scan-0", "scan-1"}, LeftDepStage: "scan-0", RightDepStage: "scan-1"},
+		{ID: "exchange-3", Type: "exchange-gather", Dependencies: []string{"join-2"}},
+	}
+	if err := ValidateNativeDAGShape(stages); err != nil {
+		t.Fatalf("expected ok, got %v", err)
+	}
+}
+
+// TestValidateNativeDAGShape_FusedJoinDeps reproduces the Q02 SF10 2026-04-23
+// shape: a broadcast_join carrying FusedJoins ends up with >2 deps. Validator
+// must catch it at plan time.
+func TestValidateNativeDAGShape_FusedJoinDeps(t *testing.T) {
+	stages := []Stage{
+		{ID: "scan-0", Type: "scan"},
+		{ID: "scan-1", Type: "scan"},
+		{ID: "scan-2", Type: "scan"},
+		{ID: "join-3", Type: "broadcast_join", Dependencies: []string{"scan-0", "scan-1", "scan-2"}, FusedJoins: []FusedJoinSpec{{BuildDepStage: "scan-2"}}},
+	}
+	err := ValidateNativeDAGShape(stages)
+	if err == nil {
+		t.Fatal("expected error on >2 deps, got nil")
+	}
+}
+
+// TestValidateNativeDAGShape_IntermediateMergeStage catches a leaked
+// merge-tree intermediate (collapseMergeTreesForNativeDAG didn't run or
+// didn't recognize the shape).
+func TestValidateNativeDAGShape_IntermediateMergeStage(t *testing.T) {
+	stages := []Stage{
+		{ID: "merge_aggregate-1-0", Type: "final_aggregate", Dependencies: []string{"scan-0"}, MergeGroup: 0, MergeGroupCount: 3},
+	}
+	err := ValidateNativeDAGShape(stages)
+	if err == nil {
+		t.Fatal("expected error on MergeGroupCount>0, got nil")
+	}
+}
+
+// TestValidateNativeDAGShape_BadExchangeDeps catches Exchange stages with
+// the wrong dep count (Exchange should always bridge exactly one child to
+// its parent).
+func TestValidateNativeDAGShape_BadExchangeDeps(t *testing.T) {
+	stages := []Stage{
+		{ID: "exchange-1", Type: "exchange-repartition", Dependencies: []string{"scan-0", "scan-1"}},
+	}
+	err := ValidateNativeDAGShape(stages)
+	if err == nil {
+		t.Fatal("expected error on multi-dep Exchange, got nil")
+	}
+}

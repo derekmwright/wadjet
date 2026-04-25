@@ -42,6 +42,14 @@ func (c *Coordinator) executeStageDAG(
 		return nil, fmt.Errorf("executeStageDAG: empty stage list")
 	}
 
+	// Fail-fast on plan shapes the dispatchers can't consume — see
+	// physical.ValidateNativeDAGShape. The 2026-04-23 SF10 A/B blew 10
+	// minutes on a multi-merge-tree timeout before surfacing the shape
+	// mismatch; this catches the same class at plan time.
+	if err := physical.ValidateNativeDAGShape(stages); err != nil {
+		return nil, err
+	}
+
 	// Register parent queryID in the tracker so SubjectQueryActive replies
 	// "active" for this query. Without this the worker's pre-execute
 	// is-query-still-active probe (worker.go:402) gets "0" back and terms

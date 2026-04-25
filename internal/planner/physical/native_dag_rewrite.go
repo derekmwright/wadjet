@@ -1,8 +1,52 @@
 package physical
 
 import (
+	"fmt"
 	"strings"
 )
+
+// ValidateNativeDAGShape walks the stage list and returns an error describing
+// the first stage whose shape the native-DAG executor cannot consume. Called
+// by the coordinator before dispatch so plan-shape problems surface as a clear
+// fail-fast at plan time, instead of as silent timeouts (Q01 SF10 2026-04-23
+// case) or mid-execution input-mapping errors (Q02 SF10 case).
+//
+// Each branch encodes a contract the executor relies on:
+//   - hash_join / broadcast_join: exactly 2 deps, no FusedJoins.
+//     buildTaskInputsForStage maps probe→[0] / build→[1]; >2 deps means the
+//     planner left a fused-broadcast tree the dispatcher can't unpack.
+//   - exchange-repartition / replicate / gather: exactly 1 dep (Exchange
+//     stages bridge a single child distribution to the parent's required
+//     distribution).
+//   - MergeGroupCount > 0: stage is the intermediate tier of a multi-level
+//     merge_aggregate / merge_sort tree. collapseMergeTreesForNativeDAG
+//     should have flattened it; if it slipped through, dispatch creates the
+//     SF10 N-stage thrash.
+func ValidateNativeDAGShape(stages []Stage) error {
+	for _, s := range stages {
+		switch s.Type {
+		case StageHashJoin, StageBroadcastJoin:
+			if len(s.Dependencies) != 2 {
+				return fmt.Errorf("native-DAG: %s stage %s has %d dependencies, expected 2 (FusedJoins should be disabled by the planner via Planner.UseEnsureDistribution; see fuseJoinStages call site)",
+					s.Type, s.ID, len(s.Dependencies))
+			}
+			if len(s.FusedJoins) > 0 {
+				return fmt.Errorf("native-DAG: %s stage %s carries %d FusedJoins which executeStageHashJoin / executeStageBroadcastJoin do not consume",
+					s.Type, s.ID, len(s.FusedJoins))
+			}
+		case StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather:
+			if len(s.Dependencies) != 1 {
+				return fmt.Errorf("native-DAG: %s stage %s has %d dependencies, expected 1",
+					s.Type, s.ID, len(s.Dependencies))
+			}
+		}
+		if s.MergeGroupCount > 0 {
+			return fmt.Errorf("native-DAG: stage %s has MergeGroupCount=%d (intermediate tier of a merge tree); collapseMergeTreesForNativeDAG should have flattened it",
+				s.ID, s.MergeGroupCount)
+		}
+	}
+	return nil
+}
 
 // fuseSortIntoPredecessor folds a Singleton sort stage into the compute
 // stage that produces its sole input, so the predecessor applies sort
