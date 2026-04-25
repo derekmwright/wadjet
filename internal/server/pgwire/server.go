@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/coordinator"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/citc-tech/wadjet/wadjet"
@@ -29,6 +30,7 @@ import (
 // queries to a Wadjet DB instance.
 type Server struct {
 	db           *wadjet.DB
+	coord        *coordinator.Coordinator // optional; SELECT routes through native-DAG when set
 	listener     net.Listener
 	logger       *slog.Logger
 	wg           sync.WaitGroup
@@ -39,6 +41,18 @@ type Server struct {
 	authProvider *auth.Provider // nil = no auth enforcement
 	querySem     chan struct{}  // nil = unlimited concurrent queries
 	queryQueue   int64         // atomic: number of queries waiting for admission
+}
+
+// SetCoordinator attaches a coordinator so SELECT statements stream through
+// coord.ExecuteSQL (native-DAG executor with batched output) instead of the
+// legacy wadjet.DB.Query path which materializes all rows into a single
+// CollectSink — root cause of the 2026-04-25 Q18 SF10 OOM.
+//
+// When unset, all paths fall back to db.Query (current behavior; safe for
+// any caller that hasn't migrated). When set, only SELECT queries route
+// through coord; DDL / DESCRIBE / introspection stay on db.Query for now.
+func (s *Server) SetCoordinator(coord *coordinator.Coordinator) {
+	s.coord = coord
 }
 
 // Config holds configuration for the pgwire server.
@@ -171,6 +185,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	c := &pgConn{
 		conn:         conn,
 		db:           s.db,
+		coord:        s.coord,
 		server:       s,
 		logger:       s.logger,
 		buf:          make([]byte, 0, 4096),
@@ -188,6 +203,7 @@ func (s *Server) handleConn(conn net.Conn) {
 type pgConn struct {
 	conn         net.Conn
 	db           *wadjet.DB
+	coord        *coordinator.Coordinator // optional: routes SELECT through native-DAG when non-nil
 	server       *Server        // back-pointer for query admission
 	logger       *slog.Logger
 	buf          []byte
@@ -761,7 +777,13 @@ func (c *pgConn) handleQuery(sql string) {
 		c.sendReadyForQuery()
 		return
 	}
-	result, err := c.db.Query(ctx, sql)
+	var result *wadjet.QueryResult
+	var err error
+	if coordRoutingEnabled() && c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
+		result, err = c.queryViaCoord(ctx, sql)
+	} else {
+		result, err = c.db.Query(ctx, sql)
+	}
 	c.server.releaseQuery()
 	if err != nil {
 		c.sendError("ERROR", "42000", err.Error())
@@ -949,7 +971,13 @@ func (c *pgConn) describeSQL(sql string) {
 	// order is non-deterministic in Go).
 	ctx, cancel := c.queryContext()
 	defer cancel()
-	result, err := c.db.Query(ctx, sql)
+	var result *wadjet.QueryResult
+	var err error
+	if coordRoutingEnabled() && c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
+		result, err = c.queryViaCoord(ctx, sql)
+	} else {
+		result, err = c.db.Query(ctx, sql)
+	}
 	if err != nil {
 		// Can't describe — send NoData rather than error (the error
 		// will surface when Execute runs).
@@ -1031,7 +1059,11 @@ func (c *pgConn) handleExecute(payload []byte) {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		var err error
-		result, err = c.db.Query(ctx, sql)
+		if coordRoutingEnabled() && c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
+			result, err = c.queryViaCoord(ctx, sql)
+		} else {
+			result, err = c.db.Query(ctx, sql)
+		}
 		if err != nil {
 			c.sendError("ERROR", "42000", err.Error())
 			return

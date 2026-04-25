@@ -912,6 +912,10 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		pgCfg.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
 	}
 	pgSrv := pgwire.NewServer(pgDB, pgCfg, logger)
+	// Route SELECT/WITH through coord.ExecuteSQL (native-DAG executor) when
+	// available — bypasses the legacy db.Query CollectSink materialization
+	// path that OOMed on Q18 SF10 (project_q18_sf10_native_dag_oom_2026-04-24).
+	pgSrv.SetCoordinator(coord)
 
 	errCh := make(chan error, 3)
 	go func() {
