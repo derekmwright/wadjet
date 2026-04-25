@@ -75,7 +75,9 @@ func (c *Coordinator) executeStageDAG(
 	var gatherStage physical.Stage
 	var hasGather bool
 	pending := make(map[string]physical.Stage, len(stages))
+	stageByID := make(map[string]physical.Stage, len(stages))
 	for _, s := range stages {
+		stageByID[s.ID] = s
 		if s.Type == physical.StageExchangeGather {
 			if hasGather {
 				return nil, fmt.Errorf("executeStageDAG: plan has multiple Gather stages")
@@ -146,12 +148,16 @@ func (c *Coordinator) executeStageDAG(
 				}
 				outputsMu.Lock()
 				prod := make(map[string]StageOutput, len(s.ScalarDependencies))
+				prodStages := make(map[string]physical.Stage, len(s.ScalarDependencies))
 				for _, pid := range s.ScalarDependencies {
 					prod[pid] = outputs[pid]
+					if ps, ok := stageByID[pid]; ok {
+						prodStages[pid] = ps
+					}
 				}
 				outputsMu.Unlock()
 				var subErr error
-				s, subErr = c.substituteScalarDependencies(gctx, s, prod)
+				s, subErr = c.substituteScalarDependencies(gctx, s, prod, prodStages)
 				if subErr != nil {
 					return fmt.Errorf("stage %s scalar substitution: %w", s.ID, subErr)
 				}

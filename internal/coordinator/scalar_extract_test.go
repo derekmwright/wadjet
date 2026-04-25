@@ -155,7 +155,7 @@ func TestSubstituteScalarDependencies(t *testing.T) {
 	// End-to-end contract check: substituteScalarDependencies with an empty
 	// stage returns the stage unchanged (no producer outputs).
 	stage := physical.Stage{ID: "s1"}
-	out, err := c.substituteScalarDependencies(ctx, stage, nil)
+	out, err := c.substituteScalarDependencies(ctx, stage, nil, nil)
 	if err != nil {
 		t.Fatalf("substitute empty: %v", err)
 	}

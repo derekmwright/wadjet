@@ -619,6 +619,16 @@ func (p *Planner) emitScalarProducerStages(stages *[]Stage, subquerySQL string) 
 	// here would fan out into partitioned WSHF output that the coordinator's
 	// scalar extractor can't read.
 	terminal.Tasks = 1
+	// Pin the subquery's projection on the terminal so the scalar extractor
+	// can apply post-aggregate wrappers like Q11's "SUM(...) * 0.0001". The
+	// producer chain only emits the raw aggregate (e.g. __agg_0 = SUM); the
+	// SELECT-level multiplier needs to be applied by the coordinator after
+	// reading the producer output. Reuses Stage.OutputRenames the same way
+	// Gather does — at extract time we'll detect the producer-vs-Gather
+	// case via context.
+	if renames := extractOutputRenames(logicalPlan); len(renames) > 0 {
+		terminal.OutputRenames = renames
+	}
 	return terminal.ID, nil
 }
 

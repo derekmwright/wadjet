@@ -15,6 +15,13 @@ import (
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
 
+func firstN(xs []int64, n int) []int64 {
+	if len(xs) > n {
+		return xs[:n]
+	}
+	return xs
+}
+
 // dumpStages prints the native-DAG stage list for a query without executing.
 // Useful for spotting plan-shape issues that produce wrong runtime output.
 func dumpStages(t *testing.T, c *Coordinator, ctx context.Context, label, sql string) {
@@ -254,9 +261,87 @@ func TestQ07_SF01_DumpRows(t *testing.T) {
 
 	// Q11 HAVING-with-scalar-subquery
 	q11 := tpch.TPCHQueries[11].SQL
-	dump("Q11_LEGACY", q11, false, 3)
-	dump("Q11_NATIVE", q11, true, 3)
+	dump("Q11_LEGACY", q11, false, 20)
+	dump("Q11_NATIVE", q11, true, 20)
 	dumpStages(t, coord, ctx, "Q11_STAGES", q11)
+
+	// Q11's subquery in isolation — check whether the threshold computation
+	// agrees between paths.
+	q11sub := `SELECT SUM(ps_supplycost * ps_availqty) * 0.0001 FROM partsupp
+		JOIN supplier ON ps_suppkey = s_suppkey
+		JOIN nation ON s_nationkey = n_nationkey
+		WHERE n_name = 'GERMANY'`
+	dump("Q11SUB_LEGACY", q11sub, false, 3)
+	dump("Q11SUB_NATIVE", q11sub, true, 3)
+
+	// Probe specific ps_partkeys to see if their values differ between paths.
+	q11pk := `SELECT ps_partkey, SUM(ps_supplycost * ps_availqty) AS value
+		FROM partsupp JOIN supplier ON ps_suppkey = s_suppkey
+		JOIN nation ON s_nationkey = n_nationkey
+		WHERE n_name = 'GERMANY' AND ps_partkey IN (100, 145, 146, 175, 1050, 1053)
+		GROUP BY ps_partkey ORDER BY ps_partkey`
+	dump("Q11PK_LEGACY", q11pk, false, 10)
+	dump("Q11PK_NATIVE", q11pk, true, 10)
+
+	// Probe the ACTUAL borderline partkeys identified by Q11_PK_DIFF.
+	q11pk2 := `SELECT ps_partkey, SUM(ps_supplycost * ps_availqty) AS value
+		FROM partsupp JOIN supplier ON ps_suppkey = s_suppkey
+		JOIN nation ON s_nationkey = n_nationkey
+		WHERE n_name = 'GERMANY' AND ps_partkey IN (447, 286, 862, 733, 201, 829)
+		GROUP BY ps_partkey ORDER BY ps_partkey`
+	dump("Q11BORDER_LEGACY", q11pk2, false, 10)
+	dump("Q11BORDER_NATIVE", q11pk2, true, 10)
+
+	// Raw diff Q11 — what partkeys are unique to each side?
+	{
+		coord.UseNativeDAG = false
+		legRes, _ := coord.ExecuteSQL(ctx, q11)
+		coord.UseNativeDAG = true
+		natRes, _ := coord.ExecuteSQL(ctx, q11)
+		coord.UseNativeDAG = false
+		legPK := map[int64]bool{}
+		natPK := map[int64]bool{}
+		for _, r := range legRes.Rows() {
+			if pk, ok := r["ps_partkey"]; ok {
+				legPK[toInt64(pk)] = true
+			}
+		}
+		for _, r := range natRes.Rows() {
+			if pk, ok := r["ps_partkey"]; ok {
+				natPK[toInt64(pk)] = true
+			}
+		}
+		var legOnly, natOnly []int64
+		for k := range legPK {
+			if !natPK[k] {
+				legOnly = append(legOnly, k)
+			}
+		}
+		for k := range natPK {
+			if !legPK[k] {
+				natOnly = append(natOnly, k)
+			}
+		}
+		fmt.Printf("=== Q11_PK_DIFF: legacy_unique=%d native_unique=%d ===\n", len(legOnly), len(natOnly))
+		fmt.Printf("  legacy-only first 10: %v\n", firstN(legOnly, 10))
+		fmt.Printf("  native-only first 10: %v\n", firstN(natOnly, 10))
+	}
+
+	// Look at specific partkeys' presence in Q11's full result by adding
+	// "AND ps_partkey = X" to Q11's outer query and checking row presence.
+	// Avoids tricky interactions with my dumpRowSets canonicalization.
+	q11full1050 := `SELECT ps_partkey, SUM(ps_supplycost * ps_availqty) as value
+		FROM partsupp JOIN supplier ON ps_suppkey = s_suppkey JOIN nation ON s_nationkey = n_nationkey
+		WHERE n_name = 'GERMANY' AND ps_partkey IN (1050, 1053, 145)
+		GROUP BY ps_partkey
+		HAVING SUM(ps_supplycost * ps_availqty) > (
+			SELECT SUM(ps_supplycost * ps_availqty) * 0.0001 FROM partsupp
+			JOIN supplier ON ps_suppkey = s_suppkey
+			JOIN nation ON s_nationkey = n_nationkey
+			WHERE n_name = 'GERMANY')
+		ORDER BY value DESC`
+	dump("Q11SPEC_LEGACY", q11full1050, false, 10)
+	dump("Q11SPEC_NATIVE", q11full1050, true, 10)
 
 	// Q08 minus the WHERE filters — does it return any rows?
 	q08NoFilter := `SELECT

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -18,10 +19,17 @@ import (
 // aggregate, for example). Returns the value formatted as a SQL literal
 // ready for string substitution into a filter expression.
 //
+// When projection is non-nil (the producer's terminal stage carries
+// OutputRenames from its subquery's SELECT list), the SCALAR is the value
+// of the projection's expression rather than the raw first column. Required
+// for Q11 where the subquery is "SELECT SUM(...) * 0.0001 FROM ..." — the
+// producer chain only emits the raw SUM under __agg_0 and the * 0.0001
+// wrapper has to be applied at extract time.
+//
 // Used by executeStageDAG to late-bind CTE-referencing scalar subqueries
 // so both the filter-carrying stage and the subquery share the same
 // distributed accumulation path — see Stage.ScalarDependencies.
-func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOutput) (string, error) {
+func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOutput, projection []physical.OutputRename) (string, error) {
 	files := flattenStageFiles(out)
 	if len(files) == 0 {
 		return "", fmt.Errorf("producer stage emitted no output files")
@@ -45,12 +53,79 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 		if err != nil {
 			return "", fmt.Errorf("read shuffle %s: %w", path, err)
 		}
-		lit, ok := firstScalarLiteral(batches)
+		lit, ok := scalarFromBatches(batches, projection)
 		if ok {
 			return lit, nil
 		}
 	}
 	return "", fmt.Errorf("producer stage output has no rows")
+}
+
+// scalarFromBatches extracts the scalar value from the producer's output
+// batches. When projection contains an Expr-bearing rename (the subquery's
+// wrapped-aggregate SELECT — e.g. SUM(...) * 0.0001), compile and evaluate
+// the expression for row 0 and return its formatted literal. Otherwise fall
+// back to firstScalarLiteral on the raw first column.
+func scalarFromBatches(batches []*batch.RecordBatch, projection []physical.OutputRename) (string, bool) {
+	for _, r := range projection {
+		if r.Expr == nil {
+			continue
+		}
+		compiled, err := expr.Compile(r.Expr)
+		if err != nil {
+			break // fall back to raw extraction
+		}
+		for _, b := range batches {
+			if b == nil || b.ActiveLen() == 0 {
+				continue
+			}
+			row := 0
+			if b.Sel != nil && len(b.Sel) > 0 {
+				row = int(b.Sel[0])
+			}
+			v := compiled.Eval(b, row)
+			return formatGoValue(v), true
+		}
+	}
+	return firstScalarLiteral(batches)
+}
+
+// formatGoValue stringifies an arbitrary Go value into its SQL-literal
+// form for filter substitution. Mirrors planner.scalarToLiteral.
+func formatGoValue(v any) string {
+	if v == nil {
+		return "null"
+	}
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return "null"
+		}
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case float32:
+		f := float64(x)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return "null"
+		}
+		return strconv.FormatFloat(f, 'f', -1, 32)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case int32:
+		return strconv.FormatInt(int64(x), 10)
+	case int:
+		return strconv.FormatInt(int64(x), 10)
+	case string:
+		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
+	case []byte:
+		return "'" + strings.ReplaceAll(string(x), "'", "''") + "'"
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
 // firstScalarLiteral returns the SQL-literal rendering of the first column of
@@ -136,7 +211,12 @@ func formatScalar(vec *batch.Vector, row int, typ parquet.TypeID) string {
 // Returns a copy of the stage; the input stage is not modified so concurrent
 // reads elsewhere remain safe. When the producer has no ScalarDependencies
 // the input is returned as-is.
-func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage physical.Stage, producerOutputs map[string]StageOutput) (physical.Stage, error) {
+//
+// producerStages provides the producer terminal stage so that any
+// projection (OutputRenames) attached to the producer — used for wrapped-
+// aggregate subqueries like Q11's "SUM(...) * 0.0001" — gets applied
+// during scalar extraction.
+func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage physical.Stage, producerOutputs map[string]StageOutput, producerStages map[string]physical.Stage) (physical.Stage, error) {
 	if len(stage.ScalarDependencies) == 0 {
 		return stage, nil
 	}
@@ -147,7 +227,11 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage ph
 		if !ok {
 			return stage, fmt.Errorf("missing producer output for %s (stage %s)", producerID, stage.ID)
 		}
-		lit, err := c.readScalarFromStageOutput(ctx, out)
+		var projection []physical.OutputRename
+		if ps, hasStage := producerStages[producerID]; hasStage {
+			projection = ps.OutputRenames
+		}
+		lit, err := c.readScalarFromStageOutput(ctx, out, projection)
 		if err != nil {
 			return stage, fmt.Errorf("extracting scalar for %s: %w", placeholder, err)
 		}
