@@ -84,8 +84,7 @@ func TestNativeDAG_CountMultiFile_MergesAsSum(t *testing.T) {
 	}
 	ingestMultiFile(t, ctx, store, cat, "count_mf", schema, chunks)
 
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	res, err := coord.ExecuteSQL(ctx, "SELECT k, COUNT(*) AS n FROM count_mf GROUP BY k")
 	if err != nil {
 		t.Fatalf("native DAG: %v", err)
@@ -128,8 +127,7 @@ func TestNativeDAG_SumMultiFile_MergesAsSum(t *testing.T) {
 	}
 	ingestMultiFile(t, ctx, store, cat, "sum_mf", schema, chunks)
 
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	res, err := coord.ExecuteSQL(ctx, "SELECT k, SUM(v) AS s FROM sum_mf GROUP BY k")
 	if err != nil {
 		t.Fatalf("native DAG: %v", err)
@@ -180,8 +178,7 @@ func TestNativeDAG_AvgMultiFile_FallbackOrCorrect(t *testing.T) {
 	// Naive avg-of-per-file-avgs: k=1: (10 + 30)/2 = 20 (wrong, true is 25); k=2: (100 + 250)/2 = 175 (wrong, true is 200).
 	ingestMultiFile(t, ctx, store, cat, "avg_mf", schema, chunks)
 
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	res, err := coord.ExecuteSQL(ctx, "SELECT k, AVG(v) AS a FROM avg_mf GROUP BY k")
 	if err != nil {
 		t.Fatalf("native DAG: %v", err)

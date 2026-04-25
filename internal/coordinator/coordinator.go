@@ -78,11 +78,16 @@ type Coordinator struct {
 	// Zero means use the default (2GB). Exported for testing with small datasets.
 	BuildCacheThreshold int64
 
-	// UseNativeDAG routes Exchange-annotated plans through executeStageDAG
-	// instead of the legacy four-mode switch. Default off; flipped on by the
-	// harness --use-native-dag flag to run SF10 A/B in local mode. See
-	// docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md
-	UseNativeDAG bool
+	// LegacyMode routes queries through the legacy four-mode switch
+	// (probe-split / single-worker / shuffle-distributed) instead of the
+	// native-DAG executor. Default false — native-DAG is the canonical path
+	// going forward. The legacy path remains as an opt-in fallback for
+	// queries native-DAG can't yet handle (currently: SF10 EC2 cases per
+	// project_distribution_phase_3_sf10_ab_2026-04-23.md). To be removed
+	// once native-DAG SF10 parity is verified.
+	//
+	// See docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md
+	LegacyMode bool
 
 	mu         sync.Mutex
 	resultSubs map[string]context.CancelFunc          // queryID -> cancel
@@ -465,7 +470,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	// Generate distributed stages
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
-	if c.UseNativeDAG {
+	if !c.LegacyMode {
 		planner.UseEnsureDistribution = true
 	}
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
@@ -473,10 +478,12 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}
 
-	// Native-DAG path (Phase 3): bypass the legacy four-mode switch when the
-	// planner emitted Exchange stages. The stage DAG executor dispatches each
-	// stage via its Type-specific helper and returns when it hits Gather.
-	if c.UseNativeDAG && hasExchangeStages(physStages) {
+	// Native-DAG is the default execution path. The legacy four-mode switch
+	// below is the fallback for queries that native-DAG can't yet consume
+	// (currently: some SF10 shapes — multi-level merge fan-outs and fused-
+	// broadcast joins with >2 deps per
+	// project_distribution_phase_3_sf10_ab_2026-04-23.md).
+	if !c.LegacyMode && hasExchangeStages(physStages) {
 		c.logger.Info("routing to native DAG executor",
 			"query", queryID, "stages", len(physStages))
 		gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())

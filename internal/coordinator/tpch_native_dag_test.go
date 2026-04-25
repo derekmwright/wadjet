@@ -149,9 +149,7 @@ func TestTPCHNativeDAG_SF001(t *testing.T) {
 	for _, qNum := range qNums {
 		q := tpch.TPCHQueries[qNum]
 		t.Run(fmt.Sprintf("Q%02d_%s", qNum, q.Name), func(t *testing.T) {
-			coord.UseNativeDAG = true
-			defer func() { coord.UseNativeDAG = false }()
-
+			// Native-DAG is the default; no opt-in needed.
 			res, err := coord.ExecuteSQL(ctx, q.SQL)
 			if err != nil {
 				failures = append(failures, fmt.Sprintf("Q%02d: %v", qNum, err))

@@ -44,8 +44,7 @@ func TestNativeDAG_SimpleAggregate(t *testing.T) {
 	}
 
 	// Native DAG.
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	natRes, err := coord.ExecuteSQL(ctx, sql)
 	if err != nil {
 		t.Fatalf("native DAG ExecuteSQL: %v", err)
@@ -78,8 +77,7 @@ func TestNativeDAG_SumMerge(t *testing.T) {
 	}
 	ingestTestData(t, ctx, store, cat, "sum_merge", schema, rows)
 
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	res, err := coord.ExecuteSQL(ctx, "SELECT k, SUM(v) AS total FROM sum_merge GROUP BY k")
 	if err != nil {
 		t.Fatalf("native DAG: %v", err)
@@ -136,8 +134,7 @@ func TestNativeDAG_ScanAggregateWithFilter(t *testing.T) {
 		legacyCounts[toInt64(r["k"])] = toInt64(r["n"])
 	}
 
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	natRes, err := coord.ExecuteSQL(ctx, sql)
 	if err != nil {
 		t.Fatalf("native DAG ExecuteSQL: %v", err)
@@ -199,8 +196,7 @@ func TestNativeDAG_CountMultiPartial(t *testing.T) {
 		{"k": int64(2), "v": int64(40)},
 	})
 
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	res, err := coord.ExecuteSQL(ctx, "SELECT k, COUNT(*) AS n FROM count_mp GROUP BY k")
 	if err != nil {
 		t.Fatalf("native DAG: %v", err)
@@ -235,8 +231,7 @@ func TestNativeDAG_AvgFallback(t *testing.T) {
 		{"k": int64(2), "v": int64(60)}, // avg = 50
 	})
 
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	res, err := coord.ExecuteSQL(ctx, "SELECT k, AVG(v) AS a FROM avg_fb GROUP BY k")
 	if err != nil {
 		t.Fatalf("native DAG: %v", err)
@@ -290,8 +285,7 @@ func TestNativeDAG_Join(t *testing.T) {
 		t.Fatalf("legacy ExecuteSQL: %v", err)
 	}
 
-	coord.UseNativeDAG = true
-	defer func() { coord.UseNativeDAG = false }()
+	// Native-DAG is the default; no opt-in needed.
 	natRes, err := coord.ExecuteSQL(ctx, sql)
 	if err != nil {
 		t.Fatalf("native DAG ExecuteSQL: %v", err)

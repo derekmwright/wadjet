@@ -119,8 +119,8 @@ func TestQ07_SF01_DumpRows(t *testing.T) {
 	}
 
 	dump := func(label, sql string, useNative bool, maxRows int) []string {
-		coord.UseNativeDAG = useNative
-		defer func() { coord.UseNativeDAG = false }()
+		coord.LegacyMode = !useNative
+		defer func() { coord.LegacyMode = false }()
 		res, err := coord.ExecuteSQL(ctx, sql)
 		if err != nil {
 			t.Fatalf("%s ExecuteSQL: %v", label, err)
@@ -294,11 +294,10 @@ func TestQ07_SF01_DumpRows(t *testing.T) {
 
 	// Raw diff Q11 — what partkeys are unique to each side?
 	{
-		coord.UseNativeDAG = false
+		coord.LegacyMode = true
 		legRes, _ := coord.ExecuteSQL(ctx, q11)
-		coord.UseNativeDAG = true
+		coord.LegacyMode = false
 		natRes, _ := coord.ExecuteSQL(ctx, q11)
-		coord.UseNativeDAG = false
 		legPK := map[int64]bool{}
 		natPK := map[int64]bool{}
 		for _, r := range legRes.Rows() {

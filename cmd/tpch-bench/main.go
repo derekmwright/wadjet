@@ -58,7 +58,7 @@ func main() {
 		memProf     = flag.String("memprofile", "", "Write memory profile to file")
 		profDir     = flag.String("profdir", "", "Directory for per-query profiles")
 		dataPrefix  = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
-		useNativeDAG = flag.Bool("use-native-dag", false, "Route distributed queries through the Phase 3 native-DAG executor")
+		legacyMode = flag.Bool("legacy-mode", false, "Route queries through the legacy four-mode executor (default: native-DAG)")
 	)
 	flag.Parse()
 
@@ -160,9 +160,9 @@ func main() {
 
 	if isDistributed {
 		db, coord, nc = setupDistributed(ctx, logger, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *natsPort, *workers)
-		coord.UseNativeDAG = *useNativeDAG
-		if *useNativeDAG {
-			log.Printf("native-DAG routing enabled")
+		coord.LegacyMode = *legacyMode
+		if *legacyMode {
+			log.Printf("legacy-mode routing enabled (native-DAG bypassed)")
 		}
 	} else if useS3 {
 		db = setupS3Standalone(ctx, *s3Endpoint, *s3Region, *s3Bucket, *ssl)

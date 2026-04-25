@@ -62,7 +62,10 @@ func (c *Coordinator) executeStageDAG(
 	}
 	c.tracker.Register(queryID, sql, trackerStages, stageOrder)
 	c.tracker.Start(queryID)
-	defer c.tracker.Delete(queryID)
+	// Mark Complete (not Delete) so GetQueryStatus / GetQueryResults can
+	// observe the finished query. ReapCompleted (cleanup.go) prunes old
+	// completed entries on a periodic sweep — same pattern legacy uses.
+	defer c.tracker.Complete(queryID)
 
 	// Separate the terminal Gather from the DAG body: Gather is always run
 	// last, on the coordinator's NATS reply subscription, and returns the

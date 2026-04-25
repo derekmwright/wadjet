@@ -89,7 +89,7 @@ func TestTPCHNativeDAG_SF01(t *testing.T) {
 			qCtx, qCancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer qCancel()
 
-			coord.UseNativeDAG = false
+			coord.LegacyMode = true
 			startLegacy := time.Now()
 			legacyRes, err := coord.ExecuteSQL(qCtx, q.SQL)
 			if err != nil {
@@ -97,10 +97,9 @@ func TestTPCHNativeDAG_SF01(t *testing.T) {
 			}
 			legacyElapsed := time.Since(startLegacy)
 
-			coord.UseNativeDAG = true
+			coord.LegacyMode = false
 			startNat := time.Now()
 			natRes, err := coord.ExecuteSQL(qCtx, q.SQL)
-			coord.UseNativeDAG = false
 			if err != nil {
 				t.Fatalf("native-DAG Q%02d: %v", qNum, err)
 			}
