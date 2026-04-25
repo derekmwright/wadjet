@@ -140,7 +140,6 @@ func TestTPCHNativeDAG_SF01(t *testing.T) {
 			//        Suspect IN-subquery + outer-aggregate column collision.
 			valueSkip := map[int]string{
 				11: "wrapped scalar subquery in HAVING",
-				17: "post-aggregate divisor (SUM/7.0) not applied",
 				18: "outer SUM(l_quantity) NULL when IN-subquery present",
 			}
 			if reason, skip := valueSkip[qNum]; skip {

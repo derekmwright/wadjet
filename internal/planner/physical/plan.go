@@ -158,10 +158,16 @@ type Stage struct {
 
 // OutputRename pairs a worker-emitted column name with the SELECT-list alias
 // the user wrote. The coordinator rewrites batch and result schemas after
-// Gather using these pairs.
+// Gather using these pairs. When Expr is non-nil, the coordinator compiles
+// and evaluates the expression per row instead of doing a name rename — used
+// for wrapped aggregates ("SUM(x)/7.0 AS y" emits Expr=BinaryOp{ColRef("__agg_0"), /, 7.0}
+// because the logical planner replaces nested aggregates with refs to their
+// synthetic OutputCol). From is the primary input column (used as the
+// existence check); other column refs in Expr resolve via ColumnIndexFallback.
 type OutputRename struct {
 	From string
 	To   string
+	Expr plansql.Node
 }
 
 // WindowColSpec defines a window function column in a stage.
@@ -1232,6 +1238,7 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 	renames := make([]OutputRename, 0, len(proj))
 	for _, p := range proj {
 		var src, target string
+		var astExpr plansql.Node
 		switch {
 		case p.IsAgg:
 			// AggSpec.OutputCol == alias; if no alias, fall back to expr.
@@ -1240,6 +1247,22 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 				target = strings.ToLower(p.Expr)
 			}
 			src = target
+		case p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) && referencesSyntheticAgg(p.ASTExpr):
+			// Wrapped aggregate — the logical layer replaced aggregate calls
+			// with ColRefs to their __agg_N synthetic columns. Compile+eval
+			// at gather time so the divisor (e.g. "/7.0" in Q17's avg_yearly)
+			// gets applied. We restrict this to expressions that reference
+			// __agg_N because pure scalar expressions like SUBSTR(o_orderdate,
+			// 1, 4) are computed by the worker's GROUP BY / project pipeline
+			// and surface as a column under the expression's lowercased text
+			// — those need a plain rename, not eval (and eval would mistype
+			// SUBSTR's string output as float64).
+			target = p.Alias
+			if target == "" {
+				target = strings.ToLower(p.Expr)
+			}
+			astExpr = p.ASTExpr
+			src = firstColRefName(p.ASTExpr)
 		case p.Column != "" && p.Alias != "":
 			// Bare column reference. Worker may emit qualified ("n1.n_name")
 			// or unqualified ("n_name") depending on the upstream join chain.
@@ -1261,9 +1284,107 @@ func extractOutputRenames(root *logical.Node) []OutputRename {
 		default:
 			continue
 		}
-		renames = append(renames, OutputRename{From: src, To: target})
+		renames = append(renames, OutputRename{From: src, To: target, Expr: astExpr})
 	}
 	return renames
+}
+
+// isSimpleColRefForRename is the OutputRenames-specific variant of
+// isSimpleColRef. The base helper at line 4308 also returns true for Lit
+// nodes; here we only want to skip the eval path when the projection is
+// strictly a column reference (or a parenthesized one).
+func isSimpleColRefForRename(n plansql.Node) bool {
+	if n == nil {
+		return false
+	}
+	if _, ok := n.(*plansql.ColRef); ok {
+		return true
+	}
+	if p, ok := n.(*plansql.ParenNode); ok {
+		return isSimpleColRefForRename(p.Inner)
+	}
+	return false
+}
+
+// referencesSyntheticAgg reports whether an AST contains any ColRef whose
+// name starts with "__agg_" — the marker the logical layer's nested-
+// aggregate rewrite uses for synthetic column names. Lets the gather rewrite
+// distinguish "SUM(x)/7.0" (rewritten to "__agg_0/7.0", needs eval) from
+// "SUBSTR(o_orderdate, 1, 4)" (worker-computed, needs rename).
+func referencesSyntheticAgg(n plansql.Node) bool {
+	if n == nil {
+		return false
+	}
+	switch x := n.(type) {
+	case *plansql.ColRef:
+		return strings.HasPrefix(x.Column, "__agg_")
+	case *plansql.BinaryOp:
+		return referencesSyntheticAgg(x.Left) || referencesSyntheticAgg(x.Right)
+	case *plansql.UnaryOp:
+		return referencesSyntheticAgg(x.Inner)
+	case *plansql.CmpExpr:
+		return referencesSyntheticAgg(x.Left) || referencesSyntheticAgg(x.Right)
+	case *plansql.ParenNode:
+		return referencesSyntheticAgg(x.Inner)
+	case *plansql.FuncCallNode:
+		for _, a := range x.Args {
+			if referencesSyntheticAgg(a) {
+				return true
+			}
+		}
+	case *plansql.CastNode:
+		return referencesSyntheticAgg(x.Inner)
+	case *plansql.CaseNode:
+		if referencesSyntheticAgg(x.Subject) {
+			return true
+		}
+		for _, w := range x.Whens {
+			if referencesSyntheticAgg(w.Cond) || referencesSyntheticAgg(w.Result) {
+				return true
+			}
+		}
+		return referencesSyntheticAgg(x.Else)
+	}
+	return false
+}
+
+// firstColRefName returns the first column reference name in an AST, used as
+// the existence anchor for the gather rewrite. Returns "" when no ColRef is
+// found (very rare — pure-literal projections).
+func firstColRefName(n plansql.Node) string {
+	if n == nil {
+		return ""
+	}
+	switch x := n.(type) {
+	case *plansql.ColRef:
+		if x.Table != "" {
+			return x.Table + "." + x.Column
+		}
+		return x.Column
+	case *plansql.BinaryOp:
+		if v := firstColRefName(x.Left); v != "" {
+			return v
+		}
+		return firstColRefName(x.Right)
+	case *plansql.UnaryOp:
+		return firstColRefName(x.Inner)
+	case *plansql.CmpExpr:
+		if v := firstColRefName(x.Left); v != "" {
+			return v
+		}
+		return firstColRefName(x.Right)
+	case *plansql.ParenNode:
+		return firstColRefName(x.Inner)
+	case *plansql.FuncCallNode:
+		for _, a := range x.Args {
+			if v := firstColRefName(a); v != "" {
+				return v
+			}
+		}
+	case *plansql.CastNode:
+		return firstColRefName(x.Inner)
+	}
+	return ""
 }
 
 // findOutputProjectionsForRename walks down through Sort/Limit/Filter wrappers

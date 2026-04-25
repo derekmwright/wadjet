@@ -13,6 +13,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/expr"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -219,12 +220,34 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 	if gr == nil || len(renames) == 0 {
 		return
 	}
+	// Pre-compile any expression-bearing renames (wrapped aggregates etc.)
+	// once per call. Compilation can fail (e.g., unsupported AST shape); on
+	// failure we degrade the whole pass to rename-only.
+	compiledExprs := make(map[int]expr.Expr, len(renames))
+	for i, r := range renames {
+		if r.Expr == nil {
+			continue
+		}
+		e, cerr := expr.Compile(r.Expr)
+		if cerr != nil {
+			// Compilation failure → degrade to rename-only.
+			compiledExprs = nil
+			break
+		}
+		compiledExprs[i] = e
+	}
 	// Determine if every source resolves in the schema. If not, degrade
 	// to rename-only behavior to avoid hiding the entire result.
 	canProject := true
-	if len(gr.batches) > 0 && len(gr.batches[0].Schema) > 0 {
+	if compiledExprs == nil {
+		canProject = false
+	}
+	if canProject && len(gr.batches) > 0 && len(gr.batches[0].Schema) > 0 {
 		schema := gr.batches[0].Schema
 		for _, r := range renames {
+			if r.Expr != nil {
+				continue // existence check uses expression evaluation
+			}
 			found := false
 			for _, c := range schema {
 				if strings.EqualFold(c.Name, r.From) {
@@ -237,7 +260,7 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 				break
 			}
 		}
-	} else if len(gr.columns) > 0 {
+	} else if len(gr.columns) > 0 && len(gr.batches) == 0 {
 		// No batches but columns set — fall back to rename-only.
 		canProject = false
 	}
@@ -264,7 +287,7 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 		}
 		return
 	}
-	// Project: keep only the renamed columns, in renames order.
+	// Project: keep only the renamed/computed columns, in renames order.
 	gr.columns = make([]string, len(renames))
 	for i, r := range renames {
 		gr.columns[i] = r.To
@@ -273,10 +296,17 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 		if b == nil {
 			continue
 		}
-		// Map each rename target to the source column index in the batch.
 		newCols := make([]*batch.Vector, len(renames))
 		newSchema := make([]parquet.Column, len(renames))
 		for i, r := range renames {
+			if e, ok := compiledExprs[i]; ok {
+				// Expression-bearing rename: evaluate per row, build a new
+				// column. Used for wrapped aggregates ("SUM(x)/7.0") whose
+				// post-aggregate divisor needs to be applied at gather time.
+				newCols[i] = evalExprColumn(e, b)
+				newSchema[i] = parquet.Column{Name: r.To, Type: parquet.TypeFloat64, Nullable: true}
+				continue
+			}
 			srcIdx := -1
 			for j, c := range b.Schema {
 				if strings.EqualFold(c.Name, r.From) {
@@ -285,7 +315,7 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 				}
 			}
 			if srcIdx < 0 {
-				// Should not happen — we checked canProject above. Defensive.
+				// Should not happen — canProject was true. Defensive.
 				continue
 			}
 			newCols[i] = b.Columns[srcIdx]
@@ -300,6 +330,61 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 		}
 		gr.batches[bi] = nb
 	}
+}
+
+// evalExprColumn builds a new Vector by evaluating e against each row of b.
+// Used by applyOutputRenames to materialize wrapped-aggregate columns at
+// gather time. Output type is float64 (the dominant case for wrapped
+// aggregates: SUM/N, AVG-like ratios). Other types may need extension when
+// new query shapes surface.
+func evalExprColumn(e expr.Expr, b *batch.RecordBatch) *batch.Vector {
+	v := batch.NewVector(parquet.TypeFloat64, b.Len)
+	if cap(v.Float64Data) < b.Len {
+		v.Float64Data = make([]float64, b.Len)
+	} else {
+		v.Float64Data = v.Float64Data[:b.Len]
+	}
+	emit := func(row, dst int) {
+		val := e.Eval(b, row)
+		if val == nil {
+			v.Nulls.SetNull(dst)
+			return
+		}
+		switch x := val.(type) {
+		case float64:
+			v.Float64Data[dst] = x
+			v.Nulls.SetValid(dst)
+		case float32:
+			v.Float64Data[dst] = float64(x)
+			v.Nulls.SetValid(dst)
+		case int64:
+			v.Float64Data[dst] = float64(x)
+			v.Nulls.SetValid(dst)
+		case int32:
+			v.Float64Data[dst] = float64(x)
+			v.Nulls.SetValid(dst)
+		case int:
+			v.Float64Data[dst] = float64(x)
+			v.Nulls.SetValid(dst)
+		case bool:
+			if x {
+				v.Float64Data[dst] = 1
+			}
+			v.Nulls.SetValid(dst)
+		default:
+			v.Nulls.SetNull(dst)
+		}
+	}
+	if b.Sel != nil {
+		for i, src := range b.Sel {
+			emit(int(src), i)
+		}
+	} else {
+		for i := 0; i < b.Len; i++ {
+			emit(i, i)
+		}
+	}
+	return v
 }
 
 // dispatchShuffleStage executes a StageExchangeRepartition: reads upstream
