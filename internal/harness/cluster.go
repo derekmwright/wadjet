@@ -36,11 +36,6 @@ type ClusterConfig struct {
 	Endpoint    string
 	SSL         bool
 
-	// LegacyMode forces the spawned coordinator into the legacy four-mode
-	// executor via `wadjet serve --legacy-mode`. Default false; native-DAG
-	// is the canonical execution path.
-	LegacyMode bool
-
 	Logger *slog.Logger
 }
 
@@ -133,9 +128,6 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 		"--nats-store-dir=" + filepath.Join(c.cfg.RunDir, "nats"),
 	}
 	coordArgs = append(coordArgs, storageArgs(c.cfg)...)
-	if c.cfg.LegacyMode {
-		coordArgs = append(coordArgs, "--legacy-mode")
-	}
 	coord, err := c.spawn("coord", coordArgs)
 	if err != nil {
 		return fmt.Errorf("spawning coordinator: %w", err)

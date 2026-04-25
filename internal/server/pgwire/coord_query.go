@@ -2,28 +2,11 @@ package pgwire
 
 import (
 	"context"
-	"os"
 	"strings"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/wadjet"
 )
-
-// coordRoutingEnabled returns true when WADJET_PGWIRE_USE_COORD is set to a
-// truthy value. Default OFF: the native-DAG path through coord exposed a class
-// of stage-output file-path mismatches in standalone+FileStore mode (Q01
-// "object not found" cascade on 2026-04-25) that don't reproduce in the
-// in-process MemStore tests. Until those are root-caused and fixed, pgwire
-// stays on the legacy db.Query path by default. Opt-in via env to debug or
-// to validate after the underlying bugs land.
-func coordRoutingEnabled() bool {
-	v := os.Getenv("WADJET_PGWIRE_USE_COORD")
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "", "0", "false", "no":
-		return false
-	}
-	return true
-}
 
 // shouldRouteThroughCoord reports whether a SQL statement should go through
 // coord.ExecuteSQL (the native-DAG executor). True for SELECT/WITH; false for

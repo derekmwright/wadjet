@@ -2,11 +2,14 @@
 /unifi-ingest
 /tpch-seed
 /wadjet
+/wadjet_bin
 /wadjet-arm64
 /wadjet-amd64
 /tpch-bench
 /tpch-bench-arm64
 /tpch-bench-local
+/tpch-harness
+/harness-result.json
 
 # Terraform
 *.plan

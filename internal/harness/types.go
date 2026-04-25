@@ -50,11 +50,6 @@ type Config struct {
 	Endpoint   string
 	SSL        bool
 	DataPrefix string // prefix under Bucket containing table data (e.g. "tables/")
-
-	// LegacyMode: pass --legacy-mode to the spawned coordinator. Native-DAG
-	// is the default execution path; legacy is the opt-in fallback for
-	// queries native-DAG can't yet handle.
-	LegacyMode bool
 }
 
 // QueryMeasurement is the result of running one query (or micro).

@@ -779,7 +779,7 @@ func (c *pgConn) handleQuery(sql string) {
 	}
 	var result *wadjet.QueryResult
 	var err error
-	if coordRoutingEnabled() && c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
+	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
 		result, err = c.queryViaCoord(ctx, sql)
 	} else {
 		result, err = c.db.Query(ctx, sql)
@@ -973,7 +973,7 @@ func (c *pgConn) describeSQL(sql string) {
 	defer cancel()
 	var result *wadjet.QueryResult
 	var err error
-	if coordRoutingEnabled() && c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
+	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
 		result, err = c.queryViaCoord(ctx, sql)
 	} else {
 		result, err = c.db.Query(ctx, sql)
@@ -1059,7 +1059,7 @@ func (c *pgConn) handleExecute(payload []byte) {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		var err error
-		if coordRoutingEnabled() && c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
+		if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
 			result, err = c.queryViaCoord(ctx, sql)
 		} else {
 			result, err = c.db.Query(ctx, sql)

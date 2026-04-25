@@ -78,17 +78,6 @@ type Coordinator struct {
 	// Zero means use the default (2GB). Exported for testing with small datasets.
 	BuildCacheThreshold int64
 
-	// LegacyMode routes queries through the legacy four-mode switch
-	// (probe-split / single-worker / shuffle-distributed) instead of the
-	// native-DAG executor. Default false — native-DAG is the canonical path
-	// going forward. The legacy path remains as an opt-in fallback for
-	// queries native-DAG can't yet handle (currently: SF10 EC2 cases per
-	// project_distribution_phase_3_sf10_ab_2026-04-23.md). To be removed
-	// once native-DAG SF10 parity is verified.
-	//
-	// See docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md
-	LegacyMode bool
-
 	mu         sync.Mutex
 	resultSubs map[string]context.CancelFunc          // queryID -> cancel
 	queryMetas map[string]*queryMeta                  // queryID -> metadata for result retrieval
@@ -475,352 +464,36 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 	planStr := logicalPlan.PrettyPrint(0)
 
-	// Generate distributed stages
+	// Generate distributed stages via native-DAG (UseEnsureDistribution).
+	// The legacy four-mode switch was deleted 2026-04-25 after Q18 SF10
+	// validation confirmed native-DAG handles SF10 within memory budget
+	// (project_q18_sf10_native_dag_oom_2026-04-24).
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
-	if !c.LegacyMode {
-		planner.UseEnsureDistribution = true
-	}
+	planner.UseEnsureDistribution = true
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}
 
-	// Native-DAG is the default execution path. The legacy four-mode switch
-	// below is the fallback for queries that native-DAG can't yet consume
-	// (currently: some SF10 shapes — multi-level merge fan-outs and fused-
-	// broadcast joins with >2 deps per
-	// project_distribution_phase_3_sf10_ab_2026-04-23.md).
-	if !c.LegacyMode && hasExchangeStages(physStages) {
-		c.logger.Info("routing to native DAG executor",
-			"query", queryID, "stages", len(physStages))
-		gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())
-		if gerr != nil {
-			return &SQLResult{
-				QueryID: queryID,
-				Error:   gerr.Error(),
-				Elapsed: time.Since(start),
-				Plan:    planStr,
-			}, fmt.Errorf("native DAG: %w", gerr)
-		}
-		return &SQLResult{
-			QueryID:   queryID,
-			Columns:   gr.columns,
-			Batches:   gr.batches,
-			TotalRows: gr.totalRows,
-			Elapsed:   time.Since(start),
-			Plan:      planStr,
-		}, nil
-	}
-
-	// Log stage summary for debugging
-	for _, s := range physStages {
-		c.logger.Debug("distributed stage", "query", queryID, "stage", s.ID, "type", s.Type,
-			"tasks", s.Tasks, "deps", s.Dependencies, "joinType", s.JoinType,
-			"leftKeys", s.JoinLeftKeys, "rightKeys", s.JoinRightKeys,
-			"filters", s.FilterExprs, "joinFilter", s.JoinFilter,
-			"buildAlias", s.BuildTableAlias)
-	}
-
-	// Route all queries through pipeline execution. Three modes:
-	// 1. Shuffle-distributed: when the largest build table exceeds
-	//    shuffleBuildThreshold (4 GB), partition both join sides on the join
-	//    keys so per-worker memory scales 1/N instead of being broadcast-duplicated.
-	// 2. Probe-split: partition probe table files across workers; build tables
-	//    are broadcast (or cached). Fast path for small/medium builds.
-	// 3. Single-worker: entire query on one worker.
-	var probeSplitMergeInfo *logical.MergeInfo
-	var shuffleTasks map[string][]distributed.Task
-	probeAlias, probeFiles, canProbeSplit := physical.CanProbeSplit(physStages, c.workers.Count())
-	mergeInfo := logical.ExtractMergeInfo(logicalPlan)
-	shuffleCand, shuffleApplicable := physical.PickShuffleCandidate(physStages, shuffleBuildThreshold)
-	// Option 2 Phase 1 (spec: 2026-04-18-shuffle-distributed-aggregate.md):
-	// detect joins whose build side is a derived aggregate (Q17 shape).
-	// When detected AND probe-split applicable, pre-compute the aggregate
-	// once and attach its cache paths to probe tasks so workers substitute
-	// the in-plan aggregate subtree instead of re-computing per task.
-	// Falls back silently to the regular probe-split / broadcast path on any
-	// error — the fallback preserves correctness at the cost of the memory
-	// savings Phase 1 would have provided.
-	var preComputedAggregates []physical.PreComputedAggregateMeta
-	if canProbeSplit && mergeInfo != nil {
-		diag := physical.PickAggregateShuffleCandidateDiag(physStages, aggregateShuffleThreshold)
-		if diag.Reason == physical.AggShuffleRejectNone {
-			aggCand := diag.Candidate
-			c.logger.Info("aggregate-shuffle candidate matched, dispatching pre-compute",
-				"query", queryID,
-				"agg_stage", aggCand.AggregateStageID,
-				"input_scan", aggCand.InputScanAlias,
-				"input_bytes", aggCand.InputScanBytes,
-				"threshold", aggregateShuffleThreshold,
-				"group_by", aggCand.GroupByKeys)
-			cacheFiles, preErr := c.preComputeDerivedAggregate(ctx, queryID, aggCand, physStages)
-			if preErr != nil {
-				c.logger.Warn("aggregate pre-compute failed, falling back to in-plan execution",
-					"query", queryID, "err", preErr)
-			} else if len(cacheFiles) > 0 {
-				meta, metaErr := buildPreComputedAggregateMeta(aggCand, physStages, cacheFiles)
-				if metaErr != nil {
-					c.logger.Warn("aggregate-shuffle metadata construction failed, falling back",
-						"query", queryID, "err", metaErr)
-				} else {
-					preComputedAggregates = append(preComputedAggregates, meta)
-				}
-			}
-		} else {
-			// Log the rejection reason + any observed candidate stats so we
-			// can tune thresholds / relax gates on real workloads without
-			// paying for another EC2 round-trip to find out.
-			c.logger.Info("aggregate-shuffle not applied",
-				"query", queryID,
-				"reason", diag.Reason.String(),
-				"observed_scan_bytes", diag.ObservedScanBytes,
-				"threshold", aggregateShuffleThreshold,
-				"nearest_join", diag.JoinStageID,
-				"nearest_scan_alias", diag.InputScanAlias)
-		}
-	}
-
-	// When the aggregate-shuffle pre-compute has already handled the build
-	// that PickShuffleCandidate flagged, suppress the base-table shuffle
-	// branch — the derived aggregate's source isn't a true broadcast build;
-	// it's the input to a pre-computed intermediate, and the shuffle-
-	// distributed path would try to partition it by the OUTER join's keys
-	// which aren't present on the inner scan's columns.
-	if len(preComputedAggregates) > 0 {
-		shuffleApplicable = false
-	}
-
-	switch {
-	case shuffleApplicable && mergeInfo != nil:
-		workerCount := c.workers.Count()
-		probeSplitMergeInfo = mergeInfo
-
-		c.logger.Info("routing to shuffle-distributed",
-			"query", queryID,
-			"build_alias", shuffleCand.BuildAlias,
-			"build_bytes", shuffleCand.BuildBytes,
-			"probe_alias", shuffleCand.ProbeAlias,
-			"workers", workerCount,
-			"partitions", workerCount*shufflePartitionMultiplier)
-
-		layout, err := c.orchestrateRepartition(ctx, queryID, shuffleCand, physStages, workerCount)
-		if err != nil {
-			return nil, fmt.Errorf("shuffle stages failed for query %s: %w", queryID, err)
-		}
-
-		probeTasks := buildShufflePipelineTasks(queryID, sql, c.config.ResultBucket, layout, workerCount)
-
-		physStages = []physical.Stage{{
-			ID:    "pipeline-0",
-			Type:  "pipeline",
-			Tasks: len(probeTasks),
-		}}
-		shuffleTasks = map[string][]distributed.Task{"pipeline-0": probeTasks}
-
-	case canProbeSplit && mergeInfo != nil:
-		workerCount := c.workers.Count()
-		probeSplitMergeInfo = mergeInfo
-
-		// Build-side broadcast cache: pre-scan large build tables once so all
-		// workers load a shared S3 result instead of independently scanning
-		// large source tables N times. Eliminates the N× hash table duplication
-		// that OOMs Q09 at SF100 (orders ~15GB × 3 workers = ~45GB).
-		buildCache, buildCacheErr := c.preScanBuildTables(ctx, queryID, sql, physStages, probeAlias)
-		if buildCacheErr != nil {
-			return nil, fmt.Errorf("build cache pre-scan failed for query %s: %w", queryID, buildCacheErr)
-		}
-
-		physStages = []physical.Stage{{
-			ID:                    "pipeline-0",
-			Type:                  "pipeline",
-			Tasks:                 workerCount,
-			ProbeSplitAlias:       probeAlias,
-			ProbeSplitFiles:       probeFiles,
-			BuildCachePreScans:    buildCache,
-			PreComputedAggregates: preComputedAggregates,
-		}}
-		c.logger.Info("routing to probe-split pipeline",
-			"query", queryID, "probe_alias", probeAlias,
-			"probe_files", len(probeFiles), "workers", workerCount,
-			"has_merge", probeSplitMergeInfo != nil,
-			"build_cache_tables", len(buildCache),
-			"pre_computed_aggregates", len(preComputedAggregates))
-
-	default:
-		c.logger.Info("routing to single worker pipeline",
-			"query", queryID)
-		physStages = []physical.Stage{{
-			ID:    "pipeline-0",
-			Type:  "pipeline",
-			Tasks: 1,
-		}}
-	}
-
-	// Expand scans to target remote clusters when table exists on multiple clusters
-	physStages = planner.ExpandFederatedScans(physStages)
-
-	if len(physStages) == 0 {
-		return &SQLResult{QueryID: queryID, Plan: planStr, Elapsed: time.Since(start)}, nil
-	}
-
-	// Store query metadata for task creation and result retrieval
-	c.mu.Lock()
-	qm := &queryMeta{stages: physStages, planStr: planStr, sqlText: sql, mergeInfo: probeSplitMergeInfo, prebuiltTasks: shuffleTasks}
-	// Propagate or create distributed trace context.
-	// If OTel tracing is active, use the OTel span's IDs so worker spans
-	// appear as children in the trace backend.
-	tc := distributed.TraceFromContext(ctx)
-	if tc.TraceID == "" {
-		if otelTraceID := telemetry.TraceIDFromContext(ctx); otelTraceID != "" {
-			tc.TraceID = otelTraceID
-			tc.SpanID = telemetry.SpanIDFromContext(ctx)
-			tc.TraceFlags = 0x01
-		} else {
-			tc = distributed.NewTraceContext()
-		}
-	}
-	qm.trace = tc
-	if id := auth.IdentityFromContext(ctx); id != nil {
-		qm.identityName = id.Name
-		qm.identityRole = id.Role
-	}
-	// Serialize ABAC table decisions for worker-side enforcement
-	if td := auth.TableDecisionsFromContext(ctx); len(td) > 0 {
-		sd := auth.SerializedDecision{
-			Allowed:        true,
-			TableDecisions: map[string]*auth.TableDecision(td),
-		}
-		if data, err := json.Marshal(sd); err == nil {
-			qm.policyDecisionJSON = data
-		}
-	}
-	c.queryMetas[queryID] = qm
-	c.mu.Unlock()
-
-	// Register stages with tracker
-	trackerStages := make(map[string]*StageInfo, len(physStages))
-	var stageOrder []string
-	for _, s := range physStages {
-		trackerStages[s.ID] = &StageInfo{
-			StageID:      s.ID,
-			Type:         distributed.TaskType(s.Type),
-			TotalTasks:   s.Tasks,
-			Dependencies: s.Dependencies,
-		}
-		stageOrder = append(stageOrder, s.ID)
-	}
-	c.tracker.Register(queryID, sql, trackerStages, stageOrder)
-	c.tracker.Start(queryID)
-
-	// HA: persist query state after planning
-	c.saveQueryState(ctx, queryID, sql, "executing", nil)
-
-	// Subscribe for results
-	doneCh := make(chan struct{}, 1)
-	c.subscribeResults(ctx, queryID, doneCh)
-
-	// Publish leaf stage tasks (stages with no dependencies)
-	for _, s := range physStages {
-		if len(s.Dependencies) > 0 {
-			continue
-		}
-		var tasks []distributed.Task
-		if qm.prebuiltTasks != nil {
-			if pre, ok := qm.prebuiltTasks[s.ID]; ok {
-				tasks = pre
-				// Enrich each prebuilt task with query-level context (trace, identity,
-				// policy) — same enrichment that createTasksForStage applies.
-				c.mu.Lock()
-				qmLive := c.queryMetas[queryID]
-				c.mu.Unlock()
-				for i := range tasks {
-					c.enrichTaskWithQueryContext(qmLive, &tasks[i])
-				}
-			}
-		}
-		if tasks == nil {
-			tasks = c.createTasksForStage(queryID, s, nil)
-		}
-		// Update tracker with actual task count and mark as scheduled
-		// (prevents GetReadyStages from re-scheduling these).
-		c.tracker.SetStageTasks(queryID, s.ID, len(tasks))
-		c.tracker.MarkScheduled(queryID, s.ID)
-		if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
-			c.tracker.Fail(queryID, err.Error())
-			return nil, fmt.Errorf("publishing leaf tasks: %w", err)
-		}
-	}
-
-	// Wait for all stages to complete
-	select {
-	case <-doneCh:
-	case <-ctx.Done():
-		c.tracker.Fail(queryID, ctx.Err().Error())
-		return nil, ctx.Err()
-	}
-
-	info := c.tracker.Get(queryID)
-	if info.State == QueryStateFailed {
+	c.logger.Info("routing to native DAG executor",
+		"query", queryID, "stages", len(physStages))
+	gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())
+	if gerr != nil {
 		return &SQLResult{
 			QueryID: queryID,
-			Error:   info.Error,
+			Error:   gerr.Error(),
 			Elapsed: time.Since(start),
 			Plan:    planStr,
-		}, fmt.Errorf("query failed: %s", info.Error)
+		}, fmt.Errorf("native DAG: %w", gerr)
 	}
-
-	// Probe-split merge: check if we need to re-aggregate partial results.
-	c.mu.Lock()
-	qmForMerge := c.queryMetas[queryID]
-	c.mu.Unlock()
-
-	// Read results from the final stage. When probe-split merge is needed,
-	// force full materialization so S3-stored results are fetched for merging.
-	needsMerge := qmForMerge != nil && qmForMerge.mergeInfo != nil
-	batches, columns, totalRows, err := c.readFinalResults(ctx, queryID, physStages, needsMerge)
-	if qmForMerge != nil && qmForMerge.mergeInfo != nil && len(batches) > 0 {
-		merged, mergedRows, mergeErr := c.mergeProbePartials(batches, columns, qmForMerge.mergeInfo)
-		if mergeErr != nil {
-			c.logger.Error("probe-split merge failed", "query", queryID, "error", mergeErr)
-		} else {
-			batches = merged
-			totalRows = mergedRows
-		}
-	}
-
-	// Release tracker's inline result data — it's been decoded into batches.
-	// Without this, the raw compressed bytes stay in memory until the reaper
-	// cleans up the tracker entry (up to 5 minutes).
-	c.tracker.ClearResults(queryID)
-
-	// Synchronous path: we have all data locally, clean up queryMetas
-	// immediately. The tracker entry is kept for status/list APIs and
-	// reaped by StartQueryReaper after the TTL.
-	c.mu.Lock()
-	delete(c.queryMetas, queryID)
-	c.mu.Unlock()
-
-	c.deleteQueryState(ctx, queryID)
-
-	if err != nil {
-		return &SQLResult{
-			QueryID:     queryID,
-			ResultFiles: info.ResultFiles,
-			TotalRows:   info.TotalRows,
-			Elapsed:     time.Since(start),
-			Plan:        planStr,
-		}, nil // return what we have even if reading fails
-	}
-
 	return &SQLResult{
-		QueryID:     queryID,
-		Columns:     columns,
-		Batches:     batches,
-		ResultFiles: info.ResultFiles,
-		TotalRows:   totalRows,
-		Elapsed:     time.Since(start),
-		Plan:        planStr,
+		QueryID:   queryID,
+		Columns:   gr.columns,
+		Batches:   gr.batches,
+		TotalRows: gr.totalRows,
+		Elapsed:   time.Since(start),
+		Plan:      planStr,
 	}, nil
 }
 

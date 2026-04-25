@@ -32,7 +32,6 @@ func main() {
 		endpoint       = flag.String("endpoint", "s3.us-east-2.amazonaws.com", "S3 endpoint (source=s3)")
 		ssl            = flag.Bool("ssl", true, "use SSL for S3 (source=s3)")
 		dataPrefix     = flag.String("data-prefix", "tables/", "S3 prefix under --bucket containing table data (source=s3)")
-		legacyMode     = flag.Bool("legacy-mode", false, "route queries through the legacy four-mode executor on the spawned coordinator (default: native-DAG)")
 	)
 	flag.Parse()
 
@@ -63,7 +62,6 @@ func main() {
 		Endpoint:       *endpoint,
 		SSL:            *ssl,
 		DataPrefix:     *dataPrefix,
-		LegacyMode:     *legacyMode,
 	}
 	if *queries != "" {
 		cfg.Queries = strings.Split(*queries, ",")
