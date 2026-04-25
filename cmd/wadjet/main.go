@@ -675,6 +675,15 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	// WADJET_HEAP_DUMP_INTERVAL is set. See cmd/wadjet/heap_dumper.go.
 	startHeapDumper(ctx, logger)
 
+	// Periodic background GC: with the default gogc=off, large transient
+	// garbage (catalog priming, NATS message buffers) accumulates and
+	// can push baseline heap to 11+ GB before any query runs (Q18 SF10
+	// 2026-04-25, project_q18_sf10_native_dag_oom_2026-04-24). One GC
+	// every 30s reclaims this cheaply (~50ms per call) without the
+	// per-allocation GC assist tax that GOGC=100 imposes. Override via
+	// WADJET_BG_GC_INTERVAL ("off" to disable, "<duration>" otherwise).
+	startBackgroundGC(ctx, logger)
+
 	// Start embedded NATS (with optional leaf node connections)
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = natsPort
