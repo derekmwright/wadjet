@@ -9,6 +9,10 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Skip CI on draft PRs — iteration on feat branches is rapid and runs
+    # are 3+ min; CI fires automatically once the PR is marked ready.
+    # Pushes to main always run (event_name == 'push' bypasses this gate).
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +38,9 @@ jobs:
 
   benchmark:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    # Same draft gate as the test job: skip the 30-min SF1 bench while a
+    # PR is still in draft.
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v4
 
