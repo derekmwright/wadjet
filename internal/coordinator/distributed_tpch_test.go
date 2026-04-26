@@ -1260,21 +1260,35 @@ func TestDistributedTPCHQ17AggregateShuffleCorrectness(t *testing.T) {
 	}
 
 	// Compare. The outer projection is SUM(l_extendedprice)/7.0 as
-	// avg_yearly. Both paths must produce the same value. Empty-result
-	// NULL equality is handled: if both are nil, that's still a match
-	// (confirms neither path is broken, just that SF0.1 happened to
-	// have no matches).
+	// avg_yearly. Both paths must produce the same logical value, but
+	// distributed reductions sum partial results in I/O-order — which
+	// can drift by 1 ULP between paths whenever timing changes the order
+	// (e.g. if one path serves a stage output from a same-worker disk
+	// cache and the other from S3). Treat ULP-level divergence as benign;
+	// anything larger means a real correctness bug. Mirrors
+	// TestAggregateShuffleCorrectness_NonEmptyResult below.
 	a := inPlanRows[0]["avg_yearly"]
 	b := aggShuffleRows[0]["avg_yearly"]
-	if fmt.Sprintf("%v", a) != fmt.Sprintf("%v", b) {
-		t.Fatalf("Q17 avg_yearly diverges:\n  in-plan:          %v\n  aggregate-shuffle: %v",
+	if (a == nil) != (b == nil) {
+		t.Fatalf("Q17 avg_yearly null-ness diverges:\n  in-plan:          %v\n  aggregate-shuffle: %v",
 			a, b)
 	}
 	if a == nil {
 		t.Logf("Q17 avg_yearly = NULL in both paths (SF0.1 may lack Brand#23 MED BOX matches — still a valid correctness check that substitution didn't break the plan)")
-	} else {
-		t.Logf("Q17 avg_yearly = %v (both paths match)", a)
+		return
 	}
+	af, aok := a.(float64)
+	bf, bok := b.(float64)
+	if !aok || !bok {
+		t.Fatalf("Q17 avg_yearly non-float64 result:\n  in-plan:          %T(%v)\n  aggregate-shuffle: %T(%v)", a, a, b, b)
+	}
+	const eps = 1e-9
+	rel := (af - bf) / af
+	if rel < -eps || rel > eps {
+		t.Fatalf("Q17 avg_yearly diverges beyond FP noise:\n  in-plan:          %v\n  aggregate-shuffle: %v\n  relative diff:     %g",
+			af, bf, rel)
+	}
+	t.Logf("Q17 avg_yearly = %v (both paths match within %.2e)", af, rel)
 }
 
 // TestAggregateShuffleCorrectness_NonEmptyResult uses a Q17-shape query

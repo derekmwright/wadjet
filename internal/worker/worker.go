@@ -99,6 +99,13 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	if cfg.ResultStoreBytes > 0 {
 		executor.SetResultStore(NewResultStore(cfg.ResultStoreBytes))
 	}
+	// Same-worker LocalStageCache: producers register their local spill
+	// files in here after upload, downstream tasks landing on the same
+	// worker mmap them directly instead of round-tripping S3. Skipped when
+	// no spill dir is configured (tests / minimal embeddings).
+	if cfg.SpillDir != "" {
+		executor.SetLocalStageCache(NewLocalStageCache(filepath.Join(cfg.SpillDir, "stage-cache")))
+	}
 	// Best-effort bind to the coordinator's shared result KV bucket so small
 	// stage outputs can round-trip via NATS (~10ms) instead of S3 (~500ms).
 	// The coordinator creates the bucket in New(); workers just open it.
@@ -176,10 +183,32 @@ func (w *Worker) Start(ctx context.Context) error {
 		w.cancelledMu.Lock()
 		w.cancelled[queryID] = time.Now()
 		w.cancelledMu.Unlock()
+		// Free per-query state. Cancelled queries won't read any further
+		// stage outputs, so their spill files are pure leak otherwise.
+		if w.executor.localCache != nil {
+			w.executor.localCache.CleanupQuery(queryID)
+		}
 		w.logger.Debug("query cancelled", "query_id", queryID)
 	})
 	if err != nil {
 		return fmt.Errorf("subscribing to cancellations: %w", err)
+	}
+
+	// Subscribe to query completion messages — same cleanup as cancel, but
+	// for queries that finished normally. Coordinator publishes once per
+	// query in cleanupQuery().
+	completeSub, err := w.nc.Subscribe(distributed.CompleteSubjectAll(), func(msg *nats.Msg) {
+		queryID := string(msg.Data)
+		if w.executor.localCache != nil {
+			n := w.executor.localCache.CleanupQuery(queryID)
+			if n > 0 {
+				w.logger.Debug("released local stage cache",
+					"query_id", queryID, "entries", n)
+			}
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("subscribing to completions: %w", err)
 	}
 
 	// Subscribe to drain requests (sent by coordinator or admin)
@@ -204,6 +233,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		cancelSub.Unsubscribe()
+		completeSub.Unsubscribe()
 	}()
 
 	// Start task pull loop

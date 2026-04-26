@@ -658,6 +658,17 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 	}
 	c.mu.Unlock()
 
+	// Notify workers that the query is finished so they can release per-
+	// query state (LocalStageCache spill files). Best-effort: workers that
+	// miss the message will eventually leak entries until process exit, but
+	// the cache returns false on Put when full and falls through to S3.
+	if c.nc != nil {
+		if err := c.nc.Publish(distributed.CompleteSubject(queryID), []byte(queryID)); err != nil {
+			c.logger.Debug("failed to publish query completion",
+				"query_id", queryID, "error", err)
+		}
+	}
+
 	// Purge KV entries async — frees NATS memory without blocking the caller.
 	if len(kvKeys) > 0 {
 		go func() {

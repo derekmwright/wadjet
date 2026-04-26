@@ -76,7 +76,7 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 			}
 		}
 	}
-	src, err := e.sourceForAliasWithProjection(bucket, alias, files, projCols)
+	src, err := e.sourceForAliasWithProjection(task.QueryID, bucket, alias, files, projCols)
 	if err != nil {
 		return fmt.Errorf("scan task %s: source: %w", task.ID, err)
 	}
@@ -130,7 +130,7 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 			// result instead of waiting forever.
 			continue
 		}
-		src, err := e.sourceForAlias(bucket, alias, files)
+		src, err := e.sourceForAlias(task.QueryID, bucket, alias, files)
 		if err != nil {
 			return fmt.Errorf("gather task %s: source for %q: %w", task.ID, alias, err)
 		}
@@ -231,11 +231,11 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 		bucket = task.ResultBucket
 	}
 
-	buildSource, err := e.sourceForAlias(bucket, buildAlias, buildFiles)
+	buildSource, err := e.sourceForAlias(task.QueryID, bucket, buildAlias, buildFiles)
 	if err != nil {
 		return fmt.Errorf("hash_join task %s: build source: %w", task.ID, err)
 	}
-	probeSource, err := e.sourceForAlias(bucket, probeAlias, probeFiles)
+	probeSource, err := e.sourceForAlias(task.QueryID, bucket, probeAlias, probeFiles)
 	if err != nil {
 		return fmt.Errorf("hash_join task %s: probe source: %w", task.ID, err)
 	}
@@ -380,7 +380,7 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	if len(aggExtraCols) > 0 {
 		extend(aggExtraCols)
 	}
-	src, err := e.sourceForAliasWithProjection(bucket, alias, files, projCols)
+	src, err := e.sourceForAliasWithProjection(task.QueryID, bucket, alias, files, projCols)
 	if err != nil {
 		return fmt.Errorf("aggregate task %s: source: %w", task.ID, err)
 	}
@@ -625,7 +625,7 @@ func (e *Executor) executeStageSort(ctx context.Context, task distributed.Task, 
 	if bucket == "" {
 		bucket = task.ResultBucket
 	}
-	src, err := e.sourceForAlias(bucket, alias, files)
+	src, err := e.sourceForAlias(task.QueryID, bucket, alias, files)
 	if err != nil {
 		return fmt.Errorf("sort task %s: source: %w", task.ID, err)
 	}
@@ -846,7 +846,15 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 		}
 		result.ResultFiles = append(result.ResultFiles, key)
 		result.SizeBytes += fi.Size()
-		_ = os.Remove(localPath)
+		// Same-worker fast path: hand the local file to the LocalStageCache
+		// so a downstream task landing on this worker can mmap it directly
+		// instead of paying an S3 download. Adopt renames the file out of
+		// the per-task spill dir (which the deferred RemoveAll wipes) into
+		// the cache's per-query dir. If adoption fails or no cache is wired,
+		// fall back to the old delete-after-upload behavior.
+		if adopted := e.localCache.Adopt(task.QueryID, key, localPath); adopted == "" {
+			_ = os.Remove(localPath)
+		}
 	}
 	return nil
 }
@@ -915,7 +923,41 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 	}
 	result.ResultFiles = append(result.ResultFiles, key)
 	result.SizeBytes += int64(len(payload))
+	// Same-worker fast path for the S3-eligible (i.e., > KV threshold) case.
+	// Spill the in-memory buffer to a tmp file under the worker spill dir
+	// and Adopt it into the LocalStageCache. The extra disk write is much
+	// cheaper than the S3 download a same-worker consumer would otherwise
+	// pay. Best-effort — failures fall back to the existing S3 path.
+	e.cacheUnpartitionedLocal(task.QueryID, key, payload)
 	return nil
+}
+
+// cacheUnpartitionedLocal writes payload to a temp file under the worker's
+// spill directory and adopts it into the LocalStageCache. Best-effort — any
+// I/O failure leaves the cache empty for this entry, and the consumer falls
+// through to S3 as before. Caller must have already written payload durably
+// to S3 (or KV) before invoking this.
+func (e *Executor) cacheUnpartitionedLocal(queryID, key string, payload []byte) {
+	if e.localCache == nil || e.spillDir == "" {
+		return
+	}
+	tmp, err := os.CreateTemp(e.spillDir, "stage-unpart-*.wshf")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(payload); err != nil {
+		tmp.Close()
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return
+	}
+	if adopted := e.localCache.Adopt(queryID, key, tmpPath); adopted == "" {
+		_ = os.Remove(tmpPath)
+	}
 }
 
 // mapJoinTypeString converts the canonical join-type string carried on

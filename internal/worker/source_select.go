@@ -74,22 +74,22 @@ func kindOf(key string) inputFileKind {
 // file patterns within an alias are consistent (so a planner bug that mixes
 // partitioned output with flat output fails fast instead of silently
 // concatenating mismatched chunk streams).
-func (e *Executor) sourceForAlias(bucket, alias string, files []string) (exec.Source, error) {
-	return e.sourceForAliasWithProjection(bucket, alias, files, nil)
+func (e *Executor) sourceForAlias(queryID, bucket, alias string, files []string) (exec.Source, error) {
+	return e.sourceForAliasWithProjection(queryID, bucket, alias, files, nil)
 }
 
 // sourceForAliasWithProjection hints that the parquet reader should only
 // materialise the named columns. Safe to call with a mix of schema and
 // derived column names — the source skips projection when any requested
 // column is missing from the file schema. WSHF payloads ignore the hint.
-func (e *Executor) sourceForAliasWithProjection(bucket, alias string, files []string, projectColumns []string) (exec.Source, error) {
+func (e *Executor) sourceForAliasWithProjection(queryID, bucket, alias string, files []string, projectColumns []string) (exec.Source, error) {
 	kind, err := classifyInputFiles(files)
 	if err != nil {
 		return nil, fmt.Errorf("alias %q: %w", alias, err)
 	}
 	_ = kind
 	if len(projectColumns) > 0 {
-		return newCachedFileStreamSourceWithProjection(e, bucket, files, projectColumns), nil
+		return newCachedFileStreamSourceWithProjection(e, queryID, bucket, files, projectColumns), nil
 	}
-	return newCachedFileStreamSource(e, bucket, files), nil
+	return newCachedFileStreamSource(e, queryID, bucket, files), nil
 }

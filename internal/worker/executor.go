@@ -51,6 +51,7 @@ type Executor struct {
 	cache        *LRUCache
 	resultStore  *ResultStore        // in-memory result passing between stages (nil = disabled)
 	resultKV     jetstream.KeyValue  // NATS KV for cross-worker inter-stage results (nil = disabled)
+	localCache   *LocalStageCache    // same-worker stage-output local-disk cache (nil = disabled)
 	memoryBudget int64               // per-task memory budget in bytes (0 = unlimited)
 	spillDir     string              // directory for spill files
 	metrics      *metrics.Metrics
@@ -98,6 +99,14 @@ func (e *Executor) SetMemoryBudget(budget int64, spillDir string) {
 // SetResultStore attaches an in-memory result store for inter-stage result passing.
 func (e *Executor) SetResultStore(rs *ResultStore) {
 	e.resultStore = rs
+}
+
+// SetLocalStageCache attaches a same-worker local-disk stage-output cache.
+// Producers register their local spill files in it after upload succeeds;
+// consumers consult it before falling back to KV/S3. Lifecycle is driven by
+// query-complete / cancel signals from the coordinator.
+func (e *Executor) SetLocalStageCache(c *LocalStageCache) {
+	e.localCache = c
 }
 
 // SetNATSConn attaches a NATS connection used by Gather tasks to stream
@@ -405,12 +414,12 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	if len(task.PreScannedInputs) > 0 || len(precompAliasFiles) > 0 || len(task.Inputs) > 0 {
 		streamingSources := make(map[string]exec.Source, len(task.PreScannedInputs)+len(precompAliasFiles)+len(task.Inputs))
 		for tableName, files := range task.PreScannedInputs {
-			streamingSources[tableName] = newCachedFileStreamSource(e, bucket, files)
+			streamingSources[tableName] = newCachedFileStreamSource(e, task.QueryID, bucket, files)
 			e.logger.Debug("streaming pre-scanned input",
 				"table", tableName, "files", len(files))
 		}
 		for alias, files := range precompAliasFiles {
-			streamingSources[alias] = newCachedFileStreamSource(e, bucket, files)
+			streamingSources[alias] = newCachedFileStreamSource(e, task.QueryID, bucket, files)
 			e.logger.Debug("streaming pre-computed aggregate",
 				"alias", alias, "files", len(files))
 		}
@@ -421,7 +430,7 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 			if _, already := streamingSources[alias]; already {
 				return fmt.Errorf("alias %q populated by both Inputs and legacy pre-scanned paths", alias)
 			}
-			src, err := e.sourceForAlias(bucket, alias, files)
+			src, err := e.sourceForAlias(task.QueryID, bucket, alias, files)
 			if err != nil {
 				return fmt.Errorf("source for alias %q: %w", alias, err)
 			}
@@ -636,7 +645,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			return fmt.Errorf("shuffle task %s: reading parquet source files: %w", task.ID, err)
 		}
 	case inputKindPartitioned, inputKindShuffleFlat:
-		src := newCachedFileStreamSource(e, bucket, task.Files)
+		src := newCachedFileStreamSource(e, task.QueryID, bucket, task.Files)
 		if initErr := src.Init(ctx); initErr != nil {
 			return fmt.Errorf("shuffle task %s: init wshf source: %w", task.ID, initErr)
 		}

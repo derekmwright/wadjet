@@ -15,7 +15,7 @@ import (
 //
 // Files are read sequentially; each is fully drained before the next one
 // starts. This matches the existing cachedFileStreamSource semantics.
-func newPartitionShardSource(ctx context.Context, executor *Executor, bucket, prefix string) (*cachedFileStreamSource, error) {
+func newPartitionShardSource(ctx context.Context, executor *Executor, queryID, bucket, prefix string) (*cachedFileStreamSource, error) {
 	infos, err := executor.store.List(ctx, bucket, objstore.ListOptions{Prefix: prefix})
 	if err != nil {
 		return nil, fmt.Errorf("listing partition prefix %q: %w", prefix, err)
@@ -24,5 +24,5 @@ func newPartitionShardSource(ctx context.Context, executor *Executor, bucket, pr
 	for _, info := range infos {
 		files = append(files, info.Key)
 	}
-	return newCachedFileStreamSource(executor, bucket, files), nil
+	return newCachedFileStreamSource(executor, queryID, bucket, files), nil
 }
