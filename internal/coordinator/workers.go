@@ -12,12 +12,13 @@ import (
 
 // WorkerInfo tracks the state of a registered worker.
 type WorkerInfo struct {
-	WorkerID    string
-	ClusterID   string
-	MemoryUsed  int64
-	MemoryTotal int64
-	Draining    bool
-	LastSeen    time.Time
+	WorkerID      string
+	ClusterID     string
+	MaxConcurrent int   // effective task-slot count reported in heartbeat; 0 = legacy worker (assume default)
+	MemoryUsed    int64
+	MemoryTotal   int64
+	Draining      bool
+	LastSeen      time.Time
 }
 
 // TaskLiveness tracks when each in-flight task was last reported active.
@@ -127,6 +128,7 @@ func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
 		wr.workers[hb.WorkerID] = info
 	}
 	info.ClusterID = hb.ClusterID
+	info.MaxConcurrent = hb.MaxConcurrent
 	info.MemoryUsed = hb.MemoryUsed
 	info.MemoryTotal = hb.MemoryTotal
 	info.Draining = hb.Draining
@@ -163,6 +165,30 @@ func (wr *WorkerRegistry) ActiveWorkers() []*WorkerInfo {
 // Count returns the number of active workers.
 func (wr *WorkerRegistry) Count() int {
 	return len(wr.ActiveWorkers())
+}
+
+// ClusterCapacity returns the sum of effective task-slot counts across
+// active (non-draining, non-stale) workers, taken from the most recent
+// heartbeat each worker reported. Workers running pre-MaxConcurrent-in-
+// heartbeat builds report 0; those are skipped here so the result reflects
+// only workers we have honest capacity data for. Returns 0 when no worker
+// has reported MaxConcurrent yet — callers should fall back to a
+// conservative static cap (e.g. 2 * Count).
+func (wr *WorkerRegistry) ClusterCapacity() int {
+	wr.mu.RLock()
+	defer wr.mu.RUnlock()
+	cutoff := time.Now().Add(-wr.stale)
+	total := 0
+	for _, w := range wr.workers {
+		if !w.LastSeen.After(cutoff) || w.Draining {
+			continue
+		}
+		if w.MaxConcurrent <= 0 {
+			continue
+		}
+		total += w.MaxConcurrent
+	}
+	return total
 }
 
 // ReapStale removes workers that haven't sent a heartbeat recently.
