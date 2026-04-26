@@ -132,13 +132,29 @@ func (c *Coordinator) executeStageDAG(
 	// The semaphore is acquired AFTER all upstream dependencies are
 	// satisfied, so it can never deadlock waiting on a producer that itself
 	// can't acquire a slot.
-	dispatchSlots := 2 * workerCount
+	// Source the slot count from the actual cluster capacity (sum of each
+	// worker's auto-tuned max_concurrent reported in heartbeats) when
+	// available. Workers downscale max_concurrent under memory pressure
+	// (auto-detected memory budget logic in cmd/wadjet), so this gives the
+	// dispatcher a memory-aware backpressure signal: if every worker has
+	// shrunk to max_concurrent=2 because the box is tight, dispatch only
+	// queues that many stages at a time instead of stampeding 8+ in a wave.
+	// Falls back to 2 * workerCount when no worker has reported
+	// MaxConcurrent yet (cluster startup, legacy workers).
+	dispatchSlots := c.workers.ClusterCapacity()
+	dispatchSource := "cluster_capacity"
+	if dispatchSlots <= 0 {
+		dispatchSlots = 2 * workerCount
+		dispatchSource = "fallback_2x_workerCount"
+	}
 	if dispatchSlots < 2 {
 		dispatchSlots = 2
+		dispatchSource = "floor"
 	}
 	dispatchSem := make(chan struct{}, dispatchSlots)
 	c.logger.Info("stage-DAG dispatch", "query", queryID,
-		"stages", len(pending), "dispatch_concurrency", dispatchSlots)
+		"stages", len(pending), "dispatch_concurrency", dispatchSlots,
+		"dispatch_source", dispatchSource)
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, s := range pending {

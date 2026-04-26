@@ -699,6 +699,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 			hb := distributed.WorkerHeartbeat{
 				WorkerID:      w.config.WorkerID,
 				ClusterID:     w.config.ClusterID,
+				MaxConcurrent: w.config.MaxConcurrent,
 				ActiveTasks:   len(sem),
 				ActiveTaskIDs: taskIDs,
 				MemoryUsed:    int64(memStats.Alloc),
