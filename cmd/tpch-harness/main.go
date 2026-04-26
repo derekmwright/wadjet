@@ -32,6 +32,7 @@ func main() {
 		endpoint       = flag.String("endpoint", "s3.us-east-2.amazonaws.com", "S3 endpoint (source=s3)")
 		ssl            = flag.Bool("ssl", true, "use SSL for S3 (source=s3)")
 		dataPrefix     = flag.String("data-prefix", "tables/", "S3 prefix under --bucket containing table data (source=s3)")
+		numWorkers     = flag.Int("workers", 0, "number of worker processes to spawn (local mode); 0 = default of 2. Set to 1 to avoid 2-process memory overcommit on small dev boxes when measuring SF10+.")
 	)
 	flag.Parse()
 
@@ -56,6 +57,7 @@ func main() {
 		NoCompare:      *noCompare,
 		WadjetBin:      *wadjetBin,
 		PgAddr:         *pgAddr,
+		NumWorkers:     *numWorkers,
 		Source:         *source,
 		Bucket:         *bucket,
 		Region:         *region,

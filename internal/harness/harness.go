@@ -58,7 +58,10 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 	switch cfg.Mode {
 	case ModeLocal:
 		sliceCfg := SliceConfigs[cfg.Slice]
-		const numWorkers = 2
+		numWorkers := cfg.NumWorkers
+		if numWorkers <= 0 {
+			numWorkers = 2 // historical default — preserves prior behavior
+		}
 		pf := CheckPreflight(sliceCfg, runDir, numWorkers)
 		if !pf.OK {
 			return result, fmt.Errorf("preflight failed:\n  - %s", pf.Error())

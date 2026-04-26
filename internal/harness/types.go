@@ -42,6 +42,7 @@ type Config struct {
 	NoCompare      bool
 	WadjetBin      string // path to wadjet binary; auto-built if empty
 	PgAddr         string // local only; override for coordinator pgwire listen addr
+	NumWorkers     int    // local only; cluster size to spawn (0 = default of 2)
 
 	// S3 source (Source=="s3" only)
 	Source     string // "local" (default) or "s3"
