@@ -34,6 +34,7 @@ import (
 type cachedFileStreamSource struct {
 	executor *Executor
 	bucket   string
+	queryID  string // used to look up same-worker LocalStageCache entries; "" disables
 	files    []string
 
 	// projectColumns optionally restricts parquet reads to these columns
@@ -52,16 +53,17 @@ type cachedFileStreamSource struct {
 	// owned by mmapData below.
 	chunkReader *shuffleChunkReader
 	mmapData    []byte // mmap'd view of the current local cache file (nil if Parquet)
-	localPath   string // path of the current local cache file on the spill volume
+	localPath   string // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
 
 	// Buffered batches for the current Parquet file.
 	batches  []*batch.RecordBatch
 	batchIdx int
 }
 
-func newCachedFileStreamSource(executor *Executor, bucket string, files []string) *cachedFileStreamSource {
+func newCachedFileStreamSource(executor *Executor, queryID, bucket string, files []string) *cachedFileStreamSource {
 	return &cachedFileStreamSource{
 		executor: executor,
+		queryID:  queryID,
 		bucket:   bucket,
 		files:    files,
 	}
@@ -72,9 +74,10 @@ func newCachedFileStreamSource(executor *Executor, bucket string, files []string
 // projection is applied ONLY when every requested column is present in the
 // parquet file's schema — a safety guard against derived/expression names
 // that would otherwise over-prune the scan and break downstream operators.
-func newCachedFileStreamSourceWithProjection(executor *Executor, bucket string, files []string, projectColumns []string) *cachedFileStreamSource {
+func newCachedFileStreamSourceWithProjection(executor *Executor, queryID, bucket string, files []string, projectColumns []string) *cachedFileStreamSource {
 	return &cachedFileStreamSource{
 		executor:       executor,
+		queryID:        queryID,
 		bucket:         bucket,
 		files:          files,
 		projectColumns: projectColumns,
@@ -149,6 +152,21 @@ func (s *cachedFileStreamSource) releaseCurrentFile() {
 func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	filePath := s.files[s.fileIdx]
 	s.fileIdx++
+
+	// Tier-0 same-worker fast path: if a producer task on this worker
+	// already wrote this stage output to local disk and registered it in
+	// LocalStageCache, mmap it directly — no KV / S3 round-trip. The cache
+	// owns the file (it'll unlink on query-complete cleanup); the consumer
+	// must NOT unlink, so we leave s.localPath empty.
+	if s.queryID != "" && s.executor.localCache != nil {
+		if cached := s.executor.localCache.Get(s.queryID, filePath); cached != "" {
+			if err := s.openShuffleFromLocalFile(cached); err == nil {
+				return nil
+			}
+			// On any failure (file vanished, mmap error), fall through to
+			// the existing KV/S3 path — the durable copy is still there.
+		}
+	}
 
 	// KV fast-path: small stage outputs (Phase 3 native-DAG) are written
 	// only to NATS KV and skip S3 entirely. Consult KV first; on miss,
@@ -346,6 +364,38 @@ func (s *cachedFileStreamSource) openShuffleFile(_ context.Context, srcPath stri
 	s.chunkReader = r
 	s.mmapData = mmapData
 	s.localPath = localPath
+	return nil
+}
+
+// openShuffleFromLocalFile mmaps an existing local file (typically owned by
+// LocalStageCache) directly, without staging a copy. The chunkReader walks
+// the mmap'd region; the cache will unlink the file on CleanupQuery, so the
+// consumer must NOT delete it — releaseCurrentFile only munmaps.
+func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) error {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("opening cached local file %s: %w", localPath, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat cached local file %s: %w", localPath, err)
+	}
+	if fi.Size() == 0 {
+		return fmt.Errorf("cached local file %s is empty", localPath)
+	}
+	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		return fmt.Errorf("mmap cached local file %s: %w", localPath, err)
+	}
+	r, err := newShuffleChunkReader(mmapData)
+	if err != nil {
+		_ = syscall.Munmap(mmapData)
+		return fmt.Errorf("opening cached shuffle file %s: %w", localPath, err)
+	}
+	s.chunkReader = r
+	s.mmapData = mmapData
+	// Intentionally leave s.localPath empty — LocalStageCache owns this file.
 	return nil
 }
 

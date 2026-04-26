@@ -22,6 +22,14 @@ const (
 	// Query cancellation — Core NATS
 	SubjectCancel = "wadjet.cancel"
 
+	// Query completion — Core NATS. Published by the coordinator after a
+	// query finishes (success, failure, or cancellation) so workers can
+	// release per-query resources (LocalStageCache spill files, etc).
+	// Distinct from CancelSubject: CancelSubject still means "stop running
+	// new tasks for this query"; CompleteSubject means "the query is done,
+	// you may free its caches."
+	SubjectComplete = "wadjet.complete"
+
 	// Catalog locks — NATS KV
 	SubjectCatalogLock = "wadjet.catalog.lock"
 
@@ -86,4 +94,15 @@ func CancelSubject(queryID string) string {
 // CancelSubjectAll returns the wildcard subject for all cancellation messages.
 func CancelSubjectAll() string {
 	return SubjectCancel + ".>"
+}
+
+// CompleteSubject returns the NATS subject signalling that a query has
+// finished and per-query worker state may be released.
+func CompleteSubject(queryID string) string {
+	return SubjectComplete + "." + queryID
+}
+
+// CompleteSubjectAll returns the wildcard subject for all completion messages.
+func CompleteSubjectAll() string {
+	return SubjectComplete + ".>"
 }

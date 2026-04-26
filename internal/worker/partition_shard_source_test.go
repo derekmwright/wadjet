@@ -71,7 +71,7 @@ func TestPartitionShardSource_ReadsAllFiles(t *testing.T) {
 	cache := NewLRUCache(4 * 1024 * 1024)
 	executor := NewExecutor(store, cache, nil /* js — not needed */)
 
-	src, err := newPartitionShardSource(ctx, executor, bucket, prefix)
+	src, err := newPartitionShardSource(ctx, executor, "test-query", bucket, prefix)
 	if err != nil {
 		t.Fatalf("newPartitionShardSource: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestPartitionShardSource_EmptyPrefix(t *testing.T) {
 	cache := NewLRUCache(4 * 1024 * 1024)
 	executor := NewExecutor(store, cache, nil)
 
-	src, err := newPartitionShardSource(ctx, executor, bucket, "shuffle/no-such-prefix/")
+	src, err := newPartitionShardSource(ctx, executor, "test-query", bucket, "shuffle/no-such-prefix/")
 	if err != nil {
 		t.Fatalf("newPartitionShardSource: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestPartitionShardSource_SpillDir(t *testing.T) {
 	executor := NewExecutor(store, cache, nil)
 	executor.SetMemoryBudget(0, spillDir)
 
-	src, err := newPartitionShardSource(ctx, executor, bucket, prefix)
+	src, err := newPartitionShardSource(ctx, executor, "test-query", bucket, prefix)
 	if err != nil {
 		t.Fatalf("newPartitionShardSource: %v", err)
 	}
