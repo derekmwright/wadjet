@@ -875,6 +875,14 @@ func (c *Coordinator) dispatchComputeStage(
 	if workerCount <= 0 {
 		workerCount = 1 // single-worker fallback for sparse test / bootstrap setups
 	}
+	// Singleton final_aggregate over a fanned-out upstream is a serialization
+	// point — one worker re-aggregates every partial while the others idle.
+	// Reshape into a parallel intermediate-merge phase + a 1-task final
+	// merge when the preconditions hold (multi-worker, K>=2 upstream files,
+	// no AVG). Falls back to the standard 1-task path otherwise.
+	if _, _, ok := finalAggregateFanoutCandidate(stage, inputs, workerCount); ok {
+		return c.dispatchFinalAggregateFanout(ctx, queryID, stage, inputs, workerCount)
+	}
 	// Task count derivation:
 	//   - Singleton output: exactly 1 task. The stage produces one logical
 	//     result; running workerCount tasks on the same unpartitioned input
@@ -1082,6 +1090,271 @@ func (c *Coordinator) dispatchComputeStage(
 		NumPartitions: len(tasks),
 		Files:         files,
 	}, nil
+}
+
+// finalAggregateFanoutCandidate reports whether a stage qualifies for
+// dispatchFinalAggregateFanout: a Singleton final_aggregate over multiple
+// upstream files with parallel workers available, none of whose AggSpecs
+// is AVG (which can't decompose without separate sum/count partials —
+// dispatchScanAggregateStage handles the same constraint).
+//
+// Returns the (single) dep ID and the flattened upstream file list when it
+// qualifies; nil otherwise so callers fall through to the standard
+// single-task dispatch.
+func finalAggregateFanoutCandidate(
+	stage physical.Stage,
+	inputs map[string]StageOutput,
+	workerCount int,
+) (depID string, files []string, ok bool) {
+	if stage.Type != "final_aggregate" {
+		return "", nil, false
+	}
+	if stage.Distribution.Kind != physical.DistSingleton {
+		return "", nil, false
+	}
+	if workerCount <= 1 {
+		return "", nil, false
+	}
+	if len(stage.Dependencies) != 1 {
+		// Multi-dep merges (the planner's two-level merge_aggregate tree
+		// reaches here too) already encode parallelism via separate
+		// intermediate stages — collapseMergeTreesForNativeDAG only
+		// rewrites them when the upstream count is small. Don't double-
+		// fan-out by re-splitting at dispatch.
+		return "", nil, false
+	}
+	for _, a := range stage.AggSpecs {
+		if strings.EqualFold(strings.TrimSpace(a.Func), "avg") {
+			return "", nil, false
+		}
+	}
+	depID = stage.Dependencies[0]
+	in, present := inputs[depID]
+	if !present {
+		return "", nil, false
+	}
+	files = flattenStageFiles(in)
+	// Fanout only wins when each intermediate task performs a non-trivial
+	// merge (>= 2 input files). With K <= workerCount, splitFilesEvenly
+	// would hand each intermediate a single file, which is just an identity
+	// re-emit + an extra final merge — pure overhead. Require K > workerCount
+	// so the intermediate phase does real work.
+	if len(files) <= workerCount {
+		return "", nil, false
+	}
+	return depID, files, true
+}
+
+// dispatchFinalAggregateFanout splits a Singleton final_aggregate dispatch
+// into N parallel intermediate merge tasks plus a 1-task final merge.
+//
+// Today a Singleton final_aggregate is a single task that reads every
+// upstream partial-aggregate file serially. When the upstream is a fan-out
+// (e.g. dispatchScanAggregateStage emits W partial outputs) the merge
+// becomes the serialization point: one worker scans all W partials while
+// the others idle. This helper reshapes the dispatch into:
+//
+//	N=min(K, workerCount) intermediate merge tasks (each over ⌈K/N⌉ inputs)
+//	  ↓
+//	1 final merge task (over the N intermediate outputs)
+//
+// Each intermediate runs in `final_aggregate` mode (worker rewrites InputCol
+// → OutputCol per executeStageAggregate) so output preserves the partial-
+// aggregate column shape the final merge expects. PostFilterExprs (HAVING)
+// run only on the final task — applying them to intermediates would drop
+// rows before all groups had been merged across partitions.
+func (c *Coordinator) dispatchFinalAggregateFanout(
+	ctx context.Context,
+	queryID string,
+	stage physical.Stage,
+	inputs map[string]StageOutput,
+	workerCount int,
+) (StageOutput, error) {
+	depID, files, ok := finalAggregateFanoutCandidate(stage, inputs, workerCount)
+	if !ok {
+		return StageOutput{}, fmt.Errorf("final_aggregate fanout precondition failed for stage %s", stage.ID)
+	}
+	N := workerCount
+	if N > len(files) {
+		N = len(files)
+	}
+	groups := splitFilesEvenly(files, N)
+	N = len(groups) // splitFilesEvenly may return fewer when files < N
+
+	c.logger.Info("dispatchFinalAggregateFanout",
+		"stage_id", stage.ID, "upstream_files", len(files),
+		"intermediate_tasks", N)
+
+	aggs := make([]distributed.AggSpec, 0, len(stage.AggSpecs))
+	for _, a := range stage.AggSpecs {
+		aggs = append(aggs, distributed.AggSpec{
+			Func:      a.Func,
+			InputCol:  a.InputCol,
+			OutputCol: a.OutputCol,
+			InputExpr: a.InputExpr,
+		})
+	}
+
+	// Phase 1: intermediates. Each consumes a slice of upstream files,
+	// re-aggregates in merge mode, and emits its own partial output.
+	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
+	intermTasks := make([]distributed.Task, 0, N)
+	for i, group := range groups {
+		t := distributed.Task{
+			ID:           uuid.New().String()[:8],
+			QueryID:      queryID,
+			StageID:      fmt.Sprintf("%s-merge-%d", stage.ID, i),
+			Type:         distributed.TaskTypeStage,
+			StageType:    "final_aggregate",
+			GroupByCols:  stage.GroupByCols,
+			Aggregates:   aggs,
+			Inputs:       map[string][]string{depID: group},
+			DataBucket:   c.config.ResultBucket,
+			ResultBucket: c.config.ResultBucket,
+			ResultPrefix: resultPrefix,
+			CreatedAt:    time.Now(),
+			// HAVING is final-only — see comment on dispatchComputeStage.
+		}
+		if clusterID := c.catalog.ClusterID(); clusterID != "" {
+			t.ClusterID = clusterID
+		}
+		c.mu.Lock()
+		qm := c.queryMetas[queryID]
+		c.mu.Unlock()
+		c.enrichTaskWithQueryContext(qm, &t)
+		intermTasks = append(intermTasks, t)
+	}
+	intermFiles, err := c.runStageTasks(ctx,
+		fmt.Sprintf("st-%s-interm-%s", stage.ID, queryID),
+		stage.ID+"-interm",
+		intermTasks)
+	if err != nil {
+		return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: intermediate phase: %w", stage.ID, err)
+	}
+	// Flatten intermediate outputs into a single file list for the final.
+	finalInputs := make([]string, 0)
+	for _, fs := range intermFiles {
+		finalInputs = append(finalInputs, fs...)
+	}
+
+	// Phase 2: single final merge task over the intermediate outputs.
+	finalTask := distributed.Task{
+		ID:              uuid.New().String()[:8],
+		QueryID:         queryID,
+		StageID:         stage.ID,
+		Type:            distributed.TaskTypeStage,
+		StageType:       "final_aggregate",
+		GroupByCols:     stage.GroupByCols,
+		Aggregates:      aggs,
+		Limit:           stage.Limit,
+		Inputs:          map[string][]string{depID: finalInputs},
+		DataBucket:      c.config.ResultBucket,
+		ResultBucket:    c.config.ResultBucket,
+		ResultPrefix:    resultPrefix,
+		CreatedAt:       time.Now(),
+		PostFilterExprs: append([]string(nil), stage.FilterExprs...),
+	}
+	if clusterID := c.catalog.ClusterID(); clusterID != "" {
+		finalTask.ClusterID = clusterID
+	}
+	c.mu.Lock()
+	qm := c.queryMetas[queryID]
+	c.mu.Unlock()
+	c.enrichTaskWithQueryContext(qm, &finalTask)
+
+	finalFiles, err := c.runStageTasks(ctx,
+		fmt.Sprintf("st-%s-%s", stage.ID, queryID),
+		stage.ID,
+		[]distributed.Task{finalTask})
+	if err != nil {
+		return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: final phase: %w", stage.ID, err)
+	}
+	return StageOutput{
+		Kind:          OutputSinglePart,
+		NumPartitions: 1,
+		Files:         finalFiles,
+	}, nil
+}
+
+// runStageTasks publishes the given tasks under stageQueryID, subscribes to
+// the per-stage result subject, and waits for all completions. Returns one
+// []string of result files per task, in completion order. Used by
+// dispatchFinalAggregateFanout for both phases; mirrors the inline
+// dispatch+collect in dispatchScanAggregateStage / dispatchComputeStage.
+func (c *Coordinator) runStageTasks(
+	ctx context.Context,
+	stageQueryID, stageLabel string,
+	tasks []distributed.Task,
+) ([][]string, error) {
+	if len(tasks) == 0 {
+		return nil, nil
+	}
+	trackerStages := map[string]*StageInfo{
+		stageLabel: {StageID: stageLabel, Type: distributed.TaskTypeStage, TotalTasks: len(tasks)},
+	}
+	c.tracker.Register(stageQueryID, "", trackerStages, []string{stageLabel})
+	c.tracker.Start(stageQueryID)
+	defer c.tracker.Delete(stageQueryID)
+
+	for i := range tasks {
+		tasks[i].QueryID = stageQueryID
+	}
+	subject := distributed.QueryResultSubject(stageQueryID)
+	type taskResult struct {
+		files []string
+		err   string
+	}
+	collected := make([]taskResult, 0, len(tasks))
+	var mu sync.Mutex
+	done := make(chan struct{}, 1)
+	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+		var r distributed.ResultNotification
+		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
+			return
+		}
+		mu.Lock()
+		if r.Success {
+			collected = append(collected, taskResult{files: r.ResultFiles})
+		} else {
+			collected = append(collected, taskResult{err: r.Error})
+		}
+		got := len(collected)
+		mu.Unlock()
+		if got >= len(tasks) {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("stage %s: subscribe: %w", stageLabel, err)
+	}
+	defer sub.Unsubscribe()
+
+	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
+		return nil, fmt.Errorf("stage %s: publish: %w", stageLabel, err)
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(shuffleStageTimeout):
+		return nil, fmt.Errorf("stage %s: timeout after %s", stageLabel, shuffleStageTimeout)
+	}
+
+	mu.Lock()
+	results := make([]taskResult, len(collected))
+	copy(results, collected)
+	mu.Unlock()
+	files := make([][]string, len(tasks))
+	for i, r := range results {
+		if r.err != "" {
+			return nil, fmt.Errorf("stage %s: task failed: %s", stageLabel, r.err)
+		}
+		files[i] = r.files
+	}
+	return files, nil
 }
 
 // buildTaskInputsForStage maps a stage's Dependencies (upstream stage IDs)
