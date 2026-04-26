@@ -119,7 +119,26 @@ func (c *Coordinator) executeStageDAG(
 	for id := range pending {
 		done[id] = make(chan struct{})
 	}
-	c.logger.Info("stage-DAG dispatch", "query", queryID, "stages", len(pending))
+	// Cap how many stages can be dispatching concurrently to keep coord-side
+	// result-collection state (NATS subscriptions, in-flight task batches,
+	// per-stage buffers) bounded. Without this, every "ready" stage in a
+	// wave dispatches simultaneously — for Q18 SF10 (17 stages, multiple
+	// fan-outs ready at once) the resulting coord+worker total RSS routinely
+	// overshoots the host's physical memory and the OS OOM-kills a process.
+	//
+	// 2 * workerCount keeps workers saturated (each worker has typically
+	// max_concurrent>=2 tasks) while bounding the number of in-flight stage
+	// pipelines coord must track to a small multiple of the cluster size.
+	// The semaphore is acquired AFTER all upstream dependencies are
+	// satisfied, so it can never deadlock waiting on a producer that itself
+	// can't acquire a slot.
+	dispatchSlots := 2 * workerCount
+	if dispatchSlots < 2 {
+		dispatchSlots = 2
+	}
+	dispatchSem := make(chan struct{}, dispatchSlots)
+	c.logger.Info("stage-DAG dispatch", "query", queryID,
+		"stages", len(pending), "dispatch_concurrency", dispatchSlots)
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, s := range pending {
@@ -179,6 +198,17 @@ func (c *Coordinator) executeStageDAG(
 			if err != nil {
 				return fmt.Errorf("stage %s collect inputs: %w", s.ID, err)
 			}
+			// Acquire a dispatch slot now that we have inputs and are
+			// about to publish tasks. Held until the stage completes so
+			// concurrent stage count never exceeds dispatchSlots. Released
+			// via defer so it always fires, even on dispatch error.
+			select {
+			case dispatchSem <- struct{}{}:
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+			defer func() { <-dispatchSem }()
+
 			var out StageOutput
 			switch s.Type {
 			case physical.StageExchangeRepartition:
