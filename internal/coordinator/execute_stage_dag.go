@@ -23,6 +23,41 @@ import (
 // aggregation stages don't falsely time out.
 const gatherReceiveTimeout = 10 * time.Minute
 
+// awaitStageProgress blocks until either every dispatched task has reported
+// a result (signalled via allDone) or progress has stalled for longer than
+// stageIdleTimeout. Each task-completion subscription handler should send
+// (non-blocking) to progress on every result. The absolute wall-clock cap
+// shuffleStageTimeout still applies as a backstop for pathological cases
+// where progress signals leak (lost NATS subscription).
+//
+// Returns nil on completion, ctx.Err() on cancellation, or a stuck/timeout
+// error otherwise.
+func awaitStageProgress(ctx context.Context, allDone <-chan struct{}, progress <-chan struct{}, label string) error {
+	const tickEvery = 30 * time.Second
+	ticker := time.NewTicker(tickEvery)
+	defer ticker.Stop()
+	lastProgress := time.Now()
+	deadline := time.Now().Add(shuffleStageTimeout)
+	for {
+		select {
+		case <-allDone:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-progress:
+			lastProgress = time.Now()
+		case now := <-ticker.C:
+			if now.Sub(lastProgress) > stageIdleTimeout {
+				return fmt.Errorf("stage %s: idle for %s with no task progress (likely worker crash, deadlock, or lost result publish)",
+					label, stageIdleTimeout)
+			}
+			if now.After(deadline) {
+				return fmt.Errorf("stage %s: exceeded absolute timeout %s", label, shuffleStageTimeout)
+			}
+		}
+	}
+}
+
 // executeStageDAG is the native-DAG distributed executor. It walks the
 // Exchange-annotated stage DAG in topological order, dispatches each
 // stage via its Type-specific helper, records outputs in a per-query
@@ -734,6 +769,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	collected := make([]taskResult, 0, len(tasks))
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
+	progress := make(chan struct{}, len(tasks))
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
@@ -747,6 +783,10 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		}
 		got := len(collected)
 		mu.Unlock()
+		select {
+		case progress <- struct{}{}:
+		default:
+		}
 		if got >= len(tasks) {
 			select {
 			case done <- struct{}{}:
@@ -762,12 +802,8 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
 		return StageOutput{}, fmt.Errorf("scan-agg stage %s publish: %w", stage.ID, err)
 	}
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return StageOutput{}, ctx.Err()
-	case <-time.After(shuffleStageTimeout):
-		return StageOutput{}, fmt.Errorf("scan-agg stage %s timeout", stage.ID)
+	if err := awaitStageProgress(ctx, done, progress, "scan-agg "+stage.ID); err != nil {
+		return StageOutput{}, err
 	}
 
 	mu.Lock()
@@ -845,6 +881,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 	var collected []taskResult
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
+	progress := make(chan struct{}, 1)
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
@@ -858,6 +895,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 		}
 		got := len(collected)
 		mu.Unlock()
+		select {
+		case progress <- struct{}{}:
+		default:
+		}
 		if got >= 1 {
 			select {
 			case done <- struct{}{}:
@@ -872,12 +913,8 @@ func (c *Coordinator) dispatchScanFilterStage(
 	if err := c.scheduler.PublishTasks(ctx, []distributed.Task{task}); err != nil {
 		return StageOutput{}, fmt.Errorf("scan-filter stage %s publish: %w", stage.ID, err)
 	}
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return StageOutput{}, ctx.Err()
-	case <-time.After(shuffleStageTimeout):
-		return StageOutput{}, fmt.Errorf("scan-filter stage %s timeout", stage.ID)
+	if err := awaitStageProgress(ctx, done, progress, "scan-filter "+stage.ID); err != nil {
+		return StageOutput{}, err
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -1062,6 +1099,7 @@ func (c *Coordinator) dispatchComputeStage(
 	collected := make([]taskResult, 0, len(tasks))
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
+	progress := make(chan struct{}, len(tasks))
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
@@ -1075,6 +1113,10 @@ func (c *Coordinator) dispatchComputeStage(
 		}
 		got := len(collected)
 		mu.Unlock()
+		select {
+		case progress <- struct{}{}:
+		default:
+		}
 		if got >= len(tasks) {
 			select {
 			case done <- struct{}{}:
@@ -1094,17 +1136,13 @@ func (c *Coordinator) dispatchComputeStage(
 		return StageOutput{}, fmt.Errorf("stage %s: publish: %w", stage.ID, err)
 	}
 
-	select {
-	case <-done:
-		c.logger.Info("compute stage complete", "stage_id", stage.ID, "tasks", len(tasks))
-	case <-ctx.Done():
+	if err := awaitStageProgress(ctx, done, progress, "compute "+stage.ID); err != nil {
 		mu.Lock()
 		got := len(collected)
 		mu.Unlock()
-		return StageOutput{}, fmt.Errorf("stage %s: ctx done with %d/%d results: %w", stage.ID, got, len(tasks), ctx.Err())
-	case <-time.After(shuffleStageTimeout):
-		return StageOutput{}, fmt.Errorf("stage %s: timed out after %s", stage.ID, shuffleStageTimeout)
+		return StageOutput{}, fmt.Errorf("stage %s with %d/%d results: %w", stage.ID, got, len(tasks), err)
 	}
+	c.logger.Info("compute stage complete", "stage_id", stage.ID, "tasks", len(tasks))
 
 	mu.Lock()
 	results := make([]taskResult, len(collected))
@@ -1353,6 +1391,7 @@ func (c *Coordinator) runStageTasks(
 	collected := make([]taskResult, 0, len(tasks))
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
+	progress := make(chan struct{}, len(tasks))
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
@@ -1366,6 +1405,10 @@ func (c *Coordinator) runStageTasks(
 		}
 		got := len(collected)
 		mu.Unlock()
+		select {
+		case progress <- struct{}{}:
+		default:
+		}
 		if got >= len(tasks) {
 			select {
 			case done <- struct{}{}:
@@ -1381,12 +1424,8 @@ func (c *Coordinator) runStageTasks(
 	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
 		return nil, fmt.Errorf("stage %s: publish: %w", stageLabel, err)
 	}
-	select {
-	case <-done:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(shuffleStageTimeout):
-		return nil, fmt.Errorf("stage %s: timeout after %s", stageLabel, shuffleStageTimeout)
+	if err := awaitStageProgress(ctx, done, progress, stageLabel); err != nil {
+		return nil, err
 	}
 
 	mu.Lock()

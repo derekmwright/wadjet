@@ -24,8 +24,22 @@ var shuffleBuildThreshold int64 = 4 * 1024 * 1024 * 1024 // 4 GB
 // 4 reduces hot-key skew impact while keeping file count bounded.
 const shufflePartitionMultiplier = 4
 
-// shuffleStageTimeout is the per-shuffle-stage timeout. Phase 1: no per-stage retry.
-const shuffleStageTimeout = 10 * time.Minute
+// shuffleStageTimeout is the absolute upper bound a stage is allowed to run.
+// It's intentionally generous because the actual stuck-stage detection is
+// progress-based (see awaitStageProgress in execute_stage_dag.go): a stage is
+// considered stuck only when no task has reported a result in
+// stageIdleTimeout. The wall-clock cap here is the belt-and-suspenders for
+// pathological cases where progress signals leak (lost subscription, NATS
+// partition) and we still need to bail out.
+const shuffleStageTimeout = 60 * time.Minute
+
+// stageIdleTimeout is how long a stage may go without observing any task
+// completion before it's declared stuck. Replaces the old fixed-wall-clock
+// shuffleStageTimeout in the dispatch+collect loops: a stage that's slow but
+// reporting completions every few minutes is fine; one that has gone silent
+// for stageIdleTimeout is broken (worker crashed, deadlock, lost result
+// publish).
+const stageIdleTimeout = 10 * time.Minute
 
 // ShuffleLayout describes the shard file layout produced by the two-sided
 // shuffle stages. The caller (coordinator routing path) constructs probe
