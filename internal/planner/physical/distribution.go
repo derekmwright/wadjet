@@ -248,12 +248,25 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 		// Per spec §"OutputDistribution": merge-grouped finals are labeled
 		// hash-partitioned on group-by cols with Count=MergeGroupCount for
 		// symmetry with Trino/Spark. Lone reducers (MergeGroupCount == 0)
-		// are singleton. See spec Risk #1.
+		// are singleton — UNLESS the planner spliced a matching hash-
+		// repartition Exchange directly upstream (insertHashShuffleBeforeFinalAgg
+		// does this for grouped finals), in which case each task computes
+		// disjoint groups and the output is naturally hash-partitioned on
+		// the group keys.
 		if stage.MergeGroupCount > 0 {
 			return Distribution{
 				Kind:  DistHashPartitioned,
 				Keys:  stage.GroupByCols,
 				Count: stage.MergeGroupCount,
+			}
+		}
+		if len(stage.GroupByCols) > 0 && len(stage.Dependencies) == 1 {
+			if dep, ok := deps[stage.Dependencies[0]]; ok && dep.Kind == DistHashPartitioned && keysEqual(dep.Keys, stage.GroupByCols) {
+				return Distribution{
+					Kind:  DistHashPartitioned,
+					Keys:  append([]string(nil), stage.GroupByCols...),
+					Count: dep.Count,
+				}
 			}
 		}
 		return Distribution{Kind: DistSingleton}

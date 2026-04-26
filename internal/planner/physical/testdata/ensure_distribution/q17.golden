@@ -4,10 +4,11 @@ exchange-repartition-2	exchange-repartition	Hash(l_partkey)/32	deps=scan-0
 exchange-repartition-3	exchange-repartition	Hash(p_partkey)/32	deps=scan-1
 join-4	hash_join	Hash(l_partkey)/32	deps=exchange-repartition-2,exchange-repartition-3
 scan-5	scan	Singleton
-final_aggregate-44	final_aggregate	Singleton	deps=scan-5
+final_aggregate-44	final_aggregate	Hash(l_partkey)/4	deps=exchange-repartition-final_aggregate-44
 exchange-repartition-45	exchange-repartition	Hash(p_partkey)/32	deps=join-4
 exchange-repartition-46	exchange-repartition	Hash(l_partkey)/32	deps=final_aggregate-44
 join-47	hash_join	Hash(p_partkey)/32	deps=exchange-repartition-45,exchange-repartition-46
 aggregate-48	aggregate	Singleton	deps=join-47
 final_aggregate-49	final_aggregate	Singleton	deps=aggregate-48
 exchange-gather-final_aggregate-49	exchange-gather	Singleton	deps=final_aggregate-49
+exchange-repartition-final_aggregate-44	exchange-repartition	Hash(l_partkey)/4	deps=scan-5

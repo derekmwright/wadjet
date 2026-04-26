@@ -348,3 +348,97 @@ func isMergeTreeFinal(stages []Stage, s *Stage, idIndex map[string]int) bool {
 	}
 	return true
 }
+
+// insertHashShuffleBeforeFinalAgg splices a StageExchangeRepartition (hash by
+// GroupByCols) between every grouped final_aggregate and its sole upstream
+// dep, so the dispatcher can fan the merge across workers. Without this, a
+// Singleton final_aggregate over a fanned-out partial input runs as one task
+// re-aggregating everything serially — the dominant cost for queries like
+// Q18 SF10 where the partial output is large.
+//
+// Why a dedicated pass instead of EnsureDistribution: the property algebra
+// has RequiredClusteredOn satisfied by DistSingleton (a single-worker output
+// is "trivially clustered"), so labeling final_aggregate as
+// RequiredClusteredOn doesn't trigger an exchange when the upstream is a
+// fused-aggregate scan (whose nominal Distribution stays Singleton even
+// though dispatchScanAggregateStage fans it out into N partial files at
+// runtime). Working around that requires either a new DistKind or special-
+// casing scan output, both of which break unrelated callers (notably the
+// merge_aggregate consistency check). A targeted rewrite keeps the property
+// algebra unchanged and only acts on the case that actually benefits.
+//
+// Skips:
+//   - merge_aggregate intermediates (MergeGroupCount > 0): handled by the
+//     existing merge tree shape, output is already labeled hash-partitioned.
+//   - Scalar aggregates (no GROUP BY): nothing to cluster on.
+//   - Multi-dep finals (the dual-level merge tree shape): the upstream is
+//     already a fan-out and the dispatcher's fanout in
+//     dispatchFinalAggregateFanout handles it.
+//   - Stages whose sole dep is already a StageExchangeRepartition with
+//     matching Keys: no-op, exchange already in place.
+func insertHashShuffleBeforeFinalAgg(stages []Stage, workerCount int) []Stage {
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	idIndex := make(map[string]int, len(stages))
+	for i, s := range stages {
+		idIndex[s.ID] = i
+	}
+
+	out := make([]Stage, 0, len(stages))
+	for _, s := range stages {
+		out = append(out, s)
+	}
+
+	for i := range out {
+		s := &out[i]
+		if s.Type != "final_aggregate" {
+			continue
+		}
+		if s.MergeGroupCount > 0 {
+			continue
+		}
+		if len(s.GroupByCols) == 0 {
+			continue
+		}
+		if len(s.Dependencies) != 1 {
+			continue
+		}
+		// Skip when fuseSortIntoPredecessor has folded sort+limit into
+		// this final_aggregate. Hash-partitioning would let each task
+		// apply Limit independently (e.g., Q10 LIMIT 20 with 3 workers
+		// emits 60 rows) and global sort order can't be reconstructed
+		// from per-partition slices. Both require a Singleton
+		// finalization step that we don't synthesize today.
+		if s.Limit > 0 || len(s.SortKeys) > 0 {
+			continue
+		}
+		depID := s.Dependencies[0]
+		depIdx, ok := idIndex[depID]
+		if !ok {
+			continue
+		}
+		dep := out[depIdx]
+		if dep.Type == StageExchangeRepartition && dep.Exchange != nil &&
+			keysEqual(dep.Exchange.Keys, s.GroupByCols) {
+			continue
+		}
+
+		exchID := fmt.Sprintf("%s-%s", StageExchangeRepartition, s.ID)
+		exch := Stage{
+			ID:           exchID,
+			Type:         StageExchangeRepartition,
+			Dependencies: []string{depID},
+			Exchange: &ExchangeStage{
+				Keys:  append([]string(nil), s.GroupByCols...),
+				Count: workerCount,
+			},
+		}
+		out = append(out, exch)
+		idIndex[exchID] = len(out) - 1
+		// Rewire the final_aggregate by index since &out[i] may now be
+		// invalid after append.
+		out[i].Dependencies = []string{exchID}
+	}
+	return out
+}

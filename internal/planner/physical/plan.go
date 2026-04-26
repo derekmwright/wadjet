@@ -1193,6 +1193,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		if ensureErr != nil {
 			return nil, fmt.Errorf("ensure distribution: %w", ensureErr)
 		}
+		stages = insertHashShuffleBeforeFinalAgg(stages, p.WorkerCount)
+		// Re-run distribution assignment so stages whose OutputDistribution
+		// depends on (now-spliced) upstream Exchange outputs see the right
+		// inputs. Notably: a grouped final_aggregate whose input is a
+		// freshly-inserted hash-partition Exchange should label its own
+		// output DistHashPartitioned (so the dispatcher fans it out across
+		// workers) instead of the pre-Exchange Singleton.
+		assignStageDistributions(stages, p.WorkerCount)
 		prev := BehaviorPreservingMode
 		BehaviorPreservingMode = false
 		defer func() { BehaviorPreservingMode = prev }()

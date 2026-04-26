@@ -41,6 +41,15 @@ func (c *Coordinator) executeStageDAG(
 	if len(stages) == 0 {
 		return nil, fmt.Errorf("executeStageDAG: empty stage list")
 	}
+	// Clamp to >=1 so dispatchers that key off workerCount (notably
+	// runShuffleSide via splitFilesEvenly) don't silently degrade to a
+	// zero-task no-op when the workers map hasn't yet picked up a
+	// heartbeat. The legacy dispatchers had per-helper clamps; new
+	// shuffle stages spliced by insertHashShuffleBeforeFinalAgg hit the
+	// runShuffleSide path directly and need this enforced upstream.
+	if workerCount < 1 {
+		workerCount = 1
+	}
 
 	// Fail-fast on plan shapes the dispatchers can't consume — see
 	// physical.ValidateNativeDAGShape. The 2026-04-23 SF10 A/B blew 10
