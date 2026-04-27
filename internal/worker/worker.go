@@ -673,7 +673,69 @@ func (w *Worker) publishDLQ(task distributed.Task, reason, errMsg string) {
 	}
 }
 
+// statsCache holds the slow-to-collect process statistics that the
+// heartbeat reports. A separate goroutine refreshes it on a coarser
+// cadence so the hot heartbeat path never has to call runtime.ReadMemStats
+// (which does a stop-the-world pause) or walk the spill directory while
+// the worker is in heavy compute. Under SF10/SF100 with GOGC=off, in-line
+// ReadMemStats can stall for minutes while back-to-back GCs run; coord
+// then reaps the worker as stale even though it's alive and progressing.
+type statsCache struct {
+	mu            sync.RWMutex
+	allocBytes    int64
+	sysBytes      int64
+	mallocs       uint64
+	rss           int64
+	numGoroutines int
+	spillBytes    int64
+}
+
+func (s *statsCache) refresh(spillDir string) {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms) // STW; only this goroutine pays the cost
+	rss := distributed.ProcessRSS()
+	ng := distributed.NumGoroutines()
+	spill := distributed.DirDiskUsage(spillDir)
+	s.mu.Lock()
+	s.allocBytes = int64(ms.Alloc)
+	s.sysBytes = int64(ms.Sys)
+	s.mallocs = ms.Mallocs
+	s.rss = rss
+	s.numGoroutines = ng
+	s.spillBytes = spill
+	s.mu.Unlock()
+}
+
+func (s *statsCache) snapshot() (alloc, sys int64, mallocs uint64, rss int64, ng int, spill int64) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.allocBytes, s.sysBytes, s.mallocs, s.rss, s.numGoroutines, s.spillBytes
+}
+
+func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
+	// Initial snapshot so the first heartbeat after startup carries real
+	// values rather than zeros.
+	cache.refresh(w.config.SpillDir)
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cache.refresh(w.config.SpillDir)
+		}
+	}
+}
+
 func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
+	cache := &statsCache{}
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.statsRefreshLoop(ctx, cache)
+	}()
+
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -685,10 +747,14 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 		case <-ticker.C:
 			tickCounter++
 
-			var memStats runtime.MemStats
-			runtime.ReadMemStats(&memStats)
+			// Read cached stats — never blocks on STW or filesystem walk,
+			// so the hot heartbeat path keeps firing on its 10s cadence
+			// even while the stats refresher is paused inside ReadMemStats
+			// or the spill walker. Coord sees Timestamp tick forward and
+			// keeps the worker marked alive.
+			alloc, sys, mallocs, rss, ng, spill := cache.snapshot()
 
-			// Snapshot active task IDs for progress reporting
+			// Snapshot active task IDs for progress reporting.
 			w.activeTasksMu.RLock()
 			taskIDs := make([]string, 0, len(w.activeTasks))
 			for id := range w.activeTasks {
@@ -702,12 +768,12 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 				MaxConcurrent: w.config.MaxConcurrent,
 				ActiveTasks:   len(sem),
 				ActiveTaskIDs: taskIDs,
-				MemoryUsed:    int64(memStats.Alloc),
-				MemoryTotal:   int64(memStats.Sys),
-				RSS:           distributed.ProcessRSS(),
-				NumGoroutines: distributed.NumGoroutines(),
-				Mallocs:       memStats.Mallocs,
-				SpillDiskUsed: distributed.DirDiskUsage(w.config.SpillDir),
+				MemoryUsed:    alloc,
+				MemoryTotal:   sys,
+				RSS:           rss,
+				NumGoroutines: ng,
+				Mallocs:       mallocs,
+				SpillDiskUsed: spill,
 				Draining:      w.Draining(),
 				Timestamp:     time.Now(),
 			}
