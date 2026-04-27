@@ -9,3 +9,4 @@ mode                      = "distributed"
 coordinator_instance_type = "c7g.2xlarge"   # 8 vCPU, 16 GB
 worker_instance_type      = "c7gd.4xlarge"  # 16 vCPU, 32 GB, 237 GB NVMe
 worker_count              = 3
+query_timeout             = "30m"           # SF100 heavy queries need >10m default; mirrors sf10-distributed
