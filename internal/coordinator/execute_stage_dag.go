@@ -824,64 +824,91 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	}, nil
 }
 
-// dispatchScanFilterStage runs a scan-and-filter pipeline on a single
-// task. Used when a leaf scan carries scan-pushed FilterExprs but no
-// fused aggregate — without this path the filter would silently drop
-// because downstream stages see only the raw parquet files.
+// dispatchScanFilterStage runs a scan-and-filter pipeline fanned out across
+// workers. Used when a leaf scan carries scan-pushed FilterExprs but no
+// fused aggregate — each worker reads its slice of stage.ScanFiles, applies
+// FilterExprs, and emits a partial output. Downstream stages consume the
+// partitioned output the same way they consume the dispatchScanAggregateStage
+// output: via partitionFilesForWorker.
+//
+// Pre-fan-out (single-task) was the bottleneck on Q04 SF10: scanning 600
+// lineitem files in one task took >10m and tripped the new progress-based
+// idle timeout (no completion signals can land for a 1-task stage). Fan-out
+// makes scan-filter symmetric with scan-aggregate: workerCount tasks, each
+// with a slice of files, each emits independently — completions stream in
+// every minute or two, idle detection works as designed, and total wall
+// drops linearly with worker count.
 func (c *Coordinator) dispatchScanFilterStage(
 	ctx context.Context,
 	queryID string,
 	stage physical.Stage,
 	workerCount int,
 ) (StageOutput, error) {
-	_ = workerCount
+	if workerCount <= 0 {
+		workerCount = 1
+	}
 	if len(stage.ScanFiles) == 0 {
-		return StageOutput{Kind: OutputSinglePart, Files: [][]string{nil}}, nil
+		return StageOutput{Kind: OutputPartitioned, NumPartitions: 0, Files: nil}, nil
+	}
+	fileSets := splitFilesEvenly(stage.ScanFiles, workerCount)
+	actualTasks := len(fileSets)
+	if actualTasks == 0 {
+		return StageOutput{Kind: OutputPartitioned, NumPartitions: 0, Files: nil}, nil
 	}
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
-	task := distributed.Task{
-		ID:           uuid.New().String()[:8],
-		QueryID:      queryID,
-		StageID:      stage.ID,
-		Type:         distributed.TaskTypeStage,
-		StageType:    "scan",
-		TableName:    stage.TableName,
-		Columns:      stage.Columns,
-		FilterExprs:  append([]string(nil), stage.FilterExprs...),
-		Inputs: map[string][]string{
-			scanAliasForStage(stage): append([]string(nil), stage.ScanFiles...),
-		},
-		DataBucket:   c.config.ResultBucket,
-		ResultBucket: c.config.ResultBucket,
-		ResultPrefix: resultPrefix,
-		CreatedAt:    time.Now(),
+	c.logger.Info("dispatchScanFilterStage",
+		"stage_id", stage.ID, "files", len(stage.ScanFiles),
+		"tasks", actualTasks, "filters", len(stage.FilterExprs))
+
+	tasks := make([]distributed.Task, 0, actualTasks)
+	for _, files := range fileSets {
+		t := distributed.Task{
+			ID:          uuid.New().String()[:8],
+			QueryID:     queryID,
+			StageID:     stage.ID,
+			Type:        distributed.TaskTypeStage,
+			StageType:   "scan",
+			TableName:   stage.TableName,
+			Columns:     stage.Columns,
+			FilterExprs: append([]string(nil), stage.FilterExprs...),
+			Inputs: map[string][]string{
+				scanAliasForStage(stage): files,
+			},
+			DataBucket:   c.config.ResultBucket,
+			ResultBucket: c.config.ResultBucket,
+			ResultPrefix: resultPrefix,
+			CreatedAt:    time.Now(),
+		}
+		if clusterID := c.catalog.ClusterID(); clusterID != "" {
+			t.ClusterID = clusterID
+		}
+		c.mu.Lock()
+		qm := c.queryMetas[queryID]
+		c.mu.Unlock()
+		c.enrichTaskWithQueryContext(qm, &t)
+		tasks = append(tasks, t)
 	}
-	if clusterID := c.catalog.ClusterID(); clusterID != "" {
-		task.ClusterID = clusterID
-	}
-	c.mu.Lock()
-	qm := c.queryMetas[queryID]
-	c.mu.Unlock()
-	c.enrichTaskWithQueryContext(qm, &task)
 
 	stageQueryID := fmt.Sprintf("st-%s-%s", stage.ID, queryID)
 	trackerStages := map[string]*StageInfo{
-		stage.ID: {StageID: stage.ID, Type: distributed.TaskTypeStage, TotalTasks: 1},
+		stage.ID: {StageID: stage.ID, Type: distributed.TaskTypeStage, TotalTasks: len(tasks)},
 	}
 	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
-	task.QueryID = stageQueryID
 
+	for i := range tasks {
+		tasks[i].QueryID = stageQueryID
+	}
 	subject := distributed.QueryResultSubject(stageQueryID)
 	type taskResult struct {
 		files []string
 		err   string
 	}
-	var collected []taskResult
+	collected := make([]taskResult, 0, len(tasks))
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
-	progress := make(chan struct{}, 1)
+	progress := make(chan struct{}, len(tasks))
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
@@ -899,7 +926,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		case progress <- struct{}{}:
 		default:
 		}
-		if got >= 1 {
+		if got >= len(tasks) {
 			select {
 			case done <- struct{}{}:
 			default:
@@ -910,23 +937,29 @@ func (c *Coordinator) dispatchScanFilterStage(
 		return StageOutput{}, fmt.Errorf("scan-filter stage %s subscribe: %w", stage.ID, err)
 	}
 	defer sub.Unsubscribe()
-	if err := c.scheduler.PublishTasks(ctx, []distributed.Task{task}); err != nil {
+
+	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
 		return StageOutput{}, fmt.Errorf("scan-filter stage %s publish: %w", stage.ID, err)
 	}
 	if err := awaitStageProgress(ctx, done, progress, "scan-filter "+stage.ID); err != nil {
 		return StageOutput{}, err
 	}
+
 	mu.Lock()
-	defer mu.Unlock()
-	if len(collected) == 0 {
-		return StageOutput{}, fmt.Errorf("scan-filter stage %s: no result", stage.ID)
-	}
-	if collected[0].err != "" {
-		return StageOutput{}, fmt.Errorf("scan-filter stage %s: %s", stage.ID, collected[0].err)
+	results := make([]taskResult, len(collected))
+	copy(results, collected)
+	mu.Unlock()
+	files := make([][]string, len(tasks))
+	for i, r := range results {
+		if r.err != "" {
+			return StageOutput{}, fmt.Errorf("scan-filter stage %s: task failed: %s", stage.ID, r.err)
+		}
+		files[i] = r.files
 	}
 	return StageOutput{
-		Kind:  OutputSinglePart,
-		Files: [][]string{collected[0].files},
+		Kind:          OutputPartitioned,
+		NumPartitions: len(tasks),
+		Files:         files,
 	}, nil
 }
 
