@@ -25,9 +25,16 @@ const (
 // Returns 0 if no container limit is detected.
 //
 // Detection order:
-//  1. cgroups v2: /sys/fs/cgroup/memory.max
-//  2. cgroups v1: /sys/fs/cgroup/memory/memory.limit_in_bytes
+//  1. process's cgroup v2 scope (/sys/fs/cgroup/<scope>/memory.max), walking
+//     up the tree to find the tightest non-"max" limit. This catches
+//     systemd-run --scope MemoryMax=N for processes launched inside a
+//     transient unit on hosts whose root cgroup has unlimited memory.
+//  2. cgroups v2 root: /sys/fs/cgroup/memory.max
+//  3. cgroups v1: /sys/fs/cgroup/memory/memory.limit_in_bytes
 func DetectCgroupLimit() int64 {
+	if limit := detectV2ProcessLimit(); limit > 0 {
+		return limit
+	}
 	if limit := readLimit(cgroupV2MemMax, false); limit > 0 {
 		return limit
 	}
@@ -35,6 +42,50 @@ func DetectCgroupLimit() int64 {
 		return limit
 	}
 	return 0
+}
+
+// detectV2ProcessLimit walks the cgroup v2 hierarchy starting at the
+// process's own cgroup (read from /proc/self/cgroup) and returns the
+// tightest memory.max found. Each ancestor in the hierarchy enforces its
+// own memory.max independently — the kernel applies the minimum — so the
+// effective limit for the process is the smallest "non-max" value
+// encountered while walking from leaf to root.
+//
+// Returns 0 when the process is in the root cgroup, /proc/self/cgroup
+// can't be read, or every ancestor has memory.max set to "max".
+func detectV2ProcessLimit() int64 {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return 0
+	}
+	// cgroup v2 line format: "0::/system.slice/wadjet-worker-3.scope".
+	// Pre-AL2023 hybrid hosts may show v1 lines too; we only consume the
+	// "0::" entry which is the unified v2 hierarchy.
+	var path string
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "0::") {
+			path = strings.TrimPrefix(line, "0::")
+			break
+		}
+	}
+	if path == "" || path == "/" {
+		return 0
+	}
+	const cgroupV2Root = "/sys/fs/cgroup"
+	var best int64
+	for path != "" && path != "/" {
+		full := cgroupV2Root + path + "/memory.max"
+		if v := readLimit(full, false); v > 0 && (best == 0 || v < best) {
+			best = v
+		}
+		// Walk up: drop the trailing path segment.
+		idx := strings.LastIndexByte(path, '/')
+		if idx <= 0 {
+			break
+		}
+		path = path[:idx]
+	}
+	return best
 }
 
 // DetectBudget returns a recommended per-task memory budget (75% of the
