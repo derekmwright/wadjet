@@ -505,25 +505,51 @@ resource "aws_instance" "worker" {
       exit 1
     fi
 
-    # Start wadjet worker (retry on failure — coordinator may restart during benchmark)
-    while true; do
-      /usr/local/bin/wadjet serve \
-        --mode=worker \
-        --nats-url="nats://$COORD_IP:4222" \
-        --endpoint="s3.${local.eff_region}.amazonaws.com" \
-        --ssl \
-        --bucket="${local.bucket_name}" \
-        --region="${local.eff_region}" \
-        --storage-type=s3 \
-        --max-concurrent=${var.max_concurrent} \
-        --spill-dir="$SPILL_DIR" \
-        ${var.memory_budget > 0 ? "--memory-budget=${var.memory_budget}" : ""} \
-        ${var.cache_bytes > 0 ? "--cache-bytes=${var.cache_bytes}" : ""} 2>&1
-      EXIT_CODE=$?
-      echo "Worker exited with code $EXIT_CODE, restarting in 5s..."
-      echo "WORKER_STARTED=1" >> /etc/environment
-      sleep 5
+    # Launch ${var.workers_per_node} independent wadjet worker processes.
+    # Each gets its own GOMEMLIMIT slice (envelope/N) so an OOM on one
+    # only kills that process — siblings on the same node keep running.
+    # Each process auto-detects its memory envelope from cgroup, so we
+    # use systemd-style per-process cgroups (created via systemd-run)
+    # to give each worker a hard memory ceiling. When the worker exits
+    # (crash, OOM, etc.) the supervising shell loop restarts it.
+    WORKERS_PER_NODE=${var.workers_per_node}
+    TOTAL_BYTES=$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo)
+    PER_PROC_BYTES=$((TOTAL_BYTES * 75 / 100 / WORKERS_PER_NODE))
+    echo "Starting $WORKERS_PER_NODE worker process(es), each with ~$((PER_PROC_BYTES/1024/1024/1024)) GiB envelope"
+
+    start_worker() {
+      local idx=$1
+      local worker_spill="$SPILL_DIR/w$idx"
+      mkdir -p "$worker_spill"
+      while true; do
+        # systemd-run creates a transient unit with MemoryMax so the
+        # cgroup's auto-detected limit reflects the per-process slice,
+        # not the whole-node total.
+        systemd-run --quiet --unit="wadjet-worker-$idx-$$-$(date +%s)" \
+          --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$((PER_PROC_BYTES * 9 / 10))" \
+          /usr/local/bin/wadjet serve \
+            --mode=worker \
+            --nats-url="nats://$COORD_IP:4222" \
+            --endpoint="s3.${local.eff_region}.amazonaws.com" \
+            --ssl \
+            --bucket="${local.bucket_name}" \
+            --region="${local.eff_region}" \
+            --storage-type=s3 \
+            --max-concurrent=${var.max_concurrent} \
+            --spill-dir="$worker_spill" \
+            ${var.memory_budget > 0 ? "--memory-budget=${var.memory_budget}" : ""} \
+            ${var.cache_bytes > 0 ? "--cache-bytes=${var.cache_bytes}" : ""} 2>&1 | sed "s/^/[w$idx] /"
+        EXIT_CODE=$?
+        echo "[w$idx] exited code=$EXIT_CODE, restarting in 5s..."
+        sleep 5
+      done
+    }
+
+    echo "WORKER_STARTED=1" >> /etc/environment
+    for i in $(seq 0 $((WORKERS_PER_NODE - 1))); do
+      start_worker $i &
     done
+    wait
   EOF
   )
 

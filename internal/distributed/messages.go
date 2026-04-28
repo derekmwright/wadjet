@@ -289,6 +289,8 @@ type WorkerHeartbeat struct {
 	ActiveTaskIDs []string  `json:"active_task_ids,omitempty"` // task IDs currently executing
 	MemoryUsed    int64     `json:"memory_used"`
 	MemoryTotal   int64     `json:"memory_total"`
+	PoolUsed      int64     `json:"pool_used,omitempty"`   // bytes Reserved in the worker's shared memory pool
+	PoolBudget    int64     `json:"pool_budget,omitempty"` // shared memory pool capacity in bytes; pressure = PoolUsed/PoolBudget
 	RSS           int64     `json:"rss,omitempty"`             // process RSS from /proc/self/status
 	NumGoroutines int       `json:"num_goroutines,omitempty"`
 	Mallocs       uint64    `json:"mallocs,omitempty"`         // cumulative allocation count from runtime.MemStats
