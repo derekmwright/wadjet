@@ -248,6 +248,83 @@ func TestNativeDAG_AvgFallback(t *testing.T) {
 	}
 }
 
+// TestNativeDAG_BroadcastJoinProbeSplit exercises the broadcast_join
+// probe-split path: a small build (small dimension table) joined against
+// a multi-chunk probe (4 files). With workerCount > 1 the dispatcher should
+// fan out the broadcast_join to multiple tasks, each scanning a slice of
+// probe files while reading the full build. Verifies that the join produces
+// the expected row count (no duplication from the fan-out, no rows dropped
+// from probe slicing).
+func TestNativeDAG_BroadcastJoinProbeSplit(t *testing.T) {
+	_, coord, store := setupDistributed(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cat := coord.catalog
+
+	// Small dimension (build, broadcast-eligible).
+	dimSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "label", Type: parquet.TypeString},
+	}
+	dim := []map[string]any{
+		{"id": int64(1), "label": "A"},
+		{"id": int64(2), "label": "B"},
+		{"id": int64(3), "label": "C"},
+	}
+	ingestTestData(t, ctx, store, cat, "dim", dimSchema, dim)
+
+	// Multi-chunk facts table — 4 chunks × 25 rows = 100 rows. With
+	// MaxConcurrent=4 the cluster reports capacity=4, so the dispatcher
+	// should split the probe across 4 tasks (one chunk per task).
+	factSchema := []parquet.Column{
+		{Name: "fk", Type: parquet.TypeInt64},
+		{Name: "amt", Type: parquet.TypeInt64},
+	}
+	chunks := make([][]map[string]any, 4)
+	for c := 0; c < 4; c++ {
+		rows := make([]map[string]any, 25)
+		for i := 0; i < 25; i++ {
+			rows[i] = map[string]any{
+				"fk":  int64((i % 3) + 1),
+				"amt": int64(c*100 + i),
+			}
+		}
+		chunks[c] = rows
+	}
+	ingestMultiFile(t, ctx, store, cat, "facts", factSchema, chunks)
+
+	sql := "SELECT d.label, COUNT(*) AS n FROM facts f JOIN dim d ON f.fk = d.id GROUP BY d.label"
+
+	res, err := coord.ExecuteSQL(ctx, sql)
+	if err != nil {
+		t.Fatalf("ExecuteSQL: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("query error: %s", res.Error)
+	}
+
+	got := map[string]int64{}
+	for _, r := range res.Rows() {
+		got[r["label"].(string)] = toInt64(r["n"])
+	}
+	// Each chunk has 25 rows with fk values cycling 1,2,3,1,2,3,...
+	// Per chunk: id=1 gets 9, id=2 gets 8, id=3 gets 8. ×4 chunks =
+	// {A:36, B:32, C:32}. Total 100.
+	want := map[string]int64{"A": 36, "B": 32, "C": 32}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("label=%s: got %d, want %d (full result %v)", k, got[k], w, got)
+		}
+	}
+	var total int64
+	for _, n := range got {
+		total += n
+	}
+	if total != 100 {
+		t.Errorf("total joined rows = %d, want 100 (probe-split duplicated or dropped rows)", total)
+	}
+}
+
 // TestNativeDAG_Join exercises a hash_join compute stage end-to-end by
 // running a two-table INNER JOIN through the native DAG executor.
 func TestNativeDAG_Join(t *testing.T) {

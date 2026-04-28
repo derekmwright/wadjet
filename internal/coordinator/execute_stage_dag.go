@@ -1024,23 +1024,28 @@ func (c *Coordinator) dispatchComputeStage(
 		// Unknown distribution — fall back to 1 rather than workerCount.
 		numTasks = 1
 	}
-	// NB: stage.Tasks from the legacy planner encodes probe-split intent
-	// (e.g., Tasks=workerCount for broadcast_join means "split probe files
-	// across N workers"). That semantics assumes each task receives a
-	// DIFFERENT slice of probe files — which only works if the coordinator
-	// slices probe input per task. Native-DAG dispatch today hands every
-	// Singleton-stage task the same full probe set (partitionFilesForWorker
-	// on Singleton input returns the full list for every worker), so
-	// honoring stage.Tasks=N duplicates the full scan/join N× and triples
-	// the worker memory pressure. Until native-DAG grows probe-split
-	// semantics, Distribution is the authoritative signal and stage.Tasks
-	// is intentionally ignored here.
+	// Probe-split for broadcast_join: when the planner picks DistSingleton
+	// (because probe upstream is a leaf scan with DistSingleton output), the
+	// join would otherwise run as a single task on one worker — the entire
+	// probe scan + hash probe is serialized. When workerCount > 1 and the
+	// probe upstream is a multi-file OutputSinglePart, fan out to
+	// min(workerCount, len(probeFiles)) tasks each scanning 1/N of probe
+	// files. The build is broadcast (every task reads the same OutputSinglePart
+	// Files[0]), so memory pressure stays bounded — the per-task hash table
+	// is identical to the single-task case. Only the probe scan + probe
+	// compute is parallelized.
+	probeSplit := false
+	if n, ok := broadcastJoinProbeSplit(stage, inputs, workerCount, numTasks); ok {
+		numTasks = n
+		probeSplit = true
+	}
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	c.logger.Info("dispatchComputeStage",
 		"stage_id", stage.ID, "stage_type", stage.Type,
 		"deps", stage.Dependencies, "num_tasks", numTasks,
 		"distribution_kind", stage.Distribution.Kind,
 		"distribution_count", stage.Distribution.Count,
+		"probe_split", probeSplit,
 		"inputs_aliases", len(inputs))
 
 	// Build one task per output partition. Input slicing uses numTasks as
@@ -1049,7 +1054,13 @@ func (c *Coordinator) dispatchComputeStage(
 	// Hash-partitioned N-task stages each task reads its N-th partition.
 	tasks := make([]distributed.Task, 0, numTasks)
 	for w := 0; w < numTasks; w++ {
-		taskInputs, err := buildTaskInputsForStage(stage, inputs, w, numTasks)
+		var taskInputs map[string][]string
+		var err error
+		if probeSplit {
+			taskInputs, err = buildTaskInputsForBroadcastJoinSplitProbe(stage, inputs, w, numTasks)
+		} else {
+			taskInputs, err = buildTaskInputsForStage(stage, inputs, w, numTasks)
+		}
 		if err != nil {
 			return StageOutput{}, fmt.Errorf("stage %s worker %d: %w", stage.ID, w, err)
 		}
@@ -1201,6 +1212,23 @@ func (c *Coordinator) dispatchComputeStage(
 		kind = OutputPartitioned
 	case physical.DistBroadcast:
 		kind = OutputReplicated
+	}
+	if probeSplit {
+		// Probe-split fan-out keeps the planner's DistSingleton labelling but
+		// produces N physical files (one per probe-slice task). Collapse all
+		// per-task files into Files[0] so OutputSinglePart consumers (which
+		// read only Files[0]) see the full join result. Downstream parallelism
+		// is preserved by finalAggregateFanoutCandidate / flattenStageFiles
+		// callers that iterate every Files[i].
+		flat := make([]string, 0)
+		for _, f := range files {
+			flat = append(flat, f...)
+		}
+		return StageOutput{
+			Kind:          OutputSinglePart,
+			NumPartitions: 1,
+			Files:         [][]string{flat},
+		}, nil
 	}
 	return StageOutput{
 		Kind:          kind,
@@ -1514,6 +1542,88 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 		inputs[depID] = partitionFilesForWorker(upstreams[depID], workerIdx, workerCount)
 	}
 	return inputs, nil
+}
+
+// broadcastJoinProbeSplit reports whether a broadcast_join stage qualifies
+// for probe-split fan-out. Returns the desired numTasks and ok=true when:
+//   - the stage is a broadcast_join the planner left at numTasks=1 (DistSingleton)
+//   - the cluster has spare workers (workerCount > 1)
+//   - the probe upstream is OutputSinglePart with at least 2 files
+//
+// Triggers only for DistSingleton broadcast_join; the hash-partitioned path
+// is already parallelized by the planner via Exchange{Repartition}.
+func broadcastJoinProbeSplit(
+	stage physical.Stage,
+	inputs map[string]StageOutput,
+	workerCount, currentNumTasks int,
+) (numTasks int, ok bool) {
+	if stage.Type != physical.StageBroadcastJoin {
+		return 0, false
+	}
+	if currentNumTasks != 1 {
+		return 0, false
+	}
+	if workerCount <= 1 {
+		return 0, false
+	}
+	if len(stage.Dependencies) != 2 {
+		return 0, false
+	}
+	probeDep := stage.LeftDepStage
+	if probeDep == "" {
+		probeDep = stage.Dependencies[0]
+	}
+	probeIn, present := inputs[probeDep]
+	if !present || probeIn.Kind != OutputSinglePart {
+		return 0, false
+	}
+	probeFiles := flattenStageFiles(probeIn)
+	if len(probeFiles) < 2 {
+		return 0, false
+	}
+	n := workerCount
+	if n > len(probeFiles) {
+		n = len(probeFiles)
+	}
+	return n, true
+}
+
+// buildTaskInputsForBroadcastJoinSplitProbe is the probe-split variant of
+// buildTaskInputsForStage for broadcast_join. Each task receives:
+//   - build alias → the full broadcast set (every task sees every build row)
+//   - probe alias → its 1/numTasks slice of probe upstream files
+//
+// Caller must verify the stage has 2 deps and probe upstream is single-part
+// with multiple files; this helper assumes the dispatcher already vetted
+// eligibility.
+func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, numTasks int) (map[string][]string, error) {
+	if len(stage.Dependencies) != 2 {
+		return nil, fmt.Errorf("broadcast_join split-probe stage %s expects 2 deps, got %d", stage.ID, len(stage.Dependencies))
+	}
+	probeDep := stage.LeftDepStage
+	buildDep := stage.RightDepStage
+	if probeDep == "" {
+		probeDep = stage.Dependencies[0]
+	}
+	if buildDep == "" {
+		buildDep = stage.Dependencies[1]
+	}
+	buildAlias := stage.BuildTableAlias
+	if buildAlias == "" {
+		buildAlias = "build"
+	}
+	probeAlias := "probe"
+	if probeAlias == buildAlias {
+		probeAlias = "probe_side"
+	}
+	out := make(map[string][]string, 2)
+	out[buildAlias] = flattenStageFiles(upstreams[buildDep])
+	probeFiles := flattenStageFiles(upstreams[probeDep])
+	parts := splitFilesEvenly(probeFiles, numTasks)
+	if workerIdx >= 0 && workerIdx < len(parts) {
+		out[probeAlias] = parts[workerIdx]
+	}
+	return out, nil
 }
 
 // dispatchGatherStage is terminal: dispatches a single Gather task to one
