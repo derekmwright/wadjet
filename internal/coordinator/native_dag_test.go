@@ -325,6 +325,74 @@ func TestNativeDAG_BroadcastJoinProbeSplit(t *testing.T) {
 	}
 }
 
+// TestNativeDAG_BroadcastJoinReplicateMaterialization exercises the
+// dispatchReplicateStage materialization path. With a multi-chunk build
+// table, EnsureDistribution splices an exchange-replicate ahead of the
+// broadcast_join build slot. The dispatcher should detect the multi-file
+// upstream and consolidate it into a single WSHF cache. Verifies the
+// final join row count is unchanged (no rows dropped or duplicated by
+// the materialization).
+func TestNativeDAG_BroadcastJoinReplicateMaterialization(t *testing.T) {
+	prevMin := replicateMaterializeMinFiles
+	replicateMaterializeMinFiles = 2
+	t.Cleanup(func() { replicateMaterializeMinFiles = prevMin })
+
+	_, coord, store := setupDistributed(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cat := coord.catalog
+
+	// Multi-chunk build — small dimension table, broadcast-eligible, but
+	// spread across 3 chunks so the materialization gate fires.
+	dimSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "label", Type: parquet.TypeString},
+	}
+	dimChunks := [][]map[string]any{
+		{{"id": int64(1), "label": "A"}},
+		{{"id": int64(2), "label": "B"}},
+		{{"id": int64(3), "label": "C"}},
+	}
+	ingestMultiFile(t, ctx, store, cat, "dim_multi", dimSchema, dimChunks)
+
+	// Single-chunk facts table on the probe side.
+	factSchema := []parquet.Column{
+		{Name: "fk", Type: parquet.TypeInt64},
+		{Name: "amt", Type: parquet.TypeInt64},
+	}
+	facts := []map[string]any{
+		{"fk": int64(1), "amt": int64(10)},
+		{"fk": int64(2), "amt": int64(20)},
+		{"fk": int64(2), "amt": int64(25)},
+		{"fk": int64(3), "amt": int64(30)},
+		{"fk": int64(3), "amt": int64(35)},
+		{"fk": int64(3), "amt": int64(40)},
+	}
+	ingestTestData(t, ctx, store, cat, "facts_single", factSchema, facts)
+
+	sql := "SELECT d.label, COUNT(*) AS n FROM facts_single f JOIN dim_multi d ON f.fk = d.id GROUP BY d.label"
+
+	res, err := coord.ExecuteSQL(ctx, sql)
+	if err != nil {
+		t.Fatalf("ExecuteSQL: %v", err)
+	}
+	if res.Error != "" {
+		t.Fatalf("query error: %s", res.Error)
+	}
+
+	got := map[string]int64{}
+	for _, r := range res.Rows() {
+		got[r["label"].(string)] = toInt64(r["n"])
+	}
+	want := map[string]int64{"A": 1, "B": 2, "C": 3}
+	for k, w := range want {
+		if got[k] != w {
+			t.Errorf("label=%s: got %d, want %d (full result %v) — materialization may have dropped/duplicated rows",
+				k, got[k], w, got)
+		}
+	}
+}
+
 // TestNativeDAG_Join exercises a hash_join compute stage end-to-end by
 // running a two-table INNER JOIN through the native DAG executor.
 func TestNativeDAG_Join(t *testing.T) {
