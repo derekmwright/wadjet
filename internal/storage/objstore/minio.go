@@ -43,7 +43,20 @@ func s3Transport(secure bool) *http.Transport {
 		TLSHandshakeTimeout: 10 * time.Second,
 		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12}, //nolint:gosec // TLS always verified
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 120 * time.Second,
+		// ResponseHeaderTimeout fires when the server hasn't sent response
+		// headers by the deadline. For PUT, the server only sends headers
+		// AFTER the entire body upload completes, so this is effectively a
+		// per-upload wall-clock limit. With multiple worker processes per
+		// host contending for bandwidth, a 1-2GB shuffle partition can
+		// take >2min just to upload. 30min gives enough headroom for
+		// SF100-class shuffles under heavy contention; the per-task
+		// context still bounds total wall time.
+		//
+		// Observed in SF10 67062a5 deploy: 12 worker processes uploading
+		// shuffle partitions concurrently → 2m36s PUT failed at the
+		// previous 120s threshold despite the upload being legitimately
+		// in flight.
+		ResponseHeaderTimeout: 30 * time.Minute,
 		DisableCompression:    true, // Parquet/object data is already compressed
 	}
 }
