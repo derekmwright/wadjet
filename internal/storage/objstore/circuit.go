@@ -183,15 +183,21 @@ func (cs *CircuitStore) do(ctx context.Context, fn func(context.Context) error) 
 	return err
 }
 
-// Put implements Store.
+// Put implements Store. PUT operations are not wrapped in a per-call
+// timeout — the inner store's transport-level ResponseHeaderTimeout
+// (30 min) plus the caller's ctx already bound upload time. A short
+// per-call timeout caused multi-process clusters to fail healthy uploads
+// when contended bandwidth dropped per-connection throughput below the
+// previous 20 MB/s sizing assumption.
+//
+// The circuit breaker's failure counting still applies — repeated PUT
+// errors trip the breaker — but a slow-yet-progressing upload no longer
+// triggers a context deadline mid-stream.
 func (cs *CircuitStore) Put(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string) (string, error) {
-	timeout := cs.putTimeout(size)
 	if err := cs.beforeRequest(); err != nil {
 		return "", err
 	}
-	tctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	etag, err := cs.inner.Put(tctx, bucket, key, r, size, contentType)
+	etag, err := cs.inner.Put(ctx, bucket, key, r, size, contentType)
 	if err != nil {
 		cs.onFailure(err)
 	} else {
@@ -200,15 +206,13 @@ func (cs *CircuitStore) Put(ctx context.Context, bucket, key string, r io.Reader
 	return etag, err
 }
 
-// PutIfMatch implements Store.
+// PutIfMatch implements Store. See Put for why we don't wrap in a
+// per-call timeout.
 func (cs *CircuitStore) PutIfMatch(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string, expectedETag string) (string, error) {
-	timeout := cs.putTimeout(size)
 	if err := cs.beforeRequest(); err != nil {
 		return "", err
 	}
-	tctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	etag, err := cs.inner.PutIfMatch(tctx, bucket, key, r, size, contentType, expectedETag)
+	etag, err := cs.inner.PutIfMatch(ctx, bucket, key, r, size, contentType, expectedETag)
 	if err != nil {
 		cs.onFailure(err)
 	} else {
@@ -217,11 +221,8 @@ func (cs *CircuitStore) PutIfMatch(ctx context.Context, bucket, key string, r io
 	return etag, err
 }
 
-// putTimeout returns a size-aware timeout for upload operations. The fixed
-// 10-second RequestTimeout is fine for the small results that originally
-// flowed through this store (~MB), but build-cache pre-scan tasks now upload
-// multi-GB shuffle files. Allow at least RequestTimeout, plus enough headroom
-// to push the payload at ~20 MB/s effective same-region S3 throughput.
+// putTimeout is no longer used — kept only because it has tests. PUT
+// operations now rely on transport-level and caller-level deadlines.
 func (cs *CircuitStore) putTimeout(size int64) time.Duration {
 	timeout := cs.config.RequestTimeout
 	if size > 0 {
