@@ -779,6 +779,32 @@ func (c *Coordinator) dispatchPipelineStage(
 	return c.dispatchComputeStage(ctx, queryID, stage, inputs, workerCount)
 }
 
+// scanFanOutTaskCount picks the number of scan-side tasks for stage fan-out.
+// Returns max(workerCount, capacity), capped at fileCount and floored at 1.
+//
+// Prefers cluster capacity (sum of each worker's auto-tuned MaxConcurrent
+// reported in heartbeats) over the raw worker count because workers
+// downscale concurrency under memory pressure. With 3 workers each running
+// MaxConcurrent=2 the cluster can run 6 tasks at once; sizing scan fan-out
+// to 3 leaves half the cluster idle AND doubles per-task memory pressure
+// (each task reads twice as many files).
+//
+// Falls back to workerCount when capacity == 0 — typical for the first
+// query post-cluster-startup, before any heartbeat has reported MaxConcurrent.
+func scanFanOutTaskCount(workerCount, capacity, fileCount int) int {
+	n := workerCount
+	if capacity > n {
+		n = capacity
+	}
+	if n > fileCount {
+		n = fileCount
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
 // dispatchScanAggregateStage dispatches N partial-aggregate tasks, one
 // per worker, each reading a disjoint slice of stage.ScanFiles. Each task
 // runs a HashAggregate on its file slice and emits a partial result as
@@ -810,15 +836,24 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	// whole aggregate runs on one worker and the merge step is a
 	// pass-through. Loses parallelism for AVG queries (Q01 is the
 	// notable one) but preserves correctness.
+	avgFallback := false
 	for _, a := range stage.FusedAggSpecs {
 		if strings.EqualFold(strings.TrimSpace(a.Func), "avg") {
 			c.logger.Info("scan-aggregate AVG fallback: single-task",
 				"stage_id", stage.ID, "func", a.Func)
 			workerCount = 1
+			avgFallback = true
 			break
 		}
 	}
-	fileSets := splitFilesEvenly(stage.ScanFiles, workerCount)
+	// Same fan-out widening as dispatchScanFilterStage: prefer cluster capacity
+	// over raw worker count so each task stays inside the per-worker memory
+	// budget. AVG fallback intentionally stays at 1 task.
+	taskCount := workerCount
+	if !avgFallback {
+		taskCount = scanFanOutTaskCount(workerCount, c.workers.ClusterCapacity(), len(stage.ScanFiles))
+	}
+	fileSets := splitFilesEvenly(stage.ScanFiles, taskCount)
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		return StageOutput{
@@ -983,7 +1018,14 @@ func (c *Coordinator) dispatchScanFilterStage(
 	if len(stage.ScanFiles) == 0 {
 		return StageOutput{Kind: OutputPartitioned, NumPartitions: 0, Files: nil}, nil
 	}
-	fileSets := splitFilesEvenly(stage.ScanFiles, workerCount)
+	// Task count: prefer cluster capacity (workers × auto-tuned MaxConcurrent)
+	// over raw worker count so each task stays under the per-worker memory
+	// budget. With 3 workers × MaxConcurrent=2, that's 6 tasks instead of 3
+	// — for SF10 lineitem (600 files) that's 100 files/task instead of 200,
+	// which keeps each task's heap below the 32GB worker limit and avoids
+	// the OOM-restart-then-idle-timeout pattern observed on Q04 SF10.
+	taskCount := scanFanOutTaskCount(workerCount, c.workers.ClusterCapacity(), len(stage.ScanFiles))
+	fileSets := splitFilesEvenly(stage.ScanFiles, taskCount)
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		return StageOutput{Kind: OutputPartitioned, NumPartitions: 0, Files: nil}, nil
