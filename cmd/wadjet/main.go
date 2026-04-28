@@ -60,6 +60,7 @@ var (
 	leafRemotes      []string
 	grpcAddr         string
 	memoryBudget     int64
+	sharedPoolBudget int64
 	spillDir         string
 	resultStoreBytes int64
 	pgAddr           string
@@ -114,6 +115,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&otelEndpoint, "otel-endpoint", "", "OTLP gRPC endpoint for tracing (e.g., localhost:4317)")
 	rootCmd.PersistentFlags().BoolVar(&otelInsecure, "otel-insecure", false, "Use plaintext gRPC for OTLP exporter")
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = auto-detect from cgroup, or unlimited)")
+	rootCmd.PersistentFlags().Int64Var(&sharedPoolBudget, "shared-pool-budget", 0, "Worker-wide shared memory pool in bytes (0 = auto-detect: envelope minus cache). All concurrent tasks Reserve against this pool.")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
 
@@ -221,6 +223,13 @@ func serveCmd() *cobra.Command {
 					// and spill threshold lowered to 60%, enabling tighter budgets
 					// without OOM risk on multi-join queries.
 					// Formula: (envelope - cache) / (4 * maxConcurrent)
+					//
+					// Note: with the shared worker memory pool (Trino MemoryPool /
+					// Spark ExecutionMemoryPool model), the per-task budget is only
+					// consulted by the planner for operator sizing — actual
+					// allocation tracking flows through `sharedPoolBudget` below.
+					// We keep this calculation for planner sizing and as a fallback
+					// for legacy callers, but spill triggers are pool-driven.
 					memoryBudget = (goMemLimit - cacheBytes) / (4 * maxConc)
 
 					// Auto-tune maxConc DOWN when the per-task budget would be
@@ -254,6 +263,21 @@ func serveCmd() *cobra.Command {
 					}
 
 					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget, "max_concurrent", maxConc)
+				}
+				if sharedPoolBudget == 0 {
+					// Pool is the full envelope minus the file cache. All
+					// concurrent tasks Reserve from it; operators
+					// cooperatively spill when the pool fills. NOT divided
+					// by maxConc — the pool's whole point is to share a
+					// single budget across tasks instead of statically
+					// carving N slices.
+					sharedPoolBudget = goMemLimit - cacheBytes
+					if sharedPoolBudget < 256*1024*1024 {
+						sharedPoolBudget = 256 * 1024 * 1024
+					}
+					logger.Info("auto-detected shared pool budget",
+						"pool_bytes", sharedPoolBudget,
+						"go_mem_limit", goMemLimit, "cache_bytes", cacheBytes)
 				}
 			}
 
@@ -742,6 +766,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		MaxConcurrent:    maxConcurrent,
 		CacheBytes:       cacheBytes,
 		MemoryBudget:     memoryBudget,
+		SharedPoolBudget: sharedPoolBudget,
 		SpillDir:         spillDir,
 		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)
@@ -1212,6 +1237,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		MaxConcurrent:    maxConcurrent,
 		CacheBytes:       cacheBytes,
 		MemoryBudget:     memoryBudget,
+		SharedPoolBudget: sharedPoolBudget,
 		SpillDir:         spillDir,
 		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)

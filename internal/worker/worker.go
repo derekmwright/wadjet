@@ -34,7 +34,8 @@ type Config struct {
 	ClusterID        string // cluster this worker belongs to (for federated routing)
 	MaxConcurrent    int    // max concurrent tasks
 	CacheBytes       int64  // local LRU cache size
-	MemoryBudget     int64  // per-task memory budget in bytes (0 = unlimited, no spill)
+	MemoryBudget     int64  // per-task memory budget in bytes (0 = unlimited, no spill); used as legacy fallback when SharedPoolBudget is unset
+	SharedPoolBudget int64  // worker-wide memory pool in bytes (0 = derived as MemoryBudget*MaxConcurrent). All concurrent tasks Reserve against this pool; spill triggers fire on cumulative worker pressure.
 	SpillDir         string // directory for spill files (default: os temp dir)
 	ResultStoreBytes int64  // in-memory result store capacity (0 = disabled, results go to S3)
 }
@@ -93,7 +94,18 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 
 	cache := NewLRUCache(cfg.CacheBytes)
 	executor := NewExecutor(store, cache, js)
+	pool := cfg.SharedPoolBudget
+	if pool <= 0 && cfg.MemoryBudget > 0 && cfg.MaxConcurrent > 0 {
+		// Legacy callers pass per-task MemoryBudget; reconstruct the
+		// worker-wide pool size as `per-task × MaxConcurrent` so all
+		// concurrent tasks share one budget. This matches what the
+		// per-task budget was originally a slice of.
+		pool = cfg.MemoryBudget * int64(cfg.MaxConcurrent)
+	}
 	executor.SetMemoryBudget(cfg.MemoryBudget, cfg.SpillDir)
+	if pool > 0 {
+		executor.SetSharedPoolBudget(pool)
+	}
 	executor.SetLogger(logger)
 	executor.SetNATSConn(nc)
 	if cfg.ResultStoreBytes > 0 {
@@ -762,6 +774,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 			}
 			w.activeTasksMu.RUnlock()
 
+			poolUsed, poolBudget := w.executor.SharedPoolStats()
 			hb := distributed.WorkerHeartbeat{
 				WorkerID:      w.config.WorkerID,
 				ClusterID:     w.config.ClusterID,
@@ -770,6 +783,8 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 				ActiveTaskIDs: taskIDs,
 				MemoryUsed:    alloc,
 				MemoryTotal:   sys,
+				PoolUsed:      poolUsed,
+				PoolBudget:    poolBudget,
 				RSS:           rss,
 				NumGoroutines: ng,
 				Mallocs:       mallocs,

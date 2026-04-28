@@ -73,27 +73,61 @@ func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) 
 	return &Executor{store: store, js: js, cache: cache, logger: slog.Default()}
 }
 
-// SetMemoryBudget configures the worker-level memory budget and spill
-// directory, and eagerly creates the shared Tracker + SpillManager that
-// all tasks will use. Budget is the TOTAL across concurrent tasks, not
-// per-task — callers should pass ~75% of worker RAM.
+// SetMemoryBudget configures the per-task memory budget and the spill
+// directory. For backward compatibility it also initializes a shared
+// pool of the same size, so existing callers that pass a single budget
+// continue to get cooperative spill across concurrent tasks. Callers
+// that want a different pool size (typically larger than per-task
+// budget) should call SetSharedPoolBudget afterward to override.
 func (e *Executor) SetMemoryBudget(budget int64, spillDir string) {
 	e.memoryBudget = budget
 	e.spillDir = spillDir
 	if budget > 0 {
-		e.sharedTracker = memory.NewTracker("worker", budget)
-		dir := spillDir
-		if dir == "" {
-			dir = os.TempDir()
-		}
-		sm, err := memory.NewSpillManager(dir, e.sharedTracker)
-		if err != nil {
-			e.logger.Warn("failed to create worker spill manager; tasks run without spill governance",
-				"error", err)
-			return
-		}
-		e.sharedSpill = sm
+		e.SetSharedPoolBudget(budget)
 	}
+}
+
+// SharedPoolStats returns (used, budget) bytes for the worker-wide
+// memory pool, or (0, 0) if no pool is configured. Used by the worker
+// heartbeat loop to publish pool pressure for coord-side dispatch
+// backpressure.
+func (e *Executor) SharedPoolStats() (used, budget int64) {
+	if e.sharedTracker == nil {
+		return 0, 0
+	}
+	return e.sharedTracker.Used(), e.sharedTracker.Budget()
+}
+
+// SetSharedPoolBudget creates the worker-wide memory pool that all
+// concurrent tasks Reserve against. Operators (HashJoin build, sort
+// run accumulation, hash aggregate state) cooperatively spill when the
+// pool fills, regardless of which task is holding the bytes. Matches the
+// Trino MemoryPool / Spark ExecutionMemoryPool model.
+//
+// Pool budget should be the FULL worker envelope (after cache reservation),
+// not a per-task slice. With 32GB physical RAM and a 24GB GOMEMLIMIT,
+// pool budget is roughly 21GB (envelope − cache).
+//
+// Calling this with budget<=0 disables the shared pool and falls back to
+// per-task tracking via SetMemoryBudget.
+func (e *Executor) SetSharedPoolBudget(budget int64) {
+	if budget <= 0 {
+		e.sharedTracker = nil
+		e.sharedSpill = nil
+		return
+	}
+	e.sharedTracker = memory.NewTracker("worker", budget)
+	dir := e.spillDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	sm, err := memory.NewSpillManager(dir, e.sharedTracker)
+	if err != nil {
+		e.logger.Warn("failed to create worker spill manager; tasks run without spill governance",
+			"error", err)
+		return
+	}
+	e.sharedSpill = sm
 }
 
 // SetResultStore attaches an in-memory result store for inter-stage result passing.
@@ -132,58 +166,70 @@ func (e *Executor) SetLogger(l *slog.Logger) {
 	e.logger = l
 }
 
-// newSpillManager creates a Tracker + SpillManager for a task if memory budget is configured.
-// Returns nil, nil if budget is 0 (unlimited).
+// newSpillManager creates a Tracker + SpillManager for a task.
+//
+// When the worker has a configured shared memory pool (via SetMemoryBudget),
+// the task tracker is a CHILD of the shared pool — its Reserve calls bubble
+// up so spill triggers fire on cumulative worker pressure, not per-task
+// quotas. Matches the Trino MemoryPool / Spark ExecutionMemoryPool model:
+// every concurrent task allocates from one budget, and operators
+// cooperatively spill when the pool fills, regardless of which task is
+// holding the bytes.
+//
+// Without a shared pool (SetMemoryBudget never called or budget==0), returns
+// nil/nil — no tracking, no spill. Same behaviour as the old per-task path.
 func (e *Executor) newSpillManager(taskID string) (*memory.SpillManager, *memory.Tracker) {
+	if e.sharedTracker != nil {
+		return e.sharedSpill, e.sharedTracker.Child(taskID)
+	}
 	if e.memoryBudget <= 0 {
 		return nil, nil
 	}
-
+	// Fallback: legacy per-task pool when SetMemoryBudget wasn't called but
+	// memoryBudget is set directly (test paths, embedded callers).
 	tracker := memory.NewTracker(taskID, e.memoryBudget)
-
 	dir := e.spillDir
 	if dir == "" {
 		dir = os.TempDir()
 	}
-
 	sm, err := memory.NewSpillManager(dir, tracker)
 	if err != nil {
 		e.logger.Warn("failed to create spill manager, running without spill",
 			"task_id", taskID, "error", err)
 		return nil, tracker
 	}
-
 	return sm, tracker
 }
 
-// newSpillManagerScaled creates a Tracker + SpillManager with a budget scaled
-// by the number of concurrent hash tables. Join tasks with N fused joins need
-// N+1 hash tables in memory simultaneously during probing. Without scaling,
-// each table gets 1/(N+1) of the budget, triggering premature spill.
+// newSpillManagerScaled is preserved for the legacy per-task-pool path —
+// when the shared pool is active (the prod path), join scaling has no
+// meaning because the pool is sized for cumulative pressure across all
+// concurrent tasks and operators. Scaling per-task budgets would
+// over-provision against a shared pool that already accounts for them.
+//
+// joinCount is therefore only honoured on the legacy path.
 func (e *Executor) newSpillManagerScaled(taskID string, joinCount int) (*memory.SpillManager, *memory.Tracker) {
+	if e.sharedTracker != nil {
+		return e.sharedSpill, e.sharedTracker.Child(taskID)
+	}
 	if e.memoryBudget <= 0 {
 		return nil, nil
 	}
-
 	budget := e.memoryBudget
 	if joinCount > 1 {
 		budget = e.memoryBudget * int64(joinCount)
 	}
-
 	tracker := memory.NewTracker(taskID, budget)
-
 	dir := e.spillDir
 	if dir == "" {
 		dir = os.TempDir()
 	}
-
 	sm, err := memory.NewSpillManager(dir, tracker)
 	if err != nil {
 		e.logger.Warn("failed to create spill manager, running without spill",
 			"task_id", taskID, "error", err)
 		return nil, tracker
 	}
-
 	return sm, tracker
 }
 

@@ -111,9 +111,15 @@ variable "query_timeout" {
 }
 
 variable "max_concurrent" {
-  description = "Maximum concurrent tasks per worker (lower = less memory, slower execution)"
+  description = "Maximum concurrent tasks per worker process (lower = less memory, slower execution). With workers_per_node > 1 the effective cluster concurrency is workers_per_node × max_concurrent × node_count."
   type        = number
   default     = 4
+}
+
+variable "workers_per_node" {
+  description = "Number of independent wadjet worker processes to launch per node. >1 gives crash isolation: when one process OOMs, sibling workers on the same node keep running. Each process gets a per-process memory envelope (auto-derived from /N of total) and registers separately with the coord."
+  type        = number
+  default     = 1
 }
 
 variable "cache_bytes" {

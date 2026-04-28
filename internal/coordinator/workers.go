@@ -17,6 +17,8 @@ type WorkerInfo struct {
 	MaxConcurrent int   // effective task-slot count reported in heartbeat; 0 = legacy worker (assume default)
 	MemoryUsed    int64
 	MemoryTotal   int64
+	PoolUsed      int64 // shared memory pool bytes Reserved
+	PoolBudget    int64 // shared memory pool capacity in bytes; pressure = PoolUsed / PoolBudget
 	Draining      bool
 	LastSeen      time.Time
 }
@@ -132,6 +134,8 @@ func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
 	info.MaxConcurrent = hb.MaxConcurrent
 	info.MemoryUsed = hb.MemoryUsed
 	info.MemoryTotal = hb.MemoryTotal
+	info.PoolUsed = hb.PoolUsed
+	info.PoolBudget = hb.PoolBudget
 	info.Draining = hb.Draining
 	// Use coordinator-side time for LastSeen. The heartbeat message
 	// arriving proves the worker is alive — even if the worker's
@@ -166,6 +170,42 @@ func (wr *WorkerRegistry) ActiveWorkers() []*WorkerInfo {
 // Count returns the number of active workers.
 func (wr *WorkerRegistry) Count() int {
 	return len(wr.ActiveWorkers())
+}
+
+// ClusterPoolPressure returns the cluster-wide shared memory pool pressure
+// as a value in [0.0, 1.0], computed from the most recent heartbeat each
+// active worker reported. Returns 0 when no worker has reported pool stats
+// (legacy workers, or worker without --shared-pool-budget).
+//
+// The dispatcher uses this to throttle new task admission when the cluster
+// is near memory exhaustion — refusing to dispatch lets in-flight operators
+// spill and free pool memory before piling on more concurrent work.
+func (wr *WorkerRegistry) ClusterPoolPressure() float64 {
+	wr.mu.RLock()
+	defer wr.mu.RUnlock()
+	cutoff := time.Now().Add(-wr.stale)
+	var totalUsed, totalBudget int64
+	for _, w := range wr.workers {
+		if !w.LastSeen.After(cutoff) || w.Draining {
+			continue
+		}
+		if w.PoolBudget <= 0 {
+			continue
+		}
+		totalUsed += w.PoolUsed
+		totalBudget += w.PoolBudget
+	}
+	if totalBudget == 0 {
+		return 0
+	}
+	p := float64(totalUsed) / float64(totalBudget)
+	if p < 0 {
+		p = 0
+	}
+	if p > 1 {
+		p = 1
+	}
+	return p
 }
 
 // ClusterCapacity returns the sum of effective task-slot counts across
