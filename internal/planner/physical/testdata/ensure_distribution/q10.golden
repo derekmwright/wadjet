@@ -4,11 +4,12 @@ exchange-repartition-2	exchange-repartition	Hash(o_custkey)/32	deps=scan-0
 exchange-repartition-3	exchange-repartition	Hash(c_custkey)/32	deps=scan-1
 join-4	hash_join	Hash(o_custkey)/32	deps=exchange-repartition-2,exchange-repartition-3
 scan-5	scan	Singleton
-join-6	broadcast_join	Hash(o_custkey)/32	deps=join-4,scan-5
+join-6	broadcast_join	Hash(o_custkey)/32	deps=join-4,exchange-replicate-join-6-6
 scan-7	scan	Singleton
 exchange-repartition-8	exchange-repartition	Hash(o_orderkey)/32	deps=join-6
 exchange-repartition-9	exchange-repartition	Hash(l_orderkey)/32	deps=scan-7
 join-10	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-8,exchange-repartition-9
 aggregate-11	aggregate	Singleton	deps=join-10
 final_aggregate-12	final_aggregate	Singleton	deps=aggregate-11
+exchange-replicate-join-6-6	exchange-replicate	Broadcast	deps=scan-5
 exchange-gather-final_aggregate-12	exchange-gather	Singleton	deps=final_aggregate-12

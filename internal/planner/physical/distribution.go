@@ -175,12 +175,23 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 			return RequiredDistribution{Kind: RequiredAny}
 		}
 	case StageBroadcastJoin:
-		// Phase 1 leaves both slots at RequiredAny — the executor handles
-		// broadcast in-process today (no explicit broadcast Exchange stage).
-		// Phase 2 inserts Exchange{Type: Replicate} between scan and the
-		// build slot, at which point the build requirement strengthens to
-		// RequiredBroadcast. See spec Risk #4.
-		return RequiredDistribution{Kind: RequiredAny}
+		// Slot 1 (build) requires Broadcast: every worker that runs the
+		// join needs the full build set. EnsureDistribution splices a
+		// StageExchangeReplicate ahead of the build when the upstream
+		// isn't already DistBroadcast; dispatchReplicateStage materializes
+		// the upstream once into a single broadcast file that all
+		// probe-split tasks read in parallel, eliminating N× duplicated
+		// probe-side parquet reads.
+		//
+		// Slot 0 (probe) stays RequiredAny — the dispatcher slices probe
+		// files across tasks (broadcastJoinProbeSplit), which is more
+		// efficient than asking the planner to insert a shuffle.
+		switch slot {
+		case 1:
+			return RequiredDistribution{Kind: RequiredBroadcast}
+		default:
+			return RequiredDistribution{Kind: RequiredAny}
+		}
 	case StageAggregate:
 		// Phase 1 conservative: today's two-phase distributed aggregate
 		// runs the partial stage on RequiredAny inputs (the partial does

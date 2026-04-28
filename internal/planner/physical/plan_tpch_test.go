@@ -642,8 +642,9 @@ func TestTPCHShuffleKeysResolvable(t *testing.T) {
 	}
 }
 
-// TestTPCHDistributionConsistency is the Phase 1 acceptance gate for the
-// distribution-property pass. For every Q1-Q22, runs PlanDistributed with
+// TestTPCHDistributionConsistency is the acceptance gate for the
+// distribution-property pass on the production planning path
+// (UseEnsureDistribution=true). For every Q1-Q22, runs PlanDistributed with
 // WorkerCount=4 in strict mode (BehaviorPreservingMode=false) and asserts:
 //  1. Every stage has a populated Distribution (shuffle stages explicitly
 //     DistHashPartitioned with non-zero Count).
@@ -652,7 +653,11 @@ func TestTPCHShuffleKeysResolvable(t *testing.T) {
 // Failure on any query means either the OutputDistribution /
 // RequiredChildDistribution rules are wrong or PlanDistributed emits an
 // inconsistent plan. Either way, the spec's load-bearing invariant is
-// broken and Phase 2 cannot proceed safely.
+// broken.
+//
+// Native-DAG unification (2026-04-25) made UseEnsureDistribution the only
+// runtime path, so the acceptance gate runs against that path. The base
+// planner's pre-rewrite output is no longer a runtime configuration.
 //
 // Spec: docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md
 func TestTPCHDistributionConsistency(t *testing.T) {
@@ -691,6 +696,7 @@ func TestTPCHDistributionConsistency(t *testing.T) {
 
 			planner := NewPlanner(cat)
 			planner.WorkerCount = 4
+			planner.UseEnsureDistribution = true
 			stages, err := planner.PlanDistributed(ctx, logicalPlan)
 			if err != nil {
 				// In strict mode, exchange-consistency violations come back
