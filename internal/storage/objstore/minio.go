@@ -20,11 +20,32 @@ type MinIOConfig struct {
 	SecretKey string
 	UseSSL    bool
 	Region    string
+
+	// MaxConcurrentUploads bounds the number of in-flight PUT operations
+	// originating from a single MinIOStore instance. Defaults to 4 when
+	// zero. Each PUT for a >16MB object triggers minio-go's multipart
+	// uploader which itself opens multiple TCP connections per object
+	// (UploadThreads, default 2 here). With multiple worker processes
+	// on the same host, the aggregate connection count needs a ceiling
+	// so individual uploads aren't starved of bandwidth.
+	MaxConcurrentUploads int
+
+	// UploadThreads is the per-PUT multipart concurrency for objects
+	// large enough to trigger multipart upload (>16MB). Defaults to 2.
+	// Lower values reduce per-upload connection count; higher values
+	// speed up individual uploads when bandwidth is plentiful. With 4
+	// processes per node and MaxConcurrentUploads=4, this caps host
+	// connection count at 4×4×2 = 32.
+	UploadThreads int
 }
 
-// MinIOStore implements Store using minio-go.
+// MinIOStore implements Store using minio-go. Includes a per-instance
+// upload semaphore that bounds aggregate PUT concurrency so simultaneous
+// uploads from a single process don't fragment available bandwidth.
 type MinIOStore struct {
-	client *minio.Client
+	client        *minio.Client
+	uploadSem     chan struct{}
+	uploadThreads uint
 }
 
 // s3Transport returns an http.Transport tuned for high-throughput S3 access.
@@ -88,7 +109,36 @@ func NewMinIOStore(cfg MinIOConfig) (*MinIOStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating minio client: %w", err)
 	}
-	return &MinIOStore{client: client}, nil
+	maxUploads := cfg.MaxConcurrentUploads
+	if maxUploads <= 0 {
+		maxUploads = 4
+	}
+	uploadThreads := cfg.UploadThreads
+	if uploadThreads <= 0 {
+		uploadThreads = 2
+	}
+	return &MinIOStore{
+		client:        client,
+		uploadSem:     make(chan struct{}, maxUploads),
+		uploadThreads: uint(uploadThreads),
+	}, nil
+}
+
+// acquireUpload blocks until an upload slot is available or ctx is
+// cancelled. Returns a release func that the caller MUST defer to
+// return the slot. Bounds aggregate PUT concurrency from this MinIOStore
+// instance so simultaneous uploads don't all fight for the same EC2
+// outbound bandwidth at low individual throughput.
+func (s *MinIOStore) acquireUpload(ctx context.Context) (func(), error) {
+	if s.uploadSem == nil {
+		return func() {}, nil
+	}
+	select {
+	case s.uploadSem <- struct{}{}:
+		return func() { <-s.uploadSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 func (s *MinIOStore) MakeBucket(ctx context.Context, bucket string) error {
@@ -107,7 +157,15 @@ func (s *MinIOStore) BucketExists(ctx context.Context, bucket string) (bool, err
 }
 
 func (s *MinIOStore) Put(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string) (string, error) {
-	opts := minio.PutObjectOptions{ContentType: contentType}
+	release, err := s.acquireUpload(ctx)
+	if err != nil {
+		return "", fmt.Errorf("acquiring upload slot: %w", err)
+	}
+	defer release()
+	opts := minio.PutObjectOptions{
+		ContentType: contentType,
+		NumThreads:  s.uploadThreads,
+	}
 	info, err := s.client.PutObject(ctx, bucket, key, r, size, opts)
 	if err != nil {
 		return "", fmt.Errorf("putting object: %w", err)
@@ -116,7 +174,15 @@ func (s *MinIOStore) Put(ctx context.Context, bucket, key string, r io.Reader, s
 }
 
 func (s *MinIOStore) PutIfMatch(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string, expectedETag string) (string, error) {
-	opts := minio.PutObjectOptions{ContentType: contentType}
+	release, err := s.acquireUpload(ctx)
+	if err != nil {
+		return "", fmt.Errorf("acquiring upload slot: %w", err)
+	}
+	defer release()
+	opts := minio.PutObjectOptions{
+		ContentType: contentType,
+		NumThreads:  s.uploadThreads,
+	}
 	if expectedETag == "" {
 		// Create-only: use If-None-Match: *
 		opts.Internal = minio.AdvancedPutOptions{
