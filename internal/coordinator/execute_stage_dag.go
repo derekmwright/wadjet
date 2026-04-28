@@ -550,34 +550,167 @@ func (c *Coordinator) dispatchShuffleStage(
 	}, nil
 }
 
+// replicateMaterializeMinFiles is the minimum upstream file count that
+// triggers materialization in dispatchReplicateStage. Below this, the
+// upstream is small enough that having every probe-split task read the
+// raw files is fine; at or above, we consolidate so the per-task readers
+// pay parquet decode cost once instead of N times.
+//
+// Declared as var (not const) so tests can lower it to force the
+// materialization path on small fixtures.
+var replicateMaterializeMinFiles = 2
+
 // dispatchReplicateStage executes a StageExchangeReplicate: reads upstream
 // output and materializes it into a single broadcast cache that all
 // downstream workers read in full.
 //
-// Phase 3 scaffolding: delegates to preScanBuildTables when the upstream is
-// a table scan (the common Phase 2a shape for build-side broadcasts); for
-// stage-to-stage replicates the upstream files are already broadcast-shaped
-// and we pass them through unchanged.
+// When the upstream has fewer than replicateMaterializeMinFiles files
+// (or is already OutputReplicated, i.e. broadcast-shaped), we pass the
+// file list through unchanged — every downstream task still reads the
+// full set, but the consolidation overhead would not pay back. When the
+// upstream is multi-file OutputSinglePart / OutputPartitioned, we spawn
+// one scan task that reads every upstream file and writes a single WSHF
+// cache. Downstream broadcast_join probe-split tasks all read that one
+// cache instead of re-decoding the upstream parquet N times.
 func (c *Coordinator) dispatchReplicateStage(
 	ctx context.Context,
 	queryID, sql string,
 	stage physical.Stage,
 	inputs map[string]StageOutput,
 ) (StageOutput, error) {
+	_ = sql
 	if len(stage.Dependencies) != 1 {
 		return StageOutput{}, fmt.Errorf("replicate stage %s expects 1 dep, got %d", stage.ID, len(stage.Dependencies))
 	}
 	upstream := inputs[stage.Dependencies[0]]
-	// Pass-through: upstream already produced files; downstream workers
-	// consume them as broadcast input. The legacy preScanBuildTables path
-	// handles the source-table case via ExecuteSQL's explicit call.
-	_ = ctx
-	_ = queryID
-	_ = sql
+	upstreamFiles := flattenStageFiles(upstream)
+
+	if upstream.Kind == OutputReplicated || len(upstreamFiles) < replicateMaterializeMinFiles {
+		return StageOutput{
+			Kind:  OutputReplicated,
+			Files: [][]string{upstreamFiles},
+		}, nil
+	}
+
+	cacheFiles, err := c.materializeReplicate(ctx, queryID, stage, stage.Dependencies[0], upstreamFiles)
+	if err != nil {
+		// Materialization failure must not break the query — fall back to
+		// pass-through. Workers can still read the raw upstream files; we
+		// just lose the consolidation benefit. Logged at Warn so an unhealthy
+		// cluster is visible.
+		c.logger.Warn("dispatchReplicateStage: materialization failed, falling back to pass-through",
+			"stage_id", stage.ID, "upstream_files", len(upstreamFiles), "err", err)
+		return StageOutput{
+			Kind:  OutputReplicated,
+			Files: [][]string{upstreamFiles},
+		}, nil
+	}
+
 	return StageOutput{
 		Kind:  OutputReplicated,
-		Files: [][]string{flattenStageFiles(upstream)},
+		Files: [][]string{cacheFiles},
 	}, nil
+}
+
+// materializeReplicate dispatches a single TaskTypeStage scan task that reads
+// the upstream files and writes a consolidated WSHF that downstream readers
+// can share. Returns the cache file paths (typically a single .wshf key).
+//
+// The consolidation task uses the same scan-stage handler as a leaf scan;
+// it streams batches from upstream into writeUnpartitionedWSHF without
+// running any operator. cachedFileStreamSource auto-detects parquet vs WSHF
+// inputs, so the upstream's file kind is transparent.
+func (c *Coordinator) materializeReplicate(
+	ctx context.Context,
+	queryID string,
+	stage physical.Stage,
+	upstreamID string,
+	files []string,
+) ([]string, error) {
+	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
+	task := distributed.Task{
+		ID:           uuid.New().String()[:8],
+		QueryID:      queryID,
+		StageID:      stage.ID,
+		Type:         distributed.TaskTypeStage,
+		StageType:    "scan",
+		Inputs:       map[string][]string{upstreamID: files},
+		DataBucket:   c.config.ResultBucket,
+		ResultBucket: c.config.ResultBucket,
+		ResultPrefix: resultPrefix,
+		CreatedAt:    time.Now(),
+	}
+	if clusterID := c.catalog.ClusterID(); clusterID != "" {
+		task.ClusterID = clusterID
+	}
+	c.mu.Lock()
+	qm := c.queryMetas[queryID]
+	c.mu.Unlock()
+	c.enrichTaskWithQueryContext(qm, &task)
+
+	stageQueryID := fmt.Sprintf("st-%s-%s", stage.ID, queryID)
+	trackerStages := map[string]*StageInfo{
+		stage.ID: {StageID: stage.ID, Type: distributed.TaskTypeStage, TotalTasks: 1},
+	}
+	c.tracker.Register(stageQueryID, "", trackerStages, []string{stage.ID})
+	c.tracker.Start(stageQueryID)
+	defer c.tracker.Delete(stageQueryID)
+	task.QueryID = stageQueryID
+
+	subject := distributed.QueryResultSubject(stageQueryID)
+	type result struct {
+		files []string
+		err   string
+	}
+	var collected result
+	var mu sync.Mutex
+	done := make(chan struct{}, 1)
+	progress := make(chan struct{}, 1)
+	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+		var r distributed.ResultNotification
+		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
+			return
+		}
+		mu.Lock()
+		if r.Success {
+			collected = result{files: r.ResultFiles}
+		} else {
+			collected = result{err: r.Error}
+		}
+		mu.Unlock()
+		select {
+		case progress <- struct{}{}:
+		default:
+		}
+		select {
+		case done <- struct{}{}:
+		default:
+		}
+	})
+	if err != nil {
+		return nil, fmt.Errorf("subscribe materialize: %w", err)
+	}
+	defer sub.Unsubscribe()
+
+	c.logger.Info("dispatchReplicateStage: materializing",
+		"stage_id", stage.ID, "upstream_files", len(files), "task_id", task.ID)
+	if err := c.scheduler.PublishTasks(ctx, []distributed.Task{task}); err != nil {
+		return nil, fmt.Errorf("publish materialize: %w", err)
+	}
+	if err := awaitStageProgress(ctx, done, progress, "replicate "+stage.ID); err != nil {
+		return nil, err
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if collected.err != "" {
+		return nil, fmt.Errorf("materialize task failed: %s", collected.err)
+	}
+	if len(collected.files) == 0 {
+		return nil, fmt.Errorf("materialize task returned no files")
+	}
+	c.logger.Info("dispatchReplicateStage: materialized",
+		"stage_id", stage.ID, "input_files", len(files), "cache_files", len(collected.files))
+	return collected.files, nil
 }
 
 // dispatchPipelineStage executes a compute stage (scan/join/aggregate/etc.)
