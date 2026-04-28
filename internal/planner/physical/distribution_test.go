@@ -160,7 +160,7 @@ func TestRequiredChildDistribution(t *testing.T) {
 			want: RequiredDistribution{Kind: RequiredAny},
 		},
 		{
-			name: "broadcast_join build slot requires any (Phase 1)",
+			name: "broadcast_join build slot requires broadcast",
 			stage: Stage{
 				ID: "join-0", Type: "broadcast_join",
 				JoinLeftKeys: []string{"l_partkey"}, JoinRightKeys: []string{"p_partkey"},
@@ -168,7 +168,7 @@ func TestRequiredChildDistribution(t *testing.T) {
 				Dependencies: []string{"scan-l", "scan-r"},
 			},
 			slot: 1,
-			want: RequiredDistribution{Kind: RequiredAny},
+			want: RequiredDistribution{Kind: RequiredBroadcast},
 		},
 		{
 			name:  "aggregate requires any (Phase 1 conservative — see Risk #1)",

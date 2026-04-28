@@ -1,6 +1,6 @@
 scan-0	scan	Singleton
 scan-1	scan	Singleton
-join-2	broadcast_join	Singleton	deps=scan-0,scan-1
+join-2	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-2-2
 scan-3	scan	Singleton
 scan-4	scan	Singleton
 exchange-repartition-5	exchange-repartition	Hash(ps_partkey)/32	deps=scan-3
@@ -15,4 +15,5 @@ exchange-repartition-51	exchange-repartition	Hash(s_suppkey)/32	deps=join-2
 exchange-repartition-52	exchange-repartition	Hash(ps_suppkey)/32	deps=join-50
 join-53	hash_join	Hash(s_suppkey)/32	deps=exchange-repartition-51,exchange-repartition-52
 sort-54	sort	Singleton	deps=join-53
+exchange-replicate-join-2-2	exchange-replicate	Broadcast	deps=scan-1
 exchange-gather-sort-54	exchange-gather	Singleton	deps=sort-54
