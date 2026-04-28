@@ -506,27 +506,42 @@ resource "aws_instance" "worker" {
     fi
 
     # Launch ${var.workers_per_node} independent wadjet worker processes.
-    # Each gets its own GOMEMLIMIT slice (envelope/N) so an OOM on one
-    # only kills that process — siblings on the same node keep running.
-    # Each process auto-detects its memory envelope from cgroup, so we
-    # use systemd-style per-process cgroups (created via systemd-run)
-    # to give each worker a hard memory ceiling. When the worker exits
-    # (crash, OOM, etc.) the supervising shell loop restarts it.
+    # Each gets its own GOMEMLIMIT slice (envelope/N) and explicit pool +
+    # cache budgets so the per-process memory math is correct regardless
+    # of what the host cgroup reports. Auto-detect would read the host's
+    # full memory because systemd-run's `--scope MemoryMax` doesn't
+    # propagate to /sys/fs/cgroup paths Go's auto-detect inspects on
+    # AL2023, so we hand each process its slice explicitly via flags.
+    #
+    # systemd-run still gives each process a hard MemoryMax cgroup
+    # ceiling for crash isolation: when one process's runaway
+    # allocations exceed its slice, the kernel kills only that process
+    # and the supervising shell loop restarts it.
     WORKERS_PER_NODE=${var.workers_per_node}
     TOTAL_BYTES=$(awk '/MemTotal/ {print $2 * 1024}' /proc/meminfo)
     PER_PROC_BYTES=$((TOTAL_BYTES * 75 / 100 / WORKERS_PER_NODE))
-    echo "Starting $WORKERS_PER_NODE worker process(es), each with ~$((PER_PROC_BYTES/1024/1024/1024)) GiB envelope"
+    # GOMEMLIMIT is 90% of per-process slice (Go runtime soft limit; the
+    # kernel cgroup ceiling is the hard backstop).
+    PER_PROC_GOMEMLIMIT=$((PER_PROC_BYTES * 9 / 10))
+    # Cache + pool: give the cache 10% of GOMEMLIMIT, pool gets the rest.
+    PER_PROC_CACHE=$((PER_PROC_GOMEMLIMIT / 10))
+    PER_PROC_POOL=$((PER_PROC_GOMEMLIMIT - PER_PROC_CACHE))
+    # Per-task budget: pool / max_concurrent. Planner uses this for
+    # operator sizing; actual memory accounting flows through the shared
+    # pool. Computed here so it doesn't fall through to auto-detect
+    # (which reads the ROOT cgroup memory.max — i.e. host RAM, not the
+    # systemd-run scope's MemoryMax).
+    PER_TASK_BUDGET=$((PER_PROC_POOL / ${var.max_concurrent}))
+    echo "Starting $WORKERS_PER_NODE worker process(es): per-proc envelope=$((PER_PROC_BYTES/1024/1024/1024))GiB, GOMEMLIMIT=$((PER_PROC_GOMEMLIMIT/1024/1024/1024))GiB, pool=$((PER_PROC_POOL/1024/1024/1024))GiB, per-task=$((PER_TASK_BUDGET/1024/1024/1024))GiB"
 
     start_worker() {
       local idx=$1
       local worker_spill="$SPILL_DIR/w$idx"
       mkdir -p "$worker_spill"
       while true; do
-        # systemd-run creates a transient unit with MemoryMax so the
-        # cgroup's auto-detected limit reflects the per-process slice,
-        # not the whole-node total.
         systemd-run --quiet --unit="wadjet-worker-$idx-$$-$(date +%s)" \
-          --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$((PER_PROC_BYTES * 9 / 10))" \
+          --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$PER_PROC_GOMEMLIMIT" \
+          --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
           /usr/local/bin/wadjet serve \
             --mode=worker \
             --nats-url="nats://$COORD_IP:4222" \
@@ -537,8 +552,9 @@ resource "aws_instance" "worker" {
             --storage-type=s3 \
             --max-concurrent=${var.max_concurrent} \
             --spill-dir="$worker_spill" \
-            ${var.memory_budget > 0 ? "--memory-budget=${var.memory_budget}" : ""} \
-            ${var.cache_bytes > 0 ? "--cache-bytes=${var.cache_bytes}" : ""} 2>&1 | sed "s/^/[w$idx] /"
+            --cache-bytes=$PER_PROC_CACHE \
+            --memory-budget=$PER_TASK_BUDGET \
+            --shared-pool-budget=$PER_PROC_POOL 2>&1 | sed "s/^/[w$idx] /"
         EXIT_CODE=$?
         echo "[w$idx] exited code=$EXIT_CODE, restarting in 5s..."
         sleep 5
