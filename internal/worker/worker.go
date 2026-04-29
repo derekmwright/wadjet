@@ -511,11 +511,21 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	// The heartbeat resets the AckWait timer so that long-running tasks
 	// (e.g., SF100 pipeline stages that take 10+ minutes) are not
 	// redelivered to other workers.
+	//
+	// Bounded extensions: a wedged task (worker process alive but stuck
+	// in a retry loop or kernel syscall) keeps this goroutine running
+	// and would indefinitely extend AckWait via msg.InProgress(). Cap
+	// at maxInProgressExtensions so a wedge is bounded — after that,
+	// AckWait expires naturally and JetStream redelivers the task to
+	// a healthy worker. With AckWait=10m the bound is ~30m total task
+	// lifetime; option-2 progress-aware InProgress will tighten further.
+	const maxInProgressExtensions = 2
 	go func() {
 		cancelTicker := time.NewTicker(500 * time.Millisecond)
 		defer cancelTicker.Stop()
 		heartbeat := time.NewTicker(2 * time.Minute)
 		defer heartbeat.Stop()
+		extensions := 0
 		for {
 			select {
 			case <-taskCtx.Done():
@@ -526,7 +536,14 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 					return
 				}
 			case <-heartbeat.C:
+				if extensions >= maxInProgressExtensions {
+					w.logger.Warn("task InProgress cap reached; allowing JetStream redelivery",
+						"task_id", task.ID, "query_id", task.QueryID,
+						"extensions", extensions)
+					return
+				}
 				msg.InProgress()
+				extensions++
 			}
 		}
 	}()
