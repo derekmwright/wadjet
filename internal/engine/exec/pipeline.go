@@ -53,6 +53,7 @@ func (p *Pipeline) allOpsCloneable() bool {
 
 // runSerial is the original single-threaded pipeline loop.
 func (p *Pipeline) runSerial(ctx context.Context) error {
+	progress := ProgressReporterFromContext(ctx)
 	batchCount := 0
 	for {
 		if batchCount&63 == 0 {
@@ -68,6 +69,13 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 		}
 		if b == nil {
 			break
+		}
+		if progress != nil {
+			// Report rows pulled from the source. Captures forward
+			// progress for the worker's task heartbeat regardless of
+			// downstream operator behaviour (filter dropping all,
+			// aggregator buffering, etc).
+			progress.AddRows(int64(b.ActiveLen()))
 		}
 
 		exhausted := false

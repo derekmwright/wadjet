@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/telemetry"
@@ -492,6 +493,13 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		}
 		taskCtx = distributed.ContextWithTrace(taskCtx, tc)
 	}
+	// Per-task progress reporter. Operators along the hot loop (sources,
+	// sinks, exchange writers) call AddRows / AddBytes via
+	// exec.ProgressReporterFromContext; the heartbeat goroutine below
+	// reads it to make AckWait extension conditional on actual forward
+	// progress and to publish TaskProgress to coord.
+	taskProgress := &TaskProgress{}
+	taskCtx = exec.WithProgressReporter(taskCtx, taskProgress)
 	defer taskCancel()
 
 	// Start OTel child span linked to coordinator's trace
@@ -507,25 +515,42 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		defer span.End()
 	}
 
-	// Monitor for cancellation and send NATS in-progress heartbeats.
-	// The heartbeat resets the AckWait timer so that long-running tasks
-	// (e.g., SF100 pipeline stages that take 10+ minutes) are not
-	// redelivered to other workers.
+	// Monitor for cancellation, publish per-task progress, and extend
+	// JetStream AckWait — but only when the task is actually making
+	// forward progress.
 	//
-	// Bounded extensions: a wedged task (worker process alive but stuck
-	// in a retry loop or kernel syscall) keeps this goroutine running
-	// and would indefinitely extend AckWait via msg.InProgress(). Cap
-	// at maxInProgressExtensions so a wedge is bounded — after that,
-	// AckWait expires naturally and JetStream redelivers the task to
-	// a healthy worker. With AckWait=10m the bound is ~30m total task
-	// lifetime; option-2 progress-aware InProgress will tighten further.
-	const maxInProgressExtensions = 2
+	// Three timers run inside one select:
+	//   - cancelTicker (500ms): poll for query-level cancellation.
+	//   - progressTicker (2s): publish TaskProgress to coord with the
+	//       latest row/byte counters, so coord-side awaitStageProgress
+	//       can distinguish slow-but-healthy from wedged.
+	//   - ackTicker (2min): extend JetStream AckWait via msg.InProgress
+	//       — IFF the task has reported progress in the last
+	//       progressIdleThreshold. A wedged task (worker process alive
+	//       but stuck in a retry loop or syscall) eventually stops
+	//       reporting progress; after that we stop extending and
+	//       AckWait expires, JetStream redelivers to a healthy worker.
+	//
+	// progressIdleThreshold is a worker-side floor. Coord-side
+	// per-task idle detection runs at a longer threshold (60s) so a
+	// brief stall doesn't immediately cancel the task; the worker
+	// just stops cementing AckWait so JetStream can decide.
+	const (
+		progressIdleThreshold = 60 * time.Second
+		maxInProgressExtensions = 5 // belt-and-suspenders if the progress signal stops working
+	)
 	go func() {
 		cancelTicker := time.NewTicker(500 * time.Millisecond)
 		defer cancelTicker.Stop()
-		heartbeat := time.NewTicker(2 * time.Minute)
-		defer heartbeat.Stop()
+		progressTicker := time.NewTicker(2 * time.Second)
+		defer progressTicker.Stop()
+		ackTicker := time.NewTicker(2 * time.Minute)
+		defer ackTicker.Stop()
+		var lastPublishedRows int64
 		extensions := 0
+		// Mark progress at task start so the first 60s aren't treated as idle
+		// (operators may take time to start emitting batches; the task is alive).
+		taskProgress.lastUpdateNano.Store(time.Now().UnixNano())
 		for {
 			select {
 			case <-taskCtx.Done():
@@ -535,7 +560,29 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 					taskCancel()
 					return
 				}
-			case <-heartbeat.C:
+			case <-progressTicker.C:
+				rows, bytesProc, _ := taskProgress.snapshot()
+				if rows == lastPublishedRows {
+					continue // no new progress since last publish; skip
+				}
+				lastPublishedRows = rows
+				publishTaskProgress(w.nc, distributed.TaskProgress{
+					QueryID:        task.QueryID,
+					StageID:        task.StageID,
+					TaskID:         task.ID,
+					WorkerID:       w.config.WorkerID,
+					RowsProcessed:  rows,
+					BytesProcessed: bytesProc,
+					Timestamp:      time.Now(),
+				})
+			case <-ackTicker.C:
+				_, _, lastUpdate := taskProgress.snapshot()
+				if !lastUpdate.IsZero() && time.Since(lastUpdate) > progressIdleThreshold {
+					w.logger.Warn("task progress idle; stopping AckWait extension",
+						"task_id", task.ID, "query_id", task.QueryID,
+						"idle_for", time.Since(lastUpdate).Round(time.Second))
+					return
+				}
 				if extensions >= maxInProgressExtensions {
 					w.logger.Warn("task InProgress cap reached; allowing JetStream redelivery",
 						"task_id", task.ID, "query_id", task.QueryID,
