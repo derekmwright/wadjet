@@ -25,7 +25,9 @@ type WorkerInfo struct {
 }
 
 // TaskLiveness tracks when each in-flight task was last reported active.
-// Updated from worker heartbeats. Used to detect stuck tasks.
+// Updated from worker heartbeats AND from per-task TaskProgress messages —
+// either signal is proof the worker process is alive (see WorkerRegistry's
+// progress subscription for why we need both). Used to detect stuck tasks.
 type TaskLiveness struct {
 	mu    sync.RWMutex
 	tasks map[string]time.Time // task ID → last heartbeat time
@@ -68,13 +70,14 @@ func (tl *TaskLiveness) StuckTasks(threshold time.Duration) []string {
 
 // WorkerRegistry tracks active workers from heartbeats.
 type WorkerRegistry struct {
-	mu       sync.RWMutex
-	workers  map[string]*WorkerInfo
-	stale    time.Duration // workers not heard from in this long are considered dead
-	logger   *slog.Logger
-	nc       *nats.Conn
-	sub      *nats.Subscription
-	Liveness *TaskLiveness // per-task progress tracking from heartbeats
+	mu          sync.RWMutex
+	workers     map[string]*WorkerInfo
+	stale       time.Duration // workers not heard from in this long are considered dead
+	logger      *slog.Logger
+	nc          *nats.Conn
+	sub         *nats.Subscription
+	progressSub *nats.Subscription // per-task progress, used as a heartbeat-equivalent liveness signal
+	Liveness    *TaskLiveness      // per-task progress tracking from heartbeats AND TaskProgress messages
 }
 
 // NewWorkerRegistry creates a worker registry that subscribes to heartbeats.
@@ -121,7 +124,48 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 	}
 	wr.sub = sub
 
+	// Per-task progress is published from a separate worker goroutine on a
+	// 2s cadence (see worker.go's per-task heartbeat goroutine). Treating
+	// it as a heartbeat-equivalent liveness signal decouples worker
+	// liveness from the global heartbeat goroutine being scheduled. In the
+	// 2026-04-29 SF10 Q03 reproduction, workers were GC-thrashing under
+	// lineitem broadcast-join build pressure; the global heartbeat
+	// goroutine starved past 90s, the workers were reaped, JetStream
+	// redelivered tasks to other workers that thrashed identically, and
+	// the cluster hot-potato'd until query timeout. With this signal,
+	// even one stalled goroutine in a multi-goroutine process keeps the
+	// worker alive in coord's view.
+	progressSub, err := nc.Subscribe(distributed.SubjectTaskProgressAll, func(msg *nats.Msg) {
+		var tp distributed.TaskProgress
+		if err := distributed.Unmarshal(msg.Data, &tp); err != nil {
+			return
+		}
+		wr.recordTaskProgress(tp)
+	})
+	if err != nil {
+		logger.Error("failed to subscribe to task progress", "error", err)
+	} else {
+		wr.progressSub = progressSub
+	}
+
 	return wr
+}
+
+// recordTaskProgress treats a per-task progress message as proof of life
+// for the emitting worker. Only updates an EXISTING WorkerInfo's LastSeen
+// — registration still requires a real heartbeat with cluster ID and pool
+// stats. If the worker hasn't registered yet, the progress message is
+// recorded for the task only.
+func (wr *WorkerRegistry) recordTaskProgress(tp distributed.TaskProgress) {
+	now := time.Now()
+	wr.mu.Lock()
+	if info, ok := wr.workers[tp.WorkerID]; ok {
+		info.LastSeen = now
+	}
+	wr.mu.Unlock()
+	if wr.Liveness != nil {
+		wr.Liveness.Update([]string{tp.TaskID}, now)
+	}
 }
 
 func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
@@ -302,9 +346,12 @@ func (wr *WorkerRegistry) StartReaper(ctx context.Context) {
 	}()
 }
 
-// Close unsubscribes from heartbeats.
+// Close unsubscribes from heartbeats and task progress.
 func (wr *WorkerRegistry) Close() {
 	if wr.sub != nil {
 		wr.sub.Unsubscribe()
+	}
+	if wr.progressSub != nil {
+		wr.progressSub.Unsubscribe()
 	}
 }
