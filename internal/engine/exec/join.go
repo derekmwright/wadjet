@@ -677,6 +677,17 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// and costs as much as the parallel insertion saved (~9s for 60M rows).
 	// Serial without spill is a tight loop at ~0.6s/60M rows.
 
+	// Report build-side row consumption to the per-task progress reporter.
+	// Without this, a long broadcast_join build phase (minutes for SF10
+	// lineitem) emits no rows-processed signal — the per-task heartbeat
+	// goroutine (worker.go) doesn't publish TaskProgress messages, AckWait
+	// extensions stop after the InProgress cap, and the coord's
+	// multi-signal liveness check (PR #78) has nothing to fall back on
+	// when the worker's global heartbeat goroutine is GC-starved. Result:
+	// the build task hot-potatoes across workers (observed 2026-04-29 PM
+	// SF10 deploy of 3b57e93 — task 3455f719 reaped 3× in 3 minutes).
+	progress := ProgressReporterFromContext(ctx)
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("join build cancelled: %w", err)
@@ -688,6 +699,9 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}
 		if b == nil {
 			break
+		}
+		if progress != nil {
+			progress.AddRows(int64(b.ActiveLen()))
 		}
 
 		h.mu.Lock()
@@ -1166,6 +1180,10 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 
 	// Insert first batch into worker 0.
 	h.insertKeyOnlyBatch(locals[0], first)
+	progress := ProgressReporterFromContext(ctx)
+	if progress != nil {
+		progress.AddRows(int64(first.ActiveLen()))
+	}
 
 	// Launch workers.
 	var sourceMu sync.Mutex
@@ -1194,6 +1212,9 @@ func (h *HashJoin) buildParallelKeyOnly(ctx context.Context, source Source, work
 				}
 				if b == nil {
 					return
+				}
+				if progress != nil {
+					progress.AddRows(int64(b.ActiveLen()))
 				}
 				h.insertKeyOnlyBatch(lb, b)
 			}
