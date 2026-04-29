@@ -180,11 +180,11 @@ func (wr *WorkerRegistry) Count() int {
 // ClusterPoolPressure returns the cluster-wide shared memory pool pressure
 // as a value in [0.0, 1.0], computed from the most recent heartbeat each
 // active worker reported. Returns 0 when no worker has reported pool stats
-// (legacy workers, or worker without --shared-pool-budget).
-//
-// The dispatcher uses this to throttle new task admission when the cluster
-// is near memory exhaustion — refusing to dispatch lets in-flight operators
-// spill and free pool memory before piling on more concurrent work.
+// (legacy workers, or worker without --shared-pool-budget). Observability
+// only — earlier per-stage dispatch gating on this value caused a deadlock
+// in broadcast_join chains (the probe-side stage that would free build-side
+// memory was itself gated on memory dropping). Worker-side pool-pressure
+// spill is the load-shedding primitive now.
 func (wr *WorkerRegistry) ClusterPoolPressure() float64 {
 	wr.mu.RLock()
 	defer wr.mu.RUnlock()
