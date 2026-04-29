@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -815,30 +814,9 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 		}
 		key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
 
-		// KV fast-path per partition file: if the partition fits, KV it
-		// and skip S3. Partition sizes vary a lot within one stage (skew),
-		// so this is a per-partition decision, not per-stage.
-		if e.resultKV != nil && fi.Size() <= natsKVResultThreshold {
-			payload := make([]byte, fi.Size())
-			if _, readErr := io.ReadFull(f, payload); readErr == nil {
-				f.Close()
-				if _, putErr := e.resultKV.Put(ctx, natsKVKey(key), payload); putErr == nil {
-					result.ResultFiles = append(result.ResultFiles, key)
-					result.SizeBytes += fi.Size()
-					_ = os.Remove(localPath)
-					continue
-				}
-				// KV put failed — re-open for S3 upload.
-				f, err = os.Open(localPath)
-				if err != nil {
-					return fmt.Errorf("stage task %s: reopen partition %d for S3: %w", task.ID, p, err)
-				}
-			} else {
-				// Read failed — fall through and let S3 Put stream from file.
-				f.Seek(0, 0)
-			}
-		}
-
+		// S3 is the durable store; KV (if small enough) is a best-effort fast
+		// cache. See writeUnpartitionedWSHF for the same rationale — KV's
+		// 5-min TTL is shorter than long-running queries.
 		_, uploadErr := e.store.Put(ctx, task.ResultBucket, key, f, fi.Size(), "application/octet-stream")
 		f.Close()
 		if uploadErr != nil {
@@ -846,12 +824,24 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 		}
 		result.ResultFiles = append(result.ResultFiles, key)
 		result.SizeBytes += fi.Size()
+
+		// Best-effort KV cache for small partitions. Read the local file we
+		// already wrote to disk — cheaper than re-buffering. Failure is
+		// non-fatal because S3 is now durable.
+		if e.resultKV != nil && fi.Size() <= natsKVResultThreshold {
+			if payload, readErr := os.ReadFile(localPath); readErr == nil {
+				if _, putErr := e.resultKV.Put(ctx, natsKVKey(key), payload); putErr != nil {
+					e.logger.Debug("KV cache write failed (S3 already durable)",
+						"task_id", task.ID, "key", key,
+						"payload_bytes", len(payload), "err", putErr)
+				}
+			}
+		}
+
 		// Same-worker fast path: hand the local file to the LocalStageCache
-		// so a downstream task landing on this worker can mmap it directly
-		// instead of paying an S3 download. Adopt renames the file out of
-		// the per-task spill dir (which the deferred RemoveAll wipes) into
-		// the cache's per-query dir. If adoption fails or no cache is wired,
-		// fall back to the old delete-after-upload behavior.
+		// so a downstream task on this worker can mmap it directly. Adopt
+		// renames the file out of the per-task spill dir into the cache's
+		// per-query dir.
 		if adopted := e.localCache.Adopt(task.QueryID, key, localPath); adopted == "" {
 			_ = os.Remove(localPath)
 		}
@@ -893,41 +883,34 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 
 	key := fmt.Sprintf("%s%s.wshf", task.ResultPrefix, task.ID)
 
-	// KV fast-path: for small outputs, write only to NATS KV and skip the
-	// S3 upload. Downstream cachedFileStreamSource checks KV first (via
-	// natsKVKey(key)) and falls back to S3 on miss. This avoids the ~500ms
-	// S3 round-trip per stage boundary for the many small intermediate
-	// outputs in a typical TPC-H query (aggregates, merge-sort finals,
-	// broadcast-join output).
-	if e.resultKV != nil && len(payload) <= natsKVResultThreshold {
-		kvKey := natsKVKey(key)
-		if _, err := e.resultKV.Put(ctx, kvKey, payload); err == nil {
-			result.ResultFiles = append(result.ResultFiles, key)
-			result.SizeBytes += int64(len(payload))
-			return nil
-		} else {
-			// KV put failed — fall through to S3. Log at Warn because silent
-			// failure here was the 2026-04-25 diagnostic gap on the pgwire→
-			// coord "object not found" cascade (project_q18_sf10_native_dag_oom).
-			// If this fires often, payloads are exceeding NATS KV's per-value
-			// max — bump the threshold or the bucket's MaxValueSize.
-			e.logger.Warn("KV put failed, falling back to store",
-				"task_id", task.ID, "key", key,
-				"payload_bytes", len(payload), "err", err)
-		}
-	}
-
+	// S3 is the durable store. NATS KV has a 5-minute TTL (coordinator.go
+	// jetstream.KeyValueConfig) and a 1 GB bucket cap — entries can expire or
+	// be evicted before downstream stages read them. Q02 SF10 2026-04-28 hit
+	// exactly this: 10m57s query, KV-only outputs vanished at minute 5,
+	// downstream `nats: key not found` + `object not found`. Always upload to
+	// S3 first; KV is a best-effort fast-read cache below.
 	_, err := e.store.Put(ctx, task.ResultBucket, key, bytes.NewReader(payload), int64(len(payload)), "application/octet-stream")
 	if err != nil {
 		return fmt.Errorf("stage task %s: uploading wshf: %w", task.ID, err)
 	}
 	result.ResultFiles = append(result.ResultFiles, key)
 	result.SizeBytes += int64(len(payload))
-	// Same-worker fast path for the S3-eligible (i.e., > KV threshold) case.
-	// Spill the in-memory buffer to a tmp file under the worker spill dir
-	// and Adopt it into the LocalStageCache. The extra disk write is much
-	// cheaper than the S3 download a same-worker consumer would otherwise
-	// pay. Best-effort — failures fall back to the existing S3 path.
+
+	// Best-effort KV cache for small payloads. Downstream consumers check KV
+	// first (~10ms) and fall back to S3 (~500ms) on miss; both are correct
+	// reads now that S3 is durable.
+	if e.resultKV != nil && len(payload) <= natsKVResultThreshold {
+		kvKey := natsKVKey(key)
+		if _, err := e.resultKV.Put(ctx, kvKey, payload); err != nil {
+			e.logger.Debug("KV cache write failed (S3 already durable)",
+				"task_id", task.ID, "key", key,
+				"payload_bytes", len(payload), "err", err)
+		}
+	}
+
+	// Same-worker fast path: adopt the local copy so a downstream task on
+	// this worker can mmap it directly. Best-effort — failures fall back to
+	// S3.
 	e.cacheUnpartitionedLocal(task.QueryID, key, payload)
 	return nil
 }

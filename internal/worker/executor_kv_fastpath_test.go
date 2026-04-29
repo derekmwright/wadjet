@@ -15,14 +15,21 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-// TestKVFastPath_SmallOutputSkipsS3 stages the executor with both MemStore
-// (for S3 fallback) and NATS KV. A stage task whose output fits under
-// natsKVResultThreshold should put the payload into KV and NOT write to
-// the object store — proving the perf-A fast-path activates.
-func TestKVFastPath_SmallOutputSkipsS3(t *testing.T) {
+// kvFastPathFixture stages an executor with both MemStore (S3) and an
+// in-process NATS JetStream KV bucket. Returns the components a test needs
+// to drive writeStageOutput and inspect both stores.
+type kvFastPathFixture struct {
+	ctx      context.Context
+	executor *Executor
+	store    *objstore.MemStore
+	kv       jetstream.KeyValue
+	bucket   string
+}
+
+func newKVFastPathFixture(t *testing.T) *kvFastPathFixture {
+	t.Helper()
 	ctx := context.Background()
 
-	// Embedded NATS + KV bucket (same config the coordinator uses).
 	cfg := distributed.DefaultNATSConfig()
 	cfg.Port = -1
 	cfg.StoreDir = t.TempDir()
@@ -51,7 +58,6 @@ func TestKVFastPath_SmallOutputSkipsS3(t *testing.T) {
 		t.Fatalf("kv: %v", err)
 	}
 
-	// Executor with MemStore + KV wired.
 	store := objstore.NewMemStore()
 	const bucket = "test-bucket"
 	if err := store.MakeBucket(ctx, bucket); err != nil {
@@ -60,7 +66,17 @@ func TestKVFastPath_SmallOutputSkipsS3(t *testing.T) {
 	executor := NewExecutor(store, NewLRUCache(1024*1024), nil)
 	executor.SetResultKV(kv)
 
-	// Build a small batch (fits easily under the 4 MB threshold).
+	return &kvFastPathFixture{
+		ctx:      ctx,
+		executor: executor,
+		store:    store,
+		kv:       kv,
+		bucket:   bucket,
+	}
+}
+
+func (f *kvFastPathFixture) writeSmallStageOutput(t *testing.T) string {
+	t.Helper()
 	schema := []parquet.Column{{Name: "v", Type: parquet.TypeInt64, Nullable: true}}
 	b := batch.NewRecordBatch(schema, 3)
 	for i := 0; i < 3; i++ {
@@ -74,32 +90,73 @@ func TestKVFastPath_SmallOutputSkipsS3(t *testing.T) {
 		StageID:      "s",
 		Type:         distributed.TaskTypeStage,
 		StageType:    "hash_join",
-		DataBucket:   bucket,
-		ResultBucket: bucket,
+		DataBucket:   f.bucket,
+		ResultBucket: f.bucket,
 		ResultPrefix: "out/s/",
 	}
 	result := &distributed.ResultNotification{TaskID: task.ID}
-
-	if err := executor.writeStageOutput(ctx, task, []*batch.RecordBatch{b}, result); err != nil {
+	if err := f.executor.writeStageOutput(f.ctx, task, []*batch.RecordBatch{b}, result); err != nil {
 		t.Fatalf("writeStageOutput: %v", err)
 	}
-
 	if len(result.ResultFiles) != 1 {
 		t.Fatalf("expected 1 result file, got %d: %v", len(result.ResultFiles), result.ResultFiles)
 	}
-	key := result.ResultFiles[0]
+	return result.ResultFiles[0]
+}
 
-	// KV must hold the data under the dot-sanitized key.
+// TestKVCache_SmallOutputDurableInS3AndCachedInKV documents the post-2026-04-28
+// invariant: small stage outputs are written durably to S3 *and* cached in KV
+// for fast reads. The pre-fix behavior — KV-only with no S3 upload — failed
+// Q02 SF10 at 10m57s when the 5-minute KV TTL expired mid-query.
+func TestKVCache_SmallOutputDurableInS3AndCachedInKV(t *testing.T) {
+	f := newKVFastPathFixture(t)
+	key := f.writeSmallStageOutput(t)
+
+	// KV must hold the data under the dot-sanitized key (fast-read cache).
 	kvKey := natsKVKey(key)
-	if entry, err := kv.Get(ctx, kvKey); err != nil {
-		t.Fatalf("KV miss for key %q (sanitized=%q): %v", key, kvKey, err)
+	if entry, err := f.kv.Get(f.ctx, kvKey); err != nil {
+		t.Fatalf("KV cache miss for key %q (sanitized=%q): %v", key, kvKey, err)
 	} else if len(entry.Value()) == 0 {
-		t.Fatalf("KV value empty for key %q", kvKey)
+		t.Fatalf("KV cache value empty for key %q", kvKey)
 	}
 
-	// S3 (MemStore) must NOT hold the data — fast-path's whole purpose is
-	// to skip the S3 round-trip.
-	if _, _, err := store.Get(ctx, bucket, key); err == nil {
-		t.Fatalf("S3 should NOT hold the key when KV fast-path takes effect: %q", key)
+	// S3 must also hold the data (durable store of record).
+	rc, _, err := f.store.Get(f.ctx, f.bucket, key)
+	if err != nil {
+		t.Fatalf("S3 must hold the durable copy for key %q: %v", key, err)
+	}
+	rc.Close()
+}
+
+// TestKVCache_FallsBackToS3WhenKVMisses is the regression test for Q02 SF10
+// 2026-04-28: a downstream consumer encounters a missing KV entry (TTL
+// expiry, eviction, or never-written) and must still find the data in S3.
+//
+// Before the fix this would fail with `nats: key not found` + `object not
+// found` — the producer had skipped S3 in the KV-only fast path. After the
+// fix, S3 is always durable and the fallback succeeds.
+func TestKVCache_FallsBackToS3WhenKVMisses(t *testing.T) {
+	f := newKVFastPathFixture(t)
+	key := f.writeSmallStageOutput(t)
+
+	// Simulate KV expiry / eviction by purging the entry directly. The
+	// downstream stream_source.openNextFile path will then hit `nats: key
+	// not found` and must fall through to S3.
+	kvKey := natsKVKey(key)
+	if err := f.kv.Purge(f.ctx, kvKey); err != nil {
+		t.Fatalf("purging KV entry: %v", err)
+	}
+	if _, err := f.kv.Get(f.ctx, kvKey); err == nil {
+		t.Fatalf("expected KV miss after purge, got hit")
+	}
+
+	// The S3 read must succeed — this is the regression assertion.
+	rc, info, err := f.store.Get(f.ctx, f.bucket, key)
+	if err != nil {
+		t.Fatalf("S3 fallback failed for key %q: %v", key, err)
+	}
+	defer rc.Close()
+	if info.Size == 0 {
+		t.Fatalf("S3 fallback returned empty body for key %q", key)
 	}
 }
