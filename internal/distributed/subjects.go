@@ -19,6 +19,15 @@ const (
 	// Worker heartbeats — Core NATS
 	SubjectHeartbeat = "wadjet.workers.heartbeat"
 
+	// Per-task progress — Core NATS. Published by workers from inside
+	// task hot loops (every ~2s when progress is being made). Coord
+	// subscribes via SubjectTaskProgressAll and feeds into per-stage
+	// progress detection so a long-running task that's still pushing
+	// rows is distinguishable from a wedged task that's stopped making
+	// forward progress.
+	SubjectTaskProgress    = "wadjet.task.progress"
+	SubjectTaskProgressAll = "wadjet.task.progress.>"
+
 	// Query cancellation — Core NATS
 	SubjectCancel = "wadjet.cancel"
 
@@ -105,4 +114,11 @@ func CompleteSubject(queryID string) string {
 // CompleteSubjectAll returns the wildcard subject for all completion messages.
 func CompleteSubjectAll() string {
 	return SubjectComplete + ".>"
+}
+
+// TaskProgressSubject returns the NATS subject for a specific task's
+// per-task progress messages. Published by the worker; subscribed
+// via wildcard by the coordinator.
+func TaskProgressSubject(queryID, taskID string) string {
+	return SubjectTaskProgress + "." + queryID + "." + taskID
 }

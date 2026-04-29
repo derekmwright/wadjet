@@ -30,6 +30,13 @@ const gatherReceiveTimeout = 10 * time.Minute
 // shuffleStageTimeout still applies as a backstop for pathological cases
 // where progress signals leak (lost NATS subscription).
 //
+// In-flight forward progress: a Coordinator may attach itself via the
+// optional perTaskProgressBridge parameter. When non-nil, the bridge is
+// expected to feed `progress` on TaskProgress messages from workers
+// (rows being pushed through a long-running task), so a slow-but-healthy
+// task keeps the stage alive. Pass nil for stages that don't benefit
+// (terminal Gather, single-task stages).
+//
 // Returns nil on completion, ctx.Err() on cancellation, or a stuck/timeout
 // error otherwise.
 func awaitStageProgress(ctx context.Context, allDone <-chan struct{}, progress <-chan struct{}, label string) error {
@@ -84,6 +91,20 @@ func (c *Coordinator) executeStageDAG(
 	if err := physical.ValidateNativeDAGShape(stages); err != nil {
 		return nil, err
 	}
+
+	// Per-task progress bridge: fans worker-emitted TaskProgress
+	// messages out to per-stage progress channels so a slow-but-healthy
+	// task keeps stageIdleTimeout from firing. Each dispatch helper
+	// registers its progress channel under the stage_id; the bridge
+	// routes by that field. Bridge is closed on query exit to drop
+	// the underlying NATS subscription.
+	bridge, err := newStageProgressBridge(c.nc, queryID)
+	if err != nil {
+		c.logger.Warn("task-progress bridge subscribe failed; falling back to completion-only progress",
+			"query", queryID, "error", err)
+	}
+	defer bridge.Close()
+	ctx = withStageProgressBridge(ctx, bridge)
 
 	// Register parent queryID in the tracker so SubjectQueryActive replies
 	// "active" for this query. Without this the worker's pre-execute
@@ -683,6 +704,7 @@ func (c *Coordinator) materializeReplicate(
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, 1)
+	defer stageProgressBridgeFromContext(ctx).Register(stage.ID, progress)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
@@ -955,6 +977,10 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
+	// Register with the per-query progress bridge so worker-emitted
+	// TaskProgress messages also count as forward progress for this
+	// stage's idle detection.
+	defer stageProgressBridgeFromContext(ctx).Register(stage.ID, progress)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
@@ -1101,6 +1127,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
+	// Register with the per-query progress bridge so worker-emitted
+	// TaskProgress messages also count as forward progress for this
+	// stage's idle detection.
+	defer stageProgressBridgeFromContext(ctx).Register(stage.ID, progress)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
@@ -1336,6 +1366,10 @@ func (c *Coordinator) dispatchComputeStage(
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
+	// Register with the per-query progress bridge so worker-emitted
+	// TaskProgress messages also count as forward progress for this
+	// stage's idle detection.
+	defer stageProgressBridgeFromContext(ctx).Register(stage.ID, progress)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
@@ -1645,6 +1679,10 @@ func (c *Coordinator) runStageTasks(
 	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
+	// Register with the per-query progress bridge so worker-emitted
+	// TaskProgress messages also count as forward progress for this
+	// stage's idle detection.
+	defer stageProgressBridgeFromContext(ctx).Register(stageLabel, progress)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {

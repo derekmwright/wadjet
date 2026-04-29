@@ -299,6 +299,24 @@ type WorkerHeartbeat struct {
 	Timestamp     time.Time `json:"timestamp"`
 }
 
+// TaskProgress is published by a worker from inside a task's hot loop
+// to signal forward progress (rows/bytes processed). Coord uses these
+// to distinguish a slow-but-healthy task from a wedged task.
+//
+// Workers emit at most one TaskProgress message per ~2s per task; the
+// counters are monotonically increasing across the task's lifetime,
+// so the coord can compute throughput and detect "no row progress for
+// N seconds" stalls without needing every batch to publish.
+type TaskProgress struct {
+	QueryID        string    `json:"query_id"`
+	StageID        string    `json:"stage_id"`
+	TaskID         string    `json:"task_id"`
+	WorkerID       string    `json:"worker_id"`
+	RowsProcessed  int64     `json:"rows_processed"`
+	BytesProcessed int64     `json:"bytes_processed,omitempty"`
+	Timestamp      time.Time `json:"timestamp"`
+}
+
 // QueryManifest describes the final results of a query.
 type QueryManifest struct {
 	QueryID     string   `json:"query_id"`
