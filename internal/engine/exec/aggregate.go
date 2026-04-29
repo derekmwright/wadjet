@@ -1963,7 +1963,25 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 	return nil
 }
 
-func (h *HashAggregate) Close() error { return nil }
+// Close releases any tracker reservation HashAggregate still holds for
+// group-state memory and buffered-but-unspilled rows. Without this, a
+// non-spilling HashAggregate accumulates a phantom reservation in the
+// shared tracker for the lifetime of the process; see HashJoin.Close for
+// the full background.
+func (h *HashAggregate) Close() error {
+	if h.Spill != nil {
+		if h.trackedGroupMem > 0 {
+			h.Spill.ReleaseTracking(h.trackedGroupMem)
+			h.trackedGroupMem = 0
+		}
+		if h.spillBufferBytes > 0 {
+			h.Spill.ReleaseTracking(h.spillBufferBytes)
+			h.spillBufferBytes = 0
+		}
+	}
+	h.spillBuffer = nil
+	return nil
+}
 
 // Next returns the aggregated results in batches of DefaultBatchSize rows.
 func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
