@@ -3295,6 +3295,35 @@ func (p *HashJoinProbe) FlushUnmatched(leftSchema []parquet.Column) *batch.Recor
 
 func (p *HashJoinProbe) Close() error { return nil }
 
+// Close releases any memory still reserved with the shared MemTracker and
+// drops references to the build-side state so Go's GC can reclaim it
+// promptly. Must be called by the owner of the HashJoin (the worker
+// executor) after the probe pipeline has fully drained — including any
+// spilled-partition flushes. Calling Close more than once is safe; the
+// release amount goes to zero on the first call.
+//
+// Without this, an operator that builds-probes-completes WITHOUT spilling
+// never returns its reservation to the shared tracker. The hash table is
+// GC-eligible but the tracker thinks it's still in use, so the worker
+// reports inflated PoolPressure to the coordinator and worker-side spill
+// thresholds fire prematurely. With many concurrent broadcast joins (e.g.,
+// TPC-H Q02), phantom reservations accumulate query-over-query.
+func (h *HashJoin) Close() error {
+	if h.MemTracker != nil && h.trackedMem > 0 {
+		h.MemTracker.Release(h.trackedMem)
+		h.trackedMem = 0
+	}
+	h.trackedHashOverhead = 0
+	h.buildBatches = nil
+	h.arena = nil
+	h.arenaNext = nil
+	h.intIndex = nil
+	h.strIndex = nil
+	h.bloom = nil
+	h.bloomMask = 0
+	return nil
+}
+
 // Clone returns a new HashJoinProbe that shares the same build-side hash table
 // but has its own scratch buffers (pairsBuf, semiSelBuf, lookupBuf, indexBuf).
 func (p *HashJoinProbe) Clone() UnaryOperator {

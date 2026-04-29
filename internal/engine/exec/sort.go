@@ -371,7 +371,20 @@ func (s *Sort) MergeSink(other SinkSource) {
 	o.batches = nil
 }
 
-func (s *Sort) Close() error { return nil }
+// Close releases any tracker reservation Sort still holds for buffered rows
+// that never crossed the spill threshold, and drops references so the GC
+// can reclaim immediately. Without this, a non-spilling Sort accumulates a
+// phantom reservation in the shared tracker for the lifetime of the
+// process; see HashJoin.Close for the full background.
+func (s *Sort) Close() error {
+	if s.Spill != nil && s.trackedMem > 0 {
+		s.Spill.ReleaseTracking(s.trackedMem)
+		s.trackedMem = 0
+	}
+	s.batches = nil
+	s.totalRows = 0
+	return nil
+}
 
 // Next returns sorted results in batches.
 func (s *Sort) Next(_ context.Context) (*batch.RecordBatch, error) {

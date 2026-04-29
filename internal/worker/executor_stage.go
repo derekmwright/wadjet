@@ -257,6 +257,11 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 		hj.Spill = e.sharedSpill
 		hj.MemTracker = e.sharedTracker
 	}
+	// Close releases trackedMem to the shared tracker once the join is done.
+	// Without this, a non-spilling broadcast_join leaks its reservation for
+	// the lifetime of the worker process — phantom pool pressure inflates
+	// across queries and triggers worker-side spill prematurely.
+	defer hj.Close()
 
 	if err := buildSource.Init(ctx); err != nil {
 		return fmt.Errorf("hash_join task %s: init build source: %w", task.ID, err)
@@ -425,6 +430,9 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	if e.sharedSpill != nil {
 		hashAgg.Spill = e.sharedSpill
 	}
+	// Close releases tracker reservations once draining is complete; see
+	// HashJoin defer above for why this is required.
+	defer hashAgg.Close()
 
 	// Order: source → filters → derived-column projection → HashAggregate.
 	// Filter first so expressions only evaluate on surviving rows.
@@ -638,6 +646,9 @@ func (e *Executor) executeStageSort(ctx context.Context, task distributed.Task, 
 		keys[i] = exec.SortKey{Column: k.Column, Order: order}
 	}
 	sorter := exec.NewSort(keys)
+	// Close releases tracker reservation; see HashJoin defer for the
+	// architectural rationale.
+	defer sorter.Close()
 
 	pipeline := &exec.Pipeline{
 		Source: src,
