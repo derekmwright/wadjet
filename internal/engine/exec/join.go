@@ -134,6 +134,16 @@ type HashJoin struct {
 	// output schema. Only set when spillState is non-nil.
 	spillOutputFilter map[string]bool
 	spillLeftSchema   []parquet.Column
+
+	// PartitionOnArrival makes Build allocate spillState upfront and partition
+	// every batch as it arrives, so memory pressure can be relieved by evicting
+	// a single partition (O(partition_size)) instead of redistributing the
+	// entire flat hash table on first spill (O(total_size) plus a hash-table
+	// reset and rebuild). When false, Build uses the legacy flat path and only
+	// converts to partitioned representation reactively on first spill. The
+	// production worker path enables this; standalone embeddings without a
+	// shared memory pool keep the legacy path.
+	PartitionOnArrival bool
 }
 
 // BloomPushdownOp returns a UnaryOperator that pre-filters probe batches using
@@ -670,6 +680,16 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// no merge overhead (each worker inserts directly into the shared table).
 	if workers > 1 && h.SemiAntiKeyOnly {
 		return h.buildParallelKeyOnly(ctx, source, workers)
+	}
+
+	// Partition-on-arrival path: when both MemTracker and Spill are
+	// configured (the production worker config) and the caller opted in via
+	// PartitionOnArrival, bypass the legacy flat-then-reactively-partition
+	// path. Spill becomes O(partition) instead of O(total), which is the
+	// architectural primitive that the SF10 lineitem broadcast-join "8 min
+	// per join" memory pressure was hitting.
+	if h.PartitionOnArrival && h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
+		return h.buildPartitioned(ctx, source)
 	}
 
 	// Full builds use serial insertion. buildParallel creates per-worker

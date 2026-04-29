@@ -256,6 +256,14 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	if e.sharedSpill != nil {
 		hj.Spill = e.sharedSpill
 		hj.MemTracker = e.sharedTracker
+		// Partition-on-arrival keeps spill incremental under shared-pool
+		// pressure: when one task hits the spill threshold, only its
+		// largest partition is evicted (O(partition) rather than the
+		// legacy O(total) repartition+rehash). The decision is gated on
+		// shared-pool config because the legacy flat path is still the
+		// right shape for embedded/test callers that don't pass a
+		// MemTracker — those paths never spill anyway.
+		hj.PartitionOnArrival = true
 	}
 	// Close releases trackedMem to the shared tracker once the join is done.
 	// Without this, a non-spilling broadcast_join leaks its reservation for
