@@ -19,6 +19,7 @@ type WorkerInfo struct {
 	MemoryTotal   int64
 	PoolUsed      int64 // shared memory pool bytes Reserved
 	PoolBudget    int64 // shared memory pool capacity in bytes; pressure = PoolUsed / PoolBudget
+	ActiveTaskIDs []string // task IDs in flight per the most recent heartbeat
 	Draining      bool
 	LastSeen      time.Time
 }
@@ -78,22 +79,25 @@ type WorkerRegistry struct {
 
 // NewWorkerRegistry creates a worker registry that subscribes to heartbeats.
 // staleTTL controls how long since the last heartbeat before a worker is
-// considered dead. Pass 0 to use the default (30s).
+// considered dead. Pass 0 to use the default (90s).
 func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duration) *WorkerRegistry {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	if staleTTL <= 0 {
-		// Default: 30 minutes. Workers under heavy compute load with
-		// GOGC=off may stall their heartbeat goroutine for many minutes
-		// (runtime.ReadMemStats does a stop-the-world; large hash builds
-		// + back-to-back GCs leave little scheduler space). The 26 April
-		// SF10 AWS run reaped workers during 10m+ shuffle stages even
-		// though the workers were alive and progressing — false positives
-		// shut down the cluster mid-query. 30 minutes accommodates the
-		// observed worst-case heartbeat gap on SF10 c7g.4xlarge while
-		// still detecting truly dead workers eventually.
-		staleTTL = 30 * time.Minute
+		// Default: 90 seconds. Workers send heartbeats every 10s (PR #58
+		// decoupled the hot path from runtime.ReadMemStats so GC-stalls
+		// no longer block heartbeat emission). 90s = 9 missed heartbeats,
+		// enough margin for a brief NATS hiccup but tight enough to
+		// detect a wedged worker quickly.
+		//
+		// Was 30 minutes pre-PR #58 (workers under load could stall the
+		// heartbeat goroutine for many minutes during ReadMemStats STW).
+		// With heartbeat decoupled, we no longer need that headroom —
+		// and a 30m TTL meant the SF10 deploy let a wedged worker hold
+		// 8 tasks for the entire 30m bench-runner cap before reaping
+		// (observed 92833f7).
+		staleTTL = 90 * time.Second
 	}
 
 	wr := &WorkerRegistry{
@@ -136,6 +140,7 @@ func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
 	info.MemoryTotal = hb.MemoryTotal
 	info.PoolUsed = hb.PoolUsed
 	info.PoolBudget = hb.PoolBudget
+	info.ActiveTaskIDs = append(info.ActiveTaskIDs[:0], hb.ActiveTaskIDs...)
 	info.Draining = hb.Draining
 	// Use coordinator-side time for LastSeen. The heartbeat message
 	// arriving proves the worker is alive — even if the worker's
@@ -244,8 +249,25 @@ func (wr *WorkerRegistry) ReapStale() int {
 	reaped := 0
 	for id, w := range wr.workers {
 		if w.LastSeen.Before(cutoff) {
+			// Report which tasks the dead worker was holding. Surfaces
+			// "8 tasks orphaned because worker wedged" in the coord log
+			// instead of just "worker reaped." Operators reading the log
+			// can correlate stuck stages with reaped workers, and the
+			// JetStream-level redelivery (post worker-side InProgress
+			// cap, see worker.go) eventually picks these up on a
+			// healthy worker.
+			lastSeenAgo := time.Since(w.LastSeen).Round(time.Second)
+			if len(w.ActiveTaskIDs) > 0 {
+				wr.logger.Warn("worker reaped (stale) with in-flight tasks",
+					"worker_id", id,
+					"last_seen_ago", lastSeenAgo,
+					"in_flight_tasks", len(w.ActiveTaskIDs),
+					"task_ids", w.ActiveTaskIDs)
+			} else {
+				wr.logger.Info("worker reaped (stale)",
+					"worker_id", id, "last_seen_ago", lastSeenAgo)
+			}
 			delete(wr.workers, id)
-			wr.logger.Info("worker reaped (stale)", "worker_id", id)
 			// Tell the worker to stop pulling tasks. Use request/reply
 			// with a short timeout — if the worker is truly dead, the
 			// NATS connection is gone and this times out harmlessly.
