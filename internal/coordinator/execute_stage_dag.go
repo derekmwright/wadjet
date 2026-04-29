@@ -270,23 +270,6 @@ func (c *Coordinator) executeStageDAG(
 			if err != nil {
 				return fmt.Errorf("stage %s collect inputs: %w", s.ID, err)
 			}
-			// Memory-pressure backpressure: refuse to dispatch new tasks
-			// when the cluster's shared memory pool is near exhaustion.
-			// Lets in-flight operators spill and free pool memory before
-			// piling on more concurrent work. Re-checks every 500ms so
-			// stages resume admission as soon as pressure drops.
-			//
-			// Returns 0 when no worker has reported pool stats (legacy
-			// workers, missing --shared-pool-budget); in that case the
-			// gate is effectively disabled and dispatch behaves as before.
-			const poolPressureMax = 0.85
-			for c.workers.ClusterPoolPressure() >= poolPressureMax {
-				select {
-				case <-time.After(500 * time.Millisecond):
-				case <-gctx.Done():
-					return gctx.Err()
-				}
-			}
 			// Acquire a dispatch slot now that we have inputs and are
 			// about to publish tasks. Held until the stage completes so
 			// concurrent stage count never exceeds dispatchSlots. Released
