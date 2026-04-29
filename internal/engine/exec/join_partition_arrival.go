@@ -39,6 +39,14 @@ import (
 func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	progress := ProgressReporterFromContext(ctx)
 
+	// Register with the worker's cooperative-spill advisor. While Build is
+	// running this operator's partitions are reclaimable; once Build returns
+	// (and especially during probe replay of spilled partitions) we deregister
+	// so cross-operator advisories don't try to evict from a partition state
+	// the probe path is actively reading.
+	unregister := h.Spill.RegisterSpillable(h)
+	defer unregister()
+
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("join build cancelled: %w", err)
@@ -351,8 +359,12 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 }
 
 // spillUntilCanReserve evicts in-memory partitions one at a time until either
-// h.MemTracker.Used() + needed fits within budget or no in-memory partitions
-// remain. Returns nil if enough was freed; an error if a spill failed.
+// h.MemTracker.Used() + needed fits within budget or this operator runs out
+// of evictable partitions. When self-spill is exhausted but pressure remains,
+// it asks the worker's cooperative-spill advisor to evict from any other
+// concurrent operator on the same shared pool — this addresses the cross-
+// operator pool starvation case where one task holds the bulk of the pool
+// and another can't make Reserve progress on its own.
 //
 // Caller must hold h.mu.
 func (h *HashJoin) spillUntilCanReserve(needed int64) error {
@@ -365,8 +377,66 @@ func (h *HashJoin) spillUntilCanReserve(needed int64) error {
 			return err
 		}
 		if freed == 0 {
-			break // nothing left in memory to evict
+			break // nothing left in memory to evict from THIS operator
 		}
 	}
-	return nil
+	if h.MemTracker.Used()+needed <= h.MemTracker.Budget() {
+		return nil
+	}
+	// Cooperative spill: ask the worker's advisor to evict from any other
+	// concurrent operator. Skip if no SpillManager (test paths), no other
+	// operators (single-operator path), or the budget hasn't been crossed.
+	if h.Spill == nil {
+		return nil
+	}
+	gap := h.MemTracker.Used() + needed - h.MemTracker.Budget()
+	// h.mu is held — release before calling cross-operator advisory. A
+	// concurrent operator's SpillSome takes ITS mu, never ours, but we
+	// shouldn't pin our partitioning loop while another operator does its
+	// own potentially-large spill.
+	h.mu.Unlock()
+	_, err := h.Spill.RequestRelief(gap)
+	h.mu.Lock()
+	return err
+}
+
+// SpillFootprint reports how many bytes of in-memory build state this join
+// currently holds. Implements memory.Spillable for the worker's cooperative
+// spill advisor. Footprint is the sum across all in-memory partitions; the
+// hash-table arena/index overhead is excluded because it isn't reclaimable
+// without rebuilding the hash table.
+func (h *HashJoin) SpillFootprint() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.spillState == nil {
+		return 0
+	}
+	var total int64
+	for _, mem := range h.spillState.partMemory {
+		total += mem
+	}
+	return total
+}
+
+// SpillSome attempts to free at least target bytes from this join's in-memory
+// partitions. Picks the largest partition repeatedly until target is met or
+// no partitions remain. Implements memory.Spillable.
+func (h *HashJoin) SpillSome(target int64) (int64, error) {
+	if target <= 0 {
+		return 0, nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var freed int64
+	for freed < target {
+		n, err := h.spillOneInMemoryPartition()
+		if err != nil {
+			return freed, err
+		}
+		if n == 0 {
+			break
+		}
+		freed += n
+	}
+	return freed, nil
 }

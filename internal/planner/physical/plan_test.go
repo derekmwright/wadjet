@@ -534,6 +534,81 @@ func TestPlanDistributed_ShuffleJoin(t *testing.T) {
 	}
 }
 
+// TestBroadcastBytesThreshold_TightBudgetDemotesToShuffle covers the
+// memory-conditioned broadcast→shuffle promotion (Class C). With the
+// default threshold (100 MB), a small users table is broadcast as before.
+// With BroadcastBytesThreshold lowered to 256 bytes (smaller than the
+// users file's 512 bytes), the planner promotes the same join to
+// hash_join + shuffle stages — proving the decision is conditioned on
+// the threshold, not just absolute size.
+func TestBroadcastBytesThreshold_TightBudgetDemotesToShuffle(t *testing.T) {
+	cat, ctx := setupCatalogWithUsers(t)
+
+	// Default threshold: users (512 bytes) is broadcast.
+	{
+		planner := NewPlanner(cat)
+		planner.WorkerCount = 4
+		left := logical.NewScan("events", "e")
+		right := logical.NewScan("users", "u")
+		join := logical.NewJoin(left, right, "inner", "e.user_id = u.user_id")
+		stages, err := planner.PlanDistributed(ctx, join)
+		if err != nil {
+			t.Fatalf("PlanDistributed default: %v", err)
+		}
+		var got string
+		for _, s := range stages {
+			if s.Type == "broadcast_join" || s.Type == "hash_join" {
+				got = s.Type
+			}
+		}
+		if got != "broadcast_join" {
+			t.Errorf("default threshold: expected broadcast_join, got %q", got)
+		}
+	}
+
+	// Tight threshold: 256 < users size (512 bytes) → must demote to hash_join.
+	{
+		planner := NewPlanner(cat)
+		planner.WorkerCount = 4
+		planner.BroadcastBytesThreshold = 256
+		left := logical.NewScan("events", "e")
+		right := logical.NewScan("users", "u")
+		join := logical.NewJoin(left, right, "inner", "e.user_id = u.user_id")
+		stages, err := planner.PlanDistributed(ctx, join)
+		if err != nil {
+			t.Fatalf("PlanDistributed tight: %v", err)
+		}
+		var got string
+		for _, s := range stages {
+			if s.Type == "broadcast_join" || s.Type == "hash_join" {
+				got = s.Type
+			}
+		}
+		if got != "hash_join" {
+			t.Errorf("tight threshold: expected hash_join (broadcast demoted), got %q", got)
+		}
+	}
+
+	// Negative threshold: broadcast disabled entirely.
+	{
+		planner := NewPlanner(cat)
+		planner.WorkerCount = 4
+		planner.BroadcastBytesThreshold = -1
+		left := logical.NewScan("events", "e")
+		right := logical.NewScan("users", "u")
+		join := logical.NewJoin(left, right, "inner", "e.user_id = u.user_id")
+		stages, err := planner.PlanDistributed(ctx, join)
+		if err != nil {
+			t.Fatalf("PlanDistributed disabled: %v", err)
+		}
+		for _, s := range stages {
+			if s.Type == "broadcast_join" {
+				t.Errorf("negative threshold: expected NO broadcast_join, found %s", s.ID)
+			}
+		}
+	}
+}
+
 // setupCatalogWithLargeTables creates two tables with many files so both
 // sides exceed the broadcast threshold and trigger shuffle stages.
 func setupCatalogWithLargeTables(t *testing.T) (*catalog.Catalog, context.Context) {

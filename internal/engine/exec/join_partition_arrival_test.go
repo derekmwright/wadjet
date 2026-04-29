@@ -220,13 +220,21 @@ func TestPartitionOnArrival_ConcurrentBuildsSharedPool(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	// Match the legacy TestConcurrentBuildSharedTracker budget (1.4 MB) so
-	// both joins have headroom to make progress when the other build holds
-	// the pool. The new path's per-spill granularity is finer than the
-	// legacy path's; under a tighter budget the concurrent steady-state
-	// requires multi-join cooperative spilling which is a separate
-	// architectural lever (Class B in the brainstorm).
-	sharedTracker := memory.NewTracker("shared", 1_400_000)
+	// Tight budget that exercises cross-operator cooperative spill: each
+	// join's full build is ~3 MB; the shared budget below forces both
+	// joins to give up partition data they hold so the other can make
+	// Reserve progress. Without the cooperative-spill advisor (B), this
+	// budget deadlocks because each join only spills its own partitions
+	// and one mid-build join holding the pool starves the other.
+	//
+	// Budget chosen with headroom for the case where one join finishes
+	// build first and its hash-table overhead remains in the tracker
+	// (released only on Close, not Build completion) while the other
+	// join is still ingesting. Under -race the scheduling exposes this
+	// window — without the headroom, the still-building join can't
+	// reserve even after the cooperative-spill round because the now-
+	// deregistered peer's residual overhead is no longer reclaimable.
+	sharedTracker := memory.NewTracker("shared", 1_600_000)
 	sm, err := memory.NewSpillManager(tmpDir, sharedTracker)
 	if err != nil {
 		t.Fatal(err)

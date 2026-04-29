@@ -471,6 +471,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
 	planner.UseEnsureDistribution = true
+	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return nil, fmt.Errorf("physical plan: %w", err)
@@ -1754,6 +1755,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	// Generate distributed stages and route to pipeline execution
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
+	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return "", "", fmt.Errorf("physical plan: %w", err)

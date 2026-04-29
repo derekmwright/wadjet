@@ -1667,10 +1667,26 @@ func (h *HashJoin) bloomMayContain(hash uint64) bool {
 // consolidateBuild merges all build batches into a single contiguous batch.
 // This eliminates the O(n log n) pair sort in the probe phase (sort is skipped
 // when len(buildBatches) == 1) and improves gatherBuildVector cache locality
-// by removing per-pair batch switching. Cost: one-time O(n) copy during build.
+// by removing per-pair batch switching. Cost: one-time O(n) copy during build —
+// at exactly the moment the build is finishing and probe is about to begin,
+// peak heap is doubled by the consolidation.
+//
+// Skip the consolidation under any of:
+//   - Single batch already → no-op (legacy)
+//   - Spill state attached → arena entries reference per-partition batches
+//   - Semi/anti key-only → no batches to merge
+//   - Shared pool > 30% used → the 2× spike is unsafe; pay the per-pair sort
+//     cost in probe instead. Removes a class of OOM observed when concurrent
+//     builds finish in close succession and each tries to consolidate.
 func (h *HashJoin) consolidateBuild() {
 	if len(h.buildBatches) <= 1 || h.spillState != nil || h.SemiAntiKeyOnly {
 		return
+	}
+	if h.MemTracker != nil && h.MemTracker.Budget() > 0 {
+		used := h.MemTracker.Used()
+		if used*100 > h.MemTracker.Budget()*30 {
+			return
+		}
 	}
 
 	// Compute total rows and cumulative offsets per batch.

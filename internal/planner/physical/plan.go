@@ -253,6 +253,25 @@ type Planner struct {
 	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
 	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
 
+	// BroadcastBytesThreshold is the maximum estimated build-side size for
+	// a join to be planned as broadcast_join. Builds above this become
+	// hash_join (hash-shuffle), eliminating the N× build-cache duplication
+	// every worker pays under broadcast.
+	//
+	// Zero = use absolute default (100 MB), preserving legacy behavior for
+	// embedded callers that don't set this. Distributed callers should set
+	// this from per-worker pool budget — e.g., budget * 0.3 capped at
+	// 200 MB — so the broadcast/shuffle decision adapts to cluster memory
+	// instead of trusting an absolute constant. Negative = never broadcast
+	// (force every join to hash_join).
+	//
+	// Architectural rule the threshold encodes: broadcast is sound when
+	// every worker can comfortably hold the full build state in memory
+	// alongside concurrent hash tables. As cluster width or per-worker
+	// budget shrinks, the threshold shrinks too — without changing the
+	// planner's join-type logic.
+	BroadcastBytesThreshold int64
+
 	// UseEnsureDistribution runs the Phase-2 EnsureDistribution pass after
 	// assignStageDistributions. When true, BehaviorPreservingMode is flipped
 	// to false for the duration of the call (strict AssertExchangeConsistency).
@@ -2727,10 +2746,18 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 			totalBytes += f.SizeBytes
 		}
 	}
-	// Broadcast if build side is under 100 MB.  At SF100 partsupp is ~10 GB
-	// and was incorrectly broadcast under the old file-count heuristic,
-	// forcing every worker to build a 10 GB hash table.
-	return totalBytes <= 100*1024*1024
+	// Broadcast threshold: defaults to 100 MB (legacy behavior). Distributed
+	// callers override via BroadcastBytesThreshold to adapt the decision to
+	// per-worker pool budget so a moderate build (say 500 MB) on a tight
+	// cluster falls back to hash-shuffle instead of multiplying memory
+	// pressure N× across worker procs.
+	threshold := int64(100 * 1024 * 1024)
+	if p.BroadcastBytesThreshold > 0 {
+		threshold = p.BroadcastBytesThreshold
+	} else if p.BroadcastBytesThreshold < 0 {
+		return false // broadcast disabled
+	}
+	return totalBytes <= threshold
 }
 
 // findScanNode walks through pass-through nodes (Filter, Project, Limit)
