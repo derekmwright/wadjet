@@ -687,6 +687,27 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 			}
 		}()
 	}
+
+	// Delete query intermediates from the object store. Without this, every
+	// completed query leaks its queries/<id>/* prefix and the data dir grows
+	// unbounded across runs (~40 GB per full TPC-H SF1 sweep). The periodic
+	// cleaner does eventually GC stale files via TTL, but its default 1-hour
+	// TTL is too long for a back-to-back test cadence and there's no reason
+	// to wait — we know the query is done. Async to keep cleanupQuery fast.
+	if c.cleaner != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			n, err := c.cleaner.CleanQuery(ctx, queryID)
+			if err != nil {
+				c.logger.Warn("query intermediate cleanup failed",
+					"query_id", queryID, "error", err)
+			} else if n > 0 {
+				c.logger.Debug("cleaned query intermediates",
+					"query_id", queryID, "objects_deleted", n)
+			}
+		}()
+	}
 }
 
 // queryReaperTTL is how long completed/failed/cancelled queries stay in memory

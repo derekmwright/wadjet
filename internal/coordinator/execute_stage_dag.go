@@ -129,7 +129,13 @@ func (c *Coordinator) executeStageDAG(
 	// Mark Complete (not Delete) so GetQueryStatus / GetQueryResults can
 	// observe the finished query. ReapCompleted (cleanup.go) prunes old
 	// completed entries on a periodic sweep — same pattern legacy uses.
-	defer c.tracker.Complete(queryID)
+	// cleanupQuery purges KV entries + queries/<id>/* in the object store;
+	// without it the data dir grows unbounded across runs (the legacy
+	// path at coordinator.go:1712 does the same call).
+	defer func() {
+		c.tracker.Complete(queryID)
+		c.cleanupQuery(queryID)
+	}()
 
 	// Separate the terminal Gather from the DAG body: Gather is always run
 	// last, on the coordinator's NATS reply subscription, and returns the
