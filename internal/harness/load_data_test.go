@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/citc-tech/wadjet/benchmarks/tpch"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -57,7 +58,7 @@ func TestLoadSampleDataPopulatesCatalog(t *testing.T) {
 	}
 
 	sliceCfg := SliceConfigs[SliceSmall]
-	if err := loadSampleData(ctx, cluster, dataDir, sliceCfg, logger); err != nil {
+	if err := loadSampleData(ctx, cluster, dataDir, sliceCfg, tpch.SF001, logger); err != nil {
 		t.Fatalf("loadSampleData: %v", err)
 	}
 

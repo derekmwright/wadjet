@@ -44,6 +44,16 @@ type Config struct {
 	PgAddr         string // local only; override for coordinator pgwire listen addr
 	NumWorkers     int    // local only; cluster size to spawn (0 = default of 2)
 
+	// ScaleFactor is the TPC-H data volume for local mode generation.
+	// 0 (zero value) defaults to 0.01 (~10 MB total, lineitem 60K rows).
+	// Larger values let the harness exercise per-stage round-trip and
+	// memory-pressure paths at meaningful scale without EC2 spend:
+	//   0.1  → ~150 MB total, lineitem 600K rows  (~5-10 sec total benchmark)
+	//   1.0  → ~1.5 GB total, lineitem 6M rows    (~30-60 sec)
+	//   10.0 → ~15 GB total — local generation will take minutes; only useful
+	//          on machines with disk + memory to spare.
+	ScaleFactor float64 // 0 = SF0.01 default
+
 	// S3 source (Source=="s3" only)
 	Source     string // "local" (default) or "s3"
 	Bucket     string

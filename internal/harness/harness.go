@@ -98,7 +98,11 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 				return result, fmt.Errorf("priming S3 catalog: %w", err)
 			}
 		default: // "local" or empty
-			if err := loadSampleData(ctx, cluster, cfg.DataDir, sliceCfg, logger); err != nil {
+			scale := tpch.ScaleFactor(cfg.ScaleFactor)
+			if scale <= 0 {
+				scale = tpch.SF001
+			}
+			if err := loadSampleData(ctx, cluster, cfg.DataDir, sliceCfg, scale, logger); err != nil {
 				return result, fmt.Errorf("loading sample data: %w", err)
 			}
 		}
@@ -369,7 +373,7 @@ func runOneQuery(
 // be called after cluster.StartNATS() and before cluster.StartProcesses()
 // so that when the coordinator and workers boot, the catalog already has
 // all tables and files registered.
-func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ SliceConfig, logger *slog.Logger) error {
+func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ SliceConfig, scale tpch.ScaleFactor, logger *slog.Logger) error {
 	// Connect to the coordinator's NATS for catalog access.
 	nc, err := cluster.ConnectNATS()
 	if err != nil {
@@ -401,63 +405,62 @@ func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ Sli
 		return fmt.Errorf("catalog init: %w", err)
 	}
 
-	// Generate SF0.01 data and write as parquet files.
-	const chunksPerTable = 8
-	data := tpch.Generate(tpch.SF001)
+	// Create all tables up-front before streaming data into them. The
+	// streaming generator emits in a fixed order independent of map
+	// iteration; pre-creating decouples table-existence from data writes.
 	for tableName, schema := range tpch.AllTables {
 		if err := cat.CreateTable(ctx, tableName, schema, nil); err != nil {
 			return fmt.Errorf("creating table %s: %w", tableName, err)
 		}
-		rows := data[tableName]
+	}
+
+	// Streaming generation: bound memory by chunk size (50K rows per chunk
+	// is ~5-10 MB depending on the table). Without streaming, SF1 lineitem
+	// alone would materialize ~6M row maps in heap (≈1+ GB).
+	const chunkSize = 50_000
+	pendingChunks := make(map[string]int) // table → next chunk index
+	tableEntries := make(map[string][]catalog.FileEntry)
+	tableRows := make(map[string]int64)
+	emit := func(tableName string, rows []map[string]any) error {
 		if len(rows) == 0 {
-			continue
+			return nil
 		}
-
-		numChunks := chunksPerTable
-		if len(rows) < numChunks {
-			numChunks = len(rows)
+		schema := tpch.AllTables[tableName]
+		var buf bytes.Buffer
+		pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+		if err != nil {
+			return fmt.Errorf("parquet writer for %s: %w", tableName, err)
 		}
-		chunkSize := (len(rows) + numChunks - 1) / numChunks
-		var entries []catalog.FileEntry
-		for cIdx := 0; cIdx < numChunks; cIdx++ {
-			start := cIdx * chunkSize
-			end := start + chunkSize
-			if end > len(rows) {
-				end = len(rows)
-			}
-			if start >= end {
-				break
-			}
-			chunkRows := rows[start:end]
-
-			var buf bytes.Buffer
-			pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
-			if err != nil {
-				return fmt.Errorf("parquet writer for %s: %w", tableName, err)
-			}
-			if err := pw.WriteRows(chunkRows); err != nil {
-				return fmt.Errorf("writing %s chunk %d: %w", tableName, cIdx, err)
-			}
-			if err := pw.Close(); err != nil {
-				return fmt.Errorf("closing %s chunk %d: %w", tableName, cIdx, err)
-			}
-
-			filePath := fmt.Sprintf("tables/%s/chunk_%04d.parquet", tableName, cIdx+1)
-			pdata := buf.Bytes()
-			if _, err := store.Put(ctx, bucketName, filePath, bytes.NewReader(pdata), int64(len(pdata)), "application/octet-stream"); err != nil {
-				return fmt.Errorf("storing %s chunk %d: %w", tableName, cIdx, err)
-			}
-			entries = append(entries, catalog.FileEntry{
-				Path:      filePath,
-				SizeBytes: int64(len(pdata)),
-				NumRows:   int64(len(chunkRows)),
-				CreatedAt: time.Now(),
-			})
+		if err := pw.WriteRows(rows); err != nil {
+			return fmt.Errorf("writing %s: %w", tableName, err)
 		}
+		if err := pw.Close(); err != nil {
+			return fmt.Errorf("closing %s: %w", tableName, err)
+		}
+		idx := pendingChunks[tableName]
+		pendingChunks[tableName] = idx + 1
+		filePath := fmt.Sprintf("tables/%s/chunk_%04d.parquet", tableName, idx+1)
+		pdata := buf.Bytes()
+		if _, err := store.Put(ctx, bucketName, filePath, bytes.NewReader(pdata), int64(len(pdata)), "application/octet-stream"); err != nil {
+			return fmt.Errorf("storing %s chunk %d: %w", tableName, idx, err)
+		}
+		tableEntries[tableName] = append(tableEntries[tableName], catalog.FileEntry{
+			Path:      filePath,
+			SizeBytes: int64(len(pdata)),
+			NumRows:   int64(len(rows)),
+			CreatedAt: time.Now(),
+		})
+		tableRows[tableName] += int64(len(rows))
+		return nil
+	}
+	if err := tpch.GenerateChunked(scale, chunkSize, emit); err != nil {
+		return fmt.Errorf("generating SF%v data: %w", scale, err)
+	}
+	for tableName, entries := range tableEntries {
 		if err := cat.AddFiles(ctx, tableName, map[string]string{}, "tables/"+tableName+"/", entries); err != nil {
 			return fmt.Errorf("adding %s files to catalog: %w", tableName, err)
 		}
-		logger.Info("loaded table", "table", tableName, "chunks", len(entries), "rows", len(rows))
+		logger.Info("loaded table", "table", tableName, "chunks", len(entries), "rows", tableRows[tableName])
 	}
 
 	// Seed synthetic micro tables for micro-benchmarks.
