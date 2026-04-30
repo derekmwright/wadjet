@@ -1,6 +1,10 @@
 package exec
 
-import "github.com/citc-tech/wadjet/internal/engine/batch"
+import (
+	"fmt"
+
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+)
 
 // flatAccumArrays stores accumulator state in SoA (Struct of Arrays) layout
 // for better cache locality during grouped aggregation. One per aggregate.
@@ -291,6 +295,19 @@ func scatterCount(countArr []int64, gi []int32, nulls *batch.Bitmap, sel []uint3
 func scatterCountStar(countArr []int64, gi []int32, n int) {
 	for i := 0; i < n; i++ {
 		if idx := gi[i]; idx >= 0 {
+			if int(idx) >= len(countArr) {
+				// Diagnostic: surface state that lets us debug Q21's panic
+				// instead of the bare "index out of range" runtime error.
+				maxGI := int32(-1)
+				for _, g := range gi[:n] {
+					if g > maxGI {
+						maxGI = g
+					}
+				}
+				panic(fmt.Sprintf(
+					"scatterCountStar: gi[%d]=%d out of range, len(countArr)=%d, n=%d, max(gi)=%d",
+					i, idx, len(countArr), n, maxGI))
+			}
 			countArr[idx]++
 		}
 	}
