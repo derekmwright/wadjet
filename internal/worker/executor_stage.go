@@ -271,14 +271,24 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	if e.sharedSpill != nil {
 		hj.Spill = e.sharedSpill
 		hj.MemTracker = e.sharedTracker
-		// Partition-on-arrival keeps spill incremental under shared-pool
-		// pressure: when one task hits the spill threshold, only its
-		// largest partition is evicted (O(partition) rather than the
-		// legacy O(total) repartition+rehash). The decision is gated on
-		// shared-pool config because the legacy flat path is still the
-		// right shape for embedded/test callers that don't pass a
-		// MemTracker — those paths never spill anyway.
-		hj.PartitionOnArrival = true
+		// Partition-on-arrival is opt-in based on observed shared-pool
+		// pressure at task entry. Below ~30% used, we let the join run the
+		// legacy flat path; the per-batch partitioning allocation cost
+		// (compactBatchForRows × 64 per source batch) isn't paid back when
+		// no spill is actually going to fire. At SF10 with workers_per_node=2,
+		// most broadcast-join builds at task entry are well under 30% pool
+		// — pre-2026-04-30 unconditional partition-on-arrival turned a
+		// quick 10MB build into 3,200 small allocations, GC-thrashed the
+		// worker into OOM-kill, and regressed Q02 to 22m vs 12m baseline.
+		//
+		// When pressure IS already high at task entry (concurrent build
+		// holding the pool, or a long-lived prior task), partition-on-
+		// arrival pays for itself: spill becomes O(partition) eviction
+		// instead of an O(total) flat→partitioned redistribute. If pressure
+		// rises mid-build under the flat path, spillBuildBatches still
+		// reactively converts to partitioned representation; the gate just
+		// avoids paying upfront when the pool is plentiful.
+		hj.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
 	}
 	// Close releases trackedMem to the shared tracker once the join is done.
 	// Without this, a non-spilling broadcast_join leaks its reservation for
@@ -337,7 +347,10 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 		if e.sharedSpill != nil {
 			fjHJ.Spill = e.sharedSpill
 			fjHJ.MemTracker = e.sharedTracker
-			fjHJ.PartitionOnArrival = true
+			// Re-check pool pressure for each fused build — by the time the
+			// primary build has run, the pool may have crossed the threshold
+			// even if it was below at task entry.
+			fjHJ.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
 		}
 		if err := fjBuildSrc.Init(ctx); err != nil {
 			fjBuildSrc.Close()

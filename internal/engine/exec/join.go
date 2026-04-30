@@ -688,6 +688,15 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// path. Spill becomes O(partition) instead of O(total), which is the
 	// architectural primitive that the SF10 lineitem broadcast-join "8 min
 	// per join" memory pressure was hitting.
+	//
+	// The CALLER (worker stage hash join, in production) decides whether to
+	// set this flag — it sees the shared pool state at task entry and only
+	// turns the flag on when pressure is already high enough to make the
+	// per-partition allocation cost worth paying. Below pressure, the worker
+	// leaves the flag false and we run the legacy flat path; if pressure
+	// rises mid-build, spillBuildBatches reactively converts to partitioned
+	// representation at that point. Tests that need to validate partition-
+	// on-arrival behavior set the flag unconditionally.
 	if h.PartitionOnArrival && h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
 		return h.buildPartitioned(ctx, source)
 	}
@@ -952,7 +961,15 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			}
 		} else {
 			if h.strIndex == nil {
-				h.strIndex = newStrHashTable(64)
+				// Pre-size to this batch's row count so PutNoGrow has room
+				// for the inserts that follow. The earlier EnsureCapacity
+				// branch only fires when strIndex is non-nil; if we entered
+				// with strIndex==nil and seeded it at 64 buckets, PutNoGrow
+				// would loop forever once load exceeds 100%. Surfaced by
+				// TestPartitionOnArrival_StringKeySpill once pressure-aware
+				// routing started sending string-key builds through the
+				// legacy flat path under low pool pressure.
+				h.strIndex = newStrHashTable(b.ActiveLen())
 			}
 			if b.Sel != nil {
 				for _, si := range b.Sel {
