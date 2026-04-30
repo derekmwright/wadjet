@@ -673,6 +673,12 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		bucket = task.ResultBucket
 	}
 
+	// Per-phase timing. We attribute the shuffle task wall to source read
+	// vs. consume vs. finalize vs. upload so we can target the dominant
+	// cost. Logged on completion alongside row + size counts.
+	tStart := time.Now()
+	var tReadEnd, tConsumeEnd, tFinalizeEnd time.Time
+
 	// Read all source files into batches. Parquet inputs (table scans) use the
 	// concurrent parquet path; .wshf inputs (Phase 3 native-DAG: output of an
 	// upstream shuffle stage) stream through cachedFileStreamSource which
@@ -709,6 +715,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	default:
 		return fmt.Errorf("shuffle task %s: unsupported input file kind %v", task.ID, fileKind)
 	}
+	tReadEnd = time.Now()
 	if len(batches) == 0 {
 		// Source files produced no rows — nothing to upload.
 		return nil
@@ -758,9 +765,11 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		totalRows += n
 	}
 
+	tConsumeEnd = time.Now()
 	if err := sink.Finalize(ctx); err != nil {
 		return fmt.Errorf("shuffle task %s: finalizing sink: %w", task.ID, err)
 	}
+	tFinalizeEnd = time.Now()
 
 	// Upload each non-empty partition file to S3.
 	partFiles := sink.PartitionFiles()
@@ -798,12 +807,17 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	}
 
 	result.NumRows = totalRows
+	tEnd := time.Now()
 
 	e.logger.Info("shuffle task completed",
 		"task_id", task.ID,
 		"rows", totalRows,
 		"partitions", len(result.ResultFiles),
 		"size_bytes", result.SizeBytes,
+		"read_ms", tReadEnd.Sub(tStart).Milliseconds(),
+		"consume_ms", tConsumeEnd.Sub(tReadEnd).Milliseconds(),
+		"finalize_ms", tFinalizeEnd.Sub(tConsumeEnd).Milliseconds(),
+		"upload_ms", tEnd.Sub(tFinalizeEnd).Milliseconds(),
 	)
 	return nil
 }
