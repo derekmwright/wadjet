@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -27,6 +28,10 @@ type shuffleStreamSink struct {
 
 	mu      sync.Mutex
 	file    *os.File
+	bufFile *bufio.Writer // wraps file so the small per-row/per-column
+	                     // Writes from shuffleWriter coalesce into one
+	                     // syscall per buffer worth (see partitioned
+	                     // shuffle sink for the profile that drove this).
 	writer  *shuffleWriter
 	schema  []parquet.Column
 	numRows int64
@@ -66,7 +71,8 @@ func (s *shuffleStreamSink) Consume(_ context.Context, b *batch.RecordBatch) err
 
 	if s.writer == nil {
 		s.schema = b.Schema
-		s.writer = newShuffleWriter(s.file, s.schema)
+		s.bufFile = bufio.NewWriterSize(s.file, 256*1024)
+		s.writer = newShuffleWriter(s.bufFile, s.schema)
 		if err := s.writer.writeHeader(); err != nil {
 			return fmt.Errorf("writing shuffle header: %w", err)
 		}
@@ -96,6 +102,15 @@ func (s *shuffleStreamSink) Finalize(_ context.Context) error {
 	if s.writer == nil {
 		// No batches consumed — leave the file empty so upstream sees zero rows.
 		return s.file.Sync()
+	}
+
+	// Flush the bufio.Writer before seeking the underlying file: a Seek
+	// bypasses the buffer, so any buffered bytes would otherwise land at
+	// the wrong offset.
+	if s.bufFile != nil {
+		if err := s.bufFile.Flush(); err != nil {
+			return fmt.Errorf("flushing shuffle stream buffer: %w", err)
+		}
 	}
 
 	// Patch chunk count in the header. Layout (see shuffle_format.go):
