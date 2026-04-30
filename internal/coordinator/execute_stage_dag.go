@@ -1335,6 +1335,28 @@ func (c *Coordinator) dispatchComputeStage(
 		"probe_split", probeSplit,
 		"inputs_aliases", len(inputs))
 
+	// Observability for fused-chain probe-split: log the cluster-wide
+	// broadcast-cache file count this stage will read across all shard
+	// tasks. With N shards × (1 primary + M fused) caches, total S3 reads
+	// scale linearly. Useful for spotting when amplification is dominating
+	// wall time on bigger SF deploys.
+	if len(stage.FusedJoins) > 0 || probeSplit {
+		var primaryFiles, fusedFiles int
+		if buildDep := stage.RightDepStage; buildDep != "" {
+			primaryFiles = len(flattenStageFiles(inputs[buildDep]))
+		}
+		for _, fj := range stage.FusedJoins {
+			fusedFiles += len(flattenStageFiles(inputs[fj.BuildDepStage]))
+		}
+		c.logger.Info("fused/probe-split broadcast cache load",
+			"stage_id", stage.ID,
+			"num_tasks", numTasks,
+			"fused_count", len(stage.FusedJoins),
+			"primary_cache_files", primaryFiles,
+			"fused_cache_files_total", fusedFiles,
+			"cluster_cache_reads_estimate", numTasks*(primaryFiles+fusedFiles))
+	}
+
 	// Build one task per output partition. Input slicing uses numTasks as
 	// the divisor so each task reads its share of the upstream partitioned
 	// input — for Singleton stages every task reads the full upstream; for
