@@ -777,27 +777,35 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		if localPath == "" {
 			continue // empty partition
 		}
-		f, err := os.Open(localPath)
-		if err != nil {
-			return fmt.Errorf("shuffle task %s: opening partition %d: %w", task.ID, p, err)
-		}
-		fi, err := f.Stat()
-		if err != nil {
-			f.Close()
-			return fmt.Errorf("shuffle task %s: stat partition %d: %w", task.ID, p, err)
+		key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
+
+		// Read the partition file once into memory, then both upload to S3
+		// AND populate the same-worker result store. The file just came out
+		// of the bufio writer's flush, so its pages are warm in the OS cache;
+		// io.ReadAll is essentially a memcpy. This matters because non-shuffle
+		// stages already populate result_store after their S3 upload (see
+		// pipeline result path at L1094) — without the parallel here, every
+		// partitioned-shuffle output forced downstream stages on the same
+		// worker through the S3 download path even though we just had the
+		// data in hand.
+		data, readErr := os.ReadFile(localPath)
+		if readErr != nil {
+			return fmt.Errorf("shuffle task %s: reading partition %d: %w", task.ID, p, readErr)
 		}
 
-		key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
-		_, uploadErr := e.store.Put(ctx, task.ResultBucket, key, f, fi.Size(), "application/octet-stream")
-		f.Close()
+		_, uploadErr := e.store.Put(ctx, task.ResultBucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
 		if uploadErr != nil {
 			return fmt.Errorf("shuffle task %s: uploading partition %d: %w", task.ID, p, uploadErr)
 		}
 
+		// Best-effort populate same-worker cache. Returns false if full —
+		// downstream readers fall through to KV / LRU / S3 in that case.
+		if e.resultStore != nil {
+			e.resultStore.Put(task.QueryID, key, data)
+		}
+
 		result.ResultFiles = append(result.ResultFiles, key)
-		// SizeBytes uses the local file size; the object store does not re-encode
-		// .wshf data so this matches the uploaded byte count.
-		result.SizeBytes += fi.Size()
+		result.SizeBytes += int64(len(data))
 
 		// Remove local file best-effort.
 		if removeErr := os.Remove(localPath); removeErr != nil {
