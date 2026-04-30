@@ -66,12 +66,25 @@ type managedProcess struct {
 }
 
 // NewCluster constructs a Cluster but does not start anything.
+//
+// PgAddr defaults: when empty or ":15433" (the historical default), the
+// cluster picks a free port at coordinator-start time. The default :15433
+// silently collided with any process — including unrelated services that
+// happen to occupy that port (in one observed case, an external tool called
+// `warden` on a developer machine), causing the coordinator to fail
+// pgwire-listen and shut down NATS, leaving the harness's catalog seeding
+// stuck on a dead embedded NATS with a misleading "kv get … context
+// deadline exceeded" error several seconds later. Fixing the port choice
+// at construct time made local-mode harness runs reliable.
+//
+// Callers that need a specific port (e.g. interactive psql) can still
+// pass an explicit PgAddr like ":5432".
 func NewCluster(cfg ClusterConfig) *Cluster {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	if cfg.PgAddr == "" {
-		cfg.PgAddr = ":15433"
+	if cfg.PgAddr == "" || cfg.PgAddr == ":15433" {
+		cfg.PgAddr = fmt.Sprintf(":%d", freePort())
 	}
 	return &Cluster{cfg: cfg}
 }
