@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -43,12 +44,17 @@ type partitionedShuffleSink struct {
 // partitionWriter holds the open file handle and incremental state for one
 // output partition.
 type partitionWriter struct {
-	file    *os.File
-	writer  *shuffleWriter
-	rowBuf  *batch.RecordBatch // accumulator: rows destined for this partition
-	bufRows int                // rows currently in rowBuf
-	bufBytes int               // approximate byte count of buffered rows
-	numRows int64              // total rows written to disk
+	file     *os.File
+	bufFile  *bufio.Writer     // wraps file so the many small Writes from
+	                           // shuffleWriter coalesce into syscall-sized
+	                           // chunks. Pre-2026-04-30 the shuffleWriter
+	                           // emitted ~1 syscall per non-null bytes-row,
+	                           // and that was 90%+ of shuffle CPU.
+	writer   *shuffleWriter
+	rowBuf   *batch.RecordBatch // accumulator: rows destined for this partition
+	bufRows  int                // rows currently in rowBuf
+	bufBytes int                // approximate byte count of buffered rows
+	numRows  int64              // total rows written to disk
 }
 
 // flushPartitionBytes is the per-partition accumulator size (in approx bytes
@@ -201,102 +207,142 @@ func (s *partitionedShuffleSink) appendRowsBulk(p int, b *batch.RecordBatch, row
 	growBatchTo(dst, end)
 
 	bytesAdded := 0
+	nRows := len(rows)
 
 	for ci, srcCol := range b.Columns {
 		dstCol := dst.Columns[ci]
+		hasNulls := srcCol.Nulls.HasNulls()
 		switch dstCol.Type {
 		case parquet.TypeBool:
+			dstSlice := dstCol.BoolData[start : start+nRows]
 			srcData := srcCol.BoolData
-			dstData := dstCol.BoolData
-			for i, row := range rows {
-				di := start + i
-				if srcCol.Nulls.IsNullFast(row) {
-					dstCol.Nulls.SetNull(di)
-				} else {
-					dstData[di] = srcData[row]
+			if !hasNulls {
+				for i, row := range rows {
+					dstSlice[i] = srcData[row]
+				}
+			} else {
+				for i, row := range rows {
+					if srcCol.Nulls.IsNullFast(row) {
+						dstCol.Nulls.SetNull(start + i)
+					} else {
+						dstSlice[i] = srcData[row]
+					}
 				}
 			}
-			bytesAdded += len(rows)
+			bytesAdded += nRows
 
 		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+			dstSlice := dstCol.Int32Data[start : start+nRows]
 			srcData := srcCol.Int32Data
-			dstData := dstCol.Int32Data
-			for i, row := range rows {
-				di := start + i
-				if srcCol.Nulls.IsNullFast(row) {
-					dstCol.Nulls.SetNull(di)
-				} else {
-					dstData[di] = srcData[row]
+			if !hasNulls {
+				for i, row := range rows {
+					dstSlice[i] = srcData[row]
+				}
+			} else {
+				for i, row := range rows {
+					if srcCol.Nulls.IsNullFast(row) {
+						dstCol.Nulls.SetNull(start + i)
+					} else {
+						dstSlice[i] = srcData[row]
+					}
 				}
 			}
-			bytesAdded += len(rows) * 4
+			bytesAdded += nRows * 4
 
 		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+			dstSlice := dstCol.Int64Data[start : start+nRows]
 			srcData := srcCol.Int64Data
-			dstData := dstCol.Int64Data
-			for i, row := range rows {
-				di := start + i
-				if srcCol.Nulls.IsNullFast(row) {
-					dstCol.Nulls.SetNull(di)
-				} else {
-					dstData[di] = srcData[row]
+			if !hasNulls {
+				for i, row := range rows {
+					dstSlice[i] = srcData[row]
+				}
+			} else {
+				for i, row := range rows {
+					if srcCol.Nulls.IsNullFast(row) {
+						dstCol.Nulls.SetNull(start + i)
+					} else {
+						dstSlice[i] = srcData[row]
+					}
 				}
 			}
-			bytesAdded += len(rows) * 8
+			bytesAdded += nRows * 8
 
 		case parquet.TypeFloat32:
+			dstSlice := dstCol.Float32Data[start : start+nRows]
 			srcData := srcCol.Float32Data
-			dstData := dstCol.Float32Data
-			for i, row := range rows {
-				di := start + i
-				if srcCol.Nulls.IsNullFast(row) {
-					dstCol.Nulls.SetNull(di)
-				} else {
-					dstData[di] = srcData[row]
+			if !hasNulls {
+				for i, row := range rows {
+					dstSlice[i] = srcData[row]
+				}
+			} else {
+				for i, row := range rows {
+					if srcCol.Nulls.IsNullFast(row) {
+						dstCol.Nulls.SetNull(start + i)
+					} else {
+						dstSlice[i] = srcData[row]
+					}
 				}
 			}
-			bytesAdded += len(rows) * 4
+			bytesAdded += nRows * 4
 
 		case parquet.TypeFloat64:
+			dstSlice := dstCol.Float64Data[start : start+nRows]
 			srcData := srcCol.Float64Data
-			dstData := dstCol.Float64Data
-			for i, row := range rows {
-				di := start + i
-				if srcCol.Nulls.IsNullFast(row) {
-					dstCol.Nulls.SetNull(di)
-				} else {
-					dstData[di] = srcData[row]
+			if !hasNulls {
+				for i, row := range rows {
+					dstSlice[i] = srcData[row]
+				}
+			} else {
+				for i, row := range rows {
+					if srcCol.Nulls.IsNullFast(row) {
+						dstCol.Nulls.SetNull(start + i)
+					} else {
+						dstSlice[i] = srcData[row]
+					}
 				}
 			}
-			bytesAdded += len(rows) * 8
+			bytesAdded += nRows * 8
 
 		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
 			// Bytes path uses SetFrom for non-null (avoids the intermediate
 			// slice header) and Set(di, nil) for null (advances the offset
 			// without writing data). Offsets pre-grown by growBatchTo.
-			for i, row := range rows {
-				di := start + i
-				if srcCol.Nulls.IsNullFast(row) {
-					dstCol.Nulls.SetNull(di)
-					dstCol.BytesData.Set(di, nil)
-				} else {
-					dstCol.BytesData.SetFrom(di, &srcCol.BytesData, row)
-					bytesAdded += int(srcCol.BytesData.Offsets[row+1]-srcCol.BytesData.Offsets[row]) + 4
+			srcOffsets := srcCol.BytesData.Offsets
+			if !hasNulls {
+				for i, row := range rows {
+					dstCol.BytesData.SetFrom(start+i, &srcCol.BytesData, row)
+					bytesAdded += int(srcOffsets[row+1]-srcOffsets[row]) + 4
+				}
+			} else {
+				for i, row := range rows {
+					di := start + i
+					if srcCol.Nulls.IsNullFast(row) {
+						dstCol.Nulls.SetNull(di)
+						dstCol.BytesData.Set(di, nil)
+					} else {
+						dstCol.BytesData.SetFrom(di, &srcCol.BytesData, row)
+						bytesAdded += int(srcOffsets[row+1]-srcOffsets[row]) + 4
+					}
 				}
 			}
 
 		case parquet.TypeDecimal:
+			dstSlice := dstCol.DecimalData.Data[start : start+nRows]
 			srcData := srcCol.DecimalData.Data
-			dstData := dstCol.DecimalData.Data
-			for i, row := range rows {
-				di := start + i
-				if srcCol.Nulls.IsNullFast(row) {
-					dstCol.Nulls.SetNull(di)
-				} else {
-					dstData[di] = srcData[row]
+			if !hasNulls {
+				for i, row := range rows {
+					dstSlice[i] = srcData[row]
+				}
+			} else {
+				for i, row := range rows {
+					if srcCol.Nulls.IsNullFast(row) {
+						dstCol.Nulls.SetNull(start + i)
+					} else {
+						dstSlice[i] = srcData[row]
+					}
 				}
 			}
-			bytesAdded += len(rows) * 16
+			bytesAdded += nRows * 16
 		}
 	}
 
@@ -404,7 +450,12 @@ func (s *partitionedShuffleSink) flushPartition(p int) error {
 		return nil
 	}
 	if pw.writer == nil {
-		pw.writer = newShuffleWriter(pw.file, s.schema)
+		// 256 KB stream buffer keeps the syscall count down to ~1 per
+		// 256 KB of column data. The previous unbuffered path issued a
+		// syscall per row of bytes-typed columns (writeBytesData), which
+		// made that the dominant shuffle cost on Q03 SF1 (~95% of CPU).
+		pw.bufFile = bufio.NewWriterSize(pw.file, 256*1024)
+		pw.writer = newShuffleWriter(pw.bufFile, s.schema)
 		if err := pw.writer.writeHeader(); err != nil {
 			return fmt.Errorf("partition %d header: %w", p, err)
 		}
@@ -452,6 +503,14 @@ func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 				return err
 			}
 			continue
+		}
+		// The bufio.Writer must be flushed before we Seek the underlying
+		// file: a Seek bypasses the buffer, so any unflushed bytes would
+		// land at the wrong offset.
+		if pw.bufFile != nil {
+			if err := pw.bufFile.Flush(); err != nil {
+				return fmt.Errorf("partition %d flush: %w", p, err)
+			}
 		}
 		// Patch chunk count in header. Layout (see shuffle_format.go):
 		//   offset 0..4 = magic "WSHF"

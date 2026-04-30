@@ -19,7 +19,7 @@ import (
 // Use this to validate refactors of the shuffle sink without the
 // noise of running a full TPC-H query.
 func BenchmarkPartitionedShuffleConsume(b *testing.B) {
-	for _, np := range []int{2, 4, 16} {
+	for _, np := range []int{2, 4, 16, 24} {
 		b.Run("parts="+strconv.Itoa(np), func(b *testing.B) {
 			schema := []parquet.Column{
 				{Name: "l_orderkey", Type: parquet.TypeInt64},
@@ -70,18 +70,31 @@ func BenchmarkPartitionedShuffleConsume(b *testing.B) {
 			rb.Len = nRows
 			ctx := context.Background()
 
-			b.ResetTimer()
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				dir := b.TempDir()
-				sink := newPartitionedShuffleSink(filepath.Join(dir, "sf"), []string{"l_orderkey"}, np, schema)
-				if err := sink.Init(ctx); err != nil {
-					b.Fatal(err)
-				}
+			// Reuse one sink across many Consume calls. The flush threshold
+			// keeps per-partition row buffers bounded; production hits the
+			// flush every few batches at SF1+. We measure steady-state per-
+			// Consume cost AFTER the buffers reach their working size.
+			dir := b.TempDir()
+			sink := newPartitionedShuffleSink(filepath.Join(dir, "sf"), []string{"l_orderkey"}, np, schema)
+			if err := sink.Init(ctx); err != nil {
+				b.Fatal(err)
+			}
+			defer func() { _ = sink.Close() }()
+
+			// Warm-up: hit each partition once so the per-partition rowBuf
+			// is allocated and the benchmark loop sees only the Consume cost.
+			for i := 0; i < 4; i++ {
 				if err := sink.Consume(ctx, rb); err != nil {
 					b.Fatal(err)
 				}
-				_ = sink.Close()
+			}
+
+			b.ResetTimer()
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if err := sink.Consume(ctx, rb); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
