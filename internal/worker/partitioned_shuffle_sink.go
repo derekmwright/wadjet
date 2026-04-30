@@ -31,12 +31,13 @@ type partitionedShuffleSink struct {
 	schema     []parquet.Column
 	flushBytes int // per-partition row buffer flush threshold
 
-	mu          sync.Mutex
-	parts       []*partitionWriter
-	closed      bool
-	keyIdxs     []int    // resolved column indices for keys (set on first Consume)
-	partScratch []int    // per-row partition assignment, reused across batches
-	hashScratch []uint64 // per-row uint64 hash accumulator, reused across batches
+	mu             sync.Mutex
+	parts          []*partitionWriter
+	closed         bool
+	keyIdxs        []int    // resolved column indices for keys (set on first Consume)
+	partScratch    []int    // per-row partition assignment, reused across batches
+	hashScratch    []uint64 // per-row uint64 hash accumulator, reused across batches
+	perPartRows    [][]int  // per-partition source-row indices, reused across batches
 }
 
 // partitionWriter holds the open file handle and incremental state for one
@@ -123,27 +124,62 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	parts := s.partScratch[:n]
 	hashRowsIntoPartitions(b, s.keyIdxs, s.numParts, s.hashScratch[:n], parts)
 
-	for i := 0; i < n; i++ {
-		row := i
-		if b.Sel != nil {
-			row = int(b.Sel[i])
+	// Group rows by partition so each partition's columns are appended in
+	// one bulk pass with the type switch hoisted outside the row loop. The
+	// alternative (per-row appendRow) does a 13-arm type switch per column
+	// per row, which on Q03 SF1 was ~64M switch dispatches for the lineitem
+	// shuffle and was the dominant wall-time cost.
+	if s.perPartRows == nil {
+		s.perPartRows = make([][]int, s.numParts)
+	}
+	for p := range s.perPartRows {
+		s.perPartRows[p] = s.perPartRows[p][:0]
+	}
+	if b.Sel != nil {
+		for i := 0; i < n; i++ {
+			s.perPartRows[parts[i]] = append(s.perPartRows[parts[i]], int(b.Sel[i]))
 		}
-		if err := s.appendRow(parts[i], b, row); err != nil {
+	} else {
+		for i := 0; i < n; i++ {
+			s.perPartRows[parts[i]] = append(s.perPartRows[parts[i]], i)
+		}
+	}
+
+	for p := 0; p < s.numParts; p++ {
+		if len(s.perPartRows[p]) == 0 {
+			continue
+		}
+		if err := s.appendRowsBulk(p, b, s.perPartRows[p]); err != nil {
 			return err
 		}
 	}
 	return s.flushIfNeeded()
 }
 
-// appendRow copies a single row from b at physical row index `row` into the
-// accumulator buffer for partition p. The buffer is a RecordBatch that grows
-// one row at a time; we copy typed column data directly, mirroring the approach
-// used by batch.Compact.
-func (s *partitionedShuffleSink) appendRow(p int, b *batch.RecordBatch, row int) error {
+// appendRowsBulk appends `len(rows)` rows from b into the accumulator buffer
+// for partition p, where rows[i] is the source-row index in b for the i-th
+// destination row. The type switch is hoisted OUTSIDE the row loop so that
+// each column is processed in a tight typed loop — on Q03 SF1 this converts
+// ~64M switch dispatches into ~16 (one per column).
+//
+// The destination column slices are pre-grown once to fit all rows; null
+// state defaults to non-null (Bitmap.Grow leaves new bits set), so we only
+// emit SetNull on actual source nulls. Offsets for bytes/string columns are
+// pre-grown to end+1 so BytesData.Set can write Offsets[di+1] in place
+// without per-row growth.
+func (s *partitionedShuffleSink) appendRowsBulk(p int, b *batch.RecordBatch, rows []int) error {
+	if len(rows) == 0 {
+		return nil
+	}
 	pw := s.parts[p]
 	if pw.rowBuf == nil {
 		// Allocate buffer with a reasonable initial capacity to reduce resizes.
-		const initCap = 256
+		// Size by the first batch's per-partition row count (fall back to 256
+		// for tiny incoming batches) so the typical case avoids any growth.
+		initCap := len(rows)
+		if initCap < 256 {
+			initCap = 256
+		}
 		pw.rowBuf = batch.NewRecordBatch(b.Schema, initCap)
 		pw.rowBuf.Len = 0
 		// Reset BytesData offsets so we can append incrementally.
@@ -157,106 +193,192 @@ func (s *partitionedShuffleSink) appendRow(p int, b *batch.RecordBatch, row int)
 	}
 
 	dst := pw.rowBuf
-	di := dst.Len
+	start := dst.Len
+	end := start + len(rows)
 
-	// Grow typed column storage if needed.
-	s.growBatch(dst, di)
+	// Pre-grow all column storage to fit `end` rows in one allocation per
+	// column (versus one append-of-one per row in the old code).
+	growBatchTo(dst, end)
 
-	// Copy each column value at physical row `row` from b into dst at index di.
-	var rowBytes int
+	bytesAdded := 0
+
 	for ci, srcCol := range b.Columns {
 		dstCol := dst.Columns[ci]
-
-		if srcCol.Nulls.IsNullFast(row) {
-			dstCol.Nulls.SetNull(di)
-			// For bytes/string columns keep offsets aligned.
-			switch dstCol.Type {
-			case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-				dstCol.BytesData.Set(di, nil)
-			}
-			continue
-		}
-
-		dstCol.Nulls.SetValid(di)
-
 		switch dstCol.Type {
 		case parquet.TypeBool:
-			dstCol.BoolData[di] = srcCol.BoolData[row]
-			rowBytes++
+			srcData := srcCol.BoolData
+			dstData := dstCol.BoolData
+			for i, row := range rows {
+				di := start + i
+				if srcCol.Nulls.IsNullFast(row) {
+					dstCol.Nulls.SetNull(di)
+				} else {
+					dstData[di] = srcData[row]
+				}
+			}
+			bytesAdded += len(rows)
 
 		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
-			dstCol.Int32Data[di] = srcCol.Int32Data[row]
-			rowBytes += 4
+			srcData := srcCol.Int32Data
+			dstData := dstCol.Int32Data
+			for i, row := range rows {
+				di := start + i
+				if srcCol.Nulls.IsNullFast(row) {
+					dstCol.Nulls.SetNull(di)
+				} else {
+					dstData[di] = srcData[row]
+				}
+			}
+			bytesAdded += len(rows) * 4
 
 		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
-			dstCol.Int64Data[di] = srcCol.Int64Data[row]
-			rowBytes += 8
+			srcData := srcCol.Int64Data
+			dstData := dstCol.Int64Data
+			for i, row := range rows {
+				di := start + i
+				if srcCol.Nulls.IsNullFast(row) {
+					dstCol.Nulls.SetNull(di)
+				} else {
+					dstData[di] = srcData[row]
+				}
+			}
+			bytesAdded += len(rows) * 8
 
 		case parquet.TypeFloat32:
-			dstCol.Float32Data[di] = srcCol.Float32Data[row]
-			rowBytes += 4
+			srcData := srcCol.Float32Data
+			dstData := dstCol.Float32Data
+			for i, row := range rows {
+				di := start + i
+				if srcCol.Nulls.IsNullFast(row) {
+					dstCol.Nulls.SetNull(di)
+				} else {
+					dstData[di] = srcData[row]
+				}
+			}
+			bytesAdded += len(rows) * 4
 
 		case parquet.TypeFloat64:
-			dstCol.Float64Data[di] = srcCol.Float64Data[row]
-			rowBytes += 8
+			srcData := srcCol.Float64Data
+			dstData := dstCol.Float64Data
+			for i, row := range rows {
+				di := start + i
+				if srcCol.Nulls.IsNullFast(row) {
+					dstCol.Nulls.SetNull(di)
+				} else {
+					dstData[di] = srcData[row]
+				}
+			}
+			bytesAdded += len(rows) * 8
 
 		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-			val := srcCol.BytesData.Value(row)
-			dstCol.BytesData.Set(di, val)
-			rowBytes += len(val) + 4 // data + offset entry
+			// Bytes path uses SetFrom for non-null (avoids the intermediate
+			// slice header) and Set(di, nil) for null (advances the offset
+			// without writing data). Offsets pre-grown by growBatchTo.
+			for i, row := range rows {
+				di := start + i
+				if srcCol.Nulls.IsNullFast(row) {
+					dstCol.Nulls.SetNull(di)
+					dstCol.BytesData.Set(di, nil)
+				} else {
+					dstCol.BytesData.SetFrom(di, &srcCol.BytesData, row)
+					bytesAdded += int(srcCol.BytesData.Offsets[row+1]-srcCol.BytesData.Offsets[row]) + 4
+				}
+			}
 
 		case parquet.TypeDecimal:
-			dstCol.DecimalData.Data[di] = srcCol.DecimalData.Data[row]
-			rowBytes += 16
+			srcData := srcCol.DecimalData.Data
+			dstData := dstCol.DecimalData.Data
+			for i, row := range rows {
+				di := start + i
+				if srcCol.Nulls.IsNullFast(row) {
+					dstCol.Nulls.SetNull(di)
+				} else {
+					dstData[di] = srcData[row]
+				}
+			}
+			bytesAdded += len(rows) * 16
 		}
 	}
 
-	dst.Len = di + 1
-	pw.bufRows++
-	pw.bufBytes += rowBytes
+	dst.Len = end
+	pw.bufRows += len(rows)
+	pw.bufBytes += bytesAdded
 	return nil
 }
 
-// growBatch ensures the destination batch has storage for at least di+1 rows.
-// We grow by doubling when capacity is exhausted — same strategy as Go slices.
-func (s *partitionedShuffleSink) growBatch(dst *batch.RecordBatch, di int) {
+// growBatchTo ensures the destination batch has storage for n rows in each
+// column. Grows in one allocation per column when capacity is exceeded
+// (vs. the per-row appends in the legacy growBatch). After this call, the
+// null bitmaps default to non-null in the new range — callers must explicitly
+// SetNull for source rows that are null.
+func growBatchTo(dst *batch.RecordBatch, n int) {
 	for _, col := range dst.Columns {
-		col.Len = di + 1 // keep Len in sync for null bitmap ops
-
+		col.Len = n
 		switch col.Type {
 		case parquet.TypeBool:
-			for len(col.BoolData) <= di {
-				col.BoolData = append(col.BoolData, false)
+			if cap(col.BoolData) < n {
+				grew := make([]bool, n)
+				copy(grew, col.BoolData)
+				col.BoolData = grew
+			} else if len(col.BoolData) < n {
+				col.BoolData = col.BoolData[:n]
 			}
 		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
-			for len(col.Int32Data) <= di {
-				col.Int32Data = append(col.Int32Data, 0)
+			if cap(col.Int32Data) < n {
+				grew := make([]int32, n)
+				copy(grew, col.Int32Data)
+				col.Int32Data = grew
+			} else if len(col.Int32Data) < n {
+				col.Int32Data = col.Int32Data[:n]
 			}
 		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
-			for len(col.Int64Data) <= di {
-				col.Int64Data = append(col.Int64Data, 0)
+			if cap(col.Int64Data) < n {
+				grew := make([]int64, n)
+				copy(grew, col.Int64Data)
+				col.Int64Data = grew
+			} else if len(col.Int64Data) < n {
+				col.Int64Data = col.Int64Data[:n]
 			}
 		case parquet.TypeFloat32:
-			for len(col.Float32Data) <= di {
-				col.Float32Data = append(col.Float32Data, 0)
+			if cap(col.Float32Data) < n {
+				grew := make([]float32, n)
+				copy(grew, col.Float32Data)
+				col.Float32Data = grew
+			} else if len(col.Float32Data) < n {
+				col.Float32Data = col.Float32Data[:n]
 			}
 		case parquet.TypeFloat64:
-			for len(col.Float64Data) <= di {
-				col.Float64Data = append(col.Float64Data, 0)
+			if cap(col.Float64Data) < n {
+				grew := make([]float64, n)
+				copy(grew, col.Float64Data)
+				col.Float64Data = grew
+			} else if len(col.Float64Data) < n {
+				col.Float64Data = col.Float64Data[:n]
 			}
 		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-			// BytesData.Offsets must have di+2 entries (offsets[0..di+1]).
-			for len(col.BytesData.Offsets) <= di+1 {
-				col.BytesData.Offsets = append(col.BytesData.Offsets, col.BytesData.Offsets[len(col.BytesData.Offsets)-1])
+			// Offsets must have len ≥ n+1 so BytesData.Set/SetFrom can write
+			// Offsets[di+1] in place. The values in the grown range are
+			// uninitialized — but bulk callers always write rows in
+			// contiguous order from start..n-1, so each entry will be
+			// overwritten by the next Set/SetFrom.
+			needed := n + 1
+			if cap(col.BytesData.Offsets) < needed {
+				grew := make([]uint32, needed)
+				copy(grew, col.BytesData.Offsets)
+				col.BytesData.Offsets = grew
+			} else if len(col.BytesData.Offsets) < needed {
+				col.BytesData.Offsets = col.BytesData.Offsets[:needed]
 			}
 		case parquet.TypeDecimal:
-			for len(col.DecimalData.Data) <= di {
-				col.DecimalData.Data = append(col.DecimalData.Data, batch.Int128{})
+			if cap(col.DecimalData.Data) < n {
+				grew := make([]batch.Int128, n)
+				copy(grew, col.DecimalData.Data)
+				col.DecimalData.Data = grew
+			} else if len(col.DecimalData.Data) < n {
+				col.DecimalData.Data = col.DecimalData.Data[:n]
 			}
 		}
-
-		// Grow the null bitmap if needed.
-		col.Nulls = col.Nulls.Grow(di + 1)
+		col.Nulls = col.Nulls.Grow(n)
 	}
 }
 
