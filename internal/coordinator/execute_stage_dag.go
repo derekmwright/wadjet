@@ -827,6 +827,40 @@ func scanFanOutTaskCount(workerCount, capacity, fileCount int) int {
 	return n
 }
 
+// singleFileShardThresholdBytes is the minimum file size that triggers
+// row-group sharding for a single-file scan. Below this threshold the
+// scan runs as one task (whole file); above it the dispatcher fans out
+// N row-group shards so the downstream broadcast-join chain can probe-
+// split (which requires probe upstream to have ≥ 2 files).
+//
+// 64 MB is small enough to catch any moderately-compacted production
+// file (SF10 partsupp = 691 MB single file fans out cleanly) and large
+// enough that small dimension tables (region/nation/supplier) stay
+// single-task and don't waste a worker slot on a few KB of data.
+//
+// Var rather than const so tests can lower it to force the sharded path
+// on small fixtures.
+var singleFileShardThresholdBytes int64 = 64 * 1024 * 1024
+
+// scanShardCountForSingleFile returns the number of row-group shard tasks
+// to fan out for a single large file. Returns 1 (no sharding) when the
+// file is below the threshold or when the cluster is too small to
+// benefit. Caps at the cluster's effective task capacity so we don't
+// over-shard a small cluster.
+func scanShardCountForSingleFile(workerCount, capacity int, fileBytes int64) int {
+	if fileBytes < singleFileShardThresholdBytes {
+		return 1
+	}
+	n := workerCount
+	if capacity > n {
+		n = capacity
+	}
+	if n < 2 {
+		return 1
+	}
+	return n
+}
+
 // dispatchScanAggregateStage dispatches N partial-aggregate tasks, one
 // per worker, each reading a disjoint slice of stage.ScanFiles. Each task
 // runs a HashAggregate on its file slice and emits a partial result as
@@ -872,10 +906,27 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	// over raw worker count so each task stays inside the per-worker memory
 	// budget. AVG fallback intentionally stays at 1 task.
 	taskCount := workerCount
-	if !avgFallback {
-		taskCount = scanFanOutTaskCount(workerCount, c.workers.ClusterCapacity(), len(stage.ScanFiles))
+	capacity := c.workers.ClusterCapacity()
+	var fileSets [][]string
+	var shardCount int
+	if !avgFallback && len(stage.ScanFiles) == 1 {
+		shardCount = scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes)
 	}
-	fileSets := splitFilesEvenly(stage.ScanFiles, taskCount)
+	if shardCount > 1 {
+		// Single-file row-group sharding for fused scan-aggregate. Each
+		// shard task aggregates its row-group slice; the downstream
+		// final_aggregate merges across the N partial outputs.
+		fileSets = make([][]string, shardCount)
+		for i := range fileSets {
+			fileSets[i] = stage.ScanFiles
+		}
+		taskCount = shardCount
+	} else {
+		if !avgFallback {
+			taskCount = scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
+		}
+		fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
+	}
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		return StageOutput{
@@ -887,7 +938,8 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	c.logger.Info("dispatchScanAggregateStage",
 		"stage_id", stage.ID, "files", len(stage.ScanFiles),
-		"tasks", actualTasks, "group_by", stage.FusedAggGroupBy)
+		"tasks", actualTasks, "group_by", stage.FusedAggGroupBy,
+		"shard_count", shardCount)
 
 	// Convert AggSpec → wire format once.
 	var aggs []distributed.AggSpec
@@ -901,7 +953,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	}
 
 	tasks := make([]distributed.Task, 0, actualTasks)
-	for w, files := range fileSets {
+	for shardIdx, files := range fileSets {
 		t := distributed.Task{
 			ID:           uuid.New().String()[:8],
 			QueryID:      queryID,
@@ -928,6 +980,10 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
 		}
+		if shardCount > 1 {
+			t.ScanShardIndex = shardIdx
+			t.ScanShardCount = shardCount
+		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -936,7 +992,6 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		c.mu.Unlock()
 		c.enrichTaskWithQueryContext(qm, &t)
 		tasks = append(tasks, t)
-		_ = w
 	}
 
 	// Dispatch and collect (same pattern as dispatchComputeStage).
@@ -1044,14 +1099,36 @@ func (c *Coordinator) dispatchScanFilterStage(
 	if len(stage.ScanFiles) == 0 {
 		return StageOutput{Kind: OutputPartitioned, NumPartitions: 0, Files: nil}, nil
 	}
-	// Task count: prefer cluster capacity (workers × auto-tuned MaxConcurrent)
-	// over raw worker count so each task stays under the per-worker memory
-	// budget. With 3 workers × MaxConcurrent=2, that's 6 tasks instead of 3
-	// — for SF10 lineitem (600 files) that's 100 files/task instead of 200,
-	// which keeps each task's heap below the 32GB worker limit and avoids
-	// the OOM-restart-then-idle-timeout pattern observed on Q04 SF10.
-	taskCount := scanFanOutTaskCount(workerCount, c.workers.ClusterCapacity(), len(stage.ScanFiles))
-	fileSets := splitFilesEvenly(stage.ScanFiles, taskCount)
+	// Single-file sharding path: when the leaf scan has exactly one file
+	// above the threshold, fan out N row-group shard tasks instead of one
+	// whole-file task. Without this, a compacted single-file source
+	// (e.g. SF10 partsupp = 691 MB) caps fan-out at fileCount=1, which
+	// then cascades single-tasked through the entire downstream broadcast-
+	// join chain (probe-split requires probe upstream to have ≥ 2 files).
+	// The shards each emit one output file → the chain inherits parallelism
+	// for free.
+	capacity := c.workers.ClusterCapacity()
+	var fileSets [][]string
+	var shardCount int
+	if len(stage.ScanFiles) == 1 {
+		shardCount = scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes)
+	}
+	if shardCount > 1 {
+		// One row-group shard per task, all reading the same single file.
+		fileSets = make([][]string, shardCount)
+		for i := range fileSets {
+			fileSets[i] = stage.ScanFiles
+		}
+	} else {
+		// Task count: prefer cluster capacity (workers × auto-tuned MaxConcurrent)
+		// over raw worker count so each task stays under the per-worker memory
+		// budget. With 3 workers × MaxConcurrent=2, that's 6 tasks instead of 3
+		// — for SF10 lineitem (600 files) that's 100 files/task instead of 200,
+		// which keeps each task's heap below the 32GB worker limit and avoids
+		// the OOM-restart-then-idle-timeout pattern observed on Q04 SF10.
+		taskCount := scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
+		fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
+	}
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		return StageOutput{Kind: OutputPartitioned, NumPartitions: 0, Files: nil}, nil
@@ -1059,10 +1136,11 @@ func (c *Coordinator) dispatchScanFilterStage(
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	c.logger.Info("dispatchScanFilterStage",
 		"stage_id", stage.ID, "files", len(stage.ScanFiles),
-		"tasks", actualTasks, "filters", len(stage.FilterExprs))
+		"tasks", actualTasks, "filters", len(stage.FilterExprs),
+		"shard_count", shardCount)
 
 	tasks := make([]distributed.Task, 0, actualTasks)
-	for _, files := range fileSets {
+	for shardIdx, files := range fileSets {
 		t := distributed.Task{
 			ID:          uuid.New().String()[:8],
 			QueryID:     queryID,
@@ -1079,6 +1157,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 			ResultBucket: c.config.ResultBucket,
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
+		}
+		if shardCount > 1 {
+			t.ScanShardIndex = shardIdx
+			t.ScanShardCount = shardCount
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID

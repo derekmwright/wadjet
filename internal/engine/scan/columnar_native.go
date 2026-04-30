@@ -13,20 +13,36 @@ import (
 // custom FileReader (no parquet-go dependency). Returns one RecordBatch per
 // row group for schemas without unsupported types.
 func ReadFileBatchesNative(fr *pqt.FileReader, schema []pqt.Column, selectedCols []string) ([]*batch.RecordBatch, error) {
+	return ReadFileBatchesNativeShard(fr, schema, selectedCols, 0, 1)
+}
+
+// ReadFileBatchesNativeShard reads only the row-group slice assigned to one
+// shard. With shardCount=1 the behavior matches ReadFileBatchesNative.
+//
+// Row-group ownership: shardIdx i reads row groups in [i*total/count,
+// (i+1)*total/count). When total < count, the early shards each read one
+// row group and later shards read nothing — a degenerate but correct split.
+func ReadFileBatchesNativeShard(fr *pqt.FileReader, schema []pqt.Column, selectedCols []string, shardIdx, shardCount int) ([]*batch.RecordBatch, error) {
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	if shardIdx < 0 || shardIdx >= shardCount {
+		return nil, nil
+	}
+
 	readSchema := schema
 	if len(selectedCols) > 0 {
 		readSchema = projectSchema(schema, selectedCols)
 	}
 
-	// Schemas with types unsupported by the columnar reader return an error.
-	// Callers with Array/Map columns should use ReadFileBatches which falls
-	// back to row-based reading for those types.
 	if HasUnsupportedColumnarTypes(readSchema) {
 		return nil, fmt.Errorf("native reader does not support Array/Map types yet")
 	}
 
+	total := fr.NumRowGroups()
+	startRg, endRg := rowGroupRangeForShard(total, shardIdx, shardCount)
 	var batches []*batch.RecordBatch
-	for rgIdx := 0; rgIdx < fr.NumRowGroups(); rgIdx++ {
+	for rgIdx := startRg; rgIdx < endRg; rgIdx++ {
 		b, err := ReadRowGroupNative(fr, rgIdx, readSchema, nil)
 		if err != nil {
 			return nil, err
@@ -36,6 +52,27 @@ func ReadFileBatchesNative(fr *pqt.FileReader, schema []pqt.Column, selectedCols
 		}
 	}
 	return batches, nil
+}
+
+// rowGroupRangeForShard returns the half-open [start, end) row-group range
+// for shardIdx out of shardCount total shards over total row groups. The
+// union of ranges over [0, shardCount) covers exactly [0, total).
+func rowGroupRangeForShard(total, shardIdx, shardCount int) (int, int) {
+	if total <= 0 || shardCount <= 1 {
+		return 0, total
+	}
+	start := shardIdx * total / shardCount
+	end := (shardIdx + 1) * total / shardCount
+	if shardIdx == shardCount-1 {
+		end = total
+	}
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+	return start, end
 }
 
 // ReadRowGroupNative reads a row group using our custom page reader,

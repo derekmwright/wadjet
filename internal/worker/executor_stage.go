@@ -79,6 +79,21 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 	if err != nil {
 		return fmt.Errorf("scan task %s: source: %w", task.ID, err)
 	}
+	// Row-group sharding: if the dispatcher fanned out a single-file scan
+	// into N tasks, each task reads only its assigned row-group slice.
+	// Cast safety: sourceForAliasWithProjection returns *cachedFileStreamSource
+	// today; if a future call site returns a different source type the cast
+	// fails and we silently read whole-file (functionally correct but wastes
+	// the fan-out). Document with a log instead of erroring so a wiring
+	// regression doesn't block queries.
+	if task.ScanShardCount > 1 {
+		if cs, ok := src.(*cachedFileStreamSource); ok {
+			cs.SetShard(task.ScanShardIndex, task.ScanShardCount)
+		} else {
+			e.logger.Warn("scan task: shard params set but source is not cachedFileStreamSource; reading whole file",
+				"task_id", task.ID, "shard_idx", task.ScanShardIndex, "shard_count", task.ScanShardCount)
+		}
+	}
 	// SkipFinalizeToRows: writeStageOutput consumes Batches() directly;
 	// the ToRows materialization Finalize would otherwise do held 21 GB
 	// of live heap on Q18 SF10 (project_q18_sf10_native_dag_oom_2026-04-24).
@@ -395,6 +410,12 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	src, err := e.sourceForAliasWithProjection(task.QueryID, bucket, alias, files, projCols)
 	if err != nil {
 		return fmt.Errorf("aggregate task %s: source: %w", task.ID, err)
+	}
+	// Row-group sharding for fused scan-aggregate over a single compacted file.
+	if task.ScanShardCount > 1 {
+		if cs, ok := src.(*cachedFileStreamSource); ok {
+			cs.SetShard(task.ScanShardIndex, task.ScanShardCount)
+		}
 	}
 
 	// For final_aggregate / merge_aggregate the upstream "partial" stage

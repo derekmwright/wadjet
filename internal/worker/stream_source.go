@@ -67,6 +67,13 @@ type cachedFileStreamSource struct {
 	// without needing to teach the source about derivation rules.
 	projectColumns []string
 
+	// Row-group sharding. When shardCount > 1, parquet reads only row groups
+	// [idx*N/count, (idx+1)*N/count). Only applies to parquet inputs (.wshf
+	// shuffle outputs are unaffected — those are already partitioned by the
+	// upstream stage). shardCount = 0 or 1 means whole file.
+	shardIdx   int
+	shardCount int
+
 	fileIdx int
 
 	// Active WSHF chunk reader for the current file (nil if current file is
@@ -103,6 +110,14 @@ func newCachedFileStreamSourceWithProjection(executor *Executor, queryID, bucket
 		files:          files,
 		projectColumns: projectColumns,
 	}
+}
+
+// SetShard configures row-group sharding for parquet reads on this source.
+// shardCount <= 1 disables sharding (whole file). Idempotent and safe to
+// call before Init.
+func (s *cachedFileStreamSource) SetShard(shardIdx, shardCount int) {
+	s.shardIdx = shardIdx
+	s.shardCount = shardCount
 }
 
 func (s *cachedFileStreamSource) Init(_ context.Context) error { return nil }
@@ -289,7 +304,11 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			}
 		}
 	}
-	batches, err := scan.ReadFileBatches(reader, projCols, nil)
+	shardIdx, shardCount := s.shardIdx, s.shardCount
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	batches, err := scan.ReadFileBatchesShard(reader, projCols, nil, shardIdx, shardCount)
 	if err != nil {
 		return fmt.Errorf("reading parquet file %s: %w", filePath, err)
 	}

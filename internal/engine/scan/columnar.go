@@ -11,18 +11,48 @@ import (
 // (one per row group). Supports column projection via selectedCols. Falls back to
 // row-based reading for schemas containing Array or Map types.
 func ReadFileBatches(reader *pqt.Reader, schema []pqt.Column, selectedCols []string) ([]*batch.RecordBatch, error) {
+	return ReadFileBatchesShard(reader, schema, selectedCols, 0, 1)
+}
+
+// ReadFileBatchesShard is like ReadFileBatches but reads only the row-group
+// slice assigned to one shard of a multi-task scan. With shardCount=1 the
+// behavior is identical to ReadFileBatches (whole file). With shardCount>1
+// the file's row groups are split evenly into shardCount disjoint ranges and
+// shardIdx selects which range to read; the union over all shards equals the
+// whole file.
+//
+// This is the primitive that lets a single compacted parquet file (e.g. SF10
+// partsupp = 691 MB single file) fan out across N tasks without requiring
+// the file to be physically chunked. The downstream broadcast-join chain then
+// inherits parallelism through probe-split (which checks `len(probeFiles) >=
+// 2`) because each shard task emits its own output file.
+func ReadFileBatchesShard(reader *pqt.Reader, schema []pqt.Column, selectedCols []string, shardIdx, shardCount int) ([]*batch.RecordBatch, error) {
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	if shardIdx < 0 || shardIdx >= shardCount {
+		return nil, nil
+	}
+
 	readSchema := schema
 	if len(selectedCols) > 0 {
 		readSchema = projectSchema(schema, selectedCols)
 	}
 
-	// Schemas with types unsupported by the native columnar reader fall back to rows.
+	// The row-based fallback path doesn't yet support row-group sharding —
+	// callers needing Array/Map types must accept whole-file reads on shard 0
+	// only, with empty results from other shards. None of our TPC-H scan
+	// stages use these types, so this is safe in practice; revisit if a
+	// future workload introduces sharded reads of Array/Map data.
 	if HasUnsupportedColumnarTypes(readSchema) {
+		if shardIdx != 0 {
+			return nil, nil
+		}
 		return readFileBatchesViaRows(reader, readSchema, selectedCols)
 	}
 
 	fr := reader.FileReader()
-	return ReadFileBatchesNative(fr, schema, selectedCols)
+	return ReadFileBatchesNativeShard(fr, schema, selectedCols, shardIdx, shardCount)
 }
 
 // readFileBatchesViaRows falls back to row-based reading for unsupported types.
