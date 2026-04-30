@@ -1843,10 +1843,22 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 // for probe-split fan-out. Returns the desired numTasks and ok=true when:
 //   - the stage is a broadcast_join the planner left at numTasks=1 (DistSingleton)
 //   - the cluster has spare workers (workerCount > 1)
-//   - the probe upstream is OutputSinglePart with at least 2 files
+//   - the probe upstream produced at least 2 files (whether OutputSinglePart
+//     or OutputPartitioned — for a broadcast join, the probe-side parallelism
+//     is just "split probe rows N ways," and that is correct regardless of
+//     whether the upstream pre-partitioned by some hash key, because the
+//     broadcast cache is replicated to every shard task anyway)
 //
 // Triggers only for DistSingleton broadcast_join; the hash-partitioned path
 // is already parallelized by the planner via Exchange{Repartition}.
+//
+// History: this check used to require probeIn.Kind == OutputSinglePart
+// strictly. That was overly conservative — at SF10 with compacted single-
+// file dimension scans, scan-sharding (commit 47630b3) produced N partial
+// outputs as OutputPartitioned, which the strict check rejected, leaving
+// every broadcast_join in the chain single-tasked. Relaxed 2026-04-30 after
+// observing the regression on the SF10 deploy of 47630b3 (Q02 22m vs 12m
+// baseline) — sharding was firing but probe-split wasn't picking it up.
 func broadcastJoinProbeSplit(
 	stage physical.Stage,
 	inputs map[string]StageOutput,
@@ -1869,7 +1881,10 @@ func broadcastJoinProbeSplit(
 		probeDep = stage.Dependencies[0]
 	}
 	probeIn, present := inputs[probeDep]
-	if !present || probeIn.Kind != OutputSinglePart {
+	if !present {
+		return 0, false
+	}
+	if probeIn.Kind != OutputSinglePart && probeIn.Kind != OutputPartitioned {
 		return 0, false
 	}
 	probeFiles := flattenStageFiles(probeIn)
