@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"hash/fnv"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -31,10 +31,12 @@ type partitionedShuffleSink struct {
 	schema     []parquet.Column
 	flushBytes int // per-partition row buffer flush threshold
 
-	mu      sync.Mutex
-	parts   []*partitionWriter
-	closed  bool
-	keyIdxs []int // resolved column indices for keys (set on first Consume)
+	mu          sync.Mutex
+	parts       []*partitionWriter
+	closed      bool
+	keyIdxs     []int    // resolved column indices for keys (set on first Consume)
+	partScratch []int    // per-row partition assignment, reused across batches
+	hashScratch []uint64 // per-row uint64 hash accumulator, reused across batches
 }
 
 // partitionWriter holds the open file handle and incremental state for one
@@ -106,28 +108,31 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 		}
 	}
 
+	// Vectorized partition assignment: one pass per key column over the
+	// active rows, mixing into a per-row hash accumulator. Pre-2026-04-30
+	// this code did `fnv.New64a()` per row → 1M heap allocations of the
+	// hasher struct on a SF1 lineitem shuffle. Inlined FNV-1a here is
+	// allocation-free.
 	n := b.ActiveLen()
+	if cap(s.partScratch) < n {
+		s.partScratch = make([]int, n)
+	}
+	if cap(s.hashScratch) < n {
+		s.hashScratch = make([]uint64, n)
+	}
+	parts := s.partScratch[:n]
+	hashRowsIntoPartitions(b, s.keyIdxs, s.numParts, s.hashScratch[:n], parts)
+
 	for i := 0; i < n; i++ {
 		row := i
 		if b.Sel != nil {
 			row = int(b.Sel[i])
 		}
-		p := s.partitionFor(b, row)
-		if err := s.appendRow(p, b, row); err != nil {
+		if err := s.appendRow(parts[i], b, row); err != nil {
 			return err
 		}
 	}
 	return s.flushIfNeeded()
-}
-
-// partitionFor computes hash(b.Columns[keyIdxs][row]) % numParts using FNV-1a.
-func (s *partitionedShuffleSink) partitionFor(b *batch.RecordBatch, row int) int {
-	h := fnv.New64a()
-	var buf [8]byte
-	for _, idx := range s.keyIdxs {
-		hashVectorValue(h, b.Columns[idx], row, buf[:])
-	}
-	return int(h.Sum64() % uint64(s.numParts))
 }
 
 // appendRow copies a single row from b at physical row index `row` into the
@@ -378,6 +383,159 @@ func (s *partitionedShuffleSink) PartitionFiles() []string {
 		out[p] = pw.file.Name()
 	}
 	return out
+}
+
+// FNV-1a 64-bit constants.
+const (
+	fnvOffset64 uint64 = 14695981039346656037
+	fnvPrime64  uint64 = 1099511628211
+)
+
+// hashRowsIntoPartitions computes hash(b.Columns[keyIdxs][row]) % numParts
+// for every active row of b, writing the result into out (which must have
+// len ≥ b.ActiveLen()). Inlined FNV-1a — zero allocations, no interface
+// calls. Pre-2026-04-30 the per-row variant called fnv.New64a() per row,
+// allocating a new hasher struct ~1M times for an SF1 lineitem shuffle.
+//
+// Multi-column keys: hash byte-stream is column1 || column2 || …, mixed
+// into the per-row accumulator in the same order.
+//
+// Caller-supplied scratch slice for the per-row uint64 accumulator. If the
+// scratch is too small the function returns false; caller should grow it
+// and retry. This avoids re-allocating a uint64 buffer per Consume.
+func hashRowsIntoPartitions(b *batch.RecordBatch, keyIdxs []int, numParts int, hashScratch []uint64, out []int) bool {
+	n := b.ActiveLen()
+	if cap(hashScratch) < n || len(out) < n {
+		return false
+	}
+	hashes := hashScratch[:n]
+	if len(keyIdxs) == 0 {
+		for i := 0; i < n; i++ {
+			out[i] = 0
+		}
+		return true
+	}
+	for i := range hashes {
+		hashes[i] = fnvOffset64
+	}
+	useSel := b.Sel != nil
+	for _, idx := range keyIdxs {
+		col := b.Columns[idx]
+		switch col.Type {
+		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+			data := col.Int32Data
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					v := uint32(data[row])
+					h = (h ^ uint64(byte(v))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>8))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>16))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>24))) * fnvPrime64
+				}
+				hashes[i] = h
+			}
+		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+			data := col.Int64Data
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					v := uint64(data[row])
+					h = (h ^ uint64(byte(v))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>8))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>16))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>24))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>32))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>40))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>48))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>56))) * fnvPrime64
+				}
+				hashes[i] = h
+			}
+		case parquet.TypeFloat32:
+			data := col.Float32Data
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					v := math.Float32bits(data[row])
+					h = (h ^ uint64(byte(v))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>8))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>16))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>24))) * fnvPrime64
+				}
+				hashes[i] = h
+			}
+		case parquet.TypeFloat64:
+			data := col.Float64Data
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					v := math.Float64bits(data[row])
+					h = (h ^ uint64(byte(v))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>8))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>16))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>24))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>32))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>40))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>48))) * fnvPrime64
+					h = (h ^ uint64(byte(v>>56))) * fnvPrime64
+				}
+				hashes[i] = h
+			}
+		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+			for i := 0; i < n; i++ {
+				row := i
+				if useSel {
+					row = int(b.Sel[i])
+				}
+				h := hashes[i]
+				if col.Nulls.IsNullFast(row) {
+					h = (h ^ 0xff) * fnvPrime64
+				} else {
+					for _, c := range col.BytesData.Value(row) {
+						h = (h ^ uint64(c)) * fnvPrime64
+					}
+				}
+				hashes[i] = h
+			}
+		default:
+			for i := 0; i < n; i++ {
+				hashes[i] = (hashes[i] ^ 0x00) * fnvPrime64
+			}
+		}
+	}
+	mod := uint64(numParts)
+	if mod == 0 {
+		mod = 1
+	}
+	for i := 0; i < n; i++ {
+		out[i] = int(hashes[i] % mod)
+	}
+	return true
 }
 
 // hashVectorValue mixes a single column value at the given row into h using
