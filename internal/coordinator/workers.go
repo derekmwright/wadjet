@@ -221,6 +221,53 @@ func (wr *WorkerRegistry) Count() int {
 	return len(wr.ActiveWorkers())
 }
 
+// broadcastThresholdFromCluster derives a build-bytes threshold for the
+// planner's broadcast-vs-shuffle decision from the smallest worker's shared
+// pool budget. The rule: a build can be broadcast only if it fits
+// comfortably within ~30% of the smallest worker's pool, capped at an
+// absolute 200 MB so a very large worker doesn't open the door to
+// catastrophic broadcast (broadcast still pays N× across the cluster).
+//
+// minBudget == 0 means we have no info from any worker — return 0 so the
+// planner falls back to its absolute default (100 MB).
+func broadcastThresholdFromCluster(minBudget int64) int64 {
+	if minBudget <= 0 {
+		return 0 // planner uses default
+	}
+	t := minBudget * 30 / 100
+	const cap = int64(200 * 1024 * 1024)
+	if t > cap {
+		t = cap
+	}
+	return t
+}
+
+// MinWorkerPoolBudget returns the smallest non-zero shared-pool budget
+// reported by any active worker. Used by the planner to bound broadcast-vs-
+// shuffle decisions: a build that wouldn't fit in the smallest worker's
+// memory pool must NOT be broadcast (every worker would pay the full
+// duplication). Returns 0 when no worker has reported pool stats yet
+// (legacy workers, or pre-heartbeat phase) — callers should treat 0 as
+// "no information; use absolute defaults."
+func (wr *WorkerRegistry) MinWorkerPoolBudget() int64 {
+	wr.mu.RLock()
+	defer wr.mu.RUnlock()
+	cutoff := time.Now().Add(-wr.stale)
+	var min int64
+	for _, w := range wr.workers {
+		if !w.LastSeen.After(cutoff) || w.Draining {
+			continue
+		}
+		if w.PoolBudget <= 0 {
+			continue
+		}
+		if min == 0 || w.PoolBudget < min {
+			min = w.PoolBudget
+		}
+	}
+	return min
+}
+
 // ClusterPoolPressure returns the cluster-wide shared memory pool pressure
 // as a value in [0.0, 1.0], computed from the most recent heartbeat each
 // active worker reported. Returns 0 when no worker has reported pool stats

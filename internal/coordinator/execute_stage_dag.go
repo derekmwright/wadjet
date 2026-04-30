@@ -827,6 +827,40 @@ func scanFanOutTaskCount(workerCount, capacity, fileCount int) int {
 	return n
 }
 
+// singleFileShardThresholdBytes is the minimum file size that triggers
+// row-group sharding for a single-file scan. Below this threshold the
+// scan runs as one task (whole file); above it the dispatcher fans out
+// N row-group shards so the downstream broadcast-join chain can probe-
+// split (which requires probe upstream to have ≥ 2 files).
+//
+// 64 MB is small enough to catch any moderately-compacted production
+// file (SF10 partsupp = 691 MB single file fans out cleanly) and large
+// enough that small dimension tables (region/nation/supplier) stay
+// single-task and don't waste a worker slot on a few KB of data.
+//
+// Var rather than const so tests can lower it to force the sharded path
+// on small fixtures.
+var singleFileShardThresholdBytes int64 = 64 * 1024 * 1024
+
+// scanShardCountForSingleFile returns the number of row-group shard tasks
+// to fan out for a single large file. Returns 1 (no sharding) when the
+// file is below the threshold or when the cluster is too small to
+// benefit. Caps at the cluster's effective task capacity so we don't
+// over-shard a small cluster.
+func scanShardCountForSingleFile(workerCount, capacity int, fileBytes int64) int {
+	if fileBytes < singleFileShardThresholdBytes {
+		return 1
+	}
+	n := workerCount
+	if capacity > n {
+		n = capacity
+	}
+	if n < 2 {
+		return 1
+	}
+	return n
+}
+
 // dispatchScanAggregateStage dispatches N partial-aggregate tasks, one
 // per worker, each reading a disjoint slice of stage.ScanFiles. Each task
 // runs a HashAggregate on its file slice and emits a partial result as
@@ -872,10 +906,27 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	// over raw worker count so each task stays inside the per-worker memory
 	// budget. AVG fallback intentionally stays at 1 task.
 	taskCount := workerCount
-	if !avgFallback {
-		taskCount = scanFanOutTaskCount(workerCount, c.workers.ClusterCapacity(), len(stage.ScanFiles))
+	capacity := c.workers.ClusterCapacity()
+	var fileSets [][]string
+	var shardCount int
+	if !avgFallback && len(stage.ScanFiles) == 1 {
+		shardCount = scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes)
 	}
-	fileSets := splitFilesEvenly(stage.ScanFiles, taskCount)
+	if shardCount > 1 {
+		// Single-file row-group sharding for fused scan-aggregate. Each
+		// shard task aggregates its row-group slice; the downstream
+		// final_aggregate merges across the N partial outputs.
+		fileSets = make([][]string, shardCount)
+		for i := range fileSets {
+			fileSets[i] = stage.ScanFiles
+		}
+		taskCount = shardCount
+	} else {
+		if !avgFallback {
+			taskCount = scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
+		}
+		fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
+	}
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		return StageOutput{
@@ -887,7 +938,8 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	c.logger.Info("dispatchScanAggregateStage",
 		"stage_id", stage.ID, "files", len(stage.ScanFiles),
-		"tasks", actualTasks, "group_by", stage.FusedAggGroupBy)
+		"tasks", actualTasks, "group_by", stage.FusedAggGroupBy,
+		"shard_count", shardCount)
 
 	// Convert AggSpec → wire format once.
 	var aggs []distributed.AggSpec
@@ -901,7 +953,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	}
 
 	tasks := make([]distributed.Task, 0, actualTasks)
-	for w, files := range fileSets {
+	for shardIdx, files := range fileSets {
 		t := distributed.Task{
 			ID:           uuid.New().String()[:8],
 			QueryID:      queryID,
@@ -928,6 +980,10 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
 		}
+		if shardCount > 1 {
+			t.ScanShardIndex = shardIdx
+			t.ScanShardCount = shardCount
+		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -936,7 +992,6 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		c.mu.Unlock()
 		c.enrichTaskWithQueryContext(qm, &t)
 		tasks = append(tasks, t)
-		_ = w
 	}
 
 	// Dispatch and collect (same pattern as dispatchComputeStage).
@@ -1044,14 +1099,36 @@ func (c *Coordinator) dispatchScanFilterStage(
 	if len(stage.ScanFiles) == 0 {
 		return StageOutput{Kind: OutputPartitioned, NumPartitions: 0, Files: nil}, nil
 	}
-	// Task count: prefer cluster capacity (workers × auto-tuned MaxConcurrent)
-	// over raw worker count so each task stays under the per-worker memory
-	// budget. With 3 workers × MaxConcurrent=2, that's 6 tasks instead of 3
-	// — for SF10 lineitem (600 files) that's 100 files/task instead of 200,
-	// which keeps each task's heap below the 32GB worker limit and avoids
-	// the OOM-restart-then-idle-timeout pattern observed on Q04 SF10.
-	taskCount := scanFanOutTaskCount(workerCount, c.workers.ClusterCapacity(), len(stage.ScanFiles))
-	fileSets := splitFilesEvenly(stage.ScanFiles, taskCount)
+	// Single-file sharding path: when the leaf scan has exactly one file
+	// above the threshold, fan out N row-group shard tasks instead of one
+	// whole-file task. Without this, a compacted single-file source
+	// (e.g. SF10 partsupp = 691 MB) caps fan-out at fileCount=1, which
+	// then cascades single-tasked through the entire downstream broadcast-
+	// join chain (probe-split requires probe upstream to have ≥ 2 files).
+	// The shards each emit one output file → the chain inherits parallelism
+	// for free.
+	capacity := c.workers.ClusterCapacity()
+	var fileSets [][]string
+	var shardCount int
+	if len(stage.ScanFiles) == 1 {
+		shardCount = scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes)
+	}
+	if shardCount > 1 {
+		// One row-group shard per task, all reading the same single file.
+		fileSets = make([][]string, shardCount)
+		for i := range fileSets {
+			fileSets[i] = stage.ScanFiles
+		}
+	} else {
+		// Task count: prefer cluster capacity (workers × auto-tuned MaxConcurrent)
+		// over raw worker count so each task stays under the per-worker memory
+		// budget. With 3 workers × MaxConcurrent=2, that's 6 tasks instead of 3
+		// — for SF10 lineitem (600 files) that's 100 files/task instead of 200,
+		// which keeps each task's heap below the 32GB worker limit and avoids
+		// the OOM-restart-then-idle-timeout pattern observed on Q04 SF10.
+		taskCount := scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
+		fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
+	}
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		return StageOutput{Kind: OutputPartitioned, NumPartitions: 0, Files: nil}, nil
@@ -1059,10 +1136,11 @@ func (c *Coordinator) dispatchScanFilterStage(
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	c.logger.Info("dispatchScanFilterStage",
 		"stage_id", stage.ID, "files", len(stage.ScanFiles),
-		"tasks", actualTasks, "filters", len(stage.FilterExprs))
+		"tasks", actualTasks, "filters", len(stage.FilterExprs),
+		"shard_count", shardCount)
 
 	tasks := make([]distributed.Task, 0, actualTasks)
-	for _, files := range fileSets {
+	for shardIdx, files := range fileSets {
 		t := distributed.Task{
 			ID:          uuid.New().String()[:8],
 			QueryID:     queryID,
@@ -1079,6 +1157,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 			ResultBucket: c.config.ResultBucket,
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
+		}
+		if shardCount > 1 {
+			t.ScanShardIndex = shardIdx
+			t.ScanShardCount = shardCount
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
@@ -1253,6 +1335,28 @@ func (c *Coordinator) dispatchComputeStage(
 		"probe_split", probeSplit,
 		"inputs_aliases", len(inputs))
 
+	// Observability for fused-chain probe-split: log the cluster-wide
+	// broadcast-cache file count this stage will read across all shard
+	// tasks. With N shards × (1 primary + M fused) caches, total S3 reads
+	// scale linearly. Useful for spotting when amplification is dominating
+	// wall time on bigger SF deploys.
+	if len(stage.FusedJoins) > 0 || probeSplit {
+		var primaryFiles, fusedFiles int
+		if buildDep := stage.RightDepStage; buildDep != "" {
+			primaryFiles = len(flattenStageFiles(inputs[buildDep]))
+		}
+		for _, fj := range stage.FusedJoins {
+			fusedFiles += len(flattenStageFiles(inputs[fj.BuildDepStage]))
+		}
+		c.logger.Info("fused/probe-split broadcast cache load",
+			"stage_id", stage.ID,
+			"num_tasks", numTasks,
+			"fused_count", len(stage.FusedJoins),
+			"primary_cache_files", primaryFiles,
+			"fused_cache_files_total", fusedFiles,
+			"cluster_cache_reads_estimate", numTasks*(primaryFiles+fusedFiles))
+	}
+
 	// Build one task per output partition. Input slicing uses numTasks as
 	// the divisor so each task reads its share of the upstream partitioned
 	// input — for Singleton stages every task reads the full upstream; for
@@ -1284,6 +1388,28 @@ func (c *Coordinator) dispatchComputeStage(
 		for _, s := range stage.SortKeys {
 			sorts = append(sorts, distributed.SortKeySpec{Column: s.Column, Desc: s.Desc})
 		}
+		// Translate planner-side FusedJoinSpec (carries BuildDepStage) into
+		// wire-side FusedJoinSpec (carries BuildFiles) by looking up each
+		// fused build's upstream stage output. This is what lets a fused
+		// broadcast-join chain run as one pipelined task instead of N
+		// separate stages with S3 round-trips between them.
+		var wireFused []distributed.FusedJoinSpec
+		for fi, fj := range stage.FusedJoins {
+			buildOut, ok := inputs[fj.BuildDepStage]
+			if !ok {
+				return StageOutput{}, fmt.Errorf("stage %s fused join %d: build dep %q output not found",
+					stage.ID, fi, fj.BuildDepStage)
+			}
+			wireFused = append(wireFused, distributed.FusedJoinSpec{
+				JoinType:        fj.JoinType,
+				JoinLeftKeys:    append([]string(nil), fj.JoinLeftKeys...),
+				JoinRightKeys:   append([]string(nil), fj.JoinRightKeys...),
+				BuildFiles:      flattenStageFiles(buildOut),
+				BuildTableAlias: fj.BuildTableAlias,
+				JoinFilter:      fj.JoinFilter,
+				FilterExprs:     append([]string(nil), fj.FilterExprs...),
+			})
+		}
 		t := distributed.Task{
 			ID:              uuid.New().String()[:8],
 			QueryID:         queryID,
@@ -1296,6 +1422,7 @@ func (c *Coordinator) dispatchComputeStage(
 			BuildTableAlias:     stage.BuildTableAlias,
 			QualifyAllBuildCols: stage.QualifyAllBuildCols,
 			JoinFilter:          stage.JoinFilter,
+			FusedJoins:      wireFused,
 			GroupByCols:     stage.GroupByCols,
 			Aggregates:      aggs,
 			SortKeys:        sorts,
@@ -1720,13 +1847,19 @@ func (c *Coordinator) runStageTasks(
 // into Task.Inputs keyed by a per-stage alias convention:
 //   - hash_join/broadcast_join: use stage.BuildTableAlias for the build
 //     side (dep index 1) and "probe" for the other side (dep index 0).
+//     With FusedJoins, additional dep entries are the fused builds — those
+//     are NOT placed in task.Inputs because the worker reads
+//     task.FusedJoins[i].BuildFiles directly (the dispatcher populates that
+//     wire field by looking up each fused build's upstream output).
 //   - aggregate/sort/etc: use the single dep's ID as alias.
 func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, workerCount int) (map[string][]string, error) {
 	inputs := make(map[string][]string)
 	switch stage.Type {
 	case physical.StageHashJoin, physical.StageBroadcastJoin:
-		if len(stage.Dependencies) != 2 {
-			return nil, fmt.Errorf("join stage %s expects 2 deps, got %d", stage.ID, len(stage.Dependencies))
+		expectedDeps := 2 + len(stage.FusedJoins)
+		if len(stage.Dependencies) != expectedDeps {
+			return nil, fmt.Errorf("join stage %s expects %d deps (2 primary + %d fused), got %d",
+				stage.ID, expectedDeps, len(stage.FusedJoins), len(stage.Dependencies))
 		}
 		probeDep := stage.LeftDepStage
 		buildDep := stage.RightDepStage
@@ -1746,6 +1879,9 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 		}
 		inputs[buildAlias] = partitionFilesForWorker(upstreams[buildDep], workerIdx, workerCount)
 		inputs[probeAlias] = partitionFilesForWorker(upstreams[probeDep], workerIdx, workerCount)
+		// Fused-build deps are intentionally NOT added to inputs[]; their
+		// files flow through task.FusedJoins[i].BuildFiles, populated by
+		// dispatchComputeStage from the upstream stage outputs.
 	default:
 		if len(stage.Dependencies) == 0 {
 			return nil, fmt.Errorf("stage %s has no dependencies and no ScanFiles", stage.ID)
@@ -1761,10 +1897,22 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 // for probe-split fan-out. Returns the desired numTasks and ok=true when:
 //   - the stage is a broadcast_join the planner left at numTasks=1 (DistSingleton)
 //   - the cluster has spare workers (workerCount > 1)
-//   - the probe upstream is OutputSinglePart with at least 2 files
+//   - the probe upstream produced at least 2 files (whether OutputSinglePart
+//     or OutputPartitioned — for a broadcast join, the probe-side parallelism
+//     is just "split probe rows N ways," and that is correct regardless of
+//     whether the upstream pre-partitioned by some hash key, because the
+//     broadcast cache is replicated to every shard task anyway)
 //
 // Triggers only for DistSingleton broadcast_join; the hash-partitioned path
 // is already parallelized by the planner via Exchange{Repartition}.
+//
+// History: this check used to require probeIn.Kind == OutputSinglePart
+// strictly. That was overly conservative — at SF10 with compacted single-
+// file dimension scans, scan-sharding (commit 47630b3) produced N partial
+// outputs as OutputPartitioned, which the strict check rejected, leaving
+// every broadcast_join in the chain single-tasked. Relaxed 2026-04-30 after
+// observing the regression on the SF10 deploy of 47630b3 (Q02 22m vs 12m
+// baseline) — sharding was firing but probe-split wasn't picking it up.
 func broadcastJoinProbeSplit(
 	stage physical.Stage,
 	inputs map[string]StageOutput,
@@ -1779,7 +1927,13 @@ func broadcastJoinProbeSplit(
 	if workerCount <= 1 {
 		return 0, false
 	}
-	if len(stage.Dependencies) != 2 {
+	// A fused-chain broadcast_join has 2 + N deps (probe + primary build +
+	// N fused builds). Probe-split semantics are identical: split probe
+	// files across shard tasks, replicate the broadcast caches (primary +
+	// fused) to every shard. The shard count gate just needs to verify the
+	// stage has the expected dep count.
+	expectedDeps := 2 + len(stage.FusedJoins)
+	if len(stage.Dependencies) != expectedDeps {
 		return 0, false
 	}
 	probeDep := stage.LeftDepStage
@@ -1787,7 +1941,10 @@ func broadcastJoinProbeSplit(
 		probeDep = stage.Dependencies[0]
 	}
 	probeIn, present := inputs[probeDep]
-	if !present || probeIn.Kind != OutputSinglePart {
+	if !present {
+		return 0, false
+	}
+	if probeIn.Kind != OutputSinglePart && probeIn.Kind != OutputPartitioned {
 		return 0, false
 	}
 	probeFiles := flattenStageFiles(probeIn)
@@ -1810,8 +1967,10 @@ func broadcastJoinProbeSplit(
 // with multiple files; this helper assumes the dispatcher already vetted
 // eligibility.
 func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, numTasks int) (map[string][]string, error) {
-	if len(stage.Dependencies) != 2 {
-		return nil, fmt.Errorf("broadcast_join split-probe stage %s expects 2 deps, got %d", stage.ID, len(stage.Dependencies))
+	expectedDeps := 2 + len(stage.FusedJoins)
+	if len(stage.Dependencies) != expectedDeps {
+		return nil, fmt.Errorf("broadcast_join split-probe stage %s expects %d deps (2 primary + %d fused), got %d",
+			stage.ID, expectedDeps, len(stage.FusedJoins), len(stage.Dependencies))
 	}
 	probeDep := stage.LeftDepStage
 	buildDep := stage.RightDepStage
@@ -1836,6 +1995,10 @@ func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams m
 	if workerIdx >= 0 && workerIdx < len(parts) {
 		out[probeAlias] = parts[workerIdx]
 	}
+	// Fused build deps don't go in inputs[]; their files travel via
+	// task.FusedJoins[i].BuildFiles, populated by dispatchComputeStage.
+	// Each shard task gets the full broadcast cache for every fused build,
+	// just like the primary build.
 	return out, nil
 }
 

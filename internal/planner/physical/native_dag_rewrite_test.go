@@ -84,20 +84,51 @@ func TestValidateNativeDAGShape_OK(t *testing.T) {
 	}
 }
 
-// TestValidateNativeDAGShape_FusedJoinDeps reproduces the Q02 SF10 2026-04-23
-// shape: a broadcast_join carrying FusedJoins ends up with >2 deps. Validator
-// must catch it at plan time.
+// TestValidateNativeDAGShape_FusedJoinDeps verifies the validator's
+// dependency-count check for fused-broadcast-join chains.
+//
+// Pre-2026-04-30 the validator rejected FusedJoins entirely under native-DAG
+// because executeStageHashJoin couldn't consume them. After
+// executeStageHashJoin learned to build a hash table per FusedJoin entry
+// and chain Probe operators, the validator was relaxed to accept 2 + N
+// deps when N FusedJoins are present (2 primary + 1 build-dep per fused).
+//
+// The validator still rejects mismatched counts: missing a fused build-dep
+// is a planner bug, as is an extra dep with no FusedJoin.
 func TestValidateNativeDAGShape_FusedJoinDeps(t *testing.T) {
-	stages := []Stage{
-		{ID: "scan-0", Type: "scan"},
-		{ID: "scan-1", Type: "scan"},
-		{ID: "scan-2", Type: "scan"},
-		{ID: "join-3", Type: "broadcast_join", Dependencies: []string{"scan-0", "scan-1", "scan-2"}, FusedJoins: []FusedJoinSpec{{BuildDepStage: "scan-2"}}},
-	}
-	err := ValidateNativeDAGShape(stages)
-	if err == nil {
-		t.Fatal("expected error on >2 deps, got nil")
-	}
+	t.Run("one_fused_three_deps_ok", func(t *testing.T) {
+		stages := []Stage{
+			{ID: "scan-0", Type: "scan"},
+			{ID: "scan-1", Type: "scan"},
+			{ID: "scan-2", Type: "scan"},
+			{ID: "join-3", Type: "broadcast_join", Dependencies: []string{"scan-0", "scan-1", "scan-2"}, FusedJoins: []FusedJoinSpec{{BuildDepStage: "scan-2"}}},
+		}
+		if err := ValidateNativeDAGShape(stages); err != nil {
+			t.Fatalf("expected fused chain (1 fused, 3 deps) to validate, got: %v", err)
+		}
+	})
+	t.Run("missing_fused_build_dep", func(t *testing.T) {
+		// 1 fused join → expects 3 deps; only 2 supplied.
+		stages := []Stage{
+			{ID: "scan-0", Type: "scan"},
+			{ID: "scan-1", Type: "scan"},
+			{ID: "join-3", Type: "broadcast_join", Dependencies: []string{"scan-0", "scan-1"}, FusedJoins: []FusedJoinSpec{{BuildDepStage: "scan-2"}}},
+		}
+		if err := ValidateNativeDAGShape(stages); err == nil {
+			t.Fatal("expected error: 1 fused join needs 3 deps, only 2 supplied")
+		}
+	})
+	t.Run("extra_dep_without_fused", func(t *testing.T) {
+		stages := []Stage{
+			{ID: "scan-0", Type: "scan"},
+			{ID: "scan-1", Type: "scan"},
+			{ID: "scan-2", Type: "scan"},
+			{ID: "join-3", Type: "broadcast_join", Dependencies: []string{"scan-0", "scan-1", "scan-2"}},
+		}
+		if err := ValidateNativeDAGShape(stages); err == nil {
+			t.Fatal("expected error: 0 fused joins should mean exactly 2 deps")
+		}
+	})
 }
 
 // TestValidateNativeDAGShape_IntermediateMergeStage catches a leaked

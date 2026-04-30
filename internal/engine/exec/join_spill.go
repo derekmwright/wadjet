@@ -75,6 +75,12 @@ type spillState struct {
 	// Track memory per partition for choosing what to spill
 	partMemory map[int]int64
 
+	// batchPartID maps a global HashJoin.buildBatches index to its partition.
+	// Populated only by the partition-on-arrival path so spillOneInMemoryPartition
+	// can locate and free a partition's batches in O(len(buildBatches)). Stays
+	// nil under the legacy reactive-spill path, which never needs this lookup.
+	batchPartID []int
+
 	schema []parquet.Column // build-side schema
 }
 
@@ -770,6 +776,16 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 	if !tmpJoin.SemiAntiKeyOnly {
 		tmpJoin.arena = make([]buildRef, 0, totalRows)
 		tmpJoin.arenaNext = make([]int32, 0, totalRows)
+	}
+
+	// Pre-size the hash index to fit totalRows. tryEnableIntKey already sized
+	// the int path via BuildRowHint above; the string path needs an explicit
+	// pre-size here. Without it, indexBuildBatch's PutNoGrow on a 64-bucket
+	// default table loops forever once load exceeds 100% — the spilled-
+	// partition replay path used to silently bypass this for int keys but
+	// would deadlock for string keys.
+	if !tmpJoin.useIntKey && !tmpJoin.useDualIntKey {
+		tmpJoin.strIndex = newStrHashTable(totalRows)
 	}
 
 	for _, b := range buildBatches {

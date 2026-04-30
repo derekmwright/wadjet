@@ -36,12 +36,41 @@ const (
 // tasks on the same worker) write to the same directory.
 var spillFileSeq atomic.Int64
 
+// Spillable is implemented by operators (today: HashJoin) that hold
+// reclaimable in-memory state and can write a portion of it to disk on
+// request. The cooperative-spill advisor uses these methods to relieve
+// shared-pool pressure when one operator can't make progress because another
+// concurrent operator holds the bulk of the pool. Each operator's per-self
+// reactive spill is still the first line of defense; cross-operator
+// coordination only fires when an operator has exhausted its own partitions
+// but tracker pressure remains.
+type Spillable interface {
+	// SpillFootprint reports how many bytes of in-memory reclaimable state
+	// the operator currently holds. Used to pick the largest contributor
+	// when the worker is over the spill threshold.
+	SpillFootprint() int64
+
+	// SpillSome attempts to free at least target bytes by writing in-memory
+	// state to disk. Returns the number of bytes actually released back to
+	// the shared tracker. May return less than target if the operator runs
+	// out of evictable state. Must be safe to call from a goroutine other
+	// than the one driving the operator's main pipeline.
+	SpillSome(target int64) (int64, error)
+}
+
 // SpillManager handles spilling data to disk when memory budget is exceeded.
 type SpillManager struct {
 	dir     string
 	tracker *Tracker
 	mu      sync.Mutex
 	files   []string
+
+	// spillables registry — operators register on Build entry, deregister
+	// on Close. RequestRelief picks the largest registered contributor and
+	// asks it to spill. Independent of mu so registration doesn't contend
+	// with file-list mutations.
+	spillablesMu sync.Mutex
+	spillables   []Spillable
 }
 
 // NewSpillManager creates a spill manager that writes temp files to the given directory.
@@ -425,4 +454,71 @@ func (sm *SpillManager) SpilledFiles() []string {
 // to report tracker accounting outside of the operator-level spill API.
 func (sm *SpillManager) Tracker() *Tracker {
 	return sm.tracker
+}
+
+// RegisterSpillable adds an operator to the cooperative-spill registry.
+// Returns an unregister function the caller must call (defer is fine) when
+// the operator stops being a spill source — typically at Build completion
+// or Close. Unregister is idempotent and safe to call after the SpillManager
+// is no longer in use.
+func (sm *SpillManager) RegisterSpillable(s Spillable) func() {
+	sm.spillablesMu.Lock()
+	sm.spillables = append(sm.spillables, s)
+	sm.spillablesMu.Unlock()
+	return func() {
+		sm.spillablesMu.Lock()
+		defer sm.spillablesMu.Unlock()
+		for i, x := range sm.spillables {
+			if x == s {
+				sm.spillables = append(sm.spillables[:i], sm.spillables[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// RequestRelief asks registered Spillables to free at least target bytes
+// by spilling. Picks the largest contributor first and iterates until either
+// target is met or every spillable returns 0. Returns the total bytes freed
+// and any error from a Spillable's SpillSome call.
+//
+// Caller must NOT hold any operator's mutex when calling this — the
+// requester operator is implicitly skipped via the largest-first ordering
+// and zero-progress break, so a self-call where no other Spillable holds
+// reclaimable state simply returns 0 cleanly. But to be safe under future
+// callers, RequestRelief takes no operator-side locks itself; it only locks
+// the registry briefly to snapshot.
+func (sm *SpillManager) RequestRelief(target int64) (int64, error) {
+	if target <= 0 {
+		return 0, nil
+	}
+	var freed int64
+	for freed < target {
+		// Snapshot the registry, pick the largest. The snapshot is short-
+		// lived so registrations during a long-running spill don't deadlock
+		// the registry mutex.
+		sm.spillablesMu.Lock()
+		var best Spillable
+		var bestSize int64
+		for _, s := range sm.spillables {
+			sz := s.SpillFootprint()
+			if sz > bestSize {
+				best = s
+				bestSize = sz
+			}
+		}
+		sm.spillablesMu.Unlock()
+		if best == nil || bestSize == 0 {
+			break
+		}
+		n, err := best.SpillSome(target - freed)
+		if err != nil {
+			return freed, err
+		}
+		if n == 0 {
+			break
+		}
+		freed += n
+	}
+	return freed, nil
 }

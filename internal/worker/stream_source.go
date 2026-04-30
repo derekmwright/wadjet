@@ -12,9 +12,30 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
+
+// progressWriter wraps an io.Writer and reports each successful Write as
+// bytes-of-progress on the active per-task ProgressReporter. Used while
+// streaming a multi-GB build cache file to local NVMe so the per-task
+// progress heartbeat keeps flowing during the otherwise-silent download +
+// decompression window — without this, a long broadcast cache load shows
+// up as "no per-task progress" to the coord and risks a stale-worker reap
+// for an instance that's making real I/O progress.
+type progressWriter struct {
+	w   io.Writer
+	rep exec.ProgressReporter
+}
+
+func (p *progressWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	if n > 0 && p.rep != nil {
+		p.rep.AddBytes(int64(n))
+	}
+	return n, err
+}
 
 // cachedFileStreamSource lazily reads pre-scanned build-cache files one at a
 // time, yielding batches from each file before moving to the next.
@@ -45,6 +66,13 @@ type cachedFileStreamSource struct {
 	// optimization safe in the presence of expression-based aggregates
 	// without needing to teach the source about derivation rules.
 	projectColumns []string
+
+	// Row-group sharding. When shardCount > 1, parquet reads only row groups
+	// [idx*N/count, (idx+1)*N/count). Only applies to parquet inputs (.wshf
+	// shuffle outputs are unaffected — those are already partitioned by the
+	// upstream stage). shardCount = 0 or 1 means whole file.
+	shardIdx   int
+	shardCount int
 
 	fileIdx int
 
@@ -82,6 +110,14 @@ func newCachedFileStreamSourceWithProjection(executor *Executor, queryID, bucket
 		files:          files,
 		projectColumns: projectColumns,
 	}
+}
+
+// SetShard configures row-group sharding for parquet reads on this source.
+// shardCount <= 1 disables sharding (whole file). Idempotent and safe to
+// call before Init.
+func (s *cachedFileStreamSource) SetShard(shardIdx, shardCount int) {
+	s.shardIdx = shardIdx
+	s.shardCount = shardCount
 }
 
 func (s *cachedFileStreamSource) Init(_ context.Context) error { return nil }
@@ -268,7 +304,11 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			}
 		}
 	}
-	batches, err := scan.ReadFileBatches(reader, projCols, nil)
+	shardIdx, shardCount := s.shardIdx, s.shardCount
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	batches, err := scan.ReadFileBatchesShard(reader, projCols, nil, shardIdx, shardCount)
 	if err != nil {
 		return fmt.Errorf("reading parquet file %s: %w", filePath, err)
 	}
@@ -282,7 +322,14 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 // and hands it to a shuffleChunkReader. Memory is bounded by the kernel's
 // page cache footprint over the active mmap region rather than the full file
 // size.
-func (s *cachedFileStreamSource) openShuffleFile(_ context.Context, srcPath string, magic []byte, rc io.Reader, compressed bool) error {
+//
+// While the body streams to disk, each Write is reported to the per-task
+// ProgressReporter (read from ctx). This keeps liveness signals flowing
+// during the otherwise-silent download window of a large broadcast cache
+// load — without it, a multi-GB load can run for minutes with no per-task
+// progress, and the coord's stale-worker reap fires on an instance that's
+// making real I/O progress.
+func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath string, magic []byte, rc io.Reader, compressed bool) error {
 	spillDir := s.executor.spillDir
 	if spillDir == "" {
 		// Fall back to the in-memory path if no NVMe spill is available.
@@ -314,16 +361,25 @@ func (s *cachedFileStreamSource) openShuffleFile(_ context.Context, srcPath stri
 		return fmt.Errorf("writing magic to local cache: %w", err)
 	}
 
+	rep := exec.ProgressReporterFromContext(ctx)
+	if rep != nil {
+		rep.AddBytes(int64(len(magic)))
+	}
+	dst := io.Writer(tmp)
+	if rep != nil {
+		dst = &progressWriter{w: tmp, rep: rep}
+	}
+
 	if compressed {
 		// Stream-decompress the body. After writing the WSHF magic to disk,
 		// the body is the s2 stream that follows the WSHC magic. The shuffle
 		// reader expects a plain WSHF file, so we transcode here.
-		if err := streamDecompressShuffle(rc, tmp); err != nil {
+		if err := streamDecompressShuffle(rc, dst); err != nil {
 			return fmt.Errorf("decompressing %s into local cache: %w", srcPath, err)
 		}
 	} else {
 		// Plain WSHF: just stream the body to disk.
-		if _, err := io.Copy(tmp, rc); err != nil {
+		if _, err := io.Copy(dst, rc); err != nil {
 			return fmt.Errorf("streaming %s to local cache: %w", srcPath, err)
 		}
 	}

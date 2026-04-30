@@ -79,6 +79,21 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 	if err != nil {
 		return fmt.Errorf("scan task %s: source: %w", task.ID, err)
 	}
+	// Row-group sharding: if the dispatcher fanned out a single-file scan
+	// into N tasks, each task reads only its assigned row-group slice.
+	// Cast safety: sourceForAliasWithProjection returns *cachedFileStreamSource
+	// today; if a future call site returns a different source type the cast
+	// fails and we silently read whole-file (functionally correct but wastes
+	// the fan-out). Document with a log instead of erroring so a wiring
+	// regression doesn't block queries.
+	if task.ScanShardCount > 1 {
+		if cs, ok := src.(*cachedFileStreamSource); ok {
+			cs.SetShard(task.ScanShardIndex, task.ScanShardCount)
+		} else {
+			e.logger.Warn("scan task: shard params set but source is not cachedFileStreamSource; reading whole file",
+				"task_id", task.ID, "shard_idx", task.ScanShardIndex, "shard_count", task.ScanShardCount)
+		}
+	}
 	// SkipFinalizeToRows: writeStageOutput consumes Batches() directly;
 	// the ToRows materialization Finalize would otherwise do held 21 GB
 	// of live heap on Q18 SF10 (project_q18_sf10_native_dag_oom_2026-04-24).
@@ -256,6 +271,24 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	if e.sharedSpill != nil {
 		hj.Spill = e.sharedSpill
 		hj.MemTracker = e.sharedTracker
+		// Partition-on-arrival is opt-in based on observed shared-pool
+		// pressure at task entry. Below ~30% used, we let the join run the
+		// legacy flat path; the per-batch partitioning allocation cost
+		// (compactBatchForRows × 64 per source batch) isn't paid back when
+		// no spill is actually going to fire. At SF10 with workers_per_node=2,
+		// most broadcast-join builds at task entry are well under 30% pool
+		// — pre-2026-04-30 unconditional partition-on-arrival turned a
+		// quick 10MB build into 3,200 small allocations, GC-thrashed the
+		// worker into OOM-kill, and regressed Q02 to 22m vs 12m baseline.
+		//
+		// When pressure IS already high at task entry (concurrent build
+		// holding the pool, or a long-lived prior task), partition-on-
+		// arrival pays for itself: spill becomes O(partition) eviction
+		// instead of an O(total) flat→partitioned redistribute. If pressure
+		// rises mid-build under the flat path, spillBuildBatches still
+		// reactively converts to partitioned representation; the gate just
+		// avoids paying upfront when the pool is plentiful.
+		hj.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
 	}
 	// Close releases trackedMem to the shared tracker once the join is done.
 	// Without this, a non-spilling broadcast_join leaks its reservation for
@@ -273,17 +306,94 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	buildSource.Close()
 	hj.FixKeyAssignment()
 
+	// Build the probe pipeline. FusedJoin entries execute BEFORE the primary
+	// hash join because fuseJoinStages absorbs a leaf broadcast_join into
+	// its CONSUMER — i.e. the absorbed join was originally upstream of the
+	// primary in the data flow. The probe stream goes:
+	//
+	//   probeSource → fused[0].Probe → fused[1].Probe → … → primary.Probe
+	//
+	// Each fused join builds its own hash table (a broadcast cache,
+	// replicated to every shard task) and probes batches passing through,
+	// augmenting them with its build-side columns. The primary join sees
+	// the wider probe schema after all fused joins have run.
+	probeOps := make([]exec.UnaryOperator, 0, len(task.FusedJoins)+1)
+	fusedJoins := make([]*exec.HashJoin, 0, len(task.FusedJoins))
+	// Defer cleanup BEFORE building any fused joins so that an error
+	// partway through the loop still releases tracker reservations and
+	// closes spill files for every fjHJ that was constructed. The earlier
+	// shape (defer after the loop) leaked any fjHJ whose Init or Build
+	// failed AFTER allocation but before the success-path append — and
+	// since each fjHJ may have already reserved memory in the shared
+	// tracker via Build's first batch, that's a phantom-pool-pressure
+	// leak across the whole worker.
+	defer func() {
+		for _, fjHJ := range fusedJoins {
+			fjHJ.Close()
+		}
+	}()
+	for i, fj := range task.FusedJoins {
+		if len(fj.JoinLeftKeys) == 0 || len(fj.JoinRightKeys) == 0 {
+			return fmt.Errorf("hash_join task %s: fused join %d missing keys", task.ID, i)
+		}
+		if len(fj.BuildFiles) == 0 {
+			// An empty broadcast cache produces no output for inner/semi
+			// joins; for anti, the entire probe passes through. Today we
+			// treat empty as "no output" since SF0.01 / SF10 broadcast
+			// chains all use inner joins. Revisit if anti chains land.
+			return e.writeStageOutput(ctx, task, nil, result)
+		}
+		fjAlias := fj.BuildTableAlias
+		if fjAlias == "" {
+			fjAlias = fmt.Sprintf("fused_build_%d", i)
+		}
+		fjBuildSrc, err := e.sourceForAlias(task.QueryID, bucket, fjAlias, fj.BuildFiles)
+		if err != nil {
+			return fmt.Errorf("hash_join task %s: fused %d build source: %w", task.ID, i, err)
+		}
+		fjType := mapJoinTypeString(fj.JoinType)
+		fjHJ := exec.NewHashJoin(fjType, fj.JoinLeftKeys, fj.JoinRightKeys)
+		fjHJ.BuildTableAlias = fj.BuildTableAlias
+		if fj.JoinFilter != "" {
+			fjHJ.SemiAntiFilter = physical.BuildSemiAntiFilter(fj.JoinFilter)
+		}
+		if e.sharedSpill != nil {
+			fjHJ.Spill = e.sharedSpill
+			fjHJ.MemTracker = e.sharedTracker
+			// Re-check pool pressure for each fused build — by the time the
+			// primary build has run, the pool may have crossed the threshold
+			// even if it was below at task entry.
+			fjHJ.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
+		}
+		// Append BEFORE Init/Build so the deferred cleanup closes fjHJ on
+		// any subsequent error. Build may reserve tracker memory on its
+		// first batch even if it later fails — Close releases it.
+		fusedJoins = append(fusedJoins, fjHJ)
+		if err := fjBuildSrc.Init(ctx); err != nil {
+			fjBuildSrc.Close()
+			return fmt.Errorf("hash_join task %s: fused %d init build source: %w", task.ID, i, err)
+		}
+		if err := fjHJ.Build(ctx, fjBuildSrc); err != nil {
+			fjBuildSrc.Close()
+			return fmt.Errorf("hash_join task %s: fused %d building hash table: %w", task.ID, i, err)
+		}
+		fjBuildSrc.Close()
+		fjHJ.FixKeyAssignment()
+		probeOps = append(probeOps, fjHJ.Probe())
+	}
+	// Primary probe last — the original consumer-of-fused position.
+	probeOps = append(probeOps, hj.Probe())
+
 	// Probe pipeline with CollectSink; we post-process batches into the
 	// configured output sink. CollectSink is memory-bounded by the build
 	// spill semantics (per-worker partition of probe input).
 	// SkipFinalizeToRows: we read Batches() below, never Rows. Without
 	// this flag, Finalize materializes every probe row as map[string]any
 	// — for Q18 SF10 join-8 (~60M probe rows) that's 15+ GB of pure waste.
-	probe := hj.Probe()
 	collect := &exec.CollectSink{SkipFinalizeToRows: true}
 	pipeline := &exec.Pipeline{
 		Source: probeSource,
-		Ops:    []exec.UnaryOperator{probe},
+		Ops:    probeOps,
 		Sink:   collect,
 	}
 	if err := pipeline.Run(ctx); err != nil {
@@ -387,6 +497,12 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	src, err := e.sourceForAliasWithProjection(task.QueryID, bucket, alias, files, projCols)
 	if err != nil {
 		return fmt.Errorf("aggregate task %s: source: %w", task.ID, err)
+	}
+	// Row-group sharding for fused scan-aggregate over a single compacted file.
+	if task.ScanShardCount > 1 {
+		if cs, ok := src.(*cachedFileStreamSource); ok {
+			cs.SetShard(task.ScanShardIndex, task.ScanShardCount)
+		}
 	}
 
 	// For final_aggregate / merge_aggregate the upstream "partial" stage

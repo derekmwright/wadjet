@@ -134,6 +134,16 @@ type HashJoin struct {
 	// output schema. Only set when spillState is non-nil.
 	spillOutputFilter map[string]bool
 	spillLeftSchema   []parquet.Column
+
+	// PartitionOnArrival makes Build allocate spillState upfront and partition
+	// every batch as it arrives, so memory pressure can be relieved by evicting
+	// a single partition (O(partition_size)) instead of redistributing the
+	// entire flat hash table on first spill (O(total_size) plus a hash-table
+	// reset and rebuild). When false, Build uses the legacy flat path and only
+	// converts to partitioned representation reactively on first spill. The
+	// production worker path enables this; standalone embeddings without a
+	// shared memory pool keep the legacy path.
+	PartitionOnArrival bool
 }
 
 // BloomPushdownOp returns a UnaryOperator that pre-filters probe batches using
@@ -672,6 +682,39 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		return h.buildParallelKeyOnly(ctx, source, workers)
 	}
 
+	// Cooperative-spill registration: when the join has both a Spill manager
+	// and a MemTracker, register as a Spillable so the worker's
+	// SpillManager.RequestRelief can target this operator's partitions when
+	// another task hits Reserve failure. Registering at Build entry (rather
+	// than only in buildPartitioned) covers the legacy-flat-path-then-
+	// reactively-converted case: the operator starts with spillState=nil
+	// (SpillFootprint returns 0, RequestRelief skips it), and once
+	// spillBuildBatches reactively allocates spillState mid-build, the
+	// operator becomes a viable target without any additional registration.
+	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
+		unregister := h.Spill.RegisterSpillable(h)
+		defer unregister()
+	}
+
+	// Partition-on-arrival path: when both MemTracker and Spill are
+	// configured (the production worker config) and the caller opted in via
+	// PartitionOnArrival, bypass the legacy flat-then-reactively-partition
+	// path. Spill becomes O(partition) instead of O(total), which is the
+	// architectural primitive that the SF10 lineitem broadcast-join "8 min
+	// per join" memory pressure was hitting.
+	//
+	// The CALLER (worker stage hash join, in production) decides whether to
+	// set this flag — it sees the shared pool state at task entry and only
+	// turns the flag on when pressure is already high enough to make the
+	// per-partition allocation cost worth paying. Below pressure, the worker
+	// leaves the flag false and we run the legacy flat path; if pressure
+	// rises mid-build, spillBuildBatches reactively converts to partitioned
+	// representation at that point. Tests that need to validate partition-
+	// on-arrival behavior set the flag unconditionally.
+	if h.PartitionOnArrival && h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
+		return h.buildPartitioned(ctx, source)
+	}
+
 	// Full builds use serial insertion. buildParallel creates per-worker
 	// local tables then merges them, but the merge re-inserts every key
 	// and costs as much as the parallel insertion saved (~9s for 60M rows).
@@ -932,7 +975,15 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			}
 		} else {
 			if h.strIndex == nil {
-				h.strIndex = newStrHashTable(64)
+				// Pre-size to this batch's row count so PutNoGrow has room
+				// for the inserts that follow. The earlier EnsureCapacity
+				// branch only fires when strIndex is non-nil; if we entered
+				// with strIndex==nil and seeded it at 64 buckets, PutNoGrow
+				// would loop forever once load exceeds 100%. Surfaced by
+				// TestPartitionOnArrival_StringKeySpill once pressure-aware
+				// routing started sending string-key builds through the
+				// legacy flat path under low pool pressure.
+				h.strIndex = newStrHashTable(b.ActiveLen())
 			}
 			if b.Sel != nil {
 				for _, si := range b.Sel {
@@ -1647,10 +1698,26 @@ func (h *HashJoin) bloomMayContain(hash uint64) bool {
 // consolidateBuild merges all build batches into a single contiguous batch.
 // This eliminates the O(n log n) pair sort in the probe phase (sort is skipped
 // when len(buildBatches) == 1) and improves gatherBuildVector cache locality
-// by removing per-pair batch switching. Cost: one-time O(n) copy during build.
+// by removing per-pair batch switching. Cost: one-time O(n) copy during build —
+// at exactly the moment the build is finishing and probe is about to begin,
+// peak heap is doubled by the consolidation.
+//
+// Skip the consolidation under any of:
+//   - Single batch already → no-op (legacy)
+//   - Spill state attached → arena entries reference per-partition batches
+//   - Semi/anti key-only → no batches to merge
+//   - Shared pool > 30% used → the 2× spike is unsafe; pay the per-pair sort
+//     cost in probe instead. Removes a class of OOM observed when concurrent
+//     builds finish in close succession and each tries to consolidate.
 func (h *HashJoin) consolidateBuild() {
 	if len(h.buildBatches) <= 1 || h.spillState != nil || h.SemiAntiKeyOnly {
 		return
+	}
+	if h.MemTracker != nil && h.MemTracker.Budget() > 0 {
+		used := h.MemTracker.Used()
+		if used*100 > h.MemTracker.Budget()*30 {
+			return
+		}
 	}
 
 	// Compute total rows and cumulative offsets per batch.

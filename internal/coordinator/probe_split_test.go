@@ -46,8 +46,18 @@ func TestBroadcastJoinProbeSplit_Trigger(t *testing.T) {
 		{name: "single_worker", stage: stage, inputs: multi, workers: 1, curTasks: 1, wantOK: false},
 		{name: "already_parallel", stage: stage, inputs: multi, workers: 4, curTasks: 4, wantOK: false},
 		{name: "non_broadcast_stage", stage: physical.Stage{Type: physical.StageHashJoin, Dependencies: []string{"probe", "build"}, LeftDepStage: "probe", RightDepStage: "build"}, inputs: multi, workers: 4, curTasks: 1, wantOK: false},
-		{name: "probe_partitioned", stage: stage, inputs: map[string]StageOutput{
+		// OutputPartitioned probe with multiple files now triggers probe-split:
+		// the broadcast join's per-shard parallelism is independent of the
+		// upstream's hash partitioning. Pre-2026-04-30 this returned ok=false,
+		// which left every chain whose leaf scan went through dispatchScanFilterStage
+		// (i.e. any scan with WHERE pushdown) single-tasked end-to-end at SF10.
+		{name: "probe_partitioned_multi_file_now_splits", stage: stage, inputs: map[string]StageOutput{
 			"probe": {Kind: OutputPartitioned, NumPartitions: 4, Files: [][]string{{"p0"}, {"p1"}, {"p2"}, {"p3"}}},
+			"build": {Kind: OutputSinglePart, Files: [][]string{{"b0"}}},
+		}, workers: 4, curTasks: 1, wantOK: true, wantTasks: 4},
+		// Single-file partitioned probe still gets one task (no parallelism gain).
+		{name: "probe_partitioned_single_file", stage: stage, inputs: map[string]StageOutput{
+			"probe": {Kind: OutputPartitioned, NumPartitions: 1, Files: [][]string{{"p0"}}},
 			"build": {Kind: OutputSinglePart, Files: [][]string{{"b0"}}},
 		}, workers: 4, curTasks: 1, wantOK: false},
 		{name: "probe_replicated", stage: stage, inputs: map[string]StageOutput{

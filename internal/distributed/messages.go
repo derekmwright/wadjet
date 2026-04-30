@@ -41,6 +41,17 @@ type Task struct {
 	// other scans read all files normally.
 	ScanFileFilter map[string][]string `json:"scan_file_filter,omitempty"`
 
+	// Row-group sharding for single-file scans. When ScanShardCount > 1, the
+	// worker reads only row groups [idx*N/count, (idx+1)*N/count) of each
+	// input parquet file (where N = file's NumRowGroups). The dispatcher
+	// uses this to fan out a single compacted file (e.g. SF10 partsupp =
+	// one 691 MB file) into multiple parallel scan tasks; without it the
+	// downstream broadcast-join chain cascades single-tasked because
+	// `broadcastJoinProbeSplit` requires probe upstream to have ≥ 2 files.
+	// ScanShardCount = 0 or 1 means no sharding (whole file).
+	ScanShardIndex int `json:"scan_shard_index,omitempty"`
+	ScanShardCount int `json:"scan_shard_count,omitempty"`
+
 	// PartialAggregate is set on probe-split pipeline tasks to indicate that
 	// the top-level Sort and Limit should be stripped. Each worker produces
 	// complete partial aggregates; the coordinator merges them.

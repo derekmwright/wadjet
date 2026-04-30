@@ -253,6 +253,25 @@ type Planner struct {
 	memTracker     *memory.Tracker      // shared per-query memory tracker (lazy-initialized)
 	WorkerCount    int                  // number of distributed workers (for shuffle partitioning)
 
+	// BroadcastBytesThreshold is the maximum estimated build-side size for
+	// a join to be planned as broadcast_join. Builds above this become
+	// hash_join (hash-shuffle), eliminating the N× build-cache duplication
+	// every worker pays under broadcast.
+	//
+	// Zero = use absolute default (100 MB), preserving legacy behavior for
+	// embedded callers that don't set this. Distributed callers should set
+	// this from per-worker pool budget — e.g., budget * 0.3 capped at
+	// 200 MB — so the broadcast/shuffle decision adapts to cluster memory
+	// instead of trusting an absolute constant. Negative = never broadcast
+	// (force every join to hash_join).
+	//
+	// Architectural rule the threshold encodes: broadcast is sound when
+	// every worker can comfortably hold the full build state in memory
+	// alongside concurrent hash tables. As cluster width or per-worker
+	// budget shrinks, the threshold shrinks too — without changing the
+	// planner's join-type logic.
+	BroadcastBytesThreshold int64
+
 	// UseEnsureDistribution runs the Phase-2 EnsureDistribution pass after
 	// assignStageDistributions. When true, BehaviorPreservingMode is flipped
 	// to false for the duration of the call (strict AssertExchangeConsistency).
@@ -1991,17 +2010,23 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 func (p *Planner) generateStages(node *logical.Node) []Stage {
 	var stages []Stage
 	p.walkStages(node, &stages, nil)
-	// Broadcast-join fusion is a single-pipeline-executor optimization: it
-	// moves a separate broadcast_join stage into a consumer's FusedJoins
-	// list to avoid an intermediate S3 round-trip. Under native-DAG execution
-	// (Phase 3), every stage is dispatched independently and stage boundaries
-	// are the fundamental unit — fusing collapses that structure in ways the
-	// worker's executeStageHashJoin can't consume (the consumer ends up with
-	// >2 Dependencies, and FusedJoins semantics don't round-trip through the
-	// wire-level Task contract). Skip fusion when the caller has opted into
-	// native-DAG; the extra round-trip is the correctness price we pay, and
-	// the parallel-wave dispatcher hides most of the latency.
-	if p.WorkerCount > 1 && !p.UseEnsureDistribution {
+	// Broadcast-join fusion absorbs a leaf broadcast_join into its consumer
+	// join's FusedJoins list, so a chain of N broadcast joins runs as ONE
+	// task that builds N hash tables and pipelines probes batch-by-batch
+	// through them — instead of N separate stages with an S3 round-trip
+	// between each, single-tasked all the way down because the chain root
+	// probe is a small dimension table.
+	//
+	// Previously gated to only the legacy single-pipeline executor — the
+	// native-DAG validator rejected fused shapes because executeStageHashJoin
+	// only handled 2 deps and didn't read task.FusedJoins. Both are fixed:
+	//   - native_dag_rewrite.go's validator now allows 2+N deps when N
+	//     FusedJoins are present.
+	//   - executor_stage.go:executeStageHashJoin builds a hash table per
+	//     FusedJoin entry and chains their Probe operators in the pipeline.
+	//   - dispatchComputeStage translates planner-side FusedJoinSpec
+	//     (BuildDepStage) into wire-format FusedJoinSpec (BuildFiles).
+	if p.WorkerCount > 1 {
 		stages = fuseJoinStages(stages)
 	}
 	markCoPathingSelfJoinBuilds(stages)
@@ -2107,6 +2132,51 @@ func markCoPathingSelfJoinBuilds(stages []Stage) {
 	}
 }
 
+// maxFusedBuildBytes is the per-fused-build EstimatedBytes ceiling above
+// which fuseJoinStages refuses to absorb a broadcast join. Above this size,
+// the cluster-wide S3 amplification of replicating the cache to every
+// probe-split shard task outweighs the savings from skipping the
+// intermediate exchange-replicate materialization. Tune via SF100+ deploys
+// once we have measured numbers; 1 GB is conservative.
+//
+// Var rather than const so tests can lower it to exercise the skip path on
+// small fixtures.
+var maxFusedBuildBytes int64 = 1 * 1024 * 1024 * 1024
+
+// buildSideBytes returns the EstimatedBytes of the build-side scan reachable
+// from a broadcast_join's RightDepStage. Walks one level (the typical shape:
+// join → exchange-replicate → scan) and accepts the direct case
+// (join → scan). Returns 0 when the build subtree shape is unknown — callers
+// should treat 0 as "no info; allow fusion" so fuseJoinStages doesn't
+// over-restrict on edges its heuristic doesn't model.
+func buildSideBytes(stages []Stage, joinStage *Stage) int64 {
+	if joinStage == nil {
+		return 0
+	}
+	buildDep := joinStage.RightDepStage
+	if buildDep == "" {
+		return 0
+	}
+	for _, s := range stages {
+		if s.ID != buildDep {
+			continue
+		}
+		if s.Type == "scan" {
+			return s.EstimatedBytes
+		}
+		// Walk through one level of exchange-replicate to its underlying scan.
+		if s.Type == StageExchangeReplicate && len(s.Dependencies) == 1 {
+			for _, t := range stages {
+				if t.ID == s.Dependencies[0] && t.Type == "scan" {
+					return t.EstimatedBytes
+				}
+			}
+		}
+		return 0
+	}
+	return 0
+}
+
 // fuseJoinStages absorbs broadcast join stages into their downstream consumer
 // join stage when the broadcast join's output feeds directly as the probe or
 // build side of another join. This avoids materializing the intermediate result
@@ -2114,6 +2184,30 @@ func markCoPathingSelfJoinBuilds(stages []Stage) {
 //
 // Example: join-A (lineitem ⨝ part) → join-B (broadcast_join with nation)
 // becomes: join-A with FusedJoins=[nation join spec], join-B removed.
+//
+// FUSION DEPTH CONSTRAINT
+//
+// Each consumer absorbs at most ONE leaf broadcast join (the
+// `len(s.FusedJoins) > 0` skip below). For a long chain of broadcast joins
+// the result is each pair gets fused but no consumer absorbs deeper than
+// depth-2 (one fused entry + its primary). This is intentional, not a TODO.
+//
+// Why bounded depth: under probe-split (broadcastJoinProbeSplit), the fused
+// stage runs as N parallel shard tasks, each of which loads the FULL
+// broadcast cache for every fused build. With M fused entries and N shards,
+// each shard reads M cache files; total cluster S3 reads scale as
+// workerCount × M. Bounding M at 1 keeps the amplification factor at
+// workerCount, identical to what unfused chains pay through the same
+// probe-split path. Allowing deeper fusion (M ≥ 2) would multiply broadcast
+// cache S3 reads by M without commensurate compute benefit, since each
+// shard still has to wait for all caches to load before probing.
+//
+// If a future change wants deeper fusion (e.g. for star schemas with many
+// tiny dimension tables where cache amplification is acceptable), enforce
+// a per-stage byte budget here: do not absorb when the cumulative
+// EstimatedBytes of the consumer's existing FusedJoins plus the new
+// candidate would exceed `MaxFusedBuildBytes` (a planner config). The
+// safe default is "fail closed" — keep depth-1 unless explicitly opted in.
 func fuseJoinStages(stages []Stage) []Stage {
 	stageByID := make(map[string]*Stage, len(stages))
 	for i := range stages {
@@ -2171,6 +2265,24 @@ func fuseJoinStages(stages []Stage) []Stage {
 		}
 		// Consumer must be a join stage
 		if consumer.Type != "hash_join" && consumer.Type != "broadcast_join" {
+			continue
+		}
+
+		// Safety guard: don't fuse when the leaf broadcast's build-side
+		// upstream is so large that loading its cache from every probe-
+		// split shard would dominate the query's S3 bandwidth. Each shard
+		// of a downstream probe-split task reads the FULL fused cache
+		// regardless of how many probe rows it gets, so a pathological
+		// case is N shards × M fused × K-byte caches.
+		//
+		// Threshold: 1 GB per fused build by default. Skipping fusion in
+		// this case leaves the broadcast as its own stage, which gives
+		// the coordinator the option to materialize once and broadcast via
+		// NATS-KV (small caches) or to run a separate probe-split per
+		// stage (each independently sized to its own probe). Either way,
+		// the per-fused-stage I/O is unaffected by amplification through a
+		// chain of fused entries.
+		if buildBytes := buildSideBytes(stages, s); buildBytes > maxFusedBuildBytes {
 			continue
 		}
 
@@ -2727,10 +2839,18 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 			totalBytes += f.SizeBytes
 		}
 	}
-	// Broadcast if build side is under 100 MB.  At SF100 partsupp is ~10 GB
-	// and was incorrectly broadcast under the old file-count heuristic,
-	// forcing every worker to build a 10 GB hash table.
-	return totalBytes <= 100*1024*1024
+	// Broadcast threshold: defaults to 100 MB (legacy behavior). Distributed
+	// callers override via BroadcastBytesThreshold to adapt the decision to
+	// per-worker pool budget so a moderate build (say 500 MB) on a tight
+	// cluster falls back to hash-shuffle instead of multiplying memory
+	// pressure N× across worker procs.
+	threshold := int64(100 * 1024 * 1024)
+	if p.BroadcastBytesThreshold > 0 {
+		threshold = p.BroadcastBytesThreshold
+	} else if p.BroadcastBytesThreshold < 0 {
+		return false // broadcast disabled
+	}
+	return totalBytes <= threshold
 }
 
 // findScanNode walks through pass-through nodes (Filter, Project, Limit)

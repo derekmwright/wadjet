@@ -8,14 +8,12 @@ exchange-repartition-6	exchange-repartition	Hash(o_orderkey)/32	deps=join-4
 exchange-repartition-7	exchange-repartition	Hash(l_orderkey)/32	deps=scan-5
 join-8	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-6,exchange-repartition-7
 scan-9	scan	Singleton
-join-10	broadcast_join	Hash(o_orderkey)/32	deps=join-8,exchange-replicate-join-10-10
 scan-11	scan	Singleton
-join-12	broadcast_join	Hash(o_orderkey)/32	deps=join-10,exchange-replicate-join-12-12
+join-12	broadcast_join	Hash(o_orderkey)/32	deps=join-8,exchange-replicate-join-12-11,scan-9
 scan-13	scan	Singleton
-join-14	broadcast_join	Hash(o_orderkey)/32	deps=join-12,exchange-replicate-join-14-14
+join-14	broadcast_join	Hash(o_orderkey)/32	deps=join-12,exchange-replicate-join-14-13
 aggregate-15	aggregate	Singleton	deps=join-14
 final_aggregate-16	final_aggregate	Singleton	deps=aggregate-15
-exchange-replicate-join-10-10	exchange-replicate	Broadcast	deps=scan-9
-exchange-replicate-join-12-12	exchange-replicate	Broadcast	deps=scan-11
-exchange-replicate-join-14-14	exchange-replicate	Broadcast	deps=scan-13
+exchange-replicate-join-12-11	exchange-replicate	Broadcast	deps=scan-11
+exchange-replicate-join-14-13	exchange-replicate	Broadcast	deps=scan-13
 exchange-gather-final_aggregate-16	exchange-gather	Singleton	deps=final_aggregate-16
