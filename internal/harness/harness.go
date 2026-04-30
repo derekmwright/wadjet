@@ -222,7 +222,10 @@ func writeResult(path string, r RunResult) error {
 }
 
 func preserveRunDirOnFailure(runDir string, r RunResult) {
-	if r.Passed {
+	// WADJET_HARNESS_KEEP=1 disables the cleanup-on-success path so log
+	// files / spill files / NATS jetstream store survive for inspection.
+	// Useful when profiling per-stage timing on a passing run.
+	if r.Passed && os.Getenv("WADJET_HARNESS_KEEP") == "" {
 		_ = os.RemoveAll(runDir)
 		return
 	}
