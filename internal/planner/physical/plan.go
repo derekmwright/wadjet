@@ -2010,17 +2010,23 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 func (p *Planner) generateStages(node *logical.Node) []Stage {
 	var stages []Stage
 	p.walkStages(node, &stages, nil)
-	// Broadcast-join fusion is a single-pipeline-executor optimization: it
-	// moves a separate broadcast_join stage into a consumer's FusedJoins
-	// list to avoid an intermediate S3 round-trip. Under native-DAG execution
-	// (Phase 3), every stage is dispatched independently and stage boundaries
-	// are the fundamental unit — fusing collapses that structure in ways the
-	// worker's executeStageHashJoin can't consume (the consumer ends up with
-	// >2 Dependencies, and FusedJoins semantics don't round-trip through the
-	// wire-level Task contract). Skip fusion when the caller has opted into
-	// native-DAG; the extra round-trip is the correctness price we pay, and
-	// the parallel-wave dispatcher hides most of the latency.
-	if p.WorkerCount > 1 && !p.UseEnsureDistribution {
+	// Broadcast-join fusion absorbs a leaf broadcast_join into its consumer
+	// join's FusedJoins list, so a chain of N broadcast joins runs as ONE
+	// task that builds N hash tables and pipelines probes batch-by-batch
+	// through them — instead of N separate stages with an S3 round-trip
+	// between each, single-tasked all the way down because the chain root
+	// probe is a small dimension table.
+	//
+	// Previously gated to only the legacy single-pipeline executor — the
+	// native-DAG validator rejected fused shapes because executeStageHashJoin
+	// only handled 2 deps and didn't read task.FusedJoins. Both are fixed:
+	//   - native_dag_rewrite.go's validator now allows 2+N deps when N
+	//     FusedJoins are present.
+	//   - executor_stage.go:executeStageHashJoin builds a hash table per
+	//     FusedJoin entry and chains their Probe operators in the pipeline.
+	//   - dispatchComputeStage translates planner-side FusedJoinSpec
+	//     (BuildDepStage) into wire-format FusedJoinSpec (BuildFiles).
+	if p.WorkerCount > 1 {
 		stages = fuseJoinStages(stages)
 	}
 	markCoPathingSelfJoinBuilds(stages)

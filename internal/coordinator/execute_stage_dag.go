@@ -1366,6 +1366,28 @@ func (c *Coordinator) dispatchComputeStage(
 		for _, s := range stage.SortKeys {
 			sorts = append(sorts, distributed.SortKeySpec{Column: s.Column, Desc: s.Desc})
 		}
+		// Translate planner-side FusedJoinSpec (carries BuildDepStage) into
+		// wire-side FusedJoinSpec (carries BuildFiles) by looking up each
+		// fused build's upstream stage output. This is what lets a fused
+		// broadcast-join chain run as one pipelined task instead of N
+		// separate stages with S3 round-trips between them.
+		var wireFused []distributed.FusedJoinSpec
+		for fi, fj := range stage.FusedJoins {
+			buildOut, ok := inputs[fj.BuildDepStage]
+			if !ok {
+				return StageOutput{}, fmt.Errorf("stage %s fused join %d: build dep %q output not found",
+					stage.ID, fi, fj.BuildDepStage)
+			}
+			wireFused = append(wireFused, distributed.FusedJoinSpec{
+				JoinType:        fj.JoinType,
+				JoinLeftKeys:    append([]string(nil), fj.JoinLeftKeys...),
+				JoinRightKeys:   append([]string(nil), fj.JoinRightKeys...),
+				BuildFiles:      flattenStageFiles(buildOut),
+				BuildTableAlias: fj.BuildTableAlias,
+				JoinFilter:      fj.JoinFilter,
+				FilterExprs:     append([]string(nil), fj.FilterExprs...),
+			})
+		}
 		t := distributed.Task{
 			ID:              uuid.New().String()[:8],
 			QueryID:         queryID,
@@ -1378,6 +1400,7 @@ func (c *Coordinator) dispatchComputeStage(
 			BuildTableAlias:     stage.BuildTableAlias,
 			QualifyAllBuildCols: stage.QualifyAllBuildCols,
 			JoinFilter:          stage.JoinFilter,
+			FusedJoins:      wireFused,
 			GroupByCols:     stage.GroupByCols,
 			Aggregates:      aggs,
 			SortKeys:        sorts,
@@ -1802,13 +1825,19 @@ func (c *Coordinator) runStageTasks(
 // into Task.Inputs keyed by a per-stage alias convention:
 //   - hash_join/broadcast_join: use stage.BuildTableAlias for the build
 //     side (dep index 1) and "probe" for the other side (dep index 0).
+//     With FusedJoins, additional dep entries are the fused builds — those
+//     are NOT placed in task.Inputs because the worker reads
+//     task.FusedJoins[i].BuildFiles directly (the dispatcher populates that
+//     wire field by looking up each fused build's upstream output).
 //   - aggregate/sort/etc: use the single dep's ID as alias.
 func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, workerCount int) (map[string][]string, error) {
 	inputs := make(map[string][]string)
 	switch stage.Type {
 	case physical.StageHashJoin, physical.StageBroadcastJoin:
-		if len(stage.Dependencies) != 2 {
-			return nil, fmt.Errorf("join stage %s expects 2 deps, got %d", stage.ID, len(stage.Dependencies))
+		expectedDeps := 2 + len(stage.FusedJoins)
+		if len(stage.Dependencies) != expectedDeps {
+			return nil, fmt.Errorf("join stage %s expects %d deps (2 primary + %d fused), got %d",
+				stage.ID, expectedDeps, len(stage.FusedJoins), len(stage.Dependencies))
 		}
 		probeDep := stage.LeftDepStage
 		buildDep := stage.RightDepStage
@@ -1828,6 +1857,9 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 		}
 		inputs[buildAlias] = partitionFilesForWorker(upstreams[buildDep], workerIdx, workerCount)
 		inputs[probeAlias] = partitionFilesForWorker(upstreams[probeDep], workerIdx, workerCount)
+		// Fused-build deps are intentionally NOT added to inputs[]; their
+		// files flow through task.FusedJoins[i].BuildFiles, populated by
+		// dispatchComputeStage from the upstream stage outputs.
 	default:
 		if len(stage.Dependencies) == 0 {
 			return nil, fmt.Errorf("stage %s has no dependencies and no ScanFiles", stage.ID)
@@ -1873,7 +1905,13 @@ func broadcastJoinProbeSplit(
 	if workerCount <= 1 {
 		return 0, false
 	}
-	if len(stage.Dependencies) != 2 {
+	// A fused-chain broadcast_join has 2 + N deps (probe + primary build +
+	// N fused builds). Probe-split semantics are identical: split probe
+	// files across shard tasks, replicate the broadcast caches (primary +
+	// fused) to every shard. The shard count gate just needs to verify the
+	// stage has the expected dep count.
+	expectedDeps := 2 + len(stage.FusedJoins)
+	if len(stage.Dependencies) != expectedDeps {
 		return 0, false
 	}
 	probeDep := stage.LeftDepStage
@@ -1907,8 +1945,10 @@ func broadcastJoinProbeSplit(
 // with multiple files; this helper assumes the dispatcher already vetted
 // eligibility.
 func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, numTasks int) (map[string][]string, error) {
-	if len(stage.Dependencies) != 2 {
-		return nil, fmt.Errorf("broadcast_join split-probe stage %s expects 2 deps, got %d", stage.ID, len(stage.Dependencies))
+	expectedDeps := 2 + len(stage.FusedJoins)
+	if len(stage.Dependencies) != expectedDeps {
+		return nil, fmt.Errorf("broadcast_join split-probe stage %s expects %d deps (2 primary + %d fused), got %d",
+			stage.ID, expectedDeps, len(stage.FusedJoins), len(stage.Dependencies))
 	}
 	probeDep := stage.LeftDepStage
 	buildDep := stage.RightDepStage
@@ -1933,6 +1973,10 @@ func buildTaskInputsForBroadcastJoinSplitProbe(stage physical.Stage, upstreams m
 	if workerIdx >= 0 && workerIdx < len(parts) {
 		out[probeAlias] = parts[workerIdx]
 	}
+	// Fused build deps don't go in inputs[]; their files travel via
+	// task.FusedJoins[i].BuildFiles, populated by dispatchComputeStage.
+	// Each shard task gets the full broadcast cache for every fused build,
+	// just like the primary build.
 	return out, nil
 }
 

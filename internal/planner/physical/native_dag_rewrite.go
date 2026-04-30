@@ -26,13 +26,17 @@ func ValidateNativeDAGShape(stages []Stage) error {
 	for _, s := range stages {
 		switch s.Type {
 		case StageHashJoin, StageBroadcastJoin:
-			if len(s.Dependencies) != 2 {
-				return fmt.Errorf("native-DAG: %s stage %s has %d dependencies, expected 2 (FusedJoins should be disabled by the planner via Planner.UseEnsureDistribution; see fuseJoinStages call site)",
-					s.Type, s.ID, len(s.Dependencies))
-			}
-			if len(s.FusedJoins) > 0 {
-				return fmt.Errorf("native-DAG: %s stage %s carries %d FusedJoins which executeStageHashJoin / executeStageBroadcastJoin do not consume",
-					s.Type, s.ID, len(s.FusedJoins))
+			// A join with N FusedJoins has 2 + N dependencies: 2 for the
+			// primary join (probe + build) plus 1 build-dep per fused
+			// join. The worker's executeStageHashJoin consumes
+			// task.FusedJoins[i].BuildFiles for each; the dispatcher
+			// translates planner-side FusedJoinSpec.BuildDepStage into
+			// the wire-format BuildFiles by looking up the upstream stage
+			// output.
+			expectedDeps := 2 + len(s.FusedJoins)
+			if len(s.Dependencies) != expectedDeps {
+				return fmt.Errorf("native-DAG: %s stage %s has %d dependencies, expected %d (2 primary + %d fused)",
+					s.Type, s.ID, len(s.Dependencies), expectedDeps, len(s.FusedJoins))
 			}
 		case StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather:
 			if len(s.Dependencies) != 1 {

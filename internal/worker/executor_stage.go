@@ -296,17 +296,80 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	buildSource.Close()
 	hj.FixKeyAssignment()
 
+	// Build the probe pipeline. FusedJoin entries execute BEFORE the primary
+	// hash join because fuseJoinStages absorbs a leaf broadcast_join into
+	// its CONSUMER — i.e. the absorbed join was originally upstream of the
+	// primary in the data flow. The probe stream goes:
+	//
+	//   probeSource → fused[0].Probe → fused[1].Probe → … → primary.Probe
+	//
+	// Each fused join builds its own hash table (a broadcast cache,
+	// replicated to every shard task) and probes batches passing through,
+	// augmenting them with its build-side columns. The primary join sees
+	// the wider probe schema after all fused joins have run.
+	probeOps := make([]exec.UnaryOperator, 0, len(task.FusedJoins)+1)
+	fusedJoins := make([]*exec.HashJoin, 0, len(task.FusedJoins))
+	for i, fj := range task.FusedJoins {
+		if len(fj.JoinLeftKeys) == 0 || len(fj.JoinRightKeys) == 0 {
+			return fmt.Errorf("hash_join task %s: fused join %d missing keys", task.ID, i)
+		}
+		if len(fj.BuildFiles) == 0 {
+			// An empty broadcast cache produces no output for inner/semi
+			// joins; for anti, the entire probe passes through. Today we
+			// treat empty as "no output" since SF0.01 / SF10 broadcast
+			// chains all use inner joins. Revisit if anti chains land.
+			return e.writeStageOutput(ctx, task, nil, result)
+		}
+		fjAlias := fj.BuildTableAlias
+		if fjAlias == "" {
+			fjAlias = fmt.Sprintf("fused_build_%d", i)
+		}
+		fjBuildSrc, err := e.sourceForAlias(task.QueryID, bucket, fjAlias, fj.BuildFiles)
+		if err != nil {
+			return fmt.Errorf("hash_join task %s: fused %d build source: %w", task.ID, i, err)
+		}
+		fjType := mapJoinTypeString(fj.JoinType)
+		fjHJ := exec.NewHashJoin(fjType, fj.JoinLeftKeys, fj.JoinRightKeys)
+		fjHJ.BuildTableAlias = fj.BuildTableAlias
+		if fj.JoinFilter != "" {
+			fjHJ.SemiAntiFilter = physical.BuildSemiAntiFilter(fj.JoinFilter)
+		}
+		if e.sharedSpill != nil {
+			fjHJ.Spill = e.sharedSpill
+			fjHJ.MemTracker = e.sharedTracker
+			fjHJ.PartitionOnArrival = true
+		}
+		if err := fjBuildSrc.Init(ctx); err != nil {
+			fjBuildSrc.Close()
+			return fmt.Errorf("hash_join task %s: fused %d init build source: %w", task.ID, i, err)
+		}
+		if err := fjHJ.Build(ctx, fjBuildSrc); err != nil {
+			fjBuildSrc.Close()
+			return fmt.Errorf("hash_join task %s: fused %d building hash table: %w", task.ID, i, err)
+		}
+		fjBuildSrc.Close()
+		fjHJ.FixKeyAssignment()
+		fusedJoins = append(fusedJoins, fjHJ)
+		probeOps = append(probeOps, fjHJ.Probe())
+	}
+	// Primary probe last — the original consumer-of-fused position.
+	probeOps = append(probeOps, hj.Probe())
+	defer func() {
+		for _, fjHJ := range fusedJoins {
+			fjHJ.Close()
+		}
+	}()
+
 	// Probe pipeline with CollectSink; we post-process batches into the
 	// configured output sink. CollectSink is memory-bounded by the build
 	// spill semantics (per-worker partition of probe input).
 	// SkipFinalizeToRows: we read Batches() below, never Rows. Without
 	// this flag, Finalize materializes every probe row as map[string]any
 	// — for Q18 SF10 join-8 (~60M probe rows) that's 15+ GB of pure waste.
-	probe := hj.Probe()
 	collect := &exec.CollectSink{SkipFinalizeToRows: true}
 	pipeline := &exec.Pipeline{
 		Source: probeSource,
-		Ops:    []exec.UnaryOperator{probe},
+		Ops:    probeOps,
 		Sink:   collect,
 	}
 	if err := pipeline.Run(ctx); err != nil {
