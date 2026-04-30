@@ -71,13 +71,9 @@ func SharedPoolUnderPressure(t *memory.Tracker) bool {
 func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	progress := ProgressReporterFromContext(ctx)
 
-	// Register with the worker's cooperative-spill advisor. While Build is
-	// running this operator's partitions are reclaimable; once Build returns
-	// (and especially during probe replay of spilled partitions) we deregister
-	// so cross-operator advisories don't try to evict from a partition state
-	// the probe path is actively reading.
-	unregister := h.Spill.RegisterSpillable(h)
-	defer unregister()
+	// Spillable registration lives in Build() — both the partition-on-arrival
+	// and the legacy-flat-then-reactively-converted paths benefit from being
+	// reachable by the cooperative-spill advisor.
 
 	for {
 		if err := ctx.Err(); err != nil {

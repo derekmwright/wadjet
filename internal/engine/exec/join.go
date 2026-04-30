@@ -682,6 +682,20 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		return h.buildParallelKeyOnly(ctx, source, workers)
 	}
 
+	// Cooperative-spill registration: when the join has both a Spill manager
+	// and a MemTracker, register as a Spillable so the worker's
+	// SpillManager.RequestRelief can target this operator's partitions when
+	// another task hits Reserve failure. Registering at Build entry (rather
+	// than only in buildPartitioned) covers the legacy-flat-path-then-
+	// reactively-converted case: the operator starts with spillState=nil
+	// (SpillFootprint returns 0, RequestRelief skips it), and once
+	// spillBuildBatches reactively allocates spillState mid-build, the
+	// operator becomes a viable target without any additional registration.
+	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
+		unregister := h.Spill.RegisterSpillable(h)
+		defer unregister()
+	}
+
 	// Partition-on-arrival path: when both MemTracker and Spill are
 	// configured (the production worker config) and the caller opted in via
 	// PartitionOnArrival, bypass the legacy flat-then-reactively-partition

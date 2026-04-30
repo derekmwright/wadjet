@@ -319,6 +319,19 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	// the wider probe schema after all fused joins have run.
 	probeOps := make([]exec.UnaryOperator, 0, len(task.FusedJoins)+1)
 	fusedJoins := make([]*exec.HashJoin, 0, len(task.FusedJoins))
+	// Defer cleanup BEFORE building any fused joins so that an error
+	// partway through the loop still releases tracker reservations and
+	// closes spill files for every fjHJ that was constructed. The earlier
+	// shape (defer after the loop) leaked any fjHJ whose Init or Build
+	// failed AFTER allocation but before the success-path append — and
+	// since each fjHJ may have already reserved memory in the shared
+	// tracker via Build's first batch, that's a phantom-pool-pressure
+	// leak across the whole worker.
+	defer func() {
+		for _, fjHJ := range fusedJoins {
+			fjHJ.Close()
+		}
+	}()
 	for i, fj := range task.FusedJoins {
 		if len(fj.JoinLeftKeys) == 0 || len(fj.JoinRightKeys) == 0 {
 			return fmt.Errorf("hash_join task %s: fused join %d missing keys", task.ID, i)
@@ -352,6 +365,10 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 			// even if it was below at task entry.
 			fjHJ.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
 		}
+		// Append BEFORE Init/Build so the deferred cleanup closes fjHJ on
+		// any subsequent error. Build may reserve tracker memory on its
+		// first batch even if it later fails — Close releases it.
+		fusedJoins = append(fusedJoins, fjHJ)
 		if err := fjBuildSrc.Init(ctx); err != nil {
 			fjBuildSrc.Close()
 			return fmt.Errorf("hash_join task %s: fused %d init build source: %w", task.ID, i, err)
@@ -362,16 +379,10 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 		}
 		fjBuildSrc.Close()
 		fjHJ.FixKeyAssignment()
-		fusedJoins = append(fusedJoins, fjHJ)
 		probeOps = append(probeOps, fjHJ.Probe())
 	}
 	// Primary probe last — the original consumer-of-fused position.
 	probeOps = append(probeOps, hj.Probe())
-	defer func() {
-		for _, fjHJ := range fusedJoins {
-			fjHJ.Close()
-		}
-	}()
 
 	// Probe pipeline with CollectSink; we post-process batches into the
 	// configured output sink. CollectSink is memory-bounded by the build
