@@ -62,6 +62,17 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 		if numWorkers <= 0 {
 			numWorkers = 2 // historical default — preserves prior behavior
 		}
+		// Reclaim disk from prior crashed/timed-out runs before the disk
+		// space check. The orphan-wadjet check inside CheckPreflight will
+		// still fail if a sibling harness is running (sweeping its data
+		// would corrupt the live run); when the orphan check passes, all
+		// /tmp/wadjet-harness/run-* dirs and <dataDir>/wadjet/queries/*
+		// entries are abandoned and safe to delete. We use a 30 s
+		// pruneOlderThan as belt-and-suspenders — the just-created
+		// runDir is fresher than that and won't be swept.
+		if err := checkNoOrphanedWadjet(); err == nil {
+			SweepStaleRunArtifacts("/tmp/wadjet-harness", cfg.DataDir, 30*time.Second, logger)
+		}
 		pf := CheckPreflight(sliceCfg, runDir, numWorkers)
 		if !pf.OK {
 			return result, fmt.Errorf("preflight failed:\n  - %s", pf.Error())

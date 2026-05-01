@@ -2,6 +2,7 @@ package harness
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // PreflightResult holds the results of all preflight checks.
@@ -92,6 +94,93 @@ func checkFreeDisk(runDir string, required int64) error {
 			parent, availBytes/int64(MB), required/int64(MB))
 	}
 	return nil
+}
+
+// SweepStaleRunArtifacts removes leftover transient state from prior
+// harness runs that crashed, timed out, or otherwise didn't reach
+// the deferred cleanup paths. Called from Run() *before* CheckPreflight
+// so the disk-space check sees a clean slate.
+//
+// Two sources of leakage we observe in practice:
+//
+//   - /tmp/wadjet-harness/run-<unix>/  - per-run logs + spill + JetStream
+//     store. The harness removes it on success unless WADJET_HARNESS_KEEP=1
+//     is set, but a panic / external SIGKILL leaves it. Each abandoned
+//     SF1 run dir is several GB.
+//
+//   - <dataDir>/wadjet/queries/<query_id>/ - per-query intermediates that
+//     the coordinator's cleanupQuery now removes on completion (committed
+//     2542260), but a coordinator killed mid-flight by harness teardown
+//     never reaches that hook. Each orphan query is ~1 GB at SF1 and
+//     ~100 GB at SF10.
+//
+// Safety: the caller must invoke checkNoOrphanedWadjet first OR otherwise
+// guarantee no concurrent wadjet process is touching these paths. With
+// pruneOlderThan = 0 the function deletes everything; otherwise only
+// entries with mtime older than that threshold are removed (use this to
+// avoid sweeping a sibling harness's just-created run dir).
+func SweepStaleRunArtifacts(harnessRoot, dataDir string, pruneOlderThan time.Duration, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	cutoff := time.Now().Add(-pruneOlderThan)
+
+	sweep := func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				logger.Debug("sweep: skipping", "dir", dir, "error", err)
+			}
+			return
+		}
+		var freed int64
+		var removed int
+		for _, e := range entries {
+			full := filepath.Join(dir, e.Name())
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			if pruneOlderThan > 0 && info.ModTime().After(cutoff) {
+				continue
+			}
+			size, _ := dirBytes(full)
+			if rmErr := os.RemoveAll(full); rmErr != nil {
+				logger.Debug("sweep: remove failed", "path", full, "error", rmErr)
+				continue
+			}
+			freed += size
+			removed++
+		}
+		if removed > 0 {
+			logger.Info("swept stale harness artifacts",
+				"dir", dir, "entries_removed", removed,
+				"bytes_freed", freed)
+		}
+	}
+
+	if harnessRoot == "" {
+		harnessRoot = "/tmp/wadjet-harness"
+	}
+	sweep(harnessRoot)
+	if dataDir != "" {
+		sweep(filepath.Join(dataDir, "wadjet", "queries"))
+	}
+}
+
+// dirBytes returns the cumulative size of regular files under path.
+func dirBytes(path string) (int64, error) {
+	var total int64
+	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // best-effort
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total, err
 }
 
 // checkNoOrphanedWadjet looks for wadjet processes spawned by a prior
