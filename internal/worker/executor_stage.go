@@ -793,6 +793,18 @@ func (e *Executor) runStageAggregateStreaming(ctx context.Context, task distribu
 
 	foldAvg := task.StageType == "final_aggregate"
 
+	// Per-task progress reporter — the per-task heartbeat goroutine reads
+	// .rows on a 2s cadence and publishes TaskProgress messages that coord
+	// treats as heartbeat-equivalent liveness signals (workers.go:138).
+	// Pipeline.runSerial reports rows from the SOURCE side, but that loop
+	// has already finished by the time we drain hashAgg.Next() here. For
+	// high-cardinality aggregates (Q18 SF10 final_aggregate-46: ~15M
+	// groups per intermediate task), draining the hash-table can run for
+	// minutes; without progress reports the worker goes silent past the
+	// 90s reap window and JetStream redelivers, kicking off the Q18 reap
+	// loop seen on the 2026-05-01 v5 deploy.
+	progress := exec.ProgressReporterFromContext(ctx)
+
 	for {
 		b, err := hashAgg.Next(ctx)
 		if err != nil {
@@ -825,6 +837,9 @@ func (e *Executor) runStageAggregateStreaming(ctx context.Context, task distribu
 		}
 		if err := sink.Consume(ctx, b); err != nil {
 			return fmt.Errorf("aggregate task %s: sink consume: %w", task.ID, err)
+		}
+		if progress != nil {
+			progress.AddRows(int64(b.ActiveLen()))
 		}
 	}
 	if err := sink.Finalize(ctx); err != nil {
