@@ -271,24 +271,28 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	if e.sharedSpill != nil {
 		hj.Spill = e.sharedSpill
 		hj.MemTracker = e.sharedTracker
-		// Partition-on-arrival is opt-in based on observed shared-pool
-		// pressure at task entry. Below ~30% used, we let the join run the
-		// legacy flat path; the per-batch partitioning allocation cost
-		// (compactBatchForRows × 64 per source batch) isn't paid back when
-		// no spill is actually going to fire. At SF10 with workers_per_node=2,
-		// most broadcast-join builds at task entry are well under 30% pool
-		// — pre-2026-04-30 unconditional partition-on-arrival turned a
-		// quick 10MB build into 3,200 small allocations, GC-thrashed the
-		// worker into OOM-kill, and regressed Q02 to 22m vs 12m baseline.
-		//
-		// When pressure IS already high at task entry (concurrent build
-		// holding the pool, or a long-lived prior task), partition-on-
-		// arrival pays for itself: spill becomes O(partition) eviction
-		// instead of an O(total) flat→partitioned redistribute. If pressure
-		// rises mid-build under the flat path, spillBuildBatches still
-		// reactively converts to partitioned representation; the gate just
-		// avoids paying upfront when the pool is plentiful.
-		hj.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
+		// Partition-on-arrival policy:
+		//   - Standalone (non-fused) join: opt-in based on observed
+		//     shared-pool pressure at task entry. Below ~30% used, the
+		//     legacy flat path skips the per-batch partitioning cost
+		//     (compactBatchForRows × 64 per source batch). Without this
+		//     gate, small broadcast joins (10 MB nation, region) burn
+		//     thousands of micro-allocations for no spill benefit and
+		//     regress wall — Q02 22m incident on 2026-04-30 morning.
+		//   - Fused-chain join (this stage has FusedJoins entries): force
+		//     PartitionOnArrival regardless of entry-time pressure. The
+		//     chain holds N concurrent build hash tables × probe-split
+		//     amplification; reactive spill arrives too late, the worker
+		//     OOMs before the trigger fires. Q21 SF10 regression on
+		//     2026-04-30 deploy: peak heap 19.8 GB on a 12 GB envelope.
+		//     The amortization argument flips here too — a fused chain
+		//     by definition has cumulative cache size large enough to
+		//     pay back the partitioning cost.
+		if len(task.FusedJoins) > 0 {
+			hj.PartitionOnArrival = true
+		} else {
+			hj.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
+		}
 	}
 	// Close releases trackedMem to the shared tracker once the join is done.
 	// Without this, a non-spilling broadcast_join leaks its reservation for
@@ -360,10 +364,15 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 		if e.sharedSpill != nil {
 			fjHJ.Spill = e.sharedSpill
 			fjHJ.MemTracker = e.sharedTracker
-			// Re-check pool pressure for each fused build — by the time the
-			// primary build has run, the pool may have crossed the threshold
-			// even if it was below at task entry.
-			fjHJ.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
+			// Force partition-on-arrival for every fused-chain build —
+			// see the corresponding policy comment on the primary join
+			// above. The chain holds N hash tables in memory simultaneously;
+			// reactive spill (waiting for pool to cross 60%) arrives too late
+			// once the FIRST cache has already grown unbounded. Proactive
+			// partitioning + 60%-threshold-driven eviction keeps the per-
+			// task working set bounded by partition_count × max_partition,
+			// not by total_chain_cache_bytes.
+			fjHJ.PartitionOnArrival = true
 		}
 		// Append BEFORE Init/Build so the deferred cleanup closes fjHJ on
 		// any subsequent error. Build may reserve tracker memory on its
