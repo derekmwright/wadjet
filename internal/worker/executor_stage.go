@@ -29,7 +29,7 @@ func (e *Executor) executeStage(ctx context.Context, task distributed.Task, resu
 		return e.executeStageScan(ctx, task, result)
 	case "hash_join", "broadcast_join":
 		return e.executeStageHashJoin(ctx, task, result)
-	case "aggregate", "final_aggregate":
+	case "aggregate", "final_aggregate", "merge_aggregate":
 		return e.executeStageAggregate(ctx, task, result)
 	case "sort", "merge_sort":
 		return e.executeStageSort(ctx, task, result)
@@ -94,6 +94,25 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 				"task_id", task.ID, "shard_idx", task.ScanShardIndex, "shard_count", task.ScanShardCount)
 		}
 	}
+	// Streaming output path. When the stage's output is a single unpartitioned
+	// .wshf (no shuffle keys, no gather reply), route filtered batches into a
+	// disk-backed sink as they arrive instead of collecting them all in heap.
+	// Bounds memory at one batch + the 256 KB bufio buffer regardless of total
+	// output size.
+	//
+	// Why this matters: lineitem scan-1 at SF10 emits ~5 GB of filtered batches
+	// per task (24-200 input files × ~25 MB raw × 0.63 filter pass). The old
+	// CollectSink → writeUnpartitionedWSHF path held BOTH a slice of decoded
+	// batches AND a bytes.Buffer encoding of the same data simultaneously
+	// during upload — local repro 2026-05-01 saw two concurrent scan-1 tasks
+	// drive coord heap to 9 GB and OOM the process before the shuffle stage
+	// even began (project_q04_sf10_followup.md). The shuffle/gather paths
+	// retain the legacy collect-then-route behaviour for now; their working
+	// sets are smaller and the streaming variants land in a follow-up.
+	if len(task.ShuffleKeys) == 0 && task.ReplySubject == "" {
+		return e.runStageScanUnpartitionedStreaming(ctx, task, src, filterOps, result)
+	}
+
 	// SkipFinalizeToRows: writeStageOutput consumes Batches() directly;
 	// the ToRows materialization Finalize would otherwise do held 21 GB
 	// of live heap on Q18 SF10 (project_q18_sf10_native_dag_oom_2026-04-24).
@@ -107,6 +126,103 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 		return fmt.Errorf("scan task %s: pipeline: %w", task.ID, err)
 	}
 	return e.writeStageOutput(ctx, task, collect.Batches(), result)
+}
+
+// runStageScanUnpartitionedStreaming is the streaming variant of the scan
+// stage executor for tasks whose output is a single unpartitioned .wshf. It
+// pipes filtered batches directly into an unpartitionedStageSink and uploads
+// the resulting spill file once the pipeline drains.
+func (e *Executor) runStageScanUnpartitionedStreaming(ctx context.Context, task distributed.Task, src exec.Source, filterOps []exec.UnaryOperator, result *distributed.ResultNotification) error {
+	spillDir := filepath.Join(e.spillDir, "stage-"+task.ID)
+	if e.spillDir == "" {
+		spillDir = filepath.Join(os.TempDir(), "stage-"+task.ID)
+	}
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		return fmt.Errorf("scan task %s: creating spill dir: %w", task.ID, err)
+	}
+	defer os.RemoveAll(spillDir)
+
+	sink := newUnpartitionedStageSink(spillDir, task.ID)
+	if err := sink.Init(ctx); err != nil {
+		return fmt.Errorf("scan task %s: streaming sink init: %w", task.ID, err)
+	}
+	defer sink.Close()
+
+	pipeline := &exec.Pipeline{
+		Source: src,
+		Ops:    filterOps,
+		Sink:   sink,
+	}
+	if err := pipeline.Run(ctx); err != nil {
+		return fmt.Errorf("scan task %s: pipeline: %w", task.ID, err)
+	}
+	if err := sink.Finalize(ctx); err != nil {
+		return fmt.Errorf("scan task %s: streaming sink finalize: %w", task.ID, err)
+	}
+
+	result.NumRows = sink.TotalRows()
+	if sink.NumChunks() == 0 {
+		// Filter rejected every row — no output to upload, but the task
+		// completed successfully (matches writeStageOutput's empty-batches
+		// short-circuit).
+		return nil
+	}
+	return e.uploadUnpartitionedSpill(ctx, task, sink, result)
+}
+
+// uploadUnpartitionedSpill uploads a streaming sink's finalised file to S3,
+// populates the NATS KV fast-read cache for small payloads, and adopts the
+// file into the LocalStageCache for same-worker downstream tasks. Mirrors the
+// post-write actions in writeUnpartitionedWSHF, but reads from disk instead of
+// keeping the entire payload in heap.
+func (e *Executor) uploadUnpartitionedSpill(ctx context.Context, task distributed.Task, sink *unpartitionedStageSink, result *distributed.ResultNotification) error {
+	key := fmt.Sprintf("%s%s.wshf", task.ResultPrefix, task.ID)
+	srcPath := sink.Path()
+
+	stat, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("scan task %s: stat spill file: %w", task.ID, err)
+	}
+	size := stat.Size()
+
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("scan task %s: open spill file: %w", task.ID, err)
+	}
+	if _, err := e.store.Put(ctx, task.ResultBucket, key, f, size, "application/octet-stream"); err != nil {
+		f.Close()
+		return fmt.Errorf("scan task %s: uploading wshf: %w", task.ID, err)
+	}
+	f.Close()
+
+	result.ResultFiles = append(result.ResultFiles, key)
+	result.SizeBytes += size
+
+	// KV fast-read cache for small payloads (downstream stages on this query
+	// hit KV first, fall through to S3 on miss). Skipped for large outputs
+	// where the read cost would defeat the streaming-write savings.
+	if e.resultKV != nil && size <= natsKVResultThreshold {
+		payload, readErr := os.ReadFile(srcPath)
+		if readErr == nil {
+			kvKey := natsKVKey(key)
+			if _, putErr := e.resultKV.Put(ctx, kvKey, payload); putErr != nil {
+				e.logger.Debug("KV cache write failed (S3 already durable)",
+					"task_id", task.ID, "key", key,
+					"payload_bytes", len(payload), "err", putErr)
+			}
+		}
+	}
+
+	// Same-worker fast path: hand the spill file to the LocalStageCache. Adopt
+	// uses os.Rename, moving the file out of the spill dir into the cache's
+	// per-query directory; downstream tasks on this worker mmap it directly.
+	// On Adopt failure (cross-device rename, etc.) the file stays in spillDir
+	// and the deferred RemoveAll cleans it up — the durable S3 copy still
+	// satisfies cross-worker reads.
+	if e.localCache != nil && e.spillDir != "" {
+		e.localCache.Adopt(task.QueryID, key, srcPath)
+	}
+	return nil
 }
 
 // executeGatherStage is the native-DAG Gather task handler: reads all
@@ -587,11 +703,19 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 		outBatches = append(outBatches, b)
 	}
 	// Fold AVG synthetic columns (__avg_sum#X / __avg_count#X) into a
-	// single AVG output column named X. ONLY in merge mode: partial
-	// tasks must emit the synthetics intact so downstream merges can
-	// keep summing. See avg_fold.go and avg_decompose.go in package
+	// single AVG output column named X. ONLY on the FINAL aggregate task:
+	// partial tasks (StageType="aggregate") and intermediate-merge tasks
+	// (StageType="merge_aggregate" — used by dispatchFinalAggregateFanout
+	// for parallel merges) must emit the synthetics intact so downstream
+	// merges can keep summing. Folding too early — e.g. on every
+	// mergeMode task including the intermediates — turns the final's
+	// merge into "avg of avgs" which is mathematically wrong and breaks
+	// downstream key-equality (Q17 SF0.1: 0 rows after the fanout
+	// intermediates folded the per-l_partkey averages, then the final
+	// stage's HashAggregate failed to find the synthetic input columns
+	// it expected). See avg_fold.go and avg_decompose.go in package
 	// coordinator for the producer side.
-	if mergeMode {
+	if task.StageType == "final_aggregate" {
 		outBatches, err = applyAvgFold(outBatches)
 		if err != nil {
 			return fmt.Errorf("aggregate task %s: avg-fold: %w", task.ID, err)

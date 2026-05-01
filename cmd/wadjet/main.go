@@ -172,7 +172,18 @@ func serveCmd() *cobra.Command {
 				// Memory envelope: 75% of detected limit. Leaves 25% headroom
 				// for OS page cache, kernel buffers, and non-Go allocations.
 				// (Previous 90% left only 3 GB on 32 GB machines — not enough.)
+				//
+				// Honour an explicit GOMEMLIMIT env var when set — the harness
+				// passes a tight per-process limit (4 GB / 8 GB) to reproduce
+				// constrained-memory paths locally, and overriding it with the
+				// 75%-of-physical default would silently mask the very
+				// workloads we're testing.
 				goMemLimit := memLimit * 3 / 4
+				if envLim := os.Getenv("GOMEMLIMIT"); envLim != "" {
+					if parsed, err := strconv.ParseInt(envLim, 10, 64); err == nil && parsed > 0 {
+						goMemLimit = parsed
+					}
+				}
 				debug.SetMemoryLimit(goMemLimit)
 				// GC mode is overridable via WADJET_GOGC env var:
 				//   "off" / unset (default): rely on GOMEMLIMIT only — best for

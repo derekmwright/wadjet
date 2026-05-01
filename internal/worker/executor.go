@@ -673,65 +673,33 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		bucket = task.ResultBucket
 	}
 
-	// Per-phase timing. We attribute the shuffle task wall to source read
-	// vs. consume vs. finalize vs. upload so we can target the dominant
-	// cost. Logged on completion alongside row + size counts.
+	// Per-phase timing. With streaming, source-read and sink-consume are
+	// interleaved per batch — we capture them as a single stream_ms instead
+	// of trying to attribute time between them. finalize_ms and upload_ms
+	// remain separately measured.
 	tStart := time.Now()
-	var tReadEnd, tConsumeEnd, tFinalizeEnd time.Time
+	var tStreamEnd, tFinalizeEnd time.Time
 
-	// Read all source files into batches. Parquet inputs (table scans) use the
-	// concurrent parquet path; .wshf inputs (Phase 3 native-DAG: output of an
-	// upstream shuffle stage) stream through cachedFileStreamSource which
-	// handles both formats but reads serially. Mixed kinds within one Files
-	// list are a planner bug; classifyInputFiles surfaces that as an error.
-	fileKind, err := classifyInputFiles(task.Files)
-	if err != nil {
+	// Validate input files share a single kind early — a planner bug that
+	// mixes parquet and .wshf in one task surfaces here as a clear error.
+	if _, err := classifyInputFiles(task.Files); err != nil {
 		return fmt.Errorf("shuffle task %s: %w", task.ID, err)
 	}
 
-	var batches []*batch.RecordBatch
-	switch fileKind {
-	case inputKindParquet:
-		batches, err = e.readParquetFilesConcurrentBatches(ctx, bucket, task.Files, task.Columns)
-		if err != nil {
-			return fmt.Errorf("shuffle task %s: reading parquet source files: %w", task.ID, err)
-		}
-	case inputKindPartitioned, inputKindShuffleFlat:
-		src := newCachedFileStreamSource(e, task.QueryID, bucket, task.Files)
-		if initErr := src.Init(ctx); initErr != nil {
-			return fmt.Errorf("shuffle task %s: init wshf source: %w", task.ID, initErr)
-		}
-		defer src.Close()
-		for {
-			b, nerr := src.Next(ctx)
-			if nerr != nil {
-				return fmt.Errorf("shuffle task %s: reading wshf source: %w", task.ID, nerr)
-			}
-			if b == nil {
-				break
-			}
-			batches = append(batches, b)
-		}
-	default:
-		return fmt.Errorf("shuffle task %s: unsupported input file kind %v", task.ID, fileKind)
+	// Streaming source. cachedFileStreamSource handles parquet and .wshf
+	// alike, opening one input file at a time. The previous implementation
+	// materialised every input batch into a slice before pushing into the
+	// partitioning sink — at SF10 that meant ~3.2 GB of lineitem batches
+	// resident per shuffle task (8 × ~400 MB filtered scan outputs), which
+	// pushed Q04 workers to 8-9 GB RSS and triggered the reap cycle that
+	// stalled the query (project_q04_sf10_followup.md, 2026-04-30). With
+	// streaming, the working set is bounded by one file's batches plus the
+	// sink's per-partition bufio buffers (48 × 256 KB ≈ 12 MB).
+	src := newCachedFileStreamSourceWithProjection(e, task.QueryID, bucket, task.Files, task.Columns)
+	if err := src.Init(ctx); err != nil {
+		return fmt.Errorf("shuffle task %s: source init: %w", task.ID, err)
 	}
-	tReadEnd = time.Now()
-	if len(batches) == 0 {
-		// Source files produced no rows — nothing to upload.
-		return nil
-	}
-
-	// Extract schema from first non-empty batch.
-	var schema []parquet.Column
-	for _, b := range batches {
-		if b != nil && len(b.Schema) > 0 {
-			schema = b.Schema
-			break
-		}
-	}
-	if schema == nil {
-		return fmt.Errorf("shuffle task %s: could not determine schema from source batches", task.ID)
-	}
+	defer src.Close()
 
 	// Set up the spill directory for the sink's partition files.
 	spillDir := filepath.Join(e.spillDir, "shuffle-"+task.ID)
@@ -743,29 +711,56 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	}
 	defer os.RemoveAll(spillDir)
 
-	sink := newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, schema)
-	if err := sink.Init(ctx); err != nil {
-		return fmt.Errorf("shuffle task %s: init sink: %w", task.ID, err)
-	}
-	defer sink.Close()
+	// Per-task progress reporter — each AddRows call updates the worker's
+	// TaskProgress counter, which the worker's per-task progress goroutine
+	// reads on a 2s cadence and publishes to coord. Coord's WorkerRegistry
+	// treats those messages as heartbeat-equivalent liveness signals
+	// (workers.go:138, PR #78). Without per-batch progress here, a shuffle
+	// task processing many lineitem inputs goes silent for the entire
+	// duration; if the global heartbeat goroutine is also briefly delayed
+	// (NATS reconnect, heavy GC), coord reaps the worker after 90s and
+	// JetStream redelivers — exactly the Q03 SF10 reap loop observed on the
+	// 2026-05-01 streaming-refactor deploy.
+	progress := exec.ProgressReporterFromContext(ctx)
 
-	// Feed all batches into the sink and count rows.
+	// Sink is created lazily on the first non-empty batch — it needs the
+	// schema upfront, and discovering it from the first batch lets us avoid
+	// any pre-pass over the input.
+	var sink *partitionedShuffleSink
 	var totalRows int64
-	for _, b := range batches {
+	for {
+		b, err := src.Next(ctx)
+		if err != nil {
+			return fmt.Errorf("shuffle task %s: source next: %w", task.ID, err)
+		}
 		if b == nil {
-			continue
+			break
 		}
 		n := int64(b.ActiveLen())
 		if n == 0 {
 			continue
 		}
+		if sink == nil {
+			sink = newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, b.Schema)
+			if err := sink.Init(ctx); err != nil {
+				return fmt.Errorf("shuffle task %s: init sink: %w", task.ID, err)
+			}
+			defer sink.Close()
+		}
 		if err := sink.Consume(ctx, b); err != nil {
 			return fmt.Errorf("shuffle task %s: consuming batch: %w", task.ID, err)
 		}
 		totalRows += n
+		if progress != nil {
+			progress.AddRows(n)
+		}
 	}
 
-	tConsumeEnd = time.Now()
+	tStreamEnd = time.Now()
+	if sink == nil {
+		// Source produced no rows — nothing to upload.
+		return nil
+	}
 	if err := sink.Finalize(ctx); err != nil {
 		return fmt.Errorf("shuffle task %s: finalizing sink: %w", task.ID, err)
 	}
@@ -865,9 +860,8 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		"rows", totalRows,
 		"partitions", len(result.ResultFiles),
 		"size_bytes", result.SizeBytes,
-		"read_ms", tReadEnd.Sub(tStart).Milliseconds(),
-		"consume_ms", tConsumeEnd.Sub(tReadEnd).Milliseconds(),
-		"finalize_ms", tFinalizeEnd.Sub(tConsumeEnd).Milliseconds(),
+		"stream_ms", tStreamEnd.Sub(tStart).Milliseconds(),
+		"finalize_ms", tFinalizeEnd.Sub(tStreamEnd).Milliseconds(),
 		"upload_ms", tEnd.Sub(tFinalizeEnd).Milliseconds(),
 	)
 	return nil

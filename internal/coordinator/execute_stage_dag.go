@@ -1684,6 +1684,16 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 
 	// Phase 1: intermediates. Each consumes a slice of upstream files,
 	// re-aggregates in merge mode, and emits its own partial output.
+	// StageType="merge_aggregate" enables InputCol→OutputCol rewrite and
+	// COUNT→SUM rewrite (the merge math) but skips the AVG fold — that
+	// only fires on the FINAL task. Without this distinction, intermediate
+	// tasks would fold AVG synthetic columns (__avg_sum#X / __avg_count#X)
+	// into a single AVG column X, and the final task's HashAggregate
+	// would then attempt to merge AVG values directly (mathematically
+	// wrong: avg-of-avgs is unweighted) AND fail to find the synthetic
+	// columns it expects in its specs. Q17 SF0.1 Brand#23 MED BOX
+	// matched parts produced 0 rows because of this — bisect at
+	// 8239db4 (2026-05-01).
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	intermTasks := make([]distributed.Task, 0, N)
 	for i, group := range groups {
@@ -1692,7 +1702,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 			QueryID:      queryID,
 			StageID:      fmt.Sprintf("%s-merge-%d", stage.ID, i),
 			Type:         distributed.TaskTypeStage,
-			StageType:    "final_aggregate",
+			StageType:    "merge_aggregate",
 			GroupByCols:  stage.GroupByCols,
 			Aggregates:   aggs,
 			Inputs:       map[string][]string{depID: group},
