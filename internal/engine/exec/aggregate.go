@@ -1609,6 +1609,16 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	h.keys = append(h.keys, keyVals)
 	h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
 
+	// Keep the SoA flat accumulator length in sync with strGroupStates.
+	// processRow is called from the null-key branch of consumeBatchStrGroup
+	// (and other str-group paths) AFTER the SoA fast paths are configured;
+	// without this appendGroup, the hash table maps a new key to gsIdx N
+	// but fa.count is still len N, so the next batch's scatterCountStar
+	// indexes out of bounds. Manifested as Q21 SF1's mysterious panic.
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].appendGroup()
+	}
+
 	h.updateGroup(gs, b, row)
 }
 

@@ -2311,12 +2311,21 @@ func fuseJoinStages(stages []Stage) []Stage {
 			}
 		}
 
-		// Absorb: append the candidate's primary join + its existing fused
-		// chain to the consumer's FusedJoins. Order matters — the runtime
-		// walks FusedJoins in order, so the candidate's primary must come
-		// before the candidate's deeper fused entries (which were already in
-		// chain order from when they were absorbed into the candidate).
-		consumer.FusedJoins = append(consumer.FusedJoins, FusedJoinSpec{
+		// Absorb: PREPEND the candidate's chain (its FusedJoins followed by
+		// its primary spec) to the consumer's FusedJoins. The runtime walks
+		// FusedJoins in order, then the primary join — so the resulting
+		// runtime chain is:
+		//
+		//   probe_candidate → s.FusedJoins[0..n-1] → s.primary → consumer.original_FusedJoins → consumer.primary
+		//
+		// which matches what the un-fused DAG would compute: the candidate's
+		// stage produced (its-probe ⨝ its-fused-builds ⨝ its-primary-build)
+		// and that result was the consumer's probe input, so consumer's own
+		// chain runs after the candidate's. Pre-fix this code APPENDED
+		// (placing s.primary AFTER consumer.original_FusedJoins) which
+		// silently re-ordered joins and caused empty result sets on Q02 + Q05
+		// at SF1.
+		spec := FusedJoinSpec{
 			JoinType:        s.JoinType,
 			JoinLeftKeys:    s.JoinLeftKeys,
 			JoinRightKeys:   s.JoinRightKeys,
@@ -2324,8 +2333,12 @@ func fuseJoinStages(stages []Stage) []Stage {
 			BuildTableAlias: s.BuildTableAlias,
 			JoinFilter:      s.JoinFilter,
 			FilterExprs:     s.FilterExprs,
-		})
-		consumer.FusedJoins = append(consumer.FusedJoins, s.FusedJoins...)
+		}
+		merged := make([]FusedJoinSpec, 0, len(s.FusedJoins)+1+len(consumer.FusedJoins))
+		merged = append(merged, s.FusedJoins...)
+		merged = append(merged, spec)
+		merged = append(merged, consumer.FusedJoins...)
+		consumer.FusedJoins = merged
 
 		// Rewire: consumer's dependency on this stage → dependency on this stage's probe dep
 		for k, dep := range consumer.Dependencies {
