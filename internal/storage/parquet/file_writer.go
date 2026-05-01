@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"time"
 
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/snappy"
@@ -1120,6 +1121,16 @@ func toInt64(v any, colType TypeID) int64 {
 		return int64(t)
 	case string:
 		return convertStringToInt64(t, colType)
+	case time.Time:
+		// TypeTimestamp / TypeDuration land here when ingest hands a time.Time
+		// directly. The parquet schema declares TypeTimestamp as
+		// TimestampMillis (file_writer.go:813), so encode in milliseconds —
+		// otherwise the row group stores 0 from the default branch and every
+		// query against the column reads zeros (TestTimestampStringComparison
+		// surfaced this: `event_time >= '<literal>'` returned 0 rows because
+		// every column value was 0). TypeDate has its own pre-converter in
+		// writer.go::prepareRows; it never reaches this fall-through.
+		return t.UnixMilli()
 	default:
 		return 0
 	}
