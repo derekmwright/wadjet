@@ -577,6 +577,17 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 		}
 		outBatches = append(outBatches, b)
 	}
+	// Fold AVG synthetic columns (__avg_sum#X / __avg_count#X) into a
+	// single AVG output column named X. ONLY in merge mode: partial
+	// tasks must emit the synthetics intact so downstream merges can
+	// keep summing. See avg_fold.go and avg_decompose.go in package
+	// coordinator for the producer side.
+	if mergeMode {
+		outBatches, err = applyAvgFold(outBatches)
+		if err != nil {
+			return fmt.Errorf("aggregate task %s: avg-fold: %w", task.ID, err)
+		}
+	}
 	outBatches, err = applyPostFilter(ctx, task, outBatches)
 	if err != nil {
 		return fmt.Errorf("aggregate task %s: %w", task.ID, err)

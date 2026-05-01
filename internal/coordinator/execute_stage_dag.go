@@ -891,31 +891,20 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	if workerCount <= 0 {
 		workerCount = 1
 	}
-	// AVG cannot merge across partials without decomposing into
-	// sum+count pair — taking the average of per-partition averages
-	// silently produces wrong values (unweighted mean). Until AVG
-	// partial decomposition lands, fall back to a single task so the
-	// whole aggregate runs on one worker and the merge step is a
-	// pass-through. Loses parallelism for AVG queries (Q01 is the
-	// notable one) but preserves correctness.
-	avgFallback := false
-	for _, a := range stage.FusedAggSpecs {
-		if strings.EqualFold(strings.TrimSpace(a.Func), "avg") {
-			c.logger.Info("scan-aggregate AVG fallback: single-task",
-				"stage_id", stage.ID, "func", a.Func)
-			workerCount = 1
-			avgFallback = true
-			break
-		}
-	}
-	// Same fan-out widening as dispatchScanFilterStage: prefer cluster capacity
-	// over raw worker count so each task stays inside the per-worker memory
-	// budget. AVG fallback intentionally stays at 1 task.
+	// AVG cannot directly merge across partials (avg-of-averages is
+	// arithmetically wrong) but it CAN be decomposed into per-partition
+	// SUM and COUNT, which DO merge correctly. decomposeAvg expands
+	// every AVG spec into (SUM, COUNT) twin specs with synthetic output
+	// names — the worker's post-merge fold (avg_fold.go in package
+	// worker) reconstructs AVG = SUM/COUNT after the final_aggregate
+	// stage merges the partials. With this in place there's no
+	// reason to fall back to single-task on AVG queries; Q01 SF10
+	// drops from a single-worker scan of 60M rows to N-way fan-out.
 	taskCount := workerCount
 	capacity := c.workers.ClusterCapacity()
 	var fileSets [][]string
 	var shardCount int
-	if !avgFallback && len(stage.ScanFiles) == 1 {
+	if len(stage.ScanFiles) == 1 {
 		shardCount = scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes)
 	}
 	if shardCount > 1 {
@@ -928,9 +917,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		}
 		taskCount = shardCount
 	} else {
-		if !avgFallback {
-			taskCount = scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
-		}
+		taskCount = scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
 		fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
 	}
 	actualTasks := len(fileSets)
@@ -947,7 +934,11 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		"tasks", actualTasks, "group_by", stage.FusedAggGroupBy,
 		"shard_count", shardCount)
 
-	// Convert AggSpec → wire format once.
+	// Convert AggSpec → wire format once. decomposeAvg expands AVG into
+	// SUM+COUNT pairs so the partial fan-out can run in parallel; the
+	// worker's avg-fold step (executor_stage.go in package worker) folds
+	// the synthetic columns back into AVG after the downstream
+	// final_aggregate stage merges the partials.
 	var aggs []distributed.AggSpec
 	for _, a := range stage.FusedAggSpecs {
 		aggs = append(aggs, distributed.AggSpec{
@@ -957,6 +948,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			InputExpr: a.InputExpr,
 		})
 	}
+	aggs = decomposeAvg(aggs)
 
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
@@ -1379,7 +1371,10 @@ func (c *Coordinator) dispatchComputeStage(
 		if err != nil {
 			return StageOutput{}, fmt.Errorf("stage %s worker %d: %w", stage.ID, w, err)
 		}
-		// Convert stage.AggSpecs → distributed.AggSpec.
+		// Convert stage.AggSpecs → distributed.AggSpec, decomposing AVG
+		// into (SUM, COUNT) pairs so the merge step sees only mergable
+		// aggregates. The worker's avg-fold (executor_stage.go) reads
+		// the synthetic columns and emits the original AVG output names.
 		var aggs []distributed.AggSpec
 		for _, a := range stage.AggSpecs {
 			aggs = append(aggs, distributed.AggSpec{
@@ -1389,6 +1384,7 @@ func (c *Coordinator) dispatchComputeStage(
 				InputExpr: a.InputExpr,
 			})
 		}
+		aggs = decomposeAvg(aggs)
 		// Convert stage.SortKeys → distributed.SortKeySpec.
 		var sorts []distributed.SortKeySpec
 		for _, s := range stage.SortKeys {
@@ -1581,9 +1577,12 @@ func (c *Coordinator) dispatchComputeStage(
 
 // finalAggregateFanoutCandidate reports whether a stage qualifies for
 // dispatchFinalAggregateFanout: a Singleton final_aggregate over multiple
-// upstream files with parallel workers available, none of whose AggSpecs
-// is AVG (which can't decompose without separate sum/count partials —
-// dispatchScanAggregateStage handles the same constraint).
+// upstream files with parallel workers available.
+//
+// AVG was historically excluded here for the same reason
+// dispatchScanAggregateStage forced single-task on AVG. With decomposeAvg
+// (avg_decompose.go) handling the (SUM, COUNT) split + worker post-merge
+// fold, AVG fan-out is now correct and the guard is gone.
 //
 // Returns the (single) dep ID and the flattened upstream file list when it
 // qualifies; nil otherwise so callers fall through to the standard
@@ -1609,11 +1608,6 @@ func finalAggregateFanoutCandidate(
 		// rewrites them when the upstream count is small. Don't double-
 		// fan-out by re-splitting at dispatch.
 		return "", nil, false
-	}
-	for _, a := range stage.AggSpecs {
-		if strings.EqualFold(strings.TrimSpace(a.Func), "avg") {
-			return "", nil, false
-		}
 	}
 	depID = stage.Dependencies[0]
 	in, present := inputs[depID]
@@ -1681,6 +1675,12 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 			InputExpr: a.InputExpr,
 		})
 	}
+	// Decompose AVG specs into (SUM, COUNT) pairs. Both intermediates
+	// and the final task get the decomposed list; the worker's avg-fold
+	// step reconstructs AVG only on the FINAL task (mergeMode), so
+	// intermediate output schemas carry the synthetic columns end-to-
+	// end up to the final's fold.
+	aggs = decomposeAvg(aggs)
 
 	// Phase 1: intermediates. Each consumes a slice of upstream files,
 	// re-aggregates in merge mode, and emits its own partial output.
