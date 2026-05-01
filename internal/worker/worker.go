@@ -219,6 +219,18 @@ func (w *Worker) Start(ctx context.Context) error {
 					"query_id", queryID, "entries", n)
 			}
 		}
+		// Also drop in-memory ResultStore entries for this query.
+		// Without this, every shuffle output that the coordinator
+		// fix `2c22e08` populates into ResultStore stays resident
+		// past the query's lifetime, eating per-worker envelope
+		// across queries. Caught at SF10 Q04 (2026-04-30 deploy):
+		// shuffle outputs from Q01-Q03 stayed in ResultStore,
+		// the per-process pool (9.6 GB shared + 512 MB ResultStore
+		// + 1 GB LRU + working set) ran out, GC-thrashed, the same
+		// task got reaped 10+ times.
+		if w.executor.resultStore != nil {
+			w.executor.resultStore.CleanupQuery(queryID)
+		}
 	})
 	if err != nil {
 		return fmt.Errorf("subscribing to completions: %w", err)
