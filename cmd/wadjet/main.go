@@ -978,6 +978,17 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	select {
 	case <-ctx.Done():
 		logger.Info("shutting down...")
+		// Reap query intermediates before exit. In-flight queries are
+		// dying with us, so their queries/<id>/* prefix on the data
+		// store would otherwise leak — the per-query cleanupQuery hook
+		// only fires on graceful completion. Best-effort with a 3 s cap
+		// so SIGTERM->SIGKILL still completes within the harness's 5 s
+		// shutdown deadline.
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 3*time.Second)
+		if cleaner := coord.Cleaner(store, bucket); cleaner != nil {
+			_, _ = cleaner.CleanAll(cleanupCtx)
+		}
+		cancelCleanup()
 		coord.Workers().Close()
 		pgSrv.Shutdown()
 		grpcSrv.Shutdown()
@@ -1183,6 +1194,14 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	select {
 	case <-ctx.Done():
 		logger.Info("coordinator shutting down...")
+		// Same shutdown reap as standalone (see standalone path comment).
+		// In-flight queries die with us; their queries/<id>/* prefix would
+		// otherwise leak.
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), 3*time.Second)
+		if cleaner := coord.Cleaner(store, bucket); cleaner != nil {
+			_, _ = cleaner.CleanAll(cleanupCtx)
+		}
+		cancelCleanup()
 		coord.Workers().Close()
 		grpcSrv.Shutdown()
 		srv.Shutdown(context.Background())
