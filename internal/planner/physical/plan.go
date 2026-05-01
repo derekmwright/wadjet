@@ -4131,11 +4131,6 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 	}
 
-	// CSE: deduplicate identical computed expressions across projections.
-	// When the same expression appears multiple times (e.g., EXTRACT(year FROM date)
-	// in both SELECT and ORDER BY), compute it once and reuse via ColumnRef.
-	projExprDedup := make(map[string]string) // expr string → first output column name
-
 	var projCols []exec.ProjectColumn
 	for _, proj := range node.Projections {
 		colRef := proj.Column
@@ -4203,30 +4198,37 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 		}
 
 		if expression == nil && proj.ASTExpr != nil && !proj.IsAgg {
-			// CSE: if we already compiled this exact expression for a prior
-			// projection column, reuse it via a ColumnRef instead of re-evaluating.
-			exprKey := proj.ASTExpr.String()
-			if prevCol, ok := projExprDedup[exprKey]; ok {
-				expression = exec.ColumnRef(prevCol)
-			} else {
-				outerTables := collectTableAliases(child)
-				outerCols := collectOuterColumns(child)
-				var compiled expr.Expr
-				var compErr error
-				if len(outerTables) > 0 {
-					if len(outerCols) > 0 {
-						compiled, compErr = expr.CompileWithFullScope(proj.ASTExpr, p.subqueryRunner, outerTables, outerCols)
-					} else {
-						compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
-					}
+			// CSE within a single Project operator is unsafe: prevCol below
+			// is the OUTPUT column name of an earlier projection, but at
+			// runtime each ColumnRef is resolved against the INPUT batch's
+			// schema — which doesn't yet have the earlier output column.
+			// Pointing the duplicate at prevCol resolves to NULL at every
+			// row (e.g. `SELECT 1 AS n, 0 AS a, 1 AS b` produced
+			// {n: 1, a: 0, b: NULL} because the second `1` literal mapped
+			// to ColumnRef("n") and n wasn't in the input — regression
+			// surfaced by TestRecursiveCTE_Fibonacci).
+			//
+			// Safe CSE for SELECT-list duplicates would require either
+			// (a) materialising shared expressions as a synthetic column
+			// the Project then references, or (b) compiling each
+			// projection independently. (b) is what we do — recompiling
+			// a literal or already-compiled expression is cheap.
+			outerTables := collectTableAliases(child)
+			outerCols := collectOuterColumns(child)
+			var compiled expr.Expr
+			var compErr error
+			if len(outerTables) > 0 {
+				if len(outerCols) > 0 {
+					compiled, compErr = expr.CompileWithFullScope(proj.ASTExpr, p.subqueryRunner, outerTables, outerCols)
 				} else {
-					compiled, compErr = expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
+					compiled, compErr = expr.CompileWithScope(proj.ASTExpr, p.subqueryRunner, outerTables)
 				}
-				if compErr == nil {
-					expression = wrapExpr(compiled)
-					compiledExpr = compiled
-					projExprDedup[exprKey] = name
-				}
+			} else {
+				compiled, compErr = expr.CompileWithRunner(proj.ASTExpr, p.subqueryRunner)
+			}
+			if compErr == nil {
+				expression = wrapExpr(compiled)
+				compiledExpr = compiled
 			}
 		}
 		isDirectCopy := expression == nil
