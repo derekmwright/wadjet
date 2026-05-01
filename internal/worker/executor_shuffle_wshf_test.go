@@ -103,6 +103,10 @@ func TestExecuteShuffle_WSHFInput(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %q: %v", key, err)
 		}
+		data, err = DecompressShuffleData(data)
+		if err != nil {
+			t.Fatalf("decompress %q: %v", key, err)
+		}
 		rdr, err := newShuffleChunkReader(data)
 		if err != nil {
 			t.Fatalf("reader %q: %v", key, err)

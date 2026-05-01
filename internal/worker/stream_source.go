@@ -356,29 +356,29 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 		}
 	}()
 
-	// We already consumed the magic bytes from rc; write them back first.
-	if _, err := tmp.Write(magic); err != nil {
-		return fmt.Errorf("writing magic to local cache: %w", err)
-	}
-
+	// The local file must hold a plain-WSHF stream because the chunk reader
+	// only knows the WSHF magic. For a compressed (WSHC) input the s2 stream
+	// already encodes the original WSHF body — including its own WSHF magic
+	// — so we write nothing yet and let streamDecompressShuffle below produce
+	// the entire WSHF stream. For a plain (WSHF) input we re-prepend the
+	// magic that we already consumed from rc.
 	rep := exec.ProgressReporterFromContext(ctx)
-	if rep != nil {
-		rep.AddBytes(int64(len(magic)))
-	}
 	dst := io.Writer(tmp)
 	if rep != nil {
 		dst = &progressWriter{w: tmp, rep: rep}
 	}
 
 	if compressed {
-		// Stream-decompress the body. After writing the WSHF magic to disk,
-		// the body is the s2 stream that follows the WSHC magic. The shuffle
-		// reader expects a plain WSHF file, so we transcode here.
 		if err := streamDecompressShuffle(rc, dst); err != nil {
 			return fmt.Errorf("decompressing %s into local cache: %w", srcPath, err)
 		}
 	} else {
-		// Plain WSHF: just stream the body to disk.
+		if _, err := tmp.Write(magic); err != nil {
+			return fmt.Errorf("writing magic to local cache: %w", err)
+		}
+		if rep != nil {
+			rep.AddBytes(int64(len(magic)))
+		}
 		if _, err := io.Copy(dst, rc); err != nil {
 			return fmt.Errorf("streaming %s to local cache: %w", srcPath, err)
 		}

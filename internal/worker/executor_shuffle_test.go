@@ -96,6 +96,10 @@ func TestExecuteShuffle_HappyPath(t *testing.T) {
 		if err != nil {
 			t.Fatalf("reading back %q data: %v", key, err)
 		}
+		data, err = DecompressShuffleData(data)
+		if err != nil {
+			t.Fatalf("decompressing %q: %v", key, err)
+		}
 		r, err := newShuffleChunkReader(data)
 		if err != nil {
 			t.Fatalf("parsing %q: %v", key, err)
@@ -173,6 +177,10 @@ func TestExecuteShuffle_ColumnProjection(t *testing.T) {
 		}
 		if len(data) == 0 {
 			continue
+		}
+		data, err = DecompressShuffleData(data)
+		if err != nil {
+			t.Fatalf("decompressing %q: %v", key, err)
 		}
 		r, err := newShuffleChunkReader(data)
 		if err != nil {
@@ -302,6 +310,10 @@ func TestExecuteShuffle_SchemaRoundTrip(t *testing.T) {
 		}
 		if len(data) == 0 {
 			continue
+		}
+		data, err = DecompressShuffleData(data)
+		if err != nil {
+			t.Fatalf("decompressing %q: %v", key, err)
 		}
 		r, err := newShuffleChunkReader(data)
 		if err != nil {

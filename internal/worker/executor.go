@@ -814,13 +814,26 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 				return
 			}
 
-			if _, uploadErr := e.store.Put(ctx, task.ResultBucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); uploadErr != nil {
+			// Compress with S2 before upload. Downstream readers (cached
+			// file source, readInputFilesBatches) detect the WSHC magic and
+			// stream-decompress on the fly. CompressShuffleData returns the
+			// original bytes if the compressed output is not >=10% smaller,
+			// so compressible TPC-H data wins and incompressible data is
+			// untouched. On Q18 SF1 shuffle-17 (lineitem joined+filtered),
+			// 800 MB raw compresses to ~250 MB with S2 — saves ~500 MB
+			// across the upload, the FileStore write, and the downstream
+			// download.
+			compressed := CompressShuffleData(data)
+
+			if _, uploadErr := e.store.Put(ctx, task.ResultBucket, key, bytes.NewReader(compressed), int64(len(compressed)), "application/octet-stream"); uploadErr != nil {
 				partResults[p] = partResult{err: fmt.Errorf("uploading partition %d: %w", p, uploadErr)}
 				return
 			}
 
+			// Cache the compressed bytes — the reader path will detect the
+			// WSHC header and stream-decompress, so this is transparent.
 			if e.resultStore != nil {
-				e.resultStore.Put(task.QueryID, key, data)
+				e.resultStore.Put(task.QueryID, key, compressed)
 			}
 
 			if removeErr := os.Remove(localPath); removeErr != nil {
