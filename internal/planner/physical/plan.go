@@ -2185,29 +2185,26 @@ func buildSideBytes(stages []Stage, joinStage *Stage) int64 {
 // Example: join-A (lineitem ⨝ part) → join-B (broadcast_join with nation)
 // becomes: join-A with FusedJoins=[nation join spec], join-B removed.
 //
-// FUSION DEPTH CONSTRAINT
+// FUSION DEPTH AND BYTE BUDGET
 //
-// Each consumer absorbs at most ONE leaf broadcast join (the
-// `len(s.FusedJoins) > 0` skip below). For a long chain of broadcast joins
-// the result is each pair gets fused but no consumer absorbs deeper than
-// depth-2 (one fused entry + its primary). This is intentional, not a TODO.
+// Multi-level fusion is allowed when the cumulative build-side bytes on the
+// consumer (its primary build, if broadcast_join, plus every existing fused
+// build, plus the candidate's primary build, plus the candidate's existing
+// fused builds) stays below maxFusedBuildBytes. The check exists because
+// under probe-split each shard task loads ALL caches the fused stage
+// references — a chain of M fused builds means each shard reads M cache
+// files, so the cluster-wide S3/store amplification is workerCount × M ×
+// per-build-bytes. Capping the cumulative byte total caps the amplification
+// regardless of M.
 //
-// Why bounded depth: under probe-split (broadcastJoinProbeSplit), the fused
-// stage runs as N parallel shard tasks, each of which loads the FULL
-// broadcast cache for every fused build. With M fused entries and N shards,
-// each shard reads M cache files; total cluster S3 reads scale as
-// workerCount × M. Bounding M at 1 keeps the amplification factor at
-// workerCount, identical to what unfused chains pay through the same
-// probe-split path. Allowing deeper fusion (M ≥ 2) would multiply broadcast
-// cache S3 reads by M without commensurate compute benefit, since each
-// shard still has to wait for all caches to load before probing.
-//
-// If a future change wants deeper fusion (e.g. for star schemas with many
-// tiny dimension tables where cache amplification is acceptable), enforce
-// a per-stage byte budget here: do not absorb when the cumulative
-// EstimatedBytes of the consumer's existing FusedJoins plus the new
-// candidate would exceed `MaxFusedBuildBytes` (a planner config). The
-// safe default is "fail closed" — keep depth-1 unless explicitly opted in.
+// Pre-2026-04-30 the implementation hard-capped at depth 1 (a single fused
+// entry per consumer) by skipping any candidate that already had FusedJoins.
+// That excluded star-schema queries with multiple tiny dimension tables
+// (nation, region, supplier) where the cumulative build size is well under
+// the budget but the dispatch overhead of N separate broadcast stages is the
+// dominant cost. The new cumulative-bytes check fails closed: when
+// EstimatedBytes is unknown for any participant we treat it as conservative
+// and do NOT extend the fusion past depth 1.
 func fuseJoinStages(stages []Stage) []Stage {
 	stageByID := make(map[string]*Stage, len(stages))
 	for i := range stages {
@@ -2229,15 +2226,34 @@ func fuseJoinStages(stages []Stage) []Stage {
 		}
 	}
 
+	// cumulativeBuildBytes is the sum of EstimatedBytes for every cache the
+	// given stage will load: its primary build (only for broadcast_join — a
+	// hash_join shuffles its build side), plus the build-side scan behind
+	// each entry in FusedJoins. Returns -1 when ANY participant has unknown
+	// (zero) EstimatedBytes — forces the conservative path so we don't
+	// silently approve a chain that might exceed the budget.
+	cumulativeBuildBytes := func(s *Stage) int64 {
+		var total int64
+		if s.Type == "broadcast_join" {
+			pb := buildSideBytes(stages, s)
+			if pb <= 0 {
+				return -1
+			}
+			total += pb
+		}
+		for _, fj := range s.FusedJoins {
+			b := fusedSpecBuildBytes(stages, fj)
+			if b <= 0 {
+				return -1
+			}
+			total += b
+		}
+		return total
+	}
+
 	for i := range stages {
 		s := &stages[i]
 		if s.Type != "broadcast_join" {
-			continue
-		}
-		// Only absorb leaf broadcast joins (no existing fused joins).
-		// Deep fusion chains are fragile and unnecessary — single-level
-		// handles the important case (small dimension tables like nation).
-		if len(s.FusedJoins) > 0 {
 			continue
 		}
 		// Only fuse if exactly one consumer depends on this stage
@@ -2268,26 +2284,38 @@ func fuseJoinStages(stages []Stage) []Stage {
 			continue
 		}
 
-		// Safety guard: don't fuse when the leaf broadcast's build-side
-		// upstream is so large that loading its cache from every probe-
-		// split shard would dominate the query's S3 bandwidth. Each shard
-		// of a downstream probe-split task reads the FULL fused cache
-		// regardless of how many probe rows it gets, so a pathological
-		// case is N shards × M fused × K-byte caches.
-		//
-		// Threshold: 1 GB per fused build by default. Skipping fusion in
-		// this case leaves the broadcast as its own stage, which gives
-		// the coordinator the option to materialize once and broadcast via
-		// NATS-KV (small caches) or to run a separate probe-split per
-		// stage (each independently sized to its own probe). Either way,
-		// the per-fused-stage I/O is unaffected by amplification through a
-		// chain of fused entries.
-		if buildBytes := buildSideBytes(stages, s); buildBytes > maxFusedBuildBytes {
+		// Cumulative byte budget: cap total cache amplification across the
+		// fused chain. Required because each probe-split shard loads every
+		// cache the consumer references — see comment on fuseJoinStages.
+		// Backwards-compat fallback: when the candidate has no existing
+		// FusedJoins (the historical depth-1 case) we still allow the fuse
+		// based only on the candidate's primary build size, even if the
+		// consumer's existing chain has unknown bytes — preserves the
+		// historical fusion shape in the absence of cardinality estimates.
+		candidateBytes := buildSideBytes(stages, s) + sumFusedBytes(stages, s.FusedJoins)
+		if candidateBytes <= 0 {
 			continue
 		}
+		if candidateBytes > maxFusedBuildBytes {
+			continue
+		}
+		if len(s.FusedJoins) > 0 || len(consumer.FusedJoins) > 0 {
+			// Multi-level fusion path — require known cumulative bytes for
+			// both consumer + candidate and check the sum.
+			cb := cumulativeBuildBytes(consumer)
+			if cb < 0 {
+				continue
+			}
+			if cb+candidateBytes > maxFusedBuildBytes {
+				continue
+			}
+		}
 
-		// Absorb: move this broadcast join's spec into the consumer as a FusedJoin.
-		// The consumer's probe stream will be chained through this join.
+		// Absorb: append the candidate's primary join + its existing fused
+		// chain to the consumer's FusedJoins. Order matters — the runtime
+		// walks FusedJoins in order, so the candidate's primary must come
+		// before the candidate's deeper fused entries (which were already in
+		// chain order from when they were absorbed into the candidate).
 		consumer.FusedJoins = append(consumer.FusedJoins, FusedJoinSpec{
 			JoinType:        s.JoinType,
 			JoinLeftKeys:    s.JoinLeftKeys,
@@ -2297,6 +2325,7 @@ func fuseJoinStages(stages []Stage) []Stage {
 			JoinFilter:      s.JoinFilter,
 			FilterExprs:     s.FilterExprs,
 		})
+		consumer.FusedJoins = append(consumer.FusedJoins, s.FusedJoins...)
 
 		// Rewire: consumer's dependency on this stage → dependency on this stage's probe dep
 		for k, dep := range consumer.Dependencies {
@@ -2315,9 +2344,18 @@ func fuseJoinStages(stages []Stage) []Stage {
 			}
 		}
 
-		// Add the build-side dependency of the fused join to consumer's deps
+		// Add the candidate's build-side dependency to consumer.Dependencies,
+		// plus any deps that came from the candidate's existing fused chain.
+		// Without these, the coordinator can't see the build-side stages as
+		// upstream dependencies of the fused consumer and may schedule it
+		// before its caches are ready.
 		if s.RightDepStage != "" {
 			consumer.Dependencies = append(consumer.Dependencies, s.RightDepStage)
+		}
+		for _, fj := range s.FusedJoins {
+			if fj.BuildDepStage != "" {
+				consumer.Dependencies = append(consumer.Dependencies, fj.BuildDepStage)
+			}
 		}
 
 		absorbed[s.ID] = true
@@ -2335,6 +2373,53 @@ func fuseJoinStages(stages []Stage) []Stage {
 		}
 	}
 	return result
+}
+
+// fusedSpecBuildBytes is buildSideBytes for a FusedJoinSpec — walks the
+// stages slice to find the BuildDepStage scan and returns its EstimatedBytes.
+// Returns 0 (unknown) when the build subtree shape doesn't match the
+// expected join → [exchange-replicate] → scan pattern, matching
+// buildSideBytes' fail-closed convention.
+func fusedSpecBuildBytes(stages []Stage, fj FusedJoinSpec) int64 {
+	if fj.BuildDepStage == "" {
+		return 0
+	}
+	for _, s := range stages {
+		if s.ID != fj.BuildDepStage {
+			continue
+		}
+		if s.Type == "scan" {
+			return s.EstimatedBytes
+		}
+		if s.Type == StageExchangeReplicate && len(s.Dependencies) == 1 {
+			for _, t := range stages {
+				if t.ID == s.Dependencies[0] && t.Type == "scan" {
+					return t.EstimatedBytes
+				}
+			}
+		}
+		return 0
+	}
+	return 0
+}
+
+// sumFusedBytes returns the cumulative build-side bytes across a slice of
+// fused specs, using fusedSpecBuildBytes per entry. Returns -1 when any
+// participant's bytes are unknown — forces the cumulative-budget check to
+// fall back to the conservative depth-1 path.
+func sumFusedBytes(stages []Stage, specs []FusedJoinSpec) int64 {
+	if len(specs) == 0 {
+		return 0
+	}
+	var total int64
+	for _, fj := range specs {
+		b := fusedSpecBuildBytes(stages, fj)
+		if b <= 0 {
+			return -1
+		}
+		total += b
+	}
+	return total
 }
 
 // resolveShuffleKey resolves a join key name through any Project alias nodes
