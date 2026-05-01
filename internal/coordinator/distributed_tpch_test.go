@@ -615,8 +615,14 @@ func setupTPCHDistributedPolars(t *testing.T) (context.Context, *Coordinator) {
 //	      --region us-east-2; done
 func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 	const sampleDir = "/tmp/sf100-sample"
-	if _, err := os.Stat(sampleDir); os.IsNotExist(err) {
-		t.Skipf("SF100 sample dir %s missing — see test comment for setup", sampleDir)
+	// The skip condition has to check for the actual sample files, not just
+	// the directory: the harness's local-mode SF1/SF10 generator also lives
+	// under /tmp/sf100-sample (under /tmp/sf100-sample/wadjet/tables/...) so
+	// stat-ing the bare dir succeeds even when this test's specific Polars
+	// sample files (region-0_0.parquet etc.) are absent. Probing for the
+	// canonical first file makes the skip robust.
+	if _, err := os.Stat(sampleDir + "/region-0_0.parquet"); os.IsNotExist(err) {
+		t.Skipf("SF100 sample files missing in %s — see test comment for setup", sampleDir)
 	}
 
 	origMinBytes := physical.ProbeSplitMinBytes
@@ -850,8 +856,12 @@ func sf100SampleCluster(t *testing.T, memoryBudget int64) (context.Context, *Coo
 func sf100SampleClusterN(t *testing.T, memoryBudget int64, wantWorkers, maxConcurrent int) (context.Context, *Coordinator) {
 	t.Helper()
 	const sampleDir = "/tmp/sf100-sample"
-	if _, err := os.Stat(sampleDir); os.IsNotExist(err) {
-		t.Skipf("SF100 sample dir %s missing — see TestDistributedTPCHBuildCacheSF100Sample for setup", sampleDir)
+	// Probe for a specific sample file rather than just the dir — the
+	// harness's local-mode generator also lives under /tmp/sf100-sample
+	// (under /tmp/sf100-sample/wadjet/tables/) so a bare-dir stat succeeds
+	// even when these tests' Polars sample files are absent.
+	if _, err := os.Stat(sampleDir + "/region-0_0.parquet"); os.IsNotExist(err) {
+		t.Skipf("SF100 sample files missing in %s — see TestDistributedTPCHBuildCacheSF100Sample for setup", sampleDir)
 	}
 
 	origMinBytes := physical.ProbeSplitMinBytes

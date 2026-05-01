@@ -350,6 +350,13 @@ locals {
     export WADJET_REVERSE_BLOOM_INNER_THRESHOLD="${var.reverse_bloom_inner_threshold}"
     export WADJET_JOIN_DEBUG="${var.join_debug}"
     export USE_NATIVE_DAG="${var.use_native_dag ? "1" : "0"}"
+    # Force GOGC=100 so heap is bounded by 2x live data instead of growing to
+    # GOMEMLIMIT before triggering mark-assist. Without this, scan-3 SF10
+    # tasks accumulated parquet-decode garbage to ~10 GB peak heap before
+    # GC fired; the resulting mark-assist starved the heartbeat goroutine
+    # for >90s and the coord reaped workers, kicking off the Q03 redelivery
+    # loop observed on the 2026-05-01 streaming-refactor deploy.
+    export WADJET_GOGC=100
     ${local.profile_env}
     cd /root/wadjet
 
@@ -542,6 +549,7 @@ resource "aws_instance" "worker" {
         systemd-run --quiet --unit="wadjet-worker-$idx-$$-$(date +%s)" \
           --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$PER_PROC_GOMEMLIMIT" \
           --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
+          --setenv="WADJET_GOGC=100" \
           /usr/local/bin/wadjet serve \
             --mode=worker \
             --nats-url="nats://$COORD_IP:4222" \
