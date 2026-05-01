@@ -689,6 +689,25 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	if err := pipeline.Run(ctx); err != nil {
 		return fmt.Errorf("aggregate task %s: pipeline: %w", task.ID, err)
 	}
+
+	// Streaming output path: when this aggregate emits a single unpartitioned
+	// .wshf (no shuffle keys, no gather reply, no post-sort), drain
+	// HashAggregate's output one batch at a time and pipe directly into a
+	// disk-backed sink. AVG fold (final_aggregate only) and post-filter run
+	// inline per batch; post-sort would require buffering all batches so it
+	// forces the legacy collect path.
+	//
+	// Why it matters: high-cardinality scan-aggregate stages (Q18 SF10
+	// scan-7 with group_by=l_orderkey, ~15M groups across the cluster)
+	// emit hundreds of MB of partial-aggregate rows per task. The legacy
+	// `outBatches` slice + writeUnpartitionedWSHF bytes.Buffer doubled
+	// the footprint and added enough heap pressure to push workers past
+	// GoMemLimit, which mark-assist-stalled the heartbeat goroutine and
+	// triggered the Q18 reap loop on the 2026-05-01 v3 deploy.
+	if len(task.ShuffleKeys) == 0 && task.ReplySubject == "" && len(task.SortKeys) == 0 {
+		return e.runStageAggregateStreaming(ctx, task, hashAgg, mergeMode, result)
+	}
+
 	// HashAggregate acts as a source after the sink run: drain its output
 	// batches via Next.
 	var outBatches []*batch.RecordBatch
@@ -727,6 +746,95 @@ func (e *Executor) executeStageAggregate(ctx context.Context, task distributed.T
 	}
 	outBatches = applyPostSort(ctx, task, outBatches)
 	return e.writeStageOutput(ctx, task, outBatches, result)
+}
+
+// runStageAggregateStreaming drains HashAggregate's output one batch at a
+// time, applies per-batch transforms inline, and pipes the result into an
+// unpartitionedStageSink. Bounds memory at one output batch + the 256 KB
+// bufio buffer in the sink. Caller guarantees no shuffle keys, no gather
+// reply, and no post-sort.
+//
+// Per-batch transforms:
+//   - AVG fold: ONLY when StageType=="final_aggregate". Intermediates
+//     (StageType=="merge_aggregate") and partial aggregates skip it; the
+//     final task is the sole place __avg_sum#X / __avg_count#X collapse
+//     into a single AVG column. See the corresponding gate in the legacy
+//     collect path above for the rationale.
+//   - PostFilter (HAVING) compiled once and applied to each batch.
+func (e *Executor) runStageAggregateStreaming(ctx context.Context, task distributed.Task, hashAgg *exec.HashAggregate, _ bool, result *distributed.ResultNotification) error {
+	spillDir := filepath.Join(e.spillDir, "stage-"+task.ID)
+	if e.spillDir == "" {
+		spillDir = filepath.Join(os.TempDir(), "stage-"+task.ID)
+	}
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		return fmt.Errorf("aggregate task %s: creating spill dir: %w", task.ID, err)
+	}
+	defer os.RemoveAll(spillDir)
+
+	sink := newUnpartitionedStageSink(spillDir, task.ID)
+	if err := sink.Init(ctx); err != nil {
+		return fmt.Errorf("aggregate task %s: streaming sink init: %w", task.ID, err)
+	}
+	defer sink.Close()
+
+	var postFilterOps []exec.UnaryOperator
+	if len(task.PostFilterExprs) > 0 {
+		ops, _, err := compileFilterExprs(task.PostFilterExprs)
+		if err != nil {
+			return fmt.Errorf("aggregate task %s: post-filter compile: %w", task.ID, err)
+		}
+		for _, op := range ops {
+			if err := op.Init(ctx); err != nil {
+				return fmt.Errorf("aggregate task %s: post-filter init: %w", task.ID, err)
+			}
+		}
+		postFilterOps = ops
+	}
+
+	foldAvg := task.StageType == "final_aggregate"
+
+	for {
+		b, err := hashAgg.Next(ctx)
+		if err != nil {
+			return fmt.Errorf("aggregate task %s: next: %w", task.ID, err)
+		}
+		if b == nil {
+			break
+		}
+		if foldAvg {
+			folded, ferr := applyAvgFold([]*batch.RecordBatch{b})
+			if ferr != nil {
+				return fmt.Errorf("aggregate task %s: avg-fold: %w", task.ID, ferr)
+			}
+			if len(folded) == 0 {
+				continue
+			}
+			b = folded[0]
+		}
+		for _, op := range postFilterOps {
+			b, err = op.Execute(ctx, b)
+			if err != nil {
+				return fmt.Errorf("aggregate task %s: post-filter: %w", task.ID, err)
+			}
+			if b == nil {
+				break
+			}
+		}
+		if b == nil || b.ActiveLen() == 0 {
+			continue
+		}
+		if err := sink.Consume(ctx, b); err != nil {
+			return fmt.Errorf("aggregate task %s: sink consume: %w", task.ID, err)
+		}
+	}
+	if err := sink.Finalize(ctx); err != nil {
+		return fmt.Errorf("aggregate task %s: streaming sink finalize: %w", task.ID, err)
+	}
+	result.NumRows = sink.TotalRows()
+	if sink.NumChunks() == 0 {
+		return nil
+	}
+	return e.uploadUnpartitionedSpill(ctx, task, sink, result)
 }
 
 // aggProjectionCols returns the union of group-by columns and each
