@@ -1699,14 +1699,28 @@ func TestDistributedTPCH(t *testing.T) {
 	for _, tt := range tests {
 		q := tpch.TPCHQueries[tt.qNum]
 		t.Run(fmt.Sprintf("Q%02d_%s", tt.qNum, q.Name), func(t *testing.T) {
-			// Q15's CTE evaluation race intermittently produces 0 rows
-			// instead of the expected supplier list (post-Stage-3 merge
-			// 2026-04-25 — confirmed reproducible 1/5 locally and 2/2 in
-			// CI). The native-DAG snapshot test (TestTPCHNativeDAG_SF001)
-			// covers Q15 deterministically; this multi-worker fixture's
-			// CTE-producer / outer-join race needs separate investigation.
+			// Q15 fails ~50% of the time at SF0.01 with chunksPerTable=8.
+			// Root cause (verified 2026-05-02): walkStages emits the CTE
+			// `revenue` as TWO independent stage chains — once for the JOIN
+			// side (scan-1 → final_aggregate-2) and once for the MAX subquery
+			// (scan-6 → final_aggregate-7 → aggregate-8 → final_aggregate-9).
+			// Each chain SUMs l_extendedprice*(1-l_discount) per supplier
+			// across 8 partial-aggregate tasks; non-deterministic processing
+			// order produces float64 results that differ by 1 ULP between
+			// the two chains. The filter `total_revenue = MAX(total_revenue)`
+			// then rejects every row.
+			//
+			// TestTPCHNativeDAG_SF001 doesn't trigger this because it uses
+			// 1 chunk per table — single scan task → deterministic SUM order
+			// → both chains produce identical floats.
+			//
+			// Fix (deferred): in walkStages/PlanDistributed, detect when a
+			// CTE referenced in both an outer scan and a deferred-scalar
+			// subquery, emit ONE materialization, and have both consumers
+			// (the JOIN's right side AND the MAX's input) read from it.
+			// Substantial planner work — needs its own session.
 			if tt.qNum == 15 {
-				t.Skip("Q15 CTE-producer race (project_q15_native_dag_late_bound_scalar_2026-04-24); covered by TestTPCHNativeDAG_SF001")
+				t.Skip("Q15 CTE float-drift between dual computation chains; see comment for fix path")
 			}
 			start := time.Now()
 			result, err := coord.ExecuteSQL(ctx, q.SQL)
