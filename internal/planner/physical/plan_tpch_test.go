@@ -937,6 +937,8 @@ func distSummary(d Distribution) string {
 		return "Broadcast"
 	case DistHashPartitioned:
 		return fmt.Sprintf("Hash(%s)/%d", strings.Join(d.Keys, ","), d.Count)
+	case DistRoundRobin:
+		return "RoundRobin"
 	}
 	return "Unknown"
 }

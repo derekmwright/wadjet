@@ -12,6 +12,14 @@ const (
 	DistSingleton       DistKind = iota // single worker has all rows
 	DistBroadcast                       // every worker has all rows
 	DistHashPartitioned                 // rows partitioned by hash(Keys) % Count
+	// DistRoundRobin: multiple parallel tasks, no key clustering. Used to
+	// model multi-task partial aggregates / multi-task scans where each task
+	// emits its own subset of the input rows. Unlike DistSingleton, this kind
+	// does NOT trivially satisfy RequiredClusteredOn — downstream consumers
+	// that need keys co-located must shuffle. The Phase 1 spec deferred this
+	// label to Phase 2/3; needed once the executor wires real fan-out into
+	// the property graph (e.g. dispatchScanAggregateStage at workerCount > 1).
+	DistRoundRobin
 )
 
 // Distribution describes how a stage's output is partitioned across workers.
@@ -98,7 +106,8 @@ type RequiredDistribution struct {
 //   RequiredSingleton:              only DistSingleton.
 //   RequiredBroadcast:              only DistBroadcast.
 //   RequiredClusteredOn(K):         DistBroadcast yes; DistSingleton yes;
-//                                   DistHashPartitioned iff Keys==K.
+//                                   DistHashPartitioned iff Keys==K;
+//                                   DistRoundRobin no (multi-task, unclustered).
 //   RequiredHashPartitionedOn(K, N): only DistHashPartitioned with Keys==K
 //                                   and Count==N.
 func (d Distribution) Satisfies(req RequiredDistribution) bool {
@@ -239,16 +248,33 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 
 // OutputDistribution computes the partitioning a stage's output has, given
 // the resolved distributions of its dependencies. Pure function over
-// stage fields + dep map. Rules track how today's planner emits stages;
-// see the Phase 1 spec §"OutputDistribution" for the per-stage table.
+// stage fields + dep map + cluster size. Rules track how today's planner
+// emits stages; see the Phase 1 spec §"OutputDistribution" for the per-stage
+// table.
 //
-// Phase 1 deliberately labels probe-split scans (Tasks > 1) as DistSingleton
-// because the per-worker file-list is opaque to the property algebra.
-// Phase 2 adds a richer label (e.g. DistRoundRobin) when the executor wires
-// scan partitioning into the property graph. See spec Risk #2.
-func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution {
+// workerCount is needed to distinguish single-task (Singleton) from multi-task
+// (RoundRobin) variants of stages whose dispatcher fans out at runtime
+// (e.g. dispatchScanAggregateStage). Phase 1 punted on this and labeled
+// everything Singleton (see spec Risk #2); Phase 3 wires the real label so
+// the property algebra correctly forces hash-shuffles ahead of grouped
+// finals.
+func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount int) Distribution {
 	switch stage.Type {
 	case StageScan:
+		// Scans with fused partial aggregation (canFuseScanAggregate fires
+		// when the GROUP BY has no join in between) fan out across
+		// workerCount tasks at runtime via dispatchScanAggregateStage.
+		// Each task emits one partial-aggregate file containing all keys
+		// it saw — no key clustering across files. Label RoundRobin so
+		// grouped final_aggregate's RequiredClusteredOn triggers a
+		// hash-shuffle. Without this, final_aggregate's fanout intermediates
+		// each see the full key space → high-cardinality grouped finals OOM
+		// (Q18 SF10 inner subquery: GROUP BY l_orderkey, ~15M groups).
+		// Plain scans stay Singleton; probe-split / fan-out for plain scans
+		// is a separate Phase concern.
+		if len(stage.FusedAggGroupBy) > 0 && workerCount > 1 {
+			return Distribution{Kind: DistRoundRobin}
+		}
 		return Distribution{Kind: DistSingleton}
 	case "dual":
 		return Distribution{Kind: DistSingleton}
@@ -261,6 +287,10 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 			Keys:  stage.Exchange.Keys,
 			Count: stage.Exchange.Count,
 		}
+	case StageExchangeReplicate:
+		return Distribution{Kind: DistBroadcast}
+	case StageExchangeGather:
+		return Distribution{Kind: DistSingleton}
 	case StageHashJoin, StageBroadcastJoin:
 		// The join inherits the probe (left) input's distribution — the
 		// join itself does not re-partition the joined output, it just
@@ -270,6 +300,19 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 		}
 		return Distribution{Kind: DistSingleton}
 	case StageAggregate:
+		// Grouped partial aggregate runs as N parallel tasks at runtime
+		// (dispatchScanAggregateStage fans out across workerCount). Each
+		// task emits one file containing partials for all keys it saw —
+		// no key clustering across files. Label this multi-task output
+		// as DistRoundRobin so the downstream final_aggregate's
+		// RequiredClusteredOn (group keys) triggers a hash-shuffle.
+		// Without this label, Singleton trivially satisfies clustered_on
+		// and the final_aggregate sees N files all carrying the full key
+		// space → high-cardinality grouped finals OOM (Q18 SF10).
+		// Single-worker mode keeps Singleton: one task, no shuffle needed.
+		if len(stage.GroupByCols) > 0 && workerCount > 1 {
+			return Distribution{Kind: DistRoundRobin}
+		}
 		return Distribution{Kind: DistSingleton}
 	case "final_aggregate", "merge_aggregate":
 		// Per spec §"OutputDistribution": merge-grouped finals are labeled
@@ -281,6 +324,23 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 				Kind:  DistHashPartitioned,
 				Keys:  stage.GroupByCols,
 				Count: stage.MergeGroupCount,
+			}
+		}
+		// Grouped final/merge over hash-partitioned input: each task processes
+		// one partition slice and emits its own output, mirroring the input's
+		// partition layout. This is what makes dispatchComputeStage emit
+		// numTasks=Distribution.Count parallel final tasks (each consuming a
+		// disjoint slice of group keys), instead of one OOM-prone task that
+		// merges all keys serially. Only mirror when SortKeys/Limit are unset
+		// — those force serial output today (single-task Sort + Limit; lifting
+		// is a separate concern that needs a downstream merge_sort).
+		if len(stage.GroupByCols) > 0 &&
+			len(stage.SortKeys) == 0 && stage.Limit == 0 &&
+			len(stage.Dependencies) == 1 {
+			if depDist, ok := deps[stage.Dependencies[0]]; ok &&
+				depDist.Kind == DistHashPartitioned &&
+				keysEqual(depDist.Keys, stage.GroupByCols) {
+				return depDist
 			}
 		}
 		return Distribution{Kind: DistSingleton}
@@ -314,12 +374,10 @@ func OutputDistribution(stage Stage, deps map[string]Distribution) Distribution 
 // is by-ID so stages provided out of topological order are still resolved
 // correctly (matters because fuseJoinStages rewires deps after walkStages).
 //
-// workerCount is reserved for future rules (e.g. probe-split scan
-// distribution) — Phase 1 ignores it but threads it through to keep the
-// signature stable for Phase 2.
+// workerCount distinguishes single-task vs multi-task variants of stages
+// whose dispatcher fans out at runtime (e.g. partial aggregate becomes
+// DistRoundRobin when workerCount > 1).
 func assignStageDistributions(stages []Stage, workerCount int) {
-	_ = workerCount // reserved for Phase 2 probe-split distribution rules
-
 	// Build an ID → index lookup so we can mutate stages in place.
 	idx := make(map[string]int, len(stages))
 	for i, s := range stages {
@@ -355,7 +413,7 @@ func assignStageDistributions(stages []Stage, workerCount int) {
 			for _, dep := range s.Dependencies {
 				depMap[dep] = resolved[dep]
 			}
-			d := OutputDistribution(*s, depMap)
+			d := OutputDistribution(*s, depMap, workerCount)
 			s.Distribution = d
 			resolved[s.ID] = d
 			_ = idx // idx kept for Phase 2 stages that need cross-references

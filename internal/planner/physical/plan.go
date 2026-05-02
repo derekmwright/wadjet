@@ -1212,6 +1212,15 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		if ensureErr != nil {
 			return nil, fmt.Errorf("ensure distribution: %w", ensureErr)
 		}
+		// Re-resolve distributions after EnsureDistribution: stages whose
+		// inputs got rewritten to exchange outputs need their Distribution
+		// recomputed against the new dep distributions. Without this, e.g.,
+		// a grouped final_aggregate whose dep was upgraded from Singleton
+		// to HashPartitioned (via an inserted exchange-repartition) would
+		// keep its initial Singleton label, and dispatchComputeStage would
+		// run it as one task instead of the N parallel tasks the exchange
+		// is feeding (Q18 SF10 OOM trigger).
+		assignStageDistributions(stages, p.WorkerCount)
 		prev := BehaviorPreservingMode
 		BehaviorPreservingMode = false
 		defer func() { BehaviorPreservingMode = prev }()

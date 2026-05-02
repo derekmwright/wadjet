@@ -11,7 +11,7 @@ scan-9	scan	Singleton
 scan-11	scan	Singleton
 scan-13	scan	Singleton
 join-14	broadcast_join	Hash(o_orderkey)/32	deps=join-8,exchange-replicate-join-14-12,scan-11,scan-9
-aggregate-15	aggregate	Singleton	deps=join-14
+aggregate-15	aggregate	RoundRobin	deps=join-14
 final_aggregate-16	final_aggregate	Singleton	deps=aggregate-15
 exchange-replicate-join-14-12	exchange-replicate	Broadcast	deps=scan-13
 exchange-gather-final_aggregate-16	exchange-gather	Singleton	deps=final_aggregate-16

@@ -261,10 +261,11 @@ func TestRequiredChildDistribution(t *testing.T) {
 
 func TestOutputDistribution(t *testing.T) {
 	tests := []struct {
-		name  string
-		stage Stage
-		deps  map[string]Distribution
-		want  Distribution
+		name        string
+		stage       Stage
+		deps        map[string]Distribution
+		workerCount int // 0 means default to 4
+		want        Distribution
 	}{
 		{
 			name:  "scan emits singleton",
@@ -315,10 +316,25 @@ func TestOutputDistribution(t *testing.T) {
 			want: Distribution{Kind: DistSingleton},
 		},
 		{
-			name:  "aggregate emits singleton",
-			stage: Stage{ID: "aggregate-0", Type: "aggregate", GroupByCols: []string{"l_returnflag"}},
-			deps:  nil,
-			want:  Distribution{Kind: DistSingleton},
+			name:        "grouped aggregate multi-worker emits round-robin",
+			stage:       Stage{ID: "aggregate-0", Type: "aggregate", GroupByCols: []string{"l_returnflag"}},
+			deps:        nil,
+			workerCount: 4,
+			want:        Distribution{Kind: DistRoundRobin},
+		},
+		{
+			name:        "grouped aggregate single-worker stays singleton",
+			stage:       Stage{ID: "aggregate-0", Type: "aggregate", GroupByCols: []string{"l_returnflag"}},
+			deps:        nil,
+			workerCount: 1,
+			want:        Distribution{Kind: DistSingleton},
+		},
+		{
+			name:        "scalar aggregate (no GroupByCols) stays singleton even multi-worker",
+			stage:       Stage{ID: "aggregate-0", Type: "aggregate"},
+			deps:        nil,
+			workerCount: 4,
+			want:        Distribution{Kind: DistSingleton},
 		},
 		{
 			name: "final_aggregate lone reducer emits singleton",
@@ -390,7 +406,11 @@ func TestOutputDistribution(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := OutputDistribution(tt.stage, tt.deps)
+			wc := tt.workerCount
+			if wc == 0 {
+				wc = 4
+			}
+			got := OutputDistribution(tt.stage, tt.deps, wc)
 			if !got.Equals(tt.want) {
 				t.Fatalf("OutputDistribution = %+v, want %+v", got, tt.want)
 			}

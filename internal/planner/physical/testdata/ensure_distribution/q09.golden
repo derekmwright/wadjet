@@ -15,7 +15,7 @@ exchange-repartition-13	exchange-repartition	Hash(o_orderkey)/32	deps=scan-11
 join-14	hash_join	Hash(l_orderkey)/32	deps=exchange-repartition-12,exchange-repartition-13
 scan-15	scan	Singleton
 join-16	broadcast_join	Hash(l_orderkey)/32	deps=join-14,exchange-replicate-join-16-16
-aggregate-17	aggregate	Singleton	deps=join-16
+aggregate-17	aggregate	RoundRobin	deps=join-16
 final_aggregate-18	final_aggregate	Singleton	deps=aggregate-17
 exchange-replicate-join-6-6	exchange-replicate	Broadcast	deps=scan-5
 exchange-replicate-join-16-16	exchange-replicate	Broadcast	deps=scan-15

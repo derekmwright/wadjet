@@ -93,6 +93,15 @@ func EnsureDistribution(stages []Stage, workerCount int) ([]Stage, error) {
 			exch.ID = fmt.Sprintf("%s-%s-%d", exch.Type, out[i].ID, i)
 			exch.Dependencies = []string{childID}
 			exch.Distribution = distributionFromRequired(req, workerCount)
+			// Backfill the synthesized Exchange payload's Count to match the
+			// resolved Distribution.Count. Without this, OutputDistribution
+			// for StageExchangeRepartition reads Exchange.Count (still 0
+			// when the consumer's RequiredClusteredOn left it unset) and
+			// regresses Distribution.Count to 0 on a second
+			// assignStageDistributions pass.
+			if exch.Exchange != nil && exch.Exchange.Count == 0 {
+				exch.Exchange.Count = exch.Distribution.Count
+			}
 			byID[exch.ID] = len(out)
 			out = append(out, exch)
 			cache[key] = exch.ID
