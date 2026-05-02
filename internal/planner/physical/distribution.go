@@ -199,6 +199,22 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 		// stage merges). See spec Risk #1.
 		return RequiredDistribution{Kind: RequiredAny}
 	case "final_aggregate", "merge_aggregate":
+		// Grouped final/merge aggregates require their input to be clustered
+		// on the GROUP BY keys so the merge fans out across workers — each
+		// downstream task sees a disjoint slice of keys instead of the full
+		// hash table. Without this, dispatchFinalAggregateFanout creates N
+		// intermediate tasks that each materialise ALL groups (e.g. Q18 SF10
+		// final_aggregate-46 with group_by=l_orderkey: every intermediate
+		// builds a ~15 M-group hash table, OOM-kills the worker, JetStream
+		// redelivers, repeat).
+		//
+		// SortKeys / Limit / scalar (no GroupByCols) stay on RequiredAny:
+		// SortKeys force serial execution anyway, Limit relies on the
+		// pre-existing single-task collapse, and scalar aggregates produce
+		// one row regardless of input distribution.
+		if len(stage.GroupByCols) > 0 && len(stage.SortKeys) == 0 && stage.Limit == 0 {
+			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.GroupByCols}
+		}
 		return RequiredDistribution{Kind: RequiredAny}
 	case StageSort, "merge_sort":
 		return RequiredDistribution{Kind: RequiredAny}

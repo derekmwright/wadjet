@@ -177,8 +177,20 @@ func TestRequiredChildDistribution(t *testing.T) {
 			want:  RequiredDistribution{Kind: RequiredAny},
 		},
 		{
-			name:  "final_aggregate requires any",
+			name:  "grouped final_aggregate requires clustered_on group keys",
 			stage: Stage{ID: "final_aggregate-0", Type: "final_aggregate", GroupByCols: []string{"l_returnflag"}},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredClusteredOn, Keys: []string{"l_returnflag"}},
+		},
+		{
+			name:  "scalar final_aggregate (no GroupByCols) requires any",
+			stage: Stage{ID: "final_aggregate-1", Type: "final_aggregate"},
+			slot:  0,
+			want:  RequiredDistribution{Kind: RequiredAny},
+		},
+		{
+			name:  "final_aggregate with Limit stays on RequiredAny",
+			stage: Stage{ID: "final_aggregate-2", Type: "final_aggregate", GroupByCols: []string{"l_returnflag"}, Limit: 10},
 			slot:  0,
 			want:  RequiredDistribution{Kind: RequiredAny},
 		},
