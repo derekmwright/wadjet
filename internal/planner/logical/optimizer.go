@@ -1113,10 +1113,35 @@ func pushFilterThroughJoin(filter, join *Node) *Node {
 }
 
 // extractJoinCondPredicates splits a join's ON condition and pushes single-table
-// predicates to the appropriate child. Only applies to INNER joins (for outer joins
-// pushing predicates from ON changes semantics).
+// predicates to the appropriate child.
+//
+// Outer-join correctness: pushing a single-side predicate from the ON clause
+// is safe only on the *inner* side of the join (the side whose unmatched rows
+// are NOT padded with NULLs). Pushing on the outer side would change LEFT/
+// RIGHT JOIN semantics — outer-side rows must always survive the join.
+//
+//	INNER JOIN  : push left + right
+//	LEFT JOIN   : push right only (left is preserved)
+//	RIGHT JOIN  : push left only (right is preserved)
+//	FULL JOIN   : push neither (both preserved)
+//	CROSS JOIN  : push left + right (no padding semantics)
+//
+// Without this pushdown, the non-equi part of an ON clause survives in
+// JoinCond, where parseJoinKeys silently drops anything without an "=" sign,
+// producing wrong results for queries like Q13 ("LEFT JOIN orders ON
+// c_custkey = o_custkey AND o_comment NOT LIKE '%special%requests%'").
 func extractJoinCondPredicates(join *Node) *Node {
-	if !strings.EqualFold(join.JoinType, "inner") && join.JoinType != "" {
+	jt := strings.ToLower(strings.TrimSpace(join.JoinType))
+	pushLeft, pushRight := false, false
+	switch jt {
+	case "", "inner", "inner join", "join", "cross":
+		pushLeft, pushRight = true, true
+	case "left", "left join", "left outer", "left outer join":
+		pushRight = true
+	case "right", "right join", "right outer", "right outer join":
+		pushLeft = true
+	default:
+		// full outer / semi / anti — safer to leave the ON clause alone.
 		return join
 	}
 
@@ -1164,11 +1189,12 @@ func extractJoinCondPredicates(join *Node) *Node {
 			}
 		}
 
-		if allLeft {
+		switch {
+		case allLeft && pushLeft:
 			leftParts = append(leftParts, part)
-		} else if allRight {
+		case allRight && pushRight:
 			rightParts = append(rightParts, part)
-		} else {
+		default:
 			joinParts = append(joinParts, part)
 		}
 	}

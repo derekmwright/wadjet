@@ -792,6 +792,91 @@ func TestConcurrentQueryNoPanic(t *testing.T) {
 		}
 	}
 }
+// TestLeftJoinNonEquiOnFilter is a regression test for the Q13/Q16 family
+// of bugs. The logical optimizer's extractJoinCondPredicates only pushed
+// non-equi ON-clause predicates for INNER joins, so a query like:
+//
+//	customer LEFT JOIN orders
+//	  ON c_custkey = o_custkey
+//	  AND o_comment NOT LIKE '%special%requests%'
+//
+// silently dropped the non-equi part — parseJoinKeys keeps only "=" parts,
+// and there is no post-join filter for inner/left joins. The result was
+// extra orders pulled into the LEFT JOIN output.
+//
+// Outer-join correctness: pushing single-side predicates is safe only on
+// the *inner* side (rows that don't survive aren't padded with NULLs),
+// which is the right side of LEFT JOIN.
+func TestLeftJoinNonEquiOnFilter(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	custSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "c_id", Type: parquet.TypeInt32},
+	}}
+	ordSchema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "o_id", Type: parquet.TypeInt32},
+		{Name: "o_cust", Type: parquet.TypeInt32},
+		{Name: "o_kind", Type: parquet.TypeString},
+	}}
+	if err := db.CreateTable(ctx, "cust", custSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateTable(ctx, "ord", ordSchema, nil); err != nil {
+		t.Fatal(err)
+	}
+	custIng := db.NewIngester("cust", custSchema, nil, ingest.Config{MaxBufferRows: 8})
+	if err := custIng.Ingest(ctx, []map[string]any{
+		{"c_id": int32(1)}, {"c_id": int32(2)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := custIng.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ordIng := db.NewIngester("ord", ordSchema, nil, ingest.Config{MaxBufferRows: 8})
+	if err := ordIng.Ingest(ctx, []map[string]any{
+		// cust 1: 2 normal orders + 1 special — ON filter should drop the special
+		{"o_id": int32(101), "o_cust": int32(1), "o_kind": "normal"},
+		{"o_id": int32(102), "o_cust": int32(1), "o_kind": "normal"},
+		{"o_id": int32(103), "o_cust": int32(1), "o_kind": "special"},
+		// cust 2: only special orders — LEFT JOIN must still emit cust 2 with NULL right
+		{"o_id": int32(201), "o_cust": int32(2), "o_kind": "special"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ordIng.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// LEFT JOIN with non-equi ON filter on the right side. Expected per row:
+	//   cust 1 → 2 matches (101, 102) — special order excluded
+	//   cust 2 → 0 matches → 1 NULL-padded row
+	res, err := db.Query(ctx,
+		`SELECT c_id, COUNT(o_id) AS n FROM cust
+		 LEFT JOIN ord ON c_id = o_cust AND o_kind != 'special'
+		 GROUP BY c_id ORDER BY c_id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(res.Rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d: %v", len(res.Rows), res.Rows)
+	}
+	want := map[int32]int64{1: 2, 2: 0}
+	for _, r := range res.Rows {
+		c := r["c_id"].(int32)
+		n := r["n"].(int64)
+		if got := want[c]; got != n {
+			t.Errorf("c_id=%d: got n=%d, want %d", c, n, got)
+		}
+	}
+}
+
 // TestLiteralProjectionType is a regression test for the Q20 bug where
 // `WHERE col IN (SELECT 13)` returned no rows. The physical planner's
 // inferProjectionType ignored *plansql.Lit nodes, so a numeric-literal
