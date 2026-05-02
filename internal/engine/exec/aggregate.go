@@ -2015,7 +2015,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 	// Scalar aggregate with no input: Consume was never called so isScalarAgg
 	// was never set, but we still need to emit a single row with identity values.
-	// Standard SQL: COUNT over empty -> 0; SUM/AVG/MIN/MAX over empty -> NULL.
+	// Standard SQL: COUNT over empty → 0; SUM/AVG/MIN/MAX over empty → NULL.
 	// This happens when all input batches were filtered out before reaching the
 	// aggregate.
 	if len(h.GroupByCols) == 0 && len(h.Aggs) > 0 && h.outputPos == 0 && len(h.keys) == 0 &&
@@ -2247,6 +2247,31 @@ func (h *HashAggregate) CloneSink() SinkSource {
 func (h *HashAggregate) MergeSink(other SinkSource) {
 	o := other.(*HashAggregate)
 
+	// When the parent (h) was never fed a batch — runParallel's warmup batch
+	// gets consumed when present, but if the warmup row group is fully
+	// filtered out (e.g. shipdate range outside the data window) then
+	// resolveIndices was never called on h. That leaves h.groupColTypes
+	// empty, which forces outputSchema to fall back to TypeString for every
+	// GROUP BY column. The string-typed output column then stores group
+	// keys (int64 from gs.keyValues) as their decimal string form, and the
+	// downstream HAVING / projection comparison against an int literal
+	// silently produces zero matches even though the merged accumulator
+	// had the right value. Inherit the worker's resolved schema metadata
+	// on the first non-empty merge so the parent's output schema matches
+	// the workers'.
+	if len(h.groupColTypes) == 0 && len(o.groupColTypes) > 0 {
+		h.groupColTypes = o.groupColTypes
+		if len(h.groupColIdx) == 0 {
+			h.groupColIdx = o.groupColIdx
+		}
+		if len(h.aggColIdx) == 0 {
+			h.aggColIdx = o.aggColIdx
+		}
+		if len(h.aggColIdx2) == 0 {
+			h.aggColIdx2 = o.aggColIdx2
+		}
+	}
+
 	// Scalar aggregate fast path: merge batch accumulators directly.
 	// The parent (h) is created by CloneSink and never consumes a batch
 	// itself, so isScalarAgg / scalarAccs / batchAggKernels stay zero on h
@@ -2294,6 +2319,23 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 			gs := h.strGroupStates[gsIdx]
 			for j := range gs.accs {
 				gs.accs[j].Merge(&oGS.accs[j])
+			}
+			// COUNT(DISTINCT) state lives in distinctSets, not accs. Without
+			// this merge, parallel workers' partial distinct sets aren't
+			// combined and COUNT(DISTINCT) under-counts whenever a group is
+			// split across workers (test: Q16 missing the cnt=6 row at
+			// position 2 because half the suppliers were on a different
+			// worker than the other half).
+			for j := range gs.distinctSets {
+				if oGS.distinctSets == nil || j >= len(oGS.distinctSets) || oGS.distinctSets[j] == nil {
+					continue
+				}
+				if gs.distinctSets[j] == nil {
+					gs.distinctSets[j] = make(map[string]struct{}, len(oGS.distinctSets[j]))
+				}
+				for k := range oGS.distinctSets[j] {
+					gs.distinctSets[j][k] = struct{}{}
+				}
 			}
 		} else {
 			h.strGroupStates = append(h.strGroupStates, oGS)

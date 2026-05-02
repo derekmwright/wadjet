@@ -530,6 +530,106 @@ func TestHashAggregateCorrelation(t *testing.T) {
 	}
 }
 
+// TestHashAggregateMergeSinkInheritsGroupSchema is a regression test for the
+// Q20 bug where the parent HashAggregate (created via CloneSink and never
+// fed a batch — happens when runParallel's warmup batch is fully filtered
+// out) had empty groupColTypes. outputSchema then defaults every GROUP BY
+// column to TypeString, the runtime stores int64 group keys as their decimal
+// string form, and any downstream filter (HAVING, projection equality) fails
+// to match the expected typed value.
+func TestHashAggregateMergeSinkInheritsGroupSchema(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt32},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{
+		{"k": int32(1), "v": int64(10)},
+		{"k": int32(1), "v": int64(20)},
+	}
+
+	parent := NewHashAggregate([]string{"k"}, []AggColumn{
+		{Func: AggSum, InputCol: "v", OutputCol: "s", OutputType: parquet.TypeInt64},
+	})
+	parent.Init(context.Background())
+
+	worker := parent.CloneSink().(*HashAggregate)
+	worker.Init(context.Background())
+	if err := worker.Consume(context.Background(), batch.FromRows(schema, rows)); err != nil {
+		t.Fatal(err)
+	}
+
+	parent.MergeSink(worker)
+
+	// Parent must have inherited the worker's typed group schema; otherwise
+	// the output column would be TypeString and the int64 key would render
+	// as "1".
+	out, _ := parent.Next(context.Background())
+	if out == nil {
+		t.Fatal("expected non-nil batch")
+	}
+	got := out.ToRows()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(got))
+	}
+	if k, ok := got[0]["k"].(int32); !ok || k != 1 {
+		t.Errorf("k: got %v (%T), want int32(1)", got[0]["k"], got[0]["k"])
+	}
+	if s, ok := got[0]["s"].(int64); !ok || s != 30 {
+		t.Errorf("s: got %v (%T), want int64(30)", got[0]["s"], got[0]["s"])
+	}
+}
+
+// TestHashAggregateMergeSinkDistinctSets is a regression test for the Q16
+// bug where COUNT(DISTINCT col) under-counted when a group was split across
+// parallel workers. MergeSink merged accs but ignored gs.distinctSets, so
+// each parallel worker's partial set of distinct values was discarded.
+func TestHashAggregateMergeSinkDistinctSets(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "g", Type: parquet.TypeString},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+
+	parent := NewHashAggregate([]string{"g"}, []AggColumn{
+		{Func: AggCountDistinct, InputCol: "v", OutputCol: "n", OutputType: parquet.TypeInt64},
+	})
+	parent.Init(context.Background())
+
+	w1 := parent.CloneSink().(*HashAggregate)
+	w1.Init(context.Background())
+	if err := w1.Consume(context.Background(), batch.FromRows(schema, []map[string]any{
+		{"g": "a", "v": int64(1)},
+		{"g": "a", "v": int64(2)},
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	w2 := parent.CloneSink().(*HashAggregate)
+	w2.Init(context.Background())
+	if err := w2.Consume(context.Background(), batch.FromRows(schema, []map[string]any{
+		{"g": "a", "v": int64(2)}, // overlap with w1
+		{"g": "a", "v": int64(3)},
+		{"g": "a", "v": int64(4)},
+	})); err != nil {
+		t.Fatal(err)
+	}
+
+	parent.MergeSink(w1)
+	parent.MergeSink(w2)
+
+	out, _ := parent.Next(context.Background())
+	if out == nil {
+		t.Fatal("expected non-nil batch")
+	}
+	got := out.ToRows()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(got))
+	}
+	// Distinct values across workers: {1, 2, 3, 4} → 4
+	if n, ok := got[0]["n"].(int64); !ok || n != 4 {
+		t.Errorf("count(distinct): got %v (%T), want int64(4)", got[0]["n"], got[0]["n"])
+	}
+}
+
 // TestHashAggregateScalarMergeSink is a regression test for the bug where
 // MergeSink ignored partial-worker scalar accumulators when the parent
 // HashAggregate (created by CloneSink and never fed a batch directly) had
@@ -586,7 +686,6 @@ func TestHashAggregateScalarMergeSink(t *testing.T) {
 		t.Errorf("s: got %v, want %d", got[0]["s"], wantSum)
 	}
 }
-
 
 func TestHashAggregateCountStar(t *testing.T) {
 	schema := []parquet.Column{
