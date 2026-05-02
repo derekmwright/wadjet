@@ -218,6 +218,14 @@ func (b *Bitmap) ResetNonNull(n int) {
 
 // Grow returns a bitmap that can hold at least newLen bits, preserving existing data.
 // If the current bitmap is already large enough, it is returned as-is.
+//
+// All bits in the newly-exposed range [b.len, newLen) are set to 1 (valid).
+// This includes the previously-excess bits of the OLD last word: NewBitmap
+// zeros those as padding, so once Grow brings them into the valid range we
+// must explicitly mark them valid — otherwise they read back as null and
+// silently drop rows from downstream consumers (e.g., HashAggregate routes
+// "null GROUP BY key" rows to strGroupStates while int-keyed Next() emits
+// only intGroupStates, dropping the rows from output).
 func (b Bitmap) Grow(newLen int) Bitmap {
 	if newLen <= b.len {
 		return b
@@ -234,8 +242,17 @@ func (b Bitmap) Grow(newLen int) Bitmap {
 	}
 	data := make([]uint64, newWords)
 	copy(data, b.data)
-	// Set new words to all-valid
-	for i := len(b.data); i < newWords; i++ {
+	// Mark previously-excess bits in the OLD last word as valid. The copy
+	// above preserved them as the 0s that NewBitmap wrote as padding; once
+	// b.len grows past them they become real positions and must be reset
+	// to 1.
+	oldWords := len(b.data)
+	oldEnd := oldWords * 64
+	for i := b.len; i < oldEnd && i < newLen; i++ {
+		data[i/64] |= 1 << uint(i%64)
+	}
+	// Set new (entirely fresh) words to all-valid
+	for i := oldWords; i < newWords; i++ {
 		data[i] = ^uint64(0)
 	}
 	// Clear excess bits in last word

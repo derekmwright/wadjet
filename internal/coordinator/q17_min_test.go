@@ -145,7 +145,7 @@ func setupQ17MinDistributed(t *testing.T, chunksPerTable int, numWorkers int) (c
 // GROUP BY row-loss bug. Iterates over (chunks-per-table × workers) to
 // localise where the loss kicks in.
 //
-// Findings from this session (gated on WADJET_Q17_MIN=1):
+// Pre-fix (kept here for forensic context):
 //
 //	          | sum_via_pk | sum_via_sk | sum_via_ok
 //	chunks=1, workers=1 | 60000 ✓     | 60000 ✓     | 60000 ✓
@@ -153,38 +153,20 @@ func setupQ17MinDistributed(t *testing.T, chunksPerTable int, numWorkers int) (c
 //	chunks=8, workers=1 | 60000 ✓     | 60000 ✓     | 60000 ✓
 //	chunks=8, workers=3 | ~56500 ✗   | 60000 ✓     | ~58100 ✗
 //
-// Bug scales with #distinct keys: l_suppkey has 100 keys (no loss),
-// l_partkey has 2000 (~6% loss), l_orderkey has 15000 (~3% loss).
-//
-// Single-worker is always correct → the loss only happens when the inner
-// aggregate stage (`SELECT key, COUNT(*) GROUP BY key`) shuffles partial
-// outputs across multiple workers, then the final_aggregate merges. With
-// per-stage instrumentation the loss localises to inside the final-stage
-// HashAggregate: input rows to the final task carry the full count
-// (sumOfC = total lineitem rows in this partition), but the merged
-// output's per-group SUM(c) is short. Pre-existing on main, not
-// introduced by today's fixes.
-//
-// What was ruled out:
-//   - Scan / shuffle row count: traced and matches (15,609 partial rows
-//     in, 15,609 shuffle batches out, 15,609 reaching the final tasks).
-//   - In-process HashAggregate with the same merge shape (SUM(c)
-//     GROUP BY l_partkey over (key, c) pairs): see
-//     internal/engine/exec/agg_merge_repro_test.go — passes with the same
-//     2000 keys × 8 partials = 16000 row pattern, even with explicit
-//     Workers=4. The loss is specific to the distributed input path
-//     (.wshf reader / coordinator-side fan-out / merge-mode rewrite), not
-//     the in-process aggregate kernel.
-//
-// Next-session leads:
-//   - Compare batch-by-batch: dump each .wshf chunk's expected vs actual
-//     SUM(c) when read by cachedFileStreamSource.
-//   - Check whether the rewrite mergeMode path (fn=COUNT→SUM, InputCol=
-//     OutputCol "c") interacts oddly with the int-group SoA scatter when
-//     batches arrive at final-task batch boundaries < 2048 rows.
-//   - Audit whether scatterSumInt skips rows when the `c` column carries
-//     a (possibly stale) selection vector inherited from the shuffle
-//     write path.
+// Root cause (now fixed): Bitmap.Grow's allocate-new branch left the
+// previously-excess bits of the OLD last word at 0 (NewBitmap had written
+// them as padding). Once Grow extended b.len past the old word boundary
+// those bits became real positions and read back as null, so
+// HashAggregate routed those rows to processRow → strGroupStates while
+// int-keyed Next() emits only intGroupStates. Trigger was 1-key-per-row
+// partial output (post-shuffle final_aggregate input), where per-key
+// loss = full key loss; Grow fired in partitionedShuffleSink's row-buf
+// growth (and any other column extension that crossed a 64-row boundary
+// past an old NewBitmap padding edge). Fix: internal/engine/batch/bitmap.go
+// — Grow now fixes up the old last word's previously-excess bits before
+// writing the fresh trailing words. Regression coverage:
+// internal/engine/batch/bitmap_grow_test.go and the multi-chunk shuffle
+// tests under internal/worker/.
 func TestQ17MinRepro(t *testing.T) {
 	if os.Getenv("WADJET_Q17_MIN") != "1" {
 		t.Skip("set WADJET_Q17_MIN=1 to enable")
@@ -198,6 +180,12 @@ func TestQ17MinRepro(t *testing.T) {
 		{"sum_via_pk", `SELECT SUM(c) AS s FROM (SELECT l_partkey, COUNT(*) AS c FROM lineitem GROUP BY l_partkey) sub`},
 		{"sum_via_sk", `SELECT SUM(c) AS s FROM (SELECT l_suppkey, COUNT(*) AS c FROM lineitem GROUP BY l_suppkey) sub`},
 		{"sum_via_ok", `SELECT SUM(c) AS s FROM (SELECT l_orderkey, COUNT(*) AS c FROM lineitem GROUP BY l_orderkey) sub`},
+		// Localizers for the loss: count groups + sum-of-counts in the same shape.
+		// If groups<expected, keys are being dropped between partial and final. If
+		// groups==expected but sum<expected, increments are being lost inside the
+		// final aggregate.
+		{"groups_pk", `SELECT COUNT(*) AS g, SUM(c) AS s FROM (SELECT l_partkey, COUNT(*) AS c FROM lineitem GROUP BY l_partkey) sub`},
+		{"groups_ok", `SELECT COUNT(*) AS g, SUM(c) AS s FROM (SELECT l_orderkey, COUNT(*) AS c FROM lineitem GROUP BY l_orderkey) sub`},
 	}
 	cases := []struct {
 		chunks  int
