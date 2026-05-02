@@ -143,6 +143,134 @@ func TestGatherReplySink(t *testing.T) {
 	}
 }
 
+// TestGatherReplySinkChunksOversizedBatch is a regression test for the
+// grace-hash-join hang on the harness's micro_grace_hash_join: when the
+// upstream join's 1:N output produced a single batch larger than 8 MB,
+// the previous gather sink tried to publish it as one NATS message and
+// hit "nats: maximum payload exceeded". The task failed without
+// publishing a terminal marker; the coord then waited on the reply
+// subject until query timeout (~2 minutes) instead of failing fast.
+//
+// The fix: cap each NATS message at gatherMaxRowsPerMessage rows and
+// split larger batches into multiple messages.
+func TestGatherReplySinkChunksOversizedBatch(t *testing.T) {
+	cfg := distributed.DefaultNATSConfig()
+	cfg.Port = -1
+	cfg.StoreDir = t.TempDir()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	en, err := distributed.NewEmbeddedNATS(cfg, logger)
+	if err != nil {
+		t.Fatalf("embed NATS: %v", err)
+	}
+	t.Cleanup(en.Shutdown)
+
+	nc, err := distributed.ConnectInProcess(en.Server())
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(func() { nc.Close() })
+
+	const subject = "test.gather.chunks"
+	var (
+		mu       sync.Mutex
+		received []distributed.GatherBatchMsg
+		done     = make(chan struct{})
+	)
+	sub, err := nc.Subscribe(subject, func(m *nats.Msg) {
+		var msg distributed.GatherBatchMsg
+		if err := distributed.Unmarshal(m.Data, &msg); err != nil {
+			return
+		}
+		mu.Lock()
+		received = append(received, msg)
+		terminal := msg.Terminal
+		mu.Unlock()
+		if terminal {
+			close(done)
+		}
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+
+	// Build a batch large enough that publishing it as a single NATS
+	// message would have failed previously. 4 × DefaultBatchSize rows
+	// guarantees splitting into at least 4 chunks.
+	const totalRows = 4 * batch.DefaultBatchSize
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "val", Type: parquet.TypeInt64, Nullable: true},
+	}
+	b := batch.NewRecordBatch(schema, totalRows)
+	wantSum := int64(0)
+	for i := 0; i < totalRows; i++ {
+		b.Columns[0].Int64Data[i] = int64(i)
+		b.Columns[1].Int64Data[i] = int64(i + 1)
+		wantSum += int64(i + 1)
+	}
+
+	sink := newGatherReplySink(nc, subject, schema)
+	ctx := context.Background()
+	if err := sink.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := sink.Consume(ctx, b); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	if err := sink.Finalize(ctx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for terminal")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	// Expect at least totalRows / DefaultBatchSize batch messages plus 1
+	// terminal. Allow exactly that — the chunker is row-count-bounded so
+	// the count is deterministic for this row width.
+	wantBatchMsgs := totalRows / batch.DefaultBatchSize
+	if len(received) != wantBatchMsgs+1 {
+		t.Fatalf("messages: got %d, want %d (= %d batch chunks + 1 terminal)",
+			len(received), wantBatchMsgs+1, wantBatchMsgs)
+	}
+	if !received[len(received)-1].Terminal {
+		t.Errorf("last message should be terminal, got %v", received[len(received)-1])
+	}
+	// Round-trip every chunk and verify the union covers all input rows.
+	totalDecoded := 0
+	gotSum := int64(0)
+	for i, msg := range received[:wantBatchMsgs] {
+		rdr, err := newShuffleChunkReader(msg.Payload)
+		if err != nil {
+			t.Fatalf("msg %d reader: %v", i, err)
+		}
+		for {
+			rb, err := rdr.Next()
+			if err != nil {
+				t.Fatalf("msg %d Next: %v", i, err)
+			}
+			if rb == nil {
+				break
+			}
+			for r := 0; r < rb.Len; r++ {
+				gotSum += rb.Columns[1].Int64Data[r]
+			}
+			totalDecoded += rb.Len
+		}
+	}
+	if totalDecoded != totalRows {
+		t.Errorf("decoded rows: got %d want %d", totalDecoded, totalRows)
+	}
+	if gotSum != wantSum {
+		t.Errorf("sum: got %d want %d", gotSum, wantSum)
+	}
+}
+
 // TestGatherReplySinkConsumeError verifies that a failure inside Consume
 // surfaces in the terminal message's Err field, and that subsequent Consume
 // calls are no-ops.

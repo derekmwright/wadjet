@@ -249,6 +249,15 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 	if err := sink.Init(ctx); err != nil {
 		return fmt.Errorf("gather task %s: sink init: %w", task.ID, err)
 	}
+	// Always publish a terminal marker, even on error — the coord's gather
+	// subscriber waits on the reply subject for the terminal message to
+	// unblock recv.wait. Without this, any Consume / Next failure left the
+	// coord blocked until query timeout (gather hang on Q grace_hash_join
+	// SF1 was a 12 MB single-message publish that exceeded NATS's 8 MB
+	// payload cap; the failed task returned without finalizing and the
+	// coord waited 1m+ for batches that would never come). Finalize is
+	// idempotent so the explicit success-path call below stays.
+	defer func() { _ = sink.Finalize(ctx) }()
 	var totalRows, batchesPublished int64
 	for alias, files := range task.Inputs {
 		e.logger.Info("executeGatherStage: opening source",
