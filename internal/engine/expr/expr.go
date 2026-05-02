@@ -423,20 +423,16 @@ func (e *BinOp) Eval(b *batch.RecordBatch, row int) any {
 
 // BinOpFloat64 is a typed binary op that operates on float64 without boxing.
 // Uses a pre-resolved arithOp opcode for the hot EvalFloat64 path to avoid
-// per-row string comparison on the Op field.
+// per-row string comparison on the Op field. The opcode is resolved lazily
+// via opOnce so external callers can construct BinOpFloat64 directly with
+// only Op populated; concurrent pipeline workers see the same opCode after
+// the first call returns thanks to sync.Once's happens-before guarantee.
 type BinOpFloat64 struct {
 	Left, Right Float64Expr
 	Op          string
 	opCode      arithOp
-	opResolved  bool
+	opOnce      sync.Once
 	vecBuf      []float64 // scratch buffer for vectorized evaluation
-}
-
-func (e *BinOpFloat64) resolveOp() {
-	if !e.opResolved {
-		e.opCode = resolveArithOp(e.Op)
-		e.opResolved = true
-	}
 }
 
 func (e *BinOpFloat64) Eval(b *batch.RecordBatch, row int) any {
@@ -445,6 +441,12 @@ func (e *BinOpFloat64) Eval(b *batch.RecordBatch, row int) any {
 		return nil
 	}
 	return v
+}
+
+// resolveOpCode populates opCode the first time it's called. Subsequent
+// calls are a single relaxed atomic load on the once.done flag.
+func (e *BinOpFloat64) resolveOpCode() {
+	e.opOnce.Do(func() { e.opCode = resolveArithOp(e.Op) })
 }
 
 func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool) {
@@ -456,10 +458,7 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 	if !rok {
 		return 0, false
 	}
-	if !e.opResolved {
-		e.opCode = resolveArithOp(e.Op)
-		e.opResolved = true
-	}
+	e.resolveOpCode()
 	switch e.opCode {
 	case arithAdd:
 		return lf + rf, true
@@ -488,9 +487,8 @@ func (e *BinOpFloat64) EvalFloat64(b *batch.RecordBatch, row int) (float64, bool
 // are shared; only BinOpFloat64 nodes (which own vecBuf) are cloned.
 func (e *BinOpFloat64) CloneVec() *BinOpFloat64 {
 	clone := &BinOpFloat64{
-		Op:         e.Op,
-		opCode:     e.opCode,
-		opResolved: e.opResolved,
+		Op:     e.Op,
+		opCode: e.opCode,
 		// vecBuf intentionally nil — each clone allocates on first use
 	}
 	if child, ok := e.Left.(*BinOpFloat64); ok {
@@ -509,10 +507,7 @@ func (e *BinOpFloat64) CloneVec() *BinOpFloat64 {
 // EvalFloat64Vec evaluates left and right operands in bulk, then applies the
 // arithmetic op in a tight loop. Eliminates ~5 function calls per row.
 func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int) bool {
-	if !e.opResolved {
-		e.opCode = resolveArithOp(e.Op)
-		e.opResolved = true
-	}
+	e.resolveOpCode()
 
 	// Check if children support vectorized evaluation
 	leftVec, leftOK := e.Left.(VecFloat64Expr)
@@ -571,12 +566,18 @@ func (e *BinOpFloat64) EvalFloat64Vec(b *batch.RecordBatch, dst []float64, n int
 }
 
 // BinOpInt64 is a typed binary op that operates on int64 without boxing.
-// Uses a pre-resolved arithOp opcode for the hot EvalInt64 path.
+// opCode is resolved lazily via opOnce so external construction with only
+// Op populated stays safe; see BinOpFloat64 for the same pattern.
 type BinOpInt64 struct {
 	Left, Right Int64Expr
 	Op          string
 	opCode      arithOp
-	opResolved  bool
+	opOnce      sync.Once
+}
+
+// resolveOpCode populates opCode the first time it's called.
+func (e *BinOpInt64) resolveOpCode() {
+	e.opOnce.Do(func() { e.opCode = resolveArithOp(e.Op) })
 }
 
 func (e *BinOpInt64) Eval(b *batch.RecordBatch, row int) any {
@@ -596,10 +597,7 @@ func (e *BinOpInt64) EvalInt64(b *batch.RecordBatch, row int) (int64, bool) {
 	if !rok {
 		return 0, false
 	}
-	if !e.opResolved {
-		e.opCode = resolveArithOp(e.Op)
-		e.opResolved = true
-	}
+	e.resolveOpCode()
 	switch e.opCode {
 	case arithAdd:
 		return lv + rv, true

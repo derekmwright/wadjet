@@ -3698,6 +3698,12 @@ func mapExecJoinType(jt string) exec.JoinType {
 // The returned closure lazily resolves column indices on first call and caches
 // them, avoiding per-row ColumnByName lookups. Comparisons use typed dispatch
 // (int32, int64, float64, string) instead of fmt.Sprint conversion.
+//
+// HashJoin's probe runs in parallel — multiple workers call this filter
+// concurrently against probe and build batches whose schemas are stable
+// across the lifetime of the query (same logical plan → same projected
+// columns). Use sync.Once to resolve indices safely on first call; later
+// calls become a single relaxed atomic load on the once.done flag.
 func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
 	type filterCond struct {
 		probeCol string
@@ -3754,21 +3760,21 @@ func BuildSemiAntiFilter(filter string) func(probe *batch.RecordBatch, probeRow 
 		}
 	}
 
-	// Lazily resolved column indices; reset when batch pointers change.
+	// Resolved once on first probe; sync.Once provides happens-before so
+	// concurrent workers see the same probeIdxs / buildIdxs after the first
+	// call returns. The schemas don't change for the lifetime of the join,
+	// so caching the indices forever is safe.
 	probeIdxs := make([]int, len(conds))
 	buildIdxs := make([]int, len(conds))
-	var prevProbe, prevBuild *batch.RecordBatch
+	var resolveOnce sync.Once
 
 	return func(probe *batch.RecordBatch, probeRow int, build *batch.RecordBatch, buildRow int) bool {
-		// Resolve column indices once per batch pair.
-		if probe != prevProbe || build != prevBuild {
+		resolveOnce.Do(func() {
 			for i, c := range conds {
 				probeIdxs[i] = probe.ColumnIndex(c.probeCol)
 				buildIdxs[i] = build.ColumnIndex(c.buildCol)
 			}
-			prevProbe = probe
-			prevBuild = build
-		}
+		})
 
 		for i := range conds {
 			pi, bi := probeIdxs[i], buildIdxs[i]
