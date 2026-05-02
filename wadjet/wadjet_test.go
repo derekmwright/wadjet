@@ -792,3 +792,66 @@ func TestConcurrentQueryNoPanic(t *testing.T) {
 		}
 	}
 }
+// TestLiteralProjectionType is a regression test for the Q20 bug where
+// `WHERE col IN (SELECT 13)` returned no rows. The physical planner's
+// inferProjectionType ignored *plansql.Lit nodes, so a numeric-literal
+// projection got typed as String. The runtime then stored the int64 13 in a
+// String column (rendered as "13"), and the IN-subquery hash lookup against
+// an int column never matched. Adds explicit type inference for literal
+// projections so SELECT <int> projects through an int64 column.
+func TestLiteralProjectionType(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "k", Type: parquet.TypeInt32},
+			{Name: "name", Type: parquet.TypeString},
+		},
+	}
+	if err := db.CreateTable(ctx, "t", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ing := db.NewIngester("t", schema, nil, ingest.Config{MaxBufferRows: 8})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"k": int32(13), "name": "thirteen"},
+		{"k": int32(20), "name": "twenty"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Projection of a numeric literal must keep its int64 type — `IN
+	// (SELECT 13)` against an int column has to match.
+	res, err := db.Query(ctx, "SELECT name FROM t WHERE k IN (SELECT 13)")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(res.Rows))
+	}
+	if got := res.Rows[0]["name"]; got != "thirteen" {
+		t.Errorf("name: got %v, want thirteen", got)
+	}
+
+	// The standalone literal projection must also produce an int64-typed cell.
+	res, err = db.Query(ctx, "SELECT 13 AS x")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(res.Rows))
+	}
+	if got, want := res.Rows[0]["x"], int64(13); got != want {
+		t.Errorf("x: got %v (%T), want %v (int64)", got, got, want)
+	}
+}
+
+

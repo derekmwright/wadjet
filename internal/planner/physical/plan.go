@@ -4538,6 +4538,26 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 		}
 	case *plansql.CastNode:
 		return inferCastType(n.TypeName)
+	case *plansql.Lit:
+		// Literal projections (e.g., SELECT 13, SELECT 'x') need a typed
+		// output column so the runtime stores the value in the matching
+		// typed slice instead of falling back to String. Without this,
+		// `... IN (SELECT 13)` returns the literal as "13" and the IN
+		// hash lookup against an int column fails to match.
+		switch n.Kind {
+		case plansql.LitNumber:
+			if _, err := strconv.ParseInt(n.Value, 10, 64); err == nil {
+				return parquet.TypeInt64
+			}
+			return parquet.TypeFloat64
+		case plansql.LitBool:
+			return parquet.TypeBool
+		case plansql.LitNull:
+			// Type unknown; let fallback decide.
+			return fallback
+		case plansql.LitString:
+			return parquet.TypeString
+		}
 	}
 	return fallback
 }
