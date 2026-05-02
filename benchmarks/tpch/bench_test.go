@@ -96,37 +96,63 @@ func TestTPCHDataGen(t *testing.T) {
 // the streaming path produced orders covering ~99.99% of customers (vs
 // ~66% per TPC-H spec). Q22 SF1 returned 0 rows under streaming ingestion
 // because nearly every customer had at least one order.
+//
+// Both paths use the same seed `int64(sf * 42_000_000)` and call the same
+// per-table generator in the same order, so the output should be byte-
+// identical row-by-row at SF0.01. Any future divergence in the per-row
+// formulas (e.g. dropping a join-key cap as streamOrders did) trips the
+// row-by-row equality check.
 func TestGenerateChunkedMatchesGenerate(t *testing.T) {
-	for _, sf := range []ScaleFactor{SF001, SF01} {
-		sf := sf
-		t.Run(fmt.Sprintf("SF=%v", float64(sf)), func(t *testing.T) {
-			byTable := map[string][]map[string]any{}
-			if err := GenerateChunked(sf, 1000, func(table string, rows []map[string]any) error {
-				byTable[table] = append(byTable[table], rows...)
-				return nil
-			}); err != nil {
-				t.Fatalf("GenerateChunked: %v", err)
-			}
-
-			counts := sf.RowCounts()
-
-			distinctCust := map[int32]struct{}{}
-			for _, r := range byTable["orders"] {
-				distinctCust[r["o_custkey"].(int32)] = struct{}{}
-			}
-			// TPC-H spec: orders reference roughly the first 2/3 of customers
-			// (custRange = numCusts*2/3). Allow ±5% drift for RNG variance —
-			// the symptom we're guarding against (streaming path covering
-			// ~all customers) is far outside the band.
-			expectedDistinct := counts.Customer * 2 / 3
-			lo := int(float64(expectedDistinct) * 0.95)
-			hi := int(float64(expectedDistinct) * 1.05)
-			if got := len(distinctCust); got < lo || got > hi {
-				t.Errorf("distinct o_custkey: got %d, want %d±5%% [%d, %d] — streamOrders likely dropped custRange cap",
-					got, expectedDistinct, lo, hi)
-			}
-		})
+	sf := SF001
+	streamed := map[string][]map[string]any{}
+	if err := GenerateChunked(sf, 1000, func(table string, rows []map[string]any) error {
+		// Copy the slice header so a later chunk can't alias.
+		out := make([]map[string]any, len(rows))
+		copy(out, rows)
+		streamed[table] = append(streamed[table], out...)
+		return nil
+	}); err != nil {
+		t.Fatalf("GenerateChunked: %v", err)
 	}
+
+	whole := Generate(sf)
+
+	for _, table := range []string{"region", "nation", "supplier", "part", "partsupp", "customer", "orders", "lineitem"} {
+		w := whole[table]
+		s := streamed[table]
+		if len(w) != len(s) {
+			t.Errorf("%s row count mismatch: Generate=%d GenerateChunked=%d", table, len(w), len(s))
+			continue
+		}
+		for i := range w {
+			if !rowsEqual(w[i], s[i]) {
+				t.Errorf("%s[%d] differs:\n  Generate:        %v\n  GenerateChunked: %v", table, i, w[i], s[i])
+				break // one mismatch per table is enough; symptom is usually systemic
+			}
+		}
+	}
+}
+
+// rowsEqual compares two rows for byte-identity at the value level. Maps
+// produced by the generator only contain primitive scalar types (string,
+// int32, int64, float64) so reflect.DeepEqual via fmt.Sprintf round-trip
+// is overkill — direct == on each known column does it.
+func rowsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		// Compare via fmt.Sprintf — handles all numeric and string types,
+		// avoids pulling reflect.DeepEqual semantics around float NaN.
+		if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) {
+			return false
+		}
+	}
+	return true
 }
 
 // expectedRowsSF001 defines the expected row counts for each TPC-H query at SF0.01.
