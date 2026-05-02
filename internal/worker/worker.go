@@ -55,6 +55,16 @@ type Worker struct {
 	config   Config
 	store    objstore.Store
 	nc       *nats.Conn
+	// controlNC is an optional second NATS connection used exclusively for
+	// the heartbeat publish path. When set, the heartbeat goroutine never
+	// shares fate with high-volume data-plane traffic on nc (gather chunks,
+	// task results, TaskProgress). When nil, heartbeat falls back to nc.
+	// See project_q16_q18_jetstream_dispatch_stall_2026-05-02 for the
+	// motivating EC2 observation: workers with bursty data-plane load had
+	// their heartbeats fall behind even though publish-into-buffer was
+	// fast (the buffer wasn't draining because the connection's write
+	// goroutine was wedged behind larger sends).
+	controlNC *nats.Conn
 	js       jetstream.JetStream
 	executor *Executor
 	logger   *slog.Logger
@@ -148,6 +158,16 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 func (w *Worker) SetMetrics(m *metrics.Metrics) {
 	w.metrics = m
 	w.executor.SetMetrics(m)
+}
+
+// SetControlConn provides a dedicated NATS connection for the heartbeat
+// publish path. When set, heartbeats go through this connection instead of
+// the data-plane nc. Callers should pass a separately-dialed *nats.Conn
+// (NOT the same one as nc). Optional — heartbeat falls back to nc when
+// unset, preserving the historical single-connection topology used by
+// in-process tests.
+func (w *Worker) SetControlConn(nc *nats.Conn) {
+	w.controlNC = nc
 }
 
 // Start begins the worker task loop and heartbeat.
@@ -454,24 +474,27 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	// Skip tasks for cancelled queries (local cache from broadcast)
+	// Skip tasks for cancelled queries (local cache from broadcast).
+	// Cancellation arrives via the wadjet.cancel.> pubsub at line 194; if
+	// a task races ahead of the broadcast and starts executing, the
+	// per-task cancelTicker (500ms cadence at line 570) re-checks
+	// w.isCancelled and aborts in-flight. We previously did a synchronous
+	// nc.Request(SubjectQueryActive) here as belt-and-suspenders against
+	// watchdog-style query kills, but that request shared the data-plane
+	// connection — under buffer pressure, the publish-into-buffer
+	// completed fast yet the connection's write goroutine wedged behind
+	// larger gather sends, so the request hung past JS AckWait (10 min).
+	// Each redelivery hit the same wedge and consumed a MaxDeliver attempt;
+	// the result was the 10:48-min Q16 stall observed on the 2026-05-02
+	// EC2 deploy. Trade the millisecond-window race protection for a
+	// non-blocking handleTask entry — wasted work on a stale task is
+	// bounded by per-task cancelTicker reactivity (~500ms) plus task
+	// duration.
 	if w.isCancelled(task.QueryID) {
 		w.logger.Debug("skipping task for cancelled query",
 			"task_id", task.ID, "query_id", task.QueryID)
 		msg.Term()
 		return
-	}
-
-	// Check with coordinator if query is still active. Catches stale tasks
-	// that linger in JetStream after a query was killed (e.g., watchdog).
-	// ~1ms overhead per task, prevents minutes of wasted work.
-	if resp, err := w.nc.Request(distributed.SubjectQueryActive, []byte(task.QueryID), 2*time.Second); err == nil {
-		if string(resp.Data) == "0" {
-			w.logger.Info("skipping task for inactive query",
-				"task_id", task.ID, "query_id", task.QueryID)
-			msg.Term()
-			return
-		}
 	}
 
 	// Track active task for heartbeat progress reporting
@@ -874,7 +897,16 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 				continue
 			}
 
-			w.nc.Publish(distributed.SubjectHeartbeat, data)
+			// Heartbeat uses the control-plane connection when set; the
+			// dedicated connection isolates the publish path from
+			// data-plane buffer pressure (gather chunks, large task
+			// results) that previously left coord blind to a still-alive
+			// worker.
+			hbConn := w.controlNC
+			if hbConn == nil {
+				hbConn = w.nc
+			}
+			hbConn.Publish(distributed.SubjectHeartbeat, data)
 
 			// Reap old cancellation entries every ~60s (6 heartbeat ticks)
 			if tickCounter%6 == 0 {

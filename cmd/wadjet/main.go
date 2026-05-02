@@ -180,8 +180,11 @@ func serveCmd() *cobra.Command {
 				// workloads we're testing.
 				goMemLimit := memLimit * 3 / 4
 				if envLim := os.Getenv("GOMEMLIMIT"); envLim != "" {
-					if parsed, err := strconv.ParseInt(envLim, 10, 64); err == nil && parsed > 0 {
+					if parsed, ok := parseGoMemLimit(envLim); ok {
 						goMemLimit = parsed
+					} else {
+						logger.Warn("ignoring unparseable GOMEMLIMIT env",
+							"value", envLim, "fallback_bytes", goMemLimit)
 					}
 				}
 				debug.SetMemoryLimit(goMemLimit)
@@ -1246,6 +1249,16 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	}
 	defer nc.Close()
 
+	// Dedicated control-plane connection for the heartbeat publish path.
+	// Separate from `nc` (data plane) so heartbeat traffic can't share fate
+	// with bursty gather/result publishes that wedged the data connection
+	// past JetStream AckWait on the 2026-05-02 SF10 EC2 deploy.
+	controlNC, err := distributed.Connect(natsAddr, natsTLSCfg)
+	if err != nil {
+		return fmt.Errorf("connecting control-plane NATS: %w", err)
+	}
+	defer controlNC.Close()
+
 	js, err := distributed.NewJetStream(nc)
 	if err != nil {
 		return fmt.Errorf("creating JetStream: %w", err)
@@ -1271,6 +1284,12 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		SpillDir:         spillDir,
 		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)
+	w.SetControlConn(controlNC)
+
+	// Opt-in heap+goroutine pprof dumper (env-gated). Workers are silent
+	// to journald under buffered cloud-init pipes, so disk-snapshot pprof
+	// is the only signal that survives across a stall window.
+	startHeapDumper(ctx, logger)
 
 	// Initialize Prometheus metrics
 	m := metrics.New()
@@ -1591,6 +1610,72 @@ func parseLogLevel(s string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// parseGoMemLimit accepts the same humanized formats the Go runtime
+// recognizes for GOMEMLIMIT (e.g. "2GiB", "2GB", "2G", "2147483648") and
+// returns the value in bytes. Returns ok=false if the input doesn't parse.
+// Plain integer fast path matches the historical behavior callers depended
+// on (the harness writes raw bytes).
+func parseGoMemLimit(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n > 0 {
+			return n, true
+		}
+		return 0, false
+	}
+	// Strip a trailing "B" — both "GiB" and "GB" end in "B" and the suffix
+	// is informational; the multiplier is determined by the i-vs-no-i below.
+	t := s
+	if strings.HasSuffix(t, "B") || strings.HasSuffix(t, "b") {
+		t = t[:len(t)-1]
+	}
+	binary := false
+	if l := len(t); l >= 1 && (t[l-1] == 'i' || t[l-1] == 'I') {
+		binary = true
+		t = t[:l-1]
+	}
+	if len(t) == 0 {
+		return 0, false
+	}
+	mult := int64(1)
+	switch t[len(t)-1] {
+	case 'K', 'k':
+		if binary {
+			mult = 1024
+		} else {
+			mult = 1000
+		}
+	case 'M', 'm':
+		if binary {
+			mult = 1024 * 1024
+		} else {
+			mult = 1000 * 1000
+		}
+	case 'G', 'g':
+		if binary {
+			mult = 1024 * 1024 * 1024
+		} else {
+			mult = 1000 * 1000 * 1000
+		}
+	case 'T', 't':
+		if binary {
+			mult = 1024 * 1024 * 1024 * 1024
+		} else {
+			mult = 1000 * 1000 * 1000 * 1000
+		}
+	default:
+		return 0, false
+	}
+	num, err := strconv.ParseInt(t[:len(t)-1], 10, 64)
+	if err != nil || num <= 0 {
+		return 0, false
+	}
+	return num * mult, true
 }
 
 func buildTLSConfig(cfg config.AuthMTLS) (*tls.Config, error) {
