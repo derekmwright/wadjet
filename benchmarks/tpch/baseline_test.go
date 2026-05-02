@@ -15,15 +15,38 @@ import (
 	"testing"
 )
 
-// baselineFile is the on-disk artifact: per-query expected row count plus a
-// checksum over the query's full output. The checksum locks in row contents
-// AND output ordering — any silent regression in values, types, or ORDER BY
-// fails the corresponding subtest.
-const baselineFile = "baseline-sf001.json"
+// Baseline files: per-query expected row count plus a checksum over the
+// query's full output. The checksum locks in row contents AND output
+// ordering — any silent regression in values, types, or ORDER BY fails the
+// corresponding subtest. SF0.01 runs by default in CI; SF1 is opt-in
+// (~1.5M lineitem rows, slower datagen).
+const (
+	baselineFileSF001 = "baseline-sf001.json"
+	baselineFileSF1   = "baseline-sf1.json"
+)
 
 type baselineEntry struct {
 	RowCount int    `json:"row_count"`
 	Checksum string `json:"checksum"`
+}
+
+// flakyChecksumQueries lists queries whose row content can flip across runs
+// due to inherent floating-point border-row instability — the HAVING /
+// threshold subquery sums billions of partial values whose ordering varies
+// by ~1 ULP across parallel executions, and rows whose group sum lands
+// within that ULP of the threshold flip in and out of the result.
+//
+// For these queries the test gates row count only (within a small tolerance)
+// instead of comparing the full content checksum. They still catch big
+// regressions (Q06's revenue=0 vs 1.19M would change the row count or push
+// it well outside tolerance) without false-positive-flapping on float noise.
+//
+// Keyed by (scale-factor file, query number).
+var flakyChecksumQueries = map[string]map[int]int{
+	// SF0.01 had no flaky queries in 10/10 stability runs.
+	baselineFileSF1: {
+		11: 5, // SF1 Q11: HAVING SUM(ps_supplycost*ps_availqty) > 0.0001 * total
+	},
 }
 
 // canonicalRow returns a stable string form of one query result row. Columns
@@ -92,9 +115,9 @@ func queryChecksum(rows []map[string]any) string {
 
 // loadBaseline reads the on-disk JSON, returning an empty map if absent so
 // the regeneration path can populate it from scratch.
-func loadBaseline(t *testing.T) map[int]baselineEntry {
+func loadBaseline(t *testing.T, file string) map[int]baselineEntry {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(".", baselineFile))
+	data, err := os.ReadFile(filepath.Join(".", file))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return map[int]baselineEntry{}
@@ -117,7 +140,7 @@ func loadBaseline(t *testing.T) map[int]baselineEntry {
 	return out
 }
 
-func writeBaseline(t *testing.T, baseline map[int]baselineEntry) {
+func writeBaseline(t *testing.T, file string, baseline map[int]baselineEntry) {
 	t.Helper()
 	raw := make(map[string]baselineEntry, len(baseline))
 	for k, v := range baseline {
@@ -128,23 +151,16 @@ func writeBaseline(t *testing.T, baseline map[int]baselineEntry) {
 		t.Fatalf("marshal baseline: %v", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(filepath.Join(".", baselineFile), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(".", file), data, 0o644); err != nil {
 		t.Fatalf("write baseline: %v", err)
 	}
 }
 
-// TestTPCHBaselineSF001 verifies each query's row count AND content checksum
-// against the on-disk baseline. The audit found 7 queries that returned
-// wrong values silently because the prior gate only checked row counts;
-// this test catches both classes of regression.
-//
-// To regenerate the baseline (e.g. after an intentional output change):
-//
-//	WADJET_REGENERATE_BASELINE=1 go test -run TestTPCHBaselineSF001 ./benchmarks/tpch/
-func TestTPCHBaselineSF001(t *testing.T) {
-	regenerate := os.Getenv("WADJET_REGENERATE_BASELINE") == "1"
-
-	db := setupTPCH(t, SF001)
+// runBaselineCheck shares the per-query verify/regenerate flow between
+// scale factors. The two TestTPCHBaseline* tests are thin wrappers so they
+// can wire scale-specific datagen and the env-var name that opts SF1 in.
+func runBaselineCheck(t *testing.T, sf ScaleFactor, file string, regenerate bool) {
+	db := setupTPCH(t, sf)
 	ctx := context.Background()
 
 	queryNums := make([]int, 0, len(TPCHQueries))
@@ -153,7 +169,7 @@ func TestTPCHBaselineSF001(t *testing.T) {
 	}
 	sort.Ints(queryNums)
 
-	baseline := loadBaseline(t)
+	baseline := loadBaseline(t, file)
 	updated := make(map[int]baselineEntry, len(baseline))
 
 	for _, qNum := range queryNums {
@@ -174,12 +190,18 @@ func TestTPCHBaselineSF001(t *testing.T) {
 
 			want, ok := baseline[qNum]
 			if !ok {
-				t.Errorf("no baseline for Q%02d (got rows=%d checksum=%s); regenerate with WADJET_REGENERATE_BASELINE=1",
+				t.Errorf("no baseline for Q%02d (got rows=%d checksum=%s); regenerate with the appropriate WADJET_REGENERATE_BASELINE_* env var",
 					qNum, got.RowCount, got.Checksum)
 				return
 			}
-			if got.RowCount != want.RowCount {
-				t.Errorf("Q%02d row count drift: got %d want %d", qNum, got.RowCount, want.RowCount)
+			tolerance := flakyChecksumQueries[file][qNum]
+			diff := got.RowCount - want.RowCount
+			if diff < -tolerance || diff > tolerance {
+				t.Errorf("Q%02d row count drift: got %d want %d (±%d)", qNum, got.RowCount, want.RowCount, tolerance)
+			}
+			if tolerance > 0 {
+				// Flaky-by-design: row count within tolerance is the gate.
+				return
 			}
 			if got.Checksum != want.Checksum {
 				t.Errorf("Q%02d content checksum drift: got %s want %s\nfirst row: %v",
@@ -189,9 +211,39 @@ func TestTPCHBaselineSF001(t *testing.T) {
 	}
 
 	if regenerate {
-		writeBaseline(t, updated)
-		t.Logf("wrote %s with %d entries", baselineFile, len(updated))
+		writeBaseline(t, file, updated)
+		t.Logf("wrote %s with %d entries", file, len(updated))
 	}
+}
+
+// TestTPCHBaselineSF001 verifies each query's row count AND content checksum
+// against the on-disk baseline at SF0.01. The audit found 7 queries that
+// returned wrong values silently because the prior gate only checked row
+// counts; this test catches both classes of regression.
+//
+// To regenerate the baseline (e.g. after an intentional output change):
+//
+//	WADJET_REGENERATE_BASELINE=1 go test -run TestTPCHBaselineSF001 ./benchmarks/tpch/
+func TestTPCHBaselineSF001(t *testing.T) {
+	regenerate := os.Getenv("WADJET_REGENERATE_BASELINE") == "1"
+	runBaselineCheck(t, SF001, baselineFileSF001, regenerate)
+}
+
+// TestTPCHBaselineSF1 mirrors SF001 at scale 1 (~6M lineitem rows). Several
+// SF0.01 bugs were data-shape-dependent (Q06's leftover-row-group trigger
+// would not appear without specific row-group boundaries); SF1 has different
+// boundaries and far more groups in HashAggregate, so it surfaces shape and
+// scale issues that SF001 cannot.
+//
+// Opt-in via WADJET_TPCH_SF1=1 — datagen materialises ~6M rows in memory
+// (~30 s wall) so it is too heavy to run on every CI invocation. Regenerate
+// with WADJET_REGENERATE_BASELINE_SF1=1 alongside that flag.
+func TestTPCHBaselineSF1(t *testing.T) {
+	if os.Getenv("WADJET_TPCH_SF1") != "1" {
+		t.Skip("set WADJET_TPCH_SF1=1 to enable SF1 baseline (heavy: ~6M lineitem rows, ~30 s datagen)")
+	}
+	regenerate := os.Getenv("WADJET_REGENERATE_BASELINE_SF1") == "1"
+	runBaselineCheck(t, SF1, baselineFileSF1, regenerate)
 }
 
 func firstRow(rows []map[string]any) any {
