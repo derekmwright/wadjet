@@ -171,8 +171,13 @@ func runWadjet(ctx context.Context, db *wadjet.DB, sql string) ([]map[string]any
 
 // runDuckDB runs sql via the duckdb CLI subprocess and returns rows as
 // (col → string) maps. The DuckDB output is CSV with header.
+//
+// NULL is encoded as the literal string "<NULL>" (instead of an empty field)
+// so the CSV reader doesn't drop rows whose only column is NULL — the Go
+// encoding/csv reader skips records with zero fields, which it treats a bare
+// "\r\n" as. cellEqual recognises "<NULL>" as Wadjet's typed nil.
 func runDuckDB(setup, sql string) ([]map[string]any, []string, error) {
-	script := setup + "\n.mode csv\n.headers on\n" + sql + ";\n"
+	script := setup + "\n.mode csv\n.headers on\n.nullvalue <NULL>\n" + sql + ";\n"
 	cmd := exec.Command(duckdbBin)
 	cmd.Stdin = strings.NewReader(script)
 	out, err := cmd.Output()
@@ -210,7 +215,10 @@ func cellEqual(w, d any) bool {
 	if w == nil && d == nil {
 		return true
 	}
-	// DuckDB CSV emits "" for NULL by default. Treat empty-string == nil.
+	// DuckDB emits "<NULL>" for NULL (set via .nullvalue in runDuckDB).
+	if ds, ok := d.(string); ok && ds == "<NULL>" {
+		return w == nil
+	}
 	if w == nil {
 		if ds, ok := d.(string); ok && ds == "" {
 			return true
