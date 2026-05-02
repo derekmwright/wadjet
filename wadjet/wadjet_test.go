@@ -877,6 +877,69 @@ func TestLeftJoinNonEquiOnFilter(t *testing.T) {
 	}
 }
 
+// TestEmptyAggregateNullSemantics is a regression test for the Q17 family of
+// bugs (TestDuckDBCompare/Q17). Standard SQL: SUM/AVG/MIN/MAX over empty
+// input must return NULL (only COUNT returns 0). And NULL propagated through
+// arithmetic must stay NULL — Wadjet's vectorized projection used to discard
+// the hasNull return from VecFloat64Eval, silently turning NULL/7.0 into 0.
+func TestEmptyAggregateNullSemantics(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "v", Type: parquet.TypeFloat64},
+		},
+	}
+	if err := db.CreateTable(ctx, "t", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ing := db.NewIngester("t", schema, nil, ingest.Config{MaxBufferRows: 16})
+	if err := ing.Ingest(ctx, []map[string]any{{"v": 1.0}, {"v": 2.0}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		sql  string
+		want any
+	}{
+		{"sum_empty", "SELECT SUM(v) AS x FROM t WHERE 1=0", nil},
+		{"avg_empty", "SELECT AVG(v) AS x FROM t WHERE 1=0", nil},
+		{"min_empty", "SELECT MIN(v) AS x FROM t WHERE 1=0", nil},
+		{"max_empty", "SELECT MAX(v) AS x FROM t WHERE 1=0", nil},
+		{"count_empty", "SELECT COUNT(*) AS x FROM t WHERE 1=0", int64(0)},
+		// Arithmetic on a NULL aggregate must propagate NULL through the
+		// projection's vectorized float64 path.
+		{"sum_div_const_empty", "SELECT SUM(v) / 7.0 AS x FROM t WHERE 1=0", nil},
+		{"sum_plus_const_empty", "SELECT SUM(v) + 1.0 AS x FROM t WHERE 1=0", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := db.Query(ctx, tc.sql)
+			if err != nil {
+				t.Fatalf("query: %v", err)
+			}
+			if len(res.Rows) != 1 {
+				t.Fatalf("expected 1 row, got %d", len(res.Rows))
+			}
+			got := res.Rows[0]["x"]
+			if got != tc.want {
+				t.Errorf("got %v (%T), want %v (%T)", got, got, tc.want, tc.want)
+			}
+		})
+	}
+}
+
+
 // TestLiteralProjectionType is a regression test for the Q20 bug where
 // `WHERE col IN (SELECT 13)` returned no rows. The physical planner's
 // inferProjectionType ignored *plansql.Lit nodes, so a numeric-literal

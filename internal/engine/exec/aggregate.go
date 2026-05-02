@@ -2014,19 +2014,19 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	}
 
 	// Scalar aggregate with no input: Consume was never called so isScalarAgg
-	// was never set, but we still need to emit a single row with identity values
-	// (0 for COUNT/SUM, NULL for MIN/MAX/AVG). This happens when all input
-	// batches were filtered out before reaching the aggregate.
+	// was never set, but we still need to emit a single row with identity values.
+	// Standard SQL: COUNT over empty -> 0; SUM/AVG/MIN/MAX over empty -> NULL.
+	// This happens when all input batches were filtered out before reaching the
+	// aggregate.
 	if len(h.GroupByCols) == 0 && len(h.Aggs) > 0 && h.outputPos == 0 && len(h.keys) == 0 &&
 		!h.useIntGroupKey && !h.useDualIntGroupKey && !h.useCompactGroupKey {
 		h.outputPos = 1
 		schema := h.outputSchema()
 		out := batch.NewRecordBatch(schema, 1)
 		for j, agg := range h.Aggs {
-			switch agg.Func {
-			case AggCount, AggSum:
+			if agg.Func == AggCount {
 				out.Columns[j].SetValue(0, int64(0))
-			default:
+			} else {
 				out.Columns[j].Nulls.SetNull(0)
 			}
 		}

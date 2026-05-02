@@ -174,7 +174,18 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			} else if proj.VecEval != nil {
 				proj.VecEval(in, col, in.Len)
 			} else if proj.VecFloat64Eval != nil {
-				proj.VecFloat64Eval(in, col.Float64Data, in.Len)
+				// VecFloat64Eval returns hasNull when any input row is null;
+				// when that happens the float buffer holds a placeholder (0)
+				// for those rows, so fall back to per-row Float64Eval to set
+				// the null bits on the output vector. Otherwise NULL/x silently
+				// emits 0 and the projection swallows the null.
+				if proj.VecFloat64Eval(in, col.Float64Data, in.Len) && proj.Float64Eval != nil {
+					for i := 0; i < in.Len; i++ {
+						if _, ok := proj.Float64Eval(in, i); !ok {
+							col.Nulls.SetNull(i)
+						}
+					}
+				}
 			} else if proj.Float64Eval != nil {
 				for i := 0; i < in.Len; i++ {
 					v, ok := proj.Float64Eval(in, i)
