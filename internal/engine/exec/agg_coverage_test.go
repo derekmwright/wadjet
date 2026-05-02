@@ -530,6 +530,64 @@ func TestHashAggregateCorrelation(t *testing.T) {
 	}
 }
 
+// TestHashAggregateScalarMergeSink is a regression test for the bug where
+// MergeSink ignored partial-worker scalar accumulators when the parent
+// HashAggregate (created by CloneSink and never fed a batch directly) had
+// not yet resolved as scalar. Symptom: scalar aggregates over filtered input
+// silently returned the identity value (0 for COUNT/SUM) when the planner
+// ran the aggregate in cloned-worker form. Originally surfaced by Q06/Q14/
+// Q19 returning revenue=0 against DuckDB-shaped SF0.01 data.
+func TestHashAggregateScalarMergeSink(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	rows := []map[string]any{
+		{"v": int64(1)}, {"v": int64(2)}, {"v": int64(3)},
+	}
+
+	// Parent aggregate — what the coordinator holds. Receives merges only.
+	parent := NewHashAggregate(nil, []AggColumn{
+		{Func: AggCount, InputCol: "", OutputCol: "cnt", OutputType: parquet.TypeInt64},
+		{Func: AggSum, InputCol: "v", OutputCol: "s", OutputType: parquet.TypeInt64},
+	})
+	parent.Init(context.Background())
+
+	// Two cloned workers, each consumes one batch.
+	workers := []*HashAggregate{
+		parent.CloneSink().(*HashAggregate),
+		parent.CloneSink().(*HashAggregate),
+	}
+	for _, w := range workers {
+		w.Init(context.Background())
+		b := batch.FromRows(schema, rows)
+		if err := w.Consume(context.Background(), b); err != nil {
+			t.Fatalf("worker consume: %v", err)
+		}
+	}
+
+	for _, w := range workers {
+		parent.MergeSink(w)
+	}
+
+	out, _ := parent.Next(context.Background())
+	if out == nil {
+		t.Fatal("expected non-nil output batch")
+	}
+	got := out.ToRows()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(got))
+	}
+	wantCount := int64(2 * len(rows))    // 2 workers × 3 rows = 6
+	wantSum := int64(2 * (1 + 2 + 3))    // 2 workers × sum(1+2+3) = 12
+	if got[0]["cnt"].(int64) != wantCount {
+		t.Errorf("cnt: got %v, want %d", got[0]["cnt"], wantCount)
+	}
+	if got[0]["s"].(int64) != wantSum {
+		t.Errorf("s: got %v, want %d", got[0]["s"], wantSum)
+	}
+}
+
+
 func TestHashAggregateCountStar(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "group", Type: parquet.TypeString},

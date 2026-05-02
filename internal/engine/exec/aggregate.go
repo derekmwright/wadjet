@@ -2247,8 +2247,20 @@ func (h *HashAggregate) CloneSink() SinkSource {
 func (h *HashAggregate) MergeSink(other SinkSource) {
 	o := other.(*HashAggregate)
 
-	// Scalar aggregate fast path: merge batch accumulators directly
-	if h.isScalarAgg && o.isScalarAgg {
+	// Scalar aggregate fast path: merge batch accumulators directly.
+	// The parent (h) is created by CloneSink and never consumes a batch
+	// itself, so isScalarAgg / scalarAccs / batchAggKernels stay zero on h
+	// even when the workers (o) all resolved as scalar. Adopt the worker's
+	// scalar wiring on the first scalar merge so Next() takes the scalar
+	// finalization path instead of falling through to the empty-input
+	// "emit zeros" fallback.
+	if o.isScalarAgg {
+		if !h.isScalarAgg {
+			h.isScalarAgg = true
+			h.scalarAccs = make([]kernel.Accumulator, len(o.scalarAccs))
+			h.batchAggKernels = o.batchAggKernels
+			h.aggColIdx = o.aggColIdx
+		}
 		for i := range h.scalarAccs {
 			h.scalarAccs[i].Merge(&o.scalarAccs[i])
 		}
