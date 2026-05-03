@@ -449,7 +449,13 @@ resource "aws_instance" "worker" {
   subnet_id                            = data.aws_subnets.default.ids[0]
 
   root_block_device {
-    volume_size = local.eff_scale <= 10 ? 50 : 200
+    # Workers spill shuffle output to /tmp; SF10 Q18's lineitem shuffle
+    # exceeded the 50 GB SF10 default with workers_per_node=1 (write
+    # ENOSPC at column 15 / l_comment per project_diagnostic_b26b889).
+    # 200 GB unconditionally — extra cost on SF1 is negligible (gp3 at
+    # ~$0.08/GB-month, prorated to a 30-min run is fractions of a cent),
+    # and removes the SF-tier conditional as a foot-gun.
+    volume_size = 200
     volume_type = "gp3"
     throughput  = 250
     iops        = 3000
