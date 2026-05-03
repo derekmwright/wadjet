@@ -7,8 +7,8 @@ mode                     = "distributed"
 coordinator_instance_type = "c7g.2xlarge"  # 8 vCPU, 16 GB
 worker_instance_type      = "c7g.4xlarge"  # 16 vCPU, 32 GB (2xlarge OOM'd Q21)
 worker_count              = 3
-workers_per_node         = 2   # 2 wadjet processes per node × 3 nodes = 6 worker processes. Each ~12GB envelope (75% of 32GB / 2). Tradeoff vs workers_per_node=4: less crash isolation but halves S3 upload contention (2x4x2=16 connections/node vs 32). With more headroom per process, shuffle output buffering doesn't pressure the 5GB-cap regime that 4-procs forced.
-max_concurrent           = 4   # per process; effective cluster concurrency = 2 × 4 × 3 = 24 task slots (same as before with workers_per_node=4)
+workers_per_node         = 1   # 2026-05-03: dropped from 2 to 1 — cgroup throttle confirmed via Q05/Q09/Q10 10-20× speedup vs workers_per_node=2 run.
+max_concurrent           = 2   # 2026-05-03: dropped from 4 to 2 — Q11 stalled with 4 because each broadcast_join task peaks ~3.5 GB; 4 concurrent = 14 GB transient + GC garbage saturates 32 GB envelope. Cluster concurrency = 1 × 2 × 3 = 6 task slots (vs 12 prior). Slower throughput but Q11 should complete.
 data_bucket              = "wadjet-bench-sf10-use2"
 skip_queries             = ""
 query_timeout            = "30m"  # SF10 heavy queries (Q03/Q05/Q21 lineitem joins) need >10m; the 26 April AWS run hit the 10m cap on Q03 even though stages were progressing

@@ -51,6 +51,16 @@ func DefaultConfig() Config {
 }
 
 // Worker pulls tasks from NATS, executes them, and publishes results.
+// Pool-pressure-gated task pull (see taskLoop). Threshold is just under
+// the spill trigger (~75%) so we hold new tasks back BEFORE existing
+// tasks have to spill. Backoff is short — the goal is to defer the next
+// fetch by a beat, not to stall progress; the pull loop re-enters
+// immediately and re-checks pressure on the next iteration.
+const (
+	poolPressurePullThreshold = 0.70
+	poolPressurePullBackoff   = 100 * time.Millisecond
+)
+
 type Worker struct {
 	config   Config
 	store    objstore.Store
@@ -400,6 +410,28 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 		// In drain mode, stop pulling new tasks.
 		if w.Draining() {
 			return
+		}
+
+		// Pool-pressure-gated pull: if the worker's shared memory pool is
+		// near capacity, hold off on accepting new tasks. Lets in-flight
+		// tasks complete + GC reclaim before we add more allocations on top.
+		// 2026-05-03 SF10 Q11 stalled because the worker accepted 4 new
+		// scan tasks 15s after completing 8 broadcast-join tasks
+		// (peak_heap=3.5GB each); the new tasks made zero row progress for
+		// 2m10s while the process thrashed. Gating the pull at 70% pool
+		// pressure prevents that overlap. Threshold matches the worker's
+		// internal spill trigger (~75%), giving slack to cleanly finish
+		// what's already in flight before pulling more.
+		if used, budget := w.executor.SharedPoolStats(); budget > 0 {
+			pressure := float64(used) / float64(budget)
+			if pressure > poolPressurePullThreshold {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(poolPressurePullBackoff):
+				}
+				continue
+			}
 		}
 
 		// Count available slots (non-blocking drain)
