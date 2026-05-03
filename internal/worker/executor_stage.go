@@ -448,6 +448,20 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 	// the wider probe schema after all fused joins have run.
 	probeOps := make([]exec.UnaryOperator, 0, len(task.FusedJoins)+1)
 	fusedJoins := make([]*exec.HashJoin, 0, len(task.FusedJoins))
+	// Output column projection: the planner sets stage.Columns to the columns
+	// the downstream stage consumes from this join's output. The probe operator
+	// uses OutputFilter to drop everything else, so the join writes a tight
+	// schema to its WSHF instead of the full union of build+probe columns.
+	// Empty Columns → nil filter → preserves "emit everything" semantics.
+	// Qualified names (e.g. "n2.n_name" from self-joins) are handled by the
+	// probe's lookup (see internal/engine/exec/join.go OutputSchema dot-strip).
+	var outputFilter map[string]bool
+	if len(task.Columns) > 0 {
+		outputFilter = make(map[string]bool, len(task.Columns))
+		for _, c := range task.Columns {
+			outputFilter[c] = true
+		}
+	}
 	// Defer cleanup BEFORE building any fused joins so that an error
 	// partway through the loop still releases tracker reservations and
 	// closes spill files for every fjHJ that was constructed. The earlier
@@ -513,10 +527,19 @@ func (e *Executor) executeStageHashJoin(ctx context.Context, task distributed.Ta
 		}
 		fjBuildSrc.Close()
 		fjHJ.FixKeyAssignment()
+		// No OutputFilter on fused probes: each fused probe must emit columns
+		// that LATER probes in the chain (including the primary) consume —
+		// e.g. probe-side keys for the next join. task.Columns reflects the
+		// primary's NeededColumns only, so applying it to a fused probe would
+		// silently drop those downstream-key columns mid-chain.
 		probeOps = append(probeOps, fjHJ.Probe())
 	}
-	// Primary probe last — the original consumer-of-fused position.
-	probeOps = append(probeOps, hj.Probe())
+	// Primary probe last — its output is what the stage emits. OutputFilter
+	// here is safe: nothing downstream of the primary consumes intermediate
+	// columns that aren't already in task.Columns.
+	primaryProbe := hj.Probe()
+	primaryProbe.OutputFilter = outputFilter
+	probeOps = append(probeOps, primaryProbe)
 
 	// Probe pipeline with CollectSink; we post-process batches into the
 	// configured output sink. CollectSink is memory-bounded by the build

@@ -1480,6 +1480,14 @@ func (c *Coordinator) dispatchComputeStage(
 			ResultBucket:    c.config.ResultBucket,
 			ResultPrefix:    resultPrefix,
 			CreatedAt:       time.Now(),
+			// Output column projection for hash_join / broadcast_join stages.
+			// The worker applies these as the probe operator's OutputFilter so
+			// the join emits only the columns the downstream stage consumes,
+			// instead of the full union of build+probe schemas. Without this
+			// the wide post-join schema rides every chained shuffle (which
+			// can't prune via prunedScanColumns because TableName="" upstream
+			// of a join). Aggregate/sort stages ignore this field.
+			Columns: append([]string(nil), stage.Columns...),
 			// Filters attached to a compute stage (HAVING on
 			// aggregate/final_aggregate, residual predicates on
 			// hash_join) reference OUTPUT columns and must run after
