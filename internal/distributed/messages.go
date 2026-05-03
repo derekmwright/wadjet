@@ -60,6 +60,15 @@ type Task struct {
 	// Scan-specific
 	Files           []string          `json:"files,omitempty"`
 	PartitionFilter map[string]string `json:"partition_filter,omitempty"`
+	// Columns has dual semantics by stage type:
+	//   - scan / shuffle tasks: input projection (columns to read from
+	//     parquet/wshf source).
+	//   - hash_join / broadcast_join tasks: output projection — the worker
+	//     applies these as the probe operator's OutputFilter so the join
+	//     emits only what the downstream stage consumes, instead of the
+	//     full union of build+probe schemas.
+	//   - aggregate / sort tasks: ignored (output schema is determined by
+	//     AggSpecs / SortKeys).
 	Columns         []string          `json:"columns,omitempty"`
 	FilterExprs     []string          `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
 	// PostFilterExprs are SQL filter expressions applied to the stage's

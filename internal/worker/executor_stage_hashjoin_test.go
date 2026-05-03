@@ -199,3 +199,161 @@ func TestExecuteStageHashJoin_PartitionedOutput(t *testing.T) {
 		}
 	}
 }
+
+// TestExecuteStageHashJoin_OutputFilterPrunesColumns verifies that
+// task.Columns is wired into probe.OutputFilter so the join's WSHF output
+// only contains the requested columns, not the full union of build+probe
+// schemas. Regression for the column-pruning audit (2026-05-03).
+func TestExecuteStageHashJoin_OutputFilterPrunesColumns(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-stage-outfilter"
+
+	buildData := makeBuildWshf(t, [][2]int64{{1, 100}, {2, 200}, {3, 300}})
+	probeData := makeProbeWshf(t, []struct {
+		ID   int64
+		Name string
+	}{{1, "alice"}, {2, "bob"}, {4, "dave"}})
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	buildKey := "in/build/t.wshf"
+	probeKey := "in/probe/t.wshf"
+	if _, err := store.Put(ctx, bucket, buildKey, bytes.NewReader(buildData), int64(len(buildData)), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, bucket, probeKey, bytes.NewReader(probeData), int64(len(probeData)), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := NewLRUCache(4 * 1024 * 1024)
+	executor := NewExecutor(store, cache, nil)
+
+	// Without OutputFilter the join would emit the full union {id, val, name}.
+	// With Columns=["name"] only the probe-side string column should remain.
+	task := distributed.Task{
+		ID:              "hj-outfilter",
+		QueryID:         "q",
+		StageID:         "join-out",
+		Type:            distributed.TaskTypeStage,
+		StageType:       "hash_join",
+		JoinType:        "inner",
+		JoinLeftKeys:    []string{"id"},
+		JoinRightKeys:   []string{"id"},
+		BuildTableAlias: "build",
+		Columns:         []string{"name"},
+		Inputs: map[string][]string{
+			"build": {buildKey},
+			"probe": {probeKey},
+		},
+		DataBucket:   bucket,
+		ResultBucket: bucket,
+		ResultPrefix: "out/join-out/",
+	}
+
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(ctx, task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	if result.NumRows != 2 {
+		t.Fatalf("expected 2 joined rows (ids 1+2), got %d", result.NumRows)
+	}
+	if len(result.ResultFiles) != 1 {
+		t.Fatalf("expected 1 output file, got %d", len(result.ResultFiles))
+	}
+
+	got, _, err := store.Get(ctx, bucket, result.ResultFiles[0])
+	if err != nil {
+		t.Fatalf("get result file: %v", err)
+	}
+	defer got.Close()
+	var raw bytes.Buffer
+	if _, err := raw.ReadFrom(got); err != nil {
+		t.Fatalf("read result file: %v", err)
+	}
+	payload, err := DecompressShuffleData(raw.Bytes())
+	if err != nil {
+		t.Fatalf("decompress: %v", err)
+	}
+	rdr, err := newShuffleChunkReader(payload)
+	if err != nil {
+		t.Fatalf("newShuffleChunkReader: %v", err)
+	}
+	if len(rdr.schema) != 1 {
+		names := make([]string, len(rdr.schema))
+		for i, c := range rdr.schema {
+			names[i] = c.Name
+		}
+		t.Fatalf("expected 1 output column with OutputFilter=[name], got %d: %v", len(rdr.schema), names)
+	}
+	if rdr.schema[0].Name != "name" {
+		t.Errorf("expected output column 'name', got %q", rdr.schema[0].Name)
+	}
+}
+
+// TestExecuteStageHashJoin_OutputFilterEmptyAllowsAllColumns verifies that
+// when task.Columns is empty (e.g. tasks dispatched before the audit fix
+// landed, or stages without a tighter projection), the probe behaves as
+// before: emit all build+probe columns.
+func TestExecuteStageHashJoin_OutputFilterEmptyAllowsAllColumns(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-stage-noflt"
+
+	buildData := makeBuildWshf(t, [][2]int64{{1, 10}})
+	probeData := makeProbeWshf(t, []struct {
+		ID   int64
+		Name string
+	}{{1, "x"}})
+
+	store := objstore.NewMemStore()
+	_ = store.MakeBucket(ctx, bucket)
+	store.Put(ctx, bucket, "b.wshf", bytes.NewReader(buildData), int64(len(buildData)), "application/octet-stream")
+	store.Put(ctx, bucket, "p.wshf", bytes.NewReader(probeData), int64(len(probeData)), "application/octet-stream")
+
+	cache := NewLRUCache(4 * 1024 * 1024)
+	executor := NewExecutor(store, cache, nil)
+
+	task := distributed.Task{
+		ID:              "hj-nofilter",
+		QueryID:         "q",
+		StageID:         "join-nf",
+		Type:            distributed.TaskTypeStage,
+		StageType:       "hash_join",
+		JoinType:        "inner",
+		JoinLeftKeys:    []string{"id"},
+		JoinRightKeys:   []string{"id"},
+		BuildTableAlias: "build",
+		// Columns: nil — preserve legacy "emit all" semantics.
+		Inputs: map[string][]string{
+			"build": {"b.wshf"},
+			"probe": {"p.wshf"},
+		},
+		DataBucket:   bucket,
+		ResultBucket: bucket,
+		ResultPrefix: "out/join-nf/",
+	}
+
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(ctx, task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	got, _, err := store.Get(ctx, bucket, result.ResultFiles[0])
+	if err != nil {
+		t.Fatalf("get result file: %v", err)
+	}
+	defer got.Close()
+	var raw bytes.Buffer
+	raw.ReadFrom(got)
+	payload, err := DecompressShuffleData(raw.Bytes())
+	if err != nil {
+		t.Fatalf("decompress: %v", err)
+	}
+	rdr, err := newShuffleChunkReader(payload)
+	if err != nil {
+		t.Fatalf("reader: %v", err)
+	}
+	if len(rdr.schema) < 2 {
+		t.Errorf("expected ≥2 output columns when Columns is nil (full union), got %d", len(rdr.schema))
+	}
+}
