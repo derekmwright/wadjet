@@ -487,9 +487,17 @@ resource "aws_instance" "worker" {
       exit 1
     fi
 
-    # Mount NVMe instance store (c7gd, i4g, etc.) for spill-to-disk.
-    # Falls back to /tmp on instances without NVMe (c7g, etc.).
-    SPILL_DIR="/tmp"
+    # Spill-to-disk location selection. NVMe instance store (c7gd, i4g)
+    # is fastest; fall back to EBS-backed /var/spill for instances
+    # without instance store (c7g.* etc.).
+    #
+    # 2026-05-03: previously fell back to /tmp, which on Amazon Linux 2023
+    # is tmpfs (RAM-backed, default 50% of RAM = 16 GB on c7g.4xlarge).
+    # Q18 SF10 lineitem shuffle silently hit ENOSPC against tmpfs while
+    # the 200 GB EBS root volume sat unused; cluster wedged on retry
+    # loops until 30m timeout. /var/spill on the EBS root volume is
+    # slower than NVMe but unbounded by RAM and grows with the configured
+    # volume_size (200 GB).
     NVME_DEV=$(lsblk -dno NAME,TYPE | awk '$2=="disk" && $1~/nvme[0-9]+n1/ && $1!~/nvme0n1/{print "/dev/"$1; exit}')
     if [ -n "$NVME_DEV" ]; then
       echo "Formatting NVMe instance store: $NVME_DEV"
@@ -499,6 +507,10 @@ resource "aws_instance" "worker" {
       mkdir -p /mnt/nvme/spill
       SPILL_DIR="/mnt/nvme/spill"
       echo "NVMe spill directory ready at $SPILL_DIR"
+    else
+      mkdir -p /var/spill
+      SPILL_DIR="/var/spill"
+      echo "EBS-backed spill directory ready at $SPILL_DIR (no NVMe instance store on this instance type)"
     fi
 
     # Wait for coordinator NATS to be reachable before starting worker
