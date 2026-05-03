@@ -29,6 +29,7 @@ type gatherResult struct {
 // until `expectedTerminals` terminal messages arrive or ctx/timeout fires.
 type gatherReceiver struct {
 	sub               *nats.Subscription
+	workers           *WorkerRegistry // nil-safe; used to mark worker liveness from gather batches
 	mu                sync.Mutex
 	batches           []*batch.RecordBatch
 	totalRows         int64
@@ -44,9 +45,14 @@ type gatherReceiver struct {
 // the Gather task is published so the subscriber is present when the
 // worker emits batches and the terminal marker — raw-subject publishes
 // are not buffered for late subscribers.
-func subscribeGather(nc *nats.Conn, subject string, expectedTerminals int) (*gatherReceiver, error) {
+//
+// workers may be nil (test code that doesn't care about liveness); when
+// non-nil, every received gather batch updates LastSeen for the emitting
+// worker via WorkerRegistry.MarkWorkerSeen.
+func subscribeGather(nc *nats.Conn, subject string, expectedTerminals int, workers *WorkerRegistry) (*gatherReceiver, error) {
 	r := &gatherReceiver{
 		expectedTerminals: expectedTerminals,
+		workers:           workers,
 		done:              make(chan struct{}, 1),
 	}
 	sub, err := nc.Subscribe(subject, r.handle)
@@ -69,6 +75,9 @@ func (r *gatherReceiver) handle(m *nats.Msg) {
 	var msg distributed.GatherBatchMsg
 	if err := distributed.Unmarshal(m.Data, &msg); err != nil {
 		return
+	}
+	if r.workers != nil {
+		r.workers.MarkWorkerSeen(msg.WorkerID)
 	}
 	r.msgCount.Add(1)
 	r.mu.Lock()
@@ -136,20 +145,3 @@ func (r *gatherReceiver) wait(ctx context.Context, timeout time.Duration) (*gath
 	}, nil
 }
 
-// runGatherReceiver is a back-compat convenience: subscribe and wait in one
-// call. New callers should use subscribeGather + wait() so they can publish
-// the Gather task BETWEEN the subscribe and the wait, eliminating the race
-// where the worker publishes results before the subscription is installed.
-func runGatherReceiver(
-	ctx context.Context,
-	nc *nats.Conn,
-	subject string,
-	expectedTerminals int,
-	timeout time.Duration,
-) (*gatherResult, error) {
-	r, err := subscribeGather(nc, subject, expectedTerminals)
-	if err != nil {
-		return nil, err
-	}
-	return r.wait(ctx, timeout)
-}

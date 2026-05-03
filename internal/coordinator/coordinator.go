@@ -1689,6 +1689,11 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 		if c.workers.Liveness != nil {
 			c.workers.Liveness.Remove(result.TaskID)
 		}
+		// Multi-signal liveness: a result publish proves the worker is
+		// alive even if its heartbeat goroutine starves or the heartbeat
+		// NATS conn lags. Updates LastSeen for the worker, no-op if not
+		// yet registered.
+		c.workers.MarkWorkerSeen(result.WorkerID)
 		stageComplete := c.tracker.RecordResult(result)
 		if !stageComplete {
 			return

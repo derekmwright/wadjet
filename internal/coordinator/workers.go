@@ -158,14 +158,38 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 // recorded for the task only.
 func (wr *WorkerRegistry) recordTaskProgress(tp distributed.TaskProgress) {
 	now := time.Now()
-	wr.mu.Lock()
-	if info, ok := wr.workers[tp.WorkerID]; ok {
-		info.LastSeen = now
-	}
-	wr.mu.Unlock()
+	wr.markWorkerSeen(tp.WorkerID, now)
 	if wr.Liveness != nil {
 		wr.Liveness.Update([]string{tp.TaskID}, now)
 	}
+}
+
+// MarkWorkerSeen records that the given worker is alive as of `now`.
+// Multi-signal liveness: any worker→coord NATS message (TaskProgress,
+// ResultNotification, GatherBatchMsg) is proof the worker process is
+// running and able to publish, even if its heartbeat goroutine is
+// starved or its heartbeat NATS publish is lagging. Coord still requires
+// a real heartbeat for initial registration (cluster ID, pool stats),
+// but post-registration any of these signals counts toward LastSeen.
+//
+// No-op when workerID is empty (some workers don't stamp messages until
+// the worker ID is plumbed end-to-end).
+func (wr *WorkerRegistry) MarkWorkerSeen(workerID string) {
+	if workerID == "" {
+		return
+	}
+	wr.markWorkerSeen(workerID, time.Now())
+}
+
+func (wr *WorkerRegistry) markWorkerSeen(workerID string, now time.Time) {
+	if workerID == "" {
+		return
+	}
+	wr.mu.Lock()
+	if info, ok := wr.workers[workerID]; ok {
+		info.LastSeen = now
+	}
+	wr.mu.Unlock()
 }
 
 func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {

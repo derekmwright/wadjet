@@ -722,6 +722,7 @@ func (c *Coordinator) materializeReplicate(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = result{files: r.ResultFiles}
@@ -1065,6 +1066,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = append(collected, taskResult{files: r.ResultFiles})
@@ -1242,6 +1244,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = append(collected, taskResult{files: r.ResultFiles})
@@ -1530,6 +1533,7 @@ func (c *Coordinator) dispatchComputeStage(
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = append(collected, taskResult{files: r.ResultFiles})
@@ -1857,6 +1861,7 @@ func (c *Coordinator) runStageTasks(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = append(collected, taskResult{files: r.ResultFiles})
@@ -2125,7 +2130,7 @@ func (c *Coordinator) dispatchGatherStage(
 	// fired).
 	c.logger.Info("gather: subscribing",
 		"query_id", queryID, "reply_subject", replySubject)
-	recv, err := subscribeGather(c.nc, replySubject, 1)
+	recv, err := subscribeGather(c.nc, replySubject, 1, c.workers)
 	if err != nil {
 		return nil, fmt.Errorf("subscribing gather reply: %w", err)
 	}

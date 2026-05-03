@@ -200,6 +200,7 @@ func (c *Coordinator) runShuffleSide(
 		if unmarshalErr := distributed.Unmarshal(msg.Data, &r); unmarshalErr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if !r.Success {
 			collected = append(collected, taskResult{err: r.Error})

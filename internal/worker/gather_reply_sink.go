@@ -26,6 +26,7 @@ import (
 type gatherReplySink struct {
 	nc        *nats.Conn
 	subject   string
+	workerID  string // stamped on each GatherBatchMsg for coord-side liveness
 	schema    []parquet.Column
 	err       error
 	finalized bool
@@ -40,8 +41,8 @@ type gatherReplySink struct {
 // reply subject until query timeout.
 const gatherMaxRowsPerMessage = batch.DefaultBatchSize
 
-func newGatherReplySink(nc *nats.Conn, subject string, schema []parquet.Column) *gatherReplySink {
-	return &gatherReplySink{nc: nc, subject: subject, schema: schema}
+func newGatherReplySink(nc *nats.Conn, subject, workerID string, schema []parquet.Column) *gatherReplySink {
+	return &gatherReplySink{nc: nc, subject: subject, workerID: workerID, schema: schema}
 }
 
 func (s *gatherReplySink) Init(_ context.Context) error { return nil }
@@ -100,6 +101,7 @@ func (s *gatherReplySink) Consume(_ context.Context, b *batch.RecordBatch) error
 		msg := distributed.GatherBatchMsg{
 			RowCount: int32(windowLen),
 			Payload:  payload,
+			WorkerID: s.workerID,
 		}
 		data, err := distributed.Marshal(msg)
 		if err != nil {

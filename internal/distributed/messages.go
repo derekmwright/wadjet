@@ -222,6 +222,10 @@ type GatherBatchMsg struct {
 	RowCount int32  `json:"row_count"`
 	Payload  []byte `json:"payload,omitempty"` // WSHF-encoded single-chunk batch
 	Err      string `json:"err,omitempty"`     // non-empty on terminal failure
+	// WorkerID lets coord count gather batches as worker-liveness signals
+	// (multi-signal liveness — see WorkerRegistry.MarkWorkerSeen). Optional;
+	// older workers leave it empty.
+	WorkerID string `json:"worker_id,omitempty"`
 }
 
 // SortKeySpec defines a sort key in a task.
