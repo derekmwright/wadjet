@@ -791,8 +791,24 @@ func (c *Coordinator) dispatchPipelineStage(
 		if len(stage.FilterExprs) > 0 {
 			return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
 		}
-		// No filter: pass the raw parquet files through to the
-		// downstream stage.
+		// No filter: by default pass the raw parquet files through to the
+		// downstream stage (avoids the extra wshf write+read hop). But when
+		// the scan has a single oversized file (e.g. SF10 partsupp = 1.4 GB
+		// in 1 file because the bucket holds the data pre-compacted), the
+		// pass-through cascades single-tasked through every downstream
+		// broadcast-join in the chain — broadcastJoinProbeSplit's >=2-file
+		// gate skips, the entire join runs on one worker, and Q16 SF10
+		// jumps from ~1m45s to 14m+. Route through the scan-filter
+		// dispatcher (with empty filters) when sharding would help: it
+		// already row-group-shards a single big file across the cluster
+		// and produces N output wshf files, which the downstream
+		// broadcast_join can then probe-split.
+		if len(stage.ScanFiles) == 1 {
+			capacity := c.workers.ClusterCapacity()
+			if scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes) > 1 {
+				return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
+			}
+		}
 		files := append([]string(nil), stage.ScanFiles...)
 		return StageOutput{
 			Kind:  OutputSinglePart,
@@ -1320,7 +1336,8 @@ func (c *Coordinator) dispatchComputeStage(
 	// is identical to the single-task case. Only the probe scan + probe
 	// compute is parallelized.
 	probeSplit := false
-	if n, ok := broadcastJoinProbeSplit(stage, inputs, workerCount, numTasks); ok {
+	var probeSplitWhy probeSplitDiag
+	if n, ok := broadcastJoinProbeSplitWhy(stage, inputs, workerCount, numTasks, &probeSplitWhy); ok {
 		numTasks = n
 		probeSplit = true
 	}
@@ -1332,6 +1349,22 @@ func (c *Coordinator) dispatchComputeStage(
 		"distribution_count", stage.Distribution.Count,
 		"probe_split", probeSplit,
 		"inputs_aliases", len(inputs))
+	// When a single-task broadcast_join refused probe-split, log the
+	// reason so the next regression chase doesn't have to re-derive it
+	// from the planner's call sites.
+	if !probeSplit && stage.Type == physical.StageBroadcastJoin && numTasks == 1 {
+		c.logger.Info("probe_split skipped",
+			"stage_id", stage.ID,
+			"reason", probeSplitWhy.Reason,
+			"probe_dep", probeSplitWhy.ProbeDep,
+			"probe_kind", probeSplitWhy.ProbeKind,
+			"probe_files", probeSplitWhy.ProbeFiles,
+			"available_inputs", probeSplitWhy.AvailableInputs,
+			"expected_deps", probeSplitWhy.ExpectedDeps,
+			"actual_deps", probeSplitWhy.ActualDeps,
+			"current_num_tasks", probeSplitWhy.CurrentNumTasks,
+			"worker_count", probeSplitWhy.WorkerCount)
+	}
 
 	// Observability for fused-chain probe-split: log the cluster-wide
 	// broadcast-cache file count this stage will read across all shard
@@ -1934,22 +1967,47 @@ func broadcastJoinProbeSplit(
 	inputs map[string]StageOutput,
 	workerCount, currentNumTasks int,
 ) (numTasks int, ok bool) {
+	return broadcastJoinProbeSplitWhy(stage, inputs, workerCount, currentNumTasks, nil)
+}
+
+// broadcastJoinProbeSplitWhy is the diagnostic wrapper around the probe-split
+// gate. When `why` is non-nil it records the exact reason a single-task
+// broadcast_join didn't qualify for fan-out — invaluable when chasing
+// query-shape regressions like the Q16 SF10 single-task hot spot
+// documented in project_q16_q18_jetstream_dispatch_stall_2026-05-02.
+func broadcastJoinProbeSplitWhy(
+	stage physical.Stage,
+	inputs map[string]StageOutput,
+	workerCount, currentNumTasks int,
+	why *probeSplitDiag,
+) (numTasks int, ok bool) {
 	if stage.Type != physical.StageBroadcastJoin {
+		if why != nil {
+			why.Reason = "stage_type_not_broadcast_join"
+		}
 		return 0, false
 	}
 	if currentNumTasks != 1 {
+		if why != nil {
+			why.Reason = "current_num_tasks_not_one"
+			why.CurrentNumTasks = currentNumTasks
+		}
 		return 0, false
 	}
 	if workerCount <= 1 {
+		if why != nil {
+			why.Reason = "worker_count_too_small"
+			why.WorkerCount = workerCount
+		}
 		return 0, false
 	}
-	// A fused-chain broadcast_join has 2 + N deps (probe + primary build +
-	// N fused builds). Probe-split semantics are identical: split probe
-	// files across shard tasks, replicate the broadcast caches (primary +
-	// fused) to every shard. The shard count gate just needs to verify the
-	// stage has the expected dep count.
 	expectedDeps := 2 + len(stage.FusedJoins)
 	if len(stage.Dependencies) != expectedDeps {
+		if why != nil {
+			why.Reason = "dep_count_mismatch"
+			why.ExpectedDeps = expectedDeps
+			why.ActualDeps = len(stage.Dependencies)
+		}
 		return 0, false
 	}
 	probeDep := stage.LeftDepStage
@@ -1958,13 +2016,31 @@ func broadcastJoinProbeSplit(
 	}
 	probeIn, present := inputs[probeDep]
 	if !present {
+		if why != nil {
+			why.Reason = "probe_dep_not_in_inputs"
+			why.ProbeDep = probeDep
+			why.AvailableInputs = make([]string, 0, len(inputs))
+			for k := range inputs {
+				why.AvailableInputs = append(why.AvailableInputs, k)
+			}
+		}
 		return 0, false
 	}
 	if probeIn.Kind != OutputSinglePart && probeIn.Kind != OutputPartitioned {
+		if why != nil {
+			why.Reason = "probe_kind_unsupported"
+			why.ProbeDep = probeDep
+			why.ProbeKind = int(probeIn.Kind)
+		}
 		return 0, false
 	}
 	probeFiles := flattenStageFiles(probeIn)
 	if len(probeFiles) < 2 {
+		if why != nil {
+			why.Reason = "probe_files_too_few"
+			why.ProbeDep = probeDep
+			why.ProbeFiles = len(probeFiles)
+		}
 		return 0, false
 	}
 	n := workerCount
@@ -1972,6 +2048,20 @@ func broadcastJoinProbeSplit(
 		n = len(probeFiles)
 	}
 	return n, true
+}
+
+// probeSplitDiag captures why a probe-split didn't fire for a particular
+// broadcast_join stage. Caller fills this in and inspects after the call.
+type probeSplitDiag struct {
+	Reason          string
+	CurrentNumTasks int
+	WorkerCount     int
+	ExpectedDeps    int
+	ActualDeps      int
+	ProbeDep        string
+	AvailableInputs []string
+	ProbeKind       int
+	ProbeFiles      int
 }
 
 // buildTaskInputsForBroadcastJoinSplitProbe is the probe-split variant of
