@@ -1,8 +1,6 @@
-scan-0	scan	Singleton
-scan-1	scan	Singleton
-exchange-repartition-2	exchange-repartition	Hash(l_partkey)/32	deps=scan-0
-exchange-repartition-3	exchange-repartition	Hash(p_partkey)/32	deps=scan-1
-join-4	hash_join	Hash(l_partkey)/32	deps=exchange-repartition-2,exchange-repartition-3
+scan-0	scan	Hash(l_partkey)/32
+scan-1	scan	Hash(p_partkey)/32
+join-4	hash_join	Hash(l_partkey)/32	deps=scan-0,scan-1
 scan-5	scan	RoundRobin
 final_aggregate-44	final_aggregate	Hash(l_partkey)/4	deps=exchange-repartition-final_aggregate-44-6
 exchange-repartition-45	exchange-repartition	Hash(p_partkey)/32	deps=join-4
