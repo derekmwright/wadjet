@@ -231,6 +231,7 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		ResultBucket: bucket,
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
+	coord.Workers().StartSubStatsLogger(ctx)
 	coord.StartQueryReaper(ctx)
 	coord.StartQueryActiveHandler()
 

@@ -165,6 +165,29 @@ func (c *Coordinator) executeStageDAG(
 		return nil, fmt.Errorf("executeStageDAG: plan for query %s has no Gather stage", queryID)
 	}
 
+	// Mark every leaf scan that's the PROBE of a downstream broadcast_join.
+	// dispatchPipelineStage uses this to row-group-shard a single oversized
+	// probe file (e.g. SF10 partsupp at 1.4 GB pre-compacted) so the
+	// downstream broadcast_join can probe-split across the cluster. We only
+	// shard the probe side; build-side scans stay single-file because the
+	// broadcast cache is replicated to every join task — sharding the build
+	// would multiply the cache load N-fold and tank queries like Q05 that
+	// depend on small-dim broadcast joins (observed on the 2026-05-03 SF10
+	// fix-verify deploy of 970374a, where Q05 regressed 3m7s → 10m47s).
+	probeOfBroadcast := make(map[string]bool, len(stages))
+	for _, s := range stages {
+		if s.Type != physical.StageBroadcastJoin {
+			continue
+		}
+		probeDep := s.LeftDepStage
+		if probeDep == "" && len(s.Dependencies) > 0 {
+			probeDep = s.Dependencies[0]
+		}
+		if probeDep != "" {
+			probeOfBroadcast[probeDep] = true
+		}
+	}
+
 	outputs := make(map[string]StageOutput, len(stages))
 	var outputsMu sync.Mutex
 
@@ -294,7 +317,7 @@ func (c *Coordinator) executeStageDAG(
 			case physical.StageExchangeReplicate:
 				out, err = c.dispatchReplicateStage(gctx, queryID, sql, s, inputs)
 			default:
-				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount)
+				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount, probeOfBroadcast[s.ID])
 			}
 			if err != nil {
 				return fmt.Errorf("stage %s (%s): %w", s.ID, s.Type, err)
@@ -699,6 +722,7 @@ func (c *Coordinator) materializeReplicate(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = result{files: r.ResultFiles}
@@ -762,6 +786,7 @@ func (c *Coordinator) dispatchPipelineStage(
 	stage physical.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
+	isBroadcastJoinProbe bool,
 ) (StageOutput, error) {
 	_ = sql
 	// Leaf scan stage.
@@ -791,8 +816,27 @@ func (c *Coordinator) dispatchPipelineStage(
 		if len(stage.FilterExprs) > 0 {
 			return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
 		}
-		// No filter: pass the raw parquet files through to the
-		// downstream stage.
+		// No filter: by default pass raw parquet files through (saves the
+		// wshf write+read hop). But when this scan is the PROBE of a
+		// downstream broadcast_join AND it's a single oversized file
+		// (SF10 partsupp pre-compacted at 1.4 GB → 1 file), the
+		// pass-through cascades single-tasked through the join because
+		// broadcastJoinProbeSplit's >=2-file gate skips. Routing through
+		// scan-filter (with empty filters) row-group-shards the single
+		// file across the cluster and emits multiple output files, which
+		// the downstream broadcast_join can then probe-split.
+		//
+		// Build-side scans of broadcast_joins are explicitly NOT sharded:
+		// the broadcast cache is replicated to every join task, so each
+		// task would have to load N cache files instead of 1. Q05 SF10
+		// regressed 3m7s → 10m47s when the prior attempt at this fix
+		// sharded all single-file plain leaf scans regardless of role.
+		if isBroadcastJoinProbe && len(stage.ScanFiles) == 1 {
+			capacity := c.workers.ClusterCapacity()
+			if scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes) > 1 {
+				return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
+			}
+		}
 		files := append([]string(nil), stage.ScanFiles...)
 		return StageOutput{
 			Kind:  OutputSinglePart,
@@ -1022,6 +1066,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = append(collected, taskResult{files: r.ResultFiles})
@@ -1199,6 +1244,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = append(collected, taskResult{files: r.ResultFiles})
@@ -1487,6 +1533,7 @@ func (c *Coordinator) dispatchComputeStage(
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = append(collected, taskResult{files: r.ResultFiles})
@@ -1814,6 +1861,7 @@ func (c *Coordinator) runStageTasks(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
 			collected = append(collected, taskResult{files: r.ResultFiles})
@@ -2082,7 +2130,7 @@ func (c *Coordinator) dispatchGatherStage(
 	// fired).
 	c.logger.Info("gather: subscribing",
 		"query_id", queryID, "reply_subject", replySubject)
-	recv, err := subscribeGather(c.nc, replySubject, 1)
+	recv, err := subscribeGather(c.nc, replySubject, 1, c.workers)
 	if err != nil {
 		return nil, fmt.Errorf("subscribing gather reply: %w", err)
 	}

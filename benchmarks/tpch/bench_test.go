@@ -90,6 +90,71 @@ func TestTPCHDataGen(t *testing.T) {
 	}
 }
 
+// TestGenerateChunkedMatchesGenerate guards parity between the in-memory
+// Generate and streaming GenerateChunked paths. A real bug from this slipped
+// through: streamOrders dropped the numCusts*2/3 cap that genOrders has, so
+// the streaming path produced orders covering ~99.99% of customers (vs
+// ~66% per TPC-H spec). Q22 SF1 returned 0 rows under streaming ingestion
+// because nearly every customer had at least one order.
+//
+// Both paths use the same seed `int64(sf * 42_000_000)` and call the same
+// per-table generator in the same order, so the output should be byte-
+// identical row-by-row at SF0.01. Any future divergence in the per-row
+// formulas (e.g. dropping a join-key cap as streamOrders did) trips the
+// row-by-row equality check.
+func TestGenerateChunkedMatchesGenerate(t *testing.T) {
+	sf := SF001
+	streamed := map[string][]map[string]any{}
+	if err := GenerateChunked(sf, 1000, func(table string, rows []map[string]any) error {
+		// Copy the slice header so a later chunk can't alias.
+		out := make([]map[string]any, len(rows))
+		copy(out, rows)
+		streamed[table] = append(streamed[table], out...)
+		return nil
+	}); err != nil {
+		t.Fatalf("GenerateChunked: %v", err)
+	}
+
+	whole := Generate(sf)
+
+	for _, table := range []string{"region", "nation", "supplier", "part", "partsupp", "customer", "orders", "lineitem"} {
+		w := whole[table]
+		s := streamed[table]
+		if len(w) != len(s) {
+			t.Errorf("%s row count mismatch: Generate=%d GenerateChunked=%d", table, len(w), len(s))
+			continue
+		}
+		for i := range w {
+			if !rowsEqual(w[i], s[i]) {
+				t.Errorf("%s[%d] differs:\n  Generate:        %v\n  GenerateChunked: %v", table, i, w[i], s[i])
+				break // one mismatch per table is enough; symptom is usually systemic
+			}
+		}
+	}
+}
+
+// rowsEqual compares two rows for byte-identity at the value level. Maps
+// produced by the generator only contain primitive scalar types (string,
+// int32, int64, float64) so reflect.DeepEqual via fmt.Sprintf round-trip
+// is overkill — direct == on each known column does it.
+func rowsEqual(a, b map[string]any) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		// Compare via fmt.Sprintf — handles all numeric and string types,
+		// avoids pulling reflect.DeepEqual semantics around float NaN.
+		if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) {
+			return false
+		}
+	}
+	return true
+}
+
 // expectedRowsSF001 defines the expected row counts for each TPC-H query at SF0.01.
 // These are deterministic because the data generator uses fixed seeds.
 // Q18 legitimately returns 0 rows at this small scale factor.

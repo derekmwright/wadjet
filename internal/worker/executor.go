@@ -543,7 +543,7 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		if e.nc == nil {
 			return fmt.Errorf("gather task requires NATS connection")
 		}
-		pipeline.Sink = newGatherReplySink(e.nc, task.ReplySubject, nil)
+		pipeline.Sink = newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, nil)
 		if err := pipeline.Run(ctx); err != nil {
 			return fmt.Errorf("gather pipeline: %w", err)
 		}

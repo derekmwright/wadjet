@@ -51,10 +51,30 @@ func DefaultConfig() Config {
 }
 
 // Worker pulls tasks from NATS, executes them, and publishes results.
+// Pool-pressure-gated task pull (see taskLoop). Threshold is just under
+// the spill trigger (~75%) so we hold new tasks back BEFORE existing
+// tasks have to spill. Backoff is short — the goal is to defer the next
+// fetch by a beat, not to stall progress; the pull loop re-enters
+// immediately and re-checks pressure on the next iteration.
+const (
+	poolPressurePullThreshold = 0.70
+	poolPressurePullBackoff   = 100 * time.Millisecond
+)
+
 type Worker struct {
 	config   Config
 	store    objstore.Store
 	nc       *nats.Conn
+	// controlNC is an optional second NATS connection used exclusively for
+	// the heartbeat publish path. When set, the heartbeat goroutine never
+	// shares fate with high-volume data-plane traffic on nc (gather chunks,
+	// task results, TaskProgress). When nil, heartbeat falls back to nc.
+	// See project_q16_q18_jetstream_dispatch_stall_2026-05-02 for the
+	// motivating EC2 observation: workers with bursty data-plane load had
+	// their heartbeats fall behind even though publish-into-buffer was
+	// fast (the buffer wasn't draining because the connection's write
+	// goroutine was wedged behind larger sends).
+	controlNC *nats.Conn
 	js       jetstream.JetStream
 	executor *Executor
 	logger   *slog.Logger
@@ -148,6 +168,16 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 func (w *Worker) SetMetrics(m *metrics.Metrics) {
 	w.metrics = m
 	w.executor.SetMetrics(m)
+}
+
+// SetControlConn provides a dedicated NATS connection for the heartbeat
+// publish path. When set, heartbeats go through this connection instead of
+// the data-plane nc. Callers should pass a separately-dialed *nats.Conn
+// (NOT the same one as nc). Optional — heartbeat falls back to nc when
+// unset, preserving the historical single-connection topology used by
+// in-process tests.
+func (w *Worker) SetControlConn(nc *nats.Conn) {
+	w.controlNC = nc
 }
 
 // Start begins the worker task loop and heartbeat.
@@ -382,6 +412,28 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 			return
 		}
 
+		// Pool-pressure-gated pull: if the worker's shared memory pool is
+		// near capacity, hold off on accepting new tasks. Lets in-flight
+		// tasks complete + GC reclaim before we add more allocations on top.
+		// 2026-05-03 SF10 Q11 stalled because the worker accepted 4 new
+		// scan tasks 15s after completing 8 broadcast-join tasks
+		// (peak_heap=3.5GB each); the new tasks made zero row progress for
+		// 2m10s while the process thrashed. Gating the pull at 70% pool
+		// pressure prevents that overlap. Threshold matches the worker's
+		// internal spill trigger (~75%), giving slack to cleanly finish
+		// what's already in flight before pulling more.
+		if used, budget := w.executor.SharedPoolStats(); budget > 0 {
+			pressure := float64(used) / float64(budget)
+			if pressure > poolPressurePullThreshold {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(poolPressurePullBackoff):
+				}
+				continue
+			}
+		}
+
 		// Count available slots (non-blocking drain)
 		available := 0
 		for {
@@ -454,24 +506,27 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	// Skip tasks for cancelled queries (local cache from broadcast)
+	// Skip tasks for cancelled queries (local cache from broadcast).
+	// Cancellation arrives via the wadjet.cancel.> pubsub at line 194; if
+	// a task races ahead of the broadcast and starts executing, the
+	// per-task cancelTicker (500ms cadence at line 570) re-checks
+	// w.isCancelled and aborts in-flight. We previously did a synchronous
+	// nc.Request(SubjectQueryActive) here as belt-and-suspenders against
+	// watchdog-style query kills, but that request shared the data-plane
+	// connection — under buffer pressure, the publish-into-buffer
+	// completed fast yet the connection's write goroutine wedged behind
+	// larger gather sends, so the request hung past JS AckWait (10 min).
+	// Each redelivery hit the same wedge and consumed a MaxDeliver attempt;
+	// the result was the 10:48-min Q16 stall observed on the 2026-05-02
+	// EC2 deploy. Trade the millisecond-window race protection for a
+	// non-blocking handleTask entry — wasted work on a stale task is
+	// bounded by per-task cancelTicker reactivity (~500ms) plus task
+	// duration.
 	if w.isCancelled(task.QueryID) {
 		w.logger.Debug("skipping task for cancelled query",
 			"task_id", task.ID, "query_id", task.QueryID)
 		msg.Term()
 		return
-	}
-
-	// Check with coordinator if query is still active. Catches stale tasks
-	// that linger in JetStream after a query was killed (e.g., watchdog).
-	// ~1ms overhead per task, prevents minutes of wasted work.
-	if resp, err := w.nc.Request(distributed.SubjectQueryActive, []byte(task.QueryID), 2*time.Second); err == nil {
-		if string(resp.Data) == "0" {
-			w.logger.Info("skipping task for inactive query",
-				"task_id", task.ID, "query_id", task.QueryID)
-			msg.Term()
-			return
-		}
 	}
 
 	// Track active task for heartbeat progress reporting
@@ -874,7 +929,16 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 				continue
 			}
 
-			w.nc.Publish(distributed.SubjectHeartbeat, data)
+			// Heartbeat uses the control-plane connection when set; the
+			// dedicated connection isolates the publish path from
+			// data-plane buffer pressure (gather chunks, large task
+			// results) that previously left coord blind to a still-alive
+			// worker.
+			hbConn := w.controlNC
+			if hbConn == nil {
+				hbConn = w.nc
+			}
+			hbConn.Publish(distributed.SubjectHeartbeat, data)
 
 			// Reap old cancellation entries every ~60s (6 heartbeat ticks)
 			if tickCounter%6 == 0 {

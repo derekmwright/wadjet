@@ -157,3 +157,81 @@ func TestTaskLivenessFromHeartbeat(t *testing.T) {
 	}
 	wr.Liveness.mu.RUnlock()
 }
+
+// TestMarkWorkerSeenKeepsAliveWithoutHeartbeat is the regression test for
+// the multi-signal liveness fix. A worker that registers and then stops
+// heartbeating but continues publishing results / TaskProgress / gather
+// batches must NOT be reaped. Without MarkWorkerSeen the coord would reap
+// the worker after `stale` and orphan its in-flight tasks.
+func TestMarkWorkerSeenKeepsAliveWithoutHeartbeat(t *testing.T) {
+	wr := &WorkerRegistry{
+		workers:  make(map[string]*WorkerInfo),
+		stale:    50 * time.Millisecond,
+		logger:   slog.Default(),
+		Liveness: NewTaskLiveness(),
+	}
+
+	// Register via heartbeat so worker exists in the registry.
+	wr.record(distributed.WorkerHeartbeat{WorkerID: "w-busy", Timestamp: time.Now()})
+
+	// Backdate heartbeat past the stale TTL — without other signals
+	// the worker would be reaped on the next ReapStale tick.
+	wr.workers["w-busy"].LastSeen = time.Now().Add(-1 * time.Hour)
+
+	// Result publish from the worker arrives before the reaper runs.
+	// MarkWorkerSeen updates LastSeen so the worker is no longer stale.
+	wr.MarkWorkerSeen("w-busy")
+
+	if reaped := wr.ReapStale(); reaped != 0 {
+		t.Fatalf("expected 0 reaped after MarkWorkerSeen; got %d (multi-signal liveness regression)", reaped)
+	}
+	if wr.Count() != 1 {
+		t.Fatalf("expected w-busy to remain active; got %d workers", wr.Count())
+	}
+}
+
+// TestMarkWorkerSeenIgnoresEmptyAndUnknown verifies that the helper is
+// safe to call on every worker→coord message without preconditions:
+// empty workerID is a no-op, and a workerID for a worker not yet
+// registered is a no-op (registration still requires a real heartbeat
+// to populate cluster ID and pool stats).
+func TestMarkWorkerSeenIgnoresEmptyAndUnknown(t *testing.T) {
+	wr := &WorkerRegistry{
+		workers: make(map[string]*WorkerInfo),
+		stale:   30 * time.Second,
+		logger:  slog.Default(),
+	}
+
+	// Empty workerID: must not panic, must not register a worker.
+	wr.MarkWorkerSeen("")
+	if len(wr.workers) != 0 {
+		t.Errorf("empty workerID should not create a worker; got %d", len(wr.workers))
+	}
+
+	// Unknown workerID: same — registration still requires a heartbeat.
+	wr.MarkWorkerSeen("w-unknown")
+	if len(wr.workers) != 0 {
+		t.Errorf("unknown workerID should not create a worker; got %d", len(wr.workers))
+	}
+}
+
+// TestReapStillFiresWhenAllSignalsStop confirms the reaper still works
+// when no signals (heartbeat, TaskProgress, results, gather) arrive at
+// all. Multi-signal liveness widens the proof-of-life inputs but does
+// NOT extend the TTL itself.
+func TestReapStillFiresWhenAllSignalsStop(t *testing.T) {
+	wr := &WorkerRegistry{
+		workers:  make(map[string]*WorkerInfo),
+		stale:    50 * time.Millisecond,
+		logger:   slog.Default(),
+		Liveness: NewTaskLiveness(),
+	}
+
+	wr.record(distributed.WorkerHeartbeat{WorkerID: "w-dead", Timestamp: time.Now()})
+	wr.workers["w-dead"].LastSeen = time.Now().Add(-1 * time.Hour)
+	// No MarkWorkerSeen call — simulating a truly dead worker.
+
+	if reaped := wr.ReapStale(); reaped != 1 {
+		t.Fatalf("expected 1 reaped (truly dead worker); got %d", reaped)
+	}
+}

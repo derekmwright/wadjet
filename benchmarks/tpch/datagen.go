@@ -473,13 +473,14 @@ func streamCustomer(rng *rand.Rand, count int, e *chunkEmitter) {
 
 func streamOrders(rng *rand.Rand, count, numCusts int, e *chunkEmitter) {
 	statuses := []string{"F", "O", "P"}
+	custRange := max(1, numCusts*2/3)
 	for i := 0; i < count; i++ {
 		year := 1992 + rng.Intn(6)
 		month := rng.Intn(12) + 1
 		day := rng.Intn(28) + 1
 		e.add(map[string]any{
 			"o_orderkey":      int32(i + 1),
-			"o_custkey":       int32(rng.Intn(numCusts) + 1),
+			"o_custkey":       int32(rng.Intn(custRange) + 1),
 			"o_orderstatus":   statuses[rng.Intn(3)],
 			"o_totalprice":    randFloat(rng, 1000.0, 500000.0),
 			"o_orderdate":     fmt.Sprintf("%04d-%02d-%02d", year, month, day),

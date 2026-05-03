@@ -76,7 +76,7 @@ func TestGatherReplySink(t *testing.T) {
 	b2.Columns[1].BytesData.Set(0, []byte("dave"))
 	b2.Columns[1].BytesData.Set(1, []byte("eve"))
 
-	sink := newGatherReplySink(nc, subject, schema)
+	sink := newGatherReplySink(nc, subject, "test-worker", schema)
 	ctx := context.Background()
 	if err := sink.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -210,7 +210,7 @@ func TestGatherReplySinkChunksOversizedBatch(t *testing.T) {
 		wantSum += int64(i + 1)
 	}
 
-	sink := newGatherReplySink(nc, subject, schema)
+	sink := newGatherReplySink(nc, subject, "test-worker", schema)
 	ctx := context.Background()
 	if err := sink.Init(ctx); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -310,7 +310,7 @@ func TestGatherReplySinkConsumeError(t *testing.T) {
 	}
 	defer sub.Unsubscribe()
 
-	sink := newGatherReplySink(nc, "gather.err.test", schema)
+	sink := newGatherReplySink(nc, "gather.err.test", "test-worker", schema)
 	if err := sink.Consume(context.Background(), b); err == nil {
 		t.Fatal("expected Consume to fail on unsupported type")
 	}

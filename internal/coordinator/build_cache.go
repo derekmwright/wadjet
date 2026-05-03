@@ -270,6 +270,7 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 		if unmarshalErr := distributed.Unmarshal(msg.Data, &r); unmarshalErr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		resultMu.Lock()
 		if !r.Success {
 			resultErr = r.Error

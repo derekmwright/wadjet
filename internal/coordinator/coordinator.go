@@ -1689,6 +1689,11 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 		if c.workers.Liveness != nil {
 			c.workers.Liveness.Remove(result.TaskID)
 		}
+		// Multi-signal liveness: a result publish proves the worker is
+		// alive even if its heartbeat goroutine starves or the heartbeat
+		// NATS conn lags. Updates LastSeen for the worker, no-op if not
+		// yet registered.
+		c.workers.MarkWorkerSeen(result.WorkerID)
 		stageComplete := c.tracker.RecordResult(result)
 		if !stageComplete {
 			return
@@ -1719,6 +1724,12 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 	if err != nil {
 		c.logger.Error("failed to subscribe to results", "error", err, "subject", subject)
 		return
+	}
+	// Same pending-limit bump as heartbeat sub — long queries (Q11 30min)
+	// can accumulate many results during the per-query lifetime, and
+	// drops here would silently lose stage-completion signals.
+	if perr := sub.SetPendingLimits(coordSubMsgLimit, coordSubByteLimit); perr != nil {
+		c.logger.Warn("failed to bump query-result sub pending limits", "error", perr)
 	}
 
 	c.mu.Lock()

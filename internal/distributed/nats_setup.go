@@ -41,6 +41,26 @@ func DefaultNATSConfig() NATSConfig {
 	}
 }
 
+// natsSlogLogger adapts the nats-server Logger interface onto our slog
+// pipeline. We only use this for the embedded NATS server inside coord
+// (and tests). Notice/Warn/Error/Fatal map naturally; Debug/Trace map
+// to slog.Debug since we leave debug=trace=false at SetLogger time.
+type natsSlogLogger struct{ l *slog.Logger }
+
+func newNATSSlogLogger(base *slog.Logger) *natsSlogLogger {
+	if base == nil {
+		base = slog.Default()
+	}
+	return &natsSlogLogger{l: base.With("component", "nats")}
+}
+
+func (n *natsSlogLogger) Noticef(format string, v ...any) { n.l.Info(fmt.Sprintf(format, v...)) }
+func (n *natsSlogLogger) Warnf(format string, v ...any)   { n.l.Warn(fmt.Sprintf(format, v...)) }
+func (n *natsSlogLogger) Fatalf(format string, v ...any)  { n.l.Error(fmt.Sprintf(format, v...), "level", "fatal") }
+func (n *natsSlogLogger) Errorf(format string, v ...any)  { n.l.Error(fmt.Sprintf(format, v...)) }
+func (n *natsSlogLogger) Debugf(format string, v ...any)  { n.l.Debug(fmt.Sprintf(format, v...)) }
+func (n *natsSlogLogger) Tracef(format string, v ...any)  { n.l.Debug(fmt.Sprintf(format, v...), "trace", true) }
+
 // EmbeddedNATS manages an embedded NATS server with JetStream.
 type EmbeddedNATS struct {
 	server *natsserver.Server
@@ -62,7 +82,13 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 	opts := &natsserver.Options{
 		Host:           cfg.Host,
 		Port:           cfg.Port,
-		NoLog:          true,
+		// NoLog=false so we can install a custom logger after Start(). The
+		// SF10 mass-reap pattern (5 workers across 3 hosts going silent
+		// within 7s) is consistent with NATS server-side slow-consumer
+		// drops, and we historically had NoLog=true so the server's drop
+		// warnings were invisible. With this off + the SetLogger call
+		// below, slow-consumer events surface in the coord log.
+		NoLog:          false,
 		NoSigs:         true,
 		MaxPayload:     cfg.MaxPayload,
 		JetStream:      true,
@@ -118,6 +144,11 @@ func NewEmbeddedNATS(cfg NATSConfig, logger *slog.Logger) (*EmbeddedNATS, error)
 	if err != nil {
 		return nil, fmt.Errorf("creating nats server: %w", err)
 	}
+
+	// Install slog-backed logger BEFORE Start() so any startup messages
+	// reach our log instead of stdout. Trace=false keeps volume down;
+	// flip to true when chasing a specific NATS-internal issue.
+	ns.SetLogger(newNATSSlogLogger(logger), false, false)
 
 	ns.Start()
 

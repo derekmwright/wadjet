@@ -132,6 +132,7 @@ func (c *Coordinator) preComputeDerivedAggregate(
 		if unmarshalErr := distributed.Unmarshal(msg.Data, &r); unmarshalErr != nil {
 			return
 		}
+		c.workers.MarkWorkerSeen(r.WorkerID)
 		resultMu.Lock()
 		if !r.Success {
 			resultErr = r.Error

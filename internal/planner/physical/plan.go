@@ -3,7 +3,10 @@ package physical
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"runtime"
 	"strconv"
@@ -302,6 +305,15 @@ type Planner struct {
 	// across a single query when resolveFilterSubqueries defers CTE-
 	// referencing subqueries for late coordinator-side substitution.
 	scalarPlaceholderSeq int
+
+	// ctePlannedTerminal caches the terminal stage ID emitted while walking
+	// a CTE's subtree, keyed by `cteName + "|" + structuralHash(subtree)`.
+	// On a second walk of a structurally-identical CTE clone, walkStages
+	// links the parent's deps to the cached terminal and skips re-emitting
+	// duplicate stages. Eliminates the dual-chain float drift that fails
+	// Q15 ~50% under multi-file scans (project_q15_dual_chain_float_drift).
+	// Reset at the start of generateStages so each query gets a fresh map.
+	ctePlannedTerminal map[string]string
 }
 
 // getSpillManager returns a shared per-query spill manager, creating it on
@@ -936,6 +948,136 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 
 	// Store final accumulated results
 	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: allRows}
+}
+
+// stageTypeCTEAlias marks a phantom stage that walkStages emits in place of
+// a re-computed CTE subtree when ctePlannedTerminal already has a cached
+// terminal stage ID. flattenCTEAliases removes these stages from the final
+// plan and rewrites every dependency edge that targets an alias to target
+// the alias's underlying CTE terminal instead. The alias never reaches
+// dispatch — it exists purely to give parent walkStages cases something to
+// pick up via leafStages without changing every parent's child-resolution
+// logic.
+const stageTypeCTEAlias = "cte-alias"
+
+// flattenCTEAliases collapses cte-alias stages: replaces every Dependencies
+// reference to an alias with its target, recursing through chains of aliases,
+// then drops alias stages from the slice. Idempotent on slices that contain
+// no aliases.
+func flattenCTEAliases(stages []Stage) []Stage {
+	// Build alias → target map. Aliases have exactly one Dependencies entry
+	// pointing at the cached CTE terminal (or another alias, in pathological
+	// chain cases — recurse to flatten).
+	aliasTarget := map[string]string{}
+	for _, s := range stages {
+		if s.Type == stageTypeCTEAlias && len(s.Dependencies) == 1 {
+			aliasTarget[s.ID] = s.Dependencies[0]
+		}
+	}
+	if len(aliasTarget) == 0 {
+		return stages
+	}
+	// Resolve transitively: follow alias→alias chains until we hit a real
+	// stage. Caps at len(aliasTarget) hops to defend against any cycle.
+	resolve := func(id string) string {
+		for i := 0; i <= len(aliasTarget); i++ {
+			next, ok := aliasTarget[id]
+			if !ok {
+				return id
+			}
+			id = next
+		}
+		return id
+	}
+	// Rewrite every Dependencies / LeftDepStage / RightDepStage / FusedJoin
+	// build dep that points at an alias.
+	for i := range stages {
+		s := &stages[i]
+		for j, dep := range s.Dependencies {
+			s.Dependencies[j] = resolve(dep)
+		}
+		if t, ok := aliasTarget[s.LeftDepStage]; ok {
+			s.LeftDepStage = resolve(t)
+		}
+		if t, ok := aliasTarget[s.RightDepStage]; ok {
+			s.RightDepStage = resolve(t)
+		}
+		for j, fj := range s.FusedJoins {
+			if t, ok := aliasTarget[fj.BuildDepStage]; ok {
+				s.FusedJoins[j].BuildDepStage = resolve(t)
+			}
+		}
+		for ph, prod := range s.ScalarDependencies {
+			if t, ok := aliasTarget[prod]; ok {
+				s.ScalarDependencies[ph] = resolve(t)
+			}
+		}
+	}
+	// Drop alias stages.
+	out := make([]Stage, 0, len(stages))
+	for _, s := range stages {
+		if s.Type == stageTypeCTEAlias {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// cteSubtreeHash returns a hex SHA-256 over a structural projection of the
+// logical subtree rooted at n. Two CTE clones with the same hash are safe
+// to dedupe in walkStages: identical scan tables, identical pushed-down
+// predicates, identical projections/aggregates, identical column-pruning
+// outputs, identical child shapes. A clone where the optimizer pushed
+// different filters or columns has a different hash and is NOT deduped.
+//
+// The hash is intentionally over the *post-optimization* logical shape —
+// we want bit-identical execution paths, not source-text equality.
+func cteSubtreeHash(n *logical.Node) string {
+	h := sha256.New()
+	hashLogicalNode(h, n)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func hashLogicalNode(h io.Writer, n *logical.Node) {
+	if n == nil {
+		_, _ = io.WriteString(h, "<nil>|")
+		return
+	}
+	// Order matters and so does separator — Sprint with a delimiter so a
+	// field containing the same characters as another can't collide. The
+	// fields chosen are the ones the physical planner actually reads from
+	// when emitting stages; if a future planner change reads a new field
+	// during walkStages, add it here.
+	//
+	// IMPORTANT: RequiredColumns is INTENTIONALLY excluded. The optimizer's
+	// column-pruning analysis pushes columns referenced anywhere in the
+	// outer query into the CTE's inner scan rc list — including columns
+	// that don't even belong to the CTE's tables (e.g., supplier_no
+	// projected by the Project ABOVE the CTE body, or s_suppkey from the
+	// JOIN's other side). Two clones of the same CTE will therefore
+	// disagree on RequiredColumns even though they compute byte-identical
+	// data; downstream scan code already over-approximates and prunes to
+	// real schema columns at execution time. Hashing RC would defeat the
+	// dedup whenever a CTE is consumed by two consumers with different
+	// outer column needs (i.e., always).
+	fmt.Fprintf(h, "T:%v|TBL:%s|PF:%v|SP:%v|", n.Type, n.TableName, n.PartitionFilter, n.ScanPredicates)
+	fmt.Fprintf(h, "Pred:%v|Proj:%v|", n.Predicates, n.Projections)
+	fmt.Fprintf(h, "GB:%v|GBE:%v|Agg:%v|", n.GroupBy, n.GroupByExprs, n.AggExprs)
+	fmt.Fprintf(h, "OB:%v|Lim:%d|Off:%d|", n.OrderBy, n.LimitVal, n.OffsetVal)
+	fmt.Fprintf(h, "JT:%s|JC:%s|JF:%s|LK:%v|RK:%v|", n.JoinType, n.JoinCond, n.JoinFilter, n.LeftKeys, n.RightKeys)
+	fmt.Fprintf(h, "Win:%v|UA:%v|", n.WindowExprs, n.UnionAll)
+	// Don't fold n.CTEName into the hash — two clones of the same CTE
+	// SHARE that name, that's the whole point. The cache key in walkStages
+	// already uses CTEName as a separate dimension.
+	_, _ = io.WriteString(h, "C:[")
+	for i, c := range n.Children {
+		if i > 0 {
+			_, _ = io.WriteString(h, ",")
+		}
+		hashLogicalNode(h, c)
+	}
+	_, _ = io.WriteString(h, "]|")
 }
 
 // splitRecursiveUnion splits a recursive CTE body at the top-level UNION ALL.
@@ -2018,7 +2160,15 @@ func (p *Planner) ExpandFederatedScans(stages []Stage) []Stage {
 
 func (p *Planner) generateStages(node *logical.Node) []Stage {
 	var stages []Stage
+	// Fresh CTE dedup cache per query — walkStages populates it as it
+	// encounters CTE-named subtrees and consults it on subsequent walks
+	// (typically when emitScalarProducerStages re-walks a CTE-referencing
+	// scalar subquery, which would otherwise double-compute the CTE).
+	p.ctePlannedTerminal = make(map[string]string)
 	p.walkStages(node, &stages, nil)
+	// Resolve cte-alias phantoms emitted by walkStages dedup. Must happen
+	// before fuseJoinStages so fusion sees real stage IDs everywhere.
+	stages = flattenCTEAliases(stages)
 	// Broadcast-join fusion absorbs a leaf broadcast_join into its consumer
 	// join's FusedJoins list, so a chain of N broadcast joins runs as ONE
 	// task that builds N hash tables and pipelines probes batch-by-batch
@@ -2472,6 +2622,61 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 }
 
 func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *string) {
+	// CTE deduplication: when this subtree's root is a CTE reference and
+	// a structurally-identical clone has already been planned, link the
+	// parent's deps to the cached terminal stage and skip re-walking.
+	// Eliminates the dual-chain float drift that fails Q15 under multi-
+	// file scans: the JOIN's right side and the MAX-subquery producer
+	// chain previously emitted independent stages computing the same
+	// CTE, producing 1-ULP drift between their float SUMs.
+	//
+	// The structural hash guards correctness — a CTE clone with different
+	// pushed-down filters or column projections has a different hash and
+	// is NOT deduped, falling back to the historical compute-twice path.
+	if node.CTEName != "" {
+		hash := cteSubtreeHash(node)
+		cacheKey := node.CTEName + "|" + hash
+		if termID, ok := p.ctePlannedTerminal[cacheKey]; ok {
+			// Emit a phantom "cte-alias" stage that points at the cached
+			// terminal. Parent walkStages cases compute their dependencies
+			// via leafStages over [preCount:], which naturally picks up
+			// this alias as a leaf — so the parent's deps reference the
+			// alias's ID. A post-pass (flattenCTEAliases) rewrites every
+			// dep that points to an alias into the alias's target and
+			// drops the alias stages, leaving the parent reading directly
+			// from the cached CTE terminal. Surgical: avoids modifying
+			// every parent case to consult a Planner-level "deduped child"
+			// list; the bookkeeping lives entirely in the alias stage and
+			// the post-pass.
+			aliasID := fmt.Sprintf("cte-alias-%d", len(*stages))
+			*stages = append(*stages, Stage{
+				ID:           aliasID,
+				Type:         stageTypeCTEAlias,
+				Dependencies: []string{termID},
+			})
+			if parentID != nil {
+				for i := range *stages {
+					if (*stages)[i].ID == *parentID {
+						(*stages)[i].Dependencies = append((*stages)[i].Dependencies, aliasID)
+						break
+					}
+				}
+			}
+			return
+		}
+		// Defer recording: after walkStages returns, the last stage
+		// in *stages is the terminal of this CTE's subtree (walkStages
+		// emits children first, then the node's own stage last for
+		// every node type except Filter — and Filter at a CTE root is
+		// degenerate because Filter doesn't emit its own stage).
+		before := len(*stages)
+		defer func() {
+			if len(*stages) > before {
+				p.ctePlannedTerminal[cacheKey] = (*stages)[len(*stages)-1].ID
+			}
+		}()
+	}
+
 	switch node.Type {
 	case logical.NodeScan:
 		stageID := fmt.Sprintf("scan-%d", len(*stages))
