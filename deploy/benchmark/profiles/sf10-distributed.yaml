@@ -2,8 +2,14 @@
 #
 # Medium-scale benchmark for performance regression testing.
 # Data pre-seeded in S3 under tables/ prefix.
-# Coordinator: c7g.2xlarge (8 vCPU, 16 GB)
-# Workers: c7g.4xlarge (16 vCPU, 32 GB) x3
+# Coordinator: c7g.2xlarge  (8 vCPU, 16 GB)
+# Workers:     c7gd.4xlarge (16 vCPU, 32 GB, 1x950 GB NVMe) x3
+#
+# NVMe (c7gd, not c7g) is required: 2026-05-03 SF10 Q18 stalled when
+# spill landed on tmpfs because c7g.4xlarge has no instance store.
+# c7gd matches SF100 cluster topology.
+#
+# MUST match tfvars: deploy/benchmark/terraform/sf10-distributed.tfvars
 
 name: SF10 Distributed
 description: 3-worker TPC-H SF10 for performance regression testing
@@ -17,12 +23,12 @@ cluster:
   mode: distributed
   workers: 3
   coordinator_instance: c7g.2xlarge
-  worker_instance: c7g.4xlarge
+  worker_instance: c7gd.4xlarge
   arch: arm64
   use_spot: true
 
 benchmark:
   scale_factor: 10
   runs: 1
-  query_timeout: 10m
+  query_timeout: 30m
   skip_load: true
