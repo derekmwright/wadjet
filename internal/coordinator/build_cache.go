@@ -336,27 +336,3 @@ func (c *Coordinator) preScanOneTable(parentCtx context.Context, parentQueryID s
 	return nil, fmt.Errorf("build cache scan returned %d rows but no result path or inline data", resultRows)
 }
 
-// orchestrateReplicate dispatches a StageExchangeReplicate. It adapts
-// the pre-scan implementation (preScanBuildTables) to the stage-DAG
-// dispatch interface. The pre-scan function is retained as the actual
-// implementation until Phase 2 Task 19 deletes the legacy path.
-//
-// Phase 2 Task 12: shim added, but orchestrateReplicate is not yet
-// called from any dispatch site. Task 14 introduces the stage-DAG
-// dispatcher that routes to this function.
-func (c *Coordinator) orchestrateReplicate(
-	ctx context.Context,
-	stage physical.Stage,
-	parentQueryID string,
-	sql string,
-	allStages []physical.Stage,
-	probeAlias string,
-) (map[string][]string, error) {
-	if stage.Type != physical.StageExchangeReplicate {
-		return nil, fmt.Errorf(
-			"orchestrate replicate: wrong stage type %q (expected %q)",
-			stage.Type, physical.StageExchangeReplicate,
-		)
-	}
-	return c.preScanBuildTables(ctx, parentQueryID, sql, allStages, probeAlias)
-}

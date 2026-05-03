@@ -93,10 +93,6 @@ type Coordinator struct {
 	catalogSnapshotInterval time.Duration
 	catalogSnapshotCancel   context.CancelFunc
 	catalogSnapshotWG       sync.WaitGroup
-
-	// dispatchHooks is nil in production. Tests set it to observe how
-	// dispatchStageDAG routes stages per Type.
-	dispatchHooks *dispatchHooks
 }
 
 // New creates a new Coordinator.
