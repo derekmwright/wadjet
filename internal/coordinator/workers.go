@@ -10,6 +10,19 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+// Coord-side NATS subscription pending limits. NATS defaults are 65536
+// messages / 64 MB per sub; under SF10 fanout (24 task slots × multiple
+// publishes per task) those limits get hit during bursts and the server
+// silently drops messages. Bumping by ~16× msgs / 4× bytes gives bursts
+// room to queue while the sub callback drains. Long-term fix is to move
+// NATS off coord so its goroutines don't share GC + GOMAXPROCS with
+// coord planning/dispatch — but that's a bigger change. See
+// project_multi_signal_liveness_ec2_validation_2026-05-03.md.
+const (
+	coordSubMsgLimit  = 1_048_576       // 1M messages (default 65k)
+	coordSubByteLimit = 256 * 1024 * 1024 // 256 MB (default 64 MB)
+)
+
 // WorkerInfo tracks the state of a registered worker.
 type WorkerInfo struct {
 	WorkerID      string
@@ -122,6 +135,17 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 		logger.Error("failed to subscribe to heartbeats", "error", err)
 		return wr
 	}
+	// Bump pending limits past NATS defaults (65536 msgs / 64 MB). 2026-05-03
+	// EC2 SF10 saw 5 workers reaped within 7 seconds across 3 hosts during
+	// Q11 — a cluster-wide silence consistent with NATS server-side
+	// slow-consumer drops on the heartbeat sub. Headroom here lets bursts
+	// queue instead of dropping silently. Sub-stats instrumentation
+	// (StartSubStatsLogger) reports actual pending+drop counts; if drops
+	// stay zero with these limits, the slow-consumer hypothesis is valid
+	// and a deeper fix (NATS off coord) is the architectural next step.
+	if err := sub.SetPendingLimits(coordSubMsgLimit, coordSubByteLimit); err != nil {
+		logger.Warn("failed to bump heartbeat sub pending limits", "error", err)
+	}
 	wr.sub = sub
 
 	// Per-task progress is published from a separate worker goroutine on a
@@ -145,6 +169,9 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 	if err != nil {
 		logger.Error("failed to subscribe to task progress", "error", err)
 	} else {
+		if err := progressSub.SetPendingLimits(coordSubMsgLimit, coordSubByteLimit); err != nil {
+			logger.Warn("failed to bump task-progress sub pending limits", "error", err)
+		}
 		wr.progressSub = progressSub
 	}
 
@@ -412,6 +439,77 @@ func (wr *WorkerRegistry) StartReaper(ctx context.Context) {
 				return
 			case <-ticker.C:
 				wr.ReapStale()
+			}
+		}
+	}()
+}
+
+// StartSubStatsLogger periodically logs PendingMsgs/PendingBytes/Dropped/
+// Delivered for the long-lived subscriptions (heartbeat + TaskProgress).
+// 2026-05-03 SF10 mass-reap was consistent with NATS server-side slow-
+// consumer drops on these subs but we had no instrumentation to confirm.
+// With this running, drops surface in the coord log as they happen.
+//
+// Cadence: 10s — same as worker heartbeat cadence so a stat-tick reliably
+// sits between consecutive heartbeats. Stats are O(1) to read; the only
+// cost is one log line per tick.
+func (wr *WorkerRegistry) StartSubStatsLogger(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		var prevHBDropped, prevHBDeliv int64
+		var prevTPDropped, prevTPDeliv int64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if wr.sub != nil {
+					pMsgs, pBytes, _ := wr.sub.Pending()
+					dropped, _ := wr.sub.Dropped()
+					deliv, _ := wr.sub.Delivered()
+					maxMsgs, maxBytes, _ := wr.sub.PendingLimits()
+					dDropped := int64(dropped) - prevHBDropped
+					dDeliv := deliv - prevHBDeliv
+					prevHBDropped = int64(dropped)
+					prevHBDeliv = deliv
+					level := slog.LevelInfo
+					if dDropped > 0 {
+						level = slog.LevelWarn
+					}
+					wr.logger.Log(ctx, level, "nats sub stats",
+						"sub", "heartbeat",
+						"pending_msgs", pMsgs,
+						"pending_bytes", pBytes,
+						"max_msgs", maxMsgs,
+						"max_bytes", maxBytes,
+						"delta_delivered", dDeliv,
+						"delta_dropped", dDropped,
+						"total_dropped", dropped)
+				}
+				if wr.progressSub != nil {
+					pMsgs, pBytes, _ := wr.progressSub.Pending()
+					dropped, _ := wr.progressSub.Dropped()
+					deliv, _ := wr.progressSub.Delivered()
+					maxMsgs, maxBytes, _ := wr.progressSub.PendingLimits()
+					dDropped := int64(dropped) - prevTPDropped
+					dDeliv := deliv - prevTPDeliv
+					prevTPDropped = int64(dropped)
+					prevTPDeliv = deliv
+					level := slog.LevelInfo
+					if dDropped > 0 {
+						level = slog.LevelWarn
+					}
+					wr.logger.Log(ctx, level, "nats sub stats",
+						"sub", "task_progress",
+						"pending_msgs", pMsgs,
+						"pending_bytes", pBytes,
+						"max_msgs", maxMsgs,
+						"max_bytes", maxBytes,
+						"delta_delivered", dDeliv,
+						"delta_dropped", dDropped,
+						"total_dropped", dropped)
+				}
 			}
 		}
 	}()

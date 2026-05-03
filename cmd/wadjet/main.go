@@ -803,6 +803,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Start heartbeat monitoring, query reaping, active check, and result cleanup
 	coord.Workers().StartReaper(ctx)
+	coord.Workers().StartSubStatsLogger(ctx)
 	coord.StartQueryReaper(ctx)
 	coord.StartQueryActiveHandler()
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)
@@ -1073,6 +1074,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	}
 
 	coord.Workers().StartReaper(ctx)
+	coord.Workers().StartSubStatsLogger(ctx)
 	coord.StartQueryReaper(ctx)
 	coord.StartQueryActiveHandler()
 	coord.Cleaner(store, bucket).StartPeriodicCleanup(ctx, 0)

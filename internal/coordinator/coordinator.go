@@ -1725,6 +1725,12 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 		c.logger.Error("failed to subscribe to results", "error", err, "subject", subject)
 		return
 	}
+	// Same pending-limit bump as heartbeat sub — long queries (Q11 30min)
+	// can accumulate many results during the per-query lifetime, and
+	// drops here would silently lose stage-completion signals.
+	if perr := sub.SetPendingLimits(coordSubMsgLimit, coordSubByteLimit); perr != nil {
+		c.logger.Warn("failed to bump query-result sub pending limits", "error", perr)
+	}
 
 	c.mu.Lock()
 	cancelCtx, cancel := context.WithCancel(ctx)
