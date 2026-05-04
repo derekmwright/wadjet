@@ -2,15 +2,18 @@ scan-0	scan	Singleton
 scan-1	scan	Singleton
 scan-3	scan	Singleton
 join-4	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-4-3,scan-1
-scan-5	scan	Hash(o_custkey)/32
+scan-5	scan	Singleton
 exchange-repartition-6	exchange-repartition	Hash(c_custkey)/32	deps=join-4
-join-8	hash_join	Hash(c_custkey)/32	deps=exchange-repartition-6,scan-5
-scan-9	scan	Hash(l_orderkey)/32
+exchange-repartition-7	exchange-repartition	Hash(o_custkey)/32	deps=scan-5
+join-8	hash_join	Hash(c_custkey)/32	deps=exchange-repartition-6,exchange-repartition-7
+scan-9	scan	Singleton
 exchange-repartition-10	exchange-repartition	Hash(o_orderkey)/32	deps=join-8
-join-12	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-10,scan-9
-scan-13	scan	Hash(p_partkey)/32
+exchange-repartition-11	exchange-repartition	Hash(l_orderkey)/32	deps=scan-9
+join-12	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-10,exchange-repartition-11
+scan-13	scan	Singleton
 exchange-repartition-14	exchange-repartition	Hash(l_partkey)/32	deps=join-12
-join-16	hash_join	Hash(l_partkey)/32	deps=exchange-repartition-14,scan-13
+exchange-repartition-15	exchange-repartition	Hash(p_partkey)/32	deps=scan-13
+join-16	hash_join	Hash(l_partkey)/32	deps=exchange-repartition-14,exchange-repartition-15
 scan-17	scan	Singleton
 scan-19	scan	Singleton
 join-20	broadcast_join	Hash(l_partkey)/32	deps=join-16,exchange-replicate-join-20-18,scan-17

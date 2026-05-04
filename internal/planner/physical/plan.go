@@ -1363,11 +1363,6 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// run it as one task instead of the N parallel tasks the exchange
 		// is feeding (Q18 SF10 OOM trigger).
 		assignStageDistributions(stages, p.WorkerCount)
-		// Fuse scan + downstream exchange-repartition into a single
-		// hash-partitioning scan task — saves one S3 round-trip per
-		// fused pair. Worker support is already there
-		// (writePartitionedShuffle); coord propagates via stage.Exchange.
-		stages = fuseScanShuffle(stages)
 		prev := BehaviorPreservingMode
 		BehaviorPreservingMode = false
 		defer func() { BehaviorPreservingMode = prev }()
