@@ -1170,19 +1170,6 @@ func (c *Coordinator) dispatchScanFilterStage(
 		// which keeps each task's heap below the 32GB worker limit and avoids
 		// the OOM-restart-then-idle-timeout pattern observed on Q04 SF10.
 		taskCount := scanFanOutTaskCount(workerCount, capacity, len(stage.ScanFiles))
-		// Fused scan+shuffle: each task hash-partitions into Exchange.Count
-		// output files, so total partition files = taskCount × Exchange.Count.
-		// The legacy unfused path used workerCount shuffle tasks; allowing the
-		// fused scan to fan out beyond workerCount produces MORE partition
-		// files than the legacy path (e.g. SF10 max_concurrent=2 cluster:
-		// scanFanOut=6 vs workerCount=3 ⇒ 2× partition files). Downstream
-		// hash_join tasks then read 2× more S3 objects per partition,
-		// dominating the savings from skipping the intermediate WSHF.
-		// Cap to workerCount when fused; per-task heap is bounded by the
-		// per-task memory budget × max_concurrent already.
-		if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && taskCount > workerCount {
-			taskCount = workerCount
-		}
 		fileSets = splitFilesEvenly(stage.ScanFiles, taskCount)
 	}
 	actualTasks := len(fileSets)
