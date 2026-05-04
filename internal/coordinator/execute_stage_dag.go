@@ -1182,28 +1182,63 @@ func (c *Coordinator) dispatchScanFilterStage(
 		"tasks", actualTasks, "filters", len(stage.FilterExprs),
 		"shard_count", shardCount)
 
+	// Fragment dispatch: when the planner's fuseScanShuffle pass absorbed a
+	// downstream exchange-repartition into this scan, emit a 2-op (or 3-op
+	// with filter) Operators[] pipeline so the worker streams the filtered
+	// scan output directly into a partitioned shuffle sink. Saves one S3 PUT
+	// + one S3 GET + one NATS round-trip vs the legacy scan→shuffle two-task
+	// path. The pre-2026-05-03 narrow PR (#85) did this via stage.ShuffleKeys
+	// on a single-op task, but that hit the worker's CollectSink memory blow-
+	// up on Q05 SF10; the fragment path uses runStageScanPartitionedStreaming.
+	fuseShuffle := stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
 		t := distributed.Task{
-			ID:          uuid.New().String()[:8],
-			QueryID:     queryID,
-			StageID:     stage.ID,
-			Type:        distributed.TaskTypeStage,
-			StageType:   "scan",
-			TableName:   stage.TableName,
-			Columns:     stage.Columns,
-			FilterExprs: append([]string(nil), stage.FilterExprs...),
-			Inputs: map[string][]string{
-				scanAliasForStage(stage): files,
-			},
+			ID:           uuid.New().String()[:8],
+			QueryID:      queryID,
+			StageID:      stage.ID,
+			Type:         distributed.TaskTypeStage,
+			TableName:    stage.TableName,
 			DataBucket:   c.config.ResultBucket,
 			ResultBucket: c.config.ResultBucket,
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
 		}
-		if shardCount > 1 {
-			t.ScanShardIndex = shardIdx
-			t.ScanShardCount = shardCount
+		if fuseShuffle {
+			scanOp := distributed.OpSpec{
+				Type:        distributed.OpScan,
+				InputAlias:  scanAliasForStage(stage),
+				InputFiles:  files,
+				InputBucket: c.config.ResultBucket,
+				Columns:     stage.Columns,
+			}
+			if shardCount > 1 {
+				scanOp.ScanShardIndex = shardIdx
+				scanOp.ScanShardCount = shardCount
+			}
+			t.Operators = append(t.Operators, scanOp)
+			if len(stage.FilterExprs) > 0 {
+				t.Operators = append(t.Operators, distributed.OpSpec{
+					Type:       distributed.OpFilter,
+					Predicates: append([]string(nil), stage.FilterExprs...),
+				})
+			}
+			t.Operators = append(t.Operators, distributed.OpSpec{
+				Type:          distributed.OpExchangeSender,
+				ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
+				NumPartitions: stage.Exchange.Count,
+			})
+		} else {
+			t.StageType = "scan"
+			t.Columns = stage.Columns
+			t.FilterExprs = append([]string(nil), stage.FilterExprs...)
+			t.Inputs = map[string][]string{
+				scanAliasForStage(stage): files,
+			}
+			if shardCount > 1 {
+				t.ScanShardIndex = shardIdx
+				t.ScanShardCount = shardCount
+			}
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
@@ -1280,11 +1315,38 @@ func (c *Coordinator) dispatchScanFilterStage(
 	results := make([]taskResult, len(collected))
 	copy(results, collected)
 	mu.Unlock()
-	files := make([][]string, len(tasks))
-	for i, r := range results {
+	for _, r := range results {
 		if r.err != "" {
 			return StageOutput{}, fmt.Errorf("scan-filter stage %s: task failed: %s", stage.ID, r.err)
 		}
+	}
+	if fuseShuffle {
+		// Fused scan+shuffle: each task produced N partition files at
+		// "<prefix>partition=NNNN/<task>.wshf". Bucket all files across
+		// all tasks by partition number so the downstream consumer reads
+		// each partition's full set. Same shape as runShuffleSide.
+		numParts := stage.Exchange.Count
+		shardFiles := make([][]string, numParts)
+		for _, r := range results {
+			for _, f := range r.files {
+				p, parseErr := parsePartitionFromPath(f)
+				if parseErr != nil {
+					return StageOutput{}, fmt.Errorf("scan-filter stage %s: parsing partition from %q: %w", stage.ID, f, parseErr)
+				}
+				if p < 0 || p >= numParts {
+					return StageOutput{}, fmt.Errorf("scan-filter stage %s: partition %d out of range [0,%d) in %q", stage.ID, p, numParts, f)
+				}
+				shardFiles[p] = append(shardFiles[p], f)
+			}
+		}
+		return StageOutput{
+			Kind:          OutputPartitioned,
+			NumPartitions: numParts,
+			Files:         shardFiles,
+		}, nil
+	}
+	files := make([][]string, len(tasks))
+	for i, r := range results {
 		files[i] = r.files
 	}
 	return StageOutput{
@@ -1497,6 +1559,35 @@ func (c *Coordinator) dispatchComputeStage(
 			// Q18 ignoring `HAVING SUM(l_quantity) > 300`.
 			PostFilterExprs: append([]string(nil), stage.FilterExprs...),
 		}
+		// Fused join + downstream exchange-sender: emit a fragment task
+		// pipeline that runs the entire chain in one worker call without
+		// writing the join output to S3 only to immediately re-read+hash
+		// it in a separate shuffle task. Worker dispatches via
+		// executeFragment (executor_fragment.go); the legacy single-op
+		// task fields above still populate so the wire format stays
+		// stable for any downstream consumer that hasn't yet learned
+		// about Operators[].
+		//
+		// Compound stages (join with attached aggregate or sort metadata)
+		// stay on the legacy path until those operators are migrated to
+		// fragment ops. probeSplit also stays legacy: probe-split's per-
+		// task probe slicing pre-dates fragments and the runtime
+		// multiplies file count vs partition count in ways the fragment
+		// builder doesn't yet model.
+		canFuseJoin := stage.Exchange != nil &&
+			len(stage.Exchange.Keys) > 0 &&
+			stage.Exchange.Count > 0 &&
+			(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) &&
+			len(stage.GroupByCols) == 0 &&
+			len(stage.SortKeys) == 0 &&
+			!probeSplit
+		if canFuseJoin {
+			ops, ferr := buildFusedJoinFragment(stage, &t, taskInputs, wireFused)
+			if ferr != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: build fragment: %w", stage.ID, ferr)
+			}
+			t.Operators = ops
+		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -1586,11 +1677,40 @@ func (c *Coordinator) dispatchComputeStage(
 	copy(results, collected)
 	mu.Unlock()
 
-	files := make([][]string, len(tasks))
-	for i, r := range results {
+	for _, r := range results {
 		if r.err != "" {
 			return StageOutput{}, fmt.Errorf("stage %s: task failed: %s", stage.ID, r.err)
 		}
+	}
+	// Fused join + downstream exchange-sender: each task produced N partition
+	// files at "<prefix>partition=NNNN/<task>.wshf" (worker's executeFragment
+	// → fragmentExchangeSink). Bucket all files across all tasks by partition
+	// number — same shape as runShuffleSide / dispatchScanFilterStage's
+	// fused-shuffle bucketing.
+	if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 &&
+		(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) {
+		numParts := stage.Exchange.Count
+		shardFiles := make([][]string, numParts)
+		for _, r := range results {
+			for _, f := range r.files {
+				p, parseErr := parsePartitionFromPath(f)
+				if parseErr != nil {
+					return StageOutput{}, fmt.Errorf("stage %s: parsing partition from %q: %w", stage.ID, f, parseErr)
+				}
+				if p < 0 || p >= numParts {
+					return StageOutput{}, fmt.Errorf("stage %s: partition %d out of range [0,%d) in %q", stage.ID, p, numParts, f)
+				}
+				shardFiles[p] = append(shardFiles[p], f)
+			}
+		}
+		return StageOutput{
+			Kind:          OutputPartitioned,
+			NumPartitions: numParts,
+			Files:         shardFiles,
+		}, nil
+	}
+	files := make([][]string, len(tasks))
+	for i, r := range results {
 		files[i] = r.files
 	}
 	// Kind reflects what the planner said this stage produces. Single-
@@ -1628,6 +1748,96 @@ func (c *Coordinator) dispatchComputeStage(
 		NumPartitions: len(tasks),
 		Files:         files,
 	}, nil
+}
+
+// buildFusedJoinFragment translates a join stage's task into a fragment
+// pipeline (Operators[]) when the planner's fuseJoinShuffle pass absorbed a
+// downstream exchange-repartition into the join. The fragment runs:
+//
+//	[ShuffleSource(probe), BroadcastProbe(fused_0..n), HashJoinProbe(primary), ExchangeSender]
+//
+// Each FusedJoin in wireFused becomes its own BroadcastProbe op (the existing
+// chain semantics: every fused entry is a broadcast cache the probe stream
+// passes through before reaching the primary).
+func buildFusedJoinFragment(
+	stage physical.Stage,
+	t *distributed.Task,
+	taskInputs map[string][]string,
+	wireFused []distributed.FusedJoinSpec,
+) ([]distributed.OpSpec, error) {
+	if t.BuildTableAlias == "" {
+		return nil, fmt.Errorf("BuildTableAlias required")
+	}
+	buildFiles, ok := taskInputs[t.BuildTableAlias]
+	if !ok {
+		return nil, fmt.Errorf("build alias %q missing from inputs", t.BuildTableAlias)
+	}
+	var probeAlias string
+	var probeFiles []string
+	for k, v := range taskInputs {
+		if k != t.BuildTableAlias {
+			probeAlias = k
+			probeFiles = v
+			break
+		}
+	}
+	if probeAlias == "" {
+		return nil, fmt.Errorf("no probe-side alias (only %q)", t.BuildTableAlias)
+	}
+
+	ops := make([]distributed.OpSpec, 0, 2+len(wireFused)+1)
+	ops = append(ops, distributed.OpSpec{
+		Type:        distributed.OpShuffleSource,
+		InputAlias:  probeAlias,
+		InputFiles:  probeFiles,
+		InputBucket: t.DataBucket,
+	})
+	for _, fj := range wireFused {
+		ops = append(ops, distributed.OpSpec{
+			Type:        distributed.OpBroadcastProbe,
+			JoinType:    fj.JoinType,
+			LeftKeys:    fj.JoinLeftKeys,
+			RightKeys:   fj.JoinRightKeys,
+			BuildAlias:  fj.BuildTableAlias,
+			BuildFiles:  fj.BuildFiles,
+			BuildBucket: t.DataBucket,
+			JoinFilter:  fj.JoinFilter,
+		})
+	}
+	primaryType := distributed.OpHashJoinProbe
+	if stage.Type == physical.StageBroadcastJoin {
+		primaryType = distributed.OpBroadcastProbe
+	}
+	ops = append(ops, distributed.OpSpec{
+		Type:                primaryType,
+		JoinType:            t.JoinType,
+		LeftKeys:            t.JoinLeftKeys,
+		RightKeys:           t.JoinRightKeys,
+		BuildAlias:          t.BuildTableAlias,
+		BuildFiles:          buildFiles,
+		BuildBucket:         t.DataBucket,
+		JoinFilter:          t.JoinFilter,
+		BuildRowHint:        t.BuildRowHint,
+		SemiAntiKeyOnly:     t.SemiAntiKeyOnly,
+		QualifyAllBuildCols: t.QualifyAllBuildCols,
+		OutputColumns:       append([]string(nil), t.Columns...),
+	})
+	// Residual post-join filters (semi/anti residual or compute-stage
+	// HAVING-equivalent) compile to an OpFilter applied AFTER the probe and
+	// BEFORE the exchange sink. Mirrors the legacy applyPostFilter step in
+	// executeStageHashJoin.
+	if len(t.PostFilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	ops = append(ops, distributed.OpSpec{
+		Type:          distributed.OpExchangeSender,
+		ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
+		NumPartitions: stage.Exchange.Count,
+	})
+	return ops, nil
 }
 
 // finalAggregateFanoutCandidate reports whether a stage qualifies for

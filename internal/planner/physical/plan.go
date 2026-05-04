@@ -1363,6 +1363,20 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// run it as one task instead of the N parallel tasks the exchange
 		// is feeding (Q18 SF10 OOM trigger).
 		assignStageDistributions(stages, p.WorkerCount)
+		// Fuse scan + downstream exchange-repartition into a single
+		// hash-partitioning scan stage. The fused stage is dispatched as a
+		// 2-op fragment ([OpScan, OpExchangeSender]) by the coord; the
+		// worker's runStageScanPartitionedStreaming / executeFragment
+		// streams the filtered scan output directly into a partitioned
+		// shuffle sink, avoiding the round-trip of writing+re-reading an
+		// unpartitioned WSHF between scan and shuffle.
+		stages = fuseScanShuffle(stages)
+		// Fuse hash_join / broadcast_join + downstream exchange-repartition
+		// into a single fragment task so the join writes its hash-partitioned
+		// output directly. Same shape as fuseScanShuffle but on join stages —
+		// captures the wins on chained shuffle joins (Q21's join-8/join-12,
+		// Q07's chained joins, etc.).
+		stages = fuseJoinShuffle(stages)
 		prev := BehaviorPreservingMode
 		BehaviorPreservingMode = false
 		defer func() { BehaviorPreservingMode = prev }()

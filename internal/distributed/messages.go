@@ -186,7 +186,80 @@ type Task struct {
 	// SemiAntiFilter — enables key-only build (skip batch storage).
 	SemiAntiKeyOnly bool `json:"semi_anti_key_only,omitempty"`
 
+	// Operators carries a multi-operator pipeline the worker runs end-to-end
+	// without inter-operator round-trips through S3+NATS. When set, the worker
+	// builds an exec.Pipeline from these specs in order: Operators[0] is the
+	// source, Operators[len-1] is the sink, and the operators in between are
+	// unary transforms. Single-operator stages can be expressed as a single
+	// OpSpec; multi-operator fragments (the long-term shape that dissolves
+	// the per-operator S3 round-trip floor) carry the full pipeline.
+	//
+	// Worker dispatch: Execute → executeStage → if len(Operators) > 0
+	// → executeFragment; otherwise fall back to the per-StageType handlers
+	// (executeStageScan/HashJoin/Aggregate/Sort). The legacy handlers stay
+	// alive until every shape has migrated; mixed routing during migration
+	// is intentional and safe.
+	Operators []OpSpec `json:"operators,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// OpType identifies an operator within a fragment pipeline.
+type OpType string
+
+const (
+	// Sources (must be first in Operators).
+	OpScan          OpType = "scan"           // read parquet/wshf via cachedFileStreamSource
+	OpShuffleSource OpType = "shuffle_source" // read partition=NNNN/*.wshf for one partition
+
+	// Unary transforms (middle of the pipeline; zero or more).
+	OpFilter           OpType = "filter"            // FilterExprs predicate chain
+	OpHashJoinProbe    OpType = "hash_join_probe"   // shuffle-side hash join: build from BuildFiles, probe upstream
+	OpBroadcastProbe   OpType = "broadcast_probe"   // broadcast hash join: small build replicated to every task
+
+	// Sinks (must be last in Operators).
+	OpExchangeSender    OpType = "exchange_sender"     // partitionedShuffleSink: hash-partition into N output files
+	OpUnpartitionedSink OpType = "unpartitioned_sink"  // unpartitionedStageSink: single .wshf output
+	OpGatherSink        OpType = "gather_sink"         // gatherReplySink: stream batches to ReplySubject
+)
+
+// OpSpec describes one operator within a fragment pipeline. Fields are
+// optional — populated only for operators of the matching Type. The flat
+// shape avoids the JSON-marshal overhead of a discriminated union; the
+// worker's executeFragment branches on Type to read the relevant subset.
+type OpSpec struct {
+	Type OpType `json:"type"`
+
+	// Source operators (OpScan, OpShuffleSource).
+	InputAlias     string   `json:"input_alias,omitempty"`     // logical alias for source-column lookup
+	InputFiles     []string `json:"input_files,omitempty"`     // S3 keys to read
+	InputBucket    string   `json:"input_bucket,omitempty"`    // bucket override; falls back to task.DataBucket
+	Columns        []string `json:"columns,omitempty"`         // projection hint (parquet column pruning)
+	ScanShardIndex int      `json:"scan_shard_index,omitempty"`
+	ScanShardCount int      `json:"scan_shard_count,omitempty"`
+
+	// OpFilter.
+	Predicates []string `json:"predicates,omitempty"`
+
+	// OpHashJoinProbe / OpBroadcastProbe.
+	JoinType            string   `json:"join_type,omitempty"`        // inner, left, semi, anti, …
+	LeftKeys            []string `json:"left_keys,omitempty"`        // probe-side keys
+	RightKeys           []string `json:"right_keys,omitempty"`       // build-side keys
+	BuildAlias          string   `json:"build_alias,omitempty"`
+	BuildFiles          []string `json:"build_files,omitempty"`      // build-side input files
+	BuildBucket         string   `json:"build_bucket,omitempty"`     // bucket override for build files
+	JoinFilter          string   `json:"join_filter,omitempty"`
+	BuildRowHint        int64    `json:"build_row_hint,omitempty"`
+	SemiAntiKeyOnly     bool     `json:"semi_anti_key_only,omitempty"`
+	QualifyAllBuildCols bool     `json:"qualify_all_build_cols,omitempty"`
+	OutputColumns       []string `json:"output_columns,omitempty"`   // OutputFilter for primary probe
+
+	// OpExchangeSender (sink).
+	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`
+	NumPartitions int      `json:"num_partitions,omitempty"`
+
+	// OpGatherSink (sink).
+	ReplySubject string `json:"reply_subject,omitempty"`
 }
 
 // PreComputedAggregate identifies a derived aggregate whose result has

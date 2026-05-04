@@ -24,6 +24,14 @@ import (
 // selected by task fields (ShuffleKeys → partitionedShuffleSink,
 // ReplySubject → gatherReplySink, else unpartitioned .wshf upload).
 func (e *Executor) executeStage(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	// Fragment dispatch (multi-operator pipeline). Routes to the unified
+	// executeFragment path when the planner emits an Operators[] chain
+	// instead of a single StageType. Falls through to the per-StageType
+	// switch when Operators is empty (legacy single-op stages, still in
+	// active use until every shape has migrated).
+	if len(task.Operators) > 0 {
+		return e.executeFragment(ctx, task, result)
+	}
 	switch task.StageType {
 	case "scan", "filter_scan":
 		return e.executeStageScan(ctx, task, result)
@@ -109,13 +117,24 @@ func (e *Executor) executeStageScan(ctx context.Context, task distributed.Task, 
 	// even began (project_q04_sf10_followup.md). The shuffle/gather paths
 	// retain the legacy collect-then-route behaviour for now; their working
 	// sets are smaller and the streaming variants land in a follow-up.
-	if len(task.ShuffleKeys) == 0 && task.ReplySubject == "" {
+	if task.ReplySubject == "" {
+		// Both non-gather output paths stream batches directly into a
+		// disk-backed sink instead of collecting them in heap. Bounds memory
+		// at ~1 batch + the sink's bufio buffers regardless of total output
+		// size. Picked between unpartitioned and partitioned by whether the
+		// downstream consumer wants a single .wshf or per-partition files.
+		if len(task.ShuffleKeys) > 0 && task.NumPartitions > 0 {
+			return e.runStageScanPartitionedStreaming(ctx, task, src, filterOps, result)
+		}
 		return e.runStageScanUnpartitionedStreaming(ctx, task, src, filterOps, result)
 	}
 
-	// SkipFinalizeToRows: writeStageOutput consumes Batches() directly;
-	// the ToRows materialization Finalize would otherwise do held 21 GB
-	// of live heap on Q18 SF10 (project_q18_sf10_native_dag_oom_2026-04-24).
+	// ReplySubject set: gather-output path. Output is the final result of the
+	// query (ORDER BY + LIMIT applied), so row count is small — collecting in
+	// heap before publishing via gatherReplySink is fine. SkipFinalizeToRows:
+	// writeStageOutput consumes Batches() directly; the ToRows materialization
+	// Finalize would otherwise do held 21 GB of live heap on Q18 SF10
+	// (project_q18_sf10_native_dag_oom_2026-04-24).
 	collect := &exec.CollectSink{SkipFinalizeToRows: true}
 	pipeline := &exec.Pipeline{
 		Source: src,
@@ -168,6 +187,102 @@ func (e *Executor) runStageScanUnpartitionedStreaming(ctx context.Context, task 
 		return nil
 	}
 	return e.uploadUnpartitionedSpill(ctx, task, sink, result)
+}
+
+// runStageScanPartitionedStreaming is the streaming variant of the scan
+// stage executor for tasks whose output is hash-partitioned into
+// task.NumPartitions output files. It pipes filtered batches directly into a
+// partitionedShuffleSink and uploads the resulting per-partition files to
+// <ResultPrefix>partition=NNNN/<TaskID>.wshf once the pipeline drains.
+//
+// This is the worker primitive that makes scan+exchange-sender fusion safe.
+// The legacy CollectSink+writeStageOutput path materialises every filtered
+// batch in heap before partitioning — at SF10 a fused lineitem scan task
+// emits hundreds of MB of filtered output, and concurrent fused tasks on the
+// same worker push the heap past GoMemLimit, triggering spill thrash that
+// caused the 2026-05-03 Q05 regression (8m29s vs 48s baseline; PR #85
+// reverted via PR #87). The streaming sink bounds working memory at one
+// batch in flight plus N × 64 KB partition buffers, independent of total
+// output size.
+func (e *Executor) runStageScanPartitionedStreaming(ctx context.Context, task distributed.Task, src exec.Source, filterOps []exec.UnaryOperator, result *distributed.ResultNotification) error {
+	if task.NumPartitions <= 0 {
+		return fmt.Errorf("scan task %s: ShuffleKeys set but NumPartitions=%d", task.ID, task.NumPartitions)
+	}
+	spillDir := filepath.Join(e.spillDir, "stage-"+task.ID)
+	if e.spillDir == "" {
+		spillDir = filepath.Join(os.TempDir(), "stage-"+task.ID)
+	}
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		return fmt.Errorf("scan task %s: creating spill dir: %w", task.ID, err)
+	}
+	defer os.RemoveAll(spillDir)
+
+	if err := src.Init(ctx); err != nil {
+		return fmt.Errorf("scan task %s: source init: %w", task.ID, err)
+	}
+	defer src.Close()
+	for _, op := range filterOps {
+		if err := op.Init(ctx); err != nil {
+			return fmt.Errorf("scan task %s: filter init: %w", task.ID, err)
+		}
+	}
+
+	progress := exec.ProgressReporterFromContext(ctx)
+	// Lazy sink construction — partitionedShuffleSink needs schema upfront for
+	// its writers, and we discover it from the first non-empty filtered batch.
+	// Mirrors executeShuffle's pattern in executor.go.
+	var sink *partitionedShuffleSink
+	var totalRows int64
+
+	for {
+		b, err := src.Next(ctx)
+		if err != nil {
+			return fmt.Errorf("scan task %s: source next: %w", task.ID, err)
+		}
+		if b == nil {
+			break
+		}
+		cur := b
+		for _, op := range filterOps {
+			cur, err = op.Execute(ctx, cur)
+			if err != nil {
+				return fmt.Errorf("scan task %s: filter exec: %w", task.ID, err)
+			}
+			if cur == nil {
+				break
+			}
+		}
+		if cur == nil || cur.ActiveLen() == 0 {
+			continue
+		}
+		if sink == nil {
+			sink = newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, cur.Schema)
+			if err := sink.Init(ctx); err != nil {
+				return fmt.Errorf("scan task %s: partitioned sink init: %w", task.ID, err)
+			}
+			defer sink.Close()
+		}
+		if err := sink.Consume(ctx, cur); err != nil {
+			return fmt.Errorf("scan task %s: partitioned sink consume: %w", task.ID, err)
+		}
+		n := int64(cur.ActiveLen())
+		totalRows += n
+		if progress != nil {
+			progress.AddRows(n)
+		}
+	}
+
+	result.NumRows = totalRows
+	if sink == nil {
+		// Filter rejected every row — no partitions to upload, but the task
+		// completed successfully (matches writeStageOutput's empty-batches
+		// short-circuit).
+		return nil
+	}
+	if err := sink.Finalize(ctx); err != nil {
+		return fmt.Errorf("scan task %s: partitioned sink finalize: %w", task.ID, err)
+	}
+	return e.uploadPartitionedShuffleFiles(ctx, task, sink, result)
 }
 
 // uploadUnpartitionedSpill uploads a streaming sink's finalised file to S3,
@@ -1225,6 +1340,15 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 		return fmt.Errorf("stage task %s: partitioned sink finalize: %w", task.ID, err)
 	}
 
+	return e.uploadPartitionedShuffleFiles(ctx, task, sink, result)
+}
+
+// uploadPartitionedShuffleFiles takes a finalised partitioned sink and uploads
+// each non-empty partition file to S3, populates the KV fast-read cache for
+// small payloads, and adopts the local file into the LocalStageCache. Shared
+// between the legacy collect-then-partition path (writePartitionedShuffle) and
+// the streaming-partition path (runStageScanPartitionedStreaming).
+func (e *Executor) uploadPartitionedShuffleFiles(ctx context.Context, task distributed.Task, sink *partitionedShuffleSink, result *distributed.ResultNotification) error {
 	for p, localPath := range sink.PartitionFiles() {
 		if localPath == "" {
 			continue
@@ -1268,8 +1392,10 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 		// so a downstream task on this worker can mmap it directly. Adopt
 		// renames the file out of the per-task spill dir into the cache's
 		// per-query dir.
-		if adopted := e.localCache.Adopt(task.QueryID, key, localPath); adopted == "" {
-			_ = os.Remove(localPath)
+		if e.localCache != nil {
+			if adopted := e.localCache.Adopt(task.QueryID, key, localPath); adopted == "" {
+				_ = os.Remove(localPath)
+			}
 		}
 	}
 	return nil

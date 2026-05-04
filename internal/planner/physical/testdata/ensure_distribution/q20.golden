@@ -1,19 +1,15 @@
 scan-0	scan	Singleton
 scan-1	scan	Singleton
 join-2	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-2-2
-scan-3	scan	Singleton
-scan-4	scan	Singleton
-exchange-repartition-5	exchange-repartition	Hash(ps_partkey)/32	deps=scan-3
-exchange-repartition-6	exchange-repartition	Hash(p_partkey)/32	deps=scan-4
-join-7	hash_join	Hash(ps_partkey)/32	deps=exchange-repartition-5,exchange-repartition-6
+scan-3	scan	Hash(ps_partkey)/32
+scan-4	scan	Hash(p_partkey)/32
+join-7	hash_join	Hash(ps_partkey,ps_suppkey)/32	deps=scan-3,scan-4
 scan-8	scan	RoundRobin
 final_aggregate-47	final_aggregate	Hash(l_partkey,l_suppkey)/4	deps=exchange-repartition-final_aggregate-47-9
-exchange-repartition-48	exchange-repartition	Hash(ps_partkey,ps_suppkey)/32	deps=join-7
 exchange-repartition-49	exchange-repartition	Hash(l_partkey,l_suppkey)/32	deps=final_aggregate-47
-join-50	hash_join	Hash(ps_partkey,ps_suppkey)/32	deps=exchange-repartition-48,exchange-repartition-49
+join-50	hash_join	Hash(ps_suppkey)/32	deps=join-7,exchange-repartition-49
 exchange-repartition-51	exchange-repartition	Hash(s_suppkey)/32	deps=join-2
-exchange-repartition-52	exchange-repartition	Hash(ps_suppkey)/32	deps=join-50
-join-53	hash_join	Hash(s_suppkey)/32	deps=exchange-repartition-51,exchange-repartition-52
+join-53	hash_join	Hash(s_suppkey)/32	deps=exchange-repartition-51,join-50
 sort-54	sort	Singleton	deps=join-53
 exchange-replicate-join-2-2	exchange-replicate	Broadcast	deps=scan-1
 exchange-repartition-final_aggregate-47-9	exchange-repartition	Hash(l_partkey,l_suppkey)/4	deps=scan-8
