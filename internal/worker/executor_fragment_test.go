@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"hash/fnv"
+	"io"
 	"strconv"
 	"strings"
 	"testing"
@@ -116,6 +117,126 @@ func TestExecuteFragment_ScanExchangeSender(t *testing.T) {
 	}
 	if totalRows != numRows {
 		t.Errorf("total rows across partitions = %d, want %d", totalRows, numRows)
+	}
+}
+
+// TestExecuteFragment_ScanHashAggregateUnpartitioned exercises the
+// pipeline-breaker code path: scan source → HashAggregate (partial) →
+// unpartitioned sink. Three groups in input → three rows in output, each
+// summing the per-group values. Validates the consume/drain split that
+// HashAggregate forces (it consumes all input, then emits results).
+func TestExecuteFragment_ScanHashAggregateUnpartitioned(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-fragment-agg"
+
+	// 3 groups: g=1 sum=30, g=2 sum=50, g=3 sum=60
+	data := makeGroupedWshf(t, [][2]int64{
+		{1, 10}, {1, 20}, {2, 50}, {3, 30}, {3, 30},
+	})
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	key := "in/agg/t0.wshf"
+	if _, err := store.Put(ctx, bucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	cache := NewLRUCache(4 * 1024 * 1024)
+	executor := NewExecutor(store, cache, nil)
+
+	task := distributed.Task{
+		ID:           "frag-agg-0",
+		QueryID:      "q-frag-agg",
+		StageID:      "agg-0",
+		Type:         distributed.TaskTypeStage,
+		DataBucket:   bucket,
+		ResultBucket: bucket,
+		ResultPrefix: "out/agg/",
+		Operators: []distributed.OpSpec{
+			{
+				Type:        distributed.OpScan,
+				InputAlias:  "src",
+				InputFiles:  []string{key},
+				InputBucket: bucket,
+				Columns:     []string{"g", "v"},
+			},
+			{
+				Type:        distributed.OpHashAggregate,
+				GroupByCols: []string{"g"},
+				Aggregates: []distributed.AggSpec{
+					{Func: "sum", InputCol: "v", OutputCol: "total"},
+				},
+			},
+			{
+				Type: distributed.OpUnpartitionedSink,
+			},
+		},
+	}
+
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(ctx, task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	if result.NumRows != 3 {
+		t.Fatalf("NumRows = %d, want 3 groups", result.NumRows)
+	}
+	if len(result.ResultFiles) != 1 {
+		t.Fatalf("expected 1 unpartitioned output, got %d", len(result.ResultFiles))
+	}
+
+	// Read output and verify (group, total) pairs.
+	rc, _, err := store.Get(ctx, bucket, result.ResultFiles[0])
+	if err != nil {
+		t.Fatalf("get output: %v", err)
+	}
+	defer rc.Close()
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	r, err := newShuffleChunkReader(out)
+	if err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
+	got := map[int64]float64{}
+	for {
+		b, err := r.Next()
+		if err != nil {
+			t.Fatalf("chunk next: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		gIdx, totalIdx := -1, -1
+		for i, c := range b.Schema {
+			switch c.Name {
+			case "g":
+				gIdx = i
+			case "total":
+				totalIdx = i
+			}
+		}
+		if gIdx < 0 || totalIdx < 0 {
+			t.Fatalf("output schema missing g/total: %+v", b.Schema)
+		}
+		for i := 0; i < b.ActiveLen(); i++ {
+			row := i
+			if b.Sel != nil {
+				row = int(b.Sel[i])
+			}
+			got[b.Columns[gIdx].Int64Data[row]] = b.Columns[totalIdx].Float64Data[row]
+		}
+	}
+	want := map[int64]float64{1: 30, 2: 50, 3: 60}
+	for g, v := range want {
+		if got[g] != v {
+			t.Errorf("group %d: got total=%v, want %v", g, got[g], v)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("group count: got %d, want %d (%v)", len(got), len(want), got)
 	}
 }
 

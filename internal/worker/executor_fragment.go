@@ -44,9 +44,19 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	if !isFragmentSinkOp(sinkSpec.Type) {
 		return fmt.Errorf("fragment task %s: last op %q is not a sink", task.ID, sinkSpec.Type)
 	}
+	// Locate at most one pipeline-breaker (HashAggregate today; Sort and
+	// HashJoinBuild are future candidates). Reject middle ops that aren't
+	// recognised as unary or breaker.
+	breakerIdx := -1
 	for i, m := range middle {
 		if isFragmentSourceOp(m.Type) || isFragmentSinkOp(m.Type) {
-			return fmt.Errorf("fragment task %s: middle op %d is %q, must be unary", task.ID, i, m.Type)
+			return fmt.Errorf("fragment task %s: middle op %d is %q, must be unary or breaker", task.ID, i, m.Type)
+		}
+		if isFragmentBreakerOp(m.Type) {
+			if breakerIdx >= 0 {
+				return fmt.Errorf("fragment task %s: multiple pipeline-breaker ops not yet supported (op %d and %d)", task.ID, breakerIdx, i)
+			}
+			breakerIdx = i
 		}
 	}
 
@@ -69,41 +79,44 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	}
 	defer src.Close()
 
-	// Build unary operators in order.
-	var unaryOps []exec.UnaryOperator
-	var unaryCleanups []func()
-	defer func() {
-		for _, c := range unaryCleanups {
-			c()
-		}
-	}()
-	for i, opSpec := range middle {
-		opChain, cleanup, err := e.buildFragmentUnary(ctx, task, opSpec)
-		if err != nil {
-			return fmt.Errorf("fragment task %s: unary op %d (%s): %w", task.ID, i, opSpec.Type, err)
-		}
-		if cleanup != nil {
-			unaryCleanups = append(unaryCleanups, cleanup)
-		}
-		for _, op := range opChain {
-			if err := op.Init(ctx); err != nil {
-				return fmt.Errorf("fragment task %s: unary op %d init: %w", task.ID, i, err)
-			}
-		}
-		unaryOps = append(unaryOps, opChain...)
-	}
-
-	// Build the sink. Schema-discovery is lazy for the partitioned/unpartitioned
-	// sinks; we capture the first batch's schema and construct on demand.
+	// Build the sink. Schema-discovery is lazy for the partitioned/
+	// unpartitioned sinks; we capture the first batch's schema and construct
+	// on demand.
 	sink, err := e.openFragmentSink(task, sinkSpec)
 	if err != nil {
 		return fmt.Errorf("fragment task %s: sink: %w", task.ID, err)
 	}
 	defer sink.close()
 
+	if breakerIdx < 0 {
+		// Linear pipeline: source → unary ops → sink.
+		preOps, cleanup, err := e.buildUnaryChain(ctx, task, middle)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		return e.runFragmentLinear(ctx, task, src, preOps, sink, result)
+	}
+
+	// Pipeline-breaker: split middle into pre- and post-breaker chains.
+	preOps, preCleanup, err := e.buildUnaryChain(ctx, task, middle[:breakerIdx])
+	if err != nil {
+		return err
+	}
+	defer preCleanup()
+	postOps, postCleanup, err := e.buildUnaryChain(ctx, task, middle[breakerIdx+1:])
+	if err != nil {
+		return err
+	}
+	defer postCleanup()
+	return e.runFragmentWithBreaker(ctx, task, src, preOps, middle[breakerIdx], postOps, sink, result)
+}
+
+// runFragmentLinear streams batches from src through unary ops into the sink.
+// No pipeline-breaker — every batch flows end-to-end before the next is read.
+func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification) error {
 	progress := exec.ProgressReporterFromContext(ctx)
 	var totalRows int64
-
 	for {
 		b, err := src.Next(ctx)
 		if err != nil {
@@ -113,7 +126,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 			break
 		}
 		cur := b
-		for _, op := range unaryOps {
+		for _, op := range ops {
 			cur, err = op.Execute(ctx, cur)
 			if err != nil {
 				return fmt.Errorf("fragment task %s: unary exec: %w", task.ID, err)
@@ -141,12 +154,179 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	return nil
 }
 
+// runFragmentWithBreaker splits the fragment around a pipeline-breaker (e.g.
+// HashAggregate). Phase 1 (consume): source → preOps → breaker as Sink.
+// Phase 2 (drain): breaker as Source → postOps → sink. AVG-fold (when
+// breakerSpec.FoldAvg is set) runs at the head of postOps so __avg_sum#X /
+// __avg_count#X collapse into a single AVG output column before any
+// downstream filter or sort.
+func (e *Executor) runFragmentWithBreaker(ctx context.Context, task distributed.Task, src exec.Source, preOps []exec.UnaryOperator, breakerSpec distributed.OpSpec, postOps []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification) error {
+	progress := exec.ProgressReporterFromContext(ctx)
+
+	switch breakerSpec.Type {
+	case distributed.OpHashAggregate:
+		hashAgg, err := e.buildFragmentHashAggregate(breakerSpec)
+		if err != nil {
+			return fmt.Errorf("fragment task %s: hash_aggregate build: %w", task.ID, err)
+		}
+		defer hashAgg.Close()
+
+		// Optional derived-input projection. Mirrors executeStageAggregate's
+		// buildAggInputProjection — required for partial aggregates whose
+		// inputs are SQL expressions (e.g. SUM(l_extendedprice*(1-l_discount))).
+		// Skipped for merge mode: the partial stage already computed the
+		// derived column under OutputCol.
+		if breakerSpec.BuildProject && !breakerSpec.MergeMode {
+			project, _, err := buildAggInputProjection(breakerSpec.GroupByCols, breakerSpec.Aggregates, nil)
+			if err != nil {
+				return fmt.Errorf("fragment task %s: agg input project: %w", task.ID, err)
+			}
+			if project != nil {
+				if err := project.Init(ctx); err != nil {
+					return fmt.Errorf("fragment task %s: project init: %w", task.ID, err)
+				}
+				preOps = append(preOps, project)
+			}
+		}
+
+		// Consume phase — feed every batch from src through preOps into
+		// hashAgg via exec.Pipeline.Run (which handles the source-init/
+		// drain loop already).
+		consume := &exec.Pipeline{Source: src, Ops: preOps, Sink: hashAgg}
+		if err := consume.Run(ctx); err != nil {
+			return fmt.Errorf("fragment task %s: consume pipeline: %w", task.ID, err)
+		}
+
+		// Drain phase — pull aggregated batches from hashAgg, apply
+		// AVG-fold + postOps inline, push into sink.
+		var totalRows int64
+		for {
+			b, err := hashAgg.Next(ctx)
+			if err != nil {
+				return fmt.Errorf("fragment task %s: hash_aggregate next: %w", task.ID, err)
+			}
+			if b == nil {
+				break
+			}
+			cur := b
+			if breakerSpec.FoldAvg {
+				folded, ferr := applyAvgFold([]*batch.RecordBatch{cur})
+				if ferr != nil {
+					return fmt.Errorf("fragment task %s: avg-fold: %w", task.ID, ferr)
+				}
+				if len(folded) == 0 {
+					continue
+				}
+				cur = folded[0]
+			}
+			for _, op := range postOps {
+				cur, err = op.Execute(ctx, cur)
+				if err != nil {
+					return fmt.Errorf("fragment task %s: post-breaker exec: %w", task.ID, err)
+				}
+				if cur == nil {
+					break
+				}
+			}
+			if cur == nil || cur.ActiveLen() == 0 {
+				continue
+			}
+			if err := sink.consume(ctx, cur); err != nil {
+				return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
+			}
+			n := int64(cur.ActiveLen())
+			totalRows += n
+			if progress != nil {
+				progress.AddRows(n)
+			}
+		}
+		result.NumRows = totalRows
+		if err := sink.finalize(ctx, task, result); err != nil {
+			return fmt.Errorf("fragment task %s: sink finalize: %w", task.ID, err)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("fragment task %s: unsupported breaker op %q", task.ID, breakerSpec.Type)
+	}
+}
+
+// buildFragmentHashAggregate constructs an exec.HashAggregate from an OpSpec.
+// In merge mode the spec's Aggregates are rewritten so InputCol = OutputCol
+// (the partial-output column) and COUNT becomes SUM (counting partial rows
+// re-counts groups, not source rows). Mirrors the rewrite in
+// executeStageAggregate.
+func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.HashAggregate, error) {
+	if len(spec.Aggregates) == 0 && len(spec.GroupByCols) == 0 {
+		return nil, fmt.Errorf("hash_aggregate: at least one of GroupByCols or Aggregates is required")
+	}
+	aggCols := make([]exec.AggColumn, len(spec.Aggregates))
+	for i, a := range spec.Aggregates {
+		inputCol := a.InputCol
+		fn := parseAggFuncString(a.Func)
+		if spec.MergeMode {
+			if a.OutputCol != "" {
+				inputCol = a.OutputCol
+			}
+			if fn == exec.AggCount {
+				fn = exec.AggSum
+			}
+		}
+		aggCols[i] = exec.AggColumn{
+			Func:       fn,
+			InputCol:   inputCol,
+			OutputCol:  a.OutputCol,
+			OutputType: aggOutputTypeString(a.Func),
+		}
+	}
+	hashAgg := exec.NewHashAggregate(spec.GroupByCols, aggCols)
+	if e.sharedSpill != nil {
+		hashAgg.Spill = e.sharedSpill
+	}
+	return hashAgg, nil
+}
+
+// buildUnaryChain builds and inits each unary op in specs. Returns a single
+// cleanup that closes every op (and any owned resources like build-side hash
+// tables) in reverse order.
+func (e *Executor) buildUnaryChain(ctx context.Context, task distributed.Task, specs []distributed.OpSpec) ([]exec.UnaryOperator, func(), error) {
+	var ops []exec.UnaryOperator
+	var cleanups []func()
+	cleanup := func() {
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			cleanups[i]()
+		}
+	}
+	for i, opSpec := range specs {
+		opChain, opCleanup, err := e.buildFragmentUnary(ctx, task, opSpec)
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("fragment task %s: unary op %d (%s): %w", task.ID, i, opSpec.Type, err)
+		}
+		if opCleanup != nil {
+			cleanups = append(cleanups, opCleanup)
+		}
+		for _, op := range opChain {
+			if err := op.Init(ctx); err != nil {
+				cleanup()
+				return nil, nil, fmt.Errorf("fragment task %s: unary op %d init: %w", task.ID, i, err)
+			}
+		}
+		ops = append(ops, opChain...)
+	}
+	return ops, cleanup, nil
+}
+
 func isFragmentSourceOp(t distributed.OpType) bool {
 	return t == distributed.OpScan || t == distributed.OpShuffleSource
 }
 
 func isFragmentSinkOp(t distributed.OpType) bool {
 	return t == distributed.OpExchangeSender || t == distributed.OpUnpartitionedSink || t == distributed.OpGatherSink
+}
+
+func isFragmentBreakerOp(t distributed.OpType) bool {
+	return t == distributed.OpHashAggregate
 }
 
 func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.OpSpec) (exec.Source, error) {

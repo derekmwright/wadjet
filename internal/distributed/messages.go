@@ -217,6 +217,13 @@ const (
 	OpHashJoinProbe    OpType = "hash_join_probe"   // shuffle-side hash join: build from BuildFiles, probe upstream
 	OpBroadcastProbe   OpType = "broadcast_probe"   // broadcast hash join: small build replicated to every task
 
+	// Pipeline-breaker operators. Consume all input from the upstream chain,
+	// then emit results into the downstream chain. Splits the fragment into
+	// a consume phase (source → preOps → breaker) and a drain phase
+	// (breaker → postOps → sink). At most one breaker per fragment today;
+	// chained breakers (e.g. aggregate + sort) need a follow-up extension.
+	OpHashAggregate OpType = "hash_aggregate" // group-by + aggregates; partial or merge mode
+
 	// Sinks (must be last in Operators).
 	OpExchangeSender    OpType = "exchange_sender"     // partitionedShuffleSink: hash-partition into N output files
 	OpUnpartitionedSink OpType = "unpartitioned_sink"  // unpartitionedStageSink: single .wshf output
@@ -260,6 +267,13 @@ type OpSpec struct {
 
 	// OpGatherSink (sink).
 	ReplySubject string `json:"reply_subject,omitempty"`
+
+	// OpHashAggregate (pipeline-breaker).
+	GroupByCols   []string  `json:"group_by_cols,omitempty"`   // empty = scalar aggregate
+	Aggregates    []AggSpec `json:"aggregates,omitempty"`      // per-column aggregations
+	MergeMode     bool      `json:"merge_mode,omitempty"`      // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
+	FoldAvg       bool      `json:"fold_avg,omitempty"`        // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
+	BuildProject  bool      `json:"build_project,omitempty"`   // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
 }
 
 // PreComputedAggregate identifies a derived aggregate whose result has
