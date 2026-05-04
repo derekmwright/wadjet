@@ -23,6 +23,58 @@ import (
 // aggregation stages don't falsely time out.
 const gatherReceiveTimeout = 10 * time.Minute
 
+// gatherFusion carries the pre-installed gather subscription + reply subject
+// through dispatch so that an upstream final_aggregate / merge_aggregate
+// stage can emit OpGatherSink instead of OpUnpartitionedSink — collapsing
+// the standalone gather stage into the aggregate fragment and saving one
+// S3 PUT/GET + one task dispatch round-trip per query. The dispatcher
+// updates recv's expected-terminals count once it knows numTasks. Nil = no
+// fusion (legacy gather dispatch runs after the DAG completes).
+type gatherFusion struct {
+	recv         *gatherReceiver
+	replySubject string
+}
+
+// canFuseGather reports whether a gather stage can be absorbed into its
+// upstream final_aggregate / merge_aggregate stage. Returns the upstream
+// stage ID when fusion is eligible.
+//
+// Eligibility:
+//   - Exactly one upstream dependency.
+//   - No Ordering on the gather Exchange (ordered gather still needs
+//     coordinator-side merge of pre-sorted streams; the fragment runner
+//     has no OpSort breaker yet).
+//   - Upstream is in the pending dispatch set (not a leaf scan or pre-
+//     computed input).
+//   - Upstream is final_aggregate or merge_aggregate (the only stages
+//     dispatchComputeStage already routes through buildAggregateFragment).
+//   - Upstream has no SortKeys / Limit (post-aggregate sort needs an
+//     OpSort breaker not yet supported by executeFragment).
+//
+// Amplification-safe: the gather sink publishes via NATS, not S3, so
+// per-task fan-out doesn't multiply S3 GETs the way scan/join fragment
+// fusion does.
+func canFuseGather(gatherStage physical.Stage, pending map[string]physical.Stage) (depID string, ok bool) {
+	if len(gatherStage.Dependencies) != 1 {
+		return "", false
+	}
+	if gatherStage.Exchange != nil && len(gatherStage.Exchange.Ordering) > 0 {
+		return "", false
+	}
+	depID = gatherStage.Dependencies[0]
+	dep, present := pending[depID]
+	if !present {
+		return "", false
+	}
+	if dep.Type != "final_aggregate" && dep.Type != "merge_aggregate" {
+		return "", false
+	}
+	if len(dep.SortKeys) > 0 || dep.Limit > 0 {
+		return "", false
+	}
+	return depID, true
+}
+
 // awaitStageProgress blocks until either every dispatched task has reported
 // a result (signalled via allDone) or progress has stalled for longer than
 // stageIdleTimeout. Each task-completion subscription handler should send
@@ -163,6 +215,36 @@ func (c *Coordinator) executeStageDAG(
 	}
 	if !hasGather {
 		return nil, fmt.Errorf("executeStageDAG: plan for query %s has no Gather stage", queryID)
+	}
+
+	// Gather fusion: if the gather stage's only upstream is a final_aggregate
+	// or merge_aggregate that's already migrated to the fragment path, fold
+	// OpGatherSink into that fragment so workers stream batches directly to
+	// the coordinator's NATS reply subject — eliminates the standalone
+	// gather task dispatch + the unpartitioned .wshf upload+download hop the
+	// gather task would otherwise perform.
+	//
+	// Subscribed early (with expectedTerminals=0 sentinel) so no per-task
+	// terminal can race past us; SetExpectedTerminals is called from the
+	// upstream stage's dispatcher once numTasks is known. Defer Unsubscribe
+	// covers any error path that returns before recv.wait() fires (wait()
+	// also unsubscribes; nats Unsubscribe is idempotent).
+	var fusion *gatherFusion
+	var fuseStageID string
+	if depID, ok := canFuseGather(gatherStage, pending); ok {
+		replySubject := fmt.Sprintf("wadjet.gather.%s", queryID)
+		recv, err := subscribeGather(c.nc, replySubject, 0, c.workers)
+		if err != nil {
+			c.logger.Warn("gather fusion: subscribe failed; falling back to legacy gather",
+				"query", queryID, "fuse_stage_id", depID, "error", err)
+		} else {
+			fusion = &gatherFusion{recv: recv, replySubject: replySubject}
+			fuseStageID = depID
+			c.logger.Info("gather fusion enabled",
+				"query", queryID, "fuse_stage_id", depID,
+				"reply_subject", replySubject)
+			defer recv.sub.Unsubscribe()
+		}
 	}
 
 	// Mark every leaf scan that's the PROBE of a downstream broadcast_join.
@@ -310,6 +392,10 @@ func (c *Coordinator) executeStageDAG(
 			}
 			defer func() { <-dispatchSem }()
 
+			var stageFusion *gatherFusion
+			if fusion != nil && s.ID == fuseStageID {
+				stageFusion = fusion
+			}
 			var out StageOutput
 			switch s.Type {
 			case physical.StageExchangeRepartition:
@@ -317,7 +403,7 @@ func (c *Coordinator) executeStageDAG(
 			case physical.StageExchangeReplicate:
 				out, err = c.dispatchReplicateStage(gctx, queryID, sql, s, inputs)
 			default:
-				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount, probeOfBroadcast[s.ID])
+				out, err = c.dispatchPipelineStage(gctx, queryID, sql, s, inputs, workerCount, probeOfBroadcast[s.ID], stageFusion)
 			}
 			if err != nil {
 				return fmt.Errorf("stage %s (%s): %w", s.ID, s.Type, err)
@@ -333,7 +419,27 @@ func (c *Coordinator) executeStageDAG(
 		return nil, err
 	}
 
-	// Terminal Gather.
+	// Fused gather: workers already streamed batches + terminals to the
+	// pre-installed receiver via OpGatherSink. The upstream stage's
+	// dispatcher set expectedTerminals = numTasks before publishing, so by
+	// the time errgroup completes every terminal has arrived and wait()
+	// returns immediately. Skips the dispatchGatherStage round-trip
+	// entirely.
+	if fusion != nil {
+		gr, waitErr := fusion.recv.wait(ctx, gatherReceiveTimeout)
+		c.logger.Info("gather: fused wait returned",
+			"query", queryID, "msg_count", fusion.recv.msgCount.Load(),
+			"err", waitErr)
+		if waitErr != nil {
+			return gr, waitErr
+		}
+		if gr != nil && len(gatherStage.OutputRenames) > 0 {
+			applyOutputRenames(gr, gatherStage.OutputRenames)
+		}
+		return gr, nil
+	}
+
+	// Terminal Gather (unfused): legacy single-task gather dispatch.
 	inputs, err := collectInputs(gatherStage, outputs)
 	if err != nil {
 		return nil, fmt.Errorf("gather stage %s: %w", gatherStage.ID, err)
@@ -787,6 +893,7 @@ func (c *Coordinator) dispatchPipelineStage(
 	inputs map[string]StageOutput,
 	workerCount int,
 	isBroadcastJoinProbe bool,
+	fusion *gatherFusion,
 ) (StageOutput, error) {
 	_ = sql
 	// Leaf scan stage.
@@ -848,7 +955,7 @@ func (c *Coordinator) dispatchPipelineStage(
 	// The stage's output is collected into a Partitioned StageOutput where
 	// partition p = the files produced by worker p — downstream Exchange
 	// stages treat this as partitioned if they need to re-hash.
-	return c.dispatchComputeStage(ctx, queryID, stage, inputs, workerCount)
+	return c.dispatchComputeStage(ctx, queryID, stage, inputs, workerCount, fusion)
 }
 
 // scanFanOutTaskCount picks the number of scan-side tasks for stage fan-out.
@@ -1380,6 +1487,7 @@ func (c *Coordinator) dispatchComputeStage(
 	stage physical.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
+	fusion *gatherFusion,
 ) (StageOutput, error) {
 	if workerCount <= 0 {
 		workerCount = 1 // single-worker fallback for sparse test / bootstrap setups
@@ -1390,7 +1498,7 @@ func (c *Coordinator) dispatchComputeStage(
 	// merge when the preconditions hold (multi-worker, K>=2 upstream files,
 	// no AVG). Falls back to the standard 1-task path otherwise.
 	if _, _, ok := finalAggregateFanoutCandidate(stage, inputs, workerCount); ok {
-		return c.dispatchFinalAggregateFanout(ctx, queryID, stage, inputs, workerCount)
+		return c.dispatchFinalAggregateFanout(ctx, queryID, stage, inputs, workerCount, fusion)
 	}
 	// Task count derivation:
 	//   - Singleton output: exactly 1 task. The stage produces one logical
@@ -1608,7 +1716,11 @@ func (c *Coordinator) dispatchComputeStage(
 			stage.Limit == 0 &&
 			t.ReplySubject == ""
 		if canMigrateAggregate {
-			ops, ferr := buildAggregateFragment(stage, &t, taskInputs, aggs)
+			var fusedSubject string
+			if fusion != nil {
+				fusedSubject = fusion.replySubject
+			}
+			ops, ferr := buildAggregateFragment(stage, &t, taskInputs, aggs, fusedSubject)
 			if ferr != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: build aggregate fragment: %w", stage.ID, ferr)
 			}
@@ -1686,6 +1798,15 @@ func (c *Coordinator) dispatchComputeStage(
 	c.logger.Info("dispatching compute stage",
 		"stage_id", stage.ID, "stage_type", stage.Type,
 		"tasks", len(tasks), "subject", subject)
+	// Arm gather-fusion terminal count before publish so workers can't race
+	// the count past the receiver. Every task in this stage emits an
+	// OpGatherSink terminal (canMigrateAggregate fires for the entire batch
+	// when fusion is set — canFuseJoin is mutually exclusive on stage type,
+	// canFuseGather requires no SortKeys/Limit). Tasks count == terminals
+	// expected.
+	if fusion != nil {
+		fusion.recv.SetExpectedTerminals(len(tasks))
+	}
 	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
 		return StageOutput{}, fmt.Errorf("stage %s: publish: %w", stage.ID, err)
 	}
@@ -1870,14 +1991,21 @@ func buildFusedJoinFragment(
 // stage's task into a fragment Operators[] pipeline:
 //
 //	[OpShuffleSource, OpHashAggregate(MergeMode=true), OpFilter?(HAVING),
-//	 OpUnpartitionedSink]
+//	 OpUnpartitionedSink | OpGatherSink]
 //
 // FoldAvg is set only for "final_aggregate" — intermediate "merge_aggregate"
 // tasks must keep __avg_sum#X / __avg_count#X synthetics intact for the
 // downstream final to fold (see executor_stage.go for the same gate on the
 // legacy path). Mirror behavior is byte-equivalent to the legacy
 // executeStageAggregate for the no-sort/no-limit case.
-func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec) ([]distributed.OpSpec, error) {
+//
+// When gatherReplySubject is non-empty, the terminal sink is OpGatherSink
+// streaming directly to the coordinator's NATS reply subscription instead
+// of an unpartitioned .wshf upload — fuses the downstream gather stage
+// into this fragment, eliminating one S3 PUT/GET hop and one coord round-
+// trip. Each task publishes its own terminal marker; coord pre-subscribes
+// with expectedTerminals = numTasks.
+func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("aggregate fragment: expected 1 input alias, got %d", len(taskInputs))
 	}
@@ -1908,9 +2036,16 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 			Predicates: append([]string(nil), t.PostFilterExprs...),
 		})
 	}
-	ops = append(ops, distributed.OpSpec{
-		Type: distributed.OpUnpartitionedSink,
-	})
+	if gatherReplySubject != "" {
+		ops = append(ops, distributed.OpSpec{
+			Type:         distributed.OpGatherSink,
+			ReplySubject: gatherReplySubject,
+		})
+	} else {
+		ops = append(ops, distributed.OpSpec{
+			Type: distributed.OpUnpartitionedSink,
+		})
+	}
 	return ops, nil
 }
 
@@ -1989,6 +2124,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	stage physical.Stage,
 	inputs map[string]StageOutput,
 	workerCount int,
+	fusion *gatherFusion,
 ) (StageOutput, error) {
 	depID, files, ok := finalAggregateFanoutCandidate(stage, inputs, workerCount)
 	if !ok {
@@ -2097,6 +2233,22 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	qm := c.queryMetas[queryID]
 	c.mu.Unlock()
 	c.enrichTaskWithQueryContext(qm, &finalTask)
+
+	// Gather fusion: emit the final-merge task as a fragment whose terminal
+	// sink is OpGatherSink streaming directly to the coord's gather receiver,
+	// instead of an unpartitioned .wshf upload that the fan-out caller would
+	// re-read in a separate gather task. Only the final task is fragment-
+	// migrated here; the intermediate phase already wrote partial outputs to
+	// S3 (next stage of the pipeline).
+	if fusion != nil {
+		finalInputsMap := map[string][]string{depID: finalInputs}
+		ops, ferr := buildAggregateFragment(stage, &finalTask, finalInputsMap, aggs, fusion.replySubject)
+		if ferr != nil {
+			return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: build fused fragment: %w", stage.ID, ferr)
+		}
+		finalTask.Operators = ops
+		fusion.recv.SetExpectedTerminals(1)
+	}
 
 	finalFiles, err := c.runStageTasks(ctx,
 		fmt.Sprintf("st-%s-%s", stage.ID, queryID),

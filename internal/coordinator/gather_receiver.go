@@ -118,6 +118,26 @@ func (r *gatherReceiver) handle(m *nats.Msg) {
 	}
 }
 
+// SetExpectedTerminals updates the terminal-count threshold after the
+// subscription is already installed. Used by gather fusion: the receiver
+// is created early in executeStageDAG (so no early publishes are lost),
+// but the actual fragment task count is not known until the upstream
+// stage's dispatcher computes it. The dispatcher calls this before
+// publishing tasks. Re-arms the done signal if already-arrived terminals
+// meet or exceed the new threshold (handles the race where every fragment
+// task finishes before the dispatcher returns from PublishTasks).
+func (r *gatherReceiver) SetExpectedTerminals(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.expectedTerminals = n
+	if r.terminals >= r.expectedTerminals {
+		select {
+		case r.done <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // wait blocks until all expected terminal messages arrive, ctx is done,
 // or the timeout fires. Always unsubscribes before returning.
 func (r *gatherReceiver) wait(ctx context.Context, timeout time.Duration) (*gatherResult, error) {

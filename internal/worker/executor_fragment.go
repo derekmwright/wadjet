@@ -65,7 +65,23 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// result files; downstream stages handle the empty-input shape via their
 	// own short-circuits. Mirrors executeStageHashJoin's len(probeFiles)==0
 	// check before any S3 I/O happens.
+	//
+	// Exception: OpGatherSink. The coordinator's gather receiver counts
+	// terminal markers, not messages — skipping finalize would leave it
+	// hanging until the 10-minute gather timeout. Open + finalize the sink
+	// (its Finalize publishes a terminal even with no batches consumed) so
+	// the receiver unblocks immediately on empty fragments.
 	if len(sourceSpec.InputFiles) == 0 {
+		if sinkSpec.Type == distributed.OpGatherSink {
+			sink, err := e.openFragmentSink(task, sinkSpec)
+			if err != nil {
+				return fmt.Errorf("fragment task %s: open gather sink (empty source): %w", task.ID, err)
+			}
+			defer sink.close()
+			if err := sink.finalize(ctx, task, result); err != nil {
+				return fmt.Errorf("fragment task %s: finalize gather sink (empty source): %w", task.ID, err)
+			}
+		}
 		return nil
 	}
 
