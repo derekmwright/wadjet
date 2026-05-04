@@ -1588,6 +1588,32 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// Final/merge aggregate migration: dispatch via the fragment path
+		// when the stage has no fused sort/limit. The fragment runs:
+		//   [OpShuffleSource, OpHashAggregate(MergeMode), OpFilter? (HAVING),
+		//    OpUnpartitionedSink]
+		// Output shape (one .wshf per task) matches the legacy
+		// executeStageAggregate path — same downstream consumers (gather,
+		// further merge stages) read it identically. No file-count
+		// amplification because the aggregate output is one row per group
+		// per task and the sink is unpartitioned.
+		//
+		// Eligibility: skipped when SortKeys/Limit are set (post-aggregate
+		// sort needs an OpSort breaker not yet in the fragment runner) or
+		// when ReplySubject is set (gather output — handled by the legacy
+		// gather-task path today; gather fusion is a follow-up).
+		canMigrateAggregate := t.Operators == nil &&
+			(stage.Type == "final_aggregate" || stage.Type == "merge_aggregate") &&
+			len(stage.SortKeys) == 0 &&
+			stage.Limit == 0 &&
+			t.ReplySubject == ""
+		if canMigrateAggregate {
+			ops, ferr := buildAggregateFragment(stage, &t, taskInputs, aggs)
+			if ferr != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: build aggregate fragment: %w", stage.ID, ferr)
+			}
+			t.Operators = ops
+		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -1836,6 +1862,54 @@ func buildFusedJoinFragment(
 		Type:          distributed.OpExchangeSender,
 		ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
 		NumPartitions: stage.Exchange.Count,
+	})
+	return ops, nil
+}
+
+// buildAggregateFragment translates a final_aggregate / merge_aggregate
+// stage's task into a fragment Operators[] pipeline:
+//
+//	[OpShuffleSource, OpHashAggregate(MergeMode=true), OpFilter?(HAVING),
+//	 OpUnpartitionedSink]
+//
+// FoldAvg is set only for "final_aggregate" — intermediate "merge_aggregate"
+// tasks must keep __avg_sum#X / __avg_count#X synthetics intact for the
+// downstream final to fold (see executor_stage.go for the same gate on the
+// legacy path). Mirror behavior is byte-equivalent to the legacy
+// executeStageAggregate for the no-sort/no-limit case.
+func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec) ([]distributed.OpSpec, error) {
+	if len(taskInputs) != 1 {
+		return nil, fmt.Errorf("aggregate fragment: expected 1 input alias, got %d", len(taskInputs))
+	}
+	var alias string
+	var files []string
+	for k, v := range taskInputs {
+		alias = k
+		files = v
+		break
+	}
+	ops := make([]distributed.OpSpec, 0, 4)
+	ops = append(ops, distributed.OpSpec{
+		Type:        distributed.OpShuffleSource,
+		InputAlias:  alias,
+		InputFiles:  files,
+		InputBucket: t.DataBucket,
+	})
+	ops = append(ops, distributed.OpSpec{
+		Type:        distributed.OpHashAggregate,
+		GroupByCols: append([]string(nil), stage.GroupByCols...),
+		Aggregates:  append([]distributed.AggSpec(nil), aggs...),
+		MergeMode:   true,
+		FoldAvg:     stage.Type == "final_aggregate",
+	})
+	if len(t.PostFilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	ops = append(ops, distributed.OpSpec{
+		Type: distributed.OpUnpartitionedSink,
 	})
 	return ops, nil
 }
