@@ -1370,7 +1370,7 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// streams the filtered scan output directly into a partitioned
 		// shuffle sink, avoiding the round-trip of writing+re-reading an
 		// unpartitioned WSHF between scan and shuffle.
-		stages = fuseScanShuffle(stages)
+		stages = fuseScanShuffle(stages, p.WorkerCount)
 		// Fuse hash_join / broadcast_join + downstream exchange-repartition
 		// into a single fragment task so the join writes its hash-partitioned
 		// output directly. Same shape as fuseScanShuffle but on join stages —
