@@ -166,7 +166,6 @@ func sqlToStages(t *testing.T, cat *catalog.Catalog, ctx context.Context, sql st
 
 	planner := NewPlanner(cat)
 	planner.WorkerCount = workerCount
-	planner.UseEnsureDistribution = true // mirror production coord (always native-DAG)
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		t.Fatalf("plan distributed: %v", err)

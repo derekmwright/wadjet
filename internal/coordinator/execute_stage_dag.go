@@ -1201,14 +1201,6 @@ func (c *Coordinator) dispatchScanFilterStage(
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
 		}
-		// Fused scan+shuffle (planner's fuseScanShuffle pass): the scan
-		// task hash-partitions its filtered output directly via the
-		// worker's writePartitionedShuffle, eliminating one S3 PUT and
-		// one S3 GET vs the legacy scan→exchange-repartition split.
-		if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 {
-			t.ShuffleKeys = append([]string(nil), stage.Exchange.Keys...)
-			t.NumPartitions = stage.Exchange.Count
-		}
 		if shardCount > 1 {
 			t.ScanShardIndex = shardIdx
 			t.ScanShardCount = shardCount
@@ -1288,38 +1280,11 @@ func (c *Coordinator) dispatchScanFilterStage(
 	results := make([]taskResult, len(collected))
 	copy(results, collected)
 	mu.Unlock()
-	for _, r := range results {
+	files := make([][]string, len(tasks))
+	for i, r := range results {
 		if r.err != "" {
 			return StageOutput{}, fmt.Errorf("scan-filter stage %s: task failed: %s", stage.ID, r.err)
 		}
-	}
-	// Fused scan+shuffle: each task produced N partition files
-	// (worker writePartitionedShuffle uploads to "<prefix>partition=NNNN/<task>.wshf").
-	// Bucket all files across all tasks by partition number so the downstream
-	// consumer reads each partition's full set. Same shape as runShuffleSide.
-	if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
-		numParts := stage.Exchange.Count
-		shardFiles := make([][]string, numParts)
-		for _, r := range results {
-			for _, f := range r.files {
-				p, parseErr := parsePartitionFromPath(f)
-				if parseErr != nil {
-					return StageOutput{}, fmt.Errorf("scan-filter stage %s: parsing partition from %q: %w", stage.ID, f, parseErr)
-				}
-				if p < 0 || p >= numParts {
-					return StageOutput{}, fmt.Errorf("scan-filter stage %s: partition %d out of range [0,%d) in %q", stage.ID, p, numParts, f)
-				}
-				shardFiles[p] = append(shardFiles[p], f)
-			}
-		}
-		return StageOutput{
-			Kind:          OutputPartitioned,
-			NumPartitions: numParts,
-			Files:         shardFiles,
-		}, nil
-	}
-	files := make([][]string, len(tasks))
-	for i, r := range results {
 		files[i] = r.files
 	}
 	return StageOutput{

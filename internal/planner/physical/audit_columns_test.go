@@ -183,35 +183,6 @@ func TestAuditFusedJoinChains(t *testing.T) {
 					s.ID, s.TableName, len(s.ScanFiles), s.EstimatedBytes, s.EstimatedRows)
 			}
 			t.Logf("=== %s SUMMARY: total fused entries across all join stages = %d ===", tc.name, fusedTotal)
-
-			// Also count stages by type so we can see whether fuseScanShuffle
-			// eliminated exchange-repartition stages we expected to absorb.
-			byType := make(map[string]int)
-			for _, s := range stages {
-				byType[s.Type]++
-			}
-			t.Logf("--- %s stage counts by type ---", tc.name)
-			for _, k := range []string{"scan", "broadcast_join", "hash_join", "aggregate", "final_aggregate", "merge_aggregate", "exchange-repartition", "exchange-replicate", "exchange-gather", "sort", "merge_sort"} {
-				if v, ok := byType[k]; ok && v > 0 {
-					t.Logf("  %-22s %d", k, v)
-				}
-			}
-
-			// Per-scan: report whether the scan now carries Exchange metadata
-			// (i.e. fused with a downstream shuffle).
-			t.Logf("--- %s scan stages with fused-shuffle (Exchange != nil) ---", tc.name)
-			fusedScans := 0
-			for _, s := range stages {
-				if s.Type != "scan" {
-					continue
-				}
-				if s.Exchange != nil {
-					fusedScans++
-					keys := strings.Join(s.Exchange.Keys, ",")
-					t.Logf("  %s table=%s shuffleKeys=[%s] count=%d", s.ID, s.TableName, keys, s.Exchange.Count)
-				}
-			}
-			t.Logf("=== %s scan-shuffle fusion: %d scan stages absorbed downstream exchange ===", tc.name, fusedScans)
 		})
 	}
 }
