@@ -223,6 +223,7 @@ const (
 	// (breaker → postOps → sink). At most one breaker per fragment today;
 	// chained breakers (e.g. aggregate + sort) need a follow-up extension.
 	OpHashAggregate OpType = "hash_aggregate" // group-by + aggregates; partial or merge mode
+	OpSort          OpType = "sort"           // ordered sort, optional top-N limit
 
 	// Sinks (must be last in Operators).
 	OpExchangeSender    OpType = "exchange_sender"     // partitionedShuffleSink: hash-partition into N output files
@@ -274,6 +275,10 @@ type OpSpec struct {
 	MergeMode     bool      `json:"merge_mode,omitempty"`      // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
 	FoldAvg       bool      `json:"fold_avg,omitempty"`        // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
 	BuildProject  bool      `json:"build_project,omitempty"`   // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
+
+	// OpSort (pipeline-breaker).
+	SortKeySpecs []SortKeySpec `json:"sort_key_specs,omitempty"` // ordered key columns
+	SortLimit    int           `json:"sort_limit,omitempty"`     // 0 = no limit; > 0 = top-N truncation after sort
 }
 
 // PreComputedAggregate identifies a derived aggregate whose result has

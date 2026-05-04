@@ -44,19 +44,15 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	if !isFragmentSinkOp(sinkSpec.Type) {
 		return fmt.Errorf("fragment task %s: last op %q is not a sink", task.ID, sinkSpec.Type)
 	}
-	// Locate at most one pipeline-breaker (HashAggregate today; Sort and
-	// HashJoinBuild are future candidates). Reject middle ops that aren't
-	// recognised as unary or breaker.
-	breakerIdx := -1
+	// Locate every pipeline-breaker (HashAggregate, Sort) in middle. Reject
+	// middle ops that aren't recognised as unary or breaker.
+	var breakerIdxs []int
 	for i, m := range middle {
 		if isFragmentSourceOp(m.Type) || isFragmentSinkOp(m.Type) {
 			return fmt.Errorf("fragment task %s: middle op %d is %q, must be unary or breaker", task.ID, i, m.Type)
 		}
 		if isFragmentBreakerOp(m.Type) {
-			if breakerIdx >= 0 {
-				return fmt.Errorf("fragment task %s: multiple pipeline-breaker ops not yet supported (op %d and %d)", task.ID, breakerIdx, i)
-			}
-			breakerIdx = i
+			breakerIdxs = append(breakerIdxs, i)
 		}
 	}
 
@@ -104,7 +100,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	}
 	defer sink.close()
 
-	if breakerIdx < 0 {
+	if len(breakerIdxs) == 0 {
 		// Linear pipeline: source → unary ops → sink.
 		preOps, cleanup, err := e.buildUnaryChain(ctx, task, middle)
 		if err != nil {
@@ -114,18 +110,11 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 		return e.runFragmentLinear(ctx, task, src, preOps, sink, result)
 	}
 
-	// Pipeline-breaker: split middle into pre- and post-breaker chains.
-	preOps, preCleanup, err := e.buildUnaryChain(ctx, task, middle[:breakerIdx])
-	if err != nil {
-		return err
-	}
-	defer preCleanup()
-	postOps, postCleanup, err := e.buildUnaryChain(ctx, task, middle[breakerIdx+1:])
-	if err != nil {
-		return err
-	}
-	defer postCleanup()
-	return e.runFragmentWithBreaker(ctx, task, src, preOps, middle[breakerIdx], postOps, sink, result)
+	// One or more pipeline-breakers — split middle into N+1 unary segments
+	// around them and run a chain of consume/drain phases. No materialization
+	// to disk between phases; each breaker holds its state in memory (with
+	// optional spill).
+	return e.runFragmentWithBreakers(ctx, task, src, middle, breakerIdxs, sink, result)
 }
 
 // runFragmentLinear streams batches from src through unary ops into the sink.
@@ -170,101 +159,284 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 	return nil
 }
 
-// runFragmentWithBreaker splits the fragment around a pipeline-breaker (e.g.
-// HashAggregate). Phase 1 (consume): source → preOps → breaker as Sink.
-// Phase 2 (drain): breaker as Source → postOps → sink. AVG-fold (when
-// breakerSpec.FoldAvg is set) runs at the head of postOps so __avg_sum#X /
-// __avg_count#X collapse into a single AVG output column before any
-// downstream filter or sort.
-func (e *Executor) runFragmentWithBreaker(ctx context.Context, task distributed.Task, src exec.Source, preOps []exec.UnaryOperator, breakerSpec distributed.OpSpec, postOps []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification) error {
+// fragmentBreaker bundles an exec.SinkSource pipeline-breaker (HashAggregate,
+// Sort) with the optional pre- and post- hooks that operator type needs.
+// PrependOps run as the tail of the consume-phase unary chain (e.g.
+// HashAggregate's derived-input Project). DrainXform runs per-batch during
+// the drain phase before postOps (e.g. HashAggregate's AVG-fold). PostFinalize
+// runs once between Finalize and the first Next (e.g. Sort.Truncate for the
+// top-N optimization).
+type fragmentBreaker struct {
+	Op           exec.SinkSource
+	Label        string
+	PrependOps   []exec.UnaryOperator
+	DrainXform   func(*batch.RecordBatch) (*batch.RecordBatch, error)
+	PostFinalize func()
+	Cleanup      func()
+}
+
+// runFragmentWithBreakers handles fragments containing one or more pipeline-
+// breakers (HashAggregate, Sort). middle is split into N+1 unary segments
+// around the breaker indices: seg[0] feeds the first breaker, seg[k] sits
+// between breaker[k-1] and breaker[k], and seg[N] sits between the last
+// breaker and the terminal sink.
+//
+// Each breaker is consumed entirely (Phase k consume) before its drain
+// stream is piped into the next phase's consume. State stays in memory
+// (with operator-level spill) — no S3 hop between phases.
+//
+// Today the planner emits at most one breaker per fragment; the multi-
+// breaker path is exercised by tests and ready for future shapes
+// (e.g. final_aggregate + sort fused into one fragment when the planner
+// stops emitting them as separate Sort stages).
+func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed.Task, src exec.Source, middle []distributed.OpSpec, breakerIdxs []int, sink fragmentSink, result *distributed.ResultNotification) error {
 	progress := exec.ProgressReporterFromContext(ctx)
 
-	switch breakerSpec.Type {
-	case distributed.OpHashAggregate:
-		hashAgg, err := e.buildFragmentHashAggregate(breakerSpec)
+	breakers := make([]*fragmentBreaker, len(breakerIdxs))
+	for i, idx := range breakerIdxs {
+		fb, err := e.buildFragmentBreaker(ctx, middle[idx])
 		if err != nil {
-			return fmt.Errorf("fragment task %s: hash_aggregate build: %w", task.ID, err)
+			return fmt.Errorf("fragment task %s: build breaker %d (%s): %w", task.ID, i, middle[idx].Type, err)
 		}
-		defer hashAgg.Close()
+		breakers[i] = fb
+		defer fb.Cleanup()
+	}
 
+	// Phase 0..N-1: feed the previous source (src for j=0, breakers[j-1].Op
+	// otherwise) through middle[prevIdx+1:idx] + breakers[j].PrependOps into
+	// breakers[j]. Apply breakers[j-1].DrainXform per-batch when draining a
+	// previous breaker.
+	currentSrc := src
+	for j, idx := range breakerIdxs {
+		segStart := 0
+		if j > 0 {
+			segStart = breakerIdxs[j-1] + 1
+		}
+		segOps, segCleanup, err := e.buildUnaryChain(ctx, task, middle[segStart:idx])
+		if err != nil {
+			return err
+		}
+		defer segCleanup()
+		// Append breaker prepend-ops AFTER the segment ops; init each so the
+		// pipeline can call Execute without further setup. PrependOps come
+		// already-init'd from buildFragmentBreaker (HashAggregate's Project),
+		// so don't double-init here.
+		phaseOps := append([]exec.UnaryOperator{}, segOps...)
+		phaseOps = append(phaseOps, breakers[j].PrependOps...)
+
+		if j == 0 {
+			pipe := &exec.Pipeline{Source: currentSrc, Ops: phaseOps, Sink: breakers[j].Op}
+			if err := pipe.Run(ctx); err != nil {
+				return fmt.Errorf("fragment task %s: %s consume: %w", task.ID, breakers[j].Label, err)
+			}
+		} else {
+			if err := drainThroughBreaker(ctx, currentSrc, breakers[j-1].DrainXform, phaseOps, breakers[j].Op); err != nil {
+				return fmt.Errorf("fragment task %s: %s consume: %w", task.ID, breakers[j].Label, err)
+			}
+			if err := breakers[j].Op.Finalize(ctx); err != nil {
+				return fmt.Errorf("fragment task %s: %s finalize: %w", task.ID, breakers[j].Label, err)
+			}
+		}
+		if breakers[j].PostFinalize != nil {
+			breakers[j].PostFinalize()
+		}
+		currentSrc = breakers[j].Op
+	}
+
+	// Final phase: drain the last breaker through middle[lastIdx+1:end] into
+	// sink. Apply the last breaker's DrainXform per-batch before postOps.
+	lastIdx := breakerIdxs[len(breakerIdxs)-1]
+	finalOps, finalCleanup, err := e.buildUnaryChain(ctx, task, middle[lastIdx+1:])
+	if err != nil {
+		return err
+	}
+	defer finalCleanup()
+
+	last := breakers[len(breakers)-1]
+	var totalRows int64
+	for {
+		b, err := currentSrc.Next(ctx)
+		if err != nil {
+			return fmt.Errorf("fragment task %s: %s next: %w", task.ID, last.Label, err)
+		}
+		if b == nil {
+			break
+		}
+		cur := b
+		if last.DrainXform != nil {
+			cur, err = last.DrainXform(cur)
+			if err != nil {
+				return fmt.Errorf("fragment task %s: %s drain xform: %w", task.ID, last.Label, err)
+			}
+			if cur == nil {
+				continue
+			}
+		}
+		for _, op := range finalOps {
+			cur, err = op.Execute(ctx, cur)
+			if err != nil {
+				return fmt.Errorf("fragment task %s: post-breaker exec: %w", task.ID, err)
+			}
+			if cur == nil {
+				break
+			}
+		}
+		if cur == nil || cur.ActiveLen() == 0 {
+			continue
+		}
+		if err := sink.consume(ctx, cur); err != nil {
+			return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
+		}
+		n := int64(cur.ActiveLen())
+		totalRows += n
+		if progress != nil {
+			progress.AddRows(n)
+		}
+	}
+	result.NumRows = totalRows
+	if err := sink.finalize(ctx, task, result); err != nil {
+		return fmt.Errorf("fragment task %s: sink finalize: %w", task.ID, err)
+	}
+	return nil
+}
+
+// drainThroughBreaker pulls batches from src, applies an optional per-batch
+// transform, pipes them through the unary chain, and pushes each non-empty
+// result into sink.Consume. Caller is responsible for sink.Finalize.
+func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch.RecordBatch) (*batch.RecordBatch, error), ops []exec.UnaryOperator, sink exec.Sink) error {
+	for {
+		b, err := src.Next(ctx)
+		if err != nil {
+			return err
+		}
+		if b == nil {
+			return nil
+		}
+		cur := b
+		if xform != nil {
+			cur, err = xform(cur)
+			if err != nil {
+				return err
+			}
+			if cur == nil {
+				continue
+			}
+		}
+		for _, op := range ops {
+			cur, err = op.Execute(ctx, cur)
+			if err != nil {
+				return err
+			}
+			if cur == nil {
+				break
+			}
+		}
+		if cur == nil || cur.ActiveLen() == 0 {
+			continue
+		}
+		if err := sink.Consume(ctx, cur); err != nil {
+			return err
+		}
+	}
+}
+
+// buildFragmentBreaker dispatches per-OpType breaker construction. Returns a
+// fully-initialised SinkSource plus the optional pre/drain/post hooks the
+// breaker needs.
+func (e *Executor) buildFragmentBreaker(ctx context.Context, spec distributed.OpSpec) (*fragmentBreaker, error) {
+	switch spec.Type {
+	case distributed.OpHashAggregate:
+		hashAgg, err := e.buildFragmentHashAggregate(spec)
+		if err != nil {
+			return nil, err
+		}
+		fb := &fragmentBreaker{
+			Op:      hashAgg,
+			Label:   "hash_aggregate",
+			Cleanup: func() { hashAgg.Close() },
+		}
 		// Optional derived-input projection. Mirrors executeStageAggregate's
 		// buildAggInputProjection — required for partial aggregates whose
 		// inputs are SQL expressions (e.g. SUM(l_extendedprice*(1-l_discount))).
 		// Skipped for merge mode: the partial stage already computed the
 		// derived column under OutputCol.
-		if breakerSpec.BuildProject && !breakerSpec.MergeMode {
-			project, _, err := buildAggInputProjection(breakerSpec.GroupByCols, breakerSpec.Aggregates, nil)
-			if err != nil {
-				return fmt.Errorf("fragment task %s: agg input project: %w", task.ID, err)
+		if spec.BuildProject && !spec.MergeMode {
+			project, _, perr := buildAggInputProjection(spec.GroupByCols, spec.Aggregates, nil)
+			if perr != nil {
+				return nil, fmt.Errorf("agg input project: %w", perr)
 			}
 			if project != nil {
-				if err := project.Init(ctx); err != nil {
-					return fmt.Errorf("fragment task %s: project init: %w", task.ID, err)
+				if perr := project.Init(ctx); perr != nil {
+					return nil, fmt.Errorf("project init: %w", perr)
 				}
-				preOps = append(preOps, project)
+				fb.PrependOps = append(fb.PrependOps, project)
 			}
 		}
-
-		// Consume phase — feed every batch from src through preOps into
-		// hashAgg via exec.Pipeline.Run (which handles the source-init/
-		// drain loop already).
-		consume := &exec.Pipeline{Source: src, Ops: preOps, Sink: hashAgg}
-		if err := consume.Run(ctx); err != nil {
-			return fmt.Errorf("fragment task %s: consume pipeline: %w", task.ID, err)
-		}
-
-		// Drain phase — pull aggregated batches from hashAgg, apply
-		// AVG-fold + postOps inline, push into sink.
-		var totalRows int64
-		for {
-			b, err := hashAgg.Next(ctx)
-			if err != nil {
-				return fmt.Errorf("fragment task %s: hash_aggregate next: %w", task.ID, err)
-			}
-			if b == nil {
-				break
-			}
-			cur := b
-			if breakerSpec.FoldAvg {
-				folded, ferr := applyAvgFold([]*batch.RecordBatch{cur})
+		// AVG-fold collapses __avg_sum#X / __avg_count#X synthetics into the
+		// single AVG output column on the FINAL stage only. Wrap the slice-
+		// taking applyAvgFold helper as a per-batch transform.
+		if spec.FoldAvg {
+			fb.DrainXform = func(b *batch.RecordBatch) (*batch.RecordBatch, error) {
+				folded, ferr := applyAvgFold([]*batch.RecordBatch{b})
 				if ferr != nil {
-					return fmt.Errorf("fragment task %s: avg-fold: %w", task.ID, ferr)
+					return nil, ferr
 				}
 				if len(folded) == 0 {
-					continue
+					return nil, nil
 				}
-				cur = folded[0]
-			}
-			for _, op := range postOps {
-				cur, err = op.Execute(ctx, cur)
-				if err != nil {
-					return fmt.Errorf("fragment task %s: post-breaker exec: %w", task.ID, err)
-				}
-				if cur == nil {
-					break
-				}
-			}
-			if cur == nil || cur.ActiveLen() == 0 {
-				continue
-			}
-			if err := sink.consume(ctx, cur); err != nil {
-				return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
-			}
-			n := int64(cur.ActiveLen())
-			totalRows += n
-			if progress != nil {
-				progress.AddRows(n)
+				return folded[0], nil
 			}
 		}
-		result.NumRows = totalRows
-		if err := sink.finalize(ctx, task, result); err != nil {
-			return fmt.Errorf("fragment task %s: sink finalize: %w", task.ID, err)
+		return fb, nil
+
+	case distributed.OpSort:
+		sorter, err := e.buildFragmentSort(spec)
+		if err != nil {
+			return nil, err
 		}
-		return nil
+		if err := sorter.Init(ctx); err != nil {
+			sorter.Close()
+			return nil, fmt.Errorf("sort init: %w", err)
+		}
+		fb := &fragmentBreaker{
+			Op:      sorter,
+			Label:   "sort",
+			Cleanup: func() { sorter.Close() },
+		}
+		// Truncate to the top-N rows after Finalize. Mirrors
+		// executeStageSort: Truncate runs ONCE between Finalize and the
+		// first Next so the materialized output is bounded.
+		if spec.SortLimit > 0 {
+			limit := spec.SortLimit
+			fb.PostFinalize = func() { sorter.Truncate(limit) }
+		}
+		return fb, nil
 
 	default:
-		return fmt.Errorf("fragment task %s: unsupported breaker op %q", task.ID, breakerSpec.Type)
+		return nil, fmt.Errorf("unsupported breaker op %q", spec.Type)
 	}
+}
+
+// buildFragmentSort constructs an exec.Sort from an OpSpec. Mirrors the
+// executeStageSort key conversion (Desc → exec.Descending). Spill is wired
+// from the executor's shared spill manager when present.
+func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error) {
+	if len(spec.SortKeySpecs) == 0 {
+		return nil, fmt.Errorf("sort: SortKeySpecs required")
+	}
+	keys := make([]exec.SortKey, len(spec.SortKeySpecs))
+	for i, k := range spec.SortKeySpecs {
+		order := exec.Ascending
+		if k.Desc {
+			order = exec.Descending
+		}
+		keys[i] = exec.SortKey{Column: k.Column, Order: order}
+	}
+	sorter := exec.NewSort(keys)
+	if e.sharedSpill != nil {
+		sorter.Spill = e.sharedSpill
+	}
+	return sorter, nil
 }
 
 // buildFragmentHashAggregate constructs an exec.HashAggregate from an OpSpec.
@@ -342,7 +514,7 @@ func isFragmentSinkOp(t distributed.OpType) bool {
 }
 
 func isFragmentBreakerOp(t distributed.OpType) bool {
-	return t == distributed.OpHashAggregate
+	return t == distributed.OpHashAggregate || t == distributed.OpSort
 }
 
 func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.OpSpec) (exec.Source, error) {

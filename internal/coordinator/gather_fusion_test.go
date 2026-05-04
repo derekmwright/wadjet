@@ -138,6 +138,72 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 	}
 }
 
+// TestBuildSortFragment verifies that buildSortFragment emits the canonical
+// [OpShuffleSource, OpSort, OpUnpartitionedSink] shape and forwards
+// SortKeys + Limit onto the OpSort spec. Caller-side preconditions
+// (single input alias, non-empty SortKeys) surface as errors.
+func TestBuildSortFragment(t *testing.T) {
+	stage := physical.Stage{
+		Type:  "sort",
+		Limit: 5,
+	}
+	task := &distributed.Task{DataBucket: "buk"}
+	taskInputs := map[string][]string{"upstream": {"f1.wshf", "f2.wshf"}}
+	sorts := []distributed.SortKeySpec{
+		{Column: "rev", Desc: true},
+		{Column: "id", Desc: false},
+	}
+
+	t.Run("happy path: 3-op fragment with sort keys + limit", func(t *testing.T) {
+		ops, err := buildSortFragment(stage, task, taskInputs, sorts)
+		if err != nil {
+			t.Fatalf("buildSortFragment: %v", err)
+		}
+		if len(ops) != 3 {
+			t.Fatalf("ops length: got %d, want 3", len(ops))
+		}
+		if ops[0].Type != distributed.OpShuffleSource {
+			t.Errorf("ops[0]: got %q, want %q", ops[0].Type, distributed.OpShuffleSource)
+		}
+		if ops[0].InputAlias != "upstream" {
+			t.Errorf("ops[0].InputAlias: got %q, want %q", ops[0].InputAlias, "upstream")
+		}
+		if len(ops[0].InputFiles) != 2 {
+			t.Errorf("ops[0].InputFiles: got %d files, want 2", len(ops[0].InputFiles))
+		}
+		if ops[1].Type != distributed.OpSort {
+			t.Errorf("ops[1]: got %q, want %q", ops[1].Type, distributed.OpSort)
+		}
+		if len(ops[1].SortKeySpecs) != 2 {
+			t.Fatalf("ops[1].SortKeySpecs: got %d, want 2", len(ops[1].SortKeySpecs))
+		}
+		if ops[1].SortKeySpecs[0].Column != "rev" || !ops[1].SortKeySpecs[0].Desc {
+			t.Errorf("ops[1].SortKeySpecs[0]: got %+v, want {rev DESC}", ops[1].SortKeySpecs[0])
+		}
+		if ops[1].SortLimit != 5 {
+			t.Errorf("ops[1].SortLimit: got %d, want 5", ops[1].SortLimit)
+		}
+		if ops[2].Type != distributed.OpUnpartitionedSink {
+			t.Errorf("ops[2]: got %q, want %q", ops[2].Type, distributed.OpUnpartitionedSink)
+		}
+	})
+	t.Run("rejects empty SortKeys", func(t *testing.T) {
+		_, err := buildSortFragment(stage, task, taskInputs, nil)
+		if err == nil {
+			t.Fatal("expected error on empty SortKeys")
+		}
+	})
+	t.Run("rejects multi-alias input", func(t *testing.T) {
+		_, err := buildSortFragment(stage, task, map[string][]string{
+			"a": {"x"},
+			"b": {"y"},
+		}, sorts)
+		if err == nil {
+			t.Fatal("expected error on multi-alias input")
+		}
+	})
+}
+
 // TestBuildAggregateFragment_GatherSink verifies that buildAggregateFragment
 // emits OpGatherSink (carrying the reply subject) when gatherReplySubject is
 // non-empty and OpUnpartitionedSink otherwise.

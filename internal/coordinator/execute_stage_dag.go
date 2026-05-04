@@ -1726,6 +1726,26 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// Sort migration: dispatch standalone Sort / merge_sort stages via
+		// the fragment path. The fragment runs:
+		//   [OpShuffleSource, OpSort, OpUnpartitionedSink]
+		// Output shape (one .wshf per task) matches the legacy
+		// executeStageSort path. Eligibility excludes any stage already
+		// claimed by canFuseJoin (joins have no SortKeys) or
+		// canMigrateAggregate (mutually exclusive on stage.Type), so this
+		// reads as "if no other migration claimed it, and it's a sort,
+		// migrate it."
+		canMigrateSort := t.Operators == nil &&
+			(stage.Type == "sort" || stage.Type == "merge_sort") &&
+			len(stage.SortKeys) > 0 &&
+			t.ReplySubject == ""
+		if canMigrateSort {
+			ops, ferr := buildSortFragment(stage, &t, taskInputs, sorts)
+			if ferr != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: build sort fragment: %w", stage.ID, ferr)
+			}
+			t.Operators = ops
+		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -2047,6 +2067,47 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		})
 	}
 	return ops, nil
+}
+
+// buildSortFragment translates a sort / merge_sort stage's task into a
+// fragment Operators[] pipeline:
+//
+//	[OpShuffleSource, OpSort, OpUnpartitionedSink]
+//
+// Same one-output-file-per-task shape the legacy executeStageSort emitted,
+// so downstream consumers (gather, further merges) read it identically.
+// Limit is forwarded as SortLimit so the sort operator's Truncate fires
+// after Finalize for top-N optimization.
+func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, sorts []distributed.SortKeySpec) ([]distributed.OpSpec, error) {
+	if len(taskInputs) != 1 {
+		return nil, fmt.Errorf("sort fragment: expected 1 input alias, got %d", len(taskInputs))
+	}
+	if len(sorts) == 0 {
+		return nil, fmt.Errorf("sort fragment: SortKeys required")
+	}
+	var alias string
+	var files []string
+	for k, v := range taskInputs {
+		alias = k
+		files = v
+		break
+	}
+	return []distributed.OpSpec{
+		{
+			Type:        distributed.OpShuffleSource,
+			InputAlias:  alias,
+			InputFiles:  files,
+			InputBucket: t.DataBucket,
+		},
+		{
+			Type:         distributed.OpSort,
+			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
+			SortLimit:    stage.Limit,
+		},
+		{
+			Type: distributed.OpUnpartitionedSink,
+		},
+	}, nil
 }
 
 // finalAggregateFanoutCandidate reports whether a stage qualifies for
