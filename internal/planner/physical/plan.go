@@ -1376,7 +1376,10 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// output directly. Same shape as fuseScanShuffle but on join stages —
 		// captures the wins on chained shuffle joins (Q21's join-8/join-12,
 		// Q07's chained joins, etc.).
-		stages = fuseJoinShuffle(stages)
+		// 2026-05-04 BISECT: temporarily disabled to isolate the Q05 8.8×
+		// SF10 regression on 388ffd7. Re-enable after confirming whether the
+		// regression is in scan-side or join-side fragment dispatch.
+		// stages = fuseJoinShuffle(stages)
 		prev := BehaviorPreservingMode
 		BehaviorPreservingMode = false
 		defer func() { BehaviorPreservingMode = prev }()

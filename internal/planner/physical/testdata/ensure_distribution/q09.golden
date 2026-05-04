@@ -5,9 +5,10 @@ scan-5	scan	Singleton
 join-6	broadcast_join	Hash(l_partkey)/32	deps=join-4,exchange-replicate-join-6-6
 scan-7	scan	Hash(ps_suppkey,ps_partkey)/32
 exchange-repartition-8	exchange-repartition	Hash(l_suppkey,l_partkey)/32	deps=join-6
-join-10	hash_join	Hash(l_orderkey)/32	deps=exchange-repartition-8,scan-7
+join-10	hash_join	Hash(l_suppkey,l_partkey)/32	deps=exchange-repartition-8,scan-7
 scan-11	scan	Hash(o_orderkey)/32
-join-14	hash_join	Hash(l_orderkey)/32	deps=join-10,scan-11
+exchange-repartition-12	exchange-repartition	Hash(l_orderkey)/32	deps=join-10
+join-14	hash_join	Hash(l_orderkey)/32	deps=exchange-repartition-12,scan-11
 scan-15	scan	Singleton
 join-16	broadcast_join	Hash(l_orderkey)/32	deps=join-14,exchange-replicate-join-16-16
 aggregate-17	aggregate	RoundRobin	deps=join-16
