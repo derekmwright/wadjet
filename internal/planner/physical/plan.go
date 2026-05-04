@@ -1363,22 +1363,29 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// run it as one task instead of the N parallel tasks the exchange
 		// is feeding (Q18 SF10 OOM trigger).
 		assignStageDistributions(stages, p.WorkerCount)
-		// Fuse scan + downstream exchange-repartition into a single
-		// hash-partitioning scan stage. The fused stage is dispatched as a
-		// 2-op fragment ([OpScan, OpExchangeSender]) by the coord; the
-		// worker's runStageScanPartitionedStreaming / executeFragment
-		// streams the filtered scan output directly into a partitioned
-		// shuffle sink, avoiding the round-trip of writing+re-reading an
-		// unpartitioned WSHF between scan and shuffle.
-		stages = fuseScanShuffle(stages, p.WorkerCount)
-		// Fuse hash_join / broadcast_join + downstream exchange-repartition
-		// into a single fragment task so the join writes its hash-partitioned
-		// output directly. Same shape as fuseScanShuffle but on join stages —
-		// captures the wins on chained shuffle joins (Q21's join-8/join-12,
-		// Q07's chained joins, etc.).
-		// 2026-05-04 BISECT: temporarily disabled to isolate the Q05 8.8×
-		// SF10 regression on 388ffd7. Re-enable after confirming whether the
-		// regression is in scan-side or join-side fragment dispatch.
+		// Fragment fusion passes are intentionally NOT called here.
+		//
+		// fuseScanShuffle / fuseJoinShuffle absorb a downstream
+		// exchange-repartition into the upstream scan or join, emitting
+		// fragment-style multi-op task pipelines via executeFragment.
+		// Both passes regressed SF10 wall-time across the query suite
+		// (Q07 +85%, Q03 +30%, Q21 +13% vs the no-fusion baseline)
+		// because fragment-fused scan output amplifies the file count
+		// downstream consumers (broadcast caches, legacy exchange-
+		// repartition stages reading partitioned input) have to ingest:
+		// 24 partition files per upstream task instead of 1 unpartitioned
+		// file. The selective workerCount-bound gate on a24ae48 fixed
+		// the worst case (Q05 lineitem 7m4s → 58s) but left the
+		// dimension-scan amplification cost on every other query.
+		//
+		// The architectural primitive — Operators[]+executeFragment+
+		// runStageScanPartitionedStreaming+partitionedShuffleSink —
+		// stays in place under the worker, dormant until a future
+		// fusion shape uses it without amplifying downstream reads.
+		// Most likely first user is intra-task aggregate fragments,
+		// where the aggregate is a pipeline-breaker that collapses to
+		// a single output stream per task (no fan-out, no amplification).
+		// stages = fuseScanShuffle(stages, p.WorkerCount)
 		// stages = fuseJoinShuffle(stages)
 		prev := BehaviorPreservingMode
 		BehaviorPreservingMode = false
