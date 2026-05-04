@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ import (
 //
 // Run:
 //   go test -v -run TestAuditStageColumns ./internal/planner/physical/
+//   go test -v -run TestAuditFusedJoinChains ./internal/planner/physical/
 func TestAuditStageColumns(t *testing.T) {
 	const q18 = `SELECT
 		c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice,
@@ -123,4 +125,64 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestAuditFusedJoinChains dumps the FusedJoins structure on broadcast/hash
+// join stages for the join-heavy TPC-H queries. Used to verify whether
+// fuseJoinStages is reaching N-deep fusion in practice or whether the
+// "EstimatedBytes unknown → conservative skip" gate is firing too often.
+//
+// Background: PR #80 (2026-04-30) lifted the depth-1 hard cap on fusion,
+// replacing it with a 1 GB cumulative byte budget. But the multi-depth path
+// at fuseJoinStages requires every participant to have known EstimatedBytes.
+// If the catalog's manifest stats don't propagate to scan nodes, the chain
+// stays at depth-1 in practice.
+func TestAuditFusedJoinChains(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+	}{
+		{"Q02", tpchPlanQueries["Q02"]},
+		{"Q07", tpchPlanQueries["Q07"]},
+		{"Q08", tpchPlanQueries["Q08"]},
+		{"Q21", tpchPlanQueries["Q21"]},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, ctx := setupTPCHCatalog(t)
+			stages := sqlToStages(t, cat, ctx, tc.sql, 3)
+
+			t.Logf("=== %s — %d stages, fusion audit ===", tc.name, len(stages))
+			fusedTotal := 0
+			for _, s := range stages {
+				if s.Type != "broadcast_join" && s.Type != "hash_join" {
+					continue
+				}
+				fusedTotal += len(s.FusedJoins)
+				note := ""
+				if s.EstimatedBytes > 0 {
+					note = fmt.Sprintf(" estBytes=%d", s.EstimatedBytes)
+				}
+				t.Logf("  %s [%s] FusedJoins=%d%s leftDep=%s rightDep=%s",
+					s.ID, s.Type, len(s.FusedJoins), note, s.LeftDepStage, s.RightDepStage)
+				for i, fj := range s.FusedJoins {
+					b := fusedSpecBuildBytes(stages, fj)
+					t.Logf("    fused[%d]: %s buildAlias=%s buildDep=%s buildBytes=%d", i, fj.JoinType, fj.BuildTableAlias, fj.BuildDepStage, b)
+				}
+			}
+
+			// Also dump scan stages with their EstimatedBytes so we can see
+			// where the bytes-known gate would fire.
+			t.Logf("--- scan stages (EstimatedBytes) ---")
+			for _, s := range stages {
+				if s.Type != "scan" {
+					continue
+				}
+				t.Logf("  %s table=%s files=%d estBytes=%d estRows=%d",
+					s.ID, s.TableName, len(s.ScanFiles), s.EstimatedBytes, s.EstimatedRows)
+			}
+			t.Logf("=== %s SUMMARY: total fused entries across all join stages = %d ===", tc.name, fusedTotal)
+		})
+	}
 }

@@ -1148,10 +1148,26 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 		groupByIdx[i] = colIdx[col]
 	}
 
+	// Pre-resolve aggregate column metadata + a typed merge function once per
+	// aggregate. The hot row loop calls aggMergeFns[ai] directly instead of
+	// switching on a "sum"/"min"/"max" string per row per aggregate.
+	type aggMergeFn func(cur float64, in float64) float64
+	sumMerge := func(cur, in float64) float64 { return cur + in }
+	minMerge := func(cur, in float64) float64 {
+		if in < cur {
+			return in
+		}
+		return cur
+	}
+	maxMerge := func(cur, in float64) float64 {
+		if in > cur {
+			return in
+		}
+		return cur
+	}
 	type aggCol struct {
-		idx      int
-		mergeOp  string // "sum", "min", "max"
-		origFunc string
+		idx     int
+		mergeFn aggMergeFn
 	}
 	var aggCols []aggCol
 	for _, ae := range mi.AggExprs {
@@ -1159,32 +1175,109 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 		if !ok {
 			continue
 		}
-		mergeOp := "sum" // COUNT, SUM → SUM
+		merge := sumMerge // COUNT, SUM → SUM
 		switch strings.ToLower(ae.Func) {
 		case "min":
-			mergeOp = "min"
+			merge = minMerge
 		case "max":
-			mergeOp = "max"
+			merge = maxMerge
 		}
-		aggCols = append(aggCols, aggCol{idx: idx, mergeOp: mergeOp, origFunc: ae.Func})
+		aggCols = append(aggCols, aggCol{idx: idx, mergeFn: merge})
 	}
 
 	if len(aggCols) == 0 {
 		return batches
 	}
 
-	// Build a map from group key → merged row values.
-	// Keys are encoded as raw bytes (no fmt.Fprint overhead).
+	schema := batches[0].Schema
+
+	// Pre-resolve key encoders once per group-by column so the hot row loop
+	// dispatches via function pointer instead of switching on schema[ci].Type
+	// every row. Closure captures the column index so the encoder reads
+	// directly from b.Columns[ci] at the given row.
+	type keyEncoder func(b *batch.RecordBatch, row int, dst []byte) []byte
+	keyEncoders := make([]keyEncoder, len(groupByIdx))
+	for gi, ci := range groupByIdx {
+		ci := ci
+		switch schema[ci].Type {
+		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				return strconv.AppendInt(dst, int64(b.Columns[ci].Int32Data[row]), 10)
+			}
+		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				return strconv.AppendInt(dst, b.Columns[ci].Int64Data[row], 10)
+			}
+		case parquet.TypeFloat32:
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				return strconv.AppendFloat(dst, float64(b.Columns[ci].Float32Data[row]), 'g', -1, 32)
+			}
+		case parquet.TypeFloat64:
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				return strconv.AppendFloat(dst, b.Columns[ci].Float64Data[row], 'g', -1, 64)
+			}
+		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				return append(dst, b.Columns[ci].BytesData.Value(row)...)
+			}
+		case parquet.TypeBool:
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				if b.Columns[ci].BoolData[row] {
+					return append(dst, '1')
+				}
+				return append(dst, '0')
+			}
+		default:
+			typ := schema[ci].Type
+			keyEncoders[gi] = func(b *batch.RecordBatch, row int, dst []byte) []byte {
+				return fmt.Appendf(dst, "%v", extractValue(b.Columns[ci], row, typ))
+			}
+		}
+	}
+
+	// Pre-resolve aggregate float extractors once per aggregate column —
+	// avoids the per-row type switch inside extractFloat64.
+	type floatExtractor func(b *batch.RecordBatch, row int) float64
+	aggExtractors := make([]floatExtractor, len(aggCols))
+	for ai, ac := range aggCols {
+		ac := ac
+		switch schema[ac.idx].Type {
+		case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+			aggExtractors[ai] = func(b *batch.RecordBatch, row int) float64 {
+				return float64(b.Columns[ac.idx].Int32Data[row])
+			}
+		case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+			aggExtractors[ai] = func(b *batch.RecordBatch, row int) float64 {
+				return float64(b.Columns[ac.idx].Int64Data[row])
+			}
+		case parquet.TypeFloat32:
+			aggExtractors[ai] = func(b *batch.RecordBatch, row int) float64 {
+				return float64(b.Columns[ac.idx].Float32Data[row])
+			}
+		case parquet.TypeFloat64:
+			aggExtractors[ai] = func(b *batch.RecordBatch, row int) float64 {
+				return b.Columns[ac.idx].Float64Data[row]
+			}
+		default:
+			typ := schema[ac.idx].Type
+			aggExtractors[ai] = func(b *batch.RecordBatch, row int) float64 {
+				return extractFloat64(b.Columns[ac.idx], row, typ)
+			}
+		}
+	}
+
+	// mergedRow stores a pointer back to the source (b, row) instead of
+	// materializing a []any per group. The source row's typed values are
+	// copied out at finalize time (one type-switch per group, not per row),
+	// avoiding the boxing allocation that dominated GC pressure at SF100.
 	type mergedRow struct {
-		groupVals []any     // group-by column values
-		aggVals   []float64 // aggregate values
+		sourceBatch *batch.RecordBatch
+		sourceRow   int
+		aggVals     []float64
 	}
 	groups := make(map[string]*mergedRow)
 	var groupOrder []string // preserve insertion order
 
-	schema := batches[0].Schema
-
-	// Reusable key buffer — avoids per-row allocation
 	keyBuf := make([]byte, 0, 256)
 
 	for _, b := range batches {
@@ -1196,100 +1289,48 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 				row = int(sel[ri])
 			}
 
-			// Build group key using direct byte encoding
 			keyBuf = keyBuf[:0]
-			groupVals := make([]any, len(groupByIdx))
-			for gi, ci := range groupByIdx {
+			for gi, enc := range keyEncoders {
 				if gi > 0 {
 					keyBuf = append(keyBuf, 0)
 				}
-				switch schema[ci].Type {
-				case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
-					v := b.Columns[ci].Int32Data[row]
-					groupVals[gi] = v
-					keyBuf = strconv.AppendInt(keyBuf, int64(v), 10)
-				case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
-					v := b.Columns[ci].Int64Data[row]
-					groupVals[gi] = v
-					keyBuf = strconv.AppendInt(keyBuf, v, 10)
-				case parquet.TypeFloat32:
-					v := b.Columns[ci].Float32Data[row]
-					groupVals[gi] = v
-					keyBuf = strconv.AppendFloat(keyBuf, float64(v), 'g', -1, 32)
-				case parquet.TypeFloat64:
-					v := b.Columns[ci].Float64Data[row]
-					groupVals[gi] = v
-					keyBuf = strconv.AppendFloat(keyBuf, v, 'g', -1, 64)
-				case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-					v := b.Columns[ci].BytesData.Value(row)
-					groupVals[gi] = string(v)
-					keyBuf = append(keyBuf, v...)
-				case parquet.TypeBool:
-					v := b.Columns[ci].BoolData[row]
-					groupVals[gi] = v
-					if v {
-						keyBuf = append(keyBuf, '1')
-					} else {
-						keyBuf = append(keyBuf, '0')
-					}
-				default:
-					val := extractValue(b.Columns[ci], row, schema[ci].Type)
-					groupVals[gi] = val
-					keyBuf = fmt.Appendf(keyBuf, "%v", val)
-				}
+				keyBuf = enc(b, row, keyBuf)
 			}
 			key := string(keyBuf)
 
 			mr, exists := groups[key]
 			if !exists {
-				mr = &mergedRow{
-					groupVals: groupVals,
-					aggVals:   make([]float64, len(aggCols)),
+				aggVals := make([]float64, len(aggCols))
+				for ai, ext := range aggExtractors {
+					aggVals[ai] = ext(b, row)
 				}
-				// Initialize all aggregate values from first row
-				for ai, ac := range aggCols {
-					mr.aggVals[ai] = extractFloat64(b.Columns[ac.idx], row, schema[ac.idx].Type)
+				groups[key] = &mergedRow{
+					sourceBatch: b,
+					sourceRow:   row,
+					aggVals:     aggVals,
 				}
-				groups[key] = mr
 				groupOrder = append(groupOrder, key)
 				continue
 			}
 
-			// Merge aggregate values into existing group
-			for ai, ac := range aggCols {
-				v := extractFloat64(b.Columns[ac.idx], row, schema[ac.idx].Type)
-				switch ac.mergeOp {
-				case "sum":
-					mr.aggVals[ai] += v
-				case "min":
-					if v < mr.aggVals[ai] {
-						mr.aggVals[ai] = v
-					}
-				case "max":
-					if v > mr.aggVals[ai] {
-						mr.aggVals[ai] = v
-					}
-				}
+			for ai, ext := range aggExtractors {
+				mr.aggVals[ai] = aggCols[ai].mergeFn(mr.aggVals[ai], ext(b, row))
 			}
 		}
 	}
 
-	// Build result batch(es) from merged groups
+	// Build result batch from merged groups. Group-by values are copied
+	// directly from the captured source batch+row using typed copy
+	// helpers — this is one type-switch per (group, column), not per row.
 	result := batch.NewRecordBatch(schema, len(groupOrder))
 	for ri, key := range groupOrder {
 		mr := groups[key]
-
-		// Set group-by columns
-		for gi, ci := range groupByIdx {
-			setValueFromAny(result.Columns[ci], ri, mr.groupVals[gi], schema[ci].Type)
+		for _, ci := range groupByIdx {
+			copyVectorValue(result.Columns[ci], ri, mr.sourceBatch.Columns[ci], mr.sourceRow, schema[ci].Type)
 		}
-
-		// Set aggregate columns
 		for ai, ac := range aggCols {
 			setFloat64Value(result.Columns[ac.idx], ri, mr.aggVals[ai], schema[ac.idx].Type)
 		}
-
-		// Mark all columns as valid (not null)
 		for ci := range schema {
 			result.Columns[ci].Nulls.SetValid(ri)
 		}
@@ -1297,6 +1338,27 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 	result.Len = len(groupOrder)
 
 	return []*batch.RecordBatch{result}
+}
+
+// copyVectorValue copies a single typed value from src[srcRow] to dst[dstRow].
+// Avoids the []any boxing that setValueFromAny goes through — used by
+// reAggregatePartials' finalize step where the source value is already in a
+// typed vector slot.
+func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow int, typ parquet.TypeID) {
+	switch typ {
+	case parquet.TypeInt32, parquet.TypePort, parquet.TypeProtocol, parquet.TypeDate:
+		dst.Int32Data[dstRow] = src.Int32Data[srcRow]
+	case parquet.TypeInt64, parquet.TypeTimestamp, parquet.TypeIPv4, parquet.TypeMAC, parquet.TypeDuration:
+		dst.Int64Data[dstRow] = src.Int64Data[srcRow]
+	case parquet.TypeFloat32:
+		dst.Float32Data[dstRow] = src.Float32Data[srcRow]
+	case parquet.TypeFloat64:
+		dst.Float64Data[dstRow] = src.Float64Data[srcRow]
+	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
+		dst.BytesData.Set(dstRow, src.BytesData.Value(srcRow))
+	case parquet.TypeBool:
+		dst.BoolData[dstRow] = src.BoolData[srcRow]
+	}
 }
 
 // sortBatches performs a simple in-memory sort of batches by the given order keys.
