@@ -1702,23 +1702,38 @@ func (c *Coordinator) dispatchComputeStage(
 		// stable for any downstream consumer that hasn't yet learned
 		// about Operators[].
 		//
-		// Compound stages (join with attached aggregate or sort metadata)
-		// stay on the legacy path until those operators are migrated to
-		// fragment ops. probeSplit also stays legacy: probe-split's per-
-		// task probe slicing pre-dates fragments and the runtime
-		// multiplies file count vs partition count in ways the fragment
-		// builder doesn't yet model.
-		canFuseJoin := stage.Exchange != nil &&
-			len(stage.Exchange.Keys) > 0 &&
-			stage.Exchange.Count > 0 &&
+		// Hash-join / broadcast_join migration: every join stage routes
+		// through the multi-op fragment runner. Three terminal sink shapes:
+		//   - downstream Repartition Exchange → OpExchangeSender
+		//     (the fuseJoinShuffle case)
+		//   - downstream is anything else → OpUnpartitionedSink
+		//   - GroupByCols on a join stage isn't an emitted shape (joins
+		//     and aggregates are separate stages in the planner today),
+		//     so we don't model it.
+		//
+		// SortKeys after fuseSortIntoPredecessor: legacy applyPostSort ran
+		// in-process; the fragment runner uses OpSort as a multi-breaker
+		// chain element. probeSplit's task input slicing flows through
+		// taskInputs unchanged; the fragment source op is a uniform
+		// sourceForAliasWithProjection (auto-detects parquet vs WSHF).
+		canMigrateJoin := t.Operators == nil &&
 			(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) &&
 			len(stage.GroupByCols) == 0 &&
-			len(stage.SortKeys) == 0 &&
 			!probeSplit
-		if canFuseJoin {
-			ops, ferr := buildFusedJoinFragment(stage, &t, taskInputs, wireFused)
+		if canMigrateJoin {
+			var sinkOp distributed.OpSpec
+			if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
+				sinkOp = distributed.OpSpec{
+					Type:          distributed.OpExchangeSender,
+					ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
+					NumPartitions: stage.Exchange.Count,
+				}
+			} else {
+				sinkOp = distributed.OpSpec{Type: distributed.OpUnpartitionedSink}
+			}
+			ops, ferr := buildJoinFragment(stage, &t, taskInputs, wireFused, sorts, sinkOp)
 			if ferr != nil {
-				return StageOutput{}, fmt.Errorf("stage %s: build fragment: %w", stage.ID, ferr)
+				return StageOutput{}, fmt.Errorf("stage %s: build join fragment: %w", stage.ID, ferr)
 			}
 			t.Operators = ops
 		}
@@ -1952,20 +1967,28 @@ func (c *Coordinator) dispatchComputeStage(
 	}, nil
 }
 
-// buildFusedJoinFragment translates a join stage's task into a fragment
-// pipeline (Operators[]) when the planner's fuseJoinShuffle pass absorbed a
-// downstream exchange-repartition into the join. The fragment runs:
+// buildJoinFragment translates a hash_join / broadcast_join stage's task into
+// a fragment pipeline (Operators[]). Pipeline shape:
 //
-//	[ShuffleSource(probe), BroadcastProbe(fused_0..n), HashJoinProbe(primary), ExchangeSender]
+//	[ShuffleSource(probe), BroadcastProbe(fused_0..n), HashJoinProbe|BroadcastProbe(primary),
+//	 OpFilter?(residual), OpSort?(folded sort), <terminalSink>]
 //
 // Each FusedJoin in wireFused becomes its own BroadcastProbe op (the existing
 // chain semantics: every fused entry is a broadcast cache the probe stream
 // passes through before reaching the primary).
-func buildFusedJoinFragment(
+//
+// terminalSink is the caller-supplied sink — OpExchangeSender for the
+// fuseJoinShuffle path, OpUnpartitionedSink for the standalone-terminal-join
+// path. sorts is non-empty when fuseSortIntoPredecessor folded a downstream
+// Singleton sort into this join (post-join sort runs in-process via the
+// multi-breaker runner).
+func buildJoinFragment(
 	stage physical.Stage,
 	t *distributed.Task,
 	taskInputs map[string][]string,
 	wireFused []distributed.FusedJoinSpec,
+	sorts []distributed.SortKeySpec,
+	terminalSink distributed.OpSpec,
 ) ([]distributed.OpSpec, error) {
 	if t.BuildTableAlias == "" {
 		return nil, fmt.Errorf("BuildTableAlias required")
@@ -1987,7 +2010,7 @@ func buildFusedJoinFragment(
 		return nil, fmt.Errorf("no probe-side alias (only %q)", t.BuildTableAlias)
 	}
 
-	ops := make([]distributed.OpSpec, 0, 2+len(wireFused)+1)
+	ops := make([]distributed.OpSpec, 0, 2+len(wireFused)+3)
 	ops = append(ops, distributed.OpSpec{
 		Type:        distributed.OpShuffleSource,
 		InputAlias:  probeAlias,
@@ -2026,19 +2049,21 @@ func buildFusedJoinFragment(
 	})
 	// Residual post-join filters (semi/anti residual or compute-stage
 	// HAVING-equivalent) compile to an OpFilter applied AFTER the probe and
-	// BEFORE the exchange sink. Mirrors the legacy applyPostFilter step in
-	// executeStageHashJoin.
+	// BEFORE any sort/sink. Mirrors the legacy applyPostFilter step.
 	if len(t.PostFilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:       distributed.OpFilter,
 			Predicates: append([]string(nil), t.PostFilterExprs...),
 		})
 	}
-	ops = append(ops, distributed.OpSpec{
-		Type:          distributed.OpExchangeSender,
-		ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
-		NumPartitions: stage.Exchange.Count,
-	})
+	if len(sorts) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:         distributed.OpSort,
+			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
+			SortLimit:    stage.Limit,
+		})
+	}
+	ops = append(ops, terminalSink)
 	return ops, nil
 }
 
