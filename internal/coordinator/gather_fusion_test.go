@@ -15,12 +15,13 @@ import (
 // canFuseGather. Each row constructs a gather stage + a pending map and
 // asserts whether fusion is allowed.
 func TestCanFuseGather_Eligibility(t *testing.T) {
-	mkAgg := func(typ string, sortKeys []physical.SortKeySpec, limit int) physical.Stage {
+	mkAgg := func(typ string, sortKeys []physical.SortKeySpec, limit int, dist physical.DistKind) physical.Stage {
 		return physical.Stage{
-			ID:       "agg",
-			Type:     typ,
-			SortKeys: sortKeys,
-			Limit:    limit,
+			ID:           "agg",
+			Type:         typ,
+			SortKeys:     sortKeys,
+			Limit:        limit,
+			Distribution: physical.Distribution{Kind: dist},
 		}
 	}
 	tests := []struct {
@@ -37,7 +38,7 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 				Dependencies: []string{"agg"},
 			},
 			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", nil, 0),
+				"agg": mkAgg("final_aggregate", nil, 0, physical.DistSingleton),
 			},
 			want: true,
 		},
@@ -49,7 +50,31 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 				Dependencies: []string{"agg"},
 			},
 			pending: map[string]physical.Stage{
-				"agg": mkAgg("merge_aggregate", nil, 0),
+				"agg": mkAgg("merge_aggregate", nil, 0, physical.DistSingleton),
+			},
+			want: true,
+		},
+		{
+			name: "happy path: gather over Singleton final_aggregate with SortKeys (post-fuseSortIntoPredecessor)",
+			gather: physical.Stage{
+				ID:           "gather",
+				Type:         physical.StageExchangeGather,
+				Dependencies: []string{"agg"},
+			},
+			pending: map[string]physical.Stage{
+				"agg": mkAgg("final_aggregate", []physical.SortKeySpec{{Column: "x"}}, 0, physical.DistSingleton),
+			},
+			want: true,
+		},
+		{
+			name: "happy path: gather over Singleton final_aggregate with Limit",
+			gather: physical.Stage{
+				ID:           "gather",
+				Type:         physical.StageExchangeGather,
+				Dependencies: []string{"agg"},
+			},
+			pending: map[string]physical.Stage{
+				"agg": mkAgg("final_aggregate", nil, 100, physical.DistSingleton),
 			},
 			want: true,
 		},
@@ -64,7 +89,7 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 				},
 			},
 			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", nil, 0),
+				"agg": mkAgg("final_aggregate", nil, 0, physical.DistSingleton),
 			},
 			want: false,
 		},
@@ -81,26 +106,26 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "rejects: dep has SortKeys",
+			name: "rejects: dep has SortKeys but is hash-partitioned (multi-task sort loses global order)",
 			gather: physical.Stage{
 				ID:           "gather",
 				Type:         physical.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
 			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", []physical.SortKeySpec{{Column: "x"}}, 0),
+				"agg": mkAgg("final_aggregate", []physical.SortKeySpec{{Column: "x"}}, 0, physical.DistHashPartitioned),
 			},
 			want: false,
 		},
 		{
-			name: "rejects: dep has Limit",
+			name: "rejects: dep has Limit but is hash-partitioned",
 			gather: physical.Stage{
 				ID:           "gather",
 				Type:         physical.StageExchangeGather,
 				Dependencies: []string{"agg"},
 			},
 			pending: map[string]physical.Stage{
-				"agg": mkAgg("final_aggregate", nil, 100),
+				"agg": mkAgg("final_aggregate", nil, 100, physical.DistHashPartitioned),
 			},
 			want: false,
 		},
@@ -112,8 +137,8 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 				Dependencies: []string{"agg", "other"},
 			},
 			pending: map[string]physical.Stage{
-				"agg":   mkAgg("final_aggregate", nil, 0),
-				"other": mkAgg("final_aggregate", nil, 0),
+				"agg":   mkAgg("final_aggregate", nil, 0, physical.DistSingleton),
+				"other": mkAgg("final_aggregate", nil, 0, physical.DistSingleton),
 			},
 			want: false,
 		},
@@ -217,7 +242,7 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 	aggs := []distributed.AggSpec{{Func: "sum", InputCol: "v", OutputCol: "total"}}
 
 	t.Run("with reply subject emits OpGatherSink", func(t *testing.T) {
-		ops, err := buildAggregateFragment(stage, task, taskInputs, aggs, "wadjet.gather.q-foo")
+		ops, err := buildAggregateFragment(stage, task, taskInputs, aggs, nil, "wadjet.gather.q-foo")
 		if err != nil {
 			t.Fatalf("buildAggregateFragment: %v", err)
 		}
@@ -230,7 +255,7 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 		}
 	})
 	t.Run("empty reply subject keeps legacy OpUnpartitionedSink", func(t *testing.T) {
-		ops, err := buildAggregateFragment(stage, task, taskInputs, aggs, "")
+		ops, err := buildAggregateFragment(stage, task, taskInputs, aggs, nil, "")
 		if err != nil {
 			t.Fatalf("buildAggregateFragment: %v", err)
 		}
@@ -240,6 +265,35 @@ func TestBuildAggregateFragment_GatherSink(t *testing.T) {
 		}
 		if sink.ReplySubject != "" {
 			t.Errorf("reply subject should be unset on unpartitioned sink, got %q", sink.ReplySubject)
+		}
+	})
+	t.Run("with sort keys appends OpSort before terminal sink", func(t *testing.T) {
+		stageWithSort := physical.Stage{
+			Type:        "final_aggregate",
+			GroupByCols: []string{"g"},
+			SortKeys:    []physical.SortKeySpec{{Column: "total", Desc: true}},
+			Limit:       10,
+		}
+		sorts := []distributed.SortKeySpec{{Column: "total", Desc: true}}
+		ops, err := buildAggregateFragment(stageWithSort, task, taskInputs, aggs, sorts, "wadjet.gather.q-sort")
+		if err != nil {
+			t.Fatalf("buildAggregateFragment with sort: %v", err)
+		}
+		// Expect 4 ops: shuffle source, hash aggregate, sort, gather sink.
+		if len(ops) != 4 {
+			t.Fatalf("ops length: got %d, want 4 (source/agg/sort/sink); ops=%+v", len(ops), ops)
+		}
+		if ops[2].Type != distributed.OpSort {
+			t.Fatalf("ops[2]: got %q, want OpSort", ops[2].Type)
+		}
+		if ops[2].SortLimit != 10 {
+			t.Errorf("OpSort.SortLimit: got %d, want 10 (forwarded from stage.Limit)", ops[2].SortLimit)
+		}
+		if len(ops[2].SortKeySpecs) != 1 || ops[2].SortKeySpecs[0].Column != "total" {
+			t.Errorf("OpSort.SortKeySpecs: got %+v, want [{total Desc}]", ops[2].SortKeySpecs)
+		}
+		if ops[3].Type != distributed.OpGatherSink {
+			t.Errorf("ops[3]: got %q, want OpGatherSink", ops[3].Type)
 		}
 	})
 }

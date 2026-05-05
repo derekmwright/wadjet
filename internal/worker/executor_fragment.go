@@ -303,6 +303,14 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 // drainThroughBreaker pulls batches from src, applies an optional per-batch
 // transform, pipes them through the unary chain, and pushes each non-empty
 // result into sink.Consume. Caller is responsible for sink.Finalize.
+//
+// The Sel snapshot before sink.Consume mirrors the legacy applyPostFilter
+// pattern: exec.Filter (and other Sel-emitting ops) reuses its internal
+// selBuf across calls. When the sink is a retaining SinkSource (Sort,
+// HashAggregate), it stores the batch reference; without the copy, the
+// next iteration's Filter execution would overwrite the same selBuf and
+// corrupt the previously-stored batch's Sel — a Q07-style bug documented
+// at executor_stage.go:applyPostFilter.
 func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch.RecordBatch) (*batch.RecordBatch, error), ops []exec.UnaryOperator, sink exec.Sink) error {
 	for {
 		b, err := src.Next(ctx)
@@ -333,6 +341,11 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 		}
 		if cur == nil || cur.ActiveLen() == 0 {
 			continue
+		}
+		if cur.Sel != nil {
+			selCopy := make([]uint32, len(cur.Sel))
+			copy(selCopy, cur.Sel)
+			cur.Sel = selCopy
 		}
 		if err := sink.Consume(ctx, cur); err != nil {
 			return err

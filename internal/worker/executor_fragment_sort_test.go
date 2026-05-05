@@ -130,6 +130,144 @@ func TestExecuteFragment_ScanSortUnpartitioned(t *testing.T) {
 	}
 }
 
+// TestExecuteFragment_ThreeOps_AggFilterSort regresses the Sel-clobber bug
+// between drain phases. The pipeline:
+//
+//	scan → HashAggregate(GROUP BY g) → Filter(total > 25) → Sort(total DESC)
+//
+// exec.Filter mutates input.Sel and reuses its internal selBuf across calls.
+// Sort retains every batch it Consumes. Without snapshotting Sel between
+// Filter and Sort.Consume, every previously-stored batch's Sel gets clobbered
+// by the next Filter execution, so the final sort output reflects only the
+// LAST batch's surviving rows — the SF0.1 Q11 row-set drift that bisected to
+// drainThroughBreaker missing the Sel snapshot.
+//
+// Inputs: 4 groups with sums {30, 20, 80, 25}. Filter `total > 25` keeps
+// {30, 80}. Sort DESC: [80, 30].
+func TestExecuteFragment_ThreeOps_AggFilterSort(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-fragment-agg-filt-sort"
+
+	data := makeGroupedWshf(t, [][2]int64{
+		{1, 10}, {1, 20}, // g=1 → sum=30 (passes >25)
+		{2, 5}, {2, 15}, // g=2 → sum=20 (rejected)
+		{3, 50}, {3, 30}, // g=3 → sum=80 (passes)
+		{4, 25}, // g=4 → sum=25 (rejected, not strictly greater)
+	})
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	key := "in/agg-filt-sort/t0.wshf"
+	if _, err := store.Put(ctx, bucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	executor := NewExecutor(store, NewLRUCache(4*1024*1024), nil)
+
+	task := distributed.Task{
+		ID:           "frag-agg-filt-sort-0",
+		QueryID:      "q-frag-afs",
+		StageID:      "afs-0",
+		Type:         distributed.TaskTypeStage,
+		DataBucket:   bucket,
+		ResultBucket: bucket,
+		ResultPrefix: "out/afs/",
+		Operators: []distributed.OpSpec{
+			{
+				Type:        distributed.OpScan,
+				InputAlias:  "src",
+				InputFiles:  []string{key},
+				InputBucket: bucket,
+				Columns:     []string{"g", "v"},
+			},
+			{
+				Type:        distributed.OpHashAggregate,
+				GroupByCols: []string{"g"},
+				Aggregates: []distributed.AggSpec{
+					{Func: "sum", InputCol: "v", OutputCol: "total"},
+				},
+			},
+			{
+				Type:       distributed.OpFilter,
+				Predicates: []string{"total > 25"},
+			},
+			{
+				Type: distributed.OpSort,
+				SortKeySpecs: []distributed.SortKeySpec{
+					{Column: "total", Desc: true},
+				},
+			},
+			{
+				Type: distributed.OpUnpartitionedSink,
+			},
+		},
+	}
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(ctx, task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	if result.NumRows != 2 {
+		t.Fatalf("NumRows = %d, want 2 (groups passing total>25)", result.NumRows)
+	}
+
+	rc, _, err := store.Get(ctx, bucket, result.ResultFiles[0])
+	if err != nil {
+		t.Fatalf("get output: %v", err)
+	}
+	defer rc.Close()
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	r, err := newShuffleChunkReader(out)
+	if err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
+	type pair struct {
+		g     int64
+		total float64
+	}
+	var got []pair
+	for {
+		b, err := r.Next()
+		if err != nil {
+			t.Fatalf("chunk next: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		gIdx, totalIdx := -1, -1
+		for i, c := range b.Schema {
+			switch c.Name {
+			case "g":
+				gIdx = i
+			case "total":
+				totalIdx = i
+			}
+		}
+		for i := 0; i < b.ActiveLen(); i++ {
+			row := i
+			if b.Sel != nil {
+				row = int(b.Sel[i])
+			}
+			got = append(got, pair{
+				g:     b.Columns[gIdx].Int64Data[row],
+				total: b.Columns[totalIdx].Float64Data[row],
+			})
+		}
+	}
+	want := []pair{{g: 3, total: 80}, {g: 1, total: 30}}
+	if len(got) != len(want) {
+		t.Fatalf("rows: got %d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i, w := range want {
+		if got[i].g != w.g || got[i].total != w.total {
+			t.Errorf("row %d: got (g=%d, total=%v), want (g=%d, total=%v); full got=%v", i, got[i].g, got[i].total, w.g, w.total, got)
+		}
+	}
+}
+
 // TestExecuteFragment_TwoBreakers_AggThenSort exercises the multi-breaker
 // generalization: scan → hash_aggregate (GROUP BY g) → sort (DESC by total)
 // → unpartitioned sink. Validates that runFragmentWithBreakers correctly

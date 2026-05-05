@@ -41,15 +41,19 @@ type gatherFusion struct {
 //
 // Eligibility:
 //   - Exactly one upstream dependency.
-//   - No Ordering on the gather Exchange (ordered gather still needs
-//     coordinator-side merge of pre-sorted streams; the fragment runner
-//     has no OpSort breaker yet).
+//   - No Ordering on the gather Exchange (ordered gather is the
+//     coordinator-side sort-merge of multiple pre-sorted streams; when the
+//     upstream agg already absorbs the sort and runs single-task, the
+//     gather Ordering is redundant — but we still require it to be unset
+//     to avoid silent semantic changes for any caller relying on it).
 //   - Upstream is in the pending dispatch set (not a leaf scan or pre-
 //     computed input).
 //   - Upstream is final_aggregate or merge_aggregate (the only stages
 //     dispatchComputeStage already routes through buildAggregateFragment).
-//   - Upstream has no SortKeys / Limit (post-aggregate sort needs an
-//     OpSort breaker not yet supported by executeFragment).
+//   - When upstream has SortKeys / Limit (post-fuseSortIntoPredecessor
+//     case): require DistSingleton. Multi-task aggs each sort their
+//     partition independently — streaming N partial-sorted streams to
+//     gather concatenates them in arrival order, losing global order.
 //
 // Amplification-safe: the gather sink publishes via NATS, not S3, so
 // per-task fan-out doesn't multiply S3 GETs the way scan/join fragment
@@ -69,7 +73,7 @@ func canFuseGather(gatherStage physical.Stage, pending map[string]physical.Stage
 	if dep.Type != "final_aggregate" && dep.Type != "merge_aggregate" {
 		return "", false
 	}
-	if len(dep.SortKeys) > 0 || dep.Limit > 0 {
+	if (len(dep.SortKeys) > 0 || dep.Limit > 0) && dep.Distribution.Kind != physical.DistSingleton {
 		return "", false
 	}
 	return depID, true
@@ -1710,17 +1714,20 @@ func (c *Coordinator) dispatchComputeStage(
 		// sort needs an OpSort breaker not yet in the fragment runner) or
 		// when ReplySubject is set (gather output — handled by the legacy
 		// gather-task path today; gather fusion is a follow-up).
+		// Aggregate-fragment migration. SortKeys / Limit on a final_aggregate
+		// stage come from fuseSortIntoPredecessor folding a downstream
+		// Singleton sort into this aggregate; the multi-breaker fragment
+		// runner handles the resulting `[ShuffleSource, HashAggregate,
+		// Filter?(HAVING), Sort?, Sink]` chain in one task.
 		canMigrateAggregate := t.Operators == nil &&
 			(stage.Type == "final_aggregate" || stage.Type == "merge_aggregate") &&
-			len(stage.SortKeys) == 0 &&
-			stage.Limit == 0 &&
 			t.ReplySubject == ""
 		if canMigrateAggregate {
 			var fusedSubject string
 			if fusion != nil {
 				fusedSubject = fusion.replySubject
 			}
-			ops, ferr := buildAggregateFragment(stage, &t, taskInputs, aggs, fusedSubject)
+			ops, ferr := buildAggregateFragment(stage, &t, taskInputs, aggs, sorts, fusedSubject)
 			if ferr != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: build aggregate fragment: %w", stage.ID, ferr)
 			}
@@ -2011,13 +2018,21 @@ func buildFusedJoinFragment(
 // stage's task into a fragment Operators[] pipeline:
 //
 //	[OpShuffleSource, OpHashAggregate(MergeMode=true), OpFilter?(HAVING),
-//	 OpUnpartitionedSink | OpGatherSink]
+//	 OpSort?, OpUnpartitionedSink | OpGatherSink]
 //
 // FoldAvg is set only for "final_aggregate" — intermediate "merge_aggregate"
 // tasks must keep __avg_sum#X / __avg_count#X synthetics intact for the
 // downstream final to fold (see executor_stage.go for the same gate on the
 // legacy path). Mirror behavior is byte-equivalent to the legacy
-// executeStageAggregate for the no-sort/no-limit case.
+// executeStageAggregate path including the post-aggregate sort folded in
+// by fuseSortIntoPredecessor.
+//
+// OpSort is appended only when the stage carries SortKeys (the planner's
+// fuseSortIntoPredecessor pass set them by absorbing a downstream Singleton
+// Sort). Stage.Limit propagates through as SortLimit so the Sort operator's
+// post-Finalize Truncate fires for top-N. The multi-breaker runner chains
+// HashAggregate's drain into Sort's consume in-process — no S3 hop between
+// the two breakers.
 //
 // When gatherReplySubject is non-empty, the terminal sink is OpGatherSink
 // streaming directly to the coordinator's NATS reply subscription instead
@@ -2025,7 +2040,7 @@ func buildFusedJoinFragment(
 // into this fragment, eliminating one S3 PUT/GET hop and one coord round-
 // trip. Each task publishes its own terminal marker; coord pre-subscribes
 // with expectedTerminals = numTasks.
-func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec, gatherReplySubject string) ([]distributed.OpSpec, error) {
+func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, aggs []distributed.AggSpec, sorts []distributed.SortKeySpec, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("aggregate fragment: expected 1 input alias, got %d", len(taskInputs))
 	}
@@ -2036,7 +2051,7 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		files = v
 		break
 	}
-	ops := make([]distributed.OpSpec, 0, 4)
+	ops := make([]distributed.OpSpec, 0, 5)
 	ops = append(ops, distributed.OpSpec{
 		Type:        distributed.OpShuffleSource,
 		InputAlias:  alias,
@@ -2054,6 +2069,13 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		ops = append(ops, distributed.OpSpec{
 			Type:       distributed.OpFilter,
 			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	if len(sorts) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:         distributed.OpSort,
+			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
+			SortLimit:    stage.Limit,
 		})
 	}
 	if gatherReplySubject != "" {
@@ -2270,6 +2292,16 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 		finalInputs = append(finalInputs, fs...)
 	}
 
+	// Convert SortKeys once for both the legacy and fragment paths below.
+	// fuseSortIntoPredecessor folds a downstream Singleton sort into the
+	// final_aggregate stage; carrying SortKeys onto the final task lets
+	// the worker apply the sort in-process instead of relying on a
+	// separate sort task.
+	var sorts []distributed.SortKeySpec
+	for _, s := range stage.SortKeys {
+		sorts = append(sorts, distributed.SortKeySpec{Column: s.Column, Desc: s.Desc})
+	}
+
 	// Phase 2: single final merge task over the intermediate outputs.
 	finalTask := distributed.Task{
 		ID:              uuid.New().String()[:8],
@@ -2279,6 +2311,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 		StageType:       "final_aggregate",
 		GroupByCols:     stage.GroupByCols,
 		Aggregates:      aggs,
+		SortKeys:        sorts,
 		Limit:           stage.Limit,
 		Inputs:          map[string][]string{depID: finalInputs},
 		DataBucket:      c.config.ResultBucket,
@@ -2303,7 +2336,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	// S3 (next stage of the pipeline).
 	if fusion != nil {
 		finalInputsMap := map[string][]string{depID: finalInputs}
-		ops, ferr := buildAggregateFragment(stage, &finalTask, finalInputsMap, aggs, fusion.replySubject)
+		ops, ferr := buildAggregateFragment(stage, &finalTask, finalInputsMap, aggs, sorts, fusion.replySubject)
 		if ferr != nil {
 			return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: build fused fragment: %w", stage.ID, ferr)
 		}
