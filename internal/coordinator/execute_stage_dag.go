@@ -793,12 +793,25 @@ func (c *Coordinator) materializeReplicate(
 		QueryID:      queryID,
 		StageID:      stage.ID,
 		Type:         distributed.TaskTypeStage,
-		StageType:    "scan",
-		Inputs:       map[string][]string{upstreamID: files},
 		DataBucket:   c.config.ResultBucket,
 		ResultBucket: c.config.ResultBucket,
 		ResultPrefix: resultPrefix,
 		CreatedAt:    time.Now(),
+		// Fragment dispatch: stream upstream files through OpScan into an
+		// unpartitioned WSHF sink. cachedFileStreamSource auto-detects
+		// parquet vs WSHF, so the consolidation pattern (this caller's job)
+		// drops in unchanged.
+		Operators: []distributed.OpSpec{
+			{
+				Type:        distributed.OpScan,
+				InputAlias:  upstreamID,
+				InputFiles:  files,
+				InputBucket: c.config.ResultBucket,
+			},
+			{
+				Type: distributed.OpUnpartitionedSink,
+			},
+		},
 	}
 	if clusterID := c.catalog.ClusterID(); clusterID != "" {
 		task.ClusterID = clusterID
@@ -1327,41 +1340,38 @@ func (c *Coordinator) dispatchScanFilterStage(
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
 		}
+		// Both branches emit fragment Operators[]. fuseShuffle terminates
+		// in OpExchangeSender (writing partitioned shuffle output);
+		// non-fuseShuffle terminates in OpUnpartitionedSink (one .wshf
+		// per task) — same shape the legacy executeStageScan emitted.
+		scanOp := distributed.OpSpec{
+			Type:        distributed.OpScan,
+			InputAlias:  scanAliasForStage(stage),
+			InputFiles:  files,
+			InputBucket: c.config.ResultBucket,
+			Columns:     stage.Columns,
+		}
+		if shardCount > 1 {
+			scanOp.ScanShardIndex = shardIdx
+			scanOp.ScanShardCount = shardCount
+		}
+		t.Operators = append(t.Operators, scanOp)
+		if len(stage.FilterExprs) > 0 {
+			t.Operators = append(t.Operators, distributed.OpSpec{
+				Type:       distributed.OpFilter,
+				Predicates: append([]string(nil), stage.FilterExprs...),
+			})
+		}
 		if fuseShuffle {
-			scanOp := distributed.OpSpec{
-				Type:        distributed.OpScan,
-				InputAlias:  scanAliasForStage(stage),
-				InputFiles:  files,
-				InputBucket: c.config.ResultBucket,
-				Columns:     stage.Columns,
-			}
-			if shardCount > 1 {
-				scanOp.ScanShardIndex = shardIdx
-				scanOp.ScanShardCount = shardCount
-			}
-			t.Operators = append(t.Operators, scanOp)
-			if len(stage.FilterExprs) > 0 {
-				t.Operators = append(t.Operators, distributed.OpSpec{
-					Type:       distributed.OpFilter,
-					Predicates: append([]string(nil), stage.FilterExprs...),
-				})
-			}
 			t.Operators = append(t.Operators, distributed.OpSpec{
 				Type:          distributed.OpExchangeSender,
 				ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
 				NumPartitions: stage.Exchange.Count,
 			})
 		} else {
-			t.StageType = "scan"
-			t.Columns = stage.Columns
-			t.FilterExprs = append([]string(nil), stage.FilterExprs...)
-			t.Inputs = map[string][]string{
-				scanAliasForStage(stage): files,
-			}
-			if shardCount > 1 {
-				t.ScanShardIndex = shardIdx
-				t.ScanShardCount = shardCount
-			}
+			t.Operators = append(t.Operators, distributed.OpSpec{
+				Type: distributed.OpUnpartitionedSink,
+			})
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
@@ -1731,8 +1741,14 @@ func (c *Coordinator) dispatchComputeStage(
 		// Singleton sort into this aggregate; the multi-breaker fragment
 		// runner handles the resulting `[ShuffleSource, HashAggregate,
 		// Filter?(HAVING), Sort?, Sink]` chain in one task.
+		//
+		// "aggregate" (partial, MergeMode=false) is a standalone aggregate
+		// stage consuming non-scan upstream input (e.g. join output);
+		// "merge_aggregate" / "final_aggregate" (MergeMode=true) re-aggregate
+		// partial outputs. buildAggregateFragment derives the mode from
+		// stage.Type.
 		canMigrateAggregate := t.Operators == nil &&
-			(stage.Type == "final_aggregate" || stage.Type == "merge_aggregate") &&
+			(stage.Type == "aggregate" || stage.Type == "final_aggregate" || stage.Type == "merge_aggregate") &&
 			t.ReplySubject == ""
 		if canMigrateAggregate {
 			var fusedSubject string
@@ -2070,12 +2086,23 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		InputFiles:  files,
 		InputBucket: t.DataBucket,
 	})
+	// MergeMode is true for stages that re-aggregate already-partial
+	// outputs (final_aggregate, merge_aggregate). It's false for the
+	// standalone "aggregate" stage, which consumes raw rows from upstream
+	// non-scan input (e.g. a join output) and produces a partial. AVG
+	// fold runs only on the final stage; partial / merge_aggregate
+	// preserve __avg_sum#X / __avg_count#X synthetics for the downstream
+	// final to fold. BuildProject is needed only on partial mode where
+	// AggSpec.InputExpr might reference a derived expression that the
+	// upstream hasn't pre-computed.
+	mergeMode := stage.Type == "final_aggregate" || stage.Type == "merge_aggregate"
 	ops = append(ops, distributed.OpSpec{
-		Type:        distributed.OpHashAggregate,
-		GroupByCols: append([]string(nil), stage.GroupByCols...),
-		Aggregates:  append([]distributed.AggSpec(nil), aggs...),
-		MergeMode:   true,
-		FoldAvg:     stage.Type == "final_aggregate",
+		Type:         distributed.OpHashAggregate,
+		GroupByCols:  append([]string(nil), stage.GroupByCols...),
+		Aggregates:   append([]distributed.AggSpec(nil), aggs...),
+		MergeMode:    mergeMode,
+		FoldAvg:      stage.Type == "final_aggregate",
+		BuildProject: !mergeMode,
 	})
 	if len(t.PostFilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{
@@ -2323,22 +2350,29 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	// 8239db4 (2026-05-01).
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	intermTasks := make([]distributed.Task, 0, N)
+	// Synthetic stage for the intermediate fragments: Type="merge_aggregate"
+	// keeps FoldAvg=false (AVG synthetics survive end-to-end up to the
+	// final task), no SortKeys / Limit / FilterExprs — those are final-only.
+	intermStage := physical.Stage{
+		Type:        "merge_aggregate",
+		GroupByCols: stage.GroupByCols,
+	}
 	for i, group := range groups {
 		t := distributed.Task{
 			ID:           uuid.New().String()[:8],
 			QueryID:      queryID,
 			StageID:      fmt.Sprintf("%s-merge-%d", stage.ID, i),
 			Type:         distributed.TaskTypeStage,
-			StageType:    "merge_aggregate",
-			GroupByCols:  stage.GroupByCols,
-			Aggregates:   aggs,
-			Inputs:       map[string][]string{depID: group},
 			DataBucket:   c.config.ResultBucket,
 			ResultBucket: c.config.ResultBucket,
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
-			// HAVING is final-only — see comment on dispatchComputeStage.
 		}
+		ops, ferr := buildAggregateFragment(intermStage, &t, map[string][]string{depID: group}, aggs, nil, "")
+		if ferr != nil {
+			return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: build interm fragment %d: %w", stage.ID, i, ferr)
+		}
+		t.Operators = ops
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -2372,22 +2406,33 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	}
 
 	// Phase 2: single final merge task over the intermediate outputs.
+	// Always emits a fragment (HashAggregate(merge, FoldAvg) → Filter?(HAVING)
+	// → Sort? → OpGatherSink|OpUnpartitionedSink). Gather fusion (when
+	// the planner detected the chain) replaces the terminal sink with
+	// OpGatherSink and pre-arms the receiver with one terminal.
 	finalTask := distributed.Task{
 		ID:              uuid.New().String()[:8],
 		QueryID:         queryID,
 		StageID:         stage.ID,
 		Type:            distributed.TaskTypeStage,
-		StageType:       "final_aggregate",
-		GroupByCols:     stage.GroupByCols,
-		Aggregates:      aggs,
-		SortKeys:        sorts,
-		Limit:           stage.Limit,
-		Inputs:          map[string][]string{depID: finalInputs},
 		DataBucket:      c.config.ResultBucket,
 		ResultBucket:    c.config.ResultBucket,
 		ResultPrefix:    resultPrefix,
 		CreatedAt:       time.Now(),
 		PostFilterExprs: append([]string(nil), stage.FilterExprs...),
+	}
+	finalInputsMap := map[string][]string{depID: finalInputs}
+	var fusedSubject string
+	if fusion != nil {
+		fusedSubject = fusion.replySubject
+	}
+	finalOps, ferr := buildAggregateFragment(stage, &finalTask, finalInputsMap, aggs, sorts, fusedSubject)
+	if ferr != nil {
+		return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: build final fragment: %w", stage.ID, ferr)
+	}
+	finalTask.Operators = finalOps
+	if fusion != nil {
+		fusion.recv.SetExpectedTerminals(1)
 	}
 	if clusterID := c.catalog.ClusterID(); clusterID != "" {
 		finalTask.ClusterID = clusterID
@@ -2396,22 +2441,6 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	qm := c.queryMetas[queryID]
 	c.mu.Unlock()
 	c.enrichTaskWithQueryContext(qm, &finalTask)
-
-	// Gather fusion: emit the final-merge task as a fragment whose terminal
-	// sink is OpGatherSink streaming directly to the coord's gather receiver,
-	// instead of an unpartitioned .wshf upload that the fan-out caller would
-	// re-read in a separate gather task. Only the final task is fragment-
-	// migrated here; the intermediate phase already wrote partial outputs to
-	// S3 (next stage of the pipeline).
-	if fusion != nil {
-		finalInputsMap := map[string][]string{depID: finalInputs}
-		ops, ferr := buildAggregateFragment(stage, &finalTask, finalInputsMap, aggs, sorts, fusion.replySubject)
-		if ferr != nil {
-			return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: build fused fragment: %w", stage.ID, ferr)
-		}
-		finalTask.Operators = ops
-		fusion.recv.SetExpectedTerminals(1)
-	}
 
 	finalFiles, err := c.runStageTasks(ctx,
 		fmt.Sprintf("st-%s-%s", stage.ID, queryID),
