@@ -15,6 +15,140 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
+// TestExecuteFragment_ScanFilterAggregateUnpartitioned exercises the
+// scan-aggregate fragment shape that today's dispatchScanAggregateStage
+// emits via buildScanAggregateFragment:
+//
+//	[OpScan, OpFilter, OpHashAggregate(partial), OpUnpartitionedSink]
+//
+// Verifies (a) the parquet/wshf source reads through OpScan with column
+// projection, (b) the OpFilter discards rows that don't match the WHERE,
+// (c) the partial HashAggregate (MergeMode=false) runs to completion,
+// (d) output is one .wshf with GROUP BY + agg-output columns.
+//
+// Test data: 5 rows with (g, v). Filter keeps rows where v >= 20. Sums
+// per group: g=1 sum(20), g=2 sum(50), g=3 sum(60).
+func TestExecuteFragment_ScanFilterAggregateUnpartitioned(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-fragment-scan-filt-agg"
+
+	data := makeGroupedWshf(t, [][2]int64{
+		{1, 10}, {1, 20}, // g=1 → after filter v>=20: 20
+		{2, 50}, // g=2 → 50
+		{3, 30}, {3, 30}, // g=3 → 60
+	})
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	key := "in/sfa/t0.wshf"
+	if _, err := store.Put(ctx, bucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	cache := NewLRUCache(4 * 1024 * 1024)
+	executor := NewExecutor(store, cache, nil)
+
+	task := distributed.Task{
+		ID:           "frag-sfa-0",
+		QueryID:      "q-frag-sfa",
+		StageID:      "sfa-0",
+		Type:         distributed.TaskTypeStage,
+		DataBucket:   bucket,
+		ResultBucket: bucket,
+		ResultPrefix: "out/sfa/",
+		Operators: []distributed.OpSpec{
+			{
+				Type:        distributed.OpScan,
+				InputAlias:  "src",
+				InputFiles:  []string{key},
+				InputBucket: bucket,
+				Columns:     []string{"g", "v"},
+			},
+			{
+				Type:       distributed.OpFilter,
+				Predicates: []string{"v >= 20"},
+			},
+			{
+				Type:        distributed.OpHashAggregate,
+				GroupByCols: []string{"g"},
+				Aggregates: []distributed.AggSpec{
+					{Func: "sum", InputCol: "v", OutputCol: "total"},
+				},
+				MergeMode:    false,
+				BuildProject: true,
+			},
+			{
+				Type: distributed.OpUnpartitionedSink,
+			},
+		},
+	}
+
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(ctx, task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	if result.NumRows != 3 {
+		t.Fatalf("NumRows = %d, want 3 groups", result.NumRows)
+	}
+	if len(result.ResultFiles) != 1 {
+		t.Fatalf("expected 1 unpartitioned output, got %d", len(result.ResultFiles))
+	}
+
+	rc, _, err := store.Get(ctx, bucket, result.ResultFiles[0])
+	if err != nil {
+		t.Fatalf("get output: %v", err)
+	}
+	defer rc.Close()
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	r, err := newShuffleChunkReader(out)
+	if err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
+	got := map[int64]float64{}
+	for {
+		b, err := r.Next()
+		if err != nil {
+			t.Fatalf("chunk next: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		gIdx, totalIdx := -1, -1
+		for i, c := range b.Schema {
+			switch c.Name {
+			case "g":
+				gIdx = i
+			case "total":
+				totalIdx = i
+			}
+		}
+		if gIdx < 0 || totalIdx < 0 {
+			t.Fatalf("output schema missing g/total: %+v", b.Schema)
+		}
+		for i := 0; i < b.ActiveLen(); i++ {
+			row := i
+			if b.Sel != nil {
+				row = int(b.Sel[i])
+			}
+			got[b.Columns[gIdx].Int64Data[row]] = b.Columns[totalIdx].Float64Data[row]
+		}
+	}
+	want := map[int64]float64{1: 20, 2: 50, 3: 60}
+	for g, v := range want {
+		if got[g] != v {
+			t.Errorf("group %d: got total=%v, want %v", g, got[g], v)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("group count: got %d, want %d (%v)", len(got), len(want), got)
+	}
+}
+
 // TestExecuteFragment_ScanExchangeSender exercises the fragment dispatch path
 // end-to-end with the simplest non-trivial pipeline: a scan source feeding an
 // exchange-sender sink. Output partition files must match the same shape and

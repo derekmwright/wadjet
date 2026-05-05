@@ -1137,6 +1137,18 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			t.ScanShardIndex = shardIdx
 			t.ScanShardCount = shardCount
 		}
+		// Fragment migration: dispatch via the multi-op fragment runner
+		// instead of the legacy executeStageAggregate handler. Pipeline:
+		//   [OpScan, OpFilter?, OpHashAggregate(partial, BuildProject), OpUnpartitionedSink]
+		// Output is byte-equivalent to the legacy partial-aggregate path
+		// (one .wshf per task carrying group-by columns + agg OutputCols).
+		// Downstream final_aggregate / merge_aggregate stages consume it
+		// identically.
+		ops, ferr := buildScanAggregateFragment(stage, &t, files, aggs, shardIdx, shardCount)
+		if ferr != nil {
+			return StageOutput{}, fmt.Errorf("scan-agg stage %s: build fragment: %w", stage.ID, ferr)
+		}
+		t.Operators = ops
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -2088,6 +2100,63 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 			Type: distributed.OpUnpartitionedSink,
 		})
 	}
+	return ops, nil
+}
+
+// buildScanAggregateFragment translates a fused scan + partial-aggregate
+// stage's task into a fragment Operators[] pipeline:
+//
+//	[OpScan, OpFilter?(scan-pushed WHERE), OpHashAggregate(partial, BuildProject), OpUnpartitionedSink]
+//
+// Output shape is byte-equivalent to the legacy executeStageAggregate path
+// for partial mode: one unpartitioned .wshf per task carrying GROUP BY cols
+// + agg OutputCols. Downstream final_aggregate / merge_aggregate stages
+// consume it identically (legacy or fragment).
+//
+// BuildProject=true asks the worker's buildAggInputProjection to construct a
+// derived-input Project for AggSpecs whose InputCol references an expression
+// (e.g. SUM(l_extendedprice * (1 - l_discount))). The worker prepends the
+// project to the unary chain ahead of HashAggregate's consume phase.
+//
+// ScanShardIndex/Count propagate single-file row-group sharding for fused
+// scan-aggregate over a single compacted parquet file (e.g. SF10 lineitem
+// at 5GB).
+func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files []string, aggs []distributed.AggSpec, shardIdx, shardCount int) ([]distributed.OpSpec, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("scan-aggregate fragment: empty file list")
+	}
+	if len(stage.FusedAggGroupBy) == 0 && len(aggs) == 0 {
+		return nil, fmt.Errorf("scan-aggregate fragment: at least one of FusedAggGroupBy or AggSpecs required")
+	}
+	scanOp := distributed.OpSpec{
+		Type:        distributed.OpScan,
+		InputAlias:  scanAliasForStage(stage),
+		InputFiles:  append([]string(nil), files...),
+		InputBucket: t.DataBucket,
+		Columns:     append([]string(nil), stage.Columns...),
+	}
+	if shardCount > 1 {
+		scanOp.ScanShardIndex = shardIdx
+		scanOp.ScanShardCount = shardCount
+	}
+	ops := make([]distributed.OpSpec, 0, 4)
+	ops = append(ops, scanOp)
+	if len(stage.FilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), stage.FilterExprs...),
+		})
+	}
+	ops = append(ops, distributed.OpSpec{
+		Type:         distributed.OpHashAggregate,
+		GroupByCols:  append([]string(nil), stage.FusedAggGroupBy...),
+		Aggregates:   append([]distributed.AggSpec(nil), aggs...),
+		MergeMode:    false,
+		BuildProject: true,
+	})
+	ops = append(ops, distributed.OpSpec{
+		Type: distributed.OpUnpartitionedSink,
+	})
 	return ops, nil
 }
 
