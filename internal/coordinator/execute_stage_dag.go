@@ -1193,14 +1193,25 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			t.ScanShardIndex = shardIdx
 			t.ScanShardCount = shardCount
 		}
-		// Fragment migration: dispatch via the multi-op fragment runner
-		// instead of the legacy executeStageAggregate handler. Pipeline:
-		//   [OpScan, OpFilter?, OpHashAggregate(partial, BuildProject), OpUnpartitionedSink]
-		// Output is byte-equivalent to the legacy partial-aggregate path
-		// (one .wshf per task carrying group-by columns + agg OutputCols).
-		// Downstream final_aggregate / merge_aggregate stages consume it
-		// identically.
-		ops, ferr := buildScanAggregateFragment(stage, &t, files, aggs, shardIdx, shardCount)
+		// Fragment migration: dispatch via the multi-op fragment runner.
+		// Two terminal sink shapes:
+		//   - downstream Repartition Exchange absorbed by
+		//     fuseScanAggregateShuffle → OpExchangeSender (each task's
+		//     K aggregate rows hash-partition directly to the consumer's
+		//     partition layout, skipping the standalone exchange-repartition).
+		//   - otherwise → OpUnpartitionedSink (one .wshf per task;
+		//     downstream Singleton final_aggregate reads them all).
+		var sinkOp distributed.OpSpec
+		if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
+			sinkOp = distributed.OpSpec{
+				Type:          distributed.OpExchangeSender,
+				ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
+				NumPartitions: stage.Exchange.Count,
+			}
+		} else {
+			sinkOp = distributed.OpSpec{Type: distributed.OpUnpartitionedSink}
+		}
+		ops, ferr := buildScanAggregateFragment(stage, &t, files, aggs, shardIdx, shardCount, sinkOp)
 		if ferr != nil {
 			return StageOutput{}, fmt.Errorf("scan-agg stage %s: build fragment: %w", stage.ID, ferr)
 		}
@@ -1281,11 +1292,39 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	results := make([]taskResult, len(collected))
 	copy(results, collected)
 	mu.Unlock()
-	files := make([][]string, len(tasks))
-	for i, r := range results {
+	for _, r := range results {
 		if r.err != "" {
 			return StageOutput{}, fmt.Errorf("scan-agg stage %s: task failed: %s", stage.ID, r.err)
 		}
+	}
+	if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
+		// Fused scan-aggregate + shuffle: each task produced N partition
+		// files at "<prefix>partition=NNNN/<task>.wshf". Bucket all files
+		// across all tasks by partition number so the downstream consumer
+		// reads each partition's full set. Same shape as
+		// dispatchScanFilterStage's fuseShuffle path.
+		numParts := stage.Exchange.Count
+		shardFiles := make([][]string, numParts)
+		for _, r := range results {
+			for _, f := range r.files {
+				p, parseErr := parsePartitionFromPath(f)
+				if parseErr != nil {
+					return StageOutput{}, fmt.Errorf("scan-agg stage %s: parsing partition from %q: %w", stage.ID, f, parseErr)
+				}
+				if p < 0 || p >= numParts {
+					return StageOutput{}, fmt.Errorf("scan-agg stage %s: partition %d out of range [0,%d) in %q", stage.ID, p, numParts, f)
+				}
+				shardFiles[p] = append(shardFiles[p], f)
+			}
+		}
+		return StageOutput{
+			Kind:          OutputPartitioned,
+			NumPartitions: numParts,
+			Files:         shardFiles,
+		}, nil
+	}
+	files := make([][]string, len(tasks))
+	for i, r := range results {
 		files[i] = r.files
 	}
 	return StageOutput{
@@ -2208,12 +2247,15 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 // buildScanAggregateFragment translates a fused scan + partial-aggregate
 // stage's task into a fragment Operators[] pipeline:
 //
-//	[OpScan, OpFilter?(scan-pushed WHERE), OpHashAggregate(partial, BuildProject), OpUnpartitionedSink]
+//	[OpScan, OpFilter?(scan-pushed WHERE), OpHashAggregate(partial, BuildProject), terminalSink]
 //
-// Output shape is byte-equivalent to the legacy executeStageAggregate path
-// for partial mode: one unpartitioned .wshf per task carrying GROUP BY cols
-// + agg OutputCols. Downstream final_aggregate / merge_aggregate stages
-// consume it identically (legacy or fragment).
+// terminalSink is the caller-supplied sink — OpExchangeSender for the
+// fuseScanAggregateShuffle case (each task hash-partitions its K aggregate
+// rows by group key directly, skipping the standalone exchange-repartition
+// stage), OpUnpartitionedSink otherwise (one .wshf per task; downstream
+// Singleton final_aggregate reads them all). Output shape under the
+// unpartitioned terminal is byte-equivalent to the legacy
+// executeStageAggregate path.
 //
 // BuildProject=true asks the worker's buildAggInputProjection to construct a
 // derived-input Project for AggSpecs whose InputCol references an expression
@@ -2223,12 +2265,15 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 // ScanShardIndex/Count propagate single-file row-group sharding for fused
 // scan-aggregate over a single compacted parquet file (e.g. SF10 lineitem
 // at 5GB).
-func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files []string, aggs []distributed.AggSpec, shardIdx, shardCount int) ([]distributed.OpSpec, error) {
+func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files []string, aggs []distributed.AggSpec, shardIdx, shardCount int, terminalSink distributed.OpSpec) ([]distributed.OpSpec, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("scan-aggregate fragment: empty file list")
 	}
 	if len(stage.FusedAggGroupBy) == 0 && len(aggs) == 0 {
 		return nil, fmt.Errorf("scan-aggregate fragment: at least one of FusedAggGroupBy or AggSpecs required")
+	}
+	if terminalSink.Type == "" {
+		return nil, fmt.Errorf("scan-aggregate fragment: terminalSink.Type required")
 	}
 	scanOp := distributed.OpSpec{
 		Type:        distributed.OpScan,
@@ -2256,9 +2301,7 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 		MergeMode:    false,
 		BuildProject: true,
 	})
-	ops = append(ops, distributed.OpSpec{
-		Type: distributed.OpUnpartitionedSink,
-	})
+	ops = append(ops, terminalSink)
 	return ops, nil
 }
 

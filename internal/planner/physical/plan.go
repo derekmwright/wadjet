@@ -1387,6 +1387,17 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// a single output stream per task (no fan-out, no amplification).
 		// stages = fuseScanShuffle(stages, p.WorkerCount)
 		// stages = fuseJoinShuffle(stages)
+		//
+		// fuseScanAggregateShuffle IS enabled. Pattern: scan(FusedAgg) →
+		// exchange-repartition → final_aggregate/merge_aggregate. Aggregate
+		// collapses input cardinality to K rows per task, so fused output
+		// scan-task-count × numPartitions matches the unfused output's
+		// post-exchange-repartition file count. No amplification at
+		// downstream consumers. Enables Q01/Q02/Q15/Q17/Q18/Q20-style
+		// aggregation queries to skip the standalone exchange-repartition
+		// stage. Gated on collapsing-consumer (final_aggregate /
+		// merge_aggregate) only.
+		stages = fuseScanAggregateShuffle(stages)
 		prev := BehaviorPreservingMode
 		BehaviorPreservingMode = false
 		defer func() { BehaviorPreservingMode = prev }()
