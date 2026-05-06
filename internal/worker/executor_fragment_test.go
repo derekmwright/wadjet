@@ -374,6 +374,63 @@ func TestExecuteFragment_ScanHashAggregateUnpartitioned(t *testing.T) {
 	}
 }
 
+// makeBuildWshf writes a build-side .wshf payload with schema (id int64, val int64).
+func makeBuildWshf(t *testing.T, rows [][2]int64) []byte {
+	t.Helper()
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "val", Type: parquet.TypeInt64, Nullable: true},
+	}
+	var buf bytes.Buffer
+	sw := newShuffleWriter(&buf, schema)
+	if err := sw.writeHeader(); err != nil {
+		t.Fatalf("writeHeader: %v", err)
+	}
+	b := batch.NewRecordBatch(schema, len(rows))
+	for i, r := range rows {
+		b.Columns[0].Int64Data[i] = r[0]
+		b.Columns[0].Nulls.SetValid(i)
+		b.Columns[1].Int64Data[i] = r[1]
+		b.Columns[1].Nulls.SetValid(i)
+	}
+	if err := sw.writeChunk(b.Columns, nil, len(rows)); err != nil {
+		t.Fatalf("writeChunk: %v", err)
+	}
+	data := buf.Bytes()
+	data[4] = byte(sw.numChunks)
+	return data
+}
+
+// makeProbeWshf writes a probe-side .wshf payload with schema (id int64, name string).
+func makeProbeWshf(t *testing.T, rows []struct {
+	ID   int64
+	Name string
+}) []byte {
+	t.Helper()
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+		{Name: "name", Type: parquet.TypeString, Nullable: true},
+	}
+	var buf bytes.Buffer
+	sw := newShuffleWriter(&buf, schema)
+	if err := sw.writeHeader(); err != nil {
+		t.Fatalf("writeHeader: %v", err)
+	}
+	b := batch.NewRecordBatch(schema, len(rows))
+	for i, r := range rows {
+		b.Columns[0].Int64Data[i] = r.ID
+		b.Columns[0].Nulls.SetValid(i)
+		b.Columns[1].BytesData.Set(i, []byte(r.Name))
+		b.Columns[1].Nulls.SetValid(i)
+	}
+	if err := sw.writeChunk(b.Columns, nil, len(rows)); err != nil {
+		t.Fatalf("writeChunk: %v", err)
+	}
+	data := buf.Bytes()
+	data[4] = byte(sw.numChunks)
+	return data
+}
+
 // TestExecuteFragment_ScanFilterUnpartitioned exercises a 3-op fragment:
 // scan source → filter (l_orderkey > 500) → unpartitioned sink. Verifies
 // the unary-op chain runs and the unpartitioned sink path uploads the

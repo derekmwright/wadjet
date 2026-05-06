@@ -1716,10 +1716,13 @@ func (c *Coordinator) dispatchComputeStage(
 		// chain element. probeSplit's task input slicing flows through
 		// taskInputs unchanged; the fragment source op is a uniform
 		// sourceForAliasWithProjection (auto-detects parquet vs WSHF).
+		// probeSplit migration depends on the fragment runner's spilled-
+		// partition flush phase (worker/executor_fragment.go); without it,
+		// Q05 SF100 build-cache chains return 0 rows when the primary's
+		// only build partition spills under cumulative chain pressure.
 		canMigrateJoin := t.Operators == nil &&
 			(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) &&
-			len(stage.GroupByCols) == 0 &&
-			!probeSplit
+			len(stage.GroupByCols) == 0
 		if canMigrateJoin {
 			var sinkOp distributed.OpSpec
 			if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
