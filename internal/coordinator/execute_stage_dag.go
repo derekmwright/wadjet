@@ -36,24 +36,34 @@ type gatherFusion struct {
 }
 
 // canFuseGather reports whether a gather stage can be absorbed into its
-// upstream final_aggregate / merge_aggregate stage. Returns the upstream
-// stage ID when fusion is eligible.
+// upstream stage. Returns the upstream stage ID when fusion is eligible.
 //
-// Eligibility:
+// Two upstream-shape cases are eligible:
+//
+//  1. Aggregate (final_aggregate / merge_aggregate). The upstream emits
+//     unordered groups (or pre-sorted groups when SortKeys are set via
+//     fuseSortIntoPredecessor). Reject Ordering on the gather Exchange in
+//     this case: ordered gather is the coordinator-side sort-merge of
+//     pre-sorted streams; when the upstream agg already absorbs the sort
+//     and runs single-task, the gather Ordering is redundant — but we
+//     still require it to be unset to avoid silent semantic changes for
+//     any caller relying on it.
+//
+//  2. Sort (sort / merge_sort). The upstream produces a single ordered
+//     stream. Ordering on the gather Exchange is permitted IFF the
+//     upstream SortKeys equal it (i.e., the legacy gather's coord-side
+//     re-sort would be redundant). Otherwise the keys differ and fusion
+//     would silently corrupt order.
+//
+// Common requirements for both cases:
 //   - Exactly one upstream dependency.
-//   - No Ordering on the gather Exchange (ordered gather is the
-//     coordinator-side sort-merge of multiple pre-sorted streams; when the
-//     upstream agg already absorbs the sort and runs single-task, the
-//     gather Ordering is redundant — but we still require it to be unset
-//     to avoid silent semantic changes for any caller relying on it).
 //   - Upstream is in the pending dispatch set (not a leaf scan or pre-
 //     computed input).
-//   - Upstream is final_aggregate or merge_aggregate (the only stages
-//     dispatchComputeStage already routes through buildAggregateFragment).
-//   - When upstream has SortKeys / Limit (post-fuseSortIntoPredecessor
-//     case): require DistSingleton. Multi-task aggs each sort their
-//     partition independently — streaming N partial-sorted streams to
-//     gather concatenates them in arrival order, losing global order.
+//   - Distribution.Kind == DistSingleton when the upstream emits ordered
+//     output (sort, merge_sort, or sort-bearing aggregate). Multi-task
+//     ordered upstreams sort their partition independently — streaming N
+//     partial-sorted streams to gather concatenates them in arrival
+//     order, losing global order.
 //
 // Amplification-safe: the gather sink publishes via NATS, not S3, so
 // per-task fan-out doesn't multiply S3 GETs the way scan/join fragment
@@ -62,21 +72,54 @@ func canFuseGather(gatherStage physical.Stage, pending map[string]physical.Stage
 	if len(gatherStage.Dependencies) != 1 {
 		return "", false
 	}
-	if gatherStage.Exchange != nil && len(gatherStage.Exchange.Ordering) > 0 {
-		return "", false
-	}
 	depID = gatherStage.Dependencies[0]
 	dep, present := pending[depID]
 	if !present {
 		return "", false
 	}
-	if dep.Type != "final_aggregate" && dep.Type != "merge_aggregate" {
-		return "", false
+	gatherOrdering := gatherOrderingKeys(gatherStage)
+	switch dep.Type {
+	case "final_aggregate", "merge_aggregate":
+		if len(gatherOrdering) > 0 {
+			return "", false
+		}
+		if (len(dep.SortKeys) > 0 || dep.Limit > 0) && dep.Distribution.Kind != physical.DistSingleton {
+			return "", false
+		}
+		return depID, true
+	case "sort", "merge_sort":
+		if dep.Distribution.Kind != physical.DistSingleton {
+			return "", false
+		}
+		// When gather has Ordering, require it match the upstream sort's
+		// keys exactly. The upstream already produces rows in that order;
+		// the gather re-sort is redundant. When gather has no Ordering, the
+		// caller is taking the sort's order as-is — also fine.
+		if len(gatherOrdering) > 0 && !sortKeysEqual(gatherOrdering, dep.SortKeys) {
+			return "", false
+		}
+		return depID, true
 	}
-	if (len(dep.SortKeys) > 0 || dep.Limit > 0) && dep.Distribution.Kind != physical.DistSingleton {
-		return "", false
+	return "", false
+}
+
+func gatherOrderingKeys(gatherStage physical.Stage) []physical.SortKeySpec {
+	if gatherStage.Exchange == nil {
+		return nil
 	}
-	return depID, true
+	return gatherStage.Exchange.Ordering
+}
+
+func sortKeysEqual(a, b []physical.SortKeySpec) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // awaitStageProgress blocks until either every dispatched task has reported
@@ -1793,7 +1836,11 @@ func (c *Coordinator) dispatchComputeStage(
 			len(stage.SortKeys) > 0 &&
 			t.ReplySubject == ""
 		if canMigrateSort {
-			ops, ferr := buildSortFragment(stage, &t, taskInputs, sorts)
+			var fusedSubject string
+			if fusion != nil {
+				fusedSubject = fusion.replySubject
+			}
+			ops, ferr := buildSortFragment(stage, &t, taskInputs, sorts, fusedSubject)
 			if ferr != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: build sort fragment: %w", stage.ID, ferr)
 			}
@@ -2218,13 +2265,22 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 // buildSortFragment translates a sort / merge_sort stage's task into a
 // fragment Operators[] pipeline:
 //
-//	[OpShuffleSource, OpSort, OpUnpartitionedSink]
+//	[OpShuffleSource, OpSort, OpUnpartitionedSink | OpGatherSink]
 //
-// Same one-output-file-per-task shape the legacy executeStageSort emitted,
-// so downstream consumers (gather, further merges) read it identically.
-// Limit is forwarded as SortLimit so the sort operator's Truncate fires
-// after Finalize for top-N optimization.
-func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, sorts []distributed.SortKeySpec) ([]distributed.OpSpec, error) {
+// Same one-output-file-per-task shape the legacy executeStageSort emitted
+// when the terminal sink is OpUnpartitionedSink; downstream consumers
+// (gather, further merges) read it identically. Limit is forwarded as
+// SortLimit so the sort operator's Truncate fires after Finalize for
+// top-N optimization.
+//
+// When gatherReplySubject is non-empty, the terminal sink is OpGatherSink
+// streaming the (single, ordered) sorted output directly to the
+// coordinator's NATS reply subscription instead of an unpartitioned .wshf
+// upload — fuses the downstream gather stage into this fragment,
+// eliminating one S3 PUT/GET hop and one coord round-trip. Only safe
+// when the upstream stage is DistSingleton (one task → one ordered
+// stream); canFuseGather enforces that.
+func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map[string][]string, sorts []distributed.SortKeySpec, gatherReplySubject string) ([]distributed.OpSpec, error) {
 	if len(taskInputs) != 1 {
 		return nil, fmt.Errorf("sort fragment: expected 1 input alias, got %d", len(taskInputs))
 	}
@@ -2238,6 +2294,13 @@ func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map
 		files = v
 		break
 	}
+	terminal := distributed.OpSpec{Type: distributed.OpUnpartitionedSink}
+	if gatherReplySubject != "" {
+		terminal = distributed.OpSpec{
+			Type:         distributed.OpGatherSink,
+			ReplySubject: gatherReplySubject,
+		}
+	}
 	return []distributed.OpSpec{
 		{
 			Type:        distributed.OpShuffleSource,
@@ -2250,9 +2313,7 @@ func buildSortFragment(stage physical.Stage, t *distributed.Task, taskInputs map
 			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
 			SortLimit:    stage.Limit,
 		},
-		{
-			Type: distributed.OpUnpartitionedSink,
-		},
+		terminal,
 	}, nil
 }
 

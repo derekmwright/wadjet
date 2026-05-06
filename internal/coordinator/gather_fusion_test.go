@@ -152,6 +152,97 @@ func TestCanFuseGather_Eligibility(t *testing.T) {
 			pending: map[string]physical.Stage{},
 			want:    false,
 		},
+		{
+			name: "happy path: gather over Singleton sort, no Ordering",
+			gather: physical.Stage{
+				ID:           "gather",
+				Type:         physical.StageExchangeGather,
+				Dependencies: []string{"sort"},
+			},
+			pending: map[string]physical.Stage{
+				"sort": {
+					ID:           "sort",
+					Type:         "sort",
+					SortKeys:     []physical.SortKeySpec{{Column: "x", Desc: true}},
+					Distribution: physical.Distribution{Kind: physical.DistSingleton},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "happy path: gather over Singleton merge_sort, no Ordering",
+			gather: physical.Stage{
+				ID:           "gather",
+				Type:         physical.StageExchangeGather,
+				Dependencies: []string{"ms"},
+			},
+			pending: map[string]physical.Stage{
+				"ms": {
+					ID:           "ms",
+					Type:         "merge_sort",
+					SortKeys:     []physical.SortKeySpec{{Column: "v"}},
+					Distribution: physical.Distribution{Kind: physical.DistSingleton},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "happy path: gather over Singleton sort with matching Ordering",
+			gather: physical.Stage{
+				ID:           "gather",
+				Type:         physical.StageExchangeGather,
+				Dependencies: []string{"sort"},
+				Exchange: &physical.ExchangeStage{
+					Ordering: []physical.SortKeySpec{{Column: "x", Desc: true}, {Column: "id"}},
+				},
+			},
+			pending: map[string]physical.Stage{
+				"sort": {
+					ID:           "sort",
+					Type:         "sort",
+					SortKeys:     []physical.SortKeySpec{{Column: "x", Desc: true}, {Column: "id"}},
+					Distribution: physical.Distribution{Kind: physical.DistSingleton},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "rejects: gather over sort with mismatched Ordering keys",
+			gather: physical.Stage{
+				ID:           "gather",
+				Type:         physical.StageExchangeGather,
+				Dependencies: []string{"sort"},
+				Exchange: &physical.ExchangeStage{
+					Ordering: []physical.SortKeySpec{{Column: "y"}},
+				},
+			},
+			pending: map[string]physical.Stage{
+				"sort": {
+					ID:           "sort",
+					Type:         "sort",
+					SortKeys:     []physical.SortKeySpec{{Column: "x"}},
+					Distribution: physical.Distribution{Kind: physical.DistSingleton},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "rejects: gather over multi-task sort (would lose global order)",
+			gather: physical.Stage{
+				ID:           "gather",
+				Type:         physical.StageExchangeGather,
+				Dependencies: []string{"sort"},
+			},
+			pending: map[string]physical.Stage{
+				"sort": {
+					ID:           "sort",
+					Type:         "sort",
+					SortKeys:     []physical.SortKeySpec{{Column: "x"}},
+					Distribution: physical.Distribution{Kind: physical.DistHashPartitioned},
+				},
+			},
+			want: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,7 +271,7 @@ func TestBuildSortFragment(t *testing.T) {
 	}
 
 	t.Run("happy path: 3-op fragment with sort keys + limit", func(t *testing.T) {
-		ops, err := buildSortFragment(stage, task, taskInputs, sorts)
+		ops, err := buildSortFragment(stage, task, taskInputs, sorts, "")
 		if err != nil {
 			t.Fatalf("buildSortFragment: %v", err)
 		}
@@ -213,7 +304,7 @@ func TestBuildSortFragment(t *testing.T) {
 		}
 	})
 	t.Run("rejects empty SortKeys", func(t *testing.T) {
-		_, err := buildSortFragment(stage, task, taskInputs, nil)
+		_, err := buildSortFragment(stage, task, taskInputs, nil, "")
 		if err == nil {
 			t.Fatal("expected error on empty SortKeys")
 		}
@@ -222,9 +313,24 @@ func TestBuildSortFragment(t *testing.T) {
 		_, err := buildSortFragment(stage, task, map[string][]string{
 			"a": {"x"},
 			"b": {"y"},
-		}, sorts)
+		}, sorts, "")
 		if err == nil {
 			t.Fatal("expected error on multi-alias input")
+		}
+	})
+	t.Run("emits OpGatherSink when gatherReplySubject is set", func(t *testing.T) {
+		ops, err := buildSortFragment(stage, task, taskInputs, sorts, "wadjet.gather.q-fused")
+		if err != nil {
+			t.Fatalf("buildSortFragment: %v", err)
+		}
+		if len(ops) != 3 {
+			t.Fatalf("ops length: got %d, want 3", len(ops))
+		}
+		if ops[2].Type != distributed.OpGatherSink {
+			t.Errorf("ops[2].Type: got %q, want %q", ops[2].Type, distributed.OpGatherSink)
+		}
+		if ops[2].ReplySubject != "wadjet.gather.q-fused" {
+			t.Errorf("ops[2].ReplySubject: got %q, want %q", ops[2].ReplySubject, "wadjet.gather.q-fused")
 		}
 	})
 }
