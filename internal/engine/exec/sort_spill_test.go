@@ -1,0 +1,187 @@
+package exec
+
+import (
+	"context"
+	"testing"
+
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
+)
+
+// TestSortSpill_FinalizeMergesSpilledRows exercises the finalizeWithSpill
+// path: low memory budget triggers spill in Consume, then Finalize must read
+// every spilled file back, merge with any in-memory residue, and produce a
+// globally sorted result.
+//
+// Why this test matters: Sort.spillFiles is populated by Consume when
+// SpillManager.ShouldSpillFor(SpillCheap) trips, but no prior test exercised
+// finalizeWithSpill end-to-end. SF100 sort-heavy workloads (Q21, Q18)
+// hit this path under memory pressure; without coverage it could regress
+// silently. Mirrors HashAggregate's TestHashAggregateSpillBatching
+// philosophy — set a tiny budget, push enough rows to force spill, verify
+// the final output is correct.
+func TestSortSpill_FinalizeMergesSpilledRows(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "val", Type: parquet.TypeInt64},
+	}
+
+	ctx := context.Background()
+	spillDir := t.TempDir()
+	// 1 KB budget — every Consume's TrackBatch crosses the SpillCheap threshold
+	// (60% of 1KB = 600 bytes) so the second-and-subsequent batches spill.
+	tracker := memory.NewTracker("sort-spill-test", 1_000)
+	sm, err := memory.NewSpillManager(spillDir, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewSort([]SortKey{{Column: "val", Order: Ascending}})
+	s.Spill = sm
+	if err := s.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Push values in reverse-sorted order across multiple batches so the
+	// final sort has real work to do across spill boundaries.
+	const numBatches = 20
+	const rowsPerBatch = 10
+	totalRows := numBatches * rowsPerBatch
+	for i := 0; i < numBatches; i++ {
+		rows := make([]map[string]any, 0, rowsPerBatch)
+		for j := 0; j < rowsPerBatch; j++ {
+			// Descending order: batch 0 has the largest values, batch N-1 the
+			// smallest. Spill files therefore contain reverse-sorted runs and
+			// finalize must merge them into ascending order.
+			v := int64((numBatches-i)*rowsPerBatch - j)
+			rows = append(rows, map[string]any{"val": v})
+		}
+		b := batch.FromRows(schema, rows)
+		if err := s.Consume(ctx, b); err != nil {
+			t.Fatalf("Consume batch %d: %v", i, err)
+		}
+	}
+
+	// Sanity check: spill path actually fired.
+	if len(s.spillFiles) == 0 {
+		t.Fatal("spill path was never exercised; tracker/budget setup is wrong")
+	}
+
+	if err := s.Finalize(ctx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	// Spill files cleaned up by finalizeWithSpill.
+	if len(s.spillFiles) != 0 {
+		t.Errorf("Finalize should clear spillFiles, got %d remaining", len(s.spillFiles))
+	}
+
+	// Drain the sorted output and verify ascending order across every row.
+	got := make([]int64, 0, totalRows)
+	for {
+		b, err := s.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		for _, r := range b.ToRows() {
+			got = append(got, r["val"].(int64))
+		}
+	}
+	if len(got) != totalRows {
+		t.Fatalf("got %d rows, want %d", len(got), totalRows)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] < got[i-1] {
+			t.Fatalf("output not sorted ascending at index %d: %d < %d", i, got[i], got[i-1])
+		}
+	}
+	// Smallest possible value emitted from the descending generator is 1; largest is totalRows.
+	if got[0] != 1 {
+		t.Errorf("first row should be 1 (smallest), got %d", got[0])
+	}
+	if got[len(got)-1] != int64(totalRows) {
+		t.Errorf("last row should be %d (largest), got %d", totalRows, got[len(got)-1])
+	}
+}
+
+// TestSortSpill_MixedInMemoryAndSpilled covers the case where some batches
+// are still in s.batches (in memory) at Finalize time because they arrived
+// after the most recent spill flush — finalizeWithSpill must merge both
+// in-memory and spilled rows.
+func TestSortSpill_MixedInMemoryAndSpilled(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "val", Type: parquet.TypeInt64},
+	}
+
+	ctx := context.Background()
+	spillDir := t.TempDir()
+	// Budget tuned so the first 5 batches spill but pressure relaxes for the
+	// remaining batches (ReleaseTracking after spill drops Used below
+	// threshold). A 1KB budget does this naturally because each spill clears
+	// the tracker, then the next batch starts fresh.
+	tracker := memory.NewTracker("sort-spill-mixed-test", 1_000)
+	sm, err := memory.NewSpillManager(spillDir, tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewSort([]SortKey{{Column: "val", Order: Descending}})
+	s.Spill = sm
+	if err := s.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	const numBatches = 8
+	const rowsPerBatch = 5
+	totalRows := numBatches * rowsPerBatch
+	for i := 0; i < numBatches; i++ {
+		rows := make([]map[string]any, 0, rowsPerBatch)
+		for j := 0; j < rowsPerBatch; j++ {
+			rows = append(rows, map[string]any{"val": int64(i*rowsPerBatch + j)})
+		}
+		b := batch.FromRows(schema, rows)
+		if err := s.Consume(ctx, b); err != nil {
+			t.Fatalf("Consume batch %d: %v", i, err)
+		}
+	}
+
+	if len(s.spillFiles) == 0 {
+		t.Fatal("spill path was never exercised")
+	}
+
+	if err := s.Finalize(ctx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	got := make([]int64, 0, totalRows)
+	for {
+		b, err := s.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		for _, r := range b.ToRows() {
+			got = append(got, r["val"].(int64))
+		}
+	}
+	if len(got) != totalRows {
+		t.Fatalf("got %d rows, want %d", len(got), totalRows)
+	}
+	// Descending order — first row is the largest value (totalRows-1).
+	for i := 1; i < len(got); i++ {
+		if got[i] > got[i-1] {
+			t.Fatalf("output not sorted descending at index %d: %d > %d", i, got[i], got[i-1])
+		}
+	}
+	if got[0] != int64(totalRows-1) {
+		t.Errorf("first row should be %d (largest), got %d", totalRows-1, got[0])
+	}
+	if got[len(got)-1] != 0 {
+		t.Errorf("last row should be 0 (smallest), got %d", got[len(got)-1])
+	}
+}
