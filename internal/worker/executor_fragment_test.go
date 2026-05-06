@@ -378,6 +378,126 @@ func TestExecuteFragment_ScanHashAggregateUnpartitioned(t *testing.T) {
 // scan source → filter (l_orderkey > 500) → unpartitioned sink. Verifies
 // the unary-op chain runs and the unpartitioned sink path uploads the
 // filtered output as a single .wshf.
+// TestExecuteFragment_HashJoinProbe_FlushesSpilledPartitions is the unit
+// regression test for the Q05 SF100 build-cache 0-rows bug. Before the fix,
+// runFragmentLinear had no flush phase: when the build's only data partition
+// got evicted under memory pressure, every probe row got routed to disk and
+// the join silently produced 0 rows. The legacy executeStageHashJoin path
+// drove probes through exec.Pipeline which already includes flushSpilledOps;
+// the fragment runner did not.
+//
+// This test forces the build's hash partition to spill (tiny shared budget +
+// PartitionOnArrival via OpBroadcastProbe) and asserts every matching
+// probe→build pair appears in the joined output.
+func TestExecuteFragment_HashJoinProbe_FlushesSpilledPartitions(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-fragment-hj-flush"
+
+	// Build side spans multiple files so the source emits multiple batches.
+	// The shared budget is sized so the first batch fits but the second
+	// triggers spillUntilCanReserve, which evicts the largest in-memory
+	// partition. Subsequent batches scattered to that partition write
+	// directly to disk; probe rows hashing there route through the spill
+	// flush path. PartitionOnArrival=true is forced by OpBroadcastProbe.
+	const numBuildFiles = 4
+	const rowsPerFile = 2048
+	const buildN = numBuildFiles * rowsPerFile
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	buildKeys := make([]string, numBuildFiles)
+	for f := 0; f < numBuildFiles; f++ {
+		rows := make([][2]int64, rowsPerFile)
+		for i := range rows {
+			id := int64(f*rowsPerFile + i)
+			rows[i] = [2]int64{id, id * 10}
+		}
+		data := makeBuildWshf(t, rows)
+		key := "in/hj/build-" + strconv.Itoa(f) + ".wshf"
+		if _, err := store.Put(ctx, bucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+			t.Fatal(err)
+		}
+		buildKeys[f] = key
+	}
+	// Probe side: every probe row matches a build row.
+	const probeN = 4096
+	probeRows := make([]struct {
+		ID   int64
+		Name string
+	}, probeN)
+	for i := range probeRows {
+		probeRows[i] = struct {
+			ID   int64
+			Name string
+		}{ID: int64(i % buildN), Name: "row-" + strconv.Itoa(i)}
+	}
+	probeData := makeProbeWshf(t, probeRows)
+
+	probeKey := "in/hj/probe.wshf"
+	if _, err := store.Put(ctx, bucket, probeKey, bytes.NewReader(probeData), int64(len(probeData)), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+
+	cache := NewLRUCache(4 * 1024 * 1024)
+	executor := NewExecutor(store, cache, nil)
+	// Budget sized so reactive spill in buildPartitioned fires between
+	// batches. Each 2048-row batch tracks ~94 KB. A 200 KB budget puts the
+	// 60% spill-cheap threshold (120 KB) between batch 1 and batch 2 — the
+	// post-batch ShouldSpillFor check triggers a partition eviction before
+	// the third batch lands. Probe rows hashing to the spilled partition
+	// route through the flush phase. Without that phase, those probe rows
+	// are silently dropped.
+	executor.SetSharedPoolBudget(500 * 1024)
+
+	task := distributed.Task{
+		ID:           "frag-hj-flush",
+		QueryID:      "q-frag-hj-flush",
+		StageID:      "join-0",
+		Type:         distributed.TaskTypeStage,
+		DataBucket:   bucket,
+		ResultBucket: bucket,
+		ResultPrefix: "out/join-0/",
+		Operators: []distributed.OpSpec{
+			{
+				Type:        distributed.OpShuffleSource,
+				InputAlias:  "probe",
+				InputFiles:  []string{probeKey},
+				InputBucket: bucket,
+			},
+			{
+				// OpBroadcastProbe forces PartitionOnArrival=true on the
+				// HashJoin (see buildFragmentJoinProbe). The tight shared
+				// budget triggers a spill once the second build batch
+				// arrives, putting probe-routing rows on disk.
+				Type:        distributed.OpBroadcastProbe,
+				JoinType:    "inner",
+				LeftKeys:    []string{"id"},
+				RightKeys:   []string{"id"},
+				BuildAlias:  "build",
+				BuildFiles:  buildKeys,
+				BuildBucket: bucket,
+			},
+			{
+				Type: distributed.OpUnpartitionedSink,
+			},
+		},
+	}
+
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(ctx, task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	// Every probe row matches a build row. Without the flush phase, probes
+	// hashing to spilled partitions are silently dropped; the test passes
+	// only when every probe row is accounted for in the joined output.
+	if result.NumRows != int64(probeN) {
+		t.Fatalf("NumRows = %d, want %d (flush of spilled HashJoin partitions failed)",
+			result.NumRows, probeN)
+	}
+}
+
 func TestExecuteFragment_ScanFilterUnpartitioned(t *testing.T) {
 	ctx := context.Background()
 	const bucket = "test-fragment-scan-filt"

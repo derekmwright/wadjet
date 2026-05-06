@@ -122,6 +122,17 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification) error {
 	progress := exec.ProgressReporterFromContext(ctx)
 	var totalRows int64
+	consume := func(ctx context.Context, b *batch.RecordBatch) error {
+		if err := sink.consume(ctx, b); err != nil {
+			return err
+		}
+		n := int64(b.ActiveLen())
+		totalRows += n
+		if progress != nil {
+			progress.AddRows(n)
+		}
+		return nil
+	}
 	for {
 		b, err := src.Next(ctx)
 		if err != nil {
@@ -143,18 +154,74 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 		if cur == nil || cur.ActiveLen() == 0 {
 			continue
 		}
-		if err := sink.consume(ctx, cur); err != nil {
+		if err := consume(ctx, cur); err != nil {
 			return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
 		}
-		n := int64(cur.ActiveLen())
-		totalRows += n
-		if progress != nil {
-			progress.AddRows(n)
-		}
+	}
+	// Spilled-partition flush. Grace Hash Join probes route rows whose hash
+	// partition was evicted to disk; without this drain, those probe rows
+	// never re-enter the chain and the join silently drops matches. Mirror
+	// of exec.Pipeline.flushSpilledOps. Q05 with shared-spill + multi-probe
+	// chain (build pressure → primary's only build partition spills →
+	// every probe row routes to disk) returns 0 rows without this drain.
+	if err := drainFlushableOps(ctx, ops, false, consume); err != nil {
+		return fmt.Errorf("fragment task %s: flush spilled ops: %w", task.ID, err)
 	}
 	result.NumRows = totalRows
 	if err := sink.finalize(ctx, task, result); err != nil {
 		return fmt.Errorf("fragment task %s: sink finalize: %w", task.ID, err)
+	}
+	return nil
+}
+
+// drainFlushableOps drains any FlushableOperators (Grace Hash Join probes that
+// spilled partitions to disk) through the remaining unary chain into consume.
+// Mirrors exec.Pipeline.flushSpilledOps.
+//
+// snapshotSel matters when the downstream consumer retains batch references
+// across calls (Sort, HashAggregate consuming into their internal store) and
+// upstream ops in the chain reuse a per-instance Sel buffer (exec.Filter and
+// the comparison/expression filters do — their selBuf is shared scratch).
+// Without the copy, the next iteration's Filter clobbers the Sel of the
+// already-stored batch. Sinks that consume each batch in one shot (S3 PUT,
+// NATS publish) don't need the copy.
+func drainFlushableOps(ctx context.Context, ops []exec.UnaryOperator, snapshotSel bool, consume func(context.Context, *batch.RecordBatch) error) error {
+	for opIdx, op := range ops {
+		fo, ok := op.(exec.FlushableOperator)
+		if !ok || !fo.HasPendingFlush() {
+			continue
+		}
+		downstream := ops[opIdx+1:]
+		for {
+			b, err := fo.NextFlush(ctx)
+			if err != nil {
+				return err
+			}
+			if b == nil {
+				break
+			}
+			cur := b
+			for _, dop := range downstream {
+				cur, err = dop.Execute(ctx, cur)
+				if err != nil {
+					return err
+				}
+				if cur == nil {
+					break
+				}
+			}
+			if cur == nil || cur.ActiveLen() == 0 {
+				continue
+			}
+			if snapshotSel && cur.Sel != nil {
+				selCopy := make([]uint32, len(cur.Sel))
+				copy(selCopy, cur.Sel)
+				cur.Sel = selCopy
+			}
+			if err := consume(ctx, cur); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -254,6 +321,17 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 
 	last := breakers[len(breakers)-1]
 	var totalRows int64
+	consume := func(ctx context.Context, b *batch.RecordBatch) error {
+		if err := sink.consume(ctx, b); err != nil {
+			return err
+		}
+		n := int64(b.ActiveLen())
+		totalRows += n
+		if progress != nil {
+			progress.AddRows(n)
+		}
+		return nil
+	}
 	for {
 		b, err := currentSrc.Next(ctx)
 		if err != nil {
@@ -284,14 +362,13 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 		if cur == nil || cur.ActiveLen() == 0 {
 			continue
 		}
-		if err := sink.consume(ctx, cur); err != nil {
+		if err := consume(ctx, cur); err != nil {
 			return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
 		}
-		n := int64(cur.ActiveLen())
-		totalRows += n
-		if progress != nil {
-			progress.AddRows(n)
-		}
+	}
+	// Spilled-partition flush for any HashJoin probes in finalOps.
+	if err := drainFlushableOps(ctx, finalOps, false, consume); err != nil {
+		return fmt.Errorf("fragment task %s: flush spilled finalOps: %w", task.ID, err)
 	}
 	result.NumRows = totalRows
 	if err := sink.finalize(ctx, task, result); err != nil {
@@ -312,13 +389,21 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 // corrupt the previously-stored batch's Sel — a Q07-style bug documented
 // at executor_stage.go:applyPostFilter.
 func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch.RecordBatch) (*batch.RecordBatch, error), ops []exec.UnaryOperator, sink exec.Sink) error {
+	consume := func(ctx context.Context, b *batch.RecordBatch) error {
+		if b.Sel != nil {
+			selCopy := make([]uint32, len(b.Sel))
+			copy(selCopy, b.Sel)
+			b.Sel = selCopy
+		}
+		return sink.Consume(ctx, b)
+	}
 	for {
 		b, err := src.Next(ctx)
 		if err != nil {
 			return err
 		}
 		if b == nil {
-			return nil
+			break
 		}
 		cur := b
 		if xform != nil {
@@ -342,15 +427,14 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 		if cur == nil || cur.ActiveLen() == 0 {
 			continue
 		}
-		if cur.Sel != nil {
-			selCopy := make([]uint32, len(cur.Sel))
-			copy(selCopy, cur.Sel)
-			cur.Sel = selCopy
-		}
-		if err := sink.Consume(ctx, cur); err != nil {
+		if err := consume(ctx, cur); err != nil {
 			return err
 		}
 	}
+	// Spilled-partition flush — same reason as runFragmentLinear. The
+	// downstream sink here is a retaining SinkSource (Sort/HashAggregate),
+	// so snapshotSel=true.
+	return drainFlushableOps(ctx, ops, true, consume)
 }
 
 // buildFragmentBreaker dispatches per-OpType breaker construction. Returns a
