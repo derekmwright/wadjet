@@ -98,22 +98,6 @@ func (e *Executor) SharedPoolStats() (used, budget int64) {
 	return e.sharedTracker.Used(), e.sharedTracker.Budget()
 }
 
-// ReserveSharedPool is the admission gate for new tasks. Blocks until the
-// shared pool can fit n bytes (or ctx cancels). Returns the released
-// callback the caller MUST defer to free the reservation.
-//
-// Returns (nil, nil) when no shared pool is configured — in that case
-// the caller proceeds without admission control (single-process embeds,
-// tests).
-func (e *Executor) ReserveSharedPool(ctx context.Context, n int64) (release func(), err error) {
-	if e.sharedTracker == nil || n <= 0 {
-		return func() {}, nil
-	}
-	if err := e.sharedTracker.ReserveBlocking(ctx, n, 100*time.Millisecond); err != nil {
-		return nil, err
-	}
-	return func() { e.sharedTracker.Release(n) }, nil
-}
 
 // SetSharedPoolBudget creates the worker-wide memory pool that all
 // concurrent tasks Reserve against. Operators (HashJoin build, sort

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +92,22 @@ type Worker struct {
 	activeTasksMu sync.RWMutex
 	activeTasks   map[string]struct{} // task IDs currently executing
 
+	// heavyTaskSem caps in-flight Stage and Shuffle tasks at a smaller
+	// fraction of MaxConcurrent so a single worker doesn't admit enough
+	// heavy tasks to overwhelm GOMEMLIMIT during sustained scan-aggregate
+	// or large-shuffle work. Sized at max(1, MaxConcurrent-1) by default
+	// so light task types (gather, control) can still run alongside.
+	//
+	// Why a separate semaphore (not a memory-tracker reservation): admission
+	// reservations on the shared pool double-account against operator
+	// allocations inside admitted tasks. The Q17 SF100 deploy of 4d1c8bd
+	// (2026-05-07) hit `memory budget exceeded` on a HashJoin build that
+	// only needed 77KB because 4 admitted tasks already reserved the full
+	// 19.99GB pool. A pure-counter cap separates "how many heavy tasks can
+	// run" from "how many bytes those tasks have allocated", which is the
+	// Trino split-queue / Spark TaskExecutor pattern.
+	heavyTaskSem chan struct{}
+
 	// CPU profiling state — started/stopped via NATS profile requests.
 	profMu  sync.Mutex
 	profBuf *bytes.Buffer // nil when not profiling
@@ -151,16 +168,34 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		logger.Debug("worker KV fast-path unavailable", "error", kvErr)
 	}
 
+	// Heavy-task semaphore: leave one slot for light tasks so a worker
+	// fully saturated by scan-aggregate or large-shuffle work can still
+	// service gather/control tasks. Tunable per-worker via env if a
+	// deploy needs a different ratio.
+	heavyLimit := cfg.MaxConcurrent - 1
+	if heavyLimit < 1 {
+		heavyLimit = 1
+	}
+	if v := os.Getenv("WADJET_HEAVY_TASK_LIMIT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= cfg.MaxConcurrent {
+			heavyLimit = n
+		}
+	}
+	logger.Info("heavy-task admission gate",
+		"max_concurrent", cfg.MaxConcurrent,
+		"heavy_task_limit", heavyLimit)
+
 	return &Worker{
-		config:    cfg,
-		store:     store,
-		nc:        nc,
-		js:        js,
-		executor:  executor,
-		logger:    logger,
-		cancelled:   make(map[string]time.Time),
-		activeTasks: make(map[string]struct{}),
-		drainCh:   make(chan struct{}),
+		config:       cfg,
+		store:        store,
+		nc:           nc,
+		js:           js,
+		executor:     executor,
+		logger:       logger,
+		cancelled:    make(map[string]time.Time),
+		activeTasks:  make(map[string]struct{}),
+		drainCh:      make(chan struct{}),
+		heavyTaskSem: make(chan struct{}, heavyLimit),
 	}
 }
 
@@ -662,36 +697,34 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		}
 	}()
 
-	// Admission gate: reserve the per-task memory budget on the worker's
-	// shared pool BEFORE we start executing. This bounds in-flight tasks
-	// to roughly (pool_budget / per_task_budget), preventing the
-	// over-commit that pinned heap to GOMEMLIMIT during Q17 SF100
-	// (2026-05-07): four concurrent scan-aggregate tasks each peaking at
-	// 5–6 GB of LIVE working state (decoded parquet + hash + shuffle
-	// buffers) overwhelmed a 19 GB pool, GC ran constantly, heartbeats
-	// starved, coord reaped — but spilling didn't help because the live
-	// memory wasn't a long-lived spillable target.
+	// Heavy-task admission gate. Bounds concurrent in-flight Stage/Shuffle
+	// tasks at heavyTaskSem capacity (default MaxConcurrent-1) so a worker
+	// can't admit enough heavy tasks to overwhelm GOMEMLIMIT. The Q17 SF100
+	// deploy of c465eef (2026-05-07) showed all four MaxConcurrent slots
+	// saturated → heap pinned at GOMEMLIMIT → GC thrashed → heartbeats
+	// starved → coord reaped. With one slot held back, three heavy tasks
+	// run concurrently (~15 GB live on a 19 GB pool) leaving headroom for
+	// in-task operator allocations and GC garbage.
 	//
-	// Heavy stage and shuffle tasks are gated; lightweight types
-	// (TaskTypeProgress, etc.) skip admission. Non-stage types can be
-	// added here as we accumulate evidence about their working sets.
+	// Pure counter — does NOT consume the shared memory pool. The pool is
+	// for actual operator allocations (HashJoin builds, HashAggregate
+	// state, ExchangeSender buffers). The 4d1c8bd deploy that did pool
+	// reservations alongside operator usage hit `memory budget exceeded`
+	// on a 77KB HashJoin init because four admitted tasks reserved the
+	// full 19.99 GB pool — admission ate the operators' headroom.
 	//
-	// On reservation timeout / cancel, return msg.Nak so JetStream
-	// redelivers; another worker (or this one, later) admits it.
-	var releasePoolReservation func()
-	if admissionBytes := w.admissionReservation(task); admissionBytes > 0 {
-		release, err := w.executor.ReserveSharedPool(taskCtx, admissionBytes)
-		if err != nil {
-			w.logger.Warn("admission gate cancelled; nack for redelivery",
+	// On context cancellation, Nak so JetStream redelivers.
+	if w.isHeavyTask(task) {
+		select {
+		case w.heavyTaskSem <- struct{}{}:
+			defer func() { <-w.heavyTaskSem }()
+		case <-taskCtx.Done():
+			w.logger.Warn("heavy-task admission cancelled; nack for redelivery",
 				"task_id", task.ID, "stage_id", task.StageID,
-				"reservation_bytes", admissionBytes, "error", err)
+				"error", taskCtx.Err())
 			msg.Nak()
 			return
 		}
-		releasePoolReservation = release
-	}
-	if releasePoolReservation != nil {
-		defer releasePoolReservation()
 	}
 
 	// Recover from panics in task execution to prevent crashing
@@ -822,27 +855,21 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	w.logger.Info("task completed", logAttrsEnd...)
 }
 
-// admissionReservation returns the number of shared-pool bytes the worker
-// should reserve before starting this task. Heavy task types (stage, shuffle)
-// reserve the per-task MemoryBudget so the pool gates concurrent in-flight
-// tasks. Returns 0 for types whose working set is small enough that
-// admission control would just add latency.
+// isHeavyTask reports whether this task should pass through the
+// heavyTaskSem admission gate. Stage and Shuffle tasks at SF100 scale
+// hold multi-GB working sets (decoded parquet + hash tables + partition
+// buffers); a worker running MaxConcurrent of them concurrently
+// exhausts GOMEMLIMIT before any task can complete.
 //
-// The model treats MemoryBudget as a per-task reservation rather than a
-// per-task budget. The shared-pool ratio of pool_budget / MemoryBudget
-// determines the worker's effective concurrency — independent of the
-// MaxConcurrent semaphore (which exists for goroutine isolation). Today's
-// SF100 deploy: pool=19GB, per-task=5GB, so ~3-4 stage tasks can be
-// admitted at once, even when MaxConcurrent allows 4.
-func (w *Worker) admissionReservation(task distributed.Task) int64 {
-	if w.config.MemoryBudget <= 0 {
-		return 0
-	}
+// Light task types — Gather streams to the coord, Pipeline runs in a
+// scope where heap is bounded by other means — skip the gate so a
+// worker fully saturated by heavy work can still service them.
+func (w *Worker) isHeavyTask(task distributed.Task) bool {
 	switch task.Type {
 	case distributed.TaskTypeStage, distributed.TaskTypeShuffle:
-		return w.config.MemoryBudget
+		return true
 	}
-	return 0
+	return false
 }
 
 // publishDLQ sends a failed task to the dead-letter queue for later inspection.
