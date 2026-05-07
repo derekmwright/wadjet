@@ -469,6 +469,94 @@ func TestExternalMergeSpill_KWayMerge(t *testing.T) {
 	}
 }
 
+// TestExternalMergeSpill_StreamingNext verifies that finalizeViaPartialMerge
+// runs in streaming mode: after Finalize, partialMerger is non-nil and
+// strGroupStates is empty (we don't materialize the merged result up front).
+// Each Next() pulls one batch's worth, and the merger is closed when the
+// last batch is drained.
+func TestExternalMergeSpill_StreamingNext(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	ctx := context.Background()
+	tracker := memory.NewTracker("test", 1_000)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHashAggregate([]string{"k"}, []AggColumn{
+		{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+	})
+	h.Spill = sm
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tracker.ForceReserve(900) // force pressure on first Consume
+
+	const numGroups = 5000 // multiple batches worth of merged output
+	const batches = 5
+	expected := make(map[int64]int64, numGroups)
+	for bi := 0; bi < batches; bi++ {
+		rows := make([]map[string]any, 0, numGroups)
+		for k := int64(0); k < int64(numGroups); k++ {
+			v := int64(bi + 1)
+			rows = append(rows, map[string]any{"k": k, "v": v})
+			expected[k] += v
+		}
+		if err := h.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Streaming-mode invariants right after Finalize:
+	if h.partialMerger == nil {
+		t.Fatal("expected partialMerger set after Finalize, got nil")
+	}
+	if len(h.strGroupStates) != 0 {
+		t.Errorf("strGroupStates should be empty in streaming mode, got %d", len(h.strGroupStates))
+	}
+
+	// Drain Next() across multiple calls. Verify that the merger drains
+	// across at least 2 batches (numGroups > DefaultBatchSize).
+	got := make(map[int64]int64, numGroups)
+	nBatches := 0
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		nBatches++
+		for _, r := range out.ToRows() {
+			got[r["k"].(int64)] = r["total"].(int64)
+		}
+	}
+	if nBatches < 2 {
+		t.Errorf("expected streaming to span >=2 batches for %d groups, got %d", numGroups, nBatches)
+	}
+	if h.partialMerger != nil {
+		t.Errorf("expected partialMerger cleared after exhaustion, still set")
+	}
+
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != numGroups {
+		t.Fatalf("group count: got %d want %d", len(got), numGroups)
+	}
+	for k, want := range expected {
+		if got[k] != want {
+			t.Errorf("k=%d: got %d want %d", k, got[k], want)
+		}
+	}
+}
+
 func bytesEq(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false

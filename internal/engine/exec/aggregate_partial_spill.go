@@ -1275,27 +1275,26 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	h.groupIndexBuf = nil
 }
 
-// finalizeViaPartialMerge merges all partial-spill runs (plus any in-memory
-// remainder produced by the final Consume) into the canonical in-memory
-// group-state structure that Next() iterates. After this returns:
-//   - h.strGroupStates carries the merged groups
-//   - h.keys carries display values aligned with strGroupStates
-//   - h.intFlatAccs is nil (already materialized into gs.accs)
-//   - The fast-path mode flags are cleared so Next() falls into the generic
-//     output emission path
+// finalizeViaPartialMerge sets up a streaming k-way merge over all
+// partial-spill runs plus the in-memory remainder. The merger is stored on
+// the HashAggregate; Next() drains it incrementally into output batches.
 //
-// This is correct for any simpleAggs/SoA configuration because the merger
-// produces sorted-by-key output and we feed each merged group as a fresh
-// strGroupStates entry; equal keys never appear twice.
+// Memory bound: peak in-Next() footprint is one output batch (~2048 rows)
+// plus the merger's heap entries (one per run) plus each run's current
+// head group. Critically NOT proportional to the merged group count, so
+// SF1000+ "output >> memory" cases are tractable.
 //
-// Memory bound: the final result must fit in memory (we hold all merged
-// groups during Next). Streaming Next is a future enhancement; for now,
-// "final groups fit" is a weaker assumption than today's "all input rows
-// fit re-aggregated", and unblocks the SF100+ case where input >> output.
+// Spill files are deleted by Close() once the merger is closed, not here —
+// the runs need them open during Next() drains.
 func (h *HashAggregate) finalizeViaPartialMerge() error {
 	// Capture specs before materialize clears intFlatAccs (same ordering
 	// constraint as spillPartialState).
 	specs := h.buildPartialAggSpecs()
+	// Capture the output schema while the path-mode flags + groupColTypes
+	// reflect the original configuration. Once we collapse to streaming
+	// mode below, outputSchema()'s heuristics (which depend on those flags)
+	// would emit a different shape.
+	h.partialMergerSchema = h.outputSchema()
 
 	// Drain any remaining in-memory groups to the merger as a memory run.
 	// We don't write them to disk — they're already in RAM, no point doing
@@ -1320,42 +1319,90 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 		sources = append(sources, src)
 	}
 
-	merger := newKWayMerger(sources, specs)
-	defer merger.Close()
-
-	// Reset state so we can repopulate via the generic strGroupStates path.
-	// This collapses the SoA fast-path's separate intGroupStates into a
-	// uniform strGroupStates layout for output emission.
+	// Reset in-memory state so the existing Next() emission paths can't
+	// accidentally drive output from leftover hash table entries — only the
+	// merger drives output now.
 	h.resetGroupStateAfterSpill()
 	h.useIntGroupKey = false
 	h.useDualIntGroupKey = false
 	h.useCompactGroupKey = false
 	h.useStrGroupKey = false
 	h.useGenericSoA = false
-	if h.strGroupIndex == nil {
-		h.strGroupIndex = newStrHashTable(4096)
-	}
 
-	for {
-		g, err := merger.Next()
-		if err != nil {
-			return err
-		}
-		if g == nil {
-			break
-		}
-		gs := h.gsPool.alloc()
-		gs.keyValues = g.KeyVals
-		gs.accs = g.Accs
-		h.strGroupStates = append(h.strGroupStates, gs)
-		h.keys = append(h.keys, g.KeyVals)
-		h.serializedKeys = append(h.serializedKeys, string(g.SortKey))
-	}
+	h.partialMerger = newKWayMerger(sources, specs)
+	return nil
+}
 
-	// Clean up spill files now that we've consumed them.
+// closePartialMerger closes the active streaming merger (if any), removes
+// the spill files it consumed, and releases internal references. Idempotent
+// — safe to call from Next() at exhaustion AND from Close() as a backstop.
+func (h *HashAggregate) closePartialMerger() {
+	if h.partialMerger != nil {
+		_ = h.partialMerger.Close()
+		h.partialMerger = nil
+	}
 	for _, path := range h.partialSpillFiles {
 		_ = os.Remove(path)
 	}
 	h.partialSpillFiles = nil
-	return nil
+	h.partialMergerSchema = nil
+}
+
+// nextFromPartialMerger drains up to batch.DefaultBatchSize groups from the
+// streaming merger and emits them as a single output batch matching the
+// previously captured output schema. Returns (nil, nil) when the merger is
+// exhausted.
+//
+// Caller must hold h.mu (Next does not lock today, but the merger field is
+// only mutated by Finalize and Close, both of which run on the main goroutine
+// — concurrent SpillSome only touches pre-finalize state).
+func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
+	if h.partialMerger == nil {
+		return nil, nil
+	}
+	rows := make([]partialGroup, 0, batch.DefaultBatchSize)
+	for len(rows) < batch.DefaultBatchSize {
+		g, err := h.partialMerger.Next()
+		if err != nil {
+			h.closePartialMerger()
+			return nil, err
+		}
+		if g == nil {
+			break
+		}
+		rows = append(rows, *g)
+	}
+	if len(rows) == 0 {
+		h.closePartialMerger()
+		return nil, nil
+	}
+	out := batch.NewRecordBatch(h.partialMergerSchema, len(rows))
+	nGroupCols := len(h.GroupByCols)
+	for i, g := range rows {
+		// Group-by columns: write each keyVal into its column. KeyVals were
+		// produced by drainSimpleAggsToPartialGroups (or readKeyValue from
+		// disk), which preserves the original typed value, so SetValue
+		// stores them through the right typed path without an extra cast.
+		for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
+			if g.KeyVals[k] == nil {
+				out.Columns[k].Nulls.SetNull(i)
+				continue
+			}
+			out.Columns[k].SetValue(i, g.KeyVals[k])
+		}
+		// Aggregate columns: finalize each accumulator to its output value
+		// using the same kernel finalizer as the in-memory path. Only
+		// SUM/COUNT/MIN/MAX/AVG reach here (canUseExternalMerge gate); the
+		// kernel handles each correctly via finalizeKernelAcc.
+		for j, agg := range h.Aggs {
+			colIdx := nGroupCols + j
+			result := finalizeKernelAcc(&g.Accs[j], agg.Func)
+			if result == nil {
+				out.Columns[colIdx].Nulls.SetNull(i)
+				continue
+			}
+			out.Columns[colIdx].SetValue(i, result)
+		}
+	}
+	return out, nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -157,6 +156,17 @@ type HashAggregate struct {
 	// materialized the final result (no more reclaimable state) or in Close
 	// as a backstop.
 	unregisterSpillable func()
+	// partialMerger, when non-nil, drives streaming Next() from the
+	// k-way merge of partial-spill runs. Set by finalizeViaPartialMerge
+	// (streaming variant); each Next() pulls one batch's worth of merged
+	// groups from it. This avoids materializing the full merged result in
+	// memory — the bound is "one output batch + heap entries", which is
+	// what makes the SF1000+ "output >> memory" case tractable. Cleared in
+	// Close (and naturally drains to nil-return when exhausted).
+	partialMerger *kWayMerger
+	// partialMergerSchema caches the output schema computed at finalize
+	// time so streaming Next() doesn't recompute it per call.
+	partialMergerSchema []parquet.Column
 	// spillBuffer holds rows from Consume calls in the spill branch that
 	// have not yet been flushed to disk. Rows are accumulated here across
 	// many Consume calls so that each physical spill file contains a
@@ -2052,14 +2062,11 @@ func (h *HashAggregate) Close() error {
 			h.spillBufferBytes = 0
 		}
 	}
-	// Remove any partial-spill files that survived (early-terminate paths
-	// where Finalize was never called, e.g. query cancellation). Best-effort:
-	// errors here just leave files in the spill dir for the worker's next
-	// Cleanup pass.
-	for _, path := range h.partialSpillFiles {
-		_ = os.Remove(path)
-	}
-	h.partialSpillFiles = nil
+	// Close the streaming merger (if any) and remove its spill files. This
+	// is the backstop for early-termination paths (cancellation, error
+	// before exhaustion); the normal drain in Next() also calls
+	// closePartialMerger when the merger returns nil.
+	h.closePartialMerger()
 	h.spillBuffer = nil
 	return nil
 }
@@ -2116,6 +2123,14 @@ func (h *HashAggregate) SpillSome(target int64) (int64, error) {
 
 // Next returns the aggregated results in batches of DefaultBatchSize rows.
 func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
+	// Streaming partial-merge path: when finalizeViaPartialMerge stored a
+	// merger, drain it incrementally instead of walking strGroupStates.
+	// This bounds peak Next() memory to ~one batch + merger heap, which is
+	// what makes "output groups >> memory" tractable.
+	if h.partialMerger != nil {
+		return h.nextFromPartialMerger()
+	}
+
 	// Materialize SoA flat accumulators to per-group AoS on first call.
 	h.materializeFlatAccums()
 
