@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -139,9 +140,17 @@ type HashAggregate struct {
 	resolved       bool
 	needsDistinct  bool // true if any agg uses distinctSets
 	needsExtra     bool // true if any agg uses extraState
+	simpleAggs     bool // true when every Agg fits the kernel.Accumulator shape
+	                   // (SUM, COUNT, MIN, MAX, AVG only — no distinct/extra state).
+	                   // Drives external-merge partial-state spill eligibility.
 	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles    []string
+	// partialSpillFiles holds external-merge spill files (sorted partial group
+	// state). These are produced when simpleAggs && one of the SoA paths is in
+	// use; Finalize k-way merges them. Distinct from spillFiles because the
+	// merge logic differs (re-aggregate raw rows vs. merge partial accs).
+	partialSpillFiles []string
 	// spillBuffer holds rows from Consume calls in the spill branch that
 	// have not yet been flushed to disk. Rows are accumulated here across
 	// many Consume calls so that each physical spill file contains a
@@ -415,6 +424,21 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// when the actual group state was a handful of rows (e.g. Q12 with 7
 	// shipmode groups). That inflated 250ms Q12 work to 37s of spill I/O.
 	if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) {
+		// External-merge path: when the aggregate uses simple kernel
+		// accumulators on an SoA fast path, drain the current hash table
+		// to a sorted partial-state file and reset state. Finalize will
+		// k-way merge across runs. This avoids the legacy raw-row spill's
+		// pathological re-scan in Finalize at SF100+.
+		if h.canUseExternalMerge() {
+			// Consume this batch FIRST so its rows enter the hash table
+			// before we drain. This keeps the per-spill file dense (one
+			// drain per pressure event) instead of a write per Consume.
+			h.consumeBatch(b)
+			h.reconcileGroupMemory()
+			return h.spillPartialState()
+		}
+		// Legacy raw-row spill (extra-state aggs, grouping sets, scalar):
+		// buffer rows on disk and re-aggregate in Finalize.
 		rows := b.ToRows()
 		h.spillBuffer = append(h.spillBuffer, rows...)
 		h.spillBufferBytes += EstimateBatchBytes(b)
@@ -581,6 +605,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			}
 		}
 	}
+	h.simpleAggs = allSimpleAggs
 
 	// Pre-sizing hint: initial hash-table capacity. InputRowHint reflects the
 	// aggregate's INPUT row count (derived from scan estimates), which is a
@@ -1923,6 +1948,16 @@ func (h *HashAggregate) flushSpillBuffer() error {
 }
 
 func (h *HashAggregate) Finalize(_ context.Context) error {
+	// External-merge path: when partial-state files exist, k-way merge them
+	// (plus any in-memory remainder) instead of re-aggregating raw rows. This
+	// is the SF100+ unblock: the legacy raw-row Finalize re-reads ALL spilled
+	// input back into the hash table and re-runs Consume on it, blowing the
+	// budget when input >> output. Partial-state merge processes each group
+	// once and is bounded by the merged result size.
+	if len(h.partialSpillFiles) > 0 {
+		return h.finalizeViaPartialMerge()
+	}
+
 	if len(h.spillFiles) == 0 && len(h.spillBuffer) == 0 {
 		return nil
 	}
@@ -1989,6 +2024,14 @@ func (h *HashAggregate) Close() error {
 			h.spillBufferBytes = 0
 		}
 	}
+	// Remove any partial-spill files that survived (early-terminate paths
+	// where Finalize was never called, e.g. query cancellation). Best-effort:
+	// errors here just leave files in the spill dir for the worker's next
+	// Cleanup pass.
+	for _, path := range h.partialSpillFiles {
+		_ = os.Remove(path)
+	}
+	h.partialSpillFiles = nil
 	h.spillBuffer = nil
 	return nil
 }

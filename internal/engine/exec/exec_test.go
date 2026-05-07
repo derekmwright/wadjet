@@ -590,10 +590,12 @@ func TestHashAggregateMergeThenSpillFinalize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// After the spill-fragmentation fix, small spilled payloads land in the
-	// in-memory buffer rather than a new file. Either indicates the spill
-	// path was exercised.
-	if len(primary.spillFiles) == 0 && len(primary.spillBuffer) == 0 {
+	// Spill exercised when any of the three sinks recorded activity:
+	// legacy raw-row file, in-memory buffer (small payloads), or external-
+	// merge partial-state file. The simple-aggs SoA path now routes through
+	// partialSpillFiles, so a successful spill leaves spillFiles=0 here.
+	if len(primary.spillFiles) == 0 && len(primary.spillBuffer) == 0 &&
+		len(primary.partialSpillFiles) == 0 {
 		t.Fatal("expected spill path to be exercised but nothing was written or buffered")
 	}
 
@@ -701,8 +703,9 @@ func TestHashAggregateSpillBatching(t *testing.T) {
 
 	// Sanity: we exercised the spill path. Before the fix this manifests as
 	// many spillFiles; after the fix it may manifest as buffered rows that
-	// haven't yet been flushed to disk.
-	if len(h.spillFiles) == 0 && len(h.spillBuffer) == 0 {
+	// haven't yet been flushed to disk, OR (since simple-aggs external merge)
+	// as partial-state files.
+	if len(h.spillFiles) == 0 && len(h.spillBuffer) == 0 && len(h.partialSpillFiles) == 0 {
 		t.Fatal("spill path was never exercised; tracker/budget setup is wrong for this test")
 	}
 
@@ -794,13 +797,16 @@ func TestHashAggregateSpillBufferFlush(t *testing.T) {
 		}
 	}
 
-	// With a tiny flush threshold, we should have produced multiple files
-	// (but far fewer than numBatches).
-	if got := len(h.spillFiles); got == 0 {
-		t.Error("expected flush path to produce at least one spill file")
+	// With a tight budget, the simple-aggs path produces partial-state files
+	// (one drain per pressure event) and the legacy path produces buffered
+	// raw-row files (one per spillBuffer flush). Either is acceptable for
+	// the "multiple files, far fewer than numBatches" intent of this test.
+	totalFiles := len(h.spillFiles) + len(h.partialSpillFiles)
+	if totalFiles == 0 {
+		t.Error("expected spill path to produce at least one file")
 	}
-	if got := len(h.spillFiles); got >= numBatches {
-		t.Errorf("flush did not batch across Consume calls: got %d files for %d batches", got, numBatches)
+	if totalFiles >= numBatches {
+		t.Errorf("spill did not batch across Consume calls: got %d files for %d batches", totalFiles, numBatches)
 	}
 
 	if err := h.Finalize(ctx); err != nil {
