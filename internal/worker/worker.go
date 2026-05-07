@@ -662,6 +662,38 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		}
 	}()
 
+	// Admission gate: reserve the per-task memory budget on the worker's
+	// shared pool BEFORE we start executing. This bounds in-flight tasks
+	// to roughly (pool_budget / per_task_budget), preventing the
+	// over-commit that pinned heap to GOMEMLIMIT during Q17 SF100
+	// (2026-05-07): four concurrent scan-aggregate tasks each peaking at
+	// 5–6 GB of LIVE working state (decoded parquet + hash + shuffle
+	// buffers) overwhelmed a 19 GB pool, GC ran constantly, heartbeats
+	// starved, coord reaped — but spilling didn't help because the live
+	// memory wasn't a long-lived spillable target.
+	//
+	// Heavy stage and shuffle tasks are gated; lightweight types
+	// (TaskTypeProgress, etc.) skip admission. Non-stage types can be
+	// added here as we accumulate evidence about their working sets.
+	//
+	// On reservation timeout / cancel, return msg.Nak so JetStream
+	// redelivers; another worker (or this one, later) admits it.
+	var releasePoolReservation func()
+	if admissionBytes := w.admissionReservation(task); admissionBytes > 0 {
+		release, err := w.executor.ReserveSharedPool(taskCtx, admissionBytes)
+		if err != nil {
+			w.logger.Warn("admission gate cancelled; nack for redelivery",
+				"task_id", task.ID, "stage_id", task.StageID,
+				"reservation_bytes", admissionBytes, "error", err)
+			msg.Nak()
+			return
+		}
+		releasePoolReservation = release
+	}
+	if releasePoolReservation != nil {
+		defer releasePoolReservation()
+	}
+
 	// Recover from panics in task execution to prevent crashing
 	// the entire worker process on schema mismatches or other bugs.
 	var result distributed.ResultNotification
@@ -788,6 +820,29 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		logAttrsEnd = append(logAttrsEnd, "error", result.Error)
 	}
 	w.logger.Info("task completed", logAttrsEnd...)
+}
+
+// admissionReservation returns the number of shared-pool bytes the worker
+// should reserve before starting this task. Heavy task types (stage, shuffle)
+// reserve the per-task MemoryBudget so the pool gates concurrent in-flight
+// tasks. Returns 0 for types whose working set is small enough that
+// admission control would just add latency.
+//
+// The model treats MemoryBudget as a per-task reservation rather than a
+// per-task budget. The shared-pool ratio of pool_budget / MemoryBudget
+// determines the worker's effective concurrency — independent of the
+// MaxConcurrent semaphore (which exists for goroutine isolation). Today's
+// SF100 deploy: pool=19GB, per-task=5GB, so ~3-4 stage tasks can be
+// admitted at once, even when MaxConcurrent allows 4.
+func (w *Worker) admissionReservation(task distributed.Task) int64 {
+	if w.config.MemoryBudget <= 0 {
+		return 0
+	}
+	switch task.Type {
+	case distributed.TaskTypeStage, distributed.TaskTypeShuffle:
+		return w.config.MemoryBudget
+	}
+	return 0
 }
 
 // publishDLQ sends a failed task to the dead-letter queue for later inspection.
