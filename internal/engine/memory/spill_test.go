@@ -1,8 +1,11 @@
 package memory
 
 import (
+	"context"
 	"math"
+	"runtime/debug"
 	"testing"
+	"time"
 )
 
 func TestSpillManager(t *testing.T) {
@@ -299,4 +302,98 @@ func TestShouldSpillFor_ExpensiveTriggersAt90Percent(t *testing.T) {
 	if !sm.ShouldSpillFor(SpillCheap) {
 		t.Errorf("at 90.1%% of budget, SpillCheap should also fire")
 	}
+}
+
+// TestPauseOnHeapBackpressure_NoLimit confirms the helper is a no-op when
+// GOMEMLIMIT is unset. Most embedded callers (single-process wadjet.DB,
+// tests not running under the worker) hit this path, and PauseOnHeapBackpressure
+// must stay cheap there.
+func TestPauseOnHeapBackpressure_NoLimit(t *testing.T) {
+	// Reset cached state so the test sees current GOMEMLIMIT.
+	resetHeapBackpressureCache(t)
+
+	prev := debug.SetMemoryLimit(-1)
+	debug.SetMemoryLimit(math.MaxInt64) // disable limit
+	t.Cleanup(func() { debug.SetMemoryLimit(prev); resetHeapBackpressureCache(t) })
+
+	if HeapBackpressureActive() {
+		t.Errorf("HeapBackpressureActive should be false when GOMEMLIMIT is unset")
+	}
+	start := time.Now()
+	if err := PauseOnHeapBackpressure(context.Background()); err != nil {
+		t.Errorf("PauseOnHeapBackpressure returned err: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Millisecond {
+		t.Errorf("PauseOnHeapBackpressure should be near-instant, took %v", elapsed)
+	}
+}
+
+// TestPauseOnHeapBackpressure_RespectsContextCancel confirms that when
+// pressure is active and a pause is in flight, ctx cancellation is honored
+// promptly so worker shutdown isn't blocked on a 50ms sleep per task.
+func TestPauseOnHeapBackpressure_RespectsContextCancel(t *testing.T) {
+	resetHeapBackpressureCache(t)
+
+	// Force the cached value to "active" by writing it directly.
+	heapBackpressureMu.Lock()
+	heapBackpressureLastValue = true
+	heapBackpressureLastCheck = time.Now()
+	heapBackpressureMu.Unlock()
+	t.Cleanup(func() { resetHeapBackpressureCache(t) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // immediate
+
+	start := time.Now()
+	err := PauseOnHeapBackpressure(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Errorf("PauseOnHeapBackpressure should return ctx.Err() when cancelled")
+	}
+	if elapsed > 20*time.Millisecond {
+		t.Errorf("PauseOnHeapBackpressure should return promptly on cancel, took %v", elapsed)
+	}
+}
+
+// TestPauseOnHeapBackpressure_PausesUnderPressure confirms that when
+// HeapBackpressureActive is true and ctx is alive, PauseOnHeapBackpressure
+// blocks for ~HeapBackpressurePauseDuration. Validates the actual sleep
+// path runs end-to-end.
+func TestPauseOnHeapBackpressure_PausesUnderPressure(t *testing.T) {
+	resetHeapBackpressureCache(t)
+
+	heapBackpressureMu.Lock()
+	heapBackpressureLastValue = true
+	heapBackpressureLastCheck = time.Now()
+	heapBackpressureMu.Unlock()
+	t.Cleanup(func() { resetHeapBackpressureCache(t) })
+
+	start := time.Now()
+	if err := PauseOnHeapBackpressure(context.Background()); err != nil {
+		t.Fatalf("expected nil err, got %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < HeapBackpressurePauseDuration {
+		t.Errorf("expected pause >= %v, got %v", HeapBackpressurePauseDuration, elapsed)
+	}
+	// Allow generous slack for scheduler jitter (CI under load).
+	if elapsed > HeapBackpressurePauseDuration*4 {
+		t.Errorf("pause took longer than expected: %v vs %v expected",
+			elapsed, HeapBackpressurePauseDuration)
+	}
+}
+
+// resetHeapBackpressureCache wipes the package-level cache so the next call
+// re-reads runtime.MemStats. Tests that toggle GOMEMLIMIT must call this
+// after Setenv/SetMemoryLimit.
+func resetHeapBackpressureCache(_ *testing.T) {
+	heapBackpressureMu.Lock()
+	heapBackpressureLastCheck = time.Time{}
+	heapBackpressureLastValue = false
+	heapBackpressureMu.Unlock()
+	heapPressureMu.Lock()
+	heapPressureMemLimit = 0 // force re-read on next call
+	heapPressureMu.Unlock()
 }

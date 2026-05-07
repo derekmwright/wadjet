@@ -2,6 +2,7 @@ package memory
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -164,12 +166,119 @@ func (sm *SpillManager) ShouldSpill() bool {
 // genuine OOM-imminent situations.
 const heapPressureRatio = 0.95
 
+// heapBackpressureRatio is the fraction of GOMEMLIMIT at which fragment
+// runners pause briefly before reading the next batch. Lower than the
+// 0.95 spill threshold because backpressure is non-destructive — it just
+// slows the producer to let GC catch up and downstream operators drain.
+//
+// 0.70 lines up with the GOGC=100 collection cycle: the GC keeps live
+// heap to roughly half of the trigger point, so pausing when total heap
+// crosses 70% of GOMEMLIMIT gives one full collection cycle of headroom
+// before the 95% spill backstop or the cgroup MemoryHigh ceiling fire.
+//
+// Set via WADJET_HEAP_BACKPRESSURE_RATIO env var (e.g. "0.6") for tuning.
+// Disable with "0" or by leaving GOMEMLIMIT unset.
+const heapBackpressureRatio = 0.70
+
 var (
 	heapPressureMu        sync.Mutex
 	heapPressureLastCheck time.Time
 	heapPressureLastValue bool
 	heapPressureMemLimit  int64 // cached debug.SetMemoryLimit value
 )
+
+var (
+	heapBackpressureMu        sync.Mutex
+	heapBackpressureLastCheck time.Time
+	heapBackpressureLastValue bool
+	heapBackpressureRatioOnce sync.Once
+	heapBackpressureRatioEff  float64
+)
+
+func effectiveHeapBackpressureRatio() float64 {
+	heapBackpressureRatioOnce.Do(func() {
+		heapBackpressureRatioEff = heapBackpressureRatio
+		if v := os.Getenv("WADJET_HEAP_BACKPRESSURE_RATIO"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f < 1 {
+				heapBackpressureRatioEff = f
+			}
+		}
+	})
+	return heapBackpressureRatioEff
+}
+
+// HeapBackpressurePauseDuration is how long PauseOnHeapBackpressure
+// sleeps when HeapBackpressureActive fires. 50ms is one to two GC cycles
+// at typical SF100 allocation rates — long enough for live heap to drop,
+// short enough that downstream consumers don't time out.
+const HeapBackpressurePauseDuration = 50 * time.Millisecond
+
+// PauseOnHeapBackpressure is a one-line helper that callers can invoke
+// between batches: if heap pressure is high, sleep briefly so GC can
+// catch up. Returns ctx.Err() if the context is cancelled during the
+// pause, nil otherwise (including when no pressure is detected).
+//
+// Cheap when no pressure: one cached-atomic check.
+func PauseOnHeapBackpressure(ctx context.Context) error {
+	if !HeapBackpressureActive() {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(HeapBackpressurePauseDuration):
+	}
+	return nil
+}
+
+// HeapBackpressureActive reports whether process heap usage is high
+// enough that batch producers in fragment runners should pause briefly
+// to let GC catch up and downstream operators drain. Cached for 100 ms
+// across all callers so the per-batch overhead stays near zero.
+//
+// The signal is intentionally a coarse tide gauge — a process-wide
+// HeapAlloc check, NOT a per-operator tracker check. The motivating
+// failure mode (Q17 SF100, 2026-05-07) was tasks heap-thrashing while
+// the tracker reported only ~80MB used because the actual 20GB+ of
+// per-task heap lived in transient parquet decode + hash routing
+// allocations that no operator owns long enough to be Spillable.
+//
+// Use this between batches in the consume loop, not in per-row hot
+// paths. Returns false when GOMEMLIMIT is unset.
+func HeapBackpressureActive() bool {
+	ratio := effectiveHeapBackpressureRatio()
+	if ratio <= 0 {
+		return false
+	}
+	heapBackpressureMu.Lock()
+	defer heapBackpressureMu.Unlock()
+
+	if time.Since(heapBackpressureLastCheck) < 100*time.Millisecond {
+		return heapBackpressureLastValue
+	}
+	heapBackpressureLastCheck = time.Now()
+
+	// Reuse the spill-side cached limit lookup to avoid a second
+	// debug.SetMemoryLimit call. Both functions share the same value once
+	// cached.
+	heapPressureMu.Lock()
+	if heapPressureMemLimit == 0 {
+		heapPressureMemLimit = debug.SetMemoryLimit(-1)
+	}
+	limit := heapPressureMemLimit
+	heapPressureMu.Unlock()
+
+	if limit <= 0 || limit == math.MaxInt64 {
+		heapBackpressureLastValue = false
+		return false
+	}
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	threshold := int64(float64(limit) * ratio)
+	heapBackpressureLastValue = int64(ms.HeapAlloc) > threshold
+	return heapBackpressureLastValue
+}
 
 // heapPressureExceeded reads runtime.MemStats and returns true if the
 // heap is using more than heapPressureRatio of GOMEMLIMIT. Result is

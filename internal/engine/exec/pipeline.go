@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -62,6 +63,14 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 			}
 		}
 		batchCount++
+
+		// Heap-aware backpressure: when process heap is approaching
+		// GOMEMLIMIT, pause briefly so GC can reclaim before pulling more
+		// data. Cheap (cached check) when no pressure; sleeps 50ms when
+		// fired. See memory.HeapBackpressureActive for rationale.
+		if err := memory.PauseOnHeapBackpressure(ctx); err != nil {
+			return err
+		}
 
 		b, err := p.Source.Next(ctx)
 		if err != nil {
@@ -289,6 +298,17 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 					if ds.Done() {
 						return
 					}
+				}
+
+				// Heap-aware backpressure (parallel variant). All workers
+				// pause concurrently when fired, so the system-wide pause
+				// is the same 50ms regardless of Workers count.
+				if err := memory.PauseOnHeapBackpressure(workerCtx); err != nil {
+					if workerCtx.Err() == nil {
+						firstErr.CompareAndSwap(nil, err)
+						cancel()
+					}
+					return
 				}
 
 				b, err := p.Source.Next(workerCtx)
