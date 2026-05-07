@@ -831,6 +831,12 @@ type statsCache struct {
 	rss           int64
 	numGoroutines int
 	spillBytes    int64
+	// GC pressure signals sampled alongside the existing fields. Used by the
+	// stats logger so worker logs surface periods where the GC is taking
+	// significant CPU — the SF100 Q17 hang investigation needed this signal
+	// to confirm whether 90s heartbeat gaps were real GC stalls or NATS-side.
+	numGC         uint32
+	pauseTotalNs  uint64
 }
 
 func (s *statsCache) refresh(spillDir string) {
@@ -846,6 +852,8 @@ func (s *statsCache) refresh(spillDir string) {
 	s.rss = rss
 	s.numGoroutines = ng
 	s.spillBytes = spill
+	s.numGC = ms.NumGC
+	s.pauseTotalNs = ms.PauseTotalNs
 	s.mu.Unlock()
 }
 
@@ -859,6 +867,8 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 	// Initial snapshot so the first heartbeat after startup carries real
 	// values rather than zeros.
 	cache.refresh(w.config.SpillDir)
+	var prevGC uint32
+	var prevPauseNs uint64
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -867,6 +877,23 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 			return
 		case <-ticker.C:
 			cache.refresh(w.config.SpillDir)
+			// Surface GC pressure deltas in the worker log so the next
+			// SF100 Q17-class hang can be diagnosed without instrumenting
+			// the wire format. Logged every 30s alongside refresh.
+			cache.mu.RLock()
+			alloc, rss := cache.allocBytes, cache.rss
+			ng := cache.numGoroutines
+			gcDelta := cache.numGC - prevGC
+			pauseDeltaNs := cache.pauseTotalNs - prevPauseNs
+			prevGC = cache.numGC
+			prevPauseNs = cache.pauseTotalNs
+			cache.mu.RUnlock()
+			w.logger.Info("worker stats",
+				"alloc_mb", alloc/1024/1024,
+				"rss_mb", rss/1024/1024,
+				"goroutines", ng,
+				"gc_delta", gcDelta,
+				"gc_pause_delta_ms", pauseDeltaNs/1_000_000)
 		}
 	}
 }
