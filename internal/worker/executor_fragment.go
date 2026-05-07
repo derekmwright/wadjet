@@ -3,14 +3,152 @@ package worker
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 )
+
+// fragmentBackpressurePauseMS is how long the consume loop sleeps when
+// HeapBackpressureActive() fires. 50ms is one to two GC cycles at typical
+// SF100 allocation rates — long enough for live heap to drop, short enough
+// that downstream consumers don't time out. Tuneable via env var.
+const fragmentBackpressurePauseMS = 50
+
+// fragmentProgressInterval is how often runFragmentLinear / runFragmentWithBreakers
+// log per-task progress for tasks that run longer than the heartbeat reap window.
+// The coordinator reaps a worker after ~90s without a heartbeat, so a 30s
+// log cadence ensures at least one progress line lands on the worker side
+// before the coord-side reap log fires — operators correlating coord reaps
+// with worker progress get the worker's view without waiting on a heap dump.
+const fragmentProgressInterval = 30 * time.Second
+
+// fragmentProgress emits "fragment task progress" log lines on long-running
+// tasks. Cheap: a time.Since check on each consume call. Logging happens at
+// most once per fragmentProgressInterval. Used by both runFragmentLinear and
+// runFragmentWithBreakers to make slow-but-progressing tasks visible in
+// worker logs (the SF100 Q17 hang investigation needed this signal because
+// the coord saw silence between dispatch and reap with no worker-side
+// evidence of forward progress).
+type fragmentProgress struct {
+	logger    *slog.Logger
+	taskID    string
+	stageID   string
+	stageType string
+	exec      *Executor // for SharedPoolStats(); nil-safe in tests
+	started   time.Time
+	lastLog   time.Time
+	rows      int64
+
+	// Heap-backpressure tracking. The fragment runner calls applyBackpressure
+	// between batches; when HeapBackpressureActive() fires it sleeps briefly
+	// to let GC catch up. We summarize how often and how long that fired so
+	// worker logs make slow-task root cause obvious without per-pause spam.
+	backpressureCount   int64
+	backpressurePauseMS int64
+	lastBackpressureLog time.Time
+}
+
+func newFragmentProgress(logger *slog.Logger, task distributed.Task, e *Executor) *fragmentProgress {
+	now := time.Now()
+	return &fragmentProgress{
+		logger:    logger,
+		taskID:    task.ID,
+		stageID:   task.StageID,
+		stageType: task.StageType,
+		exec:      e,
+		started:   now,
+		lastLog:   now,
+	}
+}
+
+func (p *fragmentProgress) addRows(n int64) {
+	p.rows += n
+	if time.Since(p.lastLog) < fragmentProgressInterval {
+		return
+	}
+	elapsed := time.Since(p.started)
+	attrs := []any{
+		"task_id", p.taskID,
+		"stage_id", p.stageID,
+		"stage_type", p.stageType,
+		"elapsed", elapsed.Round(time.Second),
+		"rows", p.rows,
+	}
+	if p.exec != nil {
+		used, budget := p.exec.SharedPoolStats()
+		if budget > 0 {
+			attrs = append(attrs,
+				"pool_used_mb", used/1024/1024,
+				"pool_budget_mb", budget/1024/1024,
+				"pool_pct", used*100/budget)
+		}
+	}
+	if p.backpressureCount > 0 {
+		attrs = append(attrs,
+			"bp_count", p.backpressureCount,
+			"bp_paused_ms", p.backpressurePauseMS)
+	}
+	p.logger.Info("fragment task progress", attrs...)
+	p.lastLog = time.Now()
+}
+
+// applyBackpressure pauses the consume loop briefly when the process heap
+// is approaching GOMEMLIMIT. The signal (HeapBackpressureActive) fires at
+// 70% of GOMEMLIMIT — well before the 95% spill backstop — and the pause
+// gives GC time to reclaim before the next batch lands. Without this hook,
+// scan-heavy stages allocate faster than GC can collect at SF100, the heap
+// climbs to the limit, and STW pauses lengthen until heartbeats starve and
+// coord reaps the worker (Q17 SF100, 2026-05-07).
+//
+// Returns ctx.Err() if the context was cancelled during the pause; nil
+// otherwise. Cheap when no pressure: one cached atomic check per batch.
+//
+// Backpressure is also installed at the engine level (exec.Pipeline.runSerial
+// / runParallel) so single-process queries and breaker-phase consumes get
+// it for free. This wrapper exists for the linear/breaker-final loops that
+// don't go through Pipeline, and adds per-task counters + occasional logs.
+func (p *fragmentProgress) applyBackpressure(ctx context.Context) error {
+	if !memory.HeapBackpressureActive() {
+		return nil
+	}
+	p.backpressureCount++
+	started := time.Now()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(fragmentBackpressurePauseMS * time.Millisecond):
+	}
+	p.backpressurePauseMS += time.Since(started).Milliseconds()
+	// Log on the first hit and at most every 30 s thereafter so sustained
+	// backpressure shows up in logs without flooding them.
+	if p.lastBackpressureLog.IsZero() || time.Since(p.lastBackpressureLog) > 30*time.Second {
+		attrs := []any{
+			"task_id", p.taskID,
+			"stage_id", p.stageID,
+			"stage_type", p.stageType,
+			"count", p.backpressureCount,
+			"total_paused_ms", p.backpressurePauseMS,
+		}
+		if p.exec != nil {
+			used, budget := p.exec.SharedPoolStats()
+			if budget > 0 {
+				attrs = append(attrs,
+					"pool_used_mb", used/1024/1024,
+					"pool_budget_mb", budget/1024/1024)
+			}
+		}
+		p.logger.Info("fragment task heap backpressure", attrs...)
+		p.lastBackpressureLog = time.Now()
+	}
+	return nil
+}
 
 // executeFragment runs a multi-operator pipeline described by task.Operators[]
 // end-to-end on this worker, without intermediate S3 round-trips between
@@ -121,6 +259,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 // No pipeline-breaker — every batch flows end-to-end before the next is read.
 func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification) error {
 	progress := exec.ProgressReporterFromContext(ctx)
+	fp := newFragmentProgress(e.logger, task, e)
 	var totalRows int64
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
 		if err := sink.consume(ctx, b); err != nil {
@@ -131,9 +270,13 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 		if progress != nil {
 			progress.AddRows(n)
 		}
+		fp.addRows(n)
 		return nil
 	}
 	for {
+		if err := fp.applyBackpressure(ctx); err != nil {
+			return err
+		}
 		b, err := src.Next(ctx)
 		if err != nil {
 			return fmt.Errorf("fragment task %s: source next: %w", task.ID, err)
@@ -320,6 +463,7 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 	defer finalCleanup()
 
 	last := breakers[len(breakers)-1]
+	fp := newFragmentProgress(e.logger, task, e)
 	var totalRows int64
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
 		if err := sink.consume(ctx, b); err != nil {
@@ -330,6 +474,7 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 		if progress != nil {
 			progress.AddRows(n)
 		}
+		fp.addRows(n)
 		return nil
 	}
 	for {
@@ -398,6 +543,11 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 		return sink.Consume(ctx, b)
 	}
 	for {
+		// Heap-aware backpressure between batches; mirrors the runFragment*
+		// callers and the engine-level Pipeline.Run hook.
+		if err := memory.PauseOnHeapBackpressure(ctx); err != nil {
+			return err
+		}
 		b, err := src.Next(ctx)
 		if err != nil {
 			return err

@@ -1,9 +1,11 @@
 package memory
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestTrackerName(t *testing.T) {
@@ -180,4 +182,95 @@ func findSubstr(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestReserveBlocking_ImmediateSuccess confirms the fast path: when the
+// budget has room, ReserveBlocking returns immediately.
+func TestReserveBlocking_ImmediateSuccess(t *testing.T) {
+	tr := NewTracker("admit", 1000)
+	ctx := context.Background()
+	start := time.Now()
+	if err := tr.ReserveBlocking(ctx, 500, 100*time.Millisecond); err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Millisecond {
+		t.Errorf("immediate success should be near-instant, took %v", elapsed)
+	}
+	if tr.Used() != 500 {
+		t.Errorf("expected used=500, got %d", tr.Used())
+	}
+}
+
+// TestReserveBlocking_WaitsForRelease confirms a blocked reservation
+// completes once another caller releases bytes. This is the admission-gate
+// pattern: in-flight tasks fill the pool, a new task waits, an in-flight
+// task finishes and releases, the new task admits.
+func TestReserveBlocking_WaitsForRelease(t *testing.T) {
+	tr := NewTracker("admit", 1000)
+	if err := tr.Reserve(800); err != nil {
+		t.Fatalf("initial reserve: %v", err)
+	}
+
+	// Goroutine waits for 700 bytes (would need 1500 used; only 200 free).
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- tr.ReserveBlocking(ctx, 700, 25*time.Millisecond)
+	}()
+
+	// Should still be blocked after one poll interval.
+	select {
+	case err := <-done:
+		t.Fatalf("ReserveBlocking should still be blocked, got err=%v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Release enough for the waiter to admit.
+	tr.Release(600) // 800-600=200 remains, plus 700 incoming = 900 ≤ 1000
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("expected admission after release, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReserveBlocking should have admitted after release")
+	}
+	if tr.Used() != 900 {
+		t.Errorf("expected used=900 (200+700), got %d", tr.Used())
+	}
+}
+
+// TestReserveBlocking_RespectsContextCancel confirms that a blocked
+// reservation returns ctx.Err promptly when cancelled — important so a
+// worker shutdown isn't delayed by a stuck task waiting for a perpetually
+// full pool.
+func TestReserveBlocking_RespectsContextCancel(t *testing.T) {
+	tr := NewTracker("admit", 1000)
+	if err := tr.Reserve(1000); err != nil {
+		t.Fatalf("initial reserve: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- tr.ReserveBlocking(ctx, 100, 25*time.Millisecond)
+	}()
+
+	time.Sleep(75 * time.Millisecond) // ensure goroutine entered the wait
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Errorf("expected ctx.Err on cancel, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReserveBlocking should have returned promptly on cancel")
+	}
+	// Used should be unchanged — no partial reservation should leak.
+	if tr.Used() != 1000 {
+		t.Errorf("expected used=1000 unchanged, got %d", tr.Used())
+	}
 }

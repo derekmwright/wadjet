@@ -139,9 +139,34 @@ type HashAggregate struct {
 	resolved       bool
 	needsDistinct  bool // true if any agg uses distinctSets
 	needsExtra     bool // true if any agg uses extraState
+	simpleAggs     bool // true when every Agg fits the kernel.Accumulator shape
+	                   // (SUM, COUNT, MIN, MAX, AVG only — no distinct/extra state).
+	                   // Drives external-merge partial-state spill eligibility.
 	keyBuf         []byte
 	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles    []string
+	// partialSpillFiles holds external-merge spill files (sorted partial group
+	// state). These are produced when simpleAggs && one of the SoA paths is in
+	// use; Finalize k-way merges them. Distinct from spillFiles because the
+	// merge logic differs (re-aggregate raw rows vs. merge partial accs).
+	partialSpillFiles []string
+	// unregisterSpillable, when non-nil, deregisters this aggregate from the
+	// SpillManager's cooperative-spill registry. Set on first Consume when
+	// canUseExternalMerge is true; cleared in Finalize once the merge has
+	// materialized the final result (no more reclaimable state) or in Close
+	// as a backstop.
+	unregisterSpillable func()
+	// partialMerger, when non-nil, drives streaming Next() from the
+	// k-way merge of partial-spill runs. Set by finalizeViaPartialMerge
+	// (streaming variant); each Next() pulls one batch's worth of merged
+	// groups from it. This avoids materializing the full merged result in
+	// memory — the bound is "one output batch + heap entries", which is
+	// what makes the SF1000+ "output >> memory" case tractable. Cleared in
+	// Close (and naturally drains to nil-return when exhausted).
+	partialMerger *kWayMerger
+	// partialMergerSchema caches the output schema computed at finalize
+	// time so streaming Next() doesn't recompute it per call.
+	partialMergerSchema []parquet.Column
 	// spillBuffer holds rows from Consume calls in the spill branch that
 	// have not yet been flushed to disk. Rows are accumulated here across
 	// many Consume calls so that each physical spill file contains a
@@ -403,6 +428,15 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// Resolve column indices and typed updaters once
 	if !h.resolved {
 		h.resolveIndices(b)
+		// Cooperative-spill registration. resolveIndices populates the path
+		// flags (useIntGroupKey etc.) that canUseExternalMerge inspects, so
+		// register only after they've been set. The Spill manager skips us
+		// until SpillFootprint > 0, so registering on a brand-new aggregate
+		// before any rows arrive doesn't disturb peer operators' relief
+		// targeting.
+		if h.Spill != nil && h.unregisterSpillable == nil && h.canUseExternalMerge() {
+			h.unregisterSpillable = h.Spill.RegisterSpillable(h)
+		}
 	}
 
 	// Spill decision is based on current group state size, not input
@@ -415,6 +449,21 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// when the actual group state was a handful of rows (e.g. Q12 with 7
 	// shipmode groups). That inflated 250ms Q12 work to 37s of spill I/O.
 	if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) {
+		// External-merge path: when the aggregate uses simple kernel
+		// accumulators on an SoA fast path, drain the current hash table
+		// to a sorted partial-state file and reset state. Finalize will
+		// k-way merge across runs. This avoids the legacy raw-row spill's
+		// pathological re-scan in Finalize at SF100+.
+		if h.canUseExternalMerge() {
+			// Consume this batch FIRST so its rows enter the hash table
+			// before we drain. This keeps the per-spill file dense (one
+			// drain per pressure event) instead of a write per Consume.
+			h.consumeBatch(b)
+			h.reconcileGroupMemory()
+			return h.spillPartialState()
+		}
+		// Legacy raw-row spill (extra-state aggs, grouping sets, scalar):
+		// buffer rows on disk and re-aggregate in Finalize.
 		rows := b.ToRows()
 		h.spillBuffer = append(h.spillBuffer, rows...)
 		h.spillBufferBytes += EstimateBatchBytes(b)
@@ -581,6 +630,7 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 			}
 		}
 	}
+	h.simpleAggs = allSimpleAggs
 
 	// Pre-sizing hint: initial hash-table capacity. InputRowHint reflects the
 	// aggregate's INPUT row count (derived from scan estimates), which is a
@@ -1923,6 +1973,25 @@ func (h *HashAggregate) flushSpillBuffer() error {
 }
 
 func (h *HashAggregate) Finalize(_ context.Context) error {
+	// Once Finalize starts, the aggregate is no longer a viable cooperative
+	// spill target — it's about to drain its in-memory state into the merger.
+	// Deregister here so peer operators don't waste a RequestRelief call on
+	// us mid-finalize. Close still calls unregister as a backstop.
+	if h.unregisterSpillable != nil {
+		h.unregisterSpillable()
+		h.unregisterSpillable = nil
+	}
+
+	// External-merge path: when partial-state files exist, k-way merge them
+	// (plus any in-memory remainder) instead of re-aggregating raw rows. This
+	// is the SF100+ unblock: the legacy raw-row Finalize re-reads ALL spilled
+	// input back into the hash table and re-runs Consume on it, blowing the
+	// budget when input >> output. Partial-state merge processes each group
+	// once and is bounded by the merged result size.
+	if len(h.partialSpillFiles) > 0 {
+		return h.finalizeViaPartialMerge()
+	}
+
 	if len(h.spillFiles) == 0 && len(h.spillBuffer) == 0 {
 		return nil
 	}
@@ -1979,6 +2048,10 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 // shared tracker for the lifetime of the process; see HashJoin.Close for
 // the full background.
 func (h *HashAggregate) Close() error {
+	if h.unregisterSpillable != nil {
+		h.unregisterSpillable()
+		h.unregisterSpillable = nil
+	}
 	if h.Spill != nil {
 		if h.trackedGroupMem > 0 {
 			h.Spill.ReleaseTracking(h.trackedGroupMem)
@@ -1989,12 +2062,75 @@ func (h *HashAggregate) Close() error {
 			h.spillBufferBytes = 0
 		}
 	}
+	// Close the streaming merger (if any) and remove its spill files. This
+	// is the backstop for early-termination paths (cancellation, error
+	// before exhaustion); the normal drain in Next() also calls
+	// closePartialMerger when the merger returns nil.
+	h.closePartialMerger()
 	h.spillBuffer = nil
 	return nil
 }
 
+// SpillFootprint reports the bytes of in-memory hash-table state this
+// aggregate currently holds and can release via SpillSome. Returns 0 when
+// the aggregate is in a configuration that doesn't support partial-state
+// spill (extra-state aggs, grouping sets, scalar) — those cases must use
+// the legacy raw-row spill path which can't be triggered cooperatively.
+//
+// Implements memory.Spillable.
+func (h *HashAggregate) SpillFootprint() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Spill == nil {
+		return 0
+	}
+	if !h.canUseExternalMerge() {
+		return 0
+	}
+	// trackedGroupMem reflects what we've reported to the SpillManager's
+	// tracker. Use it directly so RequestRelief's "largest contributor"
+	// arithmetic matches the tracker's view rather than our internal
+	// estimate.
+	return h.trackedGroupMem
+}
+
+// SpillSome drains the current SoA hash state to a partial-state spill file
+// and releases the freed bytes back to the tracker, returning the number of
+// bytes released. Called by SpillManager.RequestRelief on behalf of a peer
+// operator under memory pressure.
+//
+// The target hint is advisory — partial-state spill is whole-hash-table at
+// this granularity, so we either free everything reclaimable or nothing.
+//
+// Implements memory.Spillable.
+func (h *HashAggregate) SpillSome(target int64) (int64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Spill == nil || !h.canUseExternalMerge() {
+		return 0, nil
+	}
+	before := h.trackedGroupMem
+	if before == 0 {
+		return 0, nil
+	}
+	if err := h.spillPartialState(); err != nil {
+		return 0, err
+	}
+	// trackedGroupMem is reset to 0 by resetGroupStateAfterSpill (called
+	// from spillPartialState). before - 0 = before bytes freed.
+	return before - h.trackedGroupMem, nil
+}
+
 // Next returns the aggregated results in batches of DefaultBatchSize rows.
 func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
+	// Streaming partial-merge path: when finalizeViaPartialMerge stored a
+	// merger, drain it incrementally instead of walking strGroupStates.
+	// This bounds peak Next() memory to ~one batch + merger heap, which is
+	// what makes "output groups >> memory" tractable.
+	if h.partialMerger != nil {
+		return h.nextFromPartialMerger()
+	}
+
 	// Materialize SoA flat accumulators to per-group AoS on first call.
 	h.materializeFlatAccums()
 

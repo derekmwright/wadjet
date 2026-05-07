@@ -2,8 +2,11 @@
 package memory
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 )
 
 // ErrMemoryExceeded is returned when a memory reservation exceeds the budget.
@@ -83,6 +86,38 @@ func (t *Tracker) ForceReserve(n int64) {
 	t.used.Add(n)
 	if t.parent != nil {
 		t.parent.ForceReserve(n)
+	}
+}
+
+// ReserveBlocking attempts to reserve n bytes, retrying every pollInterval
+// until success or ctx cancellation. Used as an admission gate so callers
+// can wait for the budget to free instead of failing immediately on a
+// transient over-budget condition.
+//
+// The polling design is intentional: the existing tracker is lock-free
+// (atomic counters), and adding a sync.Cond would require holding a mutex
+// in every Release path on the hot batch loop. Polling at 100ms keeps
+// admission overhead near zero (one Reserve attempt + one timer goroutine
+// per blocked task) while bounding wait latency to one poll interval.
+//
+// Returns ctx.Err() on cancellation or any non-budget error from Reserve.
+func (t *Tracker) ReserveBlocking(ctx context.Context, n int64, pollInterval time.Duration) error {
+	if pollInterval <= 0 {
+		pollInterval = 100 * time.Millisecond
+	}
+	for {
+		err := t.Reserve(n)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrMemoryExceeded) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
 	}
 }
 

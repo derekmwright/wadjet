@@ -408,3 +408,152 @@ func TestExecuteFragment_TwoBreakers_AggThenSort(t *testing.T) {
 		}
 	}
 }
+
+// TestExecuteFragment_TwoBreakers_SpillUnderPressure exercises the
+// multi-breaker shape under a tight shared memory budget so the
+// HashAggregate spills mid-fragment via the partial-state external-merge
+// path. Validates that the fragment runner correctly drives Finalize ->
+// Next() -> Sort.Consume -> Sort.Finalize -> sink even when the aggregate
+// is in streaming-merger mode rather than fully-materialized.
+//
+// Regression for the Gap 1 + 2 spill audit work: ensures runFragmentWithBreakers
+// chains an aggregate that consumed via canUseExternalMerge into a
+// downstream Sort without losing groups or ordering.
+func TestExecuteFragment_TwoBreakers_SpillUnderPressure(t *testing.T) {
+	ctx := context.Background()
+	const bucket = "test-fragment-agg-sort-spill"
+
+	// Build enough groups that the aggregate's tracked memory crosses the
+	// 60% spill threshold under the tight budget below. 200 groups × ~64
+	// bytes per group state (with small accumulator arrays + int hash
+	// table overhead) is well over 1KB, comfortably triggering the spill.
+	rows := make([][2]int64, 0, 200*3)
+	for g := int64(1); g <= 200; g++ {
+		for v := int64(1); v <= 3; v++ {
+			rows = append(rows, [2]int64{g, v * 10})
+		}
+	}
+	data := makeGroupedWshf(t, rows)
+
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	key := "in/agg-sort-spill/t0.wshf"
+	if _, err := store.Put(ctx, bucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	executor := NewExecutor(store, NewLRUCache(4*1024*1024), nil)
+	// 1KB budget — the aggregate's group state will cross the 60%
+	// (SpillCheap) threshold partway through Consume and route through
+	// the external-merge partial-state spill path.
+	executor.SetMemoryBudget(1024, t.TempDir())
+
+	task := distributed.Task{
+		ID:           "frag-agg-sort-spill-0",
+		QueryID:      "q-frag-agg-sort-spill",
+		StageID:      "ass-0",
+		Type:         distributed.TaskTypeStage,
+		DataBucket:   bucket,
+		ResultBucket: bucket,
+		ResultPrefix: "out/agg-sort-spill/",
+		Operators: []distributed.OpSpec{
+			{
+				Type:        distributed.OpScan,
+				InputAlias:  "src",
+				InputFiles:  []string{key},
+				InputBucket: bucket,
+				Columns:     []string{"g", "v"},
+			},
+			{
+				Type:        distributed.OpHashAggregate,
+				GroupByCols: []string{"g"},
+				Aggregates: []distributed.AggSpec{
+					{Func: "sum", InputCol: "v", OutputCol: "total"},
+				},
+			},
+			{
+				Type: distributed.OpSort,
+				SortKeySpecs: []distributed.SortKeySpec{
+					{Column: "g", Desc: false},
+				},
+			},
+			{
+				Type: distributed.OpUnpartitionedSink,
+			},
+		},
+	}
+
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(ctx, task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	if result.NumRows != 200 {
+		t.Fatalf("NumRows = %d, want 200 groups", result.NumRows)
+	}
+
+	rc, _, err := store.Get(ctx, bucket, result.ResultFiles[0])
+	if err != nil {
+		t.Fatalf("get output: %v", err)
+	}
+	defer rc.Close()
+	out, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	r, err := newShuffleChunkReader(out)
+	if err != nil {
+		t.Fatalf("parse output: %v", err)
+	}
+
+	type pair struct {
+		g     int64
+		total float64
+	}
+	var got []pair
+	for {
+		b, err := r.Next()
+		if err != nil {
+			t.Fatalf("chunk next: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		gIdx, totalIdx := -1, -1
+		for i, c := range b.Schema {
+			switch c.Name {
+			case "g":
+				gIdx = i
+			case "total":
+				totalIdx = i
+			}
+		}
+		if gIdx < 0 || totalIdx < 0 {
+			t.Fatalf("output schema missing g/total: %+v", b.Schema)
+		}
+		for i := 0; i < b.ActiveLen(); i++ {
+			row := i
+			if b.Sel != nil {
+				row = int(b.Sel[i])
+			}
+			got = append(got, pair{
+				g:     b.Columns[gIdx].Int64Data[row],
+				total: b.Columns[totalIdx].Float64Data[row],
+			})
+		}
+	}
+	// Each group's expected sum is 10 + 20 + 30 = 60.
+	if len(got) != 200 {
+		t.Fatalf("rows: got %d, want 200 (got=%v)", len(got), got[:min(len(got), 5)])
+	}
+	for i, p := range got {
+		wantG := int64(i + 1)
+		if p.g != wantG {
+			t.Errorf("row %d: got g=%d, want %d (output not sorted ascending)", i, p.g, wantG)
+		}
+		if p.total != 60 {
+			t.Errorf("row %d g=%d: got total=%v, want 60", i, p.g, p.total)
+		}
+	}
+}

@@ -98,6 +98,7 @@ func (e *Executor) SharedPoolStats() (used, budget int64) {
 	return e.sharedTracker.Used(), e.sharedTracker.Budget()
 }
 
+
 // SetSharedPoolBudget creates the worker-wide memory pool that all
 // concurrent tasks Reserve against. Operators (HashJoin build, sort
 // run accumulation, hash aggregate state) cooperatively spill when the

@@ -45,6 +45,12 @@ type Sort struct {
 	spillFiles []string
 	sorted     []*batch.RecordBatch // materialized sorted results
 	pos        int
+	// unregisterSpillable, when non-nil, deregisters this Sort from the
+	// SpillManager's cooperative-spill registry. Set on first Consume when
+	// Spill is configured; cleared in Finalize once we begin draining the
+	// sorted output (no more reclaimable input batches) or in Close as a
+	// backstop.
+	unregisterSpillable func()
 }
 
 func NewSort(keys []SortKey) *Sort {
@@ -64,6 +70,13 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 	defer s.mu.Unlock()
 	if s.schema == nil {
 		s.schema = b.Schema
+		// Register on first Consume when a SpillManager is configured. We
+		// don't register in Init because (1) Init runs before any state
+		// exists (footprint=0), and (2) some pipelines reuse a Sort across
+		// queries with Init resets.
+		if s.Spill != nil && s.unregisterSpillable == nil {
+			s.unregisterSpillable = s.Spill.RegisterSpillable(s)
+		}
 	}
 	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
 	s.batches = append(s.batches, b)
@@ -96,6 +109,14 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 }
 
 func (s *Sort) Finalize(_ context.Context) error {
+	// Once Finalize starts, the input batches will be consumed by the sort
+	// itself; we can't usefully respond to a peer's RequestRelief any more.
+	// Deregister now so the registry stops considering us. Close still
+	// deregisters as a backstop.
+	if s.unregisterSpillable != nil {
+		s.unregisterSpillable()
+		s.unregisterSpillable = nil
+	}
 	if len(s.spillFiles) > 0 {
 		return s.finalizeWithSpill()
 	}
@@ -377,6 +398,10 @@ func (s *Sort) MergeSink(other SinkSource) {
 // phantom reservation in the shared tracker for the lifetime of the
 // process; see HashJoin.Close for the full background.
 func (s *Sort) Close() error {
+	if s.unregisterSpillable != nil {
+		s.unregisterSpillable()
+		s.unregisterSpillable = nil
+	}
 	if s.Spill != nil && s.trackedMem > 0 {
 		s.Spill.ReleaseTracking(s.trackedMem)
 		s.trackedMem = 0
@@ -384,6 +409,46 @@ func (s *Sort) Close() error {
 	s.batches = nil
 	s.totalRows = 0
 	return nil
+}
+
+// SpillFootprint reports the bytes Sort currently holds in accumulated input
+// batches. The cooperative-spill registry uses this to pick the largest
+// contributor when a peer operator under pressure asks for relief.
+//
+// Implements memory.Spillable.
+func (s *Sort) SpillFootprint() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.trackedMem
+}
+
+// SpillSome drains accumulated input batches to a raw-row spill file and
+// releases the freed bytes. Sort uses raw-row spill (not partial state)
+// because input batches are pre-sort — there's no partial sorted state to
+// preserve until finalizeWithSpill runs the global merge.
+//
+// Implements memory.Spillable.
+func (s *Sort) SpillSome(target int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Spill == nil || s.trackedMem == 0 || len(s.batches) == 0 {
+		return 0, nil
+	}
+	var rows []map[string]any
+	for _, sb := range s.batches {
+		rows = append(rows, sb.ToRows()...)
+	}
+	path, err := s.Spill.SpillRows(rows)
+	if err != nil {
+		return 0, err
+	}
+	s.spillFiles = append(s.spillFiles, path)
+	s.batches = s.batches[:0]
+	s.totalRows = 0
+	freed := s.trackedMem
+	s.Spill.ReleaseTracking(freed)
+	s.trackedMem = 0
+	return freed, nil
 }
 
 // Next returns sorted results in batches.
