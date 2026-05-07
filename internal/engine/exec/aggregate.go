@@ -151,6 +151,12 @@ type HashAggregate struct {
 	// use; Finalize k-way merges them. Distinct from spillFiles because the
 	// merge logic differs (re-aggregate raw rows vs. merge partial accs).
 	partialSpillFiles []string
+	// unregisterSpillable, when non-nil, deregisters this aggregate from the
+	// SpillManager's cooperative-spill registry. Set on first Consume when
+	// canUseExternalMerge is true; cleared in Finalize once the merge has
+	// materialized the final result (no more reclaimable state) or in Close
+	// as a backstop.
+	unregisterSpillable func()
 	// spillBuffer holds rows from Consume calls in the spill branch that
 	// have not yet been flushed to disk. Rows are accumulated here across
 	// many Consume calls so that each physical spill file contains a
@@ -412,6 +418,15 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// Resolve column indices and typed updaters once
 	if !h.resolved {
 		h.resolveIndices(b)
+		// Cooperative-spill registration. resolveIndices populates the path
+		// flags (useIntGroupKey etc.) that canUseExternalMerge inspects, so
+		// register only after they've been set. The Spill manager skips us
+		// until SpillFootprint > 0, so registering on a brand-new aggregate
+		// before any rows arrive doesn't disturb peer operators' relief
+		// targeting.
+		if h.Spill != nil && h.unregisterSpillable == nil && h.canUseExternalMerge() {
+			h.unregisterSpillable = h.Spill.RegisterSpillable(h)
+		}
 	}
 
 	// Spill decision is based on current group state size, not input
@@ -1948,6 +1963,15 @@ func (h *HashAggregate) flushSpillBuffer() error {
 }
 
 func (h *HashAggregate) Finalize(_ context.Context) error {
+	// Once Finalize starts, the aggregate is no longer a viable cooperative
+	// spill target — it's about to drain its in-memory state into the merger.
+	// Deregister here so peer operators don't waste a RequestRelief call on
+	// us mid-finalize. Close still calls unregister as a backstop.
+	if h.unregisterSpillable != nil {
+		h.unregisterSpillable()
+		h.unregisterSpillable = nil
+	}
+
 	// External-merge path: when partial-state files exist, k-way merge them
 	// (plus any in-memory remainder) instead of re-aggregating raw rows. This
 	// is the SF100+ unblock: the legacy raw-row Finalize re-reads ALL spilled
@@ -2014,6 +2038,10 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 // shared tracker for the lifetime of the process; see HashJoin.Close for
 // the full background.
 func (h *HashAggregate) Close() error {
+	if h.unregisterSpillable != nil {
+		h.unregisterSpillable()
+		h.unregisterSpillable = nil
+	}
 	if h.Spill != nil {
 		if h.trackedGroupMem > 0 {
 			h.Spill.ReleaseTracking(h.trackedGroupMem)
@@ -2034,6 +2062,56 @@ func (h *HashAggregate) Close() error {
 	h.partialSpillFiles = nil
 	h.spillBuffer = nil
 	return nil
+}
+
+// SpillFootprint reports the bytes of in-memory hash-table state this
+// aggregate currently holds and can release via SpillSome. Returns 0 when
+// the aggregate is in a configuration that doesn't support partial-state
+// spill (extra-state aggs, grouping sets, scalar) — those cases must use
+// the legacy raw-row spill path which can't be triggered cooperatively.
+//
+// Implements memory.Spillable.
+func (h *HashAggregate) SpillFootprint() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Spill == nil {
+		return 0
+	}
+	if !h.canUseExternalMerge() {
+		return 0
+	}
+	// trackedGroupMem reflects what we've reported to the SpillManager's
+	// tracker. Use it directly so RequestRelief's "largest contributor"
+	// arithmetic matches the tracker's view rather than our internal
+	// estimate.
+	return h.trackedGroupMem
+}
+
+// SpillSome drains the current SoA hash state to a partial-state spill file
+// and releases the freed bytes back to the tracker, returning the number of
+// bytes released. Called by SpillManager.RequestRelief on behalf of a peer
+// operator under memory pressure.
+//
+// The target hint is advisory — partial-state spill is whole-hash-table at
+// this granularity, so we either free everything reclaimable or nothing.
+//
+// Implements memory.Spillable.
+func (h *HashAggregate) SpillSome(target int64) (int64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.Spill == nil || !h.canUseExternalMerge() {
+		return 0, nil
+	}
+	before := h.trackedGroupMem
+	if before == 0 {
+		return 0, nil
+	}
+	if err := h.spillPartialState(); err != nil {
+		return 0, err
+	}
+	// trackedGroupMem is reset to 0 by resetGroupStateAfterSpill (called
+	// from spillPartialState). before - 0 = before bytes freed.
+	return before - h.trackedGroupMem, nil
 }
 
 // Next returns the aggregated results in batches of DefaultBatchSize rows.

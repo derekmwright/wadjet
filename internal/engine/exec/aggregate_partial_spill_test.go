@@ -480,3 +480,359 @@ func bytesEq(a, b []byte) bool {
 	}
 	return true
 }
+
+// TestHashAggregateSpillable_FootprintAndSpillSome covers the Spillable
+// contract directly: SpillFootprint reflects tracker bytes after Consume,
+// SpillSome drains state to a partial-spill file and releases bytes back,
+// and a follow-up Consume rebuilds normally on the empty hash table.
+func TestHashAggregateSpillable_FootprintAndSpillSome(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	ctx := context.Background()
+	tracker := memory.NewTracker("test", 1_000_000)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHashAggregate([]string{"k"}, []AggColumn{
+		{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+	})
+	h.Spill = sm
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// SpillFootprint before any input is 0 — no state, no tracker bytes.
+	if got := h.SpillFootprint(); got != 0 {
+		t.Errorf("pre-Consume footprint: got %d want 0", got)
+	}
+
+	rows := make([]map[string]any, 0, 500)
+	for i := 0; i < 500; i++ {
+		rows = append(rows, map[string]any{"k": int64(i), "v": int64(i + 1)})
+	}
+	b := batch.FromRows(schema, rows)
+	if err := h.Consume(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+
+	// Footprint is now non-zero (group state grew during scatter).
+	footprint := h.SpillFootprint()
+	if footprint <= 0 {
+		t.Fatalf("post-Consume footprint: got %d want > 0", footprint)
+	}
+
+	// SpillSome drains the entire hash table.
+	freed, err := h.SpillSome(footprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed != footprint {
+		t.Errorf("SpillSome: freed %d want %d", freed, footprint)
+	}
+
+	// A second SpillSome with no in-memory state freed should return 0
+	// without writing a new file.
+	if again, err := h.SpillSome(1024); err != nil || again != 0 {
+		t.Errorf("idle SpillSome: got freed=%d err=%v want 0/nil", again, err)
+	}
+
+	// A follow-up Consume rebuilds the hash on an empty table and stays
+	// correct end-to-end. Append rows for a second pass over the same keys
+	// so Finalize merges file + in-memory.
+	moreRows := make([]map[string]any, 0, 500)
+	for i := 0; i < 500; i++ {
+		moreRows = append(moreRows, map[string]any{"k": int64(i), "v": int64(10)})
+	}
+	if err := h.Consume(ctx, batch.FromRows(schema, moreRows)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	got := make(map[int64]int64)
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for _, r := range out.ToRows() {
+			got[r["k"].(int64)] = r["total"].(int64)
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 500 {
+		t.Fatalf("group count: got %d want 500", len(got))
+	}
+	for i := int64(0); i < 500; i++ {
+		want := (i + 1) + 10
+		if got[i] != want {
+			t.Errorf("k=%d: got %d want %d", i, got[i], want)
+		}
+	}
+}
+
+// TestSortSpillable_FootprintAndSpillSome covers Sort's Spillable contract:
+// after Consume the footprint reflects accumulated input bytes; SpillSome
+// drains them to a raw-row spill file and releases the bytes.
+func TestSortSpillable_FootprintAndSpillSome(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+	}
+	ctx := context.Background()
+	tracker := memory.NewTracker("test", 1_000_000)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewSort([]SortKey{{Column: "k"}})
+	s.Spill = sm
+	if err := s.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := s.SpillFootprint(); got != 0 {
+		t.Errorf("pre-Consume footprint: got %d want 0", got)
+	}
+
+	// Two batches of 200 rows each — Sort accumulates both before a Finalize.
+	for batchIdx := 0; batchIdx < 2; batchIdx++ {
+		rows := make([]map[string]any, 0, 200)
+		for i := 0; i < 200; i++ {
+			rows = append(rows, map[string]any{"k": int64(batchIdx*1000 + i)})
+		}
+		if err := s.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	footprint := s.SpillFootprint()
+	if footprint <= 0 {
+		t.Fatalf("post-Consume footprint: got %d want > 0", footprint)
+	}
+
+	freed, err := s.SpillSome(footprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed != footprint {
+		t.Errorf("SpillSome: freed %d want %d", freed, footprint)
+	}
+	if got := s.SpillFootprint(); got != 0 {
+		t.Errorf("post-spill footprint: got %d want 0", got)
+	}
+
+	// Idle SpillSome with no batches in memory returns 0.
+	if again, err := s.SpillSome(1024); err != nil || again != 0 {
+		t.Errorf("idle SpillSome: got freed=%d err=%v", again, err)
+	}
+
+	// Finalize must still emit the rows in sorted order — they live on disk.
+	if err := s.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var got []int64
+	for {
+		out, err := s.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for _, r := range out.ToRows() {
+			got = append(got, r["k"].(int64))
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 400 {
+		t.Fatalf("rows: got %d want 400", len(got))
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] < got[i-1] {
+			t.Fatalf("not sorted at i=%d: %d < %d", i, got[i], got[i-1])
+		}
+	}
+}
+
+// TestSpillable_MultiBreakerCooperativeRelief simulates the architectural
+// scenario the audit memo flagged: two breakers (HashAggregate + Sort) in
+// the same fragment share a tracker; one of them is passive in memory while
+// the other hits pressure. RequestRelief invoked from the second operator
+// should pick the largest registered Spillable and free its bytes.
+func TestSpillable_MultiBreakerCooperativeRelief(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	ctx := context.Background()
+	tracker := memory.NewTracker("test", 1_000_000)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Aggregate accumulates a tall hash table.
+	h := NewHashAggregate([]string{"k"}, []AggColumn{
+		{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+	})
+	h.Spill = sm
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]map[string]any, 0, 600)
+	for i := 0; i < 600; i++ {
+		rows = append(rows, map[string]any{"k": int64(i), "v": int64(i)})
+	}
+	if err := h.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sort holds nothing yet — it's a "peer" that hasn't received batches.
+	s := NewSort([]SortKey{{Column: "k"}})
+	s.Spill = sm
+	if err := s.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	hFootprint := h.SpillFootprint()
+	if hFootprint == 0 {
+		t.Fatal("hash aggregate footprint should be non-zero")
+	}
+	if s.SpillFootprint() != 0 {
+		t.Fatalf("sort footprint should be 0 (no batches), got %d", s.SpillFootprint())
+	}
+
+	// Imagine Sort is about to allocate and asks for relief. The registry
+	// should pick HashAggregate (largest contributor) and call SpillSome.
+	freed, err := sm.RequestRelief(hFootprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if freed == 0 {
+		t.Fatal("RequestRelief returned 0 — registry didn't route to HashAggregate")
+	}
+
+	// Cleanup. Both operators should still finalize correctly even after
+	// their cooperative spill participation.
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatalf("HashAggregate.Finalize after relief: %v", err)
+	}
+	gotGroups := 0
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		gotGroups += out.ActiveLen()
+	}
+	if gotGroups != 600 {
+		t.Errorf("groups after cooperative spill: got %d want 600", gotGroups)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHashAggregateSpillable_RequestReliefRoutesHere proves that when
+// HashAggregate is registered as the largest Spillable in a SpillManager and
+// an external caller invokes RequestRelief, the relief is satisfied by
+// HashAggregate.SpillSome (rather than returning 0 because no-one volunteered).
+// Mirrors the multi-breaker scenario where a peer Sort hits memory pressure
+// and asks the registry for help.
+func TestHashAggregateSpillable_RequestReliefRoutesHere(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	ctx := context.Background()
+	tracker := memory.NewTracker("test", 1_000_000)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHashAggregate([]string{"k"}, []AggColumn{
+		{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+	})
+	h.Spill = sm
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build up a few hundred groups so SpillFootprint > 0 and the registry
+	// can pick this aggregate.
+	rows := make([]map[string]any, 0, 400)
+	for i := 0; i < 400; i++ {
+		rows = append(rows, map[string]any{"k": int64(i), "v": int64(i)})
+	}
+	if err := h.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+		t.Fatal(err)
+	}
+
+	footprint := h.SpillFootprint()
+	if footprint <= 0 {
+		t.Fatalf("setup precondition: footprint should be positive, got %d", footprint)
+	}
+
+	// Simulate a peer operator under pressure asking the SpillManager to
+	// free bytes. The registry walks Spillables, picks the largest, and
+	// calls SpillSome on it. Our HashAggregate is the only registered
+	// Spillable, so it MUST satisfy the request.
+	freed, err := sm.RequestRelief(footprint)
+	if err != nil {
+		t.Fatalf("RequestRelief: %v", err)
+	}
+	if freed == 0 {
+		t.Fatal("RequestRelief returned 0 freed — Spillable not registered or SpillSome not wired")
+	}
+	if h.SpillFootprint() != 0 {
+		t.Errorf("after relief, footprint should be 0, got %d", h.SpillFootprint())
+	}
+
+	// Finalize should still produce the original 400 distinct sums.
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[int64]int64)
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for _, r := range out.ToRows() {
+			got[r["k"].(int64)] = r["total"].(int64)
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 400 {
+		t.Fatalf("group count: got %d want 400", len(got))
+	}
+	for i := int64(0); i < 400; i++ {
+		if got[i] != i {
+			t.Errorf("k=%d: got %d want %d", i, got[i], i)
+		}
+	}
+}
