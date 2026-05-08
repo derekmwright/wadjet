@@ -49,9 +49,12 @@ func (p *progressWriter) Write(b []byte) (int, error) {
 // the cache file (10+ GB at SF100) and OOM the worker before it could
 // process a single batch.
 //
-// For Parquet files (only used by older shuffle paths) we still buffer
-// row-group batches eagerly via scan.ReadFileBatches because they're already
-// lazy by row-group in the parquet reader and the file sizes are bounded.
+// For Parquet files we use a streaming row-group iterator: only one
+// decoded row group is held in memory at a time per source, instead of
+// materializing every row group of the active file up front. At SF100 a
+// lineitem file decodes to ~280 MB per row group × ~10 row groups, so
+// the eager-decode that this replaced cost ~2.8 GB live per file —
+// dominant contributor to per-task working set during scan-aggregate.
 type cachedFileStreamSource struct {
 	executor *Executor
 	bucket   string
@@ -83,9 +86,21 @@ type cachedFileStreamSource struct {
 	mmapData    []byte // mmap'd view of the current local cache file (nil if Parquet)
 	localPath   string // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
 
-	// Buffered batches for the current Parquet file.
-	batches  []*batch.RecordBatch
-	batchIdx int
+	// Streaming row-group iterator for the current Parquet file. Yields one
+	// decoded RecordBatch per Next() call; the previous batch is GC-eligible
+	// once the consumer Releases it. Bounds Parquet-side live memory to one
+	// decoded row group at a time per source.
+	parquetIter *scan.RowGroupIter
+	// parquetReader is held alongside the iterator so its underlying buffer
+	// (the whole-file byte slice) stays live for the iterator's row-group
+	// reads. Released alongside parquetIter when the file is exhausted.
+	parquetReader *parquet.Reader
+
+	// Fallback slice for schemas with Array/Map types — RowGroupIter does not
+	// support those yet, so we keep the existing eager-decode path for them.
+	// Empty for all TPC-H scans.
+	fallbackBatches  []*batch.RecordBatch
+	fallbackBatchIdx int
 }
 
 func newCachedFileStreamSource(executor *Executor, queryID, bucket string, files []string) *cachedFileStreamSource {
@@ -140,11 +155,26 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 			s.releaseCurrentFile()
 		}
 
-		// Yield buffered Parquet batches.
-		if s.batchIdx < len(s.batches) {
-			b := s.batches[s.batchIdx]
-			s.batches[s.batchIdx] = nil // release for GC
-			s.batchIdx++
+		// Yield next decoded row group from the active Parquet iterator.
+		// The iterator decodes lazily — only one row group's worth of
+		// memory is live at a time per source.
+		if s.parquetIter != nil {
+			b, err := s.parquetIter.Next()
+			if err != nil {
+				return nil, err
+			}
+			if b != nil {
+				return b, nil
+			}
+			// Iterator exhausted — release reader and move on.
+			s.releaseParquetIter()
+		}
+
+		// Yield from the fallback slice (Array/Map schemas only).
+		if s.fallbackBatchIdx < len(s.fallbackBatches) {
+			b := s.fallbackBatches[s.fallbackBatchIdx]
+			s.fallbackBatches[s.fallbackBatchIdx] = nil
+			s.fallbackBatchIdx++
 			return b, nil
 		}
 
@@ -162,11 +192,23 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 
 func (s *cachedFileStreamSource) Close() error {
 	s.releaseCurrentFile()
-	for i := s.batchIdx; i < len(s.batches); i++ {
-		s.batches[i] = nil
+	s.releaseParquetIter()
+	for i := s.fallbackBatchIdx; i < len(s.fallbackBatches); i++ {
+		s.fallbackBatches[i] = nil
 	}
-	s.batches = nil
+	s.fallbackBatches = nil
 	return nil
+}
+
+// releaseParquetIter closes the active row-group iterator and drops the
+// reader reference so the underlying file buffer can be GC'd. Safe to
+// call multiple times.
+func (s *cachedFileStreamSource) releaseParquetIter() {
+	if s.parquetIter != nil {
+		_ = s.parquetIter.Close()
+		s.parquetIter = nil
+	}
+	s.parquetReader = nil
 }
 
 // releaseCurrentFile munmaps and deletes the local cache file backing the
@@ -308,12 +350,24 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	if shardCount < 1 {
 		shardCount = 1
 	}
-	batches, err := scan.ReadFileBatchesShard(reader, projCols, nil, shardIdx, shardCount)
-	if err != nil {
-		return fmt.Errorf("reading parquet file %s: %w", filePath, err)
+	// Schemas with Array/Map types (none in TPC-H) still go through the
+	// eager-decode slice path because RowGroupIter doesn't support them.
+	// Everything else streams one row group at a time.
+	if scan.HasUnsupportedColumnarTypes(projCols) {
+		batches, err := scan.ReadFileBatchesShard(reader, projCols, nil, shardIdx, shardCount)
+		if err != nil {
+			return fmt.Errorf("reading parquet file %s (fallback): %w", filePath, err)
+		}
+		s.fallbackBatches = batches
+		s.fallbackBatchIdx = 0
+		return nil
 	}
-	s.batches = batches
-	s.batchIdx = 0
+	iter, err := scan.OpenRowGroupIter(reader, projCols, nil, shardIdx, shardCount)
+	if err != nil {
+		return fmt.Errorf("opening row-group iterator for %s: %w", filePath, err)
+	}
+	s.parquetIter = iter
+	s.parquetReader = reader
 	return nil
 }
 
