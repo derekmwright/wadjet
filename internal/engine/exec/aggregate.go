@@ -186,13 +186,45 @@ type HashAggregate struct {
 // override it to exercise the flush path deterministically.
 var spillFileTargetBytes int64 = 64 * 1024 * 1024
 
+// groupState holds per-group hash table state. The slim 24-byte base lives
+// inline in the groupStatePool chunks so the SoA simple-aggs hot path
+// (Q17/Q01/most TPC-H) — which never needs keyValues/accs/distinctSets/
+// extraState — pays only 8 bytes for the extras pointer (nil) instead of
+// 96 bytes of slice headers. Complex-agg paths (COUNT(DISTINCT), STRING_AGG,
+// variance, percentile, GROUPING SETS, str-group, generic SoA) call
+// ensureExtras() to lazily allocate the heavy fields.
+//
+// Sizing: 8 (intKey) + 4 (setID) + 4 (pad) + 8 (extras) = 24 bytes.
+// The 88-byte savings vs the inline layout is 1.76 GB at SF100 scan-5
+// (20M groups) and brings worker peak heap under GOMEMLIMIT at
+// max_concurrent=4.
 type groupState struct {
+	intKey int64 // single int64 key for int-keyed groups (avoids []any boxing)
+	setID  int32 // grouping set index (-1 = not a grouping set); 4 B of tail padding follows
+	extras *groupStateExtras
+}
+
+// groupStateExtras holds the heavy per-group fields that are only needed by
+// complex-agg paths or by the generic str-keyed path. Allocated lazily by
+// (*groupState).ensureExtras() and pointed at from the slim base. The SoA
+// simple-aggs path (consumeBatchIntGroup, consumeBatchDualIntGroup) never
+// touches this allocation, so the typical Q17/Q01 pattern leaves it nil.
+type groupStateExtras struct {
 	keyValues    []any
-	intKey       int64 // single int64 key for int-keyed groups (avoids []any boxing)
-	setID        int   // grouping set index (-1 = not a grouping set)
 	accs         []kernel.Accumulator
 	distinctSets []map[string]struct{} // per-agg distinct value sets (nil if not COUNT(DISTINCT))
 	extraState   []any                 // per-agg custom state (string_agg builder, variance state, etc.)
+}
+
+// ensureExtras lazily allocates the extras struct on first complex-path
+// access. Callers that do multiple writes should bind the result to a local
+// (`ext := gs.ensureExtras(); ext.keyValues = ...`) instead of calling
+// ensureExtras repeatedly.
+func (gs *groupState) ensureExtras() *groupStateExtras {
+	if gs.extras == nil {
+		gs.extras = &groupStateExtras{}
+	}
+	return gs.extras
 }
 
 // groupStatePool allocates groupState objects in contiguous chunks to reduce
@@ -239,10 +271,16 @@ func (h *HashAggregate) groupMemoryUsage() int64 {
 	if h.strGroupIndex != nil {
 		size += h.strGroupIndex.MemoryUsage()
 	}
-	// Group state pool: each chunk is a contiguous array of groupState structs.
-	// groupState is ~120 bytes (keys, accs slices, intKey, setID).
+	// Group state pool: each chunk is a contiguous array of slim groupState
+	// structs (24 bytes each: intKey + setID + extras pointer). Complex-agg
+	// paths additionally allocate a groupStateExtras (~96 bytes per group)
+	// behind the pointer, but the dominant SF100 hot path leaves extras nil
+	// so this estimate is exact for SoA simple-aggs and a slight under-count
+	// (~96 B/group) for the rarer complex paths. The slice contents (keyVals,
+	// accs, distinctSets, extraState data) are not tracked here in either
+	// regime — same accuracy budget as before the slim-struct refactor.
 	for _, chunk := range h.gsPool.chunks {
-		size += int64(cap(chunk)) * 120
+		size += int64(cap(chunk)) * 24
 	}
 	// SoA flat accumulator arrays: 8 bytes per element for int64/float64 fields.
 	for _, fa := range h.intFlatAccs {
@@ -1254,7 +1292,7 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 			}
 		}
 		gs := h.gsPool.alloc()
-		gs.keyValues = keyVals
+		gs.ensureExtras().keyValues = keyVals
 		h.intGroupStates = append(h.intGroupStates, gs)
 		h.compactKeys = append(h.compactKeys, string(h.keyBuf))
 		h.keys = append(h.keys, keyVals)
@@ -1393,7 +1431,7 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 			} else {
 				keyStr := string(key)
 				gs := h.gsPool.alloc()
-				gs.keyValues = []any{keyStr}
+				gs.ensureExtras().keyValues = []any{keyStr}
 				h.strGroupStates = append(h.strGroupStates, gs)
 				h.keys = append(h.keys, []any{keyStr})
 				h.serializedKeys = append(h.serializedKeys, keyStr)
@@ -1419,7 +1457,7 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 			} else {
 				keyStr := string(key)
 				gs := h.gsPool.alloc()
-				gs.keyValues = []any{keyStr}
+				gs.ensureExtras().keyValues = []any{keyStr}
 				h.strGroupStates = append(h.strGroupStates, gs)
 				h.keys = append(h.keys, []any{keyStr})
 				h.serializedKeys = append(h.serializedKeys, keyStr)
@@ -1505,7 +1543,7 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 			}
 		}
 		gs := h.gsPool.alloc()
-		gs.keyValues = keyVals
+		gs.ensureExtras().keyValues = keyVals
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.keys = append(h.keys, keyVals)
 		h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
@@ -1615,44 +1653,45 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		}
 	}
 	gs := h.gsPool.alloc()
-	gs.keyValues = keyVals
-	gs.accs = make([]kernel.Accumulator, len(h.Aggs))
+	ext := gs.ensureExtras()
+	ext.keyValues = keyVals
+	ext.accs = make([]kernel.Accumulator, len(h.Aggs))
 	if h.needsDistinct {
-		gs.distinctSets = make([]map[string]struct{}, len(h.Aggs))
+		ext.distinctSets = make([]map[string]struct{}, len(h.Aggs))
 	}
 	if h.needsExtra {
-		gs.extraState = make([]any, len(h.Aggs))
+		ext.extraState = make([]any, len(h.Aggs))
 	}
 	for i, agg := range h.Aggs {
 		switch agg.Func {
 		case AggCountDistinct:
-			if gs.distinctSets != nil {
-				gs.distinctSets[i] = make(map[string]struct{})
+			if ext.distinctSets != nil {
+				ext.distinctSets[i] = make(map[string]struct{})
 			}
 		case AggStringAgg:
 			sep := agg.Separator
 			if sep == "" {
 				sep = ","
 			}
-			gs.extraState[i] = &stringAggState{sep: sep}
+			ext.extraState[i] = &stringAggState{sep: sep}
 		case AggStddev, AggVariance, AggStddevPop, AggVarPop:
-			gs.extraState[i] = &varianceState{}
+			ext.extraState[i] = &varianceState{}
 		case AggBoolAnd:
-			gs.extraState[i] = true
+			ext.extraState[i] = true
 		case AggBoolOr:
-			gs.extraState[i] = false
+			ext.extraState[i] = false
 		case AggApproxDistinct:
-			if gs.distinctSets != nil {
-				gs.distinctSets[i] = make(map[string]struct{})
+			if ext.distinctSets != nil {
+				ext.distinctSets[i] = make(map[string]struct{})
 			}
 		case AggCorr, AggCovarSamp, AggCovarPop:
-			gs.extraState[i] = &covarianceState{}
+			ext.extraState[i] = &covarianceState{}
 		case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
-			gs.extraState[i] = &collectState{}
+			ext.extraState[i] = &collectState{}
 		case AggMinBy:
-			gs.extraState[i] = &minMaxByState{isMin: true}
+			ext.extraState[i] = &minMaxByState{isMin: true}
 		case AggMaxBy:
-			gs.extraState[i] = &minMaxByState{isMin: false}
+			ext.extraState[i] = &minMaxByState{isMin: false}
 		}
 	}
 	h.strGroupStates = append(h.strGroupStates, gs)
@@ -1716,41 +1755,42 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 			// columns not in set stay nil
 		}
 		gs := h.gsPool.alloc()
-		gs.keyValues = keyVals
-		gs.setID = setIdx
-		gs.accs = make([]kernel.Accumulator, len(h.Aggs))
+		gs.setID = int32(setIdx)
+		ext := gs.ensureExtras()
+		ext.keyValues = keyVals
+		ext.accs = make([]kernel.Accumulator, len(h.Aggs))
 		if h.needsDistinct {
-			gs.distinctSets = make([]map[string]struct{}, len(h.Aggs))
+			ext.distinctSets = make([]map[string]struct{}, len(h.Aggs))
 		}
 		if h.needsExtra {
-			gs.extraState = make([]any, len(h.Aggs))
+			ext.extraState = make([]any, len(h.Aggs))
 		}
 		for i, agg := range h.Aggs {
 			switch agg.Func {
 			case AggCountDistinct, AggApproxDistinct:
-				if gs.distinctSets != nil {
-					gs.distinctSets[i] = make(map[string]struct{})
+				if ext.distinctSets != nil {
+					ext.distinctSets[i] = make(map[string]struct{})
 				}
 			case AggStringAgg:
 				sep := agg.Separator
 				if sep == "" {
 					sep = ","
 				}
-				gs.extraState[i] = &stringAggState{sep: sep}
+				ext.extraState[i] = &stringAggState{sep: sep}
 			case AggStddev, AggVariance, AggStddevPop, AggVarPop:
-				gs.extraState[i] = &varianceState{}
+				ext.extraState[i] = &varianceState{}
 			case AggBoolAnd:
-				gs.extraState[i] = true
+				ext.extraState[i] = true
 			case AggBoolOr:
-				gs.extraState[i] = false
+				ext.extraState[i] = false
 			case AggCorr, AggCovarSamp, AggCovarPop:
-				gs.extraState[i] = &covarianceState{}
+				ext.extraState[i] = &covarianceState{}
 			case AggPercentileCont, AggPercentileDisc, AggMode, AggMedian:
-				gs.extraState[i] = &collectState{}
+				ext.extraState[i] = &collectState{}
 			case AggMinBy:
-				gs.extraState[i] = &minMaxByState{isMin: true}
+				ext.extraState[i] = &minMaxByState{isMin: true}
 			case AggMaxBy:
-				gs.extraState[i] = &minMaxByState{isMin: false}
+				ext.extraState[i] = &minMaxByState{isMin: false}
 			}
 		}
 		h.strGroupStates = append(h.strGroupStates, gs)
@@ -1761,7 +1801,11 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 }
 
 // updateGroup updates a group's accumulators with values from a single row.
+// updateGroup is only ever called on groups whose extras was allocated by
+// processRow / processRowGroupingSets, so gs.extras is non-nil here and we
+// bind it to a local for compactness.
 func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row int) {
+	ext := gs.extras
 	for i, agg := range h.Aggs {
 		switch agg.Func {
 		case AggCountDistinct:
@@ -1777,7 +1821,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			h.keyBuf = h.keyBuf[:0]
 			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
 			valKey := string(h.keyBuf)
-			gs.distinctSets[i][valKey] = struct{}{}
+			ext.distinctSets[i][valKey] = struct{}{}
 
 		case AggStringAgg:
 			idx := h.aggColIdx[i]
@@ -1788,7 +1832,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if v.Nulls.IsNullFast(row) {
 				continue
 			}
-			state := gs.extraState[i].(*stringAggState)
+			state := ext.extraState[i].(*stringAggState)
 			state.parts = append(state.parts, fmt.Sprint(v.GetValue(row)))
 
 		case AggBoolAnd:
@@ -1810,8 +1854,8 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			case float64:
 				boolVal = tv != 0
 			}
-			current := gs.extraState[i].(bool)
-			gs.extraState[i] = current && boolVal
+			current := ext.extraState[i].(bool)
+			ext.extraState[i] = current && boolVal
 
 		case AggBoolOr:
 			idx := h.aggColIdx[i]
@@ -1832,8 +1876,8 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			case float64:
 				boolVal = tv != 0
 			}
-			current := gs.extraState[i].(bool)
-			gs.extraState[i] = current || boolVal
+			current := ext.extraState[i].(bool)
+			ext.extraState[i] = current || boolVal
 
 		case AggStddev, AggVariance, AggStddevPop, AggVarPop:
 			idx := h.aggColIdx[i]
@@ -1848,7 +1892,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if extract == nil {
 				continue
 			}
-			gs.extraState[i].(*varianceState).update(extract(v, row))
+			ext.extraState[i].(*varianceState).update(extract(v, row))
 
 		case AggApproxDistinct:
 			idx := h.aggColIdx[i]
@@ -1862,7 +1906,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			h.keyBuf = h.keyBuf[:0]
 			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
 			valKey := string(h.keyBuf)
-			gs.distinctSets[i][valKey] = struct{}{}
+			ext.distinctSets[i][valKey] = struct{}{}
 
 		case AggCorr, AggCovarSamp, AggCovarPop:
 			idx1 := h.aggColIdx[i]
@@ -1879,7 +1923,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if e1 == nil || e2 == nil {
 				continue
 			}
-			gs.extraState[i].(*covarianceState).update(e1(v1, row), e2(v2, row))
+			ext.extraState[i].(*covarianceState).update(e1(v1, row), e2(v2, row))
 
 		case AggPercentileCont, AggPercentileDisc, AggMedian:
 			idx := h.aggColIdx[i]
@@ -1894,7 +1938,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if extract == nil {
 				continue
 			}
-			gs.extraState[i].(*collectState).values = append(gs.extraState[i].(*collectState).values, extract(v, row))
+			ext.extraState[i].(*collectState).values = append(ext.extraState[i].(*collectState).values, extract(v, row))
 
 		case AggMode:
 			idx := h.aggColIdx[i]
@@ -1909,7 +1953,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if extract == nil {
 				continue
 			}
-			gs.extraState[i].(*collectState).values = append(gs.extraState[i].(*collectState).values, extract(v, row))
+			ext.extraState[i].(*collectState).values = append(ext.extraState[i].(*collectState).values, extract(v, row))
 
 		case AggMinBy, AggMaxBy:
 			idx1 := h.aggColIdx[i]
@@ -1926,7 +1970,7 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			if extract2 == nil {
 				continue
 			}
-			state := gs.extraState[i].(*minMaxByState)
+			state := ext.extraState[i].(*minMaxByState)
 			cmpVal := extract2(v2, row)
 			if !state.hasValue ||
 				(state.isMin && cmpVal < state.bestCmp) ||
@@ -1943,10 +1987,10 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			}
 			idx := h.aggColIdx[i]
 			if idx >= 0 {
-				updater(&gs.accs[i], b.Columns[idx], row)
+				updater(&ext.accs[i], b.Columns[idx], row)
 			} else {
 				// COUNT(*) — pass nil vec
-				updater(&gs.accs[i], nil, row)
+				updater(&ext.accs[i], nil, row)
 			}
 		}
 	}
@@ -2131,8 +2175,19 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		return h.nextFromPartialMerger()
 	}
 
-	// Materialize SoA flat accumulators to per-group AoS on first call.
-	h.materializeFlatAccums()
+	// SoA-direct read: when the SoA fast path is still active (intFlatAccs
+	// non-nil), Next() reads accumulators straight from the flat arrays via
+	// finalizeFlatAtIndex instead of calling materializeFlatAccums to copy
+	// them per-group. Skipping that materialize saves 96 B (extras) + 24 B
+	// (accs slice header) + nAggs × ~80 B (Accumulator) of fresh heap per
+	// group, which on Q17 SF100 (20M groups × 3 aggs) is the difference
+	// between ~3 GB and ~0.5 GB of group-state heap inside Next.
+	//
+	// materializeFlatAccums is still called on the migration paths
+	// (compact→generic, dual-int→generic, MergeSink generic merge,
+	// drainSimpleAggsToPartialGroups) where per-group accs are required to
+	// run kernel.Accumulator.Merge. After those run, h.intFlatAccs == nil and
+	// the per-group ext.accs branch below picks up the materialized values.
 
 	// Scalar aggregate fast path: single row output from batch accumulators
 	if h.isScalarAgg {
@@ -2201,17 +2256,23 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		} else {
 			gs = h.strGroupStates[start+i]
 		}
+		// gs.extras is nil on the SoA hot path (consumeBatchIntGroup /
+		// consumeBatchDualIntGroup defer boxing) — those reads go through
+		// the SoA-direct branch below. Complex-agg / compact / generic
+		// paths populate extras during consume or processRow.
+		ext := gs.extras
 
 		// Set group-by columns: use intKey directly for int-keyed groups
 		// to avoid deferred []any boxing. For other paths, use keyValues.
-		if h.useIntGroupKey && gs.keyValues == nil {
+		deferredBoxing := ext == nil || ext.keyValues == nil
+		if h.useIntGroupKey && deferredBoxing {
 			out.Columns[0].SetValue(i, gs.intKey)
-		} else if h.useDualIntGroupKey && gs.keyValues == nil {
+		} else if h.useDualIntGroupKey && deferredBoxing {
 			idx := start + i
 			out.Columns[0].SetValue(i, h.dualIntKeysA[idx])
 			out.Columns[1].SetValue(i, h.dualIntKeysB[idx])
 		} else {
-			for j, val := range gs.keyValues {
+			for j, val := range ext.keyValues {
 				out.Columns[j].SetValue(i, val)
 			}
 		}
@@ -2221,88 +2282,101 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 			colIdx := len(h.GroupByCols) + j
 			switch agg.Func {
 			case AggCountDistinct:
-				out.Columns[colIdx].SetValue(i, int64(len(gs.distinctSets[j])))
+				out.Columns[colIdx].SetValue(i, int64(len(ext.distinctSets[j])))
 			case AggStringAgg:
-				state := gs.extraState[j].(*stringAggState)
+				state := ext.extraState[j].(*stringAggState)
 				if len(state.parts) == 0 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, strings.Join(state.parts, state.sep))
 				}
 			case AggBoolAnd, AggBoolOr:
-				out.Columns[colIdx].SetValue(i, gs.extraState[j].(bool))
+				out.Columns[colIdx].SetValue(i, ext.extraState[j].(bool))
 			case AggStddev:
-				state := gs.extraState[j].(*varianceState)
+				state := ext.extraState[j].(*varianceState)
 				if state.count < 2 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, math.Sqrt(state.varianceSamp()))
 				}
 			case AggVariance:
-				state := gs.extraState[j].(*varianceState)
+				state := ext.extraState[j].(*varianceState)
 				if state.count < 2 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, state.varianceSamp())
 				}
 			case AggStddevPop:
-				state := gs.extraState[j].(*varianceState)
+				state := ext.extraState[j].(*varianceState)
 				if state.count == 0 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, math.Sqrt(state.variancePop()))
 				}
 			case AggVarPop:
-				state := gs.extraState[j].(*varianceState)
+				state := ext.extraState[j].(*varianceState)
 				if state.count == 0 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, state.variancePop())
 				}
 			case AggApproxDistinct:
-				out.Columns[colIdx].SetValue(i, int64(len(gs.distinctSets[j])))
+				out.Columns[colIdx].SetValue(i, int64(len(ext.distinctSets[j])))
 			case AggCorr:
-				state := gs.extraState[j].(*covarianceState)
+				state := ext.extraState[j].(*covarianceState)
 				if state.count < 2 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, state.correlation())
 				}
 			case AggCovarSamp:
-				state := gs.extraState[j].(*covarianceState)
+				state := ext.extraState[j].(*covarianceState)
 				if state.count < 2 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, state.covarSamp())
 				}
 			case AggCovarPop:
-				state := gs.extraState[j].(*covarianceState)
+				state := ext.extraState[j].(*covarianceState)
 				if state.count == 0 {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, state.covarPop())
 				}
 			case AggPercentileCont:
-				state := gs.extraState[j].(*collectState)
+				state := ext.extraState[j].(*collectState)
 				out.Columns[colIdx].SetValue(i, computePercentileCont(state.values, agg.Percentile))
 			case AggPercentileDisc:
-				state := gs.extraState[j].(*collectState)
+				state := ext.extraState[j].(*collectState)
 				out.Columns[colIdx].SetValue(i, computePercentileDisc(state.values, agg.Percentile))
 			case AggMedian:
-				state := gs.extraState[j].(*collectState)
+				state := ext.extraState[j].(*collectState)
 				out.Columns[colIdx].SetValue(i, computePercentileCont(state.values, 0.5))
 			case AggMode:
-				state := gs.extraState[j].(*collectState)
+				state := ext.extraState[j].(*collectState)
 				out.Columns[colIdx].SetValue(i, computeMode(state.values))
 			case AggMinBy, AggMaxBy:
-				state := gs.extraState[j].(*minMaxByState)
+				state := ext.extraState[j].(*minMaxByState)
 				if !state.hasValue {
 					out.Columns[colIdx].SetValue(i, nil)
 				} else {
 					out.Columns[colIdx].SetValue(i, state.bestVal)
 				}
 			default:
-				result := finalizeKernelAcc(&gs.accs[j], agg.Func)
+				// Two paths: the SoA fast path reads directly from
+				// intFlatAccs (no per-group accs allocation); the
+				// post-materialize / post-merge generic path reads from
+				// ext.accs which materializeFlatAccums has populated. We
+				// pick by looking at gs.extras and h.intFlatAccs together so
+				// that null-key fallback groups (which processRow filled in
+				// ext.accs while their intFlatAccs slot stayed at zero) are
+				// served from ext.accs even when SoA is otherwise active.
+				var result any
+				if ext != nil && ext.accs != nil {
+					result = finalizeKernelAcc(&ext.accs[j], agg.Func)
+				} else {
+					result = finalizeFlatAtIndex(&h.intFlatAccs[j], start+i, agg.Func)
+				}
 				out.Columns[colIdx].SetValue(i, result)
 			}
 		}
@@ -2322,6 +2396,16 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		h.serializedKeys = nil
 		h.strGroupStates = nil
 		h.strGroupIndex = nil
+		// Drop SoA arrays now that the SoA-direct path has finished reading
+		// from them. materializeFlatAccums used to do this implicitly (it
+		// nil'd intFlatAccs on the way through); since Next() no longer calls
+		// materialize on the SoA hot path, we must release these explicitly.
+		h.intFlatAccs = nil
+		h.intGroupStates = nil
+		h.intGroupIndex = nil
+		h.dualIntKeysA = nil
+		h.dualIntKeysB = nil
+		h.dualIntNextGroup = nil
 	}
 	return out, nil
 }
@@ -2445,16 +2529,20 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 	h.migrateToGenericMap()
 	o.migrateToGenericMap()
 
+	// migrateToGenericMap → materializeFlatAccums on both sides, so every
+	// group's extras is allocated and extras.accs is populated. Bind locals.
 	for i := range o.keys {
 		key := o.serializedKeys[i]
 		oGS := o.strGroupStates[i]
+		oExt := oGS.extras
 
 		newIdx := int32(len(h.strGroupStates))
 		gsIdx, found := h.strGroupIndex.GetOrInsert([]byte(key), newIdx)
 		if found {
 			gs := h.strGroupStates[gsIdx]
-			for j := range gs.accs {
-				gs.accs[j].Merge(&oGS.accs[j])
+			ext := gs.extras
+			for j := range ext.accs {
+				ext.accs[j].Merge(&oExt.accs[j])
 			}
 			// COUNT(DISTINCT) state lives in distinctSets, not accs. Without
 			// this merge, parallel workers' partial distinct sets aren't
@@ -2462,20 +2550,20 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 			// split across workers (test: Q16 missing the cnt=6 row at
 			// position 2 because half the suppliers were on a different
 			// worker than the other half).
-			for j := range gs.distinctSets {
-				if oGS.distinctSets == nil || j >= len(oGS.distinctSets) || oGS.distinctSets[j] == nil {
+			for j := range ext.distinctSets {
+				if oExt.distinctSets == nil || j >= len(oExt.distinctSets) || oExt.distinctSets[j] == nil {
 					continue
 				}
-				if gs.distinctSets[j] == nil {
-					gs.distinctSets[j] = make(map[string]struct{}, len(oGS.distinctSets[j]))
+				if ext.distinctSets[j] == nil {
+					ext.distinctSets[j] = make(map[string]struct{}, len(oExt.distinctSets[j]))
 				}
-				for k := range oGS.distinctSets[j] {
-					gs.distinctSets[j][k] = struct{}{}
+				for k := range oExt.distinctSets[j] {
+					ext.distinctSets[j][k] = struct{}{}
 				}
 			}
 		} else {
 			h.strGroupStates = append(h.strGroupStates, oGS)
-			h.keys = append(h.keys, oGS.keyValues)
+			h.keys = append(h.keys, oExt.keyValues)
 			h.serializedKeys = append(h.serializedKeys, key)
 		}
 	}
@@ -2771,15 +2859,16 @@ func (h *HashAggregate) migrateToGenericMap() {
 		h.serializedKeys = make([]string, 0, len(h.intGroupStates))
 		h.keys = make([][]any, 0, len(h.intGroupStates))
 		for i, gs := range h.intGroupStates {
-			if gs.keyValues == nil {
-				gs.keyValues = []any{h.dualIntKeysA[i], h.dualIntKeysB[i]}
+			ext := gs.ensureExtras()
+			if ext.keyValues == nil {
+				ext.keyValues = []any{h.dualIntKeysA[i], h.dualIntKeysB[i]}
 			}
 			h.keyBuf = h.keyBuf[:0]
-			key := serializeKey(h.keyBuf, gs.keyValues)
+			key := serializeKey(h.keyBuf, ext.keyValues)
 			h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 			h.strGroupStates = append(h.strGroupStates, gs)
 			h.serializedKeys = append(h.serializedKeys, key)
-			h.keys = append(h.keys, gs.keyValues)
+			h.keys = append(h.keys, ext.keyValues)
 		}
 		h.useDualIntGroupKey = false
 		h.intGroupStates = nil
@@ -2799,15 +2888,16 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.keys = make([][]any, 0, len(h.intGroupStates))
 	for _, gs := range h.intGroupStates {
 		// Lazily construct keyValues for groups that deferred boxing
-		if gs.keyValues == nil {
-			gs.keyValues = []any{gs.intKey}
+		ext := gs.ensureExtras()
+		if ext.keyValues == nil {
+			ext.keyValues = []any{gs.intKey}
 		}
 		h.keyBuf = h.keyBuf[:0]
-		key := serializeKey(h.keyBuf, gs.keyValues)
+		key := serializeKey(h.keyBuf, ext.keyValues)
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
-		h.keys = append(h.keys, gs.keyValues)
+		h.keys = append(h.keys, ext.keyValues)
 	}
 	h.useIntGroupKey = false
 	h.intGroupStates = nil
@@ -3106,6 +3196,59 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	h.groupIndexBuf = make([]int32, batch.DefaultBatchSize)
 }
 
+// finalizeFlatAtIndex reads SoA accumulator state at group index gi and
+// finalizes without allocating a per-group Accumulator on the heap. This is
+// the SoA-direct counterpart to finalizeKernelAcc that lets Next() avoid
+// calling materializeFlatAccums (which would otherwise allocate
+// groupStateExtras+accs for every group — 96 B/group + 24 B/group = 120 B
+// of fresh heap per group, scaling to ~2.4 GB at SF100 Q17's 20M groups).
+//
+// Build a stack-only Accumulator view, then finalize. The compiler sees acc
+// is value-typed and never escapes (only its address passes to
+// finalizeKernelAcc, which doesn't retain it), so there is no heap
+// allocation in the hot path.
+func finalizeFlatAtIndex(fa *flatAccumArrays, gi int, fn AggFunc) any {
+	var acc kernel.Accumulator
+	acc.Count = fa.count[gi]
+	acc.IsFloat = fa.isFloat
+	acc.IsDecimal = fa.isDecimal
+	acc.DecScale = fa.decScale
+	if fa.sumI64 != nil {
+		acc.SumI64 = fa.sumI64[gi]
+	}
+	if fa.sumF64 != nil {
+		acc.SumF64 = fa.sumF64[gi]
+	}
+	if fa.sumDec != nil {
+		acc.SumDec = fa.sumDec[gi]
+	}
+	if fa.minI64 != nil {
+		acc.MinI64 = fa.minI64[gi]
+		acc.HasMin = fa.hasMin[gi]
+	}
+	if fa.maxI64 != nil {
+		acc.MaxI64 = fa.maxI64[gi]
+		acc.HasMax = fa.hasMax[gi]
+	}
+	if fa.minF64 != nil {
+		acc.MinF64 = fa.minF64[gi]
+		acc.HasMin = fa.hasMin[gi]
+	}
+	if fa.maxF64 != nil {
+		acc.MaxF64 = fa.maxF64[gi]
+		acc.HasMax = fa.hasMax[gi]
+	}
+	if fa.minDec != nil {
+		acc.MinDec = fa.minDec[gi]
+		acc.HasMin = fa.hasMin[gi]
+	}
+	if fa.maxDec != nil {
+		acc.MaxDec = fa.maxDec[gi]
+		acc.HasMax = fa.hasMax[gi]
+	}
+	return finalizeKernelAcc(&acc, fn)
+}
+
 // materializeFlatAccums converts SoA flat arrays back to per-group Accumulator
 // structs for output (Next) and merge (MergeSink). Called once after all input
 // is consumed. O(groups) — negligible compared to the O(rows) hot loop.
@@ -3117,8 +3260,9 @@ func (h *HashAggregate) materializeFlatAccums() {
 	// String GROUP BY and generic SoA use strGroupStates with SoA flat accumulators.
 	if h.useStrGroupKey || h.useGenericSoA {
 		for gi, gs := range h.strGroupStates {
-			if gs.accs == nil {
-				gs.accs = make([]kernel.Accumulator, nAggs)
+			ext := gs.ensureExtras()
+			if ext.accs == nil {
+				ext.accs = make([]kernel.Accumulator, nAggs)
 			}
 			for ai := range h.intFlatAccs {
 				fa := &h.intFlatAccs[ai]
@@ -3132,7 +3276,7 @@ func (h *HashAggregate) materializeFlatAccums() {
 				if gi >= len(fa.count) {
 					continue
 				}
-				acc := &gs.accs[ai]
+				acc := &ext.accs[ai]
 				acc.Count = fa.count[gi]
 				acc.IsFloat = fa.isFloat
 				acc.IsDecimal = fa.isDecimal
@@ -3177,12 +3321,13 @@ func (h *HashAggregate) materializeFlatAccums() {
 		return
 	}
 	for gi, gs := range h.intGroupStates {
-		if gs.accs == nil {
-			gs.accs = make([]kernel.Accumulator, nAggs)
+		ext := gs.ensureExtras()
+		if ext.accs == nil {
+			ext.accs = make([]kernel.Accumulator, nAggs)
 		}
 		for ai := range h.intFlatAccs {
 			fa := &h.intFlatAccs[ai]
-			acc := &gs.accs[ai]
+			acc := &ext.accs[ai]
 			acc.Count = fa.count[gi]
 			acc.IsFloat = fa.isFloat
 			acc.IsDecimal = fa.isDecimal
@@ -3245,10 +3390,13 @@ func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
 		for ai := range h.intFlatAccs {
 			fa := &h.intFlatAccs[ai]
 			fa.appendGroup()
-			if gs.accs == nil || ai >= len(gs.accs) {
+			// extras may be nil if rebuild runs before any materialize/Group
+			// path allocated them; treat those as the "no accumulators yet"
+			// case the original `gs.accs == nil` branch handled.
+			if gs.extras == nil || gs.extras.accs == nil || ai >= len(gs.extras.accs) {
 				continue
 			}
-			acc := &gs.accs[ai]
+			acc := &gs.extras.accs[ai]
 			fa.count[gi] = acc.Count
 			if fa.sumI64 != nil {
 				fa.sumI64[gi] = acc.SumI64
