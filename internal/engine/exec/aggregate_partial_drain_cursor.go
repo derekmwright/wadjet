@@ -2,6 +2,7 @@ package exec
 
 import (
 	"sort"
+	"strconv"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
@@ -134,12 +135,26 @@ func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
 	c.head.KeyVals = c.headKeyVals
 	c.head.Accs = c.headAccs
 
-	scratchKeyVals := make([]any, nGroupCols)
-	for gi := 0; gi < numGroups; gi++ {
-		c.keyOffsets[gi] = int32(len(c.keyArena))
-		c.populateScratchKeyVals(gi, scratchKeyVals)
-		c.keyArena = appendSerializedKey(c.keyArena, scratchKeyVals)
-		c.sortedIdx[gi] = uint32(gi)
+	// int / dual-int paths skip the []any round-trip entirely: they read SoA
+	// int values straight into the arena via typed serconv writes. At SF100
+	// scan-5 (20M groups) this saves N (single-int) or 2N (dual-int) `any`
+	// boxing allocations during build. compact / str / generic modes already
+	// have a []any in extras.keyValues so there's no boxing to skip.
+	switch keyMode {
+	case partialKeyModeInt, partialKeyModeDualInt:
+		for gi := 0; gi < numGroups; gi++ {
+			c.keyOffsets[gi] = int32(len(c.keyArena))
+			c.keyArena = c.appendIntModeSortKey(c.keyArena, gi)
+			c.sortedIdx[gi] = uint32(gi)
+		}
+	default:
+		scratchKeyVals := make([]any, nGroupCols)
+		for gi := 0; gi < numGroups; gi++ {
+			c.keyOffsets[gi] = int32(len(c.keyArena))
+			c.populateScratchKeyVals(gi, scratchKeyVals)
+			c.keyArena = appendSerializedKey(c.keyArena, scratchKeyVals)
+			c.sortedIdx[gi] = uint32(gi)
+		}
 	}
 	c.keyOffsets[numGroups] = int32(len(c.keyArena))
 
@@ -292,6 +307,39 @@ func appendSerializedKey(buf []byte, vals []any) []byte {
 		buf = appendKeyValue(buf, v)
 	}
 	return buf
+}
+
+// appendIntModeSortKey writes the sort key for an int- or dual-int-keyed
+// group at SoA index gi directly from typed int64s, bypassing the []any
+// box that appendKeyValue's type switch would otherwise require. Output is
+// byte-identical to serializeKey([]any{reifyIntKey(...)}, ...) so spill
+// files written via the cursor stay compatible with file-source readers.
+func (c *partialGroupCursor) appendIntModeSortKey(buf []byte, gi int) []byte {
+	if c.keyMode == partialKeyModeInt {
+		gs := c.intGroupStates[gi]
+		return appendTypedIntKey(buf, gs.intKey, c.groupColTypes[0])
+	}
+	// partialKeyModeDualInt
+	buf = appendTypedIntKey(buf, c.dualIntKeysA[gi], c.groupColTypes[0])
+	buf = append(buf, 0)
+	return appendTypedIntKey(buf, c.dualIntKeysB[gi], c.groupColTypes[1])
+}
+
+// appendTypedIntKey writes one int-mode column value to buf using the same
+// text encoding appendKeyValue produces for the corresponding boxed `any`.
+// The shared encoding makes this byte-identical to the prior boxed path.
+func appendTypedIntKey(buf []byte, v int64, t batch.TypeID) []byte {
+	switch t {
+	case batch.TypeBool:
+		return strconv.AppendBool(buf, v != 0)
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		return strconv.AppendInt(buf, int64(int32(v)), 10)
+	default:
+		// int64 + every wider-or-equal type stored as int64 (timestamp,
+		// ipv4, mac, duration, ...). reifyIntKey returns int64(v) for these,
+		// and appendKeyValue's int64 branch is strconv.AppendInt(buf, tv, 10).
+		return strconv.AppendInt(buf, v, 10)
+	}
 }
 
 // Peek implements partialRunSource.Peek. Returns nil when exhausted.
