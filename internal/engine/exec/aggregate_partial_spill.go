@@ -1102,16 +1102,20 @@ func mapBatchTypeToParquet(t batch.TypeID) parquet.TypeID {
 //     groupColTypes[0] (so writeKeyValue emits the right tag and so Next()
 //     emits the right type after merge)
 //   - useDualIntGroupKey: dualIntKeysA[i], dualIntKeysB[i] reified
-//   - useCompactGroupKey: gs.keyValues (set during consumeBatchCompactGroup)
-//   - useStrGroupKey: gs.keyValues (single string)
-//   - useGenericSoA: gs.keyValues
-//   - generic (post-MergeSink migration): gs.keyValues from strGroupStates
+//   - useCompactGroupKey: gs.extras.keyValues (set during consumeBatchCompactGroup)
+//   - useStrGroupKey: gs.extras.keyValues (single string)
+//   - useGenericSoA: gs.extras.keyValues
+//   - generic (post-MergeSink migration): gs.extras.keyValues from strGroupStates
 //
 // Caller must have materialized intFlatAccs into per-group accs (via
-// materializeFlatAccums) BEFORE calling this — accs come from gs.accs.
+// materializeFlatAccums) BEFORE calling this — accs come from gs.extras.accs.
 func (h *HashAggregate) drainSimpleAggsToPartialGroups() []*partialGroup {
 	var groups []*partialGroup
 	keyBuf := make([]byte, 0, 64)
+	// Caller called materializeFlatAccums above this, so every group's extras
+	// is allocated and extras.accs is populated. extras.keyValues is set for
+	// compact / str / generic paths but stays nil for int / dual-int (we
+	// rebuild keyVals from intKey / dualIntKeys[]).
 	switch {
 	case h.useIntGroupKey:
 		groups = make([]*partialGroup, 0, len(h.intGroupStates))
@@ -1122,7 +1126,7 @@ func (h *HashAggregate) drainSimpleAggsToPartialGroups() []*partialGroup {
 			groups = append(groups, &partialGroup{
 				SortKey: sortKey,
 				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.accs...),
+				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
 			})
 		}
 	case h.useDualIntGroupKey:
@@ -1136,29 +1140,29 @@ func (h *HashAggregate) drainSimpleAggsToPartialGroups() []*partialGroup {
 			groups = append(groups, &partialGroup{
 				SortKey: sortKey,
 				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.accs...),
+				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
 			})
 		}
 	case h.useCompactGroupKey:
 		groups = make([]*partialGroup, 0, len(h.intGroupStates))
 		for _, gs := range h.intGroupStates {
-			keyVals := append([]any(nil), gs.keyValues...)
+			keyVals := append([]any(nil), gs.extras.keyValues...)
 			sortKey := []byte(serializeKey(keyBuf, keyVals))
 			groups = append(groups, &partialGroup{
 				SortKey: sortKey,
 				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.accs...),
+				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
 			})
 		}
 	default: // useStrGroupKey || useGenericSoA || post-MergeSink generic
 		groups = make([]*partialGroup, 0, len(h.strGroupStates))
 		for _, gs := range h.strGroupStates {
-			keyVals := append([]any(nil), gs.keyValues...)
+			keyVals := append([]any(nil), gs.extras.keyValues...)
 			sortKey := []byte(serializeKey(keyBuf, keyVals))
 			groups = append(groups, &partialGroup{
 				SortKey: sortKey,
 				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.accs...),
+				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
 			})
 		}
 	}
