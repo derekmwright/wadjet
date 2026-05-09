@@ -219,12 +219,12 @@ func (w *partialSpillWriter) Write(g partialGroup) error {
 		if i < len(g.KeyVals) {
 			v = g.KeyVals[i]
 		}
-		if err := writeKeyValue(w.w, v, gc.Type); err != nil {
+		if err := writeKeyValue(w.w, w.scratch[:], v, gc.Type); err != nil {
 			return err
 		}
 	}
 	for i, spec := range w.header.Aggs {
-		if err := emitAcc(w.w, spec, &g.Accs[i]); err != nil {
+		if err := emitAcc(w.w, w.scratch[:], spec, &g.Accs[i]); err != nil {
 			return err
 		}
 	}
@@ -268,22 +268,30 @@ func (w *partialSpillWriter) Close() (int64, error) {
 
 // emitAcc writes only the accumulator fields used by this aggregate's func +
 // type combo. The reader uses the matching readAcc to deserialize.
-func emitAcc(w *bufio.Writer, spec partialAggSpec, a *kernel.Accumulator) error {
+//
+// scratch must be a slice of at least 16 bytes whose backing storage is
+// already heap-allocated (typical: w.scratch[:] from partialSpillWriter).
+// The helpers passed `scratch` use it instead of a stack-local [N]byte
+// because bufio.Writer.Write triggers an io.Writer interface call on its
+// slow path, forcing the compiler to assume any []byte parameter could
+// escape; threading scratch through avoids the per-call heap allocation
+// the local-array path would incur.
+func emitAcc(w *bufio.Writer, scratch []byte, spec partialAggSpec, a *kernel.Accumulator) error {
 	switch spec.Func {
 	case AggSum, AggAvg:
-		if err := writeInt64(w, a.Count); err != nil {
+		if err := writeInt64(w, scratch, a.Count); err != nil {
 			return err
 		}
 		switch {
 		case spec.IsDecimal:
-			return writeInt128(w, a.SumDec)
+			return writeInt128(w, scratch, a.SumDec)
 		case spec.IsFloat:
-			return writeFloat64(w, a.SumF64)
+			return writeFloat64(w, scratch, a.SumF64)
 		default:
-			return writeInt64(w, a.SumI64)
+			return writeInt64(w, scratch, a.SumI64)
 		}
 	case AggCount:
-		return writeInt64(w, a.Count)
+		return writeInt64(w, scratch, a.Count)
 	case AggMin:
 		if err := writeBool(w, a.HasMin); err != nil {
 			return err
@@ -293,11 +301,11 @@ func emitAcc(w *bufio.Writer, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		switch {
 		case spec.IsDecimal:
-			return writeInt128(w, a.MinDec)
+			return writeInt128(w, scratch, a.MinDec)
 		case spec.IsFloat:
-			return writeFloat64(w, a.MinF64)
+			return writeFloat64(w, scratch, a.MinF64)
 		default:
-			return writeInt64(w, a.MinI64)
+			return writeInt64(w, scratch, a.MinI64)
 		}
 	case AggMax:
 		if err := writeBool(w, a.HasMax); err != nil {
@@ -308,11 +316,11 @@ func emitAcc(w *bufio.Writer, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		switch {
 		case spec.IsDecimal:
-			return writeInt128(w, a.MaxDec)
+			return writeInt128(w, scratch, a.MaxDec)
 		case spec.IsFloat:
-			return writeFloat64(w, a.MaxF64)
+			return writeFloat64(w, scratch, a.MaxF64)
 		default:
-			return writeInt64(w, a.MaxI64)
+			return writeInt64(w, scratch, a.MaxI64)
 		}
 	default:
 		return fmt.Errorf("partial spill: unsupported agg func %v", spec.Func)
@@ -426,11 +434,15 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 // writeKeyValue writes a typed display value for a group-by column. The type
 // is taken from the header (parquet.TypeID) so we can encode the canonical
 // representation; nil values are encoded as a single null tag.
-func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
+//
+// scratch must be a slice of at least 16 bytes whose backing storage is
+// already heap-allocated (typical: w.scratch[:] from partialSpillWriter).
+// See emitAcc for why threading scratch avoids the per-call alloc that a
+// stack-local [16]byte would incur via bufio.Writer.Write's escape.
+func writeKeyValue(w *bufio.Writer, scratch []byte, v any, _ parquet.TypeID) error {
 	if v == nil {
 		return w.WriteByte(partialTagNull)
 	}
-	var buf [16]byte
 	switch tv := v.(type) {
 	case bool:
 		if tv {
@@ -441,43 +453,43 @@ func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
 		if err := w.WriteByte(partialTagInt64); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint64(buf[:8], uint64(tv))
-		_, err := w.Write(buf[:8])
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv))
+		_, err := w.Write(scratch[:8])
 		return err
 	case int32:
 		if err := w.WriteByte(partialTagInt32); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], uint32(tv))
-		_, err := w.Write(buf[:4])
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(tv))
+		_, err := w.Write(scratch[:4])
 		return err
 	case int:
 		if err := w.WriteByte(partialTagInt64); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint64(buf[:8], uint64(tv))
-		_, err := w.Write(buf[:8])
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv))
+		_, err := w.Write(scratch[:8])
 		return err
 	case float64:
 		if err := w.WriteByte(partialTagFloat64); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint64(buf[:8], math.Float64bits(tv))
-		_, err := w.Write(buf[:8])
+		binary.LittleEndian.PutUint64(scratch[:8], math.Float64bits(tv))
+		_, err := w.Write(scratch[:8])
 		return err
 	case float32:
 		if err := w.WriteByte(partialTagFloat32); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], math.Float32bits(tv))
-		_, err := w.Write(buf[:4])
+		binary.LittleEndian.PutUint32(scratch[:4], math.Float32bits(tv))
+		_, err := w.Write(scratch[:4])
 		return err
 	case string:
 		if err := w.WriteByte(partialTagString); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], uint32(len(tv)))
-		if _, err := w.Write(buf[:4]); err != nil {
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(tv)))
+		if _, err := w.Write(scratch[:4]); err != nil {
 			return err
 		}
 		_, err := w.WriteString(tv)
@@ -486,8 +498,8 @@ func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
 		if err := w.WriteByte(partialTagBytes); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], uint32(len(tv)))
-		if _, err := w.Write(buf[:4]); err != nil {
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(tv)))
+		if _, err := w.Write(scratch[:4]); err != nil {
 			return err
 		}
 		_, err := w.Write(tv)
@@ -496,9 +508,9 @@ func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
 		if err := w.WriteByte(partialTagInt128); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint64(buf[:8], uint64(tv.Hi))
-		binary.LittleEndian.PutUint64(buf[8:16], tv.Lo)
-		_, err := w.Write(buf[:16])
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv.Hi))
+		binary.LittleEndian.PutUint64(scratch[8:16], tv.Lo)
+		_, err := w.Write(scratch[:16])
 		return err
 	default:
 		// Fall back to fmt.Sprintf string form. This is acceptable for
@@ -509,8 +521,8 @@ func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
 		if err := w.WriteByte(partialTagString); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], uint32(len(s)))
-		if _, err := w.Write(buf[:4]); err != nil {
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(s)))
+		if _, err := w.Write(scratch[:4]); err != nil {
 			return err
 		}
 		_, err := w.WriteString(s)
@@ -599,10 +611,9 @@ func readBool(r *bufio.Reader) (bool, error) {
 	return b != 0, nil
 }
 
-func writeInt64(w *bufio.Writer, v int64) error {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(v))
-	_, err := w.Write(buf[:])
+func writeInt64(w *bufio.Writer, scratch []byte, v int64) error {
+	binary.LittleEndian.PutUint64(scratch[:8], uint64(v))
+	_, err := w.Write(scratch[:8])
 	return err
 }
 
@@ -614,10 +625,9 @@ func readInt64(r *bufio.Reader) (int64, error) {
 	return int64(binary.LittleEndian.Uint64(buf[:])), nil
 }
 
-func writeFloat64(w *bufio.Writer, v float64) error {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
-	_, err := w.Write(buf[:])
+func writeFloat64(w *bufio.Writer, scratch []byte, v float64) error {
+	binary.LittleEndian.PutUint64(scratch[:8], math.Float64bits(v))
+	_, err := w.Write(scratch[:8])
 	return err
 }
 
@@ -629,11 +639,10 @@ func readFloat64(r *bufio.Reader) (float64, error) {
 	return math.Float64frombits(binary.LittleEndian.Uint64(buf[:])), nil
 }
 
-func writeInt128(w *bufio.Writer, v batch.Int128) error {
-	var buf [16]byte
-	binary.LittleEndian.PutUint64(buf[:8], uint64(v.Hi))
-	binary.LittleEndian.PutUint64(buf[8:16], v.Lo)
-	_, err := w.Write(buf[:])
+func writeInt128(w *bufio.Writer, scratch []byte, v batch.Int128) error {
+	binary.LittleEndian.PutUint64(scratch[:8], uint64(v.Hi))
+	binary.LittleEndian.PutUint64(scratch[8:16], v.Lo)
+	_, err := w.Write(scratch[:16])
 	return err
 }
 
