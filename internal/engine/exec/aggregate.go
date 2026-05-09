@@ -2184,10 +2184,12 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	// between ~3 GB and ~0.5 GB of group-state heap inside Next.
 	//
 	// materializeFlatAccums is still called on the migration paths
-	// (compact→generic, dual-int→generic, MergeSink generic merge,
-	// drainSimpleAggsToPartialGroups) where per-group accs are required to
-	// run kernel.Accumulator.Merge. After those run, h.intFlatAccs == nil and
-	// the per-group ext.accs branch below picks up the materialized values.
+	// (compact→generic, dual-int→generic, MergeSink generic merge) where
+	// per-group accs are required to run kernel.Accumulator.Merge. After
+	// those run, h.intFlatAccs == nil and the per-group ext.accs branch
+	// below picks up the materialized values. The spill/finalize-via-merge
+	// paths now drain SoA-direct via partialGroupCursor, so they do not
+	// trigger materialize.
 
 	// Scalar aggregate fast path: single row output from batch accumulators
 	if h.isScalarAgg {

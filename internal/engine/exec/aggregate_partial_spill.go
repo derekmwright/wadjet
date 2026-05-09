@@ -9,7 +9,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -975,15 +974,6 @@ func (m *kWayMerger) Close() error {
 	return firstErr
 }
 
-// sortPartialGroups sorts in-memory groups by SortKey, ascending. Used both
-// before writing a spill run and to prepare the in-memory remainder for the
-// k-way merge.
-func sortPartialGroups(groups []*partialGroup) {
-	sort.Slice(groups, func(i, j int) bool {
-		return bytesCompare(groups[i].SortKey, groups[j].SortKey) < 0
-	})
-}
-
 // canUseExternalMerge reports whether HashAggregate's current configuration
 // supports the partial-state external-merge spill path. The path requires:
 //   - simpleAggs (every agg fits Accumulator: SUM/COUNT/MIN/MAX/AVG)
@@ -1086,90 +1076,6 @@ func mapBatchTypeToParquet(t batch.TypeID) parquet.TypeID {
 	}
 }
 
-// drainSimpleAggsToPartialGroups walks the current SoA hash table and produces
-// one *partialGroup per live group, ready to be written to a spill file.
-//
-// SortKey is always produced via serializeKey(keyVals) so that runs from
-// any path (int, dual-int, compact, string, generic) and from any state
-// transition (raw consume, MergeSink-migrated) merge correctly. serializeKey
-// is the same encoding migrateToGenericMap uses to populate serializedKeys
-// after MergeSink migration, so a HashAggregate that spilled in compact mode
-// and was later merged with a peer in generic mode still has matching sort
-// keys at Finalize time.
-//
-// KeyVals strategy:
-//   - useIntGroupKey: gs.intKey reified to a typed value matching
-//     groupColTypes[0] (so writeKeyValue emits the right tag and so Next()
-//     emits the right type after merge)
-//   - useDualIntGroupKey: dualIntKeysA[i], dualIntKeysB[i] reified
-//   - useCompactGroupKey: gs.extras.keyValues (set during consumeBatchCompactGroup)
-//   - useStrGroupKey: gs.extras.keyValues (single string)
-//   - useGenericSoA: gs.extras.keyValues
-//   - generic (post-MergeSink migration): gs.extras.keyValues from strGroupStates
-//
-// Caller must have materialized intFlatAccs into per-group accs (via
-// materializeFlatAccums) BEFORE calling this — accs come from gs.extras.accs.
-func (h *HashAggregate) drainSimpleAggsToPartialGroups() []*partialGroup {
-	var groups []*partialGroup
-	keyBuf := make([]byte, 0, 64)
-	// Caller called materializeFlatAccums above this, so every group's extras
-	// is allocated and extras.accs is populated. extras.keyValues is set for
-	// compact / str / generic paths but stays nil for int / dual-int (we
-	// rebuild keyVals from intKey / dualIntKeys[]).
-	switch {
-	case h.useIntGroupKey:
-		groups = make([]*partialGroup, 0, len(h.intGroupStates))
-		for _, gs := range h.intGroupStates {
-			keyVal := reifyIntKey(gs.intKey, h.groupColTypes[0])
-			keyVals := []any{keyVal}
-			sortKey := []byte(serializeKey(keyBuf, keyVals))
-			groups = append(groups, &partialGroup{
-				SortKey: sortKey,
-				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
-			})
-		}
-	case h.useDualIntGroupKey:
-		groups = make([]*partialGroup, 0, len(h.intGroupStates))
-		for i, gs := range h.intGroupStates {
-			a, b := h.dualIntKeysA[i], h.dualIntKeysB[i]
-			vA := reifyIntKey(a, h.groupColTypes[0])
-			vB := reifyIntKey(b, h.groupColTypes[1])
-			keyVals := []any{vA, vB}
-			sortKey := []byte(serializeKey(keyBuf, keyVals))
-			groups = append(groups, &partialGroup{
-				SortKey: sortKey,
-				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
-			})
-		}
-	case h.useCompactGroupKey:
-		groups = make([]*partialGroup, 0, len(h.intGroupStates))
-		for _, gs := range h.intGroupStates {
-			keyVals := append([]any(nil), gs.extras.keyValues...)
-			sortKey := []byte(serializeKey(keyBuf, keyVals))
-			groups = append(groups, &partialGroup{
-				SortKey: sortKey,
-				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
-			})
-		}
-	default: // useStrGroupKey || useGenericSoA || post-MergeSink generic
-		groups = make([]*partialGroup, 0, len(h.strGroupStates))
-		for _, gs := range h.strGroupStates {
-			keyVals := append([]any(nil), gs.extras.keyValues...)
-			sortKey := []byte(serializeKey(keyBuf, keyVals))
-			groups = append(groups, &partialGroup{
-				SortKey: sortKey,
-				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
-			})
-		}
-	}
-	sortPartialGroups(groups)
-	return groups
-}
-
 // reifyIntKey converts a packed int64 key back to the typed value that
 // would have been read from a column of the given batch type, so the spill
 // file's display values match what Next() would emit from the in-memory
@@ -1190,55 +1096,62 @@ func reifyIntKey(v int64, t batch.TypeID) any {
 // The next Consume call will rebuild flat accumulators from the next batch's
 // schema.
 //
+// Drain is SoA-direct via partialGroupCursor: no materializeFlatAccums copy,
+// no []*partialGroup pointer-slice materialization. Peak drain footprint is
+// the sort-key arena + sort index + a single reused head, instead of one
+// heap-allocated *partialGroup per group. At SF100 Q17 (20M groups) this
+// drops ~7 GB per task to ~480 MB.
+//
 // Caller must hold h.mu.
 func (h *HashAggregate) spillPartialState() error {
 	if h.Spill == nil {
 		return nil
 	}
-	// Step 1: capture agg specs BEFORE materializing — buildPartialAggSpecs
-	// reads h.intFlatAccs[i].isFloat/isDecimal, and materializeFlatAccums
-	// clears h.intFlatAccs as its final step. Without this ordering, the
-	// captured specs would default IsFloat=false and the writer would emit
-	// the int64 sum branch for what is actually a float64 column, producing
-	// zero-valued accumulators in the spill file.
+	// Capture specs while h.intFlatAccs still carries the type flags. We
+	// no longer materialize, but the buildPartialAggSpecs/buildPartialGroupCols
+	// dependencies on h's mode + intFlatAccs are unchanged from the prior path.
 	aggSpecs := h.buildPartialAggSpecs()
 	groupCols := h.buildPartialGroupCols()
 
-	// Step 2: materialize SoA -> AoS so we can copy per-group accs into
-	// partialGroup.Accs. This nils out h.intFlatAccs, which is the desired
-	// reset state — the next Consume call will rebuildFlatAccums.
-	h.materializeFlatAccums()
-
-	// Step 3: build sorted partial groups from the materialized state.
-	groups := h.drainSimpleAggsToPartialGroups()
-	if len(groups) == 0 {
-		// Nothing to spill — still reset trackers so we don't grow
-		// unbounded.
+	cursor := newPartialGroupCursor(h)
+	if cursor.numGroups == 0 {
+		cursor.Close()
 		h.resetGroupStateAfterSpill()
 		return nil
 	}
 
-	// Step 4: write to disk.
 	header := partialSpillHeader{
 		GroupCols: groupCols,
 		Aggs:      aggSpecs,
 	}
 	w, path, err := newPartialSpillWriter(h.Spill.SpillDir(), header)
 	if err != nil {
+		cursor.Close()
 		return err
 	}
-	for _, g := range groups {
-		if err := w.Write(*g); err != nil {
+	for {
+		g := cursor.Peek()
+		if g == nil {
+			break
+		}
+		if werr := w.Write(*g); werr != nil {
 			w.Close()
-			return err
+			cursor.Close()
+			return werr
+		}
+		if aerr := cursor.Advance(); aerr != nil {
+			w.Close()
+			cursor.Close()
+			return aerr
 		}
 	}
 	if _, err := w.Close(); err != nil {
+		cursor.Close()
 		return err
 	}
+	cursor.Close()
 	h.partialSpillFiles = append(h.partialSpillFiles, path)
 
-	// Step 5: reset hash table and release tracker bytes.
 	h.resetGroupStateAfterSpill()
 	return nil
 }
@@ -1291,8 +1204,7 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 // Spill files are deleted by Close() once the merger is closed, not here —
 // the runs need them open during Next() drains.
 func (h *HashAggregate) finalizeViaPartialMerge() error {
-	// Capture specs before materialize clears intFlatAccs (same ordering
-	// constraint as spillPartialState).
+	// Capture specs while intFlatAccs is still populated.
 	specs := h.buildPartialAggSpecs()
 	// Capture the output schema while the path-mode flags + groupColTypes
 	// reflect the original configuration. Once we collapse to streaming
@@ -1300,16 +1212,18 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 	// would emit a different shape.
 	h.partialMergerSchema = h.outputSchema()
 
-	// Drain any remaining in-memory groups to the merger as a memory run.
-	// We don't write them to disk — they're already in RAM, no point doing
-	// the round-trip.
-	h.materializeFlatAccums()
-	memGroups := h.drainSimpleAggsToPartialGroups()
+	// Build a streaming SoA-direct cursor over the in-memory remainder. The
+	// cursor owns slice-header references to h.intFlatAccs / *GroupStates /
+	// dualIntKeys for its lifetime; the resetGroupStateAfterSpill call below
+	// nils h's slice headers but not the underlying arrays, which the cursor
+	// keeps live until it's drained and Close()d by closePartialMerger.
+	cursor := newPartialGroupCursor(h)
 
-	// Build run sources: one per partial-spill file plus the memory run.
 	sources := make([]partialRunSource, 0, len(h.partialSpillFiles)+1)
-	if len(memGroups) > 0 {
-		sources = append(sources, newMemoryRunSource(memGroups))
+	if cursor.numGroups > 0 {
+		sources = append(sources, cursor)
+	} else {
+		cursor.Close()
 	}
 	for _, path := range h.partialSpillFiles {
 		src, err := newFileRunSource(path)
@@ -1325,7 +1239,8 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 
 	// Reset in-memory state so the existing Next() emission paths can't
 	// accidentally drive output from leftover hash table entries — only the
-	// merger drives output now.
+	// merger drives output now. The cursor's slice-header copies keep the
+	// SoA arrays + group-state chunks alive until cursor.Close() runs.
 	h.resetGroupStateAfterSpill()
 	h.useIntGroupKey = false
 	h.useDualIntGroupKey = false
@@ -1384,9 +1299,10 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 	nGroupCols := len(h.GroupByCols)
 	for i, g := range rows {
 		// Group-by columns: write each keyVal into its column. KeyVals were
-		// produced by drainSimpleAggsToPartialGroups (or readKeyValue from
-		// disk), which preserves the original typed value, so SetValue
-		// stores them through the right typed path without an extra cast.
+		// produced by partialGroupCursor.populateScratchKeyVals (or
+		// readKeyValue from disk), which preserves the original typed value,
+		// so SetValue stores them through the right typed path without an
+		// extra cast.
 		for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
 			if g.KeyVals[k] == nil {
 				out.Columns[k].Nulls.SetNull(i)

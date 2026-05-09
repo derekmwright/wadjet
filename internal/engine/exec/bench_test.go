@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -145,6 +146,66 @@ func BenchmarkHashAggregateHighCardinality(b *testing.B) {
 				break
 			}
 		}
+		agg.Close()
+	}
+}
+
+// BenchmarkHashAggregatePartialSpillDrain measures the spillPartialState path
+// — the architectural hotspot at SF100 scale. Builds N unique-key groups via
+// Consume, forces a SpillSome, and times the drain (cursor build + sort +
+// streaming write). Reported B/op should scale roughly linearly with N (the
+// sort-key arena + index dominate) and NOT include per-group partialGroup
+// allocations. Allocs/op should be near-constant across N.
+func BenchmarkHashAggregatePartialSpillDrain(b *testing.B) {
+	const groupsPerBatch = 2048
+	const nBatches = 10 // 20480 unique groups total
+
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	batches := make([]*batch.RecordBatch, nBatches)
+	for bi := 0; bi < nBatches; bi++ {
+		bb := batch.NewRecordBatch(schema, groupsPerBatch)
+		for i := 0; i < groupsPerBatch; i++ {
+			bb.Columns[0].SetValue(i, int64(bi*groupsPerBatch+i))
+			bb.Columns[1].SetValue(i, float64(i)*1.5)
+		}
+		batches[bi] = bb
+	}
+
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		// Use a tracker large enough to never auto-spill mid-Consume; we drive
+		// the spill manually via SpillSome to time only the drain.
+		tracker := memory.NewTracker("bench", 1<<30)
+		sm, err := memory.NewSpillManager(b.TempDir(), tracker)
+		if err != nil {
+			b.Fatal(err)
+		}
+		agg := NewHashAggregate(
+			[]string{"k"},
+			[]AggColumn{
+				{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeFloat64},
+			},
+		)
+		agg.Spill = sm
+		if err := agg.Init(ctx); err != nil {
+			b.Fatal(err)
+		}
+		for _, bb := range batches {
+			if err := agg.Consume(ctx, bb); err != nil {
+				b.Fatal(err)
+			}
+		}
+		footprint := agg.SpillFootprint()
+		b.StartTimer()
+		if _, err := agg.SpillSome(footprint); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
 		agg.Close()
 	}
 }

@@ -1,0 +1,336 @@
+package exec
+
+import (
+	"sort"
+
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
+)
+
+// partialKeyMode selects how a cursor reifies group-key values from SoA state.
+// One branch per HashAggregate group-key path: int, dual-int, compact, and
+// (string-or-generic).
+type partialKeyMode int
+
+const (
+	partialKeyModeInt partialKeyMode = iota
+	partialKeyModeDualInt
+	partialKeyModeCompact
+	partialKeyModeStrOrGeneric
+)
+
+// partialGroupCursor is a streaming partialRunSource backed by a HashAggregate's
+// SoA hash state. It builds a sort-key arena + sorted index up-front (memory
+// proportional to keys, not to full partial-group records) and emits one
+// *partialGroup per Peek/Advance by reading from the flat accumulator arrays
+// at the next sorted index.
+//
+// Memory characteristics for N groups, ngc group cols, na aggs, k bytes/key:
+//   - Pre-existing SoA arrays — already live; we don't re-allocate them
+//   - Key arena       = N*k bytes  (typ. 16 B/group → 320 MB at N=20M)
+//   - Key offsets     = (N+1)*4    (~80 MB at N=20M)
+//   - Sort index      = N*4        (~80 MB at N=20M)
+//   - Reusable head   = O(ngc + na), single struct overwritten per Advance
+//
+// Compare with the prior []*partialGroup materialization: each group allocated
+// a *partialGroup (24 B) + a fresh []byte SortKey + a fresh []any KeyVals + a
+// fresh []kernel.Accumulator Accs, totaling ~150–200 B per group, or ~3–4 GB
+// at N=20M. The cursor cuts that to ~480 MB at SF100 Q17 scale.
+//
+// Lifetime: the cursor borrows references to the HashAggregate's SoA arrays
+// and group-state slices. The caller must not mutate those arrays for the
+// cursor's lifetime. finalizeViaPartialMerge transfers ownership by clearing
+// the aggregate's references after construction so the cursor is the sole
+// owner; spillPartialState consumes the cursor synchronously before its
+// resetGroupStateAfterSpill call frees the references.
+type partialGroupCursor struct {
+	// Source state borrowed from HashAggregate.
+	flatAccs       []flatAccumArrays
+	intGroupStates []*groupState
+	strGroupStates []*groupState
+	dualIntKeysA   []int64
+	dualIntKeysB   []int64
+	groupColTypes  []batch.TypeID
+	nAggs          int
+	nGroupCols     int
+	keyMode        partialKeyMode
+	// useAoSAccs flips Acc loading from SoA flat arrays to per-group
+	// gs.extras.accs. True iff the aggregate's intFlatAccs slice has been
+	// cleared by a prior materializeFlatAccums (e.g. MergeSink → generic
+	// migration), in which case the canonical accumulator state lives in
+	// extras.accs and reading flat arrays would panic on empty slices.
+	useAoSAccs bool
+
+	// Sort state (built once during construction; immutable thereafter).
+	keyArena   []byte   // contiguous serialized sort keys
+	keyOffsets []int32  // len == numGroups+1; key[i] = arena[off[i]:off[i+1]]
+	sortedIdx  []uint32 // permutation; group at sorted position j is sortedIdx[j]
+	pos        int
+	numGroups  int
+
+	// Reusable head storage (overwritten in place per loadHeadAt).
+	head        partialGroup
+	headKeyVals []any
+	headAccs    []kernel.Accumulator
+}
+
+// newPartialGroupCursor walks the aggregate's hash state, builds a sort-key
+// arena + sorted index, and pre-positions on the first sorted group so the
+// merger's Peek-then-Advance pattern works with no extra plumbing.
+//
+// Caller's contract:
+//   - h.intFlatAccs is populated (one of the SoA paths is in use).
+//   - h.canUseExternalMerge() is true (simpleAggs + SoA path).
+//   - h's mode flags reflect the path that built the SoA state.
+//
+// The cursor does NOT call materializeFlatAccums — accs are read SoA-direct
+// per Advance. This is the second-pass optimization equivalent to the one
+// shipped for Next() in PR #90 (commit 91cd65f), now applied to the spill
+// and finalize-via-merge drain paths.
+func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
+	var (
+		keyMode   partialKeyMode
+		numGroups int
+	)
+	switch {
+	case h.useIntGroupKey:
+		keyMode = partialKeyModeInt
+		numGroups = len(h.intGroupStates)
+	case h.useDualIntGroupKey:
+		keyMode = partialKeyModeDualInt
+		numGroups = len(h.intGroupStates)
+	case h.useCompactGroupKey:
+		keyMode = partialKeyModeCompact
+		numGroups = len(h.intGroupStates)
+	default: // useStrGroupKey || useGenericSoA || post-MergeSink generic
+		keyMode = partialKeyModeStrOrGeneric
+		numGroups = len(h.strGroupStates)
+	}
+
+	nAggs := len(h.Aggs)
+	nGroupCols := len(h.GroupByCols)
+
+	c := &partialGroupCursor{
+		flatAccs:       h.intFlatAccs,
+		intGroupStates: h.intGroupStates,
+		strGroupStates: h.strGroupStates,
+		dualIntKeysA:   h.dualIntKeysA,
+		dualIntKeysB:   h.dualIntKeysB,
+		groupColTypes:  h.groupColTypes,
+		nAggs:          nAggs,
+		nGroupCols:     nGroupCols,
+		keyMode:        keyMode,
+		useAoSAccs:     len(h.intFlatAccs) == 0,
+		// Initial 16 B/group arena estimate fits typical numeric-key shapes;
+		// strings will grow it via append, which is fine — arena writes are
+		// strictly append-only and slices into it remain valid after grow.
+		keyArena:    make([]byte, 0, numGroups*16),
+		keyOffsets:  make([]int32, numGroups+1),
+		sortedIdx:   make([]uint32, numGroups),
+		numGroups:   numGroups,
+		headKeyVals: make([]any, nGroupCols),
+		headAccs:    make([]kernel.Accumulator, nAggs),
+	}
+	c.head.KeyVals = c.headKeyVals
+	c.head.Accs = c.headAccs
+
+	scratchKeyVals := make([]any, nGroupCols)
+	for gi := 0; gi < numGroups; gi++ {
+		c.keyOffsets[gi] = int32(len(c.keyArena))
+		c.populateScratchKeyVals(gi, scratchKeyVals)
+		c.keyArena = appendSerializedKey(c.keyArena, scratchKeyVals)
+		c.sortedIdx[gi] = uint32(gi)
+	}
+	c.keyOffsets[numGroups] = int32(len(c.keyArena))
+
+	sort.Slice(c.sortedIdx, func(i, j int) bool {
+		ai, bi := c.sortedIdx[i], c.sortedIdx[j]
+		ak := c.keyArena[c.keyOffsets[ai]:c.keyOffsets[ai+1]]
+		bk := c.keyArena[c.keyOffsets[bi]:c.keyOffsets[bi+1]]
+		return bytesCompare(ak, bk) < 0
+	})
+
+	if numGroups > 0 {
+		c.loadHeadAt(int(c.sortedIdx[0]))
+	}
+	return c
+}
+
+// populateScratchKeyVals fills dst (len == nGroupCols) with the group-key
+// values at SoA index gi. The four branches mirror HashAggregate's key paths
+// so spill files written via the cursor are bit-identical to those produced
+// before the SoA-direct rewrite.
+func (c *partialGroupCursor) populateScratchKeyVals(gi int, dst []any) {
+	switch c.keyMode {
+	case partialKeyModeInt:
+		gs := c.intGroupStates[gi]
+		dst[0] = reifyIntKey(gs.intKey, c.groupColTypes[0])
+	case partialKeyModeDualInt:
+		dst[0] = reifyIntKey(c.dualIntKeysA[gi], c.groupColTypes[0])
+		dst[1] = reifyIntKey(c.dualIntKeysB[gi], c.groupColTypes[1])
+	case partialKeyModeCompact:
+		gs := c.intGroupStates[gi]
+		copy(dst, gs.extras.keyValues)
+	default: // partialKeyModeStrOrGeneric
+		gs := c.strGroupStates[gi]
+		copy(dst, gs.extras.keyValues)
+	}
+}
+
+// loadHeadAt populates the reusable head storage from SoA at SoA index gi.
+//
+// SortKey aliases the arena slice (no copy) — the kWayMerger always copies
+// SortKey into its merged group on Pop, and the heap entry's key is captured
+// at heap.Push time. The arena is built once during construction and never
+// modified after, so aliasing is safe across Advance calls.
+//
+// KeyVals/Accs reuse the underlying arrays. The merger copies their contents
+// during merge (`append([]any(nil), current.KeyVals...)`,
+// `append([]kernel.Accumulator(nil), current.Accs...)`), so overwriting them
+// in place between Advance calls cannot corrupt the merger's state.
+func (c *partialGroupCursor) loadHeadAt(gi int) {
+	c.head.SortKey = c.keyArena[c.keyOffsets[gi]:c.keyOffsets[gi+1]]
+	c.populateScratchKeyVals(gi, c.headKeyVals)
+
+	if c.useAoSAccs {
+		c.loadHeadAccsAoS(gi)
+		return
+	}
+	c.loadHeadAccsSoA(gi)
+}
+
+// loadHeadAccsSoA fills c.headAccs from the flat accumulator arrays at index
+// gi. Used when the aggregate is still in a SoA mode and intFlatAccs carries
+// the live accumulator state.
+func (c *partialGroupCursor) loadHeadAccsSoA(gi int) {
+	for ai := 0; ai < c.nAggs; ai++ {
+		fa := &c.flatAccs[ai]
+		acc := &c.headAccs[ai]
+		// Reset acc so a previously-loaded group's HasMin/HasMax/etc. don't
+		// leak into a fresh load that doesn't touch those fields.
+		*acc = kernel.Accumulator{
+			Count:     fa.count[gi],
+			IsFloat:   fa.isFloat,
+			IsDecimal: fa.isDecimal,
+			DecScale:  fa.decScale,
+		}
+		if fa.sumI64 != nil {
+			acc.SumI64 = fa.sumI64[gi]
+		}
+		if fa.sumF64 != nil {
+			acc.SumF64 = fa.sumF64[gi]
+		}
+		if fa.sumDec != nil {
+			acc.SumDec = fa.sumDec[gi]
+		}
+		if fa.minI64 != nil {
+			acc.MinI64 = fa.minI64[gi]
+			acc.HasMin = fa.hasMin[gi]
+		}
+		if fa.maxI64 != nil {
+			acc.MaxI64 = fa.maxI64[gi]
+			acc.HasMax = fa.hasMax[gi]
+		}
+		if fa.minF64 != nil {
+			acc.MinF64 = fa.minF64[gi]
+			acc.HasMin = fa.hasMin[gi]
+		}
+		if fa.maxF64 != nil {
+			acc.MaxF64 = fa.maxF64[gi]
+			acc.HasMax = fa.hasMax[gi]
+		}
+		if fa.minDec != nil {
+			acc.MinDec = fa.minDec[gi]
+			acc.HasMin = fa.hasMin[gi]
+		}
+		if fa.maxDec != nil {
+			acc.MaxDec = fa.maxDec[gi]
+			acc.HasMax = fa.hasMax[gi]
+		}
+	}
+}
+
+// loadHeadAccsAoS fills c.headAccs from per-group gs.extras.accs at index gi.
+// Used when migrateToGenericMap (MergeSink path) cleared intFlatAccs and the
+// canonical state lives in extras.accs.
+func (c *partialGroupCursor) loadHeadAccsAoS(gi int) {
+	var gs *groupState
+	switch c.keyMode {
+	case partialKeyModeInt, partialKeyModeDualInt, partialKeyModeCompact:
+		gs = c.intGroupStates[gi]
+	default:
+		gs = c.strGroupStates[gi]
+	}
+	if gs.extras == nil || gs.extras.accs == nil {
+		// Defensive: a group with no extras at this point would be a bug
+		// upstream (migrate populates extras for all groups). Zero out the
+		// head so any partial spill written from this cursor produces
+		// identity values instead of stale fields from a prior load.
+		for ai := range c.headAccs {
+			c.headAccs[ai] = kernel.Accumulator{}
+		}
+		return
+	}
+	for ai := 0; ai < c.nAggs && ai < len(gs.extras.accs); ai++ {
+		c.headAccs[ai] = gs.extras.accs[ai]
+	}
+	// Zero any tail slots so a short extras.accs doesn't leave stale data.
+	for ai := len(gs.extras.accs); ai < c.nAggs; ai++ {
+		c.headAccs[ai] = kernel.Accumulator{}
+	}
+}
+
+// appendSerializedKey writes the same byte sequence as serializeKey directly
+// into buf, returning the extended buf. The two share one definition of the
+// on-the-wire format; callers track the pre-call length to recover offset
+// boundaries.
+func appendSerializedKey(buf []byte, vals []any) []byte {
+	for i, v := range vals {
+		if i > 0 {
+			buf = append(buf, 0)
+		}
+		buf = appendKeyValue(buf, v)
+	}
+	return buf
+}
+
+// Peek implements partialRunSource.Peek. Returns nil when exhausted.
+func (c *partialGroupCursor) Peek() *partialGroup {
+	if c.pos >= c.numGroups {
+		return nil
+	}
+	return &c.head
+}
+
+// Advance implements partialRunSource.Advance. Idempotent at exhaustion.
+func (c *partialGroupCursor) Advance() error {
+	if c.pos >= c.numGroups {
+		return nil
+	}
+	c.pos++
+	if c.pos < c.numGroups {
+		c.loadHeadAt(int(c.sortedIdx[c.pos]))
+	}
+	return nil
+}
+
+// Close implements partialRunSource.Close. Drops the cursor's references to
+// the source SoA arrays so they (and the group-state chunks they alias into)
+// can be reclaimed by the next GC. Idempotent.
+func (c *partialGroupCursor) Close() error {
+	c.flatAccs = nil
+	c.intGroupStates = nil
+	c.strGroupStates = nil
+	c.dualIntKeysA = nil
+	c.dualIntKeysB = nil
+	c.groupColTypes = nil
+	c.keyArena = nil
+	c.keyOffsets = nil
+	c.sortedIdx = nil
+	c.head = partialGroup{}
+	c.headKeyVals = nil
+	c.headAccs = nil
+	c.pos = 0
+	c.numGroups = 0
+	return nil
+}
