@@ -1281,6 +1281,13 @@ func (h *HashAggregate) closePartialMerger() {
 // previously captured output schema. Returns (nil, nil) when the merger is
 // exhausted.
 //
+// Writes columns inline as the merger yields each group, so the only
+// transient buffer is the output batch itself — there is no intermediate
+// []partialGroup of size DefaultBatchSize. Saves ~144 KB of struct-header
+// copies per Next call (2048 × sizeof(partialGroup)) and improves
+// locality: each merged group is consumed and dropped before the next one
+// is pulled.
+//
 // Caller must hold h.mu (Next does not lock today, but the merger field is
 // only mutated by Finalize and Close, both of which run on the main goroutine
 // — concurrent SpillSome only touches pre-finalize state).
@@ -1288,8 +1295,24 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 	if h.partialMerger == nil {
 		return nil, nil
 	}
-	rows := make([]partialGroup, 0, batch.DefaultBatchSize)
-	for len(rows) < batch.DefaultBatchSize {
+	// Pull the first group up-front so the empty case (merger exhausted)
+	// returns without allocating an output batch we'd immediately discard.
+	first, err := h.partialMerger.Next()
+	if err != nil {
+		h.closePartialMerger()
+		return nil, err
+	}
+	if first == nil {
+		h.closePartialMerger()
+		return nil, nil
+	}
+
+	out := batch.NewRecordBatch(h.partialMergerSchema, batch.DefaultBatchSize)
+	nGroupCols := len(h.GroupByCols)
+	h.writeMergedRow(out, 0, first, nGroupCols)
+	nRows := 1
+
+	for nRows < batch.DefaultBatchSize {
 		g, err := h.partialMerger.Next()
 		if err != nil {
 			h.closePartialMerger()
@@ -1298,40 +1321,40 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 		if g == nil {
 			break
 		}
-		rows = append(rows, *g)
+		h.writeMergedRow(out, nRows, g, nGroupCols)
+		nRows++
 	}
-	if len(rows) == 0 {
-		h.closePartialMerger()
-		return nil, nil
-	}
-	out := batch.NewRecordBatch(h.partialMergerSchema, len(rows))
-	nGroupCols := len(h.GroupByCols)
-	for i, g := range rows {
-		// Group-by columns: write each keyVal into its column. KeyVals were
-		// produced by partialGroupCursor.populateScratchKeyVals (or
-		// readKeyValue from disk), which preserves the original typed value,
-		// so SetValue stores them through the right typed path without an
-		// extra cast.
-		for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
-			if g.KeyVals[k] == nil {
-				out.Columns[k].Nulls.SetNull(i)
-				continue
-			}
-			out.Columns[k].SetValue(i, g.KeyVals[k])
-		}
-		// Aggregate columns: finalize each accumulator to its output value
-		// using the same kernel finalizer as the in-memory path. Only
-		// SUM/COUNT/MIN/MAX/AVG reach here (canUseExternalMerge gate); the
-		// kernel handles each correctly via finalizeKernelAcc.
-		for j, agg := range h.Aggs {
-			colIdx := nGroupCols + j
-			result := finalizeKernelAcc(&g.Accs[j], agg.Func)
-			if result == nil {
-				out.Columns[colIdx].Nulls.SetNull(i)
-				continue
-			}
-			out.Columns[colIdx].SetValue(i, result)
-		}
+
+	// Trim the output batch to the actual filled row count. The unused
+	// slots in each column vector were zero-cleared by NewRecordBatch and
+	// are not visible past Len.
+	out.Len = nRows
+	for _, col := range out.Columns {
+		col.Len = nRows
 	}
 	return out, nil
+}
+
+// writeMergedRow writes one merged partialGroup into out at row index i.
+// Group-by columns come from g.KeyVals (preserving the typed value the
+// cursor or file reader produced); agg columns are finalized via
+// finalizeKernelAcc — only SUM/COUNT/MIN/MAX/AVG reach here per the
+// canUseExternalMerge gate.
+func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partialGroup, nGroupCols int) {
+	for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
+		if g.KeyVals[k] == nil {
+			out.Columns[k].Nulls.SetNull(i)
+			continue
+		}
+		out.Columns[k].SetValue(i, g.KeyVals[k])
+	}
+	for j, agg := range h.Aggs {
+		colIdx := nGroupCols + j
+		result := finalizeKernelAcc(&g.Accs[j], agg.Func)
+		if result == nil {
+			out.Columns[colIdx].Nulls.SetNull(i)
+			continue
+		}
+		out.Columns[colIdx].SetValue(i, result)
+	}
 }
