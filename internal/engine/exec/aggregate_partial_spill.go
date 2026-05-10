@@ -2,7 +2,6 @@ package exec
 
 import (
 	"bufio"
-	"container/heap"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -949,32 +948,97 @@ func (s *fileRunSource) Advance() error {
 
 func (s *fileRunSource) Close() error { return s.r.Close() }
 
-// runHeap implements heap.Interface — top-of-heap is the smallest sortKey
-// across all live runs. We track the source index so Advance() can hit the
-// right run after we yield its head.
+// runHeapEntry tracks one run's current head SortKey. The merger pops the
+// smallest SortKey across all live runs; source disambiguates ties so the
+// merge order is deterministic.
 type runHeapEntry struct {
 	source int // index into runs slice
 	key    []byte
 }
 
+// runHeap is a min-heap of runHeapEntry implemented inline rather than via
+// container/heap. The standard library's interface{} signature on Push and
+// Pop boxed every entry — at SF100 Q17 scale (one push + pop per merged
+// group across 20M groups) that's ~40M `any` allocations per drain task.
+// The typed inline version is alloc-free.
 type runHeap []runHeapEntry
 
-func (h runHeap) Len() int { return len(h) }
-func (h runHeap) Less(i, j int) bool {
-	c := bytesCompare(h[i].key, h[j].key)
+func (h *runHeap) Len() int { return len(*h) }
+
+// less reports whether entry i sorts before entry j: smaller SortKey first,
+// breaking ties by source index for deterministic merge order.
+func (h *runHeap) less(i, j int) bool {
+	hh := *h
+	c := bytesCompare(hh[i].key, hh[j].key)
 	if c != 0 {
 		return c < 0
 	}
-	return h[i].source < h[j].source
+	return hh[i].source < hh[j].source
 }
-func (h runHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *runHeap) Push(x any)         { *h = append(*h, x.(runHeapEntry)) }
-func (h *runHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
+
+// Push appends an entry and sifts it up to restore heap order.
+func (h *runHeap) Push(e runHeapEntry) {
+	*h = append(*h, e)
+	h.up(len(*h) - 1)
+}
+
+// Pop removes and returns the smallest entry, sifting the new root down.
+// Caller must check Len() > 0; popping an empty heap panics.
+func (h *runHeap) Pop() runHeapEntry {
+	hh := *h
+	n := len(hh) - 1
+	hh[0], hh[n] = hh[n], hh[0]
+	min := hh[n]
+	*h = hh[:n]
+	if n > 0 {
+		h.down(0, n)
+	}
+	return min
+}
+
+// PeekKey returns the key of the smallest entry without popping. Caller
+// must check Len() > 0.
+func (h *runHeap) PeekKey() []byte {
+	return (*h)[0].key
+}
+
+func (h *runHeap) up(j int) {
+	for {
+		i := (j - 1) / 2
+		if i == j || !h.less(j, i) {
+			break
+		}
+		hh := *h
+		hh[i], hh[j] = hh[j], hh[i]
+		j = i
+	}
+}
+
+func (h *runHeap) down(i, n int) {
+	for {
+		j1 := 2*i + 1
+		if j1 >= n || j1 < 0 {
+			break
+		}
+		j := j1
+		if j2 := j1 + 1; j2 < n && h.less(j2, j1) {
+			j = j2
+		}
+		if !h.less(j, i) {
+			break
+		}
+		hh := *h
+		hh[i], hh[j] = hh[j], hh[i]
+		i = j
+	}
+}
+
+// init builds heap order over the existing slice in O(n).
+func (h *runHeap) init() {
+	n := len(*h)
+	for i := n/2 - 1; i >= 0; i-- {
+		h.down(i, n)
+	}
 }
 
 // bytesCompare is a local copy of bytes.Compare to avoid the import for one
@@ -1031,7 +1095,7 @@ func newKWayMerger(runs []partialRunSource, aggs []partialAggSpec) *kWayMerger {
 			m.heap = append(m.heap, runHeapEntry{source: i, key: g.SortKey})
 		}
 	}
-	heap.Init(&m.heap)
+	m.heap.init()
 	return m
 }
 
@@ -1045,7 +1109,7 @@ func (m *kWayMerger) Next() (*partialGroup, error) {
 	if len(m.heap) == 0 {
 		return nil, nil
 	}
-	top := heap.Pop(&m.heap).(runHeapEntry)
+	top := m.heap.Pop()
 	current := m.runs[top.source].Peek()
 
 	// Refill m.head from current using stable backing arrays. SortKey is
@@ -1082,7 +1146,7 @@ func (m *kWayMerger) Next() (*partialGroup, error) {
 	// accumulators in. Important: keep going as long as heap top's key
 	// equals m.head.SortKey; multiple runs may all carry the same group.
 	for len(m.heap) > 0 && bytesCompare(m.heap[0].key, m.head.SortKey) == 0 {
-		next := heap.Pop(&m.heap).(runHeapEntry)
+		next := m.heap.Pop()
 		other := m.runs[next.source].Peek()
 		for i := range m.head.Accs {
 			m.head.Accs[i].Merge(&other.Accs[i])
@@ -1099,7 +1163,7 @@ func (m *kWayMerger) advanceSource(idx int) error {
 		return err
 	}
 	if g := m.runs[idx].Peek(); g != nil {
-		heap.Push(&m.heap, runHeapEntry{source: idx, key: g.SortKey})
+		m.heap.Push(runHeapEntry{source: idx, key: g.SortKey})
 	}
 	return nil
 }
