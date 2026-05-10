@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -145,6 +146,207 @@ func BenchmarkHashAggregateHighCardinality(b *testing.B) {
 				break
 			}
 		}
+		agg.Close()
+	}
+}
+
+// BenchmarkHashAggregatePartialSpillDrain measures the spillPartialState path
+// — the architectural hotspot at SF100 scale. Builds N unique-key groups via
+// Consume, forces a SpillSome, and times the drain (cursor build + sort +
+// streaming write). Reported B/op should scale roughly linearly with N (the
+// sort-key arena + index dominate) and NOT include per-group partialGroup
+// allocations. Allocs/op should be near-constant across N.
+func BenchmarkHashAggregatePartialSpillDrain(b *testing.B) {
+	const groupsPerBatch = 2048
+	const nBatches = 10 // 20480 unique groups total
+
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	batches := make([]*batch.RecordBatch, nBatches)
+	for bi := 0; bi < nBatches; bi++ {
+		bb := batch.NewRecordBatch(schema, groupsPerBatch)
+		for i := 0; i < groupsPerBatch; i++ {
+			bb.Columns[0].SetValue(i, int64(bi*groupsPerBatch+i))
+			bb.Columns[1].SetValue(i, float64(i)*1.5)
+		}
+		batches[bi] = bb
+	}
+
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		// Use a tracker large enough to never auto-spill mid-Consume; we drive
+		// the spill manually via SpillSome to time only the drain.
+		tracker := memory.NewTracker("bench", 1<<30)
+		sm, err := memory.NewSpillManager(b.TempDir(), tracker)
+		if err != nil {
+			b.Fatal(err)
+		}
+		agg := NewHashAggregate(
+			[]string{"k"},
+			[]AggColumn{
+				{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeFloat64},
+			},
+		)
+		agg.Spill = sm
+		if err := agg.Init(ctx); err != nil {
+			b.Fatal(err)
+		}
+		for _, bb := range batches {
+			if err := agg.Consume(ctx, bb); err != nil {
+				b.Fatal(err)
+			}
+		}
+		footprint := agg.SpillFootprint()
+		b.StartTimer()
+		if _, err := agg.SpillSome(footprint); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		agg.Close()
+	}
+}
+
+// BenchmarkHashAggregatePartialSpillDrainDualInt covers the dual-int SoA
+// path. Two int32 GROUP BY columns trigger the dualIntKeysA/B + chain
+// hash-table layout, and the cursor's appendIntModeSortKey takes the
+// 2N-typed-write branch. Confirms the typed-key optimization scales as
+// well for dual-int as for single-int.
+func BenchmarkHashAggregatePartialSpillDrainDualInt(b *testing.B) {
+	const rowsPerBatch = 2048
+	const nBatches = 10
+	const numKeysA = 256 // 256 * 80 = 20480 distinct (a, b) pairs
+	const numKeysB = 80
+
+	schema := []parquet.Column{
+		{Name: "a", Type: parquet.TypeInt32},
+		{Name: "c", Type: parquet.TypeInt32},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	batches := make([]*batch.RecordBatch, nBatches)
+	for bi := 0; bi < nBatches; bi++ {
+		bb := batch.NewRecordBatch(schema, rowsPerBatch)
+		for i := 0; i < rowsPerBatch; i++ {
+			pos := bi*rowsPerBatch + i
+			bb.Columns[0].SetValue(i, int32(pos%numKeysA))
+			bb.Columns[1].SetValue(i, int32((pos/numKeysA)%numKeysB))
+			bb.Columns[2].SetValue(i, float64(i)*1.5)
+		}
+		batches[bi] = bb
+	}
+
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tracker := memory.NewTracker("bench", 1<<30)
+		sm, err := memory.NewSpillManager(b.TempDir(), tracker)
+		if err != nil {
+			b.Fatal(err)
+		}
+		agg := NewHashAggregate(
+			[]string{"a", "c"},
+			[]AggColumn{
+				{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeFloat64},
+			},
+		)
+		agg.Spill = sm
+		if err := agg.Init(ctx); err != nil {
+			b.Fatal(err)
+		}
+		for _, bb := range batches {
+			if err := agg.Consume(ctx, bb); err != nil {
+				b.Fatal(err)
+			}
+		}
+		footprint := agg.SpillFootprint()
+		b.StartTimer()
+		if _, err := agg.SpillSome(footprint); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		agg.Close()
+	}
+}
+
+// BenchmarkHashAggregatePartialMergeFinalize covers finalizeViaPartialMerge
+// — the cursor as a memory partialRunSource feeding the k-way merger
+// alongside one spilled run. End-to-end: cursor build + heap merge + Next
+// drain. Detects regressions in the streaming-emit path that the spill-only
+// bench above cannot.
+func BenchmarkHashAggregatePartialMergeFinalize(b *testing.B) {
+	const groupsPerBatch = 2048
+	const nBatches = 10
+
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	batches := make([]*batch.RecordBatch, nBatches)
+	for bi := 0; bi < nBatches; bi++ {
+		bb := batch.NewRecordBatch(schema, groupsPerBatch)
+		for i := 0; i < groupsPerBatch; i++ {
+			// Overlap keys across batches so finalize merges in-memory and
+			// spilled groups via Accumulator.Merge for a fraction of keys.
+			bb.Columns[0].SetValue(i, int64((bi*groupsPerBatch/2)+i))
+			bb.Columns[1].SetValue(i, float64(i)*1.5)
+		}
+		batches[bi] = bb
+	}
+
+	ctx := context.Background()
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		tracker := memory.NewTracker("bench", 1<<30)
+		sm, err := memory.NewSpillManager(b.TempDir(), tracker)
+		if err != nil {
+			b.Fatal(err)
+		}
+		agg := NewHashAggregate(
+			[]string{"k"},
+			[]AggColumn{
+				{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeFloat64},
+			},
+		)
+		agg.Spill = sm
+		if err := agg.Init(ctx); err != nil {
+			b.Fatal(err)
+		}
+		// Consume half, force a spill, then consume the rest. Finalize will
+		// k-way merge the spilled run with the in-memory cursor.
+		half := nBatches / 2
+		for _, bb := range batches[:half] {
+			if err := agg.Consume(ctx, bb); err != nil {
+				b.Fatal(err)
+			}
+		}
+		footprint := agg.SpillFootprint()
+		if _, err := agg.SpillSome(footprint); err != nil {
+			b.Fatal(err)
+		}
+		for _, bb := range batches[half:] {
+			if err := agg.Consume(ctx, bb); err != nil {
+				b.Fatal(err)
+			}
+		}
+		b.StartTimer()
+		if err := agg.Finalize(ctx); err != nil {
+			b.Fatal(err)
+		}
+		for {
+			out, err := agg.Next(ctx)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if out == nil {
+				break
+			}
+		}
+		b.StopTimer()
 		agg.Close()
 	}
 }

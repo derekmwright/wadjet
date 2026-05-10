@@ -653,6 +653,156 @@ func TestHashAggregateMergeThenSpillFinalize(t *testing.T) {
 	}
 }
 
+// TestHashAggregateMergeThenSpillFinalize_HighCardinality is the high-N
+// counterpart to TestHashAggregateMergeThenSpillFinalize. It exercises the
+// post-MergeSink AoS path through partialGroupCursor at a group count that
+// the small (4-group) test cannot meaningfully cover: the cursor's
+// useAoSAccs branch reads from gs.extras.accs (populated by migrate's
+// materializeFlatAccums) instead of the now-cleared intFlatAccs.
+//
+// Flow: primary spills once, clone runs in parallel, MergeSink merges them
+// via the generic-map path (compact→generic migration), then Finalize runs
+// finalizeViaPartialMerge which builds a cursor over the post-merge state.
+// Without the AoS fallback the cursor would panic at len(c.flatAccs)==0;
+// without correct AoS reading every group's SUM would be zero.
+func TestHashAggregateMergeThenSpillFinalize_HighCardinality(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "year", Type: parquet.TypeInt32},
+		{Name: "region", Type: parquet.TypeInt32},
+		{Name: "amount", Type: parquet.TypeFloat64},
+	}
+	ctx := context.Background()
+
+	// Generate 4000 (year, region) pairs split between primary and clone with
+	// a 50% overlap so MergeSink hits both the "found" and "not found"
+	// branches in the generic-map path.
+	const numYears = 80
+	const numRegions = 50
+	type expacc struct{ sum float64 }
+	expected := make(map[[2]int32]*expacc, numYears*numRegions)
+
+	primaryBatches := make([]*batch.RecordBatch, 0, 2)
+	cloneBatches := make([]*batch.RecordBatch, 0, 1)
+
+	// Primary: years [0, numYears) × regions [0, numRegions/2).
+	rowsP1 := make([]map[string]any, 0, numYears*numRegions/2)
+	rowsP2 := make([]map[string]any, 0, numYears*numRegions/2)
+	for y := int32(0); y < int32(numYears); y++ {
+		for r := int32(0); r < int32(numRegions/2); r++ {
+			v1 := float64(int(y)*1000 + int(r))
+			v2 := float64(int(y)*100 + int(r) + 7)
+			rowsP1 = append(rowsP1, map[string]any{"year": y, "region": r, "amount": v1})
+			rowsP2 = append(rowsP2, map[string]any{"year": y, "region": r, "amount": v2})
+			key := [2]int32{y, r}
+			if expected[key] == nil {
+				expected[key] = &expacc{}
+			}
+			expected[key].sum += v1 + v2
+		}
+	}
+	primaryBatches = append(primaryBatches, batch.FromRows(schema, rowsP1))
+	primaryBatches = append(primaryBatches, batch.FromRows(schema, rowsP2))
+
+	// Clone: years [0, numYears) × regions [numRegions/4, 3*numRegions/4) so
+	// half overlaps with primary, half is fresh.
+	rowsC := make([]map[string]any, 0, numYears*numRegions/2)
+	for y := int32(0); y < int32(numYears); y++ {
+		for r := int32(numRegions / 4); r < int32(3*numRegions/4); r++ {
+			v := float64(int(y)*5000 + int(r)*3)
+			rowsC = append(rowsC, map[string]any{"year": y, "region": r, "amount": v})
+			key := [2]int32{y, r}
+			if expected[key] == nil {
+				expected[key] = &expacc{}
+			}
+			expected[key].sum += v
+		}
+	}
+	cloneBatches = append(cloneBatches, batch.FromRows(schema, rowsC))
+
+	// Tight tracker so primary's second batch trips SpillSome.
+	tracker := memory.NewTracker("test", 100_000)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	primary := NewHashAggregate([]string{"year", "region"}, []AggColumn{
+		{Func: AggSum, InputCol: "amount", OutputCol: "total", OutputType: parquet.TypeFloat64},
+	})
+	primary.Spill = sm
+	if err := primary.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := primary.Consume(ctx, primaryBatches[0]); err != nil {
+		t.Fatal(err)
+	}
+	// Force pressure — the next Consume must spill.
+	tracker.ForceReserve(95_000)
+	if err := primary.Consume(ctx, primaryBatches[1]); err != nil {
+		t.Fatal(err)
+	}
+	if len(primary.partialSpillFiles) == 0 {
+		t.Fatal("expected partial-state spill file but none was written")
+	}
+
+	// Clone runs without spill.
+	clone := primary.CloneSink().(*HashAggregate)
+	if err := clone.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range cloneBatches {
+		if err := clone.Consume(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// MergeSink runs the compact→generic migration on both sides. After this
+	// primary.intFlatAccs == nil and groups live in primary.strGroupStates
+	// with extras.accs populated.
+	primary.MergeSink(clone)
+	if primary.intFlatAccs != nil {
+		t.Errorf("expected intFlatAccs cleared after MergeSink, still set")
+	}
+	if len(primary.strGroupStates) == 0 {
+		t.Fatal("expected merged groups in strGroupStates")
+	}
+
+	// Finalize triggers finalizeViaPartialMerge which builds the cursor over
+	// the post-merge AoS state. Drain Next() to completion.
+	if err := primary.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[[2]int32]float64, len(expected))
+	for {
+		out, err := primary.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for _, r := range out.ToRows() {
+			y := r["year"].(int32)
+			rg := r["region"].(int32)
+			got[[2]int32{y, rg}] = r["total"].(float64)
+		}
+	}
+	if err := primary.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(got) != len(expected) {
+		t.Fatalf("group count: got %d want %d", len(got), len(expected))
+	}
+	for k, want := range expected {
+		if g, ok := got[k]; !ok {
+			t.Errorf("missing group y=%d r=%d", k[0], k[1])
+		} else if g != want.sum {
+			t.Errorf("y=%d r=%d: got %v want %v", k[0], k[1], g, want.sum)
+		}
+	}
+}
+
 // TestHashAggregateSpillBatching feeds 200 small batches under a tight memory
 // budget so every Consume after the first lands in the spill branch.
 // Regression for SF100 Q03 where per-batch flushing produced millions of

@@ -569,6 +569,88 @@ func bytesEq(a, b []byte) bool {
 	return true
 }
 
+// TestExternalMergeSpill_FinalizeAllSpilledNoRemainder exercises the path
+// where SpillSome drained every group, no more Consume calls follow, and
+// Finalize must merge the spill files alone — partialGroupCursor.numGroups
+// is 0 and the cursor must Close without joining the source list.
+//
+// Regression check: ensure a 0-group cursor doesn't appear as a heap entry
+// (which would cause Peek().SortKey to be a zero-length slice and break the
+// merger's order invariant).
+func TestExternalMergeSpill_FinalizeAllSpilledNoRemainder(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	ctx := context.Background()
+	tracker := memory.NewTracker("test", 1_000_000)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHashAggregate([]string{"k"}, []AggColumn{
+		{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+	})
+	h.Spill = sm
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	const numGroups = 200
+	rows := make([]map[string]any, 0, numGroups)
+	expected := make(map[int64]int64, numGroups)
+	for i := 0; i < numGroups; i++ {
+		k := int64(i)
+		v := int64(i + 1)
+		rows = append(rows, map[string]any{"k": k, "v": v})
+		expected[k] = v
+	}
+	if err := h.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Drain everything to spill, then DON'T consume anything further. The
+	// in-memory remainder is now empty.
+	if _, err := h.SpillSome(h.SpillFootprint()); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.partialSpillFiles) != 1 {
+		t.Fatalf("expected 1 spill file, got %d", len(h.partialSpillFiles))
+	}
+	if len(h.intGroupStates) != 0 {
+		t.Fatalf("expected empty in-memory groups, got %d", len(h.intGroupStates))
+	}
+
+	// Finalize hits finalizeViaPartialMerge with no in-memory remainder.
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[int64]int64, numGroups)
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out == nil {
+			break
+		}
+		for _, r := range out.ToRows() {
+			got[r["k"].(int64)] = r["total"].(int64)
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != numGroups {
+		t.Fatalf("group count: got %d want %d", len(got), numGroups)
+	}
+	for k, want := range expected {
+		if got[k] != want {
+			t.Errorf("k=%d: got %d want %d", k, got[k], want)
+		}
+	}
+}
+
 // TestHashAggregateSpillable_FootprintAndSpillSome covers the Spillable
 // contract directly: SpillFootprint reflects tracker bytes after Consume,
 // SpillSome drains state to a partial-spill file and releases bytes back,

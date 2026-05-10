@@ -9,7 +9,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -220,12 +219,12 @@ func (w *partialSpillWriter) Write(g partialGroup) error {
 		if i < len(g.KeyVals) {
 			v = g.KeyVals[i]
 		}
-		if err := writeKeyValue(w.w, v, gc.Type); err != nil {
+		if err := writeKeyValue(w.w, w.scratch[:], v, gc.Type); err != nil {
 			return err
 		}
 	}
 	for i, spec := range w.header.Aggs {
-		if err := emitAcc(w.w, spec, &g.Accs[i]); err != nil {
+		if err := emitAcc(w.w, w.scratch[:], spec, &g.Accs[i]); err != nil {
 			return err
 		}
 	}
@@ -269,22 +268,30 @@ func (w *partialSpillWriter) Close() (int64, error) {
 
 // emitAcc writes only the accumulator fields used by this aggregate's func +
 // type combo. The reader uses the matching readAcc to deserialize.
-func emitAcc(w *bufio.Writer, spec partialAggSpec, a *kernel.Accumulator) error {
+//
+// scratch must be a slice of at least 16 bytes whose backing storage is
+// already heap-allocated (typical: w.scratch[:] from partialSpillWriter).
+// The helpers passed `scratch` use it instead of a stack-local [N]byte
+// because bufio.Writer.Write triggers an io.Writer interface call on its
+// slow path, forcing the compiler to assume any []byte parameter could
+// escape; threading scratch through avoids the per-call heap allocation
+// the local-array path would incur.
+func emitAcc(w *bufio.Writer, scratch []byte, spec partialAggSpec, a *kernel.Accumulator) error {
 	switch spec.Func {
 	case AggSum, AggAvg:
-		if err := writeInt64(w, a.Count); err != nil {
+		if err := writeInt64(w, scratch, a.Count); err != nil {
 			return err
 		}
 		switch {
 		case spec.IsDecimal:
-			return writeInt128(w, a.SumDec)
+			return writeInt128(w, scratch, a.SumDec)
 		case spec.IsFloat:
-			return writeFloat64(w, a.SumF64)
+			return writeFloat64(w, scratch, a.SumF64)
 		default:
-			return writeInt64(w, a.SumI64)
+			return writeInt64(w, scratch, a.SumI64)
 		}
 	case AggCount:
-		return writeInt64(w, a.Count)
+		return writeInt64(w, scratch, a.Count)
 	case AggMin:
 		if err := writeBool(w, a.HasMin); err != nil {
 			return err
@@ -294,11 +301,11 @@ func emitAcc(w *bufio.Writer, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		switch {
 		case spec.IsDecimal:
-			return writeInt128(w, a.MinDec)
+			return writeInt128(w, scratch, a.MinDec)
 		case spec.IsFloat:
-			return writeFloat64(w, a.MinF64)
+			return writeFloat64(w, scratch, a.MinF64)
 		default:
-			return writeInt64(w, a.MinI64)
+			return writeInt64(w, scratch, a.MinI64)
 		}
 	case AggMax:
 		if err := writeBool(w, a.HasMax); err != nil {
@@ -309,11 +316,11 @@ func emitAcc(w *bufio.Writer, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		switch {
 		case spec.IsDecimal:
-			return writeInt128(w, a.MaxDec)
+			return writeInt128(w, scratch, a.MaxDec)
 		case spec.IsFloat:
-			return writeFloat64(w, a.MaxF64)
+			return writeFloat64(w, scratch, a.MaxF64)
 		default:
-			return writeInt64(w, a.MaxI64)
+			return writeInt64(w, scratch, a.MaxI64)
 		}
 	default:
 		return fmt.Errorf("partial spill: unsupported agg func %v", spec.Func)
@@ -427,11 +434,15 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 // writeKeyValue writes a typed display value for a group-by column. The type
 // is taken from the header (parquet.TypeID) so we can encode the canonical
 // representation; nil values are encoded as a single null tag.
-func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
+//
+// scratch must be a slice of at least 16 bytes whose backing storage is
+// already heap-allocated (typical: w.scratch[:] from partialSpillWriter).
+// See emitAcc for why threading scratch avoids the per-call alloc that a
+// stack-local [16]byte would incur via bufio.Writer.Write's escape.
+func writeKeyValue(w *bufio.Writer, scratch []byte, v any, _ parquet.TypeID) error {
 	if v == nil {
 		return w.WriteByte(partialTagNull)
 	}
-	var buf [16]byte
 	switch tv := v.(type) {
 	case bool:
 		if tv {
@@ -442,43 +453,43 @@ func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
 		if err := w.WriteByte(partialTagInt64); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint64(buf[:8], uint64(tv))
-		_, err := w.Write(buf[:8])
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv))
+		_, err := w.Write(scratch[:8])
 		return err
 	case int32:
 		if err := w.WriteByte(partialTagInt32); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], uint32(tv))
-		_, err := w.Write(buf[:4])
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(tv))
+		_, err := w.Write(scratch[:4])
 		return err
 	case int:
 		if err := w.WriteByte(partialTagInt64); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint64(buf[:8], uint64(tv))
-		_, err := w.Write(buf[:8])
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv))
+		_, err := w.Write(scratch[:8])
 		return err
 	case float64:
 		if err := w.WriteByte(partialTagFloat64); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint64(buf[:8], math.Float64bits(tv))
-		_, err := w.Write(buf[:8])
+		binary.LittleEndian.PutUint64(scratch[:8], math.Float64bits(tv))
+		_, err := w.Write(scratch[:8])
 		return err
 	case float32:
 		if err := w.WriteByte(partialTagFloat32); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], math.Float32bits(tv))
-		_, err := w.Write(buf[:4])
+		binary.LittleEndian.PutUint32(scratch[:4], math.Float32bits(tv))
+		_, err := w.Write(scratch[:4])
 		return err
 	case string:
 		if err := w.WriteByte(partialTagString); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], uint32(len(tv)))
-		if _, err := w.Write(buf[:4]); err != nil {
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(tv)))
+		if _, err := w.Write(scratch[:4]); err != nil {
 			return err
 		}
 		_, err := w.WriteString(tv)
@@ -487,8 +498,8 @@ func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
 		if err := w.WriteByte(partialTagBytes); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], uint32(len(tv)))
-		if _, err := w.Write(buf[:4]); err != nil {
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(tv)))
+		if _, err := w.Write(scratch[:4]); err != nil {
 			return err
 		}
 		_, err := w.Write(tv)
@@ -497,9 +508,9 @@ func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
 		if err := w.WriteByte(partialTagInt128); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint64(buf[:8], uint64(tv.Hi))
-		binary.LittleEndian.PutUint64(buf[8:16], tv.Lo)
-		_, err := w.Write(buf[:16])
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv.Hi))
+		binary.LittleEndian.PutUint64(scratch[8:16], tv.Lo)
+		_, err := w.Write(scratch[:16])
 		return err
 	default:
 		// Fall back to fmt.Sprintf string form. This is acceptable for
@@ -510,8 +521,8 @@ func writeKeyValue(w *bufio.Writer, v any, _ parquet.TypeID) error {
 		if err := w.WriteByte(partialTagString); err != nil {
 			return err
 		}
-		binary.LittleEndian.PutUint32(buf[:4], uint32(len(s)))
-		if _, err := w.Write(buf[:4]); err != nil {
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(s)))
+		if _, err := w.Write(scratch[:4]); err != nil {
 			return err
 		}
 		_, err := w.WriteString(s)
@@ -600,10 +611,9 @@ func readBool(r *bufio.Reader) (bool, error) {
 	return b != 0, nil
 }
 
-func writeInt64(w *bufio.Writer, v int64) error {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], uint64(v))
-	_, err := w.Write(buf[:])
+func writeInt64(w *bufio.Writer, scratch []byte, v int64) error {
+	binary.LittleEndian.PutUint64(scratch[:8], uint64(v))
+	_, err := w.Write(scratch[:8])
 	return err
 }
 
@@ -615,10 +625,9 @@ func readInt64(r *bufio.Reader) (int64, error) {
 	return int64(binary.LittleEndian.Uint64(buf[:])), nil
 }
 
-func writeFloat64(w *bufio.Writer, v float64) error {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
-	_, err := w.Write(buf[:])
+func writeFloat64(w *bufio.Writer, scratch []byte, v float64) error {
+	binary.LittleEndian.PutUint64(scratch[:8], math.Float64bits(v))
+	_, err := w.Write(scratch[:8])
 	return err
 }
 
@@ -630,11 +639,10 @@ func readFloat64(r *bufio.Reader) (float64, error) {
 	return math.Float64frombits(binary.LittleEndian.Uint64(buf[:])), nil
 }
 
-func writeInt128(w *bufio.Writer, v batch.Int128) error {
-	var buf [16]byte
-	binary.LittleEndian.PutUint64(buf[:8], uint64(v.Hi))
-	binary.LittleEndian.PutUint64(buf[8:16], v.Lo)
-	_, err := w.Write(buf[:])
+func writeInt128(w *bufio.Writer, scratch []byte, v batch.Int128) error {
+	binary.LittleEndian.PutUint64(scratch[:8], uint64(v.Hi))
+	binary.LittleEndian.PutUint64(scratch[8:16], v.Lo)
+	_, err := w.Write(scratch[:16])
 	return err
 }
 
@@ -652,11 +660,24 @@ func readInt128(r *bufio.Reader) (batch.Int128, error) {
 // partialSpillReader iterates groups in a partial-spill file in stored order
 // (which is sorted by sortKey). It is forward-only and not safe for concurrent
 // use.
+//
+// Next returns a *partialGroup whose backing storage (SortKey/KeyVals/Accs)
+// is owned by the reader and reused across calls — same contract as
+// kWayMerger.Next. Callers must consume (or copy) before the next Next.
+// Because the reader feeds into kWayMerger which copies head data on its
+// own Next, the in-place reuse is safe end-to-end.
 type partialSpillReader struct {
-	f      *os.File
-	r      *bufio.Reader
-	header partialSpillHeader
+	f       *os.File
+	r       *bufio.Reader
+	header  partialSpillHeader
 	scratch [16]byte
+
+	// Reusable head storage. Returned by Next; valid only until the next
+	// Next call. Backing arrays grow once to fit the widest group.
+	head        partialGroup
+	headSortKey []byte
+	headKeyVals []any
+	headAccs    []kernel.Accumulator
 }
 
 func openPartialSpillReader(path string) (*partialSpillReader, error) {
@@ -728,6 +749,9 @@ func (r *partialSpillReader) readHeader() error {
 
 // Next reads the next group, or returns (nil, io.EOF) when the run is
 // exhausted. Returns errors for malformed files (truncated, bad tags, etc.).
+//
+// The returned *partialGroup aliases reusable buffers on the reader; the
+// next Next call invalidates the previously returned slice contents.
 func (r *partialSpillReader) Next() (*partialGroup, error) {
 	marker, err := r.r.ReadByte()
 	if err != nil {
@@ -743,28 +767,50 @@ func (r *partialSpillReader) Next() (*partialGroup, error) {
 		return nil, err
 	}
 	keyLen := int(binary.LittleEndian.Uint32(r.scratch[:4]))
-	sortKey := make([]byte, keyLen)
-	if _, err := io.ReadFull(r.r, sortKey); err != nil {
+	if cap(r.headSortKey) < keyLen {
+		r.headSortKey = make([]byte, keyLen)
+	} else {
+		r.headSortKey = r.headSortKey[:keyLen]
+	}
+	if _, err := io.ReadFull(r.r, r.headSortKey); err != nil {
 		return nil, err
 	}
-	g := &partialGroup{
-		SortKey: sortKey,
-		KeyVals: make([]any, len(r.header.GroupCols)),
-		Accs:    make([]kernel.Accumulator, len(r.header.Aggs)),
+	r.head.SortKey = r.headSortKey
+
+	nGc := len(r.header.GroupCols)
+	if cap(r.headKeyVals) < nGc {
+		r.headKeyVals = make([]any, nGc)
+	} else {
+		r.headKeyVals = r.headKeyVals[:nGc]
 	}
-	for i := range g.KeyVals {
+	for i := range r.headKeyVals {
 		v, err := readKeyValue(r.r)
 		if err != nil {
 			return nil, err
 		}
-		g.KeyVals[i] = v
+		r.headKeyVals[i] = v
 	}
-	for i := range g.Accs {
-		if err := readAcc(r.r, r.header.Aggs[i], &g.Accs[i]); err != nil {
+	r.head.KeyVals = r.headKeyVals
+
+	nA := len(r.header.Aggs)
+	if cap(r.headAccs) < nA {
+		r.headAccs = make([]kernel.Accumulator, nA)
+	} else {
+		r.headAccs = r.headAccs[:nA]
+	}
+	// readAcc only sets fields its agg type touches; zero out so a prior
+	// group's HasMin/HasMax/etc. don't leak into this read.
+	for i := range r.headAccs {
+		r.headAccs[i] = kernel.Accumulator{}
+	}
+	for i := range r.headAccs {
+		if err := readAcc(r.r, r.header.Aggs[i], &r.headAccs[i]); err != nil {
 			return nil, err
 		}
 	}
-	return g, nil
+	r.head.Accs = r.headAccs
+
+	return &r.head, nil
 }
 
 func (r *partialSpillReader) Close() error {
@@ -902,10 +948,24 @@ func bytesCompare(a, b []byte) int {
 
 // kWayMerger streams groups from N runs in sortKey order, combining
 // accumulators on equal keys. Output is monotone non-decreasing in sortKey.
+//
+// Next returns a *partialGroup whose backing storage (SortKey/KeyVals/Accs
+// slices) is owned by the merger and reused across calls. Callers MUST NOT
+// retain pointers across Next calls — copy what you need before calling
+// Next again. Reusing the head buffers eliminates the per-merged-group
+// allocations the older fresh-copy contract required.
 type kWayMerger struct {
 	runs []partialRunSource
 	heap runHeap
 	aggs []partialAggSpec
+
+	// Reusable head storage. Returned by Next; valid only until the next
+	// Next call. Backing arrays grow once to fit the widest group then
+	// stay stable for subsequent reuse.
+	head        partialGroup
+	headSortKey []byte               // stable backing for head.SortKey
+	headKeyVals []any                // stable backing for head.KeyVals
+	headAccs    []kernel.Accumulator // stable backing for head.Accs
 }
 
 func newKWayMerger(runs []partialRunSource, aggs []partialAggSpec) *kWayMerger {
@@ -921,36 +981,58 @@ func newKWayMerger(runs []partialRunSource, aggs []partialAggSpec) *kWayMerger {
 
 // Next returns the next merged group, or (nil, nil) when all runs are
 // exhausted. Equal-keyed groups across runs are combined via Accumulator.Merge.
+//
+// The returned *partialGroup aliases reusable buffers on the merger; the
+// next Next call invalidates the previously returned slice contents. The
+// caller must consume (or copy) the head before continuing.
 func (m *kWayMerger) Next() (*partialGroup, error) {
 	if len(m.heap) == 0 {
 		return nil, nil
 	}
 	top := heap.Pop(&m.heap).(runHeapEntry)
 	current := m.runs[top.source].Peek()
-	// Allocate a fresh group rather than aliasing current; the source may
-	// reuse its head buffer in future Advance calls.
-	merged := &partialGroup{
-		SortKey: append([]byte(nil), current.SortKey...),
-		KeyVals: append([]any(nil), current.KeyVals...),
-		Accs:    append([]kernel.Accumulator(nil), current.Accs...),
+
+	// Refill m.head from current using stable backing arrays. SortKey is
+	// always copied (the source may reuse its head buffer on Advance, and
+	// the heap-top compare below needs a stable reference). KeyVals are
+	// `any` boxes — the slice array is stable; we overwrite slots rather
+	// than allocate a fresh []any. Accs are value types — same.
+	m.headSortKey = append(m.headSortKey[:0], current.SortKey...)
+	m.head.SortKey = m.headSortKey
+
+	if cap(m.headKeyVals) < len(current.KeyVals) {
+		m.headKeyVals = make([]any, len(current.KeyVals))
+	} else {
+		m.headKeyVals = m.headKeyVals[:len(current.KeyVals)]
 	}
+	copy(m.headKeyVals, current.KeyVals)
+	m.head.KeyVals = m.headKeyVals
+
+	if cap(m.headAccs) < len(current.Accs) {
+		m.headAccs = make([]kernel.Accumulator, len(current.Accs))
+	} else {
+		m.headAccs = m.headAccs[:len(current.Accs)]
+	}
+	copy(m.headAccs, current.Accs)
+	m.head.Accs = m.headAccs
+
 	if err := m.advanceSource(top.source); err != nil {
 		return nil, err
 	}
 	// Drain any other runs whose head matches this key and merge their
 	// accumulators in. Important: keep going as long as heap top's key
-	// equals merged.SortKey; multiple runs may all carry the same group.
-	for len(m.heap) > 0 && bytesCompare(m.heap[0].key, merged.SortKey) == 0 {
+	// equals m.head.SortKey; multiple runs may all carry the same group.
+	for len(m.heap) > 0 && bytesCompare(m.heap[0].key, m.head.SortKey) == 0 {
 		next := heap.Pop(&m.heap).(runHeapEntry)
 		other := m.runs[next.source].Peek()
-		for i := range merged.Accs {
-			merged.Accs[i].Merge(&other.Accs[i])
+		for i := range m.head.Accs {
+			m.head.Accs[i].Merge(&other.Accs[i])
 		}
 		if err := m.advanceSource(next.source); err != nil {
 			return nil, err
 		}
 	}
-	return merged, nil
+	return &m.head, nil
 }
 
 func (m *kWayMerger) advanceSource(idx int) error {
@@ -973,15 +1055,6 @@ func (m *kWayMerger) Close() error {
 	}
 	m.runs = nil
 	return firstErr
-}
-
-// sortPartialGroups sorts in-memory groups by SortKey, ascending. Used both
-// before writing a spill run and to prepare the in-memory remainder for the
-// k-way merge.
-func sortPartialGroups(groups []*partialGroup) {
-	sort.Slice(groups, func(i, j int) bool {
-		return bytesCompare(groups[i].SortKey, groups[j].SortKey) < 0
-	})
 }
 
 // canUseExternalMerge reports whether HashAggregate's current configuration
@@ -1086,90 +1159,6 @@ func mapBatchTypeToParquet(t batch.TypeID) parquet.TypeID {
 	}
 }
 
-// drainSimpleAggsToPartialGroups walks the current SoA hash table and produces
-// one *partialGroup per live group, ready to be written to a spill file.
-//
-// SortKey is always produced via serializeKey(keyVals) so that runs from
-// any path (int, dual-int, compact, string, generic) and from any state
-// transition (raw consume, MergeSink-migrated) merge correctly. serializeKey
-// is the same encoding migrateToGenericMap uses to populate serializedKeys
-// after MergeSink migration, so a HashAggregate that spilled in compact mode
-// and was later merged with a peer in generic mode still has matching sort
-// keys at Finalize time.
-//
-// KeyVals strategy:
-//   - useIntGroupKey: gs.intKey reified to a typed value matching
-//     groupColTypes[0] (so writeKeyValue emits the right tag and so Next()
-//     emits the right type after merge)
-//   - useDualIntGroupKey: dualIntKeysA[i], dualIntKeysB[i] reified
-//   - useCompactGroupKey: gs.extras.keyValues (set during consumeBatchCompactGroup)
-//   - useStrGroupKey: gs.extras.keyValues (single string)
-//   - useGenericSoA: gs.extras.keyValues
-//   - generic (post-MergeSink migration): gs.extras.keyValues from strGroupStates
-//
-// Caller must have materialized intFlatAccs into per-group accs (via
-// materializeFlatAccums) BEFORE calling this — accs come from gs.extras.accs.
-func (h *HashAggregate) drainSimpleAggsToPartialGroups() []*partialGroup {
-	var groups []*partialGroup
-	keyBuf := make([]byte, 0, 64)
-	// Caller called materializeFlatAccums above this, so every group's extras
-	// is allocated and extras.accs is populated. extras.keyValues is set for
-	// compact / str / generic paths but stays nil for int / dual-int (we
-	// rebuild keyVals from intKey / dualIntKeys[]).
-	switch {
-	case h.useIntGroupKey:
-		groups = make([]*partialGroup, 0, len(h.intGroupStates))
-		for _, gs := range h.intGroupStates {
-			keyVal := reifyIntKey(gs.intKey, h.groupColTypes[0])
-			keyVals := []any{keyVal}
-			sortKey := []byte(serializeKey(keyBuf, keyVals))
-			groups = append(groups, &partialGroup{
-				SortKey: sortKey,
-				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
-			})
-		}
-	case h.useDualIntGroupKey:
-		groups = make([]*partialGroup, 0, len(h.intGroupStates))
-		for i, gs := range h.intGroupStates {
-			a, b := h.dualIntKeysA[i], h.dualIntKeysB[i]
-			vA := reifyIntKey(a, h.groupColTypes[0])
-			vB := reifyIntKey(b, h.groupColTypes[1])
-			keyVals := []any{vA, vB}
-			sortKey := []byte(serializeKey(keyBuf, keyVals))
-			groups = append(groups, &partialGroup{
-				SortKey: sortKey,
-				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
-			})
-		}
-	case h.useCompactGroupKey:
-		groups = make([]*partialGroup, 0, len(h.intGroupStates))
-		for _, gs := range h.intGroupStates {
-			keyVals := append([]any(nil), gs.extras.keyValues...)
-			sortKey := []byte(serializeKey(keyBuf, keyVals))
-			groups = append(groups, &partialGroup{
-				SortKey: sortKey,
-				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
-			})
-		}
-	default: // useStrGroupKey || useGenericSoA || post-MergeSink generic
-		groups = make([]*partialGroup, 0, len(h.strGroupStates))
-		for _, gs := range h.strGroupStates {
-			keyVals := append([]any(nil), gs.extras.keyValues...)
-			sortKey := []byte(serializeKey(keyBuf, keyVals))
-			groups = append(groups, &partialGroup{
-				SortKey: sortKey,
-				KeyVals: keyVals,
-				Accs:    append([]kernel.Accumulator(nil), gs.extras.accs...),
-			})
-		}
-	}
-	sortPartialGroups(groups)
-	return groups
-}
-
 // reifyIntKey converts a packed int64 key back to the typed value that
 // would have been read from a column of the given batch type, so the spill
 // file's display values match what Next() would emit from the in-memory
@@ -1190,55 +1179,62 @@ func reifyIntKey(v int64, t batch.TypeID) any {
 // The next Consume call will rebuild flat accumulators from the next batch's
 // schema.
 //
+// Drain is SoA-direct via partialGroupCursor: no materializeFlatAccums copy,
+// no []*partialGroup pointer-slice materialization. Peak drain footprint is
+// the sort-key arena + sort index + a single reused head, instead of one
+// heap-allocated *partialGroup per group. At SF100 Q17 (20M groups) this
+// drops ~7 GB per task to ~480 MB.
+//
 // Caller must hold h.mu.
 func (h *HashAggregate) spillPartialState() error {
 	if h.Spill == nil {
 		return nil
 	}
-	// Step 1: capture agg specs BEFORE materializing — buildPartialAggSpecs
-	// reads h.intFlatAccs[i].isFloat/isDecimal, and materializeFlatAccums
-	// clears h.intFlatAccs as its final step. Without this ordering, the
-	// captured specs would default IsFloat=false and the writer would emit
-	// the int64 sum branch for what is actually a float64 column, producing
-	// zero-valued accumulators in the spill file.
+	// Capture specs while h.intFlatAccs still carries the type flags. We
+	// no longer materialize, but the buildPartialAggSpecs/buildPartialGroupCols
+	// dependencies on h's mode + intFlatAccs are unchanged from the prior path.
 	aggSpecs := h.buildPartialAggSpecs()
 	groupCols := h.buildPartialGroupCols()
 
-	// Step 2: materialize SoA -> AoS so we can copy per-group accs into
-	// partialGroup.Accs. This nils out h.intFlatAccs, which is the desired
-	// reset state — the next Consume call will rebuildFlatAccums.
-	h.materializeFlatAccums()
-
-	// Step 3: build sorted partial groups from the materialized state.
-	groups := h.drainSimpleAggsToPartialGroups()
-	if len(groups) == 0 {
-		// Nothing to spill — still reset trackers so we don't grow
-		// unbounded.
+	cursor := newPartialGroupCursor(h)
+	if cursor.numGroups == 0 {
+		cursor.Close()
 		h.resetGroupStateAfterSpill()
 		return nil
 	}
 
-	// Step 4: write to disk.
 	header := partialSpillHeader{
 		GroupCols: groupCols,
 		Aggs:      aggSpecs,
 	}
 	w, path, err := newPartialSpillWriter(h.Spill.SpillDir(), header)
 	if err != nil {
+		cursor.Close()
 		return err
 	}
-	for _, g := range groups {
-		if err := w.Write(*g); err != nil {
+	for {
+		g := cursor.Peek()
+		if g == nil {
+			break
+		}
+		if werr := w.Write(*g); werr != nil {
 			w.Close()
-			return err
+			cursor.Close()
+			return werr
+		}
+		if aerr := cursor.Advance(); aerr != nil {
+			w.Close()
+			cursor.Close()
+			return aerr
 		}
 	}
 	if _, err := w.Close(); err != nil {
+		cursor.Close()
 		return err
 	}
+	cursor.Close()
 	h.partialSpillFiles = append(h.partialSpillFiles, path)
 
-	// Step 5: reset hash table and release tracker bytes.
 	h.resetGroupStateAfterSpill()
 	return nil
 }
@@ -1291,8 +1287,7 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 // Spill files are deleted by Close() once the merger is closed, not here —
 // the runs need them open during Next() drains.
 func (h *HashAggregate) finalizeViaPartialMerge() error {
-	// Capture specs before materialize clears intFlatAccs (same ordering
-	// constraint as spillPartialState).
+	// Capture specs while intFlatAccs is still populated.
 	specs := h.buildPartialAggSpecs()
 	// Capture the output schema while the path-mode flags + groupColTypes
 	// reflect the original configuration. Once we collapse to streaming
@@ -1300,16 +1295,18 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 	// would emit a different shape.
 	h.partialMergerSchema = h.outputSchema()
 
-	// Drain any remaining in-memory groups to the merger as a memory run.
-	// We don't write them to disk — they're already in RAM, no point doing
-	// the round-trip.
-	h.materializeFlatAccums()
-	memGroups := h.drainSimpleAggsToPartialGroups()
+	// Build a streaming SoA-direct cursor over the in-memory remainder. The
+	// cursor owns slice-header references to h.intFlatAccs / *GroupStates /
+	// dualIntKeys for its lifetime; the resetGroupStateAfterSpill call below
+	// nils h's slice headers but not the underlying arrays, which the cursor
+	// keeps live until it's drained and Close()d by closePartialMerger.
+	cursor := newPartialGroupCursor(h)
 
-	// Build run sources: one per partial-spill file plus the memory run.
 	sources := make([]partialRunSource, 0, len(h.partialSpillFiles)+1)
-	if len(memGroups) > 0 {
-		sources = append(sources, newMemoryRunSource(memGroups))
+	if cursor.numGroups > 0 {
+		sources = append(sources, cursor)
+	} else {
+		cursor.Close()
 	}
 	for _, path := range h.partialSpillFiles {
 		src, err := newFileRunSource(path)
@@ -1325,7 +1322,8 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 
 	// Reset in-memory state so the existing Next() emission paths can't
 	// accidentally drive output from leftover hash table entries — only the
-	// merger drives output now.
+	// merger drives output now. The cursor's slice-header copies keep the
+	// SoA arrays + group-state chunks alive until cursor.Close() runs.
 	h.resetGroupStateAfterSpill()
 	h.useIntGroupKey = false
 	h.useDualIntGroupKey = false
@@ -1357,6 +1355,13 @@ func (h *HashAggregate) closePartialMerger() {
 // previously captured output schema. Returns (nil, nil) when the merger is
 // exhausted.
 //
+// Writes columns inline as the merger yields each group, so the only
+// transient buffer is the output batch itself — there is no intermediate
+// []partialGroup of size DefaultBatchSize. Saves ~144 KB of struct-header
+// copies per Next call (2048 × sizeof(partialGroup)) and improves
+// locality: each merged group is consumed and dropped before the next one
+// is pulled.
+//
 // Caller must hold h.mu (Next does not lock today, but the merger field is
 // only mutated by Finalize and Close, both of which run on the main goroutine
 // — concurrent SpillSome only touches pre-finalize state).
@@ -1364,8 +1369,24 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 	if h.partialMerger == nil {
 		return nil, nil
 	}
-	rows := make([]partialGroup, 0, batch.DefaultBatchSize)
-	for len(rows) < batch.DefaultBatchSize {
+	// Pull the first group up-front so the empty case (merger exhausted)
+	// returns without allocating an output batch we'd immediately discard.
+	first, err := h.partialMerger.Next()
+	if err != nil {
+		h.closePartialMerger()
+		return nil, err
+	}
+	if first == nil {
+		h.closePartialMerger()
+		return nil, nil
+	}
+
+	out := batch.NewRecordBatch(h.partialMergerSchema, batch.DefaultBatchSize)
+	nGroupCols := len(h.GroupByCols)
+	h.writeMergedRow(out, 0, first, nGroupCols)
+	nRows := 1
+
+	for nRows < batch.DefaultBatchSize {
 		g, err := h.partialMerger.Next()
 		if err != nil {
 			h.closePartialMerger()
@@ -1374,39 +1395,40 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 		if g == nil {
 			break
 		}
-		rows = append(rows, *g)
+		h.writeMergedRow(out, nRows, g, nGroupCols)
+		nRows++
 	}
-	if len(rows) == 0 {
-		h.closePartialMerger()
-		return nil, nil
-	}
-	out := batch.NewRecordBatch(h.partialMergerSchema, len(rows))
-	nGroupCols := len(h.GroupByCols)
-	for i, g := range rows {
-		// Group-by columns: write each keyVal into its column. KeyVals were
-		// produced by drainSimpleAggsToPartialGroups (or readKeyValue from
-		// disk), which preserves the original typed value, so SetValue
-		// stores them through the right typed path without an extra cast.
-		for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
-			if g.KeyVals[k] == nil {
-				out.Columns[k].Nulls.SetNull(i)
-				continue
-			}
-			out.Columns[k].SetValue(i, g.KeyVals[k])
-		}
-		// Aggregate columns: finalize each accumulator to its output value
-		// using the same kernel finalizer as the in-memory path. Only
-		// SUM/COUNT/MIN/MAX/AVG reach here (canUseExternalMerge gate); the
-		// kernel handles each correctly via finalizeKernelAcc.
-		for j, agg := range h.Aggs {
-			colIdx := nGroupCols + j
-			result := finalizeKernelAcc(&g.Accs[j], agg.Func)
-			if result == nil {
-				out.Columns[colIdx].Nulls.SetNull(i)
-				continue
-			}
-			out.Columns[colIdx].SetValue(i, result)
-		}
+
+	// Trim the output batch to the actual filled row count. The unused
+	// slots in each column vector were zero-cleared by NewRecordBatch and
+	// are not visible past Len.
+	out.Len = nRows
+	for _, col := range out.Columns {
+		col.Len = nRows
 	}
 	return out, nil
+}
+
+// writeMergedRow writes one merged partialGroup into out at row index i.
+// Group-by columns come from g.KeyVals (preserving the typed value the
+// cursor or file reader produced); agg columns are finalized via
+// finalizeKernelAcc — only SUM/COUNT/MIN/MAX/AVG reach here per the
+// canUseExternalMerge gate.
+func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partialGroup, nGroupCols int) {
+	for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
+		if g.KeyVals[k] == nil {
+			out.Columns[k].Nulls.SetNull(i)
+			continue
+		}
+		out.Columns[k].SetValue(i, g.KeyVals[k])
+	}
+	for j, agg := range h.Aggs {
+		colIdx := nGroupCols + j
+		result := finalizeKernelAcc(&g.Accs[j], agg.Func)
+		if result == nil {
+			out.Columns[colIdx].Nulls.SetNull(i)
+			continue
+		}
+		out.Columns[colIdx].SetValue(i, result)
+	}
 }
