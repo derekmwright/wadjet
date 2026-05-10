@@ -910,10 +910,24 @@ func bytesCompare(a, b []byte) int {
 
 // kWayMerger streams groups from N runs in sortKey order, combining
 // accumulators on equal keys. Output is monotone non-decreasing in sortKey.
+//
+// Next returns a *partialGroup whose backing storage (SortKey/KeyVals/Accs
+// slices) is owned by the merger and reused across calls. Callers MUST NOT
+// retain pointers across Next calls — copy what you need before calling
+// Next again. Reusing the head buffers eliminates the per-merged-group
+// allocations the older fresh-copy contract required.
 type kWayMerger struct {
 	runs []partialRunSource
 	heap runHeap
 	aggs []partialAggSpec
+
+	// Reusable head storage. Returned by Next; valid only until the next
+	// Next call. Backing arrays grow once to fit the widest group then
+	// stay stable for subsequent reuse.
+	head        partialGroup
+	headSortKey []byte               // stable backing for head.SortKey
+	headKeyVals []any                // stable backing for head.KeyVals
+	headAccs    []kernel.Accumulator // stable backing for head.Accs
 }
 
 func newKWayMerger(runs []partialRunSource, aggs []partialAggSpec) *kWayMerger {
@@ -929,36 +943,58 @@ func newKWayMerger(runs []partialRunSource, aggs []partialAggSpec) *kWayMerger {
 
 // Next returns the next merged group, or (nil, nil) when all runs are
 // exhausted. Equal-keyed groups across runs are combined via Accumulator.Merge.
+//
+// The returned *partialGroup aliases reusable buffers on the merger; the
+// next Next call invalidates the previously returned slice contents. The
+// caller must consume (or copy) the head before continuing.
 func (m *kWayMerger) Next() (*partialGroup, error) {
 	if len(m.heap) == 0 {
 		return nil, nil
 	}
 	top := heap.Pop(&m.heap).(runHeapEntry)
 	current := m.runs[top.source].Peek()
-	// Allocate a fresh group rather than aliasing current; the source may
-	// reuse its head buffer in future Advance calls.
-	merged := &partialGroup{
-		SortKey: append([]byte(nil), current.SortKey...),
-		KeyVals: append([]any(nil), current.KeyVals...),
-		Accs:    append([]kernel.Accumulator(nil), current.Accs...),
+
+	// Refill m.head from current using stable backing arrays. SortKey is
+	// always copied (the source may reuse its head buffer on Advance, and
+	// the heap-top compare below needs a stable reference). KeyVals are
+	// `any` boxes — the slice array is stable; we overwrite slots rather
+	// than allocate a fresh []any. Accs are value types — same.
+	m.headSortKey = append(m.headSortKey[:0], current.SortKey...)
+	m.head.SortKey = m.headSortKey
+
+	if cap(m.headKeyVals) < len(current.KeyVals) {
+		m.headKeyVals = make([]any, len(current.KeyVals))
+	} else {
+		m.headKeyVals = m.headKeyVals[:len(current.KeyVals)]
 	}
+	copy(m.headKeyVals, current.KeyVals)
+	m.head.KeyVals = m.headKeyVals
+
+	if cap(m.headAccs) < len(current.Accs) {
+		m.headAccs = make([]kernel.Accumulator, len(current.Accs))
+	} else {
+		m.headAccs = m.headAccs[:len(current.Accs)]
+	}
+	copy(m.headAccs, current.Accs)
+	m.head.Accs = m.headAccs
+
 	if err := m.advanceSource(top.source); err != nil {
 		return nil, err
 	}
 	// Drain any other runs whose head matches this key and merge their
 	// accumulators in. Important: keep going as long as heap top's key
-	// equals merged.SortKey; multiple runs may all carry the same group.
-	for len(m.heap) > 0 && bytesCompare(m.heap[0].key, merged.SortKey) == 0 {
+	// equals m.head.SortKey; multiple runs may all carry the same group.
+	for len(m.heap) > 0 && bytesCompare(m.heap[0].key, m.head.SortKey) == 0 {
 		next := heap.Pop(&m.heap).(runHeapEntry)
 		other := m.runs[next.source].Peek()
-		for i := range merged.Accs {
-			merged.Accs[i].Merge(&other.Accs[i])
+		for i := range m.head.Accs {
+			m.head.Accs[i].Merge(&other.Accs[i])
 		}
 		if err := m.advanceSource(next.source); err != nil {
 			return nil, err
 		}
 	}
-	return merged, nil
+	return &m.head, nil
 }
 
 func (m *kWayMerger) advanceSource(idx int) error {
