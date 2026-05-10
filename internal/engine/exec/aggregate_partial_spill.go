@@ -660,11 +660,24 @@ func readInt128(r *bufio.Reader) (batch.Int128, error) {
 // partialSpillReader iterates groups in a partial-spill file in stored order
 // (which is sorted by sortKey). It is forward-only and not safe for concurrent
 // use.
+//
+// Next returns a *partialGroup whose backing storage (SortKey/KeyVals/Accs)
+// is owned by the reader and reused across calls — same contract as
+// kWayMerger.Next. Callers must consume (or copy) before the next Next.
+// Because the reader feeds into kWayMerger which copies head data on its
+// own Next, the in-place reuse is safe end-to-end.
 type partialSpillReader struct {
-	f      *os.File
-	r      *bufio.Reader
-	header partialSpillHeader
+	f       *os.File
+	r       *bufio.Reader
+	header  partialSpillHeader
 	scratch [16]byte
+
+	// Reusable head storage. Returned by Next; valid only until the next
+	// Next call. Backing arrays grow once to fit the widest group.
+	head        partialGroup
+	headSortKey []byte
+	headKeyVals []any
+	headAccs    []kernel.Accumulator
 }
 
 func openPartialSpillReader(path string) (*partialSpillReader, error) {
@@ -736,6 +749,9 @@ func (r *partialSpillReader) readHeader() error {
 
 // Next reads the next group, or returns (nil, io.EOF) when the run is
 // exhausted. Returns errors for malformed files (truncated, bad tags, etc.).
+//
+// The returned *partialGroup aliases reusable buffers on the reader; the
+// next Next call invalidates the previously returned slice contents.
 func (r *partialSpillReader) Next() (*partialGroup, error) {
 	marker, err := r.r.ReadByte()
 	if err != nil {
@@ -751,28 +767,50 @@ func (r *partialSpillReader) Next() (*partialGroup, error) {
 		return nil, err
 	}
 	keyLen := int(binary.LittleEndian.Uint32(r.scratch[:4]))
-	sortKey := make([]byte, keyLen)
-	if _, err := io.ReadFull(r.r, sortKey); err != nil {
+	if cap(r.headSortKey) < keyLen {
+		r.headSortKey = make([]byte, keyLen)
+	} else {
+		r.headSortKey = r.headSortKey[:keyLen]
+	}
+	if _, err := io.ReadFull(r.r, r.headSortKey); err != nil {
 		return nil, err
 	}
-	g := &partialGroup{
-		SortKey: sortKey,
-		KeyVals: make([]any, len(r.header.GroupCols)),
-		Accs:    make([]kernel.Accumulator, len(r.header.Aggs)),
+	r.head.SortKey = r.headSortKey
+
+	nGc := len(r.header.GroupCols)
+	if cap(r.headKeyVals) < nGc {
+		r.headKeyVals = make([]any, nGc)
+	} else {
+		r.headKeyVals = r.headKeyVals[:nGc]
 	}
-	for i := range g.KeyVals {
+	for i := range r.headKeyVals {
 		v, err := readKeyValue(r.r)
 		if err != nil {
 			return nil, err
 		}
-		g.KeyVals[i] = v
+		r.headKeyVals[i] = v
 	}
-	for i := range g.Accs {
-		if err := readAcc(r.r, r.header.Aggs[i], &g.Accs[i]); err != nil {
+	r.head.KeyVals = r.headKeyVals
+
+	nA := len(r.header.Aggs)
+	if cap(r.headAccs) < nA {
+		r.headAccs = make([]kernel.Accumulator, nA)
+	} else {
+		r.headAccs = r.headAccs[:nA]
+	}
+	// readAcc only sets fields its agg type touches; zero out so a prior
+	// group's HasMin/HasMax/etc. don't leak into this read.
+	for i := range r.headAccs {
+		r.headAccs[i] = kernel.Accumulator{}
+	}
+	for i := range r.headAccs {
+		if err := readAcc(r.r, r.header.Aggs[i], &r.headAccs[i]); err != nil {
 			return nil, err
 		}
 	}
-	return g, nil
+	r.head.Accs = r.headAccs
+
+	return &r.head, nil
 }
 
 func (r *partialSpillReader) Close() error {
