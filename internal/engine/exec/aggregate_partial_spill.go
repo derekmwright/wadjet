@@ -346,32 +346,32 @@ func emitAcc(w *bufio.Writer, scratch []byte, spec partialAggSpec, a *kernel.Acc
 	}
 }
 
-func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error {
+func readAcc(r *bufio.Reader, scratch []byte, spec partialAggSpec, a *kernel.Accumulator) error {
 	a.IsFloat = spec.IsFloat
 	a.IsDecimal = spec.IsDecimal
 	a.DecScale = int(spec.DecScale)
 	switch spec.Func {
 	case AggSum, AggAvg:
-		c, err := readInt64(r)
+		c, err := readInt64(r, scratch)
 		if err != nil {
 			return err
 		}
 		a.Count = c
 		switch {
 		case spec.IsDecimal:
-			v, err := readInt128(r)
+			v, err := readInt128(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.SumDec = v
 		case spec.IsFloat:
-			v, err := readFloat64(r)
+			v, err := readFloat64(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.SumF64 = v
 		default:
-			v, err := readInt64(r)
+			v, err := readInt64(r, scratch)
 			if err != nil {
 				return err
 			}
@@ -379,7 +379,7 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		return nil
 	case AggCount:
-		c, err := readInt64(r)
+		c, err := readInt64(r, scratch)
 		if err != nil {
 			return err
 		}
@@ -396,19 +396,19 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		switch {
 		case spec.IsDecimal:
-			v, err := readInt128(r)
+			v, err := readInt128(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.MinDec = v
 		case spec.IsFloat:
-			v, err := readFloat64(r)
+			v, err := readFloat64(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.MinF64 = v
 		default:
-			v, err := readInt64(r)
+			v, err := readInt64(r, scratch)
 			if err != nil {
 				return err
 			}
@@ -426,19 +426,19 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		switch {
 		case spec.IsDecimal:
-			v, err := readInt128(r)
+			v, err := readInt128(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.MaxDec = v
 		case spec.IsFloat:
-			v, err := readFloat64(r)
+			v, err := readFloat64(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.MaxF64 = v
 		default:
-			v, err := readInt64(r)
+			v, err := readInt64(r, scratch)
 			if err != nil {
 				return err
 			}
@@ -587,48 +587,49 @@ func setPartialKeyFromAny(dst *partialKeyValue, v any) {
 // is overwritten with a fresh allocation; Dec/I64/F64 are overwritten when
 // the new tag's branch sets them).
 //
+// scratch must be a slice of at least 16 bytes whose backing storage is
+// already heap-allocated (typical: r.scratch[:] from partialSpillReader).
 // Allocates one fresh []byte per string/bytes read (variable-length data
 // must own its bytes since the underlying bufio buffer is reused). Numeric
 // types allocate nothing.
-func readKeyValueInto(r *bufio.Reader, dst *partialKeyValue) error {
+func readKeyValueInto(r *bufio.Reader, scratch []byte, dst *partialKeyValue) error {
 	tag, err := r.ReadByte()
 	if err != nil {
 		return err
 	}
 	dst.Tag = tag
-	var buf [16]byte
 	switch tag {
 	case partialTagNull, partialTagBoolFalse, partialTagBoolTrue:
 		return nil
 	case partialTagInt64:
-		if _, err := io.ReadFull(r, buf[:8]); err != nil {
+		if _, err := io.ReadFull(r, scratch[:8]); err != nil {
 			return err
 		}
-		dst.I64 = int64(binary.LittleEndian.Uint64(buf[:8]))
+		dst.I64 = int64(binary.LittleEndian.Uint64(scratch[:8]))
 		return nil
 	case partialTagInt32:
-		if _, err := io.ReadFull(r, buf[:4]); err != nil {
+		if _, err := io.ReadFull(r, scratch[:4]); err != nil {
 			return err
 		}
-		dst.I64 = int64(int32(binary.LittleEndian.Uint32(buf[:4])))
+		dst.I64 = int64(int32(binary.LittleEndian.Uint32(scratch[:4])))
 		return nil
 	case partialTagFloat64:
-		if _, err := io.ReadFull(r, buf[:8]); err != nil {
+		if _, err := io.ReadFull(r, scratch[:8]); err != nil {
 			return err
 		}
-		dst.F64 = math.Float64frombits(binary.LittleEndian.Uint64(buf[:8]))
+		dst.F64 = math.Float64frombits(binary.LittleEndian.Uint64(scratch[:8]))
 		return nil
 	case partialTagFloat32:
-		if _, err := io.ReadFull(r, buf[:4]); err != nil {
+		if _, err := io.ReadFull(r, scratch[:4]); err != nil {
 			return err
 		}
-		dst.F64 = float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[:4])))
+		dst.F64 = float64(math.Float32frombits(binary.LittleEndian.Uint32(scratch[:4])))
 		return nil
 	case partialTagString, partialTagBytes:
-		if _, err := io.ReadFull(r, buf[:4]); err != nil {
+		if _, err := io.ReadFull(r, scratch[:4]); err != nil {
 			return err
 		}
-		n := int(binary.LittleEndian.Uint32(buf[:4]))
+		n := int(binary.LittleEndian.Uint32(scratch[:4]))
 		// Reuse dst.Bytes capacity when it's large enough; otherwise allocate
 		// fresh. The merger and downstream output writer both copy or
 		// pass-through Bytes without retaining beyond the next read.
@@ -642,11 +643,11 @@ func readKeyValueInto(r *bufio.Reader, dst *partialKeyValue) error {
 		}
 		return nil
 	case partialTagInt128:
-		if _, err := io.ReadFull(r, buf[:16]); err != nil {
+		if _, err := io.ReadFull(r, scratch[:16]); err != nil {
 			return err
 		}
-		dst.Dec.Hi = int64(binary.LittleEndian.Uint64(buf[:8]))
-		dst.Dec.Lo = binary.LittleEndian.Uint64(buf[8:16])
+		dst.Dec.Hi = int64(binary.LittleEndian.Uint64(scratch[:8]))
+		dst.Dec.Lo = binary.LittleEndian.Uint64(scratch[8:16])
 		return nil
 	default:
 		return fmt.Errorf("partial spill: unknown tag %d", tag)
@@ -674,12 +675,11 @@ func writeInt64(w *bufio.Writer, scratch []byte, v int64) error {
 	return err
 }
 
-func readInt64(r *bufio.Reader) (int64, error) {
-	var buf [8]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
+func readInt64(r *bufio.Reader, scratch []byte) (int64, error) {
+	if _, err := io.ReadFull(r, scratch[:8]); err != nil {
 		return 0, err
 	}
-	return int64(binary.LittleEndian.Uint64(buf[:])), nil
+	return int64(binary.LittleEndian.Uint64(scratch[:8])), nil
 }
 
 func writeFloat64(w *bufio.Writer, scratch []byte, v float64) error {
@@ -688,12 +688,11 @@ func writeFloat64(w *bufio.Writer, scratch []byte, v float64) error {
 	return err
 }
 
-func readFloat64(r *bufio.Reader) (float64, error) {
-	var buf [8]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
+func readFloat64(r *bufio.Reader, scratch []byte) (float64, error) {
+	if _, err := io.ReadFull(r, scratch[:8]); err != nil {
 		return 0, err
 	}
-	return math.Float64frombits(binary.LittleEndian.Uint64(buf[:])), nil
+	return math.Float64frombits(binary.LittleEndian.Uint64(scratch[:8])), nil
 }
 
 func writeInt128(w *bufio.Writer, scratch []byte, v batch.Int128) error {
@@ -703,14 +702,13 @@ func writeInt128(w *bufio.Writer, scratch []byte, v batch.Int128) error {
 	return err
 }
 
-func readInt128(r *bufio.Reader) (batch.Int128, error) {
-	var buf [16]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
+func readInt128(r *bufio.Reader, scratch []byte) (batch.Int128, error) {
+	if _, err := io.ReadFull(r, scratch[:16]); err != nil {
 		return batch.Int128{}, err
 	}
 	return batch.Int128{
-		Hi: int64(binary.LittleEndian.Uint64(buf[:8])),
-		Lo: binary.LittleEndian.Uint64(buf[8:16]),
+		Hi: int64(binary.LittleEndian.Uint64(scratch[:8])),
+		Lo: binary.LittleEndian.Uint64(scratch[8:16]),
 	}, nil
 }
 
@@ -844,7 +842,7 @@ func (r *partialSpillReader) Next() (*partialGroup, error) {
 		// Zero the slot first so a prior group's Bytes / Dec don't leak
 		// into a fresh read that doesn't touch those fields.
 		r.headKeyVals[i] = partialKeyValue{}
-		if err := readKeyValueInto(r.r, &r.headKeyVals[i]); err != nil {
+		if err := readKeyValueInto(r.r, r.scratch[:], &r.headKeyVals[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -862,7 +860,7 @@ func (r *partialSpillReader) Next() (*partialGroup, error) {
 		r.headAccs[i] = kernel.Accumulator{}
 	}
 	for i := range r.headAccs {
-		if err := readAcc(r.r, r.header.Aggs[i], &r.headAccs[i]); err != nil {
+		if err := readAcc(r.r, r.scratch[:], r.header.Aggs[i], &r.headAccs[i]); err != nil {
 			return nil, err
 		}
 	}
