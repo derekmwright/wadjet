@@ -1520,26 +1520,132 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 // writeMergedRow writes one merged partialGroup into out at row index i.
 // Group-by columns come from g.KeyVals (typed partialKeyValue produced by
 // the cursor or file reader); agg columns are finalized via
-// finalizeKernelAcc — only SUM/COUNT/MIN/MAX/AVG reach here per the
+// writeAccToColumn — only SUM/COUNT/MIN/MAX/AVG reach here per the
 // canUseExternalMerge gate.
 //
-// Group-by writes go through writePartialKeyToColumn to dispatch on the
-// destination column's batch.TypeID without an `any` round-trip. Agg
-// writes still go through SetValue (the kernel finalizer returns `any`
-// today; making it typed would be a parallel refactor).
+// Both group-by and agg writes dispatch on the destination column's
+// batch.TypeID directly to the typed Vector slot — no `any` round-trip.
 func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partialGroup, nGroupCols int) {
 	for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
 		writePartialKeyToColumn(out.Columns[k], i, &g.KeyVals[k])
 	}
 	for j, agg := range h.Aggs {
 		colIdx := nGroupCols + j
-		result := finalizeKernelAcc(&g.Accs[j], agg.Func)
-		if result == nil {
-			out.Columns[colIdx].Nulls.SetNull(i)
-			continue
-		}
-		out.Columns[colIdx].SetValue(i, result)
+		writeAccToColumn(out.Columns[colIdx], i, &g.Accs[j], agg.Func)
 	}
+}
+
+// writeAccToColumn writes the finalized value of acc (under aggregate
+// function fn) into dst at row i, dispatching on dst.Type to write
+// directly to the typed Vector field. Mirrors finalizeKernelAcc +
+// Vector.SetValue but skips the `any` round-trip — finalizeKernelAcc's
+// `any` return boxes every row at SF100 Q17 scale (10K+ groups × 1+
+// agg cols per merged group). The canUseExternalMerge gate guarantees
+// only SUM/COUNT/MIN/MAX/AVG reach here, and the output column type is
+// always one of int64 / float64 (per outputSchema's agg rules).
+func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggFunc) {
+	switch fn {
+	case AggSum:
+		if acc.Count == 0 {
+			dst.Nulls.SetNull(i)
+			return
+		}
+		dst.Nulls.SetValid(i)
+		switch dst.Type {
+		case batch.TypeFloat64:
+			if acc.IsDecimal {
+				dst.Float64Data[i] = acc.SumDec.ToFloat64(acc.DecScale)
+			} else if acc.IsFloat {
+				dst.Float64Data[i] = acc.SumF64
+			} else {
+				dst.Float64Data[i] = float64(acc.SumI64)
+			}
+		case batch.TypeInt64:
+			dst.Int64Data[i] = acc.SumI64
+		default:
+			writeAccFallback(dst, i, acc, fn)
+		}
+	case AggAvg:
+		if acc.Count == 0 {
+			dst.Nulls.SetNull(i)
+			return
+		}
+		dst.Nulls.SetValid(i)
+		if dst.Type == batch.TypeFloat64 {
+			switch {
+			case acc.IsDecimal:
+				dst.Float64Data[i] = acc.SumDec.ToFloat64(acc.DecScale) / float64(acc.Count)
+			case acc.IsFloat:
+				dst.Float64Data[i] = acc.SumF64 / float64(acc.Count)
+			default:
+				dst.Float64Data[i] = float64(acc.SumI64) / float64(acc.Count)
+			}
+			return
+		}
+		writeAccFallback(dst, i, acc, fn)
+	case AggCount:
+		dst.Nulls.SetValid(i)
+		if dst.Type == batch.TypeInt64 {
+			dst.Int64Data[i] = acc.Count
+			return
+		}
+		writeAccFallback(dst, i, acc, fn)
+	case AggMin:
+		if !acc.HasMin {
+			dst.Nulls.SetNull(i)
+			return
+		}
+		dst.Nulls.SetValid(i)
+		switch dst.Type {
+		case batch.TypeFloat64:
+			if acc.IsDecimal {
+				dst.Float64Data[i] = acc.MinDec.ToFloat64(acc.DecScale)
+			} else if acc.IsFloat {
+				dst.Float64Data[i] = acc.MinF64
+			} else {
+				dst.Float64Data[i] = float64(acc.MinI64)
+			}
+		case batch.TypeInt64:
+			dst.Int64Data[i] = acc.MinI64
+		default:
+			writeAccFallback(dst, i, acc, fn)
+		}
+	case AggMax:
+		if !acc.HasMax {
+			dst.Nulls.SetNull(i)
+			return
+		}
+		dst.Nulls.SetValid(i)
+		switch dst.Type {
+		case batch.TypeFloat64:
+			if acc.IsDecimal {
+				dst.Float64Data[i] = acc.MaxDec.ToFloat64(acc.DecScale)
+			} else if acc.IsFloat {
+				dst.Float64Data[i] = acc.MaxF64
+			} else {
+				dst.Float64Data[i] = float64(acc.MaxI64)
+			}
+		case batch.TypeInt64:
+			dst.Int64Data[i] = acc.MaxI64
+		default:
+			writeAccFallback(dst, i, acc, fn)
+		}
+	default:
+		writeAccFallback(dst, i, acc, fn)
+	}
+}
+
+// writeAccFallback handles output-column types not in the typed
+// dispatch above (e.g., decimal output column, int32 output column).
+// Goes through the existing any-returning finalizeKernelAcc + SetValue
+// path, paying one box per call. Reached for off-fast-path types only.
+func writeAccFallback(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggFunc) {
+	result := finalizeKernelAcc(acc, fn)
+	if result == nil {
+		dst.Nulls.SetNull(i)
+		return
+	}
+	dst.SetValue(i, result)
 }
 
 // writePartialKeyToColumn dispatches a typed partialKeyValue into the
