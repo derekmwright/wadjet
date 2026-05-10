@@ -2,7 +2,6 @@ package exec
 
 import (
 	"bufio"
-	"container/heap"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -113,9 +112,26 @@ type partialSpillHeader struct {
 // for the eventual Next() output; Accs are the aggregate state to merge.
 type partialGroup struct {
 	SortKey []byte
-	KeyVals []any
+	KeyVals []partialKeyValue
 	Accs    []kernel.Accumulator
 }
+
+// partialKeyValue carries one typed group-by display value without `any`
+// boxing. Tag drives which typed field is valid (matches the partialTag*
+// constants the on-disk format uses, so writer / reader can dispatch on
+// the same byte). At SF100 Q17 (20M groups × ~2 group cols) the prior
+// `any` representation cost ~640 MB of transient box allocations per
+// drain task; the unboxed struct cuts that to zero.
+type partialKeyValue struct {
+	Tag   byte         // one of partialTag* (partialTagNull means null)
+	I64   int64        // bool / int32 / int64 / timestamp / ipv4 / mac / duration / port / protocol / date
+	F64   float64      // float32 / float64
+	Bytes []byte       // string / bytes / ipv6 / cidr / uuid (header may alias backing buffer)
+	Dec   batch.Int128 // decimal
+}
+
+// IsNull reports whether the value is the null sentinel.
+func (kv *partialKeyValue) IsNull() bool { return kv.Tag == partialTagNull }
 
 // partialSpillWriter writes a single partial-state run to a file. Caller
 // builds groups in memory, sorts them by SortKey, then calls Write per group
@@ -215,11 +231,13 @@ func (w *partialSpillWriter) Write(g partialGroup) error {
 		return err
 	}
 	for i, gc := range w.header.GroupCols {
-		var v any
+		var kv partialKeyValue
 		if i < len(g.KeyVals) {
-			v = g.KeyVals[i]
+			kv = g.KeyVals[i]
+		} else {
+			kv.Tag = partialTagNull
 		}
-		if err := writeKeyValue(w.w, w.scratch[:], v, gc.Type); err != nil {
+		if err := writeKeyValue(w.w, w.scratch[:], &kv, gc.Type); err != nil {
 			return err
 		}
 	}
@@ -327,32 +345,32 @@ func emitAcc(w *bufio.Writer, scratch []byte, spec partialAggSpec, a *kernel.Acc
 	}
 }
 
-func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error {
+func readAcc(r *bufio.Reader, scratch []byte, spec partialAggSpec, a *kernel.Accumulator) error {
 	a.IsFloat = spec.IsFloat
 	a.IsDecimal = spec.IsDecimal
 	a.DecScale = int(spec.DecScale)
 	switch spec.Func {
 	case AggSum, AggAvg:
-		c, err := readInt64(r)
+		c, err := readInt64(r, scratch)
 		if err != nil {
 			return err
 		}
 		a.Count = c
 		switch {
 		case spec.IsDecimal:
-			v, err := readInt128(r)
+			v, err := readInt128(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.SumDec = v
 		case spec.IsFloat:
-			v, err := readFloat64(r)
+			v, err := readFloat64(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.SumF64 = v
 		default:
-			v, err := readInt64(r)
+			v, err := readInt64(r, scratch)
 			if err != nil {
 				return err
 			}
@@ -360,7 +378,7 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		return nil
 	case AggCount:
-		c, err := readInt64(r)
+		c, err := readInt64(r, scratch)
 		if err != nil {
 			return err
 		}
@@ -377,19 +395,19 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		switch {
 		case spec.IsDecimal:
-			v, err := readInt128(r)
+			v, err := readInt128(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.MinDec = v
 		case spec.IsFloat:
-			v, err := readFloat64(r)
+			v, err := readFloat64(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.MinF64 = v
 		default:
-			v, err := readInt64(r)
+			v, err := readInt64(r, scratch)
 			if err != nil {
 				return err
 			}
@@ -407,19 +425,19 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 		}
 		switch {
 		case spec.IsDecimal:
-			v, err := readInt128(r)
+			v, err := readInt128(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.MaxDec = v
 		case spec.IsFloat:
-			v, err := readFloat64(r)
+			v, err := readFloat64(r, scratch)
 			if err != nil {
 				return err
 			}
 			a.MaxF64 = v
 		default:
-			v, err := readInt64(r)
+			v, err := readInt64(r, scratch)
 			if err != nil {
 				return err
 			}
@@ -432,167 +450,206 @@ func readAcc(r *bufio.Reader, spec partialAggSpec, a *kernel.Accumulator) error 
 }
 
 // writeKeyValue writes a typed display value for a group-by column. The type
-// is taken from the header (parquet.TypeID) so we can encode the canonical
-// representation; nil values are encoded as a single null tag.
+// is taken from kv.Tag, which mirrors the on-disk tag bytes; output is
+// byte-identical to the prior `any`-dispatch path.
 //
 // scratch must be a slice of at least 16 bytes whose backing storage is
 // already heap-allocated (typical: w.scratch[:] from partialSpillWriter).
 // See emitAcc for why threading scratch avoids the per-call alloc that a
 // stack-local [16]byte would incur via bufio.Writer.Write's escape.
-func writeKeyValue(w *bufio.Writer, scratch []byte, v any, _ parquet.TypeID) error {
-	if v == nil {
+func writeKeyValue(w *bufio.Writer, scratch []byte, kv *partialKeyValue, _ parquet.TypeID) error {
+	switch kv.Tag {
+	case partialTagNull:
 		return w.WriteByte(partialTagNull)
+	case partialTagBoolTrue, partialTagBoolFalse:
+		// I64 carries the boolean truth value; tag itself encodes it on disk.
+		return w.WriteByte(kv.Tag)
+	case partialTagInt64:
+		if err := w.WriteByte(partialTagInt64); err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(kv.I64))
+		_, err := w.Write(scratch[:8])
+		return err
+	case partialTagInt32:
+		if err := w.WriteByte(partialTagInt32); err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(int32(kv.I64)))
+		_, err := w.Write(scratch[:4])
+		return err
+	case partialTagFloat64:
+		if err := w.WriteByte(partialTagFloat64); err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint64(scratch[:8], math.Float64bits(kv.F64))
+		_, err := w.Write(scratch[:8])
+		return err
+	case partialTagFloat32:
+		if err := w.WriteByte(partialTagFloat32); err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint32(scratch[:4], math.Float32bits(float32(kv.F64)))
+		_, err := w.Write(scratch[:4])
+		return err
+	case partialTagString:
+		if err := w.WriteByte(partialTagString); err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(kv.Bytes)))
+		if _, err := w.Write(scratch[:4]); err != nil {
+			return err
+		}
+		_, err := w.Write(kv.Bytes)
+		return err
+	case partialTagBytes:
+		if err := w.WriteByte(partialTagBytes); err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(kv.Bytes)))
+		if _, err := w.Write(scratch[:4]); err != nil {
+			return err
+		}
+		_, err := w.Write(kv.Bytes)
+		return err
+	case partialTagInt128:
+		if err := w.WriteByte(partialTagInt128); err != nil {
+			return err
+		}
+		binary.LittleEndian.PutUint64(scratch[:8], uint64(kv.Dec.Hi))
+		binary.LittleEndian.PutUint64(scratch[8:16], kv.Dec.Lo)
+		_, err := w.Write(scratch[:16])
+		return err
+	default:
+		return fmt.Errorf("partial spill: unknown kv tag %d", kv.Tag)
+	}
+}
+
+// setPartialKeyFromAny populates dst with the typed contents of v. Used by
+// fallback paths (cursor's AoS branch, MergeSink-migrated state) where the
+// canonical KeyVals storage is `[]any` from the consume-time generic path.
+// At those call sites, the boxing already happened during consume — we just
+// unbox once into the typed slot.
+func setPartialKeyFromAny(dst *partialKeyValue, v any) {
+	dst.Bytes = nil
+	dst.Dec = batch.Int128{}
+	dst.I64 = 0
+	dst.F64 = 0
+	if v == nil {
+		dst.Tag = partialTagNull
+		return
 	}
 	switch tv := v.(type) {
 	case bool:
 		if tv {
-			return w.WriteByte(partialTagBoolTrue)
+			dst.Tag = partialTagBoolTrue
+		} else {
+			dst.Tag = partialTagBoolFalse
 		}
-		return w.WriteByte(partialTagBoolFalse)
 	case int64:
-		if err := w.WriteByte(partialTagInt64); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv))
-		_, err := w.Write(scratch[:8])
-		return err
-	case int32:
-		if err := w.WriteByte(partialTagInt32); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint32(scratch[:4], uint32(tv))
-		_, err := w.Write(scratch[:4])
-		return err
+		dst.Tag = partialTagInt64
+		dst.I64 = tv
 	case int:
-		if err := w.WriteByte(partialTagInt64); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv))
-		_, err := w.Write(scratch[:8])
-		return err
+		dst.Tag = partialTagInt64
+		dst.I64 = int64(tv)
+	case int32:
+		dst.Tag = partialTagInt32
+		dst.I64 = int64(tv)
 	case float64:
-		if err := w.WriteByte(partialTagFloat64); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint64(scratch[:8], math.Float64bits(tv))
-		_, err := w.Write(scratch[:8])
-		return err
+		dst.Tag = partialTagFloat64
+		dst.F64 = tv
 	case float32:
-		if err := w.WriteByte(partialTagFloat32); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint32(scratch[:4], math.Float32bits(tv))
-		_, err := w.Write(scratch[:4])
-		return err
+		dst.Tag = partialTagFloat32
+		dst.F64 = float64(tv)
 	case string:
-		if err := w.WriteByte(partialTagString); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(tv)))
-		if _, err := w.Write(scratch[:4]); err != nil {
-			return err
-		}
-		_, err := w.WriteString(tv)
-		return err
+		dst.Tag = partialTagString
+		// Aliasing tv's underlying bytes via unsafe is risky; the consume
+		// path produces strings whose lifetime exceeds the cursor's, so a
+		// view-by-byte conversion is acceptable. The merger copies Bytes
+		// when extracting the head into output columns anyway.
+		dst.Bytes = []byte(tv)
 	case []byte:
-		if err := w.WriteByte(partialTagBytes); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(tv)))
-		if _, err := w.Write(scratch[:4]); err != nil {
-			return err
-		}
-		_, err := w.Write(tv)
-		return err
+		dst.Tag = partialTagBytes
+		dst.Bytes = tv
 	case batch.Int128:
-		if err := w.WriteByte(partialTagInt128); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint64(scratch[:8], uint64(tv.Hi))
-		binary.LittleEndian.PutUint64(scratch[8:16], tv.Lo)
-		_, err := w.Write(scratch[:16])
-		return err
+		dst.Tag = partialTagInt128
+		dst.Dec = tv
 	default:
-		// Fall back to fmt.Sprintf string form. This is acceptable for
-		// rarely-spilled types we haven't seen yet; correctness comes from
-		// the round-trip test producing identical input/output for the
-		// agg state, not the display value's exact type.
-		s := fmt.Sprintf("%v", tv)
-		if err := w.WriteByte(partialTagString); err != nil {
-			return err
-		}
-		binary.LittleEndian.PutUint32(scratch[:4], uint32(len(s)))
-		if _, err := w.Write(scratch[:4]); err != nil {
-			return err
-		}
-		_, err := w.WriteString(s)
-		return err
+		dst.Tag = partialTagString
+		dst.Bytes = []byte(fmt.Sprintf("%v", tv))
 	}
 }
 
-func readKeyValue(r *bufio.Reader) (any, error) {
+// readKeyValueInto decodes one typed display value from r into dst, reusing
+// dst's backing storage where possible. Caller must zero dst before calling
+// if it might hold stale data from a prior read (string/bytes Bytes pointer
+// is overwritten with a fresh allocation; Dec/I64/F64 are overwritten when
+// the new tag's branch sets them).
+//
+// scratch must be a slice of at least 16 bytes whose backing storage is
+// already heap-allocated (typical: r.scratch[:] from partialSpillReader).
+// Allocates one fresh []byte per string/bytes read (variable-length data
+// must own its bytes since the underlying bufio buffer is reused). Numeric
+// types allocate nothing.
+func readKeyValueInto(r *bufio.Reader, scratch []byte, dst *partialKeyValue) error {
 	tag, err := r.ReadByte()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	var buf [16]byte
+	dst.Tag = tag
 	switch tag {
-	case partialTagNull:
-		return nil, nil
-	case partialTagBoolFalse:
-		return false, nil
-	case partialTagBoolTrue:
-		return true, nil
+	case partialTagNull, partialTagBoolFalse, partialTagBoolTrue:
+		return nil
 	case partialTagInt64:
-		if _, err := io.ReadFull(r, buf[:8]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, scratch[:8]); err != nil {
+			return err
 		}
-		return int64(binary.LittleEndian.Uint64(buf[:8])), nil
+		dst.I64 = int64(binary.LittleEndian.Uint64(scratch[:8]))
+		return nil
 	case partialTagInt32:
-		if _, err := io.ReadFull(r, buf[:4]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, scratch[:4]); err != nil {
+			return err
 		}
-		return int32(binary.LittleEndian.Uint32(buf[:4])), nil
+		dst.I64 = int64(int32(binary.LittleEndian.Uint32(scratch[:4])))
+		return nil
 	case partialTagFloat64:
-		if _, err := io.ReadFull(r, buf[:8]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, scratch[:8]); err != nil {
+			return err
 		}
-		return math.Float64frombits(binary.LittleEndian.Uint64(buf[:8])), nil
+		dst.F64 = math.Float64frombits(binary.LittleEndian.Uint64(scratch[:8]))
+		return nil
 	case partialTagFloat32:
-		if _, err := io.ReadFull(r, buf[:4]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, scratch[:4]); err != nil {
+			return err
 		}
-		return math.Float32frombits(binary.LittleEndian.Uint32(buf[:4])), nil
-	case partialTagString:
-		if _, err := io.ReadFull(r, buf[:4]); err != nil {
-			return nil, err
+		dst.F64 = float64(math.Float32frombits(binary.LittleEndian.Uint32(scratch[:4])))
+		return nil
+	case partialTagString, partialTagBytes:
+		if _, err := io.ReadFull(r, scratch[:4]); err != nil {
+			return err
 		}
-		n := int(binary.LittleEndian.Uint32(buf[:4]))
-		s := make([]byte, n)
-		if _, err := io.ReadFull(r, s); err != nil {
-			return nil, err
+		n := int(binary.LittleEndian.Uint32(scratch[:4]))
+		// Reuse dst.Bytes capacity when it's large enough; otherwise allocate
+		// fresh. The merger and downstream output writer both copy or
+		// pass-through Bytes without retaining beyond the next read.
+		if cap(dst.Bytes) < n {
+			dst.Bytes = make([]byte, n)
+		} else {
+			dst.Bytes = dst.Bytes[:n]
 		}
-		return string(s), nil
-	case partialTagBytes:
-		if _, err := io.ReadFull(r, buf[:4]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, dst.Bytes); err != nil {
+			return err
 		}
-		n := int(binary.LittleEndian.Uint32(buf[:4]))
-		s := make([]byte, n)
-		if _, err := io.ReadFull(r, s); err != nil {
-			return nil, err
-		}
-		return s, nil
+		return nil
 	case partialTagInt128:
-		if _, err := io.ReadFull(r, buf[:16]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(r, scratch[:16]); err != nil {
+			return err
 		}
-		return batch.Int128{
-			Hi: int64(binary.LittleEndian.Uint64(buf[:8])),
-			Lo: binary.LittleEndian.Uint64(buf[8:16]),
-		}, nil
+		dst.Dec.Hi = int64(binary.LittleEndian.Uint64(scratch[:8]))
+		dst.Dec.Lo = binary.LittleEndian.Uint64(scratch[8:16])
+		return nil
 	default:
-		return nil, fmt.Errorf("partial spill: unknown tag %d", tag)
+		return fmt.Errorf("partial spill: unknown tag %d", tag)
 	}
 }
 
@@ -617,12 +674,11 @@ func writeInt64(w *bufio.Writer, scratch []byte, v int64) error {
 	return err
 }
 
-func readInt64(r *bufio.Reader) (int64, error) {
-	var buf [8]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
+func readInt64(r *bufio.Reader, scratch []byte) (int64, error) {
+	if _, err := io.ReadFull(r, scratch[:8]); err != nil {
 		return 0, err
 	}
-	return int64(binary.LittleEndian.Uint64(buf[:])), nil
+	return int64(binary.LittleEndian.Uint64(scratch[:8])), nil
 }
 
 func writeFloat64(w *bufio.Writer, scratch []byte, v float64) error {
@@ -631,12 +687,11 @@ func writeFloat64(w *bufio.Writer, scratch []byte, v float64) error {
 	return err
 }
 
-func readFloat64(r *bufio.Reader) (float64, error) {
-	var buf [8]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
+func readFloat64(r *bufio.Reader, scratch []byte) (float64, error) {
+	if _, err := io.ReadFull(r, scratch[:8]); err != nil {
 		return 0, err
 	}
-	return math.Float64frombits(binary.LittleEndian.Uint64(buf[:])), nil
+	return math.Float64frombits(binary.LittleEndian.Uint64(scratch[:8])), nil
 }
 
 func writeInt128(w *bufio.Writer, scratch []byte, v batch.Int128) error {
@@ -646,14 +701,13 @@ func writeInt128(w *bufio.Writer, scratch []byte, v batch.Int128) error {
 	return err
 }
 
-func readInt128(r *bufio.Reader) (batch.Int128, error) {
-	var buf [16]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
+func readInt128(r *bufio.Reader, scratch []byte) (batch.Int128, error) {
+	if _, err := io.ReadFull(r, scratch[:16]); err != nil {
 		return batch.Int128{}, err
 	}
 	return batch.Int128{
-		Hi: int64(binary.LittleEndian.Uint64(buf[:8])),
-		Lo: binary.LittleEndian.Uint64(buf[8:16]),
+		Hi: int64(binary.LittleEndian.Uint64(scratch[:8])),
+		Lo: binary.LittleEndian.Uint64(scratch[8:16]),
 	}, nil
 }
 
@@ -676,7 +730,7 @@ type partialSpillReader struct {
 	// Next call. Backing arrays grow once to fit the widest group.
 	head        partialGroup
 	headSortKey []byte
-	headKeyVals []any
+	headKeyVals []partialKeyValue
 	headAccs    []kernel.Accumulator
 }
 
@@ -779,16 +833,17 @@ func (r *partialSpillReader) Next() (*partialGroup, error) {
 
 	nGc := len(r.header.GroupCols)
 	if cap(r.headKeyVals) < nGc {
-		r.headKeyVals = make([]any, nGc)
+		r.headKeyVals = make([]partialKeyValue, nGc)
 	} else {
 		r.headKeyVals = r.headKeyVals[:nGc]
 	}
 	for i := range r.headKeyVals {
-		v, err := readKeyValue(r.r)
-		if err != nil {
+		// Zero the slot first so a prior group's Bytes / Dec don't leak
+		// into a fresh read that doesn't touch those fields.
+		r.headKeyVals[i] = partialKeyValue{}
+		if err := readKeyValueInto(r.r, r.scratch[:], &r.headKeyVals[i]); err != nil {
 			return nil, err
 		}
-		r.headKeyVals[i] = v
 	}
 	r.head.KeyVals = r.headKeyVals
 
@@ -804,7 +859,7 @@ func (r *partialSpillReader) Next() (*partialGroup, error) {
 		r.headAccs[i] = kernel.Accumulator{}
 	}
 	for i := range r.headAccs {
-		if err := readAcc(r.r, r.header.Aggs[i], &r.headAccs[i]); err != nil {
+		if err := readAcc(r.r, r.scratch[:], r.header.Aggs[i], &r.headAccs[i]); err != nil {
 			return nil, err
 		}
 	}
@@ -893,32 +948,97 @@ func (s *fileRunSource) Advance() error {
 
 func (s *fileRunSource) Close() error { return s.r.Close() }
 
-// runHeap implements heap.Interface — top-of-heap is the smallest sortKey
-// across all live runs. We track the source index so Advance() can hit the
-// right run after we yield its head.
+// runHeapEntry tracks one run's current head SortKey. The merger pops the
+// smallest SortKey across all live runs; source disambiguates ties so the
+// merge order is deterministic.
 type runHeapEntry struct {
 	source int // index into runs slice
 	key    []byte
 }
 
+// runHeap is a min-heap of runHeapEntry implemented inline rather than via
+// container/heap. The standard library's interface{} signature on Push and
+// Pop boxed every entry — at SF100 Q17 scale (one push + pop per merged
+// group across 20M groups) that's ~40M `any` allocations per drain task.
+// The typed inline version is alloc-free.
 type runHeap []runHeapEntry
 
-func (h runHeap) Len() int { return len(h) }
-func (h runHeap) Less(i, j int) bool {
-	c := bytesCompare(h[i].key, h[j].key)
+func (h *runHeap) Len() int { return len(*h) }
+
+// less reports whether entry i sorts before entry j: smaller SortKey first,
+// breaking ties by source index for deterministic merge order.
+func (h *runHeap) less(i, j int) bool {
+	hh := *h
+	c := bytesCompare(hh[i].key, hh[j].key)
 	if c != 0 {
 		return c < 0
 	}
-	return h[i].source < h[j].source
+	return hh[i].source < hh[j].source
 }
-func (h runHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *runHeap) Push(x any)         { *h = append(*h, x.(runHeapEntry)) }
-func (h *runHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
+
+// Push appends an entry and sifts it up to restore heap order.
+func (h *runHeap) Push(e runHeapEntry) {
+	*h = append(*h, e)
+	h.up(len(*h) - 1)
+}
+
+// Pop removes and returns the smallest entry, sifting the new root down.
+// Caller must check Len() > 0; popping an empty heap panics.
+func (h *runHeap) Pop() runHeapEntry {
+	hh := *h
+	n := len(hh) - 1
+	hh[0], hh[n] = hh[n], hh[0]
+	min := hh[n]
+	*h = hh[:n]
+	if n > 0 {
+		h.down(0, n)
+	}
+	return min
+}
+
+// PeekKey returns the key of the smallest entry without popping. Caller
+// must check Len() > 0.
+func (h *runHeap) PeekKey() []byte {
+	return (*h)[0].key
+}
+
+func (h *runHeap) up(j int) {
+	for {
+		i := (j - 1) / 2
+		if i == j || !h.less(j, i) {
+			break
+		}
+		hh := *h
+		hh[i], hh[j] = hh[j], hh[i]
+		j = i
+	}
+}
+
+func (h *runHeap) down(i, n int) {
+	for {
+		j1 := 2*i + 1
+		if j1 >= n || j1 < 0 {
+			break
+		}
+		j := j1
+		if j2 := j1 + 1; j2 < n && h.less(j2, j1) {
+			j = j2
+		}
+		if !h.less(j, i) {
+			break
+		}
+		hh := *h
+		hh[i], hh[j] = hh[j], hh[i]
+		i = j
+	}
+}
+
+// init builds heap order over the existing slice in O(n).
+func (h *runHeap) init() {
+	n := len(*h)
+	for i := n/2 - 1; i >= 0; i-- {
+		h.down(i, n)
+	}
 }
 
 // bytesCompare is a local copy of bytes.Compare to avoid the import for one
@@ -964,7 +1084,7 @@ type kWayMerger struct {
 	// stay stable for subsequent reuse.
 	head        partialGroup
 	headSortKey []byte               // stable backing for head.SortKey
-	headKeyVals []any                // stable backing for head.KeyVals
+	headKeyVals []partialKeyValue    // stable backing for head.KeyVals
 	headAccs    []kernel.Accumulator // stable backing for head.Accs
 }
 
@@ -975,7 +1095,7 @@ func newKWayMerger(runs []partialRunSource, aggs []partialAggSpec) *kWayMerger {
 			m.heap = append(m.heap, runHeapEntry{source: i, key: g.SortKey})
 		}
 	}
-	heap.Init(&m.heap)
+	m.heap.init()
 	return m
 }
 
@@ -989,19 +1109,22 @@ func (m *kWayMerger) Next() (*partialGroup, error) {
 	if len(m.heap) == 0 {
 		return nil, nil
 	}
-	top := heap.Pop(&m.heap).(runHeapEntry)
+	top := m.heap.Pop()
 	current := m.runs[top.source].Peek()
 
 	// Refill m.head from current using stable backing arrays. SortKey is
 	// always copied (the source may reuse its head buffer on Advance, and
 	// the heap-top compare below needs a stable reference). KeyVals are
-	// `any` boxes — the slice array is stable; we overwrite slots rather
-	// than allocate a fresh []any. Accs are value types — same.
+	// typed structs — the slice array is stable; we overwrite slots
+	// rather than allocate. Bytes within partialKeyValue still alias the
+	// source's underlying storage, but the source guarantees that storage
+	// is stable until its own next Advance, which doesn't happen until
+	// the corresponding heap entry is popped.
 	m.headSortKey = append(m.headSortKey[:0], current.SortKey...)
 	m.head.SortKey = m.headSortKey
 
 	if cap(m.headKeyVals) < len(current.KeyVals) {
-		m.headKeyVals = make([]any, len(current.KeyVals))
+		m.headKeyVals = make([]partialKeyValue, len(current.KeyVals))
 	} else {
 		m.headKeyVals = m.headKeyVals[:len(current.KeyVals)]
 	}
@@ -1023,7 +1146,7 @@ func (m *kWayMerger) Next() (*partialGroup, error) {
 	// accumulators in. Important: keep going as long as heap top's key
 	// equals m.head.SortKey; multiple runs may all carry the same group.
 	for len(m.heap) > 0 && bytesCompare(m.heap[0].key, m.head.SortKey) == 0 {
-		next := heap.Pop(&m.heap).(runHeapEntry)
+		next := m.heap.Pop()
 		other := m.runs[next.source].Peek()
 		for i := range m.head.Accs {
 			m.head.Accs[i].Merge(&other.Accs[i])
@@ -1040,7 +1163,7 @@ func (m *kWayMerger) advanceSource(idx int) error {
 		return err
 	}
 	if g := m.runs[idx].Peek(); g != nil {
-		heap.Push(&m.heap, runHeapEntry{source: idx, key: g.SortKey})
+		m.heap.Push(runHeapEntry{source: idx, key: g.SortKey})
 	}
 	return nil
 }
@@ -1156,21 +1279,6 @@ func mapBatchTypeToParquet(t batch.TypeID) parquet.TypeID {
 		return parquet.TypeDecimal
 	default:
 		return parquet.TypeString
-	}
-}
-
-// reifyIntKey converts a packed int64 key back to the typed value that
-// would have been read from a column of the given batch type, so the spill
-// file's display values match what Next() would emit from the in-memory
-// hash table.
-func reifyIntKey(v int64, t batch.TypeID) any {
-	switch t {
-	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-		return int32(v)
-	case batch.TypeBool:
-		return v != 0
-	default:
-		return v
 	}
 }
 
@@ -1410,25 +1518,214 @@ func (h *HashAggregate) nextFromPartialMerger() (*batch.RecordBatch, error) {
 }
 
 // writeMergedRow writes one merged partialGroup into out at row index i.
-// Group-by columns come from g.KeyVals (preserving the typed value the
-// cursor or file reader produced); agg columns are finalized via
-// finalizeKernelAcc — only SUM/COUNT/MIN/MAX/AVG reach here per the
+// Group-by columns come from g.KeyVals (typed partialKeyValue produced by
+// the cursor or file reader); agg columns are finalized via
+// writeAccToColumn — only SUM/COUNT/MIN/MAX/AVG reach here per the
 // canUseExternalMerge gate.
+//
+// Both group-by and agg writes dispatch on the destination column's
+// batch.TypeID directly to the typed Vector slot — no `any` round-trip.
 func (h *HashAggregate) writeMergedRow(out *batch.RecordBatch, i int, g *partialGroup, nGroupCols int) {
 	for k := 0; k < nGroupCols && k < len(g.KeyVals); k++ {
-		if g.KeyVals[k] == nil {
-			out.Columns[k].Nulls.SetNull(i)
-			continue
-		}
-		out.Columns[k].SetValue(i, g.KeyVals[k])
+		writePartialKeyToColumn(out.Columns[k], i, &g.KeyVals[k])
 	}
 	for j, agg := range h.Aggs {
 		colIdx := nGroupCols + j
-		result := finalizeKernelAcc(&g.Accs[j], agg.Func)
-		if result == nil {
-			out.Columns[colIdx].Nulls.SetNull(i)
-			continue
+		writeAccToColumn(out.Columns[colIdx], i, &g.Accs[j], agg.Func)
+	}
+}
+
+// writeAccToColumn writes the finalized value of acc (under aggregate
+// function fn) into dst at row i, dispatching on dst.Type to write
+// directly to the typed Vector field. Mirrors finalizeKernelAcc +
+// Vector.SetValue but skips the `any` round-trip — finalizeKernelAcc's
+// `any` return boxes every row at SF100 Q17 scale (10K+ groups × 1+
+// agg cols per merged group). The canUseExternalMerge gate guarantees
+// only SUM/COUNT/MIN/MAX/AVG reach here, and the output column type is
+// always one of int64 / float64 (per outputSchema's agg rules).
+func writeAccToColumn(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggFunc) {
+	switch fn {
+	case AggSum:
+		if acc.Count == 0 {
+			dst.Nulls.SetNull(i)
+			return
 		}
-		out.Columns[colIdx].SetValue(i, result)
+		dst.Nulls.SetValid(i)
+		switch dst.Type {
+		case batch.TypeFloat64:
+			if acc.IsDecimal {
+				dst.Float64Data[i] = acc.SumDec.ToFloat64(acc.DecScale)
+			} else if acc.IsFloat {
+				dst.Float64Data[i] = acc.SumF64
+			} else {
+				dst.Float64Data[i] = float64(acc.SumI64)
+			}
+		case batch.TypeInt64:
+			dst.Int64Data[i] = acc.SumI64
+		default:
+			writeAccFallback(dst, i, acc, fn)
+		}
+	case AggAvg:
+		if acc.Count == 0 {
+			dst.Nulls.SetNull(i)
+			return
+		}
+		dst.Nulls.SetValid(i)
+		if dst.Type == batch.TypeFloat64 {
+			switch {
+			case acc.IsDecimal:
+				dst.Float64Data[i] = acc.SumDec.ToFloat64(acc.DecScale) / float64(acc.Count)
+			case acc.IsFloat:
+				dst.Float64Data[i] = acc.SumF64 / float64(acc.Count)
+			default:
+				dst.Float64Data[i] = float64(acc.SumI64) / float64(acc.Count)
+			}
+			return
+		}
+		writeAccFallback(dst, i, acc, fn)
+	case AggCount:
+		dst.Nulls.SetValid(i)
+		if dst.Type == batch.TypeInt64 {
+			dst.Int64Data[i] = acc.Count
+			return
+		}
+		writeAccFallback(dst, i, acc, fn)
+	case AggMin:
+		if !acc.HasMin {
+			dst.Nulls.SetNull(i)
+			return
+		}
+		dst.Nulls.SetValid(i)
+		switch dst.Type {
+		case batch.TypeFloat64:
+			if acc.IsDecimal {
+				dst.Float64Data[i] = acc.MinDec.ToFloat64(acc.DecScale)
+			} else if acc.IsFloat {
+				dst.Float64Data[i] = acc.MinF64
+			} else {
+				dst.Float64Data[i] = float64(acc.MinI64)
+			}
+		case batch.TypeInt64:
+			dst.Int64Data[i] = acc.MinI64
+		default:
+			writeAccFallback(dst, i, acc, fn)
+		}
+	case AggMax:
+		if !acc.HasMax {
+			dst.Nulls.SetNull(i)
+			return
+		}
+		dst.Nulls.SetValid(i)
+		switch dst.Type {
+		case batch.TypeFloat64:
+			if acc.IsDecimal {
+				dst.Float64Data[i] = acc.MaxDec.ToFloat64(acc.DecScale)
+			} else if acc.IsFloat {
+				dst.Float64Data[i] = acc.MaxF64
+			} else {
+				dst.Float64Data[i] = float64(acc.MaxI64)
+			}
+		case batch.TypeInt64:
+			dst.Int64Data[i] = acc.MaxI64
+		default:
+			writeAccFallback(dst, i, acc, fn)
+		}
+	default:
+		writeAccFallback(dst, i, acc, fn)
+	}
+}
+
+// writeAccFallback handles output-column types not in the typed
+// dispatch above (e.g., decimal output column, int32 output column).
+// Goes through the existing any-returning finalizeKernelAcc + SetValue
+// path, paying one box per call. Reached for off-fast-path types only.
+func writeAccFallback(dst *batch.Vector, i int, acc *kernel.Accumulator, fn AggFunc) {
+	result := finalizeKernelAcc(acc, fn)
+	if result == nil {
+		dst.Nulls.SetNull(i)
+		return
+	}
+	dst.SetValue(i, result)
+}
+
+// writePartialKeyToColumn dispatches a typed partialKeyValue into the
+// matching typed slot on dst. The destination column's batch.TypeID drives
+// the dispatch; the kv tag is used only to detect the null sentinel (and
+// for variable-width types where len(kv.Bytes) is the payload). No `any`
+// round-trip and no type assertion.
+func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) {
+	if kv.Tag == partialTagNull {
+		dst.Nulls.SetNull(i)
+		switch dst.Type {
+		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+			dst.BytesData.Set(i, nil)
+		}
+		return
+	}
+	dst.Nulls.SetValid(i)
+	switch dst.Type {
+	case batch.TypeBool:
+		dst.BoolData[i] = kv.Tag == partialTagBoolTrue || kv.I64 != 0
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		dst.Int32Data[i] = int32(kv.I64)
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		dst.Int64Data[i] = kv.I64
+	case batch.TypeFloat32:
+		dst.Float32Data[i] = float32(kv.F64)
+	case batch.TypeFloat64:
+		dst.Float64Data[i] = kv.F64
+	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
+		dst.BytesData.Set(i, kv.Bytes)
+	default:
+		// Decimal and any other types not enumerated above: defer to the
+		// generic SetValue path. Decimal's display value isn't trivial to
+		// dispatch from kv.Dec without recreating Decimal-store semantics
+		// here. SF100 group keys are not decimals; the slow path is fine.
+		writePartialKeyFallback(dst, i, kv)
+	}
+}
+
+// writeIntKeyToColumn writes a group-by column value held in int64 SoA
+// storage (gs.intKey or dualIntKeys[i]) into the typed Vector slot
+// indicated by t. Used by HashAggregate.Next on the int / dual-int
+// SoA emit paths to skip the `any` box that SetValue otherwise requires.
+// Mirrors writePartialKeyToColumn but reads from a plain int64 instead
+// of a typed partialKeyValue.
+func writeIntKeyToColumn(dst *batch.Vector, i int, v int64, t batch.TypeID) {
+	dst.Nulls.SetValid(i)
+	switch t {
+	case batch.TypeBool:
+		dst.BoolData[i] = v != 0
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		dst.Int32Data[i] = int32(v)
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		dst.Int64Data[i] = v
+	default:
+		// Fallback for output column types that don't correspond to the
+		// int64 SoA storage (rare — column type and groupColTypes should
+		// generally agree). Pay one box.
+		dst.SetValue(i, v)
+	}
+}
+
+// writePartialKeyFallback handles types not in the typed-dispatch fast
+// path. Goes through Vector.SetValue, which boxes once per call. Reached
+// only for decimal group-by keys today.
+func writePartialKeyFallback(dst *batch.Vector, i int, kv *partialKeyValue) {
+	switch kv.Tag {
+	case partialTagInt128:
+		dst.SetValue(i, kv.Dec)
+	case partialTagInt64:
+		dst.SetValue(i, kv.I64)
+	case partialTagInt32:
+		dst.SetValue(i, int32(kv.I64))
+	case partialTagFloat64:
+		dst.SetValue(i, kv.F64)
+	case partialTagFloat32:
+		dst.SetValue(i, float32(kv.F64))
+	case partialTagString:
+		dst.SetValue(i, string(kv.Bytes))
+	case partialTagBytes:
+		dst.SetValue(i, kv.Bytes)
 	}
 }

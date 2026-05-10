@@ -71,7 +71,7 @@ type partialGroupCursor struct {
 
 	// Reusable head storage (overwritten in place per loadHeadAt).
 	head        partialGroup
-	headKeyVals []any
+	headKeyVals []partialKeyValue
 	headAccs    []kernel.Accumulator
 }
 
@@ -129,17 +129,18 @@ func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
 		keyOffsets:  make([]int32, numGroups+1),
 		sortedIdx:   make([]uint32, numGroups),
 		numGroups:   numGroups,
-		headKeyVals: make([]any, nGroupCols),
+		headKeyVals: make([]partialKeyValue, nGroupCols),
 		headAccs:    make([]kernel.Accumulator, nAggs),
 	}
 	c.head.KeyVals = c.headKeyVals
 	c.head.Accs = c.headAccs
 
-	// int / dual-int paths skip the []any round-trip entirely: they read SoA
-	// int values straight into the arena via typed serconv writes. At SF100
-	// scan-5 (20M groups) this saves N (single-int) or 2N (dual-int) `any`
-	// boxing allocations during build. compact / str / generic modes already
-	// have a []any in extras.keyValues so there's no boxing to skip.
+	// Arena build pass. int / dual-int paths read SoA int values straight
+	// into the arena via typed strconv writes (skips `any` boxing). Compact
+	// and str/generic modes alias the existing gs.extras.keyValues `[]any`
+	// — those boxes were allocated at consume time and we just hand them
+	// to appendSerializedKey for serialization. No new allocations on
+	// either branch.
 	switch keyMode {
 	case partialKeyModeInt, partialKeyModeDualInt:
 		for gi := 0; gi < numGroups; gi++ {
@@ -147,12 +148,16 @@ func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
 			c.keyArena = c.appendIntModeSortKey(c.keyArena, gi)
 			c.sortedIdx[gi] = uint32(gi)
 		}
-	default:
-		scratchKeyVals := make([]any, nGroupCols)
+	case partialKeyModeCompact:
 		for gi := 0; gi < numGroups; gi++ {
 			c.keyOffsets[gi] = int32(len(c.keyArena))
-			c.populateScratchKeyVals(gi, scratchKeyVals)
-			c.keyArena = appendSerializedKey(c.keyArena, scratchKeyVals)
+			c.keyArena = appendSerializedKey(c.keyArena, c.intGroupStates[gi].extras.keyValues)
+			c.sortedIdx[gi] = uint32(gi)
+		}
+	default: // partialKeyModeStrOrGeneric
+		for gi := 0; gi < numGroups; gi++ {
+			c.keyOffsets[gi] = int32(len(c.keyArena))
+			c.keyArena = appendSerializedKey(c.keyArena, c.strGroupStates[gi].extras.keyValues)
 			c.sortedIdx[gi] = uint32(gi)
 		}
 	}
@@ -171,24 +176,59 @@ func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
 	return c
 }
 
-// populateScratchKeyVals fills dst (len == nGroupCols) with the group-key
-// values at SoA index gi. The four branches mirror HashAggregate's key paths
-// so spill files written via the cursor are bit-identical to those produced
-// before the SoA-direct rewrite.
-func (c *partialGroupCursor) populateScratchKeyVals(gi int, dst []any) {
+// populateHeadKeyVals fills c.headKeyVals (len == nGroupCols) with typed
+// values for the group at SoA index gi.
+//
+// int / dual-int branches set typed slots without any `any` boxing:
+// the int64 SoA value goes straight into headKeyVals[k].I64. Compact and
+// str/generic branches read from gs.extras.keyValues (which is `[]any`
+// from consume time) and unbox into the typed slot via setPartialKeyFromAny
+// — no new boxes, just a one-time per-group dispatch on the existing box.
+func (c *partialGroupCursor) populateHeadKeyVals(gi int) {
 	switch c.keyMode {
 	case partialKeyModeInt:
 		gs := c.intGroupStates[gi]
-		dst[0] = reifyIntKey(gs.intKey, c.groupColTypes[0])
+		setPartialKeyFromInt(&c.headKeyVals[0], gs.intKey, c.groupColTypes[0])
 	case partialKeyModeDualInt:
-		dst[0] = reifyIntKey(c.dualIntKeysA[gi], c.groupColTypes[0])
-		dst[1] = reifyIntKey(c.dualIntKeysB[gi], c.groupColTypes[1])
+		setPartialKeyFromInt(&c.headKeyVals[0], c.dualIntKeysA[gi], c.groupColTypes[0])
+		setPartialKeyFromInt(&c.headKeyVals[1], c.dualIntKeysB[gi], c.groupColTypes[1])
 	case partialKeyModeCompact:
 		gs := c.intGroupStates[gi]
-		copy(dst, gs.extras.keyValues)
+		for i, v := range gs.extras.keyValues {
+			if i >= len(c.headKeyVals) {
+				break
+			}
+			setPartialKeyFromAny(&c.headKeyVals[i], v)
+		}
 	default: // partialKeyModeStrOrGeneric
 		gs := c.strGroupStates[gi]
-		copy(dst, gs.extras.keyValues)
+		for i, v := range gs.extras.keyValues {
+			if i >= len(c.headKeyVals) {
+				break
+			}
+			setPartialKeyFromAny(&c.headKeyVals[i], v)
+		}
+	}
+}
+
+// setPartialKeyFromInt populates dst from an int64 SoA key value typed by t.
+// Counterpart to reifyIntKey but writes a typed slot (no `any` box).
+func setPartialKeyFromInt(dst *partialKeyValue, v int64, t batch.TypeID) {
+	dst.Bytes = nil
+	dst.F64 = 0
+	dst.Dec = batch.Int128{}
+	dst.I64 = v
+	switch t {
+	case batch.TypeBool:
+		if v != 0 {
+			dst.Tag = partialTagBoolTrue
+		} else {
+			dst.Tag = partialTagBoolFalse
+		}
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		dst.Tag = partialTagInt32
+	default: // int64 / timestamp / ipv4 / mac / duration
+		dst.Tag = partialTagInt64
 	}
 }
 
@@ -200,12 +240,12 @@ func (c *partialGroupCursor) populateScratchKeyVals(gi int, dst []any) {
 // modified after, so aliasing is safe across Advance calls.
 //
 // KeyVals/Accs reuse the underlying arrays. The merger copies their contents
-// during merge (`append([]any(nil), current.KeyVals...)`,
+// during merge (typed copy of partialKeyValue slots, plus
 // `append([]kernel.Accumulator(nil), current.Accs...)`), so overwriting them
 // in place between Advance calls cannot corrupt the merger's state.
 func (c *partialGroupCursor) loadHeadAt(gi int) {
 	c.head.SortKey = c.keyArena[c.keyOffsets[gi]:c.keyOffsets[gi+1]]
-	c.populateScratchKeyVals(gi, c.headKeyVals)
+	c.populateHeadKeyVals(gi)
 
 	if c.useAoSAccs {
 		c.loadHeadAccsAoS(gi)

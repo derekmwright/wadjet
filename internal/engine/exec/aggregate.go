@@ -2177,11 +2177,12 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 	// SoA-direct read: when the SoA fast path is still active (intFlatAccs
 	// non-nil), Next() reads accumulators straight from the flat arrays via
-	// finalizeFlatAtIndex instead of calling materializeFlatAccums to copy
-	// them per-group. Skipping that materialize saves 96 B (extras) + 24 B
-	// (accs slice header) + nAggs × ~80 B (Accumulator) of fresh heap per
-	// group, which on Q17 SF100 (20M groups × 3 aggs) is the difference
-	// between ~3 GB and ~0.5 GB of group-state heap inside Next.
+	// loadAccFromFlat + writeAccToColumn instead of calling
+	// materializeFlatAccums to copy them per-group. Skipping that materialize
+	// saves 96 B (extras) + 24 B (accs slice header) + nAggs × ~80 B
+	// (Accumulator) of fresh heap per group, which on Q17 SF100 (20M groups
+	// × 3 aggs) is the difference between ~3 GB and ~0.5 GB of group-state
+	// heap inside Next.
 	//
 	// materializeFlatAccums is still called on the migration paths
 	// (compact→generic, dual-int→generic, MergeSink generic merge) where
@@ -2264,15 +2265,19 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		// paths populate extras during consume or processRow.
 		ext := gs.extras
 
-		// Set group-by columns: use intKey directly for int-keyed groups
-		// to avoid deferred []any boxing. For other paths, use keyValues.
+		// Set group-by columns. Int and dual-int paths take the typed-direct
+		// route (writeIntKeyToColumn) so the per-row int64 → `any` box that
+		// the prior SetValue path forced is avoided. For SF100 Q17 scale
+		// (20M emitted groups × 1 int key) this is 20M boxes eliminated per
+		// drain. The generic path reads pre-boxed values from extras.keyValues
+		// and hands them to SetValue without re-boxing.
 		deferredBoxing := ext == nil || ext.keyValues == nil
 		if h.useIntGroupKey && deferredBoxing {
-			out.Columns[0].SetValue(i, gs.intKey)
+			writeIntKeyToColumn(out.Columns[0], i, gs.intKey, h.groupColTypes[0])
 		} else if h.useDualIntGroupKey && deferredBoxing {
 			idx := start + i
-			out.Columns[0].SetValue(i, h.dualIntKeysA[idx])
-			out.Columns[1].SetValue(i, h.dualIntKeysB[idx])
+			writeIntKeyToColumn(out.Columns[0], i, h.dualIntKeysA[idx], h.groupColTypes[0])
+			writeIntKeyToColumn(out.Columns[1], i, h.dualIntKeysB[idx], h.groupColTypes[1])
 		} else {
 			for j, val := range ext.keyValues {
 				out.Columns[j].SetValue(i, val)
@@ -2373,13 +2378,22 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 				// that null-key fallback groups (which processRow filled in
 				// ext.accs while their intFlatAccs slot stayed at zero) are
 				// served from ext.accs even when SoA is otherwise active.
-				var result any
+				//
+				// writeAccToColumn dispatches the finalized value into the
+				// typed Vector slot directly, skipping the kernel's `any`
+				// return type and Vector.SetValue's type switch — saves one
+				// box per (row × simple-agg-col) at SF100 scale.
 				if ext != nil && ext.accs != nil {
-					result = finalizeKernelAcc(&ext.accs[j], agg.Func)
+					writeAccToColumn(out.Columns[colIdx], i, &ext.accs[j], agg.Func)
 				} else {
-					result = finalizeFlatAtIndex(&h.intFlatAccs[j], start+i, agg.Func)
+					// SoA flat-arrays path: synthesize a stack-only Accumulator
+					// from intFlatAccs at index start+i, then dispatch. The
+					// Accumulator value never escapes (writeAccToColumn doesn't
+					// retain it), so this is alloc-free.
+					var acc kernel.Accumulator
+					loadAccFromFlat(&h.intFlatAccs[j], start+i, &acc)
+					writeAccToColumn(out.Columns[colIdx], i, &acc, agg.Func)
 				}
-				out.Columns[colIdx].SetValue(i, result)
 			}
 		}
 
@@ -3198,57 +3212,50 @@ func (h *HashAggregate) initFlatAccums(b *batch.RecordBatch) {
 	h.groupIndexBuf = make([]int32, batch.DefaultBatchSize)
 }
 
-// finalizeFlatAtIndex reads SoA accumulator state at group index gi and
-// finalizes without allocating a per-group Accumulator on the heap. This is
-// the SoA-direct counterpart to finalizeKernelAcc that lets Next() avoid
-// calling materializeFlatAccums (which would otherwise allocate
-// groupStateExtras+accs for every group — 96 B/group + 24 B/group = 120 B
-// of fresh heap per group, scaling to ~2.4 GB at SF100 Q17's 20M groups).
-//
-// Build a stack-only Accumulator view, then finalize. The compiler sees acc
-// is value-typed and never escapes (only its address passes to
-// finalizeKernelAcc, which doesn't retain it), so there is no heap
-// allocation in the hot path.
-func finalizeFlatAtIndex(fa *flatAccumArrays, gi int, fn AggFunc) any {
-	var acc kernel.Accumulator
-	acc.Count = fa.count[gi]
-	acc.IsFloat = fa.isFloat
-	acc.IsDecimal = fa.isDecimal
-	acc.DecScale = fa.decScale
+// loadAccFromFlat fills dst from a flatAccumArrays row at index gi. The
+// SoA-direct counterpart to materializing per-group accs into extras.accs:
+// callers build a stack-local Accumulator (which the compiler sees value-
+// typed and proves doesn't escape) and pass it to a finalizer that doesn't
+// retain it. At SF100 Q17 scale (20M groups) this saves a multi-GB heap
+// pass through materializeFlatAccums.
+func loadAccFromFlat(fa *flatAccumArrays, gi int, dst *kernel.Accumulator) {
+	dst.Count = fa.count[gi]
+	dst.IsFloat = fa.isFloat
+	dst.IsDecimal = fa.isDecimal
+	dst.DecScale = fa.decScale
 	if fa.sumI64 != nil {
-		acc.SumI64 = fa.sumI64[gi]
+		dst.SumI64 = fa.sumI64[gi]
 	}
 	if fa.sumF64 != nil {
-		acc.SumF64 = fa.sumF64[gi]
+		dst.SumF64 = fa.sumF64[gi]
 	}
 	if fa.sumDec != nil {
-		acc.SumDec = fa.sumDec[gi]
+		dst.SumDec = fa.sumDec[gi]
 	}
 	if fa.minI64 != nil {
-		acc.MinI64 = fa.minI64[gi]
-		acc.HasMin = fa.hasMin[gi]
+		dst.MinI64 = fa.minI64[gi]
+		dst.HasMin = fa.hasMin[gi]
 	}
 	if fa.maxI64 != nil {
-		acc.MaxI64 = fa.maxI64[gi]
-		acc.HasMax = fa.hasMax[gi]
+		dst.MaxI64 = fa.maxI64[gi]
+		dst.HasMax = fa.hasMax[gi]
 	}
 	if fa.minF64 != nil {
-		acc.MinF64 = fa.minF64[gi]
-		acc.HasMin = fa.hasMin[gi]
+		dst.MinF64 = fa.minF64[gi]
+		dst.HasMin = fa.hasMin[gi]
 	}
 	if fa.maxF64 != nil {
-		acc.MaxF64 = fa.maxF64[gi]
-		acc.HasMax = fa.hasMax[gi]
+		dst.MaxF64 = fa.maxF64[gi]
+		dst.HasMax = fa.hasMax[gi]
 	}
 	if fa.minDec != nil {
-		acc.MinDec = fa.minDec[gi]
-		acc.HasMin = fa.hasMin[gi]
+		dst.MinDec = fa.minDec[gi]
+		dst.HasMin = fa.hasMin[gi]
 	}
 	if fa.maxDec != nil {
-		acc.MaxDec = fa.maxDec[gi]
-		acc.HasMax = fa.hasMax[gi]
+		dst.MaxDec = fa.maxDec[gi]
+		dst.HasMax = fa.hasMax[gi]
 	}
-	return finalizeKernelAcc(&acc, fn)
 }
 
 // materializeFlatAccums converts SoA flat arrays back to per-group Accumulator

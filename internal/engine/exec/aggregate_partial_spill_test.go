@@ -301,7 +301,7 @@ func TestExternalMergeSpill_PartialFileRoundTrip(t *testing.T) {
 	groups := []*partialGroup{
 		{
 			SortKey: []byte{0, 0, 0, 0, 0, 0, 0, 1},
-			KeyVals: []any{int64(1)},
+			KeyVals: []partialKeyValue{{Tag: partialTagInt64, I64: 1}},
 			Accs: []kernel.Accumulator{
 				{Count: 5, SumI64: 100},
 				{Count: 5},
@@ -310,7 +310,7 @@ func TestExternalMergeSpill_PartialFileRoundTrip(t *testing.T) {
 		},
 		{
 			SortKey: []byte{0, 0, 0, 0, 0, 0, 0, 2},
-			KeyVals: []any{int64(2)},
+			KeyVals: []partialKeyValue{{Tag: partialTagInt64, I64: 2}},
 			Accs: []kernel.Accumulator{
 				{Count: 7, SumI64: 200},
 				{Count: 7},
@@ -349,8 +349,8 @@ func TestExternalMergeSpill_PartialFileRoundTrip(t *testing.T) {
 		if !bytesEq(got.SortKey, want.SortKey) {
 			t.Errorf("group %d sortKey: got %x want %x", i, got.SortKey, want.SortKey)
 		}
-		if got.KeyVals[0] != want.KeyVals[0] {
-			t.Errorf("group %d keyVals: got %v want %v", i, got.KeyVals, want.KeyVals)
+		if got.KeyVals[0].Tag != want.KeyVals[0].Tag || got.KeyVals[0].I64 != want.KeyVals[0].I64 {
+			t.Errorf("group %d keyVals: got %+v want %+v", i, got.KeyVals[0], want.KeyVals[0])
 		}
 		for ai := range want.Accs {
 			gotAcc := got.Accs[ai]
@@ -406,7 +406,7 @@ func TestExternalMergeSpill_KWayMerge(t *testing.T) {
 		buf[0] = byte(k)
 		return &partialGroup{
 			SortKey: buf,
-			KeyVals: []any{k},
+			KeyVals: []partialKeyValue{{Tag: partialTagInt64, I64: k}},
 			Accs: []kernel.Accumulator{
 				{Count: cnt, SumI64: sum},
 				{Count: cnt},
@@ -446,7 +446,7 @@ func TestExternalMergeSpill_KWayMerge(t *testing.T) {
 			break
 		}
 		got = append(got, out{
-			k:   g.KeyVals[0].(int64),
+			k:   g.KeyVals[0].I64,
 			sum: g.Accs[0].SumI64,
 			cnt: g.Accs[0].Count,
 		})
