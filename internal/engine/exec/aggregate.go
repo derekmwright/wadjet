@@ -2265,15 +2265,19 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		// paths populate extras during consume or processRow.
 		ext := gs.extras
 
-		// Set group-by columns: use intKey directly for int-keyed groups
-		// to avoid deferred []any boxing. For other paths, use keyValues.
+		// Set group-by columns. Int and dual-int paths take the typed-direct
+		// route (writeIntKeyToColumn) so the per-row int64 → `any` box that
+		// the prior SetValue path forced is avoided. For SF100 Q17 scale
+		// (20M emitted groups × 1 int key) this is 20M boxes eliminated per
+		// drain. The generic path reads pre-boxed values from extras.keyValues
+		// and hands them to SetValue without re-boxing.
 		deferredBoxing := ext == nil || ext.keyValues == nil
 		if h.useIntGroupKey && deferredBoxing {
-			out.Columns[0].SetValue(i, gs.intKey)
+			writeIntKeyToColumn(out.Columns[0], i, gs.intKey, h.groupColTypes[0])
 		} else if h.useDualIntGroupKey && deferredBoxing {
 			idx := start + i
-			out.Columns[0].SetValue(i, h.dualIntKeysA[idx])
-			out.Columns[1].SetValue(i, h.dualIntKeysB[idx])
+			writeIntKeyToColumn(out.Columns[0], i, h.dualIntKeysA[idx], h.groupColTypes[0])
+			writeIntKeyToColumn(out.Columns[1], i, h.dualIntKeysB[idx], h.groupColTypes[1])
 		} else {
 			for j, val := range ext.keyValues {
 				out.Columns[j].SetValue(i, val)

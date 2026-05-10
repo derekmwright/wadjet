@@ -1685,6 +1685,29 @@ func writePartialKeyToColumn(dst *batch.Vector, i int, kv *partialKeyValue) {
 	}
 }
 
+// writeIntKeyToColumn writes a group-by column value held in int64 SoA
+// storage (gs.intKey or dualIntKeys[i]) into the typed Vector slot
+// indicated by t. Used by HashAggregate.Next on the int / dual-int
+// SoA emit paths to skip the `any` box that SetValue otherwise requires.
+// Mirrors writePartialKeyToColumn but reads from a plain int64 instead
+// of a typed partialKeyValue.
+func writeIntKeyToColumn(dst *batch.Vector, i int, v int64, t batch.TypeID) {
+	dst.Nulls.SetValid(i)
+	switch t {
+	case batch.TypeBool:
+		dst.BoolData[i] = v != 0
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		dst.Int32Data[i] = int32(v)
+	case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
+		dst.Int64Data[i] = v
+	default:
+		// Fallback for output column types that don't correspond to the
+		// int64 SoA storage (rare — column type and groupColTypes should
+		// generally agree). Pay one box.
+		dst.SetValue(i, v)
+	}
+}
+
 // writePartialKeyFallback handles types not in the typed-dispatch fast
 // path. Goes through Vector.SetValue, which boxes once per call. Reached
 // only for decimal group-by keys today.
