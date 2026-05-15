@@ -62,10 +62,18 @@ type partialGroupCursor struct {
 	// extras.accs and reading flat arrays would panic on empty slices.
 	useAoSAccs bool
 
+	// liveGroups, when non-nil, restricts the cursor to a subset of the
+	// aggregate's slots. Position p in [0, numGroups) maps to SoA slot
+	// liveGroups[p]. Used by the partial-drain spill path (subset = the
+	// drained partitions) and by finalize after partial drains (subset =
+	// surviving slots derived from intGroupIndex). nil means "all slots in
+	// 0..len-1 order" — the pre-partial-drain behavior.
+	liveGroups []int32
+
 	// Sort state (built once during construction; immutable thereafter).
 	keyArena   []byte   // contiguous serialized sort keys
-	keyOffsets []int32  // len == numGroups+1; key[i] = arena[off[i]:off[i+1]]
-	sortedIdx  []uint32 // permutation; group at sorted position j is sortedIdx[j]
+	keyOffsets []int32  // len == numGroups+1; key for position p = arena[off[p]:off[p+1]]
+	sortedIdx  []uint32 // permutation; cursor at pos emits position sortedIdx[pos]
 	pos        int
 	numGroups  int
 
@@ -88,24 +96,28 @@ type partialGroupCursor struct {
 // per Advance. This is the second-pass optimization equivalent to the one
 // shipped for Next() in PR #90 (commit 91cd65f), now applied to the spill
 // and finalize-via-merge drain paths.
-func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
+func newPartialGroupCursor(h *HashAggregate, liveGroups []int32) *partialGroupCursor {
 	var (
 		keyMode   partialKeyMode
-		numGroups int
+		srcGroups int
 	)
 	switch {
 	case h.useIntGroupKey:
 		keyMode = partialKeyModeInt
-		numGroups = len(h.intGroupStates)
+		srcGroups = len(h.intGroupStates)
 	case h.useDualIntGroupKey:
 		keyMode = partialKeyModeDualInt
-		numGroups = len(h.intGroupStates)
+		srcGroups = len(h.intGroupStates)
 	case h.useCompactGroupKey:
 		keyMode = partialKeyModeCompact
-		numGroups = len(h.intGroupStates)
+		srcGroups = len(h.intGroupStates)
 	default: // useStrGroupKey || useGenericSoA || post-MergeSink generic
 		keyMode = partialKeyModeStrOrGeneric
-		numGroups = len(h.strGroupStates)
+		srcGroups = len(h.strGroupStates)
+	}
+	numGroups := srcGroups
+	if liveGroups != nil {
+		numGroups = len(liveGroups)
 	}
 
 	nAggs := len(h.Aggs)
@@ -122,6 +134,7 @@ func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
 		nGroupCols:     nGroupCols,
 		keyMode:        keyMode,
 		useAoSAccs:     len(h.intFlatAccs) == 0,
+		liveGroups:     liveGroups,
 		// Initial 16 B/group arena estimate fits typical numeric-key shapes;
 		// strings will grow it via append, which is fine — arena writes are
 		// strictly append-only and slices into it remain valid after grow.
@@ -135,30 +148,35 @@ func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
 	c.head.KeyVals = c.headKeyVals
 	c.head.Accs = c.headAccs
 
-	// Arena build pass. int / dual-int paths read SoA int values straight
-	// into the arena via typed strconv writes (skips `any` boxing). Compact
-	// and str/generic modes alias the existing gs.extras.keyValues `[]any`
-	// — those boxes were allocated at consume time and we just hand them
-	// to appendSerializedKey for serialization. No new allocations on
-	// either branch.
+	// Arena build pass. Position p in [0, numGroups) maps to SoA slot
+	// c.slotAt(p) — either p (when liveGroups is nil) or liveGroups[p]
+	// (when restricted to a subset). int / dual-int paths read SoA int
+	// values straight into the arena via typed strconv writes (skips `any`
+	// boxing). Compact and str/generic modes alias the existing
+	// gs.extras.keyValues `[]any` — those boxes were allocated at consume
+	// time and we just hand them to appendSerializedKey for serialization.
+	// No new allocations on either branch.
 	switch keyMode {
 	case partialKeyModeInt, partialKeyModeDualInt:
-		for gi := 0; gi < numGroups; gi++ {
-			c.keyOffsets[gi] = int32(len(c.keyArena))
-			c.keyArena = c.appendIntModeSortKey(c.keyArena, gi)
-			c.sortedIdx[gi] = uint32(gi)
+		for p := 0; p < numGroups; p++ {
+			slot := c.slotAt(p)
+			c.keyOffsets[p] = int32(len(c.keyArena))
+			c.keyArena = c.appendIntModeSortKey(c.keyArena, slot)
+			c.sortedIdx[p] = uint32(p)
 		}
 	case partialKeyModeCompact:
-		for gi := 0; gi < numGroups; gi++ {
-			c.keyOffsets[gi] = int32(len(c.keyArena))
-			c.keyArena = appendSerializedKey(c.keyArena, c.intGroupStates[gi].extras.keyValues)
-			c.sortedIdx[gi] = uint32(gi)
+		for p := 0; p < numGroups; p++ {
+			slot := c.slotAt(p)
+			c.keyOffsets[p] = int32(len(c.keyArena))
+			c.keyArena = appendSerializedKey(c.keyArena, c.intGroupStates[slot].extras.keyValues)
+			c.sortedIdx[p] = uint32(p)
 		}
 	default: // partialKeyModeStrOrGeneric
-		for gi := 0; gi < numGroups; gi++ {
-			c.keyOffsets[gi] = int32(len(c.keyArena))
-			c.keyArena = appendSerializedKey(c.keyArena, c.strGroupStates[gi].extras.keyValues)
-			c.sortedIdx[gi] = uint32(gi)
+		for p := 0; p < numGroups; p++ {
+			slot := c.slotAt(p)
+			c.keyOffsets[p] = int32(len(c.keyArena))
+			c.keyArena = appendSerializedKey(c.keyArena, c.strGroupStates[slot].extras.keyValues)
+			c.sortedIdx[p] = uint32(p)
 		}
 	}
 	c.keyOffsets[numGroups] = int32(len(c.keyArena))
@@ -174,6 +192,16 @@ func newPartialGroupCursor(h *HashAggregate) *partialGroupCursor {
 		c.loadHeadAt(int(c.sortedIdx[0]))
 	}
 	return c
+}
+
+// slotAt translates a cursor position to a SoA slot index. With liveGroups
+// nil, positions are slot indices directly (the pre-partial-drain default).
+// With liveGroups non-nil, positions index into the supplied subset.
+func (c *partialGroupCursor) slotAt(position int) int {
+	if c.liveGroups == nil {
+		return position
+	}
+	return int(c.liveGroups[position])
 }
 
 // populateHeadKeyVals fills c.headKeyVals (len == nGroupCols) with typed
@@ -232,7 +260,10 @@ func setPartialKeyFromInt(dst *partialKeyValue, v int64, t batch.TypeID) {
 	}
 }
 
-// loadHeadAt populates the reusable head storage from SoA at SoA index gi.
+// loadHeadAt populates the reusable head storage from the cursor's source
+// SoA arrays for the group at iteration position `position`. SortKey is read
+// from the arena (indexed by position); KeyVals/Accs are read by translating
+// position → slot via c.slotAt.
 //
 // SortKey aliases the arena slice (no copy) — the kWayMerger always copies
 // SortKey into its merged group on Pop, and the heap entry's key is captured
@@ -243,15 +274,16 @@ func setPartialKeyFromInt(dst *partialKeyValue, v int64, t batch.TypeID) {
 // during merge (typed copy of partialKeyValue slots, plus
 // `append([]kernel.Accumulator(nil), current.Accs...)`), so overwriting them
 // in place between Advance calls cannot corrupt the merger's state.
-func (c *partialGroupCursor) loadHeadAt(gi int) {
-	c.head.SortKey = c.keyArena[c.keyOffsets[gi]:c.keyOffsets[gi+1]]
-	c.populateHeadKeyVals(gi)
+func (c *partialGroupCursor) loadHeadAt(position int) {
+	c.head.SortKey = c.keyArena[c.keyOffsets[position]:c.keyOffsets[position+1]]
+	slot := c.slotAt(position)
+	c.populateHeadKeyVals(slot)
 
 	if c.useAoSAccs {
-		c.loadHeadAccsAoS(gi)
+		c.loadHeadAccsAoS(slot)
 		return
 	}
-	c.loadHeadAccsSoA(gi)
+	c.loadHeadAccsSoA(slot)
 }
 
 // loadHeadAccsSoA fills c.headAccs from the flat accumulator arrays at index
@@ -412,6 +444,7 @@ func (c *partialGroupCursor) Close() error {
 	c.dualIntKeysA = nil
 	c.dualIntKeysB = nil
 	c.groupColTypes = nil
+	c.liveGroups = nil
 	c.keyArena = nil
 	c.keyOffsets = nil
 	c.sortedIdx = nil

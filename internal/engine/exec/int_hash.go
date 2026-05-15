@@ -208,6 +208,73 @@ func (h *intHashTable) ForEach(fn func(key int64, val int32)) {
 	}
 }
 
+// Delete removes a key from the table, preserving probe-chain correctness via
+// back-shift deletion. Returns (oldVal, true) if the key was present, or
+// (0, false) otherwise. O(probe chain length) per call — O(1) amortized at
+// the 70% load factor invariant.
+//
+// Back-shift rather than tombstones because tombstones bloat the hot lookup
+// path (Get / GetOrInsertNoGrow) with an extra "is this a tombstone?" branch
+// and cause the table to never naturally shrink. Used by HashAggregate's
+// partial-drain spill path, where we Delete drained group keys before
+// recycling their slots through the free-list.
+func (h *intHashTable) Delete(key int64) (int32, bool) {
+	n := len(h.entries)
+	if n == 0 {
+		return 0, false
+	}
+	idx := fibHash(key) & h.mask
+	found := false
+	for k := 0; k < n; k++ {
+		e := &h.entries[idx]
+		if e.key == intHashEmpty {
+			return 0, false
+		}
+		if e.key == key {
+			found = true
+			break
+		}
+		idx = (idx + 1) & h.mask
+	}
+	if !found {
+		return 0, false
+	}
+	deleted := h.entries[idx].val
+
+	// Back-shift loop. Walk forward from idx; for each filled slot j, decide
+	// whether the entry at j must move back to i (the current hole) to keep
+	// its probe chain reachable. The entry at j with ideal position id is
+	// reachable via probing from id; if i lies on j's probe chain (i.e., id
+	// is closer to i than to j in cyclic forward order), vacating i would
+	// break that chain — so move the entry back. Otherwise leave it and stop.
+	i := idx
+	for k := 0; k < n; k++ {
+		j := (i + 1) & h.mask
+		e := &h.entries[j]
+		if e.key == intHashEmpty {
+			h.entries[i].key = intHashEmpty
+			h.size--
+			return deleted, true
+		}
+		id := fibHash(e.key) & h.mask
+		if ((i-id)&h.mask) < ((j-id)&h.mask) {
+			h.entries[i] = *e
+			i = j
+			continue
+		}
+		h.entries[i].key = intHashEmpty
+		h.size--
+		return deleted, true
+	}
+	// Defensive: table-wide back-shift completed without hitting an empty
+	// slot. Possible only if the table is entirely full and forms one giant
+	// probe chain — not a state the 70%-load invariant allows, but guard
+	// anyway. Empty the final hole and return.
+	h.entries[i].key = intHashEmpty
+	h.size--
+	return deleted, true
+}
+
 // grow doubles the table capacity and rehashes all entries.
 func (h *intHashTable) grow() {
 	newCap := len(h.entries) * 2

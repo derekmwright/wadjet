@@ -150,6 +150,25 @@ type HashAggregate struct {
 	// use; Finalize k-way merges them. Distinct from spillFiles because the
 	// merge logic differs (re-aggregate raw rows vs. merge partial accs).
 	partialSpillFiles []string
+	// freeGroupIDs holds intGroupStates indices that were drained by partial
+	// spill and are available for reuse on the next int-keyed Consume. Each
+	// entry pre-points at a groupState chunk allocation in h.gsPool and at a
+	// pre-existing slot in every h.intFlatAccs[*] array (zeroed during drain).
+	// Reusing these slots avoids the O(survivors) compaction cost a "rebuild
+	// every drain" path would impose at SF100+ scale.
+	freeGroupIDs []int32
+	// drainK is the partition count fixed on the first partial SpillSome
+	// call. Stays constant for the aggregate's lifetime so partition
+	// assignments (fibHash(intKey) & (drainK-1)) are stable across drains.
+	// Zero means "not yet initialized". Adaptive: scales as
+	// nextPow2(max(numGroups/1M, 8)) capped at 512, sized so each partition
+	// is ~100 MB–1 GB at SF100–SF1000 footprints.
+	drainK uint32
+	// nextDrainPartition is the round-robin cursor over partition indices in
+	// [0, drainK). Each partial SpillSome advances by the number of
+	// partitions drained so successive calls chip away at different slices
+	// instead of churning the same one and re-rebuilding the same groups.
+	nextDrainPartition uint32
 	// unregisterSpillable, when non-nil, deregisters this aggregate from the
 	// SpillManager's cooperative-spill registry. Set on first Consume when
 	// canUseExternalMerge is true; cleared in Finalize once the merge has
@@ -498,7 +517,11 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 			// drain per pressure event) instead of a write per Consume.
 			h.consumeBatch(b)
 			h.reconcileGroupMemory()
-			return h.spillPartialState()
+			// Self-triggered spill (own pressure threshold): drain the whole
+			// hash table. Cooperative spills via SpillSome use the partial-
+			// partitions path instead; this code path is unchanged from its
+			// pre-partial-drain behavior.
+			return h.spillPartialState(0)
 		}
 		// Legacy raw-row spill (extra-state aggs, grouping sets, scalar):
 		// buffer rows on disk and re-aggregate in Finalize.
@@ -1009,17 +1032,29 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			} else {
 				key = gkVec.Int64Data[row]
 			}
-			newIdx := int32(len(h.intGroupStates))
+			var newIdx int32
+			fromFree := false
+			if nf := len(h.freeGroupIDs); nf > 0 {
+				newIdx = h.freeGroupIDs[nf-1]
+				fromFree = true
+			} else {
+				newIdx = int32(len(h.intGroupStates))
+			}
 			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
 				gi[si] = gsIdx
 			} else {
 				intIdx.CheckGrow()
-				gs := h.gsPool.alloc()
-				gs.intKey = key
-				h.intGroupStates = append(h.intGroupStates, gs)
-				for ai := range h.intFlatAccs {
-					h.intFlatAccs[ai].appendGroup()
+				if fromFree {
+					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+					h.intGroupStates[newIdx].intKey = key
+				} else {
+					gs := h.gsPool.alloc()
+					gs.intKey = key
+					h.intGroupStates = append(h.intGroupStates, gs)
+					for ai := range h.intFlatAccs {
+						h.intFlatAccs[ai].appendGroup()
+					}
 				}
 				gi[si] = newIdx
 			}
@@ -1039,17 +1074,29 @@ func (h *HashAggregate) consumeBatchIntGroup(b *batch.RecordBatch) {
 			} else {
 				key = gkVec.Int64Data[row]
 			}
-			newIdx := int32(len(h.intGroupStates))
+			var newIdx int32
+			fromFree := false
+			if nf := len(h.freeGroupIDs); nf > 0 {
+				newIdx = h.freeGroupIDs[nf-1]
+				fromFree = true
+			} else {
+				newIdx = int32(len(h.intGroupStates))
+			}
 			gsIdx, ok := intIdx.GetOrInsertNoGrow(key, newIdx)
 			if ok {
 				gi[row] = gsIdx
 			} else {
 				intIdx.CheckGrow()
-				gs := h.gsPool.alloc()
-				gs.intKey = key
-				h.intGroupStates = append(h.intGroupStates, gs)
-				for ai := range h.intFlatAccs {
-					h.intFlatAccs[ai].appendGroup()
+				if fromFree {
+					h.freeGroupIDs = h.freeGroupIDs[:len(h.freeGroupIDs)-1]
+					h.intGroupStates[newIdx].intKey = key
+				} else {
+					gs := h.gsPool.alloc()
+					gs.intKey = key
+					h.intGroupStates = append(h.intGroupStates, gs)
+					for ai := range h.intFlatAccs {
+						h.intFlatAccs[ai].appendGroup()
+					}
 				}
 				gi[row] = newIdx
 			}
@@ -2138,13 +2185,21 @@ func (h *HashAggregate) SpillFootprint() int64 {
 	return h.trackedGroupMem
 }
 
-// SpillSome drains the current SoA hash state to a partial-state spill file
-// and releases the freed bytes back to the tracker, returning the number of
-// bytes released. Called by SpillManager.RequestRelief on behalf of a peer
-// operator under memory pressure.
+// SpillSome drains a portion of the SoA hash state to a partial-state spill
+// file and releases the freed bytes back to the tracker, returning the
+// number of bytes released. Called by SpillManager.RequestRelief on behalf
+// of a peer operator under memory pressure.
 //
-// The target hint is advisory — partial-state spill is whole-hash-table at
-// this granularity, so we either free everything reclaimable or nothing.
+// On the int-keyed path, spillPartialState drains a hash-partition slice
+// sized roughly to `target` bytes, leaving surviving groups in place. This
+// breaks the drain-rebuild loop that whole-table draining created at SF100
+// scale (PR #88 → drain-rebuild loop → heartbeat starvation): future
+// Consume rows whose keys hash to a surviving partition continue to hit
+// existing in-memory groups, paying no rebuild cost.
+//
+// On other paths (dual-int, compact, string, generic) and when target
+// covers the full footprint, falls through to the whole-drain path —
+// semantically identical to the pre-partial-drain behavior.
 //
 // Implements memory.Spillable.
 func (h *HashAggregate) SpillSome(target int64) (int64, error) {
@@ -2157,11 +2212,9 @@ func (h *HashAggregate) SpillSome(target int64) (int64, error) {
 	if before == 0 {
 		return 0, nil
 	}
-	if err := h.spillPartialState(); err != nil {
+	if err := h.spillPartialState(target); err != nil {
 		return 0, err
 	}
-	// trackedGroupMem is reset to 0 by resetGroupStateAfterSpill (called
-	// from spillPartialState). before - 0 = before bytes freed.
 	return before - h.trackedGroupMem, nil
 }
 

@@ -1282,7 +1282,100 @@ func mapBatchTypeToParquet(t batch.TypeID) parquet.TypeID {
 	}
 }
 
-// spillPartialState drains the current SoA hash state to a partial-spill file
+// drainPlan describes the subset of partitions a single SpillSome call will
+// drain. Membership is tested via contains() in the drain-set build loop;
+// at SF100 Q17 scale that's ~20M tests, so the lookup must be O(1).
+type drainPlan struct {
+	K    uint32
+	mask []uint64 // (K+63)/64 words; bit (i*64 + j) set means partition (i*64+j) is in the drain set
+}
+
+// contains reports whether partition is in the drain plan. Caller must
+// guarantee partition < K (call sites compute partition as fibHash(key) & (K-1)).
+func (p drainPlan) contains(partition uint32) bool {
+	return p.mask[partition>>6]&(uint64(1)<<(partition&63)) != 0
+}
+
+// computeAdaptiveK picks the partition count K for a HashAggregate of the
+// given live-group count. K = nextPow2(max(numGroups/1_000_000, 8)) capped at
+// 512. Sized so each partition is ~100 MB–1 GB at typical SF100–SF1000
+// footprints (≈40 B/group avg), keeping per-drain cost roughly constant
+// across scales. Always a power of 2 so partition assignment is a cheap
+// mask (fibHash(key) & (K-1)) instead of a modulo.
+func computeAdaptiveK(numGroups int) uint32 {
+	target := numGroups / 1_000_000
+	if target < 8 {
+		target = 8
+	}
+	k := uint32(1)
+	for k < uint32(target) {
+		k <<= 1
+	}
+	if k > 512 {
+		k = 512
+	}
+	return k
+}
+
+// pickPartitionsToDrain decides how many of K partitions to drain to free
+// approximately target bytes given current footprint bytes spread across
+// numGroups groups. Returns at least 1, at most K. Returns K when target
+// >= footprint so the caller can fall through to the whole-drain path.
+func pickPartitionsToDrain(K uint32, footprint, target int64) uint32 {
+	if K == 0 {
+		return 0
+	}
+	if target <= 0 || target >= footprint {
+		return K
+	}
+	perPartition := footprint / int64(K)
+	if perPartition <= 0 {
+		return 1
+	}
+	n := (target + perPartition - 1) / perPartition
+	if n < 1 {
+		return 1
+	}
+	if uint32(n) > K {
+		return K
+	}
+	return uint32(n)
+}
+
+// buildDrainPlan returns a plan covering numPartitions partitions starting
+// at start, wrapping around K. Caller is responsible for advancing the
+// round-robin cursor after a successful drain.
+func buildDrainPlan(K, start, numPartitions uint32) drainPlan {
+	nWords := (K + 63) / 64
+	mask := make([]uint64, nWords)
+	for i := uint32(0); i < numPartitions; i++ {
+		p := (start + i) & (K - 1)
+		mask[p>>6] |= uint64(1) << (p & 63)
+	}
+	return drainPlan{K: K, mask: mask}
+}
+
+// spillPartialState dispatches a cooperative drain to either the partial-
+// partitions path (int-keyed SoA, target < footprint) or the whole-table
+// drain. Caller must hold h.mu.
+//
+// The partial path drains only a hash-partition slice sized to `target`,
+// preserving the surviving groups in-memory so subsequent Consume rows for
+// those keys do not pay a rebuild cost — this is what closes the drain-
+// rebuild loop that PR #88 created on the whole-table path at SF100 Q17.
+// The whole-table path is preserved for other key modes (dual-int, compact,
+// string, generic) and for cases where target ≥ footprint.
+func (h *HashAggregate) spillPartialState(target int64) error {
+	if h.Spill == nil {
+		return nil
+	}
+	if h.useIntGroupKey && target > 0 && target < h.trackedGroupMem {
+		return h.spillPartialPartitions(target)
+	}
+	return h.spillFullState()
+}
+
+// spillFullState drains the entire SoA hash state to a partial-spill file
 // and resets in-memory structures so subsequent Consume calls start fresh.
 // The next Consume call will rebuild flat accumulators from the next batch's
 // schema.
@@ -1294,7 +1387,7 @@ func mapBatchTypeToParquet(t batch.TypeID) parquet.TypeID {
 // drops ~7 GB per task to ~480 MB.
 //
 // Caller must hold h.mu.
-func (h *HashAggregate) spillPartialState() error {
+func (h *HashAggregate) spillFullState() error {
 	if h.Spill == nil {
 		return nil
 	}
@@ -1304,7 +1397,7 @@ func (h *HashAggregate) spillPartialState() error {
 	aggSpecs := h.buildPartialAggSpecs()
 	groupCols := h.buildPartialGroupCols()
 
-	cursor := newPartialGroupCursor(h)
+	cursor := newPartialGroupCursor(h, nil)
 	if cursor.numGroups == 0 {
 		cursor.Close()
 		h.resetGroupStateAfterSpill()
@@ -1347,6 +1440,134 @@ func (h *HashAggregate) spillPartialState() error {
 	return nil
 }
 
+// spillPartialPartitions drains a hash-partition slice of the int-keyed SoA
+// state, freeing approximately `target` bytes while leaving surviving groups
+// in place. Reclaimed slots are appended to h.freeGroupIDs for reuse by the
+// next Consume cycle.
+//
+// Caller must hold h.mu. Caller must guarantee h.useIntGroupKey == true and
+// h.trackedGroupMem > 0.
+//
+// The partition scheme: fibHash(intKey) & (drainK-1) maps each group to a
+// partition in [0, drainK). drainK is fixed on first call so the assignment
+// is stable; the nextDrainPartition cursor advances by numPartitionsToDrain
+// each call, so successive drains chip at different slices. Surviving
+// partitions stay in-memory, so probe rows whose keys hash into them hit
+// existing groups — no rebuild loop.
+func (h *HashAggregate) spillPartialPartitions(target int64) error {
+	if h.intGroupIndex == nil || h.intGroupIndex.Len() == 0 {
+		return nil
+	}
+	liveBefore := h.intGroupIndex.Len()
+	footprint := h.trackedGroupMem
+
+	if h.drainK == 0 {
+		h.drainK = computeAdaptiveK(liveBefore)
+	}
+	K := h.drainK
+	numPartitions := pickPartitionsToDrain(K, footprint, target)
+	if numPartitions == 0 {
+		return nil
+	}
+	if numPartitions >= K {
+		// Caller asked for ≥ full state; the whole-drain path is cheaper
+		// (no per-slot cleanup loop, no free-list bookkeeping) so route
+		// through it.
+		return h.spillFullState()
+	}
+	plan := buildDrainPlan(K, h.nextDrainPartition, numPartitions)
+	h.nextDrainPartition = (h.nextDrainPartition + numPartitions) & (K - 1)
+
+	// Walk live hash table entries, collect drained groupIDs. Hash table
+	// ForEach iterates only occupied slots, so dead slots from prior drains
+	// are naturally skipped — drainSet contains live groupIDs only.
+	estimate := liveBefore * int(numPartitions) / int(K)
+	if estimate < 16 {
+		estimate = 16
+	}
+	drainSet := make([]int32, 0, estimate)
+	h.intGroupIndex.ForEach(func(key int64, val int32) {
+		partition := uint32(fibHash(key)) & (K - 1)
+		if plan.contains(partition) {
+			drainSet = append(drainSet, val)
+		}
+	})
+	if len(drainSet) == 0 {
+		// Selected partitions were empty (newly inserted groups all hashed
+		// elsewhere). Cursor advanced; next call will hit a different slice.
+		return nil
+	}
+
+	aggSpecs := h.buildPartialAggSpecs()
+	groupCols := h.buildPartialGroupCols()
+	cursor := newPartialGroupCursor(h, drainSet)
+	if cursor.numGroups == 0 {
+		cursor.Close()
+		return nil
+	}
+
+	header := partialSpillHeader{
+		GroupCols: groupCols,
+		Aggs:      aggSpecs,
+	}
+	w, path, err := newPartialSpillWriter(h.Spill.SpillDir(), header)
+	if err != nil {
+		cursor.Close()
+		return err
+	}
+	for {
+		g := cursor.Peek()
+		if g == nil {
+			break
+		}
+		if werr := w.Write(*g); werr != nil {
+			w.Close()
+			cursor.Close()
+			return werr
+		}
+		if aerr := cursor.Advance(); aerr != nil {
+			w.Close()
+			cursor.Close()
+			return aerr
+		}
+	}
+	if _, err := w.Close(); err != nil {
+		cursor.Close()
+		return err
+	}
+	cursor.Close()
+	h.partialSpillFiles = append(h.partialSpillFiles, path)
+
+	// Reclaim drained slots. Delete from the hash table (back-shift keeps
+	// probe chains correct), zero the SoA accumulator slots, and push the
+	// slot indices onto the free list for the next Consume cycle to reuse.
+	for _, slot := range drainSet {
+		key := h.intGroupStates[slot].intKey
+		h.intGroupIndex.Delete(key)
+		for ai := range h.intFlatAccs {
+			h.intFlatAccs[ai].clearGroup(int(slot))
+		}
+		h.freeGroupIDs = append(h.freeGroupIDs, slot)
+	}
+
+	// Release tracker bytes proportional to the drained group count. We
+	// use liveBefore (the pre-drain live count) to derive a per-group share
+	// of footprint, then multiply by drained count. Slight rounding error
+	// is acceptable — the tracker treats this accounting as advisory.
+	drainedBytes := footprint * int64(len(drainSet)) / int64(liveBefore)
+	if drainedBytes > footprint {
+		drainedBytes = footprint
+	}
+	if drainedBytes > 0 {
+		h.Spill.ReleaseTracking(drainedBytes)
+		h.trackedGroupMem -= drainedBytes
+		if h.trackedGroupMem < 0 {
+			h.trackedGroupMem = 0
+		}
+	}
+	return nil
+}
+
 // resetGroupStateAfterSpill clears the in-memory hash table state so the
 // next Consume rebuilds it from scratch. Releases tracker bytes for the
 // drained group state. Called by spillPartialState; also a useful seam for
@@ -1373,6 +1594,13 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	h.dualIntKeysA = nil
 	h.dualIntKeysB = nil
 	h.dualIntNextGroup = nil
+	// Partial-drain state is meaningless after a whole-table reset: the
+	// slot indices in freeGroupIDs no longer correspond to live storage,
+	// and the partition cursor will be re-initialized from the (currently
+	// empty) hash table on next SpillSome.
+	h.freeGroupIDs = nil
+	h.drainK = 0
+	h.nextDrainPartition = 0
 	// Drop the group-state pool — its chunks are no longer referenced once
 	// the slice headers above are nil. Resetting the pool lets GC reclaim
 	// the chunks; without this, the chunk arrays stay live as roots.
@@ -1408,7 +1636,21 @@ func (h *HashAggregate) finalizeViaPartialMerge() error {
 	// dualIntKeys for its lifetime; the resetGroupStateAfterSpill call below
 	// nils h's slice headers but not the underlying arrays, which the cursor
 	// keeps live until it's drained and Close()d by closePartialMerger.
-	cursor := newPartialGroupCursor(h)
+	//
+	// When partial drains have happened (freeGroupIDs non-empty), intGroupStates
+	// has dead slots interspersed with live ones. Walk the hash table to get
+	// the live slot indices — that's the source of truth post-drain, since
+	// back-shift Delete removed the dead keys. Other paths (string/generic/
+	// dual-int/compact) never partial-drain in v1+, so liveGroups stays nil
+	// and the cursor iterates the dense slot range as before.
+	var liveGroups []int32
+	if h.useIntGroupKey && len(h.freeGroupIDs) > 0 && h.intGroupIndex != nil {
+		liveGroups = make([]int32, 0, h.intGroupIndex.Len())
+		h.intGroupIndex.ForEach(func(_ int64, val int32) {
+			liveGroups = append(liveGroups, val)
+		})
+	}
+	cursor := newPartialGroupCursor(h, liveGroups)
 
 	sources := make([]partialRunSource, 0, len(h.partialSpillFiles)+1)
 	if cursor.numGroups > 0 {

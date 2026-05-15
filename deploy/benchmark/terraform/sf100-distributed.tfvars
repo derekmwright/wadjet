@@ -9,6 +9,10 @@ mode                      = "distributed"
 coordinator_instance_type = "c7g.2xlarge"   # 8 vCPU, 16 GB
 worker_instance_type      = "c7gd.4xlarge"  # 16 vCPU, 32 GB, 237 GB NVMe
 worker_count              = 3
+data_bucket               = "wadjet-bench-sf100-use2"
+data_prefix               = ""              # SF100 data at root (lineitem/, orders/, ...), NOT under tables/
+generate_data             = false           # data is pre-staged; do not regenerate
+skip_queries              = ""
 query_timeout             = "30m"           # SF100 heavy queries need >10m default; mirrors sf10-distributed
 # 2026-05-07 Q17 investigation: 4 concurrent stage tasks each with ~5-6 GB
 # live working set overwhelmed the 21.6 GB GOMEMLIMIT, GC thrashed,
@@ -23,4 +27,12 @@ query_timeout             = "30m"           # SF100 heavy queries need >10m defa
 # =4 across the whole 22Q suite remains memory-bound on a different
 # code path. Stay at =3 until the post-Q17 bottleneck (likely
 # drainSimpleAggsToPartialGroups peak, ~749 MB at SF10) is addressed.
+# 2026-05-10 deploy of db4feab (PR #91 + #92 typed-keyvals) at mc=4:
+# Q01-Q04 PASSED (Q03 -53s vs 7m18 baseline, Q04 -1m49 vs 8m57). Q05
+# (5-way customer/orders/lineitem/supplier/nation/region join) stalled
+# after ~16 min: worker reaped (1m43s no heartbeat with 2 in-flight
+# tasks), then ~10 min no stage completions. Different signature than
+# PR #90's post-Q17 stall — this is a hash-join build/probe memory
+# pressure at SF100, NOT the drain path. Production stays at mc=3 until
+# the Q05-shape HashJoin peak is addressed. Cost of this attempt ~$1.55.
 max_concurrent            = 3
