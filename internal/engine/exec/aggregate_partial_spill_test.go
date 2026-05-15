@@ -1006,3 +1006,207 @@ func TestHashAggregateSpillable_RequestReliefRoutesHere(t *testing.T) {
 		}
 	}
 }
+
+// TestPartialDrain_IntKeyMultiSpill exercises the partition-slice partial-
+// drain path: feeds a high-cardinality int-keyed aggregate, fires multiple
+// SpillSome calls with small targets during Consume, and verifies the final
+// merged output matches a no-spill reference row-for-row.
+//
+// This is the regression test for the drain-rebuild loop that caused Q17
+// SF100 mc=3 to stall: previously SpillSome always drained the whole hash
+// table on every call, so subsequent Consume rows rebuilt the same groups
+// from scratch — pinning the heap and starving heartbeats. Partial drain
+// frees only a hash-partition slice; surviving partitions stay in-memory so
+// new rows for those keys hit existing groups instead of re-inserting.
+func TestPartialDrain_IntKeyMultiSpill(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	const numGroups = 1000
+	const rowsPerBatch = 200
+	const numBatches = 25
+
+	expected := make(map[int64]int64)
+	batches := make([]*batch.RecordBatch, 0, numBatches)
+	for bi := 0; bi < numBatches; bi++ {
+		rows := make([]map[string]any, 0, rowsPerBatch)
+		for ri := 0; ri < rowsPerBatch; ri++ {
+			k := int64((bi*rowsPerBatch + ri) % numGroups)
+			v := int64(bi*1000 + ri + 1)
+			rows = append(rows, map[string]any{"k": k, "v": v})
+			expected[k] += v
+		}
+		batches = append(batches, batch.FromRows(schema, rows))
+	}
+
+	mkAgg := func(spill *memory.SpillManager) *HashAggregate {
+		h := NewHashAggregate([]string{"k"}, []AggColumn{
+			{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+		})
+		h.Spill = spill
+		return h
+	}
+
+	// Reference run: no SpillManager, all aggregation in-memory.
+	refRows := runHashAggToMap(t, mkAgg(nil), batches)
+	if len(refRows) != numGroups {
+		t.Fatalf("reference: expected %d groups, got %d", numGroups, len(refRows))
+	}
+
+	// Partial-drain run. Large tracker so no auto-spill — drive partial
+	// drains manually via SpillSome with small targets.
+	tracker := memory.NewTracker("test", 1<<30)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mkAgg(sm)
+	ctx := context.Background()
+	if err := h.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	var partialDrainsObserved int
+	var maxFreeListSeen int
+	for i, b := range batches {
+		if err := h.Consume(ctx, b); err != nil {
+			t.Fatalf("Consume #%d: %v", i, err)
+		}
+		// Every other batch: drain ~⅛ of footprint to exercise partial path.
+		if i%2 == 1 {
+			footprint := h.SpillFootprint()
+			if footprint <= 0 {
+				continue
+			}
+			target := footprint / 8
+			if target <= 0 {
+				target = 1
+			}
+			freed, err := h.SpillSome(target)
+			if err != nil {
+				t.Fatalf("SpillSome #%d: %v", i, err)
+			}
+			// Partial path returns less than footprint (would route to full
+			// drain otherwise). Non-zero confirms we actually drained.
+			if freed > 0 && freed < footprint {
+				partialDrainsObserved++
+			}
+			if n := len(h.freeGroupIDs); n > maxFreeListSeen {
+				maxFreeListSeen = n
+			}
+		}
+	}
+	if partialDrainsObserved < 3 {
+		t.Errorf("expected ≥3 partial drains, observed %d (target sizing may be off)", partialDrainsObserved)
+	}
+	if maxFreeListSeen == 0 {
+		t.Errorf("freeGroupIDs never populated — partial-drain reclamation path didn't fire")
+	}
+	if h.drainK == 0 {
+		t.Errorf("drainK never initialized — spillPartialPartitions never reached")
+	}
+
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	got := make(map[int64]int64)
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if out == nil {
+			break
+		}
+		for _, r := range out.ToRows() {
+			got[r["k"].(int64)] = r["total"].(int64)
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(got) != numGroups {
+		t.Fatalf("partial-drain group count: got %d want %d", len(got), numGroups)
+	}
+	for k, want := range expected {
+		if got[k] != want {
+			t.Errorf("k=%d: got %d want %d", k, got[k], want)
+		}
+	}
+}
+
+// TestPartialDrain_FreeListReuse asserts that slots reclaimed by a partial
+// drain are reused by the next Consume cycle: the surviving hash table
+// continues to grow only with truly-new keys, while keys that hash into a
+// drained partition recycle slots from h.freeGroupIDs.
+func TestPartialDrain_FreeListReuse(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	// Pre-populate a single batch with 5000 unique keys so we have enough
+	// material to drain a partition.
+	const numKeys = 5000
+	rows := make([]map[string]any, 0, numKeys)
+	for i := 0; i < numKeys; i++ {
+		rows = append(rows, map[string]any{"k": int64(i), "v": int64(i)})
+	}
+
+	tracker := memory.NewTracker("test", 1<<30)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewHashAggregate([]string{"k"}, []AggColumn{
+		{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+	})
+	h.Spill = sm
+	ctx := context.Background()
+	if err := h.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+		t.Fatal(err)
+	}
+
+	slotsBeforeDrain := len(h.intGroupStates)
+	footprint := h.SpillFootprint()
+	if footprint <= 0 {
+		t.Fatalf("post-Consume footprint: got %d want > 0", footprint)
+	}
+
+	// Drain ~⅛ of footprint. With K = max(numKeys/1M, 8) capped → K=8,
+	// numPartitionsToDrain = ceil(target/perPartition) → 1.
+	if _, err := h.SpillSome(footprint / 8); err != nil {
+		t.Fatal(err)
+	}
+	freeListSize := len(h.freeGroupIDs)
+	if freeListSize == 0 {
+		t.Fatalf("freeGroupIDs empty after partial drain — reclamation didn't run")
+	}
+	liveAfterDrain := h.intGroupIndex.Len()
+	if liveAfterDrain >= slotsBeforeDrain {
+		t.Errorf("hash table didn't shrink: liveAfter=%d slotsBefore=%d", liveAfterDrain, slotsBeforeDrain)
+	}
+	if liveAfterDrain+freeListSize != slotsBeforeDrain {
+		t.Errorf("survivor + free = %d, expected %d (slotsBefore)", liveAfterDrain+freeListSize, slotsBeforeDrain)
+	}
+
+	// Re-Consume the same keys. Drained keys should recycle slots from the
+	// free list. The intGroupStates slice length must NOT grow above
+	// slotsBeforeDrain — every drained key reuses a freed slot.
+	if err := h.Consume(ctx, batch.FromRows(schema, rows)); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(h.intGroupStates); got > slotsBeforeDrain {
+		t.Errorf("intGroupStates grew despite free-list: got %d, expected ≤ %d", got, slotsBeforeDrain)
+	}
+	// Free list should be empty again — every entry got reused.
+	if got := len(h.freeGroupIDs); got != 0 {
+		t.Errorf("freeGroupIDs not fully drained: got %d entries, expected 0", got)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

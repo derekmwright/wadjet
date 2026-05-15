@@ -70,6 +70,53 @@ func (fa *flatAccumArrays) appendGroup() {
 	}
 }
 
+// clearGroup zeros every non-nil SoA field at index idx. Used by the
+// partial-drain path to reset a reclaimed slot before it's recycled
+// through HashAggregate.freeGroupIDs. Caller must guarantee idx is a
+// valid index into the arrays (i.e., len(count) > idx, etc.).
+//
+// Zero is the identity element for the operators we run here: COUNT starts
+// at 0, SUM at 0, MIN/MAX at 0 with hasMin/hasMax false (which makes the
+// scatter kernels treat the first input as the seed). So a clearGroup'd
+// slot behaves identically to a fresh appendGroup'd slot for subsequent
+// scatter updates.
+func (fa *flatAccumArrays) clearGroup(idx int) {
+	fa.count[idx] = 0
+	if fa.sumI64 != nil {
+		fa.sumI64[idx] = 0
+	}
+	if fa.sumF64 != nil {
+		fa.sumF64[idx] = 0
+	}
+	if fa.sumDec != nil {
+		fa.sumDec[idx] = batch.Int128{}
+	}
+	if fa.minI64 != nil {
+		fa.minI64[idx] = 0
+	}
+	if fa.maxI64 != nil {
+		fa.maxI64[idx] = 0
+	}
+	if fa.minF64 != nil {
+		fa.minF64[idx] = 0
+	}
+	if fa.maxF64 != nil {
+		fa.maxF64[idx] = 0
+	}
+	if fa.minDec != nil {
+		fa.minDec[idx] = batch.Int128{}
+	}
+	if fa.maxDec != nil {
+		fa.maxDec[idx] = batch.Int128{}
+	}
+	if fa.hasMin != nil {
+		fa.hasMin[idx] = false
+	}
+	if fa.hasMax != nil {
+		fa.hasMax[idx] = false
+	}
+}
+
 // ensureCapacity pre-grows all non-nil arrays so that n additional
 // appendGroup calls won't trigger growslice reallocation. Called
 // before the hash lookup phase with n = batch row count as an upper
