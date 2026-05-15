@@ -1319,8 +1319,12 @@ func computeAdaptiveK(numGroups int) uint32 {
 
 // pickPartitionsToDrain decides how many of K partitions to drain to free
 // approximately target bytes given current footprint bytes spread across
-// numGroups groups. Returns at least 1, at most K. Returns K when target
-// >= footprint so the caller can fall through to the whole-drain path.
+// numGroups groups. Returns at least 1, at most K. Returns K only when the
+// caller explicitly asks for whole-table relief (target >= footprint); when
+// target < footprint we cap at K-1 so at least one partition survives, even
+// if ceil(target/perPartition) rounds up to K. Without this cap, asking for
+// 90%+ relief degrades to full drain — defeating the purpose of partial-
+// drain on tight-pressure self-spill paths.
 func pickPartitionsToDrain(K uint32, footprint, target int64) uint32 {
 	if K == 0 {
 		return 0
@@ -1336,8 +1340,8 @@ func pickPartitionsToDrain(K uint32, footprint, target int64) uint32 {
 	if n < 1 {
 		return 1
 	}
-	if uint32(n) > K {
-		return K
+	if uint32(n) >= K {
+		return K - 1
 	}
 	return uint32(n)
 }

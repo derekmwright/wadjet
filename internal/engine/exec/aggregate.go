@@ -517,11 +517,17 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 			// drain per pressure event) instead of a write per Consume.
 			h.consumeBatch(b)
 			h.reconcileGroupMemory()
-			// Self-triggered spill (own pressure threshold): drain the whole
-			// hash table. Cooperative spills via SpillSome use the partial-
-			// partitions path instead; this code path is unchanged from its
-			// pre-partial-drain behavior.
-			return h.spillPartialState(0)
+			// Self-triggered spill: drain enough to recover headroom below the
+			// SpillCheap threshold (60% of budget), leaving a 5% hysteresis
+			// margin so we don't immediately re-trigger. The partial-drain
+			// dispatcher routes int-keyed cases through spillPartialPartitions
+			// when target < footprint, breaking the drain-rebuild loop that
+			// whole-table self-spill created on heavy GROUP BY workloads (Q18
+			// SF100 mc=3 — 150M orderkey groups would otherwise drain fully on
+			// every pressure event and rebuild from the next probe burst).
+			// Large targets (target >= footprint) and non-int paths fall
+			// through to spillFullState — semantically identical to before.
+			return h.spillPartialState(h.selfSpillReliefTarget())
 		}
 		// Legacy raw-row spill (extra-state aggs, grouping sets, scalar):
 		// buffer rows on disk and re-aggregate in Finalize.
@@ -2183,6 +2189,33 @@ func (h *HashAggregate) SpillFootprint() int64 {
 	// arithmetic matches the tracker's view rather than our internal
 	// estimate.
 	return h.trackedGroupMem
+}
+
+// selfSpillReliefTarget computes the bytes to release in response to our
+// own Consume-time pressure detection. Targets bringing tracker.Used()
+// below 55% of budget — 5% hysteresis below the 60% SpillCheap trigger so
+// the next batch doesn't immediately re-trip the threshold.
+//
+// Returns 0 when the budget is unknown (tests without a tracker, ad-hoc
+// environments) so the dispatcher falls through to spillFullState — the
+// pre-partial-drain behavior.
+//
+// Caller is the self-spill Consume path; cooperative SpillSome callers
+// supply their own target via the Spillable interface.
+func (h *HashAggregate) selfSpillReliefTarget() int64 {
+	if h.Spill == nil {
+		return 0
+	}
+	t := h.Spill.Tracker()
+	if t == nil || t.Budget() <= 0 {
+		return 0
+	}
+	threshold := t.Budget() * 55 / 100
+	relief := t.Used() - threshold
+	if relief <= 0 {
+		return 0
+	}
+	return relief
 }
 
 // SpillSome drains a portion of the SoA hash state to a partial-state spill
