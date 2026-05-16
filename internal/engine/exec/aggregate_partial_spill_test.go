@@ -1136,6 +1136,119 @@ func TestPartialDrain_IntKeyMultiSpill(t *testing.T) {
 	}
 }
 
+// TestPartialDrain_SelfSpill verifies the Consume-time pressure self-spill
+// uses the partial-drain path instead of whole-table drain. This is the Q18
+// SF100 unblock — heavy GROUP BY workloads (150M orderkey groups) previously
+// drained the entire hash table on every self-spill event, creating the same
+// drain-rebuild loop that cooperative spill caused on Q17.
+//
+// Asserts:
+//   1. Self-spill fires (freeGroupIDs populated post-Consume) on int-keyed path.
+//   2. Final aggregate result matches no-spill reference row-for-row.
+//   3. Tracker.Used() lands below the 60% SpillCheap trigger after spill.
+func TestPartialDrain_SelfSpill(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	const numGroups = 2000
+	const rowsPerBatch = 500
+	const numBatches = 20
+	expected := make(map[int64]int64)
+	batches := make([]*batch.RecordBatch, 0, numBatches)
+	for bi := 0; bi < numBatches; bi++ {
+		rows := make([]map[string]any, 0, rowsPerBatch)
+		for ri := 0; ri < rowsPerBatch; ri++ {
+			k := int64((bi*rowsPerBatch + ri) % numGroups)
+			v := int64(bi*1000 + ri + 1)
+			rows = append(rows, map[string]any{"k": k, "v": v})
+			expected[k] += v
+		}
+		batches = append(batches, batch.FromRows(schema, rows))
+	}
+
+	mkAgg := func(spill *memory.SpillManager) *HashAggregate {
+		h := NewHashAggregate([]string{"k"}, []AggColumn{
+			{Func: AggSum, InputCol: "v", OutputCol: "total", OutputType: parquet.TypeInt64},
+		})
+		h.Spill = spill
+		return h
+	}
+
+	refRows := runHashAggToMap(t, mkAgg(nil), batches)
+	if len(refRows) != numGroups {
+		t.Fatalf("reference: expected %d groups, got %d", numGroups, len(refRows))
+	}
+
+	// Tight tracker budget so the SpillCheap trigger (60% = ~60 KB) fires
+	// during Consume after the int-keyed aggregate accrues group state.
+	const budget int64 = 100_000
+	tracker := memory.NewTracker("test", budget)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := mkAgg(sm)
+	ctx := context.Background()
+	if err := h.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	var sawFreeList, sawPartialFiles bool
+	var maxFreeListSize int
+	for i, b := range batches {
+		if err := h.Consume(ctx, b); err != nil {
+			t.Fatalf("Consume #%d: %v", i, err)
+		}
+		if n := len(h.freeGroupIDs); n > 0 {
+			sawFreeList = true
+			if n > maxFreeListSize {
+				maxFreeListSize = n
+			}
+		}
+		if len(h.partialSpillFiles) > 0 {
+			sawPartialFiles = true
+		}
+	}
+	if !sawFreeList {
+		t.Errorf("freeGroupIDs never populated — self-spill took whole-drain path; partial-drain mechanism unreached")
+	}
+	if !sawPartialFiles {
+		t.Errorf("partialSpillFiles never populated — no spill of any kind fired (budget too generous?)")
+	}
+	if h.drainK == 0 {
+		t.Errorf("drainK uninitialized — partition selection never ran")
+	}
+
+	if err := h.Finalize(ctx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+	got := make(map[int64]int64)
+	for {
+		out, err := h.Next(ctx)
+		if err != nil {
+			t.Fatalf("Next: %v", err)
+		}
+		if out == nil {
+			break
+		}
+		for _, r := range out.ToRows() {
+			got[r["k"].(int64)] = r["total"].(int64)
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(got) != numGroups {
+		t.Fatalf("self-spill group count: got %d want %d (maxFreeList=%d, drainK=%d)",
+			len(got), numGroups, maxFreeListSize, h.drainK)
+	}
+	for k, want := range expected {
+		if got[k] != want {
+			t.Errorf("k=%d: got %d want %d", k, got[k], want)
+		}
+	}
+}
+
 // TestPartialDrain_FreeListReuse asserts that slots reclaimed by a partial
 // drain are reused by the next Consume cycle: the surviving hash table
 // continues to grow only with truly-new keys, while keys that hash into a
