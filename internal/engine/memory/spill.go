@@ -243,6 +243,58 @@ func effectiveHeapBackpressureRatio() float64 {
 // short enough that downstream consumers don't time out.
 const HeapBackpressurePauseDuration = 50 * time.Millisecond
 
+// AdmissionPollInterval is how often WaitForHeapHeadroom re-checks
+// HeapBackpressureActive while waiting at task entry. 200 ms balances
+// responsiveness (admit promptly once heap drops) against poll overhead
+// (one cached-atomic read per tick).
+const AdmissionPollInterval = 200 * time.Millisecond
+
+// AdmissionMaxWait is the cap on how long WaitForHeapHeadroom waits
+// before giving up and admitting the task anyway. Bounds worst-case
+// per-task admission delay so coord-side task timeouts and JetStream
+// AckWait don't expire under pressure that never clears. Tasks already
+// in-flight continue making progress (with per-batch backpressure), so
+// in practice heap drops well before this cap fires.
+const AdmissionMaxWait = 60 * time.Second
+
+// WaitForHeapHeadroom polls HeapBackpressureActive until pressure clears
+// (returning the time spent waiting and nil) or the context is cancelled
+// (returning ctx.Err()) or AdmissionMaxWait elapses (returning the wait
+// duration and nil — best-effort admission so rare permanently-pressured
+// workers don't starve their JetStream queue).
+//
+// Designed to gate fragment-task entry on Wadjet workers — a single
+// admission check, not a per-batch hook. Concurrent fragment tasks each
+// holding multi-GB build state can collectively exceed GOMEMLIMIT; this
+// hook serializes admission until at least one in-flight task releases
+// memory. Matches the Trino MemoryPool / Spark ExecutionMemoryPool
+// admission pattern the engine already references in its
+// SetSharedPoolBudget docs.
+//
+// Cheap when no pressure: returns 0 after one cached-atomic check.
+func WaitForHeapHeadroom(ctx context.Context) (time.Duration, error) {
+	if !HeapBackpressureActive() {
+		return 0, nil
+	}
+	start := time.Now()
+	deadline := start.Add(AdmissionMaxWait)
+	ticker := time.NewTicker(AdmissionPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return time.Since(start), ctx.Err()
+		case <-ticker.C:
+			if !HeapBackpressureActive() {
+				return time.Since(start), nil
+			}
+			if time.Now().After(deadline) {
+				return time.Since(start), nil
+			}
+		}
+	}
+}
+
 // PauseOnHeapBackpressure is a one-line helper that callers can invoke
 // between batches: if heap pressure is high, sleep briefly so GC can
 // catch up. Returns ctx.Err() if the context is cancelled during the
