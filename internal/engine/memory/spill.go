@@ -243,32 +243,6 @@ func effectiveHeapBackpressureRatio() float64 {
 // short enough that downstream consumers don't time out.
 const HeapBackpressurePauseDuration = 50 * time.Millisecond
 
-// SetTestHeapPressure overrides the cached HeapBackpressureActive value
-// so callers (including from other packages' tests) can deterministically
-// exercise paths gated by HeapBackpressureActive without having to inflate
-// runtime.MemStats. Pass true to spoof pressure on, false to clear.
-//
-// Test-only. Production callers must not use this — the override masks
-// the real backpressure signal. The cached check timestamp is set to the
-// future so the next HeapBackpressureActive call returns the override
-// without re-reading MemStats.
-func SetTestHeapPressure(active bool) {
-	heapBackpressureMu.Lock()
-	heapBackpressureLastValue = active
-	heapBackpressureLastCheck = time.Now().Add(time.Hour)
-	heapBackpressureMu.Unlock()
-}
-
-// ClearTestHeapPressure restores the live MemStats-based heap pressure
-// check by invalidating the cached value. Pair with SetTestHeapPressure
-// via a defer in tests.
-func ClearTestHeapPressure() {
-	heapBackpressureMu.Lock()
-	heapBackpressureLastValue = false
-	heapBackpressureLastCheck = time.Time{}
-	heapBackpressureMu.Unlock()
-}
-
 // PauseOnHeapBackpressure is a one-line helper that callers can invoke
 // between batches: if heap pressure is high, sleep briefly so GC can
 // catch up. Returns ctx.Err() if the context is cancelled during the
