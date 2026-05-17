@@ -194,7 +194,8 @@ type HashAggregate struct {
 	// making Finalize unable to complete in reasonable time.
 	spillBuffer      []map[string]any
 	spillBufferBytes int64 // tracker bytes attributable to rows in spillBuffer
-	trackedGroupMem int64 // bytes charged to Spill tracker for group state growth
+	trackedGroupMem     int64 // bytes charged to Spill tracker for group state growth
+	peakTrackedGroupMem int64 // high-water mark of trackedGroupMem; surfaced via Inspectable
 	outputPos     int              // position in keys for batched Next() output
 	gsPool        groupStatePool   // chunk allocator for groupState (reduces GC pressure)
 }
@@ -338,6 +339,9 @@ func (h *HashAggregate) reconcileGroupMemory() {
 		delta := actual - h.trackedGroupMem
 		h.Spill.TrackBatch(delta)
 		h.trackedGroupMem = actual
+		if h.trackedGroupMem > h.peakTrackedGroupMem {
+			h.peakTrackedGroupMem = h.trackedGroupMem
+		}
 	}
 }
 
@@ -2189,6 +2193,24 @@ func (h *HashAggregate) SpillFootprint() int64 {
 	// arithmetic matches the tracker's view rather than our internal
 	// estimate.
 	return h.trackedGroupMem
+}
+
+// SpillableName implements memory.Inspectable. Identifies the aggregate by
+// its group-by columns; falls back to "HashAggregate" when the column list
+// is empty (scalar aggregate).
+func (h *HashAggregate) SpillableName() string {
+	if len(h.GroupByCols) == 0 {
+		return "HashAggregate"
+	}
+	return "HashAggregate/group_by=" + strings.Join(h.GroupByCols, ",")
+}
+
+// PeakFootprint implements memory.Inspectable: returns the high-water mark
+// of trackedGroupMem observed during the aggregate's lifetime.
+func (h *HashAggregate) PeakFootprint() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.peakTrackedGroupMem
 }
 
 // selfSpillReliefTarget computes the bytes to release in response to our

@@ -133,6 +133,9 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 			}
 		}
 		h.trackedMem += cost
+		if h.trackedMem > h.peakTrackedMem {
+			h.peakTrackedMem = h.trackedMem
+		}
 
 		// Update key min/max even before partitioning — bloom + dynamic-range
 		// pushdowns use these for ALL keys, including those that later spill.
@@ -444,6 +447,25 @@ func (h *HashJoin) SpillFootprint() int64 {
 		total += mem
 	}
 	return total
+}
+
+// SpillableName implements memory.Inspectable: returns a stable identifier
+// incorporating the build alias when available. Used for per-operator peak
+// attribution at task end.
+func (h *HashJoin) SpillableName() string {
+	if h.BuildTableAlias != "" {
+		return fmt.Sprintf("HashJoin/build=%s", h.BuildTableAlias)
+	}
+	return "HashJoin"
+}
+
+// PeakFootprint implements memory.Inspectable: returns the high-water mark
+// of this join's tracker reservations. Includes column data + arena/index
+// overhead, matching trackedMem.
+func (h *HashJoin) PeakFootprint() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.peakTrackedMem
 }
 
 // SpillSome attempts to free at least target bytes from this join's in-memory

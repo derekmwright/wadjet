@@ -15,10 +15,11 @@ var ErrMemoryExceeded = fmt.Errorf("memory budget exceeded")
 // Tracker tracks memory usage with a configurable budget.
 // Hierarchical: a query tracker can have child operator trackers.
 type Tracker struct {
-	name     string
-	budget   int64
-	used     atomic.Int64
-	parent   *Tracker
+	name   string
+	budget int64
+	used   atomic.Int64
+	peak   atomic.Int64
+	parent *Tracker
 }
 
 // NewTracker creates a root memory tracker with the given budget in bytes.
@@ -54,6 +55,7 @@ func (t *Tracker) Reserve(n int64) error {
 		}
 	}
 
+	t.bumpPeak(newUsed)
 	return nil
 }
 
@@ -83,9 +85,31 @@ func (t *Tracker) Name() string {
 // ForceReserve adds n bytes without checking or rolling back on over-budget.
 // Used by operators that need to track usage for spill detection without failing.
 func (t *Tracker) ForceReserve(n int64) {
-	t.used.Add(n)
+	newUsed := t.used.Add(n)
 	if t.parent != nil {
 		t.parent.ForceReserve(n)
+	}
+	t.bumpPeak(newUsed)
+}
+
+// Peak returns the highest value ever observed by used. Used by per-task
+// observability hooks to surface peak per-tracker footprint at task end.
+func (t *Tracker) Peak() int64 {
+	return t.peak.Load()
+}
+
+// bumpPeak updates peak with newUsed via lock-free CAS. Cheaper than holding
+// a mutex on the hot Reserve/ForceReserve path; contention is rare because
+// peak only moves up.
+func (t *Tracker) bumpPeak(newUsed int64) {
+	for {
+		cur := t.peak.Load()
+		if newUsed <= cur {
+			return
+		}
+		if t.peak.CompareAndSwap(cur, newUsed) {
+			return
+		}
 	}
 }
 
@@ -121,7 +145,9 @@ func (t *Tracker) ReserveBlocking(ctx context.Context, n int64, pollInterval tim
 	}
 }
 
-// Reset resets the usage counter.
+// Reset resets the usage counter. Does not reset peak — peak is a high-water
+// mark for the tracker's lifetime; callers that want a fresh peak should
+// construct a new tracker.
 func (t *Tracker) Reset() {
 	t.used.Store(0)
 }

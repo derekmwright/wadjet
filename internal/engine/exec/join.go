@@ -119,6 +119,12 @@ type HashJoin struct {
 	// concurrent builds' accounting).
 	trackedMem int64
 
+	// peakTrackedMem is the high-water mark of trackedMem. Surfaced via the
+	// memory.Inspectable interface for per-operator peak attribution at task
+	// end (see internal/worker/executor.go). Updated under h.mu wherever
+	// trackedMem is incremented.
+	peakTrackedMem int64
+
 	// trackedHashOverhead tracks how much hash table overhead has been charged
 	// to the memory tracker via EstimateBatchBytes (40 bytes/row). When the
 	// actual hash table grows beyond this (e.g., string arenas, grow() doubling),
@@ -635,6 +641,9 @@ func (h *HashJoin) reconcileHashMemory() {
 		h.MemTracker.ForceReserve(delta) // always track; triggers ShouldSpill sooner
 		h.trackedHashOverhead = actual
 		h.trackedMem += delta
+		if h.trackedMem > h.peakTrackedMem {
+			h.peakTrackedMem = h.trackedMem
+		}
 	}
 }
 
@@ -888,6 +897,9 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				}
 			}
 			h.trackedMem += cost
+			if h.trackedMem > h.peakTrackedMem {
+				h.peakTrackedMem = h.trackedMem
+			}
 		}
 
 		// If spill state is active, route new batches through partitioning

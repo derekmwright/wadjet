@@ -781,6 +781,21 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	if result.TaskStats != nil && result.TaskStats.PeakHeapMB > 0 {
 		logAttrsEnd = append(logAttrsEnd, "peak_heap_mb", result.TaskStats.PeakHeapMB)
 	}
+	// TrackerPeak is the peak of Reserve-tracked bytes for this task — a
+	// narrower signal than PeakHeapMB (excludes non-tracked allocations like
+	// ResultStore buffering). OperatorPeaks breaks that down per registered
+	// Spillable, surfacing which HashJoin/HashAggregate/Sort owns the
+	// high-water mark.
+	if result.TaskStats != nil && result.TaskStats.TrackerPeak > 0 {
+		logAttrsEnd = append(logAttrsEnd, "tracker_peak_mb", result.TaskStats.TrackerPeak/(1<<20))
+	}
+	if result.TaskStats != nil && len(result.TaskStats.OperatorPeaks) > 0 {
+		parts := make([]string, len(result.TaskStats.OperatorPeaks))
+		for i, op := range result.TaskStats.OperatorPeaks {
+			parts[i] = fmt.Sprintf("%s=%dMB(peak)/%dMB(now)", op.Name, op.Peak/(1<<20), op.Current/(1<<20))
+		}
+		logAttrsEnd = append(logAttrsEnd, "operator_peaks", strings.Join(parts, ","))
+	}
 	if task.TraceID != "" {
 		logAttrsEnd = append(logAttrsEnd, "trace_id", task.TraceID)
 	}

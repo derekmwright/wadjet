@@ -293,6 +293,29 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	}
 	result.TaskStats.PeakHeapMB = peakTracker.PeakMB()
 
+	// Per-operator peak attribution: ask the shared SpillManager for every
+	// currently-registered Spillable's name + peak/current footprint. This
+	// runs at task end so unregistered operators (e.g. completed broadcast
+	// builds) don't appear. When tasks run concurrently against the same
+	// shared spill, attribution is union-of-all-active — accept that loss
+	// of per-task isolation as the cost of the lightweight wiring.
+	if e.sharedSpill != nil {
+		snaps := e.sharedSpill.Inspect()
+		if len(snaps) > 0 {
+			result.TaskStats.OperatorPeaks = make([]distributed.OperatorPeak, len(snaps))
+			for i, s := range snaps {
+				result.TaskStats.OperatorPeaks[i] = distributed.OperatorPeak{
+					Name:    s.Name,
+					Peak:    s.Peak,
+					Current: s.Current,
+				}
+			}
+		}
+	}
+	if e.sharedTracker != nil {
+		result.TaskStats.TrackerPeak = e.sharedTracker.Peak()
+	}
+
 	return result
 }
 
@@ -1172,9 +1195,28 @@ func (e *Executor) collectTaskStats(spill *memory.SpillManager, tracker *memory.
 	if tracker != nil {
 		stats.MemUsed = tracker.Used()
 		stats.MemBudget = tracker.Budget()
+		stats.TrackerPeak = tracker.Peak()
 		if e.metrics != nil {
 			e.metrics.MemoryBudgetBytes.Set(float64(stats.MemBudget))
 			e.metrics.MemoryUsedBytes.Set(float64(stats.MemUsed))
+		}
+	}
+
+	// Per-operator peak attribution: ask each Spillable registered with the
+	// task's SpillManager for its name + current/peak footprint. This is the
+	// signal we read from worker logs when investigating which operator
+	// pinned the heap on a given task (Q18-class debugging).
+	if spill != nil {
+		snaps := spill.Inspect()
+		if len(snaps) > 0 {
+			stats.OperatorPeaks = make([]distributed.OperatorPeak, len(snaps))
+			for i, s := range snaps {
+				stats.OperatorPeaks[i] = distributed.OperatorPeak{
+					Name:    s.Name,
+					Peak:    s.Peak,
+					Current: s.Current,
+				}
+			}
 		}
 	}
 

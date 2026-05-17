@@ -41,7 +41,8 @@ type Sort struct {
 	mu         sync.Mutex
 	batches    []*batch.RecordBatch // columnar storage
 	totalRows  int
-	trackedMem int64 // memory reserved from shared tracker by this operator
+	trackedMem     int64 // memory reserved from shared tracker by this operator
+	peakTrackedMem int64 // high-water mark; surfaced via memory.Inspectable
 	spillFiles []string
 	sorted     []*batch.RecordBatch // materialized sorted results
 	pos        int
@@ -87,6 +88,9 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		cost := EstimateBatchBytes(b)
 		s.Spill.TrackBatch(cost)
 		s.trackedMem += cost
+		if s.trackedMem > s.peakTrackedMem {
+			s.peakTrackedMem = s.trackedMem
+		}
 	}
 
 	// Spill to disk if memory pressure is high
@@ -420,6 +424,19 @@ func (s *Sort) SpillFootprint() int64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.trackedMem
+}
+
+// SpillableName implements memory.Inspectable.
+func (s *Sort) SpillableName() string {
+	return "Sort"
+}
+
+// PeakFootprint implements memory.Inspectable: returns the high-water mark
+// of bytes Sort had reserved with the shared tracker.
+func (s *Sort) PeakFootprint() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peakTrackedMem
 }
 
 // SpillSome drains accumulated input batches to a raw-row spill file and

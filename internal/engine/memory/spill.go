@@ -60,6 +60,30 @@ type Spillable interface {
 	SpillSome(target int64) (int64, error)
 }
 
+// Inspectable is an optional extension to Spillable that surfaces per-operator
+// observability state (a stable identifier and peak in-memory footprint) for
+// task-end logging. Operators that implement this enable per-operator peak
+// attribution in SpillManager.Inspect; ones that don't fall back to type name
+// and current footprint.
+type Inspectable interface {
+	Spillable
+	// SpillableName returns a stable identifier for the operator instance.
+	// Used as the key in SpillManager.Inspect output; should incorporate the
+	// stage_id or operator role when possible.
+	SpillableName() string
+	// PeakFootprint returns the highest SpillFootprint value ever observed
+	// during the operator's lifetime. Used by Inspect to surface where heap
+	// pressure peaked, not just where it currently sits.
+	PeakFootprint() int64
+}
+
+// SpillableSnapshot is one entry in SpillManager.Inspect output.
+type SpillableSnapshot struct {
+	Name    string
+	Current int64
+	Peak    int64
+}
+
 // SpillManager handles spilling data to disk when memory budget is exceeded.
 type SpillManager struct {
 	dir     string
@@ -73,6 +97,12 @@ type SpillManager struct {
 	// with file-list mutations.
 	spillablesMu sync.Mutex
 	spillables   []Spillable
+
+	// departed retains the final SpillableSnapshot of operators that have
+	// already unregistered. Inspect concatenates departed + currently-
+	// registered so post-task observability sees a closed HashJoin's peak
+	// even though its Spillable entry was removed during Close.
+	departed []SpillableSnapshot
 }
 
 // NewSpillManager creates a spill manager that writes temp files to the given directory.
@@ -565,6 +595,39 @@ func (sm *SpillManager) Tracker() *Tracker {
 	return sm.tracker
 }
 
+// Inspect snapshots the current and peak footprint of every registered
+// Spillable plus operators that have already unregistered (their final
+// snapshot is kept in the departed list). Operators that implement
+// Inspectable surface their own name and peak; others fall back to the Go
+// type name and current footprint. Intended for task-end logging.
+func (sm *SpillManager) Inspect() []SpillableSnapshot {
+	sm.spillablesMu.Lock()
+	defer sm.spillablesMu.Unlock()
+	out := make([]SpillableSnapshot, 0, len(sm.spillables)+len(sm.departed))
+	out = append(out, sm.departed...)
+	for _, s := range sm.spillables {
+		out = append(out, snapshotSpillable(s))
+	}
+	return out
+}
+
+// snapshotSpillable extracts a SpillableSnapshot from a live Spillable.
+// Peak is taken from the Inspectable extension when available; otherwise
+// peak == current footprint (Inspect's best effort under no peak tracking).
+func snapshotSpillable(s Spillable) SpillableSnapshot {
+	snap := SpillableSnapshot{Current: s.SpillFootprint()}
+	if isp, ok := s.(Inspectable); ok {
+		snap.Name = isp.SpillableName()
+		snap.Peak = isp.PeakFootprint()
+	} else {
+		snap.Name = fmt.Sprintf("%T", s)
+	}
+	if snap.Peak < snap.Current {
+		snap.Peak = snap.Current
+	}
+	return snap
+}
+
 // RegisterSpillable adds an operator to the cooperative-spill registry.
 // Returns an unregister function the caller must call (defer is fine) when
 // the operator stops being a spill source — typically at Build completion
@@ -579,6 +642,9 @@ func (sm *SpillManager) RegisterSpillable(s Spillable) func() {
 		defer sm.spillablesMu.Unlock()
 		for i, x := range sm.spillables {
 			if x == s {
+				// Capture the final snapshot before removal so Inspect can
+				// report peak attribution for operators that have closed.
+				sm.departed = append(sm.departed, snapshotSpillable(s))
 				sm.spillables = append(sm.spillables[:i], sm.spillables[i+1:]...)
 				return
 			}

@@ -388,12 +388,24 @@ type ResultNotification struct {
 
 // TaskStats captures per-task execution metrics for debugging.
 type TaskStats struct {
-	MemUsed    int64 `json:"mem_used"`    // memory tracker usage at completion
-	MemBudget  int64 `json:"mem_budget"`  // memory budget for this task
-	SpillFiles int   `json:"spill_files"` // number of spill files written
-	SpillBytes int64 `json:"spill_bytes"` // total bytes spilled to disk
-	RSS        int64 `json:"rss"`         // worker process RSS at task completion
-	PeakHeapMB int64 `json:"peak_heap_mb"` // per-task peak HeapAlloc in MB, captured by atomic-max sampler
+	MemUsed        int64          `json:"mem_used"`                  // memory tracker usage at completion
+	MemBudget      int64          `json:"mem_budget"`                // memory budget for this task
+	SpillFiles     int            `json:"spill_files"`               // number of spill files written
+	SpillBytes     int64          `json:"spill_bytes"`               // total bytes spilled to disk
+	RSS            int64          `json:"rss"`                       // worker process RSS at task completion
+	PeakHeapMB     int64          `json:"peak_heap_mb"`              // per-task peak HeapAlloc in MB, captured by atomic-max sampler
+	TrackerPeak    int64          `json:"tracker_peak,omitempty"`    // peak of the per-task memory.Tracker (Reserve-tracked bytes)
+	OperatorPeaks  []OperatorPeak `json:"operator_peaks,omitempty"`  // per-Spillable peak attribution at task end
+}
+
+// OperatorPeak is one entry in TaskStats.OperatorPeaks. Mirrors
+// memory.SpillableSnapshot but lives here to avoid a memory→distributed
+// package dependency. Populated for each Spillable registered with the
+// task's SpillManager at the moment collectTaskStats fires.
+type OperatorPeak struct {
+	Name    string `json:"name"`    // SpillableName() or Go type fallback
+	Peak    int64  `json:"peak"`    // high-water mark of in-memory footprint
+	Current int64  `json:"current"` // footprint at snapshot time
 }
 
 // WorkerHeartbeat is periodically sent by workers.
