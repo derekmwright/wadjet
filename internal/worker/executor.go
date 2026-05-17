@@ -753,14 +753,6 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	var sink *partitionedShuffleSink
 	var totalRows int64
 	for {
-		// Heap-aware backpressure between batches; mirrors the fragment runner
-		// and engine Pipeline.Run hooks. Without this, mc=3 concurrent shuffle
-		// tasks streaming 100s of MB/s each push worker heap past GOMEMLIMIT
-		// before GC catches up — observed as the 22 GB worker heap on Q17
-		// SF100 mc=3 (project_q17_sf100_instrumented_2026-05-17.md).
-		if err := memory.PauseOnHeapBackpressure(ctx); err != nil {
-			return err
-		}
 		b, err := src.Next(ctx)
 		if err != nil {
 			return fmt.Errorf("shuffle task %s: source next: %w", task.ID, err)
