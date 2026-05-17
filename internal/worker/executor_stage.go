@@ -11,6 +11,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -133,6 +134,13 @@ func (e *Executor) executeGatherStage(ctx context.Context, task distributed.Task
 			return fmt.Errorf("gather task %s: init source %q: %w", task.ID, alias, err)
 		}
 		for {
+			// Heap-aware backpressure between batches; mirrors fragment runner
+			// and Pipeline.Run hooks. Prevents the gather stage from racing
+			// past GOMEMLIMIT while concurrent tasks share the worker process.
+			if err := memory.PauseOnHeapBackpressure(ctx); err != nil {
+				src.Close()
+				return err
+			}
 			b, err := src.Next(ctx)
 			if err != nil {
 				src.Close()
