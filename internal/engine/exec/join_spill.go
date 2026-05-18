@@ -288,7 +288,7 @@ func newSpillBatchWriter(dir, prefix string) (*spillBatchWriter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating spill file: %w", err)
 	}
-	w := bufio.NewWriterSize(f, 1024*1024)
+	w := bufio.NewWriterSize(f, 64*1024) // EXPERIMENT
 	// Reserve space for batch count (will be written on close)
 	var buf [4]byte
 	w.Write(buf[:4])

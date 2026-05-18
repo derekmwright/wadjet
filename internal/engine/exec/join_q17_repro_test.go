@@ -5,15 +5,53 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
+
+// generatedIntSource emits N rows of synthetic data (int64 key + int64 val)
+// in batches of size 2048 directly into RecordBatch columns — no intermediate
+// []map[string]any allocation. Eliminates ~1 GB of test-scaffolding heap
+// usage in the Q17-shape probe so the measured peak heap reflects operator-
+// internal allocation, not the test's input materialization.
+type generatedIntSource struct {
+	schema   []parquet.Column
+	total    int
+	offset   int
+	keyStart int64
+}
+
+func newGeneratedIntSource(schema []parquet.Column, total int, keyStart int64) *generatedIntSource {
+	return &generatedIntSource{schema: schema, total: total, keyStart: keyStart}
+}
+
+func (s *generatedIntSource) Init(_ context.Context) error { return nil }
+
+func (s *generatedIntSource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.offset >= s.total {
+		return nil, nil
+	}
+	n := batch.DefaultBatchSize
+	if s.offset+n > s.total {
+		n = s.total - s.offset
+	}
+	rb := batch.NewRecordBatch(s.schema, n)
+	for i := 0; i < n; i++ {
+		k := s.keyStart + int64(s.offset+i)
+		rb.Columns[0].SetValue(i, k)
+		rb.Columns[1].SetValue(i, k*7)
+	}
+	s.offset += n
+	return rb, nil
+}
+
+func (s *generatedIntSource) Close() error { return nil }
 
 // TestHashJoin_Q17ShapeRepro is a local test bench for the Q17 SF100 mc=3
 // heap-pin failure shape. It runs N concurrent HashJoin builds against a
@@ -40,30 +78,19 @@ func TestHashJoin_Q17ShapeRepro(t *testing.T) {
 		t.Skip("set WADJET_Q17_REPRO=1 to enable")
 	}
 	const concurrent = 3
-	const buildN = 80_000
+	const buildN = 2_000_000
 
-	// Each build holds ~3 MB column data + intHashTable + arena.
-	// 3 concurrent × ~3 MB = ~9 MB cumulative. Budget 5 MB forces spill
-	// to fire on at least one build (cumulative tracker > 60% of 5 MB
-	// triggers SpillCheap).
-	budget := int64(5 * 1024 * 1024)
+	// Each build holds ~80 MB column data + intHashTable + arena.
+	// 3 concurrent × ~80 MB = ~240 MB cumulative. Budget 120 MB forces
+	// spill on all builds. Larger scale (2M rows) reduces the relative
+	// weight of fixed-size transients (bufio buffers, batch pool entries)
+	// in peak heap — bringing the heap-vs-budget ratio closer to the
+	// SF100 production observation of ~1.5×.
+	budget := int64(120 * 1024 * 1024)
 
 	schema := []parquet.Column{
 		{Name: "id", Type: parquet.TypeInt64},
-		{Name: "val", Type: parquet.TypeString},
-	}
-	// Pad the string value so each row is ~30 bytes, giving each build
-	// enough state to actually trigger spill under the tight budget.
-	pad := strings.Repeat("x", 20)
-	makeRows := func(offset int) []map[string]any {
-		rows := make([]map[string]any, buildN)
-		for i := range rows {
-			rows[i] = map[string]any{
-				"id":  int64(offset + i),
-				"val": pad,
-			}
-		}
-		return rows
+		{Name: "val", Type: parquet.TypeInt64},
 	}
 
 	spillDir := t.TempDir()
@@ -128,7 +155,8 @@ func TestHashJoin_Q17ShapeRepro(t *testing.T) {
 		go func(idx int, j *HashJoin) {
 			defer wg.Done()
 			<-startBarrier // wait so all goroutines race-start concurrently
-			errs[idx] = j.Build(ctx, NewSliceSource(schema, makeRows(idx*buildN)))
+			src := newGeneratedIntSource(schema, buildN, int64(idx*buildN))
+			errs[idx] = j.Build(ctx, src)
 		}(i, hj)
 	}
 	close(startBarrier)
