@@ -344,7 +344,11 @@ func writeSpillBatches(dir string, batches []*batch.RecordBatch) (string, error)
 	}
 	defer f.Close()
 
-	w := bufio.NewWriterSize(f, 1024*1024)
+	// 64 KB matches the convention in newSpillBatchWriter and
+	// aggregate_partial_spill — local-disk spill writes coalesce fine at
+	// this size, and a smaller buffer reduces transient heap during the
+	// moment spill is firing.
+	w := bufio.NewWriterSize(f, 64*1024)
 
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(len(batches)))
