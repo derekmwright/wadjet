@@ -253,26 +253,6 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		return result
 	}
 
-	// Heap-pressure admission control: wait at task entry until the worker
-	// process has memory headroom. Without this, mc=3 dispatched concurrently
-	// stacks fragment-task state (HashJoin builds at ~5.7 GB each on Q17
-	// SF100) past GOMEMLIMIT, pinning the worker in GC mark-assist —
-	// observed as the 22 GB heap / 13-min stall on the prior instrumented
-	// run (project_q17_sf100_instrumented_2026-05-17.md). Pause is at task
-	// entry only, not per batch; in-flight tasks continue making progress
-	// via the fragment-runner's existing PauseOnHeapBackpressure. Capped at
-	// AdmissionMaxWait (60s) so JetStream AckWait doesn't expire even if
-	// pressure never clears.
-	if waited, err := memory.WaitForHeapHeadroom(ctx); err != nil {
-		result.Duration = time.Since(start)
-		result.Error = fmt.Sprintf("admission cancelled: %s", err)
-		return result
-	} else if waited > 100*time.Millisecond {
-		e.logger.Info("admitted task after heap-headroom wait",
-			"task_id", task.ID, "wait_ms", waited.Milliseconds(),
-			"stage_id", task.StageID)
-	}
-
 	peakTracker := newTaskPeakHeapTracker(ctx)
 
 	var err error
