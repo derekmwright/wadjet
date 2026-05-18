@@ -15,6 +15,151 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
+// TestHashJoin_StateRetentionAcrossQueries probes worker-process state
+// retention between queries. SF100 mc=3 shows progressive slowdown across
+// queries in a run (Q01-Q05 within band, Q06+ progressively slower, Q09
+// frequently times out). The hypothesis is that operator state, batch
+// pools, runtime allocator pages, or other persistent structures aren't
+// fully released between query boundaries — and the next query pays the
+// cost.
+//
+// This test simulates N sequential "queries" against the same shared
+// tracker + spill manager (mimicking a worker process running many
+// queries). Between iterations it forces GC, samples HeapInuse and
+// HeapIdle, and reports whether heap retains memory across boundaries.
+//
+// At SF100: 14.8 GB GOMEMLIMIT - cache reservation = ~14 GB pool. If
+// each query leaves ~500 MB of irreclaimable state, after 6-8 queries
+// the pool is effectively exhausted before the next query even starts —
+// matching the Q09 timeout pattern observed in
+// project_bufio_fix_sf100_2026-05-18.md.
+//
+// Set WADJET_Q17_REPRO=1 to enable.
+func TestHashJoin_StateRetentionAcrossQueries(t *testing.T) {
+	if os.Getenv("WADJET_Q17_REPRO") != "1" {
+		t.Skip("set WADJET_Q17_REPRO=1 to enable")
+	}
+	const queries = 8     // simulate Q01-Q08
+	const concurrent = 3  // mc=3 per query
+	const buildN = 500_000
+
+	budget := int64(60 * 1024 * 1024)
+
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeInt64},
+	}
+
+	spillDir := t.TempDir()
+	sharedTracker := memory.NewTracker("shared", budget)
+	sm, err := memory.NewSpillManager(spillDir, sharedTracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sm.Cleanup()
+
+	// Run one "query" = N concurrent HashJoin builds, then close all.
+	runQuery := func(qIdx int) (peakHeap uint64, dur time.Duration) {
+		start := time.Now()
+		joins := make([]*HashJoin, concurrent)
+		for i := range joins {
+			hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
+			hj.Spill = sm
+			hj.MemTracker = sharedTracker
+			hj.BuildTableAlias = fmt.Sprintf("q%d-build-%d", qIdx, i)
+			joins[i] = hj
+		}
+
+		var peak atomic.Uint64
+		stopSampler := make(chan struct{})
+		var sampWG sync.WaitGroup
+		sampWG.Add(1)
+		go func() {
+			defer sampWG.Done()
+			tk := time.NewTicker(20 * time.Millisecond)
+			defer tk.Stop()
+			for {
+				select {
+				case <-stopSampler:
+					return
+				case <-tk.C:
+					var ms runtime.MemStats
+					runtime.ReadMemStats(&ms)
+					for {
+						cur := peak.Load()
+						if ms.HeapAlloc <= cur {
+							break
+						}
+						if peak.CompareAndSwap(cur, ms.HeapAlloc) {
+							break
+						}
+					}
+				}
+			}
+		}()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		var wg sync.WaitGroup
+		gate := make(chan struct{})
+		errs := make([]error, concurrent)
+		for i, hj := range joins {
+			wg.Add(1)
+			go func(idx int, j *HashJoin) {
+				defer wg.Done()
+				<-gate
+				src := newGeneratedIntSource(schema, buildN, int64(qIdx*concurrent*buildN+idx*buildN))
+				errs[idx] = j.Build(ctx, src)
+			}(i, hj)
+		}
+		close(gate)
+		wg.Wait()
+		close(stopSampler)
+		sampWG.Wait()
+
+		// Close all joins to release operator state — same as what happens
+		// at end of a real query.
+		for _, j := range joins {
+			_ = j.Close()
+		}
+
+		for i, e := range errs {
+			if e != nil {
+				t.Fatalf("query %d build %d: %v", qIdx, i, e)
+			}
+		}
+		return peak.Load(), time.Since(start)
+	}
+
+	// Drain to a steady state before measuring baseline.
+	runtime.GC()
+	runtime.GC()
+	var msBefore runtime.MemStats
+	runtime.ReadMemStats(&msBefore)
+	baselineInuse := msBefore.HeapInuse
+	baselineAlloc := msBefore.HeapAlloc
+
+	t.Logf("=== State retention probe: %d sequential queries, %d concurrent builds each ===", queries, concurrent)
+	t.Logf("Baseline (pre-Q01): HeapInuse=%d KB, HeapAlloc=%d KB", baselineInuse/1024, baselineAlloc/1024)
+
+	for q := 1; q <= queries; q++ {
+		peakHeap, dur := runQuery(q)
+
+		// Force GC to drain transient state — measure what STAYS resident.
+		runtime.GC()
+		runtime.GC()
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+
+		t.Logf("Q%02d: dur=%v peak=%dMB | post-GC: HeapInuse=%dMB HeapAlloc=%dMB delta-vs-baseline=+%dMB",
+			q, dur,
+			peakHeap/1024/1024,
+			ms.HeapInuse/1024/1024,
+			ms.HeapAlloc/1024/1024,
+			(int64(ms.HeapAlloc)-int64(baselineAlloc))/1024/1024)
+	}
+}
+
 // generatedIntSource emits N rows of synthetic data (int64 key + int64 val)
 // in batches of size 2048 directly into RecordBatch columns — no intermediate
 // []map[string]any allocation. Eliminates ~1 GB of test-scaffolding heap
