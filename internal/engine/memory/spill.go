@@ -250,17 +250,12 @@ const HeapBackpressurePauseDuration = 50 * time.Millisecond
 const AdmissionPollInterval = 200 * time.Millisecond
 
 // AdmissionMaxWait is the cap on how long WaitForHeapHeadroom waits
-// before giving up and admitting the task anyway. Sized to cover one
-// full in-flight task duration at SF100: HashJoin builds at SF100 mc=3
-// run ~6m30s, so a 5-minute cap gives a waiting task a real chance to
-// inherit released memory from a peer completing. JetStream AckWait
-// stays alive via the worker's separate heartbeat goroutine, so a long
-// admission wait doesn't trigger redelivery.
-//
-// Per-batch backpressure on in-flight tasks (fragment runners) continues
-// in parallel, so heap drops as in-flight work completes even when
-// admission is gating new tasks.
-const AdmissionMaxWait = 5 * time.Minute
+// before giving up and admitting the task anyway. Bounds worst-case
+// per-task admission delay so coord-side task timeouts and JetStream
+// AckWait don't expire under pressure that never clears. Tasks already
+// in-flight continue making progress (with per-batch backpressure), so
+// in practice heap drops well before this cap fires.
+const AdmissionMaxWait = 60 * time.Second
 
 // WaitForHeapHeadroom polls HeapBackpressureActive until pressure clears
 // (returning the time spent waiting and nil) or the context is cancelled
