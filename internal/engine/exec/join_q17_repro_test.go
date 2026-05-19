@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -295,6 +296,7 @@ func TestHashJoin_Q17ShapeRepro(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, concurrent)
 	startBarrier := make(chan struct{})
+	buildStart := time.Now()
 	for i, hj := range joins {
 		wg.Add(1)
 		go func(idx int, j *HashJoin) {
@@ -306,6 +308,7 @@ func TestHashJoin_Q17ShapeRepro(t *testing.T) {
 	}
 	close(startBarrier)
 	wg.Wait()
+	buildElapsed := time.Since(buildStart)
 	close(stopSampler)
 	samplerWG.Wait()
 
@@ -334,13 +337,29 @@ func TestHashJoin_Q17ShapeRepro(t *testing.T) {
 	budgetMB := float64(budget) / 1024 / 1024
 	overshoot := float64(final) / float64(budget)
 
+	// Sum spill bytes by walking the spill dir directly — HashJoin's
+	// spillBatchWriter path doesn't register files via SpillRows, so
+	// SpillManager.SpilledFiles misses them.
+	var spillBytes int64
+	var spillFiles int
+	_ = filepath.Walk(spillDir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		spillBytes += info.Size()
+		spillFiles++
+		return nil
+	})
+
 	t.Logf("=== Q17-shape repro summary ===")
 	t.Logf("  concurrent builds: %d", concurrent)
 	t.Logf("  rows per build:    %d", buildN)
 	t.Logf("  tracker budget:    %.2f MB", budgetMB)
 	t.Logf("  peak Go heap:      %.2f MB (%.2fx budget)", heapMB, overshoot)
 	t.Logf("  final tracker:     %d KB (cumulative %d KB)", usedFinal/1024, cumulativeTracked/1024)
-	t.Logf("  spilled:           %d / %d builds", spilledCount, concurrent)
+	t.Logf("  spilled:           %d / %d builds, %d files, %.2f MB total",
+		spilledCount, concurrent, spillFiles, float64(spillBytes)/1024/1024)
+	t.Logf("  build wall time:   %v", buildElapsed)
 
 	// CORRECTNESS gate: tracker must stay near budget (cooperative spill
 	// works). >2× budget would mean the per-tracker spill threshold is
