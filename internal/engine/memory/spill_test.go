@@ -266,20 +266,20 @@ func TestSpillLargeDataset(t *testing.T) {
 	}
 }
 
-func TestShouldSpillFor_CheapTriggersAt60Percent(t *testing.T) {
+func TestShouldSpillFor_CheapTriggersAt40Percent(t *testing.T) {
 	tr := NewTracker("t", 1000)
 	dir := t.TempDir()
 	sm, err := NewSpillManager(dir, tr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr.ForceReserve(599)
+	tr.ForceReserve(399)
 	if sm.ShouldSpillFor(SpillCheap) {
-		t.Errorf("at 59.9%% of budget, SpillCheap should not fire")
+		t.Errorf("at 39.9%% of budget, SpillCheap should not fire")
 	}
-	tr.ForceReserve(2) // now 601, above 60%
+	tr.ForceReserve(2) // now 401, above 40%
 	if !sm.ShouldSpillFor(SpillCheap) {
-		t.Errorf("at 60.1%% of budget, SpillCheap should fire")
+		t.Errorf("at 40.1%% of budget, SpillCheap should fire")
 	}
 }
 
