@@ -24,26 +24,28 @@ service DataPlane {
 }
 
 // WorkerEnvelope is the worker→coord direction of the bidi stream.
-// Phase B adds ResultBatch. Subsequent phases add TaskAck,
-// TaskProgress, TaskComplete, TaskFailed.
+// Phase B adds ResultBatch. Subsequent phases add TaskProgress,
+// TaskComplete, TaskFailed.
 message WorkerEnvelope {
   oneof msg {
     Hello hello = 1;
     ResultBatch result_batch = 2;
-    // reserved: TaskAck, TaskProgress, TaskComplete, TaskFailed.
-    // See phases C–E.
+    // reserved: TaskProgress, TaskComplete, TaskFailed.
+    // See phases D–E.
   }
   reserved 3 to 15;
 }
 
-// CoordEnvelope is the coord→worker direction. Subsequent phases add
-// TaskDispatch, CancelTask as `oneof` variants.
+// CoordEnvelope is the coord→worker direction. Phase C adds
+// TaskDispatch (the load-bearing change in the migration); CancelTask
+// stays on NATS pub/sub in Phase C and may move later.
 message CoordEnvelope {
   oneof msg {
     Welcome welcome = 1;
-    // reserved: TaskDispatch, CancelTask. See phases B–E.
+    TaskDispatch task_dispatch = 2;
+    // reserved: CancelTask. See phase D+ design.
   }
-  reserved 2 to 15;
+  reserved 3 to 15;
 }
 
 // Hello is the worker's introduction. Coord uses it to register the
@@ -81,4 +83,26 @@ message ResultBatch {
   int32  row_count = 4;
   bytes  payload   = 5; // WSHF-encoded
   string err       = 6; // non-empty on task failure (terminal=true)
+}
+
+// TaskDispatch is one unit of work coord pushes to a worker. The body
+// is an opaque blob — distributed.Marshal(Task) on the coord side,
+// distributed.Unmarshal on the worker side — because the Task struct
+// has too many fields and too much churn to express in proto. gRPC
+// just carries the bytes.
+//
+// task_id, query_id, stage_id are duplicated outside the blob so the
+// dispatcher and progress paths can route without unmarshaling. They
+// MUST match the values inside task_blob; worker-side code uses the
+// blob for execution and the outer fields for routing/logging only.
+//
+// Idempotency: workers de-dupe on task_id. Coord may redispatch the
+// same task_id after a TCP disconnect; duplicate completions are
+// dropped by the result handler.
+message TaskDispatch {
+  string task_id           = 1;
+  string query_id          = 2;
+  string stage_id          = 3;
+  bytes  task_blob         = 4;
+  int64  deadline_unix_nano = 5; // 0 = no explicit deadline
 }

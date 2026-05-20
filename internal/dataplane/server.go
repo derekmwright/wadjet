@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -15,6 +16,10 @@ import (
 
 	dpv1 "github.com/citc-tech/wadjet/gen/dataplane/v1"
 )
+
+// ErrNoWorkers is returned by SendTaskDispatch when no worker is
+// currently connected to the data-plane server.
+var ErrNoWorkers = errors.New("dataplane: no connected workers")
 
 // ResultBatch is the transport-neutral form of a worker→coord result
 // chunk. The gRPC adapter translates ResultBatch proto messages into
@@ -49,20 +54,29 @@ type Server struct {
 	grpcSrv *grpc.Server
 	lis     net.Listener
 
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	workers map[string]*workerSession // keyed by worker_id
+	order   []string                  // ConnectedWorkers stable ordering for RR
+
+	rrCursor atomic.Uint64
 
 	resultHandlers sync.Map // map[string]ResultHandler keyed by query_id
 }
 
 // workerSession is the coord's view of a connected worker. Phase A
-// holds just identity; Phases B–E add task assignment + result wiring.
+// held just identity; Phase C adds the per-worker outbound stream so
+// the scheduler can push TaskDispatch messages over it. gRPC
+// stream.Send is NOT safe for concurrent use, so sendMu serializes
+// writes; reads (Recv) only happen on the Connect goroutine.
 type workerSession struct {
 	id        string
 	buildSHA  string
 	numCPUs   int32
 	memLimit  int64
 	connected time.Time
+
+	sendMu sync.Mutex
+	stream grpc.BidiStreamingServer[dpv1.WorkerEnvelope, dpv1.CoordEnvelope]
 }
 
 // NewServer constructs a Server. Call Start to begin accepting.
@@ -162,6 +176,7 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[dpv1.WorkerEnvelope, dp
 		numCPUs:   hello.GetNumCpus(),
 		memLimit:  hello.GetGomemlimit(),
 		connected: time.Now(),
+		stream:    stream,
 	}
 	if err := s.register(sess); err != nil {
 		return err
@@ -271,24 +286,80 @@ func (s *Server) register(sess *workerSession) error {
 		return fmt.Errorf("dataplane: worker %q already connected", sess.id)
 	}
 	s.workers[sess.id] = sess
+	s.order = append(s.order, sess.id)
 	return nil
 }
 
 func (s *Server) unregister(id string) {
 	s.mu.Lock()
 	delete(s.workers, id)
+	for i, w := range s.order {
+		if w == id {
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			break
+		}
+	}
 	s.mu.Unlock()
 }
 
 // ConnectedWorkers returns a snapshot of worker IDs currently registered.
-// Useful for tests and admin endpoints.
+// Order is registration order — useful for tests; the scheduler uses
+// PickWorker for round-robin dispatch.
 func (s *Server) ConnectedWorkers() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]string, 0, len(s.workers))
-	for id := range s.workers {
-		out = append(out, id)
-	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]string, len(s.order))
+	copy(out, s.order)
 	return out
+}
+
+// PickWorker returns the next worker ID via round-robin across the
+// currently-connected set. Returns ("", false) when no worker is
+// connected. Safe for concurrent callers.
+func (s *Server) PickWorker() (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	n := len(s.order)
+	if n == 0 {
+		return "", false
+	}
+	i := s.rrCursor.Add(1) - 1
+	return s.order[int(i%uint64(n))], true
+}
+
+// SendTaskDispatch pushes a TaskDispatch envelope to the named worker.
+// Blocks on HTTP/2 flow control if the worker's recv side is full —
+// that's the backpressure path. Returns ErrNotConnected if the worker
+// is no longer connected.
+//
+// task_blob is the result of distributed.Marshal(Task). The scheduler
+// owns the marshal; the data-plane layer only carries bytes.
+func (s *Server) SendTaskDispatch(workerID, taskID, queryID, stageID string, taskBlob []byte, deadlineUnixNano int64) error {
+	s.mu.RLock()
+	sess, ok := s.workers[workerID]
+	s.mu.RUnlock()
+	if !ok {
+		return ErrNotConnected
+	}
+	env := &dpv1.CoordEnvelope{
+		Msg: &dpv1.CoordEnvelope_TaskDispatch{
+			TaskDispatch: &dpv1.TaskDispatch{
+				TaskId:           taskID,
+				QueryId:          queryID,
+				StageId:          stageID,
+				TaskBlob:         taskBlob,
+				DeadlineUnixNano: deadlineUnixNano,
+			},
+		},
+	}
+	sess.sendMu.Lock()
+	defer sess.sendMu.Unlock()
+	if sess.stream == nil {
+		return ErrNotConnected
+	}
+	if err := sess.stream.Send(env); err != nil {
+		return fmt.Errorf("dataplane: dispatch to %s: %w", workerID, err)
+	}
+	return nil
 }
 

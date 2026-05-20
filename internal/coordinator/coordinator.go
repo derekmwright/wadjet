@@ -153,12 +153,18 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	return c
 }
 
-// SetDataPlaneServer enables gRPC result delivery. When set, the coord
-// registers each gather receiver with the server so workers can stream
-// ResultBatch messages directly instead of via NATS. Must be called
-// before any query runs. Pass nil (or skip) to use NATS-only delivery.
+// SetDataPlaneServer enables gRPC result delivery and task dispatch.
+// When set:
+//   - gather receivers register as ResultHandlers so workers can stream
+//     ResultBatch messages directly instead of via NATS (Phase B),
+//   - the scheduler routes TaskDispatch over the gRPC stream instead of
+//     NATS publish (Phase C).
+//
+// Must be called before any query runs. Pass nil (or skip) to use the
+// NATS-only path.
 func (c *Coordinator) SetDataPlaneServer(srv *dataplane.Server) {
 	c.dpSrv = srv
+	c.scheduler.SetDataPlaneServer(srv)
 }
 
 // Workers returns the worker registry for inspecting active workers.

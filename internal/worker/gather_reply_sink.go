@@ -131,25 +131,29 @@ func (s *gatherReplySink) Consume(_ context.Context, b *batch.RecordBatch) error
 	return nil
 }
 
-// sendBatch prefers the gRPC data-plane stream when the client is set
-// and currently connected; otherwise publishes to the NATS reply
-// subject. Both transports flow into the same gatherReceiver on coord,
-// so per-message switching across a worker's lifetime is safe.
+// sendBatch routes the result over whichever transport the sink was
+// configured for: when dpClient is set, gRPC is used exclusively (no
+// NATS fallback — coord redispatches the task on TCP disconnect via
+// task_id idempotency, see Phase D design); when nil, the legacy NATS
+// reply-subject path is used.
+//
+// The either/or choice is per-cluster — `--data-plane=grpc` wires the
+// dpClient at startup. We deliberately don't mix transports per call:
+// a single query writing to both NATS and gRPC would force the receiver
+// to subscribe to both forever.
 func (s *gatherReplySink) sendBatch(msg distributed.GatherBatchMsg) error {
-	if s.dpClient != nil && s.dpClient.Connected() {
-		err := s.dpClient.SendResultBatch(dataplane.ResultBatch{
+	if s.dpClient != nil {
+		if err := s.dpClient.SendResultBatch(dataplane.ResultBatch{
 			QueryID:  s.queryID,
 			WorkerID: msg.WorkerID,
 			Terminal: msg.Terminal,
 			RowCount: msg.RowCount,
 			Payload:  msg.Payload,
 			Err:      msg.Err,
-		})
-		if err == nil {
-			return nil
+		}); err != nil {
+			return fmt.Errorf("gather: dataplane send: %w", err)
 		}
-		// Stream disconnected mid-publish (rare). Fall through to NATS
-		// so the batch still reaches coord rather than failing the task.
+		return nil
 	}
 	data, err := distributed.Marshal(msg)
 	if err != nil {
@@ -180,8 +184,8 @@ func (s *gatherReplySink) Finalize(_ context.Context) error {
 	}
 	// Ensure the terminal message leaves this process before we return.
 	// gRPC send is synchronous (returns when the server has accepted),
-	// so this only matters for the NATS fallback path.
-	if s.dpClient == nil || !s.dpClient.Connected() {
+	// so the flush is only meaningful on the NATS legacy path.
+	if s.dpClient == nil {
 		return s.nc.Flush()
 	}
 	return nil

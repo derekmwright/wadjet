@@ -229,3 +229,227 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 	return cond()
 }
 
+// TestTaskDispatchRoundTrip is the Phase C smoke test: server pushes a
+// TaskDispatch envelope at a registered worker; client routes it into
+// the registered handler.
+func TestTaskDispatchRoundTrip(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", ClusterID: "td"}, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := NewClient(ClientConfig{
+		CoordAddr:        srv.Addr(),
+		WorkerID:         "w-td",
+		ReconnectBackoff: 50 * time.Millisecond,
+	}, nil)
+	client.Start(ctx)
+	defer client.Stop()
+
+	var received atomic.Int32
+	var lastTaskID atomic.Value
+	client.RegisterDispatchHandler(func(td TaskDispatch) {
+		received.Add(1)
+		lastTaskID.Store(td.TaskID)
+	})
+
+	if !waitFor(t, 2*time.Second, client.Connected) {
+		t.Fatal("client never connected")
+	}
+	if !waitFor(t, 2*time.Second, func() bool {
+		return len(srv.ConnectedWorkers()) == 1
+	}) {
+		t.Fatal("server never saw worker register")
+	}
+
+	for i := 0; i < 3; i++ {
+		if err := srv.SendTaskDispatch("w-td", "task-"+string(rune('a'+i)), "q1", "s1", []byte("blob"), 0); err != nil {
+			t.Fatalf("dispatch %d: %v", i, err)
+		}
+	}
+
+	if !waitFor(t, 2*time.Second, func() bool { return received.Load() == 3 }) {
+		t.Fatalf("got %d dispatches, want 3", received.Load())
+	}
+	if got := lastTaskID.Load(); got != "task-c" {
+		t.Errorf("last task id = %v, want task-c", got)
+	}
+}
+
+// TestTaskDispatchRoundRobin spreads N tasks across 3 workers and
+// verifies each worker receives roughly N/3.
+func TestTaskDispatchRoundRobin(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", ClusterID: "rr"}, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	counts := make(map[string]*atomic.Int32)
+	for _, id := range []string{"w-rr-0", "w-rr-1", "w-rr-2"} {
+		counts[id] = &atomic.Int32{}
+		client := NewClient(ClientConfig{
+			CoordAddr:        srv.Addr(),
+			WorkerID:         id,
+			ReconnectBackoff: 50 * time.Millisecond,
+		}, nil)
+		client.Start(ctx)
+		defer client.Stop()
+		c := counts[id]
+		client.RegisterDispatchHandler(func(td TaskDispatch) {
+			c.Add(1)
+		})
+	}
+
+	if !waitFor(t, 2*time.Second, func() bool {
+		return len(srv.ConnectedWorkers()) == 3
+	}) {
+		t.Fatalf("only %d/3 workers connected", len(srv.ConnectedWorkers()))
+	}
+
+	const n = 30
+	for i := 0; i < n; i++ {
+		w, ok := srv.PickWorker()
+		if !ok {
+			t.Fatalf("PickWorker returned false at i=%d", i)
+		}
+		if err := srv.SendTaskDispatch(w, "t", "q", "s", []byte{}, 0); err != nil {
+			t.Fatalf("dispatch %d to %s: %v", i, w, err)
+		}
+	}
+
+	if !waitFor(t, 2*time.Second, func() bool {
+		total := int32(0)
+		for _, c := range counts {
+			total += c.Load()
+		}
+		return total == n
+	}) {
+		total := int32(0)
+		for id, c := range counts {
+			t.Logf("worker %s: %d", id, c.Load())
+			total += c.Load()
+		}
+		t.Fatalf("only %d/%d dispatches landed", total, n)
+	}
+	// Each worker should receive exactly n/3 with strict round-robin.
+	for id, c := range counts {
+		if got := c.Load(); got != int32(n/3) {
+			t.Errorf("worker %s: %d dispatches, want %d", id, got, n/3)
+		}
+	}
+}
+
+// TestPickWorkerEmpty returns false when no workers are connected.
+func TestPickWorkerEmpty(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", ClusterID: "empty"}, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop(0)
+
+	if _, ok := srv.PickWorker(); ok {
+		t.Fatal("PickWorker on empty server should return false")
+	}
+}
+
+// TestSendTaskDispatchUnknownWorker returns ErrNotConnected when the
+// named worker isn't currently registered.
+func TestSendTaskDispatchUnknownWorker(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", ClusterID: "u"}, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop(0)
+
+	err := srv.SendTaskDispatch("ghost", "t", "q", "s", nil, 0)
+	if err == nil {
+		t.Fatal("expected ErrNotConnected for unknown worker")
+	}
+}
+
+// TestTaskDispatchBackpressureBlocksSend verifies that a slow handler
+// applies HTTP/2 flow-control backpressure all the way back to the
+// server's Send. We simulate slow consumption with a blocking handler
+// and confirm Send eventually blocks once the in-flight window is full.
+//
+// gRPC's default flow-control window is 64 KiB; sending many small
+// messages while the handler blocks fills it. We measure that a
+// large-enough fan-out exhibits a measurable Send delay.
+func TestTaskDispatchBackpressureBlocksSend(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", ClusterID: "bp"}, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	client := NewClient(ClientConfig{
+		CoordAddr:        srv.Addr(),
+		WorkerID:         "w-bp",
+		ReconnectBackoff: 50 * time.Millisecond,
+	}, nil)
+	client.Start(ctx)
+	defer client.Stop()
+
+	release := make(chan struct{})
+	var received atomic.Int32
+	client.RegisterDispatchHandler(func(td TaskDispatch) {
+		received.Add(1)
+		<-release
+	})
+
+	if !waitFor(t, 2*time.Second, client.Connected) {
+		t.Fatal("client never connected")
+	}
+	if !waitFor(t, 2*time.Second, func() bool {
+		return len(srv.ConnectedWorkers()) == 1
+	}) {
+		t.Fatal("server never saw worker")
+	}
+
+	// Use a large-ish payload so the flow-control window fills quickly.
+	// We don't depend on a specific count; we just verify that Send
+	// blocks once the window is full, by watching a sequence of sends
+	// in a goroutine and confirming one of them does not complete
+	// before we release the handler.
+	const payloadKB = 64
+	payload := make([]byte, payloadKB*1024)
+	sendDone := make(chan int, 64)
+	go func() {
+		for i := 0; i < cap(sendDone); i++ {
+			err := srv.SendTaskDispatch("w-bp", "t", "q", "s", payload, 0)
+			if err != nil {
+				return
+			}
+			sendDone <- i
+		}
+	}()
+
+	// Wait for the producer to stall: at least one send completed (handler
+	// received), but progress should stop before the full 64 messages
+	// land because the handler is blocked.
+	if !waitFor(t, 2*time.Second, func() bool { return received.Load() >= 1 }) {
+		t.Fatal("handler never received first message")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if len(sendDone) >= cap(sendDone) {
+		t.Fatal("all sends completed despite handler blocking — no backpressure")
+	}
+
+	// Release the handler. Producer should drain.
+	close(release)
+	if !waitFor(t, 3*time.Second, func() bool { return len(sendDone) == cap(sendDone) }) {
+		t.Fatalf("after release: %d/%d sends drained", len(sendDone), cap(sendDone))
+	}
+}
+

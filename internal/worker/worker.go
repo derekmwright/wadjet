@@ -92,6 +92,12 @@ type Worker struct {
 	activeTasksMu sync.RWMutex
 	activeTasks   map[string]struct{} // task IDs currently executing
 
+	// dpClient is the optional data-plane gRPC client. When non-nil, the
+	// worker skips the JetStream Fetch loop and instead executes tasks
+	// pushed via dpClient's TaskDispatch handler. Gather sinks also prefer
+	// gRPC for result delivery in this mode. nil = legacy NATS-only path.
+	dpClient *dataplane.Client
+
 	// CPU profiling state — started/stopped via NATS profile requests.
 	profMu  sync.Mutex
 	profBuf *bytes.Buffer // nil when not profiling
@@ -181,11 +187,16 @@ func (w *Worker) SetControlConn(nc *nats.Conn) {
 	w.controlNC = nc
 }
 
-// SetDataPlaneClient enables gRPC result streaming for gather sinks
-// produced by this worker's executor. When set + Connected, each task's
-// gatherReplySink prefers the gRPC stream over the NATS reply subject.
-// nil = NATS-only result delivery (default).
+// SetDataPlaneClient enables the gRPC data plane for this worker.
+// When set:
+//   - gather sinks prefer the gRPC stream over the NATS reply subject
+//     (Phase B behavior; safe even if dispatch stays on NATS),
+//   - the worker skips its JetStream Fetch loop and executes tasks
+//     pushed via TaskDispatch on the same stream (Phase C).
+//
+// nil = legacy NATS-only path (default). Must be called before Start.
 func (w *Worker) SetDataPlaneClient(c *dataplane.Client) {
+	w.dpClient = c
 	w.executor.SetDataPlaneClient(c)
 }
 
@@ -204,8 +215,8 @@ func (w *Worker) Start(ctx context.Context) error {
 		w.sweepStaleBuildCacheFiles()
 	}
 
-	// Use cluster-scoped filter so this worker only pulls tasks for its cluster.
-	// If ClusterID is empty, subscribe to all tasks (backward compatible).
+	// Filter subject is computed even in gRPC mode purely for the startup
+	// log line below — gRPC dispatch is routed by worker_id, not subject.
 	filterSubject := distributed.SubjectTasksAll
 	if w.config.ClusterID != "" {
 		filterSubject = distributed.ClusterTasksFilter(w.config.ClusterID)
@@ -214,19 +225,25 @@ func (w *Worker) Start(ctx context.Context) error {
 	// Create a shared durable consumer per cluster. All workers in the same
 	// cluster pull from the same consumer — NATS distributes messages across them.
 	// WorkQueuePolicy streams don't allow multiple consumers with the same filter.
-	consumerName := "tasks"
-	if w.config.ClusterID != "" {
-		consumerName = "tasks-" + w.config.ClusterID
-	}
-	consumer, err := w.js.CreateOrUpdateConsumer(ctx, distributed.StreamTasks, jetstream.ConsumerConfig{
-		Durable:       consumerName,
-		FilterSubject: filterSubject,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       10 * time.Minute,
-		MaxDeliver:    3,
-	})
-	if err != nil {
-		return fmt.Errorf("creating consumer: %w", err)
+	// Skipped when the gRPC data plane is in use: coord pushes TaskDispatch
+	// over the bidi stream and the JetStream Fetch loop stays dormant.
+	var consumer jetstream.Consumer
+	if w.dpClient == nil {
+		consumerName := "tasks"
+		if w.config.ClusterID != "" {
+			consumerName = "tasks-" + w.config.ClusterID
+		}
+		c, err := w.js.CreateOrUpdateConsumer(ctx, distributed.StreamTasks, jetstream.ConsumerConfig{
+			Durable:       consumerName,
+			FilterSubject: filterSubject,
+			AckPolicy:     jetstream.AckExplicitPolicy,
+			AckWait:       10 * time.Minute,
+			MaxDeliver:    3,
+		})
+		if err != nil {
+			return fmt.Errorf("creating consumer: %w", err)
+		}
+		consumer = c
 	}
 
 	// Subscribe to query cancellation messages
@@ -309,20 +326,83 @@ func (w *Worker) Start(ctx context.Context) error {
 		defer w.wg.Done()
 		w.heartbeatLoop(ctx, sem)
 	}()
-	w.wg.Add(1)
-	go func() {
-		defer w.wg.Done()
-		w.taskLoop(ctx, consumer, sem)
-	}()
+
+	dispatchMode := "nats"
+	if w.dpClient != nil {
+		dispatchMode = "grpc"
+		// Bounded queue between the gRPC recv loop and the per-task
+		// goroutines. Capacity = MaxConcurrent so coord can have
+		// MaxConcurrent in-flight assignments before HTTP/2 flow control
+		// stalls the next Send. The receive path is single-threaded
+		// inside the dataplane client, so blocking the handler blocks
+		// recv → coord's stream.Send blocks → backpressure propagates.
+		pending := make(chan dataplane.TaskDispatch, w.config.MaxConcurrent)
+		w.dpClient.RegisterDispatchHandler(func(td dataplane.TaskDispatch) {
+			select {
+			case pending <- td:
+			case <-ctx.Done():
+			}
+		})
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.dispatchLoop(ctx, pending, sem)
+		}()
+	} else {
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.taskLoop(ctx, consumer, sem)
+		}()
+	}
 
 	w.logger.Info("worker started",
 		"worker_id", w.config.WorkerID,
 		"cluster_id", w.config.ClusterID,
 		"max_concurrent", w.config.MaxConcurrent,
 		"filter_subject", filterSubject,
+		"dispatch", dispatchMode,
 	)
 
 	return nil
+}
+
+// dispatchLoop consumes TaskDispatch envelopes pushed by coord over
+// the gRPC data plane and runs them against the same per-worker
+// MaxConcurrent semaphore the legacy taskLoop uses. The pending queue
+// is bounded; when full, the gRPC recv handler blocks → HTTP/2 flow
+// control backs the pressure all the way to coord.
+func (w *Worker) dispatchLoop(ctx context.Context, in <-chan dataplane.TaskDispatch, sem chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case td := <-in:
+			if w.Draining() {
+				return
+			}
+			var task distributed.Task
+			if err := distributed.Unmarshal(td.TaskBlob, &task); err != nil {
+				w.logger.Error("dataplane: unmarshal task",
+					"error", err, "task_id", td.TaskID, "query_id", td.QueryID)
+				continue
+			}
+			// Acquire a concurrency slot. Coord-side scheduling already
+			// bounds in-flight count per worker, but the sem also feeds
+			// heartbeat's ActiveTasks metric so we keep using it.
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+			}
+			w.wg.Add(1)
+			go func(t distributed.Task) {
+				defer w.wg.Done()
+				defer func() { <-sem }()
+				w.executeIncomingTask(ctx, t, noopAcker{})
+			}(task)
+		}
+	}
 }
 
 // Drain puts the worker into drain mode: it stops pulling new tasks and waits
@@ -507,6 +587,35 @@ func (w *Worker) isCancelled(queryID string) bool {
 	return ok
 }
 
+// taskAcker abstracts the JetStream message control surface so
+// handleTask can run on both the legacy JetStream path and the gRPC
+// data-plane path. JetStream wraps a real jetstream.Msg; gRPC uses a
+// no-op (no AckWait, no redelivery — coord owns retry via task_id
+// idempotency on disconnect).
+type taskAcker interface {
+	Ack()
+	Nak()
+	Term()
+	InProgress()
+}
+
+type jetstreamAcker struct{ msg jetstream.Msg }
+
+func (a jetstreamAcker) Ack()        { a.msg.Ack() }
+func (a jetstreamAcker) Nak()        { a.msg.Nak() }
+func (a jetstreamAcker) Term()       { a.msg.Term() }
+func (a jetstreamAcker) InProgress() { a.msg.InProgress() }
+
+// noopAcker is the gRPC-side acker. The data plane has no
+// redelivery model — coord re-dispatches on TCP disconnect, workers
+// dedupe on task_id.
+type noopAcker struct{}
+
+func (noopAcker) Ack()        {}
+func (noopAcker) Nak()        {}
+func (noopAcker) Term()       {}
+func (noopAcker) InProgress() {}
+
 func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 	var task distributed.Task
 	if err := distributed.Unmarshal(msg.Data(), &task); err != nil {
@@ -514,7 +623,13 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		msg.Term()
 		return
 	}
+	w.executeIncomingTask(ctx, task, jetstreamAcker{msg: msg})
+}
 
+// executeIncomingTask runs a task previously parsed from either the
+// JetStream consumer or the gRPC data-plane stream. The acker bridges
+// the two paths' control surfaces.
+func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task, msg taskAcker) {
 	// Skip tasks for cancelled queries (local cache from broadcast).
 	// Cancellation arrives via the wadjet.cancel.> pubsub at line 194; if
 	// a task races ahead of the broadcast and starts executing, the

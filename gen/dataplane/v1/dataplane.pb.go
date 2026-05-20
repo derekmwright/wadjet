@@ -22,8 +22,8 @@ const (
 )
 
 // WorkerEnvelope is the worker→coord direction of the bidi stream.
-// Phase B adds ResultBatch. Subsequent phases add TaskAck,
-// TaskProgress, TaskComplete, TaskFailed.
+// Phase B adds ResultBatch. Subsequent phases add TaskProgress,
+// TaskComplete, TaskFailed.
 type WorkerEnvelope struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -106,13 +106,15 @@ func (*WorkerEnvelope_Hello) isWorkerEnvelope_Msg() {}
 
 func (*WorkerEnvelope_ResultBatch) isWorkerEnvelope_Msg() {}
 
-// CoordEnvelope is the coord→worker direction. Subsequent phases add
-// TaskDispatch, CancelTask as `oneof` variants.
+// CoordEnvelope is the coord→worker direction. Phase C adds
+// TaskDispatch (the load-bearing change in the migration); CancelTask
+// stays on NATS pub/sub in Phase C and may move later.
 type CoordEnvelope struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
 	//
 	//	*CoordEnvelope_Welcome
+	//	*CoordEnvelope_TaskDispatch
 	Msg           isCoordEnvelope_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -164,15 +166,30 @@ func (x *CoordEnvelope) GetWelcome() *Welcome {
 	return nil
 }
 
+func (x *CoordEnvelope) GetTaskDispatch() *TaskDispatch {
+	if x != nil {
+		if x, ok := x.Msg.(*CoordEnvelope_TaskDispatch); ok {
+			return x.TaskDispatch
+		}
+	}
+	return nil
+}
+
 type isCoordEnvelope_Msg interface {
 	isCoordEnvelope_Msg()
 }
 
 type CoordEnvelope_Welcome struct {
-	Welcome *Welcome `protobuf:"bytes,1,opt,name=welcome,proto3,oneof"` // reserved: TaskDispatch, CancelTask. See phases B–E.
+	Welcome *Welcome `protobuf:"bytes,1,opt,name=welcome,proto3,oneof"`
+}
+
+type CoordEnvelope_TaskDispatch struct {
+	TaskDispatch *TaskDispatch `protobuf:"bytes,2,opt,name=task_dispatch,json=taskDispatch,proto3,oneof"` // reserved: CancelTask. See phase D+ design.
 }
 
 func (*CoordEnvelope_Welcome) isCoordEnvelope_Msg() {}
+
+func (*CoordEnvelope_TaskDispatch) isCoordEnvelope_Msg() {}
 
 // Hello is the worker's introduction. Coord uses it to register the
 // worker, bind capabilities to the scheduler, and pin a build_sha for
@@ -394,6 +411,96 @@ func (x *ResultBatch) GetErr() string {
 	return ""
 }
 
+// TaskDispatch is one unit of work coord pushes to a worker. The body
+// is an opaque blob — distributed.Marshal(Task) on the coord side,
+// distributed.Unmarshal on the worker side — because the Task struct
+// has too many fields and too much churn to express in proto. gRPC
+// just carries the bytes.
+//
+// task_id, query_id, stage_id are duplicated outside the blob so the
+// dispatcher and progress paths can route without unmarshaling. They
+// MUST match the values inside task_blob; worker-side code uses the
+// blob for execution and the outer fields for routing/logging only.
+//
+// Idempotency: workers de-dupe on task_id. Coord may redispatch the
+// same task_id after a TCP disconnect; duplicate completions are
+// dropped by the result handler.
+type TaskDispatch struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	TaskId           string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	QueryId          string                 `protobuf:"bytes,2,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
+	StageId          string                 `protobuf:"bytes,3,opt,name=stage_id,json=stageId,proto3" json:"stage_id,omitempty"`
+	TaskBlob         []byte                 `protobuf:"bytes,4,opt,name=task_blob,json=taskBlob,proto3" json:"task_blob,omitempty"`
+	DeadlineUnixNano int64                  `protobuf:"varint,5,opt,name=deadline_unix_nano,json=deadlineUnixNano,proto3" json:"deadline_unix_nano,omitempty"` // 0 = no explicit deadline
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *TaskDispatch) Reset() {
+	*x = TaskDispatch{}
+	mi := &file_dataplane_v1_dataplane_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TaskDispatch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TaskDispatch) ProtoMessage() {}
+
+func (x *TaskDispatch) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_v1_dataplane_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TaskDispatch.ProtoReflect.Descriptor instead.
+func (*TaskDispatch) Descriptor() ([]byte, []int) {
+	return file_dataplane_v1_dataplane_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *TaskDispatch) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *TaskDispatch) GetQueryId() string {
+	if x != nil {
+		return x.QueryId
+	}
+	return ""
+}
+
+func (x *TaskDispatch) GetStageId() string {
+	if x != nil {
+		return x.StageId
+	}
+	return ""
+}
+
+func (x *TaskDispatch) GetTaskBlob() []byte {
+	if x != nil {
+		return x.TaskBlob
+	}
+	return nil
+}
+
+func (x *TaskDispatch) GetDeadlineUnixNano() int64 {
+	if x != nil {
+		return x.DeadlineUnixNano
+	}
+	return 0
+}
+
 var File_dataplane_v1_dataplane_proto protoreflect.FileDescriptor
 
 const file_dataplane_v1_dataplane_proto_rawDesc = "" +
@@ -402,10 +509,11 @@ const file_dataplane_v1_dataplane_proto_rawDesc = "" +
 	"\x0eWorkerEnvelope\x122\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1a.wadjet.dataplane.v1.HelloH\x00R\x05hello\x12E\n" +
 	"\fresult_batch\x18\x02 \x01(\v2 .wadjet.dataplane.v1.ResultBatchH\x00R\vresultBatchB\x05\n" +
-	"\x03msgJ\x04\b\x03\x10\x10\"V\n" +
+	"\x03msgJ\x04\b\x03\x10\x10\"\xa0\x01\n" +
 	"\rCoordEnvelope\x128\n" +
-	"\awelcome\x18\x01 \x01(\v2\x1c.wadjet.dataplane.v1.WelcomeH\x00R\awelcomeB\x05\n" +
-	"\x03msgJ\x04\b\x02\x10\x10\"|\n" +
+	"\awelcome\x18\x01 \x01(\v2\x1c.wadjet.dataplane.v1.WelcomeH\x00R\awelcome\x12H\n" +
+	"\rtask_dispatch\x18\x02 \x01(\v2!.wadjet.dataplane.v1.TaskDispatchH\x00R\ftaskDispatchB\x05\n" +
+	"\x03msgJ\x04\b\x03\x10\x10\"|\n" +
 	"\x05Hello\x12\x1b\n" +
 	"\tworker_id\x18\x01 \x01(\tR\bworkerId\x12\x1b\n" +
 	"\tbuild_sha\x18\x02 \x01(\tR\bbuildSha\x12\x19\n" +
@@ -424,7 +532,13 @@ const file_dataplane_v1_dataplane_proto_rawDesc = "" +
 	"\bterminal\x18\x03 \x01(\bR\bterminal\x12\x1b\n" +
 	"\trow_count\x18\x04 \x01(\x05R\browCount\x12\x18\n" +
 	"\apayload\x18\x05 \x01(\fR\apayload\x12\x10\n" +
-	"\x03err\x18\x06 \x01(\tR\x03err2c\n" +
+	"\x03err\x18\x06 \x01(\tR\x03err\"\xa8\x01\n" +
+	"\fTaskDispatch\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
+	"\bquery_id\x18\x02 \x01(\tR\aqueryId\x12\x19\n" +
+	"\bstage_id\x18\x03 \x01(\tR\astageId\x12\x1b\n" +
+	"\ttask_blob\x18\x04 \x01(\fR\btaskBlob\x12,\n" +
+	"\x12deadline_unix_nano\x18\x05 \x01(\x03R\x10deadlineUnixNano2c\n" +
 	"\tDataPlane\x12V\n" +
 	"\aConnect\x12#.wadjet.dataplane.v1.WorkerEnvelope\x1a\".wadjet.dataplane.v1.CoordEnvelope(\x010\x01B:Z8github.com/citc-tech/wadjet/gen/dataplane/v1;dataplanev1b\x06proto3"
 
@@ -440,25 +554,27 @@ func file_dataplane_v1_dataplane_proto_rawDescGZIP() []byte {
 	return file_dataplane_v1_dataplane_proto_rawDescData
 }
 
-var file_dataplane_v1_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_dataplane_v1_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_dataplane_v1_dataplane_proto_goTypes = []any{
 	(*WorkerEnvelope)(nil), // 0: wadjet.dataplane.v1.WorkerEnvelope
 	(*CoordEnvelope)(nil),  // 1: wadjet.dataplane.v1.CoordEnvelope
 	(*Hello)(nil),          // 2: wadjet.dataplane.v1.Hello
 	(*Welcome)(nil),        // 3: wadjet.dataplane.v1.Welcome
 	(*ResultBatch)(nil),    // 4: wadjet.dataplane.v1.ResultBatch
+	(*TaskDispatch)(nil),   // 5: wadjet.dataplane.v1.TaskDispatch
 }
 var file_dataplane_v1_dataplane_proto_depIdxs = []int32{
 	2, // 0: wadjet.dataplane.v1.WorkerEnvelope.hello:type_name -> wadjet.dataplane.v1.Hello
 	4, // 1: wadjet.dataplane.v1.WorkerEnvelope.result_batch:type_name -> wadjet.dataplane.v1.ResultBatch
 	3, // 2: wadjet.dataplane.v1.CoordEnvelope.welcome:type_name -> wadjet.dataplane.v1.Welcome
-	0, // 3: wadjet.dataplane.v1.DataPlane.Connect:input_type -> wadjet.dataplane.v1.WorkerEnvelope
-	1, // 4: wadjet.dataplane.v1.DataPlane.Connect:output_type -> wadjet.dataplane.v1.CoordEnvelope
-	4, // [4:5] is the sub-list for method output_type
-	3, // [3:4] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	5, // 3: wadjet.dataplane.v1.CoordEnvelope.task_dispatch:type_name -> wadjet.dataplane.v1.TaskDispatch
+	0, // 4: wadjet.dataplane.v1.DataPlane.Connect:input_type -> wadjet.dataplane.v1.WorkerEnvelope
+	1, // 5: wadjet.dataplane.v1.DataPlane.Connect:output_type -> wadjet.dataplane.v1.CoordEnvelope
+	5, // [5:6] is the sub-list for method output_type
+	4, // [4:5] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_dataplane_v1_dataplane_proto_init() }
@@ -472,6 +588,7 @@ func file_dataplane_v1_dataplane_proto_init() {
 	}
 	file_dataplane_v1_dataplane_proto_msgTypes[1].OneofWrappers = []any{
 		(*CoordEnvelope_Welcome)(nil),
+		(*CoordEnvelope_TaskDispatch)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -479,7 +596,7 @@ func file_dataplane_v1_dataplane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_v1_dataplane_proto_rawDesc), len(file_dataplane_v1_dataplane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -781,7 +781,9 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	}
 	defer geoip.Close()
 
-	// Start worker
+	// Construct worker (deferred Start; the gRPC data-plane wiring below
+	// must complete first so Start can see the dpClient and skip the
+	// JetStream Fetch loop in --data-plane=grpc mode).
 	w := worker.New(worker.Config{
 		NATSUrl:          embeddedNATS.ClientURL(),
 		ClusterID:        clusterID,
@@ -798,11 +800,6 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	m.Registry.MustRegister(alerts.Collectors()...)
 	w.SetMetrics(m)
 
-	if err := w.Start(ctx); err != nil {
-		return fmt.Errorf("starting worker: %w", err)
-	}
-	defer w.Stop()
-
 	// Start coordinator
 	coord := coordinator.New(coordinator.Config{
 		NATSUrl:      embeddedNATS.ClientURL(),
@@ -812,6 +809,8 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	// Phase A: same-process data-plane server + client when enabled.
 	// Worker dials localhost:dataPlaneAddr. Phase B: coord registers
 	// gather receivers; worker streams results via dpClient.
+	// Phase C: coord pushes TaskDispatch over the gRPC stream; worker.Start
+	// (below) sees a non-nil dpClient and skips its JetStream Fetch loop.
 	var dpSrv *dataplane.Server
 	var dpClient *dataplane.Client
 	if dataPlane == "grpc" {
@@ -834,6 +833,11 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		defer dpClient.Stop()
 		w.SetDataPlaneClient(dpClient)
 	}
+
+	if err := w.Start(ctx); err != nil {
+		return fmt.Errorf("starting worker: %w", err)
+	}
+	defer w.Stop()
 
 	// Start heartbeat monitoring, query reaping, active check, and result cleanup
 	coord.Workers().StartReaper(ctx)

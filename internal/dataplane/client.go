@@ -22,12 +22,32 @@ import (
 // can choose to fall back to NATS or treat it as fatal.
 var ErrNotConnected = errors.New("dataplane: not connected")
 
+// TaskDispatch is the transport-neutral form of a coord→worker task
+// envelope. The worker registers a handler with RegisterDispatchHandler;
+// every TaskDispatch received from the stream is delivered to it.
+//
+// Body is the same `distributed.Marshal(Task)` blob coord publishes —
+// worker unmarshals via `distributed.Unmarshal` to recover the full Task.
+type TaskDispatch struct {
+	TaskID           string
+	QueryID          string
+	StageID          string
+	TaskBlob         []byte
+	DeadlineUnixNano int64
+}
+
+// DispatchHandler consumes TaskDispatch messages. The recv loop calls
+// the handler synchronously; a slow handler applies backpressure all
+// the way back to coord via HTTP/2 flow control.
+type DispatchHandler func(TaskDispatch)
+
 // Client is the worker-side data-plane gRPC connection. It maintains a
 // single long-lived bidi stream to coord, reconnecting on disconnect.
 //
 // Phase A: open the stream, exchange Hello/Welcome, hold open.
 // Phase B: send ResultBatch messages via the stream's send side.
-// Phases C–E add task dispatch consumption.
+// Phase C: route TaskDispatch from the recv side into a registered
+// handler (worker plumbs this into its task pool).
 type Client struct {
 	cfg    ClientConfig
 	logger *slog.Logger
@@ -45,6 +65,8 @@ type Client struct {
 	streamMu      sync.RWMutex
 	currentStream dpv1.DataPlane_ConnectClient
 	sendMu        sync.Mutex
+
+	dispatchHandler atomic.Value // DispatchHandler; nil until RegisterDispatchHandler
 }
 
 // NewClient constructs a Client. Call Start to dial.
@@ -183,15 +205,55 @@ func (c *Client) connectOnce(ctx context.Context) error {
 		"server_time", time.Unix(0, welcome.GetServerTime()))
 
 	// Phase B: SendResultBatch uses currentStream directly under
-	// streamMu. The recv loop here is currently a drain — Phases C–E
-	// will route TaskDispatch back into the worker scheduler.
+	// streamMu. Phase C: route TaskDispatch envelopes into the worker's
+	// registered handler. The handler is called synchronously so a busy
+	// worker applies backpressure all the way back to coord via HTTP/2
+	// flow control.
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
 			return err
 		}
-		_ = msg
+		c.routeCoordEnvelope(msg)
 	}
+}
+
+func (c *Client) routeCoordEnvelope(env *dpv1.CoordEnvelope) {
+	switch m := env.GetMsg().(type) {
+	case *dpv1.CoordEnvelope_TaskDispatch:
+		td := m.TaskDispatch
+		v := c.dispatchHandler.Load()
+		if v == nil {
+			c.logger.Warn("dataplane: TaskDispatch received with no handler registered",
+				"task_id", td.GetTaskId(), "query_id", td.GetQueryId())
+			return
+		}
+		h, ok := v.(DispatchHandler)
+		if !ok || h == nil {
+			return
+		}
+		h(TaskDispatch{
+			TaskID:           td.GetTaskId(),
+			QueryID:          td.GetQueryId(),
+			StageID:          td.GetStageId(),
+			TaskBlob:         td.GetTaskBlob(),
+			DeadlineUnixNano: td.GetDeadlineUnixNano(),
+		})
+	default:
+		// Unknown variant from coord — ignore for forward compatibility.
+	}
+}
+
+// RegisterDispatchHandler installs the function invoked for each
+// TaskDispatch envelope arriving on the stream. Must be set before
+// coord starts pushing work. Replacing the handler at runtime is safe
+// — the recv loop reads atomically per message. A nil handler is
+// rejected (atomic.Value disallows storing nil).
+func (c *Client) RegisterDispatchHandler(h DispatchHandler) {
+	if c == nil || h == nil {
+		return
+	}
+	c.dispatchHandler.Store(h)
 }
 
 // SendResultBatch sends a result chunk over the data-plane stream.

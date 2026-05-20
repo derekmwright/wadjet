@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -332,5 +334,166 @@ func TestGatherReplySinkConsumeError(t *testing.T) {
 	}
 	if terminal.Err == "" {
 		t.Fatal("expected non-empty Err on terminal message")
+	}
+}
+
+// TestGatherReplySinkDataPlaneOnly is the Phase D smoke test: when the
+// sink has a dataplane.Client attached (`--data-plane=grpc` mode),
+// batches flow exclusively over the gRPC stream — NATS reply-subject
+// is never touched. This pins the either-or-per-cluster invariant from
+// the split-plane design.
+func TestGatherReplySinkDataPlaneOnly(t *testing.T) {
+	const queryID = "phaseD-grpc-only"
+	const subject = "wadjet.gather." + queryID
+
+	srv := dataplane.NewServer(dataplane.ServerConfig{
+		Addr: "127.0.0.1:0", ClusterID: "phaseD",
+	}, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	t.Cleanup(func() { srv.Stop(0) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := dataplane.NewClient(dataplane.ClientConfig{
+		CoordAddr:        srv.Addr(),
+		WorkerID:         "phaseD-worker",
+		ReconnectBackoff: 50 * time.Millisecond,
+	}, nil)
+	client.Start(ctx)
+	t.Cleanup(client.Stop)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !client.Connected() && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !client.Connected() {
+		t.Fatal("client never connected")
+	}
+
+	// Coord-side: register a ResultHandler and count incoming batches.
+	var grpcCount atomic.Int32
+	var terminalSeen atomic.Bool
+	srv.RegisterResultHandler(queryID, func(rb *dataplane.ResultBatch) {
+		grpcCount.Add(1)
+		if rb.Terminal {
+			terminalSeen.Store(true)
+		}
+	})
+	t.Cleanup(func() { srv.UnregisterResultHandler(queryID) }) //nolint:gocritic
+
+	// Hook NATS too, asserting nothing arrives there.
+	cfg := distributed.DefaultNATSConfig()
+	cfg.Port = -1
+	cfg.StoreDir = t.TempDir()
+	en, err := distributed.NewEmbeddedNATS(cfg, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	if err != nil {
+		t.Fatalf("embed NATS: %v", err)
+	}
+	t.Cleanup(en.Shutdown)
+	nc, err := distributed.ConnectInProcess(en.Server())
+	if err != nil {
+		t.Fatalf("nats connect: %v", err)
+	}
+	t.Cleanup(func() { nc.Close() })
+
+	var natsCount atomic.Int32
+	natsSub, err := nc.Subscribe(subject, func(m *nats.Msg) { natsCount.Add(1) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer natsSub.Unsubscribe()
+
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+	}
+	b := batch.NewRecordBatch(schema, 3)
+	b.Columns[0].Int64Data[0], b.Columns[0].Int64Data[1], b.Columns[0].Int64Data[2] = 10, 20, 30
+
+	sink := newGatherReplySink(nc, subject, "phaseD-worker", schema).withDataPlane(client)
+	if err := sink.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if err := sink.Consume(ctx, b); err != nil {
+		t.Fatalf("Consume: %v", err)
+	}
+	if err := sink.Finalize(ctx); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for grpcCount.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if got := grpcCount.Load(); got != 2 {
+		t.Fatalf("gRPC handler receive count = %d, want 2 (1 batch + 1 terminal)", got)
+	}
+	if !terminalSeen.Load() {
+		t.Error("terminal batch was not seen via gRPC")
+	}
+	if got := natsCount.Load(); got != 0 {
+		t.Errorf("NATS subscriber received %d messages — expected 0 (gRPC-only mode)", got)
+	}
+}
+
+// TestGatherReplySinkDataPlaneDisconnected verifies that in gRPC-only
+// mode, a send issued after the client disconnects returns an error
+// instead of silently falling back to NATS — coord redispatches the
+// task on TCP loss, not the worker.
+func TestGatherReplySinkDataPlaneDisconnected(t *testing.T) {
+	srv := dataplane.NewServer(dataplane.ServerConfig{
+		Addr: "127.0.0.1:0", ClusterID: "phaseD-d",
+	}, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	addr := srv.Addr()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	client := dataplane.NewClient(dataplane.ClientConfig{
+		CoordAddr:        addr,
+		WorkerID:         "phaseD-d-worker",
+		ReconnectBackoff: 50 * time.Millisecond,
+	}, nil)
+	client.Start(ctx)
+	t.Cleanup(client.Stop)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !client.Connected() && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !client.Connected() {
+		t.Fatal("client never connected")
+	}
+
+	// Kill the server. Client's Connected() flips false; SendResultBatch
+	// returns ErrNotConnected.
+	srv.Stop(0)
+	deadline = time.Now().Add(2 * time.Second)
+	for client.Connected() && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if client.Connected() {
+		t.Fatal("client did not detect server stop")
+	}
+
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64, Nullable: true},
+	}
+	b := batch.NewRecordBatch(schema, 1)
+	b.Columns[0].Int64Data[0] = 1
+
+	// nc is nil — only dpClient is set, so a NATS fallback would panic.
+	// Confirms we never reach the NATS path.
+	sink := newGatherReplySink(nil, "wadjet.gather.dead", "phaseD-d-worker", schema).withDataPlane(client)
+	if err := sink.Init(ctx); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	err := sink.Consume(ctx, b)
+	if err == nil {
+		t.Fatal("expected Consume to fail when gRPC is disconnected (no NATS fallback)")
 	}
 }
