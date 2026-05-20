@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/peterh/liner"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/config"
 	"github.com/citc-tech/wadjet/internal/geoip"
 	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/expr"
 	"github.com/citc-tech/wadjet/internal/format"
@@ -83,6 +85,9 @@ var (
 	otelInsecure     bool
 	metricsAddr      string
 	enableAlerts     bool
+	dataPlane        string
+	dataPlaneAddr    string
+	coordDataPlane   string
 )
 
 func main() {
@@ -127,6 +132,9 @@ func main() {
 	rootCmd.PersistentFlags().IntVar(&maxConcurrentQry, "max-concurrent-queries", 0, "Maximum concurrent queries (0=unlimited)")
 	rootCmd.PersistentFlags().StringVar(&metricsAddr, "metrics-addr", ":9100", "Prometheus metrics listen address (worker mode)")
 	rootCmd.PersistentFlags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum concurrent tasks per worker")
+	rootCmd.PersistentFlags().StringVar(&dataPlane, "data-plane", "nats", "Worker↔coord data-plane transport: nats (default) or grpc. See project_split_plane_design_2026-05-20.")
+	rootCmd.PersistentFlags().StringVar(&dataPlaneAddr, "data-plane-addr", ":9091", "Data-plane gRPC listen address (coord/standalone)")
+	rootCmd.PersistentFlags().StringVar(&coordDataPlane, "coord-data-plane", "", "Coord's data-plane host:port (worker only; defaults to coord-host + 9091)")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
@@ -801,6 +809,32 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		ResultBucket: bucket,
 	}, cat, nc, js, logger)
 
+	// Phase A: same-process data-plane server + client when enabled.
+	// Worker dials localhost:dataPlaneAddr. Phase B: coord registers
+	// gather receivers; worker streams results via dpClient.
+	var dpSrv *dataplane.Server
+	var dpClient *dataplane.Client
+	if dataPlane == "grpc" {
+		dpSrv = dataplane.NewServer(dataplane.ServerConfig{
+			Addr:      dataPlaneAddr,
+			ClusterID: clusterID,
+		}, logger)
+		if err := dpSrv.Start(); err != nil {
+			return fmt.Errorf("dataplane server: %w", err)
+		}
+		defer dpSrv.Stop(3 * time.Second)
+		coord.SetDataPlaneServer(dpSrv)
+
+		dpClient = dataplane.NewClient(dataplane.ClientConfig{
+			CoordAddr: dpSrv.Addr(),
+			WorkerID:  "standalone-worker",
+			BuildSHA:  buildSHA(),
+		}, logger)
+		dpClient.Start(ctx)
+		defer dpClient.Stop()
+		w.SetDataPlaneClient(dpClient)
+	}
+
 	// Start heartbeat monitoring, query reaping, active check, and result cleanup
 	coord.Workers().StartReaper(ctx)
 	coord.Workers().StartSubStatsLogger(ctx)
@@ -1066,6 +1100,22 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		ResultBucket: bucket,
 	}, cat, nc, js, logger)
 
+	// Phase A: start data-plane gRPC server alongside coord when enabled.
+	// Phase B: coord registers gather receivers as ResultHandlers so
+	// workers can stream results over gRPC instead of NATS.
+	var dpSrv *dataplane.Server
+	if dataPlane == "grpc" {
+		dpSrv = dataplane.NewServer(dataplane.ServerConfig{
+			Addr:      dataPlaneAddr,
+			ClusterID: clusterID,
+		}, logger)
+		if err := dpSrv.Start(); err != nil {
+			return fmt.Errorf("dataplane server: %w", err)
+		}
+		defer dpSrv.Stop(3 * time.Second)
+		coord.SetDataPlaneServer(dpSrv)
+	}
+
 	// Initialize OTel tracing if configured
 	otelTP := initTelemetry(ctx, logger)
 	if otelTP != nil {
@@ -1276,7 +1326,12 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	}
 	defer geoip.Close()
 
+	// Generate a worker id once so both the existing NATS worker code and
+	// the new data-plane client share the same identity.
+	workerID := "worker-" + uuid.New().String()[:8]
+
 	w := worker.New(worker.Config{
+		WorkerID:         workerID,
 		NATSUrl:          natsAddr,
 		ClusterID:        clusterID,
 		MaxConcurrent:    maxConcurrent,
@@ -1287,6 +1342,26 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)
 	w.SetControlConn(controlNC)
+
+	// Phase A: open the data-plane stream to coord when enabled. Heartbeats,
+	// cancellation, KV stay on NATS. Phases B–E migrate task dispatch,
+	// results, gather, progress onto this stream.
+	var dpClient *dataplane.Client
+	if dataPlane == "grpc" {
+		addr := coordDataPlane
+		if addr == "" {
+			// Derive from natsAddr host: keep host, swap port to data-plane.
+			addr = deriveDataPlaneAddr(natsAddr, dataPlaneAddr)
+		}
+		dpClient = dataplane.NewClient(dataplane.ClientConfig{
+			CoordAddr: addr,
+			WorkerID:  workerID,
+			BuildSHA:  buildSHA(),
+		}, logger)
+		dpClient.Start(ctx)
+		defer dpClient.Stop()
+		w.SetDataPlaneClient(dpClient)
+	}
 
 	// Opt-in heap+goroutine pprof dumper (env-gated). Workers are silent
 	// to journald under buffered cloud-init pipes, so disk-snapshot pprof
@@ -1815,4 +1890,37 @@ func parseS3URL(s string) (bucket, path string, err error) {
 		path += "/"
 	}
 	return bucket, path, nil
+}
+
+// deriveDataPlaneAddr builds host:port for the data plane from the
+// NATS URL host and the data-plane listen port. natsAddr is something
+// like "nats://10.0.1.2:4222" or "10.0.1.2:4222"; portFromFlag is the
+// listen address used by coord (":9091" → port 9091).
+func deriveDataPlaneAddr(natsAddr, portFromFlag string) string {
+	host := natsAddr
+	host = strings.TrimPrefix(host, "nats://")
+	host = strings.TrimPrefix(host, "tls://")
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		host = host[:i]
+	}
+	port := strings.TrimPrefix(portFromFlag, ":")
+	return host + ":" + port
+}
+
+// buildSHA returns the VCS revision short SHA from the build info, or
+// "unknown" if unavailable.
+func buildSHA() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" {
+			if len(s.Value) >= 7 {
+				return s.Value[:7]
+			}
+			return s.Value
+		}
+	}
+	return "unknown"
 }

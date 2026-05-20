@@ -15,6 +15,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/alerts"
 	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/telemetry"
 
@@ -93,6 +94,11 @@ type Coordinator struct {
 	catalogSnapshotInterval time.Duration
 	catalogSnapshotCancel   context.CancelFunc
 	catalogSnapshotWG       sync.WaitGroup
+
+	// dpSrv is the optional data-plane gRPC server. When non-nil, gather
+	// receivers are registered as ResultHandlers so workers can stream
+	// results over gRPC instead of NATS. nil = NATS-only delivery.
+	dpSrv *dataplane.Server
 }
 
 // New creates a new Coordinator.
@@ -145,6 +151,14 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	}
 
 	return c
+}
+
+// SetDataPlaneServer enables gRPC result delivery. When set, the coord
+// registers each gather receiver with the server so workers can stream
+// ResultBatch messages directly instead of via NATS. Must be called
+// before any query runs. Pass nil (or skip) to use NATS-only delivery.
+func (c *Coordinator) SetDataPlaneServer(srv *dataplane.Server) {
+	c.dpSrv = srv
 }
 
 // Workers returns the worker registry for inspecting active workers.

@@ -927,7 +927,7 @@ func (e *Executor) openFragmentSink(task distributed.Task, spec distributed.OpSp
 		// Schema is captured on first Consume so we don't need to plumb it
 		// through openFragmentSink. nil here is the same shape gather uses
 		// in writeStageOutput.
-		s := newGatherReplySink(e.nc, spec.ReplySubject, "", nil)
+		s := newGatherReplySink(e.nc, spec.ReplySubject, "", nil).withDataPlane(e.dpClient)
 		return &fragmentGatherSink{sink: s}, nil
 
 	default:

@@ -9,6 +9,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 )
@@ -76,6 +77,14 @@ func (r *gatherReceiver) handle(m *nats.Msg) {
 	if err := distributed.Unmarshal(m.Data, &msg); err != nil {
 		return
 	}
+	r.handleParsed(&msg)
+}
+
+// handleParsed is the transport-neutral entry point. NATS path calls it
+// after Unmarshal; gRPC data-plane path calls it after translating a
+// ResultBatch proto into the equivalent GatherBatchMsg. The behavior
+// must be identical for both transports.
+func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 	if r.workers != nil {
 		r.workers.MarkWorkerSeen(msg.WorkerID)
 	}
@@ -136,6 +145,28 @@ func (r *gatherReceiver) SetExpectedTerminals(n int) {
 		default:
 		}
 	}
+}
+
+// registerWithDataPlane installs a ResultHandler on the data-plane
+// gRPC server so workers that publish results via the gRPC stream are
+// routed to the same handleParsed entry point as the NATS path. Both
+// transports flow into the same accumulator; receive ordering between
+// them is unspecified but each batch is independent. Returns a cleanup
+// function that removes the handler; cheap no-op if srv is nil.
+func (r *gatherReceiver) registerWithDataPlane(srv *dataplane.Server, queryID string) func() {
+	if srv == nil {
+		return func() {}
+	}
+	srv.RegisterResultHandler(queryID, func(rb *dataplane.ResultBatch) {
+		r.handleParsed(&distributed.GatherBatchMsg{
+			Terminal: rb.Terminal,
+			RowCount: rb.RowCount,
+			Payload:  rb.Payload,
+			Err:      rb.Err,
+			WorkerID: rb.WorkerID,
+		})
+	})
+	return func() { srv.UnregisterResultHandler(queryID) }
 }
 
 // wait blocks until all expected terminal messages arrive, ctx is done,

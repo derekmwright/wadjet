@@ -36,6 +36,14 @@ type ClusterConfig struct {
 	Endpoint    string
 	SSL         bool
 
+	// DataPlane selects the worker↔coord transport. "" or "nats" uses
+	// the legacy NATS reply-subject path; "grpc" enables the new
+	// data-plane gRPC stream (Phase B+). Both transports route into the
+	// same coord-side gatherReceiver so cross-flag results are
+	// identical; the toggle exists to validate the new path without
+	// committing to it as default.
+	DataPlane string
+
 	Logger *slog.Logger
 }
 
@@ -45,15 +53,16 @@ type ClusterConfig struct {
 type Cluster struct {
 	cfg ClusterConfig
 
-	mu           sync.Mutex
-	natsPort     int
-	natsURL      string
-	httpPort     int
-	grpcPort     int
-	coord        *managedProcess
-	workers      []*managedProcess
-	shutdownOnce sync.Once
-	shutdownErr  error
+	mu            sync.Mutex
+	natsPort      int
+	natsURL       string
+	httpPort      int
+	grpcPort      int
+	dataPlanePort int
+	coord         *managedProcess
+	workers       []*managedProcess
+	shutdownOnce  sync.Once
+	shutdownErr   error
 }
 
 type managedProcess struct {
@@ -140,6 +149,13 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 		"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", "coord"),
 		"--nats-store-dir=" + filepath.Join(c.cfg.RunDir, "nats"),
 	}
+	if c.cfg.DataPlane == "grpc" {
+		c.dataPlanePort = freePort()
+		coordArgs = append(coordArgs,
+			"--data-plane=grpc",
+			"--data-plane-addr=:"+strconv.Itoa(c.dataPlanePort),
+		)
+	}
 	coordArgs = append(coordArgs, storageArgs(c.cfg)...)
 	coord, err := c.spawn("coord", coordArgs)
 	if err != nil {
@@ -184,6 +200,12 @@ func (c *Cluster) StartWorkers(ctx context.Context) error {
 			"--nats-url=" + c.natsURL,
 			"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", role),
 			"--metrics-addr=:" + strconv.Itoa(metricsPort),
+		}
+		if c.cfg.DataPlane == "grpc" {
+			workerArgs = append(workerArgs,
+				"--data-plane=grpc",
+				"--coord-data-plane=127.0.0.1:"+strconv.Itoa(c.dataPlanePort),
+			)
 		}
 		workerArgs = append(workerArgs, storageArgs(c.cfg)...)
 		w, err := c.spawn(role, workerArgs)

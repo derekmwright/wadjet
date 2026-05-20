@@ -34,6 +34,7 @@ func main() {
 		dataPrefix     = flag.String("data-prefix", "tables/", "S3 prefix under --bucket containing table data (source=s3)")
 		numWorkers     = flag.Int("workers", 0, "number of worker processes to spawn (local mode); 0 = default of 2. Set to 1 to avoid 2-process memory overcommit on small dev boxes when measuring SF10+.")
 		scaleFactor    = flag.Float64("scale-factor", 0, "TPC-H scale factor for local-mode generated data (0=SF0.01 default, 0.1, 1, 10). Larger values exercise per-stage round-trip overhead and memory paths at meaningful scale without EC2 spend.")
+		dataPlane      = flag.String("data-plane", "", "Worker↔coord transport: empty/nats (default) or grpc (Phase B+)")
 	)
 	flag.Parse()
 
@@ -66,6 +67,7 @@ func main() {
 		Endpoint:       *endpoint,
 		SSL:            *ssl,
 		DataPrefix:     *dataPrefix,
+		DataPlane:      *dataPlane,
 	}
 	if *queries != "" {
 		cfg.Queries = strings.Split(*queries, ",")

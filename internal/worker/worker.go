@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/metrics"
@@ -178,6 +179,14 @@ func (w *Worker) SetMetrics(m *metrics.Metrics) {
 // in-process tests.
 func (w *Worker) SetControlConn(nc *nats.Conn) {
 	w.controlNC = nc
+}
+
+// SetDataPlaneClient enables gRPC result streaming for gather sinks
+// produced by this worker's executor. When set + Connected, each task's
+// gatherReplySink prefers the gRPC stream over the NATS reply subject.
+// nil = NATS-only result delivery (default).
+func (w *Worker) SetDataPlaneClient(c *dataplane.Client) {
+	w.executor.SetDataPlaneClient(c)
 }
 
 // Start begins the worker task loop and heartbeat.

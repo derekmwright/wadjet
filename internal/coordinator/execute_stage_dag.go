@@ -291,6 +291,7 @@ func (c *Coordinator) executeStageDAG(
 				"query", queryID, "fuse_stage_id", depID,
 				"reply_subject", replySubject)
 			defer recv.sub.Unsubscribe()
+			defer recv.registerWithDataPlane(c.dpSrv, queryID)()
 		}
 	}
 
@@ -2902,6 +2903,7 @@ func (c *Coordinator) dispatchGatherStage(
 	if err != nil {
 		return nil, fmt.Errorf("subscribing gather reply: %w", err)
 	}
+	defer recv.registerWithDataPlane(c.dpSrv, queryID)()
 	c.logger.Info("gather: publishing task",
 		"query_id", queryID, "task_id", task.ID, "reply_subject", replySubject,
 		"input_files", len(task.Inputs[alias]))

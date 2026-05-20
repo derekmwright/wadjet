@@ -61,6 +61,11 @@ type Config struct {
 	Endpoint   string
 	SSL        bool
 	DataPrefix string // prefix under Bucket containing table data (e.g. "tables/")
+
+	// DataPlane selects worker↔coord transport for the spawned cluster.
+	// Empty / "nats" uses the legacy NATS reply-subject path. "grpc"
+	// enables the data-plane gRPC stream (Phase B+).
+	DataPlane string
 }
 
 // QueryMeasurement is the result of running one query (or micro).

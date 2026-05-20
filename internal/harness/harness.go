@@ -85,6 +85,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			GoMemLimit:   sliceCfg.GoMemLimit,
 			PgAddr:       cfg.PgAddr,
 			DataDir:      cfg.DataDir,
+			DataPlane:    cfg.DataPlane,
 			Logger:       logger,
 		}
 		if cfg.Source == "s3" {

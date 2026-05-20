@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -48,12 +49,13 @@ type Executor struct {
 	store        objstore.Store
 	js           jetstream.JetStream // for catalog access in pipeline tasks
 	nc           *nats.Conn          // for Gather-task reply streaming (nil = Gather disabled)
+	dpClient     *dataplane.Client   // optional gRPC data-plane; when connected, gather sinks prefer it
 	cache        *LRUCache
 	resultStore  *ResultStore        // in-memory result passing between stages (nil = disabled)
 	resultKV     jetstream.KeyValue  // NATS KV for cross-worker inter-stage results (nil = disabled)
 	localCache   *LocalStageCache    // same-worker stage-output local-disk cache (nil = disabled)
 	memoryBudget int64               // per-task memory budget in bytes (0 = unlimited)
-	spillDir     string              // directory for spill files
+	spillDir     string               // directory for spill files
 	metrics      *metrics.Metrics
 	logger       *slog.Logger
 
@@ -148,6 +150,14 @@ func (e *Executor) SetLocalStageCache(c *LocalStageCache) {
 // batches back to the coordinator's reply subject.
 func (e *Executor) SetNATSConn(nc *nats.Conn) {
 	e.nc = nc
+}
+
+// SetDataPlaneClient enables gRPC result streaming for gather sinks
+// constructed by this executor. When set and Connected, each
+// gatherReplySink prefers the gRPC stream over NATS Publish. nil
+// reverts to NATS-only delivery.
+func (e *Executor) SetDataPlaneClient(c *dataplane.Client) {
+	e.dpClient = c
 }
 
 // SetResultKV attaches a NATS KV store for cross-worker inter-stage result transfer.
@@ -567,7 +577,7 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		if e.nc == nil {
 			return fmt.Errorf("gather task requires NATS connection")
 		}
-		pipeline.Sink = newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, nil)
+		pipeline.Sink = newGatherReplySink(e.nc, task.ReplySubject, result.WorkerID, nil).withDataPlane(e.dpClient)
 		if err := pipeline.Run(ctx); err != nil {
 			return fmt.Errorf("gather pipeline: %w", err)
 		}

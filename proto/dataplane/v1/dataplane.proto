@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package wadjet.dataplane.v1;
+
+option go_package = "github.com/citc-tech/wadjet/gen/dataplane/v1;dataplanev1";
+
+// DataPlane is the worker↔coord transport for high-rate operational
+// traffic that NATS JetStream is a poor fit for at scale: task dispatch,
+// result batches, gather payloads, and per-task progress.
+//
+// Out of scope for this service (stays on NATS): heartbeats, query
+// cancellation broadcast, catalog/UDF KV, DLQ. See
+// project_split_plane_design_2026-05-20.md for the full design and
+// rationale.
+//
+// Phase A defines the connection bootstrap only (Hello/Welcome). The
+// streaming RPCs that carry tasks and results are added in Phases B–E.
+service DataPlane {
+  // Worker opens a long-lived bidi stream to the coordinator. The first
+  // message in each direction is Hello/Welcome; subsequent messages
+  // multiplex task dispatch, results, progress, and completion over
+  // the same stream.
+  rpc Connect(stream WorkerEnvelope) returns (stream CoordEnvelope);
+}
+
+// WorkerEnvelope is the worker→coord direction of the bidi stream.
+// Phase B adds ResultBatch. Subsequent phases add TaskAck,
+// TaskProgress, TaskComplete, TaskFailed.
+message WorkerEnvelope {
+  oneof msg {
+    Hello hello = 1;
+    ResultBatch result_batch = 2;
+    // reserved: TaskAck, TaskProgress, TaskComplete, TaskFailed.
+    // See phases C–E.
+  }
+  reserved 3 to 15;
+}
+
+// CoordEnvelope is the coord→worker direction. Subsequent phases add
+// TaskDispatch, CancelTask as `oneof` variants.
+message CoordEnvelope {
+  oneof msg {
+    Welcome welcome = 1;
+    // reserved: TaskDispatch, CancelTask. See phases B–E.
+  }
+  reserved 2 to 15;
+}
+
+// Hello is the worker's introduction. Coord uses it to register the
+// worker, bind capabilities to the scheduler, and pin a build_sha for
+// compatibility checks.
+message Hello {
+  string worker_id   = 1;
+  string build_sha   = 2;
+  int32  num_cpus    = 3;
+  int64  gomemlimit  = 4;
+}
+
+// Welcome is the coord's reply. Carries cluster identity and any
+// initial config the worker needs.
+message Welcome {
+  string cluster_id  = 1;
+  int64  server_time = 2; // unix nanos
+}
+
+// ResultBatch is a chunk of a query's gather output, sent from worker
+// to coord. Mirrors distributed.GatherBatchMsg on the NATS path so the
+// receive-side can reuse the same WSHF decoder.
+//
+// Routing: coord uses query_id to dispatch the batch to the right
+// gatherReceiver. WSHF payload is self-contained (magic + schema +
+// rows + nulls) — the gRPC framing is just transport.
+//
+// Terminal=true marks the last batch from this worker for this query.
+// If err is non-empty, the task failed and the partial output (if any)
+// is discarded by the receiver.
+message ResultBatch {
+  string query_id  = 1;
+  string worker_id = 2;
+  bool   terminal  = 3;
+  int32  row_count = 4;
+  bytes  payload   = 5; // WSHF-encoded
+  string err       = 6; // non-empty on task failure (terminal=true)
+}
