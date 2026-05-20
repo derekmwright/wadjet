@@ -28,6 +28,7 @@ import (
 
 	tpch "github.com/citc-tech/wadjet/benchmarks/tpch"
 	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	distrib "github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
@@ -41,14 +42,16 @@ import (
 
 func main() {
 	var (
-		configPath  = flag.String("config", "", "Path to benchmark profile YAML (values override defaults; CLI flags override profile)")
-		scale       = flag.Int("scale", 1, "TPC-H scale factor (1, 10, 100)")
-		s3Endpoint  = flag.String("endpoint", "", "S3 endpoint (empty = in-memory standalone)")
-		s3Bucket    = flag.String("bucket", "wadjet-bench-sf1", "S3 bucket name")
-		s3Region    = flag.String("region", "", "S3 region")
-		ssl         = flag.Bool("ssl", false, "Use TLS for S3")
-		workers     = flag.Int("workers", 0, "Expected external workers (0 = standalone in-memory)")
-		natsPort    = flag.Int("nats-port", 4222, "NATS listen port (distributed mode)")
+		configPath    = flag.String("config", "", "Path to benchmark profile YAML (values override defaults; CLI flags override profile)")
+		scale         = flag.Int("scale", 1, "TPC-H scale factor (1, 10, 100)")
+		s3Endpoint    = flag.String("endpoint", "", "S3 endpoint (empty = in-memory standalone)")
+		s3Bucket      = flag.String("bucket", "wadjet-bench-sf1", "S3 bucket name")
+		s3Region      = flag.String("region", "", "S3 region")
+		ssl           = flag.Bool("ssl", false, "Use TLS for S3")
+		workers       = flag.Int("workers", 0, "Expected external workers (0 = standalone in-memory)")
+		natsPort      = flag.Int("nats-port", 4222, "NATS listen port (distributed mode)")
+		dataPlane     = flag.String("data-plane", "", "Worker↔coord data-plane transport: empty/nats (default) or grpc (Phases C+D+E)")
+		dataPlaneAddr = flag.String("data-plane-addr", ":9091", "gRPC data-plane listen address (distributed + --data-plane=grpc)")
 		runs        = flag.Int("runs", 1, "Number of benchmark runs")
 		dataOnly    = flag.Bool("data-only", false, "Generate and upload data only, skip benchmark queries")
 		skipLoad    = flag.Bool("skip-load", false, "Skip data generation; discover existing parquet files from S3")
@@ -158,7 +161,7 @@ func main() {
 	useS3 := *s3Endpoint != ""
 
 	if isDistributed {
-		db, coord, nc = setupDistributed(ctx, logger, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *natsPort, *workers)
+		db, coord, nc = setupDistributed(ctx, logger, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *natsPort, *workers, *dataPlane, *dataPlaneAddr)
 	} else if useS3 {
 		db = setupS3Standalone(ctx, *s3Endpoint, *s3Region, *s3Bucket, *ssl)
 	} else {
@@ -267,7 +270,7 @@ func setupS3Standalone(ctx context.Context, endpoint, region, bucket string, ssl
 	return db
 }
 
-func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region, bucket string, ssl bool, nPort, workerCount int) (*wadjet.DB, *coordinator.Coordinator, *nats.Conn) {
+func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region, bucket string, ssl bool, nPort, workerCount int, dataPlane, dataPlaneAddr string) (*wadjet.DB, *coordinator.Coordinator, *nats.Conn) {
 	// S3 store (IAM credentials auto-detected)
 	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
 		Endpoint: endpoint,
@@ -321,6 +324,22 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	coord.Workers().StartSubStatsLogger(ctx)
 	coord.StartQueryReaper(ctx)
 	coord.StartQueryActiveHandler()
+
+	// Phase C/D/E: optional gRPC data-plane. When --data-plane=grpc, coord
+	// listens on dataPlaneAddr; workers dial it via --coord-data-plane.
+	// All task dispatch, results, gather payloads, and TaskProgress flow
+	// over the bidi stream. NATS keeps heartbeats + cancellation + KV.
+	if dataPlane == "grpc" {
+		dpSrv := dataplane.NewServer(dataplane.ServerConfig{
+			Addr:      dataPlaneAddr,
+			ClusterID: "local",
+		}, logger)
+		if err := dpSrv.Start(); err != nil {
+			log.Fatalf("dataplane server: %v", err)
+		}
+		coord.SetDataPlaneServer(dpSrv)
+		log.Printf("Data-plane gRPC listening on %s", dpSrv.Addr())
+	}
 
 	// Wait for remote workers
 	log.Printf("Waiting for %d remote workers to connect...", workerCount)

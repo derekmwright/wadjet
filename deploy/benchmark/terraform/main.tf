@@ -139,6 +139,15 @@ resource "aws_security_group" "bench" {
     self      = true
   }
 
+  # gRPC data-plane (workers ↔ coord). Phases C+D+E. Workers dial coord
+  # on this port when --data-plane=grpc; idle when --data-plane=nats.
+  ingress {
+    from_port = var.data_plane_port
+    to_port   = var.data_plane_port
+    protocol  = "tcp"
+    self      = true
+  }
+
   # pgwire
   ingress {
     from_port = 5433
@@ -350,6 +359,12 @@ locals {
     export WADJET_REVERSE_BLOOM_INNER_THRESHOLD="${var.reverse_bloom_inner_threshold}"
     export WADJET_JOIN_DEBUG="${var.join_debug}"
     export USE_NATIVE_DAG="${var.use_native_dag ? "1" : "0"}"
+    # Phase C/D/E data-plane selection. Empty/"nats" = legacy NATS reply
+    # subjects; "grpc" routes task dispatch + results + gather +
+    # TaskProgress over a per-worker bidi gRPC stream on
+    # ${var.data_plane_port}.
+    export TPCH_DATA_PLANE="${var.data_plane}"
+    export TPCH_DATA_PLANE_ADDR=":${var.data_plane_port}"
     # Force GOGC=100 so heap is bounded by 2x live data instead of growing to
     # GOMEMLIMIT before triggering mark-assist. Without this, scan-3 SF10
     # tasks accumulated parquet-decode garbage to ~10 GB peak heap before
@@ -580,7 +595,12 @@ resource "aws_instance" "worker" {
             --spill-dir="$worker_spill" \
             --cache-bytes=$PER_PROC_CACHE \
             --memory-budget=$PER_TASK_BUDGET \
-            --shared-pool-budget=$PER_PROC_POOL 2>&1 | sed "s/^/[w$idx] /"
+            --shared-pool-budget=$PER_PROC_POOL \
+            %{if var.data_plane == "grpc"~}
+            --data-plane=grpc \
+            --coord-data-plane="$COORD_IP:${var.data_plane_port}" \
+            %{endif~}
+            2>&1 | sed "s/^/[w$idx] /"
         EXIT_CODE=$?
         echo "[w$idx] exited code=$EXIT_CODE, restarting in 5s..."
         sleep 5

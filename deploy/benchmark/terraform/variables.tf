@@ -174,6 +174,18 @@ variable "use_native_dag" {
   default     = false
 }
 
+variable "data_plane" {
+  description = "Worker↔coord data-plane transport. Empty or 'nats' uses the legacy NATS reply-subject path; 'grpc' enables the bidi gRPC stream (Phases C+D+E). See project_split_plane_design_2026-05-20."
+  type        = string
+  default     = ""
+}
+
+variable "data_plane_port" {
+  description = "TCP port for the gRPC data-plane listener on the coordinator. Workers dial coord on this port. Only used when data_plane=grpc."
+  type        = number
+  default     = 9091
+}
+
 # Recommended instance types per scale factor:
 #   Graviton3 ARM (c7g):
 #     SF1:   c7g.2xlarge  (8 vCPU, 16 GB) — $0.29/hr

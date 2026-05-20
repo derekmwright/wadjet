@@ -151,6 +151,12 @@ elif [ "$MODE" = "distributed" ]; then
   NATIVE_DAG_FLAGS=()
   [ "${USE_NATIVE_DAG:-0}" = "1" ] && NATIVE_DAG_FLAGS=(--use-native-dag)
 
+  DATA_PLANE_FLAGS=()
+  if [ -n "${TPCH_DATA_PLANE:-}" ]; then
+    DATA_PLANE_FLAGS=(--data-plane="${TPCH_DATA_PLANE}")
+    [ -n "${TPCH_DATA_PLANE_ADDR:-}" ] && DATA_PLANE_FLAGS+=(--data-plane-addr="${TPCH_DATA_PLANE_ADDR}")
+  fi
+
   "$BENCH_BIN" \
     "${PROFILE_FLAG[@]}" \
     --scale="${SCALE}" \
@@ -161,6 +167,7 @@ elif [ "$MODE" = "distributed" ]; then
     "${LOAD_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
     "${NATIVE_DAG_FLAGS[@]}" \
+    "${DATA_PLANE_FLAGS[@]}" \
     --nats-port=4222 \
     --cpuprofile="${PROF_DIR}/cpu-distributed.prof" \
     --memprofile="${PROF_DIR}/mem-distributed.prof" \
