@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -74,9 +75,21 @@ type Server struct {
 	grpcSrv *grpc.Server
 	lis     net.Listener
 
-	mu      sync.RWMutex
+	// mu protects workers, order, and inFlight. cond is paired with mu
+	// (uses *sync.Mutex under the hood so RLock/RWMutex semantics are
+	// dropped where the throttle path needs Wait). PickWorkerAndReserve
+	// takes the write lock; PickWorker (no throttle) still uses RLock.
+	mu      sync.Mutex
+	cond    *sync.Cond
 	workers map[string]*workerSession // keyed by worker_id
 	order   []string                  // ConnectedWorkers stable ordering for RR
+
+	// inFlight tracks per-(workerID, stageID) outstanding task counts
+	// for the per-stage throttle. Reserved on PickWorkerAndReserveForStage,
+	// released on ReleaseStage (called from the global result subscriber
+	// on every terminal ResultNotification) or on worker disconnect.
+	// Empty when no annotated-stage tasks have been dispatched.
+	inFlight map[string]map[string]int
 
 	rrCursor atomic.Uint64
 
@@ -106,11 +119,14 @@ func NewServer(cfg ServerConfig, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{
-		cfg:     cfg,
-		logger:  logger.With("component", "dataplane.server"),
-		workers: make(map[string]*workerSession),
+	s := &Server{
+		cfg:      cfg,
+		logger:   logger.With("component", "dataplane.server"),
+		workers:  make(map[string]*workerSession),
+		inFlight: make(map[string]map[string]int),
 	}
+	s.cond = sync.NewCond(&s.mu)
+	return s
 }
 
 // Start binds the listener and runs the gRPC server in the background.
@@ -382,6 +398,12 @@ func (s *Server) unregister(id string) {
 			break
 		}
 	}
+	// Drop any reserved-but-unreleased slots on the departing worker.
+	// Without this, PickWorkerAndReserveForStage waiters could block
+	// forever when a worker disconnects mid-task (the per-query
+	// ResultNotification subscriber won't fire on a vanished worker).
+	delete(s.inFlight, id)
+	s.cond.Broadcast()
 	s.mu.Unlock()
 }
 
@@ -389,8 +411,8 @@ func (s *Server) unregister(id string) {
 // Order is registration order — useful for tests; the scheduler uses
 // PickWorker for round-robin dispatch.
 func (s *Server) ConnectedWorkers() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]string, len(s.order))
 	copy(out, s.order)
 	return out
@@ -399,15 +421,121 @@ func (s *Server) ConnectedWorkers() []string {
 // PickWorker returns the next worker ID via round-robin across the
 // currently-connected set. Returns ("", false) when no worker is
 // connected. Safe for concurrent callers.
+//
+// For tasks with a per-stage concurrency cap, use
+// PickWorkerAndReserveForStage instead; this method ignores caps and
+// is used for unannotated stages where any connected worker is fine.
 func (s *Server) PickWorker() (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n := len(s.order)
 	if n == 0 {
 		return "", false
 	}
 	i := s.rrCursor.Add(1) - 1
 	return s.order[int(i%uint64(n))], true
+}
+
+// PickWorkerAndReserveForStage selects a worker that has fewer than
+// `cap` in-flight tasks of `stageKey`, atomically reserves a slot, and
+// returns the worker ID. When all workers are at cap, blocks until one
+// frees a slot via ReleaseStage or until ctx is cancelled. Returns
+// ErrNoWorkers when no worker is currently connected (independent of
+// cap).
+//
+// Pass cap <= 0 to skip the throttle and fall through to plain
+// round-robin (equivalent to PickWorker but without a separate code
+// path for the caller).
+//
+// Deadlock-free by construction: throttling gates on stage-ID count,
+// not memory. Build and probe stages have distinct IDs, so a saturated
+// build stage doesn't block its downstream probe stage from dispatching.
+// The chained-build/probe deadlock that took out the worker-side
+// admission control (project_admission_control_rejected_2026-05-18)
+// does not apply to per-stage counts.
+func (s *Server) PickWorkerAndReserveForStage(ctx context.Context, stageKey string, cap int) (string, error) {
+	if cap <= 0 {
+		if id, ok := s.PickWorker(); ok {
+			return id, nil
+		}
+		return "", ErrNoWorkers
+	}
+
+	// Wake any waiter when ctx cancels so PickWorker callers don't pile
+	// up holding the lock during long blocks.
+	wakeup := make(chan struct{})
+	defer close(wakeup)
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.mu.Lock()
+			s.cond.Broadcast()
+			s.mu.Unlock()
+		case <-wakeup:
+		}
+	}()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		n := len(s.order)
+		if n == 0 {
+			return "", ErrNoWorkers
+		}
+		// One full RR pass over connected workers, starting at the
+		// current cursor. If any worker has capacity, take that worker
+		// and advance the cursor past it.
+		startIdx := int(s.rrCursor.Load() % uint64(n))
+		for i := 0; i < n; i++ {
+			idx := (startIdx + i) % n
+			wid := s.order[idx]
+			counts := s.inFlight[wid]
+			if counts[stageKey] < cap {
+				// Reserve.
+				if counts == nil {
+					counts = make(map[string]int)
+					s.inFlight[wid] = counts
+				}
+				counts[stageKey]++
+				s.rrCursor.Store(uint64(idx + 1))
+				return wid, nil
+			}
+		}
+		// No worker has capacity for this stage. Wait for a release or
+		// ctx cancel. cond.Wait atomically releases mu and reacquires
+		// on wakeup, so the next loop iteration re-checks under the
+		// fresh lock.
+		s.cond.Wait()
+	}
+}
+
+// ReleaseStage decrements the per-(workerID, stageKey) in-flight count
+// and signals any PickWorkerAndReserveForStage waiter that capacity
+// has freed. Called from the global ResultNotification subscriber on
+// every terminal worker→coord notification (success+failure+panic).
+// Safe to call with workerID/stageKey that were never reserved — that
+// is a no-op (handles legacy result publishes pre-throttle and
+// reaped-worker double-release).
+func (s *Server) ReleaseStage(workerID, stageKey string) {
+	if s == nil || workerID == "" || stageKey == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m := s.inFlight[workerID]
+	if m == nil {
+		return
+	}
+	if m[stageKey] > 0 {
+		m[stageKey]--
+		if m[stageKey] == 0 {
+			delete(m, stageKey)
+		}
+		s.cond.Broadcast()
+	}
 }
 
 // SendTaskDispatch pushes a TaskDispatch envelope to the named worker.
@@ -418,9 +546,9 @@ func (s *Server) PickWorker() (string, bool) {
 // task_blob is the result of distributed.Marshal(Task). The scheduler
 // owns the marshal; the data-plane layer only carries bytes.
 func (s *Server) SendTaskDispatch(workerID, taskID, queryID, stageID string, taskBlob []byte, deadlineUnixNano int64) error {
-	s.mu.RLock()
+	s.mu.Lock()
 	sess, ok := s.workers[workerID]
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	if !ok {
 		return ErrNotConnected
 	}

@@ -182,6 +182,12 @@ type Task struct {
 	// hash_join stages. Zero means no hint (arena grows dynamically).
 	BuildRowHint int64 `json:"build_row_hint,omitempty"`
 
+	// MaxConcurrentPerWorker caps how many tasks of THIS stage may run
+	// concurrently on the same worker. 0 = no cap (worker's global
+	// MaxConcurrent applies). Carried from physical.Stage so the gRPC
+	// dispatcher can throttle per-stage-ID before SendTaskDispatch.
+	MaxConcurrentPerWorker int `json:"max_concurrent_per_worker,omitempty"`
+
 	// SemiAntiKeyOnly is set on semi/anti hash_join stages without a
 	// SemiAntiFilter — enables key-only build (skip batch storage).
 	SemiAntiKeyOnly bool `json:"semi_anti_key_only,omitempty"`
