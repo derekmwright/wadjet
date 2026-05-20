@@ -36,3 +36,4 @@ query_timeout             = "30m"           # SF100 heavy queries need >10m defa
 # pressure at SF100, NOT the drain path. Production stays at mc=3 until
 # the Q05-shape HashJoin peak is addressed. Cost of this attempt ~$1.55.
 max_concurrent            = 3
+data_plane                = "grpc" # Phase C+D+E gRPC data-plane (task dispatch + results + gather + TaskProgress). NATS retained for heartbeats + cancellation + KV only. SF100 is where the design was actually targeted — Q17 dispatch-stall + NATS lock-contention pathologies.
