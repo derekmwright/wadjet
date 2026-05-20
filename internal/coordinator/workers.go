@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/nats-io/nats.go"
 )
@@ -176,6 +177,29 @@ func NewWorkerRegistry(nc *nats.Conn, logger *slog.Logger, staleTTL time.Duratio
 	}
 
 	return wr
+}
+
+// SetDataPlaneServer installs the registry's global TaskProgress
+// handler on the data-plane server. When workers send TaskProgress
+// over gRPC (Phase E), this handler treats each arrival as proof of
+// life for the emitting worker — same liveness semantics as the NATS
+// progressSub above. Idempotent; a later SetDataPlaneServer(nil)
+// installs a no-op handler. Must be called after NewWorkerRegistry.
+func (wr *WorkerRegistry) SetDataPlaneServer(srv *dataplane.Server) {
+	if wr == nil || srv == nil {
+		return
+	}
+	srv.SetGlobalTaskProgressHandler(func(tp *dataplane.TaskProgress) {
+		wr.recordTaskProgress(distributed.TaskProgress{
+			QueryID:        tp.QueryID,
+			StageID:        tp.StageID,
+			TaskID:         tp.TaskID,
+			WorkerID:       tp.WorkerID,
+			RowsProcessed:  tp.RowsProcessed,
+			BytesProcessed: tp.BytesProcessed,
+			Timestamp:      time.Unix(0, tp.TimestampUnixNano),
+		})
+	})
 }
 
 // recordTaskProgress treats a per-task progress message as proof of life

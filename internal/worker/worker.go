@@ -757,7 +757,7 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 					continue // no new progress since last publish; skip
 				}
 				lastPublishedRows = rows
-				publishTaskProgress(w.nc, distributed.TaskProgress{
+				publishTaskProgress(w.nc, w.dpClient, distributed.TaskProgress{
 					QueryID:        task.QueryID,
 					StageID:        task.StageID,
 					TaskID:         task.ID,

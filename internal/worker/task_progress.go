@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/nats-io/nats.go"
 )
@@ -55,11 +56,25 @@ func (p *TaskProgress) snapshot() (rows, bytes int64, lastUpdate time.Time) {
 	return
 }
 
-// publishTaskProgress sends a TaskProgress NATS message to the coord
-// for the given task. Uses Core NATS (fire-and-forget) since
-// progress messages are advisory — a missed one doesn't break
-// correctness. Failures are silently dropped.
-func publishTaskProgress(nc *nats.Conn, msg distributed.TaskProgress) {
+// publishTaskProgress sends a TaskProgress signal to the coord for
+// the given task. Routes over the gRPC data-plane stream when
+// dpClient is set (Phase E — progress shares fate with results so a
+// wedged worker can't fake liveness); otherwise falls back to NATS
+// Core publish. Either way, fire-and-forget — missed progress is
+// advisory and the per-task ticker re-sends in ~2 s.
+func publishTaskProgress(nc *nats.Conn, dpClient *dataplane.Client, msg distributed.TaskProgress) {
+	if dpClient != nil {
+		_ = dpClient.SendTaskProgress(dataplane.TaskProgress{
+			QueryID:           msg.QueryID,
+			StageID:           msg.StageID,
+			TaskID:            msg.TaskID,
+			WorkerID:          msg.WorkerID,
+			RowsProcessed:     msg.RowsProcessed,
+			BytesProcessed:    msg.BytesProcessed,
+			TimestampUnixNano: msg.Timestamp.UnixNano(),
+		})
+		return
+	}
 	if nc == nil {
 		return
 	}

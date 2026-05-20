@@ -43,6 +43,26 @@ type ResultBatch struct {
 // query.
 type ResultHandler func(*ResultBatch)
 
+// TaskProgress is the transport-neutral form of a worker→coord
+// progress update. Mirrors distributed.TaskProgress (the NATS path's
+// shape) minus the JSON tags so coord-side bridges can reuse the
+// existing handler bodies.
+type TaskProgress struct {
+	QueryID           string
+	StageID           string
+	TaskID            string
+	WorkerID          string
+	RowsProcessed     int64
+	BytesProcessed    int64
+	TimestampUnixNano int64
+}
+
+// TaskProgressHandler consumes TaskProgress messages. Server invokes
+// the global handler (used by WorkerRegistry for liveness) AND the
+// per-query handler (used by stageProgressBridge) on every arrival;
+// both are optional.
+type TaskProgressHandler func(*TaskProgress)
+
 // Server is the coord-side data-plane gRPC listener. Workers dial it
 // and open one long-lived bidi stream each.
 type Server struct {
@@ -60,7 +80,9 @@ type Server struct {
 
 	rrCursor atomic.Uint64
 
-	resultHandlers sync.Map // map[string]ResultHandler keyed by query_id
+	resultHandlers   sync.Map     // map[string]ResultHandler keyed by query_id
+	progressHandlers sync.Map     // map[string]TaskProgressHandler keyed by query_id
+	globalProgress   atomic.Value // TaskProgressHandler; fires on every TaskProgress
 }
 
 // workerSession is the coord's view of a connected worker. Phase A
@@ -226,11 +248,13 @@ func (s *Server) Connect(stream grpc.BidiStreamingServer[dpv1.WorkerEnvelope, dp
 }
 
 // routeWorkerEnvelope dispatches a post-Hello message to its handler.
-// Phase B handles ResultBatch; Phases C–E add the rest.
+// Phase B handles ResultBatch; Phase E adds TaskProgress.
 func (s *Server) routeWorkerEnvelope(env *dpv1.WorkerEnvelope) {
 	switch m := env.GetMsg().(type) {
 	case *dpv1.WorkerEnvelope_ResultBatch:
 		s.dispatchResultBatch(m.ResultBatch)
+	case *dpv1.WorkerEnvelope_TaskProgress:
+		s.dispatchTaskProgress(m.TaskProgress)
 	default:
 		// Unknown / not-yet-implemented variant; drop.
 	}
@@ -277,6 +301,65 @@ func (s *Server) UnregisterResultHandler(queryID string) {
 		return
 	}
 	s.resultHandlers.Delete(queryID)
+}
+
+func (s *Server) dispatchTaskProgress(tp *dpv1.TaskProgress) {
+	out := &TaskProgress{
+		QueryID:           tp.GetQueryId(),
+		StageID:           tp.GetStageId(),
+		TaskID:            tp.GetTaskId(),
+		WorkerID:          tp.GetWorkerId(),
+		RowsProcessed:     tp.GetRowsProcessed(),
+		BytesProcessed:    tp.GetBytesProcessed(),
+		TimestampUnixNano: tp.GetTimestampUnixNano(),
+	}
+	// Global handler fires on every TaskProgress (used by
+	// WorkerRegistry for worker liveness).
+	if v := s.globalProgress.Load(); v != nil {
+		if h, ok := v.(TaskProgressHandler); ok && h != nil {
+			h(out)
+		}
+	}
+	// Per-query handler — fans to the stage bridge for the active
+	// query, if registered.
+	if v, ok := s.progressHandlers.Load(out.QueryID); ok {
+		if h, ok := v.(TaskProgressHandler); ok && h != nil {
+			h(out)
+		}
+	}
+}
+
+// SetGlobalTaskProgressHandler installs (or clears, when h is nil) the
+// global TaskProgress handler. Used by WorkerRegistry to drive the
+// multi-signal liveness path off gRPC TaskProgress arrivals.
+func (s *Server) SetGlobalTaskProgressHandler(h TaskProgressHandler) {
+	if s == nil {
+		return
+	}
+	if h == nil {
+		// atomic.Value disallows storing nil. Replace with a typed no-op.
+		s.globalProgress.Store(TaskProgressHandler(func(*TaskProgress) {}))
+		return
+	}
+	s.globalProgress.Store(h)
+}
+
+// RegisterTaskProgressHandler installs the per-query progress handler.
+// Each query overrides any prior registration for the same queryID.
+// Must be paired with UnregisterTaskProgressHandler at query end.
+func (s *Server) RegisterTaskProgressHandler(queryID string, h TaskProgressHandler) {
+	if s == nil || h == nil {
+		return
+	}
+	s.progressHandlers.Store(queryID, h)
+}
+
+// UnregisterTaskProgressHandler removes the per-query handler.
+func (s *Server) UnregisterTaskProgressHandler(queryID string) {
+	if s == nil {
+		return
+	}
+	s.progressHandlers.Delete(queryID)
 }
 
 func (s *Server) register(sess *workerSession) error {

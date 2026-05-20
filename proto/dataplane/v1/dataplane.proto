@@ -24,16 +24,17 @@ service DataPlane {
 }
 
 // WorkerEnvelope is the worker→coord direction of the bidi stream.
-// Phase B adds ResultBatch. Subsequent phases add TaskProgress,
-// TaskComplete, TaskFailed.
+// Phase B added ResultBatch. Phase E added TaskProgress so the
+// liveness signal shares fate with results (heap-pinned worker that
+// can't deliver results also can't deliver progress, so coord redispatches).
 message WorkerEnvelope {
   oneof msg {
     Hello hello = 1;
     ResultBatch result_batch = 2;
-    // reserved: TaskProgress, TaskComplete, TaskFailed.
-    // See phases D–E.
+    TaskProgress task_progress = 3;
+    // reserved: TaskComplete, TaskFailed (future).
   }
-  reserved 3 to 15;
+  reserved 4 to 15;
 }
 
 // CoordEnvelope is the coord→worker direction. Phase C adds
@@ -105,4 +106,28 @@ message TaskDispatch {
   string stage_id          = 3;
   bytes  task_blob         = 4;
   int64  deadline_unix_nano = 5; // 0 = no explicit deadline
+}
+
+// TaskProgress is the per-task liveness + throughput signal workers
+// emit from their hot loops (~2 s cadence, advisory). Coord consumes
+// it for two purposes:
+//   1. WorkerRegistry liveness — any TaskProgress proves the worker
+//      goroutine is alive even if the global heartbeat is starved by
+//      GC mark-assist (Q03 SF10 2026-04-29 motivation for the
+//      multi-signal liveness work).
+//   2. Per-stage awaitStageProgress — bridge fans messages out to the
+//      stage's progress channel for "no row progress for N seconds"
+//      stall detection.
+//
+// rows_processed / bytes_processed are monotonic over the task's
+// lifetime; coord computes throughput as deltas across consecutive
+// messages from the same task_id.
+message TaskProgress {
+  string query_id              = 1;
+  string stage_id              = 2;
+  string task_id               = 3;
+  string worker_id             = 4;
+  int64  rows_processed        = 5;
+  int64  bytes_processed       = 6;
+  int64  timestamp_unix_nano   = 7;
 }

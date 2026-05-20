@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/nats-io/nats.go"
 )
@@ -22,13 +23,28 @@ import (
 // Routing happens by stageID embedded in each TaskProgress message,
 // not by NATS subject — keeps the subject layout flat.
 type stageProgressBridge struct {
-	mu    sync.RWMutex
-	chans map[string]chan<- struct{}
-	sub   *nats.Subscription
+	mu       sync.RWMutex
+	chans    map[string]chan<- struct{}
+	sub      *nats.Subscription
+	dpSrv    *dataplane.Server
+	queryID  string
 }
 
-func newStageProgressBridge(nc *nats.Conn, queryID string) (*stageProgressBridge, error) {
-	b := &stageProgressBridge{chans: make(map[string]chan<- struct{})}
+func newStageProgressBridge(nc *nats.Conn, dpSrv *dataplane.Server, queryID string) (*stageProgressBridge, error) {
+	b := &stageProgressBridge{
+		chans:   make(map[string]chan<- struct{}),
+		dpSrv:   dpSrv,
+		queryID: queryID,
+	}
+	// gRPC path: register a per-query handler on the data-plane server.
+	// Bridge.Close removes it; Phase E moves TaskProgress off NATS when
+	// dpSrv is set, but the NATS subscribe below is kept so mixed-mode
+	// queries (legacy workers still on NATS) continue to route.
+	if dpSrv != nil {
+		dpSrv.RegisterTaskProgressHandler(queryID, func(tp *dataplane.TaskProgress) {
+			b.route(tp.StageID)
+		})
+	}
 	if nc == nil {
 		return b, nil
 	}
@@ -38,22 +54,35 @@ func newStageProgressBridge(nc *nats.Conn, queryID string) (*stageProgressBridge
 		if err := distributed.Unmarshal(msg.Data, &tp); err != nil {
 			return
 		}
-		b.mu.RLock()
-		ch, ok := b.chans[tp.StageID]
-		b.mu.RUnlock()
-		if !ok {
-			return
-		}
-		select {
-		case ch <- struct{}{}:
-		default:
-		}
+		b.route(tp.StageID)
 	})
 	if err != nil {
+		if dpSrv != nil {
+			dpSrv.UnregisterTaskProgressHandler(queryID)
+		}
 		return nil, err
 	}
 	b.sub = sub
 	return b, nil
+}
+
+// route fans a progress arrival to the stage's progress channel, if
+// any is currently registered. Non-blocking — a full channel means the
+// stage already has a pending tick.
+func (b *stageProgressBridge) route(stageID string) {
+	if b == nil {
+		return
+	}
+	b.mu.RLock()
+	ch, ok := b.chans[stageID]
+	b.mu.RUnlock()
+	if !ok {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }
 
 // Register associates a stage's progress channel with the bridge for
@@ -74,14 +103,20 @@ func (b *stageProgressBridge) Register(stageID string, ch chan<- struct{}) func(
 	}
 }
 
-// Close unsubscribes the NATS handler. Called by executeStageDAG on
-// query completion (success or failure). Per-stage cleanup funcs
-// remove their channels independently.
+// Close unsubscribes the NATS handler AND removes the gRPC progress
+// handler (if either was wired). Called by executeStageDAG on query
+// completion (success or failure). Per-stage cleanup funcs remove
+// their channels independently.
 func (b *stageProgressBridge) Close() {
-	if b == nil || b.sub == nil {
+	if b == nil {
 		return
 	}
-	_ = b.sub.Unsubscribe()
+	if b.sub != nil {
+		_ = b.sub.Unsubscribe()
+	}
+	if b.dpSrv != nil {
+		b.dpSrv.UnregisterTaskProgressHandler(b.queryID)
+	}
 }
 
 type stageProgressBridgeKey struct{}

@@ -197,7 +197,7 @@ func (c *Coordinator) executeStageDAG(
 	// registers its progress channel under the stage_id; the bridge
 	// routes by that field. Bridge is closed on query exit to drop
 	// the underlying NATS subscription.
-	bridge, err := newStageProgressBridge(c.nc, queryID)
+	bridge, err := newStageProgressBridge(c.nc, c.dpSrv, queryID)
 	if err != nil {
 		c.logger.Warn("task-progress bridge subscribe failed; falling back to completion-only progress",
 			"query", queryID, "error", err)

@@ -216,6 +216,81 @@ func TestResultBatchUnknownQueryDropped(t *testing.T) {
 	}
 }
 
+// TestTaskProgressRoundTrip is the Phase E smoke test: worker sends
+// TaskProgress envelopes; coord's per-query handler AND global handler
+// both fire on each arrival; unregister stops the per-query handler
+// while the global continues.
+func TestTaskProgressRoundTrip(t *testing.T) {
+	srv := NewServer(ServerConfig{Addr: "127.0.0.1:0", ClusterID: "tp"}, nil)
+	if err := srv.Start(); err != nil {
+		t.Fatalf("server start: %v", err)
+	}
+	defer srv.Stop(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := NewClient(ClientConfig{
+		CoordAddr:        srv.Addr(),
+		WorkerID:         "w-tp",
+		ReconnectBackoff: 50 * time.Millisecond,
+	}, nil)
+	client.Start(ctx)
+	defer client.Stop()
+	if !waitFor(t, 2*time.Second, client.Connected) {
+		t.Fatal("client never connected")
+	}
+
+	var globalCount atomic.Int32
+	var perQueryCount atomic.Int32
+	var lastRows atomic.Int64
+
+	srv.SetGlobalTaskProgressHandler(func(tp *TaskProgress) {
+		globalCount.Add(1)
+	})
+	srv.RegisterTaskProgressHandler("q-tp-1", func(tp *TaskProgress) {
+		perQueryCount.Add(1)
+		lastRows.Store(tp.RowsProcessed)
+	})
+	defer srv.UnregisterTaskProgressHandler("q-tp-1")
+
+	for i := int64(1); i <= 3; i++ {
+		if err := client.SendTaskProgress(TaskProgress{
+			QueryID:       "q-tp-1",
+			StageID:       "s",
+			TaskID:        "t",
+			WorkerID:      "w-tp",
+			RowsProcessed: i * 1000,
+		}); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+
+	if !waitFor(t, 2*time.Second, func() bool {
+		return globalCount.Load() == 3 && perQueryCount.Load() == 3
+	}) {
+		t.Fatalf("counts: global=%d per-query=%d want 3 each",
+			globalCount.Load(), perQueryCount.Load())
+	}
+	if got := lastRows.Load(); got != 3000 {
+		t.Errorf("lastRows = %d, want 3000", got)
+	}
+
+	// Unregister the per-query handler; further sends still hit global only.
+	srv.UnregisterTaskProgressHandler("q-tp-1")
+	if err := client.SendTaskProgress(TaskProgress{
+		QueryID: "q-tp-1", TaskID: "t", WorkerID: "w-tp", RowsProcessed: 9999,
+	}); err != nil {
+		t.Fatalf("send post-unregister: %v", err)
+	}
+	if !waitFor(t, 2*time.Second, func() bool { return globalCount.Load() == 4 }) {
+		t.Fatalf("global count after unregister = %d, want 4", globalCount.Load())
+	}
+	if got := perQueryCount.Load(); got != 3 {
+		t.Errorf("per-query count after unregister = %d, want 3 (no further fires)", got)
+	}
+}
+
 // waitFor polls cond every 25ms until it returns true or the timeout elapses.
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) bool {
 	t.Helper()

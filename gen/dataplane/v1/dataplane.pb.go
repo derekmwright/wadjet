@@ -22,14 +22,16 @@ const (
 )
 
 // WorkerEnvelope is the worker→coord direction of the bidi stream.
-// Phase B adds ResultBatch. Subsequent phases add TaskProgress,
-// TaskComplete, TaskFailed.
+// Phase B added ResultBatch. Phase E added TaskProgress so the
+// liveness signal shares fate with results (heap-pinned worker that
+// can't deliver results also can't deliver progress, so coord redispatches).
 type WorkerEnvelope struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
 	//
 	//	*WorkerEnvelope_Hello
 	//	*WorkerEnvelope_ResultBatch
+	//	*WorkerEnvelope_TaskProgress
 	Msg           isWorkerEnvelope_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -90,6 +92,15 @@ func (x *WorkerEnvelope) GetResultBatch() *ResultBatch {
 	return nil
 }
 
+func (x *WorkerEnvelope) GetTaskProgress() *TaskProgress {
+	if x != nil {
+		if x, ok := x.Msg.(*WorkerEnvelope_TaskProgress); ok {
+			return x.TaskProgress
+		}
+	}
+	return nil
+}
+
 type isWorkerEnvelope_Msg interface {
 	isWorkerEnvelope_Msg()
 }
@@ -102,9 +113,15 @@ type WorkerEnvelope_ResultBatch struct {
 	ResultBatch *ResultBatch `protobuf:"bytes,2,opt,name=result_batch,json=resultBatch,proto3,oneof"`
 }
 
+type WorkerEnvelope_TaskProgress struct {
+	TaskProgress *TaskProgress `protobuf:"bytes,3,opt,name=task_progress,json=taskProgress,proto3,oneof"` // reserved: TaskComplete, TaskFailed (future).
+}
+
 func (*WorkerEnvelope_Hello) isWorkerEnvelope_Msg() {}
 
 func (*WorkerEnvelope_ResultBatch) isWorkerEnvelope_Msg() {}
+
+func (*WorkerEnvelope_TaskProgress) isWorkerEnvelope_Msg() {}
 
 // CoordEnvelope is the coord→worker direction. Phase C adds
 // TaskDispatch (the load-bearing change in the migration); CancelTask
@@ -501,15 +518,122 @@ func (x *TaskDispatch) GetDeadlineUnixNano() int64 {
 	return 0
 }
 
+// TaskProgress is the per-task liveness + throughput signal workers
+// emit from their hot loops (~2 s cadence, advisory). Coord consumes
+// it for two purposes:
+//  1. WorkerRegistry liveness — any TaskProgress proves the worker
+//     goroutine is alive even if the global heartbeat is starved by
+//     GC mark-assist (Q03 SF10 2026-04-29 motivation for the
+//     multi-signal liveness work).
+//  2. Per-stage awaitStageProgress — bridge fans messages out to the
+//     stage's progress channel for "no row progress for N seconds"
+//     stall detection.
+//
+// rows_processed / bytes_processed are monotonic over the task's
+// lifetime; coord computes throughput as deltas across consecutive
+// messages from the same task_id.
+type TaskProgress struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	QueryId           string                 `protobuf:"bytes,1,opt,name=query_id,json=queryId,proto3" json:"query_id,omitempty"`
+	StageId           string                 `protobuf:"bytes,2,opt,name=stage_id,json=stageId,proto3" json:"stage_id,omitempty"`
+	TaskId            string                 `protobuf:"bytes,3,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	WorkerId          string                 `protobuf:"bytes,4,opt,name=worker_id,json=workerId,proto3" json:"worker_id,omitempty"`
+	RowsProcessed     int64                  `protobuf:"varint,5,opt,name=rows_processed,json=rowsProcessed,proto3" json:"rows_processed,omitempty"`
+	BytesProcessed    int64                  `protobuf:"varint,6,opt,name=bytes_processed,json=bytesProcessed,proto3" json:"bytes_processed,omitempty"`
+	TimestampUnixNano int64                  `protobuf:"varint,7,opt,name=timestamp_unix_nano,json=timestampUnixNano,proto3" json:"timestamp_unix_nano,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *TaskProgress) Reset() {
+	*x = TaskProgress{}
+	mi := &file_dataplane_v1_dataplane_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TaskProgress) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TaskProgress) ProtoMessage() {}
+
+func (x *TaskProgress) ProtoReflect() protoreflect.Message {
+	mi := &file_dataplane_v1_dataplane_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TaskProgress.ProtoReflect.Descriptor instead.
+func (*TaskProgress) Descriptor() ([]byte, []int) {
+	return file_dataplane_v1_dataplane_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *TaskProgress) GetQueryId() string {
+	if x != nil {
+		return x.QueryId
+	}
+	return ""
+}
+
+func (x *TaskProgress) GetStageId() string {
+	if x != nil {
+		return x.StageId
+	}
+	return ""
+}
+
+func (x *TaskProgress) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
+func (x *TaskProgress) GetWorkerId() string {
+	if x != nil {
+		return x.WorkerId
+	}
+	return ""
+}
+
+func (x *TaskProgress) GetRowsProcessed() int64 {
+	if x != nil {
+		return x.RowsProcessed
+	}
+	return 0
+}
+
+func (x *TaskProgress) GetBytesProcessed() int64 {
+	if x != nil {
+		return x.BytesProcessed
+	}
+	return 0
+}
+
+func (x *TaskProgress) GetTimestampUnixNano() int64 {
+	if x != nil {
+		return x.TimestampUnixNano
+	}
+	return 0
+}
+
 var File_dataplane_v1_dataplane_proto protoreflect.FileDescriptor
 
 const file_dataplane_v1_dataplane_proto_rawDesc = "" +
 	"\n" +
-	"\x1cdataplane/v1/dataplane.proto\x12\x13wadjet.dataplane.v1\"\x98\x01\n" +
+	"\x1cdataplane/v1/dataplane.proto\x12\x13wadjet.dataplane.v1\"\xe2\x01\n" +
 	"\x0eWorkerEnvelope\x122\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1a.wadjet.dataplane.v1.HelloH\x00R\x05hello\x12E\n" +
-	"\fresult_batch\x18\x02 \x01(\v2 .wadjet.dataplane.v1.ResultBatchH\x00R\vresultBatchB\x05\n" +
-	"\x03msgJ\x04\b\x03\x10\x10\"\xa0\x01\n" +
+	"\fresult_batch\x18\x02 \x01(\v2 .wadjet.dataplane.v1.ResultBatchH\x00R\vresultBatch\x12H\n" +
+	"\rtask_progress\x18\x03 \x01(\v2!.wadjet.dataplane.v1.TaskProgressH\x00R\ftaskProgressB\x05\n" +
+	"\x03msgJ\x04\b\x04\x10\x10\"\xa0\x01\n" +
 	"\rCoordEnvelope\x128\n" +
 	"\awelcome\x18\x01 \x01(\v2\x1c.wadjet.dataplane.v1.WelcomeH\x00R\awelcome\x12H\n" +
 	"\rtask_dispatch\x18\x02 \x01(\v2!.wadjet.dataplane.v1.TaskDispatchH\x00R\ftaskDispatchB\x05\n" +
@@ -538,7 +662,15 @@ const file_dataplane_v1_dataplane_proto_rawDesc = "" +
 	"\bquery_id\x18\x02 \x01(\tR\aqueryId\x12\x19\n" +
 	"\bstage_id\x18\x03 \x01(\tR\astageId\x12\x1b\n" +
 	"\ttask_blob\x18\x04 \x01(\fR\btaskBlob\x12,\n" +
-	"\x12deadline_unix_nano\x18\x05 \x01(\x03R\x10deadlineUnixNano2c\n" +
+	"\x12deadline_unix_nano\x18\x05 \x01(\x03R\x10deadlineUnixNano\"\xfa\x01\n" +
+	"\fTaskProgress\x12\x19\n" +
+	"\bquery_id\x18\x01 \x01(\tR\aqueryId\x12\x19\n" +
+	"\bstage_id\x18\x02 \x01(\tR\astageId\x12\x17\n" +
+	"\atask_id\x18\x03 \x01(\tR\x06taskId\x12\x1b\n" +
+	"\tworker_id\x18\x04 \x01(\tR\bworkerId\x12%\n" +
+	"\x0erows_processed\x18\x05 \x01(\x03R\rrowsProcessed\x12'\n" +
+	"\x0fbytes_processed\x18\x06 \x01(\x03R\x0ebytesProcessed\x12.\n" +
+	"\x13timestamp_unix_nano\x18\a \x01(\x03R\x11timestampUnixNano2c\n" +
 	"\tDataPlane\x12V\n" +
 	"\aConnect\x12#.wadjet.dataplane.v1.WorkerEnvelope\x1a\".wadjet.dataplane.v1.CoordEnvelope(\x010\x01B:Z8github.com/citc-tech/wadjet/gen/dataplane/v1;dataplanev1b\x06proto3"
 
@@ -554,7 +686,7 @@ func file_dataplane_v1_dataplane_proto_rawDescGZIP() []byte {
 	return file_dataplane_v1_dataplane_proto_rawDescData
 }
 
-var file_dataplane_v1_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_dataplane_v1_dataplane_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_dataplane_v1_dataplane_proto_goTypes = []any{
 	(*WorkerEnvelope)(nil), // 0: wadjet.dataplane.v1.WorkerEnvelope
 	(*CoordEnvelope)(nil),  // 1: wadjet.dataplane.v1.CoordEnvelope
@@ -562,19 +694,21 @@ var file_dataplane_v1_dataplane_proto_goTypes = []any{
 	(*Welcome)(nil),        // 3: wadjet.dataplane.v1.Welcome
 	(*ResultBatch)(nil),    // 4: wadjet.dataplane.v1.ResultBatch
 	(*TaskDispatch)(nil),   // 5: wadjet.dataplane.v1.TaskDispatch
+	(*TaskProgress)(nil),   // 6: wadjet.dataplane.v1.TaskProgress
 }
 var file_dataplane_v1_dataplane_proto_depIdxs = []int32{
 	2, // 0: wadjet.dataplane.v1.WorkerEnvelope.hello:type_name -> wadjet.dataplane.v1.Hello
 	4, // 1: wadjet.dataplane.v1.WorkerEnvelope.result_batch:type_name -> wadjet.dataplane.v1.ResultBatch
-	3, // 2: wadjet.dataplane.v1.CoordEnvelope.welcome:type_name -> wadjet.dataplane.v1.Welcome
-	5, // 3: wadjet.dataplane.v1.CoordEnvelope.task_dispatch:type_name -> wadjet.dataplane.v1.TaskDispatch
-	0, // 4: wadjet.dataplane.v1.DataPlane.Connect:input_type -> wadjet.dataplane.v1.WorkerEnvelope
-	1, // 5: wadjet.dataplane.v1.DataPlane.Connect:output_type -> wadjet.dataplane.v1.CoordEnvelope
-	5, // [5:6] is the sub-list for method output_type
-	4, // [4:5] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	6, // 2: wadjet.dataplane.v1.WorkerEnvelope.task_progress:type_name -> wadjet.dataplane.v1.TaskProgress
+	3, // 3: wadjet.dataplane.v1.CoordEnvelope.welcome:type_name -> wadjet.dataplane.v1.Welcome
+	5, // 4: wadjet.dataplane.v1.CoordEnvelope.task_dispatch:type_name -> wadjet.dataplane.v1.TaskDispatch
+	0, // 5: wadjet.dataplane.v1.DataPlane.Connect:input_type -> wadjet.dataplane.v1.WorkerEnvelope
+	1, // 6: wadjet.dataplane.v1.DataPlane.Connect:output_type -> wadjet.dataplane.v1.CoordEnvelope
+	6, // [6:7] is the sub-list for method output_type
+	5, // [5:6] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_dataplane_v1_dataplane_proto_init() }
@@ -585,6 +719,7 @@ func file_dataplane_v1_dataplane_proto_init() {
 	file_dataplane_v1_dataplane_proto_msgTypes[0].OneofWrappers = []any{
 		(*WorkerEnvelope_Hello)(nil),
 		(*WorkerEnvelope_ResultBatch)(nil),
+		(*WorkerEnvelope_TaskProgress)(nil),
 	}
 	file_dataplane_v1_dataplane_proto_msgTypes[1].OneofWrappers = []any{
 		(*CoordEnvelope_Welcome)(nil),
@@ -596,7 +731,7 @@ func file_dataplane_v1_dataplane_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_dataplane_v1_dataplane_proto_rawDesc), len(file_dataplane_v1_dataplane_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

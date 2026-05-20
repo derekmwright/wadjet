@@ -288,6 +288,39 @@ func (c *Client) SendResultBatch(rb ResultBatch) error {
 	return nil
 }
 
+// SendTaskProgress emits a TaskProgress envelope on the data-plane
+// stream. Cheap fire-and-forget: a missed progress message doesn't
+// break correctness (worker-side ticker re-sends in ~2 s). Returns
+// ErrNotConnected when the stream isn't live so callers can decide
+// whether to log or drop.
+func (c *Client) SendTaskProgress(tp TaskProgress) error {
+	c.streamMu.RLock()
+	stream := c.currentStream
+	c.streamMu.RUnlock()
+	if stream == nil {
+		return ErrNotConnected
+	}
+	env := &dpv1.WorkerEnvelope{
+		Msg: &dpv1.WorkerEnvelope_TaskProgress{
+			TaskProgress: &dpv1.TaskProgress{
+				QueryId:           tp.QueryID,
+				StageId:           tp.StageID,
+				TaskId:            tp.TaskID,
+				WorkerId:          tp.WorkerID,
+				RowsProcessed:     tp.RowsProcessed,
+				BytesProcessed:    tp.BytesProcessed,
+				TimestampUnixNano: tp.TimestampUnixNano,
+			},
+		},
+	}
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if err := stream.Send(env); err != nil {
+		return fmt.Errorf("dataplane: send progress: %w", err)
+	}
+	return nil
+}
+
 // gomemlimit returns the current GOMEMLIMIT in bytes, or 0 if unset.
 // Reading the runtime value avoids importing debug.SetMemoryLimit
 // indirection; the actual mechanism on workers is the env var.
