@@ -327,6 +327,12 @@ func (w *Worker) Start(ctx context.Context) error {
 		w.heartbeatLoop(ctx, sem)
 	}()
 
+	// Snapshot a heap profile whenever HeapBackpressureActive fires so a
+	// post-deploy analyst can attribute the SF100 22 GB heap-pin to its
+	// actual allocation sources (vs. the existing peak_heap_mb tracker
+	// number that just confirms "this stage hit 22 GB").
+	w.startHeapPressureProfiler(ctx)
+
 	dispatchMode := "nats"
 	if w.dpClient != nil {
 		dispatchMode = "grpc"
