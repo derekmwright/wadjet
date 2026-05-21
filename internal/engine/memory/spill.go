@@ -181,6 +181,42 @@ func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
 	return heapPressureExceeded()
 }
 
+// ShouldSpillForTaskShare extends ShouldSpillFor with a per-task fair-
+// share check. When taskTracker has a non-zero Share, this returns true
+// as soon as taskTracker.Used() exceeds the share-based threshold, even
+// if the shared-pool tracker (sm.tracker) is still under pressure.
+//
+// Why a separate check: ShouldSpillFor watches cumulative shared-pool
+// usage. With one heavy task and several light tasks, cumulative stays
+// low while the heavy task grows past its fair share and pins the
+// worker (Q17/Q18 at SF100, project_q17_sf100_instrumented_2026-05-17).
+// Per-task share enforcement makes each task self-spill when its own
+// contribution exceeds its slice of the budget.
+//
+// SpillCheap fires at 40% of share, SpillExpensive at 90% — same
+// proportions as the shared-pool check. The shared-pool check is still
+// consulted as a fallback so cumulative pressure also drives spill on
+// tasks without a Share configured.
+func (sm *SpillManager) ShouldSpillForTaskShare(urgency SpillUrgency, taskTracker *Tracker) bool {
+	if taskTracker != nil {
+		share := taskTracker.Share()
+		if share > 0 {
+			used := taskTracker.Used()
+			var threshold int64
+			switch urgency {
+			case SpillExpensive:
+				threshold = share * 90 / 100
+			default:
+				threshold = share * 40 / 100
+			}
+			if used > threshold {
+				return true
+			}
+		}
+	}
+	return sm.ShouldSpillFor(urgency)
+}
+
 // ShouldSpill returns true when the operator should spill to disk.
 //
 // It checks two independent signals:
