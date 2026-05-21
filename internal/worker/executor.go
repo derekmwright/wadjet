@@ -828,49 +828,94 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 
 			key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
 
-			// Read the partition file once into memory, then both upload to S3
-			// AND populate the same-worker result store. The file just came
-			// out of the bufio writer's flush, so its pages are warm in the
-			// OS cache; io.ReadAll is essentially a memcpy. This matters
-			// because non-shuffle stages already populate result_store after
-			// their S3 upload (see pipeline result path); without it, every
-			// partitioned-shuffle output forces downstream stages on the
-			// same worker back through the S3 download path even though we
-			// just had the data in hand.
-			data, readErr := os.ReadFile(localPath)
-			if readErr != nil {
-				partResults[p] = partResult{err: fmt.Errorf("reading partition %d: %w", p, readErr)}
+			// Stream-compress, stream-upload, mmap-cache. Replaces the
+			// previous os.ReadFile → CompressShuffleData → resultStore.Put
+			// chain that held the entire partition payload (compressed AND
+			// uncompressed) in Go heap. At SF100 Q05 that chain pinned
+			// 8.78 GB of process heap per task (62 % of GOMEMLIMIT, per
+			// 2026-05-21 pprof on the reaped worker). Heap cost of this
+			// path is bounded by the s2.Writer block buffer (~64 KB)
+			// regardless of partition size or count.
+			//
+			// Stat first to learn the on-disk uncompressed size (used for
+			// result.SizeBytes accounting, matching the old len(data)
+			// semantics).
+			fi, statErr := os.Stat(localPath)
+			if statErr != nil {
+				partResults[p] = partResult{err: fmt.Errorf("stat partition %d: %w", p, statErr)}
+				return
+			}
+			uncompressedSize := fi.Size()
+
+			// Stream-compress to a sibling temp file. CompressShuffleFile
+			// applies the same ≥10 % savings heuristic as the in-memory
+			// CompressShuffleData; useCompressed=false signals we should
+			// upload the raw source instead.
+			compressedPath := localPath + ".s2"
+			_, useCompressed, compErr := CompressShuffleFile(localPath, compressedPath)
+			if compErr != nil {
+				_ = os.Remove(compressedPath)
+				partResults[p] = partResult{err: fmt.Errorf("compressing partition %d: %w", p, compErr)}
 				return
 			}
 
-			// Compress with S2 before upload. Downstream readers (cached
-			// file source, readInputFilesBatches) detect the WSHC magic and
-			// stream-decompress on the fly. CompressShuffleData returns the
-			// original bytes if the compressed output is not >=10% smaller,
-			// so compressible TPC-H data wins and incompressible data is
-			// untouched. On Q18 SF1 shuffle-17 (lineitem joined+filtered),
-			// 800 MB raw compresses to ~250 MB with S2 — saves ~500 MB
-			// across the upload, the FileStore write, and the downstream
-			// download.
-			compressed := CompressShuffleData(data)
+			var uploadPath string
+			if useCompressed {
+				// Compression saved enough; drop the raw source and keep
+				// the compressed file as the artifact.
+				if err := os.Remove(localPath); err != nil {
+					e.logger.Warn("shuffle: failed to remove uncompressed partition",
+						"task_id", task.ID, "partition", p, "path", localPath, "error", err)
+				}
+				uploadPath = compressedPath
+			} else {
+				// Compression didn't pay; drop the temp and upload raw.
+				_ = os.Remove(compressedPath)
+				uploadPath = localPath
+			}
 
-			if _, uploadErr := e.store.Put(ctx, task.ResultBucket, key, bytes.NewReader(compressed), int64(len(compressed)), "application/octet-stream"); uploadErr != nil {
+			// Stream the chosen file to S3. The objstore Put signature
+			// takes an io.Reader and a size; passing *os.File means S3
+			// reads in chunks from the file descriptor with no full-file
+			// buffer in heap.
+			f, openErr := os.Open(uploadPath)
+			if openErr != nil {
+				_ = os.Remove(uploadPath)
+				partResults[p] = partResult{err: fmt.Errorf("opening partition %d: %w", p, openErr)}
+				return
+			}
+			fi2, statErr2 := f.Stat()
+			if statErr2 != nil {
+				f.Close()
+				_ = os.Remove(uploadPath)
+				partResults[p] = partResult{err: fmt.Errorf("stat upload partition %d: %w", p, statErr2)}
+				return
+			}
+			uploadSize := fi2.Size()
+			if _, uploadErr := e.store.Put(ctx, task.ResultBucket, key, f, uploadSize, "application/octet-stream"); uploadErr != nil {
+				f.Close()
+				_ = os.Remove(uploadPath)
 				partResults[p] = partResult{err: fmt.Errorf("uploading partition %d: %w", p, uploadErr)}
 				return
 			}
+			f.Close()
 
-			// Cache the compressed bytes — the reader path will detect the
-			// WSHC header and stream-decompress, so this is transparent.
-			if e.resultStore != nil {
-				e.resultStore.Put(task.QueryID, key, compressed)
+			// Adopt the local file into the LocalStageCache so a
+			// downstream same-worker consumer mmap's it instead of
+			// re-downloading from S3. Adopt renames the file out of the
+			// per-task spill dir into the cache's per-query dir; on
+			// failure we fall back to removing the local file (S3 is
+			// durable). This replaces the heap-resident resultStore.Put
+			// path that was the actual SF100 OOM source.
+			if e.localCache != nil {
+				if adopted := e.localCache.Adopt(task.QueryID, key, uploadPath); adopted == "" {
+					_ = os.Remove(uploadPath)
+				}
+			} else {
+				_ = os.Remove(uploadPath)
 			}
 
-			if removeErr := os.Remove(localPath); removeErr != nil {
-				e.logger.Warn("shuffle: failed to remove local partition file",
-					"task_id", task.ID, "partition", p, "path", localPath, "error", removeErr)
-			}
-
-			partResults[p] = partResult{key: key, size: int64(len(data))}
+			partResults[p] = partResult{key: key, size: uncompressedSize}
 		}(p, localPath)
 	}
 	wg.Wait()

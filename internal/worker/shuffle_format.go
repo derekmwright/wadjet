@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"unsafe"
 
 	"github.com/klauspost/compress/s2"
@@ -667,6 +668,71 @@ func CompressShuffleData(data []byte) []byte {
 		return data
 	}
 	return buf.Bytes()
+}
+
+// CompressShuffleFile streams srcPath through S2 into dstPath, prefixed
+// by the WSHC magic. Returns (compressedSize, useCompressed, error).
+// useCompressed is true when the compressed output is ≥10 % smaller
+// than the source, matching CompressShuffleData's heuristic. When
+// useCompressed is false the caller should drop dst and upload src.
+//
+// Heap cost is bounded by the s2.Writer's internal block buffer
+// (~64 KB) regardless of file size. This is the file-streaming
+// counterpart to CompressShuffleData, used by the shuffle path to
+// avoid materialising whole partition files in heap at SF100+ scale
+// (project_per_task_share_landed_2026-05-20 followup —
+// executeShuffle's os.ReadFile was the dominant 62 % of heap at the
+// Q05 stall, per pprof on 2026-05-21).
+func CompressShuffleFile(srcPath, dstPath string) (compressedSize int64, useCompressed bool, err error) {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return 0, false, fmt.Errorf("open shuffle source: %w", err)
+	}
+	defer src.Close()
+	info, err := src.Stat()
+	if err != nil {
+		return 0, false, fmt.Errorf("stat shuffle source: %w", err)
+	}
+	srcSize := info.Size()
+	if srcSize < 64 {
+		// Below the threshold; CompressShuffleData skips these too.
+		return srcSize, false, nil
+	}
+
+	dst, err := os.Create(dstPath)
+	if err != nil {
+		return 0, false, fmt.Errorf("create shuffle compressed temp: %w", err)
+	}
+	if _, err := dst.Write(compressedMagic[:]); err != nil {
+		dst.Close()
+		return 0, false, fmt.Errorf("write WSHC magic: %w", err)
+	}
+	w := s2.NewWriter(dst)
+	if _, err := io.Copy(w, src); err != nil {
+		w.Close()
+		dst.Close()
+		return 0, false, fmt.Errorf("s2 stream copy: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		dst.Close()
+		return 0, false, fmt.Errorf("s2 close: %w", err)
+	}
+	outInfo, err := dst.Stat()
+	if err != nil {
+		dst.Close()
+		return 0, false, fmt.Errorf("stat compressed temp: %w", err)
+	}
+	compressedSize = outInfo.Size()
+	if err := dst.Close(); err != nil {
+		return compressedSize, false, fmt.Errorf("close compressed temp: %w", err)
+	}
+
+	if compressedSize >= srcSize*9/10 {
+		// Compression did not save the ≥10 % threshold; caller should
+		// upload the uncompressed source and drop the compressed temp.
+		return compressedSize, false, nil
+	}
+	return compressedSize, true, nil
 }
 
 // streamDecompressShuffle reads the s2 body that follows a WSHC magic header
