@@ -14,19 +14,9 @@ var ErrMemoryExceeded = fmt.Errorf("memory budget exceeded")
 
 // Tracker tracks memory usage with a configurable budget.
 // Hierarchical: a query tracker can have child operator trackers.
-//
-// Budget (hard cap) is checked by Reserve and fails the allocation when
-// exceeded. Share (soft cap) is checked by SpillManager.ShouldSpillForTaskShare
-// and triggers cooperative spill on this task before its allocations
-// reach the hard cap. Share is intended to express a task's fair slice
-// of a shared pool (e.g., sharedBudget / maxConcurrent) so heavy
-// operators can't hog more than their portion of cumulative cluster
-// memory even when other concurrent tasks happen to be idle. Share = 0
-// disables the soft cap (legacy behavior).
 type Tracker struct {
 	name   string
 	budget int64
-	share  int64 // soft cap for ShouldSpillForTaskShare; 0 = disabled
 	used   atomic.Int64
 	peak   atomic.Int64
 	parent *Tracker
@@ -85,22 +75,6 @@ func (t *Tracker) Used() int64 {
 // Budget returns the configured budget in bytes.
 func (t *Tracker) Budget() int64 {
 	return t.budget
-}
-
-// Share returns the soft cap (cooperative spill threshold base) for
-// this tracker, or 0 when disabled. Used by SpillManager to drive
-// per-task spill on the operator's own contribution rather than on
-// cumulative shared-pool pressure.
-func (t *Tracker) Share() int64 {
-	return t.share
-}
-
-// SetShare configures the soft cap. Pass 0 to disable. Safe to call
-// before any allocations have been Reserved against this tracker —
-// changing share mid-flight is allowed but won't retroactively trigger
-// spill on already-reserved bytes.
-func (t *Tracker) SetShare(n int64) {
-	t.share = n
 }
 
 // Name returns the tracker name.

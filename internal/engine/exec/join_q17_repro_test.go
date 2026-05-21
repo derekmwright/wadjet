@@ -219,12 +219,10 @@ func (s *generatedIntSource) Close() error { return nil }
 //
 // Set WADJET_Q17_REPRO=1 to enable. Skipped by default because it spawns
 // goroutines and exercises spill paths (slow + temp files).
-//
-// runQ17ShapeRepro factors the body so two sibling tests can drive it
-// with and without per-task share enforcement. Returns peak heap so
-// callers can compare configurations.
-func runQ17ShapeRepro(t *testing.T, perTaskShare bool) uint64 {
-	t.Helper()
+func TestHashJoin_Q17ShapeRepro(t *testing.T) {
+	if os.Getenv("WADJET_Q17_REPRO") != "1" {
+		t.Skip("set WADJET_Q17_REPRO=1 to enable")
+	}
 	const concurrent = 3
 	const buildN = 2_000_000
 
@@ -253,18 +251,7 @@ func runQ17ShapeRepro(t *testing.T, perTaskShare bool) uint64 {
 	for i := range joins {
 		hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
 		hj.Spill = sm
-		if perTaskShare {
-			// Per-task child of sharedTracker with Share = budget / N.
-			// Mirrors what Executor.taskTracker does on a real worker:
-			// each task's HashJoin.Build sees a tracker whose Used() is
-			// only its own contribution and whose Share triggers spill
-			// when this task crosses its fair slice of the worker pool.
-			child := sharedTracker.Child(fmt.Sprintf("task-%d", i))
-			child.SetShare(budget / int64(concurrent))
-			hj.MemTracker = child
-		} else {
-			hj.MemTracker = sharedTracker
-		}
+		hj.MemTracker = sharedTracker
 		// Tag the build alias so SpillableName attribution is readable
 		// in any future logging of this test bench.
 		hj.BuildTableAlias = fmt.Sprintf("build-%d", i)
@@ -364,17 +351,10 @@ func runQ17ShapeRepro(t *testing.T, perTaskShare bool) uint64 {
 		return nil
 	})
 
-	mode := "shared-only"
-	if perTaskShare {
-		mode = "per-task-share"
-	}
-	t.Logf("=== Q17-shape repro summary [%s] ===", mode)
+	t.Logf("=== Q17-shape repro summary ===")
 	t.Logf("  concurrent builds: %d", concurrent)
 	t.Logf("  rows per build:    %d", buildN)
 	t.Logf("  tracker budget:    %.2f MB", budgetMB)
-	if perTaskShare {
-		t.Logf("  per-task share:    %.2f MB", float64(budget/int64(concurrent))/1024/1024)
-	}
 	t.Logf("  peak Go heap:      %.2f MB (%.2fx budget)", heapMB, overshoot)
 	t.Logf("  final tracker:     %d KB (cumulative %d KB)", usedFinal/1024, cumulativeTracked/1024)
 	t.Logf("  spilled:           %d / %d builds, %d files, %.2f MB total",
@@ -399,161 +379,4 @@ func runQ17ShapeRepro(t *testing.T, perTaskShare bool) uint64 {
 	// earlier coop-spill trigger) should REDUCE this ratio when re-run
 	// against the same scale. Compare runs, don't compare to a fixed
 	// threshold.
-	return final
-}
-
-// TestHashJoin_Q17ShapeRepro runs the baseline (shared-only) variant.
-// See runQ17ShapeRepro doc for context.
-func TestHashJoin_Q17ShapeRepro(t *testing.T) {
-	if os.Getenv("WADJET_Q17_REPRO") != "1" {
-		t.Skip("set WADJET_Q17_REPRO=1 to enable")
-	}
-	runQ17ShapeRepro(t, false)
-}
-
-// TestHashJoin_Q17ShapeReproPerTaskShare runs with per-task share
-// enforcement under symmetric load — same input size in every task.
-// Under symmetric load, both modes spill at the same cumulative point
-// (3 tasks each at threshold/3 = cumulative-at-threshold), so the
-// peak-heap difference between modes is mostly allocator noise. The
-// architectural win surfaces in the ASYMMETRIC test below.
-//
-// Kept here as a symmetry-correctness sanity check: per-task share
-// must not regress the simple case.
-func TestHashJoin_Q17ShapeReproPerTaskShare(t *testing.T) {
-	if os.Getenv("WADJET_Q17_REPRO") != "1" {
-		t.Skip("set WADJET_Q17_REPRO=1 to enable")
-	}
-	runQ17ShapeRepro(t, true)
-}
-
-// TestHashJoin_Q17ShapeAsymmetric exposes the actual SF100 Q17 failure
-// shape: one heavy build (lineitem-side) racing two light builds
-// (dimension-side) for shared pool budget. Without per-task share,
-// the heavy build is allowed to grow until CUMULATIVE pressure trips
-// the spill check — and that's well after the heavy build has pushed
-// past its fair slice of the worker pool. With per-task share, the
-// heavy build trips its own share threshold first and spills before
-// it can hog the pool.
-//
-// Compares peak heap between the two modes under identical input.
-// The relative delta (asymmetric per-task < asymmetric shared) is the
-// load-bearing measurement; absolute values are noise-bound.
-func TestHashJoin_Q17ShapeAsymmetric(t *testing.T) {
-	if os.Getenv("WADJET_Q17_REPRO") != "1" {
-		t.Skip("set WADJET_Q17_REPRO=1 to enable")
-	}
-	sharedOnly := runAsymmetricRepro(t, false)
-	perTaskShare := runAsymmetricRepro(t, true)
-
-	t.Logf("=== asymmetric load comparison ===")
-	t.Logf("  shared-only peak:    %.2f MB", float64(sharedOnly)/1024/1024)
-	t.Logf("  per-task-share peak: %.2f MB", float64(perTaskShare)/1024/1024)
-	t.Logf("  delta:               %+.2f MB (%+.1f%%)",
-		float64(int64(perTaskShare)-int64(sharedOnly))/1024/1024,
-		(float64(perTaskShare)-float64(sharedOnly))/float64(sharedOnly)*100)
-}
-
-func runAsymmetricRepro(t *testing.T, perTaskShare bool) uint64 {
-	t.Helper()
-	// One heavy build + two light builds racing for the same shared pool.
-	// Heavy build is ~8× the light build's row count. This mirrors the SF100
-	// Q17 shape: lineitem-side build (~5.7 GB) vs dimension-side builds
-	// (~few hundred MB each).
-	const concurrent = 3
-	heavyN := 8_000_000
-	lightN := 1_000_000
-	rowsPerBuild := []int{heavyN, lightN, lightN}
-
-	budget := int64(120 * 1024 * 1024)
-	schema := []parquet.Column{
-		{Name: "id", Type: parquet.TypeInt64},
-		{Name: "val", Type: parquet.TypeInt64},
-	}
-
-	spillDir := t.TempDir()
-	sharedTracker := memory.NewTracker("shared", budget)
-	sm, err := memory.NewSpillManager(spillDir, sharedTracker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sm.Cleanup()
-
-	joins := make([]*HashJoin, concurrent)
-	for i := range joins {
-		hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
-		hj.Spill = sm
-		if perTaskShare {
-			child := sharedTracker.Child(fmt.Sprintf("task-%d", i))
-			child.SetShare(budget / int64(concurrent))
-			hj.MemTracker = child
-		} else {
-			hj.MemTracker = sharedTracker
-		}
-		hj.BuildTableAlias = fmt.Sprintf("build-%d-%s", i, map[bool]string{false: "shared", true: "per-task"}[perTaskShare])
-		joins[i] = hj
-	}
-
-	var peakHeap atomic.Uint64
-	stopSampler := make(chan struct{})
-	var samplerWG sync.WaitGroup
-	samplerWG.Add(1)
-	go func() {
-		defer samplerWG.Done()
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopSampler:
-				return
-			case <-ticker.C:
-				var ms runtime.MemStats
-				runtime.ReadMemStats(&ms)
-				for {
-					cur := peakHeap.Load()
-					if ms.HeapAlloc <= cur {
-						break
-					}
-					if peakHeap.CompareAndSwap(cur, ms.HeapAlloc) {
-						break
-					}
-				}
-			}
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	var wg sync.WaitGroup
-	startBarrier := make(chan struct{})
-	errs := make([]error, concurrent)
-	for i, hj := range joins {
-		wg.Add(1)
-		go func(idx int, j *HashJoin, rows int) {
-			defer wg.Done()
-			<-startBarrier
-			src := newGeneratedIntSource(schema, rows, int64(idx*heavyN))
-			errs[idx] = j.Build(ctx, src)
-		}(i, hj, rowsPerBuild[i])
-	}
-	close(startBarrier)
-	wg.Wait()
-	close(stopSampler)
-	samplerWG.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("Build %d failed: %v", i, err)
-		}
-	}
-
-	mode := "shared-only"
-	if perTaskShare {
-		mode = "per-task-share"
-	}
-	final := peakHeap.Load()
-	t.Logf("--- asymmetric [%s] peak=%dMB, joins=%v ---",
-		mode, final/1024/1024,
-		[]int{int(joins[0].TrackedMem() / 1024 / 1024), int(joins[1].TrackedMem() / 1024 / 1024), int(joins[2].TrackedMem() / 1024 / 1024)})
-	return final
 }

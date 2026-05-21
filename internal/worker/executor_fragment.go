@@ -850,12 +850,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	}
 	if e.sharedSpill != nil {
 		hj.Spill = e.sharedSpill
-		// Per-task child tracker (Share = shared / maxConcurrent) so this
-		// HashJoin's cooperative spill triggers on its own contribution
-		// to the worker pool, not just on cumulative shared-pool pressure.
-		// Falls back to e.sharedTracker when per-task scoping isn't
-		// configured (legacy callers, tests without MaxConcurrent set).
-		hj.MemTracker = e.taskTracker(task.ID)
+		hj.MemTracker = e.sharedTracker
 		// Broadcast probes always force partition-on-arrival to bound peak
 		// heap; shuffle-side probes opt in based on observed pool pressure.
 		// See executeStageHashJoin for the policy rationale.

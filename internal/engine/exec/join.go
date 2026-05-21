@@ -868,12 +868,8 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			continue
 		}
 
-		// Spill to disk if memory pressure is high. ShouldSpillForTaskShare
-		// fires when EITHER (a) this task's tracked memory exceeds its fair
-		// share of the worker pool (per-task spill — prevents one hot build
-		// from hogging while siblings are idle) OR (b) shared-pool pressure
-		// has crossed the urgency threshold (the existing cumulative check).
-		if h.Spill != nil && h.Spill.ShouldSpillForTaskShare(memory.SpillCheap, h.MemTracker) && (len(h.buildBatches) > 0 || h.spillState != nil) {
+		// Spill to disk if memory pressure is high
+		if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) && (len(h.buildBatches) > 0 || h.spillState != nil) {
 			if err := h.spillBuildBatches(0); err != nil {
 				h.mu.Unlock()
 				return fmt.Errorf("spilling build side: %w", err)
@@ -1960,9 +1956,8 @@ func (h *HashJoin) spillBuildBatches(neededBytes int64) error {
 				break
 			}
 		} else {
-			// Proactive spill: stop when under threshold on both per-task
-			// share and shared-pool pressure.
-			if h.MemTracker == nil || !h.Spill.ShouldSpillForTaskShare(memory.SpillCheap, h.MemTracker) {
+			// Proactive spill: stop when under 80% threshold
+			if h.MemTracker == nil || !h.Spill.ShouldSpillFor(memory.SpillCheap) {
 				break
 			}
 		}

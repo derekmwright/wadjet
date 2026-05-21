@@ -134,10 +134,6 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	if pool > 0 {
 		executor.SetSharedPoolBudget(pool)
 	}
-	// Surface concurrency so taskTracker() can compute each task's fair
-	// share of the shared pool (sharedBudget / maxConcurrent) for the
-	// per-task spill check.
-	executor.SetMaxConcurrent(cfg.MaxConcurrent)
 	executor.SetLogger(logger)
 	executor.SetNATSConn(nc)
 	if cfg.ResultStoreBytes > 0 {

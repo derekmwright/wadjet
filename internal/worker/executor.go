@@ -68,14 +68,6 @@ type Executor struct {
 	// table now share one budget and cooperatively spill.
 	sharedTracker *memory.Tracker
 	sharedSpill   *memory.SpillManager
-
-	// maxConcurrent records the worker's task slot count. Used by
-	// taskTracker() to size each task's fair share of the shared pool
-	// (sharedBudget / maxConcurrent) for the per-task cooperative spill
-	// check (SpillManager.ShouldSpillForTaskShare). Zero means no per-
-	// task scoping — operators see the shared tracker directly and only
-	// spill on cumulative pressure (legacy behavior).
-	maxConcurrent int
 }
 
 // NewExecutor creates a new task executor.
@@ -108,47 +100,6 @@ func (e *Executor) SharedPoolStats() (used, budget int64) {
 	return e.sharedTracker.Used(), e.sharedTracker.Budget()
 }
 
-
-// SetMaxConcurrent records the worker's task slot count so taskTracker()
-// can compute each task's fair share. Pass the same value the worker
-// passes to its dispatch semaphore. Safe to call before
-// SetSharedPoolBudget; both fields combine at task creation time.
-func (e *Executor) SetMaxConcurrent(n int) {
-	e.maxConcurrent = n
-}
-
-// taskTracker returns a memory tracker scoped to a single task. The
-// returned tracker is a child of the shared pool tracker (Reserve
-// bubbles up so the worker's hard cap still enforces) with Share set
-// to sharedBudget / maxConcurrent — so the per-task cooperative spill
-// check (SpillManager.ShouldSpillForTaskShare) fires when this task's
-// own contribution exceeds its fair slice of the worker pool, even if
-// cumulative pressure across all tasks is still low.
-//
-// Without this, one heavy task can hog the pool unbounded as long as
-// its siblings happen to be idle — exactly the SF100 Q17/Q18 failure
-// mode where lineitem-side HashJoin builds reach 5.7 GB tracked per
-// task on a worker whose share would be 14.8 GB / 3 ≈ 4.9 GB
-// (project_q17_sf100_instrumented_2026-05-17).
-//
-// Returns e.sharedTracker (no per-task scoping) when the worker isn't
-// configured for shared-pool tracking or maxConcurrent is unknown.
-//
-// Callers should call this ONCE per task and reuse the returned
-// tracker across all operators in the task — calling twice produces
-// two independent counters whose Used() values don't combine for the
-// share check.
-func (e *Executor) taskTracker(taskID string) *memory.Tracker {
-	if e.sharedTracker == nil {
-		return nil
-	}
-	if e.maxConcurrent <= 0 || e.sharedTracker.Budget() <= 0 {
-		return e.sharedTracker
-	}
-	t := e.sharedTracker.Child(taskID)
-	t.SetShare(e.sharedTracker.Budget() / int64(e.maxConcurrent))
-	return t
-}
 
 // SetSharedPoolBudget creates the worker-wide memory pool that all
 // concurrent tasks Reserve against. Operators (HashJoin build, sort
@@ -530,12 +481,7 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	// Tracker+SpillManager. Without this, two concurrent pipeline tasks
 	// could each allocate up to MemoryBudget and OOM the worker.
 	if e.sharedTracker != nil {
-		// Use a per-task child tracker so each operator built by the
-		// planner sees a tracker whose Used() reflects only THIS task's
-		// reservations and whose Share is the task's fair slice of the
-		// shared pool. Reserve still bubbles to the shared tracker via
-		// the child→parent link, so the worker's hard cap is unchanged.
-		planner.SharedTracker = e.taskTracker(task.ID)
+		planner.SharedTracker = e.sharedTracker
 	}
 	if e.sharedSpill != nil {
 		planner.SharedSpillMgr = e.sharedSpill
