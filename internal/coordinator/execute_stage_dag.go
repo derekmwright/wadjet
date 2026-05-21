@@ -1759,11 +1759,6 @@ func (c *Coordinator) dispatchComputeStage(
 			ResultBucket:    c.config.ResultBucket,
 			ResultPrefix:    resultPrefix,
 			CreatedAt:       time.Now(),
-			// Per-stage concurrency cap propagation. annotateMaxConcurrent
-			// sets stage.MaxConcurrentPerWorker on heavy-build joins; the
-			// scheduler honors this via PickWorkerForStage on the gRPC
-			// dispatch path. 0 = no cap (most stages).
-			MaxConcurrentPerWorker: stage.MaxConcurrentPerWorker,
 			// Output column projection for hash_join / broadcast_join stages.
 			// The worker applies these as the probe operator's OutputFilter so
 			// the join emits only the columns the downstream stage consumes,

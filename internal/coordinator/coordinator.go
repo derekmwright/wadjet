@@ -99,16 +99,6 @@ type Coordinator struct {
 	// receivers are registered as ResultHandlers so workers can stream
 	// results over gRPC instead of NATS. nil = NATS-only delivery.
 	dpSrv *dataplane.Server
-
-	// throttleReleaseSub is the wildcard NATS subscription that drives
-	// per-stage throttle release. Every terminal ResultNotification
-	// (success/failure/panic) decrements the in-flight count on the
-	// data-plane server for the (workerID, queryID:stageID) tuple,
-	// freeing capacity for any PickWorkerAndReserveForStage waiter.
-	// Lifecycle is tied to dpSrv: created when SetDataPlaneServer is
-	// first called, never explicitly torn down (NATS unsubscribes on
-	// conn close). Idempotent on re-init.
-	throttleReleaseSub *nats.Subscription
 }
 
 // New creates a new Coordinator.
@@ -180,42 +170,6 @@ func (c *Coordinator) SetDataPlaneServer(srv *dataplane.Server) {
 	c.dpSrv = srv
 	c.scheduler.SetDataPlaneServer(srv)
 	c.workers.SetDataPlaneServer(srv)
-	c.startThrottleReleaseSub()
-}
-
-// startThrottleReleaseSub installs the global ResultNotification
-// subscriber that drives per-stage throttle release. Wakes every
-// PickWorkerAndReserveForStage waiter on terminal task completion
-// (success+failure+panic — all three paths publish a
-// ResultNotification before exiting the worker's task goroutine).
-//
-// Idempotent: if already subscribed, returns without resubscribing.
-// Safe to call when dpSrv is nil (no-op) or when nc is unavailable
-// (logs and continues — throttle gracefully degrades to "never release
-// on success" which would eventually wedge, but no-NATS isn't a
-// supported configuration for the data-plane path anyway).
-func (c *Coordinator) startThrottleReleaseSub() {
-	if c.dpSrv == nil || c.nc == nil || c.throttleReleaseSub != nil {
-		return
-	}
-	sub, err := c.nc.Subscribe(distributed.SubjectResultsAll, func(msg *nats.Msg) {
-		var rn distributed.ResultNotification
-		if err := distributed.Unmarshal(msg.Data, &rn); err != nil {
-			return
-		}
-		if rn.WorkerID == "" || rn.StageID == "" {
-			// Pre-throttle workers (or task shapes that omit attribution)
-			// leave these empty. Skip — those tasks never reserved a slot.
-			return
-		}
-		c.dpSrv.ReleaseStage(rn.WorkerID, rn.QueryID+":"+rn.StageID)
-	})
-	if err != nil {
-		c.logger.Warn("throttle: subscribe to global result subject failed; per-stage throttle disabled",
-			"error", err, "subject", distributed.SubjectResultsAll)
-		return
-	}
-	c.throttleReleaseSub = sub
 }
 
 // Workers returns the worker registry for inspecting active workers.
@@ -539,7 +493,6 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	planner.WorkerCount = c.workers.Count()
 	planner.UseEnsureDistribution = true
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
-	planner.MaxConcurrentBudget = c.workers.MinWorkerPoolBudget()
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return nil, fmt.Errorf("physical plan: %w", err)

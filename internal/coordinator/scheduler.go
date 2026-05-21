@@ -51,7 +51,7 @@ type preparedTask struct {
 // via gRPC TaskDispatch (data-plane server) when configured, otherwise
 // falls back to NATS JetStream publish. Tasks are serialized in batch
 // before publishing to minimize time spent holding the transport.
-func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) error {
+func (s *Scheduler) PublishTasks(_ context.Context, tasks []distributed.Task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -77,7 +77,7 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 	}
 
 	if s.dpSrv != nil {
-		return s.publishViaDataPlane(ctx, batch)
+		return s.publishViaDataPlane(batch)
 	}
 
 	// Publish all pre-serialized messages
@@ -100,40 +100,21 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 // on HTTP/2 flow control when a worker is saturated, applying
 // backpressure to the scheduler. The full set is rejected if no worker
 // is connected — there is no NATS fallback in gRPC mode.
-//
-// Tasks carrying MaxConcurrentPerWorker > 0 route through
-// PickWorkerAndReserveForStage, which atomically reserves a per-stage
-// slot on the chosen worker; the slot is released on terminal
-// ResultNotification by the global subscriber wired into
-// Coordinator.SetDataPlaneServer (or on worker disconnect, by
-// dataplane.Server.unregister). Tasks with cap 0 use the plain
-// round-robin path.
-func (s *Scheduler) publishViaDataPlane(ctx context.Context, batch []preparedTask) error {
+func (s *Scheduler) publishViaDataPlane(batch []preparedTask) error {
 	for _, p := range batch {
-		stageKey := stageKeyFor(p.task)
-		cap := p.task.MaxConcurrentPerWorker
-
-		workerID, err := s.pickAndReserve(ctx, stageKey, cap)
-		if err != nil {
-			return fmt.Errorf("dispatching task %s: %w", p.task.ID, err)
+		workerID, ok := s.dpSrv.PickWorker()
+		if !ok {
+			return fmt.Errorf("dispatching task %s: %w", p.task.ID, dataplane.ErrNoWorkers)
 		}
 		if err := s.dpSrv.SendTaskDispatch(workerID, p.task.ID, p.task.QueryID, p.task.StageID, p.data, 0); err != nil {
-			// Rollback the reservation we just made on `workerID` so the
-			// slot doesn't leak forever — the terminal ResultNotification
-			// won't fire for a task we never actually sent.
-			if cap > 0 {
-				s.dpSrv.ReleaseStage(workerID, stageKey)
-			}
 			if errors.Is(err, dataplane.ErrNotConnected) {
 				// Worker dropped between Pick and Send; one retry on the
 				// next round-robin position keeps the path lossless when
 				// the cluster has more than one worker.
-				workerID2, err2 := s.pickAndReserve(ctx, stageKey, cap)
-				if err2 == nil && workerID2 != workerID {
-					if err3 := s.dpSrv.SendTaskDispatch(workerID2, p.task.ID, p.task.QueryID, p.task.StageID, p.data, 0); err3 == nil {
+				workerID2, ok2 := s.dpSrv.PickWorker()
+				if ok2 && workerID2 != workerID {
+					if err2 := s.dpSrv.SendTaskDispatch(workerID2, p.task.ID, p.task.QueryID, p.task.StageID, p.data, 0); err2 == nil {
 						continue
-					} else if cap > 0 {
-						s.dpSrv.ReleaseStage(workerID2, stageKey)
 					}
 				}
 			}
@@ -142,29 +123,4 @@ func (s *Scheduler) publishViaDataPlane(ctx context.Context, batch []preparedTas
 	}
 	s.logger.Info("published tasks", "count", len(batch), "transport", "grpc")
 	return nil
-}
-
-// pickAndReserve picks a worker honoring the per-stage cap when set.
-// When cap == 0, falls back to plain RR (no reservation tracking).
-func (s *Scheduler) pickAndReserve(ctx context.Context, stageKey string, cap int) (string, error) {
-	if cap > 0 {
-		return s.dpSrv.PickWorkerAndReserveForStage(ctx, stageKey, cap)
-	}
-	id, ok := s.dpSrv.PickWorker()
-	if !ok {
-		return "", dataplane.ErrNoWorkers
-	}
-	return id, nil
-}
-
-// stageKeyFor returns the cluster-wide key used to track per-stage
-// in-flight task counts. Composed of QueryID + StageID so two
-// concurrent queries running plans that produce the same stage.ID
-// strings don't accidentally share a cap — each query gets its own
-// budget. The throttle's purpose is per-worker memory pressure
-// management within a single query's heavy-build stages; cross-query
-// memory pressure (when it arises) needs a separate cluster-wide
-// admission primitive.
-func stageKeyFor(t distributed.Task) string {
-	return t.QueryID + ":" + t.StageID
 }

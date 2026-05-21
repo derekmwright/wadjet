@@ -117,14 +117,6 @@ type Stage struct {
 	EstimatedBytes int64
 	EstimatedRows  int64
 
-	// MaxConcurrentPerWorker caps how many tasks of THIS stage may run
-	// concurrently on a single worker. 0 = no per-stage cap (worker's
-	// global MaxConcurrent applies). Set by annotateMaxConcurrent for
-	// heavy-build join stages whose per-task footprint would overcommit
-	// the worker heap budget when run at full concurrency
-	// (project_q17_fix_directions_2026-05-18 Path A).
-	MaxConcurrentPerWorker int
-
 	// Distribution describes how this stage's output is partitioned.
 	// Default zero value is {Kind: DistSingleton} which is correct for
 	// most existing stages (single-worker output). Shuffle stages set this
@@ -282,15 +274,6 @@ type Planner struct {
 	// budget shrinks, the threshold shrinks too — without changing the
 	// planner's join-type logic.
 	BroadcastBytesThreshold int64
-
-	// MaxConcurrentBudget is the smallest per-worker shared-pool budget
-	// reported by any active worker (typically
-	// WorkerRegistry.MinWorkerPoolBudget). When > 0, the planner runs
-	// annotateMaxConcurrent after EnsureDistribution to cap per-stage
-	// concurrent task counts on stages whose per-task build memory would
-	// overcommit the worker heap if run at full concurrency. Zero leaves
-	// every stage uncapped (legacy behavior).
-	MaxConcurrentBudget int64
 
 	// UseEnsureDistribution runs the Phase-2 EnsureDistribution pass after
 	// assignStageDistributions. When true, BehaviorPreservingMode is flipped
@@ -1415,10 +1398,6 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// stage. Gated on collapsing-consumer (final_aggregate /
 		// merge_aggregate) only.
 		stages = fuseScanAggregateShuffle(stages)
-		// Per-stage concurrency caps for heavy-build joins. Runs after
-		// EnsureDistribution + fuse passes so the annotated stage IDs are
-		// stable. No-op when MaxConcurrentBudget == 0.
-		annotateMaxConcurrent(stages, p.MaxConcurrentBudget)
 		prev := BehaviorPreservingMode
 		BehaviorPreservingMode = false
 		defer func() { BehaviorPreservingMode = prev }()
