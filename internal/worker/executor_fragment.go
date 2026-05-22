@@ -165,10 +165,6 @@ func (p *fragmentProgress) applyBackpressure(ctx context.Context) error {
 //	[Scan, Filter?, ExchangeSender]                  — replaces scan + shuffle stages
 //	[ShuffleSource, HashJoinProbe, ExchangeSender]   — replaces shuffle-recv + join stages
 //	[ShuffleSource, HashAggregate, GatherSink]       — final-aggregate + gather
-//
-// The legacy executeStageScan/HashJoin/Aggregate/Sort handlers remain for
-// tasks the planner hasn't migrated yet; they're equivalent to a single-op
-// fragment but go through the per-StageType code path.
 func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
 	if len(task.Operators) == 0 {
 		return fmt.Errorf("fragment task %s: empty Operators", task.ID)
@@ -199,8 +195,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// Empty source files: legitimate "upstream produced nothing" case (e.g.,
 	// an aggregate or semi-join filtered every row). Emit zero rows and no
 	// result files; downstream stages handle the empty-input shape via their
-	// own short-circuits. Mirrors executeStageHashJoin's len(probeFiles)==0
-	// check before any S3 I/O happens.
+	// own short-circuits; we short-circuit here before any S3 I/O happens.
 	//
 	// Exception: OpGatherSink. The coordinator's gather receiver counts
 	// terminal markers, not messages — skipping finalize would leave it
@@ -644,11 +639,10 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, spec distributed.Op
 			Label:   "hash_aggregate",
 			Cleanup: func() { hashAgg.Close() },
 		}
-		// Optional derived-input projection. Mirrors executeStageAggregate's
-		// buildAggInputProjection — required for partial aggregates whose
-		// inputs are SQL expressions (e.g. SUM(l_extendedprice*(1-l_discount))).
-		// Skipped for merge mode: the partial stage already computed the
-		// derived column under OutputCol.
+		// Optional derived-input projection via buildAggInputProjection —
+		// required for partial aggregates whose inputs are SQL expressions
+		// (e.g. SUM(l_extendedprice*(1-l_discount))). Skipped for merge mode:
+		// the partial stage already computed the derived column under OutputCol.
 		if spec.BuildProject && !spec.MergeMode {
 			project, _, perr := buildAggInputProjection(spec.GroupByCols, spec.Aggregates, nil)
 			if perr != nil {
@@ -692,9 +686,9 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, spec distributed.Op
 			Label:   "sort",
 			Cleanup: func() { sorter.Close() },
 		}
-		// Truncate to the top-N rows after Finalize. Mirrors
-		// executeStageSort: Truncate runs ONCE between Finalize and the
-		// first Next so the materialized output is bounded.
+		// Truncate to the top-N rows after Finalize. Truncate runs ONCE
+		// between Finalize and the first Next so the materialized output
+		// is bounded.
 		if spec.SortLimit > 0 {
 			limit := spec.SortLimit
 			fb.PostFinalize = func() { sorter.Truncate(limit) }
@@ -706,9 +700,9 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, spec distributed.Op
 	}
 }
 
-// buildFragmentSort constructs an exec.Sort from an OpSpec. Mirrors the
-// executeStageSort key conversion (Desc → exec.Descending). Spill is wired
-// from the executor's shared spill manager when present.
+// buildFragmentSort constructs an exec.Sort from an OpSpec. Converts each
+// SortKeySpec.Desc into exec.Descending. Spill is wired from the executor's
+// shared spill manager when present.
 func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error) {
 	if len(spec.SortKeySpecs) == 0 {
 		return nil, fmt.Errorf("sort: SortKeySpecs required")
@@ -731,8 +725,7 @@ func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error
 // buildFragmentHashAggregate constructs an exec.HashAggregate from an OpSpec.
 // In merge mode the spec's Aggregates are rewritten so InputCol = OutputCol
 // (the partial-output column) and COUNT becomes SUM (counting partial rows
-// re-counts groups, not source rows). Mirrors the rewrite in
-// executeStageAggregate.
+// re-counts groups, not source rows).
 func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.HashAggregate, error) {
 	if len(spec.Aggregates) == 0 && len(spec.GroupByCols) == 0 {
 		return nil, fmt.Errorf("hash_aggregate: at least one of GroupByCols or Aggregates is required")
@@ -857,9 +850,8 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	if len(spec.BuildFiles) == 0 {
 		// Empty build → inner/semi joins emit no rows; upstream planner may
 		// have decided this fragment should not run, but we treat empty
-		// build as "no output" to match executeStageHashJoin's behavior.
-		// Returning an op chain that drops every row keeps the pipeline
-		// well-formed without special-casing the runner.
+		// build as "no output". Returning an op chain that drops every row
+		// keeps the pipeline well-formed without special-casing the runner.
 		return []exec.UnaryOperator{exec.NewFilter(func(_ *batch.RecordBatch, _ int) bool {
 			return false
 		})}, nil, nil
@@ -905,7 +897,6 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			hj.MemTracker = e.sharedTracker
 			// Broadcast probes always force partition-on-arrival to bound peak
 			// heap; shuffle-side probes opt in based on observed pool pressure.
-			// See executeStageHashJoin for the policy rationale.
 			if spec.Type == distributed.OpBroadcastProbe {
 				hj.PartitionOnArrival = true
 			} else {
