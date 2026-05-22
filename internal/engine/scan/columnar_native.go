@@ -4,6 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"runtime"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -110,22 +113,38 @@ func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 		}
 	}
 
+	// Per-column reads write only to their own b.Columns[i] slot, and
+	// FileReader is read-only after construction (immutable meta + leaves;
+	// each ColumnPages call allocates a fresh ColumnPageReader). Parallelize
+	// the per-column work to use idle worker cores: 2026-05-22 SF100 Q18
+	// profile showed cachedFileStreamSource.Next at 22.7% cum CPU with the
+	// per-column loop serial within a single fragment goroutine.
+	limit := len(schema)
+	if gp := runtime.GOMAXPROCS(0); limit > gp {
+		limit = gp
+	}
+	g := new(errgroup.Group)
+	g.SetLimit(limit)
 	for i, col := range schema {
+		i, col := i, col
 		// ROW: read each child field as a separate leaf column.
 		if col.Type == pqt.TypeRow && len(col.Fields) > 0 {
-			for j, field := range col.Fields {
-				key := col.Name + "." + field.Name
-				childIdx, ok := leafByPath[key]
-				if !ok {
-					for k := 0; k < numRows; k++ {
-						b.Columns[i].Children[j].Nulls.SetNull(k)
+			g.Go(func() error {
+				for j, field := range col.Fields {
+					key := col.Name + "." + field.Name
+					childIdx, ok := leafByPath[key]
+					if !ok {
+						for k := 0; k < numRows; k++ {
+							b.Columns[i].Children[j].Nulls.SetNull(k)
+						}
+						continue
 					}
-					continue
+					if err := readColumnNative(b.Columns[i].Children[j], fr, rgIdx, childIdx, numRows, field.Type); err != nil {
+						return fmt.Errorf("reading ROW field %s.%s: %w", col.Name, field.Name, err)
+					}
 				}
-				if err := readColumnNative(b.Columns[i].Children[j], fr, rgIdx, childIdx, numRows, field.Type); err != nil {
-					return nil, fmt.Errorf("reading ROW field %s.%s: %w", col.Name, field.Name, err)
-				}
-			}
+				return nil
+			})
 			continue
 		}
 
@@ -142,6 +161,7 @@ func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 			}
 			if !found {
 				// Column not in parquet file — leave as all nulls.
+				// Run synchronously: trivial work, no decode.
 				for j := 0; j < numRows; j++ {
 					b.Columns[i].Nulls.SetNull(j)
 				}
@@ -149,9 +169,16 @@ func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool
 			}
 		}
 
-		if err := readColumnNative(b.Columns[i], fr, rgIdx, colIdx, numRows, col.Type); err != nil {
-			return nil, fmt.Errorf("reading column %s: %w", col.Name, err)
-		}
+		ci := colIdx
+		g.Go(func() error {
+			if err := readColumnNative(b.Columns[i], fr, rgIdx, ci, numRows, col.Type); err != nil {
+				return fmt.Errorf("reading column %s: %w", col.Name, err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	return b, nil

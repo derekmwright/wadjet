@@ -163,10 +163,18 @@ func (c *Coordinator) runShuffleSide(
 	// Note: intentionally accepting nil here (SELECT * fallback) rather than
 	// returning an error for a catalog miss during shuffle setup.
 
-	// Split source files across workers. splitFilesEvenly handles the case where
-	// there are fewer files than workers by capping n at len(files), so
-	// actualTasks ≤ workerCount.
-	fileSets := splitFilesEvenly(sourceStage.ScanFiles, workerCount)
+	// Fan out shuffle tasks across the cluster's effective concurrency capacity
+	// (sum of each worker's auto-tuned MaxConcurrent reported in heartbeats),
+	// not just worker count. With 3 workers × MaxConcurrent=3 the cluster can
+	// run 9 shuffle tasks at once; sizing to 3 leaves 6 task slots idle and
+	// pegs each worker to a single fragment-pipeline. 2026-05-22 SF100 Q18
+	// stage timeline showed exchange-repartition-15 wall = 3m09s with only
+	// 3 tasks (workerCount), while workers had MaxConcurrent=3 → 6 task slots
+	// sat idle for the whole stage. This mirrors scanFanOutTaskCount's policy
+	// (used by dispatchScanAggregateStage et al) — see execute_stage_dag.go.
+	capacity := c.workers.ClusterCapacity()
+	taskCount := scanFanOutTaskCount(workerCount, capacity, len(sourceStage.ScanFiles))
+	fileSets := splitFilesEvenly(sourceStage.ScanFiles, taskCount)
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		// No files — nothing to shuffle. Return empty partition layout.
