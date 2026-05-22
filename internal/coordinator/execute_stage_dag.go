@@ -764,6 +764,31 @@ func (c *Coordinator) dispatchShuffleStage(
 // materialization path on small fixtures.
 var replicateMaterializeMinFiles = 2
 
+// allWSHF reports whether every file in the list has the .wshf suffix.
+// Native-DAG upstreams ALL write WSHF — the only path that would feed
+// raw parquet into a replicate is a (legacy) plan that skipped the
+// intermediate scan-filter stage, which the current planner never
+// emits. When all upstreams are WSHF, the consolidation that
+// materializeReplicate provides has no CPU payoff (mmap-walk a single
+// 154 MB cache vs mmap-walk N WSHF chunks is essentially identical
+// I/O cost), yet the serial single-task materialize burns wall time
+// — 2 m 19 s on Q21 SF100 c9716f7 just to consolidate 5 WSHF files
+// totalling ~150 MB (project_streaming_shuffle_sf100_win_2026-05-22
+// follow-up profile analysis). Returns false for an empty list to
+// preserve the existing "pass through" semantics — len() == 0 hits
+// other guards.
+func allWSHF(files []string) bool {
+	if len(files) == 0 {
+		return false
+	}
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".wshf") {
+			return false
+		}
+	}
+	return true
+}
+
 // dispatchReplicateStage executes a StageExchangeReplicate: reads upstream
 // output and materializes it into a single broadcast cache that all
 // downstream workers read in full.
@@ -789,7 +814,12 @@ func (c *Coordinator) dispatchReplicateStage(
 	upstream := inputs[stage.Dependencies[0]]
 	upstreamFiles := flattenStageFiles(upstream)
 
-	if upstream.Kind == OutputReplicated || len(upstreamFiles) < replicateMaterializeMinFiles {
+	if upstream.Kind == OutputReplicated || len(upstreamFiles) < replicateMaterializeMinFiles || allWSHF(upstreamFiles) {
+		// allWSHF bypass: native-DAG upstreams write WSHF, mmap-readable
+		// downstream with no per-file decode cost. Materialize provides no
+		// CPU savings here and adds a 2 m+ serial-task wall on Q21 SF100.
+		// Pass through; downstream probe-split tasks each open all N
+		// upstream files directly via cachedFileStreamSource (mmap, cheap).
 		return StageOutput{
 			Kind:  OutputReplicated,
 			Files: [][]string{upstreamFiles},
