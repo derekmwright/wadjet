@@ -166,8 +166,16 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 			if b != nil {
 				return b, nil
 			}
-			// Iterator exhausted — release reader and move on.
+			// Iterator exhausted — release reader and the mmap/local file it
+			// was reading from before opening the next file. Order matters:
+			// releaseParquetIter drops s.parquetReader, which drops the last
+			// reference to the byte slice that the streaming parquet-mmap
+			// path (added 2026-05-22) handed in as FileReader.data. Once
+			// nothing is holding the slice, releaseCurrentFile can safely
+			// munmap. WSHF path is unaffected because chunkReader is nil
+			// here (its release happens in its own branch above).
 			s.releaseParquetIter()
+			s.releaseCurrentFile()
 		}
 
 		// Yield from the fallback slice (Array/Map schemas only).
@@ -191,8 +199,13 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 }
 
 func (s *cachedFileStreamSource) Close() error {
-	s.releaseCurrentFile()
+	// Parquet refs must be cleared BEFORE munmap: parquet.NewReaderFromBytes
+	// keeps the input slice live inside FileReader.data, and the streaming
+	// parquet-mmap path (added 2026-05-22) hands the mmap'd region in as
+	// that slice. Munmapping before releasing the reader would leave the
+	// reader holding dangling mmap bytes if any caller still has a handle.
 	s.releaseParquetIter()
+	s.releaseCurrentFile()
 	for i := s.fallbackBatchIdx; i < len(s.fallbackBatches); i++ {
 		s.fallbackBatches[i] = nil
 	}
@@ -300,18 +313,54 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		return s.openShuffleFile(ctx, filePath, magic[:], rc, wshc)
 	}
 
-	// Legacy Parquet path: download the rest of the body, hand to the
-	// parquet reader. These payloads are bounded by the inline-result
-	// threshold (KB to a few MB) so io.ReadAll is fine here.
-	rest, err := io.ReadAll(rc)
-	if err != nil {
-		return fmt.Errorf("reading parquet body for %s: %w", filePath, err)
+	// Parquet path: when a spill dir is available, stream the body to a
+	// local NVMe temp file, mmap it PROT_READ, and hand the mmap'd byte
+	// slice to parquet.NewReaderFromBytes (zero-copy). Heap is bounded
+	// by the kernel's page-cache footprint for the active mmap region
+	// instead of the full file size. Mirrors the WSHF path's streaming
+	// pattern (openShuffleFile above).
+	//
+	// Pre-2026-05-22 this used io.ReadAll(rc) + parquet.NewReader
+	// (bytes.NewReader(data), len), which kept TWO full-file buffers
+	// alive per open file: the io.ReadAll slice AND OpenFileReader's
+	// internal make([]byte, size). Q21 SF1 alloc-profile attributed
+	// 1110 MB to io.ReadAll + 204 MB to OpenFileReader's make([]byte,
+	// size) — the dominant heap source during join-6 (peak 3.9 GB).
+	//
+	// Fallback: when spillDir is empty (tests, MemStore-only setups)
+	// keep the in-memory path but drop the double-buffer by using
+	// NewReaderFromBytes (zero-copy) instead of NewReader+bytes.Reader.
+	var data []byte
+	var mmapData []byte
+	var localPath string
+	if s.executor.spillDir != "" {
+		md, lp, err := s.streamParquetToLocalMmap(ctx, filePath, magic[:], rc)
+		if err != nil {
+			return fmt.Errorf("streaming parquet %s to local mmap: %w", filePath, err)
+		}
+		mmapData = md
+		localPath = lp
+		data = mmapData
+	} else {
+		rest, err := io.ReadAll(rc)
+		if err != nil {
+			return fmt.Errorf("reading parquet body for %s: %w", filePath, err)
+		}
+		data = append(magic[:], rest...)
 	}
-	data := append(magic[:], rest...)
-	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+	reader, err := parquet.NewReaderFromBytes(data)
 	if err != nil {
+		if mmapData != nil {
+			_ = syscall.Munmap(mmapData)
+			_ = os.Remove(localPath)
+		}
 		return fmt.Errorf("opening parquet file %s: %w", filePath, err)
 	}
+	// Transfer mmap/file ownership to the source so Next()/Close()
+	// release them when the iterator exhausts. nil/empty are fine for
+	// the in-memory fallback above.
+	s.mmapData = mmapData
+	s.localPath = localPath
 	projCols := reader.Schema().Columns
 	// Apply column projection only when EVERY requested column is present
 	// in the file schema. If any requested name is missing (likely a
@@ -475,6 +524,66 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 	s.mmapData = mmapData
 	s.localPath = localPath
 	return nil
+}
+
+// streamParquetToLocalMmap streams a parquet body (with `magic` prepended)
+// from rc to a temp file on the worker's NVMe spill dir, then mmaps the
+// file PROT_READ and returns the mmap'd slice. The caller takes ownership:
+// on success it must munmap the slice and remove the local path. Used by
+// the parquet branch of openNextFile to avoid the double-full-file-buffer
+// allocation pattern of io.ReadAll + OpenFileReader.
+func (s *cachedFileStreamSource) streamParquetToLocalMmap(ctx context.Context, srcPath string, magic []byte, rc io.Reader) ([]byte, string, error) {
+	spillDir := s.executor.spillDir
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		return nil, "", fmt.Errorf("creating spill dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(spillDir, "parquet-stream-*.parquet")
+	if err != nil {
+		return nil, "", fmt.Errorf("creating local parquet file: %w", err)
+	}
+	localPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			tmp.Close()
+			_ = os.Remove(localPath)
+		}
+	}()
+
+	rep := exec.ProgressReporterFromContext(ctx)
+	dst := io.Writer(tmp)
+	if rep != nil {
+		dst = &progressWriter{w: tmp, rep: rep}
+	}
+	if _, err := dst.Write(magic); err != nil {
+		return nil, "", fmt.Errorf("writing magic to local parquet: %w", err)
+	}
+	if _, err := io.Copy(dst, rc); err != nil {
+		return nil, "", fmt.Errorf("streaming %s to local parquet: %w", srcPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return nil, "", fmt.Errorf("syncing local parquet: %w", err)
+	}
+
+	fi, err := tmp.Stat()
+	if err != nil {
+		return nil, "", fmt.Errorf("stat local parquet: %w", err)
+	}
+	if fi.Size() == 0 {
+		return nil, "", fmt.Errorf("local parquet for %s is empty after stream", srcPath)
+	}
+
+	mmapData, err := syscall.Mmap(int(tmp.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		return nil, "", fmt.Errorf("mmap local parquet %s: %w", localPath, err)
+	}
+	// Close the fd — the mmap keeps the inode alive until Munmap.
+	if err := tmp.Close(); err != nil {
+		_ = syscall.Munmap(mmapData)
+		return nil, "", fmt.Errorf("closing local parquet fd: %w", err)
+	}
+	cleanup = false
+	return mmapData, localPath, nil
 }
 
 // openShuffleFromLocalFile mmaps an existing local file (typically owned by
