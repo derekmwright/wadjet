@@ -1,7 +1,6 @@
 package parquet
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 )
@@ -1139,41 +1138,3 @@ func decimalFromBytesRaw(b []byte) (int64, uint64) {
 	return hi, lo
 }
 
-// Deprecated compatibility aliases — exported functions that some callers may
-// still reference. These delegate to TypeIDFromSchemaNode which is the canonical
-// path now.
-
-// TypeIDFromParquetPhysical maps a native physical type to TypeID.
-func TypeIDFromParquetPhysical(pt PhysicalType) TypeID {
-	switch pt {
-	case PhysicalBoolean:
-		return TypeBool
-	case PhysicalInt32:
-		return TypeInt32
-	case PhysicalInt64:
-		return TypeInt64
-	case PhysicalFloat:
-		return TypeFloat32
-	case PhysicalDouble:
-		return TypeFloat64
-	case PhysicalByteArray, PhysicalFixedLenByteArray:
-		return TypeString
-	default:
-		return TypeString
-	}
-}
-
-// decimalFromBytesLE interprets LE decimal bytes for statistics.
-func decimalFromBytesLE(b []byte, size int) int64 {
-	switch size {
-	case 4:
-		if len(b) >= 4 {
-			return int64(int32(binary.LittleEndian.Uint32(b)))
-		}
-	case 8:
-		if len(b) >= 8 {
-			return int64(binary.LittleEndian.Uint64(b))
-		}
-	}
-	return 0
-}
