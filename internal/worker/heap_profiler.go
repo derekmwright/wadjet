@@ -10,8 +10,16 @@ import (
 	"runtime/pprof"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 )
+
+// longTaskWatchAt is how long a task may run before the watcher fires a
+// one-shot snapshot (goroutine stacks + heap + sidecar). 5 min is well
+// above all SF10/SF100 short queries (Q16 ~1 min, Q06 ~1.5 min) and
+// catches Q21/Q18-class wall regressions without firing on healthy
+// workloads.
+const longTaskWatchAt = 5 * time.Minute
 
 // heapPressureProfilePoll is how often the heap-pressure profiler checks
 // HeapBackpressureActive. The check itself is cached at 100 ms inside
@@ -170,5 +178,154 @@ func (w *Worker) writeHeapPressureProfile(dir string) error {
 		"heap_alloc_before_gc_mb", msBefore.HeapAlloc/1024/1024,
 		"heap_alloc_after_gc_mb", msAfter.HeapAlloc/1024/1024,
 		"active_tasks", len(activeIDs))
+	return nil
+}
+
+// startLongTaskWatcher spawns a one-shot goroutine that fires a
+// snapshot if the task is still active after longTaskWatchAt elapses.
+// The snapshot includes the live goroutine profile (stacks), live heap
+// profile, and a sidecar with task/query/stage IDs + heap stats.
+//
+// Returns a cancel func the caller must invoke (typically via defer)
+// when the task completes — that prevents the snapshot from firing on
+// short tasks. The cancel is idempotent.
+//
+// Motivation: 2026-05-22 SF100 Q21 ran 13m50s with zero
+// HeapBackpressureActive events. The existing heap_profiler.go fires
+// only above 70% GOMEMLIMIT; sub-threshold long tasks (CPU-bound,
+// blocked goroutines, plan inefficiencies) produce no diagnostic data.
+// This watcher closes that gap with a once-per-task snapshot at the
+// 5-min mark.
+//
+// Disabled when SpillDir is unset.
+func (w *Worker) startLongTaskWatcher(ctx context.Context, task distributed.Task) func() {
+	if w.config.SpillDir == "" {
+		return func() {}
+	}
+	dir := filepath.Join(w.config.SpillDir, "heap-profiles")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		w.logger.Warn("long-task watcher: mkdir failed", "dir", dir, "err", err)
+		return func() {}
+	}
+	cancelCh := make(chan struct{})
+	var cancelOnce func()
+	{
+		ch := cancelCh
+		cancelOnce = func() {
+			select {
+			case <-ch:
+			default:
+				close(ch)
+			}
+		}
+	}
+
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		select {
+		case <-ctx.Done():
+			return
+		case <-cancelCh:
+			return
+		case <-time.After(longTaskWatchAt):
+		}
+		if err := w.writeLongTaskSnapshot(dir, task); err != nil {
+			w.logger.Warn("long-task snapshot failed",
+				"task_id", task.ID, "err", err)
+		}
+	}()
+	return cancelOnce
+}
+
+// writeLongTaskSnapshot dumps a goroutine profile, a heap profile, and
+// a sidecar describing the task. Run when a task crosses
+// longTaskWatchAt. Files share the long-task-<workerID>-<task_id>-...
+// naming so they're easy to grep alongside the heap-pressure-fired
+// profiles in the same directory.
+func (w *Worker) writeLongTaskSnapshot(dir string, task distributed.Task) error {
+	ts := time.Now().UnixMilli()
+	base := fmt.Sprintf("long-task-%s-%s-%d", w.config.WorkerID, task.ID, ts)
+	goroutinePath := filepath.Join(dir, base+".goroutines.txt")
+	heapPath := filepath.Join(dir, base+".heap.pb.gz")
+	sidecarPath := filepath.Join(dir, base+".meta.txt")
+
+	// Goroutine dump (text format, debug=2 for full stacks). This is
+	// the load-bearing artifact for diagnosing wall-time-without-heap
+	// failures: blocked I/O, channel waits, GC-mark-assist parks, lock
+	// contention all surface in the stacks.
+	gf, err := os.Create(goroutinePath)
+	if err != nil {
+		return fmt.Errorf("create goroutine profile: %w", err)
+	}
+	if gErr := pprof.Lookup("goroutine").WriteTo(gf, 2); gErr != nil {
+		_ = gf.Close()
+		_ = os.Remove(goroutinePath)
+		return fmt.Errorf("write goroutine profile: %w", gErr)
+	}
+	if cErr := gf.Close(); cErr != nil {
+		return fmt.Errorf("close goroutine profile: %w", cErr)
+	}
+
+	// Heap profile alongside for memory state at the snapshot point.
+	runtime.GC()
+	hf, err := os.Create(heapPath)
+	if err != nil {
+		return fmt.Errorf("create heap profile: %w", err)
+	}
+	if pErr := pprof.WriteHeapProfile(hf); pErr != nil {
+		_ = hf.Close()
+		_ = os.Remove(heapPath)
+		return fmt.Errorf("write heap profile: %w", pErr)
+	}
+	if cErr := hf.Close(); cErr != nil {
+		return fmt.Errorf("close heap profile: %w", cErr)
+	}
+
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	sidecar := fmt.Sprintf(
+		"worker_id=%s\n"+
+			"task_id=%s\n"+
+			"query_id=%s\n"+
+			"stage_id=%s\n"+
+			"stage_type=%s\n"+
+			"task_type=%s\n"+
+			"timestamp_unix_ms=%d\n"+
+			"timestamp_rfc3339=%s\n"+
+			"watch_threshold=%s\n"+
+			"heap_alloc_mb=%d\n"+
+			"heap_sys_mb=%d\n"+
+			"heap_inuse_mb=%d\n"+
+			"gc_num=%d\n"+
+			"num_goroutines=%d\n",
+		w.config.WorkerID,
+		task.ID,
+		task.QueryID,
+		task.StageID,
+		task.StageType,
+		task.Type,
+		ts,
+		time.UnixMilli(ts).UTC().Format(time.RFC3339Nano),
+		longTaskWatchAt,
+		ms.HeapAlloc/1024/1024,
+		ms.HeapSys/1024/1024,
+		ms.HeapInuse/1024/1024,
+		ms.NumGC,
+		runtime.NumGoroutine(),
+	)
+	if sErr := os.WriteFile(sidecarPath, []byte(sidecar), 0o644); sErr != nil {
+		w.logger.Warn("long-task sidecar write failed",
+			"path", sidecarPath, "err", sErr)
+	}
+
+	w.logger.Info("long-task snapshot written",
+		"task_id", task.ID,
+		"query_id", task.QueryID,
+		"stage_id", task.StageID,
+		"goroutines", runtime.NumGoroutine(),
+		"heap_alloc_mb", ms.HeapAlloc/1024/1024,
+		"goroutine_path", goroutinePath,
+		"heap_path", heapPath)
 	return nil
 }

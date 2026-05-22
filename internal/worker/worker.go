@@ -669,6 +669,12 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 		w.activeTasksMu.Unlock()
 	}()
 
+	// Long-task watcher: one-shot goroutine + heap snapshot if this task
+	// runs past longTaskWatchAt. Cancelled here on completion so short
+	// tasks pay nothing beyond the goroutine spawn.
+	stopWatcher := w.startLongTaskWatcher(ctx, task)
+	defer stopWatcher()
+
 	// Inject trace context from the task into the Go context
 	logAttrsStart := []any{
 		"task_id", task.ID,

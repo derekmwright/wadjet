@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/citc-tech/wadjet/internal/distributed"
 )
 
 func TestWriteHeapPressureProfile_ProducesValidPprof(t *testing.T) {
@@ -144,3 +146,92 @@ func TestHeapPressureProfiler_RateLimited(t *testing.T) {
 // (activeTasks + activeTasksMu) are accessed under the lock. The test
 // itself reads activeTasksMu indirectly via writeHeapPressureProfile.
 var _ = sync.RWMutex{} // silence unused import linter if struct moves
+
+func TestWriteLongTaskSnapshot_ProducesAllArtifacts(t *testing.T) {
+	tmp := t.TempDir()
+	w := &Worker{
+		config:      Config{WorkerID: "lt-worker", SpillDir: tmp},
+		logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		activeTasks: map[string]struct{}{},
+	}
+	dir := filepath.Join(tmp, "heap-profiles")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	task := distributed.Task{
+		ID:        "task-abc",
+		QueryID:   "query-xyz",
+		StageID:   "join-21",
+		StageType: "hash_join",
+		Type:      distributed.TaskTypeStage,
+	}
+	if err := w.writeLongTaskSnapshot(dir, task); err != nil {
+		t.Fatalf("writeLongTaskSnapshot: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var heap, gor, meta string
+	for _, e := range entries {
+		if strings.Contains(e.Name(), "task-abc") {
+			switch {
+			case strings.HasSuffix(e.Name(), ".heap.pb.gz"):
+				heap = filepath.Join(dir, e.Name())
+			case strings.HasSuffix(e.Name(), ".goroutines.txt"):
+				gor = filepath.Join(dir, e.Name())
+			case strings.HasSuffix(e.Name(), ".meta.txt"):
+				meta = filepath.Join(dir, e.Name())
+			}
+		}
+	}
+	if heap == "" || gor == "" || meta == "" {
+		t.Fatalf("missing artifact: heap=%q goroutines=%q meta=%q", heap, gor, meta)
+	}
+	if info, err := os.Stat(gor); err != nil || info.Size() == 0 {
+		t.Errorf("goroutine file missing or empty: %v size=%d", err, info.Size())
+	}
+	metaBytes, _ := os.ReadFile(meta)
+	for _, want := range []string{"task_id=task-abc", "query_id=query-xyz", "stage_id=join-21", "stage_type=hash_join"} {
+		if !strings.Contains(string(metaBytes), want) {
+			t.Errorf("sidecar missing %q; got:\n%s", want, string(metaBytes))
+		}
+	}
+}
+
+func TestStartLongTaskWatcher_CancelPreventsSnapshot(t *testing.T) {
+	// Cancelling the returned func before longTaskWatchAt should prevent
+	// the snapshot from firing — the common case for short tasks.
+	tmp := t.TempDir()
+	w := &Worker{
+		config:      Config{WorkerID: "cancel-worker", SpillDir: tmp},
+		logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		activeTasks: map[string]struct{}{},
+		drainCh:     make(chan struct{}),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	stop := w.startLongTaskWatcher(ctx, distributed.Task{ID: "short-task"})
+	// Cancel immediately — watcher should exit without writing.
+	stop()
+	// Drain the worker's wg so any straggler is observed by the test.
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("watcher goroutine did not exit after cancel")
+	}
+
+	entries, _ := os.ReadDir(filepath.Join(tmp, "heap-profiles"))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "long-task-") {
+			t.Errorf("snapshot fired despite cancel: %s", e.Name())
+		}
+	}
+}
