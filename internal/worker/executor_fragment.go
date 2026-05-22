@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -257,6 +259,21 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 
 // runFragmentLinear streams batches from src through unary ops into the sink.
 // No pipeline-breaker — every batch flows end-to-end before the next is read.
+//
+// Producer/consumer split: the source pull (parquet decode + S3 GET — CPU-
+// and I/O-heavy) runs in one goroutine; the operator chain + sink consume
+// (CPU-heavy too: HashJoin probe, shuffle write, agg merge) runs in another,
+// connected by a small bounded channel. 2026-05-22 SF100 Q18 profile (v3)
+// showed source.Next 22.7% cum + sink consume 15.2% cum running serially per
+// batch in a single goroutine; workers used ~1.4 / 16 cores. Splitting lets
+// source decode batch N+1 while the consumer processes batch N — wall time
+// drops to max(producer, consumer) per batch instead of the sum.
+//
+// Channel cap is intentionally small (2 batches × ≤2048 rows). Memory is
+// bounded; backpressure remains natural (producer blocks on send when consumer
+// is slow). All fragmentProgress accesses are kept inside the consumer
+// goroutine to avoid races on its counters; applyBackpressure (heap-pressure
+// pause) lives in the consumer so the pause reflects the full pipeline state.
 func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification) error {
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
@@ -273,34 +290,59 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 		fp.addRows(n)
 		return nil
 	}
-	for {
-		if err := fp.applyBackpressure(ctx); err != nil {
-			return err
-		}
-		b, err := src.Next(ctx)
-		if err != nil {
-			return fmt.Errorf("fragment task %s: source next: %w", task.ID, err)
-		}
-		if b == nil {
-			break
-		}
-		cur := b
-		for _, op := range ops {
-			cur, err = op.Execute(ctx, cur)
+
+	const batchChanCap = 2
+	ch := make(chan *batch.RecordBatch, batchChanCap)
+
+	g, gctx := errgroup.WithContext(ctx)
+	// Producer: source.Next → channel. Closes ch on EOF or error.
+	g.Go(func() error {
+		defer close(ch)
+		for {
+			b, err := src.Next(gctx)
 			if err != nil {
-				return fmt.Errorf("fragment task %s: unary exec: %w", task.ID, err)
+				return fmt.Errorf("source next: %w", err)
 			}
-			if cur == nil {
-				break
+			if b == nil {
+				return nil
+			}
+			select {
+			case <-gctx.Done():
+				return gctx.Err()
+			case ch <- b:
 			}
 		}
-		if cur == nil || cur.ActiveLen() == 0 {
-			continue
+	})
+	// Consumer: ops + sink. Drives backpressure (heap pause) and progress.
+	g.Go(func() error {
+		for b := range ch {
+			if err := fp.applyBackpressure(gctx); err != nil {
+				return err
+			}
+			cur := b
+			var err error
+			for _, op := range ops {
+				cur, err = op.Execute(gctx, cur)
+				if err != nil {
+					return fmt.Errorf("unary exec: %w", err)
+				}
+				if cur == nil {
+					break
+				}
+			}
+			if cur == nil || cur.ActiveLen() == 0 {
+				continue
+			}
+			if err := consume(gctx, cur); err != nil {
+				return fmt.Errorf("sink consume: %w", err)
+			}
 		}
-		if err := consume(ctx, cur); err != nil {
-			return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
-		}
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("fragment task %s: %w", task.ID, err)
 	}
+
 	// Spilled-partition flush. Grace Hash Join probes route rows whose hash
 	// partition was evicted to disk; without this drain, those probe rows
 	// never re-enter the chain and the join silently drops matches. Mirror

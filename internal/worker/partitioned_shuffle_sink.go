@@ -8,7 +8,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -151,15 +154,45 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 		}
 	}
 
+	// Pre-warm the source batch's lazy Bitmap.HasNulls() cache on every
+	// column before launching parallel goroutines: HasNulls memoizes its
+	// result on first call (bitmap.go:127-158), and parallel readers calling
+	// HasNulls on the same column race on that write. Touching each column's
+	// Nulls.HasNulls() once here, single-threaded, populates the cache so all
+	// subsequent reads in appendRowsBulk hit the fast path (b.hasNulls >= 0).
+	for _, col := range b.Columns {
+		_ = col.Nulls.HasNulls()
+	}
+
+	// Each partitionWriter is fully independent (own file handle, bufio.Writer,
+	// shuffleWriter, rowBuf). Run per-partition append + threshold-flush in
+	// parallel: 2026-05-22 SF100 Q18 profile showed appendRowsBulk 84.5s cum +
+	// flushIfNeeded 54.8s cum, all serial in this loop, while workers used only
+	// ~9% of 16 available cores. Bounded at min(numParts, GOMAXPROCS) to avoid
+	// goroutine explosion on hot shuffles.
+	limit := s.numParts
+	if gp := runtime.GOMAXPROCS(0); limit > gp {
+		limit = gp
+	}
+	g := new(errgroup.Group)
+	g.SetLimit(limit)
 	for p := 0; p < s.numParts; p++ {
 		if len(s.perPartRows[p]) == 0 {
 			continue
 		}
-		if err := s.appendRowsBulk(p, b, s.perPartRows[p]); err != nil {
-			return err
-		}
+		p := p
+		g.Go(func() error {
+			if err := s.appendRowsBulk(p, b, s.perPartRows[p]); err != nil {
+				return err
+			}
+			pw := s.parts[p]
+			if pw.rowBuf == nil || pw.bufRows == 0 || pw.bufBytes < s.flushBytes {
+				return nil
+			}
+			return s.flushPartition(p)
+		})
 	}
-	return s.flushIfNeeded()
+	return g.Wait()
 }
 
 // appendRowsBulk appends `len(rows)` rows from b into the accumulator buffer
@@ -428,22 +461,6 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 	}
 }
 
-// flushIfNeeded writes any partition whose buffer exceeds the flush threshold.
-func (s *partitionedShuffleSink) flushIfNeeded() error {
-	for p, pw := range s.parts {
-		if pw.rowBuf == nil || pw.bufRows == 0 {
-			continue
-		}
-		if pw.bufBytes < s.flushBytes {
-			continue
-		}
-		if err := s.flushPartition(p); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *partitionedShuffleSink) flushPartition(p int) error {
 	pw := s.parts[p]
 	if pw.rowBuf == nil || pw.bufRows == 0 {
@@ -491,46 +508,51 @@ func (s *partitionedShuffleSink) flushPartition(p int) error {
 func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for p := range s.parts {
-		if err := s.flushPartition(p); err != nil {
-			return err
-		}
+	// Per-partition flush + header-patch + fsync. All steps touch only the
+	// target partition's writer; safe to run in parallel across partitions.
+	limit := s.numParts
+	if gp := runtime.GOMAXPROCS(0); limit > gp {
+		limit = gp
 	}
-	for p, pw := range s.parts {
-		if pw.writer == nil {
-			// Empty partition — leave file at zero bytes; downstream treats as no rows.
-			if err := pw.file.Sync(); err != nil {
+	g := new(errgroup.Group)
+	g.SetLimit(limit)
+	for p := range s.parts {
+		p := p
+		g.Go(func() error {
+			if err := s.flushPartition(p); err != nil {
 				return err
 			}
-			continue
-		}
-		// The bufio.Writer must be flushed before we Seek the underlying
-		// file: a Seek bypasses the buffer, so any unflushed bytes would
-		// land at the wrong offset.
-		if pw.bufFile != nil {
-			if err := pw.bufFile.Flush(); err != nil {
-				return fmt.Errorf("partition %d flush: %w", p, err)
+			pw := s.parts[p]
+			if pw.writer == nil {
+				// Empty partition — leave file at zero bytes; downstream treats as no rows.
+				return pw.file.Sync()
 			}
-		}
-		// Patch chunk count in header. Layout (see shuffle_format.go):
-		//   offset 0..4 = magic "WSHF"
-		//   offset 4..8 = numChunks (uint32 LE) — placeholder written by writeHeader
-		if _, err := pw.file.Seek(4, 0); err != nil {
-			return fmt.Errorf("partition %d seek: %w", p, err)
-		}
-		var buf [4]byte
-		binary.LittleEndian.PutUint32(buf[:], pw.writer.numChunks)
-		if _, err := pw.file.Write(buf[:]); err != nil {
-			return fmt.Errorf("partition %d patch: %w", p, err)
-		}
-		if _, err := pw.file.Seek(0, 2); err != nil {
-			return fmt.Errorf("partition %d seek end: %w", p, err)
-		}
-		if err := pw.file.Sync(); err != nil {
-			return err
-		}
+			// The bufio.Writer must be flushed before we Seek the underlying
+			// file: a Seek bypasses the buffer, so any unflushed bytes would
+			// land at the wrong offset.
+			if pw.bufFile != nil {
+				if err := pw.bufFile.Flush(); err != nil {
+					return fmt.Errorf("partition %d flush: %w", p, err)
+				}
+			}
+			// Patch chunk count in header. Layout (see shuffle_format.go):
+			//   offset 0..4 = magic "WSHF"
+			//   offset 4..8 = numChunks (uint32 LE) — placeholder written by writeHeader
+			if _, err := pw.file.Seek(4, 0); err != nil {
+				return fmt.Errorf("partition %d seek: %w", p, err)
+			}
+			var buf [4]byte
+			binary.LittleEndian.PutUint32(buf[:], pw.writer.numChunks)
+			if _, err := pw.file.Write(buf[:]); err != nil {
+				return fmt.Errorf("partition %d patch: %w", p, err)
+			}
+			if _, err := pw.file.Seek(0, 2); err != nil {
+				return fmt.Errorf("partition %d seek end: %w", p, err)
+			}
+			return pw.file.Sync()
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
 // Close releases all file handles. Idempotent.
