@@ -760,35 +760,9 @@ func (c *Coordinator) dispatchShuffleStage(
 // raw files is fine; at or above, we consolidate so the per-task readers
 // pay parquet decode cost once instead of N times.
 //
-// SF100 calibration (project_streaming_shuffle_sf100_win_2026-05-22
-// Q21 follow-up): the materialize is a SINGLE serial task. When the
-// rest of the cluster has already finished its parallel scans and is
-// waiting for materialize before the probe-split broadcast_join can
-// dispatch, the materialize's wall time directly stalls the query.
-// Q21 SF100 c9716f7 spent 2 m 19 s in materialize for 5 supplier
-// parquet files → 154 MB cache, blocking a probe-split N=3 join-2
-// for 13 m 45 s total. Math for typical probe-split N (3-9 at SF100
-// mc=3):
-//
-//	materialize wall = N_files × (decode + write) [serial in 1 task]
-//	skip wall        = ceil(N_files / N_probes) × decode [parallel across probes]
-//
-// Skip wins when N_files / N_probes < N_files (always, for N_probes > 1)
-// minus the cache-read savings on probes. The cache savings only matter
-// when the materialize's CONSOLIDATED output is much smaller than the
-// sum of raw inputs (i.e., heavy decompression). For broadcast caches
-// of post-filter small-table outputs (supplier, nation), consolidation
-// gains are minimal at SF100 mc=3 — skipping is the clear win.
-//
-// Threshold 10 is chosen so:
-//   - Q21's 5-file shape skips (saves ~2 min)
-//   - Anything with ≥ 10 upstream files still materializes (where
-//     N_files/N_probes ratio is high enough that even parallel probe
-//     redundancy adds up to more wall time than the serial materialize)
-//
 // Declared as var (not const) so tests can lower it to force the
 // materialization path on small fixtures.
-var replicateMaterializeMinFiles = 10
+var replicateMaterializeMinFiles = 2
 
 // allWSHF reports whether every file in the list has the .wshf suffix.
 // Native-DAG upstreams ALL write WSHF — the only path that would feed

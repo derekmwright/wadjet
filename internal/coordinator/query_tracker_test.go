@@ -1,6 +1,7 @@
 package coordinator
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -563,9 +564,14 @@ func TestQueryTrackerConcurrentAccess(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		go func(i int) {
 			qt.RecordResult(distributed.ResultNotification{
-				QueryID:    "q-concurrent",
-				StageID:    "s0",
-				TaskID:     "t-" + time.Now().String(),
+				QueryID: "q-concurrent",
+				StageID: "s0",
+				// Per-goroutine unique task ID. Previously this used
+				// time.Now().String(), which two goroutines could compute
+				// identically on fast machines — RecordResult dedupes by
+				// task ID, dropping one of the duplicates and yielding
+				// TotalRows=99 instead of 100. Reproduced in CI on PR #95.
+				TaskID:     "t-" + strconv.Itoa(i),
 				Success:    true,
 				NumRows:    1,
 				ResultPath: "path/result.parquet",
