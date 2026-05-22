@@ -12,7 +12,11 @@ worker_count              = 3
 data_bucket               = "wadjet-bench-sf100-use2"
 data_prefix               = ""              # SF100 data at root (lineitem/, orders/, ...), NOT under tables/
 generate_data             = false           # data is pre-staged; do not regenerate
-skip_queries              = ""
+# Q21 SF100 at c9716f7 ran in 13m50s with exact 100 rows (project_streaming_shuffle_sf100_win_2026-05-22).
+# +570% vs the older mc=3 baseline. Wall time, not heap — zero HeapBackpressureActive events for the
+# whole 2h09m run. Burns the reaper budget (MAX_RUNTIME_HOURS=2) before Q22 dispatches.
+# Skip until the Q21 wall is investigated; revert to "" once it's back under ~3m.
+skip_queries              = "21"
 query_timeout             = "30m"           # SF100 heavy queries need >10m default; mirrors sf10-distributed
 # 2026-05-07 Q17 investigation: 4 concurrent stage tasks each with ~5-6 GB
 # live working set overwhelmed the 21.6 GB GOMEMLIMIT, GC thrashed,
