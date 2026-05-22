@@ -257,6 +257,9 @@ func (w *Worker) Start(ctx context.Context) error {
 		if w.executor.localCache != nil {
 			w.executor.localCache.CleanupQuery(queryID)
 		}
+		if w.executor.broadcastCache != nil {
+			w.executor.broadcastCache.CleanupQuery(queryID)
+		}
 		w.logger.Debug("query cancelled", "query_id", queryID)
 	})
 	if err != nil {
@@ -272,6 +275,12 @@ func (w *Worker) Start(ctx context.Context) error {
 			n := w.executor.localCache.CleanupQuery(queryID)
 			if n > 0 {
 				w.logger.Debug("released local stage cache",
+					"query_id", queryID, "entries", n)
+			}
+		}
+		if w.executor.broadcastCache != nil {
+			if n := w.executor.broadcastCache.CleanupQuery(queryID); n > 0 {
+				w.logger.Debug("released broadcast-join cache",
 					"query_id", queryID, "entries", n)
 			}
 		}
