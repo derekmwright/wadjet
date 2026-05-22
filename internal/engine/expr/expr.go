@@ -2452,8 +2452,25 @@ func parseTemporalInt64(ref int64, s string) int64 {
 	return parseTimestampToEpochMs(s)
 }
 
+// Deterministic temporal-string parsers are called row-by-row from
+// Cmp.EvalBool whenever a date/timestamp column is compared against a string
+// literal (e.g., `l_shipdate <= '1998-09-02'`). At SF100 the 22Q suite spent
+// 4.24% of worker CPU (236s cum) parsing the SAME literal strings over and
+// over — every row of every filter re-walked the layout list. SQL queries
+// have a fixed, tiny set of date literals (TPC-H Q03/Q04/Q06/Q07/Q10/Q12/
+// Q14/Q15/Q20: ~1-3 literals each; suite-wide < 20 distinct strings), so a
+// memoization cache stays trivially small and never grows unbounded.
+var (
+	dateEpochDaysCache  sync.Map // map[string]int64 → epoch days
+	timestampEpochMsCache sync.Map // map[string]int64 → epoch milliseconds
+)
+
 // parseDateToEpochDays parses a date/timestamp string into epoch days.
 func parseDateToEpochDays(s string) int64 {
+	if v, ok := dateEpochDaysCache.Load(s); ok {
+		return v.(int64)
+	}
+	var result int64
 	for _, layout := range []string{
 		"2006-01-02",
 		time.RFC3339,
@@ -2462,14 +2479,20 @@ func parseDateToEpochDays(s string) int64 {
 	} {
 		if t, err := time.Parse(layout, s); err == nil {
 			epoch := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-			return int64(t.Sub(epoch).Hours() / 24)
+			result = int64(t.Sub(epoch).Hours() / 24)
+			break
 		}
 	}
-	return 0
+	dateEpochDaysCache.Store(s, result)
+	return result
 }
 
 // parseTimestampToEpochMs parses common timestamp string formats into epoch milliseconds.
 func parseTimestampToEpochMs(s string) int64 {
+	if v, ok := timestampEpochMsCache.Load(s); ok {
+		return v.(int64)
+	}
+	var result int64
 	for _, layout := range []string{
 		time.RFC3339Nano,
 		time.RFC3339,
@@ -2479,10 +2502,12 @@ func parseTimestampToEpochMs(s string) int64 {
 		"2006-01-02",
 	} {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t.UnixMilli()
+			result = t.UnixMilli()
+			break
 		}
 	}
-	return 0
+	timestampEpochMsCache.Store(s, result)
+	return result
 }
 
 func toBool(e Expr, b *batch.RecordBatch, row int) bool {
