@@ -871,43 +871,74 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	if bucket == "" {
 		bucket = task.ResultBucket
 	}
-	buildSrc, err := e.sourceForAlias(task.QueryID, bucket, spec.BuildAlias, spec.BuildFiles)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build source: %w", err)
-	}
-	if err := buildSrc.Init(ctx); err != nil {
-		buildSrc.Close()
-		return nil, nil, fmt.Errorf("build source init: %w", err)
+	// Build the HashJoin once, then share it across same-worker probe tasks
+	// for the same broadcast. HashJoinProbe is designed for concurrent use:
+	// each Probe() call returns its own scratch buffers, and lazy probeKeyIdx
+	// resolution is atomic.Bool + mutex guarded. Build()-completed HashJoin
+	// state (intIndex, arena, buildBatches) is read-only.
+	//
+	// Hash-shuffle probes don't share a build (each task probes its own
+	// partition) so they take the direct path.
+	buildHJ := func() (*exec.HashJoin, error) {
+		src, err := e.sourceForAlias(task.QueryID, bucket, spec.BuildAlias, spec.BuildFiles)
+		if err != nil {
+			return nil, fmt.Errorf("build source: %w", err)
+		}
+		if err := src.Init(ctx); err != nil {
+			src.Close()
+			return nil, fmt.Errorf("build source init: %w", err)
+		}
+		defer src.Close()
+
+		hj := exec.NewHashJoin(mapJoinTypeString(spec.JoinType), spec.LeftKeys, spec.RightKeys)
+		hj.BuildTableAlias = spec.BuildAlias
+		hj.QualifyAllBuildCols = spec.QualifyAllBuildCols
+		if spec.BuildRowHint > 0 {
+			hj.BuildRowHint = spec.BuildRowHint
+		}
+		hj.SemiAntiKeyOnly = spec.SemiAntiKeyOnly
+		if spec.JoinFilter != "" {
+			hj.SemiAntiFilter = physical.BuildSemiAntiFilter(spec.JoinFilter)
+		}
+		if e.sharedSpill != nil {
+			hj.Spill = e.sharedSpill
+			hj.MemTracker = e.sharedTracker
+			// Broadcast probes always force partition-on-arrival to bound peak
+			// heap; shuffle-side probes opt in based on observed pool pressure.
+			// See executeStageHashJoin for the policy rationale.
+			if spec.Type == distributed.OpBroadcastProbe {
+				hj.PartitionOnArrival = true
+			} else {
+				hj.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
+			}
+		}
+		if err := hj.Build(ctx, src); err != nil {
+			return nil, fmt.Errorf("building hash table: %w", err)
+		}
+		hj.FixKeyAssignment()
+		return hj, nil
 	}
 
-	hj := exec.NewHashJoin(mapJoinTypeString(spec.JoinType), spec.LeftKeys, spec.RightKeys)
-	hj.BuildTableAlias = spec.BuildAlias
-	hj.QualifyAllBuildCols = spec.QualifyAllBuildCols
-	if spec.BuildRowHint > 0 {
-		hj.BuildRowHint = spec.BuildRowHint
-	}
-	hj.SemiAntiKeyOnly = spec.SemiAntiKeyOnly
-	if spec.JoinFilter != "" {
-		hj.SemiAntiFilter = physical.BuildSemiAntiFilter(spec.JoinFilter)
-	}
-	if e.sharedSpill != nil {
-		hj.Spill = e.sharedSpill
-		hj.MemTracker = e.sharedTracker
-		// Broadcast probes always force partition-on-arrival to bound peak
-		// heap; shuffle-side probes opt in based on observed pool pressure.
-		// See executeStageHashJoin for the policy rationale.
-		if spec.Type == distributed.OpBroadcastProbe {
-			hj.PartitionOnArrival = true
-		} else {
-			hj.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
+	var (
+		hj      *exec.HashJoin
+		cleanup func()
+	)
+	if spec.Type == distributed.OpBroadcastProbe && e.broadcastCache != nil {
+		key := computeBroadcastJoinKey(task.QueryID, spec)
+		built, release, err := e.broadcastCache.Acquire(key, task.QueryID, buildHJ)
+		if err != nil {
+			return nil, nil, err
 		}
+		hj = built
+		cleanup = release
+	} else {
+		built, err := buildHJ()
+		if err != nil {
+			return nil, nil, err
+		}
+		hj = built
+		cleanup = func() { hj.Close() }
 	}
-	if err := hj.Build(ctx, buildSrc); err != nil {
-		buildSrc.Close()
-		return nil, nil, fmt.Errorf("building hash table: %w", err)
-	}
-	buildSrc.Close()
-	hj.FixKeyAssignment()
 
 	probe := hj.Probe()
 	if len(spec.OutputColumns) > 0 {
@@ -917,7 +948,6 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		}
 		probe.OutputFilter = filter
 	}
-	cleanup := func() { hj.Close() }
 	return []exec.UnaryOperator{probe}, cleanup, nil
 }
 

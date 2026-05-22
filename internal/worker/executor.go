@@ -68,11 +68,23 @@ type Executor struct {
 	// table now share one budget and cooperatively spill.
 	sharedTracker *memory.Tracker
 	sharedSpill   *memory.SpillManager
+
+	// Same-worker dedup of broadcast-join build state. Probe tasks for the
+	// same broadcast (max_concurrent=3 concurrent tasks reading the same
+	// build cache) share a single *exec.HashJoin instead of each rebuilding
+	// from scratch. See broadcast_join_cache.go.
+	broadcastCache *broadcastJoinCache
 }
 
 // NewExecutor creates a new task executor.
 func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) *Executor {
-	return &Executor{store: store, js: js, cache: cache, logger: slog.Default()}
+	return &Executor{
+		store:          store,
+		js:             js,
+		cache:          cache,
+		logger:         slog.Default(),
+		broadcastCache: newBroadcastJoinCache(),
+	}
 }
 
 // SetMemoryBudget configures the per-task memory budget and the spill
