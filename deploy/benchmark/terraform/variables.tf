@@ -168,6 +168,12 @@ variable "join_debug" {
   default     = ""
 }
 
+variable "dynamic_filters" {
+  description = "Set to 1 to enable Trino-style semi-join dynamic-filter pushdown on the coordinator. Off by default for v1 rollout."
+  type        = string
+  default     = ""
+}
+
 variable "use_native_dag" {
   description = "Route distributed queries through the Phase 3 native-DAG executor (feat/distribution-property-phase-3)."
   type        = bool

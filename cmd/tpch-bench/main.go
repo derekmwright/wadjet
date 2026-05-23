@@ -317,8 +317,9 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	// Coordinator — no embedded worker so it stays out of the data path.
 	// All data tasks run on the remote workers.
 	coord := coordinator.New(coordinator.Config{
-		NATSUrl:      embeddedNATS.ClientURL(),
-		ResultBucket: bucket,
+		NATSUrl:        embeddedNATS.ClientURL(),
+		ResultBucket:   bucket,
+		DynamicFilters: os.Getenv("WADJET_DYNAMIC_FILTERS") == "1" || strings.EqualFold(os.Getenv("WADJET_DYNAMIC_FILTERS"), "true"),
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
 	coord.Workers().StartSubStatsLogger(ctx)
