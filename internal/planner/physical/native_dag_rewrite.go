@@ -267,8 +267,6 @@ func collapseRedundantFinalMergeSort(stages []Stage) []Stage {
 //     wiring them behind a N-partition dispatch is future work, but even
 //     single-task is faster than the 83-stage tree.
 //
-// Gated by Planner.UseEnsureDistribution since that flag is synonymous
-// with native-DAG in callers today.
 func collapseMergeTreesForNativeDAG(stages []Stage) []Stage {
 	// Pre-index stages by ID.
 	idIndex := make(map[string]int, len(stages))

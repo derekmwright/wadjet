@@ -78,7 +78,6 @@ func sqlToStagesWithEnsure(t *testing.T, cat *catalog.Catalog, ctx context.Conte
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 	planner := NewPlanner(cat)
 	planner.WorkerCount = workerCount
-	planner.UseEnsureDistribution = true
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		t.Fatalf("plan distributed: %v", err)

@@ -89,8 +89,9 @@ func TestPlanDistributed_SimpleScan(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	if len(stages) != 1 {
-		t.Fatalf("expected 1 stage, got %d", len(stages))
+	// Native-DAG always emits a terminal exchange-gather stage.
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stages (scan + exchange-gather), got %d", len(stages))
 	}
 
 	s := stages[0]
@@ -102,6 +103,9 @@ func TestPlanDistributed_SimpleScan(t *testing.T) {
 	}
 	if len(s.Dependencies) != 0 {
 		t.Errorf("scan stage should have no dependencies, got %v", s.Dependencies)
+	}
+	if stages[1].Type != StageExchangeGather {
+		t.Errorf("expected final stage exchange-gather, got %q", stages[1].Type)
 	}
 }
 
@@ -122,13 +126,16 @@ func TestPlanDistributed_AggregateScan(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	// Fused scan-aggregate: scan (with fused agg) + final_aggregate
-	if len(stages) != 2 {
-		t.Fatalf("expected 2 stages (fused scan-agg + final_aggregate), got %d", len(stages))
+	// Fused scan-aggregate + final_aggregate + terminal exchange-gather.
+	if len(stages) != 3 {
+		t.Fatalf("expected 3 stages (fused scan-agg + final_aggregate + exchange-gather), got %d", len(stages))
 	}
 
 	scanStage := stages[0]
 	finalAggStage := stages[1]
+	if stages[2].Type != StageExchangeGather {
+		t.Errorf("third stage should be exchange-gather, got %q", stages[2].Type)
+	}
 
 	if scanStage.Type != "scan" {
 		t.Errorf("first stage should be 'scan', got %q", scanStage.Type)
@@ -174,9 +181,10 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	// Fused: scan (with fused agg) + final_aggregate + sort + merge_sort
-	if len(stages) != 4 {
-		t.Fatalf("expected 4 stages (fused scan-agg, final_aggregate, sort, merge_sort), got %d", len(stages))
+	// Fused: scan (with fused agg) + final_aggregate (with sort fused in
+	// by fuseSortIntoPredecessor, merge_sort collapsed) + exchange-gather.
+	if len(stages) != 3 {
+		t.Fatalf("expected 3 stages (fused scan-agg, final_aggregate, exchange-gather), got %d", len(stages))
 	}
 
 	if stages[0].Type != "scan" {
@@ -185,11 +193,8 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 	if stages[1].Type != "final_aggregate" {
 		t.Errorf("stage 1 should be 'final_aggregate', got %q", stages[1].Type)
 	}
-	if stages[2].Type != "sort" {
-		t.Errorf("stage 2 should be 'sort', got %q", stages[2].Type)
-	}
-	if stages[3].Type != "merge_sort" {
-		t.Errorf("stage 3 should be 'merge_sort', got %q", stages[3].Type)
+	if stages[2].Type != StageExchangeGather {
+		t.Errorf("stage 2 should be 'exchange-gather', got %q", stages[2].Type)
 	}
 
 	// Verify fused aggregation on scan
@@ -197,27 +202,22 @@ func TestPlanDistributed_SortAggregateScan(t *testing.T) {
 		t.Fatal("scan stage should have fused aggregate specs")
 	}
 
-	// final_aggregate depends on scan (fused agg)
+	// final_aggregate depends on scan (fused agg). The sort is fused into
+	// the final_aggregate via fuseSortIntoPredecessor — verify SortKeys
+	// landed on it.
 	if len(stages[1].Dependencies) != 1 || stages[1].Dependencies[0] != stages[0].ID {
 		t.Errorf("final_aggregate should depend on scan %q, got %v", stages[0].ID, stages[1].Dependencies)
 	}
-	// Sort depends only on final_aggregate
-	if len(stages[2].Dependencies) != 1 || stages[2].Dependencies[0] != stages[1].ID {
-		t.Errorf("sort stage should depend only on final_aggregate stage %q, got %v", stages[1].ID, stages[2].Dependencies)
+	if len(stages[1].SortKeys) != 1 {
+		t.Fatalf("expected 1 fused sort key on final_aggregate, got %d", len(stages[1].SortKeys))
 	}
-	if len(stages[2].SortKeys) != 1 {
-		t.Fatalf("expected 1 sort key, got %d", len(stages[2].SortKeys))
-	}
-	if stages[2].SortKeys[0].Column != "cnt" || !stages[2].SortKeys[0].Desc {
-		t.Errorf("unexpected sort key: %+v", stages[2].SortKeys[0])
+	if stages[1].SortKeys[0].Column != "cnt" || !stages[1].SortKeys[0].Desc {
+		t.Errorf("unexpected fused sort key: %+v", stages[1].SortKeys[0])
 	}
 
-	// Merge sort depends only on the sort stage
-	if len(stages[3].Dependencies) != 1 || stages[3].Dependencies[0] != stages[2].ID {
-		t.Errorf("merge_sort should depend only on sort stage, got %v", stages[3].Dependencies)
-	}
-	if len(stages[3].SortKeys) != 1 || stages[3].SortKeys[0].Column != "cnt" {
-		t.Errorf("merge_sort should have same sort keys as sort stage")
+	// exchange-gather depends on final_aggregate.
+	if len(stages[2].Dependencies) != 1 || stages[2].Dependencies[0] != stages[1].ID {
+		t.Errorf("exchange-gather should depend only on final_aggregate %q, got %v", stages[1].ID, stages[2].Dependencies)
 	}
 }
 
@@ -283,8 +283,8 @@ func TestPlanDistributed_WindowScan(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	if len(stages) != 2 {
-		t.Fatalf("expected 2 stages, got %d", len(stages))
+	if len(stages) != 3 {
+		t.Fatalf("expected 3 stages (scan, window, exchange-gather), got %d", len(stages))
 	}
 
 	if stages[0].Type != "scan" {
@@ -292,6 +292,9 @@ func TestPlanDistributed_WindowScan(t *testing.T) {
 	}
 	if stages[1].Type != "window" {
 		t.Errorf("stage 1 should be 'window', got %q", stages[1].Type)
+	}
+	if stages[2].Type != StageExchangeGather {
+		t.Errorf("stage 2 should be 'exchange-gather', got %q", stages[2].Type)
 	}
 	if len(stages[1].Dependencies) == 0 {
 		t.Fatal("window stage should depend on scan stage")
@@ -393,9 +396,9 @@ func TestExpandFederatedScans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Before expansion: 1 scan (with fused agg) + 1 final_aggregate
-	if len(stages) != 2 {
-		t.Fatalf("expected 2 stages before expansion (fused scan-agg + final), got %d", len(stages))
+	// Before expansion: 1 scan (with fused agg) + 1 final_aggregate + 1 exchange-gather
+	if len(stages) != 3 {
+		t.Fatalf("expected 3 stages before expansion (fused scan-agg + final + gather), got %d", len(stages))
 	}
 
 	// Verify fused aggregation on scan stage
@@ -481,8 +484,9 @@ func TestScanStage_TableNameAndFiles(t *testing.T) {
 		t.Fatalf("PlanDistributed: %v", err)
 	}
 
-	if len(stages) != 1 {
-		t.Fatalf("expected 1 stage, got %d", len(stages))
+	// Native-DAG always emits a trailing exchange-gather stage.
+	if len(stages) != 2 {
+		t.Fatalf("expected 2 stages (scan + exchange-gather), got %d", len(stages))
 	}
 
 	s := stages[0]

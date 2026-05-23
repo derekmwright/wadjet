@@ -170,8 +170,7 @@ func awaitStageProgress(ctx context.Context, allDone <-chan struct{}, progress <
 // stageOutputs map, and terminates when it hits a Gather stage (which
 // streams results to the coordinator directly).
 //
-// Gated by Coordinator.UseNativeDAG. When disabled, the legacy switch in
-// ExecuteSQL handles dispatch. See spec:
+// See spec:
 // docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md
 func (c *Coordinator) executeStageDAG(
 	ctx context.Context,

@@ -166,7 +166,6 @@ func sqlToStages(t *testing.T, cat *catalog.Catalog, ctx context.Context, sql st
 
 	planner := NewPlanner(cat)
 	planner.WorkerCount = workerCount
-	planner.UseEnsureDistribution = true // mirror production coord (always native-DAG)
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		t.Fatalf("plan distributed: %v", err)
@@ -697,7 +696,6 @@ func TestTPCHDistributionConsistency(t *testing.T) {
 
 			planner := NewPlanner(cat)
 			planner.WorkerCount = 4
-			planner.UseEnsureDistribution = true
 			stages, err := planner.PlanDistributed(ctx, logicalPlan)
 			if err != nil {
 				// In strict mode, exchange-consistency violations come back
@@ -741,13 +739,12 @@ func TestTPCHDistributionConsistency(t *testing.T) {
 	}
 }
 
-// TestPlanDistributed_WithEnsureDistribution_InsertsExchanges verifies that
-// setting UseEnsureDistribution=true on the Planner runs EnsureDistribution
-// during PlanDistributed. Q01 is used because it is the simplest correctness
-// gate: we verify the call succeeds (wiring test). Q05 is then checked to
-// confirm at least one StageExchange* stage is present, since it has joins
-// large enough to require exchange insertion.
-func TestPlanDistributed_WithEnsureDistribution_InsertsExchanges(t *testing.T) {
+// TestPlanDistributed_InsertsExchanges verifies that EnsureDistribution runs
+// during PlanDistributed (always-on under native-DAG). Q01 is the simplest
+// wiring correctness gate; Q05 is then checked to confirm at least one
+// StageExchange* stage is present, since it has joins large enough to
+// require exchange insertion.
+func TestPlanDistributed_InsertsExchanges(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 
 	buildLogicalPlan := func(t *testing.T, sql string) *logical.Node {
@@ -773,15 +770,14 @@ func TestPlanDistributed_WithEnsureDistribution_InsertsExchanges(t *testing.T) {
 	}
 
 	t.Run("Q01_wiring", func(t *testing.T) {
-		// Simple wiring test: UseEnsureDistribution=true must not error on Q01.
+		// Simple wiring test: PlanDistributed must not error on Q01.
 		planner := NewPlanner(cat)
 		planner.WorkerCount = 4
-		planner.UseEnsureDistribution = true
 
 		node := buildLogicalPlan(t, tpchPlanQueryMap[1])
 		_, err := planner.PlanDistributed(ctx, node)
 		if err != nil {
-			t.Fatalf("PlanDistributed with UseEnsureDistribution=true failed: %v", err)
+			t.Fatalf("PlanDistributed Q01 failed: %v", err)
 		}
 	})
 
@@ -789,12 +785,11 @@ func TestPlanDistributed_WithEnsureDistribution_InsertsExchanges(t *testing.T) {
 		// Q05 has multiple joins large enough to trigger exchange insertion.
 		planner := NewPlanner(cat)
 		planner.WorkerCount = 4
-		planner.UseEnsureDistribution = true
 
 		node := buildLogicalPlan(t, tpchPlanQueryMap[5])
 		stages, err := planner.PlanDistributed(ctx, node)
 		if err != nil {
-			t.Fatalf("PlanDistributed with UseEnsureDistribution=true failed: %v", err)
+			t.Fatalf("PlanDistributed Q05 failed: %v", err)
 		}
 		var sawExchange bool
 		for _, s := range stages {
@@ -804,23 +799,7 @@ func TestPlanDistributed_WithEnsureDistribution_InsertsExchanges(t *testing.T) {
 			}
 		}
 		if !sawExchange {
-			t.Fatal("expected at least one StageExchange* stage when UseEnsureDistribution=true")
-		}
-	})
-
-	t.Run("default_flag_false", func(t *testing.T) {
-		// Verify the default (UseEnsureDistribution=false) still works and
-		// does not require EnsureDistribution to have been run — i.e. the
-		// flag is off by default and does not change behaviour for existing
-		// callers.
-		planner := NewPlanner(cat)
-		planner.WorkerCount = 4
-		// UseEnsureDistribution is intentionally NOT set (defaults to false).
-
-		node := buildLogicalPlan(t, tpchPlanQueryMap[1])
-		_, err := planner.PlanDistributed(ctx, node)
-		if err != nil {
-			t.Fatalf("PlanDistributed default (flag=false) failed: %v", err)
+			t.Fatal("expected at least one StageExchange* stage")
 		}
 	})
 }
@@ -872,7 +851,6 @@ func TestTPCH_EnsureDistribution_PlannerParity(t *testing.T) {
 
 			planner := NewPlanner(cat)
 			planner.WorkerCount = 4
-			planner.UseEnsureDistribution = true
 
 			// Assertion 1: plan succeeds.
 			stages, err := planner.PlanDistributed(ctx, node)
@@ -988,7 +966,6 @@ func TestTPCH_EnsureDistribution_Snapshot(t *testing.T) {
 
 			planner := NewPlanner(cat)
 			planner.WorkerCount = 4
-			planner.UseEnsureDistribution = true
 
 			stages, err := planner.PlanDistributed(ctx, node)
 			if err != nil {

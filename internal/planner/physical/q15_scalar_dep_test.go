@@ -45,7 +45,6 @@ func TestQ15_ScalarDependenciesWiring(t *testing.T) {
 
 	planner := NewPlanner(cat)
 	planner.WorkerCount = 4
-	planner.UseEnsureDistribution = true
 
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -111,43 +110,3 @@ func TestQ15_ScalarDependenciesWiring(t *testing.T) {
 	}
 }
 
-// TestQ15_LegacyPath_NoScalarDependencies verifies that the default legacy
-// plan (UseEnsureDistribution=false) does NOT emit ScalarDependencies — the
-// late-binding mechanism is opt-in under native-DAG only.
-func TestQ15_LegacyPath_NoScalarDependencies(t *testing.T) {
-	cat, ctx := setupTPCHCatalog(t)
-
-	sql := tpchPlanQueryMap[15]
-	parsed, err := plansql.Parse(sql)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	info, err := plansql.ExtractSelect(parsed)
-	if err != nil {
-		t.Fatalf("extract: %v", err)
-	}
-	logicalPlan, err := logical.BuildFromSelect(info)
-	if err != nil {
-		t.Fatalf("logical plan: %v", err)
-	}
-	scanAnnotator := func(plan *logical.Node) {
-		NewPlanner(cat).AnnotateScanColumns(ctx, plan)
-	}
-	scanAnnotator(logicalPlan)
-	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
-
-	planner := NewPlanner(cat)
-	planner.WorkerCount = 4
-	// UseEnsureDistribution intentionally left false.
-
-	stages, err := planner.PlanDistributed(ctx, logicalPlan)
-	if err != nil {
-		t.Fatalf("PlanDistributed: %v", err)
-	}
-
-	for _, s := range stages {
-		if len(s.ScalarDependencies) > 0 {
-			t.Errorf("stage %s: unexpected ScalarDependencies in legacy path: %v", s.ID, s.ScalarDependencies)
-		}
-	}
-}
