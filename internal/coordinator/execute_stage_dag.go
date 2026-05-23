@@ -1011,7 +1011,7 @@ func (c *Coordinator) dispatchPipelineStage(
 		// parquet files, applies FilterExprs, and writes a WSHF output
 		// the rest of the native-DAG pipeline can consume.
 		if len(stage.FilterExprs) > 0 {
-			return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
+			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 		}
 		// No filter: by default pass raw parquet files through (saves the
 		// wshf write+read hop). But when this scan is the PROBE of a
@@ -1031,8 +1031,15 @@ func (c *Coordinator) dispatchPipelineStage(
 		if isBroadcastJoinProbe && len(stage.ScanFiles) == 1 {
 			capacity := c.workers.ClusterCapacity()
 			if scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes) > 1 {
-				return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
+				return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 			}
+		}
+		// Dynamic-filter participation: emitting or consuming scans must
+		// dispatch real tasks (the emit op runs in the fragment pipeline,
+		// and the bloom is applied at the scan's row-group iterator) — the
+		// pass-through fast path can't carry either side of the flow.
+		if len(stage.EmitDynamicFilters) > 0 || len(stage.ConsumeDynamicFilters) > 0 {
+			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 		}
 		files := append([]string(nil), stage.ScanFiles...)
 		return StageOutput{
@@ -1382,6 +1389,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 	ctx context.Context,
 	queryID string,
 	stage physical.Stage,
+	inputs map[string]StageOutput,
 	workerCount int,
 ) (StageOutput, error) {
 	if workerCount <= 0 {
@@ -1467,6 +1475,25 @@ func (c *Coordinator) dispatchScanFilterStage(
 			scanOp.ScanShardIndex = shardIdx
 			scanOp.ScanShardCount = shardCount
 		}
+		// Build-side: each task emits a partial bloom+range artifact.
+		if len(stage.EmitDynamicFilters) > 0 {
+			emits := make([]distributed.DynamicFilterEmit, len(stage.EmitDynamicFilters))
+			for i, e := range stage.EmitDynamicFilters {
+				emits[i] = distributed.DynamicFilterEmit{
+					FilterID:  e.FilterID,
+					KeyColumn: e.KeyColumn,
+					KeyType:   e.KeyType,
+					BloomBits: e.BloomBits,
+				}
+			}
+			scanOp.DynamicFilterEmits = emits
+		}
+		// Probe-side: coordinator-merged stats from the upstream build-scan.
+		// dynamicFilterSpecsFromBuildStats walks ConsumeDynamicFilters and
+		// pulls the matching BuildStats out of inputs[SourceStageID].
+		if len(stage.ConsumeDynamicFilters) > 0 {
+			scanOp.DynamicFilters = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+		}
 		t.Operators = append(t.Operators, scanOp)
 		if len(stage.FilterExprs) > 0 {
 			t.Operators = append(t.Operators, distributed.OpSpec{
@@ -1508,8 +1535,9 @@ func (c *Coordinator) dispatchScanFilterStage(
 	}
 	subject := distributed.QueryResultSubject(stageQueryID)
 	type taskResult struct {
-		files []string
-		err   string
+		files    []string
+		partials []distributed.DynamicFilterPartialRef
+		err      string
 	}
 	collected := make([]taskResult, 0, len(tasks))
 	var mu sync.Mutex
@@ -1527,7 +1555,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
-			collected = append(collected, taskResult{files: r.ResultFiles})
+			collected = append(collected, taskResult{
+				files:    r.ResultFiles,
+				partials: r.DynamicFilterPartials,
+			})
 		} else {
 			collected = append(collected, taskResult{err: r.Error})
 		}
@@ -1565,6 +1596,36 @@ func (c *Coordinator) dispatchScanFilterStage(
 			return StageOutput{}, fmt.Errorf("scan-filter stage %s: task failed: %s", stage.ID, r.err)
 		}
 	}
+
+	// Union per-task dynamic-filter partials into stage-level BuildStats.
+	// Skipped if the stage didn't emit (no partials expected) — saves the
+	// S3 round-trip for the common non-emit case.
+	var buildStats map[string]*BuildStats
+	if len(stage.EmitDynamicFilters) > 0 {
+		var allRefs []distributed.DynamicFilterPartialRef
+		for _, r := range results {
+			allRefs = append(allRefs, r.partials...)
+		}
+		merged, mergeErr := mergeBuildStatsFromPartials(ctx, c.catalog.Store(), allRefs)
+		if mergeErr != nil {
+			c.logger.Warn("dynamic_filter: partial merge failed; downstream consumes will see no filter",
+				"stage_id", stage.ID, "error", mergeErr)
+		}
+		// Inline-vs-stage decision per FilterID.
+		for filterID, stats := range merged {
+			if stats == nil {
+				continue
+			}
+			if estimateBuildStatsInlineSize(stats) > dynamicFilterInlineThresholdBytes {
+				if err := stageBuildStats(ctx, c.catalog.Store(), c.config.ResultBucket, queryID, stage.ID, filterID, stats); err != nil {
+					c.logger.Warn("dynamic_filter: stage upload failed; falling back to inline",
+						"stage_id", stage.ID, "filter_id", filterID, "error", err)
+				}
+			}
+		}
+		buildStats = merged
+	}
+
 	if fuseShuffle {
 		// Fused scan+shuffle: each task produced N partition files at
 		// "<prefix>partition=NNNN/<task>.wshf". Bucket all files across
@@ -1588,6 +1649,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
+			BuildStats:    buildStats,
 		}, nil
 	}
 	files := make([][]string, len(tasks))
@@ -1598,6 +1660,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		Kind:          OutputPartitioned,
 		NumPartitions: len(tasks),
 		Files:         files,
+		BuildStats:    buildStats,
 	}, nil
 }
 

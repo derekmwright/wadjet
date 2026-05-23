@@ -279,6 +279,16 @@ type OpSpec struct {
 	// OpSort (pipeline-breaker).
 	SortKeySpecs []SortKeySpec `json:"sort_key_specs,omitempty"` // ordered key columns
 	SortLimit    int           `json:"sort_limit,omitempty"`     // 0 = no limit; > 0 = top-N truncation after sort
+
+	// OpScan (build-side, dynamic-filter producer). Each Emit makes the scan
+	// task compute a partial bloom+range over the named column and upload it
+	// as a sideband artifact returned in ResultNotification.DynamicFilterPartials.
+	DynamicFilterEmits []DynamicFilterEmit `json:"dynamic_filter_emits,omitempty"`
+
+	// OpScan (probe-side, dynamic-filter consumer). Coordinator-materialized
+	// stats from the upstream build-scan stage. Worker wires each into the
+	// row-group pruning path before the first S3 fetch.
+	DynamicFilters []DynamicFilterSpec `json:"dynamic_filters,omitempty"`
 }
 
 // PreComputedAggregate identifies a derived aggregate whose result has
@@ -384,6 +394,11 @@ type ResultNotification struct {
 
 	// Task execution stats (populated by worker for debugging)
 	TaskStats *TaskStats `json:"task_stats,omitempty"`
+
+	// DynamicFilterPartials, populated when the originating task was a
+	// build-scan with DynamicFilterEmit set. One ref per emit. Coordinator
+	// fetches+unions before dispatching the downstream probe-scan stage.
+	DynamicFilterPartials []DynamicFilterPartialRef `json:"dynamic_filter_partials,omitempty"`
 }
 
 // TaskStats captures per-task execution metrics for debugging.

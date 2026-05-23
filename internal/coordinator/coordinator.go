@@ -41,6 +41,7 @@ type Config struct {
 	MaxInflight    int           // max concurrent queries, 0 = default (64)
 	QueryTimeout   time.Duration // max time for a query to complete, 0 = default (30m)
 	WorkerStaleTTL time.Duration // time after which a silent worker is reaped, 0 = default (30s)
+	DynamicFilters bool          // Trino-style semi-join dynamic-filter pushdown (off by default in v1)
 }
 
 // queryMeta stores per-query metadata needed for later result retrieval.
@@ -488,6 +489,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
+	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return nil, fmt.Errorf("physical plan: %w", err)
@@ -1866,6 +1868,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
+	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
 		return "", "", fmt.Errorf("physical plan: %w", err)

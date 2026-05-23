@@ -101,6 +101,22 @@ type cachedFileStreamSource struct {
 	// Empty for all TPC-H scans.
 	fallbackBatches  []*batch.RecordBatch
 	fallbackBatchIdx int
+
+	// Dynamic-filter pushdowns. Set by the fragment runner from
+	// OpSpec.DynamicFilters; consumed by RowGroupIter to skip row groups
+	// whose stats don't intersect the build-side bloom or range.
+	dynamicRanges []exec.DynamicRange
+	bloomFilters  []*exec.BloomScanFilter
+}
+
+// SetDynamicFilters attaches dynamic-filter pushdowns to this source.
+// Idempotent — safe to call before Init.
+func (s *cachedFileStreamSource) SetDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) {
+	if s == nil {
+		return
+	}
+	s.dynamicRanges = ranges
+	s.bloomFilters = blooms
 }
 
 func newCachedFileStreamSource(executor *Executor, queryID, bucket string, files []string) *cachedFileStreamSource {
@@ -414,6 +430,9 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	iter, err := scan.OpenRowGroupIter(reader, projCols, nil, shardIdx, shardCount)
 	if err != nil {
 		return fmt.Errorf("opening row-group iterator for %s: %w", filePath, err)
+	}
+	if len(s.dynamicRanges) > 0 || len(s.bloomFilters) > 0 {
+		iter.SetDynamicFilters(s.dynamicRanges, s.bloomFilters)
 	}
 	s.parquetIter = iter
 	s.parquetReader = reader

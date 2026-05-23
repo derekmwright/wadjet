@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -46,6 +47,37 @@ type RowGroupIter struct {
 	// Empty-shard sentinel: shardIdx out of range or row-fallback shard >0
 	// returns no batches without erroring. matches ReadFileBatchesShard.
 	empty bool
+
+	// Dynamic filters consulted before reading each row group. Both are
+	// optional; a row group is skipped if EITHER prunes it. Wired by
+	// callers (e.g., distributed worker scan source) via SetDynamicFilters.
+	dynamicRanges []exec.DynamicRange
+	bloomFilters  []*exec.BloomScanFilter
+
+	// Per-iterator counters for diagnostics. Reset on each Open.
+	rgPrunedBloom int
+	rgPrunedRange int
+	rgRead        int
+}
+
+// SetDynamicFilters attaches dynamic-filter pushdowns to the iterator. Must
+// be called before the first Next(). Empty slices clear any existing
+// filters. Multiple calls overwrite prior state.
+func (it *RowGroupIter) SetDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) {
+	if it == nil {
+		return
+	}
+	it.dynamicRanges = ranges
+	it.bloomFilters = blooms
+}
+
+// PruneStats returns counters for diagnostic logging: row groups skipped
+// via bloom, via range, and actually read. Snapshot at any point.
+func (it *RowGroupIter) PruneStats() (bloom, rangeP, read int) {
+	if it == nil {
+		return 0, 0, 0
+	}
+	return it.rgPrunedBloom, it.rgPrunedRange, it.rgRead
 }
 
 // OpenRowGroupIter constructs a streaming iterator over the row-group
@@ -100,6 +132,31 @@ func (it *RowGroupIter) Next() (*batch.RecordBatch, error) {
 	for it.cur < it.end {
 		rgIdx := it.cur
 		it.cur++
+
+		// Dynamic-filter row-group pruning. Stats read is cheap (already
+		// available in file metadata); the read+decode that follows is
+		// the expensive part we're avoiding when we can prune.
+		if len(it.dynamicRanges) > 0 || len(it.bloomFilters) > 0 {
+			stats := it.fr.RowGroupStats(rgIdx)
+			pruned := false
+			if !pruned && len(it.dynamicRanges) > 0 && CanRangePruneRowGroup(it.dynamicRanges, stats) {
+				it.rgPrunedRange++
+				pruned = true
+			}
+			if !pruned && len(it.bloomFilters) > 0 {
+				for _, bf := range it.bloomFilters {
+					if CanBloomPruneRowGroup(bf, stats) {
+						it.rgPrunedBloom++
+						pruned = true
+						break
+					}
+				}
+			}
+			if pruned {
+				continue
+			}
+		}
+
 		b, err := ReadRowGroupNative(it.fr, rgIdx, it.readSchema, nil)
 		if err != nil {
 			return nil, fmt.Errorf("reading row group %d: %w", rgIdx, err)
@@ -108,6 +165,7 @@ func (it *RowGroupIter) Next() (*batch.RecordBatch, error) {
 			// Empty row group (zero rows) — skip and try the next.
 			continue
 		}
+		it.rgRead++
 		return b, nil
 	}
 	return nil, nil

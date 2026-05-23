@@ -1,0 +1,69 @@
+package distributed
+
+// Dynamic filter (Trino-style semi-join pushdown) wire types.
+//
+// Flow: the planner identifies eligible joins (selective build, large probe
+// over an integer key) and annotates two stages — a build-side scan with
+// DynamicFilterEmit and a probe-side scan with DynamicFilterConsume. At
+// runtime the build-scan tasks compute partial {KeyRange, Bloom} stats over
+// the join key column, upload them as sideband artifacts, and the
+// coordinator unions the partials into a single BuildStats. The unioned
+// stats are then injected into the probe-scan stage's OpSpec.DynamicFilters
+// so probe-side row groups whose stats don't intersect the bloom are skipped
+// before any S3 fetch fires.
+
+// DynamicFilterEmit, attached to a build-scan Stage, instructs each scan task
+// to compute a partial bloom + min/max range on KeyColumn (post-filter,
+// post-projection). All tasks use the same BloomBits so the coordinator
+// unions partials with a trivial bitwise OR.
+type DynamicFilterEmit struct {
+	FilterID  string `json:"filter_id"`
+	KeyColumn string `json:"key_column"`
+	KeyType   string `json:"key_type"` // "int32" | "int64" | "date" — integer types only in v1
+	BloomBits int    `json:"bloom_bits"`
+}
+
+// DynamicFilterConsume, attached to a probe-scan Stage, instructs the
+// coordinator to inject the matching BuildStats artifact into this stage's
+// scan tasks. The stat-dep edge (SourceStageID added to Dependencies)
+// guarantees the artifact is available before this stage dispatches.
+type DynamicFilterConsume struct {
+	FilterID      string `json:"filter_id"`
+	SourceStageID string `json:"source_stage_id"`
+	TargetColumn  string `json:"target_column"`
+	KeyType       string `json:"key_type"`
+}
+
+// DynamicFilterPartialRef is a per-task sideband artifact reference returned
+// in ResultNotification. Each build-scan task uploads its partial stats to
+// the indicated S3 location; the coordinator fetches all partials for a
+// FilterID and unions them.
+type DynamicFilterPartialRef struct {
+	FilterID string `json:"filter_id"`
+	Bucket   string `json:"bucket"`
+	Key      string `json:"key"`
+}
+
+// DynamicFilterSpec is the materialized stat the coordinator injects into a
+// probe-scan task's OpSpec. Bloom is carried inline when the unioned bitset
+// is small (≤ inlineThresholdBytes); otherwise BloomBucket+BloomKey point
+// to the S3-staged artifact and the worker fetches it before scan init.
+type DynamicFilterSpec struct {
+	FilterID     string `json:"filter_id"`
+	TargetColumn string `json:"target_column"`
+	KeyType      string `json:"key_type"`
+
+	HasRange bool  `json:"has_range,omitempty"`
+	Min      int64 `json:"min,omitempty"`
+	Max      int64 `json:"max,omitempty"`
+
+	// Inline bloom (small filters): non-empty Bloom + BloomMask.
+	Bloom     []uint64 `json:"bloom,omitempty"`
+	BloomMask uint64   `json:"bloom_mask,omitempty"`
+
+	// Staged bloom (large filters): non-empty BloomKey. BloomBits gives
+	// the expected uint64 word count for size validation post-fetch.
+	BloomBucket string `json:"bloom_bucket,omitempty"`
+	BloomKey    string `json:"bloom_key,omitempty"`
+	BloomWords  int    `json:"bloom_words,omitempty"`
+}

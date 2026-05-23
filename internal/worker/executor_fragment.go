@@ -235,6 +235,20 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	}
 	defer sink.close()
 
+	// Dynamic-filter emit (Trino-style semi-join pushdown). When the source
+	// spec carries DynamicFilterEmits, prepend a pass-through accumulator
+	// op per emit to the unary chain. Snapshots are uploaded after the
+	// pipeline finishes; refs land in result.DynamicFilterPartials.
+	emitOps, err := buildDynamicFilterEmitOps(sourceSpec.DynamicFilterEmits)
+	if err != nil {
+		return fmt.Errorf("fragment task %s: dynamic filter emit ops: %w", task.ID, err)
+	}
+	for _, op := range emitOps {
+		if err := op.Init(ctx); err != nil {
+			return fmt.Errorf("fragment task %s: emit op init: %w", task.ID, err)
+		}
+	}
+
 	if len(breakerIdxs) == 0 {
 		// Linear pipeline: source → unary ops → sink.
 		preOps, cleanup, err := e.buildUnaryChain(ctx, task, middle)
@@ -242,14 +256,53 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 			return err
 		}
 		defer cleanup()
-		return e.runFragmentLinear(ctx, task, src, preOps, sink, result)
+		ops := prependEmitOps(emitOps, preOps)
+		if err := e.runFragmentLinear(ctx, task, src, ops, sink, result); err != nil {
+			return err
+		}
+		return e.finalizeDynamicFilterEmits(ctx, task, emitOps, sourceSpec.DynamicFilterEmits, result)
 	}
 
 	// One or more pipeline-breakers — split middle into N+1 unary segments
 	// around them and run a chain of consume/drain phases. No materialization
 	// to disk between phases; each breaker holds its state in memory (with
 	// optional spill).
-	return e.runFragmentWithBreakers(ctx, task, src, middle, breakerIdxs, sink, result)
+	//
+	// Emit ops are prepended ONLY to the first segment (pre-source ops) so
+	// they observe every input row regardless of breaker layout.
+	if err := e.runFragmentWithBreakers(ctx, task, src, middle, breakerIdxs, sink, result, emitOps); err != nil {
+		return err
+	}
+	return e.finalizeDynamicFilterEmits(ctx, task, emitOps, sourceSpec.DynamicFilterEmits, result)
+}
+
+func prependEmitOps(emit []*exec.DynamicFilterEmitOp, rest []exec.UnaryOperator) []exec.UnaryOperator {
+	if len(emit) == 0 {
+		return rest
+	}
+	out := make([]exec.UnaryOperator, 0, len(emit)+len(rest))
+	for _, op := range emit {
+		out = append(out, op)
+	}
+	out = append(out, rest...)
+	return out
+}
+
+func buildDynamicFilterEmitOps(specs []distributed.DynamicFilterEmit) ([]*exec.DynamicFilterEmitOp, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	out := make([]*exec.DynamicFilterEmitOp, 0, len(specs))
+	for _, s := range specs {
+		if s.FilterID == "" || s.KeyColumn == "" {
+			return nil, fmt.Errorf("dynamic_filter_emit: FilterID and KeyColumn required")
+		}
+		if s.BloomBits <= 0 {
+			return nil, fmt.Errorf("dynamic_filter_emit %s: BloomBits must be > 0", s.FilterID)
+		}
+		out = append(out, exec.NewDynamicFilterEmitOp(s.FilterID, s.KeyColumn, s.KeyType, s.BloomBits))
+	}
+	return out, nil
 }
 
 // runFragmentLinear streams batches from src through unary ops into the sink.
@@ -436,7 +489,7 @@ type fragmentBreaker struct {
 // breaker path is exercised by tests and ready for future shapes
 // (e.g. final_aggregate + sort fused into one fragment when the planner
 // stops emitting them as separate Sort stages).
-func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed.Task, src exec.Source, middle []distributed.OpSpec, breakerIdxs []int, sink fragmentSink, result *distributed.ResultNotification) error {
+func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed.Task, src exec.Source, middle []distributed.OpSpec, breakerIdxs []int, sink fragmentSink, result *distributed.ResultNotification, emitOps []*exec.DynamicFilterEmitOp) error {
 	progress := exec.ProgressReporterFromContext(ctx)
 
 	breakers := make([]*fragmentBreaker, len(breakerIdxs))
@@ -469,6 +522,11 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 		// already-init'd from buildFragmentBreaker (HashAggregate's Project),
 		// so don't double-init here.
 		phaseOps := append([]exec.UnaryOperator{}, segOps...)
+		if j == 0 {
+			// Emit ops sit at the very head of the pipeline so they observe
+			// every source-emitted row before any breaker / segment op.
+			phaseOps = prependEmitOps(emitOps, phaseOps)
+		}
 		phaseOps = append(phaseOps, breakers[j].PrependOps...)
 
 		if j == 0 {
@@ -821,6 +879,20 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 		} else {
 			e.logger.Warn("fragment source: shard params set but source is not cachedFileStreamSource",
 				"alias", spec.InputAlias, "shard_idx", spec.ScanShardIndex, "shard_count", spec.ScanShardCount)
+		}
+	}
+	// Dynamic-filter pushdown (Trino-style semi-join). When the OpScan spec
+	// carries DynamicFilters, materialize each into a BloomScanFilter and
+	// attach to the source so row groups get pruned before any S3 fetch.
+	if len(spec.DynamicFilters) > 0 {
+		if cs, ok := src.(*cachedFileStreamSource); ok {
+			ranges, blooms, err := e.materializeDynamicFilters(spec.DynamicFilters)
+			if err != nil {
+				e.logger.Warn("fragment source: dynamic-filter materialize failed; proceeding without filter",
+					"alias", spec.InputAlias, "error", err)
+			} else if len(ranges) > 0 || len(blooms) > 0 {
+				cs.SetDynamicFilters(ranges, blooms)
+			}
 		}
 	}
 	return src, nil

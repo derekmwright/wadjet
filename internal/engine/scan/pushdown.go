@@ -152,3 +152,76 @@ func toFloat64(v any) float64 {
 		return 0
 	}
 }
+
+// CanRangePruneRowGroup returns true when a row group can be skipped based
+// on dynamic min/max ranges supplied by an upstream hash-join build (or a
+// distributed dynamic filter). A row group prunes when its column range has
+// no overlap with ANY of the supplied range filters.
+//
+// Behavior matches the in-process planner's canRangePruneRowGroup
+// (planner/physical/util.go) — moved here so the worker fragment-runner
+// scan path can apply the same logic without a circular import.
+func CanRangePruneRowGroup(ranges []exec.DynamicRange, stats pqt.RowGroupStats) bool {
+	for _, r := range ranges {
+		colStats, ok := stats.Columns[r.Column]
+		if !ok || !colStats.HasStats {
+			continue
+		}
+		if colStats.MinValue == nil || colStats.MaxValue == nil {
+			continue
+		}
+		if colStats.NullCount == stats.NumRows {
+			continue
+		}
+		// No overlap: row group max < build min, or row group min > build max
+		if CompareValues(colStats.MaxValue, r.MinValue) < 0 {
+			return true
+		}
+		if CompareValues(colStats.MinValue, r.MaxValue) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// CanBloomPruneRowGroup returns true when every integer value in the row
+// group's min..max range is absent from the bloom — i.e., the row group
+// cannot contain any rows matching the build side. Only applicable for
+// single-column integer keys with a small (≤1024) value range; larger
+// ranges return false (no pruning) to keep the check O(small).
+func CanBloomPruneRowGroup(bf *exec.BloomScanFilter, stats pqt.RowGroupStats) bool {
+	if bf == nil || !bf.UseIntKey {
+		return false
+	}
+	colStats, ok := stats.Columns[bf.Column]
+	if !ok || !colStats.HasStats {
+		return false
+	}
+	if colStats.MinValue == nil || colStats.MaxValue == nil {
+		return false
+	}
+	if colStats.NullCount == stats.NumRows {
+		return false
+	}
+	minVal := toInt64(colStats.MinValue)
+	maxVal := toInt64(colStats.MaxValue)
+	if minVal == 0 && maxVal == 0 {
+		switch colStats.MinValue.(type) {
+		case int64, int32, int:
+			// Genuine zero range — fall through.
+		default:
+			return false
+		}
+	}
+	const maxRangeSize = 1024
+	rangeSize := maxVal - minVal + 1
+	if rangeSize <= 0 || rangeSize > maxRangeSize {
+		return false
+	}
+	for v := minVal; v <= maxVal; v++ {
+		if exec.BloomContains(bf.Bloom, bf.BloomMask, exec.BloomHashInt(v)) {
+			return false
+		}
+	}
+	return true
+}
