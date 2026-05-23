@@ -275,13 +275,6 @@ type Planner struct {
 	// planner's join-type logic.
 	BroadcastBytesThreshold int64
 
-	// UseEnsureDistribution runs the Phase-2 EnsureDistribution pass after
-	// assignStageDistributions. When true, BehaviorPreservingMode is flipped
-	// to false for the duration of the call (strict AssertExchangeConsistency).
-	// Temporary flag: will be deleted in Phase 2 Task 20 once the heuristic
-	// switch is gone.
-	UseEnsureDistribution bool
-
 	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
 	// When populated, buildScan uses these batches instead of reading from the
 	// object store, allowing parallel scan I/O with single-worker compute.
@@ -475,9 +468,8 @@ type deferredScalar struct {
 // the scalar results as literals. This is needed for distributed mode where
 // workers don't have catalog access to execute subqueries themselves.
 //
-// Under native-DAG (UseEnsureDistribution=true), subqueries whose FROM clause
-// references a CTE are rewritten with :scalar_N placeholders instead of being
-// pre-computed. The returned deferredScalar list describes the producer stages
+// Subqueries whose FROM clause references a CTE are rewritten with
+// :scalar_N placeholders instead of being pre-computed. The returned deferredScalar list describes the producer stages
 // the caller must emit, and the filter-carrying stage's ScalarDependencies
 // should point to those producer stage IDs. This eliminates the float-precision
 // divergence between single-process cteCache evaluation and the distributed
@@ -489,12 +481,6 @@ type deferredScalar struct {
 func (p *Planner) resolveFilterSubqueries(exprStr string) (string, []deferredScalar) {
 	// Quick check: no subquery to resolve
 	if !strings.Contains(strings.ToUpper(exprStr), "SELECT") {
-		return exprStr, nil
-	}
-
-	// Legacy (non-native-DAG) deferral: let the worker re-run the subquery
-	// against pipeline outputs so float precision matches.
-	if !p.UseEnsureDistribution && p.subqueryReferencesCTE(exprStr) {
 		return exprStr, nil
 	}
 
@@ -551,11 +537,11 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 
 	switch n := node.(type) {
 	case *plansql.SubqueryNode:
-		// Under native-DAG, if the subquery references a CTE we must defer
-		// evaluation so it shares the distributed accumulation path rather
-		// than running as a single-process pipeline over the cteCache
-		// (which floats-drifts vs the outer query's distributed aggregate).
-		if p.UseEnsureDistribution && p.subqueryReferencesCTE(n.SQL) {
+		// If the subquery references a CTE we must defer evaluation so it
+		// shares the distributed accumulation path rather than running as a
+		// single-process pipeline over the cteCache (which floats-drifts vs
+		// the outer query's distributed aggregate).
+		if p.subqueryReferencesCTE(n.SQL) {
 			name := p.allocScalarPlaceholder()
 			*deferred = append(*deferred, deferredScalar{Placeholder: name, SubquerySQL: n.SQL})
 			return &plansql.LiteralPlaceholder{Name: name}
@@ -1329,17 +1315,16 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		return nil, err
 	}
 	// Phase 1 distribution-property pass: populate Stage.Distribution for
-	// every stage. Phase 2 (this flag) runs EnsureDistribution afterward
-	// to insert Exchange stages where child output doesn't satisfy parent
-	// input, then asserts consistency strictly.
+	// every stage. Phase 2 then runs EnsureDistribution to insert Exchange
+	// stages where child output doesn't satisfy parent input, and asserts
+	// consistency strictly.
 	assignStageDistributions(stages, p.WorkerCount)
-	if p.UseEnsureDistribution {
-		// Collapse multi-level merge_aggregate/merge_sort trees before the
-		// Exchange pass so the emitted Exchange stages are placed against
-		// the final merger, not the intermediate tree levels. The tree
-		// shape is a single-pipeline optimization that becomes a SF10-
-		// killing N-round-trip fan-out under native-DAG dispatch.
-		stages = collapseMergeTreesForNativeDAG(stages)
+	// Collapse multi-level merge_aggregate/merge_sort trees before the
+	// Exchange pass so the emitted Exchange stages are placed against
+	// the final merger, not the intermediate tree levels. The tree
+	// shape is a single-pipeline optimization that becomes a SF10-
+	// killing N-round-trip fan-out under native-DAG dispatch.
+	stages = collapseMergeTreesForNativeDAG(stages)
 		// Drop redundant trailing merge_sort Singleton stages whose sole
 		// dep is a Singleton sort — the merge_sort is a no-op in that
 		// shape and costs a full worker round-trip per query.
@@ -1397,11 +1382,10 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// aggregation queries to skip the standalone exchange-repartition
 		// stage. Gated on collapsing-consumer (final_aggregate /
 		// merge_aggregate) only.
-		stages = fuseScanAggregateShuffle(stages)
-		prev := BehaviorPreservingMode
-		BehaviorPreservingMode = false
-		defer func() { BehaviorPreservingMode = prev }()
-	}
+	stages = fuseScanAggregateShuffle(stages)
+	prev := BehaviorPreservingMode
+	BehaviorPreservingMode = false
+	defer func() { BehaviorPreservingMode = prev }()
 	if err := AssertExchangeConsistency(stages); err != nil {
 		// In strict mode (Phase 2 onward, or test override) this is a
 		// hard failure. BehaviorPreservingMode swallows the error inside
@@ -1413,15 +1397,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// rename the final result schema. walkStages currently treats NodeProject
 	// as a passthrough — this surfaces the user's aliases that would otherwise
 	// be lost (e.g., "n1.n_name" -> "supp_nation", "substr(l_shipdate, 1, 4)"
-	// -> "l_year"). Only meaningful under the native-DAG path where Gather
-	// drives the result schema.
-	if p.UseEnsureDistribution {
-		if renames := extractOutputRenames(node); len(renames) > 0 {
-			for i := range stages {
-				if stages[i].Type == StageExchangeGather {
-					stages[i].OutputRenames = renames
-					break
-				}
+	// -> "l_year"). Gather drives the result schema under native-DAG.
+	if renames := extractOutputRenames(node); len(renames) > 0 {
+		for i := range stages {
+			if stages[i].Type == StageExchangeGather {
+				stages[i].OutputRenames = renames
+				break
 			}
 		}
 	}

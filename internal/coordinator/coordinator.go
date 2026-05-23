@@ -485,13 +485,8 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 	planStr := logicalPlan.PrettyPrint(0)
 
-	// Generate distributed stages via native-DAG (UseEnsureDistribution).
-	// The legacy four-mode switch was deleted 2026-04-25 after Q18 SF10
-	// validation confirmed native-DAG handles SF10 within memory budget
-	// (project_q18_sf10_native_dag_oom_2026-04-24).
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
-	planner.UseEnsureDistribution = true
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {

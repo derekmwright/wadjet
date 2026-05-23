@@ -31,7 +31,6 @@ func TestMarkCoPathingSelfJoinBuilds_Q07(t *testing.T) {
 
 	planner := NewPlanner(cat)
 	planner.WorkerCount = 4
-	planner.UseEnsureDistribution = true
 
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -99,7 +98,6 @@ func TestMarkCoPathingSelfJoinBuilds_Q15_NoFalsePositive(t *testing.T) {
 
 	planner := NewPlanner(cat)
 	planner.WorkerCount = 4
-	planner.UseEnsureDistribution = true
 
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {

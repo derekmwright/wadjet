@@ -126,7 +126,6 @@ func TestPlanDistributed_GatherCarriesOutputRenames(t *testing.T) {
 
 	planner := NewPlanner(cat)
 	planner.WorkerCount = 4
-	planner.UseEnsureDistribution = true
 
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
