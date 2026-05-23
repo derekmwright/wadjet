@@ -802,8 +802,9 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Start coordinator
 	coord := coordinator.New(coordinator.Config{
-		NATSUrl:      embeddedNATS.ClientURL(),
-		ResultBucket: bucket,
+		NATSUrl:        embeddedNATS.ClientURL(),
+		ResultBucket:   bucket,
+		DynamicFilters: dynamicFiltersFromEnv(),
 	}, cat, nc, js, logger)
 
 	// Phase A: same-process data-plane server + client when enabled.
@@ -1100,8 +1101,9 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	wireUDFPersistence(cat, logger)
 
 	coord := coordinator.New(coordinator.Config{
-		NATSUrl:      embeddedNATS.ClientURL(),
-		ResultBucket: bucket,
+		NATSUrl:        embeddedNATS.ClientURL(),
+		ResultBucket:   bucket,
+		DynamicFilters: dynamicFiltersFromEnv(),
 	}, cat, nc, js, logger)
 
 	// Phase A: start data-plane gRPC server alongside coord when enabled.
@@ -1468,6 +1470,15 @@ func catalogSnapshotCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&coordAddr, "coord-addr", "", "coordinator pgwire address (host:port)")
 	return cmd
+}
+
+// dynamicFiltersFromEnv reads WADJET_DYNAMIC_FILTERS and reports whether
+// the Trino-style semi-join dynamic-filter optimization should be enabled
+// on the coordinator. Accepts "1", "true" (case-insensitive). Off otherwise
+// — v1 default until validated at SF10/SF100.
+func dynamicFiltersFromEnv() bool {
+	v := os.Getenv("WADJET_DYNAMIC_FILTERS")
+	return v == "1" || strings.EqualFold(v, "true")
 }
 
 func wireUDFPersistence(cat *catalog.Catalog, logger *slog.Logger) {
