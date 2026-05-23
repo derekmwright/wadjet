@@ -120,6 +120,13 @@ type Task struct {
 	NumPartitions int      `json:"num_partitions,omitempty"`  // number of output partitions
 	PartitionID   int      `json:"partition_id,omitempty"`    // which partition this join task handles
 
+	// Dynamic filters carried at the top level for non-fragment task shapes
+	// (TaskTypeShuffle). Fragment tasks carry the same data in OpSpec.DynamicFilters
+	// per-op, but shuffle tasks use a flat task descriptor and apply the
+	// filter against their single implicit scan source. The worker materializes
+	// these into the cachedFileStreamSource's bloom+range pushdown.
+	DynamicFilters []DynamicFilterSpec `json:"dynamic_filters,omitempty"`
+
 	// Distributed tracing context (W3C Trace Context format)
 	TraceID  string `json:"trace_id,omitempty"`  // 32-char hex
 	SpanID   string `json:"span_id,omitempty"`   // 16-char hex parent span

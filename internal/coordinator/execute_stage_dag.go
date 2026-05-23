@@ -742,7 +742,10 @@ func (c *Coordinator) dispatchShuffleStage(
 	if numParts == 0 {
 		numParts = workerCount * shufflePartitionMultiplier
 	}
-	shards, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount)
+	// Forward any dynamic-filter specs the upstream (probe-side) leaf scan
+	// resolved through pass-through. Each shuffle task gets a copy so its
+	// parquet scan applies the bloom at row-group level.
+	shards, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
 	if err != nil {
 		return StageOutput{}, err
 	}
@@ -987,7 +990,14 @@ func (c *Coordinator) dispatchPipelineStage(
 ) (StageOutput, error) {
 	_ = sql
 	// Leaf scan stage.
-	if stage.Type == physical.StageScan && len(inputs) == 0 {
+	//
+	// The `inputs` map may be non-empty when a stat-dep edge is present
+	// (probe-side leaf with ConsumeDynamicFilters depends on a build-side
+	// leaf). Stat-dep deps don't change the leaf-ness of the scan; they
+	// only provide upstream BuildStats. ScanFiles is the structural marker:
+	// any stage with ScanFiles populated IS a leaf scan regardless of how
+	// many soft deps it has.
+	if stage.Type == physical.StageScan && len(stage.ScanFiles) > 0 {
 		// Fused scan-aggregate: the planner marked this scan to produce
 		// partial aggregates (saves the scan→aggregate round-trip in the
 		// legacy single-pipeline executor). Under native-DAG we must
@@ -1034,18 +1044,28 @@ func (c *Coordinator) dispatchPipelineStage(
 				return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 			}
 		}
-		// Dynamic-filter participation: emitting or consuming scans must
-		// dispatch real tasks (the emit op runs in the fragment pipeline,
-		// and the bloom is applied at the scan's row-group iterator) — the
-		// pass-through fast path can't carry either side of the flow.
-		if len(stage.EmitDynamicFilters) > 0 || len(stage.ConsumeDynamicFilters) > 0 {
+		// Build-side dynamic-filter emit must dispatch real tasks so the
+		// emit op runs in the fragment pipeline and uploads its partial.
+		// Consume-only (probe-side) stays as pass-through — the downstream
+		// shuffle dispatcher threads the materialized DynamicFilters into
+		// its shuffle tasks, which apply them at the row-group iterator
+		// during their parquet scan. This avoids an extra dispatched scan-
+		// filter hop that regressed Q18 SF1 +16% in the first wiring.
+		if len(stage.EmitDynamicFilters) > 0 {
 			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 		}
 		files := append([]string(nil), stage.ScanFiles...)
-		return StageOutput{
+		out := StageOutput{
 			Kind:  OutputSinglePart,
 			Files: [][]string{files},
-		}, nil
+		}
+		// Materialize Consume specs into wire form so downstream shuffle/
+		// stage dispatchers can ship them in their task descriptors
+		// without having to re-walk the plan.
+		if len(stage.ConsumeDynamicFilters) > 0 {
+			out.DynamicFilters = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+		}
+		return out, nil
 	}
 	// Compute stage: emit workerCount TaskTypeStage tasks, each reading its
 	// slice of partitioned input and writing unpartitioned .wshf output.

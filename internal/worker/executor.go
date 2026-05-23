@@ -742,6 +742,37 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// streaming, the working set is bounded by one file's batches plus the
 	// sink's per-partition bufio buffers (48 × 256 KB ≈ 12 MB).
 	src := newCachedFileStreamSourceWithProjection(e, task.QueryID, bucket, task.Files, task.Columns)
+	// Dynamic-filter pushdown for shuffle's implicit parquet scan. Operates
+	// at two layers:
+	//   - Row-group level (via cachedFileStreamSource.SetDynamicFilters →
+	//     RowGroupIter): skips entire row groups whose stats don't intersect
+	//     the bloom. Effective when per-row-group key range is small (≤1024)
+	//     — typically only at SF100+ where row groups are narrow.
+	//   - Row level (via BloomFilterOp inserted in the shuffle loop below):
+	//     marks ineligible rows in the selection vector before they reach
+	//     the hash-partitioning sink. Effective at any scale because it
+	//     prunes pre-shuffle-write. Adaptive-disables if rejection <5% to
+	//     avoid paying lookup cost on non-selective workloads.
+	// Together they cover the SF1→SF100 selectivity spectrum.
+	var shuffleBloomOps []*exec.BloomFilterOp
+	if len(task.DynamicFilters) > 0 {
+		ranges, blooms, err := e.materializeDynamicFilters(task.DynamicFilters)
+		if err != nil {
+			e.logger.Warn("shuffle task: dynamic-filter materialize failed; proceeding without filter",
+				"task_id", task.ID, "error", err)
+		} else if len(ranges) > 0 || len(blooms) > 0 {
+			src.SetDynamicFilters(ranges, blooms)
+			for _, bf := range blooms {
+				if bf == nil {
+					continue
+				}
+				op := exec.NewBloomFilterOp(bf.Bloom, bf.BloomMask, []string{bf.Column}, bf.UseIntKey)
+				if err := op.Init(ctx); err == nil {
+					shuffleBloomOps = append(shuffleBloomOps, op)
+				}
+			}
+		}
+	}
 	if err := src.Init(ctx); err != nil {
 		return fmt.Errorf("shuffle task %s: source init: %w", task.ID, err)
 	}
@@ -785,6 +816,26 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		n := int64(b.ActiveLen())
 		if n == 0 {
 			continue
+		}
+		// Row-level dynamic-filter prune (post-row-group-prune). Applies
+		// every bloom in sequence; each modifies b.Sel. An op that returns
+		// nil means every row was bloom-rejected — skip the batch entirely.
+		if len(shuffleBloomOps) > 0 {
+			for _, op := range shuffleBloomOps {
+				bb, err := op.Execute(ctx, b)
+				if err != nil {
+					return fmt.Errorf("shuffle task %s: bloom filter op: %w", task.ID, err)
+				}
+				if bb == nil {
+					b = nil
+					break
+				}
+				b = bb
+			}
+			if b == nil || b.ActiveLen() == 0 {
+				continue
+			}
+			n = int64(b.ActiveLen())
 		}
 		if sink == nil {
 			sink = newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, b.Schema)

@@ -3,6 +3,7 @@ package coordinator
 import (
 	"fmt"
 
+	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 )
 
@@ -35,6 +36,13 @@ type StageOutput struct {
 	// non-empty. One entry per emit, keyed by FilterID. Downstream consumer
 	// stages reach in via the stat-dep edge to pull the materialized stats.
 	BuildStats map[string]*BuildStats
+
+	// DynamicFilters, populated when this stage's Stage.ConsumeDynamicFilters
+	// resolved against an upstream build-scan's BuildStats. Downstream
+	// dispatchers (shuffle, compute) thread these into their task
+	// descriptors so workers apply the bloom at scan time. Carries forward
+	// across pass-through leaf scans that don't dispatch tasks themselves.
+	DynamicFilters []distributed.DynamicFilterSpec
 }
 
 // BuildStats is the coordinator-merged dynamic-filter artifact for one
