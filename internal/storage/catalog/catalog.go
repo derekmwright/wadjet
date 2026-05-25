@@ -93,6 +93,14 @@ type FileColumnStats struct {
 	MinValue  any   `json:"min_value,omitempty"`
 	MaxValue  any   `json:"max_value,omitempty"`
 	NullCount int64 `json:"null_count"`
+
+	// HLL is a HyperLogLog sketch over the column's distinct values in this
+	// file. Persisted as 1 byte version + 16384 register bytes (~16 KB).
+	// Empty if HLL was not collected at write time (e.g., legacy files,
+	// or for columns where NDV isn't useful — strings of comments). Read
+	// at plan time via AggregateColumnStats which merges sketches across
+	// files to estimate table-level NDV.
+	HLL []byte `json:"hll,omitempty"`
 }
 
 // FileEntry describes a single Parquet file within a partition.
@@ -111,6 +119,10 @@ type TableColumnStats struct {
 	MaxValue  any
 	NullCount int64
 	TotalRows int64
+	// NDV is the merged HLL estimate of distinct values across all files,
+	// or 0 when no file had an HLL sketch. When >0 it's preferred over the
+	// min/max-range heuristic in the optimizer's NDV estimator.
+	NDV int64
 }
 
 // New creates a new Catalog backed by the given KV store and object store.
@@ -739,6 +751,10 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 	}
 
 	agg := make(map[string]TableColumnStats)
+	// HLL sketches are merged outside the TableColumnStats struct because
+	// merging is incremental (byte-wise max) and the merged sketch can be
+	// estimated at the end. Track per-column merged HLL here.
+	mergedHLLs := make(map[string]*HLL)
 	var totalRows int64
 	for _, part := range manifest.Partitions {
 		for _, f := range part.Files {
@@ -757,15 +773,27 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 						cur.MaxValue = cs.MaxValue
 					}
 				}
+				if len(cs.HLL) > 0 {
+					if h := HLLFromBytes(cs.HLL); h != nil {
+						if existing := mergedHLLs[col]; existing != nil {
+							existing.Merge(h)
+						} else {
+							mergedHLLs[col] = h
+						}
+					}
+				}
 				agg[col] = cur
 			}
 		}
 	}
 
-	// Fill TotalRows for columns that didn't appear in all files
+	// Fill TotalRows + NDV for columns that didn't appear in all files
 	for col, cs := range agg {
 		if cs.TotalRows < totalRows {
 			cs.TotalRows = totalRows
+		}
+		if h := mergedHLLs[col]; h != nil {
+			cs.NDV = h.Estimate()
 		}
 		agg[col] = cs
 	}
