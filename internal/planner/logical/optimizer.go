@@ -31,6 +31,7 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	plan = decorrelateScalarSubqueries(plan)
 	plan = extractCommonORPredicates(plan)
 	plan = pushdownPredicates(plan)
+	plan = dedupSemiAntiBuildSide(plan)
 	plan = reorderJoins(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
