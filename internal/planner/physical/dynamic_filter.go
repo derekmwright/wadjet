@@ -3,6 +3,7 @@ package physical
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -88,10 +89,23 @@ func (p *Planner) applyDynamicFilters(ctx context.Context, stages []Stage) []Sta
 		buildLeaf := &stages[buildLeafIdx]
 		probeLeaf := &stages[probeLeafIdx]
 
-		// Eligibility: build leaf must produce ≤ threshold rows post-filter.
-		// EstimatedRows on the leaf reflects post-pushed-filter cardinality
-		// when the optimizer can compute it.
+		// Eligibility: effective build cardinality ≤ threshold.
+		//
+		// For INNER joins, "effective" = raw row count of the build leaf.
+		// For SEMI/ANTI joins, HashJoin builds a key-only hash table that
+		// naturally deduplicates duplicate keys — so the effective build
+		// cardinality is bounded by NDV(joinKey), not raw row count.
+		// Estimate NDV via foreign-key inference: a column named e.g.
+		// `l_orderkey` is a foreign key whose NDV ≤ the PK table's row
+		// count. Without this, joins like Q04 (orders ⨝SEMI lineitem on
+		// l_orderkey) get rejected even though build hashtable is bounded
+		// by orders.NumRows, not lineitem's 60M raw rows.
 		buildRows := buildLeaf.EstimatedRows
+		if j.JoinType == "semi" || j.JoinType == "anti" {
+			if ndv := p.estimateFKReferencedRowCount(ctx, j.JoinRightKeys[0]); ndv > 0 && ndv < buildRows {
+				buildRows = ndv
+			}
+		}
 		if buildRows <= 0 || buildRows > dynamicFilterMaxBuildRows {
 			continue
 		}
@@ -206,6 +220,62 @@ func computeDynamicFilterBloomBits(rows int64) int {
 		n = dynamicFilterMinBloomBits
 	}
 	return n
+}
+
+// estimateFKReferencedRowCount returns an NDV upper bound for a column
+// that appears to follow the foreign-key naming convention
+// "<prefix>_<entity>key" (TPC-H style: l_orderkey, o_custkey, etc.).
+//
+// The heuristic: strip the column's leading qualifier ("n1.n_nationkey"
+// → "n_nationkey"), strip the leading single-letter prefix, take the
+// remaining stem up to and including "key", drop the "key" suffix, and
+// try the result as a table name in the catalog. If found, return its
+// row count; otherwise 0.
+//
+// Examples: l_orderkey → orders, o_custkey → customer, l_partkey →
+// part, s_nationkey → nation. Misses pluralization differences (orders
+// vs order) — the catalog lookup is tried both forms.
+//
+// Returns 0 when the column name doesn't follow the pattern or the
+// inferred table isn't in the catalog. Callers fall back to raw row
+// count in that case.
+func (p *Planner) estimateFKReferencedRowCount(ctx context.Context, column string) int64 {
+	if p == nil || p.catalog == nil {
+		return 0
+	}
+	name := strings.ToLower(column)
+	if dot := strings.Index(name, "."); dot >= 0 {
+		name = name[dot+1:]
+	}
+	if !strings.HasSuffix(name, "key") {
+		return 0
+	}
+	// Strip leading "<letter>_" qualifier and trailing "key".
+	stem := strings.TrimSuffix(name, "key")
+	if u := strings.Index(stem, "_"); u >= 0 && u <= 2 {
+		stem = stem[u+1:]
+	}
+	if stem == "" {
+		return 0
+	}
+	// Try as-is then plural form. TPC-H tables: order/orders, customer,
+	// part, supplier, nation, region, lineitem, partsupp.
+	for _, candidate := range []string{stem, stem + "s"} {
+		manifest, err := p.catalog.GetManifest(ctx, candidate)
+		if err != nil || manifest == nil {
+			continue
+		}
+		var total int64
+		for _, part := range manifest.Partitions {
+			for _, f := range part.Files {
+				total += f.NumRows
+			}
+		}
+		if total > 0 {
+			return total
+		}
+	}
+	return 0
 }
 
 // columnIntType resolves the integer-shaped type ("int32" | "int64" | "date")
