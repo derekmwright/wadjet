@@ -169,3 +169,67 @@ func abs(x int64) int64 {
 	}
 	return x
 }
+
+// TestAnalyzeTableHistogramEndToEnd verifies the full histogram path:
+// ANALYZE collects reservoir samples per file, AggregateColumnStats
+// merges them into a table-level histogram, and the histogram returns
+// accurate selectivity for range queries.
+func TestAnalyzeTableHistogramEndToEnd(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(ctx, "test"); err != nil {
+		t.Fatal(err)
+	}
+	cat := New(NewMemKV(), store, "test")
+	if err := cat.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "n", Type: parquet.TypeInt64, Nullable: false},
+	}}
+	cat.CreateTable(ctx, "nums", schema, nil)
+
+	// Write 3 files. n ranges from 0 to 30000 across all files.
+	const rowsPerFile = 10_000
+	for fi := 0; fi < 3; fi++ {
+		rows := make([]map[string]any, rowsPerFile)
+		for i := 0; i < rowsPerFile; i++ {
+			rows[i] = map[string]any{"n": int64(fi*rowsPerFile + i)}
+		}
+		var buf bytes.Buffer
+		pw, _ := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
+		pw.WriteRows(rows)
+		pw.Close()
+		key := fmt.Sprintf("tables/nums/c_%d.parquet", fi)
+		data := buf.Bytes()
+		store.Put(ctx, "test", key, bytes.NewReader(data), int64(len(data)), "application/octet-stream")
+		cat.AddFiles(ctx, "nums", nil, "tables/nums/", []FileEntry{{Path: key, SizeBytes: int64(len(data)), NumRows: rowsPerFile}})
+	}
+
+	if _, err := cat.AnalyzeTable(ctx, "nums"); err != nil {
+		t.Fatalf("AnalyzeTable: %v", err)
+	}
+
+	stats, _ := cat.AggregateColumnStats(ctx, "nums")
+	nStats, ok := stats["n"]
+	if !ok {
+		t.Fatal("missing n stats")
+	}
+	if nStats.Histogram == nil {
+		t.Fatal("no histogram built")
+	}
+
+	// First quarter: [0, 7500] → ~25%
+	q1 := nStats.Histogram.SelectivityRange(int64(0), int64(7500))
+	t.Logf("[0, 7500] sel=%.4f (expect ~0.25)", q1)
+	if q1 < 0.20 || q1 > 0.30 {
+		t.Errorf("first quarter sel %.4f outside expected", q1)
+	}
+	// Second half: [15000, 30000] → ~50%
+	h2 := nStats.Histogram.SelectivityRange(int64(15000), int64(30000))
+	t.Logf("[15000, 30000] sel=%.4f (expect ~0.5)", h2)
+	if h2 < 0.40 || h2 > 0.60 {
+		t.Errorf("second half sel %.4f outside expected", h2)
+	}
+}

@@ -260,6 +260,27 @@ func histPredSelectivity(p Predicate, colHist map[string]any) float64 {
 		return clamp01(1 - h.SelectivityLE(p.Value))
 	case ">=", "ge":
 		return clamp01(1 - h.SelectivityLT(p.Value))
+	case "in":
+		// Sum of per-value EQ selectivities, capped at 1.0. Works when
+		// Value is a slice; otherwise fall back.
+		switch vs := p.Value.(type) {
+		case []any:
+			var s float64
+			for _, v := range vs {
+				s += h.SelectivityEQ(v)
+			}
+			return clamp01(s)
+		}
+		return -1
+	case "between":
+		// Value is typically a 2-tuple of (lo, hi). Fall back if not.
+		switch vs := p.Value.(type) {
+		case []any:
+			if len(vs) == 2 {
+				return clamp01(h.SelectivityRange(vs[0], vs[1]))
+			}
+		}
+		return -1
 	}
 	return -1
 }
