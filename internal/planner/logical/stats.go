@@ -5,6 +5,15 @@ import (
 	"strings"
 )
 
+// RelStatsOf returns CBO-derived statistics for the given subtree.
+// Exported so the physical planner can consult cardinality-driven
+// estimates when making structural decisions (broadcast vs shuffle,
+// dynamic-filter eligibility, etc.) without re-implementing the
+// recursion.
+func RelStatsOf(n *Node) RelStats {
+	return estimateSubtreeStats(n)
+}
+
 // RelStats holds estimated statistics for a plan subtree.
 type RelStats struct {
 	Rows   float64

@@ -3220,6 +3220,14 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 			totalBytes += f.SizeBytes
 		}
 	}
+	// NOTE: filter selectivity is NOT applied here. A prototype that
+	// scaled totalBytes by RelStatsOf(build).Rows / totalRows shifted
+	// 9 TPC-H queries from hash-shuffle to broadcast (Q17 went
+	// lineitem-hash-shuffle → part-broadcast, eliminating a 6 GB
+	// shuffle at SF10). All 22Q SF0.01 correctness held. But the
+	// change increases memory pressure per worker (broadcasts load
+	// build into every worker), which needs SF10/SF100 deploy
+	// validation before shipping. Tracked for a future session.
 	// Broadcast threshold: defaults to 100 MB (legacy behavior). Distributed
 	// callers override via BroadcastBytesThreshold to adapt the decision to
 	// per-worker pool budget so a moderate build (say 500 MB) on a tight
