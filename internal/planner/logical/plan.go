@@ -13,6 +13,13 @@ type ScanColumnStats struct {
 	MaxValue  any
 	NullCount int64
 	TotalRows int64
+	// NDV is the catalog's merged HyperLogLog estimate of distinct values
+	// across all files of this column. Zero means HLL wasn't collected
+	// (legacy files / pre-ANALYZE state); planner falls back to the
+	// min/max-range heuristic. When >0 it's preferred — orders of
+	// magnitude more accurate for sparse-int / string columns where the
+	// range overstates true cardinality.
+	NDV int64
 }
 
 // NodeType identifies the kind of logical plan node.

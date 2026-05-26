@@ -114,10 +114,18 @@ func estimateScanStats(n *Node) RelStats {
 	return RelStats{Rows: math.Max(1, rows), ColNDV: ndv}
 }
 
-// estimateNDVFromStats estimates distinct values using actual min/max stats.
-// For numeric types, uses (max-min+1) capped at row count.
-// For strings, falls back to a fraction of rows.
+// estimateNDVFromStats estimates distinct values using catalog statistics.
+//
+// Preference order:
+//  1. Catalog HLL NDV when populated (CBO Phase 2). Ground-truth-derived,
+//     ~1% standard error. Computed at ingest time or by ANALYZE TABLE.
+//  2. min/max range for numeric types (max-min+1, capped at row count).
+//     Overstates for sparse keys but cheap to compute.
+//  3. String / non-numeric: moderate-cardinality heuristic.
 func estimateNDVFromStats(cs ScanColumnStats, tableRows float64) float64 {
+	if cs.NDV > 0 {
+		return math.Min(float64(cs.NDV), tableRows)
+	}
 	minF, minOk := toFloat(cs.MinValue)
 	maxF, maxOk := toFloat(cs.MaxValue)
 	if minOk && maxOk {

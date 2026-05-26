@@ -744,6 +744,7 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 						MaxValue:  cs.MaxValue,
 						NullCount: cs.NullCount,
 						TotalRows: cs.TotalRows,
+						NDV:       cs.NDV,
 					}
 				}
 				node.ScanColStats = scanStats

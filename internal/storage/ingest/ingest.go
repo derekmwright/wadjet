@@ -329,6 +329,21 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 
 	// Extract column statistics from the written Parquet file
 	colStats := extractColumnStats(data)
+	// Augment with per-column HLL sketches computed from the raw rows
+	// before they were serialized. Parquet metadata doesn't carry NDV
+	// info, so the only place to capture it cheaply is right here while
+	// the rows are still in memory.
+	hlls := computeColumnHLLs(buf.rows, ing.schema)
+	if len(hlls) > 0 {
+		if colStats == nil {
+			colStats = make(map[string]catalog.FileColumnStats, len(hlls))
+		}
+		for col, h := range hlls {
+			cs := colStats[col]
+			cs.HLL = h.Bytes()
+			colStats[col] = cs
+		}
+	}
 
 	// Update catalog manifest
 	fileEntry := catalog.FileEntry{
