@@ -739,12 +739,17 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			if colStats, err := p.catalog.AggregateColumnStats(ctx, node.TableName); err == nil && colStats != nil {
 				scanStats := make(map[string]logical.ScanColumnStats, len(colStats))
 				for col, cs := range colStats {
+					var hist any
+					if cs.Histogram != nil {
+						hist = cs.Histogram
+					}
 					scanStats[col] = logical.ScanColumnStats{
 						MinValue:  cs.MinValue,
 						MaxValue:  cs.MaxValue,
 						NullCount: cs.NullCount,
 						TotalRows: cs.TotalRows,
 						NDV:       cs.NDV,
+						Histogram: hist,
 					}
 				}
 				node.ScanColStats = scanStats

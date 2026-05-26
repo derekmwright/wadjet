@@ -20,6 +20,14 @@ type ScanColumnStats struct {
 	// magnitude more accurate for sparse-int / string columns where the
 	// range overstates true cardinality.
 	NDV int64
+	// Histogram is the catalog's equi-depth histogram for this column,
+	// merged across files from reservoir samples. Nil when not collected.
+	// Used by estimatePredSelectivity to compute range/equality
+	// selectivity from real value distributions instead of hardcoded
+	// fractions (0.33 for <, 0.1 for =). The opaque any allows the
+	// logical package to receive *catalog.Histogram without importing
+	// the catalog package (avoids circular import).
+	Histogram any
 }
 
 // NodeType identifies the kind of logical plan node.

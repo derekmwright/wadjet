@@ -9,6 +9,11 @@ import (
 type RelStats struct {
 	Rows   float64
 	ColNDV map[string]float64 // lowercase unqualified column name → estimated NDV
+	// ColHist carries opaque histogram pointers (*catalog.Histogram) for
+	// columns that have one in the catalog. Used by estimatePredSelectivity
+	// to compute range/equality selectivity from real data distributions.
+	// Stored as any to keep the logical package free of catalog imports.
+	ColHist map[string]any
 }
 
 // estimateSubtreeStats estimates cardinality and per-column NDV for a plan subtree.
@@ -23,9 +28,9 @@ func estimateSubtreeStats(n *Node) RelStats {
 
 	case NodeFilter:
 		child := estimateSubtreeStats(n.Children[0])
-		sel := estimatePredSelectivity(n.Predicates)
+		sel := estimatePredSelectivityWithHist(n.Predicates, child.ColHist)
 		rows := math.Max(1, child.Rows*sel)
-		return RelStats{Rows: rows, ColNDV: scaleNDVs(child.ColNDV, rows)}
+		return RelStats{Rows: rows, ColNDV: scaleNDVs(child.ColNDV, rows), ColHist: child.ColHist}
 
 	case NodeAggregate:
 		child := estimateSubtreeStats(n.Children[0])
@@ -102,16 +107,22 @@ func estimateScanStats(n *Node) RelStats {
 	rows *= math.Max(scanSel, 0.0001)
 
 	ndv := make(map[string]float64, len(n.ScanColumns))
+	hist := make(map[string]any, len(n.ScanColumns))
 	for _, col := range n.ScanColumns {
 		lc := strings.ToLower(col)
 		if cs, ok := n.ScanColStats[lc]; ok && cs.MinValue != nil && cs.MaxValue != nil {
 			ndv[lc] = estimateNDVFromStats(cs, rows)
+		} else if cs, ok := n.ScanColStats[lc]; ok && cs.NDV > 0 {
+			ndv[lc] = math.Min(float64(cs.NDV), rows)
 		} else {
 			ndv[lc] = estimateColumnNDV(col, rows)
 		}
+		if cs, ok := n.ScanColStats[lc]; ok && cs.Histogram != nil {
+			hist[lc] = cs.Histogram
+		}
 	}
 
-	return RelStats{Rows: math.Max(1, rows), ColNDV: ndv}
+	return RelStats{Rows: math.Max(1, rows), ColNDV: ndv, ColHist: hist}
 }
 
 // estimateNDVFromStats estimates distinct values using catalog statistics.
@@ -194,6 +205,99 @@ func estimateColumnNDV(colName string, tableRows float64) float64 {
 
 	// Default: moderate cardinality
 	return math.Min(tableRows, math.Max(10, math.Sqrt(tableRows)*10))
+}
+
+// estimatePredSelectivityWithHist computes combined selectivity, using
+// per-column histograms (when present) for range and equality
+// predicates. Falls back to estimatePredSelectivity's hardcoded
+// fractions when no histogram exists for the predicate's column.
+//
+// The histograms come from RelStats.ColHist, which the Scan case in
+// estimateSubtreeStats populates from the catalog's TableColumnStats.
+// They're opaque (any) at this layer to avoid a logical→catalog
+// import; callers cast via the histogramSelector indirection.
+func estimatePredSelectivityWithHist(preds []Predicate, colHist map[string]any) float64 {
+	sel := 1.0
+	for _, p := range preds {
+		s := histPredSelectivity(p, colHist)
+		if s < 0 {
+			s = singlePredSelectivity(p)
+		}
+		sel *= s
+	}
+	return math.Max(sel, 0.0001)
+}
+
+// HistogramStats is the interface a per-column histogram must implement
+// to participate in selectivity estimation. catalog.Histogram satisfies
+// it. Kept as an interface so the logical package stays free of a
+// catalog dependency.
+type HistogramStats interface {
+	SelectivityLE(v any) float64
+	SelectivityLT(v any) float64
+	SelectivityRange(lo, hi any) float64
+	SelectivityEQ(v any) float64
+}
+
+// histPredSelectivity returns the histogram-driven selectivity for a
+// single predicate, or -1 if no usable histogram or unsupported op.
+func histPredSelectivity(p Predicate, colHist map[string]any) float64 {
+	if colHist == nil || p.Column == "" || p.Value == nil {
+		return -1
+	}
+	h, ok := colHist[strings.ToLower(p.Column)].(HistogramStats)
+	if !ok || h == nil {
+		return -1
+	}
+	switch strings.ToLower(p.Op) {
+	case "=", "eq":
+		return clamp01(h.SelectivityEQ(p.Value))
+	case "<", "lt":
+		return clamp01(h.SelectivityLT(p.Value))
+	case "<=", "le":
+		return clamp01(h.SelectivityLE(p.Value))
+	case ">", "gt":
+		return clamp01(1 - h.SelectivityLE(p.Value))
+	case ">=", "ge":
+		return clamp01(1 - h.SelectivityLT(p.Value))
+	}
+	return -1
+}
+
+func clamp01(x float64) float64 {
+	if x < 0 {
+		return 0
+	}
+	if x > 1 {
+		return 1
+	}
+	return x
+}
+
+// singlePredSelectivity is the per-predicate fallback when no
+// histogram is available — same hardcoded fractions as the original
+// estimatePredSelectivity.
+func singlePredSelectivity(p Predicate) float64 {
+	switch strings.ToLower(p.Op) {
+	case "=", "eq":
+		return 0.1
+	case "<", "<=", ">", ">=", "lt", "le", "gt", "ge":
+		return 0.33
+	case "!=", "<>", "ne":
+		return 0.9
+	case "is_null":
+		return 0.05
+	case "is_not_null":
+		return 0.95
+	case "in":
+		return 0.25
+	case "between":
+		return 0.25
+	case "like":
+		return 0.1
+	default:
+		return 0.33
+	}
 }
 
 // estimatePredSelectivity estimates combined selectivity of predicates.

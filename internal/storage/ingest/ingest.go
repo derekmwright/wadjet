@@ -329,18 +329,28 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 
 	// Extract column statistics from the written Parquet file
 	colStats := extractColumnStats(data)
-	// Augment with per-column HLL sketches computed from the raw rows
-	// before they were serialized. Parquet metadata doesn't carry NDV
-	// info, so the only place to capture it cheaply is right here while
-	// the rows are still in memory.
-	hlls := computeColumnHLLs(buf.rows, ing.schema)
-	if len(hlls) > 0 {
+	// Augment with per-column HLL sketches AND reservoir samples
+	// computed from the raw rows before they were serialized.
+	// - HLL → NDV estimation in the planner
+	// - Sample → cross-file histogram merge for selectivity estimation
+	// Parquet metadata doesn't carry either, so the only place to
+	// capture them cheaply is while rows are still in memory.
+	extra := computeColumnStats(buf.rows, ing.schema)
+	if len(extra) > 0 {
 		if colStats == nil {
-			colStats = make(map[string]catalog.FileColumnStats, len(hlls))
+			colStats = make(map[string]catalog.FileColumnStats, len(extra))
 		}
-		for col, h := range hlls {
+		for col, st := range extra {
 			cs := colStats[col]
-			cs.HLL = h.Bytes()
+			if st.hll != nil {
+				cs.HLL = st.hll.Bytes()
+			}
+			if st.sampler != nil {
+				vals, total, tc := st.sampler.Snapshot()
+				if len(vals) > 0 {
+					cs.Sample = catalog.SampleBytes(vals, total, tc)
+				}
+			}
 			colStats[col] = cs
 		}
 	}

@@ -101,6 +101,13 @@ type FileColumnStats struct {
 	// at plan time via AggregateColumnStats which merges sketches across
 	// files to estimate table-level NDV.
 	HLL []byte `json:"hll,omitempty"`
+
+	// Sample is a reservoir-sampled snapshot of the column's values in
+	// this file, encoded by EncodeSample (typically ~256 values, ~2 KB).
+	// AggregateColumnStats merges samples across files (weighted by
+	// file row count) and builds an equi-depth Histogram at query time.
+	// Used by stats.estimatePredSelectivity for range/equality filters.
+	Sample []byte `json:"sample,omitempty"`
 }
 
 // FileEntry describes a single Parquet file within a partition.
@@ -123,6 +130,12 @@ type TableColumnStats struct {
 	// or 0 when no file had an HLL sketch. When >0 it's preferred over the
 	// min/max-range heuristic in the optimizer's NDV estimator.
 	NDV int64
+	// Histogram is the equi-depth histogram built from merging per-file
+	// reservoir samples, scaled to TotalRows. Nil when no file had a
+	// Sample. Used by stats.estimatePredSelectivity for range/equality
+	// filters — replaces the hardcoded 0.33/0.1 fractions with
+	// data-driven selectivity.
+	Histogram *Histogram
 }
 
 // New creates a new Catalog backed by the given KV store and object store.
@@ -755,6 +768,8 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 	// merging is incremental (byte-wise max) and the merged sketch can be
 	// estimated at the end. Track per-column merged HLL here.
 	mergedHLLs := make(map[string]*HLL)
+	// Per-column sample byte slices, fed into MergeSamples at the end.
+	samples := make(map[string][][]byte)
 	var totalRows int64
 	for _, part := range manifest.Partitions {
 		for _, f := range part.Files {
@@ -782,18 +797,27 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 						}
 					}
 				}
+				if len(cs.Sample) > 0 {
+					samples[col] = append(samples[col], cs.Sample)
+				}
 				agg[col] = cur
 			}
 		}
 	}
 
-	// Fill TotalRows + NDV for columns that didn't appear in all files
+	// Fill TotalRows + NDV + Histogram for columns that didn't appear in all files
 	for col, cs := range agg {
 		if cs.TotalRows < totalRows {
 			cs.TotalRows = totalRows
 		}
 		if h := mergedHLLs[col]; h != nil {
 			cs.NDV = h.Estimate()
+		}
+		if sb := samples[col]; len(sb) > 0 {
+			merged, _, typeCode := MergeSamples(sb)
+			if len(merged) > 0 {
+				cs.Histogram = HistogramFromMergedSample(merged, cs.TotalRows, typeCode, HistDefaultBuckets)
+			}
 		}
 		agg[col] = cs
 	}

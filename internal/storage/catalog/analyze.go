@@ -49,19 +49,25 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 			if err := ctx.Err(); err != nil {
 				return analyzed, err
 			}
-			hlls, err := computeFileHLLs(ctx, c.store, c.bucket, f.Path)
+			sk, err := computeFileSketches(ctx, c.store, c.bucket, f.Path)
 			if err != nil {
 				return analyzed, fmt.Errorf("analyze %s: file %s: %w", name, f.Path, err)
 			}
-			if len(hlls) == 0 {
+			if sk == nil || len(sk.hlls) == 0 {
 				continue
 			}
 			if f.ColumnStats == nil {
-				f.ColumnStats = make(map[string]FileColumnStats, len(hlls))
+				f.ColumnStats = make(map[string]FileColumnStats, len(sk.hlls))
 			}
-			for col, h := range hlls {
+			for col, h := range sk.hlls {
 				cs := f.ColumnStats[col]
 				cs.HLL = h.Bytes()
+				if sampler := sk.samplers[col]; sampler != nil {
+					vals, total, tc := sampler.Snapshot()
+					if len(vals) > 0 {
+						cs.Sample = SampleBytes(vals, total, tc)
+					}
+				}
 				f.ColumnStats[col] = cs
 			}
 			manifest.Partitions[pi].Files[fi] = f
@@ -76,13 +82,22 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 	return analyzed, nil
 }
 
-// computeFileHLLs reads a parquet file's data and builds per-column
-// HLLs. Skips nested types (Array/Row/Map) where NDV isn't well-defined.
+// fileColumnSketches bundles HLL and reservoir-sample collectors per
+// column, produced by computeFileSketches in one decode pass.
+type fileColumnSketches struct {
+	hlls     map[string]*HLL
+	samplers map[string]*ReservoirSampler
+	colTypes map[string]parquet.TypeID
+}
+
+// computeFileSketches reads a parquet file's data and builds per-column
+// HLLs + reservoir samples in one decode pass. Skips nested types
+// (Array/Row/Map) where the value→hash encoding isn't well-defined.
 //
 // Uses ReadRowGroup which materializes each row as a map[string]any —
-// the same value representation that the ingest path operates on, so
-// the produced HLLs are byte-compatible (same hash → same registers).
-func computeFileHLLs(ctx context.Context, store objstore.Store, bucket, path string) (map[string]*HLL, error) {
+// the same value representation the ingest path uses, so produced
+// stats are byte-compatible across collection sites.
+func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path string) (*fileColumnSketches, error) {
 	rc, _, err := store.Get(ctx, bucket, path)
 	if err != nil {
 		return nil, fmt.Errorf("get: %w", err)
@@ -99,14 +114,18 @@ func computeFileHLLs(ctx context.Context, store objstore.Store, bucket, path str
 	}
 	schema := reader.Schema()
 
-	hlls := make(map[string]*HLL, len(schema.Columns))
-	colTypes := make(map[string]parquet.TypeID, len(schema.Columns))
+	out := &fileColumnSketches{
+		hlls:     make(map[string]*HLL, len(schema.Columns)),
+		samplers: make(map[string]*ReservoirSampler, len(schema.Columns)),
+		colTypes: make(map[string]parquet.TypeID, len(schema.Columns)),
+	}
 	for _, col := range schema.Columns {
 		if !IsHLLSupportedType(col.Type) {
 			continue
 		}
-		hlls[col.Name] = &HLL{}
-		colTypes[col.Name] = col.Type
+		out.hlls[col.Name] = &HLL{}
+		out.samplers[col.Name] = NewReservoirSampler(SampleDefaultSize)
+		out.colTypes[col.Name] = col.Type
 	}
 
 	nrg := reader.NumRowGroups()
@@ -114,23 +133,21 @@ func computeFileHLLs(ctx context.Context, store objstore.Store, bucket, path str
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		// ReadRowGroup yields []map[string]any — same shape as ingest's
-		// raw rows. selectedColumns=nil reads all columns at once;
-		// per-column reads would amplify decode passes.
 		rows, err := reader.ReadRowGroup(rg, nil)
 		if err != nil {
 			return nil, fmt.Errorf("row group %d: %w", rg, err)
 		}
 		for _, row := range rows {
-			for col, h := range hlls {
+			for col, h := range out.hlls {
 				v, ok := row[col]
 				if !ok || v == nil {
 					continue
 				}
-				AddValueToHLL(h, v, colTypes[col])
+				AddValueToHLL(h, v, out.colTypes[col])
+				out.samplers[col].Add(v)
 			}
 		}
 	}
-	return hlls, nil
+	return out, nil
 }
 
