@@ -95,14 +95,17 @@ func (p *Planner) applyDynamicFilters(ctx context.Context, stages []Stage) []Sta
 		// For SEMI/ANTI joins, HashJoin builds a key-only hash table that
 		// naturally deduplicates duplicate keys — so the effective build
 		// cardinality is bounded by NDV(joinKey), not raw row count.
-		// Estimate NDV via foreign-key inference: a column named e.g.
-		// `l_orderkey` is a foreign key whose NDV ≤ the PK table's row
-		// count. Without this, joins like Q04 (orders ⨝SEMI lineitem on
-		// l_orderkey) get rejected even though build hashtable is bounded
-		// by orders.NumRows, not lineitem's 60M raw rows.
+		//
+		// NDV preference: catalog HLL (ground-truth-derived, ~1% error)
+		// → FK-naming inference (heuristic, TPC-H-shape friendly) → raw
+		// row count. The HLL path becomes the primary source as soon as
+		// ingest or ANALYZE TABLE populates it; FK inference covers
+		// pre-ANALYZE catalogs.
 		buildRows := buildLeaf.EstimatedRows
 		if j.JoinType == "semi" || j.JoinType == "anti" {
-			if ndv := p.estimateFKReferencedRowCount(ctx, j.JoinRightKeys[0]); ndv > 0 && ndv < buildRows {
+			if ndv := p.lookupCatalogNDV(ctx, buildLeaf.TableName, j.JoinRightKeys[0]); ndv > 0 && ndv < buildRows {
+				buildRows = ndv
+			} else if ndv := p.estimateFKReferencedRowCount(ctx, j.JoinRightKeys[0]); ndv > 0 && ndv < buildRows {
 				buildRows = ndv
 			}
 		}
@@ -220,6 +223,36 @@ func computeDynamicFilterBloomBits(rows int64) int {
 		n = dynamicFilterMinBloomBits
 	}
 	return n
+}
+
+// lookupCatalogNDV returns the catalog's HLL-derived NDV estimate for a
+// (table, column) pair. Returns 0 when the catalog has no HLL sketch
+// (ingest pre-dated HLL collection, or column wasn't covered).
+//
+// The qualified-form ("o.o_orderkey") and unqualified-form ("o_orderkey")
+// are both tried so the lookup works regardless of how the join
+// condition phrases the column reference.
+func (p *Planner) lookupCatalogNDV(ctx context.Context, table, column string) int64 {
+	if p == nil || p.catalog == nil || table == "" || column == "" {
+		return 0
+	}
+	stats, err := p.catalog.AggregateColumnStats(ctx, table)
+	if err != nil || stats == nil {
+		return 0
+	}
+	for _, key := range []string{column, stripQualifier(column)} {
+		if cs, ok := stats[key]; ok && cs.NDV > 0 {
+			return cs.NDV
+		}
+	}
+	return 0
+}
+
+func stripQualifier(s string) string {
+	if i := strings.Index(s, "."); i >= 0 {
+		return s[i+1:]
+	}
+	return s
 }
 
 // estimateFKReferencedRowCount returns an NDV upper bound for a column
