@@ -368,16 +368,40 @@ func estimateJoinStats(left, right RelStats, joinCond, joinType string) RelStats
 }
 
 // estimateJoinCard estimates the output cardinality of a join.
-// For inner equi-joins, uses the FK-PK assumption: output ≈ max(left, right).
-// This is robust for analytics workloads without column-level statistics.
+//
+// For inner equi-joins, the cardinality lies between max(leftRows,
+// rightRows) (the FK→PK natural ceiling) and leftRows*rightRows/maxNDV
+// (the genuine many-to-many product). We pick the larger of the two:
+// the Selinger formula bites only when both sides have NDV materially
+// smaller than their row counts (many-to-many on a shared key); in the
+// far more common FK→PK shape it reduces to max(L,R).
+//
+// Why not always Selinger? When NDV comes from a heuristic (the
+// _key-suffix shortcut returns tableRows, overstating NDV), the
+// Selinger formula collapses output below max(L,R), incorrectly
+// "shrinking" FK→PK joins. The floor at max(L,R) keeps the formula
+// well-behaved under both heuristic and HLL-derived NDVs.
 func estimateJoinCard(leftRows, rightRows, leftNDV, rightNDV float64, joinType string) float64 {
 	jt := strings.ToLower(joinType)
 
 	switch {
 	case jt == "" || jt == "join" || jt == "inner" || jt == "inner join":
-		// FK-PK assumption: the join doesn't reduce the larger side.
-		// This is correct for dimension→fact joins (most analytical joins).
-		return math.Max(leftRows, rightRows)
+		ceiling := math.Max(leftRows, rightRows)
+		// Sanity-bound NDVs to row counts (HLL can overshoot near
+		// precision limit; heuristics may exceed).
+		ndvL := math.Min(leftNDV, leftRows)
+		ndvR := math.Min(rightNDV, rightRows)
+		maxNDV := math.Max(ndvL, ndvR)
+		if maxNDV < 1 {
+			return ceiling
+		}
+		selinger := leftRows * rightRows / maxNDV
+		if selinger > ceiling {
+			// Genuine many-to-many: both NDVs are small relative to
+			// their row counts, so each match multiplies output.
+			return selinger
+		}
+		return ceiling
 
 	case strings.HasPrefix(jt, "left"):
 		return leftRows // left join preserves all left rows
