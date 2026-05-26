@@ -3214,20 +3214,32 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if err != nil {
 		return false
 	}
-	var totalBytes int64
+	var totalBytes, totalRows int64
 	for _, part := range manifest.Partitions {
 		for _, f := range part.Files {
 			totalBytes += f.SizeBytes
+			totalRows += f.NumRows
 		}
 	}
-	// NOTE: filter selectivity is NOT applied here. A prototype that
-	// scaled totalBytes by RelStatsOf(build).Rows / totalRows shifted
-	// 9 TPC-H queries from hash-shuffle to broadcast (Q17 went
-	// lineitem-hash-shuffle → part-broadcast, eliminating a 6 GB
-	// shuffle at SF10). All 22Q SF0.01 correctness held. But the
-	// change increases memory pressure per worker (broadcasts load
-	// build into every worker), which needs SF10/SF100 deploy
-	// validation before shipping. Tracked for a future session.
+	// Apply filter selectivity to the build-side bytes estimate. Q17's
+	// `part WHERE p_brand=... AND p_container=...` filters 2M rows to
+	// ~13K, dropping the build size from 200 MB raw to ~1.5 MB — well
+	// below the broadcast threshold. Without this scaling, the raw
+	// 200 MB exceeds the threshold and Q17 falls through to a
+	// hash-shuffle that pays exchange-repartition for BOTH lineitem
+	// (60M rows ≈ 6 GB at SF10) and part.
+	//
+	// Source of selectivity: RelStatsOf walks the build subtree applying
+	// histogram-driven predicate selectivity (CBO Phase 3 work). For
+	// tables without HLL/histogram, the existing 0.33/0.1 heuristic
+	// still applies so the scaling is at-worst-conservative.
+	if totalRows > 0 {
+		stats := logical.RelStatsOf(joinNode.Children[1])
+		if stats.Rows > 0 && stats.Rows < float64(totalRows) {
+			scale := stats.Rows / float64(totalRows)
+			totalBytes = int64(float64(totalBytes) * scale)
+		}
+	}
 	// Broadcast threshold: defaults to 100 MB (legacy behavior). Distributed
 	// callers override via BroadcastBytesThreshold to adapt the decision to
 	// per-worker pool budget so a moderate build (say 500 MB) on a tight

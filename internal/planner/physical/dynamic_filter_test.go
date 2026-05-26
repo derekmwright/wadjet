@@ -40,17 +40,23 @@ func sqlToStagesWithDynamicFilters(t *testing.T, cat *catalog.Catalog, ctx conte
 	return stages
 }
 
-// TestDynamicFilterPassQ17 verifies Q17 gets Emit/Consume annotations +
-// the stat-dep edge when DynamicFiltersEnabled is on.
+// TestDynamicFilterPassQ17 verifies the planner does the right thing
+// for Q17 (small-quantity-order) under DynamicFiltersEnabled.
 //
-// Q17 shape (SF10-sized catalog):
+// Original v1 test asserted Emit/Consume annotations were attached.
+// After the filter-aware broadcast threshold change (CBO Phase 4),
+// Q17's small filtered `part` build (~13K rows ≈ 1.5 MB) is below
+// the broadcast threshold and the join becomes a broadcast_join
+// instead of hash_join. Broadcast joins ship the build to every
+// worker — so a separate dynamic-filter bloom is redundant (the
+// build is already present everywhere). The planner correctly
+// skips annotating broadcast joins.
 //
-//	scan-0 (lineitem, 60M rows)   ── exchange-repartition ──┐
-//	                                                         ├── hash_join (l_partkey = p_partkey)
-//	scan-1 (part filtered ~13K)   ── exchange-repartition ──┘
-//
-// Expected: scan-1 emits a bloom on p_partkey; scan-0 consumes it on
-// l_partkey; scan-0.Dependencies includes scan-1.ID (stat-dep edge).
+// This test now confirms: Q17 plan contains a broadcast_join (the
+// architecturally-correct shape) and ZERO dynamic-filter annotations.
+// The pre-broadcast hash-shuffle + dynamic-filter combo is strictly
+// worse — broadcast eliminates the lineitem shuffle that the bloom
+// could only have partially mitigated.
 func TestDynamicFilterPassQ17(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 	const sql = `SELECT
@@ -67,71 +73,20 @@ func TestDynamicFilterPassQ17(t *testing.T) {
 
 	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3)
 
-	var partScan, lineitemScan *Stage
-	for i := range stages {
-		s := &stages[i]
-		if s.Type != StageScan {
-			continue
+	hasBroadcast := false
+	emits, consumes := 0, 0
+	for _, s := range stages {
+		if s.Type == StageBroadcastJoin {
+			hasBroadcast = true
 		}
-		if s.TableName == "part" {
-			partScan = s
-		}
-		if s.TableName == "lineitem" && lineitemScan == nil {
-			lineitemScan = s
-		}
+		emits += len(s.EmitDynamicFilters)
+		consumes += len(s.ConsumeDynamicFilters)
 	}
-	if partScan == nil {
-		t.Fatal("missing part scan stage")
+	if !hasBroadcast {
+		t.Errorf("expected at least one broadcast_join in Q17 plan; got none")
 	}
-	if lineitemScan == nil {
-		t.Fatal("missing lineitem scan stage")
-	}
-
-	if len(partScan.EmitDynamicFilters) == 0 {
-		t.Errorf("part scan should emit; got 0 entries")
-	} else {
-		found := false
-		for _, e := range partScan.EmitDynamicFilters {
-			if e.KeyColumn == "p_partkey" {
-				found = true
-				if e.KeyType != "int32" && e.KeyType != "int64" {
-					t.Errorf("KeyType = %q, want int32 or int64", e.KeyType)
-				}
-				if e.BloomBits < 1024 {
-					t.Errorf("BloomBits = %d, want >= 1024", e.BloomBits)
-				}
-			}
-		}
-		if !found {
-			t.Errorf("part scan EmitDynamicFilters missing p_partkey: %+v", partScan.EmitDynamicFilters)
-		}
-	}
-
-	if len(lineitemScan.ConsumeDynamicFilters) == 0 {
-		t.Errorf("lineitem scan should consume; got 0 entries")
-	} else {
-		found := false
-		for _, c := range lineitemScan.ConsumeDynamicFilters {
-			if c.TargetColumn == "l_partkey" && c.SourceStageID == partScan.ID {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("lineitem scan ConsumeDynamicFilters missing l_partkey from %s: %+v",
-				partScan.ID, lineitemScan.ConsumeDynamicFilters)
-		}
-	}
-
-	depFound := false
-	for _, d := range lineitemScan.Dependencies {
-		if d == partScan.ID {
-			depFound = true
-			break
-		}
-	}
-	if !depFound {
-		t.Errorf("lineitem scan Dependencies missing stat-dep edge to %s: %v",
-			partScan.ID, lineitemScan.Dependencies)
+	if emits != 0 || consumes != 0 {
+		t.Errorf("expected zero dynamic-filter annotations (broadcast joins skipped); got emits=%d consumes=%d", emits, consumes)
 	}
 }
 
