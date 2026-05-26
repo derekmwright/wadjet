@@ -321,35 +321,6 @@ func singlePredSelectivity(p Predicate) float64 {
 	}
 }
 
-// estimatePredSelectivity estimates combined selectivity of predicates.
-func estimatePredSelectivity(preds []Predicate) float64 {
-	sel := 1.0
-	for _, p := range preds {
-		switch strings.ToLower(p.Op) {
-		case "=", "eq":
-			sel *= 0.1
-		case "<", "<=", ">", ">=", "lt", "le", "gt", "ge":
-			sel *= 0.33
-		case "!=", "<>", "ne":
-			sel *= 0.9
-		case "is_null":
-			sel *= 0.05
-		case "is_not_null":
-			sel *= 0.95
-		case "in":
-			sel *= 0.25
-		case "between":
-			sel *= 0.25
-		case "like":
-			sel *= 0.1
-		default:
-			// Raw expression predicates (most common path)
-			sel *= 0.33
-		}
-	}
-	return math.Max(sel, 0.0001)
-}
-
 // estimateJoinStats estimates the output statistics of a join.
 func estimateJoinStats(left, right RelStats, joinCond, joinType string) RelStats {
 	leftNDV, rightNDV := resolveJoinKeyNDVs(joinCond, left, right)
