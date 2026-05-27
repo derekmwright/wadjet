@@ -267,6 +267,7 @@ func readLeafColumn(fr *FileReader, rgIdx, colIdx int) (leafColumnData, error) {
 		// Decode non-null values.
 		pageVals := decodePageValues(data, lcd.maxDef, page.DefinitionLevels, typeID)
 		lcd.values = append(lcd.values, pageVals...)
+		page.Release()
 	}
 
 	return lcd, nil
@@ -715,6 +716,7 @@ func readColumnToAny(fr *FileReader, rgIdx, colIdx, numRows int, typeID TypeID) 
 			unpackWithNulls(values, offset, data, page.DefinitionLevels, maxDef, n, typeID)
 		}
 		offset += n
+		page.Release()
 	}
 	return values, nil
 }

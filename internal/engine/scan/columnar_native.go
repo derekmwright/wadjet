@@ -243,6 +243,7 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		if defLevels == nil || !hasNulls {
 			if coerce {
 				if err := copyNativeCoercedDirect(vec, offset, data, pageRows, fileType, catalogType); err != nil {
+					page.Release()
 					return err
 				}
 			} else {
@@ -251,6 +252,7 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		} else {
 			if coerce {
 				if err := copyNativeCoercedScatter(vec, offset, data, defLevels, int32(maxDefLevel), pageRows, fileType, catalogType); err != nil {
+					page.Release()
 					return err
 				}
 			} else {
@@ -259,6 +261,7 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		}
 
 		offset += pageRows
+		page.Release()
 	}
 
 	return nil

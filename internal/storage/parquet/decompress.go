@@ -51,12 +51,23 @@ func init() {
 }
 
 func decompressZstd(data []byte, size int) ([]byte, error) {
-	dst := make([]byte, 0, size)
+	dst := getZstdBuf(size)
 	dst, err := zstdDecoder.DecodeAll(data, dst)
 	if err != nil {
+		putZstdBuf(dst)
 		return nil, fmt.Errorf("zstd decompress: %w", err)
 	}
 	return dst, nil
+}
+
+// ReleaseDecompressed returns the slice returned by Decompress to its pool,
+// if it came from one. Safe to call with any slice — non-pooled buffers are
+// dropped to GC. Only the zstd path is currently pooled; other codecs are
+// no-ops.
+func ReleaseDecompressed(codec CompressionCodec, buf []byte) {
+	if codec == CodecZstd {
+		putZstdBuf(buf)
+	}
 }
 
 func decompressGzip(data []byte, size int) ([]byte, error) {
