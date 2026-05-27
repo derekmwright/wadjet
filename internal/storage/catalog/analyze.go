@@ -123,20 +123,35 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 			continue
 		}
 		f := manifest.Partitions[r.pi].Files[r.fi]
+		// Build entries for the per-file sketches bundle. Also clear any
+		// legacy inline HLL/Sample bytes on the FileColumnStats so the
+		// manifest stays small. Min/Max/NullCount stay inline because
+		// they're small and are read at plan time before sketch fetches.
+		entries := make([]FileSketchesEntry, 0, len(sk.hlls))
 		if f.ColumnStats == nil {
 			f.ColumnStats = make(map[string]FileColumnStats, len(sk.hlls))
 		}
 		for col, h := range sk.hlls {
-			cs := f.ColumnStats[col]
-			cs.HLL = h.Bytes()
+			hllBytes := h.Bytes()
+			var sampleBytes []byte
 			if sampler := sk.samplers[col]; sampler != nil {
 				vals, total, tc := sampler.Snapshot()
 				if len(vals) > 0 {
-					cs.Sample = SampleBytes(vals, total, tc)
+					sampleBytes = SampleBytes(vals, total, tc)
 				}
 			}
+			entries = append(entries, FileSketchesEntry{Column: col, HLL: hllBytes, Sample: sampleBytes})
+			// Clear any legacy inline bytes — they're now externalized.
+			cs := f.ColumnStats[col]
+			cs.HLL = nil
+			cs.Sample = nil
 			f.ColumnStats[col] = cs
 		}
+		key, err := c.putFileSketches(ctx, name, f.Path, entries)
+		if err != nil {
+			return analyzed, fmt.Errorf("analyze %s: upload sketches for %s: %w", name, f.Path, err)
+		}
+		f.SketchesKey = key
 		manifest.Partitions[r.pi].Files[r.fi] = f
 		analyzed++
 	}

@@ -117,6 +117,15 @@ type FileEntry struct {
 	NumRows     int64                      `json:"num_rows"`
 	CreatedAt   time.Time                  `json:"created_at"`
 	ColumnStats map[string]FileColumnStats `json:"column_stats,omitempty"`
+	// SketchesKey points to a bundled per-column HLL+Sample blob in the
+	// object store (see sketches.go). Externalizing the sketches keeps
+	// the manifest small enough to fit in the NATS KV per-message
+	// payload cap (~1 MB) — without it, SF100 lineitem manifests
+	// (63 files × 16 cols × ~18 KB per sketch) blew past the limit and
+	// ANALYZE failed to persist the manifest. Empty string when no
+	// sketches are externalized (legacy inline path still supported via
+	// FileColumnStats.HLL / .Sample).
+	SketchesKey string `json:"sketches_key,omitempty"`
 }
 
 // TableColumnStats holds aggregated per-column statistics across all files.
@@ -774,6 +783,28 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 	for _, part := range manifest.Partitions {
 		for _, f := range part.Files {
 			totalRows += f.NumRows
+			// Externalized sketches: fetch the per-file bundle once,
+			// merge each column's HLL + collect each column's sample
+			// bytes. SF100 catalogs use this path (manifests too big to
+			// hold sketches inline).
+			if f.SketchesKey != "" {
+				if entries, _ := c.loadFileSketches(context.Background(), f.SketchesKey); entries != nil {
+					for _, e := range entries {
+						if len(e.HLL) > 0 {
+							if h := HLLFromBytes(e.HLL); h != nil {
+								if existing := mergedHLLs[e.Column]; existing != nil {
+									existing.Merge(h)
+								} else {
+									mergedHLLs[e.Column] = h
+								}
+							}
+						}
+						if len(e.Sample) > 0 {
+							samples[e.Column] = append(samples[e.Column], e.Sample)
+						}
+					}
+				}
+			}
 			for col, cs := range f.ColumnStats {
 				cur := agg[col]
 				cur.NullCount += cs.NullCount
@@ -788,6 +819,10 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 						cur.MaxValue = cs.MaxValue
 					}
 				}
+				// Inline legacy path: pre-externalization catalogs may
+				// still carry HLL/Sample bytes inside FileColumnStats.
+				// New ANALYZE clears these and writes externally, but the
+				// fallback keeps existing data usable.
 				if len(cs.HLL) > 0 {
 					if h := HLLFromBytes(cs.HLL); h != nil {
 						if existing := mergedHLLs[col]; existing != nil {

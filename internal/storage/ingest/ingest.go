@@ -333,25 +333,43 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 	// computed from the raw rows before they were serialized.
 	// - HLL → NDV estimation in the planner
 	// - Sample → cross-file histogram merge for selectivity estimation
-	// Parquet metadata doesn't carry either, so the only place to
-	// capture them cheaply is while rows are still in memory.
+	// Sketches are bundled into one object-store blob per parquet file
+	// (sketches.go) so the catalog manifest stays under the NATS 1 MB
+	// payload limit even at SF100 scale (60+ lineitem files × 16 cols).
 	extra := computeColumnStats(buf.rows, ing.schema)
+	var sketchEntries []catalog.FileSketchesEntry
 	if len(extra) > 0 {
 		if colStats == nil {
 			colStats = make(map[string]catalog.FileColumnStats, len(extra))
 		}
 		for col, st := range extra {
 			cs := colStats[col]
+			var hllBytes, sampleBytes []byte
 			if st.hll != nil {
-				cs.HLL = st.hll.Bytes()
+				hllBytes = st.hll.Bytes()
 			}
 			if st.sampler != nil {
 				vals, total, tc := st.sampler.Snapshot()
 				if len(vals) > 0 {
-					cs.Sample = catalog.SampleBytes(vals, total, tc)
+					sampleBytes = catalog.SampleBytes(vals, total, tc)
 				}
 			}
+			if len(hllBytes) > 0 || len(sampleBytes) > 0 {
+				sketchEntries = append(sketchEntries, catalog.FileSketchesEntry{
+					Column: col, HLL: hllBytes, Sample: sampleBytes,
+				})
+			}
 			colStats[col] = cs
+		}
+	}
+	var sketchesKey string
+	if len(sketchEntries) > 0 {
+		key, err := ing.catalog.UploadFileSketches(ctx, ing.tableName, filePath, sketchEntries)
+		if err != nil {
+			ing.logger.Warn("ingest: sketch upload failed; planner falls back to heuristic NDV",
+				"table", ing.tableName, "file", filePath, "error", err)
+		} else {
+			sketchesKey = key
 		}
 	}
 
@@ -362,6 +380,7 @@ func (ing *Ingester) flushBuffer(ctx context.Context, partPath string, buf *part
 		NumRows:     int64(len(buf.rows)),
 		CreatedAt:   time.Now().UTC(),
 		ColumnStats: colStats,
+		SketchesKey: sketchesKey,
 	}
 
 	if err := ing.catalog.AddFiles(ctx, ing.tableName, buf.values, partPath, []catalog.FileEntry{fileEntry}); err != nil {
