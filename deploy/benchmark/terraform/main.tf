@@ -260,6 +260,7 @@ locals {
     echo "BENCHMARK_TYPE=${local.eff_bench_type}" >> /etc/environment
     echo "WADJET_REVERSE_BLOOM_INNER_THRESHOLD=${var.reverse_bloom_inner_threshold}" >> /etc/environment
     echo "WADJET_JOIN_DEBUG=${var.join_debug}" >> /etc/environment
+    echo "WADJET_DYNAMIC_FILTERS=${var.dynamic_filters}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -292,6 +293,7 @@ locals {
     echo "BENCHMARK_TYPE=${local.eff_bench_type}" >> /etc/environment
     echo "WADJET_REVERSE_BLOOM_INNER_THRESHOLD=${var.reverse_bloom_inner_threshold}" >> /etc/environment
     echo "WADJET_JOIN_DEBUG=${var.join_debug}" >> /etc/environment
+    echo "WADJET_DYNAMIC_FILTERS=${var.dynamic_filters}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -358,6 +360,7 @@ locals {
     export QUERY_TIMEOUT="${local.eff_timeout}"
     export WADJET_REVERSE_BLOOM_INNER_THRESHOLD="${var.reverse_bloom_inner_threshold}"
     export WADJET_JOIN_DEBUG="${var.join_debug}"
+    export WADJET_DYNAMIC_FILTERS="${var.dynamic_filters}"
     export USE_NATIVE_DAG="${var.use_native_dag ? "1" : "0"}"
     # Phase C/D/E data-plane selection. Empty/"nats" = legacy NATS reply
     # subjects; "grpc" routes task dispatch + results + gather +
@@ -495,6 +498,7 @@ resource "aws_instance" "worker" {
     # vars must be export'd here BEFORE the worker process is launched.
     export WADJET_REVERSE_BLOOM_INNER_THRESHOLD="${var.reverse_bloom_inner_threshold}"
     export WADJET_JOIN_DEBUG="${var.join_debug}"
+    export WADJET_DYNAMIC_FILTERS="${var.dynamic_filters}"
 
     # Verify binary was downloaded successfully
     if [ ! -x /usr/local/bin/wadjet ]; then

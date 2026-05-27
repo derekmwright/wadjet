@@ -97,7 +97,7 @@ func (c *Coordinator) orchestrateRepartition(
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		shards, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount)
+		shards, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount, nil)
 		if err != nil {
 			return fmt.Errorf("build-side shuffle for %s: %w", cand.BuildAlias, err)
 		}
@@ -106,7 +106,7 @@ func (c *Coordinator) orchestrateRepartition(
 	})
 
 	g.Go(func() error {
-		shards, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount)
+		shards, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount, nil)
 		if err != nil {
 			return fmt.Errorf("probe-side shuffle for %s: %w", cand.ProbeAlias, err)
 		}
@@ -144,6 +144,7 @@ func (c *Coordinator) runShuffleSide(
 	keys []string,
 	numParts int,
 	workerCount int,
+	dynamicFilters []distributed.DynamicFilterSpec, // resolved bloom/range pushdowns from upstream build stat
 ) ([][]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, shuffleStageTimeout)
 	defer cancel()
@@ -246,6 +247,7 @@ func (c *Coordinator) runShuffleSide(
 			ResultBucket: c.config.ResultBucket,
 			ResultPrefix: resultPrefix,
 			CreatedAt:    time.Now(),
+			DynamicFilters: dynamicFilters,
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID

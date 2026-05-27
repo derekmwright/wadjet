@@ -120,6 +120,13 @@ type Task struct {
 	NumPartitions int      `json:"num_partitions,omitempty"`  // number of output partitions
 	PartitionID   int      `json:"partition_id,omitempty"`    // which partition this join task handles
 
+	// Dynamic filters carried at the top level for non-fragment task shapes
+	// (TaskTypeShuffle). Fragment tasks carry the same data in OpSpec.DynamicFilters
+	// per-op, but shuffle tasks use a flat task descriptor and apply the
+	// filter against their single implicit scan source. The worker materializes
+	// these into the cachedFileStreamSource's bloom+range pushdown.
+	DynamicFilters []DynamicFilterSpec `json:"dynamic_filters,omitempty"`
+
 	// Distributed tracing context (W3C Trace Context format)
 	TraceID  string `json:"trace_id,omitempty"`  // 32-char hex
 	SpanID   string `json:"span_id,omitempty"`   // 16-char hex parent span
@@ -279,6 +286,16 @@ type OpSpec struct {
 	// OpSort (pipeline-breaker).
 	SortKeySpecs []SortKeySpec `json:"sort_key_specs,omitempty"` // ordered key columns
 	SortLimit    int           `json:"sort_limit,omitempty"`     // 0 = no limit; > 0 = top-N truncation after sort
+
+	// OpScan (build-side, dynamic-filter producer). Each Emit makes the scan
+	// task compute a partial bloom+range over the named column and upload it
+	// as a sideband artifact returned in ResultNotification.DynamicFilterPartials.
+	DynamicFilterEmits []DynamicFilterEmit `json:"dynamic_filter_emits,omitempty"`
+
+	// OpScan (probe-side, dynamic-filter consumer). Coordinator-materialized
+	// stats from the upstream build-scan stage. Worker wires each into the
+	// row-group pruning path before the first S3 fetch.
+	DynamicFilters []DynamicFilterSpec `json:"dynamic_filters,omitempty"`
 }
 
 // PreComputedAggregate identifies a derived aggregate whose result has
@@ -384,6 +401,11 @@ type ResultNotification struct {
 
 	// Task execution stats (populated by worker for debugging)
 	TaskStats *TaskStats `json:"task_stats,omitempty"`
+
+	// DynamicFilterPartials, populated when the originating task was a
+	// build-scan with DynamicFilterEmit set. One ref per emit. Coordinator
+	// fetches+unions before dispatching the downstream probe-scan stage.
+	DynamicFilterPartials []DynamicFilterPartialRef `json:"dynamic_filter_partials,omitempty"`
 }
 
 // TaskStats captures per-task execution metrics for debugging.

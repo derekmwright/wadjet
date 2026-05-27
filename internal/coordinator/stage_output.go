@@ -3,6 +3,7 @@ package coordinator
 import (
 	"fmt"
 
+	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 )
 
@@ -30,6 +31,35 @@ type StageOutput struct {
 	Kind          OutputKind
 	NumPartitions int        // valid when Kind == OutputPartitioned
 	Files         [][]string // Partitioned: Files[p]; Replicated/SinglePart: Files[0]
+
+	// BuildStats, populated when this stage's Stage.EmitDynamicFilters was
+	// non-empty. One entry per emit, keyed by FilterID. Downstream consumer
+	// stages reach in via the stat-dep edge to pull the materialized stats.
+	BuildStats map[string]*BuildStats
+
+	// DynamicFilters, populated when this stage's Stage.ConsumeDynamicFilters
+	// resolved against an upstream build-scan's BuildStats. Downstream
+	// dispatchers (shuffle, compute) thread these into their task
+	// descriptors so workers apply the bloom at scan time. Carries forward
+	// across pass-through leaf scans that don't dispatch tasks themselves.
+	DynamicFilters []distributed.DynamicFilterSpec
+}
+
+// BuildStats is the coordinator-merged dynamic-filter artifact for one
+// FilterID across all build-scan tasks of one stage. Computed by
+// mergeBuildStatsFromPartials after the build-scan stage completes.
+type BuildStats struct {
+	FilterID  string
+	KeyType   string
+	HasRange  bool
+	Min, Max  int64
+	RowCount  int64
+	Bloom     []uint64
+	BloomMask uint64
+	// StagedBucket/Key set when the unioned bloom exceeded the inline
+	// threshold and was uploaded; Bloom is nil in that case.
+	StagedBucket string
+	StagedKey    string
 }
 
 // collectInputs translates a stage's Dependencies into a map keyed by the

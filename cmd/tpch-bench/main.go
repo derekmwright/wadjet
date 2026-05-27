@@ -317,8 +317,9 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	// Coordinator — no embedded worker so it stays out of the data path.
 	// All data tasks run on the remote workers.
 	coord := coordinator.New(coordinator.Config{
-		NATSUrl:      embeddedNATS.ClientURL(),
-		ResultBucket: bucket,
+		NATSUrl:        embeddedNATS.ClientURL(),
+		ResultBucket:   bucket,
+		DynamicFilters: os.Getenv("WADJET_DYNAMIC_FILTERS") == "1" || strings.EqualFold(os.Getenv("WADJET_DYNAMIC_FILTERS"), "true"),
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
 	coord.Workers().StartSubStatsLogger(ctx)
@@ -458,6 +459,26 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		log.Printf("Discovered %d files for table %s (%d cols, %d rows)", len(files), name, len(schema.Columns), totalRows)
 	}
 	log.Printf("Data discovery complete: %d total files across %d tables", totalFiles, len(tpch.AllTables))
+
+	// ANALYZE every table to populate per-column HLL sketches in the
+	// catalog. Without this, S3-staged data (every EC2 SF10/SF100 deploy
+	// uses pre-staged data and skips the ingest path) leaves the planner
+	// without real NDV — falling back to min/max-range heuristics that
+	// overstate cardinality for sparse keys and break join-cost decisions.
+	//
+	// Runs once at startup. Cost: ~1-2 minutes serial at SF10, dwarfed
+	// by the bench's per-query wall time. Output is cached in the
+	// catalog so subsequent queries reuse the sketches.
+	for name := range tpch.AllTables {
+		analyzed, err := db.Catalog().AnalyzeTable(ctx, name)
+		if err != nil {
+			log.Printf("WARNING: ANALYZE %s failed (%v); planner falls back to heuristic NDV", name, err)
+			continue
+		}
+		if analyzed > 0 {
+			log.Printf("ANALYZE %s: HLL collected on %d files", name, analyzed)
+		}
+	}
 }
 
 // probeParquetRowCount returns the total row count of a parquet file by

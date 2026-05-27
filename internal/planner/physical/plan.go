@@ -147,6 +147,19 @@ type Stage struct {
 	// ("supp_nation", "l_year"). Only populated on the Gather stage.
 	OutputRenames []OutputRename
 
+	// Dynamic filter (Trino-style semi-join pushdown) annotations.
+	// EmitDynamicFilters is set on a build-side leaf scan stage; each task
+	// computes a partial KeyRange+Bloom and uploads as a sideband artifact.
+	// ConsumeDynamicFilters is set on a probe-side leaf scan stage; the
+	// coordinator unions the upstream partials and injects the result into
+	// each scan task's OpSpec.DynamicFilters.
+	//
+	// The stat-dep edge (emit stage ID appended to the consume stage's
+	// Dependencies) makes execute_stage_dag.go serialize them via the
+	// existing dependency mechanism — no new edge type or async broker.
+	EmitDynamicFilters    []DynamicFilterEmit
+	ConsumeDynamicFilters []DynamicFilterConsume
+
 	// QualifyAllBuildCols, when true, instructs the join executor to always
 	// emit build-side columns under their qualified name
 	// ("BuildTableAlias.col_name") instead of the default behavior of
@@ -214,6 +227,28 @@ type SortKeySpec struct {
 	NullsLast bool
 }
 
+// DynamicFilterEmit is the planner-side spec attached to a build-side leaf
+// scan stage. Mirrors distributed.DynamicFilterEmit (separate copy keeps
+// the physical package free of the wire-format dependency direction; the
+// dispatcher converts at the boundary).
+type DynamicFilterEmit struct {
+	FilterID  string
+	KeyColumn string
+	KeyType   string // "int32" | "int64" | "date"
+	BloomBits int    // total bloom-bitset size; identical across all tasks so union = bitwise OR
+}
+
+// DynamicFilterConsume is the planner-side spec attached to a probe-side
+// leaf scan stage. SourceStageID names the build-scan stage that emits the
+// corresponding stats; the planner also appends SourceStageID to this
+// stage's Dependencies so the stage DAG serializes them.
+type DynamicFilterConsume struct {
+	FilterID      string
+	SourceStageID string
+	TargetColumn  string
+	KeyType       string
+}
+
 // PrettyPrint returns a formatted string representation of the physical plan.
 func (p *PhysicalPlan) PrettyPrint() string {
 	if len(p.Stages) == 0 {
@@ -274,6 +309,13 @@ type Planner struct {
 	// budget shrinks, the threshold shrinks too — without changing the
 	// planner's join-type logic.
 	BroadcastBytesThreshold int64
+
+	// DynamicFiltersEnabled gates the Trino-style dynamic-filter planner
+	// pass. When true, applyDynamicFilters annotates eligible hash_join
+	// build/probe leaf scans with Emit/Consume specs and adds the stat-dep
+	// edge from build-scan to probe-scan. Off by default for v1 rollout;
+	// distributed callers flip this on after the local-harness gate passes.
+	DynamicFiltersEnabled bool
 
 	// MaterializedInputs holds pre-scanned data for scan-split pipeline mode.
 	// When populated, buildScan uses these batches instead of reading from the
@@ -697,11 +739,17 @@ func (p *Planner) AnnotateScanColumns(ctx context.Context, node *logical.Node) {
 			if colStats, err := p.catalog.AggregateColumnStats(ctx, node.TableName); err == nil && colStats != nil {
 				scanStats := make(map[string]logical.ScanColumnStats, len(colStats))
 				for col, cs := range colStats {
+					var hist any
+					if cs.Histogram != nil {
+						hist = cs.Histogram
+					}
 					scanStats[col] = logical.ScanColumnStats{
 						MinValue:  cs.MinValue,
 						MaxValue:  cs.MaxValue,
 						NullCount: cs.NullCount,
 						TotalRows: cs.TotalRows,
+						NDV:       cs.NDV,
+						Histogram: hist,
 					}
 				}
 				node.ScanColStats = scanStats
@@ -1383,6 +1431,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// stage. Gated on collapsing-consumer (final_aggregate /
 		// merge_aggregate) only.
 	stages = fuseScanAggregateShuffle(stages)
+	// Dynamic-filter pass: must run AFTER fuseScanAggregateShuffle (which
+	// may absorb an exchange-repartition into a fused scan-aggregate) but
+	// BEFORE AssertExchangeConsistency / ValidateNativeDAGShape so any
+	// stat-dep edges we add are visible to the validators.
+	stages = p.applyDynamicFilters(ctx, stages)
 	prev := BehaviorPreservingMode
 	BehaviorPreservingMode = false
 	defer func() { BehaviorPreservingMode = prev }()
@@ -3161,10 +3214,30 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if err != nil {
 		return false
 	}
-	var totalBytes int64
+	var totalBytes, totalRows int64
 	for _, part := range manifest.Partitions {
 		for _, f := range part.Files {
 			totalBytes += f.SizeBytes
+			totalRows += f.NumRows
+		}
+	}
+	// Apply filter selectivity to the build-side bytes estimate. Q17's
+	// `part WHERE p_brand=... AND p_container=...` filters 2M rows to
+	// ~13K, dropping the build size from 200 MB raw to ~1.5 MB — well
+	// below the broadcast threshold. Without this scaling, the raw
+	// 200 MB exceeds the threshold and Q17 falls through to a
+	// hash-shuffle that pays exchange-repartition for BOTH lineitem
+	// (60M rows ≈ 6 GB at SF10) and part.
+	//
+	// Source of selectivity: RelStatsOf walks the build subtree applying
+	// histogram-driven predicate selectivity (CBO Phase 3 work). For
+	// tables without HLL/histogram, the existing 0.33/0.1 heuristic
+	// still applies so the scaling is at-worst-conservative.
+	if totalRows > 0 {
+		stats := logical.RelStatsOf(joinNode.Children[1])
+		if stats.Rows > 0 && stats.Rows < float64(totalRows) {
+			scale := stats.Rows / float64(totalRows)
+			totalBytes = int64(float64(totalBytes) * scale)
 		}
 	}
 	// Broadcast threshold: defaults to 100 MB (legacy behavior). Distributed

@@ -13,6 +13,21 @@ type ScanColumnStats struct {
 	MaxValue  any
 	NullCount int64
 	TotalRows int64
+	// NDV is the catalog's merged HyperLogLog estimate of distinct values
+	// across all files of this column. Zero means HLL wasn't collected
+	// (legacy files / pre-ANALYZE state); planner falls back to the
+	// min/max-range heuristic. When >0 it's preferred — orders of
+	// magnitude more accurate for sparse-int / string columns where the
+	// range overstates true cardinality.
+	NDV int64
+	// Histogram is the catalog's equi-depth histogram for this column,
+	// merged across files from reservoir samples. Nil when not collected.
+	// Used by estimatePredSelectivity to compute range/equality
+	// selectivity from real value distributions instead of hardcoded
+	// fractions (0.33 for <, 0.1 for =). The opaque any allows the
+	// logical package to receive *catalog.Histogram without importing
+	// the catalog package (avoids circular import).
+	Histogram any
 }
 
 // NodeType identifies the kind of logical plan node.

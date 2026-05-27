@@ -742,7 +742,10 @@ func (c *Coordinator) dispatchShuffleStage(
 	if numParts == 0 {
 		numParts = workerCount * shufflePartitionMultiplier
 	}
-	shards, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount)
+	// Forward any dynamic-filter specs the upstream (probe-side) leaf scan
+	// resolved through pass-through. Each shuffle task gets a copy so its
+	// parquet scan applies the bloom at row-group level.
+	shards, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
 	if err != nil {
 		return StageOutput{}, err
 	}
@@ -987,7 +990,14 @@ func (c *Coordinator) dispatchPipelineStage(
 ) (StageOutput, error) {
 	_ = sql
 	// Leaf scan stage.
-	if stage.Type == physical.StageScan && len(inputs) == 0 {
+	//
+	// The `inputs` map may be non-empty when a stat-dep edge is present
+	// (probe-side leaf with ConsumeDynamicFilters depends on a build-side
+	// leaf). Stat-dep deps don't change the leaf-ness of the scan; they
+	// only provide upstream BuildStats. ScanFiles is the structural marker:
+	// any stage with ScanFiles populated IS a leaf scan regardless of how
+	// many soft deps it has.
+	if stage.Type == physical.StageScan && len(stage.ScanFiles) > 0 {
 		// Fused scan-aggregate: the planner marked this scan to produce
 		// partial aggregates (saves the scan→aggregate round-trip in the
 		// legacy single-pipeline executor). Under native-DAG we must
@@ -1011,7 +1021,7 @@ func (c *Coordinator) dispatchPipelineStage(
 		// parquet files, applies FilterExprs, and writes a WSHF output
 		// the rest of the native-DAG pipeline can consume.
 		if len(stage.FilterExprs) > 0 {
-			return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
+			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 		}
 		// No filter: by default pass raw parquet files through (saves the
 		// wshf write+read hop). But when this scan is the PROBE of a
@@ -1031,14 +1041,31 @@ func (c *Coordinator) dispatchPipelineStage(
 		if isBroadcastJoinProbe && len(stage.ScanFiles) == 1 {
 			capacity := c.workers.ClusterCapacity()
 			if scanShardCountForSingleFile(workerCount, capacity, stage.EstimatedBytes) > 1 {
-				return c.dispatchScanFilterStage(ctx, queryID, stage, workerCount)
+				return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 			}
 		}
+		// Build-side dynamic-filter emit must dispatch real tasks so the
+		// emit op runs in the fragment pipeline and uploads its partial.
+		// Consume-only (probe-side) stays as pass-through — the downstream
+		// shuffle dispatcher threads the materialized DynamicFilters into
+		// its shuffle tasks, which apply them at the row-group iterator
+		// during their parquet scan. This avoids an extra dispatched scan-
+		// filter hop that regressed Q18 SF1 +16% in the first wiring.
+		if len(stage.EmitDynamicFilters) > 0 {
+			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
+		}
 		files := append([]string(nil), stage.ScanFiles...)
-		return StageOutput{
+		out := StageOutput{
 			Kind:  OutputSinglePart,
 			Files: [][]string{files},
-		}, nil
+		}
+		// Materialize Consume specs into wire form so downstream shuffle/
+		// stage dispatchers can ship them in their task descriptors
+		// without having to re-walk the plan.
+		if len(stage.ConsumeDynamicFilters) > 0 {
+			out.DynamicFilters = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+		}
+		return out, nil
 	}
 	// Compute stage: emit workerCount TaskTypeStage tasks, each reading its
 	// slice of partitioned input and writing unpartitioned .wshf output.
@@ -1382,6 +1409,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 	ctx context.Context,
 	queryID string,
 	stage physical.Stage,
+	inputs map[string]StageOutput,
 	workerCount int,
 ) (StageOutput, error) {
 	if workerCount <= 0 {
@@ -1467,6 +1495,25 @@ func (c *Coordinator) dispatchScanFilterStage(
 			scanOp.ScanShardIndex = shardIdx
 			scanOp.ScanShardCount = shardCount
 		}
+		// Build-side: each task emits a partial bloom+range artifact.
+		if len(stage.EmitDynamicFilters) > 0 {
+			emits := make([]distributed.DynamicFilterEmit, len(stage.EmitDynamicFilters))
+			for i, e := range stage.EmitDynamicFilters {
+				emits[i] = distributed.DynamicFilterEmit{
+					FilterID:  e.FilterID,
+					KeyColumn: e.KeyColumn,
+					KeyType:   e.KeyType,
+					BloomBits: e.BloomBits,
+				}
+			}
+			scanOp.DynamicFilterEmits = emits
+		}
+		// Probe-side: coordinator-merged stats from the upstream build-scan.
+		// dynamicFilterSpecsFromBuildStats walks ConsumeDynamicFilters and
+		// pulls the matching BuildStats out of inputs[SourceStageID].
+		if len(stage.ConsumeDynamicFilters) > 0 {
+			scanOp.DynamicFilters = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+		}
 		t.Operators = append(t.Operators, scanOp)
 		if len(stage.FilterExprs) > 0 {
 			t.Operators = append(t.Operators, distributed.OpSpec{
@@ -1508,8 +1555,9 @@ func (c *Coordinator) dispatchScanFilterStage(
 	}
 	subject := distributed.QueryResultSubject(stageQueryID)
 	type taskResult struct {
-		files []string
-		err   string
+		files    []string
+		partials []distributed.DynamicFilterPartialRef
+		err      string
 	}
 	collected := make([]taskResult, 0, len(tasks))
 	var mu sync.Mutex
@@ -1527,7 +1575,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 		c.workers.MarkWorkerSeen(r.WorkerID)
 		mu.Lock()
 		if r.Success {
-			collected = append(collected, taskResult{files: r.ResultFiles})
+			collected = append(collected, taskResult{
+				files:    r.ResultFiles,
+				partials: r.DynamicFilterPartials,
+			})
 		} else {
 			collected = append(collected, taskResult{err: r.Error})
 		}
@@ -1565,6 +1616,36 @@ func (c *Coordinator) dispatchScanFilterStage(
 			return StageOutput{}, fmt.Errorf("scan-filter stage %s: task failed: %s", stage.ID, r.err)
 		}
 	}
+
+	// Union per-task dynamic-filter partials into stage-level BuildStats.
+	// Skipped if the stage didn't emit (no partials expected) — saves the
+	// S3 round-trip for the common non-emit case.
+	var buildStats map[string]*BuildStats
+	if len(stage.EmitDynamicFilters) > 0 {
+		var allRefs []distributed.DynamicFilterPartialRef
+		for _, r := range results {
+			allRefs = append(allRefs, r.partials...)
+		}
+		merged, mergeErr := mergeBuildStatsFromPartials(ctx, c.catalog.Store(), allRefs)
+		if mergeErr != nil {
+			c.logger.Warn("dynamic_filter: partial merge failed; downstream consumes will see no filter",
+				"stage_id", stage.ID, "error", mergeErr)
+		}
+		// Inline-vs-stage decision per FilterID.
+		for filterID, stats := range merged {
+			if stats == nil {
+				continue
+			}
+			if estimateBuildStatsInlineSize(stats) > dynamicFilterInlineThresholdBytes {
+				if err := stageBuildStats(ctx, c.catalog.Store(), c.config.ResultBucket, queryID, stage.ID, filterID, stats); err != nil {
+					c.logger.Warn("dynamic_filter: stage upload failed; falling back to inline",
+						"stage_id", stage.ID, "filter_id", filterID, "error", err)
+				}
+			}
+		}
+		buildStats = merged
+	}
+
 	if fuseShuffle {
 		// Fused scan+shuffle: each task produced N partition files at
 		// "<prefix>partition=NNNN/<task>.wshf". Bucket all files across
@@ -1588,6 +1669,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
+			BuildStats:    buildStats,
 		}, nil
 	}
 	files := make([][]string, len(tasks))
@@ -1598,6 +1680,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		Kind:          OutputPartitioned,
 		NumPartitions: len(tasks),
 		Files:         files,
+		BuildStats:    buildStats,
 	}, nil
 }
 

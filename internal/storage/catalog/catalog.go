@@ -93,6 +93,21 @@ type FileColumnStats struct {
 	MinValue  any   `json:"min_value,omitempty"`
 	MaxValue  any   `json:"max_value,omitempty"`
 	NullCount int64 `json:"null_count"`
+
+	// HLL is a HyperLogLog sketch over the column's distinct values in this
+	// file. Persisted as 1 byte version + 16384 register bytes (~16 KB).
+	// Empty if HLL was not collected at write time (e.g., legacy files,
+	// or for columns where NDV isn't useful — strings of comments). Read
+	// at plan time via AggregateColumnStats which merges sketches across
+	// files to estimate table-level NDV.
+	HLL []byte `json:"hll,omitempty"`
+
+	// Sample is a reservoir-sampled snapshot of the column's values in
+	// this file, encoded by EncodeSample (typically ~256 values, ~2 KB).
+	// AggregateColumnStats merges samples across files (weighted by
+	// file row count) and builds an equi-depth Histogram at query time.
+	// Used by stats.estimatePredSelectivity for range/equality filters.
+	Sample []byte `json:"sample,omitempty"`
 }
 
 // FileEntry describes a single Parquet file within a partition.
@@ -102,6 +117,15 @@ type FileEntry struct {
 	NumRows     int64                      `json:"num_rows"`
 	CreatedAt   time.Time                  `json:"created_at"`
 	ColumnStats map[string]FileColumnStats `json:"column_stats,omitempty"`
+	// SketchesKey points to a bundled per-column HLL+Sample blob in the
+	// object store (see sketches.go). Externalizing the sketches keeps
+	// the manifest small enough to fit in the NATS KV per-message
+	// payload cap (~1 MB) — without it, SF100 lineitem manifests
+	// (63 files × 16 cols × ~18 KB per sketch) blew past the limit and
+	// ANALYZE failed to persist the manifest. Empty string when no
+	// sketches are externalized (legacy inline path still supported via
+	// FileColumnStats.HLL / .Sample).
+	SketchesKey string `json:"sketches_key,omitempty"`
 }
 
 // TableColumnStats holds aggregated per-column statistics across all files.
@@ -111,6 +135,16 @@ type TableColumnStats struct {
 	MaxValue  any
 	NullCount int64
 	TotalRows int64
+	// NDV is the merged HLL estimate of distinct values across all files,
+	// or 0 when no file had an HLL sketch. When >0 it's preferred over the
+	// min/max-range heuristic in the optimizer's NDV estimator.
+	NDV int64
+	// Histogram is the equi-depth histogram built from merging per-file
+	// reservoir samples, scaled to TotalRows. Nil when no file had a
+	// Sample. Used by stats.estimatePredSelectivity for range/equality
+	// filters — replaces the hardcoded 0.33/0.1 fractions with
+	// data-driven selectivity.
+	Histogram *Histogram
 }
 
 // New creates a new Catalog backed by the given KV store and object store.
@@ -739,10 +773,38 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 	}
 
 	agg := make(map[string]TableColumnStats)
+	// HLL sketches are merged outside the TableColumnStats struct because
+	// merging is incremental (byte-wise max) and the merged sketch can be
+	// estimated at the end. Track per-column merged HLL here.
+	mergedHLLs := make(map[string]*HLL)
+	// Per-column sample byte slices, fed into MergeSamples at the end.
+	samples := make(map[string][][]byte)
 	var totalRows int64
 	for _, part := range manifest.Partitions {
 		for _, f := range part.Files {
 			totalRows += f.NumRows
+			// Externalized sketches: fetch the per-file bundle once,
+			// merge each column's HLL + collect each column's sample
+			// bytes. SF100 catalogs use this path (manifests too big to
+			// hold sketches inline).
+			if f.SketchesKey != "" {
+				if entries, _ := c.loadFileSketches(context.Background(), f.SketchesKey); entries != nil {
+					for _, e := range entries {
+						if len(e.HLL) > 0 {
+							if h := HLLFromBytes(e.HLL); h != nil {
+								if existing := mergedHLLs[e.Column]; existing != nil {
+									existing.Merge(h)
+								} else {
+									mergedHLLs[e.Column] = h
+								}
+							}
+						}
+						if len(e.Sample) > 0 {
+							samples[e.Column] = append(samples[e.Column], e.Sample)
+						}
+					}
+				}
+			}
 			for col, cs := range f.ColumnStats {
 				cur := agg[col]
 				cur.NullCount += cs.NullCount
@@ -757,15 +819,40 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 						cur.MaxValue = cs.MaxValue
 					}
 				}
+				// Inline legacy path: pre-externalization catalogs may
+				// still carry HLL/Sample bytes inside FileColumnStats.
+				// New ANALYZE clears these and writes externally, but the
+				// fallback keeps existing data usable.
+				if len(cs.HLL) > 0 {
+					if h := HLLFromBytes(cs.HLL); h != nil {
+						if existing := mergedHLLs[col]; existing != nil {
+							existing.Merge(h)
+						} else {
+							mergedHLLs[col] = h
+						}
+					}
+				}
+				if len(cs.Sample) > 0 {
+					samples[col] = append(samples[col], cs.Sample)
+				}
 				agg[col] = cur
 			}
 		}
 	}
 
-	// Fill TotalRows for columns that didn't appear in all files
+	// Fill TotalRows + NDV + Histogram for columns that didn't appear in all files
 	for col, cs := range agg {
 		if cs.TotalRows < totalRows {
 			cs.TotalRows = totalRows
+		}
+		if h := mergedHLLs[col]; h != nil {
+			cs.NDV = h.Estimate()
+		}
+		if sb := samples[col]; len(sb) > 0 {
+			merged, _, typeCode := MergeSamples(sb)
+			if len(merged) > 0 {
+				cs.Histogram = HistogramFromMergedSample(merged, cs.TotalRows, typeCode, HistDefaultBuckets)
+			}
 		}
 		agg[col] = cs
 	}

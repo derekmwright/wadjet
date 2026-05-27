@@ -31,6 +31,7 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	plan = decorrelateScalarSubqueries(plan)
 	plan = extractCommonORPredicates(plan)
 	plan = pushdownPredicates(plan)
+	plan = dedupSemiAntiBuildSide(plan)
 	plan = reorderJoins(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
@@ -2919,6 +2920,27 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) *Node {
 		}
 	}
 
+	// Bushy join enumeration is DEFERRED.
+	//
+	// A bushy DP pass (enumerating non-trivial subset partitions) was
+	// prototyped here. With Selinger's floor at max(L,R), bushy didn't
+	// change costs on FK→PK shapes — but it changed PLAN STRUCTURES,
+	// and the physical planner's column-resolution pipeline
+	// (parseJoinKeys + fixJoinKeyOrder + scan-alias propagation) has
+	// implicit assumptions about left-deep nesting that bushy plans
+	// violate. Result: Q02/Q07/Q08/Q09/Q21 returned wrong rows at
+	// SF0.01 even with same-cost bushy alternatives selected.
+	//
+	// Doing bushy properly requires:
+	//   - A column-resolution pass that handles arbitrary Join
+	//     subtrees on both sides without leaking unqualified names
+	//   - Self-join column qualification that's structure-independent
+	//   - Stronger physical-plan invariants captured as snapshot tests
+	//
+	// All multi-day work. Left as Phase 4. Current DP gives optimal
+	// left-deep plans; with HLL+histogram inputs that's already a
+	// substantial improvement over the rule-based predecessor.
+
 	fullMask := maxMask - 1
 	if math.IsInf(dp[fullMask].cost, 1) {
 		// Disconnected graph — fall back to greedy
@@ -2927,6 +2949,7 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) *Node {
 
 	return dp[fullMask].plan
 }
+
 
 // hasSelectiveFilter checks whether a relation subtree contains a filter
 // (NodeFilter or scan predicates) that reduces its output. Filtered relations
