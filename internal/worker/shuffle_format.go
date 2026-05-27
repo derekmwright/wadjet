@@ -9,8 +9,6 @@ import (
 	"os"
 	"unsafe"
 
-	"github.com/klauspost/compress/s2"
-
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -656,13 +654,16 @@ func CompressShuffleData(data []byte) []byte {
 	var buf bytes.Buffer
 	buf.Grow(len(data)/2 + 4)
 	buf.Write(compressedMagic[:])
-	w := s2.NewWriter(&buf)
+	w := acquireS2Writer(&buf)
 	if _, err := w.Write(data); err != nil {
+		releaseS2Writer(w)
 		return data
 	}
 	if err := w.Close(); err != nil {
+		releaseS2Writer(w)
 		return data
 	}
+	releaseS2Writer(w)
 	// Only use compression if it saves at least 10%
 	if buf.Len() >= len(data)*9/10 {
 		return data
@@ -707,16 +708,19 @@ func CompressShuffleFile(srcPath, dstPath string) (compressedSize int64, useComp
 		dst.Close()
 		return 0, false, fmt.Errorf("write WSHC magic: %w", err)
 	}
-	w := s2.NewWriter(dst)
+	w := acquireS2Writer(dst)
 	if _, err := io.Copy(w, src); err != nil {
 		w.Close()
+		releaseS2Writer(w)
 		dst.Close()
 		return 0, false, fmt.Errorf("s2 stream copy: %w", err)
 	}
 	if err := w.Close(); err != nil {
+		releaseS2Writer(w)
 		dst.Close()
 		return 0, false, fmt.Errorf("s2 close: %w", err)
 	}
+	releaseS2Writer(w)
 	outInfo, err := dst.Stat()
 	if err != nil {
 		dst.Close()
@@ -741,7 +745,8 @@ func CompressShuffleFile(srcPath, dstPath string) (compressedSize int64, useComp
 // by the build-cache stream source to transcode WSHC payloads to WSHF on disk
 // without first materializing the entire compressed body in memory.
 func streamDecompressShuffle(src io.Reader, dst io.Writer) error {
-	r := s2.NewReader(src)
+	r := acquireS2Reader(src)
+	defer releaseS2Reader(r)
 	if _, err := io.Copy(dst, r); err != nil {
 		return fmt.Errorf("decompressing shuffle stream: %w", err)
 	}
@@ -758,7 +763,8 @@ func DecompressShuffleData(data []byte) ([]byte, error) {
 		data[2] != compressedMagic[2] || data[3] != compressedMagic[3] {
 		return data, nil // not compressed
 	}
-	r := s2.NewReader(bytes.NewReader(data[4:]))
+	r := acquireS2Reader(bytes.NewReader(data[4:]))
+	defer releaseS2Reader(r)
 	decoded, err := io.ReadAll(r)
 	if err != nil {
 		return nil, fmt.Errorf("decompressing shuffle data: %w", err)
