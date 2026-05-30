@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -20,6 +22,14 @@ type Tracker struct {
 	used   atomic.Int64
 	peak   atomic.Int64
 	parent *Tracker
+
+	// published holds per-instance externally-reported owned-byte counters,
+	// keyed by instanceID -> *atomic.Int64. Operators publish their current owned
+	// footprint here; the spill manager reads it wait-free. A sync.Map (rather
+	// than a struct-wide mutex) preserves the lock-free invariant documented on
+	// ReserveBlocking — reads are an atomic.Load, writes touch one per-instance
+	// counter created once via LoadOrStore.
+	published sync.Map // map[uint64]*atomic.Int64
 }
 
 // NewTracker creates a root memory tracker with the given budget in bytes.
@@ -67,6 +77,50 @@ func (t *Tracker) Release(n int64) {
 	}
 }
 
+// Transfer moves n bytes of accounting from one tracker to another. When `from`
+// and `to` share a parent, the bubbled release and reserve cancel at the common
+// ancestor, so the parent's total is conserved; when they live in different
+// subtrees the bytes move between subtrees, which is the intended semantics.
+//
+// Concurrency: like the rest of Tracker, this is lock-free. It is two
+// independent atomic ops on `used` (not transactional across the pair), matching
+// Reserve's Add-then-rollback non-atomicity. A concurrent reader may briefly
+// observe the in-between state, but both endpoints converge to a consistent sum,
+// which is what the conserved-sum property test asserts under -race.
+//
+// If the subtraction would drive `from.used` below zero — an accounting bug,
+// bytes released that were never reserved — the source is clamped back to 0 and
+// a WARN is emitted, rather than letting `used` go negative as bare Release does.
+// The destination still receives the full n.
+//
+// The receiver is unused; Transfer is a method only so callers can write
+// tracker.Transfer(from, to, n) on any convenient tracker handle.
+func (t *Tracker) Transfer(from, to *Tracker, n int64) {
+	if n <= 0 || from == nil || to == nil || from == to {
+		return
+	}
+
+	newFrom := from.used.Add(-n)
+	if newFrom < 0 {
+		slog.Warn("memory tracker transfer underflow (accounting gap)",
+			"from", from.name,
+			"to", to.name,
+			"requested", n,
+			"resulting_used", newFrom,
+		)
+		from.used.Add(-newFrom) // -newFrom > 0, lands the counter back at 0
+	}
+	if from.parent != nil {
+		from.parent.Release(n)
+	}
+
+	newTo := to.used.Add(n)
+	if to.parent != nil {
+		to.parent.ForceReserve(n)
+	}
+	to.bumpPeak(newTo)
+}
+
 // Used returns the current memory usage in bytes.
 func (t *Tracker) Used() int64 {
 	return t.used.Load()
@@ -96,6 +150,47 @@ func (t *Tracker) ForceReserve(n int64) {
 // observability hooks to surface peak per-tracker footprint at task end.
 func (t *Tracker) Peak() int64 {
 	return t.peak.Load()
+}
+
+// PublishOwned records the externally-reported owned-byte total for the given
+// instance. It is an idempotent overwrite (Store of the latest total), not
+// additive — callers publish their current owned footprint and readers see the
+// latest. Lock-free on the common path: the *atomic.Int64 is created once per
+// instance via LoadOrStore, then updated in place.
+func (t *Tracker) PublishOwned(instanceID uint64, total int64) {
+	v, _ := t.published.LoadOrStore(instanceID, new(atomic.Int64))
+	v.(*atomic.Int64).Store(total)
+}
+
+// OwnedFor returns the published owned bytes for one instance, wait-free.
+// Returns 0 if the instance has never published.
+func (t *Tracker) OwnedFor(instanceID uint64) int64 {
+	if v, ok := t.published.Load(instanceID); ok {
+		return v.(*atomic.Int64).Load()
+	}
+	return 0
+}
+
+// OwnedSnapshot returns a copy of instanceID -> published owned bytes. Wait-free
+// per entry (atomic.Load); the walk itself uses sync.Map's lock-free Range.
+func (t *Tracker) OwnedSnapshot() map[uint64]int64 {
+	out := make(map[uint64]int64)
+	t.published.Range(func(k, v any) bool {
+		out[k.(uint64)] = v.(*atomic.Int64).Load()
+		return true
+	})
+	return out
+}
+
+// OwnedTotal returns the sum of all published owned-byte counters across
+// instances. Wait-free per entry.
+func (t *Tracker) OwnedTotal() int64 {
+	var sum int64
+	t.published.Range(func(_, v any) bool {
+		sum += v.(*atomic.Int64).Load()
+		return true
+	})
+	return sum
 }
 
 // bumpPeak updates peak with newUsed via lock-free CAS. Cheaper than holding

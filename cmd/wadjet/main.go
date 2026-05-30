@@ -301,6 +301,18 @@ func serveCmd() *cobra.Command {
 						"pool_bytes", sharedPoolBudget,
 						"go_mem_limit", goMemLimit, "cache_bytes", cacheBytes)
 				}
+
+				// Phase 1 of the memory-accounting overhaul: register the LRU
+				// file cache as a TierSystemReservoir and log the boot-time
+				// GOMEMLIMIT invariant. Advisory only here — the hard
+				// refuse-to-start lands once every reservoir (result store,
+				// codec pools, batch pools) is registered and the invariant
+				// constants are validated against the constrained-memory deploy
+				// envelopes. The shared pool is operator working memory, not a
+				// system reservoir, so it is deliberately not registered here.
+				reservoirs := memory.NewReservoirRegistry()
+				reservoirs.Register(memory.NewReservoir("lru-cache/parquet-metadata", cacheBytes))
+				reservoirs.LogInvariant(logger)
 			}
 
 			store, err := newStore()

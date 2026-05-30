@@ -211,6 +211,16 @@ func (bc *BytesColumn) Reset() {
 	bc.Data = bc.Data[:0]
 }
 
+// MemBytes returns the heap bytes consumed by the offset and data slices.
+//
+// Offsets are sized by len (the logical rows+1), but the data arena is sized by
+// cap: a pooled BytesColumn retains its grown arena capacity across Reset cycles
+// (see NewBytesColumn), so cap(Data) is the true resident footprint. This is the
+// honest byte count that replaces the b.Len*48 estimate in EstimateBatchBytes.
+func (bc *BytesColumn) MemBytes() int64 {
+	return int64(len(bc.Offsets))*4 + int64(cap(bc.Data)) // 4 = sizeof(uint32) offset
+}
+
 // Vector holds a single column of data. Uses typed slices instead of interface{}.
 type Vector struct {
 	Type        TypeID
@@ -769,6 +779,58 @@ func (v *Vector) GetNumericFloat64(i int) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// memBytesMaxDepth bounds the recursion into nested type children so a
+// pathological (or cyclic) schema cannot blow the stack while accounting.
+const memBytesMaxDepth = 3
+
+// MemBytes returns the heap bytes resident in this vector's backing storage:
+// the null bitmap plus the typed data slice, recursing into nested children for
+// ARRAY/MAP/ROW. It is the byte-true accounting primitive for the memory
+// tracker, replacing the per-type b.Len*48 estimate in EstimateBatchBytes. It
+// deliberately omits any operator-specific overhead (e.g. the HashJoin hash
+// index charge) — that stays at the call site.
+func (v *Vector) MemBytes() int64 {
+	return v.memBytes(0)
+}
+
+func (v *Vector) memBytes(depth int) int64 {
+	if v == nil || depth > memBytesMaxDepth {
+		return 0
+	}
+	// Null bitmap: stored as []uint64 words, one bit per row.
+	size := int64(len(v.Nulls.Words())) * 8 // 8 = sizeof(uint64) word
+
+	switch v.Type {
+	case TypeBool:
+		size += int64(len(v.BoolData)) // 1 byte per bool
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		size += int64(len(v.Int32Data)) * 4
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		size += int64(len(v.Int64Data)) * 8 // IPv4/MAC are stored as int64
+	case TypeFloat32:
+		size += int64(len(v.Float32Data)) * 4
+	case TypeFloat64:
+		size += int64(len(v.Float64Data)) * 8
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		size += v.BytesData.MemBytes()
+	case TypeDecimal:
+		size += int64(len(v.DecimalData.Data)) * 16 // Int128 = {Hi int64, Lo uint64}
+	case TypeVector:
+		size += int64(len(v.Float32Data)) * 4 // Len*VectorDim float32s
+	case TypeArray, TypeMap:
+		size += int64(len(v.Offsets)) * 4 // int32 offsets
+		size += v.Child.memBytes(depth + 1)
+	case TypeRow:
+		for _, c := range v.Children {
+			size += c.memBytes(depth + 1)
+		}
+		for _, n := range v.FieldNames {
+			size += int64(len(n)) + 16 // string header (ptr+len) + backing bytes
+		}
+	}
+	return size
 }
 
 // String returns a debug representation of the vector.

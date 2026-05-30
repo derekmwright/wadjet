@@ -17,6 +17,13 @@ import (
 // The pool abstraction here makes that swap straightforward — only Get() and the
 // underlying NewRecordBatch call need to change. Operator code stays the same.
 
+// ReservoirOwner is the sentinel ownerID stamped onto every batch minted by a
+// BatchPool (Get, GetForSize, PreWarm). The zero value (ownerID == 0) means the
+// batch is not pool-owned — e.g. the over-size escape hatch in GetForSize or a
+// Detach'd long-lived batch. A non-zero sentinel keeps the zero value
+// unambiguous, matching the Sel==nil / pool==nil "absent" conventions.
+const ReservoirOwner uint64 = 1
+
 // maxPoolPerClass scales with CPU count to accommodate parallel pipeline workers.
 // Each worker may hold 2-3 batches in-flight (scan → filter → aggregate), so
 // we need enough cached batches to avoid allocate/GC churn under parallelism.
@@ -66,6 +73,7 @@ func (p *BatchPool) PreWarm(n int) {
 	for i := 0; i < n && len(p.pool) < p.maxPool; i++ {
 		b := NewRecordBatch(p.schema, p.batchSize)
 		b.pool = p
+		b.ownerID = ReservoirOwner
 		p.pool = append(p.pool, b)
 	}
 	p.mu.Unlock()
@@ -84,6 +92,7 @@ func (p *BatchPool) Get() *RecordBatch {
 	p.mu.Unlock()
 	b := NewRecordBatch(p.schema, p.batchSize)
 	b.pool = p
+	b.ownerID = ReservoirOwner
 	return b
 }
 
@@ -104,6 +113,7 @@ func (p *BatchPool) GetForSize(numRows int) *RecordBatch {
 	p.mu.Unlock()
 	b := NewRecordBatch(p.schema, p.batchSize)
 	b.pool = p
+	b.ownerID = ReservoirOwner
 	b.Reset(numRows)
 	return b
 }

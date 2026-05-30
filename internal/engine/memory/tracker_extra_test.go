@@ -154,6 +154,110 @@ func TestTrackerNegativeBudget(t *testing.T) {
 	}
 }
 
+func TestTracker_Transfer_ConcurrentSumInvariant(t *testing.T) {
+	parent := NewTracker("parent", 0) // 0 = unlimited
+	a := parent.Child("a")
+	b := parent.Child("b")
+
+	const start = 1_000_000
+	a.ForceReserve(start) // all bytes start on a (bubbles to parent)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				parent.Transfer(a, b, 100)
+				parent.Transfer(b, a, 100)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// All bytes back on a; b empty; parent total conserved.
+	if a.Used() != start {
+		t.Fatalf("a.Used = %d, want %d", a.Used(), start)
+	}
+	if b.Used() != 0 {
+		t.Fatalf("b.Used = %d, want 0", b.Used())
+	}
+	if parent.Used() != start {
+		t.Fatalf("parent.Used = %d, want %d (sum not conserved)", parent.Used(), start)
+	}
+}
+
+func TestTracker_Transfer_UnderflowClamps(t *testing.T) {
+	a := NewTracker("a", 0)
+	b := NewTracker("b", 0)
+	// a holds nothing; transferring drives a below zero → clamp to 0.
+	a.Transfer(a, b, 500)
+	if a.Used() != 0 {
+		t.Fatalf("underflow source should clamp to 0, got %d", a.Used())
+	}
+	if b.Used() != 500 {
+		t.Fatalf("dest should still receive 500, got %d", b.Used())
+	}
+}
+
+func TestTracker_PublishOwned_SnapshotAndTotal(t *testing.T) {
+	tr := NewTracker("pub", 0)
+	tr.PublishOwned(1, 100)
+	tr.PublishOwned(2, 250)
+	tr.PublishOwned(1, 175) // overwrite, not additive
+
+	if got := tr.OwnedFor(1); got != 175 {
+		t.Fatalf("OwnedFor(1) = %d, want 175", got)
+	}
+	if got := tr.OwnedFor(99); got != 0 {
+		t.Fatalf("OwnedFor(unknown) = %d, want 0", got)
+	}
+	if got := tr.OwnedTotal(); got != 175+250 {
+		t.Fatalf("OwnedTotal = %d, want %d", got, 175+250)
+	}
+	snap := tr.OwnedSnapshot()
+	if snap[1] != 175 || snap[2] != 250 {
+		t.Fatalf("snapshot = %v", snap)
+	}
+}
+
+func TestTracker_PublishOwned_ConcurrentNoTear(t *testing.T) {
+	tr := NewTracker("pub", 0)
+	var wg sync.WaitGroup
+	for id := uint64(0); id < 50; id++ {
+		wg.Add(1)
+		go func(id uint64) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				tr.PublishOwned(id, int64(id)*1000)
+				_ = tr.OwnedFor(id)
+			}
+		}(id)
+	}
+	wg.Wait()
+	for id := uint64(0); id < 50; id++ {
+		if got := tr.OwnedFor(id); got != int64(id)*1000 {
+			t.Fatalf("instance %d: got %d, want %d", id, got, int64(id)*1000)
+		}
+	}
+}
+
+func TestTracker_Transfer_Noops(t *testing.T) {
+	a := NewTracker("a", 0)
+	b := NewTracker("b", 0)
+	a.ForceReserve(100)
+	a.Transfer(a, b, 0)   // n <= 0: no-op
+	a.Transfer(a, a, 50)  // from == to: no-op
+	a.Transfer(nil, b, 1) // nil from: no-op
+	a.Transfer(a, nil, 1) // nil to: no-op
+	if a.Used() != 100 {
+		t.Fatalf("a.Used = %d, want 100 (no-ops must not move bytes)", a.Used())
+	}
+	if b.Used() != 0 {
+		t.Fatalf("b.Used = %d, want 0", b.Used())
+	}
+}
+
 func TestTrackerErrorMessage(t *testing.T) {
 	tr := NewTracker("my-query", 100)
 	tr.Reserve(50)

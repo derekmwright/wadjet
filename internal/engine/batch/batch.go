@@ -12,6 +12,13 @@ type RecordBatch struct {
 	Len     int
 	Sel     []uint32 // selection vector: indices of active rows (nil = all rows active)
 	pool    *BatchPool
+	// ownerID identifies which memory-tier owner currently accounts this batch's
+	// bytes. 0 means unstamped (not pool-owned, e.g. the over-size escape hatch
+	// or a Detach'd long-lived batch); ReservoirOwner means a BatchPool minted it
+	// and its bytes are charged to the pool reservoir. Survives Reset so a reused
+	// batch keeps its owner. The non-zero sentinel keeps the zero value
+	// unambiguous, matching the Sel==nil / pool==nil "absent" conventions.
+	ownerID uint64
 }
 
 // NewRecordBatch creates a new record batch with the given schema and row count.
