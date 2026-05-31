@@ -468,6 +468,62 @@ func (h *HashJoin) PeakFootprint() int64 {
 	return h.peakTrackedMem
 }
 
+// Inspect implements memory.AccountedOperator. OwnedBytes includes the hash
+// arena/index overhead (trackedMem) plus keyBuf scratch; SpillableBytes is the
+// reclaimable in-memory partition bytes only (the arena can't be freed without
+// rebuilding). RetainedBytes is the build-side column data.
+func (h *HashJoin) Inspect() memory.OperatorFootprint {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	st := memory.OpState(h.accState.Load())
+	if st == memory.OpClosed {
+		return memory.OperatorFootprint{State: memory.OpClosed, InstanceID: h.accInstanceID, Name: h.accName()}
+	}
+	return memory.OperatorFootprint{
+		OwnedBytes:     h.trackedMem + int64(cap(h.keyBuf)),
+		RetainedBytes:  h.trackedMem,
+		SpillableBytes: h.spillableBytesLocked(),
+		State:          st,
+		InstanceID:     h.accInstanceID,
+		Name:           h.accName(),
+	}
+}
+
+// accName is the stable identifier for this join instance.
+func (h *HashJoin) accName() string {
+	if h.BuildTableAlias != "" {
+		return "HashJoin/build=" + h.BuildTableAlias
+	}
+	return "HashJoin"
+}
+
+// spillableBytesLocked reports the reclaimable in-memory partition bytes — the
+// same sum as the legacy SpillFootprint. A flat (non-partitioned) build has
+// spillState==nil and reports 0: it can't evict a partition without a rebuild,
+// matching existing semantics. Caller holds h.mu.
+func (h *HashJoin) spillableBytesLocked() int64 {
+	if h.spillState == nil {
+		return 0
+	}
+	var total int64
+	for _, mem := range h.spillState.partMemory {
+		total += mem
+	}
+	return total
+}
+
+// EstimateRelief implements memory.AccountedOperator: the reclaimable partition
+// bytes, capped at target.
+func (h *HashJoin) EstimateRelief(target int64) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.spillableBytesLocked()
+	if target > 0 && target < s {
+		return target
+	}
+	return s
+}
+
 // SpillSome attempts to free at least target bytes from this join's in-memory
 // partitions. Picks the largest partition repeatedly until target is met or
 // no partitions remain. Implements memory.Spillable.
@@ -475,6 +531,8 @@ func (h *HashJoin) SpillSome(target int64) (int64, error) {
 	if target <= 0 {
 		return 0, nil
 	}
+	h.accState.Store(int32(memory.OpSpilling))
+	defer h.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var freed int64
@@ -487,6 +545,9 @@ func (h *HashJoin) SpillSome(target int64) (int64, error) {
 			break
 		}
 		freed += n
+	}
+	if h.accInstanceID != 0 {
+		h.MemTracker.PublishOwned(h.accInstanceID, h.trackedMem+int64(cap(h.keyBuf)))
 	}
 	return freed, nil
 }

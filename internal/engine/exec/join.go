@@ -125,6 +125,12 @@ type HashJoin struct {
 	// trackedMem is incremented.
 	peakTrackedMem int64
 
+	// AccountedOperator (Phase 2) state — see HashAggregate for the contract.
+	// Registered during Build only (the spill-eligible phase); accState is read
+	// by Inspect off the pipeline goroutine.
+	accInstanceID uint64
+	accState      atomic.Int32
+
 	// trackedHashOverhead tracks how much hash table overhead has been charged
 	// to the memory tracker via EstimateBatchBytes (40 bytes/row). When the
 	// actual hash table grows beyond this (e.g., string arenas, grow() doubling),
@@ -644,6 +650,11 @@ func (h *HashJoin) reconcileHashMemory() {
 		if h.trackedMem > h.peakTrackedMem {
 			h.peakTrackedMem = h.trackedMem
 		}
+		// Publish the true owned footprint for the drift-backstop. keyBuf is
+		// scratch we also own; fold it in so OwnedTotal is honest.
+		if h.accInstanceID != 0 {
+			h.MemTracker.PublishOwned(h.accInstanceID, h.trackedMem+int64(cap(h.keyBuf)))
+		}
 	}
 }
 
@@ -703,6 +714,15 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
 		unregister := h.Spill.RegisterSpillable(h)
 		defer unregister()
+		// Dual-register with the Phase-2 AccountedOperator registry for the
+		// duration of Build (the spill-eligible phase).
+		h.accInstanceID = memory.NextInstanceID()
+		h.accState.Store(int32(memory.OpActive))
+		unregisterAccounted := h.Spill.RegisterAccounted(h)
+		defer func() {
+			h.accState.Store(int32(memory.OpClosed))
+			unregisterAccounted()
+		}()
 	}
 
 	// Partition-on-arrival path: when both MemTracker and Spill are

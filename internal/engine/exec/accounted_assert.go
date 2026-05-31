@@ -8,4 +8,5 @@ var (
 	_ memory.AccountedOperator = (*HashAggregate)(nil)
 	_ memory.AccountedOperator = (*Sort)(nil)
 	_ memory.AccountedOperator = (*Window)(nil)
+	_ memory.AccountedOperator = (*HashJoin)(nil)
 )
