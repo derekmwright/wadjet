@@ -937,7 +937,11 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 	if result.TaskStats != nil && len(result.TaskStats.OperatorPeaks) > 0 {
 		parts := make([]string, len(result.TaskStats.OperatorPeaks))
 		for i, op := range result.TaskStats.OperatorPeaks {
-			parts[i] = fmt.Sprintf("%s=%dMB(peak)/%dMB(now)", op.Name, op.Peak/(1<<20), op.Current/(1<<20))
+			// Keep the existing %s=%dMB(peak)/%dMB(now) shape (entries are
+			// comma-joined, so intra-token extras use ';') for grep continuity;
+			// append the Phase-2 owned/state breakdown.
+			parts[i] = fmt.Sprintf("%s=%dMB(peak)/%dMB(now);owned=%dMB;state=%s",
+				op.Name, op.Peak/(1<<20), op.Current/(1<<20), op.Owned/(1<<20), op.State)
 		}
 		logAttrsEnd = append(logAttrsEnd, "operator_peaks", strings.Join(parts, ","))
 	}

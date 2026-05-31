@@ -425,9 +425,15 @@ type TaskStats struct {
 // package dependency. Populated for each Spillable registered with the
 // task's SpillManager at the moment collectTaskStats fires.
 type OperatorPeak struct {
-	Name    string `json:"name"`    // SpillableName() or Go type fallback
-	Peak    int64  `json:"peak"`    // high-water mark of in-memory footprint
-	Current int64  `json:"current"` // footprint at snapshot time
+	Name    string `json:"name"`    // operator instance name
+	Peak    int64  `json:"peak"`    // high-water mark of OwnedBytes
+	Current int64  `json:"current"` // SpillableBytes at snapshot time (reclaimable now)
+	// Phase-2 AccountedOperator fields. Additive (omitempty) — gob skips them
+	// for old encoders, JSON omits when zero — so this stays wire-compatible
+	// with mixed-version peers. The coordinator reads none of OperatorPeaks.
+	Owned    int64  `json:"owned,omitempty"`    // OwnedBytes incl. operator overhead
+	Retained int64  `json:"retained,omitempty"` // RetainedBytes (detained batches)
+	State    string `json:"state,omitempty"`    // OpState string
 }
 
 // WorkerHeartbeat is periodically sent by workers.

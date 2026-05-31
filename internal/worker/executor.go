@@ -322,14 +322,17 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	// shared spill, attribution is union-of-all-active — accept that loss
 	// of per-task isolation as the cost of the lightweight wiring.
 	if e.sharedSpill != nil {
-		snaps := e.sharedSpill.Inspect()
+		snaps := e.sharedSpill.InspectAccounted()
 		if len(snaps) > 0 {
 			result.TaskStats.OperatorPeaks = make([]distributed.OperatorPeak, len(snaps))
 			for i, s := range snaps {
 				result.TaskStats.OperatorPeaks[i] = distributed.OperatorPeak{
-					Name:    s.Name,
-					Peak:    s.Peak,
-					Current: s.Current,
+					Name:     s.Name,
+					Peak:     s.OwnedBytes,     // departed entries carry true peak
+					Current:  s.SpillableBytes, // reclaimable now
+					Owned:    s.OwnedBytes,
+					Retained: s.RetainedBytes,
+					State:    s.State.String(),
 				}
 			}
 		}
@@ -1325,14 +1328,17 @@ func (e *Executor) collectTaskStats(spill *memory.SpillManager, tracker *memory.
 	// signal we read from worker logs when investigating which operator
 	// pinned the heap on a given task (Q18-class debugging).
 	if spill != nil {
-		snaps := spill.Inspect()
+		snaps := spill.InspectAccounted()
 		if len(snaps) > 0 {
 			stats.OperatorPeaks = make([]distributed.OperatorPeak, len(snaps))
 			for i, s := range snaps {
 				stats.OperatorPeaks[i] = distributed.OperatorPeak{
-					Name:    s.Name,
-					Peak:    s.Peak,
-					Current: s.Current,
+					Name:     s.Name,
+					Peak:     s.OwnedBytes,
+					Current:  s.SpillableBytes,
+					Owned:    s.OwnedBytes,
+					Retained: s.RetainedBytes,
+					State:    s.State.String(),
 				}
 			}
 		}
