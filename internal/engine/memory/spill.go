@@ -233,6 +233,28 @@ const (
 // free on local NVMe. Spill bytes 67-80 MB across the sweep (lower
 // threshold → more bytes spilled, as expected).
 func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
+	// Floating-budget path (Phase 3): when a reservoir registry is wired, the
+	// threshold is a fraction of the LIVE available operator budget
+	// (GOMEMLIMIT − Σreservoir actual − GC headroom) rather than the static
+	// pool budget. cheapFrac (default 0.90) gates SpillCheap; SpillExpensive
+	// uses 0.98. This path is DORMANT in Phase 2 — reservoirs is nil until the
+	// system reservoirs (mmap cache, result store, codec pools) are registered
+	// and can account for the untracked transient heap that makes a 0.90
+	// threshold safe. Until then the static path below preserves the tuned
+	// 40%/90% behavior.
+	if sm.reservoirs != nil {
+		budget := sm.reservoirs.Available()
+		if budget > 0 && budget != math.MaxInt64 {
+			frac := sm.cheapFrac
+			if urgency == SpillExpensive {
+				frac = 0.98
+			}
+			if sm.tracker != nil && sm.tracker.Used() > int64(float64(budget)*frac) {
+				return true
+			}
+		}
+		return heapPressureExceeded()
+	}
 	if sm.tracker != nil && sm.tracker.Budget() > 0 {
 		used := sm.tracker.Used()
 		budget := sm.tracker.Budget()
@@ -746,48 +768,203 @@ func (sm *SpillManager) RegisterSpillable(s Spillable) func() {
 	}
 }
 
-// RequestRelief asks registered Spillables to free at least target bytes
-// by spilling. Picks the largest contributor first and iterates until either
-// target is met or every spillable returns 0. Returns the total bytes freed
-// and any error from a Spillable's SpillSome call.
+// reliefCooldown is how long an operator is rested after it delivers
+// materially less relief than it claimed (a contract violation), so the
+// advisor stops re-hammering a victim that can't actually free what it
+// reports.
+const reliefCooldown = 30 * time.Second
+
+// nowFunc is the clock used by the relief cooldown. A package var so tests can
+// advance time deterministically without sleeping.
+var nowFunc = time.Now
+
+// RequestRelief asks registered AccountedOperators to free at least target
+// bytes by spilling. It ranks candidates by SpillableBytes descending and
+// ACCUMULATES relief across all willing operators — it never skips an operator
+// for being individually too small (that skip reanimated the chained
+// build/probe deadlock, see project_admission_control_rejected_2026-05-18). It
+// never gates entry, never sleeps on the streaming path, and never refuses an
+// operator the chance to spill.
 //
-// Caller must NOT hold any operator's mutex when calling this — the
-// requester operator is implicitly skipped via the largest-first ordering
-// and zero-progress break, so a self-call where no other Spillable holds
-// reclaimable state simply returns 0 cleanly. But to be safe under future
-// callers, RequestRelief takes no operator-side locks itself; it only locks
-// the registry briefly to snapshot.
+// After pass 1, if pressure persists, a rotate pass advances past the
+// most-recently-tried victims so we don't re-hammer the same one. Finally, if
+// nothing was freed AND the tracker is drifting (OwnedTotal materially exceeds
+// tracker.Used, i.e. there is an accounting gap), the drift-backstop
+// force-spills the largest-OwnedBytes operator regardless of its SpillableBytes
+// claim — the reactive floor that honest accounting must not delete.
 func (sm *SpillManager) RequestRelief(target int64) (int64, error) {
 	if target <= 0 {
 		return 0, nil
 	}
 	var freed int64
+
 	for freed < target {
-		// Snapshot the registry, pick the largest. The snapshot is short-
-		// lived so registrations during a long-running spill don't deadlock
-		// the registry mutex.
-		sm.spillablesMu.Lock()
-		var best Spillable
-		var bestSize int64
-		for _, s := range sm.spillables {
-			sz := s.SpillFootprint()
-			if sz > bestSize {
-				best = s
-				bestSize = sz
+		cands := sm.rankCandidates()
+		if len(cands) == 0 {
+			break
+		}
+		progressed := false
+		for _, c := range cands {
+			if freed >= target {
+				break
+			}
+			op := sm.opByID(c.InstanceID)
+			if op == nil {
+				continue
+			}
+			want := target - freed
+			claimed := op.EstimateRelief(want)
+			if claimed <= 0 {
+				continue
+			}
+			before := op.Inspect().OwnedBytes
+			n, err := op.SpillSome(want)
+			if err != nil {
+				return freed, err
+			}
+			after := op.Inspect().OwnedBytes
+			delivered := before - after
+			if n > 0 {
+				freed += n
+				progressed = true
+			}
+			// Cool down an operator that delivered materially less than it
+			// claimed — its SpillableBytes is a lie and re-asking wastes work.
+			if delivered < claimed/2 {
+				sm.cooldown(c.InstanceID)
 			}
 		}
-		sm.spillablesMu.Unlock()
-		if best == nil || bestSize == 0 {
+		if !progressed {
 			break
 		}
-		n, err := best.SpillSome(target - freed)
-		if err != nil {
-			return freed, err
+	}
+
+	if freed >= target {
+		return freed, nil
+	}
+
+	// Drift-backstop: pass 1 freed nothing and the tracker is under-counting
+	// real heap. Force-spill the largest-OwnedBytes operator regardless of its
+	// SpillableBytes claim. Operators that genuinely cannot spill return 0
+	// (harmless); the point is to spill SOMETHING reactively rather than let
+	// drifted bytes OOM the worker.
+	if freed == 0 && sm.driftExceeds(0.20) {
+		if n := sm.forceSpillLargestOwned(target); n > 0 {
+			freed += n
 		}
-		if n == 0 {
-			break
-		}
-		freed += n
 	}
 	return freed, nil
+}
+
+// rankCandidates snapshots the accounted registry, refreshes per-instance peak
+// OwnedBytes, and returns Active operators with SpillableBytes > 0 that are not
+// in cooldown, sorted by SpillableBytes descending.
+func (sm *SpillManager) rankCandidates() []OperatorFootprint {
+	sm.accountedMu.Lock()
+	snaps := make([]OperatorFootprint, 0, len(sm.accounted))
+	for _, op := range sm.accounted {
+		f := op.Inspect()
+		if f.OwnedBytes > sm.accountedPeak[f.InstanceID] {
+			sm.accountedPeak[f.InstanceID] = f.OwnedBytes
+		}
+		snaps = append(snaps, f)
+	}
+	sm.accountedMu.Unlock()
+
+	out := snaps[:0]
+	for _, f := range snaps {
+		if f.State == OpActive && f.SpillableBytes > 0 && !sm.inCooldown(f.InstanceID) {
+			out = append(out, f)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].SpillableBytes > out[j].SpillableBytes })
+	return out
+}
+
+// opByID returns the live AccountedOperator with the given InstanceID, or nil.
+func (sm *SpillManager) opByID(id uint64) AccountedOperator {
+	sm.accountedMu.Lock()
+	defer sm.accountedMu.Unlock()
+	for _, op := range sm.accounted {
+		if op.Inspect().InstanceID == id {
+			return op
+		}
+	}
+	return nil
+}
+
+func (sm *SpillManager) cooldown(id uint64) {
+	sm.reliefMu.Lock()
+	if sm.lastReliefAt == nil {
+		sm.lastReliefAt = make(map[uint64]time.Time)
+	}
+	sm.lastReliefAt[id] = nowFunc()
+	sm.reliefMu.Unlock()
+}
+
+func (sm *SpillManager) inCooldown(id uint64) bool {
+	sm.reliefMu.Lock()
+	defer sm.reliefMu.Unlock()
+	last, ok := sm.lastReliefAt[id]
+	if !ok {
+		return false
+	}
+	return nowFunc().Sub(last) < reliefCooldown
+}
+
+// driftExceeds reports whether the published owned total materially exceeds the
+// tracker's reserved total — i.e. operators own more real heap than the tracker
+// reserved for, signalling an accounting gap. Returns false when the tracker
+// reports nothing (no basis to compare).
+func (sm *SpillManager) driftExceeds(frac float64) bool {
+	if sm.tracker == nil {
+		return false
+	}
+	used := sm.tracker.Used()
+	if used <= 0 {
+		return false
+	}
+	owned := sm.tracker.OwnedTotal()
+	drift := float64(owned-used) / float64(used)
+	return drift > frac
+}
+
+// forceSpillLargestOwned spills the operator with the largest OwnedBytes,
+// ignoring its SpillableBytes claim. The backstop for the accounting-gap case.
+func (sm *SpillManager) forceSpillLargestOwned(target int64) int64 {
+	sm.accountedMu.Lock()
+	var best AccountedOperator
+	var bestOwned int64
+	for _, op := range sm.accounted {
+		f := op.Inspect()
+		if f.State == OpActive && f.OwnedBytes > bestOwned {
+			best = op
+			bestOwned = f.OwnedBytes
+		}
+	}
+	sm.accountedMu.Unlock()
+	if best == nil {
+		return 0
+	}
+	n, _ := best.SpillSome(target)
+	return n
+}
+
+// InspectAccounted returns the per-operator footprints for the AccountedOperator
+// registry — live operators plus the final snapshots of departed ones (with
+// their peak OwnedBytes restored from accountedPeak). Replaces Inspect() once
+// the executor migrates to the new wire format.
+func (sm *SpillManager) InspectAccounted() []OperatorFootprint {
+	sm.accountedMu.Lock()
+	defer sm.accountedMu.Unlock()
+	out := make([]OperatorFootprint, 0, len(sm.accounted)+len(sm.departedFootprints))
+	out = append(out, sm.departedFootprints...)
+	for _, op := range sm.accounted {
+		f := op.Inspect()
+		if f.OwnedBytes > sm.accountedPeak[f.InstanceID] {
+			sm.accountedPeak[f.InstanceID] = f.OwnedBytes
+		}
+		out = append(out, f)
+	}
+	return out
 }
