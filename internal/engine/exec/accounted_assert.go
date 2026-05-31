@@ -6,4 +6,5 @@ import "github.com/citc-tech/wadjet/internal/engine/memory"
 // memory.AccountedOperator interface. Extended as each operator is migrated.
 var (
 	_ memory.AccountedOperator = (*HashAggregate)(nil)
+	_ memory.AccountedOperator = (*Sort)(nil)
 )

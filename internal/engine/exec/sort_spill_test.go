@@ -118,11 +118,14 @@ func TestSortSpill_MixedInMemoryAndSpilled(t *testing.T) {
 
 	ctx := context.Background()
 	spillDir := t.TempDir()
-	// Budget tuned so the first 5 batches spill but pressure relaxes for the
-	// remaining batches (ReleaseTracking after spill drops Used below
-	// threshold). A 1KB budget does this naturally because each spill clears
-	// the tracker, then the next batch starts fresh.
-	tracker := memory.NewTracker("sort-spill-mixed-test", 1_000)
+	// Budget tuned to honest per-batch accounting (RecordBatch.MemBytes): a
+	// 5-row int64 batch is ~48 bytes (40 data + one 8-byte null-bitmap word),
+	// not the ~240 bytes the old b.Len*48+b.Len*40 estimate reported. At a 200
+	// byte budget the 40% SpillCheap threshold (80 B) trips every couple of
+	// batches; each spill clears the tracker via ReleaseTracking, so pressure
+	// relaxes and later batches re-accumulate — exercising the mixed
+	// in-memory + spilled merge path in finalizeWithSpill.
+	tracker := memory.NewTracker("sort-spill-mixed-test", 200)
 	sm, err := memory.NewSpillManager(spillDir, tracker)
 	if err != nil {
 		t.Fatal(err)

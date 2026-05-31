@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
@@ -23,8 +24,8 @@ const (
 
 // SortKey defines a column and direction for sorting.
 type SortKey struct {
-	Column   string
-	Order    SortOrder
+	Column    string
+	Order     SortOrder
 	NullsLast bool
 }
 
@@ -38,20 +39,27 @@ type Sort struct {
 	schema []parquet.Column
 	Spill  *memory.SpillManager // optional: enables spill-to-disk
 
-	mu         sync.Mutex
-	batches    []*batch.RecordBatch // columnar storage
-	totalRows  int
+	mu             sync.Mutex
+	batches        []*batch.RecordBatch // columnar storage
+	totalRows      int
 	trackedMem     int64 // memory reserved from shared tracker by this operator
 	peakTrackedMem int64 // high-water mark; surfaced via memory.Inspectable
-	spillFiles []string
-	sorted     []*batch.RecordBatch // materialized sorted results
-	pos        int
+	spillFiles     []string
+	sorted         []*batch.RecordBatch // materialized sorted results
+	pos            int
 	// unregisterSpillable, when non-nil, deregisters this Sort from the
 	// SpillManager's cooperative-spill registry. Set on first Consume when
 	// Spill is configured; cleared in Finalize once we begin draining the
 	// sorted output (no more reclaimable input batches) or in Close as a
 	// backstop.
 	unregisterSpillable func()
+	// AccountedOperator (Phase 2) state — see HashAggregate for the contract.
+	accInstanceID       uint64
+	accState            atomic.Int32
+	unregisterAccounted func()
+	// finalized is set once finalizeColumnar/finalizeWithSpill begins; after
+	// that the input batches are gone and there is nothing left to spill.
+	finalized bool
 }
 
 func NewSort(keys []SortKey) *Sort {
@@ -77,6 +85,9 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		// queries with Init resets.
 		if s.Spill != nil && s.unregisterSpillable == nil {
 			s.unregisterSpillable = s.Spill.RegisterSpillable(s)
+			s.accInstanceID = memory.NextInstanceID()
+			s.accState.Store(int32(memory.OpActive))
+			s.unregisterAccounted = s.Spill.RegisterAccounted(s)
 		}
 	}
 	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
@@ -85,11 +96,14 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 
 	// Track memory usage for spill pressure detection
 	if s.Spill != nil {
-		cost := EstimateBatchBytes(b)
+		cost := b.MemBytes()
 		s.Spill.TrackBatch(cost)
 		s.trackedMem += cost
 		if s.trackedMem > s.peakTrackedMem {
 			s.peakTrackedMem = s.trackedMem
+		}
+		if s.accInstanceID != 0 {
+			s.Spill.Tracker().PublishOwned(s.accInstanceID, s.trackedMem)
 		}
 	}
 
@@ -117,9 +131,17 @@ func (s *Sort) Finalize(_ context.Context) error {
 	// itself; we can't usefully respond to a peer's RequestRelief any more.
 	// Deregister now so the registry stops considering us. Close still
 	// deregisters as a backstop.
+	s.mu.Lock()
+	s.finalized = true
+	s.mu.Unlock()
 	if s.unregisterSpillable != nil {
 		s.unregisterSpillable()
 		s.unregisterSpillable = nil
+	}
+	if s.unregisterAccounted != nil {
+		s.accState.Store(int32(memory.OpClosed))
+		s.unregisterAccounted()
+		s.unregisterAccounted = nil
 	}
 	if len(s.spillFiles) > 0 {
 		return s.finalizeWithSpill()
@@ -406,6 +428,11 @@ func (s *Sort) Close() error {
 		s.unregisterSpillable()
 		s.unregisterSpillable = nil
 	}
+	if s.unregisterAccounted != nil {
+		s.accState.Store(int32(memory.OpClosed))
+		s.unregisterAccounted()
+		s.unregisterAccounted = nil
+	}
 	if s.Spill != nil && s.trackedMem > 0 {
 		s.Spill.ReleaseTracking(s.trackedMem)
 		s.trackedMem = 0
@@ -439,13 +466,56 @@ func (s *Sort) PeakFootprint() int64 {
 	return s.peakTrackedMem
 }
 
+// Inspect implements memory.AccountedOperator.
+func (s *Sort) Inspect() memory.OperatorFootprint {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := memory.OpState(s.accState.Load())
+	if st == memory.OpClosed {
+		return memory.OperatorFootprint{State: memory.OpClosed, InstanceID: s.accInstanceID, Name: "Sort"}
+	}
+	return memory.OperatorFootprint{
+		OwnedBytes:     s.trackedMem,
+		RetainedBytes:  s.trackedMem,
+		SpillableBytes: s.spillableBytesLocked(),
+		State:          st,
+		InstanceID:     s.accInstanceID,
+		Name:           "Sort",
+	}
+}
+
+// spillableBytesLocked: Sort has no incremental spill mechanism — SpillSome
+// drains ALL buffered batches in one shot. Before finalize the whole tracked
+// footprint is reclaimable; once finalize begins, s.batches is gone and the
+// sorted output stream is not re-spillable raw rows, so it reports 0. Caller
+// holds s.mu.
+func (s *Sort) spillableBytesLocked() int64 {
+	if s.Spill == nil || s.finalized || s.trackedMem == 0 || len(s.batches) == 0 {
+		return 0
+	}
+	return s.trackedMem
+}
+
+// EstimateRelief implements memory.AccountedOperator. Sort frees all-or-nothing,
+// so it reports the full spillable footprint whenever target > 0.
+func (s *Sort) EstimateRelief(target int64) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if target <= 0 {
+		return 0
+	}
+	return s.spillableBytesLocked()
+}
+
 // SpillSome drains accumulated input batches to a raw-row spill file and
 // releases the freed bytes. Sort uses raw-row spill (not partial state)
 // because input batches are pre-sort — there's no partial sorted state to
 // preserve until finalizeWithSpill runs the global merge.
 //
-// Implements memory.Spillable.
+// Implements memory.Spillable and memory.AccountedOperator.
 func (s *Sort) SpillSome(target int64) (int64, error) {
+	s.accState.Store(int32(memory.OpSpilling))
+	defer s.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.Spill == nil || s.trackedMem == 0 || len(s.batches) == 0 {
@@ -465,6 +535,9 @@ func (s *Sort) SpillSome(target int64) (int64, error) {
 	freed := s.trackedMem
 	s.Spill.ReleaseTracking(freed)
 	s.trackedMem = 0
+	if s.accInstanceID != 0 {
+		s.Spill.Tracker().PublishOwned(s.accInstanceID, 0)
+	}
 	return freed, nil
 }
 
@@ -910,4 +983,3 @@ func appendKeyValue(buf []byte, v any) []byte {
 		return append(buf, "<unknown>"...)
 	}
 }
-
