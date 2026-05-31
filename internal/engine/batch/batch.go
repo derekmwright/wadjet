@@ -102,6 +102,19 @@ func (b *RecordBatch) Detach() {
 	b.pool = nil
 }
 
+// MemBytes returns the in-memory byte footprint of the batch's column data,
+// summing each Vector's MemBytes(). It deliberately omits operator-specific
+// overhead (e.g. the HashJoin hash-index charge) — that stays at the call site
+// (see hashBuildBytes in package exec). Replaces the per-type estimate that
+// lived in exec.EstimateBatchBytes.
+func (b *RecordBatch) MemBytes() int64 {
+	var size int64
+	for _, v := range b.Columns {
+		size += v.MemBytes()
+	}
+	return size
+}
+
 // Reset clears the batch for reuse, keeping allocated memory.
 func (b *RecordBatch) Reset(numRows int) {
 	b.Len = numRows

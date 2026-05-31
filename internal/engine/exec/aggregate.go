@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
@@ -175,6 +176,13 @@ type HashAggregate struct {
 	// materialized the final result (no more reclaimable state) or in Close
 	// as a backstop.
 	unregisterSpillable func()
+	// AccountedOperator (Phase 2) state. accInstanceID is the process-unique
+	// id; accState is the lifecycle (memory.OpState) read/written atomically so
+	// Inspect (called off the pipeline goroutine) sees a consistent state.
+	// unregisterAccounted deregisters from the new relief registry.
+	accInstanceID       uint64
+	accState            atomic.Int32
+	unregisterAccounted func()
 	// partialMerger, when non-nil, drives streaming Next() from the
 	// k-way merge of partial-spill runs. Set by finalizeViaPartialMerge
 	// (streaming variant); each Next() pulls one batch's worth of merged
@@ -342,6 +350,12 @@ func (h *HashAggregate) reconcileGroupMemory() {
 		if h.trackedGroupMem > h.peakTrackedGroupMem {
 			h.peakTrackedGroupMem = h.trackedGroupMem
 		}
+		// Publish the true owned footprint so the SpillManager drift-backstop
+		// (OwnedTotal vs tracker.Used) has a real number; without this the
+		// published total stays 0 and the backstop misreads drift as 100%.
+		if h.accInstanceID != 0 {
+			h.Spill.Tracker().PublishOwned(h.accInstanceID, h.trackedGroupMem)
+		}
 	}
 }
 
@@ -497,6 +511,12 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 		// targeting.
 		if h.Spill != nil && h.unregisterSpillable == nil && h.canUseExternalMerge() {
 			h.unregisterSpillable = h.Spill.RegisterSpillable(h)
+			// Dual-register with the Phase-2 AccountedOperator registry. Both
+			// coexist during the migration; the legacy RegisterSpillable call
+			// is removed once RequestRelief reads the accounted registry.
+			h.accInstanceID = memory.NextInstanceID()
+			h.accState.Store(int32(memory.OpActive))
+			h.unregisterAccounted = h.Spill.RegisterAccounted(h)
 		}
 	}
 
@@ -2082,6 +2102,11 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 		h.unregisterSpillable()
 		h.unregisterSpillable = nil
 	}
+	if h.unregisterAccounted != nil {
+		h.accState.Store(int32(memory.OpClosed))
+		h.unregisterAccounted()
+		h.unregisterAccounted = nil
+	}
 
 	// External-merge path: when partial-state files exist, k-way merge them
 	// (plus any in-memory remainder) instead of re-aggregating raw rows. This
@@ -2153,6 +2178,11 @@ func (h *HashAggregate) Close() error {
 		h.unregisterSpillable()
 		h.unregisterSpillable = nil
 	}
+	if h.unregisterAccounted != nil {
+		h.accState.Store(int32(memory.OpClosed))
+		h.unregisterAccounted()
+		h.unregisterAccounted = nil
+	}
 	if h.Spill != nil {
 		if h.trackedGroupMem > 0 {
 			h.Spill.ReleaseTracking(h.trackedGroupMem)
@@ -2213,6 +2243,93 @@ func (h *HashAggregate) PeakFootprint() int64 {
 	return h.peakTrackedGroupMem
 }
 
+// Inspect implements memory.AccountedOperator. Wait-free w.r.t. the registry
+// but takes h.mu to read group-state fields consistently.
+func (h *HashAggregate) Inspect() memory.OperatorFootprint {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	st := memory.OpState(h.accState.Load())
+	if st == memory.OpClosed || h.Spill == nil || !h.canUseExternalMerge() {
+		return memory.OperatorFootprint{
+			State: memory.OpClosed, InstanceID: h.accInstanceID, Name: h.accName(),
+		}
+	}
+	owned := h.trackedGroupMem
+	return memory.OperatorFootprint{
+		OwnedBytes:     owned,
+		RetainedBytes:  owned, // all group state is detained
+		SpillableBytes: h.spillableBytesLocked(),
+		SpillReadBytes: h.spillReadBytesLocked(),
+		State:          st,
+		InstanceID:     h.accInstanceID,
+		Name:           h.accName(),
+	}
+}
+
+// accName is the stable identifier for this aggregate instance.
+func (h *HashAggregate) accName() string {
+	if len(h.GroupByCols) == 0 {
+		return "HashAggregate"
+	}
+	return "HashAggregate/group_by=" + strings.Join(h.GroupByCols, ",")
+}
+
+// spillableBytesLocked reports the bytes RequestRelief may target without
+// forming a drain-rebuild loop or re-reading about-to-be-merged state (TODO-1).
+//
+// Derivation: before Finalize installs partialMerger the merge has not begun
+// and every in-memory byte is reclaimable; the only cap is that a single
+// cooperative drain must leave one survivor partition (pickPartitionsToDrain
+// caps at K-1), so the int-keyed path reports perPartition*(K-1). Once
+// partialMerger != nil the merger owns the remaining bytes and we report 0 so
+// the SpillManager never targets state that is being merged back in. Caller
+// holds h.mu.
+func (h *HashAggregate) spillableBytesLocked() int64 {
+	if h.Spill == nil || !h.canUseExternalMerge() {
+		return 0
+	}
+	if h.partialMerger != nil {
+		return 0 // finalize started: merger owns the bytes
+	}
+	if !h.useIntGroupKey {
+		return h.trackedGroupMem // non-int paths whole-drain; all reclaimable
+	}
+	if h.intGroupIndex == nil || h.intGroupIndex.Len() == 0 {
+		return 0
+	}
+	K := h.drainK
+	if K == 0 {
+		K = computeAdaptiveK(h.intGroupIndex.Len())
+	}
+	if K <= 1 {
+		return h.trackedGroupMem
+	}
+	perPartition := h.trackedGroupMem / int64(K)
+	return perPartition * int64(K-1) // never offer the last survivor partition
+}
+
+// spillReadBytesLocked reports bytes currently being read back by the merger
+// during finalize (about to re-enter the heap; never reclaimable). Caller
+// holds h.mu.
+func (h *HashAggregate) spillReadBytesLocked() int64 {
+	if h.partialMerger != nil {
+		return h.trackedGroupMem
+	}
+	return 0
+}
+
+// EstimateRelief implements memory.AccountedOperator: a pure read of the
+// rebuild-safe spillable bytes, capped at target.
+func (h *HashAggregate) EstimateRelief(target int64) int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := h.spillableBytesLocked()
+	if target > 0 && target < s {
+		return target
+	}
+	return s
+}
+
 // selfSpillReliefTarget computes the bytes to release in response to our
 // own Consume-time pressure detection. Targets bringing tracker.Used()
 // below 55% of budget — 5% hysteresis below the 60% SpillCheap trigger so
@@ -2256,8 +2373,12 @@ func (h *HashAggregate) selfSpillReliefTarget() int64 {
 // covers the full footprint, falls through to the whole-drain path —
 // semantically identical to the pre-partial-drain behavior.
 //
-// Implements memory.Spillable.
+// Implements memory.Spillable and memory.AccountedOperator. The OpSpilling
+// state is published for the duration so a concurrent RequestRelief snapshot
+// skips this instance rather than double-dispatching.
 func (h *HashAggregate) SpillSome(target int64) (int64, error) {
+	h.accState.Store(int32(memory.OpSpilling))
+	defer h.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.Spill == nil || !h.canUseExternalMerge() {
@@ -2270,7 +2391,11 @@ func (h *HashAggregate) SpillSome(target int64) (int64, error) {
 	if err := h.spillPartialState(target); err != nil {
 		return 0, err
 	}
-	return before - h.trackedGroupMem, nil
+	freed := before - h.trackedGroupMem
+	if h.accInstanceID != 0 {
+		h.Spill.Tracker().PublishOwned(h.accInstanceID, h.trackedGroupMem)
+	}
+	return freed, nil
 }
 
 // Next returns the aggregated results in batches of DefaultBatchSize rows.

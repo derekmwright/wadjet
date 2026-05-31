@@ -103,7 +103,34 @@ type SpillManager struct {
 	// registered so post-task observability sees a closed HashJoin's peak
 	// even though its Spillable entry was removed during Close.
 	departed []SpillableSnapshot
+
+	// --- AccountedOperator registry (Phase 2) ---
+	// The new registry replacing spillables/departed. Operators register via
+	// RegisterAccounted and the floating-budget RequestRelief ranks them by
+	// SpillableBytes. accountedPeak survives an operator's Close so a closed
+	// operator's peak OwnedBytes is still reported by Inspect.
+	accountedMu        sync.Mutex
+	accounted          []AccountedOperator
+	accountedPeak      map[uint64]int64    // InstanceID -> peak OwnedBytes
+	departedFootprints []OperatorFootprint // final snapshot of closed operators
+
+	// reservoirs sources the floating operator budget (GOMEMLIMIT − Σreservoir
+	// actual − GC headroom). nil falls back to the static tracker.Budget().
+	reservoirs *ReservoirRegistry
+	cheapFrac  float64 // --spill-cheap-fraction, default 0.90
+
+	// relief bookkeeping for RequestRelief: per-instance cooldown after a
+	// delivered<claimed shortfall, and a round-robin cursor for the
+	// rotate-on-unrelieved-pressure pass.
+	reliefMu       sync.Mutex
+	lastReliefAt   map[uint64]time.Time
+	rotationCursor int
 }
+
+// defaultSpillCheapFraction is the fraction of the floating operator budget at
+// which SpillCheap operators begin spilling. The deploy can override it via
+// --spill-cheap-fraction; the SF100 A/B tunes it (design memo R1).
+const defaultSpillCheapFraction = 0.90
 
 // NewSpillManager creates a spill manager that writes temp files to the given directory.
 func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
@@ -112,9 +139,51 @@ func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
 		return nil, fmt.Errorf("creating spill dir: %w", err)
 	}
 	return &SpillManager{
-		dir:     spillDir,
-		tracker: tracker,
+		dir:           spillDir,
+		tracker:       tracker,
+		cheapFrac:     defaultSpillCheapFraction,
+		accountedPeak: make(map[uint64]int64),
+		lastReliefAt:  make(map[uint64]time.Time),
 	}, nil
+}
+
+// SetReservoirs wires the reservoir registry so ShouldSpillFor thresholds
+// against the live floating operator budget instead of the static tracker
+// budget. Safe to call once at construction; nil leaves the static fallback.
+func (sm *SpillManager) SetReservoirs(rr *ReservoirRegistry) { sm.reservoirs = rr }
+
+// SetCheapFraction overrides the SpillCheap threshold fraction (default 0.90).
+// Ignored unless 0 < f < 1.
+func (sm *SpillManager) SetCheapFraction(f float64) {
+	if f > 0 && f < 1 {
+		sm.cheapFrac = f
+	}
+}
+
+// RegisterAccounted adds an AccountedOperator to the Phase-2 relief registry
+// and returns an unregister closure. The closure captures the operator's final
+// footprint (peak OwnedBytes) into departedFootprints so a closed operator's
+// peak is still surfaced by Inspect.
+func (sm *SpillManager) RegisterAccounted(op AccountedOperator) func() {
+	sm.accountedMu.Lock()
+	sm.accounted = append(sm.accounted, op)
+	if sm.accountedPeak == nil {
+		sm.accountedPeak = make(map[uint64]int64)
+	}
+	sm.accountedMu.Unlock()
+	return func() {
+		sm.accountedMu.Lock()
+		defer sm.accountedMu.Unlock()
+		for i, x := range sm.accounted {
+			if x == op {
+				f := op.Inspect() // Closed-zeros; peak comes from accountedPeak
+				f.OwnedBytes = sm.accountedPeak[f.InstanceID]
+				sm.departedFootprints = append(sm.departedFootprints, f)
+				sm.accounted = append(sm.accounted[:i], sm.accounted[i+1:]...)
+				return
+			}
+		}
+	}
 }
 
 // SpillUrgency describes how much pressure is needed before this operator
