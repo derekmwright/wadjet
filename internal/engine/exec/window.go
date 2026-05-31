@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
@@ -70,16 +71,26 @@ type Window struct {
 	Columns []WindowColumn
 	Spill   *memory.SpillManager // optional: enables spill-to-disk
 
-	mu         sync.Mutex
-	batches    []*batch.RecordBatch
-	totalRows  int
-	trackedMem int64 // memory reserved from shared tracker by this operator
-	schema     []parquet.Column
-	spillFiles []string
+	mu             sync.Mutex
+	batches        []*batch.RecordBatch
+	totalRows      int
+	trackedMem     int64 // memory reserved from shared tracker by this operator
+	peakTrackedMem int64 // high-water mark; surfaced via AccountedOperator
+	schema         []parquet.Column
+	spillFiles     []string
 
 	result  []*batch.RecordBatch
 	pos     int
 	emitted bool
+
+	// AccountedOperator (Phase 2) state — see HashAggregate for the contract.
+	// Window registers at Init (not first-Consume) because it self-spills
+	// during Consume, so it must be a relief candidate from the moment input
+	// can arrive. finalized gates SpillableBytes to 0 once finalize runs.
+	accInstanceID       uint64
+	accState            atomic.Int32
+	unregisterAccounted func()
+	finalized           bool
 }
 
 // NewWindow creates a new window operator.
@@ -93,6 +104,15 @@ func (w *Window) Init(_ context.Context) error {
 	w.result = nil
 	w.pos = 0
 	w.emitted = false
+	w.finalized = false
+	// Register with the relief registry up front: Window self-spills during
+	// Consume, so it must be visible to RequestRelief before any batch arrives.
+	// A zero footprint at registration is fine (Inspect reports OwnedBytes==0).
+	if w.Spill != nil && w.unregisterAccounted == nil {
+		w.accInstanceID = memory.NextInstanceID()
+		w.accState.Store(int32(memory.OpActive))
+		w.unregisterAccounted = w.Spill.RegisterAccounted(w)
+	}
 	return nil
 }
 
@@ -108,9 +128,15 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 
 	// Track memory usage for spill pressure detection
 	if w.Spill != nil {
-		cost := EstimateBatchBytes(b)
+		cost := b.MemBytes()
 		w.Spill.TrackBatch(cost)
 		w.trackedMem += cost
+		if w.trackedMem > w.peakTrackedMem {
+			w.peakTrackedMem = w.trackedMem
+		}
+		if w.accInstanceID != 0 {
+			w.Spill.Tracker().PublishOwned(w.accInstanceID, w.trackedMem)
+		}
 	}
 
 	// Spill to disk if memory pressure is high
@@ -133,10 +159,86 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 }
 
 func (w *Window) Finalize(_ context.Context) error {
+	w.mu.Lock()
+	w.finalized = true
+	w.mu.Unlock()
+	if w.unregisterAccounted != nil {
+		w.accState.Store(int32(memory.OpClosed))
+		w.unregisterAccounted()
+		w.unregisterAccounted = nil
+	}
 	if len(w.spillFiles) > 0 {
 		return w.finalizeWithSpill()
 	}
 	return w.finalizeColumnar()
+}
+
+// Inspect implements memory.AccountedOperator.
+func (w *Window) Inspect() memory.OperatorFootprint {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	st := memory.OpState(w.accState.Load())
+	if st == memory.OpClosed {
+		return memory.OperatorFootprint{State: memory.OpClosed, InstanceID: w.accInstanceID, Name: "Window"}
+	}
+	return memory.OperatorFootprint{
+		OwnedBytes:     w.trackedMem,
+		RetainedBytes:  w.trackedMem,
+		SpillableBytes: w.spillableBytesLocked(),
+		State:          st,
+		InstanceID:     w.accInstanceID,
+		Name:           "Window",
+	}
+}
+
+// spillableBytesLocked: Window's input batches are raw-row spillable throughout
+// the collect/sort phase (its most memory-intensive phase). Once finalize runs
+// the batches are consumed, so it reports 0. Caller holds w.mu.
+func (w *Window) spillableBytesLocked() int64 {
+	if w.Spill == nil || w.finalized || w.trackedMem == 0 || len(w.batches) == 0 {
+		return 0
+	}
+	return w.trackedMem
+}
+
+// EstimateRelief implements memory.AccountedOperator (all-or-nothing).
+func (w *Window) EstimateRelief(target int64) int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if target <= 0 {
+		return 0
+	}
+	return w.spillableBytesLocked()
+}
+
+// SpillSome implements memory.AccountedOperator: drains all buffered input
+// batches to a raw-row spill file and releases the freed bytes.
+func (w *Window) SpillSome(_ int64) (int64, error) {
+	w.accState.Store(int32(memory.OpSpilling))
+	defer w.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.Spill == nil || w.trackedMem == 0 || len(w.batches) == 0 {
+		return 0, nil
+	}
+	var rows []map[string]any
+	for _, sb := range w.batches {
+		rows = append(rows, sb.ToRows()...)
+	}
+	path, err := w.Spill.SpillRows(rows)
+	if err != nil {
+		return 0, err
+	}
+	w.spillFiles = append(w.spillFiles, path)
+	w.batches = w.batches[:0]
+	w.totalRows = 0
+	freed := w.trackedMem
+	w.Spill.ReleaseTracking(freed)
+	w.trackedMem = 0
+	if w.accInstanceID != 0 {
+		w.Spill.Tracker().PublishOwned(w.accInstanceID, 0)
+	}
+	return freed, nil
 }
 
 // finalizeColumnar is the fast path when no spill occurred — operates entirely
@@ -246,7 +348,25 @@ func (w *Window) buildOutputSchema() []parquet.Column {
 	return outSchema
 }
 
-func (w *Window) Close() error { return nil }
+// Close releases any tracker reservation Window still holds for buffered rows
+// that never crossed the spill threshold, and unregisters from the relief
+// registry. The previous no-op leaked a phantom reservation for the lifetime
+// of the process when a Window accumulated but never spilled and Finalize was
+// not reached (early cancel).
+func (w *Window) Close() error {
+	w.mu.Lock()
+	if w.Spill != nil && w.trackedMem > 0 {
+		w.Spill.ReleaseTracking(w.trackedMem)
+		w.trackedMem = 0
+	}
+	w.mu.Unlock()
+	if w.unregisterAccounted != nil {
+		w.accState.Store(int32(memory.OpClosed))
+		w.unregisterAccounted()
+		w.unregisterAccounted = nil
+	}
+	return nil
+}
 
 // Next returns windowed results in batches.
 func (w *Window) Next(_ context.Context) (*batch.RecordBatch, error) {

@@ -460,7 +460,11 @@ func TestWindowSpillRunningSum(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	tracker := memory.NewTracker("test", 250_000)
+	// Budget tuned to honest accounting (RecordBatch.MemBytes): a 2048-row
+	// {int64,float64} batch is ~33 KB (data + null-bitmap words), not the
+	// ~115 KB the old b.Len*8*2 + b.Len*40 estimate reported. An 80 KB budget
+	// trips the 40% SpillCheap threshold (32 KB) on the first batch.
+	tracker := memory.NewTracker("test", 80_000)
 	sm, err := memory.NewSpillManager(tmpDir, tracker)
 	if err != nil {
 		t.Fatal(err)

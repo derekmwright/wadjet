@@ -7,4 +7,5 @@ import "github.com/citc-tech/wadjet/internal/engine/memory"
 var (
 	_ memory.AccountedOperator = (*HashAggregate)(nil)
 	_ memory.AccountedOperator = (*Sort)(nil)
+	_ memory.AccountedOperator = (*Window)(nil)
 )
