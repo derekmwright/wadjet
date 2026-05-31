@@ -133,9 +133,6 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 			}
 		}
 		h.trackedMem += cost
-		if h.trackedMem > h.peakTrackedMem {
-			h.peakTrackedMem = h.trackedMem
-		}
 
 		// Update key min/max even before partitioning — bloom + dynamic-range
 		// pushdowns use these for ALL keys, including those that later spill.
@@ -429,43 +426,6 @@ func (h *HashJoin) spillUntilCanReserve(needed int64) error {
 	_, err := h.Spill.RequestRelief(gap)
 	h.mu.Lock()
 	return err
-}
-
-// SpillFootprint reports how many bytes of in-memory build state this join
-// currently holds. Implements memory.Spillable for the worker's cooperative
-// spill advisor. Footprint is the sum across all in-memory partitions; the
-// hash-table arena/index overhead is excluded because it isn't reclaimable
-// without rebuilding the hash table.
-func (h *HashJoin) SpillFootprint() int64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.spillState == nil {
-		return 0
-	}
-	var total int64
-	for _, mem := range h.spillState.partMemory {
-		total += mem
-	}
-	return total
-}
-
-// SpillableName implements memory.Inspectable: returns a stable identifier
-// incorporating the build alias when available. Used for per-operator peak
-// attribution at task end.
-func (h *HashJoin) SpillableName() string {
-	if h.BuildTableAlias != "" {
-		return fmt.Sprintf("HashJoin/build=%s", h.BuildTableAlias)
-	}
-	return "HashJoin"
-}
-
-// PeakFootprint implements memory.Inspectable: returns the high-water mark
-// of this join's tracker reservations. Includes column data + arena/index
-// overhead, matching trackedMem.
-func (h *HashJoin) PeakFootprint() int64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.peakTrackedMem
 }
 
 // Inspect implements memory.AccountedOperator. OwnedBytes includes the hash

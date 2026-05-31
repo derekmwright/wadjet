@@ -611,7 +611,7 @@ func TestExternalMergeSpill_FinalizeAllSpilledNoRemainder(t *testing.T) {
 
 	// Drain everything to spill, then DON'T consume anything further. The
 	// in-memory remainder is now empty.
-	if _, err := h.SpillSome(h.SpillFootprint()); err != nil {
+	if _, err := h.SpillSome(h.Inspect().OwnedBytes); err != nil {
 		t.Fatal(err)
 	}
 	if len(h.partialSpillFiles) != 1 {
@@ -674,7 +674,7 @@ func TestHashAggregateSpillable_FootprintAndSpillSome(t *testing.T) {
 		t.Fatal(err)
 	}
 	// SpillFootprint before any input is 0 — no state, no tracker bytes.
-	if got := h.SpillFootprint(); got != 0 {
+	if got := h.Inspect().OwnedBytes; got != 0 {
 		t.Errorf("pre-Consume footprint: got %d want 0", got)
 	}
 
@@ -688,7 +688,7 @@ func TestHashAggregateSpillable_FootprintAndSpillSome(t *testing.T) {
 	}
 
 	// Footprint is now non-zero (group state grew during scatter).
-	footprint := h.SpillFootprint()
+	footprint := h.Inspect().OwnedBytes
 	if footprint <= 0 {
 		t.Fatalf("post-Consume footprint: got %d want > 0", footprint)
 	}
@@ -768,7 +768,7 @@ func TestSortSpillable_FootprintAndSpillSome(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := s.SpillFootprint(); got != 0 {
+	if got := s.Inspect().OwnedBytes; got != 0 {
 		t.Errorf("pre-Consume footprint: got %d want 0", got)
 	}
 
@@ -783,7 +783,7 @@ func TestSortSpillable_FootprintAndSpillSome(t *testing.T) {
 		}
 	}
 
-	footprint := s.SpillFootprint()
+	footprint := s.Inspect().OwnedBytes
 	if footprint <= 0 {
 		t.Fatalf("post-Consume footprint: got %d want > 0", footprint)
 	}
@@ -795,7 +795,7 @@ func TestSortSpillable_FootprintAndSpillSome(t *testing.T) {
 	if freed != footprint {
 		t.Errorf("SpillSome: freed %d want %d", freed, footprint)
 	}
-	if got := s.SpillFootprint(); got != 0 {
+	if got := s.Inspect().OwnedBytes; got != 0 {
 		t.Errorf("post-spill footprint: got %d want 0", got)
 	}
 
@@ -874,12 +874,12 @@ func TestSpillable_MultiBreakerCooperativeRelief(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hFootprint := h.SpillFootprint()
+	hFootprint := h.Inspect().OwnedBytes
 	if hFootprint == 0 {
 		t.Fatal("hash aggregate footprint should be non-zero")
 	}
-	if s.SpillFootprint() != 0 {
-		t.Fatalf("sort footprint should be 0 (no batches), got %d", s.SpillFootprint())
+	if s.Inspect().OwnedBytes != 0 {
+		t.Fatalf("sort footprint should be 0 (no batches), got %d", s.Inspect().OwnedBytes)
 	}
 
 	// Imagine Sort is about to allocate and asks for relief. The registry
@@ -957,7 +957,7 @@ func TestHashAggregateSpillable_RequestReliefRoutesHere(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	footprint := h.SpillFootprint()
+	footprint := h.Inspect().OwnedBytes
 	if footprint <= 0 {
 		t.Fatalf("setup precondition: footprint should be positive, got %d", footprint)
 	}
@@ -973,8 +973,8 @@ func TestHashAggregateSpillable_RequestReliefRoutesHere(t *testing.T) {
 	if freed == 0 {
 		t.Fatal("RequestRelief returned 0 freed — Spillable not registered or SpillSome not wired")
 	}
-	if h.SpillFootprint() != 0 {
-		t.Errorf("after relief, footprint should be 0, got %d", h.SpillFootprint())
+	if h.Inspect().OwnedBytes != 0 {
+		t.Errorf("after relief, footprint should be 0, got %d", h.Inspect().OwnedBytes)
 	}
 
 	// Finalize should still produce the original 400 distinct sums.
@@ -1075,7 +1075,7 @@ func TestPartialDrain_IntKeyMultiSpill(t *testing.T) {
 		}
 		// Every other batch: drain ~⅛ of footprint to exercise partial path.
 		if i%2 == 1 {
-			footprint := h.SpillFootprint()
+			footprint := h.Inspect().OwnedBytes
 			if footprint <= 0 {
 				continue
 			}
@@ -1284,7 +1284,7 @@ func TestPartialDrain_FreeListReuse(t *testing.T) {
 	}
 
 	slotsBeforeDrain := len(h.intGroupStates)
-	footprint := h.SpillFootprint()
+	footprint := h.Inspect().OwnedBytes
 	if footprint <= 0 {
 		t.Fatalf("post-Consume footprint: got %d want > 0", footprint)
 	}

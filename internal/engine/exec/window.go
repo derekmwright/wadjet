@@ -71,13 +71,12 @@ type Window struct {
 	Columns []WindowColumn
 	Spill   *memory.SpillManager // optional: enables spill-to-disk
 
-	mu             sync.Mutex
-	batches        []*batch.RecordBatch
-	totalRows      int
-	trackedMem     int64 // memory reserved from shared tracker by this operator
-	peakTrackedMem int64 // high-water mark; surfaced via AccountedOperator
-	schema         []parquet.Column
-	spillFiles     []string
+	mu         sync.Mutex
+	batches    []*batch.RecordBatch
+	totalRows  int
+	trackedMem int64 // memory reserved from shared tracker by this operator
+	schema     []parquet.Column
+	spillFiles []string
 
 	result  []*batch.RecordBatch
 	pos     int
@@ -131,9 +130,6 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 		cost := b.MemBytes()
 		w.Spill.TrackBatch(cost)
 		w.trackedMem += cost
-		if w.trackedMem > w.peakTrackedMem {
-			w.peakTrackedMem = w.trackedMem
-		}
 		if w.accInstanceID != 0 {
 			w.Spill.Tracker().PublishOwned(w.accInstanceID, w.trackedMem)
 		}

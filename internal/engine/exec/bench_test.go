@@ -200,7 +200,7 @@ func BenchmarkHashAggregatePartialSpillDrain(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
-		footprint := agg.SpillFootprint()
+		footprint := agg.Inspect().OwnedBytes
 		b.StartTimer()
 		if _, err := agg.SpillSome(footprint); err != nil {
 			b.Fatal(err)
@@ -262,7 +262,7 @@ func BenchmarkHashAggregatePartialSpillDrainDualInt(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
-		footprint := agg.SpillFootprint()
+		footprint := agg.Inspect().OwnedBytes
 		b.StartTimer()
 		if _, err := agg.SpillSome(footprint); err != nil {
 			b.Fatal(err)
@@ -324,7 +324,7 @@ func BenchmarkHashAggregatePartialMergeFinalize(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
-		footprint := agg.SpillFootprint()
+		footprint := agg.Inspect().OwnedBytes
 		if _, err := agg.SpillSome(footprint); err != nil {
 			b.Fatal(err)
 		}

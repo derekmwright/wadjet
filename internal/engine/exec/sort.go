@@ -39,20 +39,13 @@ type Sort struct {
 	schema []parquet.Column
 	Spill  *memory.SpillManager // optional: enables spill-to-disk
 
-	mu             sync.Mutex
-	batches        []*batch.RecordBatch // columnar storage
-	totalRows      int
-	trackedMem     int64 // memory reserved from shared tracker by this operator
-	peakTrackedMem int64 // high-water mark; surfaced via memory.Inspectable
-	spillFiles     []string
-	sorted         []*batch.RecordBatch // materialized sorted results
-	pos            int
-	// unregisterSpillable, when non-nil, deregisters this Sort from the
-	// SpillManager's cooperative-spill registry. Set on first Consume when
-	// Spill is configured; cleared in Finalize once we begin draining the
-	// sorted output (no more reclaimable input batches) or in Close as a
-	// backstop.
-	unregisterSpillable func()
+	mu         sync.Mutex
+	batches    []*batch.RecordBatch // columnar storage
+	totalRows  int
+	trackedMem int64 // memory reserved from shared tracker by this operator
+	spillFiles []string
+	sorted     []*batch.RecordBatch // materialized sorted results
+	pos        int
 	// AccountedOperator (Phase 2) state — see HashAggregate for the contract.
 	accInstanceID       uint64
 	accState            atomic.Int32
@@ -83,8 +76,7 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		// don't register in Init because (1) Init runs before any state
 		// exists (footprint=0), and (2) some pipelines reuse a Sort across
 		// queries with Init resets.
-		if s.Spill != nil && s.unregisterSpillable == nil {
-			s.unregisterSpillable = s.Spill.RegisterSpillable(s)
+		if s.Spill != nil && s.unregisterAccounted == nil {
 			s.accInstanceID = memory.NextInstanceID()
 			s.accState.Store(int32(memory.OpActive))
 			s.unregisterAccounted = s.Spill.RegisterAccounted(s)
@@ -99,9 +91,6 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		cost := b.MemBytes()
 		s.Spill.TrackBatch(cost)
 		s.trackedMem += cost
-		if s.trackedMem > s.peakTrackedMem {
-			s.peakTrackedMem = s.trackedMem
-		}
 		if s.accInstanceID != 0 {
 			s.Spill.Tracker().PublishOwned(s.accInstanceID, s.trackedMem)
 		}
@@ -134,10 +123,6 @@ func (s *Sort) Finalize(_ context.Context) error {
 	s.mu.Lock()
 	s.finalized = true
 	s.mu.Unlock()
-	if s.unregisterSpillable != nil {
-		s.unregisterSpillable()
-		s.unregisterSpillable = nil
-	}
 	if s.unregisterAccounted != nil {
 		s.accState.Store(int32(memory.OpClosed))
 		s.unregisterAccounted()
@@ -424,10 +409,6 @@ func (s *Sort) MergeSink(other SinkSource) {
 // phantom reservation in the shared tracker for the lifetime of the
 // process; see HashJoin.Close for the full background.
 func (s *Sort) Close() error {
-	if s.unregisterSpillable != nil {
-		s.unregisterSpillable()
-		s.unregisterSpillable = nil
-	}
 	if s.unregisterAccounted != nil {
 		s.accState.Store(int32(memory.OpClosed))
 		s.unregisterAccounted()
@@ -440,30 +421,6 @@ func (s *Sort) Close() error {
 	s.batches = nil
 	s.totalRows = 0
 	return nil
-}
-
-// SpillFootprint reports the bytes Sort currently holds in accumulated input
-// batches. The cooperative-spill registry uses this to pick the largest
-// contributor when a peer operator under pressure asks for relief.
-//
-// Implements memory.Spillable.
-func (s *Sort) SpillFootprint() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.trackedMem
-}
-
-// SpillableName implements memory.Inspectable.
-func (s *Sort) SpillableName() string {
-	return "Sort"
-}
-
-// PeakFootprint implements memory.Inspectable: returns the high-water mark
-// of bytes Sort had reserved with the shared tracker.
-func (s *Sort) PeakFootprint() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.peakTrackedMem
 }
 
 // Inspect implements memory.AccountedOperator.

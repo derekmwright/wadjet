@@ -21,16 +21,16 @@ import (
 
 // Binary spill format type tags
 const (
-	spillTagNull       byte = 0
-	spillTagBoolFalse  byte = 1
-	spillTagBoolTrue   byte = 2
-	spillTagInt64      byte = 3
-	spillTagFloat64    byte = 4
-	spillTagString     byte = 5
-	spillTagInt32      byte = 6
-	spillTagFloat32    byte = 7
-	spillRowMarker     byte = 0x01
-	spillEndMarker     byte = 0x00
+	spillTagNull      byte = 0
+	spillTagBoolFalse byte = 1
+	spillTagBoolTrue  byte = 2
+	spillTagInt64     byte = 3
+	spillTagFloat64   byte = 4
+	spillTagString    byte = 5
+	spillTagInt32     byte = 6
+	spillTagFloat32   byte = 7
+	spillRowMarker    byte = 0x01
+	spillEndMarker    byte = 0x00
 )
 
 // spillFileSeq is a global atomic counter for unique spill file names.
@@ -38,71 +38,12 @@ const (
 // tasks on the same worker) write to the same directory.
 var spillFileSeq atomic.Int64
 
-// Spillable is implemented by operators (today: HashJoin) that hold
-// reclaimable in-memory state and can write a portion of it to disk on
-// request. The cooperative-spill advisor uses these methods to relieve
-// shared-pool pressure when one operator can't make progress because another
-// concurrent operator holds the bulk of the pool. Each operator's per-self
-// reactive spill is still the first line of defense; cross-operator
-// coordination only fires when an operator has exhausted its own partitions
-// but tracker pressure remains.
-type Spillable interface {
-	// SpillFootprint reports how many bytes of in-memory reclaimable state
-	// the operator currently holds. Used to pick the largest contributor
-	// when the worker is over the spill threshold.
-	SpillFootprint() int64
-
-	// SpillSome attempts to free at least target bytes by writing in-memory
-	// state to disk. Returns the number of bytes actually released back to
-	// the shared tracker. May return less than target if the operator runs
-	// out of evictable state. Must be safe to call from a goroutine other
-	// than the one driving the operator's main pipeline.
-	SpillSome(target int64) (int64, error)
-}
-
-// Inspectable is an optional extension to Spillable that surfaces per-operator
-// observability state (a stable identifier and peak in-memory footprint) for
-// task-end logging. Operators that implement this enable per-operator peak
-// attribution in SpillManager.Inspect; ones that don't fall back to type name
-// and current footprint.
-type Inspectable interface {
-	Spillable
-	// SpillableName returns a stable identifier for the operator instance.
-	// Used as the key in SpillManager.Inspect output; should incorporate the
-	// stage_id or operator role when possible.
-	SpillableName() string
-	// PeakFootprint returns the highest SpillFootprint value ever observed
-	// during the operator's lifetime. Used by Inspect to surface where heap
-	// pressure peaked, not just where it currently sits.
-	PeakFootprint() int64
-}
-
-// SpillableSnapshot is one entry in SpillManager.Inspect output.
-type SpillableSnapshot struct {
-	Name    string
-	Current int64
-	Peak    int64
-}
-
 // SpillManager handles spilling data to disk when memory budget is exceeded.
 type SpillManager struct {
 	dir     string
 	tracker *Tracker
 	mu      sync.Mutex
 	files   []string
-
-	// spillables registry — operators register on Build entry, deregister
-	// on Close. RequestRelief picks the largest registered contributor and
-	// asks it to spill. Independent of mu so registration doesn't contend
-	// with file-list mutations.
-	spillablesMu sync.Mutex
-	spillables   []Spillable
-
-	// departed retains the final SpillableSnapshot of operators that have
-	// already unregistered. Inspect concatenates departed + currently-
-	// registered so post-task observability sees a closed HashJoin's peak
-	// even though its Spillable entry was removed during Close.
-	departed []SpillableSnapshot
 
 	// --- AccountedOperator registry (Phase 2) ---
 	// The new registry replacing spillables/departed. Operators register via
@@ -711,63 +652,6 @@ func (sm *SpillManager) Tracker() *Tracker {
 	return sm.tracker
 }
 
-// Inspect snapshots the current and peak footprint of every registered
-// Spillable plus operators that have already unregistered (their final
-// snapshot is kept in the departed list). Operators that implement
-// Inspectable surface their own name and peak; others fall back to the Go
-// type name and current footprint. Intended for task-end logging.
-func (sm *SpillManager) Inspect() []SpillableSnapshot {
-	sm.spillablesMu.Lock()
-	defer sm.spillablesMu.Unlock()
-	out := make([]SpillableSnapshot, 0, len(sm.spillables)+len(sm.departed))
-	out = append(out, sm.departed...)
-	for _, s := range sm.spillables {
-		out = append(out, snapshotSpillable(s))
-	}
-	return out
-}
-
-// snapshotSpillable extracts a SpillableSnapshot from a live Spillable.
-// Peak is taken from the Inspectable extension when available; otherwise
-// peak == current footprint (Inspect's best effort under no peak tracking).
-func snapshotSpillable(s Spillable) SpillableSnapshot {
-	snap := SpillableSnapshot{Current: s.SpillFootprint()}
-	if isp, ok := s.(Inspectable); ok {
-		snap.Name = isp.SpillableName()
-		snap.Peak = isp.PeakFootprint()
-	} else {
-		snap.Name = fmt.Sprintf("%T", s)
-	}
-	if snap.Peak < snap.Current {
-		snap.Peak = snap.Current
-	}
-	return snap
-}
-
-// RegisterSpillable adds an operator to the cooperative-spill registry.
-// Returns an unregister function the caller must call (defer is fine) when
-// the operator stops being a spill source — typically at Build completion
-// or Close. Unregister is idempotent and safe to call after the SpillManager
-// is no longer in use.
-func (sm *SpillManager) RegisterSpillable(s Spillable) func() {
-	sm.spillablesMu.Lock()
-	sm.spillables = append(sm.spillables, s)
-	sm.spillablesMu.Unlock()
-	return func() {
-		sm.spillablesMu.Lock()
-		defer sm.spillablesMu.Unlock()
-		for i, x := range sm.spillables {
-			if x == s {
-				// Capture the final snapshot before removal so Inspect can
-				// report peak attribution for operators that have closed.
-				sm.departed = append(sm.departed, snapshotSpillable(s))
-				sm.spillables = append(sm.spillables[:i], sm.spillables[i+1:]...)
-				return
-			}
-		}
-	}
-}
-
 // reliefCooldown is how long an operator is rested after it delivers
 // materially less relief than it claimed (a contract violation), so the
 // advisor stops re-hammering a victim that can't actually free what it
@@ -950,11 +834,11 @@ func (sm *SpillManager) forceSpillLargestOwned(target int64) int64 {
 	return n
 }
 
-// InspectAccounted returns the per-operator footprints for the AccountedOperator
+// Inspect returns the per-operator footprints for the AccountedOperator
 // registry — live operators plus the final snapshots of departed ones (with
 // their peak OwnedBytes restored from accountedPeak). Replaces Inspect() once
 // the executor migrates to the new wire format.
-func (sm *SpillManager) InspectAccounted() []OperatorFootprint {
+func (sm *SpillManager) Inspect() []OperatorFootprint {
 	sm.accountedMu.Lock()
 	defer sm.accountedMu.Unlock()
 	out := make([]OperatorFootprint, 0, len(sm.accounted)+len(sm.departedFootprints))

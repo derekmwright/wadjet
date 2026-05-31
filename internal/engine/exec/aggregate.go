@@ -75,24 +75,24 @@ type HashAggregate struct {
 	Aggs          []AggColumn
 	Spill         *memory.SpillManager // optional: enables spill-to-disk
 	NullGroupCols []string             // GROUPING SETS: columns to output as NULL (legacy per-node)
-	GroupingSets  [][]int             // single-pass grouping sets: column indices within GroupByCols per set
+	GroupingSets  [][]int              // single-pass grouping sets: column indices within GroupByCols per set
 	InputRowHint  int64                // estimated input rows for pre-sizing hash table
 
-	mu            sync.Mutex
-	keys          [][]any
-	serializedKeys []string // pre-serialized keys matching h.keys order
-	groupColIdx   []int
-	aggColIdx     []int
-	aggColIdx2    []int                  // second column indices for two-column aggregates
-	groupColTypes  []batch.TypeID
-	aggUpdaters       []kernel.RowAggUpdater // resolved typed updaters
-	aggUpdatersNoNull []kernel.RowAggUpdater // no-null-check variants
-	batchUpdaters     []kernel.RowAggUpdater // per-batch updater selection (reusable)
-	batchAggKernels []kernel.BatchAggKernel // batch-level kernels (scalar aggregate fast path)
-	scalarAccs     []kernel.Accumulator    // accumulators for scalar aggregate fast path
-	isScalarAgg    bool                    // true when len(GroupByCols)==0 and all aggs are batch-able
-	aggF64Extract  []float64Extractor      // pre-resolved float64 extractors per agg column (variance, corr, etc.)
-	aggF64Extract2 []float64Extractor      // pre-resolved float64 extractors for second column (corr, covar)
+	mu                sync.Mutex
+	keys              [][]any
+	serializedKeys    []string // pre-serialized keys matching h.keys order
+	groupColIdx       []int
+	aggColIdx         []int
+	aggColIdx2        []int // second column indices for two-column aggregates
+	groupColTypes     []batch.TypeID
+	aggUpdaters       []kernel.RowAggUpdater  // resolved typed updaters
+	aggUpdatersNoNull []kernel.RowAggUpdater  // no-null-check variants
+	batchUpdaters     []kernel.RowAggUpdater  // per-batch updater selection (reusable)
+	batchAggKernels   []kernel.BatchAggKernel // batch-level kernels (scalar aggregate fast path)
+	scalarAccs        []kernel.Accumulator    // accumulators for scalar aggregate fast path
+	isScalarAgg       bool                    // true when len(GroupByCols)==0 and all aggs are batch-able
+	aggF64Extract     []float64Extractor      // pre-resolved float64 extractors per agg column (variance, corr, etc.)
+	aggF64Extract2    []float64Extractor      // pre-resolved float64 extractors for second column (corr, covar)
 
 	// Single-column integer GROUP BY fast path: uses intHashTable
 	// instead of serializing keys to strings and using map[string].
@@ -111,10 +111,10 @@ type HashAggregate struct {
 	// into intHashTable, with chain verification for collision handling.
 	// Uses SoA scatter like the single-int path.
 	useDualIntGroupKey  bool
-	dualIntGroupKeyCols [2]int     // column indices for the two GROUP BY columns
-	dualIntKeysA        []int64    // first key per group
-	dualIntKeysB        []int64    // second key per group
-	dualIntNextGroup    []int32    // chain for hash collisions (-1 = end)
+	dualIntGroupKeyCols [2]int  // column indices for the two GROUP BY columns
+	dualIntKeysA        []int64 // first key per group
+	dualIntKeysB        []int64 // second key per group
+	dualIntNextGroup    []int32 // chain for hash collisions (-1 = end)
 
 	// Multi-column compact GROUP BY fast path: binary-encoded key packed into int64.
 	// Uses intHashTable for lookup. Falls back to generic path if key exceeds 8 bytes.
@@ -137,15 +137,15 @@ type HashAggregate struct {
 	strGroupIndex  *strHashTable
 	strGroupStates []*groupState
 
-	resolved       bool
-	needsDistinct  bool // true if any agg uses distinctSets
-	needsExtra     bool // true if any agg uses extraState
-	simpleAggs     bool // true when every Agg fits the kernel.Accumulator shape
-	                   // (SUM, COUNT, MIN, MAX, AVG only — no distinct/extra state).
-	                   // Drives external-merge partial-state spill eligibility.
-	keyBuf         []byte
-	inputSchema   []parquet.Column // schema from first input batch (for spill recovery)
-	spillFiles    []string
+	resolved      bool
+	needsDistinct bool // true if any agg uses distinctSets
+	needsExtra    bool // true if any agg uses extraState
+	simpleAggs    bool // true when every Agg fits the kernel.Accumulator shape
+	// (SUM, COUNT, MIN, MAX, AVG only — no distinct/extra state).
+	// Drives external-merge partial-state spill eligibility.
+	keyBuf      []byte
+	inputSchema []parquet.Column // schema from first input batch (for spill recovery)
+	spillFiles  []string
 	// partialSpillFiles holds external-merge spill files (sorted partial group
 	// state). These are produced when simpleAggs && one of the SoA paths is in
 	// use; Finalize k-way merges them. Distinct from spillFiles because the
@@ -170,12 +170,6 @@ type HashAggregate struct {
 	// partitions drained so successive calls chip away at different slices
 	// instead of churning the same one and re-rebuilding the same groups.
 	nextDrainPartition uint32
-	// unregisterSpillable, when non-nil, deregisters this aggregate from the
-	// SpillManager's cooperative-spill registry. Set on first Consume when
-	// canUseExternalMerge is true; cleared in Finalize once the merge has
-	// materialized the final result (no more reclaimable state) or in Close
-	// as a backstop.
-	unregisterSpillable func()
 	// AccountedOperator (Phase 2) state. accInstanceID is the process-unique
 	// id; accState is the lifecycle (memory.OpState) read/written atomically so
 	// Inspect (called off the pipeline goroutine) sees a consistent state.
@@ -201,11 +195,10 @@ type HashAggregate struct {
 	// one file per Consume, producing millions of ~4 KB files at SF100 and
 	// making Finalize unable to complete in reasonable time.
 	spillBuffer      []map[string]any
-	spillBufferBytes int64 // tracker bytes attributable to rows in spillBuffer
-	trackedGroupMem     int64 // bytes charged to Spill tracker for group state growth
-	peakTrackedGroupMem int64 // high-water mark of trackedGroupMem; surfaced via Inspectable
-	outputPos     int              // position in keys for batched Next() output
-	gsPool        groupStatePool   // chunk allocator for groupState (reduces GC pressure)
+	spillBufferBytes int64          // tracker bytes attributable to rows in spillBuffer
+	trackedGroupMem  int64          // bytes charged to Spill tracker for group state growth
+	outputPos        int            // position in keys for batched Next() output
+	gsPool           groupStatePool // chunk allocator for groupState (reduces GC pressure)
 }
 
 // spillFileTargetBytes is the approximate size at which the spill buffer is
@@ -347,9 +340,6 @@ func (h *HashAggregate) reconcileGroupMemory() {
 		delta := actual - h.trackedGroupMem
 		h.Spill.TrackBatch(delta)
 		h.trackedGroupMem = actual
-		if h.trackedGroupMem > h.peakTrackedGroupMem {
-			h.peakTrackedGroupMem = h.trackedGroupMem
-		}
 		// Publish the true owned footprint so the SpillManager drift-backstop
 		// (OwnedTotal vs tracker.Used) has a real number; without this the
 		// published total stays 0 and the backstop misreads drift as 100%.
@@ -505,15 +495,11 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 		h.resolveIndices(b)
 		// Cooperative-spill registration. resolveIndices populates the path
 		// flags (useIntGroupKey etc.) that canUseExternalMerge inspects, so
-		// register only after they've been set. The Spill manager skips us
-		// until SpillFootprint > 0, so registering on a brand-new aggregate
+		// register only after they've been set. Inspect reports SpillableBytes
+		// == 0 until rows arrive, so registering on a brand-new aggregate
 		// before any rows arrive doesn't disturb peer operators' relief
 		// targeting.
-		if h.Spill != nil && h.unregisterSpillable == nil && h.canUseExternalMerge() {
-			h.unregisterSpillable = h.Spill.RegisterSpillable(h)
-			// Dual-register with the Phase-2 AccountedOperator registry. Both
-			// coexist during the migration; the legacy RegisterSpillable call
-			// is removed once RequestRelief reads the accounted registry.
+		if h.Spill != nil && h.unregisterAccounted == nil && h.canUseExternalMerge() {
 			h.accInstanceID = memory.NextInstanceID()
 			h.accState.Store(int32(memory.OpActive))
 			h.unregisterAccounted = h.Spill.RegisterAccounted(h)
@@ -1012,8 +998,9 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 // Uses intHashTable for group lookup — no key serialization, no string allocation.
 //
 // Two-phase SoA (Struct of Arrays) approach:
-//   Phase 1: Hash lookup — compute group indices for all rows in the batch.
-//   Phase 2: Per-aggregate typed scatter update using flat accumulator arrays.
+//
+//	Phase 1: Hash lookup — compute group indices for all rows in the batch.
+//	Phase 2: Per-aggregate typed scatter update using flat accumulator arrays.
 //
 // This eliminates per-row function pointer overhead (indirect calls can't inline),
 // removes the inner nAggs loop per row, and stores accumulators in contiguous arrays
@@ -2098,10 +2085,6 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 	// spill target — it's about to drain its in-memory state into the merger.
 	// Deregister here so peer operators don't waste a RequestRelief call on
 	// us mid-finalize. Close still calls unregister as a backstop.
-	if h.unregisterSpillable != nil {
-		h.unregisterSpillable()
-		h.unregisterSpillable = nil
-	}
 	if h.unregisterAccounted != nil {
 		h.accState.Store(int32(memory.OpClosed))
 		h.unregisterAccounted()
@@ -2174,10 +2157,6 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 // shared tracker for the lifetime of the process; see HashJoin.Close for
 // the full background.
 func (h *HashAggregate) Close() error {
-	if h.unregisterSpillable != nil {
-		h.unregisterSpillable()
-		h.unregisterSpillable = nil
-	}
 	if h.unregisterAccounted != nil {
 		h.accState.Store(int32(memory.OpClosed))
 		h.unregisterAccounted()
@@ -2200,47 +2179,6 @@ func (h *HashAggregate) Close() error {
 	h.closePartialMerger()
 	h.spillBuffer = nil
 	return nil
-}
-
-// SpillFootprint reports the bytes of in-memory hash-table state this
-// aggregate currently holds and can release via SpillSome. Returns 0 when
-// the aggregate is in a configuration that doesn't support partial-state
-// spill (extra-state aggs, grouping sets, scalar) — those cases must use
-// the legacy raw-row spill path which can't be triggered cooperatively.
-//
-// Implements memory.Spillable.
-func (h *HashAggregate) SpillFootprint() int64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.Spill == nil {
-		return 0
-	}
-	if !h.canUseExternalMerge() {
-		return 0
-	}
-	// trackedGroupMem reflects what we've reported to the SpillManager's
-	// tracker. Use it directly so RequestRelief's "largest contributor"
-	// arithmetic matches the tracker's view rather than our internal
-	// estimate.
-	return h.trackedGroupMem
-}
-
-// SpillableName implements memory.Inspectable. Identifies the aggregate by
-// its group-by columns; falls back to "HashAggregate" when the column list
-// is empty (scalar aggregate).
-func (h *HashAggregate) SpillableName() string {
-	if len(h.GroupByCols) == 0 {
-		return "HashAggregate"
-	}
-	return "HashAggregate/group_by=" + strings.Join(h.GroupByCols, ",")
-}
-
-// PeakFootprint implements memory.Inspectable: returns the high-water mark
-// of trackedGroupMem observed during the aggregate's lifetime.
-func (h *HashAggregate) PeakFootprint() int64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.peakTrackedGroupMem
 }
 
 // Inspect implements memory.AccountedOperator. Wait-free w.r.t. the registry
@@ -3676,4 +3614,3 @@ func (h *HashAggregate) rebuildFlatAccums(b *batch.RecordBatch) {
 		}
 	}
 }
-

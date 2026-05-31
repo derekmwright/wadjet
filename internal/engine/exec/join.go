@@ -43,17 +43,17 @@ type HashJoin struct {
 	LeftKeys  []string // join key columns from left (probe) side
 	RightKeys []string // join key columns from right (build) side
 
-	mu           sync.Mutex
-	buildBatches []*batch.RecordBatch // columnar storage of build side
-	strIndex     *strHashTable     // arena-based hash table for string keys (general path)
-	intIndex     *intHashTable    // fast path: single-column integer join key
-	arena        []buildRef           // flat storage for all build refs
-	arenaNext    []int32              // chain: arenaNext[i] = next arena index for same key (-1 = end)
-	useIntKey    bool                 // true when single int32/int64 join key detected
-	useDualIntKey bool               // true when exactly two int32/int64 join keys
-	buildDone    bool
-	buildSchema  []parquet.Column
-	buildRows    int64 // total rows in build side
+	mu            sync.Mutex
+	buildBatches  []*batch.RecordBatch // columnar storage of build side
+	strIndex      *strHashTable        // arena-based hash table for string keys (general path)
+	intIndex      *intHashTable        // fast path: single-column integer join key
+	arena         []buildRef           // flat storage for all build refs
+	arenaNext     []int32              // chain: arenaNext[i] = next arena index for same key (-1 = end)
+	useIntKey     bool                 // true when single int32/int64 join key detected
+	useDualIntKey bool                 // true when exactly two int32/int64 join keys
+	buildDone     bool
+	buildSchema   []parquet.Column
+	buildRows     int64 // total rows in build side
 
 	// Memory tracking (optional). When set, Reserve() is called for each
 	// build-side batch. If the budget is exceeded, Build returns ErrMemoryExceeded.
@@ -118,12 +118,6 @@ type HashJoin struct {
 	// rather than resetting the entire shared tracker (which would wipe other
 	// concurrent builds' accounting).
 	trackedMem int64
-
-	// peakTrackedMem is the high-water mark of trackedMem. Surfaced via the
-	// memory.Inspectable interface for per-operator peak attribution at task
-	// end (see internal/worker/executor.go). Updated under h.mu wherever
-	// trackedMem is incremented.
-	peakTrackedMem int64
 
 	// AccountedOperator (Phase 2) state — see HashAggregate for the contract.
 	// Registered during Build only (the spill-eligible phase); accState is read
@@ -628,9 +622,9 @@ func (h *HashJoin) hashTableOverhead() int64 {
 		size += h.strIndex.MemoryUsage()
 	}
 	size += int64(cap(h.arena)) * 8     // buildRef = 8 bytes
-	size += int64(cap(h.arenaNext)) * 4  // int32 = 4 bytes
-	size += int64(cap(h.arenaMatched))   // bool = 1 byte
-	size += int64(len(h.bloom)) * 8      // uint64 = 8 bytes
+	size += int64(cap(h.arenaNext)) * 4 // int32 = 4 bytes
+	size += int64(cap(h.arenaMatched))  // bool = 1 byte
+	size += int64(len(h.bloom)) * 8     // uint64 = 8 bytes
 	return size
 }
 
@@ -647,9 +641,6 @@ func (h *HashJoin) reconcileHashMemory() {
 		h.MemTracker.ForceReserve(delta) // always track; triggers ShouldSpill sooner
 		h.trackedHashOverhead = actual
 		h.trackedMem += delta
-		if h.trackedMem > h.peakTrackedMem {
-			h.peakTrackedMem = h.trackedMem
-		}
 		// Publish the true owned footprint for the drift-backstop. keyBuf is
 		// scratch we also own; fold it in so OwnedTotal is honest.
 		if h.accInstanceID != 0 {
@@ -696,10 +687,8 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// spillBuildBatches reactively allocates spillState mid-build, the
 	// operator becomes a viable target without any additional registration.
 	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
-		unregister := h.Spill.RegisterSpillable(h)
-		defer unregister()
-		// Dual-register with the Phase-2 AccountedOperator registry for the
-		// duration of Build (the spill-eligible phase).
+		// Register with the relief registry for the duration of Build (the
+		// spill-eligible phase).
 		h.accInstanceID = memory.NextInstanceID()
 		h.accState.Store(int32(memory.OpActive))
 		unregisterAccounted := h.Spill.RegisterAccounted(h)
@@ -901,9 +890,6 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				}
 			}
 			h.trackedMem += cost
-			if h.trackedMem > h.peakTrackedMem {
-				h.peakTrackedMem = h.trackedMem
-			}
 		}
 
 		// If spill state is active, route new batches through partitioning
@@ -1887,8 +1873,6 @@ func bloomHashBytes(key []byte) uint64 {
 	return h ^ (h >> 32)
 }
 
-
-
 // spillBuildBatches partitions current build batches by hash and spills the
 // largest partition(s) to disk. Must be called with h.mu held.
 // neededBytes is the amount of additional memory needed (0 = just reduce to
@@ -2323,14 +2307,14 @@ type matchPair struct {
 
 // HashJoinProbe is a UnaryOperator that probes the build-side hash table.
 type HashJoinProbe struct {
-	join       *HashJoin
-	pairsBuf   []matchPair // reusable buffer to avoid per-batch allocation
-	sortBuf    []matchPair // reusable buffer for counting sort scratch space
-	semiSelBuf []uint32    // reusable selection vector for semi/anti join output
-	lookupBuf  []buildRef  // reusable buffer for lookupBuild results
-	indexBuf      []int  // reusable buffer for probe-side gather indices
-	buildIndexBuf []int  // reusable buffer for build-side gather indices
-	keyBuf        []byte // per-probe key serialization buffer (avoids race on shared h.keyBuf)
+	join          *HashJoin
+	pairsBuf      []matchPair // reusable buffer to avoid per-batch allocation
+	sortBuf       []matchPair // reusable buffer for counting sort scratch space
+	semiSelBuf    []uint32    // reusable selection vector for semi/anti join output
+	lookupBuf     []buildRef  // reusable buffer for lookupBuild results
+	indexBuf      []int       // reusable buffer for probe-side gather indices
+	buildIndexBuf []int       // reusable buffer for build-side gather indices
+	keyBuf        []byte      // per-probe key serialization buffer (avoids race on shared h.keyBuf)
 
 	// Cached output schema and column mapping (computed once on first batch)
 	cachedSchema  []parquet.Column
@@ -2360,12 +2344,12 @@ type HashJoinProbe struct {
 	spillFlushPartIdx  int                 // index of next partition to process
 	spillFlushPrefetch chan preloadedBuild // pre-fetch channel for next partition's build data
 	// Per-current-partition state.
-	spillFlushTmpJoin     *HashJoin          // hash join built for the current partition
-	spillFlushTmpProbe    *HashJoinProbe     // probe operator for the current partition
-	spillFlushProbeFiles  []string           // probe spill files for the current partition
-	spillFlushProbeFileIx int                // next file to open in spillFlushProbeFiles
-	spillFlushReader      *spillBatchReader  // open reader for the current probe file
-	spillFlushDone        bool               // current partition's probe batches all consumed; emit unmatched/move on
+	spillFlushTmpJoin     *HashJoin         // hash join built for the current partition
+	spillFlushTmpProbe    *HashJoinProbe    // probe operator for the current partition
+	spillFlushProbeFiles  []string          // probe spill files for the current partition
+	spillFlushProbeFileIx int               // next file to open in spillFlushProbeFiles
+	spillFlushReader      *spillBatchReader // open reader for the current probe file
+	spillFlushDone        bool              // current partition's probe batches all consumed; emit unmatched/move on
 }
 
 func (p *HashJoinProbe) Init(_ context.Context) error {

@@ -322,7 +322,7 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	// shared spill, attribution is union-of-all-active — accept that loss
 	// of per-task isolation as the cost of the lightweight wiring.
 	if e.sharedSpill != nil {
-		snaps := e.sharedSpill.InspectAccounted()
+		snaps := e.sharedSpill.Inspect()
 		if len(snaps) > 0 {
 			result.TaskStats.OperatorPeaks = make([]distributed.OperatorPeak, len(snaps))
 			for i, s := range snaps {
@@ -1328,7 +1328,7 @@ func (e *Executor) collectTaskStats(spill *memory.SpillManager, tracker *memory.
 	// signal we read from worker logs when investigating which operator
 	// pinned the heap on a given task (Q18-class debugging).
 	if spill != nil {
-		snaps := spill.InspectAccounted()
+		snaps := spill.Inspect()
 		if len(snaps) > 0 {
 			stats.OperatorPeaks = make([]distributed.OperatorPeak, len(snaps))
 			for i, s := range snaps {

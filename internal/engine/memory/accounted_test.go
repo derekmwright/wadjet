@@ -79,12 +79,12 @@ func TestNextInstanceID_NeverCollidesWithReservoirOwner(t *testing.T) {
 	}
 }
 
-func TestInspectAccounted_ClosedReturnsZeros(t *testing.T) {
+func TestInspect_ClosedReturnsZeros(t *testing.T) {
 	sm := newSM(t)
 	op := &fakeAccountedOp{id: NextInstanceID(), name: "op", owned: 1000, spillable: 1000, state: OpClosed}
 	unreg := sm.RegisterAccounted(op)
 	defer unreg()
-	got := sm.InspectAccounted()
+	got := sm.Inspect()
 	if len(got) != 1 {
 		t.Fatalf("expected 1 footprint, got %d", len(got))
 	}
