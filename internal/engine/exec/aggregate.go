@@ -557,7 +557,7 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 		// buffer rows on disk and re-aggregate in Finalize.
 		rows := b.ToRows()
 		h.spillBuffer = append(h.spillBuffer, rows...)
-		h.spillBufferBytes += EstimateBatchBytes(b)
+		h.spillBufferBytes += b.MemBytes()
 		if h.spillBufferBytes >= spillFileTargetBytes {
 			if err := h.flushSpillBuffer(); err != nil {
 				return err

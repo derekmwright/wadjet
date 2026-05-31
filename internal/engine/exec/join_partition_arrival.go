@@ -119,7 +119,7 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 		// path, we Reserve and fall back to spilling on over-budget. Unlike
 		// the legacy path, the spill is incremental — pick one partition and
 		// evict it instead of repartitioning the whole flat state.
-		cost := EstimateBatchBytes(b)
+		cost := hashBuildBytes(b)
 		if err := h.MemTracker.Reserve(cost); err != nil {
 			if spillErr := h.spillUntilCanReserve(cost); spillErr != nil {
 				h.mu.Unlock()
@@ -197,7 +197,7 @@ func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) error {
 			continue
 		}
 		partBatch := compactBatchForRows(b, rows)
-		partBytes := EstimateBatchBytes(partBatch)
+		partBytes := hashBuildBytes(partBatch)
 
 		if ss.spilledParts[partID] {
 			if err := ss.writeBuildBatch(partID, partBatch); err != nil {

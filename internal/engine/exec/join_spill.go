@@ -265,7 +265,7 @@ func (h *HashJoin) partitionBuildBatch(b *batch.RecordBatch) {
 		}
 		partBatch := compactBatchForRows(b, rows)
 		ss.partBuildBatches[partID] = append(ss.partBuildBatches[partID], partBatch)
-		ss.partMemory[partID] += EstimateBatchBytes(partBatch)
+		ss.partMemory[partID] += hashBuildBytes(partBatch)
 	}
 }
 

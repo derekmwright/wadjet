@@ -658,30 +658,14 @@ func (h *HashJoin) reconcileHashMemory() {
 	}
 }
 
-// EstimateBatchBytes estimates the memory footprint of a RecordBatch.
-func EstimateBatchBytes(b *batch.RecordBatch) int64 {
-	var size int64
-	for _, v := range b.Columns {
-		switch v.Type {
-		case batch.TypeBool:
-			size += int64(len(v.BoolData))
-		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-			size += int64(len(v.Int32Data)) * 4
-		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
-			size += int64(len(v.Int64Data)) * 8
-		case batch.TypeFloat32:
-			size += int64(len(v.Float32Data)) * 4
-		case batch.TypeFloat64:
-			size += int64(len(v.Float64Data)) * 8
-		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-			size += int64(b.Len) * 48 // rough estimate: offset array + string data
-		case batch.TypeDecimal:
-			size += int64(len(v.DecimalData.Data)) * 16
-		}
-	}
-	// Hash index overhead: ~40 bytes per row (key string + buildRef + map bucket)
-	size += int64(b.Len) * 40
-	return size
+// hashBuildBytes is the HashJoin build-side reservation: the batch's honest
+// column footprint (RecordBatch.MemBytes) plus the ~40 B/row hash-index charge
+// (key string + buildRef + map bucket). Only HashJoin build paths add the hash
+// charge — every other operator reserves b.MemBytes() directly. This replaces
+// the old EstimateBatchBytes, whose per-type estimate (notably b.Len*48 for
+// string columns) is now subsumed by the byte-true MemBytes accounting.
+func hashBuildBytes(b *batch.RecordBatch) int64 {
+	return b.MemBytes() + int64(b.Len)*40
 }
 
 // Build consumes all rows from the build (right) side into the columnar hash table.
@@ -898,7 +882,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 
 		// Track memory if budget is set
 		if h.MemTracker != nil {
-			cost := EstimateBatchBytes(b)
+			cost := hashBuildBytes(b)
 			if err := h.MemTracker.Reserve(cost); err != nil {
 				// Try spilling before giving up
 				if h.Spill != nil {

@@ -62,7 +62,7 @@ func TestIntKeyFromVector(t *testing.T) {
 	}
 }
 
-func TestEstimateBatchBytes(t *testing.T) {
+func TestHashBuildBytes(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "b", Type: parquet.TypeBool},
 		{Name: "i32", Type: parquet.TypeInt32},
@@ -73,9 +73,12 @@ func TestEstimateBatchBytes(t *testing.T) {
 		{Name: "d", Type: parquet.TypeDecimal},
 	}
 	b := batch.NewRecordBatch(schema, 10)
-	size := EstimateBatchBytes(b)
-	if size <= 0 {
-		t.Fatalf("expected positive size, got %d", size)
+	// hashBuildBytes = honest MemBytes + the 40 B/row hash-index charge.
+	if got, want := hashBuildBytes(b), b.MemBytes()+int64(b.Len)*40; got != want {
+		t.Fatalf("hashBuildBytes = %d, want %d (MemBytes=%d + Len*40)", got, want, b.MemBytes())
+	}
+	if hashBuildBytes(b) <= 0 {
+		t.Fatalf("expected positive size, got %d", hashBuildBytes(b))
 	}
 }
 
