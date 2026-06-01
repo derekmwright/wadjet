@@ -125,8 +125,8 @@ func main() {
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = auto-detect from cgroup, or unlimited)")
 	rootCmd.PersistentFlags().Int64Var(&sharedPoolBudget, "shared-pool-budget", 0, "Worker-wide shared memory pool in bytes (0 = auto-detect: envelope minus cache). All concurrent tasks Reserve against this pool.")
 	rootCmd.PersistentFlags().BoolVar(&spillFloatingBudget, "spill-floating-budget", false, "Activate the floating-budget spill threshold (deploy-gated; requires Phase-4 mmap RSS accounting). Default false = tuned static 40%/90% thresholds.")
-	rootCmd.PersistentFlags().BoolVar(&mmapRelief, "mmap-relief", false, "Enable MADV_DONTNEED relief of cold mmap'd cache files under heap pressure (deploy-gated). Default false = dormant (no tracking, no syscall).")
-	rootCmd.PersistentFlags().Int64Var(&mmapReliefThresholdMB, "mmap-relief-threshold-mb", 4096, "Non-heap-resident (RSS−HeapInuse) ceiling in MB at which mmap relief fires (only when --mmap-relief is set).")
+	rootCmd.PersistentFlags().BoolVar(&mmapRelief, "mmap-relief", false, "Enable MADV_DONTNEED relief of cold mmap'd cache files when total RSS exceeds the ceiling (deploy-gated). Default false = dormant (no tracking, no syscall).")
+	rootCmd.PersistentFlags().Int64Var(&mmapReliefThresholdMB, "mmap-relief-threshold-mb", 16000, "Total process RSS ceiling in MB; when --mmap-relief is set, relieve the coldest mmap'd cache files to bring RSS back to this level. Tune below the worker cgroup memory.max so relief has headroom.")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
 

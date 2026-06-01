@@ -29,9 +29,12 @@ import (
 // MADV_DONTNEED relief. Set once at worker startup via SetMmapRelief.
 var mmapReliefEnabled atomic.Bool
 
-// mmapReliefThresholdBytes is the non-heap-resident (RSS − HeapInuse) ceiling at
-// or above which the stats loop starts relieving the coldest mappings, down to
-// this level. Tunable via --mmap-relief-threshold-mb; the deploy A/B sets it.
+// mmapReliefThresholdBytes is the TOTAL process RSS ceiling at or above which
+// the stats loop relieves the coldest mappings, bringing RSS back to this level.
+// RSS (not Go heap) is the right signal — mmap page cache counts toward the
+// cgroup memory.max / OOM but not toward GOMEMLIMIT. Tunable via
+// --mmap-relief-threshold-mb; set below the worker memory.max so relief has
+// headroom (SF100 Run 2 showed heap-pressure gating never fires for mmap).
 var mmapReliefThresholdBytes atomic.Int64
 
 // SetMmapRelief configures the relief mechanism from worker config. thresholdMB

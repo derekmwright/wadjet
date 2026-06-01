@@ -123,9 +123,9 @@ variable "mmap_relief" {
 }
 
 variable "mmap_relief_threshold_mb" {
-  description = "--mmap-relief-threshold-mb: non-heap-resident (RSS−HeapInuse) ceiling in MB at which relief fires. Only used when mmap_relief = true."
+  description = "--mmap-relief-threshold-mb: TOTAL process RSS ceiling in MB; relieve cold mmap to bring RSS back to this level. Set below the worker memory.max (e.g. ~16000 on the ~20 GB SF100 c7gd per-proc envelope). Only used when mmap_relief = true."
   type        = number
-  default     = 6000
+  default     = 16000
 }
 
 variable "spill_floating_budget" {

@@ -57,9 +57,11 @@ type Config struct {
 	// files under heap pressure. Default false: fully dormant (no region
 	// tracking, no per-Next cost, no syscall). Deploy-gated.
 	MmapRelief bool
-	// MmapReliefThresholdMB is the non-heap-resident (RSS − HeapInuse) ceiling
-	// in MB at/above which relief fires, down to this level. 0 leaves the
-	// default. Only meaningful when MmapRelief is true.
+	// MmapReliefThresholdMB is the TOTAL process RSS ceiling in MB at/above
+	// which relief MADV_DONTNEEDs the coldest mmap to bring RSS back down. Tune
+	// below the worker's cgroup memory.max so relief has headroom (e.g. ~16000
+	// on a ~20 GB per-proc envelope). 0 leaves the default. Only meaningful when
+	// MmapRelief is true.
 	MmapReliefThresholdMB int64
 }
 
@@ -1121,20 +1123,28 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 				"gc_delta", gcDelta,
 				"gc_pause_delta_ms", pauseDeltaNs/1_000_000)
 
-			// Phase-5 mmap relief (dormant unless --mmap-relief): when the
-			// process is under genuine heap pressure AND the non-heap resident
-			// working set exceeds the threshold, MADV_DONTNEED the coldest
-			// mappings down to the threshold. Pressure-gated so we never pay
-			// re-fault cost when there's headroom. Cadence is the 30s stats tick
-			// for now — deploy data decides whether a faster loop is needed.
+			// Phase-5 mmap relief (dormant unless --mmap-relief): when TOTAL
+			// process RSS exceeds the configured ceiling, MADV_DONTNEED the
+			// coldest mappings to bring RSS back to the ceiling. Only cold mmap
+			// page cache is reclaimable, so we target (RSS − ceiling) bytes of it.
+			//
+			// The trigger is RSS-vs-ceiling, NOT heap pressure: mmap'd page cache
+			// is not Go heap, so HeapAlloc/GOMEMLIMIT stays low even at multi-GB
+			// mmap — gating on HeapPressureExceeded() meant relief never fired
+			// (SF100 Run 2, 2026-06-01: worker hit 9.4 GB mmap_rss > threshold but
+			// relief_events=0 because Go heap was nowhere near GOMEMLIMIT). RSS is
+			// what counts toward the cgroup memory.max / OOM, so it is the right
+			// pressure signal. The ceiling is deploy-tuned per worker envelope,
+			// set below memory.max so relief has headroom to act.
 			if mmapReliefEnabled.Load() {
-				thresh := mmapReliefThresholdBytes.Load()
-				if thresh > 0 && mmapMB*(1<<20) > thresh && memory.HeapPressureExceeded() {
-					if freed := relieveMmap(mmapMB*(1<<20) - thresh); freed > 0 {
+				ceiling := mmapReliefThresholdBytes.Load()
+				if ceiling > 0 && rss > ceiling {
+					if freed := relieveMmap(rss - ceiling); freed > 0 {
 						w.logger.Warn("mmap relief",
 							"freed_mb", freed/(1<<20),
+							"rss_mb", rss/(1<<20),
 							"mmap_rss_mb", mmapMB,
-							"threshold_mb", thresh/(1<<20))
+							"ceiling_mb", ceiling/(1<<20))
 					}
 				}
 			}
