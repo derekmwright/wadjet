@@ -52,6 +52,15 @@ type Config struct {
 	// with reservoirs wired (the floating budget is mmap-blind until Phase-4
 	// RSS-sampling).
 	FloatingBudgetActive bool
+
+	// MmapRelief enables the Phase-5 MADV_DONTNEED relief of cold mmap'd cache
+	// files under heap pressure. Default false: fully dormant (no region
+	// tracking, no per-Next cost, no syscall). Deploy-gated.
+	MmapRelief bool
+	// MmapReliefThresholdMB is the non-heap-resident (RSS − HeapInuse) ceiling
+	// in MB at/above which relief fires, down to this level. 0 leaves the
+	// default. Only meaningful when MmapRelief is true.
+	MmapReliefThresholdMB int64
 }
 
 // DefaultConfig returns default worker configuration.
@@ -165,6 +174,8 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	if cfg.Reservoirs != nil {
 		cfg.Reservoirs.LogInvariant(logger)
 	}
+	// Phase 5: configure mmap relief (dormant unless MmapRelief is set).
+	SetMmapRelief(cfg.MmapRelief, cfg.MmapReliefThresholdMB<<20)
 	// Same-worker LocalStageCache: producers register their local spill
 	// files in here after upload, downstream tasks landing on the same
 	// worker mmap them directly instead of round-tripping S3. Skipped when
@@ -1109,6 +1120,24 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 				"goroutines", ng,
 				"gc_delta", gcDelta,
 				"gc_pause_delta_ms", pauseDeltaNs/1_000_000)
+
+			// Phase-5 mmap relief (dormant unless --mmap-relief): when the
+			// process is under genuine heap pressure AND the non-heap resident
+			// working set exceeds the threshold, MADV_DONTNEED the coldest
+			// mappings down to the threshold. Pressure-gated so we never pay
+			// re-fault cost when there's headroom. Cadence is the 30s stats tick
+			// for now — deploy data decides whether a faster loop is needed.
+			if mmapReliefEnabled.Load() {
+				thresh := mmapReliefThresholdBytes.Load()
+				if thresh > 0 && mmapMB*(1<<20) > thresh && memory.HeapPressureExceeded() {
+					if freed := relieveMmap(mmapMB*(1<<20) - thresh); freed > 0 {
+						w.logger.Warn("mmap relief",
+							"freed_mb", freed/(1<<20),
+							"mmap_rss_mb", mmapMB,
+							"threshold_mb", thresh/(1<<20))
+					}
+				}
+			}
 
 			// Drift WARN is greppable, not pageable (memo §3/C16). Critical at
 			// >50%, high at >20%. Negative drift (sample skew) never trips these.

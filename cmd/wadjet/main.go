@@ -47,48 +47,50 @@ import (
 )
 
 var (
-	mode                string
-	storageType         string
-	dataDir             string
-	endpoint            string
-	accessKey           string
-	secretKey           string
-	bucket              string
-	httpAddr            string
-	natsPort            int
-	natsURL             string
-	configFile          string
-	clusterID           string
-	leafRemotes         []string
-	grpcAddr            string
-	memoryBudget        int64
-	sharedPoolBudget    int64
-	spillFloatingBudget bool
-	spillDir            string
-	resultStoreBytes    int64
-	pgAddr              string
-	pgTLSCert           string
-	pgTLSKey            string
-	queryTimeout        string
-	maxConcurrentQry    int
-	natsStoreDir        string
-	geoipCityDB         string
-	geoipASNDB          string
-	useSSL              bool
-	s3Region            string
-	maxConcurrent       int
-	cacheBytes          int64
-	logLevel            string
-	natsTLSCert         string
-	natsTLSKey          string
-	natsTLSCA           string
-	otelEndpoint        string
-	otelInsecure        bool
-	metricsAddr         string
-	enableAlerts        bool
-	dataPlane           string
-	dataPlaneAddr       string
-	coordDataPlane      string
+	mode                  string
+	storageType           string
+	dataDir               string
+	endpoint              string
+	accessKey             string
+	secretKey             string
+	bucket                string
+	httpAddr              string
+	natsPort              int
+	natsURL               string
+	configFile            string
+	clusterID             string
+	leafRemotes           []string
+	grpcAddr              string
+	memoryBudget          int64
+	sharedPoolBudget      int64
+	spillFloatingBudget   bool
+	mmapRelief            bool
+	mmapReliefThresholdMB int64
+	spillDir              string
+	resultStoreBytes      int64
+	pgAddr                string
+	pgTLSCert             string
+	pgTLSKey              string
+	queryTimeout          string
+	maxConcurrentQry      int
+	natsStoreDir          string
+	geoipCityDB           string
+	geoipASNDB            string
+	useSSL                bool
+	s3Region              string
+	maxConcurrent         int
+	cacheBytes            int64
+	logLevel              string
+	natsTLSCert           string
+	natsTLSKey            string
+	natsTLSCA             string
+	otelEndpoint          string
+	otelInsecure          bool
+	metricsAddr           string
+	enableAlerts          bool
+	dataPlane             string
+	dataPlaneAddr         string
+	coordDataPlane        string
 )
 
 func main() {
@@ -123,6 +125,8 @@ func main() {
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = auto-detect from cgroup, or unlimited)")
 	rootCmd.PersistentFlags().Int64Var(&sharedPoolBudget, "shared-pool-budget", 0, "Worker-wide shared memory pool in bytes (0 = auto-detect: envelope minus cache). All concurrent tasks Reserve against this pool.")
 	rootCmd.PersistentFlags().BoolVar(&spillFloatingBudget, "spill-floating-budget", false, "Activate the floating-budget spill threshold (deploy-gated; requires Phase-4 mmap RSS accounting). Default false = tuned static 40%/90% thresholds.")
+	rootCmd.PersistentFlags().BoolVar(&mmapRelief, "mmap-relief", false, "Enable MADV_DONTNEED relief of cold mmap'd cache files under heap pressure (deploy-gated). Default false = dormant (no tracking, no syscall).")
+	rootCmd.PersistentFlags().Int64Var(&mmapReliefThresholdMB, "mmap-relief-threshold-mb", 4096, "Non-heap-resident (RSS−HeapInuse) ceiling in MB at which mmap relief fires (only when --mmap-relief is set).")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
 
@@ -791,16 +795,18 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	// must complete first so Start can see the dpClient and skip the
 	// JetStream Fetch loop in --data-plane=grpc mode).
 	w := worker.New(worker.Config{
-		NATSUrl:              embeddedNATS.ClientURL(),
-		ClusterID:            clusterID,
-		MaxConcurrent:        maxConcurrent,
-		CacheBytes:           cacheBytes,
-		MemoryBudget:         memoryBudget,
-		SharedPoolBudget:     sharedPoolBudget,
-		SpillDir:             spillDir,
-		ResultStoreBytes:     resultStoreBytes,
-		Reservoirs:           memory.NewReservoirRegistry(),
-		FloatingBudgetActive: spillFloatingBudget,
+		NATSUrl:               embeddedNATS.ClientURL(),
+		ClusterID:             clusterID,
+		MaxConcurrent:         maxConcurrent,
+		CacheBytes:            cacheBytes,
+		MemoryBudget:          memoryBudget,
+		SharedPoolBudget:      sharedPoolBudget,
+		SpillDir:              spillDir,
+		ResultStoreBytes:      resultStoreBytes,
+		Reservoirs:            memory.NewReservoirRegistry(),
+		FloatingBudgetActive:  spillFloatingBudget,
+		MmapRelief:            mmapRelief,
+		MmapReliefThresholdMB: mmapReliefThresholdMB,
 	}, store, nc, js, logger)
 
 	// Initialize Prometheus metrics (before worker.Start so spill metrics are wired)
@@ -1345,17 +1351,19 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	workerID := "worker-" + uuid.New().String()[:8]
 
 	w := worker.New(worker.Config{
-		WorkerID:             workerID,
-		NATSUrl:              natsAddr,
-		ClusterID:            clusterID,
-		MaxConcurrent:        maxConcurrent,
-		CacheBytes:           cacheBytes,
-		MemoryBudget:         memoryBudget,
-		SharedPoolBudget:     sharedPoolBudget,
-		SpillDir:             spillDir,
-		ResultStoreBytes:     resultStoreBytes,
-		Reservoirs:           memory.NewReservoirRegistry(),
-		FloatingBudgetActive: spillFloatingBudget,
+		WorkerID:              workerID,
+		NATSUrl:               natsAddr,
+		ClusterID:             clusterID,
+		MaxConcurrent:         maxConcurrent,
+		CacheBytes:            cacheBytes,
+		MemoryBudget:          memoryBudget,
+		SharedPoolBudget:      sharedPoolBudget,
+		SpillDir:              spillDir,
+		ResultStoreBytes:      resultStoreBytes,
+		Reservoirs:            memory.NewReservoirRegistry(),
+		FloatingBudgetActive:  spillFloatingBudget,
+		MmapRelief:            mmapRelief,
+		MmapReliefThresholdMB: mmapReliefThresholdMB,
 	}, store, nc, js, logger)
 	w.SetControlConn(controlNC)
 

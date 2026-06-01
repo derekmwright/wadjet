@@ -389,6 +389,12 @@ func HeapBackpressureActive() bool {
 	return heapBackpressureLastValue
 }
 
+// HeapPressureExceeded is the exported view of the process heap-pressure
+// circuit breaker: HeapAlloc > heapPressureRatio × GOMEMLIMIT (100ms-cached).
+// Used by the Phase-5 mmap-relief trigger to gate MADV_DONTNEED on genuine
+// pressure rather than relieving page cache when there is headroom.
+func HeapPressureExceeded() bool { return heapPressureExceeded() }
+
 // heapPressureExceeded reads runtime.MemStats and returns true if the
 // heap is using more than heapPressureRatio of GOMEMLIMIT. Result is
 // cached for 100 ms to keep the per-call overhead near zero on hot paths.

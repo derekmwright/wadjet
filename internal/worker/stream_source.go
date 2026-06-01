@@ -83,8 +83,9 @@ type cachedFileStreamSource struct {
 	// Parquet or no file is open). The reader walks an mmap'd byte slice
 	// owned by mmapData below.
 	chunkReader *shuffleChunkReader
-	mmapData    []byte // mmap'd view of the current local cache file (nil if Parquet)
-	localPath   string // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
+	mmapData    []byte      // mmap'd view of the current local cache file (nil if Parquet)
+	mmapRegion  *mmapRegion // Phase-5 relief handle for mmapData; nil when relief is disabled
+	localPath   string      // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
 
 	// Streaming row-group iterator for the current Parquet file. Yields one
 	// decoded RecordBatch per Next() call; the previous batch is GC-eligible
@@ -154,6 +155,10 @@ func (s *cachedFileStreamSource) SetShard(shardIdx, shardCount int) {
 func (s *cachedFileStreamSource) Init(_ context.Context) error { return nil }
 
 func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	// Phase-5 relief: mark the current mapping as recently used so it isn't
+	// chosen as a cold MADV_DONTNEED victim while actively streamed. nil when
+	// relief is disabled — one branch, no cost on the hot path.
+	s.mmapRegion.touch()
 	for {
 		// Stream from active WSHF chunk reader.
 		if s.chunkReader != nil {
@@ -245,6 +250,11 @@ func (s *cachedFileStreamSource) releaseParquetIter() {
 func (s *cachedFileStreamSource) releaseCurrentFile() {
 	s.chunkReader = nil
 	if s.mmapData != nil {
+		// Unregister from the relief registry BEFORE munmapping so relieveMmap
+		// (which holds the registry lock during its MADV syscalls) can never
+		// advise a region that is about to be unmapped.
+		unregisterMmap(s.mmapRegion)
+		s.mmapRegion = nil
 		_ = syscall.Munmap(s.mmapData)
 		s.mmapData = nil
 	}
@@ -376,6 +386,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	// release them when the iterator exhausts. nil/empty are fine for
 	// the in-memory fallback above.
 	s.mmapData = mmapData
+	s.mmapRegion = registerMmap(mmapData) // nil when relief disabled
 	s.localPath = localPath
 	projCols := reader.Schema().Columns
 	// Apply column projection only when EVERY requested column is present
@@ -541,6 +552,7 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 	cleanupLocal = false
 	s.chunkReader = r
 	s.mmapData = mmapData
+	s.mmapRegion = registerMmap(mmapData) // nil when relief disabled
 	s.localPath = localPath
 	return nil
 }
@@ -633,6 +645,7 @@ func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) erro
 	}
 	s.chunkReader = r
 	s.mmapData = mmapData
+	s.mmapRegion = registerMmap(mmapData) // nil when relief disabled
 	// Intentionally leave s.localPath empty — LocalStageCache owns this file.
 	return nil
 }
