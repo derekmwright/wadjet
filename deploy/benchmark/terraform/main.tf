@@ -604,6 +604,13 @@ resource "aws_instance" "worker" {
             --data-plane=grpc \
             --coord-data-plane="$COORD_IP:${var.data_plane_port}" \
             %{endif~}
+            %{if var.mmap_relief~}
+            --mmap-relief \
+            --mmap-relief-threshold-mb=${var.mmap_relief_threshold_mb} \
+            %{endif~}
+            %{if var.spill_floating_budget~}
+            --spill-floating-budget \
+            %{endif~}
             2>&1 | sed "s/^/[w$idx] /"
         EXIT_CODE=$?
         echo "[w$idx] exited code=$EXIT_CODE, restarting in 5s..."

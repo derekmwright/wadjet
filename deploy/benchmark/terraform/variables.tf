@@ -116,6 +116,24 @@ variable "max_concurrent" {
   default     = 4
 }
 
+variable "mmap_relief" {
+  description = "Pass --mmap-relief to workers: MADV_DONTNEED relief of cold mmap'd cache files under heap pressure (Phase 5). Default false = dormant."
+  type        = bool
+  default     = false
+}
+
+variable "mmap_relief_threshold_mb" {
+  description = "--mmap-relief-threshold-mb: non-heap-resident (RSS−HeapInuse) ceiling in MB at which relief fires. Only used when mmap_relief = true."
+  type        = number
+  default     = 6000
+}
+
+variable "spill_floating_budget" {
+  description = "Pass --spill-floating-budget to workers: activate the floating-budget spill threshold (Phase 3a). Default false = static 40%/90%. Requires mmap relief to be safe."
+  type        = bool
+  default     = false
+}
+
 variable "workers_per_node" {
   description = "Number of independent wadjet worker processes to launch per node. >1 gives crash isolation: when one process OOMs, sibling workers on the same node keep running. Each process gets a per-process memory envelope (auto-derived from /N of total) and registers separately with the coord."
   type        = number
