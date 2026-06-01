@@ -818,10 +818,41 @@ func (sm *SpillManager) inCooldown(id uint64) bool {
 	return nowFunc().Sub(last) < reliefCooldown
 }
 
+// HeapDrift returns the Phase-4 accounting drift in bytes:
+//
+//	HeapInuse − (Tracker.OwnedTotal + Σreservoir.Actual)
+//
+// the unaccounted Go-heap residual (parquet decode arenas, kernel scratch,
+// shuffle decode buffers) that no operator or reservoir owns. The caller
+// supplies heapInuse (from runtime.MemStats) so this method never pays the STW
+// ReadMemStats cost — the worker stats loop already samples it. mmap'd files and
+// spill-readback page cache are absent from HeapInuse AND from the accounting
+// terms, so they're symmetrically excluded (no category error). May be negative
+// (sample skew / eviction); callers report it as-is.
+//
+// NOTE: this is HeapInuse-shaped and deliberately DISTINCT from driftExceeds,
+// which measures OwnedTotal−Used (a within-ledger reserve-vs-published gap that
+// drives the relief backstop). They share only OwnedTotal(); do not unify them.
+func (sm *SpillManager) HeapDrift(heapInuse int64) int64 {
+	var owned int64
+	if sm.tracker != nil {
+		owned = sm.tracker.OwnedTotal()
+	}
+	var reservoirActual int64
+	if sm.reservoirs != nil {
+		reservoirActual = sm.reservoirs.TotalActual()
+	}
+	return heapInuse - owned - reservoirActual
+}
+
 // driftExceeds reports whether the published owned total materially exceeds the
 // tracker's reserved total — i.e. operators own more real heap than the tracker
 // reserved for, signalling an accounting gap. Returns false when the tracker
 // reports nothing (no basis to compare).
+//
+// This is the within-ledger reserve-vs-published gap (OwnedTotal−Used) that
+// gates the RequestRelief backstop — NOT the same as HeapDrift, which is the
+// heap-truth residual (HeapInuse − accounted). Keep the two distinct.
 func (sm *SpillManager) driftExceeds(frac float64) bool {
 	if sm.tracker == nil {
 		return false

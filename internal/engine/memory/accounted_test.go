@@ -221,6 +221,58 @@ func TestShouldSpillFor_ReservoirsWiredButDormant(t *testing.T) {
 	}
 }
 
+// TestHeapDrift: the Phase-4 heap-truth residual HeapInuse − (OwnedTotal +
+// Σreservoir_actual). Distinct from driftExceeds (within-ledger gap).
+func TestHeapDrift(t *testing.T) {
+	t.Run("owned_and_reservoir", func(t *testing.T) {
+		sm := newSM(t)
+		sm.tracker.PublishOwned(1, 300) // OwnedTotal = 300
+		rr := NewReservoirRegistry()
+		rr.Register(NewReservoirFunc("r", 1000, func() int64 { return 200 }))
+		sm.SetReservoirs(rr)
+		// drift = 1000 − 300 − 200 = 500.
+		if got := sm.HeapDrift(1000); got != 500 {
+			t.Fatalf("HeapDrift = %d, want 500", got)
+		}
+	})
+	t.Run("nil_reservoirs", func(t *testing.T) {
+		sm := newSM(t)
+		sm.tracker.PublishOwned(1, 400)
+		// no reservoirs: drift = 1000 − 400 = 600.
+		if got := sm.HeapDrift(1000); got != 600 {
+			t.Fatalf("HeapDrift = %d, want 600", got)
+		}
+	})
+	t.Run("negative_returned_as_is", func(t *testing.T) {
+		sm := newSM(t)
+		sm.tracker.PublishOwned(1, 900)
+		rr := NewReservoirRegistry()
+		rr.Register(NewReservoirFunc("r", 1000, func() int64 { return 300 }))
+		sm.SetReservoirs(rr)
+		// drift = 500 − 900 − 300 = -700 (sample skew): returned as-is, not clamped.
+		if got := sm.HeapDrift(500); got != -700 {
+			t.Fatalf("HeapDrift = %d, want -700 (negative not clamped)", got)
+		}
+	})
+}
+
+// TestDriftExceedsUnchanged guards against accidentally unifying driftExceeds
+// (within-ledger OwnedTotal−Used gap) with HeapDrift (heap-truth residual).
+func TestDriftExceedsUnchanged(t *testing.T) {
+	sm := newSM(t)
+	sm.tracker.ForceReserve(100)     // Used = 100
+	sm.tracker.PublishOwned(1, 1000) // OwnedTotal = 1000 → drift (1000-100)/100 = 9 > 0.20
+	if !sm.driftExceeds(0.20) {
+		t.Fatal("driftExceeds must still measure (OwnedTotal−Used)/Used")
+	}
+	sm2 := newSM(t)
+	sm2.tracker.ForceReserve(1000)
+	sm2.tracker.PublishOwned(1, 1050) // (1050-1000)/1000 = 0.05 < 0.20
+	if sm2.driftExceeds(0.20) {
+		t.Fatal("driftExceeds must not fire at 5% within-ledger gap")
+	}
+}
+
 // TestShouldSpillFor_StaticPathWhenNoReservoirs: without a reservoir registry,
 // the tuned static 40%/90% behavior is preserved (Phase 2 default).
 func TestShouldSpillFor_StaticPathWhenNoReservoirs(t *testing.T) {

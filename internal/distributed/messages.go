@@ -69,24 +69,24 @@ type Task struct {
 	//     full union of build+probe schemas.
 	//   - aggregate / sort tasks: ignored (output schema is determined by
 	//     AggSpecs / SortKeys).
-	Columns         []string          `json:"columns,omitempty"`
-	FilterExprs     []string          `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
+	Columns     []string `json:"columns,omitempty"`
+	FilterExprs []string `json:"filter_exprs,omitempty"` // SQL filter expressions for pushdown
 	// PostFilterExprs are SQL filter expressions applied to the stage's
 	// OUTPUT (post-aggregate/post-join) rather than to raw scan input.
 	// Native-DAG compute stages use this for HAVING and join residual
 	// predicates. FilterExprs vs PostFilterExprs differ in column scope:
 	// FilterExprs references scan columns; PostFilterExprs references
 	// aggregate output cols or joined-schema cols.
-	PostFilterExprs []string          `json:"post_filter_exprs,omitempty"`
+	PostFilterExprs []string `json:"post_filter_exprs,omitempty"`
 
 	// Fused scan-aggregate: partial aggregation done at scan level
 	ScanAggGroupBy []string  `json:"scan_agg_group_by,omitempty"`
 	ScanAggSpecs   []AggSpec `json:"scan_agg_specs,omitempty"`
 
 	// Aggregate-specific
-	GroupByCols []string     `json:"group_by_cols,omitempty"`
-	Aggregates  []AggSpec    `json:"aggregates,omitempty"`
-	InputFiles  []string     `json:"input_files,omitempty"` // results from previous stage
+	GroupByCols []string  `json:"group_by_cols,omitempty"`
+	Aggregates  []AggSpec `json:"aggregates,omitempty"`
+	InputFiles  []string  `json:"input_files,omitempty"` // results from previous stage
 
 	// Sort-specific
 	SortKeys       []SortKeySpec `json:"sort_keys,omitempty"`
@@ -95,17 +95,17 @@ type Task struct {
 	MergePartials  bool          `json:"merge_partials,omitempty"`   // true for final_aggregate: re-aggregate partial results
 
 	// Join-specific
-	JoinType        string   `json:"join_type,omitempty"`        // inner, left, right, full, cross
-	JoinLeftKeys    []string `json:"join_left_keys,omitempty"`   // probe side key columns
-	JoinRightKeys   []string `json:"join_right_keys,omitempty"`  // build side key columns
-	BuildFiles      []string `json:"build_files,omitempty"`      // build (right) side input files
+	JoinType        string   `json:"join_type,omitempty"`         // inner, left, right, full, cross
+	JoinLeftKeys    []string `json:"join_left_keys,omitempty"`    // probe side key columns
+	JoinRightKeys   []string `json:"join_right_keys,omitempty"`   // build side key columns
+	BuildFiles      []string `json:"build_files,omitempty"`       // build (right) side input files
 	BuildTableAlias string   `json:"build_table_alias,omitempty"` // build-side alias for column disambiguation
 	// QualifyAllBuildCols, when true, forces the join executor to emit
 	// build-side columns under their qualified name even when no probe-side
 	// column has the same base name. Set by the planner for self-join scenarios
 	// (Q07's two scans of nation that co-path into the same join chain).
 	QualifyAllBuildCols bool   `json:"qualify_all_build_cols,omitempty"`
-	JoinFilter      string   `json:"join_filter,omitempty"`       // semi/anti join inequality filter expression
+	JoinFilter          string `json:"join_filter,omitempty"` // semi/anti join inequality filter expression
 
 	// Fused join: additional broadcast joins absorbed into a single task.
 	// The worker builds hash tables for each fused join, then chains probes
@@ -116,9 +116,9 @@ type Task struct {
 	WindowCols []WindowColSpec `json:"window_cols,omitempty"`
 
 	// Shuffle-specific
-	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`    // columns to hash-partition on
-	NumPartitions int      `json:"num_partitions,omitempty"`  // number of output partitions
-	PartitionID   int      `json:"partition_id,omitempty"`    // which partition this join task handles
+	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`   // columns to hash-partition on
+	NumPartitions int      `json:"num_partitions,omitempty"` // number of output partitions
+	PartitionID   int      `json:"partition_id,omitempty"`   // which partition this join task handles
 
 	// Dynamic filters carried at the top level for non-fragment task shapes
 	// (TaskTypeShuffle). Fragment tasks carry the same data in OpSpec.DynamicFilters
@@ -128,9 +128,9 @@ type Task struct {
 	DynamicFilters []DynamicFilterSpec `json:"dynamic_filters,omitempty"`
 
 	// Distributed tracing context (W3C Trace Context format)
-	TraceID  string `json:"trace_id,omitempty"`  // 32-char hex
-	SpanID   string `json:"span_id,omitempty"`   // 16-char hex parent span
-	TraceFlags byte  `json:"trace_flags,omitempty"` // 0x01 = sampled
+	TraceID    string `json:"trace_id,omitempty"`    // 32-char hex
+	SpanID     string `json:"span_id,omitempty"`     // 16-char hex parent span
+	TraceFlags byte   `json:"trace_flags,omitempty"` // 0x01 = sampled
 
 	// Identity context (for access control enforcement at workers)
 	IdentityName string `json:"identity_name,omitempty"`
@@ -220,9 +220,9 @@ const (
 	OpShuffleSource OpType = "shuffle_source" // read partition=NNNN/*.wshf for one partition
 
 	// Unary transforms (middle of the pipeline; zero or more).
-	OpFilter           OpType = "filter"            // FilterExprs predicate chain
-	OpHashJoinProbe    OpType = "hash_join_probe"   // shuffle-side hash join: build from BuildFiles, probe upstream
-	OpBroadcastProbe   OpType = "broadcast_probe"   // broadcast hash join: small build replicated to every task
+	OpFilter         OpType = "filter"          // FilterExprs predicate chain
+	OpHashJoinProbe  OpType = "hash_join_probe" // shuffle-side hash join: build from BuildFiles, probe upstream
+	OpBroadcastProbe OpType = "broadcast_probe" // broadcast hash join: small build replicated to every task
 
 	// Pipeline-breaker operators. Consume all input from the upstream chain,
 	// then emit results into the downstream chain. Splits the fragment into
@@ -233,9 +233,9 @@ const (
 	OpSort          OpType = "sort"           // ordered sort, optional top-N limit
 
 	// Sinks (must be last in Operators).
-	OpExchangeSender    OpType = "exchange_sender"     // partitionedShuffleSink: hash-partition into N output files
-	OpUnpartitionedSink OpType = "unpartitioned_sink"  // unpartitionedStageSink: single .wshf output
-	OpGatherSink        OpType = "gather_sink"         // gatherReplySink: stream batches to ReplySubject
+	OpExchangeSender    OpType = "exchange_sender"    // partitionedShuffleSink: hash-partition into N output files
+	OpUnpartitionedSink OpType = "unpartitioned_sink" // unpartitionedStageSink: single .wshf output
+	OpGatherSink        OpType = "gather_sink"        // gatherReplySink: stream batches to ReplySubject
 )
 
 // OpSpec describes one operator within a fragment pipeline. Fields are
@@ -246,10 +246,10 @@ type OpSpec struct {
 	Type OpType `json:"type"`
 
 	// Source operators (OpScan, OpShuffleSource).
-	InputAlias     string   `json:"input_alias,omitempty"`     // logical alias for source-column lookup
-	InputFiles     []string `json:"input_files,omitempty"`     // S3 keys to read
-	InputBucket    string   `json:"input_bucket,omitempty"`    // bucket override; falls back to task.DataBucket
-	Columns        []string `json:"columns,omitempty"`         // projection hint (parquet column pruning)
+	InputAlias     string   `json:"input_alias,omitempty"`  // logical alias for source-column lookup
+	InputFiles     []string `json:"input_files,omitempty"`  // S3 keys to read
+	InputBucket    string   `json:"input_bucket,omitempty"` // bucket override; falls back to task.DataBucket
+	Columns        []string `json:"columns,omitempty"`      // projection hint (parquet column pruning)
 	ScanShardIndex int      `json:"scan_shard_index,omitempty"`
 	ScanShardCount int      `json:"scan_shard_count,omitempty"`
 
@@ -257,17 +257,17 @@ type OpSpec struct {
 	Predicates []string `json:"predicates,omitempty"`
 
 	// OpHashJoinProbe / OpBroadcastProbe.
-	JoinType            string   `json:"join_type,omitempty"`        // inner, left, semi, anti, …
-	LeftKeys            []string `json:"left_keys,omitempty"`        // probe-side keys
-	RightKeys           []string `json:"right_keys,omitempty"`       // build-side keys
+	JoinType            string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …
+	LeftKeys            []string `json:"left_keys,omitempty"`  // probe-side keys
+	RightKeys           []string `json:"right_keys,omitempty"` // build-side keys
 	BuildAlias          string   `json:"build_alias,omitempty"`
-	BuildFiles          []string `json:"build_files,omitempty"`      // build-side input files
-	BuildBucket         string   `json:"build_bucket,omitempty"`     // bucket override for build files
+	BuildFiles          []string `json:"build_files,omitempty"`  // build-side input files
+	BuildBucket         string   `json:"build_bucket,omitempty"` // bucket override for build files
 	JoinFilter          string   `json:"join_filter,omitempty"`
 	BuildRowHint        int64    `json:"build_row_hint,omitempty"`
 	SemiAntiKeyOnly     bool     `json:"semi_anti_key_only,omitempty"`
 	QualifyAllBuildCols bool     `json:"qualify_all_build_cols,omitempty"`
-	OutputColumns       []string `json:"output_columns,omitempty"`   // OutputFilter for primary probe
+	OutputColumns       []string `json:"output_columns,omitempty"` // OutputFilter for primary probe
 
 	// OpExchangeSender (sink).
 	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`
@@ -277,11 +277,11 @@ type OpSpec struct {
 	ReplySubject string `json:"reply_subject,omitempty"`
 
 	// OpHashAggregate (pipeline-breaker).
-	GroupByCols   []string  `json:"group_by_cols,omitempty"`   // empty = scalar aggregate
-	Aggregates    []AggSpec `json:"aggregates,omitempty"`      // per-column aggregations
-	MergeMode     bool      `json:"merge_mode,omitempty"`      // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
-	FoldAvg       bool      `json:"fold_avg,omitempty"`        // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
-	BuildProject  bool      `json:"build_project,omitempty"`   // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
+	GroupByCols  []string  `json:"group_by_cols,omitempty"` // empty = scalar aggregate
+	Aggregates   []AggSpec `json:"aggregates,omitempty"`    // per-column aggregations
+	MergeMode    bool      `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
+	FoldAvg      bool      `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
+	BuildProject bool      `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
 
 	// OpSort (pipeline-breaker).
 	SortKeySpecs []SortKeySpec `json:"sort_key_specs,omitempty"` // ordered key columns
@@ -354,8 +354,8 @@ type SortKeySpec struct {
 
 // WindowColSpec defines a window function column in a task.
 type WindowColSpec struct {
-	Func        string        `json:"func"`         // row_number, rank, dense_rank, sum, count, avg, min, max
-	InputCol    string        `json:"input_col"`     // for aggregate window functions
+	Func        string        `json:"func"`      // row_number, rank, dense_rank, sum, count, avg, min, max
+	InputCol    string        `json:"input_col"` // for aggregate window functions
 	OutputCol   string        `json:"output_col"`
 	PartitionBy []string      `json:"partition_by,omitempty"`
 	OrderBy     []SortKeySpec `json:"order_by,omitempty"`
@@ -366,9 +366,9 @@ type WindowColSpec struct {
 // through this join before passing it to the next fused join (or output).
 type FusedJoinSpec struct {
 	JoinType        string   `json:"join_type"`
-	JoinLeftKeys    []string `json:"join_left_keys"`    // keys from the probe stream
-	JoinRightKeys   []string `json:"join_right_keys"`   // keys in build files
-	BuildFiles      []string `json:"build_files"`       // build-side files (broadcast)
+	JoinLeftKeys    []string `json:"join_left_keys"`  // keys from the probe stream
+	JoinRightKeys   []string `json:"join_right_keys"` // keys in build files
+	BuildFiles      []string `json:"build_files"`     // build-side files (broadcast)
 	BuildTableAlias string   `json:"build_table_alias,omitempty"`
 	JoinFilter      string   `json:"join_filter,omitempty"`
 	FilterExprs     []string `json:"filter_exprs,omitempty"` // post-join filters for this step
@@ -376,12 +376,12 @@ type FusedJoinSpec struct {
 
 // ResultNotification is sent by workers when a task completes.
 type ResultNotification struct {
-	TaskID    string `json:"task_id"`
-	QueryID   string `json:"query_id"`
-	StageID   string `json:"stage_id"`
-	WorkerID  string `json:"worker_id"`
-	Success   bool   `json:"success"`
-	Error     string `json:"error,omitempty"`
+	TaskID   string `json:"task_id"`
+	QueryID  string `json:"query_id"`
+	StageID  string `json:"stage_id"`
+	WorkerID string `json:"worker_id"`
+	Success  bool   `json:"success"`
+	Error    string `json:"error,omitempty"`
 
 	// Result location
 	ResultPath  string   `json:"result_path,omitempty"`
@@ -410,14 +410,18 @@ type ResultNotification struct {
 
 // TaskStats captures per-task execution metrics for debugging.
 type TaskStats struct {
-	MemUsed        int64          `json:"mem_used"`                  // memory tracker usage at completion
-	MemBudget      int64          `json:"mem_budget"`                // memory budget for this task
-	SpillFiles     int            `json:"spill_files"`               // number of spill files written
-	SpillBytes     int64          `json:"spill_bytes"`               // total bytes spilled to disk
-	RSS            int64          `json:"rss"`                       // worker process RSS at task completion
-	PeakHeapMB     int64          `json:"peak_heap_mb"`              // per-task peak HeapAlloc in MB, captured by atomic-max sampler
-	TrackerPeak    int64          `json:"tracker_peak,omitempty"`    // peak of the per-task memory.Tracker (Reserve-tracked bytes)
-	OperatorPeaks  []OperatorPeak `json:"operator_peaks,omitempty"`  // per-Spillable peak attribution at task end
+	MemUsed       int64          `json:"mem_used"`                 // memory tracker usage at completion
+	MemBudget     int64          `json:"mem_budget"`               // memory budget for this task
+	SpillFiles    int            `json:"spill_files"`              // number of spill files written
+	SpillBytes    int64          `json:"spill_bytes"`              // total bytes spilled to disk
+	RSS           int64          `json:"rss"`                      // worker process RSS at task completion
+	PeakHeapMB    int64          `json:"peak_heap_mb"`             // per-task peak HeapAlloc in MB, captured by atomic-max sampler
+	TrackerPeak   int64          `json:"tracker_peak,omitempty"`   // peak of the per-task memory.Tracker (Reserve-tracked bytes)
+	OperatorPeaks []OperatorPeak `json:"operator_peaks,omitempty"` // per-Spillable peak attribution at task end
+	// Phase-4 accounting observability (additive, omitempty; the coordinator
+	// reads neither — diagnostic only).
+	DriftMB   int64 `json:"drift_mb,omitempty"`    // HeapInuse − (operator owned + reservoir actual) at task end
+	MmapRSSMB int64 `json:"mmap_rss_mb,omitempty"` // max(0, RSS − HeapInuse): non-heap resident working set
 }
 
 // OperatorPeak is one entry in TaskStats.OperatorPeaks. Mirrors
@@ -439,15 +443,15 @@ type OperatorPeak struct {
 // WorkerHeartbeat is periodically sent by workers.
 type WorkerHeartbeat struct {
 	WorkerID      string    `json:"worker_id"`
-	ClusterID     string    `json:"cluster_id,omitempty"` // cluster this worker belongs to
-	MaxConcurrent int       `json:"max_concurrent,omitempty"`  // worker's effective task slot count (after auto-tuning); 0 = unknown
+	ClusterID     string    `json:"cluster_id,omitempty"`     // cluster this worker belongs to
+	MaxConcurrent int       `json:"max_concurrent,omitempty"` // worker's effective task slot count (after auto-tuning); 0 = unknown
 	ActiveTasks   int       `json:"active_tasks"`
 	ActiveTaskIDs []string  `json:"active_task_ids,omitempty"` // task IDs currently executing
 	MemoryUsed    int64     `json:"memory_used"`
 	MemoryTotal   int64     `json:"memory_total"`
 	PoolUsed      int64     `json:"pool_used,omitempty"`   // bytes Reserved in the worker's shared memory pool
 	PoolBudget    int64     `json:"pool_budget,omitempty"` // shared memory pool capacity in bytes; pressure = PoolUsed/PoolBudget
-	RSS           int64     `json:"rss,omitempty"`             // process RSS from /proc/self/status
+	RSS           int64     `json:"rss,omitempty"`         // process RSS from /proc/self/status
 	NumGoroutines int       `json:"num_goroutines,omitempty"`
 	Mallocs       uint64    `json:"mallocs,omitempty"`         // cumulative allocation count from runtime.MemStats
 	SpillDiskUsed int64     `json:"spill_disk_used,omitempty"` // bytes used in spill directory
@@ -490,7 +494,7 @@ type DLQEntry struct {
 	WorkerID  string    `json:"worker_id"`
 	TaskType  TaskType  `json:"task_type"`
 	Error     string    `json:"error"`
-	Reason    string    `json:"reason"` // "execution_error", "panic", "marshal_error", "publish_error"
+	Reason    string    `json:"reason"`              // "execution_error", "panic", "marshal_error", "publish_error"
 	TaskData  []byte    `json:"task_data,omitempty"` // original task JSON for replay
 	Timestamp time.Time `json:"timestamp"`
 }

@@ -190,16 +190,32 @@ func (rr *ReservoirRegistry) Available() int64 {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
 
-	var actual int64
-	for _, r := range rr.reservoirs {
-		actual += r.Actual() // soft reservoirs subtract their live actual too
-	}
+	actual := rr.totalActualLocked()
 	headroom := gcHeadroom(limit)
 	avail := limit - actual - headroom
 	if avail < 0 {
 		avail = 0
 	}
 	return avail
+}
+
+// totalActualLocked sums every reservoir's live actual occupancy (soft included
+// — their actual still counts against the budget). Caller holds rr.mu.
+func (rr *ReservoirRegistry) totalActualLocked() int64 {
+	var actual int64
+	for _, r := range rr.reservoirs {
+		actual += r.Actual()
+	}
+	return actual
+}
+
+// TotalActual returns Σ(reservoir actual occupancy) across all registered
+// reservoirs (hard and soft). Used by the Phase-4 drift reconciler to subtract
+// the system-reservoir accounting from HeapInuse.
+func (rr *ReservoirRegistry) TotalActual() int64 {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	return rr.totalActualLocked()
 }
 
 // LogInvariant validates and logs the boot-time invariant without refusing to

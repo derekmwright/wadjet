@@ -971,6 +971,13 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 		}
 		logAttrsEnd = append(logAttrsEnd, "operator_peaks", strings.Join(parts, ","))
 	}
+	// Phase-4 per-task accounting drift + non-heap (mmap) resident working set.
+	if result.TaskStats != nil && result.TaskStats.DriftMB != 0 {
+		logAttrsEnd = append(logAttrsEnd, "drift_mb", result.TaskStats.DriftMB)
+	}
+	if result.TaskStats != nil && result.TaskStats.MmapRSSMB > 0 {
+		logAttrsEnd = append(logAttrsEnd, "mmap_rss_mb", result.TaskStats.MmapRSSMB)
+	}
 	if task.TraceID != "" {
 		logAttrsEnd = append(logAttrsEnd, "trace_id", task.TraceID)
 	}
@@ -1027,6 +1034,10 @@ type statsCache struct {
 	// to confirm whether 90s heartbeat gaps were real GC stalls or NATS-side.
 	numGC        uint32
 	pauseTotalNs uint64
+	// heapInuse is the in-use heap-span figure (Phase 4) used for the
+	// accounting-drift and mmap-RSS gauges. Distinct from allocBytes (ms.Alloc,
+	// which sawtooths with the GC cycle and feeds MemoryUsed/alloc_mb).
+	heapInuse int64
 }
 
 func (s *statsCache) refresh(spillDir string) {
@@ -1044,6 +1055,7 @@ func (s *statsCache) refresh(spillDir string) {
 	s.spillBytes = spill
 	s.numGC = ms.NumGC
 	s.pauseTotalNs = ms.PauseTotalNs
+	s.heapInuse = int64(ms.HeapInuse)
 	s.mu.Unlock()
 }
 
@@ -1072,20 +1084,64 @@ func (w *Worker) statsRefreshLoop(ctx context.Context, cache *statsCache) {
 			// the wire format. Logged every 30s alongside refresh.
 			cache.mu.RLock()
 			alloc, rss := cache.allocBytes, cache.rss
+			heapInuse := cache.heapInuse
 			ng := cache.numGoroutines
 			gcDelta := cache.numGC - prevGC
 			pauseDeltaNs := cache.pauseTotalNs - prevPauseNs
 			prevGC = cache.numGC
 			prevPauseNs = cache.pauseTotalNs
 			cache.mu.RUnlock()
+
+			// Phase 4 (observability only — drives no spill/relief decision):
+			// accounting drift = HeapInuse − (operator owned + reservoir actual),
+			// the unaccounted Go-heap residual; mmap RSS = RSS − HeapInuse, the
+			// non-heap resident working set (parquet/shuffle page cache) Phase 5
+			// will MADV-relieve.
+			driftMB, driftPct, mmapMB := computeStatsGauges(heapInuse, rss, w.executor.HeapDrift(heapInuse))
+
 			w.logger.Info("worker stats",
 				"alloc_mb", alloc/1024/1024,
 				"rss_mb", rss/1024/1024,
+				"heap_inuse_mb", heapInuse/(1<<20),
+				"mmap_rss_mb", mmapMB,
+				"accounting_drift_mb", driftMB,
+				"accounting_drift_pct", int64(driftPct*100),
 				"goroutines", ng,
 				"gc_delta", gcDelta,
 				"gc_pause_delta_ms", pauseDeltaNs/1_000_000)
+
+			// Drift WARN is greppable, not pageable (memo §3/C16). Critical at
+			// >50%, high at >20%. Negative drift (sample skew) never trips these.
+			if driftPct > 0.50 {
+				w.logger.Warn("accounting drift critical",
+					"accounting_drift_mb", driftMB,
+					"accounting_drift_pct", int64(driftPct*100),
+					"heap_inuse_mb", heapInuse/(1<<20))
+			} else if driftPct > 0.20 {
+				w.logger.Warn("accounting drift high",
+					"accounting_drift_mb", driftMB,
+					"accounting_drift_pct", int64(driftPct*100))
+			}
 		}
 	}
+}
+
+// computeStatsGauges derives the Phase-4 log gauges from a stats sample.
+// driftBytes is HeapInuse − accounted (from SpillManager.HeapDrift, supplied by
+// the caller so this stays a pure, unit-testable function). driftPct is the
+// raw fraction (caller logs int percent and uses the float for thresholds);
+// mmapMB = max(0, RSS − HeapInuse) floored to MB.
+func computeStatsGauges(heapInuse, rss, driftBytes int64) (driftMB int64, driftPct float64, mmapMB int64) {
+	driftMB = driftBytes / (1 << 20)
+	if heapInuse > 0 {
+		driftPct = float64(driftBytes) / float64(heapInuse)
+	}
+	mmap := rss - heapInuse
+	if mmap < 0 {
+		mmap = 0
+	}
+	mmapMB = mmap / (1 << 20)
+	return driftMB, driftPct, mmapMB
 }
 
 func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {

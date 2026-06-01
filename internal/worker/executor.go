@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -117,6 +118,16 @@ func (e *Executor) SharedPoolStats() (used, budget int64) {
 		return 0, 0
 	}
 	return e.sharedTracker.Used(), e.sharedTracker.Budget()
+}
+
+// HeapDrift returns the Phase-4 accounting drift in bytes for the supplied
+// HeapInuse sample — HeapInuse − (operator owned + reservoir actual) — or 0 when
+// no shared spill manager is configured. Observability only.
+func (e *Executor) HeapDrift(heapInuse int64) int64 {
+	if e.sharedSpill == nil {
+		return 0
+	}
+	return e.sharedSpill.HeapDrift(heapInuse)
 }
 
 // SetSharedPoolBudget creates the worker-wide memory pool that all
@@ -378,6 +389,21 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	}
 	if e.sharedTracker != nil {
 		result.TaskStats.TrackerPeak = e.sharedTracker.Peak()
+	}
+
+	// Phase-4 per-task accounting observability (diagnostic only; no decision).
+	// One ReadMemStats at the existing task-end reporting point — not a hot path.
+	if e.sharedSpill != nil {
+		var ms runtime.MemStats
+		runtime.ReadMemStats(&ms)
+		heapInuse := int64(ms.HeapInuse)
+		rss := result.TaskStats.RSS
+		if rss == 0 {
+			rss = distributed.ProcessRSS()
+		}
+		driftMB, _, mmapMB := computeStatsGauges(heapInuse, rss, e.sharedSpill.HeapDrift(heapInuse))
+		result.TaskStats.DriftMB = driftMB
+		result.TaskStats.MmapRSSMB = mmapMB
 	}
 
 	return result

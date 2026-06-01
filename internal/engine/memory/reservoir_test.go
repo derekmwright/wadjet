@@ -152,6 +152,27 @@ func TestReservoir_Available_ClampsAtZero(t *testing.T) {
 	}
 }
 
+func TestReservoir_TotalActual(t *testing.T) {
+	rr := NewReservoirRegistry()
+	a := NewReservoir("a", 100)
+	a.Tracker().ForceReserve(40)
+	rr.Register(a)
+	rr.Register(NewReservoirFunc("b", 100, func() int64 { return 25 }))
+	rr.Register(NewSoftReservoir("c", 0, func() int64 { return 10 })) // soft counts too
+	if got, want := rr.TotalActual(), int64(40+25+10); got != want {
+		t.Fatalf("TotalActual = %d, want %d", got, want)
+	}
+
+	// Regression: Available() must equal limit − TotalActual − gcHeadroom after
+	// the shared-helper refactor.
+	const limit = 20 << 30
+	withMemLimit(t, limit)
+	want := limit - rr.TotalActual() - gcHeadroom(limit)
+	if got := rr.Available(); got != want {
+		t.Fatalf("Available = %d, want %d (limit − TotalActual − gcHeadroom)", got, want)
+	}
+}
+
 func TestReservoir_Accessors(t *testing.T) {
 	r := NewReservoir("res", 123)
 	if r.Name() != "res" {
