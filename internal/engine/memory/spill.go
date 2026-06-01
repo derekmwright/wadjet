@@ -56,9 +56,20 @@ type SpillManager struct {
 	departedFootprints []OperatorFootprint // final snapshot of closed operators
 
 	// reservoirs sources the floating operator budget (GOMEMLIMIT − Σreservoir
-	// actual − GC headroom). nil falls back to the static tracker.Budget().
+	// actual − GC headroom). In Phase 3 it is wired for ACCOUNTING/observability
+	// (Available()/Inspect) even while the floating threshold stays dormant. nil
+	// falls back to the static tracker.Budget().
 	reservoirs *ReservoirRegistry
-	cheapFrac  float64 // --spill-cheap-fraction, default 0.90
+
+	// floatingBudgetActive gates whether ShouldSpillFor thresholds against the
+	// floating budget. Default false: reservoirs may be wired for accounting
+	// while the spill DECISION still uses the tuned static 40%/90% path. Flipped
+	// true only by SetFloatingBudgetActive — deploy-gated, safe only once the
+	// system reservoirs (and Phase-4 mmap RSS-sampling) account for the
+	// untracked transient heap that makes a 0.90 threshold safe.
+	floatingBudgetActive bool
+
+	cheapFrac float64 // --spill-cheap-fraction, default 0.90
 
 	// relief bookkeeping for RequestRelief: per-instance cooldown after a
 	// delivered<claimed shortfall, and a round-robin cursor for the
@@ -88,10 +99,21 @@ func NewSpillManager(dir string, tracker *Tracker) (*SpillManager, error) {
 	}, nil
 }
 
-// SetReservoirs wires the reservoir registry so ShouldSpillFor thresholds
-// against the live floating operator budget instead of the static tracker
-// budget. Safe to call once at construction; nil leaves the static fallback.
+// SetReservoirs wires the reservoir registry for ACCOUNTING — it makes
+// Available()/Inspect reflect live reservoir occupancy. It does NOT activate the
+// floating spill threshold; ShouldSpillFor stays on the tuned static 40%/90%
+// path until SetFloatingBudgetActive(true) is called separately. Safe to call
+// once at construction; nil leaves the static fallback.
 func (sm *SpillManager) SetReservoirs(rr *ReservoirRegistry) { sm.reservoirs = rr }
+
+// SetFloatingBudgetActive enables (true) or disables (false, default) the
+// floating-budget spill threshold in ShouldSpillFor. When false, ShouldSpillFor
+// uses the tuned static 40%/90% thresholds even if a reservoir registry is
+// wired. When true, SpillCheap triggers at cheapFrac of the live floating budget
+// (GOMEMLIMIT − Σreservoir actual − GC headroom) and SpillExpensive at 0.98.
+// Deploy-gated: safe only once the system reservoirs account for the untracked
+// transient heap (mmap working set via Phase-4 RSS-sampling).
+func (sm *SpillManager) SetFloatingBudgetActive(active bool) { sm.floatingBudgetActive = active }
 
 // SetCheapFraction overrides the SpillCheap threshold fraction (default 0.90).
 // Ignored unless 0 < f < 1.
@@ -174,16 +196,16 @@ const (
 // free on local NVMe. Spill bytes 67-80 MB across the sweep (lower
 // threshold → more bytes spilled, as expected).
 func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
-	// Floating-budget path (Phase 3): when a reservoir registry is wired, the
-	// threshold is a fraction of the LIVE available operator budget
-	// (GOMEMLIMIT − Σreservoir actual − GC headroom) rather than the static
-	// pool budget. cheapFrac (default 0.90) gates SpillCheap; SpillExpensive
-	// uses 0.98. This path is DORMANT in Phase 2 — reservoirs is nil until the
-	// system reservoirs (mmap cache, result store, codec pools) are registered
-	// and can account for the untracked transient heap that makes a 0.90
-	// threshold safe. Until then the static path below preserves the tuned
-	// 40%/90% behavior.
-	if sm.reservoirs != nil {
+	// Floating-budget path: the threshold is a fraction of the LIVE available
+	// operator budget (GOMEMLIMIT − Σreservoir actual − GC headroom) rather than
+	// the static pool budget. cheapFrac (default 0.90) gates SpillCheap;
+	// SpillExpensive uses 0.98. This path is DORMANT until floatingBudgetActive
+	// is flipped (deploy-gated) — merely wiring a reservoir registry for
+	// accounting does NOT activate it, because the floating budget is mmap-blind
+	// until Phase-4 RSS-sampling and a 0.90 threshold against it would risk the
+	// Q17/Q18 worker reap. Until activated, the static path below preserves the
+	// tuned 40%/90% behavior.
+	if sm.floatingBudgetActive && sm.reservoirs != nil {
 		budget := sm.reservoirs.Available()
 		if budget > 0 && budget != math.MaxInt64 {
 			frac := sm.cheapFrac

@@ -26,10 +26,10 @@ import (
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 const inlineResultThreshold = 512 * 1024 // 512 KB — avoids S3 round-trip for small dimension tables and aggregation results
@@ -51,11 +51,11 @@ type Executor struct {
 	nc           *nats.Conn          // for Gather-task reply streaming (nil = Gather disabled)
 	dpClient     *dataplane.Client   // optional gRPC data-plane; when connected, gather sinks prefer it
 	cache        *LRUCache
-	resultStore  *ResultStore        // in-memory result passing between stages (nil = disabled)
-	resultKV     jetstream.KeyValue  // NATS KV for cross-worker inter-stage results (nil = disabled)
-	localCache   *LocalStageCache    // same-worker stage-output local-disk cache (nil = disabled)
-	memoryBudget int64               // per-task memory budget in bytes (0 = unlimited)
-	spillDir     string               // directory for spill files
+	resultStore  *ResultStore       // in-memory result passing between stages (nil = disabled)
+	resultKV     jetstream.KeyValue // NATS KV for cross-worker inter-stage results (nil = disabled)
+	localCache   *LocalStageCache   // same-worker stage-output local-disk cache (nil = disabled)
+	memoryBudget int64              // per-task memory budget in bytes (0 = unlimited)
+	spillDir     string             // directory for spill files
 	metrics      *metrics.Metrics
 	logger       *slog.Logger
 
@@ -68,6 +68,13 @@ type Executor struct {
 	// table now share one budget and cooperatively spill.
 	sharedTracker *memory.Tracker
 	sharedSpill   *memory.SpillManager
+
+	// Phase 3: system-reservoir registry, pushed into every SpillManager for
+	// ACCOUNTING. floatingBudgetActive is the deploy-gated flag that decides
+	// whether the SpillManager thresholds against the floating budget; default
+	// false keeps ShouldSpillFor on the static path.
+	reservoirs           *memory.ReservoirRegistry
+	floatingBudgetActive bool
 
 	// Same-worker dedup of broadcast-join build state. Probe tasks for the
 	// same broadcast (max_concurrent=3 concurrent tasks reading the same
@@ -112,7 +119,6 @@ func (e *Executor) SharedPoolStats() (used, budget int64) {
 	return e.sharedTracker.Used(), e.sharedTracker.Budget()
 }
 
-
 // SetSharedPoolBudget creates the worker-wide memory pool that all
 // concurrent tasks Reserve against. Operators (HashJoin build, sort
 // run accumulation, hash aggregate state) cooperatively spill when the
@@ -143,11 +149,44 @@ func (e *Executor) SetSharedPoolBudget(budget int64) {
 		return
 	}
 	e.sharedSpill = sm
+	// Self-healing wiring: whichever of SetSharedPoolBudget / SetReservoirs runs
+	// second links the registry into the freshly-built SpillManager (the
+	// compiler can't enforce setter ordering — feedback_setter_before_start).
+	if e.reservoirs != nil {
+		e.sharedSpill.SetReservoirs(e.reservoirs)
+		e.sharedSpill.SetFloatingBudgetActive(e.floatingBudgetActive)
+	}
 }
 
-// SetResultStore attaches an in-memory result store for inter-stage result passing.
+// SetReservoirs wires the system-reservoir registry into the executor and the
+// shared SpillManager for ACCOUNTING. It does NOT activate the floating spill
+// threshold (see SetFloatingBudgetActive). Call before any task executes.
+func (e *Executor) SetReservoirs(rr *memory.ReservoirRegistry) {
+	e.reservoirs = rr
+	if e.sharedSpill != nil {
+		e.sharedSpill.SetReservoirs(rr)
+	}
+}
+
+// SetFloatingBudgetActive propagates the deploy-gated floating-threshold flag to
+// the shared SpillManager. Default false keeps ShouldSpillFor static.
+func (e *Executor) SetFloatingBudgetActive(active bool) {
+	e.floatingBudgetActive = active
+	if e.sharedSpill != nil {
+		e.sharedSpill.SetFloatingBudgetActive(active)
+	}
+}
+
+// SetResultStore attaches an in-memory result store for inter-stage result
+// passing. When a reservoir registry is wired, it registers the result store as
+// a hard reservoir backed by the store's live UsedBytes accessor so its
+// occupancy (≈496 MB at SF100) feeds Available()/drift. Requires SetReservoirs
+// to have run first.
 func (e *Executor) SetResultStore(rs *ResultStore) {
 	e.resultStore = rs
+	if e.reservoirs != nil && rs != nil && rs.MaxBytes() > 0 {
+		e.reservoirs.Register(memory.NewReservoirFunc("resultstore", rs.MaxBytes(), rs.UsedBytes))
+	}
 }
 
 // SetLocalStageCache attaches a same-worker local-disk stage-output cache.

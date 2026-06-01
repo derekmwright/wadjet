@@ -16,9 +16,9 @@ import (
 // Memory is bounded by maxBytes. When exceeded, new results spill to S3 as usual.
 // Results are cleaned up per-query when the query completes.
 type ResultStore struct {
-	mu       sync.RWMutex
-	results  map[string][]byte // path → parquet bytes
-	byQuery  map[string][]string // queryID → paths (for cleanup)
+	mu        sync.RWMutex
+	results   map[string][]byte   // path → parquet bytes
+	byQuery   map[string][]string // queryID → paths (for cleanup)
 	usedBytes int64
 	maxBytes  int64
 }
@@ -93,6 +93,10 @@ func (rs *ResultStore) UsedBytes() int64 {
 	defer rs.mu.RUnlock()
 	return rs.usedBytes
 }
+
+// MaxBytes returns the configured capacity (0 disables the store). Used as the
+// resultstore reservoir's cap.
+func (rs *ResultStore) MaxBytes() int64 { return rs.maxBytes }
 
 // Count returns the number of stored results.
 func (rs *ResultStore) Count() int {

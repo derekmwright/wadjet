@@ -8,11 +8,27 @@ import (
 	"sync"
 )
 
-// gcHeadroomRatio is the fraction of GOMEMLIMIT held back as GC headroom — the
-// slack the runtime needs between live heap and the hard limit to avoid GC
-// thrash. It is the single home for the previously-scattered ad-hoc headroom
-// math (the goMemLimit/10 cache headroom in cmd/wadjet/main.go).
-const gcHeadroomRatio = 0.10
+// gcHeadroomRatio is the fraction of GOMEMLIMIT held back as GC headroom. It
+// also absorbs the untracked transient heap that is deliberately NOT
+// reservoired (parquet decode arenas, sub-batch kernel scratch, and — until
+// the Phase-4 RSS-sampling lands — the shuffle/parquet mmap working set). 0.20
+// (was 0.10 in Phase 1) is sized so the eventual floating-threshold activation
+// does not over-credit operators by the unaccounted transient heap.
+const gcHeadroomRatio = 0.20
+
+// gcHeadroomFloor protects small dev envelopes: 0.20 of a 4 GiB standalone is
+// 800 MiB, too thin to absorb one parquet row-group decode plus a scan pool.
+const gcHeadroomFloor int64 = 2 << 30 // 2 GiB
+
+// gcHeadroom returns the GC + transient-heap headroom for a given GOMEMLIMIT:
+// max(gcHeadroomRatio × limit, gcHeadroomFloor).
+func gcHeadroom(limit int64) int64 {
+	h := int64(float64(limit) * gcHeadroomRatio)
+	if h < gcHeadroomFloor {
+		h = gcHeadroomFloor
+	}
+	return h
+}
 
 // minOperatorBytes is the smallest in-flight operator footprint the boot
 // invariant reserves so a single task can always make progress.
@@ -34,10 +50,20 @@ type Reservoir struct {
 	name    string
 	cap     int64
 	tracker *Tracker
+	// soft marks an accounting-only reservoir: its Actual() still feeds
+	// Available(), but its cap is EXCLUDED from the boot-invariant Σcaps. Used
+	// for pools whose worst-case cap is not boot-knowable (batchpool) or whose
+	// cap is a rough static estimate (scan/file-read-buf, codec/s2).
+	soft bool
+	// actual, when non-nil, is a live accessor read by Actual() instead of the
+	// internal tracker. Used for objects that already maintain their own byte
+	// count (LRUCache.Size, ResultStore.UsedBytes, BatchPool.ResidentBytes) so
+	// the reservoir reports true occupancy with no hot-path Reserve/Release.
+	actual func() int64
 }
 
-// NewReservoir creates a reservoir with a hard cap, backed by a Tracker whose
-// budget equals the cap.
+// NewReservoir creates a HARD-capped reservoir backed by a Tracker whose budget
+// equals the cap. Callers Reserve/Release against Tracker() to record usage.
 func NewReservoir(name string, cap int64) *Reservoir {
 	return &Reservoir{
 		name:    name,
@@ -46,17 +72,45 @@ func NewReservoir(name string, cap int64) *Reservoir {
 	}
 }
 
+// NewReservoirFunc creates a HARD-capped reservoir whose Actual() reads a live
+// accessor (e.g. LRUCache.Size, ResultStore.UsedBytes) rather than its own
+// tracker — for objects that already maintain their own byte count.
+func NewReservoirFunc(name string, cap int64, actual func() int64) *Reservoir {
+	r := NewReservoir(name, cap)
+	r.actual = actual
+	return r
+}
+
+// NewSoftReservoir creates an accounting-only reservoir: Actual() feeds
+// Available() but cap is EXCLUDED from the boot-invariant Σcaps. For pools whose
+// worst-case cap is not boot-knowable (batchpool) or whose cap is a rough static
+// estimate (scan/file-read-buf, codec/s2).
+func NewSoftReservoir(name string, cap int64, actual func() int64) *Reservoir {
+	r := NewReservoirFunc(name, cap, actual)
+	r.soft = true
+	return r
+}
+
 // Name returns the reservoir name.
 func (r *Reservoir) Name() string { return r.name }
 
 // Cap returns the reservoir's hard byte cap.
 func (r *Reservoir) Cap() int64 { return r.cap }
 
+// Soft reports whether this reservoir's cap is excluded from the boot invariant.
+func (r *Reservoir) Soft() bool { return r.soft }
+
 // Tracker exposes the backing tracker so callers Reserve/Release against it.
 func (r *Reservoir) Tracker() *Tracker { return r.tracker }
 
-// Actual returns the bytes currently accounted in this reservoir.
-func (r *Reservoir) Actual() int64 { return r.tracker.Used() }
+// Actual returns the bytes currently accounted in this reservoir — the live
+// accessor when set, otherwise the internal tracker's usage.
+func (r *Reservoir) Actual() int64 {
+	if r.actual != nil {
+		return r.actual()
+	}
+	return r.tracker.Used()
+}
 
 // ReservoirRegistry holds all reservoirs for a worker and validates the
 // boot-time GOMEMLIMIT invariant. One instance lives per process.
@@ -105,9 +159,12 @@ func (rr *ReservoirRegistry) Validate() error {
 
 	var sumCaps int64
 	for _, r := range rr.reservoirs {
+		if r.soft {
+			continue // accounting-only: cap excluded from the invariant
+		}
 		sumCaps += r.cap
 	}
-	headroom := int64(float64(limit) * gcHeadroomRatio)
+	headroom := gcHeadroom(limit)
 	required := sumCaps + minOperatorBytes + headroom
 
 	if required > limit {
@@ -135,9 +192,9 @@ func (rr *ReservoirRegistry) Available() int64 {
 
 	var actual int64
 	for _, r := range rr.reservoirs {
-		actual += r.Actual()
+		actual += r.Actual() // soft reservoirs subtract their live actual too
 	}
-	headroom := int64(float64(limit) * gcHeadroomRatio)
+	headroom := gcHeadroom(limit)
 	avail := limit - actual - headroom
 	if avail < 0 {
 		avail = 0
@@ -161,10 +218,13 @@ func (rr *ReservoirRegistry) LogInvariant(logger *slog.Logger) {
 	rr.mu.Lock()
 	var sumCaps int64
 	for _, r := range rr.reservoirs {
+		if r.soft {
+			continue
+		}
 		sumCaps += r.cap
 	}
 	rr.mu.Unlock()
-	headroom := int64(float64(limit) * gcHeadroomRatio)
+	headroom := gcHeadroom(limit)
 
 	if err := rr.Validate(); err != nil {
 		logger.Warn("memory reservoir invariant violated (advisory in this phase)",

@@ -18,15 +18,16 @@ import (
 	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/telemetry"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Config holds worker configuration.
@@ -40,6 +41,17 @@ type Config struct {
 	SharedPoolBudget int64  // worker-wide memory pool in bytes (0 = derived as MemoryBudget*MaxConcurrent). All concurrent tasks Reserve against this pool; spill triggers fire on cumulative worker pressure.
 	SpillDir         string // directory for spill files (default: os temp dir)
 	ResultStoreBytes int64  // in-memory result store capacity (0 = disabled, results go to S3)
+
+	// Reservoirs is the Phase-3 system-reservoir registry. When non-nil, the
+	// worker registers its cache + result-store reservoirs against it and wires
+	// it into the shared SpillManager for ACCOUNTING (Available()/drift). nil =
+	// the legacy static-budget path.
+	Reservoirs *memory.ReservoirRegistry
+	// FloatingBudgetActive enables the deploy-gated floating spill threshold.
+	// Default false: ShouldSpillFor stays on the tuned static 40%/90% path even
+	// with reservoirs wired (the floating budget is mmap-blind until Phase-4
+	// RSS-sampling).
+	FloatingBudgetActive bool
 }
 
 // DefaultConfig returns default worker configuration.
@@ -63,9 +75,9 @@ const (
 )
 
 type Worker struct {
-	config   Config
-	store    objstore.Store
-	nc       *nats.Conn
+	config Config
+	store  objstore.Store
+	nc     *nats.Conn
 	// controlNC is an optional second NATS connection used exclusively for
 	// the heartbeat publish path. When set, the heartbeat goroutine never
 	// shares fate with high-volume data-plane traffic on nc (gather chunks,
@@ -76,14 +88,14 @@ type Worker struct {
 	// fast (the buffer wasn't draining because the connection's write
 	// goroutine was wedged behind larger sends).
 	controlNC *nats.Conn
-	js       jetstream.JetStream
-	executor *Executor
-	logger   *slog.Logger
-	metrics  *metrics.Metrics
+	js        jetstream.JetStream
+	executor  *Executor
+	logger    *slog.Logger
+	metrics   *metrics.Metrics
 
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	drainCh  chan struct{} // closed when drain is requested
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	drainCh   chan struct{} // closed when drain is requested
 	drainOnce sync.Once
 
 	cancelledMu sync.RWMutex
@@ -136,8 +148,22 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	}
 	executor.SetLogger(logger)
 	executor.SetNATSConn(nc)
+	// Phase 3: wire the system-reservoir registry for ACCOUNTING (Available()/
+	// drift) — this does NOT activate the floating spill threshold; that stays
+	// gated on FloatingBudgetActive (default false → tuned static 40%/90% path).
+	// Register the LRU cache (live Size accessor) here; SetResultStore registers
+	// the result store; both must run before LogInvariant. SetReservoirs must
+	// precede SetResultStore so the store reservoir lands in the same registry.
+	if cfg.Reservoirs != nil {
+		cfg.Reservoirs.Register(memory.NewReservoirFunc("lru-cache/parquet-metadata", cfg.CacheBytes, cache.Size))
+		executor.SetReservoirs(cfg.Reservoirs)
+		executor.SetFloatingBudgetActive(cfg.FloatingBudgetActive)
+	}
 	if cfg.ResultStoreBytes > 0 {
 		executor.SetResultStore(NewResultStore(cfg.ResultStoreBytes))
+	}
+	if cfg.Reservoirs != nil {
+		cfg.Reservoirs.LogInvariant(logger)
 	}
 	// Same-worker LocalStageCache: producers register their local spill
 	// files in here after upload, downstream tasks landing on the same
@@ -748,7 +774,7 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 	// brief stall doesn't immediately cancel the task; the worker
 	// just stops cementing AckWait so JetStream can decide.
 	const (
-		progressIdleThreshold = 60 * time.Second
+		progressIdleThreshold   = 60 * time.Second
 		maxInProgressExtensions = 5 // belt-and-suspenders if the progress signal stops working
 	)
 	go func() {
@@ -999,8 +1025,8 @@ type statsCache struct {
 	// stats logger so worker logs surface periods where the GC is taking
 	// significant CPU — the SF100 Q17 hang investigation needed this signal
 	// to confirm whether 90s heartbeat gaps were real GC stalls or NATS-side.
-	numGC         uint32
-	pauseTotalNs  uint64
+	numGC        uint32
+	pauseTotalNs uint64
 }
 
 func (s *statsCache) refresh(spillDir string) {

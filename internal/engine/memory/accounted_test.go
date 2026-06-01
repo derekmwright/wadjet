@@ -183,28 +183,41 @@ func TestRequestRelief_CooldownOnShortfall(t *testing.T) {
 }
 
 // TestShouldSpillFor_FloatingBudget: with a reservoir registry wired, the
-// threshold floats against Available() rather than the static budget.
-func TestShouldSpillFor_FloatingBudget(t *testing.T) {
-	const limit = 1000 << 20
+// threshold floats against Available() rather than the static budget — but ONLY
+// when floatingBudgetActive is set. This is the load-bearing decoupling test:
+// wiring a reservoir registry for accounting must NOT change the spill decision.
+func TestShouldSpillFor_ReservoirsWiredButDormant(t *testing.T) {
+	const limit = 20 << 30 // headroom = 4 GiB (ratio)
 	withMemLimit(t, limit)
 
-	sm := newSM(t)
+	// Tracker budget 10 GiB; static SpillCheap threshold = 40% = 4 GiB.
+	sm, err := NewSpillManager(t.TempDir(), NewTracker("t", 10<<30))
+	if err != nil {
+		t.Fatal(err)
+	}
 	rr := NewReservoirRegistry()
-	res := NewReservoir("cache", 200<<20)
-	rr.Register(res)
-	sm.SetReservoirs(rr)
+	rr.Register(NewReservoir("cache", 2<<30)) // actual 0
+	sm.SetReservoirs(rr)                      // accounting only — does NOT activate floating
 	sm.SetCheapFraction(0.90)
 
-	// Available = 1000 - 0 (actual) - 100 (10% headroom) = 900 MiB.
-	// Operator used below 0.90*900 = 810 MiB => no spill.
-	sm.tracker.ForceReserve(700 << 20)
-	if sm.ShouldSpillFor(SpillCheap) {
-		t.Fatal("700 MiB used < 810 MiB threshold: should not spill")
-	}
-	// Push used over the floating threshold.
-	sm.tracker.ForceReserve(150 << 20) // now 850 MiB > 810
+	sm.tracker.ForceReserve(5 << 30) // 5 GiB used
+
+	// Reservoirs wired, floatingBudgetActive=false (default): the STATIC path
+	// governs. 5 GiB > 4 GiB (40% of 10) => SpillCheap fires.
 	if !sm.ShouldSpillFor(SpillCheap) {
-		t.Fatal("850 MiB used > 810 MiB threshold: should spill")
+		t.Fatal("dormant floating: 5 GiB used must trip the static 40% threshold")
+	}
+
+	// Flip the floating budget active. Available = 20 - 0 - 4 = 16 GiB; floating
+	// SpillCheap threshold = 0.90*16 = 14.4 GiB. 5 GiB < 14.4 => does NOT fire.
+	sm.SetFloatingBudgetActive(true)
+	if sm.ShouldSpillFor(SpillCheap) {
+		t.Fatal("active floating: 5 GiB used < 14.4 GiB floating threshold, must NOT spill")
+	}
+	// Push used over the floating threshold to confirm the floating path fires.
+	sm.tracker.ForceReserve(10 << 30) // now 15 GiB > 14.4
+	if !sm.ShouldSpillFor(SpillCheap) {
+		t.Fatal("active floating: 15 GiB used > 14.4 GiB threshold, must spill")
 	}
 }
 

@@ -27,67 +27,68 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/config"
-	"github.com/citc-tech/wadjet/internal/geoip"
 	"github.com/citc-tech/wadjet/internal/coordinator"
 	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/expr"
 	"github.com/citc-tech/wadjet/internal/format"
+	"github.com/citc-tech/wadjet/internal/geoip"
 	"github.com/citc-tech/wadjet/internal/metrics"
 	"github.com/citc-tech/wadjet/internal/server"
 	"github.com/citc-tech/wadjet/internal/server/mcp"
-	"github.com/citc-tech/wadjet/internal/telemetry"
 	"github.com/citc-tech/wadjet/internal/server/pgwire"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/compaction"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/telemetry"
 	"github.com/citc-tech/wadjet/internal/worker"
 	"github.com/citc-tech/wadjet/wadjet"
 	"github.com/spf13/cobra"
 )
 
 var (
-	mode             string
-	storageType      string
-	dataDir          string
-	endpoint         string
-	accessKey        string
-	secretKey        string
-	bucket           string
-	httpAddr         string
-	natsPort         int
-	natsURL          string
-	configFile       string
-	clusterID        string
-	leafRemotes      []string
-	grpcAddr         string
-	memoryBudget     int64
-	sharedPoolBudget int64
-	spillDir         string
-	resultStoreBytes int64
-	pgAddr           string
-	pgTLSCert        string
-	pgTLSKey         string
-	queryTimeout     string
-	maxConcurrentQry int
-	natsStoreDir     string
-	geoipCityDB      string
-	geoipASNDB       string
-	useSSL           bool
-	s3Region         string
-	maxConcurrent    int
-	cacheBytes       int64
-	logLevel         string
-	natsTLSCert      string
-	natsTLSKey       string
-	natsTLSCA        string
-	otelEndpoint     string
-	otelInsecure     bool
-	metricsAddr      string
-	enableAlerts     bool
-	dataPlane        string
-	dataPlaneAddr    string
-	coordDataPlane   string
+	mode                string
+	storageType         string
+	dataDir             string
+	endpoint            string
+	accessKey           string
+	secretKey           string
+	bucket              string
+	httpAddr            string
+	natsPort            int
+	natsURL             string
+	configFile          string
+	clusterID           string
+	leafRemotes         []string
+	grpcAddr            string
+	memoryBudget        int64
+	sharedPoolBudget    int64
+	spillFloatingBudget bool
+	spillDir            string
+	resultStoreBytes    int64
+	pgAddr              string
+	pgTLSCert           string
+	pgTLSKey            string
+	queryTimeout        string
+	maxConcurrentQry    int
+	natsStoreDir        string
+	geoipCityDB         string
+	geoipASNDB          string
+	useSSL              bool
+	s3Region            string
+	maxConcurrent       int
+	cacheBytes          int64
+	logLevel            string
+	natsTLSCert         string
+	natsTLSKey          string
+	natsTLSCA           string
+	otelEndpoint        string
+	otelInsecure        bool
+	metricsAddr         string
+	enableAlerts        bool
+	dataPlane           string
+	dataPlaneAddr       string
+	coordDataPlane      string
 )
 
 func main() {
@@ -121,6 +122,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&otelInsecure, "otel-insecure", false, "Use plaintext gRPC for OTLP exporter")
 	rootCmd.PersistentFlags().Int64Var(&memoryBudget, "memory-budget", 0, "Per-task memory budget in bytes (0 = auto-detect from cgroup, or unlimited)")
 	rootCmd.PersistentFlags().Int64Var(&sharedPoolBudget, "shared-pool-budget", 0, "Worker-wide shared memory pool in bytes (0 = auto-detect: envelope minus cache). All concurrent tasks Reserve against this pool.")
+	rootCmd.PersistentFlags().BoolVar(&spillFloatingBudget, "spill-floating-budget", false, "Activate the floating-budget spill threshold (deploy-gated; requires Phase-4 mmap RSS accounting). Default false = tuned static 40%/90% thresholds.")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
 
@@ -166,186 +168,178 @@ func serveCmd() *cobra.Command {
 	forceRestoreCatalog := cmd.Flags().String("force-restore-catalog", "", "Restore catalog from S3 regardless of KV state. Value: 'latest' or a specific timestamp.")
 
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-			defer cancel()
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
 
-			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(logLevel)}))
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(logLevel)}))
 
-			if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
-				maxConc := int64(maxConcurrent)
-				if maxConc < 1 {
-					maxConc = 1
-				}
+		if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
+			maxConc := int64(maxConcurrent)
+			if maxConc < 1 {
+				maxConc = 1
+			}
 
-				// Memory envelope: 75% of detected limit. Leaves 25% headroom
-				// for OS page cache, kernel buffers, and non-Go allocations.
-				// (Previous 90% left only 3 GB on 32 GB machines — not enough.)
-				//
-				// Honour an explicit GOMEMLIMIT env var when set — the harness
-				// passes a tight per-process limit (4 GB / 8 GB) to reproduce
-				// constrained-memory paths locally, and overriding it with the
-				// 75%-of-physical default would silently mask the very
-				// workloads we're testing.
-				goMemLimit := memLimit * 3 / 4
-				if envLim := os.Getenv("GOMEMLIMIT"); envLim != "" {
-					if parsed, ok := parseGoMemLimit(envLim); ok {
-						goMemLimit = parsed
-					} else {
-						logger.Warn("ignoring unparseable GOMEMLIMIT env",
-							"value", envLim, "fallback_bytes", goMemLimit)
-					}
-				}
-				debug.SetMemoryLimit(goMemLimit)
-				// GC mode is overridable via WADJET_GOGC env var:
-				//   "off" / unset (default): rely on GOMEMLIMIT only — best for
-				//     workloads with large stable live data (LRU cache pattern)
-				//     because GC assist tax with GOGC=100 caused 2-3x query
-				//     slowdowns when the cache was populated.
-				//   "<int>" (e.g. "100"): set debug.SetGCPercent to that value —
-				//     useful for catalog-priming-heavy workloads where transient
-				//     garbage accumulates pre-query (Q18 SF10 baseline 11.5 GB
-				//     before query starts on a freshly primed coord).
-				gcMode := os.Getenv("WADJET_GOGC")
-				if gcMode == "" || strings.EqualFold(gcMode, "off") {
-					debug.SetGCPercent(-1)
-					gcMode = "off"
-				} else if pct, perr := strconv.Atoi(gcMode); perr == nil && pct > 0 {
-					debug.SetGCPercent(pct)
-					gcMode = strconv.Itoa(pct)
+			// Memory envelope: 75% of detected limit. Leaves 25% headroom
+			// for OS page cache, kernel buffers, and non-Go allocations.
+			// (Previous 90% left only 3 GB on 32 GB machines — not enough.)
+			//
+			// Honour an explicit GOMEMLIMIT env var when set — the harness
+			// passes a tight per-process limit (4 GB / 8 GB) to reproduce
+			// constrained-memory paths locally, and overriding it with the
+			// 75%-of-physical default would silently mask the very
+			// workloads we're testing.
+			goMemLimit := memLimit * 3 / 4
+			if envLim := os.Getenv("GOMEMLIMIT"); envLim != "" {
+				if parsed, ok := parseGoMemLimit(envLim); ok {
+					goMemLimit = parsed
 				} else {
-					debug.SetGCPercent(-1)
-					gcMode = "off (invalid WADJET_GOGC)"
+					logger.Warn("ignoring unparseable GOMEMLIMIT env",
+						"value", envLim, "fallback_bytes", goMemLimit)
 				}
-				logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", gcMode)
+			}
+			debug.SetMemoryLimit(goMemLimit)
+			// GC mode is overridable via WADJET_GOGC env var:
+			//   "off" / unset (default): rely on GOMEMLIMIT only — best for
+			//     workloads with large stable live data (LRU cache pattern)
+			//     because GC assist tax with GOGC=100 caused 2-3x query
+			//     slowdowns when the cache was populated.
+			//   "<int>" (e.g. "100"): set debug.SetGCPercent to that value —
+			//     useful for catalog-priming-heavy workloads where transient
+			//     garbage accumulates pre-query (Q18 SF10 baseline 11.5 GB
+			//     before query starts on a freshly primed coord).
+			gcMode := os.Getenv("WADJET_GOGC")
+			if gcMode == "" || strings.EqualFold(gcMode, "off") {
+				debug.SetGCPercent(-1)
+				gcMode = "off"
+			} else if pct, perr := strconv.Atoi(gcMode); perr == nil && pct > 0 {
+				debug.SetGCPercent(pct)
+				gcMode = strconv.Itoa(pct)
+			} else {
+				debug.SetGCPercent(-1)
+				gcMode = "off (invalid WADJET_GOGC)"
+			}
+			logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", gcMode)
 
-				if cacheBytes == 0 {
-					if memoryBudget > 0 {
-						// With explicit memory budget, scale cache to fit alongside
-						// task memory. Each task uses ~3x its tracked budget in total
-						// RSS (tracked + hash table arenas + intermediate batches).
-						taskFootprint := memoryBudget * maxConc * 3
-						headroom := goMemLimit / 10
-						available := goMemLimit - taskFootprint - headroom
-						if available < 256*1024*1024 {
-							available = 256 * 1024 * 1024
-						}
-						if maxCache := goMemLimit / 5; available > maxCache {
-							available = maxCache
-						}
-						cacheBytes = available
-					} else {
-						// Default: 10% of envelope for cross-query S3 file cache.
-						cacheBytes = goMemLimit / 10
+			if cacheBytes == 0 {
+				if memoryBudget > 0 {
+					// With explicit memory budget, scale cache to fit alongside
+					// task memory. Each task uses ~3x its tracked budget in total
+					// RSS (tracked + hash table arenas + intermediate batches).
+					taskFootprint := memoryBudget * maxConc * 3
+					headroom := goMemLimit / 10
+					available := goMemLimit - taskFootprint - headroom
+					if available < 256*1024*1024 {
+						available = 256 * 1024 * 1024
 					}
-					logger.Info("auto-detected file cache size", "cache_bytes", cacheBytes)
-				}
-				if memoryBudget == 0 {
-					// Per-task spill budget. Reduced from 5x to 4x: hash table
-					// reconciliation now uses ForceReserve for accurate tracking,
-					// and spill threshold lowered to 60%, enabling tighter budgets
-					// without OOM risk on multi-join queries.
-					// Formula: (envelope - cache) / (4 * maxConcurrent)
-					//
-					// Note: with the shared worker memory pool (Trino MemoryPool /
-					// Spark ExecutionMemoryPool model), the per-task budget is only
-					// consulted by the planner for operator sizing — actual
-					// allocation tracking flows through `sharedPoolBudget` below.
-					// We keep this calculation for planner sizing and as a fallback
-					// for legacy callers, but spill triggers are pool-driven.
-					memoryBudget = (goMemLimit - cacheBytes) / (4 * maxConc)
-
-					// Auto-tune maxConc DOWN when the per-task budget would be
-					// too small to fit a SF100-class join. The 4x factor models
-					// task overhead but cannot rescue a worker whose hash tables
-					// alone need 8 GB at SF100 from a 1.4 GB budget — at SF100
-					// the original maxConc=4 / 30GB-machine combo gives each
-					// task ~1.4 GB and the worker OOMs at 31 GB anon-rss when
-					// multiple tasks pick up the same query in parallel.
-					//
-					// Minimum target: 2 GB per task. If we'd be under, reduce
-					// maxConc until we hit it (or until maxConc=1). Each query
-					// in distributed/probe-split mode dispatches one task per
-					// worker, so maxConc above ~2 only helps with concurrent
-					// queries from different sessions — which is rare in
-					// benchmarks and tunable upward via --max-concurrent when
-					// the workload actually needs it.
-					const minBudgetPerTask int64 = 2 * 1024 * 1024 * 1024
-					if memoryBudget < minBudgetPerTask && maxConc > 1 {
-						origConc := maxConc
-						for memoryBudget < minBudgetPerTask && maxConc > 1 {
-							maxConc--
-							memoryBudget = (goMemLimit - cacheBytes) / (4 * maxConc)
-						}
-						maxConcurrent = int(maxConc)
-						logger.Info("auto-tuned max_concurrent down to fit memory budget",
-							"orig_max_concurrent", origConc,
-							"new_max_concurrent", maxConc,
-							"budget_bytes", memoryBudget,
-							"min_budget_target", minBudgetPerTask)
+					if maxCache := goMemLimit / 5; available > maxCache {
+						available = maxCache
 					}
-
-					logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget, "max_concurrent", maxConc)
+					cacheBytes = available
+				} else {
+					// Default: 10% of envelope for cross-query S3 file cache.
+					cacheBytes = goMemLimit / 10
 				}
-				if sharedPoolBudget == 0 {
-					// Pool is the full envelope minus the file cache. All
-					// concurrent tasks Reserve from it; operators
-					// cooperatively spill when the pool fills. NOT divided
-					// by maxConc — the pool's whole point is to share a
-					// single budget across tasks instead of statically
-					// carving N slices.
-					sharedPoolBudget = goMemLimit - cacheBytes
-					if sharedPoolBudget < 256*1024*1024 {
-						sharedPoolBudget = 256 * 1024 * 1024
+				logger.Info("auto-detected file cache size", "cache_bytes", cacheBytes)
+			}
+			if memoryBudget == 0 {
+				// Per-task spill budget. Reduced from 5x to 4x: hash table
+				// reconciliation now uses ForceReserve for accurate tracking,
+				// and spill threshold lowered to 60%, enabling tighter budgets
+				// without OOM risk on multi-join queries.
+				// Formula: (envelope - cache) / (4 * maxConcurrent)
+				//
+				// Note: with the shared worker memory pool (Trino MemoryPool /
+				// Spark ExecutionMemoryPool model), the per-task budget is only
+				// consulted by the planner for operator sizing — actual
+				// allocation tracking flows through `sharedPoolBudget` below.
+				// We keep this calculation for planner sizing and as a fallback
+				// for legacy callers, but spill triggers are pool-driven.
+				memoryBudget = (goMemLimit - cacheBytes) / (4 * maxConc)
+
+				// Auto-tune maxConc DOWN when the per-task budget would be
+				// too small to fit a SF100-class join. The 4x factor models
+				// task overhead but cannot rescue a worker whose hash tables
+				// alone need 8 GB at SF100 from a 1.4 GB budget — at SF100
+				// the original maxConc=4 / 30GB-machine combo gives each
+				// task ~1.4 GB and the worker OOMs at 31 GB anon-rss when
+				// multiple tasks pick up the same query in parallel.
+				//
+				// Minimum target: 2 GB per task. If we'd be under, reduce
+				// maxConc until we hit it (or until maxConc=1). Each query
+				// in distributed/probe-split mode dispatches one task per
+				// worker, so maxConc above ~2 only helps with concurrent
+				// queries from different sessions — which is rare in
+				// benchmarks and tunable upward via --max-concurrent when
+				// the workload actually needs it.
+				const minBudgetPerTask int64 = 2 * 1024 * 1024 * 1024
+				if memoryBudget < minBudgetPerTask && maxConc > 1 {
+					origConc := maxConc
+					for memoryBudget < minBudgetPerTask && maxConc > 1 {
+						maxConc--
+						memoryBudget = (goMemLimit - cacheBytes) / (4 * maxConc)
 					}
-					logger.Info("auto-detected shared pool budget",
-						"pool_bytes", sharedPoolBudget,
-						"go_mem_limit", goMemLimit, "cache_bytes", cacheBytes)
+					maxConcurrent = int(maxConc)
+					logger.Info("auto-tuned max_concurrent down to fit memory budget",
+						"orig_max_concurrent", origConc,
+						"new_max_concurrent", maxConc,
+						"budget_bytes", memoryBudget,
+						"min_budget_target", minBudgetPerTask)
 				}
 
-				// Phase 1 of the memory-accounting overhaul: register the LRU
-				// file cache as a TierSystemReservoir and log the boot-time
-				// GOMEMLIMIT invariant. Advisory only here — the hard
-				// refuse-to-start lands once every reservoir (result store,
-				// codec pools, batch pools) is registered and the invariant
-				// constants are validated against the constrained-memory deploy
-				// envelopes. The shared pool is operator working memory, not a
-				// system reservoir, so it is deliberately not registered here.
-				reservoirs := memory.NewReservoirRegistry()
-				reservoirs.Register(memory.NewReservoir("lru-cache/parquet-metadata", cacheBytes))
-				reservoirs.LogInvariant(logger)
+				logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget, "max_concurrent", maxConc)
 			}
-
-			store, err := newStore()
-			if err != nil {
-				return err
-			}
-
-			// Wrap store with circuit breaker for S3 resilience
-			store = objstore.NewCircuitStore(store, objstore.DefaultCircuitConfig(), logger)
-
-			if v := os.Getenv("WADJET_ENABLE_ALERTS"); v == "1" || strings.EqualFold(v, "true") {
-				enableAlerts = true
-			}
-			if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_PREFIX"); v != "" {
-				*catalogSnapshotPrefix = v
-			}
-			if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_INTERVAL"); v != "" {
-				if d, err := time.ParseDuration(v); err == nil {
-					*catalogSnapshotInterval = d
+			if sharedPoolBudget == 0 {
+				// Pool is the full envelope minus the file cache. All
+				// concurrent tasks Reserve from it; operators
+				// cooperatively spill when the pool fills. NOT divided
+				// by maxConc — the pool's whole point is to share a
+				// single budget across tasks instead of statically
+				// carving N slices.
+				sharedPoolBudget = goMemLimit - cacheBytes
+				if sharedPoolBudget < 256*1024*1024 {
+					sharedPoolBudget = 256 * 1024 * 1024
 				}
+				logger.Info("auto-detected shared pool budget",
+					"pool_bytes", sharedPoolBudget,
+					"go_mem_limit", goMemLimit, "cache_bytes", cacheBytes)
 			}
+			// Phase 3 note: the system-reservoir registry is built per
+			// run-function (buildReservoirs) and threaded into worker.Config
+			// so it reaches a real worker's SpillManager. The Phase-1 prelude
+			// that built+logged a throwaway registry here was removed.
+		}
 
-			switch mode {
-			case "standalone":
-				return runStandalone(ctx, store, logger, enableAlerts, *catalogSnapshotPrefix, *catalogSnapshotInterval, *forceRestoreCatalog)
-			case "coordinator":
-				return runCoordinator(ctx, store, logger, enableAlerts, *catalogSnapshotPrefix, *catalogSnapshotInterval, *forceRestoreCatalog)
-			case "worker":
-				return runWorker(ctx, store, logger)
-			default:
-				return fmt.Errorf("unknown mode: %s", mode)
+		store, err := newStore()
+		if err != nil {
+			return err
+		}
+
+		// Wrap store with circuit breaker for S3 resilience
+		store = objstore.NewCircuitStore(store, objstore.DefaultCircuitConfig(), logger)
+
+		if v := os.Getenv("WADJET_ENABLE_ALERTS"); v == "1" || strings.EqualFold(v, "true") {
+			enableAlerts = true
+		}
+		if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_PREFIX"); v != "" {
+			*catalogSnapshotPrefix = v
+		}
+		if v := os.Getenv("WADJET_CATALOG_SNAPSHOT_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				*catalogSnapshotInterval = d
 			}
 		}
+
+		switch mode {
+		case "standalone":
+			return runStandalone(ctx, store, logger, enableAlerts, *catalogSnapshotPrefix, *catalogSnapshotInterval, *forceRestoreCatalog)
+		case "coordinator":
+			return runCoordinator(ctx, store, logger, enableAlerts, *catalogSnapshotPrefix, *catalogSnapshotInterval, *forceRestoreCatalog)
+		case "worker":
+			return runWorker(ctx, store, logger)
+		default:
+			return fmt.Errorf("unknown mode: %s", mode)
+		}
+	}
 	return cmd
 }
 
@@ -797,14 +791,16 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	// must complete first so Start can see the dpClient and skip the
 	// JetStream Fetch loop in --data-plane=grpc mode).
 	w := worker.New(worker.Config{
-		NATSUrl:          embeddedNATS.ClientURL(),
-		ClusterID:        clusterID,
-		MaxConcurrent:    maxConcurrent,
-		CacheBytes:       cacheBytes,
-		MemoryBudget:     memoryBudget,
-		SharedPoolBudget: sharedPoolBudget,
-		SpillDir:         spillDir,
-		ResultStoreBytes: resultStoreBytes,
+		NATSUrl:              embeddedNATS.ClientURL(),
+		ClusterID:            clusterID,
+		MaxConcurrent:        maxConcurrent,
+		CacheBytes:           cacheBytes,
+		MemoryBudget:         memoryBudget,
+		SharedPoolBudget:     sharedPoolBudget,
+		SpillDir:             spillDir,
+		ResultStoreBytes:     resultStoreBytes,
+		Reservoirs:           memory.NewReservoirRegistry(),
+		FloatingBudgetActive: spillFloatingBudget,
 	}, store, nc, js, logger)
 
 	// Initialize Prometheus metrics (before worker.Start so spill metrics are wired)
@@ -1349,15 +1345,17 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	workerID := "worker-" + uuid.New().String()[:8]
 
 	w := worker.New(worker.Config{
-		WorkerID:         workerID,
-		NATSUrl:          natsAddr,
-		ClusterID:        clusterID,
-		MaxConcurrent:    maxConcurrent,
-		CacheBytes:       cacheBytes,
-		MemoryBudget:     memoryBudget,
-		SharedPoolBudget: sharedPoolBudget,
-		SpillDir:         spillDir,
-		ResultStoreBytes: resultStoreBytes,
+		WorkerID:             workerID,
+		NATSUrl:              natsAddr,
+		ClusterID:            clusterID,
+		MaxConcurrent:        maxConcurrent,
+		CacheBytes:           cacheBytes,
+		MemoryBudget:         memoryBudget,
+		SharedPoolBudget:     sharedPoolBudget,
+		SpillDir:             spillDir,
+		ResultStoreBytes:     resultStoreBytes,
+		Reservoirs:           memory.NewReservoirRegistry(),
+		FloatingBudgetActive: spillFloatingBudget,
 	}, store, nc, js, logger)
 	w.SetControlConn(controlNC)
 

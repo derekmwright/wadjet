@@ -20,37 +20,68 @@ func withMemLimit(t *testing.T, limit int64) {
 }
 
 func TestReservoir_Validate_PassAndFail(t *testing.T) {
-	const limit = 1000 << 20 // 1000 MiB
+	const limit = 20 << 30 // 20 GiB; headroom = 0.20*20 = 4 GiB (ratio, not floor)
 	withMemLimit(t, limit)
 
-	// Fits: cap 800 + min 64 + headroom 100 (10%) = 964 <= 1000.
+	// Fits: cap 15 GiB + min 0.0625 + headroom 4 = 19.06 <= 20.
 	rr := NewReservoirRegistry()
-	rr.Register(NewReservoir("pool", 800<<20))
+	rr.Register(NewReservoir("pool", 15<<30))
 	if err := rr.Validate(); err != nil {
 		t.Fatalf("expected pass, got %v", err)
 	}
 
-	// Violates: cap 950 + 64 + 100 = 1114 > 1000.
+	// Violates: cap 17 GiB + 0.0625 + 4 = 21.06 > 20.
 	rr2 := NewReservoirRegistry()
-	rr2.Register(NewReservoir("pool", 950<<20))
+	rr2.Register(NewReservoir("pool", 17<<30))
 	if err := rr2.Validate(); err == nil {
 		t.Fatal("expected invariant violation error, got nil")
 	}
 }
 
 func TestReservoir_Validate_SumsMultipleCaps(t *testing.T) {
-	const limit = 1000 << 20
+	const limit = 20 << 30 // headroom 4 GiB
 	withMemLimit(t, limit)
 
 	rr := NewReservoirRegistry()
-	rr.Register(NewReservoir("a", 400<<20))
-	rr.Register(NewReservoir("b", 400<<20)) // Σcaps=800; +64+100=964 <= 1000
+	rr.Register(NewReservoir("a", 7<<30))
+	rr.Register(NewReservoir("b", 7<<30)) // Σcaps=14; +0.06+4=18.06 <= 20
 	if err := rr.Validate(); err != nil {
 		t.Fatalf("two caps within budget should pass, got %v", err)
 	}
-	rr.Register(NewReservoir("c", 100<<20)) // Σcaps=900; +64+100=1064 > 1000
+	rr.Register(NewReservoir("c", 3<<30)) // Σcaps=17; +0.06+4=21.06 > 20
 	if err := rr.Validate(); err == nil {
 		t.Fatal("third cap should push over budget")
+	}
+}
+
+func TestReservoir_Validate_SoftCapExcluded(t *testing.T) {
+	const limit = 20 << 30 // headroom 4 GiB
+	withMemLimit(t, limit)
+
+	rr := NewReservoirRegistry()
+	rr.Register(NewReservoir("hard", 15<<30)) // 15 + 0.06 + 4 = 19.06 <= 20: passes
+	// A soft reservoir with an enormous cap must NOT push the invariant over —
+	// its cap is excluded from Σcaps.
+	rr.Register(NewSoftReservoir("soft", 100<<30, func() int64 { return 0 }))
+	if err := rr.Validate(); err != nil {
+		t.Fatalf("soft cap must be excluded from the invariant, got %v", err)
+	}
+	// But the soft reservoir's live actual still subtracts from Available().
+	rr2 := NewReservoirRegistry()
+	soft := NewSoftReservoir("soft", 0, func() int64 { return 1 << 30 })
+	rr2.Register(soft)
+	// Available = 20 - 1 (soft actual) - 4 (headroom) = 15 GiB.
+	if got, want := rr2.Available(), int64(15<<30); got != want {
+		t.Fatalf("soft actual must subtract from Available: got %d GiB want %d GiB", got>>30, want>>30)
+	}
+}
+
+func TestReservoir_GCHeadroom_FloorAndRatio(t *testing.T) {
+	if got, want := gcHeadroom(4<<30), int64(2<<30); got != want { // 0.20*4=0.8 < 2 → floor
+		t.Fatalf("gcHeadroom(4GiB) = %d, want floor 2GiB", got)
+	}
+	if got, want := gcHeadroom(40<<30), int64(8<<30); got != want { // 0.20*40=8 > 2 → ratio
+		t.Fatalf("gcHeadroom(40GiB) = %d, want ratio 8GiB", got)
 	}
 }
 
@@ -65,18 +96,38 @@ func TestReservoir_Validate_UnsetLimitIsNoop(t *testing.T) {
 }
 
 func TestReservoir_Available(t *testing.T) {
-	const limit = 1000 << 20
+	const limit = 20 << 30 // headroom 4 GiB
 	withMemLimit(t, limit)
 
 	rr := NewReservoirRegistry()
-	r := NewReservoir("pool", 500<<20)
+	r := NewReservoir("pool", 10<<30)
 	rr.Register(r)
-	r.Tracker().ForceReserve(200 << 20) // actual usage
+	r.Tracker().ForceReserve(2 << 30) // actual usage
 
-	// available = 1000 − 200 (actual) − 100 (10% headroom) = 700 MiB.
-	want := int64(700 << 20)
+	// available = 20 − 2 (actual) − 4 (headroom) = 14 GiB.
+	want := int64(14 << 30)
 	if got := rr.Available(); got != want {
-		t.Fatalf("Available = %d MiB, want %d MiB", got>>20, want>>20)
+		t.Fatalf("Available = %d GiB, want %d GiB", got>>30, want>>30)
+	}
+}
+
+// TestReservoir_Available_LiveAccessor confirms NewReservoirFunc's Actual()
+// tracks a live accessor rather than the internal tracker.
+func TestReservoir_Available_LiveAccessor(t *testing.T) {
+	const limit = 20 << 30
+	withMemLimit(t, limit)
+
+	live := int64(1 << 30)
+	rr := NewReservoirRegistry()
+	rr.Register(NewReservoirFunc("store", 5<<30, func() int64 { return live }))
+
+	// available = 20 - 1 (live) - 4 (headroom) = 15 GiB.
+	if got, want := rr.Available(), int64(15<<30); got != want {
+		t.Fatalf("Available = %d GiB, want %d GiB", got>>30, want>>30)
+	}
+	live = 3 << 30 // mutate the live source
+	if got, want := rr.Available(), int64(13<<30); got != want {
+		t.Fatalf("after live change: Available = %d GiB, want %d GiB", got>>30, want>>30)
 	}
 }
 
