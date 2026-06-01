@@ -162,6 +162,17 @@ func (t *Tracker) PublishOwned(instanceID uint64, total int64) {
 	v.(*atomic.Int64).Store(total)
 }
 
+// UnpublishOwned removes an instance's published owned-byte counter. It MUST be
+// called when an operator instance is done (deregistration / Close), otherwise
+// OwnedTotal accumulates the last-published value of every operator instance for
+// the life of the worker — across a full SF100 run that balloons to hundreds of
+// GB of phantom "owned" bytes (observed on SF100 Run 1, 2026-06-01:
+// accounting_drift went to -146 GB because thousands of closed instances leaked
+// their counters here).
+func (t *Tracker) UnpublishOwned(instanceID uint64) {
+	t.published.Delete(instanceID)
+}
+
 // OwnedFor returns the published owned bytes for one instance, wait-free.
 // Returns 0 if the instance has never published.
 func (t *Tracker) OwnedFor(instanceID uint64) int64 {

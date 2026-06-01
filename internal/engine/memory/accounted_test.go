@@ -221,6 +221,41 @@ func TestShouldSpillFor_ReservoirsWiredButDormant(t *testing.T) {
 	}
 }
 
+// TestRegisterAccounted_UnpublishesOnClose guards the SF100 Run-1 leak fix:
+// when an operator unregisters, its published owned-byte counter must be removed
+// so OwnedTotal reflects only live operators (else it accumulates to hundreds of
+// GB across a run and drift goes wildly negative).
+func TestRegisterAccounted_UnpublishesOnClose(t *testing.T) {
+	sm := newSM(t)
+	op := &fakeAccountedOp{id: NextInstanceID(), name: "op", owned: 1000, spillable: 0, state: OpActive}
+	sm.tracker.PublishOwned(op.id, 5000) // operator publishes its footprint
+	unreg := sm.RegisterAccounted(op)
+	if sm.tracker.OwnedTotal() != 5000 {
+		t.Fatalf("OwnedTotal = %d, want 5000 while registered", sm.tracker.OwnedTotal())
+	}
+	op.state = OpClosed
+	unreg()
+	if got := sm.tracker.OwnedTotal(); got != 0 {
+		t.Fatalf("OwnedTotal = %d after unregister, want 0 (leak fix)", got)
+	}
+	if got := sm.tracker.OwnedFor(op.id); got != 0 {
+		t.Fatalf("OwnedFor = %d after unregister, want 0", got)
+	}
+}
+
+func TestTracker_UnpublishOwned(t *testing.T) {
+	tr := NewTracker("t", 0)
+	tr.PublishOwned(7, 100)
+	tr.PublishOwned(8, 200)
+	tr.UnpublishOwned(7)
+	if got := tr.OwnedTotal(); got != 200 {
+		t.Fatalf("OwnedTotal = %d after unpublish(7), want 200", got)
+	}
+	if got := tr.OwnedFor(7); got != 0 {
+		t.Fatalf("OwnedFor(7) = %d after unpublish, want 0", got)
+	}
+}
+
 // TestHeapDrift: the Phase-4 heap-truth residual HeapInuse − (OwnedTotal +
 // Σreservoir_actual). Distinct from driftExceeds (within-ledger gap).
 func TestHeapDrift(t *testing.T) {

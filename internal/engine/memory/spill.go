@@ -143,6 +143,15 @@ func (sm *SpillManager) RegisterAccounted(op AccountedOperator) func() {
 				f.OwnedBytes = sm.accountedPeak[f.InstanceID]
 				sm.departedFootprints = append(sm.departedFootprints, f)
 				sm.accounted = append(sm.accounted[:i], sm.accounted[i+1:]...)
+				// Drop this instance's published owned-byte counter so OwnedTotal
+				// reflects only LIVE operators. Without this, every closed
+				// instance leaks its last value into OwnedTotal for the worker's
+				// lifetime (SF100 Run 1: drift hit -146 GB). delete(accountedPeak)
+				// too so the per-instance peak map doesn't grow unbounded.
+				if sm.tracker != nil {
+					sm.tracker.UnpublishOwned(f.InstanceID)
+				}
+				delete(sm.accountedPeak, f.InstanceID)
 				return
 			}
 		}
