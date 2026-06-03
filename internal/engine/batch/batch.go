@@ -115,6 +115,21 @@ func (b *RecordBatch) MemBytes() int64 {
 	return size
 }
 
+// EnsureCapacity grows every column so positions [0, n) are addressable for
+// in-place writes, preserving existing data, and sets Len to n. Used by
+// append-style builders (e.g. the hash-join per-partition accumulator) that
+// grow a batch across many source batches rather than pre-sizing to a
+// worst-case capacity. See Vector.EnsureLen for per-type behavior and the
+// nested-type caveat.
+func (b *RecordBatch) EnsureCapacity(n int) {
+	for _, col := range b.Columns {
+		col.EnsureLen(n)
+	}
+	if n > b.Len {
+		b.Len = n
+	}
+}
+
 // Reset clears the batch for reuse, keeping allocated memory.
 func (b *RecordBatch) Reset(numRows int) {
 	b.Len = numRows
