@@ -573,20 +573,42 @@ func (h *HashJoin) spillUntilCanReserve(needed int64) error {
 		return nil
 	}
 	// Cooperative spill: ask the worker's advisor to evict from any other
-	// concurrent operator. Skip if no SpillManager (test paths), no other
-	// operators (single-operator path), or the budget hasn't been crossed.
+	// concurrent operator. Skip if no SpillManager (test paths, single-operator
+	// path). We LOOP rather than make a single request: the advisor evicts one
+	// victim partition per call and may free less than the gap in one round,
+	// and a concurrent build on the same pool can add between rounds. A single
+	// round that comes up a few bytes short would otherwise bubble a spurious
+	// "memory budget exceeded" up to the caller even though the combined
+	// unspillable footprint fits the budget. Keep requesting relief (and
+	// re-checking our own self-spill, in case an open accumulator became
+	// spillable meanwhile) until we fit or a full round frees nothing anywhere.
 	if h.Spill == nil {
 		return nil
 	}
-	gap := h.MemTracker.Used() + needed - h.MemTracker.Budget()
-	// h.mu is held — release before calling cross-operator advisory. A
-	// concurrent operator's SpillSome takes ITS mu, never ours, but we
-	// shouldn't pin our partitioning loop while another operator does its
-	// own potentially-large spill.
-	h.mu.Unlock()
-	_, err := h.Spill.RequestRelief(gap)
-	h.mu.Lock()
-	return err
+	for h.MemTracker.Used()+needed > h.MemTracker.Budget() {
+		gap := h.MemTracker.Used() + needed - h.MemTracker.Budget()
+		// h.mu is held — release before calling cross-operator advisory. A
+		// concurrent operator's SpillSome takes ITS mu, never ours, so this is
+		// deadlock-free; we just shouldn't pin our partitioning loop while
+		// another operator does its own potentially-large spill.
+		h.mu.Unlock()
+		relieved, err := h.Spill.RequestRelief(gap)
+		h.mu.Lock()
+		if err != nil {
+			return err
+		}
+		selfFreed, err := h.spillOneInMemoryPartition()
+		if err != nil {
+			return err
+		}
+		if relieved == 0 && selfFreed == 0 {
+			// Neither we nor any peer has anything left to evict; the build
+			// genuinely cannot fit. Return nil and let the caller's Reserve
+			// surface the real over-budget error with full context.
+			return nil
+		}
+	}
+	return nil
 }
 
 // Inspect implements memory.AccountedOperator. OwnedBytes includes the hash
