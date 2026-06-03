@@ -14,26 +14,22 @@ data_prefix               = ""              # SF100 data at root (lineitem/, ord
 generate_data             = false           # data is pre-staged; do not regenerate
 skip_queries              = ""
 query_timeout             = "30m"           # SF100 heavy queries need >10m default; mirrors sf10-distributed
-# 2026-05-07 Q17 investigation: 4 concurrent stage tasks each with ~5-6 GB
-# live working set overwhelmed the 21.6 GB GOMEMLIMIT, GC thrashed,
-# heartbeats starved, coord reaped. Lowered to 3.
-#
-# 2026-05-09 SF100 deploy of 7a8c0d6 (PR #90 groupstate-soa-split) at
-# max_concurrent=4: Q17 PASSED in 22m18s (the =4 unblock goal), but the
-# suite did not complete — a query post-Q17 (Q18 or Q21 based on staged
-# shuffle outputs `final_aggregate-13` + `join-16`) hit a separate
-# memory bottleneck and the run never reached the S3 upload step. Q17
-# was +5m13s vs the =3 baseline (17m5s). The refactor is correct but
-# =4 across the whole 22Q suite remains memory-bound on a different
-# code path. Stay at =3 until the post-Q17 bottleneck (likely
-# drainSimpleAggsToPartialGroups peak, ~749 MB at SF10) is addressed.
-# 2026-05-10 deploy of db4feab (PR #91 + #92 typed-keyvals) at mc=4:
-# Q01-Q04 PASSED (Q03 -53s vs 7m18 baseline, Q04 -1m49 vs 8m57). Q05
-# (5-way customer/orders/lineitem/supplier/nation/region join) stalled
-# after ~16 min: worker reaped (1m43s no heartbeat with 2 in-flight
-# tasks), then ~10 min no stage completions. Different signature than
-# PR #90's post-Q17 stall — this is a hash-join build/probe memory
-# pressure at SF100, NOT the drain path. Production stays at mc=3 until
-# the Q05-shape HashJoin peak is addressed. Cost of this attempt ~$1.55.
-max_concurrent            = 3
+# max_concurrent history (chronological):
+# - 2026-05-07: lowered 4->3 after the Q17 investigation (4 concurrent
+#   tasks x ~5-6 GB live overwhelmed the 21.6 GB GOMEMLIMIT, GC thrashed,
+#   heartbeats starved, coord reaped).
+# - 2026-05-09 (PR #90) and 2026-05-10 (db4feab, PR #91/#92) mc=4 attempts
+#   each failed: PR #90 completed Q17 but the suite died post-Q17 on the
+#   Q18/Q21 drain; db4feab stalled at Q05 (a hash-join build/probe memory
+#   pressure, NOT the drain path) — worker reaped, ~10 min no stage
+#   completions. Production pinned at mc=3.
+# - 2026-06-03 (d5997af, HashJoin flat-path retirement / partition-on-arrival
+#   unification): mc=4 now PASSES the full suite. SF100 22/22 byte-identical
+#   to the mc=3 baseline (results/20260603-174555), total 1h6m vs ~71m at
+#   mc=3 — FASTER and complete. Both prior death points cleared: Q05 (3m35s)
+#   and the Q17->Q18 drain (Q18 7m16s vs 10m8s at mc=3). The fix makes the
+#   HashJoin build spill O(partition) instead of doing a reactive O(total)
+#   repartition+rebuild under pressure, which is what OOM'd mc=4 before.
+#   Raised to 4 — the concurrency payoff the engine was always targeting.
+max_concurrent            = 4
 data_plane                = "grpc" # Phase C+D+E gRPC data-plane (task dispatch + results + gather + TaskProgress). NATS retained for heartbeats + cancellation + KV only. SF100 is where the design was actually targeted — Q17 dispatch-stall + NATS lock-contention pathologies.
