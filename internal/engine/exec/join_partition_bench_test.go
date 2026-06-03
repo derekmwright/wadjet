@@ -9,19 +9,21 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-// BenchmarkHashJoinBuildNoSpill is the Option A gate for HashJoin partial-drain.
+// BenchmarkHashJoinBuildNoSpill measures the permanent no-spill build cost of
+// the two surviving build paths after the flat-path unification:
+//   - "flat": a no-spill in-memory build (no MemTracker/Spill — embedded
+//     queries, tests, spill-replay rebuilds). Zero-copy: indexes arriving
+//     batches in place.
+//   - "partitioned": buildPartitioned, taken by every spill-eligible build
+//     (MemTracker + Spill set). It scatters rows into growable per-partition
+//     accumulators (one physical copy per row), the cost of making spill
+//     O(partition) and cooperative relief always available.
 //
-// It measures build-side cost of the legacy flat path (PartitionOnArrival=false)
-// vs the partition-on-arrival path (true) in the NO-SPILL regime — the regime
-// the flat "fast path" exists to optimize. Partition-on-arrival is already the
-// correct partial-drain path (O(partition) eviction, cooperative relief); the
-// only thing keeping the legacy flat path alive is the hypothesis that its
-// per-batch scatter is too expensive when no spill happens. If the overhead
-// here is within noise, the flat path — and its reactive O(total) repartition +
-// full hash-table rebuild (the Q17/Q18 mc=4 killer) — can be retired.
-//
-// Both paths get MemTracker+Spill with a budget far above the working set, so
-// nothing spills and the only variable is PartitionOnArrival.
+// The "partitioned" arm is given an 8 GiB budget so nothing spills — the
+// measured delta is the per-row copy floor that spill-eligible builds now pay
+// unconditionally (the accepted tax for retiring the reactive O(total)
+// repartition that was the Q17/Q18 mc=4 killer). Guards against regressing
+// either path's no-spill cost.
 func BenchmarkHashJoinBuildNoSpill(b *testing.B) {
 	const buildN = 200_000
 	schema := []parquet.Column{
@@ -61,6 +63,10 @@ func BenchmarkHashJoinBuildNoSpill(b *testing.B) {
 
 	tmpDir := b.TempDir() // unused target: no spill at this budget
 
+	// Path selection is driven by spill-eligibility: a build with a
+	// MemTracker + Spill manager partitions on arrival; one without takes the
+	// no-spill flat path. (The PartitionOnArrival flag was retired with the
+	// flat-path unification.)
 	for _, partition := range []bool{false, true} {
 		name := "flat"
 		if partition {
@@ -71,15 +77,18 @@ func BenchmarkHashJoinBuildNoSpill(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
 				batches := freshBatches()
-				tracker := memory.NewTracker("bench", 8<<30) // 8 GiB: no spill
-				sm, err := memory.NewSpillManager(tmpDir, tracker)
-				if err != nil {
-					b.Fatal(err)
-				}
 				hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
-				hj.Spill = sm
-				hj.MemTracker = tracker
-				hj.PartitionOnArrival = partition
+				var sm *memory.SpillManager
+				if partition {
+					tracker := memory.NewTracker("bench", 8<<30) // 8 GiB: no spill
+					var err error
+					sm, err = memory.NewSpillManager(tmpDir, tracker)
+					if err != nil {
+						b.Fatal(err)
+					}
+					hj.Spill = sm
+					hj.MemTracker = tracker
+				}
 				src := NewBatchSource(batches)
 				b.StartTimer()
 
@@ -89,7 +98,9 @@ func BenchmarkHashJoinBuildNoSpill(b *testing.B) {
 
 				b.StopTimer()
 				_ = hj.Close()
-				sm.Cleanup()
+				if sm != nil {
+					sm.Cleanup()
+				}
 				b.StartTimer()
 			}
 		})

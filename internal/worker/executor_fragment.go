@@ -965,15 +965,13 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			hj.SemiAntiFilter = physical.BuildSemiAntiFilter(spec.JoinFilter)
 		}
 		if e.sharedSpill != nil {
+			// Wiring a Spill manager + tracker makes Build partition on arrival
+			// unconditionally (O(partition) spill). There is no at-entry
+			// pressure heuristic: the stale 30% snapshot used to leave shuffle
+			// builds on the flat path, which could then need an O(total)
+			// reactive repartition under pressure (the Q17/Q18 mc=4 killer).
 			hj.Spill = e.sharedSpill
 			hj.MemTracker = e.sharedTracker
-			// Broadcast probes always force partition-on-arrival to bound peak
-			// heap; shuffle-side probes opt in based on observed pool pressure.
-			if spec.Type == distributed.OpBroadcastProbe {
-				hj.PartitionOnArrival = true
-			} else {
-				hj.PartitionOnArrival = exec.SharedPoolUnderPressure(e.sharedTracker)
-			}
 		}
 		if err := hj.Build(ctx, src); err != nil {
 			return nil, fmt.Errorf("building hash table: %w", err)

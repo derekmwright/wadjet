@@ -180,28 +180,6 @@ func (s *spillState) largestInMemoryPartition() int {
 	return bestPart
 }
 
-// spillBuildPartition writes a partition's build batches to disk and frees memory.
-// Returns the number of bytes freed.
-func (s *spillState) spillBuildPartition(partID int) (int64, error) {
-	batches := s.partBuildBatches[partID]
-	if len(batches) == 0 {
-		s.spilledParts[partID] = true
-		return 0, nil
-	}
-
-	path, err := writeSpillBatches(s.dir, batches)
-	if err != nil {
-		return 0, fmt.Errorf("spilling partition %d: %w", partID, err)
-	}
-
-	s.partBuildFiles[partID] = append(s.partBuildFiles[partID], path)
-	freed := s.partMemory[partID]
-	delete(s.partBuildBatches, partID)
-	delete(s.partMemory, partID)
-	s.spilledParts[partID] = true
-	return freed, nil
-}
-
 // writeProbeRow buffers a probe batch for a spilled partition.
 // Thread-safe: called concurrently from parallel pipeline workers.
 func (s *spillState) writeProbeRow(partID int, b *batch.RecordBatch) error {
@@ -245,60 +223,6 @@ func (s *spillState) cleanup() {
 		for _, f := range files {
 			os.Remove(f)
 		}
-	}
-}
-
-// partitionBuildBatch assigns rows from a build batch to partitions.
-// The batch is split by partition ID and stored in the partition's build list.
-func (h *HashJoin) partitionBuildBatch(b *batch.RecordBatch) {
-	ss := h.spillState
-
-	// Compute partition for each row
-	partRows := make(map[int][]int) // partID → row indices
-
-	if h.useIntKey {
-		col := b.Columns[h.buildKeyIdx[0]]
-		for i := 0; i < b.Len; i++ {
-			key, ok := intKeyFromVector(col, i)
-			if !ok {
-				partRows[0] = append(partRows[0], i)
-				continue
-			}
-			p := spillPartition(key)
-			partRows[p] = append(partRows[p], i)
-		}
-	} else if h.useDualIntKey {
-		col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
-		for i := 0; i < b.Len; i++ {
-			a, bb, ok := dualIntKeyFromVectors(col0, col1, i)
-			if !ok {
-				partRows[0] = append(partRows[0], i)
-				continue
-			}
-			p := spillPartition(dualIntHash(a, bb))
-			partRows[p] = append(partRows[p], i)
-		}
-	} else {
-		for i := 0; i < b.Len; i++ {
-			h.buildKeyFromBatch(b, i)
-			p := spillPartitionBytes(h.keyBuf)
-			partRows[p] = append(partRows[p], i)
-		}
-	}
-
-	// Create per-partition batches
-	for partID, rows := range partRows {
-		if ss.spilledParts[partID] {
-			// This partition is already spilled — append to its long-lived
-			// writer so a run of post-spill batches concatenates into a
-			// single file instead of fragmenting into one file per batch.
-			partBatch := compactBatchForRows(b, rows)
-			_ = ss.writeBuildBatch(partID, partBatch) // best-effort
-			continue
-		}
-		partBatch := compactBatchForRows(b, rows)
-		ss.partBuildBatches[partID] = append(ss.partBuildBatches[partID], partBatch)
-		ss.partMemory[partID] += hashBuildBytes(partBatch)
 	}
 }
 

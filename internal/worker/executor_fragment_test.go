@@ -443,9 +443,9 @@ func makeProbeWshf(t *testing.T, rows []struct {
 // drove probes through exec.Pipeline which already includes flushSpilledOps;
 // the fragment runner did not.
 //
-// This test forces the build's hash partition to spill (tiny shared budget +
-// PartitionOnArrival via OpBroadcastProbe) and asserts every matching
-// probe→build pair appears in the joined output.
+// This test forces the build's hash partition to spill (tiny shared budget;
+// the shared Spill+tracker make Build partition on arrival) and asserts every
+// matching probe→build pair appears in the joined output.
 func TestExecuteFragment_HashJoinProbe_FlushesSpilledPartitions(t *testing.T) {
 	ctx := context.Background()
 	const bucket = "test-fragment-hj-flush"
@@ -455,7 +455,7 @@ func TestExecuteFragment_HashJoinProbe_FlushesSpilledPartitions(t *testing.T) {
 	// triggers spillUntilCanReserve, which evicts the largest in-memory
 	// partition. Subsequent batches scattered to that partition write
 	// directly to disk; probe rows hashing there route through the spill
-	// flush path. PartitionOnArrival=true is forced by OpBroadcastProbe.
+	// flush path. The shared Spill manager makes the build partition on arrival.
 	const numBuildFiles = 4
 	const rowsPerFile = 2048
 	const buildN = numBuildFiles * rowsPerFile
@@ -524,8 +524,8 @@ func TestExecuteFragment_HashJoinProbe_FlushesSpilledPartitions(t *testing.T) {
 				InputBucket: bucket,
 			},
 			{
-				// OpBroadcastProbe forces PartitionOnArrival=true on the
-				// HashJoin (see buildFragmentJoinProbe). The tight shared
+				// The shared Spill manager makes this HashJoin partition on
+				// arrival (see buildFragmentJoinProbe). The tight shared
 				// budget triggers a spill once the second build batch
 				// arrives, putting probe-routing rows on disk.
 				Type:        distributed.OpBroadcastProbe,

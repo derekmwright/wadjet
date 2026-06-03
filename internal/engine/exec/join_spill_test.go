@@ -415,9 +415,15 @@ func TestGraceHashJoinSpill_Parallel(t *testing.T) {
 }
 
 // TestConcurrentBuildSharedTracker verifies that two hash joins sharing a single
-// MemTracker don't corrupt each other's accounting when one spills. Previously,
-// spillBuildBatches() called tracker.Reset() which zeroed ALL concurrent builds'
-// tracked memory, causing unchecked allocation and OOM in multi-way joins (Q21).
+// MemTracker keep their accounting balanced (tracker.Used == sum of per-join
+// trackedMem) when one spills under concurrent build. The original regression
+// was the legacy flat path's spillBuildBatches() calling tracker.Reset(), which
+// zeroed ALL concurrent builds' tracked memory → unchecked allocation and OOM in
+// multi-way joins (Q21). That path is retired; spill-eligible builds now use
+// partition-on-arrival (buildPartitioned), whose spillOneInMemoryPartition only
+// Releases its own partition bytes and never touches the shared tracker's total,
+// so the invariant holds structurally. This test now guards that invariant under
+// buildPartitioned's cooperative cross-operator spill.
 func TestConcurrentBuildSharedTracker(t *testing.T) {
 	schema := []parquet.Column{
 		{Name: "id", Type: parquet.TypeInt64},
@@ -442,11 +448,14 @@ func TestConcurrentBuildSharedTracker(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Shared tracker: each build produces ~980KB (5 batches × 196KB).
-	// Budget of 1.4MB lets both builds get at least 2 batches before
-	// combined usage triggers spill (80% of 1.4MB = 1.12MB threshold),
-	// even if one build monopolizes early scheduling.
-	budget := int64(1_400_000)
+	// Shared budget that forces at least one build to spill while leaving
+	// headroom for buildPartitioned's residual hash-table overhead, which (for
+	// partition-on-arrival) stays in the tracker for spilled partitions until
+	// Close rather than being dropped by a flat-path arena rebuild. 1.6MB is
+	// the calibrated minimum for two concurrent 10K-row builds (matching
+	// TestPartitionOnArrival_ConcurrentBuildsSharedPool); the legacy flat path's
+	// 1.4MB was tuned to its smaller reactively-rebuilt arena.
+	budget := int64(1_600_000)
 	sharedTracker := memory.NewTracker("shared", budget)
 	sm, err := memory.NewSpillManager(tmpDir, sharedTracker)
 	if err != nil {
