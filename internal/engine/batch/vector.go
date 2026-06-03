@@ -283,6 +283,122 @@ func NewVectorWithScale(typ TypeID, length int, scale int) *Vector {
 	return v
 }
 
+// EnsureLen grows the vector's backing storage so positions [0, n) are
+// addressable for in-place writes (Set / index-assign), preserving existing
+// values, defaulting new fixed-width slots to zero and new null bits to
+// non-null. Backing arrays grow geometrically (via append) for amortized O(1)
+// appends, so an append-style builder can grow a column across many source
+// batches instead of pre-sizing to a worst-case capacity. Sets Len to n.
+//
+// Scalar, bytes, decimal and fixed-dim VECTOR columns are fully supported.
+// Nested ARRAY/MAP element storage and ROW children are NOT grown here (their
+// element storage is appended by SetValue); callers that build nested columns
+// should use pre-sized batches. The hash-join accumulator path that relies on
+// EnsureLen guards nested schemas to a pre-sized path for this reason.
+func (v *Vector) EnsureLen(n int) {
+	if n <= v.Len {
+		return
+	}
+	v.Nulls.EnsureLen(n)
+	switch v.Type {
+	case TypeBool:
+		if cap(v.BoolData) >= n {
+			v.BoolData = v.BoolData[:n]
+		} else {
+			g := make([]bool, n, growCap(cap(v.BoolData), n))
+			copy(g, v.BoolData)
+			v.BoolData = g
+		}
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		if cap(v.Int32Data) >= n {
+			v.Int32Data = v.Int32Data[:n]
+		} else {
+			g := make([]int32, n, growCap(cap(v.Int32Data), n))
+			copy(g, v.Int32Data)
+			v.Int32Data = g
+		}
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		if cap(v.Int64Data) >= n {
+			v.Int64Data = v.Int64Data[:n]
+		} else {
+			g := make([]int64, n, growCap(cap(v.Int64Data), n))
+			copy(g, v.Int64Data)
+			v.Int64Data = g
+		}
+	case TypeFloat32:
+		if cap(v.Float32Data) >= n {
+			v.Float32Data = v.Float32Data[:n]
+		} else {
+			g := make([]float32, n, growCap(cap(v.Float32Data), n))
+			copy(g, v.Float32Data)
+			v.Float32Data = g
+		}
+	case TypeFloat64:
+		if cap(v.Float64Data) >= n {
+			v.Float64Data = v.Float64Data[:n]
+		} else {
+			g := make([]float64, n, growCap(cap(v.Float64Data), n))
+			copy(g, v.Float64Data)
+			v.Float64Data = g
+		}
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		// Offsets need length n+1 (one trailing offset). Data grows separately
+		// via Set/SetFrom appends.
+		if cap(v.BytesData.Offsets) >= n+1 {
+			v.BytesData.Offsets = v.BytesData.Offsets[:n+1]
+		} else {
+			g := make([]uint32, n+1, growCap(cap(v.BytesData.Offsets), n+1))
+			copy(g, v.BytesData.Offsets)
+			v.BytesData.Offsets = g
+		}
+	case TypeDecimal:
+		if cap(v.DecimalData.Data) >= n {
+			v.DecimalData.Data = v.DecimalData.Data[:n]
+		} else {
+			g := make([]Int128, n, growCap(cap(v.DecimalData.Data), n))
+			copy(g, v.DecimalData.Data)
+			v.DecimalData.Data = g
+		}
+	case TypeVector:
+		if v.VectorDim > 0 {
+			need := n * v.VectorDim
+			if cap(v.Float32Data) >= need {
+				v.Float32Data = v.Float32Data[:need]
+			} else {
+				g := make([]float32, need, growCap(cap(v.Float32Data), need))
+				copy(g, v.Float32Data)
+				v.Float32Data = g
+			}
+		}
+	case TypeArray, TypeMap:
+		if cap(v.Offsets) >= n+1 {
+			v.Offsets = v.Offsets[:n+1]
+		} else {
+			g := make([]int32, n+1, growCap(cap(v.Offsets), n+1))
+			copy(g, v.Offsets)
+			v.Offsets = g
+		}
+	case TypeRow:
+		for _, c := range v.Children {
+			c.EnsureLen(n)
+		}
+	}
+	v.Len = n
+}
+
+// growCap returns a new capacity >= need, at least doubling the old capacity so
+// repeated EnsureLen growth amortizes to O(1) per appended row.
+func growCap(old, need int) int {
+	c := old
+	if c == 0 {
+		c = need
+	}
+	for c < need {
+		c *= 2
+	}
+	return c
+}
+
 // NewVectorVector creates a new VECTOR column with fixed dimensionality.
 // Storage: Float32Data of length * dim, where row i occupies [i*dim, (i+1)*dim).
 func NewVectorVector(length, dim int) *Vector {

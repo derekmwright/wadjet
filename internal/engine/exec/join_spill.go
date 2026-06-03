@@ -81,6 +81,39 @@ type spillState struct {
 	// nil under the legacy reactive-spill path, which never needs this lookup.
 	batchPartID []int
 
+	// --- Partition-on-arrival reusable build scatter state ---
+	// partRowScratch[p] holds the row indices of the CURRENT arrival batch that
+	// hash to partition p. Reused across arrival batches: each is truncated to
+	// [:0] (capacity retained) at the top of partitionAndIndexBatch. This
+	// replaces the per-batch map[int][]int + 64 fresh []int allocations.
+	partRowScratch [numSpillPartitions][]int
+
+	// openAccum[p] is the in-progress per-partition accumulator batch. Rows are
+	// appended into it across arrival batches; when it fills to accumFlushRows
+	// (or at build end / before its partition spills) it is "frozen": indexed
+	// into the hash table, appended to buildBatches, and openAccum[p] cleared so
+	// the next arrival batch mints a fresh one. A frozen accumulator backs live
+	// buildRefs and is NEVER mutated or Reset while reachable from buildBatches.
+	// partMemory is charged tightly at append time, so an open accumulator's
+	// rows are already counted for spill selection before the freeze.
+	openAccum [numSpillPartitions]*batch.RecordBatch
+
+	// openAccumData[p] accumulates the appendRows data-byte charges (the
+	// MemBytes-comparable portion, excluding null-bitmap words) made into
+	// partition p's open accumulator. At freeze it is reconciled against the
+	// accumulator's true MemBytes() so the growable accumulator's residual
+	// capacity slack (bitmap words + bytes-arena cap) is charged and later
+	// released honestly rather than undercounted.
+	openAccumData [numSpillPartitions]int64
+
+	// accumEligible reports whether the build schema is composed only of column
+	// types whose storage EnsureLen can grow in place (scalar/bytes/decimal).
+	// Schemas with nested ARRAY/MAP/ROW/VECTOR build columns fall back to one
+	// tightly-sized indexed batch per arrival, since append-grow cannot extend
+	// nested element storage. Computed once from the first arrival batch.
+	accumEligible bool
+	accumChecked  bool
+
 	schema []parquet.Column // build-side schema
 }
 
@@ -1248,75 +1281,114 @@ func (p *HashJoinProbe) probePartition(in *batch.RecordBatch, row int) int {
 	return spillPartitionBytes(p.keyBuf)
 }
 
-// compactBatchForRows creates a new batch containing only the specified rows.
+// compactBatchForRows creates a new dense batch containing only the specified
+// rows. It is a thin wrapper over appendRows that mints a tightly-sized
+// destination; callers that reuse a destination across many source batches use
+// appendRows directly (see the partition-on-arrival accumulator path).
 func compactBatchForRows(in *batch.RecordBatch, rows []int) *batch.RecordBatch {
 	out := batch.NewRecordBatch(in.Schema, len(rows))
-	for j, col := range in.Columns {
-		dst := out.Columns[j]
+	appendRows(out, in, rows, 0)
+	return out
+}
+
+// appendRows copies src's rows[di] into dst at positions [dstStart, dstStart+len(rows)).
+// It returns the data-byte footprint of the copied rows (matching Vector.MemBytes
+// per-type sizing, summed over just these rows, excluding null-bitmap words and
+// the per-row hash overhead) so callers can charge a TIGHT memory figure that is
+// independent of dst's physical capacity — required when dst is a reused
+// accumulator sized larger than its logical row count.
+//
+// Preconditions the caller MUST satisfy:
+//   - dst.Sel == nil and dst's fixed-width column slices have length >=
+//     dstStart+len(rows).
+//   - dst.Nulls is pre-cleared to all-valid over [dstStart, dstStart+len(rows))
+//     (true for a freshly NewRecordBatch'd or Reset() batch); appendRows only
+//     ever sets nulls, never clears them.
+//   - For BytesColumn columns, rows are appended in strictly increasing dst
+//     position with dst.BytesData.Offsets[dstStart] == len(dst.BytesData.Data)
+//     (true at dstStart==0 after Reset, and maintained as the tail grows).
+//
+// appendRows does NOT update dst.Len; the caller owns the logical row count.
+func appendRows(dst, src *batch.RecordBatch, rows []int, dstStart int) int64 {
+	n := int64(len(rows))
+	var dataBytes int64
+	for j, col := range src.Columns {
+		d := dst.Columns[j]
 		switch col.Type {
 		case batch.TypeBool:
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
-					dst.Nulls.SetNull(di)
+					d.Nulls.SetNull(dstStart + di)
 				} else {
-					dst.BoolData[di] = col.BoolData[si]
+					d.BoolData[dstStart+di] = col.BoolData[si]
 				}
 			}
+			dataBytes += n
 		case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
-					dst.Nulls.SetNull(di)
+					d.Nulls.SetNull(dstStart + di)
 				} else {
-					dst.Int32Data[di] = col.Int32Data[si]
+					d.Int32Data[dstStart+di] = col.Int32Data[si]
 				}
 			}
+			dataBytes += n * 4
 		case batch.TypeInt64, batch.TypeTimestamp, batch.TypeIPv4, batch.TypeMAC, batch.TypeDuration:
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
-					dst.Nulls.SetNull(di)
+					d.Nulls.SetNull(dstStart + di)
 				} else {
-					dst.Int64Data[di] = col.Int64Data[si]
+					d.Int64Data[dstStart+di] = col.Int64Data[si]
 				}
 			}
+			dataBytes += n * 8
 		case batch.TypeFloat32:
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
-					dst.Nulls.SetNull(di)
+					d.Nulls.SetNull(dstStart + di)
 				} else {
-					dst.Float32Data[di] = col.Float32Data[si]
+					d.Float32Data[dstStart+di] = col.Float32Data[si]
 				}
 			}
+			dataBytes += n * 4
 		case batch.TypeFloat64:
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
-					dst.Nulls.SetNull(di)
+					d.Nulls.SetNull(dstStart + di)
 				} else {
-					dst.Float64Data[di] = col.Float64Data[si]
+					d.Float64Data[dstStart+di] = col.Float64Data[si]
 				}
 			}
+			dataBytes += n * 8
 		case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
-					dst.Nulls.SetNull(di)
-					dst.BytesData.Set(di, nil) // maintain offset continuity
+					d.Nulls.SetNull(dstStart + di)
+					d.BytesData.Set(dstStart+di, nil) // maintain offset continuity
 				} else {
-					dst.BytesData.SetFrom(di, &col.BytesData, si)
+					start := col.BytesData.Offsets[si]
+					end := col.BytesData.Offsets[si+1]
+					dataBytes += int64(end - start)
+					d.BytesData.SetFrom(dstStart+di, &col.BytesData, si)
 				}
 			}
+			dataBytes += n * 4 // offsets, one uint32 per row
 		case batch.TypeDecimal:
 			for di, si := range rows {
 				if col.Nulls.IsNullFast(si) {
-					dst.Nulls.SetNull(di)
+					d.Nulls.SetNull(dstStart + di)
 				} else {
-					dst.DecimalData.Data[di] = col.DecimalData.Data[si]
+					d.DecimalData.Data[dstStart+di] = col.DecimalData.Data[si]
 				}
 			}
+			dataBytes += n * 16
 		default:
-			// Fallback via GetValue/SetValue
+			// Fallback via GetValue/SetValue (nested ARRAY/ROW/MAP/VECTOR).
 			for di, si := range rows {
-				dst.SetValue(di, col.GetValue(si))
+				d.SetValue(dstStart+di, col.GetValue(si))
 			}
+			dataBytes += n * 8 // coarse estimate; nested types are off the join hot path
 		}
 	}
-	return out
+	return dataBytes
 }

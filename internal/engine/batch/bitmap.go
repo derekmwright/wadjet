@@ -35,6 +35,40 @@ func NewBitmapAllNull(n int) Bitmap {
 	return Bitmap{data: make([]uint64, words), len: n, hasNulls: hn}
 }
 
+// EnsureLen grows the bitmap to at least n bits, defaulting any newly added
+// bits to non-null (1) to match NewBitmap. Existing bits are preserved. Used by
+// append-style builders that grow a column across many source batches instead
+// of pre-sizing to a worst-case capacity.
+func (b *Bitmap) EnsureLen(n int) {
+	if n <= b.len {
+		return
+	}
+	words := (n + 63) / 64
+	if words > cap(b.data) {
+		// Grow the word array geometrically (at least double) so repeated
+		// EnsureLen calls amortize to O(1) per row instead of reallocating
+		// every 64 rows.
+		newCap := cap(b.data)
+		if newCap == 0 {
+			newCap = words
+		}
+		for newCap < words {
+			newCap *= 2
+		}
+		grown := make([]uint64, words, newCap)
+		copy(grown, b.data)
+		b.data = grown
+	} else if words > len(b.data) {
+		b.data = b.data[:words]
+	}
+	// Default new bits [b.len, n) to non-null (1). Each bit is set at most once
+	// across successive grows (b.len only advances), so total work is O(rows).
+	for i := b.len; i < n; i++ {
+		b.data[i/64] |= 1 << uint(i%64)
+	}
+	b.len = n
+}
+
 // IsNull returns true if the bit at position i is 0 (null).
 // Includes bounds checking for safety at API boundaries.
 func (b *Bitmap) IsNull(i int) bool {

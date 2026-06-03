@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -403,6 +404,152 @@ func TestPartitionOnArrival_StringKeySpill(t *testing.T) {
 	}
 	if len(sink.Rows) != expected {
 		t.Fatalf("expected %d rows, got %d", expected, len(sink.Rows))
+	}
+}
+
+// TestPartitionOnArrival_MultiBatchAccumulatorFill is the buildRef-integrity
+// regression for the reusable per-partition accumulator. It feeds the build
+// side as MANY tiny arrival batches, so every partition's accumulator spans
+// multiple arrival batches (appends at dstStart > 0) and fills/freezes more
+// than once (buildN > accumFlushRows). Each build row carries a UNIQUE payload,
+// so any error in the accumulator's row offset — a wrong appendRows dstStart, a
+// wrong frozen Len, or a Reset/overwrite of a still-live accumulator — would
+// return the wrong payload for a probed key and fail the per-key assertion
+// below. Duplicate keys spread across distinct arrival batches exercise match
+// chains that cross accumulator-freeze boundaries. The spill subcase forces
+// partially-filled accumulators to be frozen and evicted mid-build.
+func TestPartitionOnArrival_MultiBatchAccumulatorFill(t *testing.T) {
+	rightSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "val", Type: parquet.TypeString},
+	}
+	const (
+		buildN       = 6000 // > accumFlushRows (2048): accumulators freeze and refill
+		dupKeys      = 200   // ids 0..dupKeys-1 appear twice with distinct payloads
+		arrivalBatch = 37    // tiny: forces many partial per-partition appends
+	)
+
+	rightRows := make([]map[string]any, 0, buildN+dupKeys)
+	for i := 0; i < buildN; i++ {
+		rightRows = append(rightRows, map[string]any{
+			"id":  int64(i),
+			"val": fmt.Sprintf("val-%d", i),
+		})
+	}
+	// Duplicate keys 0..dupKeys-1 with a distinct payload, appended last so they
+	// land in much later arrival batches than the originals — the resulting
+	// 2-entry match chains straddle accumulator freezes.
+	for i := 0; i < dupKeys; i++ {
+		rightRows = append(rightRows, map[string]any{
+			"id":  int64(i),
+			"val": fmt.Sprintf("dup-%d", i),
+		})
+	}
+
+	makeBatches := func() []*batch.RecordBatch {
+		var out []*batch.RecordBatch
+		for i := 0; i < len(rightRows); i += arrivalBatch {
+			end := i + arrivalBatch
+			if end > len(rightRows) {
+				end = len(rightRows)
+			}
+			out = append(out, batch.FromRows(rightSchema, rightRows[i:end]))
+		}
+		return out
+	}
+
+	leftSchema := []parquet.Column{{Name: "id", Type: parquet.TypeInt64}}
+	leftRows := make([]map[string]any, buildN)
+	for i := 0; i < buildN; i++ {
+		leftRows[i] = map[string]any{"id": int64(i)}
+	}
+
+	cases := []struct {
+		name      string
+		budget    int64
+		wantSpill bool
+	}{
+		{"no-spill", 64 << 20, false},
+		{"spill", 150_000, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			tracker := memory.NewTracker("test", tc.budget)
+			sm, err := memory.NewSpillManager(tmpDir, tracker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sm.Cleanup()
+
+			hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
+			hj.Spill = sm
+			hj.MemTracker = tracker
+			hj.PartitionOnArrival = true
+
+			if err := hj.Build(context.Background(), NewBatchSource(makeBatches())); err != nil {
+				t.Fatalf("Build failed: %v", err)
+			}
+			if hj.spillState == nil {
+				t.Fatal("partition-on-arrival must allocate spillState")
+			}
+			spilled := len(hj.spillState.spilledParts)
+			if tc.wantSpill && spilled == 0 {
+				t.Fatalf("expected at least one spilled partition at budget %d", tc.budget)
+			}
+			if !tc.wantSpill && spilled != 0 {
+				t.Fatalf("did not expect spill at budget %d, got %d spilled", tc.budget, spilled)
+			}
+
+			probe := hj.Probe()
+			sink := &CollectSink{}
+			pipe := &Pipeline{
+				Source: NewSliceSource(leftSchema, leftRows),
+				Ops:    []UnaryOperator{probe},
+				Sink:   sink,
+			}
+			if err := pipe.Run(context.Background()); err != nil {
+				t.Fatalf("Pipeline failed: %v", err)
+			}
+
+			// Gather build payloads per probed key. id i<dupKeys matches two
+			// build rows (val-i and dup-i); id i>=dupKeys matches exactly one.
+			got := make(map[int64][]string, buildN)
+			for _, row := range sink.Rows {
+				id, ok := row["id"].(int64)
+				if !ok {
+					t.Fatalf("expected int64 id, got %T", row["id"])
+				}
+				val, ok := row["val"].(string)
+				if !ok {
+					t.Fatalf("expected string val for id %d, got %T", id, row["val"])
+				}
+				got[id] = append(got[id], val)
+			}
+
+			totalExpected := 0
+			for i := 0; i < buildN; i++ {
+				want := map[string]bool{fmt.Sprintf("val-%d", i): true}
+				if i < dupKeys {
+					want[fmt.Sprintf("dup-%d", i)] = true
+				}
+				totalExpected += len(want)
+
+				gotVals := got[int64(i)]
+				if len(gotVals) != len(want) {
+					t.Fatalf("id %d: got %d matches %v, want %d", i, len(gotVals), gotVals, len(want))
+				}
+				for _, g := range gotVals {
+					if !want[g] {
+						t.Fatalf("id %d: wrong payload %q (a corrupt accumulator offset would surface here); got=%v",
+							i, g, gotVals)
+					}
+				}
+			}
+			if len(sink.Rows) != totalExpected {
+				t.Fatalf("expected %d output rows, got %d", totalExpected, len(sink.Rows))
+			}
+		})
 	}
 }
 

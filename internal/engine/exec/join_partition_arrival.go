@@ -21,6 +21,15 @@ import (
 // when the pool is mostly empty. Tune via SF10/SF100 deploys.
 const PartitionOnArrivalThresholdPercent = 30
 
+// accumFlushRows is the row count at which an open per-partition build
+// accumulator is frozen (indexed into the hash table and handed to
+// buildBatches) and a fresh one is started. Bounding accumulators at
+// batch.DefaultBatchSize keeps per-batch index growth (EnsureCapacity +
+// CheckGrow) on its tuned path and caps any single buildBatches entry to one
+// arrival batch's worth. Accumulators grow on demand toward this bound rather
+// than pre-allocating it, so a sparsely-filled partition stays small.
+const accumFlushRows = batch.DefaultBatchSize
+
 // SharedPoolUnderPressure reports whether the shared tracker is at or above
 // PartitionOnArrivalThresholdPercent of its budget. Returns false when no
 // budget is configured (test paths, embedded callers without a memory pool).
@@ -159,6 +168,16 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 		h.mu.Unlock()
 	}
 
+	// Freeze any remaining open per-partition accumulators so their buffered
+	// rows are indexed and joined into the build side before probe begins. This
+	// extends the arena, so it must run before arenaMatched is sized below.
+	h.mu.Lock()
+	if err := h.freezeAllOpenAccums(); err != nil {
+		h.mu.Unlock()
+		return fmt.Errorf("freezing accumulators at build end: %w", err)
+	}
+	h.mu.Unlock()
+
 	// Allocate matched bitmap for right/full outer join and right semi/anti tracking
 	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin ||
 		h.JoinType == RightSemiJoin || h.JoinType == RightAntiJoin) && len(h.arena) > 0 {
@@ -187,29 +206,42 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 // Caller must hold h.mu.
 func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) error {
 	ss := h.spillState
-	partRows := computeBuildPartitionRows(h, b)
 
-	for partID, rows := range partRows {
+	if !ss.accumChecked {
+		ss.accumEligible = accumEligibleSchema(b)
+		ss.accumChecked = true
+	}
+
+	// Reset the reusable per-partition scatter scratch (capacity retained) and
+	// scatter this arrival batch's rows into it — no per-batch map allocation.
+	for p := range ss.partRowScratch {
+		ss.partRowScratch[p] = ss.partRowScratch[p][:0]
+	}
+	computeBuildPartitionRows(h, b, &ss.partRowScratch)
+
+	for partID := 0; partID < numSpillPartitions; partID++ {
+		rows := ss.partRowScratch[partID]
 		if len(rows) == 0 {
 			continue
 		}
-		partBatch := compactBatchForRows(b, rows)
-		partBytes := hashBuildBytes(partBatch)
 
+		// Already spilling to disk: write a transient compacted batch straight
+		// out. Spilled partitions are never indexed or accumulated, so there is
+		// no live ref and no accumulator involved.
 		if ss.spilledParts[partID] {
+			partBatch := compactBatchForRows(b, rows)
+			partBytes := hashBuildBytes(partBatch)
 			if err := ss.writeBuildBatch(partID, partBatch); err != nil {
 				return fmt.Errorf("writing build batch for spilled partition %d: %w", partID, err)
 			}
-			// Release the cost portion that this batch contributed to the
-			// arrival batch's Reserve(cost). The rows just went to disk —
-			// the corresponding bytes are no longer charged against the
-			// in-memory budget, and there's no in-memory partition to spill
-			// later that would otherwise release them. Without this, every
-			// arrival batch processed after partitions start spilling
-			// drifts the tracker upward by the to-disk fraction, eventually
-			// outrunning the recoverable partMemory pool — which is the
-			// failure mode TestPartitionOnArrival_BasicSpill exposed before
-			// this release.
+			// Release the cost portion that these rows contributed to the
+			// arrival batch's Reserve(cost). They just went to disk, so the
+			// corresponding bytes are no longer charged against the in-memory
+			// budget, and there's no in-memory partition to spill later that
+			// would otherwise release them. Without this, every arrival batch
+			// processed after partitions start spilling drifts the tracker
+			// upward by the to-disk fraction — the failure mode
+			// TestPartitionOnArrival_BasicSpill exposed before this release.
 			if h.MemTracker != nil && partBytes > 0 {
 				h.MemTracker.Release(partBytes)
 				h.trackedMem -= partBytes
@@ -220,46 +252,199 @@ func (h *HashJoin) partitionAndIndexBatch(b *batch.RecordBatch) error {
 			continue
 		}
 
-		partBatch.Detach() // build retains references; batch must not be recycled
-		batchIdx := int32(len(h.buildBatches))
-		h.buildBatches = append(h.buildBatches, partBatch)
-		ss.batchPartID = append(ss.batchPartID, partID)
-		ss.partBuildBatches[partID] = append(ss.partBuildBatches[partID], partBatch)
-		ss.partMemory[partID] += partBytes
-
-		// Pre-grow hash table for this partition's rows so PutNoGrow won't
-		// overflow during indexing. Mirrors the legacy flat path's per-batch
-		// EnsureCapacity + CheckGrow pattern.
-		batchRows := partBatch.ActiveLen()
-		if h.useIntKey || h.useDualIntKey {
-			if h.intIndex == nil {
-				h.intIndex = newIntHashTable(batchRows)
+		// In-memory partition. Eligible (scalar/bytes/decimal) schemas append
+		// into a reusable growable per-partition accumulator; nested-column
+		// schemas index one tightly-sized batch per arrival (append-grow can't
+		// extend nested element storage).
+		if ss.accumEligible {
+			if err := h.appendToAccum(b, partID, rows); err != nil {
+				return err
 			}
-			h.intIndex.EnsureCapacity(batchRows)
-		} else if h.strIndex != nil {
-			h.strIndex.EnsureCapacity(batchRows)
 		} else {
-			h.strIndex = newStrHashTable(batchRows)
+			h.freezeTightForPartition(partID, b, rows)
 		}
+	}
+	return nil
+}
 
-		h.indexBuildBatch(partBatch, batchIdx)
+// accumEligibleSchema reports whether every column of b can be grown in place by
+// Vector.EnsureLen (scalar, bytes, or decimal). Nested ARRAY/MAP/ROW/VECTOR
+// columns cannot, so such schemas use the tight per-arrival path.
+func accumEligibleSchema(b *batch.RecordBatch) bool {
+	for _, col := range b.Columns {
+		switch col.Type {
+		case batch.TypeArray, batch.TypeMap, batch.TypeRow, batch.TypeVector:
+			return false
+		}
+	}
+	return true
+}
 
-		if h.useIntKey || h.useDualIntKey {
-			h.intIndex.CheckGrow()
-		} else if h.strIndex != nil {
-			h.strIndex.CheckGrow()
+// freezeTightForPartition indexes one tightly-sized batch of an in-memory
+// partition's rows directly into the build side (no accumulator reuse). Used
+// for nested-column schemas and oversized arrival contributions. partMemory is
+// charged the batch's true MemBytes (its capacity equals its row count).
+// Caller must hold h.mu.
+func (h *HashJoin) freezeTightForPartition(partID int, b *batch.RecordBatch, rows []int) {
+	ss := h.spillState
+	tight := compactBatchForRows(b, rows)
+	tight.Detach()
+	ss.partMemory[partID] += tight.MemBytes() + int64(len(rows))*40
+	h.registerFrozen(partID, tight)
+}
+
+// appendToAccum appends b's selected rows for an in-memory partition into that
+// partition's open accumulator, freezing it first if the rows would overflow
+// accumFlushRows. partMemory is charged with the TIGHT byte footprint of the
+// appended rows (independent of the accumulator's physical capacity), keeping
+// the spill accounting balanced against the arrival batch's Reserve(cost) and
+// making an open accumulator's rows visible to spill selection before freeze.
+//
+// Caller must hold h.mu.
+func (h *HashJoin) appendToAccum(b *batch.RecordBatch, partID int, rows []int) error {
+	ss := h.spillState
+
+	// Defensive: an arrival batch never exceeds DefaultBatchSize, so a fresh
+	// accumulator always fits one partition's slice within accumFlushRows. If a
+	// future caller delivers an oversized batch, freeze any partial accumulator
+	// (to preserve arrival order within the partition) and index the oversized
+	// slice as one tight batch rather than overflowing the freeze bound.
+	if len(rows) > accumFlushRows {
+		if err := h.freezeAccum(partID); err != nil {
+			return err
+		}
+		h.freezeTightForPartition(partID, b, rows)
+		return nil
+	}
+
+	acc := ss.openAccum[partID]
+	if acc != nil && acc.Len+len(rows) > accumFlushRows {
+		if err := h.freezeAccum(partID); err != nil {
+			return err
+		}
+		acc = nil
+	}
+	if acc == nil {
+		// Mint empty; the backing arrays grow on demand via EnsureCapacity so a
+		// partition that receives few rows never pre-commits an accumFlushRows-
+		// sized buffer (which would over-allocate 64 partitions on a tight pool
+		// and starve concurrent builds — the regime this path exists to serve).
+		acc = batch.NewRecordBatch(b.Schema, 0)
+		acc.Detach() // build retains references; batch must not be recycled
+		ss.openAccum[partID] = acc
+	}
+	dstStart := acc.Len
+	acc.EnsureCapacity(dstStart + len(rows)) // grows backing arrays; sets acc.Len
+	dataBytes := appendRows(acc, b, rows, dstStart)
+	ss.partMemory[partID] += dataBytes + int64(len(rows))*40
+	ss.openAccumData[partID] += dataBytes
+	return nil
+}
+
+// freezeAccum finalizes partID's open accumulator: it sets the batch's logical
+// length, indexes it into the global hash table, and appends it to buildBatches
+// (after which it backs live buildRefs and must never be mutated or Reset).
+// openAccum[partID] is cleared. No-op when there is no open accumulator.
+//
+// Caller must hold h.mu.
+func (h *HashJoin) freezeAccum(partID int) error {
+	ss := h.spillState
+	acc := ss.openAccum[partID]
+	if acc == nil {
+		return nil
+	}
+	ss.openAccum[partID] = nil
+	if acc.Len == 0 {
+		ss.openAccumData[partID] = 0
+		return nil
+	}
+	// Ensure each column's logical length matches the filled row count so the
+	// frozen batch is structurally a normal compacted batch (EnsureCapacity
+	// already set these during the last append; this is defensive).
+	for _, col := range acc.Columns {
+		col.Len = acc.Len
+	}
+	// Reconcile the accumulator's fixed-capacity overhead. Its arrays were
+	// allocated for accumFlushRows rows regardless of fill, so MemBytes() (which
+	// counts slice length + Data capacity) exceeds the tight per-row data
+	// charged at append. Charge the difference to partMemory AND the shared
+	// tracker so the resident-but-unfilled capacity is accounted: undercounting
+	// it would let the shared pool over-commit to concurrent tasks — the OOM
+	// risk this path exists to remove. On spill, partMemory[partID] (now
+	// inclusive) is released, balancing this charge; Close releases the rest.
+	if excess := acc.MemBytes() - ss.openAccumData[partID]; excess > 0 {
+		ss.partMemory[partID] += excess
+		if h.MemTracker != nil {
+			h.MemTracker.ForceReserve(excess)
+			h.trackedMem += excess
+		}
+	}
+	ss.openAccumData[partID] = 0
+	h.registerFrozen(partID, acc)
+	return nil
+}
+
+// registerFrozen indexes a finalized in-memory partition batch into the hash
+// table and records it in buildBatches plus the per-partition bookkeeping. The
+// batch must be Detached, dense (Sel==nil), and have its logical Len set.
+// partMemory is charged by the caller (tightly, at append time), so this does
+// not touch it. Caller must hold h.mu.
+func (h *HashJoin) registerFrozen(partID int, frozen *batch.RecordBatch) {
+	ss := h.spillState
+	batchIdx := int32(len(h.buildBatches))
+	h.buildBatches = append(h.buildBatches, frozen)
+	ss.batchPartID = append(ss.batchPartID, partID)
+	ss.partBuildBatches[partID] = append(ss.partBuildBatches[partID], frozen)
+
+	// Pre-grow the hash table for this batch's rows so PutNoGrow won't overflow
+	// during indexing. Mirrors the legacy flat path's EnsureCapacity+CheckGrow.
+	batchRows := frozen.ActiveLen()
+	if h.useIntKey || h.useDualIntKey {
+		if h.intIndex == nil {
+			h.intIndex = newIntHashTable(batchRows)
+		}
+		h.intIndex.EnsureCapacity(batchRows)
+	} else if h.strIndex != nil {
+		h.strIndex.EnsureCapacity(batchRows)
+	} else {
+		h.strIndex = newStrHashTable(batchRows)
+	}
+
+	h.indexBuildBatch(frozen, batchIdx)
+
+	if h.useIntKey || h.useDualIntKey {
+		h.intIndex.CheckGrow()
+	} else if h.strIndex != nil {
+		h.strIndex.CheckGrow()
+	}
+}
+
+// freezeAllOpenAccums freezes every open per-partition accumulator. Called once
+// at build end so the final partial accumulators are indexed before probe.
+// Caller must hold h.mu.
+func (h *HashJoin) freezeAllOpenAccums() error {
+	ss := h.spillState
+	if ss == nil {
+		return nil
+	}
+	for partID := 0; partID < numSpillPartitions; partID++ {
+		if ss.openAccum[partID] != nil {
+			if err := h.freezeAccum(partID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
 // computeBuildPartitionRows assigns each row of b to a hash partition based
-// on the join's key encoding (int / dual-int / string). Rows whose key is
-// null are routed to partition 0 and will produce no hash-table match — but
-// keeping them grouped means the same partition holds all keys that hash to
-// it, including a probe-side null lookup that hits this same partition.
-func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch) map[int][]int {
-	partRows := make(map[int][]int)
+// on the join's key encoding (int / dual-int / string), appending the row
+// index into out[partition]. The caller owns out and must truncate each
+// out[p] to [:0] before the call. Rows whose key is null are routed to
+// partition 0 and will produce no hash-table match — but keeping them grouped
+// means the same partition holds all keys that hash to it, including a
+// probe-side null lookup that hits this same partition.
+func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch, out *[numSpillPartitions][]int) {
 	switch {
 	case h.useIntKey:
 		col := b.Columns[h.buildKeyIdx[0]]
@@ -268,21 +453,21 @@ func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch) map[int][]int 
 				row := int(si)
 				key, ok := intKeyFromVector(col, row)
 				if !ok {
-					partRows[0] = append(partRows[0], row)
+					out[0] = append(out[0], row)
 					continue
 				}
 				p := spillPartition(key)
-				partRows[p] = append(partRows[p], row)
+				out[p] = append(out[p], row)
 			}
 		} else {
 			for i := 0; i < b.Len; i++ {
 				key, ok := intKeyFromVector(col, i)
 				if !ok {
-					partRows[0] = append(partRows[0], i)
+					out[0] = append(out[0], i)
 					continue
 				}
 				p := spillPartition(key)
-				partRows[p] = append(partRows[p], i)
+				out[p] = append(out[p], i)
 			}
 		}
 	case h.useDualIntKey:
@@ -292,21 +477,21 @@ func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch) map[int][]int 
 				row := int(si)
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, row)
 				if !ok {
-					partRows[0] = append(partRows[0], row)
+					out[0] = append(out[0], row)
 					continue
 				}
 				p := spillPartition(dualIntHash(a, bb))
-				partRows[p] = append(partRows[p], row)
+				out[p] = append(out[p], row)
 			}
 		} else {
 			for i := 0; i < b.Len; i++ {
 				a, bb, ok := dualIntKeyFromVectors(col0, col1, i)
 				if !ok {
-					partRows[0] = append(partRows[0], i)
+					out[0] = append(out[0], i)
 					continue
 				}
 				p := spillPartition(dualIntHash(a, bb))
-				partRows[p] = append(partRows[p], i)
+				out[p] = append(out[p], i)
 			}
 		}
 	default:
@@ -315,17 +500,16 @@ func computeBuildPartitionRows(h *HashJoin, b *batch.RecordBatch) map[int][]int 
 				row := int(si)
 				h.buildKeyFromBatch(b, row)
 				p := spillPartitionBytes(h.keyBuf)
-				partRows[p] = append(partRows[p], row)
+				out[p] = append(out[p], row)
 			}
 		} else {
 			for i := 0; i < b.Len; i++ {
 				h.buildKeyFromBatch(b, i)
 				p := spillPartitionBytes(h.keyBuf)
-				partRows[p] = append(partRows[p], i)
+				out[p] = append(out[p], i)
 			}
 		}
 	}
-	return partRows
 }
 
 // spillOneInMemoryPartition picks the largest in-memory partition, writes its
@@ -348,6 +532,15 @@ func (h *HashJoin) spillOneInMemoryPartition() (int64, error) {
 	partID := ss.largestInMemoryPartition()
 	if partID < 0 {
 		return 0, nil
+	}
+
+	// Freeze this partition's open accumulator (if any) so its buffered rows
+	// become a writable, indexed batch in buildBatches before we evict. Those
+	// rows are already counted in partMemory[partID] (charged at append), so
+	// largestInMemoryPartition could have selected this partition on their
+	// account and the freed total below stays correct.
+	if err := h.freezeAccum(partID); err != nil {
+		return 0, err
 	}
 
 	// Mark spilled BEFORE writing, so any concurrent (re-entry-safe) callers
