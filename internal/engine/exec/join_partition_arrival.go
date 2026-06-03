@@ -8,19 +8,6 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 )
 
-// PartitionOnArrivalThresholdPercent is the shared-pool used percentage at
-// or above which the worker should turn on partition-on-arrival for new
-// HashJoin builds. Below this threshold, the legacy flat path is cheaper:
-// it skips the per-batch compactBatchForRows × 64 allocations that pure
-// partition-on-arrival paid upfront. Above the threshold, eager
-// partitioning is worth it because spill is likely and the partition-on-
-// arrival path makes spill O(partition) instead of O(total).
-//
-// 30% is heuristic: chosen so concurrent builds on a shared pool start
-// partitioning before the pool fills, but don't pay the allocation tax
-// when the pool is mostly empty. Tune via SF10/SF100 deploys.
-const PartitionOnArrivalThresholdPercent = 30
-
 // accumFlushRows is the row count at which an open per-partition build
 // accumulator is frozen (indexed into the hash table and handed to
 // buildBatches) and a fresh one is started. Bounding accumulators at
@@ -29,25 +16,6 @@ const PartitionOnArrivalThresholdPercent = 30
 // arrival batch's worth. Accumulators grow on demand toward this bound rather
 // than pre-allocating it, so a sparsely-filled partition stays small.
 const accumFlushRows = batch.DefaultBatchSize
-
-// SharedPoolUnderPressure reports whether the shared tracker is at or above
-// PartitionOnArrivalThresholdPercent of its budget. Returns false when no
-// budget is configured (test paths, embedded callers without a memory pool).
-//
-// Worker callers use this to decide whether to enable HashJoin.PartitionOnArrival
-// at task entry — the Build path itself doesn't read pressure dynamically;
-// it trusts the caller's flag and runs the partitioned path unconditionally
-// when set.
-func SharedPoolUnderPressure(t *memory.Tracker) bool {
-	if t == nil {
-		return false
-	}
-	budget := t.Budget()
-	if budget <= 0 {
-		return false
-	}
-	return t.Used()*100 >= budget*PartitionOnArrivalThresholdPercent
-}
 
 // buildPartitioned is the partition-on-arrival build path. Instead of
 // accumulating every batch flat and reactively switching to partitioned-spill

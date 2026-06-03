@@ -140,16 +140,6 @@ type HashJoin struct {
 	// output schema. Only set when spillState is non-nil.
 	spillOutputFilter map[string]bool
 	spillLeftSchema   []parquet.Column
-
-	// PartitionOnArrival makes Build allocate spillState upfront and partition
-	// every batch as it arrives, so memory pressure can be relieved by evicting
-	// a single partition (O(partition_size)) instead of redistributing the
-	// entire flat hash table on first spill (O(total_size) plus a hash-table
-	// reset and rebuild). When false, Build uses the legacy flat path and only
-	// converts to partitioned representation reactively on first spill. The
-	// production worker path enables this; standalone embeddings without a
-	// shared memory pool keep the legacy path.
-	PartitionOnArrival bool
 }
 
 // BloomPushdownOp returns a UnaryOperator that pre-filters probe batches using
@@ -678,14 +668,9 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	}
 
 	// Cooperative-spill registration: when the join has both a Spill manager
-	// and a MemTracker, register as a Spillable so the worker's
-	// SpillManager.RequestRelief can target this operator's partitions when
-	// another task hits Reserve failure. Registering at Build entry (rather
-	// than only in buildPartitioned) covers the legacy-flat-path-then-
-	// reactively-converted case: the operator starts with spillState=nil
-	// (SpillFootprint returns 0, RequestRelief skips it), and once
-	// spillBuildBatches reactively allocates spillState mid-build, the
-	// operator becomes a viable target without any additional registration.
+	// and a MemTracker (so it dispatches to buildPartitioned below), register as
+	// a Spillable so the worker's SpillManager.RequestRelief can target this
+	// operator's in-memory partitions when another task hits Reserve failure.
 	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
 		// Register with the relief registry for the duration of Build (the
 		// spill-eligible phase).
@@ -698,29 +683,25 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}()
 	}
 
-	// Partition-on-arrival path: when both MemTracker and Spill are
-	// configured (the production worker config) and the caller opted in via
-	// PartitionOnArrival, bypass the legacy flat-then-reactively-partition
-	// path. Spill becomes O(partition) instead of O(total), which is the
-	// architectural primitive that the SF10 lineitem broadcast-join "8 min
-	// per join" memory pressure was hitting.
-	//
-	// The CALLER (worker stage hash join, in production) decides whether to
-	// set this flag — it sees the shared pool state at task entry and only
-	// turns the flag on when pressure is already high enough to make the
-	// per-partition allocation cost worth paying. Below pressure, the worker
-	// leaves the flag false and we run the legacy flat path; if pressure
-	// rises mid-build, spillBuildBatches reactively converts to partitioned
-	// representation at that point. Tests that need to validate partition-
-	// on-arrival behavior set the flag unconditionally.
-	if h.PartitionOnArrival && h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
+	// Spill-eligible builds (MemTracker + Spill both configured — the
+	// production worker config) always partition on arrival. Spill is then
+	// O(partition) instead of O(total): each pressure event evicts one
+	// partition rather than freezing, repartitioning, and rebuilding the whole
+	// flat state. There is no at-entry pressure heuristic — partitioning is
+	// unconditional for spill-eligible builds, so a build that mispredicts its
+	// pressure can never get stuck on a flat path with no cheap spill (the
+	// Q17/Q18 mc=4 failure mode). The flat path below runs only for callers
+	// without a tracker/spill (embedded queries, tests, spill-replay rebuilds),
+	// where it is a pure in-memory build that never spills.
+	if h.Spill != nil && h.MemTracker != nil && !h.SemiAntiKeyOnly {
 		return h.buildPartitioned(ctx, source)
 	}
 
-	// Full builds use serial insertion. buildParallel creates per-worker
-	// local tables then merges them, but the merge re-inserts every key
-	// and costs as much as the parallel insertion saved (~9s for 60M rows).
-	// Serial without spill is a tight loop at ~0.6s/60M rows.
+	// No-spill flat build: serial insertion. A per-worker parallel build was
+	// removed in the flat-path retirement — its local-table merge re-inserted
+	// every key and cost as much as the parallel insertion saved (~9s/60M rows),
+	// while serial is a tight ~0.6s/60M-row loop. (Spill-eligible builds use
+	// buildPartitioned; semi/anti key-only builds use buildParallelKeyOnly.)
 
 	// Report build-side row consumption to the per-task progress reporter.
 	// Without this, a long broadcast_join build phase (minutes for SF10
@@ -861,43 +842,19 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 			continue
 		}
 
-		// Spill to disk if memory pressure is high
-		if h.Spill != nil && h.Spill.ShouldSpillFor(memory.SpillCheap) && (len(h.buildBatches) > 0 || h.spillState != nil) {
-			if err := h.spillBuildBatches(0); err != nil {
-				h.mu.Unlock()
-				return fmt.Errorf("spilling build side: %w", err)
-			}
-		}
-
-		// Track memory if budget is set
+		// Track memory if a budget is set. This flat path runs only for callers
+		// without a configured Spill manager (embedded queries, tests, the
+		// spill-replay tmpJoin rebuild) — see Build's dispatch above — so a
+		// Reserve failure has no spill recourse and fails loudly rather than
+		// silently over-committing. Spill-eligible builds use buildPartitioned.
 		if h.MemTracker != nil {
 			cost := hashBuildBytes(b)
 			if err := h.MemTracker.Reserve(cost); err != nil {
-				// Try spilling before giving up
-				if h.Spill != nil {
-					if spillErr := h.spillBuildBatches(cost); spillErr == nil {
-						// After spill, this join's trackedMem was reduced. Try again.
-						if err2 := h.MemTracker.Reserve(cost); err2 != nil {
-							h.mu.Unlock()
-							return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
-								err2, h.buildRows, len(h.buildBatches))
-						}
-					}
-				} else {
-					h.mu.Unlock()
-					return fmt.Errorf("hash join build: %w (build_rows=%d, batches=%d)",
-						err, h.buildRows, len(h.buildBatches))
-				}
+				h.mu.Unlock()
+				return fmt.Errorf("hash join build (no spill configured): %w (build_rows=%d, batches=%d)",
+					err, h.buildRows, len(h.buildBatches))
 			}
 			h.trackedMem += cost
-		}
-
-		// If spill state is active, route new batches through partitioning
-		if h.spillState != nil {
-			b.Detach()
-			h.partitionBuildBatch(b)
-			h.mu.Unlock()
-			continue
 		}
 
 		// Collect min/max for dynamic filter pushdown before key indexing.
@@ -1016,13 +973,8 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		h.mu.Unlock()
 	}
 
-	// When Grace Hash Join is active, rebuild hash table from in-memory partitions only.
-	// Spilled partitions will be processed one at a time during probe flush.
-	if h.spillState != nil {
-		if err := h.reloadInMemoryPartitions(); err != nil {
-			return fmt.Errorf("rebuilding in-memory partitions: %w", err)
-		}
-	}
+	// This flat path is no-spill (spillState is always nil here): spill-eligible
+	// builds run buildPartitioned, which indexes per-partition on arrival.
 
 	// Allocate matched bitmap for right/full outer join and right semi/anti tracking
 	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin ||
@@ -1041,148 +993,6 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// the per-batch tracking loop. Charge them to the memory tracker.
 	h.reconcileHashMemory()
 
-	h.buildDone = true
-	return nil
-}
-
-// localBuild accumulates hash table state for one parallel build worker.
-// Each worker builds into its own local hash table and arena to avoid
-// contention. After all workers finish, locals are merged into the main
-// HashJoin state.
-type localBuild struct {
-	batches   []*batch.RecordBatch
-	arena     []buildRef
-	arenaNext []int32
-	intIndex  *intHashTable
-	strIndex  *strHashTable
-	keyBuf    []byte
-	buildRows int64
-}
-
-func (lb *localBuild) appendInt(key int64, ref buildRef) {
-	idx := int32(len(lb.arena))
-	lb.arena = append(lb.arena, ref)
-	if prev, ok := lb.intIndex.PutNoGrow(key, idx); ok {
-		lb.arenaNext = append(lb.arenaNext, prev)
-	} else {
-		lb.arenaNext = append(lb.arenaNext, -1)
-	}
-}
-
-func (lb *localBuild) appendStr(ref buildRef, key []byte) {
-	idx := int32(len(lb.arena))
-	lb.arena = append(lb.arena, ref)
-	if prev, ok := lb.strIndex.PutNoGrow(key, idx); ok {
-		lb.arenaNext = append(lb.arenaNext, prev)
-	} else {
-		lb.arenaNext = append(lb.arenaNext, -1)
-	}
-}
-
-// buildParallel uses per-worker local hash tables for concurrent build.
-// Each worker reads batches (serialized by mutex), inserts into its local
-// table (no contention, fits in L2 cache), then all locals are merged.
-func (h *HashJoin) buildParallel(ctx context.Context, source Source, workers int) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("join build cancelled: %w", err)
-	}
-
-	// Read first batch to initialize schema, key indices, and hash type.
-	first, err := source.Next(ctx)
-	if err != nil {
-		return fmt.Errorf("build source next: %w", err)
-	}
-	if first == nil {
-		h.buildDone = true
-		return nil
-	}
-
-	h.buildSchema = first.Schema
-	h.buildKeyIdx = make([]int, len(h.RightKeys))
-	for i, col := range h.RightKeys {
-		h.buildKeyIdx[i] = first.ColumnIndex(col)
-	}
-	h.tryEnableIntKey(first)
-
-	// Create per-worker local accumulators.
-	hint := 64
-	if h.BuildRowHint > 0 {
-		hint = int(h.BuildRowHint) / workers
-		if hint < 64 {
-			hint = 64
-		}
-	}
-	locals := make([]*localBuild, workers)
-	for i := range locals {
-		lb := &localBuild{
-			keyBuf: make([]byte, 0, 128),
-		}
-		if h.useIntKey || h.useDualIntKey {
-			lb.intIndex = newIntHashTable(hint)
-		} else {
-			lb.strIndex = newStrHashTable(hint)
-		}
-		if h.BuildRowHint > 0 {
-			lb.arena = make([]buildRef, 0, hint)
-			lb.arenaNext = make([]int32, 0, hint)
-		}
-		locals[i] = lb
-	}
-
-	// Process first batch in worker 0's local.
-	h.processLocalBatch(locals[0], first)
-
-	// Launch workers.
-	var sourceMu sync.Mutex
-	var wg sync.WaitGroup
-	var firstErr atomic.Value
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(lb *localBuild) {
-			defer wg.Done()
-			for {
-				if ctx.Err() != nil {
-					return
-				}
-				sourceMu.Lock()
-				b, err := source.Next(ctx)
-				if b != nil && b.Sel != nil {
-					// Snapshot selection vector — filter operators reuse a
-					// shared buffer that the next source.Next() overwrites.
-					sel := make([]uint32, len(b.Sel))
-					copy(sel, b.Sel)
-					b.Sel = sel
-				}
-				sourceMu.Unlock()
-				if err != nil {
-					firstErr.CompareAndSwap(nil, fmt.Errorf("build source next: %w", err))
-					return
-				}
-				if b == nil {
-					return
-				}
-				h.processLocalBatch(lb, b)
-			}
-		}(locals[i])
-	}
-	wg.Wait()
-
-	if v := firstErr.Load(); v != nil {
-		return v.(error)
-	}
-
-	// Merge all local builds into the main hash join state.
-	h.mergeLocalBuilds(locals)
-
-	// Allocate matched bitmap for right/full outer join tracking.
-	if (h.JoinType == RightJoin || h.JoinType == FullOuterJoin) && len(h.arena) > 0 {
-		h.arenaMatched = make([]bool, len(h.arena))
-	}
-
-	h.consolidateBuild()
-
-	h.buildBloom()
 	h.buildDone = true
 	return nil
 }
@@ -1444,207 +1254,6 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 	lk.rows += int64(b.ActiveLen())
 }
 
-// processLocalBatch inserts one batch into a worker-local build accumulator.
-// Caller must not hold any locks — this function is lock-free per worker.
-func (h *HashJoin) processLocalBatch(lb *localBuild, b *batch.RecordBatch) {
-	b.Detach()
-	batchIdx := int32(len(lb.batches))
-	lb.batches = append(lb.batches, b)
-
-	// Pre-grow for this batch.
-	batchRows := b.ActiveLen()
-	if h.useIntKey || h.useDualIntKey {
-		lb.intIndex.EnsureCapacity(batchRows)
-	} else if lb.strIndex != nil {
-		lb.strIndex.EnsureCapacity(batchRows)
-	}
-
-	if h.useIntKey {
-		col := b.Columns[h.buildKeyIdx[0]]
-		if b.Sel != nil {
-			for _, si := range b.Sel {
-				key, ok := intKeyFromVector(col, int(si))
-				if !ok {
-					continue
-				}
-				lb.appendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
-				lb.buildRows++
-			}
-		} else if !col.Nulls.HasNulls() {
-			switch col.Type {
-			case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
-				data := col.Int32Data
-				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					lb.appendInt(int64(data[rowIdx]), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
-				}
-			default:
-				data := col.Int64Data
-				for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-					lb.appendInt(data[rowIdx], buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
-				}
-			}
-			lb.buildRows += int64(b.Len)
-		} else {
-			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				key, ok := intKeyFromVector(col, rowIdx)
-				if !ok {
-					continue
-				}
-				lb.appendInt(key, buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
-				lb.buildRows++
-			}
-		}
-	} else if h.useDualIntKey {
-		col0, col1 := b.Columns[h.buildKeyIdx[0]], b.Columns[h.buildKeyIdx[1]]
-		if b.Sel != nil {
-			for _, si := range b.Sel {
-				a, bb, ok := dualIntKeyFromVectors(col0, col1, int(si))
-				if !ok {
-					continue
-				}
-				lb.appendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(si)})
-				lb.buildRows++
-			}
-		} else {
-			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				a, bb, ok := dualIntKeyFromVectors(col0, col1, rowIdx)
-				if !ok {
-					continue
-				}
-				lb.appendInt(dualIntHash(a, bb), buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)})
-				lb.buildRows++
-			}
-		}
-	} else {
-		if lb.strIndex == nil {
-			lb.strIndex = newStrHashTable(64)
-		}
-		if b.Sel != nil {
-			for _, si := range b.Sel {
-				lb.keyBuf = lb.keyBuf[:0]
-				for _, idx := range h.buildKeyIdx {
-					if idx < 0 {
-						lb.keyBuf = append(lb.keyBuf, 1)
-						continue
-					}
-					v := b.Columns[idx]
-					if v.Nulls.IsNullFast(int(si)) {
-						lb.keyBuf = append(lb.keyBuf, 1)
-					} else {
-						lb.keyBuf = append(lb.keyBuf, 0)
-						lb.keyBuf = appendColumnValue(lb.keyBuf, v, int(si), v.Type)
-					}
-				}
-				lb.appendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(si)}, lb.keyBuf)
-				lb.buildRows++
-			}
-		} else {
-			for rowIdx := 0; rowIdx < b.Len; rowIdx++ {
-				lb.keyBuf = lb.keyBuf[:0]
-				for _, idx := range h.buildKeyIdx {
-					if idx < 0 {
-						lb.keyBuf = append(lb.keyBuf, 1)
-						continue
-					}
-					v := b.Columns[idx]
-					if v.Nulls.IsNullFast(rowIdx) {
-						lb.keyBuf = append(lb.keyBuf, 1)
-					} else {
-						lb.keyBuf = append(lb.keyBuf, 0)
-						lb.keyBuf = appendColumnValue(lb.keyBuf, v, rowIdx, v.Type)
-					}
-				}
-				lb.appendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(rowIdx)}, lb.keyBuf)
-				lb.buildRows++
-			}
-		}
-	}
-	// Deferred growth check after batch.
-	if h.useIntKey || h.useDualIntKey {
-		lb.intIndex.CheckGrow()
-	} else if lb.strIndex != nil {
-		lb.strIndex.CheckGrow()
-	}
-}
-
-// mergeLocalBuilds combines per-worker local accumulators into the main
-// HashJoin state. Concatenates batches and arenas, then re-inserts hash
-// table entries with adjusted indices. O(distinct_keys) hash work, not
-// O(total_rows), since each key appears once per local table.
-func (h *HashJoin) mergeLocalBuilds(locals []*localBuild) {
-	// Count totals for pre-allocation.
-	var totalArena, totalBatches int
-	for _, lb := range locals {
-		totalArena += len(lb.arena)
-		totalBatches += len(lb.batches)
-		h.buildRows += lb.buildRows
-	}
-
-	h.buildBatches = make([]*batch.RecordBatch, 0, totalBatches)
-	h.arena = make([]buildRef, 0, totalArena)
-	h.arenaNext = make([]int32, 0, totalArena)
-
-	// Pre-size the merged hash table for the total row count.
-	if h.useIntKey || h.useDualIntKey {
-		h.intIndex = newIntHashTable(int(h.buildRows))
-	} else {
-		h.strIndex = newStrHashTable(int(h.buildRows))
-	}
-
-	for _, lb := range locals {
-		batchOffset := int32(len(h.buildBatches))
-		arenaOffset := int32(len(h.arena))
-
-		// Append batches.
-		h.buildBatches = append(h.buildBatches, lb.batches...)
-
-		// Bulk-copy arena and adjust batchIdx in-place (sequential write
-		// is more cache-friendly than per-element struct creation).
-		arenaStart := len(h.arena)
-		h.arena = append(h.arena, lb.arena...)
-		for i := arenaStart; i < len(h.arena); i++ {
-			h.arena[i].batchIdx += batchOffset
-		}
-
-		// Bulk-copy arenaNext and adjust chain links in-place.
-		nextStart := len(h.arenaNext)
-		h.arenaNext = append(h.arenaNext, lb.arenaNext...)
-		for i := nextStart; i < len(h.arenaNext); i++ {
-			if h.arenaNext[i] >= 0 {
-				h.arenaNext[i] += arenaOffset
-			}
-		}
-
-		// Re-insert hash entries with adjusted arena indices.
-		// Uses Put directly (returns old value) instead of Get+Put,
-		// saving one hash table probe per key during merge.
-		if h.useIntKey || h.useDualIntKey {
-			lb.intIndex.ForEach(func(key int64, localHead int32) {
-				adjustedHead := localHead + arenaOffset
-				if existingHead, existed := h.intIndex.Put(key, adjustedHead); existed {
-					// Link local chain tail to existing merged chain head.
-					tail := adjustedHead
-					for h.arenaNext[tail] >= 0 {
-						tail = h.arenaNext[tail]
-					}
-					h.arenaNext[tail] = existingHead
-				}
-			})
-		} else if lb.strIndex != nil {
-			lb.strIndex.ForEachWithValue(func(key []byte, localHead int32) {
-				adjustedHead := localHead + arenaOffset
-				if existingHead, existed := h.strIndex.Put(key, adjustedHead); existed {
-					tail := adjustedHead
-					for h.arenaNext[tail] >= 0 {
-						tail = h.arenaNext[tail]
-					}
-					h.arenaNext[tail] = existingHead
-				}
-			})
-		}
-	}
-}
-
 // buildBloom populates the bloom filter from the build-side hash table keys.
 // Uses a 64-bit-per-slot bloom with 2 hash functions. The filter size is
 // chosen to give ~1% false positive rate for the number of distinct keys.
@@ -1871,144 +1480,6 @@ func bloomHashBytes(key []byte) uint64 {
 		h *= 16777619
 	}
 	return h ^ (h >> 32)
-}
-
-// spillBuildBatches partitions current build batches by hash and spills the
-// largest partition(s) to disk. Must be called with h.mu held.
-// neededBytes is the amount of additional memory needed (0 = just reduce to
-// under 80% threshold). When non-zero, partitions are spilled until
-// in-memory usage + neededBytes fits within budget.
-func (h *HashJoin) spillBuildBatches(neededBytes int64) error {
-	ss := h.spillState
-	if ss == nil {
-		// First spill: initialize partition state and redistribute existing
-		// batches. Drop each batch from h.buildBatches as soon as its rows
-		// have been copied into a partition so the original column data is
-		// GC-eligible during the redistribution loop. Without this drop the
-		// peak heap during spill includes BOTH the full flat build state
-		// AND the new partition data — at SF100 that's an extra ~3 GB of
-		// transient pressure that pushes workers over GOMEMLIMIT during
-		// the very moment they're trying to relieve memory pressure.
-		dir := h.Spill.SpillDir()
-		ss = newSpillState(dir, h.buildSchema)
-		h.spillState = ss
-
-		// Reset hash table state BEFORE redistribution so the partition
-		// path gets a clean intIndex/strIndex to insert into. Set the
-		// arena/arenaNext slices to nil rather than [:0] so the backing
-		// arrays become GC-eligible — at SF100 the flat arena before the
-		// first spill can hold 1 GB+ of buildRefs and we don't want to
-		// carry that capacity forward when the partitioned path uses its
-		// own per-partition state.
-		h.arena = nil
-		h.arenaNext = nil
-		if h.useIntKey || h.useDualIntKey {
-			h.intIndex = newIntHashTable(64)
-		} else {
-			h.strIndex = newStrHashTable(64)
-		}
-		h.buildRows = 0
-
-		// Redistribute existing build batches into partitions, dropping
-		// each from the flat slice as it's consumed so peak heap during
-		// the redistribution loop is bounded by (partitions in flight)
-		// rather than (full flat state + full partition state).
-		flat := h.buildBatches
-		h.buildBatches = nil
-		for i := range flat {
-			b := flat[i]
-			flat[i] = nil
-			h.partitionBuildBatch(b)
-		}
-	}
-
-	// Spill largest partition(s) until memory pressure is resolved
-	for {
-		// Re-sync tracker: release only what THIS join freed by spilling.
-		// Other concurrent builds' tracked memory must not be disturbed.
-		var inMem int64
-		for p, mem := range ss.partMemory {
-			if !ss.spilledParts[p] {
-				inMem += mem
-			}
-		}
-		if h.MemTracker != nil && h.trackedMem > inMem {
-			h.MemTracker.Release(h.trackedMem - inMem)
-			h.trackedMem = inMem
-		}
-
-		// Check if we've freed enough
-		if neededBytes > 0 {
-			// Spill until there's room for the incoming batch
-			if h.MemTracker == nil || inMem+neededBytes <= h.MemTracker.Budget() {
-				break
-			}
-		} else {
-			// Proactive spill: stop when under 80% threshold
-			if h.MemTracker == nil || !h.Spill.ShouldSpillFor(memory.SpillCheap) {
-				break
-			}
-		}
-
-		partID := ss.largestInMemoryPartition()
-		if partID < 0 {
-			break // nothing left to spill
-		}
-		if _, err := ss.spillBuildPartition(partID); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// reloadInMemoryPartitions rebuilds the hash table from in-memory partitions only.
-// Spilled partitions are NOT loaded — they'll be processed one at a time during probe.
-func (h *HashJoin) reloadInMemoryPartitions() error {
-	ss := h.spillState
-	if ss == nil {
-		return nil
-	}
-
-	// Count in-memory rows for pre-allocation
-	var totalRows int
-	for partID, batches := range ss.partBuildBatches {
-		if ss.spilledParts[partID] {
-			continue
-		}
-		for _, b := range batches {
-			totalRows += b.Len
-		}
-	}
-
-	// Reset build state
-	h.buildBatches = nil
-	h.buildRows = 0
-	h.arena = make([]buildRef, 0, totalRows)
-	h.arenaNext = make([]int32, 0, totalRows)
-	if h.useIntKey || h.useDualIntKey {
-		h.intIndex = newIntHashTable(totalRows)
-	} else {
-		h.strIndex = newStrHashTable(totalRows)
-	}
-
-	// Rebuild hash table from in-memory partitions
-	for partID, batches := range ss.partBuildBatches {
-		if ss.spilledParts[partID] {
-			continue
-		}
-		for _, b := range batches {
-			batchIdx := int32(len(h.buildBatches))
-			h.buildBatches = append(h.buildBatches, b)
-			if h.SemiAntiKeyOnly {
-				h.indexBuildBatchKeyOnly(b)
-			} else {
-				h.indexBuildBatch(b, batchIdx)
-			}
-		}
-	}
-
-	return nil
 }
 
 // PruneBuildColumns removes non-essential columns from the build-side batches.

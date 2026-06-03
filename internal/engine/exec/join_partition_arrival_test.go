@@ -55,7 +55,6 @@ func TestPartitionOnArrival_BasicSpill(t *testing.T) {
 	hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
 	hj.Spill = sm
 	hj.MemTracker = tracker
-	hj.PartitionOnArrival = true
 
 	if err := hj.Build(context.Background(), NewSliceSource(rightSchema, rightRows)); err != nil {
 		t.Fatalf("Build failed: %v", err)
@@ -162,7 +161,6 @@ func TestPartitionOnArrival_NoSpillStillCorrect(t *testing.T) {
 	hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
 	hj.Spill = sm
 	hj.MemTracker = tracker
-	hj.PartitionOnArrival = true
 
 	if err := hj.Build(context.Background(), NewSliceSource(rightSchema, rightRows)); err != nil {
 		t.Fatalf("Build failed: %v", err)
@@ -246,7 +244,6 @@ func TestPartitionOnArrival_ConcurrentBuildsSharedPool(t *testing.T) {
 		hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
 		hj.Spill = sm
 		hj.MemTracker = sharedTracker
-		hj.PartitionOnArrival = true
 		return hj
 	}
 	hjA := makeJoin()
@@ -373,7 +370,6 @@ func TestPartitionOnArrival_StringKeySpill(t *testing.T) {
 	hj := NewHashJoin(InnerJoin, []string{"k"}, []string{"k"})
 	hj.Spill = sm
 	hj.MemTracker = tracker
-	hj.PartitionOnArrival = true
 
 	if err := hj.Build(context.Background(), NewSliceSource(rightSchema, rightRows)); err != nil {
 		t.Fatalf("Build failed: %v", err)
@@ -485,7 +481,6 @@ func TestPartitionOnArrival_MultiBatchAccumulatorFill(t *testing.T) {
 			hj := NewHashJoin(InnerJoin, []string{"id"}, []string{"id"})
 			hj.Spill = sm
 			hj.MemTracker = tracker
-			hj.PartitionOnArrival = true
 
 			if err := hj.Build(context.Background(), NewBatchSource(makeBatches())); err != nil {
 				t.Fatalf("Build failed: %v", err)
