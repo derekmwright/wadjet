@@ -183,6 +183,21 @@ aws s3 cp "$RESULTS_DIR/" "s3://${BUCKET}/results/${TIMESTAMP}/" --recursive 2>&
 
 log ""
 log "Results uploaded to: s3://${BUCKET}/results/${TIMESTAMP}/"
+
+# ---- Purge intermediate query scratch ----
+#
+# Distributed execution materializes every DAG stage's output to
+# s3://${BUCKET}/queries/<id>/... (shuffle/repartition + per-stage .wshf).
+# The coordinator's async CleanQuery races the post-run teardown and usually
+# loses, so each run leaks its full intermediate working set (~1.4 TB at SF100)
+# until the 1-day S3 lifecycle rule reclaims it — the dominant S3 storage cost.
+# All runs are complete and results are already uploaded above, so this scratch
+# is safe to delete now. `|| true` so a cleanup hiccup never blocks shutdown.
+log ""
+log "=== Purging intermediate query scratch (s3://${BUCKET}/queries/) ==="
+aws s3 rm "s3://${BUCKET}/queries/" --recursive 2>&1 | tail -3 | tee -a "$RESULT_FILE" || true
+
+log ""
 log "Benchmark complete. Shutting down instance."
 
 # Auto-shutdown to avoid burning compute after benchmark completes.
