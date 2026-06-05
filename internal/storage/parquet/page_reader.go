@@ -209,6 +209,9 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 
 	vals, err := r.decodeValues(valuesData, nonNullCount, dph.Encoding)
 	if err != nil {
+		// Return the pooled decompress buffer on the error path (mirrors the
+		// v2 path); nothing references it once decode failed.
+		ReleaseDecompressed(r.codec, pageData)
 		return nil, fmt.Errorf("decoding v1 data: %w", err)
 	}
 
