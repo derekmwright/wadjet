@@ -451,11 +451,19 @@ func TestConcurrentBuildSharedTracker(t *testing.T) {
 	// Shared budget that forces at least one build to spill while leaving
 	// headroom for buildPartitioned's residual hash-table overhead, which (for
 	// partition-on-arrival) stays in the tracker for spilled partitions until
-	// Close rather than being dropped by a flat-path arena rebuild. 1.6MB is
-	// the calibrated minimum for two concurrent 10K-row builds (matching
-	// TestPartitionOnArrival_ConcurrentBuildsSharedPool); the legacy flat path's
-	// 1.4MB was tuned to its smaller reactively-rebuilt arena.
-	budget := int64(1_600_000)
+	// Close rather than being dropped by a flat-path arena rebuild.
+	//
+	// 2.0MB sits deliberately between the concurrent-startup transient and the
+	// steady-state footprint of two 10K-row builds (~2.4MB+ combined, observed
+	// final tracker.Used). It is high enough that the first reservation that
+	// crosses budget happens only once BOTH joins already hold abundant
+	// spillable partitions (~0.9MB each) — so self- or cooperative-spill always
+	// frees room — yet low enough that the combined footprint still forces a
+	// spill. The earlier 1.6MB minimum tripped a rare startup race: a join could
+	// need to reserve while it had nothing of its own to evict and its peer
+	// wasn't yet a reachable cooperative-spill target, hard-failing on a ~KB gap
+	// (flaked TestConcurrentBuildSharedTracker in CI; see spillUntilCanReserve).
+	budget := int64(2_000_000)
 	sharedTracker := memory.NewTracker("shared", budget)
 	sm, err := memory.NewSpillManager(tmpDir, sharedTracker)
 	if err != nil {
