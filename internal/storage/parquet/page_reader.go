@@ -7,12 +7,30 @@ import (
 
 // PageData holds the decoded contents of a single Parquet data page.
 type PageData struct {
-	NumValues       int
-	NumRows         int
-	NumNulls        int
-	Data            Values  // decoded column values (non-null values only)
+	NumValues        int
+	NumRows          int
+	NumNulls         int
+	Data             Values  // decoded column values (non-null values only)
 	DefinitionLevels []int32 // nil if column is required (no nulls)
 	RepetitionLevels []int32 // nil for flat schemas (no nesting)
+
+	// rawBuf is the decompressed page buffer that backs Data when the page
+	// values alias the decompress output (PLAIN-encoded numeric/fixed-len
+	// columns). nil when no pooled buffer needs to be returned (uncompressed
+	// pages, dictionary-indexed pages, or codecs without a buffer pool).
+	rawBuf []byte
+	codec  CompressionCodec
+}
+
+// Release returns any pooled decompression buffer backing this page to its
+// pool. Must be called once the page's values have been copied into their
+// destination Vector — subsequent use of p.Data is undefined.
+func (p *PageData) Release() {
+	if p == nil || p.rawBuf == nil {
+		return
+	}
+	ReleaseDecompressed(p.codec, p.rawBuf)
+	p.rawBuf = nil
 }
 
 // DictionaryData holds the decoded contents of a dictionary page.
@@ -191,6 +209,9 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 
 	vals, err := r.decodeValues(valuesData, nonNullCount, dph.Encoding)
 	if err != nil {
+		// Return the pooled decompress buffer on the error path (mirrors the
+		// v2 path); nothing references it once decode failed.
+		ReleaseDecompressed(r.codec, pageData)
 		return nil, fmt.Errorf("decoding v1 data: %w", err)
 	}
 
@@ -204,6 +225,8 @@ func (r *ColumnPageReader) decodeDataPageV1(ph *PageHeader, compressed []byte) (
 		Data:             vals,
 		DefinitionLevels: defLevels,
 		RepetitionLevels: repLevels,
+		rawBuf:           pageData,
+		codec:            r.codec,
 	}, nil
 }
 
@@ -249,17 +272,20 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 
 	// Decompress the data section (levels were NOT compressed in v2).
 	dataSection := compressed[off:]
+	var rawBuf []byte
 	if dph.IsCompressed {
 		decompressed, err := Decompress(r.codec, dataSection, int(ph.UncompressedPageSize)-repLen-defLen)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing v2 data: %w", err)
 		}
 		dataSection = decompressed
+		rawBuf = decompressed
 	}
 
 	nonNullCount := numValues - numNulls
 	vals, err := r.decodeValues(dataSection, nonNullCount, dph.Encoding)
 	if err != nil {
+		ReleaseDecompressed(r.codec, rawBuf)
 		return nil, fmt.Errorf("decoding v2 data: %w", err)
 	}
 
@@ -270,6 +296,8 @@ func (r *ColumnPageReader) decodeDataPageV2(ph *PageHeader, compressed []byte) (
 		Data:             vals,
 		DefinitionLevels: defLevels,
 		RepetitionLevels: repLevels,
+		rawBuf:           rawBuf,
+		codec:            r.codec,
 	}, nil
 }
 
