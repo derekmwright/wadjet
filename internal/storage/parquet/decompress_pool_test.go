@@ -2,7 +2,9 @@ package parquet
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -145,4 +147,162 @@ func TestPageDataRelease_Idempotent(t *testing.T) {
 	p = &PageData{rawBuf: buf, codec: CodecZstd}
 	p.Release()
 	p.Release() // double-release must not double-put
+}
+
+// deepCopyForSnapshot makes a value safe to retain across a pool poison: any
+// reference type that *could* alias a pooled decompression buffer is copied so
+// the snapshot is immune to later corruption. Scalars are returned as-is.
+func deepCopyForSnapshot(v any) any {
+	switch t := v.(type) {
+	case []byte:
+		cp := make([]byte, len(t))
+		copy(cp, t)
+		return cp
+	case string:
+		return string([]byte(t))
+	case []int64:
+		cp := make([]int64, len(t))
+		copy(cp, t)
+		return cp
+	case []float64:
+		cp := make([]float64, len(t))
+		copy(cp, t)
+		return cp
+	default:
+		return v
+	}
+}
+
+// TestZstdPoolPoison_ReaderAlias is the premature-release regression guard for
+// the zstd decompress-buffer pool. It reads a zstd-compressed parquet file
+// fully via the public reader, snapshots every value, then deterministically
+// poisons the pool by overwriting the full capacity of every released buffer
+// with 0xFF. If any consumer retained a slice that still aliases a pooled
+// buffer past page.Release(), its bytes now read sentinel and the snapshot
+// comparison fails. On correct (copy-out) code the snapshot is unchanged.
+//
+// This lives in the parquet package on purpose: only here can the test reach
+// zstdBufPool directly to force a deterministic poison, and ReadRows runs
+// single-goroutine so every released page buffer is resident in one pool when
+// poisonPool drains it — no scheduling or sync.Pool timing luck.
+func TestZstdPoolPoison_ReaderAlias(t *testing.T) {
+	const nRows = 5000
+	schema := Schema{
+		Columns: []Column{
+			{Name: "id", Type: TypeInt64},       // PLAIN INT64 — Int64() unsafe-aliases rawBuf
+			{Name: "i32", Type: TypeInt32},      // PLAIN INT32 — Int32() unsafe-aliases rawBuf
+			{Name: "amount", Type: TypeFloat64}, // PLAIN DOUBLE — Double() aliases rawBuf
+			{Name: "name", Type: TypeString},    // BYTE_ARRAY — exercises the string path
+		},
+	}
+	rows := make([]map[string]any, nRows)
+	for i := 0; i < nRows; i++ {
+		rows[i] = map[string]any{
+			"id":     int64(i)*1_000_003 + 7,
+			"i32":    int32(i*31 - 5),
+			"amount": float64(i) * 1.5,
+			"name":   fmt.Sprintf("row-%08d-payload-value", i),
+		}
+	}
+
+	// Force zstd compression and a small page buffer so the columns span
+	// several pages — each page is its own decompress + Release cycle.
+	cfg := DefaultWriterConfig()
+	cfg.Compression = CompressionZstd
+	cfg.PageBufferSize = 8 * 1024
+	cfg.RowGroupSize = 1 << 20
+
+	var buf bytes.Buffer
+	pw, err := NewWriter(&buf, schema, cfg)
+	if err != nil {
+		t.Fatalf("NewWriter: %v", err)
+	}
+	if err := pw.WriteRows(rows); err != nil {
+		t.Fatalf("WriteRows: %v", err)
+	}
+	if err := pw.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	data := buf.Bytes()
+
+	reader, err := NewReaderFromBytes(data)
+	if err != nil {
+		t.Fatalf("NewReaderFromBytes: %v", err)
+	}
+	got, err := reader.ReadRows(nil)
+	if err != nil {
+		t.Fatalf("ReadRows: %v", err)
+	}
+	if len(got) != nRows {
+		t.Fatalf("row count = %d, want %d", len(got), nRows)
+	}
+
+	// Snapshot every value with a deep copy, BEFORE poisoning the pool.
+	snap := make([]map[string]any, len(got))
+	for i, r := range got {
+		m := make(map[string]any, len(r))
+		for k, v := range r {
+			m[k] = deepCopyForSnapshot(v)
+		}
+		snap[i] = m
+	}
+
+	poisonPool(t)
+
+	for i := range got {
+		if !reflect.DeepEqual(got[i], snap[i]) {
+			t.Fatalf("row %d corrupted after pool poison — a consumer retained a "+
+				"pool-aliased reference past Release:\n got=%#v\nwant=%#v",
+				i, got[i], snap[i])
+		}
+	}
+
+	// A clean re-read must also match the snapshot (the file itself is intact).
+	reader2, err := NewReaderFromBytes(data)
+	if err != nil {
+		t.Fatalf("NewReaderFromBytes (reread): %v", err)
+	}
+	reread, err := reader2.ReadRows(nil)
+	if err != nil {
+		t.Fatalf("ReadRows (reread): %v", err)
+	}
+	for i := range snap {
+		if !reflect.DeepEqual(reread[i], snap[i]) {
+			t.Fatalf("row %d differs on clean re-read: got=%#v want=%#v",
+				i, reread[i], snap[i])
+		}
+	}
+}
+
+// poisonPool deterministically clobbers every buffer resident in zstdBufPool:
+// it drains the pool, fills each buffer's full capacity with 0xFF, then returns
+// them. Any slice still aliasing a released buffer now reads sentinel bytes.
+func poisonPool(t *testing.T) {
+	t.Helper()
+	const drainLimit = 8192
+	drained := make([]*[]byte, 0, 128)
+	fresh := 0
+	for i := 0; i < drainLimit; i++ {
+		bp := zstdBufPool.Get().(*[]byte)
+		b := *bp
+		full := b[:cap(b)]
+		for j := range full {
+			full[j] = 0xFF
+		}
+		drained = append(drained, bp)
+		// Pool.New mints empty 64 KiB buffers; once we've pulled a short streak
+		// of those we've drained all real (payload-bearing) entries.
+		if cap(b) == 64*1024 {
+			fresh++
+			if fresh >= 16 {
+				break
+			}
+		} else {
+			fresh = 0
+		}
+	}
+	for _, bp := range drained {
+		b := (*bp)[:0]
+		zstdBufPool.Put(&b)
+	}
 }
