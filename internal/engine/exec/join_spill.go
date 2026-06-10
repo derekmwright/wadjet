@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -233,6 +234,7 @@ type spillBatchWriter struct {
 	dir    string
 	prefix string
 	f      *os.File
+	fl     *diskio.Flusher
 	w      *bufio.Writer
 	count  int
 	path   string
@@ -245,11 +247,12 @@ func newSpillBatchWriter(dir, prefix string) (*spillBatchWriter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating spill file: %w", err)
 	}
-	w := bufio.NewWriterSize(f, 64*1024) // EXPERIMENT
+	wf, fl := diskio.NewWriter(f, diskio.Spill)
+	w := bufio.NewWriterSize(wf, 64*1024) // EXPERIMENT
 	// Reserve space for batch count (will be written on close)
 	var buf [4]byte
 	w.Write(buf[:4])
-	return &spillBatchWriter{dir: dir, prefix: prefix, f: f, w: w, path: path}, nil
+	return &spillBatchWriter{dir: dir, prefix: prefix, f: f, fl: fl, w: w, path: path}, nil
 }
 
 func (sw *spillBatchWriter) writeBatch(b *batch.RecordBatch) error {
@@ -279,6 +282,7 @@ func (sw *spillBatchWriter) close() (string, error) {
 		sw.f.Close()
 		return "", err
 	}
+	sw.fl.Finish()
 	if err := sw.f.Close(); err != nil {
 		return "", err
 	}
@@ -305,7 +309,8 @@ func writeSpillBatches(dir string, batches []*batch.RecordBatch) (string, error)
 	// aggregate_partial_spill — local-disk spill writes coalesce fine at
 	// this size, and a smaller buffer reduces transient heap during the
 	// moment spill is firing.
-	w := bufio.NewWriterSize(f, 64*1024)
+	wf, fl := diskio.NewWriter(f, diskio.Spill)
+	w := bufio.NewWriterSize(wf, 64*1024)
 
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(len(batches)))
@@ -320,6 +325,7 @@ func writeSpillBatches(dir string, batches []*batch.RecordBatch) (string, error)
 	if err := w.Flush(); err != nil {
 		return "", fmt.Errorf("flushing spill: %w", err)
 	}
+	fl.Finish()
 	return path, nil
 }
 

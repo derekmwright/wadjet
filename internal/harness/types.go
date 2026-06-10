@@ -66,6 +66,12 @@ type Config struct {
 	// Empty / "nats" uses the legacy NATS reply-subject path. "grpc"
 	// enables the data-plane gRPC stream (Phase B+).
 	DataPlane string
+
+	// ExtraServeArgs are appended verbatim to every spawned `wadjet serve`
+	// command (coordinator and workers). Use to exercise deploy-gated
+	// flags (e.g. --bounded-dirty-writes, --mmap-relief) through the
+	// local harness before an EC2 run.
+	ExtraServeArgs []string
 }
 
 // QueryMeasurement is the result of running one query (or micro).

@@ -79,14 +79,15 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 		}
 
 		clusterCfg := ClusterConfig{
-			WadjetBin:    cfg.WadjetBin,
-			RunDir:       runDir,
-			NumWorkers:   numWorkers,
-			GoMemLimit:   sliceCfg.GoMemLimit,
-			PgAddr:       cfg.PgAddr,
-			DataDir:      cfg.DataDir,
-			DataPlane:    cfg.DataPlane,
-			Logger:       logger,
+			WadjetBin:      cfg.WadjetBin,
+			RunDir:         runDir,
+			NumWorkers:     numWorkers,
+			GoMemLimit:     sliceCfg.GoMemLimit,
+			PgAddr:         cfg.PgAddr,
+			DataDir:        cfg.DataDir,
+			DataPlane:      cfg.DataPlane,
+			ExtraServeArgs: cfg.ExtraServeArgs,
+			Logger:         logger,
 		}
 		if cfg.Source == "s3" {
 			clusterCfg.StorageType = "s3"

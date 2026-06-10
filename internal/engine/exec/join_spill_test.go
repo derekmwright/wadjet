@@ -2,10 +2,13 @@ package exec
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -254,6 +257,75 @@ func TestColumnarSpillRoundtrip(t *testing.T) {
 	}
 	if got.Columns[1].Nulls.IsNullFast(0) {
 		t.Error("expected i32 row 0 to be non-null")
+	}
+}
+
+// TestSpillRoundtrip_BoundedDirtyWrites runs the spill batch writer with
+// --bounded-dirty-writes active and enough data to cross multiple 8 MiB
+// writeback windows, so the real sync_file_range + FADV_DONTNEED calls
+// fire against the spill file. The machinery is advisory only: contents
+// must round-trip identically (dropped pages re-fault from disk).
+func TestSpillRoundtrip_BoundedDirtyWrites(t *testing.T) {
+	prev := diskio.Enabled()
+	diskio.SetEnabled(true)
+	defer diskio.SetEnabled(prev)
+
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "payload", Type: parquet.TypeString},
+	}
+
+	sw, err := newSpillBatchWriter(t.TempDir(), "bounded-dirty")
+	if err != nil {
+		t.Fatalf("newSpillBatchWriter: %v", err)
+	}
+	// ~25 MB total: 12 batches × 2048 rows × ~1 KB payload crosses the
+	// 8 MiB window boundary multiple times mid-batch.
+	const numBatches, rowsPerBatch = 12, 2048
+	payload := func(b, r int) string {
+		return strings.Repeat(fmt.Sprintf("b%03d-r%04d|", b, r), 90)
+	}
+	for bi := 0; bi < numBatches; bi++ {
+		rows := make([]map[string]any, rowsPerBatch)
+		for ri := 0; ri < rowsPerBatch; ri++ {
+			rows[ri] = map[string]any{
+				"id":      int64(bi*rowsPerBatch + ri),
+				"payload": payload(bi, ri),
+			}
+		}
+		if err := sw.writeBatch(fromRowsForTest(schema, rows)); err != nil {
+			t.Fatalf("writeBatch %d: %v", bi, err)
+		}
+	}
+	path, err := sw.close()
+	if err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	r, err := openSpillBatchReader(path)
+	if err != nil {
+		t.Fatalf("openSpillBatchReader: %v", err)
+	}
+	defer r.Close()
+	if r.numBatches != numBatches {
+		t.Fatalf("numBatches = %d, want %d (header patch must survive Finish)", r.numBatches, numBatches)
+	}
+	for bi := 0; bi < numBatches; bi++ {
+		got, err := r.Next()
+		if err != nil {
+			t.Fatalf("reading batch %d: %v", bi, err)
+		}
+		if got.Len != rowsPerBatch {
+			t.Fatalf("batch %d: len %d, want %d", bi, got.Len, rowsPerBatch)
+		}
+		for ri := 0; ri < rowsPerBatch; ri++ {
+			if id := got.Columns[0].Int64Data[ri]; id != int64(bi*rowsPerBatch+ri) {
+				t.Fatalf("batch %d row %d: id %d, want %d", bi, ri, id, bi*rowsPerBatch+ri)
+			}
+			if s, _ := got.Columns[1].GetString(ri); s != payload(bi, ri) {
+				t.Fatalf("batch %d row %d: payload mismatch (len %d vs %d)", bi, ri, len(s), len(payload(bi, ri)))
+			}
+		}
 	}
 }
 

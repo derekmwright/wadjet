@@ -44,6 +44,11 @@ type ClusterConfig struct {
 	// committing to it as default.
 	DataPlane string
 
+	// ExtraServeArgs are appended verbatim to every spawned `wadjet serve`
+	// command (coordinator and workers). Used to exercise deploy-gated
+	// flags through the local harness before an EC2 run.
+	ExtraServeArgs []string
+
 	Logger *slog.Logger
 }
 
@@ -157,6 +162,7 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 		)
 	}
 	coordArgs = append(coordArgs, storageArgs(c.cfg)...)
+	coordArgs = append(coordArgs, c.cfg.ExtraServeArgs...)
 	coord, err := c.spawn("coord", coordArgs)
 	if err != nil {
 		return fmt.Errorf("spawning coordinator: %w", err)
@@ -208,6 +214,7 @@ func (c *Cluster) StartWorkers(ctx context.Context) error {
 			)
 		}
 		workerArgs = append(workerArgs, storageArgs(c.cfg)...)
+		workerArgs = append(workerArgs, c.cfg.ExtraServeArgs...)
 		w, err := c.spawn(role, workerArgs)
 		if err != nil {
 			return fmt.Errorf("spawning %s: %w", role, err)
