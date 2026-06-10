@@ -96,7 +96,7 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	// Failure: retry if attempts remain, else terminal failure.
 	if tr.retryEnabled && st.attempts < maxTaskAttempts {
 		st.attempts++
-		task := tr.tasks[r.TaskID]
+		task := tr.growEstimateLocked(r.TaskID)
 		task.Attempt = st.attempts
 		tr.mu.Unlock()
 		if tr.logger != nil {
@@ -121,6 +121,21 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 			"attempts", st.attempts, "error", r.Error)
 	}
 	return done
+}
+
+// growEstimateLocked doubles the task's admission size estimate and returns
+// the updated task (grow-on-retry, the Trino FTE pattern). A failure or a
+// presumed-dead worker can't tell us whether memory was the cause, so the
+// retry asks for strictly more headroom before being admitted — cheap
+// insurance, bounded to 4x by maxTaskAttempts. No-op when the dispatcher
+// had no estimate (0 stays 0 = unknown). Caller must hold tr.mu.
+func (tr *taskRetrier) growEstimateLocked(taskID string) distributed.Task {
+	task := tr.tasks[taskID]
+	if task.EstimatedBytes > 0 {
+		task.EstimatedBytes *= 2
+		tr.tasks[taskID] = task
+	}
+	return task
 }
 
 // Terminal returns how many tasks have reached a terminal state.
@@ -196,7 +211,7 @@ func (tr *taskRetrier) RetryStuck(stuck []string) (redispatched, terminal []stri
 			continue
 		}
 		st.attempts++
-		task := tr.tasks[id]
+		task := tr.growEstimateLocked(id)
 		task.Attempt = st.attempts
 		tr.mu.Unlock()
 		if tr.logger != nil {

@@ -927,10 +927,7 @@ func (c *Coordinator) materializeReplicate(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
-		c.workers.MarkWorkerSeen(r.WorkerID)
-		if c.workers.Liveness != nil {
-			c.workers.Liveness.Remove(r.TaskID)
-		}
+		c.noteTaskResult(r)
 		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
@@ -1296,9 +1293,17 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
 
+	// Per-task admission estimate: the catalog-true scan bytes split
+	// across tasks (files are split evenly; row-group shards each read
+	// ~1/N of the file).
+	perTaskEst := int64(0)
+	if stage.EstimatedBytes > 0 {
+		perTaskEst = stage.EstimatedBytes / int64(len(tasks))
+	}
 	for i := range tasks {
 		tasks[i].QueryID = stageQueryID
 		tasks[i].Attempt = 1
+		tasks[i].EstimatedBytes = perTaskEst
 	}
 	subject := distributed.QueryResultSubject(stageQueryID)
 	done := make(chan struct{}, 1)
@@ -1324,10 +1329,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
-		c.workers.MarkWorkerSeen(r.WorkerID)
-		if c.workers.Liveness != nil {
-			c.workers.Liveness.Remove(r.TaskID)
-		}
+		c.noteTaskResult(r)
 		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
@@ -1548,9 +1550,17 @@ func (c *Coordinator) dispatchScanFilterStage(
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
 
+	// Per-task admission estimate: the catalog-true scan bytes split
+	// across tasks (files are split evenly; row-group shards each read
+	// ~1/N of the file).
+	perTaskEst := int64(0)
+	if stage.EstimatedBytes > 0 {
+		perTaskEst = stage.EstimatedBytes / int64(len(tasks))
+	}
 	for i := range tasks {
 		tasks[i].QueryID = stageQueryID
 		tasks[i].Attempt = 1
+		tasks[i].EstimatedBytes = perTaskEst
 	}
 	subject := distributed.QueryResultSubject(stageQueryID)
 	done := make(chan struct{}, 1)
@@ -1578,10 +1588,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
-		c.workers.MarkWorkerSeen(r.WorkerID)
-		if c.workers.Liveness != nil {
-			c.workers.Liveness.Remove(r.TaskID)
-		}
+		c.noteTaskResult(r)
 		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
@@ -2038,10 +2045,7 @@ func (c *Coordinator) dispatchComputeStage(
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
 			return
 		}
-		c.workers.MarkWorkerSeen(r.WorkerID)
-		if c.workers.Liveness != nil {
-			c.workers.Liveness.Remove(r.TaskID)
-		}
+		c.noteTaskResult(r)
 		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
@@ -2739,10 +2743,7 @@ func (c *Coordinator) runStageTasks(
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
-		c.workers.MarkWorkerSeen(r.WorkerID)
-		if c.workers.Liveness != nil {
-			c.workers.Liveness.Remove(r.TaskID)
-		}
+		c.noteTaskResult(r)
 		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:

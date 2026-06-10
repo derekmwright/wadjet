@@ -458,7 +458,7 @@ func (w *Worker) dispatchLoop(ctx context.Context, in <-chan dataplane.TaskDispa
 			// waiting on cooperative spill that the new task's relief
 			// participation can unblock, and the spill machinery remains the
 			// backstop.
-			w.waitForPoolHeadroom(ctx)
+			w.waitForPoolHeadroom(ctx, task.EstimatedBytes)
 			w.wg.Add(1)
 			go func(t distributed.Task) {
 				defer w.wg.Done()
@@ -476,18 +476,32 @@ func (w *Worker) dispatchLoop(ctx context.Context, in <-chan dataplane.TaskDispa
 const poolHeadroomMaxWait = 30 * time.Second
 
 // waitForPoolHeadroom blocks until shared-pool pressure falls below the pull
-// threshold, ctx is done, or poolHeadroomMaxWait elapses. Mirrors taskLoop's
-// pre-fetch pressure gate for the gRPC dispatch path.
-func (w *Worker) waitForPoolHeadroom(ctx context.Context) {
+// threshold AND, when the task carries a size estimate, the pool has room
+// for its estimated input footprint. Returns on ctx done or after
+// poolHeadroomMaxWait. Mirrors taskLoop's pre-fetch pressure gate for the
+// gRPC dispatch path; the size requirement only exists here because the
+// gRPC path has the task in hand before start (the NATS pull gate is
+// task-blind by construction, and blocking a fetched JetStream message
+// risks AckWait redelivery = duplicate execution = more memory, not less).
+//
+// estBytes <= 0 means unknown — only the pressure threshold applies,
+// identical to the pre-estimate behavior.
+func (w *Worker) waitForPoolHeadroom(ctx context.Context, estBytes int64) {
 	deadline := time.Now().Add(poolHeadroomMaxWait)
 	for {
 		used, budget := w.executor.SharedPoolStats()
-		if budget <= 0 || float64(used)/float64(budget) <= poolPressurePullThreshold {
+		if budget <= 0 {
+			return
+		}
+		pressureOK := float64(used)/float64(budget) <= poolPressurePullThreshold
+		fitsOK := estBytes <= 0 || used+estBytes <= budget
+		if pressureOK && fitsOK {
 			return
 		}
 		if time.Now().After(deadline) {
 			w.logger.Warn("pool pressure gate timed out; starting task anyway",
-				"pool_used_mb", used>>20, "pool_budget_mb", budget>>20)
+				"pool_used_mb", used>>20, "pool_budget_mb", budget>>20,
+				"task_estimated_mb", estBytes>>20)
 			return
 		}
 		select {
