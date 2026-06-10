@@ -134,6 +134,12 @@ variable "spill_floating_budget" {
   default     = false
 }
 
+variable "bounded_dirty_writes" {
+  description = "Pass --bounded-dirty-writes to workers: windowed sync_file_range writeback + FADV_DONTNEED on spill-class files, bounding write-side page-cache pressure (PR #113). Default false = dormant."
+  type        = bool
+  default     = false
+}
+
 variable "workers_per_node" {
   description = "Number of independent wadjet worker processes to launch per node. >1 gives crash isolation: when one process OOMs, sibling workers on the same node keep running. Each process gets a per-process memory envelope (auto-derived from /N of total) and registers separately with the coord."
   type        = number
