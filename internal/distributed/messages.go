@@ -31,6 +31,15 @@ type Task struct {
 	// with the same ID and a bumped Attempt (coordinator.taskRetrier).
 	// 0 means unset (pre-retry senders); treat as attempt 1.
 	Attempt int `json:"attempt,omitempty"`
+	// EstimatedBytes is the coordinator's estimate of this task's input
+	// footprint, used for memory-aware admission (worker holds the task
+	// start until the shared pool has room for it) and coordinator-side
+	// bin-packing. 0 = unknown — admission and placement fall back to
+	// pressure-threshold / round-robin behavior. Doubled on every
+	// re-dispatch (grow-on-retry, the Trino FTE pattern): a task whose
+	// worker died possibly-of-memory is only admitted where strictly more
+	// headroom exists.
+	EstimatedBytes int64 `json:"estimated_bytes,omitempty"`
 
 	// Pipeline-specific (full query on one worker)
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline

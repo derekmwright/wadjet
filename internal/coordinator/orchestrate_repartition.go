@@ -198,6 +198,12 @@ func (c *Coordinator) runShuffleSide(
 	subject := distributed.QueryResultSubject(shuffleQueryID)
 	done := make(chan struct{}, 1)
 
+	// Per-task admission estimate from the source scan's catalog-true
+	// bytes (0 = unknown when the source isn't a planner-estimated scan).
+	perTaskEst := int64(0)
+	if sourceStage.EstimatedBytes > 0 && actualTasks > 0 {
+		perTaskEst = sourceStage.EstimatedBytes / int64(actualTasks)
+	}
 	tasks := make([]distributed.Task, actualTasks)
 	for i, files := range fileSets {
 		t := distributed.Task{
@@ -220,6 +226,7 @@ func (c *Coordinator) runShuffleSide(
 			t.ClusterID = clusterID
 		}
 		t.Attempt = 1
+		t.EstimatedBytes = perTaskEst
 		tasks[i] = t
 	}
 
@@ -243,10 +250,7 @@ func (c *Coordinator) runShuffleSide(
 		if unmarshalErr := distributed.Unmarshal(msg.Data, &r); unmarshalErr != nil {
 			return
 		}
-		c.workers.MarkWorkerSeen(r.WorkerID)
-		if c.workers.Liveness != nil {
-			c.workers.Liveness.Remove(r.TaskID)
-		}
+		c.noteTaskResult(r)
 		if retrier.Observe(r) {
 			select {
 			case done <- struct{}{}:

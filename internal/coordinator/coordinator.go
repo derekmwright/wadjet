@@ -124,6 +124,9 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 		queryMetas: make(map[string]*queryMeta),
 		querySem:   make(chan struct{}, maxInflight),
 	}
+	// Memory-aware gRPC placement: the scheduler bin-packs estimated task
+	// footprints against heartbeat pool stats. No-op on the NATS path.
+	c.scheduler.SetWorkerRegistry(c.workers)
 
 	// NATS KV result cache: coordinator writes inline results here instead of S3.
 	// Workers already read from this bucket (tier 2 in getFileData), so this
@@ -176,6 +179,19 @@ func (c *Coordinator) SetDataPlaneServer(srv *dataplane.Server) {
 // Workers returns the worker registry for inspecting active workers.
 func (c *Coordinator) Workers() *WorkerRegistry {
 	return c.workers
+}
+
+// noteTaskResult records the cross-cutting bookkeeping every stage result
+// subscription performs on a ResultNotification: the publishing worker is
+// alive (multi-signal liveness), the task's per-task liveness entry is
+// done (it must stop scanning as stuck), and the scheduler's in-flight
+// admission estimate for it is released.
+func (c *Coordinator) noteTaskResult(r distributed.ResultNotification) {
+	c.workers.MarkWorkerSeen(r.WorkerID)
+	if c.workers.Liveness != nil {
+		c.workers.Liveness.Remove(r.TaskID)
+	}
+	c.scheduler.TaskDone(r.TaskID)
 }
 
 // SetTelemetry enables OpenTelemetry tracing on the coordinator.
@@ -1769,6 +1785,7 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 		if c.workers.Liveness != nil {
 			c.workers.Liveness.Remove(result.TaskID)
 		}
+		c.scheduler.TaskDone(result.TaskID)
 		// Multi-signal liveness: a result publish proves the worker is
 		// alive even if its heartbeat goroutine starves or the heartbeat
 		// NATS conn lags. Updates LastSeen for the worker, no-op if not
