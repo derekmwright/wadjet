@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -71,7 +72,8 @@ func (s *shuffleStreamSink) Consume(_ context.Context, b *batch.RecordBatch) err
 
 	if s.writer == nil {
 		s.schema = b.Schema
-		s.bufFile = bufio.NewWriterSize(s.file, 256*1024)
+		wf, _ := diskio.NewWriter(s.file, diskio.KeepResident)
+		s.bufFile = bufio.NewWriterSize(wf, 256*1024)
 		s.writer = newShuffleWriter(s.bufFile, s.schema)
 		if err := s.writer.writeHeader(); err != nil {
 			return fmt.Errorf("writing shuffle header: %w", err)

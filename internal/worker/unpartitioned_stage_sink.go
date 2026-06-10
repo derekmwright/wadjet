@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -60,7 +61,11 @@ func (s *unpartitionedStageSink) Init(_ context.Context) error {
 		return fmt.Errorf("creating spill file %s: %w", s.spillPath, err)
 	}
 	s.file = f
-	s.bufFile = bufio.NewWriterSize(f, 256*1024)
+	// KeepResident: the file is uploaded (and possibly adopted into the
+	// LocalStageCache and mmap'd) right after Finalize, so only the dirty
+	// bound applies — pages stay resident for the imminent reader.
+	wf, _ := diskio.NewWriter(f, diskio.KeepResident)
+	s.bufFile = bufio.NewWriterSize(wf, 256*1024)
 	return nil
 }
 

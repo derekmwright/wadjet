@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -502,9 +503,14 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 	// the entire WSHF stream. For a plain (WSHF) input we re-prepend the
 	// magic that we already consumed from rc.
 	rep := exec.ProgressReporterFromContext(ctx)
-	dst := io.Writer(tmp)
+	// KeepResident: the file is mmap'd and walked immediately after the
+	// download, so only the dirty bound applies — windowed writeback caps
+	// the dirty page-cache footprint of a multi-GB download at ~2 windows
+	// without dropping the pages the imminent walk needs.
+	wf, _ := diskio.NewWriter(tmp, diskio.KeepResident)
+	dst := io.Writer(wf)
 	if rep != nil {
-		dst = &progressWriter{w: tmp, rep: rep}
+		dst = &progressWriter{w: wf, rep: rep}
 	}
 
 	if compressed {
@@ -512,7 +518,7 @@ func (s *cachedFileStreamSource) openShuffleFile(ctx context.Context, srcPath st
 			return fmt.Errorf("decompressing %s into local cache: %w", srcPath, err)
 		}
 	} else {
-		if _, err := tmp.Write(magic); err != nil {
+		if _, err := wf.Write(magic); err != nil {
 			return fmt.Errorf("writing magic to local cache: %w", err)
 		}
 		if rep != nil {
@@ -588,9 +594,12 @@ func (s *cachedFileStreamSource) streamParquetToLocalMmap(ctx context.Context, s
 	}()
 
 	rep := exec.ProgressReporterFromContext(ctx)
-	dst := io.Writer(tmp)
+	// KeepResident: mmap'd and read by the parquet row-group iterator right
+	// after the download — bound dirty pages, keep them resident.
+	wf, _ := diskio.NewWriter(tmp, diskio.KeepResident)
+	dst := io.Writer(wf)
 	if rep != nil {
-		dst = &progressWriter{w: tmp, rep: rep}
+		dst = &progressWriter{w: wf, rep: rep}
 	}
 	if _, err := dst.Write(magic); err != nil {
 		return nil, "", fmt.Errorf("writing magic to local parquet: %w", err)

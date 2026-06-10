@@ -66,6 +66,7 @@ var (
 	spillFloatingBudget   bool
 	mmapRelief            bool
 	mmapReliefThresholdMB int64
+	boundedDirtyWrites    bool
 	spillDir              string
 	resultStoreBytes      int64
 	pgAddr                string
@@ -127,6 +128,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&spillFloatingBudget, "spill-floating-budget", false, "Activate the floating-budget spill threshold (deploy-gated; requires Phase-4 mmap RSS accounting). Default false = tuned static 40%/90% thresholds.")
 	rootCmd.PersistentFlags().BoolVar(&mmapRelief, "mmap-relief", false, "Enable MADV_DONTNEED relief of cold mmap'd cache files when total RSS exceeds the ceiling (deploy-gated). Default false = dormant (no tracking, no syscall).")
 	rootCmd.PersistentFlags().Int64Var(&mmapReliefThresholdMB, "mmap-relief-threshold-mb", 16000, "Total process RSS ceiling in MB; when --mmap-relief is set, relieve the coldest mmap'd cache files to bring RSS back to this level. Tune below the worker cgroup memory.max so relief has headroom.")
+	rootCmd.PersistentFlags().BoolVar(&boundedDirtyWrites, "bounded-dirty-writes", false, "Bound the dirty page-cache footprint of spill/cache/stage file writes via windowed sync_file_range, and drop spill-file pages from cache as they are written (deploy-gated). Default false = writes rely on kernel writeback.")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
 
@@ -807,6 +809,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		FloatingBudgetActive:  spillFloatingBudget,
 		MmapRelief:            mmapRelief,
 		MmapReliefThresholdMB: mmapReliefThresholdMB,
+		BoundedDirtyWrites:    boundedDirtyWrites,
 	}, store, nc, js, logger)
 
 	// Initialize Prometheus metrics (before worker.Start so spill metrics are wired)
@@ -1364,6 +1367,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		FloatingBudgetActive:  spillFloatingBudget,
 		MmapRelief:            mmapRelief,
 		MmapReliefThresholdMB: mmapReliefThresholdMB,
+		BoundedDirtyWrites:    boundedDirtyWrites,
 	}, store, nc, js, logger)
 	w.SetControlConn(controlNC)
 

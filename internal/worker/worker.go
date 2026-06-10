@@ -17,6 +17,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/metrics"
@@ -63,6 +64,14 @@ type Config struct {
 	// on a ~20 GB per-proc envelope). 0 leaves the default. Only meaningful when
 	// MmapRelief is true.
 	MmapReliefThresholdMB int64
+
+	// BoundedDirtyWrites enables windowed sync_file_range writeback (plus
+	// FADV_DONTNEED on spill-class files) for all large sequential disk
+	// writes, capping each writer's dirty page-cache footprint so kernel
+	// reclaim stops evicting the mmap'd cache pages concurrent tasks are
+	// walking (see internal/engine/diskio). Default false: writes rely on
+	// kernel writeback as before. Deploy-gated.
+	BoundedDirtyWrites bool
 }
 
 // DefaultConfig returns default worker configuration.
@@ -178,6 +187,8 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	}
 	// Phase 5: configure mmap relief (dormant unless MmapRelief is set).
 	SetMmapRelief(cfg.MmapRelief, cfg.MmapReliefThresholdMB<<20)
+	// Write-side page-cache pressure control (dormant unless flagged).
+	diskio.SetEnabled(cfg.BoundedDirtyWrites)
 	// Same-worker LocalStageCache: producers register their local spill
 	// files in here after upload, downstream tasks landing on the same
 	// worker mmap them directly instead of round-tripping S3. Skipped when

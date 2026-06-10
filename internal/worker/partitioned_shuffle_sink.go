@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -471,7 +472,8 @@ func (s *partitionedShuffleSink) flushPartition(p int) error {
 		// 256 KB of column data. The previous unbuffered path issued a
 		// syscall per row of bytes-typed columns (writeBytesData), which
 		// made that the dominant shuffle cost on Q03 SF1 (~95% of CPU).
-		pw.bufFile = bufio.NewWriterSize(pw.file, 256*1024)
+		wf, _ := diskio.NewWriter(pw.file, diskio.KeepResident)
+		pw.bufFile = bufio.NewWriterSize(wf, 256*1024)
 		pw.writer = newShuffleWriter(pw.bufFile, s.schema)
 		if err := pw.writer.writeHeader(); err != nil {
 			return fmt.Errorf("partition %d header: %w", p, err)

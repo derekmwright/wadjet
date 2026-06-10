@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 )
 
 // Binary spill format type tags
@@ -478,7 +480,8 @@ func (sm *SpillManager) SpillRows(rows []map[string]any) (string, error) {
 	}
 	defer f.Close()
 
-	w := bufio.NewWriterSize(f, 64*1024) // 64KB write buffer
+	wf, fl := diskio.NewWriter(f, diskio.Spill)
+	w := bufio.NewWriterSize(wf, 64*1024) // 64KB write buffer
 
 	// Derive stable column order from the first row
 	columns := make([]string, 0, len(rows[0]))
@@ -552,6 +555,7 @@ func (sm *SpillManager) SpillRows(rows []map[string]any) (string, error) {
 	if err := w.Flush(); err != nil {
 		return "", fmt.Errorf("flushing spill file: %w", err)
 	}
+	fl.Finish()
 
 	sm.mu.Lock()
 	sm.files = append(sm.files, path)

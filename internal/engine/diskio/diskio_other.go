@@ -1,0 +1,20 @@
+//go:build !linux
+
+package diskio
+
+import (
+	"io"
+	"os"
+)
+
+// sync_file_range is Linux-only; elsewhere the mechanism is a no-op and
+// writers are returned unwrapped.
+
+// Flusher is inert on non-Linux platforms.
+type Flusher struct{}
+
+// NewWriter returns f unchanged and a nil Flusher on non-Linux platforms.
+func NewWriter(f *os.File, _ Class) (io.Writer, *Flusher) { return f, nil }
+
+// Finish is a no-op on non-Linux platforms. nil-safe.
+func (fl *Flusher) Finish() {}

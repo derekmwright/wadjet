@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -138,6 +139,7 @@ func (kv *partialKeyValue) IsNull() bool { return kv.Tag == partialTagNull }
 // followed by Close.
 type partialSpillWriter struct {
 	f       *os.File
+	fl      *diskio.Flusher
 	w       *bufio.Writer
 	header  partialSpillHeader
 	count   uint32
@@ -151,9 +153,11 @@ func newPartialSpillWriter(dir string, header partialSpillHeader) (*partialSpill
 	if err != nil {
 		return nil, "", fmt.Errorf("creating partial-spill file: %w", err)
 	}
+	wf, fl := diskio.NewWriter(f, diskio.Spill)
 	psw := &partialSpillWriter{
 		f:      f,
-		w:      bufio.NewWriterSize(f, 64*1024),
+		fl:     fl,
+		w:      bufio.NewWriterSize(wf, 64*1024),
 		header: header,
 	}
 	if err := psw.writeHeader(); err != nil {
@@ -277,6 +281,7 @@ func (w *partialSpillWriter) Close() (int64, error) {
 		w.f.Close()
 		return 0, err
 	}
+	w.fl.Finish()
 	size, _ := w.f.Seek(0, io.SeekEnd)
 	if err := w.f.Close(); err != nil {
 		return size, err
