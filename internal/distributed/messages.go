@@ -25,6 +25,12 @@ type Task struct {
 	Type      TaskType `json:"type"`
 	ClusterID string   `json:"cluster_id,omitempty"` // target cluster for routing
 	TableName string   `json:"table_name,omitempty"`
+	// Attempt is the 1-based execution attempt for this task ID. Stage
+	// inputs are durable S3 files and outputs are overwrite-safe (same
+	// TaskID → same key), so the coordinator re-dispatches failed tasks
+	// with the same ID and a bumped Attempt (coordinator.taskRetrier).
+	// 0 means unset (pre-retry senders); treat as attempt 1.
+	Attempt int `json:"attempt,omitempty"`
 
 	// Pipeline-specific (full query on one worker)
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline

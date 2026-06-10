@@ -733,10 +733,10 @@ func (c *Coordinator) dispatchShuffleStage(
 	}
 	// Synthesize a source stage for runShuffleSide.
 	synthetic := physical.Stage{
-		ID:         stage.ID + "-src",
-		Type:       physical.StageScan,
-		ScanFiles:  sourceFiles,
-		TableName:  stage.TableName, // may be empty for chained shuffles; worker falls back to generic scan
+		ID:        stage.ID + "-src",
+		Type:      physical.StageScan,
+		ScanFiles: sourceFiles,
+		TableName: stage.TableName, // may be empty for chained shuffles; worker falls back to generic scan
 	}
 	numParts := stage.Exchange.Count
 	if numParts == 0 {
@@ -1221,15 +1221,15 @@ func (c *Coordinator) dispatchScanAggregateStage(
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
 		t := distributed.Task{
-			ID:           uuid.New().String()[:8],
-			QueryID:      queryID,
-			StageID:      stage.ID,
-			Type:         distributed.TaskTypeStage,
-			StageType:    "aggregate",
-			TableName:    stage.TableName,
-			Columns:      stage.Columns,
-			GroupByCols:  stage.FusedAggGroupBy,
-			Aggregates:   aggs,
+			ID:          uuid.New().String()[:8],
+			QueryID:     queryID,
+			StageID:     stage.ID,
+			Type:        distributed.TaskTypeStage,
+			StageType:   "aggregate",
+			TableName:   stage.TableName,
+			Columns:     stage.Columns,
+			GroupByCols: stage.FusedAggGroupBy,
+			Aggregates:  aggs,
 			// Propagate scan-pushed WHERE fragments. Without this the worker
 			// aggregates every row in the file slice and ignores the query's
 			// predicate — group counts match legacy but aggregate VALUES are
@@ -1850,27 +1850,27 @@ func (c *Coordinator) dispatchComputeStage(
 			})
 		}
 		t := distributed.Task{
-			ID:              uuid.New().String()[:8],
-			QueryID:         queryID,
-			StageID:         stage.ID,
-			Type:            distributed.TaskTypeStage,
-			StageType:       stage.Type,
-			JoinType:        stage.JoinType,
-			JoinLeftKeys:    stage.JoinLeftKeys,
-			JoinRightKeys:   stage.JoinRightKeys,
+			ID:                  uuid.New().String()[:8],
+			QueryID:             queryID,
+			StageID:             stage.ID,
+			Type:                distributed.TaskTypeStage,
+			StageType:           stage.Type,
+			JoinType:            stage.JoinType,
+			JoinLeftKeys:        stage.JoinLeftKeys,
+			JoinRightKeys:       stage.JoinRightKeys,
 			BuildTableAlias:     stage.BuildTableAlias,
 			QualifyAllBuildCols: stage.QualifyAllBuildCols,
 			JoinFilter:          stage.JoinFilter,
-			FusedJoins:      wireFused,
-			GroupByCols:     stage.GroupByCols,
-			Aggregates:      aggs,
-			SortKeys:        sorts,
-			Limit:           stage.Limit,
-			Inputs:          taskInputs,
-			DataBucket:      c.config.ResultBucket,
-			ResultBucket:    c.config.ResultBucket,
-			ResultPrefix:    resultPrefix,
-			CreatedAt:       time.Now(),
+			FusedJoins:          wireFused,
+			GroupByCols:         stage.GroupByCols,
+			Aggregates:          aggs,
+			SortKeys:            sorts,
+			Limit:               stage.Limit,
+			Inputs:              taskInputs,
+			DataBucket:          c.config.ResultBucket,
+			ResultBucket:        c.config.ResultBucket,
+			ResultPrefix:        resultPrefix,
+			CreatedAt:           time.Now(),
 			// Output column projection for hash_join / broadcast_join stages.
 			// The worker applies these as the probe operator's OutputFilter so
 			// the join emits only the columns the downstream stage consumes,
@@ -2022,40 +2022,41 @@ func (c *Coordinator) dispatchComputeStage(
 	defer c.tracker.Delete(stageQueryID)
 
 	subject := distributed.QueryResultSubject(stageQueryID)
-	type taskResult struct {
-		files []string
-		err   string
-	}
 	for i := range tasks {
 		tasks[i].QueryID = stageQueryID
+		tasks[i].Attempt = 1
 	}
-	collected := make([]taskResult, 0, len(tasks))
-	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
 	// Register with the per-query progress bridge so worker-emitted
 	// TaskProgress messages also count as forward progress for this
 	// stage's idle detection.
 	defer stageProgressBridgeFromContext(ctx).Register(stage.ID, progress)()
+	// Task retry: failed tasks are re-dispatched up to maxTaskAttempts
+	// (deterministic durable inputs + overwrite-safe outputs make this
+	// sound). DISABLED for gather-fused stages — those stream rows to the
+	// client mid-task, so a retried task would duplicate streamed output.
+	retrier := newTaskRetrier(tasks, fusion == nil, func(t distributed.Task) {
+		if ctx.Err() != nil {
+			return
+		}
+		if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
+			c.logger.Error("task retry publish failed",
+				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
+		}
+	}, c.logger, stage.ID)
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
 			return
 		}
 		c.workers.MarkWorkerSeen(r.WorkerID)
-		mu.Lock()
-		if r.Success {
-			collected = append(collected, taskResult{files: r.ResultFiles})
-		} else {
-			collected = append(collected, taskResult{err: r.Error})
-		}
-		got := len(collected)
-		mu.Unlock()
+		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
 		default:
 		}
-		if got >= len(tasks) {
+		if allDone {
 			select {
 			case done <- struct{}{}:
 			default:
@@ -2084,23 +2085,14 @@ func (c *Coordinator) dispatchComputeStage(
 	}
 
 	if err := awaitStageProgress(ctx, done, progress, "compute "+stage.ID); err != nil {
-		mu.Lock()
-		got := len(collected)
-		mu.Unlock()
-		return StageOutput{}, fmt.Errorf("stage %s with %d/%d results: %w", stage.ID, got, len(tasks), err)
+		return StageOutput{}, fmt.Errorf("stage %s with %d/%d results: %w", stage.ID, retrier.Terminal(), len(tasks), err)
 	}
 	c.logger.Info("compute stage complete", "stage_id", stage.ID, "tasks", len(tasks))
 
-	mu.Lock()
-	results := make([]taskResult, len(collected))
-	copy(results, collected)
-	mu.Unlock()
-
-	for _, r := range results {
-		if r.err != "" {
-			return StageOutput{}, fmt.Errorf("stage %s: task failed: %s", stage.ID, r.err)
-		}
+	if taskID, errMsg, failed := retrier.FirstError(); failed {
+		return StageOutput{}, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg)
 	}
+	resultFiles := retrier.Files()
 	// Fused join + downstream exchange-sender: each task produced N partition
 	// files at "<prefix>partition=NNNN/<task>.wshf" (worker's executeFragment
 	// → fragmentExchangeSink). Bucket all files across all tasks by partition
@@ -2110,8 +2102,8 @@ func (c *Coordinator) dispatchComputeStage(
 		(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) {
 		numParts := stage.Exchange.Count
 		shardFiles := make([][]string, numParts)
-		for _, r := range results {
-			for _, f := range r.files {
+		for _, taskFiles := range resultFiles {
+			for _, f := range taskFiles {
 				p, parseErr := parsePartitionFromPath(f)
 				if parseErr != nil {
 					return StageOutput{}, fmt.Errorf("stage %s: parsing partition from %q: %w", stage.ID, f, parseErr)
@@ -2128,10 +2120,9 @@ func (c *Coordinator) dispatchComputeStage(
 			Files:         shardFiles,
 		}, nil
 	}
-	files := make([][]string, len(tasks))
-	for i, r := range results {
-		files[i] = r.files
-	}
+	// resultFiles is in dispatch order (taskRetrier keys results by task ID),
+	// which is deterministic — an improvement over the old arrival-order slice.
+	files := resultFiles
 	// Kind reflects what the planner said this stage produces. Single-
 	// task Singleton stages label their output OutputSinglePart so
 	// downstream consumers (partitionFilesForWorker) return the full file
