@@ -46,6 +46,7 @@ type taskRetrier struct {
 type taskAttemptState struct {
 	files    []string
 	partials []distributed.DynamicFilterPartialRef
+	bytes    int64
 	errMsg   string
 	attempts int
 	terminal bool
@@ -86,6 +87,7 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	if r.Success {
 		st.files = r.ResultFiles
 		st.partials = r.DynamicFilterPartials
+		st.bytes = r.SizeBytes
 		st.errMsg = ""
 		st.terminal = true
 		tr.terminal++
@@ -167,6 +169,20 @@ func (tr *taskRetrier) Files() [][]string {
 		out[i] = tr.states[id].files
 	}
 	return out
+}
+
+// TotalBytes sums the worker-reported output size (ResultNotification.
+// SizeBytes) across all successful tasks. Feeds StageOutput.Bytes so
+// downstream dispatchers can estimate their tasks' input footprints.
+// 0 when workers didn't report sizes (legacy builds).
+func (tr *taskRetrier) TotalBytes() int64 {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	var total int64
+	for _, st := range tr.states {
+		total += st.bytes
+	}
+	return total
 }
 
 // DynamicFilterPartials returns every successful task's dynamic-filter

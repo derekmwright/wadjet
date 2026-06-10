@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/planner/physical"
 )
 
 func TestPickLeastLoadedWorker(t *testing.T) {
@@ -101,5 +102,67 @@ func TestTaskRetrier_GrowEstimateOnRetry(t *testing.T) {
 	got = waitRepublished(t, rep, 3)
 	if got[2].ID != "b" || got[2].EstimatedBytes != 0 {
 		t.Fatalf("no-estimate retry = %+v, want b with 0", got[2])
+	}
+}
+
+// TestTaskRetrier_TotalBytes: worker-reported SizeBytes sums across
+// successful tasks; duplicates don't double-count; failures contribute 0.
+func TestTaskRetrier_TotalBytes(t *testing.T) {
+	tr := newTaskRetrier(retryTestTasks(3), false, nil, slog.Default(), "s")
+	rA := okResult("a", "f-a")
+	rA.SizeBytes = 100
+	rB := okResult("b", "f-b")
+	rB.SizeBytes = 250
+	tr.Observe(rA)
+	tr.Observe(rB)
+	tr.Observe(rA) // duplicate
+	tr.Observe(failResult("c", "boom"))
+	if got := tr.TotalBytes(); got != 350 {
+		t.Fatalf("TotalBytes = %d, want 350", got)
+	}
+}
+
+func TestEstimateComputeTaskBytes(t *testing.T) {
+	join := physical.Stage{
+		Type:         physical.StageBroadcastJoin,
+		Dependencies: []string{"probe-dep", "build-dep"},
+		LeftDepStage: "probe-dep",
+	}
+	tests := []struct {
+		name       string
+		stage      physical.Stage
+		inputs     map[string]StageOutput
+		numTasks   int
+		probeSplit bool
+		want       int64
+	}{
+		{"partitioned splits", physical.Stage{}, map[string]StageOutput{
+			"d": {Kind: OutputPartitioned, Bytes: 900},
+		}, 3, false, 300},
+		{"replicated charges full", physical.Stage{}, map[string]StageOutput{
+			"d": {Kind: OutputReplicated, Bytes: 900},
+		}, 3, false, 900},
+		{"singlepart charges full", physical.Stage{}, map[string]StageOutput{
+			"d": {Kind: OutputSinglePart, Bytes: 900},
+		}, 3, false, 900},
+		{"probe-split slices the probe", join, map[string]StageOutput{
+			"probe-dep": {Kind: OutputSinglePart, Bytes: 600},
+			"build-dep": {Kind: OutputReplicated, Bytes: 90},
+		}, 3, true, 290}, // 600/3 + 90
+		{"unknown sizes contribute nothing", physical.Stage{}, map[string]StageOutput{
+			"d1": {Kind: OutputPartitioned, Bytes: 0},
+			"d2": {Kind: OutputReplicated, Bytes: 100},
+		}, 2, false, 100},
+		{"zero tasks clamps to 1", physical.Stage{}, map[string]StageOutput{
+			"d": {Kind: OutputPartitioned, Bytes: 500},
+		}, 0, false, 500},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := estimateComputeTaskBytes(tc.stage, tc.inputs, tc.numTasks, tc.probeSplit)
+			if got != tc.want {
+				t.Fatalf("estimateComputeTaskBytes = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
