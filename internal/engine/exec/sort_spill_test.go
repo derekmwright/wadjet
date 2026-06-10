@@ -9,19 +9,19 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
-// TestSortSpill_FinalizeMergesSpilledRows exercises the finalizeWithSpill
-// path: low memory budget triggers spill in Consume, then Finalize must read
-// every spilled file back, merge with any in-memory residue, and produce a
-// globally sorted result.
+// TestSortSpill_FinalizeMergesSpilledRows exercises the external-merge spill
+// path: low memory budget triggers sorted-run spill in Consume, then Finalize
+// sets up a streaming k-way merge that Next drains into a globally sorted
+// result.
 //
-// Why this test matters: Sort.spillFiles is populated by Consume when
-// SpillManager.ShouldSpillFor(SpillCheap) trips, but no prior test exercised
-// finalizeWithSpill end-to-end. SF100 sort-heavy workloads (Q21, Q18)
-// hit this path under memory pressure; without coverage it could regress
-// silently. Mirrors HashAggregate's TestHashAggregateSpillBatching
+// Why this test matters: Sort.runFiles is populated by Consume when
+// SpillManager.ShouldSpillFor(SpillCheap) trips. SF100 sort-heavy workloads
+// (Q21, Q18) hit this path under memory pressure; without coverage it could
+// regress silently. Mirrors HashAggregate's TestHashAggregateSpillBatching
 // philosophy — set a tiny budget, push enough rows to force spill, verify
 // the final output is correct.
 func TestSortSpill_FinalizeMergesSpilledRows(t *testing.T) {
+	forceTinyRuns(t)
 	schema := []parquet.Column{
 		{Name: "val", Type: parquet.TypeInt64},
 	}
@@ -62,8 +62,8 @@ func TestSortSpill_FinalizeMergesSpilledRows(t *testing.T) {
 		}
 	}
 
-	// Sanity check: spill path actually fired.
-	if len(s.spillFiles) == 0 {
+	// Sanity check: spill path actually fired (sorted columnar runs).
+	if len(s.runFiles) == 0 {
 		t.Fatal("spill path was never exercised; tracker/budget setup is wrong")
 	}
 
@@ -71,9 +71,10 @@ func TestSortSpill_FinalizeMergesSpilledRows(t *testing.T) {
 		t.Fatalf("Finalize: %v", err)
 	}
 
-	// Spill files cleaned up by finalizeWithSpill.
-	if len(s.spillFiles) != 0 {
-		t.Errorf("Finalize should clear spillFiles, got %d remaining", len(s.spillFiles))
+	// Finalize hands runs to the streaming merger; nothing should remain in
+	// the pre-finalize run list.
+	if len(s.runFiles) != 0 {
+		t.Errorf("Finalize should hand off runFiles to the merger, got %d remaining", len(s.runFiles))
 	}
 
 	// Drain the sorted output and verify ascending order across every row.
@@ -112,6 +113,7 @@ func TestSortSpill_FinalizeMergesSpilledRows(t *testing.T) {
 // after the most recent spill flush — finalizeWithSpill must merge both
 // in-memory and spilled rows.
 func TestSortSpill_MixedInMemoryAndSpilled(t *testing.T) {
+	forceTinyRuns(t)
 	schema := []parquet.Column{
 		{Name: "val", Type: parquet.TypeInt64},
 	}
@@ -151,7 +153,7 @@ func TestSortSpill_MixedInMemoryAndSpilled(t *testing.T) {
 		}
 	}
 
-	if len(s.spillFiles) == 0 {
+	if len(s.runFiles) == 0 {
 		t.Fatal("spill path was never exercised")
 	}
 

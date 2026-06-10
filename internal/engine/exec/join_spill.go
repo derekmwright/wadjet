@@ -505,6 +505,23 @@ func writeColumnData(w *bufio.Writer, v *batch.Vector, n int, buf []byte) error 
 			binary.LittleEndian.PutUint64(buf[:8], uint64(d.Hi))
 			w.Write(buf[:8])
 		}
+
+	case batch.TypeVector:
+		// [dim:u32] then n*dim float32s. dim is per-column metadata that the
+		// Vector carries outside the schema, so it must ride in the file.
+		binary.LittleEndian.PutUint32(buf[:4], uint32(v.VectorDim))
+		w.Write(buf[:4])
+		total := n * v.VectorDim
+		for i := 0; i < total; i++ {
+			binary.LittleEndian.PutUint32(buf[:4], math.Float32bits(v.Float32Data[i]))
+			w.Write(buf[:4])
+		}
+
+	default:
+		// Nested types (Array/Map/Row) have no columnar spill encoding.
+		// Writing nothing here would silently corrupt data on read-back, so
+		// fail loudly — callers gate on columnarSpillableSchema.
+		return fmt.Errorf("columnar spill: unsupported column type %v", v.Type)
 	}
 	return nil
 }
@@ -671,6 +688,23 @@ func readColumnData(r *bufio.Reader, v *batch.Vector, n int, buf []byte) error {
 			hi := int64(binary.LittleEndian.Uint64(buf[:8]))
 			v.DecimalData.Data[i] = batch.Int128{Lo: lo, Hi: hi}
 		}
+
+	case batch.TypeVector:
+		if _, err := io.ReadFull(r, buf[:4]); err != nil {
+			return err
+		}
+		dim := int(binary.LittleEndian.Uint32(buf[:4]))
+		v.VectorDim = dim
+		v.Float32Data = make([]float32, n*dim)
+		for i := range v.Float32Data {
+			if _, err := io.ReadFull(r, buf[:4]); err != nil {
+				return err
+			}
+			v.Float32Data[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+		}
+
+	default:
+		return fmt.Errorf("columnar spill: unsupported column type %v", v.Type)
 	}
 	return nil
 }

@@ -1,7 +1,6 @@
 package exec
 
 import (
-	"container/heap"
 	"context"
 	"sort"
 	"strconv"
@@ -9,7 +8,6 @@ import (
 	"sync/atomic"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
-	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -42,10 +40,16 @@ type Sort struct {
 	mu         sync.Mutex
 	batches    []*batch.RecordBatch // columnar storage
 	totalRows  int
-	trackedMem int64 // memory reserved from shared tracker by this operator
-	spillFiles []string
+	trackedMem int64                // memory reserved from shared tracker by this operator
+	spillFiles []string             // legacy row-oriented spill (schemas the columnar run format can't carry)
+	runFiles   []string             // sorted columnar runs (external-merge path)
 	sorted     []*batch.RecordBatch // materialized sorted results
 	pos        int
+	// External-merge stream state (set by finalizeExternalMerge; drained by Next).
+	merger    *runMerger
+	mergeRuns []string // run files to delete once the merge drains
+	mergeEmit int      // rows emitted so far (Limit enforcement)
+	mergeDone bool
 	// AccountedOperator (Phase 2) state — see HashAggregate for the contract.
 	accInstanceID       uint64
 	accState            atomic.Int32
@@ -64,6 +68,10 @@ func (s *Sort) Init(_ context.Context) error {
 	s.totalRows = 0
 	s.sorted = nil
 	s.pos = 0
+	s.merger = nil
+	s.mergeRuns = nil
+	s.mergeEmit = 0
+	s.mergeDone = false
 	return nil
 }
 
@@ -96,23 +104,57 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 		}
 	}
 
-	// Spill to disk if memory pressure is high
+	// Spill to disk if memory pressure is high. The columnar run path
+	// accumulates at least minSortRunBytes before flushing so runs stay
+	// merge-friendly; the legacy row path (nested-type schemas) keeps the
+	// old flush-on-pressure behavior. Peer relief (SpillSome) bypasses the
+	// floor.
 	if s.Spill != nil && s.Spill.ShouldSpillFor(memory.SpillCheap) && len(s.batches) > 0 {
+		if !columnarSpillableSchema(s.schema) || s.trackedMem >= minSortRunBytes {
+			if _, err := s.flushSpillLocked(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// flushSpillLocked drains all buffered batches to disk and releases their
+// tracking, returning the bytes freed. Columnar-spillable schemas write a
+// SORTED run (the external-merge unit); nested-type schemas fall back to the
+// legacy row-oriented spill file. Caller holds s.mu.
+func (s *Sort) flushSpillLocked() (int64, error) {
+	if len(s.batches) == 0 || s.trackedMem == 0 {
+		return 0, nil
+	}
+	if columnarSpillableSchema(s.schema) {
+		path, err := sortBatchesToRun(s.Spill.SpillDir(), s.schema, s.batches, s.totalRows, s.Keys, s.Limit)
+		if err != nil {
+			return 0, err
+		}
+		if path != "" {
+			s.runFiles = append(s.runFiles, path)
+		}
+	} else {
 		var rows []map[string]any
 		for _, sb := range s.batches {
 			rows = append(rows, sb.ToRows()...)
 		}
 		path, err := s.Spill.SpillRows(rows)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		s.spillFiles = append(s.spillFiles, path)
-		s.batches = s.batches[:0]
-		s.totalRows = 0
-		s.Spill.ReleaseTracking(s.trackedMem)
-		s.trackedMem = 0
 	}
-	return nil
+	s.batches = s.batches[:0]
+	s.totalRows = 0
+	freed := s.trackedMem
+	s.Spill.ReleaseTracking(freed)
+	s.trackedMem = 0
+	if s.accInstanceID != 0 {
+		s.Spill.Tracker().PublishOwned(s.accInstanceID, 0)
+	}
+	return freed, nil
 }
 
 func (s *Sort) Finalize(_ context.Context) error {
@@ -131,7 +173,80 @@ func (s *Sort) Finalize(_ context.Context) error {
 	if len(s.spillFiles) > 0 {
 		return s.finalizeWithSpill()
 	}
+	if len(s.runFiles) > 0 {
+		return s.finalizeExternalMerge()
+	}
 	return s.finalizeColumnar()
+}
+
+// finalizeExternalMerge sets up the streaming k-way merge over sorted runs
+// plus the in-memory remainder. Nothing is materialized here — Next() pulls
+// one merged batch at a time, so finalize-phase memory is bounded by one
+// buffered batch per run regardless of input size.
+func (s *Sort) finalizeExternalMerge() error {
+	runs := s.runFiles
+	s.runFiles = nil
+
+	// Multi-level pre-merge keeps the final fan-in (and its one-batch-per-run
+	// buffer cost) bounded. Reserve one slot for the in-memory cursor.
+	runs, err := preMergeRuns(s.Spill.SpillDir(), s.schema, s.Keys, runs, maxMergeFanIn-1, s.Limit)
+	if err != nil {
+		return err
+	}
+
+	cursors := make([]*runCursor, 0, len(runs)+1)
+	for ord, p := range runs {
+		c, err := newFileRunCursor(p)
+		if err != nil {
+			for _, prev := range cursors {
+				prev.close()
+			}
+			return err
+		}
+		c.ord = ord
+		cursors = append(cursors, c)
+	}
+
+	// In-memory remainder participates as the last cursor: sorted entries
+	// gathered lazily, no run write needed. It arrived after every spilled
+	// run, so it ties last — consistent with the stable in-memory sort.
+	if len(s.batches) > 0 {
+		entries := buildSortEntries(s.batches, s.totalRows)
+		resolved := resolveSortKeysForBatches(s.Keys, s.batches)
+		entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, s.batches), s.Limit)
+		c, err := newMemRunCursor(s.schema, s.batches, entries)
+		if err != nil {
+			for _, prev := range cursors {
+				prev.close()
+			}
+			return err
+		}
+		c.ord = len(runs)
+		cursors = append(cursors, c)
+	}
+
+	s.merger = newRunMerger(s.schema, s.Keys, cursors)
+	s.mergeRuns = runs
+	return nil
+}
+
+// finishMergeLocked tears down the external merge: closes cursors, deletes
+// run files, releases the reservation still held for the in-memory remainder,
+// and drops batch references.
+func (s *Sort) finishMergeLocked() {
+	if s.merger != nil {
+		s.merger.close()
+		s.merger = nil
+	}
+	removeRunFiles(s.mergeRuns)
+	s.mergeRuns = nil
+	s.batches = nil
+	s.totalRows = 0
+	if s.Spill != nil && s.trackedMem > 0 {
+		s.Spill.ReleaseTracking(s.trackedMem)
+		s.trackedMem = 0
+	}
+	s.mergeDone = true
 }
 
 // finalizeWithSpill falls back to row-oriented sort when spill files exist.
@@ -204,149 +319,24 @@ type sortEntry struct {
 }
 
 // finalizeColumnar sorts using typed column comparisons on an index array.
+// The entry-building / key-resolution / top-K machinery is shared with the
+// external-merge run writer (sort_external.go).
 func (s *Sort) finalizeColumnar() error {
 	if len(s.batches) == 0 {
 		return nil
 	}
 
-	// Build index entries for all active rows
-	entries := make([]sortEntry, 0, s.totalRows)
-	for bi, b := range s.batches {
-		if b.Sel != nil {
-			for _, idx := range b.Sel {
-				entries = append(entries, sortEntry{batchIdx: uint32(bi), rowIdx: idx})
-			}
-		} else {
-			for i := 0; i < b.Len; i++ {
-				entries = append(entries, sortEntry{batchIdx: uint32(bi), rowIdx: uint32(i)})
-			}
-		}
-	}
-
-	// Resolve sort key column indices and pre-resolve typed comparison kernels.
-	// Null ordering (NULLS FIRST vs NULLS LAST) is baked into the kernel selection,
-	// so the comparison loop has no per-row null checks.
-	type resolvedKey struct {
-		colIdx  int
-		order   SortOrder
-		compare kernel.SortCompareKernel
-	}
-	firstBatch := s.batches[0]
-	resolved := make([]resolvedKey, len(s.Keys))
-	for i, key := range s.Keys {
-		idx := firstBatch.ColumnIndex(key.Column)
-		if idx >= len(firstBatch.Columns) {
-			idx = -1 // schema/column count mismatch — skip this key
-		}
-		var cmp kernel.SortCompareKernel
-		if idx >= 0 {
-			colType := firstBatch.Columns[idx].Type
-			// Check if this column is null-free across all batches.
-			allNullFree := true
-			for _, b := range s.batches {
-				if idx >= len(b.Columns) || b.Columns[idx].Nulls.HasNulls() {
-					allNullFree = false
-					break
-				}
-			}
-			if allNullFree {
-				// No nulls: skip null bitmap checks entirely.
-				cmp = kernel.ResolveSortCompareNoNulls(colType)
-			} else if key.NullsLast {
-				// Has nulls with NULLS LAST: null > non-null baked into kernel.
-				cmp = kernel.ResolveSortCompareNullsLast(colType)
-			} else {
-				// Has nulls with NULLS FIRST (default): null < non-null.
-				cmp = kernel.ResolveSortCompare(colType)
-			}
-		}
-		resolved[i] = resolvedKey{colIdx: idx, order: key.Order, compare: cmp}
-	}
-
-	// Sort comparison function used by both full sort and TopN heap.
-	// Null ordering is fully handled by the selected kernel — no post-hoc checks needed.
-	batches := s.batches
-	lessFunc := func(ei, ej sortEntry) bool {
-		bi, bj := batches[ei.batchIdx], batches[ej.batchIdx]
-		ri, rj := int(ei.rowIdx), int(ej.rowIdx)
-		for _, key := range resolved {
-			if key.colIdx < 0 || key.colIdx >= len(bi.Columns) || key.colIdx >= len(bj.Columns) {
-				continue
-			}
-			cmp := key.compare(bi.Columns[key.colIdx], ri, bj.Columns[key.colIdx], rj)
-			if cmp == 0 {
-				continue
-			}
-			if key.order == Descending {
-				return cmp > 0
-			}
-			return cmp < 0
-		}
-		return false
-	}
-
-	// When Limit is small relative to total rows, use a bounded heap
-	// to find the top Limit entries in O(n log k) instead of O(n log n).
-	if s.Limit > 0 && s.Limit < len(entries)/2 {
-		k := s.Limit
-		// Build a max-heap of size k where the root is the WORST entry
-		// (the one we'd evict first). "Worse" = sorts LATER = inverse of lessFunc.
-		h := &topNHeap{
-			entries: make([]sortEntry, k),
-			less:    lessFunc,
-		}
-		copy(h.entries, entries[:k])
-		heap.Init(h)
-
-		for _, e := range entries[k:] {
-			// If this entry is better than the worst in the heap, replace
-			if lessFunc(e, h.entries[0]) {
-				h.entries[0] = e
-				heap.Fix(h, 0)
-			}
-		}
-
-		// Sort the heap entries to get final order
-		entries = h.entries
-		sort.SliceStable(entries, func(i, j int) bool {
-			return lessFunc(entries[i], entries[j])
-		})
-	} else {
-		// Full sort for unlimited or large-limit queries
-		sort.SliceStable(entries, func(i, j int) bool {
-			return lessFunc(entries[i], entries[j])
-		})
-	}
+	entries := buildSortEntries(s.batches, s.totalRows)
+	resolved := resolveSortKeysForBatches(s.Keys, s.batches)
+	entries = selectSortedEntries(entries, sortEntriesLessFunc(resolved, s.batches), s.Limit)
 
 	// Materialize sorted batches using typed column copies.
-	// When Limit > 0, only materialize the top Limit rows (Top-K).
-	materializeN := len(entries)
-	if s.Limit > 0 && s.Limit < materializeN {
-		materializeN = s.Limit
-	}
-	for pos := 0; pos < materializeN; {
+	for pos := 0; pos < len(entries); {
 		end := pos + batch.DefaultBatchSize
-		if end > materializeN {
-			end = materializeN
+		if end > len(entries) {
+			end = len(entries)
 		}
-		chunk := entries[pos:end]
-		out := batch.NewRecordBatch(s.schema, len(chunk))
-		// Column-first iteration for better cache locality on destination arrays.
-		for j := range s.schema {
-			// Verify all source batches have this column; if any don't,
-			// the output column stays zero-valued (null-filled on demand).
-			allHaveCol := true
-			for _, e := range chunk {
-				if j >= len(batches[e.batchIdx].Columns) {
-					allHaveCol = false
-					break
-				}
-			}
-			if allHaveCol {
-				gatherSortVector(out.Columns[j], j, chunk, batches)
-			}
-		}
-		s.sorted = append(s.sorted, out)
+		s.sorted = append(s.sorted, gatherEntriesBatch(s.schema, s.batches, entries[pos:end]))
 		pos = end
 	}
 
@@ -356,6 +346,15 @@ func (s *Sort) finalizeColumnar() error {
 
 // Truncate keeps only the first n rows of sorted output (Top-K).
 func (s *Sort) Truncate(n int) {
+	// External-merge path: nothing is materialized — cap the stream instead.
+	// Callers (fragment PostFinalize, sortSourceAdapter) invoke Truncate once
+	// between Finalize and the first Next, before any rows are emitted.
+	if s.merger != nil || s.mergeDone {
+		if s.Limit == 0 || n < s.Limit {
+			s.Limit = n
+		}
+		return
+	}
 	remaining := n
 	for i, b := range s.sorted {
 		if remaining <= 0 {
@@ -414,12 +413,20 @@ func (s *Sort) Close() error {
 		s.unregisterAccounted()
 		s.unregisterAccounted = nil
 	}
+	s.mu.Lock()
+	if s.merger != nil || len(s.mergeRuns) > 0 {
+		// Early cancel mid-merge: close cursors and delete run scratch.
+		s.finishMergeLocked()
+	}
+	removeRunFiles(s.runFiles)
+	s.runFiles = nil
 	if s.Spill != nil && s.trackedMem > 0 {
 		s.Spill.ReleaseTracking(s.trackedMem)
 		s.trackedMem = 0
 	}
 	s.batches = nil
 	s.totalRows = 0
+	s.mu.Unlock()
 	return nil
 }
 
@@ -464,47 +471,67 @@ func (s *Sort) EstimateRelief(target int64) int64 {
 	return s.spillableBytesLocked()
 }
 
-// SpillSome drains accumulated input batches to a raw-row spill file and
-// releases the freed bytes. Sort uses raw-row spill (not partial state)
-// because input batches are pre-sort — there's no partial sorted state to
-// preserve until finalizeWithSpill runs the global merge.
+// SpillSome drains accumulated input batches to disk and releases the freed
+// bytes — a sorted columnar run on the external-merge path, a raw-row file on
+// the nested-type fallback. All-or-nothing either way: input batches are
+// pre-sort, so there's no partial state to keep.
 //
 // Implements memory.Spillable and memory.AccountedOperator.
-func (s *Sort) SpillSome(target int64) (int64, error) {
+func (s *Sort) SpillSome(_ int64) (int64, error) {
 	s.accState.Store(int32(memory.OpSpilling))
 	defer s.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.Spill == nil || s.trackedMem == 0 || len(s.batches) == 0 {
+	if s.Spill == nil || s.finalized {
 		return 0, nil
 	}
-	var rows []map[string]any
-	for _, sb := range s.batches {
-		rows = append(rows, sb.ToRows()...)
-	}
-	path, err := s.Spill.SpillRows(rows)
-	if err != nil {
-		return 0, err
-	}
-	s.spillFiles = append(s.spillFiles, path)
-	s.batches = s.batches[:0]
-	s.totalRows = 0
-	freed := s.trackedMem
-	s.Spill.ReleaseTracking(freed)
-	s.trackedMem = 0
-	if s.accInstanceID != 0 {
-		s.Spill.Tracker().PublishOwned(s.accInstanceID, 0)
-	}
-	return freed, nil
+	return s.flushSpillLocked()
 }
 
-// Next returns sorted results in batches.
+// Next returns sorted results in batches. On the external-merge path it
+// streams from the k-way run merger; otherwise it drains the materialized
+// s.sorted list.
 func (s *Sort) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if s.merger != nil || s.mergeDone {
+		return s.nextMerged()
+	}
 	if s.pos >= len(s.sorted) {
 		return nil, nil
 	}
 	b := s.sorted[s.pos]
 	s.pos++
+	return b, nil
+}
+
+// nextMerged pulls the next batch from the external merge, enforcing Limit
+// and tearing the merge down (cursors, run files, reservations) at EOF.
+func (s *Sort) nextMerged() (*batch.RecordBatch, error) {
+	if s.mergeDone {
+		return nil, nil
+	}
+	b, err := s.merger.Next()
+	if err != nil {
+		return nil, err
+	}
+	if b == nil {
+		s.mu.Lock()
+		s.finishMergeLocked()
+		s.mu.Unlock()
+		return nil, nil
+	}
+	if s.Limit > 0 {
+		remaining := s.Limit - s.mergeEmit
+		if remaining <= 0 {
+			s.mu.Lock()
+			s.finishMergeLocked()
+			s.mu.Unlock()
+			return nil, nil
+		}
+		if b.Len > remaining {
+			b.Len = remaining
+		}
+	}
+	s.mergeEmit += b.Len
 	return b, nil
 }
 
