@@ -71,6 +71,7 @@ SQL text
 - **Selection vectors**: Filtering marks indices instead of copying rows
 - **Push-based pipelines**: Source → UnaryOperator chain → Sink
 - **Pipeline breakers**: Aggregate, Sort, Window act as SinkSource (consume all, then produce)
+- **Spill-to-disk**: All pipeline breakers degrade gracefully past memory — HashJoin (grace partition-on-arrival), HashAggregate (partial-state k-way merge), Sort and Window (sorted-run external merge, streaming k-way). Residuals that still materialize fully: window specs with empty PARTITION BY, nested-type (Array/Map/Row) schemas in Sort/Window (legacy row spill).
 - **Batch pooling**: `BatchPool` for zero-alloc batch reuse
 
 ### Core Interfaces
@@ -115,8 +116,8 @@ Network-native types (IPv4, IPv6, CIDR, MAC, Port, Protocol) are first-class wit
 ### Distribution
 
 - **Modes**: `standalone` (all-in-one), `coordinator` (plan+dispatch), `worker` (execute)
-- **Pipeline-only execution**: All queries run as full SQL pipelines on workers. No inter-stage S3 shuffles.
-- **Probe-split**: Partition the largest table's files across workers, each runs the full query, coordinator merges partial results (re-aggregation, sort, dedup).
+- **Stage-DAG execution**: Distributed queries run as a multi-stage DAG. Every stage's output **materializes to S3** (`queries/<id>/...`) and is read back by the next stage — structurally like Trino's fault-tolerant execution with exchange spooling, not like its streaming mode. `exchange-repartition` stages hash-partition `.wshf` shuffle files; large-build joins (> `shuffleBuildThreshold`) take this path by default.
+- **Broadcast + probe-split**: Builds under `BroadcastBytesThreshold` replicate to all workers; the probe side's files are split across workers, each runs the full join, coordinator merges partial results (re-aggregation, sort, dedup).
 - **NATS JetStream**: Task queues with request/reply result delivery, metadata KV
 - **Federation**: NATS leaf nodes connect edge clusters to central
 
