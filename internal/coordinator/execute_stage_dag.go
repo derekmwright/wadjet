@@ -905,37 +905,42 @@ func (c *Coordinator) materializeReplicate(
 	c.tracker.Start(stageQueryID)
 	defer c.tracker.Delete(stageQueryID)
 	task.QueryID = stageQueryID
+	task.Attempt = 1
 
 	subject := distributed.QueryResultSubject(stageQueryID)
-	type result struct {
-		files []string
-		err   string
-	}
-	var collected result
-	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, 1)
 	defer stageProgressBridgeFromContext(ctx).Register(stage.ID, progress)()
+	// Materialize sinks to S3 (OpUnpartitionedSink) — retry-safe.
+	retrier := newTaskRetrier([]distributed.Task{task}, true, func(t distributed.Task) {
+		if ctx.Err() != nil {
+			return
+		}
+		if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
+			c.logger.Error("materialize task retry publish failed",
+				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
+		}
+	}, c.logger, stage.ID)
+	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
 		c.workers.MarkWorkerSeen(r.WorkerID)
-		mu.Lock()
-		if r.Success {
-			collected = result{files: r.ResultFiles}
-		} else {
-			collected = result{err: r.Error}
+		if c.workers.Liveness != nil {
+			c.workers.Liveness.Remove(r.TaskID)
 		}
-		mu.Unlock()
+		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
 		default:
 		}
-		select {
-		case done <- struct{}{}:
-		default:
+		if allDone {
+			select {
+			case done <- struct{}{}:
+			default:
+			}
 		}
 	})
 	if err != nil {
@@ -951,17 +956,16 @@ func (c *Coordinator) materializeReplicate(
 	if err := awaitStageProgress(ctx, done, progress, "replicate "+stage.ID); err != nil {
 		return nil, err
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if collected.err != "" {
-		return nil, fmt.Errorf("materialize task failed: %s", collected.err)
+	if _, errMsg, failed := retrier.FirstError(); failed {
+		return nil, fmt.Errorf("materialize task failed after %d attempts: %s", maxTaskAttempts, errMsg)
 	}
-	if len(collected.files) == 0 {
+	resultFiles := retrier.Files()[0]
+	if len(resultFiles) == 0 {
 		return nil, fmt.Errorf("materialize task returned no files")
 	}
 	c.logger.Info("dispatchReplicateStage: materialized",
-		"stage_id", stage.ID, "input_files", len(files), "cache_files", len(collected.files))
-	return collected.files, nil
+		"stage_id", stage.ID, "input_files", len(files), "cache_files", len(resultFiles))
+	return resultFiles, nil
 }
 
 // dispatchPipelineStage executes a compute stage (scan/join/aggregate/etc.)
@@ -1294,39 +1298,42 @@ func (c *Coordinator) dispatchScanAggregateStage(
 
 	for i := range tasks {
 		tasks[i].QueryID = stageQueryID
+		tasks[i].Attempt = 1
 	}
 	subject := distributed.QueryResultSubject(stageQueryID)
-	type taskResult struct {
-		files []string
-		err   string
-	}
-	collected := make([]taskResult, 0, len(tasks))
-	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
 	// Register with the per-query progress bridge so worker-emitted
 	// TaskProgress messages also count as forward progress for this
 	// stage's idle detection.
 	defer stageProgressBridgeFromContext(ctx).Register(stage.ID, progress)()
+	// Scan-aggregate tasks sink to S3 (unpartitioned or exchange-sender),
+	// never gather-fused — retry is always safe.
+	retrier := newTaskRetrier(tasks, true, func(t distributed.Task) {
+		if ctx.Err() != nil {
+			return
+		}
+		if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
+			c.logger.Error("scan-agg task retry publish failed",
+				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
+		}
+	}, c.logger, stage.ID)
+	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
 		c.workers.MarkWorkerSeen(r.WorkerID)
-		mu.Lock()
-		if r.Success {
-			collected = append(collected, taskResult{files: r.ResultFiles})
-		} else {
-			collected = append(collected, taskResult{err: r.Error})
+		if c.workers.Liveness != nil {
+			c.workers.Liveness.Remove(r.TaskID)
 		}
-		got := len(collected)
-		mu.Unlock()
+		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
 		default:
 		}
-		if got >= len(tasks) {
+		if allDone {
 			select {
 			case done <- struct{}{}:
 			default:
@@ -1345,15 +1352,10 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		return StageOutput{}, err
 	}
 
-	mu.Lock()
-	results := make([]taskResult, len(collected))
-	copy(results, collected)
-	mu.Unlock()
-	for _, r := range results {
-		if r.err != "" {
-			return StageOutput{}, fmt.Errorf("scan-agg stage %s: task failed: %s", stage.ID, r.err)
-		}
+	if taskID, errMsg, failed := retrier.FirstError(); failed {
+		return StageOutput{}, fmt.Errorf("scan-agg stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg)
 	}
+	resultFiles := retrier.Files()
 	if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
 		// Fused scan-aggregate + shuffle: each task produced N partition
 		// files at "<prefix>partition=NNNN/<task>.wshf". Bucket all files
@@ -1362,8 +1364,8 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		// dispatchScanFilterStage's fuseShuffle path.
 		numParts := stage.Exchange.Count
 		shardFiles := make([][]string, numParts)
-		for _, r := range results {
-			for _, f := range r.files {
+		for _, taskFiles := range resultFiles {
+			for _, f := range taskFiles {
 				p, parseErr := parsePartitionFromPath(f)
 				if parseErr != nil {
 					return StageOutput{}, fmt.Errorf("scan-agg stage %s: parsing partition from %q: %w", stage.ID, f, parseErr)
@@ -1380,14 +1382,10 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			Files:         shardFiles,
 		}, nil
 	}
-	files := make([][]string, len(tasks))
-	for i, r := range results {
-		files[i] = r.files
-	}
 	return StageOutput{
 		Kind:          OutputPartitioned,
 		NumPartitions: len(tasks),
-		Files:         files,
+		Files:         resultFiles,
 	}, nil
 }
 
@@ -1552,43 +1550,44 @@ func (c *Coordinator) dispatchScanFilterStage(
 
 	for i := range tasks {
 		tasks[i].QueryID = stageQueryID
+		tasks[i].Attempt = 1
 	}
 	subject := distributed.QueryResultSubject(stageQueryID)
-	type taskResult struct {
-		files    []string
-		partials []distributed.DynamicFilterPartialRef
-		err      string
-	}
-	collected := make([]taskResult, 0, len(tasks))
-	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
 	// Register with the per-query progress bridge so worker-emitted
 	// TaskProgress messages also count as forward progress for this
 	// stage's idle detection.
 	defer stageProgressBridgeFromContext(ctx).Register(stage.ID, progress)()
+	// Scan-filter tasks sink to S3 (unpartitioned or fused-shuffle
+	// partition files), never gather-fused — retry is always safe.
+	// Dynamic-filter partials are collected from the successful attempt's
+	// notification, same as result files.
+	retrier := newTaskRetrier(tasks, true, func(t distributed.Task) {
+		if ctx.Err() != nil {
+			return
+		}
+		if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
+			c.logger.Error("scan-filter task retry publish failed",
+				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
+		}
+	}, c.logger, stage.ID)
+	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
 		c.workers.MarkWorkerSeen(r.WorkerID)
-		mu.Lock()
-		if r.Success {
-			collected = append(collected, taskResult{
-				files:    r.ResultFiles,
-				partials: r.DynamicFilterPartials,
-			})
-		} else {
-			collected = append(collected, taskResult{err: r.Error})
+		if c.workers.Liveness != nil {
+			c.workers.Liveness.Remove(r.TaskID)
 		}
-		got := len(collected)
-		mu.Unlock()
+		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
 		default:
 		}
-		if got >= len(tasks) {
+		if allDone {
 			select {
 			case done <- struct{}{}:
 			default:
@@ -1607,25 +1606,17 @@ func (c *Coordinator) dispatchScanFilterStage(
 		return StageOutput{}, err
 	}
 
-	mu.Lock()
-	results := make([]taskResult, len(collected))
-	copy(results, collected)
-	mu.Unlock()
-	for _, r := range results {
-		if r.err != "" {
-			return StageOutput{}, fmt.Errorf("scan-filter stage %s: task failed: %s", stage.ID, r.err)
-		}
+	if taskID, errMsg, failed := retrier.FirstError(); failed {
+		return StageOutput{}, fmt.Errorf("scan-filter stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg)
 	}
+	resultFiles := retrier.Files()
 
 	// Union per-task dynamic-filter partials into stage-level BuildStats.
 	// Skipped if the stage didn't emit (no partials expected) — saves the
 	// S3 round-trip for the common non-emit case.
 	var buildStats map[string]*BuildStats
 	if len(stage.EmitDynamicFilters) > 0 {
-		var allRefs []distributed.DynamicFilterPartialRef
-		for _, r := range results {
-			allRefs = append(allRefs, r.partials...)
-		}
+		allRefs := retrier.DynamicFilterPartials()
 		merged, mergeErr := mergeBuildStatsFromPartials(ctx, c.catalog.Store(), allRefs)
 		if mergeErr != nil {
 			c.logger.Warn("dynamic_filter: partial merge failed; downstream consumes will see no filter",
@@ -1653,8 +1644,8 @@ func (c *Coordinator) dispatchScanFilterStage(
 		// each partition's full set. Same shape as runShuffleSide.
 		numParts := stage.Exchange.Count
 		shardFiles := make([][]string, numParts)
-		for _, r := range results {
-			for _, f := range r.files {
+		for _, taskFiles := range resultFiles {
+			for _, f := range taskFiles {
 				p, parseErr := parsePartitionFromPath(f)
 				if parseErr != nil {
 					return StageOutput{}, fmt.Errorf("scan-filter stage %s: parsing partition from %q: %w", stage.ID, f, parseErr)
@@ -1672,14 +1663,10 @@ func (c *Coordinator) dispatchScanFilterStage(
 			BuildStats:    buildStats,
 		}, nil
 	}
-	files := make([][]string, len(tasks))
-	for i, r := range results {
-		files[i] = r.files
-	}
 	return StageOutput{
 		Kind:          OutputPartitioned,
 		NumPartitions: len(tasks),
-		Files:         files,
+		Files:         resultFiles,
 		BuildStats:    buildStats,
 	}, nil
 }
@@ -2045,12 +2032,16 @@ func (c *Coordinator) dispatchComputeStage(
 				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
 		}
 	}, c.logger, stage.ID)
+	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
 			return
 		}
 		c.workers.MarkWorkerSeen(r.WorkerID)
+		if c.workers.Liveness != nil {
+			c.workers.Liveness.Remove(r.TaskID)
+		}
 		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
@@ -2618,10 +2609,12 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 		c.enrichTaskWithQueryContext(qm, &t)
 		intermTasks = append(intermTasks, t)
 	}
+	// Intermediates always sink to S3 (no fused subject) — retry-safe.
 	intermFiles, err := c.runStageTasks(ctx,
 		fmt.Sprintf("st-%s-interm-%s", stage.ID, queryID),
 		stage.ID+"-interm",
-		intermTasks)
+		intermTasks,
+		true)
 	if err != nil {
 		return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: intermediate phase: %w", stage.ID, err)
 	}
@@ -2678,10 +2671,13 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 	c.mu.Unlock()
 	c.enrichTaskWithQueryContext(qm, &finalTask)
 
+	// The final task streams to the client when gather-fused — retry only
+	// when it sinks to S3 instead.
 	finalFiles, err := c.runStageTasks(ctx,
 		fmt.Sprintf("st-%s-%s", stage.ID, queryID),
 		stage.ID,
-		[]distributed.Task{finalTask})
+		[]distributed.Task{finalTask},
+		fusion == nil)
 	if err != nil {
 		return StageOutput{}, fmt.Errorf("final_aggregate fanout %s: final phase: %w", stage.ID, err)
 	}
@@ -2694,13 +2690,18 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 
 // runStageTasks publishes the given tasks under stageQueryID, subscribes to
 // the per-stage result subject, and waits for all completions. Returns one
-// []string of result files per task, in completion order. Used by
+// []string of result files per task, in dispatch order. Used by
 // dispatchFinalAggregateFanout for both phases; mirrors the inline
 // dispatch+collect in dispatchScanAggregateStage / dispatchComputeStage.
+//
+// retryEnabled must be false when any task streams output mid-task
+// (gather-fused terminal sinks) — a retried task would duplicate the
+// streamed rows.
 func (c *Coordinator) runStageTasks(
 	ctx context.Context,
 	stageQueryID, stageLabel string,
 	tasks []distributed.Task,
+	retryEnabled bool,
 ) ([][]string, error) {
 	if len(tasks) == 0 {
 		return nil, nil
@@ -2714,39 +2715,40 @@ func (c *Coordinator) runStageTasks(
 
 	for i := range tasks {
 		tasks[i].QueryID = stageQueryID
+		tasks[i].Attempt = 1
 	}
 	subject := distributed.QueryResultSubject(stageQueryID)
-	type taskResult struct {
-		files []string
-		err   string
-	}
-	collected := make([]taskResult, 0, len(tasks))
-	var mu sync.Mutex
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
 	// Register with the per-query progress bridge so worker-emitted
 	// TaskProgress messages also count as forward progress for this
 	// stage's idle detection.
 	defer stageProgressBridgeFromContext(ctx).Register(stageLabel, progress)()
+	retrier := newTaskRetrier(tasks, retryEnabled, func(t distributed.Task) {
+		if ctx.Err() != nil {
+			return
+		}
+		if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
+			c.logger.Error("task retry publish failed",
+				"stage_id", stageLabel, "task_id", t.ID, "error", pubErr)
+		}
+	}, c.logger, stageLabel)
+	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
 		}
 		c.workers.MarkWorkerSeen(r.WorkerID)
-		mu.Lock()
-		if r.Success {
-			collected = append(collected, taskResult{files: r.ResultFiles})
-		} else {
-			collected = append(collected, taskResult{err: r.Error})
+		if c.workers.Liveness != nil {
+			c.workers.Liveness.Remove(r.TaskID)
 		}
-		got := len(collected)
-		mu.Unlock()
+		allDone := retrier.Observe(r)
 		select {
 		case progress <- struct{}{}:
 		default:
 		}
-		if got >= len(tasks) {
+		if allDone {
 			select {
 			case done <- struct{}{}:
 			default:
@@ -2765,18 +2767,10 @@ func (c *Coordinator) runStageTasks(
 		return nil, err
 	}
 
-	mu.Lock()
-	results := make([]taskResult, len(collected))
-	copy(results, collected)
-	mu.Unlock()
-	files := make([][]string, len(tasks))
-	for i, r := range results {
-		if r.err != "" {
-			return nil, fmt.Errorf("stage %s: task failed: %s", stageLabel, r.err)
-		}
-		files[i] = r.files
+	if taskID, errMsg, failed := retrier.FirstError(); failed {
+		return nil, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stageLabel, taskID, maxTaskAttempts, errMsg)
 	}
-	return files, nil
+	return retrier.Files(), nil
 }
 
 // buildTaskInputsForStage maps a stage's Dependencies (upstream stage IDs)

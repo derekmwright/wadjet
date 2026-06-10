@@ -236,6 +236,7 @@ func (c *Coordinator) runShuffleSide(
 				"side", sideName, "task_id", t.ID, "error", pubErr)
 		}
 	}, c.logger, stageID)
+	defer c.watchStuckTasks(ctx, retrier)()
 
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
@@ -243,6 +244,9 @@ func (c *Coordinator) runShuffleSide(
 			return
 		}
 		c.workers.MarkWorkerSeen(r.WorkerID)
+		if c.workers.Liveness != nil {
+			c.workers.Liveness.Remove(r.TaskID)
+		}
 		if retrier.Observe(r) {
 			select {
 			case done <- struct{}{}:
