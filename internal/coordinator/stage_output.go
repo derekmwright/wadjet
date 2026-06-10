@@ -32,6 +32,15 @@ type StageOutput struct {
 	NumPartitions int        // valid when Kind == OutputPartitioned
 	Files         [][]string // Partitioned: Files[p]; Replicated/SinglePart: Files[0]
 
+	// Bytes is the total on-disk size of Files as reported by the workers
+	// that wrote them (ResultNotification.SizeBytes), or the catalog size
+	// for pass-through leaf scans. Feeds downstream tasks' EstimatedBytes
+	// for memory-aware admission. 0 = unknown (legacy worker, empty
+	// output) — downstream estimates degrade to unknown, never to wrong.
+	// Note these are file bytes (compressed), the same unit the scan-stage
+	// estimates use; in-memory footprint is larger by the codec ratio.
+	Bytes int64
+
 	// BuildStats, populated when this stage's Stage.EmitDynamicFilters was
 	// non-empty. One entry per emit, keyed by FilterID. Downstream consumer
 	// stages reach in via the stat-dep edge to pull the materialized stats.

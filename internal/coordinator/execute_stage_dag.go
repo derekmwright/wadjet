@@ -731,12 +731,15 @@ func (c *Coordinator) dispatchShuffleStage(
 			Files:         make([][]string, numParts),
 		}, nil
 	}
-	// Synthesize a source stage for runShuffleSide.
+	// Synthesize a source stage for runShuffleSide. EstimatedBytes carries
+	// the upstream's worker-reported output size so the shuffle tasks get
+	// per-task admission estimates (runShuffleSide splits it per task).
 	synthetic := physical.Stage{
-		ID:        stage.ID + "-src",
-		Type:      physical.StageScan,
-		ScanFiles: sourceFiles,
-		TableName: stage.TableName, // may be empty for chained shuffles; worker falls back to generic scan
+		ID:             stage.ID + "-src",
+		Type:           physical.StageScan,
+		ScanFiles:      sourceFiles,
+		TableName:      stage.TableName, // may be empty for chained shuffles; worker falls back to generic scan
+		EstimatedBytes: upstream.Bytes,
 	}
 	numParts := stage.Exchange.Count
 	if numParts == 0 {
@@ -745,7 +748,7 @@ func (c *Coordinator) dispatchShuffleStage(
 	// Forward any dynamic-filter specs the upstream (probe-side) leaf scan
 	// resolved through pass-through. Each shuffle task gets a copy so its
 	// parquet scan applies the bloom at row-group level.
-	shards, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
+	shards, shardBytes, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
 	if err != nil {
 		return StageOutput{}, err
 	}
@@ -753,6 +756,7 @@ func (c *Coordinator) dispatchShuffleStage(
 		Kind:          OutputPartitioned,
 		NumPartitions: numParts,
 		Files:         shards,
+		Bytes:         shardBytes,
 	}, nil
 }
 
@@ -825,10 +829,11 @@ func (c *Coordinator) dispatchReplicateStage(
 		return StageOutput{
 			Kind:  OutputReplicated,
 			Files: [][]string{upstreamFiles},
+			Bytes: upstream.Bytes,
 		}, nil
 	}
 
-	cacheFiles, err := c.materializeReplicate(ctx, queryID, stage, stage.Dependencies[0], upstreamFiles)
+	cacheFiles, cacheBytes, err := c.materializeReplicate(ctx, queryID, stage, stage.Dependencies[0], upstreamFiles, upstream.Bytes)
 	if err != nil {
 		// Materialization failure must not break the query — fall back to
 		// pass-through. Workers can still read the raw upstream files; we
@@ -839,12 +844,14 @@ func (c *Coordinator) dispatchReplicateStage(
 		return StageOutput{
 			Kind:  OutputReplicated,
 			Files: [][]string{upstreamFiles},
+			Bytes: upstream.Bytes,
 		}, nil
 	}
 
 	return StageOutput{
 		Kind:  OutputReplicated,
 		Files: [][]string{cacheFiles},
+		Bytes: cacheBytes,
 	}, nil
 }
 
@@ -862,17 +869,19 @@ func (c *Coordinator) materializeReplicate(
 	stage physical.Stage,
 	upstreamID string,
 	files []string,
-) ([]string, error) {
+	estBytes int64, // upstream output size; the task reads all of it
+) ([]string, int64, error) {
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	task := distributed.Task{
-		ID:           uuid.New().String()[:8],
-		QueryID:      queryID,
-		StageID:      stage.ID,
-		Type:         distributed.TaskTypeStage,
-		DataBucket:   c.config.ResultBucket,
-		ResultBucket: c.config.ResultBucket,
-		ResultPrefix: resultPrefix,
-		CreatedAt:    time.Now(),
+		ID:             uuid.New().String()[:8],
+		QueryID:        queryID,
+		StageID:        stage.ID,
+		Type:           distributed.TaskTypeStage,
+		DataBucket:     c.config.ResultBucket,
+		ResultBucket:   c.config.ResultBucket,
+		ResultPrefix:   resultPrefix,
+		EstimatedBytes: estBytes,
+		CreatedAt:      time.Now(),
 		// Fragment dispatch: stream upstream files through OpScan into an
 		// unpartitioned WSHF sink. cachedFileStreamSource auto-detects
 		// parquet vs WSHF, so the consolidation pattern (this caller's job)
@@ -941,28 +950,28 @@ func (c *Coordinator) materializeReplicate(
 		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("subscribe materialize: %w", err)
+		return nil, 0, fmt.Errorf("subscribe materialize: %w", err)
 	}
 	defer sub.Unsubscribe()
 
 	c.logger.Info("dispatchReplicateStage: materializing",
 		"stage_id", stage.ID, "upstream_files", len(files), "task_id", task.ID)
 	if err := c.scheduler.PublishTasks(ctx, []distributed.Task{task}); err != nil {
-		return nil, fmt.Errorf("publish materialize: %w", err)
+		return nil, 0, fmt.Errorf("publish materialize: %w", err)
 	}
 	if err := awaitStageProgress(ctx, done, progress, "replicate "+stage.ID); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if _, errMsg, failed := retrier.FirstError(); failed {
-		return nil, fmt.Errorf("materialize task failed after %d attempts: %s", maxTaskAttempts, errMsg)
+		return nil, 0, fmt.Errorf("materialize task failed after %d attempts: %s", maxTaskAttempts, errMsg)
 	}
 	resultFiles := retrier.Files()[0]
 	if len(resultFiles) == 0 {
-		return nil, fmt.Errorf("materialize task returned no files")
+		return nil, 0, fmt.Errorf("materialize task returned no files")
 	}
 	c.logger.Info("dispatchReplicateStage: materialized",
 		"stage_id", stage.ID, "input_files", len(files), "cache_files", len(resultFiles))
-	return resultFiles, nil
+	return resultFiles, retrier.TotalBytes(), nil
 }
 
 // dispatchPipelineStage executes a compute stage (scan/join/aggregate/etc.)
@@ -1059,6 +1068,7 @@ func (c *Coordinator) dispatchPipelineStage(
 		out := StageOutput{
 			Kind:  OutputSinglePart,
 			Files: [][]string{files},
+			Bytes: stage.EstimatedBytes, // catalog-true file sizes
 		}
 		// Materialize Consume specs into wire form so downstream shuffle/
 		// stage dispatchers can ship them in their task descriptors
@@ -1382,12 +1392,14 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
+			Bytes:         retrier.TotalBytes(),
 		}, nil
 	}
 	return StageOutput{
 		Kind:          OutputPartitioned,
 		NumPartitions: len(tasks),
 		Files:         resultFiles,
+		Bytes:         retrier.TotalBytes(),
 	}, nil
 }
 
@@ -1668,6 +1680,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 			NumPartitions: numParts,
 			Files:         shardFiles,
 			BuildStats:    buildStats,
+			Bytes:         retrier.TotalBytes(),
 		}, nil
 	}
 	return StageOutput{
@@ -1675,6 +1688,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		NumPartitions: len(tasks),
 		Files:         resultFiles,
 		BuildStats:    buildStats,
+		Bytes:         retrier.TotalBytes(),
 	}, nil
 }
 
@@ -2016,9 +2030,16 @@ func (c *Coordinator) dispatchComputeStage(
 	defer c.tracker.Delete(stageQueryID)
 
 	subject := distributed.QueryResultSubject(stageQueryID)
+	// Per-task admission estimate from upstream output sizes: partitioned
+	// inputs (and the manually-sliced probe of a probe-split) divide across
+	// tasks; replicated and single-part inputs are read in full by EVERY
+	// task (partitionFilesForWorker hands non-partitioned deps to each task
+	// whole), so they charge their full bytes.
+	perTaskEst := estimateComputeTaskBytes(stage, inputs, numTasks, probeSplit)
 	for i := range tasks {
 		tasks[i].QueryID = stageQueryID
 		tasks[i].Attempt = 1
+		tasks[i].EstimatedBytes = perTaskEst
 	}
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
@@ -2113,6 +2134,7 @@ func (c *Coordinator) dispatchComputeStage(
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
+			Bytes:         retrier.TotalBytes(),
 		}, nil
 	}
 	// resultFiles is in dispatch order (taskRetrier keys results by task ID),
@@ -2146,12 +2168,14 @@ func (c *Coordinator) dispatchComputeStage(
 			Kind:          OutputSinglePart,
 			NumPartitions: 1,
 			Files:         [][]string{flat},
+			Bytes:         retrier.TotalBytes(),
 		}, nil
 	}
 	return StageOutput{
 		Kind:          kind,
 		NumPartitions: len(tasks),
 		Files:         files,
+		Bytes:         retrier.TotalBytes(),
 	}, nil
 }
 
@@ -2588,16 +2612,23 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 		Type:        "merge_aggregate",
 		GroupByCols: stage.GroupByCols,
 	}
+	// Per-task admission estimate: each intermediate reads ~1/N of the
+	// upstream output (worker-reported bytes; 0 = unknown).
+	intermEst := int64(0)
+	if b := inputs[depID].Bytes; b > 0 && N > 0 {
+		intermEst = b / int64(N)
+	}
 	for i, group := range groups {
 		t := distributed.Task{
-			ID:           uuid.New().String()[:8],
-			QueryID:      queryID,
-			StageID:      fmt.Sprintf("%s-merge-%d", stage.ID, i),
-			Type:         distributed.TaskTypeStage,
-			DataBucket:   c.config.ResultBucket,
-			ResultBucket: c.config.ResultBucket,
-			ResultPrefix: resultPrefix,
-			CreatedAt:    time.Now(),
+			ID:             uuid.New().String()[:8],
+			QueryID:        queryID,
+			StageID:        fmt.Sprintf("%s-merge-%d", stage.ID, i),
+			Type:           distributed.TaskTypeStage,
+			DataBucket:     c.config.ResultBucket,
+			ResultBucket:   c.config.ResultBucket,
+			ResultPrefix:   resultPrefix,
+			EstimatedBytes: intermEst,
+			CreatedAt:      time.Now(),
 		}
 		ops, ferr := buildAggregateFragment(intermStage, &t, map[string][]string{depID: group}, aggs, nil, "")
 		if ferr != nil {
@@ -2614,7 +2645,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 		intermTasks = append(intermTasks, t)
 	}
 	// Intermediates always sink to S3 (no fused subject) — retry-safe.
-	intermFiles, err := c.runStageTasks(ctx,
+	intermFiles, intermBytes, err := c.runStageTasks(ctx,
 		fmt.Sprintf("st-%s-interm-%s", stage.ID, queryID),
 		stage.ID+"-interm",
 		intermTasks,
@@ -2651,6 +2682,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 		DataBucket:      c.config.ResultBucket,
 		ResultBucket:    c.config.ResultBucket,
 		ResultPrefix:    resultPrefix,
+		EstimatedBytes:  intermBytes, // final merge reads every intermediate output
 		CreatedAt:       time.Now(),
 		PostFilterExprs: append([]string(nil), stage.FilterExprs...),
 	}
@@ -2677,7 +2709,7 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 
 	// The final task streams to the client when gather-fused — retry only
 	// when it sinks to S3 instead.
-	finalFiles, err := c.runStageTasks(ctx,
+	finalFiles, finalBytes, err := c.runStageTasks(ctx,
 		fmt.Sprintf("st-%s-%s", stage.ID, queryID),
 		stage.ID,
 		[]distributed.Task{finalTask},
@@ -2689,14 +2721,16 @@ func (c *Coordinator) dispatchFinalAggregateFanout(
 		Kind:          OutputSinglePart,
 		NumPartitions: 1,
 		Files:         finalFiles,
+		Bytes:         finalBytes,
 	}, nil
 }
 
 // runStageTasks publishes the given tasks under stageQueryID, subscribes to
 // the per-stage result subject, and waits for all completions. Returns one
-// []string of result files per task, in dispatch order. Used by
-// dispatchFinalAggregateFanout for both phases; mirrors the inline
-// dispatch+collect in dispatchScanAggregateStage / dispatchComputeStage.
+// []string of result files per task in dispatch order, plus the worker-
+// reported total output bytes. Used by dispatchFinalAggregateFanout for
+// both phases; mirrors the inline dispatch+collect in
+// dispatchScanAggregateStage / dispatchComputeStage.
 //
 // retryEnabled must be false when any task streams output mid-task
 // (gather-fused terminal sinks) — a retried task would duplicate the
@@ -2706,9 +2740,9 @@ func (c *Coordinator) runStageTasks(
 	stageQueryID, stageLabel string,
 	tasks []distributed.Task,
 	retryEnabled bool,
-) ([][]string, error) {
+) ([][]string, int64, error) {
 	if len(tasks) == 0 {
-		return nil, nil
+		return nil, 0, nil
 	}
 	trackerStages := map[string]*StageInfo{
 		stageLabel: {StageID: stageLabel, Type: distributed.TaskTypeStage, TotalTasks: len(tasks)},
@@ -2757,21 +2791,54 @@ func (c *Coordinator) runStageTasks(
 		}
 	})
 	if err != nil {
-		return nil, fmt.Errorf("stage %s: subscribe: %w", stageLabel, err)
+		return nil, 0, fmt.Errorf("stage %s: subscribe: %w", stageLabel, err)
 	}
 	defer sub.Unsubscribe()
 
 	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
-		return nil, fmt.Errorf("stage %s: publish: %w", stageLabel, err)
+		return nil, 0, fmt.Errorf("stage %s: publish: %w", stageLabel, err)
 	}
 	if err := awaitStageProgress(ctx, done, progress, stageLabel); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	if taskID, errMsg, failed := retrier.FirstError(); failed {
-		return nil, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stageLabel, taskID, maxTaskAttempts, errMsg)
+		return nil, 0, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stageLabel, taskID, maxTaskAttempts, errMsg)
 	}
-	return retrier.Files(), nil
+	return retrier.Files(), retrier.TotalBytes(), nil
+}
+
+// estimateComputeTaskBytes estimates one compute task's input footprint
+// from upstream output sizes, mirroring the slicing semantics of
+// buildTaskInputsForStage / buildTaskInputsForBroadcastJoinSplitProbe:
+// OutputPartitioned deps split across tasks; Replicated and SinglePart
+// deps are read in full by every task; a probe-split's probe dep is
+// manually sliced, so it splits too. Deps with unknown size (Bytes == 0,
+// e.g. legacy workers) contribute nothing — the estimate degrades toward
+// 0 = unknown rather than inventing numbers.
+func estimateComputeTaskBytes(stage physical.Stage, inputs map[string]StageOutput, numTasks int, probeSplit bool) int64 {
+	if numTasks <= 0 {
+		numTasks = 1
+	}
+	probeDep := ""
+	if probeSplit {
+		probeDep = stage.LeftDepStage
+		if probeDep == "" && len(stage.Dependencies) > 0 {
+			probeDep = stage.Dependencies[0]
+		}
+	}
+	var est int64
+	for depID, out := range inputs {
+		if out.Bytes <= 0 {
+			continue
+		}
+		if depID == probeDep || out.Kind == OutputPartitioned {
+			est += out.Bytes / int64(numTasks)
+		} else {
+			est += out.Bytes
+		}
+	}
+	return est
 }
 
 // buildTaskInputsForStage maps a stage's Dependencies (upstream stage IDs)
