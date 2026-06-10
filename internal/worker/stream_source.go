@@ -167,6 +167,16 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 				return nil, err
 			}
 			if b != nil {
+				// Self-relief: the WSHF walk is strictly forward and decode
+				// copies out of the mapping, so everything behind the cursor
+				// is dead — advise it away in 64 MiB steps. Keeps each active
+				// region's RSS at a bounded window instead of the whole file,
+				// which keeps total RSS under the relief ceiling so the
+				// global LRU pass (which under working-set > ceiling evicts
+				// exactly what a walker reads next — Q18's 2× wall) rarely
+				// needs to fire at all. nil region (relief disabled, or the
+				// in-memory test path) makes this one predictable branch.
+				s.mmapRegion.relieveConsumedPrefix(int64(s.chunkReader.pos))
 				return b, nil
 			}
 			// Current file exhausted — release its mmap and remove the local

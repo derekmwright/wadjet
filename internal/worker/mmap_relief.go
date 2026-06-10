@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -49,12 +50,26 @@ func SetMmapRelief(enabled bool, thresholdBytes int64) {
 // MmapReliefThreshold returns the current relief threshold in bytes (0 if unset).
 func MmapReliefThreshold() int64 { return mmapReliefThresholdBytes.Load() }
 
+// mmapSelfReliefChunkBytes is the hysteresis for consumed-prefix self-relief:
+// a streaming WSHF walker advises away its consumed prefix only after another
+// chunk of this size has been fully decoded, so the cost is one madvise per
+// 64 MiB walked instead of one per batch. Declared as var so tests can lower it.
+var mmapSelfReliefChunkBytes = int64(64 << 20) // 64 MiB
+
+// mmapPageSize is the kernel page size; madvise offsets must be page-aligned.
+var mmapPageSize = int64(os.Getpagesize())
+
 // mmapRegion is one tracked file mapping. lastTouch is updated atomically and
 // lock-free on every Next() that reads the region; the relief path sorts by it
 // lazily (only at eviction time), so there is no per-Next lock or list reorder.
 type mmapRegion struct {
 	data      []byte // the mmap'd slice (PROT_READ MAP_SHARED file mapping)
 	lastTouch atomic.Int64
+	// relieved is the page-aligned prefix length [0, relieved) the OWNING
+	// walker has already MADV_DONTNEED'd via relieveConsumedPrefix. Written
+	// only by the owner goroutine; read by the global relief path for live-
+	// byte accounting.
+	relieved atomic.Int64
 }
 
 // touch records the current time as this region's last access. Cheap: one
@@ -63,6 +78,50 @@ func (r *mmapRegion) touch() {
 	if r != nil {
 		r.lastTouch.Store(time.Now().UnixNano())
 	}
+}
+
+// relieveConsumedPrefix MADV_DONTNEEDs the dead prefix behind a strictly-
+// forward walker's read cursor. The WSHF chunk walk never re-reads consumed
+// bytes and decode copies out of the mapping, so pages behind the cursor
+// re-fault never — advising them away is pure RSS relief with zero re-fault
+// cost, unlike the global LRU relief which (under a working set larger than
+// the RSS ceiling) evicts exactly the pages a cyclic walker is about to
+// read again (the SF100 Q18 2× wall, threshold-insensitive 16000↔19000,
+// runs 20260610-004232 / 20260610-132630).
+//
+// consumed is the walker's byte offset into the region. Relief happens in
+// page-aligned mmapSelfReliefChunkBytes steps (one madvise per 64 MiB
+// walked); calls between steps are one atomic load + compare. Owner-
+// goroutine only — no lock; a concurrent whole-region MADV from the global
+// relief path is idempotent and harmless. nil-safe (relief disabled).
+// Returns the bytes advised away (0 between steps).
+func (r *mmapRegion) relieveConsumedPrefix(consumed int64) int64 {
+	if r == nil {
+		return 0
+	}
+	target := consumed &^ (mmapPageSize - 1)
+	if max := int64(len(r.data)) &^ (mmapPageSize - 1); target > max {
+		target = max
+	}
+	prev := r.relieved.Load()
+	if target-prev < mmapSelfReliefChunkBytes {
+		return 0
+	}
+	if err := unix.Madvise(r.data[prev:target], unix.MADV_DONTNEED); err != nil {
+		return 0
+	}
+	r.relieved.Store(target)
+	return target - prev
+}
+
+// liveBytes is the region length minus the self-relieved prefix — the bytes
+// a global relief pass can still meaningfully advise away.
+func (r *mmapRegion) liveBytes() int64 {
+	n := int64(len(r.data)) - r.relieved.Load()
+	if n < 0 {
+		n = 0
+	}
+	return n
 }
 
 // mmapRegistry holds every live file mapping across cachedFileStreamSources on
@@ -121,11 +180,15 @@ func relieveMmap(target int64) int64 {
 		if freed >= target {
 			break
 		}
-		if len(r.data) == 0 {
+		// Count (and skip by) live bytes only: a walker may have already
+		// self-relieved its consumed prefix, and crediting the full region
+		// here would stop the pass before enough real RSS was released.
+		live := r.liveBytes()
+		if live < mmapPageSize {
 			continue
 		}
 		if err := unix.Madvise(r.data, unix.MADV_DONTNEED); err == nil {
-			freed += int64(len(r.data))
+			freed += live
 		}
 	}
 	return freed
