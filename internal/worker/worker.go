@@ -449,12 +449,51 @@ func (w *Worker) dispatchLoop(ctx context.Context, in <-chan dataplane.TaskDispa
 				return
 			case sem <- struct{}{}:
 			}
+			// Memory-aware admission: hold task START while the shared pool
+			// is above the pull threshold, mirroring taskLoop's pre-fetch
+			// gate (the gRPC path previously had NO pressure gate — tasks
+			// started immediately regardless of pool state). Bounded wait:
+			// pressure relaxes as in-flight tasks finish and release; if it
+			// doesn't within the cap, proceed anyway — running tasks may be
+			// waiting on cooperative spill that the new task's relief
+			// participation can unblock, and the spill machinery remains the
+			// backstop.
+			w.waitForPoolHeadroom(ctx)
 			w.wg.Add(1)
 			go func(t distributed.Task) {
 				defer w.wg.Done()
 				defer func() { <-sem }()
 				w.executeIncomingTask(ctx, t, noopAcker{})
 			}(task)
+		}
+	}
+}
+
+// poolHeadroomMaxWait caps how long dispatchLoop delays a task start while
+// waiting for shared-pool pressure to drop below poolPressurePullThreshold.
+// A cap (rather than wait-forever) avoids a stall where in-flight tasks are
+// themselves blocked on cooperative spill that needs forward progress.
+const poolHeadroomMaxWait = 30 * time.Second
+
+// waitForPoolHeadroom blocks until shared-pool pressure falls below the pull
+// threshold, ctx is done, or poolHeadroomMaxWait elapses. Mirrors taskLoop's
+// pre-fetch pressure gate for the gRPC dispatch path.
+func (w *Worker) waitForPoolHeadroom(ctx context.Context) {
+	deadline := time.Now().Add(poolHeadroomMaxWait)
+	for {
+		used, budget := w.executor.SharedPoolStats()
+		if budget <= 0 || float64(used)/float64(budget) <= poolPressurePullThreshold {
+			return
+		}
+		if time.Now().After(deadline) {
+			w.logger.Warn("pool pressure gate timed out; starting task anyway",
+				"pool_used_mb", used>>20, "pool_budget_mb", budget>>20)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(poolPressurePullBackoff):
 		}
 	}
 }

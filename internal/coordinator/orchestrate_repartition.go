@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
@@ -194,15 +193,49 @@ func (c *Coordinator) runShuffleSide(
 	c.tracker.Start(shuffleQueryID)
 	defer c.tracker.Delete(shuffleQueryID)
 
-	// Subscribe for results before publishing to avoid the race.
+	// Build tasks first (the retrier needs them registered), then subscribe
+	// BEFORE publishing to avoid the result race.
 	subject := distributed.QueryResultSubject(shuffleQueryID)
-	type taskResult struct {
-		files []string
-		err   string
-	}
-	collected := make([]taskResult, 0, actualTasks)
-	var mu sync.Mutex
 	done := make(chan struct{}, 1)
+
+	tasks := make([]distributed.Task, actualTasks)
+	for i, files := range fileSets {
+		t := distributed.Task{
+			ID:             uuid.New().String()[:8],
+			QueryID:        shuffleQueryID,
+			StageID:        stageID,
+			Type:           distributed.TaskTypeShuffle,
+			TableName:      sourceStage.TableName,
+			Files:          files,
+			Columns:        cols,
+			ShuffleKeys:    keys,
+			NumPartitions:  numParts,
+			DataBucket:     c.config.ResultBucket,
+			ResultBucket:   c.config.ResultBucket,
+			ResultPrefix:   resultPrefix,
+			CreatedAt:      time.Now(),
+			DynamicFilters: dynamicFilters,
+		}
+		if clusterID := c.catalog.ClusterID(); clusterID != "" {
+			t.ClusterID = clusterID
+		}
+		t.Attempt = 1
+		tasks[i] = t
+	}
+
+	// Shuffle tasks are never gather-fused (their outputs are partition
+	// files), so retry is always safe here: deterministic inputs, and a
+	// retry overwrites the failed attempt's identically-named, identically-
+	// contented partition files.
+	retrier := newTaskRetrier(tasks, true, func(t distributed.Task) {
+		if ctx.Err() != nil {
+			return
+		}
+		if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
+			c.logger.Error("shuffle task retry publish failed",
+				"side", sideName, "task_id", t.ID, "error", pubErr)
+		}
+	}, c.logger, stageID)
 
 	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
@@ -210,15 +243,7 @@ func (c *Coordinator) runShuffleSide(
 			return
 		}
 		c.workers.MarkWorkerSeen(r.WorkerID)
-		mu.Lock()
-		if !r.Success {
-			collected = append(collected, taskResult{err: r.Error})
-		} else {
-			collected = append(collected, taskResult{files: r.ResultFiles})
-		}
-		got := len(collected)
-		mu.Unlock()
-		if got >= actualTasks {
+		if retrier.Observe(r) {
 			select {
 			case done <- struct{}{}:
 			default:
@@ -229,31 +254,6 @@ func (c *Coordinator) runShuffleSide(
 		return nil, fmt.Errorf("subscribing for shuffle-%s results: %w", sideName, err)
 	}
 	defer sub.Unsubscribe()
-
-	// Build and publish all tasks at once.
-	tasks := make([]distributed.Task, actualTasks)
-	for i, files := range fileSets {
-		t := distributed.Task{
-			ID:           uuid.New().String()[:8],
-			QueryID:      shuffleQueryID,
-			StageID:      stageID,
-			Type:         distributed.TaskTypeShuffle,
-			TableName:    sourceStage.TableName,
-			Files:        files,
-			Columns:      cols,
-			ShuffleKeys:  keys,
-			NumPartitions: numParts,
-			DataBucket:   c.config.ResultBucket,
-			ResultBucket: c.config.ResultBucket,
-			ResultPrefix: resultPrefix,
-			CreatedAt:    time.Now(),
-			DynamicFilters: dynamicFilters,
-		}
-		if clusterID := c.catalog.ClusterID(); clusterID != "" {
-			t.ClusterID = clusterID
-		}
-		tasks[i] = t
-	}
 
 	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
 		return nil, fmt.Errorf("publishing shuffle-%s tasks: %w", sideName, err)
@@ -266,16 +266,9 @@ func (c *Coordinator) runShuffleSide(
 		return nil, fmt.Errorf("shuffle-%s timed out after %s: %w", sideName, shuffleStageTimeout, ctx.Err())
 	}
 
-	// Check for any task failures.
-	mu.Lock()
-	results := make([]taskResult, len(collected))
-	copy(results, collected)
-	mu.Unlock()
-
-	for _, r := range results {
-		if r.err != "" {
-			return nil, fmt.Errorf("shuffle-%s task failed: %s", sideName, r.err)
-		}
+	// Check for any task failures (terminal: retries exhausted).
+	if taskID, errMsg, failed := retrier.FirstError(); failed {
+		return nil, fmt.Errorf("shuffle-%s task %s failed after %d attempts: %s", sideName, taskID, maxTaskAttempts, errMsg)
 	}
 
 	// Bucket result files by partition. Each file has a path like:
@@ -283,8 +276,8 @@ func (c *Coordinator) runShuffleSide(
 	// We parse the partition number from the "partition=NNNN" path segment.
 	// This format is fixed by the worker's executeShuffle (partitionedShuffleSink).
 	shardFiles := make([][]string, numParts)
-	for _, r := range results {
-		for _, f := range r.files {
+	for _, taskFiles := range retrier.Files() {
+		for _, f := range taskFiles {
 			p, parseErr := parsePartitionFromPath(f)
 			if parseErr != nil {
 				return nil, fmt.Errorf("shuffle-%s: parsing partition from %q: %w", sideName, f, parseErr)
@@ -377,14 +370,14 @@ func buildShufflePipelineTasks(
 			probeFiles = append(probeFiles, layout.ProbeShardFiles[p]...)
 		}
 		tasks = append(tasks, distributed.Task{
-			ID:           uuid.New().String()[:8],
-			QueryID:      queryID,
-			StageID:      "pipeline-0",
-			Type:         distributed.TaskTypePipeline,
-			SQLText:      sql,
-			DataBucket:   resultBucket,
-			ResultBucket: resultBucket,
-			ResultPrefix: resultPrefix,
+			ID:               uuid.New().String()[:8],
+			QueryID:          queryID,
+			StageID:          "pipeline-0",
+			Type:             distributed.TaskTypePipeline,
+			SQLText:          sql,
+			DataBucket:       resultBucket,
+			ResultBucket:     resultBucket,
+			ResultPrefix:     resultPrefix,
 			PartialAggregate: true,
 			PreScannedInputs: map[string][]string{
 				layout.BuildAlias: buildFiles,
@@ -421,4 +414,3 @@ func findShuffleScanStages(stages []physical.Stage, cand physical.ShuffleCandida
 	}
 	return build, probe, nil
 }
-
