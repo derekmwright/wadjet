@@ -212,3 +212,131 @@ func TestTaskRetrier_LateDuplicateAfterRetry(t *testing.T) {
 		t.Fatalf("files = %v, want f-final", files[0])
 	}
 }
+
+// TestTaskRetrier_DynamicFilterPartials: partial refs from the successful
+// attempt's notification are captured per task and flattened in dispatch
+// order; duplicates must not double-collect.
+func TestTaskRetrier_DynamicFilterPartials(t *testing.T) {
+	tr := newTaskRetrier(retryTestTasks(2), true, nil, slog.Default(), "s")
+	rA := okResult("a", "f-a")
+	rA.DynamicFilterPartials = []distributed.DynamicFilterPartialRef{
+		{FilterID: "df1", Bucket: "b", Key: "a-df1"},
+	}
+	rB := okResult("b", "f-b")
+	rB.DynamicFilterPartials = []distributed.DynamicFilterPartialRef{
+		{FilterID: "df1", Bucket: "b", Key: "b-df1"},
+		{FilterID: "df2", Bucket: "b", Key: "b-df2"},
+	}
+	tr.Observe(rB) // arrival order reversed vs dispatch order
+	tr.Observe(rA)
+	tr.Observe(rB) // duplicate must not double-collect
+	got := tr.DynamicFilterPartials()
+	if len(got) != 3 {
+		t.Fatalf("partials = %d, want 3", len(got))
+	}
+	if got[0].Key != "a-df1" || got[1].Key != "b-df1" || got[2].Key != "b-df2" {
+		t.Fatalf("partials out of dispatch order: %+v", got)
+	}
+}
+
+// TestTaskRetrier_RetryStuck_Redispatches: a stuck non-terminal task burns an
+// attempt and is republished; unknown IDs are ignored; terminal IDs are
+// reported back for liveness cleanup.
+func TestTaskRetrier_RetryStuck_Redispatches(t *testing.T) {
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s")
+	tr.Observe(okResult("b", "f-b")) // b terminal
+
+	re, term := tr.RetryStuck([]string{"a", "b", "zzz"})
+	if len(re) != 1 || re[0] != "a" {
+		t.Fatalf("redispatched = %v, want [a]", re)
+	}
+	if len(term) != 1 || term[0] != "b" {
+		t.Fatalf("terminal = %v, want [b]", term)
+	}
+	got := waitRepublished(t, rep, 1)
+	if got[0].ID != "a" || got[0].Attempt != 2 {
+		t.Fatalf("republished %+v, want task a attempt 2", got[0])
+	}
+	// The original (presumed-dead) attempt's late success still wins.
+	if !tr.Observe(okResult("a", "f-a1")) {
+		t.Fatal("stage must complete on the surviving attempt's result")
+	}
+	if _, _, failed := tr.FirstError(); failed {
+		t.Fatal("unexpected terminal failure")
+	}
+}
+
+// TestTaskRetrier_RetryStuck_CapDoesNotFail: a task stuck past the attempt
+// cap is NOT marked terminally failed — stuck is an inference, not a
+// reported failure; the stage idle timeout is the backstop.
+func TestTaskRetrier_RetryStuck_CapDoesNotFail(t *testing.T) {
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s")
+	re, _ := tr.RetryStuck([]string{"a"}) // attempt 2
+	if len(re) != 1 {
+		t.Fatalf("first stuck sweep redispatched %v, want [a]", re)
+	}
+	re, _ = tr.RetryStuck([]string{"a"}) // attempt 3 (cap)
+	if len(re) != 1 {
+		t.Fatalf("second stuck sweep redispatched %v, want [a]", re)
+	}
+	re, term := tr.RetryStuck([]string{"a"}) // capped: no-op
+	if len(re) != 0 || len(term) != 0 {
+		t.Fatalf("capped sweep = (%v,%v), want empty", re, term)
+	}
+	if tr.Terminal() != 0 {
+		t.Fatal("stuck-past-cap must not mark the task terminal")
+	}
+	if _, _, failed := tr.FirstError(); failed {
+		t.Fatal("stuck-past-cap must not record a terminal failure")
+	}
+	// A surviving attempt's success still completes the stage.
+	if !tr.Observe(okResult("a", "f-a")) {
+		t.Fatal("success must complete the stage")
+	}
+}
+
+// TestTaskRetrier_RetryStuck_RetryDisabled: gather-fused stages must never
+// re-dispatch, even for stuck tasks (a retry would duplicate streamed rows).
+func TestTaskRetrier_RetryStuck_RetryDisabled(t *testing.T) {
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(1), false, rep.republish, slog.Default(), "s")
+	re, _ := tr.RetryStuck([]string{"a"})
+	if len(re) != 0 {
+		t.Fatalf("redispatched %v with retry disabled", re)
+	}
+	if len(rep.snapshot()) != 0 {
+		t.Fatal("must not republish with retry disabled")
+	}
+}
+
+// TestReapStuckOnce: one watcher sweep re-dispatches this retrier's stuck
+// tasks and clears their liveness clocks, drops terminal strays, and leaves
+// other stages' entries alone.
+func TestReapStuckOnce(t *testing.T) {
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s")
+	tr.Observe(okResult("b", "f-b")) // b terminal
+
+	liveness := NewTaskLiveness()
+	stale := time.Now().Add(-5 * time.Minute)
+	liveness.Update([]string{"a", "b", "other-stage-task"}, stale)
+
+	if n := reapStuckOnce(liveness, tr, 2*time.Minute); n != 1 {
+		t.Fatalf("redispatched = %d, want 1", n)
+	}
+	waitRepublished(t, rep, 1)
+
+	stuck := liveness.StuckTasks(2 * time.Minute)
+	if len(stuck) != 1 || stuck[0] != "other-stage-task" {
+		t.Fatalf("post-sweep stuck = %v, want [other-stage-task] only", stuck)
+	}
+
+	// A fresh entry (the re-dispatched attempt heartbeating) must not be
+	// swept again.
+	liveness.Update([]string{"a"}, time.Now())
+	if n := reapStuckOnce(liveness, tr, 2*time.Minute); n != 0 {
+		t.Fatalf("fresh task redispatched %d times, want 0", n)
+	}
+}
