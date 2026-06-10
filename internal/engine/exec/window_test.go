@@ -313,6 +313,7 @@ func TestWindowPartitionCount(t *testing.T) {
 // TestWindowSpillToDisk verifies that the Window operator correctly spills
 // input batches to disk under memory pressure and produces correct results.
 func TestWindowSpillToDisk(t *testing.T) {
+	forceTinyRuns(t)
 	schema := []parquet.Column{
 		{Name: "dept", Type: parquet.TypeString},
 		{Name: "id", Type: parquet.TypeInt64},
@@ -366,12 +367,12 @@ func TestWindowSpillToDisk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify spill was triggered
-	spilledFiles := sm.SpilledFiles()
-	if len(spilledFiles) == 0 {
-		t.Fatal("expected spill to trigger, but no spill files were created")
+	// Verify spill was triggered: the external path leaves the final-pass
+	// streaming state armed after Finalize (run files are operator-managed,
+	// not registered with the SpillManager).
+	if win.ext == nil {
+		t.Fatal("expected spill to trigger, but the external window path was never armed")
 	}
-	t.Logf("spilled %d files", len(spilledFiles))
 
 	// Collect all output batches
 	var allRows []map[string]any
@@ -437,6 +438,7 @@ func TestWindowSpillToDisk(t *testing.T) {
 // TestWindowSpillRunningSum verifies spill correctness with an aggregate
 // window function (SUM with ORDER BY → running total).
 func TestWindowSpillRunningSum(t *testing.T) {
+	forceTinyRuns(t)
 	schema := []parquet.Column{
 		{Name: "id", Type: parquet.TypeInt64},
 		{Name: "val", Type: parquet.TypeFloat64},
@@ -489,8 +491,8 @@ func TestWindowSpillRunningSum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(sm.SpilledFiles()) == 0 {
-		t.Fatal("expected spill to trigger")
+	if win.ext == nil {
+		t.Fatal("expected spill to trigger, but the external window path was never armed")
 	}
 
 	// Collect results

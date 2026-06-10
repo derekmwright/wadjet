@@ -76,7 +76,10 @@ type Window struct {
 	totalRows  int
 	trackedMem int64 // memory reserved from shared tracker by this operator
 	schema     []parquet.Column
-	spillFiles []string
+	spillFiles []string // legacy row-oriented spill (schemas the columnar run format can't carry)
+	runFiles   []string // sorted columnar runs (external partition-at-a-time path)
+	groups     []windowSpecGroup
+	ext        *windowExtState // final-pass streaming state, drained by Next
 
 	result  []*batch.RecordBatch
 	pos     int
@@ -104,6 +107,8 @@ func (w *Window) Init(_ context.Context) error {
 	w.pos = 0
 	w.emitted = false
 	w.finalized = false
+	w.groups = groupWindowSpecs(w.Columns)
+	w.ext = nil
 	// Register with the relief registry up front: Window self-spills during
 	// Consume, so it must be visible to RequestRelief before any batch arrives.
 	// A zero footprint at registration is fine (Inspect reports OwnedBytes==0).
@@ -135,23 +140,63 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 		}
 	}
 
-	// Spill to disk if memory pressure is high
+	// Spill to disk if memory pressure is high. The columnar run path
+	// accumulates at least minSortRunBytes before flushing (merge-friendly
+	// runs); the legacy row path keeps the old flush-on-pressure behavior.
+	// Peer relief (SpillSome) bypasses the floor.
 	if w.Spill != nil && w.Spill.ShouldSpillFor(memory.SpillCheap) && len(w.batches) > 0 {
+		if !w.useColumnarRuns() || w.trackedMem >= minSortRunBytes {
+			if _, err := w.flushSpillLocked(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// useColumnarRuns reports whether spill goes through the external
+// partition-at-a-time path: every column type must round-trip the columnar
+// run format and there must be a window spec to sort runs by.
+func (w *Window) useColumnarRuns() bool {
+	return len(w.groups) > 0 && columnarSpillableSchema(w.schema)
+}
+
+// flushSpillLocked drains all buffered batches to disk and releases their
+// tracking, returning the bytes freed. The external path writes a run sorted
+// by the first spec group's (PARTITION BY, ORDER BY); the fallback writes the
+// legacy row-oriented file. Caller holds w.mu.
+func (w *Window) flushSpillLocked() (int64, error) {
+	if len(w.batches) == 0 || w.trackedMem == 0 {
+		return 0, nil
+	}
+	if w.useColumnarRuns() {
+		path, err := sortBatchesToRun(w.Spill.SpillDir(), w.schema, w.batches, w.totalRows, w.groups[0].sortKeys, 0)
+		if err != nil {
+			return 0, err
+		}
+		if path != "" {
+			w.runFiles = append(w.runFiles, path)
+		}
+	} else {
 		var rows []map[string]any
 		for _, sb := range w.batches {
 			rows = append(rows, sb.ToRows()...)
 		}
 		path, err := w.Spill.SpillRows(rows)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		w.spillFiles = append(w.spillFiles, path)
-		w.batches = w.batches[:0]
-		w.totalRows = 0
-		w.Spill.ReleaseTracking(w.trackedMem)
-		w.trackedMem = 0
 	}
-	return nil
+	w.batches = w.batches[:0]
+	w.totalRows = 0
+	freed := w.trackedMem
+	w.Spill.ReleaseTracking(freed)
+	w.trackedMem = 0
+	if w.accInstanceID != 0 {
+		w.Spill.Tracker().PublishOwned(w.accInstanceID, 0)
+	}
+	return freed, nil
 }
 
 func (w *Window) Finalize(_ context.Context) error {
@@ -166,7 +211,77 @@ func (w *Window) Finalize(_ context.Context) error {
 	if len(w.spillFiles) > 0 {
 		return w.finalizeWithSpill()
 	}
+	if len(w.runFiles) > 0 {
+		return w.finalizeExternal()
+	}
 	return w.finalizeColumnar()
+}
+
+// finalizeExternal prepares the partition-at-a-time stream over sorted runs.
+// Non-final spec groups run disk-to-disk passes here (each bounded by the
+// largest partition plus the merge fan-in); the final group streams through
+// Next(), so finalize never materializes the dataset.
+func (w *Window) finalizeExternal() error {
+	// The in-memory remainder joins the runs as one more sorted run; the
+	// multi-pass flow then has a single uniform input.
+	w.mu.Lock()
+	_, ferr := w.flushSpillLocked()
+	runs := w.runFiles
+	w.runFiles = nil
+	w.mu.Unlock()
+	if ferr != nil {
+		return ferr
+	}
+	dir := w.Spill.SpillDir()
+	passSchema := w.schema
+
+	// charge surfaces per-partition accumulation to the tracker so a
+	// pathologically large partition is visible to the pressure breaker.
+	charge := func(delta int64) {
+		if delta >= 0 {
+			w.Spill.TrackBatch(delta)
+		} else {
+			w.Spill.ReleaseTracking(-delta)
+		}
+	}
+
+	var err error
+	for gi := 0; gi < len(w.groups)-1; gi++ {
+		if gi > 0 {
+			runs, err = resortRunsByKeys(dir, passSchema, runs, w.groups[gi].sortKeys)
+			if err != nil {
+				return err
+			}
+		}
+		runs, passSchema, err = windowDiskPass(dir, passSchema, runs, w.groups[gi], charge)
+		if err != nil {
+			removeRunFiles(runs)
+			return err
+		}
+	}
+
+	last := w.groups[len(w.groups)-1]
+	if len(w.groups) > 1 {
+		runs, err = resortRunsByKeys(dir, passSchema, runs, last.sortKeys)
+		if err != nil {
+			return err
+		}
+	}
+	merger, runs, err := openRunMerger(dir, passSchema, last.sortKeys, runs)
+	if err != nil {
+		removeRunFiles(runs)
+		return err
+	}
+	w.ext = &windowExtState{
+		walker:    newPartitionWalker(merger, last.partitionBy, charge),
+		merger:    merger,
+		schema:    passSchema,
+		group:     last,
+		reorder:   buildWindowReorder(len(w.schema), w.groups, len(w.Columns)),
+		outSchema: w.buildOutputSchema(),
+		runs:      runs,
+	}
+	return nil
 }
 
 // Inspect implements memory.AccountedOperator.
@@ -208,33 +323,17 @@ func (w *Window) EstimateRelief(target int64) int64 {
 }
 
 // SpillSome implements memory.AccountedOperator: drains all buffered input
-// batches to a raw-row spill file and releases the freed bytes.
+// batches to disk and releases the freed bytes — a sorted columnar run on
+// the external path, a raw-row file on the nested-type fallback.
 func (w *Window) SpillSome(_ int64) (int64, error) {
 	w.accState.Store(int32(memory.OpSpilling))
 	defer w.accState.CompareAndSwap(int32(memory.OpSpilling), int32(memory.OpActive))
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.Spill == nil || w.trackedMem == 0 || len(w.batches) == 0 {
+	if w.Spill == nil || w.finalized {
 		return 0, nil
 	}
-	var rows []map[string]any
-	for _, sb := range w.batches {
-		rows = append(rows, sb.ToRows()...)
-	}
-	path, err := w.Spill.SpillRows(rows)
-	if err != nil {
-		return 0, err
-	}
-	w.spillFiles = append(w.spillFiles, path)
-	w.batches = w.batches[:0]
-	w.totalRows = 0
-	freed := w.trackedMem
-	w.Spill.ReleaseTracking(freed)
-	w.trackedMem = 0
-	if w.accInstanceID != 0 {
-		w.Spill.Tracker().PublishOwned(w.accInstanceID, 0)
-	}
-	return freed, nil
+	return w.flushSpillLocked()
 }
 
 // finalizeColumnar is the fast path when no spill occurred — operates entirely
@@ -351,6 +450,13 @@ func (w *Window) buildOutputSchema() []parquet.Column {
 // not reached (early cancel).
 func (w *Window) Close() error {
 	w.mu.Lock()
+	if w.ext != nil {
+		// Early cancel mid-stream: close cursors and delete run scratch.
+		w.ext.cleanup()
+		w.ext = nil
+	}
+	removeRunFiles(w.runFiles)
+	w.runFiles = nil
 	if w.Spill != nil && w.trackedMem > 0 {
 		w.Spill.ReleaseTracking(w.trackedMem)
 		w.trackedMem = 0
@@ -364,14 +470,50 @@ func (w *Window) Close() error {
 	return nil
 }
 
-// Next returns windowed results in batches.
+// Next returns windowed results in batches. On the external path it streams
+// one partition at a time from the final pass's merge.
 func (w *Window) Next(_ context.Context) (*batch.RecordBatch, error) {
+	if w.ext != nil {
+		return w.nextExternal()
+	}
 	if w.pos >= len(w.result) {
 		return nil, nil
 	}
 	b := w.result[w.pos]
 	w.pos++
 	return b, nil
+}
+
+// nextExternal drains the chunk queue, refilling it one computed partition at
+// a time; at stream EOF it tears down cursors and deletes run scratch.
+func (w *Window) nextExternal() (*batch.RecordBatch, error) {
+	e := w.ext
+	for {
+		if e.qpos < len(e.queue) {
+			b := e.queue[e.qpos]
+			e.qpos++
+			return b, nil
+		}
+		if e.done {
+			return nil, nil
+		}
+		parts, bytes, err := e.walker.nextPartition()
+		if err != nil {
+			return nil, err
+		}
+		if parts == nil {
+			e.cleanup()
+			return nil, nil
+		}
+		combined := computeWindowPartition(parts, e.schema, e.group)
+		e.walker.releasePartition(bytes)
+		if combined == nil {
+			continue
+		}
+		out := reorderBatchColumns(combined, e.reorder, e.outSchema)
+		e.queue = chunkBatch(out, batch.DefaultBatchSize)
+		e.qpos = 0
+	}
 }
 
 // --- Columnar helpers ---
@@ -424,7 +566,12 @@ func windowCopyVectorRange(dst, src *batch.Vector, dstOff, srcOff, count int) {
 			dst.BytesData.BulkCopy(dstOff, &src.BytesData, srcOff, count)
 		} else {
 			for i := 0; i < count; i++ {
-				if !src.Nulls.IsNullFast(srcOff + i) {
+				if src.Nulls.IsNullFast(srcOff + i) {
+					// BytesColumn writes must be sequential: a null row still
+					// needs its offset slot advanced or every later row in
+					// this column reads back as concatenated garbage.
+					dst.BytesData.Set(dstOff+i, nil)
+				} else {
 					dst.BytesData.SetFrom(dstOff+i, &src.BytesData, srcOff+i)
 				}
 			}
