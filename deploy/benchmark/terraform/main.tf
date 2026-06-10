@@ -611,6 +611,9 @@ resource "aws_instance" "worker" {
             %{if var.spill_floating_budget~}
             --spill-floating-budget \
             %{endif~}
+            %{if var.bounded_dirty_writes~}
+            --bounded-dirty-writes \
+            %{endif~}
             2>&1 | sed "s/^/[w$idx] /"
         EXIT_CODE=$?
         echo "[w$idx] exited code=$EXIT_CODE, restarting in 5s..."
