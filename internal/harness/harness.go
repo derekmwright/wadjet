@@ -87,6 +87,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			DataDir:        cfg.DataDir,
 			DataPlane:      cfg.DataPlane,
 			ExtraServeArgs: cfg.ExtraServeArgs,
+			SpawnWrapper:   cfg.SpawnWrapper,
 			Logger:         logger,
 		}
 		if cfg.Source == "s3" {

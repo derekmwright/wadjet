@@ -62,11 +62,6 @@ func (f *FileStore) BucketExists(_ context.Context, bucket string) (bool, error)
 func (f *FileStore) Put(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string) (string, error) {
 	_ = contentType // filesystem doesn't store content type metadata
 
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return "", fmt.Errorf("reading data: %w", err)
-	}
-
 	path := f.objectPath(bucket, key)
 
 	f.mu.Lock()
@@ -76,12 +71,33 @@ func (f *FileStore) Put(_ context.Context, bucket, key string, r io.Reader, _ in
 		return "", fmt.Errorf("creating directories: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return "", fmt.Errorf("writing file: %w", err)
+	// Stream to a temp file in the target dir (hashing as we go), then
+	// rename into place — same atomicity as the old WriteFile, no
+	// buffering. The previous io.ReadAll held the WHOLE object live in
+	// heap: a scan task's multi-hundred-MB stage-output upload arrived as
+	// one allocation, which OOM-killed every node of a 512 MiB edge-box
+	// cluster the moment scan outputs uploaded (2026-06-11 edge
+	// validation, ~280 MB live in <200 ms). FileStore is the local/edge
+	// store; it must stream like the S3 stores do.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".put-*")
+	if err != nil {
+		return "", fmt.Errorf("creating temp file: %w", err)
 	}
-
-	etag := fmt.Sprintf("%x", md5.Sum(data))
-	return etag, nil
+	h := md5.New()
+	if _, err := io.Copy(io.MultiWriter(tmp, h), r); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("writing data: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("closing temp file: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("renaming into place: %w", err)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func (f *FileStore) PutIfMatch(_ context.Context, bucket, key string, r io.Reader, _ int64, contentType string, expectedETag string) (string, error) {

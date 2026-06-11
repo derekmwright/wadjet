@@ -294,6 +294,21 @@ func serveCmd() *cobra.Command {
 
 				logger.Info("auto-detected memory budget", "budget_bytes", memoryBudget, "max_concurrent", maxConc)
 			}
+			// Result store: the flag default (512 MiB) predates edge-class
+			// envelopes and is ABSOLUTE — on a 512 MiB box it alone exceeds
+			// the whole GOMEMLIMIT and was the proximate OOM-kill in the
+			// 2026-06-11 edge validation (the boot invariant flagged
+			// Σcaps > GOMEMLIMIT, but it is advisory). When the operator
+			// didn't set --result-store explicitly, clamp it to 15% of the
+			// envelope; large results fall through to S3 as always. No
+			// change on big machines (15% of a 24 GiB limit ≫ 512 MiB).
+			if !cmd.Root().PersistentFlags().Changed("result-store") {
+				if maxStore := goMemLimit * 15 / 100; resultStoreBytes > maxStore {
+					resultStoreBytes = maxStore
+					logger.Info("auto-scaled result store to envelope",
+						"result_store_bytes", resultStoreBytes, "go_mem_limit", goMemLimit)
+				}
+			}
 			if sharedPoolBudget == 0 {
 				// Pool is the full envelope minus the file cache. All
 				// concurrent tasks Reserve from it; operators
