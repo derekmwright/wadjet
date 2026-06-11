@@ -608,15 +608,11 @@ resource "aws_instance" "worker" {
             --data-plane=grpc \
             --coord-data-plane="$COORD_IP:${var.data_plane_port}" \
             %{endif~}
-            %{if var.mmap_relief~}
-            --mmap-relief \
+            --mmap-relief=${var.mmap_relief} \
             --mmap-relief-threshold-mb=${var.mmap_relief_threshold_mb} \
-            %{endif~}
+            --bounded-dirty-writes=${var.bounded_dirty_writes} \
             %{if var.spill_floating_budget~}
             --spill-floating-budget \
-            %{endif~}
-            %{if var.bounded_dirty_writes~}
-            --bounded-dirty-writes \
             %{endif~}
             2>&1 | sed "s/^/[w$idx] /"
         EXIT_CODE=$?
