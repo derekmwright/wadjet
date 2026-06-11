@@ -205,16 +205,25 @@ func serveCmd() *cobra.Command {
 			}
 			debug.SetMemoryLimit(goMemLimit)
 			// GC mode is overridable via WADJET_GOGC env var:
-			//   "off" / unset (default): rely on GOMEMLIMIT only — best for
-			//     workloads with large stable live data (LRU cache pattern)
-			//     because GC assist tax with GOGC=100 caused 2-3x query
-			//     slowdowns when the cache was populated.
+			//   unset (default): envelope-aware — "off" (GOMEMLIMIT-only) on
+			//     big machines, where GC assist tax with GOGC=100 caused
+			//     2-3x query slowdowns once the LRU cache was populated; but
+			//     GOGC=100 below edgeGCEnvelope. With GC off, up to a full
+			//     GOMEMLIMIT of garbage legally accumulates between cycles,
+			//     and near small envelopes that slack IS the box: the 512 MiB
+			//     edge validation died at Q21 from 20 queries of accumulated
+			//     slack with GOGC=off and passed 25/25 with GOGC=100.
+			//   "off": force GOMEMLIMIT-only at any size.
 			//   "<int>" (e.g. "100"): set debug.SetGCPercent to that value —
 			//     useful for catalog-priming-heavy workloads where transient
 			//     garbage accumulates pre-query (Q18 SF10 baseline 11.5 GB
 			//     before query starts on a freshly primed coord).
+			const edgeGCEnvelope = 2 << 30 // 2 GiB GOMEMLIMIT
 			gcMode := os.Getenv("WADJET_GOGC")
-			if gcMode == "" || strings.EqualFold(gcMode, "off") {
+			if gcMode == "" && goMemLimit < edgeGCEnvelope {
+				debug.SetGCPercent(100)
+				gcMode = "100 (auto: edge envelope)"
+			} else if gcMode == "" || strings.EqualFold(gcMode, "off") {
 				debug.SetGCPercent(-1)
 				gcMode = "off"
 			} else if pct, perr := strconv.Atoi(gcMode); perr == nil && pct > 0 {
