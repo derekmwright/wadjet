@@ -36,6 +36,7 @@ func main() {
 		scaleFactor    = flag.Float64("scale-factor", 0, "TPC-H scale factor for local-mode generated data (0=SF0.01 default, 0.1, 1, 10). Larger values exercise per-stage round-trip overhead and memory paths at meaningful scale without EC2 spend.")
 		dataPlane      = flag.String("data-plane", "", "Worker↔coord transport: empty/nats (default) or grpc (Phase B+)")
 		serveArgs      = flag.String("serve-args", "", "comma-separated extra flags appended to every spawned `wadjet serve` (coord + workers), e.g. --bounded-dirty-writes")
+		spawnWrapper   = flag.String("spawn-wrapper", "", "space-separated command prefix wrapped around every spawned wadjet process, e.g. 'deploy/edge/cap-wrapper.sh' for docker memory-cap edge simulation")
 	)
 	flag.Parse()
 
@@ -75,6 +76,9 @@ func main() {
 	}
 	if *serveArgs != "" {
 		cfg.ExtraServeArgs = strings.Split(*serveArgs, ",")
+	}
+	if *spawnWrapper != "" {
+		cfg.SpawnWrapper = strings.Fields(*spawnWrapper)
 	}
 	if cfg.WadjetBin == "" {
 		cfg.WadjetBin = os.Getenv("WADJET_BIN")

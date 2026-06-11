@@ -30,7 +30,11 @@ func startHeapDumper(ctx context.Context, logger *slog.Logger) {
 		return
 	}
 	interval, err := time.ParseDuration(intervalStr)
-	if err != nil || interval < time.Second {
+	// 100ms floor: sub-second cadences exist to catch allocation bursts
+	// that live and die between 1s frames (the 512 MiB edge OOM allocated
+	// ~280 MB in <500ms). The dump itself costs ~10-30ms; an operator
+	// asking for 100ms accepts that overhead knowingly.
+	if err != nil || interval < 100*time.Millisecond {
 		logger.Warn("invalid WADJET_HEAP_DUMP_INTERVAL", "value", intervalStr, "err", err)
 		return
 	}

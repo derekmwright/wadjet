@@ -72,6 +72,11 @@ type Config struct {
 	// flags (e.g. --bounded-dirty-writes, --mmap-relief) through the
 	// local harness before an EC2 run.
 	ExtraServeArgs []string
+
+	// SpawnWrapper is prepended to every spawned process argv (see
+	// ClusterConfig.SpawnWrapper). E.g. a docker memory-cap wrapper for
+	// edge-box simulation.
+	SpawnWrapper []string
 }
 
 // QueryMeasurement is the result of running one query (or micro).

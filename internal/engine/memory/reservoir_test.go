@@ -77,11 +77,21 @@ func TestReservoir_Validate_SoftCapExcluded(t *testing.T) {
 }
 
 func TestReservoir_GCHeadroom_FloorAndRatio(t *testing.T) {
-	if got, want := gcHeadroom(4<<30), int64(2<<30); got != want { // 0.20*4=0.8 < 2 → floor
+	if got, want := gcHeadroom(4<<30), int64(2<<30); got != want { // 0.20*4=0.8 < 2 → floor (limit/2 = 2 = floor, unchanged)
 		t.Fatalf("gcHeadroom(4GiB) = %d, want floor 2GiB", got)
 	}
 	if got, want := gcHeadroom(40<<30), int64(8<<30); got != want { // 0.20*40=8 > 2 → ratio
 		t.Fatalf("gcHeadroom(40GiB) = %d, want ratio 8GiB", got)
+	}
+	// Edge envelopes: the flat 2 GiB floor used to exceed the whole limit,
+	// making the boot invariant unsatisfiable by construction (512 MiB edge
+	// box logged headroom=2147 MB vs GOMEMLIMIT=402 MB). The floor is now
+	// capped at limit/2.
+	if got, want := gcHeadroom(2<<30), int64(1<<30); got != want { // floor capped to limit/2 = 1 GiB
+		t.Fatalf("gcHeadroom(2GiB) = %d, want limit/2 1GiB", got)
+	}
+	if got, want := gcHeadroom(402653184), int64(201326592); got != want { // 384 MiB envelope → 192 MiB
+		t.Fatalf("gcHeadroom(384MiB) = %d, want 192MiB", got)
 	}
 }
 

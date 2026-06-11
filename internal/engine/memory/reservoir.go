@@ -21,11 +21,23 @@ const gcHeadroomRatio = 0.20
 const gcHeadroomFloor int64 = 2 << 30 // 2 GiB
 
 // gcHeadroom returns the GC + transient-heap headroom for a given GOMEMLIMIT:
-// max(gcHeadroomRatio × limit, gcHeadroomFloor).
+// max(gcHeadroomRatio × limit, min(gcHeadroomFloor, limit/2)).
+//
+// The floor itself is capped at half the envelope: on edge-class boxes a
+// flat 2 GiB floor exceeds the entire GOMEMLIMIT, making the boot
+// invariant (Σcaps + min_operator + headroom ≤ GOMEMLIMIT) unsatisfiable
+// by construction and therefore meaningless — the 512 MiB edge validation
+// run logged headroom=2147 MB against a 402 MB limit. Capping at limit/2
+// leaves the invariant decidable while preserving the exact prior
+// behavior for every envelope ≥ 4 GiB (where min(2 GiB, limit/2) = 2 GiB).
 func gcHeadroom(limit int64) int64 {
 	h := int64(float64(limit) * gcHeadroomRatio)
-	if h < gcHeadroomFloor {
-		h = gcHeadroomFloor
+	floor := gcHeadroomFloor
+	if half := limit / 2; half < floor {
+		floor = half
+	}
+	if h < floor {
+		h = floor
 	}
 	return h
 }

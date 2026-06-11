@@ -49,6 +49,15 @@ type ClusterConfig struct {
 	// flags through the local harness before an EC2 run.
 	ExtraServeArgs []string
 
+	// SpawnWrapper, when non-empty, is prepended to every spawned process's
+	// argv: wrapper[0] wrapper[1:]... <wadjet-bin> <args...>. Used to run
+	// the cluster under an enforcement harness — e.g. a docker memory-cap
+	// wrapper for edge-box simulation (hard OOM-kill semantics that
+	// GOMEMLIMIT alone cannot provide). The wrapper owns env forwarding:
+	// exec.Command env vars (GOMEMLIMIT, GODEBUG, heap-dump paths) do NOT
+	// cross a container boundary unless the wrapper forwards them.
+	SpawnWrapper []string
+
 	Logger *slog.Logger
 }
 
@@ -293,7 +302,11 @@ func (c *Cluster) spawn(role string, args []string) (*managedProcess, error) {
 		return nil, err
 	}
 
-	cmd := exec.Command(c.cfg.WadjetBin, args...)
+	argv := append([]string{c.cfg.WadjetBin}, args...)
+	if len(c.cfg.SpawnWrapper) > 0 {
+		argv = append(append([]string{}, c.cfg.SpawnWrapper...), argv...)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Env = append(os.Environ(),
@@ -311,7 +324,12 @@ func (c *Cluster) spawn(role string, args []string) (*managedProcess, error) {
 		// /tmp/wadjet-heap. 5s cadence is plenty granular for the
 		// 22-second Q18 SF10 explosion phase.
 		"WADJET_HEAP_DUMP_INTERVAL=5s",
-		"WADJET_HEAP_DUMP_DIR="+filepath.Join(c.cfg.RunDir, "heap"),
+		// Per-role subdir: heap_dumper names files heap-<pid>-<seq>, and
+		// under a SpawnWrapper container every process is pid 7 in its own
+		// PID namespace — a shared dir makes the roles overwrite each
+		// other's dumps (lost the OOM-killed coordinator's profile in the
+		// 2026-06-11 edge run).
+		"WADJET_HEAP_DUMP_DIR="+filepath.Join(c.cfg.RunDir, "heap", role),
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true, // own process group for clean shutdown
