@@ -114,11 +114,13 @@ func TestSpillWindowedWriteback(t *testing.T) {
 	want := []string{
 		// window 0 completes: async write only (no predecessor)
 		fmt.Sprintf("write[0,%d)", win),
-		// window 1 completes: async write, then wait+drop window 0
+		// window 1 completes: async write + best-effort drop of window 0.
+		// NO per-window wait — the strict variant serialized SF100
+		// downloads (run 20260610-203304).
 		fmt.Sprintf("write[%d,%d)", win, 2*win),
-		fmt.Sprintf("wait[0,%d)", win),
 		fmt.Sprintf("dontneed[0,%d)", win),
-		// Finish: whole-file wait + drop (offset 0, nbytes 0 = to EOF)
+		// Finish: the one blocking call — whole-file wait + drop
+		// (offset 0, nbytes 0 = to EOF)
 		"wait[0,0)",
 		"dontneed[0,0)",
 	}
@@ -151,7 +153,9 @@ func TestKeepResidentNeverDrops(t *testing.T) {
 			t.Fatalf("KeepResident issued fadvise: %v", rec.calls)
 		}
 	}
-	// Dirty bounding must still happen: 3 async writes + 2 waits.
+	// Dirty bounding must still happen — 3 async writes — but NEVER a
+	// blocking wait: KeepResident writers (cache downloads, stage sinks)
+	// are on the query critical path.
 	var writes, waits int
 	for _, c := range rec.calls {
 		switch c[:4] {
@@ -161,8 +165,8 @@ func TestKeepResidentNeverDrops(t *testing.T) {
 			waits++
 		}
 	}
-	if writes != 3 || waits != 2 {
-		t.Fatalf("got %d writes / %d waits, want 3/2: %v", writes, waits, rec.calls)
+	if writes != 3 || waits != 0 {
+		t.Fatalf("got %d writes / %d waits, want 3/0: %v", writes, waits, rec.calls)
 	}
 }
 
