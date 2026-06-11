@@ -61,6 +61,7 @@ func main() {
 		memProf     = flag.String("memprofile", "", "Write memory profile to file")
 		profDir     = flag.String("profdir", "", "Directory for per-query profiles")
 		dataPrefix  = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
+		catalogSnapshotPrefix = flag.String("catalog-snapshot-prefix", "", "S3 prefix for catalog snapshots (e.g. 'catalog/'). With --skip-load: restore the latest snapshot instead of running discovery+ANALYZE; after a fresh discovery, write one. Empty = disabled.")
 	)
 	flag.Parse()
 
@@ -105,6 +106,9 @@ func main() {
 		// "tables/" is wrong for buckets with data at root level.
 		if !setFlags["data-prefix"] {
 			*dataPrefix = profile.Storage.DataPrefix
+		}
+		if !setFlags["catalog-snapshot-prefix"] && profile.Benchmark.CatalogSnapshotPrefix != "" {
+			*catalogSnapshotPrefix = profile.Benchmark.CatalogSnapshotPrefix
 		}
 		if !setFlags["query-timeout"] && profile.Benchmark.QueryTimeout != "" {
 			d, err := time.ParseDuration(profile.Benchmark.QueryTimeout)
@@ -170,7 +174,20 @@ func main() {
 
 	sf := tpch.ScaleFactor(float64(*scale))
 	if *skipLoad {
-		discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix)
+		// Pre-staged bucket data is immutable across deploys, so the
+		// post-discovery catalog (schemas, file manifests with row counts,
+		// SketchesKey references into stats/) is too. Restoring it from a
+		// snapshot replaces ~5 min of discovery + ~10 min of ANALYZE per
+		// deploy with a few S3 GETs.
+		if *catalogSnapshotPrefix != "" {
+			snapStore := newCatalogSnapshotStore(*s3Endpoint, *s3Region, *ssl)
+			if !restoreCatalogSnapshot(ctx, db.Catalog(), snapStore, *s3Bucket, *catalogSnapshotPrefix) {
+				discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix)
+				snapshotCatalog(ctx, db.Catalog(), snapStore, *s3Bucket, *catalogSnapshotPrefix)
+			}
+		} else {
+			discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix)
+		}
 	} else {
 		loadData(ctx, db, sf)
 	}
@@ -365,6 +382,72 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	}
 
 	return db, coord, nc
+}
+
+// newCatalogSnapshotStore builds the S3 client for snapshot/restore, or nil
+// (with a warning) on failure — callers treat nil as "mechanism disabled".
+func newCatalogSnapshotStore(endpoint, region string, ssl bool) objstore.Store {
+	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
+		Endpoint: endpoint,
+		UseSSL:   ssl,
+		Region:   region,
+	})
+	if err != nil {
+		log.Printf("WARNING: creating S3 store for catalog snapshot/restore: %v", err)
+		return nil
+	}
+	return store
+}
+
+// restoreCatalogSnapshot imports the latest catalog snapshot from
+// s3://<bucket>/<prefix>, replacing discovery + ANALYZE. Returns true only
+// when a snapshot was actually restored; every failure mode logs and returns
+// false so the caller falls back to full discovery — the mechanism is an
+// accelerator, never a gate.
+func restoreCatalogSnapshot(ctx context.Context, cat *catalog.Catalog, store objstore.Store, bucket, prefix string) bool {
+	if store == nil {
+		return false
+	}
+	// Restore Puts blindly into the KV; only proceed on a fresh catalog.
+	// "Fresh" means no tables registered — setupDistributed already ran
+	// Init(), which writes the meta key, so IsKVEmpty is always false by
+	// the time this runs. Restore overwrites meta with the snapshot's own
+	// copy, so the Init-written stub is fine to clobber.
+	tables, err := cat.ListTables(ctx)
+	if err != nil || len(tables) > 0 {
+		log.Printf("catalog already has %d tables (err=%v); skipping snapshot restore", len(tables), err)
+		return false
+	}
+	ts, err := cat.Restore(ctx, catalog.RestoreOptions{
+		SnapshotOptions: catalog.SnapshotOptions{Store: store, Bucket: bucket, Prefix: prefix},
+	})
+	if err != nil {
+		log.Printf("WARNING: catalog snapshot restore failed (%v); falling back to discovery", err)
+		return false
+	}
+	if ts == "" {
+		log.Printf("No catalog snapshot at s3://%s/%s yet — running discovery", bucket, prefix)
+		return false
+	}
+	log.Printf("Catalog restored from snapshot %s (discovery + ANALYZE skipped)", ts)
+	return true
+}
+
+// snapshotCatalog persists the post-discovery+ANALYZE catalog state so the
+// next boot against this immutable bucket can restore it in seconds.
+// Best-effort: a failed snapshot only costs the next deploy a re-discovery.
+func snapshotCatalog(ctx context.Context, cat *catalog.Catalog, store objstore.Store, bucket, prefix string) {
+	if store == nil {
+		return
+	}
+	ts, err := cat.Snapshot(ctx, catalog.SnapshotOptions{
+		Store: store, Bucket: bucket, Prefix: prefix,
+	})
+	if err != nil {
+		log.Printf("WARNING: catalog snapshot failed: %v", err)
+		return
+	}
+	log.Printf("Catalog snapshotted to s3://%s/%ssnapshots/%s (next boot restores it in seconds)", bucket, prefix, ts)
 }
 
 func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool, dataPrefix string) {

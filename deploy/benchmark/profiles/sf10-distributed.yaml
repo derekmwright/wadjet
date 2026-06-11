@@ -32,3 +32,9 @@ benchmark:
   runs: 1
   query_timeout: 30m
   skip_load: true
+  # Restore the post-discovery catalog from s3://<bucket>/catalog/ instead
+  # of re-running discovery + ANALYZE every deploy. First deploy with this
+  # set pays the full cost once and writes the snapshot; later deploys
+  # restore in seconds. Safe while the bucket's table data is immutable;
+  # delete s3://<bucket>/catalog/ after changing it.
+  catalog_snapshot_prefix: "catalog/"
