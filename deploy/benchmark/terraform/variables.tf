@@ -117,9 +117,9 @@ variable "max_concurrent" {
 }
 
 variable "mmap_relief" {
-  description = "Pass --mmap-relief to workers: MADV_DONTNEED relief of cold mmap'd cache files under heap pressure (Phase 5). Default false = dormant."
+  description = "Worker --mmap-relief: MADV_DONTNEED relief of cold mmap'd cache files when RSS exceeds the ceiling. Default true (matches the binary default; validated at SF100 + edge 2026-06-11). Set false for flags-off A/B baselines."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "mmap_relief_threshold_mb" {
@@ -135,9 +135,9 @@ variable "spill_floating_budget" {
 }
 
 variable "bounded_dirty_writes" {
-  description = "Pass --bounded-dirty-writes to workers: windowed sync_file_range writeback + FADV_DONTNEED on spill-class files, bounding write-side page-cache pressure (PR #113). Default false = dormant."
+  description = "Worker --bounded-dirty-writes: windowed sync_file_range writeback + FADV_DONTNEED on spill-class files (PR #113). Default true (matches the binary default). Set false for flags-off A/B baselines."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "catalog_snapshot_prefix" {
