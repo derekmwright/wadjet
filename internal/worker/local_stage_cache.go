@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // LocalStageCache maps (queryID, key) → localPath for stage outputs the
@@ -30,7 +31,19 @@ type LocalStageCache struct {
 	rootDir string
 	mu      sync.RWMutex
 	entries map[localStageKey]string
+	// cleaned tombstones queries whose CleanupQuery already ran. A task
+	// that was mid-upload when its query terminated can reach Adopt AFTER
+	// the cleanup signal was processed; without the tombstone the adopted
+	// file is registered into a query directory nothing will ever clean
+	// again (the cleanup message fires once per query). Entries are pruned
+	// on insert after tombstoneTTL.
+	cleaned map[string]time.Time
 }
+
+// tombstoneTTL bounds how long a cleaned query refuses late Adopts. It only
+// needs to outlive the slowest straggler task of a terminated query; 30
+// minutes matches the worker's cancelled-map retention.
+const tombstoneTTL = 30 * time.Minute
 
 type localStageKey struct {
 	queryID string
@@ -52,6 +65,7 @@ func NewLocalStageCache(rootDir string) *LocalStageCache {
 	return &LocalStageCache{
 		rootDir: rootDir,
 		entries: make(map[localStageKey]string),
+		cleaned: make(map[string]time.Time),
 	}
 }
 
@@ -67,6 +81,15 @@ func (c *LocalStageCache) Adopt(queryID, key, srcPath string) string {
 		return ""
 	}
 	if _, err := os.Stat(srcPath); err != nil {
+		return ""
+	}
+	c.mu.RLock()
+	_, tombstoned := c.cleaned[queryID]
+	c.mu.RUnlock()
+	if tombstoned {
+		// The query already terminated and its cleanup ran; adopting now
+		// would leak the file forever. Decline — the caller keeps srcPath
+		// ownership and deletes it via its normal no-adopt path.
 		return ""
 	}
 	queryDir := filepath.Join(c.rootDir, queryID)
@@ -109,6 +132,15 @@ func (c *LocalStageCache) CleanupQuery(queryID string) int {
 		if k.queryID == queryID {
 			paths = append(paths, p)
 			delete(c.entries, k)
+		}
+	}
+	if c.cleaned != nil {
+		c.cleaned[queryID] = time.Now()
+		cutoff := time.Now().Add(-tombstoneTTL)
+		for q, at := range c.cleaned {
+			if at.Before(cutoff) {
+				delete(c.cleaned, q)
+			}
 		}
 	}
 	c.mu.Unlock()

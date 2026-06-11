@@ -58,6 +58,49 @@ func TestLocalStageCache_AdoptGetCleanup(t *testing.T) {
 	}
 }
 
+// TestLocalStageCache_AdoptAfterCleanupDeclined is the regression test for
+// the SF100 run-20260610-203304 leak: a straggler task of a terminated query
+// reached Adopt AFTER the query's CleanupQuery had already run, registering a
+// file into a per-query directory that no future cleanup message would ever
+// visit. Adopt must decline for tombstoned queries so the caller keeps
+// ownership and deletes the file via its normal no-adopt path.
+func TestLocalStageCache_AdoptAfterCleanupDeclined(t *testing.T) {
+	root := t.TempDir()
+	c := NewLocalStageCache(root)
+
+	// Query terminates (cleanup runs first, e.g. via the failure path)…
+	c.CleanupQuery("dead-query")
+
+	// …then a straggler producer tries to adopt its output.
+	src := filepath.Join(t.TempDir(), "late.wshf")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	if dst := c.Adopt("dead-query", "out/s/late.wshf", src); dst != "" {
+		t.Fatalf("Adopt after CleanupQuery must decline, got %q", dst)
+	}
+	// Caller retains ownership: the source file is untouched.
+	if _, err := os.Stat(src); err != nil {
+		t.Fatalf("declined Adopt must leave srcPath in place: %v", err)
+	}
+	// Nothing registered, no orphan directory recreated.
+	if got := c.Get("dead-query", "out/s/late.wshf"); got != "" {
+		t.Fatalf("Get returned %q for declined adopt, want empty", got)
+	}
+	if c.Count() != 0 {
+		t.Fatalf("cache should be empty, has %d entries", c.Count())
+	}
+
+	// Other queries are unaffected.
+	src2 := filepath.Join(t.TempDir(), "live.wshf")
+	if err := os.WriteFile(src2, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("write src2: %v", err)
+	}
+	if dst := c.Adopt("live-query", "out/s/live.wshf", src2); dst == "" {
+		t.Fatal("Adopt for a live query must still succeed")
+	}
+}
+
 func TestLocalStageCache_AdoptMissingFile(t *testing.T) {
 	c := NewLocalStageCache(t.TempDir())
 	if got := c.Adopt("q", "k", "/no/such/file"); got != "" {

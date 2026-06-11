@@ -854,7 +854,14 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	if err := os.MkdirAll(spillDir, 0o755); err != nil {
 		return fmt.Errorf("shuffle task %s: creating spill dir: %w", task.ID, err)
 	}
-	defer os.RemoveAll(spillDir)
+	// Cleanup failure must be visible: a leaked partition dir eats spill
+	// volume silently until a later query dies on ENOSPC.
+	defer func() {
+		if rmErr := os.RemoveAll(spillDir); rmErr != nil {
+			e.logger.Warn("shuffle spill dir cleanup failed; disk space may leak",
+				"task_id", task.ID, "dir", spillDir, "error", rmErr)
+		}
+	}()
 
 	// Per-task progress reporter — each AddRows call updates the worker's
 	// TaskProgress counter, which the worker's per-task progress goroutine
