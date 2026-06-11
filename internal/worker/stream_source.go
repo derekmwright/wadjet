@@ -259,7 +259,13 @@ func (s *cachedFileStreamSource) releaseCurrentFile() {
 		s.mmapData = nil
 	}
 	if s.localPath != "" {
-		_ = os.Remove(s.localPath)
+		if rmErr := os.Remove(s.localPath); rmErr != nil && !os.IsNotExist(rmErr) && s.executor.logger != nil {
+			// Visibility only — clearing localPath below means nothing will
+			// retry this delete, and a leaked multi-GB cache file eats spill
+			// volume until the next process start sweeps it.
+			s.executor.logger.Warn("local cache file cleanup failed",
+				"path", s.localPath, "error", rmErr)
+		}
 		s.localPath = ""
 	}
 }

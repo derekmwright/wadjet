@@ -290,6 +290,16 @@ func (w *Worker) Start(ctx context.Context) error {
 		queryID := string(msg.Data)
 		w.cancelledMu.Lock()
 		w.cancelled[queryID] = time.Now()
+		// Prune on insert: the coordinator broadcasts a cancel for EVERY
+		// terminal query (cleanupQuery), so this map gains one entry per
+		// query for the process lifetime. 30 minutes comfortably outlives
+		// any straggler task the entry exists to suppress.
+		cutoff := time.Now().Add(-30 * time.Minute)
+		for q, at := range w.cancelled {
+			if at.Before(cutoff) {
+				delete(w.cancelled, q)
+			}
+		}
 		w.cancelledMu.Unlock()
 		// Free per-query state. Cancelled queries won't read any further
 		// stage outputs, so their spill files are pure leak otherwise.
@@ -573,26 +583,34 @@ func (w *Worker) sweepStaleBuildCacheFiles() {
 	var bytesFreed int64
 	for _, e := range entries {
 		name := e.Name()
-		// Two prefixes are used by the build-cache pipeline:
+		// Spill-dir artifacts from a prior worker process, all orphaned by
+		// definition (nothing in this process references them):
 		//   build-cache-*.wshf       — write-side spill from shuffleStreamSink
 		//   build-cache-load-*.wshf  — read-side mmap source download
-		if !strings.HasPrefix(name, "build-cache-") || !strings.HasSuffix(name, ".wshf") {
+		//   parquet-stream-*.parquet — read-side parquet mmap download
+		//   shuffle-<taskID>/        — partitioned shuffle sink output dirs
+		isDir := e.IsDir()
+		switch {
+		case !isDir && strings.HasPrefix(name, "build-cache-") && strings.HasSuffix(name, ".wshf"):
+		case !isDir && strings.HasPrefix(name, "parquet-stream-") && strings.HasSuffix(name, ".parquet"):
+		case isDir && strings.HasPrefix(name, "shuffle-"):
+		default:
 			continue
 		}
 		full := filepath.Join(dir, name)
-		if info, statErr := e.Info(); statErr == nil {
+		if info, statErr := e.Info(); statErr == nil && !isDir {
 			bytesFreed += info.Size()
 		}
-		if rmErr := os.Remove(full); rmErr != nil {
-			w.logger.Warn("removing stale build-cache file",
+		if rmErr := os.RemoveAll(full); rmErr != nil {
+			w.logger.Warn("removing stale spill artifact",
 				"path", full, "error", rmErr)
 			continue
 		}
 		removed++
 	}
 	if removed > 0 {
-		w.logger.Info("swept stale build-cache spill files",
-			"dir", dir, "files", removed, "bytes_freed", bytesFreed)
+		w.logger.Info("swept stale spill artifacts",
+			"dir", dir, "items", removed, "bytes_freed", bytesFreed)
 	}
 }
 

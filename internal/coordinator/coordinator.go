@@ -693,6 +693,26 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 	}
 	c.mu.Unlock()
 
+	// Broadcast cancellation FIRST: by the time cleanupQuery runs the query
+	// is terminal (completed, failed, or timed out) and this function is
+	// about to purge queries/<id>/* from the object store — so any task
+	// still executing for it is pure waste whose uploads would recreate the
+	// scratch leak. Workers mark the query cancelled (queued tasks Term at
+	// pickup, running tasks abort within the ~500ms cancelTicker) and free
+	// their local/broadcast caches. Without this, a query that FAILED
+	// terminally left its in-flight tasks running to completion — at SF100
+	// run 20260610-203304, Q21's tasks kept downloading multi-GB cache
+	// files and writing partition outputs for minutes after the query
+	// failed on ENOSPC, so the disk never recovered and Q22 died on Q21's
+	// garbage. CancelSubject was previously only published by the
+	// user-facing CancelQuery API, never on internal failure.
+	if c.nc != nil {
+		if err := c.nc.Publish(distributed.CancelSubject(queryID), []byte(queryID)); err != nil {
+			c.logger.Debug("failed to publish query cancellation",
+				"query_id", queryID, "error", err)
+		}
+	}
+
 	// Notify workers that the query is finished so they can release per-
 	// query state (LocalStageCache spill files). Best-effort: workers that
 	// miss the message will eventually leak entries until process exit, but
