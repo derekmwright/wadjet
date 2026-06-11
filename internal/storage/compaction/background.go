@@ -80,6 +80,11 @@ func (bc *BackgroundCompactor) run(ctx context.Context) {
 }
 
 func (bc *BackgroundCompactor) sweep(ctx context.Context) {
+	// Physically delete compacted-away files whose DeleteGrace has expired
+	// (their manifest entries are long gone; the grace existed only for
+	// queries dispatched against the pre-compaction manifest).
+	bc.compactor.FlushDeferredDeletes(ctx)
+
 	tables, err := bc.catalog.ListTables(ctx)
 	if err != nil {
 		bc.logger.Error("compaction sweep: listing tables", "error", err)

@@ -35,6 +35,14 @@ set -euo pipefail
 CAP_MB="${EDGE_CAP_MB:-4096}"
 CPUS="${EDGE_CPUS:-4}"
 IMAGE="${EDGE_IMAGE:-debian:bookworm-slim}"
+# Hard TTL: the harness shutdown SIGKILLs the docker CLIENT after a 5s
+# grace; the container survives that (sig-proxy can't forward SIGKILL).
+# Three orphaned containers from an ENOSPC-slowed shutdown ran for 50
+# minutes on 2026-06-11 — one kept compacting and physically deleted a
+# regenerated dataset out from under the next run. timeout(1) inside the
+# container guarantees orphans die on their own. Also sweep before runs:
+#   docker ps -q --filter label=wadjet-edge | xargs -r docker rm -f
+TTL="${EDGE_TTL_SECONDS:-7200}"
 
 # --memory-swap == --memory: no swap escape hatch — exceed the cap, die.
 # --init: PID-1 reaping + signal handling; the harness's SIGTERM reaches
@@ -56,4 +64,4 @@ exec docker run --rm -i --init --network=host \
   -e WADJET_HEAP_DUMP_INTERVAL="${EDGE_HEAP_DUMP_INTERVAL:-5s}" \
   -e WADJET_HEAP_DUMP_DIR \
   ${EDGE_GOGC:+-e WADJET_GOGC="${EDGE_GOGC}"} \
-  "$IMAGE" "$@"
+  "$IMAGE" timeout --signal=KILL "$TTL" "$@"
