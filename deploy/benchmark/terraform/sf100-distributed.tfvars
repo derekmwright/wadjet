@@ -33,3 +33,4 @@ query_timeout             = "30m"           # SF100 heavy queries need >10m defa
 #   Raised to 4 — the concurrency payoff the engine was always targeting.
 max_concurrent            = 4
 data_plane                = "grpc" # Phase C+D+E gRPC data-plane (task dispatch + results + gather + TaskProgress). NATS retained for heartbeats + cancellation + KV only. SF100 is where the design was actually targeted — Q17 dispatch-stall + NATS lock-contention pathologies.
+catalog_snapshot_prefix   = "catalog/" # restore post-discovery catalog; first boot writes it (PR #115)

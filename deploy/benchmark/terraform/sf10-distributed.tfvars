@@ -15,3 +15,4 @@ data_bucket              = "wadjet-bench-sf10-use2"
 skip_queries             = ""
 query_timeout            = "30m"  # SF10 heavy queries (Q03/Q05/Q21 lineitem joins) need >10m; the 26 April AWS run hit the 10m cap on Q03 even though stages were progressing
 data_plane               = "grpc" # Phase C+D+E gRPC data-plane (task dispatch + results + gather + TaskProgress). NATS retained for heartbeats + cancellation + KV only.
+catalog_snapshot_prefix   = "catalog/" # restore post-discovery catalog; first boot writes it (PR #115)
