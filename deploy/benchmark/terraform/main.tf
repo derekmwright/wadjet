@@ -368,6 +368,10 @@ locals {
     # ${var.data_plane_port}.
     export TPCH_DATA_PLANE="${var.data_plane}"
     export TPCH_DATA_PLANE_ADDR=":${var.data_plane_port}"
+    # Catalog snapshot/restore prefix (PR #115). Non-empty = restore the
+    # post-discovery catalog from s3://<bucket>/<prefix> instead of paying
+    # ~15 min of discovery+ANALYZE per deploy; first boot writes it.
+    export TPCH_CATALOG_SNAPSHOT_PREFIX="${var.catalog_snapshot_prefix}"
     # Force GOGC=100 so heap is bounded by 2x live data instead of growing to
     # GOMEMLIMIT before triggering mark-assist. Without this, scan-3 SF10
     # tasks accumulated parquet-decode garbage to ~10 GB peak heap before

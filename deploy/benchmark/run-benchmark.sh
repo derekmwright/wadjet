@@ -103,6 +103,13 @@ fi
 PROFILE_FLAG=()
 [ -n "$PROFILE" ] && PROFILE_FLAG=(--config="${PROFILE}")
 
+# Catalog snapshot/restore (PR #115): non-empty prefix makes tpch-bench
+# restore the post-discovery catalog from s3://<bucket>/<prefix> (or write
+# the first snapshot after a fresh discovery+ANALYZE). Profile-file fields
+# don't reach tfvars-driven deploys (no --config), so this flows via env.
+CATALOG_SNAP_FLAGS=()
+[ -n "${TPCH_CATALOG_SNAPSHOT_PREFIX:-}" ] && CATALOG_SNAP_FLAGS=(--catalog-snapshot-prefix="${TPCH_CATALOG_SNAPSHOT_PREFIX}")
+
 # Decide whether to pass --data-prefix on the CLI:
 #   - If DATA_PREFIX is explicitly set in the environment, honor it (overrides profile).
 #   - Else if no profile is set, fall back to the legacy default "tables/".
@@ -129,6 +136,7 @@ if [ "$MODE" = "standalone" ]; then
     "${DATA_PREFIX_FLAG[@]}" \
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
+    "${CATALOG_SNAP_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
     --cpuprofile="${PROF_DIR}/cpu-standalone.prof" \
     --memprofile="${PROF_DIR}/mem-standalone.prof" \
@@ -165,6 +173,7 @@ elif [ "$MODE" = "distributed" ]; then
     "${DATA_PREFIX_FLAG[@]}" \
     "${S3_FLAGS[@]}" \
     "${LOAD_FLAGS[@]}" \
+    "${CATALOG_SNAP_FLAGS[@]}" \
     "${SKIP_FLAGS[@]}" \
     "${NATIVE_DAG_FLAGS[@]}" \
     "${DATA_PLANE_FLAGS[@]}" \

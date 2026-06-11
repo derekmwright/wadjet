@@ -140,6 +140,12 @@ variable "bounded_dirty_writes" {
   default     = false
 }
 
+variable "catalog_snapshot_prefix" {
+  description = "S3 prefix (within the data bucket) for catalog snapshots, e.g. 'catalog/'. Non-empty: tpch-bench restores the post-discovery catalog instead of running discovery+ANALYZE (~15 min/deploy), writing a snapshot on the first boot. Empty = disabled. Delete s3://<bucket>/<prefix> after changing table data."
+  type        = string
+  default     = ""
+}
+
 variable "workers_per_node" {
   description = "Number of independent wadjet worker processes to launch per node. >1 gives crash isolation: when one process OOMs, sibling workers on the same node keep running. Each process gets a per-process memory envelope (auto-derived from /N of total) and registers separately with the coord."
   type        = number
