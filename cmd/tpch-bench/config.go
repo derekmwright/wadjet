@@ -35,6 +35,15 @@ type BenchProfile struct {
 		QueryTimeout string `yaml:"query_timeout"`
 		SkipLoad     bool   `yaml:"skip_load"`
 		SkipQueries  []int  `yaml:"skip_queries"`
+		// CatalogSnapshotPrefix enables catalog snapshot/restore under
+		// s3://<bucket>/<prefix> (e.g. "catalog/"). When set with
+		// skip_load, boot first tries to restore the latest snapshot —
+		// skipping the ~5 min discovery + ~10 min ANALYZE entirely — and
+		// after a fresh discovery+ANALYZE it writes a new snapshot for the
+		// next deploy. Only safe while the bucket's table data is immutable
+		// across deploys (true for all pre-staged bench buckets); delete
+		// s3://<bucket>/<prefix> after changing the data.
+		CatalogSnapshotPrefix string `yaml:"catalog_snapshot_prefix"`
 	} `yaml:"benchmark"`
 }
 
