@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -42,7 +43,21 @@ type Config struct {
 	// MaxFilesPerPass caps the number of files merged in one compaction pass
 	// to bound memory usage.
 	MaxFilesPerPass int
+	// DeleteGrace is how long a compacted-away file stays physically present
+	// in the object store after its manifest entry is removed. In-flight
+	// tasks hold file lists resolved at DISPATCH time; deleting the bytes
+	// the instant the manifest swaps races every running query against the
+	// compactor (observed 2026-06-11: first successful mid-benchmark
+	// compaction at SF10 deleted chunks under three dispatched scan tasks →
+	// "object not found" ×5 → circuit breaker open → every later query
+	// failed). Mirrors DefaultGCMinAge's reasoning. Zero uses
+	// DefaultDeleteGrace; negative deletes immediately (tests).
+	DeleteGrace time.Duration
 }
+
+// DefaultDeleteGrace keeps compacted-away bytes alive long enough for any
+// in-flight query dispatched against the old manifest to finish reading them.
+const DefaultDeleteGrace = 30 * time.Minute
 
 // DefaultConfig returns production defaults.
 func DefaultConfig() Config {
@@ -50,6 +65,7 @@ func DefaultConfig() Config {
 		MinFiles:         10,
 		MaxFileSizeBytes: 32 * 1024 * 1024, // 32 MB
 		MaxFilesPerPass:  50,
+		DeleteGrace:      DefaultDeleteGrace,
 	}
 }
 
@@ -62,6 +78,18 @@ type Compactor struct {
 	// gcMu protects gcInProgress to prevent double GC rewrites of the same file.
 	gcMu         sync.Mutex
 	gcInProgress map[string]bool
+
+	// delMu protects pendingDeletes: files whose manifest entries are gone
+	// but whose bytes wait out DeleteGrace before physical deletion (see
+	// Config.DeleteGrace). Process-local: a crash leaves orphans, which the
+	// store-side reasoning elsewhere in this package already treats as safe.
+	delMu          sync.Mutex
+	pendingDeletes []pendingDelete
+}
+
+type pendingDelete struct {
+	path string
+	at   time.Time
 }
 
 // New creates a compactor.
@@ -97,13 +125,13 @@ func (c *Compactor) releaseGCLock(filePath string) {
 
 // Result summarizes one compaction pass for a table.
 type Result struct {
-	Table              string
+	Table               string
 	PartitionsCompacted int
-	FilesRemoved       int
-	FilesCreated       int
-	RowsMerged         int64
-	BytesBefore        int64
-	BytesAfter         int64
+	FilesRemoved        int
+	FilesCreated        int
+	RowsMerged          int64
+	BytesBefore         int64
+	BytesAfter          int64
 }
 
 // CompactTable runs compaction for all partitions of a table. When a partition
@@ -142,14 +170,16 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 				files = files[:maxFiles]
 			}
 
-			merged, err := c.mergeFiles(ctx, files, tableMeta.Schema, deleteSet)
+			newPath := compactedFilePath(tableName, part.Path)
+			written, err := c.mergeAndWriteFiles(ctx, files, tableMeta.Schema, deleteSet, newPath)
 			if err != nil {
 				c.logger.Warn("compaction failed for partition",
 					"table", tableName, "partition", part.Path, "error", err)
 				continue
 			}
 
-			if len(merged.rows) == 0 {
+			if written.rowsWritten == 0 {
+				// Every row delete-filtered: nothing was uploaded.
 				oldPaths := filePaths(files)
 				if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
 					return nil, fmt.Errorf("removing empty partition files: %w", err)
@@ -161,12 +191,6 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 				continue
 			}
 
-			newPath := compactedFilePath(tableName, part.Path)
-			written, err := c.writeMergedFile(ctx, newPath, tableMeta.Schema, merged.rows)
-			if err != nil {
-				return nil, fmt.Errorf("writing merged file: %w", err)
-			}
-
 			oldPaths := filePaths(files)
 			if err := c.catalog.RemoveFiles(ctx, tableName, oldPaths); err != nil {
 				return nil, fmt.Errorf("removing old files from manifest: %w", err)
@@ -175,7 +199,7 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 			newEntry := catalog.FileEntry{
 				Path:        newPath,
 				SizeBytes:   written.size,
-				NumRows:     int64(len(merged.rows)),
+				NumRows:     written.rowsWritten,
 				CreatedAt:   time.Now().UTC(),
 				ColumnStats: written.columnStats,
 			}
@@ -188,8 +212,8 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 			result.PartitionsCompacted++
 			result.FilesRemoved += len(files)
 			result.FilesCreated++
-			result.RowsMerged += int64(len(merged.rows))
-			result.BytesBefore += merged.bytesBefore
+			result.RowsMerged += written.rowsWritten
+			result.BytesBefore += written.bytesBefore
 			result.BytesAfter += written.size
 			compactedAny = true
 
@@ -198,7 +222,7 @@ func (c *Compactor) CompactTable(ctx context.Context, tableName string) (*Result
 				"partition", part.Path,
 				"pass", pass,
 				"files_merged", len(files),
-				"rows", len(merged.rows),
+				"rows", written.rowsWritten,
 			)
 		}
 
@@ -253,35 +277,61 @@ func (c *Compactor) shouldCompact(part catalog.PartitionEntry) bool {
 	return avgSize < c.config.MaxFileSizeBytes
 }
 
-type mergeResult struct {
-	rows        []map[string]any
+type mergedWrite struct {
+	rowsWritten int64
 	bytesBefore int64
+	size        int64
+	columnStats map[string]catalog.FileColumnStats
 }
 
-func (c *Compactor) mergeFiles(ctx context.Context, files []catalog.FileEntry, schema parquet.Schema, deleteSet map[string]map[int64]bool) (*mergeResult, error) {
-	var allRows []map[string]any
-	var bytesBefore int64
+// mergeAndWriteFiles streams a compaction pass: each input file's rows are
+// read, delete-filtered, and appended to the output writer — which flushes
+// row groups incrementally to a local temp file — so peak heap is ONE input
+// file's boxed rows plus one in-flight row group, regardless of merge-set
+// size. The previous mergeFiles/writeMergedFile pair materialized the whole
+// merge set as []map[string]any AND the entire output file in a
+// bytes.Buffer: the 256 MB-of-compressed-input pass target expanded to
+// >3 GB live and OOM-killed a 4 GiB edge coordinator mid-query (2026-06-11
+// edge validation, SF10 Q03).
+//
+// When every row is delete-filtered away (rowsWritten == 0) nothing is
+// uploaded and size/columnStats stay zero — callers drop the inputs.
+// Write-before-delete ordering is preserved: the upload happens here,
+// before any caller touches the manifest.
+func (c *Compactor) mergeAndWriteFiles(ctx context.Context, files []catalog.FileEntry, schema parquet.Schema, deleteSet map[string]map[int64]bool, newPath string) (*mergedWrite, error) {
+	tmp, err := os.CreateTemp("", "wadjet-compact-*.parquet")
+	if err != nil {
+		return nil, fmt.Errorf("creating compaction temp file: %w", err)
+	}
+	defer func() {
+		tmp.Close()
+		os.Remove(tmp.Name())
+	}()
 
+	cfg := parquet.DefaultWriterConfig()
+	w, err := parquet.NewWriter(tmp, schema, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating writer: %w", err)
+	}
+
+	res := &mergedWrite{}
 	for _, f := range files {
-		bytesBefore += f.SizeBytes
+		res.bytesBefore += f.SizeBytes
 
-		rc, info, err := c.catalog.ReadFile(ctx, f.Path)
+		rc, _, err := c.catalog.ReadFile(ctx, f.Path)
 		if err != nil {
 			return nil, fmt.Errorf("reading file %s: %w", f.Path, err)
 		}
-
 		data, err := io.ReadAll(rc)
 		rc.Close()
 		if err != nil {
 			return nil, fmt.Errorf("reading file data %s: %w", f.Path, err)
 		}
-		_ = info
 
 		reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			return nil, fmt.Errorf("opening parquet %s: %w", f.Path, err)
 		}
-
 		rows, err := reader.ReadRows(schema.ColumnNames())
 		if err != nil {
 			return nil, fmt.Errorf("reading rows from %s: %w", f.Path, err)
@@ -297,48 +347,49 @@ func (c *Compactor) mergeFiles(ctx context.Context, files []catalog.FileEntry, s
 			}
 			rows = filtered
 		}
-
-		allRows = append(allRows, rows...)
+		if len(rows) == 0 {
+			continue
+		}
+		if err := w.WriteRows(rows); err != nil {
+			return nil, fmt.Errorf("writing rows from %s: %w", f.Path, err)
+		}
+		res.rowsWritten += int64(len(rows))
 	}
 
-	return &mergeResult{rows: allRows, bytesBefore: bytesBefore}, nil
-}
-
-type writeResult struct {
-	size        int64
-	columnStats map[string]catalog.FileColumnStats
-}
-
-func (c *Compactor) writeMergedFile(ctx context.Context, path string, schema parquet.Schema, rows []map[string]any) (*writeResult, error) {
-	var buf bytes.Buffer
-	cfg := parquet.DefaultWriterConfig()
-	w, err := parquet.NewWriter(&buf, schema, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("creating writer: %w", err)
+	if res.rowsWritten == 0 {
+		// Every row deleted: discard the temp (deferred), upload nothing.
+		return res, nil
 	}
-	if err := w.WriteRows(rows); err != nil {
-		return nil, fmt.Errorf("writing rows: %w", err)
-	}
+
 	if err := w.Close(); err != nil {
 		return nil, fmt.Errorf("closing writer: %w", err)
 	}
-
-	data := buf.Bytes()
-	size := int64(len(data))
-	_, err = c.catalog.Store().Put(ctx, c.catalog.Bucket(), path, bytes.NewReader(data), size, "application/octet-stream")
+	fi, err := tmp.Stat()
 	if err != nil {
+		return nil, fmt.Errorf("stat merged file: %w", err)
+	}
+	res.size = fi.Size()
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return nil, fmt.Errorf("rewinding merged file: %w", err)
+	}
+	if _, err := c.catalog.Store().Put(ctx, c.catalog.Bucket(), newPath, tmp, res.size, "application/octet-stream"); err != nil {
 		return nil, fmt.Errorf("uploading merged file: %w", err)
 	}
 
-	// Extract column stats from the written file
-	colStats := extractColumnStats(data)
-
-	return &writeResult{size: size, columnStats: colStats}, nil
+	res.columnStats = extractColumnStatsAt(tmp, res.size)
+	return res, nil
 }
 
 // extractColumnStats reads Parquet metadata to extract per-column min/max/null stats.
 func extractColumnStats(data []byte) map[string]catalog.FileColumnStats {
-	reader, err := parquet.NewReader(bytes.NewReader(data), int64(len(data)))
+	return extractColumnStatsAt(bytes.NewReader(data), int64(len(data)))
+}
+
+// extractColumnStatsAt reads per-column min/max/null stats from the parquet
+// footer via a ReaderAt — no whole-file buffer needed (the compactor passes
+// its on-disk temp file directly).
+func extractColumnStatsAt(ra io.ReaderAt, size int64) map[string]catalog.FileColumnStats {
+	reader, err := parquet.NewReader(ra, size)
 	if err != nil {
 		return nil
 	}
@@ -379,12 +430,81 @@ func extractColumnStats(data []byte) map[string]catalog.FileColumnStats {
 	return merged
 }
 
+// deleteFromStore schedules paths for physical deletion after DeleteGrace.
+// The manifest entries are already gone, so no NEW query can see them; the
+// grace keeps the bytes readable for queries dispatched against the old
+// manifest. A non-positive grace deletes immediately (tests).
 func (c *Compactor) deleteFromStore(ctx context.Context, paths []string) {
+	grace := c.config.DeleteGrace
+	if grace == 0 {
+		grace = DefaultDeleteGrace
+	}
+	if grace < 0 {
+		for _, p := range paths {
+			if err := c.catalog.Store().Delete(ctx, c.catalog.Bucket(), p); err != nil {
+				c.logger.Warn("failed to delete old file", "path", p, "error", err)
+			}
+		}
+		return
+	}
+	now := time.Now()
+	c.delMu.Lock()
 	for _, p := range paths {
-		if err := c.catalog.Store().Delete(ctx, c.catalog.Bucket(), p); err != nil {
-			c.logger.Warn("failed to delete old file", "path", p, "error", err)
+		c.pendingDeletes = append(c.pendingDeletes, pendingDelete{path: p, at: now})
+	}
+	n := len(c.pendingDeletes)
+	c.delMu.Unlock()
+	c.logger.Info("deferred physical deletion of compacted files",
+		"files", len(paths), "grace", grace, "pending_total", n)
+}
+
+// FlushDeferredDeletes physically deletes every pending file older than
+// DeleteGrace. Called from the background sweep; safe to call any time.
+// Returns the number of files deleted.
+func (c *Compactor) FlushDeferredDeletes(ctx context.Context) int {
+	grace := c.config.DeleteGrace
+	if grace <= 0 {
+		grace = DefaultDeleteGrace
+	}
+	cutoff := time.Now().Add(-grace)
+
+	c.delMu.Lock()
+	var due, keep []pendingDelete
+	for _, pd := range c.pendingDeletes {
+		if pd.at.Before(cutoff) {
+			due = append(due, pd)
+		} else {
+			keep = append(keep, pd)
 		}
 	}
+	c.pendingDeletes = keep
+	c.delMu.Unlock()
+
+	deleted := 0
+	for _, pd := range due {
+		// Recreated-object guard: if the object at this path is NEWER than
+		// the deferral, it is not the file we compacted away — someone
+		// recreated the path (re-ingest, test datagen with deterministic
+		// names). Deleting it would destroy live data: a stale compactor
+		// surviving its harness (orphaned container, 2026-06-11 edge rig)
+		// silently consumed a freshly regenerated dataset through exactly
+		// this hole. Skip and drop the entry; the new object has its own
+		// manifest entry and lifecycle.
+		if info, err := c.catalog.Store().Head(ctx, c.catalog.Bucket(), pd.path); err == nil && info.LastModified.After(pd.at) {
+			c.logger.Warn("skipping deferred deletion: object recreated since deferral",
+				"path", pd.path, "deferred_at", pd.at, "object_modified", info.LastModified)
+			continue
+		}
+		if err := c.catalog.Store().Delete(ctx, c.catalog.Bucket(), pd.path); err != nil {
+			c.logger.Warn("failed to delete old file", "path", pd.path, "error", err)
+			continue
+		}
+		deleted++
+	}
+	if deleted > 0 {
+		c.logger.Info("flushed deferred deletions", "files", deleted)
+	}
+	return deleted
 }
 
 func filePaths(files []catalog.FileEntry) []string {
@@ -458,14 +578,27 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 
 	deleteSet := buildDeleteSet(manifest.DeleteMarkers)
 
-	// Merge the single file (which applies delete markers internally)
-	merged, err := c.mergeFiles(ctx, []catalog.FileEntry{*targetFile}, tableMeta.Schema, deleteSet)
-	if err != nil {
-		return fmt.Errorf("reading file for rewrite: %w", err)
+	// Write-before-delete: the streaming merge uploads the new file FIRST
+	// (inside mergeAndWriteFiles), so on failure nothing in the manifest has
+	// changed — no data loss. Mirror compactedFilePath: use the table prefix
+	// so unpartitioned tables (empty partPath) don't land at the bucket root.
+	newPath := ""
+	if partPath == "" {
+		newPath = fmt.Sprintf("%s/rewrite_%d.parquet", partition.TablePrefix(tableName), time.Now().UnixNano())
+	} else {
+		newPath = fmt.Sprintf("%s/%s/rewrite_%d.parquet", partition.TablePrefix(tableName), partPath, time.Now().UnixNano())
 	}
 
-	// If all rows were deleted, atomically remove old file + applied markers
-	if len(merged.rows) == 0 {
+	// Merge the single file (applies delete markers internally; uploads to
+	// newPath unless every row was deleted).
+	written, err := c.mergeAndWriteFiles(ctx, []catalog.FileEntry{*targetFile}, tableMeta.Schema, deleteSet, newPath)
+	if err != nil {
+		return fmt.Errorf("rewriting file: %w", err)
+	}
+
+	// If all rows were deleted, nothing was uploaded — atomically remove the
+	// old file + applied markers.
+	if written.rowsWritten == 0 {
 		if err := c.catalog.SwapFileForGC(ctx, tableName, filePath, nil, partValues, partPath, appliedIndices); err != nil {
 			return fmt.Errorf("removing fully-deleted file: %w", err)
 		}
@@ -476,25 +609,10 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 		return nil
 	}
 
-	// Write-before-delete: write the new file FIRST so data is never lost.
-	// On failure here, nothing in the manifest has changed — no data loss.
-	// Mirror compactedFilePath: use the table prefix so unpartitioned tables
-	// (empty partPath) don't land at the bucket root.
-	newPath := ""
-	if partPath == "" {
-		newPath = fmt.Sprintf("%s/rewrite_%d.parquet", partition.TablePrefix(tableName), time.Now().UnixNano())
-	} else {
-		newPath = fmt.Sprintf("%s/%s/rewrite_%d.parquet", partition.TablePrefix(tableName), partPath, time.Now().UnixNano())
-	}
-	written, err := c.writeMergedFile(ctx, newPath, tableMeta.Schema, merged.rows)
-	if err != nil {
-		return fmt.Errorf("writing rewritten file: %w", err)
-	}
-
 	newEntry := catalog.FileEntry{
 		Path:        newPath,
 		SizeBytes:   written.size,
-		NumRows:     int64(len(merged.rows)),
+		NumRows:     written.rowsWritten,
 		CreatedAt:   time.Now().UTC(),
 		ColumnStats: written.columnStats,
 	}
@@ -515,7 +633,7 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 		"old_file", filePath,
 		"new_file", newPath,
 		"rows_before", targetFile.NumRows,
-		"rows_after", len(merged.rows),
+		"rows_after", written.rowsWritten,
 	)
 	return nil
 }

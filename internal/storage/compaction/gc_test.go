@@ -212,7 +212,9 @@ func TestForceCompactFile_RewritesWithDeleteMarkers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := New(cat, nil, DefaultConfig())
+	cfg := DefaultConfig()
+	cfg.DeleteGrace = time.Nanosecond // defer, but eligible to flush immediately
+	c := New(cat, nil, cfg)
 	gcSet := map[int64]bool{1: true}
 	if err := c.ForceCompactFile(ctx, "events", path, gcSet); err != nil {
 		t.Fatal(err)
@@ -240,10 +242,21 @@ func TestForceCompactFile_RewritesWithDeleteMarkers(t *testing.T) {
 		t.Errorf("expected new file path, got original: %s", files[0].Path)
 	}
 
-	// Old file should not exist in object store
-	_, _, err = store.Get(ctx, "test-bucket", path)
-	if err == nil {
-		t.Error("expected old file to be deleted from object store")
+	// The old file's BYTES must survive the manifest swap: in-flight tasks
+	// dispatched against the pre-rewrite manifest still read them. (The
+	// pre-DeleteGrace behavior deleted here immediately, which raced every
+	// running query against the compactor — 2026-06-11 SF10 edge run.)
+	if _, _, err := store.Get(ctx, "test-bucket", path); err != nil {
+		t.Fatalf("old file must remain in store until DeleteGrace expires: %v", err)
+	}
+
+	// After the grace expires, the background flush deletes it physically.
+	time.Sleep(2 * time.Millisecond)
+	if n := c.FlushDeferredDeletes(ctx); n != 1 {
+		t.Fatalf("expected 1 deferred deletion flushed, got %d", n)
+	}
+	if _, _, err := store.Get(ctx, "test-bucket", path); err == nil {
+		t.Error("expected old file to be deleted from object store after flush")
 	}
 }
 
