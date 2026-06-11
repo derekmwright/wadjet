@@ -62,8 +62,22 @@ func (w *flushWriter) Write(p []byte) (int, error) {
 }
 
 // wrote advances the sequential write cursor. For every window that
-// completes it starts async writeback on that window, then waits out —
-// and for Spill drops — the window before it.
+// completes it starts ASYNC writeback on that window and, for Spill,
+// best-effort drops the window before it (whose writeback was queued a
+// full window earlier and has usually completed by now).
+//
+// Deliberately NO blocking wait here. The first version used the strict
+// pattern (WAIT_BEFORE|WRITE|WAIT_AFTER on window N-1, RocksDB's
+// off-by-default strict_bytes_per_sync) and it throttled multi-GB cache
+// downloads to ~96 MiB/s at SF100 — workers sat CPU-idle behind
+// serialized stage inputs, Q18 +53%, Q21 ENOSPC from the stretched
+// lifetimes (run 20260610-203304). Async-only matches what PostgreSQL
+// (checkpoint_flush_after) and RocksDB (bytes_per_sync) actually default
+// to: writeback starts within one window of the data being written —
+// instead of the ~30s dirty-expire flusher — which bounds steady-state
+// dirty pages at write-rate × device-latency without ever blocking the
+// writer. vm.dirty_* sysctls remain the backstop if the device falls
+// behind.
 func (fl *Flusher) wrote(n int) {
 	if fl.disabled {
 		return
@@ -76,17 +90,11 @@ func (fl *Flusher) wrote(n int) {
 			fl.disabled = true
 			return
 		}
-		if cur == 0 {
-			continue
-		}
-		prev := cur - windowBytes
-		if err := syncFileRange(fl.fd, prev, windowBytes,
-			unix.SYNC_FILE_RANGE_WAIT_BEFORE|unix.SYNC_FILE_RANGE_WRITE|unix.SYNC_FILE_RANGE_WAIT_AFTER); err != nil {
-			fl.disabled = true
-			return
-		}
-		if fl.class == Spill {
-			_ = fadvise(fl.fd, prev, windowBytes, unix.FADV_DONTNEED)
+		if fl.class == Spill && cur > 0 {
+			// Best-effort: a no-op on any pages still dirty (the kernel
+			// skips them); Finish()'s whole-file pass is the guaranteed
+			// drop.
+			_ = fadvise(fl.fd, cur-windowBytes, windowBytes, unix.FADV_DONTNEED)
 		}
 	}
 }
@@ -102,9 +110,10 @@ func (fl *Flusher) Finish() {
 	if fl == nil || fl.disabled || fl.class != Spill {
 		return
 	}
-	// offset 0 / nbytes 0 = the whole file, for both calls. Most of the
-	// file is already clean (dropped window by window), so the wait only
-	// covers the tail.
+	// offset 0 / nbytes 0 = the whole file, for both calls. Window
+	// writeback was started asynchronously throughout the write, so this
+	// wait covers only whatever the device hasn't absorbed yet. It is the
+	// one blocking call in the mechanism: once per spill file, at close.
 	if err := syncFileRange(fl.fd, 0, 0,
 		unix.SYNC_FILE_RANGE_WAIT_BEFORE|unix.SYNC_FILE_RANGE_WRITE|unix.SYNC_FILE_RANGE_WAIT_AFTER); err != nil {
 		return

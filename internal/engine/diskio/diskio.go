@@ -2,14 +2,18 @@
 // sequential file writes (operator spill files, local cache downloads,
 // stage-output files).
 //
-// Mechanism: the canonical two-window writeback pattern (PostgreSQL's
-// checkpoint_flush_after, RocksDB's bytes_per_sync). As each window of
-// windowBytes completes, asynchronous writeback is started for it
-// (sync_file_range(SYNC_FILE_RANGE_WRITE)) and the window before it —
-// queued a full window earlier, so usually already on disk — is waited
-// out. This caps every writer's dirty page-cache footprint at ~2 windows
-// instead of the whole file, and the wait gives natural backpressure only
-// when the writer outruns the NVMe.
+// Mechanism: windowed asynchronous writeback (PostgreSQL's
+// checkpoint_flush_after, RocksDB's bytes_per_sync — their DEFAULT,
+// non-strict shapes). As each window of windowBytes completes,
+// asynchronous writeback is started for it
+// (sync_file_range(SYNC_FILE_RANGE_WRITE)), so dirty pages reach the
+// device within one window of being written instead of waiting on the
+// ~30s kernel flusher. Steady-state dirty footprint per writer ≈
+// write-rate × device-latency. There is deliberately no per-window
+// blocking wait — the strict variant (RocksDB's off-by-default
+// strict_bytes_per_sync) serialized multi-GB cache downloads behind
+// device writeback at SF100 and regressed exchange-heavy queries 50-110%
+// (run 20260610-203304); see Flusher.wrote.
 //
 // Why dirty pages specifically: they cannot be reclaimed until written
 // back, so a multi-GB write flood (cache downloads + spill) forces kernel
