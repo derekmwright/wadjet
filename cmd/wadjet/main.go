@@ -127,7 +127,7 @@ func main() {
 	rootCmd.PersistentFlags().Int64Var(&sharedPoolBudget, "shared-pool-budget", 0, "Worker-wide shared memory pool in bytes (0 = auto-detect: envelope minus cache). All concurrent tasks Reserve against this pool.")
 	rootCmd.PersistentFlags().BoolVar(&spillFloatingBudget, "spill-floating-budget", false, "Activate the floating-budget spill threshold (deploy-gated; requires Phase-4 mmap RSS accounting). Default false = tuned static 40%/90% thresholds.")
 	rootCmd.PersistentFlags().BoolVar(&mmapRelief, "mmap-relief", false, "Enable MADV_DONTNEED relief of cold mmap'd cache files when total RSS exceeds the ceiling (deploy-gated). Default false = dormant (no tracking, no syscall).")
-	rootCmd.PersistentFlags().Int64Var(&mmapReliefThresholdMB, "mmap-relief-threshold-mb", 16000, "Total process RSS ceiling in MB; when --mmap-relief is set, relieve the coldest mmap'd cache files to bring RSS back to this level. Tune below the worker cgroup memory.max so relief has headroom.")
+	rootCmd.PersistentFlags().Int64Var(&mmapReliefThresholdMB, "mmap-relief-threshold-mb", 0, "Total process RSS ceiling in MB; when --mmap-relief is set, relieve the coldest mmap'd cache files to bring RSS back to this level. 0 = auto: 85% of the detected memory limit (the old absolute default of 16000 could never fire inside an edge-sized envelope). Tune below the worker cgroup memory.max so relief has headroom.")
 	rootCmd.PersistentFlags().BoolVar(&boundedDirtyWrites, "bounded-dirty-writes", false, "Bound the dirty page-cache footprint of spill/cache/stage file writes via windowed sync_file_range, and drop spill-file pages from cache as they are written (deploy-gated). Default false = writes rely on kernel writeback.")
 	rootCmd.PersistentFlags().StringVar(&spillDir, "spill-dir", "", "Directory for spill files (default: OS temp dir)")
 	rootCmd.PersistentFlags().Int64Var(&cacheBytes, "cache-bytes", 0, "LRU file cache size in bytes (0 = auto-detect: 20% of memory)")
@@ -234,6 +234,18 @@ func serveCmd() *cobra.Command {
 				gcMode = "off (invalid WADJET_GOGC)"
 			}
 			logger.Info("set GOMEMLIMIT", "detected_limit", memLimit, "go_mem_limit", goMemLimit, "gogc", gcMode)
+
+			// mmap-relief RSS ceiling: auto-derive from the detected limit
+			// when the flag is left at 0. The old absolute default (16000 MB)
+			// was sized for the SF100 c7gd worker envelope and could never
+			// fire inside an edge-sized cgroup — RSS hits the cap and the
+			// kernel OOM-kills long before a 16 GB ceiling is approached.
+			// 85% mirrors the validated SF100 ratio (16000/~19000).
+			if mmapRelief && mmapReliefThresholdMB == 0 {
+				mmapReliefThresholdMB = memLimit * 85 / 100 >> 20
+				logger.Info("auto-derived mmap relief threshold",
+					"threshold_mb", mmapReliefThresholdMB, "detected_limit", memLimit)
+			}
 
 			if cacheBytes == 0 {
 				if memoryBudget > 0 {
