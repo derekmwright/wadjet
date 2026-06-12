@@ -427,7 +427,7 @@ func TestGatherReceiver_SetExpectedTerminalsRace(t *testing.T) {
 	t.Cleanup(func() { nc.Close() })
 
 	const subject = "test.gather.race"
-	recv, err := subscribeGather(nc, subject, 0, nil)
+	recv, err := subscribeGather(nc, subject, 0, nil, 0)
 	if err != nil {
 		t.Fatalf("subscribeGather: %v", err)
 	}

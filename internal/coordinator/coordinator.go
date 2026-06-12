@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -42,6 +44,27 @@ type Config struct {
 	QueryTimeout   time.Duration // max time for a query to complete, 0 = default (30m)
 	WorkerStaleTTL time.Duration // time after which a silent worker is reaped, 0 = default (30s)
 	DynamicFilters bool          // Trino-style semi-join dynamic-filter pushdown (off by default in v1)
+	// GatherResultBudget caps the decoded result bytes a single query may
+	// accumulate in coordinator heap (gather receiver). 0 = derive from
+	// GOMEMLIMIT (half of it) or fall back to 2 GiB; negative = uncapped.
+	// Exceeding the budget fails the query cleanly instead of OOM-killing
+	// the coordinator.
+	GatherResultBudget int64
+}
+
+// gatherResultBudget resolves Config.GatherResultBudget: explicit value,
+// half of GOMEMLIMIT when one is set, else 2 GiB. Negative config = uncapped.
+func (c *Coordinator) gatherResultBudget() int64 {
+	if c.config.GatherResultBudget != 0 {
+		if c.config.GatherResultBudget < 0 {
+			return 0
+		}
+		return c.config.GatherResultBudget
+	}
+	if lim := debug.SetMemoryLimit(-1); lim > 0 && lim < math.MaxInt64 {
+		return lim / 2
+	}
+	return 2 << 30
 }
 
 // queryMeta stores per-query metadata needed for later result retrieval.
