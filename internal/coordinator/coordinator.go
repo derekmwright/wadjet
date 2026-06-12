@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
@@ -1053,7 +1054,11 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 		}
 	}
 	if mi.HasDistinct {
-		batches = c.deduplicatePartials(batches, columns)
+		var err error
+		batches, err = c.deduplicatePartials(batches, columns)
+		if err != nil {
+			return nil, 0, fmt.Errorf("deduplicating distinct partials: %w", err)
+		}
 	}
 
 	// Apply sort + limit. When the limit is much smaller than the row count,
@@ -1077,31 +1082,45 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 }
 
 // deduplicatePartials removes duplicate rows across probe-split partial results.
-func (c *Coordinator) deduplicatePartials(batches []*batch.RecordBatch, columns []string) []*batch.RecordBatch {
+func (c *Coordinator) deduplicatePartials(batches []*batch.RecordBatch, columns []string) ([]*batch.RecordBatch, error) {
 	if len(batches) == 0 {
-		return batches
+		return batches, nil
 	}
-	type rowKey string
-	seen := make(map[rowKey]bool)
-	var unique []map[string]any
+	_ = columns // key set = every column, resolved from the batch schema
+	// Columnar dedup via a keys-only hash aggregate (the same GroupByAll
+	// machinery SELECT DISTINCT plans to). The previous implementation
+	// boxed the entire merged result ×3 — ToRows maps per row (the pattern
+	// documented holding 21 GB at SF10), an fmt-serialized full-row key
+	// set, and a FromRows re-materialization — and its "%v\x00" key
+	// collided for values containing NUL bytes. The aggregate dedups with
+	// typed binary keys, columnar in and out, no boxing. Errors propagate:
+	// returning the partials undeduplicated would be silent wrong results.
+	agg := exec.NewHashAggregate(nil, nil)
+	agg.GroupByAll = true
+	ctx := context.Background()
+	if err := agg.Init(ctx); err != nil {
+		return nil, err
+	}
 	for _, b := range batches {
-		rows := b.ToRows()
-		for _, row := range rows {
-			var key strings.Builder
-			for _, col := range columns {
-				fmt.Fprintf(&key, "%v\x00", row[col])
-			}
-			k := rowKey(key.String())
-			if !seen[k] {
-				seen[k] = true
-				unique = append(unique, row)
-			}
+		if err := agg.Consume(ctx, b); err != nil {
+			return nil, err
 		}
 	}
-	if len(unique) == 0 {
-		return nil
+	if err := agg.Finalize(ctx); err != nil {
+		return nil, err
 	}
-	return []*batch.RecordBatch{batch.FromRows(batches[0].Schema, unique)}
+	var out []*batch.RecordBatch
+	for {
+		b, err := agg.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			break
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }
 
 // reAggregatePartials merges partial aggregate results by group-by key.
