@@ -216,3 +216,74 @@ func TestIntGroupKey_Int32NullMigrationKeysMatch(t *testing.T) {
 		t.Errorf("group 3 sum = %v, want 5 (int32 key format mismatch across migration)", sums["3"])
 	}
 }
+
+// Regression test for the single-STRING fast path's NULL group (issue #144
+// suite finding): null-key rows were diverted to processRow, whose groups
+// skip intFlatAccs.appendGroup — strGroupStates and the flat accumulators
+// went out of alignment and the NULL group emitted with ZEROED aggregates
+// (COUNT(*)=0, SUM=NULL over hundreds of rows) while real groups stayed
+// correct. The NULL group must be a first-class flat-accumulator slot.
+func TestStringGroupKey_NullGroupAggregates(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "k", Type: parquet.TypeString, Nullable: true},
+		{Name: "v", Type: parquet.TypeInt64},
+	}
+	h := NewHashAggregate([]string{"k"}, []AggColumn{
+		{Func: AggCount, OutputCol: "c", OutputType: parquet.TypeInt64},
+		{Func: AggSum, InputCol: "v", OutputCol: "s", OutputType: parquet.TypeInt64},
+	})
+	if err := h.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Interleave null keys with real ones, across two batches so the NULL
+	// group accumulates after other groups exist on both sides.
+	mk := func(vals ...any) *batch.RecordBatch {
+		rows := make([]map[string]any, 0, len(vals)/2)
+		for i := 0; i < len(vals); i += 2 {
+			rows = append(rows, map[string]any{"k": vals[i], "v": vals[i+1]})
+		}
+		return batch.FromRows(schema, rows)
+	}
+	ctx := context.Background()
+	if err := h.Consume(ctx, mk("a", int64(1), nil, int64(10), "b", int64(2), nil, int64(20))); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Consume(ctx, mk(nil, int64(30), "a", int64(3), "\x01", int64(100))); err != nil {
+		t.Fatal(err)
+	}
+
+	rows := aggRows(t, h)
+	if len(rows) != 4 {
+		t.Fatalf("groups = %d (%v), want 4 (a, b, \\x01, NULL)", len(rows), rows)
+	}
+	byKey := map[string]map[string]any{}
+	for _, r := range rows {
+		k := "<null>"
+		if r["k"] != nil {
+			k = r["k"].(string)
+		}
+		byKey[k] = r
+	}
+	if got := byKey["<null>"]; got == nil {
+		t.Fatal("NULL group missing")
+	} else {
+		if fmt.Sprintf("%v", got["c"]) != "3" {
+			t.Fatalf("NULL group COUNT = %v, want 3 (flat-accumulator misalignment)", got["c"])
+		}
+		if fmt.Sprintf("%v", got["s"]) != "60" {
+			t.Fatalf("NULL group SUM = %v, want 60", got["s"])
+		}
+	}
+	// A real 1-byte "\x01" string key must remain distinct from the NULL
+	// group (no in-band sentinel collision in the shared hash table).
+	if got := byKey["\x01"]; got == nil || fmt.Sprintf("%v", got["c"]) != "1" {
+		t.Fatalf("\\x01 key group = %v, want count 1 distinct from NULL group", got)
+	}
+	if got := byKey["a"]; got == nil || fmt.Sprintf("%v", got["s"]) != "4" {
+		t.Fatalf("group a = %v, want sum 4", got)
+	}
+	if got := byKey["b"]; got == nil || fmt.Sprintf("%v", got["s"]) != "2" {
+		t.Fatalf("group b = %v, want sum 2", got)
+	}
+}

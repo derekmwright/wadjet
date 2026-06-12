@@ -1597,6 +1597,7 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	}
 	h.intGroupStates = nil
 	h.strGroupStates = nil
+	h.strNullGroupIdx = -1
 	h.keys = nil
 	h.serializedKeys = nil
 	h.compactKeys = nil

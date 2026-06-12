@@ -92,6 +92,7 @@ type HashAggregate struct {
 	aggColIdx         []int
 	aggColIdx2        []int // second column indices for two-column aggregates
 	groupColTypes     []batch.TypeID
+	groupColMeta      []parquet.Column // full input column metadata per group col (Decimal Scale/Precision survive into outputSchema)
 	aggUpdaters       []kernel.RowAggUpdater  // resolved typed updaters
 	aggUpdatersNoNull []kernel.RowAggUpdater  // no-null-check variants
 	batchUpdaters     []kernel.RowAggUpdater  // per-batch updater selection (reusable)
@@ -132,6 +133,15 @@ type HashAggregate struct {
 	// Two-phase approach like consumeBatchIntGroup but with string key hashing.
 	useStrGroupKey bool
 	strGroupKeyCol int // column index for the string group-by key
+	// strNullGroupIdx is the NULL-key group's slot in strGroupStates (-1 =
+	// none yet). The NULL group is created inline WITH a flat-accumulator
+	// slot: the previous shape diverted null-key rows to processRow, whose
+	// groups skip appendGroup — strGroupStates and intFlatAccs went out of
+	// alignment and the NULL group emitted with zeroed aggregates
+	// (COUNT(*)=0 over 700 rows; issue #144 suite finding). Kept out of
+	// strGroupIndex entirely so it can never collide with a real 1-byte
+	// string key.
+	strNullGroupIdx int32
 
 	// Multi-column generic GROUP BY SoA fast path: binary key serialization
 	// with strHashTable lookup and SoA flat accumulator scatter.
@@ -480,6 +490,7 @@ func NewHashAggregate(groupByCols []string, aggs []AggColumn) *HashAggregate {
 func (h *HashAggregate) Init(_ context.Context) error {
 	h.strGroupIndex = newStrHashTable(4096)
 	h.strGroupStates = nil
+	h.strNullGroupIdx = -1
 	h.keys = nil
 	h.serializedKeys = nil
 	h.resolved = false
@@ -625,11 +636,15 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 	}
 	h.groupColIdx = make([]int, len(h.GroupByCols))
 	h.groupColTypes = make([]batch.TypeID, len(h.GroupByCols))
+	h.groupColMeta = make([]parquet.Column, len(h.GroupByCols))
 	for i, col := range h.GroupByCols {
 		idx := columnIndexFallback(b, col)
 		h.groupColIdx[i] = idx
 		if idx >= 0 {
 			h.groupColTypes[i] = b.Columns[idx].Type
+			if idx < len(b.Schema) {
+				h.groupColMeta[i] = b.Schema[idx]
+			}
 		}
 	}
 	h.aggColIdx = make([]int, len(h.Aggs))
@@ -1504,11 +1519,17 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 		h.intFlatAccs[ai].ensureCapacity(batchRows)
 	}
 
-	// Phase 1: Hash lookup — build group index array.
+	// Phase 1: Hash lookup — build group index array. NULL keys get their
+	// own first-class group slot (strNullGroupIdx) so the typed scatter in
+	// Phase 2 updates its flat accumulators like any other group. The
+	// previous shape diverted null-key rows to processRow, which appends a
+	// groupState WITHOUT a flat-accumulator slot — strGroupStates and
+	// intFlatAccs went out of alignment and the NULL group emitted zeroed
+	// aggregates (and a 1-byte "\x01" string key could collide with the
+	// binary null sentinel in the shared hash table).
 	var gi []int32
 	var sel []uint32
 	var iterLen int
-	hasNullKeys := false
 
 	if b.Sel != nil {
 		iterLen = len(b.Sel)
@@ -1517,8 +1538,7 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 		for si, selIdx := range b.Sel {
 			row := int(selIdx)
 			if hasNulls && gkVec.Nulls.IsNullFast(row) {
-				gi[si] = -1
-				hasNullKeys = true
+				gi[si] = h.strNullGroupSlot()
 				continue
 			}
 			key := gkVec.BytesData.Value(row)
@@ -1543,8 +1563,7 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 		gi = h.ensureGroupIndexBuf(iterLen)
 		for row := 0; row < iterLen; row++ {
 			if hasNulls && gkVec.Nulls.IsNullFast(row) {
-				gi[row] = -1
-				hasNullKeys = true
+				gi[row] = h.strNullGroupSlot()
 				continue
 			}
 			key := gkVec.BytesData.Value(row)
@@ -1577,22 +1596,29 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 		}
 	}
 
-	// Handle null-key rows via generic path.
-	if hasNullKeys {
-		if sel != nil {
-			for si, selIdx := range sel {
-				if gi[si] < 0 {
-					h.processRow(b, int(selIdx))
-				}
-			}
-		} else {
-			for row := 0; row < iterLen; row++ {
-				if gi[row] < 0 {
-					h.processRow(b, row)
-				}
-			}
-		}
+}
+
+// strNullGroupSlot returns the NULL-key group's flat-accumulator slot for
+// the single-string fast path, creating it on first use. The group lives in
+// strGroupStates with an aligned slot in every flat accumulator, but is
+// deliberately NOT inserted into strGroupIndex — a raw 1-byte string key
+// could otherwise collide with any in-band null sentinel. serializedKeys
+// gets the generic binary form (single 0x01 null flag) so spill/merge
+// round-trips distinguish the NULL group from every real string.
+func (h *HashAggregate) strNullGroupSlot() int32 {
+	if h.strNullGroupIdx >= 0 {
+		return h.strNullGroupIdx
 	}
+	gs := h.gsPool.alloc()
+	gs.ensureExtras().keyValues = []any{nil}
+	h.strNullGroupIdx = int32(len(h.strGroupStates))
+	h.strGroupStates = append(h.strGroupStates, gs)
+	h.keys = append(h.keys, []any{nil})
+	h.serializedKeys = append(h.serializedKeys, "\x01")
+	for ai := range h.intFlatAccs {
+		h.intFlatAccs[ai].appendGroup()
+	}
+	return h.strNullGroupIdx
 }
 
 // consumeBatchGenericSoA is the SoA fast path for multi-column GROUP BY
@@ -2616,6 +2642,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 		h.serializedKeys = nil
 		h.strGroupStates = nil
 		h.strGroupIndex = nil
+		h.strNullGroupIdx = -1
 		// Drop SoA arrays now that the SoA-direct path has finished reading
 		// from them. materializeFlatAccums used to do this implicitly (it
 		// nil'd intFlatAccs on the way through); since Next() no longer calls
@@ -2663,7 +2690,21 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 		if i < len(h.groupColTypes) && h.groupColTypes[i] != 0 {
 			typ = parquet.TypeID(h.groupColTypes[i])
 		}
-		cols = append(cols, parquet.Column{Name: name, Type: typ, Nullable: true})
+		out := parquet.Column{Name: name, Type: typ, Nullable: true}
+		// Decimal group keys need the source Scale/Precision: the output
+		// vector parses keyValues with its OWN scale, so a scale-0 column
+		// stored 0.25 as 0 — every fractional decimal key truncated
+		// (issue #144 suite finding). Nested key columns likewise need
+		// their Fields/ElementType to reconstruct children.
+		if i < len(h.groupColMeta) && h.groupColMeta[i].Type == typ {
+			meta := h.groupColMeta[i]
+			out.Precision = meta.Precision
+			out.Scale = meta.Scale
+			out.Fields = meta.Fields
+			out.ElementType = meta.ElementType
+			out.Dimension = meta.Dimension
+		}
+		cols = append(cols, out)
 	}
 	for _, agg := range h.Aggs {
 		cols = append(cols, parquet.Column{Name: agg.OutputCol, Type: agg.OutputType, Nullable: true})
@@ -2685,6 +2726,7 @@ func (h *HashAggregate) CloneSink() SinkSource {
 		NullGroupCols: h.NullGroupCols,
 		GroupingSets:  h.GroupingSets,
 		// No spill manager — partial aggregates are small enough
+		strNullGroupIdx: -1, // defensive: Init sets it, but the zero value is a VALID slot
 	}
 	return clone
 }
@@ -2708,6 +2750,7 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 	// the workers'.
 	if len(h.groupColTypes) == 0 && len(o.groupColTypes) > 0 {
 		h.groupColTypes = o.groupColTypes
+		h.groupColMeta = o.groupColMeta
 		if len(h.groupColIdx) == 0 {
 			h.groupColIdx = o.groupColIdx
 		}
