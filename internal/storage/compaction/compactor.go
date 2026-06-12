@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,11 +28,26 @@ import (
 // tables — yielding a leading-slash key at the bucket root and silently
 // orphaning data after the old files were deleted from the manifest.
 func compactedFilePath(tableName, partPath string) string {
+	return partitionedOutputPath(tableName, partPath, "compacted")
+}
+
+// partitionedOutputPath builds "<base>_<nanos>.parquet" under the partition's
+// directory. Some writers store the partition path already table-prefixed
+// (the harness datagen primes "tables/<name>/"); blindly joining
+// prefix+partPath then yields "tables/orders/tables/orders//compacted_*" —
+// consistent (write, manifest, and read all use it) but wrong. A prefixed
+// partPath is treated as the full base.
+func partitionedOutputPath(tableName, partPath, base string) string {
 	prefix := partition.TablePrefix(tableName)
-	if partPath == "" {
-		return fmt.Sprintf("%s/compacted_%d.parquet", prefix, time.Now().UnixNano())
+	dir := prefix
+	if partPath != "" {
+		if strings.HasPrefix(partPath, prefix+"/") || partPath == prefix {
+			dir = strings.TrimSuffix(partPath, "/")
+		} else {
+			dir = prefix + "/" + strings.TrimSuffix(partPath, "/")
+		}
 	}
-	return fmt.Sprintf("%s/%s/compacted_%d.parquet", prefix, partPath, time.Now().UnixNano())
+	return fmt.Sprintf("%s/%s_%d.parquet", dir, base, time.Now().UnixNano())
 }
 
 // Config controls compaction trigger thresholds and limits.
@@ -580,14 +596,9 @@ func (c *Compactor) ForceCompactFile(ctx context.Context, tableName string, file
 
 	// Write-before-delete: the streaming merge uploads the new file FIRST
 	// (inside mergeAndWriteFiles), so on failure nothing in the manifest has
-	// changed — no data loss. Mirror compactedFilePath: use the table prefix
-	// so unpartitioned tables (empty partPath) don't land at the bucket root.
-	newPath := ""
-	if partPath == "" {
-		newPath = fmt.Sprintf("%s/rewrite_%d.parquet", partition.TablePrefix(tableName), time.Now().UnixNano())
-	} else {
-		newPath = fmt.Sprintf("%s/%s/rewrite_%d.parquet", partition.TablePrefix(tableName), partPath, time.Now().UnixNano())
-	}
+	// changed — no data loss. partitionedOutputPath handles both empty and
+	// already-table-prefixed partition paths.
+	newPath := partitionedOutputPath(tableName, partPath, "rewrite")
 
 	// Merge the single file (applies delete markers internally; uploads to
 	// newPath unless every row was deleted).
