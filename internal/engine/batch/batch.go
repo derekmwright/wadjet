@@ -156,72 +156,26 @@ func FromRows(schema []parquet.Column, rows []map[string]any) *RecordBatch {
 	return b
 }
 
-// Compact creates a new RecordBatch containing only the active rows.
-// If there is no selection vector, it returns the batch as-is.
+// Compact materializes the selection vector into a contiguous batch using
+// the typed nested-aware value copier. Returns the batch unchanged when no
+// selection vector is set.
+//
+// Was previously a hand-rolled per-type switch whose ROW case wrote null
+// child rows via SetNull alone — never advancing a string child's offset
+// slot — so every later row in that child read back as concatenated
+// garbage (same bug class as the windowCopyVectorRange nullable-BYTES fix;
+// regression test TestCompact_RowChildNullableString).
 func (b *RecordBatch) Compact() *RecordBatch {
 	if b.Sel == nil {
 		return b
 	}
 	n := len(b.Sel)
 	out := NewRecordBatch(b.Schema, n)
-	for di, si := range b.Sel {
-		for j := range b.Schema {
-			src := b.Columns[j]
-			dst := out.Columns[j]
-			if src.Nulls.IsNullFast(int(si)) {
-				dst.Nulls.SetNull(di)
-				switch dst.Type {
-				case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
-					dst.BytesData.Set(di, nil)
-				}
-				continue
-			}
-			dst.Nulls.SetValid(di)
-			switch dst.Type {
-			case TypeBool:
-				dst.BoolData[di] = src.BoolData[si]
-			case TypeInt32, TypePort, TypeProtocol, TypeDate:
-				dst.Int32Data[di] = src.Int32Data[si]
-			case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
-				dst.Int64Data[di] = src.Int64Data[si]
-			case TypeFloat32:
-				dst.Float32Data[di] = src.Float32Data[si]
-			case TypeFloat64:
-				dst.Float64Data[di] = src.Float64Data[si]
-			case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
-				dst.BytesData.SetFrom(di, &src.BytesData, int(si))
-			case TypeDecimal:
-				dst.DecimalData.Data[di] = src.DecimalData.Data[si]
-			case TypeVector:
-				dim := src.VectorDim
-				if dim > 0 {
-					srcOff := int(si) * dim
-					dstOff := di * dim
-					copy(dst.Float32Data[dstOff:dstOff+dim], src.Float32Data[srcOff:srcOff+dim])
-				}
-			case TypeArray, TypeMap:
-				if src.Child != nil && dst.Child != nil {
-					start := int(src.Offsets[si])
-					end := int(src.Offsets[si+1])
-					dstStart := int32(dst.Child.Len)
-					for k := start; k < end; k++ {
-						appendToVector(dst.Child, src.Child.GetValue(k))
-					}
-					dst.Offsets[di] = dstStart
-					dst.Offsets[di+1] = int32(dst.Child.Len)
-				}
-			case TypeRow:
-				for ci, child := range src.Children {
-					if ci < len(dst.Children) {
-						dstChild := dst.Children[ci]
-						if child.Nulls.IsNullFast(int(si)) {
-							dstChild.Nulls.SetNull(di)
-						} else {
-							dstChild.SetValue(di, child.GetValue(int(si)))
-						}
-					}
-				}
-			}
+	for j := range b.Schema {
+		src := b.Columns[j]
+		dst := out.Columns[j]
+		for di, si := range b.Sel {
+			dst.CopyValueFrom(di, src, int(si))
 		}
 	}
 	return out

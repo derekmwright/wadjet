@@ -155,10 +155,12 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 }
 
 // useColumnarRuns reports whether spill goes through the external
-// partition-at-a-time path: every column type must round-trip the columnar
-// run format and there must be a window spec to sort runs by.
+// partition-at-a-time path. Every column type round-trips the columnar run
+// format (nested ARRAY/MAP/ROW included); the only remaining requirement is
+// a window spec to sort runs by — the degenerate no-spec case keeps the
+// legacy row spill.
 func (w *Window) useColumnarRuns() bool {
-	return len(w.groups) > 0 && columnarSpillableSchema(w.schema)
+	return len(w.groups) > 0
 }
 
 // flushSpillLocked drains all buffered batches to disk and releases their
@@ -579,10 +581,11 @@ func windowCopyVectorRange(dst, src *batch.Vector, dstOff, srcOff, count int) {
 	case batch.TypeDecimal:
 		copy(dst.DecimalData.Data[dstOff:dstOff+count], src.DecimalData.Data[srcOff:srcOff+count])
 	default:
+		// Typed per-value copy; handles VECTOR and nested ARRAY/MAP/ROW
+		// (sequential-dst contract holds at every call site — concat and
+		// chunk assembly write ranges in order).
 		for i := 0; i < count; i++ {
-			if !src.Nulls.IsNullFast(srcOff + i) {
-				dst.SetValue(dstOff+i, src.GetValue(srcOff+i))
-			}
+			copyVectorValue(dst, dstOff+i, src, srcOff+i)
 		}
 	}
 }
@@ -658,8 +661,10 @@ func windowGatherVector(dst, src *batch.Vector, perm []int) {
 			}
 		}
 	default:
+		// Typed per-value copy; handles VECTOR and nested ARRAY/MAP/ROW
+		// (perm gathers write dst sequentially).
 		for i, p := range perm {
-			dst.SetValue(i, src.GetValue(p))
+			copyVectorValue(dst, i, src, p)
 		}
 	}
 }

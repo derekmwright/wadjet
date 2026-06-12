@@ -272,3 +272,51 @@ func TestWindowConcat_NullableStringCorruption(t *testing.T) {
 		}
 	}
 }
+
+// TestWindowExternal_NestedPayload: ARRAY and ROW payload columns ride
+// through the columnar run path (write -> resort -> merge -> partition
+// walk -> concat -> output chunk) and must come back value-identical to
+// the in-memory path.
+func TestWindowExternal_NestedPayload(t *testing.T) {
+	elem := parquet.Column{Name: "element", Type: parquet.TypeInt64}
+	schema := []parquet.Column{
+		{Name: "grp", Type: parquet.TypeInt64},
+		{Name: "ts", Type: parquet.TypeInt64},
+		{Name: "tags", Type: parquet.TypeArray, ElementType: &elem, Nullable: true},
+		{Name: "rec", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "a", Type: parquet.TypeInt64},
+			{Name: "b", Type: parquet.TypeString, Nullable: true},
+		}},
+	}
+	cols := []WindowColumn{
+		{Func: WinRowNumber, OutputCol: "rn", OutputType: parquet.TypeInt64,
+			PartitionBy: []string{"grp"}, OrderBy: []SortKey{{Column: "ts", Order: Ascending}}},
+	}
+	rng := rand.New(rand.NewSource(13))
+	var rows []map[string]any
+	for i := 0; i < 180; i++ {
+		var tags any
+		switch i % 4 {
+		case 0:
+			tags = nil
+		case 1:
+			tags = []any{}
+		default:
+			tags = []any{int64(i), int64(i % 9)}
+		}
+		var b any
+		if i%5 == 0 {
+			b = nil
+		} else {
+			b = fmt.Sprintf("b%d", i)
+		}
+		rows = append(rows, map[string]any{
+			"grp":  int64(rng.Intn(6)),
+			"ts":   int64(i),
+			"tags": tags,
+			"rec":  map[string]any{"a": int64(i * 3), "b": b},
+		})
+	}
+	runWindowBothPaths(t, schema, cols, rows, 16,
+		[]string{"grp", "ts", "tags", "rec", "rn"})
+}

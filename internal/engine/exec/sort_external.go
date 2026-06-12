@@ -37,20 +37,6 @@ var minSortRunBytes int64 = 64 << 20
 // multi-level path with few runs.
 var maxMergeFanIn = 64
 
-// columnarSpillableSchema reports whether every column type round-trips
-// through the columnar spill format (writeColumnarBatch/readColumnarBatch).
-// Nested types do not — schemas containing them fall back to the legacy
-// row-oriented spill path, which boxes but is correct.
-func columnarSpillableSchema(schema []parquet.Column) bool {
-	for _, c := range schema {
-		switch c.Type {
-		case parquet.TypeArray, parquet.TypeMap, parquet.TypeRow:
-			return false
-		}
-	}
-	return true
-}
-
 // resolvedSortKey is a sort key resolved against a concrete batch set: column
 // index plus the typed comparison kernel with null ordering baked in.
 type resolvedSortKey struct {

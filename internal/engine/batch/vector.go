@@ -1085,3 +1085,275 @@ func parseDateString(s string) int32 {
 	}
 	return int32(t.Sub(epochDate).Hours() / 24)
 }
+
+// --- Nested-aware typed copy primitives ---
+//
+// These three primitives are the kernel surface that lets Sort/Window
+// columnar runs and the run merger carry ARRAY/MAP/ROW columns without
+// boxing. They share one contract with BytesColumn: destinations are
+// written SEQUENTIALLY (row 0, 1, 2, ...), and null rows still advance
+// variable-length bookkeeping (array offsets, row children) — skipping a
+// null would shift every later row's elements.
+
+// NewVectorLike returns an empty (zero-row) vector with src's type and
+// nested structure: child element types, ROW field names, VECTOR dim and
+// DECIMAL scale. Element storage is appended by AppendFrom.
+func NewVectorLike(src *Vector) *Vector {
+	if src == nil {
+		return nil
+	}
+	v := &Vector{Type: src.Type}
+	switch src.Type {
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		v.BytesData = NewBytesColumn(0)
+	case TypeDecimal:
+		v.DecimalData = NewDecimalColumn(0, src.DecimalData.Scale)
+	case TypeVector:
+		v.VectorDim = src.VectorDim
+	case TypeArray, TypeMap:
+		v.Offsets = []int32{0}
+		v.Child = NewVectorLike(src.Child)
+	case TypeRow:
+		v.Children = make([]*Vector, len(src.Children))
+		for j, ch := range src.Children {
+			v.Children[j] = NewVectorLike(ch)
+		}
+		v.FieldNames = append([]string(nil), src.FieldNames...)
+	}
+	return v
+}
+
+// AppendFrom appends src[si] to dst, growing dst by one row. Typed copy —
+// no boxing, no string round-trips — recursive for nested types. dst's
+// nested structure must match src's (build it with NewVectorLike).
+func (v *Vector) AppendFrom(src *Vector, si int) {
+	idx := v.Len
+	v.Len++
+	v.Nulls = v.Nulls.Grow(v.Len)
+	isNull := src.Nulls.IsNull(si)
+	if isNull {
+		v.Nulls.SetNull(idx)
+	}
+	switch v.Type {
+	case TypeBool:
+		var x bool
+		if !isNull {
+			x = src.BoolData[si]
+		}
+		v.BoolData = append(v.BoolData, x)
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		var x int32
+		if !isNull {
+			x = src.Int32Data[si]
+		}
+		v.Int32Data = append(v.Int32Data, x)
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		var x int64
+		if !isNull {
+			x = src.Int64Data[si]
+		}
+		v.Int64Data = append(v.Int64Data, x)
+	case TypeFloat32:
+		var x float32
+		if !isNull {
+			x = src.Float32Data[si]
+		}
+		v.Float32Data = append(v.Float32Data, x)
+	case TypeFloat64:
+		var x float64
+		if !isNull {
+			x = src.Float64Data[si]
+		}
+		v.Float64Data = append(v.Float64Data, x)
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		if isNull {
+			v.BytesData.Offsets = append(v.BytesData.Offsets, uint32(len(v.BytesData.Data)))
+		} else {
+			start, end := src.BytesData.Offsets[si], src.BytesData.Offsets[si+1]
+			v.BytesData.Data = append(v.BytesData.Data, src.BytesData.Data[start:end]...)
+			v.BytesData.Offsets = append(v.BytesData.Offsets, uint32(len(v.BytesData.Data)))
+		}
+	case TypeDecimal:
+		var x Int128
+		if !isNull {
+			x = src.DecimalData.Data[si]
+		}
+		v.DecimalData.Data = append(v.DecimalData.Data, x)
+	case TypeVector:
+		dim := v.VectorDim
+		if dim > 0 {
+			off := len(v.Float32Data)
+			v.Float32Data = append(v.Float32Data, make([]float32, dim)...)
+			if !isNull {
+				copy(v.Float32Data[off:off+dim], src.Float32Data[si*dim:(si+1)*dim])
+			}
+		}
+	case TypeArray, TypeMap:
+		if v.Child == nil && src.Child != nil {
+			v.Child = NewVectorLike(src.Child)
+		}
+		last := v.Offsets[len(v.Offsets)-1]
+		if isNull || src.Child == nil {
+			v.Offsets = append(v.Offsets, last)
+		} else {
+			start, end := src.Offsets[si], src.Offsets[si+1]
+			for j := start; j < end; j++ {
+				v.Child.AppendFrom(src.Child, int(j))
+			}
+			v.Offsets = append(v.Offsets, last+(end-start))
+		}
+	case TypeRow:
+		if v.Children == nil && src.Children != nil {
+			v.Children = make([]*Vector, len(src.Children))
+			for j, ch := range src.Children {
+				v.Children[j] = NewVectorLike(ch)
+			}
+			v.FieldNames = append([]string(nil), src.FieldNames...)
+		}
+		for j, child := range v.Children {
+			if isNull || j >= len(src.Children) {
+				appendToVector(child, nil)
+			} else {
+				child.AppendFrom(src.Children[j], si)
+			}
+		}
+	}
+}
+
+// CopyValueFrom writes src[si] into position di of dst using typed access —
+// no boxing, no string round-trips — for every column type including nested
+// ARRAY/MAP/ROW. Fixed-width slots are indexed; variable-length storage
+// (bytes data, array child elements, lazily-created row children) is
+// appended, so writes must be SEQUENTIAL per column (di = 0, 1, 2, ...) —
+// the same contract BytesColumn.Set has always had. Null source rows still
+// advance offsets and children; skipping them would shift every later row.
+//
+// Destination shape is flexible per level: parent slots may be
+// pre-allocated (NewRecordBatch with full nested schema) or append-built
+// (NewVectorLike); ROW children handle both — indexed writes when
+// pre-allocated, appends when built lazily.
+func (v *Vector) CopyValueFrom(di int, src *Vector, si int) {
+	isNull := src.Nulls.IsNull(si)
+	if isNull {
+		v.Nulls.SetNull(di)
+	} else {
+		v.Nulls.SetValid(di)
+	}
+	switch v.Type {
+	case TypeBool:
+		if !isNull {
+			v.BoolData[di] = src.BoolData[si]
+		}
+	case TypeInt32, TypePort, TypeProtocol, TypeDate:
+		if !isNull {
+			v.Int32Data[di] = src.Int32Data[si]
+		}
+	case TypeInt64, TypeTimestamp, TypeIPv4, TypeMAC, TypeDuration:
+		if !isNull {
+			v.Int64Data[di] = src.Int64Data[si]
+		}
+	case TypeFloat32:
+		if !isNull {
+			v.Float32Data[di] = src.Float32Data[si]
+		}
+	case TypeFloat64:
+		if !isNull {
+			v.Float64Data[di] = src.Float64Data[si]
+		}
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		if isNull {
+			v.BytesData.Set(di, nil)
+		} else {
+			v.BytesData.SetFrom(di, &src.BytesData, si)
+		}
+	case TypeDecimal:
+		if !isNull {
+			v.DecimalData.Data[di] = src.DecimalData.Data[si]
+		}
+	case TypeVector:
+		dim := src.VectorDim
+		if v.VectorDim == 0 {
+			v.VectorDim = dim
+		}
+		if dim > 0 {
+			need := (di + 1) * dim
+			if len(v.Float32Data) < need {
+				v.Float32Data = append(v.Float32Data, make([]float32, need-len(v.Float32Data))...)
+			}
+			if !isNull {
+				copy(v.Float32Data[di*dim:(di+1)*dim], src.Float32Data[si*dim:(si+1)*dim])
+			}
+		}
+	case TypeArray, TypeMap:
+		if v.Child == nil && src.Child != nil {
+			v.Child = NewVectorLike(src.Child)
+		}
+		var base int32
+		if v.Child != nil {
+			base = int32(v.Child.Len)
+		}
+		v.Offsets[di] = base
+		if isNull || src.Child == nil {
+			v.Offsets[di+1] = base
+			return
+		}
+		start, end := src.Offsets[si], src.Offsets[si+1]
+		for j := start; j < end; j++ {
+			v.Child.AppendFrom(src.Child, int(j))
+		}
+		v.Offsets[di+1] = base + (end - start)
+	case TypeRow:
+		if v.Children == nil && src.Children != nil {
+			v.Children = make([]*Vector, len(src.Children))
+			for j, ch := range src.Children {
+				v.Children[j] = NewVectorLike(ch)
+			}
+			v.FieldNames = append([]string(nil), src.FieldNames...)
+		}
+		for j, child := range v.Children {
+			srcOK := !isNull && j < len(src.Children)
+			if child.Len > di {
+				// Pre-allocated parallel child (NewRecordBatch with nested
+				// schema): indexed write.
+				if srcOK {
+					child.CopyValueFrom(di, src.Children[j], si)
+				} else {
+					writeNullAt(child, di)
+				}
+			} else {
+				// Append-built child (NewVectorLike): grow by one.
+				if srcOK {
+					child.AppendFrom(src.Children[j], si)
+				} else {
+					appendToVector(child, nil)
+				}
+			}
+		}
+	}
+}
+
+// writeNullAt writes a null into position di of a pre-allocated vector,
+// advancing variable-length bookkeeping (bytes offsets, array offsets, row
+// children) so later sequential writes stay aligned.
+func writeNullAt(v *Vector, di int) {
+	v.Nulls.SetNull(di)
+	switch v.Type {
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		v.BytesData.Set(di, nil)
+	case TypeArray, TypeMap:
+		var base int32
+		if v.Child != nil {
+			base = int32(v.Child.Len)
+		}
+		v.Offsets[di] = base
+		v.Offsets[di+1] = base
+	case TypeRow:
+		for _, child := range v.Children {
+			if child.Len > di {
+				writeNullAt(child, di)
+			} else {
+				appendToVector(child, nil)
+			}
+		}
+	}
+}
