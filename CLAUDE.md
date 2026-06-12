@@ -71,7 +71,7 @@ SQL text
 - **Selection vectors**: Filtering marks indices instead of copying rows
 - **Push-based pipelines**: Source → UnaryOperator chain → Sink
 - **Pipeline breakers**: Aggregate, Sort, Window act as SinkSource (consume all, then produce)
-- **Spill-to-disk**: All pipeline breakers degrade gracefully past memory — HashJoin (grace partition-on-arrival), HashAggregate (partial-state k-way merge), Sort and Window (sorted-run external merge, streaming k-way). Residuals that still materialize fully: window specs with empty PARTITION BY, nested-type (Array/Map/Row) schemas in Sort/Window (legacy row spill).
+- **Spill-to-disk**: All pipeline breakers degrade gracefully past memory — HashJoin (grace partition-on-arrival), HashAggregate (partial-state k-way merge), Sort and Window (sorted-run external merge, streaming k-way; empty-PARTITION-BY windows stream via a two-pass evaluator over the runs; nested Array/Map/Row schemas ride the columnar run format). Remaining bound: cume_dist holds back the open ORDER-BY peer group; window-partition peak memory is the largest single partition.
 - **Batch pooling**: `BatchPool` for zero-alloc batch reuse
 
 ### Core Interfaces

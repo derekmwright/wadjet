@@ -269,6 +269,36 @@ func (w *Window) finalizeExternal() error {
 			return err
 		}
 	}
+	if len(last.partitionBy) == 0 {
+		// Final group with no PARTITION BY: two-pass streaming instead of
+		// accumulating the whole input as one partition (window_global.go).
+		merger, runs, err := openRunMerger(dir, passSchema, last.sortKeys, runs)
+		if err != nil {
+			removeRunFiles(runs)
+			return err
+		}
+		stats, err := collectGlobalWindowStats(merger, passSchema, last)
+		merger.close()
+		if err != nil {
+			removeRunFiles(runs)
+			return err
+		}
+		merger2, runs2, err := openRunMerger(dir, passSchema, last.sortKeys, runs)
+		if err != nil {
+			removeRunFiles(runs)
+			return err
+		}
+		w.ext = &windowExtState{
+			global:    newGlobalWindowStreamer(merger2, passSchema, last, stats, charge),
+			merger:    merger2,
+			schema:    passSchema,
+			group:     last,
+			reorder:   buildWindowReorder(len(w.schema), w.groups, len(w.Columns)),
+			outSchema: w.buildOutputSchema(),
+			runs:      runs2,
+		}
+		return nil
+	}
 	merger, runs, err := openRunMerger(dir, passSchema, last.sortKeys, runs)
 	if err != nil {
 		removeRunFiles(runs)
@@ -498,6 +528,20 @@ func (w *Window) nextExternal() (*batch.RecordBatch, error) {
 		}
 		if e.done {
 			return nil, nil
+		}
+		if e.global != nil {
+			b, err := e.global.Next()
+			if err != nil {
+				return nil, err
+			}
+			if b == nil {
+				e.cleanup()
+				return nil, nil
+			}
+			out := reorderBatchColumns(b, e.reorder, e.outSchema)
+			e.queue = chunkBatch(out, batch.DefaultBatchSize)
+			e.qpos = 0
+			continue
 		}
 		parts, bytes, err := e.walker.nextPartition()
 		if err != nil {

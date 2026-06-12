@@ -14,8 +14,8 @@ import (
 // k-way merge, and materializes ONE partition at a time: peak memory is the
 // largest partition plus one buffered batch per run. Window columns with an
 // empty PARTITION BY form a single partition spanning the input — that case
-// (like DuckDB's holistic aggregates) still materializes fully; partitioned
-// windows degrade gracefully.
+// streams through the two-pass evaluator in window_global.go instead of
+// materializing (lead/cume_dist hold back a bounded lookahead window).
 //
 // Window columns are grouped by identical (PartitionBy, OrderBy). Each group
 // is one pass: re-sort runs by the group's keys (skipped for the first group,
@@ -410,6 +410,11 @@ func chunkBatch(b *batch.RecordBatch, size int) []*batch.RecordBatch {
 // a single new run (the pass preserves the merge's sort order). Consumed runs
 // are deleted. Returns the new run list and the augmented schema.
 func windowDiskPass(dir string, schema []parquet.Column, runs []string, g windowSpecGroup, charge func(int64)) ([]string, []parquet.Column, error) {
+	if len(g.partitionBy) == 0 {
+		// Empty PARTITION BY: the walker would accumulate the whole input
+		// as one partition. Stream it twice instead (window_global.go).
+		return globalWindowDiskPass(dir, schema, runs, g, charge)
+	}
 	merger, runs, err := openRunMerger(dir, schema, g.sortKeys, runs)
 	if err != nil {
 		return nil, nil, err
@@ -491,6 +496,7 @@ func reorderBatchColumns(b *batch.RecordBatch, reorder []int, outSchema []parque
 // windowExtState is the final group's streaming state, driven by Next().
 type windowExtState struct {
 	walker    *partitionWalker
+	global    *globalWindowStreamer // non-nil when the final group has no PARTITION BY
 	merger    *runMerger
 	schema    []parquet.Column // input schema of the final pass
 	group     windowSpecGroup
@@ -503,6 +509,10 @@ type windowExtState struct {
 }
 
 func (e *windowExtState) cleanup() {
+	if e.global != nil {
+		e.global.release()
+		e.global = nil
+	}
 	if e.merger != nil {
 		e.merger.close()
 		e.merger = nil

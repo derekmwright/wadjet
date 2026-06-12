@@ -320,3 +320,206 @@ func TestWindowExternal_NestedPayload(t *testing.T) {
 	runWindowBothPaths(t, schema, cols, rows, 16,
 		[]string{"grp", "ts", "tags", "rec", "rn"})
 }
+
+// TestWindowGlobal_AllFunctions: empty PARTITION BY with ORDER BY containing
+// duplicate keys (real peer groups), covering every window function through
+// the two-pass streaming path against the in-memory reference.
+func TestWindowGlobal_AllFunctions(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "ts", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64},
+		{Name: "s", Type: parquet.TypeString, Nullable: true},
+	}
+	ob := []SortKey{{Column: "ts", Order: Ascending}}
+	cols := []WindowColumn{
+		{Func: WinRowNumber, OutputCol: "rn", OutputType: parquet.TypeInt64, OrderBy: ob},
+		{Func: WinRank, OutputCol: "rk", OutputType: parquet.TypeInt64, OrderBy: ob},
+		{Func: WinDenseRank, OutputCol: "drk", OutputType: parquet.TypeInt64, OrderBy: ob},
+		{Func: WinPercentRank, OutputCol: "prk", OutputType: parquet.TypeFloat64, OrderBy: ob},
+		{Func: WinCumeDist, OutputCol: "cd", OutputType: parquet.TypeFloat64, OrderBy: ob},
+		{Func: WinSum, InputCol: "v", OutputCol: "rsum", OutputType: parquet.TypeFloat64, OrderBy: ob},
+		{Func: WinCount, OutputCol: "rcnt", OutputType: parquet.TypeInt64, OrderBy: ob},
+		{Func: WinAvg, InputCol: "v", OutputCol: "ravg", OutputType: parquet.TypeFloat64, OrderBy: ob},
+		{Func: WinMin, InputCol: "v", OutputCol: "rmin", OutputType: parquet.TypeFloat64, OrderBy: ob},
+		{Func: WinMax, InputCol: "v", OutputCol: "rmax", OutputType: parquet.TypeFloat64, OrderBy: ob},
+		{Func: WinLag, InputCol: "s", OutputCol: "lag2", OutputType: parquet.TypeString, OrderBy: ob, LagLeadOffset: 2, LagLeadDefault: "DFLT"},
+		{Func: WinLead, InputCol: "s", OutputCol: "lead3", OutputType: parquet.TypeString, OrderBy: ob, LagLeadOffset: 3},
+		{Func: WinFirstValue, InputCol: "s", OutputCol: "fv", OutputType: parquet.TypeString, OrderBy: ob},
+		{Func: WinLastValue, InputCol: "s", OutputCol: "lv", OutputType: parquet.TypeString, OrderBy: ob},
+		{Func: WinNthValue, InputCol: "s", OutputCol: "nth5", OutputType: parquet.TypeString, OrderBy: ob, NthValueN: 5},
+		{Func: WinNtile, OutputCol: "nt", OutputType: parquet.TypeInt64, OrderBy: ob, NtileBuckets: 7},
+	}
+	rng := rand.New(rand.NewSource(21))
+	var rows []map[string]any
+	for i := 0; i < 260; i++ {
+		var sv any
+		if i%7 == 0 {
+			sv = nil
+		} else {
+			sv = fmt.Sprintf("s%d", i)
+		}
+		rows = append(rows, map[string]any{
+			"ts": int64(i / 3), // duplicates → 3-row peer groups
+			"v":  float64(rng.Intn(1000)),
+			"s":  sv,
+		})
+	}
+	runWindowBothPaths(t, schema, cols, rows, 16, []string{
+		"ts", "v", "s", "rn", "rk", "drk", "prk", "cd", "rsum", "rcnt",
+		"ravg", "rmin", "rmax", "lag2", "lead3", "fv", "lv", "nth5", "nt"})
+}
+
+// TestWindowGlobal_NoOrderBy: whole-partition aggregates with neither
+// PARTITION BY nor ORDER BY — pass-1 scalars broadcast to every row.
+func TestWindowGlobal_NoOrderBy(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	cols := []WindowColumn{
+		{Func: WinSum, InputCol: "v", OutputCol: "tsum", OutputType: parquet.TypeFloat64},
+		{Func: WinCount, OutputCol: "tcnt", OutputType: parquet.TypeInt64},
+		{Func: WinAvg, InputCol: "v", OutputCol: "tavg", OutputType: parquet.TypeFloat64},
+		{Func: WinMin, InputCol: "v", OutputCol: "tmin", OutputType: parquet.TypeFloat64},
+		{Func: WinMax, InputCol: "v", OutputCol: "tmax", OutputType: parquet.TypeFloat64},
+		{Func: WinLastValue, InputCol: "v", OutputCol: "tlast", OutputType: parquet.TypeFloat64},
+	}
+	var rows []map[string]any
+	for i := 0; i < 200; i++ {
+		rows = append(rows, map[string]any{"id": int64(i), "v": float64((i * 37) % 211)})
+	}
+	runWindowBothPaths(t, schema, cols, rows, 16,
+		[]string{"id", "v", "tsum", "tcnt", "tavg", "tmin", "tmax", "tlast"})
+}
+
+// TestWindowGlobal_MixedWithPartitioned: a partitioned group and a global
+// group in both orders, exercising the global path as a non-final disk pass
+// and as the final streaming pass (plus the re-sort between groups).
+func TestWindowGlobal_MixedWithPartitioned(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "grp", Type: parquet.TypeInt64},
+		{Name: "ts", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	rng := rand.New(rand.NewSource(31))
+	var rows []map[string]any
+	for i := 0; i < 220; i++ {
+		rows = append(rows, map[string]any{
+			"grp": int64(rng.Intn(5)),
+			"ts":  int64(i),
+			"v":   float64(rng.Intn(500)),
+		})
+	}
+	// Global group declared first → runs as a non-final disk pass.
+	colsGlobalFirst := []WindowColumn{
+		{Func: WinRank, OutputCol: "grank", OutputType: parquet.TypeInt64,
+			OrderBy: []SortKey{{Column: "v", Order: Descending}}},
+		{Func: WinSum, InputCol: "v", OutputCol: "psum", OutputType: parquet.TypeFloat64,
+			PartitionBy: []string{"grp"}, OrderBy: []SortKey{{Column: "ts", Order: Ascending}}},
+	}
+	runWindowBothPaths(t, schema, colsGlobalFirst, rows, 16,
+		[]string{"grp", "ts", "v", "grank", "psum"})
+
+	// Partitioned group first → global group is the final streaming pass.
+	colsGlobalLast := []WindowColumn{
+		{Func: WinRowNumber, OutputCol: "prn", OutputType: parquet.TypeInt64,
+			PartitionBy: []string{"grp"}, OrderBy: []SortKey{{Column: "ts", Order: Ascending}}},
+		{Func: WinCumeDist, OutputCol: "gcd", OutputType: parquet.TypeFloat64,
+			OrderBy: []SortKey{{Column: "v", Order: Ascending}}},
+	}
+	runWindowBothPaths(t, schema, colsGlobalLast, rows, 16,
+		[]string{"grp", "ts", "v", "prn", "gcd"})
+}
+
+// TestWindowGlobal_StreamingBoundsMemory drives the pass-2 streamer directly
+// over real run files and asserts pending-batch charge stays bounded by a
+// few batches while the input is far larger — the property the global path
+// exists to provide (the walker it replaces accumulated the whole input).
+func TestWindowGlobal_StreamingBoundsMemory(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "ts", Type: parquet.TypeInt64},
+		{Name: "v", Type: parquet.TypeFloat64},
+	}
+	dir := t.TempDir()
+
+	const nBatches, rowsPer = 40, 1024
+	var batches []*batch.RecordBatch
+	var totalBytes, maxBatchBytes int64
+	for bi := 0; bi < nBatches; bi++ {
+		rows := make([]map[string]any, rowsPer)
+		for i := range rows {
+			rows[i] = map[string]any{"ts": int64(bi*rowsPer + i), "v": float64(i)}
+		}
+		b := batch.FromRows(schema, rows)
+		batches = append(batches, b)
+		mb := b.MemBytes()
+		totalBytes += mb
+		if mb > maxBatchBytes {
+			maxBatchBytes = mb
+		}
+	}
+	keys := []SortKey{{Column: "ts", Order: Ascending}}
+	run, err := sortBatchesToRun(dir, schema, batches, nBatches*rowsPer, keys, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := windowSpecGroup{
+		orderBy:  keys,
+		sortKeys: keys,
+		cols: []WindowColumn{
+			{Func: WinRowNumber, OutputCol: "rn", OutputType: parquet.TypeInt64, OrderBy: keys},
+			{Func: WinSum, InputCol: "v", OutputCol: "rsum", OutputType: parquet.TypeFloat64, OrderBy: keys},
+		},
+	}
+
+	m1, runs, err := openRunMerger(dir, schema, keys, []string{run})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, err := collectGlobalWindowStats(m1, schema, g)
+	m1.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.n != nBatches*rowsPer {
+		t.Fatalf("stats.n = %d, want %d", stats.n, nBatches*rowsPer)
+	}
+
+	m2, runs, err := openRunMerger(dir, schema, keys, runs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m2.close()
+	defer removeRunFiles(runs)
+
+	var cur, peak int64
+	charge := func(d int64) {
+		cur += d
+		if cur > peak {
+			peak = cur
+		}
+	}
+	st := newGlobalWindowStreamer(m2, schema, g, stats, charge)
+	var rows int64
+	for {
+		b, err := st.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			break
+		}
+		rows += int64(b.Len)
+	}
+	if rows != stats.n {
+		t.Fatalf("streamed %d rows, want %d", rows, stats.n)
+	}
+	if cur != 0 {
+		t.Fatalf("outstanding charge after drain: %d, want 0", cur)
+	}
+	// Streaming bound: a handful of batches, never the whole input.
+	if peak > 4*maxBatchBytes {
+		t.Fatalf("peak pending charge %d exceeds 4x max batch (%d) — not streaming (total input %d)", peak, maxBatchBytes, totalBytes)
+	}
+}
