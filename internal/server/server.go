@@ -1193,6 +1193,11 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 			writeError(w, http.StatusInternalServerError, "physical plan error: "+err.Error())
 			return
 		}
+		// The pipeline is never run for EXPLAIN, but planning may have
+		// materialized CTEs to spill scratch — release it now.
+		if physPlan.Cleanup != nil {
+			physPlan.Cleanup()
+		}
 		planStr += "\n\n-- Physical Plan --\n" + physPlan.PrettyPrint()
 	}
 

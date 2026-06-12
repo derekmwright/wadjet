@@ -1003,3 +1003,121 @@ func TestLiteralProjectionType(t *testing.T) {
 }
 
 
+
+// TestCTEColumnarMaterialization is the regression suite for issue #127:
+// materialized CTEs moved from boxed map[string]any rows (unbounded heap)
+// to a columnar spill-backed collector replayed per reference. These tests
+// pin the behaviors the conversion must preserve: multi-reference replay
+// sees identical data, and the boxed path's first-row string→numeric
+// coercion (expression-evaluator literals) still applies.
+func TestCTEColumnarMaterialization(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	db, err := Open(ctx, Config{Store: store, Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	schema := parquet.Schema{
+		Columns: []parquet.Column{
+			{Name: "id", Type: parquet.TypeInt64},
+			{Name: "grp", Type: parquet.TypeString},
+			{Name: "val", Type: parquet.TypeFloat64},
+		},
+	}
+	if err := db.CreateTable(ctx, "metrics", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	ing := db.NewIngester("metrics", schema, nil, ingest.Config{MaxBufferRows: 1000, RowGroupSize: 1000})
+	rows := make([]map[string]any, 0, 600)
+	for i := 0; i < 600; i++ {
+		rows = append(rows, map[string]any{
+			"id":  int64(i),
+			"grp": fmt.Sprintf("g%d", i%3),
+			"val": float64(i),
+		})
+	}
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("multi_reference_replays_identical", func(t *testing.T) {
+		// Two references to the same CTE — each replays the collector
+		// without consuming it, so both branches must see all 600 rows.
+		result, err := db.Query(ctx, `
+			WITH m AS (
+				SELECT id, grp, val FROM metrics
+			)
+			SELECT id FROM m UNION ALL SELECT id FROM m
+		`)
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+		if len(result.Rows) != 1200 {
+			t.Fatalf("expected 1200 rows (600 per reference), got %d", len(result.Rows))
+		}
+	})
+
+	t.Run("cte_with_filter_and_aggregate_ref", func(t *testing.T) {
+		// A filtered CTE feeding an aggregate — replayed batches carry
+		// selection vectors through the collector round-trip.
+		result, err := db.Query(ctx, `
+			WITH filtered AS (
+				SELECT id, val FROM metrics WHERE id < 100
+			)
+			SELECT COUNT(*) AS c FROM filtered
+		`)
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+		if len(result.Rows) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(result.Rows))
+		}
+		if fmt.Sprintf("%v", result.Rows[0]["c"]) != "100" {
+			t.Fatalf("COUNT = %v, want 100", result.Rows[0]["c"])
+		}
+	})
+
+	t.Run("literal_cte_numeric_coercion", func(t *testing.T) {
+		// The expression evaluator can emit numeric literals as strings;
+		// the boxed CTE path coerced them via inferCTESchema's first-row
+		// rule. The columnar path must preserve that (cteCoercingSink) so
+		// arithmetic over a literal CTE still works.
+		result, err := db.Query(ctx, `
+			WITH t AS (SELECT 7 AS n)
+			SELECT n + 1 AS m FROM t
+		`)
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+		if len(result.Rows) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(result.Rows))
+		}
+		if got := fmt.Sprintf("%v", result.Rows[0]["m"]); got != "8" {
+			t.Fatalf("n + 1 = %v, want 8", result.Rows[0]["m"])
+		}
+	})
+
+	t.Run("string_data_not_coerced", func(t *testing.T) {
+		// Real string columns must never be touched by the literal
+		// coercion ("g0" doesn't parse; and a numeric-looking string
+		// column would only coerce if its FIRST row parses — same rule
+		// as the boxed path).
+		result, err := db.Query(ctx, `
+			WITH m AS (SELECT grp FROM metrics)
+			SELECT grp FROM m WHERE grp = 'g1'
+		`)
+		if err != nil {
+			t.Fatalf("query failed: %v", err)
+		}
+		if len(result.Rows) != 200 {
+			t.Fatalf("expected 200 rows, got %d", len(result.Rows))
+		}
+		if result.Rows[0]["grp"] != "g1" {
+			t.Fatalf("grp = %v (%T), want string g1", result.Rows[0]["grp"], result.Rows[0]["grp"])
+		}
+	})
+}

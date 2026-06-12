@@ -322,6 +322,11 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 		if err != nil {
 			return nil, fmt.Errorf("building physical plan: %w", err)
 		}
+		// The pipeline is never run for EXPLAIN, but planning may have
+		// materialized CTEs to spill scratch - release it now.
+		if physPlan.Cleanup != nil {
+			physPlan.Cleanup()
+		}
 		plan += "\n\n-- Physical Plan --\n" + physPlan.PrettyPrint()
 	}
 
