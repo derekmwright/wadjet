@@ -7,6 +7,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/alerts"
 	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	sql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 )
@@ -160,26 +161,46 @@ func (e *coordinatorExecutor) Execute(ctx context.Context, sqlText string) error
 }
 
 // Query runs a SELECT and returns rows as []map[string]any.
-// SQLResult.Rows() materializes RecordBatch slices into row maps; we cap at
-// limit here but count all rows for the total. This is adequate for the
-// threshold-style queries alerts use (low cardinality).
+// Rows are boxed batch-by-batch and only until limit is reached — alerts
+// run unattended on every scheduled tick on a GOMEMLIMIT'd coordinator, so
+// boxing the full result via rs.Rows() before truncating (the previous
+// shape) charged every tick for the query's whole cardinality, firing or
+// not. Truncation is detected from row counts, never by boxing the excess.
 func (e *coordinatorExecutor) Query(ctx context.Context, sqlText string, limit int) ([]map[string]any, []alerts.ColumnMeta, int64, bool, error) {
 	rs, err := e.c.ExecuteSQL(ctx, sqlText)
 	if err != nil {
 		return nil, nil, 0, false, err
 	}
-	all := rs.Rows()
-	total := rs.TotalRows
+	boxed, truncated := boxRowsUpTo(rs.Batches, limit)
 	// Build column schema from the Columns list. Type information is not
 	// carried through SQLResult at this time, so Type is left empty.
 	schema := make([]alerts.ColumnMeta, 0, len(rs.Columns))
 	for _, name := range rs.Columns {
 		schema = append(schema, alerts.ColumnMeta{Name: name})
 	}
-	truncated := false
-	if limit > 0 && len(all) > limit {
-		all = all[:limit]
-		truncated = true
+	return boxed, schema, rs.TotalRows, truncated, nil
+}
+
+// boxRowsUpTo materializes batch rows into maps, stopping once limit rows
+// are boxed (limit <= 0 means no limit). The excess is never boxed; the
+// truncated flag reports whether any active rows were left behind.
+func boxRowsUpTo(batches []*batch.RecordBatch, limit int) ([]map[string]any, bool) {
+	var boxed []map[string]any
+	for _, b := range batches {
+		if limit > 0 && len(boxed) >= limit {
+			if b.ActiveLen() > 0 {
+				return boxed, true
+			}
+			continue
+		}
+		rows := b.ToRows()
+		if limit > 0 && len(boxed)+len(rows) > limit {
+			boxed = append(boxed, rows[:limit-len(boxed)]...)
+			// More active rows exist past the cap — truncated, and any
+			// remaining batches need not be examined.
+			return boxed, true
+		}
+		boxed = append(boxed, rows...)
 	}
-	return all, schema, total, truncated, nil
+	return boxed, false
 }
