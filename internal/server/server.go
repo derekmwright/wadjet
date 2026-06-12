@@ -726,9 +726,17 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 
 	schema := tableMeta.Schema.Columns
 	var totalUpdated int64
-	var markers []catalog.DeleteMarker
-	var updatedRows []map[string]any
+	var ing *ingest.Ingester
 
+	// Per-file streaming: box only the matched rows (the previous ToRows
+	// boxed every row of every file even at zero WHERE selectivity), commit
+	// that file's delete markers, then ingest its updated rows so the
+	// ingester's auto-flush bounds memory — accumulating updatedRows
+	// table-wide held the whole table as boxed maps on a broad UPDATE.
+	// Markers commit before the matching re-ingest, preserving the original
+	// failure direction (a crash loses that file's updated rows; it never
+	// duplicates them). The transactional marker+ingest commit is a known
+	// separate issue.
 	for _, part := range manifest.Partitions {
 		for _, file := range part.Files {
 			b, err := readDMLFile(ctx, cat, file.Path, schema)
@@ -738,7 +746,6 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 			if b == nil {
 				continue
 			}
-			allRows := b.ToRows()
 			var indices []int64
 			for i := 0; i < b.Len; i++ {
 				if predicate == nil || predicate(b, i) {
@@ -748,9 +755,9 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 			if len(indices) == 0 {
 				continue
 			}
-			markers = append(markers, catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices})
+			updatedRows := make([]map[string]any, 0, len(indices))
 			for _, idx := range indices {
-				row := allRows[idx]
+				row := b.RowAt(int(idx))
 				for _, sc := range info.SetClauses {
 					v, convErr := convertDMLValue(sc.Value, typeMap[sc.Column])
 					if convErr != nil {
@@ -760,21 +767,21 @@ func executeDMLUpdate(ctx context.Context, cat *catalog.Catalog, info *plansql.U
 				}
 				updatedRows = append(updatedRows, row)
 			}
+			marker := catalog.DeleteMarker{FilePath: file.Path, RowIndices: indices}
+			if err := cat.AddDeleteMarkers(ctx, info.Table, []catalog.DeleteMarker{marker}); err != nil {
+				return nil, fmt.Errorf("recording delete markers: %w", err)
+			}
+			if ing == nil {
+				ing = ingest.New(cat, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
+			}
+			if err := ing.Ingest(ctx, updatedRows); err != nil {
+				return nil, fmt.Errorf("inserting updated rows: %w", err)
+			}
 			totalUpdated += int64(len(indices))
 		}
 	}
 
-	if len(markers) > 0 {
-		if err := cat.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
-			return nil, fmt.Errorf("recording delete markers: %w", err)
-		}
-	}
-
-	if len(updatedRows) > 0 {
-		ing := ingest.New(cat, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
-		if err := ing.Ingest(ctx, updatedRows); err != nil {
-			return nil, fmt.Errorf("inserting updated rows: %w", err)
-		}
+	if ing != nil {
 		if err := ing.FlushAll(ctx); err != nil {
 			return nil, fmt.Errorf("flushing updated rows: %w", err)
 		}

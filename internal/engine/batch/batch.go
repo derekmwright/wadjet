@@ -236,6 +236,18 @@ func (b *RecordBatch) Compact() *RecordBatch {
 	return out
 }
 
+// RowAt boxes a single physical row (Sel is not consulted) as a map.
+// For callers that need a few rows out of a large batch — boxing the whole
+// batch via ToRows for a low-selectivity pick is the documented multi-GB
+// heap pattern.
+func (b *RecordBatch) RowAt(i int) map[string]any {
+	row := make(map[string]any, len(b.Schema))
+	for j, col := range b.Schema {
+		row[col.Name] = b.Columns[j].GetValue(i)
+	}
+	return row
+}
+
 // ToRows converts a RecordBatch to row-oriented data.
 func (b *RecordBatch) ToRows() []map[string]any {
 	rows := make([]map[string]any, 0, b.ActiveLen())
