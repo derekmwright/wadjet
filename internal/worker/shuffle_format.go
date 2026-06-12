@@ -90,6 +90,19 @@ func (sw *shuffleWriter) writeHeader() error {
 		if _, err := sw.w.Write(sw.buf[:1]); err != nil {
 			return err
 		}
+		// DECIMAL carries scale+precision: the chunk data is the raw
+		// scaled integer, so a reader without the scale rebuilds a
+		// scale-0 vector and every value renders 10^scale too large
+		// (distributed GROUP BY decimal keys lost their fraction —
+		// issue #144 suite finding). Written only for decimal columns;
+		// all WSHF readers consume it conditionally on the type byte.
+		if col.Type == parquet.TypeDecimal {
+			sw.buf[0] = uint8(col.Scale)
+			sw.buf[1] = uint8(col.Precision)
+			if _, err := sw.w.Write(sw.buf[:2]); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -359,9 +372,18 @@ func (sw *shuffleWriter) writeDecimalData(vec *batch.Vector, sel []uint32, numRo
 		_, err := sw.w.Write(gb[:nbytes])
 		return err
 	}
-	// Int128 struct {Lo uint64; Hi int64} has matching little-endian layout.
-	raw := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(vec.DecimalData.Data[:numRows]))), nbytes)
-	_, err := sw.w.Write(raw)
+	// Wire order is (Lo, Hi), matching the sel path above, the
+	// coordinator's readShuffleColumn, and the exec spill format. The
+	// previous unsafe memcpy assumed the struct was {Lo, Hi} — it is
+	// {Hi, Lo} — so no-sel chunks hit explicit-order readers field-swapped
+	// and every decimal decoded as garbage (issue #144 suite finding).
+	gb := sw.ensureGather(nbytes)
+	for i := 0; i < numRows; i++ {
+		d := vec.DecimalData.Data[i]
+		binary.LittleEndian.PutUint64(gb[i*16:], d.Lo)
+		binary.LittleEndian.PutUint64(gb[i*16+8:], uint64(d.Hi))
+	}
+	_, err := sw.w.Write(gb[:nbytes])
 	return err
 }
 
@@ -409,6 +431,14 @@ func newShuffleChunkReader(data []byte) (*shuffleChunkReader, error) {
 		schema[i].Type = parquet.TypeID(data[pos])
 		schema[i].Nullable = true
 		pos++
+		if schema[i].Type == parquet.TypeDecimal {
+			if pos+2 > len(data) {
+				return nil, fmt.Errorf("truncated decimal schema at column %d", i)
+			}
+			schema[i].Scale = int(data[pos])
+			schema[i].Precision = int(data[pos+1])
+			pos += 2
+		}
 	}
 
 	return &shuffleChunkReader{
@@ -483,6 +513,14 @@ func shuffleReadBatches(data []byte) ([]*batch.RecordBatch, error) {
 		schema[i].Type = parquet.TypeID(data[pos])
 		schema[i].Nullable = true
 		pos++
+		if schema[i].Type == parquet.TypeDecimal {
+			if pos+2 > len(data) {
+				return nil, fmt.Errorf("truncated decimal schema at column %d", i)
+			}
+			schema[i].Scale = int(data[pos])
+			schema[i].Precision = int(data[pos+1])
+			pos += 2
+		}
 	}
 
 	// Read chunks
@@ -623,8 +661,16 @@ func readDecimalData(data []byte, pos int, vec *batch.Vector, numRows int) (int,
 	if vec.DecimalData.Data == nil {
 		return pos + nbytes, nil
 	}
-	dstBytes := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(vec.DecimalData.Data[:numRows]))), nbytes)
-	copy(dstBytes, data[pos:pos+nbytes])
+	// Wire order is (Lo, Hi) — see shuffleWriter.writeDecimalData. The
+	// previous raw struct memcpy assumed (Hi, Lo) and field-swapped any
+	// chunk produced by the explicit-order writer paths.
+	for i := 0; i < numRows; i++ {
+		off := pos + i*16
+		vec.DecimalData.Data[i] = batch.Int128{
+			Lo: binary.LittleEndian.Uint64(data[off:]),
+			Hi: int64(binary.LittleEndian.Uint64(data[off+8:])),
+		}
+	}
 	return pos + nbytes, nil
 }
 

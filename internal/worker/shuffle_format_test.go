@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -279,4 +280,63 @@ func BenchmarkShuffleWriteVsParquet(b *testing.B) {
 		}
 	})
 
+}
+
+// Regression test for the WSHF decimal schema header (issue #144 suite
+// finding): the header carried only (name, type), so the receiving side
+// rebuilt decimal columns at scale 0 and every value rendered as its raw
+// scaled integer — distributed GROUP BY decimal keys came back as "25"
+// instead of "0.25". Scale+precision now ride the header for decimal
+// columns only.
+func TestShuffleFormatDecimalScaleRoundTrip(t *testing.T) {
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "amount", Type: parquet.TypeDecimal, Nullable: true, Precision: 12, Scale: 2},
+	}
+	b := batch.NewRecordBatch(schema, 3)
+	for i, v := range []int64{325, -150, 1234} { // 3.25, -1.50, 12.34 at scale 2
+		b.Columns[0].Int64Data[i] = int64(i)
+		b.Columns[0].Nulls.SetValid(i)
+		b.Columns[1].DecimalData.Data[i] = batch.Int128From(v)
+		b.Columns[1].Nulls.SetValid(i)
+	}
+	b.Len = 3
+
+	var buf bytes.Buffer
+	sw := newShuffleWriter(&buf, schema)
+	if err := sw.writeHeader(); err != nil {
+		t.Fatal(err)
+	}
+	sel := []uint32{0, 1, 2}
+	if err := sw.writeChunk(b.Columns, sel, 3); err != nil {
+		t.Fatal(err)
+	}
+	payload := buf.Bytes()
+	payload[4] = 1 // patch chunk count like the gather sink does
+
+	out, err := shuffleReadBatches(payload)
+	if err != nil {
+		t.Fatalf("shuffleReadBatches: %v", err)
+	}
+	if len(out) != 1 || out[0].Len != 3 {
+		t.Fatalf("got %d batches", len(out))
+	}
+	if got := out[0].Schema[1].Scale; got != 2 {
+		t.Fatalf("decoded schema scale = %d, want 2 (header lost it)", got)
+	}
+	want := []string{"3.25", "-1.5", "12.34"}
+	for i, w := range want {
+		if got := fmt.Sprintf("%v", out[0].Columns[1].GetValue(i)); got != w {
+			t.Fatalf("row %d: %v, want %s", i, got, w)
+		}
+	}
+
+	// The streaming chunk reader parses the same header.
+	cr, err := newShuffleChunkReader(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cr.schema[1].Scale; got != 2 {
+		t.Fatalf("chunk reader schema scale = %d, want 2", got)
+	}
 }
