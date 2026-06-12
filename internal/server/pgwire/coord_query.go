@@ -46,43 +46,51 @@ func (c *pgConn) canBypassDB() bool {
 	return c.authProvider == nil && c.identity == nil
 }
 
-// queryViaCoord executes sql through coord.ExecuteSQL and adapts the result
-// into a *wadjet.QueryResult shape that the existing pgwire send-row path
-// can consume. Rows are materialized batch-by-batch via batch.RecordBatch.ToRows
-// — which is bounded by the batch size (~2K rows) per call but the returned
-// slice is the full row set. The OOM win is that we no longer flow through
-// the legacy CollectSink.Finalize path that allocates the same rows once at
-// the planner pipeline and once at db.Query.
+// queryViaCoord executes sql through coord.ExecuteSQL. The columnar batches
+// are returned as-is, NOT boxed into QueryResult.Rows — the send path boxes
+// one batch (~2K rows) at a time via sendResultRows. The previous shape
+// (batchesToRows up front) materialized the full row set (~10x the columnar
+// footprint) on top of the already-held Batches before writing a single
+// DataRow, on the no-auth standalone/edge production profile — exactly what
+// SQLResult's doc forbids.
 //
-// For Q18 SF10 (60M intermediate rows reduced to 100 by LIMIT), the ToRows
-// allocation in this adapter only sees the 100 final rows because coord's
-// native-DAG executor produces the post-LIMIT batches at Gather. Legacy
-// db.Query materialized the full pre-LIMIT pipeline output.
-func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, error) {
+// For Q18 SF10 (60M intermediate rows reduced to 100 by LIMIT), boxing here
+// only ever sees the 100 final rows because coord's native-DAG executor
+// produces the post-LIMIT batches at Gather. Legacy db.Query materialized
+// the full pre-LIMIT pipeline output.
+func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, []*batch.RecordBatch, error) {
 	res, err := c.coord.ExecuteSQL(ctx, sql)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	rows := batchesToRows(res.Batches)
-	return &wadjet.QueryResult{
-		Columns: res.Columns,
-		Rows:    rows,
-	}, nil
+	batches := res.Batches
+	res.Batches = nil
+	return &wadjet.QueryResult{Columns: res.Columns}, batches, nil
 }
 
-// batchesToRows materializes columnar batches into row form. Bounded
-// allocation per batch (one slice grow per batch instead of per row).
-func batchesToRows(batches []*batch.RecordBatch) []map[string]any {
-	if len(batches) == 0 {
-		return nil
+// sendResultRows emits a DataRow per result row and returns the count sent.
+// Columnar batches (coord path) are boxed one batch at a time, dropping each
+// batch reference once sent so peak boxed residency stays one batch; boxed
+// rows (legacy db path) are sent as-is. fmtCodes selects the formatted
+// variant used by the extended protocol; nil sends text-format rows.
+func (c *pgConn) sendResultRows(columns []string, batches []*batch.RecordBatch, rows []map[string]any, fmtCodes []int16) int {
+	sent := 0
+	send := func(row map[string]any) {
+		if len(fmtCodes) > 0 {
+			c.sendDataRowFormatted(columns, row, fmtCodes)
+		} else {
+			c.sendDataRow(columns, row)
+		}
+		sent++
 	}
-	total := 0
-	for _, b := range batches {
-		total += b.ActiveLen()
+	for i := range batches {
+		for _, row := range batches[i].ToRows() {
+			send(row)
+		}
+		batches[i] = nil
 	}
-	out := make([]map[string]any, 0, total)
-	for _, b := range batches {
-		out = append(out, b.ToRows()...)
+	for _, row := range rows {
+		send(row)
 	}
-	return out
+	return sent
 }
