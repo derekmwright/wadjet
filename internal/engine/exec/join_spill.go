@@ -444,6 +444,15 @@ func writeColumnarBatch(w *bufio.Writer, b *batch.RecordBatch) error {
 		w.Write(buf[:2])
 		w.WriteString(name)
 
+		// DECIMAL scale+precision: the data section stores raw scaled
+		// integers, so a reader without the scale rebuilds a scale-0
+		// vector and every spilled decimal renders 10^scale too large
+		// (same class as the WSHF header fix — issue #144).
+		if col.Type == batch.TypeDecimal {
+			w.WriteByte(byte(col.DecimalData.Scale))
+			w.WriteByte(byte(b.Schema[i].Precision))
+		}
+
 		// Nullable flag from schema
 		if b.Schema[i].Nullable {
 			w.WriteByte(1)
@@ -601,6 +610,11 @@ func writeNestedVector(w *bufio.Writer, v *batch.Vector, n int, buf []byte) erro
 		return nil
 	}
 	w.WriteByte(byte(v.Type))
+	// DECIMAL children carry their scale (same rationale as the top-level
+	// column header — the data section is raw scaled integers).
+	if v.Type == batch.TypeDecimal {
+		w.WriteByte(byte(v.DecimalData.Scale))
+	}
 	if v.Nulls.HasNulls() {
 		w.WriteByte(1)
 		bitmapLen := (n + 7) / 8
@@ -629,7 +643,15 @@ func readNestedVector(r *bufio.Reader, n int, buf []byte) (*batch.Vector, error)
 		}
 		return nil, nil
 	}
-	v := batch.NewVector(parquet.TypeID(typeByte), n)
+	scale := 0
+	if parquet.TypeID(typeByte) == parquet.TypeDecimal {
+		sb, err := r.ReadByte()
+		if err != nil {
+			return nil, fmt.Errorf("reading nested decimal scale: %w", err)
+		}
+		scale = int(sb)
+	}
+	v := batch.NewVectorWithScale(parquet.TypeID(typeByte), n, scale)
 	hasNulls, err := r.ReadByte()
 	if err != nil {
 		return nil, fmt.Errorf("reading nested hasNulls: %w", err)
@@ -688,21 +710,39 @@ func readColumnarBatch(r *bufio.Reader) (*batch.RecordBatch, error) {
 			return nil, fmt.Errorf("reading column name: %w", err)
 		}
 
+		typeID := parquet.TypeID(typeByte)
+
+		// DECIMAL scale+precision (written after the name — see
+		// writeColumnarBatch).
+		scale, precision := 0, 0
+		if typeID == parquet.TypeDecimal {
+			sb, err := r.ReadByte()
+			if err != nil {
+				return nil, fmt.Errorf("reading decimal scale: %w", err)
+			}
+			pb, err := r.ReadByte()
+			if err != nil {
+				return nil, fmt.Errorf("reading decimal precision: %w", err)
+			}
+			scale, precision = int(sb), int(pb)
+		}
+
 		// Nullable
 		nullable, err := r.ReadByte()
 		if err != nil {
 			return nil, fmt.Errorf("reading nullable flag: %w", err)
 		}
 
-		typeID := parquet.TypeID(typeByte)
 		schema[i] = parquet.Column{
-			Name:     string(nameBuf),
-			Type:     typeID,
-			Nullable: nullable == 1,
+			Name:      string(nameBuf),
+			Type:      typeID,
+			Nullable:  nullable == 1,
+			Scale:     scale,
+			Precision: precision,
 		}
 
 		// Create vector for this column
-		col := batch.NewVector(typeID, numRows)
+		col := batch.NewVectorWithScale(typeID, numRows, scale)
 		cols[i] = col
 
 		// Null bitmap

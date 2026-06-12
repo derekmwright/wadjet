@@ -289,6 +289,19 @@ func nodeToColumn(n *SchemaNode) Column {
 		if col.Type == TypeVector && col.Dimension <= 0 && n.TypeLength > 0 {
 			col.Dimension = int(n.TypeLength) / 4 // TypeLength = dim × sizeof(float32)
 		}
+		if col.Type == TypeDecimal {
+			// Without precision/scale the read-side vector decodes the
+			// scaled integer with scale 0 — every decimal value silently
+			// off by 10^scale (issue #144 suite finding).
+			if n.LogicalType != nil {
+				col.Precision = n.LogicalType.Precision
+				col.Scale = n.LogicalType.Scale
+			}
+			if col.Precision == 0 && n.Precision > 0 {
+				col.Precision = int(n.Precision)
+				col.Scale = int(n.Scale)
+			}
+		}
 		return col
 	}
 

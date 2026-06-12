@@ -49,6 +49,17 @@ func readShuffleBatches(data []byte) ([]*batch.RecordBatch, error) {
 		schema[i].Type = parquet.TypeID(data[pos])
 		schema[i].Nullable = true
 		pos++
+		// Decimal columns carry scale+precision after the type byte (see
+		// worker shuffleWriter.writeHeader) — without them the decoded
+		// vector renders the raw scaled integer (fraction lost).
+		if schema[i].Type == parquet.TypeDecimal {
+			if pos+2 > len(data) {
+				return nil, fmt.Errorf("truncated decimal schema at column %d", i)
+			}
+			schema[i].Scale = int(data[pos])
+			schema[i].Precision = int(data[pos+1])
+			pos += 2
+		}
 	}
 
 	batches := make([]*batch.RecordBatch, 0, numChunks)
