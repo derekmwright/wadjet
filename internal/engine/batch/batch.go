@@ -135,13 +135,68 @@ func (b *RecordBatch) Reset(numRows int) {
 	b.Len = numRows
 	b.Sel = nil
 	for _, col := range b.Columns {
-		col.Len = numRows
-		col.Nulls.ResetNonNull(numRows)
-		switch col.Type {
-		case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
-			col.BytesData.Reset()
+		resetVectorForReuse(col, numRows)
+	}
+}
+
+// resetVectorForReuse clears a vector's per-row state for pooled reuse,
+// recursing into nested children. Without the recursion, a pooled ROW/ARRAY
+// column kept its previous cycle's child arenas, offsets and null bits —
+// the first reused row read back the prior batch's data concatenated with
+// the new value, and child arenas grew monotonically per reuse cycle.
+func resetVectorForReuse(col *Vector, numRows int) {
+	col.Len = numRows
+	col.Nulls.ResetNonNull(numRows)
+	switch col.Type {
+	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
+		col.BytesData.Reset()
+	case TypeArray, TypeMap:
+		for i := 0; i < numRows+1 && i < len(col.Offsets); i++ {
+			col.Offsets[i] = 0
+		}
+		if col.Child != nil {
+			resetVectorForReuse(col.Child, 0)
+			// Child element storage is append-built; truncate the arenas so
+			// CopyValueFrom/AppendFrom start from a zero-length child.
+			truncateVectorStorage(col.Child)
+		}
+	case TypeRow:
+		for _, ch := range col.Children {
+			resetVectorForReuse(ch, numRows)
 		}
 	}
+}
+
+// truncateVectorStorage re-slices a vector's element storage to zero length
+// (capacity retained for reuse). Recurses into nested children.
+func truncateVectorStorage(v *Vector) {
+	v.Len = 0
+	v.BoolData = v.BoolData[:0]
+	v.Int32Data = v.Int32Data[:0]
+	v.Int64Data = v.Int64Data[:0]
+	v.Float32Data = v.Float32Data[:0]
+	v.Float64Data = v.Float64Data[:0]
+	if v.DecimalData.Data != nil {
+		v.DecimalData.Data = v.DecimalData.Data[:0]
+	}
+	v.BytesData.Reset()
+	if len(v.BytesData.Offsets) > 0 {
+		v.BytesData.Offsets = v.BytesData.Offsets[:1]
+		v.BytesData.Offsets[0] = 0
+	}
+	if v.Type == TypeArray || v.Type == TypeMap {
+		if len(v.Offsets) > 0 {
+			v.Offsets = v.Offsets[:1]
+			v.Offsets[0] = 0
+		}
+		if v.Child != nil {
+			truncateVectorStorage(v.Child)
+		}
+	}
+	for _, ch := range v.Children {
+		truncateVectorStorage(ch)
+	}
+	v.Nulls.ResetNonNull(0)
 }
 
 // FromRows creates a RecordBatch from row-oriented data.

@@ -1392,6 +1392,14 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 		for ci := range schema {
 			result.Columns[ci].Nulls.SetValid(ri)
 		}
+		// A NULL group key is a legitimate group (GROUP BY over nullable
+		// columns); the blanket SetValid above would resurface it as a
+		// zero value. Re-propagate source nulls for the key columns.
+		for _, ci := range groupByIdx {
+			if mr.sourceBatch.Columns[ci].Nulls.IsNullFast(mr.sourceRow) {
+				result.Columns[ci].Nulls.SetNull(ri)
+			}
+		}
 	}
 	result.Len = len(groupOrder)
 
@@ -1416,6 +1424,14 @@ func copyVectorValue(dst *batch.Vector, dstRow int, src *batch.Vector, srcRow in
 		dst.BytesData.Set(dstRow, src.BytesData.Value(srcRow))
 	case parquet.TypeBool:
 		dst.BoolData[dstRow] = src.BoolData[srcRow]
+	case parquet.TypeDecimal:
+		// Decimal has dedicated Int128 storage; the old switch silently
+		// wrote NOTHING for it, so merged Decimal group-by columns came
+		// back zero.
+		dst.DecimalData.Data[dstRow] = src.DecimalData.Data[srcRow]
+	default:
+		// Nested and any future types: the typed nested-aware copier.
+		dst.CopyValueFrom(dstRow, src, srcRow)
 	}
 }
 
@@ -1601,8 +1617,13 @@ func extractValue(vec *batch.Vector, row int, typ parquet.TypeID) any {
 		return string(vec.BytesData.Value(row))
 	case parquet.TypeBool:
 		return vec.BoolData[row]
+	case parquet.TypeDecimal:
+		// Was missing: every Decimal group key extracted as nil, encoding
+		// to the SAME merge key — distinct decimal groups collapsed into
+		// one, corrupting aggregates, not just the key column.
+		return vec.DecimalData.Data[row]
 	default:
-		return nil
+		return vec.GetValue(row)
 	}
 }
 

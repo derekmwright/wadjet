@@ -95,16 +95,23 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 				Type:     typ,
 				Nullable: true,
 			}
-			// Preserve type metadata for parameterized types.
+			// Preserve type metadata for parameterized types — including
+			// nested structure: without Fields/ElementType the pooled
+			// destination vectors have nil Children/Child and every nested
+			// value was silently dropped (rows still marked valid).
 			if srcIdx := in.ColumnIndex(proj.Name); srcIdx >= 0 {
 				col.Dimension = in.Schema[srcIdx].Dimension
 				col.Scale = in.Schema[srcIdx].Scale
 				col.Precision = in.Schema[srcIdx].Precision
+				col.Fields = in.Schema[srcIdx].Fields
+				col.ElementType = in.Schema[srcIdx].ElementType
 			} else if proj.SourceCol != "" {
 				if srcIdx := in.ColumnIndex(proj.SourceCol); srcIdx >= 0 {
 					col.Dimension = in.Schema[srcIdx].Dimension
 					col.Scale = in.Schema[srcIdx].Scale
 					col.Precision = in.Schema[srcIdx].Precision
+					col.Fields = in.Schema[srcIdx].Fields
+					col.ElementType = in.Schema[srcIdx].ElementType
 				}
 			}
 			schema[i] = col

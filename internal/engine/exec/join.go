@@ -3407,11 +3407,11 @@ func gatherCrossBuildVector(dst *batch.Vector, srcIdx int, pairs []crossPair, bu
 
 // setVectorNull marks a position as null, handling BytesColumn offset alignment.
 func setVectorNull(dst *batch.Vector, row int) {
-	dst.Nulls.SetNull(row)
-	switch dst.Type {
-	case batch.TypeString, batch.TypeBytes, batch.TypeIPv6, batch.TypeCIDR, batch.TypeUUID:
-		dst.BytesData.Set(row, nil)
-	}
+	// WriteNullAt advances variable-length bookkeeping for every column
+	// shape. The old inline switch covered only the flat bytes types, so an
+	// unmatched outer-join row over a nested build column skipped its
+	// offset/child slot and every later row read back shifted/concatenated.
+	dst.WriteNullAt(row)
 }
 
 // semiProbeInt64 is the inlined semi-join probe for int64 keys without nulls or bloom.
