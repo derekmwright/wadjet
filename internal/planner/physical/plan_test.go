@@ -1369,3 +1369,30 @@ func TestDeferredJoinBridgeBuildError(t *testing.T) {
 	}
 }
 
+
+// TestBuildTopN_WiresSpillManager: ORDER BY ... LIMIT plans must attach the
+// spill manager like plain ORDER BY does — without it the pre-sort input
+// buffered fully untracked (the top-K heap only runs at finalize).
+func TestBuildTopN_WiresSpillManager(t *testing.T) {
+	cat, ctx := setupCatalog(t)
+	p := NewPlanner(cat)
+	p.MemoryBudget = 1 << 30
+
+	node := logical.NewScan("events", "e")
+	sortNode := logical.NewSort(node, []logical.OrderExpr{{Column: "event_id"}})
+
+	src, _, _, err := p.buildTopN(ctx, sortNode, 10)
+	if err != nil {
+		t.Fatalf("buildTopN: %v", err)
+	}
+	adapter, ok := src.(*sortSourceAdapter)
+	if !ok {
+		t.Fatalf("expected sortSourceAdapter, got %T", src)
+	}
+	if adapter.sort.Spill == nil {
+		t.Fatal("buildTopN left Sort.Spill nil — pre-sort input is untracked and unspillable")
+	}
+	if adapter.sort.Limit != 10 {
+		t.Fatalf("Limit = %d, want 10", adapter.sort.Limit)
+	}
+}

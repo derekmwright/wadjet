@@ -704,6 +704,7 @@ func globalWindowDiskPass(dir string, schema []parquet.Column, runs []string, g 
 	for {
 		b, err := streamer.Next()
 		if err != nil {
+			streamer.release()
 			sw.close()
 			removeRunFiles(runs2)
 			return nil, nil, err
@@ -713,6 +714,7 @@ func globalWindowDiskPass(dir string, schema []parquet.Column, runs []string, g 
 		}
 		for _, chunk := range chunkBatch(b, batch.DefaultBatchSize) {
 			if err := sw.writeBatch(chunk); err != nil {
+				streamer.release()
 				sw.close()
 				removeRunFiles(runs2)
 				return nil, nil, err

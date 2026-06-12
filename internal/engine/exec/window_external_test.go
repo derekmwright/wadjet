@@ -523,3 +523,25 @@ func TestWindowGlobal_StreamingBoundsMemory(t *testing.T) {
 		t.Fatalf("peak pending charge %d exceeds 4x max batch (%d) — not streaming (total input %d)", peak, maxBatchBytes, totalBytes)
 	}
 }
+
+// TestPartitionWalker_ReleaseCurrent: an error mid-accumulation must not
+// strand the walker's in-flight partition charge on the shared tracker.
+func TestPartitionWalker_ReleaseCurrent(t *testing.T) {
+	var outstanding int64
+	charge := func(d int64) { outstanding += d }
+	w := &partitionWalker{charge: charge}
+
+	schema := []parquet.Column{{Name: "k", Type: parquet.TypeInt64}}
+	b := batch.FromRows(schema, []map[string]any{{"k": int64(1)}, {"k": int64(1)}})
+	w.appendSegment(b, 0, b.Len)
+	if outstanding <= 0 {
+		t.Fatal("appendSegment did not charge")
+	}
+	w.releaseCurrent()
+	if outstanding != 0 {
+		t.Fatalf("outstanding charge after releaseCurrent: %d, want 0", outstanding)
+	}
+	if len(w.cur) != 0 || w.curBytes != 0 {
+		t.Fatal("walker state not cleared")
+	}
+}

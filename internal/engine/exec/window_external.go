@@ -182,6 +182,21 @@ func (w *partitionWalker) takeCurrent() ([]*batch.RecordBatch, int64) {
 	return parts, bytes
 }
 
+// releaseCurrent drops the charge for a partition still being accumulated —
+// the teardown path for an error mid-accumulation. Without it the charge
+// (ForceReserve on the worker-lifetime shared tracker) was stranded
+// permanently: up to largest-partition-sized phantom reservation per failed
+// window query, poisoning admission and spill decisions for later tasks.
+func (w *partitionWalker) releaseCurrent() {
+	if w.curBytes > 0 && w.charge != nil {
+		w.charge(-w.curBytes)
+	}
+	w.cur = nil
+	w.curBytes = 0
+	w.lastB = nil
+	w.pending = nil
+}
+
 // releasePartition returns a finished partition's charge to the tracker.
 func (w *partitionWalker) releasePartition(bytes int64) {
 	if w.charge != nil && bytes > 0 {
@@ -435,6 +450,7 @@ func windowDiskPass(dir string, schema []parquet.Column, runs []string, g window
 	for {
 		parts, bytes, err := walker.nextPartition()
 		if err != nil {
+			walker.releaseCurrent()
 			sw.close()
 			return nil, nil, err
 		}
@@ -512,6 +528,10 @@ func (e *windowExtState) cleanup() {
 	if e.global != nil {
 		e.global.release()
 		e.global = nil
+	}
+	if e.walker != nil {
+		e.walker.releaseCurrent()
+		e.walker = nil
 	}
 	if e.merger != nil {
 		e.merger.close()

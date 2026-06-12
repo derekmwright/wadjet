@@ -207,6 +207,18 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 			s.fallbackBatchIdx++
 			return b, nil
 		}
+		if s.fallbackBatches != nil {
+			// Fallback exhausted — release the mmap/local temp backing it
+			// before advancing, mirroring the parquetIter branch above.
+			// Without this, openNextFile overwrote mmapData/localPath and a
+			// multi-file Array/Map source leaked N-1 mmaps + temp files (in
+			// the worker-lifetime spill dir, outside the per-task sweeps)
+			// plus permanent mmapRegistry entries.
+			s.fallbackBatches = nil
+			s.fallbackBatchIdx = 0
+			s.releaseParquetIter()
+			s.releaseCurrentFile()
+		}
 
 		// All files exhausted.
 		if s.fileIdx >= len(s.files) {
@@ -661,7 +673,10 @@ func (s *cachedFileStreamSource) openShuffleFromLocalFile(localPath string) erro
 	s.chunkReader = r
 	s.mmapData = mmapData
 	s.mmapRegion = registerMmap(mmapData) // nil when relief disabled
-	// Intentionally leave s.localPath empty — LocalStageCache owns this file.
+	// LocalStageCache owns this file — clear localPath EXPLICITLY rather
+	// than assuming it is empty: a stale path from a previous file would
+	// make releaseCurrentFile delete the wrong file later.
+	s.localPath = ""
 	return nil
 }
 
