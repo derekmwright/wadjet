@@ -20,6 +20,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/coordinator"
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/citc-tech/wadjet/wadjet"
@@ -40,7 +41,7 @@ type Server struct {
 	queryTimeout time.Duration
 	authProvider *auth.Provider // nil = no auth enforcement
 	querySem     chan struct{}  // nil = unlimited concurrent queries
-	queryQueue   int64         // atomic: number of queries waiting for admission
+	queryQueue   int64          // atomic: number of queries waiting for admission
 }
 
 // SetCoordinator attaches a coordinator so SELECT statements stream through
@@ -57,12 +58,12 @@ func (s *Server) SetCoordinator(coord *coordinator.Coordinator) {
 
 // Config holds configuration for the pgwire server.
 type Config struct {
-	Addr              string         // listen address, e.g. ":5433"
-	TLSConfig         *tls.Config    // nil = plain TCP
-	MaxConnections    int            // 0 = unlimited
-	MaxConcurrentQry  int            // 0 = unlimited concurrent queries
-	QueryTimeout      time.Duration  // 0 = no timeout
-	AuthProvider      *auth.Provider // nil = no auth enforcement
+	Addr             string         // listen address, e.g. ":5433"
+	TLSConfig        *tls.Config    // nil = plain TCP
+	MaxConnections   int            // 0 = unlimited
+	MaxConcurrentQry int            // 0 = unlimited concurrent queries
+	QueryTimeout     time.Duration  // 0 = no timeout
+	AuthProvider     *auth.Provider // nil = no auth enforcement
 }
 
 // NewServer creates a new PostgreSQL wire protocol server.
@@ -204,26 +205,27 @@ type pgConn struct {
 	conn         net.Conn
 	db           *wadjet.DB
 	coord        *coordinator.Coordinator // optional: routes SELECT through native-DAG when non-nil
-	server       *Server        // back-pointer for query admission
+	server       *Server                  // back-pointer for query admission
 	logger       *slog.Logger
 	buf          []byte
-	tlsConfig    *tls.Config    // non-nil = offer TLS upgrade on SSLRequest
-	queryTimeout time.Duration  // server-level default; overridden by statement_timeout
+	tlsConfig    *tls.Config   // non-nil = offer TLS upgrade on SSLRequest
+	queryTimeout time.Duration // server-level default; overridden by statement_timeout
 
 	// Authentication
-	authProvider *auth.Provider  // nil = no auth
-	identity     *auth.Identity  // set after successful auth
+	authProvider *auth.Provider // nil = no auth
+	identity     *auth.Identity // set after successful auth
 
 	// Session variables (SET key = value)
 	sessionVars map[string]string
 
 	// Extended Query protocol state
-	preparedSQL     string            // last parsed statement SQL
-	portalSQL       string            // last bound portal SQL
-	stmts           map[string]string // named prepared statements
-	described       bool              // true if Describe was sent for current portal
-	resultFmtCodes  []int16           // result format codes from Bind (0=text, 1=binary)
-	describeResult  *wadjet.QueryResult // cached Describe result for Execute reuse
+	preparedSQL     string               // last parsed statement SQL
+	portalSQL       string               // last bound portal SQL
+	stmts           map[string]string    // named prepared statements
+	described       bool                 // true if Describe was sent for current portal
+	resultFmtCodes  []int16              // result format codes from Bind (0=text, 1=binary)
+	describeResult  *wadjet.QueryResult  // cached Describe result for Execute reuse
+	describeBatches []*batch.RecordBatch // columnar half of describeResult (coord path)
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
@@ -778,9 +780,10 @@ func (c *pgConn) handleQuery(sql string) {
 		return
 	}
 	var result *wadjet.QueryResult
+	var batches []*batch.RecordBatch
 	var err error
 	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-		result, err = c.queryViaCoord(ctx, sql)
+		result, batches, err = c.queryViaCoord(ctx, sql)
 	} else {
 		result, err = c.db.Query(ctx, sql)
 	}
@@ -798,7 +801,7 @@ func (c *pgConn) handleQuery(sql string) {
 			columns = append(columns, k)
 		}
 	}
-	if len(columns) == 0 && len(result.Rows) == 0 {
+	if len(columns) == 0 && len(result.Rows) == 0 && len(batches) == 0 {
 		c.sendEmptyQuery()
 		c.sendReadyForQuery()
 		return
@@ -809,13 +812,12 @@ func (c *pgConn) handleQuery(sql string) {
 		c.sendRowDescription(columns)
 	}
 
-	// Send DataRow for each row
-	for _, row := range result.Rows {
-		c.sendDataRow(columns, row)
-	}
+	// Send DataRow for each row — coord-path batches are boxed and sent
+	// one batch at a time, never materialized as a whole.
+	sent := c.sendResultRows(columns, batches, result.Rows, nil)
 
 	// Send CommandComplete
-	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(result.Rows)))
+	c.sendCommandComplete(fmt.Sprintf("SELECT %d", sent))
 	c.sendReadyForQuery()
 }
 
@@ -834,6 +836,7 @@ func (c *pgConn) handleParse(payload []byte) {
 	}
 	c.described = false
 	c.describeResult = nil // invalidate cached result for new statement
+	c.describeBatches = nil
 
 	// Send ParseComplete ('1')
 	c.sendMsg('1', nil)
@@ -972,9 +975,10 @@ func (c *pgConn) describeSQL(sql string) {
 	ctx, cancel := c.queryContext()
 	defer cancel()
 	var result *wadjet.QueryResult
+	var batches []*batch.RecordBatch
 	var err error
 	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-		result, err = c.queryViaCoord(ctx, sql)
+		result, batches, err = c.queryViaCoord(ctx, sql)
 	} else {
 		result, err = c.db.Query(ctx, sql)
 	}
@@ -985,6 +989,7 @@ func (c *pgConn) describeSQL(sql string) {
 		return
 	}
 	c.describeResult = result
+	c.describeBatches = batches
 
 	if len(result.ColumnMetas) > 0 {
 		c.sendTypedRowDescription(result.ColumnMetas)
@@ -1052,15 +1057,18 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// RowDescription (critical for SELECT * where Go map iteration order
 	// is non-deterministic).
 	var result *wadjet.QueryResult
+	var batches []*batch.RecordBatch
 	if c.describeResult != nil {
 		result = c.describeResult
+		batches = c.describeBatches
 		c.describeResult = nil
+		c.describeBatches = nil
 	} else {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		var err error
 		if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-			result, err = c.queryViaCoord(ctx, sql)
+			result, batches, err = c.queryViaCoord(ctx, sql)
 		} else {
 			result, err = c.db.Query(ctx, sql)
 		}
@@ -1083,14 +1091,9 @@ func (c *pgConn) handleExecute(payload []byte) {
 
 	// Extended query protocol: Execute sends only DataRow + CommandComplete.
 	// RowDescription was already sent by Describe. Do NOT send it again.
-	for _, row := range result.Rows {
-		if len(c.resultFmtCodes) > 0 {
-			c.sendDataRowFormatted(columns, row, c.resultFmtCodes)
-		} else {
-			c.sendDataRow(columns, row)
-		}
-	}
-	c.sendCommandComplete(fmt.Sprintf("SELECT %d", len(result.Rows)))
+	// Coord-path batches are boxed and sent one batch at a time.
+	sent := c.sendResultRows(columns, batches, result.Rows, c.resultFmtCodes)
+	c.sendCommandComplete(fmt.Sprintf("SELECT %d", sent))
 }
 
 func (c *pgConn) handleClose(payload []byte) {
@@ -1503,10 +1506,10 @@ func (c *pgConn) handleAttributeQuery(ctx context.Context, normalized string) bo
 // Drivers like pgjdbc query pg_type to map OIDs to Java types.
 func (c *pgConn) handlePgType(normalized string) bool {
 	type pgType struct {
-		oid      string
-		typname  string
-		typlen   string
-		typtype  string
+		oid          string
+		typname      string
+		typlen       string
+		typtype      string
 		typnamespace string
 	}
 

@@ -5,8 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
+	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
 func newTestCoordinator(t *testing.T) *Coordinator {
@@ -76,5 +78,47 @@ func TestCreateAlertRejectedWhenDisabled(t *testing.T) {
 	err := c.handleCreateAlertSQL(context.Background(), `CREATE ALERT a AS SELECT 1 FROM t EVERY 10 SECONDS WEBHOOK 'http://x'`)
 	if err == nil || !strings.Contains(err.Error(), "disabled") {
 		t.Errorf("want disabled error, got %v", err)
+	}
+}
+
+// Regression test for sweep finding #22: the alert executor boxed the full
+// result via rs.Rows() and only then truncated to limit — every scheduled
+// tick paid for the query's whole cardinality. boxRowsUpTo must stop boxing
+// at the limit and report truncation without materializing the excess.
+func TestBoxRowsUpTo(t *testing.T) {
+	schema := []parquet.Column{{Name: "n", Type: parquet.TypeInt64}}
+	mk := func(vals ...int64) *batch.RecordBatch {
+		rows := make([]map[string]any, len(vals))
+		for i, v := range vals {
+			rows[i] = map[string]any{"n": v}
+		}
+		return batch.FromRows(schema, rows)
+	}
+
+	tests := []struct {
+		name      string
+		batches   []*batch.RecordBatch
+		limit     int
+		wantRows  int
+		wantTrunc bool
+	}{
+		{"under limit", []*batch.RecordBatch{mk(1, 2)}, 5, 2, false},
+		{"exact limit", []*batch.RecordBatch{mk(1, 2, 3)}, 3, 3, false},
+		{"split mid-batch", []*batch.RecordBatch{mk(1, 2, 3, 4)}, 2, 2, true},
+		{"stops at later batch", []*batch.RecordBatch{mk(1, 2), mk(3, 4)}, 2, 2, true},
+		{"trailing empty batch is not truncation", []*batch.RecordBatch{mk(1, 2), mk()}, 2, 2, false},
+		{"no limit", []*batch.RecordBatch{mk(1), mk(2)}, 0, 2, false},
+		{"empty result", nil, 5, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, trunc := boxRowsUpTo(tc.batches, tc.limit)
+			if len(rows) != tc.wantRows {
+				t.Errorf("got %d rows, want %d", len(rows), tc.wantRows)
+			}
+			if trunc != tc.wantTrunc {
+				t.Errorf("truncated = %v, want %v", trunc, tc.wantTrunc)
+			}
+		})
 	}
 }

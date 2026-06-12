@@ -79,8 +79,53 @@ func TestFileStore_PutAndGet(t *testing.T) {
 	if info.Size != int64(len(content)) {
 		t.Fatalf("size = %d, want %d", info.Size, len(content))
 	}
-	if info.ETag != etag {
-		t.Fatalf("etag mismatch: get=%q put=%q", info.ETag, etag)
+	// Get derives its ETag from file metadata (mtime+size) like Head, not
+	// content MD5 — hashing would require reading the whole object, which
+	// defeats streaming. It must agree with Head for the same object.
+	if info.ETag == "" {
+		t.Fatal("expected non-empty etag from Get")
+	}
+	headInfo, err := fs.Head(ctx, "b", "dir/file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ETag != headInfo.ETag {
+		t.Fatalf("etag mismatch: get=%q head=%q", info.ETag, headInfo.ETag)
+	}
+}
+
+// TestFileStore_GetStreams is the regression test for the whole-object Get:
+// the reader handed back must be the file itself (an *os.File / io.ReaderAt),
+// not a fully-materialized heap copy. The Put-side twin of this bug
+// OOM-killed 512 MiB edge nodes on ~280 MB stage outputs (2026-06-11).
+func TestFileStore_GetStreams(t *testing.T) {
+	fs := setupFileStore(t)
+	ctx := context.Background()
+	_ = fs.MakeBucket(ctx, "b")
+
+	content := []byte("streaming content")
+	if _, err := fs.Put(ctx, "b", "file.bin", bytes.NewReader(content), int64(len(content)), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	rc, info, err := fs.Get(ctx, "b", "file.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+
+	if _, ok := rc.(*os.File); !ok {
+		t.Fatalf("Get returned %T; want *os.File (streaming, not a heap copy)", rc)
+	}
+	got, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Fatalf("got %q, want %q", got, content)
+	}
+	if info.Size != int64(len(content)) {
+		t.Fatalf("size = %d, want %d", info.Size, len(content))
 	}
 }
 

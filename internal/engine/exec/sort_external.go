@@ -195,7 +195,7 @@ func writeSortedRun(dir string, schema []parquet.Column, batches []*batch.Record
 			end = len(entries)
 		}
 		if err := sw.writeBatch(gatherEntriesBatch(schema, batches, entries[pos:end])); err != nil {
-			sw.close()
+			sw.abort()
 			return "", err
 		}
 		pos = end
@@ -430,6 +430,12 @@ func (m *runMerger) close() {
 // maxMergeFanIn runs into longer runs (multi-level external merge). Consumed
 // run files are deleted. limit > 0 truncates intermediate runs (sorted, so
 // rows past limit cannot reach the global top-K).
+//
+// Ownership contract: on error, every run file involved — accumulated
+// intermediates and not-yet-consumed inputs alike — has been deleted. The
+// query is failing; stranding scratch in the worker-lifetime spill dir
+// (which has no per-task RemoveAll) would self-compound the ENOSPC
+// conditions these merges die under.
 func preMergeRuns(dir string, schema []parquet.Column, keys []SortKey, runs []string, maxRuns, limit int) ([]string, error) {
 	for len(runs) > maxRuns {
 		next := make([]string, 0, (len(runs)+maxMergeFanIn-1)/maxMergeFanIn)
@@ -445,6 +451,10 @@ func preMergeRuns(dir string, schema []parquet.Column, keys []SortKey, runs []st
 			}
 			path, err := mergeRunsToFile(dir, schema, keys, group, limit)
 			if err != nil {
+				// mergeRunsToFile removed its partial output; runs[:i]
+				// were consumed and deleted by earlier groups.
+				removeRunFiles(next)
+				removeRunFiles(runs[i:])
 				return nil, err
 			}
 			for _, p := range group {
@@ -487,7 +497,7 @@ func mergeRunsToFile(dir string, schema []parquet.Column, keys []SortKey, runs [
 	for {
 		b, err := m.Next()
 		if err != nil {
-			sw.close()
+			sw.abort()
 			return "", err
 		}
 		if b == nil {
@@ -497,7 +507,7 @@ func mergeRunsToFile(dir string, schema []parquet.Column, keys []SortKey, runs [
 			b.Len = limit - written // safe: columnar format writes b.Len rows
 		}
 		if err := sw.writeBatch(b); err != nil {
-			sw.close()
+			sw.abort()
 			return "", err
 		}
 		written += b.Len

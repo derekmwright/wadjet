@@ -991,11 +991,21 @@ func TestCollectSinkBatches(t *testing.T) {
 		{"val": int64(1)},
 	})
 	sink.Consume(context.Background(), b)
-	sink.Finalize(context.Background())
 
 	batches := sink.Batches()
 	if len(batches) != 1 {
 		t.Fatalf("expected 1 batch, got %d", len(batches))
+	}
+
+	// Default Finalize boxes via ToRows, which releases the columnar
+	// batches — callers that need Batches() after Finalize must set
+	// SkipFinalizeToRows (see TestCollectSink_SkipFinalizeToRows).
+	sink.Finalize(context.Background())
+	if got := sink.Batches(); got != nil {
+		t.Fatalf("expected batches released after Finalize, got %d", len(got))
+	}
+	if len(sink.Rows) != 1 {
+		t.Fatalf("expected 1 boxed row after Finalize, got %d", len(sink.Rows))
 	}
 }
 
@@ -1037,15 +1047,15 @@ func TestSinkDetachPooledBatch(t *testing.T) {
 	b2.ColumnByName("id").Int64Data[1] = 0
 	b2.Len = 2
 
-	// Verify CollectSink still has original data
+	// Verify CollectSink still has original data (boxed at Finalize; the
+	// columnar batches are released by ToRows, so assert on Rows).
 	collect.Finalize(context.Background())
-	batches := collect.Batches()
-	if len(batches) != 1 {
-		t.Fatalf("expected 1 batch, got %d", len(batches))
+	if len(collect.Rows) != 2 {
+		t.Fatalf("expected 2 boxed rows, got %d", len(collect.Rows))
 	}
-	got := batches[0].ColumnByName("id").Int64Data
-	if got[0] != 42 || got[1] != 99 {
-		t.Errorf("CollectSink data corrupted: got [%d, %d], want [42, 99]", got[0], got[1])
+	if collect.Rows[0]["id"] != int64(42) || collect.Rows[1]["id"] != int64(99) {
+		t.Errorf("CollectSink data corrupted: got [%v, %v], want [42, 99]",
+			collect.Rows[0]["id"], collect.Rows[1]["id"])
 	}
 
 	// --- Test Sort ---

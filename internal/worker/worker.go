@@ -600,7 +600,19 @@ func (w *Worker) sweepStaleBuildCacheFiles() {
 		//   build-cache-load-*.wshf  — read-side mmap source download
 		//   parquet-stream-*.parquet — read-side parquet mmap download
 		//   shuffle-<taskID>/        — partitioned shuffle sink output dirs
+		//   wadjet-spill/            — SpillManager operator scratch (sort
+		//     runs, merge intermediates, window passes, join/agg spills);
+		//     normally deleted by the owning operator, but error paths can
+		//     orphan them and the dir has no per-task RemoveAll. Contents
+		//     are swept, the dir itself kept (an already-constructed
+		//     SpillManager holds the path).
 		isDir := e.IsDir()
+		if isDir && name == "wadjet-spill" {
+			r, b := sweepDirContents(filepath.Join(dir, name), w.logger)
+			removed += r
+			bytesFreed += b
+			continue
+		}
 		switch {
 		case !isDir && strings.HasPrefix(name, "build-cache-") && strings.HasSuffix(name, ".wshf"):
 		case !isDir && strings.HasPrefix(name, "parquet-stream-") && strings.HasSuffix(name, ".parquet"):
@@ -623,6 +635,30 @@ func (w *Worker) sweepStaleBuildCacheFiles() {
 		w.logger.Info("swept stale spill artifacts",
 			"dir", dir, "items", removed, "bytes_freed", bytesFreed)
 	}
+}
+
+// sweepDirContents removes every entry inside dir (keeping dir itself) and
+// returns the count and bytes freed. Used for scratch directories whose
+// entire contents are prior-process orphans.
+func sweepDirContents(dir string, logger *slog.Logger) (int, int64) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0
+	}
+	var removed int
+	var bytesFreed int64
+	for _, e := range entries {
+		full := filepath.Join(dir, e.Name())
+		if info, statErr := e.Info(); statErr == nil && !e.IsDir() {
+			bytesFreed += info.Size()
+		}
+		if rmErr := os.RemoveAll(full); rmErr != nil {
+			logger.Warn("removing stale spill artifact", "path", full, "error", rmErr)
+			continue
+		}
+		removed++
+	}
+	return removed, bytesFreed
 }
 
 func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem chan struct{}) {

@@ -232,6 +232,9 @@ func (w *Window) finalizeExternal() error {
 	w.runFiles = nil
 	w.mu.Unlock()
 	if ferr != nil {
+		// runFiles was already taken; Close's backstop sees nil. Delete
+		// here or the runs outlive the query in the shared spill dir.
+		removeRunFiles(runs)
 		return ferr
 	}
 	dir := w.Spill.SpillDir()
@@ -247,6 +250,12 @@ func (w *Window) finalizeExternal() error {
 		}
 	}
 
+	// Cleanup contract: resortRunsByKeys, windowDiskPass, and openRunMerger
+	// each delete every run file they were given (inputs and partial
+	// outputs) on their own error paths — callers below just propagate.
+	// The previous caller-side removeRunFiles calls here were no-ops: the
+	// multi-assignment had already overwritten runs with the helper's nil
+	// error return before the cleanup ran.
 	var err error
 	for gi := 0; gi < len(w.groups)-1; gi++ {
 		if gi > 0 {
@@ -257,7 +266,6 @@ func (w *Window) finalizeExternal() error {
 		}
 		runs, passSchema, err = windowDiskPass(dir, passSchema, runs, w.groups[gi], charge)
 		if err != nil {
-			removeRunFiles(runs)
 			return err
 		}
 	}
@@ -274,7 +282,6 @@ func (w *Window) finalizeExternal() error {
 		// accumulating the whole input as one partition (window_global.go).
 		merger, runs, err := openRunMerger(dir, passSchema, last.sortKeys, runs)
 		if err != nil {
-			removeRunFiles(runs)
 			return err
 		}
 		stats, err := collectGlobalWindowStats(merger, passSchema, last)
@@ -285,7 +292,6 @@ func (w *Window) finalizeExternal() error {
 		}
 		merger2, runs2, err := openRunMerger(dir, passSchema, last.sortKeys, runs)
 		if err != nil {
-			removeRunFiles(runs)
 			return err
 		}
 		w.ext = &windowExtState{
@@ -301,7 +307,6 @@ func (w *Window) finalizeExternal() error {
 	}
 	merger, runs, err := openRunMerger(dir, passSchema, last.sortKeys, runs)
 	if err != nil {
-		removeRunFiles(runs)
 		return err
 	}
 	w.ext = &windowExtState{

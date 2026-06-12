@@ -550,8 +550,9 @@ func (s *BatchSink) Batches() []*batch.RecordBatch {
 }
 
 type CollectSink struct {
-	Rows    []map[string]any     // populated lazily on first access
-	batches []*batch.RecordBatch // columnar storage
+	Rows     []map[string]any     // populated lazily on first access
+	batches  []*batch.RecordBatch // columnar storage; released by ToRows
+	schema   []parquet.Column     // captured from the first batch; survives ToRows
 	rowsDone bool
 	mu       sync.Mutex
 	// SkipFinalizeToRows, when true, makes Finalize a no-op instead of
@@ -567,12 +568,16 @@ type CollectSink struct {
 func (s *CollectSink) Init(_ context.Context) error {
 	s.Rows = nil
 	s.batches = nil
+	s.schema = nil
 	s.rowsDone = false
 	return nil
 }
 
 func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
+	if s.schema == nil {
+		s.schema = b.Schema
+	}
 	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
 	// Snapshot the selection vector — see BatchSink.Consume for the full
 	// rationale. Filter operators reuse outSel across calls; sinks that
@@ -596,19 +601,35 @@ func (s *CollectSink) Finalize(_ context.Context) error {
 }
 
 // ToRows returns all results as rows, converting from batches on first call.
+// Each batch reference is dropped as it is boxed: holding both forms alive
+// for the sink's lifetime doubled the result's residency (columnar + boxed)
+// on every row-consuming path. Dropping is safe — Consume Detach()ed the
+// batches from their pools, so the arenas that boxed TypeBytes values alias
+// are never recycled out from under them. Batches() returns nil after this;
+// use Schema() for post-conversion schema access.
 func (s *CollectSink) ToRows() []map[string]any {
 	if !s.rowsDone {
 		s.rowsDone = true
-		for _, b := range s.batches {
+		for i, b := range s.batches {
 			s.Rows = append(s.Rows, b.ToRows()...)
+			s.batches[i] = nil
 		}
+		s.batches = nil
 	}
 	return s.Rows
 }
 
 // Batches returns the raw columnar batches (zero-copy, no conversion).
+// Returns nil once ToRows has converted the result.
 func (s *CollectSink) Batches() []*batch.RecordBatch {
 	return s.batches
+}
+
+// Schema returns the schema of the first consumed batch (nil if no batch
+// was consumed). Unlike Batches()[0].Schema, it remains available after
+// ToRows releases the batches.
+func (s *CollectSink) Schema() []parquet.Column {
+	return s.schema
 }
 
 func (s *CollectSink) Close() error { return nil }

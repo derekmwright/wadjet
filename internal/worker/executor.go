@@ -664,16 +664,21 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 		return nil
 	}
 
+	// Worker stage outputs are consumed columnar via Batches(); without
+	// SkipFinalizeToRows, Finalize boxed every collected batch into
+	// map[string]any rows that were thrown away — a full extra boxed copy
+	// of the stage output, per task.
+	collectSink, ok := pipeline.Sink.(*exec.CollectSink)
+	if !ok {
+		return fmt.Errorf("pipeline sink is not CollectSink")
+	}
+	collectSink.SkipFinalizeToRows = true
+
 	// Execute the pipeline — same path as standalone mode
 	if err := pipeline.Run(ctx); err != nil {
 		return fmt.Errorf("pipeline execution: %w", err)
 	}
 
-	// Collect results from the pipeline's sink
-	collectSink, ok := pipeline.Sink.(*exec.CollectSink)
-	if !ok {
-		return fmt.Errorf("pipeline sink is not CollectSink")
-	}
 	batches := collectSink.Batches()
 	var totalRows int64
 	for _, b := range batches {

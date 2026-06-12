@@ -163,72 +163,116 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 		return status.Error(codes.InvalidArgument, "sql is required")
 	}
 
-	var rows []map[string]any
-	var columns []string
-	var stats *wadjetv1.QueryStats
-
 	if g.coord != nil {
 		result, err := g.coord.ExecuteSQL(stream.Context(), req.Sql)
 		if err != nil {
 			return status.Errorf(codes.Internal, "query error: %v", err)
 		}
-		rows = result.Rows()
-		columns = result.Columns
-		stats = &wadjetv1.QueryStats{
-			TotalRows: result.TotalRows,
-			Elapsed:   durationpb.New(result.Elapsed),
-			Plan:      result.Plan,
+		cs := &chunkStreamer{
+			stream:  stream,
+			columns: result.Columns,
+			stats: &wadjetv1.QueryStats{
+				TotalRows: result.TotalRows,
+				Elapsed:   durationpb.New(result.Elapsed),
+				Plan:      result.Plan,
+			},
 		}
-	} else if g.db != nil {
+		return streamResultBatches(cs, result)
+	}
+
+	if g.db != nil {
 		result, err := g.db.Query(stream.Context(), req.Sql)
 		if err != nil {
 			return status.Errorf(codes.Internal, "query error: %v", err)
 		}
-		rows = result.Rows
-		columns = result.Columns
-		stats = &wadjetv1.QueryStats{
-			TotalRows: int64(len(result.Rows)),
-			Plan:      result.Plan,
+		// Legacy embedded path: db.Query returns pre-boxed rows, so the
+		// full materialization already happened inside it — chunk as-is.
+		cs := &chunkStreamer{
+			stream:  stream,
+			columns: result.Columns,
+			stats: &wadjetv1.QueryStats{
+				TotalRows: int64(len(result.Rows)),
+				Plan:      result.Plan,
+			},
 		}
-	} else {
-		return status.Error(codes.Unavailable, "no query engine available")
+		if err := cs.pushRows(result.Rows); err != nil {
+			return err
+		}
+		return cs.finish()
 	}
 
-	// Stream rows in batches
+	return status.Error(codes.Unavailable, "no query engine available")
+}
+
+// streamResultBatches boxes and sends the coord result one RecordBatch at a
+// time. The previous implementation called result.Rows(), materializing the
+// entire result as map[string]any rows up front — a concurrent ~3-10x boxed
+// copy held alive alongside result.Batches for the whole stream, violating
+// SQLResult's own "prefer iterating Batches" contract on the default-on
+// :9090 server. Peak boxed residency is now one batch (~2K rows) plus the
+// one held-back chunk, and each batch reference is dropped after boxing so
+// the columnar copy can be reclaimed while the stream proceeds.
+func streamResultBatches(cs *chunkStreamer, result *coordinator.SQLResult) error {
+	batches := result.Batches
+	result.Batches = nil
+	for i := range batches {
+		rows := batches[i].ToRows()
+		batches[i] = nil
+		if err := cs.pushRows(rows); err != nil {
+			return err
+		}
+	}
+	return cs.finish()
+}
+
+// chunkStreamer sends row chunks of at most streamBatchSize, holding back
+// one chunk so the final send carries IsLast + stats. Columns ride only the
+// first response; an empty result still produces a single columns+stats
+// response — both exactly the legacy wire behavior.
+type chunkStreamer struct {
+	stream      wadjetv1.WadjetService_QueryStreamServer
+	columns     []string
+	stats       *wadjetv1.QueryStats
+	pending     []*wadjetv1.Row
+	havePending bool
+	sentColumns bool
+}
+
+func (cs *chunkStreamer) pushRows(rows []map[string]any) error {
 	for i := 0; i < len(rows); i += streamBatchSize {
 		end := i + streamBatchSize
 		if end > len(rows) {
 			end = len(rows)
 		}
-		isLast := end >= len(rows)
-
-		resp := &wadjetv1.QueryStreamResponse{
-			Rows:   rowsToProto(rows[i:end]),
-			IsLast: isLast,
+		if cs.havePending {
+			if err := cs.send(cs.pending, false); err != nil {
+				return err
+			}
 		}
-		// Send columns and stats only on first batch
-		if i == 0 {
-			resp.Columns = columns
-		}
-		if isLast {
-			resp.Stats = stats
-		}
-
-		if err := stream.Send(resp); err != nil {
-			return err
-		}
+		cs.pending = rowsToProto(rows[i:end])
+		cs.havePending = true
 	}
-
-	// Empty result set
-	if len(rows) == 0 {
-		return stream.Send(&wadjetv1.QueryStreamResponse{
-			Columns: columns,
-			Stats:   stats,
-			IsLast:  true,
-		})
-	}
-
 	return nil
+}
+
+func (cs *chunkStreamer) finish() error {
+	return cs.send(cs.pending, true)
+}
+
+func (cs *chunkStreamer) send(rows []*wadjetv1.Row, isLast bool) error {
+	resp := &wadjetv1.QueryStreamResponse{
+		Rows:   rows,
+		IsLast: isLast,
+	}
+	if !cs.sentColumns {
+		resp.Columns = cs.columns
+		cs.sentColumns = true
+	}
+	if isLast {
+		resp.Stats = cs.stats
+	}
+	cs.pending = nil
+	return cs.stream.Send(resp)
 }
 
 // SubmitQuery submits an async query (distributed mode only).
