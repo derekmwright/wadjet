@@ -872,6 +872,14 @@ func (inner *scanSourceInner) readRG(ctx context.Context, unit rgUnit) *batch.Re
 	b, err := scan.ReadRowGroupNative(rdr, unit.rgIndex, inner.readSchema(), inner.pool)
 	unit.slot.releaseRG(inner)
 	if err != nil {
+		// Surface the first decode error so the scan FAILS instead of
+		// silently dropping this row group's rows — a swallowed error here
+		// is indistinguishable from a correct partial result (the same
+		// silent-0-rows class as the nested-branch bug, issue #144).
+		select {
+		case inner.errCh <- fmt.Errorf("decoding %s row group %d: %w", unit.slot.entry.Path, unit.rgIndex, err):
+		default:
+		}
 		return nil
 	}
 	inner.trackScanBatch(b)

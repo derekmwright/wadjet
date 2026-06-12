@@ -81,6 +81,14 @@ func rowGroupRangeForShard(total, shardIdx, shardCount int) (int, int) {
 // ReadRowGroupNative reads a row group using our custom page reader,
 // bypassing parquet-go entirely for the data path.
 func ReadRowGroupNative(fr *pqt.FileReader, rgIdx int, schema []pqt.Column, pool *batch.BatchPool) (*batch.RecordBatch, error) {
+	// ARRAY/MAP leaves don't resolve by column name here; without this
+	// guard the column lookup missed and the "schema evolution" branch
+	// silently emitted ALL-NULL values for the array column — valid-looking
+	// rows with the data gone. Callers must route such schemas to the
+	// row-based fallback (readFileBatchesViaRows / readBatchViaRows).
+	if HasUnsupportedColumnarTypes(schema) {
+		return nil, fmt.Errorf("native reader does not support ARRAY/MAP columns")
+	}
 	numRows := int(fr.RowGroupNumRows(rgIdx))
 	if numRows == 0 {
 		return nil, nil
@@ -202,6 +210,16 @@ func readColumnNative(vec *batch.Vector, fr *pqt.FileReader, rgIdx, colIdx, numR
 		fileType = catalogType
 	}
 
+	// DECIMAL: the native decoder handles the INT64 physical encoding our
+	// writer produces. Externally-written files (PyArrow decimal128) use
+	// FIXED_LEN_BYTE_ARRAY — fail loudly rather than mis-cast the bytes;
+	// callers fall back to the row-based reader on error.
+	if fileType == pqt.TypeDecimal && colIdx < len(leaves) {
+		if pt := leaves[colIdx].Type; pt == nil || *pt != pqt.PhysicalInt64 {
+			return fmt.Errorf("decimal column %q: unsupported physical encoding (want INT64)", leaves[colIdx].Name)
+		}
+	}
+
 	// Get max definition level from schema.
 	maxDefLevel := 0
 	if colIdx < len(leaves) {
@@ -273,7 +291,7 @@ func resolveNativeDictionary(dict *pqt.DictionaryData, page pqt.Values, fileType
 	n := page.Count()
 
 	switch fileType {
-	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration:
+	case pqt.TypeInt64, pqt.TypeTimestamp, pqt.TypeIPv4, pqt.TypeMAC, pqt.TypeDuration, pqt.TypeDecimal:
 		src := dict.Data.Int64()
 		dst := make([]int64, n)
 		for i := 0; i < n; i++ {
@@ -352,6 +370,15 @@ func copyNativeDataDirect(vec *batch.Vector, offset int, data pqt.Values, n int,
 		src := data.Int64()
 		copy(vec.Int64Data[offset:offset+n], src[:n])
 
+	case pqt.TypeDecimal:
+		// Scaled-integer INT64 physical → Int128 storage. Without this
+		// case the switch fell through and every decimal column scanned
+		// as zeros, silently (issue #144 suite finding).
+		src := data.Int64()
+		for i := 0; i < n; i++ {
+			vec.DecimalData.Data[offset+i] = batch.Int128From(src[i])
+		}
+
 	case pqt.TypeInt32, pqt.TypePort, pqt.TypeProtocol, pqt.TypeDate:
 		src := data.Int32()
 		copy(vec.Int32Data[offset:offset+n], src[:n])
@@ -423,6 +450,16 @@ func copyNativeDataScatter(vec *batch.Vector, offset int, data pqt.Values, defLe
 		src := data.Int64()
 		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
 			copy(vec.Int64Data[offset+dstStart:offset+dstStart+count], src[srcStart:srcStart+count])
+		}, func(dstStart, count int) {
+			vec.Nulls.SetNullRange(offset+dstStart, count)
+		})
+
+	case pqt.TypeDecimal:
+		src := data.Int64()
+		scatterRunsNative(defLevels, maxDefLevel, n, func(dstStart, srcStart, count int) {
+			for i := 0; i < count; i++ {
+				vec.DecimalData.Data[offset+dstStart+i] = batch.Int128From(src[srcStart+i])
+			}
 		}, func(dstStart, count int) {
 			vec.Nulls.SetNullRange(offset+dstStart, count)
 		})

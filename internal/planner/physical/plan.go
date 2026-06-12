@@ -7460,6 +7460,14 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		memTracker:    s.memTracker,
 		spillMgr:      s.spillMgr,
 	}
+	// Nested (ARRAY/MAP/ROW) schemas must take the file-level scan whose
+	// readBatchDirect falls back to the row-based reader. This MUST be
+	// decided HERE: the eager branch only learned about nested types
+	// inside buildRGUnits, which runs after the branch was already taken —
+	// the early return left zero rgUnits and every query against a nested
+	// table returned 0 rows with no error (issue #144 suite finding).
+	innerSchema := parquet.Schema{Columns: inner.schema}
+	inner.hasNestedTypes = innerSchema.HasNestedColumns()
 	s.scanner = inner
 
 	if inner.rowLimit > 0 || inner.hasNestedTypes {
