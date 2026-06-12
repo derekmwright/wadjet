@@ -679,3 +679,36 @@ func TestDecorrelateExists_MultiTableNotExists(t *testing.T) {
 		t.Fatalf("expected anti join type, got %q", result.JoinType)
 	}
 }
+
+// Regression test for the CTE materialization fence (issue #127 follow-on,
+// pre-existing wrong-results): pushdownPredicates swapped Filter-above-
+// Project unconditionally, so an outer WHERE over a CTE reference was
+// pushed BELOW the CTEName-tagged subtree root. The physical planner then
+// substituted the cached (unfiltered) CTE result for the whole tagged
+// subtree, silently dropping the predicate — `WITH m AS (...) SELECT ...
+// FROM m WHERE grp = 'x'` returned every CTE row. Predicates must stay
+// above the fence.
+func TestPushdownStopsAtCTEFence(t *testing.T) {
+	scan := NewScan("metrics", "")
+	cteRoot := NewProject(scan, []Projection{{Column: "grp", Expr: "grp"}})
+	cteRoot.CTEName = "m"
+	filter := NewFilter(cteRoot, []Predicate{{Column: "grp", Op: "=", Value: "'g1'"}})
+
+	got := pushdownPredicates(filter)
+	if got.Type != NodeFilter {
+		t.Fatalf("filter was pushed through the CTE fence: root = %s", got.Type)
+	}
+	if len(got.Children) != 1 || got.Children[0].CTEName != "m" {
+		t.Fatalf("expected Filter(CTE-tagged Project), got %s over %v", got.Type, got.Children)
+	}
+
+	// Control: without the tag, the swap must still happen (the whole
+	// point of the pushdown).
+	scan2 := NewScan("metrics", "")
+	proj2 := NewProject(scan2, []Projection{{Column: "grp", Expr: "grp"}})
+	filter2 := NewFilter(proj2, []Predicate{{Column: "grp", Op: "=", Value: "'g1'"}})
+	got2 := pushdownPredicates(filter2)
+	if got2.Type != NodeProject || got2.Children[0].Type != NodeFilter {
+		t.Fatalf("untagged Filter-Project swap broken: root = %s", got2.Type)
+	}
+}
