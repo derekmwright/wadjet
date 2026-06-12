@@ -296,10 +296,14 @@ func resortRunsByKeys(dir string, schema []parquet.Column, runs []string, keys [
 		buf, bufRows, bufBytes = nil, 0, 0
 		return nil
 	}
+	// Error contract: delete the rewritten outputs AND the input runs —
+	// the operation is unrecoverable, and inputs are otherwise deleted
+	// only on the success path below.
 	for _, rp := range runs {
 		r, err := openSpillBatchReader(rp)
 		if err != nil {
 			removeRunFiles(out)
+			removeRunFiles(runs)
 			return nil, err
 		}
 		for {
@@ -307,6 +311,7 @@ func resortRunsByKeys(dir string, schema []parquet.Column, runs []string, keys [
 			if err != nil {
 				r.Close()
 				removeRunFiles(out)
+				removeRunFiles(runs)
 				return nil, err
 			}
 			if b == nil {
@@ -319,6 +324,7 @@ func resortRunsByKeys(dir string, schema []parquet.Column, runs []string, keys [
 				if err := flush(); err != nil {
 					r.Close()
 					removeRunFiles(out)
+					removeRunFiles(runs)
 					return nil, err
 				}
 			}
@@ -327,6 +333,7 @@ func resortRunsByKeys(dir string, schema []parquet.Column, runs []string, keys [
 	}
 	if err := flush(); err != nil {
 		removeRunFiles(out)
+		removeRunFiles(runs)
 		return nil, err
 	}
 	removeRunFiles(runs)
@@ -335,6 +342,9 @@ func resortRunsByKeys(dir string, schema []parquet.Column, runs []string, keys [
 
 // openRunMerger pre-merges runs down to the fan-in cap and returns a merger
 // over file cursors, plus the (possibly rewritten) run list for cleanup.
+// On error every run file has been deleted (preMergeRuns cleans its own
+// failures; cursor failures clean the post-merge list here) — callers just
+// propagate.
 func openRunMerger(dir string, schema []parquet.Column, keys []SortKey, runs []string) (*runMerger, []string, error) {
 	runs, err := preMergeRuns(dir, schema, keys, runs, maxMergeFanIn, 0)
 	if err != nil {
@@ -347,6 +357,7 @@ func openRunMerger(dir string, schema []parquet.Column, keys []SortKey, runs []s
 			for _, prev := range cursors {
 				prev.close()
 			}
+			removeRunFiles(runs)
 			return nil, nil, err
 		}
 		c.ord = ord
@@ -445,13 +456,15 @@ func windowDiskPass(dir string, schema []parquet.Column, runs []string, g window
 
 	sw, err := newSpillBatchWriter(dir, "window-pass")
 	if err != nil {
+		removeRunFiles(runs)
 		return nil, nil, err
 	}
 	for {
 		parts, bytes, err := walker.nextPartition()
 		if err != nil {
 			walker.releaseCurrent()
-			sw.close()
+			sw.abort()
+			removeRunFiles(runs)
 			return nil, nil, err
 		}
 		if parts == nil {
@@ -464,13 +477,15 @@ func windowDiskPass(dir string, schema []parquet.Column, runs []string, g window
 		}
 		for _, chunk := range chunkBatch(combined, batch.DefaultBatchSize) {
 			if err := sw.writeBatch(chunk); err != nil {
-				sw.close()
+				sw.abort()
+				removeRunFiles(runs)
 				return nil, nil, err
 			}
 		}
 	}
 	path, err := sw.close()
 	if err != nil {
+		removeRunFiles(runs)
 		return nil, nil, err
 	}
 	removeRunFiles(runs)

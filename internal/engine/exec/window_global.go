@@ -690,7 +690,7 @@ func globalWindowDiskPass(dir string, schema []parquet.Column, runs []string, g 
 
 	merger2, runs2, err := openRunMerger(dir, schema, g.sortKeys, runs)
 	if err != nil {
-		removeRunFiles(runs)
+		// openRunMerger deleted the run files on its own error paths.
 		return nil, nil, err
 	}
 	defer merger2.close()
@@ -705,7 +705,7 @@ func globalWindowDiskPass(dir string, schema []parquet.Column, runs []string, g 
 		b, err := streamer.Next()
 		if err != nil {
 			streamer.release()
-			sw.close()
+			sw.abort()
 			removeRunFiles(runs2)
 			return nil, nil, err
 		}
@@ -715,7 +715,7 @@ func globalWindowDiskPass(dir string, schema []parquet.Column, runs []string, g 
 		for _, chunk := range chunkBatch(b, batch.DefaultBatchSize) {
 			if err := sw.writeBatch(chunk); err != nil {
 				streamer.release()
-				sw.close()
+				sw.abort()
 				removeRunFiles(runs2)
 				return nil, nil, err
 			}

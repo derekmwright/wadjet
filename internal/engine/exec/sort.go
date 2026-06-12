@@ -176,6 +176,10 @@ func (s *Sort) finalizeExternalMerge() error {
 		return err
 	}
 
+	// Error contract below: s.runFiles was already nil'd, so any failure
+	// before s.mergeRuns is assigned must delete the run files here —
+	// Close's backstops would see nothing and the runs would outlive the
+	// query in the worker-lifetime spill dir.
 	cursors := make([]*runCursor, 0, len(runs)+1)
 	for ord, p := range runs {
 		c, err := newFileRunCursor(p)
@@ -183,6 +187,7 @@ func (s *Sort) finalizeExternalMerge() error {
 			for _, prev := range cursors {
 				prev.close()
 			}
+			removeRunFiles(runs)
 			return err
 		}
 		c.ord = ord
@@ -201,6 +206,7 @@ func (s *Sort) finalizeExternalMerge() error {
 			for _, prev := range cursors {
 				prev.close()
 			}
+			removeRunFiles(runs)
 			return err
 		}
 		c.ord = len(runs)

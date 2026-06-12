@@ -263,27 +263,46 @@ func (sw *spillBatchWriter) writeBatch(b *batch.RecordBatch) error {
 	return nil
 }
 
+// abort closes the writer and unconditionally removes the partial file.
+// Error paths must use this instead of close(): a half-written run is
+// unusable, and in the worker-lifetime shared spill dir it would outlive
+// the failed query — compounding exactly the ENOSPC condition that most
+// often causes the failure in the first place. Skips the page-cache
+// writeback (the data is about to be unlinked). Idempotent.
+func (sw *spillBatchWriter) abort() {
+	if sw.f == nil {
+		return
+	}
+	sw.f.Close()
+	sw.f = nil
+	os.Remove(sw.path)
+}
+
 func (sw *spillBatchWriter) close() (string, error) {
 	if sw.f == nil {
 		return "", nil
 	}
+	// On any failure the file is unusable — remove it rather than strand
+	// a partial run in the shared spill dir (see abort).
 	if err := sw.w.Flush(); err != nil {
-		sw.f.Close()
+		sw.abort()
 		return "", fmt.Errorf("flushing spill: %w", err)
 	}
 	// Seek back and write batch count
 	if _, err := sw.f.Seek(0, 0); err != nil {
-		sw.f.Close()
+		sw.abort()
 		return "", err
 	}
 	var buf [4]byte
 	binary.LittleEndian.PutUint32(buf[:], uint32(sw.count))
 	if _, err := sw.f.Write(buf[:]); err != nil {
-		sw.f.Close()
+		sw.abort()
 		return "", err
 	}
 	sw.fl.Finish()
 	if err := sw.f.Close(); err != nil {
+		sw.f = nil
+		os.Remove(sw.path)
 		return "", err
 	}
 	sw.f = nil

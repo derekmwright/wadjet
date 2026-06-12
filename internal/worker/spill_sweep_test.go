@@ -28,19 +28,29 @@ func TestSweepStaleSpillArtifacts(t *testing.T) {
 		return full
 	}
 
-	// Orphans the sweep must remove.
+	// Orphans the sweep must remove. The wadjet-spill/ entries are the
+	// finding-#24 backstop: SpillManager operator scratch (sort runs, merge
+	// intermediates, window passes) orphaned by error paths in a prior
+	// process previously survived restarts — the sweep didn't look inside
+	// the directory.
 	swept := []string{
 		mustWrite("build-cache-123.wshf"),
 		mustWrite("build-cache-load-456.wshf"),
 		mustWrite("parquet-stream-789.parquet"),
 		mustWrite("shuffle-deadbeef/part-0000.wshf"),
+		mustWrite("wadjet-spill/sort-run-1234.1.bin"),
+		mustWrite("wadjet-spill/sort-merge-1234.2.bin"),
+		mustWrite("wadjet-spill/window-pass-1234.3.bin"),
+		mustWrite("wadjet-spill/window-global-pass-1234.4.bin"),
+		mustWrite("wadjet-spill/agg-spill-1234.5.bin"),
 	}
 	sweptDir := filepath.Join(dir, "shuffle-deadbeef")
+	spillScratchDir := filepath.Join(dir, "wadjet-spill")
 
 	// Files the sweep must NOT touch.
 	kept := []string{
 		mustWrite("stage-task1.wshf"),               // stage sink output naming differs
-		mustWrite("sort-run-1.1.bin"),               // operator spill (task-scoped lifecycle)
+		mustWrite("sort-run-1.1.bin"),               // outside wadjet-spill/ — not SpillManager scratch
 		mustWrite("stage-cache/q1/abc_part.wshf"),   // LocalStageCache tree (wiped by its own constructor)
 		mustWrite("parquet-stream-789.parquet.tmp"), // wrong suffix
 	}
@@ -58,6 +68,11 @@ func TestSweepStaleSpillArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(sweptDir); !os.IsNotExist(err) {
 		t.Errorf("sweep should have removed dir %s (stat err=%v)", sweptDir, err)
+	}
+	// The scratch dir itself survives (a constructed SpillManager holds the
+	// path); only its contents are swept.
+	if _, err := os.Stat(spillScratchDir); err != nil {
+		t.Errorf("sweep must keep the wadjet-spill dir itself: %v", err)
 	}
 	for _, p := range kept {
 		if _, err := os.Stat(p); err != nil {
