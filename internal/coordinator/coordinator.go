@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/alerts"
@@ -22,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
@@ -42,6 +46,27 @@ type Config struct {
 	QueryTimeout   time.Duration // max time for a query to complete, 0 = default (30m)
 	WorkerStaleTTL time.Duration // time after which a silent worker is reaped, 0 = default (30s)
 	DynamicFilters bool          // Trino-style semi-join dynamic-filter pushdown (off by default in v1)
+	// GatherResultBudget caps the decoded result bytes a single query may
+	// accumulate in coordinator heap (gather receiver). 0 = derive from
+	// GOMEMLIMIT (half of it) or fall back to 2 GiB; negative = uncapped.
+	// Exceeding the budget fails the query cleanly instead of OOM-killing
+	// the coordinator.
+	GatherResultBudget int64
+}
+
+// gatherResultBudget resolves Config.GatherResultBudget: explicit value,
+// half of GOMEMLIMIT when one is set, else 2 GiB. Negative config = uncapped.
+func (c *Coordinator) gatherResultBudget() int64 {
+	if c.config.GatherResultBudget != 0 {
+		if c.config.GatherResultBudget < 0 {
+			return 0
+		}
+		return c.config.GatherResultBudget
+	}
+	if lim := debug.SetMemoryLimit(-1); lim > 0 && lim < math.MaxInt64 {
+		return lim / 2
+	}
+	return 2 << 30
 }
 
 // queryMeta stores per-query metadata needed for later result retrieval.
@@ -869,19 +894,37 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		pending = append(pending, inlineWork{idx: i, data: r.InlineData})
 	}
 
-	// Fetch S3-stored results in parallel for probe-split merge
+	// Fetch S3-stored results for probe-split merge: bounded fan-out
+	// (mirrors ReadResultFiles' maxConcurrent) and a running byte cap —
+	// these are precisely the blobs that exceeded the inline threshold,
+	// workers can't apply LIMIT, and the previous unbounded ReadAll
+	// fan-out held every raw blob simultaneously, uncharged. Past the
+	// budget the query fails cleanly instead of OOM-killing the process.
+	budget := c.gatherResultBudget()
 	if len(s3Fetches) > 0 {
 		type fetchResult struct {
 			data []byte
 			err  error
 		}
 		fetchResults := make([]fetchResult, len(s3Fetches))
+		var fetchedBytes atomic.Int64
+		const maxConcurrentFetches = 8
+		sem := make(chan struct{}, maxConcurrentFetches)
 		var wg sync.WaitGroup
 		for fi, sf := range s3Fetches {
 			wg.Add(1)
 			go func(i int, path string) {
 				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				if budget > 0 && fetchedBytes.Load() > budget {
+					fetchResults[i] = fetchResult{err: fmt.Errorf(
+						"partial results exceeded the coordinator gather budget (%d MB): add a LIMIT, or raise the budget (Config.GatherResultBudget / GOMEMLIMIT)",
+						budget>>20)}
+					return
+				}
 				data, err := c.fetchResultData(ctx, queryID, path)
+				fetchedBytes.Add(int64(len(data)))
 				fetchResults[i] = fetchResult{data: data, err: err}
 			}(fi, sf.path)
 		}
@@ -924,13 +967,22 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 
 	var allBatches []*batch.RecordBatch
 	var columns []string
+	var decodedBytes int64
 	totalRows := s3Rows
 	for _, d := range slot {
 		if len(d.columns) > 0 && len(columns) == 0 {
 			columns = d.columns
 		}
 		totalRows += d.rows
+		for _, b := range d.batches {
+			decodedBytes += b.MemBytes()
+		}
 		allBatches = append(allBatches, d.batches...)
+	}
+	if budget > 0 && decodedBytes > budget {
+		return nil, nil, 0, fmt.Errorf(
+			"decoded partial results exceeded the coordinator gather budget (%d MB > %d MB): add a LIMIT, or raise the budget (Config.GatherResultBudget / GOMEMLIMIT)",
+			decodedBytes>>20, budget>>20)
 	}
 	return allBatches, columns, totalRows, nil
 }
@@ -1030,7 +1082,11 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 		}
 	}
 	if mi.HasDistinct {
-		batches = c.deduplicatePartials(batches, columns)
+		var err error
+		batches, err = c.deduplicatePartials(batches, columns)
+		if err != nil {
+			return nil, 0, fmt.Errorf("deduplicating distinct partials: %w", err)
+		}
 	}
 
 	// Apply sort + limit. When the limit is much smaller than the row count,
@@ -1054,31 +1110,45 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 }
 
 // deduplicatePartials removes duplicate rows across probe-split partial results.
-func (c *Coordinator) deduplicatePartials(batches []*batch.RecordBatch, columns []string) []*batch.RecordBatch {
+func (c *Coordinator) deduplicatePartials(batches []*batch.RecordBatch, columns []string) ([]*batch.RecordBatch, error) {
 	if len(batches) == 0 {
-		return batches
+		return batches, nil
 	}
-	type rowKey string
-	seen := make(map[rowKey]bool)
-	var unique []map[string]any
+	_ = columns // key set = every column, resolved from the batch schema
+	// Columnar dedup via a keys-only hash aggregate (the same GroupByAll
+	// machinery SELECT DISTINCT plans to). The previous implementation
+	// boxed the entire merged result ×3 — ToRows maps per row (the pattern
+	// documented holding 21 GB at SF10), an fmt-serialized full-row key
+	// set, and a FromRows re-materialization — and its "%v\x00" key
+	// collided for values containing NUL bytes. The aggregate dedups with
+	// typed binary keys, columnar in and out, no boxing. Errors propagate:
+	// returning the partials undeduplicated would be silent wrong results.
+	agg := exec.NewHashAggregate(nil, nil)
+	agg.GroupByAll = true
+	ctx := context.Background()
+	if err := agg.Init(ctx); err != nil {
+		return nil, err
+	}
 	for _, b := range batches {
-		rows := b.ToRows()
-		for _, row := range rows {
-			var key strings.Builder
-			for _, col := range columns {
-				fmt.Fprintf(&key, "%v\x00", row[col])
-			}
-			k := rowKey(key.String())
-			if !seen[k] {
-				seen[k] = true
-				unique = append(unique, row)
-			}
+		if err := agg.Consume(ctx, b); err != nil {
+			return nil, err
 		}
 	}
-	if len(unique) == 0 {
-		return nil
+	if err := agg.Finalize(ctx); err != nil {
+		return nil, err
 	}
-	return []*batch.RecordBatch{batch.FromRows(batches[0].Schema, unique)}
+	var out []*batch.RecordBatch
+	for {
+		b, err := agg.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			break
+		}
+		out = append(out, b)
+	}
+	return out, nil
 }
 
 // reAggregatePartials merges partial aggregate results by group-by key.

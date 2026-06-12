@@ -71,8 +71,15 @@ func isAggIntType(t batch.TypeID) bool {
 // When a SpillManager is set, input batches are spilled to disk under memory
 // pressure and re-processed during Finalize.
 type HashAggregate struct {
-	GroupByCols   []string
-	Aggs          []AggColumn
+	GroupByCols []string
+	// GroupByAll makes the aggregate group by every input column, resolved
+	// from the first batch's schema (GroupByCols must be empty). This is how
+	// DISTINCT is planned: a keys-only hash aggregate inherits the spill
+	// machinery, where the dedicated Distinct operator's seen-set grew
+	// without bound or tracking. With no Aggs the output is exactly the
+	// distinct key tuples, in input column order.
+	GroupByAll bool
+	Aggs       []AggColumn
 	Spill         *memory.SpillManager // optional: enables spill-to-disk
 	NullGroupCols []string             // GROUPING SETS: columns to output as NULL (legacy per-node)
 	GroupingSets  [][]int              // single-pass grouping sets: column indices within GroupByCols per set
@@ -606,6 +613,16 @@ func columnIndexFallback(b *batch.RecordBatch, name string) int {
 }
 
 func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
+	// GroupByAll resolves the key set from the live schema, so every
+	// downstream decision (fast-path selection, output schema, spill merge)
+	// sees a concrete column list exactly as if the planner had named them.
+	if h.GroupByAll && len(h.GroupByCols) == 0 {
+		names := make([]string, len(b.Schema))
+		for i, c := range b.Schema {
+			names[i] = c.Name
+		}
+		h.GroupByCols = names
+	}
 	h.groupColIdx = make([]int, len(h.GroupByCols))
 	h.groupColTypes = make([]batch.TypeID, len(h.GroupByCols))
 	for i, col := range h.GroupByCols {
@@ -940,6 +957,22 @@ func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	}
 
 	// Single-column integer GROUP BY fast path
+	// NULL group keys cannot live in the int hash tables. The int paths
+	// used to divert null-key rows into strGroupStates via processRow — a
+	// second store that Next(), the SoA merges, and the migrations all
+	// ignored, so the NULL group silently vanished from results (GROUP BY
+	// over a nullable int column dropped its NULL row; DISTINCT would drop
+	// NULLs). On the first batch whose key column actually contains nulls,
+	// migrate to the generic path once and stay there — null keys are rare,
+	// and a single store is the only shape every reader gets right.
+	if h.useIntGroupKey && b.Columns[h.intGroupKeyCol].Nulls.HasNulls() {
+		h.migrateToGenericMap()
+	} else if h.useDualIntGroupKey &&
+		(b.Columns[h.dualIntGroupKeyCols[0]].Nulls.HasNulls() ||
+			b.Columns[h.dualIntGroupKeyCols[1]].Nulls.HasNulls()) {
+		h.migrateToGenericMap()
+	}
+
 	if h.useIntGroupKey {
 		h.consumeBatchIntGroup(b)
 		return
@@ -2603,19 +2636,25 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	// Pre-compute output names: strip table qualifiers unless stripping would
 	// create duplicate column names (e.g., GROUP BY n1.n_name, n2.n_name must
 	// keep qualifiers so downstream projections can distinguish them).
+	// GroupByAll (DISTINCT) passes the input schema through verbatim — the
+	// operator must be name-transparent to downstream column references.
 	outNames := make([]string, len(h.GroupByCols))
-	baseCounts := make(map[string]int, len(h.GroupByCols))
-	for i, name := range h.GroupByCols {
-		base := name
-		if dot := strings.IndexByte(name, '.'); dot >= 0 {
-			base = name[dot+1:]
+	if h.GroupByAll {
+		copy(outNames, h.GroupByCols)
+	} else {
+		baseCounts := make(map[string]int, len(h.GroupByCols))
+		for i, name := range h.GroupByCols {
+			base := name
+			if dot := strings.IndexByte(name, '.'); dot >= 0 {
+				base = name[dot+1:]
+			}
+			outNames[i] = base
+			baseCounts[base]++
 		}
-		outNames[i] = base
-		baseCounts[base]++
-	}
-	for i, name := range h.GroupByCols {
-		if baseCounts[outNames[i]] > 1 {
-			outNames[i] = name // keep qualified to avoid ambiguity
+		for i, name := range h.GroupByCols {
+			if baseCounts[outNames[i]] > 1 {
+				outNames[i] = name // keep qualified to avoid ambiguity
+			}
 		}
 	}
 
@@ -2641,6 +2680,7 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 func (h *HashAggregate) CloneSink() SinkSource {
 	clone := &HashAggregate{
 		GroupByCols:   h.GroupByCols,
+		GroupByAll:    h.GroupByAll, // clones must resolve the same key set, not fall into the scalar path
 		Aggs:          h.Aggs,
 		NullGroupCols: h.NullGroupCols,
 		GroupingSets:  h.GroupingSets,
@@ -2676,6 +2716,13 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 		}
 		if len(h.aggColIdx2) == 0 {
 			h.aggColIdx2 = o.aggColIdx2
+		}
+		// GroupByAll (DISTINCT) parents have no plan-time column list at
+		// all — the clones resolved it from the first batch's schema.
+		// Without inheriting it, outputSchema emits zero group columns
+		// while the merged states hold full key tuples (index panic).
+		if len(h.GroupByCols) == 0 && len(o.GroupByCols) > 0 {
+			h.GroupByCols = o.GroupByCols
 		}
 	}
 
@@ -3040,7 +3087,14 @@ func (h *HashAggregate) migrateToGenericMap() {
 		return
 	}
 	if h.useDualIntGroupKey {
-		// Migrate dual-int group key → generic path
+		// Migrate dual-int group key → generic path. Keys are re-encoded
+		// in processRow's binary format ([null-flag][appendColumnValue
+		// bytes] per column) — NOT serializeKey's text format — because
+		// the generic path keeps inserting after this migration runs (a
+		// null group key triggers it mid-consume, and MergeSink can pair
+		// a migrated side with a natively-generic side). A text-format
+		// index entry would never match the binary key of the same
+		// logical group, silently duplicating groups.
 		h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
 		h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 		h.serializedKeys = make([]string, 0, len(h.intGroupStates))
@@ -3050,8 +3104,9 @@ func (h *HashAggregate) migrateToGenericMap() {
 			if ext.keyValues == nil {
 				ext.keyValues = []any{h.dualIntKeysA[i], h.dualIntKeysB[i]}
 			}
-			h.keyBuf = h.keyBuf[:0]
-			key := serializeKey(h.keyBuf, ext.keyValues)
+			h.keyBuf = appendIntKeyRowFormat(h.keyBuf[:0], h.dualIntKeysA[i], h.groupColTypes[0])
+			h.keyBuf = appendIntKeyRowFormat(h.keyBuf, h.dualIntKeysB[i], h.groupColTypes[1])
+			key := string(h.keyBuf)
 			h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 			h.strGroupStates = append(h.strGroupStates, gs)
 			h.serializedKeys = append(h.serializedKeys, key)
@@ -3068,7 +3123,8 @@ func (h *HashAggregate) migrateToGenericMap() {
 	if !h.useIntGroupKey {
 		return
 	}
-	// Migrate int group key → generic path
+	// Migrate int group key → generic path (binary key format — see the
+	// dual-int branch comment).
 	h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
 	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 	h.serializedKeys = make([]string, 0, len(h.intGroupStates))
@@ -3079,8 +3135,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 		if ext.keyValues == nil {
 			ext.keyValues = []any{gs.intKey}
 		}
-		h.keyBuf = h.keyBuf[:0]
-		key := serializeKey(h.keyBuf, ext.keyValues)
+		key := string(appendIntKeyRowFormat(h.keyBuf[:0], gs.intKey, h.groupColTypes[0]))
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
@@ -3089,6 +3144,26 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.useIntGroupKey = false
 	h.intGroupStates = nil
 	h.intGroupIndex = nil
+}
+
+// appendIntKeyRowFormat encodes one int-fast-path group key column exactly
+// as processRow / consumeBatchGenericSoA encode it from a live batch row:
+// a 0x00 not-null flag followed by appendColumnValue's fixed-width little-
+// endian bytes for the column type. Int-mode keys are never null (a null
+// key migrates the aggregate to the generic path before consumption).
+func appendIntKeyRowFormat(buf []byte, key int64, typ batch.TypeID) []byte {
+	buf = append(buf, 0)
+	switch typ {
+	case batch.TypeInt32, batch.TypePort, batch.TypeProtocol, batch.TypeDate:
+		v := int32(key)
+		return append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
+	default:
+		// Int64 and every type stored in Int64Data (timestamp, ipv4, mac,
+		// duration) — 8 bytes, matching appendColumnValue's int64 case.
+		return append(buf,
+			byte(key), byte(key>>8), byte(key>>16), byte(key>>24),
+			byte(key>>32), byte(key>>40), byte(key>>48), byte(key>>56))
+	}
 }
 
 // resolveBatchAggKernel returns a batch-level aggregate kernel for scalar aggregates.

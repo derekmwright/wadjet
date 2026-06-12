@@ -31,8 +31,11 @@ type gatherResult struct {
 type gatherReceiver struct {
 	sub               *nats.Subscription
 	workers           *WorkerRegistry // nil-safe; used to mark worker liveness from gather batches
+	budget            int64           // max accumulated decoded bytes; <=0 = uncapped
 	mu                sync.Mutex
 	batches           []*batch.RecordBatch
+	accBytes          int64 // decoded bytes accumulated (MemBytes sum)
+	overBudget        bool
 	totalRows         int64
 	columns           []string
 	workerErr         string
@@ -50,10 +53,20 @@ type gatherReceiver struct {
 // workers may be nil (test code that doesn't care about liveness); when
 // non-nil, every received gather batch updates LastSeen for the emitting
 // worker via WorkerRegistry.MarkWorkerSeen.
-func subscribeGather(nc *nats.Conn, subject string, expectedTerminals int, workers *WorkerRegistry) (*gatherReceiver, error) {
+//
+// budget caps the decoded bytes the receiver will accumulate (<=0 =
+// uncapped). The receiver was the last big uncharged coordinator
+// accumulator: a distributed SELECT * or no-LIMIT high-cardinality GROUP
+// BY landed its entire result in coordinator heap and OOM-killed the
+// process — taking every in-flight query with it. Exceeding the budget
+// fails THIS query cleanly instead (the accumulated batches are dropped
+// immediately to relieve pressure; terminals keep counting so wait()
+// returns promptly).
+func subscribeGather(nc *nats.Conn, subject string, expectedTerminals int, workers *WorkerRegistry, budget int64) (*gatherReceiver, error) {
 	r := &gatherReceiver{
 		expectedTerminals: expectedTerminals,
 		workers:           workers,
+		budget:            budget,
 		done:              make(chan struct{}, 1),
 	}
 	sub, err := nc.Subscribe(subject, r.handle)
@@ -107,6 +120,11 @@ func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 	if len(msg.Payload) == 0 {
 		return
 	}
+	// Once over budget the query is already failing — skip the decode
+	// work for the remaining stream instead of burning CPU on it.
+	if r.overBudget {
+		return
+	}
 	decoded, err := readShuffleBatches(msg.Payload)
 	if err != nil {
 		if r.workerErr == "" {
@@ -123,7 +141,17 @@ func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 			r.columns = cols
 		}
 		r.totalRows += int64(b.ActiveLen())
+		r.accBytes += b.MemBytes()
 		r.batches = append(r.batches, b)
+	}
+	if r.budget > 0 && r.accBytes > r.budget {
+		r.overBudget = true
+		r.batches = nil // free what's accumulated — the query fails, the process must not
+		if r.workerErr == "" {
+			r.workerErr = fmt.Sprintf(
+				"result exceeded the coordinator gather budget (%d MB accumulated > %d MB): add a LIMIT, or raise the budget (Config.GatherResultBudget / GOMEMLIMIT)",
+				r.accBytes>>20, r.budget>>20)
+		}
 	}
 }
 

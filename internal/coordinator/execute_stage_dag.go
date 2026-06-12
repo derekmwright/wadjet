@@ -279,7 +279,7 @@ func (c *Coordinator) executeStageDAG(
 	var fuseStageID string
 	if depID, ok := canFuseGather(gatherStage, pending); ok {
 		replySubject := fmt.Sprintf("wadjet.gather.%s", queryID)
-		recv, err := subscribeGather(c.nc, replySubject, 0, c.workers)
+		recv, err := subscribeGather(c.nc, replySubject, 0, c.workers, c.gatherResultBudget())
 		if err != nil {
 			c.logger.Warn("gather fusion: subscribe failed; falling back to legacy gather",
 				"query", queryID, "fuse_stage_id", depID, "error", err)
@@ -3064,7 +3064,7 @@ func (c *Coordinator) dispatchGatherStage(
 	// fired).
 	c.logger.Info("gather: subscribing",
 		"query_id", queryID, "reply_subject", replySubject)
-	recv, err := subscribeGather(c.nc, replySubject, 1, c.workers)
+	recv, err := subscribeGather(c.nc, replySubject, 1, c.workers, c.gatherResultBudget())
 	if err != nil {
 		return nil, fmt.Errorf("subscribing gather reply: %w", err)
 	}

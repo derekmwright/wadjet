@@ -183,29 +183,40 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 		typeMap[col.Name] = col.Type
 	}
 
-	// Scan each file: delete matching rows, collect modified rows for re-insert
+	// Per-file streaming: box only the matched rows, commit that file's
+	// delete markers, then ingest its updated rows so the ingester's
+	// auto-flush bounds memory. The previous shape boxed every row of
+	// every file (even at zero WHERE selectivity) and accumulated all
+	// updated rows table-wide before one Ingest — a broad UPDATE held the
+	// whole table as boxed maps. Markers commit before the matching
+	// re-ingest, preserving the original failure direction (a crash loses
+	// that file's updated rows; it never duplicates them).
 	var totalUpdated int64
-	var markers []catalog.DeleteMarker
-	var updatedRows []map[string]any
+	var ing *ingest.Ingester
 
 	for _, part := range manifest.Partitions {
 		for _, file := range part.Files {
-			fileRows, matchedIndices, err := db.scanFileForUpdates(ctx, file.Path, schema, predicate)
+			b, err := db.readParquetFile(ctx, file.Path, schema)
 			if err != nil {
 				return nil, fmt.Errorf("scanning file %s: %w", file.Path, err)
+			}
+			if b == nil {
+				continue
+			}
+			var matchedIndices []int64
+			for i := 0; i < b.Len; i++ {
+				if predicate == nil || predicate(b, i) {
+					matchedIndices = append(matchedIndices, int64(i))
+				}
 			}
 			if len(matchedIndices) == 0 {
 				continue
 			}
 
-			markers = append(markers, catalog.DeleteMarker{
-				FilePath:   file.Path,
-				RowIndices: matchedIndices,
-			})
-
 			// Apply SET clauses to matched rows
+			updatedRows := make([]map[string]any, 0, len(matchedIndices))
 			for _, idx := range matchedIndices {
-				row := fileRows[idx]
+				row := b.RowAt(int(idx))
 				for _, sc := range info.SetClauses {
 					v, err := convertValue(sc.Value, typeMap[sc.Column])
 					if err != nil {
@@ -215,23 +226,22 @@ func (db *DB) executeUpdate(ctx context.Context, info *plansql.UpdateInfo) (*Exe
 				}
 				updatedRows = append(updatedRows, row)
 			}
+
+			marker := catalog.DeleteMarker{FilePath: file.Path, RowIndices: matchedIndices}
+			if err := db.catalog.AddDeleteMarkers(ctx, info.Table, []catalog.DeleteMarker{marker}); err != nil {
+				return nil, fmt.Errorf("recording delete markers: %w", err)
+			}
+			if ing == nil {
+				ing = ingest.New(db.catalog, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
+			}
+			if err := ing.Ingest(ctx, updatedRows); err != nil {
+				return nil, fmt.Errorf("inserting updated rows: %w", err)
+			}
 			totalUpdated += int64(len(matchedIndices))
 		}
 	}
 
-	// Record delete markers for old rows
-	if len(markers) > 0 {
-		if err := db.catalog.AddDeleteMarkers(ctx, info.Table, markers); err != nil {
-			return nil, fmt.Errorf("recording delete markers: %w", err)
-		}
-	}
-
-	// Insert updated rows
-	if len(updatedRows) > 0 {
-		ing := ingest.New(db.catalog, info.Table, tableMeta.Schema, tableMeta.PartitionKeys, ingest.DefaultConfig())
-		if err := ing.Ingest(ctx, updatedRows); err != nil {
-			return nil, fmt.Errorf("inserting updated rows: %w", err)
-		}
+	if ing != nil {
 		if err := ing.FlushAll(ctx); err != nil {
 			return nil, fmt.Errorf("flushing updated rows: %w", err)
 		}
@@ -638,28 +648,6 @@ func (db *DB) scanFileForDeletes(ctx context.Context, filePath string, schema []
 		}
 	}
 	return indices, nil
-}
-
-// scanFileForUpdates reads a Parquet file and returns all rows as maps plus indices of matching rows.
-func (db *DB) scanFileForUpdates(ctx context.Context, filePath string, schema []parquet.Column, predicate func(*batch.RecordBatch, int) bool) ([]map[string]any, []int64, error) {
-	b, err := db.readParquetFile(ctx, filePath, schema)
-	if err != nil {
-		return nil, nil, err
-	}
-	if b == nil {
-		return nil, nil, nil
-	}
-
-	// Convert all rows to maps (needed for UPDATE to apply SET clauses)
-	allRows := b.ToRows()
-
-	var indices []int64
-	for i := 0; i < b.Len; i++ {
-		if predicate == nil || predicate(b, i) {
-			indices = append(indices, int64(i))
-		}
-	}
-	return allRows, indices, nil
 }
 
 // readParquetFile downloads and decodes a Parquet file into a RecordBatch.
