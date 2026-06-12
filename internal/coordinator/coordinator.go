@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/alerts"
@@ -893,19 +894,37 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 		pending = append(pending, inlineWork{idx: i, data: r.InlineData})
 	}
 
-	// Fetch S3-stored results in parallel for probe-split merge
+	// Fetch S3-stored results for probe-split merge: bounded fan-out
+	// (mirrors ReadResultFiles' maxConcurrent) and a running byte cap —
+	// these are precisely the blobs that exceeded the inline threshold,
+	// workers can't apply LIMIT, and the previous unbounded ReadAll
+	// fan-out held every raw blob simultaneously, uncharged. Past the
+	// budget the query fails cleanly instead of OOM-killing the process.
+	budget := c.gatherResultBudget()
 	if len(s3Fetches) > 0 {
 		type fetchResult struct {
 			data []byte
 			err  error
 		}
 		fetchResults := make([]fetchResult, len(s3Fetches))
+		var fetchedBytes atomic.Int64
+		const maxConcurrentFetches = 8
+		sem := make(chan struct{}, maxConcurrentFetches)
 		var wg sync.WaitGroup
 		for fi, sf := range s3Fetches {
 			wg.Add(1)
 			go func(i int, path string) {
 				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				if budget > 0 && fetchedBytes.Load() > budget {
+					fetchResults[i] = fetchResult{err: fmt.Errorf(
+						"partial results exceeded the coordinator gather budget (%d MB): add a LIMIT, or raise the budget (Config.GatherResultBudget / GOMEMLIMIT)",
+						budget>>20)}
+					return
+				}
 				data, err := c.fetchResultData(ctx, queryID, path)
+				fetchedBytes.Add(int64(len(data)))
 				fetchResults[i] = fetchResult{data: data, err: err}
 			}(fi, sf.path)
 		}
@@ -948,13 +967,22 @@ func (c *Coordinator) readFinalResults(ctx context.Context, queryID string, stag
 
 	var allBatches []*batch.RecordBatch
 	var columns []string
+	var decodedBytes int64
 	totalRows := s3Rows
 	for _, d := range slot {
 		if len(d.columns) > 0 && len(columns) == 0 {
 			columns = d.columns
 		}
 		totalRows += d.rows
+		for _, b := range d.batches {
+			decodedBytes += b.MemBytes()
+		}
 		allBatches = append(allBatches, d.batches...)
+	}
+	if budget > 0 && decodedBytes > budget {
+		return nil, nil, 0, fmt.Errorf(
+			"decoded partial results exceeded the coordinator gather budget (%d MB > %d MB): add a LIMIT, or raise the budget (Config.GatherResultBudget / GOMEMLIMIT)",
+			decodedBytes>>20, budget>>20)
 	}
 	return allBatches, columns, totalRows, nil
 }
