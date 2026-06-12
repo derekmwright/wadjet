@@ -320,19 +320,12 @@ func NewBloomFilterOp(bloom []uint64, bloomMask uint64, keys []string, useIntKey
 	}
 }
 
-// BuildBloomFromBatches constructs a bloom filter from a column across
-// multiple batches. Returns nil bloom if no rows. Used for reverse bloom
-// pushdown: the probe side's join key values filter the build side's scan.
-func BuildBloomFromBatches(batches []*batch.RecordBatch, keyCol string) (bloom []uint64, bloomMask uint64) {
-	totalRows := 0
-	for _, b := range batches {
-		totalRows += b.ActiveLen()
-	}
+// NewBloomSized allocates a bloom filter for totalRows keys (~10 bits per
+// key for ~1% FPR). Returns nil bloom for zero rows.
+func NewBloomSized(totalRows int) (bloom []uint64, bloomMask uint64) {
 	if totalRows == 0 {
 		return nil, 0
 	}
-
-	// Allocate bloom: ~10 bits per key for ~1% FPR
 	nSlots := 1
 	for nSlots*64 < totalRows*10 {
 		nSlots *= 2
@@ -340,8 +333,21 @@ func BuildBloomFromBatches(batches []*batch.RecordBatch, keyCol string) (bloom [
 	if nSlots < 8 {
 		nSlots = 8
 	}
-	bloom = make([]uint64, nSlots)
-	bloomMask = uint64(nSlots - 1)
+	return make([]uint64, nSlots), uint64(nSlots - 1)
+}
+
+// BloomAddBatch hashes one batch's key column into the bloom. Incremental
+// counterpart of BuildBloomFromBatches, used when the source batches stream
+// from a spill-backed collector instead of sitting in memory all at once.
+func BloomAddBatch(bloom []uint64, bloomMask uint64, b *batch.RecordBatch, keyCol string) {
+	colIdx := b.ColumnIndex(keyCol)
+	if colIdx < 0 {
+		return
+	}
+	col := b.Columns[colIdx]
+	isInt := col.Type == batch.TypeInt32 || col.Type == batch.TypeInt64 ||
+		col.Type == batch.TypePort || col.Type == batch.TypeProtocol ||
+		col.Type == batch.TypeDate
 
 	set := func(hash uint64) {
 		h1 := hash & bloomMask
@@ -352,40 +358,46 @@ func BuildBloomFromBatches(batches []*batch.RecordBatch, keyCol string) (bloom [
 		bloom[h2] |= 1 << b2
 	}
 
-	for _, b := range batches {
-		colIdx := b.ColumnIndex(keyCol)
-		if colIdx < 0 {
-			continue
+	if b.Sel != nil {
+		for _, si := range b.Sel {
+			row := int(si)
+			if col.Nulls.IsNull(row) {
+				continue
+			}
+			if isInt {
+				set(bloomHashInt(intValFromCol(col, row)))
+			} else {
+				set(bloomHashBytes(col.BytesData.Value(row)))
+			}
 		}
-		col := b.Columns[colIdx]
-		isInt := col.Type == batch.TypeInt32 || col.Type == batch.TypeInt64 ||
-			col.Type == batch.TypePort || col.Type == batch.TypeProtocol ||
-			col.Type == batch.TypeDate
+	} else {
+		for row := 0; row < b.Len; row++ {
+			if col.Nulls.IsNull(row) {
+				continue
+			}
+			if isInt {
+				set(bloomHashInt(intValFromCol(col, row)))
+			} else {
+				set(bloomHashBytes(col.BytesData.Value(row)))
+			}
+		}
+	}
+}
 
-		if b.Sel != nil {
-			for _, si := range b.Sel {
-				row := int(si)
-				if col.Nulls.IsNull(row) {
-					continue
-				}
-				if isInt {
-					set(bloomHashInt(intValFromCol(col, row)))
-				} else {
-					set(bloomHashBytes(col.BytesData.Value(row)))
-				}
-			}
-		} else {
-			for row := 0; row < b.Len; row++ {
-				if col.Nulls.IsNull(row) {
-					continue
-				}
-				if isInt {
-					set(bloomHashInt(intValFromCol(col, row)))
-				} else {
-					set(bloomHashBytes(col.BytesData.Value(row)))
-				}
-			}
-		}
+// BuildBloomFromBatches constructs a bloom filter from a column across
+// multiple batches. Returns nil bloom if no rows. Used for reverse bloom
+// pushdown: the probe side's join key values filter the build side's scan.
+func BuildBloomFromBatches(batches []*batch.RecordBatch, keyCol string) (bloom []uint64, bloomMask uint64) {
+	totalRows := 0
+	for _, b := range batches {
+		totalRows += b.ActiveLen()
+	}
+	bloom, bloomMask = NewBloomSized(totalRows)
+	if bloom == nil {
+		return nil, 0
+	}
+	for _, b := range batches {
+		BloomAddBatch(bloom, bloomMask, b, keyCol)
 	}
 	return bloom, bloomMask
 }

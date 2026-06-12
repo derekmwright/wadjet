@@ -3548,16 +3548,17 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		}
 
 		bridge := &reverseBloomBridge{
-			childSource:    leftSource,
-			childOps:       leftOps,
-			rbBuildSource:  &rbBuildSource,
-			buildSource:    buildSource,
-			buildStart:     buildStart,
-			barrier:        buildDone,
-			buildErr:       &buildErr,
-			probeKey:       leftKeys[0],
-			buildKey:       rightKeys[0],
-			workers:        innerPipelineWorkers(leftSource),
+			childSource:   leftSource,
+			childOps:      leftOps,
+			rbBuildSource: &rbBuildSource,
+			buildSource:   buildSource,
+			buildStart:    buildStart,
+			barrier:       buildDone,
+			buildErr:      &buildErr,
+			probeKey:      leftKeys[0],
+			buildKey:      rightKeys[0],
+			workers:       innerPipelineWorkers(leftSource),
+			spill:         p.getSpillManager(),
 		}
 		return bridge, []exec.UnaryOperator{probe}, &exec.CollectSink{}, nil
 	}
@@ -3582,6 +3583,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			barrier:     buildDone,
 			buildErr:    &buildErr,
 			workers:     innerPipelineWorkers(leftSource),
+			spill:       p.getSpillManager(),
 		}
 
 		if joinType == exec.RightJoin || joinType == exec.FullOuterJoin {
@@ -3687,26 +3689,27 @@ type deferredJoinBridge struct {
 	barrier     <-chan struct{}
 	buildErr    *error
 	workers     int
+	spill       *memory.SpillManager
 
-	batches []*batch.RecordBatch
-	idx     int
-	mu      sync.Mutex
+	collector *exec.SpillableBatchCollector
 }
 
 func (d *deferredJoinBridge) Init(ctx context.Context) error {
 	// Run child pipeline (scan → early probes) to collect filtered batches.
 	// This overlaps with the deferred build goroutine(s) running in background.
-	// BatchSink, not CollectSink: the bridge replays raw batches and never
-	// touches the row representation — CollectSink.Finalize would box the
-	// entire collected set just to discard it (see reverseBloomBridge).
-	sink := &exec.BatchSink{}
+	// The collector charges the tracker and spills past pressure — the raw
+	// BatchSink it replaces pinned the entire collected probe side in
+	// untracked heap while the deferred build held its hash table (double
+	// residency, invisible to SpillManager victim selection).
+	d.collector = &exec.SpillableBatchCollector{Spill: d.spill}
 	pipe := &exec.Pipeline{
 		Source:  d.childSource,
 		Ops:     d.childOps,
-		Sink:    sink,
+		Sink:    d.collector,
 		Workers: d.workers,
 	}
 	if err := pipe.Run(ctx); err != nil {
+		d.collector.Release()
 		// Wait for build goroutine to prevent leak
 		select {
 		case <-d.barrier:
@@ -3714,33 +3717,29 @@ func (d *deferredJoinBridge) Init(ctx context.Context) error {
 		}
 		return fmt.Errorf("deferred join child pipeline: %w", err)
 	}
-	d.batches = sink.Batches()
 
 	// Wait for deferred build to complete
 	select {
 	case <-d.barrier:
 	case <-ctx.Done():
+		d.collector.Release()
 		return ctx.Err()
 	}
 	if *d.buildErr != nil {
+		d.collector.Release()
 		return *d.buildErr
 	}
 	return nil
 }
 
-func (d *deferredJoinBridge) Next(_ context.Context) (*batch.RecordBatch, error) {
-	d.mu.Lock()
-	if d.idx >= len(d.batches) {
-		d.mu.Unlock()
-		return nil, nil
-	}
-	b := d.batches[d.idx]
-	d.idx++
-	d.mu.Unlock()
-	return b, nil
+func (d *deferredJoinBridge) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	return d.collector.NextReplay(ctx)
 }
 
 func (d *deferredJoinBridge) Close() error {
+	if d.collector != nil {
+		d.collector.Release()
+	}
 	return nil
 }
 
@@ -3761,50 +3760,57 @@ type reverseBloomBridge struct {
 	probeKey      string // probe-side column to extract bloom from
 	buildKey      string // build-side column to filter
 	workers       int
+	spill         *memory.SpillManager
 
-	batches []*batch.RecordBatch
-	idx     int
-	mu      sync.Mutex
+	collector *exec.SpillableBatchCollector
 }
 
 func (rb *reverseBloomBridge) Init(ctx context.Context) error {
-	// Phase 1: Run child pipeline to collect probe-side batches.
-	//
-	// Use BatchSink rather than CollectSink: the bridge consumes only the
-	// raw batches via .Batches(), never the row representation, and
-	// CollectSink.Finalize unconditionally calls ToRows() — which (a) burns
-	// CPU on a conversion the bridge doesn't need, and (b) panicked on
-	// batches whose Len/column-Len had drifted out of sync. The underlying
-	// drift is fixed in aggPreProject (return a fresh RecordBatch struct
-	// per call instead of mutating cachedOutput in place), but using
-	// BatchSink here is also the right structural fit and provides defence
-	// in depth.
-	sink := &exec.BatchSink{}
+	// Phase 1: Run child pipeline to collect probe-side batches. The
+	// spill-backed collector charges the tracker and degrades to disk past
+	// pressure — the raw BatchSink it replaces pinned the full probe side
+	// (e.g. a 1/N lineitem split at SF100) in untracked heap while the
+	// downstream join held its build. It also stays clear of CollectSink's
+	// Finalize→ToRows boxing, which this bridge never needed.
+	rb.collector = &exec.SpillableBatchCollector{Spill: rb.spill}
 	pipe := &exec.Pipeline{
 		Source:  rb.childSource,
-		Ops:    rb.childOps,
-		Sink:   sink,
+		Ops:     rb.childOps,
+		Sink:    rb.collector,
 		Workers: rb.workers,
 	}
 	if err := pipe.Run(ctx); err != nil {
+		rb.collector.Release()
 		close(rb.buildStart)
 		<-rb.barrier
 		return fmt.Errorf("reverse bloom child pipeline: %w", err)
 	}
-	rb.batches = sink.Batches()
 
-	// Phase 2: Build bloom from collected batches' join key column.
-	bloom, bloomMask := exec.BuildBloomFromBatches(rb.batches, rb.probeKey)
+	// Phase 2: Build bloom from the collected key column — a streaming
+	// pass over the collector (reads spilled runs back from disk), so the
+	// bloom build adds no resident copy.
+	bloom, bloomMask := exec.NewBloomSized(rb.collector.Rows())
+	if bloom != nil {
+		if err := rb.collector.Iterate(func(b *batch.RecordBatch) error {
+			exec.BloomAddBatch(bloom, bloomMask, b, rb.probeKey)
+			return nil
+		}); err != nil {
+			rb.collector.Release()
+			close(rb.buildStart)
+			<-rb.barrier
+			return fmt.Errorf("reverse bloom build: %w", err)
+		}
+	}
 
 	// Phase 3: Inject bloom filter into build-side pipeline.
 	if bloom != nil {
 		useIntKey := false
-		if len(rb.batches) > 0 {
-			if ci := rb.batches[0].ColumnIndex(rb.probeKey); ci >= 0 {
-				col := rb.batches[0].Columns[ci]
-				useIntKey = col.Type == batch.TypeInt32 || col.Type == batch.TypeInt64 ||
-					col.Type == batch.TypePort || col.Type == batch.TypeProtocol ||
-					col.Type == batch.TypeDate
+		for _, col := range rb.collector.Schema() {
+			if col.Name == rb.probeKey {
+				useIntKey = col.Type == parquet.TypeInt32 || col.Type == parquet.TypeInt64 ||
+					col.Type == parquet.TypePort || col.Type == parquet.TypeProtocol ||
+					col.Type == parquet.TypeDate
+				break
 			}
 		}
 		bloomOp := exec.NewBloomFilterOp(bloom, bloomMask, []string{rb.buildKey}, useIntKey)
@@ -3821,27 +3827,24 @@ func (rb *reverseBloomBridge) Init(ctx context.Context) error {
 	select {
 	case <-rb.barrier:
 	case <-ctx.Done():
+		rb.collector.Release()
 		return ctx.Err()
 	}
 	if *rb.buildErr != nil {
+		rb.collector.Release()
 		return *rb.buildErr
 	}
 	return nil
 }
 
-func (rb *reverseBloomBridge) Next(_ context.Context) (*batch.RecordBatch, error) {
-	rb.mu.Lock()
-	if rb.idx >= len(rb.batches) {
-		rb.mu.Unlock()
-		return nil, nil
-	}
-	b := rb.batches[rb.idx]
-	rb.idx++
-	rb.mu.Unlock()
-	return b, nil
+func (rb *reverseBloomBridge) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	return rb.collector.NextReplay(ctx)
 }
 
 func (rb *reverseBloomBridge) Close() error {
+	if rb.collector != nil {
+		rb.collector.Release()
+	}
 	return nil
 }
 
