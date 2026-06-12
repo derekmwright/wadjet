@@ -35,10 +35,24 @@ jobs:
         # the rest of the suite in parallel.
         # -p 2 caps test-package parallelism so two heavy packages don't
         # overlap on the runner's RAM.
-        run: go test -short -p 2 ./internal/... -timeout 5m
+        # ./wadjet/ carries the embeddable-API E2E suites (CTE, nested
+        # types, Decimal) — it was previously not run in CI at all.
+        run: go test -short -p 2 ./internal/... ./wadjet/ -timeout 8m
 
       - name: TPC-H Correctness (SF0.01)
         run: go test -v -run TestTPCHQueries ./benchmarks/tpch/ -timeout 5m
+
+      - name: Nested Types + Decimal Correctness
+        # The gate TPC-H is structurally blind to (issue #144): TPC-H has
+        # no ARRAY/MAP/ROW columns, no Decimal in the merge path, and no
+        # NULL group keys, so an entire class of silent wrong-results bugs
+        # shipped SF100-green until found by code sweep. These suites run
+        # the nested+Decimal battery end-to-end (embeddable API and
+        # distributed) plus the operator-level regression corpus.
+        run: |
+          go test -v -run 'TestNestedDecimalCorrectness' ./wadjet/ -timeout 5m
+          go test -v -run 'TestDistributedDecimalAndNullGroups' ./internal/coordinator/ -timeout 5m
+          go test -v -run 'TestReadRowGroupNative_DecimalValues|TestReadRowGroupNative_ArrayErrorsLoudly|TestShuffleFormatDecimalScaleRoundTrip|TestStringGroupKey_NullGroupAggregates|TestDecimal' ./internal/engine/scan/ ./internal/worker/ ./internal/engine/exec/ ./internal/storage/parquet/ -timeout 5m
 
   benchmark:
     runs-on: ubuntu-latest
