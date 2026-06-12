@@ -3696,7 +3696,10 @@ type deferredJoinBridge struct {
 func (d *deferredJoinBridge) Init(ctx context.Context) error {
 	// Run child pipeline (scan → early probes) to collect filtered batches.
 	// This overlaps with the deferred build goroutine(s) running in background.
-	sink := &exec.CollectSink{}
+	// BatchSink, not CollectSink: the bridge replays raw batches and never
+	// touches the row representation — CollectSink.Finalize would box the
+	// entire collected set just to discard it (see reverseBloomBridge).
+	sink := &exec.BatchSink{}
 	pipe := &exec.Pipeline{
 		Source:  d.childSource,
 		Ops:     d.childOps,
@@ -5428,11 +5431,11 @@ func (u *setOpSourceAdapter) Next(ctx context.Context) (*batch.RecordBatch, erro
 		}
 
 		if len(resultRows) > 0 {
-			var schema []parquet.Column
-			if leftBatches := leftSink.Batches(); len(leftBatches) > 0 {
-				schema = leftBatches[0].Schema
-			} else if rightBatches := rightSink.Batches(); len(rightBatches) > 0 {
-				schema = rightBatches[0].Schema
+			// Schema() instead of Batches()[0].Schema — ToRows above
+			// released the sinks' batches as it boxed them.
+			schema := leftSink.Schema()
+			if schema == nil {
+				schema = rightSink.Schema()
 			}
 			if schema != nil {
 				u.batches = []*batch.RecordBatch{batch.FromRows(schema, resultRows)}
