@@ -479,7 +479,7 @@ func (e *Executor) executePipeline(ctx context.Context, task distributed.Task, r
 	if err != nil {
 		return fmt.Errorf("creating catalog KV: %w", err)
 	}
-	cachedStore := NewCachedStore(e.store, e.cache)
+	cachedStore := NewCachedStore(e.store, e.cache, e.sharedTracker)
 	cat := catalog.New(kv, cachedStore, bucket)
 	if err := cat.Init(ctx); err != nil {
 		return fmt.Errorf("initializing catalog: %w", err)
