@@ -461,6 +461,32 @@ func (s *fileSlot) releaseRG(inner *scanSourceInner) {
 	}
 }
 
+// drainAbandoned releases everything a slot still holds when its scan is
+// torn down before all row groups were consumed (ctx cancel, LIMIT
+// satisfied, downstream error): the pooled buffer, the loadSem slot, and —
+// critically — the memTracker charge, which lives on the worker-lifetime
+// SHARED tracker and would otherwise remain a permanent phantom reservation
+// (up to loadConcurrency x file_size per cancelled scan), starving later
+// tasks' admission and forcing chronic over-spilling. Callers must ensure
+// the rg workers have exited (Close does wg.Wait first).
+func (s *fileSlot) drainAbandoned(inner *scanSourceInner) {
+	s.mu.Lock()
+	wasLoaded := s.loaded && s.loadErr == nil && s.reader != nil
+	s.reader = nil
+	s.nativeReader = nil
+	s.metaReader = nil
+	buf := s.dataBuf
+	s.dataBuf = nil
+	s.releaseCharge(inner)
+	s.mu.Unlock()
+	if buf != nil {
+		putReadBuf(buf)
+	}
+	if wasLoaded && inner.loadSem != nil {
+		<-inner.loadSem
+	}
+}
+
 // prefetchResult holds a speculatively read row group batch and its unit index.
 type prefetchResult struct {
 	idx   int

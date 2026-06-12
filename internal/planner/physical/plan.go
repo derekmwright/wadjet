@@ -5223,6 +5223,13 @@ func (p *Planner) buildTopN(ctx context.Context, sortNode *logical.Node, n int) 
 
 	sortOp := exec.NewSort(keys)
 	sortOp.Limit = n // Top-K: only materialize top N rows
+	// Parity with buildSort: without the spill manager, the pre-sort input
+	// of every ORDER BY ... LIMIT query buffered fully untracked — the
+	// top-K heap only runs at finalize, so this was an unbounded,
+	// pressure-invisible accumulation on the most common query shape.
+	if sm := p.getSpillManager(); sm != nil {
+		sortOp.Spill = sm
+	}
 
 	return &sortSourceAdapter{
 		childSource: childSource,
@@ -7035,6 +7042,24 @@ func (inner *scanSourceInner) releaseScanBatch(b *batch.RecordBatch) {
 	}
 }
 
+// drainSlotCharges releases the lazy fileSlot state of every slot whose row
+// groups were not fully consumed — buffers, loadSem slots and shared-tracker
+// charges abandoned by an early Close (LIMIT, cancel, error). Must run after
+// wg.Wait (no rg worker may still be loading) and BEFORE releasePooledBufs,
+// which nils rgUnits (the only reference to the slots).
+func (inner *scanSourceInner) drainSlotCharges() {
+	seen := make(map[*fileSlot]bool)
+	for _, u := range inner.rgUnits {
+		if u.slot == nil || seen[u.slot] {
+			continue
+		}
+		seen[u.slot] = true
+		if u.slot.rgRemaining.Load() > 0 {
+			u.slot.drainAbandoned(inner)
+		}
+	}
+}
+
 // drainBatchCharges releases every outstanding decoded-batch charge —
 // batches stranded in batchCh by cancellation or never sent by an exiting
 // worker. Callers must ensure the rg/scan workers have exited first (the
@@ -7275,6 +7300,7 @@ func (s *scannerExecSource) Close() error {
 		// select, so this wait is bounded by one in-flight row-group decode.
 		s.scanner.wg.Wait()
 		s.scanner.drainBatchCharges()
+		s.scanner.drainSlotCharges()
 		s.scanner.releasePooledBufs()
 	}
 	return nil

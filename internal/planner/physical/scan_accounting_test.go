@@ -230,3 +230,38 @@ func TestScanAccounting_DrainOnClose(t *testing.T) {
 		t.Fatalf("used = %d after drain, want 0", used)
 	}
 }
+
+// TestScanAccounting_DrainSlotChargesOnAbandonedScan: a scan torn down
+// before consuming every row group (LIMIT, cancel, error) must release the
+// fileSlot's buffer, semaphore slot and tracker charge — the charge lives
+// on the worker-lifetime SHARED tracker, so a leak here was a permanent
+// phantom reservation poisoning admission for every later task.
+func TestScanAccounting_DrainSlotChargesOnAbandonedScan(t *testing.T) {
+	cat, entry := scanAccountingFixture(t, testRows(10, 0), testRows(10, 10))
+
+	tracker := memory.NewTracker("scan-test", 1<<30)
+	inner := &scanSourceInner{cat: cat, memTracker: tracker}
+	inner.loadSem = make(chan struct{}, 1)
+
+	slot := &fileSlot{entry: entry}
+	slot.rgRemaining.Store(2)
+	inner.rgUnits = []rgUnit{{slot: slot, rgIndex: 0}, {slot: slot, rgIndex: 1}}
+
+	if _, err := slot.ensureLoaded(inner, context.Background()); err != nil {
+		t.Fatalf("ensureLoaded: %v", err)
+	}
+	slot.releaseRG(inner) // 1 of 2 consumed, then the scan is abandoned
+
+	if used := tracker.Used(); used < entry.SizeBytes {
+		t.Fatalf("used = %d before drain, want >= %d", used, entry.SizeBytes)
+	}
+	inner.drainSlotCharges()
+	if used := tracker.Used(); used != 0 {
+		t.Fatalf("used = %d after drainSlotCharges, want 0 (phantom reservation)", used)
+	}
+	select {
+	case inner.loadSem <- struct{}{}: // sem slot must have been released
+	default:
+		t.Fatal("loadSem slot still held after drain")
+	}
+}
