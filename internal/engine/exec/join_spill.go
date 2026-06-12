@@ -523,13 +523,114 @@ func writeColumnData(w *bufio.Writer, v *batch.Vector, n int, buf []byte) error 
 			w.Write(buf[:4])
 		}
 
+	case batch.TypeArray, batch.TypeMap:
+		// [offsets:(n+1)*u32] [child vector]. MAP shares ARRAY's layout (its
+		// child is a ROW(key,value) vector), so the recursion covers it.
+		if len(v.Offsets) < n+1 {
+			return fmt.Errorf("columnar spill: %v column has %d offsets, need %d", v.Type, len(v.Offsets), n+1)
+		}
+		for i := 0; i <= n; i++ {
+			binary.LittleEndian.PutUint32(buf[:4], uint32(v.Offsets[i]))
+			w.Write(buf[:4])
+		}
+		childLen := int(v.Offsets[n])
+		if v.Child == nil && childLen > 0 {
+			return fmt.Errorf("columnar spill: %v column has %d child elements but nil child vector", v.Type, childLen)
+		}
+		if err := writeNestedVector(w, v.Child, childLen, buf); err != nil {
+			return err
+		}
+
+	case batch.TypeRow:
+		// [numChildren:u32] then per child: [fieldNameLen:u16][fieldName]
+		// [child vector]. Children are parallel arrays of the parent's length.
+		binary.LittleEndian.PutUint32(buf[:4], uint32(len(v.Children)))
+		w.Write(buf[:4])
+		for j, ch := range v.Children {
+			var name string
+			if j < len(v.FieldNames) {
+				name = v.FieldNames[j]
+			}
+			binary.LittleEndian.PutUint16(buf[:2], uint16(len(name)))
+			w.Write(buf[:2])
+			w.WriteString(name)
+			if err := writeNestedVector(w, ch, n, buf); err != nil {
+				return err
+			}
+		}
+
 	default:
-		// Nested types (Array/Map/Row) have no columnar spill encoding.
-		// Writing nothing here would silently corrupt data on read-back, so
-		// fail loudly — callers gate on columnarSpillableSchema.
 		return fmt.Errorf("columnar spill: unsupported column type %v", v.Type)
 	}
 	return nil
+}
+
+// nestedNilChildMarker is the type byte written for a nil child vector (only
+// legal when the child has zero elements). 0xFF is outside the TypeID space.
+const nestedNilChildMarker = 0xFF
+
+// writeNestedVector serializes a child vector of a nested column:
+// [typeID:u8] [hasNulls:u8] [nullBitmap?] [typed data via writeColumnData].
+// Mirrors the per-column framing of writeColumnarBatch minus name/nullable,
+// which only exist at the schema level.
+func writeNestedVector(w *bufio.Writer, v *batch.Vector, n int, buf []byte) error {
+	if v == nil {
+		if n > 0 {
+			return fmt.Errorf("columnar spill: nil nested vector with %d elements", n)
+		}
+		w.WriteByte(nestedNilChildMarker)
+		return nil
+	}
+	w.WriteByte(byte(v.Type))
+	if v.Nulls.HasNulls() {
+		w.WriteByte(1)
+		bitmapLen := (n + 7) / 8
+		bitmapData := make([]byte, bitmapLen)
+		for j := 0; j < n; j++ {
+			if v.Nulls.IsNullFast(j) {
+				bitmapData[j/8] |= 1 << (uint(j) % 8)
+			}
+		}
+		w.Write(bitmapData)
+	} else {
+		w.WriteByte(0)
+	}
+	return writeColumnData(w, v, n, buf)
+}
+
+// readNestedVector mirrors writeNestedVector.
+func readNestedVector(r *bufio.Reader, n int, buf []byte) (*batch.Vector, error) {
+	typeByte, err := r.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("reading nested vector type: %w", err)
+	}
+	if typeByte == nestedNilChildMarker {
+		if n > 0 {
+			return nil, fmt.Errorf("columnar spill: nil nested vector marker with %d elements", n)
+		}
+		return nil, nil
+	}
+	v := batch.NewVector(parquet.TypeID(typeByte), n)
+	hasNulls, err := r.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("reading nested hasNulls: %w", err)
+	}
+	if hasNulls == 1 {
+		bitmapLen := (n + 7) / 8
+		bitmapData := make([]byte, bitmapLen)
+		if _, err := io.ReadFull(r, bitmapData); err != nil {
+			return nil, fmt.Errorf("reading nested null bitmap: %w", err)
+		}
+		for j := 0; j < n; j++ {
+			if bitmapData[j/8]&(1<<(uint(j)%8)) != 0 {
+				v.Nulls.SetNull(j)
+			}
+		}
+	}
+	if err := readColumnData(r, v, n, buf); err != nil {
+		return nil, fmt.Errorf("reading nested vector data: %w", err)
+	}
+	return v, nil
 }
 
 // readColumnarBatch reads a single RecordBatch from the columnar binary format.
@@ -707,6 +808,45 @@ func readColumnData(r *bufio.Reader, v *batch.Vector, n int, buf []byte) error {
 				return err
 			}
 			v.Float32Data[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[:4]))
+		}
+
+	case batch.TypeArray, batch.TypeMap:
+		// NewVector pre-allocated Offsets to n+1.
+		for i := 0; i <= n; i++ {
+			if _, err := io.ReadFull(r, buf[:4]); err != nil {
+				return err
+			}
+			v.Offsets[i] = int32(binary.LittleEndian.Uint32(buf[:4]))
+		}
+		childLen := int(v.Offsets[n])
+		child, err := readNestedVector(r, childLen, buf)
+		if err != nil {
+			return err
+		}
+		v.Child = child
+
+	case batch.TypeRow:
+		if _, err := io.ReadFull(r, buf[:4]); err != nil {
+			return err
+		}
+		numChildren := int(binary.LittleEndian.Uint32(buf[:4]))
+		v.Children = make([]*batch.Vector, numChildren)
+		v.FieldNames = make([]string, numChildren)
+		for j := 0; j < numChildren; j++ {
+			if _, err := io.ReadFull(r, buf[:2]); err != nil {
+				return err
+			}
+			nameLen := int(binary.LittleEndian.Uint16(buf[:2]))
+			nameBuf := make([]byte, nameLen)
+			if _, err := io.ReadFull(r, nameBuf); err != nil {
+				return err
+			}
+			v.FieldNames[j] = string(nameBuf)
+			ch, err := readNestedVector(r, n, buf)
+			if err != nil {
+				return err
+			}
+			v.Children[j] = ch
 		}
 
 	default:

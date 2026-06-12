@@ -2,7 +2,6 @@ package exec
 
 import (
 	"context"
-	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -41,7 +40,6 @@ type Sort struct {
 	batches    []*batch.RecordBatch // columnar storage
 	totalRows  int
 	trackedMem int64                // memory reserved from shared tracker by this operator
-	spillFiles []string             // legacy row-oriented spill (schemas the columnar run format can't carry)
 	runFiles   []string             // sorted columnar runs (external-merge path)
 	sorted     []*batch.RecordBatch // materialized sorted results
 	pos        int
@@ -54,7 +52,7 @@ type Sort struct {
 	accInstanceID       uint64
 	accState            atomic.Int32
 	unregisterAccounted func()
-	// finalized is set once finalizeColumnar/finalizeWithSpill begins; after
+	// finalized is set once finalize begins; after
 	// that the input batches are gone and there is nothing left to spill.
 	finalized bool
 }
@@ -106,11 +104,9 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 
 	// Spill to disk if memory pressure is high. The columnar run path
 	// accumulates at least minSortRunBytes before flushing so runs stay
-	// merge-friendly; the legacy row path (nested-type schemas) keeps the
-	// old flush-on-pressure behavior. Peer relief (SpillSome) bypasses the
-	// floor.
+	// merge-friendly. Peer relief (SpillSome) bypasses the floor.
 	if s.Spill != nil && s.Spill.ShouldSpillFor(memory.SpillCheap) && len(s.batches) > 0 {
-		if !columnarSpillableSchema(s.schema) || s.trackedMem >= minSortRunBytes {
+		if s.trackedMem >= minSortRunBytes {
 			if _, err := s.flushSpillLocked(); err != nil {
 				return err
 			}
@@ -120,31 +116,20 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 }
 
 // flushSpillLocked drains all buffered batches to disk and releases their
-// tracking, returning the bytes freed. Columnar-spillable schemas write a
-// SORTED run (the external-merge unit); nested-type schemas fall back to the
-// legacy row-oriented spill file. Caller holds s.mu.
+// tracking, returning the bytes freed. Every schema writes a SORTED columnar
+// run (the external-merge unit) — nested ARRAY/MAP/ROW columns round-trip
+// the run format since the typed nested copy primitives landed. Caller
+// holds s.mu.
 func (s *Sort) flushSpillLocked() (int64, error) {
 	if len(s.batches) == 0 || s.trackedMem == 0 {
 		return 0, nil
 	}
-	if columnarSpillableSchema(s.schema) {
-		path, err := sortBatchesToRun(s.Spill.SpillDir(), s.schema, s.batches, s.totalRows, s.Keys, s.Limit)
-		if err != nil {
-			return 0, err
-		}
-		if path != "" {
-			s.runFiles = append(s.runFiles, path)
-		}
-	} else {
-		var rows []map[string]any
-		for _, sb := range s.batches {
-			rows = append(rows, sb.ToRows()...)
-		}
-		path, err := s.Spill.SpillRows(rows)
-		if err != nil {
-			return 0, err
-		}
-		s.spillFiles = append(s.spillFiles, path)
+	path, err := sortBatchesToRun(s.Spill.SpillDir(), s.schema, s.batches, s.totalRows, s.Keys, s.Limit)
+	if err != nil {
+		return 0, err
+	}
+	if path != "" {
+		s.runFiles = append(s.runFiles, path)
 	}
 	s.batches = s.batches[:0]
 	s.totalRows = 0
@@ -169,9 +154,6 @@ func (s *Sort) Finalize(_ context.Context) error {
 		s.accState.Store(int32(memory.OpClosed))
 		s.unregisterAccounted()
 		s.unregisterAccounted = nil
-	}
-	if len(s.spillFiles) > 0 {
-		return s.finalizeWithSpill()
 	}
 	if len(s.runFiles) > 0 {
 		return s.finalizeExternalMerge()
@@ -247,69 +229,6 @@ func (s *Sort) finishMergeLocked() {
 		s.trackedMem = 0
 	}
 	s.mergeDone = true
-}
-
-// finalizeWithSpill falls back to row-oriented sort when spill files exist.
-func (s *Sort) finalizeWithSpill() error {
-	// Convert stored batches to rows
-	var rows []map[string]any
-	for _, b := range s.batches {
-		rows = append(rows, b.ToRows()...)
-	}
-	s.batches = nil
-
-	// Merge spilled data
-	for _, spillFile := range s.spillFiles {
-		spilled, err := memory.ReadSpilledRows(spillFile)
-		if err != nil {
-			return err
-		}
-		rows = append(rows, spilled...)
-	}
-	s.spillFiles = nil
-
-	sort.SliceStable(rows, func(i, j int) bool {
-		for _, key := range s.Keys {
-			vi := rows[i][key.Column]
-			vj := rows[j][key.Column]
-			viNil := vi == nil
-			vjNil := vj == nil
-			if viNil && vjNil {
-				continue
-			}
-			if viNil || vjNil {
-				if key.NullsLast {
-					return !viNil // nil sorts last: non-nil < nil
-				}
-				return viNil // nil sorts first: nil < non-nil
-			}
-			cmp := compareAny(vi, vj)
-			if cmp == 0 {
-				continue
-			}
-			if key.Order == Descending {
-				return cmp > 0
-			}
-			return cmp < 0
-		}
-		return false
-	})
-
-	// Materialize into sorted batches.
-	// When Limit > 0, only materialize the top Limit rows (Top-K).
-	materializeN := len(rows)
-	if s.Limit > 0 && s.Limit < materializeN {
-		materializeN = s.Limit
-	}
-	for pos := 0; pos < materializeN; {
-		end := pos + batch.DefaultBatchSize
-		if end > materializeN {
-			end = materializeN
-		}
-		s.sorted = append(s.sorted, batch.FromRows(s.schema, rows[pos:end]))
-		pos = end
-	}
-	return nil
 }
 
 // sortEntry identifies a row within the accumulated batches by batch and row index.
@@ -538,6 +457,13 @@ func (s *Sort) nextMerged() (*batch.RecordBatch, error) {
 // copyVectorValue copies a single value between vectors using typed access (no boxing).
 // For bytes-based types, values must be copied in sequential order for dst (i = 0, 1, 2, ...).
 func copyVectorValue(dst *batch.Vector, di int, src *batch.Vector, si int) {
+	switch dst.Type {
+	case batch.TypeArray, batch.TypeMap, batch.TypeRow:
+		// Nested writes share the sequential-dst contract; CopyValueFrom
+		// advances offsets/children for null rows itself.
+		dst.CopyValueFrom(di, src, si)
+		return
+	}
 	if src.Nulls.IsNull(si) {
 		dst.Nulls.SetNull(di)
 		switch dst.Type {

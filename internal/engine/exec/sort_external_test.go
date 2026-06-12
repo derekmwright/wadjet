@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"reflect"
 	"sort"
 	"testing"
 
@@ -347,34 +348,88 @@ func TestColumnarSpillVectorRoundTrip(t *testing.T) {
 	}
 }
 
-// TestColumnarSpillNestedTypeError locks the fail-loudly contract: nested
-// types have no columnar encoding and must error instead of silently
-// corrupting (the pre-change behavior wrote nothing and read garbage).
-func TestColumnarSpillNestedTypeError(t *testing.T) {
-	schema := []parquet.Column{{Name: "arr", Type: parquet.TypeArray}}
-	b := batch.NewRecordBatch(schema, 1)
-	if _, err := writeSpillBatches(t.TempDir(), []*batch.RecordBatch{b}); err == nil {
-		t.Fatal("writeSpillBatches on Array column should error, got nil")
-	}
-}
+// TestSortExternalMerge_NestedSchema pushes ARRAY/MAP/ROW columns through
+// the forced run-spill path and verifies the merged stream is value-identical
+// to the in-memory reference sort. Locks the nested round-trip through:
+// sortBatchesToRun gather -> columnar run encode/decode -> runMerger
+// copyVectorValue reassembly.
+func TestSortExternalMerge_NestedSchema(t *testing.T) {
+	forceTinyRuns(t)
 
-// TestSortExternalFallback_NestedSchema verifies nested-type schemas route to
-// the legacy row spill (correct, if memory-hungry) instead of columnar runs.
-func TestSortExternalFallback_NestedSchema(t *testing.T) {
-	if columnarSpillableSchema([]parquet.Column{{Name: "a", Type: parquet.TypeArray}}) {
-		t.Fatal("Array schema must not be columnar-spillable")
+	elem := parquet.Column{Name: "element", Type: parquet.TypeString}
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "tags", Type: parquet.TypeArray, ElementType: &elem, Nullable: true},
+		{Name: "rec", Type: parquet.TypeRow, Fields: []parquet.Column{
+			{Name: "a", Type: parquet.TypeInt64},
+			{Name: "b", Type: parquet.TypeString, Nullable: true},
+		}},
 	}
-	if columnarSpillableSchema([]parquet.Column{{Name: "m", Type: parquet.TypeMap}}) {
-		t.Fatal("Map schema must not be columnar-spillable")
+
+	makeRows := func() []map[string]any {
+		rng := rand.New(rand.NewSource(7))
+		perm := rng.Perm(300)
+		rows := make([]map[string]any, 0, len(perm))
+		for _, id := range perm {
+			var tags any
+			switch id % 4 {
+			case 0:
+				tags = nil // null array
+			case 1:
+				tags = []any{} // empty array
+			default:
+				tags = []any{fmt.Sprintf("t%d", id), fmt.Sprintf("u%d", id%7)}
+			}
+			var b any
+			if id%5 == 0 {
+				b = nil
+			} else {
+				b = fmt.Sprintf("b%d", id)
+			}
+			rows = append(rows, map[string]any{
+				"id":   int64(id),
+				"tags": tags,
+				"rec":  map[string]any{"a": int64(id * 2), "b": b},
+			})
+		}
+		return rows
 	}
-	if columnarSpillableSchema([]parquet.Column{{Name: "r", Type: parquet.TypeRow}}) {
-		t.Fatal("Row schema must not be columnar-spillable")
+
+	feed := func(s *Sort, rows []map[string]any) {
+		for pos := 0; pos < len(rows); pos += 32 {
+			end := pos + 32
+			if end > len(rows) {
+				end = len(rows)
+			}
+			if err := s.Consume(context.Background(), batch.FromRows(schema, rows[pos:end])); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.Finalize(context.Background()); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if !columnarSpillableSchema([]parquet.Column{
-		{Name: "v", Type: parquet.TypeVector, Dimension: 4},
-		{Name: "s", Type: parquet.TypeString},
-	}) {
-		t.Fatal("Vector+String schema should be columnar-spillable")
+
+	keys := []SortKey{{Column: "id", Order: Ascending}}
+
+	ref := NewSort(keys) // no spill manager: pure in-memory reference
+	if err := ref.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	feed(ref, makeRows())
+	want := drainSortRows(t, ref)
+
+	s := newSortSpillHarness(t, keys, 1) // 1-byte budget: every Consume is over-pressure
+	feed(s, makeRows())
+	got := drainSortRows(t, s)
+
+	if len(got) != len(want) {
+		t.Fatalf("row count: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if !reflect.DeepEqual(got[i], want[i]) {
+			t.Fatalf("row %d differs:\n got  %#v\n want %#v", i, got[i], want[i])
+		}
 	}
 }
 

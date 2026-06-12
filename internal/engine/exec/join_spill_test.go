@@ -665,3 +665,172 @@ func TestConcurrentSpillFileNaming(t *testing.T) {
 func fromRowsForTest(schema []parquet.Column, rows []map[string]any) *batch.RecordBatch {
 	return batch.FromRows(schema, rows)
 }
+
+// nestedTestStringVec builds a STRING vector from values; nil = NULL.
+func nestedTestStringVec(vals []*string) *batch.Vector {
+	v := batch.NewVector(parquet.TypeString, len(vals))
+	var data []byte
+	offsets := make([]uint32, len(vals)+1)
+	for i, s := range vals {
+		if s == nil {
+			v.Nulls.SetNull(i)
+		} else {
+			data = append(data, *s...)
+		}
+		offsets[i+1] = uint32(len(data))
+	}
+	v.BytesData.Data = data
+	v.BytesData.Offsets = offsets
+	return v
+}
+
+func nestedTestCompareVectors(t *testing.T, label string, got, want *batch.Vector, n int) {
+	t.Helper()
+	if (got == nil) != (want == nil) {
+		t.Fatalf("%s: nil mismatch got=%v want=%v", label, got == nil, want == nil)
+	}
+	if got == nil {
+		return
+	}
+	if got.Type != want.Type {
+		t.Fatalf("%s: type got %v want %v", label, got.Type, want.Type)
+	}
+	for i := 0; i < n; i++ {
+		if got.Nulls.IsNullFast(i) != want.Nulls.IsNullFast(i) {
+			t.Fatalf("%s: null bit row %d got %v want %v", label, i, got.Nulls.IsNullFast(i), want.Nulls.IsNullFast(i))
+		}
+	}
+	switch want.Type {
+	case batch.TypeInt64:
+		for i := 0; i < n; i++ {
+			if got.Int64Data[i] != want.Int64Data[i] {
+				t.Fatalf("%s: row %d got %d want %d", label, i, got.Int64Data[i], want.Int64Data[i])
+			}
+		}
+	case batch.TypeString:
+		for i := 0; i < n; i++ {
+			if want.Nulls.IsNullFast(i) {
+				continue
+			}
+			gs, _ := got.GetString(i)
+			ws, _ := want.GetString(i)
+			if gs != ws {
+				t.Fatalf("%s: row %d got %q want %q", label, i, gs, ws)
+			}
+		}
+	case batch.TypeArray, batch.TypeMap:
+		for i := 0; i <= n; i++ {
+			if got.Offsets[i] != want.Offsets[i] {
+				t.Fatalf("%s: offset %d got %d want %d", label, i, got.Offsets[i], want.Offsets[i])
+			}
+		}
+		nestedTestCompareVectors(t, label+".child", got.Child, want.Child, int(want.Offsets[n]))
+	case batch.TypeRow:
+		if len(got.Children) != len(want.Children) {
+			t.Fatalf("%s: children got %d want %d", label, len(got.Children), len(want.Children))
+		}
+		for j := range want.Children {
+			if got.FieldNames[j] != want.FieldNames[j] {
+				t.Fatalf("%s: field %d name got %q want %q", label, j, got.FieldNames[j], want.FieldNames[j])
+			}
+			nestedTestCompareVectors(t, label+"."+want.FieldNames[j], got.Children[j], want.Children[j], n)
+		}
+	default:
+		t.Fatalf("%s: comparator missing for type %v", label, want.Type)
+	}
+}
+
+// TestColumnarSpillRoundtrip_NestedTypes round-trips ARRAY, MAP, ROW and
+// ARRAY(ROW(...)) columns through the columnar spill format, including
+// top-level nulls, null child elements, empty arrays, and a nil child.
+func TestColumnarSpillRoundtrip_NestedTypes(t *testing.T) {
+	const n = 3
+	sp := func(s string) *string { return &s }
+
+	// ARRAY(INT64): [1, NULL-elem], NULL(empty), [3]
+	arr := batch.NewVector(parquet.TypeArray, n)
+	arr.Offsets = []int32{0, 2, 2, 3}
+	arrChild := batch.NewVector(parquet.TypeInt64, 3)
+	copy(arrChild.Int64Data, []int64{1, 2, 3})
+	arrChild.Nulls.SetNull(1)
+	arr.Child = arrChild
+	arr.Nulls.SetNull(1)
+
+	// ROW(a INT64, b STRING) with a null string field
+	rec := batch.NewVector(parquet.TypeRow, n)
+	recA := batch.NewVector(parquet.TypeInt64, n)
+	copy(recA.Int64Data, []int64{10, 20, 30})
+	rec.Children = []*batch.Vector{recA, nestedTestStringVec([]*string{sp("x"), sp("y"), nil})}
+	rec.FieldNames = []string{"a", "b"}
+
+	// MAP(STRING->INT64) stored as offsets + ROW(key,value) child:
+	// {"k1":1,"k2":2}, {}, {"k3":3}
+	m := batch.NewVector(parquet.TypeMap, n)
+	m.Offsets = []int32{0, 2, 2, 3}
+	kv := batch.NewVector(parquet.TypeRow, 3)
+	vals := batch.NewVector(parquet.TypeInt64, 3)
+	copy(vals.Int64Data, []int64{1, 2, 3})
+	kv.Children = []*batch.Vector{nestedTestStringVec([]*string{sp("k1"), sp("k2"), sp("k3")}), vals}
+	kv.FieldNames = []string{"key", "value"}
+	m.Child = kv
+
+	// ARRAY with all-empty rows and a nil child vector
+	empty := batch.NewVector(parquet.TypeArray, n)
+	empty.Offsets = []int32{0, 0, 0, 0}
+	empty.Child = nil
+
+	schema := []parquet.Column{
+		{Name: "arr", Type: parquet.TypeArray, Nullable: true},
+		{Name: "rec", Type: parquet.TypeRow},
+		{Name: "m", Type: parquet.TypeMap},
+		{Name: "empty", Type: parquet.TypeArray},
+	}
+	original := &batch.RecordBatch{
+		Schema:  schema,
+		Columns: []*batch.Vector{arr, rec, m, empty},
+		Len:     n,
+	}
+
+	tmpDir := t.TempDir()
+	path, err := writeSpillBatches(tmpDir, []*batch.RecordBatch{original})
+	if err != nil {
+		t.Fatalf("writeSpillBatches: %v", err)
+	}
+	batches, err := readSpillBatches(path)
+	if err != nil {
+		t.Fatalf("readSpillBatches: %v", err)
+	}
+	if len(batches) != 1 || batches[0].Len != n {
+		t.Fatalf("expected 1 batch of %d rows, got %+v", n, batches)
+	}
+	got := batches[0]
+	for i, name := range []string{"arr", "rec", "m", "empty"} {
+		if got.Schema[i].Name != name {
+			t.Fatalf("schema col %d: got %q want %q", i, got.Schema[i].Name, name)
+		}
+		nestedTestCompareVectors(t, name, got.Columns[i], original.Columns[i], n)
+	}
+}
+
+// TestColumnarSpillRoundtrip_NestedZeroRows ensures a zero-row batch with
+// nested columns round-trips (offsets arrays still have their single 0).
+func TestColumnarSpillRoundtrip_NestedZeroRows(t *testing.T) {
+	arr := batch.NewVector(parquet.TypeArray, 0)
+	arr.Child = batch.NewVector(parquet.TypeInt64, 0)
+	original := &batch.RecordBatch{
+		Schema:  []parquet.Column{{Name: "arr", Type: parquet.TypeArray}},
+		Columns: []*batch.Vector{arr},
+		Len:     0,
+	}
+	path, err := writeSpillBatches(t.TempDir(), []*batch.RecordBatch{original})
+	if err != nil {
+		t.Fatalf("writeSpillBatches: %v", err)
+	}
+	batches, err := readSpillBatches(path)
+	if err != nil {
+		t.Fatalf("readSpillBatches: %v", err)
+	}
+	if len(batches) != 1 || batches[0].Len != 0 {
+		t.Fatalf("expected 1 empty batch, got %+v", batches)
+	}
+}
