@@ -71,8 +71,15 @@ func isAggIntType(t batch.TypeID) bool {
 // When a SpillManager is set, input batches are spilled to disk under memory
 // pressure and re-processed during Finalize.
 type HashAggregate struct {
-	GroupByCols   []string
-	Aggs          []AggColumn
+	GroupByCols []string
+	// GroupByAll makes the aggregate group by every input column, resolved
+	// from the first batch's schema (GroupByCols must be empty). This is how
+	// DISTINCT is planned: a keys-only hash aggregate inherits the spill
+	// machinery, where the dedicated Distinct operator's seen-set grew
+	// without bound or tracking. With no Aggs the output is exactly the
+	// distinct key tuples, in input column order.
+	GroupByAll bool
+	Aggs       []AggColumn
 	Spill         *memory.SpillManager // optional: enables spill-to-disk
 	NullGroupCols []string             // GROUPING SETS: columns to output as NULL (legacy per-node)
 	GroupingSets  [][]int              // single-pass grouping sets: column indices within GroupByCols per set
@@ -606,6 +613,16 @@ func columnIndexFallback(b *batch.RecordBatch, name string) int {
 }
 
 func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
+	// GroupByAll resolves the key set from the live schema, so every
+	// downstream decision (fast-path selection, output schema, spill merge)
+	// sees a concrete column list exactly as if the planner had named them.
+	if h.GroupByAll && len(h.GroupByCols) == 0 {
+		names := make([]string, len(b.Schema))
+		for i, c := range b.Schema {
+			names[i] = c.Name
+		}
+		h.GroupByCols = names
+	}
 	h.groupColIdx = make([]int, len(h.GroupByCols))
 	h.groupColTypes = make([]batch.TypeID, len(h.GroupByCols))
 	for i, col := range h.GroupByCols {
@@ -2619,19 +2636,25 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 	// Pre-compute output names: strip table qualifiers unless stripping would
 	// create duplicate column names (e.g., GROUP BY n1.n_name, n2.n_name must
 	// keep qualifiers so downstream projections can distinguish them).
+	// GroupByAll (DISTINCT) passes the input schema through verbatim — the
+	// operator must be name-transparent to downstream column references.
 	outNames := make([]string, len(h.GroupByCols))
-	baseCounts := make(map[string]int, len(h.GroupByCols))
-	for i, name := range h.GroupByCols {
-		base := name
-		if dot := strings.IndexByte(name, '.'); dot >= 0 {
-			base = name[dot+1:]
+	if h.GroupByAll {
+		copy(outNames, h.GroupByCols)
+	} else {
+		baseCounts := make(map[string]int, len(h.GroupByCols))
+		for i, name := range h.GroupByCols {
+			base := name
+			if dot := strings.IndexByte(name, '.'); dot >= 0 {
+				base = name[dot+1:]
+			}
+			outNames[i] = base
+			baseCounts[base]++
 		}
-		outNames[i] = base
-		baseCounts[base]++
-	}
-	for i, name := range h.GroupByCols {
-		if baseCounts[outNames[i]] > 1 {
-			outNames[i] = name // keep qualified to avoid ambiguity
+		for i, name := range h.GroupByCols {
+			if baseCounts[outNames[i]] > 1 {
+				outNames[i] = name // keep qualified to avoid ambiguity
+			}
 		}
 	}
 
@@ -2657,6 +2680,7 @@ func (h *HashAggregate) outputSchema() []parquet.Column {
 func (h *HashAggregate) CloneSink() SinkSource {
 	clone := &HashAggregate{
 		GroupByCols:   h.GroupByCols,
+		GroupByAll:    h.GroupByAll, // clones must resolve the same key set, not fall into the scalar path
 		Aggs:          h.Aggs,
 		NullGroupCols: h.NullGroupCols,
 		GroupingSets:  h.GroupingSets,
@@ -2692,6 +2716,13 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 		}
 		if len(h.aggColIdx2) == 0 {
 			h.aggColIdx2 = o.aggColIdx2
+		}
+		// GroupByAll (DISTINCT) parents have no plan-time column list at
+		// all — the clones resolved it from the first batch's schema.
+		// Without inheriting it, outputSchema emits zero group columns
+		// while the merged states hold full key tuples (index panic).
+		if len(h.GroupByCols) == 0 && len(o.GroupByCols) > 0 {
+			h.GroupByCols = o.GroupByCols
 		}
 	}
 

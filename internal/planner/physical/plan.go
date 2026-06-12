@@ -5337,13 +5337,33 @@ func (p *Planner) buildDistinct(ctx context.Context, node *logical.Node) (exec.S
 		return nil, nil, nil, fmt.Errorf("distinct has no child")
 	}
 
-	source, ops, sink, err := p.buildPipeline(ctx, node.Children[0])
+	childSource, childOps, _, err := p.buildPipeline(ctx, node.Children[0])
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	ops = append(ops, exec.NewDistinct())
-	return source, ops, sink, nil
+	// DISTINCT is a keys-only hash aggregate over all output columns (the
+	// Trino/Spark shape). The previous streaming Distinct operator kept one
+	// serialized key per distinct row in an untracked, unspillable map —
+	// tens of GB at SF100 cardinalities, invisible to the memory budget.
+	// As a HashAggregate it inherits spill, tracker accounting, cooperative
+	// relief, and the typed group fast paths. GroupByAll resolves the key
+	// set from the first batch's schema, so no plan-time schema knowledge
+	// is needed (covers SELECT DISTINCT * and the semi/anti dedup rewrite).
+	hashAgg := exec.NewHashAggregate(nil, nil)
+	hashAgg.GroupByAll = true
+	if est := findScanRowEstimate(node.Children[0]); est > 0 {
+		hashAgg.InputRowHint = est
+	}
+	if sm := p.getSpillManager(); sm != nil {
+		hashAgg.Spill = sm
+	}
+
+	return &aggSourceAdapter{
+		childSource: childSource,
+		childOps:    childOps,
+		agg:         hashAgg,
+	}, nil, &exec.CollectSink{}, nil
 }
 
 func (p *Planner) buildSetOp(ctx context.Context, node *logical.Node, op string) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
