@@ -205,6 +205,109 @@ func (c *SpillableBatchCollector) NextReplay(_ context.Context) (*batch.RecordBa
 	return b, nil
 }
 
+// NewReplaySource returns an exec.Source that streams the collected batches
+// WITHOUT consuming the collector: spilled runs are re-read from disk (and
+// not deleted), in-memory batches are handed out as Sel-isolated shallow
+// clones so downstream operators cannot corrupt the cached data by setting
+// Sel in place (same pattern as catalogScanSource cache replay). Multiple
+// replay sources may be created and run concurrently — each re-reads the
+// spill scratch independently.
+//
+// Contract: the collector must be fully populated before the first replay
+// source is created, and must not be Consumed into or Released while any
+// replay is in flight. Spill scratch lives until Release.
+func (c *SpillableBatchCollector) NewReplaySource() *CollectorReplaySource {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return &CollectorReplaySource{
+		batches:    c.batches,
+		spillFiles: c.spillFiles,
+	}
+}
+
+// CollectorReplaySource is a non-consuming exec.Source over a populated
+// SpillableBatchCollector: spilled runs first (decoded fresh per replay),
+// then the in-memory tail as Sel-isolated shallow clones. Next is
+// mutex-guarded so a parallel pipeline can share one instance.
+type CollectorReplaySource struct {
+	batches    []*batch.RecordBatch
+	spillFiles []string
+
+	mu      sync.Mutex
+	fileIdx int
+	rd      *spillBatchReader
+	memIdx  int
+}
+
+func (s *CollectorReplaySource) Init(_ context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rd != nil {
+		s.rd.Close()
+		s.rd = nil
+	}
+	s.fileIdx = 0
+	s.memIdx = 0
+	return nil
+}
+
+func (s *CollectorReplaySource) Next(_ context.Context) (*batch.RecordBatch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for {
+		if s.rd != nil {
+			b, err := s.rd.Next()
+			if err != nil {
+				return nil, err
+			}
+			if b != nil {
+				return b, nil
+			}
+			s.rd.Close()
+			s.rd = nil
+			s.fileIdx++
+		}
+		if s.fileIdx >= len(s.spillFiles) {
+			break
+		}
+		rd, err := openSpillBatchReader(s.spillFiles[s.fileIdx])
+		if err != nil {
+			return nil, err
+		}
+		s.rd = rd
+	}
+	for s.memIdx < len(s.batches) {
+		b := s.batches[s.memIdx]
+		s.memIdx++
+		if b == nil {
+			continue
+		}
+		// Shallow clone: shared column vectors (read-only by operator
+		// contract), independent Sel copy so in-place Sel assignment by
+		// filters cannot clobber the cached batch or a concurrent replay.
+		clone := &batch.RecordBatch{
+			Schema:  b.Schema,
+			Columns: append([]*batch.Vector(nil), b.Columns...),
+			Len:     b.Len,
+		}
+		if b.Sel != nil {
+			clone.Sel = append([]uint32(nil), b.Sel...)
+		}
+		return clone, nil
+	}
+	return nil, nil
+}
+
+func (s *CollectorReplaySource) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rd != nil {
+		s.rd.Close()
+		s.rd = nil
+	}
+	return nil
+}
+
 // Release frees everything still held: the open replay reader, remaining
 // spill scratch, buffered batch references, and the tracker reservation.
 // Idempotent — call from the owner's Close and every error path.

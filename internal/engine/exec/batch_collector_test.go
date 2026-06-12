@@ -195,3 +195,130 @@ func TestBloomAddBatch_MatchesOneShot(t *testing.T) {
 		}
 	}
 }
+
+// drainReplaySource pulls every key from a CollectorReplaySource.
+func drainReplaySource(tb testing.TB, s *CollectorReplaySource) []int64 {
+	tb.Helper()
+	if err := s.Init(context.Background()); err != nil {
+		tb.Fatal(err)
+	}
+	var keys []int64
+	for {
+		b, err := s.Next(context.Background())
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if b == nil {
+			if err := s.Close(); err != nil {
+				tb.Fatal(err)
+			}
+			return keys
+		}
+		for _, r := range b.ToRows() {
+			keys = append(keys, r["k"].(int64))
+		}
+	}
+}
+
+// Regression tests for issue #127 (CTE columnar materialization): the
+// replay source must stream the collected batches WITHOUT consuming the
+// collector — every CTE reference replays the same data, spill scratch
+// survives until Release, and handed-out batches are Sel-isolated so a
+// downstream filter cannot corrupt the cache or a concurrent replay.
+func TestCollectorReplaySource_NonConsumingTwice(t *testing.T) {
+	c := &SpillableBatchCollector{}
+	ctx := context.Background()
+	if err := c.Consume(ctx, collectorBatch(t, 0, 5)); err != nil {
+		t.Fatal(err)
+	}
+	sel := collectorBatch(t, 5, 4)
+	sel.Sel = []uint32{1, 3} // keys 6, 8
+	if err := c.Consume(ctx, sel); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []int64{0, 1, 2, 3, 4, 6, 8}
+	for pass := 0; pass < 2; pass++ {
+		keys := drainReplaySource(t, c.NewReplaySource())
+		if len(keys) != len(want) {
+			t.Fatalf("pass %d: replayed %d rows, want %d (%v)", pass, len(keys), len(want), keys)
+		}
+		for i := range want {
+			if keys[i] != want[i] {
+				t.Fatalf("pass %d: keys[%d] = %d, want %d", pass, i, keys[i], want[i])
+			}
+		}
+	}
+	if c.Rows() != 7 {
+		t.Fatal("replay sources consumed the collector")
+	}
+	c.Release()
+}
+
+func TestCollectorReplaySource_SpilledTwiceAndScratchSurvives(t *testing.T) {
+	forceTinyRuns(t)
+	tracker := memory.NewTracker("collector-test", 1)
+	sm, err := memory.NewSpillManager(t.TempDir(), tracker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &SpillableBatchCollector{Spill: sm}
+	ctx := context.Background()
+	const total = 10_000
+	for start := 0; start < total; start += 500 {
+		if err := c.Consume(ctx, collectorBatch(t, start, 500)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	spillGlob := filepath.Join(sm.SpillDir(), "bridge-collect-*.bin")
+	if files, _ := filepath.Glob(spillGlob); len(files) == 0 {
+		t.Fatal("expected spill files under pressure, found none")
+	}
+
+	for pass := 0; pass < 2; pass++ {
+		keys := drainReplaySource(t, c.NewReplaySource())
+		if len(keys) != total {
+			t.Fatalf("pass %d: replayed %d rows, want %d", pass, len(keys), total)
+		}
+		for i, k := range keys {
+			if k != int64(i) {
+				t.Fatalf("pass %d: keys[%d] = %d; order or content corrupted", pass, i, k)
+			}
+		}
+	}
+	// Replay must NOT delete scratch — only Release does.
+	if files, _ := filepath.Glob(spillGlob); len(files) == 0 {
+		t.Fatal("replay source deleted spill scratch; multi-reference replay broken")
+	}
+	c.Release()
+	if files, _ := filepath.Glob(spillGlob); len(files) != 0 {
+		t.Errorf("Release left spill scratch behind: %v", files)
+	}
+	if got := tracker.Used(); got != 0 {
+		t.Errorf("tracker still charged %d bytes after Release", got)
+	}
+}
+
+func TestCollectorReplaySource_SelIsolation(t *testing.T) {
+	c := &SpillableBatchCollector{}
+	ctx := context.Background()
+	b := collectorBatch(t, 0, 4)
+	b.Sel = []uint32{0, 1, 2, 3}
+	if err := c.Consume(ctx, b); err != nil {
+		t.Fatal(err)
+	}
+
+	s1 := c.NewReplaySource()
+	got, err := s1.Next(ctx)
+	if err != nil || got == nil {
+		t.Fatalf("Next = %v, %v", got, err)
+	}
+	// Downstream filter narrows the clone's Sel in place.
+	got.Sel = got.Sel[:1]
+	got.Sel[0] = 3
+
+	keys := drainReplaySource(t, c.NewReplaySource())
+	if len(keys) != 4 || keys[0] != 0 {
+		t.Fatalf("second replay saw corrupted Sel: keys = %v", keys)
+	}
+}

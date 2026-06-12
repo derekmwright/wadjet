@@ -399,10 +399,16 @@ func (p *Planner) getMemTracker() *memory.Tracker {
 	return p.memTracker
 }
 
-// cteMaterialized stores the pre-computed results of a CTE.
+// cteMaterialized stores the pre-computed results of a CTE in one of two
+// forms. The columnar form (coll) is the production shape: batches held in
+// a tracker-charged, spill-backed collector and replayed without consuming
+// it, so a multi-gigabyte CTE never sits boxed in heap (sweep finding #13 /
+// issue #127). The boxed form (rows) remains for the recursive work table —
+// one iteration's delta, re-seeded into the cache each fixed-point step.
 type cteMaterialized struct {
 	schema []parquet.Column
-	rows   []map[string]any
+	rows   []map[string]any              // boxed form; nil when coll is set
+	coll   *exec.SpillableBatchCollector // columnar form; nil when rows is set
 }
 
 // scanCached stores columnar scan results for a table that is scanned multiple
@@ -438,16 +444,19 @@ func (p *Planner) makeSubqueryRunner() expr.SubqueryRunner {
 	}
 }
 
-// executeSubquery parses and executes a SQL subquery, returning result rows.
-func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string]any, error) {
+// buildSubqueryPipeline parses, plans, and builds (but does not run) the
+// physical pipeline for a SQL subquery, merging the enclosing WITH clause's
+// CTEs so the subquery can reference them. Shared by executeSubquery (boxed
+// results) and materializeCTEColumnar (columnar collection).
+func (p *Planner) buildSubqueryPipeline(ctx context.Context, sql string) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	// Parse using our SQL parser
 	pq, err := plansql.Parse(sql)
 	if err != nil {
-		return nil, fmt.Errorf("subquery parse error: %w", err)
+		return nil, nil, nil, fmt.Errorf("subquery parse error: %w", err)
 	}
 	info, err := plansql.ExtractSelect(pq)
 	if err != nil {
-		return nil, fmt.Errorf("subquery extract error: %w", err)
+		return nil, nil, nil, fmt.Errorf("subquery extract error: %w", err)
 	}
 
 	// Build logical plan — merge outer CTEs so subqueries can reference
@@ -460,7 +469,7 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 		logicalPlan, err = logical.BuildFromSelect(info)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("subquery plan error: %w", err)
+		return nil, nil, nil, fmt.Errorf("subquery plan error: %w", err)
 	}
 
 	// Annotate scan nodes with column metadata so the optimizer can resolve
@@ -476,7 +485,16 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	// Build physical pipeline
 	source, ops, sink, err := p.buildPipeline(ctx, logicalPlan)
 	if err != nil {
-		return nil, fmt.Errorf("subquery execution plan error: %w", err)
+		return nil, nil, nil, fmt.Errorf("subquery execution plan error: %w", err)
+	}
+	return source, ops, sink, nil
+}
+
+// executeSubquery parses and executes a SQL subquery, returning result rows.
+func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string]any, error) {
+	source, ops, sink, err := p.buildSubqueryPipeline(ctx, sql)
+	if err != nil {
+		return nil, err
 	}
 
 	// Ensure a CollectSink — buildPipeline may return nil sink for
@@ -810,16 +828,182 @@ func (p *Planner) materializeCTEs(ctx context.Context, root *logical.Node) {
 		if refCounts[cte.Name] < 2 {
 			continue
 		}
-		// Build and execute the CTE pipeline to materialize its results
-		rows, err := p.executeSubquery(ctx, cte.SQL)
+		// Materialize columnar into a tracker-charged, spill-backed
+		// collector. The previous shape boxed the whole result via
+		// CollectSink.ToRows (one map[string]any per row, entirely outside
+		// the budget/spill machinery) — `WITH x AS (SELECT * FROM lineitem)`
+		// held the full table in coordinator-process heap.
+		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL)
 		if err != nil {
 			continue // fall back to inline expansion
 		}
-		schema := p.inferCTESchema(cte.SQL, rows)
 		if schema == nil {
+			coll.Release()
 			continue
 		}
-		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: rows}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
+	}
+}
+
+// materializeCTEColumnar runs a CTE body into a spill-backed collector,
+// applying the same first-row string→numeric coercion the boxed path did
+// (see cteCoercingSink). Returns the collector and the (possibly coerced)
+// output schema; the caller owns the collector and must Release it —
+// normally via PhysicalPlan.Cleanup through releaseCTECache.
+func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string) (*exec.SpillableBatchCollector, []parquet.Column, error) {
+	source, ops, _, err := p.buildSubqueryPipeline(ctx, sql)
+	if err != nil {
+		return nil, nil, err
+	}
+	coll := &exec.SpillableBatchCollector{Spill: p.getSpillManager()}
+	sink := &cteCoercingSink{coll: coll}
+	pipeline := &exec.Pipeline{Source: source, Ops: ops, Sink: sink}
+	if err := pipeline.Run(ctx); err != nil {
+		coll.Release()
+		return nil, nil, err
+	}
+	schema := sink.schema
+	if schema == nil {
+		// Empty result: no batch ever arrived, so derive column names from
+		// the SQL like the boxed path did — downstream projection still
+		// needs the names to resolve.
+		schema = p.inferCTESchema(sql, nil)
+	}
+	return coll, schema, nil
+}
+
+// releaseCTECache frees every columnar CTE collector (tracker charge +
+// spill scratch). Idempotent; wired into PhysicalPlan.Cleanup and Plan's
+// error paths.
+func (p *Planner) releaseCTECache() {
+	for _, mat := range p.cteCache {
+		if mat.coll != nil {
+			mat.coll.Release()
+		}
+	}
+	p.cteCache = nil
+}
+
+// cteCacheHasCollectors reports whether any cached CTE holds spill-backed
+// state that requires an explicit release at query end.
+func (p *Planner) cteCacheHasCollectors() bool {
+	for _, mat := range p.cteCache {
+		if mat.coll != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// cteCoercingSink wraps the CTE collector with the columnar equivalent of
+// inferCTESchema's first-row coercion: the expression evaluator emits
+// numeric literals as strings ("SELECT 1" produces "1"), and the boxed CTE
+// path coerced such columns to Int64/Float64 by inspecting the first row.
+// The plan is decided once, from the first non-empty batch, and every batch
+// is transformed BEFORE it reaches the collector — so spilled runs already
+// hold coerced data and replays need no per-reference transform. Columns
+// whose first value does not parse stay strings (real string data is never
+// touched: "CEO" doesn't parse).
+type cteCoercingSink struct {
+	coll    *exec.SpillableBatchCollector
+	planned bool
+	coerce  []parquet.TypeID // per-column target; TypeString = leave as-is
+	any     bool             // true when at least one column coerces
+	schema  []parquet.Column // output schema (coerced types); nil until first non-empty batch
+}
+
+func (s *cteCoercingSink) Init(ctx context.Context) error { return s.coll.Init(ctx) }
+
+func (s *cteCoercingSink) Consume(ctx context.Context, b *batch.RecordBatch) error {
+	if !s.planned && b.ActiveLen() > 0 {
+		s.planBatch(b)
+	}
+	if s.any {
+		b = s.applyCoercions(b)
+	}
+	return s.coll.Consume(ctx, b)
+}
+
+func (s *cteCoercingSink) Finalize(ctx context.Context) error { return s.coll.Finalize(ctx) }
+func (s *cteCoercingSink) Close() error                       { return s.coll.Close() }
+
+// planBatch decides per-column coercions from the first active row,
+// mirroring inferCTESchema's rule: int64 first, then float64.
+func (s *cteCoercingSink) planBatch(b *batch.RecordBatch) {
+	s.planned = true
+	row0 := 0
+	if b.Sel != nil {
+		row0 = int(b.Sel[0])
+	}
+	s.coerce = make([]parquet.TypeID, len(b.Schema))
+	s.schema = append([]parquet.Column(nil), b.Schema...)
+	for ci, col := range b.Schema {
+		s.coerce[ci] = parquet.TypeString // sentinel: no coercion
+		if col.Type != parquet.TypeString {
+			continue
+		}
+		vec := b.Columns[ci]
+		if vec.Nulls.IsNullFast(row0) {
+			continue
+		}
+		v := string(vec.BytesData.Value(row0))
+		if _, err := strconv.ParseInt(v, 10, 64); err == nil {
+			s.coerce[ci] = parquet.TypeInt64
+		} else if _, err := strconv.ParseFloat(v, 64); err == nil {
+			s.coerce[ci] = parquet.TypeFloat64
+		}
+		if s.coerce[ci] != parquet.TypeString {
+			s.any = true
+			s.schema[ci].Type = s.coerce[ci]
+			s.schema[ci].Nullable = true
+		}
+	}
+}
+
+// applyCoercions rebuilds the coerced columns as typed vectors. All Len
+// slots are converted (Sel-agnostic — inactive slots become null, which is
+// harmless because Sel guards every read downstream); unparseable values
+// become null, matching what FromRows produced when the boxed path's
+// coerced schema met a non-numeric string.
+func (s *cteCoercingSink) applyCoercions(b *batch.RecordBatch) *batch.RecordBatch {
+	cols := append([]*batch.Vector(nil), b.Columns...)
+	for ci, target := range s.coerce {
+		if target == parquet.TypeString || ci >= len(cols) {
+			continue
+		}
+		src := cols[ci]
+		dst := batch.NewVector(target, b.Len)
+		for i := 0; i < b.Len; i++ {
+			if src.Nulls.IsNullFast(i) {
+				dst.Nulls.SetNull(i)
+				continue
+			}
+			v := string(src.BytesData.Value(i))
+			switch target {
+			case parquet.TypeInt64:
+				iv, err := strconv.ParseInt(v, 10, 64)
+				if err != nil {
+					dst.Nulls.SetNull(i)
+					continue
+				}
+				dst.Int64Data[i] = iv
+			case parquet.TypeFloat64:
+				fv, err := strconv.ParseFloat(v, 64)
+				if err != nil {
+					dst.Nulls.SetNull(i)
+					continue
+				}
+				dst.Float64Data[i] = fv
+			}
+			dst.Nulls.SetValid(i)
+		}
+		cols[ci] = dst
+	}
+	return &batch.RecordBatch{
+		Schema:  s.schema,
+		Columns: cols,
+		Len:     b.Len,
+		Sel:     b.Sel,
 	}
 }
 
@@ -891,15 +1075,17 @@ const maxRecursiveIterations = 1000
 func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDef) {
 	anchorSQL, recursiveSQL, ok := splitRecursiveUnion(cte.SQL)
 	if !ok {
-		// No UNION ALL found — fall back to non-recursive execution
-		rows, err := p.executeSubquery(ctx, cte.SQL)
+		// No UNION ALL found — fall back to non-recursive (columnar)
+		// materialization.
+		coll, schema, err := p.materializeCTEColumnar(ctx, cte.SQL)
 		if err != nil {
 			return
 		}
-		schema := p.inferCTESchema(cte.SQL, rows)
-		if schema != nil {
-			p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: rows}
+		if schema == nil {
+			coll.Release()
+			return
 		}
+		p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
 		return
 	}
 
@@ -930,9 +1116,30 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 		}
 	}
 
-	// Accumulate all results
-	allRows := make([]map[string]any, len(anchorRows))
-	copy(allRows, anchorRows)
+	// Accumulate iteration results columnar into a tracker-charged,
+	// spill-backed collector instead of an unbounded boxed slice — the
+	// iteration count was bounded (1000) but the row count was not, and
+	// every accumulated row lived as a map[string]any until Plan returned.
+	// The per-iteration work table stays boxed: it is one iteration's
+	// delta (inherent to the fixed-point algorithm) and is re-seeded into
+	// the cache each step for the recursive query's self-reference.
+	coll := &exec.SpillableBatchCollector{Spill: p.getSpillManager()}
+	appendRowsColumnar := func(rs []map[string]any) error {
+		for off := 0; off < len(rs); off += batch.DefaultBatchSize {
+			end := off + batch.DefaultBatchSize
+			if end > len(rs) {
+				end = len(rs)
+			}
+			if err := coll.Consume(ctx, batch.FromRows(schema, rs[off:end])); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := appendRowsColumnar(anchorRows); err != nil {
+		coll.Release()
+		return
+	}
 
 	// Derive the expected column names from the schema (aliases already applied).
 	schemaNames := make([]string, len(schema))
@@ -976,12 +1183,19 @@ func (p *Planner) materializeRecursiveCTE(ctx context.Context, cte plansql.CTEDe
 		// produce different column names (e.g., "n + 1" vs "n").
 		newRows = renameRowColumnsFromTo(newRows, recursiveColNames, schemaNames)
 
-		allRows = append(allRows, newRows...)
+		if err := appendRowsColumnar(newRows); err != nil {
+			// Spill scratch failure mid-iteration: abandon materialization.
+			// Without a cache entry the recursive reference cannot resolve
+			// and the query errors — same failure mode as an anchor error.
+			coll.Release()
+			delete(p.cteCache, cte.Name)
+			return
+		}
 		workTable = newRows
 	}
 
-	// Store final accumulated results
-	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, rows: allRows}
+	// Store final accumulated results (columnar; replayed per reference).
+	p.cteCache[cte.Name] = &cteMaterialized{schema: schema, coll: coll}
 }
 
 // stageTypeCTEAlias marks a phantom stage that walkStages emits in place of
@@ -1289,6 +1503,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 	p.scanCache = nil // reset per-query scan cache
 	p.spillMgr = nil  // reset per-query spill manager
 	p.memTracker = nil
+	p.releaseCTECache() // reset per-query CTE cache (frees stale spill scratch)
 	// Propagate CTE definitions from the logical plan so scalar subqueries
 	// (e.g., in WHERE/HAVING) can resolve CTE table references.
 	if len(node.CTEs) > 0 {
@@ -1307,6 +1522,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
+		p.releaseCTECache() // free CTE spill scratch on the no-Cleanup path
 		return nil, err
 	}
 
@@ -1333,15 +1549,25 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		},
 	}
 
-	// Attach spill file cleanup
+	// Attach spill file cleanup. CTE collectors release first (tracker
+	// charge + their scratch files) so the SpillManager sweep that follows
+	// never races their removal.
 	if sm := p.spillMgr; sm != nil {
-		plan.Cleanup = func() { sm.Cleanup() }
+		plan.Cleanup = func() {
+			p.releaseCTECache()
+			sm.Cleanup()
+		}
+	} else if p.cteCacheHasCollectors() {
+		// Shared (worker-injected) spill manager: its dir outlives this
+		// query, so the collectors' scratch must be released explicitly.
+		plan.Cleanup = func() { p.releaseCTECache() }
 	}
 
 	// Generate distributed stages for coordinator dispatch
 	plan.Stages = p.generateStages(node)
 
 	if err := p.enforceQueryLimits(plan.Stages, node); err != nil {
+		p.releaseCTECache()
 		return nil, err
 	}
 
@@ -3274,9 +3500,15 @@ func findScanNode(n *logical.Node) *logical.Node {
 
 func (p *Planner) buildPipeline(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
 	// If this subtree is a materialized CTE, serve from cache instead of
-	// re-executing the full sub-plan.
+	// re-executing the full sub-plan. The columnar form replays from the
+	// collector (disk-backed past budget) without consuming it, so every
+	// reference — main pipeline, subqueries, recursive steps — streams the
+	// same data; the boxed form (recursive work table) keeps SliceSource.
 	if node.CTEName != "" && p.cteCache != nil {
 		if mat, ok := p.cteCache[node.CTEName]; ok {
+			if mat.coll != nil {
+				return mat.coll.NewReplaySource(), nil, &exec.CollectSink{}, nil
+			}
 			source := exec.NewSliceSource(mat.schema, mat.rows)
 			return source, nil, &exec.CollectSink{}, nil
 		}

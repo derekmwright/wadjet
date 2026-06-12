@@ -1027,7 +1027,13 @@ func pushdownPredicates(n *Node) *Node {
 	// If this is a Filter above a Scan, keep it (already at leaf)
 	if n.Type == NodeFilter && len(n.Children) == 1 {
 		child := n.Children[0]
-		if child.Type == NodeProject {
+		// A CTEName tag marks a materialization fence: the physical
+		// planner substitutes the cached CTE result for the ENTIRE tagged
+		// subtree, so a predicate pushed below the tag is silently dropped
+		// on replay (outer `WHERE` over a CTE reference returned the full
+		// CTE — wrong results). Predicates stay above the fence and are
+		// applied to the replayed batches instead.
+		if child.Type == NodeProject && child.CTEName == "" {
 			// Filter-Project -> Project-Filter (push filter below project)
 			n.Children[0] = child.Children[0]
 			child.Children[0] = n
