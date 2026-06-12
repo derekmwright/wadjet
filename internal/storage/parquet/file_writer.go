@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/klauspost/compress/gzip"
@@ -879,7 +880,16 @@ func (lb *leafBuffer) appendEntryWithValue(defLevel, repLevel int32, val any) {
 		v := toInt32(val, lb.col.Type)
 		lb.appendInt32(v)
 	case PhysicalInt64:
-		v := toInt64(val, lb.col.Type)
+		var v int64
+		if lb.col.Type == TypeDecimal {
+			// DECIMAL stores the SCALED integer (3.25 at scale 2 → 325).
+			// toInt64's float64 branch truncated to the unscaled integer
+			// part, so every non-integer decimal value was destroyed on
+			// write (issue #144 suite finding).
+			v = decimalScaledInt64(val, int(lb.col.Scale))
+		} else {
+			v = toInt64(val, lb.col.Type)
+		}
 		lb.appendInt64(v)
 	case PhysicalFloat:
 		v := toFloat32(val)
@@ -1104,6 +1114,41 @@ func toInt32(v any, colType TypeID) int32 {
 			return parseDateForWrite(t)
 		}
 		return 0
+	default:
+		return 0
+	}
+}
+
+// decimalScaledInt64 converts an ingest value to the scaled integer a
+// DECIMAL(p,s) column stores physically (INT64): value × 10^scale, rounded
+// half away from zero. Integer inputs are whole decimal values; float and
+// numeric-string inputs carry fractional digits. Non-finite floats and
+// unparseable strings store 0 (matching toInt64's default for garbage).
+func decimalScaledInt64(v any, scale int) int64 {
+	pow := 1.0
+	for i := 0; i < scale; i++ {
+		pow *= 10
+	}
+	switch t := v.(type) {
+	case int:
+		return int64(t) * int64(pow)
+	case int32:
+		return int64(t) * int64(pow)
+	case int64:
+		return t * int64(pow)
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return 0
+		}
+		return int64(math.Round(t * pow))
+	case float32:
+		return decimalScaledInt64(float64(t), scale)
+	case string:
+		f, err := strconv.ParseFloat(t, 64)
+		if err != nil {
+			return 0
+		}
+		return decimalScaledInt64(f, scale)
 	default:
 		return 0
 	}
