@@ -1,8 +1,11 @@
 package coordinator
 
 import (
+	"bufio"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -17,11 +20,20 @@ import (
 // gatherResult is the terminal output of a gather receiver: the assembled
 // batches from all worker gather tasks, the column schema (copied from the
 // first batch), and any worker-reported error surfaced in a terminal message.
+//
+// When the result exceeded the gather budget, batches holds only the
+// in-memory prefix (≈budget bytes) and the remainder sits as raw payload
+// frames in the scratch file at spillPath, to be replayed lazily by
+// gatherReplayStream. The renamer, when set, must be applied to each
+// replayed batch (the prefix already has it applied).
 type gatherResult struct {
-	batches   []*batch.RecordBatch
-	columns   []string
-	totalRows int64
-	workerErr string
+	batches    []*batch.RecordBatch
+	columns    []string
+	totalRows  int64
+	workerErr  string
+	spillPath  string // "" = fully in memory
+	spillBytes int64
+	renamer    *batchRenamer
 }
 
 // gatherReceiver is a two-phase receiver: subscribeGather installs the NATS
@@ -31,11 +43,10 @@ type gatherResult struct {
 type gatherReceiver struct {
 	sub               *nats.Subscription
 	workers           *WorkerRegistry // nil-safe; used to mark worker liveness from gather batches
-	budget            int64           // max accumulated decoded bytes; <=0 = uncapped
+	budget            int64           // max decoded bytes held in memory; <=0 = uncapped
 	mu                sync.Mutex
 	batches           []*batch.RecordBatch
-	accBytes          int64 // decoded bytes accumulated (MemBytes sum)
-	overBudget        bool
+	accBytes          int64 // decoded bytes accumulated in memory (MemBytes sum)
 	totalRows         int64
 	columns           []string
 	workerErr         string
@@ -43,6 +54,15 @@ type gatherReceiver struct {
 	expectedTerminals int
 	done              chan struct{}
 	msgCount          atomic.Int64 // diagnostic: incremented on every message received
+
+	// Spill state: once accBytes reaches budget, raw payload frames are
+	// appended to a local scratch file instead of being decoded.
+	spillFile   *os.File
+	spillW      *bufio.Writer
+	spillPath   string
+	spillBytes  int64
+	spillFailed bool // scratch write failed → clean per-query fail (old behavior)
+	claimed     bool // wait() handed spill ownership to the gatherResult
 }
 
 // subscribeGather installs the NATS subscription. Must be called BEFORE
@@ -54,14 +74,19 @@ type gatherReceiver struct {
 // non-nil, every received gather batch updates LastSeen for the emitting
 // worker via WorkerRegistry.MarkWorkerSeen.
 //
-// budget caps the decoded bytes the receiver will accumulate (<=0 =
-// uncapped). The receiver was the last big uncharged coordinator
+// budget caps the decoded bytes the receiver holds in coordinator heap
+// (<=0 = uncapped). The receiver was the last big uncharged coordinator
 // accumulator: a distributed SELECT * or no-LIMIT high-cardinality GROUP
 // BY landed its entire result in coordinator heap and OOM-killed the
-// process — taking every in-flight query with it. Exceeding the budget
-// fails THIS query cleanly instead (the accumulated batches are dropped
-// immediately to relieve pressure; terminals keep counting so wait()
-// returns promptly).
+// process — taking every in-flight query with it. Past the budget the
+// receiver degrades gracefully: the remaining payload frames are appended
+// raw (still WSHF-encoded, not decoded) to a local scratch file, and the
+// result is replayed lazily disk→wire by gatherReplayStream. Only if the
+// scratch write itself fails does the query fail cleanly (the process
+// still must not die for one query's result size).
+//
+// The caller that successfully subscribes MUST `defer recv.discard()` so
+// scratch is removed on every path where wait() never claims the result.
 func subscribeGather(nc *nats.Conn, subject string, expectedTerminals int, workers *WorkerRegistry, budget int64) (*gatherReceiver, error) {
 	r := &gatherReceiver{
 		expectedTerminals: expectedTerminals,
@@ -120,9 +145,16 @@ func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 	if len(msg.Payload) == 0 {
 		return
 	}
-	// Once over budget the query is already failing — skip the decode
-	// work for the remaining stream instead of burning CPU on it.
-	if r.overBudget {
+	// Once the query is failing (scratch write error) or the result has
+	// been claimed/discarded, skip the work for the remaining stream.
+	if r.spillFailed || r.claimed {
+		return
+	}
+	// In-memory prefix is full — spill the raw frame. The first payload
+	// always decodes (accBytes starts at 0 < budget), so columns are
+	// already resolved by the time spilling starts.
+	if r.budget > 0 && r.accBytes >= r.budget {
+		r.spillFrameLocked(msg)
 		return
 	}
 	decoded, err := readShuffleBatches(msg.Payload)
@@ -144,15 +176,79 @@ func (r *gatherReceiver) handleParsed(msg *distributed.GatherBatchMsg) {
 		r.accBytes += b.MemBytes()
 		r.batches = append(r.batches, b)
 	}
-	if r.budget > 0 && r.accBytes > r.budget {
-		r.overBudget = true
-		r.batches = nil // free what's accumulated — the query fails, the process must not
-		if r.workerErr == "" {
-			r.workerErr = fmt.Sprintf(
-				"result exceeded the coordinator gather budget (%d MB accumulated > %d MB): add a LIMIT, or raise the budget (Config.GatherResultBudget / GOMEMLIMIT)",
-				r.accBytes>>20, r.budget>>20)
+}
+
+// spillFrameLocked appends one raw payload frame ([uint32 LE length][WSHF
+// payload]) to the scratch file. Decode cost is paid once, at replay.
+// Row accounting uses the message's RowCount (stamped by the worker sink);
+// the actual sent-row count downstream comes from the replayed batches, so
+// a zero RowCount from an old worker only skews the TotalRows statistic.
+// Caller holds r.mu.
+func (r *gatherReceiver) spillFrameLocked(msg *distributed.GatherBatchMsg) {
+	if r.spillFile == nil {
+		f, err := os.CreateTemp("", "wadjet-gather-*.frames")
+		if err != nil {
+			r.failSpillLocked(fmt.Errorf("creating gather scratch: %w", err))
+			return
 		}
+		r.spillFile = f
+		r.spillPath = f.Name()
+		r.spillW = bufio.NewWriterSize(f, 1<<16)
 	}
+	var hdr [4]byte
+	binary.LittleEndian.PutUint32(hdr[:], uint32(len(msg.Payload)))
+	if _, err := r.spillW.Write(hdr[:]); err != nil {
+		r.failSpillLocked(fmt.Errorf("writing gather scratch: %w", err))
+		return
+	}
+	if _, err := r.spillW.Write(msg.Payload); err != nil {
+		r.failSpillLocked(fmt.Errorf("writing gather scratch: %w", err))
+		return
+	}
+	r.spillBytes += int64(len(msg.Payload))
+	r.totalRows += int64(msg.RowCount)
+}
+
+// failSpillLocked records a scratch failure: the query fails cleanly (the
+// accumulated result is dropped immediately to relieve pressure; terminals
+// keep counting so wait() returns promptly). Caller holds r.mu.
+func (r *gatherReceiver) failSpillLocked(err error) {
+	r.spillFailed = true
+	if r.workerErr == "" {
+		r.workerErr = fmt.Sprintf(
+			"result exceeded the coordinator gather budget (%d MB in memory) and spilling to scratch failed: %v — add a LIMIT, raise the budget (Config.GatherResultBudget / GOMEMLIMIT), or free local disk",
+			r.accBytes>>20, err)
+	}
+	r.batches = nil
+	r.dropSpillLocked()
+}
+
+// dropSpillLocked closes and removes the scratch file. Caller holds r.mu.
+func (r *gatherReceiver) dropSpillLocked() {
+	if r.spillFile != nil {
+		r.spillFile.Close()
+		r.spillFile = nil
+		r.spillW = nil
+	}
+	if r.spillPath != "" {
+		os.Remove(r.spillPath)
+		r.spillPath = ""
+	}
+}
+
+// discard releases everything the receiver still owns — buffered batches
+// and unclaimed spill scratch. No-op once wait() has handed the result
+// off. Idempotent; `defer recv.discard()` at every subscribe site is the
+// contract that keeps scratch from leaking when wait() is never reached.
+func (r *gatherReceiver) discard() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.claimed {
+		return
+	}
+	r.spillFailed = true // block any late frame from recreating scratch
+	r.batches = nil
+	r.dropSpillLocked()
 }
 
 // SetExpectedTerminals updates the terminal-count threshold after the
@@ -198,9 +294,14 @@ func (r *gatherReceiver) registerWithDataPlane(srv *dataplane.Server, queryID st
 }
 
 // wait blocks until all expected terminal messages arrive, ctx is done,
-// or the timeout fires. Always unsubscribes before returning.
+// or the timeout fires. Always unsubscribes before returning. On success
+// the returned gatherResult takes ownership of the spill scratch (if any);
+// on every error path the receiver keeps ownership and the caller's
+// deferred discard() removes it.
 func (r *gatherReceiver) wait(ctx context.Context, timeout time.Duration) (*gatherResult, error) {
-	defer r.sub.Unsubscribe()
+	if r.sub != nil {
+		defer r.sub.Unsubscribe()
+	}
 	select {
 	case <-r.done:
 	case <-time.After(timeout):
@@ -217,10 +318,29 @@ func (r *gatherReceiver) wait(ctx context.Context, timeout time.Duration) (*gath
 	if r.workerErr != "" {
 		return nil, fmt.Errorf("gather worker error: %s", r.workerErr)
 	}
-	return &gatherResult{
+	gr := &gatherResult{
 		batches:   r.batches,
 		columns:   r.columns,
 		totalRows: r.totalRows,
-	}, nil
+	}
+	if r.spillFile != nil {
+		if err := r.spillW.Flush(); err != nil {
+			r.dropSpillLocked()
+			return nil, fmt.Errorf("flushing gather scratch: %w", err)
+		}
+		if err := r.spillFile.Close(); err != nil {
+			r.spillFile = nil
+			r.spillW = nil
+			r.dropSpillLocked()
+			return nil, fmt.Errorf("closing gather scratch: %w", err)
+		}
+		r.spillFile = nil
+		r.spillW = nil
+		gr.spillPath = r.spillPath
+		gr.spillBytes = r.spillBytes
+		r.spillPath = ""
+	}
+	r.claimed = true
+	r.batches = nil
+	return gr, nil
 }
-

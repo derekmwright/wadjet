@@ -28,7 +28,7 @@ func TestReadFinalResults_BudgetCap(t *testing.T) {
 		TaskID:     "t1",
 		Success:    true,
 		NumRows:    2048,
-		InlineData: wshfInt64Payload(t, 2048),
+		InlineData: wshfInt64Payload(t, 2048, 0),
 	})
 
 	c := &Coordinator{

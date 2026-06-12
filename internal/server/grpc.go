@@ -215,14 +215,21 @@ func (g *GRPCServer) QueryStream(req *wadjetv1.QueryRequest, stream wadjetv1.Wad
 // SQLResult's own "prefer iterating Batches" contract on the default-on
 // :9090 server. Peak boxed residency is now one batch (~2K rows) plus the
 // one held-back chunk, and each batch reference is dropped after boxing so
-// the columnar copy can be reclaimed while the stream proceeds.
+// the columnar copy can be reclaimed while the stream proceeds. Lazy
+// (gather-spilled) results replay from local scratch one batch at a time.
 func streamResultBatches(cs *chunkStreamer, result *coordinator.SQLResult) error {
-	batches := result.Batches
-	result.Batches = nil
-	for i := range batches {
-		rows := batches[i].ToRows()
-		batches[i] = nil
-		if err := cs.pushRows(rows); err != nil {
+	stream := result.Stream()
+	defer stream.Close()
+	ctx := context.Background()
+	for {
+		b, err := stream.Next(ctx)
+		if err != nil {
+			return status.Errorf(codes.Internal, "reading result batches: %v", err)
+		}
+		if b == nil {
+			break
+		}
+		if err := cs.pushRows(b.ToRows()); err != nil {
 			return err
 		}
 	}

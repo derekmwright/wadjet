@@ -867,7 +867,7 @@ func TestReAggregatePartialsMerge(t *testing.T) {
 		}),
 	}
 
-	merged, totalRows, err := coord.mergeProbePartials(batches, columns, mi)
+	merged, totalRows, err := coord.mergeProbePartials(newSliceStream(batches), columns, mi)
 	if err != nil {
 		t.Fatalf("mergeProbePartials error: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestTopKMerge(t *testing.T) {
 		HasAggregate: true,
 	}
 
-	merged, totalRows, err := coord.mergeProbePartials([]*batch.RecordBatch{b}, columns, mi)
+	merged, totalRows, err := coord.mergeProbePartials(newSliceStream([]*batch.RecordBatch{b}), columns, mi)
 	if err != nil {
 		t.Fatalf("mergeProbePartials error: %v", err)
 	}
@@ -1004,7 +1004,7 @@ func TestDeduplicatePartials(t *testing.T) {
 		makeBatch([][]string{{"EU", "active"}}),
 	}
 
-	merged, totalRows, err := coord.mergeProbePartials(batches, columns, mi)
+	merged, totalRows, err := coord.mergeProbePartials(newSliceStream(batches), columns, mi)
 	if err != nil {
 		t.Fatalf("mergeProbePartials error: %v", err)
 	}

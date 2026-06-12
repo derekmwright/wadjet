@@ -112,7 +112,10 @@ func TestBoxRowsUpTo(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rows, trunc := boxRowsUpTo(tc.batches, tc.limit)
+			rows, trunc, err := boxRowsUpTo(context.Background(), newSliceStream(tc.batches), tc.limit)
+			if err != nil {
+				t.Fatalf("boxRowsUpTo: %v", err)
+			}
 			if len(rows) != tc.wantRows {
 				t.Errorf("got %d rows, want %d", len(rows), tc.wantRows)
 			}

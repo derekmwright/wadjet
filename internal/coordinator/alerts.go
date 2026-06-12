@@ -7,7 +7,6 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/alerts"
 	"github.com/citc-tech/wadjet/internal/auth"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
 	sql "github.com/citc-tech/wadjet/internal/planner/sql"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 )
@@ -156,7 +155,8 @@ func (c *Coordinator) asSQLExecutor() alerts.SQLExecutor {
 type coordinatorExecutor struct{ c *Coordinator }
 
 func (e *coordinatorExecutor) Execute(ctx context.Context, sqlText string) error {
-	_, err := e.c.ExecuteSQL(ctx, sqlText)
+	rs, err := e.c.ExecuteSQL(ctx, sqlText)
+	rs.Close() // result is discarded; release any spill-backed stream
 	return err
 }
 
@@ -169,9 +169,13 @@ func (e *coordinatorExecutor) Execute(ctx context.Context, sqlText string) error
 func (e *coordinatorExecutor) Query(ctx context.Context, sqlText string, limit int) ([]map[string]any, []alerts.ColumnMeta, int64, bool, error) {
 	rs, err := e.c.ExecuteSQL(ctx, sqlText)
 	if err != nil {
+		rs.Close()
 		return nil, nil, 0, false, err
 	}
-	boxed, truncated := boxRowsUpTo(rs.Batches, limit)
+	boxed, truncated, err := boxRowsUpTo(ctx, rs.Stream(), limit)
+	if err != nil {
+		return nil, nil, 0, false, err
+	}
 	// Build column schema from the Columns list. Type information is not
 	// carried through SQLResult at this time, so Type is left empty.
 	schema := make([]alerts.ColumnMeta, 0, len(rs.Columns))
@@ -181,15 +185,26 @@ func (e *coordinatorExecutor) Query(ctx context.Context, sqlText string, limit i
 	return boxed, schema, rs.TotalRows, truncated, nil
 }
 
-// boxRowsUpTo materializes batch rows into maps, stopping once limit rows
+// boxRowsUpTo materializes stream rows into maps, stopping once limit rows
 // are boxed (limit <= 0 means no limit). The excess is never boxed; the
-// truncated flag reports whether any active rows were left behind.
-func boxRowsUpTo(batches []*batch.RecordBatch, limit int) ([]map[string]any, bool) {
+// truncated flag reports whether any active rows were left behind. The
+// stream is always closed before returning — once truncation is detected
+// the remaining batches (and any spill scratch behind them) are released
+// without being read.
+func boxRowsUpTo(ctx context.Context, in BatchStream, limit int) ([]map[string]any, bool, error) {
+	defer in.Close()
 	var boxed []map[string]any
-	for _, b := range batches {
+	for {
+		b, err := in.Next(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		if b == nil {
+			return boxed, false, nil
+		}
 		if limit > 0 && len(boxed) >= limit {
 			if b.ActiveLen() > 0 {
-				return boxed, true
+				return boxed, true, nil
 			}
 			continue
 		}
@@ -198,9 +213,8 @@ func boxRowsUpTo(batches []*batch.RecordBatch, limit int) ([]map[string]any, boo
 			boxed = append(boxed, rows[:limit-len(boxed)]...)
 			// More active rows exist past the cap — truncated, and any
 			// remaining batches need not be examined.
-			return boxed, true
+			return boxed, true, nil
 		}
 		boxed = append(boxed, rows...)
 	}
-	return boxed, false
 }

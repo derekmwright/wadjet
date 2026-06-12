@@ -47,10 +47,12 @@ type Config struct {
 	WorkerStaleTTL time.Duration // time after which a silent worker is reaped, 0 = default (30s)
 	DynamicFilters bool          // Trino-style semi-join dynamic-filter pushdown (off by default in v1)
 	// GatherResultBudget caps the decoded result bytes a single query may
-	// accumulate in coordinator heap (gather receiver). 0 = derive from
+	// hold in coordinator heap (gather receiver). 0 = derive from
 	// GOMEMLIMIT (half of it) or fall back to 2 GiB; negative = uncapped.
-	// Exceeding the budget fails the query cleanly instead of OOM-killing
-	// the coordinator.
+	// Past the budget the remaining gather payload spills as raw frames to
+	// local scratch and the SQLResult replays them lazily disk→wire; only
+	// a scratch-write failure fails the query (cleanly — the coordinator
+	// process never OOMs for one query's result size).
 	GatherResultBudget int64
 }
 
@@ -403,6 +405,9 @@ func (c *Coordinator) SubmitScanQuery(ctx context.Context, tableName string, col
 	}
 
 	result, err := c.ExecuteSQL(ctx, sql)
+	// Only the result metadata is returned here; release the batches (and
+	// any spill-backed stream) before they go out of scope.
+	defer result.Close()
 	if err != nil {
 		return &QueryResult{
 			QueryID: result.QueryID,
@@ -479,11 +484,21 @@ func (r *SQLResult) Close() error {
 	return err
 }
 
-// Rows materializes the result batches into row-oriented maps, consuming
-// the result. This is expensive for large results — prefer Stream().
+// Rows materializes the result batches into row-oriented maps. This is
+// expensive for large results — prefer Stream(). On a materialized result
+// it is repeatable (Batches are left in place, matching the historical
+// behavior); on a lazy result it consumes the stream, and a second call
+// returns nothing.
 func (r *SQLResult) Rows() ([]map[string]any, error) {
 	if r == nil {
 		return nil, nil
+	}
+	if r.stream == nil {
+		var rows []map[string]any
+		for _, b := range r.Batches {
+			rows = append(rows, b.ToRows()...)
+		}
+		return rows, nil
 	}
 	s := r.Stream()
 	defer s.Close()
@@ -600,14 +615,25 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			Plan:    planStr,
 		}, fmt.Errorf("native DAG: %w", gerr)
 	}
-	return &SQLResult{
+	res := &SQLResult{
 		QueryID:   queryID,
 		Columns:   gr.columns,
-		Batches:   gr.batches,
 		TotalRows: gr.totalRows,
 		Elapsed:   time.Since(start),
 		Plan:      planStr,
-	}, nil
+	}
+	if gr.spillPath != "" {
+		// Over-budget result: the in-memory prefix plus raw frames on
+		// local scratch, replayed lazily disk→wire as the consumer
+		// iterates. PR #142's hard-fail became this graceful path.
+		c.logger.Info("gather: result exceeded budget, replaying lazily from scratch",
+			"query", queryID, "spill_path", gr.spillPath,
+			"spilled_mb", gr.spillBytes>>20, "total_rows", gr.totalRows)
+		res.stream = newGatherReplayStream(gr.batches, gr.spillPath, gr.renamer)
+	} else {
+		res.Batches = gr.batches
+	}
+	return res, nil
 }
 
 // createTasksForStage creates distributed tasks for a given stage.
@@ -1111,13 +1137,16 @@ func (c *Coordinator) fetchResultData(ctx context.Context, queryID, path string)
 // mergeProbePartials re-aggregates partial results from probe-split pipeline
 // workers and applies the original sort + limit. Each worker produced partial
 // aggregates for its file partition; this merges them into the final result.
+// Consumes (and always closes) the input stream.
 //
-// For small result sets (typical: <100K rows), this runs in-memory on the
-// coordinator with negligible overhead.
-func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns []string, mi *logical.MergeInfo) ([]*batch.RecordBatch, int64, error) {
-	if len(batches) == 0 {
-		return nil, 0, nil
-	}
+// The DISTINCT-only path dedups streaming — each input batch is fed to the
+// hash aggregate and released before the next is read. The re-aggregate path
+// drains the stream up front: reAggregatePartials' group states pin their
+// source batches anyway (mergedRow.sourceBatch back-pointers), so streaming
+// its input would not reduce peak residency. Sort/limit inherently need the
+// (already merged, small) result materialized.
+func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *logical.MergeInfo) ([]*batch.RecordBatch, int64, error) {
+	defer in.Close()
 
 	// Build column name → index mapping
 	colIdx := make(map[string]int, len(columns))
@@ -1125,7 +1154,16 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 		colIdx[col] = i
 	}
 
+	var batches []*batch.RecordBatch
 	if mi.HasAggregate {
+		var err error
+		batches, err = drainStream(in)
+		if err != nil {
+			return nil, 0, fmt.Errorf("reading partials: %w", err)
+		}
+		if len(batches) == 0 {
+			return nil, 0, nil
+		}
 		if len(mi.GroupBy) > 0 {
 			batches = c.reAggregatePartials(batches, columns, colIdx, mi)
 		} else {
@@ -1135,10 +1173,20 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 		}
 	}
 	if mi.HasDistinct {
+		src := in
+		if mi.HasAggregate {
+			src = newSliceStream(batches)
+		}
 		var err error
-		batches, err = c.deduplicatePartials(batches, columns)
+		batches, err = c.deduplicatePartials(src, columns)
 		if err != nil {
 			return nil, 0, fmt.Errorf("deduplicating distinct partials: %w", err)
+		}
+	} else if !mi.HasAggregate {
+		var err error
+		batches, err = drainStream(in)
+		if err != nil {
+			return nil, 0, fmt.Errorf("reading partials: %w", err)
 		}
 	}
 
@@ -1162,11 +1210,12 @@ func (c *Coordinator) mergeProbePartials(batches []*batch.RecordBatch, columns [
 	return batches, totalRows, nil
 }
 
-// deduplicatePartials removes duplicate rows across probe-split partial results.
-func (c *Coordinator) deduplicatePartials(batches []*batch.RecordBatch, columns []string) ([]*batch.RecordBatch, error) {
-	if len(batches) == 0 {
-		return batches, nil
-	}
+// deduplicatePartials removes duplicate rows across probe-split partial
+// results. Consumes the input stream batch-by-batch — each batch's
+// reference is dropped once the aggregate has absorbed it, so a lazy
+// (spill-backed) input never materializes fully here.
+func (c *Coordinator) deduplicatePartials(in BatchStream, columns []string) ([]*batch.RecordBatch, error) {
+	defer in.Close()
 	_ = columns // key set = every column, resolved from the batch schema
 	// Columnar dedup via a keys-only hash aggregate (the same GroupByAll
 	// machinery SELECT DISTINCT plans to). The previous implementation
@@ -1182,7 +1231,14 @@ func (c *Coordinator) deduplicatePartials(batches []*batch.RecordBatch, columns 
 	if err := agg.Init(ctx); err != nil {
 		return nil, err
 	}
-	for _, b := range batches {
+	for {
+		b, err := in.Next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if b == nil {
+			break
+		}
 		if err := agg.Consume(ctx, b); err != nil {
 			return nil, err
 		}
@@ -2271,7 +2327,7 @@ func (c *Coordinator) GetQueryResults(ctx context.Context, queryID string) (*SQL
 
 	// Apply probe-split merge if needed (same as ExecuteSQL path)
 	if meta.mergeInfo != nil && len(batches) > 0 {
-		merged, mergedRows, mergeErr := c.mergeProbePartials(batches, columns, meta.mergeInfo)
+		merged, mergedRows, mergeErr := c.mergeProbePartials(newSliceStream(batches), columns, meta.mergeInfo)
 		if mergeErr == nil {
 			batches = merged
 			totalRows = mergedRows
