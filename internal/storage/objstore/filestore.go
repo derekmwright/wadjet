@@ -1,7 +1,6 @@
 package objstore
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"fmt"
@@ -147,21 +146,32 @@ func (f *FileStore) Get(_ context.Context, bucket, key string) (io.ReadCloser, O
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	data, err := os.ReadFile(path)
+	// Return the open file directly instead of os.ReadFile — the previous
+	// whole-object read meant every "streaming" consumer (stream_source
+	// staging, coordinator result readers, scan) actually held the full
+	// object in heap, uncharged, multiplied by read concurrency. Same
+	// envelope bug as the Put side fixed 2026-06-11. The ETag is derived
+	// from mtime+size like Head(); no production caller consumes a
+	// content-MD5 ETag from Get. Reads after the rename-based Put see a
+	// consistent file (Put never writes in place).
+	file, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, ObjectInfo{}, ErrNotFound
 		}
-		return nil, ObjectInfo{}, fmt.Errorf("reading file: %w", err)
+		return nil, ObjectInfo{}, fmt.Errorf("opening file: %w", err)
 	}
 
-	info, _ := os.Stat(path)
-	etag := fmt.Sprintf("%x", md5.Sum(data))
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, ObjectInfo{}, fmt.Errorf("stat file: %w", err)
+	}
 
-	return io.NopCloser(bytes.NewReader(data)), ObjectInfo{
+	return file, ObjectInfo{
 		Key:          key,
-		Size:         int64(len(data)),
-		ETag:         etag,
+		Size:         info.Size(),
+		ETag:         fmt.Sprintf("%x-%x", info.ModTime().UnixNano(), info.Size()),
 		LastModified: info.ModTime(),
 	}, nil
 }
