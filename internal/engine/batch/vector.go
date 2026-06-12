@@ -542,11 +542,12 @@ func (v *Vector) GetValue(i int) any {
 // For string/bytes types, values must be set in sequential order (i = 0, 1, 2, ...).
 func (v *Vector) SetValue(i int, val any) {
 	if val == nil {
-		v.Nulls.SetNull(i)
-		// For bytes/string columns, write a zero-length entry to keep offsets aligned
-		if v.Type == TypeString || v.Type == TypeBytes || v.Type == TypeIPv6 || v.Type == TypeCIDR || v.Type == TypeUUID {
-			v.BytesData.Set(i, nil)
-		}
+		// WriteNullAt advances variable-length bookkeeping for EVERY shape —
+		// bytes offsets, ARRAY/MAP offsets, ROW children. The old inline
+		// version handled only the flat bytes types, so a nil on a nested
+		// column skipped its slot and every later row read back shifted
+		// (the recurring offsets-on-NULL corruption class).
+		v.WriteNullAt(i)
 		return
 	}
 	v.Nulls.SetValid(i)
@@ -1318,7 +1319,7 @@ func (v *Vector) CopyValueFrom(di int, src *Vector, si int) {
 				if srcOK {
 					child.CopyValueFrom(di, src.Children[j], si)
 				} else {
-					writeNullAt(child, di)
+					child.WriteNullAt(di)
 				}
 			} else {
 				// Append-built child (NewVectorLike): grow by one.
@@ -1332,10 +1333,12 @@ func (v *Vector) CopyValueFrom(di int, src *Vector, si int) {
 	}
 }
 
-// writeNullAt writes a null into position di of a pre-allocated vector,
+// WriteNullAt writes a null into position di of a pre-allocated vector,
 // advancing variable-length bookkeeping (bytes offsets, array offsets, row
-// children) so later sequential writes stay aligned.
-func writeNullAt(v *Vector, di int) {
+// children) so later sequential writes stay aligned. This is THE null-write
+// primitive for indexed sequential writers — any writer that sets the null
+// bit without advancing these slots corrupts every later row in the column.
+func (v *Vector) WriteNullAt(di int) {
 	v.Nulls.SetNull(di)
 	switch v.Type {
 	case TypeString, TypeBytes, TypeIPv6, TypeCIDR, TypeUUID:
@@ -1350,7 +1353,7 @@ func writeNullAt(v *Vector, di int) {
 	case TypeRow:
 		for _, child := range v.Children {
 			if child.Len > di {
-				writeNullAt(child, di)
+				child.WriteNullAt(di)
 			} else {
 				appendToVector(child, nil)
 			}

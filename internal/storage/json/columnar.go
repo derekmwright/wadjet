@@ -429,10 +429,11 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 		switch {
 		case valByte == 'n': // null
 			sc.pos += 4
-			vec.Nulls.SetNull(row)
-			if needsBytesNull(vec.Type) {
-				vec.BytesData.Set(row, nil)
-			}
+			// WriteNullAt advances offsets/children for bytes AND nested
+			// columns — a bare SetNull on a nested column skipped its slot
+			// and every later row read back shifted (live repro: a null
+			// "meta" object made the next row read "alphabeta").
+			vec.WriteNullAt(row)
 
 		case valByte == '"': // string
 			writeStringValue(sc, vec, row, colType)
@@ -452,7 +453,7 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 				raw := sc.readRawValue()
 				var decoded any
 				if err := json.Unmarshal(raw, &decoded); err != nil {
-					vec.Nulls.SetNull(row)
+					vec.WriteNullAt(row)
 				} else {
 					vec.Nulls.SetValid(row)
 					vec.SetValue(row, decoded)
@@ -474,10 +475,7 @@ func scanObjectInto(sc *jsonScanner, rb *batch.RecordBatch, row int, schema []pa
 	// Set nulls for missing columns
 	for i, wasSeen := range seen {
 		if !wasSeen {
-			rb.Columns[i].Nulls.SetNull(row)
-			if needsBytesNull(rb.Columns[i].Type) {
-				rb.Columns[i].BytesData.Set(row, nil)
-			}
+			rb.Columns[i].WriteNullAt(row)
 		}
 	}
 
@@ -578,14 +576,6 @@ func writeBoolFalse(vec *batch.Vector, row int, colType parquet.TypeID) {
 	case parquet.TypeString:
 		vec.BytesData.Set(row, []byte("false"))
 	}
-}
-
-func needsBytesNull(typ parquet.TypeID) bool {
-	switch typ {
-	case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-		return true
-	}
-	return false
 }
 
 // ---------------------------------------------------------------------------

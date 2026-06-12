@@ -1487,9 +1487,14 @@ func appendRows(dst, src *batch.RecordBatch, rows []int, dstStart int) int64 {
 			}
 			dataBytes += n * 16
 		default:
-			// Fallback via GetValue/SetValue (nested ARRAY/ROW/MAP/VECTOR).
+			// Typed copy (nested ARRAY/ROW/MAP/VECTOR). The old boxed
+			// GetValue/SetValue fallback passed nil through for null rows,
+			// which (pre-WriteNullAt fix) skipped nested slots — corrupting
+			// the frozen build batch and truncating ARRAY spills via a
+			// stale Offsets[n]. CopyValueFrom handles nulls and both child
+			// shapes directly.
 			for di, si := range rows {
-				d.SetValue(dstStart+di, col.GetValue(si))
+				d.CopyValueFrom(dstStart+di, col, si)
 			}
 			dataBytes += n * 8 // coarse estimate; nested types are off the join hot path
 		}

@@ -625,6 +625,14 @@ func gatherVector(dst, src *batch.Vector, srcRows []int) {
 				}
 			}
 		}
+	default:
+		// Nested ARRAY/MAP/ROW: typed per-value copy. Without this default
+		// the switch fell through writing NOTHING — join probe-side nested
+		// columns emitted whatever the pooled destination batch held, rows
+		// still marked valid (sibling gatherSortVector always had it).
+		for di, si := range srcRows {
+			copyVectorValue(dst, di, src, si)
+		}
 	}
 }
 
