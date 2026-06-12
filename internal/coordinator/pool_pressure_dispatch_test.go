@@ -76,8 +76,8 @@ func TestExecuteStageDAG_NoPoolPressureDeadlock(t *testing.T) {
 		if r.res == nil || r.res.Error != "" {
 			t.Fatalf("query reported error: %+v", r.res)
 		}
-		if len(r.res.Rows()) != 1 {
-			t.Fatalf("expected 1 row, got %d", len(r.res.Rows()))
+		if len(mustRows(t, r.res)) != 1 {
+			t.Fatalf("expected 1 row, got %d", len(mustRows(t, r.res)))
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatalf("query did not complete within 15s under high pool pressure — pool-pressure dispatch gate may have been reintroduced (see execute_stage_dag.go and feedback memory project_sf10_deploy_2026-04-29.md)")

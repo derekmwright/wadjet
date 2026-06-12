@@ -420,9 +420,16 @@ func (c *Coordinator) SubmitScanQuery(ctx context.Context, tableName string, col
 	}, nil
 }
 
-// SQLResult holds the full result of a distributed SQL query.
+// SQLResult holds the result of a distributed SQL query.
 // Results are kept columnar (as RecordBatches) to avoid materializing
 // per-row map[string]any which causes massive heap pressure at SF10+.
+//
+// Results arrive in one of two forms: fully materialized in Batches, or
+// as a lazy stream (gather results that exceeded the coordinator budget
+// and spilled to local scratch — see gatherReceiver). Consumers should
+// iterate via Stream(), which handles both forms; whoever receives an
+// SQLResult owns it and must either drain the stream or call Close, or
+// spill scratch leaks until process exit.
 type SQLResult struct {
 	QueryID     string
 	Columns     []string
@@ -432,19 +439,65 @@ type SQLResult struct {
 	Elapsed     time.Duration
 	Plan        string
 	Error       string
+
+	// stream is the lazy form: set (and Batches nil) when the gather
+	// result is partially on local scratch. Accessed via Stream().
+	stream BatchStream
 }
 
-// Rows materializes the result batches into row-oriented maps.
-// This is expensive for large results — prefer iterating Batches directly.
-func (r *SQLResult) Rows() []map[string]any {
+// Stream returns a consuming iterator over the result batches. The first
+// call detaches the result's batches (lazy stream or materialized slice);
+// subsequent calls return an empty stream. The caller owns the returned
+// stream and must drain it or call Close.
+func (r *SQLResult) Stream() BatchStream {
+	if r == nil {
+		return newSliceStream(nil)
+	}
+	if r.stream != nil {
+		s := r.stream
+		r.stream = nil
+		return s
+	}
+	b := r.Batches
+	r.Batches = nil
+	return newSliceStream(b)
+}
+
+// Close releases whatever the result still holds — the lazy stream's
+// buffered batches and spill scratch, or the materialized slice.
+// Idempotent and nil-safe.
+func (r *SQLResult) Close() error {
 	if r == nil {
 		return nil
 	}
+	var err error
+	if r.stream != nil {
+		err = r.stream.Close()
+		r.stream = nil
+	}
+	r.Batches = nil
+	return err
+}
+
+// Rows materializes the result batches into row-oriented maps, consuming
+// the result. This is expensive for large results — prefer Stream().
+func (r *SQLResult) Rows() ([]map[string]any, error) {
+	if r == nil {
+		return nil, nil
+	}
+	s := r.Stream()
+	defer s.Close()
 	var rows []map[string]any
-	for _, b := range r.Batches {
+	for {
+		b, err := s.Next(context.Background())
+		if err != nil {
+			return rows, err
+		}
+		if b == nil {
+			return rows, nil
+		}
 		rows = append(rows, b.ToRows()...)
 	}
-	return rows
 }
 
 // ExecuteSQL parses SQL, plans, distributes across workers, and collects results.

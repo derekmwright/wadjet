@@ -148,7 +148,7 @@ func TestHandleCreateSnapshotSQL(t *testing.T) {
 	if len(res.Columns) != 3 {
 		t.Fatalf("want 3 cols (snapshot_id, prefix, key_count), got %d", len(res.Columns))
 	}
-	rows := res.Rows()
+	rows := mustRows(t, res)
 	if len(rows) != 1 {
 		t.Fatalf("want 1 row, got %d", len(rows))
 	}

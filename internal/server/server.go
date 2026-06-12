@@ -387,7 +387,11 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		rows := result.Rows()
+		rows, rowsErr := result.Rows()
+		if rowsErr != nil {
+			writeError(w, http.StatusInternalServerError, "reading result batches: "+rowsErr.Error())
+			return
+		}
 
 		// Apply cell-level access policies (column masking/denial)
 		if identity != nil && len(rows) > 0 {

@@ -127,10 +127,14 @@ func (g *GRPCServer) Query(ctx context.Context, req *wadjetv1.QueryRequest) (*wa
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "query error: %v", err)
 		}
+		rows, rowsErr := result.Rows()
+		if rowsErr != nil {
+			return nil, status.Errorf(codes.Internal, "reading result batches: %v", rowsErr)
+		}
 		return &wadjetv1.QueryResponse{
 			QueryId: result.QueryID,
 			Columns: result.Columns,
-			Rows:    rowsToProto(result.Rows()),
+			Rows:    rowsToProto(rows),
 			Stats: &wadjetv1.QueryStats{
 				TotalRows: result.TotalRows,
 				Elapsed:   durationpb.New(result.Elapsed),

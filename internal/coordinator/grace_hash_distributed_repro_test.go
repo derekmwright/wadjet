@@ -150,8 +150,8 @@ FROM micro_build b JOIN micro_probe p ON b.build_key = p.probe_key`
 	if res.Error != "" {
 		t.Fatalf("query error after %v: %s", elapsed, res.Error)
 	}
-	t.Logf("distributed in-process: %d rows in %v", len(res.Rows()), elapsed)
-	if len(res.Rows()) == 0 {
+	t.Logf("distributed in-process: %d rows in %v", len(mustRows(t, res)), elapsed)
+	if len(mustRows(t, res)) == 0 {
 		t.Fatal("expected non-zero rows")
 	}
 }
