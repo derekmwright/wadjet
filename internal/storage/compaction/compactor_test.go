@@ -434,3 +434,26 @@ func TestBackgroundCompactor_SweepsAllTables(t *testing.T) {
 		}
 	}
 }
+
+// TestPartitionedOutputPath covers the three partition-path shapes the
+// manifest can carry: empty (unpartitioned), hive-relative, and already
+// table-prefixed (harness datagen) — the last used to double-join into
+// "tables/orders/tables/orders//compacted_*".
+func TestPartitionedOutputPath(t *testing.T) {
+	cases := []struct {
+		table, partPath, wantPrefix string
+	}{
+		{"orders", "", "tables/orders/compacted_"},
+		{"orders", "date=2026-01-01", "tables/orders/date=2026-01-01/compacted_"},
+		{"orders", "tables/orders/", "tables/orders/compacted_"},
+		{"orders", "tables/orders", "tables/orders/compacted_"},
+		{"orders", "tables/orders/date=2026-01-01/", "tables/orders/date=2026-01-01/compacted_"},
+	}
+	for _, tc := range cases {
+		got := partitionedOutputPath(tc.table, tc.partPath, "compacted")
+		if !strings.HasPrefix(got, tc.wantPrefix) || strings.Contains(got, "//") {
+			t.Errorf("partitionedOutputPath(%q,%q) = %q, want prefix %q with no //",
+				tc.table, tc.partPath, got, tc.wantPrefix)
+		}
+	}
+}

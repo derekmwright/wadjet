@@ -89,6 +89,7 @@ var (
 	otelInsecure          bool
 	metricsAddr           string
 	enableAlerts          bool
+	backgroundCompaction  bool
 	dataPlane             string
 	dataPlaneAddr         string
 	coordDataPlane        string
@@ -147,6 +148,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
 	rootCmd.PersistentFlags().BoolVar(&enableAlerts, "enable-alerts", false, "enable CREATE ALERT DDL and scheduler (default: disabled)")
+	rootCmd.PersistentFlags().BoolVar(&backgroundCompaction, "background-compaction", true, "Run the periodic small-file compaction sweep (5m interval). --background-compaction=false disables it — useful for benchmark comparability (compaction mid-suite shifts timings and doubles data-dir disk during the delete grace) and for read-only/pre-compacted datasets.")
 
 	rootCmd.AddCommand(serveCmd())
 	rootCmd.AddCommand(queryCmd())
@@ -926,7 +928,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Start background compaction
 	compactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
-		Enabled:    true,
+		Enabled:    backgroundCompaction,
 		Compaction: compaction.DefaultConfig(),
 	}, logger)
 	compactor.Start(ctx)
@@ -1211,7 +1213,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 
 	// Start background compaction
 	coordCompactor := compaction.NewBackgroundCompactor(cat, compaction.BackgroundConfig{
-		Enabled:    true,
+		Enabled:    backgroundCompaction,
 		Compaction: compaction.DefaultConfig(),
 	}, logger)
 	coordCompactor.Start(ctx)
