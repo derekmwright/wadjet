@@ -18,15 +18,16 @@ import (
 // the legacy side-channel.
 func (c *Coordinator) orchestrateGather(
 	stage physical.Stage,
-	batches []*batch.RecordBatch,
+	in BatchStream,
 	columns []string,
 	mi *logical.MergeInfo,
 ) ([]*batch.RecordBatch, int64, error) {
 	if stage.Type != physical.StageExchangeGather {
+		in.Close()
 		return nil, 0, fmt.Errorf(
 			"orchestrate gather: wrong stage type %q (expected %q)",
 			stage.Type, physical.StageExchangeGather,
 		)
 	}
-	return c.mergeProbePartials(batches, columns, mi)
+	return c.mergeProbePartials(in, columns, mi)
 }

@@ -110,7 +110,7 @@ func TestTPCHNativeDAG_SF01(t *testing.T) {
 			}
 			elapsed := time.Since(start)
 
-			snap := canonResultSnapshot(res.Rows())
+			snap := canonResultSnapshot(mustRows(t, res))
 			goldenPath := filepath.Join("testdata", "sf01_native_dag", fmt.Sprintf("q%02d.golden", qNum))
 			if *updateSF01Golden {
 				if err := os.MkdirAll(filepath.Dir(goldenPath), 0o755); err != nil {

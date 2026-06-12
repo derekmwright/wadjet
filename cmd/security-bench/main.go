@@ -117,6 +117,7 @@ func main() {
 				if err != nil {
 					return 0, err
 				}
+				r.Close() // row count only; release batches / spill stream
 				return r.TotalRows, nil
 			}
 		} else {

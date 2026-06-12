@@ -29,7 +29,7 @@ func TestQ07SF01InProcess(t *testing.T) {
 	if res.Error != "" {
 		t.Fatalf("Q07 error: %s", res.Error)
 	}
-	rows := res.Rows()
+	rows := mustRows(t, res)
 	t.Logf("Q07 in-process distributed SF0.1: %d rows", len(rows))
 	if len(rows) == 0 {
 		t.Errorf("Q07 returned 0 rows; expected at least one (FRANCE/GERMANY pairs by year)")

@@ -90,7 +90,7 @@ func TestNativeDAG_CountMultiFile_MergesAsSum(t *testing.T) {
 		t.Fatalf("native DAG: %v", err)
 	}
 	got := map[int64]int64{}
-	for _, r := range res.Rows() {
+	for _, r := range mustRows(t, res) {
 		got[toInt64(r["k"])] = toInt64(r["n"])
 	}
 	want := map[int64]int64{1: 6, 2: 6}
@@ -133,7 +133,7 @@ func TestNativeDAG_SumMultiFile_MergesAsSum(t *testing.T) {
 		t.Fatalf("native DAG: %v", err)
 	}
 	got := map[int64]int64{}
-	for _, r := range res.Rows() {
+	for _, r := range mustRows(t, res) {
 		got[toInt64(r["k"])] = toInt64(r["s"])
 	}
 	want := map[int64]int64{1: 10, 2: 30} // 1: 1+2+3+4=10; 2: 10+20=30
@@ -184,7 +184,7 @@ func TestNativeDAG_AvgMultiFile_FallbackOrCorrect(t *testing.T) {
 		t.Fatalf("native DAG: %v", err)
 	}
 	got := map[int64]float64{}
-	for _, r := range res.Rows() {
+	for _, r := range mustRows(t, res) {
 		switch x := r["a"].(type) {
 		case float64:
 			got[toInt64(r["k"])] = x

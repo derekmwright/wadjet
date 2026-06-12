@@ -429,8 +429,8 @@ func TestExecuteSQLSortQuery(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
-	if len(result.Rows()) != 3 {
-		t.Fatalf("expected 3 rows, got %d", len(result.Rows()))
+	if len(mustRows(t, result)) != 3 {
+		t.Fatalf("expected 3 rows, got %d", len(mustRows(t, result)))
 	}
 }
 
@@ -459,8 +459,8 @@ func TestExecuteSQLWithLimit(t *testing.T) {
 		t.Fatalf("unexpected error: %s", result.Error)
 	}
 	// LIMIT 2 should give us 2 rows
-	if len(result.Rows()) > 5 { // at minimum, should not exceed total
-		t.Errorf("expected at most 5 rows, got %d", len(result.Rows()))
+	if len(mustRows(t, result)) > 5 { // at minimum, should not exceed total
+		t.Errorf("expected at most 5 rows, got %d", len(mustRows(t, result)))
 	}
 }
 
@@ -867,7 +867,7 @@ func TestReAggregatePartialsMerge(t *testing.T) {
 		}),
 	}
 
-	merged, totalRows, err := coord.mergeProbePartials(batches, columns, mi)
+	merged, totalRows, err := coord.mergeProbePartials(newSliceStream(batches), columns, mi)
 	if err != nil {
 		t.Fatalf("mergeProbePartials error: %v", err)
 	}
@@ -940,7 +940,7 @@ func TestTopKMerge(t *testing.T) {
 		HasAggregate: true,
 	}
 
-	merged, totalRows, err := coord.mergeProbePartials([]*batch.RecordBatch{b}, columns, mi)
+	merged, totalRows, err := coord.mergeProbePartials(newSliceStream([]*batch.RecordBatch{b}), columns, mi)
 	if err != nil {
 		t.Fatalf("mergeProbePartials error: %v", err)
 	}
@@ -1004,7 +1004,7 @@ func TestDeduplicatePartials(t *testing.T) {
 		makeBatch([][]string{{"EU", "active"}}),
 	}
 
-	merged, totalRows, err := coord.mergeProbePartials(batches, columns, mi)
+	merged, totalRows, err := coord.mergeProbePartials(newSliceStream(batches), columns, mi)
 	if err != nil {
 		t.Fatalf("mergeProbePartials error: %v", err)
 	}

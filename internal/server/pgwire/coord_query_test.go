@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/coordinator"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -52,7 +53,10 @@ func TestSendResultRows_PerBatch(t *testing.T) {
 	c := &pgConn{conn: rc}
 
 	batches := []*batch.RecordBatch{mk(1, 2, 3), mk(4, 5)}
-	sent := c.sendResultRows([]string{"n"}, batches, nil, nil)
+	sent, err := c.sendResultRows([]string{"n"}, coordinator.NewSliceStream(batches), nil, nil)
+	if err != nil {
+		t.Fatalf("sendResultRows: %v", err)
+	}
 
 	if sent != 5 {
 		t.Errorf("sent = %d, want 5", sent)
@@ -72,7 +76,10 @@ func TestSendResultRows_LegacyRows(t *testing.T) {
 	c := &pgConn{conn: rc}
 
 	rows := []map[string]any{{"n": int64(1)}, {"n": int64(2)}}
-	sent := c.sendResultRows([]string{"n"}, nil, rows, nil)
+	sent, err := c.sendResultRows([]string{"n"}, nil, rows, nil)
+	if err != nil {
+		t.Fatalf("sendResultRows: %v", err)
+	}
 
 	if sent != 2 {
 		t.Errorf("sent = %d, want 2", sent)

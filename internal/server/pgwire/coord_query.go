@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/coordinator"
 	"github.com/citc-tech/wadjet/wadjet"
 )
 
@@ -46,26 +46,25 @@ func (c *pgConn) canBypassDB() bool {
 	return c.authProvider == nil && c.identity == nil
 }
 
-// queryViaCoord executes sql through coord.ExecuteSQL. The columnar batches
-// are returned as-is, NOT boxed into QueryResult.Rows — the send path boxes
-// one batch (~2K rows) at a time via sendResultRows. The previous shape
-// (batchesToRows up front) materialized the full row set (~10x the columnar
-// footprint) on top of the already-held Batches before writing a single
-// DataRow, on the no-auth standalone/edge production profile — exactly what
-// SQLResult's doc forbids.
+// queryViaCoord executes sql through coord.ExecuteSQL. The result batches
+// are returned as a consuming BatchStream, NOT boxed into QueryResult.Rows
+// — the send path boxes one batch (~2K rows) at a time via sendResultRows.
+// Results that exceeded the coordinator gather budget arrive as a lazy
+// stream replaying from local scratch, so even an over-budget result never
+// materializes fully in coordinator heap. The caller owns the stream and
+// must drain it or Close it (spill scratch lives until then).
 //
 // For Q18 SF10 (60M intermediate rows reduced to 100 by LIMIT), boxing here
 // only ever sees the 100 final rows because coord's native-DAG executor
 // produces the post-LIMIT batches at Gather. Legacy db.Query materialized
 // the full pre-LIMIT pipeline output.
-func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, []*batch.RecordBatch, error) {
+func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryResult, coordinator.BatchStream, error) {
 	res, err := c.coord.ExecuteSQL(ctx, sql)
 	if err != nil {
+		res.Close()
 		return nil, nil, err
 	}
-	batches := res.Batches
-	res.Batches = nil
-	return &wadjet.QueryResult{Columns: res.Columns}, batches, nil
+	return &wadjet.QueryResult{Columns: res.Columns}, res.Stream(), nil
 }
 
 // sendResultRows emits a DataRow per result row and returns the count sent.
@@ -73,7 +72,11 @@ func (c *pgConn) queryViaCoord(ctx context.Context, sql string) (*wadjet.QueryRe
 // batch reference once sent so peak boxed residency stays one batch; boxed
 // rows (legacy db path) are sent as-is. fmtCodes selects the formatted
 // variant used by the extended protocol; nil sends text-format rows.
-func (c *pgConn) sendResultRows(columns []string, batches []*batch.RecordBatch, rows []map[string]any, fmtCodes []int16) int {
+//
+// The stream is always fully closed before returning, including on a
+// mid-stream error — the error is returned so the caller can surface an
+// ErrorResponse after the partial DataRows (legal in the v3 protocol).
+func (c *pgConn) sendResultRows(columns []string, stream coordinator.BatchStream, rows []map[string]any, fmtCodes []int16) (int, error) {
 	sent := 0
 	send := func(row map[string]any) {
 		if len(fmtCodes) > 0 {
@@ -83,14 +86,36 @@ func (c *pgConn) sendResultRows(columns []string, batches []*batch.RecordBatch, 
 		}
 		sent++
 	}
-	for i := range batches {
-		for _, row := range batches[i].ToRows() {
-			send(row)
+	if stream != nil {
+		defer stream.Close()
+		ctx := context.Background()
+		for {
+			b, err := stream.Next(ctx)
+			if err != nil {
+				return sent, err
+			}
+			if b == nil {
+				break
+			}
+			for _, row := range b.ToRows() {
+				send(row)
+			}
 		}
-		batches[i] = nil
 	}
 	for _, row := range rows {
 		send(row)
 	}
-	return sent
+	return sent, nil
+}
+
+// closeDescribeCache releases a cached Describe result stream that Execute
+// never consumed (client error between Describe and Execute, statement
+// re-Parse, connection teardown). Without this an over-budget result's
+// spill scratch would outlive the portal.
+func (c *pgConn) closeDescribeCache() {
+	if c.describeStream != nil {
+		c.describeStream.Close()
+		c.describeStream = nil
+	}
+	c.describeResult = nil
 }

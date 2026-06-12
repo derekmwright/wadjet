@@ -26,7 +26,7 @@ func TestDeduplicatePartials_NulByteKeysDoNotCollide(t *testing.T) {
 	})
 
 	c := &Coordinator{}
-	out, err := c.deduplicatePartials([]*batch.RecordBatch{b}, []string{"x", "y"})
+	out, err := c.deduplicatePartials(newSliceStream([]*batch.RecordBatch{b}), []string{"x", "y"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestDeduplicatePartials_TypedColumns(t *testing.T) {
 	}
 
 	c := &Coordinator{}
-	out, err := c.deduplicatePartials(batches, []string{"n", "f"})
+	out, err := c.deduplicatePartials(newSliceStream(batches), []string{"n", "f"})
 	if err != nil {
 		t.Fatal(err)
 	}

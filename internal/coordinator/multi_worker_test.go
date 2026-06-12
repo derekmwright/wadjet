@@ -170,7 +170,7 @@ func TestShuffleCorrectness(t *testing.T) {
 			if result.Error != "" {
 				t.Fatalf("Q%02d error: %s", tt.qNum, result.Error)
 			}
-			rows := result.Rows()
+			rows := mustRows(t, result)
 			t.Logf("Q%02d: %d rows in %v", tt.qNum, len(rows), elapsed)
 			if len(rows) > 0 {
 				t.Logf("  first row: %v", rows[0])
@@ -355,7 +355,7 @@ func TestDistributedFusedAgg(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("Q01 error: %s", result.Error)
 	}
-	rows := result.Rows()
+	rows := mustRows(t, result)
 	t.Logf("Q01: %d rows (plan:\n%s)", len(rows), result.Plan)
 	if len(rows) != 6 {
 		// SF0.01 Q01 returns 6 rows (distinct l_returnflag × l_linestatus groups)

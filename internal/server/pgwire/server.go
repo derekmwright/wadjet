@@ -20,7 +20,6 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/internal/coordinator"
-	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 	"github.com/citc-tech/wadjet/wadjet"
@@ -219,19 +218,23 @@ type pgConn struct {
 	sessionVars map[string]string
 
 	// Extended Query protocol state
-	preparedSQL     string               // last parsed statement SQL
-	portalSQL       string               // last bound portal SQL
-	stmts           map[string]string    // named prepared statements
-	described       bool                 // true if Describe was sent for current portal
-	resultFmtCodes  []int16              // result format codes from Bind (0=text, 1=binary)
-	describeResult  *wadjet.QueryResult  // cached Describe result for Execute reuse
-	describeBatches []*batch.RecordBatch // columnar half of describeResult (coord path)
+	preparedSQL    string                  // last parsed statement SQL
+	portalSQL      string                  // last bound portal SQL
+	stmts          map[string]string       // named prepared statements
+	described      bool                    // true if Describe was sent for current portal
+	resultFmtCodes []int16                 // result format codes from Bind (0=text, 1=binary)
+	describeResult *wadjet.QueryResult     // cached Describe result for Execute reuse
+	describeStream coordinator.BatchStream // columnar half of describeResult (coord path)
 
 	// Transaction state: 'I' = idle, 'T' = in transaction, 'E' = failed
 	txState byte
 }
 
 func (c *pgConn) run() {
+	// Release a cached Describe result stream the client never Executed —
+	// for over-budget results the stream pins spill scratch on disk.
+	defer c.closeDescribeCache()
+
 	// Phase 1: Startup
 	if err := c.handleStartup(); err != nil {
 		c.logger.Debug("pgwire startup failed", "err", err)
@@ -780,10 +783,10 @@ func (c *pgConn) handleQuery(sql string) {
 		return
 	}
 	var result *wadjet.QueryResult
-	var batches []*batch.RecordBatch
+	var stream coordinator.BatchStream
 	var err error
 	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-		result, batches, err = c.queryViaCoord(ctx, sql)
+		result, stream, err = c.queryViaCoord(ctx, sql)
 	} else {
 		result, err = c.db.Query(ctx, sql)
 	}
@@ -801,7 +804,13 @@ func (c *pgConn) handleQuery(sql string) {
 			columns = append(columns, k)
 		}
 	}
-	if len(columns) == 0 && len(result.Rows) == 0 && len(batches) == 0 {
+	// Coord-path results always carry columns when any batch exists (the
+	// gather receiver derives them from the first batch's schema), so an
+	// empty columns list means an empty result on both paths.
+	if len(columns) == 0 && len(result.Rows) == 0 {
+		if stream != nil {
+			stream.Close()
+		}
 		c.sendEmptyQuery()
 		c.sendReadyForQuery()
 		return
@@ -814,7 +823,14 @@ func (c *pgConn) handleQuery(sql string) {
 
 	// Send DataRow for each row — coord-path batches are boxed and sent
 	// one batch at a time, never materialized as a whole.
-	sent := c.sendResultRows(columns, batches, result.Rows, nil)
+	sent, sendErr := c.sendResultRows(columns, stream, result.Rows, nil)
+	if sendErr != nil {
+		// Partial DataRows followed by ErrorResponse is legal in the v3
+		// protocol; the client discards the partial result.
+		c.sendError("ERROR", "58030", "reading result batches: "+sendErr.Error())
+		c.sendReadyForQuery()
+		return
+	}
 
 	// Send CommandComplete
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", sent))
@@ -835,8 +851,7 @@ func (c *pgConn) handleParse(payload []byte) {
 		c.stmts[name] = sql
 	}
 	c.described = false
-	c.describeResult = nil // invalidate cached result for new statement
-	c.describeBatches = nil
+	c.closeDescribeCache() // invalidate cached result for new statement
 
 	// Send ParseComplete ('1')
 	c.sendMsg('1', nil)
@@ -975,10 +990,10 @@ func (c *pgConn) describeSQL(sql string) {
 	ctx, cancel := c.queryContext()
 	defer cancel()
 	var result *wadjet.QueryResult
-	var batches []*batch.RecordBatch
+	var stream coordinator.BatchStream
 	var err error
 	if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-		result, batches, err = c.queryViaCoord(ctx, sql)
+		result, stream, err = c.queryViaCoord(ctx, sql)
 	} else {
 		result, err = c.db.Query(ctx, sql)
 	}
@@ -988,8 +1003,9 @@ func (c *pgConn) describeSQL(sql string) {
 		c.sendMsg('n', nil)
 		return
 	}
+	c.closeDescribeCache() // release any prior cached stream before overwriting
 	c.describeResult = result
-	c.describeBatches = batches
+	c.describeStream = stream
 
 	if len(result.ColumnMetas) > 0 {
 		c.sendTypedRowDescription(result.ColumnMetas)
@@ -1057,18 +1073,18 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// RowDescription (critical for SELECT * where Go map iteration order
 	// is non-deterministic).
 	var result *wadjet.QueryResult
-	var batches []*batch.RecordBatch
+	var stream coordinator.BatchStream
 	if c.describeResult != nil {
 		result = c.describeResult
-		batches = c.describeBatches
+		stream = c.describeStream
 		c.describeResult = nil
-		c.describeBatches = nil
+		c.describeStream = nil
 	} else {
 		ctx, cancel := c.queryContext()
 		defer cancel()
 		var err error
 		if c.coord != nil && c.canBypassDB() && shouldRouteThroughCoord(sql) {
-			result, batches, err = c.queryViaCoord(ctx, sql)
+			result, stream, err = c.queryViaCoord(ctx, sql)
 		} else {
 			result, err = c.db.Query(ctx, sql)
 		}
@@ -1085,6 +1101,9 @@ func (c *pgConn) handleExecute(payload []byte) {
 		}
 	}
 	if len(columns) == 0 {
+		if stream != nil {
+			stream.Close()
+		}
 		c.sendCommandComplete("SELECT 0")
 		return
 	}
@@ -1092,7 +1111,11 @@ func (c *pgConn) handleExecute(payload []byte) {
 	// Extended query protocol: Execute sends only DataRow + CommandComplete.
 	// RowDescription was already sent by Describe. Do NOT send it again.
 	// Coord-path batches are boxed and sent one batch at a time.
-	sent := c.sendResultRows(columns, batches, result.Rows, c.resultFmtCodes)
+	sent, sendErr := c.sendResultRows(columns, stream, result.Rows, c.resultFmtCodes)
+	if sendErr != nil {
+		c.sendError("ERROR", "58030", "reading result batches: "+sendErr.Error())
+		return
+	}
 	c.sendCommandComplete(fmt.Sprintf("SELECT %d", sent))
 }
 

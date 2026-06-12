@@ -832,7 +832,7 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("Q05 error: %s", result.Error)
 	}
-	rows := result.Rows()
+	rows := mustRows(t, result)
 	t.Logf("Q05 against SF100 sample: %d rows", len(rows))
 	for i, r := range rows {
 		t.Logf("  row %d: %v", i, r)
@@ -1082,7 +1082,7 @@ func runSF100SampleQuery(t *testing.T, ctx context.Context, coord *Coordinator, 
 	if result.Error != "" {
 		t.Fatalf("Q%02d error: %s (elapsed %s)", qNum, result.Error, elapsed)
 	}
-	rows := result.Rows()
+	rows := mustRows(t, result)
 	t.Logf("Q%02d (%s): %d rows in %s", qNum, q.Name, len(rows), elapsed)
 	for i, r := range rows {
 		if i >= 10 {
@@ -1194,7 +1194,7 @@ func TestDistributedTPCHBuildCachePolarsQ05(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("Q05 error: %s", result.Error)
 	}
-	rows := result.Rows()
+	rows := mustRows(t, result)
 	t.Logf("Q05 (Polars schema, orders-only cache, groupSize=1): %d rows", len(rows))
 	for i, r := range rows {
 		t.Logf("  row %d: %v", i, r)
@@ -1247,7 +1247,7 @@ func TestDistributedTPCHQ17AggregateShuffleCorrectness(t *testing.T) {
 	if inPlan.Error != "" {
 		t.Fatalf("Q17 in-plan error: %s", inPlan.Error)
 	}
-	inPlanRows := inPlan.Rows()
+	inPlanRows := mustRows(t, inPlan)
 	t.Logf("Q17 in-plan: %d rows: %v", len(inPlanRows), inPlanRows)
 	if len(inPlanRows) != 1 {
 		t.Fatalf("Q17 in-plan: expected 1 row, got %d", len(inPlanRows))
@@ -1263,7 +1263,7 @@ func TestDistributedTPCHQ17AggregateShuffleCorrectness(t *testing.T) {
 	if aggShuffle.Error != "" {
 		t.Fatalf("Q17 aggregate-shuffle error: %s", aggShuffle.Error)
 	}
-	aggShuffleRows := aggShuffle.Rows()
+	aggShuffleRows := mustRows(t, aggShuffle)
 	t.Logf("Q17 aggregate-shuffle: %d rows: %v", len(aggShuffleRows), aggShuffleRows)
 	if len(aggShuffleRows) != 1 {
 		t.Fatalf("Q17 aggregate-shuffle: expected 1 row, got %d", len(aggShuffleRows))
@@ -1336,7 +1336,7 @@ func TestAggregateShuffleCorrectness_NonEmptyResult(t *testing.T) {
 	if a.Error != "" {
 		t.Fatalf("in-plan error: %s", a.Error)
 	}
-	aRows := a.Rows()
+	aRows := mustRows(t, a)
 	t.Logf("in-plan: %v", aRows)
 
 	// B: aggregate-shuffle
@@ -1348,7 +1348,7 @@ func TestAggregateShuffleCorrectness_NonEmptyResult(t *testing.T) {
 	if b.Error != "" {
 		t.Fatalf("agg-shuffle error: %s", b.Error)
 	}
-	bRows := b.Rows()
+	bRows := mustRows(t, b)
 	t.Logf("agg-shuffle: %v", bRows)
 
 	if len(aRows) != len(bRows) {
@@ -1427,7 +1427,7 @@ func TestDistributedTPCHQ17AggregateShuffle(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("Q17 error: %s", result.Error)
 	}
-	rows := result.Rows()
+	rows := mustRows(t, result)
 	t.Logf("Q17 (aggregate-shuffle path forced): %d rows", len(rows))
 	for i, r := range rows {
 		t.Logf("  row %d: %v", i, r)
@@ -1476,7 +1476,7 @@ func TestDistributedTPCHBuildCachePartialOrders(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("Q05 error: %s", result.Error)
 	}
-	rows := result.Rows()
+	rows := mustRows(t, result)
 	t.Logf("Q05 (orders-only cache, groupSize=1): %d rows", len(rows))
 	for i, r := range rows {
 		t.Logf("  row %d: %v", i, r)
@@ -1531,7 +1531,7 @@ func TestDistributedTPCHBuildCache(t *testing.T) {
 			if result.Error != "" {
 				t.Fatalf("Q%02d error: %s", tt.qNum, result.Error)
 			}
-			rows := result.Rows()
+			rows := mustRows(t, result)
 			t.Logf("Q%02d: %d rows in %v (build cache active)", tt.qNum, len(rows), elapsed)
 			if len(rows) != tt.expected {
 				t.Errorf("Q%02d: got %d rows, want %d", tt.qNum, len(rows), tt.expected)
@@ -1599,7 +1599,7 @@ func TestDistributedTPCHForcedShuffle(t *testing.T) {
 			if result.Error != "" {
 				t.Fatalf("Q%02d shuffle path: %s", tt.qNum, result.Error)
 			}
-			rows := result.Rows()
+			rows := mustRows(t, result)
 			t.Logf("Q%02d: %d rows in %v (shuffle ON, heap_delta=%d KB, heap_sys=%d KB)",
 				tt.qNum, len(rows), elapsed, heapDelta/1024, peakHeap/1024)
 			if len(rows) != tt.expected {
@@ -1650,7 +1650,7 @@ func TestDistributedTPCHBuildCacheDuplicateAlias(t *testing.T) {
 	if result.Error != "" {
 		t.Fatalf("Q02 error: %s", result.Error)
 	}
-	rows := result.Rows()
+	rows := mustRows(t, result)
 	t.Logf("Q02 (duplicate alias + group splitting): %d rows", len(rows))
 	if len(rows) != 5 {
 		for i, r := range rows {
@@ -1714,7 +1714,7 @@ func TestDistributedTPCH(t *testing.T) {
 			if result.Error != "" {
 				t.Fatalf("Q%02d error: %s", tt.qNum, result.Error)
 			}
-			rows := result.Rows()
+			rows := mustRows(t, result)
 			t.Logf("Q%02d: %d rows in %v (plan:\n%s)", tt.qNum, len(rows), elapsed, result.Plan)
 			if len(rows) > 0 {
 				t.Logf("  first row: %v", rows[0])

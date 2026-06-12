@@ -39,7 +39,7 @@ func TestDynamicFilterE2EQ17Correctness(t *testing.T) {
 	if baseline.Error != "" {
 		t.Fatalf("Q17 baseline error: %s", baseline.Error)
 	}
-	baselineRows := baseline.Rows()
+	baselineRows := mustRows(t, baseline)
 	t.Logf("Q17 baseline (flag=off): %d rows", len(baselineRows))
 
 	// Flip flag, re-run.
@@ -53,7 +53,7 @@ func TestDynamicFilterE2EQ17Correctness(t *testing.T) {
 	if withFilter.Error != "" {
 		t.Fatalf("Q17 with-filter error: %s", withFilter.Error)
 	}
-	wfRows := withFilter.Rows()
+	wfRows := mustRows(t, withFilter)
 	t.Logf("Q17 with-filter (flag=on): %d rows", len(wfRows))
 
 	if len(baselineRows) != len(wfRows) {

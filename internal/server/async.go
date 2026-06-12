@@ -139,10 +139,15 @@ func (s *Server) handleGetQueryResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	rows, rowsErr := result.Rows()
+	if rowsErr != nil {
+		writeError(w, http.StatusInternalServerError, "reading result batches: "+rowsErr.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, QueryResponse{
 		QueryID: result.QueryID,
 		Columns: result.Columns,
-		Rows:    result.Rows(),
+		Rows:    rows,
 		Stats: QueryStats{
 			Elapsed:     result.Elapsed.Round(time.Millisecond).String(),
 			RowsScanned: result.TotalRows,

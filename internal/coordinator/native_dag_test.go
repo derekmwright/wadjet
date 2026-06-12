@@ -83,7 +83,7 @@ func TestNativeDAG_SumMerge(t *testing.T) {
 		t.Fatalf("native DAG: %v", err)
 	}
 	sums := map[int64]int64{}
-	for _, r := range res.Rows() {
+	for _, r := range mustRows(t, res) {
 		sums[toInt64(r["k"])] = toInt64(r["total"])
 	}
 	if sums[1] != 30 {
@@ -130,7 +130,7 @@ func TestNativeDAG_ScanAggregateWithFilter(t *testing.T) {
 		t.Fatalf("legacy ExecuteSQL: %v", err)
 	}
 	legacyCounts := map[int64]int64{}
-	for _, r := range legacyRes.Rows() {
+	for _, r := range mustRows(t, legacyRes) {
 		legacyCounts[toInt64(r["k"])] = toInt64(r["n"])
 	}
 
@@ -140,7 +140,7 @@ func TestNativeDAG_ScanAggregateWithFilter(t *testing.T) {
 		t.Fatalf("native DAG ExecuteSQL: %v", err)
 	}
 	natCounts := map[int64]int64{}
-	for _, r := range natRes.Rows() {
+	for _, r := range mustRows(t, natRes) {
 		natCounts[toInt64(r["k"])] = toInt64(r["n"])
 	}
 
@@ -202,7 +202,7 @@ func TestNativeDAG_CountMultiPartial(t *testing.T) {
 		t.Fatalf("native DAG: %v", err)
 	}
 	counts := map[int64]int64{}
-	for _, r := range res.Rows() {
+	for _, r := range mustRows(t, res) {
 		counts[toInt64(r["k"])] = toInt64(r["n"])
 	}
 	if counts[1] != 2 || counts[2] != 2 {
@@ -237,7 +237,7 @@ func TestNativeDAG_AvgFallback(t *testing.T) {
 		t.Fatalf("native DAG: %v", err)
 	}
 	avgs := map[int64]float64{}
-	for _, r := range res.Rows() {
+	for _, r := range mustRows(t, res) {
 		switch x := r["a"].(type) {
 		case float64:
 			avgs[toInt64(r["k"])] = x
@@ -304,7 +304,7 @@ func TestNativeDAG_BroadcastJoinProbeSplit(t *testing.T) {
 	}
 
 	got := map[string]int64{}
-	for _, r := range res.Rows() {
+	for _, r := range mustRows(t, res) {
 		got[r["label"].(string)] = toInt64(r["n"])
 	}
 	// Each chunk has 25 rows with fk values cycling 1,2,3,1,2,3,...
@@ -381,7 +381,7 @@ func TestNativeDAG_BroadcastJoinReplicateMaterialization(t *testing.T) {
 	}
 
 	got := map[string]int64{}
-	for _, r := range res.Rows() {
+	for _, r := range mustRows(t, res) {
 		got[r["label"].(string)] = toInt64(r["n"])
 	}
 	want := map[string]int64{"A": 1, "B": 2, "C": 3}

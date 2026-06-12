@@ -290,6 +290,10 @@ func (c *Coordinator) executeStageDAG(
 				"query", queryID, "fuse_stage_id", depID,
 				"reply_subject", replySubject)
 			defer recv.sub.Unsubscribe()
+			// Remove unclaimed spill scratch on every path that returns
+			// before wait() hands the result off (dispatch errors, ctx
+			// cancellation). No-op after a successful wait().
+			defer recv.discard()
 			defer recv.registerWithDataPlane(c.dpSrv, queryID)()
 		}
 	}
@@ -521,10 +525,48 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 	if gr == nil || len(renames) == 0 {
 		return
 	}
-	// Pre-compile any expression-bearing renames (wrapped aggregates etc.)
-	// once per call. Compilation can fail (e.g., unsupported AST shape); on
-	// failure we degrade the whole pass to rename-only.
-	compiledExprs := make(map[int]expr.Expr, len(renames))
+	// Decide project-vs-rename from the column list the receiver derived
+	// from the first batch's schema (identical names). When the result is
+	// fully in memory and empty, keep the historical rename-only behavior;
+	// a spilled result always has decoded prefix batches (the budget is
+	// only exceeded after at least one decode), so columns are present.
+	br := newBatchRenamer(renames, gr.columns)
+	if len(gr.batches) == 0 && gr.spillPath == "" && len(gr.columns) > 0 {
+		// Columns but no batches (historical edge): rename-only. A fully
+		// empty result (no columns either) keeps projecting the column
+		// list to the SELECT aliases, as before.
+		br.project = false
+	}
+	gr.columns = br.renameColumns(gr.columns)
+	for bi, b := range gr.batches {
+		gr.batches[bi] = br.apply(b)
+	}
+	if gr.spillPath != "" {
+		// Replayed batches get the same transform lazily as they are
+		// decoded from scratch (gatherReplayStream).
+		gr.renamer = br
+	}
+}
+
+// batchRenamer is the per-batch form of applyOutputRenames: one decision
+// (project vs rename-only) made up front from the output column names, then
+// applied to each batch — eagerly to the in-memory prefix, lazily to batches
+// replayed from gather spill scratch. Both paths MUST use the same instance
+// so a single query's batches all share one schema shape.
+type batchRenamer struct {
+	renames  []physical.OutputRename
+	compiled map[int]expr.Expr // index → compiled expr; nil map = compilation failed
+	project  bool
+}
+
+// newBatchRenamer compiles expression-bearing renames and decides whether a
+// full projection is possible: compilation succeeded AND every non-expr
+// source column resolves in columns (case-insensitive, tolerating worker-
+// side lowercasing). Otherwise batches get a rename-only pass so the output
+// is at least non-empty rather than truncated to nothing.
+func newBatchRenamer(renames []physical.OutputRename, columns []string) *batchRenamer {
+	br := &batchRenamer{renames: renames, project: true}
+	br.compiled = make(map[int]expr.Expr, len(renames))
 	for i, r := range renames {
 		if r.Expr == nil {
 			continue
@@ -532,104 +574,102 @@ func applyOutputRenames(gr *gatherResult, renames []physical.OutputRename) {
 		e, cerr := expr.Compile(r.Expr)
 		if cerr != nil {
 			// Compilation failure → degrade to rename-only.
-			compiledExprs = nil
+			br.compiled = nil
+			br.project = false
 			break
 		}
-		compiledExprs[i] = e
+		br.compiled[i] = e
 	}
-	// Determine if every source resolves in the schema. If not, degrade
-	// to rename-only behavior to avoid hiding the entire result.
-	canProject := true
-	if compiledExprs == nil {
-		canProject = false
-	}
-	if canProject && len(gr.batches) > 0 && len(gr.batches[0].Schema) > 0 {
-		schema := gr.batches[0].Schema
+	if br.project && len(columns) > 0 {
 		for _, r := range renames {
 			if r.Expr != nil {
 				continue // existence check uses expression evaluation
 			}
 			found := false
-			for _, c := range schema {
-				if strings.EqualFold(c.Name, r.From) {
+			for _, c := range columns {
+				if strings.EqualFold(c, r.From) {
 					found = true
 					break
 				}
 			}
 			if !found {
-				canProject = false
+				br.project = false
 				break
 			}
 		}
-	} else if len(gr.columns) > 0 && len(gr.batches) == 0 {
-		// No batches but columns set — fall back to rename-only.
-		canProject = false
 	}
-	if !canProject {
-		// Rename-only fallback (matches old behavior).
-		rename := func(name string) string {
-			for _, r := range renames {
-				if strings.EqualFold(name, r.From) {
-					return r.To
-				}
-			}
-			return name
+	return br
+}
+
+// renameColumns returns the output column list: the renames' To names in
+// order (project mode), or the input names with matches renamed in place.
+func (br *batchRenamer) renameColumns(columns []string) []string {
+	if br.project {
+		out := make([]string, len(br.renames))
+		for i, r := range br.renames {
+			out[i] = r.To
 		}
-		for i, c := range gr.columns {
-			gr.columns[i] = rename(c)
-		}
-		for _, b := range gr.batches {
-			if b == nil {
-				continue
-			}
-			for i := range b.Schema {
-				b.Schema[i].Name = rename(b.Schema[i].Name)
-			}
-		}
-		return
+		return out
 	}
-	// Project: keep only the renamed/computed columns, in renames order.
-	gr.columns = make([]string, len(renames))
-	for i, r := range renames {
-		gr.columns[i] = r.To
+	for i, c := range columns {
+		columns[i] = br.renameOne(c)
 	}
-	for bi, b := range gr.batches {
-		if b == nil {
+	return columns
+}
+
+func (br *batchRenamer) renameOne(name string) string {
+	for _, r := range br.renames {
+		if strings.EqualFold(name, r.From) {
+			return r.To
+		}
+	}
+	return name
+}
+
+// apply transforms one batch: project mode keeps only the renamed/computed
+// columns in renames order; rename-only mode renames schema fields in place.
+// Nil-safe (returns nil for nil input).
+func (br *batchRenamer) apply(b *batch.RecordBatch) *batch.RecordBatch {
+	if b == nil {
+		return nil
+	}
+	if !br.project {
+		for i := range b.Schema {
+			b.Schema[i].Name = br.renameOne(b.Schema[i].Name)
+		}
+		return b
+	}
+	newCols := make([]*batch.Vector, len(br.renames))
+	newSchema := make([]parquet.Column, len(br.renames))
+	for i, r := range br.renames {
+		if e, ok := br.compiled[i]; ok {
+			// Expression-bearing rename: evaluate per row, build a new
+			// column. Used for wrapped aggregates ("SUM(x)/7.0") whose
+			// post-aggregate divisor needs to be applied at gather time.
+			newCols[i] = evalExprColumn(e, b)
+			newSchema[i] = parquet.Column{Name: r.To, Type: parquet.TypeFloat64, Nullable: true}
 			continue
 		}
-		newCols := make([]*batch.Vector, len(renames))
-		newSchema := make([]parquet.Column, len(renames))
-		for i, r := range renames {
-			if e, ok := compiledExprs[i]; ok {
-				// Expression-bearing rename: evaluate per row, build a new
-				// column. Used for wrapped aggregates ("SUM(x)/7.0") whose
-				// post-aggregate divisor needs to be applied at gather time.
-				newCols[i] = evalExprColumn(e, b)
-				newSchema[i] = parquet.Column{Name: r.To, Type: parquet.TypeFloat64, Nullable: true}
-				continue
+		srcIdx := -1
+		for j, c := range b.Schema {
+			if strings.EqualFold(c.Name, r.From) {
+				srcIdx = j
+				break
 			}
-			srcIdx := -1
-			for j, c := range b.Schema {
-				if strings.EqualFold(c.Name, r.From) {
-					srcIdx = j
-					break
-				}
-			}
-			if srcIdx < 0 {
-				// Should not happen — canProject was true. Defensive.
-				continue
-			}
-			newCols[i] = b.Columns[srcIdx]
-			newSchema[i] = b.Schema[srcIdx]
-			newSchema[i].Name = r.To
 		}
-		nb := &batch.RecordBatch{
-			Schema:  newSchema,
-			Columns: newCols,
-			Len:     b.Len,
-			Sel:     b.Sel,
+		if srcIdx < 0 {
+			// Should not happen — project was decided from these names.
+			continue
 		}
-		gr.batches[bi] = nb
+		newCols[i] = b.Columns[srcIdx]
+		newSchema[i] = b.Schema[srcIdx]
+		newSchema[i].Name = r.To
+	}
+	return &batch.RecordBatch{
+		Schema:  newSchema,
+		Columns: newCols,
+		Len:     b.Len,
+		Sel:     b.Sel,
 	}
 }
 
@@ -3068,6 +3108,9 @@ func (c *Coordinator) dispatchGatherStage(
 	if err != nil {
 		return nil, fmt.Errorf("subscribing gather reply: %w", err)
 	}
+	// Remove unclaimed spill scratch on every path that returns before
+	// wait() hands the result off. No-op after a successful wait().
+	defer recv.discard()
 	defer recv.registerWithDataPlane(c.dpSrv, queryID)()
 	c.logger.Info("gather: publishing task",
 		"query_id", queryID, "task_id", task.ID, "reply_subject", replySubject,
