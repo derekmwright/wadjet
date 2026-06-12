@@ -521,12 +521,30 @@ resource "aws_instance" "worker" {
     # loops until 30m timeout. /var/spill on the EBS root volume is
     # slower than NVMe but unbounded by RAM and grows with the configured
     # volume_size (200 GB).
-    NVME_DEV=$(lsblk -dno NAME,TYPE | awk '$2=="disk" && $1~/nvme[0-9]+n1/ && $1!~/nvme0n1/{print "/dev/"$1; exit}')
+    # Select the instance store by device MODEL, never by name: NVMe
+    # enumeration order is racy, and the old name-based exclusion of
+    # nvme0n1 picked the EBS ROOT disk on a worker where the instance
+    # store enumerated first (2026-06-12 SF100 run 105815: mkfs/mount
+    # failed, spill fell through to the 200G root, Q21/Q22 ENOSPC).
+    NVME_DEV=""
+    for d in $(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}'); do
+      model=$(cat /sys/block/$d/device/model 2>/dev/null || true)
+      case "$model" in
+        *"Instance Storage"*) NVME_DEV="/dev/$d"; break ;;
+      esac
+    done
     if [ -n "$NVME_DEV" ]; then
+      if lsblk -no MOUNTPOINTS "$NVME_DEV" 2>/dev/null | grep -q . ; then
+        echo "FATAL: instance store $NVME_DEV already mounted/partitioned — refusing to format" >&2
+        exit 1
+      fi
       echo "Formatting NVMe instance store: $NVME_DEV"
       mkfs.xfs -f "$NVME_DEV"
       mkdir -p /mnt/nvme
-      mount "$NVME_DEV" /mnt/nvme
+      if ! mount "$NVME_DEV" /mnt/nvme; then
+        echo "FATAL: failed to mount $NVME_DEV at /mnt/nvme — refusing to run with spill on the root volume" >&2
+        exit 1
+      fi
       mkdir -p /mnt/nvme/spill
       SPILL_DIR="/mnt/nvme/spill"
       echo "NVMe spill directory ready at $SPILL_DIR"
