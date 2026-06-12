@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
@@ -110,7 +111,7 @@ func TestCachedStore_Get(t *testing.T) {
 	putString(ctx, t, mem, "b", "file1.parquet", "parquet-data-1")
 
 	cache := NewLRUCache(1024 * 1024)
-	cs := NewCachedStore(mem, cache)
+	cs := NewCachedStore(mem, cache, nil)
 
 	// First read: cache miss, reads from inner store
 	rc, info, err := cs.Get(ctx, "b", "file1.parquet")
@@ -150,7 +151,7 @@ func TestCachedStore_GetReaderAt(t *testing.T) {
 	putString(ctx, t, mem, "b", "file1.parquet", "0123456789ABCDEF")
 
 	cache := NewLRUCache(1024 * 1024)
-	cs := NewCachedStore(mem, cache)
+	cs := NewCachedStore(mem, cache, nil)
 
 	// GetReaderAt downloads full file and caches it
 	ra, size, err := cs.GetReaderAt(ctx, "b", "file1.parquet")
@@ -196,7 +197,7 @@ func TestCachedStore_CrossQueryReuse(t *testing.T) {
 	cache := NewLRUCache(1024 * 1024)
 
 	// Simulate query 1: creates CachedStore, reads file
-	cs1 := NewCachedStore(mem, cache)
+	cs1 := NewCachedStore(mem, cache, nil)
 	rc, _, _ := cs1.Get(ctx, "b", "table/chunk1.parquet")
 	io.ReadAll(rc)
 	rc.Close()
@@ -205,7 +206,7 @@ func TestCachedStore_CrossQueryReuse(t *testing.T) {
 	mem.Delete(ctx, "b", "table/chunk1.parquet")
 
 	// Simulate query 2: new CachedStore, same cache — should hit
-	cs2 := NewCachedStore(mem, cache)
+	cs2 := NewCachedStore(mem, cache, nil)
 	rc2, _, err := cs2.Get(ctx, "b", "table/chunk1.parquet")
 	if err != nil {
 		t.Fatalf("expected cache hit after backing store delete: %v", err)
@@ -222,5 +223,43 @@ func putString(ctx context.Context, t *testing.T, s objstore.Store, bucket, key,
 	_, err := s.Put(ctx, bucket, key, io.NopCloser(strings.NewReader(val)), int64(len(val)), "application/octet-stream")
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestCachedStore_DownloadTransientCharged verifies the download buffer is
+// charged to the tracker for the window before cache insertion and fully
+// released once the LRU cache owns the bytes.
+func TestCachedStore_DownloadTransientCharged(t *testing.T) {
+	mem := objstore.NewMemStore()
+	ctx := context.Background()
+	mem.MakeBucket(ctx, "b")
+	putString(ctx, t, mem, "b", "file1.parquet", "parquet-data-1")
+
+	cache := NewLRUCache(1024 * 1024)
+	tracker := memory.NewTracker("worker-test", 1<<30)
+	cs := NewCachedStore(mem, cache, tracker)
+
+	rc, _, err := cs.Get(ctx, "b", "file1.parquet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Close()
+
+	if used := tracker.Used(); used != 0 {
+		t.Fatalf("used = %d after Get, want 0 (cache owns the bytes)", used)
+	}
+	if tracker.Peak() <= 0 {
+		t.Fatal("peak = 0 — download transient was never charged")
+	}
+
+	// Cache hit must not touch the tracker.
+	peak := tracker.Peak()
+	rc, _, err = cs.Get(ctx, "b", "file1.parquet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Close()
+	if tracker.Used() != 0 || tracker.Peak() != peak {
+		t.Fatal("cache hit must not charge the tracker")
 	}
 }

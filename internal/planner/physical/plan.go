@@ -5609,6 +5609,7 @@ func (p *Planner) newScanner(ctx context.Context, tableName string, partFilter m
 	// Wire per-query memory tracker so parquet pooled buffers are accounted for.
 	if sm := p.getSpillManager(); sm != nil {
 		src.memTracker = sm.Tracker()
+		src.spillMgr = sm
 	}
 	return src
 }
@@ -5635,6 +5636,7 @@ type catalogScanSource struct {
 	dynamicFilter   []exec.DynamicRange   // dynamic min/max range filter from hash join build side
 	rowLimit        int64                 // LIMIT pushdown: enables lazy file downloading (0 = eager)
 	memTracker      *memory.Tracker       // per-query memory tracker; wired at construction when budget>0
+	spillMgr        *memory.SpillManager  // for pre-emptive relief on file-load reservations; nil-safe
 }
 
 // SetBloomFilter attaches a bloom filter for scan-level row group pruning.
@@ -5690,6 +5692,7 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 		}
 		if s.memTracker != nil {
 			ses.memTracker = s.memTracker
+			ses.spillMgr = s.spillMgr
 		}
 	}
 	s.inner = sc
@@ -6932,8 +6935,9 @@ type scannerExecSource struct {
 	scanner         *scanSourceInner
 	bloomFilter     *exec.BloomScanFilter
 	dynamicFilter   []exec.DynamicRange
-	rowLimit        int64           // LIMIT pushdown: enables lazy file downloading (0 = eager)
-	memTracker      *memory.Tracker // per-query memory tracker; passed to scanSourceInner at Init
+	rowLimit        int64                // LIMIT pushdown: enables lazy file downloading (0 = eager)
+	memTracker      *memory.Tracker      // per-query memory tracker; passed to scanSourceInner at Init
+	spillMgr        *memory.SpillManager // for pre-emptive relief on file-load reservations; nil-safe
 }
 
 type scanSourceInner struct {
@@ -6993,6 +6997,59 @@ type scanSourceInner struct {
 	// from pooledBufs. Released atomically in releasePooledBufs to avoid
 	// double-release on idempotent close.
 	trackedBufBytes atomic.Int64
+
+	// spillMgr lets file-load reservations request operator relief before
+	// waiting on the budget (memory.ReserveOrForce). nil-safe.
+	spillMgr *memory.SpillManager
+
+	// batchCharges maps decoded batches currently held by the scan source
+	// (decode in progress, prefetched, or queued in batchCh) to the bytes
+	// charged against memTracker when they were decoded. Released when the
+	// batch leaves through next(), is dropped on a filter path, or is
+	// drained at Close. LoadAndDelete makes every release idempotent.
+	batchCharges sync.Map
+}
+
+// trackScanBatch charges a freshly decoded batch's footprint to the memory
+// tracker until the batch leaves the scan source. No-op without a tracker.
+func (inner *scanSourceInner) trackScanBatch(b *batch.RecordBatch) {
+	if inner.memTracker == nil || b == nil {
+		return
+	}
+	n := b.MemBytes()
+	if n <= 0 {
+		return
+	}
+	inner.batchCharges.Store(b, n)
+	inner.memTracker.ForceReserve(n)
+}
+
+// releaseScanBatch releases the charge recorded by trackScanBatch.
+// Idempotent: a second release for the same batch is a no-op.
+func (inner *scanSourceInner) releaseScanBatch(b *batch.RecordBatch) {
+	if inner.memTracker == nil || b == nil {
+		return
+	}
+	if n, ok := inner.batchCharges.LoadAndDelete(b); ok {
+		inner.memTracker.Release(n.(int64))
+	}
+}
+
+// drainBatchCharges releases every outstanding decoded-batch charge —
+// batches stranded in batchCh by cancellation or never sent by an exiting
+// worker. Callers must ensure the rg/scan workers have exited first (the
+// charges live on a shared worker-level tracker; a racing Store here would
+// leak its bytes for the worker's lifetime).
+func (inner *scanSourceInner) drainBatchCharges() {
+	if inner.memTracker == nil {
+		return
+	}
+	inner.batchCharges.Range(func(k, _ any) bool {
+		if n, ok := inner.batchCharges.LoadAndDelete(k); ok {
+			inner.memTracker.Release(n.(int64))
+		}
+		return true
+	})
 }
 
 // trackPooledBuf records a buffer obtained from readBufPool so it can be
@@ -7118,6 +7175,7 @@ func (s *scannerExecSource) Init(ctx context.Context) error {
 		errCh:         make(chan error, 1),
 		cancel:        cancel,
 		memTracker:    s.memTracker,
+		spillMgr:      s.spillMgr,
 	}
 	s.scanner = inner
 
@@ -7210,6 +7268,13 @@ func (s *scannerExecSource) Close() error {
 		if s.scanner.cancel != nil {
 			s.scanner.cancel()
 		}
+		// Wait for the scan workers to exit before draining: a worker racing
+		// drainBatchCharges could charge a batch after the drain, leaking the
+		// bytes on the shared worker-level tracker for the worker's lifetime.
+		// Workers observe the cancel at the loop head and in every blocking
+		// select, so this wait is bounded by one in-flight row-group decode.
+		s.scanner.wg.Wait()
+		s.scanner.drainBatchCharges()
 		s.scanner.releasePooledBufs()
 	}
 	return nil
@@ -7268,6 +7333,7 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 		if b == nil || b.Len == 0 {
 			continue
 		}
+		inner.trackScanBatch(b)
 
 		// Apply delete markers: skip rows marked for deletion
 		if delSet := inner.deleteMarkers[file.Path]; len(delSet) > 0 {
@@ -7278,6 +7344,7 @@ func (inner *scanSourceInner) scanWorker(ctx context.Context) {
 				}
 			}
 			if len(sel) == 0 {
+				inner.releaseScanBatch(b)
 				continue
 			}
 			if len(sel) < b.Len {
@@ -7336,6 +7403,9 @@ func (inner *scanSourceInner) next(ctx context.Context) (*batch.RecordBatch, err
 				return nil, nil
 			}
 		}
+		// The batch leaves the scan source here — downstream operators that
+		// retain it account for it themselves (TrackBatch et al).
+		inner.releaseScanBatch(b)
 		return b, nil
 	case err := <-inner.errCh:
 		return nil, err

@@ -9,9 +9,11 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -313,6 +315,7 @@ type fileSlot struct {
 	nativeReader *parquet.FileReader // alias of reader.FileReader()
 	metaReader   *parquet.FileReader // metadata-only — used during pruning before any rg load
 	dataBuf      []byte              // pooled buffer holding the file bytes; returned to pool on releaseRG
+	chargedBytes int64               // bytes reserved on inner.memTracker for dataBuf; released with it
 	rgRemaining  atomic.Int64        // refcount of unprocessed row groups; release on 0
 }
 
@@ -352,8 +355,20 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 		}
 	}
 
+	// Reserve the file's bytes BEFORE the allocation so admission and spill
+	// pressure see the load coming instead of discovering it as drift. On a
+	// budget miss this asks operators to spill the shortfall and waits
+	// briefly; it never fails the load — worst case the reservation is
+	// forced and the ledger stays honest. Released by releaseCharge (error
+	// paths) or releaseRG (with the buffer).
+	if inner.memTracker != nil && s.entry.SizeBytes > 0 {
+		memory.ReserveOrForce(ctx, inner.memTracker, inner.spillMgr, s.entry.SizeBytes, fileLoadReserveWait, "scan file load")
+		s.chargedBytes = s.entry.SizeBytes
+	}
+
 	rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), s.entry.Path)
 	if err != nil {
+		s.releaseCharge(inner)
 		if inner.loadSem != nil {
 			<-inner.loadSem
 		}
@@ -363,14 +378,28 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	data, err := readAllSized(rc, s.entry.SizeBytes, true)
 	rc.Close()
 	if err != nil {
+		s.releaseCharge(inner)
 		if inner.loadSem != nil {
 			<-inner.loadSem
 		}
 		s.loadErr = fmt.Errorf("read %s: %w", s.entry.Path, err)
 		return nil, s.loadErr
 	}
+	// Reconcile the up-front reservation to the pooled buffer's real
+	// capacity — pool reuse can hand back a larger buffer than the file.
+	if s.chargedBytes > 0 {
+		if d := int64(cap(data)) - s.chargedBytes; d != 0 {
+			if d > 0 {
+				inner.memTracker.ForceReserve(d)
+			} else {
+				inner.memTracker.Release(-d)
+			}
+			s.chargedBytes = int64(cap(data))
+		}
+	}
 	reader, err := parquet.NewReaderFromBytes(data)
 	if err != nil {
+		s.releaseCharge(inner)
 		if inner.loadSem != nil {
 			<-inner.loadSem
 		}
@@ -393,6 +422,20 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	return s.nativeReader, nil
 }
 
+// fileLoadReserveWait bounds how long a file load waits for a clean
+// reservation after asking operators for relief. Past it the reservation
+// is forced — the load is never failed or deadlocked on the budget.
+const fileLoadReserveWait = 2 * time.Second
+
+// releaseCharge releases the memTracker reservation made for this slot's
+// data buffer. Caller must hold s.mu.
+func (s *fileSlot) releaseCharge(inner *scanSourceInner) {
+	if s.chargedBytes > 0 && inner.memTracker != nil {
+		inner.memTracker.Release(s.chargedBytes)
+	}
+	s.chargedBytes = 0
+}
+
 // releaseRG decrements the row-group refcount and frees the file bytes
 // once the last row group has been processed. Safe to call from any worker.
 func (s *fileSlot) releaseRG(inner *scanSourceInner) {
@@ -405,6 +448,7 @@ func (s *fileSlot) releaseRG(inner *scanSourceInner) {
 	s.nativeReader = nil
 	buf := s.dataBuf
 	s.dataBuf = nil
+	s.releaseCharge(inner)
 	s.mu.Unlock()
 	// Return the file's pooled buffer to the read buf pool so it's
 	// immediately available for the next file the loader brings in. This
@@ -735,10 +779,11 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 			if idx >= len(inner.rgUnits) {
 				return
 			}
-			b = inner.readRG(inner.rgUnits[idx])
+			b = inner.readRG(ctx, inner.rgUnits[idx])
 		}
 
 		if b == nil || b.Len == 0 {
+			inner.releaseScanBatch(b)
 			continue
 		}
 
@@ -753,6 +798,7 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 				}
 			}
 			if len(sel) == 0 {
+				inner.releaseScanBatch(b)
 				continue
 			}
 			if len(sel) < b.Len {
@@ -777,7 +823,7 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 			if nextIdx < len(inner.rgUnits) {
 				prefetched = &prefetchResult{
 					idx:   nextIdx,
-					batch: inner.readRG(inner.rgUnits[nextIdx]),
+					batch: inner.readRG(ctx, inner.rgUnits[nextIdx]),
 				}
 			}
 		}
@@ -786,12 +832,13 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 
 // readRG reads a row group using the native page decoder. Loads the file's
 // bytes lazily on first call (bounded by inner.loadSem) and releases them
-// once this slot's last row group has been processed.
-func (inner *scanSourceInner) readRG(unit rgUnit) *batch.RecordBatch {
+// once this slot's last row group has been processed. The decoded batch is
+// charged to the memory tracker until it leaves the scan source.
+func (inner *scanSourceInner) readRG(ctx context.Context, unit rgUnit) *batch.RecordBatch {
 	if unit.slot == nil {
 		return nil
 	}
-	rdr, err := unit.slot.ensureLoaded(inner, context.Background())
+	rdr, err := unit.slot.ensureLoaded(inner, ctx)
 	if err != nil || rdr == nil {
 		unit.slot.releaseRG(inner)
 		return nil
@@ -801,6 +848,7 @@ func (inner *scanSourceInner) readRG(unit rgUnit) *batch.RecordBatch {
 	if err != nil {
 		return nil
 	}
+	inner.trackScanBatch(b)
 	return b
 }
 

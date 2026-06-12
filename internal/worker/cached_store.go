@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
@@ -18,15 +19,55 @@ import (
 // serves random-access reads from memory — this is faster than S3 range
 // requests for files that will be accessed across multiple queries.
 type CachedStore struct {
-	inner objstore.Store
-	cache *LRUCache
+	inner   objstore.Store
+	cache   *LRUCache
+	tracker *memory.Tracker // charges download transients; nil = no accounting
 }
 
 // NewCachedStore creates a store that checks the LRU cache before delegating
 // to the underlying store. Files read from the inner store are automatically
-// cached for subsequent queries.
-func NewCachedStore(inner objstore.Store, cache *LRUCache) *CachedStore {
-	return &CachedStore{inner: inner, cache: cache}
+// cached for subsequent queries. tracker (nil-safe) accounts each download
+// buffer for the window between allocation and cache insertion — before the
+// Put the bytes are invisible to admission and spill pressure; after it the
+// LRU cache's reservoir owns them.
+func NewCachedStore(inner objstore.Store, cache *LRUCache, tracker *memory.Tracker) *CachedStore {
+	return &CachedStore{inner: inner, cache: cache, tracker: tracker}
+}
+
+// readFully drains rc into a buffer sized by size when known, charging the
+// tracker for the buffer's lifetime. The returned release must be called
+// exactly once, after the bytes are handed to the cache (or on error paths
+// it has already run). rc is always closed.
+func (s *CachedStore) readFully(rc io.ReadCloser, size int64, bucket, key string) (data []byte, release func(), err error) {
+	release = func() {}
+	if size > 0 {
+		// Charge BEFORE the allocation so pressure machinery sees it coming.
+		if s.tracker != nil {
+			s.tracker.ForceReserve(size)
+			release = func() { s.tracker.Release(size) }
+		}
+		// Pre-allocate buffer using known file size to avoid io.ReadAll's
+		// O(log n) doubling strategy (512 → 1K → ... → 40MB = ~17 copies).
+		buf := make([]byte, size)
+		n, readErr := io.ReadFull(rc, buf)
+		rc.Close()
+		if readErr != nil && readErr != io.ErrUnexpectedEOF {
+			release()
+			return nil, func() {}, fmt.Errorf("reading %s/%s: %w", bucket, key, readErr)
+		}
+		return buf[:n], release, nil
+	}
+	data, err = io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, release, fmt.Errorf("reading %s/%s: %w", bucket, key, err)
+	}
+	if s.tracker != nil && len(data) > 0 {
+		n := int64(len(data))
+		s.tracker.ForceReserve(n)
+		release = func() { s.tracker.Release(n) }
+	}
+	return data, release, nil
 }
 
 func (s *CachedStore) Get(ctx context.Context, bucket, key string) (io.ReadCloser, objstore.ObjectInfo, error) {
@@ -40,26 +81,13 @@ func (s *CachedStore) Get(ctx context.Context, bucket, key string) (io.ReadClose
 	if err != nil {
 		return nil, info, err
 	}
-	var data []byte
-	if info.Size > 0 {
-		// Pre-allocate buffer using known file size to avoid io.ReadAll's
-		// O(log n) doubling strategy (512 → 1K → ... → 40MB = ~17 copies).
-		buf := make([]byte, info.Size)
-		n, readErr := io.ReadFull(rc, buf)
-		rc.Close()
-		if readErr != nil && readErr != io.ErrUnexpectedEOF {
-			return nil, info, fmt.Errorf("reading %s/%s: %w", bucket, key, readErr)
-		}
-		data = buf[:n]
-	} else {
-		data, err = io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return nil, info, fmt.Errorf("reading %s/%s: %w", bucket, key, err)
-		}
+	data, release, err := s.readFully(rc, info.Size, bucket, key)
+	if err != nil {
+		return nil, info, err
 	}
 
 	s.cache.Put(cacheKey, data)
+	release() // the LRU cache's reservoir owns the bytes from here
 	return io.NopCloser(bytes.NewReader(data)), info, nil
 }
 
@@ -87,24 +115,13 @@ func (s *CachedStore) GetReaderAt(ctx context.Context, bucket, key string) (objs
 	if err != nil {
 		return nil, 0, err
 	}
-	var data []byte
-	if info.Size > 0 {
-		buf := make([]byte, info.Size)
-		n, readErr := io.ReadFull(rc, buf)
-		rc.Close()
-		if readErr != nil && readErr != io.ErrUnexpectedEOF {
-			return nil, 0, fmt.Errorf("reading %s/%s: %w", bucket, key, readErr)
-		}
-		data = buf[:n]
-	} else {
-		data, err = io.ReadAll(rc)
-		rc.Close()
-		if err != nil {
-			return nil, 0, fmt.Errorf("reading %s/%s: %w", bucket, key, err)
-		}
+	data, release, err := s.readFully(rc, info.Size, bucket, key)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	s.cache.Put(cacheKey, data)
+	release() // the LRU cache's reservoir owns the bytes from here
 	return &nopCloseReaderAt{bytes.NewReader(data)}, int64(len(data)), nil
 }
 
