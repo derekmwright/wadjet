@@ -442,6 +442,13 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Annotate scan columns from catalog so optimizer can resolve unqualified refs
 	planner := s.newPlanner()
+
+	// Reject references to columns that resolve to no source (plan-time name binding).
+	if err := planner.ValidateColumns(r.Context(), selectInfo); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	planner.AnnotateScanColumns(r.Context(), logicalPlan)
 
 	// Optimize — pass scan annotator for new scans created during IN decorrelation
@@ -1185,6 +1192,10 @@ func (s *Server) handleExplain(w http.ResponseWriter, r *http.Request, parsed *p
 		return
 	}
 	planner := s.newPlanner()
+	if err := planner.ValidateColumns(r.Context(), selectInfo); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	planner.AnnotateScanColumns(r.Context(), logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, func(plan *logical.Node) {
 		planner.AnnotateScanColumns(r.Context(), plan)

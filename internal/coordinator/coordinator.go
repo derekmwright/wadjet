@@ -574,6 +574,11 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		return nil, fmt.Errorf("extract: %w", err)
 	}
 
+	// Reject references to columns that resolve to no source (plan-time name binding).
+	if err := physical.NewPlanner(c.catalog).ValidateColumns(ctx, selectInfo); err != nil {
+		return nil, err
+	}
+
 	// Build logical plan
 	logicalPlan, err := logical.BuildFromSelect(selectInfo)
 	if err != nil {
@@ -2093,6 +2098,11 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	selectInfo, err := plansql.ExtractSelect(parsed)
 	if err != nil {
 		return "", "", fmt.Errorf("extract: %w", err)
+	}
+
+	// Reject references to columns that resolve to no source (plan-time name binding).
+	if err := physical.NewPlanner(c.catalog).ValidateColumns(ctx, selectInfo); err != nil {
+		return "", "", err
 	}
 
 	// Build logical plan
