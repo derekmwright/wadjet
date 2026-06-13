@@ -334,13 +334,22 @@ func compareString(a, b string, op CompareOp) bool {
 // KernelFilter is a UnaryOperator that uses a pre-resolved typed filter kernel.
 // The type dispatch happens once on first Execute; the inner loop has no type switches.
 type KernelFilter struct {
-	ColName  string
-	Op       CompareOp
-	Value    any
-	colIdx   int
-	kern     kernel.FilterKernel
-	outSel   []uint32
-	resolved bool
+	ColName string
+	Op      CompareOp
+	Value   any
+	// RowFallback, when non-nil, evaluates the original comparison row-at-
+	// a-time. Used when ColName is a ROW-field access ("attrs.score") that
+	// the typed kernel cannot evaluate — the planner attaches the compiled
+	// expression's predicate, and resolution delegates to it instead of
+	// silently matching nothing (issue #147).
+	RowFallback Predicate
+
+	colIdx      int
+	kern        kernel.FilterKernel
+	outSel      []uint32
+	resolved    bool
+	useFallback bool
+	inner       *Filter
 }
 
 // NewKernelFilter creates a filter that uses typed kernels for comparison.
@@ -350,13 +359,22 @@ func NewKernelFilter(colName string, op CompareOp, value any) *KernelFilter {
 
 func (f *KernelFilter) Init(_ context.Context) error { return nil }
 
-func (f *KernelFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+func (f *KernelFilter) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if !f.resolved {
 		f.colIdx = in.ColumnIndex(f.ColName)
 		if f.colIdx < 0 && strings.Contains(f.ColName, ".") {
 			// Strip table alias qualifier (e.g. "n1.n_name" → "n_name")
 			parts := strings.SplitN(f.ColName, ".", 2)
 			f.colIdx = in.ColumnIndex(parts[1])
+			if f.colIdx < 0 && f.RowFallback != nil {
+				// ROW-field access: the qualifier names a ROW column whose
+				// field the typed kernel cannot reach — delegate to the
+				// row-at-a-time predicate.
+				if pi := in.ColumnIndex(parts[0]); pi >= 0 && in.Columns[pi].Type == batch.TypeRow {
+					f.useFallback = true
+					f.inner = NewFilter(f.RowFallback)
+				}
+			}
 		}
 		if f.colIdx >= 0 {
 			typ := in.Columns[f.colIdx].Type
@@ -366,8 +384,14 @@ func (f *KernelFilter) Execute(_ context.Context, in *batch.RecordBatch) (*batch
 		f.resolved = true
 	}
 
+	if f.useFallback {
+		return f.inner.Execute(ctx, in)
+	}
 	if f.colIdx < 0 || f.kern == nil {
-		return nil, nil
+		// An unresolvable filter column previously matched NOTHING — a
+		// typo'd WHERE clause silently returned an empty result,
+		// indistinguishable from genuinely empty data (issue #147).
+		return nil, fmt.Errorf("filter column %q does not exist in the input schema", f.ColName)
 	}
 
 	// When the batch already has a selection vector (e.g. from a prior filter
@@ -394,7 +418,7 @@ func (f *KernelFilter) Close() error { return nil }
 // Clone returns a new KernelFilter with the same parameters but fresh
 // resolution state and scratch buffers for concurrent Execute calls.
 func (f *KernelFilter) Clone() UnaryOperator {
-	return &KernelFilter{ColName: f.ColName, Op: f.Op, Value: f.Value}
+	return &KernelFilter{ColName: f.ColName, Op: f.Op, Value: f.Value, RowFallback: f.RowFallback}
 }
 
 // InFilter uses a vectorized kernel for set membership testing (IN / NOT IN).

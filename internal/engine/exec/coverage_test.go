@@ -396,11 +396,14 @@ func TestKernelFilterMissingColumn(t *testing.T) {
 	kf := NewKernelFilter("nonexistent", OpEq, int64(1))
 	kf.Init(context.Background())
 	out, err := kf.Execute(context.Background(), b)
-	if err != nil {
-		t.Fatal(err)
+	// Issue #147: a missing filter column must ERROR — the old contract
+	// (silently match nothing) made a typo'd WHERE clause look exactly
+	// like an empty result.
+	if err == nil {
+		t.Fatal("expected error for missing filter column, got silent empty result")
 	}
 	if out != nil {
-		t.Fatal("expected nil for missing column")
+		t.Fatal("expected nil batch alongside the error")
 	}
 }
 

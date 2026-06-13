@@ -2,6 +2,8 @@ package exec
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -50,13 +52,13 @@ type ProjectColumn struct {
 	Name            string
 	Type            parquet.TypeID
 	Expr            Expression
-	Float64Eval     Float64Expression    // optional typed path (avoids interface{} boxing)
-	Int64Eval       Int64Expression      // optional typed path
-	VecFloat64Eval  VecFloat64Expression // optional vectorized path (entire column at once)
+	Float64Eval     Float64Expression           // optional typed path (avoids interface{} boxing)
+	Int64Eval       Int64Expression             // optional typed path
+	VecFloat64Eval  VecFloat64Expression        // optional vectorized path (entire column at once)
 	VecFloat64Clone func() VecFloat64Expression // creates a clone with independent scratch buffers
-	VecEval         VecExpression            // optional vectorized evaluation for any output type
-	SourceCol       string               // source column name for type resolution on renames
-	DirectCopy      string               // if set, bulk copy this input column (no per-row eval)
+	VecEval         VecExpression               // optional vectorized evaluation for any output type
+	SourceCol       string                      // source column name for type resolution on renames
+	DirectCopy      string                      // if set, bulk copy this input column (no per-row eval)
 }
 
 // Project is a UnaryOperator that selects and computes columns.
@@ -136,6 +138,14 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			if proj.DirectCopy != "" {
 				if idx := in.ColumnIndex(proj.DirectCopy); idx >= 0 {
 					p.directSrcIdx[j] = idx
+				} else if !plainColumnReachable(in, proj.DirectCopy) {
+					// A projected plain column that resolves to NOTHING —
+					// not bare, not qualifier-stripped, not a ROW field —
+					// previously emitted an all-NULL column, so a typo'd
+					// SELECT item looked like a real (empty) column
+					// (issue #147). Expression projections and the
+					// fallback resolutions stay on the per-row eval path.
+					return nil, fmt.Errorf("column %q does not exist in the input schema", proj.DirectCopy)
 				}
 			}
 		}
@@ -223,6 +233,28 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 }
 
 func (p *Project) Close() error { return nil }
+
+// plainColumnReachable reports whether name resolves in b through any of
+// the runtime fallbacks expr.ColRef applies: exact match, qualifier-strip
+// ("t.col" → "col"), or ROW-field access ("attrs.score" → field of ROW
+// column "attrs"). Used to distinguish a typo (error) from a projection
+// the per-row eval path can serve.
+func plainColumnReachable(b *batch.RecordBatch, name string) bool {
+	if b.ColumnIndex(name) >= 0 {
+		return true
+	}
+	dot := strings.IndexByte(name, '.')
+	if dot <= 0 {
+		return false
+	}
+	if b.ColumnIndex(name[dot+1:]) >= 0 {
+		return true
+	}
+	if pi := b.ColumnIndex(name[:dot]); pi >= 0 && b.Columns[pi].Type == batch.TypeRow {
+		return true
+	}
+	return false
+}
 
 // Clone returns a new Project that shares the same (immutable) projections.
 // Each clone gets its own pool (created lazily on first Execute).

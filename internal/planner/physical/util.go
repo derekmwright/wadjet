@@ -196,7 +196,11 @@ func readBatchDirect(pqReader *parquet.Reader, schema []parquet.Column, required
 // which handles nested types (LIST, MAP, STRUCT) natively. Used as fallback
 // when the schema contains nested columns.
 func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, requiredCols []string) *batch.RecordBatch {
-	selectedCols := requiredCols
+	// Dotted ROW-field references require their parent column — see
+	// buildReadSchema (issue #147). ReadRows matches file columns by
+	// exact name, so "attrs.score" must become "attrs" here or the
+	// parent is never read and every downstream field access is NULL.
+	selectedCols := expandRowFieldRequirements(schema, requiredCols)
 	if len(selectedCols) == 0 {
 		selectedCols = make([]string, len(schema))
 		for i, c := range schema {
@@ -210,9 +214,9 @@ func readBatchViaRows(pqReader *parquet.Reader, schema []parquet.Column, require
 
 	// Build the read schema (only columns we're reading)
 	readSchema := schema
-	if len(requiredCols) > 0 {
-		needed := make(map[string]bool, len(requiredCols))
-		for _, c := range requiredCols {
+	if len(selectedCols) > 0 {
+		needed := make(map[string]bool, len(selectedCols))
+		for _, c := range selectedCols {
 			needed[c] = true
 		}
 		filtered := make([]parquet.Column, 0, len(requiredCols))
@@ -920,12 +924,22 @@ func buildReadSchema(schema []parquet.Column, requiredCols []string) []parquet.C
 		return schema
 	}
 	needed := make(map[string]bool, len(requiredCols))
+	// Dotted references: "attrs.score" must pull in the parent column when
+	// the qualifier names a ROW column ("attrs"), or the field access in a
+	// downstream filter/projection silently evaluated NULL because the
+	// parent was pruned from the scan (issue #147). Qualifiers that are
+	// table aliases ("lineitem.l_quantity") never match a column name, so
+	// this adds nothing for them.
+	prefixNeeded := make(map[string]bool, 2)
 	for _, c := range requiredCols {
 		needed[c] = true
+		if dot := strings.IndexByte(c, '.'); dot > 0 {
+			prefixNeeded[c[:dot]] = true
+		}
 	}
 	filtered := make([]parquet.Column, 0, len(requiredCols))
 	for _, col := range schema {
-		if needed[col.Name] {
+		if needed[col.Name] || (prefixNeeded[col.Name] && col.Type == parquet.TypeRow) {
 			filtered = append(filtered, col)
 		}
 	}
@@ -933,4 +947,33 @@ func buildReadSchema(schema []parquet.Column, requiredCols []string) []parquet.C
 		return filtered
 	}
 	return schema
+}
+
+// expandRowFieldRequirements rewrites required column names of the form
+// "parent.field" to "parent" when parent names a ROW column in schema, so
+// row-level readers (which match by exact name) pull the parent in.
+// Non-matching entries pass through unchanged.
+func expandRowFieldRequirements(schema []parquet.Column, requiredCols []string) []string {
+	if len(requiredCols) == 0 {
+		return requiredCols
+	}
+	rowCols := make(map[string]bool, 2)
+	for _, col := range schema {
+		if col.Type == parquet.TypeRow {
+			rowCols[col.Name] = true
+		}
+	}
+	out := make([]string, 0, len(requiredCols))
+	seen := make(map[string]bool, len(requiredCols))
+	for _, c := range requiredCols {
+		name := c
+		if dot := strings.IndexByte(c, '.'); dot > 0 && rowCols[c[:dot]] {
+			name = c[:dot]
+		}
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
 }
