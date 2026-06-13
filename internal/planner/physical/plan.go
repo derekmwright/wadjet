@@ -6160,6 +6160,19 @@ func flattenAnds(e expr.Expr) []expr.Expr {
 }
 
 // extractFilterOps recursively extracts vectorizable filter ops from AND combinations.
+// kernelFilterWithRowFallback builds a typed kernel filter; for dotted
+// column names ("attrs.score") it attaches the compiled comparison as a
+// row-at-a-time fallback so ROW-field access works (the kernel resolves
+// qualified table refs by stripping the prefix, but cannot reach into ROW
+// children — issue #147).
+func kernelFilterWithRowFallback(name string, op exec.CompareOp, val any, cmp expr.Expr) *exec.KernelFilter {
+	kf := exec.NewKernelFilter(name, op, val)
+	if strings.Contains(name, ".") {
+		kf.RowFallback = wrapPredicate(cmp)
+	}
+	return kf
+}
+
 func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 	switch v := e.(type) {
 	case *expr.Cmp:
@@ -6167,39 +6180,50 @@ func extractFilterOps(e expr.Expr) []exec.UnaryOperator {
 		// col op col
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
+				if strings.Contains(lc.Name, ".") || strings.Contains(rc.Name, ".") {
+					// Possible ROW-field access — the col-col kernel can't
+					// evaluate it; leave this comparison row-at-a-time.
+					return nil
+				}
 				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
 			}
 		}
 		// col op const
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{exec.NewKernelFilter(lc.Name, op, lit.Val)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit.Val, v)}
 			}
 		}
 		// const op col → flip
 		if lit, lok := v.Left.(*expr.Lit); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
-				return []exec.UnaryOperator{exec.NewKernelFilter(rc.Name, flipOp(op), lit.Val)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(rc.Name, flipOp(op), lit.Val, v)}
 			}
 		}
 	case *expr.CmpInt64:
 		op := cmpToExecOp(v.Op)
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
+				if strings.Contains(lc.Name, ".") || strings.Contains(rc.Name, ".") {
+					return nil
+				}
 				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
 			}
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{exec.NewKernelFilter(lc.Name, op, lit.Val)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit.Val, v)}
 			}
 		}
 	case *expr.CmpFloat64:
 		op := cmpToExecOp(v.Op)
 		if lc, lok := v.Left.(*expr.ColRef); lok {
 			if rc, rok := v.Right.(*expr.ColRef); rok {
+				if strings.Contains(lc.Name, ".") || strings.Contains(rc.Name, ".") {
+					return nil
+				}
 				return []exec.UnaryOperator{exec.NewColColFilter(lc.Name, rc.Name, op)}
 			}
 			if lit, rok := v.Right.(*expr.Lit); rok {
-				return []exec.UnaryOperator{exec.NewKernelFilter(lc.Name, op, lit.Val)}
+				return []exec.UnaryOperator{kernelFilterWithRowFallback(lc.Name, op, lit.Val, v)}
 			}
 		}
 	case *expr.And:
