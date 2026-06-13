@@ -159,7 +159,13 @@ func setupTPCHDistributedAtScale(t *testing.T, sf tpch.ScaleFactor) (context.Con
 			// too so tests exercise the same code path.
 			SpillDir: t.TempDir(),
 		}, store, nc, js, logger)
-		if err := w.Start(ctx); err != nil {
+		// Workers must outlive the setup/query ctx: tying taskLoop to a
+		// short-lived ctx silently killed task consumption mid-test once
+		// the deadline passed (issue #143 — the -race "deadlock" was the
+		// worker dying at setupDistributed\'s 30s timeout).
+		workerCtx, workerCancel := context.WithCancel(context.Background())
+		t.Cleanup(workerCancel)
+		if err := w.Start(workerCtx); err != nil {
 			t.Fatalf("starting worker %d: %v", i, err)
 		}
 		t.Cleanup(w.Stop)
@@ -322,7 +328,13 @@ func setupTPCHDistributed(t *testing.T) (context.Context, *Coordinator) {
 			// tests too so cache pre-scans exercise the production path.
 			SpillDir: t.TempDir(),
 		}, store, nc, js, logger)
-		if err := w.Start(ctx); err != nil {
+		// Workers must outlive the setup/query ctx: tying taskLoop to a
+		// short-lived ctx silently killed task consumption mid-test once
+		// the deadline passed (issue #143 — the -race "deadlock" was the
+		// worker dying at setupDistributed\'s 30s timeout).
+		workerCtx, workerCancel := context.WithCancel(context.Background())
+		t.Cleanup(workerCancel)
+		if err := w.Start(workerCtx); err != nil {
 			t.Fatalf("starting worker %d: %v", i, err)
 		}
 		t.Cleanup(w.Stop)
@@ -577,7 +589,13 @@ func setupTPCHDistributedPolars(t *testing.T) (context.Context, *Coordinator) {
 			SpillDir:      t.TempDir(),
 			MemoryBudget:  256 * 1024 * 1024, // small budget so spill paths fire
 		}, store, nc, js, logger)
-		if err := w.Start(ctx); err != nil {
+		// Workers must outlive the setup/query ctx: tying taskLoop to a
+		// short-lived ctx silently killed task consumption mid-test once
+		// the deadline passed (issue #143 — the -race "deadlock" was the
+		// worker dying at setupDistributed\'s 30s timeout).
+		workerCtx, workerCancel := context.WithCancel(context.Background())
+		t.Cleanup(workerCancel)
+		if err := w.Start(workerCtx); err != nil {
 			t.Fatalf("starting worker %d: %v", i, err)
 		}
 		t.Cleanup(w.Stop)
@@ -807,7 +825,13 @@ func TestDistributedTPCHBuildCacheSF100Sample(t *testing.T) {
 			SpillDir:      t.TempDir(),
 			MemoryBudget:  2 * 1024 * 1024 * 1024, // 2 GB per worker
 		}, store, nc, js, logger)
-		if err := w.Start(ctx); err != nil {
+		// Workers must outlive the setup/query ctx: tying taskLoop to a
+		// short-lived ctx silently killed task consumption mid-test once
+		// the deadline passed (issue #143 — the -race "deadlock" was the
+		// worker dying at setupDistributed\'s 30s timeout).
+		workerCtx, workerCancel := context.WithCancel(context.Background())
+		t.Cleanup(workerCancel)
+		if err := w.Start(workerCtx); err != nil {
 			t.Fatalf("worker %d: %v", i, err)
 		}
 		t.Cleanup(w.Stop)
@@ -1002,7 +1026,13 @@ func sf100SampleClusterN(t *testing.T, memoryBudget int64, wantWorkers, maxConcu
 			SpillDir:      t.TempDir(),
 			MemoryBudget:  memoryBudget,
 		}, store, nc, js, logger)
-		if err := w.Start(ctx); err != nil {
+		// Workers must outlive the setup/query ctx: tying taskLoop to a
+		// short-lived ctx silently killed task consumption mid-test once
+		// the deadline passed (issue #143 — the -race "deadlock" was the
+		// worker dying at setupDistributed\'s 30s timeout).
+		workerCtx, workerCancel := context.WithCancel(context.Background())
+		t.Cleanup(workerCancel)
+		if err := w.Start(workerCtx); err != nil {
 			t.Fatalf("worker %d: %v", i, err)
 		}
 		t.Cleanup(w.Stop)

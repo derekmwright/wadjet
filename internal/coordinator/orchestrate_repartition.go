@@ -247,7 +247,7 @@ func (c *Coordinator) runShuffleSide(
 	}, c.logger, stageID)
 	defer c.watchStuckTasks(ctx, retrier)()
 
-	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if unmarshalErr := distributed.Unmarshal(msg.Data, &r); unmarshalErr != nil {
 			return

@@ -109,7 +109,13 @@ func TestGatherBudgetSpill_E2E_RowIdentical(t *testing.T) {
 		MaxConcurrent: 4,
 		CacheBytes:    64 * 1024 * 1024,
 	}, store, nc, js, logger)
-	if err := w.Start(ctx); err != nil {
+	// Workers must outlive the setup/query ctx: tying taskLoop to a
+	// short-lived ctx silently killed task consumption mid-test once
+	// the deadline passed (issue #143 — the -race "deadlock" was the
+	// worker dying at setupDistributed\'s 30s timeout).
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	t.Cleanup(workerCancel)
+	if err := w.Start(workerCtx); err != nil {
 		t.Fatalf("starting worker: %v", err)
 	}
 	t.Cleanup(w.Stop)
