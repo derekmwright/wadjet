@@ -73,21 +73,27 @@ func buildTableFunctionSource(funcName string, args []string, namedArgs map[stri
 	}
 }
 
-// jsonTableFuncSource reads a JSON file (local or HTTP) and produces batches.
-// Uses the direct-to-columnar byte scanner (8x faster, 32x fewer allocs than
-// the row-oriented reader).
+// jsonTableFuncSource reads JSON (local file, glob, or HTTP) and produces
+// batches. Streams through the incremental byte scanner: the previous shape
+// fetched the whole input into heap and then eagerly parsed EVERY batch up
+// front — a second full-size columnar copy held while the raw bytes were
+// still live, ~2-3× the input resident for any pgwire user (issue #130).
 type jsonTableFuncSource struct {
 	path   string
-	reader *jsonreader.ColumnarReader
+	reader *jsonreader.StreamReader
+	closer io.Closer
 }
 
 func (s *jsonTableFuncSource) Init(_ context.Context) error {
-	data, err := fetchData(s.path)
+	rc, err := openData(s.path)
 	if err != nil {
 		return fmt.Errorf("read_json: %w", err)
 	}
-	r, err := jsonreader.NewColumnarReader(data)
+	s.closer = rc
+	r, err := jsonreader.NewStreamReader(rc)
 	if err != nil {
+		rc.Close()
+		s.closer = nil
 		return fmt.Errorf("read_json: parsing: %w", err)
 	}
 	s.reader = r
@@ -98,7 +104,12 @@ func (s *jsonTableFuncSource) Next(_ context.Context) (*batch.RecordBatch, error
 	return s.reader.Next()
 }
 
-func (s *jsonTableFuncSource) Close() error { return nil }
+func (s *jsonTableFuncSource) Close() error {
+	if s.closer != nil {
+		return s.closer.Close()
+	}
+	return nil
+}
 
 // parquetTableFuncSource reads a Parquet file (local or HTTP) and produces batches.
 // Uses readBatchDirect for column-at-a-time page reading (no row reconstruction).
@@ -186,29 +197,19 @@ func (s *csvTableFuncSource) Init(_ context.Context) error {
 		cfg.HasHeader = hdr == "true" || hdr == "TRUE" || hdr == "1"
 	}
 
-	// Use streaming for local non-glob files to avoid loading into memory
-	if !isURL(s.path) && !isGlob(s.path) {
-		f, err := os.Open(s.path)
-		if err != nil {
-			return fmt.Errorf("read_csv: %w", err)
-		}
-		s.closer = f
-		r, err := csvreader.NewStreamReader(f, cfg)
-		if err != nil {
-			f.Close()
-			return fmt.Errorf("read_csv: %w", err)
-		}
-		s.reader = r
-		return nil
-	}
-
-	// Fallback to full read for URLs and globs
-	data, err := fetchData(s.path)
+	// Every source shape streams: local files directly, globs through the
+	// lazy multi-file reader, HTTP straight off the response body. The
+	// URL/glob paths previously buffered the full input (globs 2×) before
+	// the CSV reader saw a byte.
+	rc, err := openData(s.path)
 	if err != nil {
 		return fmt.Errorf("read_csv: %w", err)
 	}
-	r, err := csvreader.NewReader(data, cfg)
+	s.closer = rc
+	r, err := csvreader.NewStreamReader(rc, cfg)
 	if err != nil {
+		rc.Close()
+		s.closer = nil
 		return fmt.Errorf("read_csv: %w", err)
 	}
 	s.reader = r
@@ -226,9 +227,108 @@ func (s *csvTableFuncSource) Close() error {
 	return nil
 }
 
-// fetchData retrieves data from a local file path, glob pattern, or HTTP/HTTPS URL.
-// Glob patterns (e.g., "data/*.json") expand to multiple files whose contents
-// are concatenated.
+// openData opens a local file path, glob pattern, or HTTP/HTTPS URL as a
+// stream. Globs expand to multiple files concatenated lazily (each opened
+// only when the previous is exhausted, with a newline injected between
+// files for JSONL/CSV continuity — same framing fetchGlob produced, without
+// buffering every file at once). The caller owns the ReadCloser.
+func openData(path string) (io.ReadCloser, error) {
+	if isURL(path) {
+		return openHTTP(path)
+	}
+	if isGlob(path) {
+		matches, err := filepath.Glob(path)
+		if err != nil {
+			return nil, fmt.Errorf("glob %s: %w", path, err)
+		}
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("glob %s: no matching files", path)
+		}
+		sort.Strings(matches)
+		return &multiFileReadCloser{paths: matches}, nil
+	}
+	return os.Open(path)
+}
+
+// multiFileReadCloser streams a sorted glob expansion file-by-file. At most
+// one file is open at a time; a '\n' is injected after any file that does
+// not end with one (matching fetchGlob's concatenation framing).
+type multiFileReadCloser struct {
+	paths     []string
+	idx       int
+	cur       *os.File
+	hadData   bool
+	lastByte  byte
+	pendingNL bool
+}
+
+func (m *multiFileReadCloser) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for {
+		if m.pendingNL {
+			m.pendingNL = false
+			p[0] = '\n'
+			return 1, nil
+		}
+		if m.cur == nil {
+			if m.idx >= len(m.paths) {
+				return 0, io.EOF
+			}
+			f, err := os.Open(m.paths[m.idx])
+			if err != nil {
+				return 0, fmt.Errorf("reading %s: %w", m.paths[m.idx], err)
+			}
+			m.idx++
+			m.cur = f
+			m.hadData = false
+		}
+		n, err := m.cur.Read(p)
+		if n > 0 {
+			m.hadData = true
+			m.lastByte = p[n-1]
+			return n, nil
+		}
+		if err == io.EOF || err == nil {
+			m.cur.Close()
+			m.cur = nil
+			if m.hadData && m.lastByte != '\n' {
+				m.pendingNL = true
+			}
+			continue
+		}
+		m.cur.Close()
+		m.cur = nil
+		return 0, err
+	}
+}
+
+func (m *multiFileReadCloser) Close() error {
+	if m.cur != nil {
+		err := m.cur.Close()
+		m.cur = nil
+		return err
+	}
+	return nil
+}
+
+// openHTTP returns the response body as a stream — no io.ReadAll, so a
+// large remote file never lands in heap at once.
+func openHTTP(url string) (io.ReadCloser, error) {
+	store := objstore.NewHTTPStore(objstore.HTTPConfig{})
+	bucket, key := splitURL(url)
+	rc, _, err := store.Get(context.Background(), bucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("fetching %s: %w", url, err)
+	}
+	return rc, nil
+}
+
+// fetchData retrieves data from a local file path, glob pattern, or
+// HTTP/HTTPS URL fully into memory. Only read_parquet still uses this for
+// URLs/globs — parquet needs random access (io.ReaderAt), so buffering is
+// inherent there; JSON/CSV stream via openData.
 func fetchData(path string) ([]byte, error) {
 	if isURL(path) {
 		return fetchHTTP(path)
