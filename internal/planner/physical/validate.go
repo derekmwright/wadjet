@@ -212,6 +212,13 @@ func (b *binder) validateBlock(ctx context.Context, info *plansql.SelectInfo, ou
 	if err := b.checkExpr(info.WhereExpr, resolve); err != nil {
 		return err
 	}
+	// JOIN conditions reference columns from the joined sources (all already in
+	// `resolve`). USING/NATURAL/CROSS joins have no CondExpr → skipped.
+	for i := range info.Joins {
+		if err := b.checkExpr(info.Joins[i].CondExpr, resolve); err != nil {
+			return err
+		}
+	}
 	// SELECT expressions (skip stars and window functions — window outputs and
 	// star expansion add no enumerable refs the binder can reason about safely).
 	for i := range info.Columns {
@@ -390,6 +397,9 @@ func (b *binder) blockSubqueries(info *plansql.SelectInfo) []string {
 	for i := range info.Columns {
 		walkExpr(info.Columns[i].ASTExpr, nil, &subs)
 		walkExpr(info.Columns[i].AggArgExpr, nil, &subs)
+	}
+	for i := range info.Joins {
+		walkExpr(info.Joins[i].CondExpr, nil, &subs)
 	}
 	return subs
 }
