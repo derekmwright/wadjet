@@ -21,7 +21,11 @@ func setupDistributed(t *testing.T) (context.Context, *Coordinator, objstore.Sto
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	lvl := slog.LevelWarn
+	if os.Getenv("WADJET_TEST_LOG") == "info" {
+		lvl = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl}))
 
 	// Start embedded NATS with temp storage dir
 	natsCfg := distributed.DefaultNATSConfig()
@@ -71,7 +75,13 @@ func setupDistributed(t *testing.T) (context.Context, *Coordinator, objstore.Sto
 		MaxConcurrent: 4,
 		CacheBytes:    64 * 1024 * 1024,
 	}, store, nc, js, logger)
-	if err := w.Start(ctx); err != nil {
+	// Workers must outlive the setup/query ctx: tying taskLoop to a
+	// short-lived ctx silently killed task consumption mid-test once
+	// the deadline passed (issue #143 — the -race "deadlock" was the
+	// worker dying at setupDistributed\'s 30s timeout).
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	t.Cleanup(workerCancel)
+	if err := w.Start(workerCtx); err != nil {
 		t.Fatalf("starting worker: %v", err)
 	}
 	t.Cleanup(w.Stop)
@@ -294,7 +304,13 @@ func setupDistributedWithBudget(t *testing.T, memBudget int64, resultStoreBytes 
 		SpillDir:         t.TempDir(),
 		ResultStoreBytes: resultStoreBytes,
 	}, store, nc, js, logger)
-	if err := w.Start(ctx); err != nil {
+	// Workers must outlive the setup/query ctx: tying taskLoop to a
+	// short-lived ctx silently killed task consumption mid-test once
+	// the deadline passed (issue #143 — the -race "deadlock" was the
+	// worker dying at setupDistributed\'s 30s timeout).
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	t.Cleanup(workerCancel)
+	if err := w.Start(workerCtx); err != nil {
 		t.Fatalf("starting worker: %v", err)
 	}
 	t.Cleanup(w.Stop)
