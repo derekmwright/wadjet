@@ -81,6 +81,9 @@ func TestValidateColumns(t *testing.T) {
 		{"join bare cols valid", "SELECT id, val FROM events JOIN other ON id = eid", false},
 		{"join qualified valid", "SELECT a.id, b.val FROM events a JOIN other b ON a.id = b.eid", false},
 		{"join bare typo", "SELECT id, badcol FROM events a JOIN other b ON a.id = b.eid", true},
+		{"join condition typo", "SELECT a.id FROM events a JOIN other b ON a.id = b.nope", true},
+		{"join condition valid", "SELECT a.id FROM events a JOIN other b ON a.id = b.eid", false},
+		{"join condition subquery typo", "SELECT a.id FROM events a JOIN other b ON a.id = b.eid AND a.amount > (SELECT max(nope) FROM other)", true},
 
 		// --- open schema (escape hatch) ---
 		{"unregistered table is open", "SELECT anything FROM mystery_table", false},
