@@ -95,3 +95,52 @@ func TestRowFieldResolutionAndFilterStrictness(t *testing.T) {
 		}
 	})
 }
+
+// TestPlanTimeColumnValidation covers the #147 remainder: plan-time name
+// binding that rejects unknown columns beyond the single-table WHERE case —
+// notably the SELECT-list (legacy projection) path that previously emitted an
+// all-NULL column, plus GROUP BY / ORDER BY — while never rejecting a valid
+// query (the false-positive guard for dotted ROW access and ordinary refs).
+func TestPlanTimeColumnValidation(t *testing.T) {
+	ctx := context.Background()
+	db, _ := ndOpen(t)
+
+	t.Run("select_list_typo_errors", func(t *testing.T) {
+		_, err := db.Query(ctx, `SELECT nosuchcol FROM events`)
+		if err == nil {
+			t.Fatal("typo'd SELECT column must error at plan time, not project all-NULL")
+		}
+		if !strings.Contains(err.Error(), "nosuchcol") {
+			t.Fatalf("error should name the column: %v", err)
+		}
+	})
+
+	t.Run("group_by_typo_errors", func(t *testing.T) {
+		if _, err := db.Query(ctx, `SELECT count(*) FROM events GROUP BY nope`); err == nil {
+			t.Fatal("typo'd GROUP BY column must error")
+		}
+	})
+
+	t.Run("order_by_typo_errors", func(t *testing.T) {
+		if _, err := db.Query(ctx, `SELECT id FROM events ORDER BY nope`); err == nil {
+			t.Fatal("typo'd ORDER BY column must error")
+		}
+	})
+
+	t.Run("dotted_row_select_not_false_positive", func(t *testing.T) {
+		// attrs is a ROW column; attrs.score is field access, not an unknown table.
+		if _, err := db.Query(ctx, `SELECT attrs.score FROM events LIMIT 1`); err != nil {
+			t.Fatalf("dotted ROW access wrongly rejected: %v", err)
+		}
+	})
+
+	t.Run("valid_query_unaffected", func(t *testing.T) {
+		res, err := db.Query(ctx, `SELECT id, grp FROM events WHERE id < 5`)
+		if err != nil {
+			t.Fatalf("valid query rejected: %v", err)
+		}
+		if len(res.Rows) != 5 {
+			t.Fatalf("rows = %d, want 5", len(res.Rows))
+		}
+	})
+}

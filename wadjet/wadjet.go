@@ -240,6 +240,12 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 
 	planner := db.newPlanner()
 
+	// Reject references to columns that resolve to no source (plan-time name
+	// binding) before annotation/optimization rewrite the plan.
+	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
+		return nil, err
+	}
+
 	// Annotate scan columns before ABAC enforcement so column policies can resolve
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 
@@ -301,6 +307,9 @@ func (db *DB) explain(ctx context.Context, parsed *plansql.ParsedQuery) (*QueryR
 	}
 
 	planner := db.newPlanner()
+	if err := planner.ValidateColumns(ctx, selectInfo); err != nil {
+		return nil, err
+	}
 	planner.AnnotateScanColumns(ctx, logicalPlan)
 
 	// ABAC enforcement: inject row filters and column policies at plan level
