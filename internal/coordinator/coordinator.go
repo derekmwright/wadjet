@@ -2048,6 +2048,12 @@ func (c *Coordinator) subscribeResults(ctx context.Context, queryID string, done
 	if perr := sub.SetPendingLimits(coordSubMsgLimit, coordSubByteLimit); perr != nil {
 		c.logger.Warn("failed to bump query-result sub pending limits", "error", perr)
 	}
+	// Propagate the interest to the server before the caller publishes
+	// tasks — see subscribeTaskResults for the lost-result race this
+	// closes (issue #143).
+	if ferr := c.nc.Flush(); ferr != nil {
+		c.logger.Error("failed to flush result subscription", "error", ferr, "subject", subject)
+	}
 
 	c.mu.Lock()
 	cancelCtx, cancel := context.WithCancel(ctx)

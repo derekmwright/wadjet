@@ -122,6 +122,31 @@ func sortKeysEqual(a, b []physical.SortKeySpec) bool {
 	return true
 }
 
+// subscribeTaskResults installs a result-subject subscription AND flushes
+// the connection so the server has registered the interest before the
+// caller publishes the task. Subscribe alone only creates the client-side
+// record; the interest reaches the NATS server on the next flush. Without
+// the explicit flush, a fast worker (in-process at SF0.01, or any worker
+// when the coordinator's flusher loses the scheduling race) can complete
+// the task and publish its result to a raw subject with NO subscriber —
+// the result is dropped, the task finished too fast to ever enter
+// heartbeat liveness (watchStuckTasks has nothing to reap), and the stage
+// idles out after 30 minutes. The race detector's scheduling perturbation
+// made this reliably reachable (issue #143, TestTPCHNativeDAG_SF01 Q04
+// hang), but the window exists in production whenever publish-to-result
+// round-trips beat interest propagation. Mirrors subscribeGather's flush.
+func (c *Coordinator) subscribeTaskResults(subject string, handler nats.MsgHandler) (*nats.Subscription, error) {
+	sub, err := c.nc.Subscribe(subject, handler)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.nc.Flush(); err != nil {
+		sub.Unsubscribe()
+		return nil, fmt.Errorf("flushing subscription %q: %w", subject, err)
+	}
+	return sub, nil
+}
+
 // awaitStageProgress blocks until either every dispatched task has reported
 // a result (signalled via allDone) or progress has stalled for longer than
 // stageIdleTimeout. Each task-completion subscription handler should send
@@ -971,7 +996,7 @@ func (c *Coordinator) materializeReplicate(
 		}
 	}, c.logger, stage.ID)
 	defer c.watchStuckTasks(ctx, retrier)()
-	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
@@ -1374,7 +1399,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 		}
 	}, c.logger, stage.ID)
 	defer c.watchStuckTasks(ctx, retrier)()
-	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
@@ -1635,7 +1660,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 		}
 	}, c.logger, stage.ID)
 	defer c.watchStuckTasks(ctx, retrier)()
-	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
@@ -2101,7 +2126,7 @@ func (c *Coordinator) dispatchComputeStage(
 		}
 	}, c.logger, stage.ID)
 	defer c.watchStuckTasks(ctx, retrier)()
-	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
 			return
@@ -2812,7 +2837,7 @@ func (c *Coordinator) runStageTasks(
 		}
 	}, c.logger, stageLabel)
 	defer c.watchStuckTasks(ctx, retrier)()
-	sub, err := c.nc.Subscribe(subject, func(msg *nats.Msg) {
+	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if uerr := distributed.Unmarshal(msg.Data, &r); uerr != nil {
 			return
