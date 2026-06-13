@@ -3,10 +3,15 @@ package physical
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -622,5 +627,138 @@ func TestSplitURL(t *testing.T) {
 		if b != tt.bucket || k != tt.key {
 			t.Errorf("splitURL(%q) = (%q, %q), want (%q, %q)", tt.url, b, k, tt.bucket, tt.key)
 		}
+	}
+}
+
+// Issue #130 regression tests: read_json/read_csv stream every source shape
+// (the previous shape buffered the whole input — globs twice — and parsed
+// every batch eagerly before the first Next).
+
+func drainTableFunc(t *testing.T, source exec.Source) []map[string]any {
+	t.Helper()
+	var rows []map[string]any
+	for {
+		b, err := source.Next(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b == nil {
+			return rows
+		}
+		rows = append(rows, b.ToRows()...)
+	}
+}
+
+func TestTableFuncReadJSON_GlobStreams(t *testing.T) {
+	dir := t.TempDir()
+	// Three files; the middle one lacks a trailing newline — the lazy
+	// multi-file reader must inject the separator like fetchGlob did.
+	files := map[string]string{
+		"a.json": `{"id":1}` + "\n" + `{"id":2}` + "\n",
+		"b.json": `{"id":3}`, // no trailing newline
+		"c.json": `{"id":4}` + "\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	source, err := buildTableFunctionSource("read_json", []string{filepath.Join(dir, "*.json")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	rows := drainTableFunc(t, source)
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d, want 4 (missing newline injection merges objects or drops a file)", len(rows))
+	}
+	for i, want := range []int64{1, 2, 3, 4} {
+		if rows[i]["id"] != want {
+			t.Fatalf("row %d id = %v, want %d", i, rows[i]["id"], want)
+		}
+	}
+}
+
+func TestTableFuncReadCSV_GlobStreams(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "x1.csv"), []byte("id,name\n1,a\n2,b"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "x2.csv"), []byte("3,c\n4,d\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	source, err := buildTableFunctionSource("read_csv", []string{filepath.Join(dir, "x*.csv")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	rows := drainTableFunc(t, source)
+	if len(rows) != 4 {
+		t.Fatalf("rows = %d, want 4", len(rows))
+	}
+	if fmt.Sprintf("%v", rows[2]["id"]) != "3" || fmt.Sprintf("%v", rows[2]["name"]) != "c" {
+		t.Fatalf("row 2 = %v", rows[2])
+	}
+}
+
+func TestTableFuncReadJSON_HTTPStreams(t *testing.T) {
+	var body strings.Builder
+	for i := 0; i < 3000; i++ {
+		fmt.Fprintf(&body, `{"id":%d,"v":"r%d"}`+"\n", i, i)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.Copy(w, strings.NewReader(body.String()))
+	}))
+	defer srv.Close()
+
+	source, err := buildTableFunctionSource("read_json", []string{srv.URL + "/data.json"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Init(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+
+	rows := drainTableFunc(t, source)
+	if len(rows) != 3000 {
+		t.Fatalf("rows = %d, want 3000", len(rows))
+	}
+	if rows[2999]["id"] != int64(2999) {
+		t.Fatalf("last row = %v", rows[2999])
+	}
+}
+
+func TestMultiFileReadCloser_NewlineFraming(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p1"), []byte("abc"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "p2"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "p3"), []byte("def\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m := &multiFileReadCloser{paths: []string{
+		filepath.Join(dir, "p1"), filepath.Join(dir, "p2"), filepath.Join(dir, "p3"),
+	}}
+	defer m.Close()
+	got, err := io.ReadAll(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// p1 lacks newline → injected; p2 empty → no separator; p3 keeps its own.
+	if string(got) != "abc\ndef\n" {
+		t.Fatalf("framing = %q, want %q", got, "abc\ndef\n")
 	}
 }
