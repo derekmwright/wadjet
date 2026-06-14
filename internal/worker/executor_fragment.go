@@ -986,7 +986,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	)
 	if spec.Type == distributed.OpBroadcastProbe && e.broadcastCache != nil {
 		key := computeBroadcastJoinKey(task.QueryID, spec)
-		built, release, err := e.broadcastCache.Acquire(key, task.QueryID, buildHJ)
+		built, release, err := e.broadcastCache.Acquire(ctx, key, task.QueryID, buildHJ)
 		if err != nil {
 			return nil, nil, err
 		}

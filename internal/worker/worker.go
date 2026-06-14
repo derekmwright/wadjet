@@ -37,6 +37,12 @@ type Config struct {
 	WorkerID         string
 	ClusterID        string // cluster this worker belongs to (for federated routing)
 	MaxConcurrent    int    // max concurrent tasks
+	// MaxTaskDuration caps how long a single task may run before its context
+	// is cancelled, guaranteeing its concurrency slot is eventually released
+	// even if it wedges. The coordinator's per-task DeadlineUnixNano (the
+	// query deadline) takes precedence when supplied; this is the floor for
+	// the gRPC dispatch path when no deadline rides the dispatch. 0 = no cap.
+	MaxTaskDuration  time.Duration
 	CacheBytes       int64  // local LRU cache size
 	MemoryBudget     int64  // per-task memory budget in bytes (0 = unlimited, no spill); used as legacy fallback when SharedPoolBudget is unset
 	SharedPoolBudget int64  // worker-wide memory pool in bytes (0 = derived as MemoryBudget*MaxConcurrent). All concurrent tasks Reserve against this pool; spill triggers fire on cumulative worker pressure.
@@ -78,6 +84,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		MaxConcurrent:    4,
+		MaxTaskDuration:  30 * time.Minute, // matches the coordinator's default query timeout
 		CacheBytes:       256 * 1024 * 1024, // 256 MB
 		ResultStoreBytes: 512 * 1024 * 1024, // 512 MB — avoids S3 round-trips for inter-stage results
 	}
@@ -92,6 +99,10 @@ func DefaultConfig() Config {
 const (
 	poolPressurePullThreshold = 0.70
 	poolPressurePullBackoff   = 100 * time.Millisecond
+	// dispatchBackpressureWarn is how often a saturated worker logs that it is
+	// holding a dispatched task it has no free slot for. Makes a wedged worker
+	// visible in its own logs instead of stalling silently (#101).
+	dispatchBackpressureWarn = 15 * time.Second
 )
 
 type Worker struct {
@@ -144,6 +155,12 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	}
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 4
+	}
+	if cfg.MaxTaskDuration <= 0 {
+		// Floor so a wedged task always releases its slot even when no
+		// per-dispatch deadline rides the task (e.g. the NATS path). Matches
+		// the coordinator's default query timeout.
+		cfg.MaxTaskDuration = 30 * time.Minute
 	}
 	if cfg.CacheBytes <= 0 {
 		cfg.CacheBytes = 256 * 1024 * 1024
@@ -413,9 +430,32 @@ func (w *Worker) Start(ctx context.Context) error {
 		// recv → coord's stream.Send blocks → backpressure propagates.
 		pending := make(chan dataplane.TaskDispatch, w.config.MaxConcurrent)
 		w.dpClient.RegisterDispatchHandler(func(td dataplane.TaskDispatch) {
+			// Fast path: the bounded queue has room.
 			select {
 			case pending <- td:
+				return
 			case <-ctx.Done():
+				return
+			default:
+			}
+			// Queue full — the worker is at MaxConcurrent. We still block (which
+			// applies HTTP/2 flow-control backpressure to coord), but we no
+			// longer do so silently: a worker wedged on stuck tasks used to
+			// swallow the next dispatch with zero visibility, the invisible half
+			// of the Q07 final_aggregate stall (#101). Surface it periodically.
+			warn := time.NewTicker(dispatchBackpressureWarn)
+			defer warn.Stop()
+			for {
+				select {
+				case pending <- td:
+					return
+				case <-ctx.Done():
+					return
+				case <-warn.C:
+					w.logger.Warn("dispatch queue full; worker saturated, holding dispatched task",
+						"task_id", td.TaskID, "query_id", td.QueryID, "stage_id", td.StageID,
+						"max_concurrent", w.config.MaxConcurrent)
+				}
 			}
 		})
 		w.wg.Add(1)
@@ -481,13 +521,33 @@ func (w *Worker) dispatchLoop(ctx context.Context, in <-chan dataplane.TaskDispa
 			// backstop.
 			w.waitForPoolHeadroom(ctx, task.EstimatedBytes)
 			w.wg.Add(1)
-			go func(t distributed.Task) {
+			go func(t distributed.Task, deadlineNano int64) {
 				defer w.wg.Done()
 				defer func() { <-sem }()
-				w.executeIncomingTask(ctx, t, noopAcker{})
-			}(task)
+				// Bound the task's lifetime so a wedged task (e.g. one stranded
+				// on a dependency) always releases its concurrency slot rather
+				// than permanently starving the dispatch loop (#101).
+				taskCtx, cancel := w.taskContext(ctx, deadlineNano)
+				defer cancel()
+				w.executeIncomingTask(taskCtx, t, noopAcker{})
+			}(task, td.DeadlineUnixNano)
 		}
 	}
+}
+
+// taskContext derives the execution context for one dispatched task, applying a
+// deadline so a wedged task always releases its concurrency slot. Precedence:
+// the coordinator-supplied DeadlineUnixNano (the query deadline), then the
+// worker's MaxTaskDuration floor; if neither is set the parent context is used
+// unchanged.
+func (w *Worker) taskContext(parent context.Context, deadlineUnixNano int64) (context.Context, context.CancelFunc) {
+	if deadlineUnixNano > 0 {
+		return context.WithDeadline(parent, time.Unix(0, deadlineUnixNano))
+	}
+	if w.config.MaxTaskDuration > 0 {
+		return context.WithTimeout(parent, w.config.MaxTaskDuration)
+	}
+	return context.WithCancel(parent)
 }
 
 // poolHeadroomMaxWait caps how long dispatchLoop delays a task start while
