@@ -1,10 +1,12 @@
 package worker
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -13,7 +15,7 @@ import (
 func TestBroadcastJoinCache_SingleAcquireRelease(t *testing.T) {
 	c := newBroadcastJoinCache()
 	var built int32
-	hj, release, err := c.Acquire("k1", "q1", func() (*exec.HashJoin, error) {
+	hj, release, err := c.Acquire(context.Background(), "k1", "q1", func() (*exec.HashJoin, error) {
 		atomic.AddInt32(&built, 1)
 		return exec.NewHashJoin(exec.InnerJoin, []string{"a"}, []string{"b"}), nil
 	})
@@ -49,7 +51,7 @@ func TestBroadcastJoinCache_ConcurrentAcquireSharesBuild(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			hj, release, err := c.Acquire("shared-key", "q1", func() (*exec.HashJoin, error) {
+			hj, release, err := c.Acquire(context.Background(), "shared-key", "q1", func() (*exec.HashJoin, error) {
 				atomic.AddInt32(&built, 1)
 				return exec.NewHashJoin(exec.InnerJoin, []string{"a"}, []string{"b"}), nil
 			})
@@ -98,7 +100,7 @@ func TestBroadcastJoinCache_ConcurrentAcquireSharesBuild(t *testing.T) {
 func TestBroadcastJoinCache_BuilderErrorDoesNotLeak(t *testing.T) {
 	c := newBroadcastJoinCache()
 	wantErr := errors.New("build failed")
-	hj, release, err := c.Acquire("k1", "q1", func() (*exec.HashJoin, error) {
+	hj, release, err := c.Acquire(context.Background(), "k1", "q1", func() (*exec.HashJoin, error) {
 		return nil, wantErr
 	})
 	if !errors.Is(err, wantErr) {
@@ -115,6 +117,96 @@ func TestBroadcastJoinCache_BuilderErrorDoesNotLeak(t *testing.T) {
 	}
 }
 
+// TestBroadcastJoinCache_BuilderPanicDoesNotStrandWaiters is the #101
+// regression: a panic inside build() must not leave e.ready unclosed. Before
+// the fix, the panic unwound past close(e.ready), so every concurrent waiter
+// blocked on <-e.ready forever — each holding a worker concurrency slot, which
+// eventually wedged the worker's task intake (the Q07 final_aggregate stall).
+func TestBroadcastJoinCache_BuilderPanicDoesNotStrandWaiters(t *testing.T) {
+	c := newBroadcastJoinCache()
+	const waiters = 4
+	var wg sync.WaitGroup
+	builderEntered := make(chan struct{})
+	panicNow := make(chan struct{})
+
+	// Builder enters build(), then blocks until we trigger the panic — this
+	// holds the entry un-ready so the waiters below deterministically attach
+	// and block on <-e.ready (the exact scenario the bug stranded forever).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _, err := c.Acquire(context.Background(), "boom", "q1", func() (*exec.HashJoin, error) {
+			close(builderEntered)
+			<-panicNow
+			panic("simulated build panic")
+		})
+		if err == nil {
+			t.Error("builder Acquire should return an error after a build panic")
+		}
+	}()
+	<-builderEntered
+
+	for i := 0; i < waiters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Must not hang. Whichever way it returns — inheriting the builder's
+			// error, or (if it lands after eviction) succeeding as a fresh
+			// builder — it MUST return rather than strand on e.ready.
+			_, release, _ := c.Acquire(context.Background(), "boom", "q1", func() (*exec.HashJoin, error) {
+				return exec.NewHashJoin(exec.InnerJoin, []string{"a"}, []string{"b"}), nil
+			})
+			if release != nil {
+				release()
+			}
+		}()
+	}
+	// Give the waiters a moment to attach to the in-flight entry, then panic.
+	time.Sleep(25 * time.Millisecond)
+	close(panicNow)
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Acquire waiters hung after a build panic (stranded on e.ready) — #101 regression")
+	}
+	if c.Count() != 0 {
+		t.Errorf("Count=%d, want 0 (poisoned entry must be evicted)", c.Count())
+	}
+}
+
+// TestBroadcastJoinCache_WaiterContextCancel verifies a waiter abandons its
+// block (and releases its refcount/slot) when its context is cancelled, so a
+// build that hangs can never strand a deadlined probe task.
+func TestBroadcastJoinCache_WaiterContextCancel(t *testing.T) {
+	c := newBroadcastJoinCache()
+	builderBlock := make(chan struct{})
+	builderEntered := make(chan struct{})
+
+	go func() {
+		// Builder holds the entry un-ready until we let it finish, after the
+		// waiter has already given up.
+		_, _, _ = c.Acquire(context.Background(), "slow", "q1", func() (*exec.HashJoin, error) {
+			close(builderEntered)
+			<-builderBlock
+			return exec.NewHashJoin(exec.InnerJoin, []string{"a"}, []string{"b"}), nil
+		})
+	}()
+	<-builderEntered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := c.Acquire(ctx, "slow", "q1", func() (*exec.HashJoin, error) {
+		return exec.NewHashJoin(exec.InnerJoin, []string{"a"}, []string{"b"}), nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err=%v, want context.Canceled (waiter must abandon the wait on ctx cancel)", err)
+	}
+	close(builderBlock)
+}
+
 func TestBroadcastJoinCache_CleanupQuery(t *testing.T) {
 	c := newBroadcastJoinCache()
 	// Two distinct broadcasts in q1 (different keys), one in q2.
@@ -124,7 +216,7 @@ func TestBroadcastJoinCache_CleanupQuery(t *testing.T) {
 		{"q2", "q2:a"},
 	}
 	for _, tc := range cases {
-		_, _, err := c.Acquire(tc.k, tc.q, func() (*exec.HashJoin, error) {
+		_, _, err := c.Acquire(context.Background(), tc.k, tc.q, func() (*exec.HashJoin, error) {
 			return exec.NewHashJoin(exec.InnerJoin, []string{"a"}, []string{"b"}), nil
 		})
 		if err != nil {

@@ -96,9 +96,18 @@ type preparedTask struct {
 // via gRPC TaskDispatch (data-plane server) when configured, otherwise
 // falls back to NATS JetStream publish. Tasks are serialized in batch
 // before publishing to minimize time spent holding the transport.
-func (s *Scheduler) PublishTasks(_ context.Context, tasks []distributed.Task) error {
+func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) error {
 	if len(tasks) == 0 {
 		return nil
+	}
+
+	// Carry the query deadline to workers so a dispatched task is bounded by
+	// the same budget the coordinator enforces — a worker that wedges on a
+	// task then releases its slot at the deadline instead of holding it until
+	// the whole query times out (#101). 0 = no deadline rides the dispatch.
+	var deadlineNano int64
+	if dl, ok := ctx.Deadline(); ok {
+		deadlineNano = dl.UnixNano()
 	}
 
 	batch := make([]preparedTask, 0, len(tasks))
@@ -122,7 +131,7 @@ func (s *Scheduler) PublishTasks(_ context.Context, tasks []distributed.Task) er
 	}
 
 	if s.dpSrv != nil {
-		return s.publishViaDataPlane(batch)
+		return s.publishViaDataPlane(batch, deadlineNano)
 	}
 
 	// Publish all pre-serialized messages
@@ -146,20 +155,20 @@ func (s *Scheduler) PublishTasks(_ context.Context, tasks []distributed.Task) er
 // Send blocks on HTTP/2 flow control when a worker is saturated, applying
 // backpressure to the scheduler. The full set is rejected if no worker
 // is connected — there is no NATS fallback in gRPC mode.
-func (s *Scheduler) publishViaDataPlane(batch []preparedTask) error {
+func (s *Scheduler) publishViaDataPlane(batch []preparedTask, deadlineNano int64) error {
 	for _, p := range batch {
 		workerID, ok := s.pickWorkerFor(p.task)
 		if !ok {
 			return fmt.Errorf("dispatching task %s: %w", p.task.ID, dataplane.ErrNoWorkers)
 		}
-		if err := s.dpSrv.SendTaskDispatch(workerID, p.task.ID, p.task.QueryID, p.task.StageID, p.data, 0); err != nil {
+		if err := s.dpSrv.SendTaskDispatch(workerID, p.task.ID, p.task.QueryID, p.task.StageID, p.data, deadlineNano); err != nil {
 			if errors.Is(err, dataplane.ErrNotConnected) {
 				// Worker dropped between Pick and Send; one retry on the
 				// next round-robin position keeps the path lossless when
 				// the cluster has more than one worker.
 				workerID2, ok2 := s.dpSrv.PickWorker()
 				if ok2 && workerID2 != workerID {
-					if err2 := s.dpSrv.SendTaskDispatch(workerID2, p.task.ID, p.task.QueryID, p.task.StageID, p.data, 0); err2 == nil {
+					if err2 := s.dpSrv.SendTaskDispatch(workerID2, p.task.ID, p.task.QueryID, p.task.StageID, p.data, deadlineNano); err2 == nil {
 						s.noteInflight(p.task, workerID2)
 						continue
 					}

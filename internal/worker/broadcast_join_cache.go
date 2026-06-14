@@ -1,9 +1,11 @@
 package worker
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"runtime/debug"
 	"sort"
 	"sync"
 
@@ -76,12 +78,22 @@ func computeBroadcastJoinKey(queryID string, spec distributed.OpSpec) string {
 //
 // On builder error the entry is evicted before this call returns; the caller
 // receives (nil, nil, err) and must NOT call release.
-func (c *broadcastJoinCache) Acquire(key, queryID string, build func() (*exec.HashJoin, error)) (*exec.HashJoin, func(), error) {
+//
+// ctx cancellation aborts a waiter's block on the builder (it releases its
+// refcount and returns ctx.Err()), so a cancelled or deadlined probe task can
+// never strand a goroutine — or its concurrency slot — on a build that hangs.
+func (c *broadcastJoinCache) Acquire(ctx context.Context, key, queryID string, build func() (*exec.HashJoin, error)) (*exec.HashJoin, func(), error) {
 	c.mu.Lock()
 	if e, ok := c.entries[key]; ok {
 		e.refcount++
 		c.mu.Unlock()
-		<-e.ready
+		select {
+		case <-e.ready:
+		case <-ctx.Done():
+			// Abandon the wait without leaking the refcount we just claimed.
+			c.release(key)
+			return nil, nil, ctx.Err()
+		}
 		if e.err != nil {
 			// The builder failed; this waiter inherits the error and decrements
 			// the refcount it just claimed. When refcount hits zero the entry
@@ -100,7 +112,12 @@ func (c *broadcastJoinCache) Acquire(key, queryID string, build func() (*exec.Ha
 	c.entries[key] = e
 	c.mu.Unlock()
 
-	hj, err := build()
+	// buildGuarded converts a panic in build() into an error so the path below
+	// ALWAYS reaches close(e.ready). A panic that unwound past close() would
+	// strand every concurrent and future waiter on this key forever (each
+	// holding a worker concurrency slot) — the root of the Q07 final_aggregate
+	// stall (#101).
+	hj, err := buildGuarded(build)
 
 	c.mu.Lock()
 	e.hj = hj
@@ -115,6 +132,19 @@ func (c *broadcastJoinCache) Acquire(key, queryID string, build func() (*exec.Ha
 		return nil, nil, err
 	}
 	return hj, c.releaseFnFor(key), nil
+}
+
+// buildGuarded runs build, recovering a panic into an error (with stack) so the
+// caller can always signal completion to waiters. The panicking builder task
+// then fails cleanly via the normal error path instead of stranding waiters.
+func buildGuarded(build func() (*exec.HashJoin, error)) (hj *exec.HashJoin, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			hj = nil
+			err = fmt.Errorf("broadcast build panicked: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return build()
 }
 
 func (c *broadcastJoinCache) releaseFnFor(key string) func() {
