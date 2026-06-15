@@ -219,21 +219,25 @@ func TestPartitionOnArrival_ConcurrentBuildsSharedPool(t *testing.T) {
 	}
 
 	tmpDir := t.TempDir()
-	// Tight budget that exercises cross-operator cooperative spill: each
-	// join's full build is ~3 MB; the shared budget below forces both
-	// joins to give up partition data they hold so the other can make
-	// Reserve progress. Without the cooperative-spill advisor (B), this
-	// budget deadlocks because each join only spills its own partitions
-	// and one mid-build join holding the pool starves the other.
+	// Budget that exercises cross-operator cooperative spill: each concurrent
+	// build ends at ~1.23 MB tracked (≈2.46 MB combined), so a shared budget
+	// below the combined footprint forces at least one join to give up
+	// partition data mid-build so the other can make Reserve progress. Without
+	// the cooperative-spill advisor (B), this deadlocks because each join only
+	// spills its own partitions and one mid-build join holding the pool starves
+	// the other.
 	//
-	// Budget chosen with headroom for the case where one join finishes
-	// build first and its hash-table overhead remains in the tracker
-	// (released only on Close, not Build completion) while the other
-	// join is still ingesting. Under -race the scheduling exposes this
-	// window — without the headroom, the still-building join can't
-	// reserve even after the cooperative-spill round because the now-
-	// deregistered peer's residual overhead is no longer reclaimable.
-	sharedTracker := memory.NewTracker("shared", 1_600_000)
+	// The budget MUST clear a specific transient: once one join finishes its
+	// build, its full tracked memory (~1.23 MB) stays pinned until Close (not
+	// Build completion) and is NOT reclaimable by cooperative spill (a finished
+	// peer won't spill). The still-building join must then fit its next batch
+	// reservation (~0.15 MB) on top of that pinned residual via the strict
+	// path. So the floor is ~1.23 MB + 0.15 MB ≈ 1.4 MB. The old 1.6 MB left
+	// only ~0.15 MB of slack there, which CI's slower scheduling intermittently
+	// tripped ("memory budget exceeded", #155). 2.0 MB keeps the budget below
+	// the ~2.46 MB combined footprint (spill still forced) while giving ~0.6 MB
+	// of headroom over that transient.
+	sharedTracker := memory.NewTracker("shared", 2_000_000)
 	sm, err := memory.NewSpillManager(tmpDir, sharedTracker)
 	if err != nil {
 		t.Fatal(err)
