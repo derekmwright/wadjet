@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -1512,61 +1513,107 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 	// materializing a []any per group. The source row's typed values are
 	// copied out at finalize time (one type-switch per group, not per row),
 	// avoiding the boxing allocation that dominated GC pressure at SF100.
+	// rank is the global flat-row index of the group's first occurrence; it
+	// reproduces the sequential insertion order after the parallel merge.
 	type mergedRow struct {
 		sourceBatch *batch.RecordBatch
 		sourceRow   int
 		aggVals     []float64
+		rank        int
 	}
-	groups := make(map[string]*mergedRow)
-	var groupOrder []string // preserve insertion order
 
-	keyBuf := make([]byte, 0, 256)
+	// Per-batch global row offset, so a group's first-occurrence position has a
+	// single monotonic index across all batches.
+	totalRows := 0
+	batchStart := make([]int, len(batches))
+	for i, b := range batches {
+		batchStart[i] = totalRows
+		totalRows += b.ActiveLen()
+	}
 
-	for _, b := range batches {
-		nRows := b.ActiveLen()
-		sel := b.Sel
-		for ri := 0; ri < nRows; ri++ {
-			row := ri
-			if sel != nil {
-				row = int(sel[ri])
-			}
-
-			keyBuf = keyBuf[:0]
-			for gi, enc := range keyEncoders {
-				if gi > 0 {
-					keyBuf = append(keyBuf, 0)
+	// accumulate folds one source row into a shard-local group map, identical
+	// for the serial and parallel paths. `owns` decides whether this scanner
+	// owns the row's key (always true for the single-shard serial path); when
+	// it returns false the row is skipped so another shard handles it.
+	accumulate := func(groups map[string]*mergedRow, ordered *[]*mergedRow, keyBuf []byte, owns func(key []byte) bool) []byte {
+		for bi, b := range batches {
+			nRows := b.ActiveLen()
+			sel := b.Sel
+			for ri := 0; ri < nRows; ri++ {
+				row := ri
+				if sel != nil {
+					row = int(sel[ri])
 				}
-				keyBuf = enc(b, row, keyBuf)
-			}
-			key := string(keyBuf)
-
-			mr, exists := groups[key]
-			if !exists {
-				aggVals := make([]float64, len(aggCols))
+				keyBuf = keyBuf[:0]
+				for gi, enc := range keyEncoders {
+					if gi > 0 {
+						keyBuf = append(keyBuf, 0)
+					}
+					keyBuf = enc(b, row, keyBuf)
+				}
+				if owns != nil && !owns(keyBuf) {
+					continue
+				}
+				key := string(keyBuf)
+				mr, exists := groups[key]
+				if !exists {
+					aggVals := make([]float64, len(aggCols))
+					for ai, ext := range aggExtractors {
+						aggVals[ai] = ext(b, row)
+					}
+					mr = &mergedRow{sourceBatch: b, sourceRow: row, aggVals: aggVals, rank: batchStart[bi] + ri}
+					groups[key] = mr
+					*ordered = append(*ordered, mr)
+					continue
+				}
 				for ai, ext := range aggExtractors {
-					aggVals[ai] = ext(b, row)
+					mr.aggVals[ai] = aggCols[ai].mergeFn(mr.aggVals[ai], ext(b, row))
 				}
-				groups[key] = &mergedRow{
-					sourceBatch: b,
-					sourceRow:   row,
-					aggVals:     aggVals,
-				}
-				groupOrder = append(groupOrder, key)
-				continue
-			}
-
-			for ai, ext := range aggExtractors {
-				mr.aggVals[ai] = aggCols[ai].mergeFn(mr.aggVals[ai], ext(b, row))
 			}
 		}
+		return keyBuf
+	}
+
+	var ordered []*mergedRow
+	shards := mergeShardCount(totalRows)
+	if shards <= 1 {
+		groups := make(map[string]*mergedRow)
+		accumulate(groups, &ordered, make([]byte, 0, 256), nil)
+	} else {
+		// Parallel key-sharded merge. Each worker scans ALL rows in global
+		// order but accumulates only keys it owns (hash(key)%shards == w).
+		// Because every key lives in exactly one shard and is accumulated in
+		// global (batch,row) order, per-key SUM/MIN/MAX order is identical to
+		// the serial path → byte-identical float results. Group output order is
+		// restored below by sorting on the global first-occurrence rank.
+		shardOrdered := make([][]*mergedRow, shards)
+		var wg sync.WaitGroup
+		for w := 0; w < shards; w++ {
+			wg.Add(1)
+			go func(w int) {
+				defer wg.Done()
+				groups := make(map[string]*mergedRow)
+				var local []*mergedRow
+				accumulate(groups, &local, make([]byte, 0, 256), func(key []byte) bool {
+					return mergeShardOf(key, shards) == w
+				})
+				shardOrdered[w] = local
+			}(w)
+		}
+		wg.Wait()
+		for w := 0; w < shards; w++ {
+			ordered = append(ordered, shardOrdered[w]...)
+		}
+		// ranks are unique (each group first-occurs at a distinct global row),
+		// so this reproduces the exact sequential insertion order.
+		slices.SortFunc(ordered, func(a, b *mergedRow) int { return a.rank - b.rank })
 	}
 
 	// Build result batch from merged groups. Group-by values are copied
 	// directly from the captured source batch+row using typed copy
 	// helpers — this is one type-switch per (group, column), not per row.
-	result := batch.NewRecordBatch(schema, len(groupOrder))
-	for ri, key := range groupOrder {
-		mr := groups[key]
+	result := batch.NewRecordBatch(schema, len(ordered))
+	for ri, mr := range ordered {
 		for _, ci := range groupByIdx {
 			copyVectorValue(result.Columns[ci], ri, mr.sourceBatch.Columns[ci], mr.sourceRow, schema[ci].Type)
 		}
@@ -1585,9 +1632,41 @@ func (c *Coordinator) reAggregatePartials(batches []*batch.RecordBatch, columns 
 			}
 		}
 	}
-	result.Len = len(groupOrder)
+	result.Len = len(ordered)
 
 	return []*batch.RecordBatch{result}
+}
+
+// parallelMergeMinRows is the partial-row count below which reAggregatePartials
+// stays single-threaded — goroutine setup isn't worth it for small merges.
+const parallelMergeMinRows = 8192
+
+// mergeShardCount returns how many parallel shards reAggregatePartials should
+// use for a merge of totalRows partial rows: 1 (serial) below the threshold or
+// on a single core, otherwise GOMAXPROCS.
+func mergeShardCount(totalRows int) int {
+	if totalRows < parallelMergeMinRows {
+		return 1
+	}
+	n := runtime.GOMAXPROCS(0)
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// mergeShardOf maps a group key to one of `shards` shards via FNV-1a. It is a
+// pure function of the key bytes, so a key's rows are always owned by the same
+// shard — required for byte-identical per-key accumulation order. The shard
+// assignment itself does not affect results (output is rank-sorted and per-key
+// accumulation is global-order regardless of which shard owns the key).
+func mergeShardOf(key []byte, shards int) int {
+	var h uint64 = 1469598103934665603
+	for _, c := range key {
+		h ^= uint64(c)
+		h *= 1099511628211
+	}
+	return int(h % uint64(shards))
 }
 
 // copyVectorValue copies a single typed value from src[srcRow] to dst[dstRow].
