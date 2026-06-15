@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -817,7 +818,62 @@ func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.Ha
 // buildUnaryChain builds and inits each unary op in specs. Returns a single
 // cleanup that closes every op (and any owned resources like build-side hash
 // tables) in reverse order.
+//
+// The expensive specs are hash-join probes, whose builds read independent
+// build-side inputs. We build them CONCURRENTLY (bounded) rather than
+// sequentially: in a multi-way join fragment each join's hashtable build is
+// independent, so overlapping them cuts build latency (#23). This mirrors what
+// the single-process planner already does (build goroutine overlapped with
+// probe-side preparation in physical.buildJoin). It's byte-identical: each
+// hashtable is still built by a single goroutine exactly as before — only the
+// builds of *different* joins overlap. The shared spill manager + tracker
+// already support concurrent Build via cooperative spill, and the broadcast
+// cache dedups concurrent Acquire. Op order and cleanup order are preserved by
+// indexing into a per-spec result slice.
 func (e *Executor) buildUnaryChain(ctx context.Context, task distributed.Task, specs []distributed.OpSpec) ([]exec.UnaryOperator, func(), error) {
+	type built struct {
+		ops     []exec.UnaryOperator
+		cleanup func()
+	}
+	results := make([]built, len(specs))
+
+	switch len(specs) {
+	case 0:
+		return nil, func() {}, nil
+	case 1:
+		opChain, opCleanup, err := e.buildFragmentUnary(ctx, task, specs[0])
+		if err != nil {
+			return nil, nil, fmt.Errorf("fragment task %s: unary op 0 (%s): %w", task.ID, specs[0].Type, err)
+		}
+		results[0] = built{ops: opChain, cleanup: opCleanup}
+	default:
+		g, gctx := errgroup.WithContext(ctx)
+		if limit := runtime.GOMAXPROCS(0); limit < len(specs) {
+			g.SetLimit(limit)
+		}
+		for i := range specs {
+			i := i
+			g.Go(func() error {
+				opChain, opCleanup, err := e.buildFragmentUnary(gctx, task, specs[i])
+				if err != nil {
+					return fmt.Errorf("fragment task %s: unary op %d (%s): %w", task.ID, i, specs[i].Type, err)
+				}
+				results[i] = built{ops: opChain, cleanup: opCleanup}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			// Release any builds that completed before the failure (reverse order).
+			for j := len(results) - 1; j >= 0; j-- {
+				if results[j].cleanup != nil {
+					results[j].cleanup()
+				}
+			}
+			return nil, nil, err
+		}
+	}
+
+	// Assemble in spec order; Init in order; accumulate cleanups for reverse-order close.
 	var ops []exec.UnaryOperator
 	var cleanups []func()
 	cleanup := func() {
@@ -825,22 +881,17 @@ func (e *Executor) buildUnaryChain(ctx context.Context, task distributed.Task, s
 			cleanups[i]()
 		}
 	}
-	for i, opSpec := range specs {
-		opChain, opCleanup, err := e.buildFragmentUnary(ctx, task, opSpec)
-		if err != nil {
-			cleanup()
-			return nil, nil, fmt.Errorf("fragment task %s: unary op %d (%s): %w", task.ID, i, opSpec.Type, err)
+	for i := range results {
+		if results[i].cleanup != nil {
+			cleanups = append(cleanups, results[i].cleanup)
 		}
-		if opCleanup != nil {
-			cleanups = append(cleanups, opCleanup)
-		}
-		for _, op := range opChain {
+		for _, op := range results[i].ops {
 			if err := op.Init(ctx); err != nil {
 				cleanup()
 				return nil, nil, fmt.Errorf("fragment task %s: unary op %d init: %w", task.ID, i, err)
 			}
 		}
-		ops = append(ops, opChain...)
+		ops = append(ops, results[i].ops...)
 	}
 	return ops, cleanup, nil
 }
