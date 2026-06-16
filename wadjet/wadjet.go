@@ -207,6 +207,8 @@ func (db *DB) Query(ctx context.Context, sql string) (*QueryResult, error) {
 		return db.createTableSQL(ctx, parsed.CreateTable)
 	case plansql.QueryDropTable:
 		return db.dropTableSQL(ctx, parsed.DropTable)
+	case plansql.QueryAnalyzeTable:
+		return db.analyzeTableSQL(ctx, parsed.AnalyzeTable)
 	case plansql.QueryShowTables:
 		return db.showTables(ctx)
 	case plansql.QueryCreateAlert:
@@ -699,6 +701,20 @@ func (db *DB) dropTableSQL(ctx context.Context, dt *plansql.DropTableInfo) (*Que
 	return &QueryResult{
 		Columns: []string{"result"},
 		Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q dropped", dt.Name)}},
+	}, nil
+}
+
+// analyzeTableSQL refreshes the planner's column statistics (per-column HLL NDV
+// + reservoir-sample histograms) for a table by walking its parquet files. The
+// stats engine already exists (catalog.AnalyzeTable); this is its SQL surface.
+func (db *DB) analyzeTableSQL(ctx context.Context, at *plansql.AnalyzeTableInfo) (*QueryResult, error) {
+	n, err := db.catalog.AnalyzeTable(ctx, at.Name)
+	if err != nil {
+		return nil, err
+	}
+	return &QueryResult{
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q analyzed (%d files)", at.Name, n)}},
 	}, nil
 }
 

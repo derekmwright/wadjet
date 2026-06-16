@@ -214,6 +214,27 @@ func TestExtractJoin(t *testing.T) {
 	}
 }
 
+func TestParseAnalyzeTable(t *testing.T) {
+	for _, sql := range []string{"ANALYZE TABLE events", "ANALYZE events", "analyze table events"} {
+		parsed, err := Parse(sql)
+		if err != nil {
+			t.Fatalf("%q: %v", sql, err)
+		}
+		if parsed.Type != QueryAnalyzeTable {
+			t.Fatalf("%q: expected QueryAnalyzeTable, got %v", sql, parsed.Type)
+		}
+		if parsed.AnalyzeTable == nil || parsed.AnalyzeTable.Name != "events" {
+			t.Fatalf("%q: AnalyzeTable = %+v, want Name=events", sql, parsed.AnalyzeTable)
+		}
+	}
+}
+
+func TestParseAnalyzeTableMissingName(t *testing.T) {
+	if _, err := Parse("ANALYZE TABLE"); err == nil {
+		t.Fatal("ANALYZE TABLE without a name must error")
+	}
+}
+
 func TestParseExplain(t *testing.T) {
 	parsed, err := Parse("EXPLAIN SELECT * FROM events WHERE id > 5")
 	if err != nil {

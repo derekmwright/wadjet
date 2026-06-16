@@ -33,6 +33,7 @@ type ParsedQuery struct {
 	DropFunction   *DropFunctionInfo
 	CreateTable    *CreateTableInfo
 	DropTable      *DropTableInfo
+	AnalyzeTable   *AnalyzeTableInfo
 	CreateView     *CreateViewInfo
 	DropView       *DropViewInfo
 	AlterTable     *AlterTableInfo
@@ -145,6 +146,11 @@ type DropTableInfo struct {
 	IfExists bool
 }
 
+// AnalyzeTableInfo holds details for an ANALYZE TABLE statement.
+type AnalyzeTableInfo struct {
+	Name string
+}
+
 // UpdateInfo holds details for an UPDATE statement.
 type UpdateInfo struct {
 	Table      string            // table name
@@ -209,6 +215,7 @@ const (
 	QueryShowFunctions
 	QueryCreateTable
 	QueryDropTable
+	QueryAnalyzeTable
 	QueryShowTables
 	QueryUpdate
 	QueryDelete
@@ -260,6 +267,9 @@ func Parse(sql string) (*ParsedQuery, error) {
 		return parseAlterTable(trimmed, l)
 	case TokenKWMerge:
 		return parseMerge(trimmed, l)
+	case TokenKWAnalyze:
+		l.nextToken() // consume ANALYZE
+		return lexParseAnalyze(trimmed, l)
 	}
 
 	// Pre-parse CTEs — extract WITH ... AS (...) clauses
@@ -683,6 +693,27 @@ func lexParseDropTable(sql string, l *lexer) (*ParsedQuery, error) {
 		DropTable: &DropTableInfo{
 			Name:     tok.val,
 			IfExists: ifExists,
+		},
+	}, nil
+}
+
+// lexParseAnalyze handles: ANALYZE [TABLE] <name>. The leading ANALYZE has
+// already been consumed. The TABLE keyword is optional (ANALYZE foo == ANALYZE
+// TABLE foo). EXPLAIN ANALYZE is a separate path (lexParseExplain) and is not
+// affected — only a statement that STARTS with ANALYZE reaches here.
+func lexParseAnalyze(sql string, l *lexer) (*ParsedQuery, error) {
+	tok := l.nextToken()
+	if tok.typ == TokenKWTable {
+		tok = l.nextToken()
+	}
+	if tok.typ != TokenIdent {
+		return nil, fmt.Errorf("ANALYZE: table name is required")
+	}
+	return &ParsedQuery{
+		Type: QueryAnalyzeTable,
+		SQL:  sql,
+		AnalyzeTable: &AnalyzeTableInfo{
+			Name: tok.val,
 		},
 	}, nil
 }
