@@ -272,6 +272,12 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Handle ANALYZE TABLE
+	if parsed.Type == plansql.QueryAnalyzeTable {
+		s.handleAnalyzeTableSQL(w, r, parsed, start)
+		return
+	}
+
 	// Handle SHOW TABLES
 	if parsed.Type == plansql.QueryShowTables {
 		s.handleShowTables(w, r, start)
@@ -1365,6 +1371,33 @@ func (s *Server) handleCreateTableSQL(w http.ResponseWriter, r *http.Request, pa
 }
 
 // handleDropTableSQL handles DROP TABLE via SQL.
+// handleAnalyzeTableSQL refreshes planner column statistics (HLL NDV +
+// histograms) for a table — the SQL surface for catalog.AnalyzeTable.
+func (s *Server) handleAnalyzeTableSQL(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
+	at := parsed.AnalyzeTable
+
+	identity := auth.IdentityFromContext(r.Context())
+	if identity != nil {
+		if authz := s.getAuthz(); authz != nil && !authz.HasPermission(identity, "write") {
+			writeError(w, http.StatusForbidden, "insufficient permissions to analyze tables")
+			return
+		}
+	}
+
+	n, err := s.catalog.AnalyzeTable(r.Context(), at.Name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, QueryResponse{
+		QueryID: fmt.Sprintf("q-%d", start.UnixMilli()),
+		Columns: []string{"result"},
+		Rows:    []map[string]any{{"result": fmt.Sprintf("Table %q analyzed (%d files)", at.Name, n)}},
+		Stats:   QueryStats{Elapsed: time.Since(start).String()},
+	})
+}
+
 func (s *Server) handleDropTableSQL(w http.ResponseWriter, r *http.Request, parsed *plansql.ParsedQuery, start time.Time) {
 	dt := parsed.DropTable
 
