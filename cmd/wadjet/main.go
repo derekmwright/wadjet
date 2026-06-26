@@ -1005,21 +1005,8 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		}
 	}
 
-	// Configure embedding provider if API key is set
-	if apiKey := os.Getenv("WADJET_OPENAI_API_KEY"); apiKey != "" {
-		embedModel := os.Getenv("WADJET_EMBED_MODEL")
-		if embedModel == "" {
-			embedModel = "text-embedding-3-small"
-		}
-		embedCache := embedding.NewCache(50000)
-		embedProvider := embedding.NewOpenAI(embedding.OpenAIConfig{
-			APIKey: apiKey,
-			Model:  embedModel,
-		}, embedCache)
-		embedding.SetProvider(embedProvider)
-		embedding.RegisterFunctions()
-		logger.Info("embedding provider configured", "model", embedModel, "dim", embedProvider.Dimension())
-	}
+	// Configure embedding provider for embed() if one is requested.
+	configureEmbeddingProvider(logger)
 
 	// Start HTTP server
 	srv := server.New(srvCfg, logger)
@@ -1276,20 +1263,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	}
 
 	// Configure embedding provider for coordinator mode
-	if apiKey := os.Getenv("WADJET_OPENAI_API_KEY"); apiKey != "" {
-		embedModel := os.Getenv("WADJET_EMBED_MODEL")
-		if embedModel == "" {
-			embedModel = "text-embedding-3-small"
-		}
-		embedCache := embedding.NewCache(50000)
-		embedProvider := embedding.NewOpenAI(embedding.OpenAIConfig{
-			APIKey: apiKey,
-			Model:  embedModel,
-		}, embedCache)
-		embedding.SetProvider(embedProvider)
-		embedding.RegisterFunctions()
-		logger.Info("embedding provider configured", "model", embedModel, "dim", embedProvider.Dimension())
-	}
+	configureEmbeddingProvider(logger)
 
 	srv := server.New(srvCfg, logger)
 
@@ -1539,6 +1513,64 @@ func catalogSnapshotCmd() *cobra.Command {
 func dynamicFiltersFromEnv() bool {
 	v := os.Getenv("WADJET_DYNAMIC_FILTERS")
 	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// configureEmbeddingProvider wires the embed() SQL function to an embedding
+// provider selected by WADJET_EMBED_PROVIDER: "openai" (default), "voyage", or
+// "ollama". Each provider reads its own key/model env vars. If the selected
+// provider has no credentials, embed() is left unregistered (returns NULL).
+//
+// Note: Anthropic has no native embeddings endpoint — "voyage" is Anthropic's
+// officially recommended embeddings path.
+func configureEmbeddingProvider(logger *slog.Logger) {
+	provider := strings.ToLower(os.Getenv("WADJET_EMBED_PROVIDER"))
+	model := os.Getenv("WADJET_EMBED_MODEL")
+	cache := embedding.NewCache(50000)
+
+	// Default to OpenAI when no provider is named (back-compat: the only knob
+	// that previously existed was WADJET_OPENAI_API_KEY).
+	if provider == "" {
+		provider = "openai"
+	}
+
+	var p embedding.Provider
+	switch provider {
+	case "voyage":
+		apiKey := os.Getenv("WADJET_VOYAGE_API_KEY")
+		if apiKey == "" {
+			return
+		}
+		p = embedding.NewVoyage(embedding.VoyageConfig{
+			APIKey:    apiKey,
+			Model:     model,
+			InputType: os.Getenv("WADJET_VOYAGE_INPUT_TYPE"),
+		}, cache)
+	case "ollama":
+		// Ollama is local and keyless; enable it only when explicitly selected.
+		p = embedding.NewOllama(embedding.OllamaConfig{
+			Model:   model,
+			BaseURL: os.Getenv("WADJET_OLLAMA_URL"),
+		}, cache)
+	case "openai":
+		apiKey := os.Getenv("WADJET_OPENAI_API_KEY")
+		if apiKey == "" {
+			return
+		}
+		if model == "" {
+			model = "text-embedding-3-small"
+		}
+		p = embedding.NewOpenAI(embedding.OpenAIConfig{
+			APIKey: apiKey,
+			Model:  model,
+		}, cache)
+	default:
+		logger.Warn("unknown WADJET_EMBED_PROVIDER, embed() disabled", "provider", provider)
+		return
+	}
+
+	embedding.SetProvider(p)
+	embedding.RegisterFunctions()
+	logger.Info("embedding provider configured", "provider", provider, "model", p.Model(), "dim", p.Dimension())
 }
 
 func wireUDFPersistence(cat *catalog.Catalog, logger *slog.Logger) {

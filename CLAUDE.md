@@ -61,7 +61,7 @@ SQL text
 | `internal/worker/` | Distributed task executor |
 | `internal/server/pgwire/` | PostgreSQL wire protocol |
 | `internal/auth/` | API keys, JWT, mTLS, RBAC, ABAC policy engine, identity enrichment |
-| `internal/embedding/` | embed() SQL function — OpenAI provider, LRU cache, pluggable interface |
+| `internal/embedding/` | embed() SQL function — OpenAI / Voyage AI / Ollama providers, SQL-level batching (one API call per record batch), LRU cache, pluggable interface. Anthropic has no native embeddings endpoint; Voyage AI is its recommended path. |
 | `internal/iceberg/` | Apache Iceberg metadata reader |
 | `benchmarks/tpch/` | TPC-H benchmark suite (22 queries) |
 

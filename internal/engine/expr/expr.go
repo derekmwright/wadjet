@@ -1122,16 +1122,18 @@ type VecScalarFunc func(args []*batch.Vector, out *batch.Vector, n int)
 
 // FuncRegistry is a concurrent-safe registry of scalar functions.
 type FuncRegistry struct {
-	mu       sync.RWMutex
-	funcs    map[string]ScalarFunc
-	vecFuncs map[string]VecScalarFunc
+	mu         sync.RWMutex
+	funcs      map[string]ScalarFunc
+	vecFuncs   map[string]VecScalarFunc
+	vecReturns map[string]func() int // funcs returning VECTOR; value yields the dimension
 }
 
 // NewFuncRegistry creates a new empty function registry.
 func NewFuncRegistry() *FuncRegistry {
 	return &FuncRegistry{
-		funcs:    make(map[string]ScalarFunc),
-		vecFuncs: make(map[string]VecScalarFunc),
+		funcs:      make(map[string]ScalarFunc),
+		vecFuncs:   make(map[string]VecScalarFunc),
+		vecReturns: make(map[string]func() int),
 	}
 }
 
@@ -1172,6 +1174,27 @@ func (r *FuncRegistry) LookupVec(name string) VecScalarFunc {
 	fn := r.vecFuncs[strings.ToLower(name)]
 	r.mu.RUnlock()
 	return fn
+}
+
+// RegisterVecReturn marks a function as returning a VECTOR. dimFn is evaluated
+// lazily (at plan time) to obtain the output dimensionality — embed(), for
+// example, derives it from the configured embedding provider.
+func (r *FuncRegistry) RegisterVecReturn(name string, dimFn func() int) {
+	r.mu.Lock()
+	r.vecReturns[strings.ToLower(name)] = dimFn
+	r.mu.Unlock()
+}
+
+// VecReturnDim reports whether the named function returns a VECTOR and, if so,
+// its current output dimension. ok is false for non-vector-returning functions.
+func (r *FuncRegistry) VecReturnDim(name string) (dim int, ok bool) {
+	r.mu.RLock()
+	dimFn := r.vecReturns[strings.ToLower(name)]
+	r.mu.RUnlock()
+	if dimFn == nil {
+		return 0, false
+	}
+	return dimFn(), true
 }
 
 // Has returns true if a function with the given name exists.

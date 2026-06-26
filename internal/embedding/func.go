@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/expr"
 )
 
@@ -32,6 +33,88 @@ func RegisterFunctions() {
 	expr.DefaultRegistry.Register("embed", fnEmbed)
 	expr.DefaultRegistry.Register("embed_model", fnEmbedModel)
 	expr.DefaultRegistry.Register("embed_dim", fnEmbedDim)
+
+	// SQL-level batching: the vectorized path collects every text in a record
+	// batch into a single provider.Embed() call instead of one call per row.
+	expr.DefaultRegistry.RegisterVec("embed", vecEmbed)
+	// Tell the planner embed() produces a VECTOR so the output column is typed
+	// correctly (and the batched VecEval path fires) rather than stringified.
+	expr.DefaultRegistry.RegisterVecReturn("embed", func() int {
+		if p := GetProvider(); p != nil {
+			return p.Dimension()
+		}
+		return 0
+	})
+}
+
+// vecEmbed is the vectorized implementation of embed(text) → VECTOR. It gathers
+// all non-null inputs in the batch and issues a single provider.Embed() call,
+// then scatters the results back into out (a TypeVector vector whose VectorDim
+// is set from the provider dimension at plan time). On any error every targeted
+// row is set NULL — matching the per-row fnEmbed null-on-failure behavior.
+func vecEmbed(args []*batch.Vector, out *batch.Vector, n int) {
+	if len(args) < 1 || n == 0 {
+		return
+	}
+	in := args[0]
+
+	p := GetProvider()
+	if p == nil {
+		for i := 0; i < n; i++ {
+			out.Nulls.SetNull(i)
+		}
+		return
+	}
+
+	// Ensure the output vector can hold dim-wide rows even if the schema left
+	// VectorDim unset (no provider at plan time, then one configured later).
+	if out.VectorDim <= 0 {
+		out.VectorDim = p.Dimension()
+	}
+	if out.VectorDim <= 0 {
+		for i := 0; i < n; i++ {
+			out.Nulls.SetNull(i)
+		}
+		return
+	}
+	if need := n * out.VectorDim; len(out.Float32Data) < need {
+		out.Float32Data = make([]float32, need)
+	}
+
+	texts := make([]string, 0, n)
+	rows := make([]int, 0, n)
+	for i := 0; i < n; i++ {
+		if in.Nulls.IsNullFast(i) {
+			out.Nulls.SetNull(i)
+			continue
+		}
+		s, ok := in.GetValue(i).(string)
+		if !ok {
+			s = fmt.Sprint(in.GetValue(i))
+		}
+		texts = append(texts, s)
+		rows = append(rows, i)
+	}
+	if len(texts) == 0 {
+		return
+	}
+
+	vectors, err := p.Embed(texts)
+	if err != nil {
+		for _, i := range rows {
+			out.Nulls.SetNull(i)
+		}
+		return
+	}
+
+	for k, i := range rows {
+		if k < len(vectors) && vectors[k] != nil {
+			out.SetVector(i, vectors[k])
+			out.Nulls.SetValid(i)
+		} else {
+			out.Nulls.SetNull(i)
+		}
+	}
 }
 
 // fnEmbed implements embed(text) → VECTOR.
