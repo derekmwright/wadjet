@@ -4797,6 +4797,16 @@ func (p *Planner) buildProject(ctx context.Context, node *logical.Node) (exec.So
 			Type: outType, // Will be resolved at runtime if input column matches
 			Expr: expression,
 		}
+		// VECTOR-returning functions (embed()) need their output dimension
+		// carried so the runtime sizes the output vector. Resolve it from the
+		// registry at plan time (embed() derives it from the live provider).
+		if outType == parquet.TypeVector {
+			if fc, ok := proj.ASTExpr.(*plansql.FuncCallNode); ok {
+				if dim, ok := expr.DefaultRegistry.VecReturnDim(fc.Name); ok {
+					pc.Dimension = dim
+				}
+			}
+		}
 		// For column renames (e.g., l_suppkey AS supplier_no), record the
 		// source column so Project.Execute can resolve the correct type.
 		if name != colRef {
@@ -5073,6 +5083,9 @@ func inferProjectionType(node plansql.Node, fallback parquet.TypeID) parquet.Typ
 	case *plansql.FuncCallNode:
 		if isNumericFunc(n.Name) {
 			return parquet.TypeFloat64
+		}
+		if _, ok := expr.DefaultRegistry.VecReturnDim(n.Name); ok {
+			return parquet.TypeVector
 		}
 	case *plansql.CastNode:
 		return inferCastType(n.TypeName)

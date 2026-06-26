@@ -59,6 +59,7 @@ type ProjectColumn struct {
 	VecEval         VecExpression               // optional vectorized evaluation for any output type
 	SourceCol       string                      // source column name for type resolution on renames
 	DirectCopy      string                      // if set, bulk copy this input column (no per-row eval)
+	Dimension       int                         // VECTOR output dimensionality (e.g. embed()); 0 = not a vector
 }
 
 // Project is a UnaryOperator that selects and computes columns.
@@ -115,6 +116,13 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 					col.Fields = in.Schema[srcIdx].Fields
 					col.ElementType = in.Schema[srcIdx].ElementType
 				}
+			}
+			// Computed VECTOR projections (e.g. embed(text)) don't resolve to an
+			// input column, so carry their dimension from the projection itself.
+			// This sizes the pooled output vector's Float32Data so both the
+			// batched VecEval path and the per-row SetVector path can write.
+			if col.Type == parquet.TypeVector && col.Dimension == 0 && proj.Dimension > 0 {
+				col.Dimension = proj.Dimension
 			}
 			schema[i] = col
 		}
