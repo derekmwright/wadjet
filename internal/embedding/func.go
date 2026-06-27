@@ -66,21 +66,6 @@ func vecEmbed(args []*batch.Vector, out *batch.Vector, n int) {
 		return
 	}
 
-	// Ensure the output vector can hold dim-wide rows even if the schema left
-	// VectorDim unset (no provider at plan time, then one configured later).
-	if out.VectorDim <= 0 {
-		out.VectorDim = p.Dimension()
-	}
-	if out.VectorDim <= 0 {
-		for i := 0; i < n; i++ {
-			out.Nulls.SetNull(i)
-		}
-		return
-	}
-	if need := n * out.VectorDim; len(out.Float32Data) < need {
-		out.Float32Data = make([]float32, need)
-	}
-
 	texts := make([]string, 0, n)
 	rows := make([]int, 0, n)
 	for i := 0; i < n; i++ {
@@ -88,9 +73,10 @@ func vecEmbed(args []*batch.Vector, out *batch.Vector, n int) {
 			out.Nulls.SetNull(i)
 			continue
 		}
-		s, ok := in.GetValue(i).(string)
+		v := in.GetValue(i)
+		s, ok := v.(string)
 		if !ok {
-			s = fmt.Sprint(in.GetValue(i))
+			s = fmt.Sprint(v)
 		}
 		texts = append(texts, s)
 		rows = append(rows, i)
@@ -107,8 +93,33 @@ func vecEmbed(args []*batch.Vector, out *batch.Vector, n int) {
 		return
 	}
 
+	// The authoritative width is what the provider actually returned. When the
+	// plan-time dimension is unset, derive it from the first non-empty vector;
+	// otherwise honor the plan-time width. Either way, a row whose vector
+	// doesn't match that width is set NULL rather than truncated or left
+	// holding stale data from a previous batch in the pooled output buffer.
+	dim := out.VectorDim
+	if dim <= 0 {
+		for _, vec := range vectors {
+			if len(vec) > 0 {
+				dim = len(vec)
+				break
+			}
+		}
+	}
+	if dim <= 0 {
+		for _, i := range rows {
+			out.Nulls.SetNull(i)
+		}
+		return
+	}
+	out.VectorDim = dim
+	if need := n * dim; len(out.Float32Data) < need {
+		out.Float32Data = make([]float32, need)
+	}
+
 	for k, i := range rows {
-		if k < len(vectors) && vectors[k] != nil {
+		if k < len(vectors) && len(vectors[k]) == dim {
 			out.SetVector(i, vectors[k])
 			out.Nulls.SetValid(i)
 		} else {

@@ -45,9 +45,18 @@ func TestOllamaEmbed(t *testing.T) {
 		t.Fatalf("got %d vecs of dim %d, want 2 of 3", len(vecs), len(vecs[0]))
 	}
 
-	// Dimension self-syncs to what the model actually returned.
-	if provider.Dimension() != 3 {
-		t.Errorf("dim after call = %d, want 3 (synced from response)", provider.Dimension())
+	// Dimension() is fixed at construction (no runtime self-mutation — that
+	// raced with concurrent reads on the shared singleton). vecEmbed validates
+	// the returned width and NULLs mismatched rows; an explicit Dimensions
+	// override is the way to declare a non-table model's width.
+	if provider.Dimension() != 768 {
+		t.Errorf("dim after call = %d, want 768 (stable, no self-sync)", provider.Dimension())
+	}
+
+	// Explicit dimension override is honored.
+	p2 := NewOllama(OllamaConfig{Model: "custom", Dimensions: 1024, BaseURL: server.URL}, NewCache(10))
+	if p2.Dimension() != 1024 {
+		t.Errorf("explicit dim = %d, want 1024", p2.Dimension())
 	}
 }
 

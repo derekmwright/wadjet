@@ -63,39 +63,7 @@ func (o *Ollama) Dimension() int { return o.dim }
 // Embed returns embeddings for the given texts, using cache where possible.
 // Uncached texts are batched into a single /api/embed call.
 func (o *Ollama) Embed(texts []string) ([][]float32, error) {
-	results := make([][]float32, len(texts))
-
-	var misses []int
-	for i, text := range texts {
-		if cached := o.cache.Get(o.config.Model, text); cached != nil {
-			results[i] = cached
-		} else {
-			misses = append(misses, i)
-		}
-	}
-
-	if len(misses) == 0 {
-		return results, nil
-	}
-
-	missTexts := make([]string, len(misses))
-	for i, idx := range misses {
-		missTexts[i] = texts[idx]
-	}
-
-	vectors, err := o.callAPI(missTexts)
-	if err != nil {
-		return nil, err
-	}
-
-	for i, idx := range misses {
-		if i < len(vectors) {
-			results[idx] = vectors[i]
-			o.cache.Put(o.config.Model, texts[idx], vectors[i])
-		}
-	}
-
-	return results, nil
+	return embedWithCache(o.cache, o.config.Model, texts, o.callAPI)
 }
 
 type ollamaRequest struct {
@@ -154,12 +122,12 @@ func (o *Ollama) callAPI(texts []string) ([][]float32, error) {
 		return nil, fmt.Errorf("Ollama API error: %s", apiResp.Error)
 	}
 
-	// Ollama returns embeddings in input order. Keep the provider's declared
-	// dimension in sync with what the model actually returns (the model name →
-	// dimension table can't cover every custom model).
-	if len(apiResp.Embeddings) > 0 && len(apiResp.Embeddings[0]) > 0 {
-		o.dim = len(apiResp.Embeddings[0])
-	}
-
+	// NOTE: we deliberately do NOT mutate o.dim from the response here. The
+	// output VECTOR width is fixed at plan time from Dimension(), so a runtime
+	// update would (a) race with concurrent Dimension() reads on this shared
+	// singleton and (b) arrive too late to affect the query that triggered it.
+	// For a model whose true dimension isn't in the table above, set it
+	// explicitly via OllamaConfig.Dimensions (WADJET_EMBED_DIM); vecEmbed
+	// validates the returned width and NULLs any row that doesn't match.
 	return apiResp.Embeddings, nil
 }

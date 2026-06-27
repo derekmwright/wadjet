@@ -76,3 +76,42 @@ func (c *Cache) Len() int {
 	defer c.mu.Unlock()
 	return len(c.entries)
 }
+
+// embedWithCache resolves embeddings for texts: cache hits are served directly
+// and the uncached misses are issued as a single batched callAPI. nil vectors
+// (the provider returned no embedding for a slot) are left nil in the result
+// and NOT cached — caching nil would persist a permanent miss for that text.
+// Shared by every Provider so the cache/batch policy lives in one place.
+func embedWithCache(cache *Cache, model string, texts []string, callAPI func([]string) ([][]float32, error)) ([][]float32, error) {
+	results := make([][]float32, len(texts))
+
+	var misses []int
+	for i, text := range texts {
+		if cached := cache.Get(model, text); cached != nil {
+			results[i] = cached
+		} else {
+			misses = append(misses, i)
+		}
+	}
+	if len(misses) == 0 {
+		return results, nil
+	}
+
+	missTexts := make([]string, len(misses))
+	for i, idx := range misses {
+		missTexts[i] = texts[idx]
+	}
+
+	vectors, err := callAPI(missTexts)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, idx := range misses {
+		if i < len(vectors) && vectors[i] != nil {
+			results[idx] = vectors[i]
+			cache.Put(model, texts[idx], vectors[i])
+		}
+	}
+	return results, nil
+}

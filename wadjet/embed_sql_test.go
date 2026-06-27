@@ -128,6 +128,148 @@ func TestEmbedSQLEndToEnd(t *testing.T) {
 	}
 }
 
+// fixedDimProvider reports one dimension but returns vectors of a different
+// width — simulating a misconfigured/unknown model. vecEmbed must NULL the
+// mismatched rows rather than truncate or leave stale pooled data.
+type fixedDimProvider struct {
+	reportDim int
+	returnDim int
+}
+
+func (p *fixedDimProvider) Embed(texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		v := make([]float32, p.returnDim)
+		for j := range v {
+			v[j] = float32(j) + 1
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+func (p *fixedDimProvider) Dimension() int { return p.reportDim }
+func (p *fixedDimProvider) Model() string  { return "fixed-dim-test" }
+
+// TestEmbedSQLBatchedUnderFilter is the regression for the review finding that
+// a selection vector (from a WHERE filter) made embed() fall back to one
+// provider call per row. With multiple non-null rows surviving the filter, a
+// batched embed() makes exactly one call; the pre-fix per-row path made N.
+func TestEmbedSQLBatchedUnderFilter(t *testing.T) {
+	ctx := context.Background()
+	prov := &countingProvider{dim: 8}
+	embedding.SetProvider(prov)
+	defer embedding.SetProvider(nil)
+	embedding.RegisterFunctions()
+
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "txt", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "docs", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]map[string]any, 6)
+	for i := 0; i < 6; i++ {
+		var txt any = "word" + strconv.Itoa(i)
+		if i == 4 {
+			txt = nil // a NULL survivor inside the filter
+		}
+		rows[i] = map[string]any{"id": int64(i), "txt": txt}
+	}
+	ing := db.NewIngester("docs", schema, nil, ingest.Config{MaxBufferRows: 10000, RowGroupSize: 500})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// WHERE forces a selection vector. Survivors: id 2,3,4,5 (4 rows; id4 is NULL).
+	res, err := db.Query(ctx, "SELECT id, embed(txt) AS v FROM docs WHERE id >= 2 ORDER BY id")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(res.Rows) != 4 {
+		t.Fatalf("got %d rows, want 4", len(res.Rows))
+	}
+
+	// The whole filtered batch must be embedded in ONE call (3 non-null texts),
+	// not one call per row.
+	if prov.calls != 1 {
+		t.Errorf("provider.Embed called %d times under a filter, want 1 (batched)", prov.calls)
+	}
+	if prov.rows != 3 {
+		t.Errorf("provider embedded %d texts, want 3 (NULL excluded)", prov.rows)
+	}
+
+	// Correct values + NULL passthrough survive the filtered/compacted path.
+	for _, r := range res.Rows {
+		if r["id"].(int64) == 4 {
+			if r["v"] != nil {
+				t.Errorf("embed(NULL) under filter = %v, want nil", r["v"])
+			}
+			continue
+		}
+		v, ok := r["v"].([]float32)
+		if !ok || len(v) != 8 {
+			t.Errorf("id=%v embed output %T len mismatch, want []float32 dim 8", r["id"], r["v"])
+		}
+	}
+}
+
+// TestEmbedSQLDimMismatch is the regression for the review finding that a
+// provider returning a width different from its declared Dimension() silently
+// corrupted output (truncation / stale pooled tail) while marking rows valid.
+// The mismatched rows must come back NULL.
+func TestEmbedSQLDimMismatch(t *testing.T) {
+	ctx := context.Background()
+	prov := &fixedDimProvider{reportDim: 8, returnDim: 4} // declares 8, returns 4
+	embedding.SetProvider(prov)
+	defer embedding.SetProvider(nil)
+	embedding.RegisterFunctions()
+
+	db, err := Open(ctx, Config{Store: objstore.NewMemStore(), Bucket: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "txt", Type: parquet.TypeString, Nullable: true},
+	}}
+	if err := db.CreateTable(ctx, "docs", schema, nil); err != nil {
+		t.Fatal(err)
+	}
+	rows := []map[string]any{
+		{"id": int64(1), "txt": "alpha"},
+		{"id": int64(2), "txt": "beta"},
+	}
+	ing := db.NewIngester("docs", schema, nil, ingest.Config{MaxBufferRows: 10000, RowGroupSize: 500})
+	if err := ing.Ingest(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := db.Query(ctx, "SELECT id, embed(txt) AS v FROM docs ORDER BY id")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	for _, r := range res.Rows {
+		if r["v"] != nil {
+			t.Errorf("id=%v: width-mismatched embedding = %v, want nil (no corruption)", r["id"], r["v"])
+		}
+	}
+}
+
 func toFloat(v any) (float64, bool) {
 	switch x := v.(type) {
 	case float64:

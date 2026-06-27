@@ -43,10 +43,10 @@ func NewVoyage(cfg VoyageConfig, cache *Cache) *Voyage {
 		switch cfg.Model {
 		case "voyage-3-lite":
 			dim = 512
-		case "voyage-code-2", "voyage-2":
+		case "voyage-code-2":
 			dim = 1536
 		default:
-			// voyage-3.5, voyage-3.5-lite, voyage-3-large, voyage-3
+			// voyage-3.5, voyage-3.5-lite, voyage-3-large, voyage-3, voyage-2
 			dim = 1024
 		}
 	}
@@ -65,39 +65,7 @@ func (v *Voyage) Dimension() int { return v.dim }
 // Embed returns embeddings for the given texts, using cache where possible.
 // Uncached texts are batched into a single API call.
 func (v *Voyage) Embed(texts []string) ([][]float32, error) {
-	results := make([][]float32, len(texts))
-
-	var misses []int
-	for i, text := range texts {
-		if cached := v.cache.Get(v.config.Model, text); cached != nil {
-			results[i] = cached
-		} else {
-			misses = append(misses, i)
-		}
-	}
-
-	if len(misses) == 0 {
-		return results, nil
-	}
-
-	missTexts := make([]string, len(misses))
-	for i, idx := range misses {
-		missTexts[i] = texts[idx]
-	}
-
-	vectors, err := v.callAPI(missTexts)
-	if err != nil {
-		return nil, err
-	}
-
-	for i, idx := range misses {
-		if i < len(vectors) {
-			results[idx] = vectors[i]
-			v.cache.Put(v.config.Model, texts[idx], vectors[i])
-		}
-	}
-
-	return results, nil
+	return embedWithCache(v.cache, v.config.Model, texts, v.callAPI)
 }
 
 type voyageRequest struct {
