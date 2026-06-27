@@ -64,11 +64,30 @@ type ProjectColumn struct {
 
 // Project is a UnaryOperator that selects and computes columns.
 type Project struct {
-	Projections    []ProjectColumn
-	cachedSchema   []parquet.Column // reused across batches after first resolution
-	outPool        *batch.BatchPool // output batch pool — eliminates per-batch allocation
-	directSrcIdx   []int            // resolved source col indices for DirectCopy (-1 = per-row eval)
-	directResolved bool
+	Projections       []ProjectColumn
+	cachedSchema      []parquet.Column // reused across batches after first resolution
+	outPool           *batch.BatchPool // output batch pool — eliminates per-batch allocation
+	directSrcIdx      []int            // resolved source col indices for DirectCopy (-1 = per-row eval)
+	directResolved    bool
+	vecCompact        bool // true if a VecEval-only projection requires compacting away input selection
+	vecCompactChecked bool
+}
+
+// needsVecCompaction reports whether any projection has a vectorized evaluator
+// but no per-row typed path (e.g. embed() → VECTOR). Such a projection can only
+// run through the batched VecEval path (non-sel branch); under a selection
+// vector it would otherwise fall back to per-row Expr eval. Computed once.
+func (p *Project) needsVecCompaction() bool {
+	if !p.vecCompactChecked {
+		for _, proj := range p.Projections {
+			if proj.VecEval != nil && proj.Float64Eval == nil && proj.Int64Eval == nil {
+				p.vecCompact = true
+				break
+			}
+		}
+		p.vecCompactChecked = true
+	}
+	return p.vecCompact
 }
 
 func NewProject(projections []ProjectColumn) *Project {
@@ -127,6 +146,18 @@ func (p *Project) Execute(_ context.Context, in *batch.RecordBatch) (*batch.Reco
 			schema[i] = col
 		}
 		p.cachedSchema = schema
+	}
+
+	// VecEval-only projections (e.g. embed() → VECTOR) have no per-row typed
+	// path, so the selection-vector branch below would fall back to one-row-at-
+	// a-time Expr eval — for embed() that is one provider API call per row,
+	// defeating SQL-level batching, and the per-row SetVector cannot self-
+	// correct the output dimension (leaving rows valid-but-empty). Compact the
+	// selection away so the batched VecEval path runs. The copy is paid only
+	// when such a projection is present (the common filtered-numeric case is
+	// untouched).
+	if in.Sel != nil && p.needsVecCompaction() {
+		in = in.Compact()
 	}
 
 	activeLen := in.ActiveLen()

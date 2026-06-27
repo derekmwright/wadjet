@@ -1527,6 +1527,17 @@ func configureEmbeddingProvider(logger *slog.Logger) {
 	model := os.Getenv("WADJET_EMBED_MODEL")
 	cache := embedding.NewCache(50000)
 
+	// Optional explicit output dimension. Required for any provider/model whose
+	// true width isn't in the provider's built-in table (notably custom Ollama
+	// models) — vecEmbed validates the returned width and NULLs mismatched rows,
+	// so a wrong/missing dimension fails loudly rather than corrupting vectors.
+	dim := 0
+	if d := os.Getenv("WADJET_EMBED_DIM"); d != "" {
+		if v, err := strconv.Atoi(d); err == nil && v > 0 {
+			dim = v
+		}
+	}
+
 	// Default to OpenAI when no provider is named (back-compat: the only knob
 	// that previously existed was WADJET_OPENAI_API_KEY).
 	if provider == "" {
@@ -1541,15 +1552,17 @@ func configureEmbeddingProvider(logger *slog.Logger) {
 			return
 		}
 		p = embedding.NewVoyage(embedding.VoyageConfig{
-			APIKey:    apiKey,
-			Model:     model,
-			InputType: os.Getenv("WADJET_VOYAGE_INPUT_TYPE"),
+			APIKey:     apiKey,
+			Model:      model,
+			Dimensions: dim,
+			InputType:  os.Getenv("WADJET_VOYAGE_INPUT_TYPE"),
 		}, cache)
 	case "ollama":
 		// Ollama is local and keyless; enable it only when explicitly selected.
 		p = embedding.NewOllama(embedding.OllamaConfig{
-			Model:   model,
-			BaseURL: os.Getenv("WADJET_OLLAMA_URL"),
+			Model:      model,
+			Dimensions: dim,
+			BaseURL:    os.Getenv("WADJET_OLLAMA_URL"),
 		}, cache)
 	case "openai":
 		apiKey := os.Getenv("WADJET_OPENAI_API_KEY")
@@ -1560,8 +1573,9 @@ func configureEmbeddingProvider(logger *slog.Logger) {
 			model = "text-embedding-3-small"
 		}
 		p = embedding.NewOpenAI(embedding.OpenAIConfig{
-			APIKey: apiKey,
-			Model:  model,
+			APIKey:     apiKey,
+			Model:      model,
+			Dimensions: dim,
 		}, cache)
 	default:
 		logger.Warn("unknown WADJET_EMBED_PROVIDER, embed() disabled", "provider", provider)

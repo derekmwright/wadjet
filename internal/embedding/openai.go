@@ -58,42 +58,7 @@ func (o *OpenAI) Dimension() int   { return o.dim }
 // Embed returns embeddings for the given texts, using cache where possible.
 // Uncached texts are batched into a single API call.
 func (o *OpenAI) Embed(texts []string) ([][]float32, error) {
-	results := make([][]float32, len(texts))
-
-	// Check cache first, collect misses
-	var misses []int
-	for i, text := range texts {
-		if cached := o.cache.Get(o.config.Model, text); cached != nil {
-			results[i] = cached
-		} else {
-			misses = append(misses, i)
-		}
-	}
-
-	if len(misses) == 0 {
-		return results, nil
-	}
-
-	// Batch API call for cache misses
-	missTexts := make([]string, len(misses))
-	for i, idx := range misses {
-		missTexts[i] = texts[idx]
-	}
-
-	vectors, err := o.callAPI(missTexts)
-	if err != nil {
-		return nil, err
-	}
-
-	// Store results and update cache
-	for i, idx := range misses {
-		if i < len(vectors) {
-			results[idx] = vectors[i]
-			o.cache.Put(o.config.Model, texts[idx], vectors[i])
-		}
-	}
-
-	return results, nil
+	return embedWithCache(o.cache, o.config.Model, texts, o.callAPI)
 }
 
 type openAIRequest struct {
