@@ -120,6 +120,7 @@ Network-native types (IPv4, IPv6, CIDR, MAC, Port, Protocol) are first-class wit
 - **Broadcast + probe-split**: Builds under `BroadcastBytesThreshold` replicate to all workers; the probe side's files are split across workers, each runs the full join, coordinator merges partial results (re-aggregation, sort, dedup).
 - **NATS JetStream**: Task queues with request/reply result delivery, metadata KV
 - **Federation**: NATS leaf nodes connect edge clusters to central
+- **Internals map**: `docs/internals/native-dag-execution.md` — file-anchored map of the native-DAG path (two coordinator entry paths, `walkStages` per-node stage emission, Stage→fragment conversion, the distribution-property/shuffle system, and inspection recipes). Start here before navigating coordinator/planner/worker distribution code.
 
 ## Commit Convention
 

@@ -786,8 +786,8 @@ func (e *Executor) buildFragmentSort(spec distributed.OpSpec) (*exec.Sort, error
 // (the partial-output column) and COUNT becomes SUM (counting partial rows
 // re-counts groups, not source rows).
 func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.HashAggregate, error) {
-	if len(spec.Aggregates) == 0 && len(spec.GroupByCols) == 0 {
-		return nil, fmt.Errorf("hash_aggregate: at least one of GroupByCols or Aggregates is required")
+	if !spec.GroupByAll && len(spec.Aggregates) == 0 && len(spec.GroupByCols) == 0 {
+		return nil, fmt.Errorf("hash_aggregate: at least one of GroupByCols, Aggregates, or GroupByAll is required")
 	}
 	aggCols := make([]exec.AggColumn, len(spec.Aggregates))
 	for i, a := range spec.Aggregates {
@@ -809,6 +809,7 @@ func (e *Executor) buildFragmentHashAggregate(spec distributed.OpSpec) (*exec.Ha
 		}
 	}
 	hashAgg := exec.NewHashAggregate(spec.GroupByCols, aggCols)
+	hashAgg.GroupByAll = spec.GroupByAll
 	if e.sharedSpill != nil {
 		hashAgg.Spill = e.sharedSpill
 	}
