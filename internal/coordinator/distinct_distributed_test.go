@@ -24,13 +24,6 @@ import (
 // source rows. Data is split into multiple files so several scan tasks each
 // see overlapping values — the condition a missing cross-task dedup needs.
 func TestDistributedDistinctDedup(t *testing.T) {
-	// #163: fix in progress. The planner now emits GroupByAll partial+final
-	// dedup stages for NodeDistinct, but the distinct input is not projected to
-	// its output columns before the dedup (the logical Project is a walkStages
-	// passthrough, so the scan output carries all columns) — so GroupByAll
-	// over-distinguishes and the dedup is a no-op. Unskip once the pre-dedup
-	// projection lands. See project-distributed-distinct-design-2026-06-29.
-	t.Skip("#163: distributed DISTINCT dedup — pre-dedup projection not yet wired")
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -127,6 +120,8 @@ func TestDistributedDistinctDedup(t *testing.T) {
 	}{
 		{"SELECT DISTINCT l_returnflag FROM lineitem", len(rf)},
 		{"SELECT DISTINCT l_returnflag, l_linestatus FROM lineitem", len(rfls)},
+		// DISTINCT + ORDER BY: dedup must run before the sort is re-applied.
+		{"SELECT DISTINCT l_returnflag FROM lineitem ORDER BY l_returnflag", len(rf)},
 		// Control: the aggregate path was already correct.
 		{"SELECT l_returnflag, COUNT(*) AS c FROM lineitem GROUP BY l_returnflag", len(rf)},
 	}

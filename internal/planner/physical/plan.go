@@ -1876,7 +1876,11 @@ func findOutputProjectionsForRename(n *logical.Node) []logical.Projection {
 		switch n.Type {
 		case logical.NodeProject:
 			return n.Projections
-		case logical.NodeSort, logical.NodeLimit, logical.NodeFilter:
+		case logical.NodeSort, logical.NodeLimit, logical.NodeFilter, logical.NodeDistinct:
+			// Descend through Distinct too: the gather must project to the
+			// SELECT-list columns (the Project under the Distinct) so the
+			// coordinator's distinct dedup runs over the output columns, not
+			// the full upstream schema (#163).
 			if len(n.Children) == 1 {
 				n = n.Children[0]
 				continue
