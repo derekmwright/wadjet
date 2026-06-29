@@ -621,6 +621,24 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 			Plan:    planStr,
 		}, fmt.Errorf("native DAG: %w", gerr)
 	}
+	// #163: walkStages passes NodeDistinct through (no dedup stage), so a
+	// distributed SELECT DISTINCT arrives here un-deduplicated. The gather
+	// result is already projected to the SELECT list (applyOutputRenames), so
+	// deduplicate it now — then re-apply ORDER BY / LIMIT, since dedup does not
+	// preserve order. Single-node dedup (the same shape the probe-split path
+	// uses via mergeProbePartials); a sharded in-DAG dedup is the follow-up.
+	if gr != nil {
+		if mi := logical.ExtractMergeInfo(logicalPlan); mi != nil && mi.HasDistinct {
+			if err := c.dedupGatherResult(gr, mi); err != nil {
+				return &SQLResult{
+					QueryID: queryID,
+					Error:   err.Error(),
+					Elapsed: time.Since(start),
+					Plan:    planStr,
+				}, fmt.Errorf("distinct dedup: %w", err)
+			}
+		}
+	}
 	res := &SQLResult{
 		QueryID:   queryID,
 		Columns:   gr.columns,
@@ -1214,6 +1232,55 @@ func (c *Coordinator) mergeProbePartials(in BatchStream, columns []string, mi *l
 		totalRows += int64(b.ActiveLen())
 	}
 	return batches, totalRows, nil
+}
+
+// dedupGatherResult deduplicates a native-DAG gather result in place for
+// SELECT DISTINCT (#163). The gather batches are already projected to the
+// SELECT-list columns (applyOutputRenames), so deduplicatePartials' keys-only
+// GroupByAll dedup over them yields the correct distinct set. The (possibly
+// spilled) result is streamed through the dedup and replaced with the in-memory
+// deduped batches; ORDER BY / LIMIT are re-applied afterward because the dedup
+// does not preserve input order. Mirrors the dedup→sort→limit sequence the
+// probe-split path runs in mergeProbePartials.
+func (c *Coordinator) dedupGatherResult(gr *gatherResult, mi *logical.MergeInfo) error {
+	var src BatchStream
+	if gr.spillPath != "" {
+		// Renamer applies to spilled frames only; the in-memory prefix is
+		// already renamed (applyOutputRenames), so no double-rename.
+		src = newGatherReplayStream(gr.batches, gr.spillPath, gr.renamer)
+	} else {
+		src = newSliceStream(gr.batches)
+	}
+	deduped, err := c.deduplicatePartials(src, gr.columns)
+	if err != nil {
+		return err
+	}
+	// The stream (incl. any spilled scratch) is consumed; the result is now a
+	// small in-memory distinct set.
+	gr.batches = deduped
+	gr.spillPath = ""
+	gr.spillBytes = 0
+	gr.renamer = nil
+
+	if len(mi.OrderBy) > 0 || mi.Limit > 0 {
+		colIdx := make(map[string]int, len(gr.columns))
+		for i, col := range gr.columns {
+			colIdx[col] = i
+		}
+		if len(mi.OrderBy) > 0 {
+			c.sortBatches(gr.batches, gr.columns, colIdx, mi.OrderBy)
+		}
+		if mi.Limit > 0 {
+			gr.batches = limitBatches(gr.batches, mi.Limit)
+		}
+	}
+
+	var total int64
+	for _, b := range gr.batches {
+		total += int64(b.ActiveLen())
+	}
+	gr.totalRows = total
+	return nil
 }
 
 // deduplicatePartials removes duplicate rows across probe-split partial
