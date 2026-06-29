@@ -53,6 +53,11 @@ type Stage struct {
 	// Aggregate metadata
 	GroupByCols []string
 	AggSpecs   []AggSpec
+	// GroupByAll marks a keys-only hash aggregate over EVERY input column —
+	// the DISTINCT shape. The key set is resolved at runtime from the input
+	// schema (no plan-time column list), matching exec.HashAggregate.GroupByAll
+	// and the single-process buildDistinct path.
+	GroupByAll bool
 
 	// Sort metadata
 	SortKeys []SortKeySpec
@@ -3413,7 +3418,18 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		*stages = append(*stages, stage)
 
 	default:
-		// Passthrough nodes (Project, Distinct) — walk children
+		// Passthrough nodes (Project, Distinct) — walk children.
+		//
+		// NOTE (#163): Distinct being a passthrough here is the root of the
+		// distributed-DISTINCT correctness bug — no dedup stage is emitted, so
+		// distributed SELECT DISTINCT returns every row. The fix (emit a
+		// GroupByAll partial→final dedup) is NOT just adding a case here: the
+		// distinct input must first be projected to its output columns (the
+		// logical Project above the Distinct is itself a passthrough, so the
+		// scan output carries all columns and GroupByAll over-distinguishes).
+		// The GroupByAll plumbing (Stage/OpSpec/buildFragmentHashAggregate) is
+		// in place; wiring the pre-dedup projection is the remaining work. See
+		// project-distributed-distinct-design-2026-06-29.
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}

@@ -2402,9 +2402,12 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 		Type:         distributed.OpHashAggregate,
 		GroupByCols:  append([]string(nil), stage.GroupByCols...),
 		Aggregates:   append([]distributed.AggSpec(nil), aggs...),
+		GroupByAll:   stage.GroupByAll,
 		MergeMode:    mergeMode,
-		FoldAvg:      stage.Type == "final_aggregate",
-		BuildProject: !mergeMode,
+		// GroupByAll (DISTINCT) has no derived-input expressions to project and
+		// no AVG synthetics to fold — keep both off regardless of stage role.
+		FoldAvg:      stage.Type == "final_aggregate" && !stage.GroupByAll,
+		BuildProject: !mergeMode && !stage.GroupByAll,
 	})
 	if len(t.PostFilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{

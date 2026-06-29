@@ -294,6 +294,7 @@ type OpSpec struct {
 	// OpHashAggregate (pipeline-breaker).
 	GroupByCols  []string  `json:"group_by_cols,omitempty"` // empty = scalar aggregate
 	Aggregates   []AggSpec `json:"aggregates,omitempty"`    // per-column aggregations
+	GroupByAll   bool      `json:"group_by_all,omitempty"`  // DISTINCT: group by every input column, key set resolved at runtime
 	MergeMode    bool      `json:"merge_mode,omitempty"`    // input is already partial-aggregated; rewrite InputCol → OutputCol and COUNT → SUM
 	FoldAvg      bool      `json:"fold_avg,omitempty"`      // collapse __avg_sum#X / __avg_count#X synthetics into AVG output (final aggregate only)
 	BuildProject bool      `json:"build_project,omitempty"` // construct a derived-input projection before the aggregate (skipped in merge mode — partial output already has OutputCol)
