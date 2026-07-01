@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -34,6 +35,26 @@ func (c *Coordinator) localFastPathBytes() int64 {
 // path. Exposed for tests and observability.
 func (c *Coordinator) LocalFastPathHits() int64 {
 	return c.localHits.Load()
+}
+
+// LocalFastPathBails reports how many local executions bailed out over the
+// result budget and re-dispatched as DAG queries.
+func (c *Coordinator) LocalFastPathBails() int64 {
+	return c.localBails.Load()
+}
+
+// localResultBudget bounds the materialized result of a local fast-path
+// execution. Scan input is bounded by the routing threshold, but join
+// output is not — a misrouted blow-up (e.g. a many-to-many self join) would
+// otherwise grow coordinator heap without limit. Past the budget the local
+// run aborts and the query re-dispatches as a DAG, whose gather spills
+// oversized results to scratch. 8× the routing threshold: proportional to
+// what routing declared "small", far above any well-routed result.
+func (c *Coordinator) localResultBudget(threshold int64) int64 {
+	if c.localResultBudgetOverride > 0 {
+		return c.localResultBudgetOverride
+	}
+	return 8 * threshold
 }
 
 // tryLocalFastPath routes a small query onto the coordinator-local
@@ -93,10 +114,21 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	// arena), so they safely outlive pipeline.Close and stream to the wire
 	// one batch at a time like the gather path's result.
 	sink.SkipFinalizeToRows = true
+	// Adaptive bail-out: the scan input is bounded by the estimate, the
+	// RESULT is not (join blow-up). Past the budget the run aborts here
+	// and the caller re-dispatches as a DAG query — reads are idempotent,
+	// and the DAG gather spills oversized results to scratch.
+	sink.MaxBytes = c.localResultBudget(threshold)
 	if err := pipeline.Run(ctx); err != nil {
 		pipeline.Close()
-		c.logger.Warn("local fast path execution failed, routing to DAG",
-			"query", queryID, "error", err)
+		if errors.Is(err, exec.ErrCollectBudget) {
+			c.localBails.Add(1)
+			c.logger.Info("local fast path result over budget, re-dispatching as DAG",
+				"query", queryID, "budget_bytes", sink.MaxBytes)
+		} else {
+			c.logger.Warn("local fast path execution failed, routing to DAG",
+				"query", queryID, "error", err)
+		}
 		return nil, false
 	}
 	defer pipeline.Close()

@@ -48,6 +48,12 @@ Facts that matter when touching this:
 - Unestimable plans (unknown table = table functions, residual subquery
   expressions in Raw predicate/projection text) route to the DAG.
 - Concurrency-capped (`localSem`); overflow routes to the DAG, never queues.
+- **Adaptive bail-out:** scan input is bounded by the estimate but join
+  output is not — the collect sink carries a result budget (8× the routing
+  threshold; `CollectSink.MaxBytes` → `exec.ErrCollectBudget`), and an
+  over-budget local run aborts and re-dispatches as a DAG query (reads are
+  idempotent; the DAG gather spills oversized results to scratch). This
+  makes the threshold a latency knob, not a correctness-of-judgment knob.
 - `Config.LocalFastPathBytes <= 0` = disabled (the zero value, so library
   and test usage is DAG-pure by default); `wadjet serve` enables it by
   default via `--local-fastpath-bytes` (64 MiB).

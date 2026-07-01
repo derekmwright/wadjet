@@ -122,6 +122,10 @@ type Coordinator struct {
 	querySem   chan struct{}                           // limits concurrent inflight queries
 	localSem   chan struct{}                           // limits concurrent local fast-path executions
 	localHits  atomic.Int64                            // queries served by the local fast path
+	localBails atomic.Int64                            // local runs aborted over result budget, re-dispatched as DAG
+	// localResultBudgetOverride replaces localResultBudget's derivation in
+	// tests (0 = derive from the routing threshold).
+	localResultBudgetOverride int64
 
 	// Alert scheduler fields (see alerts.go for lifecycle methods).
 	alertScheduler       *alerts.Scheduler

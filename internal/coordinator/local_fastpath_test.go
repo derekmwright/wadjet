@@ -247,4 +247,39 @@ func TestLocalFastPathDifferential(t *testing.T) {
 			t.Fatalf("expression row %d: got %s want %s", i, got[i], want[i])
 		}
 	}
+
+	// Adaptive bail-out: a routed query whose RESULT blows past the local
+	// budget must abort mid-run and re-dispatch as a DAG query, still
+	// returning the complete correct result. The 1-byte override trips on
+	// the first collected batch.
+	bail := New(Config{NATSUrl: embeddedNATS.ClientURL(), ResultBucket: "test",
+		LocalFastPathBytes: DefaultLocalFastPathBytes}, cat, nc, js, logger)
+	bail.localResultBudgetOverride = 1
+	for i := 0; i < 3; i++ {
+		bail.workers.record(distributed.WorkerHeartbeat{WorkerID: fmt.Sprintf("fake-%d", i), Timestamp: time.Now()})
+	}
+	bailRes, err := bail.ExecuteSQL(ctx, "SELECT l_orderkey, l_extendedprice FROM lineitem WHERE l_orderkey < 100")
+	if err != nil || bailRes.Error != "" {
+		t.Fatalf("bail-out query: %v %s", err, bailRes.Error)
+	}
+	if bail.LocalFastPathBails() != 1 {
+		t.Errorf("expected 1 bail-out, got %d", bail.LocalFastPathBails())
+	}
+	if bail.LocalFastPathHits() != 0 {
+		t.Errorf("bailed query still counted as a fast-path hit")
+	}
+	dagRef, err := dag.ExecuteSQL(ctx, "SELECT l_orderkey, l_extendedprice FROM lineitem WHERE l_orderkey < 100")
+	if err != nil || dagRef.Error != "" {
+		t.Fatalf("bail-out reference: %v %s", err, dagRef.Error)
+	}
+	br := canon(mustRows(t, bailRes), []string{"l_orderkey", "l_extendedprice"}, false)
+	dr := canon(mustRows(t, dagRef), []string{"l_orderkey", "l_extendedprice"}, false)
+	if len(br) != len(dr) {
+		t.Fatalf("bail-out: got %d rows, want %d", len(br), len(dr))
+	}
+	for i := range br {
+		if br[i] != dr[i] {
+			t.Fatalf("bail-out row %d: got %s want %s", i, br[i], dr[i])
+		}
+	}
 }
