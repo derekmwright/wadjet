@@ -116,6 +116,7 @@ Network-native types (IPv4, IPv6, CIDR, MAC, Port, Protocol) are first-class wit
 ### Distribution
 
 - **Modes**: `standalone` (all-in-one), `coordinator` (plan+dispatch), `worker` (execute)
+- **Small-query fast path**: the coordinator routes queries whose post-pruning catalog scan bytes stay under `--local-fastpath-bytes` (default 64 MiB; 0 disables) onto an in-process single-process pipeline, skipping the DAG's per-stage dispatch + S3 materialization. Both paths consume the identical optimized logical plan; local failures fall back to the DAG. See `docs/internals/native-dag-execution.md` §Small-query local fast path.
 - **Stage-DAG execution**: Distributed queries run as a multi-stage DAG. Every stage's output **materializes to S3** (`queries/<id>/...`) and is read back by the next stage — structurally like Trino's fault-tolerant execution with exchange spooling, not like its streaming mode. `exchange-repartition` stages hash-partition `.wshf` shuffle files; large-build joins (> `shuffleBuildThreshold`) take this path by default.
 - **Broadcast + probe-split**: Builds under `BroadcastBytesThreshold` replicate to all workers; the probe side's files are split across workers, each runs the full join, coordinator merges partial results (re-aggregation, sort, dedup).
 - **NATS JetStream**: Task queues with request/reply result delivery, metadata KV

@@ -162,6 +162,12 @@ func (c *Cluster) StartCoordinator(ctx context.Context) error {
 		"--grpc-addr=:" + strconv.Itoa(c.grpcPort),
 		"--spill-dir=" + filepath.Join(c.cfg.RunDir, "spill", "coord"),
 		"--nats-store-dir=" + filepath.Join(c.cfg.RunDir, "nats"),
+		// The harness exists to catch DISTRIBUTED regressions; its data is
+		// small enough that the coordinator-local fast path would route
+		// every query in-process and silently stop exercising the DAG.
+		// Disable it. Callers can re-enable via ExtraServeArgs (later
+		// flags win) to run the same suite through the fast path.
+		"--local-fastpath-bytes=0",
 	}
 	if c.cfg.DataPlane == "grpc" {
 		c.dataPlanePort = freePort()
