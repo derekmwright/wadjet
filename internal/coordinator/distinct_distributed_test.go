@@ -124,6 +124,19 @@ func TestDistributedDistinctDedup(t *testing.T) {
 		{"SELECT DISTINCT l_returnflag FROM lineitem ORDER BY l_returnflag", len(rf)},
 		// Control: the aggregate path was already correct.
 		{"SELECT l_returnflag, COUNT(*) AS c FROM lineitem GROUP BY l_returnflag", len(rf)},
+		// #166: aggregate-free GROUP BY must dedup across scan tasks.
+		// Before the fix the fused scan (group cols, zero agg specs)
+		// dispatched as a plain scan — no partial dedup, no hash-partition
+		// exchange — so the N final tasks re-emitted every group (3×3=9).
+		{"SELECT l_returnflag FROM lineitem GROUP BY l_returnflag", len(rf)},
+		{"SELECT l_returnflag, l_linestatus FROM lineitem GROUP BY l_returnflag, l_linestatus", len(rfls)},
+		// Aliased bare column still takes the sharded GROUP BY rewrite.
+		{"SELECT DISTINCT l_returnflag AS flag FROM lineitem", len(rf)},
+		// DISTINCT over an expression is NOT rewritten — it exercises the
+		// coordinator-side dedup fallback (MergeInfo.HasDistinct).
+		{"SELECT DISTINCT lower(l_returnflag) AS flag FROM lineitem", len(rf)},
+		// Control for the expression case: the equivalent explicit GROUP BY.
+		{"SELECT lower(l_returnflag) AS flag FROM lineitem GROUP BY lower(l_returnflag)", len(rf)},
 	}
 	for _, tc := range cases {
 		res, err := coord.ExecuteSQL(ctx, tc.sql)
