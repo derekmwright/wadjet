@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -495,6 +496,11 @@ func (s *SliceSource) Next(_ context.Context) (*batch.RecordBatch, error) {
 
 func (s *SliceSource) Close() error { return nil }
 
+// ErrCollectBudget is returned by CollectSink.Consume when the accumulated
+// result exceeds CollectSink.MaxBytes. Callers match with errors.Is to
+// distinguish "result too big for this execution path" from real failures.
+var ErrCollectBudget = errors.New("collect sink result budget exceeded")
+
 // CollectSink collects all consumed batches. Data is stored columnar internally.
 // Rows are converted lazily on first access to ToRows(), not during Finalize.
 // Use Batches() for zero-copy columnar access.
@@ -550,10 +556,17 @@ func (s *BatchSink) Batches() []*batch.RecordBatch {
 }
 
 type CollectSink struct {
-	Rows     []map[string]any     // populated lazily on first access
-	batches  []*batch.RecordBatch // columnar storage; released by ToRows
-	schema   []parquet.Column     // captured from the first batch; survives ToRows
-	rowsDone bool
+	Rows       []map[string]any     // populated lazily on first access
+	batches    []*batch.RecordBatch // columnar storage; released by ToRows
+	schema     []parquet.Column     // captured from the first batch; survives ToRows
+	rowsDone   bool
+	accumBytes int64 // running MemBytes of collected batches
+	// MaxBytes, when >0, bounds the collected result: Consume returns
+	// ErrCollectBudget once accumulated batch bytes exceed it. Callers that
+	// have a cheaper place to put oversized results (the coordinator's
+	// local fast path re-dispatches to the DAG, whose gather spills to
+	// scratch) set this to bail out instead of growing the heap unboundedly.
+	MaxBytes int64
 	mu       sync.Mutex
 	// SkipFinalizeToRows, when true, makes Finalize a no-op instead of
 	// eagerly materializing ToRows. Callers that consume Batches() directly
@@ -588,7 +601,12 @@ func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 		b.Sel = selCopy
 	}
 	s.batches = append(s.batches, b)
+	s.accumBytes += b.MemBytes()
+	over := s.MaxBytes > 0 && s.accumBytes > s.MaxBytes
 	s.mu.Unlock()
+	if over {
+		return fmt.Errorf("collect sink at %d bytes: %w", s.accumBytes, ErrCollectBudget)
+	}
 	return nil
 }
 
