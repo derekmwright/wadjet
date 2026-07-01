@@ -26,6 +26,38 @@ There are **two coordinator entry paths** — know which one you're in:
 ⚠️ **These paths handle DISTINCT differently.** The probe-split path dedups via
 `MergeInfo.HasDistinct`; the native-DAG path does **not** (see Known Issues).
 
+## Small-query local fast path (routing ahead of the DAG)
+
+Before planning a DAG, `ExecuteSQL` routes small queries onto a
+**coordinator-local single-process pipeline** (`coordinator/local_fastpath.go`
+`tryLocalFastPath`): when `EstimatePlanScanBytes`
+(`planner/physical/scan_estimate.go` — catalog bytes after partition-filter
+pruning, summed over every scan in the optimized logical plan) stays under
+`Config.LocalFastPathBytes`, the query executes in-process via
+`physical.Planner.Plan` (the `wadjet.DB` engine) and streams columnar batches
+straight into `SQLResult`. No task dispatch, no per-stage object-store
+materialization — the DAG's fixed costs are O(stages) and independent of data
+size, so small queries pay a latency floor the local pipeline doesn't have
+(measured: DAG 2–12× slower at zero store latency, top-N worst; the full
+tiny-scale TPC-H suite runs row-identical through either path).
+
+Facts that matter when touching this:
+- Both paths consume the **identical optimized logical plan** (post
+  RLS-injection, post `logical.Optimize`) — result and policy parity is by
+  construction. Any local plan/execute error falls back to the DAG.
+- Unestimable plans (unknown table = table functions, residual subquery
+  expressions in Raw predicate/projection text) route to the DAG.
+- Concurrency-capped (`localSem`); overflow routes to the DAG, never queues.
+- `Config.LocalFastPathBytes <= 0` = disabled (the zero value, so library
+  and test usage is DAG-pure by default); `wadjet serve` enables it by
+  default via `--local-fastpath-bytes` (64 MiB).
+- The tpch-harness spawns coordinators with `--local-fastpath-bytes=0` so
+  the DAG gate keeps meaning; re-enable via
+  `--serve-args=--local-fastpath-bytes=N` (later flag wins) to run the same
+  suite through the fast path.
+- Differential gate: `coordinator/local_fastpath_test.go` runs every shape
+  through both paths and diffs rows. **It found #169 on its first run.**
+
 ## Planning pipeline (logical → stages)
 
 `PlanDistributed` (`planner/physical/plan.go:1579`):
@@ -81,6 +113,16 @@ requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
 - **DISTINCT fallback shapes** (`SELECT DISTINCT *`, DISTINCT with aggregate projections, subquery expressions): not rewritten; `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`). Correct but single-node at the coordinator.
 
 ## Known Issues
+
+### scan→gather never computes SELECT-list expressions (#169)
+
+A bare expression SELECT over a scan (`SELECT lower(x) AS m FROM t WHERE …`)
+returns raw scan columns distributed — no compute stage exists and the
+gather's `applyOutputRenames` can rename/drop but not evaluate. Expression
+SELECTs above aggregates/joins are unaffected (the compute fragment
+projects). The local fast path computes this shape correctly, so only
+over-threshold bare-expression scans hit it. Found by the fast-path
+differential test.
 
 ### DISTINCT over a non-decorrelatable scalar-subquery projection (fallback, distributed)
 

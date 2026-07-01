@@ -55,6 +55,14 @@ type Config struct {
 	// a scratch-write failure fails the query (cleanly — the coordinator
 	// process never OOMs for one query's result size).
 	GatherResultBudget int64
+	// LocalFastPathBytes routes queries whose total post-pruning catalog
+	// scan bytes stay under this threshold onto the coordinator-local
+	// single-process pipeline, skipping task dispatch and per-stage
+	// object-store materialization. <=0 = disabled (every query runs the
+	// distributed DAG — the zero value keeps library/test semantics
+	// unchanged). `wadjet serve` enables it by default via its flag
+	// (DefaultLocalFastPathBytes).
+	LocalFastPathBytes int64
 }
 
 // gatherResultBudget resolves Config.GatherResultBudget: explicit value,
@@ -112,6 +120,8 @@ type Coordinator struct {
 	resultSubs map[string]context.CancelFunc          // queryID -> cancel
 	queryMetas map[string]*queryMeta                  // queryID -> metadata for result retrieval
 	querySem   chan struct{}                           // limits concurrent inflight queries
+	localSem   chan struct{}                           // limits concurrent local fast-path executions
+	localHits  atomic.Int64                            // queries served by the local fast path
 
 	// Alert scheduler fields (see alerts.go for lifecycle methods).
 	alertScheduler       *alerts.Scheduler
@@ -151,6 +161,7 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 		resultSubs: make(map[string]context.CancelFunc),
 		queryMetas: make(map[string]*queryMeta),
 		querySem:   make(chan struct{}, maxInflight),
+		localSem:   make(chan struct{}, defaultLocalFastPathConcurrency),
 	}
 	// Memory-aware gRPC placement: the scheduler bin-packs estimated task
 	// footprints against heartbeat pool stats. No-op on the NATS path.
@@ -600,6 +611,18 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	scanAnnotator(logicalPlan)
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 	planStr := logicalPlan.PrettyPrint(0)
+
+	// Small-query fast path: when the plan's total post-pruning scan bytes
+	// stay under the routing threshold, execute in-process on the
+	// coordinator instead of dispatching a stage DAG. The DAG's fixed
+	// costs (task dispatch, object-store materialization per stage
+	// boundary) dominate small queries; the local pipeline answers in
+	// milliseconds. Both paths consume the identical optimized logical
+	// plan, so results and policy enforcement match by construction. Any
+	// local failure falls through to the DAG.
+	if res, handled := c.tryLocalFastPath(ctx, queryID, logicalPlan, planStr, start); handled {
+		return res, nil
+	}
 
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()

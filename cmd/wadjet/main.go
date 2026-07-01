@@ -93,6 +93,7 @@ var (
 	dataPlane             string
 	dataPlaneAddr         string
 	coordDataPlane        string
+	localFastPathBytes    int64
 )
 
 func main() {
@@ -144,6 +145,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&dataPlane, "data-plane", "nats", "Worker↔coord data-plane transport: nats (default) or grpc. See project_split_plane_design_2026-05-20.")
 	rootCmd.PersistentFlags().StringVar(&dataPlaneAddr, "data-plane-addr", ":9091", "Data-plane gRPC listen address (coord/standalone)")
 	rootCmd.PersistentFlags().StringVar(&coordDataPlane, "coord-data-plane", "", "Coord's data-plane host:port (worker only; defaults to coord-host + 9091)")
+	rootCmd.PersistentFlags().Int64Var(&localFastPathBytes, "local-fastpath-bytes", coordinator.DefaultLocalFastPathBytes, "Queries whose post-pruning catalog scan bytes stay under this threshold execute in-process on the coordinator (skipping the distributed stage DAG and its per-stage object-store round trips). 0 = disabled.")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
@@ -857,9 +859,10 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Start coordinator
 	coord := coordinator.New(coordinator.Config{
-		NATSUrl:        embeddedNATS.ClientURL(),
-		ResultBucket:   bucket,
-		DynamicFilters: dynamicFiltersFromEnv(),
+		NATSUrl:            embeddedNATS.ClientURL(),
+		ResultBucket:       bucket,
+		DynamicFilters:     dynamicFiltersFromEnv(),
+		LocalFastPathBytes: localFastPathBytes,
 	}, cat, nc, js, logger)
 
 	// Phase A: same-process data-plane server + client when enabled.
@@ -1143,9 +1146,10 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	wireUDFPersistence(cat, logger)
 
 	coord := coordinator.New(coordinator.Config{
-		NATSUrl:        embeddedNATS.ClientURL(),
-		ResultBucket:   bucket,
-		DynamicFilters: dynamicFiltersFromEnv(),
+		NATSUrl:            embeddedNATS.ClientURL(),
+		ResultBucket:       bucket,
+		DynamicFilters:     dynamicFiltersFromEnv(),
+		LocalFastPathBytes: localFastPathBytes,
 	}, cat, nc, js, logger)
 
 	// Phase A: start data-plane gRPC server alongside coord when enabled.
