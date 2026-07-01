@@ -237,9 +237,13 @@ var spillFileTargetBytes int64 = 64 * 1024 * 1024
 // (20M groups) and brings worker peak heap under GOMEMLIMIT at
 // max_concurrent=4.
 type groupState struct {
-	intKey int64 // single int64 key for int-keyed groups (avoids []any boxing)
-	setID  int32 // grouping set index (-1 = not a grouping set); 4 B of tail padding follows
+	// Pointer first so the GC pointer-scan region is 8 B, not 24 B. This struct
+	// is one-per-group, allocated in contiguous []groupState chunks (millions of
+	// groups at SF100), so shrinking the scanned prefix cuts GC mark work per
+	// cycle. Size is unchanged at 24 B (extras 8 + intKey 8 + setID 4 + 4 tail pad).
 	extras *groupStateExtras
+	intKey int64 // single int64 key for int-keyed groups (avoids []any boxing)
+	setID  int32 // grouping set index (-1 = not a grouping set)
 }
 
 // groupStateExtras holds the heavy per-group fields that are only needed by
@@ -368,8 +372,9 @@ func (h *HashAggregate) reconcileGroupMemory() {
 
 // stringAggState accumulates strings with a separator.
 type stringAggState struct {
-	parts []string
+	// sep first keeps the two pointer prefixes adjacent (scan region 24 B, not 32).
 	sep   string
+	parts []string
 }
 
 // varianceState tracks running variance using Welford's online algorithm.
@@ -451,9 +456,11 @@ type collectState struct {
 
 // minMaxByState tracks the row where a comparison column is min/max.
 type minMaxByState struct {
-	hasValue bool
-	bestCmp  float64 // the comparison column value (min or max)
+	// Field order packs this to 32 B (was 40) and puts the pointer prefix first:
+	// one per group for MIN_BY/MAX_BY.
 	bestVal  any     // the return column value at that row
+	bestCmp  float64 // the comparison column value (min or max)
+	hasValue bool
 	isMin    bool
 }
 
