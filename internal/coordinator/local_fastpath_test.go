@@ -145,7 +145,11 @@ func TestLocalFastPathDifferential(t *testing.T) {
 	// the two paths qualify join output columns differently, and the DAG
 	// gather can carry extra upstream columns; value parity on the
 	// requested columns is the correctness contract here (column-set/name
-	// parity is tracked as a separate polish issue).
+	// parity is tracked as a separate polish issue). Floats render at 12
+	// significant digits: the single-process pipeline sums sequentially
+	// while the DAG merges partial sums, so float aggregates legitimately
+	// drift by a few ULP between the paths (same non-associativity as the
+	// Q15 CTE float drift).
 	canon := func(rows []map[string]any, cols []string, ordered bool) []string {
 		out := make([]string, len(rows))
 		for i, r := range rows {
@@ -157,7 +161,14 @@ func TestLocalFastPathDifferential(t *testing.T) {
 						v = r[col[dot+1:]]
 					}
 				}
-				fmt.Fprintf(&sb, "%v|", v)
+				switch f := v.(type) {
+				case float64:
+					fmt.Fprintf(&sb, "%.12g|", f)
+				case float32:
+					fmt.Fprintf(&sb, "%.6g|", f)
+				default:
+					fmt.Fprintf(&sb, "%v|", v)
+				}
 			}
 			out[i] = sb.String()
 		}
@@ -217,7 +228,7 @@ func TestLocalFastPathDifferential(t *testing.T) {
 	var want []string
 	for _, r := range rows {
 		if r["l_orderkey"].(int32) < 10 {
-			want = append(want, fmt.Sprintf("%v|%v|",
+			want = append(want, fmt.Sprintf("%v|%.12g|",
 				strings.ToLower(r["l_shipmode"].(string)),
 				r["l_quantity"].(float64)*2))
 		}
