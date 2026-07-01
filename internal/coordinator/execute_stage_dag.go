@@ -1102,7 +1102,13 @@ func (c *Coordinator) dispatchPipelineStage(
 		// many results. Dispatch a filter-scan task that reads the
 		// parquet files, applies FilterExprs, and writes a WSHF output
 		// the rest of the native-DAG pipeline can consume.
-		if len(stage.FilterExprs) > 0 {
+		//
+		// ProjectExprs likewise forces the fragment path (#169): the
+		// SELECT list carries expressions that must be COMPUTED before
+		// the gather — raw-parquet passthrough would hand the gather
+		// un-projected scan columns, and applyOutputRenames can only
+		// rename/drop.
+		if len(stage.FilterExprs) > 0 || len(stage.ProjectExprs) > 0 {
 			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 		}
 		// No filter: by default pass raw parquet files through (saves the
@@ -1603,6 +1609,16 @@ func (c *Coordinator) dispatchScanFilterStage(
 			t.Operators = append(t.Operators, distributed.OpSpec{
 				Type:       distributed.OpFilter,
 				Predicates: append([]string(nil), stage.FilterExprs...),
+			})
+		}
+		if len(stage.ProjectExprs) > 0 {
+			projections := make([]distributed.ProjectSpec, len(stage.ProjectExprs))
+			for i, p := range stage.ProjectExprs {
+				projections[i] = distributed.ProjectSpec{Expr: p.Expr, Name: p.Name, Type: int(p.Type)}
+			}
+			t.Operators = append(t.Operators, distributed.OpSpec{
+				Type:        distributed.OpProject,
+				Projections: projections,
 			})
 		}
 		if fuseShuffle {

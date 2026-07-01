@@ -274,3 +274,52 @@ func collectFilterColumns(n plansql.Node, out map[string]struct{}) {
 		}
 	}
 }
+
+// buildSelectProjection compiles an OpProject spec into an exec.Project.
+// Bare column references become passthrough copies (DirectCopy with a
+// ColumnRef fallback); everything else compiles through the expression
+// engine and evaluates per row. Output columns appear in spec order and are
+// exactly the fragment's output schema — anything not listed is dropped,
+// which is the point: the fragment emits the SELECT list, not the scan's
+// input columns (#169).
+func buildSelectProjection(specs []distributed.ProjectSpec) (*exec.Project, error) {
+	if len(specs) == 0 {
+		return nil, fmt.Errorf("project: at least one projection required")
+	}
+	projCols := make([]exec.ProjectColumn, 0, len(specs))
+	for _, p := range specs {
+		node, err := plansql.ParseExpression(p.Expr)
+		if err != nil {
+			return nil, fmt.Errorf("parse projection %q: %w", p.Expr, err)
+		}
+		if ref, ok := node.(*plansql.ColRef); ok {
+			src := ref.String()
+			projCols = append(projCols, exec.ProjectColumn{
+				Name:       p.Name,
+				DirectCopy: src,
+				SourceCol:  src,
+				Expr:       exec.ColumnRef(src),
+			})
+			continue
+		}
+		compiled, err := expr.Compile(node)
+		if err != nil {
+			return nil, fmt.Errorf("compile projection %q: %w", p.Expr, err)
+		}
+		typ := parquet.TypeID(p.Type)
+		if p.Type == 0 {
+			typ = parquet.TypeString
+		}
+		e := compiled
+		projCols = append(projCols, exec.ProjectColumn{
+			Name: p.Name,
+			// Plan-time inferred type: the output column doesn't exist in
+			// the input schema, so exec.Project cannot resolve it there.
+			Type: typ,
+			Expr: func(b *batch.RecordBatch, row int) any {
+				return e.Eval(b, row)
+			},
+		})
+	}
+	return exec.NewProject(projCols), nil
+}
