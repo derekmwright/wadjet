@@ -33,6 +33,7 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	plan = pushdownPredicates(plan)
 	plan = dedupSemiAntiBuildSide(plan)
 	plan = reorderJoins(plan)
+	plan = rewriteDistinctAsGroupBy(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
 	computeRequiredColumns(plan)
