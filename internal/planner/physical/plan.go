@@ -152,6 +152,17 @@ type Stage struct {
 	// ("supp_nation", "l_year"). Only populated on the Gather stage.
 	OutputRenames []OutputRename
 
+	// ProjectExprs, set on a leaf scan stage whose output feeds the gather
+	// directly, makes the scan fragment compute the SELECT list (worker-side
+	// exec.Project after scan+filter). Without it a bare expression SELECT
+	// over a scan reaches the gather as raw scan columns — the gather's
+	// applyOutputRenames can rename/drop but not evaluate (#169). Expression
+	// entries are named by the lowercased expression text, matching the
+	// convention extractOutputRenames already expects for worker-computed
+	// expressions; bare columns are passthrough entries so the fragment
+	// output is exactly the SELECT-list inputs.
+	ProjectExprs []ProjectExprSpec
+
 	// Dynamic filter (Trino-style semi-join pushdown) annotations.
 	// EmitDynamicFilters is set on a build-side leaf scan stage; each task
 	// computes a partial KeyRange+Bloom and uploads as a sideband artifact.
@@ -189,6 +200,18 @@ type OutputRename struct {
 	From string
 	To   string
 	Expr plansql.Node
+}
+
+// ProjectExprSpec is one SELECT-list item a scan fragment must emit: Name is
+// the output column, Expr the SQL text the worker compiles and evaluates
+// (bare column references become passthrough copies). Type is the plan-time
+// inferred output type for computed expressions (inferProjectionType) — the
+// worker cannot resolve it from the input schema because the output column
+// doesn't exist there; zero means "resolve from source column" (bare refs).
+type ProjectExprSpec struct {
+	Expr string
+	Name string
+	Type parquet.TypeID
 }
 
 // WindowColSpec defines a window function column in a stage.
@@ -1690,7 +1713,77 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 			}
 		}
 	}
+	// #169: when the SELECT list carries scalar expressions and the gather
+	// reads a bare leaf scan, the expressions would never be computed —
+	// applyOutputRenames can rename/drop but not evaluate. Attach the
+	// SELECT list to the scan so its fragment projects it worker-side.
+	attachScanSelectProjections(node, stages)
 	return stages, nil
+}
+
+// attachScanSelectProjections sets ProjectExprs on a leaf scan stage when
+// (a) the terminal gather's sole dependency is that scan (nothing computes
+// between scan and gather) and (b) the outermost SELECT list contains at
+// least one scalar expression (non-column, non-aggregate, not a wrapped
+// synthetic aggregate). Expression outputs are named by their lowercased
+// text — exactly the source name extractOutputRenames maps to the user's
+// alias — and bare columns become passthrough entries so the fragment emits
+// the full SELECT-list input set.
+func attachScanSelectProjections(root *logical.Node, stages []Stage) {
+	proj := findOutputProjectionsForRename(root)
+	if len(proj) == 0 {
+		return
+	}
+	hasExpr := false
+	specs := make([]ProjectExprSpec, 0, len(proj))
+	for _, p := range proj {
+		if p.IsAgg {
+			return // aggregates compute in their own fragments
+		}
+		expr := p.Expr
+		if expr == "" {
+			expr = p.Column
+		}
+		if expr == "" {
+			return
+		}
+		name := strings.ToLower(expr)
+		var typ parquet.TypeID
+		if p.ASTExpr != nil && !isSimpleColRefForRename(p.ASTExpr) {
+			if referencesSyntheticAgg(p.ASTExpr) {
+				return // wrapped aggregate — evaluated at the gather
+			}
+			hasExpr = true
+			typ = inferProjectionType(p.ASTExpr, parquet.TypeString)
+		}
+		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ})
+	}
+	if !hasExpr {
+		return
+	}
+	var gather *Stage
+	for i := range stages {
+		if stages[i].Type == StageExchangeGather {
+			gather = &stages[i]
+			break
+		}
+	}
+	if gather == nil || len(gather.Dependencies) != 1 {
+		return
+	}
+	for i := range stages {
+		s := &stages[i]
+		if s.ID != gather.Dependencies[0] {
+			continue
+		}
+		// Plain leaf scans only: fused scan-aggregates project via their
+		// aggregate machinery, and non-scan stages mean something else
+		// computes between scan and gather.
+		if s.Type == StageScan && len(s.FusedAggGroupBy) == 0 && len(s.FusedAggSpecs) == 0 {
+			s.ProjectExprs = specs
+		}
+		return
+	}
 }
 
 // extractOutputRenames inspects the logical plan tree's outermost projection

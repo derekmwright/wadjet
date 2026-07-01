@@ -114,16 +114,6 @@ requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
 
 ## Known Issues
 
-### scan→gather never computes SELECT-list expressions (#169)
-
-A bare expression SELECT over a scan (`SELECT lower(x) AS m FROM t WHERE …`)
-returns raw scan columns distributed — no compute stage exists and the
-gather's `applyOutputRenames` can rename/drop but not evaluate. Expression
-SELECTs above aggregates/joins are unaffected (the compute fragment
-projects). The local fast path computes this shape correctly, so only
-over-threshold bare-expression scans hit it. Found by the fast-path
-differential test.
-
 ### DISTINCT over a non-decorrelatable scalar-subquery projection (fallback, distributed)
 
 The coordinator-dedup fallback dedups the *gather output*, and the gather
@@ -133,6 +123,15 @@ whose subquery survives decorrelation dedups over raw upstream columns
 sharded rewrite, so this is a narrow residual shape.
 
 ### History
+
+**Fixed 2026-07 (#169):** a bare expression SELECT over a scan returned raw
+scan columns distributed — no compute stage existed and the gather can only
+rename/drop. Now `attachScanSelectProjections` (plan.go) sets
+`Stage.ProjectExprs` on a leaf scan feeding the gather directly, the scan
+dispatches through the fragment path, and an `OpProject` op computes the
+SELECT list worker-side (plan-time type inference via `inferProjectionType`
+rides along — the output column doesn't exist in the input schema, so the
+worker can't resolve its type). Found by the fast-path differential test.
 
 **Fixed 2026-07:** distributed `SELECT DISTINCT` and aggregate-free `GROUP BY`
 returned every input row (no cross-task dedup) — #163 (first-cut coordinator

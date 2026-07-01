@@ -962,6 +962,13 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 	case distributed.OpHashJoinProbe, distributed.OpBroadcastProbe:
 		return e.buildFragmentJoinProbe(ctx, task, spec)
 
+	case distributed.OpProject:
+		proj, err := buildSelectProjection(spec.Projections)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []exec.UnaryOperator{proj}, nil, nil
+
 	default:
 		return nil, nil, fmt.Errorf("unsupported unary op %q", spec.Type)
 	}
@@ -1217,4 +1224,3 @@ func (s *fragmentGatherSink) finalize(ctx context.Context, _ distributed.Task, _
 }
 
 func (s *fragmentGatherSink) close() {}
-

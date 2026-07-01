@@ -130,12 +130,18 @@ func TestLocalFastPathDifferential(t *testing.T) {
 		{"SELECT DISTINCT l_returnflag, l_linestatus FROM lineitem",
 			[]string{"l_returnflag", "l_linestatus"}, false},
 		// Expression above a GROUP BY: the aggregate fragment computes the
-		// derived columns, so both paths project. (A bare expression SELECT
-		// over a scan is NOT here — the DAG path has a pre-existing bug
-		// where scan→gather never computes SELECT-list expressions; the
-		// ground-truth check at the end of this test covers that shape.)
+		// derived columns, so both paths project.
 		{"SELECT lower(l_shipmode) AS m, COUNT(*) AS c FROM lineitem GROUP BY lower(l_shipmode)",
 			[]string{"m", "c"}, false},
+		// Bare expression SELECT over a scan — #169's shape: the scan
+		// fragment computes the SELECT list (Stage.ProjectExprs → OpProject).
+		// Also checked against ground truth at the end of this test.
+		{"SELECT lower(l_shipmode) AS m, l_quantity * 2 AS q2 FROM lineitem WHERE l_orderkey < 10",
+			[]string{"m", "q2"}, false},
+		// Same shape without a WHERE: forces the raw-parquet-passthrough
+		// scan into the fragment path purely for the projection.
+		{"SELECT upper(l_returnflag) AS r FROM lineitem",
+			[]string{"r"}, false},
 		{"SELECT a.l_orderkey, a.l_linenumber, b.l_extendedprice FROM lineitem a JOIN lineitem b ON a.l_orderkey = b.l_orderkey WHERE a.l_orderkey < 50",
 			[]string{"a.l_orderkey", "a.l_linenumber", "b.l_extendedprice"}, false},
 	}
@@ -217,10 +223,8 @@ func TestLocalFastPathDifferential(t *testing.T) {
 	}
 
 	// Bare expression SELECT over a scan, checked against ground truth
-	// computed from the source rows. This shape is differential-excluded:
-	// the DAG's scan→gather path never computes SELECT-list expressions
-	// (pre-existing bug, same family as the #163 gather-projection gap) —
-	// the fast path is the one that gets it right.
+	// computed from the source rows (both paths compute it since the #169
+	// fix; this pins the actual values, not just path agreement).
 	fastRes, err := fast.ExecuteSQL(ctx, "SELECT lower(l_shipmode) AS m, l_quantity * 2 AS q2 FROM lineitem WHERE l_orderkey < 10")
 	if err != nil || fastRes.Error != "" {
 		t.Fatalf("expression fast: %v %s", err, fastRes.Error)

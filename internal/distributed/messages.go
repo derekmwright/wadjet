@@ -251,6 +251,8 @@ const (
 	OpExchangeSender    OpType = "exchange_sender"    // partitionedShuffleSink: hash-partition into N output files
 	OpUnpartitionedSink OpType = "unpartitioned_sink" // unpartitionedStageSink: single .wshf output
 	OpGatherSink        OpType = "gather_sink"        // gatherReplySink: stream batches to ReplySubject
+
+	OpProject OpType = "project" // compute SELECT-list expressions (exec.Project); output = exactly Projections
 )
 
 // OpSpec describes one operator within a fragment pipeline. Fields are
@@ -270,6 +272,9 @@ type OpSpec struct {
 
 	// OpFilter.
 	Predicates []string `json:"predicates,omitempty"`
+
+	// OpProject.
+	Projections []ProjectSpec `json:"projections,omitempty"`
 
 	// OpHashJoinProbe / OpBroadcastProbe.
 	JoinType            string   `json:"join_type,omitempty"`  // inner, left, semi, anti, …
@@ -329,6 +334,18 @@ type PreComputedAggregate struct {
 	GroupByCols []string  `json:"group_by_cols"`
 	AggSpecs    []AggSpec `json:"agg_specs"`
 	CacheFiles  []string  `json:"cache_files"`
+}
+
+// ProjectSpec is one output column of an OpProject: Name is the emitted
+// column, Expr the SQL expression the worker compiles (bare column
+// references become passthrough copies). Type is the plan-time inferred
+// parquet.TypeID for computed expressions (0 = resolve from the source
+// column) — the worker can't infer it from the input schema because the
+// output column doesn't exist there.
+type ProjectSpec struct {
+	Expr string `json:"expr"`
+	Name string `json:"name"`
+	Type int    `json:"type,omitempty"`
 }
 
 // AggSpec defines an aggregation in a task.
