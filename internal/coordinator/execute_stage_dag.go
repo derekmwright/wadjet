@@ -1085,7 +1085,14 @@ func (c *Coordinator) dispatchPipelineStage(
 		// leaf scan ran on ONE worker reading all scan files serially —
 		// at SF10 that was the dominant cost on Q01 (87s of 87s wall
 		// time was the single-worker lineitem scan).
-		if len(stage.FusedAggSpecs) > 0 {
+		// FusedAggGroupBy alone (no aggregate functions) is a bare
+		// GROUP BY — grouping IS the work, so it must route through the
+		// scan-aggregate path too. Falling through to a plain scan here
+		// skipped the partial dedup AND the fused hash-partition
+		// exchange, so the downstream final_aggregate's N tasks each
+		// read overlapping raw-row file slices and re-emitted every
+		// group per task (#166: 3 groups × 3 tasks = 9 rows).
+		if len(stage.FusedAggSpecs) > 0 || len(stage.FusedAggGroupBy) > 0 {
 			return c.dispatchScanAggregateStage(ctx, queryID, stage, workerCount)
 		}
 		// Plain scan with no fused aggregate. When the planner pushed

@@ -45,7 +45,7 @@ There are **two coordinator entry paths** — know which one you're in:
 | `NodeSort` | `sort` → merge-sort tree | `plan.go:3105` |
 | `NodeWindow` | `window` | `plan.go:3384` |
 | `NodeFilter` | pushes predicates onto child stage | `plan.go:3323` |
-| **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only |
+| **`NodeDistinct`** | **nothing — passthrough** | `default` case `plan.go:~3415`; walks children only. Top-level DISTINCT never reaches here — `logical.rewriteDistinctAsGroupBy` (optimizer) turns it into an aggregate-free `NodeAggregate` first, so it rides the aggregate stages. Remaining NodeDistincts (semi/anti build-side dedup, fallback shapes) stay passthrough. |
 | **`NodeProject`** | **nothing — passthrough** | same `default` case; aliases recovered at gather |
 
 ## Stage → worker fragment conversion
@@ -76,24 +76,27 @@ requires `len(GroupByCols)>0 || len(Aggregates)>0` and has **no `GroupByAll`**
 
 - **Aggregate (with functions):** `aggregate` (partial, per scan task) → `final_aggregate` (merge). The distribution pass inserts a shuffle/gather so the final merges all partials. ✅ correct distributed.
 - **Sort:** `sort` → merge-sort tree, merged at the gather. ✅
-- **DISTINCT / bare GROUP BY (no agg fn):** `NodeDistinct` is passthrough and a no-aggregate `NodeAggregate` produces no merge — so the native-DAG emits `scan → gather` with **no dedup operator**. ❌ See Known Issues.
+- **Bare GROUP BY (no agg fn):** same stages as aggregates — the fused scan runs the partial dedup and hash-partitions on the group keys; the `final_aggregate` fans out one task per disjoint partition. The dispatch gate that routes a fused scan into `dispatchScanAggregateStage` accepts `FusedAggGroupBy`-only stages (`execute_stage_dag.go`, was `FusedAggSpecs`-only — issue #166). ✅ sharded.
+- **Top-level DISTINCT:** rewritten at logical-optimize time to an aggregate-free GROUP BY over the SELECT list (`logical.rewriteDistinctAsGroupBy`, `planner/logical/distinct_rewrite.go`) — bare columns AND scalar expressions (derived group-bys are evaluated by the worker's `buildAggInputProjection`). Rides the sharded path above; the coordinator does no dedup (`MergeInfo.HasDistinct` is false post-rewrite). ✅ sharded.
+- **DISTINCT fallback shapes** (`SELECT DISTINCT *`, DISTINCT with aggregate projections, subquery expressions): not rewritten; `ExecuteSQL` applies `dedupGatherResult` over the projected gather output (`MergeInfo.HasDistinct`). Correct but single-node at the coordinator.
 
 ## Known Issues
 
-### Distributed DISTINCT and aggregate-free GROUP BY are not deduplicated (native-DAG)
+### DISTINCT over a non-decorrelatable scalar-subquery projection (fallback, distributed)
 
-`SELECT DISTINCT …` and `SELECT col … GROUP BY col` (no aggregate function)
-return **every input row** in distributed mode — no cross-task dedup. Confirmed
-2026-06-29 by stage dump (`scan → exchange-gather`, no dedup stage) and an
-end-to-end multi-worker run (`SELECT DISTINCT l_returnflag` → 60000 rows vs 3).
-The probe-split path dedups via `MergeInfo.HasDistinct`; the native-DAG path
-(every production entry point) does not. Masked because: standalone/single-
-process uses `buildDistinct` (works), and no test/TPC-H query exercises bare
-distinct or no-agg group-by distributed. Likely a native-DAG-unification
-regression. **Fix:** make `NodeDistinct` (and no-agg `NodeAggregate`) emit the
-two-phase dedup stages that the working aggregate path uses
-(`GroupByAll` partial → exchange(all-cols) → `GroupByAll` final). Tracked in the
-distributed-distinct workstream.
+The coordinator-dedup fallback dedups the *gather output*, and the gather
+cannot compute expression projections — so a `SELECT DISTINCT (<subquery>) …`
+whose subquery survives decorrelation dedups over raw upstream columns
+(over-distinguishes). Decorrelated subqueries become column refs and take the
+sharded rewrite, so this is a narrow residual shape.
+
+### History
+
+**Fixed 2026-07:** distributed `SELECT DISTINCT` and aggregate-free `GROUP BY`
+returned every input row (no cross-task dedup) — #163 (first-cut coordinator
+dedup, PR #165) then #166 + the sharded rewrite (partial-dedup at scan →
+hash-partition exchange → per-partition final tasks). Regression coverage:
+`coordinator/distinct_distributed_test.go` (multi-worker e2e, 9 query shapes).
 
 ## How to inspect this machinery (recipes)
 
