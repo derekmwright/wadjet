@@ -116,6 +116,12 @@ variable "max_concurrent" {
   default     = 4
 }
 
+variable "morsel_workers" {
+  description = "Worker --morsel-workers: intra-fragment parallel pipeline consumers per task (docs/design/morsel-execution.md). 1 = serial (matches the binary default; use for baselines), 0 = auto (width adapts to fragment size + idle CPU tokens — the A/B treatment), N>1 = fixed width."
+  type        = number
+  default     = 1
+}
+
 variable "mmap_relief" {
   description = "Worker --mmap-relief: MADV_DONTNEED relief of cold mmap'd cache files when RSS exceeds the ceiling. Default true (matches the binary default; validated at SF100 + edge 2026-06-11). Set false for flags-off A/B baselines."
   type        = bool
