@@ -216,6 +216,18 @@ variable "data_plane" {
   default     = ""
 }
 
+variable "streaming_exchange" {
+  description = "Streaming exchange (docs/design/streaming-exchange.md): consumers fetch stage outputs from producing workers' local disk over gRPC (peer-exchange port below) with async S3 upload; every failure falls through to the S3 path. Wires the coordinator (TPCH_STREAMING_EXCHANGE) and worker --streaming-exchange flags together. Default false = today's synchronous S3 shuffle."
+  type        = bool
+  default     = false
+}
+
+variable "peer_exchange_port" {
+  description = "Worker↔worker peer-exchange (FetchShuffle) port; SG opens it intra-cluster whenever streaming_exchange is set."
+  type        = number
+  default     = 9095
+}
+
 variable "data_plane_port" {
   description = "TCP port for the gRPC data-plane listener on the coordinator. Workers dial coord on this port. Only used when data_plane=grpc."
   type        = number
