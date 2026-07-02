@@ -244,7 +244,7 @@ func (c *Coordinator) runShuffleSide(
 			c.logger.Error("shuffle task retry publish failed",
 				"side", sideName, "task_id", t.ID, "error", pubErr)
 		}
-	}, c.logger, stageID)
+	}, c.logger, stageID, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
 
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {

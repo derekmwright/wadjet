@@ -1,8 +1,10 @@
 package coordinator
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"sync"
 	"time"
 
@@ -40,6 +42,7 @@ type peerFileRegistry struct {
 
 type peerFileGroup struct {
 	keys      []string
+	durable   map[string]bool // key → background upload landed (Phase B); absent = not durable
 	createdAt time.Time
 }
 
@@ -90,6 +93,46 @@ func (r *peerFileRegistry) Lookup(key string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.files[key]
+}
+
+// MarkDurable flips the durability bit for keys whose background upload
+// landed (worker UploadComplete). Unknown keys are recorded durable-only —
+// message ordering vs the result notification is not guaranteed.
+func (r *peerFileRegistry) MarkDurable(keys []string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, k := range keys {
+		qid := QueryIDFromPath(k)
+		if qid == "" {
+			continue
+		}
+		g := r.groups[qid]
+		if g == nil {
+			g = &peerFileGroup{createdAt: time.Now()}
+			r.groups[qid] = g
+		}
+		if g.durable == nil {
+			g.durable = make(map[string]bool)
+		}
+		g.durable[k] = true
+	}
+}
+
+// IsDurable reports whether the key's durable copy is known to exist.
+// Conservative: false for unknown keys and for keys produced by
+// synchronous-upload tasks that never send UploadComplete — callers treat
+// "not durable" as "don't conclude anything", never as "safe to fail".
+func (r *peerFileRegistry) IsDurable(key string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	g := r.groups[QueryIDFromPath(key)]
+	return g != nil && g.durable[key]
 }
 
 // TokenFor returns the fetch token for a query ID, minting one on first
@@ -152,7 +195,18 @@ func (c *Coordinator) annotateTaskPeerLocations(t *distributed.Task) {
 	if root == "" {
 		return
 	}
+	if c.streamingDisabledFor(root) {
+		return // ErrInputLost re-execution: pure Phase-A-less S3 semantics
+	}
 	t.FetchToken = c.peerFiles.TokenFor(root)
+	// Phase B: native-DAG stage/shuffle outputs are consumed by workers
+	// (peer tier + bounded S3 re-poll), so their uploads can run in the
+	// background. Pipeline/gather tasks stay synchronous — their outputs
+	// feed coordinator-side reads (legacy result retrieval) or stream
+	// directly.
+	if t.Type == distributed.TaskTypeStage || t.Type == distributed.TaskTypeShuffle {
+		t.AsyncUpload = true
+	}
 	var locs map[string]string
 	addAll := func(files []string) {
 		for _, f := range files {
@@ -186,6 +240,85 @@ func (c *Coordinator) annotateTaskPeerLocations(t *distributed.Task) {
 		addAll(t.FusedJoins[i].BuildFiles)
 	}
 	t.InputLocations = locs
+}
+
+// classifyFatalResult is the taskRetrier's fatal hook (nil-safe when
+// streaming exchange is off): a missing-input failure is unrecoverable by
+// task retry exactly when the producing worker is dead AND the key's
+// durable copy never landed (Phase-B async upload died with the worker).
+// Everything else returns false — retries either hit the peer again
+// (transient fetch failure) or S3 once the in-flight upload lands.
+func (c *Coordinator) classifyFatalResult(r distributed.ResultNotification) bool {
+	if r.MissingInputKey == "" || c.peerFiles == nil {
+		return false
+	}
+	if c.peerFiles.IsDurable(r.MissingInputKey) {
+		return false // durable copy exists now; a retry will read it
+	}
+	producer := c.peerFiles.Lookup(r.MissingInputKey)
+	if producer == "" {
+		return false // unknown producer — can't conclude, let retries run
+	}
+	if c.workers.IsAlive(producer) {
+		return false // producer alive: its upload will land or peer serves
+	}
+	c.logger.Error("streaming-exchange input lost: producer dead before upload landed",
+		"key", r.MissingInputKey, "producer", producer, "task_id", r.TaskID)
+	return true
+}
+
+// fetchStageOutputData reads one stage-output object for coordinator-side
+// consumption (scalar-subquery extraction). With streaming exchange off it
+// is a plain fetchResultData. With it on, a miss may just mean the
+// producer's Phase-B background upload hasn't landed — bounded re-poll,
+// with a fast input-lost exit when the producer is dead and the key never
+// went durable (the coordinator has no peer tier; S3 is its only read
+// path).
+func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]byte, error) {
+	data, err := c.fetchResultData(ctx, "", path)
+	if err == nil || c.peerFiles == nil {
+		return data, err
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if !c.peerFiles.IsDurable(path) {
+			if producer := c.peerFiles.Lookup(path); producer != "" && !c.workers.IsAlive(producer) {
+				return nil, fmt.Errorf("%s (%s): producer dead before upload landed", inputLostMarker, path)
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+		if data, err = c.fetchResultData(ctx, "", path); err == nil {
+			return data, nil
+		}
+	}
+}
+
+// streamingDisabledFor reports whether the root query runs with streaming
+// exchange disabled (the one-shot ErrInputLost re-execution).
+func (c *Coordinator) streamingDisabledFor(root string) bool {
+	_, disabled := c.streamingDisabled.Load(root)
+	return disabled
+}
+
+// streamingDisabledCtxKey marks a context as belonging to a
+// streaming-disabled re-execution; ExecuteSQL propagates it onto the fresh
+// query ID before dispatch and uses it to cap re-execution depth at one.
+type streamingDisabledCtxKey struct{}
+
+func withStreamingExchangeDisabled(ctx context.Context) context.Context {
+	return context.WithValue(ctx, streamingDisabledCtxKey{}, true)
+}
+
+func streamingExchangeDisabled(ctx context.Context) bool {
+	v, _ := ctx.Value(streamingDisabledCtxKey{}).(bool)
+	return v
 }
 
 // sweepLocked drops groups and tokens past peerRegistryTTL, at most once

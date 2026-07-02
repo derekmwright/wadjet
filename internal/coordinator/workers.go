@@ -307,6 +307,16 @@ func (wr *WorkerRegistry) PeerAddr(workerID string) string {
 	return w.PeerAddr
 }
 
+// IsAlive reports whether the worker has been seen within the stale TTL
+// (draining still counts as alive — a draining worker serves peer fetches
+// and finishes uploads).
+func (wr *WorkerRegistry) IsAlive(workerID string) bool {
+	wr.mu.RLock()
+	defer wr.mu.RUnlock()
+	w, ok := wr.workers[workerID]
+	return ok && w.LastSeen.After(time.Now().Add(-wr.stale))
+}
+
 // Count returns the number of active workers.
 func (wr *WorkerRegistry) Count() int {
 	return len(wr.ActiveWorkers())

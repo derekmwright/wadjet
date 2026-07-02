@@ -64,7 +64,7 @@ func waitRepublished(t *testing.T, c *collectingRepublisher, n int) []distribute
 
 func TestTaskRetrier_AllSucceedFirstTry(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(3), true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(3), true, rep.republish, slog.Default(), "s", nil)
 	if tr.Observe(okResult("a", "f-a")) {
 		t.Fatal("done after 1/3")
 	}
@@ -91,7 +91,7 @@ func TestTaskRetrier_AllSucceedFirstTry(t *testing.T) {
 
 func TestTaskRetrier_FailThenRetrySucceeds(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s", nil)
 	if tr.Observe(failResult("a", "worker died")) {
 		t.Fatal("failure with retries left must not be terminal")
 	}
@@ -116,7 +116,7 @@ func TestTaskRetrier_FailThenRetrySucceeds(t *testing.T) {
 
 func TestTaskRetrier_ExhaustsAttempts(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s", nil)
 	// Attempt 1 fails → retry (attempt 2). Attempt 2 fails → retry (attempt 3).
 	// Attempt 3 fails → terminal.
 	if tr.Observe(failResult("a", "boom-1")) {
@@ -144,7 +144,7 @@ func TestTaskRetrier_ExhaustsAttempts(t *testing.T) {
 
 func TestTaskRetrier_RetryDisabled(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(1), false, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(1), false, rep.republish, slog.Default(), "s", nil)
 	if !tr.Observe(failResult("a", "boom")) {
 		t.Fatal("with retry disabled, first failure must be terminal")
 	}
@@ -162,7 +162,7 @@ func TestTaskRetrier_RetryDisabled(t *testing.T) {
 // a task still outstanding.
 func TestTaskRetrier_DuplicateDeliveryIgnored(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s", nil)
 	if tr.Observe(okResult("a", "f-a")) {
 		t.Fatal("done after 1/2")
 	}
@@ -179,7 +179,7 @@ func TestTaskRetrier_DuplicateDeliveryIgnored(t *testing.T) {
 }
 
 func TestTaskRetrier_UnknownTaskIgnored(t *testing.T) {
-	tr := newTaskRetrier(retryTestTasks(1), true, nil, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(1), true, nil, slog.Default(), "s", nil)
 	if tr.Observe(okResult("zzz", "f")) {
 		t.Fatal("unknown task must not complete the stage")
 	}
@@ -195,7 +195,7 @@ func TestTaskRetrier_UnknownTaskIgnored(t *testing.T) {
 // the eventual success must still win.
 func TestTaskRetrier_LateDuplicateAfterRetry(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s", nil)
 	if tr.Observe(failResult("a", "boom")) {
 		t.Fatal("terminal too early")
 	}
@@ -217,7 +217,7 @@ func TestTaskRetrier_LateDuplicateAfterRetry(t *testing.T) {
 // attempt's notification are captured per task and flattened in dispatch
 // order; duplicates must not double-collect.
 func TestTaskRetrier_DynamicFilterPartials(t *testing.T) {
-	tr := newTaskRetrier(retryTestTasks(2), true, nil, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(2), true, nil, slog.Default(), "s", nil)
 	rA := okResult("a", "f-a")
 	rA.DynamicFilterPartials = []distributed.DynamicFilterPartialRef{
 		{FilterID: "df1", Bucket: "b", Key: "a-df1"},
@@ -244,7 +244,7 @@ func TestTaskRetrier_DynamicFilterPartials(t *testing.T) {
 // reported back for liveness cleanup.
 func TestTaskRetrier_RetryStuck_Redispatches(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s", nil)
 	tr.Observe(okResult("b", "f-b")) // b terminal
 
 	re, term := tr.RetryStuck([]string{"a", "b", "zzz"})
@@ -272,7 +272,7 @@ func TestTaskRetrier_RetryStuck_Redispatches(t *testing.T) {
 // reported failure; the stage idle timeout is the backstop.
 func TestTaskRetrier_RetryStuck_CapDoesNotFail(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s", nil)
 	re, _ := tr.RetryStuck([]string{"a"}) // attempt 2
 	if len(re) != 1 {
 		t.Fatalf("first stuck sweep redispatched %v, want [a]", re)
@@ -301,7 +301,7 @@ func TestTaskRetrier_RetryStuck_CapDoesNotFail(t *testing.T) {
 // re-dispatch, even for stuck tasks (a retry would duplicate streamed rows).
 func TestTaskRetrier_RetryStuck_RetryDisabled(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(1), false, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(1), false, rep.republish, slog.Default(), "s", nil)
 	re, _ := tr.RetryStuck([]string{"a"})
 	if len(re) != 0 {
 		t.Fatalf("redispatched %v with retry disabled", re)
@@ -316,7 +316,7 @@ func TestTaskRetrier_RetryStuck_RetryDisabled(t *testing.T) {
 // other stages' entries alone.
 func TestReapStuckOnce(t *testing.T) {
 	rep := &collectingRepublisher{}
-	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s", nil)
 	tr.Observe(okResult("b", "f-b")) // b terminal
 
 	liveness := NewTaskLiveness()

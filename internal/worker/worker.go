@@ -372,6 +372,9 @@ func (w *Worker) Start(ctx context.Context) error {
 			w.executor.broadcastCache.CleanupQuery(queryID)
 		}
 		w.executor.peers.CleanupQuery(queryID)
+		// Abort pending background uploads — a terminal query's scratch is
+		// about to be purged; landing more of it is waste (and re-leaks).
+		w.executor.uploads.CancelQuery(queryID)
 		w.logger.Debug("query cancelled", "query_id", queryID)
 	})
 	if err != nil {
@@ -409,6 +412,7 @@ func (w *Worker) Start(ctx context.Context) error {
 			w.executor.resultStore.CleanupQuery(queryID)
 		}
 		w.executor.peers.CleanupQuery(queryID)
+		w.executor.uploads.CancelQuery(queryID)
 	})
 	if err != nil {
 		return fmt.Errorf("subscribing to completions: %w", err)
@@ -669,6 +673,7 @@ func (w *Worker) Stop() {
 	if w.peerClient != nil {
 		w.peerClient.Close()
 	}
+	w.executor.uploads.Drain()
 
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }
@@ -1502,6 +1507,12 @@ func (w *Worker) PeerExchangeAddr() string {
 // served via peer fetch, and hinted fetches that fell through to S3.
 func (w *Worker) PeerFetchStats() (hits, fallthroughs int64) {
 	return w.executor.PeerFetchHits(), w.executor.PeerFetchFallthroughs()
+}
+
+// UploadStats returns the Phase-B background-upload counters: files landed,
+// files cancelled by query completion, files abandoned after retries.
+func (w *Worker) UploadStats() (completed, cancelled, failed int64) {
+	return w.executor.uploads.UploadStats()
 }
 
 // reapCancelled removes cancellation entries older than maxAge.

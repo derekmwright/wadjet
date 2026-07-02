@@ -41,6 +41,15 @@ func (e *Executor) uploadUnpartitionedSpill(ctx context.Context, task distribute
 	}
 	size := stat.Size()
 
+	// Phase-B async upload: adopt + record + KV now, PUT in the background.
+	// Adoption failure falls through to the synchronous body below.
+	if root, asyncOK := e.asyncUploadEligible(&task); asyncOK {
+		if job, ok := e.finishStageOutputAsync(ctx, &task, key, srcPath, size, false, result); ok {
+			e.uploads.StartTask(root, task.ID, result.WorkerID, []uploadJob{job})
+			return nil
+		}
+	}
+
 	f, err := os.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("scan task %s: open spill file: %w", task.ID, err)
@@ -309,9 +318,29 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 // between the legacy collect-then-partition path (writePartitionedShuffle) and
 // the streaming-partition path (runStageScanPartitionedStreaming).
 func (e *Executor) uploadPartitionedShuffleFiles(ctx context.Context, task distributed.Task, sink *partitionedShuffleSink, result *distributed.ResultNotification) error {
+	root, asyncOK := e.asyncUploadEligible(&task)
+	var jobs []uploadJob
+	defer func() {
+		if len(jobs) > 0 {
+			e.uploads.StartTask(root, task.ID, result.WorkerID, jobs)
+		}
+	}()
 	for p, localPath := range sink.PartitionFiles() {
 		if localPath == "" {
 			continue
+		}
+		// Phase-B async upload: adopt + record + KV, PUT in the background.
+		// Adoption failure falls through to the synchronous body below.
+		if asyncOK {
+			fi, statErr := os.Stat(localPath)
+			if statErr != nil {
+				return fmt.Errorf("stage task %s: stat partition %d: %w", task.ID, p, statErr)
+			}
+			key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
+			if job, ok := e.finishStageOutputAsync(ctx, &task, key, localPath, fi.Size(), false, result); ok {
+				jobs = append(jobs, job)
+				continue
+			}
 		}
 		f, err := os.Open(localPath)
 		if err != nil {
@@ -395,6 +424,27 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 
 	key := fmt.Sprintf("%s%s.wshf", task.ResultPrefix, task.ID)
 
+	// Phase-B async upload: stage the payload as a cache-adopted local file
+	// (peers + background upload read it), record + KV now, PUT in the
+	// background. Adoption failure falls through to the synchronous path.
+	if root, asyncOK := e.asyncUploadEligible(&task); asyncOK {
+		if adopted := e.cacheUnpartitionedLocal(task.QueryID, key, payload); adopted != "" {
+			result.ResultFiles = append(result.ResultFiles, key)
+			result.SizeBytes += int64(len(payload))
+			if e.resultKV != nil && len(payload) <= natsKVResultThreshold {
+				if _, kvErr := e.resultKV.Put(ctx, natsKVKey(key), payload); kvErr != nil {
+					e.logger.Debug("KV cache write failed (upload pending, peers cover reads)",
+						"task_id", task.ID, "key", key, "err", kvErr)
+				}
+			}
+			e.uploads.StartTask(root, task.ID, result.WorkerID, []uploadJob{{
+				bucket: task.ResultBucket, key: key, srcPath: adopted,
+				compress: false, tmpDir: e.spillDir,
+			}})
+			return nil
+		}
+	}
+
 	// S3 is the durable store. NATS KV has a 5-minute TTL (coordinator.go
 	// jetstream.KeyValueConfig) and a 1 GB bucket cap — entries can expire or
 	// be evicted before downstream stages read them. Q02 SF10 2026-04-28 hit
@@ -428,31 +478,35 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 }
 
 // cacheUnpartitionedLocal writes payload to a temp file under the worker's
-// spill directory and adopts it into the LocalStageCache. Best-effort — any
-// I/O failure leaves the cache empty for this entry, and the consumer falls
-// through to S3 as before. Caller must have already written payload durably
-// to S3 (or KV) before invoking this.
-func (e *Executor) cacheUnpartitionedLocal(queryID, key string, payload []byte) {
+// spill directory and adopts it into the LocalStageCache, returning the
+// adopted path ("" on any failure). Best-effort for synchronous callers —
+// an empty return leaves the cache cold and consumers fall through to S3.
+// The Phase-B async path REQUIRES a non-empty return before skipping the
+// synchronous upload (the adopted file is what the background upload
+// reads).
+func (e *Executor) cacheUnpartitionedLocal(queryID, key string, payload []byte) string {
 	if e.localCache == nil || e.spillDir == "" {
-		return
+		return ""
 	}
 	tmp, err := os.CreateTemp(e.spillDir, "stage-unpart-*.wshf")
 	if err != nil {
-		return
+		return ""
 	}
 	tmpPath := tmp.Name()
 	if _, err := tmp.Write(payload); err != nil {
 		tmp.Close()
 		_ = os.Remove(tmpPath)
-		return
+		return ""
 	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
-		return
+		return ""
 	}
-	if adopted := e.localCache.Adopt(queryID, key, tmpPath); adopted == "" {
+	adopted := e.localCache.Adopt(queryID, key, tmpPath)
+	if adopted == "" {
 		_ = os.Remove(tmpPath)
 	}
+	return adopted
 }
 
 // mapJoinTypeString converts the canonical join-type string carried on

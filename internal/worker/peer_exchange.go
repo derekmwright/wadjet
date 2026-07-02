@@ -2,13 +2,16 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
 // peerExchange holds the worker's streaming-exchange state (Phase A,
@@ -158,6 +161,61 @@ func (s *cachedFileStreamSource) openShuffleFromPeer(ctx context.Context, key, a
 		return fmt.Errorf("peer %s returned non-shuffle payload for %s (magic %q)", addr, key, magic[:])
 	}
 	return s.openShuffleFile(ctx, key, magic[:], rc, wshc)
+}
+
+// durableWaitTotal bounds how long a consumer re-polls S3 for a
+// streaming-query key whose peer fetch failed (or had no hint) while the
+// durable copy hasn't landed yet (Phase-B async upload in flight).
+// Failure-recovery path, not a hot loop — past the bound the task fails
+// with MissingInputKey and the coordinator classifies. var so tests can
+// shrink the window.
+var durableWaitTotal = 15 * time.Second
+
+// durableWaitPoll is the S3 re-poll cadence within durableWaitTotal.
+var durableWaitPoll = 500 * time.Millisecond
+
+// missingInputError marks a task failure caused by an unresolvable hinted
+// input: the peer fetch failed and the durable copy stayed absent past the
+// bounded wait. Surfaces as ResultNotification.MissingInputKey so the
+// coordinator can distinguish "producer died before its upload landed"
+// (ErrInputLost, unrecoverable by task retry) from ordinary failures.
+type missingInputError struct {
+	key   string
+	cause error
+}
+
+func (e *missingInputError) Error() string {
+	return fmt.Sprintf("input %s unavailable: peer fetch failed and no durable copy after %s: %v", e.key, durableWaitTotal, e.cause)
+}
+
+func (e *missingInputError) Unwrap() error { return e.cause }
+
+// awaitDurableObject re-polls the store for a hinted key whose first read
+// missed — the producing worker reported the file, so either its background
+// upload is in flight (it will land) or the producer died with it (it
+// won't). Returns the opened reader on success.
+func (s *cachedFileStreamSource) awaitDurableObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	deadline := time.Now().Add(durableWaitTotal)
+	var lastErr error
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(min(durableWaitPoll, remaining)):
+		}
+		rc, _, err := s.executor.store.Get(ctx, s.bucket, key)
+		if err == nil {
+			return rc, nil
+		}
+		lastErr = err
+		if !errors.Is(err, objstore.ErrNotFound) {
+			return nil, err // real store error — don't spin on it
+		}
+	}
 }
 
 // PeerFetchHits returns how many input files were served via peer fetch.

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/dataplane"
 	"github.com/citc-tech/wadjet/internal/distributed"
@@ -174,6 +176,79 @@ func TestPeerTierBadTokenFallsThrough(t *testing.T) {
 	if consumer.PeerFetchFallthroughs() != 1 {
 		t.Fatalf("fallthroughs = %d, want 1", consumer.PeerFetchFallthroughs())
 	}
+}
+
+// TestMissingInputSurfacesStructurally drives the Phase-B failure contract:
+// dead peer + no durable copy past the bounded wait → a typed
+// missingInputError that survives wrapping (so Execute can populate
+// ResultNotification.MissingInputKey for the coordinator's classifier).
+// Also covers the hint-less case: a producer reaped before this consumer
+// dispatched leaves only the fetch token behind.
+func TestMissingInputSurfacesStructurally(t *testing.T) {
+	origTotal, origPoll := durableWaitTotal, durableWaitPoll
+	durableWaitTotal, durableWaitPoll = 200*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { durableWaitTotal, durableWaitPoll = origTotal, origPoll })
+
+	const (
+		queryID = "q-lost"
+		key     = "queries/q-lost/stage-1/partition=0001/task-9.wshf"
+		bucket  = "scratch"
+	)
+	for name, hints := range map[string]map[string]string{
+		"dead peer hint": {key: "127.0.0.1:1"},
+		"no hint":        nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			consumer, _ := newConsumer(t, bucket) // no object in the store
+			consumer.peers.registerTask(&distributed.Task{
+				QueryID:        "st-join-2-" + queryID,
+				ResultPrefix:   "queries/" + queryID + "/stage-2/",
+				FetchToken:     "tok",
+				InputLocations: hints,
+			})
+			src := newCachedFileStreamSource(consumer, "st-join-2-"+queryID, bucket, []string{key})
+			defer src.Close()
+			_, err := src.Next(context.Background())
+			if err == nil {
+				t.Fatal("expected missing-input failure")
+			}
+			wrapped := fmt.Errorf("stage task t9: source next: %w", err)
+			var miss *missingInputError
+			if !errors.As(wrapped, &miss) || miss.key != key {
+				t.Fatalf("error not a missingInputError for %s: %v", key, wrapped)
+			}
+		})
+	}
+
+	// Untokened query (streaming off): plain error, no missingInputError.
+	t.Run("no token no hint", func(t *testing.T) {
+		consumer, _ := newConsumer(t, bucket)
+		src := newCachedFileStreamSource(consumer, queryID, bucket, []string{key})
+		defer src.Close()
+		_, err := src.Next(context.Background())
+		var miss *missingInputError
+		if err == nil || errors.As(err, &miss) {
+			t.Fatalf("non-streaming miss must stay a plain error, got %v", err)
+		}
+	})
+
+	// Upload lands DURING the bounded wait → read succeeds.
+	t.Run("upload lands mid-wait", func(t *testing.T) {
+		consumer, store := newConsumer(t, bucket)
+		consumer.peers.registerTask(&distributed.Task{
+			QueryID:      "st-join-2-" + queryID,
+			ResultPrefix: "queries/" + queryID + "/stage-2/",
+			FetchToken:   "tok",
+		})
+		go func() {
+			time.Sleep(60 * time.Millisecond)
+			putObject(t, store, bucket, key, makeWshfBytes(t, []int64{42}))
+		}()
+		src := newCachedFileStreamSource(consumer, "st-join-2-"+queryID, bucket, []string{key})
+		if got := drainRows(t, src); got != 1 {
+			t.Fatalf("rows = %d, want 1", got)
+		}
+	})
 }
 
 func TestPeerExchangeRegistryLifecycle(t *testing.T) {

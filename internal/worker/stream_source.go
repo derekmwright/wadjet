@@ -3,6 +3,7 @@ package worker
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -356,6 +358,25 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	// at the magic bytes, and decide whether this is a WSHF (or compressed
 	// WSHC) shuffle file or some legacy Parquet payload.
 	rc, _, err := s.executor.store.Get(ctx, s.bucket, filePath)
+	if err != nil {
+		// Streaming-query key with no durable copy: the producer reported
+		// this file, so its Phase-B background upload is either in flight
+		// (bounded re-poll below catches it landing) or died with the
+		// producer (missingInputError → coordinator classifies via liveness
+		// + durability bits). Trigger on a hint OR on the query's fetch
+		// token alone — a producer reaped before this task was dispatched
+		// leaves no hint, but the key can still be upload-pending.
+		if peers := s.executor.peers; peers != nil && errors.Is(err, objstore.ErrNotFound) {
+			if addr, token := peers.hintFor(filePath); addr != "" || token != "" {
+				waited, waitErr := s.awaitDurableObject(ctx, filePath)
+				if waitErr != nil {
+					return &missingInputError{key: filePath, cause: waitErr}
+				}
+				rc = waited
+				err = nil
+			}
+		}
+	}
 	if err != nil {
 		// Both KV and store missed. Annotate so the diagnostic gap from
 		// 2026-04-25 (object not found cascade in pgwire→coord routing)
