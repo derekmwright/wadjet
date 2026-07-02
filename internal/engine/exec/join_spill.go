@@ -213,7 +213,13 @@ func (s *spillState) closeProbeWriters() error {
 	return nil
 }
 
-// cleanup removes all spill files.
+// cleanup removes all spill files and clears the partition bookkeeping.
+// Clearing matters under morsel-parallel fragments: cloned HashJoinProbes
+// share this spillState with per-probe drain cursors, and the fragment
+// runner drains every clone's chain. The first drain processes all spilled
+// partitions and lands here; without the clears, the next clone's
+// HasPendingFlush would see stale spilledParts entries and re-open files
+// this call just deleted.
 func (s *spillState) cleanup() {
 	for _, files := range s.partBuildFiles {
 		for _, f := range files {
@@ -225,6 +231,9 @@ func (s *spillState) cleanup() {
 			os.Remove(f)
 		}
 	}
+	clear(s.spilledParts)
+	clear(s.partBuildFiles)
+	clear(s.partProbeFiles)
 }
 
 // ---- Columnar Batch Spill I/O ----

@@ -92,6 +92,14 @@ type Executor struct {
 	// uploads runs Phase-B background S3 uploads for AsyncUpload tasks.
 	// Always non-nil; dormant unless tasks arrive with the flag set.
 	uploads *uploadManager
+
+	// Morsel-driven intra-fragment parallelism (SetMorselWorkers,
+	// docs/design/morsel-execution.md). morselWorkers: 0/1 = serial (zero
+	// value is dormant-safe), -1 = auto, N>1 = fixed width. cpuTokens bounds
+	// the EXTRA compute goroutines across all concurrent tasks; nil when
+	// morsels are disabled.
+	morselWorkers int
+	cpuTokens     *cpuTokens
 }
 
 // NewExecutor creates a new task executor.
@@ -256,6 +264,20 @@ func (e *Executor) SetLogger(l *slog.Logger) {
 	e.logger = l
 	if e.uploads != nil {
 		e.uploads.logger = l
+	}
+}
+
+// SetMorselWorkers configures intra-fragment parallel pipeline consumers
+// (morsel-driven execution, docs/design/morsel-execution.md). 0 and 1 =
+// serial (today's behavior); -1 = auto (width adapts to fragment input size
+// and idle CPU tokens); N>1 = fixed width of N. Must be called before the
+// worker starts executing tasks.
+func (e *Executor) SetMorselWorkers(n int) {
+	e.morselWorkers = n
+	if n == -1 || n > 1 {
+		e.cpuTokens = newCPUTokens(defaultCPUTokenCapacity())
+	} else {
+		e.cpuTokens = nil
 	}
 }
 
