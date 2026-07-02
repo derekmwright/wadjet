@@ -1015,6 +1015,13 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	srv := server.New(srvCfg, logger)
 
 	// Register admin API if config manager is available
+	// Coordinator-side ABAC: with the provider wired, ExecuteSQL enforces
+	// table/row/column policies itself, which lets pgwire route authed
+	// connections through the native-DAG executor and local fast path.
+	if provider != nil {
+		coord.SetAuthProvider(provider)
+	}
+
 	if cfgMgr != nil && provider != nil {
 		admin := server.NewAdminAPI(cfgMgr, provider, logger)
 		admin.RegisterRoutes(srv.Mux())
@@ -1270,6 +1277,13 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	configureEmbeddingProvider(logger)
 
 	srv := server.New(srvCfg, logger)
+
+	// Coordinator-side ABAC: with the provider wired, ExecuteSQL enforces
+	// table/row/column policies itself, which lets pgwire route authed
+	// connections through the native-DAG executor and local fast path.
+	if provider != nil {
+		coord.SetAuthProvider(provider)
+	}
 
 	if cfgMgr != nil && provider != nil {
 		admin := server.NewAdminAPI(cfgMgr, provider, logger)

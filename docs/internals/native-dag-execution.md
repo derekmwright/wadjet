@@ -64,6 +64,31 @@ Facts that matter when touching this:
 - Differential gate: `coordinator/local_fastpath_test.go` runs every shape
   through both paths and diffs rows. **It found #169 on its first run.**
 
+## ABAC on the coordinator paths
+
+With an auth provider wired (`Coordinator.SetAuthProvider`, done by
+`wadjet serve` whenever auth is configured), `ExecuteSQL` enforces access
+policies itself via `auth.EnforcePlanPolicies` — the same helper the
+embedded engine calls — table denial, row-filter injection, and column
+deny/mask, applied to the logical plan after scan annotation and before
+`Optimize`, so both the local fast path and the DAG consume the enforced
+plan. This is what lets pgwire route **authenticated** connections through
+the coordinator (`canBypassDB` accepts when `coord.EnforcesABAC()`);
+previously every authed connection fell back to the legacy single-process
+`db.Query` path — no distribution, no fast path.
+
+Distributed subtlety: `InjectColumnPolicies` wraps the scan in a
+**security-barrier Project** (`Node.SecurityBarrier`) — masked columns as
+literals, denied columns absent. Ordinary Projects are walkStages
+passthroughs, but a dropped barrier leaks raw values, so `walkStages`
+absorbs it into the scan stage (`absorbSecurityBarrier` →
+`Stage.SecurityProjectExprs`) across any pushed-down Filters in between;
+scan fragments apply it as the first `OpProject` — before SELECT-list
+projections and before fused partial aggregates — so restricted values
+never leave the worker. Parity gate:
+`coordinator/abac_distributed_test.go` compares fast path and DAG against
+the embedded engine per policy shape.
+
 ## Planning pipeline (logical → stages)
 
 `PlanDistributed` (`planner/physical/plan.go:1579`):

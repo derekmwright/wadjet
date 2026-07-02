@@ -163,6 +163,14 @@ type Stage struct {
 	// output is exactly the SELECT-list inputs.
 	ProjectExprs []ProjectExprSpec
 
+	// SecurityProjectExprs is the ABAC security barrier absorbed from a
+	// SecurityBarrier logical Project wrapping this scan
+	// (absorbSecurityBarrier): visible columns pass through, masked columns
+	// are literal expressions, denied columns are absent. Applied as the
+	// FIRST projection in the scan fragment — before ProjectExprs and
+	// before any aggregate — so restricted values never leave the worker.
+	SecurityProjectExprs []ProjectExprSpec
+
 	// Dynamic filter (Trino-style semi-join pushdown) annotations.
 	// EmitDynamicFilters is set on a build-side leaf scan stage; each task
 	// computes a partial KeyRange+Bloom and uploads as a sideband artifact.
@@ -3530,6 +3538,80 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 		for _, child := range node.Children {
 			p.walkStages(child, stages, parentID)
 		}
+		// ABAC security barrier (InjectColumnPolicies wraps the scan in a
+		// Project of masked/visible columns). An ordinary Project can pass
+		// through — the gather recovers aliases — but a DROPPED barrier
+		// leaks raw values, so absorb it into the scan stage it wraps:
+		// the scan fragment applies it as an OpProject before anything
+		// else consumes rows (filters excepted; they run on pre-barrier
+		// columns exactly as the single-process pipeline orders them).
+		if node.Type == logical.NodeProject && node.SecurityBarrier && len(node.Children) == 1 {
+			// Predicate pushdown may have moved Filters below the barrier
+			// (barrier → Filter… → Scan); filters on raw columns below the
+			// mask is exactly the single-process pipeline's order, so
+			// absorbing across them preserves semantics.
+			child := node.Children[0]
+			for child != nil && child.Type == logical.NodeFilter && len(child.Children) == 1 {
+				child = child.Children[0]
+			}
+			if child != nil && child.Type == logical.NodeScan {
+				absorbSecurityBarrier(node, child, stages)
+			}
+		}
+	}
+}
+
+// absorbSecurityBarrier attaches a security-barrier projection to the scan
+// stage just emitted for its child. The barrier lists every visible column
+// (bare passthrough) with masked columns as literal expressions and denied
+// columns absent; output names are the original column names, so downstream
+// stages (joins, aggregates, gather renames) resolve unchanged — they just
+// see masked values and never see denied ones.
+func absorbSecurityBarrier(node, scan *logical.Node, stages *[]Stage) {
+	var target *Stage
+	for i := len(*stages) - 1; i >= 0; i-- {
+		s := &(*stages)[i]
+		if s.Type == StageScan && s.TableName == scan.TableName {
+			target = s
+			break
+		}
+	}
+	if target == nil {
+		return
+	}
+	// Trim to the columns the scan actually reads (parquet pruning hint) —
+	// passthroughs of unread columns would emit useless null columns.
+	need := make(map[string]bool, len(target.Columns))
+	for _, c := range target.Columns {
+		need[c] = true
+	}
+	specs := make([]ProjectExprSpec, 0, len(node.Projections))
+	for _, pr := range node.Projections {
+		name := pr.Alias
+		if name == "" {
+			name = pr.Column
+		}
+		if name == "" {
+			continue
+		}
+		expr := pr.Expr
+		if expr == "" {
+			expr = pr.Column
+		}
+		isExpr := pr.ASTExpr != nil && !isSimpleColRefForRename(pr.ASTExpr)
+		// Trim passthroughs the scan doesn't read; masks are computed from
+		// literals (the scan never reads the raw column), so they always stay.
+		if !isExpr && len(need) > 0 && !need[name] {
+			continue
+		}
+		var typ parquet.TypeID
+		if isExpr {
+			typ = inferProjectionType(pr.ASTExpr, parquet.TypeString)
+		}
+		specs = append(specs, ProjectExprSpec{Expr: expr, Name: name, Type: typ})
+	}
+	if len(specs) > 0 {
+		target.SecurityProjectExprs = specs
 	}
 }
 

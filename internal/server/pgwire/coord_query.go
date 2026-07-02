@@ -36,14 +36,18 @@ func shouldRouteThroughCoord(sql string) bool {
 
 // canBypassDB reports whether the coord routing path is safe for this
 // connection. SECURITY GATE: db.Query enforces ABAC (row filters, column
-// policies, table-level access denial in wadjet.enforceAccessPolicies),
-// while coord.ExecuteSQL today does not call into the same enforcement
-// machinery. Until coord enforces ABAC, only bypass db.Query when the
-// connection has no authenticated identity AND no auth provider is wired
-// — i.e. the dev/harness path. Production deploys with auth keep the
-// legacy path until coord-side ABAC is plumbed.
+// policies, table-level access denial) via auth.EnforcePlanPolicies. The
+// coordinator applies the SAME enforcement in ExecuteSQL when an auth
+// provider is wired into it (Coordinator.SetAuthProvider → EnforcesABAC) —
+// queryContext already attaches the connection's identity, so authed
+// connections can route through the native-DAG executor and the local fast
+// path. Without coordinator-side enforcement, only unauthenticated
+// dev/harness connections may bypass db.Query.
 func (c *pgConn) canBypassDB() bool {
-	return c.authProvider == nil && c.identity == nil
+	if c.authProvider == nil && c.identity == nil {
+		return true
+	}
+	return c.coord != nil && c.coord.EnforcesABAC()
 }
 
 // queryViaCoord executes sql through coord.ExecuteSQL. The result batches
