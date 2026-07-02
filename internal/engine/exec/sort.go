@@ -320,11 +320,33 @@ func (s *Sort) CloneSink() SinkSource {
 // MergeSink merges another Sort's accumulated batches into this one.
 // Called after all parallel workers finish to combine partial batch lists
 // before the single-threaded Finalize sort.
+//
+// Memory accounting transfers with the batches: when the clone tracked its
+// buffered rows (morsel-parallel clones charge a tracking-only SpillManager
+// view against the shared pool), the reservation must follow the state or
+// the merged bytes become invisible to the primary's spill trigger. Charge
+// the primary FIRST, then release the clone, so the shared tracker never
+// under-reports in between. No-op when neither side tracks (the
+// single-process planner path).
 func (s *Sort) MergeSink(other SinkSource) {
 	o := other.(*Sort)
 	s.batches = append(s.batches, o.batches...)
 	s.totalRows += o.totalRows
 	o.batches = nil
+	if o.trackedMem > 0 {
+		if s.Spill != nil {
+			s.Spill.TrackBatch(o.trackedMem)
+			s.trackedMem += o.trackedMem
+			if s.accInstanceID != 0 {
+				s.Spill.Tracker().PublishOwned(s.accInstanceID, s.trackedMem)
+			}
+		}
+		o.Spill.ReleaseTracking(o.trackedMem)
+		o.trackedMem = 0
+		if o.accInstanceID != 0 {
+			o.Spill.Tracker().PublishOwned(o.accInstanceID, 0)
+		}
+	}
 }
 
 // Close releases any tracker reservation Sort still holds for buffered rows

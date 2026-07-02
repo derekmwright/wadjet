@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/auth"
@@ -97,9 +98,11 @@ type Executor struct {
 	// docs/design/morsel-execution.md). morselWorkers: 0/1 = serial (zero
 	// value is dormant-safe), -1 = auto, N>1 = fixed width. cpuTokens bounds
 	// the EXTRA compute goroutines across all concurrent tasks; nil when
-	// morsels are disabled.
-	morselWorkers int
-	cpuTokens     *cpuTokens
+	// morsels are disabled. morselCollapses counts pressure-collapse events
+	// (parallel breaker consume reverting to the serial spill path).
+	morselWorkers   int
+	cpuTokens       *cpuTokens
+	morselCollapses atomic.Int64
 }
 
 // NewExecutor creates a new task executor.

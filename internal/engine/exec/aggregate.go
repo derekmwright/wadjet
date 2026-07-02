@@ -2157,8 +2157,64 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 		h.unregisterAccounted = nil
 	}
 
+	// Legacy raw-row spill re-aggregation. This MUST run before the
+	// partial-merge dispatch below: an aggregate that changes group-key
+	// paths mid-stream AFTER partial-state runs already exist (post-spill
+	// MergeSink migration to the generic map, null-group-key demotion)
+	// loses canUseExternalMerge, so later pressure consumes buffer raw rows
+	// into spillFiles/spillBuffer while partialSpillFiles still holds the
+	// earlier runs. Re-consuming the raw rows into the in-memory table here
+	// folds them into the remainder that finalizeViaPartialMerge merges.
+	// The previous ordering returned early on partialSpillFiles and
+	// silently orphaned the legacy files (rows dropped from the output).
+	if len(h.spillFiles) > 0 || len(h.spillBuffer) > 0 {
+		// Re-process spilled input rows through the same aggregate logic.
+		// This is correct for all aggregate functions because we're
+		// processing raw input, not merging partial results.
+		for _, f := range h.spillFiles {
+			rows, err := memory.ReadSpilledRows(f)
+			if err != nil {
+				return err
+			}
+			if len(rows) == 0 {
+				continue
+			}
+			b := batch.FromRows(h.inputSchema, rows)
+			// Resolve indices only if not already resolved. Do NOT force
+			// re-resolution (h.resolved = false) — after a parallel merge
+			// (MergeSink), the aggregate has been migrated from compact/int
+			// key mode to generic string mode. Re-resolving would switch
+			// back to compact mode with a fresh intGroupStates, losing all
+			// merged groups and causing index-out-of-bounds in Next().
+			// The spilled batch uses h.inputSchema (same column order as
+			// the original), so re-resolution is unnecessary.
+			if !h.resolved {
+				h.resolveIndices(b)
+			}
+			h.consumeBatch(b)
+		}
+		h.spillFiles = nil
+
+		// Drain any rows that were buffered but never crossed the flush
+		// threshold — they're still in memory and can be consumed directly
+		// without a round-trip through disk.
+		if len(h.spillBuffer) > 0 {
+			b := batch.FromRows(h.inputSchema, h.spillBuffer)
+			if !h.resolved {
+				h.resolveIndices(b)
+			}
+			h.consumeBatch(b)
+			if h.Spill != nil {
+				h.Spill.ReleaseTracking(h.spillBufferBytes)
+			}
+			h.spillBuffer = nil
+			h.spillBufferBytes = 0
+		}
+	}
+
 	// External-merge path: when partial-state files exist, k-way merge them
-	// (plus any in-memory remainder) instead of re-aggregating raw rows. This
+	// (plus any in-memory remainder, which now includes any re-aggregated
+	// legacy spill from above) instead of re-aggregating raw rows. This
 	// is the SF100+ unblock: the legacy raw-row Finalize re-reads ALL spilled
 	// input back into the hash table and re-runs Consume on it, blowing the
 	// budget when input >> output. Partial-state merge processes each group
@@ -2166,54 +2222,6 @@ func (h *HashAggregate) Finalize(_ context.Context) error {
 	if len(h.partialSpillFiles) > 0 {
 		return h.finalizeViaPartialMerge()
 	}
-
-	if len(h.spillFiles) == 0 && len(h.spillBuffer) == 0 {
-		return nil
-	}
-
-	// Re-process spilled input rows through the same aggregate logic.
-	// This is correct for all aggregate functions because we're processing
-	// raw input, not merging partial results.
-	for _, f := range h.spillFiles {
-		rows, err := memory.ReadSpilledRows(f)
-		if err != nil {
-			return err
-		}
-		if len(rows) == 0 {
-			continue
-		}
-		b := batch.FromRows(h.inputSchema, rows)
-		// Resolve indices only if not already resolved. Do NOT force
-		// re-resolution (h.resolved = false) — after a parallel merge
-		// (MergeSink), the aggregate has been migrated from compact/int
-		// key mode to generic string mode. Re-resolving would switch
-		// back to compact mode with a fresh intGroupStates, losing all
-		// merged groups and causing index-out-of-bounds in Next().
-		// The spilled batch uses h.inputSchema (same column order as
-		// the original), so re-resolution is unnecessary.
-		if !h.resolved {
-			h.resolveIndices(b)
-		}
-		h.consumeBatch(b)
-	}
-	h.spillFiles = nil
-
-	// Drain any rows that were buffered but never crossed the flush
-	// threshold — they're still in memory and can be consumed directly
-	// without a round-trip through disk.
-	if len(h.spillBuffer) > 0 {
-		b := batch.FromRows(h.inputSchema, h.spillBuffer)
-		if !h.resolved {
-			h.resolveIndices(b)
-		}
-		h.consumeBatch(b)
-		if h.Spill != nil {
-			h.Spill.ReleaseTracking(h.spillBufferBytes)
-		}
-		h.spillBuffer = nil
-		h.spillBufferBytes = 0
-	}
-
 	return nil
 }
 
@@ -2740,8 +2748,19 @@ func (h *HashAggregate) CloneSink() SinkSource {
 
 // MergeSink merges another HashAggregate's partial state into this one.
 // Called after all parallel workers finish to combine partial aggregates.
+//
+// After the state merge, h's group footprint has grown by the clone's
+// state; reconcileGroupMemory recharges h so the shared-tracker reservation
+// follows the state (morsel-parallel clones charge a tracking-only
+// SpillManager view; their own charge is released at clone Close, AFTER
+// this recharge, so the tracker never under-reports in between). No-op when
+// h.Spill is nil — the single-process planner path.
 func (h *HashAggregate) MergeSink(other SinkSource) {
-	o := other.(*HashAggregate)
+	h.mergeSinkState(other.(*HashAggregate))
+	h.reconcileGroupMemory()
+}
+
+func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 
 	// When the parent (h) was never fed a batch — runParallel's warmup batch
 	// gets consumed when present, but if the warmup row group is fully
