@@ -89,6 +89,15 @@ type Config struct {
 	// Empty = derived from the bound listener (specific IP, else the first
 	// non-loopback unicast IPv4).
 	PeerAdvertiseAddr string
+
+	// MorselWorkers controls intra-fragment parallel pipeline consumers per
+	// task (morsel-driven execution, docs/design/morsel-execution.md). 0
+	// (zero value) and 1 = serial, today's behavior — dormant-safe. -1 =
+	// auto: width adapts to fragment input size and idle CPU tokens. N>1 =
+	// fixed width of N (bypasses the size gate; testing/benchmark knob).
+	// Extra consumers are bounded worker-wide by a CPU-token pool sized
+	// GOMAXPROCS−2 so concurrent tasks cannot oversubscribe cores.
+	MorselWorkers int
 }
 
 // DefaultConfig returns default worker configuration.
@@ -202,6 +211,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	}
 	executor.SetLogger(logger)
 	executor.SetNATSConn(nc)
+	executor.SetMorselWorkers(cfg.MorselWorkers)
 	// Phase 3: wire the system-reservoir registry for ACCOUNTING (Available()/
 	// drift) — this does NOT activate the floating spill threshold; that stays
 	// gated on FloatingBudgetActive (default false → tuned static 40%/90% path).

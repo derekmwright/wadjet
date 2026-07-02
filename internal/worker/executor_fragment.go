@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -39,6 +41,9 @@ const fragmentProgressInterval = 30 * time.Second
 // worker logs (the SF100 Q17 hang investigation needed this signal because
 // the coord saw silence between dispatch and reap with no worker-side
 // evidence of forward progress).
+// All counters are atomic and the log timestamps are mutex-guarded: under
+// morsel-parallel fragments (runFragmentLinearParallel) addRows and
+// applyBackpressure are called concurrently from k consumer goroutines.
 type fragmentProgress struct {
 	logger    *slog.Logger
 	taskID    string
@@ -46,15 +51,17 @@ type fragmentProgress struct {
 	stageType string
 	exec      *Executor // for SharedPoolStats(); nil-safe in tests
 	started   time.Time
-	lastLog   time.Time
-	rows      int64
+	rows      atomic.Int64
 
 	// Heap-backpressure tracking. The fragment runner calls applyBackpressure
 	// between batches; when HeapBackpressureActive() fires it sleeps briefly
 	// to let GC catch up. We summarize how often and how long that fired so
 	// worker logs make slow-task root cause obvious without per-pause spam.
-	backpressureCount   int64
-	backpressurePauseMS int64
+	backpressureCount   atomic.Int64
+	backpressurePauseMS atomic.Int64
+
+	mu                  sync.Mutex // guards the two log timestamps below
+	lastLog             time.Time
 	lastBackpressureLog time.Time
 }
 
@@ -72,17 +79,21 @@ func newFragmentProgress(logger *slog.Logger, task distributed.Task, e *Executor
 }
 
 func (p *fragmentProgress) addRows(n int64) {
-	p.rows += n
+	total := p.rows.Add(n)
+	p.mu.Lock()
 	if time.Since(p.lastLog) < fragmentProgressInterval {
+		p.mu.Unlock()
 		return
 	}
+	p.lastLog = time.Now()
+	p.mu.Unlock()
 	elapsed := time.Since(p.started)
 	attrs := []any{
 		"task_id", p.taskID,
 		"stage_id", p.stageID,
 		"stage_type", p.stageType,
 		"elapsed", elapsed.Round(time.Second),
-		"rows", p.rows,
+		"rows", total,
 	}
 	if p.exec != nil {
 		used, budget := p.exec.SharedPoolStats()
@@ -93,13 +104,12 @@ func (p *fragmentProgress) addRows(n int64) {
 				"pool_pct", used*100/budget)
 		}
 	}
-	if p.backpressureCount > 0 {
+	if bp := p.backpressureCount.Load(); bp > 0 {
 		attrs = append(attrs,
-			"bp_count", p.backpressureCount,
-			"bp_paused_ms", p.backpressurePauseMS)
+			"bp_count", bp,
+			"bp_paused_ms", p.backpressurePauseMS.Load())
 	}
 	p.logger.Info("fragment task progress", attrs...)
-	p.lastLog = time.Now()
 }
 
 // applyBackpressure pauses the consume loop briefly when the process heap
@@ -121,23 +131,29 @@ func (p *fragmentProgress) applyBackpressure(ctx context.Context) error {
 	if !memory.HeapBackpressureActive() {
 		return nil
 	}
-	p.backpressureCount++
+	p.backpressureCount.Add(1)
 	started := time.Now()
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(fragmentBackpressurePauseMS * time.Millisecond):
 	}
-	p.backpressurePauseMS += time.Since(started).Milliseconds()
+	p.backpressurePauseMS.Add(time.Since(started).Milliseconds())
 	// Log on the first hit and at most every 30 s thereafter so sustained
 	// backpressure shows up in logs without flooding them.
-	if p.lastBackpressureLog.IsZero() || time.Since(p.lastBackpressureLog) > 30*time.Second {
+	p.mu.Lock()
+	shouldLog := p.lastBackpressureLog.IsZero() || time.Since(p.lastBackpressureLog) > 30*time.Second
+	if shouldLog {
+		p.lastBackpressureLog = time.Now()
+	}
+	p.mu.Unlock()
+	if shouldLog {
 		attrs := []any{
 			"task_id", p.taskID,
 			"stage_id", p.stageID,
 			"stage_type", p.stageType,
-			"count", p.backpressureCount,
-			"total_paused_ms", p.backpressurePauseMS,
+			"count", p.backpressureCount.Load(),
+			"total_paused_ms", p.backpressurePauseMS.Load(),
 		}
 		if p.exec != nil {
 			used, budget := p.exec.SharedPoolStats()
@@ -148,7 +164,6 @@ func (p *fragmentProgress) applyBackpressure(ctx context.Context) error {
 			}
 		}
 		p.logger.Info("fragment task heap backpressure", attrs...)
-		p.lastBackpressureLog = time.Now()
 	}
 	return nil
 }
@@ -324,6 +339,21 @@ func buildDynamicFilterEmitOps(specs []distributed.DynamicFilterEmit) ([]*exec.D
 // goroutine to avoid races on its counters; applyBackpressure (heap-pressure
 // pause) lives in the consumer so the pause reflects the full pipeline state.
 func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification) error {
+	// Morsel-driven parallel path (docs/design/morsel-execution.md §4). k > 1
+	// only when the flag allows it, every op is Cloneable, the fragment
+	// clears the size gate, and CPU tokens are available. Tokens are held for
+	// the duration of the fragment.
+	if k, release := e.morselFragmentWorkers(task, ops); k > 1 {
+		defer release()
+		e.logger.Debug("morsel parallel fragment",
+			"task_id", task.ID,
+			"stage_id", task.StageID,
+			"k", k,
+			"estimated_bytes", task.EstimatedBytes,
+			"cpu_tokens_in_use", e.cpuTokens.InUse(),
+			"cpu_tokens_cap", e.cpuTokens.Capacity())
+		return e.runFragmentLinearParallel(ctx, task, src, ops, sink, result, k)
+	}
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
 	var totalRows int64
@@ -402,6 +432,222 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 		return fmt.Errorf("fragment task %s: flush spilled ops: %w", task.ID, err)
 	}
 	result.NumRows = totalRows
+	if err := sink.finalize(ctx, task, result); err != nil {
+		return fmt.Errorf("fragment task %s: sink finalize: %w", task.ID, err)
+	}
+	return nil
+}
+
+// morselMinFragmentBytes is the auto-mode size gate: fragments whose
+// EstimatedBytes fall below it stay serial. Parallelism pays only above a
+// size threshold — the parallel join build learned this the hard way
+// (join.go, size-gated for the same reason). Package-level var so tests can
+// lower it.
+var morselMinFragmentBytes int64 = 64 << 20
+
+// morselFragmentParallelismCap bounds per-fragment width regardless of
+// policy: past ~8 consumers the single producer (source decode) is the
+// bottleneck and extra clones only add merge/scratch overhead.
+const morselFragmentParallelismCap = 8
+
+// morselFragmentWorkers decides the parallel width for a linear fragment and
+// acquires CPU tokens for the extra consumers. Returns k and a release
+// function (call exactly once, after the fragment finishes). k == 1 means
+// serial — the returned release is a no-op.
+//
+// The first consumer is free (the serial baseline is always allowed); each
+// extra consumer takes one token. Acquisition is non-blocking: under token
+// exhaustion the fragment degrades toward serial rather than queueing.
+func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.UnaryOperator) (int, func()) {
+	noop := func() {}
+	policy := e.morselWorkers
+	if policy == 0 || policy == 1 || e.cpuTokens == nil {
+		return 1, noop
+	}
+	// Every op must be Cloneable — non-cloneable ops (e.g. the
+	// DynamicFilterEmitOp accumulator) keep the fragment serial.
+	for _, op := range ops {
+		if _, ok := op.(exec.Cloneable); !ok {
+			return 1, noop
+		}
+	}
+	target := policy
+	if policy < 0 { // auto: size-gated, width up to core count
+		if task.EstimatedBytes < morselMinFragmentBytes {
+			return 1, noop
+		}
+		target = runtime.GOMAXPROCS(0)
+	}
+	if target > morselFragmentParallelismCap {
+		target = morselFragmentParallelismCap
+	}
+	if target <= 1 {
+		return 1, noop
+	}
+	got := e.cpuTokens.TryAcquire(target - 1)
+	if got == 0 {
+		return 1, noop
+	}
+	return 1 + got, func() { e.cpuTokens.Release(got) }
+}
+
+// runFragmentLinearParallel is the morsel-driven variant of
+// runFragmentLinear: the same single producer feeds a bounded channel (the
+// morsel dispenser — cap 2·k preserves the decode-can't-run-ahead property
+// of the serial split), consumed by k goroutines that each run a private
+// Clone()d copy of the op chain. The fragment sink is shared behind a mutex:
+// every fragment sink consumes each batch synchronously (partitioned shuffle
+// write, WSHF append, gather publish) and retains no reference afterward, so
+// serializing consume is sufficient — no Sel snapshot needed.
+//
+// One batch is pushed through the ORIGINAL ops before cloning ("warmup",
+// same pattern as exec.Pipeline.runParallel): operator scratch is per-clone,
+// but predicate/expression closures are SHARED across clones and resolve
+// column indices lazily on first use (exec.ColumnCompare's cachedIdx,
+// expr.ColRef's sync.Once). The warmup batch completes those writes while
+// the chain is still single-threaded; clones then only read the resolved
+// caches.
+func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification, k int) error {
+	progress := exec.ProgressReporterFromContext(ctx)
+	fp := newFragmentProgress(e.logger, task, e)
+	var totalRows atomic.Int64
+	var sinkMu sync.Mutex
+	consume := func(ctx context.Context, b *batch.RecordBatch) error {
+		sinkMu.Lock()
+		err := sink.consume(ctx, b)
+		sinkMu.Unlock()
+		if err != nil {
+			return err
+		}
+		n := int64(b.ActiveLen())
+		totalRows.Add(n)
+		if progress != nil {
+			progress.AddRows(n)
+		}
+		fp.addRows(n)
+		return nil
+	}
+
+	// Warmup: one batch through the original chain before any clone exists.
+	warmup, err := src.Next(ctx)
+	if err != nil {
+		return fmt.Errorf("fragment task %s: source next: %w", task.ID, err)
+	}
+	chains := make([][]exec.UnaryOperator, 1, k)
+	chains[0] = ops
+	if warmup != nil {
+		cur := warmup
+		for _, op := range ops {
+			cur, err = op.Execute(ctx, cur)
+			if err != nil {
+				return fmt.Errorf("fragment task %s: unary exec: %w", task.ID, err)
+			}
+			if cur == nil {
+				break
+			}
+		}
+		if cur != nil && cur.ActiveLen() > 0 {
+			if err := consume(ctx, cur); err != nil {
+				return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
+			}
+		}
+
+		// Build the k−1 cloned chains. Clones that return the original
+		// instance (Limit-style shared state) are neither re-Init'd nor
+		// closed — the original's owner handles both.
+		defer func() {
+			for _, chain := range chains[1:] {
+				for j, op := range chain {
+					if op == ops[j] {
+						continue
+					}
+					op.Close()
+				}
+			}
+		}()
+		for i := 1; i < k; i++ {
+			chain := make([]exec.UnaryOperator, len(ops))
+			for j, op := range ops {
+				chain[j] = op.(exec.Cloneable).Clone()
+			}
+			chains = append(chains, chain)
+			for j, cop := range chain {
+				if cop == ops[j] {
+					continue
+				}
+				if err := cop.Init(ctx); err != nil {
+					return fmt.Errorf("fragment task %s: cloned op init: %w", task.ID, err)
+				}
+			}
+		}
+
+		ch := make(chan *batch.RecordBatch, 2*k)
+		g, gctx := errgroup.WithContext(ctx)
+		// Producer: source.Next → channel. Closes ch on EOF or error. Decode
+		// stays single-threaded inside the source (WSHF chunk / parquet
+		// row-group state machines keep their unguarded cursors).
+		g.Go(func() error {
+			defer close(ch)
+			for {
+				b, err := src.Next(gctx)
+				if err != nil {
+					return fmt.Errorf("source next: %w", err)
+				}
+				if b == nil {
+					return nil
+				}
+				select {
+				case <-gctx.Done():
+					return gctx.Err()
+				case ch <- b:
+				}
+			}
+		})
+		for i := 0; i < k; i++ {
+			chain := chains[i]
+			g.Go(func() error {
+				for b := range ch {
+					if err := fp.applyBackpressure(gctx); err != nil {
+						return err
+					}
+					cur := b
+					var err error
+					for _, op := range chain {
+						cur, err = op.Execute(gctx, cur)
+						if err != nil {
+							return fmt.Errorf("unary exec: %w", err)
+						}
+						if cur == nil {
+							break
+						}
+					}
+					if cur == nil || cur.ActiveLen() == 0 {
+						continue
+					}
+					if err := consume(gctx, cur); err != nil {
+						return fmt.Errorf("sink consume: %w", err)
+					}
+				}
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return fmt.Errorf("fragment task %s: %w", task.ID, err)
+		}
+	}
+
+	// Spilled-partition flush, over EVERY chain. Clone probes share the
+	// underlying join's spillState, so the first chain's drain processes all
+	// spilled partitions (including rows routed there by other clones) and
+	// its terminal cleanup() clears the partition maps — later chains see
+	// nothing pending and no-op. Iterating all chains keeps this correct if
+	// a future FlushableOperator holds per-instance flush state.
+	for _, chain := range chains {
+		if err := drainFlushableOps(ctx, chain, false, consume); err != nil {
+			return fmt.Errorf("fragment task %s: flush spilled ops: %w", task.ID, err)
+		}
+	}
+	result.NumRows = totalRows.Load()
 	if err := sink.finalize(ctx, task, result); err != nil {
 		return fmt.Errorf("fragment task %s: sink finalize: %w", task.ID, err)
 	}

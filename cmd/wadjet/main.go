@@ -80,6 +80,7 @@ var (
 	useSSL                bool
 	s3Region              string
 	maxConcurrent         int
+	morselWorkers         int
 	cacheBytes            int64
 	logLevel              string
 	natsTLSCert           string
@@ -145,6 +146,7 @@ func main() {
 	rootCmd.PersistentFlags().IntVar(&maxConcurrentQry, "max-concurrent-queries", 0, "Maximum concurrent queries (0=unlimited)")
 	rootCmd.PersistentFlags().StringVar(&metricsAddr, "metrics-addr", ":9100", "Prometheus metrics listen address (worker mode)")
 	rootCmd.PersistentFlags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum concurrent tasks per worker")
+	rootCmd.PersistentFlags().IntVar(&morselWorkers, "morsel-workers", 1, "Intra-fragment parallel pipeline consumers per task (morsel-driven execution, docs/design/morsel-execution.md). 1 = serial (default; kill switch), 0 = auto (width adapts to fragment input size and idle CPU tokens), N>1 = fixed width of N (bypasses the size gate; testing/benchmark knob).")
 	rootCmd.PersistentFlags().StringVar(&dataPlane, "data-plane", "nats", "Worker↔coord data-plane transport: nats (default) or grpc. See project_split_plane_design_2026-05-20.")
 	rootCmd.PersistentFlags().StringVar(&dataPlaneAddr, "data-plane-addr", ":9091", "Data-plane gRPC listen address (coord/standalone)")
 	rootCmd.PersistentFlags().StringVar(&coordDataPlane, "coord-data-plane", "", "Coord's data-plane host:port (worker only; defaults to coord-host + 9091)")
@@ -846,6 +848,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		NATSUrl:               embeddedNATS.ClientURL(),
 		ClusterID:             clusterID,
 		MaxConcurrent:         maxConcurrent,
+		MorselWorkers:         morselWorkersConfig(morselWorkers),
 		CacheBytes:            cacheBytes,
 		MemoryBudget:          memoryBudget,
 		SharedPoolBudget:      sharedPoolBudget,
@@ -1398,6 +1401,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		NATSUrl:               natsAddr,
 		ClusterID:             clusterID,
 		MaxConcurrent:         maxConcurrent,
+		MorselWorkers:         morselWorkersConfig(morselWorkers),
 		CacheBytes:            cacheBytes,
 		MemoryBudget:          memoryBudget,
 		SharedPoolBudget:      sharedPoolBudget,
@@ -2056,6 +2060,16 @@ func peerListenAddr() string {
 		return ""
 	}
 	return peerExchangeAddr
+}
+
+// morselWorkersConfig maps the --morsel-workers flag to worker.Config
+// semantics: flag 0 (auto) becomes Config -1, because the Config zero value
+// must stay serial/dormant for programmatic callers that never set it.
+func morselWorkersConfig(flagVal int) int {
+	if flagVal == 0 {
+		return -1
+	}
+	return flagVal
 }
 
 func deriveDataPlaneAddr(natsAddr, portFromFlag string) string {
