@@ -94,6 +94,9 @@ var (
 	dataPlaneAddr         string
 	coordDataPlane        string
 	localFastPathBytes    int64
+	streamingExchange     bool
+	peerExchangeAddr      string
+	peerExchangeAdvertise string
 )
 
 func main() {
@@ -146,6 +149,9 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&dataPlaneAddr, "data-plane-addr", ":9091", "Data-plane gRPC listen address (coord/standalone)")
 	rootCmd.PersistentFlags().StringVar(&coordDataPlane, "coord-data-plane", "", "Coord's data-plane host:port (worker only; defaults to coord-host + 9091)")
 	rootCmd.PersistentFlags().Int64Var(&localFastPathBytes, "local-fastpath-bytes", coordinator.DefaultLocalFastPathBytes, "Queries whose post-pruning catalog scan bytes stay under this threshold execute in-process on the coordinator (skipping the distributed stage DAG and its per-stage object-store round trips). 0 = disabled.")
+	rootCmd.PersistentFlags().BoolVar(&streamingExchange, "streaming-exchange", false, "Streaming exchange Phase A: consumers fetch stage outputs from the producing workers' local disk over gRPC instead of S3; every fetch failure falls through to the unchanged S3 path. Coordinator: annotate tasks with peer hints. Worker: serve peer fetches on --peer-exchange-addr. See docs/design/streaming-exchange.md.")
+	rootCmd.PersistentFlags().StringVar(&peerExchangeAddr, "peer-exchange-addr", ":9095", "Peer-exchange (FetchShuffle) listen address (worker/standalone; used with --streaming-exchange)")
+	rootCmd.PersistentFlags().StringVar(&peerExchangeAdvertise, "peer-exchange-advertise", "", "Peer-exchange address advertised in heartbeats (default: derived from the bound listener)")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
@@ -850,6 +856,8 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		MmapRelief:            mmapRelief,
 		MmapReliefThresholdMB: mmapReliefThresholdMB,
 		BoundedDirtyWrites:    boundedDirtyWrites,
+		PeerListenAddr:        peerListenAddr(),
+		PeerAdvertiseAddr:     peerExchangeAdvertise,
 	}, store, nc, js, logger)
 
 	// Initialize Prometheus metrics (before worker.Start so spill metrics are wired)
@@ -863,6 +871,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		ResultBucket:       bucket,
 		DynamicFilters:     dynamicFiltersFromEnv(),
 		LocalFastPathBytes: localFastPathBytes,
+		StreamingExchange:  streamingExchange,
 	}, cat, nc, js, logger)
 
 	// Phase A: same-process data-plane server + client when enabled.
@@ -1157,6 +1166,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		ResultBucket:       bucket,
 		DynamicFilters:     dynamicFiltersFromEnv(),
 		LocalFastPathBytes: localFastPathBytes,
+		StreamingExchange:  streamingExchange,
 	}, cat, nc, js, logger)
 
 	// Phase A: start data-plane gRPC server alongside coord when enabled.
@@ -1398,6 +1408,8 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		MmapRelief:            mmapRelief,
 		MmapReliefThresholdMB: mmapReliefThresholdMB,
 		BoundedDirtyWrites:    boundedDirtyWrites,
+		PeerListenAddr:        peerListenAddr(),
+		PeerAdvertiseAddr:     peerExchangeAdvertise,
 	}, store, nc, js, logger)
 	w.SetControlConn(controlNC)
 
@@ -2035,6 +2047,17 @@ func parseS3URL(s string) (bucket, path string, err error) {
 // NATS URL host and the data-plane listen port. natsAddr is something
 // like "nats://10.0.1.2:4222" or "10.0.1.2:4222"; portFromFlag is the
 // listen address used by coord (":9091" → port 9091).
+// peerListenAddr resolves the worker's peer-exchange listen address:
+// --peer-exchange-addr when --streaming-exchange is set, else "" (no peer
+// server, no advertised address — the coordinator never hints at this
+// worker).
+func peerListenAddr() string {
+	if !streamingExchange {
+		return ""
+	}
+	return peerExchangeAddr
+}
+
 func deriveDataPlaneAddr(natsAddr, portFromFlag string) string {
 	host := natsAddr
 	host = strings.TrimPrefix(host, "nats://")

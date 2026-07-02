@@ -50,6 +50,12 @@ type Scheduler struct {
 
 	inflightMu sync.Mutex
 	inflight   map[string]inflightTask // task ID → estimate charged to a worker
+
+	// annotate, when set, mutates each task immediately before it is
+	// serialized for dispatch — the single egress every task (initial and
+	// retried) passes through. Used by streaming exchange to attach
+	// peer-location hints and fetch tokens. Must be cheap and thread-safe.
+	annotate func(*distributed.Task)
 }
 
 // NewScheduler creates a new task scheduler.
@@ -72,6 +78,12 @@ func (s *Scheduler) SetDataPlaneServer(srv *dataplane.Server) {
 // of round-robin.
 func (s *Scheduler) SetWorkerRegistry(wr *WorkerRegistry) {
 	s.registry = wr
+}
+
+// SetTaskAnnotator installs the per-task pre-dispatch hook. Call before
+// any query runs (same contract as the other Set<X> setters).
+func (s *Scheduler) SetTaskAnnotator(fn func(*distributed.Task)) {
+	s.annotate = fn
 }
 
 // TaskDone clears the task's in-flight admission estimate. Called by the
@@ -112,6 +124,9 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 
 	batch := make([]preparedTask, 0, len(tasks))
 	for _, task := range tasks {
+		if s.annotate != nil {
+			s.annotate(&task)
+		}
 		data, err := distributed.Marshal(task)
 		if err != nil {
 			return fmt.Errorf("marshaling task %s: %w", task.ID, err)

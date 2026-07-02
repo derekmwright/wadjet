@@ -82,6 +82,11 @@ type Executor struct {
 	// build cache) share a single *exec.HashJoin instead of each rebuilding
 	// from scratch. See broadcast_join_cache.go.
 	broadcastCache *broadcastJoinCache
+
+	// Streaming-exchange state: fetch tokens + peer-location hints from task
+	// specs, and the outbound PeerClient (nil client = peer reads disabled).
+	// Always non-nil; dormant without --streaming-exchange.
+	peers *peerExchange
 }
 
 // NewExecutor creates a new task executor.
@@ -92,6 +97,7 @@ func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) 
 		cache:          cache,
 		logger:         slog.Default(),
 		broadcastCache: newBroadcastJoinCache(),
+		peers:          newPeerExchange(),
 	}
 }
 
@@ -317,6 +323,11 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 		WorkerID:  workerID,
 		Timestamp: time.Now(),
 	}
+
+	// Streaming exchange: record the task's fetch token (for serving
+	// validation) and peer-location hints (for Tier-1.5 reads) before any
+	// input is opened. No-op without --streaming-exchange.
+	e.peers.registerTask(&task)
 
 	// Worker-side ABAC enforcement: validate column access policies before execution.
 	if err := e.enforcePolicyDecision(task); err != nil {

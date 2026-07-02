@@ -331,6 +331,27 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		}
 	}
 
+	// Tier-1.5 peer fetch (streaming exchange Phase A): when the coordinator
+	// hinted which worker still holds this file on local disk, stream it from
+	// that peer over gRPC instead of S3. Any failure — peer gone, token
+	// stale, file evicted, mid-stream disconnect — falls through to the
+	// durable S3 copy, which is guaranteed to exist because the producing
+	// stage completed only after its synchronous upload.
+	if peers := s.executor.peers; peers != nil && peers.client != nil {
+		if addr, token := peers.hintFor(filePath); addr != "" {
+			if perr := s.openShuffleFromPeer(ctx, filePath, addr, token); perr == nil {
+				peers.fetchHits.Add(1)
+				return nil
+			} else {
+				peers.fetchFallthrough.Add(1)
+				if s.executor.logger != nil {
+					s.executor.logger.Debug("peer fetch fell through to S3",
+						"key", filePath, "peer", addr, "error", perr)
+				}
+			}
+		}
+	}
+
 	// Try the streaming path first: open a streaming reader from S3, peek
 	// at the magic bytes, and decide whether this is a WSHF (or compressed
 	// WSHC) shuffle file or some legacy Parquet payload.

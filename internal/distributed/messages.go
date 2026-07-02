@@ -174,6 +174,21 @@ type Task struct {
 	// *.parquet → streamSource.
 	Inputs map[string][]string `json:"inputs,omitempty"`
 
+	// InputLocations maps an input S3 key to the peer-exchange address of
+	// the worker that produced the file and still holds it on local disk
+	// (streaming exchange Phase A, docs/design/streaming-exchange.md).
+	// Best-effort hints: a consumer tries one peer fetch per hinted key and
+	// falls through to KV/S3 on any failure — the S3 keys stay canonical,
+	// so a task spec re-sent verbatim on retry works with or without the
+	// hints. Only populated when the coordinator runs --streaming-exchange.
+	InputLocations map[string]string `json:"input_locations,omitempty"`
+
+	// FetchToken authorizes peer-exchange fetches for this task's query.
+	// Producers record it (to validate incoming FetchShuffle requests
+	// against); consumers present it. Minted per QueryID by the
+	// coordinator; empty when streaming exchange is disabled.
+	FetchToken string `json:"fetch_token,omitempty"`
+
 	// Output is the S3 prefix where this task's output is materialized.
 	// Shuffle/pipeline-intermediate: worker writes "<Output>partition=NNNN/<taskID>.wshf".
 	// Pipeline-final (before Gather): single-partition output at "<Output><taskID>.wshf".
@@ -489,7 +504,12 @@ type WorkerHeartbeat struct {
 	Mallocs       uint64    `json:"mallocs,omitempty"`         // cumulative allocation count from runtime.MemStats
 	SpillDiskUsed int64     `json:"spill_disk_used,omitempty"` // bytes used in spill directory
 	Draining      bool      `json:"draining,omitempty"`        // true when worker is draining
-	Timestamp     time.Time `json:"timestamp"`
+	// PeerAddr is the worker's dialable peer-exchange (FetchShuffle)
+	// address. Empty when the worker doesn't serve peer fetches — the
+	// coordinator then simply emits no location hints referencing it,
+	// which makes mixed-version/mixed-flag rollouts self-gating.
+	PeerAddr  string    `json:"peer_addr,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
 }
 
 // TaskProgress is published by a worker from inside a task's hot loop

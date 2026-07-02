@@ -63,6 +63,15 @@ type Config struct {
 	// unchanged). `wadjet serve` enables it by default via its flag
 	// (DefaultLocalFastPathBytes).
 	LocalFastPathBytes int64
+	// StreamingExchange annotates dispatched tasks with peer-location
+	// hints (Task.InputLocations) and per-query fetch tokens so consumers
+	// stream stage outputs from the producing workers' local disk instead
+	// of S3 (Phase A, docs/design/streaming-exchange.md). Purely additive:
+	// hints only reference workers that advertise a PeerAddr, every fetch
+	// failure falls through to the unchanged S3 read path, and the write
+	// path (synchronous upload before stage completion) is untouched.
+	// Default false: dormant, no hints, no tokens.
+	StreamingExchange bool
 }
 
 // SetAuthProvider wires ABAC enforcement into ExecuteSQL: with a provider
@@ -164,6 +173,11 @@ type Coordinator struct {
 	// receivers are registered as ResultHandlers so workers can stream
 	// results over gRPC instead of NATS. nil = NATS-only delivery.
 	dpSrv *dataplane.Server
+
+	// peerFiles is the streaming-exchange location/token registry (nil
+	// unless Config.StreamingExchange). Fed by noteTaskResult; drained by
+	// the scheduler's task annotator and cleanupQuery.
+	peerFiles *peerFileRegistry
 }
 
 // New creates a new Coordinator.
@@ -192,6 +206,14 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	// Memory-aware gRPC placement: the scheduler bin-packs estimated task
 	// footprints against heartbeat pool stats. No-op on the NATS path.
 	c.scheduler.SetWorkerRegistry(c.workers)
+
+	// Streaming exchange (Phase A): annotate every dispatched task — initial
+	// and retried alike, since retries re-enter PublishTasks — with peer
+	// location hints and the query's fetch token.
+	if cfg.StreamingExchange {
+		c.peerFiles = newPeerFileRegistry()
+		c.scheduler.SetTaskAnnotator(c.annotateTaskPeerLocations)
+	}
 
 	// NATS KV result cache: coordinator writes inline results here instead of S3.
 	// Workers already read from this bucket (tier 2 in getFileData), so this
@@ -257,6 +279,12 @@ func (c *Coordinator) noteTaskResult(r distributed.ResultNotification) {
 		c.workers.Liveness.Remove(r.TaskID)
 	}
 	c.scheduler.TaskDone(r.TaskID)
+	// Streaming exchange: the worker that reported these files wrote them
+	// and adopted them into its local stage cache — record it as the peer
+	// to fetch them from. Retries record the winning attempt's worker.
+	if c.peerFiles != nil && r.Success {
+		c.peerFiles.Record(r.ResultFiles, r.WorkerID)
+	}
 }
 
 // SetTelemetry enables OpenTelemetry tracing on the coordinator.
@@ -883,6 +911,11 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 		delete(c.resultSubs, queryID)
 	}
 	c.mu.Unlock()
+
+	// Streaming exchange: drop the query's peer-location hints and fetch
+	// token (nil-safe when disabled). Workers drop their side on the
+	// complete/cancel broadcasts below.
+	c.peerFiles.CleanupQuery(queryID)
 
 	// Broadcast cancellation FIRST: by the time cleanupQuery runs the query
 	// is terminal (completed, failed, or timed out) and this function is

@@ -1,8 +1,19 @@
 # Streaming Exchange — Design Memo
 
-> **Status:** proposed (v1 scoped, not started). **Date:** 2026-07-02.
+> **Status:** Phase A implemented (this branch); Phase B (async upload)
+> not started. **Date:** 2026-07-02.
 > **Verified against:** main @ 9402cbc (post-#173). All `file:line` anchors
 > checked against that commit; they drift — confirm before relying on them.
+>
+> **Implementation note (Phase A):** task QueryIDs turned out to be
+> stage-scoped (`st-<stage>-<qid>`) — producer and consumer of a boundary
+> never share one — so every cross-stage identity (fetch tokens, location
+> hints, `LocalStageCache` grouping) keys on the ROOT query ID derived from
+> the object key's `queries/<id>/` prefix (`distributed.ScratchQueryID`).
+> This incidentally fixed two latent issues: same-worker Tier-0 hits across
+> stage boundaries (previously never matched in distributed mode), and
+> worker-side `CleanupQuery` (broadcast with the root ID, which never
+> matched stage-scoped cache entries — a spill-dir leak until process exit).
 
 ## 1. Goal
 

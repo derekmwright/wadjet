@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package wadjet.dataplane.v1;
+
+option go_package = "github.com/citc-tech/wadjet/gen/dataplane/v1;dataplanev1";
+
+// PeerExchange is the worker→worker shuffle-fetch service (streaming
+// exchange, Phase A). Every worker hosts it when --streaming-exchange is
+// enabled; consumers fetch stage-output files directly from the producing
+// worker's local disk instead of round-tripping S3. The S3 object stays
+// the durable copy — any fetch failure falls through to the S3 read path,
+// so this service is a best-effort cache tier, never authoritative.
+//
+// Deliberately NOT part of the DataPlane bidi envelope: each fetch runs on
+// its own server-stream so HTTP/2 per-stream flow control backpressures
+// only that fetch — no head-of-line blocking across tasks or queries
+// sharing a peer connection. See docs/design/streaming-exchange.md §4.1.
+service PeerExchange {
+  // FetchShuffle streams the raw bytes of one stage-output file the
+  // serving worker produced and still holds locally. Rejections:
+  // PermissionDenied (bad/unknown token), NotFound (key not held),
+  // ResourceExhausted (serve concurrency cap held past its bound).
+  rpc FetchShuffle(FetchShuffleRequest) returns (stream ShuffleChunk);
+}
+
+message FetchShuffleRequest {
+  // query_id scopes the lookup — the same scoping LocalStageCache uses.
+  string query_id = 1;
+  // key is the file's S3 object key: the canonical identity shared by the
+  // durable copy, the producer's local cache entry, and this fetch.
+  string key = 2;
+  // token is the per-query fetch token minted by the coordinator and
+  // distributed via task specs to producers and consumers alike.
+  string token = 3;
+}
+
+message ShuffleChunk {
+  bytes data = 1; // raw WSHF bytes, at most peerChunkBytes (256 KiB) each
+}
