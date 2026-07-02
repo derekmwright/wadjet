@@ -23,8 +23,6 @@ import (
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/telemetry"
 
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/engine/scan"
@@ -37,6 +35,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // Config holds coordinator configuration.
@@ -65,6 +65,22 @@ type Config struct {
 	LocalFastPathBytes int64
 }
 
+// SetAuthProvider wires ABAC enforcement into ExecuteSQL: with a provider
+// set, every query is policy-checked at plan level (table denial, row
+// filters, column deny/mask) for the identity in the request context — the
+// same auth.EnforcePlanPolicies the embedded engine applies. Call before
+// serving traffic (same contract as the other Set<X>-before-Start setters).
+func (c *Coordinator) SetAuthProvider(p *auth.Provider) {
+	c.authProvider = p
+}
+
+// EnforcesABAC reports whether ExecuteSQL enforces access policies itself.
+// pgwire uses this to decide that routing authed connections through the
+// coordinator is safe (canBypassDB).
+func (c *Coordinator) EnforcesABAC() bool {
+	return c.authProvider != nil && c.authProvider.Enabled()
+}
+
 // gatherResultBudget resolves Config.GatherResultBudget: explicit value,
 // half of GOMEMLIMIT when one is set, else 2 GiB. Negative config = uncapped.
 func (c *Coordinator) gatherResultBudget() int64 {
@@ -89,7 +105,7 @@ type queryMeta struct {
 	identityRole       string
 	trace              distributed.TraceContext // distributed tracing context
 	policyDecisionJSON json.RawMessage          // pre-evaluated ABAC decisions for worker enforcement
-	mergeInfo          *logical.MergeInfo // non-nil for probe-split queries needing merge
+	mergeInfo          *logical.MergeInfo       // non-nil for probe-split queries needing merge
 	// prebuiltTasks, if non-nil for a given stage, supplies the publish loop's
 	// task list instead of calling createTasksForStage. Set by the shuffle path
 	// where each worker's task carries different PreScannedInputs.
@@ -98,34 +114,40 @@ type queryMeta struct {
 
 // Coordinator accepts queries, plans them, dispatches tasks, and tracks results.
 type Coordinator struct {
-	config    Config
-	catalog   *catalog.Catalog
-	nc        *nats.Conn
-	js        jetstream.JetStream
-	scheduler *Scheduler
-	tracker   *QueryTracker
-	workers   *WorkerRegistry
-	cleaner   *ResultCleaner
-	leader    *LeaderElection   // nil = always leader (standalone mode)
-	queryStore *QueryStateStore // nil = no persistence (standalone mode)
-	resultKV  jetstream.KeyValue // NATS KV for fast inter-stage result transfer (nil = S3 only)
-	otel      *telemetry.Provider // nil = no OTel tracing
-	logger    *slog.Logger
+	config     Config
+	catalog    *catalog.Catalog
+	nc         *nats.Conn
+	js         jetstream.JetStream
+	scheduler  *Scheduler
+	tracker    *QueryTracker
+	workers    *WorkerRegistry
+	cleaner    *ResultCleaner
+	leader     *LeaderElection     // nil = always leader (standalone mode)
+	queryStore *QueryStateStore    // nil = no persistence (standalone mode)
+	resultKV   jetstream.KeyValue  // NATS KV for fast inter-stage result transfer (nil = S3 only)
+	otel       *telemetry.Provider // nil = no OTel tracing
+	logger     *slog.Logger
 
 	// BuildCacheThreshold overrides the default build cache threshold (bytes).
 	// Zero means use the default (2GB). Exported for testing with small datasets.
 	BuildCacheThreshold int64
 
 	mu         sync.Mutex
-	resultSubs map[string]context.CancelFunc          // queryID -> cancel
-	queryMetas map[string]*queryMeta                  // queryID -> metadata for result retrieval
-	querySem   chan struct{}                           // limits concurrent inflight queries
-	localSem   chan struct{}                           // limits concurrent local fast-path executions
-	localHits  atomic.Int64                            // queries served by the local fast path
-	localBails atomic.Int64                            // local runs aborted over result budget, re-dispatched as DAG
+	resultSubs map[string]context.CancelFunc // queryID -> cancel
+	queryMetas map[string]*queryMeta         // queryID -> metadata for result retrieval
+	querySem   chan struct{}                 // limits concurrent inflight queries
+	localSem   chan struct{}                 // limits concurrent local fast-path executions
+	localHits  atomic.Int64                  // queries served by the local fast path
+	localBails atomic.Int64                  // local runs aborted over result budget, re-dispatched as DAG
 	// localResultBudgetOverride replaces localResultBudget's derivation in
 	// tests (0 = derive from the routing threshold).
 	localResultBudgetOverride int64
+
+	// authProvider, when set (SetAuthProvider), makes ExecuteSQL enforce
+	// ABAC at plan level (auth.EnforcePlanPolicies) for identities in ctx.
+	// nil = no coordinator-side enforcement; callers must gate routing
+	// (pgwire canBypassDB) or pre-enforce (HTTP row-filter context).
+	authProvider *auth.Provider
 
 	// Alert scheduler fields (see alerts.go for lifecycle methods).
 	alertScheduler       *alerts.Scheduler
@@ -187,7 +209,7 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 			// the bucket's MaxBytes no longer pins resident memory.
 			// Latency hit is one disk seek per stage boundary on the slow
 			// path — KV cache hits stay in OS page cache.
-			Storage:  jetstream.FileStorage,
+			Storage: jetstream.FileStorage,
 		})
 		if kvErr == nil {
 			c.resultKV = kv
@@ -601,18 +623,32 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		return nil, fmt.Errorf("logical plan: %w", err)
 	}
 
-	// Inject row-level security filters from context (set by server from access policies)
-	if rowFilters := auth.RowFiltersFromContext(ctx); len(rowFilters) > 0 {
-		for table, filter := range rowFilters {
-			logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
-		}
-	}
-
 	// Annotate scan columns and optimize — pass scan annotator for IN decorrelation
 	scanAnnotator := func(plan *logical.Node) {
 		physical.NewPlanner(c.catalog).AnnotateScanColumns(ctx, plan)
 	}
 	scanAnnotator(logicalPlan)
+
+	// ABAC enforcement at plan level — the same auth.EnforcePlanPolicies
+	// the embedded engine applies (table denial, row filters, column
+	// deny/mask), so identities see identical policy behavior on the
+	// distributed and local-fast-path executions. Runs BEFORE Optimize so
+	// every downstream consumer (PlanDistributed and tryLocalFastPath)
+	// sees the enforced plan.
+	if c.EnforcesABAC() {
+		logicalPlan, err = auth.EnforcePlanPolicies(ctx, c.authProvider, selectInfo, logicalPlan, "coordinator")
+		if err != nil {
+			return nil, err
+		}
+	} else if rowFilters := auth.RowFiltersFromContext(ctx); len(rowFilters) > 0 {
+		// Legacy path for deployments without a provider wired into the
+		// coordinator: the HTTP server pre-evaluates policies and passes
+		// row filters through context.
+		for table, filter := range rowFilters {
+			logicalPlan = logical.InjectRowFilter(logicalPlan, table, filter)
+		}
+	}
+
 	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
 	planStr := logicalPlan.PrettyPrint(0)
 

@@ -1108,7 +1108,7 @@ func (c *Coordinator) dispatchPipelineStage(
 		// the gather — raw-parquet passthrough would hand the gather
 		// un-projected scan columns, and applyOutputRenames can only
 		// rename/drop.
-		if len(stage.FilterExprs) > 0 || len(stage.ProjectExprs) > 0 {
+		if len(stage.FilterExprs) > 0 || len(stage.ProjectExprs) > 0 || len(stage.SecurityProjectExprs) > 0 {
 			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 		}
 		// No filter: by default pass raw parquet files through (saves the
@@ -1611,15 +1611,14 @@ func (c *Coordinator) dispatchScanFilterStage(
 				Predicates: append([]string(nil), stage.FilterExprs...),
 			})
 		}
-		if len(stage.ProjectExprs) > 0 {
-			projections := make([]distributed.ProjectSpec, len(stage.ProjectExprs))
-			for i, p := range stage.ProjectExprs {
-				projections[i] = distributed.ProjectSpec{Expr: p.Expr, Name: p.Name, Type: int(p.Type)}
-			}
-			t.Operators = append(t.Operators, distributed.OpSpec{
-				Type:        distributed.OpProject,
-				Projections: projections,
-			})
+		// The ABAC security barrier projects FIRST (masks applied, denied
+		// columns dropped), then the SELECT-list projection computes over
+		// the policy-projected schema.
+		if op, ok := projectOpFromSpecs(stage.SecurityProjectExprs); ok {
+			t.Operators = append(t.Operators, op)
+		}
+		if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
+			t.Operators = append(t.Operators, op)
 		}
 		if fuseShuffle {
 			t.Operators = append(t.Operators, distributed.OpSpec{
@@ -2458,6 +2457,19 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 	return ops, nil
 }
 
+// projectOpFromSpecs converts a stage's projection spec list into an
+// OpProject OpSpec. ok=false when the list is empty.
+func projectOpFromSpecs(specs []physical.ProjectExprSpec) (distributed.OpSpec, bool) {
+	if len(specs) == 0 {
+		return distributed.OpSpec{}, false
+	}
+	projections := make([]distributed.ProjectSpec, len(specs))
+	for i, p := range specs {
+		projections[i] = distributed.ProjectSpec{Expr: p.Expr, Name: p.Name, Type: int(p.Type)}
+	}
+	return distributed.OpSpec{Type: distributed.OpProject, Projections: projections}, true
+}
+
 // buildScanAggregateFragment translates a fused scan + partial-aggregate
 // stage's task into a fragment Operators[] pipeline:
 //
@@ -2500,13 +2512,18 @@ func buildScanAggregateFragment(stage physical.Stage, t *distributed.Task, files
 		scanOp.ScanShardIndex = shardIdx
 		scanOp.ScanShardCount = shardCount
 	}
-	ops := make([]distributed.OpSpec, 0, 4)
+	ops := make([]distributed.OpSpec, 0, 5)
 	ops = append(ops, scanOp)
 	if len(stage.FilterExprs) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:       distributed.OpFilter,
 			Predicates: append([]string(nil), stage.FilterExprs...),
 		})
+	}
+	// ABAC security barrier runs BEFORE the partial aggregate so grouping
+	// and aggregation see masked values and never see denied columns.
+	if op, ok := projectOpFromSpecs(stage.SecurityProjectExprs); ok {
+		ops = append(ops, op)
 	}
 	ops = append(ops, distributed.OpSpec{
 		Type:         distributed.OpHashAggregate,

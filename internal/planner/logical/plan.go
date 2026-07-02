@@ -112,6 +112,12 @@ type Node struct {
 
 	// Project
 	Projections []Projection
+	// SecurityBarrier marks a projection injected by ABAC column-policy
+	// enforcement (InjectColumnPolicies): masked columns replaced with
+	// literal expressions, denied columns absent. The physical planner
+	// must APPLY it at the scan (distributed walkStages treats ordinary
+	// Projects as passthrough — a dropped barrier would leak raw values).
+	SecurityBarrier bool
 
 	// Aggregate
 	GroupBy          []string
@@ -428,9 +434,10 @@ func injectColumnPolicies(n *Node, tableName string, policies []ColumnPolicy) *N
 		}
 
 		projectNode := &Node{
-			Type:        NodeProject,
-			Children:    []*Node{n},
-			Projections: projections,
+			Type:            NodeProject,
+			Children:        []*Node{n},
+			Projections:     projections,
+			SecurityBarrier: true,
 		}
 		return projectNode
 	}
