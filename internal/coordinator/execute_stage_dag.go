@@ -994,7 +994,7 @@ func (c *Coordinator) materializeReplicate(
 			c.logger.Error("materialize task retry publish failed",
 				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
 		}
-	}, c.logger, stage.ID)
+	}, c.logger, stage.ID, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
@@ -1410,7 +1410,7 @@ func (c *Coordinator) dispatchScanAggregateStage(
 			c.logger.Error("scan-agg task retry publish failed",
 				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
 		}
-	}, c.logger, stage.ID)
+	}, c.logger, stage.ID, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
@@ -1680,7 +1680,7 @@ func (c *Coordinator) dispatchScanFilterStage(
 			c.logger.Error("scan-filter task retry publish failed",
 				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
 		}
-	}, c.logger, stage.ID)
+	}, c.logger, stage.ID, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
@@ -2146,7 +2146,7 @@ func (c *Coordinator) dispatchComputeStage(
 			c.logger.Error("task retry publish failed",
 				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
 		}
-	}, c.logger, stage.ID)
+	}, c.logger, stage.ID, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
@@ -2878,7 +2878,7 @@ func (c *Coordinator) runStageTasks(
 			c.logger.Error("task retry publish failed",
 				"stage_id", stageLabel, "task_id", t.ID, "error", pubErr)
 		}
-	}, c.logger, stageLabel)
+	}, c.logger, stageLabel, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification

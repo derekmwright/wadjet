@@ -176,14 +176,28 @@ func TestStreamingExchangeShuffleCorrectness(t *testing.T) {
 		})
 	}
 
-	var hits, falls int64
+	var hits, falls, uploaded, cancelled, failed int64
 	for _, w := range workers {
 		h, f := w.PeerFetchStats()
 		hits += h
 		falls += f
+		up, ca, fa := w.UploadStats()
+		uploaded += up
+		cancelled += ca
+		failed += fa
 	}
-	t.Logf("peer tier: %d hits, %d fallthroughs", hits, falls)
+	t.Logf("peer tier: %d hits, %d fallthroughs; async uploads: %d landed, %d cancelled, %d failed",
+		hits, falls, uploaded, cancelled, failed)
 	if hits == 0 {
 		t.Error("peer tier never served a read — the accelerator is dead and row parity above is vacuous")
+	}
+	// Phase B: stage/shuffle outputs upload in the background. Zero total
+	// means AsyncUpload never reached the workers — the deferred-durability
+	// path is dead and the row parity above proved only Phase A.
+	if uploaded+cancelled == 0 {
+		t.Error("no background uploads ran — Phase-B async path is dead")
+	}
+	if failed != 0 {
+		t.Errorf("%d background uploads abandoned", failed)
 	}
 }

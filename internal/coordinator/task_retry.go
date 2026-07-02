@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,6 +42,26 @@ type taskRetrier struct {
 	republish    func(distributed.Task)
 	logger       *slog.Logger
 	stageID      string
+
+	// fatal, when non-nil, is consulted on every failure BEFORE the retry
+	// decision: returning true marks the task terminally failed without
+	// burning the remaining attempts. Streaming exchange uses it for
+	// missing-input failures whose producer is dead with no durable copy
+	// (ErrInputLost) — a state no re-dispatch can fix.
+	fatal func(distributed.ResultNotification) bool
+}
+
+// inputLostMarker tags terminal failures caused by an unresolvable
+// streaming-exchange input (ResultNotification.MissingInputKey). ExecuteSQL
+// matches it (via IsInputLostErr) to trigger the one-shot re-execution with
+// streaming exchange disabled. A string marker because the retrier's error
+// state crosses dispatcher boundaries as text.
+const inputLostMarker = "streaming-exchange input lost"
+
+// IsInputLostErr reports whether err (anywhere in its message chain) is a
+// streaming-exchange input-lost failure.
+func IsInputLostErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), inputLostMarker)
 }
 
 type taskAttemptState struct {
@@ -54,8 +75,10 @@ type taskAttemptState struct {
 
 // newTaskRetrier registers the dispatched tasks. republish re-dispatches a
 // single task; it is invoked on the caller-provided function asynchronously
-// (from the NATS subscription goroutine) and must not block long.
-func newTaskRetrier(tasks []distributed.Task, retryEnabled bool, republish func(distributed.Task), logger *slog.Logger, stageID string) *taskRetrier {
+// (from the NATS subscription goroutine) and must not block long. fatal
+// (optional) short-circuits retries for failures no re-dispatch can fix —
+// see taskRetrier.fatal.
+func newTaskRetrier(tasks []distributed.Task, retryEnabled bool, republish func(distributed.Task), logger *slog.Logger, stageID string, fatal func(distributed.ResultNotification) bool) *taskRetrier {
 	tr := &taskRetrier{
 		states:       make(map[string]*taskAttemptState, len(tasks)),
 		tasks:        make(map[string]distributed.Task, len(tasks)),
@@ -64,6 +87,7 @@ func newTaskRetrier(tasks []distributed.Task, retryEnabled bool, republish func(
 		republish:    republish,
 		logger:       logger,
 		stageID:      stageID,
+		fatal:        fatal,
 	}
 	for _, t := range tasks {
 		tr.states[t.ID] = &taskAttemptState{attempts: 1}
@@ -95,8 +119,11 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 		tr.mu.Unlock()
 		return done
 	}
-	// Failure: retry if attempts remain, else terminal failure.
-	if tr.retryEnabled && st.attempts < maxTaskAttempts {
+	// Failure: retry if attempts remain, else terminal failure. A
+	// fatal-classified failure (input lost) skips straight to terminal —
+	// re-dispatching cannot recreate a dead producer's un-uploaded output.
+	fatalNow := tr.fatal != nil && tr.fatal(r)
+	if !fatalNow && tr.retryEnabled && st.attempts < maxTaskAttempts {
 		st.attempts++
 		task := tr.growEstimateLocked(r.TaskID)
 		task.Attempt = st.attempts
@@ -113,6 +140,12 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 		return false
 	}
 	st.errMsg = r.Error
+	if r.MissingInputKey != "" {
+		// Tag both the fatal-classified case and attempts-exhausted-on-
+		// missing-input so ExecuteSQL's streaming-disabled re-execution
+		// triggers on either.
+		st.errMsg = inputLostMarker + " (" + r.MissingInputKey + "): " + r.Error
+	}
 	st.terminal = true
 	tr.terminal++
 	done := tr.terminal >= len(tr.order)
@@ -120,7 +153,7 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 	if tr.logger != nil {
 		tr.logger.Error("task failed terminally",
 			"stage_id", tr.stageID, "task_id", r.TaskID,
-			"attempts", st.attempts, "error", r.Error)
+			"attempts", st.attempts, "fatal_classified", fatalNow, "error", r.Error)
 	}
 	return done
 }

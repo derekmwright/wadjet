@@ -189,6 +189,16 @@ type Task struct {
 	// coordinator; empty when streaming exchange is disabled.
 	FetchToken string `json:"fetch_token,omitempty"`
 
+	// AsyncUpload (streaming exchange Phase B) tells the worker to report
+	// task completion once stage-output files are finalized on local disk
+	// (and adopted into the LocalStageCache for peer serving), continuing
+	// the S3 upload in the background. The worker publishes UploadComplete
+	// when the task's uploads land; until then the S3 copy may not exist
+	// and consumers rely on the peer tier (with a bounded S3 re-poll).
+	// Only set by the coordinator for native-DAG task types whose outputs
+	// are consumed by workers; false = today's synchronous upload.
+	AsyncUpload bool `json:"async_upload,omitempty"`
+
 	// Output is the S3 prefix where this task's output is materialized.
 	// Shuffle/pipeline-intermediate: worker writes "<Output>partition=NNNN/<taskID>.wshf".
 	// Pipeline-final (before Gather): single-partition output at "<Output><taskID>.wshf".
@@ -454,6 +464,30 @@ type ResultNotification struct {
 	// build-scan with DynamicFilterEmit set. One ref per emit. Coordinator
 	// fetches+unions before dispatching the downstream probe-scan stage.
 	DynamicFilterPartials []DynamicFilterPartialRef `json:"dynamic_filter_partials,omitempty"`
+
+	// MissingInputKey (streaming exchange Phase B), set on failure when the
+	// task could not resolve an input file that carried a peer-location
+	// hint: peer fetch failed AND the durable copy was absent past the
+	// bounded re-poll. The coordinator classifies it against the producing
+	// worker's liveness and the key's durability bit — producer dead with
+	// the key not durable is ErrInputLost (unrecoverable by task retry).
+	MissingInputKey string `json:"missing_input_key,omitempty"`
+}
+
+// UploadComplete (streaming exchange Phase B) is published by a worker when
+// an async-upload task's background S3 uploads have all landed. The
+// coordinator flips the per-key durability bits it uses to classify
+// missing-input failures and to gate its own direct reads of stage output
+// (scalar-subquery extraction).
+type UploadComplete struct {
+	RootQueryID string   `json:"root_query_id"`
+	TaskID      string   `json:"task_id"`
+	WorkerID    string   `json:"worker_id"`
+	Keys        []string `json:"keys"`
+	// Failed marks uploads abandoned after retries (S3 outage) or
+	// cancelled (query terminal). Keys stay non-durable; ErrInputLost
+	// remains the backstop if the producer also dies.
+	Failed bool `json:"failed,omitempty"`
 }
 
 // TaskStats captures per-task execution metrics for debugging.

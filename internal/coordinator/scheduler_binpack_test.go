@@ -79,7 +79,7 @@ func TestTaskRetrier_GrowEstimateOnRetry(t *testing.T) {
 	tasks := retryTestTasks(2)
 	tasks[0].EstimatedBytes = 100
 	// tasks[1] stays 0.
-	tr := newTaskRetrier(tasks, true, rep.republish, slog.Default(), "s")
+	tr := newTaskRetrier(tasks, true, rep.republish, slog.Default(), "s", nil)
 
 	if tr.Observe(failResult("a", "boom")) {
 		t.Fatal("terminal too early")
@@ -108,7 +108,7 @@ func TestTaskRetrier_GrowEstimateOnRetry(t *testing.T) {
 // TestTaskRetrier_TotalBytes: worker-reported SizeBytes sums across
 // successful tasks; duplicates don't double-count; failures contribute 0.
 func TestTaskRetrier_TotalBytes(t *testing.T) {
-	tr := newTaskRetrier(retryTestTasks(3), false, nil, slog.Default(), "s")
+	tr := newTaskRetrier(retryTestTasks(3), false, nil, slog.Default(), "s", nil)
 	rA := okResult("a", "f-a")
 	rA.SizeBytes = 100
 	rB := okResult("b", "f-b")

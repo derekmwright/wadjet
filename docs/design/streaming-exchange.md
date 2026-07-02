@@ -1,7 +1,6 @@
 # Streaming Exchange — Design Memo
 
-> **Status:** Phase A implemented (this branch); Phase B (async upload)
-> not started. **Date:** 2026-07-02.
+> **Status:** Phases A and B implemented. **Date:** 2026-07-02.
 > **Verified against:** main @ 9402cbc (post-#173). All `file:line` anchors
 > checked against that commit; they drift — confirm before relying on them.
 >
@@ -14,6 +13,24 @@
 > stage boundaries (previously never matched in distributed mode), and
 > worker-side `CleanupQuery` (broadcast with the root ID, which never
 > matched stage-scoped cache entries — a spill-dir leak until process exit).
+>
+> **Implementation notes (Phase B):** `Task.AsyncUpload` is set only for
+> native-DAG task types (stage/shuffle) — pipeline/gather outputs feed
+> coordinator-side reads. The one coordinator-side stage-output read
+> (scalar-subquery extraction) got its own durability-aware bounded wait
+> (`fetchStageOutputData`); the small-payload NATS KV tier is written
+> synchronously from local bytes, so it stays hot with no S3 dependency.
+> Consumers re-poll S3 (bounded, 15 s) for any missing streaming-query key
+> — triggered by hint OR token, covering producers reaped before the
+> consumer dispatched — then fail with a structural `MissingInputKey`. The
+> retrier consults `classifyFatalResult` before retrying (dead producer +
+> non-durable key skips straight to terminal, tagged `inputLostMarker`);
+> `ExecuteSQL` re-executes once with the query pinned into the
+> streaming-disabled set via a ctx flag that caps depth at one. Known
+> residual: a query that is terminal before its uploads finish cancels
+> them (the S3-PUT saving), and one in-flight PUT per worker can land
+> after the coordinator's scratch purge — reclaimed by the periodic
+> `CleanStale` GC.
 
 ## 1. Goal
 

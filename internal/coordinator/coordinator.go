@@ -178,6 +178,15 @@ type Coordinator struct {
 	// unless Config.StreamingExchange). Fed by noteTaskResult; drained by
 	// the scheduler's task annotator and cleanupQuery.
 	peerFiles *peerFileRegistry
+	// uploadCompleteSub feeds peerFiles durability bits (Phase B).
+	uploadCompleteSub *nats.Subscription
+	// streamingDisabled holds root query IDs running the one-shot
+	// ErrInputLost re-execution (pure S3 semantics: no hints, no async).
+	streamingDisabled sync.Map
+	// streamingReruns counts ErrInputLost re-executions (observability —
+	// a non-zero rate is the signal to revisit single-level producer
+	// re-run per the design memo).
+	streamingReruns atomic.Int64
 }
 
 // New creates a new Coordinator.
@@ -209,10 +218,30 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 
 	// Streaming exchange (Phase A): annotate every dispatched task — initial
 	// and retried alike, since retries re-enter PublishTasks — with peer
-	// location hints and the query's fetch token.
+	// location hints and the query's fetch token. Phase B: track upload
+	// durability from worker UploadComplete notifications.
 	if cfg.StreamingExchange {
 		c.peerFiles = newPeerFileRegistry()
 		c.scheduler.SetTaskAnnotator(c.annotateTaskPeerLocations)
+		if nc != nil {
+			sub, subErr := nc.Subscribe(distributed.SubjectUploadComplete, func(msg *nats.Msg) {
+				var uc distributed.UploadComplete
+				if err := distributed.Unmarshal(msg.Data, &uc); err != nil {
+					return
+				}
+				if uc.Failed {
+					c.logger.Warn("worker abandoned background uploads; keys stay non-durable",
+						"root", uc.RootQueryID, "task_id", uc.TaskID, "worker", uc.WorkerID, "keys", len(uc.Keys))
+					return
+				}
+				c.peerFiles.MarkDurable(uc.Keys)
+			})
+			if subErr != nil {
+				logger.Warn("upload-complete subscription failed; durability bits stay conservative", "error", subErr)
+			} else {
+				c.uploadCompleteSub = sub
+			}
+		}
 	}
 
 	// NATS KV result cache: coordinator writes inline results here instead of S3.
@@ -701,10 +730,31 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		return nil, fmt.Errorf("physical plan: %w", err)
 	}
 
+	// Streaming-disabled re-execution (Phase B): a ctx flagged by the
+	// ErrInputLost rerun below pins this query ID into the disabled set so
+	// the task annotator emits no hints/tokens and no AsyncUpload — pure
+	// synchronous-S3 semantics for the whole run.
+	if streamingExchangeDisabled(ctx) {
+		c.streamingDisabled.Store(queryID, struct{}{})
+		defer c.streamingDisabled.Delete(queryID)
+	}
+
 	c.logger.Info("routing to native DAG executor",
 		"query", queryID, "stages", len(physStages))
 	gr, gerr := c.executeStageDAG(ctx, queryID, sql, physStages, c.workers.Count())
 	if gerr != nil {
+		// ErrInputLost: a producer died before its background upload landed
+		// and its output is unrecoverable by task retry. Reads are
+		// idempotent and nothing has reached the client (ExecuteSQL returns
+		// once), so re-execute the whole query ONCE with streaming exchange
+		// disabled — the fast-path bail-out pattern one level up. The ctx
+		// flag caps the depth at one.
+		if IsInputLostErr(gerr) && c.peerFiles != nil && !streamingExchangeDisabled(ctx) {
+			c.streamingReruns.Add(1)
+			c.logger.Warn("streaming-exchange input lost; re-executing query with streaming disabled",
+				"query", queryID, "error", gerr)
+			return c.ExecuteSQL(withStreamingExchangeDisabled(ctx), sql)
+		}
 		return &SQLResult{
 			QueryID: queryID,
 			Error:   gerr.Error(),

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -87,11 +88,15 @@ type Executor struct {
 	// specs, and the outbound PeerClient (nil client = peer reads disabled).
 	// Always non-nil; dormant without --streaming-exchange.
 	peers *peerExchange
+
+	// uploads runs Phase-B background S3 uploads for AsyncUpload tasks.
+	// Always non-nil; dormant unless tasks arrive with the flag set.
+	uploads *uploadManager
 }
 
 // NewExecutor creates a new task executor.
 func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) *Executor {
-	return &Executor{
+	e := &Executor{
 		store:          store,
 		js:             js,
 		cache:          cache,
@@ -99,6 +104,8 @@ func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) 
 		broadcastCache: newBroadcastJoinCache(),
 		peers:          newPeerExchange(),
 	}
+	e.uploads = newUploadManager(store, nil, e.logger)
+	return e
 }
 
 // SetMemoryBudget configures the per-task memory budget and the spill
@@ -215,9 +222,13 @@ func (e *Executor) SetLocalStageCache(c *LocalStageCache) {
 }
 
 // SetNATSConn attaches a NATS connection used by Gather tasks to stream
-// batches back to the coordinator's reply subject.
+// batches back to the coordinator's reply subject (and by the async upload
+// manager for UploadComplete notifications).
 func (e *Executor) SetNATSConn(nc *nats.Conn) {
 	e.nc = nc
+	if e.uploads != nil {
+		e.uploads.nc = nc
+	}
 }
 
 // SetDataPlaneClient enables gRPC result streaming for gather sinks
@@ -243,6 +254,9 @@ func (e *Executor) SetMetrics(m *metrics.Metrics) {
 // SetLogger sets the executor's logger.
 func (e *Executor) SetLogger(l *slog.Logger) {
 	e.logger = l
+	if e.uploads != nil {
+		e.uploads.logger = l
+	}
 }
 
 // newSpillManager creates a Tracker + SpillManager for a task.
@@ -366,6 +380,13 @@ func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID 
 	if err != nil {
 		result.Success = false
 		result.Error = err.Error()
+		// Streaming exchange Phase B: surface unresolvable hinted inputs
+		// structurally so the coordinator can classify against producer
+		// liveness + durability instead of parsing error text.
+		var miss *missingInputError
+		if errors.As(err, &miss) {
+			result.MissingInputKey = miss.key
+		}
 	} else {
 		result.Success = true
 	}
@@ -953,6 +974,49 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		return fmt.Errorf("shuffle task %s: finalizing sink: %w", task.ID, err)
 	}
 	tFinalizeEnd = time.Now()
+
+	// Phase-B async upload: report completion now — every partition file is
+	// finalized on local disk — adopt each into the LocalStageCache (peers
+	// and the background upload read the adopted copy), and hand the S3
+	// PUTs to the upload manager. Consumers overwhelmingly peer-fetch; the
+	// durable copy lands in the background and UploadComplete flips the
+	// coordinator's per-key durability bits.
+	if root, asyncOK := e.asyncUploadEligible(&task); asyncOK {
+		var jobs []uploadJob
+		for p, localPath := range sink.PartitionFiles() {
+			if localPath == "" {
+				continue // empty partition
+			}
+			key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
+			fi, statErr := os.Stat(localPath)
+			if statErr != nil {
+				return fmt.Errorf("shuffle task %s: stat partition %d: %w", task.ID, p, statErr)
+			}
+			if job, ok := e.finishStageOutputAsync(ctx, &task, key, localPath, fi.Size(), true, result); ok {
+				jobs = append(jobs, job)
+				continue
+			}
+			// Adoption failed (cross-device rename etc.) — this partition
+			// must upload synchronously: its local file dies with the task
+			// spill dir and nothing else could produce the durable copy.
+			if upErr := e.uploads.uploadOnce(ctx, uploadJob{
+				bucket: task.ResultBucket, key: key, srcPath: localPath,
+				compress: true, tmpDir: e.spillDir,
+			}); upErr != nil {
+				return fmt.Errorf("shuffle task %s: partition %d sync-fallback upload: %w", task.ID, p, upErr)
+			}
+			result.ResultFiles = append(result.ResultFiles, key)
+			result.SizeBytes += fi.Size()
+		}
+		e.uploads.StartTask(root, task.ID, result.WorkerID, jobs)
+		result.NumRows = totalRows
+		e.logger.Info("shuffle task completed (async upload pending)",
+			"task_id", task.ID, "rows", totalRows,
+			"partitions", len(result.ResultFiles), "background_uploads", len(jobs),
+			"stream_ms", tStreamEnd.Sub(tStart).Milliseconds(),
+			"finalize_ms", tFinalizeEnd.Sub(tStreamEnd).Milliseconds())
+		return nil
+	}
 
 	// Upload partition files in parallel. Q18 SF1 shuffle-17 produces 8 × 100MB
 	// partitions; serial uploads take ~4.4s on FileStore, parallel ~1.4s. The

@@ -28,6 +28,13 @@ const (
 	SubjectTaskProgress    = "wadjet.task.progress"
 	SubjectTaskProgressAll = "wadjet.task.progress.>"
 
+	// Async-upload completion (streaming exchange Phase B) — Core NATS.
+	// Published by workers when a task's background stage-output uploads
+	// land; coordinator flips per-key durability bits. Best-effort: a
+	// lost message leaves keys non-durable, which only means the
+	// coordinator stays conservative about them.
+	SubjectUploadComplete = "wadjet.uploads.complete"
+
 	// Query cancellation — Core NATS
 	SubjectCancel = "wadjet.cancel"
 

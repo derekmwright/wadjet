@@ -38,7 +38,7 @@ func (c *Coordinator) readScalarFromStageOutput(ctx context.Context, out StageOu
 	// files surfaced (e.g. a zero-row shard plus a one-row shard), scan
 	// until we find the first non-empty row.
 	for _, path := range files {
-		data, err := c.fetchResultData(ctx, "", path)
+		data, err := c.fetchStageOutputData(ctx, path)
 		if err != nil {
 			return "", fmt.Errorf("fetch %s: %w", path, err)
 		}
