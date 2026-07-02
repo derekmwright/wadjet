@@ -35,6 +35,7 @@ type WorkerInfo struct {
 	PoolBudget    int64 // shared memory pool capacity in bytes; pressure = PoolUsed / PoolBudget
 	ActiveTaskIDs []string // task IDs in flight per the most recent heartbeat
 	Draining      bool
+	PeerAddr      string // dialable peer-exchange address; "" = worker serves no peer fetches
 	LastSeen      time.Time
 }
 
@@ -261,6 +262,7 @@ func (wr *WorkerRegistry) record(hb distributed.WorkerHeartbeat) {
 	info.PoolBudget = hb.PoolBudget
 	info.ActiveTaskIDs = append(info.ActiveTaskIDs[:0], hb.ActiveTaskIDs...)
 	info.Draining = hb.Draining
+	info.PeerAddr = hb.PeerAddr
 	// Use coordinator-side time for LastSeen. The heartbeat message
 	// arriving proves the worker is alive — even if the worker's
 	// goroutine was GC-frozen and its embedded timestamp is stale.
@@ -289,6 +291,20 @@ func (wr *WorkerRegistry) ActiveWorkers() []*WorkerInfo {
 		}
 	}
 	return active
+}
+
+// PeerAddr returns the peer-exchange address of a live worker, or "" when
+// the worker is unknown, stale, or doesn't serve peer fetches. Draining
+// workers still serve fetches for files they already hold, so unlike
+// ActiveWorkers this only requires freshness.
+func (wr *WorkerRegistry) PeerAddr(workerID string) string {
+	wr.mu.RLock()
+	defer wr.mu.RUnlock()
+	w, ok := wr.workers[workerID]
+	if !ok || !w.LastSeen.After(time.Now().Add(-wr.stale)) {
+		return ""
+	}
+	return w.PeerAddr
 }
 
 // Count returns the number of active workers.

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/citc-tech/wadjet/internal/distributed"
 )
 
 // LocalStageCache maps (queryID, key) → localPath for stage outputs the
@@ -50,6 +52,21 @@ type localStageKey struct {
 	key     string
 }
 
+// cacheScope normalizes the grouping ID for a cache entry: query-scratch
+// keys ("queries/<id>/...") group under the ROOT query ID regardless of the
+// caller's task QueryID, because task QueryIDs are stage-scoped
+// ("st-<stage>-<id>") — the producer that Adopts and the downstream stage
+// that Gets never share one. Root-scoping makes cross-stage same-worker
+// hits land, lets streaming-exchange peers resolve fetches, and makes
+// CleanupQuery (which the coordinator broadcasts with the root ID) actually
+// match. Non-scratch keys keep the caller's ID.
+func cacheScope(queryID, key string) string {
+	if root := distributed.ScratchQueryID(key); root != "" {
+		return root
+	}
+	return queryID
+}
+
 // NewLocalStageCache returns an empty cache that stores adopted files under
 // rootDir/<queryID>/. Each producer's spill file is moved into this tree so
 // it survives the producing task's spill cleanup.
@@ -80,6 +97,7 @@ func (c *LocalStageCache) Adopt(queryID, key, srcPath string) string {
 	if c == nil || c.rootDir == "" {
 		return ""
 	}
+	queryID = cacheScope(queryID, key)
 	if _, err := os.Stat(srcPath); err != nil {
 		return ""
 	}
@@ -114,6 +132,7 @@ func (c *LocalStageCache) Get(queryID, key string) string {
 	if c == nil {
 		return ""
 	}
+	queryID = cacheScope(queryID, key)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.entries[localStageKey{queryID, key}]

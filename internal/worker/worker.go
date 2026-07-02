@@ -78,6 +78,17 @@ type Config struct {
 	// walking (see internal/engine/diskio). Default false: writes rely on
 	// kernel writeback as before. Deploy-gated.
 	BoundedDirtyWrites bool
+
+	// PeerListenAddr enables the streaming-exchange PeerExchange server
+	// (worker→worker shuffle fetches, docs/design/streaming-exchange.md)
+	// on the given listen address (e.g. ":9095"; ":0" in tests). Empty
+	// (the zero value) = no peer server: this worker serves no fetches
+	// and advertises no peer address, so coordinators never hint at it.
+	PeerListenAddr string
+	// PeerAdvertiseAddr overrides the peer address carried in heartbeats.
+	// Empty = derived from the bound listener (specific IP, else the first
+	// non-loopback unicast IPv4).
+	PeerAdvertiseAddr string
 }
 
 // DefaultConfig returns default worker configuration.
@@ -140,6 +151,12 @@ type Worker struct {
 	// pushed via dpClient's TaskDispatch handler. Gather sinks also prefer
 	// gRPC for result delivery in this mode. nil = legacy NATS-only path.
 	dpClient *dataplane.Client
+
+	// peerServer serves streaming-exchange FetchShuffle requests from other
+	// workers (nil unless Config.PeerListenAddr is set); peerClient issues
+	// them and is always constructed (idle without location hints).
+	peerServer *dataplane.PeerServer
+	peerClient *dataplane.PeerClient
 
 	// CPU profiling state — started/stopped via NATS profile requests.
 	profMu  sync.Mutex
@@ -225,7 +242,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		logger.Debug("worker KV fast-path unavailable", "error", kvErr)
 	}
 
-	return &Worker{
+	w := &Worker{
 		config:      cfg,
 		store:       store,
 		nc:          nc,
@@ -235,7 +252,16 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		cancelled:   make(map[string]time.Time),
 		activeTasks: make(map[string]struct{}),
 		drainCh:     make(chan struct{}),
+		peerClient:  dataplane.NewPeerClient(nil),
 	}
+	executor.SetPeerClient(w.peerClient)
+	if cfg.PeerListenAddr != "" {
+		w.peerServer = dataplane.NewPeerServer(dataplane.PeerServerConfig{
+			Addr:          cfg.PeerListenAddr,
+			AdvertiseAddr: cfg.PeerAdvertiseAddr,
+		}, executor, logger)
+	}
+	return w
 }
 
 // SetMetrics attaches Prometheus metrics for spill/memory tracking.
@@ -270,6 +296,14 @@ func (w *Worker) SetDataPlaneClient(c *dataplane.Client) {
 // Start begins the worker task loop and heartbeat.
 func (w *Worker) Start(ctx context.Context) error {
 	ctx, w.cancel = context.WithCancel(ctx)
+
+	// Streaming exchange: bind the peer-fetch listener before the first
+	// heartbeat so the advertised address is never stale.
+	if w.peerServer != nil {
+		if err := w.peerServer.Start(); err != nil {
+			return fmt.Errorf("starting peer exchange server: %w", err)
+		}
+	}
 
 	// Sweep stale build-cache spill files left over from a previous worker
 	// crash. Without this, a c7gd.4xlarge worker that crashes mid-query at
@@ -337,6 +371,7 @@ func (w *Worker) Start(ctx context.Context) error {
 		if w.executor.broadcastCache != nil {
 			w.executor.broadcastCache.CleanupQuery(queryID)
 		}
+		w.executor.peers.CleanupQuery(queryID)
 		w.logger.Debug("query cancelled", "query_id", queryID)
 	})
 	if err != nil {
@@ -373,6 +408,7 @@ func (w *Worker) Start(ctx context.Context) error {
 		if w.executor.resultStore != nil {
 			w.executor.resultStore.CleanupQuery(queryID)
 		}
+		w.executor.peers.CleanupQuery(queryID)
 	})
 	if err != nil {
 		return fmt.Errorf("subscribing to completions: %w", err)
@@ -626,6 +662,13 @@ func (w *Worker) Stop() {
 		w.cancel()
 	}
 	w.wg.Wait()
+
+	if w.peerServer != nil {
+		w.peerServer.Stop()
+	}
+	if w.peerClient != nil {
+		w.peerClient.Close()
+	}
 
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }
@@ -1411,6 +1454,7 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 				Mallocs:       mallocs,
 				SpillDiskUsed: spill,
 				Draining:      w.Draining(),
+				PeerAddr:      w.peerAdvertiseAddr(),
 				Timestamp:     time.Now(),
 			}
 
@@ -1436,6 +1480,28 @@ func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 			}
 		}
 	}
+}
+
+// peerAdvertiseAddr returns the peer-exchange address to carry in
+// heartbeats, or "" when this worker doesn't serve peer fetches.
+func (w *Worker) peerAdvertiseAddr() string {
+	if w.peerServer == nil {
+		return ""
+	}
+	return w.peerServer.AdvertiseAddr()
+}
+
+// PeerExchangeAddr exposes the advertised peer-exchange address ("" when
+// peer serving is disabled or the listener isn't bound yet). Tests use it
+// to bootstrap coordinator heartbeats ahead of the first real one.
+func (w *Worker) PeerExchangeAddr() string {
+	return w.peerAdvertiseAddr()
+}
+
+// PeerFetchStats returns the streaming-exchange read-tier counters: inputs
+// served via peer fetch, and hinted fetches that fell through to S3.
+func (w *Worker) PeerFetchStats() (hits, fallthroughs int64) {
+	return w.executor.PeerFetchHits(), w.executor.PeerFetchFallthroughs()
 }
 
 // reapCancelled removes cancellation entries older than maxAge.
