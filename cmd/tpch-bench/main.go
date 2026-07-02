@@ -338,6 +338,11 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		NATSUrl:        embeddedNATS.ClientURL(),
 		ResultBucket:   bucket,
 		DynamicFilters: os.Getenv("WADJET_DYNAMIC_FILTERS") == "1" || strings.EqualFold(os.Getenv("WADJET_DYNAMIC_FILTERS"), "true"),
+		// Streaming exchange (docs/design/streaming-exchange.md): annotate
+		// tasks with peer-location hints + fetch tokens and run stage
+		// uploads async. Workers must run with --streaming-exchange too
+		// (terraform var streaming_exchange wires both sides).
+		StreamingExchange: os.Getenv("TPCH_STREAMING_EXCHANGE") == "1" || strings.EqualFold(os.Getenv("TPCH_STREAMING_EXCHANGE"), "true"),
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
 	coord.Workers().StartSubStatsLogger(ctx)

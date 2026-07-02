@@ -148,6 +148,17 @@ resource "aws_security_group" "bench" {
     self      = true
   }
 
+  # Peer exchange (worker ↔ worker FetchShuffle, streaming exchange).
+  # A small range: each worker PROCESS on a host binds base+idx
+  # (workers_per_node processes per host). Idle unless streaming_exchange
+  # is set; harmless to keep open intra-SG.
+  ingress {
+    from_port = var.peer_exchange_port
+    to_port   = var.peer_exchange_port + 15
+    protocol  = "tcp"
+    self      = true
+  }
+
   # pgwire
   ingress {
     from_port = 5433
@@ -368,6 +379,10 @@ locals {
     # ${var.data_plane_port}.
     export TPCH_DATA_PLANE="${var.data_plane}"
     export TPCH_DATA_PLANE_ADDR=":${var.data_plane_port}"
+    # Streaming exchange (peer shuffle reads + async upload). Coordinator
+    # side of the flag; the worker cloud-init adds --streaming-exchange
+    # from the same terraform var.
+    export TPCH_STREAMING_EXCHANGE="${var.streaming_exchange ? "1" : "0"}"
     # Catalog snapshot/restore prefix (PR #115). Non-empty = restore the
     # post-discovery catalog from s3://<bucket>/<prefix> instead of paying
     # ~15 min of discovery+ANALYZE per deploy; first boot writes it.
@@ -625,6 +640,10 @@ resource "aws_instance" "worker" {
             %{if var.data_plane == "grpc"~}
             --data-plane=grpc \
             --coord-data-plane="$COORD_IP:${var.data_plane_port}" \
+            %{endif~}
+            %{if var.streaming_exchange~}
+            --streaming-exchange \
+            --peer-exchange-addr=":$((${var.peer_exchange_port} + idx))" \
             %{endif~}
             --mmap-relief=${var.mmap_relief} \
             --mmap-relief-threshold-mb=${var.mmap_relief_threshold_mb} \
