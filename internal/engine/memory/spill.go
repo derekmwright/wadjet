@@ -79,6 +79,11 @@ type SpillManager struct {
 	reliefMu       sync.Mutex
 	lastReliefAt   map[uint64]time.Time
 	rotationCursor int
+
+	// trackingOnly makes ShouldSpillFor/ShouldSpill answer false
+	// unconditionally while TrackBatch/ReleaseTracking still charge the
+	// shared tracker. See TrackingOnlyView.
+	trackingOnly bool
 }
 
 // defaultSpillCheapFraction is the fraction of the floating operator budget at
@@ -122,6 +127,32 @@ func (sm *SpillManager) SetFloatingBudgetActive(active bool) { sm.floatingBudget
 func (sm *SpillManager) SetCheapFraction(f float64) {
 	if f > 0 && f < 1 {
 		sm.cheapFrac = f
+	}
+}
+
+// TrackingOnlyView returns a SpillManager that charges the SAME tracker as
+// sm (TrackBatch/ReleaseTracking/PublishOwned all flow to the shared pool)
+// but never asks its operators to spill: ShouldSpillFor and ShouldSpill
+// answer false unconditionally, including the heap-pressure backstop.
+//
+// Built for morsel-parallel clone partials (morsel-execution.md §4.3):
+// clone accumulation must be visible to admission and to the PRIMARY
+// operator's spill trigger — clone reservations push tracker.Used up, so
+// the primary trips at the same cumulative point the serial pipeline would
+// — but clones themselves never spill. There is no concurrent spill format;
+// under pressure the fragment runner collapses parallelism and merges
+// clones into the spill-armed primary instead. Operators registered on the
+// view (RegisterAccounted) are invisible to the real manager's relief
+// targeting, which walks only its own registry — by design, since a clone
+// cannot honor SpillSome.
+func (sm *SpillManager) TrackingOnlyView() *SpillManager {
+	return &SpillManager{
+		dir:           sm.dir,
+		tracker:       sm.tracker,
+		cheapFrac:     sm.cheapFrac,
+		accountedPeak: make(map[uint64]int64),
+		lastReliefAt:  make(map[uint64]time.Time),
+		trackingOnly:  true,
 	}
 }
 
@@ -207,6 +238,9 @@ const (
 // free on local NVMe. Spill bytes 67-80 MB across the sweep (lower
 // threshold → more bytes spilled, as expected).
 func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
+	if sm.trackingOnly {
+		return false
+	}
 	// Floating-budget path: the threshold is a fraction of the LIVE available
 	// operator budget (GOMEMLIMIT − Σreservoir actual − GC headroom) rather than
 	// the static pool budget. cheapFrac (default 0.90) gates SpillCheap;
@@ -268,6 +302,9 @@ func (sm *SpillManager) ShouldSpillFor(urgency SpillUrgency) bool {
 // runtime.ReadMemStats is moderately expensive (sub-millisecond), so the
 // reading is rate-limited to once per 100 ms across all callers.
 func (sm *SpillManager) ShouldSpill() bool {
+	if sm.trackingOnly {
+		return false
+	}
 	if sm.tracker != nil && sm.tracker.Budget() > 0 &&
 		sm.tracker.Used() > sm.tracker.Budget()*60/100 {
 		return true

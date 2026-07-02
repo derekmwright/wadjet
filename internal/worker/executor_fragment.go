@@ -654,6 +654,248 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 	return nil
 }
 
+// runBreakerConsumeParallel is the morsel-parallel variant of the breaker
+// consume phase (source → first breaker): the single producer feeds a
+// bounded channel consumed by k goroutines, each running a Clone()d op
+// chain into its own CloneSink partial; partials merge into the primary at
+// the barrier (the exec.Pipeline.runParallel shape, with two additions the
+// never-OOM rules require — memo §4.3):
+//
+//  1. Clones RESERVE. Each clone sink charges its accumulated state to a
+//     tracking-only view of the shared SpillManager, so admission and the
+//     primary's spill trigger see the k× partial footprint. Clones never
+//     spill — there is no concurrent spill format.
+//  2. Pressure COLLAPSES k. When the real SpillManager's ShouldSpillFor
+//     trips during parallel consume, the consumers stop, partials merge
+//     into the spill-armed primary (the merge transfers the memory
+//     accounting), and the remaining input drains serially through the
+//     ORIGINAL chain into the primary — whose own partial-drain spill
+//     machinery is exactly today's SF100-validated path. Parallelism is a
+//     fair-weather optimization; the pressure story is unchanged serial.
+//
+// Sel is snapshotted before every breaker Consume: breakers retain batches
+// (Sort stores them) while upstream Filters reuse per-instance Sel scratch —
+// same rule as drainThroughBreaker. Finalize on the primary is called here,
+// matching the serial Pipeline.Run contract for the j==0 phase.
+func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink exec.MergeableSink, k int) error {
+	fp := newFragmentProgress(e.logger, task, e)
+
+	consumeInto := func(ctx context.Context, dst exec.Sink, b *batch.RecordBatch) error {
+		if b.Sel != nil {
+			selCopy := make([]uint32, len(b.Sel))
+			copy(selCopy, b.Sel)
+			b.Sel = selCopy
+		}
+		return dst.Consume(ctx, b)
+	}
+	runChain := func(ctx context.Context, chain []exec.UnaryOperator, b *batch.RecordBatch) (*batch.RecordBatch, error) {
+		cur := b
+		var err error
+		for _, op := range chain {
+			cur, err = op.Execute(ctx, cur)
+			if err != nil {
+				return nil, fmt.Errorf("unary exec: %w", err)
+			}
+			if cur == nil {
+				return nil, nil
+			}
+		}
+		return cur, nil
+	}
+	flushAll := func(chains [][]exec.UnaryOperator) error {
+		for _, chain := range chains {
+			if err := drainFlushableOps(ctx, chain, true, func(c context.Context, b *batch.RecordBatch) error {
+				return sink.Consume(c, b)
+			}); err != nil {
+				return fmt.Errorf("flush spilled ops: %w", err)
+			}
+		}
+		return nil
+	}
+
+	// Warmup through the ORIGINAL chain into the primary — resolves the
+	// lazily-cached column indices in shared predicate/expression closures
+	// before any clone exists, and gives the primary sink its schema (the
+	// MergeSink schema-inherit path covers the fully-filtered-warmup case).
+	warmup, err := src.Next(ctx)
+	if err != nil {
+		return fmt.Errorf("source next: %w", err)
+	}
+	if warmup == nil {
+		if err := flushAll([][]exec.UnaryOperator{ops}); err != nil {
+			return err
+		}
+		return sink.Finalize(ctx)
+	}
+	if cur, err := runChain(ctx, ops, warmup); err != nil {
+		return err
+	} else if cur != nil && cur.ActiveLen() > 0 {
+		if err := consumeInto(ctx, sink, cur); err != nil {
+			return fmt.Errorf("sink consume: %w", err)
+		}
+	}
+
+	// Cloned chains + clone sinks. Worker 0 keeps the originals and the
+	// primary. Clone sinks charge a tracking-only SpillManager view; the
+	// deferred Closes release whatever charge a clone still holds (Close is
+	// idempotent about it — post-merge the clone's charge is zero for Sort
+	// and released-once for HashAggregate).
+	var trackingSpill *memory.SpillManager
+	if e.sharedSpill != nil {
+		trackingSpill = e.sharedSpill.TrackingOnlyView()
+	}
+	chains := make([][]exec.UnaryOperator, 1, k)
+	chains[0] = ops
+	sinks := make([]exec.Sink, 1, k)
+	sinks[0] = sink
+	defer func() {
+		for _, chain := range chains[1:] {
+			for j, op := range chain {
+				if op == ops[j] {
+					continue
+				}
+				op.Close()
+			}
+		}
+		for _, ws := range sinks[1:] {
+			ws.Close()
+		}
+	}()
+	for i := 1; i < k; i++ {
+		chain := make([]exec.UnaryOperator, len(ops))
+		for j, op := range ops {
+			chain[j] = op.(exec.Cloneable).Clone()
+		}
+		chains = append(chains, chain)
+		for j, cop := range chain {
+			if cop == ops[j] {
+				continue
+			}
+			if err := cop.Init(ctx); err != nil {
+				return fmt.Errorf("cloned op init: %w", err)
+			}
+		}
+		cloned := sink.CloneSink()
+		switch cs := cloned.(type) {
+		case *exec.HashAggregate:
+			cs.Spill = trackingSpill
+		case *exec.Sort:
+			cs.Spill = trackingSpill
+		}
+		if err := cloned.Init(ctx); err != nil {
+			cloned.Close()
+			return fmt.Errorf("cloned sink init: %w", err)
+		}
+		sinks = append(sinks, cloned)
+	}
+
+	// Producer: source.Next → channel. Runs until EOF or cancel; it keeps
+	// feeding the serial continuation after a collapse, so its lifetime is
+	// the whole function, not the parallel section.
+	prodCtx, prodCancel := context.WithCancel(ctx)
+	defer prodCancel()
+	ch := make(chan *batch.RecordBatch, 2*k)
+	prodErr := make(chan error, 1)
+	go func() {
+		defer close(ch)
+		for {
+			b, err := src.Next(prodCtx)
+			if err != nil {
+				prodErr <- fmt.Errorf("source next: %w", err)
+				return
+			}
+			if b == nil {
+				prodErr <- nil
+				return
+			}
+			select {
+			case <-prodCtx.Done():
+				prodErr <- prodCtx.Err()
+				return
+			case ch <- b:
+			}
+		}
+	}()
+
+	var collapsed atomic.Bool
+	g, gctx := errgroup.WithContext(ctx)
+	for i := 0; i < k; i++ {
+		chain, wsink := chains[i], sinks[i]
+		g.Go(func() error {
+			for b := range ch {
+				if err := fp.applyBackpressure(gctx); err != nil {
+					return err
+				}
+				cur, err := runChain(gctx, chain, b)
+				if err != nil {
+					return err
+				}
+				if cur != nil && cur.ActiveLen() > 0 {
+					if err := consumeInto(gctx, wsink, cur); err != nil {
+						return fmt.Errorf("sink consume: %w", err)
+					}
+				}
+				if collapsed.Load() {
+					return nil
+				}
+				if e.sharedSpill != nil && e.sharedSpill.ShouldSpillFor(memory.SpillCheap) {
+					collapsed.Store(true)
+					return nil
+				}
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Barrier: merge clone partials into the spill-armed primary. MergeSink
+	// transfers the memory accounting with the state, so the primary's next
+	// ShouldSpillFor sees the full merged footprint.
+	for i := 1; i < k; i++ {
+		sink.MergeSink(sinks[i].(exec.SinkSource))
+	}
+	if collapsed.Load() {
+		e.morselCollapses.Add(1)
+		e.logger.Info("morsel pressure collapse: breaker consume continuing serial",
+			"task_id", task.ID,
+			"stage_id", task.StageID,
+			"k", k)
+	}
+
+	// Serial continuation. After a normal completion the channel is closed
+	// and empty — zero iterations. After a collapse this drains the rest of
+	// the input through the ORIGINAL chain into the primary, whose own
+	// spill machinery now governs memory exactly like the serial path.
+	for b := range ch {
+		if err := fp.applyBackpressure(ctx); err != nil {
+			return err
+		}
+		cur, err := runChain(ctx, ops, b)
+		if err != nil {
+			return err
+		}
+		if cur == nil || cur.ActiveLen() == 0 {
+			continue
+		}
+		if err := consumeInto(ctx, sink, cur); err != nil {
+			return fmt.Errorf("sink consume: %w", err)
+		}
+	}
+	if err := <-prodErr; err != nil {
+		return err
+	}
+
+	// Spilled-partition flush over every chain (shared spillState; the first
+	// drain clears it, later chains no-op — same rule as the linear path),
+	// then finalize the primary, matching the serial Pipeline.Run contract.
+	if err := flushAll(chains); err != nil {
+		return err
+	}
+	return sink.Finalize(ctx)
+}
+
 // drainFlushableOps drains any FlushableOperators (Grace Hash Join probes that
 // spilled partitions to disk) through the remaining unary chain into consume.
 // Mirrors exec.Pipeline.flushSpilledOps.
@@ -777,9 +1019,39 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 		phaseOps = append(phaseOps, breakers[j].PrependOps...)
 
 		if j == 0 {
-			pipe := &exec.Pipeline{Source: currentSrc, Ops: phaseOps, Sink: breakers[j].Op}
-			if err := pipe.Run(ctx); err != nil {
-				return fmt.Errorf("fragment task %s: %s consume: %w", task.ID, breakers[j].Label, err)
+			// Morsel-parallel breaker consume (docs/design/morsel-execution.md
+			// §4.3): when the width gate passes and the breaker supports
+			// per-worker partials, run the source→first-breaker phase with k
+			// cloned chains + CloneSink partials, collapsing back to the
+			// serial spill path under memory pressure. Otherwise today's
+			// serial Pipeline.
+			mergeable, isMergeable := breakers[j].Op.(exec.MergeableSink)
+			k, release := 1, func() {}
+			if isMergeable {
+				k, release = e.morselFragmentWorkers(task, phaseOps)
+			}
+			if k > 1 {
+				err = func() error {
+					defer release()
+					e.logger.Debug("morsel parallel breaker consume",
+						"task_id", task.ID,
+						"stage_id", task.StageID,
+						"breaker", breakers[j].Label,
+						"k", k,
+						"estimated_bytes", task.EstimatedBytes,
+						"cpu_tokens_in_use", e.cpuTokens.InUse(),
+						"cpu_tokens_cap", e.cpuTokens.Capacity())
+					return e.runBreakerConsumeParallel(ctx, task, currentSrc, phaseOps, mergeable, k)
+				}()
+				if err != nil {
+					return fmt.Errorf("fragment task %s: %s consume: %w", task.ID, breakers[j].Label, err)
+				}
+			} else {
+				release()
+				pipe := &exec.Pipeline{Source: currentSrc, Ops: phaseOps, Sink: breakers[j].Op}
+				if err := pipe.Run(ctx); err != nil {
+					return fmt.Errorf("fragment task %s: %s consume: %w", task.ID, breakers[j].Label, err)
+				}
 			}
 		} else {
 			if err := drainThroughBreaker(ctx, currentSrc, breakers[j-1].DrainXform, phaseOps, breakers[j].Op); err != nil {
@@ -1095,7 +1367,22 @@ func (e *Executor) buildUnaryChain(ctx context.Context, task distributed.Task, s
 		results[0] = built{ops: opChain, cleanup: opCleanup}
 	default:
 		g, gctx := errgroup.WithContext(ctx)
-		if limit := runtime.GOMAXPROCS(0); limit < len(specs) {
+		if e.cpuTokens != nil {
+			// Burst-section token adoption (morsel-execution.md §4.2): this
+			// concurrent op-build burst (broadcast build decode + hash-index
+			// construction is CPU-heavy) draws from the same worker-wide
+			// token pool as the morsel consumers, so Σ(compute goroutines)
+			// across concurrent tasks stays within the core budget. The
+			// first build slot is free, mirroring the consumer rule; token
+			// scarcity narrows the burst, never blocks it.
+			want := len(specs)
+			if m := runtime.GOMAXPROCS(0); m < want {
+				want = m
+			}
+			extra := e.cpuTokens.TryAcquire(want - 1)
+			defer e.cpuTokens.Release(extra)
+			g.SetLimit(1 + extra)
+		} else if limit := runtime.GOMAXPROCS(0); limit < len(specs) {
 			g.SetLimit(limit)
 		}
 		for i := range specs {
