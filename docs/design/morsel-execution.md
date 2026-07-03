@@ -230,6 +230,29 @@ unit of *everything*. Three boundaries get their own granularity back:
   mutex) only pays above `shuffleBurstGateRows` (4096); smaller consumes
   append inline.
 
+**SF100 acceptance postmortem (2026-07-03) — the breaker path is the real
+Q17 bomb; v2 must land §4.3's end-state.** The v1.7 SF100 run completed
+Q01–Q16 with correct rows and real wins (Q01 −17%, Q06 −15%, Q08 −8% vs
+baseline), then Q17's fused scan-agg (`GROUP BY l_partkey`, ~20M keys per
+shard) killed all three workers: 21.6 GB LIVE heap after GC vs 21.3 GB
+GOMEMLIMIT. Heap profiles (s3://wadjet-bench-sf100-use2/debug/
+morsel-v17-treatment-20260703/) attribute it to HashAggregate breaker
+state, three stacked failures: (1) k=8 clone partials × high-NDV keys —
+each clone accumulates ~the full key set, the §4.3 rule-1 hazard, and
+"clones reserve" cannot save it because (2) `groupMemoryUsage`
+under-counts (keyVals, extras, string keys omitted) — the tracker saw
+~6 GB while the heap hit 21.8 GB (41–100% drift logged), so
+`ShouldSpillFor` never tripped and ZERO breaker collapses fired during
+Q17 (the linear-path heap collapse fired correctly during Q05); and (3)
+the barrier merge is O(total): `mergeSinkState → migrateToGenericMap`
+(14.2 GB cum) + `materializeFlatAccums` (9.6 GB cum) materialize a second
+copy of all partials. The dispenser/byte-budget/linear-collapse work is
+validated; auto mode stays unsafe for high-NDV breaker fragments until
+v2 lands: partition-owned partials (route clone partials onto the
+existing `fibHash & (drainK-1)` drain sharding — no duplication, no
+barrier merge), byte-true `groupMemoryUsage`, and a spill-aware merge
+that drains via the existing external-merge partial-state files.
+
 **v1.7 amendment — splitting is a safety mechanism, gated by parent size.**
 The second SF10 A/B (v1.6, results/20260703-124706) recovered only Q01:
 adaptive view size fixed the scan-agg path, but every join/probe fragment
