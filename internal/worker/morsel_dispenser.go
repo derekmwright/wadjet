@@ -184,12 +184,30 @@ func (d *morselDispenser) release(n int64) {
 	}
 }
 
+// splitMinCost is the parent size above which dispatch splits into views:
+// parents small enough that 2k of them fit under the byte budget give every
+// consumer queue depth without splitting, and per-view processing is pure
+// overhead for them — the SF10 v1.5/v1.6 A/Bs (2026-07-03) measured
+// splitting typical SF10 units (~25 MB row groups, 64k-row chunks) at
+// +10-45% wall on join/probe fragments with no memory benefit. Parents
+// BIGGER than budget/(2k) are the SF100 failure shape (280 MB decoded row
+// groups): without splitting, k consumers each holding one would either
+// blow the heap or serialize behind the budget, so views are what make
+// k-wide consumption of them memory-safe.
+func (d *morselDispenser) splitMinCost() int64 {
+	k := int64(d.k)
+	if k < 1 {
+		k = 1
+	}
+	return d.budget / (2 * k)
+}
+
 // dispatch splits the admitted batch into morsels and sends them. The whole
 // parent's cost is released when the last sibling retires.
 func (d *morselDispenser) dispatch(ctx context.Context, b *batch.RecordBatch, cost int64) error {
 	n := b.ActiveLen()
 	viewRows := d.viewRowsFor(n)
-	if !d.split || n <= viewRows {
+	if !d.split || cost <= d.splitMinCost() || n <= viewRows {
 		d.morsels.Add(1)
 		return d.send(ctx, morsel{b: b, retire: func() { d.release(cost) }})
 	}

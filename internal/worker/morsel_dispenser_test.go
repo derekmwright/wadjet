@@ -74,10 +74,21 @@ func activeIDs(b *batch.RecordBatch) []int64 {
 	return out
 }
 
+
+// newSplitTestDispenser builds a dispenser whose bytes gate is disabled
+// (budget 0 → splitMinCost 0) so tests with small in-memory parents still
+// exercise the view-splitting machinery. admit() always admits when nothing
+// is in flight, so a zero budget only affects the gate.
+func newSplitTestDispenser(k int, split bool) *morselDispenser {
+	d := newMorselDispenser(k, split)
+	d.budget = 0
+	return d
+}
+
 func TestMorselDispenser_SplitViews(t *testing.T) {
 	const n = 2*batch.DefaultBatchSize + 100
 	parent := makeMorselTestBatch(t, 0, n)
-	d := newMorselDispenser(2, true)
+	d := newSplitTestDispenser(2, true)
 	got := collectMorsels(t, d, &stubBatchSource{batches: []*batch.RecordBatch{parent}})
 
 	if len(got) != 3 {
@@ -135,7 +146,7 @@ func TestMorselDispenser_ParentSelRespected(t *testing.T) {
 	}
 	parent.Sel = sel
 
-	d := newMorselDispenser(2, true)
+	d := newSplitTestDispenser(2, true)
 	got := collectMorsels(t, d, &stubBatchSource{batches: []*batch.RecordBatch{parent}})
 
 	var ids []int64
@@ -237,7 +248,7 @@ func TestMorselDispenser_OversizeAdmitted(t *testing.T) {
 func TestMorselDispenser_SiblingSelIsolation(t *testing.T) {
 	const n = 2 * batch.DefaultBatchSize
 	parent := makeMorselTestBatch(t, 0, n)
-	d := newMorselDispenser(2, true)
+	d := newSplitTestDispenser(2, true)
 	got := collectMorsels(t, d, &stubBatchSource{batches: []*batch.RecordBatch{parent}})
 	if len(got) != 2 {
 		t.Fatalf("morsels = %d, want 2", len(got))
@@ -293,7 +304,7 @@ func TestMorselDispenser_AdaptiveViewSize(t *testing.T) {
 func TestMorselDispenser_AdaptiveSplitCounts(t *testing.T) {
 	const n = 40_000
 	parent := makeMorselTestBatch(t, 0, n)
-	d := newMorselDispenser(4, true) // viewRows = 2500 → 16 views
+	d := newSplitTestDispenser(4, true) // viewRows = 2500 → 16 views
 	got := collectMorsels(t, d, &stubBatchSource{batches: []*batch.RecordBatch{parent}})
 	if len(got) != 16 {
 		t.Fatalf("morsels = %d, want 16", len(got))
@@ -313,5 +324,39 @@ func TestMorselDispenser_AdaptiveSplitCounts(t *testing.T) {
 	}
 	if got := d.inFlight.Load(); got != 0 {
 		t.Fatalf("inFlight after retire = %d, want 0", got)
+	}
+}
+
+// TestMorselDispenser_BytesGate: parents small relative to the byte budget
+// pass through unsplit (2k of them fit in flight — splitting is pure
+// overhead, measured +10-45% on SF10 join fragments); parents above
+// budget/(2k) split.
+func TestMorselDispenser_BytesGate(t *testing.T) {
+	const n = 3 * batch.DefaultBatchSize
+	small := makeMorselTestBatch(t, 0, n)
+	cost := small.MemBytes()
+
+	// Gate open: parent cost ≤ budget/(2k) → no split despite n > viewRows.
+	d := newMorselDispenser(2, true)
+	d.budget = cost * 4 // splitMinCost = cost*4/(2*2) = cost ≥ cost → unsplit
+	got := collectMorsels(t, d, &stubBatchSource{batches: []*batch.RecordBatch{small}})
+	if len(got) != 1 {
+		t.Fatalf("morsels = %d, want 1 (small parent must not split)", len(got))
+	}
+	if got[0].b != small {
+		t.Fatal("gated morsel must carry the original batch")
+	}
+	got[0].retire()
+
+	// Gate closed: same parent with a tight budget splits.
+	big := makeMorselTestBatch(t, 0, n)
+	d2 := newMorselDispenser(2, true)
+	d2.budget = cost // splitMinCost = cost/4 < cost → split
+	got2 := collectMorsels(t, d2, &stubBatchSource{batches: []*batch.RecordBatch{big}})
+	if len(got2) != 3 {
+		t.Fatalf("morsels = %d, want 3 (oversized parent must split)", len(got2))
+	}
+	for _, m := range got2 {
+		m.retire()
 	}
 }

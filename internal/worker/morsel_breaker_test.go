@@ -409,6 +409,13 @@ func TestExecuteFragment_MorselParallel_AggEmptyInput(t *testing.T) {
 // serial exactly. This is the SF100 parquet row-group shape on the breaker
 // path.
 func TestExecuteFragment_MorselParallel_AggLargeBatchParity(t *testing.T) {
+	// Shrink the dispenser budget so these small test parents exceed the
+	// bytes gate and the view-splitting machinery engages end-to-end.
+	origBudget := morselDispenserBudgetBytes
+	morselDispenserBudgetBytes = 64 << 10
+	defer func() { morselDispenserBudgetBytes = origBudget }()
+
+
 	const numFiles = 4
 	const rowsPerFile = 6000 // > DefaultBatchSize → dispenser splits into views
 	const groups = 50

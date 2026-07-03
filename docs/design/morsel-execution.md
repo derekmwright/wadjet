@@ -230,6 +230,26 @@ unit of *everything*. Three boundaries get their own granularity back:
   mutex) only pays above `shuffleBurstGateRows` (4096); smaller consumes
   append inline.
 
+**v1.7 amendment — splitting is a safety mechanism, gated by parent size.**
+The second SF10 A/B (v1.6, results/20260703-124706) recovered only Q01:
+adaptive view size fixed the scan-agg path, but every join/probe fragment
+where splitting engaged stayed +10-45% vs phase-2 (Q13 2×), with CPU ~flat —
+per-view consume serializes on the mutexed fragment sink, and no view size
+fixes that from the dispenser side. The resolution is that splitting was
+never a throughput feature: phase-2's batch-grained parallelism already won
+at SF10 (−3.3% suite) on ≤35 MB decode units. Splitting exists to make
+OVERSIZED units (SF100's ~280 MB decoded row groups) memory-safe under k
+consumers. So `dispatch` splits only parents whose cost exceeds
+`budget/(2k)` (`splitMinCost`) — small enough that 2k fit in flight means
+every consumer has queue depth without views; bigger than that means
+unsplit consumption would either blow the heap (k × parent in hand) or
+serialize behind the byte budget. At SF10 nothing typical crosses the gate
+(phase-2 behavior, validated); at SF100 lineitem row groups do (the
+Q17/Q18 failure shape). The byte budget, pressure collapse, and sink
+coalescing stay unconditional. Known follow-up if profiles ever show the
+gate crossed AND sink-bound: move the coalesced-chunk encode/write outside
+the sink mutex (double-buffered flush) so consume is append-only.
+
 ### 4.2 Worker count policy (adaptive, threshold-gated)
 
 `k = 1` (today's behavior) unless the fragment's input estimate clears a

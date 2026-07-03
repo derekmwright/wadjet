@@ -460,6 +460,13 @@ func runMorselFilterFragment(t *testing.T, bucket string, morselWorkers, numFile
 // SF100 parquet shape (a source batch = one decoded row group, not 2048
 // rows) that the 2026-07-03 A/B failed on.
 func TestExecuteFragment_MorselParallel_LargeBatchViewParity(t *testing.T) {
+	// Shrink the dispenser budget so these small test parents exceed the
+	// bytes gate and the view-splitting machinery engages end-to-end.
+	origBudget := morselDispenserBudgetBytes
+	morselDispenserBudgetBytes = 64 << 10
+	defer func() { morselDispenserBudgetBytes = origBudget }()
+
+
 	const numFiles = 4
 	const rowsPerFile = 10000 // > DefaultBatchSize → splitting engages
 
@@ -488,6 +495,13 @@ func TestExecuteFragment_MorselParallel_LargeBatchViewParity(t *testing.T) {
 // grace-join LINEAR fragments blew the worker heap with morselCollapses = 0
 // because only the breaker path had a pressure-collapse rule.
 func TestExecuteFragment_MorselParallel_LinearPressureCollapse(t *testing.T) {
+	// Shrink the dispenser budget so these small test parents exceed the
+	// bytes gate and the view-splitting machinery engages end-to-end.
+	origBudget := morselDispenserBudgetBytes
+	morselDispenserBudgetBytes = 64 << 10
+	defer func() { morselDispenserBudgetBytes = origBudget }()
+
+
 	orig := heapPressureActive
 	heapPressureActive = func() bool { return true }
 	defer func() { heapPressureActive = orig }()
@@ -576,6 +590,13 @@ func TestExecuteFragment_MorselParallel_LinearPressureCollapse(t *testing.T) {
 // once. This is the Q17/Q18 grace-join linear shape that failed the SF100
 // 2026-07-03 A/B.
 func TestExecuteFragment_MorselParallel_LargeBatchJoinSpillFlush(t *testing.T) {
+	// Shrink the dispenser budget so these small test parents exceed the
+	// bytes gate and the view-splitting machinery engages end-to-end.
+	origBudget := morselDispenserBudgetBytes
+	morselDispenserBudgetBytes = 64 << 10
+	defer func() { morselDispenserBudgetBytes = origBudget }()
+
+
 	ctx := context.Background()
 	const bucket = "test-morsel-hj-flush-big"
 
