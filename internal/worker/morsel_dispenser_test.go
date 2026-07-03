@@ -265,3 +265,53 @@ func TestMorselDispenser_SiblingSelIsolation(t *testing.T) {
 	got[0].retire()
 	got[1].retire()
 }
+
+// TestMorselDispenser_AdaptiveViewSize: the split targets ~4 views per
+// consumer (with a DefaultBatchSize floor and 64k cap), not unconditional
+// 2048-row views — v1.5's fixed-size split put ~500 channel handoffs per
+// row group on the critical path (SF10 suite +15%).
+func TestMorselDispenser_AdaptiveViewSize(t *testing.T) {
+	cases := []struct {
+		k, n, want int
+	}{
+		{2, 4196, batch.DefaultBatchSize},          // small parent → floor
+		{8, 1_000_000, 31250},                      // 1M rows, k=8 → n/32
+		{4, 40_000, 2500},                          // 40k rows, k=4 → n/16
+		{2, 2_000_000, morselMaxViewRows},          // huge parent → cap
+		{8, 8 * batch.DefaultBatchSize, batch.DefaultBatchSize}, // exactly 4·k floor-sized views
+	}
+	for _, c := range cases {
+		d := newMorselDispenser(c.k, true)
+		if got := d.viewRowsFor(c.n); got != c.want {
+			t.Errorf("viewRowsFor(n=%d, k=%d) = %d, want %d", c.n, c.k, got, c.want)
+		}
+	}
+}
+
+// TestMorselDispenser_AdaptiveSplitCounts: dispatch produces ceil(n/viewRows)
+// views covering the parent exactly.
+func TestMorselDispenser_AdaptiveSplitCounts(t *testing.T) {
+	const n = 40_000
+	parent := makeMorselTestBatch(t, 0, n)
+	d := newMorselDispenser(4, true) // viewRows = 2500 → 16 views
+	got := collectMorsels(t, d, &stubBatchSource{batches: []*batch.RecordBatch{parent}})
+	if len(got) != 16 {
+		t.Fatalf("morsels = %d, want 16", len(got))
+	}
+	var ids []int64
+	for _, m := range got {
+		ids = append(ids, activeIDs(m.b)...)
+		m.retire()
+	}
+	if len(ids) != n {
+		t.Fatalf("total rows = %d, want %d", len(ids), n)
+	}
+	for i, id := range ids {
+		if id != int64(i) {
+			t.Fatalf("row %d: id = %d, want %d", i, id, i)
+		}
+	}
+	if got := d.inFlight.Load(); got != 0 {
+		t.Fatalf("inFlight after retire = %d, want 0", got)
+	}
+}

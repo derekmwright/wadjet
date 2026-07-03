@@ -2,9 +2,11 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"hash/fnv"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -252,4 +254,83 @@ func readWSHFInts(t *testing.T, path, colName string) []int64 {
 		}
 	}
 	return out
+}
+
+// TestPartitionedShuffleSink_LargeConsumeBurstParity: consumes above
+// shuffleBurstGateRows take the errgroup fan-out path, below it the inline
+// path; both must produce identical partition contents. Mixes both sizes in
+// one sink and verifies every row lands in its hash partition exactly once.
+func TestPartitionedShuffleSink_LargeConsumeBurstParity(t *testing.T) {
+	dir := t.TempDir()
+	schema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "name", Type: parquet.TypeString},
+	}
+	const numParts = 4
+	sink := newPartitionedShuffleSink(dir, []string{"id"}, numParts, schema)
+	if err := sink.Init(context.Background()); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer sink.Close()
+
+	makeRange := func(base, n int) *batch.RecordBatch {
+		ids := make([]int64, n)
+		names := make([]string, n)
+		for i := range ids {
+			ids[i] = int64(base + i)
+			names[i] = "r" + strconv.Itoa(base+i)
+		}
+		return makeBatchInt64String(schema, ids, names)
+	}
+
+	total := 0
+	// One burst-path consume (> shuffleBurstGateRows) and several inline ones.
+	for _, n := range []int{shuffleBurstGateRows * 2, 100, 2048, 517} {
+		if err := sink.Consume(context.Background(), makeRange(total, n)); err != nil {
+			t.Fatalf("Consume(%d): %v", n, err)
+		}
+		total += n
+	}
+	if err := sink.Finalize(context.Background()); err != nil {
+		t.Fatalf("Finalize: %v", err)
+	}
+
+	seen := make(map[int64]bool)
+	rows := 0
+	for p := 0; p < numParts; p++ {
+		data, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("part-%04d.wshf", p)))
+		if err != nil {
+			t.Fatalf("read partition %d: %v", p, err)
+		}
+		if len(data) == 0 {
+			continue
+		}
+		rdr, err := newShuffleChunkReader(data)
+		if err != nil {
+			t.Fatalf("parse partition %d: %v", p, err)
+		}
+		for {
+			b, err := rdr.Next()
+			if err != nil {
+				t.Fatalf("partition %d next: %v", p, err)
+			}
+			if b == nil {
+				break
+			}
+			for i := 0; i < b.ActiveLen(); i++ {
+				id := b.Columns[0].Int64Data[i]
+				if seen[id] {
+					t.Fatalf("id %d appears twice", id)
+				}
+				seen[id] = true
+				if want := "r" + strconv.FormatInt(id, 10); string(b.Columns[1].BytesData.Value(i)) != want {
+					t.Fatalf("id %d: name %q, want %q", id, b.Columns[1].BytesData.Value(i), want)
+				}
+				rows++
+			}
+		}
+	}
+	if rows != total {
+		t.Fatalf("rows across partitions = %d, want %d", rows, total)
+	}
 }

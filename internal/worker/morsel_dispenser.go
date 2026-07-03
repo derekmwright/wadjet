@@ -67,6 +67,7 @@ type morselDispenser struct {
 	ch     chan morsel
 	budget int64
 	split  bool
+	k      int // consumer count; sizes the adaptive view split (see dispatch)
 
 	// inFlight is added to only by the producer (admit) and subtracted only
 	// by retire callbacks; the producer's check-then-add is single-writer
@@ -87,8 +88,34 @@ func newMorselDispenser(k int, split bool) *morselDispenser {
 		ch:     make(chan morsel, 2*k),
 		budget: morselDispenserBudgetBytes,
 		split:  split,
+		k:      k,
 		signal: make(chan struct{}, 1),
 	}
+}
+
+// morselMaxViewRows caps the adaptive view size. Bounds the transients that
+// scale with view size (join-probe output pools size off ActiveLen) and the
+// backpressure/collapse checkpoint interval.
+const morselMaxViewRows = 64 << 10
+
+// viewRowsFor sizes the split for an n-active-row batch: ~4 views per
+// consumer so k consumers stay load-balanced within one parent, with a
+// DefaultBatchSize floor and morselMaxViewRows cap. Views sized down to 2048
+// unconditionally (the v1.5 shape) made the SF10 suite 15% SLOWER: a 1M-row
+// row group became ~500 channel handoffs + mutexed sink consumes, and the
+// producer could not decode ahead — the fixed costs sat on the critical
+// path. ~4·k views keep the same parallelism with ~16× fewer handoffs.
+func (d *morselDispenser) viewRowsFor(n int) int {
+	rows := batch.DefaultBatchSize
+	if d.k > 0 {
+		if t := (n + 4*d.k - 1) / (4 * d.k); t > rows {
+			rows = t
+		}
+	}
+	if rows > morselMaxViewRows {
+		rows = morselMaxViewRows
+	}
+	return rows
 }
 
 // run is the producer loop: source → admit → split → channel. Closes the
@@ -161,12 +188,13 @@ func (d *morselDispenser) release(n int64) {
 // parent's cost is released when the last sibling retires.
 func (d *morselDispenser) dispatch(ctx context.Context, b *batch.RecordBatch, cost int64) error {
 	n := b.ActiveLen()
-	if !d.split || n <= batch.DefaultBatchSize {
+	viewRows := d.viewRowsFor(n)
+	if !d.split || n <= viewRows {
 		d.morsels.Add(1)
 		return d.send(ctx, morsel{b: b, retire: func() { d.release(cost) }})
 	}
 
-	numViews := (n + batch.DefaultBatchSize - 1) / batch.DefaultBatchSize
+	numViews := (n + viewRows - 1) / viewRows
 	var refs atomic.Int64
 	refs.Store(int64(numViews))
 	retire := func() {
@@ -197,8 +225,8 @@ func (d *morselDispenser) dispatch(ctx context.Context, b *batch.RecordBatch, co
 	}
 	d.splits.Add(1)
 	d.morsels.Add(int64(numViews))
-	for start := 0; start < n; start += batch.DefaultBatchSize {
-		end := start + batch.DefaultBatchSize
+	for start := 0; start < n; start += viewRows {
+		end := start + viewRows
 		if end > n {
 			end = n
 		}

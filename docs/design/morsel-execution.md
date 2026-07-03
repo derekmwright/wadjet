@@ -206,6 +206,30 @@ morsel, whatever it keeps is either copied out (HashAggregate group state,
 shuffle-sink accumulators) or charged to the memory ledger (Sort), so
 dispenser bytes and tracked bytes never double-count or gap.
 
+**v1.6 amendments (SF10 A/B 2026-07-03 follow-up).** The first SF10 run of
+v1.5 was 22/22 row-identical but ~15% slower than the phase-2 arm, with CPU
+up only ~6% — the loss was wait/serialization from making 2048 rows the
+unit of *everything*. Three boundaries get their own granularity back:
+
+- **Adaptive view size** (`viewRowsFor`): split into ~4·k views per parent,
+  clamp [DefaultBatchSize, 64k]. Unconditional 2048-row views turned a 1M-row
+  row group into ~500 channel handoffs + mutexed sink consumes and kept the
+  producer from decoding ahead. ~4·k keeps intra-parent parallelism with
+  ~16× fewer handoffs; the cap bounds view-scaled transients (probe output
+  pools size off ActiveLen) and the backpressure checkpoint interval.
+- **Sink-side chunk coalescing** (`unpartitionedStageSink`): a .wshf chunk
+  is the downstream stage's batch and decode unit, so chunk size is the
+  sink's decision — consumed rows accumulate (via the shared
+  `appendBatchRowsBulk`) and flush at 64k rows / 16 MB. Chunk-per-consume
+  under morsel-sized callers fragmented stage outputs ~100× (s2Decode
+  26.6s→35.6s, crc32 +1.5s in worker profiles) and cascaded small batches
+  into every downstream stage. Flat schemas only; nested schemas keep the
+  legacy chunk-per-consume path.
+- **Size-gated shuffle fan-out** (`partitionedShuffleSink`): the
+  per-Consume errgroup burst (up to GOMAXPROCS goroutines, inside the sink
+  mutex) only pays above `shuffleBurstGateRows` (4096); smaller consumes
+  append inline.
+
 ### 4.2 Worker count policy (adaptive, threshold-gated)
 
 `k = 1` (today's behavior) unless the fragment's input estimate clears a
