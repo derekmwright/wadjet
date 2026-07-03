@@ -165,6 +165,47 @@ planner sources already have, applied to `cachedFileStreamSource`:
 - No shared source mutex — the channel replaces it, addressing the
   documented 5-15% `sourceMu` ceiling.
 
+### 4.1.1 v1.5: byte-bounded dispenser + zero-copy morsel views (shipped)
+
+The SF100 A/B (2026-07-03) refuted two v1 assumptions and v1.5 replaces
+the raw channel with `morselDispenser` (`internal/worker/morsel_dispenser.go`)
+on both parallel paths:
+
+1. **"A batch ≈ 2048 rows" is false on the parquet path.** A source batch
+   from `cachedFileStreamSource` is one decoded ROW GROUP (~280 MB for
+   SF100 lineitem). The 2·k channel + k in-hand batches held ~7 GB of
+   tracker-invisible heap per task; ×`max_concurrent` that cleared
+   GOMEMLIMIT and 30m-deadlined Q17/Q18. The dispenser therefore admits
+   decoded batches against a **byte budget** (`morselDispenserBudgetBytes`,
+   512 MB), released when the batch retires — counts bound nothing.
+2. **Row-group-sized units also defeat the morsel model** — one consumer
+   owns 280 MB while the others idle, join-probe output pools size off the
+   input's ActiveLen (so transients are row-group-sized too), and
+   backpressure only checkpoints between batches. The dispenser splits
+   oversized batches into ~2048-row **zero-copy views**: shared parent
+   column vectors, private Sel (capped three-index subslices of one
+   parent-sized array), refcounted retirement returning the parent's bytes
+   to the budget. Audited safety contract: linear-path ops (`exec.Filter`,
+   `exec.Project`, `HashJoinProbe`, `DynamicFilterEmitOp`) never write
+   input column storage and mutate only the batch's own Sel *field*.
+   `Bitmap.HasNulls`' compute-and-cache memo is pre-warmed by the producer
+   before views fan out (same rule as the ColRef warmup). Views must NOT
+   reach retaining sinks — `Sort` stores batches and charges the Sel-blind
+   `MemBytes()` — so breaker-path splitting is gated to `HashAggregate`
+   sinks (which copy rows out during Consume).
+3. **Linear fragments now pressure-collapse** like breakers: their
+   transients are tracker-invisible by design, so the trigger is
+   `memory.HeapBackpressureActive` (70% of GOMEMLIMIT); on the first trip
+   consumers stop and the remaining input drains serially through the
+   original chain. The failed A/B showed `morselCollapses = 0` while the
+   heap blew past the limit precisely because only the breaker path had a
+   collapse rule.
+
+Retire-after-consume is the accounting handoff: once a sink has consumed a
+morsel, whatever it keeps is either copied out (HashAggregate group state,
+shuffle-sink accumulators) or charged to the memory ledger (Sort), so
+dispenser bytes and tracked bytes never double-count or gap.
+
 ### 4.2 Worker count policy (adaptive, threshold-gated)
 
 `k = 1` (today's behavior) unless the fragment's input estimate clears a

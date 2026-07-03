@@ -401,3 +401,130 @@ func TestExecuteFragment_MorselParallel_AggEmptyInput(t *testing.T) {
 		t.Fatalf("cpu tokens leaked: %d", held)
 	}
 }
+
+// TestExecuteFragment_MorselParallel_AggLargeBatchParity is the AggParity
+// shape with source batches ~3× DefaultBatchSize: the dispenser splits them
+// into zero-copy views (HashAggregate copies rows out during Consume, so
+// views are safe into breaker clones), and group sums must still match
+// serial exactly. This is the SF100 parquet row-group shape on the breaker
+// path.
+func TestExecuteFragment_MorselParallel_AggLargeBatchParity(t *testing.T) {
+	const numFiles = 4
+	const rowsPerFile = 6000 // > DefaultBatchSize → dispenser splits into views
+	const groups = 50
+	const minV = 1000
+
+	run := func(t *testing.T, bucket string, morselWorkers int) map[int64]float64 {
+		store := objstore.NewMemStore()
+		if err := store.MakeBucket(context.Background(), bucket); err != nil {
+			t.Fatalf("MakeBucket: %v", err)
+		}
+		keys, _ := putGroupedFiles(t, store, bucket, numFiles, rowsPerFile, groups, minV)
+
+		executor := NewExecutor(store, NewLRUCache(4*1024*1024), nil)
+		executor.SetMorselWorkers(morselWorkers)
+		executor.cpuTokens = newCPUTokens(8)
+		task := aggFragmentTask(bucket, keys, minV)
+		result := &distributed.ResultNotification{TaskID: task.ID}
+		if err := executor.executeStage(context.Background(), task, result); err != nil {
+			t.Fatalf("executeStage (morsel=%d): %v", morselWorkers, err)
+		}
+		if held := executor.cpuTokens.InUse(); held != 0 {
+			t.Fatalf("cpu tokens leaked: %d", held)
+		}
+		return readGroupTotals(t, store, bucket, result.ResultFiles[0])
+	}
+
+	serial := run(t, "morsel-agg-big-serial", 1)
+	parallel := run(t, "morsel-agg-big-parallel", 4)
+	if len(serial) != groups || len(parallel) != groups {
+		t.Fatalf("groups: serial %d, parallel %d, want %d", len(serial), len(parallel), groups)
+	}
+	for g, s := range serial {
+		if parallel[g] != s {
+			t.Errorf("group %d: parallel total %v != serial %v", g, parallel[g], s)
+		}
+	}
+}
+
+// TestExecuteFragment_MorselParallel_SortLargeBatchParity: Sort RETAINS
+// consumed batches and charges them via the Sel-blind MemBytes, so the
+// dispenser must NOT split for Sort sinks (each retained view would charge
+// the full parent). Large batches flow through the byte-bounded dispenser
+// unsplit; sorted output must be identical to serial.
+func TestExecuteFragment_MorselParallel_SortLargeBatchParity(t *testing.T) {
+	const numFiles = 4
+	const rowsPerFile = 6000
+
+	run := func(t *testing.T, bucket string, morselWorkers int) []int64 {
+		store := objstore.NewMemStore()
+		if err := store.MakeBucket(context.Background(), bucket); err != nil {
+			t.Fatalf("MakeBucket: %v", err)
+		}
+		keys := make([]string, numFiles)
+		for f := 0; f < numFiles; f++ {
+			rows := make([][2]int64, rowsPerFile)
+			for i := range rows {
+				id := int64(f*rowsPerFile + i)
+				rows[i] = [2]int64{id, id * 7 % 9973}
+			}
+			data := makeScanWshf(t, rows)
+			key := "in/sort/t" + strconv.Itoa(f) + ".wshf"
+			if _, err := store.Put(context.Background(), bucket, key, bytes.NewReader(data), int64(len(data)), "application/octet-stream"); err != nil {
+				t.Fatalf("Put: %v", err)
+			}
+			keys[f] = key
+		}
+
+		executor := NewExecutor(store, NewLRUCache(4*1024*1024), nil)
+		executor.SetMorselWorkers(morselWorkers)
+		executor.cpuTokens = newCPUTokens(8)
+		task := distributed.Task{
+			ID:           "frag-morsel-sort-big",
+			QueryID:      "q-morsel-sort-big",
+			StageID:      "sort-0",
+			Type:         distributed.TaskTypeStage,
+			DataBucket:   bucket,
+			ResultBucket: bucket,
+			ResultPrefix: "out/sort-0/",
+			Operators: []distributed.OpSpec{
+				{
+					Type:        distributed.OpScan,
+					InputAlias:  "t",
+					InputFiles:  keys,
+					InputBucket: bucket,
+					Columns:     []string{"id", "val"},
+				},
+				{
+					Type: distributed.OpSort,
+					SortKeySpecs: []distributed.SortKeySpec{
+						{Column: "val", Desc: true},
+						{Column: "id", Desc: false},
+					},
+				},
+				{
+					Type: distributed.OpUnpartitionedSink,
+				},
+			},
+		}
+		result := &distributed.ResultNotification{TaskID: task.ID}
+		if err := executor.executeStage(context.Background(), task, result); err != nil {
+			t.Fatalf("executeStage (morsel=%d): %v", morselWorkers, err)
+		}
+		if result.NumRows != int64(numFiles*rowsPerFile) {
+			t.Fatalf("NumRows = %d, want %d", result.NumRows, numFiles*rowsPerFile)
+		}
+		return readMemStoreInts(t, store, bucket, result.ResultFiles[0], "id")
+	}
+
+	serial := run(t, "morsel-sort-big-serial", 1)
+	parallel := run(t, "morsel-sort-big-parallel", 4)
+	if len(serial) != len(parallel) {
+		t.Fatalf("row counts differ: serial %d, parallel %d", len(serial), len(parallel))
+	}
+	for i := range serial {
+		if serial[i] != parallel[i] {
+			t.Fatalf("row %d: parallel id %d != serial id %d", i, parallel[i], serial[i])
+		}
+	}
+}
