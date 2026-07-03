@@ -648,6 +648,7 @@ resource "aws_instance" "worker" {
             --mmap-relief=${var.mmap_relief} \
             --mmap-relief-threshold-mb=${var.mmap_relief_threshold_mb} \
             --bounded-dirty-writes=${var.bounded_dirty_writes} \
+            --morsel-workers=${var.morsel_workers} \
             %{if var.spill_floating_budget~}
             --spill-floating-budget \
             %{endif~}
