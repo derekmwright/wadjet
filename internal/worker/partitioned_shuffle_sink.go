@@ -66,6 +66,10 @@ type partitionWriter struct {
 // 4N partitions × 64 KB = ~768 KB per shuffle task at N=3.
 const flushPartitionBytes = 64 * 1024
 
+// shuffleBurstGateRows is the consume size below which per-partition appends
+// run inline instead of fanning out an errgroup burst (see Consume).
+const shuffleBurstGateRows = 4096
+
 func newPartitionedShuffleSink(spillDir string, keys []string, numParts int, schema []parquet.Column) *partitionedShuffleSink {
 	return &partitionedShuffleSink{
 		spillDir:   spillDir,
@@ -165,6 +169,32 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 		_ = col.Nulls.HasNulls()
 	}
 
+	// Small consumes skip the goroutine fan-out below: with ~24 partitions a
+	// 2048-row batch leaves ~85 rows per partition, and spawning+joining up
+	// to GOMAXPROCS goroutines per Consume call — inside the sink mutex —
+	// costs more than the appends themselves. Morsel-parallel fragments
+	// (docs/design/morsel-execution.md §4.1.1) consume at morsel granularity,
+	// so this path is hot there; the SF10 v1.5 A/B (2026-07-03) measured the
+	// per-consume burst as a wall-time serializer.
+	if n < shuffleBurstGateRows {
+		for p := 0; p < s.numParts; p++ {
+			if len(s.perPartRows[p]) == 0 {
+				continue
+			}
+			if err := s.appendRowsBulk(p, b, s.perPartRows[p]); err != nil {
+				return err
+			}
+			pw := s.parts[p]
+			if pw.rowBuf == nil || pw.bufRows == 0 || pw.bufBytes < s.flushBytes {
+				continue
+			}
+			if err := s.flushPartition(p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	// Each partitionWriter is fully independent (own file handle, bufio.Writer,
 	// shuffleWriter, rowBuf). Run per-partition append + threshold-flush in
 	// parallel: 2026-05-22 SF100 Q18 profile showed appendRowsBulk 84.5s cum +
@@ -232,7 +262,18 @@ func (s *partitionedShuffleSink) appendRowsBulk(p int, b *batch.RecordBatch, row
 		}
 	}
 
-	dst := pw.rowBuf
+	bytesAdded := appendBatchRowsBulk(pw.rowBuf, b, rows)
+	pw.bufRows += len(rows)
+	pw.bufBytes += bytesAdded
+	return nil
+}
+
+// appendBatchRowsBulk copies the given source rows of b into dst (appending
+// at dst.Len) and returns the approximate byte count added. FLAT column
+// types only — the switch (like growBatchTo) has no Array/Map/Row/Vector
+// arms. Shared by the partition writers and the unpartitioned stage sink's
+// chunk-coalescing accumulator.
+func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, rows []int) int {
 	start := dst.Len
 	end := start + len(rows)
 
@@ -381,9 +422,7 @@ func (s *partitionedShuffleSink) appendRowsBulk(p int, b *batch.RecordBatch, row
 	}
 
 	dst.Len = end
-	pw.bufRows += len(rows)
-	pw.bufBytes += bytesAdded
-	return nil
+	return bytesAdded
 }
 
 // growBatchTo ensures the destination batch has storage for n rows in each

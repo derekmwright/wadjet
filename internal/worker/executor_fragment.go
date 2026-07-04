@@ -438,6 +438,11 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 	return nil
 }
 
+// heapPressureActive is memory.HeapBackpressureActive behind a package var
+// so the linear-collapse regression test can force a pressure trip without
+// manipulating GOMEMLIMIT. Production never reassigns it.
+var heapPressureActive = memory.HeapBackpressureActive
+
 // morselMinFragmentBytes is the auto-mode size gate: fragments whose
 // EstimatedBytes fall below it stay serial. Parallelism pays only above a
 // size threshold — the parallel join build learned this the hard way
@@ -492,13 +497,25 @@ func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.Unary
 }
 
 // runFragmentLinearParallel is the morsel-driven variant of
-// runFragmentLinear: the same single producer feeds a bounded channel (the
-// morsel dispenser — cap 2·k preserves the decode-can't-run-ahead property
-// of the serial split), consumed by k goroutines that each run a private
-// Clone()d copy of the op chain. The fragment sink is shared behind a mutex:
-// every fragment sink consumes each batch synchronously (partitioned shuffle
-// write, WSHF append, gather publish) and retains no reference afterward, so
-// serializing consume is sufficient — no Sel snapshot needed.
+// runFragmentLinear: a single producer feeds the byte-bounded morsel
+// dispenser (which splits row-group-sized decoded batches into ~2048-row
+// zero-copy views — see morsel_dispenser.go for the budget and view-safety
+// story), consumed by k goroutines that each run a private Clone()d copy of
+// the op chain. The fragment sink is shared behind a mutex: every fragment
+// sink consumes each batch synchronously (partitioned shuffle write, WSHF
+// append, gather publish) and retains no reference afterward, so serializing
+// consume is sufficient — no Sel snapshot needed.
+//
+// Pressure COLLAPSES k (the breaker-path rule, applied here): the linear
+// path's transients — dispenser in-flight bytes, join-probe output batches —
+// are tracker-invisible by design, so the collapse signal is the process
+// heap itself (memory.HeapBackpressureActive, 70% of GOMEMLIMIT). On the
+// first trip during parallel consume the consumers stop and the remaining
+// input drains serially through the original chain: parallelism is a
+// fair-weather optimization, and the pressure story is exactly today's
+// SF100-validated serial one. The SF100 2026-07-03 A/B failed on precisely
+// this gap — Q17/Q18 grace-join linear fragments blew the worker heap with
+// zero collapses because only the breaker path had a collapse rule.
 //
 // One batch is pushed through the ORIGINAL ops before cloning ("warmup",
 // same pattern as exec.Pipeline.runParallel): operator scratch is per-clone,
@@ -581,51 +598,62 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 			}
 		}
 
-		ch := make(chan *batch.RecordBatch, 2*k)
-		g, gctx := errgroup.WithContext(ctx)
-		// Producer: source.Next → channel. Closes ch on EOF or error. Decode
-		// stays single-threaded inside the source (WSHF chunk / parquet
-		// row-group state machines keep their unguarded cursors).
-		g.Go(func() error {
-			defer close(ch)
-			for {
-				b, err := src.Next(gctx)
+		// Producer: source → byte-bounded dispenser. Decode stays
+		// single-threaded inside the source (WSHF chunk / parquet row-group
+		// state machines keep their unguarded cursors). The producer runs on
+		// its own cancel scope, not the consumer errgroup's: after a
+		// pressure collapse it keeps feeding the serial continuation.
+		d := newMorselDispenser(k, true)
+		prodCtx, prodCancel := context.WithCancel(ctx)
+		defer prodCancel()
+		prodErr := make(chan error, 1)
+		go func() {
+			prodErr <- d.run(prodCtx, src)
+		}()
+
+		runChain := func(ctx context.Context, chain []exec.UnaryOperator, b *batch.RecordBatch) (*batch.RecordBatch, error) {
+			cur := b
+			var err error
+			for _, op := range chain {
+				cur, err = op.Execute(ctx, cur)
 				if err != nil {
-					return fmt.Errorf("source next: %w", err)
+					return nil, fmt.Errorf("unary exec: %w", err)
 				}
-				if b == nil {
-					return nil
-				}
-				select {
-				case <-gctx.Done():
-					return gctx.Err()
-				case ch <- b:
+				if cur == nil {
+					return nil, nil
 				}
 			}
-		})
+			return cur, nil
+		}
+
+		var collapsed atomic.Bool
+		g, gctx := errgroup.WithContext(ctx)
 		for i := 0; i < k; i++ {
 			chain := chains[i]
 			g.Go(func() error {
-				for b := range ch {
+				for m := range d.ch {
 					if err := fp.applyBackpressure(gctx); err != nil {
+						m.retire()
 						return err
 					}
-					cur := b
-					var err error
-					for _, op := range chain {
-						cur, err = op.Execute(gctx, cur)
-						if err != nil {
-							return fmt.Errorf("unary exec: %w", err)
-						}
-						if cur == nil {
-							break
+					cur, err := runChain(gctx, chain, m.b)
+					if err != nil {
+						m.retire()
+						return err
+					}
+					if cur != nil && cur.ActiveLen() > 0 {
+						if err := consume(gctx, cur); err != nil {
+							m.retire()
+							return fmt.Errorf("sink consume: %w", err)
 						}
 					}
-					if cur == nil || cur.ActiveLen() == 0 {
-						continue
+					m.retire()
+					if collapsed.Load() {
+						return nil
 					}
-					if err := consume(gctx, cur); err != nil {
-						return fmt.Errorf("sink consume: %w", err)
+					if heapPressureActive() {
+						collapsed.Store(true)
+						return nil
 					}
 				}
 				return nil
@@ -634,6 +662,39 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 		if err := g.Wait(); err != nil {
 			return fmt.Errorf("fragment task %s: %w", task.ID, err)
 		}
+		if collapsed.Load() {
+			e.morselCollapses.Add(1)
+			e.logger.Info("morsel pressure collapse: linear fragment continuing serial",
+				append([]any{"task_id", task.ID, "stage_id", task.StageID, "k", k}, d.logAttrs()...)...)
+		}
+
+		// Serial continuation. After a normal completion the channel is
+		// closed and empty — zero iterations. After a collapse this drains
+		// the rest of the input through the ORIGINAL chain, at serial memory
+		// footprint.
+		for m := range d.ch {
+			if err := fp.applyBackpressure(ctx); err != nil {
+				m.retire()
+				return fmt.Errorf("fragment task %s: %w", task.ID, err)
+			}
+			cur, err := runChain(ctx, ops, m.b)
+			if err != nil {
+				m.retire()
+				return fmt.Errorf("fragment task %s: %w", task.ID, err)
+			}
+			if cur != nil && cur.ActiveLen() > 0 {
+				if err := consume(ctx, cur); err != nil {
+					m.retire()
+					return fmt.Errorf("fragment task %s: sink consume: %w", task.ID, err)
+				}
+			}
+			m.retire()
+		}
+		if err := <-prodErr; err != nil {
+			return fmt.Errorf("fragment task %s: %w", task.ID, err)
+		}
+		e.logger.Debug("morsel parallel fragment done",
+			append([]any{"task_id", task.ID, "k", k}, d.logAttrs()...)...)
 	}
 
 	// Spilled-partition flush, over EVERY chain. Clone probes share the
@@ -779,6 +840,17 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 		switch cs := cloned.(type) {
 		case *exec.HashAggregate:
 			cs.Spill = trackingSpill
+			// Bound the clone partial: clones cannot spill (tracking-only
+			// view), so a high-NDV GROUP BY would otherwise accumulate ~the
+			// full key set in EVERY clone — k× serial state, the SF100 Q17
+			// worker deaths (morsel-agg-partials-v2.md §3.A). Past the
+			// threshold the clone self-drains to canonical partial-state
+			// runs that MergeSink hands to the primary. Per-task budget
+			// split across 2k partials mirrors the dispenser's
+			// budget/(2k) gate shape; 0 (unlimited budget) disables.
+			if e.memoryBudget > 0 {
+				cs.PartialDrainBytes = e.memoryBudget / int64(2*k)
+			}
 		case *exec.Sort:
 			cs.Spill = trackingSpill
 		}
@@ -789,32 +861,20 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 		sinks = append(sinks, cloned)
 	}
 
-	// Producer: source.Next → channel. Runs until EOF or cancel; it keeps
-	// feeding the serial continuation after a collapse, so its lifetime is
-	// the whole function, not the parallel section.
+	// Producer: source → byte-bounded morsel dispenser. Runs until EOF or
+	// cancel; it keeps feeding the serial continuation after a collapse, so
+	// its lifetime is the whole function, not the parallel section. Views
+	// (split row groups) are safe into a HashAggregate — it copies rows out
+	// during Consume — but NOT into a retaining sink (Sort stores the batch
+	// and charges b.MemBytes(), which is Sel-blind: each retained view would
+	// charge the full parent), so splitting is gated on the sink type.
+	_, sinkTakesViews := sink.(*exec.HashAggregate)
+	d := newMorselDispenser(k, sinkTakesViews)
 	prodCtx, prodCancel := context.WithCancel(ctx)
 	defer prodCancel()
-	ch := make(chan *batch.RecordBatch, 2*k)
 	prodErr := make(chan error, 1)
 	go func() {
-		defer close(ch)
-		for {
-			b, err := src.Next(prodCtx)
-			if err != nil {
-				prodErr <- fmt.Errorf("source next: %w", err)
-				return
-			}
-			if b == nil {
-				prodErr <- nil
-				return
-			}
-			select {
-			case <-prodCtx.Done():
-				prodErr <- prodCtx.Err()
-				return
-			case ch <- b:
-			}
-		}
+		prodErr <- d.run(prodCtx, src)
 	}()
 
 	var collapsed atomic.Bool
@@ -822,19 +882,23 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	for i := 0; i < k; i++ {
 		chain, wsink := chains[i], sinks[i]
 		g.Go(func() error {
-			for b := range ch {
+			for m := range d.ch {
 				if err := fp.applyBackpressure(gctx); err != nil {
+					m.retire()
 					return err
 				}
-				cur, err := runChain(gctx, chain, b)
+				cur, err := runChain(gctx, chain, m.b)
 				if err != nil {
+					m.retire()
 					return err
 				}
 				if cur != nil && cur.ActiveLen() > 0 {
 					if err := consumeInto(gctx, wsink, cur); err != nil {
+						m.retire()
 						return fmt.Errorf("sink consume: %w", err)
 					}
 				}
+				m.retire()
 				if collapsed.Load() {
 					return nil
 				}
@@ -868,24 +932,29 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	// and empty — zero iterations. After a collapse this drains the rest of
 	// the input through the ORIGINAL chain into the primary, whose own
 	// spill machinery now governs memory exactly like the serial path.
-	for b := range ch {
+	for m := range d.ch {
 		if err := fp.applyBackpressure(ctx); err != nil {
+			m.retire()
 			return err
 		}
-		cur, err := runChain(ctx, ops, b)
+		cur, err := runChain(ctx, ops, m.b)
 		if err != nil {
+			m.retire()
 			return err
 		}
-		if cur == nil || cur.ActiveLen() == 0 {
-			continue
+		if cur != nil && cur.ActiveLen() > 0 {
+			if err := consumeInto(ctx, sink, cur); err != nil {
+				m.retire()
+				return fmt.Errorf("sink consume: %w", err)
+			}
 		}
-		if err := consumeInto(ctx, sink, cur); err != nil {
-			return fmt.Errorf("sink consume: %w", err)
-		}
+		m.retire()
 	}
 	if err := <-prodErr; err != nil {
 		return err
 	}
+	e.logger.Debug("morsel parallel breaker consume done",
+		append([]any{"task_id", task.ID, "k", k}, d.logAttrs()...)...)
 
 	// Spilled-partition flush over every chain (shared spillState; the first
 	// drain clears it, later chains no-op — same rule as the linear path),

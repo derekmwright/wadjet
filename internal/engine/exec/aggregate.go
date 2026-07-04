@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec/kernel"
@@ -81,6 +83,16 @@ type HashAggregate struct {
 	GroupByAll bool
 	Aggs       []AggColumn
 	Spill         *memory.SpillManager // optional: enables spill-to-disk
+	// PartialDrainBytes bounds this aggregate's in-memory state when it is a
+	// morsel-parallel CLONE partial: past the threshold, Consume drains the
+	// whole state to canonical partial-state run files (drainedRuns) that
+	// MergeSink hands to the primary for Finalize's k-way merge. Clones run
+	// on a tracking-only SpillManager view whose ShouldSpillFor is
+	// unconditionally false, so without this bound a high-cardinality GROUP
+	// BY multiplies serial state by k with no pressure valve — the SF100 Q17
+	// worker deaths (morsel-agg-partials-v2.md §3.A). 0 = disabled (primary
+	// aggregates keep their ShouldSpillFor-driven spill machinery).
+	PartialDrainBytes int64
 	NullGroupCols []string             // GROUPING SETS: columns to output as NULL (legacy per-node)
 	GroupingSets  [][]int              // single-pass grouping sets: column indices within GroupByCols per set
 	InputRowHint  int64                // estimated input rows for pre-sizing hash table
@@ -163,6 +175,11 @@ type HashAggregate struct {
 	keyBuf      []byte
 	inputSchema []parquet.Column // schema from first input batch (for spill recovery)
 	spillFiles  []string
+	// drainedRuns holds partial-state run files written by the clone-partial
+	// bound (PartialDrainBytes) that have not yet been handed to a primary
+	// via MergeSink. Close deletes any leftovers (error paths where the
+	// barrier merge never ran).
+	drainedRuns []string
 	// partialSpillFiles holds external-merge spill files (sorted partial group
 	// state). These are produced when simpleAggs && one of the SoA paths is in
 	// use; Finalize k-way merges them. Distinct from spillFiles because the
@@ -216,6 +233,38 @@ type HashAggregate struct {
 	trackedGroupMem  int64          // bytes charged to Spill tracker for group state growth
 	outputPos        int            // position in keys for batched Next() output
 	gsPool           groupStatePool // chunk allocator for groupState (reduces GC pressure)
+
+	// Incremental byte counters for per-group state that groupMemoryUsage
+	// cannot enumerate in O(1) from caps: string bytes behind serializedKeys
+	// and compactKeys, COUNT(DISTINCT) set contents, extraState objects, and
+	// per-group accumulator counts. Bumped at the allocation/append sites,
+	// zeroed by resetStateByteCounters wherever the backing state is dropped
+	// wholesale. These existed as acknowledged under-counts ("accuracy
+	// budget", see groupMemoryUsage) until SF100 Q17 (2026-07-03) showed the
+	// gap reaching 41-100% of live heap on high-cardinality GROUP BYs — the
+	// tracker never crossed the spill threshold while the process died at
+	// GOMEMLIMIT (docs/design/morsel-agg-partials-v2.md §1-2).
+	// TestGroupMemoryUsageTruth guards these against rot.
+	serializedKeyBytes int64 // string bytes appended to serializedKeys (+ shared by keyValues boxes)
+	compactKeyBytes    int64 // string bytes appended to compactKeys
+	distinctBytes      int64 // COUNT(DISTINCT) map contents + entry overhead
+	extraStateBytes    int64 // extraState objects (alloc-time estimates)
+	extrasAccsCount    int64 // total kernel.Accumulator elements behind extras.accs
+}
+
+// kernelAccumulatorBytes is the per-element cost of extras.accs slices,
+// resolved once so groupMemoryUsage stays arithmetic-only.
+var kernelAccumulatorBytes = int64(unsafe.Sizeof(kernel.Accumulator{}))
+
+// resetStateByteCounters zeroes the incremental per-group byte counters.
+// Call wherever the backing state (keys/serializedKeys/compactKeys/extras)
+// is dropped wholesale — spillFullState, migrate rebuilds, Close.
+func (h *HashAggregate) resetStateByteCounters() {
+	h.serializedKeyBytes = 0
+	h.compactKeyBytes = 0
+	h.distinctBytes = 0
+	h.extraStateBytes = 0
+	h.extrasAccsCount = 0
 }
 
 // spillFileTargetBytes is the approximate size at which the spill buffer is
@@ -314,16 +363,34 @@ func (h *HashAggregate) groupMemoryUsage() int64 {
 		size += h.strGroupIndex.MemoryUsage()
 	}
 	// Group state pool: each chunk is a contiguous array of slim groupState
-	// structs (24 bytes each: intKey + setID + extras pointer). Complex-agg
-	// paths additionally allocate a groupStateExtras (~96 bytes per group)
-	// behind the pointer, but the dominant SF100 hot path leaves extras nil
-	// so this estimate is exact for SoA simple-aggs and a slight under-count
-	// (~96 B/group) for the rarer complex paths. The slice contents (keyVals,
-	// accs, distinctSets, extraState data) are not tracked here in either
-	// regime — same accuracy budget as before the slim-struct refactor.
+	// structs (24 bytes each: intKey + setID + extras pointer). The heavy
+	// per-group state behind the extras pointer is accounted below via the
+	// incremental counters + the per-generic-group constant — the former
+	// "accuracy budget" (slice contents untracked) let the tracker
+	// under-report by 41-100% on high-cardinality non-int-SoA GROUP BYs,
+	// which is how SF100 Q17 died at GOMEMLIMIT with the spill threshold
+	// never crossed (2026-07-03 postmortem).
 	for _, chunk := range h.gsPool.chunks {
 		size += int64(cap(chunk)) * 24
 	}
+	// Generic/str-path per-group state. Every group on those paths appends
+	// to h.keys, so len(h.keys) counts them: each carries a groupStateExtras
+	// (96 B of slice headers) plus a keyValues []any backing array (16 B
+	// interface slot + ~8 B boxed scalar per group column; boxed strings
+	// share the bytes counted in serializedKeyBytes).
+	if n := int64(len(h.keys)); n > 0 {
+		size += n * (96 + int64(len(h.GroupByCols))*24)
+	}
+	// Slice backing arrays for the key mirrors, plus the string bytes and
+	// per-category contents tracked incrementally at their append sites.
+	size += int64(cap(h.keys)) * 24 // [][]any: 24 B slice header per element
+	size += int64(cap(h.serializedKeys)) * 16
+	size += int64(cap(h.compactKeys)) * 16
+	size += h.serializedKeyBytes
+	size += h.compactKeyBytes
+	size += h.distinctBytes
+	size += h.extraStateBytes
+	size += h.extrasAccsCount * kernelAccumulatorBytes
 	// SoA flat accumulator arrays: 8 bytes per element for int64/float64 fields.
 	for _, fa := range h.intFlatAccs {
 		size += int64(cap(fa.count)) * 8
@@ -500,6 +567,7 @@ func (h *HashAggregate) Init(_ context.Context) error {
 	h.strNullGroupIdx = -1
 	h.keys = nil
 	h.serializedKeys = nil
+	h.resetStateByteCounters()
 	h.resolved = false
 	h.keyBuf = make([]byte, 0, 128)
 	h.outputPos = 0
@@ -584,6 +652,18 @@ func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	// consumeBatch grows hash tables and accumulator arrays; this is the
 	// sole signal for HashAggregate spill pressure.
 	h.reconcileGroupMemory()
+
+	// Clone-partial bound: drain the whole state to run files once it
+	// crosses PartialDrainBytes (see the field doc). trackedGroupMem is
+	// fresh from reconcileGroupMemory above.
+	if h.PartialDrainBytes > 0 && h.trackedGroupMem > h.PartialDrainBytes &&
+		h.canUseExternalMerge() && h.Spill != nil && h.Spill.SpillDir() != "" {
+		paths, err := h.drainStateToRuns(h.Spill.SpillDir())
+		if err != nil {
+			return fmt.Errorf("clone partial drain: %w", err)
+		}
+		h.drainedRuns = append(h.drainedRuns, paths...)
+	}
 
 	return nil
 }
@@ -1414,6 +1494,7 @@ func (h *HashAggregate) consumeBatchCompactGroup(b *batch.RecordBatch) {
 		gs.ensureExtras().keyValues = keyVals
 		h.intGroupStates = append(h.intGroupStates, gs)
 		h.compactKeys = append(h.compactKeys, string(h.keyBuf))
+		h.compactKeyBytes += int64(len(h.keyBuf))
 		h.keys = append(h.keys, keyVals)
 		for ai := range h.intFlatAccs {
 			h.intFlatAccs[ai].appendGroup()
@@ -1559,6 +1640,7 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				h.strGroupStates = append(h.strGroupStates, gs)
 				h.keys = append(h.keys, []any{keyStr})
 				h.serializedKeys = append(h.serializedKeys, keyStr)
+				h.serializedKeyBytes += int64(len(keyStr))
 				for ai := range h.intFlatAccs {
 					h.intFlatAccs[ai].appendGroup()
 				}
@@ -1584,6 +1666,7 @@ func (h *HashAggregate) consumeBatchStrGroup(b *batch.RecordBatch) {
 				h.strGroupStates = append(h.strGroupStates, gs)
 				h.keys = append(h.keys, []any{keyStr})
 				h.serializedKeys = append(h.serializedKeys, keyStr)
+				h.serializedKeyBytes += int64(len(keyStr))
 				for ai := range h.intFlatAccs {
 					h.intFlatAccs[ai].appendGroup()
 				}
@@ -1622,6 +1705,7 @@ func (h *HashAggregate) strNullGroupSlot() int32 {
 	h.strGroupStates = append(h.strGroupStates, gs)
 	h.keys = append(h.keys, []any{nil})
 	h.serializedKeys = append(h.serializedKeys, "\x01")
+	h.serializedKeyBytes++
 	for ai := range h.intFlatAccs {
 		h.intFlatAccs[ai].appendGroup()
 	}
@@ -1677,6 +1761,7 @@ func (h *HashAggregate) consumeBatchGenericSoA(b *batch.RecordBatch) {
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.keys = append(h.keys, keyVals)
 		h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
+		h.serializedKeyBytes += int64(len(h.keyBuf))
 		for ai := range h.intFlatAccs {
 			h.intFlatAccs[ai].appendGroup()
 		}
@@ -1735,10 +1820,12 @@ func (h *HashAggregate) migrateCompactToGeneric() {
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
+		h.serializedKeyBytes += int64(len(key))
 	}
 	h.intGroupStates = nil
 	h.intGroupIndex = nil
 	h.compactKeys = nil
+	h.compactKeyBytes = 0
 }
 
 // packKeyInt64 interprets up to 8 bytes as a little-endian int64.
@@ -1786,17 +1873,20 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	ext := gs.ensureExtras()
 	ext.keyValues = keyVals
 	ext.accs = make([]kernel.Accumulator, len(h.Aggs))
+	h.extrasAccsCount += int64(len(h.Aggs))
 	if h.needsDistinct {
 		ext.distinctSets = make([]map[string]struct{}, len(h.Aggs))
 	}
 	if h.needsExtra {
 		ext.extraState = make([]any, len(h.Aggs))
+		h.extraStateBytes += int64(len(h.Aggs)) * 80
 	}
 	for i, agg := range h.Aggs {
 		switch agg.Func {
 		case AggCountDistinct:
 			if ext.distinctSets != nil {
 				ext.distinctSets[i] = make(map[string]struct{})
+				h.distinctBytes += 48
 			}
 		case AggStringAgg:
 			sep := agg.Separator
@@ -1813,6 +1903,7 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 		case AggApproxDistinct:
 			if ext.distinctSets != nil {
 				ext.distinctSets[i] = make(map[string]struct{})
+				h.distinctBytes += 48
 			}
 		case AggCorr, AggCovarSamp, AggCovarPop:
 			ext.extraState[i] = &covarianceState{}
@@ -1827,6 +1918,7 @@ func (h *HashAggregate) processRow(b *batch.RecordBatch, row int) {
 	h.strGroupStates = append(h.strGroupStates, gs)
 	h.keys = append(h.keys, keyVals)
 	h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
+	h.serializedKeyBytes += int64(len(h.keyBuf))
 
 	// Keep the SoA flat accumulator length in sync with strGroupStates.
 	// processRow is called from the null-key branch of consumeBatchStrGroup
@@ -1889,17 +1981,20 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 		ext := gs.ensureExtras()
 		ext.keyValues = keyVals
 		ext.accs = make([]kernel.Accumulator, len(h.Aggs))
+		h.extrasAccsCount += int64(len(h.Aggs))
 		if h.needsDistinct {
 			ext.distinctSets = make([]map[string]struct{}, len(h.Aggs))
 		}
 		if h.needsExtra {
 			ext.extraState = make([]any, len(h.Aggs))
+			h.extraStateBytes += int64(len(h.Aggs)) * 80
 		}
 		for i, agg := range h.Aggs {
 			switch agg.Func {
 			case AggCountDistinct, AggApproxDistinct:
 				if ext.distinctSets != nil {
 					ext.distinctSets[i] = make(map[string]struct{})
+					h.distinctBytes += 48
 				}
 			case AggStringAgg:
 				sep := agg.Separator
@@ -1926,6 +2021,7 @@ func (h *HashAggregate) processRowGroupingSets(b *batch.RecordBatch, row int) {
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.keys = append(h.keys, keyVals)
 		h.serializedKeys = append(h.serializedKeys, string(h.keyBuf))
+		h.serializedKeyBytes += int64(len(h.keyBuf))
 		h.updateGroup(gs, b, row)
 	}
 }
@@ -1951,7 +2047,10 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			h.keyBuf = h.keyBuf[:0]
 			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
 			valKey := string(h.keyBuf)
-			ext.distinctSets[i][valKey] = struct{}{}
+			if _, dup := ext.distinctSets[i][valKey]; !dup {
+				ext.distinctSets[i][valKey] = struct{}{}
+				h.distinctBytes += int64(len(valKey)) + 48
+			}
 
 		case AggStringAgg:
 			idx := h.aggColIdx[i]
@@ -2036,7 +2135,10 @@ func (h *HashAggregate) updateGroup(gs *groupState, b *batch.RecordBatch, row in
 			h.keyBuf = h.keyBuf[:0]
 			h.keyBuf = appendColumnValue(h.keyBuf, v, row, v.Type)
 			valKey := string(h.keyBuf)
-			ext.distinctSets[i][valKey] = struct{}{}
+			if _, dup := ext.distinctSets[i][valKey]; !dup {
+				ext.distinctSets[i][valKey] = struct{}{}
+				h.distinctBytes += int64(len(valKey)) + 48
+			}
 
 		case AggCorr, AggCovarSamp, AggCovarPop:
 			idx1 := h.aggColIdx[i]
@@ -2251,6 +2353,12 @@ func (h *HashAggregate) Close() error {
 	// before exhaustion); the normal drain in Next() also calls
 	// closePartialMerger when the merger returns nil.
 	h.closePartialMerger()
+	// Clone-partial runs never handed to a primary (error path where the
+	// barrier merge did not run) would otherwise leak on the spill volume.
+	for _, path := range h.drainedRuns {
+		os.Remove(path)
+	}
+	h.drainedRuns = nil
 	h.spillBuffer = nil
 	return nil
 }
@@ -2655,6 +2763,7 @@ func (h *HashAggregate) Next(_ context.Context) (*batch.RecordBatch, error) {
 	if h.outputPos >= totalGroups {
 		h.keys = nil
 		h.serializedKeys = nil
+		h.resetStateByteCounters()
 		h.strGroupStates = nil
 		h.strGroupIndex = nil
 		h.strNullGroupIdx = -1
@@ -2761,6 +2870,12 @@ func (h *HashAggregate) MergeSink(other SinkSource) {
 }
 
 func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
+	// Runs the clone drained under its PartialDrainBytes bound belong to the
+	// primary now, whatever merge path the remaining in-memory state takes.
+	if len(o.drainedRuns) > 0 {
+		h.partialSpillFiles = append(h.partialSpillFiles, o.drainedRuns...)
+		o.drainedRuns = nil
+	}
 
 	// When the parent (h) was never fed a batch — runParallel's warmup batch
 	// gets consumed when present, but if the warmup row group is fully
@@ -2828,6 +2943,38 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 		return
 	}
 
+	// Empty-primary adoption. A primary that just whole-state-drained
+	// (spillFullState → resetGroupStateAfterSpill) has intFlatAccs == nil
+	// until its next Consume lazily rebuilds — a barrier merge landing in
+	// that window used to fall through to the migrate path below and
+	// materialize BOTH sides into the generic map. On SF100 Q17 (GROUP BY
+	// l_partkey, ~20M keys, 8 clone partials) that fallback allocated a
+	// second full copy of every partial (migrateToGenericMap 14.2 GB +
+	// materializeFlatAccums 9.6 GB cum in the worker heap profiles) at the
+	// moment memory was already critical, and one such merge poisoned all
+	// later ones by nil'ing the SoA arrays (2026-07-03 postmortem,
+	// morsel-agg-partials-v2.md §3.C). When the primary is empty, adopting
+	// the clone's state wholesale is O(1) and mode-preserving.
+	if h.groupCount() == 0 && o.groupCount() > 0 {
+		h.adoptStateFrom(o)
+		return
+	}
+
+	// Drain-to-runs fallback for simple aggregates: instead of migrating an
+	// SoA-capable side into the generic map, write its state as canonical
+	// partial-state runs (sorted by binary sortKey — the format is
+	// instance-independent) and let Finalize's existing k-way merge combine
+	// them with the primary's in-memory state. O(state) disk I/O instead of
+	// O(state) heap at the barrier. Falls through to the legacy in-memory
+	// merge on any write error — correctness never depends on disk.
+	if h.simpleAggs && len(h.GroupingSets) == 0 && o.canUseExternalMerge() &&
+		h.Spill != nil && h.Spill.SpillDir() != "" {
+		if paths, err := o.drainStateToRuns(h.Spill.SpillDir()); err == nil {
+			h.partialSpillFiles = append(h.partialSpillFiles, paths...)
+			return
+		}
+	}
+
 	// Normalize both sides to the generic map path so merge is uniform.
 	h.migrateToGenericMap()
 	o.migrateToGenericMap()
@@ -2859,17 +3006,119 @@ func (h *HashAggregate) mergeSinkState(o *HashAggregate) {
 				}
 				if ext.distinctSets[j] == nil {
 					ext.distinctSets[j] = make(map[string]struct{}, len(oExt.distinctSets[j]))
+					h.distinctBytes += 48
 				}
 				for k := range oExt.distinctSets[j] {
-					ext.distinctSets[j][k] = struct{}{}
+					if _, dup := ext.distinctSets[j][k]; !dup {
+						ext.distinctSets[j][k] = struct{}{}
+						h.distinctBytes += int64(len(k)) + 48
+					}
 				}
 			}
 		} else {
 			h.strGroupStates = append(h.strGroupStates, oGS)
+			if oExt.accs != nil {
+				h.extrasAccsCount += int64(len(oExt.accs))
+			}
+			if oExt.extraState != nil {
+				h.extraStateBytes += int64(len(oExt.extraState)) * 80
+			}
+			for _, ds := range oExt.distinctSets {
+				if ds == nil {
+					continue
+				}
+				h.distinctBytes += 48
+				for k := range ds {
+					h.distinctBytes += int64(len(k)) + 48
+				}
+			}
 			h.keys = append(h.keys, oExt.keyValues)
 			h.serializedKeys = append(h.serializedKeys, key)
+			h.serializedKeyBytes += int64(len(key))
 		}
 	}
+}
+
+// groupCount returns the number of group slots across the key modes. Used
+// as the emptiness gate for state adoption — a partially-drained aggregate
+// (freed slots still occupy the slices) reports non-zero and is not adopted
+// into.
+func (h *HashAggregate) groupCount() int {
+	return len(h.intGroupStates) + len(h.strGroupStates)
+}
+
+// adoptStateFrom moves o's entire group state (and the schema-resolution
+// and key-mode fields it depends on — deterministic given the shared config
+// and input schema, so overwriting is safe even when h already resolved)
+// into an EMPTY h. O(1): slice/pointer moves, no per-group work. o's state
+// is zeroed so its Close releases only its (still-intact) tracking charge
+// and emits nothing.
+func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
+	// Resolution state.
+	h.groupColIdx = o.groupColIdx
+	h.aggColIdx = o.aggColIdx
+	h.aggColIdx2 = o.aggColIdx2
+	h.groupColTypes = o.groupColTypes
+	h.groupColMeta = o.groupColMeta
+	h.aggUpdaters = o.aggUpdaters
+	h.aggUpdatersNoNull = o.aggUpdatersNoNull
+	h.batchAggKernels = o.batchAggKernels
+	h.aggF64Extract = o.aggF64Extract
+	h.aggF64Extract2 = o.aggF64Extract2
+	h.resolved = o.resolved
+	h.needsDistinct = o.needsDistinct
+	h.needsExtra = o.needsExtra
+	h.simpleAggs = o.simpleAggs
+	h.inputSchema = o.inputSchema
+	// Key mode + state.
+	h.useIntGroupKey = o.useIntGroupKey
+	h.intGroupIndex = o.intGroupIndex
+	h.intGroupStates = o.intGroupStates
+	h.intGroupKeyCol = o.intGroupKeyCol
+	h.intFlatAccs = o.intFlatAccs
+	h.useDualIntGroupKey = o.useDualIntGroupKey
+	h.dualIntGroupKeyCols = o.dualIntGroupKeyCols
+	h.dualIntKeysA = o.dualIntKeysA
+	h.dualIntKeysB = o.dualIntKeysB
+	h.dualIntNextGroup = o.dualIntNextGroup
+	h.useCompactGroupKey = o.useCompactGroupKey
+	h.compactKeys = o.compactKeys
+	h.useStrGroupKey = o.useStrGroupKey
+	h.strGroupKeyCol = o.strGroupKeyCol
+	h.strNullGroupIdx = o.strNullGroupIdx
+	h.useGenericSoA = o.useGenericSoA
+	h.strGroupIndex = o.strGroupIndex
+	h.strGroupStates = o.strGroupStates
+	h.keys = o.keys
+	h.serializedKeys = o.serializedKeys
+	h.gsPool = o.gsPool
+	h.freeGroupIDs = o.freeGroupIDs
+	h.drainK = o.drainK
+	h.nextDrainPartition = o.nextDrainPartition
+	// State byte counters travel with the state.
+	h.serializedKeyBytes = o.serializedKeyBytes
+	h.compactKeyBytes = o.compactKeyBytes
+	h.distinctBytes = o.distinctBytes
+	h.extraStateBytes = o.extraStateBytes
+	h.extrasAccsCount = o.extrasAccsCount
+
+	// Zero o's moved state (o keeps its trackedGroupMem so Close releases
+	// the charge it made while accumulating).
+	o.intGroupIndex = nil
+	o.intGroupStates = nil
+	o.intFlatAccs = nil
+	o.dualIntKeysA = nil
+	o.dualIntKeysB = nil
+	o.dualIntNextGroup = nil
+	o.compactKeys = nil
+	o.strGroupIndex = nil
+	o.strGroupStates = nil
+	o.strNullGroupIdx = -1
+	o.keys = nil
+	o.serializedKeys = nil
+	o.gsPool = groupStatePool{}
+	o.freeGroupIDs = nil
+	o.resetStateByteCounters()
 }
 
 // mergeIntGroupSoA merges another int-keyed SoA aggregate directly, avoiding
@@ -3167,6 +3416,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 		h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
 		h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 		h.serializedKeys = make([]string, 0, len(h.intGroupStates))
+		h.serializedKeyBytes = 0
 		h.keys = make([][]any, 0, len(h.intGroupStates))
 		for i, gs := range h.intGroupStates {
 			ext := gs.ensureExtras()
@@ -3179,6 +3429,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 			h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 			h.strGroupStates = append(h.strGroupStates, gs)
 			h.serializedKeys = append(h.serializedKeys, key)
+			h.serializedKeyBytes += int64(len(key))
 			h.keys = append(h.keys, ext.keyValues)
 		}
 		h.useDualIntGroupKey = false
@@ -3197,6 +3448,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 	h.strGroupIndex = newStrHashTable(len(h.intGroupStates))
 	h.strGroupStates = make([]*groupState, 0, len(h.intGroupStates))
 	h.serializedKeys = make([]string, 0, len(h.intGroupStates))
+	h.serializedKeyBytes = 0
 	h.keys = make([][]any, 0, len(h.intGroupStates))
 	for _, gs := range h.intGroupStates {
 		// Lazily construct keyValues for groups that deferred boxing
@@ -3208,6 +3460,7 @@ func (h *HashAggregate) migrateToGenericMap() {
 		h.strGroupIndex.Put([]byte(key), int32(len(h.strGroupStates)))
 		h.strGroupStates = append(h.strGroupStates, gs)
 		h.serializedKeys = append(h.serializedKeys, key)
+		h.serializedKeyBytes += int64(len(key))
 		h.keys = append(h.keys, ext.keyValues)
 	}
 	h.useIntGroupKey = false
@@ -3587,6 +3840,7 @@ func (h *HashAggregate) materializeFlatAccums() {
 			ext := gs.ensureExtras()
 			if ext.accs == nil {
 				ext.accs = make([]kernel.Accumulator, nAggs)
+				h.extrasAccsCount += int64(nAggs)
 			}
 			for ai := range h.intFlatAccs {
 				fa := &h.intFlatAccs[ai]
@@ -3648,6 +3902,7 @@ func (h *HashAggregate) materializeFlatAccums() {
 		ext := gs.ensureExtras()
 		if ext.accs == nil {
 			ext.accs = make([]kernel.Accumulator, nAggs)
+			h.extrasAccsCount += int64(nAggs)
 		}
 		for ai := range h.intFlatAccs {
 			fa := &h.intFlatAccs[ai]

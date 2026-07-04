@@ -165,6 +165,114 @@ planner sources already have, applied to `cachedFileStreamSource`:
 - No shared source mutex — the channel replaces it, addressing the
   documented 5-15% `sourceMu` ceiling.
 
+### 4.1.1 v1.5: byte-bounded dispenser + zero-copy morsel views (shipped)
+
+The SF100 A/B (2026-07-03) refuted two v1 assumptions and v1.5 replaces
+the raw channel with `morselDispenser` (`internal/worker/morsel_dispenser.go`)
+on both parallel paths:
+
+1. **"A batch ≈ 2048 rows" is false on the parquet path.** A source batch
+   from `cachedFileStreamSource` is one decoded ROW GROUP (~280 MB for
+   SF100 lineitem). The 2·k channel + k in-hand batches held ~7 GB of
+   tracker-invisible heap per task; ×`max_concurrent` that cleared
+   GOMEMLIMIT and 30m-deadlined Q17/Q18. The dispenser therefore admits
+   decoded batches against a **byte budget** (`morselDispenserBudgetBytes`,
+   512 MB), released when the batch retires — counts bound nothing.
+2. **Row-group-sized units also defeat the morsel model** — one consumer
+   owns 280 MB while the others idle, join-probe output pools size off the
+   input's ActiveLen (so transients are row-group-sized too), and
+   backpressure only checkpoints between batches. The dispenser splits
+   oversized batches into ~2048-row **zero-copy views**: shared parent
+   column vectors, private Sel (capped three-index subslices of one
+   parent-sized array), refcounted retirement returning the parent's bytes
+   to the budget. Audited safety contract: linear-path ops (`exec.Filter`,
+   `exec.Project`, `HashJoinProbe`, `DynamicFilterEmitOp`) never write
+   input column storage and mutate only the batch's own Sel *field*.
+   `Bitmap.HasNulls`' compute-and-cache memo is pre-warmed by the producer
+   before views fan out (same rule as the ColRef warmup). Views must NOT
+   reach retaining sinks — `Sort` stores batches and charges the Sel-blind
+   `MemBytes()` — so breaker-path splitting is gated to `HashAggregate`
+   sinks (which copy rows out during Consume).
+3. **Linear fragments now pressure-collapse** like breakers: their
+   transients are tracker-invisible by design, so the trigger is
+   `memory.HeapBackpressureActive` (70% of GOMEMLIMIT); on the first trip
+   consumers stop and the remaining input drains serially through the
+   original chain. The failed A/B showed `morselCollapses = 0` while the
+   heap blew past the limit precisely because only the breaker path had a
+   collapse rule.
+
+Retire-after-consume is the accounting handoff: once a sink has consumed a
+morsel, whatever it keeps is either copied out (HashAggregate group state,
+shuffle-sink accumulators) or charged to the memory ledger (Sort), so
+dispenser bytes and tracked bytes never double-count or gap.
+
+**v1.6 amendments (SF10 A/B 2026-07-03 follow-up).** The first SF10 run of
+v1.5 was 22/22 row-identical but ~15% slower than the phase-2 arm, with CPU
+up only ~6% — the loss was wait/serialization from making 2048 rows the
+unit of *everything*. Three boundaries get their own granularity back:
+
+- **Adaptive view size** (`viewRowsFor`): split into ~4·k views per parent,
+  clamp [DefaultBatchSize, 64k]. Unconditional 2048-row views turned a 1M-row
+  row group into ~500 channel handoffs + mutexed sink consumes and kept the
+  producer from decoding ahead. ~4·k keeps intra-parent parallelism with
+  ~16× fewer handoffs; the cap bounds view-scaled transients (probe output
+  pools size off ActiveLen) and the backpressure checkpoint interval.
+- **Sink-side chunk coalescing** (`unpartitionedStageSink`): a .wshf chunk
+  is the downstream stage's batch and decode unit, so chunk size is the
+  sink's decision — consumed rows accumulate (via the shared
+  `appendBatchRowsBulk`) and flush at 64k rows / 16 MB. Chunk-per-consume
+  under morsel-sized callers fragmented stage outputs ~100× (s2Decode
+  26.6s→35.6s, crc32 +1.5s in worker profiles) and cascaded small batches
+  into every downstream stage. Flat schemas only; nested schemas keep the
+  legacy chunk-per-consume path.
+- **Size-gated shuffle fan-out** (`partitionedShuffleSink`): the
+  per-Consume errgroup burst (up to GOMAXPROCS goroutines, inside the sink
+  mutex) only pays above `shuffleBurstGateRows` (4096); smaller consumes
+  append inline.
+
+**SF100 acceptance postmortem (2026-07-03) — the breaker path is the real
+Q17 bomb; v2 must land §4.3's end-state.** The v1.7 SF100 run completed
+Q01–Q16 with correct rows and real wins (Q01 −17%, Q06 −15%, Q08 −8% vs
+baseline), then Q17's fused scan-agg (`GROUP BY l_partkey`, ~20M keys per
+shard) killed all three workers: 21.6 GB LIVE heap after GC vs 21.3 GB
+GOMEMLIMIT. Heap profiles (s3://wadjet-bench-sf100-use2/debug/
+morsel-v17-treatment-20260703/) attribute it to HashAggregate breaker
+state, three stacked failures: (1) k=8 clone partials × high-NDV keys —
+each clone accumulates ~the full key set, the §4.3 rule-1 hazard, and
+"clones reserve" cannot save it because (2) `groupMemoryUsage`
+under-counts (keyVals, extras, string keys omitted) — the tracker saw
+~6 GB while the heap hit 21.8 GB (41–100% drift logged), so
+`ShouldSpillFor` never tripped and ZERO breaker collapses fired during
+Q17 (the linear-path heap collapse fired correctly during Q05); and (3)
+the barrier merge is O(total): `mergeSinkState → migrateToGenericMap`
+(14.2 GB cum) + `materializeFlatAccums` (9.6 GB cum) materialize a second
+copy of all partials. The dispenser/byte-budget/linear-collapse work is
+validated; auto mode stays unsafe for high-NDV breaker fragments until
+v2 lands: partition-owned partials (route clone partials onto the
+existing `fibHash & (drainK-1)` drain sharding — no duplication, no
+barrier merge), byte-true `groupMemoryUsage`, and a spill-aware merge
+that drains via the existing external-merge partial-state files.
+
+**v1.7 amendment — splitting is a safety mechanism, gated by parent size.**
+The second SF10 A/B (v1.6, results/20260703-124706) recovered only Q01:
+adaptive view size fixed the scan-agg path, but every join/probe fragment
+where splitting engaged stayed +10-45% vs phase-2 (Q13 2×), with CPU ~flat —
+per-view consume serializes on the mutexed fragment sink, and no view size
+fixes that from the dispenser side. The resolution is that splitting was
+never a throughput feature: phase-2's batch-grained parallelism already won
+at SF10 (−3.3% suite) on ≤35 MB decode units. Splitting exists to make
+OVERSIZED units (SF100's ~280 MB decoded row groups) memory-safe under k
+consumers. So `dispatch` splits only parents whose cost exceeds
+`budget/(2k)` (`splitMinCost`) — small enough that 2k fit in flight means
+every consumer has queue depth without views; bigger than that means
+unsplit consumption would either blow the heap (k × parent in hand) or
+serialize behind the byte budget. At SF10 nothing typical crosses the gate
+(phase-2 behavior, validated); at SF100 lineitem row groups do (the
+Q17/Q18 failure shape). The byte budget, pressure collapse, and sink
+coalescing stay unconditional. Known follow-up if profiles ever show the
+gate crossed AND sink-bound: move the coalesced-chunk encode/write outside
+the sink mutex (double-buffered flush) so consume is append-only.
+
 ### 4.2 Worker count policy (adaptive, threshold-gated)
 
 `k = 1` (today's behavior) unless the fragment's input estimate clears a

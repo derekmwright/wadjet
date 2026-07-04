@@ -756,19 +756,21 @@ func TestHashAggregateMergeThenSpillFinalize_HighCardinality(t *testing.T) {
 		}
 	}
 
-	// MergeSink runs the compact→generic migration on both sides. After this
-	// primary.intFlatAccs == nil and groups live in primary.strGroupStates
-	// with extras.accs populated.
+	// MergeSink used to run the compact→generic migration on both sides —
+	// an O(state) materialization at the barrier (the SF100 Q17 killer,
+	// morsel-agg-partials-v2.md §3.C). The whole-state spill left the
+	// primary EMPTY, so the merge now ADOPTS the clone's SoA state in O(1);
+	// the primary must come out non-empty and still SoA.
 	primary.MergeSink(clone)
-	if primary.intFlatAccs != nil {
-		t.Errorf("expected intFlatAccs cleared after MergeSink, still set")
+	if primary.intFlatAccs == nil {
+		t.Errorf("expected primary SoA state preserved (adopted from clone); intFlatAccs is nil")
 	}
-	if len(primary.strGroupStates) == 0 {
-		t.Fatal("expected merged groups in strGroupStates")
+	if primary.groupCount() == 0 {
+		t.Fatal("expected primary to adopt the clone's groups")
 	}
 
 	// Finalize triggers finalizeViaPartialMerge which builds the cursor over
-	// the post-merge AoS state. Drain Next() to completion.
+	// the surviving in-memory state plus all runs. Drain Next() to completion.
 	if err := primary.Finalize(ctx); err != nil {
 		t.Fatal(err)
 	}

@@ -1400,6 +1400,24 @@ func (h *HashAggregate) spillFullState() error {
 	if h.Spill == nil {
 		return nil
 	}
+	paths, err := h.drainStateToRuns(h.Spill.SpillDir())
+	if err != nil {
+		return err
+	}
+	h.partialSpillFiles = append(h.partialSpillFiles, paths...)
+	return nil
+}
+
+// drainStateToRuns writes the aggregate's ENTIRE in-memory group state as
+// canonical partial-state run files under dir, resets the state, and returns
+// the file paths. The run format is sorted by binary sortKey and merged by
+// key equality (kWayMerger), so runs written by one HashAggregate instance
+// merge correctly into another's finalizeViaPartialMerge — this is what lets
+// a morsel-parallel clone hand its partial to the primary as files instead
+// of an O(state) in-memory merge (morsel-agg-partials-v2.md §3.A/§3.C).
+// Callers other than spillFullState own appending the returned paths to the
+// target aggregate's partialSpillFiles.
+func (h *HashAggregate) drainStateToRuns(dir string) ([]string, error) {
 	// Capture specs while h.intFlatAccs still carries the type flags. We
 	// no longer materialize, but the buildPartialAggSpecs/buildPartialGroupCols
 	// dependencies on h's mode + intFlatAccs are unchanged from the prior path.
@@ -1410,17 +1428,17 @@ func (h *HashAggregate) spillFullState() error {
 	if cursor.numGroups == 0 {
 		cursor.Close()
 		h.resetGroupStateAfterSpill()
-		return nil
+		return nil, nil
 	}
 
 	header := partialSpillHeader{
 		GroupCols: groupCols,
 		Aggs:      aggSpecs,
 	}
-	w, path, err := newPartialSpillWriter(h.Spill.SpillDir(), header)
+	w, path, err := newPartialSpillWriter(dir, header)
 	if err != nil {
 		cursor.Close()
-		return err
+		return nil, err
 	}
 	for {
 		g := cursor.Peek()
@@ -1430,23 +1448,22 @@ func (h *HashAggregate) spillFullState() error {
 		if werr := w.Write(*g); werr != nil {
 			w.Close()
 			cursor.Close()
-			return werr
+			return nil, werr
 		}
 		if aerr := cursor.Advance(); aerr != nil {
 			w.Close()
 			cursor.Close()
-			return aerr
+			return nil, aerr
 		}
 	}
 	if _, err := w.Close(); err != nil {
 		cursor.Close()
-		return err
+		return nil, err
 	}
 	cursor.Close()
-	h.partialSpillFiles = append(h.partialSpillFiles, path)
 
 	h.resetGroupStateAfterSpill()
-	return nil
+	return []string{path}, nil
 }
 
 // spillPartialPartitions drains a hash-partition slice of the int-keyed SoA
@@ -1601,6 +1618,7 @@ func (h *HashAggregate) resetGroupStateAfterSpill() {
 	h.keys = nil
 	h.serializedKeys = nil
 	h.compactKeys = nil
+	h.resetStateByteCounters()
 	h.dualIntKeysA = nil
 	h.dualIntKeysB = nil
 	h.dualIntNextGroup = nil
