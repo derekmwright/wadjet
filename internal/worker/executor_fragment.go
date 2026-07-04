@@ -840,6 +840,17 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 		switch cs := cloned.(type) {
 		case *exec.HashAggregate:
 			cs.Spill = trackingSpill
+			// Bound the clone partial: clones cannot spill (tracking-only
+			// view), so a high-NDV GROUP BY would otherwise accumulate ~the
+			// full key set in EVERY clone — k× serial state, the SF100 Q17
+			// worker deaths (morsel-agg-partials-v2.md §3.A). Past the
+			// threshold the clone self-drains to canonical partial-state
+			// runs that MergeSink hands to the primary. Per-task budget
+			// split across 2k partials mirrors the dispenser's
+			// budget/(2k) gate shape; 0 (unlimited budget) disables.
+			if e.memoryBudget > 0 {
+				cs.PartialDrainBytes = e.memoryBudget / int64(2*k)
+			}
 		case *exec.Sort:
 			cs.Spill = trackingSpill
 		}
