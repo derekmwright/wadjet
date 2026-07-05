@@ -111,6 +111,14 @@ type cachedFileStreamSource struct {
 	// whose stats don't intersect the build-side bloom or range.
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
+
+	// Download-ahead for S3 parquet inputs (see filePrefetcher). Started
+	// lazily on the first openNextFile so it inherits the task context;
+	// nil when the input has no parquet files, there's no spill dir, or
+	// prefetchDisabled is set (tests exercising the serial path).
+	prefetch         *filePrefetcher
+	prefetchStarted  bool
+	prefetchDisabled bool
 }
 
 // SetDynamicFilters attaches dynamic-filter pushdowns to this source.
@@ -235,6 +243,12 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 }
 
 func (s *cachedFileStreamSource) Close() error {
+	// Stop the download-ahead workers first and reap any temp files they
+	// downloaded that were never consumed.
+	if s.prefetch != nil {
+		s.prefetch.Close()
+		s.prefetch = nil
+	}
 	// Parquet refs must be cleared BEFORE munmap: parquet.NewReaderFromBytes
 	// keeps the input slice live inside FileReader.data, and the streaming
 	// parquet-mmap path (added 2026-05-22) hands the mmap'd region in as
@@ -289,7 +303,33 @@ func (s *cachedFileStreamSource) releaseCurrentFile() {
 // (for WSHF) or batches (for Parquet). Advances fileIdx.
 func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	filePath := s.files[s.fileIdx]
+	idx := s.fileIdx
 	s.fileIdx++
+
+	// Start the download-ahead pipeline on first open. Before this
+	// existed, a scan task's files were downloaded strictly one at a time
+	// with decode idle during each download — on a standalone box that
+	// capped effective S3 read parallelism at MaxConcurrent streams
+	// (2026-07-05 SF10 cold-S3: suite 20m15s vs DuckDB 2m51s, same box).
+	if !s.prefetchStarted {
+		s.prefetchStarted = true
+		if !s.prefetchDisabled && s.executor.spillDir != "" &&
+			len(s.files) > 1 && hasPrefetchableFiles(s.files) {
+			s.prefetch = startFilePrefetcher(ctx, s)
+		}
+	}
+	if s.prefetch != nil {
+		if res := s.prefetch.take(ctx, idx); !res.skipped && res.err == nil {
+			if err := s.openPrefetchedParquet(res.localPath, filePath); err == nil {
+				return nil
+			}
+			// Open failed (truncated download, unexpected payload) — the
+			// temp was removed; fall through to the tiered path below,
+			// which re-resolves from the durable copy.
+		}
+		// skipped or err: strictly best-effort — the tiered path below is
+		// authoritative for both resolution and error reporting.
+	}
 
 	// Tier-0 same-worker fast path: if a producer task on this worker
 	// already wrote this stage output to local disk and registered it in
@@ -435,6 +475,41 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		}
 		data = append(magic[:], rest...)
 	}
+	return s.finishOpenParquet(filePath, data, mmapData, localPath)
+}
+
+// openPrefetchedParquet opens a parquet file the prefetcher already
+// downloaded to localPath: mmap it and hand the region to the shared
+// open tail. On any failure the temp file is removed and the caller
+// falls back to the normal tiered path.
+func (s *cachedFileStreamSource) openPrefetchedParquet(localPath, filePath string) error {
+	f, err := os.Open(localPath)
+	if err != nil {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("opening prefetched file %s: %w", localPath, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("prefetched file %s unusable (err=%v)", localPath, err)
+	}
+	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("mmap prefetched file %s: %w", localPath, err)
+	}
+	// finishOpenParquet unwinds mmap+file itself if the payload isn't
+	// valid parquet (e.g. a legacy shuffle object under a .parquet key).
+	return s.finishOpenParquet(filePath, mmapData, mmapData, localPath)
+}
+
+// finishOpenParquet is the shared tail of the parquet open path: build the
+// reader over data, transfer mmap/file ownership to the source, apply the
+// column projection guard, and set up the row-group iterator (or the
+// eager fallback for Array/Map schemas). mmapData/localPath may be
+// nil/empty for the in-memory path.
+func (s *cachedFileStreamSource) finishOpenParquet(filePath string, data, mmapData []byte, localPath string) error {
 	reader, err := parquet.NewReaderFromBytes(data)
 	if err != nil {
 		if mmapData != nil {
@@ -445,7 +520,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	}
 	// Transfer mmap/file ownership to the source so Next()/Close()
 	// release them when the iterator exhausts. nil/empty are fine for
-	// the in-memory fallback above.
+	// the in-memory fallback.
 	s.mmapData = mmapData
 	s.mmapRegion = registerMmap(mmapData) // nil when relief disabled
 	s.localPath = localPath

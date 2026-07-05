@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -70,8 +71,11 @@ func TestFallbackPath_ReleasesMmapAndTempPerFile(t *testing.T) {
 		}
 		rows += b.Len
 		// The fallback path must never hold more than ONE file's temp at a
-		// time — the leak left every prior file's temp behind.
-		if n := countFiles(t, spillDir); n > 1 {
+		// time — the leak left every prior file's temp behind. Download-ahead
+		// temps (scan-prefetch-*) are excluded: the prefetcher holds a
+		// bounded set by design, and the after-Close check below still
+		// requires ALL of them gone.
+		if n := countFilesExcluding(t, spillDir, "scan-prefetch-"); n > 1 {
 			t.Fatalf("%d temp files held mid-stream, want <=1 (per-file release missing)", n)
 		}
 	}
@@ -91,12 +95,22 @@ func TestFallbackPath_ReleasesMmapAndTempPerFile(t *testing.T) {
 
 func countFiles(t *testing.T, dir string) int {
 	t.Helper()
+	return countFilesExcluding(t, dir, "")
+}
+
+// countFilesExcluding counts regular files under dir, skipping names with
+// the given prefix ("" excludes nothing).
+func countFilesExcluding(t *testing.T, dir, excludePrefix string) int {
+	t.Helper()
 	n := 0
 	if err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if !info.IsDir() {
+			if excludePrefix != "" && strings.HasPrefix(info.Name(), excludePrefix) {
+				return nil
+			}
 			n++
 		}
 		return nil

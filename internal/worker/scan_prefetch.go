@@ -1,0 +1,294 @@
+package worker
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"sync"
+
+	"github.com/citc-tech/wadjet/internal/engine/diskio"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+)
+
+// Prefetch tuning. Vars (not consts) so tests can shrink them to exercise
+// the window/ordering machinery with small files.
+var (
+	// scanPrefetchConcurrency bounds concurrent S3 GETs per source. Each
+	// worker task can hold one source per input alias, and the worker runs
+	// up to MaxConcurrent tasks, so total GET fan-out on one box is roughly
+	// MaxConcurrent × this. 4 matches the shape of the existing 8-way
+	// download pools (readParquetFilesConcurrentBatches) halved to leave
+	// headroom for the async-upload pool sharing the NIC.
+	scanPrefetchConcurrency = 4
+
+	// scanPrefetchWindowBytes bounds bytes downloaded-but-not-yet-consumed
+	// on the spill volume per source. Disk-backed, so this is a disk/page-
+	// cache bound, not heap — SF10 files (~6.5 MB) never hit it; SF100
+	// lineitem files (~200 MB) get ~1 file of read-ahead plus the file
+	// currently decoding.
+	scanPrefetchWindowBytes = int64(256 << 20)
+)
+
+// prefetchResult is the outcome of one prefetch job. Exactly one of the
+// three states holds: a usable localPath, skipped (file not eligible —
+// the consumer must run the normal tiered open path), or err (download
+// attempted and failed — the consumer falls back to the normal path,
+// which re-resolves through every tier and produces the authoritative
+// error if the object is truly gone).
+type prefetchResult struct {
+	localPath   string
+	windowBytes int64 // amount acquired from the byte window; released on take
+	skipped     bool
+	err         error
+}
+
+// filePrefetcher downloads a source's upcoming S3 parquet files to the
+// spill dir while the current file decodes. Before it existed, the scan
+// path was strictly serial per task: one full-object GET blocked in
+// io.Copy until the entire file landed on NVMe, then decode ran with the
+// connection idle — on a standalone box that capped effective S3 read
+// parallelism at MaxConcurrent streams and produced the 2026-07-05 SF10
+// cold-S3 finding (suite 20m15s vs DuckDB httpfs 2m51s, same instance).
+//
+// Design constraints:
+//   - Strictly best-effort: any failure (miss, transient error, open
+//     failure on the temp) makes the consumer fall through to the
+//     untouched tiered open path in openNextFile. Prefetch can therefore
+//     never change results, only overlap I/O with decode.
+//   - Parquet keys only. Shuffle inputs (.wshf / partition=) resolve via
+//     the LocalStageCache / NATS-KV / peer tiers, which are either local
+//     or explicitly preferred over the durable S3 copy; blind-GETting
+//     them here would race the producer's async upload for no benefit.
+//   - Delivery is by file index and the consumer takes indices in order.
+//     The byte window admits the lowest not-yet-taken index regardless of
+//     occupancy: workers can finish downloads out of order, so without
+//     the bypass the window could fill with later files while the one the
+//     consumer is blocked on cannot start — a deadlock, not just a stall.
+//   - Whole-object GETs, no ranged reads: per-column ranged reads were
+//     tried 2026-03-20 and reverted the same day for S3 throttling
+//     (fe52a79); file-granularity requests at this fan-out are the shape
+//     S3 likes.
+type filePrefetcher struct {
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	results []chan *prefetchResult
+
+	mu         sync.Mutex
+	window     int64         // bytes admitted, not yet released by take/fetch-error
+	nextNeeded int           // lowest index take() has not been called for
+	windowFree chan struct{} // closed+replaced whenever window/nextNeeded changes
+}
+
+// hasPrefetchableFiles reports whether any key in the list is a parquet
+// object the prefetcher would act on.
+func hasPrefetchableFiles(files []string) bool {
+	for _, f := range files {
+		if strings.HasSuffix(f, ".parquet") {
+			return true
+		}
+	}
+	return false
+}
+
+// startFilePrefetcher spawns the download workers for s.files. ctx should
+// be the task context (from the first Next call); cancellation stops all
+// workers. The caller must Close() the returned prefetcher.
+func startFilePrefetcher(ctx context.Context, s *cachedFileStreamSource) *filePrefetcher {
+	pctx, cancel := context.WithCancel(ctx)
+	p := &filePrefetcher{
+		cancel:     cancel,
+		results:    make([]chan *prefetchResult, len(s.files)),
+		windowFree: make(chan struct{}),
+	}
+	jobs := make(chan int, len(s.files))
+	for i := range p.results {
+		p.results[i] = make(chan *prefetchResult, 1)
+		jobs <- i
+	}
+	close(jobs)
+	workers := scanPrefetchConcurrency
+	if workers > len(s.files) {
+		workers = len(s.files)
+	}
+	p.wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go p.run(pctx, s, jobs)
+	}
+	return p
+}
+
+func (p *filePrefetcher) run(ctx context.Context, s *cachedFileStreamSource, jobs <-chan int) {
+	defer p.wg.Done()
+	for idx := range jobs {
+		if ctx.Err() != nil {
+			return
+		}
+		// results[idx] is buffered (cap 1) and each index is fetched by
+		// exactly one worker, so the send never blocks.
+		p.results[idx] <- p.fetch(ctx, s, idx)
+	}
+}
+
+// fetch resolves one file index. It re-checks the cheap tiers (local
+// stage cache, peer hint) so it only spends a GET on files that would
+// have reached the S3 tier anyway.
+func (p *filePrefetcher) fetch(ctx context.Context, s *cachedFileStreamSource, idx int) *prefetchResult {
+	filePath := s.files[idx]
+	if !strings.HasSuffix(filePath, ".parquet") {
+		return &prefetchResult{skipped: true}
+	}
+	if s.queryID != "" && s.executor.localCache != nil &&
+		s.executor.localCache.Get(s.queryID, filePath) != "" {
+		return &prefetchResult{skipped: true}
+	}
+	if peers := s.executor.peers; peers != nil && peers.client != nil {
+		if addr, _ := peers.hintFor(filePath); addr != "" {
+			return &prefetchResult{skipped: true}
+		}
+	}
+
+	rc, info, err := s.executor.store.Get(ctx, s.bucket, filePath)
+	if err != nil {
+		return &prefetchResult{err: err}
+	}
+	defer rc.Close()
+
+	// Admit against the byte window using the object's advertised size.
+	// A size the store didn't report (0) gets a nominal charge so an
+	// endless run of unknown-size objects can't bypass the bound.
+	winBytes := info.Size
+	if winBytes <= 0 {
+		winBytes = 8 << 20
+	}
+	if err := p.acquireWindow(ctx, idx, winBytes); err != nil {
+		return &prefetchResult{err: err}
+	}
+
+	localPath, err := p.streamToSpill(ctx, s, filePath, rc)
+	if err != nil {
+		p.releaseWindow(winBytes)
+		return &prefetchResult{err: err}
+	}
+	return &prefetchResult{localPath: localPath, windowBytes: winBytes}
+}
+
+// streamToSpill copies the object body to a temp file in the spill dir,
+// reporting bytes to the per-task ProgressReporter so the coordinator's
+// stale-worker reap sees I/O progress during long download windows (same
+// rationale as streamParquetToLocalMmap).
+func (p *filePrefetcher) streamToSpill(ctx context.Context, s *cachedFileStreamSource, srcPath string, rc io.Reader) (string, error) {
+	spillDir := s.executor.spillDir
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating spill dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(spillDir, "scan-prefetch-*.parquet")
+	if err != nil {
+		return "", fmt.Errorf("creating prefetch file: %w", err)
+	}
+	localPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			tmp.Close()
+			_ = os.Remove(localPath)
+		}
+	}()
+
+	rep := exec.ProgressReporterFromContext(ctx)
+	// KeepResident: the file is mmap'd and decoded shortly after landing —
+	// bound dirty pages during the write, keep them resident for the read.
+	wf, _ := diskio.NewWriter(tmp, diskio.KeepResident)
+	dst := io.Writer(wf)
+	if rep != nil {
+		dst = &progressWriter{w: wf, rep: rep}
+	}
+	if _, err := io.Copy(dst, rc); err != nil {
+		return "", fmt.Errorf("prefetching %s: %w", srcPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return "", fmt.Errorf("syncing prefetch file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("closing prefetch file: %w", err)
+	}
+	cleanup = false
+	return localPath, nil
+}
+
+// acquireWindow blocks until winBytes fits in the byte window OR idx is
+// the lowest index the consumer has not yet taken. The bypass is what
+// makes the window deadlock-free: the consumer takes indices strictly in
+// order, so the file it is (or will next be) blocked on must always be
+// admitted even when later, out-of-order completions filled the window.
+func (p *filePrefetcher) acquireWindow(ctx context.Context, idx int, winBytes int64) error {
+	for {
+		p.mu.Lock()
+		if idx <= p.nextNeeded || p.window+winBytes <= scanPrefetchWindowBytes {
+			p.window += winBytes
+			p.mu.Unlock()
+			return nil
+		}
+		wait := p.windowFree
+		p.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wait:
+		}
+	}
+}
+
+func (p *filePrefetcher) releaseWindow(winBytes int64) {
+	p.mu.Lock()
+	p.window -= winBytes
+	close(p.windowFree)
+	p.windowFree = make(chan struct{})
+	p.mu.Unlock()
+}
+
+// take returns the prefetch outcome for idx, blocking until the download
+// resolves or ctx is cancelled. On a successful result the caller owns
+// localPath (must remove it when done). Must be called for indices in
+// strictly increasing order — the window's deadlock-freedom depends on it.
+func (p *filePrefetcher) take(ctx context.Context, idx int) *prefetchResult {
+	p.mu.Lock()
+	if idx+1 > p.nextNeeded {
+		p.nextNeeded = idx + 1
+	}
+	// Wake any worker parked in acquireWindow: the bypass condition just
+	// changed even though window occupancy didn't.
+	close(p.windowFree)
+	p.windowFree = make(chan struct{})
+	p.mu.Unlock()
+
+	select {
+	case res := <-p.results[idx]:
+		if res.windowBytes > 0 {
+			p.releaseWindow(res.windowBytes)
+		}
+		return res
+	case <-ctx.Done():
+		return &prefetchResult{err: ctx.Err()}
+	}
+}
+
+// Close cancels outstanding downloads, waits for workers to exit, and
+// removes any downloaded-but-never-taken temp files. Idempotent.
+func (p *filePrefetcher) Close() {
+	if p == nil {
+		return
+	}
+	p.cancel()
+	p.wg.Wait()
+	for _, ch := range p.results {
+		select {
+		case res := <-ch:
+			if res != nil && res.localPath != "" {
+				_ = os.Remove(res.localPath)
+			}
+		default:
+		}
+	}
+}
