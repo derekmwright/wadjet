@@ -20,7 +20,7 @@ A lightweight analytical query engine in pure Go. Columnar storage on Parquet, v
 go build -o wadjet ./cmd/wadjet
 
 # Start standalone (embedded NATS + worker + coordinator)
-./wadjet serve --mode=standalone --storage.endpoint=localhost:9000
+./wadjet serve --mode=standalone --endpoint=localhost:9000
 
 # Run a query
 ./wadjet query "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC LIMIT 10"
@@ -46,7 +46,7 @@ Full analytical SQL via a custom recursive descent parser:
 - Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters
 - VECTOR(N) type for embedding storage with cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims
-- `embed()` SQL function — OpenAI text-embedding-3-small/large with batched API calls and LRU cache
+- `embed()` SQL function — OpenAI, Voyage AI, and Ollama embedding providers with batched API calls (one call per record batch) and LRU cache
 - 280+ built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
 - 23 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
 - User-defined functions (CREATE FUNCTION)
@@ -91,7 +91,9 @@ CREATE TABLE doc_embeddings (doc_id INT64, embedding VECTOR(1536))
 - **Push-based pipelines** — Source → UnaryOp → Sink with selection vectors instead of data copying
 - **Typed kernels** — type dispatch resolved once at query init, no per-row switches in hot loops
 - **3-level pushdown** — partition pruning → row-group stats pruning → row-level filtering
-- **Spill-to-disk** — sort, aggregate, and window operators spill under memory pressure
+- **Cost-based optimization** — DP join reordering with Selinger-style costing over column statistics (`ANALYZE TABLE`: HLL distinct counts, histograms)
+- **Spill-to-disk everywhere** — hash join (grace partition-on-arrival), hash aggregate (partial-state k-way merge), sort and window (external sorted-run merge) all degrade gracefully past memory, governed by a byte-true memory ledger
+- **Morsel-driven parallelism** (`--morsel-workers=0`) — intra-task parallel pipeline consumers with bounded, self-draining aggregate partials; opt-in, validated at SF100
 
 ### Table Functions
 
@@ -121,12 +123,16 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 
 ### Distributed
 
-- **Pipeline-only execution** — all queries run as full SQL on workers, no inter-stage S3 shuffles
-- **Probe-split parallelism** — partition the largest table's files across workers, each runs full SQL on its slice, coordinator merges partials
-- **Embedded NATS** for coordination — no external dependencies beyond object storage
-- **JetStream task queues** with request/reply result delivery and automatic redelivery
+- **Stage-DAG execution** — distributed queries run as multi-stage DAGs; every stage output is durable in object storage, giving Trino-style fault-tolerant execution with task retry and worker-death recovery
+- **Streaming exchange** (default on) — consumers fetch stage outputs directly from producer workers' local disk over gRPC with asynchronous S3 upload; any failure falls back to the durable S3 path (SF100 suite −23% vs S3-only shuffle)
+- **Small-query fast path** — queries under a post-pruning size threshold (default 64 MiB) execute in-process on the coordinator, skipping the DAG entirely
+- **Broadcast + probe-split joins** — small builds replicate to all workers; the probe side's files split across workers with coordinator merge
+- **Split control/data plane** — NATS for heartbeats, cancellation, and the KV catalog; one multiplexed gRPC stream per worker for task dispatch and results
+- **Memory-aware scheduling** — per-task byte estimates bin-packed against live worker pool budgets, with admission gating under memory pressure
+- **Graceful worker drain** — SIGTERM stops intake, finishes in-flight tasks, flushes uploads, then exits; Kubernetes-ready with `/healthz`, `/readyz`, and `POST /drain`
+- **Catalog snapshots** — periodic S3 snapshots of the NATS KV catalog; a rebooted cluster discovers its tables in seconds
 - **Federation** across clusters via NATS leaf nodes
-- **Inline fast path** — results under 64 KB bypass S3 entirely
+- **Embedded NATS** — no external dependencies beyond object storage
 
 ### Security
 
@@ -147,14 +153,23 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 ### Operations
 
 - Prometheus metrics for queries, scans, workers, cache, and spill
-- Health endpoint with Kubernetes-compatible probes (HTTP and gRPC)
+- Kubernetes-compatible probes on every process (`/healthz`, `/readyz`) and graceful worker drain (`SIGTERM` / `POST /drain`)
+- Catalog snapshot / restore for fast cluster recovery
 - Output in table, JSON, or CSV format
 
 ## Benchmarks
 
-### TPC-H SF10 Performance
+### TPC-H SF10 Performance (single node vs DuckDB)
 
 All 22 TPC-H queries at scale factor 10 (~60M lineitem rows, 86.6M total rows across 8 tables). Pure Go, no SIMD, no CGo. Data stored as Parquet on S3 with VPC gateway endpoint.
+
+> Measured 2026-04 (DuckDB v1.2.1). The engine has had substantial
+> performance work since (streaming parquet reads, codec pools,
+> allocation-free aggregation, external sort/window); treat the table as
+> a lower bound on current standalone performance. Distributed-cluster
+> performance is tracked separately in the benchmark harness — the suite
+> also passes 22/22 with row-count validation at SF100 on a 3-worker
+> cluster.
 
 **Standalone** — AWS c7g.4xlarge (16 vCPU Graviton3, 32 GB RAM), S3 storage:
 
@@ -272,6 +287,7 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 | [Distributed Deployment](docs/distributed.md) | Multi-node setup, federation, cluster routing |
 | [Security](docs/security.md) | API keys, JWT, mTLS, RBAC, ABAC, cell-level policies |
 | [Performance Tuning](docs/tuning.md) | Memory budgets, spill tuning, environment profiles |
+| [Runbook](docs/runbook.md) | Run scenarios, the full flag surface, Kubernetes lifecycle |
 | [Operations](docs/operations.md) | Monitoring, Prometheus metrics, troubleshooting |
 | [Network Analytics](docs/network-analytics.md) | End-to-end workflow: devices → Bento → Wadjet → app |
 | [Disaster Recovery](docs/disaster-recovery.md) | Recovery scenarios, verification procedures, RTO/RPO |
