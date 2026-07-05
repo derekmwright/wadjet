@@ -42,7 +42,7 @@ install_duckdb() {
     *) log "ERROR: unsupported architecture: $ARCH"; exit 1 ;;
   esac
 
-  DUCKDB_VERSION="v1.2.1"
+  DUCKDB_VERSION="v1.5.4"
   DUCKDB_URL="https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/duckdb_cli-linux-${DUCKDB_ARCH}.zip"
 
   # Ensure unzip and bc are available (not always present on AL2023)
