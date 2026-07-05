@@ -159,58 +159,26 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 
 ## Benchmarks
 
-### TPC-H SF10 Performance (single node vs DuckDB)
+All 22 TPC-H queries pass with row-count-validated results at SF0.01 (CI,
+~5s), SF10 (single node and 4-node cluster), and SF100 (~600M lineitem
+rows, 4-node cluster with spill-to-disk under a 21 GB worker memory
+limit). Cross-engine result validation against DuckDB confirms identical
+row counts on all 22 queries over the same S3 Parquet data.
 
-All 22 TPC-H queries at scale factor 10 (~60M lineitem rows, 86.6M total rows across 8 tables). Pure Go, no SIMD, no CGo. Data stored as Parquet on S3 with VPC gateway endpoint.
-
-> Measured 2026-04 (DuckDB v1.2.1). The engine has had substantial
-> performance work since (streaming parquet reads, codec pools,
-> allocation-free aggregation, external sort/window); treat the table as
-> a lower bound on current standalone performance. Distributed-cluster
-> performance is tracked separately in the benchmark harness — the suite
-> also passes 22/22 with row-count validation at SF100 on a 3-worker
-> cluster.
-
-**Standalone** — AWS c7g.4xlarge (16 vCPU Graviton3, 32 GB RAM), S3 storage:
-
-| Query | Description | Wadjet | DuckDB | Ratio |
-|-------|-------------|--------|--------|-------|
-| Q01 | Pricing Summary | 9.36s | 15.27s | 1.6x |
-| Q02 | Min Cost Supplier | 2.57s | 4.66s | 1.8x |
-| Q03 | Shipping Priority | 11.65s | 10.97s | 0.9x |
-| Q04 | Order Priority | 12.85s | 8.91s | 0.7x |
-| Q05 | Local Supplier Volume | 9.18s | 10.38s | 1.1x |
-| Q06 | Revenue Change | 5.85s | 8.04s | 1.4x |
-| Q07 | Volume Shipping | 9.54s | 10.88s | 1.1x |
-| Q08 | National Market Share | 9.50s | 40.74s | 4.3x |
-| Q09 | Product Type Profit | 12.29s | 13.43s | 1.1x |
-| Q10 | Returned Item Reporting | 8.72s | 10.26s | 1.2x |
-| Q11 | Important Stock | 2.63s | 3.52s | 1.3x |
-| Q12 | Shipping Modes | 9.01s | 10.14s | 1.1x |
-| Q13 | Customer Distribution | 3.69s | 3.21s | 0.9x |
-| Q14 | Promotion Effect | 6.17s | 8.27s | 1.3x |
-| Q15 | Top Supplier | 6.16s | 8.29s | 1.3x |
-| Q16 | Parts/Supplier | 1.43s | 2.16s | 1.5x |
-| Q17 | Small-Quantity Revenue | 8.07s | 11.27s | 1.4x |
-| Q18 | Large Volume Customer | 13.94s | 13.20s | 0.9x |
-| Q19 | Discounted Revenue | 6.12s | 9.31s | 1.5x |
-| Q20 | Potential Part Promotion | 10.91s | 39.06s | 3.6x |
-| Q21 | Suppliers Kept Orders Waiting | 18.41s | 20.29s | 1.1x |
-| Q22 | Global Sales Opportunity | 2.84s | 2.39s | 0.8x |
-| | **Total** | **3m01s** | **4m25s** | **1.5x** |
-
-Wadjet wins 18 of 22 queries. Both engines read the same Parquet files from S3 on the same instance. DuckDB v1.2.1 with httpfs + aws extensions. DuckDB times include per-query credential and view setup (~2s overhead each); adjusted total is ~3m41s (Wadjet still 22% faster).
-
-All 22 queries return correct results with validated row counts at SF0.01 (CI) and SF10 (EC2).
+Performance numbers are intentionally not published here while the
+standalone S3 read path is being parallelized; the benchmark harness
+(`deploy/benchmark/`) reproduces every configuration.
 
 ```bash
-# Reproduce SF0.01 correctness (CI, ~5s)
+# SF0.01 correctness (CI, ~5s)
 go test -v -run TestTPCHQueries ./benchmarks/tpch/
 
-# Reproduce SF10 on EC2 (Terraform + SSM, no SSH required)
+# Distributed smoke gate (~11s, spawns a local coordinator + workers)
+go run ./cmd/tpch-harness --mode=local
+
+# Full EC2 benchmark matrix (OpenTofu + SSM, no SSH required)
 cd deploy/benchmark/terraform
-tofu apply -var="scale_factor=10" -var="worker_instance_type=c7g.4xlarge" \
-  -var="data_bucket=wadjet-bench-sf10-use2" -var="generate_data=true"
+tofu apply -var-file=sf10-standalone.tfvars -var=run_duckdb_comparison=true
 ```
 
 ## Deployment Modes
@@ -294,7 +262,7 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 
 ## TPC-H Benchmark Queries
 
-All 22 TPC-H queries pass at SF0.01 (correctness with row count validation) and SF10 (performance). See [benchmarks above](#tpc-h-sf10-performance) for details.
+All 22 TPC-H queries pass with row-count validation at SF0.01 (CI), SF10, and SF100. See [Benchmarks](#benchmarks).
 
 ```bash
 go test -v -run TestTPCHQueries ./benchmarks/tpch/                                    # SF0.01 correctness
