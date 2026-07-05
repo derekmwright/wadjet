@@ -509,17 +509,22 @@ for Q in $(seq 1 22); do
   QNAME="${QUERY_NAMES[$Q]}"
   SQL="${QUERIES[$Q]}"
 
-  # Run query against persistent database (no per-query setup overhead)
+  # Run query against persistent database (no per-query setup overhead).
+  # stderr goes to a side file, NOT into OUTPUT: extension-autoload and S3
+  # retry notices on stderr were being counted as result rows (2026-07-05:
+  # Q01 "9 rows" against 6 actual).
+  ERRFILE="${RESULTS_DIR}/duckdb-q${Q}-stderr.txt"
   START=$(date +%s%N)
-  OUTPUT=$(duckdb "$DUCKDB_DB" -csv -noheader -c "$SQL;" 2>&1) || {
+  OUTPUT=$(duckdb "$DUCKDB_DB" -csv -noheader -c "$SQL;" 2>"$ERRFILE") || {
     ELAPSED_NS=$(( $(date +%s%N) - START ))
     ELAPSED_S=$(echo "scale=3; $ELAPSED_NS / 1000000000" | bc)
     log "$(printf 'Q%02d %-35s %8ss  FAIL' "$Q" "$QNAME" "$ELAPSED_S")"
-    log "  Error: $OUTPUT"
+    log "  Error: $(cat "$ERRFILE" 2>/dev/null | head -3)"
     DUCK_TIMES[$Q]="FAIL"
     DUCK_ROWS[$Q]=0
     continue
   }
+  rm -f "$ERRFILE"
   ELAPSED_NS=$(( $(date +%s%N) - START ))
   ELAPSED_S=$(echo "scale=3; $ELAPSED_NS / 1000000000" | bc)
 
@@ -532,8 +537,12 @@ for Q in $(seq 1 22); do
 
   log "$(printf 'Q%02d %-35s %8ss  %5d rows  OK' "$Q" "$QNAME" "$ELAPSED_S" "$ROW_COUNT")"
 
-  # Save first 5 rows for correctness inspection (re-run with header for sample)
-  duckdb "$DUCKDB_DB" -csv -c "$SQL LIMIT 5;" > "${RESULTS_DIR}/duckdb-q${Q}-sample.csv" 2>/dev/null
+  # Save first rows for correctness inspection. Never append LIMIT (several
+  # queries already end in one — "LIMIT 100 LIMIT 5" is a parse error, and
+  # DuckDB >= 1.3 CLIs exit non-zero on SQL errors, which under set -e
+  # killed the whole run after Q02 on 2026-07-05). Guarded so a sample
+  # failure can never abort the benchmark.
+  (duckdb "$DUCKDB_DB" -csv -c "$SQL;" 2>/dev/null | head -6 > "${RESULTS_DIR}/duckdb-q${Q}-sample.csv") || true
 done
 
 log ""
