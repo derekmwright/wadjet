@@ -17,6 +17,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -44,6 +45,25 @@ type Catalog struct {
 
 	manifestMu    sync.Mutex
 	manifestCache map[string]manifestCacheEntry
+
+	// aggStatsCache memoizes AggregateColumnStats per table, keyed by the
+	// manifest's content version (UpdatedAt + file count). The aggregate
+	// is a pure function of the manifest, but computing it reads one
+	// sketches blob PER FILE — on an object-store-backed catalog that was
+	// 600 serial S3 GETs (~40s) of PLANNING on every query touching
+	// lineitem at SF10 (2026-07-05 finding: the dominant cost of the
+	// cold-S3 standalone suite, dwarfing the scan itself). Entries
+	// invalidate when ingestion bumps the manifest's UpdatedAt.
+	aggStatsMu    sync.Mutex
+	aggStatsCache map[string]aggStatsCacheEntry
+}
+
+// aggStatsCacheEntry is a memoized AggregateColumnStats result. The stats
+// map is shared with callers — treat it as immutable.
+type aggStatsCacheEntry struct {
+	updatedAt time.Time
+	fileCount int
+	stats     map[string]TableColumnStats
 }
 
 // CatalogMeta is the top-level catalog metadata.
@@ -772,6 +792,27 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 		return nil, err
 	}
 
+	fileCount := 0
+	for _, part := range manifest.Partitions {
+		fileCount += len(part.Files)
+	}
+
+	// Memoized result for this manifest version? The stats map is shared —
+	// callers must not mutate it (both planner call sites only read).
+	c.aggStatsMu.Lock()
+	if e, ok := c.aggStatsCache[tableName]; ok &&
+		e.updatedAt.Equal(manifest.UpdatedAt) && e.fileCount == fileCount {
+		c.aggStatsMu.Unlock()
+		return e.stats, nil
+	}
+	c.aggStatsMu.Unlock()
+
+	// Prefetch all externalized sketch blobs concurrently. Loads are
+	// best-effort (a failed blob degrades that file to inline/heuristic
+	// stats, matching loadFileSketches' contract) and merged strictly in
+	// file order below so results stay deterministic.
+	prefetched := c.prefetchFileSketches(manifest)
+
 	agg := make(map[string]TableColumnStats)
 	// HLL sketches are merged outside the TableColumnStats struct because
 	// merging is incremental (byte-wise max) and the merged sketch can be
@@ -783,12 +824,12 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 	for _, part := range manifest.Partitions {
 		for _, f := range part.Files {
 			totalRows += f.NumRows
-			// Externalized sketches: fetch the per-file bundle once,
+			// Externalized sketches: use the prefetched per-file bundle,
 			// merge each column's HLL + collect each column's sample
 			// bytes. SF100 catalogs use this path (manifests too big to
 			// hold sketches inline).
 			if f.SketchesKey != "" {
-				if entries, _ := c.loadFileSketches(context.Background(), f.SketchesKey); entries != nil {
+				if entries := prefetched[f.SketchesKey]; entries != nil {
 					for _, e := range entries {
 						if len(e.HLL) > 0 {
 							if h := HLLFromBytes(e.HLL); h != nil {
@@ -858,9 +899,70 @@ func (c *Catalog) AggregateColumnStats(_ context.Context, tableName string) (map
 	}
 
 	if len(agg) == 0 {
-		return nil, nil
+		agg = nil
 	}
+	c.aggStatsMu.Lock()
+	if c.aggStatsCache == nil {
+		c.aggStatsCache = make(map[string]aggStatsCacheEntry)
+	}
+	c.aggStatsCache[tableName] = aggStatsCacheEntry{
+		updatedAt: manifest.UpdatedAt,
+		fileCount: fileCount,
+		stats:     agg,
+	}
+	c.aggStatsMu.Unlock()
 	return agg, nil
+}
+
+// sketchPrefetchConcurrency bounds concurrent sketch-blob fetches during
+// AggregateColumnStats. Blobs are small (tens to hundreds of KB), so this
+// is a round-trip bound, not a bandwidth one.
+const sketchPrefetchConcurrency = 16
+
+// prefetchFileSketches loads every externalized sketches blob referenced
+// by the manifest concurrently and returns them keyed by SketchesKey.
+// Failed loads are simply absent (best-effort, matching loadFileSketches).
+func (c *Catalog) prefetchFileSketches(manifest *PartitionManifest) map[string][]FileSketchesEntry {
+	var keys []string
+	for _, part := range manifest.Partitions {
+		for _, f := range part.Files {
+			if f.SketchesKey != "" {
+				keys = append(keys, f.SketchesKey)
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	results := make([][]FileSketchesEntry, len(keys))
+	var idx int64
+	var wg sync.WaitGroup
+	workers := sketchPrefetchConcurrency
+	if workers > len(keys) {
+		workers = len(keys)
+	}
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(atomic.AddInt64(&idx, 1) - 1)
+				if i >= len(keys) {
+					return
+				}
+				entries, _ := c.loadFileSketches(context.Background(), keys[i])
+				results[i] = entries
+			}
+		}()
+	}
+	wg.Wait()
+	out := make(map[string][]FileSketchesEntry, len(keys))
+	for i, k := range keys {
+		if results[i] != nil {
+			out[k] = results[i]
+		}
+	}
+	return out
 }
 
 // compareStatValues compares two statistic values for ordering.
@@ -1003,6 +1105,12 @@ func (c *Catalog) invalidateManifestCache(tableName string) {
 	c.manifestMu.Lock()
 	delete(c.manifestCache, tableName)
 	c.manifestMu.Unlock()
+	// The aggregated column stats are derived from the manifest — every
+	// manifest invalidation must drop them too, so a writer that forgets
+	// to bump UpdatedAt still can't serve stale stats from this process.
+	c.aggStatsMu.Lock()
+	delete(c.aggStatsCache, tableName)
+	c.aggStatsMu.Unlock()
 }
 
 // key returns a cluster-prefixed KV key.
