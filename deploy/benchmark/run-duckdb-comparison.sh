@@ -37,7 +37,7 @@ install_duckdb() {
   log "Installing DuckDB..."
   ARCH=$(uname -m)
   case "$ARCH" in
-    aarch64|arm64) DUCKDB_ARCH="aarch64" ;;
+    aarch64|arm64) DUCKDB_ARCH="arm64" ;;  # DuckDB renamed aarch64->arm64 assets after v1.2
     x86_64|amd64)  DUCKDB_ARCH="amd64" ;;
     *) log "ERROR: unsupported architecture: $ARCH"; exit 1 ;;
   esac
