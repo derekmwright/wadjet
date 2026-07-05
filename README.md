@@ -20,7 +20,7 @@ A lightweight analytical query engine in pure Go. Columnar storage on Parquet, v
 go build -o wadjet ./cmd/wadjet
 
 # Start standalone (embedded NATS + worker + coordinator)
-./wadjet serve --mode=standalone --storage.endpoint=localhost:9000
+./wadjet serve --mode=standalone --endpoint=localhost:9000
 
 # Run a query
 ./wadjet query "SELECT src_ip, SUM(bytes_in) AS total FROM flow_logs GROUP BY src_ip ORDER BY total DESC LIMIT 10"
@@ -46,7 +46,7 @@ Full analytical SQL via a custom recursive descent parser:
 - Nested types: ARRAY, ROW/STRUCT, MAP with `person.name` dot-notation, `element_at()`, `map_keys()`
 - Table functions: `read_json()`, `read_csv()`, `read_parquet()` with glob patterns and named parameters
 - VECTOR(N) type for embedding storage with cosine_similarity, l2_distance, dot_product, vector_norm, vector_dims
-- `embed()` SQL function — OpenAI text-embedding-3-small/large with batched API calls and LRU cache
+- `embed()` SQL function — OpenAI, Voyage AI, and Ollama embedding providers with batched API calls (one call per record batch) and LRU cache
 - 280+ built-in scalar functions (string, math, trig, date/time, network, UUID, conditional, regex, hash, encoding, bitwise, JSON, URL, deep packet inspection, ICMP, IPv6, JA3 fingerprinting, payload search, GeoIP/ASN, vector distance)
 - 23 aggregate functions including approx_distinct, corr, covar, percentile_cont/disc, mode, median, min_by/max_by
 - User-defined functions (CREATE FUNCTION)
@@ -91,7 +91,9 @@ CREATE TABLE doc_embeddings (doc_id INT64, embedding VECTOR(1536))
 - **Push-based pipelines** — Source → UnaryOp → Sink with selection vectors instead of data copying
 - **Typed kernels** — type dispatch resolved once at query init, no per-row switches in hot loops
 - **3-level pushdown** — partition pruning → row-group stats pruning → row-level filtering
-- **Spill-to-disk** — sort, aggregate, and window operators spill under memory pressure
+- **Cost-based optimization** — DP join reordering with Selinger-style costing over column statistics (`ANALYZE TABLE`: HLL distinct counts, histograms)
+- **Spill-to-disk everywhere** — hash join (grace partition-on-arrival), hash aggregate (partial-state k-way merge), sort and window (external sorted-run merge) all degrade gracefully past memory, governed by a byte-true memory ledger
+- **Morsel-driven parallelism** (`--morsel-workers=0`) — intra-task parallel pipeline consumers with bounded, self-draining aggregate partials; opt-in, validated at SF100
 
 ### Table Functions
 
@@ -121,12 +123,16 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 
 ### Distributed
 
-- **Pipeline-only execution** — all queries run as full SQL on workers, no inter-stage S3 shuffles
-- **Probe-split parallelism** — partition the largest table's files across workers, each runs full SQL on its slice, coordinator merges partials
-- **Embedded NATS** for coordination — no external dependencies beyond object storage
-- **JetStream task queues** with request/reply result delivery and automatic redelivery
+- **Stage-DAG execution** — distributed queries run as multi-stage DAGs; every stage output is durable in object storage, giving Trino-style fault-tolerant execution with task retry and worker-death recovery
+- **Streaming exchange** (default on) — consumers fetch stage outputs directly from producer workers' local disk over gRPC with asynchronous S3 upload; any failure falls back to the durable S3 path (SF100 suite −23% vs S3-only shuffle)
+- **Small-query fast path** — queries under a post-pruning size threshold (default 64 MiB) execute in-process on the coordinator, skipping the DAG entirely
+- **Broadcast + probe-split joins** — small builds replicate to all workers; the probe side's files split across workers with coordinator merge
+- **Split control/data plane** — NATS for heartbeats, cancellation, and the KV catalog; one multiplexed gRPC stream per worker for task dispatch and results
+- **Memory-aware scheduling** — per-task byte estimates bin-packed against live worker pool budgets, with admission gating under memory pressure
+- **Graceful worker drain** — SIGTERM stops intake, finishes in-flight tasks, flushes uploads, then exits; Kubernetes-ready with `/healthz`, `/readyz`, and `POST /drain`
+- **Catalog snapshots** — periodic S3 snapshots of the NATS KV catalog; a rebooted cluster discovers its tables in seconds
 - **Federation** across clusters via NATS leaf nodes
-- **Inline fast path** — results under 64 KB bypass S3 entirely
+- **Embedded NATS** — no external dependencies beyond object storage
 
 ### Security
 
@@ -147,55 +153,32 @@ SELECT * FROM read_parquet('warehouse/sales.parquet')             -- Parquet fil
 ### Operations
 
 - Prometheus metrics for queries, scans, workers, cache, and spill
-- Health endpoint with Kubernetes-compatible probes (HTTP and gRPC)
+- Kubernetes-compatible probes on every process (`/healthz`, `/readyz`) and graceful worker drain (`SIGTERM` / `POST /drain`)
+- Catalog snapshot / restore for fast cluster recovery
 - Output in table, JSON, or CSV format
 
 ## Benchmarks
 
-### TPC-H SF10 Performance
+All 22 TPC-H queries pass with row-count-validated results at SF0.01 (CI,
+~5s), SF10 (single node and 4-node cluster), and SF100 (~600M lineitem
+rows, 4-node cluster with spill-to-disk under a 21 GB worker memory
+limit). Cross-engine result validation against DuckDB confirms identical
+row counts on all 22 queries over the same S3 Parquet data.
 
-All 22 TPC-H queries at scale factor 10 (~60M lineitem rows, 86.6M total rows across 8 tables). Pure Go, no SIMD, no CGo. Data stored as Parquet on S3 with VPC gateway endpoint.
-
-**Standalone** — AWS c7g.4xlarge (16 vCPU Graviton3, 32 GB RAM), S3 storage:
-
-| Query | Description | Wadjet | DuckDB | Ratio |
-|-------|-------------|--------|--------|-------|
-| Q01 | Pricing Summary | 9.36s | 15.27s | 1.6x |
-| Q02 | Min Cost Supplier | 2.57s | 4.66s | 1.8x |
-| Q03 | Shipping Priority | 11.65s | 10.97s | 0.9x |
-| Q04 | Order Priority | 12.85s | 8.91s | 0.7x |
-| Q05 | Local Supplier Volume | 9.18s | 10.38s | 1.1x |
-| Q06 | Revenue Change | 5.85s | 8.04s | 1.4x |
-| Q07 | Volume Shipping | 9.54s | 10.88s | 1.1x |
-| Q08 | National Market Share | 9.50s | 40.74s | 4.3x |
-| Q09 | Product Type Profit | 12.29s | 13.43s | 1.1x |
-| Q10 | Returned Item Reporting | 8.72s | 10.26s | 1.2x |
-| Q11 | Important Stock | 2.63s | 3.52s | 1.3x |
-| Q12 | Shipping Modes | 9.01s | 10.14s | 1.1x |
-| Q13 | Customer Distribution | 3.69s | 3.21s | 0.9x |
-| Q14 | Promotion Effect | 6.17s | 8.27s | 1.3x |
-| Q15 | Top Supplier | 6.16s | 8.29s | 1.3x |
-| Q16 | Parts/Supplier | 1.43s | 2.16s | 1.5x |
-| Q17 | Small-Quantity Revenue | 8.07s | 11.27s | 1.4x |
-| Q18 | Large Volume Customer | 13.94s | 13.20s | 0.9x |
-| Q19 | Discounted Revenue | 6.12s | 9.31s | 1.5x |
-| Q20 | Potential Part Promotion | 10.91s | 39.06s | 3.6x |
-| Q21 | Suppliers Kept Orders Waiting | 18.41s | 20.29s | 1.1x |
-| Q22 | Global Sales Opportunity | 2.84s | 2.39s | 0.8x |
-| | **Total** | **3m01s** | **4m25s** | **1.5x** |
-
-Wadjet wins 18 of 22 queries. Both engines read the same Parquet files from S3 on the same instance. DuckDB v1.2.1 with httpfs + aws extensions. DuckDB times include per-query credential and view setup (~2s overhead each); adjusted total is ~3m41s (Wadjet still 22% faster).
-
-All 22 queries return correct results with validated row counts at SF0.01 (CI) and SF10 (EC2).
+Performance numbers are intentionally not published here while the
+standalone S3 read path is being parallelized; the benchmark harness
+(`deploy/benchmark/`) reproduces every configuration.
 
 ```bash
-# Reproduce SF0.01 correctness (CI, ~5s)
+# SF0.01 correctness (CI, ~5s)
 go test -v -run TestTPCHQueries ./benchmarks/tpch/
 
-# Reproduce SF10 on EC2 (Terraform + SSM, no SSH required)
+# Distributed smoke gate (~11s, spawns a local coordinator + workers)
+go run ./cmd/tpch-harness --mode=local
+
+# Full EC2 benchmark matrix (OpenTofu + SSM, no SSH required)
 cd deploy/benchmark/terraform
-tofu apply -var="scale_factor=10" -var="worker_instance_type=c7g.4xlarge" \
-  -var="data_bucket=wadjet-bench-sf10-use2" -var="generate_data=true"
+tofu apply -var-file=sf10-standalone.tfvars -var=run_duckdb_comparison=true
 ```
 
 ## Deployment Modes
@@ -272,13 +255,14 @@ result, _ := db.Query(ctx, "SELECT src_ip, COUNT(*) FROM flow_logs GROUP BY src_
 | [Distributed Deployment](docs/distributed.md) | Multi-node setup, federation, cluster routing |
 | [Security](docs/security.md) | API keys, JWT, mTLS, RBAC, ABAC, cell-level policies |
 | [Performance Tuning](docs/tuning.md) | Memory budgets, spill tuning, environment profiles |
+| [Runbook](docs/runbook.md) | Run scenarios, the full flag surface, Kubernetes lifecycle |
 | [Operations](docs/operations.md) | Monitoring, Prometheus metrics, troubleshooting |
 | [Network Analytics](docs/network-analytics.md) | End-to-end workflow: devices → Bento → Wadjet → app |
 | [Disaster Recovery](docs/disaster-recovery.md) | Recovery scenarios, verification procedures, RTO/RPO |
 
 ## TPC-H Benchmark Queries
 
-All 22 TPC-H queries pass at SF0.01 (correctness with row count validation) and SF10 (performance). See [benchmarks above](#tpc-h-sf10-performance) for details.
+All 22 TPC-H queries pass with row-count validation at SF0.01 (CI), SF10, and SF100. See [Benchmarks](#benchmarks).
 
 ```bash
 go test -v -run TestTPCHQueries ./benchmarks/tpch/                                    # SF0.01 correctness
