@@ -47,6 +47,11 @@ type Config struct {
 	MemoryBudget     int64  // per-task memory budget in bytes (0 = unlimited, no spill); used as legacy fallback when SharedPoolBudget is unset
 	SharedPoolBudget int64  // worker-wide memory pool in bytes (0 = derived as MemoryBudget*MaxConcurrent). All concurrent tasks Reserve against this pool; spill triggers fire on cumulative worker pressure.
 	SpillDir         string // directory for spill files (default: os temp dir)
+	// DrainTimeout bounds Drain(): how long to wait for in-flight tasks and
+	// then pending stage-output uploads before escalating to a hard stop.
+	// 0 = unbounded (the platform's kill timeout — e.g. the Kubernetes
+	// termination grace period — is the backstop).
+	DrainTimeout     time.Duration
 	ResultStoreBytes int64  // in-memory result store capacity (0 = disabled, results go to S3)
 
 	// Reservoirs is the Phase-3 system-reservoir registry. When non-nil, the
@@ -144,8 +149,16 @@ type Worker struct {
 	logger    *slog.Logger
 	metrics   *metrics.Metrics
 
-	cancel    context.CancelFunc
+	cancel context.CancelFunc
+	// wg tracks the TASK side of the lifecycle: intake loops (which exit on
+	// drain) and per-task goroutines. bgWG tracks background services
+	// (heartbeat, stats, heap profiler) that exit only on context cancel.
+	// The split is what makes Drain possible: wait for wg (tasks finish)
+	// while bgWG keeps heartbeating Draining=true, THEN cancel and wait for
+	// bgWG. With a single group, Drain's pre-cancel Wait deadlocked on the
+	// heartbeat loop.
 	wg        sync.WaitGroup
+	bgWG      sync.WaitGroup
 	drainCh   chan struct{} // closed when drain is requested
 	drainOnce sync.Once
 
@@ -432,7 +445,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	drainSubject := fmt.Sprintf("wadjet.worker.%s.drain", w.config.WorkerID)
 	w.nc.Subscribe(drainSubject, func(msg *nats.Msg) {
 		w.logger.Info("received drain request via NATS")
-		w.drainOnce.Do(func() { close(w.drainCh) })
+		w.BeginDrain()
 		if msg.Reply != "" {
 			msg.Respond([]byte("ok"))
 		}
@@ -456,10 +469,13 @@ func (w *Worker) Start(ctx context.Context) error {
 	// Start task pull loop
 	sem := make(chan struct{}, w.config.MaxConcurrent)
 
-	// Start heartbeat (needs sem to report active task count)
-	w.wg.Add(1)
+	// Start heartbeat (needs sem to report active task count). Background
+	// group: must keep running through a drain so the coordinator sees
+	// Draining=true (dispatch exclusion) instead of heartbeat silence
+	// (reap + re-dispatch of work this worker is still finishing).
+	w.bgWG.Add(1)
 	go func() {
-		defer w.wg.Done()
+		defer w.bgWG.Done()
 		w.heartbeatLoop(ctx, sem)
 	}()
 
@@ -541,6 +557,12 @@ func (w *Worker) dispatchLoop(ctx context.Context, in <-chan dataplane.TaskDispa
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-w.drainCh:
+			// Without this case an IDLE worker never exits the loop on
+			// drain — it sits blocked on `in` and Drain's task-group Wait
+			// hangs (caught by the SIGTERM e2e, 2026-07-04). A task already
+			// popped from `in` still runs to completion below.
 			return
 		case td := <-in:
 			if w.Draining() {
@@ -643,19 +665,82 @@ func (w *Worker) waitForPoolHeadroom(ctx context.Context, estBytes int64) {
 	}
 }
 
-// Drain puts the worker into drain mode: it stops pulling new tasks and waits
-// for all in-flight tasks to complete, then cancels the context so heartbeat
-// and other background loops exit. Use this for zero-downtime rolling updates.
-func (w *Worker) Drain() {
+// BeginDrain marks the worker as draining without blocking: intake loops
+// stop pulling new tasks and the next heartbeat advertises Draining=true so
+// the coordinator excludes this worker from dispatch. Idempotent. The full
+// shutdown sequence is Drain(); process owners typically select on
+// DrainRequested() and call Drain when it fires.
+func (w *Worker) BeginDrain() {
 	w.drainOnce.Do(func() {
 		w.logger.Info("worker entering drain mode", "worker_id", w.config.WorkerID)
 		close(w.drainCh)
 	})
-	// Wait for in-flight tasks to finish, then stop.
-	w.wg.Wait()
+}
+
+// DrainRequested returns a channel that is closed once drain has been
+// requested from ANY source: BeginDrain, the NATS drain subject (the
+// coordinator sends it on reap), or the /drain admin endpoint.
+func (w *Worker) DrainRequested() <-chan struct{} { return w.drainCh }
+
+// Drain performs a graceful shutdown: stop pulling new tasks, let in-flight
+// tasks run to completion, flush pending stage-output uploads to the object
+// store (so consumers of this worker's outputs keep their durable fallback
+// once the peer-exchange server goes away), then stop background services.
+// Use this for zero-downtime rolling updates and Kubernetes pod termination
+// (SIGTERM). Config.DrainTimeout bounds the whole sequence; on timeout the
+// remaining work is aborted exactly like Stop.
+func (w *Worker) Drain() {
+	w.BeginDrain()
+
+	var deadline <-chan time.Time
+	var deadlineAt time.Time
+	if w.config.DrainTimeout > 0 {
+		deadlineAt = time.Now().Add(w.config.DrainTimeout)
+		t := time.NewTimer(w.config.DrainTimeout)
+		defer t.Stop()
+		deadline = t.C
+	}
+
+	// Phase 1: in-flight tasks. The intake loops exit on the drain flag;
+	// heartbeats (bgWG) keep publishing Draining=true throughout.
+	tasksDone := make(chan struct{})
+	go func() { w.wg.Wait(); close(tasksDone) }()
+	select {
+	case <-tasksDone:
+	case <-deadline:
+		w.logger.Warn("drain timeout waiting for in-flight tasks; escalating to hard stop",
+			"worker_id", w.config.WorkerID, "timeout", w.config.DrainTimeout)
+		w.Stop()
+		return
+	}
+
+	// Phase 2: flush pending async stage-output uploads. Tasks are done, so
+	// no new uploads can start; a single pass suffices. Peer fetches are
+	// still served during the flush.
+	flushCtx := context.Background()
+	if !deadlineAt.IsZero() {
+		var cancel context.CancelFunc
+		flushCtx, cancel = context.WithDeadline(flushCtx, deadlineAt)
+		defer cancel()
+	}
+	if err := w.executor.uploads.Flush(flushCtx); err != nil {
+		w.logger.Warn("drain timeout flushing stage-output uploads; remaining uploads cancelled",
+			"worker_id", w.config.WorkerID, "error", err)
+	}
+
+	// Phase 3: tear down. Consumers mid-fetch fall through to the (now
+	// flushed) S3 copies.
+	if w.peerServer != nil {
+		w.peerServer.Stop()
+	}
+	if w.peerClient != nil {
+		w.peerClient.Close()
+	}
+	w.executor.uploads.Drain()
 	if w.cancel != nil {
 		w.cancel()
 	}
+	w.bgWG.Wait()
 	w.logger.Info("worker drained and stopped", "worker_id", w.config.WorkerID)
 }
 
@@ -676,6 +761,7 @@ func (w *Worker) Stop() {
 		w.cancel()
 	}
 	w.wg.Wait()
+	w.bgWG.Wait()
 
 	if w.peerServer != nil {
 		w.peerServer.Stop()
@@ -828,9 +914,15 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 		}
 	fetch:
 		if available == 0 {
-			// All slots occupied — wait for one to free up
+			// All slots occupied — wait for one to free up. The drain case
+			// matters twice over: without it a saturated worker blocks here
+			// through the whole drain, and when a slot finally freed it
+			// would pull one MORE task past the Draining check at the loop
+			// top (intake leak during drain).
 			select {
 			case <-ctx.Done():
+				return
+			case <-w.drainCh:
 				return
 			case sem <- struct{}{}:
 				available = 1
@@ -1421,9 +1513,9 @@ func computeStatsGauges(heapInuse, rss, driftBytes int64) (driftMB int64, driftP
 
 func (w *Worker) heartbeatLoop(ctx context.Context, sem chan struct{}) {
 	cache := &statsCache{}
-	w.wg.Add(1)
+	w.bgWG.Add(1)
 	go func() {
-		defer w.wg.Done()
+		defer w.bgWG.Done()
 		w.statsRefreshLoop(ctx, cache)
 	}()
 

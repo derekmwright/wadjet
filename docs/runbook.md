@@ -121,13 +121,49 @@ Defaults are already the validated memory-tight profile:
   awaits a same-window SF100 serial-vs-auto pair. `N>1` = fixed width
   (benchmark/testing knob, bypasses the size gate).
 
-### 1.7 Edge federation
+### 1.7 Worker lifecycle on Kubernetes (graceful drain)
+
+Workers support graceful drain: stop taking new tasks, finish in-flight
+work, flush pending stage-output uploads to the object store (so
+consumers keep their durable fallback once the peer-exchange server goes
+away), then exit.
+
+Signal contract (worker mode):
+
+| Trigger | Behavior |
+|---|---|
+| `SIGTERM`, `SIGQUIT` | graceful drain, then exit |
+| `SIGINT` | hard stop (in-flight tasks abort; the coordinator's retry machinery re-dispatches them) |
+| `POST /drain` on the metrics port | same as SIGTERM (returns 202 immediately; drain proceeds) |
+| NATS `wadjet.worker.<id>.drain` | same (the coordinator sends this when it reaps a stale worker) |
+
+During drain the worker keeps heartbeating with `Draining=true`, which
+excludes it from dispatch targeting without tripping the reaper, and it
+keeps serving peer-exchange fetches until uploads are flushed.
+`--drain-timeout` bounds the whole sequence (0 = unbounded); on timeout
+the worker escalates to a hard stop. In-flight SF100-class tasks can run
+for minutes — size the bound (and the pod's grace period) accordingly.
+
+Probes on the metrics port (`--metrics-addr`, default `:9100`):
+`GET /healthz` (liveness), `GET /readyz` (readiness; 503 once draining).
+
+```yaml
+# Pod spec sketch
+terminationGracePeriodSeconds: 900   # >= --drain-timeout + margin
+containers:
+- name: wadjet-worker
+  args: ["serve", "--mode=worker", "--drain-timeout=10m", ...]
+  livenessProbe:  { httpGet: { path: /healthz, port: 9100 } }
+  readinessProbe: { httpGet: { path: /readyz,  port: 9100 } }
+```
+
+### 1.8 Edge federation
 
 Edge clusters connect to central via NATS leaf nodes:
 `--leaf-remote=nats://central:7422` (repeatable), `--cluster-id=<name>`,
 mTLS via `--nats-tls-cert/-key/-ca`. See `distributed.md`.
 
-### 1.8 Benchmarks
+### 1.9 Benchmarks
 
 Use `deploy/benchmark/` (OpenTofu + `run-benchmark.sh`); see its
 README. Local gate first: `cmd/tpch-harness --mode=local` (~11s)

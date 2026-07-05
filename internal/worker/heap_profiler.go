@@ -64,9 +64,9 @@ func (w *Worker) startHeapPressureProfiler(ctx context.Context) {
 		w.logger.Warn("heap pressure profiler: mkdir failed", "dir", dir, "err", err)
 		return
 	}
-	w.wg.Add(1)
+	w.bgWG.Add(1)
 	go func() {
-		defer w.wg.Done()
+		defer w.bgWG.Done()
 		var lastWrite time.Time
 		ticker := time.NewTicker(heapPressureProfilePoll)
 		defer ticker.Stop()
@@ -220,9 +220,9 @@ func (w *Worker) startLongTaskWatcher(ctx context.Context, task distributed.Task
 		}
 	}
 
-	w.wg.Add(1)
+	w.bgWG.Add(1)
 	go func() {
-		defer w.wg.Done()
+		defer w.bgWG.Done()
 		select {
 		case <-ctx.Done():
 			return

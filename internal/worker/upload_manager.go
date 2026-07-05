@@ -126,6 +126,40 @@ func (m *uploadManager) CancelQuery(root string) {
 	}
 }
 
+// Flush waits for every pending background upload to complete (land in the
+// object store or exhaust its retries) WITHOUT cancelling — the graceful
+// counterpart of Drain, used by Worker.Drain so that consumers of this
+// worker's stage outputs keep their durable S3 fallback after the
+// peer-exchange server goes away. Callers must ensure no new StartTask
+// calls can arrive (Worker.Drain runs it after the task WaitGroup drains),
+// so a single snapshot of the query states covers everything. Returns
+// ctx.Err() if the context expires first; the caller then falls back to
+// Drain (cancel).
+func (m *uploadManager) Flush(ctx context.Context) error {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	states := make([]*queryUploadState, 0, len(m.queries))
+	for _, qs := range m.queries {
+		states = append(states, qs)
+	}
+	m.mu.Unlock()
+	for _, qs := range states {
+		done := make(chan struct{})
+		go func(q *queryUploadState) {
+			q.inflight.Wait()
+			close(done)
+		}(qs)
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 // Drain cancels everything (worker shutdown).
 func (m *uploadManager) Drain() {
 	if m == nil {
