@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
@@ -241,7 +242,9 @@ func TestScanAccounting_DrainSlotChargesOnAbandonedScan(t *testing.T) {
 
 	tracker := memory.NewTracker("scan-test", 1<<30)
 	inner := &scanSourceInner{cat: cat, memTracker: tracker}
-	inner.loadSem = make(chan struct{}, 1)
+	// Budget of one file's bytes with a single lane: the drain must free
+	// the admitted bytes or the follow-up acquire below would block.
+	inner.loadGate = newLoadGate(entry.SizeBytes, 1)
 
 	slot := &fileSlot{entry: entry}
 	slot.rgRemaining.Store(2)
@@ -259,9 +262,11 @@ func TestScanAccounting_DrainSlotChargesOnAbandonedScan(t *testing.T) {
 	if used := tracker.Used(); used != 0 {
 		t.Fatalf("used = %d after drainSlotCharges, want 0 (phantom reservation)", used)
 	}
-	select {
-	case inner.loadSem <- struct{}{}: // sem slot must have been released
-	default:
-		t.Fatal("loadSem slot still held after drain")
+	// The gate bytes must have been released by the drain: an acquire for
+	// the full budget only succeeds if inflight is back to zero.
+	acquireCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := inner.loadGate.acquire(acquireCtx, entry.SizeBytes); err != nil {
+		t.Fatal("load-gate bytes still held after drain")
 	}
 }

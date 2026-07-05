@@ -296,7 +296,7 @@ func decimalFromBytes(b []byte) batch.Int128 {
 // are loaded LAZILY via slot.ensureLoaded() the first time any row group
 // from that file is read, and released as soon as the slot's last row
 // group has been processed. This caps peak heap usage from the scan source
-// at (loadConcurrency × file_size) instead of (total_files × file_size),
+// at (load-gate budget) instead of (total_files × file_size),
 // which at SF100 is the difference between ~1 GB and ~6 GB per scan.
 type rgUnit struct {
 	slot        *fileSlot
@@ -320,6 +320,7 @@ type fileSlot struct {
 	metaReader   *parquet.FileReader // metadata-only — used during pruning before any rg load
 	dataBuf      []byte              // pooled buffer holding the file bytes; returned to pool on releaseRG
 	chargedBytes int64               // bytes reserved on inner.memTracker for dataBuf; released with it
+	gateBytes    int64               // bytes admitted on inner.loadGate; released with the buffer
 	rgRemaining  atomic.Int64        // refcount of unprocessed row groups; release on 0
 }
 
@@ -346,16 +347,19 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	}
 	s.loaded = true
 
-	// Acquire a slot in the bounded loader semaphore so peak heap is
-	// (loadConcurrency × file_size) regardless of how many files are in
-	// the scan. The semaphore is released by releaseLoaded() when the
-	// last rg is consumed.
-	if inner.loadSem != nil {
-		select {
-		case inner.loadSem <- struct{}{}:
-		case <-ctx.Done():
-			s.loadErr = ctx.Err()
+	// Admit this load against the byte-budgeted gate so peak heap from
+	// loaded files is bounded by the gate's budget regardless of how many
+	// files are in the scan. The admitted bytes are released when the
+	// slot's last row group is consumed (releaseRG) or the scan is torn
+	// down (drainAbandoned).
+	if inner.loadGate != nil {
+		if err := inner.loadGate.acquire(ctx, s.entry.SizeBytes); err != nil {
+			s.loadErr = err
 			return nil, s.loadErr
+		}
+		s.gateBytes = s.entry.SizeBytes
+		if s.gateBytes < 1 {
+			s.gateBytes = 1
 		}
 	}
 
@@ -373,9 +377,7 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), s.entry.Path)
 	if err != nil {
 		s.releaseCharge(inner)
-		if inner.loadSem != nil {
-			<-inner.loadSem
-		}
+		s.releaseGate(inner)
 		s.loadErr = fmt.Errorf("get %s: %w", s.entry.Path, err)
 		return nil, s.loadErr
 	}
@@ -383,9 +385,7 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	rc.Close()
 	if err != nil {
 		s.releaseCharge(inner)
-		if inner.loadSem != nil {
-			<-inner.loadSem
-		}
+		s.releaseGate(inner)
 		s.loadErr = fmt.Errorf("read %s: %w", s.entry.Path, err)
 		return nil, s.loadErr
 	}
@@ -404,9 +404,7 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	reader, err := parquet.NewReaderFromBytes(data)
 	if err != nil {
 		s.releaseCharge(inner)
-		if inner.loadSem != nil {
-			<-inner.loadSem
-		}
+		s.releaseGate(inner)
 		// Buffer wasn't installed in a slot — return it directly.
 		putReadBuf(data)
 		s.loadErr = fmt.Errorf("parquet %s (%d bytes): %w", s.entry.Path, len(data), err)
@@ -440,6 +438,15 @@ func (s *fileSlot) releaseCharge(inner *scanSourceInner) {
 	s.chargedBytes = 0
 }
 
+// releaseGate returns this slot's admitted bytes to the load gate.
+// Idempotent. Caller must hold s.mu.
+func (s *fileSlot) releaseGate(inner *scanSourceInner) {
+	if s.gateBytes > 0 && inner.loadGate != nil {
+		inner.loadGate.release(s.gateBytes)
+	}
+	s.gateBytes = 0
+}
+
 // releaseRG decrements the row-group refcount and frees the file bytes
 // once the last row group has been processed. Safe to call from any worker.
 func (s *fileSlot) releaseRG(inner *scanSourceInner) {
@@ -447,47 +454,49 @@ func (s *fileSlot) releaseRG(inner *scanSourceInner) {
 		return
 	}
 	s.mu.Lock()
-	wasLoaded := s.loaded && s.loadErr == nil && s.reader != nil
 	s.reader = nil
 	s.nativeReader = nil
 	buf := s.dataBuf
 	s.dataBuf = nil
 	s.releaseCharge(inner)
+	gateN := s.gateBytes
+	s.gateBytes = 0
 	s.mu.Unlock()
 	// Return the file's pooled buffer to the read buf pool so it's
 	// immediately available for the next file the loader brings in. This
-	// is what makes the bounded loader semaphore actually bound peak heap.
+	// is what makes the byte-budgeted load gate actually bound peak heap.
 	if buf != nil {
 		putReadBuf(buf)
 	}
-	if wasLoaded && inner.loadSem != nil {
-		<-inner.loadSem
+	if gateN > 0 && inner.loadGate != nil {
+		inner.loadGate.release(gateN)
 	}
 }
 
 // drainAbandoned releases everything a slot still holds when its scan is
 // torn down before all row groups were consumed (ctx cancel, LIMIT
-// satisfied, downstream error): the pooled buffer, the loadSem slot, and —
+// satisfied, downstream error): the pooled buffer, the load-gate bytes, and —
 // critically — the memTracker charge, which lives on the worker-lifetime
 // SHARED tracker and would otherwise remain a permanent phantom reservation
-// (up to loadConcurrency x file_size per cancelled scan), starving later
+// (up to the load-gate budget per cancelled scan), starving later
 // tasks' admission and forcing chronic over-spilling. Callers must ensure
 // the rg workers have exited (Close does wg.Wait first).
 func (s *fileSlot) drainAbandoned(inner *scanSourceInner) {
 	s.mu.Lock()
-	wasLoaded := s.loaded && s.loadErr == nil && s.reader != nil
 	s.reader = nil
 	s.nativeReader = nil
 	s.metaReader = nil
 	buf := s.dataBuf
 	s.dataBuf = nil
 	s.releaseCharge(inner)
+	gateN := s.gateBytes
+	s.gateBytes = 0
 	s.mu.Unlock()
 	if buf != nil {
 		putReadBuf(buf)
 	}
-	if wasLoaded && inner.loadSem != nil {
-		<-inner.loadSem
+	if gateN > 0 && inner.loadGate != nil {
+		inner.loadGate.release(gateN)
 	}
 }
 
@@ -506,12 +515,11 @@ type prefetchResult struct {
 //
 // The slot's bytes are loaded on first read by the rg worker pool and
 // released as soon as that file's last row group has been consumed (see
-// fileSlot.ensureLoaded / releaseRG). A bounded loadConcurrency cap on
-// inner.loadSem keeps peak heap from the scan source at
-// (loadConcurrency × file_size) regardless of how many files the scan
-// covers — replaces the previous "load all files into heap upfront"
-// behaviour that OOMed SF100 workers when lineitem partitions hit
-// 21 × 283 MB ≈ 6 GB per scan per task.
+// fileSlot.ensureLoaded / releaseRG). The byte-budgeted inner.loadGate
+// keeps peak heap from the scan source at the gate's budget regardless
+// of how many files the scan covers — replaces the previous "load all
+// files into heap upfront" behaviour that OOMed SF100 workers when
+// lineitem partitions hit 21 × 283 MB ≈ 6 GB per scan per task.
 func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	// Check for nested types — fall back to file-level scan
 	pqSchema := parquet.Schema{Columns: inner.schema}
@@ -520,12 +528,22 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 		return
 	}
 
-	// Bound concurrent file LOADs (data bytes, not metadata). 4 concurrent
-	// loads × 300 MB lineitem files = 1.2 GB peak from this scan source —
-	// fits comfortably in any worker, including a 30 GB c7gd at SF100 with
-	// other tasks running. Tunable upward when memory is plentiful.
-	const loadConcurrency = 4
-	inner.loadSem = make(chan struct{}, loadConcurrency)
+	// Bound concurrent file LOADs (data bytes, not metadata) by BYTES.
+	// The old 4-slot semaphore was a byte bound in file units ("4 × 300 MB
+	// = 1.2 GB peak") and collapsed on small-file layouts: 600 × 6.5 MB
+	// SF10 files at 4 lanes left a 16-core box ~98% idle on cold S3. A
+	// byte budget holds the same heap ceiling for SF100-sized files
+	// (~3 lanes at 300 MB) while giving small files real download
+	// parallelism (lane-capped at loadGateMaxLanes). When the query has a
+	// memory budget, the gate takes a quarter of it at most so scans
+	// can't crowd out join/aggregate state.
+	loadBudget := defaultLoadBudgetBytes
+	if inner.memTracker != nil {
+		if b := inner.memTracker.Budget(); b > 0 && b/4 < loadBudget {
+			loadBudget = b / 4
+		}
+	}
+	inner.loadGate = newLoadGate(loadBudget, loadGateMaxLanes)
 
 	slots := make([]*fileSlot, len(inner.files))
 	var failedFiles atomic.Int64
@@ -861,7 +879,7 @@ func (inner *scanSourceInner) rgWorker(ctx context.Context) {
 }
 
 // readRG reads a row group using the native page decoder. Loads the file's
-// bytes lazily on first call (bounded by inner.loadSem) and releases them
+// bytes lazily on first call (bounded by inner.loadGate) and releases them
 // once this slot's last row group has been processed. The decoded batch is
 // charged to the memory tracker until it leaves the scan source.
 func (inner *scanSourceInner) readRG(ctx context.Context, unit rgUnit) *batch.RecordBatch {
