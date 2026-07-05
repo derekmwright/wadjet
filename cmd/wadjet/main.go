@@ -92,6 +92,7 @@ var (
 	enableAlerts          bool
 	backgroundCompaction  bool
 	dataPlane             string
+	drainTimeout          time.Duration
 	dataPlaneAddr         string
 	coordDataPlane        string
 	localFastPathBytes    int64
@@ -147,6 +148,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&metricsAddr, "metrics-addr", ":9100", "Prometheus metrics listen address (worker mode)")
 	rootCmd.PersistentFlags().IntVar(&maxConcurrent, "max-concurrent", 4, "Maximum concurrent tasks per worker")
 	rootCmd.PersistentFlags().IntVar(&morselWorkers, "morsel-workers", 1, "Intra-fragment parallel pipeline consumers per task (morsel-driven execution, docs/design/morsel-execution.md). 1 = serial (default; kill switch), 0 = auto (width adapts to fragment input size and idle CPU tokens), N>1 = fixed width of N (bypasses the size gate; testing/benchmark knob).")
+	rootCmd.PersistentFlags().DurationVar(&drainTimeout, "drain-timeout", 0, "Bound on graceful worker drain (SIGTERM): time allowed for in-flight tasks to finish and pending stage-output uploads to flush before escalating to a hard stop. 0 = unbounded (the platform kill timeout, e.g. the Kubernetes termination grace period, is the backstop).")
 	rootCmd.PersistentFlags().StringVar(&dataPlane, "data-plane", "nats", "Worker↔coord data-plane transport: nats (default) or grpc. See project_split_plane_design_2026-05-20.")
 	rootCmd.PersistentFlags().StringVar(&dataPlaneAddr, "data-plane-addr", ":9091", "Data-plane gRPC listen address (coord/standalone)")
 	rootCmd.PersistentFlags().StringVar(&coordDataPlane, "coord-data-plane", "", "Coord's data-plane host:port (worker only; defaults to coord-host + 9091)")
@@ -849,6 +851,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		ClusterID:             clusterID,
 		MaxConcurrent:         maxConcurrent,
 		MorselWorkers:         morselWorkersConfig(morselWorkers),
+		DrainTimeout:          drainTimeout,
 		CacheBytes:            cacheBytes,
 		MemoryBudget:          memoryBudget,
 		SharedPoolBudget:      sharedPoolBudget,
@@ -1402,6 +1405,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		ClusterID:             clusterID,
 		MaxConcurrent:         maxConcurrent,
 		MorselWorkers:         morselWorkersConfig(morselWorkers),
+		DrainTimeout:          drainTimeout,
 		CacheBytes:            cacheBytes,
 		MemoryBudget:          memoryBudget,
 		SharedPoolBudget:      sharedPoolBudget,
@@ -1446,8 +1450,33 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 	m := metrics.New()
 	w.SetMetrics(m)
 
-	// Start /metrics HTTP endpoint for Prometheus scraping
+	// Start /metrics HTTP endpoint for Prometheus scraping, plus the
+	// Kubernetes lifecycle surface: liveness, readiness (false once
+	// draining, so the pod drops out of any Service while it finishes),
+	// and a POST /drain admin hook (preStop-hook alternative to SIGTERM).
 	metricsMux := http.NewServeMux()
+	metricsMux.HandleFunc("/healthz", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.WriteHeader(http.StatusOK)
+		rw.Write([]byte("ok"))
+	})
+	metricsMux.HandleFunc("/readyz", func(rw http.ResponseWriter, _ *http.Request) {
+		if w.Draining() {
+			rw.WriteHeader(http.StatusServiceUnavailable)
+			rw.Write([]byte("draining"))
+			return
+		}
+		rw.WriteHeader(http.StatusOK)
+		rw.Write([]byte("ok"))
+	})
+	metricsMux.HandleFunc("/drain", func(rw http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			rw.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.BeginDrain()
+		rw.WriteHeader(http.StatusAccepted)
+		rw.Write([]byte("draining"))
+	})
 	metricsMux.Handle("/metrics", m.Handler())
 	metricsMux.HandleFunc("/debug/pprof/", nethttppprof.Index)
 	metricsMux.HandleFunc("/debug/pprof/cmdline", nethttppprof.Cmdline)
@@ -1477,16 +1506,32 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		return fmt.Errorf("starting worker: %w", err)
 	}
 
-	// SIGQUIT triggers graceful drain: stop accepting new tasks, finish
-	// in-flight work, then exit. SIGINT/SIGTERM still do a hard stop.
-	drainCh := make(chan os.Signal, 1)
-	signal.Notify(drainCh, syscall.SIGQUIT)
+	// Signal contract for workers (Kubernetes-compatible):
+	//   SIGTERM, SIGQUIT  -> graceful drain: stop taking tasks, finish
+	//                        in-flight work, flush stage-output uploads,
+	//                        exit. K8s sends SIGTERM on pod termination;
+	//                        --drain-timeout (or the pod's grace period)
+	//                        bounds it.
+	//   SIGINT            -> hard stop (interactive Ctrl-C).
+	// The serve command's NotifyContext claimed SIGINT+SIGTERM for a hard
+	// cancel before we got here; detach both so SIGTERM cannot race into
+	// the hard path and cancel in-flight task contexts mid-drain.
+	signal.Reset(syscall.SIGINT, syscall.SIGTERM)
+	hardCh := make(chan os.Signal, 1)
+	signal.Notify(hardCh, syscall.SIGINT)
+	drainSigCh := make(chan os.Signal, 1)
+	signal.Notify(drainSigCh, syscall.SIGTERM, syscall.SIGQUIT)
 
 	select {
-	case <-ctx.Done():
+	case <-hardCh:
+		logger.Info("SIGINT received, stopping worker...")
 		w.Stop()
-	case <-drainCh:
-		logger.Info("SIGQUIT received, draining worker...")
+	case sig := <-drainSigCh:
+		logger.Info("drain signal received, draining worker...", "signal", sig.String())
+		w.Drain()
+	case <-w.DrainRequested():
+		// NATS drain subject (coordinator reap) or POST /drain.
+		logger.Info("drain requested via control plane, draining worker...")
 		w.Drain()
 	}
 	return nil

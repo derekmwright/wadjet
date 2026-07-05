@@ -1,0 +1,194 @@
+package worker
+
+import (
+	"context"
+	"log/slog"
+	"os"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
+)
+
+// TestUploadManagerFlush_WaitsForPendingUploads: Flush must block until
+// pending background uploads land (the graceful-drain durability handoff:
+// once the worker exits, consumers of its stage outputs have only the S3
+// copy). Contrast with Drain, which cancels.
+func TestUploadManagerFlush_WaitsForPendingUploads(t *testing.T) {
+	gate := &gatedStore{MemStore: objstore.NewMemStore(), gate: make(chan struct{})}
+	if err := gate.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	m := newUploadManager(gate, nil, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	src := writeTempFile(t, []byte("stage output bytes"))
+	m.StartTask("root-q", "task-1", "w-1", []uploadJob{{bucket: "b", key: "queries/root-q/out.wshf", srcPath: src}})
+
+	flushed := make(chan error, 1)
+	go func() { flushed <- m.Flush(context.Background()) }()
+
+	select {
+	case err := <-flushed:
+		t.Fatalf("Flush returned (%v) while the upload was still gated", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(gate.gate)
+	select {
+	case err := <-flushed:
+		if err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Flush did not return after the upload completed")
+	}
+	if _, _, err := gate.Get(context.Background(), "b", "queries/root-q/out.wshf"); err != nil {
+		t.Fatalf("uploaded object missing after Flush: %v", err)
+	}
+}
+
+// TestUploadManagerFlush_Timeout: an expired context aborts the wait with
+// ctx.Err() so Drain can escalate to the cancel path.
+func TestUploadManagerFlush_Timeout(t *testing.T) {
+	gate := &gatedStore{MemStore: objstore.NewMemStore(), gate: make(chan struct{})} // never opens
+	if err := gate.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	m := newUploadManager(gate, nil, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	src := writeTempFile(t, []byte("x"))
+	m.StartTask("root-q", "task-1", "w-1", []uploadJob{{bucket: "b", key: "k", srcPath: src}})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := m.Flush(ctx); err != context.DeadlineExceeded {
+		t.Fatalf("Flush = %v, want DeadlineExceeded", err)
+	}
+	m.Drain() // release the stuck job so the test goroutine can exit
+}
+
+func TestUploadManagerFlush_NilAndEmpty(t *testing.T) {
+	var m *uploadManager
+	if err := m.Flush(context.Background()); err != nil {
+		t.Fatalf("nil Flush: %v", err)
+	}
+	m2 := newUploadManager(objstore.NewMemStore(), nil, nil)
+	if err := m2.Flush(context.Background()); err != nil {
+		t.Fatalf("empty Flush: %v", err)
+	}
+}
+
+// TestWorkerDrain_CompletesWithBackgroundLoops is the regression test for
+// the drain deadlock: heartbeat-style background goroutines exit only on
+// context cancel, and the old single-WaitGroup Drain waited for them BEFORE
+// cancelling — so Drain never returned. With the wg/bgWG split, Drain must
+// (1) wait for in-flight task goroutines, (2) flush uploads, (3) cancel and
+// join the background group.
+func TestWorkerDrain_CompletesWithBackgroundLoops(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &Worker{
+		config:   Config{WorkerID: "drain-test"},
+		logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		drainCh:  make(chan struct{}),
+		cancel:   cancel,
+		executor: NewExecutor(store, NewLRUCache(1024), nil),
+	}
+
+	// Background loop: exits only on ctx cancel (the heartbeat shape).
+	bgExited := atomic.Bool{}
+	w.bgWG.Add(1)
+	go func() {
+		defer w.bgWG.Done()
+		<-ctx.Done()
+		bgExited.Store(true)
+	}()
+
+	// In-flight task: finishes on its own shortly after drain begins, and
+	// must NOT be aborted by drain (ctx must still be alive when it ends).
+	taskSawCancel := atomic.Bool{}
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		select {
+		case <-ctx.Done():
+			taskSawCancel.Store(true)
+		case <-time.After(150 * time.Millisecond):
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() { w.Drain(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain did not complete (background-loop deadlock)")
+	}
+	if taskSawCancel.Load() {
+		t.Fatal("in-flight task was cancelled during drain; drain must let tasks finish")
+	}
+	if !bgExited.Load() {
+		t.Fatal("background loop still running after Drain returned")
+	}
+	if !w.Draining() {
+		t.Fatal("Draining() must report true after Drain")
+	}
+}
+
+// TestWorkerDrain_TimeoutEscalatesToStop: with DrainTimeout set and a task
+// that never finishes, Drain must give up and hard-stop (cancel) instead of
+// hanging past the platform's kill window.
+func TestWorkerDrain_TimeoutEscalatesToStop(t *testing.T) {
+	store := objstore.NewMemStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &Worker{
+		config:   Config{WorkerID: "drain-timeout-test", DrainTimeout: 200 * time.Millisecond},
+		logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		drainCh:  make(chan struct{}),
+		cancel:   cancel,
+		executor: NewExecutor(store, NewLRUCache(1024), nil),
+	}
+	// Wedged task: only exits when ctx is cancelled (i.e. by the escalation).
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		<-ctx.Done()
+	}()
+
+	done := make(chan struct{})
+	go func() { w.Drain(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain did not escalate on timeout")
+	}
+}
+
+// TestWorkerBeginDrain_Idempotent: BeginDrain from multiple sources (signal,
+// NATS drain subject, /drain endpoint) must not panic on double-close and
+// must trip DrainRequested exactly once.
+func TestWorkerBeginDrain_Idempotent(t *testing.T) {
+	w := &Worker{
+		config:  Config{WorkerID: "idem"},
+		logger:  slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		drainCh: make(chan struct{}),
+	}
+	select {
+	case <-w.DrainRequested():
+		t.Fatal("DrainRequested fired before BeginDrain")
+	default:
+	}
+	w.BeginDrain()
+	w.BeginDrain()
+	select {
+	case <-w.DrainRequested():
+	default:
+		t.Fatal("DrainRequested not fired after BeginDrain")
+	}
+	if !w.Draining() {
+		t.Fatal("Draining() false after BeginDrain")
+	}
+}
