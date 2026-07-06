@@ -3898,7 +3898,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// 16GB lineitem hash table to 1.7GB orders hash table per worker.
 	rightEst := findScanRowEstimate(node.Children[1])
 	leftEst := findScanRowEstimate(node.Children[0])
-	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) &&
+	// A filtered semi/anti join must NOT swap: the RightSemi/RightAnti probe
+	// (markMatchedBuildEntries) marks every key-chain entry matched and never
+	// evaluates SemiAntiFilter, so the non-equality condition would silently
+	// vanish from the query — wrong results, not a performance trade.
+	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter == "" &&
 		rightEst > 0 && leftEst > 0 && rightEst > 3*leftEst {
 		// Swap: build the small outer table, probe with the large inner table
 		if joinType == exec.SemiJoin {
@@ -3926,16 +3930,30 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.SemiAntiKeyOnly = true
 	}
 
+	// Filtered semi/anti builds must store rows for probe-time SemiAntiFilter
+	// evaluation, but only the join keys + filter-referenced columns — narrow
+	// the stored batches at arrival (see HashJoin.BuildStoreCols; the post-
+	// build PruneBuildColumns below is a no-op for partition-on-arrival
+	// builds, i.e. for every spill-eligible build).
+	if (joinType == exec.SemiJoin || joinType == exec.AntiJoin) && node.JoinFilter != "" {
+		hj.BuildStoreCols = SemiAntiBuildStoreCols(hj.RightKeys, node.JoinFilter)
+	}
+
 	// Pass build-side row estimate to pre-allocate arena and hash table.
 	est := findScanRowEstimate(node.Children[1])
 	if est > 0 {
 		hj.BuildRowHint = est
 	}
 
-	// Determine if build should be deferred: large semi/anti key-only builds
-	// overlap with the early probe pipeline for better I/O utilization.
+	// Determine if build should be deferred: large semi/anti builds overlap
+	// with the early probe pipeline for better I/O utilization. Applies to
+	// key-only builds and to filtered builds (whose arrival-time projection
+	// keeps the deferred build's storage narrow); the deferred path's post-
+	// build FixKeyAssignment is safe for partitioned builds via the nil'd-
+	// entry guard, and PruneBuildColumns self-skips them.
 	const deferBuildThreshold int64 = 1_000_000
-	deferBuild := est > deferBuildThreshold && hj.SemiAntiKeyOnly
+	deferBuild := est > deferBuildThreshold &&
+		(hj.SemiAntiKeyOnly || len(hj.BuildStoreCols) > 0)
 
 	// Reverse bloom: for very large builds (>10M rows), run the probe side
 	// first, build a bloom from its join key values, then filter the build
@@ -7373,6 +7391,35 @@ func cleanExpr(s string) string {
 		return parts[1]
 	}
 	return s
+}
+
+// SemiAntiBuildStoreCols returns the build-side columns a filtered semi/anti
+// join must retain in stored build batches: the join keys (required to
+// re-index spilled partitions and to survive FixKeyAssignment's rebuild)
+// plus the JoinFilter's build-side columns. Returns nil when the filter is
+// empty — unfiltered semi/anti builds are key-only and store nothing. Shared
+// by the single-process planner and the worker fragment executor so both
+// paths narrow their builds identically.
+func SemiAntiBuildStoreCols(rightKeys []string, joinFilter string) []string {
+	if joinFilter == "" {
+		return nil
+	}
+	filterCols := extractFilterBuildColumns(joinFilter)
+	cols := make([]string, 0, len(rightKeys)+len(filterCols))
+	seen := make(map[string]bool, len(rightKeys)+len(filterCols))
+	for _, c := range rightKeys {
+		if !seen[c] {
+			seen[c] = true
+			cols = append(cols, c)
+		}
+	}
+	for _, c := range filterCols {
+		if !seen[c] {
+			seen[c] = true
+			cols = append(cols, c)
+		}
+	}
+	return cols
 }
 
 // extractFilterBuildColumns extracts the build-side column names from a

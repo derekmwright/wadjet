@@ -1624,6 +1624,12 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		hj.SemiAntiKeyOnly = spec.SemiAntiKeyOnly
 		if spec.JoinFilter != "" {
 			hj.SemiAntiFilter = physical.BuildSemiAntiFilter(spec.JoinFilter)
+			// Filtered semi/anti builds store only keys + filter columns —
+			// the worker has no post-build prune at all, so without this a
+			// broadcast lineitem build retains every scanned column.
+			if hj.JoinType == exec.SemiJoin || hj.JoinType == exec.AntiJoin {
+				hj.BuildStoreCols = physical.SemiAntiBuildStoreCols(spec.RightKeys, spec.JoinFilter)
+			}
 		}
 		if e.sharedSpill != nil {
 			// Wiring a Spill manager + tracker makes Build partition on arrival

@@ -39,6 +39,16 @@ func dedupSemiAntiBuildSide(n *Node) *Node {
 	default:
 		return n
 	}
+	// A filtered semi/anti join (non-equality correlated condition from
+	// decorrelated EXISTS) evaluates JoinFilter against build-side columns
+	// at probe time. Project(keys)→Distinct would drop those columns (the
+	// filter then resolves to nothing and rejects every row) and dedup on
+	// keys alone discards the duplicate rows the filter must see. Skip;
+	// the exec layer narrows filtered builds to keys + filter columns via
+	// HashJoin.BuildStoreCols instead.
+	if n.JoinFilter != "" {
+		return n
+	}
 	if len(n.Children) < 2 {
 		return n
 	}
