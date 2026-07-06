@@ -63,6 +63,21 @@ func TestAnalyzeTableSQL(t *testing.T) {
 		t.Errorf("id NDV = %d (ok=%v), want ~200 (HLL error bound)", stats["id"].NDV, ok)
 	}
 
+	// ANALYZE also persists the RG-metadata blob; scans now plan from it
+	// instead of reading parquet footers. Queries — including one whose
+	// predicate exercises row-group pruning against blob stats — must
+	// return identical results through the fast path.
+	if m, err := db.Catalog().TableRGMeta(ctx, "metrics"); err != nil || len(m) == 0 {
+		t.Fatalf("TableRGMeta after ANALYZE: %d files (err %v), want >0", len(m), err)
+	}
+	res, err = db.Query(ctx, "SELECT count(*) AS n FROM metrics WHERE id >= 150")
+	if err != nil {
+		t.Fatalf("post-ANALYZE pruning query: %v", err)
+	}
+	if n := res.Rows[0]["n"]; n != int64(50) {
+		t.Errorf("post-ANALYZE count = %v, want 50", n)
+	}
+
 	// Bareword form (no TABLE keyword) also works.
 	if _, err := db.Query(ctx, "ANALYZE metrics"); err != nil {
 		t.Fatalf("ANALYZE metrics (bareword): %v", err)
