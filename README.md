@@ -170,29 +170,30 @@ row counts on all 22 queries over the same S3 Parquet data.
 Both engines on the same `c7g.4xlarge` (16 vCPU / 32 GB), reading the
 same S3 Parquet data (600 lineitem chunk files, us-east-2, same run,
 cold — no page cache, every byte fetched from S3). DuckDB v1.5.4 via
-`httpfs`. 2026-07-05, reproducible with the command below.
+`httpfs`. 2026-07-06, reproducible with the command below.
 
 | Query | Wadjet | DuckDB | | Query | Wadjet | DuckDB |
 |---|---:|---:|---|---|---:|---:|
-| Q01 | 11.4s | 7.3s | | Q12 | 20.9s | 12.7s |
-| Q02 | 8.9s | 1.9s | | Q13 | 16.4s | 1.5s |
-| Q03 | 23.7s | 10.3s | | Q14 | 10.2s | 8.7s |
-| Q04 | 22.2s | 7.7s | | Q15 | 9.3s | 8.4s |
-| Q05 | 24.1s | 9.8s | | Q16 | 8.6s | 0.9s |
-| Q06 | **9.0s** | 10.2s | | Q17 | 11.4s | 6.9s |
-| Q07 | 20.5s | 11.4s | | Q18 | 30.5s | 7.5s |
-| Q08 | 20.3s | 11.6s | | Q19 | 10.3s | 10.4s |
-| Q09 | 20.8s | 12.4s | | Q20 | 19.3s | 11.0s |
-| Q10 | 23.1s | 9.6s | | Q21 | 88.0s | 9.7s |
-| Q11 | 23.7s | 1.1s | | Q22 | 16.5s | 0.8s |
+| Q01 | 9.0s | 7.3s | | Q12 | 18.1s | 13.0s |
+| Q02 | 8.8s | 2.3s | | Q13 | 16.1s | 1.6s |
+| Q03 | 20.4s | 10.9s | | Q14 | **7.0s** | 8.6s |
+| Q04 | 18.9s | 7.3s | | Q15 | **6.1s** | 8.6s |
+| Q05 | 21.0s | 9.9s | | Q16 | 8.4s | 0.9s |
+| Q06 | **5.9s** | 10.2s | | Q17 | 8.6s | 6.8s |
+| Q07 | 17.6s | 11.8s | | Q18 | 30.9s | 7.5s |
+| Q08 | 17.0s | 12.1s | | Q19 | **6.9s** | 10.5s |
+| Q09 | 17.7s | 12.4s | | Q20 | 16.1s | 10.9s |
+| Q10 | 19.9s | 9.7s | | Q21 | 23.3s | 9.7s |
+| Q11 | 23.3s | 1.2s | | Q22 | 16.1s | 0.9s |
 
-**Suite total: Wadjet 7m29s, DuckDB 2m52s.** Wadjet wins the pure-scan
-query (Q06) and ties Q19; DuckDB's decade of optimizer and operator
-tuning still leads on join-heavy and tiny-result queries. The honest
-summary: on cold object storage Wadjet is currently ~2.6× DuckDB
-overall, closing from ~7× in a single release cycle, with identical
-results on every query. The benchmark harness (`deploy/benchmark/`)
-reproduces every configuration.
+**Suite total: Wadjet 5m37s, DuckDB 2m54s.** Wadjet now wins the four
+scan-dominated queries (Q06, Q14, Q15, Q19); DuckDB's decade of
+optimizer and operator tuning still leads on join-heavy and
+tiny-result queries. The honest summary: on cold object storage Wadjet
+is currently ~1.9× DuckDB overall — from ~7× two release cycles ago
+and 2.6× last cycle — with identical results on every query. The
+benchmark harness (`deploy/benchmark/`) reproduces every
+configuration.
 
 ```bash
 # SF0.01 correctness (CI, ~5s)
