@@ -7,6 +7,7 @@ import (
 	"io"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -156,6 +157,10 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 		analyzed++
 	}
 
+	// Bump the manifest version: ANALYZE changed its content (sketch keys,
+	// cleared inline bytes), and cross-process consumers key derived-stats
+	// caches on UpdatedAt.
+	manifest.UpdatedAt = time.Now().UTC()
 	c.invalidateManifestCache(name)
 	if err := c.putJSON(c.key("manifest."+name), manifest); err != nil {
 		return analyzed, fmt.Errorf("analyze %s: persist manifest: %w", name, err)

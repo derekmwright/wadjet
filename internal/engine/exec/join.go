@@ -1487,6 +1487,16 @@ func bloomHashBytes(key []byte) uint64 {
 // the hash index is built we only need columns referenced by SemiAntiFilter.
 // If keepCols is empty and no SemiAntiFilter is set, buildBatches are cleared.
 func (h *HashJoin) PruneBuildColumns(keepCols []string) {
+	// Partition-on-arrival builds are incompatible with pruning: evicted
+	// partitions nil their buildBatches entries (dereferencing them here
+	// was the SF10 standalone Q21 SIGSEGV, 2026-07-05), and a partition
+	// restored from disk carries the UNPRUNED schema — pruning
+	// buildSchema would desync it from the spilled data. The prune is
+	// purely a memory optimization and the spill machinery already bounds
+	// build memory, so skip it. Mirrors consolidateBuild's guard.
+	if h.spillState != nil {
+		return
+	}
 	if len(h.buildBatches) == 0 {
 		return
 	}

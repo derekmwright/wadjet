@@ -7451,10 +7451,10 @@ type scanSourceInner struct {
 	rowLimit       int64                     // >0: lazy file downloading (LIMIT pushdown)
 
 	// row-group-level parallel scan
-	rgUnits   []rgUnit      // flat list of row group work units
-	rgIdx     int64         // atomic index for parallel RG workers
-	useNative bool          // true if native page decoder can be used (no Decimal/Array/Map)
-	loadSem   chan struct{} // bounded semaphore for in-flight file LOADs (data, not metadata)
+	rgUnits   []rgUnit  // flat list of row group work units
+	rgIdx     int64     // atomic index for parallel RG workers
+	useNative bool      // true if native page decoder can be used (no Decimal/Array/Map)
+	loadGate  *loadGate // byte-budgeted admission for in-flight file LOADs (data, not metadata)
 
 	// batch pooling — reuse batch allocations across row groups
 	pool *batch.BatchPool
@@ -7533,7 +7533,7 @@ func (inner *scanSourceInner) releaseScanBatch(b *batch.RecordBatch) {
 }
 
 // drainSlotCharges releases the lazy fileSlot state of every slot whose row
-// groups were not fully consumed — buffers, loadSem slots and shared-tracker
+// groups were not fully consumed — buffers, load-gate bytes and shared-tracker
 // charges abandoned by an early Close (LIMIT, cancel, error). Must run after
 // wg.Wait (no rg worker may still be loading) and BEFORE releasePooledBufs,
 // which nils rgUnits (the only reference to the slots).
