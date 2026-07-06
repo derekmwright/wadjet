@@ -219,10 +219,23 @@ wadjet serve --mode=worker         # Stateless task executor, scale horizontally
 
 Wadjet includes a native [Model Context Protocol](https://modelcontextprotocol.io/) server, enabling AI agents to discover tables, inspect schemas, and execute SQL queries.
 
+The MCP server communicates over **stdio only** — there is no network listener.
+
 ```bash
-# Start MCP server on stdio (for Claude Desktop, Claude Code, Cursor)
-wadjet mcp --endpoint localhost:9000
+# Local/dev: unauthenticated, direct-to-store (no ABAC enforced)
+wadjet mcp
+
+# Secured: enforce row/column ABAC under an authenticated identity
+wadjet mcp --config /etc/wadjet/config.yaml --api-key "$WADJET_MCP_API_KEY"
 ```
+
+**Security:** when `--config` supplies an auth block, MCP enforces the same
+ABAC row filters, column masks, and table-access rules as the pgwire and gRPC
+paths, under the identity resolved from `--api-key` (or `WADJET_MCP_API_KEY`).
+If auth is configured but no valid credential is supplied, the server refuses
+to start (fail closed). Without a config, MCP runs unauthenticated against a
+direct-to-store DB — appropriate only where the operator already holds the
+store credentials.
 
 Configure in Claude Desktop (`claude_desktop_config.json`):
 
@@ -231,7 +244,7 @@ Configure in Claude Desktop (`claude_desktop_config.json`):
   "mcpServers": {
     "wadjet": {
       "command": "wadjet",
-      "args": ["mcp", "--endpoint", "localhost:9000"]
+      "args": ["mcp", "--config", "/etc/wadjet/config.yaml", "--api-key", "..."]
     }
   }
 }
