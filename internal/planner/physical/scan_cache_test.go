@@ -76,8 +76,10 @@ func drainSource(t *testing.T, src *catalogScanSource) []*batch.RecordBatch {
 // consumers' columns, but each consumer must receive only its OWN
 // columns — a hash-join build side stores its input batches verbatim,
 // so leaking the union into consumers multiplies build memory and spill
-// bytes (the Q21 semi/anti churn). Also verifies the cache pin is
-// reserved on the memory tracker and released by releaseScanCache.
+// bytes (the Q21 semi/anti churn). Also verifies the cache does NOT
+// reserve its (consumer-shared) vectors on the memory tracker — the
+// 2026-07-06 double-charge stalled SF10 Q21 6× — and that
+// releaseScanCache drops the batches.
 func TestScanCachePerConsumerProjection(t *testing.T) {
 	cat := scanCacheFixture(t, 100)
 	tracker := memory.NewTracker("scan-cache-test", 1<<30)
@@ -106,7 +108,10 @@ func TestScanCachePerConsumerProjection(t *testing.T) {
 		t.Fatalf("consumer A rows = %d, want 100", rowsA)
 	}
 
-	// The cache itself holds the union and is charged to the tracker.
+	// The cache itself holds the union. Its vectors are shared with
+	// consumers (builds charge them via hashBuildBytes), so the cache
+	// must NOT add a second charge — the ledger would exceed RSS and
+	// stall every append in relief waits.
 	if len(cache.batches) == 0 {
 		t.Fatal("cache not populated")
 	}
@@ -115,8 +120,8 @@ func TestScanCachePerConsumerProjection(t *testing.T) {
 			t.Fatalf("cache schema = %v, want union [id id2]", cb.Schema)
 		}
 	}
-	if tracker.Used() <= 0 {
-		t.Fatal("cache pin not reserved on the memory tracker")
+	if used := tracker.Used(); used != 0 {
+		t.Fatalf("cache double-charged %d bytes to the tracker; shared vectors must not be re-reserved", used)
 	}
 
 	// Consumer B replays: receives only "id2", values intact.
@@ -144,11 +149,11 @@ func TestScanCachePerConsumerProjection(t *testing.T) {
 		t.Fatalf("consumer B rows = %d, want 100", rowsB)
 	}
 
-	// releaseScanCache returns the reservation in full.
+	// releaseScanCache drops the cached batches and the map.
 	p := &Planner{scanCache: map[string]*scanCached{"items": cache}}
 	p.releaseScanCache()
-	if used := tracker.Used(); used != 0 {
-		t.Fatalf("tracker used = %d after releaseScanCache, want 0", used)
+	if cache.batches != nil {
+		t.Fatal("cached batches not dropped by releaseScanCache")
 	}
 	if p.scanCache != nil {
 		t.Fatal("scanCache not cleared")

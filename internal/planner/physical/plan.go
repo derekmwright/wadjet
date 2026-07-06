@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/citc-tech/wadjet/internal/config"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -462,11 +461,11 @@ type cteMaterialized struct {
 // the 2 columns they need, and partition-on-arrival evictions spilled
 // the dead columns to disk (the SF10 cold-S3 Q21 churn, 2026-07-06).
 //
-// The cache's heap pin is reserved on the query's memory tracker as it
-// grows (ReserveOrForce — asks operators to spill, never fails) and
-// released by Planner.releaseScanCache. Untracked, the pin was a
-// multi-GB accounting hole that made every spill decision downstream
-// operate on a fictional budget.
+// The cache's vectors are shared with its consumers and are therefore
+// NOT charged to the memory tracker here — see the comment at the
+// append site in catalogScanSource.Next for the 2026-07-06 stall
+// incident that rule prevents. Batches are dropped by
+// Planner.releaseScanCache on every Plan exit path.
 type scanCached struct {
 	mu      sync.Mutex
 	batches []*batch.RecordBatch
@@ -476,10 +475,6 @@ type scanCached struct {
 	// unionCols is the union of every consumer's RequiredColumns, in
 	// first-seen order. nil = full schema (some consumer needs all).
 	unionCols []string
-	// tracker/trackedBytes: the cache's reservation on the query memory
-	// tracker. Written under mu; released by Planner.releaseScanCache.
-	tracker      *memory.Tracker
-	trackedBytes int64
 }
 
 // NewPlanner creates a new physical planner.
@@ -931,20 +926,12 @@ func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string) (*exec
 	return coll, schema, nil
 }
 
-// releaseScanCache drops every duplicate-scan cache entry and returns
-// its memory-tracker reservation. Idempotent; wired into
+// releaseScanCache drops every duplicate-scan cache entry so cached
+// batches don't outlive their query. Idempotent; wired into
 // PhysicalPlan.Cleanup, Plan's error paths, and Plan's per-query reset.
-// On the shared (worker-injected) tracker path a missed release would
-// be a permanent phantom reservation, so every Plan exit must pass
-// through here.
 func (p *Planner) releaseScanCache() {
 	for _, c := range p.scanCache {
 		c.mu.Lock()
-		if c.tracker != nil && c.trackedBytes > 0 {
-			c.tracker.Release(c.trackedBytes)
-		}
-		c.tracker = nil
-		c.trackedBytes = 0
 		c.batches = nil
 		c.mu.Unlock()
 	}
@@ -6313,30 +6300,25 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 			Sel:     b.Sel,
 		}
 		copy(cached.Columns, b.Columns)
+		// NOT charged to the memory tracker, deliberately. The cache's
+		// vectors are SHARED with its consumers — hash-join builds
+		// Reserve hashBuildBytes for these same vectors, and the scan
+		// source charges them transiently in flight. Reserving them
+		// again here (tried 2026-07-06) triple-counted the same physical
+		// memory: the ledger hit the budget while RSS was fine, every
+		// append stalled in ReserveOrForce's relief wait, and the forced
+		// build spills turned SF10 Q21 from 1m28s into 8m35s on EC2
+		// (CPU profile: 4.76% utilization — pure stall). Honest cache
+		// accounting needs the cache to OWN spillable bytes
+		// (SpillableBatchCollector, like the CTE cache) — not a second
+		// charge for memory the ledger already sees.
 		s.cache.batches = append(s.cache.batches, cached)
-		// Reserve the pinned bytes on the query tracker so downstream
-		// spill decisions see the cache instead of discovering it as RSS
-		// drift. ReserveOrForce asks operators for relief and never
-		// fails; released by Planner.releaseScanCache.
-		if s.memTracker != nil {
-			n := cached.MemBytes()
-			if n > 0 {
-				memory.ReserveOrForce(ctx, s.memTracker, s.spillMgr, n, scanCacheReserveWait, "scan cache")
-				s.cache.tracker = s.memTracker
-				s.cache.trackedBytes += n
-			}
-		}
 		return s.projectForConsumer(b), nil
 	}
 
 	// No cache: inner.Next() is thread-safe for channel-based scan sources.
 	return s.inner.Next(ctx)
 }
-
-// scanCacheReserveWait bounds how long a cache append waits for a clean
-// reservation after asking operators for relief. Past it the reservation
-// is forced — population never fails or deadlocks on the budget.
-const scanCacheReserveWait = 2 * time.Second
 
 // projectForConsumer narrows a union-column cache batch down to this
 // consumer's RequiredColumns. Shallow: shares vectors, no copies. The
