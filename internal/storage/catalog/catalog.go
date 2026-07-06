@@ -56,6 +56,14 @@ type Catalog struct {
 	// invalidate when ingestion bumps the manifest's UpdatedAt.
 	aggStatsMu    sync.Mutex
 	aggStatsCache map[string]aggStatsCacheEntry
+
+	// rgMetaCache memoizes the decoded per-table RG-metadata blob (see
+	// rgmeta.go), keyed by the same manifest content version as
+	// aggStatsCache. Without it every scan re-fetches and re-decodes the
+	// blob; with it the blob costs one store GET per (table, manifest
+	// version) per process.
+	rgMetaMu    sync.Mutex
+	rgMetaCache map[string]rgMetaCacheEntry
 }
 
 // aggStatsCacheEntry is a memoized AggregateColumnStats result. The stats
@@ -90,6 +98,13 @@ type PartitionManifest struct {
 	Partitions    []PartitionEntry `json:"partitions"`
 	DeleteMarkers []DeleteMarker   `json:"delete_markers,omitempty"` // merge-on-read deletes
 	UpdatedAt     time.Time        `json:"updated_at"`
+	// RGMetaKey points to the table's row-group-metadata blob in the
+	// object store (see rgmeta.go), written by AnalyzeTable. Scans use
+	// it to enumerate and prune row groups without reading any parquet
+	// footers. Files added after the blob was written simply aren't in
+	// it and fall back to footer reads — the key stays valid across
+	// ingest. Empty until the table is first analyzed.
+	RGMetaKey string `json:"rg_meta_key,omitempty"`
 }
 
 // DeleteMarker records rows to skip during scan (merge-on-read).
@@ -1111,6 +1126,9 @@ func (c *Catalog) invalidateManifestCache(tableName string) {
 	c.aggStatsMu.Lock()
 	delete(c.aggStatsCache, tableName)
 	c.aggStatsMu.Unlock()
+	c.rgMetaMu.Lock()
+	delete(c.rgMetaCache, tableName)
+	c.rgMetaMu.Unlock()
 }
 
 // key returns a cluster-prefixed KV key.

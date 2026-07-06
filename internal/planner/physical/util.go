@@ -306,10 +306,10 @@ type rgUnit struct {
 }
 
 // fileSlot owns the lazy lifecycle of one parquet file's bytes during a
-// row-group-parallel scan. The metadata (footer) is loaded eagerly during
-// buildRGUnits so the planner can apply pruning across all files; the row
-// group bytes are loaded on first read and released after the last row
-// group from the file has been consumed.
+// row-group-parallel scan. Row-group metadata for pruning comes from the
+// catalog blob or a footer read during buildRGUnits (held there, not on
+// the slot); the row group bytes are loaded on first read and released
+// after the last row group from the file has been consumed.
 type fileSlot struct {
 	entry        catalog.FileEntry
 	mu           sync.Mutex
@@ -317,7 +317,6 @@ type fileSlot struct {
 	loadErr      error
 	reader       *parquet.Reader     // full reader (data + metadata) once loaded
 	nativeReader *parquet.FileReader // alias of reader.FileReader()
-	metaReader   *parquet.FileReader // metadata-only — used during pruning before any rg load
 	dataBuf      []byte              // pooled buffer holding the file bytes; returned to pool on releaseRG
 	chargedBytes int64               // bytes reserved on inner.memTracker for dataBuf; released with it
 	gateBytes    int64               // bytes admitted on inner.loadGate; released with the buffer
@@ -419,8 +418,6 @@ func (s *fileSlot) ensureLoaded(inner *scanSourceInner, ctx context.Context) (*p
 	// which defeated the lazy loader's bounded-in-flight design — buffers
 	// stayed live for the entire scan even after their slot was released.
 	s.dataBuf = data
-	// metaReader is no longer needed once the full reader is in place.
-	s.metaReader = nil
 	return s.nativeReader, nil
 }
 
@@ -485,7 +482,6 @@ func (s *fileSlot) drainAbandoned(inner *scanSourceInner) {
 	s.mu.Lock()
 	s.reader = nil
 	s.nativeReader = nil
-	s.metaReader = nil
 	buf := s.dataBuf
 	s.dataBuf = nil
 	s.releaseCharge(inner)
@@ -507,11 +503,16 @@ type prefetchResult struct {
 }
 
 // buildRGUnits enumerates row groups from every file in the scan WITHOUT
-// loading the file bytes upfront. For each file it does one footer-sized
-// range read (typically a few KB) to obtain the metadata, applies
-// predicate / bloom / dynamic-range pruning across the row groups using
-// only the footer's column statistics, and emits an rgUnit per surviving
-// row group that points at a lazy fileSlot.
+// loading the file bytes upfront. Row-group metadata (row counts + column
+// stats for pruning) comes from the catalog's persisted RG-metadata blob
+// when the table has one (Catalog.TableRGMeta — one cached GET per table
+// per manifest version); files not covered by the blob fall back to one
+// footer-sized range read each. Before the blob existed the footer pass
+// was a per-query barrier: 600 S3 round-trips per lineitem scan at SF10,
+// ~2-5s of metadata latency before any data download, on every query.
+// Predicate / bloom / dynamic-range pruning is applied across the row
+// groups and an rgUnit is emitted per survivor, pointing at a lazy
+// fileSlot.
 //
 // The slot's bytes are loaded on first read by the rg worker pool and
 // released as soon as that file's last row group has been consumed (see
@@ -545,94 +546,119 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 	}
 	inner.loadGate = newLoadGate(loadBudget, loadGateMaxLanes)
 
+	// Catalog-persisted row-group metadata. Best-effort: nil on any
+	// error, and files missing from the map take the footer-read path.
+	var rgMeta map[string][]parquet.RowGroupStats
+	if inner.cat != nil {
+		rgMeta, _ = inner.cat.TableRGMeta(ctx, inner.tableName)
+	}
+
 	slots := make([]*fileSlot, len(inner.files))
+	fileRGStats := make([][]parquet.RowGroupStats, len(inner.files))
+	var footerFiles []int // indices into inner.files needing a footer read
+	for i, entry := range inner.files {
+		if gs, ok := rgMeta[entry.Path]; ok {
+			slots[i] = &fileSlot{entry: entry}
+			fileRGStats[i] = gs
+		} else {
+			footerFiles = append(footerFiles, i)
+		}
+	}
+
 	var failedFiles atomic.Int64
 	var firstErr atomic.Value // stores first error for diagnostics
-	var metaWg sync.WaitGroup
-	var metaIdx int64
 
-	// Read each file's footer concurrently. A footer is a few KB so this
-	// stays cheap even at SF1000. We use GetReaderAt when available so the
-	// store can issue a range request rather than downloading the full file.
-	type readerAtStore interface {
-		GetReaderAt(ctx context.Context, bucket, key string) (objstore.ReaderAtCloser, int64, error)
-	}
-	metaWorkers := runtime.NumCPU()
-	if metaWorkers > len(inner.files) {
-		metaWorkers = len(inner.files)
-	}
-	if metaWorkers < 1 {
-		metaWorkers = 1
-	}
+	if len(footerFiles) > 0 {
+		var metaWg sync.WaitGroup
+		var metaIdx int64
 
-	metaWg.Add(metaWorkers)
-	for i := 0; i < metaWorkers; i++ {
-		go func() {
-			defer metaWg.Done()
-			for {
-				idx := int(atomic.AddInt64(&metaIdx, 1) - 1)
-				if idx >= len(inner.files) {
-					return
-				}
-				if ctx.Err() != nil {
-					return
-				}
-				entry := inner.files[idx]
+		// Read each uncovered file's footer concurrently. A footer is a
+		// few KB so this stays cheap even at SF1000. We use GetReaderAt
+		// when available so the store can issue a range request rather
+		// than downloading the full file.
+		type readerAtStore interface {
+			GetReaderAt(ctx context.Context, bucket, key string) (objstore.ReaderAtCloser, int64, error)
+		}
+		metaWorkers := runtime.NumCPU()
+		if metaWorkers > len(footerFiles) {
+			metaWorkers = len(footerFiles)
+		}
+		if metaWorkers < 1 {
+			metaWorkers = 1
+		}
 
-				var meta *parquet.FileReader
-				if ras, ok := inner.cat.Store().(readerAtStore); ok {
-					ra, sz, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), entry.Path)
-					if err == nil {
-						meta, err = parquet.OpenFileReaderMetadata(ra, sz)
-						ra.Close()
-						if err != nil {
+		metaWg.Add(metaWorkers)
+		for i := 0; i < metaWorkers; i++ {
+			go func() {
+				defer metaWg.Done()
+				for {
+					n := int(atomic.AddInt64(&metaIdx, 1) - 1)
+					if n >= len(footerFiles) {
+						return
+					}
+					if ctx.Err() != nil {
+						return
+					}
+					idx := footerFiles[n]
+					entry := inner.files[idx]
+
+					var meta *parquet.FileReader
+					if ras, ok := inner.cat.Store().(readerAtStore); ok {
+						ra, sz, err := ras.GetReaderAt(ctx, inner.cat.Bucket(), entry.Path)
+						if err == nil {
+							meta, err = parquet.OpenFileReaderMetadata(ra, sz)
+							ra.Close()
+							if err != nil {
+								if failedFiles.Add(1) == 1 {
+									firstErr.Store(fmt.Errorf("metadata %s: %w", entry.Path, err))
+								}
+								continue
+							}
+						} else {
 							if failedFiles.Add(1) == 1 {
-								firstErr.Store(fmt.Errorf("metadata %s: %w", entry.Path, err))
+								firstErr.Store(fmt.Errorf("get metadata %s: %w", entry.Path, err))
 							}
 							continue
 						}
 					} else {
-						if failedFiles.Add(1) == 1 {
-							firstErr.Store(fmt.Errorf("get metadata %s: %w", entry.Path, err))
+						// Fallback for stores without ReaderAt: full Get + bytes reader.
+						rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
+						if err != nil {
+							if failedFiles.Add(1) == 1 {
+								firstErr.Store(fmt.Errorf("get %s: %w", entry.Path, err))
+							}
+							continue
 						}
-						continue
-					}
-				} else {
-					// Fallback for stores without ReaderAt: full Get + bytes reader.
-					rc, _, err := inner.cat.Store().Get(ctx, inner.cat.Bucket(), entry.Path)
-					if err != nil {
-						if failedFiles.Add(1) == 1 {
-							firstErr.Store(fmt.Errorf("get %s: %w", entry.Path, err))
+						data, err := readAllSized(rc, entry.SizeBytes, true)
+						rc.Close()
+						if err != nil {
+							if failedFiles.Add(1) == 1 {
+								firstErr.Store(fmt.Errorf("read %s: %w", entry.Path, err))
+							}
+							continue
 						}
-						continue
-					}
-					data, err := readAllSized(rc, entry.SizeBytes, true)
-					rc.Close()
-					if err != nil {
-						if failedFiles.Add(1) == 1 {
-							firstErr.Store(fmt.Errorf("read %s: %w", entry.Path, err))
+						reader, err := parquet.NewReaderFromBytes(data)
+						if err != nil {
+							if failedFiles.Add(1) == 1 {
+								firstErr.Store(fmt.Errorf("parquet %s (%d bytes): %w", entry.Path, len(data), err))
+							}
+							continue
 						}
-						continue
+						inner.trackPooledBuf(data)
+						meta = reader.FileReader()
 					}
-					reader, err := parquet.NewReaderFromBytes(data)
-					if err != nil {
-						if failedFiles.Add(1) == 1 {
-							firstErr.Store(fmt.Errorf("parquet %s (%d bytes): %w", entry.Path, len(data), err))
-						}
-						continue
-					}
-					inner.trackPooledBuf(data)
-					meta = reader.FileReader()
-				}
 
-				slots[idx] = &fileSlot{
-					entry:      entry,
-					metaReader: meta,
+					stats := make([]parquet.RowGroupStats, meta.NumRowGroups())
+					for rg := range stats {
+						stats[rg] = meta.RowGroupStats(rg)
+					}
+					slots[idx] = &fileSlot{entry: entry}
+					fileRGStats[idx] = stats
 				}
-			}
-		}()
+			}()
+		}
+		metaWg.Wait()
 	}
-	metaWg.Wait()
 
 	if failed := failedFiles.Load(); failed > 0 {
 		inner.failedFiles = int(failed)
@@ -641,20 +667,17 @@ func (inner *scanSourceInner) buildRGUnits(ctx context.Context) {
 		}
 	}
 
-	// Enumerate row groups from each file's metadata reader, applying
-	// pruning. Surviving rgUnits hold the slot pointer; the file bytes
-	// are loaded lazily on first rg read.
-	for _, slot := range slots {
-		if slot == nil || slot.metaReader == nil {
+	// Enumerate row groups from each file's metadata, applying pruning.
+	// Surviving rgUnits hold the slot pointer; the file bytes are loaded
+	// lazily on first rg read.
+	for si, slot := range slots {
+		if slot == nil {
 			continue
 		}
-		numRGs := slot.metaReader.NumRowGroups()
-
 		var rowOffset int64
 		var keptInFile int64
-		for rgIdx := 0; rgIdx < numRGs; rgIdx++ {
-			rgNumRows := slot.metaReader.RowGroupNumRows(rgIdx)
-			stats := slot.metaReader.RowGroupStats(rgIdx)
+		for rgIdx, stats := range fileRGStats[si] {
+			rgNumRows := stats.NumRows
 			pruned := false
 
 			// Predicate-based row group pruning

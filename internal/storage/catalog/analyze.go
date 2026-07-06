@@ -115,12 +115,25 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 	}()
 
 	analyzed := 0
+	rgMetaFiles := make([]FileRGMeta, 0, len(jobs))
 	for r := range resCh {
 		if r.err != nil {
 			return analyzed, fmt.Errorf("analyze %s: file %s: %w", name, manifest.Partitions[r.pi].Files[r.fi].Path, r.err)
 		}
 		sk := r.sketches
-		if sk == nil || len(sk.hlls) == 0 {
+		if sk == nil {
+			continue
+		}
+		// Row-group metadata is captured even for files with no
+		// sketch-supported columns — the scan-side pruning fast path
+		// needs every file covered or it falls back to a footer read.
+		if len(sk.rgStats) > 0 {
+			rgMetaFiles = append(rgMetaFiles, FileRGMeta{
+				Path:   manifest.Partitions[r.pi].Files[r.fi].Path,
+				Groups: sk.rgStats,
+			})
+		}
+		if len(sk.hlls) == 0 {
 			continue
 		}
 		f := manifest.Partitions[r.pi].Files[r.fi]
@@ -157,6 +170,18 @@ func (c *Catalog) AnalyzeTable(ctx context.Context, name string) (int, error) {
 		analyzed++
 	}
 
+	// Persist the row-group metadata blob BEFORE the manifest so any
+	// reader that sees the new RGMetaKey finds the blob present. (The
+	// reverse race — old manifest, new blob — is safe by construction:
+	// blob entries are keyed by immutable file paths.)
+	if len(rgMetaFiles) > 0 {
+		key, err := c.PutTableRGMeta(ctx, name, rgMetaFiles)
+		if err != nil {
+			return analyzed, fmt.Errorf("analyze %s: %w", name, err)
+		}
+		manifest.RGMetaKey = key
+	}
+
 	// Bump the manifest version: ANALYZE changed its content (sketch keys,
 	// cleared inline bytes), and cross-process consumers key derived-stats
 	// caches on UpdatedAt.
@@ -174,6 +199,11 @@ type fileColumnSketches struct {
 	hlls     map[string]*HLL
 	samplers map[string]*ReservoirSampler
 	colTypes map[string]parquet.TypeID
+	// rgStats is the file's per-row-group footer metadata (row counts +
+	// column min/max/null), captured for the table RG-metadata blob so
+	// scans can enumerate and prune row groups without re-reading
+	// footers over the network (see rgmeta.go).
+	rgStats []parquet.RowGroupStats
 }
 
 // computeFileSketches reads a parquet file's data and builds per-column
@@ -215,10 +245,12 @@ func computeFileSketches(ctx context.Context, store objstore.Store, bucket, path
 	}
 
 	nrg := reader.NumRowGroups()
+	out.rgStats = make([]parquet.RowGroupStats, nrg)
 	for rg := 0; rg < nrg; rg++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		out.rgStats[rg] = reader.RowGroupStats(rg)
 		rows, err := reader.ReadRowGroup(rg, nil)
 		if err != nil {
 			return nil, fmt.Errorf("row group %d: %w", rg, err)
