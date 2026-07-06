@@ -2127,7 +2127,17 @@ func tryDecorrelateExists(exists *plansql.ExistsNode, outerTables map[string]boo
 			if cmp.Op == "=" {
 				eqKeys = append(eqKeys, outerCol+" = "+innerCol)
 			} else {
-				filterConds = append(filterConds, outerCol+" "+cmp.Op+" "+innerCol)
+				// JoinFilter convention is "probe(outer) OP build(inner)".
+				// extractCorrelatedCols returns (outer, inner) regardless of
+				// which side of the comparison each was written on, so when
+				// the OUTER column was on the RIGHT (e.g. "i.date > o.date"),
+				// the operator must flip ("o.date < i.date") to preserve the
+				// comparison's meaning.
+				op := cmp.Op
+				if _, leftIsOuter := getColRefInfo(cmp.Left, outerTables, innerTables, outerColMap); !leftIsOuter {
+					op = flipCmpOp(op)
+				}
+				filterConds = append(filterConds, outerCol+" "+op+" "+innerCol)
 			}
 		} else if hasInner {
 			innerFilterNodes = append(innerFilterNodes, node)
@@ -2328,6 +2338,23 @@ func nodeTableRefs(node plansql.Node, outerTables, innerTables map[string]bool, 
 // extractCorrelatedCols extracts the outer and inner column names from a
 // comparison expression between outer and inner tables.
 // Returns the unqualified column names (outer, inner) and ok=true if extraction succeeded.
+// flipCmpOp mirrors a comparison operator for operand-order reversal:
+// a OP b ⇔ b flip(OP) a. Equality and inequality are symmetric.
+func flipCmpOp(op string) string {
+	switch op {
+	case ">":
+		return "<"
+	case "<":
+		return ">"
+	case ">=":
+		return "<="
+	case "<=":
+		return ">="
+	default: // =, !=, <> are symmetric
+		return op
+	}
+}
+
 func extractCorrelatedCols(cmp *plansql.CmpExpr, outerTables, innerTables map[string]bool, outerColMap map[string]string) (outerCol, innerCol string, ok bool) {
 	leftCol, leftIsOuter := getColRefInfo(cmp.Left, outerTables, innerTables, outerColMap)
 	rightCol, rightIsOuter := getColRefInfo(cmp.Right, outerTables, innerTables, outerColMap)
