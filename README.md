@@ -165,9 +165,34 @@ rows, 4-node cluster with spill-to-disk under a 21 GB worker memory
 limit). Cross-engine result validation against DuckDB confirms identical
 row counts on all 22 queries over the same S3 Parquet data.
 
-Performance numbers are intentionally not published here while the
-standalone S3 read path is being parallelized; the benchmark harness
-(`deploy/benchmark/`) reproduces every configuration.
+### TPC-H SF10, cold S3, single node
+
+Both engines on the same `c7g.4xlarge` (16 vCPU / 32 GB), reading the
+same S3 Parquet data (600 lineitem chunk files, us-east-2, same run,
+cold — no page cache, every byte fetched from S3). DuckDB v1.5.4 via
+`httpfs`. 2026-07-05, reproducible with the command below.
+
+| Query | Wadjet | DuckDB | | Query | Wadjet | DuckDB |
+|---|---:|---:|---|---|---:|---:|
+| Q01 | 11.4s | 7.3s | | Q12 | 20.9s | 12.7s |
+| Q02 | 8.9s | 1.9s | | Q13 | 16.4s | 1.5s |
+| Q03 | 23.7s | 10.3s | | Q14 | 10.2s | 8.7s |
+| Q04 | 22.2s | 7.7s | | Q15 | 9.3s | 8.4s |
+| Q05 | 24.1s | 9.8s | | Q16 | 8.6s | 0.9s |
+| Q06 | **9.0s** | 10.2s | | Q17 | 11.4s | 6.9s |
+| Q07 | 20.5s | 11.4s | | Q18 | 30.5s | 7.5s |
+| Q08 | 20.3s | 11.6s | | Q19 | 10.3s | 10.4s |
+| Q09 | 20.8s | 12.4s | | Q20 | 19.3s | 11.0s |
+| Q10 | 23.1s | 9.6s | | Q21 | 88.0s | 9.7s |
+| Q11 | 23.7s | 1.1s | | Q22 | 16.5s | 0.8s |
+
+**Suite total: Wadjet 7m29s, DuckDB 2m52s.** Wadjet wins the pure-scan
+query (Q06) and ties Q19; DuckDB's decade of optimizer and operator
+tuning still leads on join-heavy and tiny-result queries. The honest
+summary: on cold object storage Wadjet is currently ~2.6× DuckDB
+overall, closing from ~7× in a single release cycle, with identical
+results on every query. The benchmark harness (`deploy/benchmark/`)
+reproduces every configuration.
 
 ```bash
 # SF0.01 correctness (CI, ~5s)
