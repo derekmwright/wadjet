@@ -70,6 +70,14 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 
 		h.mu.Lock()
 
+		// Narrow filtered semi/anti builds to keys + filter columns before any
+		// storage decision: the partition scatter, per-partition accumulators,
+		// spill files, and the tracker Reserve below all see only the retained
+		// columns. The view shares the arrival batch's vectors; every path
+		// below copies rows out (appendRows / compactBatchForRows), so the
+		// arrival batch is never retained and needs no Detach here.
+		b = h.projectForStore(b)
+
 		if h.buildSchema == nil {
 			h.buildSchema = b.Schema
 			h.buildKeyIdx = make([]int, len(h.RightKeys))

@@ -98,6 +98,25 @@ type HashJoin struct {
 	// for large build sides (e.g., 6M-row lineitem scan for EXISTS subqueries).
 	SemiAntiKeyOnly bool
 
+	// BuildStoreCols, when non-empty, narrows every stored build batch to the
+	// named columns (join keys + SemiAntiFilter-referenced columns) at arrival
+	// time. Filtered semi/anti joins never emit build rows, but the probe must
+	// evaluate SemiAntiFilter against the filter's build-side columns — storing
+	// only keys + those columns keeps partitioned builds, their per-partition
+	// accumulators, and their spill files narrow from the first batch. The
+	// post-build PruneBuildColumns cannot achieve this: it skips partition-on-
+	// arrival builds entirely (evicted entries are nil'd and spilled files
+	// carry the storage schema), which is every spill-eligible build. Names
+	// are resolved once against the first arrival batch; if any name fails to
+	// resolve, projection is disabled and full batches are stored.
+	BuildStoreCols []string
+
+	// buildStore* hold the once-resolved projection state for BuildStoreCols.
+	buildStoreChecked  bool
+	buildStoreDisabled bool
+	buildStoreIdx      []int
+	buildStoreSchema   []parquet.Column
+
 	// BuildRowHint is an optional hint for the expected number of build-side rows.
 	// When set, the arena and hash table are pre-allocated to avoid repeated growth.
 	BuildRowHint int64
@@ -731,6 +750,8 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		}
 
 		h.mu.Lock()
+		arrival := b
+		b = h.projectForStore(b)
 		if h.buildSchema == nil {
 			h.buildSchema = b.Schema
 			// Pre-resolve build key column indices. Use fallback to handle
@@ -863,7 +884,10 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 		// Skip Compact() — iterate through Sel (if any) directly.
 		// Avoids copying entire batch just to remove selection vector gaps.
 		// Arena refs store original row indices, which are valid for direct access.
-		b.Detach() // prevent pooled batches from being recycled — build stores references
+		// Detach the ARRIVAL batch: b may be a projectForStore view sharing its
+		// vectors, and a pooled arrival recycled under the view would corrupt
+		// the stored build data. When projection is off, arrival == b.
+		arrival.Detach() // prevent pooled batches from being recycled — build stores references
 		batchIdx := int32(len(h.buildBatches))
 		h.buildBatches = append(h.buildBatches, b)
 
@@ -1480,6 +1504,47 @@ func bloomHashBytes(key []byte) uint64 {
 		h *= 16777619
 	}
 	return h ^ (h >> 32)
+}
+
+// projectForStore narrows an arrival build batch to BuildStoreCols before it
+// is stored, partitioned, or spilled. The returned batch is a view sharing
+// b's vectors (Sel and Len preserved), so buildRef row indices stay valid;
+// callers that retain the view must Detach the original arrival batch (a
+// pooled original could otherwise be recycled under the view). Resolution
+// happens once, against the first batch, via the same columnIndexFallback
+// the key index uses; an unresolvable name disables projection so behavior
+// degrades to full-width storage. Caller must hold h.mu.
+func (h *HashJoin) projectForStore(b *batch.RecordBatch) *batch.RecordBatch {
+	if len(h.BuildStoreCols) == 0 || h.buildStoreDisabled {
+		return b
+	}
+	if !h.buildStoreChecked {
+		h.buildStoreChecked = true
+		keep := make(map[int]bool, len(h.BuildStoreCols))
+		for _, name := range h.BuildStoreCols {
+			idx := columnIndexFallback(b, name)
+			if idx < 0 {
+				h.buildStoreDisabled = true
+				return b
+			}
+			keep[idx] = true
+		}
+		if len(keep) == len(b.Columns) {
+			h.buildStoreDisabled = true // nothing to drop
+			return b
+		}
+		for i := range b.Schema {
+			if keep[i] {
+				h.buildStoreIdx = append(h.buildStoreIdx, i)
+				h.buildStoreSchema = append(h.buildStoreSchema, b.Schema[i])
+			}
+		}
+	}
+	cols := make([]*batch.Vector, len(h.buildStoreIdx))
+	for j, i := range h.buildStoreIdx {
+		cols[j] = b.Columns[i]
+	}
+	return &batch.RecordBatch{Columns: cols, Schema: h.buildStoreSchema, Len: b.Len, Sel: b.Sel}
 }
 
 // PruneBuildColumns removes non-essential columns from the build-side batches.
