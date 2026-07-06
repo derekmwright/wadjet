@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/config"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -451,12 +452,34 @@ type cteMaterialized struct {
 // times within a single query (e.g., decorrelated subqueries). The first scan
 // populates the cache, and subsequent scans replay from it. Thread-safe for
 // concurrent builds: subsequent scans block on ready until the first completes.
+//
+// The cache holds the UNION of all consumers' columns (unionCols) so one
+// scan serves everyone; each consumer projects back down to its own
+// columns in catalogScanSource.Next. Without the projection, every
+// consumer — including hash-join BUILD sides, which store their input
+// batches — carried the widest consumer's columns: Q21's two 60M-row
+// lineitem semi/anti builds each stored l1's 4-column set instead of
+// the 2 columns they need, and partition-on-arrival evictions spilled
+// the dead columns to disk (the SF10 cold-S3 Q21 churn, 2026-07-06).
+//
+// The cache's heap pin is reserved on the query's memory tracker as it
+// grows (ReserveOrForce — asks operators to spill, never fails) and
+// released by Planner.releaseScanCache. Untracked, the pin was a
+// multi-GB accounting hole that made every spill decision downstream
+// operate on a fictional budget.
 type scanCached struct {
 	mu      sync.Mutex
 	batches []*batch.RecordBatch
 	schema  []parquet.Column
 	done    bool          // true when the first scan is complete
 	ready   chan struct{} // closed when first scan completes; nil until first scan claims the cache
+	// unionCols is the union of every consumer's RequiredColumns, in
+	// first-seen order. nil = full schema (some consumer needs all).
+	unionCols []string
+	// tracker/trackedBytes: the cache's reservation on the query memory
+	// tracker. Written under mu; released by Planner.releaseScanCache.
+	tracker      *memory.Tracker
+	trackedBytes int64
 }
 
 // NewPlanner creates a new physical planner.
@@ -906,6 +929,26 @@ func (p *Planner) materializeCTEColumnar(ctx context.Context, sql string) (*exec
 		schema = p.inferCTESchema(sql, nil)
 	}
 	return coll, schema, nil
+}
+
+// releaseScanCache drops every duplicate-scan cache entry and returns
+// its memory-tracker reservation. Idempotent; wired into
+// PhysicalPlan.Cleanup, Plan's error paths, and Plan's per-query reset.
+// On the shared (worker-injected) tracker path a missed release would
+// be a permanent phantom reservation, so every Plan exit must pass
+// through here.
+func (p *Planner) releaseScanCache() {
+	for _, c := range p.scanCache {
+		c.mu.Lock()
+		if c.tracker != nil && c.trackedBytes > 0 {
+			c.tracker.Release(c.trackedBytes)
+		}
+		c.tracker = nil
+		c.trackedBytes = 0
+		c.batches = nil
+		c.mu.Unlock()
+	}
+	p.scanCache = nil
 }
 
 // releaseCTECache frees every columnar CTE collector (tracker charge +
@@ -1510,33 +1553,45 @@ func (p *Planner) mergeDuplicateScans(node *logical.Node) {
 		if incompatible {
 			continue
 		}
-		// Compute the union of required columns.
+		// Compute the union of required columns in first-seen order. The
+		// union lives on the CACHE entry only — each scan node keeps its
+		// own RequiredColumns and catalogScanSource projects the cached
+		// (union-wide) batches back down per consumer. Rewriting the scan
+		// nodes to the union, as this used to do, silently widened every
+		// consumer: hash-join build sides stored the union's columns and
+		// spilled them on eviction (Q21's semi/anti lineitem builds).
+		// A scan with no RequiredColumns needs every column: the union
+		// degrades to nil (full schema).
+		var merged []string
 		colSet := map[string]bool{}
+		needAll := false
 		for _, s := range scans {
+			if len(s.RequiredColumns) == 0 {
+				needAll = true
+				break
+			}
 			for _, col := range s.RequiredColumns {
-				colSet[col] = true
+				if !colSet[col] {
+					colSet[col] = true
+					merged = append(merged, col)
+				}
 			}
 		}
-		merged := make([]string, 0, len(colSet))
-		for col := range colSet {
-			merged = append(merged, col)
-		}
-		// Update all scan nodes to use the merged column set.
-		for _, s := range scans {
-			s.RequiredColumns = merged
+		if needAll {
+			merged = nil
 		}
 		// Initialize the scan cache entry.
 		if p.scanCache == nil {
 			p.scanCache = make(map[string]*scanCached)
 		}
-		p.scanCache[table] = &scanCached{}
+		p.scanCache[table] = &scanCached{unionCols: merged}
 	}
 }
 
 // Plan converts a logical plan to a physical plan for local execution.
 func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, error) {
-	p.planCtx = ctx   // store for subquery runner context propagation
-	p.scanCache = nil // reset per-query scan cache
+	p.planCtx = ctx       // store for subquery runner context propagation
+	p.releaseScanCache() // reset per-query scan cache (drops tracker reservation)
 	p.spillMgr = nil  // reset per-query spill manager
 	p.memTracker = nil
 	p.releaseCTECache() // reset per-query CTE cache (frees stale spill scratch)
@@ -1558,7 +1613,8 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 
 	source, ops, sink, err := p.buildPipeline(ctx, node)
 	if err != nil {
-		p.releaseCTECache() // free CTE spill scratch on the no-Cleanup path
+		p.releaseCTECache()  // free CTE spill scratch on the no-Cleanup path
+		p.releaseScanCache() // drop the scan cache's tracker reservation
 		return nil, err
 	}
 
@@ -1585,18 +1641,25 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 		},
 	}
 
-	// Attach spill file cleanup. CTE collectors release first (tracker
-	// charge + their scratch files) so the SpillManager sweep that follows
-	// never races their removal.
+	// Attach spill file cleanup. CTE collectors and the scan cache
+	// release first (tracker charge + their scratch files) so the
+	// SpillManager sweep that follows never races their removal. The
+	// scan cache release matters most on the shared-tracker path: its
+	// reservation would otherwise outlive the query as a permanent
+	// phantom on the worker-lifetime tracker.
 	if sm := p.spillMgr; sm != nil {
 		plan.Cleanup = func() {
 			p.releaseCTECache()
+			p.releaseScanCache()
 			sm.Cleanup()
 		}
-	} else if p.cteCacheHasCollectors() {
+	} else if p.cteCacheHasCollectors() || p.scanCache != nil {
 		// Shared (worker-injected) spill manager: its dir outlives this
 		// query, so the collectors' scratch must be released explicitly.
-		plan.Cleanup = func() { p.releaseCTECache() }
+		plan.Cleanup = func() {
+			p.releaseCTECache()
+			p.releaseScanCache()
+		}
 	}
 
 	// Generate distributed stages for coordinator dispatch
@@ -1604,6 +1667,7 @@ func (p *Planner) Plan(ctx context.Context, node *logical.Node) (*PhysicalPlan, 
 
 	if err := p.enforceQueryLimits(plan.Stages, node); err != nil {
 		p.releaseCTECache()
+		p.releaseScanCache()
 		return nil, err
 	}
 
@@ -6104,6 +6168,9 @@ type catalogScanSource struct {
 	inner           exec.Source
 	cache           *scanCached           // non-nil when this table is scanned multiple times
 	replayIdx       atomic.Int64          // position in cache replay (atomic for parallel pipeline)
+	projOnce        sync.Once             // guards projIdx/projSchema init (replay Next is concurrent)
+	projIdx         []int                 // cache-batch column indices for this consumer; nil = no projection
+	projSchema      []parquet.Column      // this consumer's projected schema
 	isReplay        bool                  // true when reading from cache instead of scanning; written once in Init before runParallel starts, so no synchronization needed
 	bloomFilter     *exec.BloomScanFilter // bloom filter pushdown from hash join build side
 	dynamicFilter   []exec.DynamicRange   // dynamic min/max range filter from hash join build side
@@ -6148,8 +6215,15 @@ func (s *catalogScanSource) Init(ctx context.Context) error {
 		s.cache.ready = make(chan struct{})
 		s.cache.mu.Unlock()
 	}
-	// First scan (or no cache) — scan from storage.
-	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, s.requiredCols, s.scanPreds)
+	// First scan (or no cache) — scan from storage. A cache-populating
+	// scan reads the UNION of all consumers' columns so the cache can
+	// serve every consumer; each consumer (this one included) projects
+	// back down to its own columns in Next.
+	scanCols := s.requiredCols
+	if s.cache != nil {
+		scanCols = s.cache.unionCols
+	}
+	sc := newScannerSource(s.catalog, s.tableName, s.partitionFilter, scanCols, s.scanPreds)
 	if ses, ok := sc.(*scannerExecSource); ok {
 		if s.bloomFilter != nil {
 			ses.bloomFilter = s.bloomFilter
@@ -6184,14 +6258,18 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 		cached := s.cache.batches[idx]
 		// Return a shallow copy: shared column vectors (read-only), independent Sel.
 		// This prevents downstream operators from corrupting cached data via in-place
-		// Sel mutation.
+		// Sel mutation. Sel itself is carried over (slice header copy —
+		// downstream filters replace Sel rather than mutating in place):
+		// dropping it, as this used to, resurrected delete-marker-filtered
+		// rows on replay.
 		clone := &batch.RecordBatch{
 			Schema:  cached.Schema,
 			Columns: make([]*batch.Vector, len(cached.Columns)),
 			Len:     cached.Len,
+			Sel:     cached.Sel,
 		}
 		copy(clone.Columns, cached.Columns)
-		return clone, nil
+		return s.projectForConsumer(clone), nil
 	}
 
 	// When this scan is populating a shared cache, the entire pull-and-cache
@@ -6225,19 +6303,91 @@ func (s *catalogScanSource) Next(ctx context.Context) (*batch.RecordBatch, error
 		// overwrites the Vectors that the cache references.
 		b.Detach()
 		// Cache a shallow copy so the first consumer's operators don't
-		// corrupt cached data by setting Sel in-place.
+		// corrupt cached data by setting Sel in-place. Sel is preserved
+		// (delete markers arrive from the scan as Sel) — see the replay
+		// branch.
 		cached := &batch.RecordBatch{
 			Schema:  b.Schema,
 			Columns: make([]*batch.Vector, len(b.Columns)),
 			Len:     b.Len,
+			Sel:     b.Sel,
 		}
 		copy(cached.Columns, b.Columns)
 		s.cache.batches = append(s.cache.batches, cached)
-		return b, nil
+		// Reserve the pinned bytes on the query tracker so downstream
+		// spill decisions see the cache instead of discovering it as RSS
+		// drift. ReserveOrForce asks operators for relief and never
+		// fails; released by Planner.releaseScanCache.
+		if s.memTracker != nil {
+			n := cached.MemBytes()
+			if n > 0 {
+				memory.ReserveOrForce(ctx, s.memTracker, s.spillMgr, n, scanCacheReserveWait, "scan cache")
+				s.cache.tracker = s.memTracker
+				s.cache.trackedBytes += n
+			}
+		}
+		return s.projectForConsumer(b), nil
 	}
 
 	// No cache: inner.Next() is thread-safe for channel-based scan sources.
 	return s.inner.Next(ctx)
+}
+
+// scanCacheReserveWait bounds how long a cache append waits for a clean
+// reservation after asking operators for relief. Past it the reservation
+// is forced — population never fails or deadlocks on the budget.
+const scanCacheReserveWait = 2 * time.Second
+
+// projectForConsumer narrows a union-column cache batch down to this
+// consumer's RequiredColumns. Shallow: shares vectors, no copies. The
+// no-cache path, SELECT-* consumers (empty requiredCols), and batches
+// already matching the consumer's set pass through untouched. Also
+// defensive: any required column missing from the batch schema (e.g.,
+// synthetic columns) disables projection rather than dropping data.
+func (s *catalogScanSource) projectForConsumer(b *batch.RecordBatch) *batch.RecordBatch {
+	if s.cache == nil || len(s.requiredCols) == 0 || b == nil {
+		return b
+	}
+	s.projOnce.Do(func() {
+		if len(s.requiredCols) >= len(b.Schema) {
+			return
+		}
+		want := make(map[string]bool, len(s.requiredCols))
+		for _, name := range s.requiredCols {
+			want[name] = true
+		}
+		// Keep BATCH-SCHEMA (table) order, matching what a standalone
+		// scan of this node would emit via buildReadSchema — downstream
+		// operators may have bound positions against that shape.
+		idx := make([]int, 0, len(s.requiredCols))
+		schema := make([]parquet.Column, 0, len(s.requiredCols))
+		found := 0
+		for i, col := range b.Schema {
+			if want[col.Name] {
+				idx = append(idx, i)
+				schema = append(schema, col)
+				found++
+			}
+		}
+		if found < len(want) {
+			return // some required column missing — pass through unprojected
+		}
+		s.projIdx = idx
+		s.projSchema = schema
+	})
+	if s.projIdx == nil {
+		return b
+	}
+	nb := &batch.RecordBatch{
+		Schema:  s.projSchema,
+		Columns: make([]*batch.Vector, len(s.projIdx)),
+		Len:     b.Len,
+		Sel:     b.Sel,
+	}
+	for i, ci := range s.projIdx {
+		nb.Columns[i] = b.Columns[ci]
+	}
+	return nb
 }
 
 func (s *catalogScanSource) Close() error {
