@@ -1622,6 +1622,28 @@ func (h *HashJoin) FixKeyAssignment() {
 
 	// Rebuild hash index if keys were swapped
 	if needsRebuild {
+		// A build that EVICTED partitions cannot rebuild from buildBatches:
+		// eviction nils their entries (dereferencing them here is the same
+		// crash class as PruneBuildColumns, the SF10 standalone Q21 SIGSEGV
+		// of 2026-07-05) and the evicted rows aren't in memory at all, so a
+		// rebuild would silently drop them from the index. The key SWAP
+		// above stands — probe-side resolution needs the corrected names —
+		// and the arrival-time index stays authoritative: buildPartitioned
+		// resolved buildKeyIdx through columnIndexFallback, which maps the
+		// misassigned name to the same physical build column (had it
+		// resolved to nothing, the build itself would have failed).
+		// NOTE: the guard keys on nil'd entries, not on spillState —
+		// buildPartitioned creates spillState for every spill-eligible
+		// build, and a partitioned build with nothing evicted has complete
+		// buildBatches and still relies on this rebuild (Q02's scalar-
+		// subquery join at SF0.01 breaks if it's skipped).
+		if h.spillState != nil {
+			for _, b := range h.buildBatches {
+				if b == nil {
+					return
+				}
+			}
+		}
 		// Re-resolve build key indices after swap
 		if len(h.buildBatches) > 0 {
 			b := h.buildBatches[0]
