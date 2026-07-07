@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/alerts"
@@ -15,6 +16,11 @@ import (
 func (c *Coordinator) handleCreateAlertSQL(ctx context.Context, sqlText string) error {
 	if !c.alertsEnabled {
 		return fmt.Errorf("alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
+	}
+	// An alert is a persistent server-side job that runs arbitrary SQL on a
+	// cadence under its creator's identity — a privileged management action.
+	if err := auth.RequirePermission(c.authProvider, ctx, "admin"); err != nil {
+		return err
 	}
 	pq, err := sql.Parse(sqlText)
 	if err != nil {
@@ -39,6 +45,9 @@ func (c *Coordinator) handleCreateAlertSQL(ctx context.Context, sqlText string) 
 		}
 	}
 
+	// Snapshot the creator's identity so the scheduler can run this alert
+	// under it (definer's rights) on every tick — see alertEvalDecorator.
+	snap := auth.SnapshotIdentity(ctx)
 	m := catalog.AlertMeta{
 		Name:            info.Name,
 		QueryText:       info.QueryText,
@@ -48,7 +57,10 @@ func (c *Coordinator) handleCreateAlertSQL(ctx context.Context, sqlText string) 
 		InsertIntoTable: info.InsertInto,
 		Enabled:         true,
 		CreatedAt:       time.Now().UTC(),
-		CreatedBy:       identityFromCtx(ctx),
+		CreatedBy:       snap.Name,
+		CreatedByRole:   snap.Role,
+		CreatedByMethod: snap.Method,
+		CreatedByAttrs:  snap.Attributes,
 	}
 	return c.catalog.CreateAlert(ctx, m)
 }
@@ -57,6 +69,9 @@ func (c *Coordinator) handleCreateAlertSQL(ctx context.Context, sqlText string) 
 func (c *Coordinator) handleDropAlertSQL(ctx context.Context, sqlText string) error {
 	if !c.alertsEnabled {
 		return fmt.Errorf("alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
+	}
+	if err := auth.RequirePermission(c.authProvider, ctx, "admin"); err != nil {
+		return err
 	}
 	pq, err := sql.Parse(sqlText)
 	if err != nil {
@@ -79,6 +94,9 @@ func (c *Coordinator) handleAlterAlertSQL(ctx context.Context, sqlText string) e
 	if !c.alertsEnabled {
 		return fmt.Errorf("alerts are disabled on this cluster; set --enable-alerts or WADJET_ENABLE_ALERTS=1")
 	}
+	if err := auth.RequirePermission(c.authProvider, ctx, "admin"); err != nil {
+		return err
+	}
 	pq, err := sql.Parse(sqlText)
 	if err != nil {
 		return err
@@ -87,14 +105,6 @@ func (c *Coordinator) handleAlterAlertSQL(ctx context.Context, sqlText string) e
 		return fmt.Errorf("not an ALTER ALERT statement")
 	}
 	return c.catalog.SetAlertEnabled(ctx, pq.AlterAlert.Name, pq.AlterAlert.Enable)
-}
-
-// identityFromCtx returns a string identity from ctx using the auth package.
-func identityFromCtx(ctx context.Context) string {
-	if id := auth.IdentityFromContext(ctx); id != nil {
-		return id.Name
-	}
-	return ""
 }
 
 // SetAlertsEnabled toggles the feature flag. When false, StartAlertScheduler
@@ -116,7 +126,7 @@ func (c *Coordinator) StartAlertScheduler(parent context.Context) {
 	c.StopAlertScheduler()
 	ctx, cancel := context.WithCancel(parent)
 	c.alertSchedulerCancel = cancel
-	c.alertScheduler = alerts.NewScheduler(c.catalog, c.asSQLExecutor(), c.alertSinkFactory)
+	c.alertScheduler = alerts.NewScheduler(c.catalog, c.asSQLExecutor(), c.alertSinkFactory, c.alertEvalDecorator())
 	c.alertScheduler.Start(ctx)
 }
 
@@ -130,6 +140,31 @@ func (c *Coordinator) StopAlertScheduler() {
 	if c.alertScheduler != nil {
 		c.alertScheduler.Wait()
 		c.alertScheduler = nil
+	}
+}
+
+// alertEvalDecorator returns the scheduler's per-alert context decorator that
+// runs each alert query under its creator's identity (definer's rights). When
+// auth is disabled the context is untouched. Legacy alerts with no stored
+// identity run fail-closed under ABAC (auth.StampDefiner) and are warned about
+// once per process so operators know to recreate them.
+func (c *Coordinator) alertEvalDecorator() alerts.EvalContextFunc {
+	var warned sync.Map
+	return func(ctx context.Context, m catalog.AlertMeta) context.Context {
+		snap := auth.IdentitySnapshot{
+			Name:       m.CreatedBy,
+			Role:       m.CreatedByRole,
+			Method:     m.CreatedByMethod,
+			Attributes: m.CreatedByAttrs,
+		}
+		newCtx, attributed := auth.StampDefiner(ctx, c.authProvider, snap)
+		if !attributed {
+			if _, seen := warned.LoadOrStore(m.Name, true); !seen {
+				c.logger.Warn("alert has no stored creator identity; running fail-closed under ABAC — recreate it to attribute a definer",
+					"alert", m.Name)
+			}
+		}
+		return newCtx
 	}
 }
 

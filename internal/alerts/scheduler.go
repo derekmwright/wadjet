@@ -13,12 +13,21 @@ import (
 // doesn't know about WebhookSink/TableSink concretely and tests can stub.
 type SinkFactory func(m catalog.AlertMeta) []AlertSink
 
+// EvalContextFunc decorates the per-evaluation context for an alert before its
+// query runs. Injected so the scheduler stays decoupled from the auth package:
+// the owner (coordinator / embedded DB) supplies a func that stamps the alert
+// creator's identity onto the context (definer's rights), so the scheduled
+// query enforces the creator's ABAC row/column policies instead of running
+// unfiltered. A nil func (or a nil return) leaves the context unchanged.
+type EvalContextFunc func(ctx context.Context, m catalog.AlertMeta) context.Context
+
 // Scheduler runs alerts on their configured cadence. It owns one goroutine
 // that ticks and dispatches per-alert evaluations as short-lived goroutines.
 type Scheduler struct {
 	cat          *catalog.Catalog
 	exec         SQLExecutor
 	sinks        SinkFactory
+	evalCtxFunc  EvalContextFunc
 	tickInterval time.Duration
 	logger       *slog.Logger
 
@@ -29,12 +38,15 @@ type Scheduler struct {
 	wg sync.WaitGroup
 }
 
-// NewScheduler constructs a scheduler with a default 1s tick cadence.
-func NewScheduler(cat *catalog.Catalog, exec SQLExecutor, sinks SinkFactory) *Scheduler {
+// NewScheduler constructs a scheduler with a default 1s tick cadence. evalCtx
+// may be nil (no per-alert context decoration); production callers pass a func
+// that stamps the alert creator's identity for definer's-rights enforcement.
+func NewScheduler(cat *catalog.Catalog, exec SQLExecutor, sinks SinkFactory, evalCtx EvalContextFunc) *Scheduler {
 	return &Scheduler{
 		cat:          cat,
 		exec:         exec,
 		sinks:        sinks,
+		evalCtxFunc:  evalCtx,
 		tickInterval: 1 * time.Second,
 		inflight:     make(map[string]bool),
 		logger:       slog.Default(),
@@ -117,6 +129,17 @@ func (s *Scheduler) evaluate(ctx context.Context, a catalog.AlertMeta, now time.
 	}
 	evalCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// Stamp the creator's identity (definer's rights) so the alert query
+	// enforces that identity's ABAC policies. A nil decorator leaves the
+	// context untouched (auth disabled / embedded). When auth is enabled the
+	// decorator fails an unattributed (legacy) alert closed — see
+	// alertEvalDecorator.
+	if s.evalCtxFunc != nil {
+		if decorated := s.evalCtxFunc(evalCtx, a); decorated != nil {
+			evalCtx = decorated
+		}
+	}
 
 	start := time.Now()
 	rows, schema, total, truncated, err := s.exec.Query(evalCtx, a.QueryText, MaxRowsPerFire)

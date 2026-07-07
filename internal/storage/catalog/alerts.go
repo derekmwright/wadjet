@@ -21,6 +21,13 @@ type AlertMeta struct {
 	Enabled         bool              `json:"enabled"`
 	CreatedAt       time.Time         `json:"created_at"`
 	CreatedBy       string            `json:"created_by,omitempty"`
+	// Creator identity snapshot for definer's-rights scheduled execution: the
+	// alert query runs under this identity's ABAC subject on every tick (see
+	// auth.IdentitySnapshot). Empty on alerts created before this existed —
+	// the scheduler treats those fail-closed under enabled auth.
+	CreatedByRole   string            `json:"created_by_role,omitempty"`
+	CreatedByMethod string            `json:"created_by_method,omitempty"`
+	CreatedByAttrs  map[string]string `json:"created_by_attrs,omitempty"`
 	LastEvaluatedAt time.Time         `json:"last_evaluated_at,omitempty"`
 	Version         int64             `json:"version"`
 }
