@@ -843,7 +843,11 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 				h.intIndex.CheckGrow()
 			} else {
 				if h.strIndex == nil {
-					h.strIndex = newStrHashTable(64)
+					// Seed to this batch's row count: the EnsureCapacity
+					// above skipped a nil strIndex, and a 64-bucket seed
+					// would let the first batch fill the table mid-loop
+					// (GetOrInsertNoGrow spins forever on a full table).
+					h.strIndex = newStrHashTable(batchRows)
 				}
 				if b.Sel != nil {
 					for _, si := range b.Sel {
@@ -1234,7 +1238,11 @@ func (h *HashJoin) insertKeyOnlyBatch(lk *localKeyBuild, b *batch.RecordBatch) {
 		lk.intIndex.CheckGrow()
 	} else {
 		if lk.strIndex == nil {
-			lk.strIndex = newStrHashTable(64)
+			// Seed to this batch's row count — the EnsureCapacity above
+			// skipped a nil strIndex, and a 64-bucket seed would let the
+			// first batch fill the table mid-loop (GetOrInsertNoGrow spins
+			// forever on a full table).
+			lk.strIndex = newStrHashTable(batchRows)
 		}
 		if b.Sel != nil {
 			for _, si := range b.Sel {
@@ -1626,7 +1634,13 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 	b.Detach() // prevent pooled batches from being recycled — build stores references
 	batchIdx := int32(len(h.buildBatches))
 	h.buildBatches = append(h.buildBatches, b)
+	// Pre-grow the index for this call's rows so PutNoGrow can't fill the
+	// table mid-loop — a full table turns its probe loop into an infinite
+	// spin. The int index is pre-sized by tryEnableIntKey only on the first
+	// call, and the string index was seeded at 64 buckets, so any call
+	// inserting more distinct keys than the remaining headroom hung here.
 	if h.useIntKey {
+		h.intIndex.EnsureCapacity(b.Len)
 		col := b.Columns[h.buildKeyIdx[0]]
 		for i := 0; i < b.Len; i++ {
 			key, ok := intKeyFromVector(col, i)
@@ -1639,8 +1653,9 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 		h.intIndex.CheckGrow()
 	} else {
 		if h.strIndex == nil {
-			h.strIndex = newStrHashTable(64)
+			h.strIndex = newStrHashTable(b.Len)
 		}
+		h.strIndex.EnsureCapacity(b.Len)
 		for i := 0; i < b.Len; i++ {
 			h.buildKeyFromBatch(b, i)
 			h.arenaAppendStr(buildRef{batchIdx: batchIdx, rowIdx: int32(i)})
