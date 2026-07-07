@@ -273,6 +273,38 @@ coalescing stay unconditional. Known follow-up if profiles ever show the
 gate crossed AND sink-bound: move the coalesced-chunk encode/write outside
 the sink mutex (double-buffered flush) so consume is append-only.
 
+**v1.8 amendment — the fragment sink is no longer a serial section.** The
+SF100 same-window default-flip gate (2026-07-07, serial 51m59.6s vs auto
+50m47.8s) confirmed auto is memory-safe but showed join/probe fragments
++12-27% (Q17 +27%, Q03 +19%, Q13 +18%, Q20 +12%): k consumers serialized
+on the fragment-level sink mutex through the fragment's dominant cost. Fix
+lands in three parts, all correctness-gated by -race concurrency tests
+(`sink_concurrency_test.go`) that verify multiset + partition-placement
+parity against a serial reference:
+
+- `partitionedShuffleSink` locks per PARTITION, not per sink. Hashing and
+  scatter move to per-call pooled scratch (`consumeScratch`), key
+  resolution to a `sync.Once`, and each partition's append+threshold-flush
+  runs under that partition's own mutex — the critical section is
+  ~1/numParts of a batch plus an occasional 64 KB chunk encode. Chunks
+  from different consumers may interleave within a partition file; a
+  .wshf file is a self-contained chunk sequence, so ordering across
+  consumers is immaterial. Micro-bench: 2048-row consumes over 24
+  partitions scale 893 MB/s serial → 3.3 GB/s at 8 consumers (3.75×);
+  the serial path is structurally unchanged (uncontended locks).
+- `unpartitionedStageSink` gets the double-buffered flush this note
+  anticipated: appends stay under the sink lock (bounded memcpy), and
+  when a threshold trips the full accumulator is swapped out and the up-
+  to-16 MB s2 encode+write happens OUTSIDE the lock while consumers keep
+  filling the spare. A `flushing` flag admits one flusher (the writer is
+  single-threaded); a consumer that fills the spare before the flush
+  returns waits on a cond — memory stays bounded at two accumulators.
+- The fragment-level `sinkMu` in `runFragmentLinearParallel` is deleted;
+  the three `fragmentSink` adapters are individually thread-safe
+  (exchange: guarded lazy init + concurrent sink; unpartitioned:
+  delegate; gather: internal mutex — the low-volume reply path needs no
+  concurrency).
+
 ### 4.2 Worker count policy (adaptive, threshold-gated)
 
 `k = 1` (today's behavior) unless the fragment's input estimate clears a
