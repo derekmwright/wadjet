@@ -7,14 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/citc-tech/wadjet/wadjet"
+	"github.com/citc-tech/wadjet/internal/auth"
+	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
+	"github.com/citc-tech/wadjet/wadjet"
 )
 
 func setupTestDB(t *testing.T) *wadjet.DB {
@@ -383,90 +384,126 @@ func TestUnknownMethod(t *testing.T) {
 	}
 }
 
-func TestHTTPSSE(t *testing.T) {
-	db := setupTestDB(t)
-	srv := NewServer(db, nil)
-
-	hs, err := ServeHTTP(srv, ":0")
+// TestMCPQueryEnforcesABAC proves the MCP query tool applies row/column
+// security when the server is constructed with an identity against an
+// AuthProvider-backed DB. Without identity stamping in serve(), the denied
+// column would appear and the row filter would not apply — the exact bypass
+// this change closes. A companion NewServer (no identity) run confirms the
+// enforcement is driven by the stamped identity, not by the DB alone.
+func TestMCPQueryEnforcesABAC(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	store.MakeBucket(ctx, "test")
+	db, err := wadjet.Open(ctx, wadjet.Config{Store: store, Bucket: "test"})
 	if err != nil {
-		t.Fatalf("starting HTTP server: %v", err)
-	}
-	defer hs.Shutdown()
-
-	addr := hs.Addr()
-
-	// Connect to SSE endpoint
-	resp, err := http.Get(fmt.Sprintf("http://%s/sse", addr))
-	if err != nil {
-		t.Fatalf("connecting to SSE: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.Header.Get("Content-Type") != "text/event-stream" {
-		t.Errorf("expected text/event-stream, got %s", resp.Header.Get("Content-Type"))
+		t.Fatalf("opening DB: %v", err)
 	}
 
-	// Read the endpoint event
-	scanner := strings.NewReader("")
-	_ = scanner
-	buf := make([]byte, 4096)
-	n, err := resp.Body.Read(buf)
-	if err != nil {
-		t.Fatalf("reading SSE: %v", err)
+	schema := parquet.Schema{Columns: []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "severity", Type: parquet.TypeString},
+		{Name: "secret_col", Type: parquet.TypeString},
+	}}
+	if err := db.CreateTable(ctx, "findings", schema, nil); err != nil {
+		t.Fatal(err)
 	}
-	sseData := string(buf[:n])
-
-	if !strings.Contains(sseData, "event: endpoint") {
-		t.Fatalf("expected endpoint event, got: %s", sseData)
+	ing := db.NewIngester("findings", schema, nil, ingest.Config{MaxBufferRows: 100, RowGroupSize: 100})
+	if err := ing.Ingest(ctx, []map[string]any{
+		{"id": int64(1), "severity": "high", "secret_col": "classified-a"},
+		{"id": int64(2), "severity": "low", "secret_col": "classified-b"},
+		{"id": int64(3), "severity": "high", "secret_col": "classified-c"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ing.FlushAll(ctx); err != nil {
+		t.Fatal(err)
 	}
 
-	// Extract session ID from the data line
-	var sessionID string
-	for _, line := range strings.Split(sseData, "\n") {
-		if strings.HasPrefix(line, "data: ") {
-			endpoint := strings.TrimPrefix(line, "data: ")
-			parts := strings.Split(endpoint, "sessionId=")
-			if len(parts) == 2 {
-				sessionID = parts[1]
+	evaluator := auth.NewPolicyEvaluator([]auth.AccessControlPolicy{{
+		Name: "test-policy", Version: 1, Enabled: true,
+		Rules: []auth.PolicyRule{{
+			ID: "restrict-findings", EffectStr: "allow", Priority: 10,
+			Subjects:  []auth.Condition{{Attribute: "subject.role", Op: "eq", Value: "analyst"}},
+			Resources: []auth.Condition{{Attribute: "resource.name", Op: "eq", Value: "findings"}},
+			Actions:   []auth.Action{auth.ActionRead},
+			Obligations: []auth.Obligation{
+				{Type: "deny_column", Target: "secret_col"},
+				{Type: "row_filter", Value: "severity = 'high'"},
+			},
+		}},
+	}})
+	authn, authz := auth.New(auth.Config{
+		Enabled: true,
+		APIKeys: []auth.APIKeyDef{{Key: "test-key", Name: "analyst", Role: "analyst"}},
+		Roles:   []auth.RoleConfig{{Name: "analyst", Tables: []string{"*"}, Allow: []string{"read"}}},
+	})
+	provider := auth.NewProvider(authn, authz, nil, nil)
+	provider.UpdateWithEvaluator(authn, authz, nil, evaluator)
+	db.SetAuthProvider(provider)
+
+	identity := &auth.Identity{Name: "analyst", Role: "analyst", Method: "apikey"}
+
+	queryRows := func(t *testing.T, srv *Server) (cols []any, rowCount int) {
+		t.Helper()
+		in := &bytes.Buffer{}
+		sendRPC(t, in, "tools/call", callToolParams{
+			Name:      "query",
+			Arguments: map[string]any{"sql": "SELECT * FROM findings"},
+		}, 1)
+		out := runStdio(t, srv, in)
+		resp := readResponse(t, out)
+		if resp.Error != nil {
+			t.Fatalf("query error: %v", resp.Error.Message)
+		}
+		data, _ := json.Marshal(resp.Result)
+		var result callToolResult
+		json.Unmarshal(data, &result)
+		if len(result.Content) == 0 {
+			t.Fatal("empty tool result")
+		}
+		var payload struct {
+			Columns  []any `json:"columns"`
+			RowCount int   `json:"row_count"`
+		}
+		if err := json.Unmarshal([]byte(result.Content[0].Text), &payload); err != nil {
+			t.Fatalf("unmarshaling query payload %q: %v", result.Content[0].Text, err)
+		}
+		return payload.Columns, payload.RowCount
+	}
+
+	t.Run("with_identity_enforces_row_and_column_policy", func(t *testing.T) {
+		srv := NewServerWithIdentity(db, nil, identity)
+		cols, rowCount := queryRows(t, srv)
+		for _, c := range cols {
+			if c == "secret_col" {
+				t.Errorf("denied column 'secret_col' leaked through MCP query: cols=%v", cols)
 			}
 		}
-	}
-	if sessionID == "" {
-		t.Fatalf("could not extract session ID from: %s", sseData)
-	}
-
-	// POST a tools/list request
-	reqBody, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/list",
+		if rowCount != 2 {
+			t.Errorf("row filter severity='high' not applied: got %d rows, want 2", rowCount)
+		}
 	})
-	postResp, err := http.Post(
-		fmt.Sprintf("http://%s/message?sessionId=%s", addr, sessionID),
-		"application/json",
-		bytes.NewReader(reqBody),
-	)
-	if err != nil {
-		t.Fatalf("posting message: %v", err)
-	}
-	postResp.Body.Close()
 
-	if postResp.StatusCode != http.StatusAccepted {
-		t.Errorf("expected 202 Accepted, got %d", postResp.StatusCode)
-	}
-
-	// Read the SSE response
-	n, err = resp.Body.Read(buf)
-	if err != nil {
-		t.Fatalf("reading SSE response: %v", err)
-	}
-	sseResp := string(buf[:n])
-	if !strings.Contains(sseResp, "event: message") {
-		t.Errorf("expected message event, got: %s", sseResp)
-	}
-	if !strings.Contains(sseResp, "list_tables") {
-		t.Errorf("expected tool list in response, got: %s", sseResp)
-	}
+	t.Run("without_identity_no_enforcement_context", func(t *testing.T) {
+		// Sanity anchor: enforcement is identity-driven. A server with no
+		// stamped identity (which mcpCmd only permits when no AuthProvider is
+		// configured) does not gain policy from the DB alone — proving the
+		// stamp in serve() is what carries security, so an unauthenticated
+		// network path could never inherit it by accident.
+		srv := NewServer(db, nil)
+		cols, rowCount := queryRows(t, srv)
+		leaked := false
+		for _, c := range cols {
+			if c == "secret_col" {
+				leaked = true
+			}
+		}
+		if !leaked || rowCount != 3 {
+			t.Fatalf("expected unenforced result (secret_col present, 3 rows); got cols=%v rows=%d — "+
+				"if this now enforces, the identity-driven invariant changed and mcpCmd's fail-closed guard must be re-audited",
+				cols, rowCount)
+		}
+	})
 }
 
 func TestToolUnknown(t *testing.T) {

@@ -1749,6 +1749,27 @@ func buildPolicyConfigs(cfgs []config.AuthPolicy) []auth.PolicyConfig {
 	return policyCfgs
 }
 
+// buildProviderFromConfig constructs an auth.Provider from a loaded config,
+// mirroring the coordinator/standalone wiring but WITHOUT the hot-reload
+// watcher (callers that need a one-shot provider, e.g. the mcp command). Auth
+// disabled in config yields an enabled==false provider, which enforcement
+// treats as a no-op. logger may be nil.
+func buildProviderFromConfig(cfg *config.Config, logger *slog.Logger) *auth.Provider {
+	authn, authz := buildAuth(cfg.Auth)
+	var policies *auth.PolicySet
+	if len(cfg.Auth.Policies) > 0 {
+		policies = buildPolicies(cfg.Auth.Policies)
+	}
+	provider := auth.NewProvider(authn, authz, policies, logger)
+	if len(cfg.Auth.ABACPolicies) > 0 {
+		abac := buildABACPolicies(cfg.Auth.ABACPolicies)
+		provider.UpdateFromConfig(buildAuthConfig(cfg.Auth), buildPolicyConfigs(cfg.Auth.Policies), abac...)
+	} else if len(cfg.Auth.Roles) > 0 {
+		provider.UpdateFromConfig(buildAuthConfig(cfg.Auth), buildPolicyConfigs(cfg.Auth.Policies))
+	}
+	return provider
+}
+
 func buildAuth(cfg config.Auth) (*auth.Authenticator, *auth.Authorizer) {
 	authCfg := auth.Config{
 		Enabled: cfg.Enabled,
@@ -2029,13 +2050,48 @@ func applyNATSTLS(cfg *distributed.NATSConfig, logger *slog.Logger) {
 	}
 }
 
+// resolveMCPAuth decides the MCP session identity and enforces fail-closed
+// behavior. When the provider is nil or auth is not enabled, it returns
+// (nil, nil) — the caller runs unauthenticated (dev/embedded, no policy to
+// enforce). When auth IS enabled, a valid credential is mandatory: an empty
+// or unauthenticated token is a hard error, never a silent unauthenticated
+// session. This is the guard that prevents MCP from bypassing ABAC.
+func resolveMCPAuth(provider *auth.Provider, token string) (*auth.Identity, error) {
+	if provider == nil || !provider.Enabled() {
+		return nil, nil
+	}
+	if token == "" {
+		return nil, fmt.Errorf("auth is enabled but no MCP credential provided: " +
+			"pass --api-key or set WADJET_MCP_API_KEY (refusing to serve unauthenticated)")
+	}
+	id, err := provider.Authenticator().AuthenticateToken(token)
+	if err != nil {
+		return nil, fmt.Errorf("authenticating MCP credential: %w (refusing to serve)", err)
+	}
+	return id, nil
+}
+
 func mcpCmd() *cobra.Command {
-	return &cobra.Command{
+	var mcpAPIKey string
+	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Start MCP (Model Context Protocol) server on stdio for AI agent integration",
 		Long: `Start a Model Context Protocol server that communicates over stdin/stdout.
 This allows AI agents (Claude Desktop, Claude Code, Cursor, etc.) to discover
 tables, inspect schemas, and execute SQL queries against Wadjet.
+
+Transport is stdio only — there is deliberately no network listener.
+
+Security: pass --config with an auth block to enforce ABAC (row filters,
+column masks, table access) on MCP queries. When auth is configured you must
+also supply a credential via --api-key (or the WADJET_MCP_API_KEY env var);
+the resolved identity governs every query for the session. If auth is
+configured but no valid credential is supplied, the server refuses to start
+(fail closed) rather than serving unfiltered data.
+
+Without --config (or with auth disabled), MCP runs unauthenticated against a
+direct-to-store DB — appropriate only for local/dev use, where the operator
+already holds the store credentials.
 
 Configure in Claude Desktop's claude_desktop_config.json:
 
@@ -2043,7 +2099,7 @@ Configure in Claude Desktop's claude_desktop_config.json:
     "mcpServers": {
       "wadjet": {
         "command": "wadjet",
-        "args": ["mcp", "--endpoint", "localhost:9000"]
+        "args": ["mcp", "--config", "/etc/wadjet/config.yaml", "--api-key", "..."]
       }
     }
   }`,
@@ -2053,24 +2109,56 @@ Configure in Claude Desktop's claude_desktop_config.json:
 
 			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
+			// Resolve the auth provider and the operator's identity BEFORE
+			// opening the DB, so a misconfigured secure deployment fails closed
+			// without ever exposing a query surface.
+			var provider *auth.Provider
+			var identity *auth.Identity
+			if configFile != "" {
+				cfg, loadErr := config.Load(configFile)
+				if loadErr != nil {
+					return fmt.Errorf("loading config %q: %w", configFile, loadErr)
+				}
+				provider = buildProviderFromConfig(cfg, logger)
+			}
+
+			token := mcpAPIKey
+			if token == "" {
+				token = os.Getenv("WADJET_MCP_API_KEY")
+			}
+			identity, err := resolveMCPAuth(provider, token)
+			if err != nil {
+				return err
+			}
+			if identity != nil {
+				logger.Info("MCP auth enabled", "identity", identity.Name, "role", identity.Role, "method", identity.Method)
+			} else {
+				logger.Warn("MCP server running WITHOUT authentication — ABAC row/column security is not enforced; " +
+					"use --config with an auth block for secured deployments")
+			}
+
 			store, err := newStore()
 			if err != nil {
 				return fmt.Errorf("initializing storage: %w", err)
 			}
 
 			db, err := wadjet.Open(ctx, wadjet.Config{
-				Store:  store,
-				Bucket: bucket,
-				Logger: logger,
+				Store:        store,
+				Bucket:       bucket,
+				Logger:       logger,
+				AuthProvider: provider,
 			})
 			if err != nil {
 				return fmt.Errorf("opening database: %w", err)
 			}
 
-			srv := mcp.NewServer(db, logger)
+			srv := mcp.NewServerWithIdentity(db, logger, identity)
 			return srv.ServeStdio(ctx, os.Stdin, os.Stdout)
 		},
 	}
+	cmd.Flags().StringVar(&mcpAPIKey, "api-key", "",
+		"API key/bearer token establishing the MCP session identity (or set WADJET_MCP_API_KEY). Required when auth is configured.")
+	return cmd
 }
 
 // parseS3URL splits "s3://bucket/path/..." into (bucket, path).

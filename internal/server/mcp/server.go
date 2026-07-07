@@ -2,9 +2,21 @@
 // This allows AI agents (Claude, Cursor, etc.) to discover tables, inspect schemas,
 // and execute SQL queries against a Wadjet instance.
 //
-// Supports two transports:
-//   - stdio: JSON-RPC over stdin/stdout (for CLI integration with Claude Desktop/Code)
-//   - HTTP+SSE: Server-Sent Events for server-to-client, HTTP POST for client-to-server
+// Transport: JSON-RPC 2.0 over stdio (stdin/stdout), for CLI integration with
+// Claude Desktop/Code. There is deliberately no network transport — an
+// HTTP+SSE server was removed because it accepted SQL with no authentication
+// and no ABAC identity, which bypassed row/column security. If a network MCP
+// endpoint is ever reintroduced it must authenticate every request and stamp
+// an identity onto the context (see identity handling below) before reaching
+// db.Query.
+//
+// Security model: when the backing DB is opened with an AuthProvider, the MCP
+// server is constructed with the identity that authenticated the operator
+// launching it (see NewServerWithIdentity). That identity is stamped onto
+// every request context so db.Query → EnforcePlanPolicies applies table/row/
+// column policies. Without a provider (dev/embedded, no policy to enforce)
+// the server runs unauthenticated over a direct-to-store DB — the same access
+// the operator already holds via the store credentials.
 package mcp
 
 import (
@@ -14,12 +26,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/auth"
 	"github.com/citc-tech/wadjet/wadjet"
 )
 
@@ -33,14 +44,28 @@ const (
 type Server struct {
 	db     *wadjet.DB
 	logger *slog.Logger
+	// identity, when non-nil, is stamped onto every request context so
+	// db.Query enforces ABAC row/column policies for this caller. Nil means
+	// the DB has no AuthProvider (nothing to enforce) — see package docs.
+	identity *auth.Identity
 }
 
-// NewServer creates a new MCP server backed by a Wadjet DB.
+// NewServer creates a new MCP server backed by a Wadjet DB with no ABAC
+// identity. Use this only for DBs opened WITHOUT an AuthProvider (dev/embedded)
+// — there is no security policy to enforce. For a DB with an AuthProvider, use
+// NewServerWithIdentity so queries run under an authenticated identity.
 func NewServer(db *wadjet.DB, logger *slog.Logger) *Server {
+	return NewServerWithIdentity(db, logger, nil)
+}
+
+// NewServerWithIdentity creates an MCP server that runs every query under the
+// given identity. When identity is non-nil, its ABAC subject is applied to all
+// tool queries; when nil, the server behaves like NewServer.
+func NewServerWithIdentity(db *wadjet.DB, logger *slog.Logger, identity *auth.Identity) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{db: db, logger: logger}
+	return &Server{db: db, logger: logger, identity: identity}
 }
 
 // ServeStdio runs the MCP server over stdin/stdout using JSON-RPC 2.0.
@@ -55,56 +80,6 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) er
 	}
 	t.scanner.Buffer(make([]byte, 0, 1024*1024), 10*1024*1024)
 	return s.serve(ctx, t)
-}
-
-// ServeHTTP starts an HTTP+SSE MCP server on the given address.
-// Returns after the listener is established. Call Shutdown to stop.
-func ServeHTTP(s *Server, addr string) (*HTTPServer, error) {
-	hs := &HTTPServer{
-		mcp:    s,
-		done:   make(chan struct{}),
-		logger: s.logger,
-	}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/sse", hs.handleSSE)
-	mux.HandleFunc("/message", hs.handleMessage)
-
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("mcp http listen: %w", err)
-	}
-	hs.listener = ln
-	hs.httpServer = &http.Server{Handler: mux}
-
-	s.logger.Info("MCP HTTP+SSE server listening", "addr", ln.Addr().String())
-	go hs.httpServer.Serve(ln)
-	return hs, nil
-}
-
-// HTTPServer wraps the HTTP+SSE transport lifecycle.
-type HTTPServer struct {
-	mcp        *Server
-	httpServer *http.Server
-	listener   net.Listener
-	done       chan struct{}
-	logger     *slog.Logger
-}
-
-// Addr returns the listener address.
-func (h *HTTPServer) Addr() string {
-	if h.listener == nil {
-		return ""
-	}
-	return h.listener.Addr().String()
-}
-
-// Shutdown stops the HTTP server gracefully.
-func (h *HTTPServer) Shutdown() {
-	close(h.done)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	h.httpServer.Shutdown(ctx)
 }
 
 // JSON-RPC 2.0 types
@@ -189,6 +164,14 @@ type transport interface {
 
 // serve is the main dispatch loop.
 func (s *Server) serve(ctx context.Context, t transport) error {
+	// Stamp the operator's identity onto the base context so every query
+	// enforces ABAC. When identity is nil the context is unchanged (no policy
+	// to enforce). This is the single place identity enters query execution —
+	// there is no per-request credential over stdio (one local session, one
+	// operator), so the process-lifetime identity is authoritative.
+	if s.identity != nil {
+		ctx = auth.ContextWithIdentity(ctx, s.identity)
+	}
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -702,96 +685,3 @@ func (t *stdioTransport) Send(resp jsonRPCResponse) error {
 	_, err = fmt.Fprintf(t.out, "%s\n", data)
 	return err
 }
-
-// HTTP+SSE transport
-
-func (h *HTTPServer) handleSSE(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	// Generate a session ID and create a message channel
-	sessionID := fmt.Sprintf("session-%d", time.Now().UnixNano())
-	msgCh := make(chan jsonRPCResponse, 64)
-
-	sseSessionsMu.Lock()
-	sseSessions[sessionID] = msgCh
-	sseSessionsMu.Unlock()
-
-	defer func() {
-		sseSessionsMu.Lock()
-		delete(sseSessions, sessionID)
-		sseSessionsMu.Unlock()
-	}()
-
-	// Send the endpoint event so the client knows where to POST
-	fmt.Fprintf(w, "event: endpoint\ndata: /message?sessionId=%s\n\n", sessionID)
-	flusher.Flush()
-
-	// Stream responses
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-h.done:
-			return
-		case resp := <-msgCh:
-			data, err := json.Marshal(resp)
-			if err != nil {
-				continue
-			}
-			fmt.Fprintf(w, "event: message\ndata: %s\n\n", data)
-			flusher.Flush()
-		}
-	}
-}
-
-func (h *HTTPServer) handleMessage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	sessionID := r.URL.Query().Get("sessionId")
-	if sessionID == "" {
-		http.Error(w, "missing sessionId", http.StatusBadRequest)
-		return
-	}
-
-	sseSessionsMu.RLock()
-	ch, ok := sseSessions[sessionID]
-	sseSessionsMu.RUnlock()
-	if !ok {
-		http.Error(w, "unknown session", http.StatusNotFound)
-		return
-	}
-
-	var req jsonRPCRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON-RPC: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	resp := h.mcp.handleRequest(r.Context(), &req)
-	if resp != nil {
-		select {
-		case ch <- *resp:
-		default:
-			h.logger.Warn("MCP SSE channel full, dropping response")
-		}
-	}
-
-	w.WriteHeader(http.StatusAccepted)
-}
-
-var (
-	sseSessions   = make(map[string]chan jsonRPCResponse)
-	sseSessionsMu sync.RWMutex
-)
