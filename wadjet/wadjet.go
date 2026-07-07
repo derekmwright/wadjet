@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/alerts"
@@ -89,7 +90,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 			}
 			return sinks
 		})
-		sched := alerts.NewScheduler(cat, ex, sinkFactory)
+		sched := alerts.NewScheduler(cat, ex, sinkFactory, db.alertEvalDecorator())
 		schedCtx, cancel := context.WithCancel(context.Background())
 		db.alertScheduler = sched
 		db.alertSchedulerStop = cancel
@@ -733,14 +734,43 @@ func (db *DB) showTables(ctx context.Context) (*QueryResult, error) {
 	}, nil
 }
 
+// alertEvalDecorator returns the scheduler's per-alert context decorator that
+// runs each alert query under its creator's identity (definer's rights). Auth
+// disabled → context untouched; legacy alerts with no stored identity run
+// fail-closed under ABAC and are warned about once per process.
+func (db *DB) alertEvalDecorator() alerts.EvalContextFunc {
+	var warned sync.Map
+	return func(ctx context.Context, m catalog.AlertMeta) context.Context {
+		snap := auth.IdentitySnapshot{
+			Name:       m.CreatedBy,
+			Role:       m.CreatedByRole,
+			Method:     m.CreatedByMethod,
+			Attributes: m.CreatedByAttrs,
+		}
+		newCtx, attributed := auth.StampDefiner(ctx, db.authProvider, snap)
+		if !attributed {
+			if _, seen := warned.LoadOrStore(m.Name, true); !seen {
+				db.logger.Warn("alert has no stored creator identity; running fail-closed under ABAC — recreate it to attribute a definer",
+					"alert", m.Name)
+			}
+		}
+		return newCtx
+	}
+}
+
 // createAlertSQL handles CREATE ALERT DDL in embedded mode.
 func (db *DB) createAlertSQL(ctx context.Context, info *plansql.CreateAlertInfo, _ string) (*QueryResult, error) {
 	if db.alertScheduler == nil {
 		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
 	}
+	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
+		return nil, err
+	}
 	if err := alerts.EnsureHistoryTable(ctx, db.catalog); err != nil {
 		return nil, fmt.Errorf("ensuring alert_history: %w", err)
 	}
+	// Snapshot the creator's identity for definer's-rights scheduled runs.
+	snap := auth.SnapshotIdentity(ctx)
 	m := catalog.AlertMeta{
 		Name:            info.Name,
 		QueryText:       info.QueryText,
@@ -750,6 +780,10 @@ func (db *DB) createAlertSQL(ctx context.Context, info *plansql.CreateAlertInfo,
 		InsertIntoTable: info.InsertInto,
 		Enabled:         true,
 		CreatedAt:       time.Now().UTC(),
+		CreatedBy:       snap.Name,
+		CreatedByRole:   snap.Role,
+		CreatedByMethod: snap.Method,
+		CreatedByAttrs:  snap.Attributes,
 	}
 	if err := db.catalog.CreateAlert(ctx, m); err != nil {
 		return nil, err
@@ -764,6 +798,9 @@ func (db *DB) createAlertSQL(ctx context.Context, info *plansql.CreateAlertInfo,
 func (db *DB) dropAlertSQL(ctx context.Context, info *plansql.DropAlertInfo) (*QueryResult, error) {
 	if db.alertScheduler == nil {
 		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
+	}
+	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
+		return nil, err
 	}
 	if _, err := db.catalog.GetAlert(ctx, info.Name); err != nil {
 		if info.IfExists {
@@ -787,6 +824,9 @@ func (db *DB) dropAlertSQL(ctx context.Context, info *plansql.DropAlertInfo) (*Q
 func (db *DB) alterAlertSQL(ctx context.Context, info *plansql.AlterAlertInfo) (*QueryResult, error) {
 	if db.alertScheduler == nil {
 		return nil, fmt.Errorf("alerts are disabled; set Config.EnableAlerts=true")
+	}
+	if err := auth.RequirePermission(db.authProvider, ctx, "admin"); err != nil {
+		return nil, err
 	}
 	if err := db.catalog.SetAlertEnabled(ctx, info.Name, info.Enable); err != nil {
 		return nil, err
