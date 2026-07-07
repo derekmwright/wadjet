@@ -96,6 +96,7 @@ var (
 	dataPlaneAddr         string
 	coordDataPlane        string
 	localFastPathBytes    int64
+	sortMergeJoinBytes    int64
 	streamingExchange     bool
 	peerExchangeAddr      string
 	peerExchangeAdvertise string
@@ -152,6 +153,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&dataPlane, "data-plane", "nats", "Worker↔coord data-plane transport: nats (default) or grpc. See project_split_plane_design_2026-05-20.")
 	rootCmd.PersistentFlags().StringVar(&dataPlaneAddr, "data-plane-addr", ":9091", "Data-plane gRPC listen address (coord/standalone)")
 	rootCmd.PersistentFlags().StringVar(&coordDataPlane, "coord-data-plane", "", "Coord's data-plane host:port (worker only; defaults to coord-host + 9091)")
+	rootCmd.PersistentFlags().Int64Var(&sortMergeJoinBytes, "sort-merge-join-bytes", 0, "Inner equi-joins whose sides BOTH exceed this estimated size run as sort-merge joins (both sides sort to spill-friendly runs and stream a merge) instead of hash joins, bounding join memory at merge-cursor state instead of a resident build table. Local single-process paths only for now; the distributed stage DAG keeps hash/broadcast joins. 0 = disabled (default). See docs/design/sort-merge-join.md.")
 	rootCmd.PersistentFlags().Int64Var(&localFastPathBytes, "local-fastpath-bytes", coordinator.DefaultLocalFastPathBytes, "Queries whose post-pruning catalog scan bytes stay under this threshold execute in-process on the coordinator (skipping the distributed stage DAG and its per-stage object-store round trips). 0 = disabled.")
 	rootCmd.PersistentFlags().BoolVar(&streamingExchange, "streaming-exchange", true, "Streaming exchange: consumers fetch stage outputs from the producing workers' local disk over gRPC with async S3 upload; every failure falls through to the durable S3 path. Default true (validated 2026-07-02: SF10 −10%, SF100 −23% suite wall, row-identical, zero fault-tolerance events); --streaming-exchange=false restores synchronous S3-only shuffle. See docs/design/streaming-exchange.md.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAddr, "peer-exchange-addr", ":0", "Peer-exchange (FetchShuffle) listen address. Default :0 picks a free port (the address reaches peers via heartbeats, and a fixed default would collide when multiple workers share a host); pin it when firewalls need a known port.")
@@ -877,6 +879,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		ResultBucket:       bucket,
 		DynamicFilters:     dynamicFiltersFromEnv(),
 		LocalFastPathBytes: localFastPathBytes,
+		SortMergeJoinBytes: sortMergeJoinBytes,
 		StreamingExchange:  streamingExchange,
 	}, cat, nc, js, logger)
 
@@ -953,10 +956,11 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Build config manager and auth provider for hot-reload
 	srvCfg := server.Config{
-		Addr:        httpAddr,
-		Catalog:     cat,
-		Coordinator: coord,
-		Metrics:     m,
+		Addr:               httpAddr,
+		Catalog:            cat,
+		Coordinator:        coord,
+		Metrics:            m,
+		SortMergeJoinBytes: sortMergeJoinBytes,
 	}
 
 	var cfgMgr *config.Manager
@@ -1172,6 +1176,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		ResultBucket:       bucket,
 		DynamicFilters:     dynamicFiltersFromEnv(),
 		LocalFastPathBytes: localFastPathBytes,
+		SortMergeJoinBytes: sortMergeJoinBytes,
 		StreamingExchange:  streamingExchange,
 	}, cat, nc, js, logger)
 
@@ -1237,11 +1242,12 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	dlq := coordinator.NewDLQ(js)
 
 	srvCfg := server.Config{
-		Addr:        httpAddr,
-		Catalog:     cat,
-		Coordinator: coord,
-		DLQ:         dlq,
-		Metrics:     m,
+		Addr:               httpAddr,
+		Catalog:            cat,
+		Coordinator:        coord,
+		DLQ:                dlq,
+		Metrics:            m,
+		SortMergeJoinBytes: sortMergeJoinBytes,
 	}
 
 	var cfgMgr *config.Manager

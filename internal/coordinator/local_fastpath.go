@@ -91,6 +91,7 @@ func (c *Coordinator) tryLocalFastPath(ctx context.Context, queryID string, logi
 	// resident operator state, so a misestimate degrades to disk instead
 	// of coordinator OOM.
 	planner.MemoryBudget = 8 * threshold
+	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	physPlan, err := planner.Plan(ctx, logicalPlan)
 	if err != nil {
 		c.logger.Warn("local fast path plan failed, routing to DAG",

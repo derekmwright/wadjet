@@ -54,6 +54,7 @@ type Config struct {
 	ShutdownTimeout    time.Duration            // graceful shutdown drain timeout (default 30s)
 	QueryLimits        *config.QueryLimits      // global cost-based query limits (nil = unlimited)
 	RoleLimits         map[string]*config.QueryLimits // per-role overrides (nil = use global)
+	SortMergeJoinBytes int64                    // local sort-merge-join gate (0 = disabled)
 }
 
 // Server is the Wadjet HTTP API server.
@@ -132,7 +133,9 @@ func (s *Server) Mux() chi.Router {
 // per-query mutable state (scanCounter, scanCache, cteCache) so it must not be
 // shared across concurrent requests.
 func (s *Server) newPlanner() *physical.Planner {
-	return physical.NewPlanner(s.catalog)
+	p := physical.NewPlanner(s.catalog)
+	p.SortMergeJoinBytes = s.config.SortMergeJoinBytes
+	return p
 }
 
 // Start starts the HTTP server.

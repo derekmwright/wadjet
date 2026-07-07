@@ -36,6 +36,7 @@ type DB struct {
 	authProvider       *auth.Provider    // nil = no auth enforcement
 	alertScheduler     *alerts.Scheduler // non-nil when EnableAlerts is set
 	alertSchedulerStop context.CancelFunc
+	sortMergeJoinBytes int64
 }
 
 // Config holds configuration for creating a DB instance.
@@ -43,10 +44,14 @@ type Config struct {
 	Store        objstore.Store
 	Bucket       string
 	Logger       *slog.Logger
-	MetaKV       catalog.MetaKV  // optional: NATS KV for production, nil = in-memory
-	MemoryBudget int64           // per-query memory budget in bytes (0 = unlimited)
-	SpillDir     string          // directory for spill-to-disk files (empty = os temp dir)
-	AuthProvider *auth.Provider  // optional: enables ABAC enforcement at query level
+	MetaKV       catalog.MetaKV // optional: NATS KV for production, nil = in-memory
+	MemoryBudget int64          // per-query memory budget in bytes (0 = unlimited)
+	SpillDir     string         // directory for spill-to-disk files (empty = os temp dir)
+	AuthProvider *auth.Provider // optional: enables ABAC enforcement at query level
+	// SortMergeJoinBytes routes inner equi-joins whose sides BOTH exceed this
+	// estimated size through the sort-merge join instead of the hash join
+	// (docs/design/sort-merge-join.md). 0 = disabled (default).
+	SortMergeJoinBytes int64
 	// EnableAlerts turns on the CREATE ALERT scheduler in embedded mode.
 	// When true, Open() creates a Scheduler that evaluates alerts on cadence.
 	EnableAlerts bool
@@ -69,13 +74,14 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 	}
 
 	db := &DB{
-		store:        cfg.Store,
-		catalog:      cat,
-		bucket:       cfg.Bucket,
-		memoryBudget: cfg.MemoryBudget,
-		spillDir:     cfg.SpillDir,
-		logger:       cfg.Logger,
-		authProvider: cfg.AuthProvider,
+		store:              cfg.Store,
+		catalog:            cat,
+		bucket:             cfg.Bucket,
+		memoryBudget:       cfg.MemoryBudget,
+		spillDir:           cfg.SpillDir,
+		logger:             cfg.Logger,
+		authProvider:       cfg.AuthProvider,
+		sortMergeJoinBytes: cfg.SortMergeJoinBytes,
 	}
 
 	if cfg.EnableAlerts {
@@ -147,6 +153,7 @@ func (db *DB) newPlanner() *physical.Planner {
 	p := physical.NewPlanner(db.catalog)
 	p.MemoryBudget = db.memoryBudget
 	p.SpillDir = db.spillDir
+	p.SortMergeJoinBytes = db.sortMergeJoinBytes
 	return p
 }
 

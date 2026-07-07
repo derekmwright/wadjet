@@ -346,6 +346,16 @@ type Planner struct {
 	// planner's join-type logic.
 	BroadcastBytesThreshold int64
 
+	// SortMergeJoinBytes gates the sort-merge join path for big-vs-big inner
+	// equi-joins (docs/design/sort-merge-join.md). A join takes SMJ only when
+	// BOTH sides' estimated post-selectivity bytes reach this threshold —
+	// small builds keep the strictly-better hash/broadcast paths. Zero (the
+	// shipped default) disables SMJ entirely; the planner behaves exactly as
+	// before. Distributed callers should derive it from per-worker pool
+	// budget (the broadcast-threshold pattern) so "too big to sit resident"
+	// tracks cluster memory.
+	SortMergeJoinBytes int64
+
 	// DynamicFiltersEnabled gates the Trino-style dynamic-filter planner
 	// pass. When true, applyDynamicFilters annotates eligible hash_join
 	// build/probe leaf scans with Emit/Consume specs and adds the stat-dep
@@ -3674,43 +3684,9 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 	if len(joinNode.Children) < 2 {
 		return false
 	}
-	// Walk through Filter/Project/Limit wrappers to find the underlying Scan.
-	// Small dimension tables (e.g., region with r_name='EUROPE') are often
-	// wrapped in Filter nodes, but are still small enough to broadcast.
-	scan := findScanNode(joinNode.Children[1])
-	if scan == nil {
+	totalBytes, ok := p.estimateSubtreeBytes(joinNode.Children[1])
+	if !ok {
 		return false
-	}
-	// Estimate size from file count
-	manifest, err := p.catalog.GetManifest(context.Background(), scan.TableName)
-	if err != nil {
-		return false
-	}
-	var totalBytes, totalRows int64
-	for _, part := range manifest.Partitions {
-		for _, f := range part.Files {
-			totalBytes += f.SizeBytes
-			totalRows += f.NumRows
-		}
-	}
-	// Apply filter selectivity to the build-side bytes estimate. Q17's
-	// `part WHERE p_brand=... AND p_container=...` filters 2M rows to
-	// ~13K, dropping the build size from 200 MB raw to ~1.5 MB — well
-	// below the broadcast threshold. Without this scaling, the raw
-	// 200 MB exceeds the threshold and Q17 falls through to a
-	// hash-shuffle that pays exchange-repartition for BOTH lineitem
-	// (60M rows ≈ 6 GB at SF10) and part.
-	//
-	// Source of selectivity: RelStatsOf walks the build subtree applying
-	// histogram-driven predicate selectivity (CBO Phase 3 work). For
-	// tables without HLL/histogram, the existing 0.33/0.1 heuristic
-	// still applies so the scaling is at-worst-conservative.
-	if totalRows > 0 {
-		stats := logical.RelStatsOf(joinNode.Children[1])
-		if stats.Rows > 0 && stats.Rows < float64(totalRows) {
-			scale := stats.Rows / float64(totalRows)
-			totalBytes = int64(float64(totalBytes) * scale)
-		}
 	}
 	// Broadcast threshold: defaults to 100 MB (legacy behavior). Distributed
 	// callers override via BroadcastBytesThreshold to adapt the decision to
@@ -3724,6 +3700,50 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 		return false // broadcast disabled
 	}
 	return totalBytes <= threshold
+}
+
+// estimateSubtreeBytes estimates a join input's post-selectivity size by
+// walking through Filter/Project/Limit wrappers to the underlying Scan and
+// scaling the table's manifest bytes by the subtree's estimated selectivity.
+// Returns ok=false when the subtree has no scan root (e.g. another join) or
+// the manifest is unavailable — callers must treat "unknown" conservatively.
+func (p *Planner) estimateSubtreeBytes(n *logical.Node) (int64, bool) {
+	scan := findScanNode(n)
+	if scan == nil {
+		return 0, false
+	}
+	// Estimate size from file count
+	manifest, err := p.catalog.GetManifest(context.Background(), scan.TableName)
+	if err != nil {
+		return 0, false
+	}
+	var totalBytes, totalRows int64
+	for _, part := range manifest.Partitions {
+		for _, f := range part.Files {
+			totalBytes += f.SizeBytes
+			totalRows += f.NumRows
+		}
+	}
+	// Apply filter selectivity to the bytes estimate. Q17's
+	// `part WHERE p_brand=... AND p_container=...` filters 2M rows to
+	// ~13K, dropping the build size from 200 MB raw to ~1.5 MB — well
+	// below the broadcast threshold. Without this scaling, the raw
+	// 200 MB exceeds the threshold and Q17 falls through to a
+	// hash-shuffle that pays exchange-repartition for BOTH lineitem
+	// (60M rows ≈ 6 GB at SF10) and part.
+	//
+	// Source of selectivity: RelStatsOf walks the subtree applying
+	// histogram-driven predicate selectivity (CBO Phase 3 work). For
+	// tables without HLL/histogram, the existing 0.33/0.1 heuristic
+	// still applies so the scaling is at-worst-conservative.
+	if totalRows > 0 {
+		stats := logical.RelStatsOf(n)
+		if stats.Rows > 0 && stats.Rows < float64(totalRows) {
+			scale := stats.Rows / float64(totalRows)
+			totalBytes = int64(float64(totalBytes) * scale)
+		}
+	}
+	return totalBytes, true
 }
 
 // findScanNode walks through pass-through nodes (Filter, Project, Limit)
@@ -3873,6 +3893,15 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// probe-side and right keys are build-side. This avoids the expensive
 		// post-build FixKeyAssignment hash table rebuild.
 		fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+	}
+
+	// Big-vs-big inner equi-joins route to sort-merge join when BOTH sides'
+	// estimated bytes reach SortMergeJoinBytes (0 = disabled, the shipped
+	// default — this branch is dormant unless the deploy opts in). Small
+	// builds keep the strictly-better hash path below, unchanged.
+	if joinType == exec.InnerJoin && node.JoinFilter == "" && len(leftKeys) > 0 &&
+		p.shouldSortMergeJoin(node) {
+		return p.buildSortMergeJoin(ctx, node, leftKeys, rightKeys)
 	}
 
 	hj := exec.NewHashJoin(joinType, leftKeys, rightKeys)

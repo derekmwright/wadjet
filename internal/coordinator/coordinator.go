@@ -63,6 +63,13 @@ type Config struct {
 	// unchanged). `wadjet serve` enables it by default via its flag
 	// (DefaultLocalFastPathBytes).
 	LocalFastPathBytes int64
+	// SortMergeJoinBytes routes inner equi-joins whose sides BOTH exceed
+	// this estimated size through the sort-merge join instead of the hash
+	// join (docs/design/sort-merge-join.md). Phase 2 wires the local
+	// single-process paths only (fast path, standalone); the distributed
+	// stage DAG keeps hash/broadcast joins until phase 3. 0 = disabled
+	// (default, dormant).
+	SortMergeJoinBytes int64
 	// StreamingExchange annotates dispatched tasks with peer-location
 	// hints (Task.InputLocations) and per-query fetch tokens so consumers
 	// stream stage outputs from the producing workers' local disk instead
