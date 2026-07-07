@@ -3015,10 +3015,19 @@ func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Colu
 }
 
 func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]parquet.Column, []outColSource) {
+	return joinOutputSchemaWithMapping(p.join.JoinType, leftSchema, p.join.buildSchema,
+		p.join.BuildTableAlias, p.join.QualifyAllBuildCols, p.OutputFilter)
+}
+
+// joinOutputSchemaWithMapping computes a join's output schema — probe columns
+// first, then build columns with duplicate-name qualification — and the
+// per-output-column source mapping. Shared by HashJoinProbe and SortMergeJoin
+// so both emit identical schemas for the same join shape.
+func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, qualifyAllBuildCols bool, outputFilter map[string]bool) ([]parquet.Column, []outColSource) {
 	var out []parquet.Column
 	var mapping []outColSource
 
-	if p.join.JoinType == RightJoin || p.join.JoinType == FullOuterJoin {
+	if joinType == RightJoin || joinType == FullOuterJoin {
 		for i, col := range leftSchema {
 			col.Nullable = true
 			out = append(out, col)
@@ -3036,19 +3045,19 @@ func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]
 		seen[col.Name] = true
 	}
 
-	for i, col := range p.join.buildSchema {
+	for i, col := range buildSchema {
 		isDup := seen[col.Name]
 		// Force qualification for self-join scenarios — the planner sets
 		// QualifyAllBuildCols when this build is one of two co-pathing
 		// scans of the same source table. Without it, the FIRST scan's
 		// column ships unqualified ("n_name") and downstream lookups for
 		// the qualified name ("n1.n_name") miss.
-		shouldQualify := (isDup || p.join.QualifyAllBuildCols) && p.join.BuildTableAlias != ""
+		shouldQualify := (isDup || qualifyAllBuildCols) && buildAlias != ""
 		switch {
 		case shouldQualify:
 			qualCol := col
-			qualCol.Name = p.join.BuildTableAlias + "." + col.Name
-			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
+			qualCol.Name = buildAlias + "." + col.Name
+			if joinType == LeftJoin || joinType == FullOuterJoin {
 				qualCol.Nullable = true
 			}
 			out = append(out, qualCol)
@@ -3056,7 +3065,7 @@ func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]
 		case isDup:
 			// Duplicate with no alias to disambiguate by — skip (backward compatible).
 		default:
-			if p.join.JoinType == LeftJoin || p.join.JoinType == FullOuterJoin {
+			if joinType == LeftJoin || joinType == FullOuterJoin {
 				col.Nullable = true
 			}
 			out = append(out, col)
@@ -3068,17 +3077,17 @@ func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]
 	// Apply output filter: skip columns not needed by downstream operators.
 	// This avoids allocating and gathering unneeded intermediate columns
 	// in multi-way join pipelines, reducing both CPU and memory pressure.
-	if len(p.OutputFilter) > 0 {
+	if len(outputFilter) > 0 {
 		var filteredSchema []parquet.Column
 		var filteredMapping []outColSource
 		for i, col := range out {
-			keep := p.OutputFilter[col.Name]
+			keep := outputFilter[col.Name]
 			// For qualified columns (e.g., "n2.n_name" from self-joins), also
 			// check if the unqualified base name is needed. Without this, the
 			// output filter would drop disambiguated self-join columns.
 			if !keep {
 				if dot := strings.IndexByte(col.Name, '.'); dot >= 0 {
-					keep = p.OutputFilter[col.Name[dot+1:]]
+					keep = outputFilter[col.Name[dot+1:]]
 				}
 			}
 			if keep {
