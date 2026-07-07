@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
 
@@ -29,6 +30,17 @@ import (
 // path. The N output files are uploaded by the executor to S3 under a stable
 // per-partition prefix, and downstream join tasks read all files at their
 // assigned partition prefix via partitionShardSource.
+//
+// Concurrency model: the lock is PER PARTITION, not sink-wide. Hashing and
+// row scatter are per-call private state (pooled scratch), so concurrent
+// Consume calls — morsel-parallel fragment consumers, or exec.Pipeline's
+// parallel workers — contend only when appending to the SAME partition, and
+// each such critical section covers 1/numParts of a batch plus an occasional
+// 64 KB chunk encode. The previous sink-wide mutex serialized the entire
+// consume (hash + scatter + append + flush) across k consumers, which is what
+// kept join/probe fragments +12-27% slower under morsel-auto at SF100
+// (2026-07-07 default-flip gate) — the sink was the fragment's dominant cost
+// and only one consumer could be inside it.
 type partitionedShuffleSink struct {
 	spillDir   string
 	keys       []string // partition key column names
@@ -36,24 +48,43 @@ type partitionedShuffleSink struct {
 	schema     []parquet.Column
 	flushBytes int // per-partition row buffer flush threshold
 
-	mu             sync.Mutex
-	parts          []*partitionWriter
-	closed         bool
-	keyIdxs        []int    // resolved column indices for keys (set on first Consume)
-	partScratch    []int    // per-row partition assignment, reused across batches
-	hashScratch    []uint64 // per-row uint64 hash accumulator, reused across batches
-	perPartRows    [][]int  // per-partition source-row indices, reused across batches
+	parts     []*partitionWriter // immutable after Init; per-partition state guarded by partitionWriter.mu
+	closed    atomic.Bool
+	finalized atomic.Bool
+
+	// Partition-key column indices, resolved once against the first batch.
+	keyOnce sync.Once
+	keyIdxs []int
+	keyErr  error
+
+	// Per-consume scratch (partition assignment, hash accumulator, scatter
+	// lists). Pooled because concurrent Consume calls each need private
+	// scratch; a sink-level buffer would reintroduce the global lock.
+	scratchPool sync.Pool
+}
+
+// consumeScratch is the per-Consume private working set.
+type consumeScratch struct {
+	partScratch []int    // per-row partition assignment
+	hashScratch []uint64 // per-row uint64 hash accumulator
+	perPartRows [][]int  // per-partition source-row indices
 }
 
 // partitionWriter holds the open file handle and incremental state for one
-// output partition.
+// output partition. mu guards ALL mutable fields; the file handle itself is
+// immutable after Init. Chunks written by different Consume calls may
+// interleave within a partition file — a .wshf file is a self-contained
+// chunk sequence, so interleaving is valid as long as individual chunk
+// writes are serialized (which mu provides).
 type partitionWriter struct {
-	file     *os.File
-	bufFile  *bufio.Writer     // wraps file so the many small Writes from
-	                           // shuffleWriter coalesce into syscall-sized
-	                           // chunks. Pre-2026-04-30 the shuffleWriter
-	                           // emitted ~1 syscall per non-null bytes-row,
-	                           // and that was 90%+ of shuffle CPU.
+	mu sync.Mutex
+
+	file    *os.File
+	bufFile *bufio.Writer // wraps file so the many small Writes from
+	// shuffleWriter coalesce into syscall-sized
+	// chunks. Pre-2026-04-30 the shuffleWriter
+	// emitted ~1 syscall per non-null bytes-row,
+	// and that was 90%+ of shuffle CPU.
 	writer   *shuffleWriter
 	rowBuf   *batch.RecordBatch // accumulator: rows destined for this partition
 	bufRows  int                // rows currently in rowBuf
@@ -102,93 +133,102 @@ func (s *partitionedShuffleSink) Init(_ context.Context) error {
 
 // Consume hash-partitions each row in b into its target partition, appending
 // to that partition's row buffer. Buffers are flushed when they exceed
-// flushBytes worth of accumulated rows. Safe for concurrent calls from
-// parallel pipeline workers — serialized via mu.
+// flushBytes worth of accumulated rows. Safe for concurrent calls: hashing
+// and scatter use per-call pooled scratch, and partition state is guarded by
+// per-partition locks (see the type comment for the concurrency model). Each
+// call operates on its own batch b — callers never share a batch across
+// concurrent Consume calls (morsel views and pipeline batches are
+// single-owner by contract).
 func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.closed.Load() {
+		return fmt.Errorf("partitionedShuffleSink: Consume after Close")
+	}
 
-	if len(s.keyIdxs) == 0 {
-		// Resolve key column indices from schema on first batch. Use
-		// the bidirectional fallback so qualified planner-emitted keys
-		// ("n1.n_name") still resolve against unqualified scan output
-		// ("n_name") and vice-versa for self-join chain output.
-		s.keyIdxs = make([]int, len(s.keys))
+	// Resolve key column indices from schema on the first batch. Use the
+	// bidirectional fallback so qualified planner-emitted keys ("n1.n_name")
+	// still resolve against unqualified scan output ("n_name") and
+	// vice-versa for self-join chain output. All batches share one schema
+	// (pipeline guarantee), so first-batch resolution binds for all.
+	s.keyOnce.Do(func() {
+		idxs := make([]int, len(s.keys))
 		for i, k := range s.keys {
 			idx := exec.ColumnIndexFallback(b, k)
 			if idx < 0 {
-				return fmt.Errorf("partitioned shuffle: key %q not in schema", k)
+				s.keyErr = fmt.Errorf("partitioned shuffle: key %q not in schema", k)
+				return
 			}
-			s.keyIdxs[i] = idx
+			idxs[i] = idx
 		}
+		s.keyIdxs = idxs
+	})
+	if s.keyErr != nil {
+		return s.keyErr
 	}
 
 	// Vectorized partition assignment: one pass per key column over the
 	// active rows, mixing into a per-row hash accumulator. Pre-2026-04-30
 	// this code did `fnv.New64a()` per row → 1M heap allocations of the
 	// hasher struct on a SF1 lineitem shuffle. Inlined FNV-1a here is
-	// allocation-free.
+	// allocation-free. Scratch is pooled per call so concurrent consumers
+	// never share it.
 	n := b.ActiveLen()
-	if cap(s.partScratch) < n {
-		s.partScratch = make([]int, n)
+	sc, _ := s.scratchPool.Get().(*consumeScratch)
+	if sc == nil {
+		sc = &consumeScratch{perPartRows: make([][]int, s.numParts)}
 	}
-	if cap(s.hashScratch) < n {
-		s.hashScratch = make([]uint64, n)
+	defer s.scratchPool.Put(sc)
+	if cap(sc.partScratch) < n {
+		sc.partScratch = make([]int, n)
 	}
-	parts := s.partScratch[:n]
-	hashRowsIntoPartitions(b, s.keyIdxs, s.numParts, s.hashScratch[:n], parts)
+	if cap(sc.hashScratch) < n {
+		sc.hashScratch = make([]uint64, n)
+	}
+	parts := sc.partScratch[:n]
+	hashRowsIntoPartitions(b, s.keyIdxs, s.numParts, sc.hashScratch[:n], parts)
 
 	// Group rows by partition so each partition's columns are appended in
 	// one bulk pass with the type switch hoisted outside the row loop. The
 	// alternative (per-row appendRow) does a 13-arm type switch per column
 	// per row, which on Q03 SF1 was ~64M switch dispatches for the lineitem
 	// shuffle and was the dominant wall-time cost.
-	if s.perPartRows == nil {
-		s.perPartRows = make([][]int, s.numParts)
-	}
-	for p := range s.perPartRows {
-		s.perPartRows[p] = s.perPartRows[p][:0]
+	for p := range sc.perPartRows {
+		sc.perPartRows[p] = sc.perPartRows[p][:0]
 	}
 	if b.Sel != nil {
 		for i := 0; i < n; i++ {
-			s.perPartRows[parts[i]] = append(s.perPartRows[parts[i]], int(b.Sel[i]))
+			sc.perPartRows[parts[i]] = append(sc.perPartRows[parts[i]], int(b.Sel[i]))
 		}
 	} else {
 		for i := 0; i < n; i++ {
-			s.perPartRows[parts[i]] = append(s.perPartRows[parts[i]], i)
+			sc.perPartRows[parts[i]] = append(sc.perPartRows[parts[i]], i)
 		}
 	}
 
 	// Pre-warm the source batch's lazy Bitmap.HasNulls() cache on every
-	// column before launching parallel goroutines: HasNulls memoizes its
-	// result on first call (bitmap.go:127-158), and parallel readers calling
-	// HasNulls on the same column race on that write. Touching each column's
-	// Nulls.HasNulls() once here, single-threaded, populates the cache so all
-	// subsequent reads in appendRowsBulk hit the fast path (b.hasNulls >= 0).
+	// column before per-partition appends can read it from multiple
+	// goroutines: HasNulls memoizes its result on first call
+	// (bitmap.go:127-158), and parallel readers calling HasNulls on the same
+	// column race on that write. This call's batch is private to this call,
+	// so the single-threaded touch here covers both the burst goroutines
+	// below and nothing else — concurrent Consume calls carry their own
+	// batches.
 	for _, col := range b.Columns {
 		_ = col.Nulls.HasNulls()
 	}
 
 	// Small consumes skip the goroutine fan-out below: with ~24 partitions a
 	// 2048-row batch leaves ~85 rows per partition, and spawning+joining up
-	// to GOMAXPROCS goroutines per Consume call — inside the sink mutex —
-	// costs more than the appends themselves. Morsel-parallel fragments
-	// (docs/design/morsel-execution.md §4.1.1) consume at morsel granularity,
-	// so this path is hot there; the SF10 v1.5 A/B (2026-07-03) measured the
-	// per-consume burst as a wall-time serializer.
+	// to GOMAXPROCS goroutines per Consume call costs more than the appends
+	// themselves. Morsel-parallel fragments (docs/design/morsel-execution.md
+	// §4.1.1) consume at morsel granularity, so this path is hot there; the
+	// SF10 v1.5 A/B (2026-07-03) measured the per-consume burst as a
+	// wall-time serializer.
 	if n < shuffleBurstGateRows {
 		for p := 0; p < s.numParts; p++ {
-			if len(s.perPartRows[p]) == 0 {
+			if len(sc.perPartRows[p]) == 0 {
 				continue
 			}
-			if err := s.appendRowsBulk(p, b, s.perPartRows[p]); err != nil {
-				return err
-			}
-			pw := s.parts[p]
-			if pw.rowBuf == nil || pw.bufRows == 0 || pw.bufBytes < s.flushBytes {
-				continue
-			}
-			if err := s.flushPartition(p); err != nil {
+			if err := s.appendAndMaybeFlush(p, b, sc.perPartRows[p]); err != nil {
 				return err
 			}
 		}
@@ -208,36 +248,47 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	g := new(errgroup.Group)
 	g.SetLimit(limit)
 	for p := 0; p < s.numParts; p++ {
-		if len(s.perPartRows[p]) == 0 {
+		if len(sc.perPartRows[p]) == 0 {
 			continue
 		}
 		p := p
 		g.Go(func() error {
-			if err := s.appendRowsBulk(p, b, s.perPartRows[p]); err != nil {
-				return err
-			}
-			pw := s.parts[p]
-			if pw.rowBuf == nil || pw.bufRows == 0 || pw.bufBytes < s.flushBytes {
-				return nil
-			}
-			return s.flushPartition(p)
+			return s.appendAndMaybeFlush(p, b, sc.perPartRows[p])
 		})
 	}
 	return g.Wait()
 }
 
-// appendRowsBulk appends `len(rows)` rows from b into the accumulator buffer
-// for partition p, where rows[i] is the source-row index in b for the i-th
-// destination row. The type switch is hoisted OUTSIDE the row loop so that
-// each column is processed in a tight typed loop — on Q03 SF1 this converts
-// ~64M switch dispatches into ~16 (one per column).
+// appendAndMaybeFlush appends rows to partition p's accumulator and flushes
+// it if the byte threshold tripped, all under that partition's lock. This is
+// the whole per-partition critical section: ~1/numParts of a batch's rows
+// plus an occasional flushBytes-sized chunk encode.
+func (s *partitionedShuffleSink) appendAndMaybeFlush(p int, b *batch.RecordBatch, rows []int) error {
+	pw := s.parts[p]
+	pw.mu.Lock()
+	defer pw.mu.Unlock()
+	if err := s.appendRowsBulkLocked(p, b, rows); err != nil {
+		return err
+	}
+	if pw.rowBuf == nil || pw.bufRows == 0 || pw.bufBytes < s.flushBytes {
+		return nil
+	}
+	return s.flushPartitionLocked(p)
+}
+
+// appendRowsBulkLocked appends `len(rows)` rows from b into the accumulator
+// buffer for partition p, where rows[i] is the source-row index in b for the
+// i-th destination row. Caller must hold s.parts[p].mu. The type switch is
+// hoisted OUTSIDE the row loop so that each column is processed in a tight
+// typed loop — on Q03 SF1 this converts ~64M switch dispatches into ~16 (one
+// per column).
 //
 // The destination column slices are pre-grown once to fit all rows; null
 // state defaults to non-null (Bitmap.Grow leaves new bits set), so we only
 // emit SetNull on actual source nulls. Offsets for bytes/string columns are
 // pre-grown to end+1 so BytesData.Set can write Offsets[di+1] in place
 // without per-row growth.
-func (s *partitionedShuffleSink) appendRowsBulk(p int, b *batch.RecordBatch, rows []int) error {
+func (s *partitionedShuffleSink) appendRowsBulkLocked(p int, b *batch.RecordBatch, rows []int) error {
 	if len(rows) == 0 {
 		return nil
 	}
@@ -501,7 +552,9 @@ func growBatchTo(dst *batch.RecordBatch, n int) {
 	}
 }
 
-func (s *partitionedShuffleSink) flushPartition(p int) error {
+// flushPartitionLocked writes partition p's accumulator as one chunk and
+// resets it. Caller must hold s.parts[p].mu.
+func (s *partitionedShuffleSink) flushPartitionLocked(p int) error {
 	pw := s.parts[p]
 	if pw.rowBuf == nil || pw.bufRows == 0 {
 		return nil
@@ -547,10 +600,13 @@ func (s *partitionedShuffleSink) flushPartition(p int) error {
 // in their headers (an inconsistent on-disk state). Callers MUST NOT upload
 // any partition file if Finalize returns a non-nil error.
 func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if !s.finalized.CompareAndSwap(false, true) {
+		return nil
+	}
 	// Per-partition flush + header-patch + fsync. All steps touch only the
-	// target partition's writer; safe to run in parallel across partitions.
+	// target partition's state; each goroutine takes its partition's lock,
+	// which also quiesces any straggling Consume appends (callers guarantee
+	// no NEW Consume starts after Finalize — the pipeline contract).
 	limit := s.numParts
 	if gp := runtime.GOMAXPROCS(0); limit > gp {
 		limit = gp
@@ -560,10 +616,12 @@ func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 	for p := range s.parts {
 		p := p
 		g.Go(func() error {
-			if err := s.flushPartition(p); err != nil {
+			pw := s.parts[p]
+			pw.mu.Lock()
+			defer pw.mu.Unlock()
+			if err := s.flushPartitionLocked(p); err != nil {
 				return err
 			}
-			pw := s.parts[p]
 			if pw.writer == nil {
 				// Empty partition — leave file at zero bytes; downstream treats as no rows.
 				return pw.file.Sync()
@@ -598,16 +656,18 @@ func (s *partitionedShuffleSink) Finalize(_ context.Context) error {
 
 // Close releases all file handles. Idempotent.
 func (s *partitionedShuffleSink) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	s.closed = true
 	for _, pw := range s.parts {
-		if pw != nil && pw.file != nil {
+		if pw == nil {
+			continue
+		}
+		pw.mu.Lock()
+		if pw.file != nil {
 			_ = pw.file.Close()
 		}
+		pw.mu.Unlock()
 	}
 	return nil
 }

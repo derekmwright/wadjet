@@ -501,10 +501,15 @@ func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.Unary
 // dispenser (which splits row-group-sized decoded batches into ~2048-row
 // zero-copy views — see morsel_dispenser.go for the budget and view-safety
 // story), consumed by k goroutines that each run a private Clone()d copy of
-// the op chain. The fragment sink is shared behind a mutex: every fragment
-// sink consumes each batch synchronously (partitioned shuffle write, WSHF
-// append, gather publish) and retains no reference afterward, so serializing
-// consume is sufficient — no Sel snapshot needed.
+// the op chain. The fragment sink is shared and internally concurrent: the
+// exchange sink locks per PARTITION, the unpartitioned sink appends under
+// its lock and double-buffers the chunk encode outside it, and the gather
+// sink serializes internally (low-volume reply path). Every sink consumes
+// each batch synchronously and retains no reference afterward, so no Sel
+// snapshot is needed. The previous sink-WIDE mutex here serialized k
+// consumers through the fragment's dominant cost (hash+append+encode) and
+// held join/probe fragments +12-27% slower under morsel-auto (SF100
+// default-flip gate, 2026-07-07).
 //
 // Pressure COLLAPSES k (the breaker-path rule, applied here): the linear
 // path's transients — dispenser in-flight bytes, join-probe output batches —
@@ -528,12 +533,8 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
 	var totalRows atomic.Int64
-	var sinkMu sync.Mutex
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
-		sinkMu.Lock()
-		err := sink.consume(ctx, b)
-		sinkMu.Unlock()
-		if err != nil {
+		if err := sink.consume(ctx, b); err != nil {
 			return err
 		}
 		n := int64(b.ActiveLen())
@@ -1744,23 +1745,32 @@ func stageSpillDir(e *Executor, task distributed.Task) string {
 
 // fragmentExchangeSink wraps partitionedShuffleSink with lazy schema discovery
 // (sink construction deferred until the first non-empty batch carries a
-// schema).
+// schema). consume is safe for concurrent callers: lazy construction is
+// mutex-guarded, and partitionedShuffleSink.Consume is internally concurrent
+// (per-partition locks — see its type comment).
 type fragmentExchangeSink struct {
 	executor    *Executor
 	spillDir    string
 	shuffleKeys []string
 	numParts    int
-	sink        *partitionedShuffleSink
+
+	initMu sync.Mutex
+	sink   *partitionedShuffleSink
 }
 
 func (s *fragmentExchangeSink) consume(ctx context.Context, b *batch.RecordBatch) error {
+	s.initMu.Lock()
 	if s.sink == nil {
-		s.sink = newPartitionedShuffleSink(s.spillDir, s.shuffleKeys, s.numParts, b.Schema)
-		if err := s.sink.Init(ctx); err != nil {
+		sink := newPartitionedShuffleSink(s.spillDir, s.shuffleKeys, s.numParts, b.Schema)
+		if err := sink.Init(ctx); err != nil {
+			s.initMu.Unlock()
 			return fmt.Errorf("exchange sink init: %w", err)
 		}
+		s.sink = sink
 	}
-	return s.sink.Consume(ctx, b)
+	sink := s.sink
+	s.initMu.Unlock()
+	return sink.Consume(ctx, b)
 }
 
 func (s *fragmentExchangeSink) finalize(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
@@ -1780,6 +1790,9 @@ func (s *fragmentExchangeSink) close() {
 	}
 }
 
+// fragmentUnpartitionedSink delegates to unpartitionedStageSink, whose
+// Consume is safe for concurrent callers (append under its lock; the chunk
+// encode+write is double-buffered outside it).
 type fragmentUnpartitionedSink struct {
 	executor *Executor
 	sink     *unpartitionedStageSink
@@ -1803,12 +1816,19 @@ func (s *fragmentUnpartitionedSink) finalize(ctx context.Context, task distribut
 
 func (s *fragmentUnpartitionedSink) close() { s.sink.Close() }
 
+// fragmentGatherSink serializes all consumes through mu: gather is the
+// coordinator-reply path (small final results published over NATS/data-plane),
+// so its volume never justifies internal concurrency — the mutex simply makes
+// the adapter safe under morsel-parallel consumers like the other sinks.
 type fragmentGatherSink struct {
+	mu       sync.Mutex
 	sink     *gatherReplySink
 	finished bool
 }
 
 func (s *fragmentGatherSink) consume(ctx context.Context, b *batch.RecordBatch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.finished {
 		// Init only on first non-empty batch; the sink captures schema lazily
 		// from gather's NATS publish path.
@@ -1821,6 +1841,8 @@ func (s *fragmentGatherSink) consume(ctx context.Context, b *batch.RecordBatch) 
 }
 
 func (s *fragmentGatherSink) finalize(ctx context.Context, _ distributed.Task, _ *distributed.ResultNotification) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !s.finished {
 		// No batches consumed: still need to publish a terminal marker so
 		// the coord's gather subscriber unblocks.

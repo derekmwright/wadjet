@@ -51,11 +51,30 @@ type unpartitionedStageSink struct {
 	// (appendBatchRowsBulk/growBatchTo have no nested arms); nested schemas
 	// keep the legacy chunk-per-consume path. coalesce: 0=undecided,
 	// 1=coalescing, -1=legacy.
+	//
+	// The flush is DOUBLE-BUFFERED (docs/design/morsel-execution.md §4.1.1
+	// v1.7 follow-up): when the accumulator trips a threshold, it is swapped
+	// out under mu and the s2 encode + write of up to flushBytes happens
+	// OUTSIDE the lock, so concurrent consumers keep appending into the
+	// spare buffer instead of stalling behind a 16 MB encode. `flushing`
+	// admits exactly one flusher (the writer/bufFile are single-threaded);
+	// flushCond backpressures a consumer whose freshly-refilled buffer trips
+	// the threshold while a flush is still in flight — memory stays bounded
+	// at two accumulators. The legacy (nested-schema) path never sets
+	// flushing and keeps writer access under mu, which is exclusive with the
+	// coalescing path by the coalesce flag.
 	coalesce   int8
-	rowBuf     *batch.RecordBatch
+	rowBuf     *batch.RecordBatch // active accumulator (guarded by mu)
+	spareBuf   *batch.RecordBatch // recycled accumulator awaiting reuse (guarded by mu)
 	bufRows    int
 	bufBytes   int
+	flushing   bool
+	flushCond  *sync.Cond // signaled when an out-of-lock flush completes
 	rowScratch []int
+	// Flush thresholds; fields (not consts) so tests can force frequent
+	// flushes. Default to unpartitionedFlushRows/-Bytes.
+	flushRows   int
+	flushBytesT int
 }
 
 // Coalesced-chunk flush thresholds: whichever trips first. 64k rows keeps
@@ -88,9 +107,13 @@ func batchSchemaIsFlat(schema []parquet.Column) bool {
 // newUnpartitionedStageSink constructs the sink; spillDir must already exist
 // (or be created by Init), and taskID is used to name the spill file.
 func newUnpartitionedStageSink(spillDir, taskID string) *unpartitionedStageSink {
-	return &unpartitionedStageSink{
-		spillPath: filepath.Join(spillDir, "stage-"+taskID+".wshf"),
+	s := &unpartitionedStageSink{
+		spillPath:   filepath.Join(spillDir, "stage-"+taskID+".wshf"),
+		flushRows:   unpartitionedFlushRows,
+		flushBytesT: unpartitionedFlushBytes,
 	}
+	s.flushCond = sync.NewCond(&s.mu)
+	return s
 }
 
 // Init creates the spill file. Schema is discovered lazily on first Consume,
@@ -158,19 +181,7 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 	// hand in zero-copy views whose parent bytes retire after Consume
 	// returns.
 	if s.rowBuf == nil {
-		initCap := n
-		if initCap < 256 {
-			initCap = 256
-		}
-		s.rowBuf = batch.NewRecordBatch(b.Schema, initCap)
-		s.rowBuf.Len = 0
-		for _, col := range s.rowBuf.Columns {
-			if col.BytesData.Offsets != nil {
-				col.BytesData.Offsets = col.BytesData.Offsets[:1]
-				col.BytesData.Offsets[0] = 0
-				col.BytesData.Data = col.BytesData.Data[:0]
-			}
-		}
+		s.rowBuf = s.takeAccumulator(b, n)
 	}
 	if cap(s.rowScratch) < n {
 		s.rowScratch = make([]int, n)
@@ -188,26 +199,75 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 	s.bufBytes += appendBatchRowsBulk(s.rowBuf, b, rows)
 	s.bufRows += n
 	s.totalRows += int64(n)
-	if s.bufRows >= unpartitionedFlushRows || s.bufBytes >= unpartitionedFlushBytes {
-		return s.flushCoalesced()
-	}
-	return nil
-}
-
-// flushCoalesced writes the accumulator as one chunk and resets it in place.
-// Callers hold s.mu.
-func (s *unpartitionedStageSink) flushCoalesced() error {
-	if s.rowBuf == nil || s.bufRows == 0 {
+	if s.bufRows < s.flushRows && s.bufBytes < s.flushBytesT {
 		return nil
 	}
-	if err := s.writer.writeChunk(s.rowBuf.Columns, nil, s.bufRows); err != nil {
+
+	// Threshold tripped. If a flush is already in flight, wait for it — the
+	// active accumulator is full and the spare is out with the flusher, so
+	// bounded memory means this consumer backpressures until the spare
+	// returns. After the wait the accumulator may have been flushed by our
+	// own re-check below on another consumer; re-test the threshold.
+	for s.flushing {
+		s.flushCond.Wait()
+		if s.bufRows < s.flushRows && s.bufBytes < s.flushBytesT {
+			return nil
+		}
+	}
+	// Become the flusher: swap the full accumulator out, release the lock,
+	// encode+write outside it. Only one flusher exists (flushing flag), so
+	// the writer/bufFile are single-threaded past writeHeader.
+	s.flushing = true
+	full, fullRows := s.rowBuf, s.bufRows
+	s.rowBuf = s.spareBuf // may be nil; next Consume allocates lazily
+	s.spareBuf = nil
+	s.bufRows = 0
+	s.bufBytes = 0
+	writer := s.writer
+	s.mu.Unlock()
+
+	err := writer.writeChunk(full.Columns, nil, fullRows)
+	resetAccumulator(full)
+
+	s.mu.Lock() // re-acquire for the deferred Unlock
+	s.spareBuf = full
+	s.flushing = false
+	s.flushCond.Broadcast()
+	if err != nil {
 		return fmt.Errorf("writing wshf chunk: %w", err)
 	}
 	s.numChunks++
-	s.rowBuf.Len = 0
-	s.bufRows = 0
-	s.bufBytes = 0
-	for _, col := range s.rowBuf.Columns {
+	return nil
+}
+
+// takeAccumulator returns a fresh or recycled accumulator batch for the
+// coalescing path. Caller holds s.mu.
+func (s *unpartitionedStageSink) takeAccumulator(b *batch.RecordBatch, n int) *batch.RecordBatch {
+	if s.spareBuf != nil {
+		buf := s.spareBuf
+		s.spareBuf = nil
+		return buf
+	}
+	initCap := n
+	if initCap < 256 {
+		initCap = 256
+	}
+	buf := batch.NewRecordBatch(b.Schema, initCap)
+	buf.Len = 0
+	for _, col := range buf.Columns {
+		if col.BytesData.Offsets != nil {
+			col.BytesData.Offsets = col.BytesData.Offsets[:1]
+			col.BytesData.Offsets[0] = 0
+			col.BytesData.Data = col.BytesData.Data[:0]
+		}
+	}
+	return buf
+}
+
+// resetAccumulator empties an accumulator batch in place for reuse.
+func resetAccumulator(buf *batch.RecordBatch) {
+	buf.Len = 0
+	for _, col := range buf.Columns {
 		col.Len = 0
 		col.Nulls.ResetNonNull(0)
 		switch col.Type {
@@ -217,6 +277,21 @@ func (s *unpartitionedStageSink) flushCoalesced() error {
 			col.BytesData.Offsets[0] = 0
 		}
 	}
+}
+
+// flushCoalescedLocked writes the accumulator remainder as one chunk. Callers
+// hold s.mu with NO flush in flight (Finalize waits first).
+func (s *unpartitionedStageSink) flushCoalescedLocked() error {
+	if s.rowBuf == nil || s.bufRows == 0 {
+		return nil
+	}
+	if err := s.writer.writeChunk(s.rowBuf.Columns, nil, s.bufRows); err != nil {
+		return fmt.Errorf("writing wshf chunk: %w", err)
+	}
+	s.numChunks++
+	resetAccumulator(s.rowBuf)
+	s.bufRows = 0
+	s.bufBytes = 0
 	return nil
 }
 
@@ -230,14 +305,20 @@ func (s *unpartitionedStageSink) Finalize(_ context.Context) error {
 		return nil
 	}
 	s.finalized = true
+	// Quiesce any in-flight double-buffered flush before touching the
+	// writer — the flusher owns it outside the lock until flushing clears.
+	for s.flushing {
+		s.flushCond.Wait()
+	}
 	if s.bufFile == nil {
 		return nil
 	}
 	// Write any coalesced remainder before flushing the stream.
-	if err := s.flushCoalesced(); err != nil {
+	if err := s.flushCoalescedLocked(); err != nil {
 		return err
 	}
 	s.rowBuf = nil
+	s.spareBuf = nil
 	if err := s.bufFile.Flush(); err != nil {
 		return fmt.Errorf("flushing wshf bufio: %w", err)
 	}
