@@ -25,7 +25,7 @@ import (
 func ValidateNativeDAGShape(stages []Stage) error {
 	for _, s := range stages {
 		switch s.Type {
-		case StageHashJoin, StageBroadcastJoin:
+		case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
 			// A join with N FusedJoins has 2 + N dependencies: 2 for the
 			// primary join (probe + build) plus 1 build-dep per fused
 			// join. The worker's executeStageHashJoin consumes
@@ -107,7 +107,7 @@ func fuseSortIntoPredecessor(stages []Stage) []Stage {
 			continue
 		}
 		switch pred.Type {
-		case "hash_join", "broadcast_join", "aggregate", "final_aggregate":
+		case "hash_join", "broadcast_join", "sort_merge_join", "aggregate", "final_aggregate":
 		default:
 			continue
 		}

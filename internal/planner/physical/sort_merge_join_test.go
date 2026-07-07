@@ -184,3 +184,90 @@ func TestSortMergeJoinGate_SkipsSmallSides(t *testing.T) {
 		t.Fatal("tiny sides must not take the sort-merge path")
 	}
 }
+
+// planDistributedSQL runs SQL through parse → logical → optimize →
+// PlanDistributed with the given SMJ threshold and worker count.
+func planDistributedSQL(t *testing.T, cat *catalog.Catalog, sql string, smjBytes int64, workers int) []Stage {
+	t.Helper()
+	ctx := context.Background()
+	parsed, err := plansql.Parse(sql)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	selectInfo, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	logicalPlan, err := logical.BuildFromSelect(selectInfo)
+	if err != nil {
+		t.Fatalf("logical plan: %v", err)
+	}
+	scanAnnotator := func(plan *logical.Node) {
+		NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+	}
+	scanAnnotator(logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+
+	planner := NewPlanner(cat)
+	planner.WorkerCount = workers
+	planner.BroadcastBytesThreshold = -1 // never broadcast: force the shuffled-join path
+	planner.SortMergeJoinBytes = smjBytes
+	stages, err := planner.PlanDistributed(ctx, logicalPlan)
+	if err != nil {
+		t.Fatalf("plan distributed: %v", err)
+	}
+	return stages
+}
+
+// TestSortMergeJoinStage_EmittedWithExchangeChildren: under a forced
+// threshold, the distributed planner emits a sort_merge_join stage whose
+// dependencies are the SAME exchange-repartition children a hash_join would
+// get — co-partitioning is the only exchange requirement.
+func TestSortMergeJoinStage_EmittedWithExchangeChildren(t *testing.T) {
+	cat := setupJoinTables(t)
+	sql := "SELECT id, val, rval FROM smj_l JOIN smj_r ON smj_l.id = smj_r.rid"
+
+	stages := planDistributedSQL(t, cat, sql, 1, 3)
+	byID := make(map[string]Stage, len(stages))
+	var smj *Stage
+	for i := range stages {
+		byID[stages[i].ID] = stages[i]
+		if stages[i].Type == StageSortMergeJoin {
+			smj = &stages[i]
+		}
+		if stages[i].Type == StageHashJoin {
+			t.Fatalf("hash_join stage %s emitted alongside the forced sort-merge gate", stages[i].ID)
+		}
+	}
+	if smj == nil {
+		t.Fatalf("no sort_merge_join stage emitted; stages: %v", stageTypes(stages))
+	}
+	left, ok := byID[smj.LeftDepStage]
+	if !ok || left.Type != StageExchangeRepartition {
+		t.Fatalf("left dep %q should be an exchange-repartition stage, got %+v", smj.LeftDepStage, left.Type)
+	}
+	right, ok := byID[smj.RightDepStage]
+	if !ok || right.Type != StageExchangeRepartition {
+		t.Fatalf("right dep %q should be an exchange-repartition stage, got %+v", smj.RightDepStage, right.Type)
+	}
+	if left.Exchange == nil || right.Exchange == nil || left.Exchange.Count != right.Exchange.Count {
+		t.Fatalf("exchange children must co-partition: left %+v right %+v", left.Exchange, right.Exchange)
+	}
+	if len(smj.Dependencies) != 2 {
+		t.Fatalf("sort_merge_join stage has %d dependencies, want 2", len(smj.Dependencies))
+	}
+}
+
+// TestSortMergeJoinStage_DormantByDefault: with the zero-value threshold the
+// distributed plan is the hash_join shape, byte-identical to before.
+func TestSortMergeJoinStage_DormantByDefault(t *testing.T) {
+	cat := setupJoinTables(t)
+	sql := "SELECT id, val, rval FROM smj_l JOIN smj_r ON smj_l.id = smj_r.rid"
+
+	stages := planDistributedSQL(t, cat, sql, 0, 3)
+	for _, s := range stages {
+		if s.Type == StageSortMergeJoin {
+			t.Fatal("sort_merge_join stage emitted with threshold 0 — the gate must be dormant by default")
+		}
+	}
+}

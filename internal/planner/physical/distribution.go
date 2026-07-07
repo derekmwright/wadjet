@@ -174,7 +174,7 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 	case StageExchangeRepartition:
 		// Exchange-repartition accepts any input and re-partitions.
 		return RequiredDistribution{Kind: RequiredAny}
-	case StageHashJoin:
+	case StageHashJoin, StageSortMergeJoin:
 		switch slot {
 		case 0:
 			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.JoinLeftKeys}
@@ -291,7 +291,7 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 		return Distribution{Kind: DistBroadcast}
 	case StageExchangeGather:
 		return Distribution{Kind: DistSingleton}
-	case StageHashJoin, StageBroadcastJoin:
+	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
 		// The join inherits the probe (left) input's distribution — the
 		// join itself does not re-partition the joined output, it just
 		// pairs probe rows with matching build rows.
@@ -479,7 +479,7 @@ func AssertExchangeConsistency(stages []Stage) error {
 			// (single-input) is the only meaningful index — Phase 1 does
 			// not assert non-join multi-input requirements.
 			slot := 0
-			if consumer.Type == StageHashJoin || consumer.Type == StageBroadcastJoin {
+			if consumer.Type == StageHashJoin || consumer.Type == StageBroadcastJoin || consumer.Type == StageSortMergeJoin {
 				s := joinSlot(consumer, depID)
 				if s < 0 {
 					// Auxiliary dep (e.g. fused-join build). Skip — no

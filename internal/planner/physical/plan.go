@@ -2422,7 +2422,7 @@ func LargeBuildScans(stages []Stage, probeAlias string, thresholdBytes int64) []
 func CountJoinStages(stages []Stage) int {
 	n := 0
 	for _, s := range stages {
-		if s.Type == "hash_join" || s.Type == "broadcast_join" {
+		if s.Type == "hash_join" || s.Type == "broadcast_join" || s.Type == StageSortMergeJoin {
 			n++
 		}
 		n += len(s.FusedJoins)
@@ -2686,7 +2686,7 @@ func markCoPathingSelfJoinBuilds(stages []Stage) {
 	var joinScans []joinScan
 	for i := range stages {
 		s := &stages[i]
-		if s.Type != StageHashJoin && s.Type != StageBroadcastJoin {
+		if s.Type != StageHashJoin && s.Type != StageBroadcastJoin && s.Type != StageSortMergeJoin {
 			continue
 		}
 		buildDep := s.RightDepStage
@@ -3363,6 +3363,18 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			for i, key := range rightKeys {
 				rightKeys[i] = resolveShuffleKey(key, node.Children[1])
 			}
+		}
+
+		// Big-vs-big inner equi-joins upgrade the shuffled hash join to a
+		// sort-merge join when the SortMergeJoinBytes gate passes (same gate
+		// as the local buildJoin path). The exchange children below are
+		// IDENTICAL — co-partitioning is all SMJ needs — so only the stage
+		// type changes. Broadcast candidates keep the strictly-better
+		// broadcast path.
+		if joinType == StageHashJoin && jt == "inner" && node.JoinFilter == "" &&
+			len(leftKeys) > 0 && p.shouldSortMergeJoin(node) {
+			joinType = StageSortMergeJoin
+			SortMergeJoinsPlanned.Add(1)
 		}
 
 		// Insert shuffle stages for non-broadcast joins when distributed

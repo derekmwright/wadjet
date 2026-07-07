@@ -263,6 +263,7 @@ const (
 	OpFilter         OpType = "filter"          // FilterExprs predicate chain
 	OpHashJoinProbe  OpType = "hash_join_probe" // shuffle-side hash join: build from BuildFiles, probe upstream
 	OpBroadcastProbe OpType = "broadcast_probe" // broadcast hash join: small build replicated to every task
+	OpSortMergeJoin  OpType = "sort_merge_join" // big-vs-big inner join: both sides sort to runs, two-cursor merge (pipeline-breaker)
 
 	// Pipeline-breaker operators. Consume all input from the upstream chain,
 	// then emit results into the downstream chain. Splits the fragment into
