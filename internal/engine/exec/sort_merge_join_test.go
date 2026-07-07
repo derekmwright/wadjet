@@ -584,6 +584,56 @@ func TestSortMergeJoin_QualificationAndOutputFilter(t *testing.T) {
 	assertSameRows(t, got, sink.Rows, []string{"name", "region"})
 }
 
+// TestSortMergeJoin_QualifiedAndSwappedKeyNames: the planner emits
+// SQL-qualified key names ("l.id") while batch columns are bare, and SQL may
+// put the build column on the left of "=" so the pair arrives side-swapped.
+// Consume must normalize both via columnIndexFallback + counterpart adoption
+// before anything sorts by them — an unresolved sort key is silently SKIPPED
+// by resolveSortKeysForBatches and the merge would run over UNSORTED runs
+// (wrong results, not an error).
+func TestSortMergeJoin_QualifiedAndSwappedKeyNames(t *testing.T) {
+	leftSchema := []parquet.Column{
+		{Name: "id", Type: parquet.TypeInt64},
+		{Name: "lv", Type: parquet.TypeString},
+	}
+	rightSchema := []parquet.Column{
+		{Name: "rid", Type: parquet.TypeInt64},
+		{Name: "rv", Type: parquet.TypeString},
+	}
+	var leftRows, rightRows []map[string]any
+	// Reverse-ordered keys so unsorted runs would visibly break the merge.
+	for i := 500; i > 0; i-- {
+		leftRows = append(leftRows, map[string]any{"id": int64(i), "lv": fmt.Sprintf("l%d", i)})
+		rightRows = append(rightRows, map[string]any{"rid": int64(i), "rv": fmt.Sprintf("r%d", i)})
+	}
+
+	for _, tc := range []struct {
+		name                string
+		leftKeys, rightKeys []string
+	}{
+		{"qualified", []string{"smj_l.id"}, []string{"smj_r.rid"}},
+		{"swapped_pair", []string{"rid"}, []string{"id"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := NewSortMergeJoin(tc.leftKeys, tc.rightKeys)
+			got := runSMJ(t, j,
+				chunkBatches(t, rightSchema, rightRows, 64),
+				chunkBatches(t, leftSchema, leftRows, 64))
+			defer j.Close()
+
+			if len(got) != 500 {
+				t.Fatalf("expected 500 joined rows, got %d", len(got))
+			}
+			for _, r := range got {
+				id := r["id"].(int64)
+				if r["lv"] != fmt.Sprintf("l%d", id) || r["rv"] != fmt.Sprintf("r%d", id) {
+					t.Fatalf("mismatched pair: %v", r)
+				}
+			}
+		})
+	}
+}
+
 // TestSortMergeJoin_FinalizeBeforeBuild: Finalize without a completed build
 // phase must fail loudly, mirroring HashJoinProbe.Init's guard.
 func TestSortMergeJoin_FinalizeBeforeBuild(t *testing.T) {

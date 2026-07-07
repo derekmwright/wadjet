@@ -90,13 +90,20 @@ type SortMergeJoin struct {
 // smjSide is one side's buffering/spill core: Sort's accumulate → self-spill
 // sorted runs pattern, parameterized by the side's join-key sort keys.
 type smjSide struct {
-	name       string // "probe" / "build", for error context
-	keys       []SortKey
-	schema     []parquet.Column
-	batches    []*batch.RecordBatch
-	totalRows  int
-	trackedMem int64
-	runFiles   []string
+	name string // "probe" / "build", for error context
+	keys []SortKey
+	// counterpart holds the OTHER side's key names, positionally paired.
+	// SQL may put the build-side column on the left of "=" ("JOIN t ON
+	// t.id = probe.id"), so a side's assigned key can belong to the other
+	// side; when the own name doesn't resolve against the first batch, the
+	// counterpart name is tried — symmetric adoption on both sides is
+	// exactly the pair swap HashJoin.FixKeyAssignment performs post-build.
+	counterpart []string
+	schema      []parquet.Column
+	batches     []*batch.RecordBatch
+	totalRows   int
+	trackedMem  int64
+	runFiles    []string
 }
 
 // smjPair pins one joined output row. The referenced batches are merge output
@@ -152,8 +159,8 @@ func NewSortMergeJoin(leftKeys, rightKeys []string) *SortMergeJoin {
 		LeftKeys:  leftKeys,
 		RightKeys: rightKeys,
 	}
-	j.probe = smjSide{name: "probe", keys: ascendingKeys(leftKeys)}
-	j.build = smjSide{name: "build", keys: ascendingKeys(rightKeys)}
+	j.probe = smjSide{name: "probe", keys: ascendingKeys(leftKeys), counterpart: rightKeys}
+	j.build = smjSide{name: "build", keys: ascendingKeys(rightKeys), counterpart: leftKeys}
 	return j
 }
 
@@ -224,6 +231,25 @@ func (j *SortMergeJoin) consume(side *smjSide, b *batch.RecordBatch) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if side.schema == nil {
+		// Resolve the side's key names against the actual schema before
+		// anything sorts by them: the planner emits SQL-qualified names
+		// ("l.id") while batch columns may be bare, and join outputs carry
+		// qualified duplicates the other way around. Rewriting the sort keys
+		// to the schema's exact names here means every downstream exact-match
+		// resolution (run sorting, merge cursors, kernels) just works —
+		// without this, resolveSortKeysForBatches silently SKIPS an
+		// unresolvable key and the merge would run over unsorted runs.
+		for i := range side.keys {
+			idx := columnIndexFallback(b, side.keys[i].Column)
+			if idx < 0 && i < len(side.counterpart) {
+				// Swapped pair — see smjSide.counterpart.
+				idx = columnIndexFallback(b, side.counterpart[i])
+			}
+			if idx < 0 {
+				return fmt.Errorf("sort-merge join: %s-side key column %q not found", side.name, side.keys[i].Column)
+			}
+			side.keys[i].Column = b.Schema[idx].Name
+		}
 		side.schema = b.Schema
 		// Register on the first buffered batch from either side (footprint
 		// exists from here on). One registration covers both sides.
@@ -405,26 +431,28 @@ func (j *SortMergeJoin) Finalize(_ context.Context) error {
 	return nil
 }
 
-// resolveCompareKernels resolves one typed kernel per key pair. Requires
-// identical key column types on both sides — the equi-join planner gate
-// guarantees this; anything else fails loudly here.
+// resolveCompareKernels resolves one typed kernel per key pair, using the
+// consume-time-normalized side key names. Requires identical key column
+// types on both sides — the equi-join planner gate guarantees this;
+// anything else fails loudly here.
 func (j *SortMergeJoin) resolveCompareKernels() error {
-	j.compare = make([]kernel.SortCompareKernel, len(j.LeftKeys))
-	for i := range j.LeftKeys {
-		lIdx := schemaColumnIndex(j.probe.schema, j.LeftKeys[i])
-		rIdx := schemaColumnIndex(j.build.schema, j.RightKeys[i])
+	j.compare = make([]kernel.SortCompareKernel, len(j.probe.keys))
+	for i := range j.probe.keys {
+		lCol, rCol := j.probe.keys[i].Column, j.build.keys[i].Column
+		lIdx := schemaColumnIndex(j.probe.schema, lCol)
+		rIdx := schemaColumnIndex(j.build.schema, rCol)
 		if lIdx < 0 || rIdx < 0 {
-			return fmt.Errorf("sort-merge join: key pair %q/%q not found in side schemas", j.LeftKeys[i], j.RightKeys[i])
+			return fmt.Errorf("sort-merge join: key pair %q/%q not found in side schemas", lCol, rCol)
 		}
 		lType, rType := j.probe.schema[lIdx].Type, j.build.schema[rIdx].Type
 		if lType != rType {
-			return fmt.Errorf("sort-merge join: key type mismatch for %q/%q (%d vs %d)", j.LeftKeys[i], j.RightKeys[i], lType, rType)
+			return fmt.Errorf("sort-merge join: key type mismatch for %q/%q (%d vs %d)", lCol, rCol, lType, rType)
 		}
 		// Null-aware kernel is defensive only — null-key rows never enter
 		// the runs.
 		cmp := kernel.ResolveSortCompare(lType)
 		if cmp == nil {
-			return fmt.Errorf("sort-merge join: unsupported key type %d for %q", lType, j.LeftKeys[i])
+			return fmt.Errorf("sort-merge join: unsupported key type %d for %q", lType, lCol)
 		}
 		j.compare[i] = cmp
 	}
