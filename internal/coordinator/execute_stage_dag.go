@@ -1153,6 +1153,10 @@ func (c *Coordinator) dispatchPipelineStage(
 		// without having to re-walk the plan.
 		if len(stage.ConsumeDynamicFilters) > 0 {
 			out.DynamicFilters = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+			c.logger.Info("dynamic_filter: consume specs attached to pass-through scan output",
+				"stage_id", stage.ID,
+				"requested", len(stage.ConsumeDynamicFilters),
+				"attached", len(out.DynamicFilters))
 		}
 		return out, nil
 	}
@@ -1546,7 +1550,9 @@ func (c *Coordinator) dispatchScanFilterStage(
 	c.logger.Info("dispatchScanFilterStage",
 		"stage_id", stage.ID, "files", len(stage.ScanFiles),
 		"tasks", actualTasks, "filters", len(stage.FilterExprs),
-		"shard_count", shardCount)
+		"shard_count", shardCount,
+		"df_emits", len(stage.EmitDynamicFilters),
+		"df_consumes", len(stage.ConsumeDynamicFilters))
 
 	// Fragment dispatch: when the planner's fuseScanShuffle pass absorbed a
 	// downstream exchange-repartition into this scan, emit a 2-op (or 3-op
@@ -1557,6 +1563,19 @@ func (c *Coordinator) dispatchScanFilterStage(
 	// on a single-op task, but that hit the worker's CollectSink memory blow-
 	// up on Q05 SF10; the fragment path uses runStageScanPartitionedStreaming.
 	fuseShuffle := stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0
+	// Probe-side consume specs are identical for every task — materialize
+	// once and log the attach outcome. attached < requested means the
+	// build side produced no eligible partials for some FilterID and that
+	// consume silently degraded to scan-without-filter (correct but worth
+	// seeing in an A/B run).
+	var consumeSpecs []distributed.DynamicFilterSpec
+	if len(stage.ConsumeDynamicFilters) > 0 {
+		consumeSpecs = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+		c.logger.Info("dynamic_filter: consume specs attached to probe scan",
+			"stage_id", stage.ID,
+			"requested", len(stage.ConsumeDynamicFilters),
+			"attached", len(consumeSpecs))
+	}
 	tasks := make([]distributed.Task, 0, actualTasks)
 	for shardIdx, files := range fileSets {
 		t := distributed.Task{
@@ -1601,8 +1620,8 @@ func (c *Coordinator) dispatchScanFilterStage(
 		// Probe-side: coordinator-merged stats from the upstream build-scan.
 		// dynamicFilterSpecsFromBuildStats walks ConsumeDynamicFilters and
 		// pulls the matching BuildStats out of inputs[SourceStageID].
-		if len(stage.ConsumeDynamicFilters) > 0 {
-			scanOp.DynamicFilters = dynamicFilterSpecsFromBuildStats(stage.ConsumeDynamicFilters, inputs)
+		if len(consumeSpecs) > 0 {
+			scanOp.DynamicFilters = consumeSpecs
 		}
 		t.Operators = append(t.Operators, scanOp)
 		if len(stage.FilterExprs) > 0 {
@@ -1740,6 +1759,17 @@ func (c *Coordinator) dispatchScanFilterStage(
 				}
 			}
 		}
+		staged := 0
+		for _, stats := range merged {
+			if stats != nil && stats.StagedKey != "" {
+				staged++
+			}
+		}
+		c.logger.Info("dynamic_filter: build partials merged",
+			"stage_id", stage.ID,
+			"partial_refs", len(allRefs),
+			"merged_filters", len(merged),
+			"staged_to_s3", staged)
 		buildStats = merged
 	}
 
