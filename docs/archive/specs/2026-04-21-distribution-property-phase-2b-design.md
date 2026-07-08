@@ -176,5 +176,5 @@ Ordered for reviewability:
 - `memory/feedback_push_back_on_short_term_tradeoffs.md` — guidance that produced B3 over B2-revised.
 - `memory/feedback_context_loss_architectural_shortcuts.md` — rule that produced Phase 2a/2b split.
 - `memory/feedback_baseline_first.md`, `memory/feedback_deploy_preflight.md` — EC2 discipline informing T2.
-- `docs/superpowers/specs/2026-04-20-distribution-property-phase-2-design.md` — Phase 2 original spec (Phase 2b is the runtime-integration half).
+- `docs/archive/specs/2026-04-20-distribution-property-phase-2-design.md` — Phase 2 original spec (Phase 2b is the runtime-integration half).
 - PR #45 — Phase 2a draft.

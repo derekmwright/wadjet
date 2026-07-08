@@ -3,7 +3,7 @@
 **Date:** 2026-04-20
 **Status:** Design — ready for implementation planning
 **Predecessor:** `2026-04-20-distribution-property-phase-1.md` (on `feat/distribution-property-phase-1`, pending merge to main)
-**Research:** `docs/superpowers/research/2026-04-19-distribution-model-trino-spark.md`
+**Research:** `docs/archive/research/2026-04-19-distribution-model-trino-spark.md`
 **Parked prior art:** `feat/broadcast-hazard-mitigation` @ `67ba055` (reference only for Phase 2; logic belongs to Phase 3)
 
 ---
@@ -434,7 +434,7 @@ replicate; total time ~1m54s. Before and after Phase 2: identical.
 
 ## References
 
-- Research: `docs/superpowers/research/2026-04-19-distribution-model-trino-spark.md`.
-- Phase 1 spec: `docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md` (on `feat/distribution-property-phase-1`).
+- Research: `docs/archive/research/2026-04-19-distribution-model-trino-spark.md`.
+- Phase 1 spec: `docs/archive/specs/2026-04-20-distribution-property-phase-1.md` (on `feat/distribution-property-phase-1`).
 - Parked prior art: `feat/broadcast-hazard-mitigation` @ `67ba055` — reference for `ExchangeStage` shape and `orchestrateMultiBuildShuffle`.
 - Deploy discipline: `feedback_deploy_preflight.md`, `feedback_baseline_first.md`, `feedback_ec2_teardown_discipline.md`.

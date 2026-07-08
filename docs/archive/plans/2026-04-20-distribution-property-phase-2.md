@@ -1,6 +1,5 @@
 # Distribution-Property Phase 2 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the coordinator-level four-mode routing switch with a property-based `EnsureDistribution` pass that inserts three first-class Exchange stage types, and delete the heuristic routing functions.
 
@@ -8,7 +7,7 @@
 
 **Tech Stack:** Go 1.22+; existing Wadjet planner/coordinator; NATS JetStream for task dispatch; TPC-H SF0.01 / SF1 / SF10 for validation.
 
-**Spec:** `docs/superpowers/specs/2026-04-20-distribution-property-phase-2-design.md`
+**Spec:** `docs/archive/specs/2026-04-20-distribution-property-phase-2-design.md`
 
 ---
 
@@ -2101,7 +2100,7 @@ gh pr create --title "Distribution-property phase 2: exchange insertion + retire
 ## Summary
 
 Implements Phase 2 of the distribution-property pass
-(spec: `docs/superpowers/specs/2026-04-20-distribution-property-phase-2-design.md`).
+(spec: `docs/archive/specs/2026-04-20-distribution-property-phase-2-design.md`).
 
 Replaces the coordinator-level four-mode routing switch with a
 property-based Exchange insertion pass (`EnsureDistribution`). Three

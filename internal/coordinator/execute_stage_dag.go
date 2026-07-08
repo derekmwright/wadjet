@@ -196,7 +196,7 @@ func awaitStageProgress(ctx context.Context, allDone <-chan struct{}, progress <
 // streams results to the coordinator directly).
 //
 // See spec:
-// docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md
+// docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md
 func (c *Coordinator) executeStageDAG(
 	ctx context.Context,
 	queryID, sql string,

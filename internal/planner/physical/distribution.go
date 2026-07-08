@@ -57,7 +57,7 @@ func (d Distribution) SatisfiesJoinKeys(joinKeys []string) bool {
 
 // RequiredKind enumerates the partitioning a consumer needs from each input.
 // Mirrors Spark's Distribution trait subclasses; see the Phase 1 spec
-// (docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md) §"The
+// (docs/archive/specs/2026-04-20-distribution-property-phase-1.md) §"The
 // property algebra" for the satisfaction truth table.
 type RequiredKind int
 

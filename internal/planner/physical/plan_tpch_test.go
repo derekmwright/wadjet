@@ -659,7 +659,7 @@ func TestTPCHShuffleKeysResolvable(t *testing.T) {
 // runtime path, so the acceptance gate runs against that path. The base
 // planner's pre-rewrite output is no longer a runtime configuration.
 //
-// Spec: docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md
+// Spec: docs/archive/specs/2026-04-20-distribution-property-phase-1.md
 func TestTPCHDistributionConsistency(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 
@@ -813,7 +813,7 @@ func TestPlanDistributed_InsertsExchanges(t *testing.T) {
 //     every StageExchangeReplicate has DistBroadcast, every StageExchangeGather
 //     has DistSingleton.
 //
-// Spec: docs/superpowers/specs/2026-04-20-distribution-property-phase-2.md
+// Spec: docs/archive/specs/2026-04-20-distribution-property-phase-2.md
 func TestTPCH_EnsureDistribution_PlannerParity(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 
