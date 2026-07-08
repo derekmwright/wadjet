@@ -1265,7 +1265,7 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 		shouldGC = true
 	case distributed.TaskTypeStage:
 		switch task.StageType {
-		case "hash_join", "broadcast_join", "aggregate", "final_aggregate", "sort", "merge_sort", "window":
+		case "hash_join", "broadcast_join", "sort_merge_join", "aggregate", "final_aggregate", "sort", "merge_sort", "window":
 			shouldGC = true
 		}
 	}

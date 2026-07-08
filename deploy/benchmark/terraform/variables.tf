@@ -204,6 +204,12 @@ variable "join_debug" {
   default     = ""
 }
 
+variable "sort_merge_join_bytes" {
+  description = "Sort-merge join gate (docs/design/sort-merge-join.md): inner equi-joins whose sides BOTH exceed this many estimated bytes run as sort-merge joins instead of hash joins. 0 = disabled (default, dormant)."
+  type        = number
+  default     = 0
+}
+
 variable "dynamic_filters" {
   description = "Set to 1 to enable Trino-style semi-join dynamic-filter pushdown on the coordinator. Off by default for v1 rollout."
   type        = string

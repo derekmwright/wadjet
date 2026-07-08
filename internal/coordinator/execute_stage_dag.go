@@ -2030,6 +2030,19 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// Sort-merge join stages always route through the fragment runner —
+		// there is no legacy single-op execution path for them, so any
+		// ineligibility is a planner bug and fails loudly.
+		if stage.Type == physical.StageSortMergeJoin {
+			if t.Operators != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: sort_merge_join stage already claimed by another migration", stage.ID)
+			}
+			ops, ferr := buildSortMergeJoinFragment(stage, &t, taskInputs, wireFused, sorts)
+			if ferr != nil {
+				return StageOutput{}, fmt.Errorf("stage %s: build sort-merge join fragment: %w", stage.ID, ferr)
+			}
+			t.Operators = ops
+		}
 		// Final/merge aggregate migration: dispatch via the fragment path
 		// when the stage has no fused sort/limit. The fragment runs:
 		//   [OpShuffleSource, OpHashAggregate(MergeMode), OpFilter? (HAVING),
@@ -2366,6 +2379,83 @@ func buildJoinFragment(
 	return ops, nil
 }
 
+// buildSortMergeJoinFragment translates a sort_merge_join stage's task into
+// a fragment pipeline:
+//
+//	[ShuffleSource(probe), OpSortMergeJoin(breaker; build from BuildFiles),
+//	 OpFilter?(residual), OpSort?(folded sort), OpUnpartitionedSink]
+//
+// The probe side streams from this task's partition of the left exchange;
+// the build side's partition files ride the op spec (BuildFiles) and are
+// drained by the worker's breaker construction — the same co-partitioned
+// input shape as buildJoinFragment, with the operator swapped. Fused
+// broadcast chains never attach to sort_merge_join stages (every fusion
+// pass gates on hash_join/broadcast_join), so wireFused must be empty.
+func buildSortMergeJoinFragment(
+	stage physical.Stage,
+	t *distributed.Task,
+	taskInputs map[string][]string,
+	wireFused []distributed.FusedJoinSpec,
+	sorts []distributed.SortKeySpec,
+) ([]distributed.OpSpec, error) {
+	if len(wireFused) > 0 {
+		return nil, fmt.Errorf("sort_merge_join stage carries %d fused joins; fusion passes must not target it", len(wireFused))
+	}
+	if t.BuildTableAlias == "" {
+		return nil, fmt.Errorf("BuildTableAlias required")
+	}
+	buildFiles, ok := taskInputs[t.BuildTableAlias]
+	if !ok {
+		return nil, fmt.Errorf("build alias %q missing from inputs", t.BuildTableAlias)
+	}
+	var probeAlias string
+	var probeFiles []string
+	for k, v := range taskInputs {
+		if k != t.BuildTableAlias {
+			probeAlias = k
+			probeFiles = v
+			break
+		}
+	}
+	if probeAlias == "" {
+		return nil, fmt.Errorf("no probe-side alias (only %q)", t.BuildTableAlias)
+	}
+
+	ops := make([]distributed.OpSpec, 0, 5)
+	ops = append(ops, distributed.OpSpec{
+		Type:        distributed.OpShuffleSource,
+		InputAlias:  probeAlias,
+		InputFiles:  probeFiles,
+		InputBucket: t.DataBucket,
+	})
+	ops = append(ops, distributed.OpSpec{
+		Type:                distributed.OpSortMergeJoin,
+		JoinType:            t.JoinType,
+		LeftKeys:            t.JoinLeftKeys,
+		RightKeys:           t.JoinRightKeys,
+		BuildAlias:          t.BuildTableAlias,
+		BuildFiles:          buildFiles,
+		BuildBucket:         t.DataBucket,
+		QualifyAllBuildCols: t.QualifyAllBuildCols,
+		OutputColumns:       append([]string(nil), t.Columns...),
+	})
+	if len(t.PostFilterExprs) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:       distributed.OpFilter,
+			Predicates: append([]string(nil), t.PostFilterExprs...),
+		})
+	}
+	if len(sorts) > 0 {
+		ops = append(ops, distributed.OpSpec{
+			Type:         distributed.OpSort,
+			SortKeySpecs: append([]distributed.SortKeySpec(nil), sorts...),
+			SortLimit:    stage.Limit,
+		})
+	}
+	ops = append(ops, distributed.OpSpec{Type: distributed.OpUnpartitionedSink})
+	return ops, nil
+}
+
 // buildAggregateFragment translates a final_aggregate / merge_aggregate
 // stage's task into a fragment Operators[] pipeline:
 //
@@ -2421,11 +2511,11 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 	// upstream hasn't pre-computed.
 	mergeMode := stage.Type == "final_aggregate" || stage.Type == "merge_aggregate"
 	ops = append(ops, distributed.OpSpec{
-		Type:         distributed.OpHashAggregate,
-		GroupByCols:  append([]string(nil), stage.GroupByCols...),
-		Aggregates:   append([]distributed.AggSpec(nil), aggs...),
-		GroupByAll:   stage.GroupByAll,
-		MergeMode:    mergeMode,
+		Type:        distributed.OpHashAggregate,
+		GroupByCols: append([]string(nil), stage.GroupByCols...),
+		Aggregates:  append([]distributed.AggSpec(nil), aggs...),
+		GroupByAll:  stage.GroupByAll,
+		MergeMode:   mergeMode,
 		// GroupByAll (DISTINCT) has no derived-input expressions to project and
 		// no AVG synthetics to fold — keep both off regardless of stage role.
 		FoldAvg:      stage.Type == "final_aggregate" && !stage.GroupByAll,
@@ -2961,7 +3051,7 @@ func estimateComputeTaskBytes(stage physical.Stage, inputs map[string]StageOutpu
 func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOutput, workerIdx, workerCount int) (map[string][]string, error) {
 	inputs := make(map[string][]string)
 	switch stage.Type {
-	case physical.StageHashJoin, physical.StageBroadcastJoin:
+	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
 		expectedDeps := 2 + len(stage.FusedJoins)
 		if len(stage.Dependencies) != expectedDeps {
 			return nil, fmt.Errorf("join stage %s expects %d deps (2 primary + %d fused), got %d",

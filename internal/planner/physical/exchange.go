@@ -10,6 +10,11 @@ const (
 	StageSort          = "sort"
 	StageHashJoin      = "hash_join"
 	StageBroadcastJoin = "broadcast_join"
+	// StageSortMergeJoin is a hash-shuffled join executed as a sort-merge
+	// join (docs/design/sort-merge-join.md): identical exchange children and
+	// distribution properties to StageHashJoin — only the join operator
+	// differs. Emitted when the SortMergeJoinBytes gate passes.
+	StageSortMergeJoin = "sort_merge_join"
 	StageWindow        = "window"
 	StagePipeline      = "pipeline"
 

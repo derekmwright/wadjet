@@ -63,6 +63,20 @@ type Config struct {
 	// unchanged). `wadjet serve` enables it by default via its flag
 	// (DefaultLocalFastPathBytes).
 	LocalFastPathBytes int64
+	// BroadcastBytesOverride, when non-zero, replaces the cluster-derived
+	// broadcast threshold (broadcastThresholdFromCluster): >0 = fixed byte
+	// threshold, <0 = never broadcast (every join takes the hash-shuffle /
+	// sort-merge path). 0 = derive from worker pool budget (default).
+	// Primarily a benchmarking/debugging surface: forcing the shuffled-join
+	// path at small scale is how the sort-merge join gate gets exercised
+	// before data is big enough to defeat broadcast on its own.
+	BroadcastBytesOverride int64
+	// SortMergeJoinBytes routes inner equi-joins whose sides BOTH exceed
+	// this estimated size through the sort-merge join instead of the hash
+	// join (docs/design/sort-merge-join.md), on the local fast path and in
+	// the distributed stage DAG alike (the join stage swaps operator; its
+	// exchange children are identical). 0 = disabled (default, dormant).
+	SortMergeJoinBytes int64
 	// StreamingExchange annotates dispatched tasks with peer-location
 	// hints (Task.InputLocations) and per-query fetch tokens so consumers
 	// stream stage outputs from the producing workers' local disk instead
@@ -724,6 +738,10 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
+	if c.config.BroadcastBytesOverride != 0 {
+		planner.BroadcastBytesThreshold = c.config.BroadcastBytesOverride
+	}
+	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -2413,6 +2431,10 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 	planner := physical.NewPlanner(c.catalog)
 	planner.WorkerCount = c.workers.Count()
 	planner.BroadcastBytesThreshold = broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget())
+	if c.config.BroadcastBytesOverride != 0 {
+		planner.BroadcastBytesThreshold = c.config.BroadcastBytesOverride
+	}
+	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {

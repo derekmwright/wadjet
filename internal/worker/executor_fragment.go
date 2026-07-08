@@ -1053,7 +1053,7 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 
 	breakers := make([]*fragmentBreaker, len(breakerIdxs))
 	for i, idx := range breakerIdxs {
-		fb, err := e.buildFragmentBreaker(ctx, middle[idx])
+		fb, err := e.buildFragmentBreaker(ctx, task, middle[idx])
 		if err != nil {
 			return fmt.Errorf("fragment task %s: build breaker %d (%s): %w", task.ID, i, middle[idx].Type, err)
 		}
@@ -1274,7 +1274,7 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 // buildFragmentBreaker dispatches per-OpType breaker construction. Returns a
 // fully-initialised SinkSource plus the optional pre/drain/post hooks the
 // breaker needs.
-func (e *Executor) buildFragmentBreaker(ctx context.Context, spec distributed.OpSpec) (*fragmentBreaker, error) {
+func (e *Executor) buildFragmentBreaker(ctx context.Context, task distributed.Task, spec distributed.OpSpec) (*fragmentBreaker, error) {
 	switch spec.Type {
 	case distributed.OpHashAggregate:
 		hashAgg, err := e.buildFragmentHashAggregate(spec)
@@ -1342,9 +1342,100 @@ func (e *Executor) buildFragmentBreaker(ctx context.Context, spec distributed.Op
 		}
 		return fb, nil
 
+	case distributed.OpSortMergeJoin:
+		return e.buildFragmentSortMergeJoin(ctx, task, spec)
+
 	default:
 		return nil, fmt.Errorf("unsupported breaker op %q", spec.Type)
 	}
+}
+
+// smjBreakerOp wraps SortMergeJoin for the fragment breaker path: the
+// consume-phase Pipeline.Run finalizes its sink itself, and the SMJ build
+// side drains in a concurrent goroutine — Finalize must wait for the build
+// barrier before starting the merge.
+type smjBreakerOp struct {
+	*exec.SortMergeJoin
+	barrier  <-chan struct{}
+	buildErr *error
+}
+
+func (s *smjBreakerOp) Finalize(ctx context.Context) error {
+	<-s.barrier
+	if *s.buildErr != nil {
+		return *s.buildErr
+	}
+	return s.SortMergeJoin.Finalize(ctx)
+}
+
+// buildFragmentSortMergeJoin constructs the sort-merge join breaker: the
+// build side's co-partitioned shuffle files (spec.BuildFiles) drain into the
+// operator in a goroutine — overlapping the probe-side consume phase, since
+// the two side buffers are independent — and the probe side arrives via the
+// breaker's Consume. Inner-only in v1; the planner gate guarantees it.
+func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distributed.Task, spec distributed.OpSpec) (*fragmentBreaker, error) {
+	if len(spec.LeftKeys) == 0 || len(spec.RightKeys) == 0 {
+		return nil, fmt.Errorf("sort_merge_join: LeftKeys and RightKeys required")
+	}
+	if jt := mapJoinTypeString(spec.JoinType); jt != exec.InnerJoin {
+		return nil, fmt.Errorf("sort_merge_join: join type %q not supported (v1 is inner-only)", spec.JoinType)
+	}
+
+	j := exec.NewSortMergeJoin(spec.LeftKeys, spec.RightKeys)
+	j.BuildTableAlias = spec.BuildAlias
+	j.QualifyAllBuildCols = spec.QualifyAllBuildCols
+	if len(spec.OutputColumns) > 0 {
+		filter := make(map[string]bool, len(spec.OutputColumns))
+		for _, c := range spec.OutputColumns {
+			filter[c] = true
+		}
+		j.OutputFilter = filter
+	}
+	if e.sharedSpill != nil {
+		j.Spill = e.sharedSpill
+	}
+
+	// Build source: this task's partition of the build-side exchange. Empty
+	// BuildFiles is the legitimate "upstream produced nothing for this
+	// partition" case — Build over an empty source completes immediately and
+	// the inner join emits nothing.
+	var buildSrc exec.Source
+	if len(spec.BuildFiles) == 0 {
+		buildSrc = exec.NewBatchSource(nil)
+	} else {
+		bucket := spec.BuildBucket
+		if bucket == "" {
+			bucket = task.DataBucket
+		}
+		if bucket == "" {
+			bucket = task.ResultBucket
+		}
+		src, err := e.sourceForAlias(task.QueryID, bucket, spec.BuildAlias, spec.BuildFiles)
+		if err != nil {
+			return nil, fmt.Errorf("sort_merge_join build source: %w", err)
+		}
+		buildSrc = src
+	}
+
+	buildDone := make(chan struct{})
+	var buildErr error
+	go func() {
+		defer close(buildDone)
+		if err := j.Build(ctx, buildSrc); err != nil {
+			buildErr = fmt.Errorf("sort_merge_join build side: %w", err)
+		}
+	}()
+
+	return &fragmentBreaker{
+		Op:    &smjBreakerOp{SortMergeJoin: j, barrier: buildDone, buildErr: &buildErr},
+		Label: "sort_merge_join",
+		Cleanup: func() {
+			// The build goroutine owns join state until the barrier closes;
+			// closing under it would release tracker bytes it is still adding.
+			<-buildDone
+			j.Close()
+		},
+	}, nil
 }
 
 // buildFragmentSort constructs an exec.Sort from an OpSpec. Converts each
@@ -1509,7 +1600,7 @@ func isFragmentSinkOp(t distributed.OpType) bool {
 }
 
 func isFragmentBreakerOp(t distributed.OpType) bool {
-	return t == distributed.OpHashAggregate || t == distributed.OpSort
+	return t == distributed.OpHashAggregate || t == distributed.OpSort || t == distributed.OpSortMergeJoin
 }
 
 func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.OpSpec) (exec.Source, error) {

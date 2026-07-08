@@ -180,7 +180,7 @@ type dependencySlot struct {
 
 func dependencySlots(s *Stage) []dependencySlot {
 	switch s.Type {
-	case StageHashJoin, StageBroadcastJoin:
+	case StageHashJoin, StageBroadcastJoin, StageSortMergeJoin:
 		return []dependencySlot{
 			{0, func(s *Stage) string { return s.LeftDepStage }, func(s *Stage, id string) { s.LeftDepStage = id }},
 			{1, func(s *Stage) string { return s.RightDepStage }, func(s *Stage, id string) { s.RightDepStage = id }},

@@ -23,6 +23,7 @@ import (
 	"runtime/debug"
 	"runtime/pprof"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,25 +43,25 @@ import (
 
 func main() {
 	var (
-		configPath    = flag.String("config", "", "Path to benchmark profile YAML (values override defaults; CLI flags override profile)")
-		scale         = flag.Int("scale", 1, "TPC-H scale factor (1, 10, 100)")
-		s3Endpoint    = flag.String("endpoint", "", "S3 endpoint (empty = in-memory standalone)")
-		s3Bucket      = flag.String("bucket", "wadjet-bench-sf1", "S3 bucket name")
-		s3Region      = flag.String("region", "", "S3 region")
-		ssl           = flag.Bool("ssl", false, "Use TLS for S3")
-		workers       = flag.Int("workers", 0, "Expected external workers (0 = standalone in-memory)")
-		natsPort      = flag.Int("nats-port", 4222, "NATS listen port (distributed mode)")
-		dataPlane     = flag.String("data-plane", "", "Worker↔coord data-plane transport: empty/nats (default) or grpc (Phases C+D+E)")
-		dataPlaneAddr = flag.String("data-plane-addr", ":9091", "gRPC data-plane listen address (distributed + --data-plane=grpc)")
-		runs        = flag.Int("runs", 1, "Number of benchmark runs")
-		dataOnly    = flag.Bool("data-only", false, "Generate and upload data only, skip benchmark queries")
-		skipLoad    = flag.Bool("skip-load", false, "Skip data generation; discover existing parquet files from S3")
-		skipQueries = flag.String("skip-queries", "", "Comma-separated query numbers to skip (e.g. 2,17)")
-		queryTimeout = flag.Duration("query-timeout", 10*time.Minute, "Per-query timeout (0 = no timeout)")
-		cpuProf     = flag.String("cpuprofile", "", "Write CPU profile to file")
-		memProf     = flag.String("memprofile", "", "Write memory profile to file")
-		profDir     = flag.String("profdir", "", "Directory for per-query profiles")
-		dataPrefix  = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
+		configPath            = flag.String("config", "", "Path to benchmark profile YAML (values override defaults; CLI flags override profile)")
+		scale                 = flag.Int("scale", 1, "TPC-H scale factor (1, 10, 100)")
+		s3Endpoint            = flag.String("endpoint", "", "S3 endpoint (empty = in-memory standalone)")
+		s3Bucket              = flag.String("bucket", "wadjet-bench-sf1", "S3 bucket name")
+		s3Region              = flag.String("region", "", "S3 region")
+		ssl                   = flag.Bool("ssl", false, "Use TLS for S3")
+		workers               = flag.Int("workers", 0, "Expected external workers (0 = standalone in-memory)")
+		natsPort              = flag.Int("nats-port", 4222, "NATS listen port (distributed mode)")
+		dataPlane             = flag.String("data-plane", "", "Worker↔coord data-plane transport: empty/nats (default) or grpc (Phases C+D+E)")
+		dataPlaneAddr         = flag.String("data-plane-addr", ":9091", "gRPC data-plane listen address (distributed + --data-plane=grpc)")
+		runs                  = flag.Int("runs", 1, "Number of benchmark runs")
+		dataOnly              = flag.Bool("data-only", false, "Generate and upload data only, skip benchmark queries")
+		skipLoad              = flag.Bool("skip-load", false, "Skip data generation; discover existing parquet files from S3")
+		skipQueries           = flag.String("skip-queries", "", "Comma-separated query numbers to skip (e.g. 2,17)")
+		queryTimeout          = flag.Duration("query-timeout", 10*time.Minute, "Per-query timeout (0 = no timeout)")
+		cpuProf               = flag.String("cpuprofile", "", "Write CPU profile to file")
+		memProf               = flag.String("memprofile", "", "Write memory profile to file")
+		profDir               = flag.String("profdir", "", "Directory for per-query profiles")
+		dataPrefix            = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
 		catalogSnapshotPrefix = flag.String("catalog-snapshot-prefix", "", "S3 prefix for catalog snapshots (e.g. 'catalog/'). With --skip-load: restore the latest snapshot instead of running discovery+ANALYZE; after a fresh discovery, write one. Empty = disabled.")
 	)
 	flag.Parse()
@@ -338,6 +339,13 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		NATSUrl:        embeddedNATS.ClientURL(),
 		ResultBucket:   bucket,
 		DynamicFilters: os.Getenv("WADJET_DYNAMIC_FILTERS") == "1" || strings.EqualFold(os.Getenv("WADJET_DYNAMIC_FILTERS"), "true"),
+		// Sort-merge join gate (docs/design/sort-merge-join.md): inner
+		// equi-joins whose sides BOTH exceed this many estimated bytes run
+		// as sort-merge joins. 0/unset = disabled (hash/broadcast as before).
+		SortMergeJoinBytes: envInt64("WADJET_SORT_MERGE_JOIN_BYTES"),
+		// Broadcast threshold override: <0 = never broadcast. 0/unset =
+		// cluster-derived default.
+		BroadcastBytesOverride: envInt64("WADJET_BROADCAST_BYTES"),
 		// Streaming exchange (docs/design/streaming-exchange.md): annotate
 		// tasks with peer-location hints + fetch tokens and run stage
 		// uploads async. Workers must run with --streaming-exchange too
@@ -695,14 +703,14 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 	}
 
 	type result struct {
-		Query    int
-		Name     string
-		Elapsed  time.Duration
-		Rows     int
-		HeapMB   int64
-		DeltaMB  int64
+		Query     int
+		Name      string
+		Elapsed   time.Duration
+		Rows      int
+		HeapMB    int64
+		DeltaMB   int64
 		GCPauseNs uint64
-		Err      error
+		Err       error
 	}
 
 	for run := 1; run <= runs; run++ {
@@ -867,4 +875,19 @@ func collectWorkerProfiles(nc *nats.Conn, workerCount int, profDir string) {
 		collected++
 	}
 	log.Printf("Collected profiles from %d/%d workers", collected, workerCount)
+}
+
+// envInt64 parses an int64 env var; empty or malformed values return 0 so an
+// unset knob keeps the default-off behavior.
+func envInt64(key string) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		log.Printf("WARN: ignoring %s=%q: %v", key, v, err)
+		return 0
+	}
+	return n
 }
