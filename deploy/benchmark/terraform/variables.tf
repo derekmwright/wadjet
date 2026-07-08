@@ -117,9 +117,9 @@ variable "max_concurrent" {
 }
 
 variable "morsel_workers" {
-  description = "Worker --morsel-workers: intra-fragment parallel pipeline consumers per task (docs/design/morsel-execution.md). 1 = serial (matches the binary default; use for baselines), 0 = auto (width adapts to fragment size + idle CPU tokens — the A/B treatment), N>1 = fixed width."
+  description = "Worker --morsel-workers: intra-fragment parallel pipeline consumers per task (docs/design/morsel-execution.md). 0 = auto (matches the binary default since the 2026-07-08 flip), 1 = serial (kill switch; use to reproduce pre-flip baselines), N>1 = fixed width."
   type        = number
-  default     = 1
+  default     = 0
 }
 
 variable "mmap_relief" {
