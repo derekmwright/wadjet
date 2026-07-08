@@ -1,8 +1,8 @@
 # Native-DAG Distributed Execution
 
 **Date:** 2026-04-22
-**Supersedes runtime-integration half of:** `docs/superpowers/specs/2026-04-20-distribution-property-phase-2-design.md`, `docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md`
-**Keeps:** `docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md` (Phase 1 — merged as PR #44, provides `RequiredKind`, `Satisfies`, `OutputDistribution`, `AssertExchangeConsistency`)
+**Supersedes runtime-integration half of:** `docs/archive/specs/2026-04-20-distribution-property-phase-2-design.md`, `docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md`
+**Keeps:** `docs/archive/specs/2026-04-20-distribution-property-phase-1.md` (Phase 1 — merged as PR #44, provides `RequiredKind`, `Satisfies`, `OutputDistribution`, `AssertExchangeConsistency`)
 **Keeps:** Phase 2a planner-side work on `feat/distribution-property-phase-2` (commits `707a0f2` through `d1e8175` — `EnsureDistribution`, Exchange stage types, goldens)
 
 ## Context
@@ -309,6 +309,6 @@ This design is done when:
 - `memory/feedback_execute_on_research_backed_decisions.md` — why this spec commits to decisions rather than asking
 - Trino documentation: https://trino.io/docs/current/overview/concepts.html (fragments, exchange operators)
 - Spark SQL internals: https://spark.apache.org/docs/latest/sql-performance-tuning.html#adaptive-query-execution (ShuffleExchangeExec stages)
-- `docs/superpowers/specs/2026-04-20-distribution-property-phase-1.md` — merged Phase 1 foundation
-- `docs/superpowers/specs/2026-04-20-distribution-property-phase-2-design.md` — Phase 2 spec (this design replaces the runtime-integration portion)
-- `docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md` — Phase 2b spec (this design supersedes)
+- `docs/archive/specs/2026-04-20-distribution-property-phase-1.md` — merged Phase 1 foundation
+- `docs/archive/specs/2026-04-20-distribution-property-phase-2-design.md` — Phase 2 spec (this design replaces the runtime-integration portion)
+- `docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md` — Phase 2b spec (this design supersedes)

@@ -1,6 +1,5 @@
 # CREATE ALERT DDL v1 — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Ship SQL-native detection alerts — `CREATE ALERT name AS SELECT ... EVERY N MINUTES [WEBHOOK ...] [INSERT INTO ...]` — with stateless polling, webhook + table sinks, leader-only scheduler, feature-flagged, and discoverable via MCP and `information_schema`.
 
@@ -8,7 +7,7 @@
 
 **Tech Stack:** Go stdlib (`net/http`, `net/http/httptest`), existing `internal/planner/sql/` hand-rolled parser, existing `internal/storage/catalog/` NATS KV (MemKV in tests), existing Prometheus metrics registry, existing MCP + pgwire servers.
 
-**Spec:** `docs/superpowers/specs/2026-04-16-create-alert-ddl-design.md`
+**Spec:** `docs/archive/specs/2026-04-16-create-alert-ddl-design.md`
 
 ---
 

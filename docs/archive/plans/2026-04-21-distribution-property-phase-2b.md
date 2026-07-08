@@ -1,6 +1,5 @@
 # Distribution Property Phase 2b: dispatchStageDAG Execution Integration
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Delete the legacy four-mode switch at `internal/coordinator/coordinator.go:541-605` and route all distributed queries through a lowering pass (`lowerExchangeDAG`) that consumes Exchange stages produced by the Phase 2a `EnsureDistribution` planner pass.
 
@@ -8,7 +7,7 @@
 
 **Tech Stack:** Go 1.22+, table-driven unit tests, TPC-H parity gates (SF0.01, SF1 local, SF10 EC2 A/B).
 
-**Spec:** `docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md` (commit `b42c4ed`).
+**Spec:** `docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md` (commit `b42c4ed`).
 
 **Base branch:** `feat/distribution-property-phase-2` (contains Phase 2a — PR #45). All commits from this plan land on the same branch.
 
@@ -69,7 +68,7 @@ Exchange *ExchangeStage carries per-variant metadata for StageExchange* stages.
 Adds BuildAlias, ProbeAlias, BuildBytes to the payload so the Phase 2b
 coordinator lowering can synthesize ShuffleCandidate without calling pickers.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -233,7 +232,7 @@ Mechanical rename ahead of Phase 2b coordinator lowering pass. Exchange
 payload now lives on a dedicated struct; non-Exchange stages pay no cost.
 Regenerates 22 TPC-H goldens to reflect the new field layout.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -508,7 +507,7 @@ Resolves scan aliases for inserted Exchange stages by walking parent
 dependency slots. Populates the fields the Phase 2b coordinator lowering
 pass will read instead of calling PickShuffleCandidate at dispatch time.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -632,7 +631,7 @@ One-shot pre-deletion check. Verifies that the fields EnsureDistribution
 populates on inserted Repartition stages agree with PickShuffleCandidate's
 output on the same 22 TPC-H plans. Delete when pickers are removed.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -881,7 +880,7 @@ orchestrateRepartition backend, and emits a pipeline-0 stage plus
 shuffleTasks map matching the legacy switch output. Replicate and
 Gather branches follow in subsequent commits.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -1019,7 +1018,7 @@ Emits pipeline-0 with ProbeSplitAlias/ProbeSplitFiles/BuildCachePreScans
 derived from StageExchangeReplicate's Exchange payload. Calls existing
 orchestrateReplicate shim. No shuffleTasks emitted in this path.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -1131,7 +1130,7 @@ StageExchangeGather is present in the DAG. The gather itself runs
 post-execution via the existing mergeProbePartials path; this branch
 only surfaces the side-channel metadata.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -1205,7 +1204,7 @@ File rename reflects Phase 2b's role change (test-seam dispatcher → production
 lowering pass). Adds a regression test for the zero-Exchange-stage case so
 the single-worker fallback cannot silently regress to workerCount tasks.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -1296,7 +1295,7 @@ scope). lowerExchangeDAG synthesizes ShuffleCandidate from Exchange
 stage fields and reproduces the legacy switch's pipeline-0 shape +
 shuffleTasks + mergeInfo side channels. Pipeline executor unchanged.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -1388,7 +1387,7 @@ PickAggregateShuffleCandidateDiag remains: the Q17 pre-compute inline
 branch still consults it. That will move in Phase 3 when the aggregate-
 shuffle rewrite becomes a logical pass.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---
@@ -1550,7 +1549,7 @@ Replaces the stub from commit 9399371 with real row-equality comparison
 against a baseline captured from main. Gates Phase 2b correctness beyond
 the SF0.01 result-count check.
 
-Phase 2b spec: docs/superpowers/specs/2026-04-21-distribution-property-phase-2b-design.md"
+Phase 2b spec: docs/archive/specs/2026-04-21-distribution-property-phase-2b-design.md"
 ```
 
 ---

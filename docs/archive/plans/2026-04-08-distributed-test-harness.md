@@ -1,6 +1,5 @@
 # Distributed Test Harness Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build `cmd/tpch-harness` — a single Go binary that runs the TPC-H regression suite in two modes (`local` orchestrates a multi-process cluster on the dev box, `golden` drives an existing EC2 cluster), captures structured measurements, and compares against a calibrated baseline to detect hangs, correctness divergence, missing spill paths, and performance regressions.
 
@@ -8,7 +7,7 @@
 
 **Tech Stack:** Go 1.23+, embedded NATS (existing `internal/distributed`), `os/exec` for process supervision, existing `internal/coordinator` and `internal/worker` packages, existing TPC-H query suite from `benchmarks/tpch/queries.go`.
 
-**Spec:** `docs/superpowers/specs/2026-04-08-distributed-test-harness-design.md`
+**Spec:** `docs/archive/specs/2026-04-08-distributed-test-harness-design.md`
 
 **Scope for v1 (this plan):** Working harness that runs end-to-end against a real local cluster with real spill, captures all seven signals, compares against baseline, and exits with the right code. Includes Layer 1 unit tests in full and one Layer 2 happy-path self-test. Includes one micro (`MicroReverseBloom`).
 
@@ -73,7 +72,7 @@ Write `internal/harness/doc.go`:
 // existing distributed_tpch_test.go in internal/coordinator so there is
 // exactly one implementation.
 //
-// See docs/superpowers/specs/2026-04-08-distributed-test-harness-design.md
+// See docs/archive/specs/2026-04-08-distributed-test-harness-design.md
 // for the full design.
 package harness
 ```
@@ -182,7 +181,7 @@ git commit -m "$(cat <<'EOF'
 feat(harness): add internal/harness package skeleton and core types
 
 First task in the distributed test harness implementation.
-See docs/superpowers/specs/2026-04-08-distributed-test-harness-design.md.
+See docs/archive/specs/2026-04-08-distributed-test-harness-design.md.
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
 EOF
@@ -2446,7 +2445,7 @@ Edit `Taskfile.yml`. Append a new section after the existing `bench:` tasks:
 
 ```yaml
   # --- Distributed test harness (cmd/tpch-harness) ---
-  # See docs/superpowers/specs/2026-04-08-distributed-test-harness-design.md
+  # See docs/archive/specs/2026-04-08-distributed-test-harness-design.md
 
   harness:build:
     desc: Build the tpch-harness binary

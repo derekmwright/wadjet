@@ -1,6 +1,5 @@
 # Harness V1 Gap Closure Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the three remaining gaps in the harness v1 branch: goroutine dump on hang via pprof, real micro-benchmarks with synthetic data, and worker metrics port isolation.
 

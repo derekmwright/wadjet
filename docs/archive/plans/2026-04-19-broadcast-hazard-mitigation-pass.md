@@ -1,6 +1,5 @@
 # Broadcast-Hazard Mitigation Pass Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace `PickShuffleCandidate` (PR #40) and `PickAggregateShuffleCandidate` (PR #43) with a single per-join planner pass `IdentifyBroadcastHazards` that returns every broadcast-duplication hazard above a per-worker memory budget. Each hazard is matched to a remedy (`RemedyShuffleScan` reusing PR #40 mechanism, `RemedyPreComputeAggregate` reusing PR #43 mechanism). Coordinator becomes a thin dispatch loop. Threshold constants are deleted; `broadcastBudget` derives from `GOMEMLIMIT × fraction / workerCount`. Establishes the architectural invariant: *no query in the optimized plan broadcast-duplicates a build whose per-worker bytes exceed budget.*
 
@@ -8,7 +7,7 @@
 
 **Tech Stack:** Go 1.22+, existing `internal/planner/physical` (Stage / candidate types, `followToAggregate`, `followToScan`, `keysCovered`), existing `internal/coordinator` (NATS task dispatch, `runShuffleSide`, `preComputeDerivedAggregate`), `testing` package with table-driven tests against synthetic `[]Stage`.
 
-**Spec:** `docs/superpowers/specs/2026-04-19-broadcast-hazard-mitigation-pass.md`
+**Spec:** `docs/archive/specs/2026-04-19-broadcast-hazard-mitigation-pass.md`
 
 ---
 

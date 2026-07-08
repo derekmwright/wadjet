@@ -1,6 +1,5 @@
 # Shuffle-Based Build Partitioning Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a shuffle-distributed execution path for queries whose largest build table exceeds 4 GB, so per-worker memory scales 1/N instead of being broadcast-duplicated. Unblocks Q03/Q05/Q07 at SF100.
 
@@ -8,7 +7,7 @@
 
 **Tech Stack:** Go, NATS JetStream, S3 (MinIO in tests), `wadjet` engine `exec` package, custom WSHF on-disk format.
 
-**Spec:** `docs/superpowers/specs/2026-04-18-shuffle-based-build-partitioning-design.md`
+**Spec:** `docs/archive/specs/2026-04-18-shuffle-based-build-partitioning-design.md`
 
 ---
 

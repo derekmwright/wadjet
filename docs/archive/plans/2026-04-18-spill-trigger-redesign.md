@@ -1,6 +1,5 @@
 # Spill Trigger Redesign Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Eliminate the SF10 perf regression caused by the global heap-pressure spill trigger by (a) making the per-tracker accounting honest at the highest-impact bypass sites, (b) introducing cost-class-aware spill triggers, and (c) demoting the heap-pressure check to a 95%-of-GOMEMLIMIT emergency backstop.
 
@@ -8,7 +7,7 @@
 
 **Tech Stack:** Go, `internal/engine/memory/`, `internal/planner/physical/plan.go` (scan source pool), `internal/engine/exec/{aggregate,join,sort,window}.go`.
 
-**Spec:** `docs/superpowers/specs/2026-04-18-spill-trigger-redesign.md`
+**Spec:** `docs/archive/specs/2026-04-18-spill-trigger-redesign.md`
 
 ---
 

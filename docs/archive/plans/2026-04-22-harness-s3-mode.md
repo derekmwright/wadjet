@@ -1,6 +1,5 @@
 # Harness S3 Mode — PR A Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend `cmd/tpch-harness` with an `--source=s3` mode so it can drive a local coordinator+workers cluster against the real SF10 TPC-H bucket (`wadjet-bench-sf10-use2`). Unblocks local reproduction of the distributed-execution regression class that currently requires EC2 to observe.
 
@@ -8,7 +7,7 @@
 
 **Tech Stack:** Go, embedded NATS, NATS KV catalog, minio-go S3 client, existing `tpch-bench` catalog discovery.
 
-**Spec:** `docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md` — "Testing" section.
+**Spec:** `docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md` — "Testing" section.
 
 **Base branch:** `feat/distribution-property-phase-2` (HEAD `ba9c9ac`). This PR lands first; PR B (native-DAG runtime) depends on it.
 
@@ -96,7 +95,7 @@ Plumbs the S3-mode configuration through the Config struct. No runtime
 behavior change yet — Source defaults to 'local' and s3 mode is a no-op
 until Task A2 branches the cluster spawn on Source.
 
-Phase 3 harness spec: docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 harness spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -188,7 +187,7 @@ ClusterConfig gains StorageType/Bucket/Region/Endpoint/SSL fields. When
 StorageType=='s3', coordinator and workers are spawned with --storage-type=s3
 and the S3 connection args. FileStore path retained as default.
 
-Phase 3 harness spec: docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 harness spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -294,7 +293,7 @@ TPC-H table and registers them via DB.CreateTable + DB.RegisterFiles.
 Mirrors cmd/tpch-bench's discoverData pattern. Used by S3-mode harness
 in place of loadSampleData.
 
-Phase 3 harness spec: docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 harness spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -420,7 +419,7 @@ Enables local reproduction of distributed-execution regressions without
 EC2 cost — the harness drives a real 2-worker cluster against a real
 S3 bucket.
 
-Phase 3 harness spec: docs/superpowers/specs/2026-04-22-distribution-native-dag-execution-design.md"
+Phase 3 harness spec: docs/archive/specs/2026-04-22-distribution-native-dag-execution-design.md"
 ```
 
 ---
@@ -464,7 +463,7 @@ This task is a one-time validation. It confirms the harness CAN catch the Phase 
                --wadjet-bin=./wadjet_bin --no-compare --queries=q18,q20,q21 2>&1 | tail -40
 ```
 
-Expected (Phase 2b branch state, broken): Q18 hangs or returns 0 rows; Q20 returns significantly fewer than 6194 rows; Q21 returns 0 or 1 row. This matches the SF10 EC2 run we captured in `docs/superpowers/research/sf10-phase2b-2026-04-21/feat-b2d205e.txt`.
+Expected (Phase 2b branch state, broken): Q18 hangs or returns 0 rows; Q20 returns significantly fewer than 6194 rows; Q21 returns 0 or 1 row. This matches the SF10 EC2 run we captured in `docs/archive/research/sf10-phase2b-2026-04-21/feat-b2d205e.txt`.
 
 - [ ] **Step 2: Document the reproduction in a short session note**
 
