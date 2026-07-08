@@ -106,3 +106,51 @@ func TestDynamicFilterPassDisabled(t *testing.T) {
 		}
 	}
 }
+
+// TestDynamicFilterPass_AnnotatesShuffledJoin: a shuffled single-int-key
+// inner join gets Emit/Consume annotations and bumps DynamicFiltersPlanned —
+// the observability contract A/B runs rely on to prove the pass fired
+// (the 2026-07-08 revisit pair was unverifiable without it).
+func TestDynamicFilterPass_AnnotatesShuffledJoin(t *testing.T) {
+	cat := setupJoinTables(t)
+	ctx := context.Background()
+	parsed, err := plansql.Parse("SELECT id, val, rval FROM smj_l JOIN smj_r ON id = rid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectInfo, err := plansql.ExtractSelect(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logicalPlan, err := logical.BuildFromSelect(selectInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanAnnotator := func(plan *logical.Node) {
+		NewPlanner(cat).AnnotateScanColumns(ctx, plan)
+	}
+	scanAnnotator(logicalPlan)
+	logicalPlan = logical.Optimize(logicalPlan, scanAnnotator)
+
+	planner := NewPlanner(cat)
+	planner.WorkerCount = 3
+	planner.BroadcastBytesThreshold = -1 // force the shuffled hash join
+	planner.DynamicFiltersEnabled = true
+
+	before := DynamicFiltersPlanned.Load()
+	stages, err := planner.PlanDistributed(ctx, logicalPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := DynamicFiltersPlanned.Load() - before; got == 0 {
+		t.Fatal("DynamicFiltersPlanned did not move — the pass never annotated")
+	}
+	emits, consumes := 0, 0
+	for _, s := range stages {
+		emits += len(s.EmitDynamicFilters)
+		consumes += len(s.ConsumeDynamicFilters)
+	}
+	if emits == 0 || consumes == 0 {
+		t.Fatalf("expected emit+consume annotations, got emits=%d consumes=%d", emits, consumes)
+	}
+}

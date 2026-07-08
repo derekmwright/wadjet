@@ -1,6 +1,8 @@
 package physical
 
 import (
+	"sync/atomic"
+
 	"context"
 	"fmt"
 	"strings"
@@ -46,6 +48,13 @@ const dynamicFilterMinBloomBits = 1024
 //
 // Safe to call multiple times — already-annotated stages are detected by
 // the presence of EmitDynamicFilters/ConsumeDynamicFilters and skipped.
+// DynamicFiltersPlanned counts join annotations the dynamic-filter pass
+// produced, process-wide. Observability: A/B runs use it (via the
+// coordinator's dispatch logs) to prove the pass actually fired — the
+// 2026-07-08 revisit pair was unverifiable without it, exactly the failure
+// mode SortMergeJoinsPlanned exists to prevent.
+var DynamicFiltersPlanned atomic.Int64
+
 func (p *Planner) applyDynamicFilters(ctx context.Context, stages []Stage) []Stage {
 	if !p.DynamicFiltersEnabled {
 		return stages
@@ -145,6 +154,7 @@ func (p *Planner) applyDynamicFilters(ctx context.Context, stages []Stage) []Sta
 			KeyType:   buildKeyType,
 			BloomBits: bloomBits,
 		})
+		DynamicFiltersPlanned.Add(1)
 		probeLeaf.ConsumeDynamicFilters = append(probeLeaf.ConsumeDynamicFilters, DynamicFilterConsume{
 			FilterID:      filterID,
 			SourceStageID: buildLeaf.ID,
