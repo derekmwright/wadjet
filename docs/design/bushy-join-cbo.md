@@ -1,6 +1,7 @@
 # Bushy join enumeration for the CBO
 
-Status: DRAFT for review — 2026-07-09
+Status: Phase A (Layer A resolution refactor) LANDED on branch
+feat/bushy-cbo-phase-a — 2026-07-09. Layer B (enumeration) not started.
 Prior art: left-deep DP reorder (`internal/planner/logical/optimizer.go:2863`),
 bushy attempt deferred 2026-05-26 (commit 80c2f46, wrong rows on
 Q02/Q07/Q08/Q09/Q21 at SF0.01).
@@ -203,6 +204,18 @@ marker proving the treatment engaged).
   be *rescued* by FixKeyAssignment/counterpart adoption firing. Phase A's
   WARN tripwire across TPC-H + harness will surface any such case before
   the safety nets are demoted.
+  **CONFIRMED (Phase A, 2026-07-09): Q02's decorrelated scalar-subquery join
+  is exactly such a case** — after decorrelation, BOTH children contain
+  partsupp and supplier scans, so bare `s_suppkey`/`ps_suppkey` are owned by
+  both sides and plan-time assignment (old membership test AND new ownership
+  test) correctly stays conservative; the runtime repair fixes it, as the
+  long-standing comment in FixKeyAssignment records. Root cause: the flat
+  JoinCond string loses the query-block scope of each column reference. The
+  architectural fix is the decorrelator emitting side-assigned keys
+  (LeftKeys/RightKeys on the Node instead of a re-parsed string) — deferred,
+  tracked as a Phase B+ follow-on. Until then the tripwire gate reads: NO
+  repair other than the known Q02 pair, and the bushy unit suite asserts
+  ZERO repairs on bushy shapes.
 - **Memory**: a bushy build is a join output, so build size = intermediate
   cardinality, not base-table size. Spill machinery (grace partition-on-
   arrival) already covers oversized builds; `estimateSubtreeStats` (Layer A
