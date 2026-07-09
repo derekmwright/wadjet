@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"runtime"
 	"strconv"
@@ -4108,7 +4109,10 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			return
 		}
 		if deferBuild || useReverseBloom {
-			hj.FixKeyAssignment()
+			if hj.FixKeyAssignment() {
+				slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
+					"left_keys", hj.LeftKeys, "right_keys", hj.RightKeys)
+			}
 			if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
 				hj.PruneBuildColumns(keepCols)
 			}
@@ -4199,7 +4203,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// (left of "=" → leftKey, right → rightKey), but the SQL may put the
 	// build-side column on the left (e.g., "JOIN t ON t.id = probe.id").
 	// After building, we know the build schema; swap any misassigned pairs.
-	hj.FixKeyAssignment()
+	// A repair firing here means plan-time assignJoinKeySides missed a pair.
+	if hj.FixKeyAssignment() {
+		slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
+			"left_keys", hj.LeftKeys, "right_keys", hj.RightKeys)
+	}
 
 	// SemiAntiFilter already set above (pre-goroutine).
 

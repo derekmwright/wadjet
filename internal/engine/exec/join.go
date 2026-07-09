@@ -1707,13 +1707,23 @@ func (h *HashJoin) BuildRows() int64 {
 	return h.buildRows
 }
 
+// KeyAssignmentRepairs counts runtime probe/build key swaps performed by
+// FixKeyAssignment after a build completed — cases where PLAN-TIME side
+// assignment (assignJoinKeySides) got a pair wrong and the runtime safety
+// net rescued it. Tripwire observability: the TPC-H suites assert this
+// stays 0; a nonzero count means a plan shape leaked through the planner's
+// ownership resolution (rebuild cost + a hazard for partitioned builds).
+var KeyAssignmentRepairs atomic.Int64
+
 // FixKeyAssignment corrects misassigned join keys after the build phase.
 // SQL may place the build-side column on the left of "=" (e.g., JOIN t ON t.id = src.id),
 // causing parseJoinKeys to assign it as a left/probe key. This detects and swaps
 // misassigned pairs by checking which keys exist in the build schema.
-func (h *HashJoin) FixKeyAssignment() {
+// It returns true when any pair was swapped, so callers can surface the
+// repair (it should never fire on planner-produced plans).
+func (h *HashJoin) FixKeyAssignment() bool {
 	if h.buildSchema == nil || len(h.LeftKeys) == 0 {
-		return
+		return false
 	}
 	buildCols := make(map[string]bool, len(h.buildSchema))
 	for _, col := range h.buildSchema {
@@ -1730,6 +1740,9 @@ func (h *HashJoin) FixKeyAssignment() {
 			needsRebuild = true
 			h.probeResolved.Store(false) // force re-resolution of probe key indices
 		}
+	}
+	if needsRebuild {
+		KeyAssignmentRepairs.Add(1)
 	}
 
 	// Rebuild hash index if keys were swapped
@@ -1752,7 +1765,7 @@ func (h *HashJoin) FixKeyAssignment() {
 		if h.spillState != nil {
 			for _, b := range h.buildBatches {
 				if b == nil {
-					return
+					return true
 				}
 			}
 		}
@@ -1829,6 +1842,7 @@ func (h *HashJoin) FixKeyAssignment() {
 		h.bloom = nil
 		h.buildBloom()
 	}
+	return needsRebuild
 }
 
 // Probe is a UnaryOperator that probes the hash table for each input batch.

@@ -1744,7 +1744,10 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		if err := hj.Build(ctx, src); err != nil {
 			return nil, fmt.Errorf("building hash table: %w", err)
 		}
-		hj.FixKeyAssignment()
+		if hj.FixKeyAssignment() {
+			slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
+				"left_keys", hj.LeftKeys, "right_keys", hj.RightKeys)
+		}
 		return hj, nil
 	}
 
