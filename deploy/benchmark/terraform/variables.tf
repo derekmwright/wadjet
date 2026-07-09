@@ -211,7 +211,7 @@ variable "sort_merge_join_bytes" {
 }
 
 variable "late_materialization" {
-  description = "Set to 1 to enable view-column join output (docs/design/late-materialization.md): inner/left hash joins defer the output gather to first touch and compose through join chains. Off by default."
+  description = "View-column join output (docs/design/late-materialization.md). Default on (empty/1 = on, matching the engine default); set \"0\" as the A/B kill switch to restore eager join-output gather."
   type        = string
   default     = ""
 }

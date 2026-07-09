@@ -345,8 +345,9 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		SortMergeJoinBytes: envInt64("WADJET_SORT_MERGE_JOIN_BYTES"),
 		// Late materialization (docs/design/late-materialization.md):
 		// inner/left join output rides view columns, gather deferred to
-		// first touch. Unset = off.
-		LateMaterialization: os.Getenv("WADJET_LATE_MATERIALIZATION") == "1" || strings.EqualFold(os.Getenv("WADJET_LATE_MATERIALIZATION"), "true"),
+		// first touch. Default ON (matches the wadjet CLI default;
+		// SF10/SF100 validated 2026-07-09); set 0/false as the kill switch.
+		LateMaterialization: os.Getenv("WADJET_LATE_MATERIALIZATION") != "0" && !strings.EqualFold(os.Getenv("WADJET_LATE_MATERIALIZATION"), "false"),
 		// Broadcast threshold override: <0 = never broadcast. 0/unset =
 		// cluster-derived default.
 		BroadcastBytesOverride: envInt64("WADJET_BROADCAST_BYTES"),

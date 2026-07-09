@@ -114,12 +114,21 @@ Defaults are already the validated memory-tight profile:
   SF10 −10% / SF100 −23% suite wall. `--peer-exchange-addr` (default
   `:0`) / `--peer-exchange-advertise` control the FetchShuffle listener
   when firewalls need a pinned port.
-- `--morsel-workers` (default **1 = serial**): intra-fragment parallel
-  consumers per task. `0` = auto (width adapts to fragment size and
-  idle CPU tokens) — validated SF100-safe 2026-07-04 (22/22, zero
-  reaps, wins on scan-agg shapes) but not yet the default; the flip
-  awaits a same-window SF100 serial-vs-auto pair. `N>1` = fixed width
-  (benchmark/testing knob, bypasses the size gate).
+- `--late-materialization` (default **true**): inner/left hash-join
+  output rides view (dictionary) columns — the column gather is
+  deferred to the first consumer that needs owned storage, and join
+  chains compose the indirection so a passed-through column is copied
+  once, at its final consumer or the shuffle encode. Validated
+  2026-07-09: SF10 −6.2% / SF100 −4.9% suite wall, Q08 −36%/−44%,
+  row-identical both scales. `=false` restores eager join-output
+  gather (the A/B kill switch; benchmark arms prove engagement via
+  `late_mat=true` dispatch logs and worker `late_mat_batches`
+  counters). See docs/design/late-materialization.md.
+- `--morsel-workers` (default **0 = auto** since PR #198, validated by
+  the 2026-07-08 SF100 4-arm campaign: −3.4% suite, Q08 −40%): width
+  adapts to fragment size and idle CPU tokens. `1` = serial (the kill
+  switch). `N>1` = fixed width (benchmark/testing knob, bypasses the
+  size gate).
 
 ### 1.7 Worker lifecycle on Kubernetes (graceful drain)
 
@@ -194,7 +203,8 @@ what a SET-style facility could expose cheaply vs never.
 | `--max-concurrent` | 4 | task slots per worker (memory-owner count) | feasible-with-work (semaphore is sized at Start; needs a resizable gate) |
 | `--max-concurrent-queries` | 0 | coordinator query gate | **feasible** (admission check) |
 | `--query-timeout` | 0 | default per-query timeout | **feasible** (read per query) |
-| `--morsel-workers` | 1 | intra-task parallel width policy | **feasible** (policy read per fragment via `Executor.SetMorselWorkers`; needs atomic field + propagation) |
+| `--morsel-workers` | 0 = auto | intra-task parallel width policy | **feasible** (policy read per fragment via `Executor.SetMorselWorkers`; needs atomic field + propagation) |
+| `--late-materialization` | true | view-column join output vs eager gather | **feasible** (read per query on the coordinator; rides the join-probe op spec) |
 | `--local-fastpath-bytes` | 64 MiB | in-process routing threshold | **feasible** (read per query on the coordinator) |
 | `--streaming-exchange` | true | peer-fetch shuffle vs S3-only | **feasible** (per-stage decision; falls back safely by design) |
 | `--mmap-relief`, `--mmap-relief-threshold-mb` | true / 0 = auto | RSS-ceiling MADV relief | **feasible** (periodic sweep reads config) |
