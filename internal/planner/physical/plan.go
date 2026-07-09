@@ -2691,6 +2691,17 @@ func markCoPathingSelfJoinBuilds(stages []Stage) {
 	// For each join stage, walk its build-side dep chain (transitively
 	// through any Exchange wrappers) to the underlying scan and record
 	// (joinIdx, scanTableName).
+	//
+	// The walk deliberately does NOT branch into both sides of a join stage
+	// encountered mid-chain (bushy builds). An attempted extension that did
+	// (2026-07-09) surfaced same-table scans from Q02/Q20's decorrelated
+	// subquery chains and force-qualified joins whose downstream consumers
+	// reference bare names — 0 rows. Bushy self-join collisions are instead
+	// qualified at the join where the collision occurs, via isDup +
+	// BuildColOrigins in joinOutputSchemaWithMapping. If a bushy shape ever
+	// needs Q07-style cross-chain force-qualification, decide it from the
+	// LOGICAL tree's exact output visibility (subtreeNaming), not from a
+	// stage-DAG walk.
 	type joinScan struct {
 		joinIdx   int
 		joinID    string
@@ -3077,12 +3088,16 @@ func sumFusedBytes(stages []Stage, specs []FusedJoinSpec) int64 {
 // resolveShuffleKey resolves a join key name through any Project alias nodes
 // in the child subtree. For example, a CTE with `l_suppkey AS supplier_no`
 // creates a Project that renames the column — the shuffle key `supplier_no`
-// must be mapped back to `l_suppkey` so the executor can find it in the data.
+// must be mapped back to `l_suppkey` so the executor can find it in the data
+// (distributed walkStages treats ordinary Projects as passthrough, so the
+// physical columns keep their original names).
+//
+// Join nodes recurse into their output-visible children: both sides for
+// inner/outer joins, probe side only for semi/anti. First resolution wins.
 func resolveShuffleKey(key string, child *logical.Node) string {
 	if child == nil {
 		return key
 	}
-	// Walk down through pass-through nodes looking for a Project with an alias.
 	for n := child; n != nil; {
 		if n.Type == logical.NodeProject {
 			for _, proj := range n.Projections {
@@ -3090,6 +3105,16 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 					return proj.Column
 				}
 			}
+		}
+		if n.Type == logical.NodeJoin && len(n.Children) == 2 {
+			if resolved := resolveShuffleKey(key, n.Children[0]); resolved != key {
+				return resolved
+			}
+			jt := strings.ToLower(n.JoinType)
+			if jt != "semi" && jt != "anti" {
+				return resolveShuffleKey(key, n.Children[1])
+			}
+			return key
 		}
 		// Continue down to single-child nodes (Filter, Sort, Limit, Project, Aggregate)
 		if len(n.Children) == 1 {
