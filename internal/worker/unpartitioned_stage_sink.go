@@ -11,6 +11,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/diskio"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -116,6 +117,12 @@ func newUnpartitionedStageSink(spillDir, taskID string) *unpartitionedStageSink 
 	return s
 }
 
+// AcceptsViews: Consume flattens own-null view columns under its lock and
+// the rest serialize through their indirection (writeChunk sel composition /
+// appendBatchRowsBulk row translation) — the pipeline's defensive flatten
+// would just add the copy this sink exists to skip.
+func (s *unpartitionedStageSink) AcceptsViews() bool { return true }
+
 // Init creates the spill file. Schema is discovered lazily on first Consume,
 // so empty stages don't pay for a file open.
 func (s *unpartitionedStageSink) Init(_ context.Context) error {
@@ -153,6 +160,17 @@ func (s *unpartitionedStageSink) Consume(_ context.Context, b *batch.RecordBatch
 	defer s.mu.Unlock()
 	if s.closed {
 		return fmt.Errorf("unpartitionedStageSink: Consume after Close")
+	}
+	// Own-null view columns (outer-join fill) can't ride writeChunk's sel
+	// composition or appendBatchRowsBulk's row translation — flatten them
+	// here under the lock. Other views serialize through their indirection.
+	if b.HasViews() {
+		for _, col := range b.Columns {
+			if col.IsView() && col.Nulls.HasNulls() {
+				col.Flatten()
+				exec.LateMatFlattens.Add(1)
+			}
+		}
 	}
 	if s.writer == nil {
 		s.writer = newShuffleWriter(s.bufFile, b.Schema)

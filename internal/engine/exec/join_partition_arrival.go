@@ -168,6 +168,7 @@ func (h *HashJoin) buildPartitioned(ctx context.Context, source Source) error {
 	h.buildBloom()
 	h.reconcileHashMemory()
 
+	h.warmBuildNullBitmaps()
 	h.buildDone = true
 	return nil
 }
