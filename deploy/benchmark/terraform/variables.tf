@@ -210,6 +210,12 @@ variable "sort_merge_join_bytes" {
   default     = 0
 }
 
+variable "late_materialization" {
+  description = "Set to 1 to enable view-column join output (docs/design/late-materialization.md): inner/left hash joins defer the output gather to first touch and compose through join chains. Off by default."
+  type        = string
+  default     = ""
+}
+
 variable "dynamic_filters" {
   description = "Set to 1 to enable Trino-style semi-join dynamic-filter pushdown on the coordinator. Off by default for v1 rollout."
   type        = string

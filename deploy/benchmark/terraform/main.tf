@@ -273,6 +273,7 @@ locals {
     echo "WADJET_JOIN_DEBUG=${var.join_debug}" >> /etc/environment
     echo "WADJET_DYNAMIC_FILTERS=${var.dynamic_filters}" >> /etc/environment
     echo "WADJET_SORT_MERGE_JOIN_BYTES=${var.sort_merge_join_bytes}" >> /etc/environment
+    echo "WADJET_LATE_MATERIALIZATION=${var.late_materialization}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -307,6 +308,7 @@ locals {
     echo "WADJET_JOIN_DEBUG=${var.join_debug}" >> /etc/environment
     echo "WADJET_DYNAMIC_FILTERS=${var.dynamic_filters}" >> /etc/environment
     echo "WADJET_SORT_MERGE_JOIN_BYTES=${var.sort_merge_join_bytes}" >> /etc/environment
+    echo "WADJET_LATE_MATERIALIZATION=${var.late_materialization}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -375,6 +377,7 @@ locals {
     export WADJET_JOIN_DEBUG="${var.join_debug}"
     export WADJET_DYNAMIC_FILTERS="${var.dynamic_filters}"
     export WADJET_SORT_MERGE_JOIN_BYTES="${var.sort_merge_join_bytes}"
+    export WADJET_LATE_MATERIALIZATION="${var.late_materialization}"
     export USE_NATIVE_DAG="${var.use_native_dag ? "1" : "0"}"
     # Phase C/D/E data-plane selection. Empty/"nats" = legacy NATS reply
     # subjects; "grpc" routes task dispatch + results + gather +
@@ -522,6 +525,7 @@ resource "aws_instance" "worker" {
     export WADJET_JOIN_DEBUG="${var.join_debug}"
     export WADJET_DYNAMIC_FILTERS="${var.dynamic_filters}"
     export WADJET_SORT_MERGE_JOIN_BYTES="${var.sort_merge_join_bytes}"
+    export WADJET_LATE_MATERIALIZATION="${var.late_materialization}"
 
     # Verify binary was downloaded successfully
     if [ ! -x /usr/local/bin/wadjet ]; then
