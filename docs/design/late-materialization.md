@@ -182,9 +182,13 @@ Dyn-filter lesson applied from day 1: the feature must prove it engaged.
   `LateMatBytesDeferred` (bytes NOT copied at emit), `LateMatFlattens`
   (where views got materialized, labeled by consumer). Logged per query at
   Info alongside `SortMergeJoinsPlanned`-style reporting.
-- Flag: `--late-materialization` (bool), default off until gates pass; this
-  is engine-local (no protocol change), so the endgame is default-on, unlike
-  SMJ's dormant-until-payoff posture.
+- Flag: `--late-materialization` (bool). **Default ON since 2026-07-09**,
+  after the phase-5 evidence landed: SF10 same-window pair −6.2% suite,
+  SF100 pair −4.9% (51.0m→48.5m), Q08 −35.9%/−43.9% at the two scales,
+  22/22 row-identical everywhere, engagement proven by plan-side dispatch
+  markers (48 join stages) and worker runtime counters (825k view batches,
+  3.6M columns serialized with no intermediate copy, 35k flattens).
+  `--late-materialization=false` is the kill switch.
 - Gates, in order:
   1. `batch` package unit tests: view round-trip for all 22 types, nested,
      null composition, Flatten/Compact/ToRows/RowAt/CopyValueFrom, MemBytes.
