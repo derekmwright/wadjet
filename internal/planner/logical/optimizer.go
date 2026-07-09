@@ -2,8 +2,11 @@ package logical
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
+	"math/bits"
 	"strings"
+	"sync/atomic"
 
 	plansql "github.com/citc-tech/wadjet/internal/planner/sql"
 )
@@ -2822,12 +2825,17 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 // estimated from cardinality propagation through the join tree.
 func costBasedJoinReorder(rels []*Node, edges []joinEdge) *Node {
 	if len(rels) <= 16 {
-		plan := dpJoinReorder(rels, edges)
+		plan, bushyJoins := dpJoinReorder(rels, edges)
 		// Validate: if the DP produced any inner join with an empty
 		// condition (cross join where one shouldn't be), fall back to
 		// the greedy algorithm which handles disconnected components.
 		if hasEmptyJoinCond(plan) {
 			return greedyJoinReorder(rels, edges)
+		}
+		if bushyJoins > 0 {
+			BushyJoinsPlanned.Add(1)
+			slog.Info("bushy join order chosen",
+				"relations", len(rels), "bushy_joins", bushyJoins)
 		}
 		return plan
 	}
@@ -2848,19 +2856,44 @@ func hasEmptyJoinCond(n *Node) bool {
 	return false
 }
 
+// BushyJoinReorder enables bushy subset-partition transitions in the DP join
+// reorder (docs/design/bushy-join-cbo.md §3.2). Process-wide, set once at
+// startup from --bushy-join-reorder / wadjet.Config; default off. Read at
+// plan time, so tests may toggle it around a planning call.
+var BushyJoinReorder atomic.Bool
+
+// BushyJoinsPlanned counts queries whose FINAL chosen join order contains at
+// least one bushy join (a join of two composite intermediates). Mechanism
+// marker for A/B runs: a nonzero count proves the enumeration actually
+// changed a plan; dormancy tests assert it stays zero with the flag off.
+var BushyJoinsPlanned atomic.Int64
+
+// bushyMaxRels caps the subset-partition enumeration: it is O(3^N) over the
+// relation count, so bushy transitions run only for N ≤ 10 (3^10 ≈ 59K
+// partitions — negligible; TPC-H tops out at N=8 on Q08). Larger chains
+// keep the left-deep DP.
+const bushyMaxRels = 10
+
 // dpEntry stores the optimal plan for a subset of relations in the DP table.
 type dpEntry struct {
-	cost   float64
-	rows   float64
-	colNDV map[string]float64
-	plan   *Node
+	cost       float64
+	rows       float64
+	colNDV     map[string]float64
+	plan       *Node
+	bushyJoins int // count of bushy (composite ⋈ composite) joins in plan
 }
 
-// dpJoinReorder uses bitmask dynamic programming to find the optimal left-deep
-// join order. For N relations, it evaluates O(2^N × N) states. Each state
-// represents a subset of relations joined together, and the transition adds
-// one more relation as the build side of a new hash join.
-func dpJoinReorder(rels []*Node, edges []joinEdge) *Node {
+// dpJoinReorder uses bitmask dynamic programming to find the optimal join
+// order. For N relations, the left-deep pass evaluates O(2^N × N) states —
+// each transition adds one relation as the build side of a new hash join.
+// With BushyJoinReorder enabled (and N ≤ bushyMaxRels), each subset is
+// additionally offered every connected two-way partition of itself
+// (composite ⋈ composite), accepted only on STRICT cost improvement so
+// FK→PK cost ties keep today's left-deep shapes.
+//
+// Returns the chosen plan and the number of bushy joins it contains
+// (0 for pure left-deep plans).
+func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 	n := len(rels)
 
 	// Pre-compute statistics for each base relation
@@ -2887,8 +2920,66 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) *Node {
 		}
 	}
 
+	bushy := BushyJoinReorder.Load() && n <= bushyMaxRels
+
 	// Fill DP table bottom-up by extending each reachable subset
 	for mask := 1; mask < maxMask; mask++ {
+		// Bushy pass: offer this subset every connected two-way partition of
+		// itself (composite ⋈ composite). All proper submasks are numerically
+		// smaller, so their entries are final by the time the loop reaches
+		// mask. STRICT improvement only — a partition with a single-relation
+		// build costs exactly what the left-deep transition already wrote, so
+		// ties keep the left-deep shape and only genuinely cheaper bushy
+		// shapes (typically: both sides pre-reduced by selective dimensions)
+		// change the plan.
+		if bushy && bits.OnesCount(uint(mask)) >= 3 {
+			for sub := (mask - 1) & mask; sub > 0; sub = (sub - 1) & mask {
+				other := mask ^ sub
+				if sub < other {
+					continue // each unordered pair once
+				}
+				if math.IsInf(dp[sub].cost, 1) || math.IsInf(dp[other].cost, 1) {
+					continue
+				}
+				// Collect edges crossing the cut; skip disconnected partitions
+				// (no cross-join bushy shapes).
+				var conds []string
+				joinType := "inner"
+				for _, e := range edges {
+					l, r := 1<<e.leftIdx, 1<<e.rightIdx
+					if (sub&l != 0 && other&r != 0) || (sub&r != 0 && other&l != 0) {
+						if e.joinCond != "" {
+							conds = append(conds, e.joinCond)
+						}
+						joinType = e.joinType
+					}
+				}
+				if len(conds) == 0 {
+					continue
+				}
+				// Orientation matches the 2-way rule: larger side probes.
+				probe, build := sub, other
+				if dp[build].rows > dp[probe].rows {
+					probe, build = build, probe
+				}
+				joinCond := strings.Join(conds, " AND ")
+				probeStats := RelStats{Rows: dp[probe].rows, ColNDV: dp[probe].colNDV}
+				buildStats := RelStats{Rows: dp[build].rows, ColNDV: dp[build].colNDV}
+				probeNDV, buildNDV := resolveJoinKeyNDVs(joinCond, probeStats, buildStats)
+				outputRows := estimateJoinCard(dp[probe].rows, dp[build].rows, probeNDV, buildNDV, joinType)
+				totalCost := dp[probe].cost + dp[build].cost + hashJoinCost(dp[probe].rows, dp[build].rows)
+				if totalCost < dp[mask].cost {
+					dp[mask] = dpEntry{
+						cost:       totalCost,
+						rows:       outputRows,
+						colNDV:     mergeNDVs(dp[probe].colNDV, dp[build].colNDV, outputRows),
+						plan:       NewJoin(dp[probe].plan, dp[build].plan, joinType, joinCond),
+						bushyJoins: dp[probe].bushyJoins + dp[build].bushyJoins + 1,
+					}
+				}
+			}
+		}
+
 		if math.IsInf(dp[mask].cost, 1) {
 			continue
 		}
@@ -2945,10 +3036,11 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) *Node {
 				ndvs := mergeNDVs(dp[mask].colNDV, baseStats[j].ColNDV, outputRows)
 
 				dp[newMask] = dpEntry{
-					cost:   totalCost,
-					rows:   outputRows,
-					colNDV: ndvs,
-					plan:   newPlan,
+					cost:       totalCost,
+					rows:       outputRows,
+					colNDV:     ndvs,
+					plan:       newPlan,
+					bushyJoins: dp[mask].bushyJoins,
 				}
 			}
 		}
@@ -2978,10 +3070,10 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) *Node {
 	fullMask := maxMask - 1
 	if math.IsInf(dp[fullMask].cost, 1) {
 		// Disconnected graph — fall back to greedy
-		return greedyJoinReorder(rels, edges)
+		return greedyJoinReorder(rels, edges), 0
 	}
 
-	return dp[fullMask].plan
+	return dp[fullMask].plan, dp[fullMask].bushyJoins
 }
 
 
