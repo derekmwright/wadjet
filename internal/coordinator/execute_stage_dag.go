@@ -1887,13 +1887,23 @@ func (c *Coordinator) dispatchComputeStage(
 		probeSplit = true
 	}
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
-	c.logger.Info("dispatchComputeStage",
+	dispatchAttrs := []any{
 		"stage_id", stage.ID, "stage_type", stage.Type,
 		"deps", stage.Dependencies, "num_tasks", numTasks,
 		"distribution_kind", stage.Distribution.Kind,
 		"distribution_count", stage.Distribution.Count,
 		"probe_split", probeSplit,
-		"inputs_aliases", len(inputs))
+		"inputs_aliases", len(inputs),
+	}
+	// Plan-side engagement marker for late-materialization A/B arms: join
+	// stages dispatched with view-column output enabled are grep-able from
+	// benchmark.log (worker-side runtime counters live in worker logs, which
+	// benchmark teardown discards). Flag-off logs stay byte-identical.
+	if c.config.LateMaterialization &&
+		(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) {
+		dispatchAttrs = append(dispatchAttrs, "late_mat", true)
+	}
+	c.logger.Info("dispatchComputeStage", dispatchAttrs...)
 
 	// Observability for fused-chain probe-split: log the cluster-wide
 	// broadcast-cache file count this stage will read across all shard
