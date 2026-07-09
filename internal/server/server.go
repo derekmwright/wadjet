@@ -55,6 +55,7 @@ type Config struct {
 	QueryLimits        *config.QueryLimits      // global cost-based query limits (nil = unlimited)
 	RoleLimits         map[string]*config.QueryLimits // per-role overrides (nil = use global)
 	SortMergeJoinBytes int64                    // local sort-merge-join gate (0 = disabled)
+	LateMaterialization bool                    // view-column join output, deferred gather (default off)
 }
 
 // Server is the Wadjet HTTP API server.
@@ -135,6 +136,7 @@ func (s *Server) Mux() chi.Router {
 func (s *Server) newPlanner() *physical.Planner {
 	p := physical.NewPlanner(s.catalog)
 	p.SortMergeJoinBytes = s.config.SortMergeJoinBytes
+	p.LateMaterialization = s.config.LateMaterialization
 	return p
 }
 

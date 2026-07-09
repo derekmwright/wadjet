@@ -46,7 +46,8 @@ func (c *SpillableBatchCollector) Consume(_ context.Context, b *batch.RecordBatc
 	if c.schema == nil {
 		c.schema = b.Schema
 	}
-	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
+	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
+	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()
 	// Snapshot the selection vector — filter operators reuse their outSel
 	// scratch across calls (see BatchSink.Consume).
 	if b.Sel != nil {

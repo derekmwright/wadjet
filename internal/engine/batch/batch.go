@@ -34,6 +34,14 @@ func NewRecordBatch(schema []parquet.Column, numRows int) *RecordBatch {
 	}
 }
 
+// NewColumnVector creates a single Vector from a Column definition with
+// numRows pre-allocated rows, recursively initializing nested type children —
+// the per-column equivalent of NewRecordBatch for callers that materialize
+// some columns of a batch while emitting others as views.
+func NewColumnVector(col parquet.Column, numRows int) *Vector {
+	return newVectorFromColumn(col, numRows)
+}
+
 // newVectorFromColumn creates a Vector from a Column definition, recursively
 // initializing nested type children.
 func newVectorFromColumn(col parquet.Column, numRows int) *Vector {
@@ -145,6 +153,10 @@ func (b *RecordBatch) Reset(numRows int) {
 // the first reused row read back the prior batch's data concatenated with
 // the new value, and child arenas grew monotonically per reuse cycle.
 func resetVectorForReuse(col *Vector, numRows int) {
+	// Views must never survive into a pooled reuse cycle; drop the
+	// indirection so the batch is a plain (empty) owned batch again.
+	col.Base = nil
+	col.Indices = nil
 	col.Len = numRows
 	col.Nulls.ResetNonNull(numRows)
 	switch col.Type {
@@ -170,6 +182,8 @@ func resetVectorForReuse(col *Vector, numRows int) {
 // truncateVectorStorage re-slices a vector's element storage to zero length
 // (capacity retained for reuse). Recurses into nested children.
 func truncateVectorStorage(v *Vector) {
+	v.Base = nil
+	v.Indices = nil
 	v.Len = 0
 	v.BoolData = v.BoolData[:0]
 	v.Int32Data = v.Int32Data[:0]

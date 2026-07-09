@@ -77,6 +77,11 @@ type Config struct {
 	// the distributed stage DAG alike (the join stage swaps operator; its
 	// exchange children are identical). 0 = disabled (default, dormant).
 	SortMergeJoinBytes int64
+	// LateMaterialization emits inner/left hash-join output as view
+	// (dictionary) columns with the gather deferred to first touch
+	// (docs/design/late-materialization.md), on the local fast path and in
+	// worker fragments alike (rides the join-probe OpSpec). Off by default.
+	LateMaterialization bool
 	// StreamingExchange annotates dispatched tasks with peer-location
 	// hints (Task.InputLocations) and per-query fetch tokens so consumers
 	// stream stage outputs from the producing workers' local disk instead
@@ -742,6 +747,7 @@ func (c *Coordinator) ExecuteSQL(ctx context.Context, sql string) (*SQLResult, e
 		planner.BroadcastBytesThreshold = c.config.BroadcastBytesOverride
 	}
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
+	planner.LateMaterialization = c.config.LateMaterialization
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -2435,6 +2441,7 @@ func (c *Coordinator) SubmitSQL(ctx context.Context, sql string) (queryID string
 		planner.BroadcastBytesThreshold = c.config.BroadcastBytesOverride
 	}
 	planner.SortMergeJoinBytes = c.config.SortMergeJoinBytes
+	planner.LateMaterialization = c.config.LateMaterialization
 	planner.DynamicFiltersEnabled = c.config.DynamicFilters
 	physStages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {

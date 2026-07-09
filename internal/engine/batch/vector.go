@@ -243,6 +243,18 @@ type Vector struct {
 	Child      *Vector   // ARRAY: flat vector of all element values
 	Children   []*Vector // ROW: one vector per field (same length as parent)
 	FieldNames []string  // ROW: names of child fields
+
+	// View (dictionary) form: when Base != nil this vector owns no typed
+	// storage — logical row i is Base row Indices[i]. Nulls is the view's OWN
+	// override bitmap (a null bit marks the row null regardless of Base; a
+	// valid bit defers to Base's nullness through Indices). Base is always an
+	// owned vector: NewViewVector composes indices when handed a view base, so
+	// views never chain. Views are read-only and understood only by the
+	// view-aware accessors (GetValue, CopyValueFrom-as-source, Flatten,
+	// MemBytes); typed hot-path accessors (GetInt64, Int64Data[i], ...) fail
+	// loud on a view because the typed slices are nil. See view.go.
+	Base    *Vector
+	Indices []uint32
 }
 
 // NewVector creates a new vector of the given type and length.
@@ -298,6 +310,11 @@ func NewVectorWithScale(typ TypeID, length int, scale int) *Vector {
 func (v *Vector) EnsureLen(n int) {
 	if n <= v.Len {
 		return
+	}
+	if v.Base != nil {
+		// Views are read-only; growing one for in-place writes is always a
+		// caller bug. Fail loud rather than writing into nil typed slices.
+		panic("batch: EnsureLen on a view vector — Flatten() first")
 	}
 	v.Nulls.EnsureLen(n)
 	switch v.Type {
@@ -459,6 +476,11 @@ func NewMapVector(length int, keyType, valueType TypeID) *Vector {
 func (v *Vector) GetValue(i int) any {
 	if v.Nulls.IsNullFast(i) {
 		return nil
+	}
+	if v.Base != nil {
+		// View: own-null already checked above; defer to base through the
+		// index (base applies its own null bitmap).
+		return v.Base.GetValue(int(v.Indices[i]))
 	}
 	// Hot types first as if-chain for better branch prediction
 	switch v.Type {
@@ -916,6 +938,13 @@ func (v *Vector) memBytes(depth int) int64 {
 	if v == nil || depth > memBytesMaxDepth {
 		return 0
 	}
+	if v.Base != nil {
+		// View: indices + own bitmap. Base storage is accounted by its
+		// owner (build tracker / pinned probe input), never double-charged
+		// here — the same rule that keeps shared broadcast-cache vectors
+		// single-owner.
+		return int64(len(v.Nulls.Words()))*8 + int64(len(v.Indices))*4
+	}
 	// Null bitmap: stored as []uint64 words, one bit per row.
 	size := int64(len(v.Nulls.Words())) * 8 // 8 = sizeof(uint64) word
 
@@ -1128,6 +1157,14 @@ func NewVectorLike(src *Vector) *Vector {
 // no boxing, no string round-trips — recursive for nested types. dst's
 // nested structure must match src's (build it with NewVectorLike).
 func (v *Vector) AppendFrom(src *Vector, si int) {
+	if src.Base != nil {
+		// View source: mirror CopyValueFrom's redirect.
+		if src.Nulls.IsNullFast(si) {
+			appendToVector(v, nil)
+			return
+		}
+		src, si = src.Base, int(src.Indices[si])
+	}
 	idx := v.Len
 	v.Len++
 	v.Nulls = v.Nulls.Grow(v.Len)
@@ -1234,6 +1271,15 @@ func (v *Vector) AppendFrom(src *Vector, si int) {
 // (NewVectorLike); ROW children handle both — indexed writes when
 // pre-allocated, appends when built lazily.
 func (v *Vector) CopyValueFrom(di int, src *Vector, si int) {
+	if src.Base != nil {
+		// View source: an own-null row becomes a null write (its index value
+		// is meaningless); otherwise copy from the base row it references.
+		if src.Nulls.IsNullFast(si) {
+			v.WriteNullAt(di)
+			return
+		}
+		src, si = src.Base, int(src.Indices[si])
+	}
 	isNull := src.Nulls.IsNull(si)
 	if isNull {
 		v.Nulls.SetNull(di)

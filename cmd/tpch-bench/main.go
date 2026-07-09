@@ -343,6 +343,10 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		// equi-joins whose sides BOTH exceed this many estimated bytes run
 		// as sort-merge joins. 0/unset = disabled (hash/broadcast as before).
 		SortMergeJoinBytes: envInt64("WADJET_SORT_MERGE_JOIN_BYTES"),
+		// Late materialization (docs/design/late-materialization.md):
+		// inner/left join output rides view columns, gather deferred to
+		// first touch. Unset = off.
+		LateMaterialization: os.Getenv("WADJET_LATE_MATERIALIZATION") == "1" || strings.EqualFold(os.Getenv("WADJET_LATE_MATERIALIZATION"), "true"),
 		// Broadcast threshold override: <0 = never broadcast. 0/unset =
 		// cluster-derived default.
 		BroadcastBytesOverride: envInt64("WADJET_BROADCAST_BYTES"),

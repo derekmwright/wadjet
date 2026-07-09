@@ -1309,6 +1309,7 @@ func (p *HashJoinProbe) openNextSpillPartition(ctx context.Context) error {
 	}
 	probe := tmpJoin.Probe()
 	probe.OutputFilter = p.join.spillOutputFilter
+	probe.LateMaterialize = p.LateMaterialize
 	if err := probe.Init(ctx); err != nil {
 		return fmt.Errorf("initialising probe for spilled partition %d: %w", partID, err)
 	}

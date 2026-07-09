@@ -91,6 +91,7 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 		exhausted := false
 		for _, op := range p.Ops {
 			prev := b
+			FlattenForConsumer(b, op)
 			b, err = op.Execute(ctx, b)
 			if err != nil {
 				return fmt.Errorf("operator execute: %w", err)
@@ -109,6 +110,7 @@ func (p *Pipeline) runSerial(ctx context.Context) error {
 		}
 
 		if b != nil {
+			FlattenForConsumer(b, p.Sink)
 			if err := p.Sink.Consume(ctx, b); err != nil {
 				return fmt.Errorf("sink consume: %w", err)
 			}
@@ -148,6 +150,7 @@ func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator) err
 			}
 			for _, rop := range remainingOps {
 				prev := b
+				FlattenForConsumer(b, rop)
 				b, err = rop.Execute(ctx, b)
 				if err != nil {
 					return fmt.Errorf("operator execute (flush): %w", err)
@@ -160,6 +163,7 @@ func (p *Pipeline) flushSpilledOps(ctx context.Context, ops []UnaryOperator) err
 				}
 			}
 			if b != nil {
+				FlattenForConsumer(b, p.Sink)
 				if err := p.Sink.Consume(ctx, b); err != nil {
 					return fmt.Errorf("sink consume (flush): %w", err)
 				}
@@ -191,6 +195,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 		exhausted := false
 		for _, op := range p.Ops {
 			prev := b
+			FlattenForConsumer(b, op)
 			b, err = op.Execute(ctx, b)
 			if err != nil {
 				return fmt.Errorf("operator execute: %w", err)
@@ -206,6 +211,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 			}
 		}
 		if b != nil {
+			FlattenForConsumer(b, p.Sink)
 			if err := p.Sink.Consume(ctx, b); err != nil {
 				return fmt.Errorf("sink consume: %w", err)
 			}
@@ -328,6 +334,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				exhausted := false
 				for _, op := range ops {
 					prev := b
+					FlattenForConsumer(b, op)
 					b, err = op.Execute(workerCtx, b)
 					if err != nil {
 						firstErr.CompareAndSwap(nil, fmt.Errorf("operator execute: %w", err))
@@ -346,6 +353,7 @@ func (p *Pipeline) runParallel(ctx context.Context) error {
 				}
 
 				if b != nil {
+					FlattenForConsumer(b, sink)
 					if err := sink.Consume(workerCtx, b); err != nil {
 						firstErr.CompareAndSwap(nil, fmt.Errorf("sink consume: %w", err))
 						cancel()
@@ -526,6 +534,7 @@ func (s *BatchSink) Init(_ context.Context) error {
 
 func (s *BatchSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	s.mu.Lock()
+	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
 	b.Detach()
 	// Snapshot the selection vector. Many UnaryOperators (KernelFilter,
 	// AndFilter, OrFilter, the comparison/expression filters) reuse a
@@ -591,7 +600,8 @@ func (s *CollectSink) Consume(_ context.Context, b *batch.RecordBatch) error {
 	if s.schema == nil {
 		s.schema = b.Schema
 	}
-	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
+	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
+	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()
 	// Snapshot the selection vector — see BatchSink.Consume for the full
 	// rationale. Filter operators reuse outSel across calls; sinks that
 	// hold batches across calls would otherwise see clobbered Sel data.

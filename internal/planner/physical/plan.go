@@ -356,6 +356,12 @@ type Planner struct {
 	// tracks cluster memory.
 	SortMergeJoinBytes int64
 
+	// LateMaterialization emits inner/left hash-join output as view
+	// (dictionary) columns over the probe input and build batches; the
+	// gather is deferred to the first consumer needing owned storage
+	// (docs/design/late-materialization.md). Off by default.
+	LateMaterialization bool
+
 	// DynamicFiltersEnabled gates the Trino-style dynamic-filter planner
 	// pass. When true, applyDynamicFilters annotates eligible hash_join
 	// build/probe leaf scans with Emit/Consume specs and adds the stat-dep
@@ -4076,6 +4082,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// from its join key values, inject as filter on build-side scan, then
 		// signal the build goroutine to start with the filtered scan.
 		probe := hj.Probe()
+		p.applyLateMaterialization(probe)
 		if len(node.NeededColumns) > 0 {
 			filter := make(map[string]bool, len(node.NeededColumns))
 			for _, col := range node.NeededColumns {
@@ -4106,6 +4113,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		// filtered batches, waits for the build barrier, then replays them
 		// through the deferred probe operators.
 		probe := hj.Probe()
+		p.applyLateMaterialization(probe)
 		if len(node.NeededColumns) > 0 {
 			filter := make(map[string]bool, len(node.NeededColumns))
 			for _, col := range node.NeededColumns {
@@ -4176,6 +4184,7 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		attachDynamicFilterToScanSource(leftSource, ranges)
 	}
 	probe := hj.Probe()
+	p.applyLateMaterialization(probe)
 	// Push output filter into the probe to avoid materializing intermediate
 	// columns not needed by upstream operators. In multi-way joins, this
 	// eliminates allocation and gather work for columns that would otherwise
@@ -4771,6 +4780,7 @@ func (ps *pipelineSource) Next(ctx context.Context) (*batch.RecordBatch, error) 
 			return b, err
 		}
 		for _, op := range ps.ops {
+			exec.FlattenForConsumer(b, op)
 			b, err = op.Execute(ctx, b)
 			if err != nil {
 				return nil, err

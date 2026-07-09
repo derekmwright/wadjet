@@ -2054,7 +2054,7 @@ func (c *Coordinator) dispatchComputeStage(
 			} else {
 				sinkOp = distributed.OpSpec{Type: distributed.OpUnpartitionedSink}
 			}
-			ops, ferr := buildJoinFragment(stage, &t, taskInputs, wireFused, sorts, sinkOp)
+			ops, ferr := buildJoinFragment(stage, &t, taskInputs, wireFused, sorts, sinkOp, c.config.LateMaterialization)
 			if ferr != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: build join fragment: %w", stage.ID, ferr)
 			}
@@ -2331,6 +2331,7 @@ func buildJoinFragment(
 	wireFused []distributed.FusedJoinSpec,
 	sorts []distributed.SortKeySpec,
 	terminalSink distributed.OpSpec,
+	lateMat bool,
 ) ([]distributed.OpSpec, error) {
 	if t.BuildTableAlias == "" {
 		return nil, fmt.Errorf("BuildTableAlias required")
@@ -2361,14 +2362,15 @@ func buildJoinFragment(
 	})
 	for _, fj := range wireFused {
 		ops = append(ops, distributed.OpSpec{
-			Type:        distributed.OpBroadcastProbe,
-			JoinType:    fj.JoinType,
-			LeftKeys:    fj.JoinLeftKeys,
-			RightKeys:   fj.JoinRightKeys,
-			BuildAlias:  fj.BuildTableAlias,
-			BuildFiles:  fj.BuildFiles,
-			BuildBucket: t.DataBucket,
-			JoinFilter:  fj.JoinFilter,
+			Type:            distributed.OpBroadcastProbe,
+			JoinType:        fj.JoinType,
+			LeftKeys:        fj.JoinLeftKeys,
+			RightKeys:       fj.JoinRightKeys,
+			BuildAlias:      fj.BuildTableAlias,
+			BuildFiles:      fj.BuildFiles,
+			BuildBucket:     t.DataBucket,
+			JoinFilter:      fj.JoinFilter,
+			LateMaterialize: lateMat,
 		})
 	}
 	primaryType := distributed.OpHashJoinProbe
@@ -2388,6 +2390,7 @@ func buildJoinFragment(
 		SemiAntiKeyOnly:     t.SemiAntiKeyOnly,
 		QualifyAllBuildCols: t.QualifyAllBuildCols,
 		OutputColumns:       append([]string(nil), t.Columns...),
+		LateMaterialize:     lateMat,
 	})
 	// Residual post-join filters (semi/anti residual or compute-stage
 	// HAVING-equivalent) compile to an OpFilter applied AFTER the probe and
