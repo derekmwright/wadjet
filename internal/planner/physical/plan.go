@@ -1684,7 +1684,7 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if len(node.CTEs) > 0 {
 		p.ctes = node.CTEs
 	}
-	// Ensure scan nodes have column metadata — needed by fixJoinKeyOrder
+	// Ensure scan nodes have column metadata — needed by assignJoinKeySides
 	// to assign shuffle keys to the correct child side.
 	p.AnnotateScanColumns(ctx, node)
 	stages := p.generateStages(node)
@@ -3356,7 +3356,8 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// Fix the assignment so leftKeys are from the probe (left) child
 			// and rightKeys are from the build (right) child.
 			if len(node.Children) >= 2 {
-				fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+				assignJoinKeySides(leftKeys, rightKeys,
+					subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
 			}
 		}
 
@@ -3907,10 +3908,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if len(leftKeys) == 0 {
 			return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
 		}
-		// Fix key assignment using plan-level column info: ensure left keys are
-		// probe-side and right keys are build-side. This avoids the expensive
+		// Fix key assignment using plan-level column ownership: ensure left keys
+		// are probe-side and right keys are build-side. This avoids the expensive
 		// post-build FixKeyAssignment hash table rebuild.
-		fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+		assignJoinKeySides(leftKeys, rightKeys,
+			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
 	}
 
 	// Big-vs-big inner equi-joins route to sort-merge join when BOTH sides'
@@ -3964,7 +3966,8 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		leftKeys, rightKeys = rightKeys, leftKeys
 		hj.LeftKeys = leftKeys
 		hj.RightKeys = rightKeys
-		fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+		assignJoinKeySides(leftKeys, rightKeys,
+			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
 		// Update build-side alias after swap
 		if alias := findScanAlias(node.Children[1]); alias != "" {
 			hj.BuildTableAlias = alias
@@ -4829,69 +4832,6 @@ func parseJoinKeys(cond string) (leftKeys, rightKeys []string) {
 		rightKeys = append(rightKeys, right)
 	}
 	return
-}
-
-// fixJoinKeyOrder ensures left keys are probe-side and right keys are build-side
-// by checking against the build subtree's available columns from the plan.
-// This avoids the expensive post-build FixKeyAssignment hash table rebuild
-// which was 31% of Q09's time at SF10.
-//
-// Build columns are unqualified (from the table scan), but join keys may now
-// preserve qualifiers (post Q07 fix). Strip the qualifier on lookup so a key
-// like "n1.n_nationkey" matches the build's unqualified "n_nationkey".
-func fixJoinKeyOrder(leftKeys, rightKeys []string, buildNode *logical.Node) {
-	buildCols := collectPlanColumns(buildNode)
-	if len(buildCols) == 0 {
-		return
-	}
-	stripQual := func(k string) string {
-		if dot := strings.Index(k, "."); dot >= 0 {
-			return k[dot+1:]
-		}
-		return k
-	}
-	for i := range leftKeys {
-		leftInBuild := buildCols[leftKeys[i]] || buildCols[stripQual(leftKeys[i])]
-		rightInBuild := buildCols[rightKeys[i]] || buildCols[stripQual(rightKeys[i])]
-		if leftInBuild && !rightInBuild {
-			leftKeys[i], rightKeys[i] = rightKeys[i], leftKeys[i]
-		}
-	}
-}
-
-// collectPlanColumns returns all column names available from scan nodes
-// in the logical plan subtree (lowercased).
-func collectPlanColumns(n *logical.Node) map[string]bool {
-	if n == nil {
-		return nil
-	}
-	result := make(map[string]bool)
-	collectPlanColumnsRec(n, result)
-	return result
-}
-
-func collectPlanColumnsRec(n *logical.Node, result map[string]bool) {
-	if n == nil {
-		return
-	}
-	if n.Type == logical.NodeScan {
-		for _, col := range n.ScanColumns {
-			result[strings.ToLower(col)] = true
-		}
-	}
-	// Semi/anti joins only output probe-side (child[0]) columns.
-	// Skip build side so fixJoinKeyOrder doesn't see build-only columns
-	// as available from this subtree.
-	if n.Type == logical.NodeJoin && len(n.Children) == 2 {
-		jt := strings.ToLower(n.JoinType)
-		if jt == "semi" || jt == "anti" {
-			collectPlanColumnsRec(n.Children[0], result)
-			return
-		}
-	}
-	for _, child := range n.Children {
-		collectPlanColumnsRec(child, result)
-	}
 }
 
 func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {
