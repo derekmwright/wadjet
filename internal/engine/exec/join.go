@@ -1982,7 +1982,47 @@ func (p *HashJoinProbe) markKeyMatched(in *batch.RecordBatch, row int) {
 	}
 }
 
+// AcceptsViews marks the probe view-aware: Execute self-manages view input
+// via prepareViewInput — key columns (the only probe-side columns the probe
+// reads positionally) are flattened individually, pass-through columns stay
+// lazy and compose in emitViewOutput, and the paths that read or persist
+// arbitrary columns flatten everything. This is what makes a fused join
+// chain one-copy-per-column: join N's output views compose over join N-1's
+// bases instead of materializing between probes.
+func (p *HashJoinProbe) AcceptsViews() bool { return true }
+
+// prepareViewInput materializes exactly as much of a view-carrying input
+// batch as this probe's execution path will read.
+func (p *HashJoinProbe) prepareViewInput(in *batch.RecordBatch) {
+	h := p.join
+	// Paths that touch arbitrary probe columns must see owned storage:
+	// cross join gathers every column; SemiAntiFilter evaluates a compiled
+	// expression over unresolved column sets; grace partitioning writes
+	// whole probe rows to spill files; right/full outer take the eager
+	// gather path (they never emit views); inner/left without the flag
+	// likewise gather eagerly.
+	lazyKeys := h.SemiAntiFilter == nil &&
+		!(h.spillState != nil && len(h.spillState.spilledParts) > 0) &&
+		((p.LateMaterialize && (h.JoinType == InnerJoin || h.JoinType == LeftJoin)) ||
+			h.JoinType == SemiJoin || h.JoinType == AntiJoin ||
+			h.JoinType == RightSemiJoin || h.JoinType == RightAntiJoin)
+	if !lazyKeys {
+		FlattenForConsumer(in, nil)
+		return
+	}
+	h.resolveProbeKeyIdx(in)
+	for _, idx := range h.probeKeyIdx {
+		if idx >= 0 && in.Columns[idx].IsView() {
+			in.FlattenColumn(idx)
+			LateMatFlattens.Add(1)
+		}
+	}
+}
+
 func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
+	if in.HasViews() {
+		p.prepareViewInput(in)
+	}
 	if p.join.JoinType == CrossJoin {
 		outSchema := p.outputSchema(in.Schema)
 		return p.executeCrossJoin(in, outSchema)

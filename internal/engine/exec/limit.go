@@ -26,6 +26,10 @@ func (l *Limit) Init(_ context.Context) error {
 	return nil
 }
 
+// AcceptsViews: Limit manipulates only the selection vector and row counts —
+// it never reads column storage, so view columns pass through untouched.
+func (l *Limit) AcceptsViews() bool { return true }
+
 func (l *Limit) Execute(_ context.Context, in *batch.RecordBatch) (*batch.RecordBatch, error) {
 	if l.passed.Load() >= l.Max {
 		return nil, nil

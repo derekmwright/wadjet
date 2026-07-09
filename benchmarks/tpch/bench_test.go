@@ -340,6 +340,11 @@ func setupTPCHStreaming(tb testing.TB, sf ScaleFactor) *wadjet.DB {
 	db, err := wadjet.Open(ctx, wadjet.Config{
 		Store:  store,
 		Bucket: "tpch",
+		// Local A/B knob for the flag-gated view-column join output —
+		// mirrors the tpch-bench env so `WADJET_LATE_MATERIALIZATION=1
+		// TPCH_SCALE=1 go test -run TestTPCHQueriesLarge` is a same-process
+		// treatment arm.
+		LateMaterialization: os.Getenv("WADJET_LATE_MATERIALIZATION") == "1",
 	})
 	if err != nil {
 		tb.Fatal(err)
