@@ -1980,6 +1980,7 @@ func (c *Coordinator) dispatchComputeStage(
 				JoinRightKeys:   append([]string(nil), fj.JoinRightKeys...),
 				BuildFiles:      flattenStageFiles(buildOut),
 				BuildTableAlias: fj.BuildTableAlias,
+				BuildColOrigins: fj.BuildColOrigins,
 				JoinFilter:      fj.JoinFilter,
 				FilterExprs:     append([]string(nil), fj.FilterExprs...),
 			})
@@ -1995,6 +1996,7 @@ func (c *Coordinator) dispatchComputeStage(
 			JoinRightKeys:       stage.JoinRightKeys,
 			BuildTableAlias:     stage.BuildTableAlias,
 			QualifyAllBuildCols: stage.QualifyAllBuildCols,
+			BuildColOrigins:     stage.BuildColOrigins,
 			JoinFilter:          stage.JoinFilter,
 			FusedJoins:          wireFused,
 			GroupByCols:         stage.GroupByCols,
@@ -2377,6 +2379,7 @@ func buildJoinFragment(
 			LeftKeys:        fj.JoinLeftKeys,
 			RightKeys:       fj.JoinRightKeys,
 			BuildAlias:      fj.BuildTableAlias,
+			BuildColOrigins: fj.BuildColOrigins,
 			BuildFiles:      fj.BuildFiles,
 			BuildBucket:     t.DataBucket,
 			JoinFilter:      fj.JoinFilter,
@@ -2399,6 +2402,7 @@ func buildJoinFragment(
 		BuildRowHint:        t.BuildRowHint,
 		SemiAntiKeyOnly:     t.SemiAntiKeyOnly,
 		QualifyAllBuildCols: t.QualifyAllBuildCols,
+		BuildColOrigins:     t.BuildColOrigins,
 		OutputColumns:       append([]string(nil), t.Columns...),
 		LateMaterialize:     lateMat,
 	})
@@ -2480,6 +2484,7 @@ func buildSortMergeJoinFragment(
 		BuildFiles:          buildFiles,
 		BuildBucket:         t.DataBucket,
 		QualifyAllBuildCols: t.QualifyAllBuildCols,
+		BuildColOrigins:     t.BuildColOrigins,
 		OutputColumns:       append([]string(nil), t.Columns...),
 	})
 	if len(t.PostFilterExprs) > 0 {

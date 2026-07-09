@@ -85,6 +85,13 @@ type HashJoin struct {
 	// columnIndexFallback path that breaks Q07).
 	QualifyAllBuildCols bool
 
+	// BuildColOrigins maps each bare build-column name (lowercased) to the
+	// scan alias that owns it. Set by the planner only when the build side
+	// spans multiple tables (bushy join subtrees); nil for single-scan
+	// builds. Duplicate qualification then uses the owning alias instead of
+	// the single BuildTableAlias, which is ambiguous for multi-table builds.
+	BuildColOrigins map[string]string
+
 	// Pre-resolved column indices and reusable key buffer for typed serialization.
 	// Avoids fmt.Sprint + GetValue boxing on every row.
 	keyBuf        []byte
@@ -3180,14 +3187,14 @@ func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Colu
 
 func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]parquet.Column, []outColSource) {
 	return joinOutputSchemaWithMapping(p.join.JoinType, leftSchema, p.join.buildSchema,
-		p.join.BuildTableAlias, p.join.QualifyAllBuildCols, p.OutputFilter)
+		p.join.BuildTableAlias, p.join.BuildColOrigins, p.join.QualifyAllBuildCols, p.OutputFilter)
 }
 
 // joinOutputSchemaWithMapping computes a join's output schema — probe columns
 // first, then build columns with duplicate-name qualification — and the
 // per-output-column source mapping. Shared by HashJoinProbe and SortMergeJoin
 // so both emit identical schemas for the same join shape.
-func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, qualifyAllBuildCols bool, outputFilter map[string]bool) ([]parquet.Column, []outColSource) {
+func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, buildColOrigins map[string]string, qualifyAllBuildCols bool, outputFilter map[string]bool) ([]parquet.Column, []outColSource) {
 	var out []parquet.Column
 	var mapping []outColSource
 
@@ -3211,16 +3218,36 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 
 	for i, col := range buildSchema {
 		isDup := seen[col.Name]
+		// A build column that already carries a qualifier was named by a
+		// nested join INSIDE the build subtree (bushy shapes). The name is
+		// already unique and stable — re-qualifying would double-qualify
+		// ("s.n2.n_name") and dropping it would lose the column. Emit verbatim.
+		if strings.IndexByte(col.Name, '.') >= 0 {
+			if joinType == LeftJoin || joinType == FullOuterJoin {
+				col.Nullable = true
+			}
+			out = append(out, col)
+			mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
+			seen[col.Name] = true
+			continue
+		}
+		// Qualification alias: the column's OWNING scan when the planner
+		// provided per-column origins (multi-table build subtrees), else the
+		// build side's single table alias.
+		alias := buildAlias
+		if origin := buildColOrigins[strings.ToLower(col.Name)]; origin != "" {
+			alias = origin
+		}
 		// Force qualification for self-join scenarios — the planner sets
 		// QualifyAllBuildCols when this build is one of two co-pathing
 		// scans of the same source table. Without it, the FIRST scan's
 		// column ships unqualified ("n_name") and downstream lookups for
 		// the qualified name ("n1.n_name") miss.
-		shouldQualify := (isDup || qualifyAllBuildCols) && buildAlias != ""
+		shouldQualify := (isDup || qualifyAllBuildCols) && alias != ""
 		switch {
 		case shouldQualify:
 			qualCol := col
-			qualCol.Name = buildAlias + "." + col.Name
+			qualCol.Name = alias + "." + col.Name
 			if joinType == LeftJoin || joinType == FullOuterJoin {
 				qualCol.Nullable = true
 			}

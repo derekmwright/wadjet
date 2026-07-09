@@ -1391,6 +1391,7 @@ func (e *Executor) buildFragmentSortMergeJoin(ctx context.Context, task distribu
 	j := exec.NewSortMergeJoin(spec.LeftKeys, spec.RightKeys)
 	j.BuildTableAlias = spec.BuildAlias
 	j.QualifyAllBuildCols = spec.QualifyAllBuildCols
+	j.BuildColOrigins = spec.BuildColOrigins
 	if len(spec.OutputColumns) > 0 {
 		filter := make(map[string]bool, len(spec.OutputColumns))
 		for _, c := range spec.OutputColumns {
@@ -1717,6 +1718,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		hj := exec.NewHashJoin(mapJoinTypeString(spec.JoinType), spec.LeftKeys, spec.RightKeys)
 		hj.BuildTableAlias = spec.BuildAlias
 		hj.QualifyAllBuildCols = spec.QualifyAllBuildCols
+		hj.BuildColOrigins = spec.BuildColOrigins
 		if spec.BuildRowHint > 0 {
 			hj.BuildRowHint = spec.BuildRowHint
 		}

@@ -70,6 +70,12 @@ type Stage struct {
 	LeftDepStage    string // stage providing probe (left) side
 	RightDepStage   string // stage providing build (right) side
 	BuildTableAlias string // build-side table alias for column disambiguation in self-joins
+	// BuildColOrigins maps each bare build-output column (lowercased) to the
+	// scan alias that owns it. Only set when the build subtree spans multiple
+	// tables (bushy shapes) — nil for single-scan builds, where
+	// BuildTableAlias is already exact. The join executor qualifies duplicate
+	// build columns with the OWNING alias instead of BuildTableAlias.
+	BuildColOrigins map[string]string
 	JoinFilter      string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
 
 	// Fused broadcast joins absorbed into this stage (avoids separate
@@ -239,6 +245,7 @@ type FusedJoinSpec struct {
 	JoinRightKeys   []string
 	BuildDepStage   string // stage providing build-side data
 	BuildTableAlias string
+	BuildColOrigins map[string]string // bare build col → owning scan alias (multi-table builds only)
 	JoinFilter      string
 	FilterExprs     []string
 }
@@ -2962,6 +2969,7 @@ func fuseJoinStages(stages []Stage) []Stage {
 			JoinRightKeys:   s.JoinRightKeys,
 			BuildDepStage:   s.RightDepStage,
 			BuildTableAlias: s.BuildTableAlias,
+			BuildColOrigins: s.BuildColOrigins,
 			JoinFilter:      s.JoinFilter,
 			FilterExprs:     s.FilterExprs,
 		}
@@ -3349,15 +3357,19 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 		// Extract join keys from condition (cross joins have no ON clause)
 		var leftKeys, rightKeys []string
+		var buildNaming *subtreeNaming
+		if len(node.Children) >= 2 {
+			buildNaming = subtreeNamingOf(node.Children[1])
+		}
 		if jt != "cross" {
 			leftKeys, rightKeys = parseJoinKeys(node.JoinCond)
 			// parseJoinKeys assigns left/right based on position in the "="
 			// expression, not based on which child subtree owns the column.
 			// Fix the assignment so leftKeys are from the probe (left) child
 			// and rightKeys are from the build (right) child.
-			if len(node.Children) >= 2 {
+			if buildNaming != nil {
 				assignJoinKeySides(leftKeys, rightKeys,
-					subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
+					subtreeNamingOf(node.Children[0]), buildNaming)
 			}
 		}
 
@@ -3482,6 +3494,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			if alias := findScanAlias(node.Children[1]); alias != "" {
 				stage.BuildTableAlias = alias
 			}
+			// Multi-table build subtrees additionally carry per-column origin
+			// aliases so the executor qualifies each duplicate with its OWNING
+			// scan, not the (arbitrary) first one. Nil for single-scan builds.
+			stage.BuildColOrigins = buildNaming.buildColOrigins()
 		}
 		// Propagate semi/anti join inequality filters
 		if node.JoinFilter != "" {
@@ -3930,6 +3946,9 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if alias := findScanAlias(node.Children[1]); alias != "" {
 		hj.BuildTableAlias = alias
 	}
+	// Multi-table build subtrees carry per-column origin aliases so each
+	// duplicate qualifies under its OWNING scan (nil for single-scan builds).
+	hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
 
 	// Grace Hash Join spill-to-disk: prevents OOM on large build sides (e.g.
 	// SF100 orders table at 150M rows). The shared MemTracker means multi-join
@@ -3968,10 +3987,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		hj.RightKeys = rightKeys
 		assignJoinKeySides(leftKeys, rightKeys,
 			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
-		// Update build-side alias after swap
+		// Update build-side alias + origins after swap
 		if alias := findScanAlias(node.Children[1]); alias != "" {
 			hj.BuildTableAlias = alias
 		}
+		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
 	}
 
 	// For semi/anti joins without a filter, enable key-only build:

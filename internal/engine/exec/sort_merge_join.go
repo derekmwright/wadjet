@@ -34,9 +34,11 @@ type SortMergeJoin struct {
 	LeftKeys  []string // join key columns from left (probe) side
 	RightKeys []string // join key columns from right (build) side
 
-	// BuildTableAlias / QualifyAllBuildCols / OutputFilter carry
-	// HashJoinProbe's output-schema semantics — see joinOutputSchemaWithMapping.
+	// BuildTableAlias / BuildColOrigins / QualifyAllBuildCols / OutputFilter
+	// carry HashJoinProbe's output-schema semantics — see
+	// joinOutputSchemaWithMapping.
 	BuildTableAlias     string
+	BuildColOrigins     map[string]string
 	QualifyAllBuildCols bool
 	OutputFilter        map[string]bool
 
@@ -404,7 +406,7 @@ func (j *SortMergeJoin) Finalize(_ context.Context) error {
 	}
 
 	j.outSchema, j.outMapping = joinOutputSchemaWithMapping(j.JoinType, j.probe.schema, j.build.schema,
-		j.BuildTableAlias, j.QualifyAllBuildCols, j.OutputFilter)
+		j.BuildTableAlias, j.BuildColOrigins, j.QualifyAllBuildCols, j.OutputFilter)
 
 	if err := j.resolveCompareKernels(); err != nil {
 		j.mu.Lock()
