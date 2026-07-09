@@ -32,6 +32,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/dataplane"
 	distrib "github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
@@ -332,6 +333,12 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 	if err := cat.Init(ctx); err != nil {
 		log.Fatalf("catalog init: %v", err)
 	}
+
+	// Bushy join reorder (docs/design/bushy-join-cbo.md): process-wide
+	// planner knob — the join order is decided here at plan time, so the
+	// coordinator process is the only one that needs it. Default off.
+	logical.BushyJoinReorder.Store(os.Getenv("WADJET_BUSHY_JOIN_REORDER") == "1" ||
+		strings.EqualFold(os.Getenv("WADJET_BUSHY_JOIN_REORDER"), "true"))
 
 	// Coordinator — no embedded worker so it stays out of the data path.
 	// All data tasks run on the remote workers.
