@@ -51,6 +51,9 @@ func (p *Planner) buildSortMergeJoin(ctx context.Context, node *logical.Node, le
 	if alias := findScanAlias(node.Children[1]); alias != "" {
 		j.BuildTableAlias = alias
 	}
+	// Multi-table build subtrees carry per-column origin aliases so each
+	// duplicate qualifies under its OWNING scan (nil for single-scan builds).
+	j.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
 	if sm := p.getSpillManager(); sm != nil {
 		j.Spill = sm
 	}

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"runtime"
 	"strconv"
@@ -70,6 +71,12 @@ type Stage struct {
 	LeftDepStage    string // stage providing probe (left) side
 	RightDepStage   string // stage providing build (right) side
 	BuildTableAlias string // build-side table alias for column disambiguation in self-joins
+	// BuildColOrigins maps each bare build-output column (lowercased) to the
+	// scan alias that owns it. Only set when the build subtree spans multiple
+	// tables (bushy shapes) — nil for single-scan builds, where
+	// BuildTableAlias is already exact. The join executor qualifies duplicate
+	// build columns with the OWNING alias instead of BuildTableAlias.
+	BuildColOrigins map[string]string
 	JoinFilter      string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
 
 	// Fused broadcast joins absorbed into this stage (avoids separate
@@ -239,6 +246,7 @@ type FusedJoinSpec struct {
 	JoinRightKeys   []string
 	BuildDepStage   string // stage providing build-side data
 	BuildTableAlias string
+	BuildColOrigins map[string]string // bare build col → owning scan alias (multi-table builds only)
 	JoinFilter      string
 	FilterExprs     []string
 }
@@ -1684,7 +1692,7 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	if len(node.CTEs) > 0 {
 		p.ctes = node.CTEs
 	}
-	// Ensure scan nodes have column metadata — needed by fixJoinKeyOrder
+	// Ensure scan nodes have column metadata — needed by assignJoinKeySides
 	// to assign shuffle keys to the correct child side.
 	p.AnnotateScanColumns(ctx, node)
 	stages := p.generateStages(node)
@@ -2684,6 +2692,17 @@ func markCoPathingSelfJoinBuilds(stages []Stage) {
 	// For each join stage, walk its build-side dep chain (transitively
 	// through any Exchange wrappers) to the underlying scan and record
 	// (joinIdx, scanTableName).
+	//
+	// The walk deliberately does NOT branch into both sides of a join stage
+	// encountered mid-chain (bushy builds). An attempted extension that did
+	// (2026-07-09) surfaced same-table scans from Q02/Q20's decorrelated
+	// subquery chains and force-qualified joins whose downstream consumers
+	// reference bare names — 0 rows. Bushy self-join collisions are instead
+	// qualified at the join where the collision occurs, via isDup +
+	// BuildColOrigins in joinOutputSchemaWithMapping. If a bushy shape ever
+	// needs Q07-style cross-chain force-qualification, decide it from the
+	// LOGICAL tree's exact output visibility (subtreeNaming), not from a
+	// stage-DAG walk.
 	type joinScan struct {
 		joinIdx   int
 		joinID    string
@@ -2962,6 +2981,7 @@ func fuseJoinStages(stages []Stage) []Stage {
 			JoinRightKeys:   s.JoinRightKeys,
 			BuildDepStage:   s.RightDepStage,
 			BuildTableAlias: s.BuildTableAlias,
+			BuildColOrigins: s.BuildColOrigins,
 			JoinFilter:      s.JoinFilter,
 			FilterExprs:     s.FilterExprs,
 		}
@@ -3069,12 +3089,16 @@ func sumFusedBytes(stages []Stage, specs []FusedJoinSpec) int64 {
 // resolveShuffleKey resolves a join key name through any Project alias nodes
 // in the child subtree. For example, a CTE with `l_suppkey AS supplier_no`
 // creates a Project that renames the column — the shuffle key `supplier_no`
-// must be mapped back to `l_suppkey` so the executor can find it in the data.
+// must be mapped back to `l_suppkey` so the executor can find it in the data
+// (distributed walkStages treats ordinary Projects as passthrough, so the
+// physical columns keep their original names).
+//
+// Join nodes recurse into their output-visible children: both sides for
+// inner/outer joins, probe side only for semi/anti. First resolution wins.
 func resolveShuffleKey(key string, child *logical.Node) string {
 	if child == nil {
 		return key
 	}
-	// Walk down through pass-through nodes looking for a Project with an alias.
 	for n := child; n != nil; {
 		if n.Type == logical.NodeProject {
 			for _, proj := range n.Projections {
@@ -3082,6 +3106,16 @@ func resolveShuffleKey(key string, child *logical.Node) string {
 					return proj.Column
 				}
 			}
+		}
+		if n.Type == logical.NodeJoin && len(n.Children) == 2 {
+			if resolved := resolveShuffleKey(key, n.Children[0]); resolved != key {
+				return resolved
+			}
+			jt := strings.ToLower(n.JoinType)
+			if jt != "semi" && jt != "anti" {
+				return resolveShuffleKey(key, n.Children[1])
+			}
+			return key
 		}
 		// Continue down to single-child nodes (Filter, Sort, Limit, Project, Aggregate)
 		if len(n.Children) == 1 {
@@ -3349,14 +3383,19 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 
 		// Extract join keys from condition (cross joins have no ON clause)
 		var leftKeys, rightKeys []string
+		var buildNaming *subtreeNaming
+		if len(node.Children) >= 2 {
+			buildNaming = subtreeNamingOf(node.Children[1])
+		}
 		if jt != "cross" {
 			leftKeys, rightKeys = parseJoinKeys(node.JoinCond)
 			// parseJoinKeys assigns left/right based on position in the "="
 			// expression, not based on which child subtree owns the column.
 			// Fix the assignment so leftKeys are from the probe (left) child
 			// and rightKeys are from the build (right) child.
-			if len(node.Children) >= 2 {
-				fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+			if buildNaming != nil {
+				assignJoinKeySides(leftKeys, rightKeys,
+					subtreeNamingOf(node.Children[0]), buildNaming)
 			}
 		}
 
@@ -3481,6 +3520,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			if alias := findScanAlias(node.Children[1]); alias != "" {
 				stage.BuildTableAlias = alias
 			}
+			// Multi-table build subtrees additionally carry per-column origin
+			// aliases so the executor qualifies each duplicate with its OWNING
+			// scan, not the (arbitrary) first one. Nil for single-scan builds.
+			stage.BuildColOrigins = buildNaming.buildColOrigins()
 		}
 		// Propagate semi/anti join inequality filters
 		if node.JoinFilter != "" {
@@ -3907,10 +3950,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		if len(leftKeys) == 0 {
 			return nil, nil, nil, fmt.Errorf("could not extract join keys from: %s", node.JoinCond)
 		}
-		// Fix key assignment using plan-level column info: ensure left keys are
-		// probe-side and right keys are build-side. This avoids the expensive
+		// Fix key assignment using plan-level column ownership: ensure left keys
+		// are probe-side and right keys are build-side. This avoids the expensive
 		// post-build FixKeyAssignment hash table rebuild.
-		fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
+		assignJoinKeySides(leftKeys, rightKeys,
+			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
 	}
 
 	// Big-vs-big inner equi-joins route to sort-merge join when BOTH sides'
@@ -3928,6 +3972,9 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	if alias := findScanAlias(node.Children[1]); alias != "" {
 		hj.BuildTableAlias = alias
 	}
+	// Multi-table build subtrees carry per-column origin aliases so each
+	// duplicate qualifies under its OWNING scan (nil for single-scan builds).
+	hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
 
 	// Grace Hash Join spill-to-disk: prevents OOM on large build sides (e.g.
 	// SF100 orders table at 150M rows). The shared MemTracker means multi-join
@@ -3964,11 +4011,13 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 		leftKeys, rightKeys = rightKeys, leftKeys
 		hj.LeftKeys = leftKeys
 		hj.RightKeys = rightKeys
-		fixJoinKeyOrder(leftKeys, rightKeys, node.Children[1])
-		// Update build-side alias after swap
+		assignJoinKeySides(leftKeys, rightKeys,
+			subtreeNamingOf(node.Children[0]), subtreeNamingOf(node.Children[1]))
+		// Update build-side alias + origins after swap
 		if alias := findScanAlias(node.Children[1]); alias != "" {
 			hj.BuildTableAlias = alias
 		}
+		hj.BuildColOrigins = subtreeNamingOf(node.Children[1]).buildColOrigins()
 	}
 
 	// For semi/anti joins without a filter, enable key-only build:
@@ -4060,7 +4109,10 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 			return
 		}
 		if deferBuild || useReverseBloom {
-			hj.FixKeyAssignment()
+			if hj.FixKeyAssignment() {
+				slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
+					"left_keys", hj.LeftKeys, "right_keys", hj.RightKeys)
+			}
 			if joinType == exec.SemiJoin || joinType == exec.AntiJoin {
 				hj.PruneBuildColumns(keepCols)
 			}
@@ -4151,7 +4203,11 @@ func (p *Planner) buildJoin(ctx context.Context, node *logical.Node) (exec.Sourc
 	// (left of "=" → leftKey, right → rightKey), but the SQL may put the
 	// build-side column on the left (e.g., "JOIN t ON t.id = probe.id").
 	// After building, we know the build schema; swap any misassigned pairs.
-	hj.FixKeyAssignment()
+	// A repair firing here means plan-time assignJoinKeySides missed a pair.
+	if hj.FixKeyAssignment() {
+		slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
+			"left_keys", hj.LeftKeys, "right_keys", hj.RightKeys)
+	}
 
 	// SemiAntiFilter already set above (pre-goroutine).
 
@@ -4829,69 +4885,6 @@ func parseJoinKeys(cond string) (leftKeys, rightKeys []string) {
 		rightKeys = append(rightKeys, right)
 	}
 	return
-}
-
-// fixJoinKeyOrder ensures left keys are probe-side and right keys are build-side
-// by checking against the build subtree's available columns from the plan.
-// This avoids the expensive post-build FixKeyAssignment hash table rebuild
-// which was 31% of Q09's time at SF10.
-//
-// Build columns are unqualified (from the table scan), but join keys may now
-// preserve qualifiers (post Q07 fix). Strip the qualifier on lookup so a key
-// like "n1.n_nationkey" matches the build's unqualified "n_nationkey".
-func fixJoinKeyOrder(leftKeys, rightKeys []string, buildNode *logical.Node) {
-	buildCols := collectPlanColumns(buildNode)
-	if len(buildCols) == 0 {
-		return
-	}
-	stripQual := func(k string) string {
-		if dot := strings.Index(k, "."); dot >= 0 {
-			return k[dot+1:]
-		}
-		return k
-	}
-	for i := range leftKeys {
-		leftInBuild := buildCols[leftKeys[i]] || buildCols[stripQual(leftKeys[i])]
-		rightInBuild := buildCols[rightKeys[i]] || buildCols[stripQual(rightKeys[i])]
-		if leftInBuild && !rightInBuild {
-			leftKeys[i], rightKeys[i] = rightKeys[i], leftKeys[i]
-		}
-	}
-}
-
-// collectPlanColumns returns all column names available from scan nodes
-// in the logical plan subtree (lowercased).
-func collectPlanColumns(n *logical.Node) map[string]bool {
-	if n == nil {
-		return nil
-	}
-	result := make(map[string]bool)
-	collectPlanColumnsRec(n, result)
-	return result
-}
-
-func collectPlanColumnsRec(n *logical.Node, result map[string]bool) {
-	if n == nil {
-		return
-	}
-	if n.Type == logical.NodeScan {
-		for _, col := range n.ScanColumns {
-			result[strings.ToLower(col)] = true
-		}
-	}
-	// Semi/anti joins only output probe-side (child[0]) columns.
-	// Skip build side so fixJoinKeyOrder doesn't see build-only columns
-	// as available from this subtree.
-	if n.Type == logical.NodeJoin && len(n.Children) == 2 {
-		jt := strings.ToLower(n.JoinType)
-		if jt == "semi" || jt == "anti" {
-			collectPlanColumnsRec(n.Children[0], result)
-			return
-		}
-	}
-	for _, child := range n.Children {
-		collectPlanColumnsRec(child, result)
-	}
 }
 
 func (p *Planner) buildFilter(ctx context.Context, node *logical.Node) (exec.Source, []exec.UnaryOperator, exec.Sink, error) {

@@ -85,6 +85,13 @@ type HashJoin struct {
 	// columnIndexFallback path that breaks Q07).
 	QualifyAllBuildCols bool
 
+	// BuildColOrigins maps each bare build-column name (lowercased) to the
+	// scan alias that owns it. Set by the planner only when the build side
+	// spans multiple tables (bushy join subtrees); nil for single-scan
+	// builds. Duplicate qualification then uses the owning alias instead of
+	// the single BuildTableAlias, which is ambiguous for multi-table builds.
+	BuildColOrigins map[string]string
+
 	// Pre-resolved column indices and reusable key buffer for typed serialization.
 	// Avoids fmt.Sprint + GetValue boxing on every row.
 	keyBuf        []byte
@@ -1700,13 +1707,23 @@ func (h *HashJoin) BuildRows() int64 {
 	return h.buildRows
 }
 
+// KeyAssignmentRepairs counts runtime probe/build key swaps performed by
+// FixKeyAssignment after a build completed — cases where PLAN-TIME side
+// assignment (assignJoinKeySides) got a pair wrong and the runtime safety
+// net rescued it. Tripwire observability: the TPC-H suites assert this
+// stays 0; a nonzero count means a plan shape leaked through the planner's
+// ownership resolution (rebuild cost + a hazard for partitioned builds).
+var KeyAssignmentRepairs atomic.Int64
+
 // FixKeyAssignment corrects misassigned join keys after the build phase.
 // SQL may place the build-side column on the left of "=" (e.g., JOIN t ON t.id = src.id),
 // causing parseJoinKeys to assign it as a left/probe key. This detects and swaps
 // misassigned pairs by checking which keys exist in the build schema.
-func (h *HashJoin) FixKeyAssignment() {
+// It returns true when any pair was swapped, so callers can surface the
+// repair (it should never fire on planner-produced plans).
+func (h *HashJoin) FixKeyAssignment() bool {
 	if h.buildSchema == nil || len(h.LeftKeys) == 0 {
-		return
+		return false
 	}
 	buildCols := make(map[string]bool, len(h.buildSchema))
 	for _, col := range h.buildSchema {
@@ -1723,6 +1740,9 @@ func (h *HashJoin) FixKeyAssignment() {
 			needsRebuild = true
 			h.probeResolved.Store(false) // force re-resolution of probe key indices
 		}
+	}
+	if needsRebuild {
+		KeyAssignmentRepairs.Add(1)
 	}
 
 	// Rebuild hash index if keys were swapped
@@ -1745,7 +1765,7 @@ func (h *HashJoin) FixKeyAssignment() {
 		if h.spillState != nil {
 			for _, b := range h.buildBatches {
 				if b == nil {
-					return
+					return true
 				}
 			}
 		}
@@ -1822,6 +1842,7 @@ func (h *HashJoin) FixKeyAssignment() {
 		h.bloom = nil
 		h.buildBloom()
 	}
+	return needsRebuild
 }
 
 // Probe is a UnaryOperator that probes the hash table for each input batch.
@@ -3180,14 +3201,14 @@ func (p *HashJoinProbe) outputSchema(leftSchema []parquet.Column) []parquet.Colu
 
 func (p *HashJoinProbe) outputSchemaWithMapping(leftSchema []parquet.Column) ([]parquet.Column, []outColSource) {
 	return joinOutputSchemaWithMapping(p.join.JoinType, leftSchema, p.join.buildSchema,
-		p.join.BuildTableAlias, p.join.QualifyAllBuildCols, p.OutputFilter)
+		p.join.BuildTableAlias, p.join.BuildColOrigins, p.join.QualifyAllBuildCols, p.OutputFilter)
 }
 
 // joinOutputSchemaWithMapping computes a join's output schema — probe columns
 // first, then build columns with duplicate-name qualification — and the
 // per-output-column source mapping. Shared by HashJoinProbe and SortMergeJoin
 // so both emit identical schemas for the same join shape.
-func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, qualifyAllBuildCols bool, outputFilter map[string]bool) ([]parquet.Column, []outColSource) {
+func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []parquet.Column, buildAlias string, buildColOrigins map[string]string, qualifyAllBuildCols bool, outputFilter map[string]bool) ([]parquet.Column, []outColSource) {
 	var out []parquet.Column
 	var mapping []outColSource
 
@@ -3211,16 +3232,36 @@ func joinOutputSchemaWithMapping(joinType JoinType, leftSchema, buildSchema []pa
 
 	for i, col := range buildSchema {
 		isDup := seen[col.Name]
+		// A build column that already carries a qualifier was named by a
+		// nested join INSIDE the build subtree (bushy shapes). The name is
+		// already unique and stable — re-qualifying would double-qualify
+		// ("s.n2.n_name") and dropping it would lose the column. Emit verbatim.
+		if strings.IndexByte(col.Name, '.') >= 0 {
+			if joinType == LeftJoin || joinType == FullOuterJoin {
+				col.Nullable = true
+			}
+			out = append(out, col)
+			mapping = append(mapping, outColSource{fromProbe: false, srcIdx: i})
+			seen[col.Name] = true
+			continue
+		}
+		// Qualification alias: the column's OWNING scan when the planner
+		// provided per-column origins (multi-table build subtrees), else the
+		// build side's single table alias.
+		alias := buildAlias
+		if origin := buildColOrigins[strings.ToLower(col.Name)]; origin != "" {
+			alias = origin
+		}
 		// Force qualification for self-join scenarios — the planner sets
 		// QualifyAllBuildCols when this build is one of two co-pathing
 		// scans of the same source table. Without it, the FIRST scan's
 		// column ships unqualified ("n_name") and downstream lookups for
 		// the qualified name ("n1.n_name") miss.
-		shouldQualify := (isDup || qualifyAllBuildCols) && buildAlias != ""
+		shouldQualify := (isDup || qualifyAllBuildCols) && alias != ""
 		switch {
 		case shouldQualify:
 			qualCol := col
-			qualCol.Name = buildAlias + "." + col.Name
+			qualCol.Name = alias + "." + col.Name
 			if joinType == LeftJoin || joinType == FullOuterJoin {
 				qualCol.Nullable = true
 			}

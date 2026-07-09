@@ -29,14 +29,21 @@ import (
 // (SQL equi-join semantics: NULL matches nothing — mirrors the hash paths,
 // where null keys produce no index entry). Not Cloneable: the breaker path
 // runs it single-consumer.
+// SMJCounterpartAdoptions counts key resolutions that only succeeded by
+// adopting the OTHER side's key name (swapped pair) — the sort-merge analog
+// of KeyAssignmentRepairs. Tripwire: should stay 0 on planner-produced plans.
+var SMJCounterpartAdoptions atomic.Int64
+
 type SortMergeJoin struct {
 	JoinType  JoinType // v1: InnerJoin only; validated in Init/Finalize
 	LeftKeys  []string // join key columns from left (probe) side
 	RightKeys []string // join key columns from right (build) side
 
-	// BuildTableAlias / QualifyAllBuildCols / OutputFilter carry
-	// HashJoinProbe's output-schema semantics — see joinOutputSchemaWithMapping.
+	// BuildTableAlias / BuildColOrigins / QualifyAllBuildCols / OutputFilter
+	// carry HashJoinProbe's output-schema semantics — see
+	// joinOutputSchemaWithMapping.
 	BuildTableAlias     string
+	BuildColOrigins     map[string]string
 	QualifyAllBuildCols bool
 	OutputFilter        map[string]bool
 
@@ -243,8 +250,13 @@ func (j *SortMergeJoin) consume(side *smjSide, b *batch.RecordBatch) error {
 		for i := range side.keys {
 			idx := columnIndexFallback(b, side.keys[i].Column)
 			if idx < 0 && i < len(side.counterpart) {
-				// Swapped pair — see smjSide.counterpart.
+				// Swapped pair — see smjSide.counterpart. Adoption is the
+				// SMJ analog of FixKeyAssignment: count it as a tripwire
+				// (plan-time side assignment should make this unreachable).
 				idx = columnIndexFallback(b, side.counterpart[i])
+				if idx >= 0 {
+					SMJCounterpartAdoptions.Add(1)
+				}
 			}
 			if idx < 0 {
 				return fmt.Errorf("sort-merge join: %s-side key column %q not found", side.name, side.keys[i].Column)
@@ -404,7 +416,7 @@ func (j *SortMergeJoin) Finalize(_ context.Context) error {
 	}
 
 	j.outSchema, j.outMapping = joinOutputSchemaWithMapping(j.JoinType, j.probe.schema, j.build.schema,
-		j.BuildTableAlias, j.QualifyAllBuildCols, j.OutputFilter)
+		j.BuildTableAlias, j.BuildColOrigins, j.QualifyAllBuildCols, j.OutputFilter)
 
 	if err := j.resolveCompareKernels(); err != nil {
 		j.mu.Lock()

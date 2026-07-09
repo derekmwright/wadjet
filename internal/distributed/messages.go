@@ -119,8 +119,13 @@ type Task struct {
 	// build-side columns under their qualified name even when no probe-side
 	// column has the same base name. Set by the planner for self-join scenarios
 	// (Q07's two scans of nation that co-path into the same join chain).
-	QualifyAllBuildCols bool   `json:"qualify_all_build_cols,omitempty"`
-	JoinFilter          string `json:"join_filter,omitempty"` // semi/anti join inequality filter expression
+	QualifyAllBuildCols bool `json:"qualify_all_build_cols,omitempty"`
+	// BuildColOrigins maps bare build-column names (lowercased) to their
+	// owning scan alias. Set only for multi-table build subtrees (bushy
+	// shapes); the executor qualifies duplicate build columns with the
+	// owning alias instead of BuildTableAlias.
+	BuildColOrigins map[string]string `json:"build_col_origins,omitempty"`
+	JoinFilter      string            `json:"join_filter,omitempty"` // semi/anti join inequality filter expression
 
 	// Fused join: additional broadcast joins absorbed into a single task.
 	// The worker builds hash tables for each fused join, then chains probes
@@ -312,8 +317,9 @@ type OpSpec struct {
 	JoinFilter          string   `json:"join_filter,omitempty"`
 	BuildRowHint        int64    `json:"build_row_hint,omitempty"`
 	SemiAntiKeyOnly     bool     `json:"semi_anti_key_only,omitempty"`
-	QualifyAllBuildCols bool     `json:"qualify_all_build_cols,omitempty"`
-	OutputColumns       []string `json:"output_columns,omitempty"` // OutputFilter for primary probe
+	QualifyAllBuildCols bool              `json:"qualify_all_build_cols,omitempty"`
+	BuildColOrigins     map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
+	OutputColumns       []string          `json:"output_columns,omitempty"`    // OutputFilter for primary probe
 	LateMaterialize     bool     `json:"late_materialize,omitempty"` // emit view-column join output (deferred gather)
 
 	// OpExchangeSender (sink).
@@ -425,13 +431,14 @@ type WindowColSpec struct {
 // The worker builds the hash table from BuildFiles, then probes each batch
 // through this join before passing it to the next fused join (or output).
 type FusedJoinSpec struct {
-	JoinType        string   `json:"join_type"`
-	JoinLeftKeys    []string `json:"join_left_keys"`  // keys from the probe stream
-	JoinRightKeys   []string `json:"join_right_keys"` // keys in build files
-	BuildFiles      []string `json:"build_files"`     // build-side files (broadcast)
-	BuildTableAlias string   `json:"build_table_alias,omitempty"`
-	JoinFilter      string   `json:"join_filter,omitempty"`
-	FilterExprs     []string `json:"filter_exprs,omitempty"` // post-join filters for this step
+	JoinType        string            `json:"join_type"`
+	JoinLeftKeys    []string          `json:"join_left_keys"`  // keys from the probe stream
+	JoinRightKeys   []string          `json:"join_right_keys"` // keys in build files
+	BuildFiles      []string          `json:"build_files"`     // build-side files (broadcast)
+	BuildTableAlias string            `json:"build_table_alias,omitempty"`
+	BuildColOrigins map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
+	JoinFilter      string            `json:"join_filter,omitempty"`
+	FilterExprs     []string          `json:"filter_exprs,omitempty"` // post-join filters for this step
 }
 
 // ResultNotification is sent by workers when a task completes.
