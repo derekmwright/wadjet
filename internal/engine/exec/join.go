@@ -668,6 +668,25 @@ func hashBuildBytes(b *batch.RecordBatch) int64 {
 	return b.MemBytes() + int64(b.Len)*40
 }
 
+// warmBuildNullBitmaps forces Bitmap.HasNulls memoization on every stored
+// build column at build completion — the last single-threaded point. View
+// output batches share these vectors as bases across concurrently-consumed
+// batches (morsel-parallel sinks, per-partition append bursts), and
+// HasNulls' lazy first-call write would otherwise race between consumers.
+func (h *HashJoin) warmBuildNullBitmaps() {
+	for _, b := range h.buildBatches {
+		if b == nil {
+			continue // partition-on-arrival: spilled partitions leave nil slots
+		}
+		for _, col := range b.Columns {
+			if col == nil {
+				continue
+			}
+			_ = col.Nulls.HasNulls()
+		}
+	}
+}
+
 // Build consumes all rows from the build (right) side into the columnar hash table.
 // Uses parallel workers when the build side is large enough to benefit from
 // concurrent hash table construction with per-worker local tables.
@@ -1025,6 +1044,7 @@ func (h *HashJoin) Build(ctx context.Context, source Source) error {
 	// the per-batch tracking loop. Charge them to the memory tracker.
 	h.reconcileHashMemory()
 
+	h.warmBuildNullBitmaps()
 	h.buildDone = true
 	return nil
 }
@@ -1671,6 +1691,7 @@ func (h *HashJoin) BuildFromRows(schema []parquet.Column, rows []map[string]any)
 		h.arenaMatched = make([]bool, len(h.arena))
 	}
 	h.buildBloom()
+	h.warmBuildNullBitmaps()
 	h.buildDone = true
 }
 

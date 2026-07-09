@@ -112,6 +112,12 @@ func newPartitionedShuffleSink(spillDir string, keys []string, numParts int, sch
 	}
 }
 
+// AcceptsViews: Consume normalizes view columns itself (key and own-null
+// columns flatten single-threaded before the per-partition fan-out; the
+// rest serialize through appendBatchRowsBulk's row translation, copy-free),
+// so the pipeline's defensive flatten is unnecessary.
+func (s *partitionedShuffleSink) AcceptsViews() bool { return true }
+
 // Init creates the per-partition spill files.
 func (s *partitionedShuffleSink) Init(_ context.Context) error {
 	if s.spillDir == "" {
@@ -165,6 +171,27 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 		return s.keyErr
 	}
 
+	if b.HasViews() {
+		// Normalize views single-threaded, before the per-partition goroutine
+		// fan-out: the hash pass below reads key columns positionally, and
+		// own-null views (outer-join fill) can't ride appendBatchRowsBulk's
+		// per-column row translation — flattening either inside the burst
+		// goroutines would race on the shared vectors. Remaining views defer
+		// nulls to their base and serialize through the translation, copy-free.
+		for _, ki := range s.keyIdxs {
+			if b.Columns[ki].IsView() {
+				b.FlattenColumn(ki)
+				exec.LateMatFlattens.Add(1)
+			}
+		}
+		for _, col := range b.Columns {
+			if col.IsView() && col.Nulls.HasNulls() {
+				col.Flatten()
+				exec.LateMatFlattens.Add(1)
+			}
+		}
+	}
+
 	// Vectorized partition assignment: one pass per key column over the
 	// active rows, mixing into a per-row hash accumulator. Pre-2026-04-30
 	// this code did `fnv.New64a()` per row → 1M heap allocations of the
@@ -214,6 +241,11 @@ func (s *partitionedShuffleSink) Consume(_ context.Context, b *batch.RecordBatch
 	// batches.
 	for _, col := range b.Columns {
 		_ = col.Nulls.HasNulls()
+		if col.Base != nil {
+			// View columns read their base's bitmap in the per-partition
+			// appends — warm that memoization too.
+			_ = col.Base.Nulls.HasNulls()
+		}
 	}
 
 	// Small consumes skip the goroutine fan-out below: with ~24 partitions a
@@ -324,19 +356,37 @@ func (s *partitionedShuffleSink) appendRowsBulkLocked(p int, b *batch.RecordBatc
 // types only — the switch (like growBatchTo) has no Array/Map/Row/Vector
 // arms. Shared by the partition writers and the unpartitioned stage sink's
 // chunk-coalescing accumulator.
-func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, rows []int) int {
+func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows []int) int {
 	start := dst.Len
-	end := start + len(rows)
+	end := start + len(srcRows)
 
 	// Pre-grow all column storage to fit `end` rows in one allocation per
 	// column (versus one append-of-one per row in the old code).
 	growBatchTo(dst, end)
 
 	bytesAdded := 0
-	nRows := len(rows)
+	nRows := len(srcRows)
 
+	var viewRows []int // lazy scratch for view-column row translation
 	for ci, srcCol := range b.Columns {
 		dstCol := dst.Columns[ci]
+		rows := srcRows
+		if srcCol.Base != nil {
+			// View column (own-null views were normalized by the caller's
+			// single-threaded Consume): translate the row list through the
+			// view's indices so every typed arm below reads the base
+			// directly — one copy, straight into the accumulator, instead
+			// of a flatten copy followed by this copy.
+			if viewRows == nil {
+				viewRows = make([]int, nRows)
+			}
+			for i, r := range srcRows {
+				viewRows[i] = int(srcCol.Indices[r])
+			}
+			srcCol = srcCol.Base
+			rows = viewRows
+			exec.LateMatViewColumnsSerialized.Add(1)
+		}
 		hasNulls := srcCol.Nulls.HasNulls()
 		switch dstCol.Type {
 		case parquet.TypeBool:

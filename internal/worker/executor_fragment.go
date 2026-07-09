@@ -1858,7 +1858,6 @@ type fragmentExchangeSink struct {
 }
 
 func (s *fragmentExchangeSink) consume(ctx context.Context, b *batch.RecordBatch) error {
-	exec.FlattenForConsumer(b, s) // serializes typed storage: views must resolve here
 	s.initMu.Lock()
 	if s.sink == nil {
 		sink := newPartitionedShuffleSink(s.spillDir, s.shuffleKeys, s.numParts, b.Schema)
@@ -1900,7 +1899,6 @@ type fragmentUnpartitionedSink struct {
 }
 
 func (s *fragmentUnpartitionedSink) consume(ctx context.Context, b *batch.RecordBatch) error {
-	exec.FlattenForConsumer(b, s) // serializes typed storage: views must resolve here
 	return s.sink.Consume(ctx, b)
 }
 
@@ -1928,7 +1926,6 @@ type fragmentGatherSink struct {
 }
 
 func (s *fragmentGatherSink) consume(ctx context.Context, b *batch.RecordBatch) error {
-	exec.FlattenForConsumer(b, s) // serializes typed storage: views must resolve here
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.finished {

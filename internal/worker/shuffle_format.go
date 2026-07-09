@@ -10,6 +10,7 @@ import (
 	"unsafe"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
 
@@ -37,11 +38,12 @@ var shuffleMagic = [4]byte{'W', 'S', 'H', 'F'}
 
 // shuffleWriter writes RecordBatch chunks in columnar binary format.
 type shuffleWriter struct {
-	w         io.Writer
-	schema    []parquet.Column
-	numChunks uint32
-	buf       []byte // reusable scratch buffer
-	gatherBuf []byte // reusable buffer for gathering selected rows
+	w              io.Writer
+	schema         []parquet.Column
+	numChunks      uint32
+	buf            []byte   // reusable scratch buffer
+	gatherBuf      []byte   // reusable buffer for gathering selected rows
+	viewSelScratch []uint32 // reusable composed selection for view columns
 }
 
 func newShuffleWriter(w io.Writer, schema []parquet.Column) *shuffleWriter {
@@ -109,6 +111,15 @@ func (sw *shuffleWriter) writeHeader() error {
 
 // writeChunk writes a batch of selected rows as a columnar chunk.
 // sel contains the row indices to write; if nil, writes all rows.
+//
+// View (dictionary) columns serialize straight through their indirection:
+// the writer already gathers rows via sel, so a view without an own-null
+// override is just its base with the selection composed through Indices —
+// the final copy the view deferred simply becomes this encode, with no
+// flatten in between. Own-null views (outer-join fill) can't ride the
+// composition because their null bits override the base's; those columns
+// flatten in place (every caller serializes a batch under its own lock, so
+// the in-place mutation is single-threaded).
 func (sw *shuffleWriter) writeChunk(cols []*batch.Vector, sel []uint32, numRows int) error {
 	sw.numChunks++
 
@@ -120,11 +131,39 @@ func (sw *shuffleWriter) writeChunk(cols []*batch.Vector, sel []uint32, numRows 
 
 	for ci := range sw.schema {
 		vec := cols[ci]
-		if err := sw.writeColumnData(vec, sel, numRows, sw.schema[ci].Type); err != nil {
+		colSel := sel
+		if vec.Base != nil {
+			if vec.Nulls.HasNulls() {
+				vec.Flatten()
+				exec.LateMatFlattens.Add(1)
+			} else {
+				colSel = sw.composeViewSel(vec.Indices, sel, numRows)
+				vec = vec.Base
+				exec.LateMatViewColumnsSerialized.Add(1)
+			}
+		}
+		if err := sw.writeColumnData(vec, colSel, numRows, sw.schema[ci].Type); err != nil {
 			return fmt.Errorf("writing column %d (%s): %w", ci, sw.schema[ci].Name, err)
 		}
 	}
 	return nil
+}
+
+// composeViewSel resolves a view column's effective selection against its
+// base: with no caller selection the view's index array IS the selection;
+// otherwise compose element-wise into a reusable scratch.
+func (sw *shuffleWriter) composeViewSel(indices, sel []uint32, numRows int) []uint32 {
+	if sel == nil {
+		return indices[:numRows]
+	}
+	if cap(sw.viewSelScratch) < len(sel) {
+		sw.viewSelScratch = make([]uint32, len(sel))
+	}
+	out := sw.viewSelScratch[:len(sel)]
+	for i, si := range sel {
+		out[i] = indices[si]
+	}
+	return out
 }
 
 func (sw *shuffleWriter) writeColumnData(vec *batch.Vector, sel []uint32, numRows int, typ parquet.TypeID) error {

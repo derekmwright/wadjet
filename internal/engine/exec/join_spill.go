@@ -1011,6 +1011,7 @@ func (h *HashJoin) buildTempJoinFromBatches(buildBatches []*batch.RecordBatch) (
 		tmpJoin.arenaMatched = make([]bool, len(tmpJoin.arena))
 	}
 	tmpJoin.buildBloom()
+	tmpJoin.warmBuildNullBitmaps()
 	tmpJoin.buildDone = true
 	return tmpJoin, nil
 }

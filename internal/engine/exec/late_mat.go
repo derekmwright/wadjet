@@ -20,6 +20,10 @@ var (
 	// LateMatFlattens counts FlattenViews calls made on behalf of consumers
 	// that don't accept views — each one is a deferred gather finally paid.
 	LateMatFlattens atomic.Int64
+	// LateMatViewColumnsSerialized counts view columns serialized straight
+	// through their indirection by the shuffle writers (no flatten copy at
+	// all) — the phase-4 engagement marker.
+	LateMatViewColumnsSerialized atomic.Int64
 )
 
 // ViewAware marks an operator or sink that can consume batches containing

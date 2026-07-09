@@ -1331,7 +1331,8 @@ func (w *Worker) executeIncomingTask(ctx context.Context, task distributed.Task,
 	// Zero-valued attrs are omitted so flag-off logs are byte-identical.
 	if emitted := exec.LateMatBatchesEmitted.Load(); emitted > 0 {
 		logAttrsEnd = append(logAttrsEnd, "late_mat_batches", emitted,
-			"late_mat_flattens", exec.LateMatFlattens.Load())
+			"late_mat_flattens", exec.LateMatFlattens.Load(),
+			"late_mat_serialized_cols", exec.LateMatViewColumnsSerialized.Load())
 	}
 	w.logger.Info("task completed", logAttrsEnd...)
 }
