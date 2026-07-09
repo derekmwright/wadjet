@@ -145,6 +145,10 @@ func (b *RecordBatch) Reset(numRows int) {
 // the first reused row read back the prior batch's data concatenated with
 // the new value, and child arenas grew monotonically per reuse cycle.
 func resetVectorForReuse(col *Vector, numRows int) {
+	// Views must never survive into a pooled reuse cycle; drop the
+	// indirection so the batch is a plain (empty) owned batch again.
+	col.Base = nil
+	col.Indices = nil
 	col.Len = numRows
 	col.Nulls.ResetNonNull(numRows)
 	switch col.Type {
@@ -170,6 +174,8 @@ func resetVectorForReuse(col *Vector, numRows int) {
 // truncateVectorStorage re-slices a vector's element storage to zero length
 // (capacity retained for reuse). Recurses into nested children.
 func truncateVectorStorage(v *Vector) {
+	v.Base = nil
+	v.Indices = nil
 	v.Len = 0
 	v.BoolData = v.BoolData[:0]
 	v.Int32Data = v.Int32Data[:0]
