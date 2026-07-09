@@ -401,6 +401,7 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 			cur := b
 			var err error
 			for _, op := range ops {
+				exec.FlattenForConsumer(cur, op)
 				cur, err = op.Execute(gctx, cur)
 				if err != nil {
 					return fmt.Errorf("unary exec: %w", err)
@@ -556,6 +557,7 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 	if warmup != nil {
 		cur := warmup
 		for _, op := range ops {
+			exec.FlattenForConsumer(cur, op)
 			cur, err = op.Execute(ctx, cur)
 			if err != nil {
 				return fmt.Errorf("fragment task %s: unary exec: %w", task.ID, err)
@@ -616,6 +618,7 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 			cur := b
 			var err error
 			for _, op := range chain {
+				exec.FlattenForConsumer(cur, op)
 				cur, err = op.Execute(ctx, cur)
 				if err != nil {
 					return nil, fmt.Errorf("unary exec: %w", err)
@@ -754,6 +757,7 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 		cur := b
 		var err error
 		for _, op := range chain {
+			exec.FlattenForConsumer(cur, op)
 			cur, err = op.Execute(ctx, cur)
 			if err != nil {
 				return nil, fmt.Errorf("unary exec: %w", err)
@@ -994,6 +998,7 @@ func drainFlushableOps(ctx context.Context, ops []exec.UnaryOperator, snapshotSe
 			}
 			cur := b
 			for _, dop := range downstream {
+				exec.FlattenForConsumer(cur, dop)
 				cur, err = dop.Execute(ctx, cur)
 				if err != nil {
 					return err
@@ -1180,6 +1185,7 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 			}
 		}
 		for _, op := range finalOps {
+			exec.FlattenForConsumer(cur, op)
 			cur, err = op.Execute(ctx, cur)
 			if err != nil {
 				return fmt.Errorf("fragment task %s: post-breaker exec: %w", task.ID, err)
@@ -1250,6 +1256,7 @@ func drainThroughBreaker(ctx context.Context, src exec.Source, xform func(*batch
 			}
 		}
 		for _, op := range ops {
+			exec.FlattenForConsumer(cur, op)
 			cur, err = op.Execute(ctx, cur)
 			if err != nil {
 				return err
@@ -1761,6 +1768,7 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	}
 
 	probe := hj.Probe()
+	probe.LateMaterialize = spec.LateMaterialize
 	if len(spec.OutputColumns) > 0 {
 		filter := make(map[string]bool, len(spec.OutputColumns))
 		for _, c := range spec.OutputColumns {
@@ -1850,6 +1858,7 @@ type fragmentExchangeSink struct {
 }
 
 func (s *fragmentExchangeSink) consume(ctx context.Context, b *batch.RecordBatch) error {
+	exec.FlattenForConsumer(b, s) // serializes typed storage: views must resolve here
 	s.initMu.Lock()
 	if s.sink == nil {
 		sink := newPartitionedShuffleSink(s.spillDir, s.shuffleKeys, s.numParts, b.Schema)
@@ -1891,6 +1900,7 @@ type fragmentUnpartitionedSink struct {
 }
 
 func (s *fragmentUnpartitionedSink) consume(ctx context.Context, b *batch.RecordBatch) error {
+	exec.FlattenForConsumer(b, s) // serializes typed storage: views must resolve here
 	return s.sink.Consume(ctx, b)
 }
 
@@ -1918,6 +1928,7 @@ type fragmentGatherSink struct {
 }
 
 func (s *fragmentGatherSink) consume(ctx context.Context, b *batch.RecordBatch) error {
+	exec.FlattenForConsumer(b, s) // serializes typed storage: views must resolve here
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.finished {

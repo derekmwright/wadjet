@@ -37,6 +37,7 @@ type DB struct {
 	alertScheduler     *alerts.Scheduler // non-nil when EnableAlerts is set
 	alertSchedulerStop context.CancelFunc
 	sortMergeJoinBytes int64
+	lateMaterialization bool
 }
 
 // Config holds configuration for creating a DB instance.
@@ -52,6 +53,10 @@ type Config struct {
 	// estimated size through the sort-merge join instead of the hash join
 	// (docs/design/sort-merge-join.md). 0 = disabled (default).
 	SortMergeJoinBytes int64
+	// LateMaterialization emits inner/left hash-join output as view
+	// (dictionary) columns with the gather deferred to first touch
+	// (docs/design/late-materialization.md). Off by default.
+	LateMaterialization bool
 	// EnableAlerts turns on the CREATE ALERT scheduler in embedded mode.
 	// When true, Open() creates a Scheduler that evaluates alerts on cadence.
 	EnableAlerts bool
@@ -82,6 +87,7 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		logger:             cfg.Logger,
 		authProvider:       cfg.AuthProvider,
 		sortMergeJoinBytes: cfg.SortMergeJoinBytes,
+		lateMaterialization: cfg.LateMaterialization,
 	}
 
 	if cfg.EnableAlerts {
@@ -154,6 +160,7 @@ func (db *DB) newPlanner() *physical.Planner {
 	p.MemoryBudget = db.memoryBudget
 	p.SpillDir = db.spillDir
 	p.SortMergeJoinBytes = db.sortMergeJoinBytes
+	p.LateMaterialization = db.lateMaterialization
 	return p
 }
 

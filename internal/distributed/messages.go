@@ -314,6 +314,7 @@ type OpSpec struct {
 	SemiAntiKeyOnly     bool     `json:"semi_anti_key_only,omitempty"`
 	QualifyAllBuildCols bool     `json:"qualify_all_build_cols,omitempty"`
 	OutputColumns       []string `json:"output_columns,omitempty"` // OutputFilter for primary probe
+	LateMaterialize     bool     `json:"late_materialize,omitempty"` // emit view-column join output (deferred gather)
 
 	// OpExchangeSender (sink).
 	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`

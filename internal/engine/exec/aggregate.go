@@ -577,6 +577,9 @@ func (h *HashAggregate) Init(_ context.Context) error {
 func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// Reads typed column storage directly and is fed outside the pipeline
+	// loops by the worker's multi-breaker runner — flatten at the boundary.
+	FlattenForConsumer(b, nil)
 
 	// Save schema from first batch for spill recovery
 	if h.inputSchema == nil {

@@ -672,6 +672,10 @@ func hashBuildBytes(b *batch.RecordBatch) int64 {
 // Uses parallel workers when the build side is large enough to benefit from
 // concurrent hash table construction with per-worker local tables.
 func (h *HashJoin) Build(ctx context.Context, source Source) error {
+	// Build pulls directly from a Source (no pipeline loop in between) and
+	// stores or key-reads what it pulls — arriving view batches must be
+	// materialized at this boundary.
+	source = &flattenSource{inner: source}
 	if err := source.Init(ctx); err != nil {
 		return fmt.Errorf("build source init: %w", err)
 	}
@@ -1909,6 +1913,14 @@ type HashJoinProbe struct {
 	// in multi-way join pipelines.
 	OutputFilter map[string]bool
 
+	// LateMaterialize emits inner/left join output as view (dictionary)
+	// columns over the probe input and build batches instead of gathering
+	// copies — the deferred gather happens at the first consumer that needs
+	// owned storage (see flattenForConsumer). The probe input is Detach()ed
+	// when views reference it so pool recycling can't mutate the shared
+	// vectors; GC reclaims it once the views die. Off by default.
+	LateMaterialize bool
+
 	// outPool caches output batches for reuse. Created on first Execute
 	// when the output schema is known. Eliminates per-batch allocation
 	// in multi-way join pipelines where intermediate batches are released
@@ -2079,6 +2091,14 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 		countingSortPairs(pairs, len(p.join.buildBatches), &p.sortBuf)
 	}
 
+	// Late materialization: emit view columns instead of gathered copies.
+	// Inner and left joins only in v1 — right/full-outer probe output could
+	// also ride views, but their FlushUnmatched/FlushMatched emission paths
+	// stay eager, so they are excluded until measured separately.
+	if p.LateMaterialize && (h.JoinType == InnerJoin || h.JoinType == LeftJoin) {
+		return p.emitViewOutput(in, outSchema, mapping, pairs), nil
+	}
+
 	// Build output batch using precomputed column source mapping.
 	// Two-pool strategy: standard pool for ≤DefaultBatchSize (common case,
 	// cache-friendly), large pool for oversized 1:N outputs (avoids fresh alloc).
@@ -2150,6 +2170,88 @@ func (p *HashJoinProbe) Execute(ctx context.Context, in *batch.RecordBatch) (*ba
 	}
 
 	return out, nil
+}
+
+// emitViewOutput builds the join output as view (dictionary) columns: probe
+// columns reference the input batch through the pair probe rows, build
+// columns reference the (single) build batch through the pair build rows.
+// The only per-row work is filling two shared uint32 index slices — the
+// value gather is deferred to the first consumer that needs owned storage.
+// Multi-batch builds (consolidation skipped: spilling, >2M rows, >30%
+// budget) keep the eager gather for build columns, since a view has one
+// base; the output is then mixed view/owned, which is fine — views are
+// per-column.
+func (p *HashJoinProbe) emitViewOutput(in *batch.RecordBatch, outSchema []parquet.Column, mapping []outColSource, pairs []matchPair) *batch.RecordBatch {
+	n := len(pairs)
+	h := p.join
+	allMatched := h.JoinType != LeftJoin && h.JoinType != FullOuterJoin
+	singleBuild := len(h.buildBatches) == 1
+
+	// Index slices are freshly allocated per output batch — views escape
+	// downstream, so reusing a scratch buffer here would let batch i+1
+	// corrupt any batch-i view a consumer failed to flatten. Two O(n)
+	// uint32 slices replace one full copy per output column.
+	var probeIdx, buildIdx []uint32
+	hasProbeCols, hasBuildCols := false, false
+	for _, m := range mapping {
+		if m.fromProbe {
+			hasProbeCols = true
+		} else {
+			hasBuildCols = true
+		}
+	}
+	if hasProbeCols {
+		probeIdx = make([]uint32, n)
+		for i, pair := range pairs {
+			probeIdx[i] = uint32(pair.probeRow)
+		}
+	}
+	if hasBuildCols && singleBuild {
+		buildIdx = make([]uint32, n)
+		for i, pair := range pairs {
+			buildIdx[i] = uint32(pair.ref.rowIdx)
+		}
+	}
+
+	cols := make([]*batch.Vector, len(mapping))
+	viewCols := 0
+	for outColIdx, m := range mapping {
+		switch {
+		case m.fromProbe:
+			cols[outColIdx] = batch.NewViewVector(in.Columns[m.srcIdx], probeIdx)
+			viewCols++
+		case singleBuild:
+			v := batch.NewViewVector(h.buildBatches[0].Columns[m.srcIdx], buildIdx)
+			if !allMatched {
+				// Left-join null-fill: unmatched pairs carry a zero buildRef
+				// whose index value is meaningless — the view's own null bit
+				// masks it (Flatten and all view-aware readers honor it).
+				for i, pair := range pairs {
+					if !pair.matched {
+						v.Nulls.SetNull(i)
+					}
+				}
+			}
+			cols[outColIdx] = v
+			viewCols++
+		default:
+			dst := batch.NewColumnVector(outSchema[outColIdx], n)
+			gatherBuildVector(dst, m.srcIdx, pairs, h.buildBatches, allMatched)
+			cols[outColIdx] = dst
+		}
+	}
+
+	if hasProbeCols {
+		// Views reference the input's vectors: sever it from its pool so a
+		// recycle can't truncate the shared arenas mid-flight. GC reclaims
+		// it through the views' Base pointers once they die (the pipeline
+		// flattens before every non-view-aware consumer).
+		in.Detach()
+	}
+
+	LateMatBatchesEmitted.Add(1)
+	LateMatViewColumns.Add(int64(viewCols))
+	return &batch.RecordBatch{Columns: cols, Schema: outSchema, Len: n}
 }
 
 // inlineIntProbe is the fast probe path for single int key inner joins.
@@ -3000,6 +3102,7 @@ func (h *HashJoin) Close() error {
 func (p *HashJoinProbe) Clone() UnaryOperator {
 	c := p.join.Probe()
 	c.OutputFilter = p.OutputFilter
+	c.LateMaterialize = p.LateMaterialize
 	return c
 }
 

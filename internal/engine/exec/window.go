@@ -126,7 +126,8 @@ func (w *Window) Consume(_ context.Context, b *batch.RecordBatch) error {
 	if w.schema == nil {
 		w.schema = b.Schema
 	}
-	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
+	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
+	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()
 	w.batches = append(w.batches, b)
 	w.totalRows += b.ActiveLen()
 

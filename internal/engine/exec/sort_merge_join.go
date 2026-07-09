@@ -230,6 +230,7 @@ func (j *SortMergeJoin) Consume(_ context.Context, b *batch.RecordBatch) error {
 func (j *SortMergeJoin) consume(side *smjSide, b *batch.RecordBatch) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
 	if side.schema == nil {
 		// Resolve the side's key names against the actual schema before
 		// anything sorts by them: the planner emits SQL-qualified names

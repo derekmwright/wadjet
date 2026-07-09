@@ -34,6 +34,14 @@ func NewRecordBatch(schema []parquet.Column, numRows int) *RecordBatch {
 	}
 }
 
+// NewColumnVector creates a single Vector from a Column definition with
+// numRows pre-allocated rows, recursively initializing nested type children —
+// the per-column equivalent of NewRecordBatch for callers that materialize
+// some columns of a batch while emitting others as views.
+func NewColumnVector(col parquet.Column, numRows int) *Vector {
+	return newVectorFromColumn(col, numRows)
+}
+
 // newVectorFromColumn creates a Vector from a Column definition, recursively
 // initializing nested type children.
 func newVectorFromColumn(col parquet.Column, numRows int) *Vector {

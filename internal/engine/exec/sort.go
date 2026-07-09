@@ -88,7 +88,8 @@ func (s *Sort) Consume(_ context.Context, b *batch.RecordBatch) error {
 			s.unregisterAccounted = s.Spill.RegisterAccounted(s)
 		}
 	}
-	b.Detach() // prevent pool recycle — pipeline calls Release() after Consume()
+	FlattenForConsumer(b, nil) // retained past the batch cycle: views must not survive
+	b.Detach()                 // prevent pool recycle — pipeline calls Release() after Consume()
 	s.batches = append(s.batches, b)
 	s.totalRows += b.ActiveLen()
 
