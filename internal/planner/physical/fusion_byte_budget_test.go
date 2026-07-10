@@ -24,7 +24,7 @@ func TestFuseJoinStages_SkipsLargeBuilds(t *testing.T) {
 			{
 				ID: "join-outer", Type: "broadcast_join",
 				Dependencies: []string{"scan-probe", "join-leaf"},
-				LeftDepStage: "scan-probe", RightDepStage: "join-leaf",
+				LeftDepStage: "join-leaf", RightDepStage: "scan-probe", // candidate feeds the PROBE side (fusion requirement since 2026-07-09)
 				JoinLeftKeys: []string{"k"}, JoinRightKeys: []string{"k"},
 			},
 			// Leaf broadcast join (candidate for fusion)
@@ -110,7 +110,7 @@ func TestFuseJoinStages_BuildBytesViaExchangeReplicate(t *testing.T) {
 			{
 				ID: "join-outer", Type: "broadcast_join",
 				Dependencies: []string{"scan-probe", "join-leaf"},
-				LeftDepStage: "scan-probe", RightDepStage: "join-leaf",
+				LeftDepStage: "join-leaf", RightDepStage: "scan-probe", // candidate feeds the PROBE side (fusion requirement since 2026-07-09)
 				JoinLeftKeys: []string{"k"}, JoinRightKeys: []string{"k"},
 			},
 			{
