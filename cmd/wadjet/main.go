@@ -34,6 +34,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/format"
 	"github.com/citc-tech/wadjet/internal/geoip"
 	"github.com/citc-tech/wadjet/internal/metrics"
+	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/server"
 	"github.com/citc-tech/wadjet/internal/server/mcp"
 	"github.com/citc-tech/wadjet/internal/server/pgwire"
@@ -98,6 +99,7 @@ var (
 	localFastPathBytes    int64
 	sortMergeJoinBytes    int64
 	lateMaterialization   bool
+	bushyJoinReorder      bool
 	broadcastBytes        int64
 	streamingExchange     bool
 	peerExchangeAddr      string
@@ -109,6 +111,11 @@ func main() {
 		Use:   "wadjet",
 		Short: "Wadjet — lightweight distributed analytical query engine",
 		Long:  "A distributed analytical query engine that uses embedded NATS for coordination and object storage for results.",
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			// Process-wide planner knobs (package-level state read at plan
+			// time; the logical optimizer has no per-query config surface).
+			logical.BushyJoinReorder.Store(bushyJoinReorder)
+		},
 	}
 
 	rootCmd.PersistentFlags().StringVar(&configFile, "config", "", "YAML config file path")
@@ -158,6 +165,7 @@ func main() {
 	rootCmd.PersistentFlags().Int64Var(&broadcastBytes, "broadcast-bytes", 0, "Override the broadcast-join threshold: joins whose estimated build side is under this many bytes replicate the build to every worker. 0 = derive from worker pool budget (default), <0 = never broadcast (every join takes the hash-shuffle/sort-merge path; benchmarking/debugging surface).")
 	rootCmd.PersistentFlags().Int64Var(&sortMergeJoinBytes, "sort-merge-join-bytes", 0, "Inner equi-joins whose sides BOTH exceed this estimated size run as sort-merge joins (both sides sort to spill-friendly runs and stream a merge) instead of hash joins, bounding join memory at merge-cursor state instead of a resident build table. Applies to both the local single-process paths and the distributed stage DAG (the join stage swaps operator; its exchange children are identical). 0 = disabled (default). See docs/design/sort-merge-join.md.")
 	rootCmd.PersistentFlags().BoolVar(&lateMaterialization, "late-materialization", true, "Emit inner/left hash-join output as view (dictionary) columns over the probe input and build batches, deferring the column gather to the first consumer that needs owned storage — join chains compose the indirection so a column is copied once, at its final consumer or the shuffle encode. Default true (validated 2026-07-09: SF10 −6.2%, SF100 −4.9% suite wall, Q08 −36%/−44%, row-identical both scales); --late-materialization=false restores eager join-output gather. See docs/design/late-materialization.md.")
+	rootCmd.PersistentFlags().BoolVar(&bushyJoinReorder, "bushy-join-reorder", false, "Let the cost-based join reorder emit BUSHY plans (joins of two composite intermediates — e.g. pre-joining a snowflake dimension chain before it meets the fact stream) when strictly cheaper than every left-deep order. Cost ties keep the left-deep shape. Process-wide, default false. See docs/design/bushy-join-cbo.md.")
 	rootCmd.PersistentFlags().Int64Var(&localFastPathBytes, "local-fastpath-bytes", coordinator.DefaultLocalFastPathBytes, "Queries whose post-pruning catalog scan bytes stay under this threshold execute in-process on the coordinator (skipping the distributed stage DAG and its per-stage object-store round trips). 0 = disabled.")
 	rootCmd.PersistentFlags().BoolVar(&streamingExchange, "streaming-exchange", true, "Streaming exchange: consumers fetch stage outputs from the producing workers' local disk over gRPC with async S3 upload; every failure falls through to the durable S3 path. Default true (validated 2026-07-02: SF10 −10%, SF100 −23% suite wall, row-identical, zero fault-tolerance events); --streaming-exchange=false restores synchronous S3-only shuffle. See docs/design/streaming-exchange.md.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAddr, "peer-exchange-addr", ":0", "Peer-exchange (FetchShuffle) listen address. Default :0 picks a free port (the address reaches peers via heartbeats, and a fixed default would collide when multiple workers share a host); pin it when firewalls need a known port.")

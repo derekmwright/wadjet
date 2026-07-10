@@ -222,6 +222,12 @@ variable "dynamic_filters" {
   default     = ""
 }
 
+variable "bushy_join_reorder" {
+  description = "Set to 1 to let the CBO emit bushy join orders when strictly cheaper than left-deep (docs/design/bushy-join-cbo.md). Off by default."
+  type        = string
+  default     = ""
+}
+
 variable "use_native_dag" {
   description = "Route distributed queries through the Phase 3 native-DAG executor (feat/distribution-property-phase-3)."
   type        = bool

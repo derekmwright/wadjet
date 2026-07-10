@@ -1,7 +1,27 @@
 # Bushy join enumeration for the CBO
 
-Status: Phase A (Layer A resolution refactor) LANDED on branch
-feat/bushy-cbo-phase-a — 2026-07-09. Layer B (enumeration) not started.
+Status: Phase A (resolution refactor) MERGED to main (PR #203, c6b57ba).
+Layer B (enumeration behind --bushy-join-reorder, default off) on branch
+feat/bushy-join-reorder — 2026-07-09. Phase C (SF10/SF100 A/B) pending.
+
+Layer B findings (2026-07-09):
+- STRICT-WIN SHAPES are broader than predicted: linear fact-fact FK chains
+  tie (left-deep kept), but SNOWFLAKE DIMENSION CHAINS (fact→d1→d2,
+  supplier→nation→region) strictly win bushy — the fact stream passes one
+  join instead of two. Pure star schemas tie and stay left-deep. Forced-on
+  SF0.01: 22/22 queries chose at least one bushy order, rows identical.
+- DPsub CONNECTIVITY INVARIANT is load-bearing: without it the bushy pass
+  laundered the DP's cross-join escape-hatch entries (penalty 10× ≈ free on
+  tiny dims) into plans with key-less joins — distributed executor refuses,
+  Q07/Q08 0 rows. dpEntry.connected gates partitions.
+- markCoPathingSelfJoinBuilds stays reaches-based: intersection
+  generalization force-qualified Q02's parallel-branch partsupp pair and
+  broke flag-OFF Q02. Bushy self-join collisions resolve at the colliding
+  join via isDup + BuildColOrigins (Phase A) — proven by distributed
+  forced-on 22/22.
+- SF0.01 harness walls show bushy arm slower at toy scale (extra shuffle
+  stages replace fused broadcast chains). Not a wall signal (local-repro
+  lies); the SF10 pair decides.
 Prior art: left-deep DP reorder (`internal/planner/logical/optimizer.go:2863`),
 bushy attempt deferred 2026-05-26 (commit 80c2f46, wrong rows on
 Q02/Q07/Q08/Q09/Q21 at SF0.01).

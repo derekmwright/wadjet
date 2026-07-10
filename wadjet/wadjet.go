@@ -57,6 +57,12 @@ type Config struct {
 	// (dictionary) columns with the gather deferred to first touch
 	// (docs/design/late-materialization.md). Off by default.
 	LateMaterialization bool
+	// BushyJoinReorder lets the cost-based join reorder emit bushy plans
+	// when strictly cheaper than every left-deep order
+	// (docs/design/bushy-join-cbo.md). PROCESS-WIDE: the logical optimizer
+	// has no per-query config surface, so Open stores this into a package
+	// flag shared by every DB in the process. Off by default.
+	BushyJoinReorder bool
 	// EnableAlerts turns on the CREATE ALERT scheduler in embedded mode.
 	// When true, Open() creates a Scheduler that evaluates alerts on cadence.
 	EnableAlerts bool
@@ -88,6 +94,11 @@ func Open(ctx context.Context, cfg Config) (*DB, error) {
 		authProvider:       cfg.AuthProvider,
 		sortMergeJoinBytes: cfg.SortMergeJoinBytes,
 		lateMaterialization: cfg.LateMaterialization,
+	}
+
+	if cfg.BushyJoinReorder {
+		// Process-wide planner knob — see the Config field doc.
+		logical.BushyJoinReorder.Store(true)
 	}
 
 	if cfg.EnableAlerts {
