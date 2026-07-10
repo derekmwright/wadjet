@@ -1000,6 +1000,12 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	}
 	tFinalizeEnd = time.Now()
 
+	// Per-partition accounting for coordinator-side skew detection. Rows
+	// come from the sink's counters; bytes are filled from the per-partition
+	// stat calls the upload paths below already make.
+	result.PartitionRows = sink.PartitionRowCounts()
+	result.PartitionBytes = make([]int64, task.NumPartitions)
+
 	// Phase-B async upload: report completion now — every partition file is
 	// finalized on local disk — adopt each into the LocalStageCache (peers
 	// and the background upload read the adopted copy), and hand the S3
@@ -1017,6 +1023,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			if statErr != nil {
 				return fmt.Errorf("shuffle task %s: stat partition %d: %w", task.ID, p, statErr)
 			}
+			result.PartitionBytes[p] = fi.Size()
 			if job, ok := e.finishStageOutputAsync(ctx, &task, key, localPath, fi.Size(), true, result); ok {
 				jobs = append(jobs, job)
 				continue
@@ -1172,6 +1179,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		}
 		result.ResultFiles = append(result.ResultFiles, partResults[p].key)
 		result.SizeBytes += partResults[p].size
+		result.PartitionBytes[p] = partResults[p].size
 	}
 
 	result.NumRows = totalRows

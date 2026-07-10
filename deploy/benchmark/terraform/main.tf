@@ -275,6 +275,7 @@ locals {
     echo "WADJET_SORT_MERGE_JOIN_BYTES=${var.sort_merge_join_bytes}" >> /etc/environment
     echo "WADJET_LATE_MATERIALIZATION=${var.late_materialization}" >> /etc/environment
     echo "WADJET_BUSHY_JOIN_REORDER=${var.bushy_join_reorder}" >> /etc/environment
+    echo "WADJET_SKEW_SPLIT=${var.skew_split}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -311,6 +312,7 @@ locals {
     echo "WADJET_SORT_MERGE_JOIN_BYTES=${var.sort_merge_join_bytes}" >> /etc/environment
     echo "WADJET_LATE_MATERIALIZATION=${var.late_materialization}" >> /etc/environment
     echo "WADJET_BUSHY_JOIN_REORDER=${var.bushy_join_reorder}" >> /etc/environment
+    echo "WADJET_SKEW_SPLIT=${var.skew_split}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
   SCRIPT
 
@@ -381,6 +383,7 @@ locals {
     export WADJET_SORT_MERGE_JOIN_BYTES="${var.sort_merge_join_bytes}"
     export WADJET_LATE_MATERIALIZATION="${var.late_materialization}"
     export WADJET_BUSHY_JOIN_REORDER="${var.bushy_join_reorder}"
+    export WADJET_SKEW_SPLIT="${var.skew_split}"
     export USE_NATIVE_DAG="${var.use_native_dag ? "1" : "0"}"
     # Phase C/D/E data-plane selection. Empty/"nats" = legacy NATS reply
     # subjects; "grpc" routes task dispatch + results + gather +
@@ -530,6 +533,7 @@ resource "aws_instance" "worker" {
     export WADJET_SORT_MERGE_JOIN_BYTES="${var.sort_merge_join_bytes}"
     export WADJET_LATE_MATERIALIZATION="${var.late_materialization}"
     export WADJET_BUSHY_JOIN_REORDER="${var.bushy_join_reorder}"
+    export WADJET_SKEW_SPLIT="${var.skew_split}"
 
     # Verify binary was downloaded successfully
     if [ ! -x /usr/local/bin/wadjet ]; then

@@ -813,15 +813,17 @@ func (c *Coordinator) dispatchShuffleStage(
 	// Forward any dynamic-filter specs the upstream (probe-side) leaf scan
 	// resolved through pass-through. Each shuffle task gets a copy so its
 	// parquet scan applies the bloom at row-group level.
-	shards, shardBytes, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
+	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
 	if err != nil {
 		return StageOutput{}, err
 	}
 	return StageOutput{
-		Kind:          OutputPartitioned,
-		NumPartitions: numParts,
-		Files:         shards,
-		Bytes:         shardBytes,
+		Kind:           OutputPartitioned,
+		NumPartitions:  numParts,
+		Files:          shards,
+		Bytes:          shardStats.TotalBytes,
+		PartitionRows:  shardStats.PartitionRows,
+		PartitionBytes: shardStats.PartitionBytes,
 	}, nil
 }
 
@@ -1792,13 +1794,15 @@ func (c *Coordinator) dispatchScanFilterStage(
 				shardFiles[p] = append(shardFiles[p], f)
 			}
 		}
-		return StageOutput{
+		out := StageOutput{
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
 			BuildStats:    buildStats,
 			Bytes:         retrier.TotalBytes(),
-		}, nil
+		}
+		out.PartitionRows, out.PartitionBytes = retrier.PartitionAccounting(numParts)
+		return out, nil
 	}
 	return StageOutput{
 		Kind:          OutputPartitioned,
@@ -1886,6 +1890,21 @@ func (c *Coordinator) dispatchComputeStage(
 		numTasks = n
 		probeSplit = true
 	}
+	// Adaptive skew split (--skew-split, docs/design/skew-aware-shuffle.md):
+	// a shuffled hash join whose deps report per-partition bytes may split
+	// hot partition groups into k sub-tasks (probe files divided, build
+	// files replicated). skewGroups keeps the UNSPLIT slot count so the
+	// output below re-groups sub-task files by original partition range —
+	// downstream partition-aligned consumers see the same layout shape
+	// either way.
+	skewGroups := numTasks
+	var skewAssign []skewTaskAssignment
+	if c.config.SkewSplit && !probeSplit {
+		if a := c.planSkewSplitTasks(stage, inputs, numTasks, workerCount); a != nil {
+			skewAssign = a
+			numTasks = len(a)
+		}
+	}
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	dispatchAttrs := []any{
 		"stage_id", stage.ID, "stage_type", stage.Type,
@@ -1893,6 +1912,7 @@ func (c *Coordinator) dispatchComputeStage(
 		"distribution_kind", stage.Distribution.Kind,
 		"distribution_count", stage.Distribution.Count,
 		"probe_split", probeSplit,
+		"skew_split", skewAssign != nil,
 		"inputs_aliases", len(inputs),
 	}
 	// Plan-side engagement marker for late-materialization A/B arms: join
@@ -1937,6 +1957,8 @@ func (c *Coordinator) dispatchComputeStage(
 		var err error
 		if probeSplit {
 			taskInputs, err = buildTaskInputsForBroadcastJoinSplitProbe(stage, inputs, w, numTasks)
+		} else if skewAssign != nil {
+			taskInputs = skewAssign[w].inputs
 		} else {
 			taskInputs, err = buildTaskInputsForStage(stage, inputs, w, numTasks)
 		}
@@ -2177,11 +2199,17 @@ func (c *Coordinator) dispatchComputeStage(
 	// tasks; replicated and single-part inputs are read in full by EVERY
 	// task (partitionFilesForWorker hands non-partitioned deps to each task
 	// whole), so they charge their full bytes.
-	perTaskEst := estimateComputeTaskBytes(stage, inputs, numTasks, probeSplit)
+	// skewGroups (== numTasks when no skew split) keeps the divisor at the
+	// logical slot count: sub-tasks carry their own measured estimate below,
+	// and unsplit tasks shouldn't see estimates diluted by the extra tasks.
+	perTaskEst := estimateComputeTaskBytes(stage, inputs, skewGroups, probeSplit)
 	for i := range tasks {
 		tasks[i].QueryID = stageQueryID
 		tasks[i].Attempt = 1
 		tasks[i].EstimatedBytes = perTaskEst
+		if skewAssign != nil && skewAssign[i].estBytes > 0 {
+			tasks[i].EstimatedBytes = skewAssign[i].estBytes
+		}
 	}
 	done := make(chan struct{}, 1)
 	progress := make(chan struct{}, len(tasks))
@@ -2272,10 +2300,31 @@ func (c *Coordinator) dispatchComputeStage(
 				shardFiles[p] = append(shardFiles[p], f)
 			}
 		}
-		return StageOutput{
+		out := StageOutput{
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
+			Bytes:         retrier.TotalBytes(),
+		}
+		out.PartitionRows, out.PartitionBytes = retrier.PartitionAccounting(numParts)
+		return out, nil
+	}
+	// Skew-split output re-grouping: sub-task outputs collapse back into
+	// their group's slot so the stage's OutputPartitioned layout matches
+	// the unsplit shape (skewGroups slots; a hot group's slot just holds k
+	// files). All of a hot group's rows carry that group's key range, so
+	// downstream partition-aligned consumption stays correct. The Exchange
+	// branch above needs no equivalent — it buckets by partition path,
+	// which is task-count agnostic.
+	if skewAssign != nil {
+		grouped := make([][]string, skewGroups)
+		for i, a := range skewAssign {
+			grouped[a.group] = append(grouped[a.group], resultFiles[i]...)
+		}
+		return StageOutput{
+			Kind:          OutputPartitioned,
+			NumPartitions: skewGroups,
+			Files:         grouped,
 			Bytes:         retrier.TotalBytes(),
 		}, nil
 	}

@@ -739,6 +739,20 @@ func (s *partitionedShuffleSink) PartitionFiles() []string {
 	return out
 }
 
+// PartitionRowCounts returns the number of rows written to each partition
+// file, indexed by partition id. Like PartitionFiles, must be called AFTER
+// Finalize — earlier calls miss rows still sitting in the accumulators.
+func (s *partitionedShuffleSink) PartitionRowCounts() []int64 {
+	out := make([]int64, s.numParts)
+	for p, pw := range s.parts {
+		if pw == nil {
+			continue
+		}
+		out[p] = pw.numRows
+	}
+	return out
+}
+
 // FNV-1a 64-bit constants.
 const (
 	fnvOffset64 uint64 = 14695981039346656037

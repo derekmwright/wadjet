@@ -456,6 +456,17 @@ type ResultNotification struct {
 	NumRows     int64    `json:"num_rows"`
 	SizeBytes   int64    `json:"size_bytes"`
 
+	// Per-partition output accounting for partition-writing tasks (shuffle
+	// tasks and fragment tasks with an exchange-sender sink), indexed by
+	// partition id with len == NumPartitions. Rows come from the partitioned
+	// sink's per-partition counters; bytes are the on-disk uncompressed
+	// .wshf sizes (same unit as SizeBytes). The coordinator reduces these
+	// element-wise across a stage's tasks to detect hot partitions at the
+	// repartition→join seam. Empty partitions hold zeros; nil = worker
+	// didn't report (legacy build or non-partitioned output).
+	PartitionRows  []int64 `json:"partition_rows,omitempty"`
+	PartitionBytes []int64 `json:"partition_bytes,omitempty"`
+
 	// Small result fast path (< 256 KB): inline result data
 	InlineData []byte `json:"inline_data,omitempty"`
 

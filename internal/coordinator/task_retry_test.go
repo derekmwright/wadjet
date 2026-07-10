@@ -340,3 +340,51 @@ func TestReapStuckOnce(t *testing.T) {
 		t.Fatalf("fresh task redispatched %d times, want 0", n)
 	}
 }
+
+// TestTaskRetrier_PartitionAccounting: element-wise reduction across the
+// final surviving attempts, retry-safe (a failed attempt's vectors never
+// count — only the surviving attempt's do).
+func TestTaskRetrier_PartitionAccounting(t *testing.T) {
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(2), true, rep.republish, slog.Default(), "s", nil)
+
+	ra := okResult("a", "f-a")
+	ra.PartitionRows = []int64{10, 0, 5}
+	ra.PartitionBytes = []int64{100, 0, 50}
+	tr.Observe(ra)
+
+	// Task b fails once (no vectors recorded), then its retry succeeds with
+	// vectors — the reduction must reflect only the surviving attempt.
+	tr.Observe(failResult("b", "worker died"))
+	waitRepublished(t, rep, 1)
+	rb := okResult("b", "f-b2")
+	rb.PartitionRows = []int64{1, 2, 3}
+	rb.PartitionBytes = []int64{10, 20, 30}
+	if !tr.Observe(rb) {
+		t.Fatal("not done after retry success")
+	}
+
+	rows, bytes := tr.PartitionAccounting(3)
+	wantRows := []int64{11, 2, 8}
+	wantBytes := []int64{110, 20, 80}
+	for p := range wantRows {
+		if rows[p] != wantRows[p] {
+			t.Errorf("rows[%d] = %d, want %d", p, rows[p], wantRows[p])
+		}
+		if bytes[p] != wantBytes[p] {
+			t.Errorf("bytes[%d] = %d, want %d", p, bytes[p], wantBytes[p])
+		}
+	}
+}
+
+// TestTaskRetrier_PartitionAccountingUnreported: nil vectors when no task
+// reported (legacy workers) — callers treat nil as skew-detection-off.
+func TestTaskRetrier_PartitionAccountingUnreported(t *testing.T) {
+	tr := newTaskRetrier(retryTestTasks(2), false, nil, slog.Default(), "s", nil)
+	tr.Observe(okResult("a", "f-a"))
+	tr.Observe(okResult("b", "f-b"))
+	rows, bytes := tr.PartitionAccounting(4)
+	if rows != nil || bytes != nil {
+		t.Fatalf("want nil vectors for unreported tasks, got rows=%v bytes=%v", rows, bytes)
+	}
+}

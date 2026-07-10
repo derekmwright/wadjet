@@ -216,6 +216,12 @@ variable "late_materialization" {
   default     = ""
 }
 
+variable "skew_split" {
+  description = "Set to 1 to enable adaptive skew-aware shuffle layout on the coordinator (docs/design/skew-aware-shuffle.md): hot partition groups split into sub-tasks that divide probe files and replicate build files. Off by default."
+  type        = string
+  default     = ""
+}
+
 variable "dynamic_filters" {
   description = "Set to 1 to enable Trino-style semi-join dynamic-filter pushdown on the coordinator. Off by default for v1 rollout."
   type        = string

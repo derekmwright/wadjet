@@ -318,6 +318,12 @@ func (e *Executor) writePartitionedShuffle(ctx context.Context, task distributed
 // between the legacy collect-then-partition path (writePartitionedShuffle) and
 // the streaming-partition path (runStageScanPartitionedStreaming).
 func (e *Executor) uploadPartitionedShuffleFiles(ctx context.Context, task distributed.Task, sink *partitionedShuffleSink, result *distributed.ResultNotification) error {
+	// Per-partition accounting for coordinator-side skew detection. Rows
+	// from the sink counters; bytes filled from the per-partition stats
+	// below.
+	result.PartitionRows = sink.PartitionRowCounts()
+	result.PartitionBytes = make([]int64, len(result.PartitionRows))
+
 	root, asyncOK := e.asyncUploadEligible(&task)
 	var jobs []uploadJob
 	defer func() {
@@ -336,6 +342,7 @@ func (e *Executor) uploadPartitionedShuffleFiles(ctx context.Context, task distr
 			if statErr != nil {
 				return fmt.Errorf("stage task %s: stat partition %d: %w", task.ID, p, statErr)
 			}
+			result.PartitionBytes[p] = fi.Size()
 			key := fmt.Sprintf("%spartition=%04d/%s.wshf", task.ResultPrefix, p, task.ID)
 			if job, ok := e.finishStageOutputAsync(ctx, &task, key, localPath, fi.Size(), false, result); ok {
 				jobs = append(jobs, job)
@@ -363,6 +370,7 @@ func (e *Executor) uploadPartitionedShuffleFiles(ctx context.Context, task distr
 		}
 		result.ResultFiles = append(result.ResultFiles, key)
 		result.SizeBytes += fi.Size()
+		result.PartitionBytes[p] = fi.Size()
 
 		// Best-effort KV cache for small partitions. Read the local file we
 		// already wrote to disk — cheaper than re-buffering. Failure is

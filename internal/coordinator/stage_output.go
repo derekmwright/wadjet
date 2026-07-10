@@ -41,6 +41,15 @@ type StageOutput struct {
 	// estimates use; in-memory footprint is larger by the codec ratio.
 	Bytes int64
 
+	// PartitionRows/PartitionBytes: per-partition output totals reduced
+	// across the producing stage's tasks (final surviving attempts only),
+	// indexed by partition id. Valid when Kind == OutputPartitioned; nil
+	// when the workers didn't report (legacy build) — downstream skew
+	// detection degrades to off, never to wrong. Bytes are on-disk
+	// uncompressed .wshf sizes, the unit per-task admission estimates use.
+	PartitionRows  []int64
+	PartitionBytes []int64
+
 	// BuildStats, populated when this stage's Stage.EmitDynamicFilters was
 	// non-empty. One entry per emit, keyed by FilterID. Downstream consumer
 	// stages reach in via the stat-dep edge to pull the materialized stats.
@@ -102,29 +111,41 @@ func partitionFilesForWorker(out StageOutput, w, workerCount int) []string {
 		}
 		return out.Files[0]
 	}
-	if out.NumPartitions == 0 || workerCount <= 0 || w < 0 || w >= workerCount {
-		return nil
-	}
-	partsPerWorker := out.NumPartitions / workerCount
-	if partsPerWorker == 0 {
-		partsPerWorker = 1
-	}
-	start := w * partsPerWorker
-	end := start + partsPerWorker
-	if w == workerCount-1 {
-		end = out.NumPartitions // last worker absorbs remainder
-	}
-	if start >= out.NumPartitions {
-		return nil
-	}
-	if end > out.NumPartitions {
-		end = out.NumPartitions
-	}
+	start, end := partitionRangeForWorker(out.NumPartitions, w, workerCount)
 	var files []string
 	for p := start; p < end; p++ {
 		files = append(files, out.Files[p]...)
 	}
 	return files
+}
+
+// partitionRangeForWorker returns the half-open partition range [start, end)
+// worker w of workerCount binds under the contiguous-slice assignment.
+// Returns an empty range (start == end) when w gets nothing. Extracted from
+// partitionFilesForWorker so the skew-split planner (skew_split.go) groups
+// partitions by EXACTLY the ranges the unsplit layout would bind — any
+// divergence between the two would mis-align split decisions with task
+// inputs.
+func partitionRangeForWorker(numPartitions, w, workerCount int) (start, end int) {
+	if numPartitions == 0 || workerCount <= 0 || w < 0 || w >= workerCount {
+		return 0, 0
+	}
+	partsPerWorker := numPartitions / workerCount
+	if partsPerWorker == 0 {
+		partsPerWorker = 1
+	}
+	start = w * partsPerWorker
+	end = start + partsPerWorker
+	if w == workerCount-1 {
+		end = numPartitions // last worker absorbs remainder
+	}
+	if start >= numPartitions {
+		return 0, 0
+	}
+	if end > numPartitions {
+		end = numPartitions
+	}
+	return start, end
 }
 
 // flattenStageFiles returns all output files in a single flat list,
