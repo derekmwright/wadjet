@@ -1,7 +1,14 @@
 # Adaptive skew-aware shuffle
 
-Status: DRAFT design — 2026-07-10. Grounded against main c9e139a by explorer
-sweep; all anchors verified current at write time.
+Status: Phases 1–2 IMPLEMENTED 2026-07-10 (feat/skew-aware-shuffle) — flag
+`--skew-split`, default off; per-partition accounting always on. Decision
+logic: internal/coordinator/skew_split.go. Two deviations from the draft
+below, both deliberate: partition bytes come from the upload paths'
+existing per-partition os.Stat (actual on-disk size; no redundant sink
+byte counter), and the decision unit is the task's contiguous partition
+RANGE (a task binds NumPartitions/numTasks partitions; per-partition
+decisions would mis-align with task binding). Phase 3 (skewed-dataset A/B
+deploy) not started.
 
 ## 1. Problem
 
