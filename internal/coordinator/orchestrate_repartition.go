@@ -62,6 +62,12 @@ type ShuffleLayout struct {
 	BuildShardFiles [][]string
 	// ProbeShardFiles[p] contains the S3 keys for probe partition p.
 	ProbeShardFiles [][]string
+	// Per-partition on-disk bytes for each side, reduced across the final
+	// surviving shuffle task set (worker-reported; nil when unreported).
+	// Recorded for observability — the legacy pipeline path built from this
+	// layout stays non-adaptive; skew splitting lives on the native-DAG path.
+	BuildPartitionBytes []int64
+	ProbePartitionBytes []int64
 }
 
 // orchestrateRepartition runs both shuffle stages (build side and probe side)
@@ -93,23 +99,24 @@ func (c *Coordinator) orchestrateRepartition(
 
 	// Run build and probe shuffles in parallel. Failure of either cancels both.
 	var buildShards, probeShards [][]string
+	var buildStats, probeStats shuffleSideStats
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		shards, _, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount, nil)
 		if err != nil {
 			return fmt.Errorf("build-side shuffle for %s: %w", cand.BuildAlias, err)
 		}
-		buildShards = shards
+		buildShards, buildStats = shards, stats
 		return nil
 	})
 
 	g.Go(func() error {
-		shards, _, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount, nil)
 		if err != nil {
 			return fmt.Errorf("probe-side shuffle for %s: %w", cand.ProbeAlias, err)
 		}
-		probeShards = shards
+		probeShards, probeStats = shards, stats
 		return nil
 	})
 
@@ -123,20 +130,30 @@ func (c *Coordinator) orchestrateRepartition(
 	)
 
 	return &ShuffleLayout{
-		BuildAlias:      cand.BuildAlias,
-		ProbeAlias:      cand.ProbeAlias,
-		NumPartitions:   numParts,
-		BuildShardFiles: buildShards,
-		ProbeShardFiles: probeShards,
+		BuildAlias:          cand.BuildAlias,
+		ProbeAlias:          cand.ProbeAlias,
+		NumPartitions:       numParts,
+		BuildShardFiles:     buildShards,
+		ProbeShardFiles:     probeShards,
+		BuildPartitionBytes: buildStats.PartitionBytes,
+		ProbePartitionBytes: probeStats.PartitionBytes,
 	}, nil
+}
+
+// shuffleSideStats carries worker-reported output accounting for one
+// shuffle side, reduced across the final surviving task set. TotalBytes is
+// 0 and the vectors are nil when workers didn't report (legacy builds).
+type shuffleSideStats struct {
+	TotalBytes     int64
+	PartitionRows  []int64 // indexed by partition id
+	PartitionBytes []int64 // indexed by partition id, on-disk uncompressed
 }
 
 // runShuffleSide dispatches workerCount TaskTypeShuffle tasks for one side
 // (build or probe), each reading its file slice and hash-partitioning into
 // numParts outputs. Waits for all tasks. Returns shardFiles[p] = slice of
 // S3 keys for partition p (concatenated from each task's per-partition
-// output) plus the worker-reported total bytes written across all tasks
-// (0 if workers didn't report).
+// output) plus the worker-reported output accounting.
 func (c *Coordinator) runShuffleSide(
 	ctx context.Context,
 	parentQueryID string,
@@ -146,7 +163,7 @@ func (c *Coordinator) runShuffleSide(
 	numParts int,
 	workerCount int,
 	dynamicFilters []distributed.DynamicFilterSpec, // resolved bloom/range pushdowns from upstream build stat
-) ([][]string, int64, error) {
+) ([][]string, shuffleSideStats, error) {
 	ctx, cancel := context.WithTimeout(ctx, shuffleStageTimeout)
 	defer cancel()
 
@@ -180,7 +197,7 @@ func (c *Coordinator) runShuffleSide(
 	actualTasks := len(fileSets)
 	if actualTasks == 0 {
 		// No files — nothing to shuffle. Return empty partition layout.
-		return make([][]string, numParts), 0, nil
+		return make([][]string, numParts), shuffleSideStats{}, nil
 	}
 
 	// Register an ephemeral tracker entry for this shuffle stage.
@@ -261,24 +278,24 @@ func (c *Coordinator) runShuffleSide(
 		}
 	})
 	if err != nil {
-		return nil, 0, fmt.Errorf("subscribing for shuffle-%s results: %w", sideName, err)
+		return nil, shuffleSideStats{}, fmt.Errorf("subscribing for shuffle-%s results: %w", sideName, err)
 	}
 	defer sub.Unsubscribe()
 
 	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
-		return nil, 0, fmt.Errorf("publishing shuffle-%s tasks: %w", sideName, err)
+		return nil, shuffleSideStats{}, fmt.Errorf("publishing shuffle-%s tasks: %w", sideName, err)
 	}
 
 	// Wait for all tasks to complete.
 	select {
 	case <-done:
 	case <-ctx.Done():
-		return nil, 0, fmt.Errorf("shuffle-%s timed out after %s: %w", sideName, shuffleStageTimeout, ctx.Err())
+		return nil, shuffleSideStats{}, fmt.Errorf("shuffle-%s timed out after %s: %w", sideName, shuffleStageTimeout, ctx.Err())
 	}
 
 	// Check for any task failures (terminal: retries exhausted).
 	if taskID, errMsg, failed := retrier.FirstError(); failed {
-		return nil, 0, fmt.Errorf("shuffle-%s task %s failed after %d attempts: %s", sideName, taskID, maxTaskAttempts, errMsg)
+		return nil, shuffleSideStats{}, fmt.Errorf("shuffle-%s task %s failed after %d attempts: %s", sideName, taskID, maxTaskAttempts, errMsg)
 	}
 
 	// Bucket result files by partition. Each file has a path like:
@@ -290,10 +307,10 @@ func (c *Coordinator) runShuffleSide(
 		for _, f := range taskFiles {
 			p, parseErr := parsePartitionFromPath(f)
 			if parseErr != nil {
-				return nil, 0, fmt.Errorf("shuffle-%s: parsing partition from %q: %w", sideName, f, parseErr)
+				return nil, shuffleSideStats{}, fmt.Errorf("shuffle-%s: parsing partition from %q: %w", sideName, f, parseErr)
 			}
 			if p < 0 || p >= numParts {
-				return nil, 0, fmt.Errorf("shuffle-%s: partition %d out of range [0,%d) in path %q", sideName, p, numParts, f)
+				return nil, shuffleSideStats{}, fmt.Errorf("shuffle-%s: partition %d out of range [0,%d) in path %q", sideName, p, numParts, f)
 			}
 			shardFiles[p] = append(shardFiles[p], f)
 		}
@@ -314,7 +331,9 @@ func (c *Coordinator) runShuffleSide(
 		"num_partitions", numParts,
 	)
 
-	return shardFiles, retrier.TotalBytes(), nil
+	stats := shuffleSideStats{TotalBytes: retrier.TotalBytes()}
+	stats.PartitionRows, stats.PartitionBytes = retrier.PartitionAccounting(numParts)
+	return shardFiles, stats, nil
 }
 
 // parsePartitionFromPath extracts the partition index from an S3 key that

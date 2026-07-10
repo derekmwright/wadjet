@@ -68,9 +68,15 @@ type taskAttemptState struct {
 	files    []string
 	partials []distributed.DynamicFilterPartialRef
 	bytes    int64
-	errMsg   string
-	attempts int
-	terminal bool
+	// partRows/partBytes are the per-partition output vectors from the
+	// SUCCESSFUL attempt's ResultNotification (nil when the worker didn't
+	// report). Keying by the surviving attempt is what makes the stage-level
+	// reduction retry-safe: a failed attempt's partial writes never count.
+	partRows  []int64
+	partBytes []int64
+	errMsg    string
+	attempts  int
+	terminal  bool
 }
 
 // newTaskRetrier registers the dispatched tasks. republish re-dispatches a
@@ -112,6 +118,8 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 		st.files = r.ResultFiles
 		st.partials = r.DynamicFilterPartials
 		st.bytes = r.SizeBytes
+		st.partRows = r.PartitionRows
+		st.partBytes = r.PartitionBytes
 		st.errMsg = ""
 		st.terminal = true
 		tr.terminal++
@@ -216,6 +224,39 @@ func (tr *taskRetrier) TotalBytes() int64 {
 		total += st.bytes
 	}
 	return total
+}
+
+// PartitionAccounting reduces the per-task partition vectors element-wise
+// across the final surviving attempt of every task, producing stage-level
+// per-partition row and byte totals indexed by partition id. Returns
+// (nil, nil) when no task reported vectors (legacy workers, non-partitioned
+// output) — callers treat nil as "sizes unknown, skew detection off".
+// Vectors shorter than numParts (shouldn't happen; defensive) contribute
+// only their prefix; longer ones are truncated.
+func (tr *taskRetrier) PartitionAccounting(numParts int) (rows, bytes []int64) {
+	if numParts <= 0 {
+		return nil, nil
+	}
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	any := false
+	for _, st := range tr.states {
+		if len(st.partRows) == 0 && len(st.partBytes) == 0 {
+			continue
+		}
+		if !any {
+			rows = make([]int64, numParts)
+			bytes = make([]int64, numParts)
+			any = true
+		}
+		for p := 0; p < len(st.partRows) && p < numParts; p++ {
+			rows[p] += st.partRows[p]
+		}
+		for p := 0; p < len(st.partBytes) && p < numParts; p++ {
+			bytes[p] += st.partBytes[p]
+		}
+	}
+	return rows, bytes
 }
 
 // DynamicFilterPartials returns every successful task's dynamic-filter

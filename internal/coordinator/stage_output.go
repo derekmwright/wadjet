@@ -41,6 +41,15 @@ type StageOutput struct {
 	// estimates use; in-memory footprint is larger by the codec ratio.
 	Bytes int64
 
+	// PartitionRows/PartitionBytes: per-partition output totals reduced
+	// across the producing stage's tasks (final surviving attempts only),
+	// indexed by partition id. Valid when Kind == OutputPartitioned; nil
+	// when the workers didn't report (legacy build) — downstream skew
+	// detection degrades to off, never to wrong. Bytes are on-disk
+	// uncompressed .wshf sizes, the unit per-task admission estimates use.
+	PartitionRows  []int64
+	PartitionBytes []int64
+
 	// BuildStats, populated when this stage's Stage.EmitDynamicFilters was
 	// non-empty. One entry per emit, keyed by FilterID. Downstream consumer
 	// stages reach in via the stat-dep edge to pull the materialized stats.

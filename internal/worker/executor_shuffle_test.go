@@ -69,6 +69,29 @@ func TestExecuteShuffle_HappyPath(t *testing.T) {
 	t.Logf("shuffle: %d rows → %d partition files, %d bytes",
 		result.NumRows, len(result.ResultFiles), result.SizeBytes)
 
+	// Per-partition accounting: vectors sized to NumPartitions, rows sum to
+	// the task total, bytes sum to SizeBytes, and a partition has bytes iff
+	// it has rows.
+	if len(result.PartitionRows) != numParts || len(result.PartitionBytes) != numParts {
+		t.Fatalf("partition vectors len = %d/%d, want %d",
+			len(result.PartitionRows), len(result.PartitionBytes), numParts)
+	}
+	var vecRows, vecBytes int64
+	for p := 0; p < numParts; p++ {
+		vecRows += result.PartitionRows[p]
+		vecBytes += result.PartitionBytes[p]
+		if (result.PartitionRows[p] == 0) != (result.PartitionBytes[p] == 0) {
+			t.Errorf("partition %d: rows=%d bytes=%d — must be zero/nonzero together",
+				p, result.PartitionRows[p], result.PartitionBytes[p])
+		}
+	}
+	if vecRows != numRows {
+		t.Errorf("sum(PartitionRows) = %d, want %d", vecRows, numRows)
+	}
+	if vecBytes != result.SizeBytes {
+		t.Errorf("sum(PartitionBytes) = %d, want SizeBytes %d", vecBytes, result.SizeBytes)
+	}
+
 	// Verify each ResultFile key follows the expected naming convention and exists.
 	for _, key := range result.ResultFiles {
 		if !strings.Contains(key, "partition=") {

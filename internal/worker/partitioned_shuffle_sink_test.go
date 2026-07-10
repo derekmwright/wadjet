@@ -334,3 +334,54 @@ func TestPartitionedShuffleSink_LargeConsumeBurstParity(t *testing.T) {
 		t.Fatalf("rows across partitions = %d, want %d", rows, total)
 	}
 }
+
+// TestPartitionedShuffleSink_PartitionRowCounts verifies the post-Finalize
+// per-partition row counters match what a full read-back of each partition
+// file observes, and that empty partitions report zero.
+func TestPartitionedShuffleSink_PartitionRowCounts(t *testing.T) {
+	dir := t.TempDir()
+	const numParts = 4
+
+	schema := []parquet.Column{{Name: "k", Type: parquet.TypeInt64}}
+	sink := newPartitionedShuffleSink(dir, []string{"k"}, numParts, schema)
+	if err := sink.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	const n = 1000
+	b := batch.NewRecordBatch(schema, n)
+	for i := 0; i < n; i++ {
+		b.Columns[0].Int64Data[i] = int64(i)
+		b.Columns[0].Nulls.SetValid(i)
+	}
+	if err := sink.Consume(context.Background(), b); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if err := sink.Finalize(context.Background()); err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	defer sink.Close()
+
+	counts := sink.PartitionRowCounts()
+	if len(counts) != numParts {
+		t.Fatalf("len(counts) = %d, want %d", len(counts), numParts)
+	}
+	paths := sink.PartitionFiles()
+	var total int64
+	for p, path := range paths {
+		var observed int64
+		if path != "" {
+			observed = int64(len(readWSHFInts(t, path, "k")))
+		}
+		if counts[p] != observed {
+			t.Errorf("counts[%d] = %d, read-back = %d", p, counts[p], observed)
+		}
+		if path == "" && counts[p] != 0 {
+			t.Errorf("empty partition %d reports %d rows", p, counts[p])
+		}
+		total += counts[p]
+	}
+	if total != n {
+		t.Errorf("sum of counts = %d, want %d", total, n)
+	}
+}

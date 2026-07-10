@@ -813,15 +813,17 @@ func (c *Coordinator) dispatchShuffleStage(
 	// Forward any dynamic-filter specs the upstream (probe-side) leaf scan
 	// resolved through pass-through. Each shuffle task gets a copy so its
 	// parquet scan applies the bloom at row-group level.
-	shards, shardBytes, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
+	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
 	if err != nil {
 		return StageOutput{}, err
 	}
 	return StageOutput{
-		Kind:          OutputPartitioned,
-		NumPartitions: numParts,
-		Files:         shards,
-		Bytes:         shardBytes,
+		Kind:           OutputPartitioned,
+		NumPartitions:  numParts,
+		Files:          shards,
+		Bytes:          shardStats.TotalBytes,
+		PartitionRows:  shardStats.PartitionRows,
+		PartitionBytes: shardStats.PartitionBytes,
 	}, nil
 }
 
@@ -1792,13 +1794,15 @@ func (c *Coordinator) dispatchScanFilterStage(
 				shardFiles[p] = append(shardFiles[p], f)
 			}
 		}
-		return StageOutput{
+		out := StageOutput{
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
 			BuildStats:    buildStats,
 			Bytes:         retrier.TotalBytes(),
-		}, nil
+		}
+		out.PartitionRows, out.PartitionBytes = retrier.PartitionAccounting(numParts)
+		return out, nil
 	}
 	return StageOutput{
 		Kind:          OutputPartitioned,
@@ -2272,12 +2276,14 @@ func (c *Coordinator) dispatchComputeStage(
 				shardFiles[p] = append(shardFiles[p], f)
 			}
 		}
-		return StageOutput{
+		out := StageOutput{
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
 			Bytes:         retrier.TotalBytes(),
-		}, nil
+		}
+		out.PartitionRows, out.PartitionBytes = retrier.PartitionAccounting(numParts)
+		return out, nil
 	}
 	// resultFiles is in dispatch order (taskRetrier keys results by task ID),
 	// which is deterministic — an improvement over the old arrival-order slice.
