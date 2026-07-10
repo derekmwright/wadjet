@@ -8,17 +8,29 @@ BushyJoinsPlanned=21 each bushy arm. Final pair (bin 71cab6a):
 suite −2.1%; consistent wins Q18 −32%, Q16 −31%, Q13 −23%, Q07 −19%,
 Q05 −16%; consistent loss Q08 +88% (was +123/+135% pre-#206).
 
-**Flag stays DEFAULT OFF.** Before any default-flip campaign:
-1. WIDTH-AWARE EXCHANGE COST — distributedExchangeCost prices rows, not
-   bytes; a composite build shuffles WIDE join-output rows where left-deep
-   shuffles narrow scan outputs. Q08's bushy pick survives row-based
-   pricing but loses in reality. Extend the DP cost inputs with per-column
-   width (RelStats has the pieces; estimateJoinSubtreeBytes already
-   computes composite widths physical-side).
-2. SF100 same-window pair after (1), targeting the roadmap band
-   (Q05/Q07/Q09) vs baseline results/20260709-175846 (48.5m).
-3. Decorrelator-emitted side-assigned keys (kills the Q02 runtime-repair
-   dependency; see §5).
+**PHASE C FINAL VERDICT (2026-07-10, after FOUR SF10 same-window pairs +
+#208 cell-based exchange pricing): flag stays DEFAULT OFF; cost-model
+iteration STOPPED.** Every pair was row-identical with the mechanism
+marker proving engagement — the resolution layer (Phase A) and the
+enumeration (Layer B) are correctness-sound. But wall results show the
+LOGICAL-layer cost model cannot faithfully predict distributed exchange
+reality: Q08's harmful bushy pick survived row pricing (+135/+123/+88%)
+AND cell pricing (+133%), and cell pricing shifted new harm onto Q09
+(+103%) while genuine wins persisted throughout (Q03/Q04/Q05/Q07/Q10/Q13/
+Q16/Q18 in the −10..−40% band, varying by pair). Broadcast thresholds,
+fusion opportunities, and streaming-exchange behavior all live BELOW the
+logical layer; constants cannot recover that fidelity — further tuning is
+benchmark-chasing.
+
+**Revival = design task, not a flag flip** (same class as the
+dynamic-filter verdict): cost bushy candidates at the PHYSICAL level —
+emit candidate stage DAGs and price actual exchanges/broadcast/fusion, or
+feed physical exchange decisions back into the DP. Until then the flag
+remains a validated, correctness-proven opt-in.
+
+Deferred follow-ons: SF100 pair (only meaningful after physical costing);
+decorrelator-emitted side-assigned keys (kills Q02's runtime-repair
+dependency; §5).
 
 Layer B findings (2026-07-09):
 - STRICT-WIN SHAPES are broader than predicted: linear fact-fact FK chains
