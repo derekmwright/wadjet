@@ -2765,6 +2765,14 @@ func markCoPathingSelfJoinBuilds(stages []Stage) {
 	// Mark a join when another join over the SAME table is in its forward
 	// reachable set OR vice versa — i.e. the two are in the same join
 	// chain.
+	//
+	// NOTE (bushy, 2026-07-09): generalizing this to "reachable sets
+	// intersect" (parallel branches meeting downstream) was tried and
+	// REVERTED — it force-qualified Q02's outer/scalar-subquery partsupp
+	// pair (parallel branches meeting at the scalar join) whose consumers
+	// reference bare names, breaking flag-OFF Q02. Bushy self-join
+	// disambiguation is handled where the copies actually collide, via
+	// isDup + BuildColOrigins in the join executor.
 	for i := range joinScans {
 		for j := range joinScans {
 			if i == j {

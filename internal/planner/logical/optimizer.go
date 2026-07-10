@@ -2881,6 +2881,14 @@ type dpEntry struct {
 	colNDV     map[string]float64
 	plan       *Node
 	bushyJoins int // count of bushy (composite ⋈ composite) joins in plan
+	// connected reports the plan joins its relations through real edges
+	// only — no cross-join steps. Cross-join entries exist so disconnected
+	// graphs stay plannable (validated + greedy-fallback later), but bushy
+	// partitions must not compose them: a cross join has no keys, the
+	// distributed executor refuses key-less joins, and a bushy pairing can
+	// otherwise "launder" a cross-join subplan into a plan that LOOKS
+	// edge-connected at the top (Q07's nation×nation, 2026-07-09).
+	connected bool
 }
 
 // dpJoinReorder uses bitmask dynamic programming to find the optimal join
@@ -2913,10 +2921,11 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 	for i := 0; i < n; i++ {
 		mask := 1 << i
 		dp[mask] = dpEntry{
-			cost:   0,
-			rows:   baseStats[i].Rows,
-			colNDV: baseStats[i].ColNDV,
-			plan:   rels[i],
+			cost:      0,
+			rows:      baseStats[i].Rows,
+			colNDV:    baseStats[i].ColNDV,
+			plan:      rels[i],
+			connected: true,
 		}
 	}
 
@@ -2939,6 +2948,11 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 					continue // each unordered pair once
 				}
 				if math.IsInf(dp[sub].cost, 1) || math.IsInf(dp[other].cost, 1) {
+					continue
+				}
+				// Both sides must be edge-connected subplans (DPsub
+				// invariant) — see dpEntry.connected.
+				if !dp[sub].connected || !dp[other].connected {
 					continue
 				}
 				// Collect edges crossing the cut; skip disconnected partitions
@@ -2975,6 +2989,7 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 						colNDV:     mergeNDVs(dp[probe].colNDV, dp[build].colNDV, outputRows),
 						plan:       NewJoin(dp[probe].plan, dp[build].plan, joinType, joinCond),
 						bushyJoins: dp[probe].bushyJoins + dp[build].bushyJoins + 1,
+						connected:  true,
 					}
 				}
 			}
@@ -3041,6 +3056,7 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 					colNDV:     ndvs,
 					plan:       newPlan,
 					bushyJoins: dp[mask].bushyJoins,
+					connected:  dp[mask].connected && connected,
 				}
 			}
 		}
