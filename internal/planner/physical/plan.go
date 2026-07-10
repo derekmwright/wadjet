@@ -2941,6 +2941,15 @@ func fuseJoinStages(stages []Stage) []Stage {
 		if consumer.Type != "hash_join" && consumer.Type != "broadcast_join" {
 			continue
 		}
+		// The candidate's output must feed the consumer's PROBE side.
+		// Fusion replays the absorbed join as a broadcast-probe step on the
+		// consumer's probe STREAM — valid only when the absorbed output IS
+		// that stream. A candidate feeding the consumer's BUILD side (bushy
+		// composite builds) would replay its probe steps against the wrong
+		// stream: Q07/Q08-class chains returned 0 rows (2026-07-09).
+		if consumer.LeftDepStage != s.ID {
+			continue
+		}
 
 		// Cumulative byte budget: cap total cache amplification across the
 		// fused chain. Required because each probe-split shard loads every
@@ -3776,9 +3785,21 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 // scaling the table's manifest bytes by the subtree's estimated selectivity.
 // Returns ok=false when the subtree has no scan root (e.g. another join) or
 // the manifest is unavailable — callers must treat "unknown" conservatively.
+//
+// Under BushyJoinReorder, join-shaped subtrees (composite build sides) are
+// estimated too: output bytes ≈ estimated output rows × the combined
+// per-row width of the join's visible inputs. Without this, a 25-row
+// nation ⋈ region pre-join is "unknown" → never broadcast-eligible → the
+// whole composite pays exchange-repartition for both sides (the Q08 SF10
+// regression, 2026-07-09: +135% from shuffling what should replicate).
+// Gated on the flag: flag-off keeps semi/anti-leaf builds on their
+// SF100-validated shuffle plans.
 func (p *Planner) estimateSubtreeBytes(n *logical.Node) (int64, bool) {
 	scan := findScanNode(n)
 	if scan == nil {
+		if logical.BushyJoinReorder.Load() {
+			return p.estimateJoinSubtreeBytes(n)
+		}
 		return 0, false
 	}
 	// Estimate size from file count
@@ -3813,6 +3834,62 @@ func (p *Planner) estimateSubtreeBytes(n *logical.Node) (int64, bool) {
 		}
 	}
 	return totalBytes, true
+}
+
+// estimateJoinSubtreeBytes estimates the output size of a join-shaped
+// subtree: estimated output rows × the per-row width of the join's visible
+// inputs (probe + build for inner/outer, probe only for semi/anti). Width
+// derives from each input's own bytes/rows estimate (mutual recursion with
+// estimateSubtreeBytes), so filter selectivity scaling composes through
+// nesting; the plan tree is finite so the recursion terminates.
+func (p *Planner) estimateJoinSubtreeBytes(n *logical.Node) (int64, bool) {
+	if n == nil {
+		return 0, false
+	}
+	// Unwrap single-child pass-through nodes to the join.
+	for n != nil && n.Type != logical.NodeJoin {
+		switch n.Type {
+		case logical.NodeFilter, logical.NodeProject, logical.NodeLimit:
+			if len(n.Children) == 1 {
+				n = n.Children[0]
+				continue
+			}
+		}
+		return 0, false
+	}
+	if n == nil || len(n.Children) != 2 {
+		return 0, false
+	}
+
+	sideWidth := func(child *logical.Node) (float64, bool) {
+		bytes, ok := p.estimateSubtreeBytes(child)
+		if !ok {
+			return 0, false
+		}
+		rows := logical.RelStatsOf(child).Rows
+		if rows < 1 {
+			rows = 1
+		}
+		return float64(bytes) / rows, true
+	}
+
+	width, ok := sideWidth(n.Children[0])
+	if !ok {
+		return 0, false
+	}
+	jt := strings.ToLower(n.JoinType)
+	if jt != "semi" && jt != "anti" {
+		buildWidth, ok := sideWidth(n.Children[1])
+		if !ok {
+			return 0, false
+		}
+		width += buildWidth
+	}
+	rows := logical.RelStatsOf(n).Rows
+	if rows < 1 {
+		rows = 1
+	}
+	return int64(rows * width), true
 }
 
 // findScanNode walks through pass-through nodes (Filter, Project, Limit)
