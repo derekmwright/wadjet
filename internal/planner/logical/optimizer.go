@@ -2981,7 +2981,9 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 				buildStats := RelStats{Rows: dp[build].rows, ColNDV: dp[build].colNDV}
 				probeNDV, buildNDV := resolveJoinKeyNDVs(joinCond, probeStats, buildStats)
 				outputRows := estimateJoinCard(dp[probe].rows, dp[build].rows, probeNDV, buildNDV, joinType)
-				totalCost := dp[probe].cost + dp[build].cost + hashJoinCost(dp[probe].rows, dp[build].rows)
+				totalCost := dp[probe].cost + dp[build].cost +
+					hashJoinCost(dp[probe].rows, dp[build].rows) +
+					distributedExchangeCost(dp[probe].rows, dp[build].rows)
 				if totalCost < dp[mask].cost {
 					dp[mask] = dpEntry{
 						cost:       totalCost,
@@ -3037,6 +3039,13 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 
 				// Hash join cost: build j (right side), probe current set (left side)
 				joinCost = hashJoinCost(dp[mask].rows, baseStats[j].Rows)
+				if bushy {
+					// Exchange-aware regime: price the repartition a
+					// non-broadcastable build forces (both transitions use
+					// the same model so left-deep and bushy candidates
+					// compare fairly). Flag-off keeps the pure-CPU model.
+					joinCost += distributedExchangeCost(dp[mask].rows, baseStats[j].Rows)
+				}
 			} else {
 				// Cross join — heavy penalty to avoid unless necessary
 				joinCond = ""

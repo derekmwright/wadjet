@@ -504,6 +504,31 @@ func hashJoinCost(probeRows, buildRows float64) float64 {
 	return buildRows*buildCostPerRow + probeRows*probeCostPerRow
 }
 
+// distributedExchangeCost prices the exchange a distributed hash join adds
+// on top of its CPU cost. A broadcast-scale build replicates cheaply and the
+// probe side stays in place (cost ≈ 0 at plan-order granularity); a bigger
+// build forces hash-repartition of BOTH sides — serialize, materialize,
+// re-read. The SF10 A/B pairs of 2026-07-09 showed why the DP cannot ignore
+// this: a bushy composite that replaced broadcast-fused probes with a
+// repartition pair regressed Q08 +123% while pure-CPU cost called it
+// cheaper. Applied only in the BushyJoinReorder regime so flag-off plan
+// selection is untouched.
+//
+// broadcastableRows approximates the runtime bytes threshold
+// (isBroadcastCandidate, ~100 MB) at typical analytic row widths;
+// exchangeCostPerRow prices serialize+write+read+deserialize relative to
+// hashJoinCost's 1.0/row probe unit.
+func distributedExchangeCost(probeRows, buildRows float64) float64 {
+	const (
+		broadcastableRows  = 1_000_000
+		exchangeCostPerRow = 2.0
+	)
+	if buildRows <= broadcastableRows {
+		return 0
+	}
+	return (probeRows + buildRows) * exchangeCostPerRow
+}
+
 // mergeNDVs combines column NDV maps from two relations, capping at outputRows.
 func mergeNDVs(left, right map[string]float64, outputRows float64) map[string]float64 {
 	merged := make(map[string]float64, len(left)+len(right))
