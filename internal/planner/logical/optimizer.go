@@ -2878,6 +2878,7 @@ const bushyMaxRels = 10
 type dpEntry struct {
 	cost       float64
 	rows       float64
+	width      float64 // output row width in columns (exchange cell pricing)
 	colNDV     map[string]float64
 	plan       *Node
 	bushyJoins int // count of bushy (composite ⋈ composite) joins in plan
@@ -2923,6 +2924,7 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 		dp[mask] = dpEntry{
 			cost:      0,
 			rows:      baseStats[i].Rows,
+			width:     subtreeOutputWidth(rels[i]),
 			colNDV:    baseStats[i].ColNDV,
 			plan:      rels[i],
 			connected: true,
@@ -2983,11 +2985,12 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 				outputRows := estimateJoinCard(dp[probe].rows, dp[build].rows, probeNDV, buildNDV, joinType)
 				totalCost := dp[probe].cost + dp[build].cost +
 					hashJoinCost(dp[probe].rows, dp[build].rows) +
-					distributedExchangeCost(dp[probe].rows, dp[build].rows)
+					distributedExchangeCost(dp[probe].rows, dp[probe].width, dp[build].rows, dp[build].width)
 				if totalCost < dp[mask].cost {
 					dp[mask] = dpEntry{
 						cost:       totalCost,
 						rows:       outputRows,
+						width:      dp[probe].width + dp[build].width,
 						colNDV:     mergeNDVs(dp[probe].colNDV, dp[build].colNDV, outputRows),
 						plan:       NewJoin(dp[probe].plan, dp[build].plan, joinType, joinCond),
 						bushyJoins: dp[probe].bushyJoins + dp[build].bushyJoins + 1,
@@ -3044,7 +3047,9 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 					// non-broadcastable build forces (both transitions use
 					// the same model so left-deep and bushy candidates
 					// compare fairly). Flag-off keeps the pure-CPU model.
-					joinCost += distributedExchangeCost(dp[mask].rows, baseStats[j].Rows)
+					joinCost += distributedExchangeCost(
+						dp[mask].rows, dp[mask].width,
+						baseStats[j].Rows, subtreeOutputWidth(rels[j]))
 				}
 			} else {
 				// Cross join — heavy penalty to avoid unless necessary
@@ -3062,6 +3067,7 @@ func dpJoinReorder(rels []*Node, edges []joinEdge) (*Node, int) {
 				dp[newMask] = dpEntry{
 					cost:       totalCost,
 					rows:       outputRows,
+					width:      dp[mask].width + subtreeOutputWidth(rels[j]),
 					colNDV:     ndvs,
 					plan:       newPlan,
 					bushyJoins: dp[mask].bushyJoins,

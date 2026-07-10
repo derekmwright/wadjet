@@ -514,19 +514,63 @@ func hashJoinCost(probeRows, buildRows float64) float64 {
 // cheaper. Applied only in the BushyJoinReorder regime so flag-off plan
 // selection is untouched.
 //
-// broadcastableRows approximates the runtime bytes threshold
-// (isBroadcastCandidate, ~100 MB) at typical analytic row widths;
-// exchangeCostPerRow prices serialize+write+read+deserialize relative to
-// hashJoinCost's 1.0/row probe unit.
-func distributedExchangeCost(probeRows, buildRows float64) float64 {
+// Cost scales with CELLS (rows × row width), not rows: a composite's
+// output row is as wide as all its members combined, so shuffling it costs
+// proportionally more than shuffling the narrow scan outputs a left-deep
+// chain moves. Row-based pricing left Q08's bushy pick standing at +88%
+// (SF10 pair 3, 2026-07-10). broadcastableRows approximates the runtime
+// bytes threshold (isBroadcastCandidate, ~100 MB) at typical analytic row
+// widths; exchangeCostPerCell ≈ 2.0/row at a typical 8-column shuffle row,
+// relative to hashJoinCost's 1.0/row probe unit.
+func distributedExchangeCost(probeRows, probeWidth, buildRows, buildWidth float64) float64 {
 	const (
-		broadcastableRows  = 1_000_000
-		exchangeCostPerRow = 2.0
+		broadcastableRows   = 1_000_000
+		exchangeCostPerCell = 0.25
 	)
 	if buildRows <= broadcastableRows {
 		return 0
 	}
-	return (probeRows + buildRows) * exchangeCostPerRow
+	return (probeRows*probeWidth + buildRows*buildWidth) * exchangeCostPerCell
+}
+
+// subtreeOutputWidth approximates a relation subtree's output row width as
+// the number of columns visible in its output: scans expose their table
+// width, semi/anti joins expose the probe side only, inner/outer joins
+// expose both sides combined, aggregates and explicit projections collapse
+// to their output lists. Feeds distributedExchangeCost's cell pricing.
+func subtreeOutputWidth(n *Node) float64 {
+	const defaultWidth = 8
+	if n == nil {
+		return defaultWidth
+	}
+	switch n.Type {
+	case NodeScan:
+		if len(n.ScanColumns) > 0 {
+			return float64(len(n.ScanColumns))
+		}
+		return defaultWidth
+	case NodeAggregate:
+		if w := len(n.GroupBy) + len(n.AggExprs); w > 0 {
+			return float64(w)
+		}
+		return 1
+	case NodeProject:
+		if len(n.Projections) > 0 {
+			return float64(len(n.Projections))
+		}
+	case NodeJoin:
+		if len(n.Children) == 2 {
+			jt := strings.ToLower(n.JoinType)
+			if jt == "semi" || jt == "anti" {
+				return subtreeOutputWidth(n.Children[0])
+			}
+			return subtreeOutputWidth(n.Children[0]) + subtreeOutputWidth(n.Children[1])
+		}
+	}
+	if len(n.Children) >= 1 {
+		return subtreeOutputWidth(n.Children[0])
+	}
+	return defaultWidth
 }
 
 // mergeNDVs combines column NDV maps from two relations, capping at outputRows.
