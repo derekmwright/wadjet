@@ -111,29 +111,41 @@ func partitionFilesForWorker(out StageOutput, w, workerCount int) []string {
 		}
 		return out.Files[0]
 	}
-	if out.NumPartitions == 0 || workerCount <= 0 || w < 0 || w >= workerCount {
-		return nil
-	}
-	partsPerWorker := out.NumPartitions / workerCount
-	if partsPerWorker == 0 {
-		partsPerWorker = 1
-	}
-	start := w * partsPerWorker
-	end := start + partsPerWorker
-	if w == workerCount-1 {
-		end = out.NumPartitions // last worker absorbs remainder
-	}
-	if start >= out.NumPartitions {
-		return nil
-	}
-	if end > out.NumPartitions {
-		end = out.NumPartitions
-	}
+	start, end := partitionRangeForWorker(out.NumPartitions, w, workerCount)
 	var files []string
 	for p := start; p < end; p++ {
 		files = append(files, out.Files[p]...)
 	}
 	return files
+}
+
+// partitionRangeForWorker returns the half-open partition range [start, end)
+// worker w of workerCount binds under the contiguous-slice assignment.
+// Returns an empty range (start == end) when w gets nothing. Extracted from
+// partitionFilesForWorker so the skew-split planner (skew_split.go) groups
+// partitions by EXACTLY the ranges the unsplit layout would bind — any
+// divergence between the two would mis-align split decisions with task
+// inputs.
+func partitionRangeForWorker(numPartitions, w, workerCount int) (start, end int) {
+	if numPartitions == 0 || workerCount <= 0 || w < 0 || w >= workerCount {
+		return 0, 0
+	}
+	partsPerWorker := numPartitions / workerCount
+	if partsPerWorker == 0 {
+		partsPerWorker = 1
+	}
+	start = w * partsPerWorker
+	end = start + partsPerWorker
+	if w == workerCount-1 {
+		end = numPartitions // last worker absorbs remainder
+	}
+	if start >= numPartitions {
+		return 0, 0
+	}
+	if end > numPartitions {
+		end = numPartitions
+	}
+	return start, end
 }
 
 // flattenStageFiles returns all output files in a single flat list,

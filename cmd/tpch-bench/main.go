@@ -355,6 +355,11 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		// first touch. Default ON (matches the wadjet CLI default;
 		// SF10/SF100 validated 2026-07-09); set 0/false as the kill switch.
 		LateMaterialization: os.Getenv("WADJET_LATE_MATERIALIZATION") != "0" && !strings.EqualFold(os.Getenv("WADJET_LATE_MATERIALIZATION"), "false"),
+		// Skew-aware shuffle layout (docs/design/skew-aware-shuffle.md):
+		// split hot partition groups at join dispatch. Default off; set 1
+		// as the A/B arm. Coordinator-side decision only — workers always
+		// report the per-partition accounting it consumes.
+		SkewSplit: os.Getenv("WADJET_SKEW_SPLIT") == "1" || strings.EqualFold(os.Getenv("WADJET_SKEW_SPLIT"), "true"),
 		// Broadcast threshold override: <0 = never broadcast. 0/unset =
 		// cluster-derived default.
 		BroadcastBytesOverride: envInt64("WADJET_BROADCAST_BYTES"),

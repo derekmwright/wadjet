@@ -82,6 +82,14 @@ type Config struct {
 	// (docs/design/late-materialization.md), on the local fast path and in
 	// worker fragments alike (rides the join-probe OpSpec). Off by default.
 	LateMaterialization bool
+	// SkewSplit enables adaptive skew-aware task layout for shuffled hash
+	// joins (docs/design/skew-aware-shuffle.md): hot partition groups —
+	// detected from the worker-reported per-partition shuffle output bytes
+	// — split into k sub-tasks that divide the group's probe files and
+	// replicate its build files, bounding the straggler task's input and
+	// memory footprint. Decision logic in skew_split.go. Default false
+	// (dormant; the per-partition accounting is always on).
+	SkewSplit bool
 	// StreamingExchange annotates dispatched tasks with peer-location
 	// hints (Task.InputLocations) and per-query fetch tokens so consumers
 	// stream stage outputs from the producing workers' local disk instead
