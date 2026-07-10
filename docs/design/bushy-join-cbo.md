@@ -1,8 +1,24 @@
 # Bushy join enumeration for the CBO
 
-Status: Phase A (resolution refactor) MERGED to main (PR #203, c6b57ba).
-Layer B (enumeration behind --bushy-join-reorder, default off) on branch
-feat/bushy-join-reorder — 2026-07-09. Phase C (SF10/SF100 A/B) pending.
+Status (2026-07-10): Phase A MERGED (#203) · Layer B MERGED (#204) ·
+distributed fixes MERGED (#205: composite broadcast eligibility +
+probe-side-only fusion; #206: exchange-aware costing in the bushy regime).
+Phase C SF10 A/B: THREE same-window pairs run — rows identical in all,
+BushyJoinsPlanned=21 each bushy arm. Final pair (bin 71cab6a):
+suite −2.1%; consistent wins Q18 −32%, Q16 −31%, Q13 −23%, Q07 −19%,
+Q05 −16%; consistent loss Q08 +88% (was +123/+135% pre-#206).
+
+**Flag stays DEFAULT OFF.** Before any default-flip campaign:
+1. WIDTH-AWARE EXCHANGE COST — distributedExchangeCost prices rows, not
+   bytes; a composite build shuffles WIDE join-output rows where left-deep
+   shuffles narrow scan outputs. Q08's bushy pick survives row-based
+   pricing but loses in reality. Extend the DP cost inputs with per-column
+   width (RelStats has the pieces; estimateJoinSubtreeBytes already
+   computes composite widths physical-side).
+2. SF100 same-window pair after (1), targeting the roadmap band
+   (Q05/Q07/Q09) vs baseline results/20260709-175846 (48.5m).
+3. Decorrelator-emitted side-assigned keys (kills the Q02 runtime-repair
+   dependency; see §5).
 
 Layer B findings (2026-07-09):
 - STRICT-WIN SHAPES are broader than predicted: linear fact-fact FK chains
