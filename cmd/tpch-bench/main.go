@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/citc-tech/wadjet/benchmarks/skew"
 	tpch "github.com/citc-tech/wadjet/benchmarks/tpch"
 	"github.com/citc-tech/wadjet/internal/coordinator"
 	"github.com/citc-tech/wadjet/internal/dataplane"
@@ -63,9 +64,14 @@ func main() {
 		memProf               = flag.String("memprofile", "", "Write memory profile to file")
 		profDir               = flag.String("profdir", "", "Directory for per-query profiles")
 		dataPrefix            = flag.String("data-prefix", "tables/", "S3 prefix for table data (e.g. 'tables/' or '' for root)")
+		skewSuite             = flag.Bool("skew-suite", false, "Run the hot-key skew fixture (benchmarks/skew) instead of TPC-H: without --skip-load, generate + upload the fixture under --data-prefix first. Also enabled by WADJET_SKEW_SUITE=1.")
 		catalogSnapshotPrefix = flag.String("catalog-snapshot-prefix", "", "S3 prefix for catalog snapshots (e.g. 'catalog/'). With --skip-load: restore the latest snapshot instead of running discovery+ANALYZE; after a fresh discovery, write one. Empty = disabled.")
 	)
 	flag.Parse()
+
+	if !*skewSuite && skewSuiteEnabled() {
+		*skewSuite = true
+	}
 
 	// Apply profile: values from YAML override flag defaults, but
 	// explicitly-set CLI flags take precedence over the profile.
@@ -175,6 +181,20 @@ func main() {
 	}
 
 	sf := tpch.ScaleFactor(float64(*scale))
+	if *skewSuite {
+		// Skew fixture (docs/design/skew-aware-shuffle.md Phase 3): its own
+		// load/discover path — the catalog-snapshot shortcut is TPC-H-only
+		// (skew discovery is 2 tables and takes seconds).
+		if *skipLoad {
+			discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix, skew.Tables)
+		} else {
+			loadSkewData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix)
+		}
+		if !*dataOnly {
+			runSkewSuite(ctx, coord, *workers, *runs, *queryTimeout)
+		}
+		return
+	}
 	if *skipLoad {
 		// Pre-staged bucket data is immutable across deploys, so the
 		// post-discovery catalog (schemas, file manifests with row counts,
@@ -184,11 +204,11 @@ func main() {
 		if *catalogSnapshotPrefix != "" {
 			snapStore := newCatalogSnapshotStore(*s3Endpoint, *s3Region, *ssl)
 			if !restoreCatalogSnapshot(ctx, db.Catalog(), snapStore, *s3Bucket, *catalogSnapshotPrefix) {
-				discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix)
+				discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix, tpch.AllTables)
 				snapshotCatalog(ctx, db.Catalog(), snapStore, *s3Bucket, *catalogSnapshotPrefix)
 			}
 		} else {
-			discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix)
+			discoverData(ctx, db, *s3Endpoint, *s3Region, *s3Bucket, *ssl, *dataPrefix, tpch.AllTables)
 		}
 	} else {
 		loadData(ctx, db, sf)
@@ -481,7 +501,7 @@ func snapshotCatalog(ctx context.Context, cat *catalog.Catalog, store objstore.S
 	log.Printf("Catalog snapshotted to s3://%s/%ssnapshots/%s (next boot restores it in seconds)", bucket, prefix, ts)
 }
 
-func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool, dataPrefix string) {
+func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket string, ssl bool, dataPrefix string, tables map[string]parquet.Schema) {
 	store, err := objstore.NewMinIOStore(objstore.MinIOConfig{
 		Endpoint: endpoint,
 		UseSSL:   ssl,
@@ -504,7 +524,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 	// round-trip per table (range read of the parquet footer) and removes
 	// an entire class of correctness bugs.
 	totalFiles := 0
-	for name := range tpch.AllTables {
+	for name := range tables {
 		prefix := dataPrefix + name + "/"
 		objects, err := store.List(ctx, bucket, objstore.ListOptions{Prefix: prefix})
 		if err != nil {
@@ -531,7 +551,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		}
 		if len(pqObjects) == 0 {
 			log.Printf("WARNING: no parquet files for table %s, using hardcoded schema", name)
-			if err := db.CreateTable(ctx, name, tpch.AllTables[name], nil); err != nil && !strings.Contains(err.Error(), "already exists") {
+			if err := db.CreateTable(ctx, name, tables[name], nil); err != nil && !strings.Contains(err.Error(), "already exists") {
 				log.Fatalf("create table %s: %v", name, err)
 			}
 			continue
@@ -540,7 +560,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		schema, err := probeParquetSchema(ctx, store, bucket, pqObjects[0].Key)
 		if err != nil {
 			log.Printf("WARNING: probing %s/%s failed (%v); falling back to hardcoded schema", name, pqObjects[0].Key, err)
-			schema = tpch.AllTables[name]
+			schema = tables[name]
 		}
 		if err := db.CreateTable(ctx, name, schema, nil); err != nil && !strings.Contains(err.Error(), "already exists") {
 			log.Fatalf("create table %s: %v", name, err)
@@ -572,7 +592,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 		totalFiles += len(files)
 		log.Printf("Discovered %d files for table %s (%d cols, %d rows)", len(files), name, len(schema.Columns), totalRows)
 	}
-	log.Printf("Data discovery complete: %d total files across %d tables", totalFiles, len(tpch.AllTables))
+	log.Printf("Data discovery complete: %d total files across %d tables", totalFiles, len(tables))
 
 	// ANALYZE every table to populate per-column HLL sketches in the
 	// catalog. Without this, S3-staged data (every EC2 SF10/SF100 deploy
@@ -583,7 +603,7 @@ func discoverData(ctx context.Context, db *wadjet.DB, endpoint, region, bucket s
 	// Runs once at startup. Cost: ~1-2 minutes serial at SF10, dwarfed
 	// by the bench's per-query wall time. Output is cached in the
 	// catalog so subsequent queries reuse the sketches.
-	for name := range tpch.AllTables {
+	for name := range tables {
 		analyzed, err := db.Catalog().AnalyzeTable(ctx, name)
 		if err != nil {
 			log.Printf("WARNING: ANALYZE %s failed (%v); planner falls back to heuristic NDV", name, err)

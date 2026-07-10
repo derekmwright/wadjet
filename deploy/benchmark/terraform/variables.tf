@@ -222,6 +222,12 @@ variable "skew_split" {
   default     = ""
 }
 
+variable "skew_suite" {
+  description = "Set to 1 to run the hot-key skew fixture (benchmarks/skew) instead of TPC-H — the Phase 3 skew-split A/B. Pair with data_prefix=tables-skew/ and generate_data=true on the first arm to stage the fixture."
+  type        = string
+  default     = ""
+}
+
 variable "dynamic_filters" {
   description = "Set to 1 to enable Trino-style semi-join dynamic-filter pushdown on the coordinator. Off by default for v1 rollout."
   type        = string

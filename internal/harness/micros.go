@@ -123,13 +123,13 @@ func generateMicroData() map[string]microTable {
 	return data
 }
 
-// runMicroQuery is the shared execution logic for all micro-benchmarks.
-// It opens a pgx connection, runs the query, collects row count + checksum,
-// and returns the measurement from the collector window.
-func runMicroQuery(ctx context.Context, coordURL string, name string, sql string, collector *MeasurementCollector) (QueryMeasurement, error) {
+// runMicroQuery is the shared execution logic for all micro-benchmarks and
+// skew-suite queries. It opens a pgx connection, runs the query, collects
+// row count + checksum, and returns the measurement from the collector window.
+func runMicroQuery(ctx context.Context, coordURL string, name string, sql string, timeout time.Duration, collector *MeasurementCollector) (QueryMeasurement, error) {
 	collector.StartWindow(name)
 
-	queryCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	conn, err := pgx.Connect(queryCtx, coordURL)
@@ -173,7 +173,7 @@ FROM micro_lineitem l
 JOIN micro_orders o ON l.l_orderkey = o.o_orderkey
 GROUP BY o.o_orderkey`
 
-	m, err := runMicroQuery(ctx, coordURL, "micro_reverse_bloom", sql, collector)
+	m, err := runMicroQuery(ctx, coordURL, "micro_reverse_bloom", sql, 2*time.Minute, collector)
 	if err != nil {
 		return m, err
 	}
@@ -191,7 +191,7 @@ func RunMicroGraceHashJoin(ctx context.Context, coordURL string, collector *Meas
 FROM micro_build b
 JOIN micro_probe p ON b.build_key = p.probe_key`
 
-	m, err := runMicroQuery(ctx, coordURL, "micro_grace_hash_join", sql, collector)
+	m, err := runMicroQuery(ctx, coordURL, "micro_grace_hash_join", sql, 2*time.Minute, collector)
 	if err != nil {
 		return m, err
 	}
@@ -208,7 +208,7 @@ func RunMicroHashAggHighCard(ctx context.Context, coordURL string, collector *Me
 FROM micro_agg
 GROUP BY group_key`
 
-	m, err := runMicroQuery(ctx, coordURL, "micro_hash_agg_high_card", sql, collector)
+	m, err := runMicroQuery(ctx, coordURL, "micro_hash_agg_high_card", sql, 2*time.Minute, collector)
 	if err != nil {
 		return m, err
 	}

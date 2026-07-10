@@ -58,7 +58,7 @@ func TestLoadSampleDataPopulatesCatalog(t *testing.T) {
 	}
 
 	sliceCfg := SliceConfigs[SliceSmall]
-	if err := loadSampleData(ctx, cluster, dataDir, sliceCfg, tpch.SF001, logger); err != nil {
+	if err := loadSampleData(ctx, cluster, dataDir, sliceCfg, tpch.SF001, false, logger); err != nil {
 		t.Fatalf("loadSampleData: %v", err)
 	}
 

@@ -101,6 +101,28 @@ fix it.
 3. **Validation**: skewed-dataset A/B on SF10-class deploy (marker-proven),
    then default-flip decision separately.
 
+   *Fixture (implemented 2026-07-10)*: `benchmarks/skew` — events⋈dims with
+   90% of probe rows on one hot key, sized to engage at PRODUCTION
+   thresholds (no lowered knobs). The envelope that drove the shape: the
+   build must exceed the cluster broadcast threshold (200 MiB cap) to take
+   the repartition path, while the hot group's build slice must stay under
+   the same bound to be replicable — so dims is a wide table (~300 MB
+   parquet) whose queries project only `k`+`name` (build shuffle ≈ 10 MB).
+   The suite queries aggregate `count(DISTINCT e.v)` to force the ~256-byte
+   probe payload through the shuffle (projection pruning would otherwise
+   reduce the probe to 8 B/row) and to make task memory proportional to
+   task probe bytes. Q18-shape TPC-H was rejected: SF10 orders (~1 GB
+   parquet) as build puts every group's build slice over the replication
+   bound — the safety gate refuses, correctly — and the hot orderkey would
+   also skew the GROUP BY l_orderkey aggregate, which the split does not
+   help, confounding the wall signal. Local 3-worker run at defaults:
+   splits planned (marker), rows checksum-identical both arms,
+   skew_left_join wall −46% and spill 423 MB → 0.
+   Runners: `tpch-harness --queries=skew_join_agg,skew_left_join`
+   (local; `--serve-args=--skew-split` = on-arm) and
+   `tpch-bench --skew-suite` (EC2; WADJET_SKEW_SUITE=1, data under
+   `tables-skew/`, staged via GENERATE_DATA=1 on the first arm).
+
 ## 5. Risks / notes
 
 - Retries: `retrier.Observe` replays failed tasks — per-partition vectors

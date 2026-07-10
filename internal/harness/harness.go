@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/citc-tech/wadjet/benchmarks/skew"
 	"github.com/citc-tech/wadjet/benchmarks/tpch"
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
@@ -116,7 +117,8 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) (RunResult, error
 			if scale <= 0 {
 				scale = tpch.SF001
 			}
-			if err := loadSampleData(ctx, cluster, cfg.DataDir, sliceCfg, scale, logger); err != nil {
+			seedSkew := anySkewQuery(SelectQueries(cfg.Queries))
+			if err := loadSampleData(ctx, cluster, cfg.DataDir, sliceCfg, scale, seedSkew, logger); err != nil {
 				return result, fmt.Errorf("loading sample data: %w", err)
 			}
 		}
@@ -322,6 +324,9 @@ func runOneQuery(
 		case "micro_hash_agg_high_card":
 			return RunMicroHashAggHighCard(ctx, coordURL, collector)
 		default:
+			if isSkewQuery(name) {
+				return RunSkewQuery(ctx, coordURL, name, collector)
+			}
 			return collector.EndWindow(name), err
 		}
 	}
@@ -390,7 +395,7 @@ func runOneQuery(
 // be called after cluster.StartNATS() and before cluster.StartProcesses()
 // so that when the coordinator and workers boot, the catalog already has
 // all tables and files registered.
-func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ SliceConfig, scale tpch.ScaleFactor, logger *slog.Logger) error {
+func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ SliceConfig, scale tpch.ScaleFactor, seedSkew bool, logger *slog.Logger) error {
 	// Connect to the coordinator's NATS for catalog access.
 	nc, err := cluster.ConnectNATS()
 	if err != nil {
@@ -442,7 +447,10 @@ func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ Sli
 		if len(rows) == 0 {
 			return nil
 		}
-		schema := tpch.AllTables[tableName]
+		schema, ok := tpch.AllTables[tableName]
+		if !ok {
+			schema = skew.Tables[tableName]
+		}
 		var buf bytes.Buffer
 		pw, err := parquet.NewWriter(&buf, schema, parquet.DefaultWriterConfig())
 		if err != nil {
@@ -472,6 +480,23 @@ func loadSampleData(ctx context.Context, cluster *Cluster, dataDir string, _ Sli
 	}
 	if err := tpch.GenerateChunked(scale, chunkSize, emit); err != nil {
 		return fmt.Errorf("generating SF%v data: %w", scale, err)
+	}
+	if seedSkew {
+		skewCfg, err := skewFixtureConfig()
+		if err != nil {
+			return fmt.Errorf("skew fixture config: %w", err)
+		}
+		for tableName, schema := range skew.Tables {
+			if err := cat.CreateTable(ctx, tableName, schema, nil); err != nil {
+				return fmt.Errorf("creating table %s: %w", tableName, err)
+			}
+		}
+		logger.Info("generating skew fixture",
+			"events_rows", skewCfg.EventsRows, "dims_rows", skewCfg.DimsRows,
+			"hot_pct", skewCfg.HotPct, "pad_bytes", skewCfg.PadBytes)
+		if err := skew.GenerateChunked(skewCfg, emit); err != nil {
+			return fmt.Errorf("generating skew fixture: %w", err)
+		}
 	}
 	for tableName, entries := range tableEntries {
 		if err := cat.AddFiles(ctx, tableName, map[string]string{}, "tables/"+tableName+"/", entries); err != nil {
