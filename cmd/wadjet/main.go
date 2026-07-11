@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -208,6 +209,18 @@ func serveCmd() *cobra.Command {
 		defer cancel()
 
 		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(logLevel)}))
+
+		// Env-gated contention profiling for benchmark/profiling deploys.
+		// Rates are the raw runtime knobs (block rate in ns, mutex 1-in-N);
+		// unset or 0 keeps both samplers off — zero cost in production.
+		if rate, err := strconv.Atoi(os.Getenv("WADJET_BLOCK_PROFILE_RATE")); err == nil && rate > 0 {
+			runtime.SetBlockProfileRate(rate)
+			logger.Info("block profiling enabled", "rate_ns", rate)
+		}
+		if frac, err := strconv.Atoi(os.Getenv("WADJET_MUTEX_PROFILE_FRACTION")); err == nil && frac > 0 {
+			runtime.SetMutexProfileFraction(frac)
+			logger.Info("mutex profiling enabled", "fraction", frac)
+		}
 
 		if memLimit := memory.DetectMemoryLimit(); memLimit > 0 {
 			maxConc := int64(maxConcurrent)
