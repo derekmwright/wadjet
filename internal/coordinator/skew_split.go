@@ -25,11 +25,21 @@ var (
 
 	// skewSplitMinGroupBytes is the absolute floor below which a group is
 	// never considered hot, regardless of how uneven the layout looks.
-	// The trigger is deliberately absolute, not a max/mean ratio: what
-	// breaks under skew is one task's bytes vs its memory budget and the
-	// stage's wall clock, not the shape of the distribution. Ratio is
-	// logged for observability only.
 	skewSplitMinGroupBytes int64 = 256 << 20
+
+	// skewSplitMinRatio is the minimum group-probe-bytes / mean-group-bytes
+	// ratio for a group to count as hot. v1 shipped the absolute floor
+	// alone ("what breaks under skew is one task's bytes vs its budget,
+	// not the shape of the distribution") — the 2026-07-11 SF10 no-harm
+	// A/B falsified that: TPC-H Q21's uniformly-heavy shuffle (~374 MB per
+	// group, mean_ratio ≈ 1.0, nowhere near any memory budget) tripped the
+	// floor on EVERY group, doubled the stage's task count for zero skew
+	// relief, and regressed +21% wall. Requiring a real skew signal keeps
+	// the mechanism to its name; the hot-key fixture's groups sit at
+	// ratio 2.9 (local, 3 groups) to 21.7 (SF10) and still fire. Note the
+	// mean includes the hot group itself, so with N groups the ratio is
+	// bounded by N — at N=3 a group must carry 2/3 of all probe bytes.
+	skewSplitMinRatio = 2.0
 
 	// skewSplitMaxBuildBytes caps the build bytes a hot group may have and
 	// still split, when the cluster hasn't reported worker pool budgets
@@ -72,7 +82,10 @@ type skewTaskAssignment struct {
 //   - both primary deps are OutputPartitioned with the same partition count
 //     and reported PartitionBytes (nil vectors = legacy workers → off).
 //
-// A hot group splits into k = ceil(probeBytes/skewSplitTargetBytes)
+// A group is hot when it crosses the absolute floor (skewSplitMinGroupBytes)
+// AND carries at least skewSplitMinRatio× the mean group's probe bytes —
+// heavy-but-uniform stages (every group over the floor, ratio ≈ 1) keep the
+// standard layout. A hot group splits into k = ceil(probeBytes/skewSplitTargetBytes)
 // sub-tasks, capped by workerCount and by the group's probe file count
 // (v1 splits at file granularity; a hot partition written by T shuffle
 // tasks has up to T files). Each sub-task reads 1/k of the probe files and
@@ -126,7 +139,7 @@ func (c *Coordinator) planSkewSplitTasks(
 		}
 	}
 
-	// Mean group probe bytes, for the observability ratio only.
+	// Mean group probe bytes, denominator of the skew-ratio trigger.
 	var totalProbeBytes int64
 	for _, b := range probeOut.PartitionBytes {
 		totalProbeBytes += b
@@ -165,7 +178,11 @@ func (c *Coordinator) planSkewSplitTasks(
 		if k > len(probeFiles) {
 			k = len(probeFiles)
 		}
-		hot := k > 1 && probeBytes > skewSplitMinGroupBytes
+		ratio := float64(0)
+		if meanGroupBytes > 0 {
+			ratio = float64(probeBytes) / float64(meanGroupBytes)
+		}
+		hot := k > 1 && probeBytes > skewSplitMinGroupBytes && ratio >= skewSplitMinRatio
 
 		if hot && buildBytes > buildBound {
 			// Build-side-hot: do not split (see skewSplitMaxBuildBytes).
@@ -191,10 +208,6 @@ func (c *Coordinator) planSkewSplitTasks(
 
 		anySplit = true
 		SkewSplitsPlanned.Add(1)
-		ratio := float64(0)
-		if meanGroupBytes > 0 {
-			ratio = float64(probeBytes) / float64(meanGroupBytes)
-		}
 		c.logger.Info("skew split planned",
 			"stage_id", stage.ID, "group", w,
 			"partitions_start", start, "partitions_end", end,

@@ -50,11 +50,18 @@ bucketing `runShuffleSide` already does for files at :288-300) into
 
     splitFactor[p] = ceil(bytes[p] / targetTaskBytes)   capped at workerCount
     hot iff splitFactor[p] > 1 AND bytes[p] > absolute floor (e.g. 256 MiB)
+    AND bytes[p] >= skewSplitMinRatio × mean group bytes (2.0)
     AND build[p] fits the replication bound (see safety below)
 
-Relative-only ratios (max/mean) are NOT the trigger — an absolute
-bytes-vs-budget threshold is what protects memory; ratio is logged for
-observability only.
+v1 shipped the absolute floor alone ("an absolute bytes-vs-budget threshold
+is what protects memory; ratio is observability only") — **falsified by the
+2026-07-11 SF10 no-harm A/B**: Q21's uniformly-heavy shuffle put every
+group (~374 MB, mean_ratio ≈ 1.0) over the floor, the blanket k=2 split of
+all groups bought zero skew relief, and Q21 regressed +21% wall. The 374 MB
+groups were nowhere near any memory budget, so the memory argument didn't
+apply; the trigger now requires an actual skew signal (ratio ≥ 2× the mean,
+which — since the mean includes the hot group — caps at the group count).
+Regression test: TestPlanSkewSplitTasks_UniformHeavyNoSplit.
 
 ### (d) Hot-partition-aware task layout
 In `dispatchComputeStage` (execute_stage_dag.go:1830) +
