@@ -541,6 +541,8 @@ resource "aws_instance" "worker" {
     export WADJET_LATE_MATERIALIZATION="${var.late_materialization}"
     export WADJET_BUSHY_JOIN_REORDER="${var.bushy_join_reorder}"
     export WADJET_SKEW_SPLIT="${var.skew_split}"
+    export WADJET_BLOCK_PROFILE_RATE="${var.block_profile_rate}"
+    export WADJET_MUTEX_PROFILE_FRACTION="${var.mutex_profile_fraction}"
 
     # Verify binary was downloaded successfully
     if [ ! -x /usr/local/bin/wadjet ]; then
