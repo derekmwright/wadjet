@@ -1,14 +1,20 @@
 # Adaptive skew-aware shuffle
 
-Status: Phases 1–2 IMPLEMENTED 2026-07-10 (feat/skew-aware-shuffle) — flag
-`--skew-split`, default off; per-partition accounting always on. Decision
-logic: internal/coordinator/skew_split.go. Two deviations from the draft
-below, both deliberate: partition bytes come from the upload paths'
-existing per-partition os.Stat (actual on-disk size; no redundant sink
-byte counter), and the decision unit is the task's contiguous partition
-RANGE (a task binds NumPartitions/numTasks partitions; per-partition
-decisions would mis-align with task binding). Phase 3 (skewed-dataset A/B
-deploy) not started.
+Status: COMPLETE, DEFAULT ON since 2026-07-11 — flag `--skew-split`
+(=false is the kill switch); per-partition accounting always on. Decision
+logic: internal/coordinator/skew_split.go. Phase 3 evidence (SF10, 3-run
+arms, same-window controls): hot-key fixture (benchmarks/skew) −40.6% /
+−40.9% straggler wall with row checksums identical across all arms and
+exactly one split planned per query; TPC-H no-harm arm caught the v1
+floor-only trigger blanket-splitting Q21's uniform-heavy shuffle (+21%),
+fixed by the skewSplitMinRatio gate (§2c); post-gate validation arm ran
+all 22 TPC-H queries with ZERO markers (plan-identical to flag-off) and
+rows matching control. Two deviations from the draft below, both
+deliberate: partition bytes come from the upload paths' existing
+per-partition os.Stat (actual on-disk size; no redundant sink byte
+counter), and the decision unit is the task's contiguous partition RANGE
+(a task binds NumPartitions/numTasks partitions; per-partition decisions
+would mis-align with task binding).
 
 ## 1. Problem
 
@@ -83,8 +89,9 @@ fix it.
 
 ## 3. Observability + flag
 
-- `--skew-split` (default off v1), env `WADJET_SKEW_SPLIT`, terraform var —
-  the late-mat/bushy plumbing pattern.
+- `--skew-split` (default off v1; DEFAULT ON since 2026-07-11, =false is
+  the kill switch), env `WADJET_SKEW_SPLIT`, terraform var — the late-mat
+  plumbing pattern.
 - `SkewSplitsPlanned` counter + one Info log per decision naming
   (stage, partition, bytes, splitFactor) — the mechanism marker required by
   the same-window A/B discipline (a wall delta without a fired marker is

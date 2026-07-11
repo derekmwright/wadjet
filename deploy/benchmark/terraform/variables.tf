@@ -217,7 +217,7 @@ variable "late_materialization" {
 }
 
 variable "skew_split" {
-  description = "Set to 1 to enable adaptive skew-aware shuffle layout on the coordinator (docs/design/skew-aware-shuffle.md): hot partition groups split into sub-tasks that divide probe files and replicate build files. Off by default."
+  description = "Adaptive skew-aware shuffle layout (docs/design/skew-aware-shuffle.md): hot partition groups split into sub-tasks that divide probe files and replicate build files. Default on (empty/1 = on, matching the engine default since 2026-07-11); set \"0\" as the A/B kill switch."
   type        = string
   default     = ""
 }
