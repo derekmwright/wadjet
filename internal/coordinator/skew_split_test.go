@@ -145,6 +145,23 @@ func TestPlanSkewSplitTasks_HotGroupSplits(t *testing.T) {
 	}
 }
 
+// TestPlanSkewSplitTasks_UniformHeavyNoSplit encodes the TPC-H Q21 SF10
+// profile from the 2026-07-11 no-harm A/B: every group's probe crosses the
+// absolute floor (~374 MB vs the 256 MiB default) but the layout is
+// perfectly uniform (mean_ratio ≈ 1.0). v1's floor-only trigger split every
+// group k=2 and regressed Q21 +21% wall for zero skew relief; the ratio
+// gate must keep the standard layout. Runs at REAL default thresholds.
+func TestPlanSkewSplitTasks_UniformHeavyNoSplit(t *testing.T) {
+	c := &Coordinator{logger: slog.Default()}
+	inputs := map[string]StageOutput{
+		"probe-stage": skewTestOutput("probe", []int64{374 << 20, 374 << 20, 374 << 20}, 6),
+		"build-stage": skewTestOutput("build", []int64{24 << 20, 24 << 20, 24 << 20}, 2),
+	}
+	if got := c.planSkewSplitTasks(skewTestStage(), inputs, 3, 3); got != nil {
+		t.Fatalf("uniform heavy layout planned a split: %+v", got)
+	}
+}
+
 func TestPlanSkewSplitTasks_BuildSideHotNoSplit(t *testing.T) {
 	lowerSkewThresholds(t, 100<<20, 100<<20)
 	c := &Coordinator{logger: slog.Default()}
