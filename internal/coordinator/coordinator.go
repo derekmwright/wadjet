@@ -87,8 +87,11 @@ type Config struct {
 	// detected from the worker-reported per-partition shuffle output bytes
 	// — split into k sub-tasks that divide the group's probe files and
 	// replicate its build files, bounding the straggler task's input and
-	// memory footprint. Decision logic in skew_split.go. Default false
-	// (dormant; the per-partition accounting is always on).
+	// memory footprint. Decision logic in skew_split.go. The wadjet CLI
+	// and tpch-bench default this ON (2026-07-11 SF10 A/B: −41% straggler
+	// wall on the hot-key fixture, plan-identical on uniform workloads via
+	// the ratio gate); this struct field's zero value stays false so
+	// embedded/test constructors opt in explicitly.
 	SkewSplit bool
 	// StreamingExchange annotates dispatched tasks with peer-location
 	// hints (Task.InputLocations) and per-query fetch tokens so consumers
