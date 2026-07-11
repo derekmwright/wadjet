@@ -384,6 +384,7 @@ locals {
     export WADJET_LATE_MATERIALIZATION="${var.late_materialization}"
     export WADJET_BUSHY_JOIN_REORDER="${var.bushy_join_reorder}"
     export WADJET_SKEW_SPLIT="${var.skew_split}"
+    export WADJET_SKEW_SUITE="${var.skew_suite}"
     export USE_NATIVE_DAG="${var.use_native_dag ? "1" : "0"}"
     # Phase C/D/E data-plane selection. Empty/"nats" = legacy NATS reply
     # subjects; "grpc" routes task dispatch + results + gather +
