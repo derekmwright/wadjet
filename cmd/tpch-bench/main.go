@@ -415,8 +415,13 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		// Streaming exchange (docs/design/streaming-exchange.md): annotate
 		// tasks with peer-location hints + fetch tokens and run stage
 		// uploads async. Workers must run with --streaming-exchange too
-		// (terraform var streaming_exchange wires both sides).
-		StreamingExchange: os.Getenv("TPCH_STREAMING_EXCHANGE") == "1" || strings.EqualFold(os.Getenv("TPCH_STREAMING_EXCHANGE"), "true"),
+		// (terraform var streaming_exchange wires both sides). Default ON,
+		// matching the wadjet serve default (flipped 2026-07-02, SF100
+		// −23%); this env-gate previously defaulted OFF, which silently ran
+		// every benchmark 2026-07-02..07-12 on the synchronous S3 shuffle
+		// path (SF100 A/B 2026-07-12: 42m24s→30m38s, −27.7%, 22/22
+		// row-identical). Set 0/false as the kill switch.
+		StreamingExchange: envBoolDefaultOn("TPCH_STREAMING_EXCHANGE"),
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
 	coord.Workers().StartSubStatsLogger(ctx)
@@ -951,6 +956,17 @@ func collectWorkerProfiles(nc *nats.Conn, workerCount int, profDir string) {
 		collected++
 	}
 	log.Printf("Collected profiles from %d/%d workers", collected, workerCount)
+}
+
+// envBoolDefaultOn reports true unless the env var is explicitly "0" or
+// "false" — the parse for default-on engine flags whose benchmark env acts
+// as a kill switch. An unset var MUST mean on: TPCH_STREAMING_EXCHANGE
+// previously defaulted off here while the engine default was on, which
+// silently ran every 2026-07-02..07-12 benchmark on the synchronous S3
+// shuffle path.
+func envBoolDefaultOn(key string) bool {
+	v := os.Getenv(key)
+	return v != "0" && !strings.EqualFold(v, "false")
 }
 
 // envInt64 parses an int64 env var; empty or malformed values return 0 so an
