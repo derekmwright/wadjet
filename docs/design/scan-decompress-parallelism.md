@@ -123,3 +123,25 @@ Alternatives considered:
   physical exchange costing vs streaming-exchange extension) must be
   re-litigated against a **post-fix** profile — today's profile is
   dominated by a defect that distorts every downstream estimate.
+
+## 6. SF100 validation results (2026-07-12, same-window pair)
+
+Control `results/20260712-001836` (main 41de506) vs fix
+`results/20260712-011147` (17e7c45), back-to-back deploys, identical
+config, no profiling samplers. **22/22 both arms, all row counts
+identical. Suite 48m35s → 42m24s = −12.8%.**
+
+Scan-bound band, all far beyond the ±15% single-pair noise envelope:
+Q06 −60.8%, Q15 −55.4%, Q01 −53.9%, Q14 −44.6%, Q12 −43.4%, Q19 −41.8%.
+Mid-band: Q20 −19.5%, Q10 −18.7%, Q17/Q08 −18%, Q05 −11.1%. No
+regression anywhere (worst delta −1.2% on Q03). Exchange-dominated
+queries moved little, as §5 predicted: Q03 −1.2%, Q21 −1.6%, Q18 −5.2%.
+
+Gap vs the cold-S3 Trino SF100 reference: 8.9× → **7.8×** suite-wide;
+Q01 now 2.0×, Q08 2.7×, Q09 3.9×.
+
+Post-fix bottleneck landscape: the remaining worst offenders are the
+exchange-legged shapes (Q04 19.8×, Q03 17.8×, Q14 16.4×, Q10 15.1×,
+Q13 14.3×) — the next profiling pass should re-rank against the
+shuffle/exchange path (s2 codec, string rematerialization, S3 stage
+materialization) rather than re-running this scan analysis.
