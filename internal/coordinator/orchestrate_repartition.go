@@ -103,7 +103,7 @@ func (c *Coordinator) orchestrateRepartition(
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount, nil, nil)
 		if err != nil {
 			return fmt.Errorf("build-side shuffle for %s: %w", cand.BuildAlias, err)
 		}
@@ -112,7 +112,7 @@ func (c *Coordinator) orchestrateRepartition(
 	})
 
 	g.Go(func() error {
-		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount, nil, nil)
 		if err != nil {
 			return fmt.Errorf("probe-side shuffle for %s: %w", cand.ProbeAlias, err)
 		}
@@ -154,6 +154,12 @@ type shuffleSideStats struct {
 // numParts outputs. Waits for all tasks. Returns shardFiles[p] = slice of
 // S3 keys for partition p (concatenated from each task's per-partition
 // output) plus the worker-reported output accounting.
+//
+// eagerFeed, when non-nil (native-DAG dispatchShuffleStage under
+// --eager-dispatch), is dispatched with the task layout right before
+// publish so eligible consumer stages can clear their barrier and start
+// consuming per-task manifests. The legacy orchestrateRepartition path
+// passes nil — its consumers are built from the completed ShuffleLayout.
 func (c *Coordinator) runShuffleSide(
 	ctx context.Context,
 	parentQueryID string,
@@ -163,6 +169,7 @@ func (c *Coordinator) runShuffleSide(
 	numParts int,
 	workerCount int,
 	dynamicFilters []distributed.DynamicFilterSpec, // resolved bloom/range pushdowns from upstream build stat
+	eagerFeed *eagerFeed,
 ) ([][]string, shuffleSideStats, error) {
 	ctx, cancel := context.WithTimeout(ctx, shuffleStageTimeout)
 	defer cancel()
@@ -262,6 +269,23 @@ func (c *Coordinator) runShuffleSide(
 				"side", sideName, "task_id", t.ID, "error", pubErr)
 		}
 	}, c.logger, stageID, c.classifyFatalResult)
+	if len(tasks) > 0 {
+		t0 := tasks[0]
+		retrier.onSuccess = c.eagerManifestPublisher(distributed.TaskRootQueryID(&t0), stageID, eagerFeed)
+	}
+	// Release eligible consumers: with the task layout fixed (IDs stable
+	// across retries, partition count final), consumers can bind their
+	// partition ranges and start draining manifests. Dispatch before
+	// publish so no completion can beat the feed.
+	if eagerFeed != nil && retrier.onSuccess != nil {
+		ids := make([]string, len(tasks))
+		for i := range tasks {
+			ids[i] = tasks[i].ID
+		}
+		t0 := tasks[0]
+		eagerFeed.dispatch(distributed.TaskRootQueryID(&t0), stageID, ids, numParts, workerCount)
+		c.startEagerRepublisher(eagerFeed)
+	}
 	defer c.watchStuckTasks(ctx, retrier)()
 
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {

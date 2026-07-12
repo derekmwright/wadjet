@@ -104,6 +104,7 @@ var (
 	bushyJoinReorder      bool
 	broadcastBytes        int64
 	streamingExchange     bool
+	eagerDispatch         bool
 	peerExchangeAddr      string
 	peerExchangeAdvertise string
 )
@@ -171,6 +172,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&bushyJoinReorder, "bushy-join-reorder", false, "Let the cost-based join reorder emit BUSHY plans (joins of two composite intermediates — e.g. pre-joining a snowflake dimension chain before it meets the fact stream) when strictly cheaper than every left-deep order. Cost ties keep the left-deep shape. Process-wide, default false. See docs/design/bushy-join-cbo.md.")
 	rootCmd.PersistentFlags().Int64Var(&localFastPathBytes, "local-fastpath-bytes", coordinator.DefaultLocalFastPathBytes, "Queries whose post-pruning catalog scan bytes stay under this threshold execute in-process on the coordinator (skipping the distributed stage DAG and its per-stage object-store round trips). 0 = disabled.")
 	rootCmd.PersistentFlags().BoolVar(&streamingExchange, "streaming-exchange", true, "Streaming exchange: consumers fetch stage outputs from the producing workers' local disk over gRPC with async S3 upload; every failure falls through to the durable S3 path. Default true (validated 2026-07-02: SF10 −10%, SF100 −23% suite wall, row-identical, zero fault-tolerance events); --streaming-exchange=false restores synchronous S3-only shuffle. See docs/design/streaming-exchange.md.")
+	rootCmd.PersistentFlags().BoolVar(&eagerDispatch, "eager-dispatch", false, "Eager consumer dispatch (Phase C1): eligible non-join consumer stages (aggregate/sort over a standalone repartition) start before their producer stage fully drains, consuming per-producer-task file manifests as tasks finish. Requires --streaming-exchange. Default false until SF100 validation (kill switch thereafter). See docs/design/eager-consumer-dispatch.md.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAddr, "peer-exchange-addr", ":0", "Peer-exchange (FetchShuffle) listen address. Default :0 picks a free port (the address reaches peers via heartbeats, and a fixed default would collide when multiple workers share a host); pin it when firewalls need a known port.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAdvertise, "peer-exchange-advertise", "", "Peer-exchange address advertised in heartbeats (default: derived from the bound listener)")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
@@ -911,6 +913,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		LateMaterialization:    lateMaterialization,
 		SkewSplit:              skewSplit,
 		StreamingExchange:      streamingExchange,
+		EagerDispatch:          eagerDispatch,
 	}, cat, nc, js, logger)
 
 	// Phase A: same-process data-plane server + client when enabled.
@@ -1212,6 +1215,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		LateMaterialization:    lateMaterialization,
 		SkewSplit:              skewSplit,
 		StreamingExchange:      streamingExchange,
+		EagerDispatch:          eagerDispatch,
 	}, cat, nc, js, logger)
 
 	// Phase A: start data-plane gRPC server alongside coord when enabled.

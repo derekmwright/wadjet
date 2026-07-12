@@ -259,6 +259,9 @@ func (c *Coordinator) executeStageDAG(
 		c.tracker.Complete(queryID)
 		c.cleanupQuery(queryID)
 	}()
+	// Drop this query's eager feeds (stops manifest republishers). No-op
+	// when eager dispatch is off or the plan registered none.
+	defer c.dropEagerFeeds(queryID)
 
 	// Separate the terminal Gather from the DAG body: Gather is always run
 	// last, on the coordinator's NATS reply subscription, and returns the
@@ -403,13 +406,62 @@ func (c *Coordinator) executeStageDAG(
 	for _, s := range pending {
 		s := s
 		g.Go(func() error {
+			// Eager consumer dispatch (docs/design/eager-consumer-dispatch.md
+			// §3.3): an eligible consumer may clear on its producers' feeds
+			// (task layout fixed, manifests flowing) instead of the done
+			// barrier. Feed handles are get-or-create so they exist before
+			// the producers' dispatchers fill them in; a producer that never
+			// dispatches (empty upstream, non-shuffle path) leaves its feed
+			// inert and the done case fires as before.
+			//
+			// Two shapes: C1 non-join consumers clear on their single dep's
+			// dispatch; C2 hash-join consumers clear on BOTH primary deps at
+			// the memo-§6 early-skew decision point (feed threshold + a
+			// projected planSkewSplitTasks decision — a would-split edge
+			// keeps the barrier so the full-data split governs; slice 2 adds
+			// frozen eager split layouts). Fused-build deps always keep the
+			// barrier: their real outputs ride task.FusedJoins[i].BuildFiles.
+			eagerFeeds := map[string]*eagerFeed{}
+			eagerJoin := false
+			if c.config.EagerDispatch {
+				if eagerEligibleConsumer(s, stageByID, fuseStageID, workerCount) {
+					eagerFeeds[s.Dependencies[0]] = c.eagerFeedHandle(queryID, s.Dependencies[0])
+				} else if eagerEligibleJoinConsumer(s, stageByID, fuseStageID) {
+					probeDep, buildDep := joinPrimaryDeps(s)
+					eagerFeeds[probeDep] = c.eagerFeedHandle(queryID, probeDep)
+					eagerFeeds[buildDep] = c.eagerFeedHandle(queryID, buildDep)
+					eagerJoin = true
+				}
+				for dep, f := range eagerFeeds {
+					if f == nil { // flag raced off / no root ID
+						delete(eagerFeeds, dep)
+					}
+				}
+				if eagerJoin && len(eagerFeeds) != 2 {
+					eagerFeeds = map[string]*eagerFeed{}
+				}
+			}
 			// Wait on each dependency's done signal. Deps not in the
 			// `done` map are leaf stages / pre-computed outputs (e.g.,
 			// the coordinator's initial inputs) and are treated as
-			// immediately ready.
+			// immediately ready. Eager-capable deps race their feed's
+			// dispatch against the barrier; if ANY of them completes
+			// first, the whole stage takes the barrier path (it has real
+			// outputs; mixing real and provisional gains nothing).
+			eagerBroken := len(eagerFeeds) == 0
 			for _, depID := range s.Dependencies {
 				ch, tracked := done[depID]
 				if !tracked {
+					continue
+				}
+				if f, ok := eagerFeeds[depID]; ok && !eagerBroken {
+					select {
+					case <-ch:
+						eagerBroken = true
+					case <-f.dispatched:
+					case <-gctx.Done():
+						return gctx.Err()
+					}
 					continue
 				}
 				select {
@@ -417,6 +469,70 @@ func (c *Coordinator) executeStageDAG(
 				case <-gctx.Done():
 					return gctx.Err()
 				}
+			}
+			// C2 join clearance: hold until both feeds cross the decision
+			// threshold (decisionReady always closes at or before producer
+			// completion, so this cannot outwait a healthy producer; a
+			// failed producer cancels gctx), then apply the projected skew
+			// decision. Would-split → barrier.
+			if !eagerBroken && eagerJoin {
+				numTasks := 1
+				if s.Distribution.Kind == physical.DistHashPartitioned {
+					numTasks = s.Distribution.Count
+					if numTasks <= 0 {
+						numTasks = workerCount
+					}
+				}
+				for _, f := range eagerFeeds {
+					select {
+					case <-f.decisionReady:
+					case <-gctx.Done():
+						return gctx.Err()
+					}
+				}
+				probeDep, buildDep := joinPrimaryDeps(s)
+				if c.eagerJoinWouldSplit(s, eagerFeeds[probeDep], eagerFeeds[buildDep], numTasks, workerCount) {
+					c.logger.Info("eager dispatch: projected skew split — keeping barrier",
+						"query", queryID, "stage_id", s.ID)
+					eagerBroken = true
+				}
+			}
+			// v1 producer-lane reservation: at most one eager stage in
+			// flight per coordinator. A busy slot degrades to the barrier.
+			eagerActive := false
+			if !eagerBroken {
+				select {
+				case c.eagerStageSlot <- struct{}{}:
+					eagerActive = true
+				default:
+				}
+			}
+			if eagerActive {
+				defer func() { <-c.eagerStageSlot }()
+				EagerEdgesPlanned.Add(1)
+				producerTasks := 0
+				for _, f := range eagerFeeds {
+					producerTasks += len(f.producerTaskIDs)
+				}
+				c.logger.Info("eager dispatch: consumer cleared early",
+					"query", queryID, "stage_id", s.ID, "stage_type", s.Type,
+					"eager_deps", len(eagerFeeds), "join", eagerJoin,
+					"producer_tasks", producerTasks)
+			} else if len(eagerFeeds) > 0 {
+				// Barrier fallback: wait out every eager dep's done signal
+				// (non-eager deps were already awaited above).
+				for depID := range eagerFeeds {
+					ch, tracked := done[depID]
+					if !tracked {
+						continue
+					}
+					select {
+					case <-ch:
+					case <-gctx.Done():
+						return gctx.Err()
+					}
+				}
+				eagerFeeds = map[string]*eagerFeed{}
 			}
 			// Late-bind any scalar subqueries: await each producer stage
 			// separately (producer IDs are NOT in Dependencies because
@@ -451,11 +567,36 @@ func (c *Coordinator) executeStageDAG(
 					return fmt.Errorf("stage %s scalar substitution: %w", s.ID, subErr)
 				}
 			}
-			outputsMu.Lock()
-			inputs, err := collectInputs(s, outputs)
-			outputsMu.Unlock()
-			if err != nil {
-				return fmt.Errorf("stage %s collect inputs: %w", s.ID, err)
+			var inputs map[string]StageOutput
+			var err error
+			if eagerActive {
+				// Eager deps' producers are still running; their slots in
+				// `outputs` are empty. Synthesize provisional outputs (empty
+				// layout, unknown bytes, feed attached) — dispatchComputeStage
+				// routes those aliases through Task.EagerInputs. Non-eager
+				// deps (fused builds) completed above and use real outputs.
+				inputs = make(map[string]StageOutput, len(s.Dependencies))
+				outputsMu.Lock()
+				for _, depID := range s.Dependencies {
+					if f, ok := eagerFeeds[depID]; ok {
+						inputs[depID] = f.provisionalOutput()
+						continue
+					}
+					out, ok := outputs[depID]
+					if !ok {
+						outputsMu.Unlock()
+						return fmt.Errorf("stage %s: non-eager dependency %s has no recorded output", s.ID, depID)
+					}
+					inputs[depID] = out
+				}
+				outputsMu.Unlock()
+			} else {
+				outputsMu.Lock()
+				inputs, err = collectInputs(s, outputs)
+				outputsMu.Unlock()
+				if err != nil {
+					return fmt.Errorf("stage %s collect inputs: %w", s.ID, err)
+				}
 			}
 			// Acquire a dispatch slot now that we have inputs and are
 			// about to publish tasks. Held until the stage completes so
@@ -813,7 +954,12 @@ func (c *Coordinator) dispatchShuffleStage(
 	// Forward any dynamic-filter specs the upstream (probe-side) leaf scan
 	// resolved through pass-through. Each shuffle task gets a copy so its
 	// parquet scan applies the bloom at row-group level.
-	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters)
+	//
+	// Eager dispatch: hand runShuffleSide this stage's feed so eligible
+	// consumers can clear their barrier once the shuffle tasks are built.
+	// nil when the flag is off. The empty-source early return above never
+	// dispatches the feed — consumers just fall through on done[dep].
+	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters, c.eagerFeedHandle(queryID, stage.ID))
 	if err != nil {
 		return StageOutput{}, err
 	}
@@ -2047,6 +2193,25 @@ func (c *Coordinator) dispatchComputeStage(
 			// Q18 ignoring `HAVING SUM(l_quantity) > 300`.
 			PostFilterExprs: append([]string(nil), stage.FilterExprs...),
 		}
+		// Eager consumer dispatch: a provisional upstream (producer still
+		// running) feeds this task's alias from producer-task manifests
+		// (Task.EagerInputs) rather than the frozen — here empty — file
+		// list in taskInputs. Aliases must match buildTaskInputsForStage's
+		// convention (dep ID for single-input stages; build/probe aliases
+		// for joins — eagerAliasForDep). Skew/probe-split slicing never
+		// applies to eager stages (provisional accounting is nil and the
+		// eager clearance already ruled out a projected split), so the
+		// partition range matches what the frozen path would bind for
+		// task w.
+		for depID, in := range inputs {
+			if in.eager == nil {
+				continue
+			}
+			if t.EagerInputs == nil {
+				t.EagerInputs = make(map[string]distributed.EagerInput, 2)
+			}
+			t.EagerInputs[eagerAliasForDep(stage, depID)] = in.eager.eagerInputForTask(w, numTasks)
+		}
 		// Fused join + downstream exchange-sender: emit a fragment task
 		// pipeline that runs the entire chain in one worker call without
 		// writing the join output to S3 only to immediately re-read+hash
@@ -2225,12 +2390,52 @@ func (c *Coordinator) dispatchComputeStage(
 		if ctx.Err() != nil {
 			return
 		}
+		// Eager consumers: retries are otherwise verbatim, but a stale
+		// Replay list would make the retried task wait on the republisher
+		// for manifests published since the original build (fencing
+		// recovery depends on the retry seeing the stable attempt set
+		// promptly). Refresh from the feed at re-dispatch.
+		refreshEagerReplay(&t, inputs)
 		if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
 			c.logger.Error("task retry publish failed",
 				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
 		}
 	}, c.logger, stage.ID, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
+	// Eager stages with more tasks than the cluster can hold at once
+	// publish in governed waves: eager tasks block on producer manifests
+	// while HOLDING a worker slot, so a full join fan-out (numTasks =
+	// partition count) dispatched at once could occupy every slot ahead
+	// of the very producer tasks it waits on. Cap in-flight eager tasks
+	// at capacity − workerCount (≥ one producer lane per worker on
+	// average); top up as tasks reach terminal state. Never coexists
+	// with fusion (eligibility excludes the gather-fused stage).
+	publishNow := tasks
+	var governor *eagerPublishGovernor
+	if len(tasks) > 0 && len(tasks[0].EagerInputs) > 0 {
+		capacity := c.workers.ClusterCapacity()
+		eagerCap := workerCount // capacity unreported: assume ≥ 2 slots/worker
+		if capacity > 0 {
+			eagerCap = capacity - workerCount
+		}
+		publishNow, governor = newEagerPublishGovernor(tasks, eagerCap, func(t distributed.Task) {
+			if ctx.Err() != nil {
+				return
+			}
+			// Late-wave tasks get a current Replay snapshot — their
+			// original one was taken at task build, before earlier waves'
+			// producers reported.
+			refreshEagerReplay(&t, inputs)
+			if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
+				c.logger.Error("eager wave publish failed",
+					"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
+			}
+		})
+		if governor != nil {
+			c.logger.Info("eager dispatch: governed waves",
+				"stage_id", stage.ID, "tasks", len(tasks), "in_flight_cap", eagerCap)
+		}
+	}
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {
 		var r distributed.ResultNotification
 		if err := distributed.Unmarshal(msg.Data, &r); err != nil {
@@ -2238,6 +2443,11 @@ func (c *Coordinator) dispatchComputeStage(
 		}
 		c.noteTaskResult(r)
 		allDone := retrier.Observe(r)
+		if governor != nil && retrier.IsTerminal(r.TaskID) {
+			// Off the subscription goroutine: the top-up publish flushes
+			// NATS, same as the retry republish path.
+			go governor.noteTerminal(r.TaskID)
+		}
 		select {
 		case progress <- struct{}{}:
 		default:
@@ -2266,7 +2476,7 @@ func (c *Coordinator) dispatchComputeStage(
 	if fusion != nil {
 		fusion.recv.SetExpectedTerminals(len(tasks))
 	}
-	if err := c.scheduler.PublishTasks(ctx, tasks); err != nil {
+	if err := c.scheduler.PublishTasks(ctx, publishNow); err != nil {
 		return StageOutput{}, fmt.Errorf("stage %s: publish: %w", stage.ID, err)
 	}
 

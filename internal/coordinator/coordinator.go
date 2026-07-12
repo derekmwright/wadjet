@@ -93,6 +93,13 @@ type Config struct {
 	// the ratio gate); this struct field's zero value stays false so
 	// embedded/test constructors opt in explicitly.
 	SkewSplit bool
+	// EagerDispatch enables eager consumer dispatch (docs/design/
+	// eager-consumer-dispatch.md): the coordinator republishes per-
+	// producer-task file manifests on EagerManifestSubject as shuffle
+	// tasks complete, and (Phase C1) dispatches eligible consumer stages
+	// before their producer stage fully drains. Zero value false —
+	// default off until SF100 validation; requires StreamingExchange.
+	EagerDispatch bool
 	// StreamingExchange annotates dispatched tasks with peer-location
 	// hints (Task.InputLocations) and per-query fetch tokens so consumers
 	// stream stage outputs from the producing workers' local disk instead
@@ -217,6 +224,20 @@ type Coordinator struct {
 	// a non-zero rate is the signal to revisit single-level producer
 	// re-run per the design memo).
 	streamingReruns atomic.Int64
+
+	// Eager consumer dispatch (docs/design/eager-consumer-dispatch.md,
+	// eager_feed.go). eagerFeeds maps eagerFeedKey → feed, created lazily
+	// by consumer goroutines and producer dispatchers, dropped per query.
+	// eagerStageSlot bounds in-flight eager consumer stages to ONE per
+	// coordinator (v1 producer-lane reservation, stricter than the memo's
+	// per-query bound): combined with numTasks ≤ workerCount eligibility
+	// and the scheduler's eager-spread placement, each worker holds at
+	// most one manifest-blocked task, so producers always keep
+	// MaxConcurrent−1 lanes. Relax to per-query after C2 if concurrent-
+	// query overlap matters.
+	eagerFeedsMu   sync.Mutex
+	eagerFeeds     map[string]*eagerFeed
+	eagerStageSlot chan struct{}
 }
 
 // New creates a new Coordinator.
@@ -241,6 +262,10 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 		queryMetas: make(map[string]*queryMeta),
 		querySem:   make(chan struct{}, maxInflight),
 		localSem:   make(chan struct{}, defaultLocalFastPathConcurrency),
+		eagerFeeds: make(map[string]*eagerFeed),
+		// v1 bound: one eager consumer stage in flight per coordinator
+		// (see the field comment).
+		eagerStageSlot: make(chan struct{}, 1),
 	}
 	// Memory-aware gRPC placement: the scheduler bin-packs estimated task
 	// footprints against heartbeat pool stats. No-op on the NATS path.

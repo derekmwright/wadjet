@@ -402,6 +402,10 @@ locals {
     # side of the flag; the worker cloud-init adds --streaming-exchange
     # from the same terraform var.
     export TPCH_STREAMING_EXCHANGE="${var.streaming_exchange ? "1" : "0"}"
+    # Eager consumer dispatch (Phase C1). Coordinator-side flag only;
+    # workers act on EagerInputs in the task spec. Default-off engine
+    # flag, so the env parse is explicit opt-in ("1"), not a kill switch.
+    export WADJET_EAGER_DISPATCH="${var.eager_dispatch ? "1" : "0"}"
     # Catalog snapshot/restore prefix (PR #115). Non-empty = restore the
     # post-discovery catalog from s3://<bucket>/<prefix> instead of paying
     # ~15 min of discovery+ANALYZE per deploy; first boot writes it.

@@ -1,12 +1,14 @@
 package coordinator
 
 import (
+	"errors"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/worker"
 )
 
 func retryTestTasks(n int) []distributed.Task {
@@ -386,5 +388,43 @@ func TestTaskRetrier_PartitionAccountingUnreported(t *testing.T) {
 	rows, bytes := tr.PartitionAccounting(4)
 	if rows != nil || bytes != nil {
 		t.Fatalf("want nil vectors for unreported tasks, got rows=%v bytes=%v", rows, bytes)
+	}
+}
+
+// TestTaskRetrier_StaleInputAttemptRetries pins the Phase C1 slice-4
+// classification contract (docs/design/eager-consumer-dispatch.md §5): a
+// consumer task that poisons itself on a superseded producer attempt
+// (worker.StaleInputAttemptMarker in the failure text, NO MissingInputKey)
+// is RETRIABLE — it takes the standard re-dispatch path, unlike the
+// inputLostMarker family, which is terminal via the fatal classifier. By
+// the retry the producer attempt set is stable, so attempt 2 succeeds.
+func TestTaskRetrier_StaleInputAttemptRetries(t *testing.T) {
+	// The coordinator's real fatal classifier: peerFiles set (streaming
+	// exchange on) but the stale-attempt failure carries no
+	// MissingInputKey, so it must never classify fatal.
+	c := newEagerTestCoordinator(true)
+	staleErr := worker.StaleInputAttemptMarker + ": producer task p1 attempt 2 superseded consumed attempt 1"
+	stale := distributed.ResultNotification{TaskID: "a", Success: false, Error: staleErr}
+	if c.classifyFatalResult(stale) {
+		t.Fatal("stale-attempt failure must not classify fatal")
+	}
+	if IsInputLostErr(errors.New(staleErr)) {
+		t.Fatal("stale-attempt marker must not match the input-lost family (that path disables streaming exchange for a full rerun)")
+	}
+
+	rep := &collectingRepublisher{}
+	tr := newTaskRetrier(retryTestTasks(1), true, rep.republish, slog.Default(), "s", c.classifyFatalResult)
+	if tr.Observe(stale) {
+		t.Fatal("stale-attempt failure with retries left must not be terminal")
+	}
+	got := waitRepublished(t, rep, 1)
+	if got[0].Attempt != 2 {
+		t.Fatalf("republished attempt = %d, want 2", got[0].Attempt)
+	}
+	if !tr.Observe(okResult("a", "f-a2")) {
+		t.Fatal("not done after retry success")
+	}
+	if _, _, failed := tr.FirstError(); failed {
+		t.Fatal("stale-attempt retry must recover cleanly")
 	}
 }

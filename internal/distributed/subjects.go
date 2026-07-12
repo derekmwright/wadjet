@@ -35,6 +35,13 @@ const (
 	// coordinator stays conservative about them.
 	SubjectUploadComplete = "wadjet.uploads.complete"
 
+	// Eager consumer dispatch (docs/design/eager-consumer-dispatch.md) —
+	// Core NATS. Coordinator republishes a compact per-producer-task file
+	// manifest as each task of an eager edge completes; consumer tasks'
+	// manifest sources subscribe per (root query, producer stage).
+	// Metadata-only; payload bytes never flow through these subjects.
+	SubjectEagerManifest = "wadjet.eager"
+
 	// Query cancellation — Core NATS
 	SubjectCancel = "wadjet.cancel"
 
@@ -128,4 +135,13 @@ func CompleteSubjectAll() string {
 // via wildcard by the coordinator.
 func TaskProgressSubject(queryID, taskID string) string {
 	return SubjectTaskProgress + "." + queryID + "." + taskID
+}
+
+// EagerManifestSubject returns the NATS subject on which the coordinator
+// publishes ProducerTaskManifest messages for one producer stage of one
+// root query. Consumer tasks subscribe with the exact subject (no
+// wildcard); root and stage IDs are sanitized to NATS token characters
+// by construction (UUIDs / stage-N names).
+func EagerManifestSubject(rootQueryID, stageID string) string {
+	return SubjectEagerManifest + "." + rootQueryID + "." + stageID
 }

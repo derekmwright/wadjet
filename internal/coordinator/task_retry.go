@@ -49,6 +49,15 @@ type taskRetrier struct {
 	// missing-input failures whose producer is dead with no durable copy
 	// (ErrInputLost) — a state no re-dispatch can fix.
 	fatal func(distributed.ResultNotification) bool
+
+	// onSuccess, when non-nil, fires once per task as it reaches a
+	// successful terminal state (eager consumer dispatch publishes the
+	// producer-task manifest from it). Invoked OUTSIDE the retrier lock;
+	// final is true for the stage's last terminal task; partBytes is the
+	// worker-reported per-partition output vector (nil when unreported) —
+	// the eager feed accumulates it for the early skew decision (memo §6).
+	// Must be assigned before the retrier starts observing results.
+	onSuccess func(taskID string, attempt int, files []string, workerID string, final bool, partBytes []int64)
 }
 
 // inputLostMarker tags terminal failures caused by an unresolvable
@@ -124,7 +133,12 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 		st.terminal = true
 		tr.terminal++
 		done := tr.terminal >= len(tr.order)
+		attempt := st.attempts
+		onSuccess := tr.onSuccess
 		tr.mu.Unlock()
+		if onSuccess != nil {
+			onSuccess(r.TaskID, attempt, r.ResultFiles, r.WorkerID, done, r.PartitionBytes)
+		}
 		return done
 	}
 	// Failure: retry if attempts remain, else terminal failure. A
@@ -186,6 +200,17 @@ func (tr *taskRetrier) Terminal() int {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	return tr.terminal
+}
+
+// IsTerminal reports whether one task has reached a terminal state
+// (success, or failure with retries exhausted). The eager publish governor
+// uses it to distinguish a freed worker slot (terminal) from a
+// failure-then-retry, which re-occupies the slot.
+func (tr *taskRetrier) IsTerminal(taskID string) bool {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	st, ok := tr.states[taskID]
+	return ok && st.terminal
 }
 
 // FirstError returns the first terminal failure in dispatch order, if any.

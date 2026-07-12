@@ -422,6 +422,12 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		// path (SF100 A/B 2026-07-12: 42m24s→30m38s, −27.7%, 22/22
 		// row-identical). Set 0/false as the kill switch.
 		StreamingExchange: envBoolDefaultOn("TPCH_STREAMING_EXCHANGE"),
+		// Eager consumer dispatch (docs/design/eager-consumer-dispatch.md,
+		// Phase C1): default OFF pending SF100 validation, so the parse is
+		// explicit opt-in ("1"/"true") — the OPPOSITE convention of the
+		// default-on kill switches above. Flip to envBoolDefaultOn only
+		// when the engine default flips.
+		EagerDispatch: os.Getenv("WADJET_EAGER_DISPATCH") == "1" || strings.EqualFold(os.Getenv("WADJET_EAGER_DISPATCH"), "true"),
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
 	coord.Workers().StartSubStatsLogger(ctx)

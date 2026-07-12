@@ -61,6 +61,14 @@ type StageOutput struct {
 	// descriptors so workers apply the bloom at scan time. Carries forward
 	// across pass-through leaf scans that don't dispatch tasks themselves.
 	DynamicFilters []distributed.DynamicFilterSpec
+
+	// eager marks a PROVISIONAL output synthesized by an eagerly-cleared
+	// consumer (eagerFeed.provisionalOutput): the producer stage is still
+	// running, Files is the empty layout, and dispatchComputeStage must
+	// feed the corresponding input alias from Task.EagerInputs manifests
+	// instead of a frozen file list. nil on every real (completed-stage)
+	// output. In-memory only — never serialized.
+	eager *eagerFeed
 }
 
 // BuildStats is the coordinator-merged dynamic-filter artifact for one
