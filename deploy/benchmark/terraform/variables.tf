@@ -270,6 +270,12 @@ variable "streaming_exchange" {
   default     = true
 }
 
+variable "eager_dispatch" {
+  description = "Eager consumer dispatch (docs/design/eager-consumer-dispatch.md, Phase C1): eligible non-join consumer stages start before their producer stage fully drains, consuming per-producer-task manifests. Coordinator-side only (workers act on the task spec; no worker flag). Requires streaming_exchange. Default false pending SF100 validation — set true for the treatment arm of the C3 pair."
+  type        = bool
+  default     = false
+}
+
 variable "peer_exchange_port" {
   description = "Worker↔worker peer-exchange (FetchShuffle) port; SG opens it intra-cluster whenever streaming_exchange is set."
   type        = number
