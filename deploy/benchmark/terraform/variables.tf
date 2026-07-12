@@ -228,6 +228,18 @@ variable "skew_suite" {
   default     = ""
 }
 
+variable "block_profile_rate" {
+  description = "runtime.SetBlockProfileRate value in ns for coordinator + workers (profiling runs only). Empty/0 = sampler off."
+  type        = string
+  default     = ""
+}
+
+variable "mutex_profile_fraction" {
+  description = "runtime.SetMutexProfileFraction 1-in-N value for coordinator + workers (profiling runs only). Empty/0 = sampler off."
+  type        = string
+  default     = ""
+}
+
 variable "dynamic_filters" {
   description = "Set to 1 to enable Trino-style semi-join dynamic-filter pushdown on the coordinator. Off by default for v1 rollout."
   type        = string

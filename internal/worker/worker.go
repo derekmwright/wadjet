@@ -1642,8 +1642,10 @@ func (w *Worker) reapCancelled(maxAge time.Duration) {
 // WorkerProfile is the JSON envelope for profile data sent over NATS.
 type WorkerProfile struct {
 	WorkerID string `json:"worker_id"`
-	CPU      []byte `json:"cpu,omitempty"`  // pprof CPU profile (gzip-compressed)
-	Heap     []byte `json:"heap,omitempty"` // pprof heap profile (gzip-compressed)
+	CPU      []byte `json:"cpu,omitempty"`   // pprof CPU profile (gzip-compressed)
+	Heap     []byte `json:"heap,omitempty"`  // pprof heap profile (gzip-compressed)
+	Block    []byte `json:"block,omitempty"` // pprof block profile; empty unless WADJET_BLOCK_PROFILE_RATE set
+	Mutex    []byte `json:"mutex,omitempty"` // pprof mutex profile; empty unless WADJET_MUTEX_PROFILE_FRACTION set
 }
 
 // handleProfileStart begins CPU profiling to an in-memory buffer.
@@ -1670,6 +1672,18 @@ func (w *Worker) handleProfileStart(msg *nats.Msg) {
 // handleProfileCollect stops CPU profiling, collects a heap snapshot,
 // and responds with both profiles as JSON.
 func (w *Worker) handleProfileCollect(msg *nats.Msg) {
+	resp := w.collectProfileEnvelope()
+	data, err := json.Marshal(resp)
+	if err != nil {
+		msg.Respond([]byte("error: " + err.Error()))
+		return
+	}
+	msg.Respond(data)
+}
+
+// collectProfileEnvelope stops any in-flight CPU profile and snapshots
+// heap, block, and mutex profiles into a WorkerProfile envelope.
+func (w *Worker) collectProfileEnvelope() WorkerProfile {
 	w.profMu.Lock()
 	defer w.profMu.Unlock()
 
@@ -1686,15 +1700,22 @@ func (w *Worker) handleProfileCollect(msg *nats.Msg) {
 	var heapBuf bytes.Buffer
 	pprof.WriteHeapProfile(&heapBuf)
 
-	resp := WorkerProfile{
+	// Block/mutex profiles carry records only when the env-gated samplers
+	// (WADJET_BLOCK_PROFILE_RATE / WADJET_MUTEX_PROFILE_FRACTION) are on;
+	// the Count gate keeps the envelope free of empty profiles otherwise.
+	var blockBuf, mutexBuf bytes.Buffer
+	if p := pprof.Lookup("block"); p != nil && p.Count() > 0 {
+		p.WriteTo(&blockBuf, 0)
+	}
+	if p := pprof.Lookup("mutex"); p != nil && p.Count() > 0 {
+		p.WriteTo(&mutexBuf, 0)
+	}
+
+	return WorkerProfile{
 		WorkerID: w.config.WorkerID,
 		CPU:      cpuData,
 		Heap:     heapBuf.Bytes(),
+		Block:    blockBuf.Bytes(),
+		Mutex:    mutexBuf.Bytes(),
 	}
-	data, err := json.Marshal(resp)
-	if err != nil {
-		msg.Respond([]byte("error: " + err.Error()))
-		return
-	}
-	msg.Respond(data)
 }

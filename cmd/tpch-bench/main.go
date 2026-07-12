@@ -149,6 +149,17 @@ func main() {
 		}()
 	}
 
+	// Env-gated contention profiling — same knobs as wadjet serve, because
+	// this binary hosts the in-process coordinator in distributed mode.
+	if rate, err := strconv.Atoi(os.Getenv("WADJET_BLOCK_PROFILE_RATE")); err == nil && rate > 0 {
+		runtime.SetBlockProfileRate(rate)
+		log.Printf("Block profiling enabled (rate=%dns)", rate)
+	}
+	if frac, err := strconv.Atoi(os.Getenv("WADJET_MUTEX_PROFILE_FRACTION")); err == nil && frac > 0 {
+		runtime.SetMutexProfileFraction(frac)
+		log.Printf("Mutex profiling enabled (fraction=%d)", frac)
+	}
+
 	// Set GOMEMLIMIT to prevent OOM on bare metal / EC2 instances.
 	// GOGC=off disables percentage-based GC triggering — GOMEMLIMIT alone
 	// acts as the safety net. This avoids GC assist overhead when the LRU
@@ -269,6 +280,23 @@ func main() {
 	// Collect worker profiles after benchmark
 	if nc != nil && *profDir != "" {
 		collectWorkerProfiles(nc, *workers, *profDir)
+	}
+
+	// Coordinator-side block/mutex profiles (records exist only when the
+	// env-gated samplers are on).
+	if *profDir != "" {
+		for _, name := range []string{"block", "mutex"} {
+			p := pprof.Lookup(name)
+			if p == nil || p.Count() == 0 {
+				continue
+			}
+			path := filepath.Join(*profDir, fmt.Sprintf("coord-%s.prof", name))
+			if f, err := os.Create(path); err == nil {
+				p.WriteTo(f, 0)
+				f.Close()
+				log.Printf("Saved coordinator %s profile: %s", name, path)
+			}
+		}
 	}
 
 	if *memProf != "" {
@@ -909,6 +937,16 @@ func collectWorkerProfiles(nc *nats.Conn, workerCount int, profDir string) {
 			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-heap.prof", wp.WorkerID))
 			os.WriteFile(path, wp.Heap, 0644)
 			log.Printf("Saved worker heap profile: %s (%d bytes)", path, len(wp.Heap))
+		}
+		if len(wp.Block) > 0 {
+			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-block.prof", wp.WorkerID))
+			os.WriteFile(path, wp.Block, 0644)
+			log.Printf("Saved worker block profile: %s (%d bytes)", path, len(wp.Block))
+		}
+		if len(wp.Mutex) > 0 {
+			path := filepath.Join(profDir, fmt.Sprintf("worker-%s-mutex.prof", wp.WorkerID))
+			os.WriteFile(path, wp.Mutex, 0644)
+			log.Printf("Saved worker mutex profile: %s (%d bytes)", path, len(wp.Mutex))
 		}
 		collected++
 	}
