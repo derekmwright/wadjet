@@ -39,12 +39,12 @@ var EagerEdgesPlanned atomic.Int64
 // late-built consumers: a consumer task built after the append sees the
 // manifest in its Replay; one built before has already subscribed (or will
 // catch the republisher's next re-send).
-func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string, feed *eagerFeed) func(taskID string, attempt int, files []string, workerID string, final bool) {
+func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string, feed *eagerFeed) func(taskID string, attempt int, files []string, workerID string, final bool, partBytes []int64) {
 	if !c.config.EagerDispatch || !c.config.StreamingExchange || rootQueryID == "" || c.nc == nil {
 		return nil
 	}
 	subject := distributed.EagerManifestSubject(rootQueryID, stageID)
-	return func(taskID string, attempt int, files []string, workerID string, final bool) {
+	return func(taskID string, attempt int, files []string, workerID string, final bool, partBytes []int64) {
 		m := distributed.ProducerTaskManifest{
 			StageID:  stageID,
 			TaskID:   taskID,
@@ -55,7 +55,11 @@ func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string, feed *
 			Final:    final,
 		}
 		if feed != nil {
+			// Replay before accounting: a consumer released by the
+			// decision threshold must see every counted task's manifest
+			// in its Replay snapshot.
 			feed.appendReplay(m)
+			feed.noteCompletion(partBytes)
 		}
 		data, err := distributed.Marshal(m)
 		if err != nil {

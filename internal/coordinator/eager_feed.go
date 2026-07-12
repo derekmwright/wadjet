@@ -43,28 +43,62 @@ var eagerManifestRepublishEvery = 3 * time.Second
 type eagerFeed struct {
 	dispatched chan struct{} // closed by dispatch(); dispatch info valid after
 
-	// Set by dispatch(), immutable afterwards.
-	manifestStageID string   // stage ID used in EagerManifestSubject and manifests
-	rootQueryID     string   // root query ID scoping the manifest subject
-	producerTaskIDs []string // full candidate set (task IDs are stable across retries)
-	numPartitions   int
+	// decisionReady closes once decisionThreshold producer tasks have
+	// reached successful terminal state — the memo §6 early-skew decision
+	// point. Join consumers block on it before clearing; non-join (C1)
+	// consumers ignore it. Always closes at or before stage completion
+	// (threshold ≤ total tasks).
+	decisionReady chan struct{}
 
-	mu     sync.Mutex
-	replay []distributed.ProducerTaskManifest // manifests published so far
-	closed bool                               // query finished; republisher must stop
+	// Set by dispatch(), immutable afterwards.
+	manifestStageID   string   // stage ID used in EagerManifestSubject and manifests
+	rootQueryID       string   // root query ID scoping the manifest subject
+	producerTaskIDs   []string // full candidate set (task IDs are stable across retries)
+	numPartitions     int
+	decisionThreshold int // completions needed before decisionReady closes
+
+	mu        sync.Mutex
+	replay    []distributed.ProducerTaskManifest // manifests published so far
+	closed    bool                               // query finished; republisher must stop
+	completed int                                // producer tasks at successful terminal
+	// observedPartBytes accumulates worker-reported per-partition output
+	// bytes element-wise over completed tasks. nil until the first task
+	// reports a vector; stays nil for legacy workers (skew decision
+	// degrades to "would not split", matching planSkewSplitTasks on nil).
+	observedPartBytes []int64
+	decisionClosed    bool
 }
 
 func newEagerFeed() *eagerFeed {
-	return &eagerFeed{dispatched: make(chan struct{})}
+	return &eagerFeed{
+		dispatched:    make(chan struct{}),
+		decisionReady: make(chan struct{}),
+	}
 }
 
 // dispatch records the producer's task layout and releases consumers
 // blocked on the feed. Call exactly once, before publishing producer tasks.
-func (f *eagerFeed) dispatch(rootQueryID, manifestStageID string, producerTaskIDs []string, numPartitions int) {
+func (f *eagerFeed) dispatch(rootQueryID, manifestStageID string, producerTaskIDs []string, numPartitions, workerCount int) {
 	f.rootQueryID = rootQueryID
 	f.manifestStageID = manifestStageID
 	f.producerTaskIDs = producerTaskIDs
 	f.numPartitions = numPartitions
+	// Memo §6 decision point: one full wave AND at least a quarter of the
+	// producer tasks, so every producer's input-slice shape is represented
+	// in the byte profile; capped at the task count so single-task or
+	// tiny producers still reach a decision.
+	total := len(producerTaskIDs)
+	threshold := workerCount
+	if q := (total + 3) / 4; q > threshold {
+		threshold = q
+	}
+	if threshold > total {
+		threshold = total
+	}
+	if threshold < 1 {
+		threshold = 1
+	}
+	f.decisionThreshold = threshold
 	close(f.dispatched)
 }
 
@@ -74,6 +108,51 @@ func (f *eagerFeed) appendReplay(m distributed.ProducerTaskManifest) {
 	f.mu.Lock()
 	f.replay = append(f.replay, m)
 	f.mu.Unlock()
+}
+
+// noteCompletion records one producer task's successful terminal state and
+// its per-partition output vector (nil when the worker didn't report).
+// Closes decisionReady once the threshold is crossed. Called exactly once
+// per producer task, from the manifest publisher hook.
+func (f *eagerFeed) noteCompletion(partBytes []int64) {
+	f.mu.Lock()
+	f.completed++
+	if len(partBytes) > 0 {
+		if f.observedPartBytes == nil {
+			f.observedPartBytes = make([]int64, f.numPartitions)
+		}
+		for p := 0; p < len(partBytes) && p < len(f.observedPartBytes); p++ {
+			f.observedPartBytes[p] += partBytes[p]
+		}
+	}
+	fire := !f.decisionClosed && f.completed >= f.decisionThreshold
+	if fire {
+		f.decisionClosed = true
+	}
+	f.mu.Unlock()
+	if fire {
+		close(f.decisionReady)
+	}
+}
+
+// projectedPartitionBytes linearly extrapolates the observed per-partition
+// bytes to the full producer task set (memo §6: hash partitioning makes
+// each completed task an unbiased sample, so observed × total/completed
+// converges fast). Returns nil when no task reported accounting — the
+// caller treats that exactly like planSkewSplitTasks treats nil vectors:
+// no split would fire on full data either.
+func (f *eagerFeed) projectedPartitionBytes() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.observedPartBytes == nil || f.completed == 0 {
+		return nil
+	}
+	total := int64(len(f.producerTaskIDs))
+	out := make([]int64, len(f.observedPartBytes))
+	for p, b := range f.observedPartBytes {
+		out[p] = b * total / int64(f.completed)
+	}
+	return out
 }
 
 // replaySnapshot returns a copy of the manifests published so far.
@@ -222,6 +301,210 @@ func (c *Coordinator) startEagerRepublisher(f *eagerFeed) {
 			}
 		}
 	}()
+}
+
+// joinPrimaryDeps returns a join stage's (probe, build) dependency stage
+// IDs, mirroring buildTaskInputsForStage / planSkewSplitTasks resolution.
+func joinPrimaryDeps(s physical.Stage) (probeDep, buildDep string) {
+	probeDep = s.LeftDepStage
+	buildDep = s.RightDepStage
+	if probeDep == "" && len(s.Dependencies) > 0 {
+		probeDep = s.Dependencies[0]
+	}
+	if buildDep == "" && len(s.Dependencies) > 1 {
+		buildDep = s.Dependencies[1]
+	}
+	return probeDep, buildDep
+}
+
+// eagerAliasForDep returns the Task.Inputs alias under which
+// buildTaskInputsForStage files dependency depID for this stage.
+// Task.EagerInputs must key identically, or the worker's fragment source /
+// join-build routing won't find the feed spec.
+func eagerAliasForDep(stage physical.Stage, depID string) string {
+	switch stage.Type {
+	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
+		_, buildDep := joinPrimaryDeps(stage)
+		buildAlias := stage.BuildTableAlias
+		if buildAlias == "" {
+			buildAlias = "build"
+		}
+		if depID == buildDep {
+			return buildAlias
+		}
+		probeAlias := "probe"
+		if probeAlias == buildAlias {
+			probeAlias = "probe_side"
+		}
+		return probeAlias
+	default:
+		return depID
+	}
+}
+
+// eagerEligibleJoinConsumer reports whether join stage s may clear
+// dispatch on its two producers' eager feeds (memo §3.3/§6, Phase C2
+// scope). Requires:
+//   - a hash_join on the fragment path (no GroupByCols — those take the
+//     legacy task path, which reads frozen Task.Inputs). broadcast_join is
+//     out of scope (broadcast edges stay S3+KV per memo §7);
+//     sort_merge_join is dormant (gate off) and excluded from slice 1.
+//   - both primary deps are standalone exchange-repartitions (the feeds'
+//     producers); fused-build deps keep the barrier (their real outputs
+//     ride task.FusedJoins[i].BuildFiles).
+//   - not the gather-fused stage, no scalar deps (joins never carry
+//     dynamic-filter emits/consumes; checked defensively).
+//
+// The skew decision itself happens later, at the feed threshold
+// (eagerJoinWouldSplit) — this gate is structural only.
+func eagerEligibleJoinConsumer(s physical.Stage, stageByID map[string]physical.Stage, fuseStageID string) bool {
+	if s.Type != physical.StageHashJoin {
+		return false
+	}
+	if len(s.GroupByCols) > 0 || s.ID == fuseStageID || len(s.ScalarDependencies) > 0 {
+		return false
+	}
+	if len(s.EmitDynamicFilters) > 0 || len(s.ConsumeDynamicFilters) > 0 {
+		return false
+	}
+	if len(s.Dependencies) != 2+len(s.FusedJoins) {
+		return false
+	}
+	probeDep, buildDep := joinPrimaryDeps(s)
+	for _, dep := range []string{probeDep, buildDep} {
+		d, ok := stageByID[dep]
+		if !ok || d.Type != physical.StageExchangeRepartition || d.Exchange == nil || d.Exchange.Count <= 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// eagerJoinWouldSplit is the memo §6 early skew decision: projects both
+// feeds' observed per-partition bytes to the full producer set and asks
+// whether ANY task group would split under the exact planSkewSplitTasks
+// thresholds (absolute floor, ratio gate, build replication bound). A
+// "yes" sends the consumer back to the barrier, where the full-data
+// decision governs — eager dispatch may only ever cost a split win, never
+// produce a wrong split (slice 1; frozen eager split layouts are slice 2).
+//
+// Differences from planSkewSplitTasks, both conservative toward "would
+// split" (i.e. toward the barrier): no probe-file-count cap on the split
+// factor (file counts are unknowable before completion), and missing
+// accounting on either side returns false — nil vectors would disable the
+// full-data split too, so no win is lost by clearing eagerly.
+func (c *Coordinator) eagerJoinWouldSplit(stage physical.Stage, probeFeed, buildFeed *eagerFeed, numTasks, workerCount int) bool {
+	if !c.config.SkewSplit {
+		return false
+	}
+	if stage.Type != physical.StageHashJoin ||
+		stage.Distribution.Kind != physical.DistHashPartitioned ||
+		numTasks <= 0 || workerCount <= 1 {
+		return false
+	}
+	switch stage.JoinType {
+	case "inner", "left", "semi", "anti":
+	default:
+		return false
+	}
+	probeBytes := probeFeed.projectedPartitionBytes()
+	buildBytes := buildFeed.projectedPartitionBytes()
+	if probeFeed.numPartitions != buildFeed.numPartitions ||
+		len(probeBytes) != probeFeed.numPartitions ||
+		len(buildBytes) != buildFeed.numPartitions {
+		return false
+	}
+	buildBound := skewSplitMaxBuildBytes
+	if c.workers != nil {
+		if t := broadcastThresholdFromCluster(c.workers.MinWorkerPoolBudget()); t > 0 {
+			buildBound = t
+		}
+	}
+	var totalProbeBytes int64
+	for _, b := range probeBytes {
+		totalProbeBytes += b
+	}
+	meanGroupBytes := totalProbeBytes / int64(numTasks)
+	for w := 0; w < numTasks; w++ {
+		start, end := partitionRangeForWorker(probeFeed.numPartitions, w, numTasks)
+		var pb, bb int64
+		for p := start; p < end; p++ {
+			pb += probeBytes[p]
+			bb += buildBytes[p]
+		}
+		k := 0
+		if pb > 0 {
+			k = int((pb + skewSplitTargetBytes - 1) / skewSplitTargetBytes)
+		}
+		if k > workerCount {
+			k = workerCount
+		}
+		ratio := float64(0)
+		if meanGroupBytes > 0 {
+			ratio = float64(pb) / float64(meanGroupBytes)
+		}
+		if k > 1 && pb > skewSplitMinGroupBytes && ratio >= skewSplitMinRatio && bb <= buildBound {
+			return true
+		}
+	}
+	return false
+}
+
+// eagerPublishGovernor caps in-flight eager consumer tasks so producers
+// always keep worker task slots. Eager tasks block on producer manifests
+// while HOLDING their slot, and neither transport can reorder around them
+// (gRPC dispatch is targeted with no work stealing; NATS pulls are FIFO) —
+// so publishing a full join fan-out (numTasks = partition count, typically
+// several × cluster capacity) at once could wedge every slot behind tasks
+// waiting on producers that can no longer run. The governor publishes the
+// first `cap` tasks and tops up one-for-one as published tasks reach a
+// TERMINAL state (a failure that will retry keeps its slot — the retry
+// re-occupies it).
+//
+// The residual hazard is a producer-task retry published after eager
+// consumers (it queues behind them on one worker); the task deadline
+// bounds that stall, same as any other slot contention. Documented in the
+// memo §3.3 v1 notes.
+type eagerPublishGovernor struct {
+	mu      sync.Mutex
+	pending []distributed.Task
+	freed   map[string]bool // task IDs whose terminal state already topped up
+	publish func(distributed.Task)
+}
+
+// newEagerPublishGovernor splits tasks into a first wave (returned for the
+// caller's initial PublishTasks) and a governed remainder. inFlightCap is
+// clamped to ≥ 1.
+func newEagerPublishGovernor(tasks []distributed.Task, inFlightCap int, publish func(distributed.Task)) (firstWave []distributed.Task, g *eagerPublishGovernor) {
+	if inFlightCap < 1 {
+		inFlightCap = 1
+	}
+	if len(tasks) <= inFlightCap {
+		return tasks, nil
+	}
+	return tasks[:inFlightCap], &eagerPublishGovernor{
+		pending: append([]distributed.Task(nil), tasks[inFlightCap:]...),
+		freed:   make(map[string]bool),
+		publish: publish,
+	}
+}
+
+// noteTerminal releases one slot for task taskID (idempotent per task) and
+// publishes the next pending task, if any. Called from the stage's result
+// subscription after retrier.Observe confirms the task is terminal; the
+// publish runs on this goroutine — callers already tolerate the same NATS
+// round-trip in the retry republish path.
+func (g *eagerPublishGovernor) noteTerminal(taskID string) {
+	g.mu.Lock()
+	if g.freed[taskID] || len(g.pending) == 0 {
+		g.mu.Unlock()
+		return
+	}
+	g.freed[taskID] = true
+	next := g.pending[0]
+	g.pending = g.pending[1:]
+	g.mu.Unlock()
+	g.publish(next)
 }
 
 // eagerEligibleConsumer reports whether stage s may clear dispatch on its

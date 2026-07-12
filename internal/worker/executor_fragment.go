@@ -1694,7 +1694,13 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	if len(spec.LeftKeys) == 0 || len(spec.RightKeys) == 0 {
 		return nil, nil, fmt.Errorf("hash_join_probe: LeftKeys and RightKeys required")
 	}
-	if len(spec.BuildFiles) == 0 {
+	// Eager consumer dispatch: a build alias registered in task.EagerInputs
+	// is fed by producer-task manifests — its BuildFiles is empty BY
+	// CONSTRUCTION, so the empty-build short-circuit below must not fire
+	// (it silently emitted zero join rows, the build-side twin of the
+	// executeFragment empty-InputFiles bug the C1 e2e caught).
+	eagerBuild, buildIsEager := task.EagerInputs[spec.BuildAlias]
+	if len(spec.BuildFiles) == 0 && !buildIsEager {
 		// Empty build → inner/semi joins emit no rows; upstream planner may
 		// have decided this fragment should not run, but we treat empty
 		// build as "no output". Returning an op chain that drops every row
@@ -1719,9 +1725,19 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	// Hash-shuffle probes don't share a build (each task probes its own
 	// partition) so they take the direct path.
 	buildHJ := func() (*exec.HashJoin, error) {
-		src, err := e.sourceForAlias(task.QueryID, bucket, spec.BuildAlias, spec.BuildFiles)
-		if err != nil {
-			return nil, fmt.Errorf("build source: %w", err)
+		var src exec.Source
+		if buildIsEager {
+			// Manifest-fed build: HashJoin.Build drains the source, which
+			// blocks between manifests until every producer candidate
+			// resolves — the build completes exactly when the producer
+			// side's files for this task's partition range all arrived.
+			src = newManifestStreamSource(e, task.QueryID, bucket, eagerBuild)
+		} else {
+			var err error
+			src, err = e.sourceForAlias(task.QueryID, bucket, spec.BuildAlias, spec.BuildFiles)
+			if err != nil {
+				return nil, fmt.Errorf("build source: %w", err)
+			}
 		}
 		if err := src.Init(ctx); err != nil {
 			src.Close()

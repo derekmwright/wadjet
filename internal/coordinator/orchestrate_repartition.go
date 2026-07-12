@@ -283,7 +283,7 @@ func (c *Coordinator) runShuffleSide(
 			ids[i] = tasks[i].ID
 		}
 		t0 := tasks[0]
-		eagerFeed.dispatch(distributed.TaskRootQueryID(&t0), stageID, ids, numParts)
+		eagerFeed.dispatch(distributed.TaskRootQueryID(&t0), stageID, ids, numParts, workerCount)
 		c.startEagerRepublisher(eagerFeed)
 	}
 	defer c.watchStuckTasks(ctx, retrier)()
