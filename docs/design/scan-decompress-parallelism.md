@@ -1,6 +1,7 @@
 # Scan-side zstd decompression parallelism
 
-Status: DRAFT — awaiting review. No code yet.
+Status: IMPLEMENTED + SF100-VALIDATED (PR #216, §6). Written as a
+pre-implementation design memo; §6 records the validation outcome.
 Evidence: SF100 profiling run `results/20260711-225605` @ `9723c54`
 (= main `7a1a28e` + PR #215 block/mutex profiling), 22/22 row-identical
 to baseline `20260709-175846`, suite 49m42s.
