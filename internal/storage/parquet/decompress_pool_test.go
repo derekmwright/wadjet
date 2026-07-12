@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -116,6 +117,50 @@ func BenchmarkDecompressZstd(b *testing.B) {
 		}
 		putZstdBuf(got)
 	}
+}
+
+// The shared decoder must admit parallel DecodeAll calls. Concurrency 1
+// serialized every page decompression in the process and left 16-vCPU
+// workers ~91% idle on zstd parquet (SF100 run 20260711-225605;
+// docs/design/scan-decompress-parallelism.md).
+func TestZstdDecoderConcurrency_ScalesWithCores(t *testing.T) {
+	got := zstdDecoderConcurrency()
+	want := runtime.GOMAXPROCS(0)
+	if want > 16 {
+		want = 16
+	}
+	if got != want {
+		t.Fatalf("zstdDecoderConcurrency() = %d, want min(GOMAXPROCS, 16) = %d", got, want)
+	}
+	if runtime.GOMAXPROCS(0) > 1 && got < 2 {
+		t.Fatalf("decoder concurrency = %d on a %d-proc host — page decompression is serialized",
+			got, runtime.GOMAXPROCS(0))
+	}
+}
+
+// BenchmarkDecompressZstdParallel measures DecodeAll under scan-like fan-out
+// (one goroutine per column). With decoder concurrency min(GOMAXPROCS,16)
+// this should scale near-linearly; with concurrency 1 it collapses to the
+// single-threaded rate regardless of parallelism.
+func BenchmarkDecompressZstdParallel(b *testing.B) {
+	rng := rand.New(rand.NewSource(7))
+	src := make([]byte, 64*1024)
+	for i := range src {
+		src[i] = byte(rng.Intn(64))
+	}
+	enc := zstdEncode(b, src)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			got, err := decompressZstd(enc, len(src))
+			if err != nil {
+				b.Fatal(err)
+			}
+			putZstdBuf(got)
+		}
+	})
 }
 
 // putZstdBuf must drop oversized buffers so a single anomalous page can't
