@@ -23,11 +23,23 @@ import (
 // precedent).
 var EagerManifestsPublished atomic.Int64
 
+// EagerEdgesPlanned counts consumer stages that cleared dispatch on an
+// eager feed instead of the done barrier — the memo §8 activation marker
+// for the SF100 pair (grep "eager dispatch: consumer cleared early" /
+// this counter's log line in benchmark.log).
+var EagerEdgesPlanned atomic.Int64
+
 // eagerManifestPublisher returns a taskRetrier onSuccess hook that
 // publishes one manifest per successful producer task, or nil when eager
 // dispatch is disabled or the root query ID is unavailable (legacy
 // pipeline tasks without scratch anchors never have eager consumers).
-func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string) func(taskID string, attempt int, files []string, workerID string, final bool) {
+//
+// feed, when non-nil, receives every manifest into its replay list BEFORE
+// the NATS publish, making the feed the single source of truth for
+// late-built consumers: a consumer task built after the append sees the
+// manifest in its Replay; one built before has already subscribed (or will
+// catch the republisher's next re-send).
+func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string, feed *eagerFeed) func(taskID string, attempt int, files []string, workerID string, final bool) {
 	if !c.config.EagerDispatch || !c.config.StreamingExchange || rootQueryID == "" || c.nc == nil {
 		return nil
 	}
@@ -41,6 +53,9 @@ func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string) func(t
 			WorkerID: workerID,
 			PeerAddr: c.workers.PeerAddr(workerID),
 			Final:    final,
+		}
+		if feed != nil {
+			feed.appendReplay(m)
 		}
 		data, err := distributed.Marshal(m)
 		if err != nil {

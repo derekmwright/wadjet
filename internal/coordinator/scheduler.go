@@ -51,6 +51,16 @@ type Scheduler struct {
 	inflightMu sync.Mutex
 	inflight   map[string]inflightTask // task ID → estimate charged to a worker
 
+	// eagerInflight tracks dispatched-not-yet-done eager consumer tasks
+	// (Task.EagerInputs non-empty) per worker, for the §3.3 producer-lane
+	// reservation: pickEagerWorker spreads these so no worker's task slots
+	// fill up with manifest-blocked consumers while its producer tasks
+	// queue behind them (dispatch is targeted gRPC — a saturated worker's
+	// queue cannot be stolen). Long TTL: eager tasks legitimately run for
+	// the whole producer stage, so the 60s estimate TTL would drop the
+	// charge mid-flight.
+	eagerInflight map[string]inflightTask // task ID → worker holding an eager task
+
 	// annotate, when set, mutates each task immediately before it is
 	// serialized for dispatch — the single egress every task (initial and
 	// retried) passes through. Used by streaming exchange to attach
@@ -63,8 +73,19 @@ func NewScheduler(nc *nats.Conn, logger *slog.Logger) *Scheduler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Scheduler{nc: nc, logger: logger, inflight: make(map[string]inflightTask)}
+	return &Scheduler{
+		nc:            nc,
+		logger:        logger,
+		inflight:      make(map[string]inflightTask),
+		eagerInflight: make(map[string]inflightTask),
+	}
 }
+
+// eagerInflightTTL bounds how long an eager consumer task counts against
+// its worker in pickEagerWorker. Sized to the stage idle timeout — an
+// eager task can legitimately wait most of its producer stage's lifetime.
+// Result arrival clears the entry early via TaskDone.
+const eagerInflightTTL = 30 * time.Minute
 
 // SetDataPlaneServer enables gRPC task dispatch. When set, PublishTasks
 // pushes through the data-plane server instead of NATS publish.
@@ -92,6 +113,7 @@ func (s *Scheduler) SetTaskAnnotator(fn func(*distributed.Task)) {
 func (s *Scheduler) TaskDone(taskID string) {
 	s.inflightMu.Lock()
 	delete(s.inflight, taskID)
+	delete(s.eagerInflight, taskID)
 	s.inflightMu.Unlock()
 }
 
@@ -203,13 +225,90 @@ func (s *Scheduler) publishViaDataPlane(batch []preparedTask, deadlineNano int64
 // of 0 deliberately round-robin: with no per-task charge, "most free"
 // would be static between heartbeats and pile every task of a fan-out
 // onto one worker.
+//
+// Eager consumer tasks take their own placement path first: they can
+// block on producer manifests for the whole producer stage, so stacking
+// them on one worker starves that worker's producer lanes (targeted gRPC
+// dispatch has no work stealing).
 func (s *Scheduler) pickWorkerFor(t distributed.Task) (string, bool) {
+	if len(t.EagerInputs) > 0 {
+		if id, ok := s.pickEagerWorker(); ok {
+			return id, true
+		}
+	}
 	if t.EstimatedBytes > 0 && s.registry != nil {
 		if id, ok := s.pickLeastLoaded(); ok {
 			return id, true
 		}
 	}
 	return s.dpSrv.PickWorker()
+}
+
+// pickEagerWorker places one eager consumer task: the connected worker
+// with the fewest in-flight eager tasks, preferring workers that keep at
+// least one non-eager lane free (in-flight eager + this one ≤
+// MaxConcurrent − 1 — the memo §3.3 producer-lane reservation). When no
+// worker satisfies the reservation (tiny MaxConcurrent, missing stats),
+// min-count placement still bounds the stacking; the coordinator-wide
+// one-eager-stage slot plus numTasks ≤ workerCount eligibility keep the
+// total at one per worker in practice. ok=false when no worker is
+// connected (caller falls through to round-robin's error handling).
+func (s *Scheduler) pickEagerWorker() (string, bool) {
+	connected := s.dpSrv.ConnectedWorkers()
+	if len(connected) == 0 {
+		return "", false
+	}
+	maxConc := make(map[string]int)
+	if s.registry != nil {
+		for _, w := range s.registry.ActiveWorkers() {
+			maxConc[w.WorkerID] = w.MaxConcurrent
+		}
+	}
+	return pickEagerWorkerFrom(connected, maxConc, s.eagerInflightByWorker())
+}
+
+// pickEagerWorkerFrom is pickEagerWorker's pure scoring core: min in-flight
+// eager count over connected workers, first pass restricted to workers with
+// a spare non-eager lane (count+1 ≤ MaxConcurrent−1), second pass
+// unrestricted so dispatch never fails on reservation grounds alone.
+func pickEagerWorkerFrom(connected []string, maxConc, counts map[string]int) (string, bool) {
+	pick := func(requireLane bool) (string, bool) {
+		bestID, bestCount, found := "", 0, false
+		for _, id := range connected {
+			n := counts[id]
+			if requireLane {
+				mc := maxConc[id]
+				if mc <= 0 || n+1 > mc-1 {
+					continue
+				}
+			}
+			if !found || n < bestCount {
+				bestID, bestCount, found = id, n, true
+			}
+		}
+		return bestID, found
+	}
+	if id, ok := pick(true); ok {
+		return id, true
+	}
+	return pick(false)
+}
+
+// eagerInflightByWorker counts live eager tasks per worker, lazily
+// expiring stale entries.
+func (s *Scheduler) eagerInflightByWorker() map[string]int {
+	s.inflightMu.Lock()
+	defer s.inflightMu.Unlock()
+	now := time.Now()
+	perWorker := make(map[string]int)
+	for id, e := range s.eagerInflight {
+		if now.After(e.expires) {
+			delete(s.eagerInflight, id)
+			continue
+		}
+		perWorker[e.workerID]++
+	}
+	return perWorker
 }
 
 // pickLeastLoaded returns the connected worker with the most free shared
@@ -266,8 +365,17 @@ func (s *Scheduler) inflightByWorker() map[string]int64 {
 
 // noteInflight charges a dispatched task's estimate to its worker until
 // the result arrives (TaskDone) or the TTL hands accounting off to the
-// worker's heartbeat PoolUsed.
+// worker's heartbeat PoolUsed. Eager consumer tasks are additionally
+// tracked (regardless of estimate) for pickEagerWorker's lane accounting.
 func (s *Scheduler) noteInflight(t distributed.Task, workerID string) {
+	if len(t.EagerInputs) > 0 {
+		s.inflightMu.Lock()
+		s.eagerInflight[t.ID] = inflightTask{
+			workerID: workerID,
+			expires:  time.Now().Add(eagerInflightTTL),
+		}
+		s.inflightMu.Unlock()
+	}
 	if t.EstimatedBytes <= 0 {
 		return
 	}

@@ -218,7 +218,14 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	// hanging until the 10-minute gather timeout. Open + finalize the sink
 	// (its Finalize publishes a terminal even with no batches consumed) so
 	// the receiver unblocks immediately on empty fragments.
-	if len(sourceSpec.InputFiles) == 0 {
+	//
+	// Exception: eager-fed aliases (Task.EagerInputs). Their InputFiles is
+	// empty BY CONSTRUCTION — the file set streams in as producer-task
+	// manifests — so "no frozen files" carries no emptiness signal at all.
+	// Short-circuiting here silently dropped the entire input (0 rows,
+	// task success) when eager dispatch first went end-to-end.
+	_, eagerSource := task.EagerInputs[sourceSpec.InputAlias]
+	if len(sourceSpec.InputFiles) == 0 && !eagerSource {
 		if sinkSpec.Type == distributed.OpGatherSink {
 			sink, err := e.openFragmentSink(task, sinkSpec)
 			if err != nil {
