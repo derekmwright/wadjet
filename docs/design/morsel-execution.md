@@ -1,6 +1,8 @@
 # Morsel-Driven Execution — Design Memo
 
-> **Status:** proposed (v1 scoped, not started). **Date:** 2026-07-02.
+> **Status:** DONE — implemented in PR #181, default AUTO since PR #198
+> (SF100 −3.4%, Q08 −40%; `--morsel-workers 1` = kill switch). Kept as
+> design record. **Date:** 2026-07-02 (status updated 2026-07-12).
 > **Verified against:** main @ 0cc5419 (post-#177). `file:line` anchors
 > drift — confirm before relying on them.
 
