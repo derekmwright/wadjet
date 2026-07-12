@@ -49,6 +49,13 @@ type taskRetrier struct {
 	// missing-input failures whose producer is dead with no durable copy
 	// (ErrInputLost) — a state no re-dispatch can fix.
 	fatal func(distributed.ResultNotification) bool
+
+	// onSuccess, when non-nil, fires once per task as it reaches a
+	// successful terminal state (eager consumer dispatch publishes the
+	// producer-task manifest from it). Invoked OUTSIDE the retrier lock;
+	// final is true for the stage's last terminal task. Must be assigned
+	// before the retrier starts observing results.
+	onSuccess func(taskID string, attempt int, files []string, workerID string, final bool)
 }
 
 // inputLostMarker tags terminal failures caused by an unresolvable
@@ -124,7 +131,12 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 		st.terminal = true
 		tr.terminal++
 		done := tr.terminal >= len(tr.order)
+		attempt := st.attempts
+		onSuccess := tr.onSuccess
 		tr.mu.Unlock()
+		if onSuccess != nil {
+			onSuccess(r.TaskID, attempt, r.ResultFiles, r.WorkerID, done)
+		}
 		return done
 	}
 	// Failure: retry if attempts remain, else terminal failure. A

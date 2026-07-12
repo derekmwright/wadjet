@@ -262,6 +262,10 @@ func (c *Coordinator) runShuffleSide(
 				"side", sideName, "task_id", t.ID, "error", pubErr)
 		}
 	}, c.logger, stageID, c.classifyFatalResult)
+	if len(tasks) > 0 {
+		t0 := tasks[0]
+		retrier.onSuccess = c.eagerManifestPublisher(distributed.TaskRootQueryID(&t0), stageID)
+	}
 	defer c.watchStuckTasks(ctx, retrier)()
 
 	sub, err := c.subscribeTaskResults(subject, func(msg *nats.Msg) {

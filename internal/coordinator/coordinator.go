@@ -93,6 +93,13 @@ type Config struct {
 	// the ratio gate); this struct field's zero value stays false so
 	// embedded/test constructors opt in explicitly.
 	SkewSplit bool
+	// EagerDispatch enables eager consumer dispatch (docs/design/
+	// eager-consumer-dispatch.md): the coordinator republishes per-
+	// producer-task file manifests on EagerManifestSubject as shuffle
+	// tasks complete, and (Phase C1) dispatches eligible consumer stages
+	// before their producer stage fully drains. Zero value false —
+	// default off until SF100 validation; requires StreamingExchange.
+	EagerDispatch bool
 	// StreamingExchange annotates dispatched tasks with peer-location
 	// hints (Task.InputLocations) and per-query fetch tokens so consumers
 	// stream stage outputs from the producing workers' local disk instead

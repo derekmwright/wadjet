@@ -510,6 +510,23 @@ type UploadComplete struct {
 	Failed bool `json:"failed,omitempty"`
 }
 
+// ProducerTaskManifest announces one completed producer task's shuffle
+// output files to eagerly-dispatched consumers (docs/design/
+// eager-consumer-dispatch.md §3.1). Published by the coordinator on
+// EagerManifestSubject(root, stage) as each producer task reaches a
+// successful terminal state; metadata only.
+type ProducerTaskManifest struct {
+	StageID  string   `json:"stage_id"`
+	TaskID   string   `json:"task_id"`
+	Attempt  int      `json:"attempt"` // attempt fencing (memo §5)
+	Files    []string `json:"files"`   // keys that EXIST (empty partitions absent)
+	WorkerID string   `json:"worker_id"`
+	// Final marks the manifest of the producer stage's last terminal
+	// task; a consumer that has resolved every candidate and seen Final
+	// may EOF its manifest feed.
+	Final bool `json:"final,omitempty"`
+}
+
 // TaskStats captures per-task execution metrics for debugging.
 type TaskStats struct {
 	MemUsed       int64          `json:"mem_used"`                 // memory tracker usage at completion
