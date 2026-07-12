@@ -39,6 +39,7 @@ func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string) func(t
 			Attempt:  attempt,
 			Files:    files,
 			WorkerID: workerID,
+			PeerAddr: c.workers.PeerAddr(workerID),
 			Final:    final,
 		}
 		data, err := distributed.Marshal(m)

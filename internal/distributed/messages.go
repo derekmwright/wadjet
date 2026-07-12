@@ -188,6 +188,13 @@ type Task struct {
 	// hints. Only populated when the coordinator runs --streaming-exchange.
 	InputLocations map[string]string `json:"input_locations,omitempty"`
 
+	// EagerInputs maps an input alias to its eager manifest-feed
+	// descriptor (docs/design/eager-consumer-dispatch.md). When an alias
+	// appears here, the worker builds a manifest-fed source for it
+	// instead of consuming a frozen file list; other aliases of the same
+	// task keep their explicit Inputs entries.
+	EagerInputs map[string]EagerInput `json:"eager_inputs,omitempty"`
+
 	// FetchToken authorizes peer-exchange fetches for this task's query.
 	// Producers record it (to validate incoming FetchShuffle requests
 	// against); consumers present it. Minted per QueryID by the
@@ -521,10 +528,29 @@ type ProducerTaskManifest struct {
 	Attempt  int      `json:"attempt"` // attempt fencing (memo §5)
 	Files    []string `json:"files"`   // keys that EXIST (empty partitions absent)
 	WorkerID string   `json:"worker_id"`
+	// PeerAddr is the producing worker's peer-exchange address, resolved
+	// by the coordinator at publish time. Empty when the worker is not
+	// serving peer fetches — consumers fall through to S3 as always.
+	PeerAddr string `json:"peer_addr,omitempty"`
 	// Final marks the manifest of the producer stage's last terminal
 	// task; a consumer that has resolved every candidate and seen Final
 	// may EOF its manifest feed.
 	Final bool `json:"final,omitempty"`
+}
+
+// EagerInput describes one eagerly-fed input alias of a consumer task
+// (docs/design/eager-consumer-dispatch.md §3.2): the full candidate set
+// is nameable at dispatch (deterministic shuffle keys); existence and
+// location stream in as ProducerTaskManifests. Replay carries manifests
+// already published before this task was built, so the subscribe-then-
+// replay contract never loses a completion.
+type EagerInput struct {
+	RootQueryID     string                `json:"root_query_id"`
+	StageID         string                `json:"stage_id"` // producer stage
+	ProducerTaskIDs []string              `json:"producer_task_ids"`
+	PartitionStart  int                   `json:"partition_start"` // inclusive
+	PartitionEnd    int                   `json:"partition_end"`   // inclusive
+	Replay          []ProducerTaskManifest `json:"replay,omitempty"`
 }
 
 // TaskStats captures per-task execution metrics for debugging.

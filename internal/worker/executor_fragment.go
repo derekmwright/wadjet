@@ -1619,6 +1619,13 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 	if bucket == "" {
 		bucket = task.ResultBucket
 	}
+	// Eager consumer dispatch: an alias registered in task.EagerInputs is
+	// fed by producer-task manifests instead of a frozen file list
+	// (docs/design/eager-consumer-dispatch.md §3.2). InputFiles is empty
+	// by construction for these aliases.
+	if eager, ok := task.EagerInputs[spec.InputAlias]; ok {
+		return newManifestStreamSource(e, task.QueryID, bucket, eager), nil
+	}
 	if len(spec.InputFiles) == 0 {
 		return nil, fmt.Errorf("source %q: empty InputFiles", spec.Type)
 	}

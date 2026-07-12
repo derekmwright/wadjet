@@ -71,6 +71,25 @@ func (p *peerExchange) registerTask(task *distributed.Task) {
 	p.mu.Unlock()
 }
 
+// addHint records one runtime-discovered file→peer-address hint (eager
+// consumer dispatch: manifests carry the producer's PeerAddr). Same
+// bookkeeping as registerTask so CleanupQuery drops it with the query.
+func (p *peerExchange) addHint(key, addr string) {
+	if p == nil || key == "" || addr == "" {
+		return
+	}
+	keyRoot := distributed.ScratchQueryID(key)
+	if keyRoot == "" {
+		return
+	}
+	p.mu.Lock()
+	if _, seen := p.hints[key]; !seen {
+		p.rootKeys[keyRoot] = append(p.rootKeys[keyRoot], key)
+	}
+	p.hints[key] = addr
+	p.mu.Unlock()
+}
+
 // hintFor returns the peer address hint and fetch token for one input file,
 // or empty strings when no hint exists.
 func (p *peerExchange) hintFor(key string) (addr, token string) {
