@@ -265,9 +265,9 @@ variable "data_plane" {
 }
 
 variable "streaming_exchange" {
-  description = "Streaming exchange (docs/design/streaming-exchange.md): consumers fetch stage outputs from producing workers' local disk over gRPC (peer-exchange port below) with async S3 upload; every failure falls through to the S3 path. Wires the coordinator (TPCH_STREAMING_EXCHANGE) and worker --streaming-exchange flags together. Default false = today's synchronous S3 shuffle."
+  description = "Streaming exchange (docs/design/streaming-exchange.md): consumers fetch stage outputs from producing workers' local disk over gRPC (peer-exchange port below) with async S3 upload; every failure falls through to the S3 path. Wires the coordinator (TPCH_STREAMING_EXCHANGE) and worker --streaming-exchange flags together. Default true, matching the engine default since 2026-07-02 (this var defaulted false until 2026-07-12, silently benchmarking the synchronous S3 shuffle path; SF100 A/B: −27.7%). Set false as the kill switch."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "peer_exchange_port" {
