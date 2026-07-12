@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -122,5 +123,64 @@ func TestCircuitStore_StateString(t *testing.T) {
 		if got := state.String(); got != want {
 			t.Errorf("State(%d).String() = %q, want %q", state, got, want)
 		}
+	}
+}
+
+// canceledPutStore fails Put with a (wrapped) context.Canceled — the shape
+// the worker's uploadManager.CancelQuery produces when it aborts a terminal
+// query's pending async uploads.
+type canceledPutStore struct {
+	*MemStore
+	realErrs int // Puts returning a genuine error after the canceled ones
+	calls    int
+}
+
+func (c *canceledPutStore) Put(ctx context.Context, bucket, key string, r io.Reader, size int64, contentType string) (string, error) {
+	c.calls++
+	if c.realErrs > 0 && c.calls > 8 {
+		c.realErrs--
+		return "", errors.New("simulated S3 500")
+	}
+	if c.calls <= 8 {
+		return "", fmt.Errorf("putting object: %w", context.Canceled)
+	}
+	return c.MemStore.Put(ctx, bucket, key, r, size, contentType)
+}
+
+// TestCircuitStore_CanceledDoesNotTrip is the regression for the SF100
+// 2026-07-12 incident: query-boundary upload cancellations (context.Canceled
+// from OUR OWN CancelQuery, not S3) counted as consecutive failures, opened
+// the breaker on every worker at once, and the next query's healthy reads
+// fast-failed for the 30 s reset window — Q21/Q22 (sometimes Q03) failed
+// terminally once their instant retries burned into the open breaker.
+// Client-side aborts must not move the breaker; real errors still must.
+func TestCircuitStore_CanceledDoesNotTrip(t *testing.T) {
+	ps := &canceledPutStore{MemStore: NewMemStore(), realErrs: 3}
+	ctx := context.Background()
+	ps.MakeBucket(ctx, "b")
+
+	cfg := DefaultCircuitConfig()
+	cfg.FailureThreshold = 3
+	cs := NewCircuitStore(ps, cfg, nil)
+
+	// 8 canceled Puts — far past the threshold — must leave the breaker
+	// closed: cancellation says nothing about S3 health.
+	for i := 0; i < 8; i++ {
+		if _, err := cs.Put(ctx, "b", "k", bytes.NewReader([]byte("x")), 1, ""); !errors.Is(err, context.Canceled) {
+			t.Fatalf("put %d: want context.Canceled, got %v", i, err)
+		}
+	}
+	if cs.State() != CircuitClosed {
+		t.Fatalf("breaker must stay closed through canceled puts, got %s", cs.State())
+	}
+
+	// Genuine errors still count and open the breaker at the threshold.
+	for i := 0; i < 3; i++ {
+		if _, err := cs.Put(ctx, "b", "k", bytes.NewReader([]byte("x")), 1, ""); err == nil {
+			t.Fatalf("real-error put %d: want error", i)
+		}
+	}
+	if cs.State() != CircuitOpen {
+		t.Fatalf("breaker must open on real consecutive failures, got %s", cs.State())
 	}
 }

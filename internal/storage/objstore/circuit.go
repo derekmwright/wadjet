@@ -139,6 +139,22 @@ func (cs *CircuitStore) onSuccess() {
 }
 
 func (cs *CircuitStore) onFailure(err error) {
+	// Client-side aborts are not S3 health signals. The worker cancels a
+	// terminal query's pending async uploads BY DESIGN (streaming
+	// exchange: uploadManager.CancelQuery fires on every query
+	// complete/cancel broadcast) — under mid-day S3 PUT latency a query
+	// boundary can cancel 5+ queued uploads back-to-back, which counted
+	// here as consecutive "failures", opened the breaker on every worker
+	// simultaneously, and made the NEXT query's healthy GETs fast-fail
+	// for the whole 30 s reset window (SF100 2026-07-12: Q21/Q22 —
+	// occasionally Q03 — failed terminally after their retries burned
+	// into the still-open breaker). context.Canceled can only come from
+	// our own callers; S3 slowness surfaces as DeadlineExceeded or
+	// transport errors, which still count.
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 
