@@ -65,6 +65,12 @@ type Config struct {
 	// RSS-sampling).
 	FloatingBudgetActive bool
 
+	// StreamingShuffleRead decodes WSHF/WSHC exchange inputs directly from
+	// the peer/S3 byte stream instead of staging whole files to NVMe +
+	// mmap first (docs/design/exchange-streaming-consumption.md §3 D1).
+	// Default false pending SF100 validation; kill switch thereafter.
+	StreamingShuffleRead bool
+
 	// MmapRelief enables the Phase-5 MADV_DONTNEED relief of cold mmap'd cache
 	// files under heap pressure. Default false: fully dormant (no region
 	// tracking, no per-Next cost, no syscall). Deploy-gated.
@@ -225,6 +231,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	executor.SetLogger(logger)
 	executor.SetNATSConn(nc)
 	executor.SetMorselWorkers(cfg.MorselWorkers)
+	executor.SetStreamingShuffleRead(cfg.StreamingShuffleRead)
 	// Phase 3: wire the system-reservoir registry for ACCOUNTING (Available()/
 	// drift) — this does NOT activate the floating spill threshold; that stays
 	// gated on FloatingBudgetActive (default false → tuned static 40%/90% path).
@@ -544,6 +551,31 @@ func (w *Worker) Start(ctx context.Context) error {
 		"filter_subject", filterSubject,
 		"dispatch", dispatchMode,
 	)
+
+	// Streaming-shuffle-read marker loop (memo §5): periodic greppable
+	// stats line, emitted only when the counters moved.
+	if w.config.StreamingShuffleRead {
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			var lastReads, lastFallbacks, lastSkips int64
+			t := time.NewTicker(60 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+					reads, fallbacks, skips := w.executor.ShuffleStreamStats()
+					if reads != lastReads || fallbacks != lastFallbacks || skips != lastSkips {
+						lastReads, lastFallbacks, lastSkips = reads, fallbacks, skips
+						w.logger.Info("streaming shuffle read stats",
+							"reads", reads, "fallbacks", fallbacks, "skip_resumes", skips)
+					}
+				}
+			}
+		}()
+	}
 
 	return nil
 }
@@ -1624,6 +1656,12 @@ func (w *Worker) PeerFetchStats() (hits, fallthroughs int64) {
 // files cancelled by query completion, files abandoned after retries.
 func (w *Worker) UploadStats() (completed, cancelled, failed int64) {
 	return w.executor.uploads.UploadStats()
+}
+
+// ShuffleStreamStats returns the streaming-shuffle-read counters:
+// streaming opens, staged fallbacks, batches skipped by fallbacks.
+func (w *Worker) ShuffleStreamStats() (reads, fallbacks, skipResumes int64) {
+	return w.executor.ShuffleStreamStats()
 }
 
 // reapCancelled removes cancellation entries older than maxAge.

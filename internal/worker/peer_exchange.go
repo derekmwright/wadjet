@@ -169,7 +169,12 @@ func (s *cachedFileStreamSource) openShuffleFromPeer(ctx context.Context, key, a
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
+	ownedByReader := false
+	defer func() {
+		if !ownedByReader {
+			rc.Close()
+		}
+	}()
 	var magic [4]byte
 	if _, err := io.ReadFull(rc, magic[:]); err != nil {
 		return fmt.Errorf("reading magic from peer %s: %w", addr, err)
@@ -178,6 +183,18 @@ func (s *cachedFileStreamSource) openShuffleFromPeer(ctx context.Context, key, a
 	wshc := magic == compressedMagic
 	if !wshf && !wshc {
 		return fmt.Errorf("peer %s returned non-shuffle payload for %s (magic %q)", addr, key, magic[:])
+	}
+	// Streaming decode (memo §3 D1): hand the gRPC stream straight to the
+	// chunk decoder — no NVMe staging hop. A failed streaming open has
+	// partially consumed rc, so it cannot fall through to the staged path
+	// here; returning the error sends the caller to the durable S3 tier,
+	// same as any other peer-fetch failure.
+	if s.executor.streamingShuffleRead {
+		if err := s.openShuffleStreaming(ctx, key, rc, wshc); err != nil {
+			return fmt.Errorf("streaming decode from peer %s: %w", addr, err)
+		}
+		ownedByReader = true
+		return nil
 	}
 	return s.openShuffleFile(ctx, key, magic[:], rc, wshc)
 }

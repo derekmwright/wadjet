@@ -103,6 +103,28 @@ type Executor struct {
 	morselWorkers   int
 	cpuTokens       *cpuTokens
 	morselCollapses atomic.Int64
+
+	// Streaming shuffle read (docs/design/exchange-streaming-consumption.md
+	// §3 D1): decode WSHF/WSHC exchange inputs directly from the peer/S3
+	// byte stream instead of staging the whole file to NVMe + mmap first.
+	// Counters are the §5 rollout markers: reads = files opened streaming,
+	// fallbacks = mid-stream failures re-resolved from the durable copy,
+	// skipResumes = batches discarded by fallbacks to keep the
+	// no-double-delivery contract.
+	streamingShuffleRead     bool
+	shuffleStreamReads       atomic.Int64
+	shuffleStreamFallbacks   atomic.Int64
+	shuffleStreamSkipResumes atomic.Int64
+}
+
+// SetStreamingShuffleRead enables streaming decode of shuffle inputs
+// (--streaming-shuffle-read). Call before Worker.Start.
+func (e *Executor) SetStreamingShuffleRead(on bool) { e.streamingShuffleRead = on }
+
+// ShuffleStreamStats returns the streaming-shuffle-read counters:
+// streaming opens, staged fallbacks, and batches skipped by fallbacks.
+func (e *Executor) ShuffleStreamStats() (reads, fallbacks, skipResumes int64) {
+	return e.shuffleStreamReads.Load(), e.shuffleStreamFallbacks.Load(), e.shuffleStreamSkipResumes.Load()
 }
 
 // NewExecutor creates a new task executor.

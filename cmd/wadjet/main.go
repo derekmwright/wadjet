@@ -109,6 +109,7 @@ var (
 	peerExchangeAdvertise string
 	baseTableCacheBytes   int64
 	baseTableCacheDir     string
+	streamingShuffleRead  bool
 )
 
 func main() {
@@ -177,6 +178,7 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&eagerDispatch, "eager-dispatch", false, "Eager consumer dispatch (Phase C1): eligible non-join consumer stages (aggregate/sort over a standalone repartition) start before their producer stage fully drains, consuming per-producer-task file manifests as tasks finish. Requires --streaming-exchange. Default false until SF100 validation (kill switch thereafter). See docs/design/eager-consumer-dispatch.md.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAddr, "peer-exchange-addr", ":0", "Peer-exchange (FetchShuffle) listen address. Default :0 picks a free port (the address reaches peers via heartbeats, and a fixed default would collide when multiple workers share a host); pin it when firewalls need a known port.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAdvertise, "peer-exchange-advertise", "", "Peer-exchange address advertised in heartbeats (default: derived from the bound listener)")
+	rootCmd.PersistentFlags().BoolVar(&streamingShuffleRead, "streaming-shuffle-read", false, "Decode WSHF/WSHC exchange inputs directly from the peer/S3 byte stream instead of staging the whole file to NVMe + mmap first — the first chunk decodes as soon as its frames arrive. Any mid-stream failure falls back to a staged read of the durable copy, skipping already-delivered batches. Default false pending SF100 validation (kill switch thereafter). See docs/design/exchange-streaming-consumption.md.")
 	rootCmd.PersistentFlags().Int64Var(&baseTableCacheBytes, "base-table-cache-bytes", 0, "Cross-query disk cache for immutable base-table parquet objects: LRU byte budget on the cache volume. Hits are served from local disk without touching S3 (or the circuit breaker); misses tee the download into the cache. The cache survives restarts (index rebuilt from the directory). 0 = disabled (default until SF100 validation). See docs/design/base-table-nvme-cache.md.")
 	rootCmd.PersistentFlags().StringVar(&baseTableCacheDir, "base-table-cache-dir", "", "Directory for the base-table cache (default: <spill-dir>/base-cache, inheriting the spill volume's NVMe mount)")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
@@ -929,6 +931,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		BoundedDirtyWrites:    boundedDirtyWrites,
 		PeerListenAddr:        peerListenAddr(),
 		PeerAdvertiseAddr:     peerExchangeAdvertise,
+		StreamingShuffleRead:  streamingShuffleRead,
 	}, store, nc, js, logger)
 
 	// Initialize Prometheus metrics (before worker.Start so spill metrics are wired)
@@ -1497,6 +1500,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		BoundedDirtyWrites:    boundedDirtyWrites,
 		PeerListenAddr:        peerListenAddr(),
 		PeerAdvertiseAddr:     peerExchangeAdvertise,
+		StreamingShuffleRead:  streamingShuffleRead,
 	}, store, nc, js, logger)
 	w.SetControlConn(controlNC)
 

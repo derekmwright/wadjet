@@ -83,12 +83,21 @@ type cachedFileStreamSource struct {
 	fileIdx int
 
 	// Active WSHF chunk reader for the current file (nil if current file is
-	// Parquet or no file is open). The reader walks an mmap'd byte slice
-	// owned by mmapData below.
-	chunkReader *shuffleChunkReader
+	// Parquet or no file is open). Either an mmap-backed shuffleChunkReader
+	// walking mmapData below, or a streamingShuffleReader decoding the
+	// transport body directly (--streaming-shuffle-read).
+	chunkReader shuffleBatchIter
 	mmapData    []byte      // mmap'd view of the current local cache file (nil if Parquet)
 	mmapRegion  *mmapRegion // Phase-5 relief handle for mmapData; nil when relief is disabled
 	localPath   string      // path the source is responsible for unlinking; "" when the file is owned by LocalStageCache or in-memory
+
+	// Streaming-decode state (docs/design/exchange-streaming-consumption.md
+	// §3 D1). When the current file is being stream-decoded, streamReader
+	// == chunkReader and streamKey names the object so a mid-stream
+	// transport failure can fall back to the durable copy, skipping the
+	// batches already delivered (no double delivery).
+	streamReader *streamingShuffleReader
+	streamKey    string
 
 	// Streaming row-group iterator for the current Parquet file. Yields one
 	// decoded RecordBatch per Next() call; the previous batch is GC-eligible
@@ -119,6 +128,12 @@ type cachedFileStreamSource struct {
 	prefetch         *filePrefetcher
 	prefetchStarted  bool
 	prefetchDisabled bool
+}
+
+// shuffleBatchIter is the common face of the mmap-backed and streaming
+// WSHF chunk readers.
+type shuffleBatchIter interface {
+	Next() (*batch.RecordBatch, error)
 }
 
 // SetDynamicFilters attaches dynamic-filter pushdowns to this source.
@@ -174,6 +189,15 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 		// Stream from active WSHF chunk reader.
 		if s.chunkReader != nil {
 			b, err := s.chunkReader.Next()
+			if err != nil && s.streamKey != "" {
+				// Mid-stream transport failure on a streaming decode: the
+				// durable copy is authoritative — reopen it staged and skip
+				// the batches this file already delivered.
+				if fbErr := s.fallbackFromStream(ctx, err); fbErr != nil {
+					return nil, fbErr
+				}
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -278,6 +302,11 @@ func (s *cachedFileStreamSource) releaseParquetIter() {
 // current chunkReader. Safe to call multiple times.
 func (s *cachedFileStreamSource) releaseCurrentFile() {
 	s.chunkReader = nil
+	if s.streamReader != nil {
+		_ = s.streamReader.Close()
+		s.streamReader = nil
+	}
+	s.streamKey = ""
 	if s.mmapData != nil {
 		// Unregister from the relief registry BEFORE munmapping so relieveMmap
 		// (which holds the registry lock during its MADV syscalls) can never
@@ -442,7 +471,12 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		return fmt.Errorf("opening cached file %s (kvErr=%v, kvDataLen=%d, kvMagic=%q, bucket=%s): %w",
 			filePath, kvErr, kvDataLen, kvMagic, s.bucket, err)
 	}
-	defer rc.Close()
+	rcOwnedByReader := false
+	defer func() {
+		if !rcOwnedByReader {
+			rc.Close()
+		}
+	}()
 
 	// Read enough header bytes to detect the format. Both WSHF and WSHC
 	// have a 4-byte magic at offset 0.
@@ -455,6 +489,20 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	wshc := magic == compressedMagic
 
 	if wshf || wshc {
+		// Streaming decode (memo §3 D1): decode chunks off the S3 body as
+		// they arrive instead of staging the file. A failed streaming open
+		// has partially consumed rc — re-resolve the durable copy for the
+		// staged path rather than reusing the stream.
+		if s.executor.streamingShuffleRead {
+			if err := s.openShuffleStreaming(ctx, filePath, rc, wshc); err == nil {
+				rcOwnedByReader = true
+				return nil
+			} else if s.executor.logger != nil {
+				s.executor.logger.Debug("streaming shuffle open failed; restaging from durable copy",
+					"key", filePath, "error", err)
+			}
+			return s.openShuffleStagedFromStore(ctx, filePath)
+		}
 		return s.openShuffleFile(ctx, filePath, magic[:], rc, wshc)
 	}
 
@@ -520,6 +568,115 @@ func (s *cachedFileStreamSource) openPrefetchedParquet(localPath, filePath strin
 	// finishOpenParquet unwinds mmap+file itself if the payload isn't
 	// valid parquet (e.g. a legacy shuffle object under a .parquet key).
 	return s.finishOpenParquet(filePath, mmapData, mmapData, localPath)
+}
+
+// progressReadCloser reports each successful Read to the per-task
+// ProgressReporter — the streaming-decode analog of progressWriter, so
+// the coordinator's stale-worker reap sees I/O progress during long
+// streamed reads.
+type progressReadCloser struct {
+	rc  io.ReadCloser
+	rep exec.ProgressReporter
+}
+
+func (p *progressReadCloser) Read(b []byte) (int, error) {
+	n, err := p.rc.Read(b)
+	if n > 0 {
+		p.rep.AddBytes(int64(n))
+	}
+	return n, err
+}
+
+func (p *progressReadCloser) Close() error { return p.rc.Close() }
+
+// openShuffleStreaming decodes a WSHF/WSHC body directly from rc
+// (--streaming-shuffle-read, memo §3 D1). rc must be positioned after the
+// outer 4-byte magic. On success the reader owns rc; on error the caller
+// still owns it — but note rc has been partially consumed either way, so
+// a failed streaming open must re-resolve the object, not reuse rc.
+func (s *cachedFileStreamSource) openShuffleStreaming(ctx context.Context, srcPath string, rc io.ReadCloser, compressed bool) error {
+	if rep := exec.ProgressReporterFromContext(ctx); rep != nil {
+		rc = &progressReadCloser{rc: rc, rep: rep}
+	}
+	r, err := newStreamingShuffleReader(rc, compressed)
+	if err != nil {
+		return err
+	}
+	s.chunkReader = r
+	s.streamReader = r
+	s.streamKey = srcPath
+	s.executor.shuffleStreamReads.Add(1)
+	return nil
+}
+
+// openShuffleStagedFromStore re-resolves srcPath from the durable store
+// and opens it via the staged NVMe+mmap path — the authoritative recovery
+// route when a streaming decode could not start or died mid-file. Waits
+// out an in-flight async upload exactly like the primary S3 branch.
+func (s *cachedFileStreamSource) openShuffleStagedFromStore(ctx context.Context, srcPath string) error {
+	rc, _, err := s.executor.store.Get(ctx, s.bucket, srcPath)
+	if err != nil {
+		if peers := s.executor.peers; peers != nil && errors.Is(err, objstore.ErrNotFound) {
+			if addr, token := peers.hintFor(srcPath); addr != "" || token != "" {
+				waited, waitErr := s.awaitDurableObject(ctx, srcPath)
+				if waitErr != nil {
+					return &missingInputError{key: srcPath, cause: waitErr}
+				}
+				rc = waited
+				err = nil
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	defer rc.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(rc, magic[:]); err != nil {
+		return fmt.Errorf("reading magic from durable copy of %s: %w", srcPath, err)
+	}
+	wshf := magic == shuffleMagic
+	wshc := magic == compressedMagic
+	if !wshf && !wshc {
+		return fmt.Errorf("durable copy of %s is not a shuffle payload (magic %q)", srcPath, magic[:])
+	}
+	return s.openShuffleFile(ctx, srcPath, magic[:], rc, wshc)
+}
+
+// fallbackFromStream recovers from a mid-stream failure of the current
+// streaming decode: reopen the durable copy staged, then skip the batches
+// the stream already delivered — the file is immutable and completed, so
+// the batch sequence of a full re-read is identical (memo §3 D1's
+// no-double-delivery constraint).
+func (s *cachedFileStreamSource) fallbackFromStream(ctx context.Context, cause error) error {
+	key := s.streamKey
+	delivered := 0
+	if s.streamReader != nil {
+		delivered = s.streamReader.Delivered()
+		_ = s.streamReader.Close()
+		s.streamReader = nil
+	}
+	s.chunkReader = nil
+	s.streamKey = ""
+	s.executor.shuffleStreamFallbacks.Add(1)
+	if s.executor.logger != nil {
+		s.executor.logger.Debug("streaming shuffle decode fell back to staged read",
+			"key", key, "delivered", delivered, "error", cause)
+	}
+	if err := s.openShuffleStagedFromStore(ctx, key); err != nil {
+		return fmt.Errorf("streaming read of %s failed (%v); staged fallback failed: %w", key, cause, err)
+	}
+	for i := 0; i < delivered; i++ {
+		b, err := s.chunkReader.Next()
+		if err != nil {
+			return fmt.Errorf("staged fallback for %s: re-reading batch %d/%d: %w", key, i, delivered, err)
+		}
+		if b == nil {
+			return fmt.Errorf("staged fallback for %s: durable copy has %d batches but stream delivered %d", key, i, delivered)
+		}
+	}
+	s.executor.shuffleStreamSkipResumes.Add(int64(delivered))
+	return nil
 }
 
 // openParquetFromBaseCache opens a parquet file the process-wide
