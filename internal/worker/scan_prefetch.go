@@ -82,11 +82,16 @@ type filePrefetcher struct {
 	windowFree chan struct{} // closed+replaced whenever window/nextNeeded changes
 }
 
-// hasPrefetchableFiles reports whether any key in the list is a parquet
-// object the prefetcher would act on.
-func hasPrefetchableFiles(files []string) bool {
+// hasPrefetchableFiles reports whether any key in the list is an object
+// the prefetcher would act on: parquet always; shuffle (.wshf) keys when
+// streaming shuffle read is on (memo §3 D2 — their download-ahead fetches
+// ride the peer tier, so they never blind-GET a not-yet-durable key).
+func hasPrefetchableFiles(files []string, includeShuffle bool) bool {
 	for _, f := range files {
 		if strings.HasSuffix(f, ".parquet") {
+			return true
+		}
+		if includeShuffle && strings.HasSuffix(f, ".wshf") {
 			return true
 		}
 	}
@@ -137,6 +142,12 @@ func (p *filePrefetcher) run(ctx context.Context, s *cachedFileStreamSource, job
 // have reached the S3 tier anyway.
 func (p *filePrefetcher) fetch(ctx context.Context, s *cachedFileStreamSource, idx int) *prefetchResult {
 	filePath := s.files[idx]
+	if strings.HasSuffix(filePath, ".wshf") {
+		if s.executor.streamingShuffleRead {
+			return p.fetchShuffle(ctx, s, idx)
+		}
+		return &prefetchResult{skipped: true}
+	}
 	if !strings.HasSuffix(filePath, ".parquet") {
 		return &prefetchResult{skipped: true}
 	}
@@ -214,6 +225,106 @@ func (p *filePrefetcher) streamToSpill(ctx context.Context, s *cachedFileStreamS
 	}
 	if _, err := io.Copy(dst, rc); err != nil {
 		return "", fmt.Errorf("prefetching %s: %w", srcPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return "", fmt.Errorf("syncing prefetch file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("closing prefetch file: %w", err)
+	}
+	cleanup = false
+	return localPath, nil
+}
+
+// fetchShuffle downloads one hinted shuffle file ahead of consumption,
+// landing it DECOMPRESSED (plain WSHF) on the spill volume so the
+// consumer mmaps it directly with the standard chunk reader. Only
+// peer-hinted keys are fetched — a key without a hint resolves through
+// the normal tiers (never a blind S3 GET racing an async upload, the
+// scan_prefetch original exclusion rationale). Every failure is
+// best-effort: the consumer's tiered path is authoritative.
+func (p *filePrefetcher) fetchShuffle(ctx context.Context, s *cachedFileStreamSource, idx int) *prefetchResult {
+	filePath := s.files[idx]
+	if s.queryID != "" && s.executor.localCache != nil &&
+		s.executor.localCache.Get(s.queryID, filePath) != "" {
+		return &prefetchResult{skipped: true}
+	}
+	peers := s.executor.peers
+	if peers == nil || peers.client == nil {
+		return &prefetchResult{skipped: true}
+	}
+	addr, token := peers.hintFor(filePath)
+	if addr == "" {
+		return &prefetchResult{skipped: true}
+	}
+	rc, err := peers.client.FetchShuffle(ctx, addr, s.queryID, filePath, token)
+	if err != nil {
+		return &prefetchResult{err: err}
+	}
+	defer rc.Close()
+	var magic [4]byte
+	if _, err := io.ReadFull(rc, magic[:]); err != nil {
+		return &prefetchResult{err: fmt.Errorf("reading magic from peer %s: %w", addr, err)}
+	}
+	wshf := magic == shuffleMagic
+	wshc := magic == compressedMagic
+	if !wshf && !wshc {
+		return &prefetchResult{err: fmt.Errorf("peer %s returned non-shuffle payload for %s (magic %q)", addr, filePath, magic[:])}
+	}
+
+	// Peer fetch advertises no size; nominal window charge, matching the
+	// unknown-size convention on the parquet path.
+	winBytes := int64(8 << 20)
+	if err := p.acquireWindow(ctx, idx, winBytes); err != nil {
+		return &prefetchResult{err: err}
+	}
+	localPath, err := p.streamShuffleToSpill(ctx, s, filePath, magic[:], rc, wshc)
+	if err != nil {
+		p.releaseWindow(winBytes)
+		return &prefetchResult{err: err}
+	}
+	return &prefetchResult{localPath: localPath, windowBytes: winBytes}
+}
+
+// streamShuffleToSpill copies a shuffle body to a spill temp as plain
+// WSHF (transcoding WSHC via the streaming s2 decoder), reporting
+// progress like streamToSpill.
+func (p *filePrefetcher) streamShuffleToSpill(ctx context.Context, s *cachedFileStreamSource, srcPath string, magic []byte, rc io.Reader, compressed bool) (string, error) {
+	spillDir := s.executor.spillDir
+	if err := os.MkdirAll(spillDir, 0o755); err != nil {
+		return "", fmt.Errorf("creating spill dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(spillDir, "shuffle-prefetch-*.wshf")
+	if err != nil {
+		return "", fmt.Errorf("creating prefetch file: %w", err)
+	}
+	localPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			tmp.Close()
+			_ = os.Remove(localPath)
+		}
+	}()
+
+	rep := exec.ProgressReporterFromContext(ctx)
+	wf, _ := diskio.NewWriter(tmp, diskio.KeepResident)
+	dst := io.Writer(wf)
+	if rep != nil {
+		dst = &progressWriter{w: wf, rep: rep}
+	}
+	if compressed {
+		// The s2 body re-carries the inner WSHF magic; write nothing first.
+		if err := streamDecompressShuffle(rc, dst); err != nil {
+			return "", fmt.Errorf("prefetch-decompressing %s: %w", srcPath, err)
+		}
+	} else {
+		if _, err := dst.Write(magic); err != nil {
+			return "", fmt.Errorf("writing magic to prefetch file: %w", err)
+		}
+		if _, err := io.Copy(dst, rc); err != nil {
+			return "", fmt.Errorf("prefetching %s: %w", srcPath, err)
+		}
 	}
 	if err := tmp.Sync(); err != nil {
 		return "", fmt.Errorf("syncing prefetch file: %w", err)

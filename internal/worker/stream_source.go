@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -343,13 +344,19 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	if !s.prefetchStarted {
 		s.prefetchStarted = true
 		if !s.prefetchDisabled && s.executor.spillDir != "" &&
-			len(s.files) > 1 && hasPrefetchableFiles(s.files) {
+			len(s.files) > 1 && hasPrefetchableFiles(s.files, s.executor.streamingShuffleRead) {
 			s.prefetch = startFilePrefetcher(ctx, s)
 		}
 	}
 	if s.prefetch != nil {
 		if res := s.prefetch.take(ctx, idx); !res.skipped && res.err == nil {
-			if err := s.openPrefetchedParquet(res.localPath, filePath); err == nil {
+			var err error
+			if strings.HasSuffix(filePath, ".wshf") {
+				err = s.openPrefetchedShuffle(res.localPath, filePath)
+			} else {
+				err = s.openPrefetchedParquet(res.localPath, filePath)
+			}
+			if err == nil {
 				return nil
 			}
 			// Open failed (truncated download, unexpected payload) — the
@@ -701,6 +708,40 @@ func (s *cachedFileStreamSource) openParquetFromBaseCache(cachePath, filePath st
 	// finishOpenParquet unwinds the mmap itself on a bad payload; its
 	// os.Remove of the empty localPath is a no-op.
 	return s.finishOpenParquet(filePath, mmapData, mmapData, "")
+}
+
+// openPrefetchedShuffle opens a shuffle file the prefetcher already landed
+// on spill as plain WSHF: mmap it and build the standard chunk reader. On
+// any failure the temp is removed and the caller falls back to the tiered
+// path (memo §3 D2).
+func (s *cachedFileStreamSource) openPrefetchedShuffle(localPath, filePath string) error {
+	f, err := os.Open(localPath)
+	if err != nil {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("opening prefetched shuffle file %s: %w", localPath, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("prefetched shuffle file %s unusable (err=%v)", localPath, err)
+	}
+	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("mmap prefetched shuffle file %s: %w", localPath, err)
+	}
+	r, err := newShuffleChunkReader(mmapData)
+	if err != nil {
+		_ = syscall.Munmap(mmapData)
+		_ = os.Remove(localPath)
+		return fmt.Errorf("opening prefetched shuffle file %s: %w", filePath, err)
+	}
+	s.chunkReader = r
+	s.mmapData = mmapData
+	s.mmapRegion = registerMmap(mmapData)
+	s.localPath = localPath
+	return nil
 }
 
 // finishOpenParquet is the shared tail of the parquet open path: build the
