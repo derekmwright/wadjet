@@ -276,6 +276,12 @@ variable "eager_dispatch" {
   default     = false
 }
 
+variable "base_table_cache_bytes" {
+  description = "Base-table NVMe cache LRU budget in bytes per worker process (docs/design/base-table-nvme-cache.md): cross-query disk cache for immutable base-table parquet under <spill-dir>/base-cache, so repeat scans skip the S3 GET. Worker-side flag only. 0 = disabled (default pending SF100 validation). SF100 shape proposal: 150 GB (161061273600) — working set ~100 GB, leaves ~85 GB of the 237 GB NVMe for spill."
+  type        = number
+  default     = 0
+}
+
 variable "peer_exchange_port" {
   description = "Worker↔worker peer-exchange (FetchShuffle) port; SG opens it intra-cluster whenever streaming_exchange is set."
   type        = number
