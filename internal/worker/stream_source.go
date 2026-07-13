@@ -331,6 +331,24 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		// authoritative for both resolution and error reporting.
 	}
 
+	// Base-table cache tier: the process-wide NVMe cache already holds
+	// this parquet object — mmap its file in place, no GET and no disk
+	// copy (docs/design/base-table-nvme-cache.md §7 S2). The cache owns
+	// the file (LRU eviction unlinks it; POSIX keeps the inode alive
+	// under a live mmap), so s.localPath stays empty. Any failure —
+	// evicted between lookup and open, unreadable entry — falls through
+	// to the tiered path, whose durable copy is authoritative.
+	if lps, ok := s.executor.store.(objstore.LocalPathStore); ok {
+		if cached, ok := lps.CachedLocalPath(s.bucket, filePath); ok {
+			if err := s.openParquetFromBaseCache(cached, filePath); err == nil {
+				return nil
+			} else if s.executor.logger != nil {
+				s.executor.logger.Debug("base-table cache open fell through",
+					"key", filePath, "path", cached, "error", err)
+			}
+		}
+	}
+
 	// Tier-0 same-worker fast path: if a producer task on this worker
 	// already wrote this stage output to local disk and registered it in
 	// LocalStageCache, mmap it directly — no KV / S3 round-trip. The cache
@@ -502,6 +520,30 @@ func (s *cachedFileStreamSource) openPrefetchedParquet(localPath, filePath strin
 	// finishOpenParquet unwinds mmap+file itself if the payload isn't
 	// valid parquet (e.g. a legacy shuffle object under a .parquet key).
 	return s.finishOpenParquet(filePath, mmapData, mmapData, localPath)
+}
+
+// openParquetFromBaseCache opens a parquet file the process-wide
+// base-table cache holds on local disk: mmap it in place and hand the
+// region to the shared open tail. localPath stays empty throughout — the
+// cache owns the file, so neither releaseCurrentFile nor the open-failure
+// unwind may unlink it.
+func (s *cachedFileStreamSource) openParquetFromBaseCache(cachePath, filePath string) error {
+	f, err := os.Open(cachePath)
+	if err != nil {
+		return fmt.Errorf("opening base-cache file %s: %w", cachePath, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		return fmt.Errorf("base-cache file %s unusable (err=%v)", cachePath, err)
+	}
+	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		return fmt.Errorf("mmap base-cache file %s: %w", cachePath, err)
+	}
+	// finishOpenParquet unwinds the mmap itself on a bad payload; its
+	// os.Remove of the empty localPath is a no-op.
+	return s.finishOpenParquet(filePath, mmapData, mmapData, "")
 }
 
 // finishOpenParquet is the shared tail of the parquet open path: build the

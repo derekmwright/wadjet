@@ -107,6 +107,8 @@ var (
 	eagerDispatch         bool
 	peerExchangeAddr      string
 	peerExchangeAdvertise string
+	baseTableCacheBytes   int64
+	baseTableCacheDir     string
 )
 
 func main() {
@@ -175,6 +177,8 @@ func main() {
 	rootCmd.PersistentFlags().BoolVar(&eagerDispatch, "eager-dispatch", false, "Eager consumer dispatch (Phase C1): eligible non-join consumer stages (aggregate/sort over a standalone repartition) start before their producer stage fully drains, consuming per-producer-task file manifests as tasks finish. Requires --streaming-exchange. Default false until SF100 validation (kill switch thereafter). See docs/design/eager-consumer-dispatch.md.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAddr, "peer-exchange-addr", ":0", "Peer-exchange (FetchShuffle) listen address. Default :0 picks a free port (the address reaches peers via heartbeats, and a fixed default would collide when multiple workers share a host); pin it when firewalls need a known port.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAdvertise, "peer-exchange-advertise", "", "Peer-exchange address advertised in heartbeats (default: derived from the bound listener)")
+	rootCmd.PersistentFlags().Int64Var(&baseTableCacheBytes, "base-table-cache-bytes", 0, "Cross-query disk cache for immutable base-table parquet objects: LRU byte budget on the cache volume. Hits are served from local disk without touching S3 (or the circuit breaker); misses tee the download into the cache. The cache survives restarts (index rebuilt from the directory). 0 = disabled (default until SF100 validation). See docs/design/base-table-nvme-cache.md.")
+	rootCmd.PersistentFlags().StringVar(&baseTableCacheDir, "base-table-cache-dir", "", "Directory for the base-table cache (default: <spill-dir>/base-cache, inheriting the spill volume's NVMe mount)")
 	rootCmd.PersistentFlags().StringVar(&geoipCityDB, "geoip-city", "", "Path to MaxMind GeoIP City database (GeoLite2-City.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&geoipASNDB, "geoip-asn", "", "Path to MaxMind GeoIP ASN database (GeoLite2-ASN.mmdb)")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "Log level: debug, info, warn, error")
@@ -403,6 +407,36 @@ func serveCmd() *cobra.Command {
 
 		// Wrap store with circuit breaker for S3 resilience
 		store = objstore.NewCircuitStore(store, objstore.DefaultCircuitConfig(), logger)
+
+		// Base-table NVMe cache sits ABOVE the breaker: hits never consult
+		// it (a warm cache keeps serving through an S3 brownout), misses
+		// keep full breaker protection. One process-wide seam serves every
+		// scan path (docs/design/base-table-nvme-cache.md §3).
+		if baseTableCacheBytes > 0 {
+			cacheDir := baseTableCacheDir
+			if cacheDir == "" && spillDir != "" {
+				cacheDir = filepath.Join(spillDir, "base-cache")
+			}
+			if cacheDir == "" {
+				logger.Warn("base-table cache disabled: set --base-table-cache-dir or --spill-dir to place it")
+			} else {
+				btc, err := objstore.NewBaseTableCache(store, cacheDir, baseTableCacheBytes, logger)
+				if err != nil {
+					return fmt.Errorf("initializing base-table cache: %w", err)
+				}
+				store = btc
+				logger.Info("base-table cache enabled", "dir", cacheDir, "budget_bytes", baseTableCacheBytes)
+				go func() {
+					var last objstore.BaseTableCacheStats
+					for range time.Tick(60 * time.Second) {
+						if s := btc.Stats(); s != last {
+							last = s
+							btc.LogStats()
+						}
+					}
+				}()
+			}
+		}
 
 		if v := os.Getenv("WADJET_ENABLE_ALERTS"); v == "1" || strings.EqualFold(v, "true") {
 			enableAlerts = true
@@ -989,11 +1023,11 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 
 	// Build config manager and auth provider for hot-reload
 	srvCfg := server.Config{
-		Addr:               httpAddr,
-		Catalog:            cat,
-		Coordinator:        coord,
-		Metrics:            m,
-		SortMergeJoinBytes: sortMergeJoinBytes,
+		Addr:                httpAddr,
+		Catalog:             cat,
+		Coordinator:         coord,
+		Metrics:             m,
+		SortMergeJoinBytes:  sortMergeJoinBytes,
 		LateMaterialization: lateMaterialization,
 	}
 
@@ -1280,12 +1314,12 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	dlq := coordinator.NewDLQ(js)
 
 	srvCfg := server.Config{
-		Addr:               httpAddr,
-		Catalog:            cat,
-		Coordinator:        coord,
-		DLQ:                dlq,
-		Metrics:            m,
-		SortMergeJoinBytes: sortMergeJoinBytes,
+		Addr:                httpAddr,
+		Catalog:             cat,
+		Coordinator:         coord,
+		DLQ:                 dlq,
+		Metrics:             m,
+		SortMergeJoinBytes:  sortMergeJoinBytes,
 		LateMaterialization: lateMaterialization,
 	}
 

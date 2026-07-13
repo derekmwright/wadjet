@@ -10,6 +10,7 @@ import (
 
 	"github.com/citc-tech/wadjet/internal/engine/diskio"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
+	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
 // Prefetch tuning. Vars (not consts) so tests can shrink them to exercise
@@ -147,6 +148,13 @@ func (p *filePrefetcher) fetch(ctx context.Context, s *cachedFileStreamSource, i
 		if addr, _ := peers.hintFor(filePath); addr != "" {
 			return &prefetchResult{skipped: true}
 		}
+	}
+	// Base-table cache resident: the consumer's cache tier mmaps the file
+	// in place — downloading it again here would waste the GET the cache
+	// exists to save. Counting-free probe: the serve (and the hit stat)
+	// happens in openNextFile.
+	if lps, ok := s.executor.store.(objstore.LocalPathStore); ok && lps.HasCachedPath(s.bucket, filePath) {
+		return &prefetchResult{skipped: true}
 	}
 
 	rc, info, err := s.executor.store.Get(ctx, s.bucket, filePath)
