@@ -34,3 +34,13 @@ query_timeout             = "30m"           # SF100 heavy queries need >10m defa
 max_concurrent            = 4
 data_plane                = "grpc" # Phase C+D+E gRPC data-plane (task dispatch + results + gather + TaskProgress). NATS retained for heartbeats + cancellation + KV only. SF100 is where the design was actually targeted — Q17 dispatch-stall + NATS lock-contention pathologies.
 catalog_snapshot_prefix   = "catalog/" # restore post-discovery catalog; first boot writes it (PR #115)
+# Base-table NVMe cache (docs/design/base-table-nvme-cache.md, PR #222):
+# 150 GB of the workers' 237 GB instance store; ~85 GB left for spill.
+# REPORTING CONVENTION CHANGE (2026-07-13, memo §10/§11): with this pinned,
+# a fresh cluster's first suite measures COLD-WITH-CACHE (populate tee on
+# first touch, warm within-suite re-reads) — that is the new headline
+# number. Steady-state = second suite on the same cluster
+# (-var=benchmark_runs=2). Reference points: cache-less 31m42s
+# (results/20260713-013357), cold-with-cache 29m54s / steady-state 28m50s
+# (results/20260713-021126). Set 0 to reproduce cache-less runs.
+base_table_cache_bytes    = 161061273600
