@@ -305,7 +305,33 @@ SF100 pair (same-window, control first, teardown discipline):
   latency events, and S3 GET cost reduction on long-lived clusters
   (the AtumForge deployment model — same tables queried all day).
 
-## 10. Open questions for review
+## 10. SF100 validation results (2026-07-13, added post-pair)
+
+Same-window pair on bin `c32fbc6` (PR #222), clusters destroyed+verified:
+
+- **Control** (cache off) `results/20260713-013357`: 22/22, **31m42s**.
+- **Treatment** (150 GB, `benchmark_runs=2`) `results/20260713-021126`:
+  run 1 (cold+warming) **29m54s = −5.7%**, run 2 (steady-state)
+  **28m50s = −9.0%**. 22/22 both runs, **row counts identical to control
+  on every query in all three suites**.
+- Steady-state scan-band deltas vs control: Q19 −32%, Q06 −29%, Q08
+  −29%, Q20 −29%, Q16 −24%, Q12 −23%, Q09 −21%, Q05 −17%, Q15 −15%,
+  Q21 −12%. Exchange-bound stayed flat exactly as §9 predicted: Q17
+  +1.5%, Q03 −1.7%, Q18 −3.3%. Positive movers (Q02 +15%, Q13 +13.5%)
+  are the known day-window-volatile pair, not cache-marked.
+- Engagement: worker base-cache reached **24 GB ≈ the entire SF100
+  parquet footprint** mid-run-1 (live `du` via SSM); run-1's own tail
+  already benefited (Q06 −31% cold — lineitem was resident by Q06 from
+  earlier queries' populations).
+- Not captured: per-worker hit-byte ratios (worker logs went down with
+  the prompt teardown; the stats ticker lines weren't pulled first).
+  The wall pattern + cache-size evidence is decisive enough that the
+  pair wasn't re-run for it; capture stats lines before teardown next
+  time.
+- New SF100 steady-state reference: **28m50s** (prior best 30m38s,
+  results/20260712-025644).
+
+## 11. Open questions for review
 
 1. **Benchmark reporting convention (PM):** a warm cache changes what the
    suite measures — cold-S3 has been the implicit contract for every
