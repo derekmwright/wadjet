@@ -282,6 +282,12 @@ variable "base_table_cache_bytes" {
   default     = 0
 }
 
+variable "streaming_shuffle_read" {
+  description = "Streaming shuffle read (docs/design/exchange-streaming-consumption.md): workers decode WSHF/WSHC exchange inputs directly from the peer/S3 byte stream (D1) and prefetch peer-hinted shuffle inputs ahead of consumption (D2), instead of staging whole files before the first chunk decodes. Worker-side flag only. Default false pending SF100 validation — set true for the treatment arm."
+  type        = bool
+  default     = false
+}
+
 variable "peer_exchange_port" {
   description = "Worker↔worker peer-exchange (FetchShuffle) port; SG opens it intra-cluster whenever streaming_exchange is set."
   type        = number

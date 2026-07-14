@@ -679,6 +679,7 @@ resource "aws_instance" "worker" {
             --bounded-dirty-writes=${var.bounded_dirty_writes} \
             --morsel-workers=${var.morsel_workers} \
             --base-table-cache-bytes=${var.base_table_cache_bytes} \
+            --streaming-shuffle-read=${var.streaming_shuffle_read} \
             %{if var.spill_floating_budget~}
             --spill-floating-budget \
             %{endif~}
