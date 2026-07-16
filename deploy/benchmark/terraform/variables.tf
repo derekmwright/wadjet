@@ -288,6 +288,12 @@ variable "streaming_shuffle_read" {
   default     = true
 }
 
+variable "scan_decode_ahead" {
+  description = "Scan decode pipelining (docs/design/scan-decode-pipelining.md): workers decode parquet row groups ahead of scan consumption — k decode workers with in-order delivery, byte-bounded window, cross-file continuation — instead of one row group per pull on the consumer goroutine. Worker-side flag only. Default false pending SF100 validation — set true for the treatment arm."
+  type        = bool
+  default     = false
+}
+
 variable "peer_exchange_port" {
   description = "Worker↔worker peer-exchange (FetchShuffle) port; SG opens it intra-cluster whenever streaming_exchange is set."
   type        = number
