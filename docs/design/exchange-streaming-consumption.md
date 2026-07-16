@@ -199,13 +199,16 @@ StageOutput freezing are untouched.
 
 ## 5. Flags and rollout
 
-- `--streaming-shuffle-read` (bool, default false until the SF100 pair;
-  kill switch thereafter — the base-table-cache arc convention).
+- `--streaming-shuffle-read` (bool; default false until the SF100 pair,
+  now **default true** — flipped after the 2026-07-14 SF100 validation
+  pair: steady-state −13.5%, 0 row mismatches, 0 fallbacks. `=false` is
+  the kill switch — the base-table-cache arc convention).
   Gates BOTH D1 and D2: they ship together as one read-path change; an
   intermediate D1-only default serves no operational purpose, though
   the implementation lands them as separate reviewable slices.
-- tpch-bench env `WADJET_STREAMING_SHUFFLE_READ` (explicit opt-in
-  parse), terraform var `streaming_shuffle_read` default false.
+- Terraform var `streaming_shuffle_read` mirrors the CLI default (true).
+  (The planned tpch-bench env `WADJET_STREAMING_SHUFFLE_READ` was never
+  needed — arms are selected via the terraform var.)
 - Markers (§8 pattern): per-worker counters
   `ShuffleStreamReads/ShuffleStreamFallbacks/ShuffleStreamSkipResumes`
   + prefetch window stats; DEBUG log on every fallback with the tier
