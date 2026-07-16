@@ -680,6 +680,7 @@ resource "aws_instance" "worker" {
             --morsel-workers=${var.morsel_workers} \
             --base-table-cache-bytes=${var.base_table_cache_bytes} \
             --streaming-shuffle-read=${var.streaming_shuffle_read} \
+            --scan-decode-ahead=${var.scan_decode_ahead} \
             %{if var.spill_floating_budget~}
             --spill-floating-budget \
             %{endif~}
