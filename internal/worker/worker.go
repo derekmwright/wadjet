@@ -68,7 +68,7 @@ type Config struct {
 	// StreamingShuffleRead decodes WSHF/WSHC exchange inputs directly from
 	// the peer/S3 byte stream instead of staging whole files to NVMe +
 	// mmap first (docs/design/exchange-streaming-consumption.md §3 D1).
-	// Default false pending SF100 validation; kill switch thereafter.
+	// Default on at the CLI (SF100-validated); false is the kill switch.
 	StreamingShuffleRead bool
 
 	// MmapRelief enables the Phase-5 MADV_DONTNEED relief of cold mmap'd cache
@@ -555,29 +555,37 @@ func (w *Worker) Start(ctx context.Context) error {
 	// Streaming-shuffle-read marker loop (memo §5): periodic greppable
 	// stats line, emitted only when the counters moved.
 	if w.config.StreamingShuffleRead {
-		w.wg.Add(1)
-		go func() {
-			defer w.wg.Done()
-			var lastReads, lastFallbacks, lastSkips int64
-			t := time.NewTicker(60 * time.Second)
-			defer t.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-					reads, fallbacks, skips := w.executor.ShuffleStreamStats()
-					if reads != lastReads || fallbacks != lastFallbacks || skips != lastSkips {
-						lastReads, lastFallbacks, lastSkips = reads, fallbacks, skips
-						w.logger.Info("streaming shuffle read stats",
-							"reads", reads, "fallbacks", fallbacks, "skip_resumes", skips)
-					}
-				}
-			}
-		}()
+		w.startShuffleStreamMarkerLoop(ctx)
 	}
 
 	return nil
+}
+
+// startShuffleStreamMarkerLoop runs the streaming-shuffle-read stats marker
+// on bgWG: it exits only on ctx cancel, so it must NOT join w.wg — Drain
+// waits on w.wg before cancelling, and a ctx-bound goroutine there deadlocks
+// the drain (see the wg/bgWG split comment on the Worker struct).
+func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
+	w.bgWG.Add(1)
+	go func() {
+		defer w.bgWG.Done()
+		var lastReads, lastFallbacks, lastSkips int64
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				reads, fallbacks, skips := w.executor.ShuffleStreamStats()
+				if reads != lastReads || fallbacks != lastFallbacks || skips != lastSkips {
+					lastReads, lastFallbacks, lastSkips = reads, fallbacks, skips
+					w.logger.Info("streaming shuffle read stats",
+						"reads", reads, "fallbacks", fallbacks, "skip_resumes", skips)
+				}
+			}
+		}
+	}()
 }
 
 // dispatchLoop consumes TaskDispatch envelopes pushed by coord over

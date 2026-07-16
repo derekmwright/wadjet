@@ -283,9 +283,9 @@ variable "base_table_cache_bytes" {
 }
 
 variable "streaming_shuffle_read" {
-  description = "Streaming shuffle read (docs/design/exchange-streaming-consumption.md): workers decode WSHF/WSHC exchange inputs directly from the peer/S3 byte stream (D1) and prefetch peer-hinted shuffle inputs ahead of consumption (D2), instead of staging whole files before the first chunk decodes. Worker-side flag only. Default false pending SF100 validation — set true for the treatment arm."
+  description = "Streaming shuffle read (docs/design/exchange-streaming-consumption.md): workers decode WSHF/WSHC exchange inputs directly from the peer/S3 byte stream (D1) and prefetch peer-hinted shuffle inputs ahead of consumption (D2), instead of staging whole files before the first chunk decodes. Worker-side flag only. Default true (SF100-validated, 2026-07-14 pair) — set false for a control arm / kill switch."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "peer_exchange_port" {

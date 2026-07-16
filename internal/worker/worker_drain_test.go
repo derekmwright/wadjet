@@ -138,6 +138,33 @@ func TestWorkerDrain_CompletesWithBackgroundLoops(t *testing.T) {
 	}
 }
 
+// TestWorkerDrain_StreamingShuffleMarkerLoop is the regression test for the
+// drain deadlock shipped with --streaming-shuffle-read: the stats marker
+// loop registered itself on w.wg (the in-flight task group Drain waits on
+// pre-cancel) instead of bgWG, so with the flag on, Drain never returned —
+// every graceful shutdown (tpch-harness teardown, SIGTERM, rolling update)
+// hung forever. The loop must ride bgWG exactly like the heartbeat.
+func TestWorkerDrain_StreamingShuffleMarkerLoop(t *testing.T) {
+	store := objstore.NewMemStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &Worker{
+		config:   Config{WorkerID: "drain-marker-test", StreamingShuffleRead: true},
+		logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		drainCh:  make(chan struct{}),
+		cancel:   cancel,
+		executor: NewExecutor(store, NewLRUCache(1024), nil),
+	}
+	w.startShuffleStreamMarkerLoop(ctx)
+
+	done := make(chan struct{})
+	go func() { w.Drain(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain did not complete: streaming-shuffle marker loop blocks drain (wg vs bgWG)")
+	}
+}
+
 // TestWorkerDrain_TimeoutEscalatesToStop: with DrainTimeout set and a task
 // that never finishes, Drain must give up and hard-stop (cancel) instead of
 // hanging past the platform's kill window.
