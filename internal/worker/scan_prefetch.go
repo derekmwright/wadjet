@@ -393,6 +393,40 @@ func (p *filePrefetcher) take(ctx context.Context, idx int) *prefetchResult {
 	}
 }
 
+// tryTake is take's non-blocking sibling for the decode-ahead pre-open
+// path (docs/design/scan-decode-pipelining.md S2): it never waits on a
+// download. Returns (res, true) when idx resolved to a usable local file
+// (ownership transfers to the caller), (nil, true) when idx resolved to
+// skipped/err — the result is PUT BACK for the authoritative take() in
+// openNextFile, which must still observe it — and (nil, false) when the
+// download is simply not done yet (poll again later).
+func (p *filePrefetcher) tryTake(idx int) (*prefetchResult, bool) {
+	p.mu.Lock()
+	if idx+1 > p.nextNeeded {
+		p.nextNeeded = idx + 1
+	}
+	close(p.windowFree)
+	p.windowFree = make(chan struct{})
+	p.mu.Unlock()
+
+	select {
+	case res := <-p.results[idx]:
+		if res.skipped || res.err != nil {
+			// Put back (cap-1 channel, single producer per idx — the
+			// send cannot block) so take() reaps it and releases any
+			// window bytes exactly once, there.
+			p.results[idx] <- res
+			return nil, true
+		}
+		if res.windowBytes > 0 {
+			p.releaseWindow(res.windowBytes)
+		}
+		return res, true
+	default:
+		return nil, false
+	}
+}
+
 // Close cancels outstanding downloads, waits for workers to exit, and
 // removes any downloaded-but-never-taken temp files. Idempotent.
 func (p *filePrefetcher) Close() {

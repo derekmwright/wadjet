@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -132,6 +133,18 @@ type cachedFileStreamSource struct {
 	prefetch         *filePrefetcher
 	prefetchStarted  bool
 	prefetchDisabled bool
+
+	// Cross-file decode continuation (--scan-decode-ahead, memo S2): the
+	// next parquet file, pre-opened once the current file's row groups
+	// are all assigned, so its head decodes while the current tail
+	// delivers. decodeWin is the one byte window every file of this
+	// source draws from. preOpenSkip is (fileIdx+1) of an index whose
+	// prefetch resolved unusable — stop polling it; the tiered
+	// openNextFile path is authoritative there (0 = none).
+	nextParquet *pendingParquet
+	decodeWin   *scan.DecodeWindow
+	preOpenSkip int
+	preOpens    int // files pre-opened by the continuation (tests + DEBUG log)
 }
 
 // shuffleBatchIter is the common face of the mmap-backed and streaming
@@ -224,15 +237,28 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 		}
 
 		// Yield next decoded row group from the active Parquet iterator.
-		// The iterator decodes lazily — only one row group's worth of
-		// memory is live at a time per source.
+		// Serial: only one row group's worth of memory is live at a time
+		// per source. Decode-ahead: bounded by the source's DecodeWindow.
 		if s.parquetIter != nil {
 			b, err := s.parquetIter.Next()
 			if err != nil {
 				return nil, err
 			}
 			if b != nil {
+				s.tryPreOpenNextParquet()
 				return b, nil
+			}
+			// Cross-file continuation: the next file was pre-opened and
+			// its head is already decoding — swap it in without touching
+			// the tiered open path. Release order matters exactly as in
+			// the serial branch below: iterator (quiesces decode), then
+			// reader ref, then mmap.
+			if s.nextParquet != nil {
+				s.releaseParquetIter()
+				s.releaseCurrentFile()
+				s.installParquet(s.nextParquet)
+				s.nextParquet = nil
+				continue
 			}
 			// Iterator exhausted — release reader and the mmap/local file it
 			// was reading from before opening the next file. Order matters:
@@ -279,7 +305,13 @@ func (s *cachedFileStreamSource) Next(ctx context.Context) (*batch.RecordBatch, 
 }
 
 func (s *cachedFileStreamSource) Close() error {
-	// Stop the download-ahead workers first and reap any temp files they
+	// Pre-opened next file first: its iterator joins in-flight decodes
+	// before the mmap drops (same invariant as the current file below).
+	if s.nextParquet != nil {
+		s.nextParquet.release(s.executor.logger)
+		s.nextParquet = nil
+	}
+	// Stop the download-ahead workers and reap any temp files they
 	// downloaded that were never consumed.
 	if s.prefetch != nil {
 		s.prefetch.Close()
@@ -567,25 +599,14 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 // open tail. On any failure the temp file is removed and the caller
 // falls back to the normal tiered path.
 func (s *cachedFileStreamSource) openPrefetchedParquet(localPath, filePath string) error {
-	f, err := os.Open(localPath)
-	if err != nil {
-		_ = os.Remove(localPath)
-		return fmt.Errorf("opening prefetched file %s: %w", localPath, err)
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil || fi.Size() == 0 {
-		_ = os.Remove(localPath)
-		return fmt.Errorf("prefetched file %s unusable (err=%v)", localPath, err)
-	}
-	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
-	if err != nil {
-		_ = os.Remove(localPath)
-		return fmt.Errorf("mmap prefetched file %s: %w", localPath, err)
-	}
-	// finishOpenParquet unwinds mmap+file itself if the payload isn't
+	// buildParquetFromLocal unwinds mmap+file itself if the payload isn't
 	// valid parquet (e.g. a legacy shuffle object under a .parquet key).
-	return s.finishOpenParquet(filePath, mmapData, mmapData, localPath)
+	p, err := s.buildParquetFromLocal(localPath, filePath, localPath)
+	if err != nil {
+		return err
+	}
+	s.installParquet(p)
+	return nil
 }
 
 // progressReadCloser reports each successful Read to the per-task
@@ -703,22 +724,14 @@ func (s *cachedFileStreamSource) fallbackFromStream(ctx context.Context, cause e
 // cache owns the file, so neither releaseCurrentFile nor the open-failure
 // unwind may unlink it.
 func (s *cachedFileStreamSource) openParquetFromBaseCache(cachePath, filePath string) error {
-	f, err := os.Open(cachePath)
+	// ownedPath "" — the cache owns the file; only the mmap unwinds on a
+	// bad payload.
+	p, err := s.buildParquetFromLocal(cachePath, filePath, "")
 	if err != nil {
-		return fmt.Errorf("opening base-cache file %s: %w", cachePath, err)
+		return err
 	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil || fi.Size() == 0 {
-		return fmt.Errorf("base-cache file %s unusable (err=%v)", cachePath, err)
-	}
-	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
-	if err != nil {
-		return fmt.Errorf("mmap base-cache file %s: %w", cachePath, err)
-	}
-	// finishOpenParquet unwinds the mmap itself on a bad payload; its
-	// os.Remove of the empty localPath is a no-op.
-	return s.finishOpenParquet(filePath, mmapData, mmapData, "")
+	s.installParquet(p)
+	return nil
 }
 
 // openPrefetchedShuffle opens a shuffle file the prefetcher already landed
@@ -760,21 +773,85 @@ func (s *cachedFileStreamSource) openPrefetchedShuffle(localPath, filePath strin
 // column projection guard, and set up the row-group iterator (or the
 // eager fallback for Array/Map schemas). mmapData/localPath may be
 // nil/empty for the in-memory path.
+// pendingParquet is a fully-opened parquet file (reader + iterator +
+// mmap/file ownership) not yet installed as the source's current file.
+// The cross-file continuation holds at most one while the current file
+// drains, so its head decodes into the shared window early.
+type pendingParquet struct {
+	iter            parquetGroupIter
+	reader          *parquet.Reader
+	mmapData        []byte
+	mmapRegion      *mmapRegion
+	localPath       string
+	fallbackBatches []*batch.RecordBatch
+}
+
+// release drops a never-installed pending file: quiesce decode first
+// (iter.Close joins in-flight workers), then the reader ref, then the
+// mmap — same order Close documents for the current file.
+func (p *pendingParquet) release(logger *slog.Logger) {
+	if p == nil {
+		return
+	}
+	if p.iter != nil {
+		_ = p.iter.Close()
+		p.iter = nil
+	}
+	p.reader = nil
+	if p.mmapData != nil {
+		unregisterMmap(p.mmapRegion)
+		p.mmapRegion = nil
+		_ = syscall.Munmap(p.mmapData)
+		p.mmapData = nil
+	}
+	if p.localPath != "" {
+		if rmErr := os.Remove(p.localPath); rmErr != nil && !os.IsNotExist(rmErr) && logger != nil {
+			logger.Warn("pending parquet cleanup failed", "path", p.localPath, "error", rmErr)
+		}
+		p.localPath = ""
+	}
+}
+
+// installParquet makes a pending file the source's current file. The
+// caller must have released the previous current file already.
+func (s *cachedFileStreamSource) installParquet(p *pendingParquet) {
+	s.mmapData = p.mmapData
+	s.mmapRegion = p.mmapRegion
+	s.localPath = p.localPath
+	s.parquetIter = p.iter
+	s.parquetReader = p.reader
+	s.fallbackBatches = p.fallbackBatches
+	s.fallbackBatchIdx = 0
+}
+
 func (s *cachedFileStreamSource) finishOpenParquet(filePath string, data, mmapData []byte, localPath string) error {
+	p, err := s.buildParquetState(filePath, data, mmapData, localPath)
+	if err != nil {
+		return err
+	}
+	s.installParquet(p)
+	return nil
+}
+
+// buildParquetState opens a parquet payload into a pendingParquet without
+// touching the source's current-file fields. On error the mmap/local file
+// are unwound (empty localPath = caller-owned file, not unlinked).
+func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapData []byte, localPath string) (*pendingParquet, error) {
 	reader, err := parquet.NewReaderFromBytes(data)
 	if err != nil {
 		if mmapData != nil {
 			_ = syscall.Munmap(mmapData)
 			_ = os.Remove(localPath)
 		}
-		return fmt.Errorf("opening parquet file %s: %w", filePath, err)
+		return nil, fmt.Errorf("opening parquet file %s: %w", filePath, err)
 	}
-	// Transfer mmap/file ownership to the source so Next()/Close()
-	// release them when the iterator exhausts. nil/empty are fine for
-	// the in-memory fallback.
-	s.mmapData = mmapData
-	s.mmapRegion = registerMmap(mmapData) // nil when relief disabled
-	s.localPath = localPath
+	// nil/empty mmap/localPath are fine for the in-memory fallback.
+	p := &pendingParquet{
+		reader:     reader,
+		mmapData:   mmapData,
+		mmapRegion: registerMmap(mmapData), // nil when relief disabled
+		localPath:  localPath,
+	}
 	projCols := reader.Schema().Columns
 	// Apply column projection only when EVERY requested column is present
 	// in the file schema. If any requested name is missing (likely a
@@ -819,33 +896,137 @@ func (s *cachedFileStreamSource) finishOpenParquet(filePath string, data, mmapDa
 	if scan.HasUnsupportedColumnarTypes(projCols) {
 		batches, err := scan.ReadFileBatchesShard(reader, projCols, nil, shardIdx, shardCount)
 		if err != nil {
-			return fmt.Errorf("reading parquet file %s (fallback): %w", filePath, err)
+			p.release(s.executor.logger)
+			return nil, fmt.Errorf("reading parquet file %s (fallback): %w", filePath, err)
 		}
-		s.fallbackBatches = batches
-		s.fallbackBatchIdx = 0
-		return nil
+		p.fallbackBatches = batches
+		return p, nil
 	}
 	var iter parquetGroupIter
 	if s.executor.scanDecodeAhead {
+		if s.decodeWin == nil {
+			// One window per source, shared across every file it opens —
+			// the cross-file continuation draws the next file's head from
+			// the same budget as the current file's tail.
+			s.decodeWin = scan.NewDecodeWindow(s.executor.scanDecodeAheadBytes)
+		}
 		da, err := scan.OpenDecodeAheadIter(reader, projCols, nil, shardIdx, shardCount,
-			scan.DecodeAheadOpts{WindowBytes: s.executor.scanDecodeAheadBytes})
+			scan.DecodeAheadOpts{Window: s.decodeWin})
 		if err != nil {
-			return fmt.Errorf("opening decode-ahead iterator for %s: %w", filePath, err)
+			p.release(s.executor.logger)
+			return nil, fmt.Errorf("opening decode-ahead iterator for %s: %w", filePath, err)
 		}
 		iter = &decodeAheadStatsIter{DecodeAheadIter: da, executor: s.executor}
 	} else {
 		rgIter, err := scan.OpenRowGroupIter(reader, projCols, nil, shardIdx, shardCount)
 		if err != nil {
-			return fmt.Errorf("opening row-group iterator for %s: %w", filePath, err)
+			p.release(s.executor.logger)
+			return nil, fmt.Errorf("opening row-group iterator for %s: %w", filePath, err)
 		}
 		iter = rgIter
 	}
 	if len(s.dynamicRanges) > 0 || len(s.bloomFilters) > 0 {
 		iter.SetDynamicFilters(s.dynamicRanges, s.bloomFilters)
 	}
-	s.parquetIter = iter
-	s.parquetReader = reader
-	return nil
+	p.iter = iter
+	return p, nil
+}
+
+// tryPreOpenNextParquet pre-opens the next file for the cross-file decode
+// continuation. Called after every delivered parquet batch; all guards
+// are cheap. Only the non-blocking local tiers pre-open (base-table cache
+// hit, completed prefetch download) — anything else falls back to the
+// tiered openNextFile at the boundary, keeping this strictly best-effort:
+// it can never change results and never blocks the consumer.
+func (s *cachedFileStreamSource) tryPreOpenNextParquet() {
+	if !s.executor.scanDecodeAhead || s.nextParquet != nil || s.fileIdx >= len(s.files) {
+		return
+	}
+	idx := s.fileIdx
+	if s.preOpenSkip == idx+1 {
+		return
+	}
+	filePath := s.files[idx]
+	if !strings.HasSuffix(filePath, ".parquet") {
+		return
+	}
+	da, ok := s.parquetIter.(*decodeAheadStatsIter)
+	if !ok || !da.AssignmentDrained() {
+		return
+	}
+
+	// Base-table cache tier: map lookup + local open, never blocks.
+	if lps, ok := s.executor.store.(objstore.LocalPathStore); ok {
+		if cached, ok := lps.CachedLocalPath(s.bucket, filePath); ok {
+			if p, err := s.buildParquetFromLocal(cached, filePath, ""); err == nil {
+				s.adoptPending(p, idx)
+				return
+			} else if s.executor.logger != nil {
+				s.executor.logger.Debug("decode-ahead pre-open fell through",
+					"key", filePath, "path", cached, "error", err)
+			}
+		}
+	}
+	// Prefetch tier: consume the download only if it already finished.
+	if s.prefetch != nil {
+		res, resolved := s.prefetch.tryTake(idx)
+		if !resolved {
+			return // still downloading — poll again on the next batch
+		}
+		if res == nil {
+			s.preOpenSkip = idx + 1 // skipped/err — openNextFile owns it
+			return
+		}
+		if p, err := s.buildParquetFromLocal(res.localPath, filePath, res.localPath); err == nil {
+			s.adoptPending(p, idx)
+			return
+		}
+		// buildParquetFromLocal removed the temp; the tiered path
+		// re-resolves this index from the durable copy.
+		s.preOpenSkip = idx + 1
+	}
+}
+
+// buildParquetFromLocal mmaps a local parquet file and builds its pending
+// state. ownedPath is "" when the file belongs to a cache (must not be
+// unlinked) and the file's own path when ownership transfers to us.
+func (s *cachedFileStreamSource) buildParquetFromLocal(localPath, filePath, ownedPath string) (*pendingParquet, error) {
+	f, err := os.Open(localPath)
+	if err != nil {
+		if ownedPath != "" {
+			_ = os.Remove(ownedPath)
+		}
+		return nil, fmt.Errorf("opening local parquet %s: %w", localPath, err)
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		if ownedPath != "" {
+			_ = os.Remove(ownedPath)
+		}
+		return nil, fmt.Errorf("local parquet %s unusable (err=%v)", localPath, err)
+	}
+	mmapData, err := syscall.Mmap(int(f.Fd()), 0, int(fi.Size()), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		if ownedPath != "" {
+			_ = os.Remove(ownedPath)
+		}
+		return nil, fmt.Errorf("mmap local parquet %s: %w", localPath, err)
+	}
+	// buildParquetState unwinds mmap (and unlinks ownedPath when set) on a
+	// bad payload.
+	return s.buildParquetState(filePath, mmapData, mmapData, ownedPath)
+}
+
+// adoptPending records a pre-opened next file and starts its decode
+// workers so the head decodes into the shared window immediately.
+func (s *cachedFileStreamSource) adoptPending(p *pendingParquet, idx int) {
+	s.nextParquet = p
+	s.fileIdx = idx + 1
+	s.preOpens++
+	if da, ok := p.iter.(*decodeAheadStatsIter); ok {
+		da.Start()
+	}
 }
 
 // decodeAheadStatsIter folds a DecodeAheadIter's engagement counters into

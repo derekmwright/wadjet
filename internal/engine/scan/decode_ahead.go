@@ -46,21 +46,23 @@ type DecodeAheadIter struct {
 	// for window estimation, resolved once at Open.
 	estLeaves []int
 
-	workers     int
-	windowBytes int64
+	workers int
 
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
 
-	mu       sync.Mutex
-	cond     *sync.Cond
-	started  bool
-	closed   bool
-	nextIdx  int                 // next row-group index to assign to a worker
-	deliver  int                 // next row-group index to hand to the consumer
-	inflight int64               // window bytes reserved for assigned-but-undelivered groups
-	slots    map[int]*decodeSlot // decoded (or pruned/failed), awaiting delivery
-	wg       sync.WaitGroup
+	// win serializes ALL iterator state below and carries the byte
+	// window. Chained iterators (cross-file continuation) share one
+	// DecodeWindow, so one file's deliveries wake the next file's
+	// admission waiters — and share one mutex, which keeps the two
+	// iterators' state transitions trivially race-free.
+	win     *DecodeWindow
+	started bool
+	closed  bool
+	nextIdx int                 // next row-group index to assign to a worker
+	deliver int                 // next row-group index to hand to the consumer
+	slots   map[int]*decodeSlot // decoded (or pruned/failed), awaiting delivery
+	wg      sync.WaitGroup
 
 	// Empty-shard sentinel (mirrors RowGroupIter).
 	empty bool
@@ -87,8 +89,33 @@ type DecodeAheadOpts struct {
 	// DefaultDecodeAheadWorkers capped at GOMAXPROCS.
 	Workers int
 	// WindowBytes bounds decoded-but-undelivered batch bytes. <= 0
-	// selects DefaultDecodeAheadWindowBytes.
+	// selects DefaultDecodeAheadWindowBytes. Ignored when Window is set.
 	WindowBytes int64
+	// Window shares an existing byte window (and its lock) with another
+	// iterator — the cross-file continuation shape: the tail of file F
+	// and the head of file F+1 draw from one budget.
+	Window *DecodeWindow
+}
+
+// DecodeWindow is a byte budget shared by one or more DecodeAheadIters.
+// Its mutex doubles as the owning iterators' state lock.
+type DecodeWindow struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	inflight int64
+	limit    int64
+}
+
+// NewDecodeWindow returns a window bounding decoded-but-undelivered
+// bytes across every iterator opened with it. bytes <= 0 selects
+// DefaultDecodeAheadWindowBytes.
+func NewDecodeWindow(bytes int64) *DecodeWindow {
+	if bytes <= 0 {
+		bytes = DefaultDecodeAheadWindowBytes
+	}
+	w := &DecodeWindow{limit: bytes}
+	w.cond = sync.NewCond(&w.mu)
+	return w
 }
 
 const (
@@ -130,18 +157,17 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 	}
 
 	it := &DecodeAheadIter{
-		workers:     opts.Workers,
-		windowBytes: opts.WindowBytes,
+		workers: opts.Workers,
+		win:     opts.Window,
 	}
-	it.cond = sync.NewCond(&it.mu)
+	if it.win == nil {
+		it.win = NewDecodeWindow(opts.WindowBytes)
+	}
 	if it.workers <= 0 {
 		it.workers = DefaultDecodeAheadWorkers
 	}
 	if gp := runtime.GOMAXPROCS(0); it.workers > gp {
 		it.workers = gp
-	}
-	if it.windowBytes <= 0 {
-		it.windowBytes = DefaultDecodeAheadWindowBytes
 	}
 
 	if shardIdx < 0 || shardIdx >= shardCount {
@@ -181,10 +207,47 @@ func (it *DecodeAheadIter) SetDynamicFilters(ranges []exec.DynamicRange, blooms 
 	if it == nil {
 		return
 	}
-	it.mu.Lock()
-	defer it.mu.Unlock()
+	it.win.mu.Lock()
+	defer it.win.mu.Unlock()
 	it.dynamicRanges = ranges
 	it.bloomFilters = blooms
+}
+
+// Start spawns the decode workers immediately instead of on the first
+// Next — the cross-file continuation pre-opens the next file's iterator
+// and wants its head decoding while the current file's tail delivers.
+// Filters must already be attached. Idempotent.
+func (it *DecodeAheadIter) Start() {
+	if it == nil || it.empty {
+		return
+	}
+	it.win.mu.Lock()
+	it.startLocked()
+	it.win.mu.Unlock()
+}
+
+func (it *DecodeAheadIter) startLocked() {
+	if it.started || it.closed {
+		return
+	}
+	it.started = true
+	for w := 0; w < it.workers; w++ {
+		it.wg.Add(1)
+		go it.decodeLoop()
+	}
+}
+
+// AssignmentDrained reports whether every row group has been assigned to
+// a decode worker (not necessarily delivered) — the cross-file
+// continuation's pre-open trigger: once true, idle workers exist or soon
+// will, and the next file's head is the only work left to feed them.
+func (it *DecodeAheadIter) AssignmentDrained() bool {
+	if it == nil || it.empty {
+		return true
+	}
+	it.win.mu.Lock()
+	defer it.win.mu.Unlock()
+	return !it.closed && it.started && it.nextIdx >= it.end
 }
 
 // PruneStats mirrors RowGroupIter.PruneStats.
@@ -210,15 +273,9 @@ func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
 	if it == nil || it.empty {
 		return nil, nil
 	}
-	it.mu.Lock()
-	defer it.mu.Unlock()
-	if !it.started && !it.closed {
-		it.started = true
-		for w := 0; w < it.workers; w++ {
-			it.wg.Add(1)
-			go it.decodeLoop()
-		}
-	}
+	it.win.mu.Lock()
+	defer it.win.mu.Unlock()
+	it.startLocked()
 	for {
 		if it.closed {
 			return nil, nil
@@ -226,13 +283,13 @@ func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
 		if slot, ok := it.slots[it.deliver]; ok {
 			delete(it.slots, it.deliver)
 			it.deliver++
-			it.inflight -= slot.est
-			it.cond.Broadcast()
+			it.win.inflight -= slot.est
+			it.win.cond.Broadcast()
 			if slot.err != nil {
 				// Mirror serial semantics: the error surfaces exactly at
 				// this group's position and the iterator is dead after.
 				it.closed = true
-				it.cond.Broadcast()
+				it.win.cond.Broadcast()
 				return nil, slot.err
 			}
 			if slot.batch == nil {
@@ -243,7 +300,7 @@ func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
 		if it.deliver >= it.end {
 			return nil, nil // all groups delivered
 		}
-		it.cond.Wait()
+		it.win.cond.Wait()
 	}
 }
 
@@ -251,10 +308,10 @@ func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
 // window, decode it outside the lock, park the result in its slot.
 func (it *DecodeAheadIter) decodeLoop() {
 	defer it.wg.Done()
-	it.mu.Lock()
+	it.win.mu.Lock()
 	for {
 		if it.closed || it.nextIdx >= it.end {
-			it.mu.Unlock()
+			it.win.mu.Unlock()
 			return
 		}
 		idx := it.nextIdx
@@ -262,16 +319,18 @@ func (it *DecodeAheadIter) decodeLoop() {
 		// The delivery-cursor group is always admitted: the consumer is
 		// (or will be) waiting on precisely this index, so reserving past
 		// the window here cannot grow it further, and refusing would
-		// deadlock on any single group larger than the window.
-		if it.inflight+est > it.windowBytes && idx != it.deliver {
+		// deadlock on any single group larger than the window. (Under a
+		// shared window this bounds transient overshoot to one group per
+		// chained iterator.)
+		if it.win.inflight+est > it.win.limit && idx != it.deliver {
 			it.windowFullStalls.Add(1)
-			it.cond.Wait()
+			it.win.cond.Wait()
 			continue
 		}
 		it.nextIdx++
-		it.inflight += est
+		it.win.inflight += est
 		ranges, blooms := it.dynamicRanges, it.bloomFilters
-		it.mu.Unlock()
+		it.win.mu.Unlock()
 
 		slot := &decodeSlot{est: est}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
@@ -286,9 +345,9 @@ func (it *DecodeAheadIter) decodeLoop() {
 			}
 		}
 
-		it.mu.Lock()
+		it.win.mu.Lock()
 		it.slots[idx] = slot
-		it.cond.Broadcast()
+		it.win.cond.Broadcast()
 	}
 }
 
@@ -348,13 +407,28 @@ func (it *DecodeAheadIter) Close() error {
 	if it == nil || it.empty {
 		return nil
 	}
-	it.mu.Lock()
+	it.win.mu.Lock()
 	it.closed = true
-	it.cond.Broadcast()
+	// Release this iterator's undelivered reservations so a chained
+	// iterator sharing the window doesn't inherit dead inflight bytes.
+	for idx, slot := range it.slots {
+		it.win.inflight -= slot.est
+		delete(it.slots, idx)
+	}
+	it.win.cond.Broadcast()
 	started := it.started
-	it.mu.Unlock()
+	it.win.mu.Unlock()
 	if started {
 		it.wg.Wait()
 	}
+	// Workers parked slots between the drain above and their exit; drop
+	// those reservations too. No new slots can appear once closed.
+	it.win.mu.Lock()
+	for idx, slot := range it.slots {
+		it.win.inflight -= slot.est
+		delete(it.slots, idx)
+	}
+	it.win.cond.Broadcast()
+	it.win.mu.Unlock()
 	return nil
 }
