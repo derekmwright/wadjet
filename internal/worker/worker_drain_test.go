@@ -165,6 +165,30 @@ func TestWorkerDrain_StreamingShuffleMarkerLoop(t *testing.T) {
 	}
 }
 
+// TestWorkerDrain_ScanDecodeAheadMarkerLoop: the scan-decode-ahead stats
+// marker loop must ride bgWG, not w.wg — the same drain-deadlock class as
+// the streaming-shuffle marker loop above.
+func TestWorkerDrain_ScanDecodeAheadMarkerLoop(t *testing.T) {
+	store := objstore.NewMemStore()
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &Worker{
+		config:   Config{WorkerID: "drain-scan-marker-test", ScanDecodeAhead: true},
+		logger:   slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		drainCh:  make(chan struct{}),
+		cancel:   cancel,
+		executor: NewExecutor(store, NewLRUCache(1024), nil),
+	}
+	w.startScanDecodeAheadMarkerLoop(ctx)
+
+	done := make(chan struct{})
+	go func() { w.Drain(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Drain did not complete: scan-decode-ahead marker loop blocks drain (wg vs bgWG)")
+	}
+}
+
 // TestWorkerDrain_TimeoutEscalatesToStop: with DrainTimeout set and a task
 // that never finishes, Drain must give up and hard-stop (cancel) instead of
 // hanging past the platform's kill window.

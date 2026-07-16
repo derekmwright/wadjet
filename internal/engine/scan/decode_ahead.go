@@ -1,0 +1,455 @@
+package scan
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+	"sync/atomic"
+
+	"github.com/citc-tech/wadjet/internal/engine/batch"
+	"github.com/citc-tech/wadjet/internal/engine/exec"
+	pqt "github.com/citc-tech/wadjet/internal/storage/parquet"
+)
+
+// DecodeAheadIter is the parallel sibling of RowGroupIter
+// (docs/design/scan-decode-pipelining.md): k decode workers pull
+// row-group indices in file order, each runs ReadRowGroupNative for its
+// group, and results deliver to the consumer strictly in source order.
+// The consumer-facing contract is identical to RowGroupIter — same
+// batches in the same order, same error surfaced at the same position,
+// same prune behavior — only the decode of group N+1..N+w overlaps the
+// consumption of group N instead of waiting for it.
+//
+// Memory is bounded by WindowBytes of decoded-but-undelivered batches,
+// estimated per group from the projected columns' TotalUncompressedSize
+// metadata (estimation error is bounded by one group per worker). The
+// group at the delivery cursor is always admitted regardless of the
+// window so a single oversized row group cannot deadlock the pipeline.
+//
+// Concurrency safety rests on ReadRowGroupNative's documented contract:
+// FileReader is read-only after construction and every ColumnPages call
+// allocates a fresh ColumnPageReader, so concurrent decodes of distinct
+// row groups never share mutable state (columnar_native.go:124-126).
+//
+// Lifecycle: workers start on the FIRST Next() call, not at Open — this
+// preserves RowGroupIter's "SetDynamicFilters before first Next"
+// contract (filters attach after Open on the worker scan path). Close()
+// stops assignment and JOINS in-flight decodes before returning: the
+// caller munmaps the file bytes right after Close, so no decode may
+// touch the underlying slice once Close returns.
+type DecodeAheadIter struct {
+	fr         *pqt.FileReader
+	readSchema []pqt.Column
+	start, end int
+	// estLeaves[i] is the leaf column index for readSchema[i], -1 when
+	// unresolved (ROW children, aliased or missing columns) — used only
+	// for window estimation, resolved once at Open.
+	estLeaves []int
+
+	workers  int
+	pressure func() bool
+
+	dynamicRanges []exec.DynamicRange
+	bloomFilters  []*exec.BloomScanFilter
+
+	// win serializes ALL iterator state below and carries the byte
+	// window. Chained iterators (cross-file continuation) share one
+	// DecodeWindow, so one file's deliveries wake the next file's
+	// admission waiters — and share one mutex, which keeps the two
+	// iterators' state transitions trivially race-free.
+	win     *DecodeWindow
+	started bool
+	closed  bool
+	nextIdx int                 // next row-group index to assign to a worker
+	deliver int                 // next row-group index to hand to the consumer
+	slots   map[int]*decodeSlot // decoded (or pruned/failed), awaiting delivery
+	wg      sync.WaitGroup
+
+	// Empty-shard sentinel (mirrors RowGroupIter).
+	empty bool
+
+	// Counters. Prune counters mirror RowGroupIter's for diagnostic
+	// parity; the rest are the memo §5 markers, read via Stats.
+	rgPrunedBloom    atomic.Int64
+	rgPrunedRange    atomic.Int64
+	rgRead           atomic.Int64
+	windowFullStalls atomic.Int64
+	pressureStalls   atomic.Int64
+}
+
+// decodeSlot is one row group's outcome, parked until the delivery
+// cursor reaches its index.
+type decodeSlot struct {
+	batch  *batch.RecordBatch // nil when pruned or empty
+	err    error
+	est    int64 // window bytes reserved for this group
+}
+
+// DecodeAheadOpts sizes a DecodeAheadIter.
+type DecodeAheadOpts struct {
+	// Workers is the decode worker count. <= 0 selects
+	// DefaultDecodeAheadWorkers capped at GOMAXPROCS.
+	Workers int
+	// WindowBytes bounds decoded-but-undelivered batch bytes. <= 0
+	// selects DefaultDecodeAheadWindowBytes. Ignored when Window is set.
+	WindowBytes int64
+	// Window shares an existing byte window (and its lock) with another
+	// iterator — the cross-file continuation shape: the tail of file F
+	// and the head of file F+1 draw from one budget.
+	Window *DecodeWindow
+	// Pressure, when set, is consulted before admitting any group beyond
+	// the delivery cursor. While it reports true the iterator degrades to
+	// effectively serial (one group in flight) and the window drains as
+	// the consumer takes — the memory-pressure collapse hook. Must be
+	// safe to call from multiple goroutines.
+	Pressure func() bool
+}
+
+// DecodeWindow is a byte budget shared by one or more DecodeAheadIters.
+// Its mutex doubles as the owning iterators' state lock.
+type DecodeWindow struct {
+	mu       sync.Mutex
+	cond     *sync.Cond
+	inflight int64
+	limit    int64
+}
+
+// NewDecodeWindow returns a window bounding decoded-but-undelivered
+// bytes across every iterator opened with it. bytes <= 0 selects
+// DefaultDecodeAheadWindowBytes.
+func NewDecodeWindow(bytes int64) *DecodeWindow {
+	if bytes <= 0 {
+		bytes = DefaultDecodeAheadWindowBytes
+	}
+	w := &DecodeWindow{limit: bytes}
+	w.cond = sync.NewCond(&w.mu)
+	return w
+}
+
+const (
+	// DefaultDecodeAheadWorkers is deliberately modest: decode workers
+	// multiply with the per-column errgroup inside ReadRowGroupNative
+	// (min(#cols, GOMAXPROCS) each), and with concurrent fragments per
+	// worker process. cpuToken integration (memo S3) replaces this with
+	// budget-aware width.
+	DefaultDecodeAheadWorkers = 4
+
+	// DefaultDecodeAheadWindowBytes matches the scanPrefetch byte-window
+	// order of magnitude; the morsel dispenser's budget bounds the next
+	// stage downstream.
+	DefaultDecodeAheadWindowBytes int64 = 256 << 20
+
+	// minGroupEstimateBytes floors the per-group window reservation so
+	// files with absent/zero size metadata cannot admit unboundedly.
+	minGroupEstimateBytes int64 = 1 << 20
+)
+
+// OpenDecodeAheadIter constructs a decode-ahead iterator over the
+// row-group range assigned to (shardIdx, shardCount), mirroring
+// OpenRowGroupIter's contract (empty-shard sentinel, Array/Map
+// rejection, projection via selectedCols).
+func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols []string, shardIdx, shardCount int, opts DecodeAheadOpts) (*DecodeAheadIter, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("OpenDecodeAheadIter: nil reader")
+	}
+	if shardCount < 1 {
+		shardCount = 1
+	}
+
+	readSchema := schema
+	if len(selectedCols) > 0 {
+		readSchema = projectSchema(schema, selectedCols)
+	}
+	if HasUnsupportedColumnarTypes(readSchema) {
+		return nil, fmt.Errorf("DecodeAheadIter does not support Array/Map types; caller must fall back to ReadFileBatchesShard")
+	}
+
+	it := &DecodeAheadIter{
+		workers:  opts.Workers,
+		win:      opts.Window,
+		pressure: opts.Pressure,
+	}
+	if it.win == nil {
+		it.win = NewDecodeWindow(opts.WindowBytes)
+	}
+	if it.workers <= 0 {
+		it.workers = DefaultDecodeAheadWorkers
+	}
+	if gp := runtime.GOMAXPROCS(0); it.workers > gp {
+		it.workers = gp
+	}
+
+	if shardIdx < 0 || shardIdx >= shardCount {
+		it.empty = true
+		return it, nil
+	}
+	fr := reader.FileReader()
+	if fr == nil {
+		return nil, fmt.Errorf("OpenDecodeAheadIter: reader has no FileReader")
+	}
+	it.fr = fr
+	it.readSchema = readSchema
+	it.start, it.end = rowGroupRangeForShard(fr.NumRowGroups(), shardIdx, shardCount)
+	it.nextIdx, it.deliver = it.start, it.start
+	it.slots = make(map[int]*decodeSlot, it.workers)
+
+	leaves := fr.Leaves()
+	leafByName := make(map[string]int, len(leaves))
+	for i, leaf := range leaves {
+		leafByName[leaf.Name] = i
+	}
+	it.estLeaves = make([]int, len(readSchema))
+	for i, col := range readSchema {
+		if li, ok := leafByName[col.Name]; ok {
+			it.estLeaves[i] = li
+		} else {
+			it.estLeaves[i] = -1
+		}
+	}
+	return it, nil
+}
+
+// SetDynamicFilters attaches dynamic-filter pushdowns. Must be called
+// before the first Next() — workers snapshot the filters when they
+// start. Mirrors RowGroupIter.SetDynamicFilters.
+func (it *DecodeAheadIter) SetDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) {
+	if it == nil {
+		return
+	}
+	it.win.mu.Lock()
+	defer it.win.mu.Unlock()
+	it.dynamicRanges = ranges
+	it.bloomFilters = blooms
+}
+
+// Start spawns the decode workers immediately instead of on the first
+// Next — the cross-file continuation pre-opens the next file's iterator
+// and wants its head decoding while the current file's tail delivers.
+// Filters must already be attached. Idempotent.
+func (it *DecodeAheadIter) Start() {
+	if it == nil || it.empty {
+		return
+	}
+	it.win.mu.Lock()
+	it.startLocked()
+	it.win.mu.Unlock()
+}
+
+func (it *DecodeAheadIter) startLocked() {
+	if it.started || it.closed {
+		return
+	}
+	it.started = true
+	for w := 0; w < it.workers; w++ {
+		it.wg.Add(1)
+		go it.decodeLoop()
+	}
+}
+
+// AssignmentDrained reports whether every row group has been assigned to
+// a decode worker (not necessarily delivered) — the cross-file
+// continuation's pre-open trigger: once true, idle workers exist or soon
+// will, and the next file's head is the only work left to feed them.
+func (it *DecodeAheadIter) AssignmentDrained() bool {
+	if it == nil || it.empty {
+		return true
+	}
+	it.win.mu.Lock()
+	defer it.win.mu.Unlock()
+	return !it.closed && it.started && it.nextIdx >= it.end
+}
+
+// PruneStats mirrors RowGroupIter.PruneStats.
+func (it *DecodeAheadIter) PruneStats() (bloom, rangeP, read int) {
+	if it == nil {
+		return 0, 0, 0
+	}
+	return int(it.rgPrunedBloom.Load()), int(it.rgPrunedRange.Load()), int(it.rgRead.Load())
+}
+
+// Stats returns the decode-ahead engagement counters (memo §5 markers):
+// row groups decoded, worker stalls on a full window, and admissions
+// refused under memory pressure.
+func (it *DecodeAheadIter) Stats() (groupsRead, windowFullStalls, pressureStalls int64) {
+	if it == nil {
+		return 0, 0, 0
+	}
+	return it.rgRead.Load(), it.windowFullStalls.Load(), it.pressureStalls.Load()
+}
+
+// Next returns the next decoded row group in source order, or (nil, nil)
+// when exhausted. Contract identical to RowGroupIter.Next.
+func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
+	if it == nil || it.empty {
+		return nil, nil
+	}
+	it.win.mu.Lock()
+	defer it.win.mu.Unlock()
+	it.startLocked()
+	for {
+		if it.closed {
+			return nil, nil
+		}
+		if slot, ok := it.slots[it.deliver]; ok {
+			delete(it.slots, it.deliver)
+			it.deliver++
+			it.win.inflight -= slot.est
+			it.win.cond.Broadcast()
+			if slot.err != nil {
+				// Mirror serial semantics: the error surfaces exactly at
+				// this group's position and the iterator is dead after.
+				it.closed = true
+				it.win.cond.Broadcast()
+				return nil, slot.err
+			}
+			if slot.batch == nil {
+				continue // pruned or empty group — same silent skip as serial
+			}
+			return slot.batch, nil
+		}
+		if it.deliver >= it.end {
+			return nil, nil // all groups delivered
+		}
+		it.win.cond.Wait()
+	}
+}
+
+// decodeLoop is one worker: admit the next index against the byte
+// window, decode it outside the lock, park the result in its slot.
+func (it *DecodeAheadIter) decodeLoop() {
+	defer it.wg.Done()
+	it.win.mu.Lock()
+	for {
+		if it.closed || it.nextIdx >= it.end {
+			it.win.mu.Unlock()
+			return
+		}
+		idx := it.nextIdx
+		est := it.estimateGroupBytes(idx)
+		// The delivery-cursor group is always admitted: the consumer is
+		// (or will be) waiting on precisely this index, so reserving past
+		// the window here cannot grow it further, and refusing would
+		// deadlock on any single group larger than the window. (Under a
+		// shared window this bounds transient overshoot to one group per
+		// chained iterator.) Memory pressure gates admission the same way
+		// — cursor-only progress until it clears, undelivered bytes drain
+		// as the consumer takes. Wakeups: every delivery broadcasts, and
+		// the cursor group is always decodable, so a stalled worker is
+		// re-checked at least once per delivered group.
+		if idx != it.deliver {
+			if it.win.inflight+est > it.win.limit {
+				it.windowFullStalls.Add(1)
+				it.win.cond.Wait()
+				continue
+			}
+			if it.pressure != nil && it.pressure() {
+				it.pressureStalls.Add(1)
+				it.win.cond.Wait()
+				continue
+			}
+		}
+		it.nextIdx++
+		it.win.inflight += est
+		ranges, blooms := it.dynamicRanges, it.bloomFilters
+		it.win.mu.Unlock()
+
+		slot := &decodeSlot{est: est}
+		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
+			b, err := ReadRowGroupNative(it.fr, idx, it.readSchema, nil)
+			if err != nil {
+				slot.err = fmt.Errorf("reading row group %d: %w", idx, err)
+			} else {
+				slot.batch = b // nil for empty (zero-row) groups
+				if b != nil {
+					it.rgRead.Add(1)
+				}
+			}
+		}
+
+		it.win.mu.Lock()
+		it.slots[idx] = slot
+		it.win.cond.Broadcast()
+	}
+}
+
+// pruneGroup applies the dynamic-filter row-group pruning, mirroring the
+// serial path in RowGroupIter.Next.
+func (it *DecodeAheadIter) pruneGroup(rgIdx int, ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter) bool {
+	if len(ranges) == 0 && len(blooms) == 0 {
+		return false
+	}
+	stats := it.fr.RowGroupStats(rgIdx)
+	if len(ranges) > 0 && CanRangePruneRowGroup(ranges, stats) {
+		it.rgPrunedRange.Add(1)
+		return true
+	}
+	for _, bf := range blooms {
+		if CanBloomPruneRowGroup(bf, stats) {
+			it.rgPrunedBloom.Add(1)
+			return true
+		}
+	}
+	return false
+}
+
+// estimateGroupBytes estimates the decoded size of a row group as the
+// sum of the projected leaf columns' TotalUncompressedSize — under a
+// narrow projection the whole-group TotalByteSize would over-reserve by
+// the inverse of the projected fraction and starve the window. Callers
+// hold it.mu (reads immutable metadata only; the lock is incidental).
+func (it *DecodeAheadIter) estimateGroupBytes(rgIdx int) int64 {
+	rg := it.fr.RowGroupMeta(rgIdx)
+	if rg == nil {
+		return minGroupEstimateBytes
+	}
+	var est int64
+	for _, li := range it.estLeaves {
+		if li < 0 || li >= len(rg.Columns) {
+			continue
+		}
+		if md := rg.Columns[li].MetaData; md != nil {
+			est += md.TotalUncompressedSize
+		}
+	}
+	if est <= 0 {
+		est = rg.TotalByteSize
+	}
+	if est < minGroupEstimateBytes {
+		est = minGroupEstimateBytes
+	}
+	return est
+}
+
+// Close stops assignment, wakes everything, and joins in-flight decodes.
+// The caller may munmap the file bytes as soon as Close returns —
+// workers never touch the FileReader after the join. Undelivered decoded
+// batches are dropped (GC-eligible). Idempotent.
+func (it *DecodeAheadIter) Close() error {
+	if it == nil || it.empty {
+		return nil
+	}
+	it.win.mu.Lock()
+	it.closed = true
+	// Release this iterator's undelivered reservations so a chained
+	// iterator sharing the window doesn't inherit dead inflight bytes.
+	for idx, slot := range it.slots {
+		it.win.inflight -= slot.est
+		delete(it.slots, idx)
+	}
+	it.win.cond.Broadcast()
+	started := it.started
+	it.win.mu.Unlock()
+	if started {
+		it.wg.Wait()
+	}
+	// Workers parked slots between the drain above and their exit; drop
+	// those reservations too. No new slots can appear once closed.
+	it.win.mu.Lock()
+	for idx, slot := range it.slots {
+		it.win.inflight -= slot.est
+		delete(it.slots, idx)
+	}
+	it.win.cond.Broadcast()
+	it.win.mu.Unlock()
+	return nil
+}

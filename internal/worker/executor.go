@@ -115,6 +115,17 @@ type Executor struct {
 	shuffleStreamReads       atomic.Int64
 	shuffleStreamFallbacks   atomic.Int64
 	shuffleStreamSkipResumes atomic.Int64
+
+	// Scan decode pipelining (docs/design/scan-decode-pipelining.md):
+	// parquet scan sources decode row groups ahead of consumption with a
+	// bounded window instead of one group per Next. Counters are the §5
+	// rollout markers, aggregated across sources on iterator close.
+	scanDecodeAhead               bool
+	scanDecodeAheadBytes          int64
+	scanDecodeAheadGroups         atomic.Int64
+	scanDecodeAheadWindowFulls    atomic.Int64
+	scanDecodeAheadPressureStalls atomic.Int64
+	scanDecodeAheadTokenDegrades  atomic.Int64
 }
 
 // SetStreamingShuffleRead enables streaming decode of shuffle inputs
@@ -125,6 +136,23 @@ func (e *Executor) SetStreamingShuffleRead(on bool) { e.streamingShuffleRead = o
 // streaming opens, staged fallbacks, and batches skipped by fallbacks.
 func (e *Executor) ShuffleStreamStats() (reads, fallbacks, skipResumes int64) {
 	return e.shuffleStreamReads.Load(), e.shuffleStreamFallbacks.Load(), e.shuffleStreamSkipResumes.Load()
+}
+
+// SetScanDecodeAhead enables decode-ahead on parquet scan sources
+// (--scan-decode-ahead). windowBytes <= 0 selects the default. Call
+// before Worker.Start.
+func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
+	e.scanDecodeAhead = on
+	e.scanDecodeAheadBytes = windowBytes
+}
+
+// ScanDecodeAheadStats returns the decode-ahead counters: row groups
+// decoded ahead, worker stalls on a full window, admissions refused
+// under heap pressure, and sources that got fewer decode workers than
+// the default because the cpuToken pool was drawn down.
+func (e *Executor) ScanDecodeAheadStats() (groups, windowFulls, pressureStalls, tokenDegrades int64) {
+	return e.scanDecodeAheadGroups.Load(), e.scanDecodeAheadWindowFulls.Load(),
+		e.scanDecodeAheadPressureStalls.Load(), e.scanDecodeAheadTokenDegrades.Load()
 }
 
 // NewExecutor creates a new task executor.
