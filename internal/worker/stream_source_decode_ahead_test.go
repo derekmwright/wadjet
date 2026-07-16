@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -313,16 +314,22 @@ func TestFilePrefetcher_TryTakePutsBackFailures(t *testing.T) {
 
 	// Poll tryTake on the missing file's index until its download resolves
 	// to an error; every resolved observation must report unusable (nil).
+	// Deadline-based — a count-bounded spin finishes before the prefetch
+	// worker even runs on a slow CI runner.
 	var resolved bool
-	for i := 0; i < 2000 && !resolved; i++ {
+	deadline := time.Now().Add(15 * time.Second)
+	for !resolved && time.Now().Before(deadline) {
 		var res *prefetchResult
 		res, resolved = p.tryTake(1)
 		if resolved && res != nil {
 			t.Fatalf("tryTake returned a usable result for a missing object: %+v", res)
 		}
+		if !resolved {
+			time.Sleep(time.Millisecond)
+		}
 	}
 	if !resolved {
-		t.Fatal("prefetch of missing object never resolved")
+		t.Fatal("prefetch of missing object never resolved within deadline")
 	}
 	// The authoritative take must still observe the buffered failure
 	// immediately (put-back happened) rather than blocking.
