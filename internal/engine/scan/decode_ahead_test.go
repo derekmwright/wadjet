@@ -119,7 +119,7 @@ func TestDecodeAheadIter_MatchesSerial(t *testing.T) {
 			t.Fatalf("workers=%d drain: %v", workers, err)
 		}
 		requireSameBatches(t, want, got)
-		if groups, _ := it.Stats(); groups != 16 {
+		if groups, _, _ := it.Stats(); groups != 16 {
 			t.Errorf("workers=%d: groups read = %d, want 16", workers, groups)
 		}
 		// Post-exhaustion Next returns (nil, nil), like serial.
@@ -156,8 +156,39 @@ func TestDecodeAheadIter_TinyWindowStallsButDelivers(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 	requireSameBatches(t, want, got)
-	if _, stalls := it.Stats(); stalls == 0 {
+	if _, stalls, _ := it.Stats(); stalls == 0 {
 		t.Error("WindowBytes=1 with 4 workers never stalled — window is not gating admission")
+	}
+}
+
+// TestDecodeAheadIter_PressureDegradesToSerial: with the pressure hook
+// permanently asserted, only the delivery-cursor group may be in flight
+// — output stays identical (no deadlock, no loss) and the stall counter
+// proves the hook gated admission.
+func TestDecodeAheadIter_PressureDegradesToSerial(t *testing.T) {
+	data := manyRowGroupFile(t, 8, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	serial, err := OpenRowGroupIter(openFileReader(t, data), schema, nil, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serial.Close()
+	want, _ := drainGroupIter(t, serial)
+
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 4, Pressure: func() bool { return true }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	got, err := drainGroupIter(t, it)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	requireSameBatches(t, want, got)
+	if _, _, stalls := it.Stats(); stalls == 0 {
+		t.Error("permanent pressure with 4 workers never stalled — hook is not gating admission")
 	}
 }
 

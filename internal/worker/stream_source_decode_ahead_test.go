@@ -82,7 +82,7 @@ func TestScanDecodeAhead_MultiFileParity(t *testing.T) {
 	if sum != wantSum || rows != 5*4*32 {
 		t.Fatalf("decode-ahead read: sum=%d rows=%d, want sum=%d rows=%d", sum, rows, wantSum, 5*4*32)
 	}
-	if groups, _ := e.ScanDecodeAheadStats(); groups != 5*4 {
+	if groups, _, _, _ := e.ScanDecodeAheadStats(); groups != 5*4 {
 		t.Errorf("decode-ahead groups = %d, want %d", groups, 5*4)
 	}
 
@@ -235,6 +235,63 @@ func TestScanDecodeAhead_CloseWithPendingFile(t *testing.T) {
 	}
 	if src.nextParquet != nil {
 		t.Error("Close left the pending file live")
+	}
+}
+
+// TestScanDecodeAhead_TokenDegradeAndRelease: with a drained cpuToken
+// pool the source degrades to one decode worker (counter fires) and
+// still yields identical rows; with an ample pool the extra-worker
+// tokens are held for the source's lifetime and released exactly once
+// on Close.
+func TestScanDecodeAhead_TokenDegradeAndRelease(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	keys, wantSum := writeMultiGroupFixture(t, store, "b", 3, 3, 32)
+
+	// Drained pool: degrade to serial width.
+	e := &Executor{store: store, spillDir: t.TempDir()}
+	e.SetScanDecodeAhead(true, 0)
+	e.cpuTokens = newCPUTokens(0)
+	src := newCachedFileStreamSource(e, "", "b", keys)
+	if err := src.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sum, rows := drainValSum(t, ctx, src)
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if sum != wantSum || rows != 3*3*32 {
+		t.Fatalf("degraded read: sum=%d rows=%d, want sum=%d rows=%d", sum, rows, wantSum, 3*3*32)
+	}
+	if src.decodeAheadK != 1 {
+		t.Errorf("decode width under drained pool = %d, want 1", src.decodeAheadK)
+	}
+	if _, _, _, degrades := e.ScanDecodeAheadStats(); degrades == 0 {
+		t.Error("token-degrade counter did not fire under a drained pool")
+	}
+
+	// Ample pool: extra workers hold tokens until Close releases them.
+	e2 := &Executor{store: store, spillDir: t.TempDir()}
+	e2.SetScanDecodeAhead(true, 0)
+	e2.cpuTokens = newCPUTokens(16)
+	src2 := newCachedFileStreamSource(e2, "", "b", keys)
+	if err := src2.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src2.Next(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if src2.decodeAheadK < 2 {
+		t.Fatalf("decode width under ample pool = %d, want >= 2", src2.decodeAheadK)
+	}
+	if held := e2.cpuTokens.InUse(); held != int64(src2.decodeTokensHeld) || held == 0 {
+		t.Fatalf("tokens in use = %d, want %d (source's held count)", held, src2.decodeTokensHeld)
+	}
+	if err := src2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if held := e2.cpuTokens.InUse(); held != 0 {
+		t.Errorf("tokens in use after Close = %d, want 0", held)
 	}
 }
 

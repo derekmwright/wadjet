@@ -120,10 +120,12 @@ type Executor struct {
 	// parquet scan sources decode row groups ahead of consumption with a
 	// bounded window instead of one group per Next. Counters are the §5
 	// rollout markers, aggregated across sources on iterator close.
-	scanDecodeAhead            bool
-	scanDecodeAheadBytes       int64
-	scanDecodeAheadGroups      atomic.Int64
-	scanDecodeAheadWindowFulls atomic.Int64
+	scanDecodeAhead               bool
+	scanDecodeAheadBytes          int64
+	scanDecodeAheadGroups         atomic.Int64
+	scanDecodeAheadWindowFulls    atomic.Int64
+	scanDecodeAheadPressureStalls atomic.Int64
+	scanDecodeAheadTokenDegrades  atomic.Int64
 }
 
 // SetStreamingShuffleRead enables streaming decode of shuffle inputs
@@ -145,9 +147,12 @@ func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
 }
 
 // ScanDecodeAheadStats returns the decode-ahead counters: row groups
-// decoded ahead and worker stalls on a full window.
-func (e *Executor) ScanDecodeAheadStats() (groups, windowFulls int64) {
-	return e.scanDecodeAheadGroups.Load(), e.scanDecodeAheadWindowFulls.Load()
+// decoded ahead, worker stalls on a full window, admissions refused
+// under heap pressure, and sources that got fewer decode workers than
+// the default because the cpuToken pool was drawn down.
+func (e *Executor) ScanDecodeAheadStats() (groups, windowFulls, pressureStalls, tokenDegrades int64) {
+	return e.scanDecodeAheadGroups.Load(), e.scanDecodeAheadWindowFulls.Load(),
+		e.scanDecodeAheadPressureStalls.Load(), e.scanDecodeAheadTokenDegrades.Load()
 }
 
 // NewExecutor creates a new task executor.

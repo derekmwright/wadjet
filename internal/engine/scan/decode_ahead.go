@@ -46,7 +46,8 @@ type DecodeAheadIter struct {
 	// for window estimation, resolved once at Open.
 	estLeaves []int
 
-	workers int
+	workers  int
+	pressure func() bool
 
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
@@ -73,6 +74,7 @@ type DecodeAheadIter struct {
 	rgPrunedRange    atomic.Int64
 	rgRead           atomic.Int64
 	windowFullStalls atomic.Int64
+	pressureStalls   atomic.Int64
 }
 
 // decodeSlot is one row group's outcome, parked until the delivery
@@ -95,6 +97,12 @@ type DecodeAheadOpts struct {
 	// iterator — the cross-file continuation shape: the tail of file F
 	// and the head of file F+1 draw from one budget.
 	Window *DecodeWindow
+	// Pressure, when set, is consulted before admitting any group beyond
+	// the delivery cursor. While it reports true the iterator degrades to
+	// effectively serial (one group in flight) and the window drains as
+	// the consumer takes — the memory-pressure collapse hook. Must be
+	// safe to call from multiple goroutines.
+	Pressure func() bool
 }
 
 // DecodeWindow is a byte budget shared by one or more DecodeAheadIters.
@@ -157,8 +165,9 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 	}
 
 	it := &DecodeAheadIter{
-		workers: opts.Workers,
-		win:     opts.Window,
+		workers:  opts.Workers,
+		win:      opts.Window,
+		pressure: opts.Pressure,
 	}
 	if it.win == nil {
 		it.win = NewDecodeWindow(opts.WindowBytes)
@@ -259,12 +268,13 @@ func (it *DecodeAheadIter) PruneStats() (bloom, rangeP, read int) {
 }
 
 // Stats returns the decode-ahead engagement counters (memo §5 markers):
-// row groups decoded and times a worker stalled on a full window.
-func (it *DecodeAheadIter) Stats() (groupsRead, windowFullStalls int64) {
+// row groups decoded, worker stalls on a full window, and admissions
+// refused under memory pressure.
+func (it *DecodeAheadIter) Stats() (groupsRead, windowFullStalls, pressureStalls int64) {
 	if it == nil {
-		return 0, 0
+		return 0, 0, 0
 	}
-	return it.rgRead.Load(), it.windowFullStalls.Load()
+	return it.rgRead.Load(), it.windowFullStalls.Load(), it.pressureStalls.Load()
 }
 
 // Next returns the next decoded row group in source order, or (nil, nil)
@@ -321,11 +331,22 @@ func (it *DecodeAheadIter) decodeLoop() {
 		// the window here cannot grow it further, and refusing would
 		// deadlock on any single group larger than the window. (Under a
 		// shared window this bounds transient overshoot to one group per
-		// chained iterator.)
-		if it.win.inflight+est > it.win.limit && idx != it.deliver {
-			it.windowFullStalls.Add(1)
-			it.win.cond.Wait()
-			continue
+		// chained iterator.) Memory pressure gates admission the same way
+		// — cursor-only progress until it clears, undelivered bytes drain
+		// as the consumer takes. Wakeups: every delivery broadcasts, and
+		// the cursor group is always decodable, so a stalled worker is
+		// re-checked at least once per delivered group.
+		if idx != it.deliver {
+			if it.win.inflight+est > it.win.limit {
+				it.windowFullStalls.Add(1)
+				it.win.cond.Wait()
+				continue
+			}
+			if it.pressure != nil && it.pressure() {
+				it.pressureStalls.Add(1)
+				it.win.cond.Wait()
+				continue
+			}
 		}
 		it.nextIdx++
 		it.win.inflight += est

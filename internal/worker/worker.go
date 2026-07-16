@@ -566,8 +566,40 @@ func (w *Worker) Start(ctx context.Context) error {
 	if w.config.StreamingShuffleRead {
 		w.startShuffleStreamMarkerLoop(ctx)
 	}
+	if w.config.ScanDecodeAhead {
+		w.startScanDecodeAheadMarkerLoop(ctx)
+	}
 
 	return nil
+}
+
+// startScanDecodeAheadMarkerLoop runs the scan-decode-ahead stats marker
+// (docs/design/scan-decode-pipelining.md §5) on bgWG — same contract as
+// startShuffleStreamMarkerLoop below: ctx-bound loops must never join
+// w.wg or they deadlock Drain.
+func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
+	w.bgWG.Add(1)
+	go func() {
+		defer w.bgWG.Done()
+		var last [4]int64
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				groups, windowFulls, pressureStalls, tokenDegrades := w.executor.ScanDecodeAheadStats()
+				cur := [4]int64{groups, windowFulls, pressureStalls, tokenDegrades}
+				if cur != last {
+					last = cur
+					w.logger.Info("scan decode-ahead stats",
+						"groups", groups, "window_fulls", windowFulls,
+						"pressure_stalls", pressureStalls, "token_degrades", tokenDegrades)
+				}
+			}
+		}
+	}()
 }
 
 // startShuffleStreamMarkerLoop runs the streaming-shuffle-read stats marker
