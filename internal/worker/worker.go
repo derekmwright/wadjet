@@ -71,6 +71,14 @@ type Config struct {
 	// Default on at the CLI (SF100-validated); false is the kill switch.
 	StreamingShuffleRead bool
 
+	// ScanDecodeAhead decodes parquet row groups ahead of scan consumption
+	// with a bounded window instead of one group per pull
+	// (docs/design/scan-decode-pipelining.md). Default false pending SF100
+	// validation. ScanDecodeAheadBytes bounds decoded-but-unconsumed bytes
+	// per scan source; <= 0 selects the engine default (256 MiB).
+	ScanDecodeAhead      bool
+	ScanDecodeAheadBytes int64
+
 	// MmapRelief enables the Phase-5 MADV_DONTNEED relief of cold mmap'd cache
 	// files under heap pressure. Default false: fully dormant (no region
 	// tracking, no per-Next cost, no syscall). Deploy-gated.
@@ -232,6 +240,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	executor.SetNATSConn(nc)
 	executor.SetMorselWorkers(cfg.MorselWorkers)
 	executor.SetStreamingShuffleRead(cfg.StreamingShuffleRead)
+	executor.SetScanDecodeAhead(cfg.ScanDecodeAhead, cfg.ScanDecodeAheadBytes)
 	// Phase 3: wire the system-reservoir registry for ACCOUNTING (Available()/
 	// drift) — this does NOT activate the floating spill threshold; that stays
 	// gated on FloatingBudgetActive (default false → tuned static 40%/90% path).

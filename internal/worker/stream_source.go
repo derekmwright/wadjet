@@ -102,9 +102,12 @@ type cachedFileStreamSource struct {
 
 	// Streaming row-group iterator for the current Parquet file. Yields one
 	// decoded RecordBatch per Next() call; the previous batch is GC-eligible
-	// once the consumer Releases it. Bounds Parquet-side live memory to one
-	// decoded row group at a time per source.
-	parquetIter *scan.RowGroupIter
+	// once the consumer Releases it. Serial (RowGroupIter) bounds
+	// Parquet-side live memory to one decoded row group at a time per
+	// source; decode-ahead (DecodeAheadIter, --scan-decode-ahead) to its
+	// byte window. Close MUST fully quiesce decode before returning —
+	// releaseCurrentFile munmaps the bytes the iterator reads.
+	parquetIter parquetGroupIter
 	// parquetReader is held alongside the iterator so its underlying buffer
 	// (the whole-file byte slice) stays live for the iterator's row-group
 	// reads. Released alongside parquetIter when the file is exhausted.
@@ -135,6 +138,14 @@ type cachedFileStreamSource struct {
 // WSHF chunk readers.
 type shuffleBatchIter interface {
 	Next() (*batch.RecordBatch, error)
+}
+
+// parquetGroupIter is the common face of the serial (scan.RowGroupIter)
+// and decode-ahead (scan.DecodeAheadIter) parquet row-group iterators.
+type parquetGroupIter interface {
+	Next() (*batch.RecordBatch, error)
+	SetDynamicFilters(ranges []exec.DynamicRange, blooms []*exec.BloomScanFilter)
+	Close() error
 }
 
 // SetDynamicFilters attaches dynamic-filter pushdowns to this source.
@@ -814,9 +825,20 @@ func (s *cachedFileStreamSource) finishOpenParquet(filePath string, data, mmapDa
 		s.fallbackBatchIdx = 0
 		return nil
 	}
-	iter, err := scan.OpenRowGroupIter(reader, projCols, nil, shardIdx, shardCount)
-	if err != nil {
-		return fmt.Errorf("opening row-group iterator for %s: %w", filePath, err)
+	var iter parquetGroupIter
+	if s.executor.scanDecodeAhead {
+		da, err := scan.OpenDecodeAheadIter(reader, projCols, nil, shardIdx, shardCount,
+			scan.DecodeAheadOpts{WindowBytes: s.executor.scanDecodeAheadBytes})
+		if err != nil {
+			return fmt.Errorf("opening decode-ahead iterator for %s: %w", filePath, err)
+		}
+		iter = &decodeAheadStatsIter{DecodeAheadIter: da, executor: s.executor}
+	} else {
+		rgIter, err := scan.OpenRowGroupIter(reader, projCols, nil, shardIdx, shardCount)
+		if err != nil {
+			return fmt.Errorf("opening row-group iterator for %s: %w", filePath, err)
+		}
+		iter = rgIter
 	}
 	if len(s.dynamicRanges) > 0 || len(s.bloomFilters) > 0 {
 		iter.SetDynamicFilters(s.dynamicRanges, s.bloomFilters)
@@ -824,6 +846,25 @@ func (s *cachedFileStreamSource) finishOpenParquet(filePath string, data, mmapDa
 	s.parquetIter = iter
 	s.parquetReader = reader
 	return nil
+}
+
+// decodeAheadStatsIter folds a DecodeAheadIter's engagement counters into
+// the executor-wide markers when the iterator closes (a source opens one
+// iterator per parquet file; per-file granularity is noise).
+type decodeAheadStatsIter struct {
+	*scan.DecodeAheadIter
+	executor *Executor
+	folded   bool
+}
+
+func (d *decodeAheadStatsIter) Close() error {
+	if !d.folded {
+		d.folded = true
+		groups, windowFulls := d.Stats()
+		d.executor.scanDecodeAheadGroups.Add(groups)
+		d.executor.scanDecodeAheadWindowFulls.Add(windowFulls)
+	}
+	return d.DecodeAheadIter.Close()
 }
 
 // openShuffleFile streams the (possibly compressed) shuffle body from rc to a
