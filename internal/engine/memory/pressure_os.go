@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -132,20 +133,21 @@ func (s *refaultSensor) Stats() (lastRate float64, activations int64) {
 }
 
 // readRefaultCounter returns a reader for the best available refault
-// counter: the process's cgroup v2 memory.stat if one exists, else the
-// host-wide /proc/vmstat. Returns nil when neither source has a
-// workingset_refault field (e.g. pre-4.20 kernels, PSI-less builds).
-func readRefaultCounter() func() (int64, bool) {
+// counter and the source it bound, for the init log: the process's
+// cgroup v2 memory.stat if one exists, else the host-wide /proc/vmstat.
+// Returns nil when neither source has a workingset_refault field (e.g.
+// pre-4.20 kernels, PSI-less builds).
+func readRefaultCounter() (func() (int64, bool), string) {
 	if path := cgroupV2StatPath(); path != "" {
 		if _, ok := parseRefaultFile(path); ok {
-			return func() (int64, bool) { return parseRefaultFile(path) }
+			return func() (int64, bool) { return parseRefaultFile(path) }, path
 		}
 	}
 	const vmstat = "/proc/vmstat"
 	if _, ok := parseRefaultFile(vmstat); ok {
-		return func() (int64, bool) { return parseRefaultFile(vmstat) }
+		return func() (int64, bool) { return parseRefaultFile(vmstat) }, vmstat
 	}
-	return nil
+	return nil, "none"
 }
 
 // cgroupV2StatPath resolves this process's cgroup v2 memory.stat path,
@@ -204,7 +206,12 @@ func pageCachePressureSensor() *refaultSensor {
 				threshold = f
 			}
 		}
-		pageCacheSensor = newRefaultSensor(readRefaultCounter(), threshold, refaultSampleInterval)
+		read, source := readRefaultCounter()
+		pageCacheSensor = newRefaultSensor(read, threshold, refaultSampleInterval)
+		slog.Info("page-cache pressure sensor",
+			"source", source,
+			"threshold_pages_per_sec", threshold,
+			"enabled", !pageCacheSensor.disabled)
 	})
 	return pageCacheSensor
 }
@@ -222,4 +229,16 @@ func PageCachePressureActive() bool {
 // (pages/sec) and its lifetime activation count, for rollout markers.
 func PageCachePressureStats() (lastRate float64, activations int64) {
 	return pageCachePressureSensor().Stats()
+}
+
+// ReadRefaultCounterForDiagnostics reads the raw refault counter through
+// the same source-selection logic the sensor uses. cmd/refault-probe
+// prints it beside the sensor state to separate "counter not visible
+// here" from "sensor not sampling" in the field.
+func ReadRefaultCounterForDiagnostics() (int64, bool) {
+	read, _ := readRefaultCounter()
+	if read == nil {
+		return 0, false
+	}
+	return read()
 }

@@ -338,3 +338,19 @@ full window — the sensor would trade scan-band width for cache relief.
 The SF100 pair remains the test; watch scan-band retention
 (Q16/Q06/Q12) alongside Q05/Q07, `refault_activations`, and
 `ledger_stalls`.
+
+**Sensor visibility bound (measured 2026-07-17)**: cgroup-v1 memcg
+reclaim does not feed the global `workingset_refault` counters on the
+WSL2 5.15 kernel — a capped v1 container thrashing 1.5 GiB of its own
+file pages through a 512 MiB limit moved the counter by ~0
+(`cmd/refault-probe --thrash` reproduces this). The sensor is therefore
+blind to v1-container-INTERNAL displacement, which is exactly the
+cap-wrapper simulator's shape — so the capped rig cannot fire it
+end-to-end. This is a simulator artifact, not a product gap: SF100
+workers run bare on cgroup-v2 AL2023 (host-level reclaim feeds
+/proc/vmstat AND the v2 memory.stat both), and real edge boxes are
+bare small machines or v2 containers. Fail-safe by construction:
+counter source absent or silent → sensor inactive → current behavior.
+`cmd/refault-probe` prints raw counter + sensor state side by side and
+generates workingset-shaped thrash for field diagnosis; the sensor
+logs its bound source at init.
