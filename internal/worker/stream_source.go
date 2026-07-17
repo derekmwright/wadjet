@@ -931,7 +931,11 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		// at the default width. NOTE: the nil check must happen here — a
 		// nil *cpuTokens wrapped in the interface would read as non-nil
 		// and silently serialize decode.
-		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: heapPressureActive}
+		// Admission pressure = Go-heap tide gauge OR kernel page-cache
+		// thrash (memo §9: refault-rate sensor — the displacement channel
+		// the heap hook cannot see; the capped repro measured decode-ahead
+		// width as worthless-to-harmful precisely when refaults run hot).
+		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: scanDecodeAheadPressure}
 		if s.executor.cpuTokens != nil {
 			opts.Tokens = s.executor.cpuTokens
 		}

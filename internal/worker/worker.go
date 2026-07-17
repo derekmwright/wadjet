@@ -593,10 +593,13 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 				cur := [5]int64{groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls}
 				if cur != last {
 					last = cur
+					refaultRate, refaultActivations := memory.PageCachePressureStats()
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
 						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
-						"ledger_stalls", ledgerStalls)
+						"ledger_stalls", ledgerStalls,
+						"refault_rate", int64(refaultRate),
+						"refault_activations", refaultActivations)
 				}
 			}
 		}
