@@ -856,6 +856,21 @@ func (w *Worker) Stop() {
 	}
 	w.executor.uploads.Drain()
 
+	// Final decode-ahead stats: short runs end before the 60s marker
+	// ticker ever fires, leaving the fold-on-close counters unreported —
+	// the 2026-07-17 capped repro lost every worker-side sample this way.
+	// Emitted after wg.Wait, so every source has folded its counters.
+	if w.config.ScanDecodeAhead {
+		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
+		refaultRate, refaultActivations := memory.PageCachePressureStats()
+		w.logger.Info("scan decode-ahead stats (final)",
+			"groups", groups, "window_fulls", windowFulls,
+			"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
+			"ledger_stalls", ledgerStalls,
+			"refault_rate", int64(refaultRate),
+			"refault_activations", refaultActivations)
+	}
+
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }
 
