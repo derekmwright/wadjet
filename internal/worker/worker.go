@@ -581,7 +581,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 	w.bgWG.Add(1)
 	go func() {
 		defer w.bgWG.Done()
-		var last [4]int64
+		var last [5]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -589,13 +589,14 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				groups, windowFulls, pressureStalls, tokenStalls := w.executor.ScanDecodeAheadStats()
-				cur := [4]int64{groups, windowFulls, pressureStalls, tokenStalls}
+				groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
+				cur := [5]int64{groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls}
 				if cur != last {
 					last = cur
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
-						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls)
+						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
+						"ledger_stalls", ledgerStalls)
 				}
 			}
 		}
