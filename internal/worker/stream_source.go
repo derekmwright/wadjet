@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"syscall"
 
@@ -146,11 +145,6 @@ type cachedFileStreamSource struct {
 	decodeWin   *scan.DecodeWindow
 	preOpenSkip int
 	preOpens    int // files pre-opened by the continuation (tests + DEBUG log)
-	// Decode width for this source (decided with decodeWin) and the
-	// cpuTokens held for its extra workers — released exactly once, in
-	// Close.
-	decodeAheadK     int
-	decodeTokensHeld int
 }
 
 // shuffleBatchIter is the common face of the mmap-backed and streaming
@@ -330,10 +324,6 @@ func (s *cachedFileStreamSource) Close() error {
 	// reader holding dangling mmap bytes if any caller still has a handle.
 	s.releaseParquetIter()
 	s.releaseCurrentFile()
-	if s.decodeTokensHeld > 0 {
-		s.executor.cpuTokens.Release(s.decodeTokensHeld)
-		s.decodeTokensHeld = 0
-	}
 	for i := s.fallbackBatchIdx; i < len(s.fallbackBatches); i++ {
 		s.fallbackBatches[i] = nil
 	}
@@ -917,33 +907,23 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		if s.decodeWin == nil {
 			// One window per source, shared across every file it opens —
 			// the cross-file continuation draws the next file's head from
-			// the same budget as the current file's tail. Decode width is
-			// also decided once per source, from the same cpuToken pool
-			// the morsel consumers draw on (nil pool = morsels disabled =
-			// serial consumers, so the fixed default width is safe);
-			// non-blocking, degrades toward serial under token exhaustion
-			// exactly like morselFragmentWorkers.
+			// the same budget as the current file's tail.
 			s.decodeWin = scan.NewDecodeWindow(s.executor.scanDecodeAheadBytes)
-			k := scan.DefaultDecodeAheadWorkers
-			if gp := runtime.GOMAXPROCS(0); k > gp {
-				k = gp
-			}
-			if s.executor.cpuTokens != nil {
-				got := s.executor.cpuTokens.TryAcquire(k - 1)
-				s.decodeTokensHeld = got
-				if got < k-1 {
-					s.executor.scanDecodeAheadTokenDegrades.Add(1)
-					if s.executor.logger != nil {
-						s.executor.logger.Debug("scan decode-ahead degraded on cpu tokens",
-							"want_workers", k, "got_workers", got+1)
-					}
-				}
-				k = got + 1
-			}
-			s.decodeAheadK = k
 		}
-		da, err := scan.OpenDecodeAheadIter(reader, projCols, nil, shardIdx, shardCount,
-			scan.DecodeAheadOpts{Window: s.decodeWin, Workers: s.decodeAheadK, Pressure: heapPressureActive})
+		// CPU is budgeted per ROW GROUP inside the iterator (one token
+		// held only for the duration of one decode, cursor group exempt)
+		// — never per source lifetime: the 2026-07-16 SF100 pair showed
+		// window-stalled decode workers hoarding source-held tokens and
+		// starving concurrent join fragments' morsel width. A nil pool
+		// (morsels disabled → serial consumers) leaves decode unbudgeted
+		// at the default width. NOTE: the nil check must happen here — a
+		// nil *cpuTokens wrapped in the interface would read as non-nil
+		// and silently serialize decode.
+		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: heapPressureActive}
+		if s.executor.cpuTokens != nil {
+			opts.Tokens = s.executor.cpuTokens
+		}
+		da, err := scan.OpenDecodeAheadIter(reader, projCols, nil, shardIdx, shardCount, opts)
 		if err != nil {
 			p.release(s.executor.logger)
 			return nil, fmt.Errorf("opening decode-ahead iterator for %s: %w", filePath, err)
@@ -1073,10 +1053,11 @@ type decodeAheadStatsIter struct {
 func (d *decodeAheadStatsIter) Close() error {
 	if !d.folded {
 		d.folded = true
-		groups, windowFulls, pressureStalls := d.Stats()
+		groups, windowFulls, pressureStalls, tokenStalls := d.Stats()
 		d.executor.scanDecodeAheadGroups.Add(groups)
 		d.executor.scanDecodeAheadWindowFulls.Add(windowFulls)
 		d.executor.scanDecodeAheadPressureStalls.Add(pressureStalls)
+		d.executor.scanDecodeAheadTokenStalls.Add(tokenStalls)
 	}
 	return d.DecodeAheadIter.Close()
 }

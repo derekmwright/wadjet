@@ -1,6 +1,13 @@
 # Scan decode pipelining (parallel row-group decode-ahead)
 
-Status: PROPOSED. Follow-up predicted by
+Status: IMPLEMENTED (PR #228, flag default off). First SF100 pair
+(2026-07-16, §8) validated correctness + the scan-band mechanism but
+came out WALL-FLAT: source-lifetime cpuToken holds starved concurrent
+join fragments (Q20 +54%, Q05 +17%) and ate the scan wins (Q16 −63%,
+Q01 −32%). Fixed by per-row-group token accounting (§8.1);
+single-arm revalidation pending.
+
+Originally: PROPOSED. Follow-up predicted by
 `docs/design/scan-decompress-parallelism.md` §5 ("scan decode becomes
 CPU-parallel instead of slot-serial" fixed the *decoder*; the *producer*
 stayed serial) and by the morsel cap comment itself
@@ -194,3 +201,38 @@ decoded ahead of consumption":
   fragments×window inside the envelope on c7gd.4xlarge; a
   memory-pressure collapse hook (drop to k=1, drain window) is listed
   in S3 and must be in place before default-ON is proposed.
+
+## 8. SF100 pair results (2026-07-16) and the token fix
+
+Same-window pair on main 983d1ae (control `results/20260716-222612`,
+treatment `results/20260716-232648`), benchmark_runs=2 both arms,
+block+CPU profiling both arms, 3× c7gd.4xlarge, base cache 150 GB.
+
+- **Correctness**: 0 row mismatches across all 88 query executions.
+- **Engagement**: groups ≈ 38-40k/worker/2 suites; fallback-free.
+- **Scan band moved exactly as designed** (steady-state run 2):
+  Q16 −63%, Q01 −32%, Q06 −27%, Q12 −24%, Q15 −22%, Q02 −20%.
+- **Join-legged regressions ate the wins**: Q20 +54%, Q05 +17%,
+  Q22 +11%, Q07 +9%, Q03 +8%. Suite wall FLAT (26m53s → 27m13s,
+  +1.2%); utilization FLAT (2.85 → 2.84 of 16 cores).
+- **Conviction**: `window_fulls ≈ 35-41k` on ≈ 40k groups — decode
+  workers spent most of their lives stalled on a full window while
+  HOLDING source-lifetime cpuTokens (`token_degrades 211-235/worker`
+  = the pool was drained), narrowing concurrent join fragments'
+  morsel width. Decode-ahead moved wall between bands instead of
+  adding compute.
+
+### 8.1 Fix: per-row-group token accounting
+
+Tokens are acquired per DECODE, not per worker lifetime: a worker
+takes one token at admission of a non-cursor group and releases it
+when the decoded group parks. Workers stalled on the window, on
+pressure, or between groups hold nothing; the delivery-cursor group
+stays token-exempt (serial progress always allowed — the morsel
+"first consumer free" rule). Hoarding is structurally impossible;
+decode width becomes adaptive to actual token availability per group.
+Marker `token_degrades` is replaced by `token_stalls` (per-group
+admissions deferred; the group still decodes, serially at worst).
+
+Revalidation: single treatment-only SF100 run (control reference =
+`results/20260716-222612`), per the cost call on full A/Bs.
