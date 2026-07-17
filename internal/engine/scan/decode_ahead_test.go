@@ -2,6 +2,7 @@ package scan
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -119,7 +120,7 @@ func TestDecodeAheadIter_MatchesSerial(t *testing.T) {
 			t.Fatalf("workers=%d drain: %v", workers, err)
 		}
 		requireSameBatches(t, want, got)
-		if groups, _, _ := it.Stats(); groups != 16 {
+		if groups, _, _, _ := it.Stats(); groups != 16 {
 			t.Errorf("workers=%d: groups read = %d, want 16", workers, groups)
 		}
 		// Post-exhaustion Next returns (nil, nil), like serial.
@@ -156,7 +157,7 @@ func TestDecodeAheadIter_TinyWindowStallsButDelivers(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 	requireSameBatches(t, want, got)
-	if _, stalls, _ := it.Stats(); stalls == 0 {
+	if _, stalls, _, _ := it.Stats(); stalls == 0 {
 		t.Error("WindowBytes=1 with 4 workers never stalled — window is not gating admission")
 	}
 }
@@ -187,8 +188,107 @@ func TestDecodeAheadIter_PressureDegradesToSerial(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 	requireSameBatches(t, want, got)
-	if _, _, stalls := it.Stats(); stalls == 0 {
+	if _, _, stalls, _ := it.Stats(); stalls == 0 {
 		t.Error("permanent pressure with 4 workers never stalled — hook is not gating admission")
+	}
+}
+
+// countingTokenPool counts acquire/release and enforces a capacity, so
+// tests can prove per-group hold semantics: peak holds bounded, zero
+// residual after drain, and progress with capacity 0.
+type countingTokenPool struct {
+	mu       sync.Mutex
+	capacity int
+	inUse    int
+	peak     int
+	acquires int
+}
+
+func (p *countingTokenPool) TryAcquire(n int) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	avail := p.capacity - p.inUse
+	if avail <= 0 {
+		return 0
+	}
+	if n > avail {
+		n = avail
+	}
+	p.inUse += n
+	p.acquires += n
+	if p.inUse > p.peak {
+		p.peak = p.inUse
+	}
+	return n
+}
+
+func (p *countingTokenPool) Release(n int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inUse -= n
+}
+
+// TestDecodeAheadIter_PerGroupTokens: tokens are held per decode, not
+// per worker lifetime — capacity 0 still drains the file (cursor group
+// is token-exempt) with stalls counted; an ample pool ends with zero
+// residual holds and per-group acquires.
+func TestDecodeAheadIter_PerGroupTokens(t *testing.T) {
+	data := manyRowGroupFile(t, 12, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	serial, err := OpenRowGroupIter(openFileReader(t, data), schema, nil, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serial.Close()
+	want, _ := drainGroupIter(t, serial)
+
+	// Capacity 0: every non-cursor admission stalls, yet the iterator
+	// must still deliver everything (serial via the cursor exemption).
+	starved := &countingTokenPool{capacity: 0}
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 4, Tokens: starved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it.Close()
+	got, err := drainGroupIter(t, it)
+	if err != nil {
+		t.Fatalf("starved drain: %v", err)
+	}
+	requireSameBatches(t, want, got)
+	if _, _, _, stalls := it.Stats(); stalls == 0 {
+		t.Error("capacity-0 pool never produced a token stall")
+	}
+	if starved.acquires != 0 {
+		t.Errorf("capacity-0 pool recorded %d acquires, want 0", starved.acquires)
+	}
+
+	// Ample pool: acquires happen per group, peak bounded by workers-ish,
+	// and nothing is held after the drain (no hoarding).
+	ample := &countingTokenPool{capacity: 16}
+	it2, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 4, Tokens: ample})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer it2.Close()
+	got2, err := drainGroupIter(t, it2)
+	if err != nil {
+		t.Fatalf("ample drain: %v", err)
+	}
+	requireSameBatches(t, want, got2)
+	ample.mu.Lock()
+	inUse, peak, acquires := ample.inUse, ample.peak, ample.acquires
+	ample.mu.Unlock()
+	if inUse != 0 {
+		t.Errorf("tokens still held after drain: %d, want 0 (hoarding)", inUse)
+	}
+	if peak > 4 {
+		t.Errorf("peak concurrent holds = %d, want <= workers (4)", peak)
+	}
+	if acquires == 0 {
+		t.Error("ample pool saw no acquires — tokens not engaged")
 	}
 }
 

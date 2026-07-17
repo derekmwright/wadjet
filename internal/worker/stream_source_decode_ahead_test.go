@@ -239,17 +239,18 @@ func TestScanDecodeAhead_CloseWithPendingFile(t *testing.T) {
 	}
 }
 
-// TestScanDecodeAhead_TokenDegradeAndRelease: with a drained cpuToken
-// pool the source degrades to one decode worker (counter fires) and
-// still yields identical rows; with an ample pool the extra-worker
-// tokens are held for the source's lifetime and released exactly once
-// on Close.
-func TestScanDecodeAhead_TokenDegradeAndRelease(t *testing.T) {
+// TestScanDecodeAhead_PerGroupTokens: the source's decode CPU is
+// budgeted per row group against the executor's cpuToken pool — a
+// drained pool still yields identical rows (cursor-exempt serial
+// progress, token-stall counter fires), and with an ample pool NOTHING
+// remains held after the scan drains mid-source or closes: no
+// source-lifetime hoarding (the 2026-07-16 SF100 regression class).
+func TestScanDecodeAhead_PerGroupTokens(t *testing.T) {
 	ctx := context.Background()
 	store := objstore.NewMemStore()
 	keys, wantSum := writeMultiGroupFixture(t, store, "b", 3, 3, 32)
 
-	// Drained pool: degrade to serial width.
+	// Drained pool: still correct, stall counter fires.
 	e := &Executor{store: store, spillDir: t.TempDir()}
 	e.SetScanDecodeAhead(true, 0)
 	e.cpuTokens = newCPUTokens(0)
@@ -262,16 +263,17 @@ func TestScanDecodeAhead_TokenDegradeAndRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if sum != wantSum || rows != 3*3*32 {
-		t.Fatalf("degraded read: sum=%d rows=%d, want sum=%d rows=%d", sum, rows, wantSum, 3*3*32)
+		t.Fatalf("starved read: sum=%d rows=%d, want sum=%d rows=%d", sum, rows, wantSum, 3*3*32)
 	}
-	if src.decodeAheadK != 1 {
-		t.Errorf("decode width under drained pool = %d, want 1", src.decodeAheadK)
+	if _, _, _, stalls := e.ScanDecodeAheadStats(); stalls == 0 {
+		t.Error("token-stall counter did not fire under a drained pool")
 	}
-	if _, _, _, degrades := e.ScanDecodeAheadStats(); degrades == 0 {
-		t.Error("token-degrade counter did not fire under a drained pool")
+	if held := e.cpuTokens.InUse(); held != 0 {
+		t.Errorf("tokens in use after starved scan = %d, want 0", held)
 	}
 
-	// Ample pool: extra workers hold tokens until Close releases them.
+	// Ample pool: after every delivered batch, held tokens can only be
+	// the ones inside active decodes — and after Close, exactly zero.
 	e2 := &Executor{store: store, spillDir: t.TempDir()}
 	e2.SetScanDecodeAhead(true, 0)
 	e2.cpuTokens = newCPUTokens(16)
@@ -279,20 +281,15 @@ func TestScanDecodeAhead_TokenDegradeAndRelease(t *testing.T) {
 	if err := src2.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := src2.Next(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if src2.decodeAheadK < 2 {
-		t.Fatalf("decode width under ample pool = %d, want >= 2", src2.decodeAheadK)
-	}
-	if held := e2.cpuTokens.InUse(); held != int64(src2.decodeTokensHeld) || held == 0 {
-		t.Fatalf("tokens in use = %d, want %d (source's held count)", held, src2.decodeTokensHeld)
+	sum2, rows2 := drainValSum(t, ctx, src2)
+	if sum2 != wantSum || rows2 != rows {
+		t.Fatalf("ample read: sum=%d rows=%d, want sum=%d rows=%d", sum2, rows2, wantSum, rows)
 	}
 	if err := src2.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if held := e2.cpuTokens.InUse(); held != 0 {
-		t.Errorf("tokens in use after Close = %d, want 0", held)
+		t.Errorf("tokens in use after Close = %d, want 0 (hoarding)", held)
 	}
 }
 

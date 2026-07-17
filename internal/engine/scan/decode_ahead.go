@@ -48,6 +48,7 @@ type DecodeAheadIter struct {
 
 	workers  int
 	pressure func() bool
+	tokens   TokenPool
 
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
@@ -75,6 +76,7 @@ type DecodeAheadIter struct {
 	rgRead           atomic.Int64
 	windowFullStalls atomic.Int64
 	pressureStalls   atomic.Int64
+	tokenStalls      atomic.Int64
 }
 
 // decodeSlot is one row group's outcome, parked until the delivery
@@ -103,6 +105,25 @@ type DecodeAheadOpts struct {
 	// the consumer takes — the memory-pressure collapse hook. Must be
 	// safe to call from multiple goroutines.
 	Pressure func() bool
+	// Tokens, when set, budgets decode CPU per ROW GROUP: a worker
+	// acquires one token at admission and releases it when the decoded
+	// group parks, so a worker stalled on the window (or between groups)
+	// holds nothing. The delivery-cursor group is token-exempt — serial
+	// progress is always allowed, mirroring the morsel "first consumer is
+	// free" rule. The 2026-07-16 SF100 pair convicted the previous
+	// source-lifetime acquisition: decode workers sat window-stalled
+	// holding tokens (~35k stalls/40k groups), starving concurrent join
+	// fragments' morsel width (Q20 +54%, Q05 +17%) while utilization
+	// stayed flat.
+	Tokens TokenPool
+}
+
+// TokenPool is the compute-budget seam shared with the caller's pool
+// (the worker's cpuTokens). Both methods must be safe for concurrent
+// use; TryAcquire must not block.
+type TokenPool interface {
+	TryAcquire(n int) int
+	Release(n int)
 }
 
 // DecodeWindow is a byte budget shared by one or more DecodeAheadIters.
@@ -168,6 +189,7 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 		workers:  opts.Workers,
 		win:      opts.Window,
 		pressure: opts.Pressure,
+		tokens:   opts.Tokens,
 	}
 	if it.win == nil {
 		it.win = NewDecodeWindow(opts.WindowBytes)
@@ -268,13 +290,14 @@ func (it *DecodeAheadIter) PruneStats() (bloom, rangeP, read int) {
 }
 
 // Stats returns the decode-ahead engagement counters (memo §5 markers):
-// row groups decoded, worker stalls on a full window, and admissions
-// refused under memory pressure.
-func (it *DecodeAheadIter) Stats() (groupsRead, windowFullStalls, pressureStalls int64) {
+// row groups decoded, worker stalls on a full window, admissions refused
+// under memory pressure, and admissions deferred for lack of a cpu
+// token (the group still decodes later — serially at worst).
+func (it *DecodeAheadIter) Stats() (groupsRead, windowFullStalls, pressureStalls, tokenStalls int64) {
 	if it == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
-	return it.rgRead.Load(), it.windowFullStalls.Load(), it.pressureStalls.Load()
+	return it.rgRead.Load(), it.windowFullStalls.Load(), it.pressureStalls.Load(), it.tokenStalls.Load()
 }
 
 // Next returns the next decoded row group in source order, or (nil, nil)
@@ -326,16 +349,18 @@ func (it *DecodeAheadIter) decodeLoop() {
 		}
 		idx := it.nextIdx
 		est := it.estimateGroupBytes(idx)
-		// The delivery-cursor group is always admitted: the consumer is
-		// (or will be) waiting on precisely this index, so reserving past
-		// the window here cannot grow it further, and refusing would
-		// deadlock on any single group larger than the window. (Under a
-		// shared window this bounds transient overshoot to one group per
-		// chained iterator.) Memory pressure gates admission the same way
-		// — cursor-only progress until it clears, undelivered bytes drain
-		// as the consumer takes. Wakeups: every delivery broadcasts, and
+		// The delivery-cursor group is always admitted — token-free and
+		// past any window/pressure gate: the consumer is (or will be)
+		// waiting on precisely this index, so reserving past the window
+		// here cannot grow it further, and refusing would deadlock on any
+		// single group larger than the window. (Under a shared window
+		// this bounds transient overshoot to one group per chained
+		// iterator.) Every non-cursor group must clear the window, the
+		// pressure hook, AND acquire a cpu token held only for the decode
+		// itself. Wakeups: every delivery and every park broadcasts, and
 		// the cursor group is always decodable, so a stalled worker is
 		// re-checked at least once per delivered group.
+		var holdsToken bool
 		if idx != it.deliver {
 			if it.win.inflight+est > it.win.limit {
 				it.windowFullStalls.Add(1)
@@ -346,6 +371,14 @@ func (it *DecodeAheadIter) decodeLoop() {
 				it.pressureStalls.Add(1)
 				it.win.cond.Wait()
 				continue
+			}
+			if it.tokens != nil {
+				if it.tokens.TryAcquire(1) == 0 {
+					it.tokenStalls.Add(1)
+					it.win.cond.Wait()
+					continue
+				}
+				holdsToken = true
 			}
 		}
 		it.nextIdx++
@@ -364,6 +397,9 @@ func (it *DecodeAheadIter) decodeLoop() {
 					it.rgRead.Add(1)
 				}
 			}
+		}
+		if holdsToken {
+			it.tokens.Release(1)
 		}
 
 		it.win.mu.Lock()

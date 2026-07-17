@@ -589,13 +589,13 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				groups, windowFulls, pressureStalls, tokenDegrades := w.executor.ScanDecodeAheadStats()
-				cur := [4]int64{groups, windowFulls, pressureStalls, tokenDegrades}
+				groups, windowFulls, pressureStalls, tokenStalls := w.executor.ScanDecodeAheadStats()
+				cur := [4]int64{groups, windowFulls, pressureStalls, tokenStalls}
 				if cur != last {
 					last = cur
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
-						"pressure_stalls", pressureStalls, "token_degrades", tokenDegrades)
+						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls)
 				}
 			}
 		}

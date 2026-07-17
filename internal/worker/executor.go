@@ -125,7 +125,7 @@ type Executor struct {
 	scanDecodeAheadGroups         atomic.Int64
 	scanDecodeAheadWindowFulls    atomic.Int64
 	scanDecodeAheadPressureStalls atomic.Int64
-	scanDecodeAheadTokenDegrades  atomic.Int64
+	scanDecodeAheadTokenStalls    atomic.Int64
 }
 
 // SetStreamingShuffleRead enables streaming decode of shuffle inputs
@@ -148,11 +148,11 @@ func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
 
 // ScanDecodeAheadStats returns the decode-ahead counters: row groups
 // decoded ahead, worker stalls on a full window, admissions refused
-// under heap pressure, and sources that got fewer decode workers than
-// the default because the cpuToken pool was drawn down.
-func (e *Executor) ScanDecodeAheadStats() (groups, windowFulls, pressureStalls, tokenDegrades int64) {
+// under heap pressure, and per-group admissions deferred for lack of a
+// cpu token (each affected group still decodes, serially at worst).
+func (e *Executor) ScanDecodeAheadStats() (groups, windowFulls, pressureStalls, tokenStalls int64) {
 	return e.scanDecodeAheadGroups.Load(), e.scanDecodeAheadWindowFulls.Load(),
-		e.scanDecodeAheadPressureStalls.Load(), e.scanDecodeAheadTokenDegrades.Load()
+		e.scanDecodeAheadPressureStalls.Load(), e.scanDecodeAheadTokenStalls.Load()
 }
 
 // NewExecutor creates a new task executor.
