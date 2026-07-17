@@ -236,3 +236,52 @@ admissions deferred; the group still decodes, serially at worst).
 
 Revalidation: single treatment-only SF100 run (control reference =
 `results/20260716-222612`), per the cost call on full A/Bs.
+
+## 9. Q05/Q07 residual: window occupancy under memory pressure (2026-07-17)
+
+Local reproduction (no EC2): SF10, DAG-forced, Q05 only, under
+`deploy/edge/cap-wrapper.sh` (EDGE_CAP_MB=2048, EDGE_CPUS=8). Uncapped
+the regression does not exist (decode-ahead slightly faster); capped it
+reproduces hard and scales with the WINDOW, not the machinery:
+
+| arm (medians, n=4-6)      | wall   |
+|---------------------------|--------|
+| flag off                  | 36.2s  |
+| window=1 (serial decode)  | 32.8s  |
+| window=32 MiB             | 49.4s  |
+| window=256 MiB (default)  | 56.4s  |
+
+The law: cost ∝ decoded-bytes-in-flight under memory pressure. With
+window=1 — cursor-only admission, every other mechanism (workers,
+cross-file pre-open, per-group tokens) still active — decode-ahead
+BEATS serial even under the cap. The held batches displace the memory
+the scan itself needs (page cache for the mmap'd file bytes, and GC
+headroom under GOMEMLIMIT); `heapPressureActive` never fires because
+Go heap never exceeds its target — the kernel absorbs the pressure
+silently. This is exactly §7's "real heap the ledger does not charge"
+landmine, and it is the SF100 Q05 (+13.5%, scan/repartition phase) and
+plausibly Q07 (+8.5%, mid-join) residual: c7gd workers run at partial
+page-cache residency (26 GB working set vs ~16 GB cache).
+
+### 9.1 Fix direction (needs review before implementation)
+
+Charge decoded-ahead window bytes to the task's memory ledger and
+derive the effective occupancy cap from actual budget headroom, with
+the existing cursor-exempt admission as the floor (serial decode-ahead
+is SAFE — measured faster than the flag-off path even under a 2 GiB
+cap). Properties: no new thresholds (budget-derived); reuses the
+validated ledger/pressure machinery; preserves full width when memory
+is plentiful (the SF100 scan band keeps Q16 −64% / Q06 −42%); collapses
+toward the measured-safe serial shape as headroom vanishes.
+
+Alternatives considered: fixed smaller default (32 MiB still +37%
+under the cap — size alone is not safe, and it forfeits width
+elsewhere); width-sized window (k×group estimate ≈ 32 MiB case —
+same result); page-cache-aware pressure sensor (OS-specific, and the
+ledger route subsumes it).
+
+Honest bound: the exact displacement channel at SF100 (page-cache
+re-reads vs GC-cycle frequency) is not isolated — the capped repro
+cannot distinguish them. The fix's SF100 pair is the test; markers to
+watch: decode-ahead ledger charges/denials, GC cycle counts, scan-band
+retention, Q05/Q07 vs the 20260716-222612 control.
