@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/engine/memory"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
 )
@@ -83,7 +84,7 @@ func TestScanDecodeAhead_MultiFileParity(t *testing.T) {
 	if sum != wantSum || rows != 5*4*32 {
 		t.Fatalf("decode-ahead read: sum=%d rows=%d, want sum=%d rows=%d", sum, rows, wantSum, 5*4*32)
 	}
-	if groups, _, _, _ := e.ScanDecodeAheadStats(); groups != 5*4 {
+	if groups, _, _, _, _ := e.ScanDecodeAheadStats(); groups != 5*4 {
 		t.Errorf("decode-ahead groups = %d, want %d", groups, 5*4)
 	}
 
@@ -265,7 +266,7 @@ func TestScanDecodeAhead_PerGroupTokens(t *testing.T) {
 	if sum != wantSum || rows != 3*3*32 {
 		t.Fatalf("starved read: sum=%d rows=%d, want sum=%d rows=%d", sum, rows, wantSum, 3*3*32)
 	}
-	if _, _, _, stalls := e.ScanDecodeAheadStats(); stalls == 0 {
+	if _, _, _, stalls, _ := e.ScanDecodeAheadStats(); stalls == 0 {
 		t.Error("token-stall counter did not fire under a drained pool")
 	}
 	if held := e.cpuTokens.InUse(); held != 0 {
@@ -339,5 +340,60 @@ func TestFilePrefetcher_TryTakePutsBackFailures(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("ctx done")
+	}
+}
+
+// TestScanDecodeAhead_LedgerWiring: the source's decode window charges
+// the worker's shared memory pool (memo §9). A pool with no headroom
+// denies every non-cursor admission — the scan still completes serially
+// via the cursor exemption and the ledger-stall counter fires — and in
+// all cases the pool balance returns to zero once the source closes.
+func TestScanDecodeAhead_LedgerWiring(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	keys, wantSum := writeMultiGroupFixture(t, store, "b", 3, 3, 32)
+
+	// 1-byte pool: every non-cursor Reserve is over budget.
+	e := &Executor{store: store, spillDir: t.TempDir()}
+	e.SetScanDecodeAhead(true, 0)
+	e.sharedTracker = memory.NewTracker("worker", 1)
+	src := newCachedFileStreamSource(e, "", "b", keys)
+	if err := src.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sum, rows := drainValSum(t, ctx, src)
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if sum != wantSum || rows != 3*3*32 {
+		t.Fatalf("ledger-starved read: sum=%d rows=%d, want sum=%d rows=%d", sum, rows, wantSum, 3*3*32)
+	}
+	if _, _, _, _, stalls := e.ScanDecodeAheadStats(); stalls == 0 {
+		t.Error("ledger-stall counter did not fire against a 1-byte pool")
+	}
+	if used := e.sharedTracker.Used(); used != 0 {
+		t.Errorf("shared pool used after close = %d, want 0", used)
+	}
+	if e.sharedTracker.Peak() == 0 {
+		t.Error("shared pool peak = 0 — cursor groups were never force-charged")
+	}
+
+	// Ample pool: full width, still balanced after close.
+	e2 := &Executor{store: store, spillDir: t.TempDir()}
+	e2.SetScanDecodeAhead(true, 0)
+	e2.sharedTracker = memory.NewTracker("worker", 1<<30)
+	src2 := newCachedFileStreamSource(e2, "", "b", keys)
+	if err := src2.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sum2, rows2 := drainValSum(t, ctx, src2)
+	if err := src2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if sum2 != wantSum || rows2 != rows {
+		t.Fatalf("ample read: sum=%d rows=%d, want sum=%d rows=%d", sum2, rows2, wantSum, rows)
+	}
+	if used := e2.sharedTracker.Used(); used != 0 {
+		t.Errorf("ample pool used after close = %d, want 0", used)
 	}
 }

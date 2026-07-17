@@ -2,6 +2,7 @@ package scan
 
 import (
 	"bytes"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -120,7 +121,7 @@ func TestDecodeAheadIter_MatchesSerial(t *testing.T) {
 			t.Fatalf("workers=%d drain: %v", workers, err)
 		}
 		requireSameBatches(t, want, got)
-		if groups, _, _, _ := it.Stats(); groups != 16 {
+		if groups, _, _, _, _ := it.Stats(); groups != 16 {
 			t.Errorf("workers=%d: groups read = %d, want 16", workers, groups)
 		}
 		// Post-exhaustion Next returns (nil, nil), like serial.
@@ -157,7 +158,7 @@ func TestDecodeAheadIter_TinyWindowStallsButDelivers(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 	requireSameBatches(t, want, got)
-	if _, stalls, _, _ := it.Stats(); stalls == 0 {
+	if _, stalls, _, _, _ := it.Stats(); stalls == 0 {
 		t.Error("WindowBytes=1 with 4 workers never stalled — window is not gating admission")
 	}
 }
@@ -188,7 +189,7 @@ func TestDecodeAheadIter_PressureDegradesToSerial(t *testing.T) {
 		t.Fatalf("drain: %v", err)
 	}
 	requireSameBatches(t, want, got)
-	if _, _, stalls, _ := it.Stats(); stalls == 0 {
+	if _, _, stalls, _, _ := it.Stats(); stalls == 0 {
 		t.Error("permanent pressure with 4 workers never stalled — hook is not gating admission")
 	}
 }
@@ -257,7 +258,7 @@ func TestDecodeAheadIter_PerGroupTokens(t *testing.T) {
 		t.Fatalf("starved drain: %v", err)
 	}
 	requireSameBatches(t, want, got)
-	if _, _, _, stalls := it.Stats(); stalls == 0 {
+	if _, _, _, stalls, _ := it.Stats(); stalls == 0 {
 		t.Error("capacity-0 pool never produced a token stall")
 	}
 	if starved.acquires != 0 {
@@ -470,5 +471,174 @@ func TestDecodeAheadIter_CloseMidStreamJoinsWorkers(t *testing.T) {
 	}
 	if err := it2.Close(); err != nil {
 		t.Fatalf("Close before Next: %v", err)
+	}
+}
+
+// countingLedger enforces a byte capacity and counts charge traffic so
+// tests can prove the memo-§9 ledger semantics: denial-driven collapse
+// to the cursor-only serial floor, forced cursor charges, and a zero
+// balance once every group is delivered or dropped.
+type countingLedger struct {
+	mu       sync.Mutex
+	capacity int64 // < 0 = unlimited
+	balance  int64
+	peak     int64
+	reserves int64 // successful Reserve calls
+	forced   int64 // ForceReserve calls
+}
+
+func (l *countingLedger) Reserve(n int64) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.capacity >= 0 && l.balance+n > l.capacity {
+		return fmt.Errorf("countingLedger: %d over capacity", n)
+	}
+	l.balance += n
+	l.reserves++
+	if l.balance > l.peak {
+		l.peak = l.balance
+	}
+	return nil
+}
+
+func (l *countingLedger) ForceReserve(n int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.balance += n
+	l.forced++
+	if l.balance > l.peak {
+		l.peak = l.balance
+	}
+}
+
+func (l *countingLedger) Release(n int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.balance -= n
+}
+
+func (l *countingLedger) snapshot() (balance, peak, reserves, forced int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.balance, l.peak, l.reserves, l.forced
+}
+
+// TestDecodeAheadIter_LedgerDeniedCollapsesToSerial: a ledger with zero
+// capacity denies every non-cursor admission, yet the iterator still
+// delivers everything through the cursor exemption — whose bytes are
+// force-charged, not skipped — and the ledger balance returns to zero.
+func TestDecodeAheadIter_LedgerDeniedCollapsesToSerial(t *testing.T) {
+	data := manyRowGroupFile(t, 8, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	serial, err := OpenRowGroupIter(openFileReader(t, data), schema, nil, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serial.Close()
+	want, _ := drainGroupIter(t, serial)
+
+	ledger := &countingLedger{capacity: 0}
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 4, Window: NewDecodeWindowWithLedger(0, ledger)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := drainGroupIter(t, it)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	requireSameBatches(t, want, got)
+	if _, _, _, _, stalls := it.Stats(); stalls == 0 {
+		t.Error("capacity-0 ledger never produced a ledger stall")
+	}
+	if err := it.Close(); err != nil {
+		t.Fatal(err)
+	}
+	balance, _, reserves, forced := ledger.snapshot()
+	if balance != 0 {
+		t.Errorf("ledger balance after close = %d, want 0", balance)
+	}
+	if reserves != 0 {
+		t.Errorf("capacity-0 ledger recorded %d successful reserves, want 0", reserves)
+	}
+	if forced == 0 {
+		t.Error("cursor groups were never force-charged — real bytes invisible to the ledger")
+	}
+}
+
+// TestDecodeAheadIter_LedgerBalancedOnAllPaths: with an unlimited ledger
+// the balance returns to zero after a full drain, after a token-denial
+// rollback storm (capacity-0 token pool releases every ledger reserve it
+// cannot use), and after a mid-stream Close that drops parked slots.
+func TestDecodeAheadIter_LedgerBalancedOnAllPaths(t *testing.T) {
+	data := manyRowGroupFile(t, 12, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	serial, err := OpenRowGroupIter(openFileReader(t, data), schema, nil, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serial.Close()
+	want, _ := drainGroupIter(t, serial)
+
+	// Full drain.
+	ledger := &countingLedger{capacity: -1}
+	it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 4, Window: NewDecodeWindowWithLedger(0, ledger)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := drainGroupIter(t, it)
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	requireSameBatches(t, want, got)
+	if err := it.Close(); err != nil {
+		t.Fatal(err)
+	}
+	balance, peak, reserves, _ := ledger.snapshot()
+	if balance != 0 {
+		t.Errorf("ledger balance after full drain = %d, want 0", balance)
+	}
+	if reserves == 0 || peak == 0 {
+		t.Errorf("unlimited ledger saw reserves=%d peak=%d — ledger not engaged", reserves, peak)
+	}
+
+	// Token denial must roll the ledger reserve back.
+	rollback := &countingLedger{capacity: -1}
+	it2, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 4, Tokens: &countingTokenPool{capacity: 0},
+			Window: NewDecodeWindowWithLedger(0, rollback)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got2, err := drainGroupIter(t, it2)
+	if err != nil {
+		t.Fatalf("rollback drain: %v", err)
+	}
+	requireSameBatches(t, want, got2)
+	if err := it2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if balance, _, _, _ := rollback.snapshot(); balance != 0 {
+		t.Errorf("ledger balance after token-rollback drain = %d, want 0", balance)
+	}
+
+	// Mid-stream Close drops undelivered slots and credits their charges.
+	mid := &countingLedger{capacity: -1}
+	it3, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 4, Window: NewDecodeWindowWithLedger(0, mid)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := it3.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if err := it3.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if balance, _, _, _ := mid.snapshot(); balance != 0 {
+		t.Errorf("ledger balance after mid-stream close = %d, want 0", balance)
 	}
 }

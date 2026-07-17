@@ -77,6 +77,7 @@ type DecodeAheadIter struct {
 	windowFullStalls atomic.Int64
 	pressureStalls   atomic.Int64
 	tokenStalls      atomic.Int64
+	ledgerStalls     atomic.Int64
 }
 
 // decodeSlot is one row group's outcome, parked until the delivery
@@ -126,6 +127,25 @@ type TokenPool interface {
 	Release(n int)
 }
 
+// WindowLedger is the memory-budget seam shared with the caller's task
+// ledger (the worker's shared pool tracker — *memory.Tracker satisfies
+// it directly). Decoded-but-undelivered window bytes are charged here so
+// they are visible to spill decisions and so admission collapses toward
+// the cursor-only serial floor as budget headroom vanishes — the memo §9
+// fix: under memory pressure the window's held batches displace page
+// cache and GC headroom that the Go-heap pressure hook cannot see, so
+// the byte cost must ride the same ledger as every other operator.
+//
+// Reserve returns a non-nil error to deny (nothing retained on denial);
+// ForceReserve charges unconditionally — used for the delivery-cursor
+// group, which is always admitted but whose bytes are still real.
+// All methods must be safe for concurrent use and must not block.
+type WindowLedger interface {
+	Reserve(n int64) error
+	ForceReserve(n int64)
+	Release(n int64)
+}
+
 // DecodeWindow is a byte budget shared by one or more DecodeAheadIters.
 // Its mutex doubles as the owning iterators' state lock.
 type DecodeWindow struct {
@@ -133,18 +153,43 @@ type DecodeWindow struct {
 	cond     *sync.Cond
 	inflight int64
 	limit    int64
+	// ledger, when non-nil, additionally charges every inflight byte to
+	// the task memory ledger: limit is the ceiling, ledger headroom is
+	// the floating bound below it. Reserved and released in lockstep
+	// with inflight, so the ledger balance returns to zero when every
+	// owning iterator has closed.
+	ledger WindowLedger
 }
 
 // NewDecodeWindow returns a window bounding decoded-but-undelivered
 // bytes across every iterator opened with it. bytes <= 0 selects
 // DefaultDecodeAheadWindowBytes.
 func NewDecodeWindow(bytes int64) *DecodeWindow {
+	return NewDecodeWindowWithLedger(bytes, nil)
+}
+
+// NewDecodeWindowWithLedger is NewDecodeWindow with a memory ledger
+// attached: beyond the fixed byte ceiling, non-cursor admission must
+// also clear ledger.Reserve, and every inflight byte is charged to the
+// ledger for its parked lifetime. A nil ledger yields the fixed-window
+// behavior. Callers passing a concrete pointer type must nil-check it
+// themselves — a nil *T wrapped in the interface reads as non-nil here.
+func NewDecodeWindowWithLedger(bytes int64, ledger WindowLedger) *DecodeWindow {
 	if bytes <= 0 {
 		bytes = DefaultDecodeAheadWindowBytes
 	}
-	w := &DecodeWindow{limit: bytes}
+	w := &DecodeWindow{limit: bytes, ledger: ledger}
 	w.cond = sync.NewCond(&w.mu)
 	return w
+}
+
+// credit returns a group's byte reservation — window and ledger — when
+// its slot is delivered or dropped. Caller holds w.mu.
+func (w *DecodeWindow) credit(est int64) {
+	w.inflight -= est
+	if w.ledger != nil {
+		w.ledger.Release(est)
+	}
 }
 
 const (
@@ -289,15 +334,16 @@ func (it *DecodeAheadIter) PruneStats() (bloom, rangeP, read int) {
 	return int(it.rgPrunedBloom.Load()), int(it.rgPrunedRange.Load()), int(it.rgRead.Load())
 }
 
-// Stats returns the decode-ahead engagement counters (memo §5 markers):
-// row groups decoded, worker stalls on a full window, admissions refused
-// under memory pressure, and admissions deferred for lack of a cpu
-// token (the group still decodes later — serially at worst).
-func (it *DecodeAheadIter) Stats() (groupsRead, windowFullStalls, pressureStalls, tokenStalls int64) {
+// Stats returns the decode-ahead engagement counters (memo §5/§9
+// markers): row groups decoded, worker stalls on a full window,
+// admissions refused under memory pressure, admissions deferred for
+// lack of a cpu token, and admissions denied by the memory ledger (the
+// group still decodes later — serially at worst, in every case).
+func (it *DecodeAheadIter) Stats() (groupsRead, windowFullStalls, pressureStalls, tokenStalls, ledgerStalls int64) {
 	if it == nil {
-		return 0, 0, 0, 0
+		return 0, 0, 0, 0, 0
 	}
-	return it.rgRead.Load(), it.windowFullStalls.Load(), it.pressureStalls.Load(), it.tokenStalls.Load()
+	return it.rgRead.Load(), it.windowFullStalls.Load(), it.pressureStalls.Load(), it.tokenStalls.Load(), it.ledgerStalls.Load()
 }
 
 // Next returns the next decoded row group in source order, or (nil, nil)
@@ -316,7 +362,7 @@ func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
 		if slot, ok := it.slots[it.deliver]; ok {
 			delete(it.slots, it.deliver)
 			it.deliver++
-			it.win.inflight -= slot.est
+			it.win.credit(slot.est)
 			it.win.cond.Broadcast()
 			if slot.err != nil {
 				// Mirror serial semantics: the error surfaces exactly at
@@ -350,16 +396,19 @@ func (it *DecodeAheadIter) decodeLoop() {
 		idx := it.nextIdx
 		est := it.estimateGroupBytes(idx)
 		// The delivery-cursor group is always admitted — token-free and
-		// past any window/pressure gate: the consumer is (or will be)
-		// waiting on precisely this index, so reserving past the window
-		// here cannot grow it further, and refusing would deadlock on any
-		// single group larger than the window. (Under a shared window
-		// this bounds transient overshoot to one group per chained
-		// iterator.) Every non-cursor group must clear the window, the
-		// pressure hook, AND acquire a cpu token held only for the decode
-		// itself. Wakeups: every delivery and every park broadcasts, and
-		// the cursor group is always decodable, so a stalled worker is
-		// re-checked at least once per delivered group.
+		// past any window/pressure/ledger gate: the consumer is (or will
+		// be) waiting on precisely this index, so reserving past the
+		// window here cannot grow it further, and refusing would deadlock
+		// on any single group larger than the window. Its bytes are still
+		// force-charged to the ledger — real bytes stay visible to spill
+		// decisions; overshoot is bounded to one group per chained
+		// iterator. Every non-cursor group must clear the window, the
+		// pressure hook, the memory ledger, AND acquire a cpu token held
+		// only for the decode itself. Wakeups: every delivery and every
+		// park broadcasts, and the cursor group is always decodable, so a
+		// stalled worker is re-checked at least once per delivered group —
+		// which is also why a ledger denial needs no external wakeup:
+		// deliveries keep crediting the ledger and re-running this check.
 		var holdsToken bool
 		if idx != it.deliver {
 			if it.win.inflight+est > it.win.limit {
@@ -372,14 +421,26 @@ func (it *DecodeAheadIter) decodeLoop() {
 				it.win.cond.Wait()
 				continue
 			}
+			if it.win.ledger != nil {
+				if err := it.win.ledger.Reserve(est); err != nil {
+					it.ledgerStalls.Add(1)
+					it.win.cond.Wait()
+					continue
+				}
+			}
 			if it.tokens != nil {
 				if it.tokens.TryAcquire(1) == 0 {
+					if it.win.ledger != nil {
+						it.win.ledger.Release(est)
+					}
 					it.tokenStalls.Add(1)
 					it.win.cond.Wait()
 					continue
 				}
 				holdsToken = true
 			}
+		} else if it.win.ledger != nil {
+			it.win.ledger.ForceReserve(est)
 		}
 		it.nextIdx++
 		it.win.inflight += est
@@ -469,7 +530,7 @@ func (it *DecodeAheadIter) Close() error {
 	// Release this iterator's undelivered reservations so a chained
 	// iterator sharing the window doesn't inherit dead inflight bytes.
 	for idx, slot := range it.slots {
-		it.win.inflight -= slot.est
+		it.win.credit(slot.est)
 		delete(it.slots, idx)
 	}
 	it.win.cond.Broadcast()
@@ -482,7 +543,7 @@ func (it *DecodeAheadIter) Close() error {
 	// those reservations too. No new slots can appear once closed.
 	it.win.mu.Lock()
 	for idx, slot := range it.slots {
-		it.win.inflight -= slot.est
+		it.win.credit(slot.est)
 		delete(it.slots, idx)
 	}
 	it.win.cond.Broadcast()

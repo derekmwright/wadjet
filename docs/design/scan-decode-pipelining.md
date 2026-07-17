@@ -285,3 +285,72 @@ re-reads vs GC-cycle frequency) is not isolated — the capped repro
 cannot distinguish them. The fix's SF100 pair is the test; markers to
 watch: decode-ahead ledger charges/denials, GC cycle counts, scan-band
 retention, Q05/Q07 vs the 20260716-222612 control.
+
+### 9.2 Implementation and what the capped repro falsified (2026-07-17)
+
+Both §9.1 pieces are implemented on `fix/decode-ahead-ledger-window`:
+
+**Ledger charge (e2e80a6).** `DecodeWindow` carries an optional
+`scan.WindowLedger` (satisfied directly by `*memory.Tracker`); the
+worker attaches its shared pool tracker. Non-cursor admission must
+clear the window ceiling, the pressure hook, `ledger.Reserve`, and a
+cpu token (token denial rolls the reserve back); the delivery-cursor
+group is force-charged but never denied. Inflight and ledger move in
+lockstep, balancing to zero per source on delivery and Close. New
+marker: `ledger_stalls`.
+
+**What the same-window capped repro then falsified**: §9.1's claim
+that the ledger route subsumes a page-cache sensor. Interleaved arms
+(A = off, B = main + flag, C = ledger + flag; EDGE_CAP_MB=2048):
+A 36.9 s, B 55.2 s (+49 %, regression reproduced), C 48.5 s (+31 % —
+partial) with `ledger_stalls=0`. The pool auto-sizes to
+goMemLimit − cache = 1.45 GiB under the cap, so a 256 MiB window never
+draws a denial: the pool bounds OPERATOR co-tenancy (its real job, and
+the charge stays — at SF100 the 5.4 GiB pool carries multi-GB join
+builds, a topology the capped rig cannot reproduce), but no Go-side
+ledger sees the kernel-level displacement.
+
+**Refault-rate sensor (5a35fdf).** The kernel publishes the
+displacement directly: `workingset_refault` counts faults on
+recently-evicted pages — thrash by definition; cold sequential reads
+are first-touch faults and do not count. Measured: ~0/s quiet baseline
+vs 15k–95k pages/s during capped thrash — four orders of magnitude.
+`memory.PageCachePressureActive()` samples the process's cgroup-v2
+`memory.stat` (host `/proc/vmstat` fallback; source absence disables)
+at 1 s cadence; active when the rate exceeds 1000 pages/s (~4 MB/s,
+env-overridable) on two consecutive samples. Decode-ahead admission
+consults it alongside the Go-heap gauge — no iterator changes; the
+existing pressure path collapses to the cursor-exempt serial floor.
+Safe on both ends: under thrash, width is worthless anyway (the
+I/O-bound repro logged `window_fulls=0` — decode cannot outrun a
+saturated disk); on a healthy box the sensor is silent. Markers:
+`refault_rate`, `refault_activations`.
+
+**Environment caveat for future capped repros**: the rig only
+discriminates when the flag-off arm shows a LOW refault rate (dataset
+host-cache-warm). After a host reboot every arm ran ~90k refaults/s
+and A ≈ B ≈ C — saturated disk thrash masks the window effect
+entirely. Check the flag-off refault rate before trusting any arm.
+
+**Residual honest bound** (one cell no local rig can test): SF100
+partial-residency background refaults co-occurring with a productively
+full window — the sensor would trade scan-band width for cache relief.
+The SF100 pair remains the test; watch scan-band retention
+(Q16/Q06/Q12) alongside Q05/Q07, `refault_activations`, and
+`ledger_stalls`.
+
+**Sensor visibility bound (measured 2026-07-17)**: cgroup-v1 memcg
+reclaim does not feed the global `workingset_refault` counters on the
+WSL2 5.15 kernel — a capped v1 container thrashing 1.5 GiB of its own
+file pages through a 512 MiB limit moved the counter by ~0
+(`cmd/refault-probe --thrash` reproduces this). The sensor is therefore
+blind to v1-container-INTERNAL displacement, which is exactly the
+cap-wrapper simulator's shape — so the capped rig cannot fire it
+end-to-end. This is a simulator artifact, not a product gap: SF100
+workers run bare on cgroup-v2 AL2023 (host-level reclaim feeds
+/proc/vmstat AND the v2 memory.stat both), and real edge boxes are
+bare small machines or v2 containers. Fail-safe by construction:
+counter source absent or silent → sensor inactive → current behavior.
+`cmd/refault-probe` prints raw counter + sensor state side by side and
+generates workingset-shaped thrash for field diagnosis; the sensor
+logs its bound source at init.

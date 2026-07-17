@@ -907,8 +907,20 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		if s.decodeWin == nil {
 			// One window per source, shared across every file it opens —
 			// the cross-file continuation draws the next file's head from
-			// the same budget as the current file's tail.
-			s.decodeWin = scan.NewDecodeWindow(s.executor.scanDecodeAheadBytes)
+			// the same budget as the current file's tail. Window bytes are
+			// charged to the worker's shared memory pool (memo §9): the
+			// configured window is only the ceiling, actual occupancy is
+			// bounded by pool headroom, collapsing to the cursor-only
+			// serial floor when concurrent operators hold the budget. The
+			// held batches are real heap the Go-pressure hook cannot see
+			// displacing page cache — they must compete on the same ledger
+			// as everything else. NOTE: nil-check the tracker here — a nil
+			// *memory.Tracker wrapped in the interface reads as non-nil.
+			var ledger scan.WindowLedger
+			if s.executor.sharedTracker != nil {
+				ledger = s.executor.sharedTracker
+			}
+			s.decodeWin = scan.NewDecodeWindowWithLedger(s.executor.scanDecodeAheadBytes, ledger)
 		}
 		// CPU is budgeted per ROW GROUP inside the iterator (one token
 		// held only for the duration of one decode, cursor group exempt)
@@ -919,7 +931,11 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		// at the default width. NOTE: the nil check must happen here — a
 		// nil *cpuTokens wrapped in the interface would read as non-nil
 		// and silently serialize decode.
-		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: heapPressureActive}
+		// Admission pressure = Go-heap tide gauge OR kernel page-cache
+		// thrash (memo §9: refault-rate sensor — the displacement channel
+		// the heap hook cannot see; the capped repro measured decode-ahead
+		// width as worthless-to-harmful precisely when refaults run hot).
+		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: scanDecodeAheadPressure}
 		if s.executor.cpuTokens != nil {
 			opts.Tokens = s.executor.cpuTokens
 		}
@@ -1053,11 +1069,12 @@ type decodeAheadStatsIter struct {
 func (d *decodeAheadStatsIter) Close() error {
 	if !d.folded {
 		d.folded = true
-		groups, windowFulls, pressureStalls, tokenStalls := d.Stats()
+		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := d.Stats()
 		d.executor.scanDecodeAheadGroups.Add(groups)
 		d.executor.scanDecodeAheadWindowFulls.Add(windowFulls)
 		d.executor.scanDecodeAheadPressureStalls.Add(pressureStalls)
 		d.executor.scanDecodeAheadTokenStalls.Add(tokenStalls)
+		d.executor.scanDecodeAheadLedgerStalls.Add(ledgerStalls)
 	}
 	return d.DecodeAheadIter.Close()
 }

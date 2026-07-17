@@ -581,7 +581,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 	w.bgWG.Add(1)
 	go func() {
 		defer w.bgWG.Done()
-		var last [4]int64
+		var last [5]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -589,13 +589,17 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				groups, windowFulls, pressureStalls, tokenStalls := w.executor.ScanDecodeAheadStats()
-				cur := [4]int64{groups, windowFulls, pressureStalls, tokenStalls}
+				groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
+				cur := [5]int64{groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls}
 				if cur != last {
 					last = cur
+					refaultRate, refaultActivations := memory.PageCachePressureStats()
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
-						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls)
+						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
+						"ledger_stalls", ledgerStalls,
+						"refault_rate", int64(refaultRate),
+						"refault_activations", refaultActivations)
 				}
 			}
 		}
@@ -851,6 +855,21 @@ func (w *Worker) Stop() {
 		w.peerClient.Close()
 	}
 	w.executor.uploads.Drain()
+
+	// Final decode-ahead stats: short runs end before the 60s marker
+	// ticker ever fires, leaving the fold-on-close counters unreported —
+	// the 2026-07-17 capped repro lost every worker-side sample this way.
+	// Emitted after wg.Wait, so every source has folded its counters.
+	if w.config.ScanDecodeAhead {
+		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
+		refaultRate, refaultActivations := memory.PageCachePressureStats()
+		w.logger.Info("scan decode-ahead stats (final)",
+			"groups", groups, "window_fulls", windowFulls,
+			"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
+			"ledger_stalls", ledgerStalls,
+			"refault_rate", int64(refaultRate),
+			"refault_activations", refaultActivations)
+	}
 
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
 }

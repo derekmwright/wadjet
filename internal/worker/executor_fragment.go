@@ -451,6 +451,19 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 // manipulating GOMEMLIMIT. Production never reassigns it.
 var heapPressureActive = memory.HeapBackpressureActive
 
+// pageCachePressureActive mirrors it for memory.PageCachePressureActive
+// (the §9 refault-rate sensor), same test-seam rationale.
+var pageCachePressureActive = memory.PageCachePressureActive
+
+// scanDecodeAheadPressure gates decode-ahead admission beyond the
+// delivery cursor: Go-heap tide gauge OR kernel page-cache thrash.
+// Discretionary decoded-ahead bytes are the first thing to yield under
+// either pressure channel; the cursor group is exempt inside the
+// iterator, so this can never stall delivery.
+func scanDecodeAheadPressure() bool {
+	return heapPressureActive() || pageCachePressureActive()
+}
+
 // morselMinFragmentBytes is the auto-mode size gate: fragments whose
 // EstimatedBytes fall below it stay serial. Parallelism pays only above a
 // size threshold — the parallel join build learned this the hard way
