@@ -289,9 +289,9 @@ variable "streaming_shuffle_read" {
 }
 
 variable "scan_decode_ahead" {
-  description = "Scan decode pipelining (docs/design/scan-decode-pipelining.md): workers decode parquet row groups ahead of scan consumption — k decode workers with in-order delivery, byte-bounded window, cross-file continuation — instead of one row group per pull on the consumer goroutine. Worker-side flag only. Default false pending SF100 validation — set true for the treatment arm."
+  description = "Scan decode pipelining (docs/design/scan-decode-pipelining.md): workers decode parquet row groups ahead of scan consumption — k decode workers with in-order delivery, pool-ledger-charged byte window, refault-sensor collapse, cross-file continuation. Worker-side flag only. Default true (SF100 pair 2026-07-17: steady-state -7.3%, 0/44 mismatches); set false as the kill switch."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "peer_exchange_port" {

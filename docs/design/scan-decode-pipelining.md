@@ -143,9 +143,14 @@ decoded ahead of consumption":
 
 ## 5. Flags and rollout
 
-- `--scan-decode-ahead` (bool, default **false** until the SF100 pair;
-  kill switch thereafter — the streaming-shuffle-read arc convention).
-  Gates the decodeAheadIter + cross-file continuation together.
+- `--scan-decode-ahead` (bool, default **true** as of 2026-07-18 —
+  flipped on the §9.3 SF100 pair verdict: steady-state −7.3 %, 0/44
+  mismatches across four clean SF100 suites, Q07 residual fixed, the
+  ledger charge + refault sensor bounding occupancy under pressure.
+  `--scan-decode-ahead=false` is the kill switch restoring the serial
+  RowGroupIter path. Q05 +19 % is the accepted, isolated remainder —
+  per-query attribution instrumentation tracks it). Gates the
+  decodeAheadIter + cross-file continuation together.
 - `--scan-decode-ahead-bytes` (window, default 256 MiB) — sizing knob,
   not expected to need tuning (no threshold-tweak campaigns; if the
   default is wrong the design is wrong).
