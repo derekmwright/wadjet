@@ -397,3 +397,64 @@ func TestScanDecodeAhead_LedgerWiring(t *testing.T) {
 		t.Errorf("ample pool used after close = %d, want 0", used)
 	}
 }
+
+// TestScanDecodeAhead_PerQueryAttribution: closed sources fold their
+// counters under their query id; the sweep emits-and-drops a query only
+// once its counters go idle, and final sweep drains everything.
+func TestScanDecodeAhead_PerQueryAttribution(t *testing.T) {
+	ctx := context.Background()
+	store := objstore.NewMemStore()
+	keys, wantSum := writeMultiGroupFixture(t, store, "b", 2, 3, 32)
+
+	e := &Executor{store: store, spillDir: t.TempDir()}
+	e.SetScanDecodeAhead(true, 0)
+
+	scanQuery := func(qid string) {
+		src := newCachedFileStreamSource(e, qid, "b", keys)
+		if err := src.Init(ctx); err != nil {
+			t.Fatal(err)
+		}
+		sum, _ := drainValSum(t, ctx, src)
+		if err := src.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if sum != wantSum {
+			t.Fatalf("query %s: sum=%d want %d", qid, sum, wantSum)
+		}
+	}
+	scanQuery("qa")
+	scanQuery("qb")
+
+	load := func(qid string) *decodeAheadQueryStats {
+		v, ok := e.scanDecodeAheadByQuery.Load(qid)
+		if !ok {
+			return nil
+		}
+		return v.(*decodeAheadQueryStats)
+	}
+	qa, qb := load("qa"), load("qb")
+	if qa == nil || qb == nil {
+		t.Fatal("per-query entries missing after source close")
+	}
+	if qa.groups.Load() != 2*3 || qb.groups.Load() != 2*3 {
+		t.Fatalf("per-query groups = %d/%d, want 6/6", qa.groups.Load(), qb.groups.Load())
+	}
+
+	// First sweep: counters moved since the zero snapshot — entries held.
+	e.sweepScanDecodeAheadQueryStats(false)
+	if load("qa") == nil || load("qb") == nil {
+		t.Fatal("first sweep dropped still-fresh entries")
+	}
+	// Second sweep: idle — emitted and dropped.
+	e.sweepScanDecodeAheadQueryStats(false)
+	if load("qa") != nil || load("qb") != nil {
+		t.Fatal("second sweep kept idle entries")
+	}
+
+	// Final sweep drains immediately, no idle wait.
+	scanQuery("qc")
+	e.sweepScanDecodeAheadQueryStats(true)
+	if load("qc") != nil {
+		t.Fatal("final sweep kept entry")
+	}
+}

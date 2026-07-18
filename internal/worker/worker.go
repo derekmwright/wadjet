@@ -601,6 +601,7 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"refault_rate", int64(refaultRate),
 						"refault_activations", refaultActivations)
 				}
+				w.executor.sweepScanDecodeAheadQueryStats(false)
 			}
 		}
 	}()
@@ -861,6 +862,7 @@ func (w *Worker) Stop() {
 	// the 2026-07-17 capped repro lost every worker-side sample this way.
 	// Emitted after wg.Wait, so every source has folded its counters.
 	if w.config.ScanDecodeAhead {
+		w.executor.sweepScanDecodeAheadQueryStats(true)
 		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
 		refaultRate, refaultActivations := memory.PageCachePressureStats()
 		w.logger.Info("scan decode-ahead stats (final)",

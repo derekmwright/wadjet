@@ -944,7 +944,7 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 			p.release(s.executor.logger)
 			return nil, fmt.Errorf("opening decode-ahead iterator for %s: %w", filePath, err)
 		}
-		iter = &decodeAheadStatsIter{DecodeAheadIter: da, executor: s.executor}
+		iter = &decodeAheadStatsIter{DecodeAheadIter: da, executor: s.executor, queryID: s.queryID}
 	} else {
 		rgIter, err := scan.OpenRowGroupIter(reader, projCols, nil, shardIdx, shardCount)
 		if err != nil {
@@ -1058,11 +1058,13 @@ func (s *cachedFileStreamSource) adoptPending(p *pendingParquet, idx int) {
 }
 
 // decodeAheadStatsIter folds a DecodeAheadIter's engagement counters into
-// the executor-wide markers when the iterator closes (a source opens one
-// iterator per parquet file; per-file granularity is noise).
+// the executor-wide markers — and the per-query attribution map — when
+// the iterator closes (a source opens one iterator per parquet file;
+// per-file granularity is noise).
 type decodeAheadStatsIter struct {
 	*scan.DecodeAheadIter
 	executor *Executor
+	queryID  string
 	folded   bool
 }
 
@@ -1075,6 +1077,8 @@ func (d *decodeAheadStatsIter) Close() error {
 		d.executor.scanDecodeAheadPressureStalls.Add(pressureStalls)
 		d.executor.scanDecodeAheadTokenStalls.Add(tokenStalls)
 		d.executor.scanDecodeAheadLedgerStalls.Add(ledgerStalls)
+		d.executor.foldScanDecodeAheadQueryStats(d.queryID,
+			groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls)
 	}
 	return d.DecodeAheadIter.Close()
 }
