@@ -99,3 +99,51 @@ func BenchmarkPartitionedShuffleConsume(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkAppendBatchRowsBulkBytes isolates the bytes-arm copy cost of
+// appendBatchRowsBulk across the row shapes the sinks produce: dense
+// (unpartitionedStageSink no-Sel), clustered (real lineitem l_orderkey —
+// ~4 consecutive rows per order land in one partition), and scattered
+// singletons (worst case, unique hash keys). Strings are l_comment-scale
+// (~27 B mean). The accumulator is reused at working capacity across
+// iterations, matching the sinks' steady state.
+func BenchmarkAppendBatchRowsBulkBytes(b *testing.B) {
+	const nRows = 2048
+	schema := []parquet.Column{{Name: "s", Type: parquet.TypeString}}
+	src := batch.NewRecordBatch(schema, nRows)
+	for i := 0; i < nRows; i++ {
+		src.Columns[0].BytesData.Set(i, []byte("supplier comment padding text i="+strconv.Itoa(i)))
+	}
+	src.Len = nRows
+
+	dense := make([]int, nRows)
+	for i := range dense {
+		dense[i] = i
+	}
+	clustered := make([]int, 0, nRows/6)
+	for base := 0; base+4 < nRows; base += 24 { // one order's 4 rows out of each 24-row stripe
+		clustered = append(clustered, base, base+1, base+2, base+3)
+	}
+	scattered := make([]int, 0, nRows/24)
+	for i := 7; i < nRows; i += 24 {
+		scattered = append(scattered, i)
+	}
+
+	for _, tc := range []struct {
+		name string
+		rows []int
+	}{{"dense", dense}, {"clustered", clustered}, {"scattered", scattered}} {
+		b.Run(tc.name, func(b *testing.B) {
+			dst := batch.NewRecordBatch(schema, 0)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				dst.Len = 0
+				dst.Columns[0].BytesData.Data = dst.Columns[0].BytesData.Data[:0]
+				growBatchTo(dst, len(tc.rows))
+				appendBatchRowsBulk(dst, src, tc.rows)
+			}
+			b.SetBytes(int64(len(tc.rows)) * 36)
+		})
+	}
+}
