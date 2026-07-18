@@ -127,6 +127,28 @@ type Executor struct {
 	scanDecodeAheadPressureStalls atomic.Int64
 	scanDecodeAheadTokenStalls    atomic.Int64
 	scanDecodeAheadLedgerStalls   atomic.Int64
+	// scanDecodeAheadByQuery attributes the counters above per source
+	// identity — the task's QueryID, which on stage-input sources is
+	// stage-scoped (e.g. "st-join-10-<query>"), so SF100 logs separate a
+	// query's scan legs from its exchange-repartition legs (memo §9.3:
+	// Q05's collapse-vs-width tension is phase-local and invisible in
+	// worker-lifetime totals). Entries are emitted and deleted by
+	// sweepScanDecodeAheadQueryStats once idle, so the map stays bounded
+	// on long-running workers.
+	scanDecodeAheadByQuery sync.Map // task QueryID string -> *decodeAheadQueryStats
+}
+
+// decodeAheadQueryStats is one query's decode-ahead counter slice.
+// emitted holds the counter snapshot at the last sweep; a sweep that
+// finds the counters unchanged emits the final line and drops the entry.
+type decodeAheadQueryStats struct {
+	groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls atomic.Int64
+	emitted                                                        [5]int64
+}
+
+func (s *decodeAheadQueryStats) snapshot() [5]int64 {
+	return [5]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
+		s.tokenStalls.Load(), s.ledgerStalls.Load()}
 }
 
 // SetStreamingShuffleRead enables streaming decode of shuffle inputs
@@ -145,6 +167,50 @@ func (e *Executor) ShuffleStreamStats() (reads, fallbacks, skipResumes int64) {
 func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
 	e.scanDecodeAhead = on
 	e.scanDecodeAheadBytes = windowBytes
+}
+
+// foldScanDecodeAheadQueryStats adds one closed iterator's counters to
+// the per-query accumulator. queryID may be empty (embedded callers);
+// those fold under the "-" bucket rather than being dropped.
+func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls int64) {
+	if queryID == "" {
+		queryID = "-"
+	}
+	v, _ := e.scanDecodeAheadByQuery.LoadOrStore(queryID, &decodeAheadQueryStats{})
+	qs := v.(*decodeAheadQueryStats)
+	qs.groups.Add(groups)
+	qs.windowFulls.Add(windowFulls)
+	qs.pressureStalls.Add(pressureStalls)
+	qs.tokenStalls.Add(tokenStalls)
+	qs.ledgerStalls.Add(ledgerStalls)
+}
+
+// sweepScanDecodeAheadQueryStats emits per-query decode-ahead stats
+// lines. A query whose counters are unchanged since the previous sweep
+// is finished (sources fold on close): its line is emitted and the
+// entry dropped. Queries still accumulating are held for the next
+// sweep. final=true emits and drops everything — the worker is
+// stopping and there is no next sweep.
+func (e *Executor) sweepScanDecodeAheadQueryStats(final bool) {
+	logger := e.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	e.scanDecodeAheadByQuery.Range(func(k, v any) bool {
+		qs := v.(*decodeAheadQueryStats)
+		cur := qs.snapshot()
+		if !final && cur != qs.emitted {
+			qs.emitted = cur
+			return true // still moving — hold for the next sweep
+		}
+		e.scanDecodeAheadByQuery.Delete(k)
+		logger.Info("scan decode-ahead query stats",
+			"query", k,
+			"groups", cur[0], "window_fulls", cur[1],
+			"pressure_stalls", cur[2], "token_stalls", cur[3],
+			"ledger_stalls", cur[4])
+		return true
+	})
 }
 
 // ScanDecodeAheadStats returns the decode-ahead counters: row groups
