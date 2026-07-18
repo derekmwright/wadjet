@@ -480,26 +480,55 @@ func appendBatchRowsBulk(dst *batch.RecordBatch, b *batch.RecordBatch, srcRows [
 			bytesAdded += nRows * 8
 
 		case parquet.TypeString, parquet.TypeBytes, parquet.TypeIPv6, parquet.TypeCIDR, parquet.TypeUUID:
-			// Bytes path uses SetFrom for non-null (avoids the intermediate
-			// slice header) and Set(di, nil) for null (advances the offset
-			// without writing data). Offsets pre-grown by growBatchTo.
+			// Bytes path: copy CONTIGUOUS RUNS of source rows with one
+			// append each instead of per-row SetFrom (the 2026-07-17 SF100
+			// treatment profile ranked this copy class the top addressable
+			// engine work). The dense no-Sel path (unpartitionedStageSink
+			// rows[i]=i) collapses to a single run per column; clustered
+			// keys (lineitem l_orderkey: ~4 consecutive rows per order land
+			// in one partition) coalesce ~4×; true singletons pay only one
+			// extra compare per row — measured at parity. Runs break at
+			// source nulls: a null position's Offsets[i+1] may be a
+			// malformed descending pair (see BytesColumn.Value), so null
+			// rows advance the offset individually, exactly as before.
 			srcOffsets := srcCol.BytesData.Offsets
-			if !hasNulls {
-				for i, row := range rows {
-					dstCol.BytesData.SetFrom(start+i, &srcCol.BytesData, row)
-					bytesAdded += int(srcOffsets[row+1]-srcOffsets[row]) + 4
-				}
-			} else {
-				for i, row := range rows {
+			srcData := srcCol.BytesData.Data
+			dstB := &dstCol.BytesData
+			for i := 0; i < nRows; {
+				row := rows[i]
+				if hasNulls && srcCol.Nulls.IsNullFast(row) {
 					di := start + i
-					if srcCol.Nulls.IsNullFast(row) {
-						dstCol.Nulls.SetNull(di)
-						dstCol.BytesData.Set(di, nil)
-					} else {
-						dstCol.BytesData.SetFrom(di, &srcCol.BytesData, row)
-						bytesAdded += int(srcOffsets[row+1]-srcOffsets[row]) + 4
-					}
+					dstCol.Nulls.SetNull(di)
+					dstB.Offsets[di+1] = uint32(len(dstB.Data))
+					i++
+					continue
 				}
+				runLen := 1
+				for i+runLen < nRows && rows[i+runLen] == row+runLen &&
+					!(hasNulls && srcCol.Nulls.IsNullFast(row+runLen)) {
+					runLen++
+				}
+				if runLen == 1 {
+					// Singleton fast path: hash-scattered layouts (unique
+					// keys, post-shuffle stages) hit this every row; the
+					// run machinery's fixed cost measured +33% there.
+					s, e := srcOffsets[row], srcOffsets[row+1]
+					dstB.Data = append(dstB.Data, srcData[s:e]...)
+					dstB.Offsets[start+i+1] = uint32(len(dstB.Data))
+					bytesAdded += int(e-s) + 4
+					i++
+					continue
+				}
+				runStart, runEnd := srcOffsets[row], srcOffsets[row+runLen]
+				dstBase := uint32(len(dstB.Data))
+				if runEnd > runStart {
+					dstB.Data = append(dstB.Data, srcData[runStart:runEnd]...)
+				}
+				for k := 0; k < runLen; k++ {
+					dstB.Offsets[start+i+k+1] = dstBase + (srcOffsets[row+k+1] - runStart)
+				}
+				bytesAdded += int(runEnd-runStart) + 4*runLen
+				i += runLen
 			}
 
 		case parquet.TypeDecimal:
