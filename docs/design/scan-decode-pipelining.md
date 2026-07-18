@@ -354,3 +354,46 @@ counter source absent or silent → sensor inactive → current behavior.
 `cmd/refault-probe` prints raw counter + sensor state side by side and
 generates workingset-shaped thrash for field diagnosis; the sensor
 logs its bound source at init.
+
+### 9.3 SF100 pair results (2026-07-17, bin 3d5be22): steady-state −7.3 %
+
+Same-window pair, fresh cluster per arm, benchmark_runs=2, block+mutex
+profiling, 0/44 row mismatches. Control results/20260717-221138,
+treatment results/20260717-232056.
+
+| | cold-with-cache | steady-state |
+|---|---|---|
+| control (flag off) | 26.2 m | 28.1 m |
+| treatment (ledger+sensor) | 26.7 m (+2.0 %) | **26.0 m (−7.3 %)** |
+
+Best decode-ahead suite result of the arc (pre-fix pair: −3.6 %).
+Steady-state per-query: Q08 −54 %, Q06 −43 %, Q01 −36 %, Q02 −19 %,
+Q21 −15 %, Q20 −13 %, Q19 −13 %, **Q07 −9.7 % (residual FIXED**, was
++8.5 %); regressions: **Q05 +19.2 %** (117.0→139.5 s; the one
+survivor — note today's control Q05 ran unusually fast, vs the
+2026-07-16 control it is +8.9 %), Q14 +12.6 %, Q09 +7.6 %.
+
+Sensor field data (first empirical confirmation of the §9 displacement
+theory at SF100): all three workers bound the per-scope cgroup-v2
+memory.stat (workers run under systemd-run MemoryMax scopes) and
+sustained **22k–50k refaulted pages/s** in steady-state — the partial
+page-cache residency is real and continuous. Markers per worker:
+~39–40k groups, refault_activations 35–45, pressure_stalls ~170k
+(sensor actively collapsing width), window_fulls 6–7.6k,
+token_stalls 18–28k, **ledger_stalls = 0** — at SF100 the 5.4 GiB pool
+never binds either; the fixed ceiling plus the sensor do all the
+bounding. The ledger charge remains correct co-tenancy accounting (and
+is what spill decisions see), but denial-based collapse is a no-op at
+both tested scales.
+
+Q05 residual reading: the sensor collapse did not fix Q05's
+scan/repartition phase and may partially throttle it (the §9.2 honest
+bound — background refaults + productive width co-occur there), while
+the suite-wide effect of yielding width under refault pressure is
+strongly positive (−7.3 %). Q05 is now the isolated remainder:
+phase-local, instrumented (per-query refault/stall attribution is the
+next lever if it is pursued), and no longer masks the aggregate win.
+
+Rollout: flag default remains the PM call — the aggregate case for
+default-ON is now strong (steady −7.3 %, 0 mismatches across four
+SF100 suites, kill switch retained); the counter-case is Q05 +19 %.
