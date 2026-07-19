@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -463,6 +465,17 @@ var pageCachePressureActive = memory.PageCachePressureActive
 func scanDecodeAheadPressure() bool {
 	return heapPressureActive() || pageCachePressureActive()
 }
+
+// scanDecodeAheadStrictPressure reports whether pressure collapse should
+// be cursor-only (no group ahead) rather than occupancy-floored 2-deep
+// (memo §9.5): edge-class envelopes, mirroring the < 2 GiB GOMEMLIMIT
+// classification the GC mode uses — the capped repro measured even one
+// extra in-flight group as harmful there. Cached once: GOMEMLIMIT is
+// set at process start.
+var scanDecodeAheadStrictPressure = sync.OnceValue(func() bool {
+	lim := debug.SetMemoryLimit(-1)
+	return lim > 0 && lim != math.MaxInt64 && lim < 2<<30
+})
 
 // morselMinFragmentBytes is the auto-mode size gate: fragments whose
 // EstimatedBytes fall below it stay serial. Parallelism pays only above a

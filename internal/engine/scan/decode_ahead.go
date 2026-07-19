@@ -46,9 +46,10 @@ type DecodeAheadIter struct {
 	// for window estimation, resolved once at Open.
 	estLeaves []int
 
-	workers  int
-	pressure func() bool
-	tokens   TokenPool
+	workers        int
+	pressure       func() bool
+	pressureStrict bool
+	tokens         TokenPool
 
 	dynamicRanges []exec.DynamicRange
 	bloomFilters  []*exec.BloomScanFilter
@@ -83,9 +84,10 @@ type DecodeAheadIter struct {
 // decodeSlot is one row group's outcome, parked until the delivery
 // cursor reaches its index.
 type decodeSlot struct {
-	batch  *batch.RecordBatch // nil when pruned or empty
-	err    error
-	est    int64 // window bytes reserved for this group
+	batch *batch.RecordBatch // nil when pruned or empty
+	err   error
+	est   int64 // window bytes reserved for this group
+	ahead bool  // admitted as non-cursor: delivery/drop decrements win.ahead
 }
 
 // DecodeAheadOpts sizes a DecodeAheadIter.
@@ -101,11 +103,27 @@ type DecodeAheadOpts struct {
 	// and the head of file F+1 draw from one budget.
 	Window *DecodeWindow
 	// Pressure, when set, is consulted before admitting any group beyond
-	// the delivery cursor. While it reports true the iterator degrades to
-	// effectively serial (one group in flight) and the window drains as
-	// the consumer takes — the memory-pressure collapse hook. Must be
+	// the delivery cursor — the memory-pressure collapse hook. Must be
 	// safe to call from multiple goroutines.
+	//
+	// While it reports true, admission is OCCUPANCY-FLOORED by default:
+	// one non-cursor group may be in flight or parked (a 2-deep
+	// pipeline), further admission waits. The 2026-07-18 SF100 sensor
+	// A/B (memo §9.5) split the pressure regime in two: when decode
+	// outruns the consumer the window fills and its held bytes displace
+	// page cache (collapse is right — Q06 +46 % without it), but on
+	// producer-bound repartition stages the window sits EMPTY and
+	// cursor-only collapse is pure serialization with nothing to shed
+	// (Q05 −12.7 % when spared). One group ahead holds ~one group-est of
+	// bytes — nothing to displace with — while keeping the producer
+	// pipelined.
 	Pressure func() bool
+	// PressureStrict restores cursor-only collapse under Pressure (no
+	// group ahead at all). Set on edge-class envelopes (< 2 GiB
+	// GOMEMLIMIT), where the capped repro measured even one extra
+	// in-flight group as harmful (32 MiB window arm +37 % vs cursor-only
+	// winning outright).
+	PressureStrict bool
 	// Tokens, when set, budgets decode CPU per ROW GROUP: a worker
 	// acquires one token at admission and releases it when the decoded
 	// group parks, so a worker stalled on the window (or between groups)
@@ -159,6 +177,10 @@ type DecodeWindow struct {
 	// with inflight, so the ledger balance returns to zero when every
 	// owning iterator has closed.
 	ledger WindowLedger
+	// ahead counts non-cursor groups admitted but not yet delivered (or
+	// dropped), across every iterator sharing this window — the
+	// occupancy floor the pressure hook gates on. Guarded by mu.
+	ahead int
 }
 
 // NewDecodeWindow returns a window bounding decoded-but-undelivered
@@ -183,12 +205,17 @@ func NewDecodeWindowWithLedger(bytes int64, ledger WindowLedger) *DecodeWindow {
 	return w
 }
 
-// credit returns a group's byte reservation — window and ledger — when
-// its slot is delivered or dropped. Caller holds w.mu.
-func (w *DecodeWindow) credit(est int64) {
-	w.inflight -= est
+// credit returns a slot's reservations — window bytes, ledger bytes,
+// and its occupancy-floor count — when it is delivered or dropped.
+// Caller holds w.mu.
+func (w *DecodeWindow) credit(slot *decodeSlot) {
+	w.inflight -= slot.est
+	if slot.ahead {
+		slot.ahead = false
+		w.ahead--
+	}
 	if w.ledger != nil {
-		w.ledger.Release(est)
+		w.ledger.Release(slot.est)
 	}
 }
 
@@ -231,10 +258,11 @@ func OpenDecodeAheadIter(reader *pqt.Reader, schema []pqt.Column, selectedCols [
 	}
 
 	it := &DecodeAheadIter{
-		workers:  opts.Workers,
-		win:      opts.Window,
-		pressure: opts.Pressure,
-		tokens:   opts.Tokens,
+		workers:        opts.Workers,
+		win:            opts.Window,
+		pressure:       opts.Pressure,
+		pressureStrict: opts.PressureStrict,
+		tokens:         opts.Tokens,
 	}
 	if it.win == nil {
 		it.win = NewDecodeWindow(opts.WindowBytes)
@@ -362,7 +390,7 @@ func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
 		if slot, ok := it.slots[it.deliver]; ok {
 			delete(it.slots, it.deliver)
 			it.deliver++
-			it.win.credit(slot.est)
+			it.win.credit(slot)
 			it.win.cond.Broadcast()
 			if slot.err != nil {
 				// Mirror serial semantics: the error surfaces exactly at
@@ -410,13 +438,18 @@ func (it *DecodeAheadIter) decodeLoop() {
 		// which is also why a ledger denial needs no external wakeup:
 		// deliveries keep crediting the ledger and re-running this check.
 		var holdsToken bool
-		if idx != it.deliver {
+		isAhead := idx != it.deliver
+		if isAhead {
 			if it.win.inflight+est > it.win.limit {
 				it.windowFullStalls.Add(1)
 				it.win.cond.Wait()
 				continue
 			}
-			if it.pressure != nil && it.pressure() {
+			// Occupancy-floored pressure collapse (memo §9.5): under
+			// pressure, one non-cursor group may be in flight or parked
+			// across the shared window; strict mode (edge envelopes)
+			// admits none.
+			if it.pressure != nil && (it.pressureStrict || it.win.ahead > 0) && it.pressure() {
 				it.pressureStalls.Add(1)
 				it.win.cond.Wait()
 				continue
@@ -444,10 +477,13 @@ func (it *DecodeAheadIter) decodeLoop() {
 		}
 		it.nextIdx++
 		it.win.inflight += est
+		if isAhead {
+			it.win.ahead++
+		}
 		ranges, blooms := it.dynamicRanges, it.bloomFilters
 		it.win.mu.Unlock()
 
-		slot := &decodeSlot{est: est}
+		slot := &decodeSlot{est: est, ahead: isAhead}
 		if pruned := it.pruneGroup(idx, ranges, blooms); !pruned {
 			b, err := ReadRowGroupNative(it.fr, idx, it.readSchema, nil)
 			if err != nil {
@@ -530,7 +566,7 @@ func (it *DecodeAheadIter) Close() error {
 	// Release this iterator's undelivered reservations so a chained
 	// iterator sharing the window doesn't inherit dead inflight bytes.
 	for idx, slot := range it.slots {
-		it.win.credit(slot.est)
+		it.win.credit(slot)
 		delete(it.slots, idx)
 	}
 	it.win.cond.Broadcast()
@@ -543,7 +579,7 @@ func (it *DecodeAheadIter) Close() error {
 	// those reservations too. No new slots can appear once closed.
 	it.win.mu.Lock()
 	for idx, slot := range it.slots {
-		it.win.credit(slot.est)
+		it.win.credit(slot)
 		delete(it.slots, idx)
 	}
 	it.win.cond.Broadcast()

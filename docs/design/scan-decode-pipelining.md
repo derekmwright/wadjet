@@ -441,3 +441,43 @@ non-trivial) was considered and rejected: the per-group estimate
 +37 %) shows even one extra group hurts the edge regime — the two
 regimes genuinely want different answers, and the discriminator is the
 envelope, not the occupancy.
+
+### 9.5 Sensor A/B (2026-07-18) and the occupancy-floored collapse
+
+Same-evening SF100 pair, bin 82d1ce3: sensor-on (the §9.4 attribution
+run, results/20260718-222535) vs sensor-off
+(`WADJET_REFAULT_PRESSURE_RATE=0`, results/20260719-004315). 0/44 row
+mismatches. **Sensor-off is a net loss: steady 26.6 m vs 25.7 m
+(+3.7 %).** The repartition-bound queries recover exactly as §9.4
+predicted (Q05 −12.7 %, Q12 −33 %, Q09 −13 %) but the scan band pays
+more than they gain (Q06 +46 %, Q14 +18 %, Q15 +15 %, Q17 +14 %,
+Q03/Q01 +12 %), and the counters show why: without the sensor,
+`window_fulls` jumps ~7 k → ~43 k — the 256 MiB window SATURATES and
+its held bytes displace page cache. The §9 displacement mechanism is
+live at SF100; the sensor was correctly suppressing it.
+
+Both regimes therefore coexist at SF100 query-by-query, and the
+discriminator is WINDOW OCCUPANCY:
+
+- decode outruns the consumer → window fills → held bytes displace
+  cache → collapse is right (Q06's win needs the sensor);
+- producer-bound repartition stages → window sits empty → cursor-only
+  collapse is pure serialization with nothing to shed (Q05's loss).
+
+**Fix (this section's implementation): occupancy-floored pressure
+collapse.** Under pressure, non-cursor admission is denied only while
+another non-cursor group is in flight or parked (shared-window `ahead`
+count) — a 2-deep pipeline holding at most ~one group-estimate of
+bytes, which is nothing to displace with, while keeping producer-bound
+stages pipelined. No new constants on big envelopes.
+`PressureStrict` restores cursor-only collapse and is set on
+edge-class envelopes (GOMEMLIMIT < 2 GiB, the GC-mode classification):
+the capped repro measured even one extra in-flight group as harmful
+there (32 MiB arm +37 % while cursor-only beat flag-off).
+
+Expected from the A/B arithmetic: keep the sensor-on scan band, recover
+most of the repartition-stage losses (Q05/Q09/Q12/Q02/Q07 ≈ 45 s of
+run-2 wall) → target ≈ 25.0 m steady. The validating pair watches:
+Q05 + Q06 TOGETHER (the two regimes must both hold), pressure_stalls
+(should drop on repartition stages, persist on scan band),
+`ahead`-floor correctness via row parity.

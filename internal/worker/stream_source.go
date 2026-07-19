@@ -935,7 +935,8 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 		// thrash (memo §9: refault-rate sensor — the displacement channel
 		// the heap hook cannot see; the capped repro measured decode-ahead
 		// width as worthless-to-harmful precisely when refaults run hot).
-		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: scanDecodeAheadPressure}
+		opts := scan.DecodeAheadOpts{Window: s.decodeWin, Pressure: scanDecodeAheadPressure,
+			PressureStrict: scanDecodeAheadStrictPressure()}
 		if s.executor.cpuTokens != nil {
 			opts.Tokens = s.executor.cpuTokens
 		}

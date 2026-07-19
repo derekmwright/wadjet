@@ -642,3 +642,97 @@ func TestDecodeAheadIter_LedgerBalancedOnAllPaths(t *testing.T) {
 		t.Errorf("ledger balance after mid-stream close = %d, want 0", balance)
 	}
 }
+
+// TestDecodeAheadIter_PressureOccupancyFloor: memo §9.5 — under
+// permanent pressure the default (non-strict) mode still pipelines
+// 2-deep (cursor + one ahead): output identical to serial, the ahead
+// count peaks at exactly 1, stalls fire once the floor is held, and
+// the count returns to zero on drain and on mid-stream Close. Strict
+// mode admits nothing ahead (peak 0), preserving the edge behavior.
+func TestDecodeAheadIter_PressureOccupancyFloor(t *testing.T) {
+	data := manyRowGroupFile(t, 12, 50)
+	schema := []pqt.Column{{Name: "id", Type: pqt.TypeInt64}}
+
+	serial, err := OpenRowGroupIter(openFileReader(t, data), schema, nil, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serial.Close()
+	want, _ := drainGroupIter(t, serial)
+
+	run := func(strict bool) (got []*batch.RecordBatch, stalls int64, aheadPeak int, it *DecodeAheadIter) {
+		t.Helper()
+		it, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+			DecodeAheadOpts{Workers: 4, PressureStrict: strict, Pressure: func() bool { return true }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Sample the shared ahead count between deliveries; the mutex
+		// serializes reads with admission so peaks cannot be missed
+		// entirely (a worker may admit between samples, but the floor
+		// guarantee is that ahead never EXCEEDS the bound — asserting
+		// the sampled max <= bound is what matters).
+		for {
+			b, err := it.Next()
+			if err != nil {
+				t.Fatal(err)
+			}
+			it.win.mu.Lock()
+			if it.win.ahead > aheadPeak {
+				aheadPeak = it.win.ahead
+			}
+			it.win.mu.Unlock()
+			if b == nil {
+				break
+			}
+			got = append(got, b)
+		}
+		_, _, stalls, _, _ = it.Stats()
+		return got, stalls, aheadPeak, it
+	}
+
+	// Default (floored): 2-deep, correct, stalled, drained ahead == 0.
+	got, stalls, peak, it := run(false)
+	requireSameBatches(t, want, got)
+	if peak > 1 {
+		t.Errorf("floored mode ahead peak = %d, want <= 1", peak)
+	}
+	if stalls == 0 {
+		t.Error("floored mode never stalled — floor not gating past 1 ahead")
+	}
+	it.win.mu.Lock()
+	if it.win.ahead != 0 {
+		t.Errorf("ahead after drain = %d, want 0", it.win.ahead)
+	}
+	it.win.mu.Unlock()
+	it.Close()
+
+	// Strict: nothing ahead, ever.
+	got2, stalls2, peak2, it2 := run(true)
+	requireSameBatches(t, want, got2)
+	if peak2 != 0 {
+		t.Errorf("strict mode ahead peak = %d, want 0", peak2)
+	}
+	if stalls2 == 0 {
+		t.Error("strict mode never stalled")
+	}
+	it2.Close()
+
+	// Mid-stream Close drops parked ahead slots and zeroes the count.
+	it3, err := OpenDecodeAheadIter(openFileReader(t, data), schema, nil, 0, 1,
+		DecodeAheadOpts{Workers: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := it3.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if err := it3.Close(); err != nil {
+		t.Fatal(err)
+	}
+	it3.win.mu.Lock()
+	if it3.win.ahead != 0 {
+		t.Errorf("ahead after mid-stream close = %d, want 0", it3.win.ahead)
+	}
+	it3.win.mu.Unlock()
+}
