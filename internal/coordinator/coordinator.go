@@ -93,6 +93,14 @@ type Config struct {
 	// the ratio gate); this struct field's zero value stays false so
 	// embedded/test constructors opt in explicitly.
 	SkewSplit bool
+	// AggPartialSplit enables the round-robin partial-aggregate fan-out
+	// (aggregatePartialSplit in execute_stage_dag.go): partial "aggregate"
+	// stages over a non-trivial multi-file upstream split into at most
+	// workerCount tasks aggregating disjoint file slices. The wadjet CLI
+	// and tpch-bench default this ON; --agg-partial-split=false is the
+	// kill switch. Zero value stays false so embedded/test constructors
+	// opt in explicitly (mirrors SkewSplit).
+	AggPartialSplit bool
 	// EagerDispatch enables eager consumer dispatch (docs/design/
 	// eager-consumer-dispatch.md): the coordinator republishes per-
 	// producer-task file manifests on EagerManifestSubject as shuffle

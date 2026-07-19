@@ -101,6 +101,7 @@ var (
 	sortMergeJoinBytes    int64
 	lateMaterialization   bool
 	skewSplit             bool
+	aggPartialSplit       bool
 	bushyJoinReorder      bool
 	broadcastBytes        int64
 	streamingExchange     bool
@@ -174,6 +175,7 @@ func main() {
 	rootCmd.PersistentFlags().Int64Var(&sortMergeJoinBytes, "sort-merge-join-bytes", 0, "Inner equi-joins whose sides BOTH exceed this estimated size run as sort-merge joins (both sides sort to spill-friendly runs and stream a merge) instead of hash joins, bounding join memory at merge-cursor state instead of a resident build table. Applies to both the local single-process paths and the distributed stage DAG (the join stage swaps operator; its exchange children are identical). 0 = disabled (default). See docs/design/sort-merge-join.md.")
 	rootCmd.PersistentFlags().BoolVar(&lateMaterialization, "late-materialization", true, "Emit inner/left hash-join output as view (dictionary) columns over the probe input and build batches, deferring the column gather to the first consumer that needs owned storage — join chains compose the indirection so a column is copied once, at its final consumer or the shuffle encode. Default true (validated 2026-07-09: SF10 −6.2%, SF100 −4.9% suite wall, Q08 −36%/−44%, row-identical both scales); --late-materialization=false restores eager join-output gather. See docs/design/late-materialization.md.")
 	rootCmd.PersistentFlags().BoolVar(&skewSplit, "skew-split", true, "Adaptive skew-aware shuffle layout: when a shuffled hash join's per-partition input bytes (reported by the shuffle stages) show a hot partition group (over the absolute floor AND >=2x the mean group), split it into k sub-tasks that divide the group's probe files and replicate its build files, bounding the straggler task's input and memory footprint. Default true (validated 2026-07-11: SF10 hot-key fixture -41% straggler wall, row-identical; plan-identical on uniform workloads via the ratio gate); --skew-split=false is the kill switch. See docs/design/skew-aware-shuffle.md.")
+	rootCmd.PersistentFlags().BoolVar(&aggPartialSplit, "agg-partial-split", true, "Fan out partial (pre-merge) aggregate stages over a non-trivial multi-file upstream into at most workerCount tasks aggregating disjoint file slices, instead of one task reading the entire upstream. Gated on the upstream's worker-reported output size so trivial aggregates stay single-task (per-task scheduling overhead otherwise dominates). --agg-partial-split=false is the kill switch.")
 	rootCmd.PersistentFlags().BoolVar(&bushyJoinReorder, "bushy-join-reorder", false, "Let the cost-based join reorder emit BUSHY plans (joins of two composite intermediates — e.g. pre-joining a snowflake dimension chain before it meets the fact stream) when strictly cheaper than every left-deep order. Cost ties keep the left-deep shape. Process-wide, default false. See docs/design/bushy-join-cbo.md.")
 	rootCmd.PersistentFlags().Int64Var(&localFastPathBytes, "local-fastpath-bytes", coordinator.DefaultLocalFastPathBytes, "Queries whose post-pruning catalog scan bytes stay under this threshold execute in-process on the coordinator (skipping the distributed stage DAG and its per-stage object-store round trips). 0 = disabled.")
 	rootCmd.PersistentFlags().BoolVar(&streamingExchange, "streaming-exchange", true, "Streaming exchange: consumers fetch stage outputs from the producing workers' local disk over gRPC with async S3 upload; every failure falls through to the durable S3 path. Default true (validated 2026-07-02: SF10 −10%, SF100 −23% suite wall, row-identical, zero fault-tolerance events); --streaming-exchange=false restores synchronous S3-only shuffle. See docs/design/streaming-exchange.md.")
@@ -955,6 +957,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		SortMergeJoinBytes:     sortMergeJoinBytes,
 		LateMaterialization:    lateMaterialization,
 		SkewSplit:              skewSplit,
+		AggPartialSplit:        aggPartialSplit,
 		StreamingExchange:      streamingExchange,
 		EagerDispatch:          eagerDispatch,
 	}, cat, nc, js, logger)
@@ -1257,6 +1260,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		SortMergeJoinBytes:     sortMergeJoinBytes,
 		LateMaterialization:    lateMaterialization,
 		SkewSplit:              skewSplit,
+		AggPartialSplit:        aggPartialSplit,
 		StreamingExchange:      streamingExchange,
 		EagerDispatch:          eagerDispatch,
 	}, cat, nc, js, logger)

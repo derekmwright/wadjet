@@ -3,6 +3,8 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2040,9 +2042,11 @@ func (c *Coordinator) dispatchComputeStage(
 	// Mutually exclusive with probe-split and skew-split by stage type.
 	var rrAggGroups [][]string
 	rrAggDep := ""
-	if dep, groups, ok := aggregatePartialSplit(stage, inputs, workerCount, numTasks); ok {
-		rrAggDep, rrAggGroups = dep, groups
-		numTasks = len(groups)
+	if c.config.AggPartialSplit {
+		if dep, groups, ok := aggregatePartialSplit(stage, inputs, workerCount, numTasks); ok {
+			rrAggDep, rrAggGroups = dep, groups
+			numTasks = len(groups)
+		}
 	}
 	// Adaptive skew split (--skew-split, docs/design/skew-aware-shuffle.md):
 	// a shuffled hash join whose deps report per-partition bytes may split
@@ -3495,9 +3499,24 @@ func broadcastJoinProbeSplit(
 // from EnsureDistribution, or dispatchFinalAggregateFanout for Singleton
 // finals) merge the partials.
 //
-// Slicing: one task per non-empty partition group for OutputPartitioned
-// upstreams (matches the per-partition granularity join stages already
-// dispatch at), an even file split capped at workerCount otherwise.
+// Slicing: an even split of the flattened upstream file list across at
+// most workerCount tasks — the same shape as probe-split. The first cut
+// of this fan-out used one task PER upstream partition (24-way at SF100)
+// with no size gate; the 2026-07-19 SF100 validation run showed why the
+// probe-split precedent caps at workerCount: small aggregates became
+// swarms of ~2ms tasks whose per-task dispatch/result overhead (~0.5-1s)
+// dwarfed the work, serialized through max_concurrent worker slots, and
+// queued the NEXT query's scan tasks behind the swarm (+18% suite task
+// count, steady pass +28% — slower than its own cold pass). Chunky
+// tasks or no split.
+//
+// aggSplitMinBytes is the same "fanout only wins when each task performs
+// non-trivial work" reasoning as finalAggregateFanoutCandidate's
+// K > workerCount gate: below it, the single-task partial is already
+// cheap and the split is pure scheduling overhead. Bytes are the
+// worker-reported on-disk size of the upstream output; 0 (unknown,
+// legacy worker) declines the split — degrade to the pre-split shape,
+// never to a regression.
 //
 // Guards: SortKeys/Limit/FilterExprs never appear on a partial today
 // (fuseSortIntoPredecessor folds into finals only; HAVING lands on the
@@ -3506,6 +3525,19 @@ func broadcastJoinProbeSplit(
 // merge has seen all partials. Eager provisional inputs are excluded the
 // same way probe-split/skew slicing is: their manifest-fed partition-range
 // convention does not match custom file groups.
+//
+// WADJET_AGG_SPLIT_MIN_BYTES overrides the floor (small-scale harness runs
+// force the split path everywhere with =1 so the correctness gate actually
+// exercises it; SF1 upstreams are all under the production floor).
+var aggSplitMinBytes = func() int64 {
+	if v := os.Getenv("WADJET_AGG_SPLIT_MIN_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 64 << 20
+}()
+
 func aggregatePartialSplit(
 	stage physical.Stage,
 	inputs map[string]StageOutput,
@@ -3531,20 +3563,18 @@ func aggregatePartialSplit(
 	if !present || in.eager != nil {
 		return "", nil, false
 	}
-	if in.Kind == OutputPartitioned {
-		for _, part := range in.Files {
-			if len(part) > 0 {
-				groups = append(groups, part)
-			}
-		}
-	} else if len(in.Files) > 0 && len(in.Files[0]) >= 2 {
-		files := in.Files[0]
-		n := workerCount
-		if n > len(files) {
-			n = len(files)
-		}
-		groups = splitFilesEvenly(files, n)
+	if in.Bytes < aggSplitMinBytes {
+		return "", nil, false
 	}
+	files := flattenStageFiles(in)
+	if len(files) < 2 {
+		return "", nil, false
+	}
+	n := workerCount
+	if n > len(files) {
+		n = len(files)
+	}
+	groups = splitFilesEvenly(files, n)
 	if len(groups) < 2 {
 		return "", nil, false
 	}
