@@ -409,6 +409,9 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		// as the kill switch. Coordinator-side decision only — workers
 		// always report the per-partition accounting it consumes.
 		SkewSplit: os.Getenv("WADJET_SKEW_SPLIT") != "0" && !strings.EqualFold(os.Getenv("WADJET_SKEW_SPLIT"), "false"),
+		// Partial-aggregate fan-out (aggregatePartialSplit): default ON,
+		// matching the wadjet CLI default; set 0/false as the kill switch.
+		AggPartialSplit: os.Getenv("WADJET_AGG_PARTIAL_SPLIT") != "0" && !strings.EqualFold(os.Getenv("WADJET_AGG_PARTIAL_SPLIT"), "false"),
 		// Broadcast threshold override: <0 = never broadcast. 0/unset =
 		// cluster-derived default.
 		BroadcastBytesOverride: envInt64("WADJET_BROADCAST_BYTES"),
