@@ -481,3 +481,18 @@ run-2 wall) → target ≈ 25.0 m steady. The validating pair watches:
 Q05 + Q06 TOGETHER (the two regimes must both hold), pressure_stalls
 (should drop on repartition stages, persist on scan band),
 `ahead`-floor correctness via row parity.
+
+**§9.5 validation (2026-07-19, bin 5d21461, results/20260719-105312
+vs the sensor-on run)**: 0/44 row mismatches. **Q05 −23.7 %
+(161.1 → 122.9 s)** — below every prior treatment sample and inside
+Q05's own control variance band (117–128 s across days); the
+repartition class followed (Q02 −20 %, Q15 −21 %, Q19 −11 %,
+Q09 −9 %). The give-back: several scan-band queries moved +9–16 %
+(Q10/Q22/Q06/Q12/Q14/Q16) — one group-estimate per source held under
+pressure is not free — leaving steady-state FLAT (25.7 m vs 25.7 m)
+and cold-with-cache −6.1 % (25.7 m vs 27.4 m, cross-morning,
+directional). The ≈25.0 m target arithmetic did not materialize; the
+floor's value is closing the one deterministic outlier at zero net
+suite cost with the edge regime intact (strict mode). Q05's residual
+vs flag-off control is now ≈+5 %, within its own run-to-run variance —
+the §9 arc is closed. Steady-state SF100 reference remains 25.7 m.
