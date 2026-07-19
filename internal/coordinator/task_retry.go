@@ -136,6 +136,17 @@ func (tr *taskRetrier) Observe(r distributed.ResultNotification) (allDone bool) 
 		attempt := st.attempts
 		onSuccess := tr.onSuccess
 		tr.mu.Unlock()
+		// Per-task arrival line: the only coordinator-side record of WHEN
+		// each task inside a stage finished. Within-stage completion spread
+		// read off these timestamps is what bounds task-granular
+		// consumer-start overlap (arrival-waits evidence pass 2026-07-19 —
+		// stage-level logs alone can't measure the spread).
+		if tr.logger != nil {
+			tr.logger.Info("task result",
+				"stage_id", tr.stageID, "task_id", r.TaskID,
+				"worker_id", r.WorkerID, "attempt", attempt,
+				"rows", r.NumRows, "bytes", r.SizeBytes)
+		}
 		if onSuccess != nil {
 			onSuccess(r.TaskID, attempt, r.ResultFiles, r.WorkerID, done, r.PartitionBytes)
 		}
