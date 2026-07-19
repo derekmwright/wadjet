@@ -288,6 +288,12 @@ variable "streaming_shuffle_read" {
   default     = true
 }
 
+variable "refault_pressure_rate" {
+  description = "WADJET_REFAULT_PRESSURE_RATE for workers: page-cache pressure sensor activation threshold in refaulted pages/sec (docs/design/scan-decode-pipelining.md §9). Empty = binary default (1000); 0 = sensor OFF (the §9.4 sensor-off A/B arm)."
+  type        = string
+  default     = ""
+}
+
 variable "scan_decode_ahead" {
   description = "Scan decode pipelining (docs/design/scan-decode-pipelining.md): workers decode parquet row groups ahead of scan consumption — k decode workers with in-order delivery, pool-ledger-charged byte window, refault-sensor collapse, cross-file continuation. Worker-side flag only. Default true (SF100 pair 2026-07-17: steady-state -7.3%, 0/44 mismatches); set false as the kill switch."
   type        = bool

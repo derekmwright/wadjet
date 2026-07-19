@@ -653,6 +653,7 @@ resource "aws_instance" "worker" {
           --scope -p "MemoryMax=$PER_PROC_BYTES" -p "MemoryHigh=$PER_PROC_GOMEMLIMIT" \
           --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
           --setenv="WADJET_GOGC=100" \
+          --setenv="WADJET_REFAULT_PRESSURE_RATE=${var.refault_pressure_rate}" \
           /usr/local/bin/wadjet serve \
             --mode=worker \
             --nats-url="nats://$COORD_IP:4222" \
