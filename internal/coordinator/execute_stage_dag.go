@@ -2036,6 +2036,14 @@ func (c *Coordinator) dispatchComputeStage(
 		numTasks = n
 		probeSplit = true
 	}
+	// Round-robin partial-aggregate fan-out (see aggregatePartialSplit).
+	// Mutually exclusive with probe-split and skew-split by stage type.
+	var rrAggGroups [][]string
+	rrAggDep := ""
+	if dep, groups, ok := aggregatePartialSplit(stage, inputs, workerCount, numTasks); ok {
+		rrAggDep, rrAggGroups = dep, groups
+		numTasks = len(groups)
+	}
 	// Adaptive skew split (--skew-split, docs/design/skew-aware-shuffle.md):
 	// a shuffled hash join whose deps report per-partition bytes may split
 	// hot partition groups into k sub-tasks (probe files divided, build
@@ -2057,6 +2065,7 @@ func (c *Coordinator) dispatchComputeStage(
 		"deps", stage.Dependencies, "num_tasks", numTasks,
 		"distribution_kind", stage.Distribution.Kind,
 		"distribution_count", stage.Distribution.Count,
+		"rr_agg_split", rrAggGroups != nil,
 		"probe_split", probeSplit,
 		"skew_split", skewAssign != nil,
 		"inputs_aliases", len(inputs),
@@ -2103,6 +2112,11 @@ func (c *Coordinator) dispatchComputeStage(
 		var err error
 		if probeSplit {
 			taskInputs, err = buildTaskInputsForBroadcastJoinSplitProbe(stage, inputs, w, numTasks)
+		} else if rrAggGroups != nil {
+			// Partial-aggregate fan-out: task w aggregates its disjoint
+			// file group; alias follows buildTaskInputsForStage's
+			// single-input convention (dep ID).
+			taskInputs = map[string][]string{rrAggDep: rrAggGroups[w]}
 		} else if skewAssign != nil {
 			taskInputs = skewAssign[w].inputs
 		} else {
@@ -2554,13 +2568,14 @@ func (c *Coordinator) dispatchComputeStage(
 	case physical.DistBroadcast:
 		kind = OutputReplicated
 	}
-	if probeSplit {
-		// Probe-split fan-out keeps the planner's DistSingleton labelling but
-		// produces N physical files (one per probe-slice task). Collapse all
-		// per-task files into Files[0] so OutputSinglePart consumers (which
-		// read only Files[0]) see the full join result. Downstream parallelism
-		// is preserved by finalAggregateFanoutCandidate / flattenStageFiles
-		// callers that iterate every Files[i].
+	if probeSplit || rrAggGroups != nil {
+		// Probe-split and partial-aggregate fan-out keep the planner's
+		// labelling (DistSingleton / DistRoundRobin) but produce N physical
+		// files (one per task). Collapse all per-task files into Files[0]
+		// so OutputSinglePart consumers (which read only Files[0]) see the
+		// full result. Downstream parallelism is preserved by
+		// finalAggregateFanoutCandidate / flattenStageFiles callers that
+		// iterate every Files[i].
 		flat := make([]string, 0)
 		for _, f := range files {
 			flat = append(flat, f...)
@@ -3459,6 +3474,81 @@ func broadcastJoinProbeSplit(
 		n = len(probeFiles)
 	}
 	return n, true
+}
+
+// aggregatePartialSplit reports whether a partial "aggregate" stage
+// qualifies for round-robin fan-out, returning the dep ID and per-task
+// input file groups when it does.
+//
+// The planner labels grouped partial aggregates DistRoundRobin when
+// workerCount > 1 (OutputDistribution, StageAggregate case) so the
+// property algebra forces a hash-shuffle ahead of the grouped final. The
+// dispatcher's task-count switch, however, had no DistRoundRobin arm — the
+// correctness-first default ran the partial as ONE task reading the entire
+// upstream (e.g. a 24-partition join output) while the rest of the cluster
+// idled. The 2026-07-19 arrival-waits evidence pass measured this as the
+// exclusive serial leg on Q10 (12.9s partial + downstream effects) and
+// Q13/Q02/Q03 at SF100. Partial aggregation is valid over any disjoint
+// cover of its input, so the fix is the same shape as the scan-fused
+// fan-out (dispatchScanAggregateStage): aggregate disjoint slices in
+// parallel, let the existing downstream machinery (exchange-repartition
+// from EnsureDistribution, or dispatchFinalAggregateFanout for Singleton
+// finals) merge the partials.
+//
+// Slicing: one task per non-empty partition group for OutputPartitioned
+// upstreams (matches the per-partition granularity join stages already
+// dispatch at), an even file split capped at workerCount otherwise.
+//
+// Guards: SortKeys/Limit/FilterExprs never appear on a partial today
+// (fuseSortIntoPredecessor folds into finals only; HAVING lands on the
+// final) — the guard keeps the split sound if that ever changes, since a
+// sort, limit, or post-filter applied per-slice would be wrong before the
+// merge has seen all partials. Eager provisional inputs are excluded the
+// same way probe-split/skew slicing is: their manifest-fed partition-range
+// convention does not match custom file groups.
+func aggregatePartialSplit(
+	stage physical.Stage,
+	inputs map[string]StageOutput,
+	workerCount, currentNumTasks int,
+) (depID string, groups [][]string, ok bool) {
+	if stage.Type != physical.StageAggregate {
+		return "", nil, false
+	}
+	if stage.Distribution.Kind != physical.DistRoundRobin {
+		return "", nil, false
+	}
+	if currentNumTasks != 1 || workerCount <= 1 {
+		return "", nil, false
+	}
+	if len(stage.Dependencies) != 1 || len(stage.FusedJoins) != 0 {
+		return "", nil, false
+	}
+	if len(stage.SortKeys) != 0 || stage.Limit != 0 || len(stage.FilterExprs) != 0 {
+		return "", nil, false
+	}
+	depID = stage.Dependencies[0]
+	in, present := inputs[depID]
+	if !present || in.eager != nil {
+		return "", nil, false
+	}
+	if in.Kind == OutputPartitioned {
+		for _, part := range in.Files {
+			if len(part) > 0 {
+				groups = append(groups, part)
+			}
+		}
+	} else if len(in.Files) > 0 && len(in.Files[0]) >= 2 {
+		files := in.Files[0]
+		n := workerCount
+		if n > len(files) {
+			n = len(files)
+		}
+		groups = splitFilesEvenly(files, n)
+	}
+	if len(groups) < 2 {
+		return "", nil, false
+	}
+	return depID, groups, true
 }
 
 // buildTaskInputsForBroadcastJoinSplitProbe is the probe-split variant of
