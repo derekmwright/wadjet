@@ -402,3 +402,42 @@ next lever if it is pursued), and no longer masks the aggregate win.
 Rollout: flag default remains the PM call — the aggregate case for
 default-ON is now strong (steady −7.3 %, 0 mismatches across four
 SF100 suites, kill switch retained); the counter-case is Q05 +19 %.
+
+### 9.4 Q05 attribution run (2026-07-18, bin 82d1ce3): the sensor is
+### punishing an empty window
+
+Single-arm SF100 with the per-stage attribution markers (PR #235),
+results/20260718-222535, 44/44 OK, steady suite 25.7 m. Q05's
+pressure-stall mass sits in `sh-stage-exchange-repartition-2` — the
+lineitem repartition producer — ~12.5k stalls on 2,342 groups in both
+runs (secondary scan ~3k, joins zero), confirming the §9 phase
+localization. Two facts overturn the §9.1 collapse rationale for this
+regime:
+
+1. **`window_fulls = 0` alongside 12.7k pressure stalls** (run 2): the
+   sensor denied admission to an EMPTY window. Collapse relieved no
+   held bytes — it only serialized the producer feeding a
+   24-partition shuffle write. The §9 theory ("the window's held bytes
+   displace the cache") does not describe this stage: the shuffle
+   writer's own churn plus background refaults trip the sensor, and
+   decode width takes the punishment.
+2. **24 of 32 query roots show >5k pressure stalls on lineitem
+   scans**: at SF100 partial residency (26 GB working set vs ~16 GB
+   cache), re-reading a big table refaults regardless of decode width.
+   The workingset counter cannot distinguish "my window evicted pages
+   the scan needs" (the capped-edge regime, real and measured) from
+   "the dataset does not fit in cache" (the big-box steady state).
+   The sensor's SF100 firing regime is dominated by the latter.
+
+Proposed test (no code change): SF100 pair, sensor-on vs sensor-off
+via `WADJET_REFAULT_PRESSURE_RATE=0`. If sensor-off holds the suite
+win and recovers Q05, the fix is an envelope-scaled sensor default —
+sensitive below the edge-envelope threshold (GOMEMLIMIT < 2 GiB, where
+displacement is window-caused and cursor-only measured BEST), inactive
+or high-threshold above it — mirroring the existing envelope-aware GC
+mode. An occupancy-gated collapse (only deny when inflight is
+non-trivial) was considered and rejected: the per-group estimate
+(~10–30 MB) is the occupancy quantum, and the capped data (32 MiB arm
++37 %) shows even one extra group hurts the edge regime — the two
+regimes genuinely want different answers, and the discriminator is the
+envelope, not the occupancy.
