@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -193,8 +195,16 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 // backpressure to the scheduler. The full set is rejected if no worker
 // is connected — there is no NATS fallback in gRPC mode.
 func (s *Scheduler) publishViaDataPlane(batch []preparedTask, deadlineNano int64) error {
+	// batchAssigned counts this call's placements per worker. Bin-packed
+	// tasks spread across it first (same-stage anti-affinity): one
+	// PublishTasks call is one stage's fan-out, and stale heartbeats used
+	// to let "most free pool" put an entire fan-out on one worker
+	// (2026-07-20 Q20 diagnosis: 3×18M-row final-aggregate tasks on one
+	// worker, +24s serialization; clump lotteries visible in every run).
+	batchAssigned := make(map[string]int)
+	methods := make(map[string]int)
 	for _, p := range batch {
-		workerID, ok := s.pickWorkerFor(p.task)
+		workerID, method, ok := s.pickWorkerFor(p.task, batchAssigned)
 		if !ok {
 			return fmt.Errorf("dispatching task %s: %w", p.task.ID, dataplane.ErrNoWorkers)
 		}
@@ -207,6 +217,8 @@ func (s *Scheduler) publishViaDataPlane(batch []preparedTask, deadlineNano int64
 				if ok2 && workerID2 != workerID {
 					if err2 := s.dpSrv.SendTaskDispatch(workerID2, p.task.ID, p.task.QueryID, p.task.StageID, p.data, deadlineNano); err2 == nil {
 						s.noteInflight(p.task, workerID2)
+						batchAssigned[workerID2]++
+						methods[method]++
 						continue
 					}
 				}
@@ -214,9 +226,30 @@ func (s *Scheduler) publishViaDataPlane(batch []preparedTask, deadlineNano int64
 			return fmt.Errorf("dispatching task %s to %s: %w", p.task.ID, workerID, err)
 		}
 		s.noteInflight(p.task, workerID)
+		batchAssigned[workerID]++
+		methods[method]++
 	}
-	s.logger.Info("published tasks", "count", len(batch), "transport", "grpc")
+	s.logger.Info("published tasks", "count", len(batch), "transport", "grpc",
+		"spread", formatCounts(batchAssigned), "placement", formatCounts(methods))
 	return nil
+}
+
+// formatCounts renders a count map as "k1:v1,k2:v2" with sorted keys —
+// compact enough for one log attr, stable enough to grep.
+func formatCounts(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, "%s:%d", k, m[k])
+	}
+	return b.String()
 }
 
 // pickWorkerFor selects a worker for one task. Memory-aware bin-packing
@@ -226,22 +259,33 @@ func (s *Scheduler) publishViaDataPlane(batch []preparedTask, deadlineNano int64
 // would be static between heartbeats and pile every task of a fan-out
 // onto one worker.
 //
+// batchAssigned carries this publish call's placements so far: bin-packed
+// tasks are restricted to the workers with the fewest same-batch tasks
+// before "most free pool" ranks them. Without that restriction the same
+// staleness pathology hits estimated tasks — heartbeats lag 10s and the
+// per-task in-flight charge is small, so an entire fan-out lands on
+// whichever worker last reported the most free pool.
+//
 // Eager consumer tasks take their own placement path first: they can
 // block on producer manifests for the whole producer stage, so stacking
 // them on one worker starves that worker's producer lanes (targeted gRPC
 // dispatch has no work stealing).
-func (s *Scheduler) pickWorkerFor(t distributed.Task) (string, bool) {
+//
+// The returned method ("eager" | "binpack" | "rr") feeds the placement
+// attr on the "published tasks" line.
+func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]int) (workerID, method string, ok bool) {
 	if len(t.EagerInputs) > 0 {
 		if id, ok := s.pickEagerWorker(); ok {
-			return id, true
+			return id, "eager", true
 		}
 	}
 	if t.EstimatedBytes > 0 && s.registry != nil {
-		if id, ok := s.pickLeastLoaded(); ok {
-			return id, true
+		if id, ok := s.pickLeastLoadedSpread(batchAssigned); ok {
+			return id, "binpack", true
 		}
 	}
-	return s.dpSrv.PickWorker()
+	id, ok := s.dpSrv.PickWorker()
+	return id, "rr", ok
 }
 
 // pickEagerWorker places one eager consumer task: the connected worker
@@ -317,6 +361,37 @@ func (s *Scheduler) eagerInflightByWorker() map[string]int {
 // skipped; returns ok=false when none qualify so the caller round-robins.
 func (s *Scheduler) pickLeastLoaded() (string, bool) {
 	return pickLeastLoadedWorker(s.dpSrv.ConnectedWorkers(), s.registry.ActiveWorkers(), s.inflightByWorker())
+}
+
+// pickLeastLoadedSpread is pickLeastLoaded restricted to the workers with
+// the fewest tasks already placed by the current publish call — the
+// same-stage anti-affinity pass. Pool ranking then breaks ties among
+// them. Single-task publishes (retries, governed eager top-ups) see an
+// all-zero map and degrade to plain pickLeastLoaded.
+func (s *Scheduler) pickLeastLoadedSpread(batchAssigned map[string]int) (string, bool) {
+	connected := minBatchWorkers(s.dpSrv.ConnectedWorkers(), batchAssigned)
+	return pickLeastLoadedWorker(connected, s.registry.ActiveWorkers(), s.inflightByWorker())
+}
+
+// minBatchWorkers returns the subset of connected workers holding the
+// fewest same-batch placements. Order is preserved.
+func minBatchWorkers(connected []string, batchAssigned map[string]int) []string {
+	if len(connected) == 0 {
+		return connected
+	}
+	min := batchAssigned[connected[0]]
+	for _, id := range connected[1:] {
+		if n := batchAssigned[id]; n < min {
+			min = n
+		}
+	}
+	out := make([]string, 0, len(connected))
+	for _, id := range connected {
+		if batchAssigned[id] == min {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // pickLeastLoadedWorker is pickLeastLoaded's pure scoring core: max over

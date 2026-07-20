@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/engine/batch"
 	"github.com/citc-tech/wadjet/internal/engine/exec"
@@ -79,6 +80,23 @@ type DecodeAheadIter struct {
 	pressureStalls   atomic.Int64
 	tokenStalls      atomic.Int64
 	ledgerStalls     atomic.Int64
+
+	// Stall DURATIONS (ns), one per counter above. The 2026-07-20 Q08
+	// diagnosis showed counts alone cannot rank stall classes: slow and
+	// fast tasks logged near-identical counts while their wall time
+	// differed 3× — the time was in how long each wait lasted.
+	windowFullStallNs atomic.Int64
+	pressureStallNs   atomic.Int64
+	tokenStallNs      atomic.Int64
+	ledgerStallNs     atomic.Int64
+}
+
+// timedWait waits on the window condvar and adds the blocked span to ns.
+// Callers hold win.mu (cond.Wait's contract).
+func (it *DecodeAheadIter) timedWait(ns *atomic.Int64) {
+	t0 := time.Now()
+	it.win.cond.Wait()
+	ns.Add(time.Since(t0).Nanoseconds())
 }
 
 // decodeSlot is one row group's outcome, parked until the delivery
@@ -374,6 +392,16 @@ func (it *DecodeAheadIter) Stats() (groupsRead, windowFullStalls, pressureStalls
 	return it.rgRead.Load(), it.windowFullStalls.Load(), it.pressureStalls.Load(), it.tokenStalls.Load(), it.ledgerStalls.Load()
 }
 
+// StallDurations returns the total blocked time (ns) behind each Stats
+// counter, in the same order (window-full, pressure, token, ledger).
+// Counts say how often a gate closed; these say how much wall it cost.
+func (it *DecodeAheadIter) StallDurations() (windowFullNs, pressureNs, tokenNs, ledgerNs int64) {
+	if it == nil {
+		return 0, 0, 0, 0
+	}
+	return it.windowFullStallNs.Load(), it.pressureStallNs.Load(), it.tokenStallNs.Load(), it.ledgerStallNs.Load()
+}
+
 // Next returns the next decoded row group in source order, or (nil, nil)
 // when exhausted. Contract identical to RowGroupIter.Next.
 func (it *DecodeAheadIter) Next() (*batch.RecordBatch, error) {
@@ -442,7 +470,7 @@ func (it *DecodeAheadIter) decodeLoop() {
 		if isAhead {
 			if it.win.inflight+est > it.win.limit {
 				it.windowFullStalls.Add(1)
-				it.win.cond.Wait()
+				it.timedWait(&it.windowFullStallNs)
 				continue
 			}
 			// Occupancy-floored pressure collapse (memo §9.5): under
@@ -451,13 +479,13 @@ func (it *DecodeAheadIter) decodeLoop() {
 			// admits none.
 			if it.pressure != nil && (it.pressureStrict || it.win.ahead > 0) && it.pressure() {
 				it.pressureStalls.Add(1)
-				it.win.cond.Wait()
+				it.timedWait(&it.pressureStallNs)
 				continue
 			}
 			if it.win.ledger != nil {
 				if err := it.win.ledger.Reserve(est); err != nil {
 					it.ledgerStalls.Add(1)
-					it.win.cond.Wait()
+					it.timedWait(&it.ledgerStallNs)
 					continue
 				}
 			}
@@ -467,7 +495,7 @@ func (it *DecodeAheadIter) decodeLoop() {
 						it.win.ledger.Release(est)
 					}
 					it.tokenStalls.Add(1)
-					it.win.cond.Wait()
+					it.timedWait(&it.tokenStallNs)
 					continue
 				}
 				holdsToken = true

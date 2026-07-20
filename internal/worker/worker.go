@@ -594,10 +594,13 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 				if cur != last {
 					last = cur
 					refaultRate, refaultActivations := memory.PageCachePressureStats()
+					windowFullNs, pressureNs, tokenNs, ledgerNs := w.executor.ScanDecodeAheadStallNs()
 					w.logger.Info("scan decode-ahead stats",
 						"groups", groups, "window_fulls", windowFulls,
 						"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
 						"ledger_stalls", ledgerStalls,
+						"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
+						"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 						"refault_rate", int64(refaultRate),
 						"refault_activations", refaultActivations)
 				}
@@ -865,10 +868,13 @@ func (w *Worker) Stop() {
 		w.executor.sweepScanDecodeAheadQueryStats(true)
 		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := w.executor.ScanDecodeAheadStats()
 		refaultRate, refaultActivations := memory.PageCachePressureStats()
+		windowFullNs, pressureNs, tokenNs, ledgerNs := w.executor.ScanDecodeAheadStallNs()
 		w.logger.Info("scan decode-ahead stats (final)",
 			"groups", groups, "window_fulls", windowFulls,
 			"pressure_stalls", pressureStalls, "token_stalls", tokenStalls,
 			"ledger_stalls", ledgerStalls,
+			"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
+			"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 			"refault_rate", int64(refaultRate),
 			"refault_activations", refaultActivations)
 	}
