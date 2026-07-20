@@ -1,6 +1,8 @@
 package coordinator
 
 import (
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -61,6 +63,14 @@ type eagerFeed struct {
 	replay    []distributed.ProducerTaskManifest // manifests published so far
 	closed    bool                               // query finished; republisher must stop
 	completed int                                // producer tasks at successful terminal
+	// firstDone/lastDone timestamp the first and most recent successful
+	// producer-task completions. Feed the projected-tail eager gate
+	// (projectedTailSeconds): the C3 SF100 pair (design doc §10) showed
+	// eager clearance only converts when the producer still has a long
+	// completion tail at clearance time, and costs slot occupancy when
+	// it does not.
+	firstDone time.Time
+	lastDone  time.Time
 	// observedPartBytes accumulates worker-reported per-partition output
 	// bytes element-wise over completed tasks. nil until the first task
 	// reports a vector; stays nil for legacy workers (skew decision
@@ -117,6 +127,11 @@ func (f *eagerFeed) appendReplay(m distributed.ProducerTaskManifest) {
 func (f *eagerFeed) noteCompletion(partBytes []int64) {
 	f.mu.Lock()
 	f.completed++
+	now := time.Now()
+	if f.firstDone.IsZero() {
+		f.firstDone = now
+	}
+	f.lastDone = now
 	if len(partBytes) > 0 {
 		if f.observedPartBytes == nil {
 			f.observedPartBytes = make([]int64, f.numPartitions)
@@ -154,6 +169,42 @@ func (f *eagerFeed) projectedPartitionBytes() []int64 {
 	}
 	return out
 }
+
+// projectedTailSeconds estimates the wall remaining until the producer's
+// last task completes, from the completions observed so far: mean
+// inter-arrival × tasks remaining. Called at consumer clearance time
+// (after decisionReady, so at least a full wave of completions exists).
+// Returns 0 when nothing remains or when fewer than two completions have
+// landed (single-task producers, threshold==1) — no measurable tail means
+// nothing worth overlapping, so the gate declines toward the barrier,
+// never toward a wrong clearance.
+//
+// The C3 SF100 pair (eager-consumer-dispatch.md §10) is the calibration:
+// every edge whose measured producer spread was ≥ ~12s converted under
+// eager clearance (Q05 −29%, Q21, Q18, Q04, Q03); every edge below ~10s
+// paid a slot-occupancy tax instead. eagerMinTailSeconds encodes that
+// envelope; WADJET_EAGER_MIN_TAIL_SECONDS overrides it (0 = gate off,
+// restoring the ungated C3 behavior for A/B).
+func (f *eagerFeed) projectedTailSeconds() float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	total := len(f.producerTaskIDs)
+	remaining := total - f.completed
+	if remaining <= 0 || f.completed < 2 || f.lastDone.Equal(f.firstDone) {
+		return 0
+	}
+	meanGap := f.lastDone.Sub(f.firstDone).Seconds() / float64(f.completed-1)
+	return meanGap * float64(remaining)
+}
+
+var eagerMinTailSeconds = func() float64 {
+	if v := os.Getenv("WADJET_EAGER_MIN_TAIL_SECONDS"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
+			return n
+		}
+	}
+	return 12.0
+}()
 
 // replaySnapshot returns a copy of the manifests published so far.
 func (f *eagerFeed) replaySnapshot() []distributed.ProducerTaskManifest {

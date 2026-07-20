@@ -472,24 +472,53 @@ func (c *Coordinator) executeStageDAG(
 					return gctx.Err()
 				}
 			}
-			// C2 join clearance: hold until both feeds cross the decision
-			// threshold (decisionReady always closes at or before producer
+			// Decision-point hold: EVERY eager consumer (C1 and C2) waits
+			// for its feeds to cross the decision threshold before
+			// clearing (decisionReady always closes at or before producer
 			// completion, so this cannot outwait a healthy producer; a
-			// failed producer cancels gctx), then apply the projected skew
-			// decision. Would-split → barrier.
+			// failed producer cancels gctx). Joins needed this for the
+			// projected skew decision from the start; C1 consumers now
+			// hold too, because the projected-tail gate below needs a
+			// wave of completion timestamps. The eagerness lost is the
+			// first producer wave — exactly the population §9 predicted
+			// (and the C3 pair measured) as yielding nothing.
+			if !eagerBroken {
+				for _, f := range eagerFeeds {
+					select {
+					case <-f.decisionReady:
+					case <-gctx.Done():
+						return gctx.Err()
+					}
+				}
+			}
+			// Projected-tail gate (C3 pair, eager-consumer-dispatch.md
+			// §10): eager clearance converts only when a producer still
+			// has a long completion tail to overlap — every measured edge
+			// with spread ≥ ~12s won, every edge below ~10s paid slot-
+			// occupancy tax. Gate on the LONGEST projected tail across
+			// the stage's eager feeds; below the floor, take the barrier.
+			if !eagerBroken {
+				maxTail := 0.0
+				for _, f := range eagerFeeds {
+					if t := f.projectedTailSeconds(); t > maxTail {
+						maxTail = t
+					}
+				}
+				if maxTail < eagerMinTailSeconds {
+					c.logger.Info("eager dispatch: projected tail below floor — keeping barrier",
+						"query", queryID, "stage_id", s.ID,
+						"projected_tail_s", maxTail, "floor_s", eagerMinTailSeconds)
+					eagerBroken = true
+				}
+			}
+			// C2 join clearance: apply the projected skew decision.
+			// Would-split → barrier.
 			if !eagerBroken && eagerJoin {
 				numTasks := 1
 				if s.Distribution.Kind == physical.DistHashPartitioned {
 					numTasks = s.Distribution.Count
 					if numTasks <= 0 {
 						numTasks = workerCount
-					}
-				}
-				for _, f := range eagerFeeds {
-					select {
-					case <-f.decisionReady:
-					case <-gctx.Done():
-						return gctx.Err()
 					}
 				}
 				probeDep, buildDep := joinPrimaryDeps(s)
