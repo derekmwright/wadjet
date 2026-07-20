@@ -407,3 +407,40 @@ TestEagerTailGate barrier contract), full coordinator suite, TPC-H
 SF0.01, SF1 harness with eager on at the default floor (gate declines
 everywhere at SF1 scale — plans byte-identical to flag-off) and at
 floor 0 (ungated clearance engages; rows identical).
+
+## 12. Gated SF100 arm (2026-07-20 evening): +2.1% — the tax is the
+## flag-on machinery, not clearance. Arc closed, flag stays OFF.
+
+Arm: results/20260720-210103 (bin 0e05d02 = #245 merged,
+eager_dispatch=true, default 12s floor) vs the same controls as §10.
+Rows 44/44 identical. Gate mechanics exactly as designed: 9 clearances
+(vs 44 ungated), 37 "projected tail below floor" barrier keeps, and
+the retained clearances converted (Q04 −11%, Q05 −23%, Q13 −5%,
+Q15 −6%).
+
+The decisive negative: the §10 taxed population did NOT recover even
+with 80% fewer clearances — Q02 +18%, Q09 +13%, Q19 +13% reproduce
+their ungated taxes almost exactly, and Q08 +88% / Q20 +41% have now
+appeared in BOTH eager arms and NEITHER control, which withdraws
+§10.1's variance attribution for Q08: the mechanism is linked to
+flag-on through a path clearance-gating does not touch. Suite steady
+25.98m (+2.1% vs the 25.45m control).
+
+Conclusion: the eager tax is dominated by the always-on flag-on
+machinery — per-producer-task manifest publication, the 3s
+republisher, and the NATS fan-out that runs for every eligible
+producer stage regardless of whether any consumer clears — plus an
+unidentified interaction behind the Q08/Q20 signature. A clearance
+gate cannot recover costs clearances never caused.
+
+**Arc closed. --eager-dispatch stays default OFF; three SF100 arms
+(§10, §12) are the evidence. The #245 gate remains in the tree — it
+is inert under flag-off and strictly better than ungated if the flag
+is ever flipped.** Revival preconditions, in order: (1) identify the
+Q08/Q20 flag-on mechanism from the 20260720-131435 and -210103
+worker logs; (2) re-engineer manifest activation to be
+clearance-driven (publish only for stages whose consumer actually
+cleared) so the machinery costs nothing when the gate declines;
+(3) only then re-pair. The overlap wins are real (Q05 −23/−29%
+twice, Q04 −11/−12% twice) — the plumbing has to stop costing more
+than they earn.
