@@ -303,6 +303,54 @@ multi-stage queries. If the SF100 pair shows no movement in those two
 markers, the thesis is wrong and the flag stays off — no threshold
 tuning to force it.
 
+## 10. C3 SF100 validation (2026-07-20): flat suite, split verdict —
+## flag stays OFF; revival = spread-gated clearance
+
+Pair: control = results/20260719-205317 (bin 79d50cb, eager off,
+steady 25.45m), treatment = results/20260720-131435 (same binary,
+`eager_dispatch=true`, same-evening window). Rows 22/22 identical both
+passes; eager engaged for real (44 "consumer cleared early", 42
+governed waves, 1 projected-skew barrier keep).
+
+**Suite steady 25.21m (−1.0%) — net flat, matching the 2026-07-11
+verdict but now with per-query resolution from the per-task arrival
+lines (task_retry.go "task result", added in PR #242):**
+
+The measured ceiling per barrier edge is `spread(P) = complete(P) −
+first_task_result(P)` clipped by the consumer span (scratchpad
+eager_spread.py). Steady-pass ceiling on the control run = 349s =
+23.9% of DAG wall, concentrated in exchange-repartition → hash_join
+edges. The treatment converted it EXACTLY where the ceiling was large:
+
+| Q   | ceiling | steady delta | captured |
+|-----|--------:|-------------:|---------:|
+| Q05 |   75.1s | −48.2s (−29.2%) | 64% |
+| Q18 |   34.7s | −23.5s (−9.0%)  | 68% |
+| Q04 |   14.6s | −14.0s (−12.2%) | ~96% |
+| Q21 |   59.5s | −10.1s (−4.3%)  | 17% |
+| Q03/Q22 | 26.4/11.9s | −5.4/−2.2s | 20/18% |
+
+and paid a broad tax everywhere else: Q02 +20%, Q14 +18%, Q15 +19%,
+Q20 +17%, Q17 +13%, Q12 +10%, Q01/Q06/Q09 +8-10%, and one outlier far
+beyond tax (Q08 +93%, +39s against a 6.6s ceiling — unexplained,
+needs its window read before any revival ships). Wins ≈ losses ≈
+100s. The tax mechanism is the one §9 predicted for low-yield edges:
+eager consumer tasks occupy scheduler attention and worker slots
+while blocked on manifests, and single-wave producers yield nothing
+to overlap.
+
+**Verdict: default stays OFF. The thesis is neither confirmed nor
+refuted — it is CONDITIONAL.** Overlap converts when the producer's
+completion spread is large relative to per-task overhead, and costs
+when it is not. Revival design (not implemented): gate eager clearance
+per edge on the coordinator's own live projection — it already
+accumulates per-task arrival stats in the eager feed — e.g. clear only
+when projected producer spread exceeds a floor AND the consumer's
+estimated input size justifies holding slots. Same architectural shape
+as the skew ratio gate and the aggregatePartialSplit size floor:
+mechanism on, engagement gated by measured signal, never a blanket
+flag. Q08 must be root-caused first.
+
 ### 10.1 Q08 outlier root-caused (2026-07-20): known pressure-floor
 ### variance, not an eager defect
 
