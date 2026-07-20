@@ -302,3 +302,60 @@ overlap achieved, and worker utilization rises above 2.5/16 cores on
 multi-stage queries. If the SF100 pair shows no movement in those two
 markers, the thesis is wrong and the flag stays off — no threshold
 tuning to force it.
+
+### 10.1 Q08 outlier root-caused (2026-07-20): known pressure-floor
+### variance, not an eager defect
+
+The +93% came from ONE join-6 probe-split task (b87311e0, worker
+i-0e39…): 62.1s for ~1.37M rows while its two siblings did the same
+volume in ~24s. Fragment progress lines show uniform ~22k rows/s from
+start (siblings ~55k rows/s), pool at 1% — no stall, no queueing, no
+spill, and the worker ran nothing else for the task's last 53s. The
+worker's decode-ahead stats in that window show the refault pressure
+sensor active (refault_rate ≈ 22k/s, activations climbing): the fused
+probe scan inside the join task was pinned to the 2-deep pressure
+floor for its whole run — the same partial-residency background-
+refault mechanism documented as Q05's 117-165s cross-window band
+(scan-decode-pipelining.md §9.4). Eager only reshuffled scheduling so
+the collapse landed on Q08 in this pair (control's Q05 drew the short
+straw at 165.1s that evening; the eager arm's Q05 ran 116.9s).
+No eager-specific defect found.
+
+## 11. Projected-tail clearance gate (implemented 2026-07-20; flag
+## still OFF pending the gated SF100 pair)
+
+§10's split verdict is conditional convergence: clearance converts
+exactly when the producer still has a long completion tail to overlap.
+The gate encodes that:
+
+- `eagerFeed` timestamps successful producer-task completions
+  (firstDone/lastDone in noteCompletion).
+- At clearance, EVERY eager consumer — C1 non-join included — now
+  holds for `decisionReady` (a full wave + a quarter of producer
+  tasks), so a wave of arrival stats exists. The eagerness lost is the
+  first wave, the population §9 predicted and §10 measured as yielding
+  nothing.
+- `projectedTailSeconds()` = mean observed inter-arrival × tasks
+  remaining; fewer than two completions or nothing remaining → 0
+  (decline toward the barrier, never toward a wrong clearance).
+- Clearance requires `max(tail over the stage's eager feeds) ≥
+  eagerMinTailSeconds` (default 12, the §10 envelope: every measured
+  edge ≥ ~12s converted, every edge ≤ ~10s paid tax;
+  WADJET_EAGER_MIN_TAIL_SECONDS overrides, 0 restores ungated C3
+  behavior for A/B). Below the floor the stage logs
+  "projected tail below floor — keeping barrier" and takes the
+  barrier — byte-identical to flag-off planning.
+
+Acceptance for the gated SF100 pair, derived from §10's table: the
+gate must clear Q05/Q21/Q18/Q04/Q03-class edges (their steady wins
+summed ≈ 100s ≈ 6-7% of suite) and keep the barrier on the
+Q02/Q07/Q09/Q10/Q14/Q15/Q16/Q20 population (whose §10 taxes summed to
+the cancellation). Success = suite steady meaningfully below the
+25.45m reference with no query outside its documented variance band;
+failure = flag stays off and §10's verdict stands as final.
+
+Gates run at implementation time: unit (projectedTailSeconds math,
+TestEagerTailGate barrier contract), full coordinator suite, TPC-H
+SF0.01, SF1 harness with eager on at the default floor (gate declines
+everywhere at SF1 scale — plans byte-identical to flag-off) and at
+floor 0 (ungated clearance engages; rows identical).

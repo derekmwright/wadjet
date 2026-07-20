@@ -176,6 +176,15 @@ func assertEagerArmsIdentical(t *testing.T, control, treatment map[string]int) {
 // fencing needs). Asserts flag-on results are identical to flag-off and
 // that the mechanism markers engaged (memo §8).
 func TestEagerDispatchE2E(t *testing.T) {
+	// SF001 producers complete in milliseconds, so the projected-tail
+	// gate (eager-consumer-dispatch.md §10/§11) would keep the barrier
+	// and the engagement assertions below could never fire. Disable the
+	// floor: this test gates clearance MECHANISM correctness, not the
+	// SF100 conversion policy (TestEagerTailGate covers the gate).
+	restoreTail := eagerMinTailSeconds
+	eagerMinTailSeconds = 0
+	t.Cleanup(func() { eagerMinTailSeconds = restoreTail })
+
 	ctx, newCoord := setupEagerE2E(t, []string{"part", "supplier", "partsupp", "nation", "region"})
 	sql := tpch.TPCHQueries[2].SQL
 
@@ -206,6 +215,15 @@ func TestEagerDispatchE2E(t *testing.T) {
 // SF001 data is uniform, so the projected decision is no-split and eager
 // clearance proceeds; results must be row-identical to the barrier arm.
 func TestEagerJoinDispatchE2E(t *testing.T) {
+	// SF001 producers complete in milliseconds, so the projected-tail
+	// gate (eager-consumer-dispatch.md §10/§11) would keep the barrier
+	// and the engagement assertions below could never fire. Disable the
+	// floor: this test gates clearance MECHANISM correctness, not the
+	// SF100 conversion policy (TestEagerTailGate covers the gate).
+	restoreTail := eagerMinTailSeconds
+	eagerMinTailSeconds = 0
+	t.Cleanup(func() { eagerMinTailSeconds = restoreTail })
+
 	ctx, newCoord := setupEagerE2E(t, []string{"lineitem", "orders"})
 	const sql = `SELECT l_orderkey, COUNT(*) AS cnt, SUM(l_quantity) AS qty
 		FROM lineitem JOIN orders ON l_orderkey = o_orderkey
@@ -224,4 +242,30 @@ func TestEagerJoinDispatchE2E(t *testing.T) {
 	}
 	t.Logf("C2 join eager engaged: edges=%d, %d groups identical",
 		EagerEdgesPlanned.Load()-edgesBefore, len(control))
+}
+
+// TestEagerTailGate: with the projected-tail floor in force (set high so
+// SF001's millisecond producers can never satisfy it), an eager-flagged
+// run must keep the barrier on every edge — zero early clearances — and
+// stay row-identical. This is the §11 gate contract: below-floor tails
+// degrade to exactly the flag-off plan, never to a wrong clearance.
+func TestEagerTailGate(t *testing.T) {
+	ctx, newCoord := setupEagerE2E(t, []string{"part", "supplier", "partsupp", "nation", "region"})
+	sql := tpch.TPCHQueries[2].SQL
+
+	restoreTail := eagerMinTailSeconds
+	eagerMinTailSeconds = 1e9
+	t.Cleanup(func() { eagerMinTailSeconds = restoreTail })
+
+	control := runEagerE2EQuery(ctx, t, newCoord(false), sql, "control")
+	if len(control) == 0 {
+		t.Fatal("control returned no rows")
+	}
+	edgesBefore := EagerEdgesPlanned.Load()
+	treatment := runEagerE2EQuery(ctx, t, newCoord(true), sql, "eager-gated")
+
+	assertEagerArmsIdentical(t, control, treatment)
+	if got := EagerEdgesPlanned.Load() - edgesBefore; got != 0 {
+		t.Errorf("gate floor in force but %d consumers cleared early — gate not applied", got)
+	}
 }
