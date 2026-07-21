@@ -1073,13 +1073,19 @@ func (d *decodeAheadStatsIter) Close() error {
 	if !d.folded {
 		d.folded = true
 		groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls := d.Stats()
+		windowFullNs, pressureNs, tokenNs, ledgerNs := d.StallDurations()
 		d.executor.scanDecodeAheadGroups.Add(groups)
 		d.executor.scanDecodeAheadWindowFulls.Add(windowFulls)
 		d.executor.scanDecodeAheadPressureStalls.Add(pressureStalls)
 		d.executor.scanDecodeAheadTokenStalls.Add(tokenStalls)
 		d.executor.scanDecodeAheadLedgerStalls.Add(ledgerStalls)
+		d.executor.scanDecodeAheadWindowFullNs.Add(windowFullNs)
+		d.executor.scanDecodeAheadPressureNs.Add(pressureNs)
+		d.executor.scanDecodeAheadTokenNs.Add(tokenNs)
+		d.executor.scanDecodeAheadLedgerNs.Add(ledgerNs)
 		d.executor.foldScanDecodeAheadQueryStats(d.queryID,
-			groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls)
+			groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls,
+			windowFullNs, pressureNs, tokenNs, ledgerNs)
 	}
 	return d.DecodeAheadIter.Close()
 }

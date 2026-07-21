@@ -127,6 +127,12 @@ type Executor struct {
 	scanDecodeAheadPressureStalls atomic.Int64
 	scanDecodeAheadTokenStalls    atomic.Int64
 	scanDecodeAheadLedgerStalls   atomic.Int64
+	// Stall durations (ns) behind the four stall counters above — counts
+	// rank frequency, these rank cost (2026-07-20 Q08 diagnosis).
+	scanDecodeAheadWindowFullNs atomic.Int64
+	scanDecodeAheadPressureNs   atomic.Int64
+	scanDecodeAheadTokenNs      atomic.Int64
+	scanDecodeAheadLedgerNs     atomic.Int64
 	// scanDecodeAheadByQuery attributes the counters above per source
 	// identity — the task's QueryID, which on stage-input sources is
 	// stage-scoped (e.g. "st-join-10-<query>"), so SF100 logs separate a
@@ -141,14 +147,17 @@ type Executor struct {
 // decodeAheadQueryStats is one query's decode-ahead counter slice.
 // emitted holds the counter snapshot at the last sweep; a sweep that
 // finds the counters unchanged emits the final line and drops the entry.
+// Indices 5-8 are the stall durations (ns) behind counters 1-4.
 type decodeAheadQueryStats struct {
 	groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls atomic.Int64
-	emitted                                                        [5]int64
+	windowFullNs, pressureNs, tokenNs, ledgerNs                    atomic.Int64
+	emitted                                                        [9]int64
 }
 
-func (s *decodeAheadQueryStats) snapshot() [5]int64 {
-	return [5]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
-		s.tokenStalls.Load(), s.ledgerStalls.Load()}
+func (s *decodeAheadQueryStats) snapshot() [9]int64 {
+	return [9]int64{s.groups.Load(), s.windowFulls.Load(), s.pressureStalls.Load(),
+		s.tokenStalls.Load(), s.ledgerStalls.Load(),
+		s.windowFullNs.Load(), s.pressureNs.Load(), s.tokenNs.Load(), s.ledgerNs.Load()}
 }
 
 // SetStreamingShuffleRead enables streaming decode of shuffle inputs
@@ -172,7 +181,7 @@ func (e *Executor) SetScanDecodeAhead(on bool, windowBytes int64) {
 // foldScanDecodeAheadQueryStats adds one closed iterator's counters to
 // the per-query accumulator. queryID may be empty (embedded callers);
 // those fold under the "-" bucket rather than being dropped.
-func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls int64) {
+func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowFulls, pressureStalls, tokenStalls, ledgerStalls, windowFullNs, pressureNs, tokenNs, ledgerNs int64) {
 	if queryID == "" {
 		queryID = "-"
 	}
@@ -183,6 +192,10 @@ func (e *Executor) foldScanDecodeAheadQueryStats(queryID string, groups, windowF
 	qs.pressureStalls.Add(pressureStalls)
 	qs.tokenStalls.Add(tokenStalls)
 	qs.ledgerStalls.Add(ledgerStalls)
+	qs.windowFullNs.Add(windowFullNs)
+	qs.pressureNs.Add(pressureNs)
+	qs.tokenNs.Add(tokenNs)
+	qs.ledgerNs.Add(ledgerNs)
 }
 
 // sweepScanDecodeAheadQueryStats emits per-query decode-ahead stats
@@ -208,7 +221,9 @@ func (e *Executor) sweepScanDecodeAheadQueryStats(final bool) {
 			"query", k,
 			"groups", cur[0], "window_fulls", cur[1],
 			"pressure_stalls", cur[2], "token_stalls", cur[3],
-			"ledger_stalls", cur[4])
+			"ledger_stalls", cur[4],
+			"window_full_ms", cur[5]/1e6, "pressure_stall_ms", cur[6]/1e6,
+			"token_stall_ms", cur[7]/1e6, "ledger_stall_ms", cur[8]/1e6)
 		return true
 	})
 }
@@ -222,6 +237,13 @@ func (e *Executor) ScanDecodeAheadStats() (groups, windowFulls, pressureStalls, 
 	return e.scanDecodeAheadGroups.Load(), e.scanDecodeAheadWindowFulls.Load(),
 		e.scanDecodeAheadPressureStalls.Load(), e.scanDecodeAheadTokenStalls.Load(),
 		e.scanDecodeAheadLedgerStalls.Load()
+}
+
+// ScanDecodeAheadStallNs returns the total blocked time (ns) behind the
+// four stall counters of ScanDecodeAheadStats, same order.
+func (e *Executor) ScanDecodeAheadStallNs() (windowFullNs, pressureNs, tokenNs, ledgerNs int64) {
+	return e.scanDecodeAheadWindowFullNs.Load(), e.scanDecodeAheadPressureNs.Load(),
+		e.scanDecodeAheadTokenNs.Load(), e.scanDecodeAheadLedgerNs.Load()
 }
 
 // NewExecutor creates a new task executor.

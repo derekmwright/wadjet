@@ -161,6 +161,9 @@ func TestDecodeAheadIter_TinyWindowStallsButDelivers(t *testing.T) {
 	if _, stalls, _, _, _ := it.Stats(); stalls == 0 {
 		t.Error("WindowBytes=1 with 4 workers never stalled — window is not gating admission")
 	}
+	if wfNs, _, _, _ := it.StallDurations(); wfNs <= 0 {
+		t.Error("window-full stalls counted but zero blocked duration recorded")
+	}
 }
 
 // TestDecodeAheadIter_PressureDegradesToSerial: with the pressure hook
@@ -191,6 +194,9 @@ func TestDecodeAheadIter_PressureDegradesToSerial(t *testing.T) {
 	requireSameBatches(t, want, got)
 	if _, _, stalls, _, _ := it.Stats(); stalls == 0 {
 		t.Error("permanent pressure with 4 workers never stalled — hook is not gating admission")
+	}
+	if _, pNs, _, _ := it.StallDurations(); pNs <= 0 {
+		t.Error("pressure stalls counted but zero blocked duration recorded")
 	}
 }
 

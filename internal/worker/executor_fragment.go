@@ -62,6 +62,21 @@ type fragmentProgress struct {
 	backpressureCount   atomic.Int64
 	backpressurePauseMS atomic.Int64
 
+	// Phase timing (ns), fed by the fragment runners. Splits a slow task's
+	// wall into WHERE it went — the 2026-07-20 Q08 diagnosis had a task at
+	// uniform 1/3 speed and no counter that could say whether the source,
+	// the operator chain, or the sink was pacing it.
+	//   srcNs       time inside src.Next (decode + IO, incl. its stalls)
+	//   srcBlockedNs producer blocked handing a batch to the consumer
+	//   inputWaitNs consumer blocked waiting for the producer
+	//   opsNs       operator-chain Execute (join probe, filter, project)
+	//   sinkNs      sink consume (shuffle/output write)
+	srcNs        atomic.Int64
+	srcBlockedNs atomic.Int64
+	inputWaitNs  atomic.Int64
+	opsNs        atomic.Int64
+	sinkNs       atomic.Int64
+
 	mu                  sync.Mutex // guards the two log timestamps below
 	lastLog             time.Time
 	lastBackpressureLog time.Time
@@ -111,7 +126,69 @@ func (p *fragmentProgress) addRows(n int64) {
 			"bp_count", bp,
 			"bp_paused_ms", p.backpressurePauseMS.Load())
 	}
+	attrs = p.appendPhaseAttrs(attrs)
 	p.logger.Info("fragment task progress", attrs...)
+}
+
+// appendPhaseAttrs adds the nonzero phase-timing splits to a log line.
+func (p *fragmentProgress) appendPhaseAttrs(attrs []any) []any {
+	for _, ph := range []struct {
+		key string
+		ns  *atomic.Int64
+	}{
+		{"src_ms", &p.srcNs},
+		{"src_blocked_ms", &p.srcBlockedNs},
+		{"input_wait_ms", &p.inputWaitNs},
+		{"ops_ms", &p.opsNs},
+		{"sink_ms", &p.sinkNs},
+	} {
+		if v := ph.ns.Load(); v > 0 {
+			attrs = append(attrs, ph.key, v/1e6)
+		}
+	}
+	return attrs
+}
+
+// fragmentPhaseLogFloor gates the completion-time phase line: tasks
+// shorter than this log at Debug, keeping INFO volume flat for the
+// thousands of sub-second tasks per suite run.
+const fragmentPhaseLogFloor = 5 * time.Second
+
+// finish emits one "fragment task phases" line with the task's final
+// phase split. INFO for tasks long enough to matter, Debug otherwise.
+func (p *fragmentProgress) finish(totalRows int64) {
+	elapsed := time.Since(p.started)
+	attrs := p.appendPhaseAttrs([]any{
+		"task_id", p.taskID,
+		"stage_id", p.stageID,
+		"stage_type", p.stageType,
+		"elapsed_ms", elapsed.Milliseconds(),
+		"rows", totalRows,
+	})
+	if elapsed >= fragmentPhaseLogFloor {
+		p.logger.Info("fragment task phases", attrs...)
+		return
+	}
+	p.logger.Debug("fragment task phases", attrs...)
+}
+
+// timeSource wraps src so every Next is charged to p.srcNs.
+func (p *fragmentProgress) timeSource(src exec.Source) exec.Source {
+	return &timedSource{Source: src, ns: &p.srcNs}
+}
+
+// timedSource charges the wall spent inside the wrapped Source's Next to
+// an atomic counter. Init/Close pass through untimed.
+type timedSource struct {
+	exec.Source
+	ns *atomic.Int64
+}
+
+func (t *timedSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	t0 := time.Now()
+	b, err := t.Source.Next(ctx)
+	t.ns.Add(time.Since(t0).Nanoseconds())
+	return b, err
 }
 
 // applyBackpressure pauses the consume loop briefly when the process heap
@@ -365,9 +442,13 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 	}
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
+	src = fp.timeSource(src)
 	var totalRows int64
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
-		if err := sink.consume(ctx, b); err != nil {
+		t0 := time.Now()
+		err := sink.consume(ctx, b)
+		fp.sinkNs.Add(time.Since(t0).Nanoseconds())
+		if err != nil {
 			return err
 		}
 		n := int64(b.ActiveLen())
@@ -394,21 +475,30 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 			if b == nil {
 				return nil
 			}
+			t0 := time.Now()
 			select {
 			case <-gctx.Done():
 				return gctx.Err()
 			case ch <- b:
 			}
+			fp.srcBlockedNs.Add(time.Since(t0).Nanoseconds())
 		}
 	})
 	// Consumer: ops + sink. Drives backpressure (heap pause) and progress.
 	g.Go(func() error {
-		for b := range ch {
+		for {
+			t0 := time.Now()
+			b, ok := <-ch
+			fp.inputWaitNs.Add(time.Since(t0).Nanoseconds())
+			if !ok {
+				return nil
+			}
 			if err := fp.applyBackpressure(gctx); err != nil {
 				return err
 			}
 			cur := b
 			var err error
+			tOps := time.Now()
 			for _, op := range ops {
 				exec.FlattenForConsumer(cur, op)
 				cur, err = op.Execute(gctx, cur)
@@ -419,6 +509,7 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 					break
 				}
 			}
+			fp.opsNs.Add(time.Since(tOps).Nanoseconds())
 			if cur == nil || cur.ActiveLen() == 0 {
 				continue
 			}
@@ -426,11 +517,11 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 				return fmt.Errorf("sink consume: %w", err)
 			}
 		}
-		return nil
 	})
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("fragment task %s: %w", task.ID, err)
 	}
+	defer func() { fp.finish(totalRows) }() // closure: spill flush below still adds rows
 
 	// Spilled-partition flush. Grace Hash Join probes route rows whose hash
 	// partition was evicted to disk; without this drain, those probe rows
@@ -566,9 +657,14 @@ func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.Unary
 func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification, k int) error {
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
+	src = fp.timeSource(src)
 	var totalRows atomic.Int64
+	defer func() { fp.finish(totalRows.Load()) }()
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
-		if err := sink.consume(ctx, b); err != nil {
+		t0 := time.Now()
+		err := sink.consume(ctx, b)
+		fp.sinkNs.Add(time.Since(t0).Nanoseconds())
+		if err != nil {
 			return err
 		}
 		n := int64(b.ActiveLen())
@@ -648,6 +744,8 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 		}()
 
 		runChain := func(ctx context.Context, chain []exec.UnaryOperator, b *batch.RecordBatch) (*batch.RecordBatch, error) {
+			t0 := time.Now()
+			defer func() { fp.opsNs.Add(time.Since(t0).Nanoseconds()) }()
 			cur := b
 			var err error
 			for _, op := range chain {
@@ -1088,6 +1186,10 @@ type fragmentBreaker struct {
 // stops emitting them as separate Sort stages).
 func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed.Task, src exec.Source, middle []distributed.OpSpec, breakerIdxs []int, sink fragmentSink, result *distributed.ResultNotification, emitOps []*exec.DynamicFilterEmitOp) error {
 	progress := exec.ProgressReporterFromContext(ctx)
+	// Created up front (not at the final phase) so the elapsed clock and
+	// src timing cover the breaker-consume phases too.
+	fp := newFragmentProgress(e.logger, task, e)
+	src = fp.timeSource(src)
 
 	breakers := make([]*fragmentBreaker, len(breakerIdxs))
 	for i, idx := range breakerIdxs {
@@ -1185,10 +1287,13 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 	defer finalCleanup()
 
 	last := breakers[len(breakers)-1]
-	fp := newFragmentProgress(e.logger, task, e)
 	var totalRows int64
+	defer func() { fp.finish(totalRows) }()
 	consume := func(ctx context.Context, b *batch.RecordBatch) error {
-		if err := sink.consume(ctx, b); err != nil {
+		t0 := time.Now()
+		err := sink.consume(ctx, b)
+		fp.sinkNs.Add(time.Since(t0).Nanoseconds())
+		if err != nil {
 			return err
 		}
 		n := int64(b.ActiveLen())
@@ -1208,12 +1313,14 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 			break
 		}
 		cur := b
+		tOps := time.Now()
 		if last.DrainXform != nil {
 			cur, err = last.DrainXform(cur)
 			if err != nil {
 				return fmt.Errorf("fragment task %s: %s drain xform: %w", task.ID, last.Label, err)
 			}
 			if cur == nil {
+				fp.opsNs.Add(time.Since(tOps).Nanoseconds())
 				continue
 			}
 		}
@@ -1227,6 +1334,7 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 				break
 			}
 		}
+		fp.opsNs.Add(time.Since(tOps).Nanoseconds())
 		if cur == nil || cur.ActiveLen() == 0 {
 			continue
 		}

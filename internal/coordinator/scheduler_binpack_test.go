@@ -166,3 +166,73 @@ func TestEstimateComputeTaskBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestMinBatchWorkers(t *testing.T) {
+	tests := []struct {
+		name      string
+		connected []string
+		assigned  map[string]int
+		want      []string
+	}{
+		{"empty batch keeps all", []string{"w1", "w2", "w3"},
+			map[string]int{}, []string{"w1", "w2", "w3"}},
+		{"loaded worker drops out", []string{"w1", "w2", "w3"},
+			map[string]int{"w1": 1}, []string{"w2", "w3"}},
+		{"min-count subset survives", []string{"w1", "w2", "w3"},
+			map[string]int{"w1": 2, "w2": 1, "w3": 1}, []string{"w2", "w3"}},
+		{"no connected workers", nil, map[string]int{"w1": 1}, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := minBatchWorkers(tc.connected, tc.assigned)
+			if len(got) != len(tc.want) {
+				t.Fatalf("minBatchWorkers = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("minBatchWorkers = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestBinpackSpreadFanout replays the 2026-07-20 Q20 pathology: heartbeat
+// pool stats are stale for the whole fan-out (w3 reports most free the
+// entire time) and per-task estimates are too small to flip the ranking.
+// Without the same-batch restriction all 12 tasks land on w3; with it the
+// fan-out spreads 4/4/4 while w3 still wins each tie-break round.
+func TestBinpackSpreadFanout(t *testing.T) {
+	active := []*WorkerInfo{
+		{WorkerID: "w1", PoolBudget: 1000, PoolUsed: 500},
+		{WorkerID: "w2", PoolBudget: 1000, PoolUsed: 400},
+		{WorkerID: "w3", PoolBudget: 1000, PoolUsed: 100},
+	}
+	connected := []string{"w1", "w2", "w3"}
+	inflight := map[string]int64{} // estimates tiny: 1 byte per task
+	batchAssigned := map[string]int{}
+	counts := map[string]int{}
+	for i := 0; i < 12; i++ {
+		id, ok := pickLeastLoadedWorker(minBatchWorkers(connected, batchAssigned), active, inflight)
+		if !ok {
+			t.Fatalf("pick %d failed", i)
+		}
+		batchAssigned[id]++
+		counts[id]++
+		inflight[id]++ // per-task charge too small to matter
+	}
+	if counts["w1"] != 4 || counts["w2"] != 4 || counts["w3"] != 4 {
+		t.Fatalf("fan-out spread = %v, want 4/4/4", counts)
+	}
+	// Sanity: without the restriction, the stale ranking clumps.
+	clump := map[string]int{}
+	inflight = map[string]int64{}
+	for i := 0; i < 12; i++ {
+		id, _ := pickLeastLoadedWorker(connected, active, inflight)
+		clump[id]++
+		inflight[id]++
+	}
+	if clump["w3"] != 12 {
+		t.Fatalf("unrestricted control = %v, want all 12 on w3", clump)
+	}
+}
