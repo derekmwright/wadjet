@@ -59,6 +59,20 @@ func TestSanitizeScanNeeds(t *testing.T) {
 			[]string{"l_quantity", "o_orderkey"},
 		},
 		{
+			// "attrs.score" where attrs is a ROW-typed column of THIS scan
+			// is a field path, not an alias qualifier — kept verbatim.
+			// Dropping it broke every dotted Row access when sanitization
+			// landed in #249 (filter column "attrs.score" does not exist).
+			"row field path kept",
+			&Node{
+				Type:        NodeScan,
+				TableName:   "events",
+				ScanColumns: []string{"id", "attrs"},
+			},
+			[]string{"id", "attrs.score", "other.col"},
+			[]string{"attrs.score", "id"},
+		},
+		{
 			// Table name works as the alias when no explicit alias exists.
 			"table name as alias",
 			&Node{Type: NodeScan, TableName: "orders", ScanColumns: []string{"o_orderkey"}},
