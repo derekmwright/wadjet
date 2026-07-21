@@ -131,6 +131,16 @@ func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
 		if alias, col, ok := strings.Cut(name, "."); ok {
 			if strings.EqualFold(alias, n.TableAlias) || strings.EqualFold(alias, n.TableName) {
 				keep[col] = true
+				continue
+			}
+			// "attrs.score" where attrs is a ROW-typed column of THIS
+			// scan is a field path, not an alias qualifier — keep it
+			// verbatim (the expression compiler resolves the field, and
+			// the scan must read the base column). Dropping it broke
+			// every dotted Row access (filter column "attrs.score" does
+			// not exist) when sanitization landed in #249.
+			if inSchema[strings.ToLower(alias)] {
+				keep[name] = true
 			}
 			continue // other relation's qualified column: drop
 		}
