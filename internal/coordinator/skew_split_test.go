@@ -404,12 +404,19 @@ func TestSkewSplitParity(t *testing.T) {
 		return c
 	}
 
+	// Both queries aggregate over e.v so the fat pad column legitimately
+	// survives shuffle projection — before the 2026-07-21 projection fix
+	// (exchange-reuse memo A1/A2) the fixture leaned on the projection
+	// BUG to ship v: the queries never referenced it, but the polluted
+	// column list reverted the scan to full width. With real projection,
+	// k-only shuffles fall below the skew byte thresholds and the split
+	// never engages.
 	queries := []string{
 		// Inner join + aggregate over the hot key's dimension.
-		"SELECT d.name, count(*) AS cnt FROM events e JOIN dims d ON e.k = d.k GROUP BY d.name ORDER BY d.name",
+		"SELECT d.name, count(*) AS cnt, min(e.v) AS mv FROM events e JOIN dims d ON e.k = d.k GROUP BY d.name ORDER BY d.name",
 		// Left join: unmatched probe rows (keys >= 48) must survive the
 		// split exactly once each.
-		"SELECT count(*) AS total_rows, count(d.name) AS matched_rows FROM events e LEFT JOIN dims d ON e.k = d.k",
+		"SELECT count(*) AS total_rows, count(d.name) AS matched_rows, min(e.v) AS mv FROM events e LEFT JOIN dims d ON e.k = d.k",
 	}
 
 	run := func(c *Coordinator, sql string) string {
