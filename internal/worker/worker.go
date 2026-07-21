@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -974,8 +975,44 @@ func sweepDirContents(dir string, logger *slog.Logger) (int, int64) {
 }
 
 func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem chan struct{}) {
-	// Batch fetch: pull up to available concurrency slots at once to
-	// amortize the NATS round-trip overhead.
+	// Persistent pull subscription with slot-gated Next() instead of a
+	// 500ms-polled one-shot Fetch. The polled Fetch churned ~2 pull
+	// requests/second/worker, and each request-expiry boundary is a race
+	// window: a message the server sends just as the client gives up on
+	// the request is discarded client-side WITHOUT ack, while the server
+	// has it counted as delivered — it re-appears only after the full
+	// 10-minute AckWait. Observed live 2026-07-21 (SF100 deploy 4): two
+	// Q08 join-14 task deliveries vanished with zero worker-log trace,
+	// were redelivered at exactly AckWait expiry, and executed in 137ms —
+	// a 650s query stall for 275ms of work. The managed Messages()
+	// iterator keeps one long-lived pull open (client renews it ahead of
+	// expiry and reconciles in-flight deliveries across renewals), so the
+	// expiry race is gone by construction.
+	//
+	// PullMaxMessages(1): at most one message is buffered client-side
+	// beyond the ones being executed, so a slot-starved worker holds at
+	// most one delivery aging toward AckWait (redelivery of that one is
+	// dedup-safe: task outputs are TaskID-idempotent and the coordinator's
+	// taskRetrier ignores duplicate terminal results). The old batch-fetch
+	// round-trip amortization is irrelevant against multi-second tasks.
+	it, err := consumer.Messages(jetstream.PullMaxMessages(1))
+	if err != nil {
+		w.logger.Error("task intake: creating messages iterator", "error", err)
+		return
+	}
+	defer it.Stop()
+	// Unblock Next() on shutdown or drain. Stop discards any client-side
+	// buffered delivery unacked — JetStream redelivers it to a surviving
+	// worker after AckWait, which is the desired hand-off for a departing
+	// worker.
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-w.drainCh:
+		}
+		it.Stop()
+	}()
+
 	for {
 		if ctx.Err() != nil {
 			return
@@ -1007,66 +1044,44 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 			}
 		}
 
-		// Count available slots (non-blocking drain)
-		available := 0
-		for {
-			select {
-			case sem <- struct{}{}:
-				available++
-				if available >= w.config.MaxConcurrent {
-					goto fetch
-				}
-			default:
-				goto fetch
-			}
+		// Acquire ONE slot, then take one message. The drain case matters
+		// twice over: without it a saturated worker blocks here through
+		// the whole drain, and when a slot finally freed it would pull one
+		// MORE task past the Draining check at the loop top (intake leak
+		// during drain).
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.drainCh:
+			return
+		case sem <- struct{}{}:
 		}
-	fetch:
-		if available == 0 {
-			// All slots occupied — wait for one to free up. The drain case
-			// matters twice over: without it a saturated worker blocks here
-			// through the whole drain, and when a slot finally freed it
-			// would pull one MORE task past the Draining check at the loop
-			// top (intake leak during drain).
+
+		msg, err := it.Next()
+		if err != nil {
+			<-sem
+			if ctx.Err() != nil || w.Draining() ||
+				errors.Is(err, jetstream.ErrMsgIteratorClosed) {
+				return
+			}
+			// Transient iterator error (missed heartbeats during a NATS
+			// hiccup): surface it — silent intake failures are how the
+			// Q08 stall stayed invisible — and back off briefly.
+			w.logger.Warn("task intake: iterator error", "error", err)
 			select {
 			case <-ctx.Done():
 				return
-			case <-w.drainCh:
-				return
-			case sem <- struct{}{}:
-				available = 1
-			}
-		}
-
-		msgs, err := consumer.Fetch(available, jetstream.FetchMaxWait(500*time.Millisecond))
-		if err != nil {
-			for i := 0; i < available; i++ {
-				<-sem
-			}
-			if ctx.Err() != nil {
-				return
+			case <-time.After(time.Second):
 			}
 			continue
 		}
 
-		dispatched := 0
-		for msg := range msgs.Messages() {
-			dispatched++
-			w.wg.Add(1)
-			go func(m jetstream.Msg) {
-				defer w.wg.Done()
-				defer func() { <-sem }()
-				w.handleTask(ctx, m)
-			}(msg)
-		}
-
-		// Return unused slots
-		for i := dispatched; i < available; i++ {
-			<-sem
-		}
-
-		if msgs.Error() != nil && ctx.Err() == nil {
-			w.logger.Debug("fetch returned", "error", msgs.Error())
-		}
+		w.wg.Add(1)
+		go func(m jetstream.Msg) {
+			defer w.wg.Done()
+			defer func() { <-sem }()
+			w.handleTask(ctx, m)
+		}(msg)
 	}
 }
 
@@ -1112,6 +1127,18 @@ func (w *Worker) handleTask(ctx context.Context, msg jetstream.Msg) {
 		w.logger.Error("failed to unmarshal task", "error", err)
 		msg.Term()
 		return
+	}
+	// Redelivery is always an anomaly worth seeing: either a prior
+	// delivery was lost before any worker logged it (the Q08 AckWait
+	// stall class) or a prior attempt ran past AckWait without progress.
+	// Execution stays safe either way — task outputs are
+	// TaskID-idempotent and the coordinator ignores duplicate terminal
+	// results — but the event must not be silent.
+	if meta, mErr := msg.Metadata(); mErr == nil && meta.NumDelivered > 1 {
+		w.logger.Warn("task redelivered — prior delivery lost or unacked",
+			"task_id", task.ID, "query_id", task.QueryID,
+			"num_delivered", meta.NumDelivered,
+			"stream_seq", meta.Sequence.Stream)
 	}
 	w.executeIncomingTask(ctx, task, jetstreamAcker{msg: msg})
 }
