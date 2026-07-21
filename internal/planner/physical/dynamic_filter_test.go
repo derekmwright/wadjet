@@ -9,7 +9,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 )
 
-func sqlToStagesWithDynamicFilters(t *testing.T, cat *catalog.Catalog, ctx context.Context, sql string, workerCount int) []Stage {
+func sqlToStagesWithDynamicFilters(t *testing.T, cat *catalog.Catalog, ctx context.Context, sql string, workerCount int, broadcastThreshold int64) []Stage {
 	t.Helper()
 	parsed, err := plansql.Parse(sql)
 	if err != nil {
@@ -32,6 +32,13 @@ func sqlToStagesWithDynamicFilters(t *testing.T, cat *catalog.Catalog, ctx conte
 	planner := NewPlanner(cat)
 	planner.WorkerCount = workerCount
 	planner.DynamicFiltersEnabled = true
+	// broadcastThreshold: 0 keeps the planner default; -1 disables
+	// broadcast so eligibility tests pin the shuffle regime and stay
+	// deterministic as broadcast estimation improves (findScanNode
+	// unwrapping Distinct made Q20's dimension joins broadcast-eligible
+	// in this tiny-manifest env — correct planning, but it leaves
+	// nothing for the DF pass to annotate).
+	planner.BroadcastBytesThreshold = broadcastThreshold
 
 	stages, err := planner.PlanDistributed(ctx, logicalPlan)
 	if err != nil {
@@ -71,7 +78,7 @@ func TestDynamicFilterPassQ17(t *testing.T) {
 			WHERE l_partkey = p_partkey
 		)`
 
-	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3)
+	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3, 0)
 
 	hasBroadcast := false
 	emits, consumes := 0, 0

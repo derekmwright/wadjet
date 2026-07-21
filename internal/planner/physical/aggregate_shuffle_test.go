@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"strings"
 	"testing"
 )
@@ -10,6 +11,12 @@ import (
 // lineitem (alias lineitem:1) is ~6 GB at the test catalog's SF10 metadata;
 // a 4 GB threshold should fire the detection.
 func TestPickAggregateShuffleCandidate_Q17(t *testing.T) {
+	// These fixtures exercise the UNreduced decorrelated shape; the
+	// scalar-agg semijoin reduction (on by default) rewrites it so the
+	// aggregate is no longer scan-rooted. Pin it off for this test.
+	old := logical.ScalarAggSemijoin.Load()
+	logical.ScalarAggSemijoin.Store(false)
+	defer logical.ScalarAggSemijoin.Store(old)
 	cat, ctx := setupTPCHCatalog(t)
 	sql := `SELECT SUM(l_extendedprice) / 7.0 as avg_yearly
 		FROM lineitem JOIN part ON p_partkey = l_partkey
@@ -72,6 +79,12 @@ func TestPickAggregateShuffleCandidate_Q12(t *testing.T) {
 // Q17's inner aggregate is a self-contained GROUP BY query that a worker can
 // execute standalone.
 func TestBuildAggregateShuffleSQL_Q17(t *testing.T) {
+	// These fixtures exercise the UNreduced decorrelated shape; the
+	// scalar-agg semijoin reduction (on by default) rewrites it so the
+	// aggregate is no longer scan-rooted. Pin it off for this test.
+	old := logical.ScalarAggSemijoin.Load()
+	logical.ScalarAggSemijoin.Store(false)
+	defer logical.ScalarAggSemijoin.Store(old)
 	cat, ctx := setupTPCHCatalog(t)
 	sql := `SELECT SUM(l_extendedprice) / 7.0 as avg_yearly
 		FROM lineitem JOIN part ON p_partkey = l_partkey
@@ -116,6 +129,12 @@ func TestBuildAggregateShuffleSQL_Q17(t *testing.T) {
 // Regression guard: if someone raises the default threshold back above
 // real SF10 lineitem bytes, this test fails.
 func TestPickAggregateShuffleCandidate_SF10RealisticBytes(t *testing.T) {
+	// These fixtures exercise the UNreduced decorrelated shape; the
+	// scalar-agg semijoin reduction (on by default) rewrites it so the
+	// aggregate is no longer scan-rooted. Pin it off for this test.
+	old := logical.ScalarAggSemijoin.Load()
+	logical.ScalarAggSemijoin.Store(false)
+	defer logical.ScalarAggSemijoin.Store(old)
 	cat, ctx := setupTPCHCatalog(t)
 	// Rewrite the catalog's lineitem file-size entries to match production
 	// SF10 bytes measured via `aws s3 ls`: 3,673,081,624 bytes across 600

@@ -19,7 +19,7 @@ func TestDynamicFilterAnnotationsPerQuery(t *testing.T) {
 	checks := []int{4, 5, 8, 17, 18, 20, 21, 22}
 	for _, qn := range checks {
 		sql := tpch.TPCHQueries[qn].SQL
-		stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3)
+		stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3, 0)
 		emits, consumes := 0, 0
 		var detail []string
 		for _, s := range stages {

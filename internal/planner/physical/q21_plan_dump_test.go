@@ -22,7 +22,7 @@ func TestQ21PlanDump(t *testing.T) {
 	}
 	cat, ctx := setupTPCHCatalog(t)
 	sql := tpch.TPCHQueries[21].SQL
-	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3)
+	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3, 0)
 	t.Logf("Q21 produced %d stages (worker_count=3, SF10-shaped catalog, dynamic-filters=on)", len(stages))
 
 	emitCount, consumeCount := 0, 0

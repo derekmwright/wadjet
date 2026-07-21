@@ -14,7 +14,7 @@ func TestQ04PlanDump(t *testing.T) {
 		t.Skip("set WADJET_Q04_PLAN_DUMP=1 to enable")
 	}
 	cat, ctx := setupTPCHCatalog(t)
-	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, tpch.TPCHQueries[4].SQL, 3)
+	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, tpch.TPCHQueries[4].SQL, 3, 0)
 	t.Logf("Q04 produced %d stages", len(stages))
 	for i, s := range stages {
 		var b strings.Builder

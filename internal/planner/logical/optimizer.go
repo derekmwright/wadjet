@@ -36,6 +36,10 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	plan = decorrelateScalarSubqueries(plan)
 	plan = extractCommonORPredicates(plan)
 	plan = pushdownPredicates(plan)
+	// After pushdown so the cloned key-source branch carries its final
+	// filters (before pushdown, single-table predicates still sit in the
+	// filter node above the join tree).
+	plan = reduceDecorrelatedScalarAggs(plan)
 	plan = dedupSemiAntiBuildSide(plan)
 	plan = reorderJoins(plan)
 	plan = rewriteDistinctAsGroupBy(plan)
@@ -697,10 +701,11 @@ func tryDecorrelateScalarSubquery(pred Predicate, outerTables map[string]bool, o
 	}
 
 	joinNode := &Node{
-		Type:     NodeJoin,
-		Children: []*Node{nil, aggNode}, // left child filled by caller
-		JoinType: "left",
-		JoinCond: strings.Join(joinCondParts, " AND "),
+		Type:               NodeJoin,
+		Children:           []*Node{nil, aggNode}, // left child filled by caller
+		JoinType:           "left",
+		JoinCond:           strings.Join(joinCondParts, " AND "),
+		ScalarDecorrelated: true,
 	}
 
 	// Rewrite the original predicate: replace SubqueryNode with the expression
