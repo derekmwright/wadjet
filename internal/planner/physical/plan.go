@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/citc-tech/wadjet/internal/config"
 	"github.com/citc-tech/wadjet/internal/engine/batch"
@@ -592,6 +593,13 @@ func (p *Planner) executeSubquery(ctx context.Context, sql string) ([]map[string
 	return collectSink.ToRows(), nil
 }
 
+// scalarDeferAll gates deferring ALL uncorrelated scalar filter subqueries
+// to distributed producer stages (not only CTE-referencing ones).
+// Kill switch: WADJET_SCALAR_DEFER=0 reverts non-CTE subqueries to eager
+// plan-time execution on the coordinator's single-process pipeline
+// (mirrors WADJET_EXCHANGE_ELIDE / WADJET_SCAN_COL_SANITIZE).
+var scalarDeferAll = os.Getenv("WADJET_SCALAR_DEFER") != "0"
+
 // deferredScalar carries a single CTE-referencing subquery whose resolution
 // has been deferred until coordinator dispatch. The placeholder is a colon-
 // prefixed identifier rendered into the serialized filter expression; the
@@ -675,16 +683,24 @@ func (p *Planner) resolveSubqueryAST(ctx context.Context, node plansql.Node, def
 
 	switch n := node.(type) {
 	case *plansql.SubqueryNode:
-		// If the subquery references a CTE we must defer evaluation so it
-		// shares the distributed accumulation path rather than running as a
-		// single-process pipeline over the cteCache (which floats-drifts vs
-		// the outer query's distributed aggregate).
-		if p.subqueryReferencesCTE(n.SQL) {
+		// Defer scalar subqueries to producer stages so they share the
+		// distributed accumulation path instead of running as a silent
+		// single-process pipeline on the coordinator at plan time (Q11's
+		// partsupp⨝supplier⨝nation subquery cost ~39s/query at SF100 this
+		// way, Q22's customer avg ~10s). CTE-referencing subqueries MUST
+		// defer regardless of the kill switch — eager evaluation over the
+		// cteCache floats-drifts vs the outer query's distributed
+		// aggregate (the Q15 SF0.1 0-row bug).
+		if scalarDeferAll || p.subqueryReferencesCTE(n.SQL) {
 			name := p.allocScalarPlaceholder()
 			*deferred = append(*deferred, deferredScalar{Placeholder: name, SubquerySQL: n.SQL})
 			return &plansql.LiteralPlaceholder{Name: name}
 		}
+		start := time.Now()
 		rows, err := p.executeSubquery(ctx, n.SQL)
+		slog.Info("plan-time scalar subquery executed on coordinator",
+			"duration", time.Since(start).Round(time.Millisecond),
+			"rows", len(rows), "error", err != nil)
 		if err != nil || len(rows) == 0 {
 			return node
 		}
@@ -3608,13 +3624,26 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 						// a literal in place of the placeholder. Loses
 						// correctness for CTE-drift cases but keeps the query
 						// running rather than failing outright.
+						start := time.Now()
 						rows, sErr := p.executeSubquery(p.planCtx, d.SubquerySQL)
+						slog.Warn("scalar producer emission failed; executed subquery on coordinator",
+							"duration", time.Since(start).Round(time.Millisecond),
+							"emit_error", err, "exec_error", sErr)
+						spliced := false
 						if sErr == nil && len(rows) > 0 {
 							for _, v := range rows[0] {
 								lit := scalarToLiteral(v).String()
 								resolvedExpr = strings.ReplaceAll(resolvedExpr, ":"+d.Placeholder, lit)
+								spliced = true
 								break
 							}
+						}
+						if !spliced {
+							// Both paths failed: restore the original subquery
+							// text so downstream sees what it saw before
+							// deferral existed, not a dangling :scalar_N.
+							resolvedExpr = strings.ReplaceAll(resolvedExpr,
+								":"+d.Placeholder, "("+d.SubquerySQL+")")
 						}
 						continue
 					}
