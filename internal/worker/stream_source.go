@@ -75,6 +75,11 @@ type cachedFileStreamSource struct {
 	// without needing to teach the source about derivation rules.
 	projectColumns []string
 
+	// projectionSkipWarned dedupes the once-per-source WARN emitted when
+	// projectColumns names a column absent from the file schema (the
+	// all-or-nothing guard reverting to full width).
+	projectionSkipWarned bool
+
 	// Row-group sharding. When shardCount > 1, parquet reads only row groups
 	// [idx*N/count, (idx+1)*N/count). Only applies to parquet inputs (.wshf
 	// shuffle outputs are unaffected — those are already partitioned by the
@@ -864,11 +869,23 @@ func (s *cachedFileStreamSource) buildParquetState(filePath string, data, mmapDa
 			schemaSet[c.Name] = true
 		}
 		allPresent := true
+		var missing []string
 		for _, name := range s.projectColumns {
 			if !schemaSet[name] {
 				allPresent = false
-				break
+				missing = append(missing, name)
 			}
+		}
+		if !allPresent && !s.projectionSkipWarned {
+			// Once per source, not per file: a 600-file scan reverting to
+			// full width is one event. Legitimate for derived columns
+			// (pre-project computes them); polluted planner lists were the
+			// silent 5-6x shuffle-byte amplifier of memo §2 A1 — this line
+			// is how the next regression of that class gets seen.
+			s.projectionSkipWarned = true
+			s.executor.logger.Warn("parquet projection skipped: requested columns missing from schema (reading full width)",
+				"query_id", s.queryID, "missing", strings.Join(missing, ","),
+				"requested", len(s.projectColumns))
 		}
 		if allPresent {
 			wanted := make(map[string]bool, len(s.projectColumns))

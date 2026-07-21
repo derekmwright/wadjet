@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"math"
 	"math/bits"
+	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -39,6 +41,14 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	plan = rewriteDistinctAsGroupBy(plan)
 	plan = extractPartitionFilters(plan)
 	plan = pruneProjections(plan)
+	// Re-annotate before column pruning: scans created AFTER the first
+	// annotator pass (scalar-subquery decorrelation) have no ScanColumns,
+	// and sanitizeScanNeeds can only drop other-table pollution when it
+	// knows the scan's schema (it conservatively keeps everything
+	// otherwise). Annotators are idempotent.
+	for _, annotate := range annotators {
+		annotate(plan)
+	}
 	computeRequiredColumns(plan)
 	attachScanPredicates(plan)
 	return plan
@@ -74,6 +84,66 @@ func attachScanPredicates(n *Node) {
 // columns from storage.
 func computeRequiredColumns(n *Node) {
 	pushColumnNeeds(n, nil)
+}
+
+// scanColSanitize gates sanitizeScanNeeds (WADJET_SCAN_COL_SANITIZE=0
+// restores the pre-2026-07 polluted lists for A/B). Default on.
+var scanColSanitize = os.Getenv("WADJET_SCAN_COL_SANITIZE") != "0"
+
+// sanitizeScanNeeds turns the ancestor-accumulated needs set into a clean
+// RequiredColumns list for one scan. The accumulated set carries junk the
+// scan can never produce — alias-qualified duplicates ("l1.l_receiptdate"
+// next to "l_receiptdate") and the OTHER side's join-key columns
+// ("s_suppkey" landing on a lineitem scan via "s_suppkey = l1.l_suppkey").
+// Any such name trips the worker's all-or-nothing parquet projection guard
+// (cachedFileStreamSource.projectColumns) and silently reverts the scan —
+// and every shuffle fed by it — to full width: Q21's l1 leg measured
+// 143 B/row against the 25 B/row its clean sibling leg achieves
+// (docs/design/exchange-reuse.md §2 A1).
+//
+// Rules, conservative toward keeping:
+//   - "alias.col" where alias is THIS scan (TableAlias or TableName):
+//     rewritten to bare col. Other aliases: dropped — provably another
+//     relation's column.
+//   - bare names when ScanColumns (catalog schema, AnnotateScanColumns) is
+//     known: kept iff in the schema, EXCEPT "__"-prefixed derived names
+//     (e.g. __having_0), which are kept so the worker guard's
+//     derived-column semantics are preserved exactly.
+//   - bare names when ScanColumns is empty (no catalog at plan time):
+//     kept — we cannot judge, and full width is the safe failure mode.
+//
+// Output is sorted for deterministic plans.
+func sanitizeScanNeeds(n *Node, needs map[string]bool) []string {
+	if !scanColSanitize {
+		cols := make([]string, 0, len(needs))
+		for col := range needs {
+			cols = append(cols, col)
+		}
+		sort.Strings(cols)
+		return cols
+	}
+	inSchema := make(map[string]bool, len(n.ScanColumns))
+	for _, c := range n.ScanColumns {
+		inSchema[strings.ToLower(c)] = true
+	}
+	keep := make(map[string]bool, len(needs))
+	for name := range needs {
+		if alias, col, ok := strings.Cut(name, "."); ok {
+			if strings.EqualFold(alias, n.TableAlias) || strings.EqualFold(alias, n.TableName) {
+				keep[col] = true
+			}
+			continue // other relation's qualified column: drop
+		}
+		if len(inSchema) == 0 || inSchema[strings.ToLower(name)] || strings.HasPrefix(name, "__") {
+			keep[name] = true
+		}
+	}
+	cols := make([]string, 0, len(keep))
+	for col := range keep {
+		cols = append(cols, col)
+	}
+	sort.Strings(cols)
+	return cols
 }
 
 // pushColumnNeeds recursively pushes the set of needed columns from parent
@@ -137,11 +207,7 @@ func pushColumnNeeds(n *Node, parentNeeds map[string]bool) {
 
 	if n.Type == NodeScan {
 		if len(needs) > 0 {
-			cols := make([]string, 0, len(needs))
-			for col := range needs {
-				cols = append(cols, col)
-			}
-			n.RequiredColumns = cols
+			n.RequiredColumns = sanitizeScanNeeds(n, needs)
 		}
 		return
 	}
