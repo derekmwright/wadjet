@@ -1733,6 +1733,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// run it as one task instead of the N parallel tasks the exchange
 		// is feeding (Q18 SF10 OOM trigger).
 		assignStageDistributions(stages, p.WorkerCount)
+		// Drop identity re-shuffles (input already hash-partitioned on the
+		// exchange's exact keys/count — Q18's 40 GB repartition-15 at
+		// SF100). Must run after distributions are final; consumers keep
+		// valid labels because the elided exchange's output distribution
+		// was by definition its input's. Kill switch WADJET_EXCHANGE_ELIDE=0.
+		stages = elideCoPartitionedExchanges(stages)
 		// Fragment fusion passes are intentionally NOT called here.
 		//
 		// fuseScanShuffle / fuseJoinShuffle absorb a downstream
