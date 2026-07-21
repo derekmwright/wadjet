@@ -155,6 +155,13 @@ type Node struct {
 	// CTEName — set on the root of a CTE sub-plan so the physical planner
 	// can detect and materialize multi-referenced CTEs.
 	CTEName string
+
+	// ScalarDecorrelated marks a LEFT join produced by
+	// decorrelateScalarSubqueries (children[1] is the grouped aggregate
+	// materializing the subquery result). reduceDecorrelatedScalarAggs
+	// uses it after predicate pushdown to semijoin-reduce the aggregate's
+	// input by the outer plan's key-source branch.
+	ScalarDecorrelated bool
 }
 
 // Predicate is a filter condition.

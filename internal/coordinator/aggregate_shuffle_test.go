@@ -28,6 +28,13 @@ import (
 // and below the production 4 GB threshold, but the primitive is agnostic
 // to the threshold check (that's the caller's job).
 func TestPreComputeDerivedAggregate_Q17SF001(t *testing.T) {
+	// This fixture exercises the UNreduced decorrelated Q17 shape; the
+	// scalar-agg semijoin reduction (on by default) rewrites it so the
+	// aggregate is no longer scan-rooted. Pin it off for this test.
+	oldReduce := logical.ScalarAggSemijoin.Load()
+	logical.ScalarAggSemijoin.Store(false)
+	defer logical.ScalarAggSemijoin.Store(oldReduce)
+
 	ctx, coord := setupTPCHDistributed(t)
 
 	// Plan Q17 through the same path ExecuteSQL uses so we get a realistic

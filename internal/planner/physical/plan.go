@@ -3830,6 +3830,19 @@ func (p *Planner) isBroadcastCandidate(joinNode *logical.Node) bool {
 // Gated on the flag: flag-off keeps semi/anti-leaf builds on their
 // SF100-validated shuffle plans.
 func (p *Planner) estimateSubtreeBytes(n *logical.Node) (int64, bool) {
+	// Distinct(Project[keys]) build sides (IN/EXISTS decorrelation and
+	// scalar-agg-semijoin key sources) are sized by distinct KEY count,
+	// not table bytes × row selectivity. The row-selectivity path is a
+	// trap here: Q04's EXISTS build is Distinct(l_orderkey) over lineitem
+	// filtered by the col-vs-col l_commitdate < l_receiptdate — heuristic
+	// selectivity shrank 76 GB of lineitem under the broadcast threshold
+	// and SF100 replicated a ~200M-key hash build to every worker
+	// (observed 2026-07-21: Q04 37s → 81s). Key-count × key-width says
+	// ~1.6 GB → correctly stays on the shuffle plan, while Q17's filtered
+	// part key source (~20K keys) still broadcasts.
+	if n != nil && n.Type == logical.NodeDistinct {
+		return p.estimateDistinctKeyBytes(n)
+	}
 	scan := findScanNode(n)
 	if scan == nil {
 		if logical.BushyJoinReorder.Load() {
@@ -3869,6 +3882,50 @@ func (p *Planner) estimateSubtreeBytes(n *logical.Node) (int64, bool) {
 		}
 	}
 	return totalBytes, true
+}
+
+// estimateDistinctKeyBytes sizes a Distinct(Project[cols]) subtree as
+// distinct-key-count × a fixed per-key width. Distinct rows = min(input
+// row estimate, product of the projected columns' NDVs); when any NDV is
+// unavailable the input row estimate alone is the (looser) bound. Returns
+// unknown for shapes other than Distinct→Project — bytes-based reasoning
+// through a bare Distinct has no reliable width to scale by, and unknown
+// degrades to the shuffle plan, the safe side.
+func (p *Planner) estimateDistinctKeyBytes(d *logical.Node) (int64, bool) {
+	if len(d.Children) != 1 {
+		return 0, false
+	}
+	proj := d.Children[0]
+	if proj == nil || proj.Type != logical.NodeProject ||
+		len(proj.Children) != 1 || len(proj.Projections) == 0 {
+		return 0, false
+	}
+	stats := logical.RelStatsOf(proj.Children[0])
+	if stats.Rows <= 0 {
+		return 0, false
+	}
+	for _, pr := range proj.Projections {
+		if pr.Column == "" {
+			return 0, false // expression projection — no width to reason from
+		}
+	}
+	// Size by INPUT rows, not NDV: walkStages treats Distinct as a
+	// passthrough (see the #163 note), so the replicated payload is the
+	// UNdeduplicated projected scan output. Q22's anti build is
+	// Distinct(o_custkey) over unfiltered orders — ~10M distinct keys but
+	// 150M shipped rows; NDV-based sizing called it 160MB and SF100
+	// replicated + hashed 150M rows on every worker (observed live
+	// 2026-07-21: Q22 18.7s → 2m34s cold). Row-based sizing says 2.4GB →
+	// correctly stays on the shuffle plan, while Q17's ~20K-row filtered
+	// part key source still broadcasts. If replicate ever materializes
+	// the dedup, this can tighten back toward NDV.
+	//
+	// 16 bytes per key column: int64 key + hash-table overhead. TPC-H
+	// (and typical) semi-join keys are ints; a string-keyed build would
+	// be underestimated, but the shuffle fallback on overflow is still
+	// merely slower, not wrong.
+	const bytesPerKeyCol = 16
+	return int64(stats.Rows) * bytesPerKeyCol * int64(len(proj.Projections)), true
 }
 
 // estimateJoinSubtreeBytes estimates the output size of a join-shaped

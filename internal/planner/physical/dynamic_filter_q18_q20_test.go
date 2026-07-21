@@ -1,6 +1,7 @@
 package physical
 
 import (
+	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"strings"
 	"testing"
 )
@@ -34,7 +35,7 @@ func TestDynamicFilterEligibilityQ18(t *testing.T) {
 	GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
 	ORDER BY o_totalprice DESC, o_orderdate
 	LIMIT 100`
-	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3)
+	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3, -1)
 
 	emits := 0
 	consumes := 0
@@ -73,6 +74,12 @@ func TestDynamicFilterEligibilityQ18(t *testing.T) {
 // v1 single-column-key constraint rules out the composite-key join;
 // dimension joins should still be eligible.
 func TestDynamicFilterEligibilityQ20(t *testing.T) {
+	// These fixtures exercise the UNreduced decorrelated shape; the
+	// scalar-agg semijoin reduction (on by default) rewrites it so the
+	// aggregate is no longer scan-rooted. Pin it off for this test.
+	old := logical.ScalarAggSemijoin.Load()
+	logical.ScalarAggSemijoin.Store(false)
+	defer logical.ScalarAggSemijoin.Store(old)
 	cat, ctx := setupTPCHCatalog(t)
 	const sql = `SELECT s_name, s_address
 		FROM supplier
@@ -94,7 +101,7 @@ func TestDynamicFilterEligibilityQ20(t *testing.T) {
 				)
 			)
 		ORDER BY s_name`
-	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3)
+	stages := sqlToStagesWithDynamicFilters(t, cat, ctx, sql, 3, -1)
 
 	emits := 0
 	consumes := 0
