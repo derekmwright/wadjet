@@ -62,6 +62,18 @@ type StageOutput struct {
 	// across pass-through leaf scans that don't dispatch tasks themselves.
 	DynamicFilters []distributed.DynamicFilterSpec
 
+	// ScanTable/ScanColumns identify a pass-through leaf scan's relation
+	// and (sanitized) projection. Set ONLY on the no-task pass-through
+	// path, where downstream shuffle tasks read base parquet directly —
+	// dispatchShuffleStage copies them onto its synthetic source stage so
+	// prunedScanColumns can narrow the shuffle payload. Without them the
+	// synthetic stage has no column list and every scan-absorbed shuffle
+	// leg ships full-width rows (85.69 GB vs ~12 GB needed on Q21's l2
+	// leg; docs/design/exchange-reuse.md §2 A2). Empty on all other
+	// outputs — WSHF inputs ignore column projection.
+	ScanTable   string
+	ScanColumns []string
+
 	// eager marks a PROVISIONAL output synthesized by an eagerly-cleared
 	// consumer (eagerFeed.provisionalOutput): the producer stage is still
 	// running, Files is the empty layout, and dispatchComputeStage must

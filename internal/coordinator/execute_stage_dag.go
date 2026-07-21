@@ -971,11 +971,21 @@ func (c *Coordinator) dispatchShuffleStage(
 	// Synthesize a source stage for runShuffleSide. EstimatedBytes carries
 	// the upstream's worker-reported output size so the shuffle tasks get
 	// per-task admission estimates (runShuffleSide splits it per task).
+	// ScanTable/ScanColumns ride along when the upstream is a pass-through
+	// leaf scan, so runShuffleSide's prunedScanColumns can narrow the
+	// shuffle tasks' parquet reads — otherwise scan-absorbed legs shuffle
+	// every column of the base table (memo §2 A2). Chained shuffles leave
+	// both empty: WSHF inputs ignore column projection.
+	synthTable := stage.TableName
+	if synthTable == "" {
+		synthTable = upstream.ScanTable
+	}
 	synthetic := physical.Stage{
 		ID:             stage.ID + "-src",
 		Type:           physical.StageScan,
 		ScanFiles:      sourceFiles,
-		TableName:      stage.TableName, // may be empty for chained shuffles; worker falls back to generic scan
+		TableName:      synthTable,
+		Columns:        upstream.ScanColumns,
 		EstimatedBytes: upstream.Bytes,
 	}
 	numParts := stage.Exchange.Count
@@ -1323,9 +1333,11 @@ func (c *Coordinator) dispatchPipelineStage(
 		}
 		files := append([]string(nil), stage.ScanFiles...)
 		out := StageOutput{
-			Kind:  OutputSinglePart,
-			Files: [][]string{files},
-			Bytes: stage.EstimatedBytes, // catalog-true file sizes
+			Kind:        OutputSinglePart,
+			Files:       [][]string{files},
+			Bytes:       stage.EstimatedBytes, // catalog-true file sizes
+			ScanTable:   stage.TableName,
+			ScanColumns: append([]string(nil), stage.Columns...),
 		}
 		// Materialize Consume specs into wire form so downstream shuffle/
 		// stage dispatchers can ship them in their task descriptors
