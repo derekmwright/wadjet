@@ -2380,6 +2380,14 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// A RawInputAggregate final is only correct on the fragment path —
+		// the legacy worker path derives merge mode from StageType and
+		// would remap the raw AggSpecs into merge form. The planner never
+		// emits the shape outside fragment eligibility (its dep is an
+		// exchange, never a gather); fail loudly if that invariant breaks.
+		if stage.RawInputAggregate && t.Operators == nil {
+			return StageOutput{}, fmt.Errorf("stage %s: RawInputAggregate final_aggregate did not take the fragment path", stage.ID)
+		}
 		// Sort migration: dispatch standalone Sort / merge_sort stages via
 		// the fragment path. The fragment runs:
 		//   [OpShuffleSource, OpSort, OpUnpartitionedSink]
@@ -2881,13 +2889,18 @@ func buildAggregateFragment(stage physical.Stage, t *distributed.Task, taskInput
 	// MergeMode is true for stages that re-aggregate already-partial
 	// outputs (final_aggregate, merge_aggregate). It's false for the
 	// standalone "aggregate" stage, which consumes raw rows from upstream
-	// non-scan input (e.g. a join output) and produces a partial. AVG
+	// non-scan input (e.g. a join output) and produces a partial — and for
+	// a RawInputAggregate final, whose input is raw rows from an exchange
+	// hash-partitioned on the group keys (rewireAggOverRawExchange):
+	// partition-disjoint keys make single-level raw aggregation exact, so
+	// the merge remaps (InputCol→OutputCol, COUNT→SUM) must not run. AVG
 	// fold runs only on the final stage; partial / merge_aggregate
 	// preserve __avg_sum#X / __avg_count#X synthetics for the downstream
-	// final to fold. BuildProject is needed only on partial mode where
+	// final to fold. BuildProject is needed only on non-merge mode where
 	// AggSpec.InputExpr might reference a derived expression that the
 	// upstream hasn't pre-computed.
-	mergeMode := stage.Type == "final_aggregate" || stage.Type == "merge_aggregate"
+	mergeMode := (stage.Type == "final_aggregate" || stage.Type == "merge_aggregate") &&
+		!stage.RawInputAggregate
 	ops = append(ops, distributed.OpSpec{
 		Type:        distributed.OpHashAggregate,
 		GroupByCols: append([]string(nil), stage.GroupByCols...),
