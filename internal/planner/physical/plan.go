@@ -64,6 +64,16 @@ type Stage struct {
 	// Sort metadata
 	SortKeys []SortKeySpec
 	Limit    int
+	// SortShardLocal marks a grouped final_aggregate whose SortKeys/Limit
+	// are SHARD-LOCAL: the stage fans out across disjoint group-key shards
+	// (each computes exact aggregates for its groups, then sorts and
+	// applies Limit locally) and a surviving downstream Singleton sort
+	// stage merges the N sorted ≤Limit-row outputs. Distribution rules
+	// treat such a stage like a sort-free grouped final (input clustered
+	// on GroupByCols, output mirrors the input partitioning) — without
+	// this flag SortKeys/Limit force the Singleton collapse. Set only by
+	// fuseSortIntoPredecessor's shard-local fold.
+	SortShardLocal bool
 
 	// Join metadata
 	JoinType        string // inner, left, right, full, cross
@@ -1734,7 +1744,7 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// hash_join / broadcast_join / final_aggregate) so the worker
 		// applies the sort in-process rather than serializing the
 		// pre-sort output and letting a separate sort task pick it up.
-		stages = fuseSortIntoPredecessor(stages)
+		stages = fuseSortIntoPredecessor(stages, p.WorkerCount)
 		var ensureErr error
 		stages, ensureErr = EnsureDistribution(stages, p.WorkerCount)
 		if ensureErr != nil {

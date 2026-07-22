@@ -2,8 +2,20 @@ package physical
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"sync/atomic"
 )
+
+// ShardedSortFinals gates the shard-local sort/limit fold in
+// fuseSortIntoPredecessor (sharded sort/limit finals). Kill switch
+// WADJET_SHARDED_FINALS=0 restores the Singleton collapse. Exported
+// atomic.Bool (the ScalarAggSemijoin pattern) so tests can pin either arm.
+var ShardedSortFinals atomic.Bool
+
+func init() {
+	ShardedSortFinals.Store(os.Getenv("WADJET_SHARDED_FINALS") != "0")
+}
 
 // ValidateNativeDAGShape walks the stage list and returns an error describing
 // the first stage whose shape the native-DAG executor cannot consume. Called
@@ -80,7 +92,7 @@ func ValidateNativeDAGShape(stages []Stage) error {
 // rewritten to the predecessor. No LeftDepStage/RightDepStage rewriting
 // needed because the sort had only one plain dep (sort stages never
 // appear as a join's left/right slot).
-func fuseSortIntoPredecessor(stages []Stage) []Stage {
+func fuseSortIntoPredecessor(stages []Stage, workerCount int) []Stage {
 	idIndex := make(map[string]int, len(stages))
 	for i := range stages {
 		idIndex[stages[i].ID] = i
@@ -113,6 +125,29 @@ func fuseSortIntoPredecessor(stages []Stage) []Stage {
 		}
 		if len(pred.SortKeys) > 0 {
 			continue // don't clobber existing post-sort
+		}
+		// Shard-local fold (sharded sort/limit finals): a grouped
+		// final_aggregate under an ORDER BY + LIMIT collapses to one task
+		// that merges every group serially — a 15 M-group merge is a 16 s
+		// single-task tail on SF100 Q10/Q13. When the upstream partials fan
+		// out, instead of fusing the sort away we copy SortKeys+Limit onto
+		// the final as SHARD-LOCAL (EnsureDistribution then clusters its
+		// input on the group keys and fans it out; each shard owns disjoint
+		// groups, so exact per-shard aggregates + local top-Limit are a
+		// superset of the global top-Limit) and KEEP this sort stage as the
+		// N×Limit-row merge. Limit > 0 is load-bearing: it bounds the merge
+		// input; ORDER BY without LIMIT keeps today's fuse.
+		// Kill switch WADJET_SHARDED_FINALS=0.
+		if ShardedSortFinals.Load() && workerCount > 1 &&
+			pred.Type == "final_aggregate" && len(pred.GroupByCols) > 0 &&
+			s.Limit > 0 && len(pred.Dependencies) == 1 {
+			if depIdx, ok := idIndex[pred.Dependencies[0]]; ok &&
+				stages[depIdx].Distribution.Kind != DistSingleton {
+				pred.SortKeys = append([]SortKeySpec(nil), s.SortKeys...)
+				pred.Limit = s.Limit
+				pred.SortShardLocal = true
+				continue // sort stage survives as the merge
+			}
 		}
 		// Fold sort into predecessor.
 		pred.SortKeys = append([]SortKeySpec(nil), s.SortKeys...)
