@@ -85,6 +85,7 @@ type uploadJob struct {
 	srcPath  string
 	compress bool
 	tmpDir   string // where compressed temps go; must outlive the upload (NOT the task spill dir)
+	size     int64  // srcPath size at job creation; 0 = unknown (stat fallback)
 }
 
 // taskUploads tracks one task's background uploads and publishes
@@ -245,10 +246,14 @@ func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob
 
 // noteCancelled records an aborted upload: file count plus the local
 // (pre-compression) size of the bytes that never had to move — the "S3
-// PUT work a finished query saved" side of the upload ledger.
+// PUT work a finished query saved" side of the upload ledger. Prefer the
+// creation-time size: cancellation usually races query cleanup, and the
+// cache-owned srcPath is often already unlinked by the time we get here.
 func (m *uploadManager) noteCancelled(j uploadJob) {
 	m.cancelledFiles.Add(1)
-	if fi, err := os.Stat(j.srcPath); err == nil {
+	if j.size > 0 {
+		m.cancelledBytes.Add(j.size)
+	} else if fi, err := os.Stat(j.srcPath); err == nil {
 		m.cancelledBytes.Add(fi.Size())
 	}
 }

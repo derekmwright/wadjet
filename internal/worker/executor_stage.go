@@ -447,7 +447,7 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 			}
 			e.uploads.StartTask(root, task.ID, result.WorkerID, []uploadJob{{
 				bucket: task.ResultBucket, key: key, srcPath: adopted,
-				compress: false, tmpDir: e.spillDir,
+				compress: false, tmpDir: e.spillDir, size: int64(len(payload)),
 			}})
 			return nil
 		}
