@@ -220,8 +220,12 @@ func RequiredChildDistribution(stage Stage, slot int) RequiredDistribution {
 		// SortKeys / Limit / scalar (no GroupByCols) stay on RequiredAny:
 		// SortKeys force serial execution anyway, Limit relies on the
 		// pre-existing single-task collapse, and scalar aggregates produce
-		// one row regardless of input distribution.
-		if len(stage.GroupByCols) > 0 && len(stage.SortKeys) == 0 && stage.Limit == 0 {
+		// one row regardless of input distribution. Exception: a
+		// SortShardLocal final carries shard-local SortKeys/Limit (each
+		// shard top-Ks its own disjoint groups; the surviving downstream
+		// sort merges), so it clusters like a sort-free grouped final.
+		if len(stage.GroupByCols) > 0 &&
+			(stage.SortShardLocal || (len(stage.SortKeys) == 0 && stage.Limit == 0)) {
 			return RequiredDistribution{Kind: RequiredClusteredOn, Keys: stage.GroupByCols}
 		}
 		return RequiredDistribution{Kind: RequiredAny}
@@ -332,10 +336,11 @@ func OutputDistribution(stage Stage, deps map[string]Distribution, workerCount i
 		// numTasks=Distribution.Count parallel final tasks (each consuming a
 		// disjoint slice of group keys), instead of one OOM-prone task that
 		// merges all keys serially. Only mirror when SortKeys/Limit are unset
-		// — those force serial output today (single-task Sort + Limit; lifting
-		// is a separate concern that needs a downstream merge_sort).
+		// — those force serial output today (single-task Sort + Limit) —
+		// or when they are SortShardLocal (each shard sorts/limits its own
+		// disjoint groups; the surviving downstream sort stage merges).
 		if len(stage.GroupByCols) > 0 &&
-			len(stage.SortKeys) == 0 && stage.Limit == 0 &&
+			(stage.SortShardLocal || (len(stage.SortKeys) == 0 && stage.Limit == 0)) &&
 			len(stage.Dependencies) == 1 {
 			if depDist, ok := deps[stage.Dependencies[0]]; ok &&
 				depDist.Kind == DistHashPartitioned &&
