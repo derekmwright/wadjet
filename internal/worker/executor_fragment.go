@@ -426,10 +426,10 @@ func buildDynamicFilterEmitOps(specs []distributed.DynamicFilterEmit) ([]*exec.D
 // pause) lives in the consumer so the pause reflects the full pipeline state.
 func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification) error {
 	// Morsel-driven parallel path (docs/design/morsel-execution.md §4). k > 1
-	// only when the flag allows it, every op is Cloneable, the fragment
-	// clears the size gate, and CPU tokens are available. Tokens are held for
-	// the duration of the fragment.
-	if k, release := e.morselFragmentWorkers(task, ops); k > 1 {
+	// only when the flag allows it, every op is Cloneable, and the fragment
+	// clears the size gate. Active width is metered by the gate (§4.2.1);
+	// in legacy mode tokens are held for the duration of the fragment.
+	if k, gate, release := e.morselFragmentWorkers(task, ops); k > 1 {
 		defer release()
 		e.logger.Debug("morsel parallel fragment",
 			"task_id", task.ID,
@@ -438,7 +438,7 @@ func (e *Executor) runFragmentLinear(ctx context.Context, task distributed.Task,
 			"estimated_bytes", task.EstimatedBytes,
 			"cpu_tokens_in_use", e.cpuTokens.InUse(),
 			"cpu_tokens_cap", e.cpuTokens.Capacity())
-		return e.runFragmentLinearParallel(ctx, task, src, ops, sink, result, k)
+		return e.runFragmentLinearParallel(ctx, task, src, ops, sink, result, k, gate)
 	}
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
@@ -580,31 +580,38 @@ var morselMinFragmentBytes int64 = 64 << 20
 // bottleneck and extra clones only add merge/scratch overhead.
 const morselFragmentParallelismCap = 8
 
-// morselFragmentWorkers decides the parallel width for a linear fragment and
-// acquires CPU tokens for the extra consumers. Returns k and a release
-// function (call exactly once, after the fragment finishes). k == 1 means
-// serial — the returned release is a no-op.
+// morselFragmentWorkers decides the parallel width for a linear fragment.
+// Returns the consumer count k, the width gate metering their ACTIVE
+// concurrency, and a release function (call exactly once, after the
+// fragment finishes). k == 1 means serial — gate is nil and release a no-op.
 //
-// The first consumer is free (the serial baseline is always allowed); each
-// extra consumer takes one token. Acquisition is non-blocking: under token
-// exhaustion the fragment degrades toward serial rather than queueing.
-func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.UnaryOperator) (int, func()) {
+// Work-conserving mode (default): no tokens are taken here at all. k is the
+// policy target and the returned widthGate admits consumers morsel-by-morsel
+// — one fragment baseline slot is free, extras claim pool tokens only while
+// processing and yield them when the dispenser runs dry, so input-starved
+// width never starves the decode that would feed it (§4.2.1).
+//
+// Legacy mode (WADJET_MORSEL_YIELD=0): the first consumer is free, each
+// extra consumer takes one token at fragment start and holds it for the
+// fragment's lifetime; under token exhaustion the fragment degrades toward
+// serial. gate is nil.
+func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.UnaryOperator) (int, *widthGate, func()) {
 	noop := func() {}
 	policy := e.morselWorkers
 	if policy == 0 || policy == 1 || e.cpuTokens == nil {
-		return 1, noop
+		return 1, nil, noop
 	}
 	// Every op must be Cloneable — non-cloneable ops (e.g. the
 	// DynamicFilterEmitOp accumulator) keep the fragment serial.
 	for _, op := range ops {
 		if _, ok := op.(exec.Cloneable); !ok {
-			return 1, noop
+			return 1, nil, noop
 		}
 	}
 	target := policy
 	if policy < 0 { // auto: size-gated, width up to core count
 		if task.EstimatedBytes < morselMinFragmentBytes {
-			return 1, noop
+			return 1, nil, noop
 		}
 		target = runtime.GOMAXPROCS(0)
 	}
@@ -612,13 +619,70 @@ func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.Unary
 		target = morselFragmentParallelismCap
 	}
 	if target <= 1 {
-		return 1, noop
+		return 1, nil, noop
+	}
+	if morselWidthYield {
+		return target, newWidthGate(e.cpuTokens), noop
 	}
 	got := e.cpuTokens.TryAcquire(target - 1)
 	if got == 0 {
-		return 1, noop
+		return 1, nil, noop
 	}
-	return 1 + got, func() { e.cpuTokens.Release(got) }
+	return 1 + got, nil, func() { e.cpuTokens.Release(got) }
+}
+
+// consumeMorsels is one consumer goroutine's loop, shared by the linear and
+// breaker parallel paths. process must retire the morsel on every path and
+// is called while the consumer holds its width slot; stop (nil-safe) is
+// checked after each morsel to end the parallel section early (pressure
+// collapse). A nil gate reproduces the fixed-width shape: the consumer's
+// concurrency is pre-paid, so it just drains the channel.
+//
+// The slot dance is the work-conserving core: hold a slot across
+// back-to-back morsels (the steady-flow fast path — no per-morsel pool
+// traffic), yield it before blocking on an empty channel, re-claim on the
+// next morsel.
+func consumeMorsels(ctx context.Context, d *morselDispenser, gate *widthGate, process func(m morsel) error, stop func() bool) error {
+	slot := slotNone
+	defer func() {
+		if gate != nil {
+			gate.yield(slot)
+		}
+	}()
+	for {
+		var m morsel
+		var ok bool
+		select {
+		case m, ok = <-d.ch:
+		default:
+			if gate != nil && slot != slotNone {
+				gate.yield(slot)
+				slot = slotNone
+			}
+			select {
+			case m, ok = <-d.ch:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		if !ok {
+			return nil
+		}
+		if gate != nil && slot == slotNone {
+			s, err := gate.claim(ctx)
+			if err != nil {
+				m.retire()
+				return err
+			}
+			slot = s
+		}
+		if err := process(m); err != nil {
+			return err
+		}
+		if stop != nil && stop() {
+			return nil
+		}
+	}
 }
 
 // runFragmentLinearParallel is the morsel-driven variant of
@@ -654,7 +718,7 @@ func (e *Executor) morselFragmentWorkers(task distributed.Task, ops []exec.Unary
 // expr.ColRef's sync.Once). The warmup batch completes those writes while
 // the chain is still single-threaded; clones then only read the resolved
 // caches.
-func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification, k int) error {
+func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink fragmentSink, result *distributed.ResultNotification, k int, gate *widthGate) error {
 	progress := exec.ProgressReporterFromContext(ctx)
 	fp := newFragmentProgress(e.logger, task, e)
 	src = fp.timeSource(src)
@@ -766,7 +830,7 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 		for i := 0; i < k; i++ {
 			chain := chains[i]
 			g.Go(func() error {
-				for m := range d.ch {
+				return consumeMorsels(gctx, d, gate, func(m morsel) error {
 					if err := fp.applyBackpressure(gctx); err != nil {
 						m.retire()
 						return err
@@ -783,15 +847,17 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 						}
 					}
 					m.retire()
+					return nil
+				}, func() bool {
 					if collapsed.Load() {
-						return nil
+						return true
 					}
 					if heapPressureActive() {
 						collapsed.Store(true)
-						return nil
+						return true
 					}
-				}
-				return nil
+					return false
+				})
 			})
 		}
 		if err := g.Wait(); err != nil {
@@ -828,8 +894,11 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 		if err := <-prodErr; err != nil {
 			return fmt.Errorf("fragment task %s: %w", task.ID, err)
 		}
-		e.logger.Debug("morsel parallel fragment done",
-			append([]any{"task_id", task.ID, "k", k}, d.logAttrs()...)...)
+		attrs := append([]any{"task_id", task.ID, "k", k}, d.logAttrs()...)
+		if gate != nil {
+			attrs = append(attrs, gate.logAttrs()...)
+		}
+		e.logger.Debug("morsel parallel fragment done", attrs...)
 	}
 
 	// Spilled-partition flush, over EVERY chain. Clone probes share the
@@ -873,7 +942,7 @@ func (e *Executor) runFragmentLinearParallel(ctx context.Context, task distribut
 // (Sort stores them) while upstream Filters reuse per-instance Sel scratch —
 // same rule as drainThroughBreaker. Finalize on the primary is called here,
 // matching the serial Pipeline.Run contract for the j==0 phase.
-func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink exec.MergeableSink, k int) error {
+func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distributed.Task, src exec.Source, ops []exec.UnaryOperator, sink exec.MergeableSink, k int, gate *widthGate) error {
 	fp := newFragmentProgress(e.logger, task, e)
 
 	consumeInto := func(ctx context.Context, dst exec.Sink, b *batch.RecordBatch) error {
@@ -1018,7 +1087,7 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	for i := 0; i < k; i++ {
 		chain, wsink := chains[i], sinks[i]
 		g.Go(func() error {
-			for m := range d.ch {
+			return consumeMorsels(gctx, d, gate, func(m morsel) error {
 				if err := fp.applyBackpressure(gctx); err != nil {
 					m.retire()
 					return err
@@ -1035,15 +1104,17 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 					}
 				}
 				m.retire()
+				return nil
+			}, func() bool {
 				if collapsed.Load() {
-					return nil
+					return true
 				}
 				if e.sharedSpill != nil && e.sharedSpill.ShouldSpillFor(memory.SpillCheap) {
 					collapsed.Store(true)
-					return nil
+					return true
 				}
-			}
-			return nil
+				return false
+			})
 		})
 	}
 	if err := g.Wait(); err != nil {
@@ -1089,8 +1160,11 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	if err := <-prodErr; err != nil {
 		return err
 	}
-	e.logger.Debug("morsel parallel breaker consume done",
-		append([]any{"task_id", task.ID, "k", k}, d.logAttrs()...)...)
+	doneAttrs := append([]any{"task_id", task.ID, "k", k}, d.logAttrs()...)
+	if gate != nil {
+		doneAttrs = append(doneAttrs, gate.logAttrs()...)
+	}
+	e.logger.Debug("morsel parallel breaker consume done", doneAttrs...)
 
 	// Spilled-partition flush over every chain (shared spillState; the first
 	// drain clears it, later chains no-op — same rule as the linear path),
@@ -1237,8 +1311,9 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 			// serial Pipeline.
 			mergeable, isMergeable := breakers[j].Op.(exec.MergeableSink)
 			k, release := 1, func() {}
+			var gate *widthGate
 			if isMergeable {
-				k, release = e.morselFragmentWorkers(task, phaseOps)
+				k, gate, release = e.morselFragmentWorkers(task, phaseOps)
 			}
 			if k > 1 {
 				err = func() error {
@@ -1251,7 +1326,7 @@ func (e *Executor) runFragmentWithBreakers(ctx context.Context, task distributed
 						"estimated_bytes", task.EstimatedBytes,
 						"cpu_tokens_in_use", e.cpuTokens.InUse(),
 						"cpu_tokens_cap", e.cpuTokens.Capacity())
-					return e.runBreakerConsumeParallel(ctx, task, currentSrc, phaseOps, mergeable, k)
+					return e.runBreakerConsumeParallel(ctx, task, currentSrc, phaseOps, mergeable, k, gate)
 				}()
 				if err != nil {
 					return fmt.Errorf("fragment task %s: %s consume: %w", task.ID, breakers[j].Label, err)

@@ -319,6 +319,43 @@ goroutines) bounds Σ(k) across concurrent tasks *and* is taken by the
 existing errgroup bursts, so the process never schedules more compute
 goroutines than cores.
 
+### 4.2.1 Work-conserving width (2026-07-21)
+
+Fixed-lifetime width acquisition turned out to self-starve: a fragment's
+consumers held their width tokens THROUGH input stalls, and the pool they
+exhausted is the same pool decode-ahead draws from — so on probe-split
+scan stages the decode that would have fed the idle consumers collapsed to
+cursor-only. The SF100 2026-07-21 ref run showed the shape suite-wide:
+every 3-task lineitem broadcast/probe-split stage bottomed out at a ~45 s
+floor (Q09 join-6 47.3 s with 126 s cumulative decode token-stall on one
+worker; Q17's two legs 74 s each; Q18 scan-9 130 s) while workers averaged
+~17 % CPU.
+
+The fix inverts the holding rule: **a consumer owns width only while it
+owns a morsel.** `morselFragmentWorkers` no longer takes tokens; it
+returns the policy target plus a per-fragment `widthGate`. Consumers
+claim before processing — fragment baseline slot first (the "first
+consumer is free" rule, now a slot any consumer may hold rather than
+goroutine #0's identity), then a pool token — hold the slot across
+back-to-back morsels (steady flow pays no per-morsel pool traffic), and
+yield it before blocking on an empty dispenser. Starved width returns to
+the pool, decode-ahead widens, the channel refills, consumers re-claim:
+tokens flow to whichever side has work.
+
+Claiming may BLOCK (a queued FIFO waiter on `cpuTokens`), which the
+original §4.2 design ruled out. The rejection targeted waits on capacity
+that only the waiter's own progress would release; here every token
+holder is actively computing with bounded hold time (one row-group
+decode, one morsel), releases are continuous, and the baseline slot
+guarantees each fragment a runnable consumer regardless of the pool — no
+cycle, no wedge. Queued waiters take strict priority over `TryAcquire`
+(they hold admitted morsels; feeding them beats widening decode). A side
+effect fixes a second rigidity: width is no longer frozen at start-time
+token availability, so a fragment that began under a transient burst can
+widen when the burst passes.
+
+Kill switch: `WADJET_MORSEL_YIELD=0` restores fixed-lifetime acquisition.
+
 ### 4.3 Pipeline breakers
 
 - **HashAggregate / Sort:** per-worker `CloneSink` partials merged at the

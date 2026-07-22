@@ -24,7 +24,19 @@ func (nonCloneableOp) Execute(_ context.Context, b *batch.RecordBatch) (*batch.R
 }
 func (nonCloneableOp) Close() error { return nil }
 
+// pinWidthYield pins the work-conserving-width mode for a test and restores
+// it at cleanup. The fixed-width subtests below pin false: they encode the
+// legacy WADJET_MORSEL_YIELD=0 semantics (width frozen at start-time token
+// availability).
+func pinWidthYield(tb testing.TB, on bool) {
+	tb.Helper()
+	prev := morselWidthYield
+	morselWidthYield = on
+	tb.Cleanup(func() { morselWidthYield = prev })
+}
+
 func TestMorselFragmentWorkers_Gates(t *testing.T) {
+	pinWidthYield(t, false)
 	newExec := func(policy, tokens int) *Executor {
 		e := NewExecutor(objstore.NewMemStore(), NewLRUCache(1024*1024), nil)
 		e.SetMorselWorkers(policy)
@@ -39,19 +51,19 @@ func TestMorselFragmentWorkers_Gates(t *testing.T) {
 
 	t.Run("zero value stays serial", func(t *testing.T) {
 		e := NewExecutor(objstore.NewMemStore(), NewLRUCache(1024*1024), nil)
-		if k, _ := e.morselFragmentWorkers(bigTask, cloneable); k != 1 {
+		if k, _, _ := e.morselFragmentWorkers(bigTask, cloneable); k != 1 {
 			t.Fatalf("k = %d, want 1", k)
 		}
 	})
 	t.Run("explicit 1 stays serial", func(t *testing.T) {
 		e := newExec(1, 8)
-		if k, _ := e.morselFragmentWorkers(bigTask, cloneable); k != 1 {
+		if k, _, _ := e.morselFragmentWorkers(bigTask, cloneable); k != 1 {
 			t.Fatalf("k = %d, want 1", k)
 		}
 	})
 	t.Run("fixed width acquires extras and releases", func(t *testing.T) {
 		e := newExec(4, 8)
-		k, release := e.morselFragmentWorkers(smallTask, cloneable) // fixed bypasses size gate
+		k, _, release := e.morselFragmentWorkers(smallTask, cloneable) // fixed bypasses size gate
 		if k != 4 {
 			t.Fatalf("k = %d, want 4", k)
 		}
@@ -65,7 +77,7 @@ func TestMorselFragmentWorkers_Gates(t *testing.T) {
 	})
 	t.Run("token scarcity narrows width", func(t *testing.T) {
 		e := newExec(4, 1)
-		k, release := e.morselFragmentWorkers(bigTask, cloneable)
+		k, _, release := e.morselFragmentWorkers(bigTask, cloneable)
 		if k != 2 {
 			t.Fatalf("k = %d, want 2 (1 free + 1 token)", k)
 		}
@@ -73,7 +85,7 @@ func TestMorselFragmentWorkers_Gates(t *testing.T) {
 	})
 	t.Run("token exhaustion degrades to serial", func(t *testing.T) {
 		e := newExec(4, 0)
-		k, release := e.morselFragmentWorkers(bigTask, cloneable)
+		k, _, release := e.morselFragmentWorkers(bigTask, cloneable)
 		if k != 1 {
 			t.Fatalf("k = %d, want 1", k)
 		}
@@ -85,7 +97,7 @@ func TestMorselFragmentWorkers_Gates(t *testing.T) {
 	t.Run("non-cloneable op stays serial without taking tokens", func(t *testing.T) {
 		e := newExec(4, 8)
 		ops := append([]exec.UnaryOperator{nonCloneableOp{}}, cloneable...)
-		k, _ := e.morselFragmentWorkers(bigTask, ops)
+		k, _, _ := e.morselFragmentWorkers(bigTask, ops)
 		if k != 1 {
 			t.Fatalf("k = %d, want 1", k)
 		}
@@ -95,10 +107,10 @@ func TestMorselFragmentWorkers_Gates(t *testing.T) {
 	})
 	t.Run("auto respects size gate", func(t *testing.T) {
 		e := newExec(-1, 8)
-		if k, _ := e.morselFragmentWorkers(smallTask, cloneable); k != 1 {
+		if k, _, _ := e.morselFragmentWorkers(smallTask, cloneable); k != 1 {
 			t.Fatalf("small fragment k = %d, want 1", k)
 		}
-		k, release := e.morselFragmentWorkers(bigTask, cloneable)
+		k, _, release := e.morselFragmentWorkers(bigTask, cloneable)
 		want := runtime.GOMAXPROCS(0)
 		if want > morselFragmentParallelismCap {
 			want = morselFragmentParallelismCap
@@ -113,12 +125,37 @@ func TestMorselFragmentWorkers_Gates(t *testing.T) {
 	})
 	t.Run("fixed width capped", func(t *testing.T) {
 		e := newExec(64, 64)
-		k, release := e.morselFragmentWorkers(bigTask, cloneable)
+		k, _, release := e.morselFragmentWorkers(bigTask, cloneable)
 		if k != morselFragmentParallelismCap {
 			t.Fatalf("k = %d, want cap %d", k, morselFragmentParallelismCap)
 		}
 		release()
 	})
+}
+
+// TestMorselFragmentWorkers_YieldMode: work-conserving mode takes no tokens
+// up front and returns the full policy target even on an exhausted pool —
+// active width is metered per-morsel by the gate instead of frozen at
+// start-time availability.
+func TestMorselFragmentWorkers_YieldMode(t *testing.T) {
+	pinWidthYield(t, true)
+	e := NewExecutor(objstore.NewMemStore(), NewLRUCache(1024*1024), nil)
+	e.SetMorselWorkers(4)
+	e.cpuTokens = newCPUTokens(0) // exhausted pool must not narrow k
+	cloneable := []exec.UnaryOperator{exec.NewFilter(func(*batch.RecordBatch, int) bool { return true })}
+	task := distributed.Task{EstimatedBytes: morselMinFragmentBytes}
+
+	k, gate, release := e.morselFragmentWorkers(task, cloneable)
+	if k != 4 {
+		t.Fatalf("k = %d, want policy target 4", k)
+	}
+	if gate == nil {
+		t.Fatal("gate = nil, want a width gate in yield mode")
+	}
+	if got := e.cpuTokens.InUse(); got != 0 {
+		t.Fatalf("tokens taken up front = %d, want 0", got)
+	}
+	release()
 }
 
 // TestExecuteFragment_MorselParallel_FilterParity runs the same
