@@ -3345,6 +3345,18 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 				if (*stages)[i].Type == "scan" {
 					(*stages)[i].FusedAggGroupBy = groupBy
 					(*stages)[i].FusedAggSpecs = aggSpecs
+					// The scan's RequiredColumns carry the aggregate OUTPUT
+					// names (e.g. __having_0) because ancestors reference
+					// them. On a fused scan-aggregate those are produced by
+					// the fragment's HashAggregate, not read from parquet —
+					// but the worker's all-or-nothing projection guard can't
+					// know that: one unknown name silently reverts the whole
+					// scan to full width (Q18's fused lineitem leg measured
+					// 143 B/row vs the ~25 B/row its 2-column read set
+					// needs). Strip pure outputs from the read set; an
+					// output that aliases a real input (SUM(x) AS x) stays.
+					(*stages)[i].Columns = pruneFusedAggOutputCols(
+						(*stages)[i].Columns, groupBy, aggSpecs, (*stages)[i].FilterExprs)
 				}
 			}
 			// Skip the separate aggregate stage — scans produce partial aggs.
