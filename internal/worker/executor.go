@@ -1049,6 +1049,14 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	}
 	defer src.Close()
 
+	// Appended expression columns (exchange subsumption dedup): compiled
+	// once, evaluated per batch, appended ahead of the partitioning sink so
+	// the flag ships inside every partition file.
+	computedAppenders, err := newComputedColAppenders(task.ComputedCols)
+	if err != nil {
+		return fmt.Errorf("shuffle task %s: %w", task.ID, err)
+	}
+
 	// Set up the spill directory for the sink's partition files.
 	spillDir := filepath.Join(e.spillDir, "shuffle-"+task.ID)
 	if e.spillDir == "" {
@@ -1115,6 +1123,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			}
 			n = int64(b.ActiveLen())
 		}
+		b = applyComputedCols(computedAppenders, task.DropCols, b)
 		if sink == nil {
 			sink = newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, b.Schema)
 			if err := sink.Init(ctx); err != nil {

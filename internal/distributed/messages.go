@@ -126,6 +126,9 @@ type Task struct {
 	// owning alias instead of BuildTableAlias.
 	BuildColOrigins map[string]string `json:"build_col_origins,omitempty"`
 	JoinFilter      string            `json:"join_filter,omitempty"` // semi/anti join inequality filter expression
+	// BuildFilterExprs filter the build input rows before hash-table
+	// insertion (exchange subsumption dedup).
+	BuildFilterExprs []string `json:"build_filter_exprs,omitempty"`
 
 	// Fused join: additional broadcast joins absorbed into a single task.
 	// The worker builds hash tables for each fused join, then chains probes
@@ -138,6 +141,13 @@ type Task struct {
 	// Shuffle-specific
 	ShuffleKeys   []string `json:"shuffle_keys,omitempty"`   // columns to hash-partition on
 	NumPartitions int      `json:"num_partitions,omitempty"` // number of output partitions
+	// ComputedCols are expression columns appended to the shuffle payload
+	// after the projected scan columns (exchange subsumption dedup: a
+	// dropped filtered sibling's filter ships as a computed flag).
+	ComputedCols []ComputedColSpec `json:"computed_cols,omitempty"`
+	// DropCols are read-only helper columns (ComputedCols expression
+	// inputs) removed from the payload after the flags are computed.
+	DropCols []string `json:"drop_cols,omitempty"`
 	PartitionID   int      `json:"partition_id,omitempty"`   // which partition this join task handles
 
 	// Dynamic filters carried at the top level for non-fragment task shapes
@@ -324,6 +334,10 @@ type OpSpec struct {
 	JoinFilter          string   `json:"join_filter,omitempty"`
 	BuildRowHint        int64    `json:"build_row_hint,omitempty"`
 	SemiAntiKeyOnly     bool     `json:"semi_anti_key_only,omitempty"`
+	// BuildFilterExprs filter the BUILD input rows before hash-table
+	// insertion (exchange subsumption dedup: the dropped exchange's scan
+	// filter — or its computed flag column — applied at build read).
+	BuildFilterExprs []string `json:"build_filter_exprs,omitempty"`
 	QualifyAllBuildCols bool              `json:"qualify_all_build_cols,omitempty"`
 	BuildColOrigins     map[string]string `json:"build_col_origins,omitempty"` // bare build col → owning scan alias (multi-table builds only)
 	OutputColumns       []string          `json:"output_columns,omitempty"`    // OutputFilter for primary probe
@@ -669,4 +683,11 @@ func Unmarshal(data []byte, v any) error {
 		return gob.NewDecoder(bytes.NewReader(data[1:])).Decode(v)
 	}
 	return json.Unmarshal(data, v)
+}
+
+// ComputedColSpec is one appended expression column on a shuffle payload
+// (exchange subsumption dedup).
+type ComputedColSpec struct {
+	Name string `json:"name"`
+	Expr string `json:"expr"`
 }

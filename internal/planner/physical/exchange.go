@@ -42,4 +42,21 @@ type ExchangeStage struct {
 	BuildAlias string        // Repartition, Replicate
 	ProbeAlias string        // Repartition, Replicate
 	BuildBytes int64         // Repartition (for logging / threshold checks)
+	// ComputedCols are expression columns APPENDED to the shuffle payload
+	// (after the projected scan columns). Set by dedupeSubsumedScanExchanges
+	// so one raw exchange can serve a dropped filtered sibling: the
+	// sibling's scan filter ships as a cheap computed flag (1 byte/row)
+	// instead of a second full scan+shuffle of the table. Workers evaluate
+	// Expr per batch and append the result under Name.
+	ComputedCols []ComputedCol
+	// ExtraReadCols are columns the shuffle's source scan must READ so the
+	// ComputedCols expressions can evaluate, but which are NOT part of the
+	// shipped payload — the worker drops them after computing the flags.
+	ExtraReadCols []string
+}
+
+// ComputedCol is one appended expression column on a shuffle payload.
+type ComputedCol struct {
+	Name string
+	Expr string
 }

@@ -1000,7 +1000,16 @@ func (c *Coordinator) dispatchShuffleStage(
 	// consumers can clear their barrier once the shuffle tasks are built.
 	// nil when the flag is off. The empty-source early return above never
 	// dispatches the feed — consumers just fall through on done[dep].
-	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters, c.eagerFeedHandle(queryID, stage.ID))
+	var computedCols []distributed.ComputedColSpec
+	for _, cc := range stage.Exchange.ComputedCols {
+		computedCols = append(computedCols, distributed.ComputedColSpec{Name: cc.Name, Expr: cc.Expr})
+	}
+	// Widen the parquet read with the flag expressions' input columns; the
+	// worker drops them from the payload after computing the flags.
+	if len(stage.Exchange.ExtraReadCols) > 0 && len(synthetic.Columns) > 0 {
+		synthetic.Columns = append(append([]string(nil), synthetic.Columns...), stage.Exchange.ExtraReadCols...)
+	}
+	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters, computedCols, stage.Exchange.ExtraReadCols, c.eagerFeedHandle(queryID, stage.ID))
 	if err != nil {
 		return StageOutput{}, err
 	}
@@ -2225,6 +2234,7 @@ func (c *Coordinator) dispatchComputeStage(
 			QualifyAllBuildCols: stage.QualifyAllBuildCols,
 			BuildColOrigins:     stage.BuildColOrigins,
 			JoinFilter:          stage.JoinFilter,
+			BuildFilterExprs:    append([]string(nil), stage.BuildFilterExprs...),
 			FusedJoins:          wireFused,
 			GroupByCols:         stage.GroupByCols,
 			Aggregates:          aggs,
@@ -2720,6 +2730,7 @@ func buildJoinFragment(
 		JoinFilter:          t.JoinFilter,
 		BuildRowHint:        t.BuildRowHint,
 		SemiAntiKeyOnly:     t.SemiAntiKeyOnly,
+		BuildFilterExprs:    append([]string(nil), t.BuildFilterExprs...),
 		QualifyAllBuildCols: t.QualifyAllBuildCols,
 		BuildColOrigins:     t.BuildColOrigins,
 		OutputColumns:       append([]string(nil), t.Columns...),
