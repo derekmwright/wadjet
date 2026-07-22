@@ -62,7 +62,13 @@ type refaultSensor struct {
 	hotStreak  int // consecutive over-threshold samples
 	active     bool
 
-	activations int64 // inactive->active transitions, for markers
+	activations int64     // inactive->active transitions, for markers
+	activeSince time.Time // start of the current activation episode
+
+	// boundedIgnores counts ActiveBounded calls that returned false while
+	// the sensor was active — episodes that outlived the caller's cap and
+	// were declared non-causal. Rollout marker for the episode-cap v3.
+	boundedIgnores int64
 }
 
 func newRefaultSensor(read func() (int64, bool), threshold float64, interval time.Duration) *refaultSensor {
@@ -117,8 +123,42 @@ func (s *refaultSensor) Active() bool {
 	s.active = s.hotStreak >= 2
 	if s.active && !wasActive {
 		s.activations++
+		s.activeSince = now
 	}
 	return s.active
+}
+
+// ActiveBounded is Active with a per-episode honor budget: it reports
+// true only while the current activation episode is younger than cap.
+//
+// Rationale (refault-sensor v3, 2026-07-22 SF100 investigation): the
+// collapse this sensor gates sheds the caller's own held window bytes.
+// When those bytes ARE the displacement cause (Q06-shape concurrent
+// full-table scans), shedding them drops the refault rate within a
+// sample or two and the episode ends — the cap never binds. When the
+// refaults are ambient (suite traffic re-faulting a legitimately colder
+// cache off local NVMe), collapse sheds nothing, the rate never goes
+// quiet, and v2 semantics locked the throttle on for minutes — measured
+// +22-40% SF100 steady suite loss for zero displacement relief. An
+// episode that outlives cap despite the collapse is therefore declared
+// non-causal and ignored until the sensor genuinely deactivates (one
+// quiet sample), which arms a fresh episode.
+//
+// cap <= 0 means unbounded — identical to Active.
+func (s *refaultSensor) ActiveBounded(cap time.Duration) bool {
+	if !s.Active() {
+		return false
+	}
+	if cap <= 0 {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if time.Since(s.activeSince) > cap {
+		s.boundedIgnores++
+		return false
+	}
+	return true
 }
 
 // Stats returns the last computed rate (pages/sec) and the number of
@@ -130,6 +170,17 @@ func (s *refaultSensor) Stats() (lastRate float64, activations int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.lastRate, s.activations
+}
+
+// BoundedIgnores returns how many ActiveBounded consultations declined an
+// over-cap episode — the episode-cap v3 rollout marker.
+func (s *refaultSensor) BoundedIgnores() int64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.boundedIgnores
 }
 
 // readRefaultCounter returns a reader for the best available refault
@@ -223,6 +274,19 @@ func pageCachePressureSensor() *refaultSensor {
 // on it; it must not gate correctness-bearing work.
 func PageCachePressureActive() bool {
 	return pageCachePressureSensor().Active()
+}
+
+// PageCachePressureActiveBounded is PageCachePressureActive with the
+// per-episode honor budget (see refaultSensor.ActiveBounded). cap <= 0
+// is unbounded.
+func PageCachePressureActiveBounded(cap time.Duration) bool {
+	return pageCachePressureSensor().ActiveBounded(cap)
+}
+
+// PageCachePressureBoundedIgnores returns the count of episode-cap
+// declines — the v3 rollout marker beside PageCachePressureStats.
+func PageCachePressureBoundedIgnores() int64 {
+	return pageCachePressureSensor().BoundedIgnores()
 }
 
 // PageCachePressureStats returns the sensor's last sampled refault rate
