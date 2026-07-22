@@ -222,6 +222,12 @@ variable "skew_split" {
   default     = ""
 }
 
+variable "agg_over_exchange" {
+  description = "Aggregate-over-exchange rewrite (rewireAggOverRawExchange): grouped finals consume a sibling raw exchange's partitions directly, dropping duplicate fused scan-agg legs (Q18). Default on (empty/1 = on, matching the engine default); set \"0\" as the A/B kill switch."
+  type        = string
+  default     = ""
+}
+
 variable "skew_suite" {
   description = "Set to 1 to run the hot-key skew fixture (benchmarks/skew) instead of TPC-H — the Phase 3 skew-split A/B. Pair with data_prefix=tables-skew/ and generate_data=true on the first arm to stage the fixture."
   type        = string
