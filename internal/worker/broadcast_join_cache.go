@@ -60,6 +60,11 @@ func computeBroadcastJoinKey(queryID string, spec distributed.OpSpec) string {
 	for _, k := range spec.RightKeys {
 		fmt.Fprintf(h, "\x00R:%s", k)
 	}
+	// Build-input filters change the built hash table: two joins over the
+	// same files with different BuildFilterExprs must not share a build.
+	for _, f := range spec.BuildFilterExprs {
+		fmt.Fprintf(h, "\x00BF:%s", f)
+	}
 	files := append([]string(nil), spec.BuildFiles...)
 	sort.Strings(files)
 	for _, f := range files {

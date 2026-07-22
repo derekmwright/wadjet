@@ -89,6 +89,13 @@ type Stage struct {
 	// build columns with the OWNING alias instead of BuildTableAlias.
 	BuildColOrigins map[string]string
 	JoinFilter      string // semi/anti join inequality filter (e.g., "l2.l_suppkey != l1.l_suppkey")
+	// BuildFilterExprs are row predicates applied to the BUILD input before
+	// hash-table insertion. Set by dedupeSubsumedScanExchanges when this
+	// join's build was rewired from a filtered exchange to a subsuming raw
+	// exchange: the dropped exchange's scan filter (or its computed
+	// __subsume flag) must now run at build-read time. Semantically
+	// identical to filtering at the dropped scan.
+	BuildFilterExprs []string
 
 	// Fused broadcast joins absorbed into this stage (avoids separate
 	// shuffle+join stages for small dimension tables like nation, region).
@@ -1765,6 +1772,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// valid labels because the elided exchange's output distribution
 		// was by definition its input's. Kill switch WADJET_EXCHANGE_ELIDE=0.
 		stages = elideCoPartitionedExchanges(stages)
+		// Drop filtered scan-exchanges fully subsumed by a raw sibling over
+		// the same table (Q21 l3 ⊂ l2): the raw exchange ships the filter
+		// as a computed flag column and the dropped exchange's consumer
+		// filters its build input on it. Kill switch
+		// WADJET_EXCHANGE_SUBSUME=0.
+		stages = dedupeSubsumedScanExchanges(stages)
 		// Fragment fusion passes are intentionally NOT called here.
 		//
 		// fuseScanShuffle / fuseJoinShuffle absorb a downstream

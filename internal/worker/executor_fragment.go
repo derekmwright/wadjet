@@ -1953,6 +1953,18 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 			return nil, fmt.Errorf("build source init: %w", err)
 		}
 		defer src.Close()
+		if len(spec.BuildFilterExprs) > 0 {
+			// Exchange subsumption dedup: this build was rewired from a
+			// dropped filtered exchange to a subsuming raw one — apply the
+			// dropped scan's filter (or its computed flag) to the build rows
+			// before insertion. Semantically identical to the dropped scan's
+			// own filter.
+			fops, _, err := compileFilterExprs(spec.BuildFilterExprs)
+			if err != nil {
+				return nil, fmt.Errorf("build filter: %w", err)
+			}
+			src = &filteredSource{Source: src, ops: fops}
+		}
 
 		hj := exec.NewHashJoin(mapJoinTypeString(spec.JoinType), spec.LeftKeys, spec.RightKeys)
 		hj.BuildTableAlias = spec.BuildAlias

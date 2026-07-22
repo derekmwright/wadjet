@@ -11,9 +11,7 @@ scan-9	scan	Singleton
 exchange-repartition-10	exchange-repartition	Hash(l_orderkey)/32	deps=join-8
 exchange-repartition-11	exchange-repartition	Hash(l_orderkey)/32	deps=scan-9
 join-12	hash_join	Hash(l_orderkey)/32	deps=exchange-repartition-10,exchange-repartition-11
-scan-13	scan	Singleton
-exchange-repartition-15	exchange-repartition	Hash(l_orderkey)/32	deps=scan-13
-join-16	hash_join	Hash(l_orderkey)/32	deps=join-12,exchange-repartition-15
+join-16	hash_join	Hash(l_orderkey)/32	deps=join-12,exchange-repartition-11
 aggregate-17	aggregate	RoundRobin	deps=join-16
 final_aggregate-18	final_aggregate	Hash(s_name)/4	deps=exchange-repartition-final_aggregate-18-18
 sort-19	sort	Singleton	deps=final_aggregate-18
