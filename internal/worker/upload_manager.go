@@ -51,6 +51,8 @@ type uploadManager struct {
 	completed      atomic.Int64 // files uploaded in the background
 	cancelledFiles atomic.Int64 // uploads aborted by query completion
 	failedFiles    atomic.Int64 // uploads abandoned after retries
+	completedBytes atomic.Int64 // wire bytes PUT (post-compression)
+	cancelledBytes atomic.Int64 // local file bytes of aborted uploads (pre-compression)
 }
 
 type queryUploadState struct {
@@ -205,7 +207,7 @@ func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob
 		defer func() { <-m.sem }()
 	case <-ctx.Done():
 		tu.anyCanceled.Store(true)
-		m.cancelledFiles.Add(1)
+		m.noteCancelled(j)
 		return
 	}
 
@@ -213,7 +215,7 @@ func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob
 	for attempt := 1; attempt <= uploadRetryAttempts; attempt++ {
 		if ctx.Err() != nil {
 			tu.anyCanceled.Store(true)
-			m.cancelledFiles.Add(1)
+			m.noteCancelled(j)
 			return
 		}
 		lastErr = m.uploadOnce(ctx, j)
@@ -223,7 +225,7 @@ func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob
 		}
 		if ctx.Err() != nil {
 			tu.anyCanceled.Store(true)
-			m.cancelledFiles.Add(1)
+			m.noteCancelled(j)
 			return
 		}
 		backoff := uploadRetryBackoff << (attempt - 1)
@@ -231,7 +233,7 @@ func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob
 		case <-time.After(backoff):
 		case <-ctx.Done():
 			tu.anyCanceled.Store(true)
-			m.cancelledFiles.Add(1)
+			m.noteCancelled(j)
 			return
 		}
 	}
@@ -239,6 +241,16 @@ func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob
 	m.failedFiles.Add(1)
 	m.logger.Error("background stage-output upload abandoned; key stays non-durable",
 		"key", j.key, "task_id", tu.taskID, "attempts", uploadRetryAttempts, "error", lastErr)
+}
+
+// noteCancelled records an aborted upload: file count plus the local
+// (pre-compression) size of the bytes that never had to move — the "S3
+// PUT work a finished query saved" side of the upload ledger.
+func (m *uploadManager) noteCancelled(j uploadJob) {
+	m.cancelledFiles.Add(1)
+	if fi, err := os.Stat(j.srcPath); err == nil {
+		m.cancelledBytes.Add(fi.Size())
+	}
 }
 
 // uploadOnce mirrors the synchronous path: optional s2 compression (≥10%
@@ -278,6 +290,7 @@ func (m *uploadManager) uploadOnce(ctx context.Context, j uploadJob) error {
 	if _, err := m.store.Put(ctx, j.bucket, j.key, f, fi.Size(), "application/octet-stream"); err != nil {
 		return fmt.Errorf("put %s: %w", j.key, err)
 	}
+	m.completedBytes.Add(fi.Size())
 	return nil
 }
 
@@ -313,4 +326,14 @@ func (tu *taskUploads) jobDone() {
 // file counts. Observability/test helper.
 func (m *uploadManager) UploadStats() (completed, cancelled, failed int64) {
 	return m.completed.Load(), m.cancelledFiles.Load(), m.failedFiles.Load()
+}
+
+// UploadByteStats returns the upload ledger's byte sides: wire bytes that
+// landed in S3 (post-compression) and local bytes of uploads aborted by
+// query completion (pre-compression).
+func (m *uploadManager) UploadByteStats() (completedBytes, cancelledBytes int64) {
+	if m == nil {
+		return 0, 0
+	}
+	return m.completedBytes.Load(), m.cancelledBytes.Load()
 }

@@ -79,6 +79,11 @@ func TestUploadManagerLandsFiles(t *testing.T) {
 	if _, _, failed := m.UploadStats(); failed != 0 {
 		t.Fatalf("unexpected failed uploads")
 	}
+	// Byte ledger: both files' wire bytes counted; the uncompressed job
+	// alone contributes its full payload size.
+	if done, cancelled := m.UploadByteStats(); done < int64(len(payload)) || cancelled != 0 {
+		t.Fatalf("byte stats = (done %d, cancelled %d), want done >= %d, cancelled 0", done, cancelled, len(payload))
+	}
 }
 
 func TestUploadManagerCancelQuery(t *testing.T) {
@@ -101,6 +106,9 @@ func TestUploadManagerCancelQuery(t *testing.T) {
 	})
 	if _, _, err := mem.Get(context.Background(), "b", "queries/q1/s/a.wshf"); err == nil {
 		t.Fatal("cancelled upload landed anyway")
+	}
+	if done, cancelled := m.UploadByteStats(); done != 0 || cancelled != 8 {
+		t.Fatalf("byte stats = (done %d, cancelled %d), want (0, 8)", done, cancelled)
 	}
 }
 

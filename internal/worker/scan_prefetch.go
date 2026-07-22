@@ -257,10 +257,13 @@ func (p *filePrefetcher) fetchShuffle(ctx context.Context, s *cachedFileStreamSo
 	if addr == "" {
 		return &prefetchResult{skipped: true}
 	}
-	rc, err := peers.client.FetchShuffle(ctx, addr, s.queryID, filePath, token)
+	prc, err := peers.client.FetchShuffle(ctx, addr, s.queryID, filePath, token)
 	if err != nil {
 		return &prefetchResult{err: err}
 	}
+	// Per-tier ledger: prefetched peer downloads are peer-tier transfers,
+	// counted at fetch time (the transfer happens now, not at open).
+	rc := io.ReadCloser(&countingReadCloser{rc: prc, n: &s.executor.shuffleIO.peerBytes})
 	defer rc.Close()
 	var magic [4]byte
 	if _, err := io.ReadFull(rc, magic[:]); err != nil {
@@ -283,6 +286,7 @@ func (p *filePrefetcher) fetchShuffle(ctx context.Context, s *cachedFileStreamSo
 		p.releaseWindow(winBytes)
 		return &prefetchResult{err: err}
 	}
+	s.executor.shuffleIO.peerFiles.Add(1)
 	return &prefetchResult{localPath: localPath, windowBytes: winBytes}
 }
 
