@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -548,13 +549,52 @@ var heapPressureActive = memory.HeapBackpressureActive
 // (the §9 refault-rate sensor), same test-seam rationale.
 var pageCachePressureActive = memory.PageCachePressureActive
 
+// pageCachePressureActiveBounded mirrors the episode-capped variant
+// (refault-sensor v3), same test-seam rationale.
+var pageCachePressureActiveBounded = memory.PageCachePressureActiveBounded
+
+// refaultEpisodeCap bounds how long one cache-pressure activation episode
+// keeps collapsing decode-ahead on non-edge envelopes. If the collapse
+// were shedding the displacement cause (our own held window bytes), the
+// refault rate would go quiet well inside this budget (measured ~2s on
+// the Q06 self-displacement shape); an episode that outlives it is
+// ambient thrash the collapse cannot relieve — v2 semantics locked the
+// throttle on for minutes and cost +22-40% SF100 steady suite wall
+// (2026-07-22 investigation, PR #259 arms). Override with
+// WADJET_REFAULT_EPISODE_CAP (seconds); 0 restores unbounded v2
+// semantics (the kill switch).
+var refaultEpisodeCap = func() time.Duration {
+	const def = 10 * time.Second
+	v := os.Getenv("WADJET_REFAULT_EPISODE_CAP")
+	if v == "" {
+		return def
+	}
+	secs, err := strconv.ParseFloat(v, 64)
+	if err != nil || secs < 0 {
+		return def
+	}
+	return time.Duration(secs * float64(time.Second))
+}()
+
 // scanDecodeAheadPressure gates decode-ahead admission beyond the
 // delivery cursor: Go-heap tide gauge OR kernel page-cache thrash.
 // Discretionary decoded-ahead bytes are the first thing to yield under
 // either pressure channel; the cursor group is exempt inside the
 // iterator, so this can never stall delivery.
+//
+// The cache channel is episode-capped on non-edge envelopes (see
+// refaultEpisodeCap). Strict/edge envelopes (< 2 GiB GOMEMLIMIT) keep
+// the unbounded v2 semantics: the capped repro measured even one extra
+// in-flight group as harmful there, and its thrash is EBS-priced —
+// there is no cheap-refault regime to spare.
 func scanDecodeAheadPressure() bool {
-	return heapPressureActive() || pageCachePressureActive()
+	if heapPressureActive() {
+		return true
+	}
+	if scanDecodeAheadStrictPressure() {
+		return pageCachePressureActive()
+	}
+	return pageCachePressureActiveBounded(refaultEpisodeCap)
 }
 
 // scanDecodeAheadStrictPressure reports whether pressure collapse should

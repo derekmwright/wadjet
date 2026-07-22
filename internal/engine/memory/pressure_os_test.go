@@ -144,3 +144,57 @@ func TestPageCachePressureActive_Smoke(t *testing.T) {
 	}
 	PageCachePressureStats()
 }
+
+// sampleBounded mirrors sample for the episode-capped accessor.
+func sampleBounded(t *testing.T, s *refaultSensor, f *fakeCounter, next int64, cap time.Duration) bool {
+	t.Helper()
+	f.value = next
+	time.Sleep(2 * time.Millisecond)
+	return s.ActiveBounded(cap)
+}
+
+// TestRefaultSensor_EpisodeCap pins the v3 semantics: an activation
+// episode is honored only while younger than cap; an episode that
+// outlives cap (collapse didn't quiet the rate → non-causal ambient
+// thrash) is declined until a quiet sample ends it, and the next
+// activation starts a fresh honored episode.
+func TestRefaultSensor_EpisodeCap(t *testing.T) {
+	f := &fakeCounter{value: 1000, ok: true}
+	s := newRefaultSensor(f.read, 1000, time.Millisecond)
+	const cap = 25 * time.Millisecond
+
+	// Activate (two hot samples) — young episode is honored.
+	sampleBounded(t, s, f, f.value+1_000_000, cap)
+	if !sampleBounded(t, s, f, f.value+1_000_000, cap) {
+		t.Fatal("young episode not honored")
+	}
+	if s.BoundedIgnores() != 0 {
+		t.Fatalf("ignores = %d before cap elapsed", s.BoundedIgnores())
+	}
+	// Stay hot past the cap: raw Active stays true, bounded declines.
+	deadline := time.Now().Add(2 * cap)
+	for time.Now().Before(deadline) {
+		sampleBounded(t, s, f, f.value+1_000_000, cap)
+	}
+	if !s.Active() {
+		t.Fatal("raw Active false while rate is hot")
+	}
+	if s.ActiveBounded(cap) {
+		t.Fatal("episode older than cap still honored")
+	}
+	if s.BoundedIgnores() == 0 {
+		t.Fatal("no ignores recorded for over-cap episode")
+	}
+	// cap <= 0 is unbounded — v2 kill-switch semantics.
+	if !s.ActiveBounded(0) {
+		t.Fatal("cap=0 must behave like raw Active")
+	}
+	// Quiet sample ends the episode; re-activation is honored afresh.
+	if sampleBounded(t, s, f, f.value, cap) {
+		t.Fatal("still active after quiet sample")
+	}
+	sampleBounded(t, s, f, f.value+1_000_000, cap)
+	if !sampleBounded(t, s, f, f.value+1_000_000, cap) {
+		t.Fatal("fresh episode after quiet sample not honored")
+	}
+}

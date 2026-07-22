@@ -603,7 +603,8 @@ func (w *Worker) startScanDecodeAheadMarkerLoop(ctx context.Context) {
 						"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 						"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 						"refault_rate", int64(refaultRate),
-						"refault_activations", refaultActivations)
+						"refault_activations", refaultActivations,
+						"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
 				}
 				w.executor.sweepScanDecodeAheadQueryStats(false)
 			}
@@ -877,7 +878,8 @@ func (w *Worker) Stop() {
 			"window_full_ms", windowFullNs/1e6, "pressure_stall_ms", pressureNs/1e6,
 			"token_stall_ms", tokenNs/1e6, "ledger_stall_ms", ledgerNs/1e6,
 			"refault_rate", int64(refaultRate),
-			"refault_activations", refaultActivations)
+			"refault_activations", refaultActivations,
+			"refault_episode_ignores", memory.PageCachePressureBoundedIgnores())
 	}
 
 	w.logger.Info("worker stopped", "worker_id", w.config.WorkerID)
