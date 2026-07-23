@@ -1227,7 +1227,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			result.ResultFiles = append(result.ResultFiles, key)
 			result.SizeBytes += fi.Size()
 		}
-		e.uploads.StartTask(root, task.ID, result.WorkerID, jobs)
+		e.uploads.StartTask(root, task.ID, result.WorkerID, jobs, task.UploadPolicy)
 		result.NumRows = totalRows
 		e.logger.Info("shuffle task completed (async upload pending)",
 			"task_id", task.ID, "rows", totalRows,

@@ -217,6 +217,24 @@ func (c *Coordinator) executeStageDAG(
 		return nil, err
 	}
 
+	// Register the stages whose outputs the COORDINATOR reads directly
+	// (scalar-subquery producers, substituteScalarDependencies) before any
+	// dispatch: the task annotator keeps their uploads eager under a
+	// deferred ShuffleDurability policy, because the coordinator's only
+	// read path is S3. Dropped by cleanupQuery with the rest of the
+	// query's registries.
+	if c.config.ShuffleDurability == distributed.UploadLazy || c.config.ShuffleDurability == distributed.UploadOff {
+		coordRead := make(map[string]struct{})
+		for _, s := range stages {
+			for _, pid := range s.ScalarDependencies {
+				coordRead[pid] = struct{}{}
+			}
+		}
+		if len(coordRead) > 0 {
+			c.coordReadStages.Store(queryID, coordRead)
+		}
+	}
+
 	// Per-task progress bridge: fans worker-emitted TaskProgress
 	// messages out to per-stage progress channels so a slow-but-healthy
 	// task keeps stageIdleTimeout from firing. Each dispatch helper

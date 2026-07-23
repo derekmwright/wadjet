@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
 
@@ -23,7 +24,7 @@ func TestUploadManagerFlush_WaitsForPendingUploads(t *testing.T) {
 	m := newUploadManager(gate, nil, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
 	src := writeTempFile(t, []byte("stage output bytes"))
-	m.StartTask("root-q", "task-1", "w-1", []uploadJob{{bucket: "b", key: "queries/root-q/out.wshf", srcPath: src}})
+	m.StartTask("root-q", "task-1", "w-1", []uploadJob{{bucket: "b", key: "queries/root-q/out.wshf", srcPath: src}}, distributed.UploadEager)
 
 	flushed := make(chan error, 1)
 	go func() { flushed <- m.Flush(context.Background()) }()
@@ -57,7 +58,7 @@ func TestUploadManagerFlush_Timeout(t *testing.T) {
 	}
 	m := newUploadManager(gate, nil, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	src := writeTempFile(t, []byte("x"))
-	m.StartTask("root-q", "task-1", "w-1", []uploadJob{{bucket: "b", key: "k", srcPath: src}})
+	m.StartTask("root-q", "task-1", "w-1", []uploadJob{{bucket: "b", key: "k", srcPath: src}}, distributed.UploadEager)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()

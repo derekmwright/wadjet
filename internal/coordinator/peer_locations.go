@@ -206,6 +206,17 @@ func (c *Coordinator) annotateTaskPeerLocations(t *distributed.Task) {
 	// directly.
 	if t.Type == distributed.TaskTypeStage || t.Type == distributed.TaskTypeShuffle {
 		t.AsyncUpload = true
+		// Durability policy (docs/design/shuffle-durability.md): defer or
+		// skip the background upload, except for stages whose outputs the
+		// coordinator reads itself — those have no peer tier to fall back
+		// on. Retried tasks are re-annotated on their way through
+		// PublishTasks, so a retry recomputes the same policy.
+		switch c.config.ShuffleDurability {
+		case distributed.UploadLazy, distributed.UploadOff:
+			if !c.stageReadByCoordinator(root, t.StageID) {
+				t.UploadPolicy = c.config.ShuffleDurability
+			}
+		}
 	}
 	var locs map[string]string
 	addAll := func(files []string) {
@@ -242,6 +253,37 @@ func (c *Coordinator) annotateTaskPeerLocations(t *distributed.Task) {
 	t.InputLocations = locs
 }
 
+// stageReadByCoordinator reports whether the coordinator itself reads the
+// given stage's outputs (scalar-subquery producer registered by
+// executeStageDAG). Those stages' uploads must stay eager.
+func (c *Coordinator) stageReadByCoordinator(root, stageID string) bool {
+	if stageID == "" {
+		return false
+	}
+	v, ok := c.coordReadStages.Load(root)
+	if !ok {
+		return false
+	}
+	_, hit := v.(map[string]struct{})[stageID]
+	return hit
+}
+
+// releaseDeferredUploads broadcasts SubjectUploadRelease for a root query:
+// every worker holding queued lazy uploads for it starts them. Published
+// from the paths that discover a durable copy is needed after all (a
+// consumer's missing-input retry against a live producer, a coordinator-
+// side stage read that missed). Cheap and idempotent — a released or
+// unknown root is a no-op on the workers — so no rate limiting.
+func (c *Coordinator) releaseDeferredUploads(root string) {
+	if c.nc == nil || root == "" || c.config.ShuffleDurability != distributed.UploadLazy {
+		return
+	}
+	if err := c.nc.Publish(distributed.SubjectUploadRelease, []byte(root)); err != nil {
+		c.logger.Debug("upload-release publish failed; retry rounds re-trigger it",
+			"root", root, "error", err)
+	}
+}
+
 // classifyFatalResult is the taskRetrier's fatal hook (nil-safe when
 // streaming exchange is off): a missing-input failure is unrecoverable by
 // task retry exactly when the producing worker is dead AND the key's
@@ -260,7 +302,13 @@ func (c *Coordinator) classifyFatalResult(r distributed.ResultNotification) bool
 		return false // unknown producer — can't conclude, let retries run
 	}
 	if c.workers.IsAlive(producer) {
-		return false // producer alive: its upload will land or peer serves
+		// Producer alive: its upload will land or the peer serves the
+		// retry. Under lazy durability "will land" needs a nudge — the
+		// upload is queued unstarted on the producer, so release it; the
+		// retry then converges on the S3 copy even if the peer path stays
+		// broken.
+		c.releaseDeferredUploads(distributed.ScratchQueryID(r.MissingInputKey))
+		return false
 	}
 	c.logger.Error("streaming-exchange input lost: producer dead before upload landed",
 		"key", r.MissingInputKey, "producer", producer, "task_id", r.TaskID)
@@ -279,6 +327,11 @@ func (c *Coordinator) fetchStageOutputData(ctx context.Context, path string) ([]
 	if err == nil || c.peerFiles == nil {
 		return data, err
 	}
+	// Belt-and-braces under lazy durability: scalar-producer stages are
+	// annotated eager via coordReadStages, but if this key's upload was
+	// deferred anyway (registration gap, plan edge), release it so the
+	// re-poll below can converge instead of timing out.
+	c.releaseDeferredUploads(distributed.ScratchQueryID(path))
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		if !c.peerFiles.IsDurable(path) {

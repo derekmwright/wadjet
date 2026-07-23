@@ -431,6 +431,14 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		// default-on kill switches above. Flip to envBoolDefaultOn only
 		// when the engine default flips.
 		EagerDispatch: os.Getenv("WADJET_EAGER_DISPATCH") == "1" || strings.EqualFold(os.Getenv("WADJET_EAGER_DISPATCH"), "true"),
+		// Shuffle durability (docs/design/shuffle-durability.md): stage-
+		// output upload policy for the A/B arms. eager (default) = uploads
+		// start immediately; lazy = queue until demanded, elide at query
+		// end; off = never upload scratch. Unknown values fall back to
+		// eager — the safe arm — with a log line rather than a hard fail,
+		// so a typo'd env var on a remote deploy costs the A/B arm, not
+		// the whole run.
+		ShuffleDurability: shuffleDurabilityFromEnv(logger),
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
 	coord.Workers().StartSubStatsLogger(ctx)
@@ -976,6 +984,23 @@ func collectWorkerProfiles(nc *nats.Conn, workerCount int, profDir string) {
 func envBoolDefaultOn(key string) bool {
 	v := os.Getenv(key)
 	return v != "0" && !strings.EqualFold(v, "false")
+}
+
+// shuffleDurabilityFromEnv parses WADJET_SHUFFLE_DURABILITY (eager|lazy|off,
+// unset = eager). Unknown values warn and fall back to eager — the safe arm —
+// so a typo on a remote deploy costs the A/B arm, not the run.
+func shuffleDurabilityFromEnv(logger *slog.Logger) distrib.UploadPolicy {
+	switch v := strings.ToLower(os.Getenv("WADJET_SHUFFLE_DURABILITY")); v {
+	case "", "eager":
+		return distrib.UploadEager
+	case "lazy":
+		return distrib.UploadLazy
+	case "off":
+		return distrib.UploadOff
+	default:
+		logger.Warn("ignoring unknown WADJET_SHUFFLE_DURABILITY; using eager", "value", v)
+		return distrib.UploadEager
+	}
 }
 
 // envInt64 parses an int64 env var; empty or malformed values return 0 so an

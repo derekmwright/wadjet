@@ -37,6 +37,14 @@ const uploadRetryBackoff = 500 * time.Millisecond
 // fetched from S3 never reach S3 at all. Residual race (a PUT landing
 // after the coordinator's scratch purge) is bounded by one in-flight file
 // per worker and reclaimed by the coordinator's periodic CleanStale GC.
+//
+// Durability policy (docs/design/shuffle-durability.md): each task carries
+// an UploadPolicy. Eager jobs start immediately (the above). Lazy jobs are
+// queued unstarted on the root's queryUploadState and run only when the
+// root is released — by a coordinator SubjectUploadRelease broadcast (a
+// consumer or the coordinator itself needs the durable copy) or by Flush
+// at worker drain; jobs still queued when the query turns terminal are
+// elided, never PUT. Off-policy jobs are elided at StartTask.
 type uploadManager struct {
 	store  objstore.Store
 	nc     *nats.Conn
@@ -53,12 +61,25 @@ type uploadManager struct {
 	failedFiles    atomic.Int64 // uploads abandoned after retries
 	completedBytes atomic.Int64 // wire bytes PUT (post-compression)
 	cancelledBytes atomic.Int64 // local file bytes of aborted uploads (pre-compression)
+	elidedFiles    atomic.Int64 // lazy/off uploads that never started (query finished first)
+	elidedBytes    atomic.Int64 // local file bytes of elided uploads (pre-compression)
 }
 
 type queryUploadState struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	inflight sync.WaitGroup
+
+	mu       sync.Mutex
+	pending  []pendingUpload // lazy jobs queued unstarted
+	released bool            // demand signal seen: later lazy jobs start immediately
+}
+
+// pendingUpload is one queued lazy job plus the task tracker that publishes
+// its UploadComplete once the task's last job settles.
+type pendingUpload struct {
+	tu *taskUploads
+	j  uploadJob
 }
 
 func newUploadManager(store objstore.Store, nc *nats.Conn, logger *slog.Logger) *uploadManager {
@@ -115,7 +136,8 @@ func (m *uploadManager) queryState(root string) *queryUploadState {
 }
 
 // CancelQuery aborts pending uploads for a terminal query and drops its
-// scope. Safe for unknown roots, repeated calls, and nil receivers.
+// scope. Queued lazy jobs are elided — counted as PUT work the query never
+// needed. Safe for unknown roots, repeated calls, and nil receivers.
 func (m *uploadManager) CancelQuery(root string) {
 	if m == nil {
 		return
@@ -126,6 +148,48 @@ func (m *uploadManager) CancelQuery(root string) {
 	m.mu.Unlock()
 	if qs != nil {
 		qs.cancel()
+		m.elidePending(qs)
+	}
+}
+
+// ReleaseQuery starts every queued lazy upload for a root query and marks
+// the root released so later lazy jobs start immediately. Triggered by the
+// coordinator's SubjectUploadRelease broadcast. No-op for unknown roots.
+func (m *uploadManager) ReleaseQuery(root string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	qs := m.queries[root]
+	m.mu.Unlock()
+	if qs != nil {
+		m.releasePending(qs)
+	}
+}
+
+// releasePending flips the root to released and starts its queued jobs.
+func (m *uploadManager) releasePending(qs *queryUploadState) {
+	qs.mu.Lock()
+	qs.released = true
+	pending := qs.pending
+	qs.pending = nil
+	qs.mu.Unlock()
+	for _, p := range pending {
+		m.startJob(qs, p.tu, p.j)
+	}
+}
+
+// elidePending discards a terminal root's queued jobs, counting them on the
+// elided side of the upload ledger. Their taskUploads never reach jobDone,
+// so no UploadComplete is published — correct, since the durable copy will
+// never exist and the query is done consuming anyway.
+func (m *uploadManager) elidePending(qs *queryUploadState) {
+	qs.mu.Lock()
+	pending := qs.pending
+	qs.pending = nil
+	qs.mu.Unlock()
+	for _, p := range pending {
+		m.noteElided(p.j)
 	}
 }
 
@@ -133,11 +197,13 @@ func (m *uploadManager) CancelQuery(root string) {
 // object store or exhaust its retries) WITHOUT cancelling — the graceful
 // counterpart of Drain, used by Worker.Drain so that consumers of this
 // worker's stage outputs keep their durable S3 fallback after the
-// peer-exchange server goes away. Callers must ensure no new StartTask
-// calls can arrive (Worker.Drain runs it after the task WaitGroup drains),
-// so a single snapshot of the query states covers everything. Returns
-// ctx.Err() if the context expires first; the caller then falls back to
-// Drain (cancel).
+// peer-exchange server goes away. Queued lazy uploads are released first:
+// drain is precisely the moment the local copies stop being servable, so
+// the durable copies must exist after all. Callers must ensure no new
+// StartTask calls can arrive (Worker.Drain runs it after the task
+// WaitGroup drains), so a single snapshot of the query states covers
+// everything. Returns ctx.Err() if the context expires first; the caller
+// then falls back to Drain (cancel).
 func (m *uploadManager) Flush(ctx context.Context) error {
 	if m == nil {
 		return nil
@@ -148,6 +214,9 @@ func (m *uploadManager) Flush(ctx context.Context) error {
 		states = append(states, qs)
 	}
 	m.mu.Unlock()
+	for _, qs := range states {
+		m.releasePending(qs)
+	}
 	for _, qs := range states {
 		done := make(chan struct{})
 		go func(q *queryUploadState) {
@@ -177,13 +246,23 @@ func (m *uploadManager) Drain() {
 	m.mu.Unlock()
 	for _, qs := range states {
 		qs.cancel()
+		m.elidePending(qs)
 	}
 }
 
 // StartTask begins tracking a task's background uploads and enqueues each
-// job. Call after every job's srcPath is stable (adopted into the cache).
-func (m *uploadManager) StartTask(root, taskID, workerID string, jobs []uploadJob) {
+// job under the task's durability policy: eager jobs start now, lazy jobs
+// queue until the root is released (already-released roots start now), off
+// jobs are elided outright. Call after every job's srcPath is stable
+// (adopted into the cache).
+func (m *uploadManager) StartTask(root, taskID, workerID string, jobs []uploadJob, policy distributed.UploadPolicy) {
 	if m == nil || len(jobs) == 0 {
+		return
+	}
+	if policy == distributed.UploadOff {
+		for _, j := range jobs {
+			m.noteElided(j)
+		}
 		return
 	}
 	tu := &taskUploads{m: m, root: root, taskID: taskID, workerID: workerID}
@@ -192,13 +271,29 @@ func (m *uploadManager) StartTask(root, taskID, workerID string, jobs []uploadJo
 	}
 	tu.remaining.Store(int64(len(jobs)))
 	qs := m.queryState(root)
-	for _, j := range jobs {
-		qs.inflight.Add(1)
-		go func(j uploadJob) {
-			defer qs.inflight.Done()
-			m.runJob(qs.ctx, tu, j)
-		}(j)
+	if policy == distributed.UploadLazy {
+		qs.mu.Lock()
+		if !qs.released {
+			for _, j := range jobs {
+				qs.pending = append(qs.pending, pendingUpload{tu: tu, j: j})
+			}
+			qs.mu.Unlock()
+			return
+		}
+		qs.mu.Unlock()
 	}
+	for _, j := range jobs {
+		m.startJob(qs, tu, j)
+	}
+}
+
+// startJob spawns one upload goroutine inside the root's inflight scope.
+func (m *uploadManager) startJob(qs *queryUploadState, tu *taskUploads, j uploadJob) {
+	qs.inflight.Add(1)
+	go func() {
+		defer qs.inflight.Done()
+		m.runJob(qs.ctx, tu, j)
+	}()
 }
 
 func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob) {
@@ -255,6 +350,19 @@ func (m *uploadManager) noteCancelled(j uploadJob) {
 		m.cancelledBytes.Add(j.size)
 	} else if fi, err := os.Stat(j.srcPath); err == nil {
 		m.cancelledBytes.Add(fi.Size())
+	}
+}
+
+// noteElided records an upload that never started at all (off policy, or a
+// lazy job whose query finished before any demand signal): the "S3 PUT work
+// the durability knob saved" side of the upload ledger. Same pre-compression
+// byte basis as cancelledBytes.
+func (m *uploadManager) noteElided(j uploadJob) {
+	m.elidedFiles.Add(1)
+	if j.size > 0 {
+		m.elidedBytes.Add(j.size)
+	} else if fi, err := os.Stat(j.srcPath); err == nil {
+		m.elidedBytes.Add(fi.Size())
 	}
 }
 
@@ -341,4 +449,14 @@ func (m *uploadManager) UploadByteStats() (completedBytes, cancelledBytes int64)
 		return 0, 0
 	}
 	return m.completedBytes.Load(), m.cancelledBytes.Load()
+}
+
+// UploadElidedStats returns the durability knob's savings side of the
+// ledger: uploads that never started at all (off policy, or lazy jobs whose
+// query finished first) and their local pre-compression bytes.
+func (m *uploadManager) UploadElidedStats() (files, bytes int64) {
+	if m == nil {
+		return 0, 0
+	}
+	return m.elidedFiles.Load(), m.elidedBytes.Load()
 }

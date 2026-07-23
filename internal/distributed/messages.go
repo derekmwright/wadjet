@@ -17,6 +17,18 @@ const (
 	TaskTypeStage    TaskType = "stage"    // single-operator stage fragment (native-DAG Phase 3)
 )
 
+// UploadPolicy is the shuffle-durability mode a task's stage-output uploads
+// run under (docs/design/shuffle-durability.md). Carried per task so the
+// policy survives mixed-version clusters: workers that predate the field
+// unmarshal it away and upload eagerly, which is always safe.
+type UploadPolicy string
+
+const (
+	UploadEager UploadPolicy = ""     // background upload starts immediately (default)
+	UploadLazy  UploadPolicy = "lazy" // queue unstarted; run on release/drain; elide at query end
+	UploadOff   UploadPolicy = "off"  // never upload scratch; rely on peers + whole-query re-execution
+)
+
 // Task is the unit of distributed work published to NATS JetStream.
 type Task struct {
 	ID        string   `json:"id"`
@@ -220,6 +232,20 @@ type Task struct {
 	// Only set by the coordinator for native-DAG task types whose outputs
 	// are consumed by workers; false = today's synchronous upload.
 	AsyncUpload bool `json:"async_upload,omitempty"`
+
+	// UploadPolicy (docs/design/shuffle-durability.md) refines AsyncUpload:
+	// how urgently the durable S3 copy of this task's stage outputs must
+	// exist. Empty = eager (background upload starts immediately —
+	// pre-knob behavior, and what workers that predate the field do).
+	// "lazy" = the worker queues the upload jobs unstarted and runs them
+	// only on a demand signal (SubjectUploadRelease broadcast or worker
+	// drain); jobs still queued when the query completes are elided.
+	// "off" = never upload; producer death before consumption degrades to
+	// the coordinator's one-shot streaming-disabled re-execution.
+	// Only meaningful when AsyncUpload is true; the coordinator keeps
+	// stages whose outputs it reads itself (scalar-subquery producers) on
+	// eager, because the coordinator has no peer tier.
+	UploadPolicy UploadPolicy `json:"upload_policy,omitempty"`
 
 	// Output is the S3 prefix where this task's output is materialized.
 	// Shuffle/pipeline-intermediate: worker writes "<Output>partition=NNNN/<taskID>.wshf".
