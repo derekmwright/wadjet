@@ -106,6 +106,7 @@ var (
 	broadcastBytes        int64
 	streamingExchange     bool
 	eagerDispatch         bool
+	shuffleDurability     string
 	peerExchangeAddr      string
 	peerExchangeAdvertise string
 	baseTableCacheBytes   int64
@@ -180,6 +181,7 @@ func main() {
 	rootCmd.PersistentFlags().Int64Var(&localFastPathBytes, "local-fastpath-bytes", coordinator.DefaultLocalFastPathBytes, "Queries whose post-pruning catalog scan bytes stay under this threshold execute in-process on the coordinator (skipping the distributed stage DAG and its per-stage object-store round trips). 0 = disabled.")
 	rootCmd.PersistentFlags().BoolVar(&streamingExchange, "streaming-exchange", true, "Streaming exchange: consumers fetch stage outputs from the producing workers' local disk over gRPC with async S3 upload; every failure falls through to the durable S3 path. Default true (validated 2026-07-02: SF10 −10%, SF100 −23% suite wall, row-identical, zero fault-tolerance events); --streaming-exchange=false restores synchronous S3-only shuffle. See docs/design/streaming-exchange.md.")
 	rootCmd.PersistentFlags().BoolVar(&eagerDispatch, "eager-dispatch", false, "Eager consumer dispatch (Phase C1): eligible non-join consumer stages (aggregate/sort over a standalone repartition) start before their producer stage fully drains, consuming per-producer-task file manifests as tasks finish. Requires --streaming-exchange. Default false until SF100 validation (kill switch thereafter). See docs/design/eager-consumer-dispatch.md.")
+	rootCmd.PersistentFlags().StringVar(&shuffleDurability, "shuffle-durability", "eager", "Stage-output durability policy under --streaming-exchange (docs/design/shuffle-durability.md). eager: background S3 uploads start as outputs finalize (default). lazy: uploads queue unstarted on the workers and run only on demand (consumer missing-input retry against a live producer, coordinator-side stage read, or worker drain); scratch never demanded is elided — no S3 PUT. off: scratch never uploads; a producer lost mid-query degrades to the one-shot streaming-disabled re-execution, including graceful drains. Scalar-subquery producer stages always upload eagerly (the coordinator reads those from S3).")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAddr, "peer-exchange-addr", ":0", "Peer-exchange (FetchShuffle) listen address. Default :0 picks a free port (the address reaches peers via heartbeats, and a fixed default would collide when multiple workers share a host); pin it when firewalls need a known port.")
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAdvertise, "peer-exchange-advertise", "", "Peer-exchange address advertised in heartbeats (default: derived from the bound listener)")
 	rootCmd.PersistentFlags().BoolVar(&streamingShuffleRead, "streaming-shuffle-read", true, "Decode WSHF/WSHC exchange inputs directly from the peer/S3 byte stream instead of staging the whole file to NVMe + mmap first — the first chunk decodes as soon as its frames arrive. Any mid-stream failure falls back to a staged read of the durable copy, skipping already-delivered batches. Default true (SF100-validated); =false is the kill switch restoring the staged read path. See docs/design/exchange-streaming-consumption.md.")
@@ -948,6 +950,10 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 	w.SetMetrics(m)
 
 	// Start coordinator
+	durability, err := parseShuffleDurability(shuffleDurability)
+	if err != nil {
+		return err
+	}
 	coord := coordinator.New(coordinator.Config{
 		NATSUrl:                embeddedNATS.ClientURL(),
 		ResultBucket:           bucket,
@@ -960,6 +966,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		AggPartialSplit:        aggPartialSplit,
 		StreamingExchange:      streamingExchange,
 		EagerDispatch:          eagerDispatch,
+		ShuffleDurability:      durability,
 	}, cat, nc, js, logger)
 
 	// Phase A: same-process data-plane server + client when enabled.
@@ -1251,6 +1258,10 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 	// Restore persisted UDFs and wire persistence callback
 	wireUDFPersistence(cat, logger)
 
+	durability, err := parseShuffleDurability(shuffleDurability)
+	if err != nil {
+		return err
+	}
 	coord := coordinator.New(coordinator.Config{
 		NATSUrl:                embeddedNATS.ClientURL(),
 		ResultBucket:           bucket,
@@ -1263,6 +1274,7 @@ func runCoordinator(ctx context.Context, store objstore.Store, logger *slog.Logg
 		AggPartialSplit:        aggPartialSplit,
 		StreamingExchange:      streamingExchange,
 		EagerDispatch:          eagerDispatch,
+		ShuffleDurability:      durability,
 	}, cat, nc, js, logger)
 
 	// Phase A: start data-plane gRPC server alongside coord when enabled.
@@ -1684,6 +1696,21 @@ func catalogSnapshotCmd() *cobra.Command {
 // the Trino-style semi-join dynamic-filter optimization should be enabled
 // on the coordinator. Accepts "1", "true" (case-insensitive). Off otherwise
 // — v1 default until validated at SF10/SF100.
+// parseShuffleDurability maps the --shuffle-durability flag value to the
+// wire policy ("eager" is the zero value).
+func parseShuffleDurability(s string) (distributed.UploadPolicy, error) {
+	switch s {
+	case "", "eager":
+		return distributed.UploadEager, nil
+	case "lazy":
+		return distributed.UploadLazy, nil
+	case "off":
+		return distributed.UploadOff, nil
+	default:
+		return "", fmt.Errorf("invalid --shuffle-durability %q (want eager, lazy, or off)", s)
+	}
+}
+
 func dynamicFiltersFromEnv() bool {
 	v := os.Getenv("WADJET_DYNAMIC_FILTERS")
 	return v == "1" || strings.EqualFold(v, "true")

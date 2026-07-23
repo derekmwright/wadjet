@@ -45,7 +45,7 @@ func (e *Executor) uploadUnpartitionedSpill(ctx context.Context, task distribute
 	// Adoption failure falls through to the synchronous body below.
 	if root, asyncOK := e.asyncUploadEligible(&task); asyncOK {
 		if job, ok := e.finishStageOutputAsync(ctx, &task, key, srcPath, size, false, result); ok {
-			e.uploads.StartTask(root, task.ID, result.WorkerID, []uploadJob{job})
+			e.uploads.StartTask(root, task.ID, result.WorkerID, []uploadJob{job}, task.UploadPolicy)
 			return nil
 		}
 	}
@@ -328,7 +328,7 @@ func (e *Executor) uploadPartitionedShuffleFiles(ctx context.Context, task distr
 	var jobs []uploadJob
 	defer func() {
 		if len(jobs) > 0 {
-			e.uploads.StartTask(root, task.ID, result.WorkerID, jobs)
+			e.uploads.StartTask(root, task.ID, result.WorkerID, jobs, task.UploadPolicy)
 		}
 	}()
 	for p, localPath := range sink.PartitionFiles() {
@@ -448,7 +448,7 @@ func (e *Executor) writeUnpartitionedWSHF(ctx context.Context, task distributed.
 			e.uploads.StartTask(root, task.ID, result.WorkerID, []uploadJob{{
 				bucket: task.ResultBucket, key: key, srcPath: adopted,
 				compress: false, tmpDir: e.spillDir, size: int64(len(payload)),
-			}})
+			}}, task.UploadPolicy)
 			return nil
 		}
 	}

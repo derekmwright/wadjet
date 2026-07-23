@@ -458,6 +458,23 @@ func (w *Worker) Start(ctx context.Context) error {
 		return fmt.Errorf("subscribing to completions: %w", err)
 	}
 
+	// Subscribe to deferred-upload release broadcasts (shuffle durability
+	// "lazy", docs/design/shuffle-durability.md): the coordinator names a
+	// root query whose scratch needs its durable S3 copies after all, and
+	// any queued lazy uploads for that root start. Roots with nothing
+	// queued (or unknown here) are a no-op.
+	releaseSub, err := w.nc.Subscribe(distributed.SubjectUploadRelease, func(msg *nats.Msg) {
+		root := string(msg.Data)
+		if root == "" {
+			return
+		}
+		w.logger.Info("releasing deferred stage-output uploads", "root_query_id", root)
+		w.executor.uploads.ReleaseQuery(root)
+	})
+	if err != nil {
+		return fmt.Errorf("subscribing to upload releases: %w", err)
+	}
+
 	// Subscribe to drain requests (sent by coordinator or admin)
 	drainSubject := fmt.Sprintf("wadjet.worker.%s.drain", w.config.WorkerID)
 	w.nc.Subscribe(drainSubject, func(msg *nats.Msg) {
@@ -481,6 +498,7 @@ func (w *Worker) Start(ctx context.Context) error {
 		<-ctx.Done()
 		cancelSub.Unsubscribe()
 		completeSub.Unsubscribe()
+		releaseSub.Unsubscribe()
 	}()
 
 	// Start task pull loop
@@ -622,7 +640,7 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 		defer w.bgWG.Done()
 		var lastReads, lastFallbacks, lastSkips int64
 		var lastIO ShuffleIOSnapshot
-		var lastUp [5]int64
+		var lastUp [7]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -652,13 +670,15 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 }
 
 // shuffleIOTotals snapshots the per-tier shuffle-read ledger and the upload
-// ledger ([done, cancelled, failed, doneBytes, cancelledBytes]).
-func (w *Worker) shuffleIOTotals() (ShuffleIOSnapshot, [5]int64) {
+// ledger ([done, cancelled, failed, doneBytes, cancelledBytes, elided,
+// elidedBytes]).
+func (w *Worker) shuffleIOTotals() (ShuffleIOSnapshot, [7]int64) {
 	ioStats := w.executor.ShuffleIOStats()
-	var up [5]int64
+	var up [7]int64
 	if w.executor.uploads != nil {
 		up[0], up[1], up[2] = w.executor.uploads.UploadStats()
 		up[3], up[4] = w.executor.uploads.UploadByteStats()
+		up[5], up[6] = w.executor.uploads.UploadElidedStats()
 	}
 	return ioStats, up
 }
@@ -666,7 +686,7 @@ func (w *Worker) shuffleIOTotals() (ShuffleIOSnapshot, [5]int64) {
 // logShuffleIOStats emits one "shuffle io stats" line for the given
 // snapshots — the greppable record of which tier served exchange inputs and
 // how much S3 PUT work the background uploads did vs saved.
-func (w *Worker) logShuffleIOStats(ioStats ShuffleIOSnapshot, up [5]int64) {
+func (w *Worker) logShuffleIOStats(ioStats ShuffleIOSnapshot, up [7]int64) {
 	w.logger.Info("shuffle io stats",
 		"local_files", ioStats.LocalFiles, "local_bytes", ioStats.LocalBytes,
 		"kv_files", ioStats.KVFiles, "kv_bytes", ioStats.KVBytes,
@@ -676,7 +696,8 @@ func (w *Worker) logShuffleIOStats(ioStats ShuffleIOSnapshot, up [5]int64) {
 		"peer_fallthroughs", w.executor.PeerFetchFallthroughs(),
 		"upload_done", up[0], "upload_done_bytes", up[3],
 		"upload_cancelled", up[1], "upload_cancelled_bytes", up[4],
-		"upload_failed", up[2])
+		"upload_failed", up[2],
+		"upload_elided", up[5], "upload_elided_bytes", up[6])
 }
 
 // dispatchLoop consumes TaskDispatch envelopes pushed by coord over
@@ -874,7 +895,7 @@ func (w *Worker) Drain() {
 	w.bgWG.Wait()
 	// Final shuffle-IO ledger totals: workers that lived less than one
 	// marker tick (60s) would otherwise leave no record at all.
-	if ioStats, up := w.shuffleIOTotals(); ioStats != (ShuffleIOSnapshot{}) || up != ([5]int64{}) {
+	if ioStats, up := w.shuffleIOTotals(); ioStats != (ShuffleIOSnapshot{}) || up != ([7]int64{}) {
 		w.logShuffleIOStats(ioStats, up)
 	}
 	w.logger.Info("worker drained and stopped", "worker_id", w.config.WorkerID)

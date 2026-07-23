@@ -35,6 +35,16 @@ const (
 	// coordinator stays conservative about them.
 	SubjectUploadComplete = "wadjet.uploads.complete"
 
+	// Deferred-upload release (shuffle durability "lazy",
+	// docs/design/shuffle-durability.md) — Core NATS. Published by the
+	// coordinator when a root query's scratch needs its durable S3 copies
+	// after all (a consumer reported a missing input whose producer is
+	// still alive, or the coordinator itself needs to read a stage
+	// output). Workers holding queued lazy uploads for that root start
+	// them on receipt. Best-effort: a lost message costs one task-retry
+	// round (the retry re-triggers the release), never correctness.
+	SubjectUploadRelease = "wadjet.uploads.release"
+
 	// Eager consumer dispatch (docs/design/eager-consumer-dispatch.md) —
 	// Core NATS. Coordinator republishes a compact per-producer-task file
 	// manifest as each task of an eager edge completes; consumer tasks'

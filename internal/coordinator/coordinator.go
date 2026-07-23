@@ -117,6 +117,21 @@ type Config struct {
 	// path (synchronous upload before stage completion) is untouched.
 	// Default false: dormant, no hints, no tokens.
 	StreamingExchange bool
+	// ShuffleDurability is the stage-output upload policy stamped on
+	// dispatched stage/shuffle tasks (docs/design/shuffle-durability.md).
+	// Eager (zero value) starts every background S3 upload immediately —
+	// the pre-knob behavior. Lazy queues uploads unstarted on the workers
+	// and releases them only on demand (a consumer missing an input whose
+	// producer is alive, a coordinator-side stage read, or worker drain);
+	// scratch a query finishes without ever needing durably is elided.
+	// Off never uploads scratch: producer death degrades to the one-shot
+	// streaming-disabled re-execution (the ErrInputLost fallback), and
+	// draining a worker mid-query loses its outputs the same way.
+	// Stages whose outputs the coordinator itself reads (scalar-subquery
+	// producers) always stay eager — the coordinator has no peer tier.
+	// Only meaningful with StreamingExchange (the peer tier is what makes
+	// the durable copy optional).
+	ShuffleDurability distributed.UploadPolicy
 }
 
 // SetAuthProvider wires ABAC enforcement into ExecuteSQL: with a provider
@@ -232,6 +247,13 @@ type Coordinator struct {
 	// a non-zero rate is the signal to revisit single-level producer
 	// re-run per the design memo).
 	streamingReruns atomic.Int64
+	// coordReadStages maps root query ID → set of stage IDs whose outputs
+	// the coordinator reads directly (scalar-subquery producers,
+	// fetchStageOutputData). Those stages' tasks keep eager uploads under
+	// any ShuffleDurability policy: the coordinator has no peer tier, so
+	// S3 is its only read path. Registered by executeStageDAG before
+	// dispatch; dropped in cleanupQuery.
+	coordReadStages sync.Map
 
 	// Eager consumer dispatch (docs/design/eager-consumer-dispatch.md,
 	// eager_feed.go). eagerFeeds maps eagerFeedKey → feed, created lazily
@@ -1034,6 +1056,7 @@ func (c *Coordinator) cleanupQuery(queryID string) {
 	// token (nil-safe when disabled). Workers drop their side on the
 	// complete/cancel broadcasts below.
 	c.peerFiles.CleanupQuery(queryID)
+	c.coordReadStages.Delete(queryID)
 
 	// Broadcast cancellation FIRST: by the time cleanupQuery runs the query
 	// is terminal (completed, failed, or timed out) and this function is

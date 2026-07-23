@@ -157,6 +157,87 @@ func TestAnnotatorAsyncUploadAndDisable(t *testing.T) {
 	}
 }
 
+func TestAnnotatorShuffleDurabilityPolicy(t *testing.T) {
+	newStageTask := func() distributed.Task {
+		return distributed.Task{
+			ID: "t1", QueryID: "st-join-2-qr", StageID: "stage-2",
+			Type:         distributed.TaskTypeStage,
+			ResultPrefix: "queries/qr/stage-2/",
+		}
+	}
+
+	t.Run("eager default stamps no policy", func(t *testing.T) {
+		c := testCoordinatorForPeers(time.Minute)
+		task := newStageTask()
+		c.annotateTaskPeerLocations(&task)
+		if task.UploadPolicy != distributed.UploadEager {
+			t.Fatalf("policy = %q, want eager", task.UploadPolicy)
+		}
+	})
+
+	for _, mode := range []distributed.UploadPolicy{distributed.UploadLazy, distributed.UploadOff} {
+		t.Run(string(mode)+" stamps stage and shuffle tasks", func(t *testing.T) {
+			c := testCoordinatorForPeers(time.Minute)
+			c.config.ShuffleDurability = mode
+			task := newStageTask()
+			c.annotateTaskPeerLocations(&task)
+			if !task.AsyncUpload || task.UploadPolicy != mode {
+				t.Fatalf("async=%v policy=%q, want async + %q", task.AsyncUpload, task.UploadPolicy, mode)
+			}
+			shuffle := newStageTask()
+			shuffle.Type = distributed.TaskTypeShuffle
+			c.annotateTaskPeerLocations(&shuffle)
+			if shuffle.UploadPolicy != mode {
+				t.Fatalf("shuffle policy = %q, want %q", shuffle.UploadPolicy, mode)
+			}
+		})
+	}
+
+	t.Run("coordinator-read stages stay eager", func(t *testing.T) {
+		c := testCoordinatorForPeers(time.Minute)
+		c.config.ShuffleDurability = distributed.UploadLazy
+		c.coordReadStages.Store("qr", map[string]struct{}{"stage-2": {}})
+		task := newStageTask()
+		c.annotateTaskPeerLocations(&task)
+		if task.UploadPolicy != distributed.UploadEager {
+			t.Fatalf("scalar-producer stage stamped %q; the coordinator can only read S3", task.UploadPolicy)
+		}
+		// Sibling stage of the same query still defers.
+		other := newStageTask()
+		other.StageID = "stage-3"
+		other.QueryID = "st-agg-3-qr"
+		other.ResultPrefix = "queries/qr/stage-3/"
+		c.annotateTaskPeerLocations(&other)
+		if other.UploadPolicy != distributed.UploadLazy {
+			t.Fatalf("non-scalar sibling policy = %q, want lazy", other.UploadPolicy)
+		}
+	})
+
+	t.Run("pipeline tasks never get a policy", func(t *testing.T) {
+		c := testCoordinatorForPeers(time.Minute)
+		c.config.ShuffleDurability = distributed.UploadOff
+		task := distributed.Task{
+			ID: "t2", QueryID: "qr", Type: distributed.TaskTypePipeline,
+			ResultPrefix: "queries/qr/",
+		}
+		c.annotateTaskPeerLocations(&task)
+		if task.AsyncUpload || task.UploadPolicy != distributed.UploadEager {
+			t.Fatalf("pipeline task annotated async=%v policy=%q", task.AsyncUpload, task.UploadPolicy)
+		}
+	})
+
+	t.Run("streaming-disabled rerun stays pure S3", func(t *testing.T) {
+		c := testCoordinatorForPeers(time.Minute)
+		c.config.ShuffleDurability = distributed.UploadOff
+		c.streamingDisabled.Store("qr", struct{}{})
+		task := newStageTask()
+		c.annotateTaskPeerLocations(&task)
+		if task.AsyncUpload || task.UploadPolicy != distributed.UploadEager {
+			t.Fatalf("rerun task annotated async=%v policy=%q", task.AsyncUpload, task.UploadPolicy)
+		}
+	})
+}
+
 func TestStreamingDisabledCtxDepthCap(t *testing.T) {
 	ctx := withStreamingExchangeDisabled(t.Context())
 	if !streamingExchangeDisabled(ctx) {
