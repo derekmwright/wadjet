@@ -300,6 +300,12 @@ variable "scan_decode_ahead" {
   default     = true
 }
 
+variable "shuffle_durability" {
+  description = "WADJET_SHUFFLE_DURABILITY for the coordinator (docs/design/shuffle-durability.md): stage-output upload policy stamped on dispatched tasks. eager = uploads start as outputs finalize (default, pre-knob behavior); lazy = uploads queue unstarted and run only on demand (consumer missing-input retry, coordinator read, worker drain) with the rest elided at query end; off = scratch never uploads. Coordinator-side only — workers act on Task.UploadPolicy."
+  type        = string
+  default     = "eager"
+}
+
 variable "peer_exchange_port" {
   description = "Worker↔worker peer-exchange (FetchShuffle) port; SG opens it intra-cluster whenever streaming_exchange is set."
   type        = number

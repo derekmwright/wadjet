@@ -406,6 +406,10 @@ locals {
     # workers act on EagerInputs in the task spec. Default-off engine
     # flag, so the env parse is explicit opt-in ("1"), not a kill switch.
     export WADJET_EAGER_DISPATCH="${var.eager_dispatch ? "1" : "0"}"
+    # Shuffle durability policy (docs/design/shuffle-durability.md).
+    # Coordinator-side only — workers act on Task.UploadPolicy stamped at
+    # dispatch. eager (default) = pre-knob behavior.
+    export WADJET_SHUFFLE_DURABILITY="${var.shuffle_durability}"
     # Catalog snapshot/restore prefix (PR #115). Non-empty = restore the
     # post-discovery catalog from s3://<bucket>/<prefix> instead of paying
     # ~15 min of discovery+ANALYZE per deploy; first boot writes it.
