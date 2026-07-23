@@ -116,6 +116,13 @@ type Executor struct {
 	shuffleStreamFallbacks   atomic.Int64
 	shuffleStreamSkipResumes atomic.Int64
 
+	// Per-tier shuffle-read transfer accounting: which tier served each
+	// exchange input open and how many bytes moved. peer/s3 bytes are
+	// wire bytes (WSHC stays compressed in transit); local/kv bytes are
+	// the materialized payload size. Read via ShuffleIOStats for the
+	// worker's 60s "shuffle io stats" marker.
+	shuffleIO shuffleIOCounters
+
 	// Scan decode pipelining (docs/design/scan-decode-pipelining.md):
 	// parquet scan sources decode row groups ahead of consumption with a
 	// bounded window instead of one group per Next. Counters are the §5
@@ -168,6 +175,36 @@ func (e *Executor) SetStreamingShuffleRead(on bool) { e.streamingShuffleRead = o
 // streaming opens, staged fallbacks, and batches skipped by fallbacks.
 func (e *Executor) ShuffleStreamStats() (reads, fallbacks, skipResumes int64) {
 	return e.shuffleStreamReads.Load(), e.shuffleStreamFallbacks.Load(), e.shuffleStreamSkipResumes.Load()
+}
+
+// shuffleIOCounters is the per-tier shuffle-read ledger: one files/bytes
+// pair per serving tier (same-worker LocalStageCache, NATS KV, peer
+// exchange, durable S3). Peer counts include prefetched peer downloads —
+// the transfer happens at fetch time regardless of when the file is opened.
+type shuffleIOCounters struct {
+	localFiles, localBytes atomic.Int64
+	kvFiles, kvBytes       atomic.Int64
+	peerFiles, peerBytes   atomic.Int64
+	s3Files, s3Bytes       atomic.Int64
+}
+
+// ShuffleIOSnapshot is one point-in-time reading of the per-tier
+// shuffle-read ledger.
+type ShuffleIOSnapshot struct {
+	LocalFiles, LocalBytes int64
+	KVFiles, KVBytes       int64
+	PeerFiles, PeerBytes   int64
+	S3Files, S3Bytes       int64
+}
+
+// ShuffleIOStats returns the per-tier shuffle-read transfer counters.
+func (e *Executor) ShuffleIOStats() ShuffleIOSnapshot {
+	return ShuffleIOSnapshot{
+		LocalFiles: e.shuffleIO.localFiles.Load(), LocalBytes: e.shuffleIO.localBytes.Load(),
+		KVFiles: e.shuffleIO.kvFiles.Load(), KVBytes: e.shuffleIO.kvBytes.Load(),
+		PeerFiles: e.shuffleIO.peerFiles.Load(), PeerBytes: e.shuffleIO.peerBytes.Load(),
+		S3Files: e.shuffleIO.s3Files.Load(), S3Bytes: e.shuffleIO.s3Bytes.Load(),
+	}
 }
 
 // SetScanDecodeAhead enables decode-ahead on parquet scan sources

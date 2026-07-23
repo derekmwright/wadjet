@@ -53,5 +53,6 @@ func (e *Executor) finishStageOutputAsync(ctx context.Context, task *distributed
 		srcPath:  adopted,
 		compress: compress,
 		tmpDir:   e.spillDir,
+		size:     size,
 	}, true
 }

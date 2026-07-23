@@ -621,6 +621,8 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 	go func() {
 		defer w.bgWG.Done()
 		var lastReads, lastFallbacks, lastSkips int64
+		var lastIO ShuffleIOSnapshot
+		var lastUp [5]int64
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for {
@@ -634,9 +636,47 @@ func (w *Worker) startShuffleStreamMarkerLoop(ctx context.Context) {
 					w.logger.Info("streaming shuffle read stats",
 						"reads", reads, "fallbacks", fallbacks, "skip_resumes", skips)
 				}
+				// Per-tier shuffle-read ledger + upload ledger (step-0
+				// measurement for the shuffle NVMe/durability arc): which
+				// tier served exchange inputs, and how much S3 PUT work the
+				// background uploads did vs saved.
+				ioStats, up := w.shuffleIOTotals()
+				if ioStats != lastIO || up != lastUp {
+					lastIO = ioStats
+					lastUp = up
+					w.logShuffleIOStats(ioStats, up)
+				}
 			}
 		}
 	}()
+}
+
+// shuffleIOTotals snapshots the per-tier shuffle-read ledger and the upload
+// ledger ([done, cancelled, failed, doneBytes, cancelledBytes]).
+func (w *Worker) shuffleIOTotals() (ShuffleIOSnapshot, [5]int64) {
+	ioStats := w.executor.ShuffleIOStats()
+	var up [5]int64
+	if w.executor.uploads != nil {
+		up[0], up[1], up[2] = w.executor.uploads.UploadStats()
+		up[3], up[4] = w.executor.uploads.UploadByteStats()
+	}
+	return ioStats, up
+}
+
+// logShuffleIOStats emits one "shuffle io stats" line for the given
+// snapshots — the greppable record of which tier served exchange inputs and
+// how much S3 PUT work the background uploads did vs saved.
+func (w *Worker) logShuffleIOStats(ioStats ShuffleIOSnapshot, up [5]int64) {
+	w.logger.Info("shuffle io stats",
+		"local_files", ioStats.LocalFiles, "local_bytes", ioStats.LocalBytes,
+		"kv_files", ioStats.KVFiles, "kv_bytes", ioStats.KVBytes,
+		"peer_files", ioStats.PeerFiles, "peer_bytes", ioStats.PeerBytes,
+		"s3_files", ioStats.S3Files, "s3_bytes", ioStats.S3Bytes,
+		"peer_hits", w.executor.PeerFetchHits(),
+		"peer_fallthroughs", w.executor.PeerFetchFallthroughs(),
+		"upload_done", up[0], "upload_done_bytes", up[3],
+		"upload_cancelled", up[1], "upload_cancelled_bytes", up[4],
+		"upload_failed", up[2])
 }
 
 // dispatchLoop consumes TaskDispatch envelopes pushed by coord over
@@ -832,6 +872,11 @@ func (w *Worker) Drain() {
 		w.cancel()
 	}
 	w.bgWG.Wait()
+	// Final shuffle-IO ledger totals: workers that lived less than one
+	// marker tick (60s) would otherwise leave no record at all.
+	if ioStats, up := w.shuffleIOTotals(); ioStats != (ShuffleIOSnapshot{}) || up != ([5]int64{}) {
+		w.logShuffleIOStats(ioStats, up)
+	}
 	w.logger.Info("worker drained and stopped", "worker_id", w.config.WorkerID)
 }
 

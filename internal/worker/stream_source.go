@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -441,6 +442,8 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	if s.queryID != "" && s.executor.localCache != nil {
 		if cached := s.executor.localCache.Get(s.queryID, filePath); cached != "" {
 			if err := s.openShuffleFromLocalFile(cached); err == nil {
+				s.executor.shuffleIO.localFiles.Add(1)
+				s.executor.shuffleIO.localBytes.Add(int64(len(s.mmapData)))
 				return nil
 			}
 			// On any failure (file vanished, mmap error), fall through to
@@ -468,7 +471,12 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 				wshf := magic == shuffleMagic
 				wshc := magic == compressedMagic
 				if wshf || wshc {
-					return s.openShuffleInMemory(filePath, magic[:], bytes.NewReader(data[4:]), wshc)
+					if err := s.openShuffleInMemory(filePath, magic[:], bytes.NewReader(data[4:]), wshc); err != nil {
+						return err
+					}
+					s.executor.shuffleIO.kvFiles.Add(1)
+					s.executor.shuffleIO.kvBytes.Add(int64(kvDataLen))
+					return nil
 				}
 				// Non-shuffle payload (e.g., parquet) — fall through to S3.
 			}
@@ -485,6 +493,7 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 		if addr, token := peers.hintFor(filePath); addr != "" {
 			if perr := s.openShuffleFromPeer(ctx, filePath, addr, token); perr == nil {
 				peers.fetchHits.Add(1)
+				s.executor.shuffleIO.peerFiles.Add(1)
 				return nil
 			} else {
 				peers.fetchFallthrough.Add(1)
@@ -544,12 +553,19 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 	wshc := magic == compressedMagic
 
 	if wshf || wshc {
+		// Per-tier ledger: whatever consumes rc past this point drains the
+		// durable-S3 copy, so the counting wrapper records exactly the wire
+		// bytes moved (WSHC stays compressed through it). The 4 magic bytes
+		// were already consumed off the raw stream above — credit them here.
+		crc := &countingReadCloser{rc: rc, n: &s.executor.shuffleIO.s3Bytes}
+		crc.n.Add(int64(len(magic)))
 		// Streaming decode (memo §3 D1): decode chunks off the S3 body as
 		// they arrive instead of staging the file. A failed streaming open
 		// has partially consumed rc — re-resolve the durable copy for the
 		// staged path rather than reusing the stream.
 		if s.executor.streamingShuffleRead {
-			if err := s.openShuffleStreaming(ctx, filePath, rc, wshc); err == nil {
+			if err := s.openShuffleStreaming(ctx, filePath, crc, wshc); err == nil {
+				s.executor.shuffleIO.s3Files.Add(1)
 				rcOwnedByReader = true
 				return nil
 			} else if s.executor.logger != nil {
@@ -558,7 +574,11 @@ func (s *cachedFileStreamSource) openNextFile(ctx context.Context) error {
 			}
 			return s.openShuffleStagedFromStore(ctx, filePath)
 		}
-		return s.openShuffleFile(ctx, filePath, magic[:], rc, wshc)
+		if err := s.openShuffleFile(ctx, filePath, magic[:], crc, wshc); err != nil {
+			return err
+		}
+		s.executor.shuffleIO.s3Files.Add(1)
+		return nil
 	}
 
 	// Parquet path: when a spill dir is available, stream the body to a
@@ -633,6 +653,24 @@ func (p *progressReadCloser) Read(b []byte) (int, error) {
 
 func (p *progressReadCloser) Close() error { return p.rc.Close() }
 
+// countingReadCloser adds every byte read to a tier counter of the per-tier
+// shuffle-read ledger (Executor.shuffleIO). Wire-level: wraps the transfer
+// stream before any decompression, so WSHC counts compressed bytes.
+type countingReadCloser struct {
+	rc io.ReadCloser
+	n  *atomic.Int64
+}
+
+func (c *countingReadCloser) Read(b []byte) (int, error) {
+	n, err := c.rc.Read(b)
+	if n > 0 {
+		c.n.Add(int64(n))
+	}
+	return n, err
+}
+
+func (c *countingReadCloser) Close() error { return c.rc.Close() }
+
 // openShuffleStreaming decodes a WSHF/WSHC body directly from rc
 // (--streaming-shuffle-read, memo §3 D1). rc must be positioned after the
 // outer 4-byte magic. On success the reader owns rc; on error the caller
@@ -675,8 +713,9 @@ func (s *cachedFileStreamSource) openShuffleStagedFromStore(ctx context.Context,
 		}
 	}
 	defer rc.Close()
+	crc := &countingReadCloser{rc: rc, n: &s.executor.shuffleIO.s3Bytes}
 	var magic [4]byte
-	if _, err := io.ReadFull(rc, magic[:]); err != nil {
+	if _, err := io.ReadFull(crc, magic[:]); err != nil {
 		return fmt.Errorf("reading magic from durable copy of %s: %w", srcPath, err)
 	}
 	wshf := magic == shuffleMagic
@@ -684,7 +723,11 @@ func (s *cachedFileStreamSource) openShuffleStagedFromStore(ctx context.Context,
 	if !wshf && !wshc {
 		return fmt.Errorf("durable copy of %s is not a shuffle payload (magic %q)", srcPath, magic[:])
 	}
-	return s.openShuffleFile(ctx, srcPath, magic[:], rc, wshc)
+	if err := s.openShuffleFile(ctx, srcPath, magic[:], crc, wshc); err != nil {
+		return err
+	}
+	s.executor.shuffleIO.s3Files.Add(1)
+	return nil
 }
 
 // fallbackFromStream recovers from a mid-stream failure of the current

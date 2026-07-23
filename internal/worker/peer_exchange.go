@@ -165,10 +165,13 @@ func (p *peerExchange) tokenFor(rootID string) string {
 // Errors before openShuffleFile leave no state; openShuffleFile itself cleans
 // its temp file on failure — either way the caller falls through to S3.
 func (s *cachedFileStreamSource) openShuffleFromPeer(ctx context.Context, key, addr, token string) error {
-	rc, err := s.executor.peers.client.FetchShuffle(ctx, addr, s.queryID, key, token)
+	prc, err := s.executor.peers.client.FetchShuffle(ctx, addr, s.queryID, key, token)
 	if err != nil {
 		return err
 	}
+	// Per-tier ledger: count the gRPC stream's wire bytes as peer-tier
+	// transfer (WSHC stays compressed through the wrapper).
+	rc := io.ReadCloser(&countingReadCloser{rc: prc, n: &s.executor.shuffleIO.peerBytes})
 	ownedByReader := false
 	defer func() {
 		if !ownedByReader {
