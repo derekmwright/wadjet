@@ -4,9 +4,11 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
@@ -31,6 +33,7 @@ import (
 // complete or cancelled.
 type LocalStageCache struct {
 	rootDir string
+	logger  *slog.Logger
 	mu      sync.RWMutex
 	entries map[localStageKey]string
 	// cleaned tombstones queries whose CleanupQuery already ran. A task
@@ -40,7 +43,38 @@ type LocalStageCache struct {
 	// again (the cleanup message fires once per query). Entries are pruned
 	// on insert after tombstoneTTL.
 	cleaned map[string]time.Time
+
+	// asyncPurge defers file deletion to the janitor goroutine
+	// (docs/design/async-scratch-purge.md): CleanupQuery renames the
+	// query's directory into .trash (instant) and the janitor unlinks its
+	// contents with pacing. Without it (kill switch), CleanupQuery
+	// unlinks inline on the caller — the query-complete broadcast
+	// handler — which at SF100 is a multi-GB unlink storm precisely when
+	// the NEXT query's first tasks are starting (the Q22/Q14/Q11
+	// straggler-tail diagnosis, 2026-07-24).
+	asyncPurge  bool
+	janitorOnce sync.Once
+	trashCh     chan trashedQuery
+	trashSeq    atomic.Int64
 }
+
+// trashedQuery is one detached per-query directory awaiting background
+// deletion, plus the ledger identity for the completion log line.
+type trashedQuery struct {
+	dir     string
+	queryID string
+	entries int
+}
+
+// Janitor pacing: unlink in bursts of purgeBatchFiles with purgeBatchPause
+// between bursts, bounding the unlink storm's IO/journal contention with
+// the running query's tasks. ~1-2k files per SF100 query-worker → the
+// pause adds well under a second of janitor wall per query, all off the
+// broadcast handler.
+const (
+	purgeBatchFiles = 64
+	purgeBatchPause = 5 * time.Millisecond
+)
 
 // tombstoneTTL bounds how long a cleaned query refuses late Adopts. It only
 // needs to outlive the slowest straggler task of a terminated query; 30
@@ -83,7 +117,33 @@ func NewLocalStageCache(rootDir string) *LocalStageCache {
 		rootDir: rootDir,
 		entries: make(map[localStageKey]string),
 		cleaned: make(map[string]time.Time),
+		trashCh: make(chan trashedQuery, 64),
 	}
+}
+
+// SetAsyncPurge enables deferred scratch deletion (janitor goroutine,
+// started lazily on first use). Call before the worker serves traffic
+// (same contract as the other Set<X> setters); false = inline unlinks on
+// the cleanup caller, the pre-2026-07-24 behavior and the A/B kill switch.
+func (c *LocalStageCache) SetAsyncPurge(on bool) {
+	if c != nil {
+		c.asyncPurge = on
+	}
+}
+
+// SetLogger attaches the worker's structured logger for the purge ledger
+// lines. nil-safe; without it slog.Default() is used.
+func (c *LocalStageCache) SetLogger(l *slog.Logger) {
+	if c != nil && l != nil {
+		c.logger = l
+	}
+}
+
+func (c *LocalStageCache) log() *slog.Logger {
+	if c.logger != nil {
+		return c.logger
+	}
+	return slog.Default()
 }
 
 // Adopt moves srcPath into the cache's per-query directory and registers it
@@ -138,13 +198,17 @@ func (c *LocalStageCache) Get(queryID, key string) string {
 	return c.entries[localStageKey{queryID, key}]
 }
 
-// CleanupQuery drops all entries for queryID, unlinks the files, and removes
-// the per-query directory. Safe to call multiple times and against unknown
-// query IDs.
+// CleanupQuery drops all entries for queryID and disposes of the files.
+// With asyncPurge the per-query directory is renamed into .trash (instant
+// — open fds and mmaps stay valid across rename and unlink) and the
+// janitor deletes it with pacing; otherwise files are unlinked inline,
+// blocking the caller for the whole storm. Safe to call multiple times
+// and against unknown query IDs.
 func (c *LocalStageCache) CleanupQuery(queryID string) int {
 	if c == nil {
 		return 0
 	}
+	start := time.Now()
 	c.mu.Lock()
 	paths := make([]string, 0)
 	for k, p := range c.entries {
@@ -163,13 +227,94 @@ func (c *LocalStageCache) CleanupQuery(queryID string) int {
 		}
 	}
 	c.mu.Unlock()
+
+	if len(paths) == 0 && c.rootDir == "" {
+		return 0
+	}
+	if c.asyncPurge && c.rootDir != "" && c.deferPurge(queryID, len(paths)) {
+		c.log().Info("scratch purge deferred",
+			"query_id", queryID, "entries", len(paths),
+			"handler_us", time.Since(start).Microseconds())
+		return len(paths)
+	}
+	// Inline (kill switch, empty dir, rename failure, or full janitor
+	// queue): the pre-async behavior, instrumented — handler_ms is the
+	// storm the broadcast handler absorbs.
+	var bytes int64
 	for _, p := range paths {
+		if fi, err := os.Stat(p); err == nil {
+			bytes += fi.Size()
+		}
 		_ = os.Remove(p)
 	}
 	if c.rootDir != "" {
 		_ = os.RemoveAll(filepath.Join(c.rootDir, queryID))
 	}
+	if len(paths) > 0 {
+		c.log().Info("scratch purge inline",
+			"query_id", queryID, "entries", len(paths), "bytes", bytes,
+			"handler_ms", time.Since(start).Milliseconds())
+	}
 	return len(paths)
+}
+
+// deferPurge detaches the query's directory into .trash and hands it to
+// the janitor. Returns false when the caller must delete inline (rename
+// failed, or the janitor queue is full — blocking here would put the
+// storm right back on the broadcast handler).
+func (c *LocalStageCache) deferPurge(queryID string, entries int) bool {
+	qdir := filepath.Join(c.rootDir, queryID)
+	if _, err := os.Stat(qdir); err != nil {
+		return false // nothing on disk (no adopts); inline path is a no-op
+	}
+	trashDir := filepath.Join(c.rootDir, ".trash")
+	if err := os.MkdirAll(trashDir, 0o755); err != nil {
+		return false
+	}
+	dst := filepath.Join(trashDir, fmt.Sprintf("%s-%d", queryID, c.trashSeq.Add(1)))
+	if err := os.Rename(qdir, dst); err != nil {
+		return false
+	}
+	c.janitorOnce.Do(func() { go c.janitor() })
+	select {
+	case c.trashCh <- trashedQuery{dir: dst, queryID: queryID, entries: entries}:
+		return true
+	default:
+		// Queue full — delete the detached dir inline rather than blocking.
+		_ = os.RemoveAll(dst)
+		return true // still off the entries' unlink path; dir handled here
+	}
+}
+
+// janitor deletes trashed query directories with pacing: bursts of
+// purgeBatchFiles unlinks separated by purgeBatchPause, bounding
+// journal/IO contention with the running query. Daemon goroutine, one per
+// cache, lives for the process (boot-time RemoveAll of rootDir reclaims
+// anything a crash strands in .trash).
+func (c *LocalStageCache) janitor() {
+	for t := range c.trashCh {
+		start := time.Now()
+		var files int
+		var bytes int64
+		_ = filepath.WalkDir(t.dir, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if fi, ferr := d.Info(); ferr == nil {
+				bytes += fi.Size()
+			}
+			_ = os.Remove(path)
+			files++
+			if files%purgeBatchFiles == 0 {
+				time.Sleep(purgeBatchPause)
+			}
+			return nil
+		})
+		_ = os.RemoveAll(t.dir)
+		c.log().Info("scratch purge done",
+			"query_id", t.queryID, "entries", t.entries, "files", files,
+			"bytes", bytes, "purge_ms", time.Since(start).Milliseconds())
+	}
 }
 
 // Count returns the total number of cached entries across all queries.

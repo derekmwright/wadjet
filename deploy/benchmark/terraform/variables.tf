@@ -306,6 +306,12 @@ variable "shuffle_durability" {
   default     = "eager"
 }
 
+variable "async_scratch_purge" {
+  description = "Worker --async-scratch-purge (docs/design/async-scratch-purge.md): defer per-query stage-cache deletion to a paced background janitor instead of unlinking inline on the query-complete broadcast handler. Default true; false = inline-deletion control arm / kill switch."
+  type        = bool
+  default     = true
+}
+
 variable "locality_placement" {
   description = "WADJET_LOCALITY_PLACEMENT for the coordinator (docs/design/locality-placement.md): dispatch a task whose peer-location hints all point at one worker onto that worker, converting 1:1 stage-chain reads from peer gRPC streams into same-worker mmaps. Coordinator-side only. Default false pending SF100 validation."
   type        = bool

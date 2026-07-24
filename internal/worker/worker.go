@@ -66,6 +66,12 @@ type Config struct {
 	// RSS-sampling).
 	FloatingBudgetActive bool
 
+	// AsyncScratchPurge defers per-query stage-cache file deletion to a
+	// paced background janitor instead of unlinking inline on the
+	// query-complete broadcast handler (docs/design/async-scratch-purge.md
+	// — the SF100 Q22/Q14/Q11 straggler-tail fix). False = inline unlinks
+	// (pre-fix behavior, A/B kill switch).
+	AsyncScratchPurge bool
 	// StreamingShuffleRead decodes WSHF/WSHC exchange inputs directly from
 	// the peer/S3 byte stream instead of staging whole files to NVMe +
 	// mmap first (docs/design/exchange-streaming-consumption.md §3 D1).
@@ -268,7 +274,10 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 	// worker mmap them directly instead of round-tripping S3. Skipped when
 	// no spill dir is configured (tests / minimal embeddings).
 	if cfg.SpillDir != "" {
-		executor.SetLocalStageCache(NewLocalStageCache(filepath.Join(cfg.SpillDir, "stage-cache")))
+		sc := NewLocalStageCache(filepath.Join(cfg.SpillDir, "stage-cache"))
+		sc.SetAsyncPurge(cfg.AsyncScratchPurge)
+		sc.SetLogger(logger)
+		executor.SetLocalStageCache(sc)
 	}
 	// Best-effort bind to the coordinator's shared result KV bucket so small
 	// stage outputs can round-trip via NATS (~10ms) instead of S3 (~500ms).
