@@ -101,6 +101,68 @@ func TestLocalStageCache_AdoptAfterCleanupDeclined(t *testing.T) {
 	}
 }
 
+// TestLocalStageCache_AsyncPurge: with the janitor enabled, CleanupQuery
+// must return immediately with entries dropped (Get misses, Adopt
+// tombstoned) while the files disappear shortly after in the background.
+func TestLocalStageCache_AsyncPurge(t *testing.T) {
+	root := t.TempDir()
+	c := NewLocalStageCache(root)
+	c.SetAsyncPurge(true)
+
+	var dsts []string
+	for i := 0; i < 3; i++ {
+		src := filepath.Join(t.TempDir(), "src.wshf")
+		if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		key := filepath.Join("queries/qa/s", string(rune('a'+i))+".wshf")
+		dst := c.Adopt("qa", key, src)
+		if dst == "" {
+			t.Fatalf("Adopt %d failed", i)
+		}
+		dsts = append(dsts, dst)
+	}
+
+	if n := c.CleanupQuery("qa"); n != 3 {
+		t.Fatalf("CleanupQuery = %d, want 3", n)
+	}
+	// Entries are gone synchronously.
+	if got := c.Get("qa", "queries/qa/s/a.wshf"); got != "" {
+		t.Fatalf("Get after async cleanup returned %q", got)
+	}
+	// Late Adopt still declined (tombstone unaffected by purge mode).
+	src := filepath.Join(t.TempDir(), "late.wshf")
+	if err := os.WriteFile(src, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Adopt("qa", "queries/qa/s/late.wshf", src); got != "" {
+		t.Fatal("late Adopt accepted on tombstoned query")
+	}
+	// Files disappear in the background.
+	waitFor(t, "janitor to delete trashed files", func() bool {
+		for _, d := range dsts {
+			if _, err := os.Stat(d); !os.IsNotExist(err) {
+				return false
+			}
+		}
+		return true
+	})
+	// Idempotent second cleanup.
+	if n := c.CleanupQuery("qa"); n != 0 {
+		t.Fatalf("second CleanupQuery = %d, want 0", n)
+	}
+}
+
+// TestLocalStageCache_AsyncPurgeNoAdopts: cleanup of a query with no
+// on-disk directory must not spin up janitor work or fail.
+func TestLocalStageCache_AsyncPurgeNoAdopts(t *testing.T) {
+	c := NewLocalStageCache(t.TempDir())
+	c.SetAsyncPurge(true)
+	if n := c.CleanupQuery("ghost"); n != 0 {
+		t.Fatalf("CleanupQuery(ghost) = %d, want 0", n)
+	}
+}
+
 func TestLocalStageCache_AdoptMissingFile(t *testing.T) {
 	c := NewLocalStageCache(t.TempDir())
 	if got := c.Adopt("q", "k", "/no/such/file"); got != "" {

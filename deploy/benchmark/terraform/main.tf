@@ -689,6 +689,7 @@ resource "aws_instance" "worker" {
             --base-table-cache-bytes=${var.base_table_cache_bytes} \
             --streaming-shuffle-read=${var.streaming_shuffle_read} \
             --scan-decode-ahead=${var.scan_decode_ahead} \
+            --async-scratch-purge=${var.async_scratch_purge} \
             %{if var.spill_floating_budget~}
             --spill-floating-budget \
             %{endif~}
