@@ -44,3 +44,10 @@ catalog_snapshot_prefix   = "catalog/" # restore post-discovery catalog; first b
 # (results/20260713-013357), cold-with-cache 29m54s / steady-state 28m50s
 # (results/20260713-021126). Set 0 to reproduce cache-less runs.
 base_table_cache_bytes    = 161061273600
+# Input-locality task placement (docs/design/locality-placement.md, PR #263):
+# 1:1 stage-chain consumers dispatch to their producer's worker — read split
+# 37/32% -> 50/49% local across two validation windows (2026-07-24), Q18
+# steady -15.3% in the clean-window pair, spread uniform, rows identical.
+# Wall neutral within the window-noise band. Set false to reproduce
+# locality-off baselines.
+locality_placement        = true
