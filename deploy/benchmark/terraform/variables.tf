@@ -306,6 +306,12 @@ variable "shuffle_durability" {
   default     = "eager"
 }
 
+variable "locality_placement" {
+  description = "WADJET_LOCALITY_PLACEMENT for the coordinator (docs/design/locality-placement.md): dispatch a task whose peer-location hints all point at one worker onto that worker, converting 1:1 stage-chain reads from peer gRPC streams into same-worker mmaps. Coordinator-side only. Default false pending SF100 validation."
+  type        = bool
+  default     = false
+}
+
 variable "peer_exchange_port" {
   description = "Worker↔worker peer-exchange (FetchShuffle) port; SG opens it intra-cluster whenever streaming_exchange is set."
   type        = number

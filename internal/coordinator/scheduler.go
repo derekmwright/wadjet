@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -68,6 +69,13 @@ type Scheduler struct {
 	// retried) passes through. Used by streaming exchange to attach
 	// peer-location hints and fetch tokens. Must be cheap and thread-safe.
 	annotate func(*distributed.Task)
+
+	// localityPlacement enables input-locality placement (docs/design/
+	// locality-placement.md): a task whose peer-location hints all point
+	// at one connected worker is placed on that worker, converting its
+	// exchange reads from peer gRPC streams into same-worker mmaps. Only
+	// meaningful when the annotator supplies hints (streaming exchange).
+	localityPlacement bool
 }
 
 // NewScheduler creates a new task scheduler.
@@ -107,6 +115,12 @@ func (s *Scheduler) SetWorkerRegistry(wr *WorkerRegistry) {
 // any query runs (same contract as the other Set<X> setters).
 func (s *Scheduler) SetTaskAnnotator(fn func(*distributed.Task)) {
 	s.annotate = fn
+}
+
+// SetLocalityPlacement toggles input-locality placement. Call before any
+// query runs (same contract as the other Set<X> setters).
+func (s *Scheduler) SetLocalityPlacement(on bool) {
+	s.localityPlacement = on
 }
 
 // TaskDone clears the task's in-flight admission estimate. Called by the
@@ -204,7 +218,7 @@ func (s *Scheduler) publishViaDataPlane(batch []preparedTask, deadlineNano int64
 	batchAssigned := make(map[string]int)
 	methods := make(map[string]int)
 	for _, p := range batch {
-		workerID, method, ok := s.pickWorkerFor(p.task, batchAssigned)
+		workerID, method, ok := s.pickWorkerFor(p.task, batchAssigned, len(batch))
 		if !ok {
 			return fmt.Errorf("dispatching task %s: %w", p.task.ID, dataplane.ErrNoWorkers)
 		}
@@ -271,12 +285,17 @@ func formatCounts(m map[string]int) string {
 // them on one worker starves that worker's producer lanes (targeted gRPC
 // dispatch has no work stealing).
 //
-// The returned method ("eager" | "binpack" | "rr") feeds the placement
-// attr on the "published tasks" line.
-func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]int) (workerID, method string, ok bool) {
+// The returned method ("eager" | "local" | "binpack" | "rr") feeds the
+// placement attr on the "published tasks" line.
+func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]int, batchLen int) (workerID, method string, ok bool) {
 	if len(t.EagerInputs) > 0 {
 		if id, ok := s.pickEagerWorker(); ok {
 			return id, "eager", true
+		}
+	}
+	if s.localityPlacement && s.registry != nil {
+		if id, ok := pickLocalityWorkerFrom(t, s.dpSrv.ConnectedWorkers(), s.registry.ActiveWorkers(), batchAssigned, batchLen); ok {
+			return id, "local", true
 		}
 	}
 	if t.EstimatedBytes > 0 && s.registry != nil {
@@ -286,6 +305,54 @@ func (s *Scheduler) pickWorkerFor(t distributed.Task, batchAssigned map[string]i
 	}
 	id, ok := s.dpSrv.PickWorker()
 	return id, "rr", ok
+}
+
+// pickLocalityWorkerFrom places a task whose peer-location hints all point
+// at ONE worker onto that worker — the 1:1 stage-chain case (consumer task
+// i reading exactly producer task i's output), where a same-worker mmap
+// replaces a peer gRPC stream for the entire hinted input set. Preference,
+// not correctness: hints are best-effort and reads fall back through the
+// peer/S3 tiers wherever the task lands.
+//
+// Repartition-exchange consumers read from every producer, carry hints on
+// multiple workers, and fall through — their cross-worker bytes are
+// irreducible (each producer contributes ~uniformly to every partition).
+//
+// The same-batch cap (ceil batch/connected) bounds clumping when many
+// tasks of one fan-out share a hinted worker (replicated build files whose
+// single producer would otherwise attract the whole batch), preserving the
+// anti-affinity the binpack spread established (2026-07-20 Q20 diagnosis:
+// a stacked fan-out cost +24s serialization). 1:1 chains inherit the
+// producer stage's uniform spread, so the cap does not bite them.
+func pickLocalityWorkerFrom(t distributed.Task, connected []string, active []*WorkerInfo, batchAssigned map[string]int, batchLen int) (string, bool) {
+	if len(t.InputLocations) == 0 || len(connected) == 0 {
+		return "", false
+	}
+	addr := ""
+	for _, a := range t.InputLocations {
+		if addr == "" {
+			addr = a
+		} else if a != addr {
+			return "", false // inputs span workers: nothing to co-locate with
+		}
+	}
+	var workerID string
+	for _, w := range active {
+		if w.PeerAddr != "" && w.PeerAddr == addr {
+			workerID = w.WorkerID
+			break
+		}
+	}
+	if workerID == "" {
+		return "", false
+	}
+	if !slices.Contains(connected, workerID) {
+		return "", false
+	}
+	if batchAssigned[workerID] >= (batchLen+len(connected)-1)/len(connected) {
+		return "", false
+	}
+	return workerID, true
 }
 
 // pickEagerWorker places one eager consumer task: the connected worker

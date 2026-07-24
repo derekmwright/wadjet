@@ -410,6 +410,9 @@ locals {
     # Coordinator-side only — workers act on Task.UploadPolicy stamped at
     # dispatch. eager (default) = pre-knob behavior.
     export WADJET_SHUFFLE_DURABILITY="${var.shuffle_durability}"
+    # Input-locality placement (docs/design/locality-placement.md).
+    # Coordinator-side only; explicit opt-in pending SF100 validation.
+    export WADJET_LOCALITY_PLACEMENT="${var.locality_placement ? "1" : "0"}"
     # Catalog snapshot/restore prefix (PR #115). Non-empty = restore the
     # post-discovery catalog from s3://<bucket>/<prefix> instead of paying
     # ~15 min of discovery+ANALYZE per deploy; first boot writes it.

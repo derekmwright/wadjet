@@ -132,6 +132,14 @@ type Config struct {
 	// Only meaningful with StreamingExchange (the peer tier is what makes
 	// the durable copy optional).
 	ShuffleDurability distributed.UploadPolicy
+	// LocalityPlacement places a task whose peer-location hints all point
+	// at one connected worker onto that worker (docs/design/locality-
+	// placement.md): 1:1 stage chains read their whole input set via
+	// same-worker mmap instead of peer gRPC streams. Requires
+	// StreamingExchange (the hint source) and the gRPC data plane
+	// (targeted dispatch). Zero value false — default off until SF100
+	// validation (mirrors EagerDispatch).
+	LocalityPlacement bool
 }
 
 // SetAuthProvider wires ABAC enforcement into ExecuteSQL: with a provider
@@ -300,6 +308,11 @@ func New(cfg Config, cat *catalog.Catalog, nc *nats.Conn, js jetstream.JetStream
 	// Memory-aware gRPC placement: the scheduler bin-packs estimated task
 	// footprints against heartbeat pool stats. No-op on the NATS path.
 	c.scheduler.SetWorkerRegistry(c.workers)
+	// Input-locality placement rides the streaming-exchange hints; without
+	// them no task ever carries InputLocations and the tier is inert.
+	if cfg.LocalityPlacement && cfg.StreamingExchange {
+		c.scheduler.SetLocalityPlacement(true)
+	}
 
 	// Streaming exchange (Phase A): annotate every dispatched task — initial
 	// and retried alike, since retries re-enter PublishTasks — with peer

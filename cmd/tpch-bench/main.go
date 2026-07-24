@@ -439,6 +439,11 @@ func setupDistributed(ctx context.Context, logger *slog.Logger, endpoint, region
 		// so a typo'd env var on a remote deploy costs the A/B arm, not
 		// the whole run.
 		ShuffleDurability: shuffleDurabilityFromEnv(logger),
+		// Input-locality placement (docs/design/locality-placement.md):
+		// default-off engine flag, explicit opt-in ("1"/"true") pending
+		// SF100 validation — the EagerDispatch convention, not a kill
+		// switch.
+		LocalityPlacement: os.Getenv("WADJET_LOCALITY_PLACEMENT") == "1" || strings.EqualFold(os.Getenv("WADJET_LOCALITY_PLACEMENT"), "true"),
 	}, cat, nc, js, logger)
 	coord.Workers().StartReaper(ctx)
 	coord.Workers().StartSubStatsLogger(ctx)

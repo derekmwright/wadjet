@@ -42,6 +42,54 @@ func TestPickLeastLoadedWorker(t *testing.T) {
 	}
 }
 
+func TestPickLocalityWorkerFrom(t *testing.T) {
+	active := []*WorkerInfo{
+		{WorkerID: "w1", PeerAddr: "10.0.0.1:9095"},
+		{WorkerID: "w2", PeerAddr: "10.0.0.2:9095"},
+		{WorkerID: "w3"}, // no peer addr advertised
+	}
+	oneWorker := map[string]string{
+		"queries/q/s1/a.wshf": "10.0.0.1:9095",
+		"queries/q/s1/b.wshf": "10.0.0.1:9095",
+	}
+	tests := []struct {
+		name          string
+		locs          map[string]string
+		connected     []string
+		batchAssigned map[string]int
+		batchLen      int
+		wantID        string
+		wantOK        bool
+	}{
+		{"all hints on one worker", oneWorker,
+			[]string{"w1", "w2"}, nil, 3, "w1", true},
+		{"hints span workers fall through", map[string]string{
+			"queries/q/s1/a.wshf": "10.0.0.1:9095",
+			"queries/q/s1/b.wshf": "10.0.0.2:9095",
+		}, []string{"w1", "w2"}, nil, 3, "", false},
+		{"no hints fall through", nil, []string{"w1", "w2"}, nil, 3, "", false},
+		{"hinted worker not connected", oneWorker,
+			[]string{"w2"}, nil, 3, "", false},
+		{"unknown peer addr", map[string]string{
+			"queries/q/s1/a.wshf": "10.9.9.9:9095",
+		}, []string{"w1", "w2"}, nil, 3, "", false},
+		{"batch cap bites", oneWorker,
+			[]string{"w1", "w2"}, map[string]int{"w1": 2}, 3, "", false},
+		{"batch cap admits under ceil", oneWorker,
+			[]string{"w1", "w2"}, map[string]int{"w1": 1}, 3, "w1", true},
+		{"no connected workers", oneWorker, nil, nil, 3, "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			task := distributed.Task{InputLocations: tc.locs}
+			id, ok := pickLocalityWorkerFrom(task, tc.connected, active, tc.batchAssigned, tc.batchLen)
+			if id != tc.wantID || ok != tc.wantOK {
+				t.Fatalf("pickLocalityWorkerFrom = (%q,%v), want (%q,%v)", id, ok, tc.wantID, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestSchedulerInflightLifecycle(t *testing.T) {
 	s := NewScheduler(nil, nil)
 	s.noteInflight(distributed.Task{ID: "t1", EstimatedBytes: 100}, "w1")
