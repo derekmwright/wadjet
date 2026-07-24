@@ -306,6 +306,12 @@ variable "shuffle_durability" {
   default     = "eager"
 }
 
+variable "peer_wire_compression" {
+  description = "Worker --peer-wire-compression (docs/design/peer-wire-compression.md): s2-compress raw WSHF payloads on outgoing peer-exchange streams (WSHC envelope, consumers already decode it). Default false pending SF100 validation."
+  type        = bool
+  default     = false
+}
+
 variable "async_scratch_purge" {
   description = "Worker --async-scratch-purge (docs/design/async-scratch-purge.md): defer per-query stage-cache deletion to a paced background janitor instead of unlinking inline on the query-complete broadcast handler. Default true; false = inline-deletion control arm / kill switch."
   type        = bool

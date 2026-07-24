@@ -1,6 +1,8 @@
 package dataplane
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -9,6 +11,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/klauspost/compress/s2"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -65,6 +69,15 @@ type PeerServerConfig struct {
 	// protecting the producer's NVMe/NIC from consumer fan-in spikes.
 	// 0 = default (16).
 	MaxConcurrentFetches int
+
+	// CompressWire s2-compresses raw WSHF payloads on the stream
+	// (docs/design/peer-wire-compression.md): the served bytes become a
+	// standard WSHC envelope, which every consumer already decodes.
+	// Payloads that are already WSHC (or not WSHF at all) pass through
+	// untouched. Trades ~1 core-GB/s of producer CPU per stream for
+	// ~20% fewer wire bytes (the s2 ratio measured on SF100 shuffle
+	// data). Default false pending validation.
+	CompressWire bool
 }
 
 // PeerServer is the worker-side PeerExchange gRPC listener. Serving is a
@@ -211,12 +224,36 @@ func (s *PeerServer) FetchShuffle(req *dpv1.FetchShuffleRequest, stream grpc.Ser
 	}
 	defer f.Close()
 
+	if s.cfg.CompressWire {
+		// Sniff the payload: raw WSHF is compressed into a WSHC envelope
+		// on the stream; anything else (already-WSHC, short, foreign)
+		// passes through byte-identical via the head+rest copy below.
+		var head [4]byte
+		n, herr := io.ReadFull(f, head[:])
+		if herr == nil && head == wshfMagic {
+			return s.streamCompressed(ctx, io.MultiReader(bytes.NewReader(head[:]), f), stream)
+		}
+		return s.streamRaw(ctx, io.MultiReader(bytes.NewReader(head[:n]), f), stream)
+	}
+	return s.streamRaw(ctx, f, stream)
+}
+
+// Wire-format magics, mirroring internal/worker shuffle_format.go
+// (shuffleMagic / compressedMagic — dataplane cannot import worker without
+// a cycle; these four-byte constants ARE the wire contract).
+var (
+	wshfMagic = [4]byte{'W', 'S', 'H', 'F'}
+	wshcMagic = [4]byte{'W', 'S', 'H', 'C'}
+)
+
+// streamRaw copies r to the stream in peerChunkBytes frames.
+func (s *PeerServer) streamRaw(ctx context.Context, r io.Reader, stream grpc.ServerStreamingServer[dpv1.ShuffleChunk]) error {
 	buf := make([]byte, peerChunkBytes)
 	for {
 		if ctx.Err() != nil {
 			return status.FromContextError(ctx.Err()).Err()
 		}
-		n, rerr := f.Read(buf)
+		n, rerr := r.Read(buf)
 		if n > 0 {
 			if serr := stream.Send(&dpv1.ShuffleChunk{Data: buf[:n]}); serr != nil {
 				return serr
@@ -229,4 +266,64 @@ func (s *PeerServer) FetchShuffle(req *dpv1.FetchShuffleRequest, stream grpc.Ser
 			return status.Errorf(codes.Internal, "reading local file: %v", rerr)
 		}
 	}
+}
+
+// streamCompressed sends a WSHC envelope: the magic, then the s2 stream of
+// the raw payload, chunked into peerChunkBytes frames. The consumer's
+// existing WSHC decode path (magic sniff in openShuffleFromPeer) handles
+// the result; its peer-tier byte ledger counts the compressed wire bytes.
+func (s *PeerServer) streamCompressed(ctx context.Context, r io.Reader, stream grpc.ServerStreamingServer[dpv1.ShuffleChunk]) error {
+	cw := &chunkStreamWriter{ctx: ctx, stream: stream, buf: make([]byte, 0, peerChunkBytes)}
+	if _, err := cw.Write(wshcMagic[:]); err != nil {
+		return err
+	}
+	s2w := s2.NewWriter(cw)
+	if _, err := io.Copy(s2w, r); err != nil {
+		_ = s2w.Close()
+		if serr, ok := status.FromError(err); ok && serr.Code() != codes.Unknown {
+			return err
+		}
+		return status.Errorf(codes.Internal, "compressing stream: %v", err)
+	}
+	if err := s2w.Close(); err != nil {
+		return status.Errorf(codes.Internal, "flushing s2 stream: %v", err)
+	}
+	return cw.Flush()
+}
+
+// chunkStreamWriter adapts stream.Send to io.Writer, buffering to
+// peerChunkBytes frames. Send errors (including consumer cancellation)
+// surface as write errors and abort the s2 copy.
+type chunkStreamWriter struct {
+	ctx    context.Context
+	stream grpc.ServerStreamingServer[dpv1.ShuffleChunk]
+	buf    []byte
+}
+
+func (w *chunkStreamWriter) Write(p []byte) (int, error) {
+	total := len(p)
+	for len(p) > 0 {
+		if err := w.ctx.Err(); err != nil {
+			return 0, status.FromContextError(err).Err()
+		}
+		room := peerChunkBytes - len(w.buf)
+		n := min(room, len(p))
+		w.buf = append(w.buf, p[:n]...)
+		p = p[n:]
+		if len(w.buf) == peerChunkBytes {
+			if err := w.Flush(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return total, nil
+}
+
+func (w *chunkStreamWriter) Flush() error {
+	if len(w.buf) == 0 {
+		return nil
+	}
+	err := w.stream.Send(&dpv1.ShuffleChunk{Data: w.buf})
+	w.buf = w.buf[:0]
+	return err
 }
