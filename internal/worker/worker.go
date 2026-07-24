@@ -66,6 +66,12 @@ type Config struct {
 	// RSS-sampling).
 	FloatingBudgetActive bool
 
+	// PeerWireCompression s2-compresses raw WSHF payloads on outgoing
+	// peer-exchange streams (docs/design/peer-wire-compression.md): the
+	// wire carries a standard WSHC envelope every consumer already
+	// decodes. ~20% fewer peer-stream bytes for ~1 core-GB/s of producer
+	// CPU. Default false pending SF100 validation.
+	PeerWireCompression bool
 	// AsyncScratchPurge defers per-query stage-cache file deletion to a
 	// paced background janitor instead of unlinking inline on the
 	// query-complete broadcast handler (docs/design/async-scratch-purge.md
@@ -308,6 +314,7 @@ func New(cfg Config, store objstore.Store, nc *nats.Conn, js jetstream.JetStream
 		w.peerServer = dataplane.NewPeerServer(dataplane.PeerServerConfig{
 			Addr:          cfg.PeerListenAddr,
 			AdvertiseAddr: cfg.PeerAdvertiseAddr,
+			CompressWire:  cfg.PeerWireCompression,
 		}, executor, logger)
 	}
 	return w

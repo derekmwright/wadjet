@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/klauspost/compress/s2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -66,6 +67,103 @@ func TestPeerFetchRoundTrip(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Fatalf("payload mismatch: got %d bytes, want %d", len(got), len(payload))
 	}
+}
+
+// TestPeerFetchCompressWire: with CompressWire the server must deliver a
+// WSHC envelope whose s2 stream round-trips to the original WSHF bytes;
+// non-WSHF payloads must pass through byte-identical.
+func TestPeerFetchCompressWire(t *testing.T) {
+	startCompressed := func(t *testing.T, resolver ShuffleFileResolver) (*PeerClient, string) {
+		t.Helper()
+		srv := NewPeerServer(PeerServerConfig{Addr: "127.0.0.1:0", CompressWire: true}, resolver, nil)
+		if err := srv.Start(); err != nil {
+			t.Fatalf("starting peer server: %v", err)
+		}
+		t.Cleanup(srv.Stop)
+		client := NewPeerClient(nil)
+		t.Cleanup(client.Close)
+		return client, srv.AdvertiseAddr()
+	}
+
+	t.Run("wshf compresses and round-trips", func(t *testing.T) {
+		// Compressible WSHF payload spanning several chunks.
+		payload := append([]byte("WSHF"), bytes.Repeat([]byte("wadjet-shuffle-bytes "), 3*peerChunkBytes/20)...)
+		path := filepath.Join(t.TempDir(), "p.wshf")
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		resolver := &fakeResolver{queryID: "q1", key: "k", token: "tok", path: path}
+		client, addr := startCompressed(t, resolver)
+
+		rc, err := client.FetchShuffle(context.Background(), addr, "q1", "k", "tok")
+		if err != nil {
+			t.Fatalf("FetchShuffle: %v", err)
+		}
+		defer rc.Close()
+		wire, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("reading stream: %v", err)
+		}
+		if len(wire) < 4 || string(wire[:4]) != "WSHC" {
+			t.Fatalf("wire payload not a WSHC envelope (got %q...)", wire[:min(4, len(wire))])
+		}
+		if len(wire) >= len(payload) {
+			t.Fatalf("compressible payload did not shrink: wire %d >= raw %d", len(wire), len(payload))
+		}
+		decoded, err := io.ReadAll(s2.NewReader(bytes.NewReader(wire[4:])))
+		if err != nil {
+			t.Fatalf("s2 decode: %v", err)
+		}
+		if !bytes.Equal(decoded, payload) {
+			t.Fatalf("round-trip mismatch: got %d bytes, want %d", len(decoded), len(payload))
+		}
+	})
+
+	t.Run("already-wshc passes through untouched", func(t *testing.T) {
+		payload := append([]byte("WSHC"), bytes.Repeat([]byte{0xAB}, 1000)...)
+		path := filepath.Join(t.TempDir(), "p.wshc")
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		resolver := &fakeResolver{queryID: "q1", key: "k", token: "tok", path: path}
+		client, addr := startCompressed(t, resolver)
+
+		rc, err := client.FetchShuffle(context.Background(), addr, "q1", "k", "tok")
+		if err != nil {
+			t.Fatalf("FetchShuffle: %v", err)
+		}
+		defer rc.Close()
+		got, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("reading stream: %v", err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatal("already-compressed payload was altered on the wire")
+		}
+	})
+
+	t.Run("short payload passes through", func(t *testing.T) {
+		payload := []byte("WS")
+		path := filepath.Join(t.TempDir(), "p.short")
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		resolver := &fakeResolver{queryID: "q1", key: "k", token: "tok", path: path}
+		client, addr := startCompressed(t, resolver)
+
+		rc, err := client.FetchShuffle(context.Background(), addr, "q1", "k", "tok")
+		if err != nil {
+			t.Fatalf("FetchShuffle: %v", err)
+		}
+		defer rc.Close()
+		got, err := io.ReadAll(rc)
+		if err != nil {
+			t.Fatalf("reading stream: %v", err)
+		}
+		if !bytes.Equal(got, payload) {
+			t.Fatal("short payload was altered on the wire")
+		}
+	})
 }
 
 func TestPeerFetchRejections(t *testing.T) {

@@ -114,6 +114,7 @@ var (
 	baseTableCacheDir     string
 	streamingShuffleRead  bool
 	asyncScratchPurge     bool
+	peerWireCompression   bool
 	scanDecodeAhead       bool
 	scanDecodeAheadBytes  int64
 )
@@ -189,6 +190,7 @@ func main() {
 	rootCmd.PersistentFlags().StringVar(&peerExchangeAdvertise, "peer-exchange-advertise", "", "Peer-exchange address advertised in heartbeats (default: derived from the bound listener)")
 	rootCmd.PersistentFlags().BoolVar(&streamingShuffleRead, "streaming-shuffle-read", true, "Decode WSHF/WSHC exchange inputs directly from the peer/S3 byte stream instead of staging the whole file to NVMe + mmap first — the first chunk decodes as soon as its frames arrive. Any mid-stream failure falls back to a staged read of the durable copy, skipping already-delivered batches. Default true (SF100-validated); =false is the kill switch restoring the staged read path. See docs/design/exchange-streaming-consumption.md.")
 	rootCmd.PersistentFlags().BoolVar(&asyncScratchPurge, "async-scratch-purge", true, "Defer per-query stage-cache scratch deletion to a paced background janitor instead of unlinking inline on the query-complete broadcast handler — at SF100 the inline unlink storm of a big query's multi-GB scratch stalls the NEXT query's first tasks (Q22/Q14/Q11 straggler tails). Worker-side. Default true; =false is the kill switch restoring inline deletion. See docs/design/async-scratch-purge.md.")
+	rootCmd.PersistentFlags().BoolVar(&peerWireCompression, "peer-wire-compression", false, "s2-compress raw WSHF payloads on outgoing peer-exchange streams: the wire carries a standard WSHC envelope every consumer already decodes, cutting peer-stream bytes ~20% for ~1 core-GB/s of producer CPU per stream. Worker-side. Default false pending SF100 validation. See docs/design/peer-wire-compression.md.")
 	rootCmd.PersistentFlags().BoolVar(&scanDecodeAhead, "scan-decode-ahead", true, "Decode parquet row groups ahead of scan consumption: k decode workers per scan source with in-order delivery and a decoded-bytes window bounded by the shared memory pool and the page-cache refault sensor. Worker scan path only. Default true (SF100-validated, steady-state -7.3%); =false is the kill switch restoring the serial row-group path. See docs/design/scan-decode-pipelining.md.")
 	rootCmd.PersistentFlags().Int64Var(&scanDecodeAheadBytes, "scan-decode-ahead-bytes", 0, "Decoded-but-unconsumed byte window per scan source for --scan-decode-ahead. 0 = engine default (256 MiB).")
 	rootCmd.PersistentFlags().Int64Var(&baseTableCacheBytes, "base-table-cache-bytes", 0, "Cross-query disk cache for immutable base-table parquet objects: LRU byte budget on the cache volume. Hits are served from local disk without touching S3 (or the circuit breaker); misses tee the download into the cache. The cache survives restarts (index rebuilt from the directory). 0 = disabled (default until SF100 validation). See docs/design/base-table-nvme-cache.md.")
@@ -945,6 +947,7 @@ func runStandalone(ctx context.Context, store objstore.Store, logger *slog.Logge
 		PeerAdvertiseAddr:     peerExchangeAdvertise,
 		StreamingShuffleRead:  streamingShuffleRead,
 		AsyncScratchPurge:     asyncScratchPurge,
+		PeerWireCompression:   peerWireCompression,
 		ScanDecodeAhead:       scanDecodeAhead,
 		ScanDecodeAheadBytes:  scanDecodeAheadBytes,
 	}, store, nc, js, logger)
@@ -1531,6 +1534,7 @@ func runWorker(ctx context.Context, store objstore.Store, logger *slog.Logger) e
 		PeerAdvertiseAddr:     peerExchangeAdvertise,
 		StreamingShuffleRead:  streamingShuffleRead,
 		AsyncScratchPurge:     asyncScratchPurge,
+		PeerWireCompression:   peerWireCompression,
 		ScanDecodeAhead:       scanDecodeAhead,
 		ScanDecodeAheadBytes:  scanDecodeAheadBytes,
 	}, store, nc, js, logger)

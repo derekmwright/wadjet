@@ -690,6 +690,7 @@ resource "aws_instance" "worker" {
             --streaming-shuffle-read=${var.streaming_shuffle_read} \
             --scan-decode-ahead=${var.scan_decode_ahead} \
             --async-scratch-purge=${var.async_scratch_purge} \
+            --peer-wire-compression=${var.peer_wire_compression} \
             %{if var.spill_floating_budget~}
             --spill-floating-budget \
             %{endif~}
