@@ -60,9 +60,20 @@ type eagerFeed struct {
 	decisionThreshold int // completions needed before decisionReady closes
 
 	mu        sync.Mutex
-	replay    []distributed.ProducerTaskManifest // manifests published so far
+	replay    []distributed.ProducerTaskManifest // manifests accumulated so far
 	closed    bool                               // query finished; republisher must stop
-	completed int                                // producer tasks at successful terminal
+	// active is set the first time a consumer stage clears dispatch on
+	// this feed. Until then no NATS traffic leaves the coordinator for
+	// this stage — the replay list and completion accounting still
+	// accumulate (clearance decisions read them), but publication is
+	// pure waste for the flag-on-no-clearance population (§12/§13: the
+	// gated arm declined 37 of 46 stages and still paid for every one).
+	// A consumer that clears later gets full history via its task-spec
+	// Replay snapshot plus the republisher, both of which start at
+	// activation.
+	active             bool
+	republisherStarted bool
+	completed          int // producer tasks at successful terminal
 	// firstDone/lastDone timestamp the first and most recent successful
 	// producer-task completions. Feed the projected-tail eager gate
 	// (projectedTailSeconds): the C3 SF100 pair (design doc §10) showed
@@ -211,6 +222,26 @@ func (f *eagerFeed) replaySnapshot() []distributed.ProducerTaskManifest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]distributed.ProducerTaskManifest(nil), f.replay...)
+}
+
+// activate marks the feed as having a cleared consumer, enabling live
+// manifest publication. Returns true when the caller should start the
+// republisher (first activation on an open feed). Idempotent.
+func (f *eagerFeed) activate() (startRepublisher bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.active = true
+	if f.republisherStarted || f.closed {
+		return false
+	}
+	f.republisherStarted = true
+	return true
+}
+
+func (f *eagerFeed) isActive() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
 }
 
 // markClosed stops the republisher. Idempotent.

@@ -85,6 +85,35 @@ func TestEagerFeedDispatchUnblocksAndSnapshot(t *testing.T) {
 	}
 }
 
+// TestEagerFeedActivate pins the clearance-driven activation contract
+// (§13 precondition 2): inactive until a consumer clears, exactly one
+// republisher start across repeated activations, and no start on a feed
+// already closed by query teardown.
+func TestEagerFeedActivate(t *testing.T) {
+	f := newEagerFeed()
+	if f.isActive() {
+		t.Fatal("fresh feed must be inactive")
+	}
+	if !f.activate() {
+		t.Fatal("first activation must request a republisher start")
+	}
+	if !f.isActive() {
+		t.Fatal("feed must be active after activate()")
+	}
+	if f.activate() {
+		t.Fatal("second activation must not request another republisher")
+	}
+
+	closed := newEagerFeed()
+	closed.markClosed()
+	if closed.activate() {
+		t.Fatal("activation on a closed feed must not start a republisher")
+	}
+	if !closed.isActive() {
+		t.Fatal("activate() still marks a closed feed active (publisher gate reads it)")
+	}
+}
+
 // TestEagerInputRangesMatchFrozenBinding pins the eager partition ranges to
 // partitionRangeForWorker — the contract that makes eager and barrier
 // dispatch read identical row sets per task.

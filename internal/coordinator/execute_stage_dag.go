@@ -561,6 +561,15 @@ func (c *Coordinator) executeStageDAG(
 				EagerEdgesPlanned.Add(1)
 				producerTasks := 0
 				for _, f := range eagerFeeds {
+					// Clearance-driven activation (§13 precondition 2):
+					// from here on this feed's completions publish live.
+					// The backlog flush covers completions that landed
+					// before clearance; the republisher heals the
+					// snapshot→subscribe window.
+					if f.activate() {
+						c.flushEagerManifestBacklog(f)
+						c.startEagerRepublisher(f)
+					}
 					producerTasks += len(f.producerTaskIDs)
 				}
 				c.logger.Info("eager dispatch: consumer cleared early",

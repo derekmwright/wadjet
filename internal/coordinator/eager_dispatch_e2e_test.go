@@ -262,10 +262,18 @@ func TestEagerTailGate(t *testing.T) {
 		t.Fatal("control returned no rows")
 	}
 	edgesBefore := EagerEdgesPlanned.Load()
+	manifestsBefore := EagerManifestsPublished.Load()
 	treatment := runEagerE2EQuery(ctx, t, newCoord(true), sql, "eager-gated")
 
 	assertEagerArmsIdentical(t, control, treatment)
 	if got := EagerEdgesPlanned.Load() - edgesBefore; got != 0 {
 		t.Errorf("gate floor in force but %d consumers cleared early — gate not applied", got)
+	}
+	// Clearance-driven activation (§13 precondition 2): with every
+	// consumer declined, no feed activates, so the flag-on run must
+	// publish ZERO manifests — the always-on NATS fan-out §12 charged to
+	// the flag no longer exists without a cleared consumer.
+	if got := EagerManifestsPublished.Load() - manifestsBefore; got != 0 {
+		t.Errorf("no consumer cleared but %d manifests were published — activation gating not applied", got)
 	}
 }

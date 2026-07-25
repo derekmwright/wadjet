@@ -444,3 +444,65 @@ cleared) so the machinery costs nothing when the gate declines;
 (3) only then re-pair. The overlap wins are real (Q05 −23/−29%
 twice, Q04 −11/−12% twice) — the plumbing has to stop costing more
 than they earn.
+
+## 13. Precondition (1) resolved (2026-07-25): the Q08/Q20 signature
+## was refault-sensor v2 whole-run pinning, since fixed by #260
+
+Worker-log forensics on both eager arms (gated Q08 window
+21:34:22-21:35:41, task 0a1884bb; gated Q20 final_aggregate-13 task
+02964f4c; plus §10.1's eager-arm task b87311e0):
+
+- In the gated arm, Q08 had ZERO clearances (join-10/join-14 declined
+  at the tail gate; join-6 is not eager-eligible), and workers never
+  subscribe to manifest subjects unless a task carries EagerInputs —
+  manifest publication and the republisher are coordinator-side NATS
+  publishes with no subscribers. The always-on machinery is therefore
+  invisible to worker execution. The §12 attribution ("per-task
+  manifest publication + 3s republisher + NATS fan-out") is WITHDRAWN
+  as the direct mechanism.
+- The reproducible signature in all three flag-on stragglers: one task
+  of a small multi-task stage (Q08 join-6: 3 probe-split broadcast-join
+  tasks; Q20 final_aggregate-13: 3 tasks) runs its identical row volume
+  at a uniform ~1/3 rate from its first progress line, on a worker that
+  is otherwise idle for most of the run, pool ~1%, siblings normal.
+  That is the documented refault-pressure floor: decode-ahead admission
+  collapsed to the occupancy floor while the sensor stays active
+  (§10.1 measured the sensor active with refault_rate ≈ 22k/s).
+- The flag-linkage is a SCHEDULING side effect, not a load effect:
+  with the flag on, the consumer stage dispatches earlier relative to
+  the sibling repartition burst (gated/eager join-6 dispatched t+2.1s/
+  t+6.0s vs control t+9.9s; control's later dispatch cleared the
+  repartition-9 write burst first). Landing the fused probe scan inside
+  the burst window meant the sensor was active AT SCAN START, and
+  sensor v2 semantics then held the collapse for the task's entire
+  run — ambient refault rates at SF100 (60-115k pages/s in EVERY run,
+  controls included) never go quiet, so v2 never released.
+- That exact failure mode was independently root-caused in the
+  2026-07-22 pagecache-sensor arc and fixed by #260: refault-sensor v3
+  episode cap (`ActiveBounded(refaultEpisodeCap)`,
+  internal/engine/memory/pressure_os.go, wired at
+  internal/worker/executor_fragment.go:597). An activation episode that
+  outlives the cap despite collapse is declared non-causal and ignored.
+  A task can no longer be pinned for its whole run; the +22-40% class
+  this caused is measured gone (#260's SF100 validation, steady −12.4%).
+
+Consequently the Q08/Q20 blocker is RESOLVED by the current tree.
+Precondition (2) — clearance-driven manifest activation — remains
+worthwhile as hygiene (don't publish for stages whose consumers never
+clear), and §12's broad low-single-digit taxes (Q02/Q09/Q19) remain
+unexplained on the 25m-era binary but are below the noise floor of the
+current 7m2x-era suite; the re-pair (precondition 3) re-measures them
+on the world that matters.
+
+2026-07-25 re-measure of the ceiling on bdef5ce (peerwire-treat run,
+results/20260725-123737, steady DAG wall 424s): measured edge ceiling
+133s = 31.3%, concentrated Q18 40.4s (55.8%), Q05 18.1s, Q21 16.2s,
+Q10 10.3s, Q07 9.3s, Q09 7.9s. Post-fusion plan shape moved the
+largest edges to JOIN-stage producers (Q18 join-8→join-17, Q05
+join-4→join-6, Q21 join-12→join-16): a fused chain's terminal join now
+emits the partitioned files the next join consumes. Manifest
+publication today exists only for exchange-repartition producers
+(orchestrate_repartition.go); covering join-producer edges and making
+fused consumers eligible (the §3.2 dep-count gate rejects stages whose
+Dependencies grew by chained-build deps) are the two design extensions
+the revival needs.
