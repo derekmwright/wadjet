@@ -506,3 +506,68 @@ publication today exists only for exchange-repartition producers
 fused consumers eligible (the §3.2 dep-count gate rejects stages whose
 Dependencies grew by chained-build deps) are the two design extensions
 the revival needs.
+
+POST-FUSION ceiling (main da5301a, results/20260725-162139, steady DAG
+wall 399s): 88s = 22.2%. Q21 19.1s, Q18 17.1s, Q03 13.3s, Q10 6.8s,
+Q13 6.4s, Q11 6.3s, Q05 5.1s. Composition: plain 2×-repartition hash
+joins (already C2-eligible) carry roughly half; fused chains (Q18
+join-8, chained_joins=1) and compute-stage producer edges (Q21
+join-12→join-16 9.9s, Q18 final_aggregate-14→join-8 6.1s) the rest.
+Every measured spread except Q21's is BELOW the 12s tail floor — the
+§11 calibration is stale on the 7m2x-era binary (per-task overhead and
+consumer spans shrank ~3×); the re-pair must re-derive the floor
+(treatment arm runs WADJET_EAGER_MIN_TAIL_SECONDS at ~3-5s).
+
+## 14. Revival implementation (2026-07-25, perf/eager-revival)
+
+A1 — clearance-driven manifest activation (precondition 2): eagerFeed
+gains an `active` flag set at first consumer clearance
+(execute_stage_dag.go eagerActive branch). The publisher hook still
+folds every completion into the replay list and the completion
+accounting (clearance decisions read those), but the NATS publish is
+gated on activation; the republisher starts at activation instead of
+producer dispatch; a one-time backlog flush at activation closes the
+snapshot→subscribe window for completions that landed before
+clearance. A feed no consumer clears on generates ZERO NATS traffic.
+Regression: TestEagerTailGate asserts zero manifests published when
+every consumer declines.
+
+A2 — fused-chain consumer eligibility: the C2 dep-count gate accepts
+`2+len(FusedJoins)+len(ChainedJoins)` (stage-chain fusion grows deps
+by one per ChainedJoinSpec). Only the primary probe/build feed
+eagerly; chained-build deps are barrier-complete before the clearance
+decision runs (dependency wait loop ordering). eagerJoinWouldSplit
+mirrors dispatchComputeStage's skew-skip for partitioned chains.
+Engagement marker: EagerChainedEdgesPlanned + chained_joins attr on
+the clearance line. E2E: Q18-shaped chain clears eagerly with
+row-identical results (TestEagerChainedJoinDispatchE2E).
+
+A3 — compute-stage producer manifests: dispatchComputeStage wires the
+same feed + onSuccess publisher as runShuffleSide for hash-partitioned
+hash_join / final_aggregate stages with a plain unpartitioned sink.
+Task DISPATCH ORDER is the partition (the positional contract
+StageOutput.Files already gives partitionFilesForWorker); the manifest
+source maps plain files to partitions via the ProducerTaskIDs ordinal,
+while partition= files keep filename semantics — so shuffle and
+compute producers coexist on one mechanism. Producer declines: skew /
+rr-agg / probe splits (they remap task→partition), gather fusion (no
+retry → no fencing recovery), exchange sinks (v1 scope),
+dynamic-filter and scalar participants, coordinator-read stages.
+Consumer eligibility (eagerFeedableDep) accepts repartition or
+compute-producer deps for both C1 and C2. E2E: with fusion pinned off,
+join-9 clears on TWO compute feeds (probe join-4 + build
+final_aggregate-6) and aggregate-10 cascades as a C1 consumer of
+join-9 — three eager stages deep, rows identical
+(TestEagerComputeProducerE2E).
+
+Known v1 constraints for the re-pair:
+- eagerStageSlot cap=1 serializes cascading clearances (a producer
+  that itself cleared holds the slot until its stage completes, so its
+  consumer takes the barrier). The A3 e2e widens the slot to 2 to
+  exercise the cascade; production keeps 1 until the pair says
+  otherwise.
+- The 12s tail floor declines nearly every current-world edge (§13);
+  the treatment arm overrides WADJET_EAGER_MIN_TAIL_SECONDS≈3.
+- Republisher cadence (3s) bounds the snapshot→subscribe heal window;
+  at toy scale that dominates eager wall (the 21s A3 e2e), at SF100 it
+  is noise against multi-second spreads.
