@@ -9,8 +9,14 @@ import (
 // Exported atomic.Bool (AggOverExchange pattern) so tests can pin either arm.
 var StageFusion atomic.Bool
 
+// StageFusionAgg gates the join→partial-aggregate absorb (step 2) on top
+// of the join→join fusion. Sub-switch WADJET_STAGE_FUSION_AGG=0 isolates
+// the two mechanisms for A/B; the master WADJET_STAGE_FUSION=0 kills both.
+var StageFusionAgg atomic.Bool
+
 func init() {
 	StageFusion.Store(os.Getenv("WADJET_STAGE_FUSION") != "0")
+	StageFusionAgg.Store(os.Getenv("WADJET_STAGE_FUSION_AGG") != "0")
 }
 
 // fuseStageChains absorbs 1:1 same-distribution downstream joins into their
@@ -56,8 +62,10 @@ func fuseStageChains(stages []Stage) []Stage {
 }
 
 // chainProducerEligible reports whether s can absorb a downstream join.
+// A stage that already absorbed a partial aggregate is chain-terminal.
 func chainProducerEligible(s *Stage) bool {
 	return s.Type == StageHashJoin &&
+		len(s.ChainedAggSpecs) == 0 && len(s.ChainedAggGroupBy) == 0 &&
 		s.Distribution.Kind == DistHashPartitioned && s.Distribution.Count > 0 &&
 		s.Exchange == nil &&
 		len(s.SortKeys) == 0 && s.Limit == 0 &&
@@ -86,8 +94,13 @@ func chainConsumerEligible(c, p *Stage) bool {
 		return false
 	}
 	// A consumer that already absorbed downstream links (ChainedJoins) is
-	// handled by carrying its chain along; every other producer-side
-	// restriction applies to the consumer too.
+	// handled by carrying its chain along; one that absorbed a partial
+	// aggregate is chain-terminal and cannot itself be absorbed (the
+	// joins-before-aggs pass order makes this unreachable; gate anyway).
+	if len(c.ChainedAggSpecs) > 0 || len(c.ChainedAggGroupBy) > 0 {
+		return false
+	}
+	// Every other producer-side restriction applies to the consumer too.
 	return c.Exchange == nil &&
 		len(c.SortKeys) == 0 && c.Limit == 0 &&
 		len(c.GroupByCols) == 0 && len(c.AggSpecs) == 0 && !c.GroupByAll &&
@@ -185,37 +198,101 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 		p.EstimatedRows = c.EstimatedRows
 
 		// Rewire every downstream reference to C onto P and drop C.
-		cID := c.ID
-		out := make([]Stage, 0, len(stages)-1)
-		for i := range stages {
-			if stages[i].ID == cID {
+		return rewireDropped(stages, c.ID, p.ID), true
+	}
+
+	// Step 2: absorb a terminal PARTIAL aggregate. Runs only when no
+	// join→join link fused this iteration, so multi-join chains collapse
+	// fully before the agg attaches (a stage with a chained agg is
+	// terminal). Partial aggregation is partition-agnostic — no 1:1 or
+	// same-distribution requirement; the fused stage keeps its own
+	// Distribution/task count and emits per-task partials that the final
+	// merges exactly as it merged the dropped stage's.
+	if StageFusionAgg.Load() {
+		for pi := range stages {
+			p := &stages[pi]
+			if !chainProducerEligible(p) {
 				continue
 			}
-			s := stages[i]
-			for k, d := range s.Dependencies {
-				if d == cID {
-					s.Dependencies[k] = p.ID
-				}
+			cons := consumers[p.ID]
+			if len(cons) != 1 {
+				continue
 			}
-			if s.LeftDepStage == cID {
-				s.LeftDepStage = p.ID
+			c := &stages[cons[0]]
+			if !chainAggConsumerEligible(c, p) {
+				continue
 			}
-			if s.RightDepStage == cID {
-				s.RightDepStage = p.ID
-			}
-			for k := range s.FusedJoins {
-				if s.FusedJoins[k].BuildDepStage == cID {
-					s.FusedJoins[k].BuildDepStage = p.ID
-				}
-			}
-			for k := range s.ChainedJoins {
-				if s.ChainedJoins[k].BuildDepStage == cID {
-					s.ChainedJoins[k].BuildDepStage = p.ID
-				}
-			}
-			out = append(out, s)
+			p.ChainedAggGroupBy = append([]string(nil), c.GroupByCols...)
+			p.ChainedAggSpecs = append([]AggSpec(nil), c.AggSpecs...)
+			// Keep p.Distribution: the dropped stage's RoundRobin label
+			// only described its fan-out task count; adopting it would
+			// collapse the join's 1:1 task/partition mapping at dispatch.
+			p.EstimatedRows = c.EstimatedRows
+			return rewireDropped(stages, c.ID, p.ID), true
 		}
-		return out, true
 	}
 	return stages, false
+}
+
+// chainAggConsumerEligible reports whether partial-aggregate stage c can be
+// absorbed as producer p's chain-terminal aggregate.
+func chainAggConsumerEligible(c, p *Stage) bool {
+	if c.Type != "aggregate" || len(c.Dependencies) != 1 || c.Dependencies[0] != p.ID {
+		return false
+	}
+	if len(c.GroupByCols) == 0 && len(c.AggSpecs) == 0 {
+		return false
+	}
+	// GroupByAll has no distributed fragment equivalent; merge-tree
+	// members, exchanges, sorts, filters, and scan-side fused-agg fields
+	// never belong to the absorbable shape.
+	return !c.GroupByAll &&
+		c.Exchange == nil &&
+		len(c.SortKeys) == 0 && c.Limit == 0 &&
+		len(c.FilterExprs) == 0 &&
+		len(c.FusedAggGroupBy) == 0 && len(c.FusedAggSpecs) == 0 &&
+		!c.RawInputAggregate &&
+		c.MergeGroupCount == 0 &&
+		len(c.ProjectExprs) == 0 && len(c.SecurityProjectExprs) == 0 &&
+		len(c.OutputRenames) == 0 &&
+		len(c.EmitDynamicFilters) == 0 && len(c.ConsumeDynamicFilters) == 0 &&
+		len(c.ScalarDependencies) == 0 &&
+		len(c.ChainedJoins) == 0 &&
+		len(c.ChainedAggSpecs) == 0 && len(c.ChainedAggGroupBy) == 0
+}
+
+// rewireDropped removes stage dropID from the slice, rewiring every
+// reference (Dependencies, Left/RightDepStage, fused/chained build deps)
+// to newID.
+func rewireDropped(stages []Stage, dropID, newID string) []Stage {
+	out := make([]Stage, 0, len(stages)-1)
+	for i := range stages {
+		if stages[i].ID == dropID {
+			continue
+		}
+		s := stages[i]
+		for k, d := range s.Dependencies {
+			if d == dropID {
+				s.Dependencies[k] = newID
+			}
+		}
+		if s.LeftDepStage == dropID {
+			s.LeftDepStage = newID
+		}
+		if s.RightDepStage == dropID {
+			s.RightDepStage = newID
+		}
+		for k := range s.FusedJoins {
+			if s.FusedJoins[k].BuildDepStage == dropID {
+				s.FusedJoins[k].BuildDepStage = newID
+			}
+		}
+		for k := range s.ChainedJoins {
+			if s.ChainedJoins[k].BuildDepStage == dropID {
+				s.ChainedJoins[k].BuildDepStage = newID
+			}
+		}
+		out = append(out, s)
+	}
+	return out
 }

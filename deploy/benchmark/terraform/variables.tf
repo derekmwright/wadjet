@@ -234,6 +234,12 @@ variable "stage_fusion" {
   default     = ""
 }
 
+variable "stage_fusion_agg" {
+  description = "join→partial-aggregate absorb (fuseStageChains step 2) on top of join→join fusion. Default on (empty/1 = on); set \"0\" as the A/B sub-switch isolating step 2 from step 1 (stage_fusion=0 kills both)."
+  type        = string
+  default     = ""
+}
+
 variable "skew_suite" {
   description = "Set to 1 to run the hot-key skew fixture (benchmarks/skew) instead of TPC-H — the Phase 3 skew-split A/B. Pair with data_prefix=tables-skew/ and generate_data=true on the first arm to stage the fixture."
   type        = string

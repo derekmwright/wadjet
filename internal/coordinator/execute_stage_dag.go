@@ -2304,6 +2304,32 @@ func (c *Coordinator) dispatchComputeStage(
 				})
 			}
 		}
+		// Chain-terminal partial aggregate (stage-chain fusion step 2):
+		// the join output collapses to partials in-process. Raw mode
+		// (MergeMode=false — input is raw join rows); AVG decomposes to
+		// (SUM, COUNT) exactly as the dropped stage's dispatch did, so
+		// the downstream final's merge and avg-fold see identical specs.
+		if len(stage.ChainedAggSpecs) > 0 || len(stage.ChainedAggGroupBy) > 0 {
+			var chainAggs []distributed.AggSpec
+			for _, a := range stage.ChainedAggSpecs {
+				chainAggs = append(chainAggs, distributed.AggSpec{
+					Func:      a.Func,
+					InputCol:  a.InputCol,
+					OutputCol: a.OutputCol,
+					InputExpr: a.InputExpr,
+				})
+			}
+			chainedOps = append(chainedOps, distributed.OpSpec{
+				Type:        distributed.OpHashAggregate,
+				GroupByCols: append([]string(nil), stage.ChainedAggGroupBy...),
+				Aggregates:  decomposeAvg(chainAggs),
+				// Derived group-bys / agg inputs (SUBSTR(...), price*(1-disc))
+				// need the worker's input projection ahead of the aggregate —
+				// without it the expression column doesn't exist and groups
+				// silently collapse (caught by the three-arm differential).
+				BuildProject: true,
+			})
+		}
 		t := distributed.Task{
 			ID:                  uuid.New().String()[:8],
 			QueryID:             queryID,

@@ -35,9 +35,24 @@ LIMIT 20`
 
 func planWithFusion(t *testing.T, sql string, fusion bool) []Stage {
 	t.Helper()
+	// The join→join shape tests pin the step-1 mechanism in isolation;
+	// step-2 (agg absorb) coverage lives in the *_AggAbsorb tests.
+	prevAgg := StageFusionAgg.Load()
+	t.Cleanup(func() { StageFusionAgg.Store(prevAgg) })
+	StageFusionAgg.Store(false)
+	return planWithFusionArms(t, sql, fusion, false)
+}
+
+func planWithFusionArms(t *testing.T, sql string, fusion, aggFusion bool) []Stage {
+	t.Helper()
 	prev := StageFusion.Load()
-	t.Cleanup(func() { StageFusion.Store(prev) })
+	prevAgg := StageFusionAgg.Load()
+	t.Cleanup(func() {
+		StageFusion.Store(prev)
+		StageFusionAgg.Store(prevAgg)
+	})
 	StageFusion.Store(fusion)
+	StageFusionAgg.Store(aggFusion)
 	cat, ctx := setupTPCHCatalog(t)
 	return sqlToStages(t, cat, ctx, sql, 3)
 }
@@ -199,12 +214,117 @@ func TestFuseStageChains_Q18Interplay(t *testing.T) {
 
 // TestFuseStageChains_KillSwitchIdentity pins that the kill-switch arm is
 // byte-identical to a plan produced with the pass compiled out — i.e. the
-// pass is a no-op when disabled.
+// pass is a no-op when disabled (master switch also kills the agg absorb).
 func TestFuseStageChains_KillSwitchIdentity(t *testing.T) {
-	stages := planWithFusion(t, chainFusionQ05SQL, false)
+	stages := planWithFusionArms(t, chainFusionQ05SQL, false, true)
 	for _, s := range stages {
 		if len(s.ChainedJoins) > 0 {
 			t.Errorf("stage %s carries ChainedJoins with fusion off", s.ID)
+		}
+		if len(s.ChainedAggSpecs) > 0 || len(s.ChainedAggGroupBy) > 0 {
+			t.Errorf("stage %s carries ChainedAgg with master fusion off", s.ID)
+		}
+	}
+}
+
+// Q09-shape at repartition-separated joins: the join→join links re-key
+// through exchanges (no 1:1), but the terminal partial aggregate consumes
+// the last hash_join directly — the step-2 absorb target (the SF100 Q09/
+// Q10 shape, fusion A/B 2026-07-25).
+const chainFusionQ09SQL = `SELECT
+	n_name as nation, SUBSTR(o_orderdate, 1, 4) as o_year,
+	SUM(l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity) as sum_profit
+FROM part
+JOIN lineitem ON p_partkey = l_partkey
+JOIN supplier ON s_suppkey = l_suppkey
+JOIN partsupp ON ps_suppkey = l_suppkey AND ps_partkey = l_partkey
+JOIN orders ON o_orderkey = l_orderkey
+JOIN nation ON s_nationkey = n_nationkey
+WHERE p_name LIKE '%green%'
+GROUP BY n_name, SUBSTR(o_orderdate, 1, 4)
+ORDER BY nation, o_year DESC`
+
+// TestFuseStageChains_AggAbsorb pins step 2: with the sub-switch on, the
+// partial aggregate disappears into its producer join, which keeps its own
+// distribution (task count must not collapse to the aggregate's label) and
+// carries the aggregate's specs; the final_aggregate now depends on the
+// fused join.
+func TestFuseStageChains_AggAbsorb(t *testing.T) {
+	for _, tc := range []struct{ name, sql string }{
+		{"Q09", chainFusionQ09SQL},
+		{"Q05", chainFusionQ05SQL},
+		{"Q10", chainFusionQ10SQL},
+		{"Q18", aggOverExchangeQ18SQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v1 := planWithFusionArms(t, tc.sql, true, false)
+			full := planWithFusionArms(t, tc.sql, true, true)
+
+			countAgg := func(stages []Stage) int {
+				n := 0
+				for _, s := range stages {
+					if s.Type == "aggregate" {
+						n++
+					}
+				}
+				return n
+			}
+			var fused *Stage
+			for i := range full {
+				if len(full[i].ChainedAggSpecs) > 0 || len(full[i].ChainedAggGroupBy) > 0 {
+					if fused != nil {
+						t.Fatalf("multiple ChainedAgg stages: %s and %s", fused.ID, full[i].ID)
+					}
+					fused = &full[i]
+				}
+			}
+			if fused == nil {
+				for _, s := range full {
+					t.Logf("id=%s type=%s dist=%v deps=%v chainedAgg=%d", s.ID, s.Type, s.Distribution, s.Dependencies, len(s.ChainedAggSpecs))
+				}
+				t.Fatal("agg absorb did not fire")
+			}
+			if countAgg(full) != countAgg(v1)-1 {
+				t.Errorf("aggregate stages: full=%d v1=%d, want exactly one absorbed", countAgg(full), countAgg(v1))
+			}
+			if fused.Type != StageHashJoin {
+				t.Errorf("fused stage type=%s, want hash_join", fused.Type)
+			}
+			// The fused stage must keep a dispatchable join distribution —
+			// adopting the aggregate's RoundRobin label would collapse the
+			// 1:1 task/partition mapping.
+			if fused.Distribution.Kind != DistHashPartitioned || fused.Distribution.Count <= 0 {
+				t.Errorf("fused stage distribution=%+v, want HashPartitioned{count>0}", fused.Distribution)
+			}
+			if len(fused.GroupByCols) != 0 || len(fused.AggSpecs) != 0 {
+				t.Errorf("fused stage leaked stage-level GroupByCols/AggSpecs: %v/%v", fused.GroupByCols, fused.AggSpecs)
+			}
+			// The dropped aggregate's consumers rewired onto the fused stage.
+			ids := make(map[string]bool, len(full))
+			for _, s := range full {
+				ids[s.ID] = true
+			}
+			for _, s := range full {
+				for _, d := range s.Dependencies {
+					if !ids[d] {
+						t.Errorf("stage %s depends on dropped stage %s", s.ID, d)
+					}
+				}
+			}
+			if err := AssertExchangeConsistency(full); err != nil {
+				t.Errorf("exchange consistency after agg absorb: %v", err)
+			}
+		})
+	}
+}
+
+// TestFuseStageChains_AggSubSwitch pins that WADJET_STAGE_FUSION_AGG=0
+// preserves the step-1-only plan exactly (aggregate stages intact).
+func TestFuseStageChains_AggSubSwitch(t *testing.T) {
+	v1 := planWithFusionArms(t, chainFusionQ09SQL, true, false)
+	for _, s := range v1 {
+		if len(s.ChainedAggSpecs) > 0 || len(s.ChainedAggGroupBy) > 0 {
+			t.Errorf("stage %s carries ChainedAgg with sub-switch off", s.ID)
 		}
 	}
 }

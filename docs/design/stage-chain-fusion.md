@@ -1,6 +1,11 @@
-# 1:1 stage-chain fusion (join→join)
+# 1:1 stage-chain fusion (join→join, join→partial-aggregate)
 
-Status: shipped with the implementation (kill switch `WADJET_STAGE_FUSION=0`).
+Status: shipped with the implementation (kill switch `WADJET_STAGE_FUSION=0`;
+the join→agg absorb has its own sub-switch `WADJET_STAGE_FUSION_AGG=0`).
+
+SF100 kill-switch A/B of the join→join step (2026-07-25, PR #269): suite
+scratch 261.8 → 212.2 GB (−19%), join-class −59%, Q18 scratch −56% and
+wall −38.8% cold / −22.4% steady, rows 44/44 both arms.
 
 ## Problem
 
@@ -122,12 +127,33 @@ tests cover fused vs unfused shapes for the Q18/Q05/Q10 chain patterns and
 the interplay with `AggOverExchange`; a multi-worker e2e diff runs the
 affected TPC-H shapes through both arms and compares rows.
 
-## Out of scope (v1)
+## Step 2: join→partial-aggregate absorb
 
-- join→partial-aggregate fusion (append `OpHashAggregate` breaker to the
-  fragment; the runner already supports it) — next step in this arc after
-  join→join is validated.
+After the join→join fixpoint, a producer whose sole consumer is a PARTIAL
+aggregate (`aggregate` stage, single dep, no GroupByAll / filters / sorts
+/ exchange / scan-side fused-agg fields) absorbs it as the chain terminal:
+`ChainedAggGroupBy`/`ChainedAggSpecs` on the fused stage, dispatched as a
+raw-mode `OpHashAggregate` breaker after the chained joins (the fragment
+runner's multi-breaker path). AVG decomposes to (SUM, COUNT) at dispatch
+exactly as the dropped stage's own dispatch did, so the downstream final's
+merge and avg-fold are unchanged.
+
+Partial aggregation is partition-agnostic, so this absorb needs **no 1:1
+or same-distribution gate** — and the fused stage **keeps its own
+Distribution and task count** (the dropped stage's RoundRobin label only
+described its fan-out; adopting it would collapse the join's 1:1
+task/partition dispatch). The final simply merges N per-task partials
+instead of the old fan-out count. A stage that absorbed an aggregate is
+chain-terminal (producer/consumer gates exclude it).
+
+This is the shape Q09/Q10 have at SF100 (their join→join links are real
+re-key repartitions, but `aggregate` consumes the last join 1:1), and it
+deletes the fused Q18 stage's remaining output materialization.
+
+## Out of scope
+
 - Producer types other than `hash_join` (broadcast_join producers with
-  hash-partitioned output didn't appear in any TPC-H chain scout).
+  hash-partitioned output didn't appear in any TPC-H chain scout;
+  broadcast_join→agg Singleton links are small).
 - Skew-splitting stages with partitioned chained builds (needs
   partition-indexed slicing for sub-tasks).
