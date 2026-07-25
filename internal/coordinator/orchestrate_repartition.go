@@ -280,7 +280,9 @@ func (c *Coordinator) runShuffleSide(
 	// Release eligible consumers: with the task layout fixed (IDs stable
 	// across retries, partition count final), consumers can bind their
 	// partition ranges and start draining manifests. Dispatch before
-	// publish so no completion can beat the feed.
+	// publish so no completion can beat the feed. The republisher is NOT
+	// started here — it starts at consumer clearance (feed activation),
+	// so a feed no consumer ever clears on generates zero NATS traffic.
 	if eagerFeed != nil && retrier.onSuccess != nil {
 		ids := make([]string, len(tasks))
 		for i := range tasks {
@@ -288,7 +290,6 @@ func (c *Coordinator) runShuffleSide(
 		}
 		t0 := tasks[0]
 		eagerFeed.dispatch(distributed.TaskRootQueryID(&t0), stageID, ids, numParts, workerCount)
-		c.startEagerRepublisher(eagerFeed)
 	}
 	defer c.watchStuckTasks(ctx, retrier)()
 

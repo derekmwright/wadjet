@@ -561,11 +561,24 @@ func (c *Coordinator) executeStageDAG(
 				EagerEdgesPlanned.Add(1)
 				producerTasks := 0
 				for _, f := range eagerFeeds {
+					// Clearance-driven activation (§13 precondition 2):
+					// from here on this feed's completions publish live.
+					// The backlog flush covers completions that landed
+					// before clearance; the republisher heals the
+					// snapshot→subscribe window.
+					if f.activate() {
+						c.flushEagerManifestBacklog(f)
+						c.startEagerRepublisher(f)
+					}
 					producerTasks += len(f.producerTaskIDs)
+				}
+				if len(s.ChainedJoins) > 0 {
+					EagerChainedEdgesPlanned.Add(1)
 				}
 				c.logger.Info("eager dispatch: consumer cleared early",
 					"query", queryID, "stage_id", s.ID, "stage_type", s.Type,
 					"eager_deps", len(eagerFeeds), "join", eagerJoin,
+					"chained_joins", len(s.ChainedJoins),
 					"producer_tasks", producerTasks)
 			} else if len(eagerFeeds) > 0 {
 				// Barrier fallback: wait out every eager dep's done signal
@@ -2593,6 +2606,33 @@ func (c *Coordinator) dispatchComputeStage(
 		}
 	}, c.logger, stage.ID, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
+	// A3 (eager-consumer-dispatch.md §14): a hash-partitioned compute
+	// stage backs an eager feed exactly like a shuffle producer — its
+	// plain sink writes one file per task and task dispatch order IS the
+	// partition, which the consumer's manifest source mirrors via the
+	// ProducerTaskIDs ordinal. Dispatch-time regroupings (skew split,
+	// rr-agg split, probe split) remap task→partition and decline; gather
+	// fusion disables the retry that fencing recovery needs; a
+	// coordinator-read stage (scalar extraction) keeps the barrier.
+	// Publication itself stays clearance-gated (§14/A1).
+	if fusion == nil && skewAssign == nil && rrAggGroups == nil && !probeSplit &&
+		len(tasks) > 0 && eagerCapableComputeProducer(stage) {
+		rootID := distributed.TaskRootQueryID(&tasks[0])
+		if rootID != "" && !c.stageReadByCoordinator(rootID, stage.ID) {
+			if feed := c.eagerFeedHandle(queryID, stage.ID); feed != nil {
+				retrier.onSuccess = c.eagerManifestPublisher(rootID, stage.ID, feed)
+				if retrier.onSuccess != nil {
+					ids := make([]string, len(tasks))
+					for i := range tasks {
+						ids[i] = tasks[i].ID
+					}
+					// Dispatch before publish so no completion beats the
+					// feed (same ordering contract as runShuffleSide).
+					feed.dispatch(rootID, stage.ID, ids, len(tasks), workerCount)
+				}
+			}
+		}
+	}
 	// Eager stages with more tasks than the cluster can hold at once
 	// publish in governed waves: eager tasks block on producer manifests
 	// while HOLDING a worker slot, so a full join fan-out (numTasks =

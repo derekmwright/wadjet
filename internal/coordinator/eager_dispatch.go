@@ -29,6 +29,12 @@ var EagerManifestsPublished atomic.Int64
 // this counter's log line in benchmark.log).
 var EagerEdgesPlanned atomic.Int64
 
+// EagerChainedEdgesPlanned counts the subset of EagerEdgesPlanned whose
+// consumer is a stage-chain-fused join (§13/A2): the fused chain cleared
+// on its primary probe/build feeds while its chained-build deps completed
+// at the barrier.
+var EagerChainedEdgesPlanned atomic.Int64
+
 // eagerManifestPublisher returns a taskRetrier onSuccess hook that
 // publishes one manifest per successful producer task, or nil when eager
 // dispatch is disabled or the root query ID is unavailable (legacy
@@ -61,20 +67,64 @@ func (c *Coordinator) eagerManifestPublisher(rootQueryID, stageID string, feed *
 			feed.appendReplay(m)
 			feed.noteCompletion(partBytes)
 		}
-		data, err := distributed.Marshal(m)
-		if err != nil {
-			c.logger.Error("eager manifest marshal failed",
-				"stage_id", stageID, "task_id", taskID, "error", err)
+		// Clearance-driven activation (§13 precondition 2): no NATS
+		// traffic until a consumer actually cleared on this feed. A feed
+		// that never activates costs nothing beyond the in-memory replay
+		// list; a consumer clearing later gets history from its task-spec
+		// Replay snapshot plus the activation backlog flush, and the
+		// republisher heals the remaining loss windows.
+		if feed == nil || !feed.isActive() {
 			return
 		}
-		if err := c.nc.Publish(subject, data); err != nil {
-			c.logger.Warn("eager manifest publish failed (replay list covers consumer retries)",
-				"stage_id", stageID, "task_id", taskID, "error", err)
+		if !c.publishEagerManifest(subject, m) {
 			return
 		}
-		EagerManifestsPublished.Add(1)
 		c.logger.Info("eager manifest published",
 			"stage_id", stageID, "task_id", taskID, "attempt", attempt,
 			"files", len(files), "worker", workerID, "final", final)
+	}
+}
+
+// publishEagerManifest marshals and publishes one manifest, counting it
+// on success. Publish failures are fire-and-forget by design (the replay
+// list and republisher cover consumer retries).
+func (c *Coordinator) publishEagerManifest(subject string, m distributed.ProducerTaskManifest) bool {
+	data, err := distributed.Marshal(m)
+	if err != nil {
+		c.logger.Error("eager manifest marshal failed",
+			"stage_id", m.StageID, "task_id", m.TaskID, "error", err)
+		return false
+	}
+	if err := c.nc.Publish(subject, data); err != nil {
+		c.logger.Warn("eager manifest publish failed (replay list covers consumer retries)",
+			"stage_id", m.StageID, "task_id", m.TaskID, "error", err)
+		return false
+	}
+	EagerManifestsPublished.Add(1)
+	return true
+}
+
+// flushEagerManifestBacklog publishes every manifest accumulated before
+// the feed's activation. Called once, at first consumer clearance: the
+// cleared consumer's task spec already carries these in its Replay, but
+// the flush closes the snapshot→subscribe window immediately instead of
+// waiting out a republisher tick, and it is what makes activation-gated
+// publication observable at all for producers that finished before any
+// consumer cleared.
+func (c *Coordinator) flushEagerManifestBacklog(f *eagerFeed) {
+	if c.nc == nil {
+		return
+	}
+	subject := distributed.EagerManifestSubject(f.rootQueryID, f.manifestStageID)
+	backlog := f.replaySnapshot()
+	published := 0
+	for _, m := range backlog {
+		if c.publishEagerManifest(subject, m) {
+			published++
+		}
+	}
+	if published > 0 {
+		c.logger.Info("eager manifest backlog flushed",
+			"stage_id", f.manifestStageID, "manifests", published)
 	}
 }

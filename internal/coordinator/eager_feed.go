@@ -60,9 +60,20 @@ type eagerFeed struct {
 	decisionThreshold int // completions needed before decisionReady closes
 
 	mu        sync.Mutex
-	replay    []distributed.ProducerTaskManifest // manifests published so far
+	replay    []distributed.ProducerTaskManifest // manifests accumulated so far
 	closed    bool                               // query finished; republisher must stop
-	completed int                                // producer tasks at successful terminal
+	// active is set the first time a consumer stage clears dispatch on
+	// this feed. Until then no NATS traffic leaves the coordinator for
+	// this stage — the replay list and completion accounting still
+	// accumulate (clearance decisions read them), but publication is
+	// pure waste for the flag-on-no-clearance population (§12/§13: the
+	// gated arm declined 37 of 46 stages and still paid for every one).
+	// A consumer that clears later gets full history via its task-spec
+	// Replay snapshot plus the republisher, both of which start at
+	// activation.
+	active             bool
+	republisherStarted bool
+	completed          int // producer tasks at successful terminal
 	// firstDone/lastDone timestamp the first and most recent successful
 	// producer-task completions. Feed the projected-tail eager gate
 	// (projectedTailSeconds): the C3 SF100 pair (design doc §10) showed
@@ -211,6 +222,26 @@ func (f *eagerFeed) replaySnapshot() []distributed.ProducerTaskManifest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]distributed.ProducerTaskManifest(nil), f.replay...)
+}
+
+// activate marks the feed as having a cleared consumer, enabling live
+// manifest publication. Returns true when the caller should start the
+// republisher (first activation on an open feed). Idempotent.
+func (f *eagerFeed) activate() (startRepublisher bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.active = true
+	if f.republisherStarted || f.closed {
+		return false
+	}
+	f.republisherStarted = true
+	return true
+}
+
+func (f *eagerFeed) isActive() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
 }
 
 // markClosed stops the republisher. Idempotent.
@@ -393,6 +424,40 @@ func eagerAliasForDep(stage physical.Stage, depID string) string {
 	}
 }
 
+// eagerCapableComputeProducer reports whether compute stage d can back an
+// eager feed (§14/A3): a hash-partitioned hash_join or final_aggregate
+// whose plain unpartitioned sink writes one file per task, so task
+// DISPATCH ORDER is the partition — the same positional contract the
+// barrier path's StageOutput.Files gives partitionFilesForWorker, which
+// the manifest source mirrors via the ProducerTaskIDs ordinal.
+//
+// Exchange-sink producers (stage.Exchange set) are out of A3 v1 scope;
+// dynamic-filter and scalar participants keep the barrier (provisional
+// outputs carry no BuildStats; scalar producers are read by the
+// coordinator). Dispatch-time regroupings (skew split, rr-agg split,
+// probe split, gather fusion) are gated at the wiring site — they remap
+// task→partition and would break the ordinal contract.
+func eagerCapableComputeProducer(d physical.Stage) bool {
+	if d.Type != physical.StageHashJoin && d.Type != "final_aggregate" {
+		return false
+	}
+	return d.Distribution.Kind == physical.DistHashPartitioned &&
+		d.Distribution.Count > 0 &&
+		d.Exchange == nil &&
+		len(d.EmitDynamicFilters) == 0 && len(d.ConsumeDynamicFilters) == 0 &&
+		len(d.ScalarDependencies) == 0
+}
+
+// eagerFeedableDep reports whether dependency stage d can be consumed
+// through an eager feed: a standalone exchange-repartition (C1/C2) or an
+// A3 compute producer.
+func eagerFeedableDep(d physical.Stage) bool {
+	if d.Type == physical.StageExchangeRepartition {
+		return d.Exchange != nil && d.Exchange.Count > 0
+	}
+	return eagerCapableComputeProducer(d)
+}
+
 // eagerEligibleJoinConsumer reports whether join stage s may clear
 // dispatch on its two producers' eager feeds (memo §3.3/§6, Phase C2
 // scope). Requires:
@@ -401,10 +466,20 @@ func eagerAliasForDep(stage physical.Stage, depID string) string {
 //     out of scope (broadcast edges stay S3+KV per memo §7);
 //     sort_merge_join is dormant (gate off) and excluded from slice 1.
 //   - both primary deps are standalone exchange-repartitions (the feeds'
-//     producers); fused-build deps keep the barrier (their real outputs
-//     ride task.FusedJoins[i].BuildFiles).
+//     producers); fused-build and chained-build deps keep the barrier
+//     (their real outputs ride task.FusedJoins[i].BuildFiles /
+//     task.Operators[i].BuildFiles — the dependency wait loop completes
+//     them before the clearance decision runs, so an eager dispatch sees
+//     real outputs for every non-primary dep).
 //   - not the gather-fused stage, no scalar deps (joins never carry
 //     dynamic-filter emits/consumes; checked defensively).
+//
+// Stage-chain fusion (§13, docs/design/stage-chain-fusion.md) grows
+// Dependencies by exactly one per ChainedJoinSpec; a fused chain is
+// eligible like any other hash join — only the primary probe/build feed
+// eagerly, the chain's builds are complete by clearance time. A chain
+// with an absorbed partial aggregate carries ChainedAgg* fields, not
+// GroupByCols, so the fragment-path restriction above is unaffected.
 //
 // The skew decision itself happens later, at the feed threshold
 // (eagerJoinWouldSplit) — this gate is structural only.
@@ -418,13 +493,13 @@ func eagerEligibleJoinConsumer(s physical.Stage, stageByID map[string]physical.S
 	if len(s.EmitDynamicFilters) > 0 || len(s.ConsumeDynamicFilters) > 0 {
 		return false
 	}
-	if len(s.Dependencies) != 2+len(s.FusedJoins) {
+	if len(s.Dependencies) != 2+len(s.FusedJoins)+len(s.ChainedJoins) {
 		return false
 	}
 	probeDep, buildDep := joinPrimaryDeps(s)
 	for _, dep := range []string{probeDep, buildDep} {
 		d, ok := stageByID[dep]
-		if !ok || d.Type != physical.StageExchangeRepartition || d.Exchange == nil || d.Exchange.Count <= 0 {
+		if !ok || !eagerFeedableDep(d) {
 			return false
 		}
 	}
@@ -452,6 +527,16 @@ func (c *Coordinator) eagerJoinWouldSplit(stage physical.Stage, probeFeed, build
 		stage.Distribution.Kind != physical.DistHashPartitioned ||
 		numTasks <= 0 || workerCount <= 1 {
 		return false
+	}
+	// Partitioned chained builds bind build partition i to task i, so the
+	// dispatcher never skew-splits such stages (dispatchComputeStage skips
+	// planSkewSplitTasks). Mirror that: projecting a split the full-data
+	// path would never take would send the consumer to the barrier for
+	// nothing.
+	for _, cj := range stage.ChainedJoins {
+		if cj.Partitioned {
+			return false
+		}
 	}
 	switch stage.JoinType {
 	case "inner", "left", "semi", "anti":
@@ -568,8 +653,9 @@ func (g *eagerPublishGovernor) noteTerminal(taskID string) {
 //   - a fragment-migrated single-input stage type: aggregate variants, or
 //     sort variants with SortKeys (a keyless "sort" would fall to the
 //     legacy task path, which reads Task.Inputs and cannot feed eagerly);
-//   - the dependency is a standalone exchange-repartition — the only
-//     producer the shuffle dispatcher registers feeds for in C1;
+//   - the dependency backs an eager feed: a standalone
+//     exchange-repartition, or an A3 compute producer
+//     (eagerFeedableDep);
 //   - not the gather-fused stage (fusion disables task retry, and retry is
 //     the fencing recovery path — memo §5);
 //   - no dynamic-filter participation (provisional outputs carry no
@@ -601,7 +687,7 @@ func eagerEligibleConsumer(s physical.Stage, stageByID map[string]physical.Stage
 		return false
 	}
 	dep, ok := stageByID[s.Dependencies[0]]
-	if !ok || dep.Type != physical.StageExchangeRepartition {
+	if !ok || !eagerFeedableDep(dep) {
 		return false
 	}
 	// Consumer task count (mirrors dispatchComputeStage's derivation for

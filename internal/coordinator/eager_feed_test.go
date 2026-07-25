@@ -85,6 +85,35 @@ func TestEagerFeedDispatchUnblocksAndSnapshot(t *testing.T) {
 	}
 }
 
+// TestEagerFeedActivate pins the clearance-driven activation contract
+// (§13 precondition 2): inactive until a consumer clears, exactly one
+// republisher start across repeated activations, and no start on a feed
+// already closed by query teardown.
+func TestEagerFeedActivate(t *testing.T) {
+	f := newEagerFeed()
+	if f.isActive() {
+		t.Fatal("fresh feed must be inactive")
+	}
+	if !f.activate() {
+		t.Fatal("first activation must request a republisher start")
+	}
+	if !f.isActive() {
+		t.Fatal("feed must be active after activate()")
+	}
+	if f.activate() {
+		t.Fatal("second activation must not request another republisher")
+	}
+
+	closed := newEagerFeed()
+	closed.markClosed()
+	if closed.activate() {
+		t.Fatal("activation on a closed feed must not start a republisher")
+	}
+	if !closed.isActive() {
+		t.Fatal("activate() still marks a closed feed active (publisher gate reads it)")
+	}
+}
+
 // TestEagerInputRangesMatchFrozenBinding pins the eager partition ranges to
 // partitionRangeForWorker — the contract that makes eager and barrier
 // dispatch read identical row sets per task.
@@ -335,6 +364,14 @@ func TestEagerJoinWouldSplit(t *testing.T) {
 	if !c.eagerJoinWouldSplit(join, hotProbe, coldBuild, 3, 3) {
 		t.Error("skewed projection must report would-split")
 	}
+	// Partitioned chained build: the dispatcher never skew-splits such
+	// stages (dispatchComputeStage skips planSkewSplitTasks), so the
+	// projection must not send the consumer to the barrier either.
+	chained := join
+	chained.ChainedJoins = []physical.ChainedJoinSpec{{Partitioned: true}}
+	if c.eagerJoinWouldSplit(chained, hotProbe, coldBuild, 3, 3) {
+		t.Error("partitioned-chain stage must never report would-split")
+	}
 	// Uniform: every group equal → ratio 1 < 2 → no split (the Q21 lesson).
 	uniform := mkFeed([]int64{1000, 1000, 1000}, 3)
 	if c.eagerJoinWouldSplit(join, uniform, coldBuild, 3, 3) {
@@ -374,7 +411,20 @@ func TestEagerEligibleJoinConsumer(t *testing.T) {
 	repartB := physical.Stage{ID: "ex-b", Type: physical.StageExchangeRepartition,
 		Exchange: &physical.ExchangeStage{Keys: []string{"k"}, Count: 24}}
 	scan := physical.Stage{ID: "scan-1", Type: physical.StageScan}
-	byID := map[string]physical.Stage{"ex-a": repartA, "ex-b": repartB, "scan-1": scan}
+	joinUp := physical.Stage{ID: "join-up", Type: physical.StageHashJoin,
+		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24}}
+	faggUp := physical.Stage{ID: "fagg-up", Type: "final_aggregate",
+		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24}}
+	joinSingle := physical.Stage{ID: "join-single", Type: physical.StageHashJoin,
+		Distribution: physical.Distribution{Kind: physical.DistSingleton}}
+	joinExch := physical.Stage{ID: "join-exch", Type: physical.StageHashJoin,
+		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24},
+		Exchange:     &physical.ExchangeStage{Keys: []string{"k"}, Count: 24}}
+	byID := map[string]physical.Stage{
+		"ex-a": repartA, "ex-b": repartB, "scan-1": scan,
+		"join-up": joinUp, "fagg-up": faggUp,
+		"join-single": joinSingle, "join-exch": joinExch,
+	}
 
 	base := physical.Stage{
 		ID: "join-1", Type: physical.StageHashJoin, JoinType: "inner",
@@ -409,6 +459,40 @@ func TestEagerEligibleJoinConsumer(t *testing.T) {
 		}), "", false},
 		{"fused-join dep count mismatch", mutate(func(s *physical.Stage) {
 			s.FusedJoins = []physical.FusedJoinSpec{{}}
+		}), "", false},
+		// Stage-chain fusion: Dependencies grow one per ChainedJoinSpec;
+		// a matching count is eligible (chained builds keep the barrier),
+		// a mismatch is not.
+		{"chained joins with matching deps eligible", mutate(func(s *physical.Stage) {
+			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+			s.Dependencies = []string{"ex-a", "ex-b", "scan-1"}
+		}), "", true},
+		{"chained joins with absorbed partial aggregate eligible", mutate(func(s *physical.Stage) {
+			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+			s.Dependencies = []string{"ex-a", "ex-b", "scan-1"}
+			s.ChainedAggGroupBy = []string{"g"}
+			s.ChainedAggSpecs = []physical.AggSpec{{}}
+		}), "", true},
+		{"chained-join dep count mismatch", mutate(func(s *physical.Stage) {
+			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+		}), "", false},
+		// A3: a hash-partitioned compute producer backs a feed like a
+		// repartition; a Singleton or exchange-sink one does not.
+		{"compute-producer probe eligible", mutate(func(s *physical.Stage) {
+			s.Dependencies = []string{"join-up", "ex-b"}
+			s.LeftDepStage = "join-up"
+		}), "", true},
+		{"final-aggregate probe eligible", mutate(func(s *physical.Stage) {
+			s.Dependencies = []string{"fagg-up", "ex-b"}
+			s.LeftDepStage = "fagg-up"
+		}), "", true},
+		{"singleton compute probe ineligible", mutate(func(s *physical.Stage) {
+			s.Dependencies = []string{"join-single", "ex-b"}
+			s.LeftDepStage = "join-single"
+		}), "", false},
+		{"exchange-sink compute probe ineligible", mutate(func(s *physical.Stage) {
+			s.Dependencies = []string{"join-exch", "ex-b"}
+			s.LeftDepStage = "join-exch"
 		}), "", false},
 	}
 	for _, tc := range cases {
