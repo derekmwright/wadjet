@@ -415,6 +415,11 @@ locals {
     # workers act on EagerInputs in the task spec. Default-off engine
     # flag, so the env parse is explicit opt-in ("1"), not a kill switch.
     export WADJET_EAGER_DISPATCH="${var.eager_dispatch ? "1" : "0"}"
+    # Projected-tail clearance floor in seconds (eager-consumer-dispatch.md
+    # §11/§14). The in-binary default (12) was calibrated on the 25m-era
+    # suite; current-world spreads sit mostly below it, so treatment arms
+    # override here. Ignored when eager_dispatch is off.
+    export WADJET_EAGER_MIN_TAIL_SECONDS="${var.eager_min_tail_seconds}"
     # Shuffle durability policy (docs/design/shuffle-durability.md).
     # Coordinator-side only — workers act on Task.UploadPolicy stamped at
     # dispatch. eager (default) = pre-knob behavior.

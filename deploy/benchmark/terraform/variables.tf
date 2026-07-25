@@ -294,6 +294,12 @@ variable "eager_dispatch" {
   default     = false
 }
 
+variable "eager_min_tail_seconds" {
+  description = "WADJET_EAGER_MIN_TAIL_SECONDS for the coordinator: projected-tail clearance floor for eager dispatch (eager-consumer-dispatch.md §11/§14). Default matches the in-binary default (12); treatment arms set ~3 because current-world producer spreads sit below the legacy calibration. Inert when eager_dispatch=false."
+  type        = number
+  default     = 12
+}
+
 variable "base_table_cache_bytes" {
   description = "Base-table NVMe cache LRU budget in bytes per worker process (docs/design/base-table-nvme-cache.md): cross-query disk cache for immutable base-table parquet under <spill-dir>/base-cache, so repeat scans skip the S3 GET. Worker-side flag only. 0 = disabled (default pending SF100 validation). SF100 shape proposal: 150 GB (161061273600) — working set ~100 GB, leaves ~85 GB of the 237 GB NVMe for spill."
   type        = number
