@@ -235,6 +235,14 @@ func (c *Coordinator) substituteScalarDependencies(ctx context.Context, stage ph
 		if err != nil {
 			return stage, fmt.Errorf("extracting scalar for %s: %w", placeholder, err)
 		}
+		// One line per placeholder per query: the substituted literal is
+		// otherwise invisible anywhere (dispatched predicates are never
+		// logged), which made #272 — a wrong Q11 threshold at SF100 —
+		// undiagnosable from run artifacts.
+		c.logger.Info("scalar substitution",
+			"stage_id", stage.ID, "placeholder", placeholder,
+			"producer", producerID, "producer_files", len(flattenStageFiles(out)),
+			"projection_exprs", len(projection), "literal", lit)
 		literals[":"+placeholder] = lit
 	}
 	// Deep-copy mutable slice / map fields before rewrite.
