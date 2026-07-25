@@ -51,3 +51,7 @@ base_table_cache_bytes    = 161061273600
 # Wall neutral within the window-noise band. Set false to reproduce
 # locality-off baselines.
 locality_placement        = true
+# Peer-wire s2 compression (docs/design/peer-wire-compression.md, PR #265):
+# SF100 A/B 2026-07-25: peer stream bytes -50% (265.9 -> 133.4 GB/pair) at
+# wall-neutral cost, rows identical. Set false for raw-wire baselines.
+peer_wire_compression     = true
