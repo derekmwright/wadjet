@@ -3,6 +3,7 @@ package coordinator
 import (
 	"context"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"testing"
@@ -34,17 +35,22 @@ func TestStageChainFusionDifferential(t *testing.T) {
 	coord.config.BroadcastBytesOverride = chainFusionBroadcastThreshold
 
 	prev := physical.StageFusion.Load()
-	t.Cleanup(func() { physical.StageFusion.Store(prev) })
+	prevAgg := physical.StageFusionAgg.Load()
+	t.Cleanup(func() {
+		physical.StageFusion.Store(prev)
+		physical.StageFusionAgg.Store(prevAgg)
+	})
 
-	runArm := func(t *testing.T, qNum int, fusion bool) []map[string]any {
+	runArm := func(t *testing.T, qNum int, fusion, aggFusion bool) []map[string]any {
 		t.Helper()
 		physical.StageFusion.Store(fusion)
+		physical.StageFusionAgg.Store(aggFusion)
 		result, err := coord.ExecuteSQL(ctx, tpch.TPCHQueries[qNum].SQL)
 		if err != nil {
-			t.Fatalf("Q%02d fusion=%v: %v", qNum, fusion, err)
+			t.Fatalf("Q%02d fusion=%v/agg=%v: %v", qNum, fusion, aggFusion, err)
 		}
 		if result.Error != "" {
-			t.Fatalf("Q%02d fusion=%v: %s", qNum, fusion, result.Error)
+			t.Fatalf("Q%02d fusion=%v/agg=%v: %s", qNum, fusion, aggFusion, result.Error)
 		}
 		rows := mustRows(t, result)
 		sort.Slice(rows, func(i, j int) bool {
@@ -54,45 +60,95 @@ func TestStageChainFusionDifferential(t *testing.T) {
 	}
 
 	// planEngages mirrors the coordinator's planning inputs and reports
-	// whether fuseStageChains fires on the query.
-	planEngages := func(t *testing.T, qNum int) bool {
+	// which fusion mechanisms fire on the query.
+	planEngages := func(t *testing.T, qNum int) (joins, aggs bool) {
 		t.Helper()
 		physical.StageFusion.Store(true)
+		physical.StageFusionAgg.Store(true)
 		stages := planStagesForTest(t, ctx, coord.catalog, tpch.TPCHQueries[qNum].SQL, 3, chainFusionBroadcastThreshold)
 		for _, s := range stages {
 			if len(s.ChainedJoins) > 0 {
-				return true
+				joins = true
+			}
+			if len(s.ChainedAggSpecs) > 0 || len(s.ChainedAggGroupBy) > 0 {
+				aggs = true
 			}
 		}
-		return false
+		return joins, aggs
 	}
 
 	// Queries whose plans carry fusable 1:1 join chains (scout 2026-07-25):
-	// Q02 Q05 Q07 Q08 Q09 Q10 Q18 Q21. Q03 rides along as a no-chain control.
-	engaged := 0
+	// Q02 Q05 Q07 Q08 Q09 Q10 Q18 Q21. Q03 rides along as a join→agg-only
+	// shape; the three arms are kill-switch / join-fusion-only / full.
+	joinEngaged, aggEngaged := 0, 0
 	for _, qNum := range []int{2, 3, 5, 7, 8, 9, 10, 18, 21} {
 		qNum := qNum
 		t.Run(fmt.Sprintf("Q%02d", qNum), func(t *testing.T) {
-			if planEngages(t, qNum) {
-				engaged++
-				t.Logf("Q%02d: fusion engages at this scale", qNum)
+			j, a := planEngages(t, qNum)
+			if j {
+				joinEngaged++
 			}
-			off := runArm(t, qNum, false)
-			on := runArm(t, qNum, true)
-			if len(on) != len(off) {
-				t.Fatalf("row count: fused=%d unfused=%d", len(on), len(off))
+			if a {
+				aggEngaged++
 			}
-			for i := range off {
-				if !reflect.DeepEqual(on[i], off[i]) {
-					t.Fatalf("row %d differs:\n  fused:   %v\n  unfused: %v", i, on[i], off[i])
+			t.Logf("Q%02d engagement: joins=%v aggs=%v", qNum, j, a)
+			off := runArm(t, qNum, false, false)
+			for _, arm := range []struct {
+				name          string
+				fusion, aggOn bool
+			}{{"join-only", true, false}, {"full", true, true}} {
+				got := runArm(t, qNum, arm.fusion, arm.aggOn)
+				if len(got) != len(off) {
+					t.Fatalf("%s arm row count: %d vs unfused %d", arm.name, len(got), len(off))
+				}
+				for i := range off {
+					if err := rowsEquivalent(got[i], off[i]); err != nil {
+						t.Fatalf("%s arm row %d differs (%v):\n  fused:   %v\n  unfused: %v", arm.name, i, err, got[i], off[i])
+					}
 				}
 			}
-			t.Logf("Q%02d: %d rows identical across arms", qNum, len(off))
+			t.Logf("Q%02d: %d rows identical across all three arms", qNum, len(off))
 		})
 	}
-	if engaged < 6 {
-		t.Errorf("fusion engaged on only %d queries; differential is near-vacuous (want >= 6)", engaged)
+	if joinEngaged < 6 {
+		t.Errorf("join fusion engaged on only %d queries; differential is near-vacuous (want >= 6)", joinEngaged)
 	}
+	if aggEngaged < 4 {
+		t.Errorf("agg absorb engaged on only %d queries; differential is near-vacuous (want >= 4)", aggEngaged)
+	}
+}
+
+// rowsEquivalent compares two result rows: non-float columns must match
+// exactly; float columns within 1e-9 relative tolerance. The agg absorb
+// changes how many partials the final merges (per-join-task instead of the
+// dropped stage's fan-out), so float SUMs legitimately drift in the last
+// bits — the same accumulation-order class the engine accepts across plan
+// shapes (TPC-H validation itself is tolerance-based).
+func rowsEquivalent(a, b map[string]any) error {
+	if len(a) != len(b) {
+		return fmt.Errorf("column count %d vs %d", len(a), len(b))
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return fmt.Errorf("column %s missing", k)
+		}
+		fa, aok := va.(float64)
+		fb, bok := vb.(float64)
+		if aok && bok {
+			if fa != fb {
+				den := math.Max(math.Abs(fa), math.Abs(fb))
+				if den > 0 && math.Abs(fa-fb)/den > 1e-9 {
+					return fmt.Errorf("column %s: %v vs %v", k, fa, fb)
+				}
+			}
+			continue
+		}
+		if !reflect.DeepEqual(va, vb) {
+			return fmt.Errorf("column %s: %v vs %v", k, va, vb)
+		}
+	}
+	return nil
 }
 
 // planStagesForTest plans SQL through PlanDistributed with the given worker

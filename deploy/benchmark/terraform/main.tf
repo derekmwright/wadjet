@@ -278,6 +278,7 @@ locals {
     echo "WADJET_SKEW_SPLIT=${var.skew_split}" >> /etc/environment
     echo "WADJET_AGG_OVER_EXCHANGE=${var.agg_over_exchange}" >> /etc/environment
     echo "WADJET_STAGE_FUSION=${var.stage_fusion}" >> /etc/environment
+    echo "WADJET_STAGE_FUSION_AGG=${var.stage_fusion_agg}" >> /etc/environment
     echo "WADJET_BLOCK_PROFILE_RATE=${var.block_profile_rate}" >> /etc/environment
     echo "WADJET_MUTEX_PROFILE_FRACTION=${var.mutex_profile_fraction}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
@@ -319,6 +320,7 @@ locals {
     echo "WADJET_SKEW_SPLIT=${var.skew_split}" >> /etc/environment
     echo "WADJET_AGG_OVER_EXCHANGE=${var.agg_over_exchange}" >> /etc/environment
     echo "WADJET_STAGE_FUSION=${var.stage_fusion}" >> /etc/environment
+    echo "WADJET_STAGE_FUSION_AGG=${var.stage_fusion_agg}" >> /etc/environment
     echo "WADJET_BLOCK_PROFILE_RATE=${var.block_profile_rate}" >> /etc/environment
     echo "WADJET_MUTEX_PROFILE_FRACTION=${var.mutex_profile_fraction}" >> /etc/environment
     echo "BUILD_COMPLETE=1" >> /etc/environment
@@ -394,6 +396,7 @@ locals {
     export WADJET_SKEW_SPLIT="${var.skew_split}"
     export WADJET_AGG_OVER_EXCHANGE="${var.agg_over_exchange}"
     export WADJET_STAGE_FUSION="${var.stage_fusion}"
+    export WADJET_STAGE_FUSION_AGG="${var.stage_fusion_agg}"
     export WADJET_SKEW_SUITE="${var.skew_suite}"
     export WADJET_BLOCK_PROFILE_RATE="${var.block_profile_rate}"
     export WADJET_MUTEX_PROFILE_FRACTION="${var.mutex_profile_fraction}"
@@ -560,6 +563,7 @@ resource "aws_instance" "worker" {
     export WADJET_SKEW_SPLIT="${var.skew_split}"
     export WADJET_AGG_OVER_EXCHANGE="${var.agg_over_exchange}"
     export WADJET_STAGE_FUSION="${var.stage_fusion}"
+    export WADJET_STAGE_FUSION_AGG="${var.stage_fusion_agg}"
     export WADJET_BLOCK_PROFILE_RATE="${var.block_profile_rate}"
     export WADJET_MUTEX_PROFILE_FRACTION="${var.mutex_profile_fraction}"
 

@@ -3,8 +3,7 @@ scan-1	scan	Singleton
 exchange-repartition-2	exchange-repartition	Hash(c_custkey)/32	deps=scan-0
 exchange-repartition-3	exchange-repartition	Hash(o_custkey)/32	deps=scan-1
 join-4	hash_join	Hash(c_custkey)/32	deps=exchange-repartition-2,exchange-repartition-3
-aggregate-5	aggregate	RoundRobin	deps=join-4
 final_aggregate-6	final_aggregate	Hash(c_custkey)/4	deps=exchange-repartition-final_aggregate-6-6
 sort-7	sort	Singleton	deps=final_aggregate-6
-exchange-repartition-final_aggregate-6-6	exchange-repartition	Hash(c_custkey)/4	deps=aggregate-5
+exchange-repartition-final_aggregate-6-6	exchange-repartition	Hash(c_custkey)/4	deps=join-4
 exchange-gather-sort-7	exchange-gather	Singleton	deps=sort-7

@@ -109,6 +109,17 @@ type Stage struct {
 	// materialization the separate stages paid.
 	ChainedJoins []ChainedJoinSpec
 
+	// ChainedAgg* describe a downstream PARTIAL aggregate absorbed as the
+	// chain's terminal step (fuseStageChains step 2): the fragment runs
+	// OpHashAggregate (raw mode) after the chained joins, so the join
+	// output collapses to partials in-process instead of materializing
+	// for a separate round-robin aggregate stage. Partial aggregation is
+	// partition-agnostic, so the fused stage keeps ITS OWN distribution
+	// and task count — it just emits N partial outputs instead of the
+	// dropped stage's fan-out count; finals merge either way.
+	ChainedAggGroupBy []string
+	ChainedAggSpecs   []AggSpec
+
 	// Window metadata
 	WindowCols []WindowColSpec
 
