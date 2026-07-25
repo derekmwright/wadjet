@@ -424,6 +424,40 @@ func eagerAliasForDep(stage physical.Stage, depID string) string {
 	}
 }
 
+// eagerCapableComputeProducer reports whether compute stage d can back an
+// eager feed (§14/A3): a hash-partitioned hash_join or final_aggregate
+// whose plain unpartitioned sink writes one file per task, so task
+// DISPATCH ORDER is the partition — the same positional contract the
+// barrier path's StageOutput.Files gives partitionFilesForWorker, which
+// the manifest source mirrors via the ProducerTaskIDs ordinal.
+//
+// Exchange-sink producers (stage.Exchange set) are out of A3 v1 scope;
+// dynamic-filter and scalar participants keep the barrier (provisional
+// outputs carry no BuildStats; scalar producers are read by the
+// coordinator). Dispatch-time regroupings (skew split, rr-agg split,
+// probe split, gather fusion) are gated at the wiring site — they remap
+// task→partition and would break the ordinal contract.
+func eagerCapableComputeProducer(d physical.Stage) bool {
+	if d.Type != physical.StageHashJoin && d.Type != "final_aggregate" {
+		return false
+	}
+	return d.Distribution.Kind == physical.DistHashPartitioned &&
+		d.Distribution.Count > 0 &&
+		d.Exchange == nil &&
+		len(d.EmitDynamicFilters) == 0 && len(d.ConsumeDynamicFilters) == 0 &&
+		len(d.ScalarDependencies) == 0
+}
+
+// eagerFeedableDep reports whether dependency stage d can be consumed
+// through an eager feed: a standalone exchange-repartition (C1/C2) or an
+// A3 compute producer.
+func eagerFeedableDep(d physical.Stage) bool {
+	if d.Type == physical.StageExchangeRepartition {
+		return d.Exchange != nil && d.Exchange.Count > 0
+	}
+	return eagerCapableComputeProducer(d)
+}
+
 // eagerEligibleJoinConsumer reports whether join stage s may clear
 // dispatch on its two producers' eager feeds (memo §3.3/§6, Phase C2
 // scope). Requires:
@@ -465,7 +499,7 @@ func eagerEligibleJoinConsumer(s physical.Stage, stageByID map[string]physical.S
 	probeDep, buildDep := joinPrimaryDeps(s)
 	for _, dep := range []string{probeDep, buildDep} {
 		d, ok := stageByID[dep]
-		if !ok || d.Type != physical.StageExchangeRepartition || d.Exchange == nil || d.Exchange.Count <= 0 {
+		if !ok || !eagerFeedableDep(d) {
 			return false
 		}
 	}
@@ -619,8 +653,9 @@ func (g *eagerPublishGovernor) noteTerminal(taskID string) {
 //   - a fragment-migrated single-input stage type: aggregate variants, or
 //     sort variants with SortKeys (a keyless "sort" would fall to the
 //     legacy task path, which reads Task.Inputs and cannot feed eagerly);
-//   - the dependency is a standalone exchange-repartition — the only
-//     producer the shuffle dispatcher registers feeds for in C1;
+//   - the dependency backs an eager feed: a standalone
+//     exchange-repartition, or an A3 compute producer
+//     (eagerFeedableDep);
 //   - not the gather-fused stage (fusion disables task retry, and retry is
 //     the fencing recovery path — memo §5);
 //   - no dynamic-filter participation (provisional outputs carry no
@@ -652,7 +687,7 @@ func eagerEligibleConsumer(s physical.Stage, stageByID map[string]physical.Stage
 		return false
 	}
 	dep, ok := stageByID[s.Dependencies[0]]
-	if !ok || dep.Type != physical.StageExchangeRepartition {
+	if !ok || !eagerFeedableDep(dep) {
 		return false
 	}
 	// Consumer task count (mirrors dispatchComputeStage's derivation for

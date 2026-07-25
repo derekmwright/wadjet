@@ -60,6 +60,40 @@ func TestPartitionOfKey(t *testing.T) {
 	}
 }
 
+// A3 ordinal contract: a file WITHOUT a partition= segment (plain
+// per-task compute output) takes its producing task's dispatch-order
+// ordinal as its partition; partition= files keep filename semantics.
+func TestManifestSource_OrdinalPartitionFallback(t *testing.T) {
+	e := &Executor{peers: newPeerExchange()}
+	// Consumer bound to partitions [1,2] of a 4-task producer.
+	s := newManifestStreamSource(e, "q", "b", testEagerSpec([]string{"t0", "t1", "t2", "t3"}, 1, 2))
+
+	plain := func(task string) string { return "queries/rootq/stage-3/" + task + ".wshf" }
+	// t0 (ordinal 0): out of range → resolved, no files queued.
+	got := s.filesInRange(distributed.ProducerTaskManifest{TaskID: "t0", Attempt: 1, Files: []string{plain("t0")}})
+	if len(got) != 0 {
+		t.Fatalf("ordinal 0 outside [1,2] must filter: got %v", got)
+	}
+	// t2 (ordinal 2): in range → its plain file passes.
+	got = s.filesInRange(distributed.ProducerTaskManifest{TaskID: "t2", Attempt: 1, Files: []string{plain("t2")}})
+	if len(got) != 1 || got[0] != plain("t2") {
+		t.Fatalf("ordinal 2 inside [1,2] must pass: got %v", got)
+	}
+	// Mixed manifest: partition= files keep filename semantics (9 is out,
+	// 1 is in) while the plain file rides the ordinal (t1 → 1, in).
+	got = s.filesInRange(distributed.ProducerTaskManifest{TaskID: "t1", Attempt: 1,
+		Files: []string{key("t1", 9), key("t1", 1), plain("t1")}})
+	if len(got) != 2 || got[0] != key("t1", 1) || got[1] != plain("t1") {
+		t.Fatalf("mixed manifest filtering wrong: got %v", got)
+	}
+	// Unknown task (not in ProducerTaskIDs): plain files have no ordinal
+	// and are excluded (observe's candidate gate rejects earlier anyway).
+	got = s.filesInRange(distributed.ProducerTaskManifest{TaskID: "tX", Attempt: 1, Files: []string{plain("tX")}})
+	if len(got) != 0 {
+		t.Fatalf("unknown task's plain files must be excluded: got %v", got)
+	}
+}
+
 // EOF requires every candidate resolved AND all in-range files drained;
 // manifests with no in-range files still resolve their task.
 func TestManifestSource_EOFAfterAllResolved(t *testing.T) {

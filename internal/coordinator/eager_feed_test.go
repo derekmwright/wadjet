@@ -411,7 +411,20 @@ func TestEagerEligibleJoinConsumer(t *testing.T) {
 	repartB := physical.Stage{ID: "ex-b", Type: physical.StageExchangeRepartition,
 		Exchange: &physical.ExchangeStage{Keys: []string{"k"}, Count: 24}}
 	scan := physical.Stage{ID: "scan-1", Type: physical.StageScan}
-	byID := map[string]physical.Stage{"ex-a": repartA, "ex-b": repartB, "scan-1": scan}
+	joinUp := physical.Stage{ID: "join-up", Type: physical.StageHashJoin,
+		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24}}
+	faggUp := physical.Stage{ID: "fagg-up", Type: "final_aggregate",
+		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24}}
+	joinSingle := physical.Stage{ID: "join-single", Type: physical.StageHashJoin,
+		Distribution: physical.Distribution{Kind: physical.DistSingleton}}
+	joinExch := physical.Stage{ID: "join-exch", Type: physical.StageHashJoin,
+		Distribution: physical.Distribution{Kind: physical.DistHashPartitioned, Count: 24},
+		Exchange:     &physical.ExchangeStage{Keys: []string{"k"}, Count: 24}}
+	byID := map[string]physical.Stage{
+		"ex-a": repartA, "ex-b": repartB, "scan-1": scan,
+		"join-up": joinUp, "fagg-up": faggUp,
+		"join-single": joinSingle, "join-exch": joinExch,
+	}
 
 	base := physical.Stage{
 		ID: "join-1", Type: physical.StageHashJoin, JoinType: "inner",
@@ -462,6 +475,24 @@ func TestEagerEligibleJoinConsumer(t *testing.T) {
 		}), "", true},
 		{"chained-join dep count mismatch", mutate(func(s *physical.Stage) {
 			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+		}), "", false},
+		// A3: a hash-partitioned compute producer backs a feed like a
+		// repartition; a Singleton or exchange-sink one does not.
+		{"compute-producer probe eligible", mutate(func(s *physical.Stage) {
+			s.Dependencies = []string{"join-up", "ex-b"}
+			s.LeftDepStage = "join-up"
+		}), "", true},
+		{"final-aggregate probe eligible", mutate(func(s *physical.Stage) {
+			s.Dependencies = []string{"fagg-up", "ex-b"}
+			s.LeftDepStage = "fagg-up"
+		}), "", true},
+		{"singleton compute probe ineligible", mutate(func(s *physical.Stage) {
+			s.Dependencies = []string{"join-single", "ex-b"}
+			s.LeftDepStage = "join-single"
+		}), "", false},
+		{"exchange-sink compute probe ineligible", mutate(func(s *physical.Stage) {
+			s.Dependencies = []string{"join-exch", "ex-b"}
+			s.LeftDepStage = "join-exch"
 		}), "", false},
 	}
 	for _, tc := range cases {

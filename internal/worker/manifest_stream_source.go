@@ -62,6 +62,7 @@ type manifestStreamSource struct {
 	consumed  map[string]int           // producer taskID → attempt pinned at first read
 	poisoned  error                    // sticky fencing violation
 	candidate map[string]struct{}      // full producer task ID set
+	ordinal   map[string]int           // producer taskID → dispatch-order index
 
 	inner   *cachedFileStreamSource // current file-set reader
 	current manifestFileSet
@@ -70,8 +71,10 @@ type manifestStreamSource struct {
 
 func newManifestStreamSource(e *Executor, queryID, bucket string, spec distributed.EagerInput) *manifestStreamSource {
 	cand := make(map[string]struct{}, len(spec.ProducerTaskIDs))
-	for _, id := range spec.ProducerTaskIDs {
+	ord := make(map[string]int, len(spec.ProducerTaskIDs))
+	for i, id := range spec.ProducerTaskIDs {
 		cand[id] = struct{}{}
+		ord[id] = i
 	}
 	return &manifestStreamSource{
 		executor:  e,
@@ -83,6 +86,7 @@ func newManifestStreamSource(e *Executor, queryID, bucket string, spec distribut
 		resolved:  make(map[string]int, len(cand)),
 		consumed:  make(map[string]int, len(cand)),
 		candidate: cand,
+		ordinal:   ord,
 	}
 }
 
@@ -118,7 +122,7 @@ func (s *manifestStreamSource) observe(m distributed.ProducerTaskManifest) {
 	if _, ok := s.candidate[m.TaskID]; !ok {
 		return // different edge of a shared producer stage, or garbage
 	}
-	inRange := filesInPartitionRange(m.Files, s.spec.PartitionStart, s.spec.PartitionEnd)
+	inRange := s.filesInRange(m)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -223,14 +227,28 @@ func (s *manifestStreamSource) Close() error {
 
 var _ exec.Source = (*manifestStreamSource)(nil)
 
-// filesInPartitionRange filters shuffle keys whose "partition=NNNN" path
-// segment falls inside [start, end] (inclusive). Keys without the segment
-// are excluded — eager feeds only ever carry partitioned shuffle output.
-func filesInPartitionRange(files []string, start, end int) []string {
+// filesInRange filters one manifest's files to [PartitionStart,
+// PartitionEnd] (inclusive). A key's partition is its "partition=NNNN"
+// path segment when present (partitioned shuffle / exchange-sink
+// output). A key WITHOUT the segment is a plain per-task output
+// (compute-stage producers: hash-partitioned joins and final_aggregates
+// whose unpartitioned sink writes one file per task) — there, task
+// DISPATCH ORDER is the partition, exactly the positional contract the
+// barrier path's StageOutput.Files (retrier.Files, dispatch-ordered)
+// gives partitionFilesForWorker. The ordinal map mirrors that order via
+// spec.ProducerTaskIDs.
+func (s *manifestStreamSource) filesInRange(m distributed.ProducerTaskManifest) []string {
+	ord, hasOrd := s.ordinal[m.TaskID]
 	var out []string
-	for _, f := range files {
+	for _, f := range m.Files {
 		p, ok := partitionOfKey(f)
-		if ok && p >= start && p <= end {
+		if !ok {
+			if !hasOrd {
+				continue
+			}
+			p = ord
+		}
+		if p >= s.spec.PartitionStart && p <= s.spec.PartitionEnd {
 			out = append(out, f)
 		}
 	}

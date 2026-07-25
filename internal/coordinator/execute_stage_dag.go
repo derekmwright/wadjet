@@ -2606,6 +2606,33 @@ func (c *Coordinator) dispatchComputeStage(
 		}
 	}, c.logger, stage.ID, c.classifyFatalResult)
 	defer c.watchStuckTasks(ctx, retrier)()
+	// A3 (eager-consumer-dispatch.md §14): a hash-partitioned compute
+	// stage backs an eager feed exactly like a shuffle producer — its
+	// plain sink writes one file per task and task dispatch order IS the
+	// partition, which the consumer's manifest source mirrors via the
+	// ProducerTaskIDs ordinal. Dispatch-time regroupings (skew split,
+	// rr-agg split, probe split) remap task→partition and decline; gather
+	// fusion disables the retry that fencing recovery needs; a
+	// coordinator-read stage (scalar extraction) keeps the barrier.
+	// Publication itself stays clearance-gated (§14/A1).
+	if fusion == nil && skewAssign == nil && rrAggGroups == nil && !probeSplit &&
+		len(tasks) > 0 && eagerCapableComputeProducer(stage) {
+		rootID := distributed.TaskRootQueryID(&tasks[0])
+		if rootID != "" && !c.stageReadByCoordinator(rootID, stage.ID) {
+			if feed := c.eagerFeedHandle(queryID, stage.ID); feed != nil {
+				retrier.onSuccess = c.eagerManifestPublisher(rootID, stage.ID, feed)
+				if retrier.onSuccess != nil {
+					ids := make([]string, len(tasks))
+					for i := range tasks {
+						ids[i] = tasks[i].ID
+					}
+					// Dispatch before publish so no completion beats the
+					// feed (same ordering contract as runShuffleSide).
+					feed.dispatch(rootID, stage.ID, ids, len(tasks), workerCount)
+				}
+			}
+		}
+	}
 	// Eager stages with more tasks than the cluster can hold at once
 	// publish in governed waves: eager tasks block on producer manifests
 	// while HOLDING a worker slot, so a full join fan-out (numTasks =

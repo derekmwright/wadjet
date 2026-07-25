@@ -293,6 +293,52 @@ func TestEagerChainedJoinDispatchE2E(t *testing.T) {
 		EagerChainedEdgesPlanned.Load()-chainedBefore, len(control))
 }
 
+// TestEagerComputeProducerE2E runs the A3 path: with stage-chain fusion
+// pinned OFF, the Q18-shaped plan keeps join-4 → join-9 as separate
+// stages, so join-9's probe is a hash-partitioned COMPUTE producer
+// (join-4) and its build another (final_aggregate-6). Both back eager
+// feeds whose manifests carry plain per-task .wshf files — the consumer's
+// manifest source maps them to partitions by producer-task dispatch
+// ordinal. The v1 eager slot serializes chained clearances, so the test
+// widens it to let the cascade engage deterministically. Results must be
+// row-identical to the barrier arm.
+func TestEagerComputeProducerE2E(t *testing.T) {
+	restoreTail := eagerMinTailSeconds
+	eagerMinTailSeconds = 0
+	t.Cleanup(func() { eagerMinTailSeconds = restoreTail })
+
+	restoreFusion := physical.StageFusion.Load()
+	physical.StageFusion.Store(false)
+	t.Cleanup(func() { physical.StageFusion.Store(restoreFusion) })
+
+	ctx, newCoord := setupEagerE2E(t, []string{"lineitem", "orders"})
+	const sql = `SELECT o_orderkey, SUM(l_quantity) AS qty
+		FROM lineitem
+		JOIN orders ON l_orderkey = o_orderkey
+		WHERE l_orderkey IN (SELECT l_orderkey FROM lineitem
+		     GROUP BY l_orderkey HAVING SUM(l_quantity) > 5)
+		GROUP BY o_orderkey`
+
+	control := runEagerE2EQuery(ctx, t, newCoord(false), sql, "control")
+	if len(control) == 0 {
+		t.Fatal("control returned no rows")
+	}
+	edgesBefore := EagerEdgesPlanned.Load()
+	eagerCoord := newCoord(true)
+	eagerCoord.eagerStageSlot = make(chan struct{}, 2)
+	treatment := runEagerE2EQuery(ctx, t, eagerCoord, sql, "eager-compute")
+
+	assertEagerArmsIdentical(t, control, treatment)
+	// join-4 (C2 over two repartitions) AND join-9 (A3 over two compute
+	// producers) must both clear — join-9 clearing proves manifest-fed
+	// consumption of plain compute outputs end-to-end.
+	if got := EagerEdgesPlanned.Load() - edgesBefore; got < 2 {
+		t.Errorf("expected >=2 eager clearances (C2 join-4 + A3 join-9), got %d", got)
+	}
+	t.Logf("compute-producer eager engaged: edges=%d, %d groups identical",
+		EagerEdgesPlanned.Load()-edgesBefore, len(control))
+}
+
 // TestEagerTailGate: with the projected-tail floor in force (set high so
 // SF001's millisecond producers can never satisfy it), an eager-flagged
 // run must keep the barrier on every edge — zero early clearances — and
