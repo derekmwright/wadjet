@@ -29,6 +29,12 @@ var EagerManifestsPublished atomic.Int64
 // this counter's log line in benchmark.log).
 var EagerEdgesPlanned atomic.Int64
 
+// EagerChainedEdgesPlanned counts the subset of EagerEdgesPlanned whose
+// consumer is a stage-chain-fused join (§13/A2): the fused chain cleared
+// on its primary probe/build feeds while its chained-build deps completed
+// at the barrier.
+var EagerChainedEdgesPlanned atomic.Int64
+
 // eagerManifestPublisher returns a taskRetrier onSuccess hook that
 // publishes one manifest per successful producer task, or nil when eager
 // dispatch is disabled or the root query ID is unavailable (legacy

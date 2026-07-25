@@ -12,6 +12,7 @@ import (
 
 	"github.com/citc-tech/wadjet/benchmarks/tpch"
 	"github.com/citc-tech/wadjet/internal/distributed"
+	"github.com/citc-tech/wadjet/internal/planner/physical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 	"github.com/citc-tech/wadjet/internal/storage/parquet"
@@ -28,7 +29,11 @@ func setupEagerE2E(t *testing.T, tables []string) (context.Context, func(eager b
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	logLevel := slog.LevelWarn
+	if os.Getenv("WADJET_TEST_LOG") == "info" {
+		logLevel = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 
 	natsCfg := distributed.DefaultNATSConfig()
 	natsCfg.Port = -1
@@ -242,6 +247,50 @@ func TestEagerJoinDispatchE2E(t *testing.T) {
 	}
 	t.Logf("C2 join eager engaged: edges=%d, %d groups identical",
 		EagerEdgesPlanned.Load()-edgesBefore, len(control))
+}
+
+// TestEagerChainedJoinDispatchE2E runs the A2 fused-chain path: a
+// three-table join whose two shuffled hash joins fuse into one chained
+// stage (stage-chain fusion, #269), which then clears dispatch eagerly on
+// its primary probe/build feeds while the chained build dep completes at
+// the barrier. Results must be row-identical to the barrier arm.
+func TestEagerChainedJoinDispatchE2E(t *testing.T) {
+	restoreTail := eagerMinTailSeconds
+	eagerMinTailSeconds = 0
+	t.Cleanup(func() { eagerMinTailSeconds = restoreTail })
+
+	// Pin fusion ON so the chain exists regardless of environment.
+	restoreFusion := physical.StageFusion.Load()
+	physical.StageFusion.Store(true)
+	t.Cleanup(func() { physical.StageFusion.Store(restoreFusion) })
+
+	ctx, newCoord := setupEagerE2E(t, []string{"lineitem", "orders"})
+	// Q18's chain shape at test scale: both joins key on l_orderkey /
+	// o_orderkey, so the decorrelated semi-join consumes the first join as
+	// its probe with the identical hash partitioning — the 1:1 link
+	// fuseStageChains absorbs (threshold lowered so SF001 returns rows).
+	const sql = `SELECT o_orderkey, SUM(l_quantity) AS qty
+		FROM lineitem
+		JOIN orders ON l_orderkey = o_orderkey
+		WHERE l_orderkey IN (SELECT l_orderkey FROM lineitem
+		     GROUP BY l_orderkey HAVING SUM(l_quantity) > 5)
+		GROUP BY o_orderkey`
+
+	control := runEagerE2EQuery(ctx, t, newCoord(false), sql, "control")
+	if len(control) == 0 {
+		t.Fatal("control returned no rows")
+	}
+	edgesBefore := EagerEdgesPlanned.Load()
+	chainedBefore := EagerChainedEdgesPlanned.Load()
+	treatment := runEagerE2EQuery(ctx, t, newCoord(true), sql, "eager-chained")
+
+	assertEagerArmsIdentical(t, control, treatment)
+	if got := EagerChainedEdgesPlanned.Load() - chainedBefore; got == 0 {
+		t.Error("eager chained run cleared no fused-chain consumer — A2 clearance did not engage")
+	}
+	t.Logf("chained eager engaged: edges=%d chained=%d, %d groups identical",
+		EagerEdgesPlanned.Load()-edgesBefore,
+		EagerChainedEdgesPlanned.Load()-chainedBefore, len(control))
 }
 
 // TestEagerTailGate: with the projected-tail floor in force (set high so

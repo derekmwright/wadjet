@@ -364,6 +364,14 @@ func TestEagerJoinWouldSplit(t *testing.T) {
 	if !c.eagerJoinWouldSplit(join, hotProbe, coldBuild, 3, 3) {
 		t.Error("skewed projection must report would-split")
 	}
+	// Partitioned chained build: the dispatcher never skew-splits such
+	// stages (dispatchComputeStage skips planSkewSplitTasks), so the
+	// projection must not send the consumer to the barrier either.
+	chained := join
+	chained.ChainedJoins = []physical.ChainedJoinSpec{{Partitioned: true}}
+	if c.eagerJoinWouldSplit(chained, hotProbe, coldBuild, 3, 3) {
+		t.Error("partitioned-chain stage must never report would-split")
+	}
 	// Uniform: every group equal → ratio 1 < 2 → no split (the Q21 lesson).
 	uniform := mkFeed([]int64{1000, 1000, 1000}, 3)
 	if c.eagerJoinWouldSplit(join, uniform, coldBuild, 3, 3) {
@@ -438,6 +446,22 @@ func TestEagerEligibleJoinConsumer(t *testing.T) {
 		}), "", false},
 		{"fused-join dep count mismatch", mutate(func(s *physical.Stage) {
 			s.FusedJoins = []physical.FusedJoinSpec{{}}
+		}), "", false},
+		// Stage-chain fusion: Dependencies grow one per ChainedJoinSpec;
+		// a matching count is eligible (chained builds keep the barrier),
+		// a mismatch is not.
+		{"chained joins with matching deps eligible", mutate(func(s *physical.Stage) {
+			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+			s.Dependencies = []string{"ex-a", "ex-b", "scan-1"}
+		}), "", true},
+		{"chained joins with absorbed partial aggregate eligible", mutate(func(s *physical.Stage) {
+			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
+			s.Dependencies = []string{"ex-a", "ex-b", "scan-1"}
+			s.ChainedAggGroupBy = []string{"g"}
+			s.ChainedAggSpecs = []physical.AggSpec{{}}
+		}), "", true},
+		{"chained-join dep count mismatch", mutate(func(s *physical.Stage) {
+			s.ChainedJoins = []physical.ChainedJoinSpec{{BuildDepStage: "scan-1"}}
 		}), "", false},
 	}
 	for _, tc := range cases {
