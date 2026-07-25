@@ -70,6 +70,13 @@ func TestPruneFusedAggOutputCols(t *testing.T) {
 // unknown name reverts the worker's parquet projection to full width
 // (143 B/row vs ~25 B/row on Q18's 600M-row fused lineitem leg at SF100).
 func TestFusedScanAggReadSet_Q18(t *testing.T) {
+	// Pin agg-over-exchange OFF: that rewrite removes Q18's fused
+	// scan-agg leg entirely (the shape this read-set regression test
+	// guards). The pruning still matters for every remaining fused
+	// scan-agg plan and for the WADJET_AGG_OVER_EXCHANGE=0 arm.
+	prev := AggOverExchange.Load()
+	AggOverExchange.Store(false)
+	t.Cleanup(func() { AggOverExchange.Store(prev) })
 	cat, ctx := setupTPCHCatalog(t)
 	sql := `SELECT c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice,
 	SUM(l_quantity) as total_qty
