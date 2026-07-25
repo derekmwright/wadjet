@@ -7,10 +7,8 @@ scan-5	scan	Singleton
 exchange-repartition-6	exchange-repartition	Hash(o_orderkey)/32	deps=join-4
 exchange-repartition-7	exchange-repartition	Hash(l_orderkey)/32	deps=scan-5
 join-8	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-6,exchange-repartition-7
-scan-9	scan	Hash(l_orderkey)/4
-final_aggregate-48	final_aggregate	Hash(l_orderkey)/4	deps=scan-9
-exchange-repartition-50	exchange-repartition	Hash(l_orderkey)/32	deps=final_aggregate-48
-join-51	hash_join	Hash(o_orderkey)/32	deps=join-8,exchange-repartition-50
+final_aggregate-48	final_aggregate	Hash(l_orderkey)/32	deps=exchange-repartition-7
+join-51	hash_join	Hash(o_orderkey)/32	deps=join-8,final_aggregate-48
 aggregate-52	aggregate	RoundRobin	deps=join-51
 final_aggregate-53	final_aggregate	Hash(c_name,c_custkey,o_orderkey,o_orderdate,o_totalprice)/4	deps=exchange-repartition-final_aggregate-53-15
 sort-54	sort	Singleton	deps=final_aggregate-53

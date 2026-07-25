@@ -116,6 +116,16 @@ type Stage struct {
 	FusedAggGroupBy []string
 	FusedAggSpecs   []AggSpec
 
+	// RawInputAggregate marks a final_aggregate whose input is RAW rows
+	// from an exchange hash-partitioned on the group keys, not partial
+	// aggregates — set by rewireAggOverRawExchange when it rewires the
+	// final from a duplicate fused scan-agg leg onto a sibling raw
+	// exchange. Partition-disjoint keys make per-partition raw aggregation
+	// exact, so the dispatcher builds the fragment with MergeMode=false
+	// (no InputCol→OutputCol remap, no COUNT→SUM rewrite). AggSpecs carry
+	// the raw form (the dropped scan's FusedAggSpecs).
+	RawInputAggregate bool
+
 	// Probe-split pipeline: partition the probe table's files across workers.
 	// Each worker scans build tables in full and probes its file partition.
 	ProbeSplitAlias string   // scan alias to partition (e.g., "lineitem")
@@ -1778,6 +1788,16 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// filters its build input on it. Kill switch
 		// WADJET_EXCHANGE_SUBSUME=0.
 		stages = dedupeSubsumedScanExchanges(stages)
+		// Feed a grouped final_aggregate from a sibling RAW exchange
+		// hash-partitioned on its exact group keys, dropping the duplicate
+		// fused scan-agg leg (Q18's 2nd full lineitem scan). The rewired
+		// final mirrors the raw exchange's partitioning, which typically
+		// turns its downstream re-shuffle into an identity exchange — run
+		// the elide pass again to collect it. Kill switch
+		// WADJET_AGG_OVER_EXCHANGE=0.
+		if rewired := rewireAggOverRawExchange(stages); len(rewired) != len(stages) {
+			stages = elideCoPartitionedExchanges(rewired)
+		}
 		// Fragment fusion passes are intentionally NOT called here.
 		//
 		// fuseScanShuffle / fuseJoinShuffle absorb a downstream
