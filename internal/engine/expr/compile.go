@@ -353,7 +353,42 @@ func compileCmp(left, right Expr, op CmpOp) Expr {
 	if isProvablyFloat64(left) && isProvablyFloat64(right) {
 		return &CmpFloat64{Left: left.(Float64Expr), Right: right.(Float64Expr), Op: op}
 	}
+	// Bare column vs a string literal that parses as a date/timestamp:
+	// pre-parse the literal once (both temporal units) and pick the unit
+	// per batch from the column's resolved type — the dominant pushed-
+	// filter shape (`l_shipdate <= '1998-09-02'`). Column type is unknown
+	// here, so CmpTemporalLit keeps a generic fallback for non-temporal
+	// columns; semantics stay identical to Cmp in every sub-case.
+	if col, ok := left.(*ColRef); ok && col.structField == "" {
+		if tl := tryTemporalLit(col, right, op, false); tl != nil {
+			return tl
+		}
+	}
+	if col, ok := right.(*ColRef); ok && col.structField == "" {
+		if tl := tryTemporalLit(col, left, op, true); tl != nil {
+			return tl
+		}
+	}
 	return &Cmp{Left: left, Right: right, Op: op}
+}
+
+// tryTemporalLit builds a CmpTemporalLit when other is a string literal
+// parseable as a date or timestamp; nil otherwise.
+func tryTemporalLit(col *ColRef, other Expr, op CmpOp, flip bool) *CmpTemporalLit {
+	lit, ok := other.(*Lit)
+	if !ok {
+		return nil
+	}
+	s, ok := lit.Val.(string)
+	if !ok {
+		return nil
+	}
+	days, dok := parseDateToEpochDaysOK(s)
+	ms, mok := parseTimestampToEpochMsOK(s)
+	if !dok && !mok {
+		return nil
+	}
+	return &CmpTemporalLit{Col: col, Lit: s, Op: op, Flip: flip, days: days, ms: ms}
 }
 
 // isProvablyInt64 returns true if the expression definitely produces int64 values.

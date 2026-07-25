@@ -680,6 +680,83 @@ func (e *Cmp) EvalBool(b *batch.RecordBatch, row int) bool {
 	return compare(lv, rv, e.Op)
 }
 
+// CmpTemporalLit compares a bare column against a string literal that
+// parses as a date/timestamp, without per-row parsing, cache lookups, or
+// boxing — the generic path spent 3.2% of SF100 worker CPU inside the
+// date-parse memo's sync.Map.Load (interface-key hashing dominated;
+// 2026-07-25 re-rank). The literal is parsed once into BOTH temporal
+// units at compile time; the unit is chosen from the column's resolved
+// type per batch. Every non-fast sub-case (non-temporal column, the
+// epoch-zero literal guard) delegates to the generic compare() with the
+// original operand order, keeping semantics bit-identical with Cmp.
+type CmpTemporalLit struct {
+	Col  *ColRef
+	Lit  string // original literal text (generic-fallback operand)
+	Op   CmpOp
+	Flip bool  // literal was the LEFT operand: evaluate as (lit OP col)
+	days int64 // literal as epoch days
+	ms   int64 // literal as epoch milliseconds
+}
+
+func (e *CmpTemporalLit) Eval(b *batch.RecordBatch, row int) any {
+	return e.EvalBool(b, row)
+}
+
+func (e *CmpTemporalLit) EvalBool(b *batch.RecordBatch, row int) bool {
+	e.Col.resolve(b)
+	var lit int64
+	switch e.Col.typ {
+	case batch.TypeDate:
+		lit = e.days
+	case batch.TypeTimestamp:
+		lit = e.ms
+	default:
+		// Non-temporal column: exact generic semantics (string columns
+		// compare lexically, numeric columns take the numeric paths).
+		return e.genericFallback(b, row)
+	}
+	v, ok := e.Col.EvalInt64(b, row)
+	if !ok {
+		return false // NULL / unresolved — Cmp returns false for nil operands
+	}
+	if lit == 0 && v != 0 {
+		// The generic guard (`bi != 0 || ai == 0`) treats an epoch-zero
+		// literal against a nonzero column as a parse failure and falls
+		// through to stringified comparison. Preserve that bit-exactly.
+		return e.genericFallback(b, row)
+	}
+	a, bv := v, lit
+	if e.Flip {
+		a, bv = lit, v
+	}
+	switch e.Op {
+	case CmpEq:
+		return a == bv
+	case CmpNe:
+		return a != bv
+	case CmpLt:
+		return a < bv
+	case CmpLe:
+		return a <= bv
+	case CmpGt:
+		return a > bv
+	case CmpGe:
+		return a >= bv
+	}
+	return false
+}
+
+func (e *CmpTemporalLit) genericFallback(b *batch.RecordBatch, row int) bool {
+	cv := e.Col.Eval(b, row)
+	if cv == nil {
+		return false
+	}
+	if e.Flip {
+		return compare(e.Lit, cv, e.Op)
+	}
+	return compare(cv, e.Lit, e.Op)
+}
+
 // CmpInt64 is a typed comparison that operates on int64 without boxing.
 type CmpInt64 struct {
 	Left, Right Int64Expr
@@ -2493,7 +2570,15 @@ func parseDateToEpochDays(s string) int64 {
 	if v, ok := dateEpochDaysCache.Load(s); ok {
 		return v.(int64)
 	}
-	var result int64
+	result, _ := parseDateToEpochDaysOK(s)
+	dateEpochDaysCache.Store(s, result)
+	return result
+}
+
+// parseDateToEpochDaysOK is the uncached parse with an explicit success
+// signal (0 is a valid result for the epoch itself). Used at expression
+// compile time by compileCmp's temporal-literal specialization.
+func parseDateToEpochDaysOK(s string) (int64, bool) {
 	for _, layout := range []string{
 		"2006-01-02",
 		time.RFC3339,
@@ -2502,12 +2587,10 @@ func parseDateToEpochDays(s string) int64 {
 	} {
 		if t, err := time.Parse(layout, s); err == nil {
 			epoch := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-			result = int64(t.Sub(epoch).Hours() / 24)
-			break
+			return int64(t.Sub(epoch).Hours() / 24), true
 		}
 	}
-	dateEpochDaysCache.Store(s, result)
-	return result
+	return 0, false
 }
 
 // parseTimestampToEpochMs parses common timestamp string formats into epoch milliseconds.
@@ -2515,7 +2598,14 @@ func parseTimestampToEpochMs(s string) int64 {
 	if v, ok := timestampEpochMsCache.Load(s); ok {
 		return v.(int64)
 	}
-	var result int64
+	result, _ := parseTimestampToEpochMsOK(s)
+	timestampEpochMsCache.Store(s, result)
+	return result
+}
+
+// parseTimestampToEpochMsOK is the uncached parse with an explicit success
+// signal (see parseDateToEpochDaysOK).
+func parseTimestampToEpochMsOK(s string) (int64, bool) {
 	for _, layout := range []string{
 		time.RFC3339Nano,
 		time.RFC3339,
@@ -2525,12 +2615,10 @@ func parseTimestampToEpochMs(s string) int64 {
 		"2006-01-02",
 	} {
 		if t, err := time.Parse(layout, s); err == nil {
-			result = t.UnixMilli()
-			break
+			return t.UnixMilli(), true
 		}
 	}
-	timestampEpochMsCache.Store(s, result)
-	return result
+	return 0, false
 }
 
 func toBool(e Expr, b *batch.RecordBatch, row int) bool {
