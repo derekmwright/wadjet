@@ -228,6 +228,12 @@ variable "agg_over_exchange" {
   default     = ""
 }
 
+variable "stage_fusion" {
+  description = "1:1 stage-chain fusion (fuseStageChains, docs/design/stage-chain-fusion.md): same-distribution join chains run as one fragment, eliding the per-link materialization (Q18's join-class scratch). Default on (empty/1 = on, matching the engine default); set \"0\" as the A/B kill switch."
+  type        = string
+  default     = ""
+}
+
 variable "skew_suite" {
   description = "Set to 1 to run the hot-key skew fixture (benchmarks/skew) instead of TPC-H — the Phase 3 skew-split A/B. Pair with data_prefix=tables-skew/ and generate_data=true on the first arm to stage the fixture."
   type        = string
