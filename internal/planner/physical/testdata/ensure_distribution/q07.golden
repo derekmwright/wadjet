@@ -9,10 +9,9 @@ join-8	hash_join	Hash(l_orderkey)/32	deps=exchange-repartition-6,exchange-repart
 scan-9	scan	Singleton
 exchange-repartition-10	exchange-repartition	Hash(o_custkey)/32	deps=join-8
 exchange-repartition-11	exchange-repartition	Hash(c_custkey)/32	deps=scan-9
-join-12	hash_join	Hash(o_custkey)/32	deps=exchange-repartition-10,exchange-repartition-11
+join-12	hash_join	Hash(o_custkey)/32	deps=exchange-repartition-10,exchange-repartition-11,exchange-replicate-join-14-13
 scan-13	scan	Singleton
-join-14	broadcast_join	Hash(o_custkey)/32	deps=join-12,exchange-replicate-join-14-13
-aggregate-15	aggregate	RoundRobin	deps=join-14
+aggregate-15	aggregate	RoundRobin	deps=join-12
 final_aggregate-16	final_aggregate	Singleton	deps=aggregate-15
 exchange-replicate-join-4-3	exchange-replicate	Broadcast	deps=scan-3
 exchange-replicate-join-14-13	exchange-replicate	Broadcast	deps=scan-13

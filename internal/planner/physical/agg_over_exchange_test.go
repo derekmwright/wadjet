@@ -28,6 +28,12 @@ func TestAggOverExchange_Q18ShapeApplies(t *testing.T) {
 	prev := AggOverExchange.Load()
 	t.Cleanup(func() { AggOverExchange.Store(prev) })
 	AggOverExchange.Store(true)
+	// Pin stage-chain fusion off: this test asserts the UNFUSED shape (the
+	// semi join as a standalone stage building from the raw final). The
+	// combined behavior is pinned by TestFuseStageChains_Q18Interplay.
+	prevFusion := StageFusion.Load()
+	t.Cleanup(func() { StageFusion.Store(prevFusion) })
+	StageFusion.Store(false)
 	cat, ctx := setupTPCHCatalog(t)
 	stages := sqlToStages(t, cat, ctx, aggOverExchangeQ18SQL, 3)
 

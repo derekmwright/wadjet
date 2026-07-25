@@ -42,34 +42,43 @@ func TestMarkCoPathingSelfJoinBuilds_Q07(t *testing.T) {
 		stageByID[stages[i].ID] = &stages[i]
 	}
 
-	// Walk all join stages, count how many target nation as build.
-	var nationJoins []*Stage
-	for i := range stages {
-		s := &stages[i]
-		if s.Type != StageHashJoin && s.Type != StageBroadcastJoin {
-			continue
-		}
-		if s.RightDepStage == "" {
-			continue
-		}
-		buildScan := stageByID[s.RightDepStage]
-		// Walk through one Exchange wrapper if present.
+	// isNationScan reports whether dep resolves (through one Exchange
+	// wrapper) to a nation scan.
+	isNationScan := func(dep string) bool {
+		buildScan := stageByID[dep]
 		if buildScan != nil && buildScan.Type != StageScan && len(buildScan.Dependencies) > 0 {
 			if d := stageByID[buildScan.Dependencies[0]]; d != nil && d.Type == StageScan {
 				buildScan = d
 			}
 		}
-		if buildScan != nil && buildScan.Type == StageScan && buildScan.TableName == "nation" {
-			nationJoins = append(nationJoins, s)
+		return buildScan != nil && buildScan.Type == StageScan && buildScan.TableName == "nation"
+	}
+
+	// Count nation-build joins: standalone join stages plus joins absorbed
+	// into a chain by fuseStageChains — the co-pathing qualification must
+	// survive fusion (it rides ChainedJoinSpec.QualifyAllBuildCols).
+	nationJoins := 0
+	for i := range stages {
+		s := &stages[i]
+		if s.Type == StageHashJoin || s.Type == StageBroadcastJoin {
+			if s.RightDepStage != "" && isNationScan(s.RightDepStage) {
+				nationJoins++
+				if !s.QualifyAllBuildCols {
+					t.Errorf("nation join %s: want QualifyAllBuildCols=true (co-pathing self-join), got false", s.ID)
+				}
+			}
+		}
+		for ci, cj := range s.ChainedJoins {
+			if cj.BuildDepStage != "" && isNationScan(cj.BuildDepStage) {
+				nationJoins++
+				if !cj.QualifyAllBuildCols {
+					t.Errorf("chained nation join %s[%d]: want QualifyAllBuildCols=true (co-pathing self-join), got false", s.ID, ci)
+				}
+			}
 		}
 	}
-	if len(nationJoins) != 2 {
-		t.Fatalf("Q07: want 2 nation-join stages, got %d", len(nationJoins))
-	}
-	for _, j := range nationJoins {
-		if !j.QualifyAllBuildCols {
-			t.Errorf("nation join %s: want QualifyAllBuildCols=true (co-pathing self-join), got false", j.ID)
-		}
+	if nationJoins != 2 {
+		t.Fatalf("Q07: want 2 nation joins (standalone or chained), got %d", nationJoins)
 	}
 }
 
