@@ -1054,6 +1054,42 @@ type FuncCall struct {
 	vecFn   VecScalarFunc
 }
 
+// stringInputFuncs are scalar functions whose arguments are string-typed.
+// A TypeDate ColRef argument evaluates to its raw epoch-day int64 (the
+// representation every comparison/arithmetic path depends on), so these
+// functions must render it through batch.FormatDate first — otherwise
+// SUBSTR(date_col, 1, 4) substrings the DIGITS of the day number
+// (issue #273: SF100's date32 columns grouped Q07/Q08/Q09 day-granular;
+// string-date test data never exercised the path). Keyed lowercase, the
+// registry's convention. Timestamps are excluded deliberately: they have
+// no canonical string form today (GetValue emits raw epoch-ms), and these
+// functions must stay consistent with result-output rendering.
+var stringInputFuncs = map[string]bool{
+	"upper": true, "lower": true, "concat": true, "length": true,
+	"len": true, "substr": true, "substring": true, "trim": true,
+	"ltrim": true, "rtrim": true, "replace": true, "reverse": true,
+	"left": true, "right": true, "starts_with": true, "ends_with": true,
+	"contains": true, "split_part": true, "strpos": true, "lpad": true,
+	"rpad": true, "cast_string": true,
+}
+
+// formatTemporalArgs rewrites boxed TypeDate ColRef argument values to
+// their canonical ISO form for string-input functions. Only direct column
+// references are covered — a nested expression's output type isn't known
+// here (and nothing in the TPC-H or observed customer shapes feeds a
+// computed date into a string function).
+func (e *FuncCall) formatTemporalArgs(args []any) {
+	for i, a := range e.Args {
+		cr, ok := a.(*ColRef)
+		if !ok || cr.typ != batch.TypeDate {
+			continue
+		}
+		if v, ok := args[i].(int64); ok {
+			args[i] = batch.FormatDate(int32(v))
+		}
+	}
+}
+
 func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	// Allocate args on every call so concurrent goroutines sharing this
 	// *FuncCall don't stomp on each other. For small N (the common case)
@@ -1062,6 +1098,9 @@ func (e *FuncCall) Eval(b *batch.RecordBatch, row int) any {
 	args := make([]any, len(e.Args))
 	for i, a := range e.Args {
 		args[i] = a.Eval(b, row)
+	}
+	if stringInputFuncs[strings.ToLower(e.Name)] {
+		e.formatTemporalArgs(args)
 	}
 	// Cache function pointer to avoid RWMutex contention on every row.
 	// sync.Once ensures concurrent first-time lookups don't race.
@@ -1096,6 +1135,13 @@ func (e *FuncCall) EvalVec(b *batch.RecordBatch, out *batch.Vector, n int) {
 		case *ColRef:
 			a.resolve(b)
 			if a.idx < 0 || a.idx >= len(b.Columns) {
+				e.evalVecPerRow(b, out, n)
+				return
+			}
+			// String-input vec kernels read BytesData; a TypeDate column
+			// has none and must render through the (fixed) per-row path
+			// (issue #273).
+			if a.typ == batch.TypeDate && stringInputFuncs[strings.ToLower(e.Name)] {
 				e.evalVecPerRow(b, out, n)
 				return
 			}
