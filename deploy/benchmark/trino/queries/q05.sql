@@ -13,3 +13,4 @@ SELECT
 			AND o_orderdate < DATE '1995-01-01'
 		GROUP BY n_name
 		ORDER BY revenue DESC
+;

@@ -11,3 +11,4 @@ SELECT
 		WHERE p_name LIKE '%green%'
 		GROUP BY n_name, CAST(year(o_orderdate) AS varchar)
 		ORDER BY nation, o_year DESC
+;

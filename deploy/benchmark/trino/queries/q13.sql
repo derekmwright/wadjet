@@ -6,3 +6,4 @@ SELECT
 		GROUP BY c_custkey
 		ORDER BY c_count DESC, c_custkey
 		LIMIT 100
+;

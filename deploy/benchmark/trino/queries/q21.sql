@@ -20,3 +20,4 @@ SELECT s_name, COUNT(*) as numwait
 		GROUP BY s_name
 		ORDER BY numwait DESC, s_name
 		LIMIT 100
+;

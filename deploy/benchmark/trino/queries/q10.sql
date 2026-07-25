@@ -12,3 +12,4 @@ SELECT
 		GROUP BY c_custkey, c_name, c_acctbal, c_phone, n_name, c_address, c_comment
 		ORDER BY revenue DESC
 		LIMIT 20
+;

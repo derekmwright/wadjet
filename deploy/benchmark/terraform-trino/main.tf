@@ -114,8 +114,11 @@ resource "aws_iam_instance_profile" "trino" {
 locals {
   single_node = var.worker_count == 0
   # Heap sizing: leave ~25% headroom for the OS + native S3 buffers.
-  coord_heap  = local.single_node ? "24G" : "12G"
-  worker_heap = "24G"
+  # Trino validates query.max-memory-per-node + heap headroom (default 30%
+  # of -Xmx) <= heap, so per-node query memory stays under ~60% of heap.
+  coord_heap          = local.single_node ? "24G" : "12G"
+  worker_heap         = "24G"
+  coord_query_per_node = local.single_node ? "14GB" : "6GB"
 
   # Shared install snippet: Corretto 23 (Trino needs Java 23+ on recent
   # releases; corretto.aws "latest" URL tracks patch releases) + Trino
@@ -192,8 +195,8 @@ resource "aws_instance" "coordinator" {
     node-scheduler.include-coordinator=${local.single_node}
     http-server.http.port=8080
     discovery.uri=http://localhost:8080
-    query.max-memory=${local.single_node ? "18GB" : "48GB"}
-    query.max-memory-per-node=${local.single_node ? "18GB" : "16GB"}
+    query.max-memory=${local.single_node ? "14GB" : "42GB"}
+    query.max-memory-per-node=${local.coord_query_per_node}
     CP
     cat > /opt/trino/etc/catalog/hive.properties <<'HP'
     ${local.hive_catalog}
@@ -251,8 +254,8 @@ resource "aws_instance" "worker" {
     coordinator=false
     http-server.http.port=8080
     discovery.uri=http://${aws_instance.coordinator.private_ip}:8080
-    query.max-memory=48GB
-    query.max-memory-per-node=16GB
+    query.max-memory=42GB
+    query.max-memory-per-node=14GB
     CP
     cat > /opt/trino/etc/catalog/hive.properties <<'HP'
     ${local.hive_catalog}

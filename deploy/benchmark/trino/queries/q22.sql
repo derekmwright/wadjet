@@ -15,3 +15,4 @@ SELECT
 			)
 		GROUP BY SUBSTR(c_phone, 1, 2)
 		ORDER BY cntrycode
+;

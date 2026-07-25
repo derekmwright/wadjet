@@ -8,3 +8,4 @@ SELECT
 			AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9)
 		GROUP BY p_brand, p_type, p_size
 		ORDER BY supplier_cnt DESC, p_brand, p_type, p_size
+;

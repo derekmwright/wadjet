@@ -11,3 +11,4 @@ SELECT
 			)
 		GROUP BY o_orderpriority
 		ORDER BY o_orderpriority
+;

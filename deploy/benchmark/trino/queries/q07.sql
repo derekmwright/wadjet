@@ -15,3 +15,4 @@ SELECT
 			AND l_shipdate <= DATE '1996-12-31'
 		GROUP BY n1.n_name, n2.n_name, CAST(year(l_shipdate) AS varchar)
 		ORDER BY supp_nation, cust_nation, l_year
+;

@@ -16,3 +16,4 @@ SELECT
 			AND p_type = 'ECONOMY ANODIZED STEEL'
 		GROUP BY CAST(year(o_orderdate) AS varchar)
 		ORDER BY o_year
+;

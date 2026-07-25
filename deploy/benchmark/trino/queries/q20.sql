@@ -18,3 +18,4 @@ SELECT s_name, s_address
 				)
 			)
 		ORDER BY s_name
+;

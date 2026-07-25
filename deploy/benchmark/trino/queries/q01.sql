@@ -13,3 +13,4 @@ SELECT
 		WHERE l_shipdate <= DATE '1998-09-02'
 		GROUP BY l_returnflag, l_linestatus
 		ORDER BY l_returnflag, l_linestatus
+;

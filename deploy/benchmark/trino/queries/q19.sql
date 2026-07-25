@@ -24,3 +24,4 @@ SELECT
 			AND l_shipmode IN ('AIR', 'REG AIR')
 			AND l_shipinstruct = 'DELIVER IN PERSON'
 		)
+;

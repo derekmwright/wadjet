@@ -13,3 +13,4 @@ SELECT
 		GROUP BY c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
 		ORDER BY o_totalprice DESC, o_orderdate
 		LIMIT 100
+;

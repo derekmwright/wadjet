@@ -14,3 +14,4 @@ SELECT
 			WHERE n_name = 'GERMANY'
 		)
 		ORDER BY value DESC
+;

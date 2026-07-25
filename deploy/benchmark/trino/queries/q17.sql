@@ -9,3 +9,4 @@ SELECT
 				FROM lineitem
 				WHERE l_partkey = p_partkey
 			)
+;

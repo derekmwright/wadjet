@@ -6,3 +6,4 @@ SELECT
 			AND l_discount >= 0.05
 			AND l_discount <= 0.07
 			AND l_quantity < 24
+;

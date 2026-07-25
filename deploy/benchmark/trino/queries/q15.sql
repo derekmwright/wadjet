@@ -14,3 +14,4 @@ WITH revenue AS (
 			SELECT MAX(total_revenue) FROM revenue
 		)
 		ORDER BY s_suppkey
+;
