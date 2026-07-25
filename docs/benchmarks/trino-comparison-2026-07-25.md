@@ -57,13 +57,21 @@ warm — its advantage, and noted).
   q03 5.0×, q10 4.2×, q22 3.9×) are repartition-heavy shapes — the
   remaining materialization boundaries fusion could not elide (true re-key
   exchanges) plus small-query dispatch floor.
-- **Row parity 18/22.** The four divergences are all WADJET bugs found
-  BY this comparison — the first non-self-referential row oracle in the
-  gate chain: #272 (Q11 scalar-subquery threshold ~100× small at SF100;
-  correct answer 0 rows, wadjet 92,698) and #273 (SUBSTR over date32
+- **Row parity 18/22 as first measured; post-mortem: 3 real wadjet bugs
+  + 1 harness bug of this comparison's own.** #273 (SUBSTR over date32
   renders day-granular at SF100: Q07 1462 vs 4, Q08 731 vs 2, Q09
-  50,250 vs 175). All four inflated baselines were "44/44 OK" all along
-  because baselines were wadjet-derived.
+  50,250 vs 175) was real — FIXED same day (PR #274) and SF100-verified
+  (results/20260725-190102: 4/2/175). #272 (Q11) was a FALSE ALARM
+  against wadjet: tpch-bench applies the TPC-H spec's scale-dependent
+  Q11 FRACTION (0.0001/SF = 1e-6 at SF100) via GetQuery(), while this
+  harness's q11.sql carried the unscaled 0.0001. Undoing each engine's
+  own multiplier shows both computed the IDENTICAL distributed sum to
+  1 ulp (8016814904298.586 vs .588) — wadjet's 92,698 rows is the
+  spec-correct SF100 answer; Trino's 0 answered a different question.
+  q11.sql now scales the fraction (run-duckdb-comparison.sh's
+  Q11_FRACTION precedent). The wadjet engine value path got a clean
+  end-to-end audit out of it (partial sums, merge rewrite, avg-fold
+  gating, WSHF decimal scaling, extraction — all exonerated).
 - Trino quirk observed: q15 flipped 0↔1 rows across its own runs (float
   tie on the CTE MAX — the divergence class wadjet eliminated via CTE
   materialization).
