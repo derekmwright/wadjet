@@ -2125,11 +2125,25 @@ func (c *Coordinator) dispatchComputeStage(
 	// either way.
 	skewGroups := numTasks
 	var skewAssign []skewTaskAssignment
-	if c.config.SkewSplit && !probeSplit {
+	// Partitioned chained builds (stage-chain fusion of a downstream
+	// hash_join) bind build partition i to task i; a skew sub-task's index
+	// no longer equals its partition index, which would mis-slice those
+	// builds. Broadcast chained builds ride whole and stay skew-safe.
+	partitionedChain := false
+	for _, cj := range stage.ChainedJoins {
+		if cj.Partitioned {
+			partitionedChain = true
+			break
+		}
+	}
+	if c.config.SkewSplit && !probeSplit && !partitionedChain {
 		if a := c.planSkewSplitTasks(stage, inputs, numTasks, workerCount); a != nil {
 			skewAssign = a
 			numTasks = len(a)
 		}
+	} else if c.config.SkewSplit && partitionedChain {
+		c.logger.Info("skew split skipped: stage has partitioned chained joins",
+			"stage_id", stage.ID, "chained", len(stage.ChainedJoins))
 	}
 	resultPrefix := fmt.Sprintf("queries/%s/%s/", queryID, stage.ID)
 	dispatchAttrs := []any{
@@ -2149,6 +2163,11 @@ func (c *Coordinator) dispatchComputeStage(
 	if c.config.LateMaterialization &&
 		(stage.Type == physical.StageHashJoin || stage.Type == physical.StageBroadcastJoin) {
 		dispatchAttrs = append(dispatchAttrs, "late_mat", true)
+	}
+	// Stage-chain fusion engagement marker (grep-able from benchmark.log):
+	// number of absorbed downstream joins running in this stage's fragment.
+	if len(stage.ChainedJoins) > 0 {
+		dispatchAttrs = append(dispatchAttrs, "chained_joins", len(stage.ChainedJoins))
 	}
 	c.logger.Info("dispatchComputeStage", dispatchAttrs...)
 
@@ -2238,6 +2257,52 @@ func (c *Coordinator) dispatchComputeStage(
 				JoinFilter:      fj.JoinFilter,
 				FilterExprs:     append([]string(nil), fj.FilterExprs...),
 			})
+		}
+		// Translate ChainedJoins (stage-chain fusion; docs/design/
+		// stage-chain-fusion.md) into post-primary probe OpSpecs. A
+		// Partitioned chained build is hash-partitioned 1:1 with this
+		// stage's tasks — task w reads its own slice, same semantics the
+		// absorbed stage's dispatch would have applied; broadcast builds
+		// ride whole, shared per worker via the broadcast-join cache.
+		// The absorbed stage's residual filters and output projection ride
+		// the op chain so the fused output is byte-equivalent to what the
+		// separate stage produced.
+		var chainedOps []distributed.OpSpec
+		for ci, cj := range stage.ChainedJoins {
+			buildOut, ok := inputs[cj.BuildDepStage]
+			if !ok {
+				return StageOutput{}, fmt.Errorf("stage %s chained join %d: build dep %q output not found",
+					stage.ID, ci, cj.BuildDepStage)
+			}
+			var chainBuildFiles []string
+			opType := distributed.OpBroadcastProbe
+			if cj.Partitioned {
+				opType = distributed.OpHashJoinProbe
+				chainBuildFiles = partitionFilesForWorker(buildOut, w, numTasks)
+			} else {
+				chainBuildFiles = flattenStageFiles(buildOut)
+			}
+			chainedOps = append(chainedOps, distributed.OpSpec{
+				Type:                opType,
+				JoinType:            cj.JoinType,
+				LeftKeys:            append([]string(nil), cj.JoinLeftKeys...),
+				RightKeys:           append([]string(nil), cj.JoinRightKeys...),
+				BuildAlias:          cj.BuildTableAlias,
+				BuildFiles:          chainBuildFiles,
+				BuildBucket:         c.config.ResultBucket,
+				BuildColOrigins:     cj.BuildColOrigins,
+				JoinFilter:          cj.JoinFilter,
+				BuildFilterExprs:    append([]string(nil), cj.BuildFilterExprs...),
+				QualifyAllBuildCols: cj.QualifyAllBuildCols,
+				OutputColumns:       append([]string(nil), cj.Columns...),
+				LateMaterialize:     c.config.LateMaterialization,
+			})
+			if len(cj.FilterExprs) > 0 {
+				chainedOps = append(chainedOps, distributed.OpSpec{
+					Type:       distributed.OpFilter,
+					Predicates: append([]string(nil), cj.FilterExprs...),
+				})
+			}
 		}
 		t := distributed.Task{
 			ID:                  uuid.New().String()[:8],
@@ -2340,11 +2405,16 @@ func (c *Coordinator) dispatchComputeStage(
 			} else {
 				sinkOp = distributed.OpSpec{Type: distributed.OpUnpartitionedSink}
 			}
-			ops, ferr := buildJoinFragment(stage, &t, taskInputs, wireFused, sorts, sinkOp, c.config.LateMaterialization)
+			ops, ferr := buildJoinFragment(stage, &t, taskInputs, wireFused, chainedOps, sorts, sinkOp, c.config.LateMaterialization)
 			if ferr != nil {
 				return StageOutput{}, fmt.Errorf("stage %s: build join fragment: %w", stage.ID, ferr)
 			}
 			t.Operators = ops
+		} else if len(chainedOps) > 0 {
+			// A stage carrying chained joins must dispatch as a fragment —
+			// the legacy single-op path would silently drop the chain.
+			return StageOutput{}, fmt.Errorf("stage %s: %d chained joins on a non-fragment stage (type=%s)",
+				stage.ID, len(stage.ChainedJoins), stage.Type)
 		}
 		// Sort-merge join stages always route through the fragment runner —
 		// there is no legacy single-op execution path for them, so any
@@ -2680,11 +2750,14 @@ func (c *Coordinator) dispatchComputeStage(
 // a fragment pipeline (Operators[]). Pipeline shape:
 //
 //	[ShuffleSource(probe), BroadcastProbe(fused_0..n), HashJoinProbe|BroadcastProbe(primary),
-//	 OpFilter?(residual), OpSort?(folded sort), <terminalSink>]
+//	 OpFilter?(residual), chained_0..n (stage-chain fusion), OpSort?(folded sort), <terminalSink>]
 //
 // Each FusedJoin in wireFused becomes its own BroadcastProbe op (the existing
 // chain semantics: every fused entry is a broadcast cache the probe stream
-// passes through before reaching the primary).
+// passes through before reaching the primary). chainedOps are pre-built
+// post-primary probe/filter ops from absorbed 1:1 downstream joins
+// (docs/design/stage-chain-fusion.md); they run after the primary and its
+// residual filter — the order the separate stages executed in.
 //
 // terminalSink is the caller-supplied sink — OpExchangeSender for the
 // fuseJoinShuffle path, OpUnpartitionedSink for the standalone-terminal-join
@@ -2696,6 +2769,7 @@ func buildJoinFragment(
 	t *distributed.Task,
 	taskInputs map[string][]string,
 	wireFused []distributed.FusedJoinSpec,
+	chainedOps []distributed.OpSpec,
 	sorts []distributed.SortKeySpec,
 	terminalSink distributed.OpSpec,
 	lateMat bool,
@@ -2771,6 +2845,9 @@ func buildJoinFragment(
 			Predicates: append([]string(nil), t.PostFilterExprs...),
 		})
 	}
+	// Absorbed 1:1 downstream joins (stage-chain fusion) run after the
+	// primary and its residual filter, in stage order.
+	ops = append(ops, chainedOps...)
 	if len(sorts) > 0 {
 		ops = append(ops, distributed.OpSpec{
 			Type:         distributed.OpSort,
@@ -3461,10 +3538,10 @@ func buildTaskInputsForStage(stage physical.Stage, upstreams map[string]StageOut
 	inputs := make(map[string][]string)
 	switch stage.Type {
 	case physical.StageHashJoin, physical.StageBroadcastJoin, physical.StageSortMergeJoin:
-		expectedDeps := 2 + len(stage.FusedJoins)
+		expectedDeps := 2 + len(stage.FusedJoins) + len(stage.ChainedJoins)
 		if len(stage.Dependencies) != expectedDeps {
-			return nil, fmt.Errorf("join stage %s expects %d deps (2 primary + %d fused), got %d",
-				stage.ID, expectedDeps, len(stage.FusedJoins), len(stage.Dependencies))
+			return nil, fmt.Errorf("join stage %s expects %d deps (2 primary + %d fused + %d chained), got %d",
+				stage.ID, expectedDeps, len(stage.FusedJoins), len(stage.ChainedJoins), len(stage.Dependencies))
 		}
 		probeDep := stage.LeftDepStage
 		buildDep := stage.RightDepStage

@@ -250,6 +250,11 @@ func (c *Coordinator) annotateTaskPeerLocations(t *distributed.Task) {
 	for i := range t.FusedJoins {
 		addAll(t.FusedJoins[i].BuildFiles)
 	}
+	// Chained-join builds (stage-chain fusion) exist only as fragment op
+	// specs; walk Operators so their build reads get peer hints too.
+	for i := range t.Operators {
+		addAll(t.Operators[i].BuildFiles)
+	}
 	t.InputLocations = locs
 }
 

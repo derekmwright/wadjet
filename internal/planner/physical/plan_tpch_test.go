@@ -275,6 +275,17 @@ func validateSelfJoinAliases(t *testing.T, stages []Stage, queryName string, req
 		if s.BuildTableAlias != "" {
 			foundAliases[s.BuildTableAlias] = true
 		}
+		// Joins absorbed by fusion passes keep their build alias on the spec.
+		for _, fj := range s.FusedJoins {
+			if fj.BuildTableAlias != "" {
+				foundAliases[fj.BuildTableAlias] = true
+			}
+		}
+		for _, cj := range s.ChainedJoins {
+			if cj.BuildTableAlias != "" {
+				foundAliases[cj.BuildTableAlias] = true
+			}
+		}
 	}
 
 	for _, alias := range requiredAliases {

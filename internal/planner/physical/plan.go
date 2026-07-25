@@ -101,6 +101,14 @@ type Stage struct {
 	// shuffle+join stages for small dimension tables like nation, region).
 	FusedJoins []FusedJoinSpec
 
+	// ChainedJoins are 1:1 downstream joins absorbed into this stage by
+	// fuseStageChains (docs/design/stage-chain-fusion.md). Unlike
+	// FusedJoins (broadcast probes applied BEFORE the primary join), these
+	// run AFTER it, in order — the fragment pipes the primary's output
+	// through each chained probe in-process, eliding the per-link
+	// materialization the separate stages paid.
+	ChainedJoins []ChainedJoinSpec
+
 	// Window metadata
 	WindowCols []WindowColSpec
 
@@ -277,6 +285,34 @@ type FusedJoinSpec struct {
 	BuildColOrigins map[string]string // bare build col → owning scan alias (multi-table builds only)
 	JoinFilter      string
 	FilterExprs     []string
+}
+
+// ChainedJoinSpec describes a 1:1 downstream join absorbed into an upstream
+// hash_join stage by fuseStageChains. It carries everything the dispatcher
+// needs to emit the join as a post-primary probe op in the fused fragment.
+type ChainedJoinSpec struct {
+	JoinType        string
+	JoinLeftKeys    []string
+	JoinRightKeys   []string
+	BuildDepStage   string // stage providing build-side data
+	BuildTableAlias string
+	BuildColOrigins map[string]string
+	JoinFilter      string
+	// FilterExprs are the absorbed stage's residual post-join filters —
+	// emitted as an OpFilter immediately after this chained probe.
+	FilterExprs []string
+	// BuildFilterExprs filter the build input rows before hash-table
+	// construction (exchange-subsume flag filters on the absorbed stage).
+	BuildFilterExprs    []string
+	QualifyAllBuildCols bool
+	// Columns is the absorbed stage's output projection; applied as the
+	// chained probe's OutputFilter so the fused stage emits exactly what
+	// the absorbed stage emitted.
+	Columns []string
+	// Partitioned marks a hash-partitioned 1:1 build input (the absorbed
+	// stage was a hash_join): task i reads build partition i. False means
+	// a replicated broadcast build read whole by every task.
+	Partitioned bool
 }
 
 // AggSpec defines an aggregation in a stage.
@@ -1798,6 +1834,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		if rewired := rewireAggOverRawExchange(stages); len(rewired) != len(stages) {
 			stages = elideCoPartitionedExchanges(rewired)
 		}
+		// Fuse 1:1 same-distribution join chains (consumer task i reads
+		// exactly producer task i's output) into single fragments, eliding
+		// the per-link materialization — Q18's join-class 48.9 GB at
+		// SF100. Runs when distributions are final so the count-equality
+		// gate sees real values. No file-count amplification (task count
+		// unchanged), unlike the disabled fuseScanShuffle/fuseJoinShuffle
+		// below. Kill switch WADJET_STAGE_FUSION=0.
+		stages = fuseStageChains(stages)
 		// Fragment fusion passes are intentionally NOT called here.
 		//
 		// fuseScanShuffle / fuseJoinShuffle absorb a downstream

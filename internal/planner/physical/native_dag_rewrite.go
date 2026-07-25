@@ -45,10 +45,12 @@ func ValidateNativeDAGShape(stages []Stage) error {
 			// translates planner-side FusedJoinSpec.BuildDepStage into
 			// the wire-format BuildFiles by looking up the upstream stage
 			// output.
-			expectedDeps := 2 + len(s.FusedJoins)
+			// ChainedJoins (stage-chain fusion) add one build dep each on
+			// top of the fused-join build deps.
+			expectedDeps := 2 + len(s.FusedJoins) + len(s.ChainedJoins)
 			if len(s.Dependencies) != expectedDeps {
-				return fmt.Errorf("native-DAG: %s stage %s has %d dependencies, expected %d (2 primary + %d fused)",
-					s.Type, s.ID, len(s.Dependencies), expectedDeps, len(s.FusedJoins))
+				return fmt.Errorf("native-DAG: %s stage %s has %d dependencies, expected %d (2 primary + %d fused + %d chained)",
+					s.Type, s.ID, len(s.Dependencies), expectedDeps, len(s.FusedJoins), len(s.ChainedJoins))
 			}
 		case StageExchangeRepartition, StageExchangeReplicate, StageExchangeGather:
 			if len(s.Dependencies) != 1 {
