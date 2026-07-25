@@ -1,0 +1,31 @@
+# Architecture Decision Records
+
+Short, immutable records of the architectural decisions this codebase has
+committed to: the decision, the alternatives it beat, and what we accept
+in consequence. Deep design detail lives in the linked `docs/design/`
+memos — an ADR is the index entry that says *what we chose and why it
+stuck*, so nobody relitigates a settled question without new evidence.
+
+Conventions:
+
+- Numbered, never renumbered. Superseding a decision means a new ADR that
+  names the old one; the old record's status flips to `Superseded by
+  ADR-NNNN`.
+- Status is one of `Accepted`, `Superseded`, `Deprecated`.
+- Every claim of measured behavior cites the run/date it came from.
+  Refuted premises and honest failure findings belong in the record —
+  they are why the decision is trustworthy.
+
+| ADR | Title | Status |
+|---|---|---|
+| [0001](0001-record-architecture-decisions.md) | Record architecture decisions | Accepted |
+| [0002](0002-push-based-vectorized-execution.md) | Push-based vectorized execution with selection vectors | Accepted |
+| [0003](0003-recursive-descent-parser.md) | Hand-written recursive-descent SQL parser | Accepted |
+| [0004](0004-stage-dag-with-streaming-exchange.md) | Stage-DAG execution: durable materialization with a streaming-exchange overlay | Accepted |
+| [0005](0005-split-control-and-data-plane.md) | NATS control plane, gRPC data plane | Accepted |
+| [0006](0006-never-oom-memory-model.md) | Never-OOM memory: shared pool, ownership ledger, spill-everywhere | Accepted |
+| [0007](0007-shuffle-durability-policy.md) | Shuffle durability is a policy spectrum; eager stays the default | Accepted |
+| [0008](0008-task-placement-policy.md) | Task placement: eager reservation → input locality → memory binpack → round-robin, under a same-batch anti-clump cap | Accepted |
+| [0009](0009-worker-scratch-lifecycle.md) | Worker scratch lifecycle: adopt-into-cache, paced asynchronous purge | Accepted |
+| [0010](0010-shuffle-wire-formats.md) | WSHF/WSHC shuffle formats and where compression happens | Accepted |
+| [0011](0011-performance-measurement-methodology.md) | Performance measurement methodology at SF100 | Accepted |

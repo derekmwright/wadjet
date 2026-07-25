@@ -8,6 +8,7 @@ Wadjet is an analytical query engine written in Go, inspired by systems like Duc
 |-------|-------------|
 | [Getting Started](getting-started.md) | Installation, first table, first query |
 | [Architecture](architecture.md) | System internals, execution model, data flow |
+| [ADRs](adr/README.md) | Architecture decision records — what's settled, what it beat, and the evidence |
 | [Configuration](configuration.md) | YAML config, environment variables, CLI flags |
 | [Data Types](data-types.md) | Supported column types including network primitives |
 | [Ingestion](ingestion.md) | Writing data: micro-batch accumulator, partitioning, Bento pipelines |
