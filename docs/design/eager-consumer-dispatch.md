@@ -560,6 +560,50 @@ final_aggregate-6) and aggregate-10 cascades as a C1 consumer of
 join-9 — three eager stages deep, rows identical
 (TestEagerComputeProducerE2E).
 
+### §14.1 Clean-window SF100 pair (2026-07-26): neutral ex-Q18, one
+### blocking wedge — flag stays OFF
+
+Pair: control results/20260726-103757 vs treatment
+results/20260726-111531 (same binary 65f7604, same morning window,
+fresh cluster per arm, clean catalog after the #278 tripling incident,
+treatment WADJET_EAGER_DISPATCH=1 + WADJET_EAGER_MIN_TAIL_SECONDS=3).
+Rows 44/44 identical — the clearance/manifest/fencing mechanism is
+correctness-clean at SF100 under real engagement (clearances incl. a
+chained_joins=1 fused chain and C1 finals; governed waves; activation-
+gated publication).
+
+- Suite steady: control 544.7s vs treatment 869.4s (+59.6%) — but the
+  ENTIRE delta is Q18: 54.9s → 379.6s steady (447.2s cold). Excluding
+  Q18 both arms are 489.8s — exactly neutral, wins ≈ taxes:
+  wins Q16 −59% Q12 −57% Q19 −56% Q22 −53% Q14 −36% Q21 −23%;
+  taxes Q15 +111% Q13 +86% Q11 +74% Q07 +27% Q20 +23%. Same
+  conditional-convergence economics as §10, now at floor 3s (44
+  clearance decisions; single pair, control steady sat high in its
+  variance band — per-query deltas are indicative, not conclusive).
+- Q18 WEDGE (blocking): join-8 (cleared, chained) span 137s vs ~25s;
+  then final_aggregate-19 — which DECLINED at the floor and ran the
+  barrier path — had all 3 merge tasks idle ~192s before doing 3.8s of
+  work (fragment phases: elapsed 195.8s, src 3.8s, ops 0, sink 0;
+  "task progress idle; stopping AckWait extension idle_for=1m57s" on
+  all 3 workers; worker pool drained slowly 5.8→2.9 GB across the
+  stall; no retries, no fencing errors, self-resolves). The stall
+  survives the query's own clearance decisions — some resource or
+  publication path held by the earlier eager stages drains on a
+  minutes-scale timer. Root cause unknown; needs a local repro
+  (the A3 e2e's 21s toy-scale stall is the likely small sibling).
+- Side observation: the #277 fused-chain panic (6 hits in the control
+  arm) did NOT occur once in the treatment arm — consistent with its
+  timing-dependence.
+
+VERDICT: --eager-dispatch stays default OFF. Preconditions for the
+next pair: (1) root-cause and fix the Q18 wedge locally; (2) re-pair
+(and per ADR-0011 run ≥2 pairs before believing per-query deltas).
+The win population is real but currently cancelled by the tax
+population even at floor 3 — if the wedge fix doesn't also shift the
+economics, the revival needs the per-edge spread gate sharpened
+(clear only edges whose §13 measured class converts) rather than a
+global floor.
+
 Known v1 constraints for the re-pair:
 - eagerStageSlot cap=1 serializes cascading clearances (a producer
   that itself cleared holds the slot until its stage completes, so its
