@@ -293,17 +293,35 @@ func (f *eagerFeed) eagerInputForTask(w, numTasks int) distributed.EagerInput {
 }
 
 // refreshEagerReplay swaps each eager alias's Replay list for the feed's
-// current snapshot before a retry re-dispatch. Builds a fresh map (never
-// mutates the retrier's stored copy — Observe and RetryStuck may republish
-// concurrently). No-op for tasks without eager inputs.
-func refreshEagerReplay(t *distributed.Task, inputs map[string]StageOutput) {
+// current snapshot before a retry or governed-wave re-dispatch. Builds a
+// fresh map (never mutates the retrier's stored copy — Observe and
+// RetryStuck may republish concurrently). No-op for tasks without eager
+// inputs.
+//
+// Task.EagerInputs is keyed by ALIAS (eagerAliasForDep: "probe"/build
+// alias for joins, dep ID for single-input consumers) while the stage's
+// inputs map is keyed by DEP ID — so the feed must be resolved through
+// eagerAliasForDep, not by indexing inputs with the alias. The original
+// alias-indexed lookup silently missed for every join consumer: late
+// governed-wave tasks shipped their stale build-time Replay, lost every
+// manifest published between clearance and their publish (before their
+// subscription existed), and stalled one full republisher tick per wave
+// — the §14.1 wave-quantization signature (3.0s beats in the A3 e2e;
+// Q18 join-8 137s vs ~25s at SF100).
+func refreshEagerReplay(t *distributed.Task, stage physical.Stage, inputs map[string]StageOutput) {
 	if len(t.EagerInputs) == 0 {
 		return
 	}
+	feedByAlias := make(map[string]*eagerFeed, len(t.EagerInputs))
+	for depID, in := range inputs {
+		if in.eager != nil {
+			feedByAlias[eagerAliasForDep(stage, depID)] = in.eager
+		}
+	}
 	fresh := make(map[string]distributed.EagerInput, len(t.EagerInputs))
 	for alias, ei := range t.EagerInputs {
-		if in, ok := inputs[alias]; ok && in.eager != nil {
-			ei.Replay = in.eager.replaySnapshot()
+		if f, ok := feedByAlias[alias]; ok {
+			ei.Replay = f.replaySnapshot()
 		}
 		fresh[alias] = ei
 	}

@@ -135,9 +135,11 @@ func TestEagerInputRangesMatchFrozenBinding(t *testing.T) {
 }
 
 func TestRefreshEagerReplay(t *testing.T) {
+	// C1 single-input consumer: alias == dep ID.
 	f := newEagerFeed()
 	f.dispatch("root", "st", []string{"t1", "t2"}, 3, 1)
 	inputs := map[string]StageOutput{"dep-1": f.provisionalOutput()}
+	c1Stage := physical.Stage{Type: "final_aggregate", Dependencies: []string{"dep-1"}}
 
 	task := distributed.Task{
 		EagerInputs: map[string]distributed.EagerInput{
@@ -148,7 +150,7 @@ func TestRefreshEagerReplay(t *testing.T) {
 	f.appendReplay(distributed.ProducerTaskManifest{TaskID: "t1", Attempt: 1})
 
 	refreshed := task
-	refreshEagerReplay(&refreshed, inputs)
+	refreshEagerReplay(&refreshed, c1Stage, inputs)
 	if got := len(refreshed.EagerInputs["dep-1"].Replay); got != 1 {
 		t.Fatalf("refreshed replay: got %d manifests, want 1", got)
 	}
@@ -161,9 +163,51 @@ func TestRefreshEagerReplay(t *testing.T) {
 	noFeed := distributed.Task{EagerInputs: map[string]distributed.EagerInput{
 		"other": {StageID: "x"},
 	}}
-	refreshEagerReplay(&noFeed, inputs)
+	refreshEagerReplay(&noFeed, c1Stage, inputs)
 	if noFeed.EagerInputs["other"].StageID != "x" {
 		t.Fatal("non-feed alias must pass through")
+	}
+}
+
+// TestRefreshEagerReplayJoinAliases is the §14.1 wave-quantization
+// regression: a join consumer's EagerInputs are keyed by probe/build
+// ALIAS while the stage inputs map is keyed by DEP ID. The refresh must
+// resolve feeds through eagerAliasForDep — the original alias-indexed
+// lookup silently missed for every join, so governed-wave tasks shipped
+// stale build-time Replay lists and stalled one republisher tick per
+// wave (3.0s beats in the A3 e2e; Q18 join-8 137s vs ~25s at SF100).
+func TestRefreshEagerReplayJoinAliases(t *testing.T) {
+	probe, build := newEagerFeed(), newEagerFeed()
+	probe.dispatch("root", "p", []string{"p1", "p2"}, 24, 3)
+	build.dispatch("root", "b", []string{"b1"}, 24, 3)
+	joinStage := physical.Stage{
+		Type:            physical.StageHashJoin,
+		Dependencies:    []string{"ex-probe", "ex-build"},
+		LeftDepStage:    "ex-probe",
+		RightDepStage:   "ex-build",
+		BuildTableAlias: "orders",
+	}
+	inputs := map[string]StageOutput{
+		"ex-probe": probe.provisionalOutput(),
+		"ex-build": build.provisionalOutput(),
+	}
+	task := distributed.Task{
+		EagerInputs: map[string]distributed.EagerInput{
+			"probe":  probe.eagerInputForTask(0, 3),
+			"orders": build.eagerInputForTask(0, 3),
+		},
+	}
+	// Manifests land after the task was built (the governed-wave window).
+	probe.appendReplay(distributed.ProducerTaskManifest{TaskID: "p1", Attempt: 1})
+	probe.appendReplay(distributed.ProducerTaskManifest{TaskID: "p2", Attempt: 1})
+	build.appendReplay(distributed.ProducerTaskManifest{TaskID: "b1", Attempt: 1})
+
+	refreshEagerReplay(&task, joinStage, inputs)
+	if got := len(task.EagerInputs["probe"].Replay); got != 2 {
+		t.Fatalf("probe alias replay not refreshed: got %d manifests, want 2", got)
+	}
+	if got := len(task.EagerInputs["orders"].Replay); got != 1 {
+		t.Fatalf("build alias replay not refreshed: got %d manifests, want 1", got)
 	}
 }
 

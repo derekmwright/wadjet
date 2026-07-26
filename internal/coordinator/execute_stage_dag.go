@@ -2599,7 +2599,7 @@ func (c *Coordinator) dispatchComputeStage(
 		// for manifests published since the original build (fencing
 		// recovery depends on the retry seeing the stable attempt set
 		// promptly). Refresh from the feed at re-dispatch.
-		refreshEagerReplay(&t, inputs)
+		refreshEagerReplay(&t, stage, inputs)
 		if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
 			c.logger.Error("task retry publish failed",
 				"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
@@ -2656,7 +2656,7 @@ func (c *Coordinator) dispatchComputeStage(
 			// Late-wave tasks get a current Replay snapshot — their
 			// original one was taken at task build, before earlier waves'
 			// producers reported.
-			refreshEagerReplay(&t, inputs)
+			refreshEagerReplay(&t, stage, inputs)
 			if pubErr := c.scheduler.PublishTasks(ctx, []distributed.Task{t}); pubErr != nil {
 				c.logger.Error("eager wave publish failed",
 					"stage_id", stage.ID, "task_id", t.ID, "error", pubErr)
