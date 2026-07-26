@@ -604,6 +604,33 @@ economics, the revival needs the per-edge spread gate sharpened
 (clear only edges whose §13 measured class converts) rather than a
 global floor.
 
+### §14.2 Pair 2 (2026-07-26 afternoon, binary 1a72f0e with the
+### replay-alias fix): wave taxes gone, Q18 steady crawl is THE blocker
+
+Pair: control results/20260726-122025 (steady 415.0s — fastest
+flag-off suite recorded) vs treatment results/20260726-134212
+(eager=1 floor=3). Rows 44/44 identical again.
+
+- The §14.1 tax population COLLAPSED with the replay fix: Q13 +86%→−3%,
+  Q11 +74%→−33%, Q15 +111%→−47%. Wins held or grew: Q16 −52%, Q15 −47%,
+  Q04 −42%, Q11 −33%. New modest taxes: Q07 +37%, Q17 +31%, Q05 +30%,
+  Q02/Q06/Q01 +20-30% (small queries), Q22 +107% (3.9→8.1s).
+- STEADY ex-Q18: control 369.1s vs treatment 388.7s (+5.3%) — flat to
+  slightly negative. COLD: +2.5% (Q18 cold behaved!).
+- Q18 STEADY: 46.0 → 475.8s (+935%) — the residual crawl reproduced
+  2/2 pairs and is now STEADY-ONLY + flag-on-only. Combined §14.1
+  evidence: merge/join tasks read ~1 file per 20s on otherwise-idle
+  workers, in cleared AND declined modes, phase counters near zero
+  (block outside timed sections). This single query is the entire
+  blocker; ex-Q18 the flag is a wash pending edge-class gating.
+
+VERDICT unchanged: flag stays OFF. The one prerequisite for any
+further pairing is root-causing the Q18 steady crawl — now known to
+need warm/steady cluster state plus the flag, pointing at state
+carried from the cold pass (feed/republisher lifecycle, peer-hint or
+upload-queue interactions) rather than the clearance decisions
+themselves. Investigation is local-first (EC2 freeze until August).
+
 Known v1 constraints for the re-pair:
 - eagerStageSlot cap=1 serializes cascading clearances (a producer
   that itself cleared holds the slot until its stage completes, so its
