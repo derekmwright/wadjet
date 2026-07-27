@@ -577,19 +577,36 @@ func (h *HashAggregate) Init(_ context.Context) error {
 func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// A rows-but-no-columns batch cannot legally reach a grouped or
-	// column-consuming aggregate: the rows it claims to carry have no key
-	// or input values, so neither consuming (index panic — the #277 Q18
-	// fused-chain signature) nor skipping (silent row loss) is sound.
-	// COUNT(*)-only ungrouped aggregates are exempt (they count rows
-	// without reading columns). Fail the task with a structured error;
-	// the coordinator's retry is the recovery path, and the message
-	// identifies the shape for the producing-operator diagnostic in the
-	// fragment runner.
-	if len(b.Columns) == 0 && b.ActiveLen() > 0 {
-		needsColumns := len(h.GroupByCols) > 0 || h.GroupByAll
+	// Zero-column batches (#277, the Q18 fused-chain breaker panic —
+	// SF100 stacks show duration=0s tasks dying on their FIRST batch, a
+	// 0-row 0-column one, in consumeBatch's updater-selection loop which
+	// indexes b.Columns regardless of row count):
+	//   - EMPTY (no active rows): a no-op by definition — nothing to key,
+	//     nothing to accumulate, nothing to learn. Skip. The
+	//     flushSpilledOps drain path feeds Consume without an ActiveLen
+	//     gate, so empties DO arrive here.
+	//   - rows WITHOUT columns: the claimed rows have no key or input
+	//     values, so neither consuming (index panic) nor skipping (silent
+	//     row loss) is sound — fail with a structured error unless the
+	//     aggregate provably needs no columns (COUNT(*)-only ungrouped).
+	//     "Needs columns" must consult resolved state too: CloneSink
+	//     copies resolution, so a clone can hold live column indices
+	//     while its spec fields alone look column-free.
+	if len(b.Columns) == 0 {
+		if b.ActiveLen() == 0 {
+			return nil
+		}
+		needsColumns := len(h.GroupByCols) > 0 || h.GroupByAll ||
+			h.useIntGroupKey || h.useDualIntGroupKey || h.useCompactGroupKey ||
+			h.useStrGroupKey || h.useGenericSoA
 		for _, a := range h.Aggs {
 			if a.InputCol != "" {
+				needsColumns = true
+				break
+			}
+		}
+		for _, ci := range h.aggColIdx {
+			if ci >= 0 {
 				needsColumns = true
 				break
 			}

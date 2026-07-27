@@ -37,3 +37,20 @@ func TestHashAggregateZeroColumnBatch(t *testing.T) {
 		t.Fatalf("COUNT(*) over a schemaless batch must keep working: %v", err)
 	}
 }
+
+// The SF100 stacks showed the actual triggering shape: a completely EMPTY
+// batch (0 rows, 0 columns) — the flushSpilledOps drain path feeds Consume
+// without an ActiveLen gate. Empties are no-ops: no error, no panic, and
+// no effect on state.
+func TestHashAggregateEmptyBatchNoOp(t *testing.T) {
+	agg := &HashAggregate{
+		GroupByCols: []string{"k"},
+		Aggs:        []AggColumn{{Func: AggSum, InputCol: "v", OutputCol: "s"}},
+	}
+	if err := agg.Init(context.Background()); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if err := agg.Consume(context.Background(), &batch.RecordBatch{}); err != nil {
+		t.Fatalf("empty batch must be a no-op, got %v", err)
+	}
+}
