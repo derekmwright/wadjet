@@ -211,3 +211,24 @@ func TestManifestSource_DuplicatesUnknownsHints(t *testing.T) {
 		t.Fatal("out-of-range file must not be hinted")
 	}
 }
+
+// TestEagerInputForFilePrecedence pins the §14.2 alias-collision rule:
+// an alias resolves to its manifest feed ONLY when the spec carries no
+// frozen files. A fused chain's op that reuses the primary build's alias
+// string while carrying REAL BuildFiles must read those files — routing
+// it to the primary's feed built the chained semi-join over the entire
+// primary build side (Q18: 70 -> 100 rows, LIMIT-masked value corruption).
+func TestEagerInputForFilePrecedence(t *testing.T) {
+	task := distributed.Task{EagerInputs: map[string]distributed.EagerInput{
+		"build": {StageID: "p", ProducerTaskIDs: []string{"t1"}},
+	}}
+	if _, ok := eagerInputFor(task, "build", nil); !ok {
+		t.Fatal("empty file list + registered alias must resolve to the feed")
+	}
+	if _, ok := eagerInputFor(task, "build", []string{"queries/q/s/f.wshf"}); ok {
+		t.Fatal("real frozen files must take precedence over an alias-matched feed")
+	}
+	if _, ok := eagerInputFor(task, "other", nil); ok {
+		t.Fatal("unregistered alias must not resolve")
+	}
+}

@@ -1878,8 +1878,12 @@ func (e *Executor) buildFragmentSource(task distributed.Task, spec distributed.O
 	// Eager consumer dispatch: an alias registered in task.EagerInputs is
 	// fed by producer-task manifests instead of a frozen file list
 	// (docs/design/eager-consumer-dispatch.md §3.2). InputFiles is empty
-	// by construction for these aliases.
-	if eager, ok := task.EagerInputs[spec.InputAlias]; ok {
+	// by construction for these aliases — which is also the guard: a spec
+	// carrying REAL files must never be rerouted to a feed, even when its
+	// alias string collides with an eager alias (a fused chain's op reusing
+	// the primary build's alias hijacked the primary's manifest feed and
+	// turned the chained semi-join into a pass-through — Q18 §14.2).
+	if eager, ok := eagerInputFor(task, spec.InputAlias, spec.InputFiles); ok {
 		return newManifestStreamSource(e, task.QueryID, bucket, eager), nil
 	}
 	if len(spec.InputFiles) == 0 {
@@ -1939,6 +1943,20 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 	}
 }
 
+// eagerInputFor resolves an alias to its manifest feed ONLY when the spec
+// carries no frozen files. Eager-fed aliases have empty file lists by
+// construction (the file set streams in as manifests), so non-empty files
+// are proof the spec was built from real completed outputs — an alias
+// string that happens to match an EagerInputs key (fused-chain ops reuse
+// build alias names) must not reroute those reads to a feed.
+func eagerInputFor(task distributed.Task, alias string, frozenFiles []string) (distributed.EagerInput, bool) {
+	if len(frozenFiles) > 0 {
+		return distributed.EagerInput{}, false
+	}
+	ei, ok := task.EagerInputs[alias]
+	return ei, ok
+}
+
 func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.Task, spec distributed.OpSpec) ([]exec.UnaryOperator, func(), error) {
 	if len(spec.LeftKeys) == 0 || len(spec.RightKeys) == 0 {
 		return nil, nil, fmt.Errorf("hash_join_probe: LeftKeys and RightKeys required")
@@ -1947,8 +1965,14 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 	// is fed by producer-task manifests — its BuildFiles is empty BY
 	// CONSTRUCTION, so the empty-build short-circuit below must not fire
 	// (it silently emitted zero join rows, the build-side twin of the
-	// executeFragment empty-InputFiles bug the C1 e2e caught).
-	eagerBuild, buildIsEager := task.EagerInputs[spec.BuildAlias]
+	// executeFragment empty-InputFiles bug the C1 e2e caught). The empty-
+	// by-construction property is also the eligibility guard (eagerInputFor):
+	// a chained op carrying REAL BuildFiles whose alias collides with the
+	// primary build's eager alias must use its files — routing it to the
+	// primary's manifest feed built the chained semi-join over the ENTIRE
+	// primary build side and made it a pass-through (Q18 §14.2: 70 → 100
+	// rows via LIMIT-masked value corruption).
+	eagerBuild, buildIsEager := eagerInputFor(task, spec.BuildAlias, spec.BuildFiles)
 	if len(spec.BuildFiles) == 0 && !buildIsEager {
 		// Empty build → inner/semi joins emit no rows; upstream planner may
 		// have decided this fragment should not run, but we treat empty
