@@ -307,3 +307,15 @@ All 22 TPC-H queries pass with row-count validation at SF0.01 (CI), SF10, and SF
 go test -v -run TestTPCHQueries ./benchmarks/tpch/                                    # SF0.01 correctness
 TPCH_SCALE=10 go test -v -run TestTPCHQueriesLarge -timeout 120m ./benchmarks/tpch/   # SF10 performance
 ```
+
+## License
+
+Wadjet is free and open-source software licensed under the
+[GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
+
+If the AGPL doesn't fit your use case (e.g., embedding Wadjet in a
+proprietary product), commercial licenses are available from Carolina IT
+Consulting LLC — contact licensing@citc.tech.
+
+Contributions are accepted under the [CLA](CLA.md); see
+[CONTRIBUTING.md](CONTRIBUTING.md).

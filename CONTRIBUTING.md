@@ -91,8 +91,9 @@ Commits made before 2026-07-27 may carry a
 `Co-Authored-By: Claude <noreply@anthropic.com>` (or similar) trailer.
 That trailer was an automated default of the commit tooling. It asserts
 no authorship claim by any non-human entity, and it does not name a
-contributor for CLA or licensing purposes. All rights in this repository
-vest in Carolina IT Consulting LLC per the [license](LICENSE).
+contributor for CLA or licensing purposes. The project is distributed
+under the terms in [LICENSE](LICENSE); contributions are licensed to
+Carolina IT Consulting LLC under the [CLA](CLA.md).
 
 ## Reporting Issues
 
