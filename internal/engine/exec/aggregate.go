@@ -577,6 +577,28 @@ func (h *HashAggregate) Init(_ context.Context) error {
 func (h *HashAggregate) Consume(_ context.Context, b *batch.RecordBatch) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// A rows-but-no-columns batch cannot legally reach a grouped or
+	// column-consuming aggregate: the rows it claims to carry have no key
+	// or input values, so neither consuming (index panic — the #277 Q18
+	// fused-chain signature) nor skipping (silent row loss) is sound.
+	// COUNT(*)-only ungrouped aggregates are exempt (they count rows
+	// without reading columns). Fail the task with a structured error;
+	// the coordinator's retry is the recovery path, and the message
+	// identifies the shape for the producing-operator diagnostic in the
+	// fragment runner.
+	if len(b.Columns) == 0 && b.ActiveLen() > 0 {
+		needsColumns := len(h.GroupByCols) > 0 || h.GroupByAll
+		for _, a := range h.Aggs {
+			if a.InputCol != "" {
+				needsColumns = true
+				break
+			}
+		}
+		if needsColumns {
+			return fmt.Errorf("hash aggregate: batch with %d active rows and zero columns (sel=%v len=%d) — upstream emitted a schemaless batch (#277)",
+				b.ActiveLen(), b.Sel != nil, b.Len)
+		}
+	}
 	// Reads typed column storage directly and is fed outside the pipeline
 	// loops by the worker's multi-breaker runner — flatten at the boundary.
 	FlattenForConsumer(b, nil)

@@ -996,7 +996,7 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 	runChain := func(ctx context.Context, chain []exec.UnaryOperator, b *batch.RecordBatch) (*batch.RecordBatch, error) {
 		cur := b
 		var err error
-		for _, op := range chain {
+		for oi, op := range chain {
 			exec.FlattenForConsumer(cur, op)
 			cur, err = op.Execute(ctx, cur)
 			if err != nil {
@@ -1004,6 +1004,19 @@ func (e *Executor) runBreakerConsumeParallel(ctx context.Context, task distribut
 			}
 			if cur == nil {
 				return nil, nil
+			}
+			// #277 forensics: a rows-but-no-columns batch downstream of an
+			// operator is the panic-then-retry signature seen on Q18's
+			// fused-chain breaker at SF100. Name the producer here — the
+			// aggregate's own structured error cannot see past the sink
+			// boundary. Rate-limited by the progress logger's once-ish
+			// cadence being unnecessary: this fires at most once per task
+			// before the task errors out.
+			if len(cur.Columns) == 0 && cur.ActiveLen() > 0 {
+				e.logger.Warn("fragment op emitted schemaless batch (#277)",
+					"task_id", fp.taskID, "stage_id", fp.stageID,
+					"op_index", oi, "op_type", fmt.Sprintf("%T", op),
+					"rows", cur.ActiveLen(), "len", cur.Len, "sel", cur.Sel != nil)
 			}
 		}
 		return cur, nil
