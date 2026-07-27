@@ -631,6 +631,44 @@ carried from the cold pass (feed/republisher lifecycle, peer-hint or
 upload-queue interactions) rather than the clearance decisions
 themselves. Investigation is local-first (EC2 freeze until August).
 
+### §14.3 Q18 crawl ROOT-CAUSED and fixed (2026-07-27, 2f97f42):
+### alias-collision hijacked the primary build's manifest feed
+
+Local repro (SF1 harness, q18 ×3 on one cluster, eager + grpc,
+floor 0): Q18 returned 70 rows (correct) or 100 rows (corrupt)
+nondeterministically — 100 = LIMIT masking value corruption. The
+corrupt runs were exactly those where the fused chain (join-6,
+chained_joins=1) cleared eagerly. Stage forensics: the HAVING
+subquery final_aggregate was correct (70 keys) in every run, but the
+chained semi-join emitted ~1.5M rows (every probe row) instead of 70
+— the filter did nothing.
+
+Mechanism: buildFragmentJoinProbe resolved
+`task.EagerInputs[spec.BuildAlias]` for EVERY join-probe op. A
+chained op whose BuildTableAlias string matches the primary build's
+eager alias hijacked the PRIMARY build's manifest feed and ignored
+its own real BuildFiles — building the chained semi-join over the
+entire primary build side (every orderkey ⇒ pass-through). At SF100
+the same hijack built 15M-row hash tables per task off a blocking
+manifest stream: the 46s→380-476s Q18 steady walls in §14.1/§14.2,
+and the "declined final_aggregate-19 still stalls" observation
+(its input volume was inflated ~20,000× upstream). Both pairs'
+treatment-arm Q18 values were corrupt with row counts green — the
+row-count gate cannot catch LIMIT-masked inflation (same lesson class
+as #278; a value-checksum gate would have caught both).
+
+Fix: eager-fed aliases have EMPTY file lists by construction, so
+emptiness is the eligibility signal — `eagerInputFor` resolves an
+alias to its feed only when the spec carries no frozen files
+(fragment source + join-probe build paths). Repro went 18/18 stable;
+full SF1 suite (grpc, both flag states) row-identical. Regression:
+TestEagerInputForFilePrecedence.
+
+CONSEQUENCE FOR THE ECONOMICS: §14.1/§14.2's Q18 numbers (and pair-2's
+"ex-Q18 flat" headline, which excluded only Q18) measured a corrupted
+treatment arm wherever the chain cleared. The August pair re-measures
+on the fixed binary before any default decision.
+
 Known v1 constraints for the re-pair:
 - eagerStageSlot cap=1 serializes cascading clearances (a producer
   that itself cleared holds the slot until its stage completes, so its
