@@ -93,7 +93,7 @@ That trailer was an automated default of the commit tooling. It asserts
 no authorship claim by any non-human entity, and it does not name a
 contributor for CLA or licensing purposes. The project is distributed
 under the terms in [LICENSE](LICENSE); contributions are licensed to
-Carolina IT Consulting LLC under the [CLA](CLA.md).
+the maintainer, Derek Wright, under the [CLA](CLA.md).
 
 ## Reporting Issues
 

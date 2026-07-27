@@ -1,6 +1,6 @@
 # Contributor License Agreement
 
-Thank you for your interest in contributing to Wadjet, maintained by Carolina IT Consulting LLC (CITC) ("We" or "Us").
+Thank you for your interest in contributing to Wadjet, maintained by Derek Wright ("We" or "Us").
 
 This Contributor License Agreement ("Agreement") documents the rights granted by contributors to Us. This is a legally binding document, so please read it carefully before agreeing to it.
 

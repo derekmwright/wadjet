@@ -314,8 +314,8 @@ Wadjet is free and open-source software licensed under the
 [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0).
 
 If the AGPL doesn't fit your use case (e.g., embedding Wadjet in a
-proprietary product), commercial licenses are available from Carolina IT
-Consulting LLC — contact licensing@citc.tech.
+proprietary product), commercial licenses are available — contact
+derekmwright@gmail.com.
 
 Contributions are accepted under the [CLA](CLA.md); see
 [CONTRIBUTING.md](CONTRIBUTING.md).
