@@ -341,8 +341,34 @@ func casBackoff(attempt int) {
 	time.Sleep(base/2 + jitter)
 }
 
+// mergeFileEntries folds incoming file entries into existing ones keyed by
+// Path: an entry whose path is already present REPLACES it (last writer
+// wins, so re-adding refreshes stale size/row metadata); new paths append
+// in order. Makes AddFiles idempotent — re-running discovery over a
+// populated catalog previously APPENDED duplicate entries, tripling
+// lineitem to 189 files and silently multiplying every aggregate while
+// row-count gates stayed green (#278).
+func mergeFileEntries(existing, incoming []FileEntry) []FileEntry {
+	out := append([]FileEntry(nil), existing...)
+	byPath := make(map[string]int, len(out))
+	for i, f := range out {
+		byPath[f.Path] = i
+	}
+	for _, f := range incoming {
+		if i, ok := byPath[f.Path]; ok {
+			out[i] = f
+			continue
+		}
+		byPath[f.Path] = len(out)
+		out = append(out, f)
+	}
+	return out
+}
+
 // AddFiles adds file entries to the manifest for a given partition.
 // Uses compare-and-swap to prevent concurrent flushes from losing updates.
+// Idempotent per file path (mergeFileEntries): duplicate adds replace
+// rather than append.
 func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[string]string, partPath string, files []FileEntry) error {
 	c.invalidateManifestCache(tableName)
 	key := c.key("manifest." + tableName)
@@ -363,7 +389,7 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 		found := false
 		for i, p := range manifest.Partitions {
 			if p.Path == partPath {
-				manifest.Partitions[i].Files = append(manifest.Partitions[i].Files, files...)
+				manifest.Partitions[i].Files = mergeFileEntries(p.Files, files)
 				found = true
 				break
 			}
@@ -372,7 +398,7 @@ func (c *Catalog) AddFiles(_ context.Context, tableName string, partValues map[s
 			manifest.Partitions = append(manifest.Partitions, PartitionEntry{
 				Path:   partPath,
 				Values: partValues,
-				Files:  files,
+				Files:  mergeFileEntries(nil, files),
 			})
 		}
 

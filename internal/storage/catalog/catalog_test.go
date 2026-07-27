@@ -196,6 +196,32 @@ func TestAddFilesAndGetManifest(t *testing.T) {
 		t.Fatalf("expected 3 files after append, got %d", len(manifest.Partitions[0].Files))
 	}
 
+	// #278 regression: re-adding already-registered paths must be
+	// idempotent (replace, not append) — re-discovery over a populated
+	// catalog previously duplicated every file entry, silently
+	// multiplying scan inputs while row-count gates stayed green.
+	redisc := []FileEntry{
+		{Path: "data/region=us/part-0001.parquet", SizeBytes: 4096, NumRows: 100, CreatedAt: time.Now().UTC()},
+		{Path: "data/region=us/part-0002.parquet", SizeBytes: 2048, NumRows: 200, CreatedAt: time.Now().UTC()},
+		{Path: "data/region=us/part-0003.parquet", SizeBytes: 512, NumRows: 50, CreatedAt: time.Now().UTC()},
+	}
+	if err := cat.AddFiles(ctx, "events", partValues, "data/region=us", redisc); err != nil {
+		t.Fatalf("AddFiles (re-discovery): %v", err)
+	}
+	manifest, err = cat.GetManifest(ctx, "events")
+	if err != nil {
+		t.Fatalf("GetManifest after re-discovery: %v", err)
+	}
+	if got := len(manifest.Partitions[0].Files); got != 3 {
+		t.Fatalf("re-discovery duplicated entries: got %d files, want 3", got)
+	}
+	// Replacement refreshes metadata (last writer wins).
+	for _, f := range manifest.Partitions[0].Files {
+		if f.Path == "data/region=us/part-0001.parquet" && f.SizeBytes != 4096 {
+			t.Fatalf("re-added entry did not refresh metadata: size=%d, want 4096", f.SizeBytes)
+		}
+	}
+
 	// Add files to a different partition.
 	euFiles := []FileEntry{
 		{Path: "data/region=eu/part-0001.parquet", SizeBytes: 768, NumRows: 80, CreatedAt: time.Now().UTC()},
