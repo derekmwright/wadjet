@@ -680,3 +680,33 @@ Known v1 constraints for the re-pair:
 - Republisher cadence (3s) bounds the snapshot→subscribe heal window;
   at toy scale that dominates eager wall (the 21s A3 e2e), at SF100 it
   is noise against multi-second spreads.
+
+## 15. Pair 3 (2026-07-27, binary 9ab483d, all three eager fixes
+## aboard): CORRECT at SF100, economics flat — flag stays OFF
+
+Control results/20260727-202225 vs treatment results/20260727-231051
+(fresh cluster per arm, eager=1 floor=3; arms ~2.5h apart — a
+monitoring lapse, noted for window-noise interpretation). The first
+pair ever validated at the VALUE level.
+
+- CORRECTNESS: rows 44/44 identical AND all 42 captured value
+  signatures identical within 1e-6 — the eager path (C1, C2, chained
+  A2, compute-producer A3, governed waves, activation-gated
+  publication) is byte-equivalent to the barrier at SF100.
+- Q18 CRAWL DEAD: steady 58.0s vs 380-476s in §14.1/§14.2 (+22% vs
+  control, inside the noisy band below).
+- ECONOMICS: cold 469.5→459.2s (−2.2%); steady 453.4→490.6s (+8.2%).
+  Per-query steady deltas are noise-dominated: Q01 (+80%, ZERO eager
+  stages) bounds the window noise; the large "taxes" are small
+  queries (Q15/Q16/Q22/Q14/Q12, all <16s absolute); real wins persist
+  (Q17 −34%, Q07 −22%, Q08 −16%, Q05 −15%).
+
+VERDICT: --eager-dispatch stays default OFF. The mechanism is proven
+correct and safe; a GLOBAL tail floor does not convert — wins and
+taxes cancel at every floor tried (0, 3, 12 across four arms). The
+one remaining revival idea is per-edge class gating (clear only the
+§13 converting classes); it needs a design pass and one A/B, and is
+not scheduled. The arc's durable outputs: three real bugs found and
+fixed (replay-alias, feed-hijack, empty-batch panic), catalog
+idempotency (#278), and the value-signature gate now guarding every
+future benchmark run.
