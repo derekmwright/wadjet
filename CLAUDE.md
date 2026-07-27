@@ -137,6 +137,11 @@ Use [Conventional Commits](https://www.conventionalcommits.org/):
 [optional footer(s)]
 ```
 
+**Sign-off required:** commit with `git commit -s` so every commit carries a
+`Signed-off-by:` trailer (the CLA consent mechanism — see CLA.md §6).
+Do NOT add `Co-Authored-By` trailers naming AI tools: the human committer
+is the sole author (see CONTRIBUTING.md, "AI-Assisted Development").
+
 **Types:** `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`
 
 **Scopes:** `planner`, `engine`, `exec`, `expr`, `batch`, `scan`, `storage`, `parquet`, `catalog`, `pgwire`, `auth`, `worker`, `coordinator`, `ingest`, `iceberg`, `embedding`, `tpch`

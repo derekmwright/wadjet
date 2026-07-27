@@ -79,6 +79,21 @@ By submitting a contribution, you agree to the [CLA](CLA.md). Include the follow
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
+## AI-Assisted Development
+
+AI coding tools are used in this project as tools, under human direction
+and review. The human committer is the sole author of each contribution
+and the sole signatory under the [CLA](CLA.md); an AI tool is not an
+author, co-author, or contributor and cannot sign the CLA or grant any
+license.
+
+Commits made before 2026-07-27 may carry a
+`Co-Authored-By: Claude <noreply@anthropic.com>` (or similar) trailer.
+That trailer was an automated default of the commit tooling. It asserts
+no authorship claim by any non-human entity, and it does not name a
+contributor for CLA or licensing purposes. All rights in this repository
+vest in Carolina IT Consulting LLC per the [license](LICENSE).
+
 ## Reporting Issues
 
 Use the [issue templates](https://github.com/citc-tech/wadjet/issues/new/choose) for bug reports and feature requests. Include reproduction steps and expected vs actual behavior.

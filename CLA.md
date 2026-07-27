@@ -39,6 +39,8 @@ You represent that:
 - Each Contribution is Your original creation.
 - Your Contribution does not include any third-party code unless clearly identified and licensed under terms compatible with this Agreement.
 
+Use of AI coding tools does not affect these representations: the human contributor is the sole author and sole signatory (see [CONTRIBUTING.md, "AI-Assisted Development"](CONTRIBUTING.md#ai-assisted-development)).
+
 ## 5. Support and Warranty Disclaimer
 
 Your Contributions are provided on an "AS IS" basis, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
