@@ -28,6 +28,12 @@ type QueryBaseline struct {
 	SpillTolerancePct      float64 `json:"spill_tolerance_pct"`
 	RowCount               int64   `json:"row_count"`
 	RowChecksum            string  `json:"row_checksum"`
+	// ValueSig is the canonical per-column numeric-sum signature
+	// (valuesig.go), compared with ValueSigRelTol relative tolerance —
+	// unlike RowChecksum it is order-insensitive and float-wobble-proof,
+	// so it can gate VALUES (the #278 / eager-§14.3 corruption class that
+	// row counts cannot see). Empty = not gated.
+	ValueSig string `json:"value_sig,omitempty"`
 }
 
 // Projection maps a local-mode metric to the equivalent golden-mode value
@@ -128,6 +134,16 @@ func (bf *BaselineFile) Compare(m QueryMeasurement) []QueryDelta {
 			Metric: "row_checksum",
 			Status: "REGRESS",
 		})
+	}
+	if qb.ValueSig != "" {
+		if ok, detail := CompareValueSigs(qb.ValueSig, m.ValueSig, ValueSigRelTol); !ok {
+			out = append(out, QueryDelta{
+				Query:  m.Query,
+				Metric: "value_signature",
+				Status: "REGRESS",
+				Detail: detail,
+			})
+		}
 	}
 	return out
 }

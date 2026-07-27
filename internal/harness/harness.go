@@ -363,12 +363,14 @@ func runOneQuery(
 	defer rows.Close()
 
 	hash := sha256.New()
+	var vsig ValueSigAccum
 	var rowCount int64
 	for rows.Next() {
 		vals, err := rows.Values()
 		if err != nil {
 			return collector.EndWindow(name), err
 		}
+		vsig.AddVals(vals)
 		fmt.Fprintf(hash, "%v\n", vals)
 		rowCount++
 	}
@@ -387,6 +389,7 @@ func runOneQuery(
 	m := collector.EndWindow(name)
 	m.RowCount = rowCount
 	m.RowChecksum = hex.EncodeToString(hash.Sum(nil))
+	m.ValueSig = vsig.Signature()
 	return m, nil
 }
 

@@ -33,6 +33,7 @@ import (
 	"github.com/citc-tech/wadjet/internal/dataplane"
 	distrib "github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/engine/memory"
+	"github.com/citc-tech/wadjet/internal/harness"
 	"github.com/citc-tech/wadjet/internal/planner/logical"
 	"github.com/citc-tech/wadjet/internal/storage/catalog"
 	"github.com/citc-tech/wadjet/internal/storage/ingest"
@@ -236,7 +237,7 @@ func main() {
 			// Coordinator only handles inline results (<256KB); large
 			// results stay on S3 and are counted without reading bytes.
 			expectedWorkers := *workers
-			qf = func(ctx context.Context, sql string) (int64, error) {
+			qf = func(ctx context.Context, sql string) (int64, string, error) {
 				// Wait for workers to recover if previous query crashed them.
 				for retries := 0; retries < 30 && coord.Workers().Count() < expectedWorkers; retries++ {
 					if retries == 0 {
@@ -246,19 +247,59 @@ func main() {
 				}
 				r, err := coord.ExecuteSQL(ctx, sql)
 				if err != nil {
-					return 0, err
+					return 0, "", err
 				}
-				r.Close() // row count only; release batches / spill stream
-				return r.TotalRows, nil
+				// Drain the result batches through the value-signature
+				// accumulator (result sets are ≤ ~100k rows; the cost is
+				// noise next to query execution), then release.
+				var vsig harness.ValueSigAccum
+				stream := r.Stream()
+				for {
+					b, serr := stream.Next(ctx)
+					if serr != nil || b == nil {
+						break
+					}
+					for row := 0; row < b.ActiveLen(); row++ {
+						phys := row
+						if b.Sel != nil {
+							phys = int(b.Sel[row])
+						}
+						for col, vec := range b.Columns {
+							if v, ok := vec.GetNumericFloat64(phys); ok {
+								vsig.AddFloat(col, v)
+							}
+						}
+					}
+				}
+				stream.Close()
+				r.Close()
+				return r.TotalRows, vsig.Signature(), nil
 			}
 		} else {
 			// Standalone: local execution
-			qf = func(ctx context.Context, sql string) (int64, error) {
+			qf = func(ctx context.Context, sql string) (int64, string, error) {
 				r, err := db.Query(ctx, sql)
 				if err != nil {
-					return 0, err
+					return 0, "", err
 				}
-				return int64(len(r.Rows)), nil
+				// Rows are maps; feed values in sorted-key order so column
+				// indices are stable across runs.
+				var vsig harness.ValueSigAccum
+				var keys []string
+				for _, row := range r.Rows {
+					if keys == nil {
+						for k := range row {
+							keys = append(keys, k)
+						}
+						sort.Strings(keys)
+					}
+					vals := make([]any, len(keys))
+					for i, k := range keys {
+						vals[i] = row[k]
+					}
+					vsig.AddVals(vals)
+				}
+				return int64(len(r.Rows)), vsig.Signature(), nil
 			}
 		}
 		// Parse skip-queries flag
@@ -311,7 +352,12 @@ func main() {
 }
 
 // queryFn executes a SQL query and returns (row count, error).
-type queryFn func(ctx context.Context, sql string) (int64, error)
+// queryFn executes one query, returning its row count and the canonical
+// value signature (harness.ValueSigAccum over the result's numeric
+// columns; "" when the result wasn't materialized). The signature makes
+// arm-to-arm VALUE comparison possible from benchmark logs alone — the
+// #278 / eager-§14.3 corruption class passed row-count gates green.
+type queryFn func(ctx context.Context, sql string) (int64, string, error)
 
 func setupStandalone(ctx context.Context) *wadjet.DB {
 	store := objstore.NewMemStore()
@@ -839,7 +885,7 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 			}
 
 			start := time.Now()
-			rowCount, err := qf(qCtx, q.SQL)
+			rowCount, vsig, err := qf(qCtx, q.SQL)
 			elapsed := time.Since(start)
 
 			// Force GC to collect previous query's result batches before
@@ -880,6 +926,13 @@ func runBenchmark(ctx context.Context, qf queryFn, sf tpch.ScaleFactor, runs int
 			fmt.Printf("Q%02d %-30s %8s  %5d rows  heap %+4dMB  gc %4.1fms  %s\n",
 				qNum, q.Name, elapsed.Round(time.Millisecond), r.Rows,
 				r.DeltaMB, float64(gcPause)/1e6, status)
+			// Canonical value signature: grep-able per query so two arms'
+			// logs can be diffed VALUE-to-value (harness.CompareValueSigs
+			// tolerance semantics). Empty when the result carried no
+			// numeric columns or wasn't materialized.
+			if vsig != "" {
+				fmt.Printf("Q%02d vsig %s\n", qNum, vsig)
+			}
 		}
 
 		// Summary

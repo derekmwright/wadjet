@@ -88,6 +88,7 @@ type QueryMeasurement struct {
 	SpillBytes    int64     `json:"spill_bytes"`
 	RowCount      int64     `json:"row_count"`
 	RowChecksum   string    `json:"row_checksum"`
+	ValueSig      string    `json:"value_sig,omitempty"`
 	GoroutinePeak int       `json:"goroutine_peak"`
 	Hung          bool      `json:"hung"`
 	HangDumpPath  string    `json:"hang_dump_path,omitempty"`
@@ -103,6 +104,9 @@ type QueryDelta struct {
 	DriftPct     float64 `json:"drift_pct"`
 	TolerancePct float64 `json:"tolerance_pct"`
 	Status       string  `json:"status"` // "PASS", "REGRESS"
+	// Detail carries non-scalar divergence context (e.g. which value-
+	// signature column diverged and by how much).
+	Detail string `json:"detail,omitempty"`
 }
 
 // RunResult is the top-level structured output written to the result JSON.
