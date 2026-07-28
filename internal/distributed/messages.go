@@ -309,6 +309,7 @@ const (
 
 	// Unary transforms (middle of the pipeline; zero or more).
 	OpFilter         OpType = "filter"          // FilterExprs predicate chain
+	OpColumnPrune    OpType = "column_prune"    // drop columns not in OutputColumns (exec.ColumnPrune, zero-copy)
 	OpHashJoinProbe  OpType = "hash_join_probe" // shuffle-side hash join: build from BuildFiles, probe upstream
 	OpBroadcastProbe OpType = "broadcast_probe" // broadcast hash join: small build replicated to every task
 	OpSortMergeJoin  OpType = "sort_merge_join" // big-vs-big inner join: both sides sort to runs, two-cursor merge (pipeline-breaker)

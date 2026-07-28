@@ -1870,6 +1870,17 @@ func (c *Coordinator) dispatchScanFilterStage(
 		if op, ok := projectOpFromSpecs(stage.ProjectExprs); ok {
 			t.Operators = append(t.Operators, op)
 		}
+		// Scan-output projection (pruneScanOutputColumns): read the full
+		// Columns set (pushed filters need it), ship only what consumers
+		// declared. Placed after filters/projections, before the sink, so
+		// the whole pipeline sees the full schema and only the payload
+		// narrows.
+		if len(stage.OutputColumns) > 0 {
+			t.Operators = append(t.Operators, distributed.OpSpec{
+				Type:          distributed.OpColumnPrune,
+				OutputColumns: append([]string(nil), stage.OutputColumns...),
+			})
+		}
 		if fuseShuffle {
 			t.Operators = append(t.Operators, distributed.OpSpec{
 				Type:          distributed.OpExchangeSender,

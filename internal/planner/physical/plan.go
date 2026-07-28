@@ -48,6 +48,14 @@ type Stage struct {
 	TableName       string
 	ScanAlias       string // unique scan identity: "table" or "table:N" for Nth duplicate
 	Columns         []string
+	// OutputColumns, when non-empty, narrows the stage's EMITTED columns
+	// to this set (worker inserts a zero-copy ColumnPrune before the
+	// sink). Columns stays the READ set — a scan must read its pushed
+	// filter columns but must not ship them: Q13's orders scan read
+	// o_comment for the NOT LIKE and then materialized+shuffled it,
+	// 68.8 B/row where 16 were consumed (~16 GB excess at SF100).
+	// Set by pruneScanOutputColumns from consumer declarations.
+	OutputColumns   []string
 	PartitionFilter map[string]string
 	ScanFiles       []string // files to distribute across scan tasks
 	FilterExprs     []string // SQL filter expressions pushed down to scan
@@ -1853,6 +1861,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// unchanged), unlike the disabled fuseScanShuffle/fuseJoinShuffle
 		// below. Kill switch WADJET_STAGE_FUSION=0.
 		stages = fuseStageChains(stages)
+		// Narrow scan-stage OUTPUT to what consumers declare (Columns
+		// stays the read set — pushed filter columns are read, applied,
+		// then dropped from the payload). Runs after every stage-rewiring
+		// pass so the consumer set is final. Kill switch
+		// WADJET_SCAN_OUTPUT_PRUNE=0.
+		pruneScanOutputColumns(stages)
 		// Fragment fusion passes are intentionally NOT called here.
 		//
 		// fuseScanShuffle / fuseJoinShuffle absorb a downstream

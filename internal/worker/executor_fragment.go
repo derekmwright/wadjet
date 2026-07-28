@@ -1940,6 +1940,11 @@ func (e *Executor) buildFragmentUnary(ctx context.Context, task distributed.Task
 			return nil, nil, err
 		}
 		return ops, nil, nil
+	case distributed.OpColumnPrune:
+		// Scan-output projection (Q13 class): the scan READS its filter
+		// columns but must not SHIP them — downstream declared exactly
+		// which columns it consumes. Zero-copy column drop.
+		return []exec.UnaryOperator{exec.NewColumnPrune(spec.OutputColumns)}, nil, nil
 
 	case distributed.OpHashJoinProbe, distributed.OpBroadcastProbe:
 		return e.buildFragmentJoinProbe(ctx, task, spec)
