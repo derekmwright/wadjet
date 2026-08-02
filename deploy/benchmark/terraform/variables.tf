@@ -375,6 +375,12 @@ variable "scan_output_prune" {
   default     = true
 }
 
+variable "fuse_scan_shuffle" {
+  description = "WADJET_FUSE_SCAN_SHUFFLE (coordinator-side): fuse dispatched scan→exchange-repartition pairs so scan tasks hash-partition their filtered output directly, deleting the unpartitioned WSHF write+read cycle (fuseScanShuffle, 765ce81 — ~20 GB duplicated per SF100 cold run on Q03/Q21/Q13-class legs). Default true; false = A/B kill-switch arm."
+  type        = bool
+  default     = true
+}
+
 variable "refault_episode_cap_seconds" {
   description = "WADJET_REFAULT_EPISODE_CAP (worker-side): seconds one page-cache pressure episode may throttle decode-ahead before being declared non-causal (executor_fragment.go). In-binary default 10; the window-variance memo's tuning candidate is ~3 (causal relief measured ~2s in #260). 0 = unbounded v2 semantics."
   type        = number
