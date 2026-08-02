@@ -1069,6 +1069,26 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 }
 
 func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
+	// Terminal defense for the #277 panic family: a zero-column batch can
+	// reach here through paths the Consume-entry guard cannot cover — the
+	// 2026-08-02 SF100 stacks show one arriving via the external-merge
+	// drain branch AFTER the entry guard passed, i.e. the batch's Columns
+	// were emptied between guard and here (recycled-batch hazard; both
+	// the updater-selection loop and the scalar kernels index b.Columns
+	// by resolved position). Pure COUNT(*)-style aggregates (every
+	// aggColIdx < 0) legitimately consume schemaless batches and proceed.
+	// Otherwise skipping is no worse than the panic it replaces — both
+	// lose the batch and the task retry re-runs against durable inputs.
+	if len(b.Columns) == 0 {
+		for _, ci := range h.aggColIdx {
+			if ci >= 0 {
+				return
+			}
+		}
+		if !h.isScalarAgg {
+			return // grouped: keys unavailable without columns
+		}
+	}
 	// Scalar aggregate fast path: use batch-level kernels (no per-row dispatch)
 	if h.isScalarAgg {
 		for i := range h.Aggs {
