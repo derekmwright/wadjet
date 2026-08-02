@@ -2,9 +2,14 @@ package physical
 
 import "os"
 
-// fuseJoinShuffleEnabled gates fuseJoinShuffle. Kill switch
-// WADJET_FUSE_JOIN_SHUFFLE=0.
-var fuseJoinShuffleEnabled = os.Getenv("WADJET_FUSE_JOIN_SHUFFLE") != "0"
+// fuseJoinShuffleEnabled gates fuseJoinShuffle. DEFAULT OFF pending the
+// Q18 SF100 diagnosis: the 2026-08-02 A/B treatment arm failed Q18 in
+// both runs — join-8 task panic "index out of range [0] with length 0"
+// (the #277/#279 zero-column-batch class) when consuming the fused
+// join-4 output. Local gates (SF0.01, SF1 forced-shuffle) all pass —
+// the shape only reproduces under SF100 pressure. Opt in with
+// WADJET_FUSE_JOIN_SHUFFLE=1.
+var fuseJoinShuffleEnabled = os.Getenv("WADJET_FUSE_JOIN_SHUFFLE") == "1"
 
 // fuseJoinShuffle absorbs StageExchangeRepartition stages into their upstream
 // hash_join / broadcast_join when safe, eliminating the round-trip of

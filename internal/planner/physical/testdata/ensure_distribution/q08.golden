@@ -4,10 +4,11 @@ scan-3	scan	Singleton
 join-4	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-4-3,scan-1
 scan-5	scan	Hash(o_custkey)/32
 exchange-repartition-6	exchange-repartition	Hash(c_custkey)/32	deps=join-4
-join-8	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-6,scan-5
+join-8	hash_join	Hash(c_custkey)/32	deps=exchange-repartition-6,scan-5
 scan-9	scan	Singleton
+exchange-repartition-10	exchange-repartition	Hash(o_orderkey)/32	deps=join-8
 exchange-repartition-11	exchange-repartition	Hash(l_orderkey)/32	deps=scan-9
-join-12	hash_join	Hash(o_orderkey)/32	deps=join-8,exchange-repartition-11,scan-13,scan-15,exchange-replicate-join-18-15
+join-12	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-10,exchange-repartition-11,scan-13,scan-15,exchange-replicate-join-18-15
 scan-13	scan	Singleton
 scan-15	scan	Singleton
 scan-17	scan	Singleton
