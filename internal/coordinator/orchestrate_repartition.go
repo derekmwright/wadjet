@@ -149,6 +149,25 @@ type shuffleSideStats struct {
 	PartitionBytes []int64 // indexed by partition id, on-disk uncompressed
 }
 
+// shuffleTaskColumns resolves the column projection shuffle tasks carry.
+// Catalog-based pruning (prunedScanColumns) owns parquet sources; when it
+// yields nothing and the dispatcher declared an output set for a .wshf
+// source (dispatchShuffleStage via wshfShuffleProjection), trust the
+// declaration — the worker applies it post-decode with intersection
+// semantics. The suffix guard keeps this inert for legacy parquet source
+// stages that might carry planner-set OutputColumns (their read set must
+// stay full so pushed filters see their columns).
+func shuffleTaskColumns(pruned []string, sourceStage physical.Stage) []string {
+	if len(pruned) > 0 {
+		return pruned
+	}
+	if len(sourceStage.OutputColumns) > 0 && len(sourceStage.ScanFiles) > 0 &&
+		strings.HasSuffix(sourceStage.ScanFiles[0], ".wshf") {
+		return sourceStage.OutputColumns
+	}
+	return pruned
+}
+
 // runShuffleSide dispatches workerCount TaskTypeShuffle tasks for one side
 // (build or probe), each reading its file slice and hash-partitioning into
 // numParts outputs. Waits for all tasks. Returns shardFiles[p] = slice of
@@ -187,7 +206,7 @@ func (c *Coordinator) runShuffleSide(
 	// columns that belong to sibling tables in the optimizer's over-approximated
 	// stage.Columns. If pruning fails (catalog miss or empty columns), fall back
 	// to nil which causes the worker to select all columns — correct but larger.
-	cols := c.prunedScanColumns(ctx, sourceStage)
+	cols := shuffleTaskColumns(c.prunedScanColumns(ctx, sourceStage), sourceStage)
 	// Note: intentionally accepting nil here (SELECT * fallback) rather than
 	// returning an error for a catalog miss during shuffle setup.
 

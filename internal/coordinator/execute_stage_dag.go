@@ -1019,6 +1019,14 @@ func (c *Coordinator) dispatchShuffleStage(
 		Columns:        upstream.ScanColumns,
 		EstimatedBytes: upstream.Bytes,
 	}
+	// WSHF-input shuffle projection (fix 2 of the scan-output column leak):
+	// stage outputs get no read-time narrowing, so without this a shuffle
+	// over a wide upstream re-materializes every decoded column. Ship the
+	// stage's declared Columns ∪ Keys as the task projection; the worker
+	// prunes post-decode with intersection semantics. OutputColumns is the
+	// carrier — runShuffleSide falls back to it when catalog-based pruning
+	// yields nothing. Kill switch WADJET_WSHF_SHUFFLE_PRUNE=0.
+	synthetic.OutputColumns = wshfShuffleProjection(stage, sourceFiles[0], synthetic.Columns)
 	numParts := stage.Exchange.Count
 	if numParts == 0 {
 		numParts = workerCount * shufflePartitionMultiplier
@@ -1052,6 +1060,53 @@ func (c *Coordinator) dispatchShuffleStage(
 		PartitionRows:  shardStats.PartitionRows,
 		PartitionBytes: shardStats.PartitionBytes,
 	}, nil
+}
+
+// wshfShufflePrune gates the WSHF-input shuffle projection (fix 2 of the
+// scan-output column leak, docs/benchmarks/ + memo 2026-07-28).
+// Kill switch WADJET_WSHF_SHUFFLE_PRUNE=0.
+var wshfShufflePrune = os.Getenv("WADJET_WSHF_SHUFFLE_PRUNE") != "0"
+
+// wshfShuffleProjection returns the task-level column projection for a
+// repartition stage whose input is upstream STAGE OUTPUT (.wshf), or nil
+// when ineligible. Scan pass-through legs (parquet inputs) keep the
+// existing prunedScanColumns path — syntheticCols non-empty means that
+// path owns projection. Eligibility mirrors pruneScanOutputColumns's
+// caution: the stage must declare Columns and carry no computed-column
+// machinery (ComputedCols expressions read inputs the declaration may
+// omit; ExtraReadCols is a parquet-read widening that has no WSHF
+// analogue). Exchange keys are unioned in defensively — the worker's
+// partitioning sink hashes them.
+//
+// The declared set is over-approximated by planner convention (both join
+// sides get the same union; "the reader ignores columns that don't
+// exist"), so the worker applies it with intersection semantics against
+// the decoded schema (wshfShufflePruneKeep) — never as a strict schema.
+func wshfShuffleProjection(stage physical.Stage, firstSourceFile string, syntheticCols []string) []string {
+	if !wshfShufflePrune {
+		return nil
+	}
+	if len(syntheticCols) > 0 || len(stage.Columns) == 0 || stage.Exchange == nil {
+		return nil
+	}
+	if len(stage.Exchange.ComputedCols) > 0 || len(stage.Exchange.ExtraReadCols) > 0 {
+		return nil
+	}
+	if !strings.HasSuffix(firstSourceFile, ".wshf") {
+		return nil
+	}
+	keep := append([]string(nil), stage.Columns...)
+	seen := make(map[string]bool, len(keep)+len(stage.Exchange.Keys))
+	for _, c := range keep {
+		seen[c] = true
+	}
+	for _, k := range stage.Exchange.Keys {
+		if !seen[k] {
+			keep = append(keep, k)
+			seen[k] = true
+		}
+	}
+	return keep
 }
 
 // replicateMaterializeMinFiles is the minimum upstream file count that

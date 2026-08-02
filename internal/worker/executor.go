@@ -1036,7 +1036,8 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 
 	// Validate input files share a single kind early — a planner bug that
 	// mixes parquet and .wshf in one task surfaces here as a clear error.
-	if _, err := classifyInputFiles(task.Files); err != nil {
+	inputKind, err := classifyInputFiles(task.Files)
+	if err != nil {
 		return fmt.Errorf("shuffle task %s: %w", task.ID, err)
 	}
 
@@ -1093,6 +1094,18 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	if err != nil {
 		return fmt.Errorf("shuffle task %s: %w", task.ID, err)
 	}
+
+	// WSHF-input shuffle projection: chained shuffles decode full-width
+	// upstream payloads (projectColumns is parquet-only), so the declared
+	// column set is applied post-decode before rows are re-partitioned and
+	// re-materialized. ComputedCols/DropCols tasks are ineligible — their
+	// expressions may read columns the declaration omits (the dispatcher
+	// enforces this too; the guard here keeps the worker safe against
+	// older coordinators). Resolved lazily from the first batch's schema.
+	pruneWSHF := inputKind != inputKindParquet && len(task.Columns) > 0 &&
+		len(task.ComputedCols) == 0 && len(task.DropCols) == 0
+	var wshfPrune *exec.ColumnPrune
+	wshfPruneResolved := false
 
 	// Set up the spill directory for the sink's partition files.
 	spillDir := filepath.Join(e.spillDir, "shuffle-"+task.ID)
@@ -1159,6 +1172,24 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 				continue
 			}
 			n = int64(b.ActiveLen())
+		}
+		if pruneWSHF {
+			if !wshfPruneResolved {
+				wshfPruneResolved = true
+				if keep := wshfShufflePruneKeep(b.Schema, task.Columns, task.ShuffleKeys); keep != nil {
+					wshfPrune = exec.NewColumnPrune(keep)
+					if initErr := wshfPrune.Init(ctx); initErr != nil {
+						return fmt.Errorf("shuffle task %s: init wshf prune: %w", task.ID, initErr)
+					}
+				}
+			}
+			if wshfPrune != nil {
+				pb, pruneErr := wshfPrune.Execute(ctx, b)
+				if pruneErr != nil {
+					return fmt.Errorf("shuffle task %s: wshf column prune: %w", task.ID, pruneErr)
+				}
+				b = pb
+			}
 		}
 		b = applyComputedCols(computedAppenders, task.DropCols, b)
 		if sink == nil {
