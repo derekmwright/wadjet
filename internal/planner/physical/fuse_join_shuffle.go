@@ -1,5 +1,11 @@
 package physical
 
+import "os"
+
+// fuseJoinShuffleEnabled gates fuseJoinShuffle. Kill switch
+// WADJET_FUSE_JOIN_SHUFFLE=0.
+var fuseJoinShuffleEnabled = os.Getenv("WADJET_FUSE_JOIN_SHUFFLE") != "0"
+
 // fuseJoinShuffle absorbs StageExchangeRepartition stages into their upstream
 // hash_join / broadcast_join when safe, eliminating the round-trip of
 // writing+re-reading an unpartitioned WSHF between the join and the shuffle.
@@ -28,10 +34,15 @@ package physical
 //  5. At least one stage depends on the exchange (otherwise no benefit; the
 //     dropped exchange would orphan no consumers but the absorption is moot).
 func fuseJoinShuffle(stages []Stage) []Stage {
+	if !fuseJoinShuffleEnabled {
+		return stages
+	}
+	consumers := make(map[string][]*Stage, len(stages))
 	depCount := make(map[string]int, len(stages))
 	for i := range stages {
 		for _, d := range stages[i].Dependencies {
 			depCount[d]++
+			consumers[d] = append(consumers[d], &stages[i])
 		}
 	}
 	idx := make(map[string]int, len(stages))
@@ -77,6 +88,27 @@ func fuseJoinShuffle(stages []Stage) []Stage {
 			continue
 		}
 		if depCount[ex.ID] == 0 {
+			continue
+		}
+		// Consumer-shape gate (mirrors fuseScanShuffle, 765ce81): every
+		// consumer of the exchange must partition-bind its input.
+		// Flattening consumers (chained repartitions, replicates,
+		// gathers, broadcast probe-split, singleton sorts) would ingest
+		// tasks×partitions files — the 2026-05 regression class.
+		binds := true
+		for _, c := range consumers[ex.ID] {
+			switch c.Type {
+			case StageHashJoin, StageSortMergeJoin, "final_aggregate":
+			default:
+				binds = false
+			}
+		}
+		if !binds {
+			continue
+		}
+		// No computed-column machinery: the join fragment pipeline has no
+		// flag-evaluation ops.
+		if len(ex.Exchange.ComputedCols) > 0 || len(ex.Exchange.ExtraReadCols) > 0 {
 			continue
 		}
 

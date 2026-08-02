@@ -1883,11 +1883,14 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// partition-binding consumers. Kill switch
 		// WADJET_FUSE_SCAN_SHUFFLE=0.
 		stages = fuseScanShuffle(stages)
-		// fuseJoinShuffle (join→exchange absorption) remains NOT called:
-		// its Q18-class prize (join-4→repartition-6, 8.8 GB duplicated)
-		// needs the same consumer-shape treatment plus join-fragment
-		// plumbing — future slice of this arc.
-		// stages = fuseJoinShuffle(stages)
+		// Same treatment for join→exchange pairs (Q18 join-4→rp-6 7.6 GB,
+		// Q05 join-4→rp-8 2.96 GB duplicated per SF100 run in the 08-02
+		// fusion-ab pair): hash_join outputs partition directly via the
+		// fragment runner's OpExchangeSender terminal, gated identically
+		// (partition-binding consumers only, no computed cols; hash_join
+		// only — broadcast_join fusion stays off per the 2026-05-03 Q02
+		// wrong-rows history). Kill switch WADJET_FUSE_JOIN_SHUFFLE=0.
+		stages = fuseJoinShuffle(stages)
 		//
 		// fuseScanAggregateShuffle IS enabled. Pattern: scan(FusedAgg) →
 		// exchange-repartition → final_aggregate/merge_aggregate. Aggregate

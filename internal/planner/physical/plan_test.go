@@ -815,16 +815,25 @@ func TestPlanDistributed_MultiWayJoinShuffleKeys(t *testing.T) {
 		stageByID[s.ID] = s
 	}
 
+	// Shuffle-carrying units: standalone repartitions plus Exchange-
+	// carrying joins (fuseJoinShuffle absorbs join1's output exchange;
+	// the three plain scans keep standalone exchanges — pass-through
+	// scans are not fused by design).
 	var shuffles []Stage
 	for _, s := range stages {
 		if s.Type == StageExchangeRepartition {
 			shuffles = append(shuffles, s)
 		}
+		if s.Type == StageHashJoin && s.Exchange != nil {
+			u := s
+			u.Dependencies = []string{s.ID}
+			shuffles = append(shuffles, u)
+		}
 	}
 
-	// Should have 4 shuffle stages: 2 for join1, 2 for join2
+	// 4 shuffle units total: 3 standalone (scan-fed) + 1 fused join.
 	if len(shuffles) != 4 {
-		t.Fatalf("expected 4 shuffle stages, got %d", len(shuffles))
+		t.Fatalf("expected 4 shuffle-carrying stages, got %d", len(shuffles))
 	}
 
 	// Find the second pair of shuffles (for join2) — they depend on

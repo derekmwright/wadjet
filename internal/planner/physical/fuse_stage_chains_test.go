@@ -171,10 +171,28 @@ func TestFuseStageChains_Q10ShapeApplies(t *testing.T) {
 		}
 		return n
 	}
-	for _, typ := range []string{StageScan, "aggregate", "final_aggregate", StageExchangeRepartition} {
+	for _, typ := range []string{StageScan, "aggregate", "final_aggregate"} {
 		if count(on, typ) != count(off, typ) {
 			t.Errorf("%s stages differ: fused=%d unfused=%d", typ, count(on, typ), count(off, typ))
 		}
+	}
+	// Shuffle boundaries: fuseScanShuffle/fuseJoinShuffle absorb standalone
+	// repartitions into Exchange-carrying scans/joins, and eligibility
+	// depends on the chain shape, so compare TOTAL shuffle boundaries
+	// (standalone repartitions + Exchange-carrying compute/scan stages)
+	// rather than the repartition stage-type count.
+	boundaries := func(stages []Stage) int {
+		n := 0
+		for _, s := range stages {
+			if s.Type == StageExchangeRepartition ||
+				(s.Exchange != nil && s.Type != StageExchangeGather && s.Type != StageExchangeReplicate) {
+				n++
+			}
+		}
+		return n
+	}
+	if boundaries(on) != boundaries(off) {
+		t.Errorf("shuffle boundaries differ: fused=%d unfused=%d", boundaries(on), boundaries(off))
 	}
 	if err := AssertExchangeConsistency(on); err != nil {
 		t.Errorf("exchange consistency after fusion: %v", err)
