@@ -445,6 +445,7 @@ locals {
     # Scan→shuffle fusion (fuseScanShuffle, 765ce81): coordinator-side
     # planner pass. Default on; =false is the A/B / kill-switch arm.
     export WADJET_FUSE_SCAN_SHUFFLE="${var.fuse_scan_shuffle ? "1" : "0"}"
+    export WADJET_FUSE_JOIN_SHUFFLE="${var.fuse_join_shuffle ? "1" : "0"}"
     ${local.profile_env}
     cd /root/wadjet
 

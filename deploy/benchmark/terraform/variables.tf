@@ -381,6 +381,12 @@ variable "fuse_scan_shuffle" {
   default     = true
 }
 
+variable "fuse_join_shuffle" {
+  description = "WADJET_FUSE_JOIN_SHUFFLE (coordinator-side): fuse hash_join→exchange-repartition pairs so join fragments partition output directly (fuseJoinShuffle, c400307 — Q18 7.6GB/Q05 2.96GB dup legs). Default true; false = A/B kill-switch arm."
+  type        = bool
+  default     = true
+}
+
 variable "refault_episode_cap_seconds" {
   description = "WADJET_REFAULT_EPISODE_CAP (worker-side): seconds one page-cache pressure episode may throttle decode-ahead before being declared non-causal (executor_fragment.go). In-binary default 10; the window-variance memo's tuning candidate is ~3 (causal relief measured ~2s in #260). 0 = unbounded v2 semantics."
   type        = number
