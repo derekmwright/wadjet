@@ -61,3 +61,25 @@ five comparable flag-off steady/cold pairs on post-fusion binaries
   pairs, or wait for the episode-cap A/B to (maybe) collapse the band.
 - Every future run: grab worker logs. The next variance session should
   start by decomposing per-query pressure_stall_ms across runs.
+
+## 2026-08-02 batch results (arms: baseline / prune-off / cap-3)
+
+Runs 20260802-{174751,180808,183649}, binary dfc705a, worker logs
+retained for all arms (first runs with per-query attribution).
+
+1. **Scan-output prune (03b1a10) validated at SF100**: Q13 shuffle
+   68.8 → 16.3 B/row (10.2 → 2.41 GB per materialization); Q13 cold
+   −30% (23.4→16.3s); suite cold −6.2% (507.3→475.8s), steady −4.7%.
+   Rows and value signatures identical across arms. Default stays ON.
+2. **Episode-cap 3s: mechanism engaged, no wall win — default stays
+   10s.** Cluster-wide pressure_stall time fell 1161→708s (−39%) with
+   similar activation counts (17 vs 19), but suite walls were
+   null-to-negative in-window (cold +10.5%, steady +16%). Conclusion:
+   the capped throttle's stall-seconds are mostly off the critical
+   path, and reducing them is not the variance lever; the sensor's
+   protective default stands.
+3. **Attribution now flows every run**: baseline pressure-stall
+   concentrates in repartition shuffle reads (sh-stage-exchange-
+   repartition legs, 100-180s per heavy query) and lineitem scans —
+   the next variance session correlates these per-query totals with
+   wall outliers across accumulating runs.
