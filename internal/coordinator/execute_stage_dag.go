@@ -1395,6 +1395,14 @@ func (c *Coordinator) dispatchPipelineStage(
 		if len(stage.FilterExprs) > 0 || len(stage.ProjectExprs) > 0 || len(stage.SecurityProjectExprs) > 0 {
 			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
 		}
+		// A fused shuffle payload (fuseScanShuffle) means downstream
+		// partition-binds this stage's output — pass-through raw parquet
+		// (OutputSinglePart) would silently feed every consumer task the
+		// full table. The planner only fuses dispatched-shape scans, so
+		// this branch is defense-in-depth for planner/dispatcher drift.
+		if stage.Exchange != nil && len(stage.Exchange.Keys) > 0 && stage.Exchange.Count > 0 {
+			return c.dispatchScanFilterStage(ctx, queryID, stage, inputs, workerCount)
+		}
 		// No filter: by default pass raw parquet files through (saves the
 		// wshf write+read hop). But when this scan is the PROBE of a
 		// downstream broadcast_join AND it's a single oversized file

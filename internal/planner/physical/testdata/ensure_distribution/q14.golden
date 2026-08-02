@@ -1,7 +1,6 @@
-scan-0	scan	Singleton
+scan-0	scan	Hash(l_partkey)/32
 scan-1	scan	Singleton
-exchange-repartition-2	exchange-repartition	Hash(l_partkey)/32	deps=scan-0
 exchange-repartition-3	exchange-repartition	Hash(p_partkey)/32	deps=scan-1
-join-4	hash_join	Hash(l_partkey)/32	deps=exchange-repartition-2,exchange-repartition-3
+join-4	hash_join	Hash(l_partkey)/32	deps=scan-0,exchange-repartition-3
 final_aggregate-6	final_aggregate	Singleton	deps=join-4
 exchange-gather-final_aggregate-6	exchange-gather	Singleton	deps=final_aggregate-6

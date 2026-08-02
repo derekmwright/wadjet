@@ -1867,29 +1867,26 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// pass so the consumer set is final. Kill switch
 		// WADJET_SCAN_OUTPUT_PRUNE=0.
 		pruneScanOutputColumns(stages)
-		// Fragment fusion passes are intentionally NOT called here.
-		//
-		// fuseScanShuffle / fuseJoinShuffle absorb a downstream
-		// exchange-repartition into the upstream scan or join, emitting
-		// fragment-style multi-op task pipelines via executeFragment.
-		// Both passes regressed SF10 wall-time across the query suite
-		// (Q07 +85%, Q03 +30%, Q21 +13% vs the no-fusion baseline)
-		// because fragment-fused scan output amplifies the file count
-		// downstream consumers (broadcast caches, legacy exchange-
-		// repartition stages reading partitioned input) have to ingest:
-		// 24 partition files per upstream task instead of 1 unpartitioned
-		// file. The selective workerCount-bound gate on a24ae48 fixed
-		// the worst case (Q05 lineitem 7m4s → 58s) but left the
-		// dimension-scan amplification cost on every other query.
-		//
-		// The architectural primitive — Operators[]+executeFragment+
-		// runStageScanPartitionedStreaming+partitionedShuffleSink —
-		// stays in place under the worker, dormant until a future
-		// fusion shape uses it without amplifying downstream reads.
-		// Most likely first user is intra-task aggregate fragments,
-		// where the aggregate is a pipeline-breaker that collapses to
-		// a single output stream per task (no fan-out, no amplification).
-		// stages = fuseScanShuffle(stages, p.WorkerCount)
+		// Fuse scan→exchange-repartition pairs whose consumers all
+		// partition-bind (hash/sort-merge joins, grouped finals): the scan
+		// task hash-partitions its filtered output directly, deleting the
+		// full write+read of the unpartitioned intermediate (2026-08-02
+		// SF100 accounting: ~20 GB duplicated per cold suite run on scan
+		// legs — Q03 10.0 GB, Q21 6.8 GB, Q13 2.4 GB). Re-enabled
+		// 2026-08-02: the 2026-05 regressions that kept this disabled
+		// (Q07 +85%, Q03 +30% — file-count amplification at broadcast
+		// caches and flattening exchange readers) are excluded
+		// structurally by the consumer-shape gate, and the old
+		// consolidation argument no longer holds — scan and shuffle
+		// fan-out are both capacity-bound now, so the fused layout's
+		// per-partition file count matches the unfused two-step for
+		// partition-binding consumers. Kill switch
+		// WADJET_FUSE_SCAN_SHUFFLE=0.
+		stages = fuseScanShuffle(stages)
+		// fuseJoinShuffle (join→exchange absorption) remains NOT called:
+		// its Q18-class prize (join-4→repartition-6, 8.8 GB duplicated)
+		// needs the same consumer-shape treatment plus join-fragment
+		// plumbing — future slice of this arc.
 		// stages = fuseJoinShuffle(stages)
 		//
 		// fuseScanAggregateShuffle IS enabled. Pattern: scan(FusedAgg) →

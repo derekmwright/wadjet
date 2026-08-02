@@ -1,5 +1,11 @@
 package physical
 
+import "os"
+
+// fuseScanShuffleEnabled gates fuseScanShuffle. Kill switch
+// WADJET_FUSE_SCAN_SHUFFLE=0.
+var fuseScanShuffleEnabled = os.Getenv("WADJET_FUSE_SCAN_SHUFFLE") != "0"
+
 // fuseScanShuffle absorbs StageExchangeRepartition stages into their upstream
 // StageScan when safe, eliminating the round-trip of writing+re-reading an
 // unpartitioned WSHF between scan and shuffle.
@@ -10,43 +16,59 @@ package physical
 //
 // After fusion: scan(with shuffle metadata) → consumer
 //   scan task hash-partitions its filtered output directly
-//   (writePartitionedShuffle in worker) — saves one S3 PUT, one S3 GET, one
-//   NATS round-trip per fused scan-shuffle pair.
+//   (runStageScanPartitionedStreaming + partitionedShuffleSink in the
+//   worker) — saves one full write+read of the scan's output (2026-08-02
+//   SF100 accounting: Q03 10.0 GB, Q21 6.8 GB, Q13 2.4 GB duplicated per
+//   cold run on scan legs alone), one S3 PUT+GET cycle, and one NATS
+//   round-trip per fused pair.
 //
 // Safety conditions:
 //  1. Exchange has exactly one dependency (the scan).
 //  2. Scan has exactly one dependent (the exchange) — no other stage reads
 //     the scan's unpartitioned output.
 //  3. Scan is a plain StageScan (not scan-aggregate, which has its own
-//     fan-out semantics via dispatchScanAggregateStage).
-//  4. Scan file count ≤ workerCount. The legacy exchange-repartition stage
-//     CONSOLIDATES N scan-task outputs into workerCount-task outputs; that
-//     N→workerCount step is the load-bearing piece for high-fan-out scans
-//     (lineitem with 600 SF10 files dispatches as ~6 scan tasks). Fusing
-//     a high-fan-out scan emits N×numPartitions partition files instead of
-//     workerCount×numPartitions, which then forces every downstream join
-//     task to read N build files per partition instead of workerCount —
-//     the file-count amplification that caused Q05 SF10 7m4s on 388ffd7
-//     and 8m17s on 41d1187 (bisect run, even with fuseJoinShuffle off).
-//     Cap at workerCount → small dimension scans (customer/supplier/nation
-//     with ≤ 3 files at SF10) still fuse and capture Q03/Q04 wins; heavy
-//     fact scans skip fusion and use the legacy consolidating exchange.
+//     fan-out semantics via dispatchScanAggregateStage; no prior Exchange),
+//     and it is DISPATCHED-shape (pushed filters / projections / security
+//     barrier / DF emits) — pass-through scans materialize nothing today,
+//     so there is no round-trip to save and fusing would misroute them.
+//  4. Every consumer of the exchange PARTITION-BINDS its input
+//     (buildTaskInputsForStage → partitionFilesForWorker): hash_join,
+//     sort_merge_join, or a grouped final_aggregate. Flattening consumers
+//     — chained repartitions (flattenStageFiles), replicate/broadcast
+//     caches (materializeReplicate), gathers, broadcast_join probe-split —
+//     ingest scanTasks×numPartitions files where the unfused path handed
+//     them scanTasks, the amplification behind the 2026-05 Q05 SF10
+//     7m4s / Q07 +85% regressions that kept this pass disabled.
+//  5. The exchange carries no computed-column machinery — the fragment
+//     pipeline dispatchScanFilterStage emits (scan→filter→project→
+//     column-prune→exchange-sender) has no ComputedCols evaluation ops.
 //
-// Worker requirements: writeStageOutput already routes to
-// writePartitionedShuffle when ShuffleKeys+NumPartitions are set. Coord must
-// translate stage.Exchange (when set on a scan) into task.ShuffleKeys +
-// task.NumPartitions; that change lives in dispatchScanFilterStage.
+// The historical file-count gate (skip when len(ScanFiles) > workerCount)
+// is gone: both scan fan-out and shuffle fan-out are capacity-bound via
+// scanFanOutTaskCount now, so for partition-binding consumers the fused
+// layout produces the SAME per-partition file count as the unfused
+// scan→shuffle two-step (T tasks × P partitions either way). The
+// consolidation the legacy exchange provided only ever mattered to the
+// flattening consumers condition 4 excludes.
 //
-// Run AFTER EnsureDistribution + the final assignStageDistributions, so the
-// exchange stages exist to absorb. Setting scan.Distribution directly here
-// is durable (no later pass overwrites it).
-func fuseScanShuffle(stages []Stage, workerCount int) []Stage {
-	// Count dependents per stage ID — a scan with multiple consumers can't be
-	// fused (the others would lose the unpartitioned shape).
-	depCount := make(map[string]int, len(stages))
+// Worker requirements: dispatchScanFilterStage translates scan.Exchange
+// into the fragment fuseShuffle path (OpExchangeSender terminal); the
+// fused StageOutput carries per-partition rows/bytes (PartitionAccounting)
+// so downstream skew-split stays live.
+//
+// Run AFTER pruneScanOutputColumns (which needs the exchange present to
+// compute the scan's OutputColumns) and after every stage-rewiring pass,
+// so the consumer set condition 4 inspects is final.
+func fuseScanShuffle(stages []Stage) []Stage {
+	if !fuseScanShuffleEnabled {
+		return stages
+	}
+	// Consumers per stage ID — fusion decisions need both the count (a scan
+	// with multiple consumers can't fuse) and the types (condition 4).
+	consumers := make(map[string][]*Stage, len(stages))
 	for i := range stages {
 		for _, d := range stages[i].Dependencies {
-			depCount[d]++
+			consumers[d] = append(consumers[d], &stages[i])
 		}
 	}
 
@@ -69,6 +91,10 @@ func fuseScanShuffle(stages []Stage, workerCount int) []Stage {
 		if ex.Exchange == nil {
 			continue
 		}
+		// Condition 5: no computed-column machinery on the exchange.
+		if len(ex.Exchange.ComputedCols) > 0 || len(ex.Exchange.ExtraReadCols) > 0 {
+			continue
+		}
 		scanIdx, ok := idx[ex.Dependencies[0]]
 		if !ok {
 			continue
@@ -82,6 +108,20 @@ func fuseScanShuffle(stages []Stage, workerCount int) []Stage {
 		if len(scan.FusedAggGroupBy) > 0 {
 			continue
 		}
+		// Only fuse DISPATCHED-shape scans — ones that route through
+		// dispatchScanFilterStage (pushed filters, computed projections,
+		// security barriers, dynamic-filter emits) and therefore write an
+		// unpartitioned intermediate today. Filter-less plain scans are
+		// PASS-THROUGH: no tasks, no materialization — the downstream
+		// shuffle's tasks read base parquet directly (runShuffleSide with
+		// prunedScanColumns + row-group dynamic filters), which is already
+		// single-write. Fusing those would also break dispatch routing:
+		// the pass-through branch returns raw parquet as OutputSinglePart,
+		// which a partition-binding consumer must never receive.
+		if len(scan.FilterExprs) == 0 && len(scan.ProjectExprs) == 0 &&
+			len(scan.SecurityProjectExprs) == 0 && len(scan.EmitDynamicFilters) == 0 {
+			continue
+		}
 		// Don't fuse if the scan already had a non-singleton output target —
 		// can't have two different shuffle shapes off one scan.
 		if scan.Exchange != nil {
@@ -89,31 +129,29 @@ func fuseScanShuffle(stages []Stage, workerCount int) []Stage {
 		}
 		// Don't fuse if any OTHER stage depends on the scan — they'd see the
 		// partitioned output and break.
-		if depCount[scan.ID] != 1 {
+		if len(consumers[scan.ID]) != 1 {
 			continue
 		}
-		// Don't fuse if any OTHER stage depends on the exchange — we're going
-		// to remove it, so its other dependents would lose their input.
-		if depCount[ex.ID] == 0 {
+		// Condition 4: every exchange consumer must partition-bind.
+		exCons := consumers[ex.ID]
+		if len(exCons) == 0 {
 			continue
 		}
-		// Selective gate: skip fusion when scan file count exceeds
-		// workerCount. dispatchScanFilterStage's task fan-out is bounded by
-		// min(capacity, fileCount) where capacity ≥ workerCount, so a scan
-		// with > workerCount files dispatches as > workerCount tasks. Fusing
-		// such a scan amplifies intermediate partition file count from
-		// workerCount×numPartitions (legacy: exchange-repartition consolidates
-		// N→workerCount streams) to scanTaskCount×numPartitions, multiplying
-		// per-join-task S3 GETs by the same factor. workerCount=0 (uncapped
-		// planner mode used by some tests) bypasses the gate so unit tests
-		// without ScanFiles still exercise the absorption path.
-		if workerCount > 0 && len(scan.ScanFiles) > workerCount {
+		binds := true
+		for _, c := range exCons {
+			switch c.Type {
+			case StageHashJoin, StageSortMergeJoin, "final_aggregate":
+			default:
+				binds = false
+			}
+		}
+		if !binds {
 			continue
 		}
 
 		// Absorb: scan inherits the exchange's distribution + Exchange payload.
 		// The dispatch layer reads scan.Exchange to decide whether to emit
-		// the scan task with ShuffleKeys+NumPartitions.
+		// the scan task with the fragment fuseShuffle pipeline.
 		scan.Distribution = ex.Distribution
 		scan.Exchange = ex.Exchange
 		absorbed[ex.ID] = scan.ID
