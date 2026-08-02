@@ -368,3 +368,15 @@ variable "data_plane_port" {
 #   Intel Sapphire Rapids (c7i):
 #     SF10:  c7i.4xlarge  (16 vCPU, 32 GB) — $0.71/hr
 #     SF10 coordinator: c7i.2xlarge (8 vCPU, 16 GB) — $0.36/hr
+
+variable "scan_output_prune" {
+  description = "WADJET_SCAN_OUTPUT_PRUNE (coordinator-side): scan stages ship only consumer-declared columns instead of their full read set (pruneScanOutputColumns, 03b1a10 — Q13 leak fix). Default true; false = A/B kill-switch arm."
+  type        = bool
+  default     = true
+}
+
+variable "refault_episode_cap_seconds" {
+  description = "WADJET_REFAULT_EPISODE_CAP (worker-side): seconds one page-cache pressure episode may throttle decode-ahead before being declared non-causal (executor_fragment.go). In-binary default 10; the window-variance memo's tuning candidate is ~3 (causal relief measured ~2s in #260). 0 = unbounded v2 semantics."
+  type        = number
+  default     = 10
+}

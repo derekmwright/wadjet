@@ -438,6 +438,10 @@ locals {
     # for >90s and the coord reaped workers, kicking off the Q03 redelivery
     # loop observed on the 2026-05-01 streaming-refactor deploy.
     export WADJET_GOGC=100
+    # Scan-output column pruning (pruneScanOutputColumns, 03b1a10):
+    # coordinator-side planner pass. Default on; =false is the A/B /
+    # kill-switch arm.
+    export WADJET_SCAN_OUTPUT_PRUNE="${var.scan_output_prune ? "1" : "0"}"
     ${local.profile_env}
     cd /root/wadjet
 
@@ -678,6 +682,7 @@ resource "aws_instance" "worker" {
           --setenv="GOMEMLIMIT=$PER_PROC_GOMEMLIMIT" \
           --setenv="WADJET_GOGC=100" \
           --setenv="WADJET_REFAULT_PRESSURE_RATE=${var.refault_pressure_rate}" \
+          --setenv="WADJET_REFAULT_EPISODE_CAP=${var.refault_episode_cap_seconds}" \
           /usr/local/bin/wadjet serve \
             --mode=worker \
             --nats-url="nats://$COORD_IP:4222" \
