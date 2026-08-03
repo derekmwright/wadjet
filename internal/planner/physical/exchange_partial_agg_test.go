@@ -146,6 +146,74 @@ func TestMarkExchangePartialAgg_IneligibleShapes(t *testing.T) {
 	}
 }
 
+// Post-semi-pushdown Q18 shape: the lineitem exchange's join consumer
+// feeds ANOTHER join (customer) before the terminal grouped aggregate.
+// The dependent walk must recurse through the intermediate join.
+func TestMarkExchangePartialAgg_JoinChainDependentMarks(t *testing.T) {
+	stages := q18Stages()
+	// Splice a customer join between the lineitem join and the outer
+	// grouped final: join → join2 → fa-outer.
+	stages = append(stages, Stage{
+		ID:            "join2",
+		Type:          StageHashJoin,
+		LeftDepStage:  "join",
+		RightDepStage: "scan-cust",
+		JoinLeftKeys:  []string{"o_custkey"},
+		JoinRightKeys: []string{"c_custkey"},
+		Dependencies:  []string{"join", "scan-cust"},
+	})
+	for i := range stages {
+		if stages[i].ID == "fa-outer" {
+			stages[i].Dependencies = []string{"join2"}
+		}
+	}
+	markExchangePartialAgg(stages)
+	ex := exchangeByID(t, stages, "rp")
+	want := []AggSpec{{Func: "sum", InputCol: "l_quantity", OutputCol: "l_quantity"}}
+	if !reflect.DeepEqual(ex.PartialAggSpecs, want) {
+		t.Fatalf("PartialAggSpecs = %v, want %v (recurse through join2)", ex.PartialAggSpecs, want)
+	}
+}
+
+// The recursion must still reject a chain whose intermediate join keys
+// on the aggregated column or whose terminal counts rows.
+func TestMarkExchangePartialAgg_JoinChainDependentRejects(t *testing.T) {
+	mutate := map[string]func(s []Stage){
+		"intermediate join keys on agg col": func(s []Stage) {
+			s[len(s)-1].JoinLeftKeys = []string{"l_quantity"}
+		},
+		"terminal counts rows": func(s []Stage) {
+			for i := range s {
+				if s[i].ID == "fa-outer" {
+					s[i].AggSpecs = append(s[i].AggSpecs, AggSpec{Func: "count", InputCol: "", OutputCol: "n"})
+				}
+			}
+		},
+	}
+	for name, fn := range mutate {
+		stages := q18Stages()
+		stages = append(stages, Stage{
+			ID:            "join2",
+			Type:          StageHashJoin,
+			LeftDepStage:  "join",
+			RightDepStage: "scan-cust",
+			JoinLeftKeys:  []string{"o_custkey"},
+			JoinRightKeys: []string{"c_custkey"},
+			Dependencies:  []string{"join", "scan-cust"},
+		})
+		for i := range stages {
+			if stages[i].ID == "fa-outer" {
+				stages[i].Dependencies = []string{"join2"}
+			}
+		}
+		fn(stages)
+		markExchangePartialAgg(stages)
+		if ex := exchangeByID(t, stages, "rp"); ex.PartialAggSpecs != nil {
+			t.Errorf("%s: exchange must be unmarked", name)
+		}
+	}
+}
+
 func TestMarkExchangePartialAgg_SoleAggConsumerMarks(t *testing.T) {
 	// Single grouped-final consumer, no join — the simplest eligible shape.
 	stages := []Stage{
