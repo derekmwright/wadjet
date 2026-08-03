@@ -266,71 +266,25 @@ func joinConsumerCompatible(
 			return false
 		}
 	}
-	return joinDependentsTerminate(j, aggFunc, consumersOf, collectSpecs, touchesAgg, refsAgg, 0)
-}
-
-// joinDependentsTerminate walks a compatible join's dependents: every
-// path must terminate in a grouped final/merge aggregate whose specs
-// only re-merge the covered columns. Intermediate hash/sort-merge joins
-// are allowed (semi pushdown buries the aggregated columns under a
-// chain of joins — Q18 post-pushdown: lineitem-exchange → join-13 →
-// join-17 → final_aggregate-19) as long as their keys, filters, and
-// chained/fused joins avoid the aggregated columns, because joins pass
-// the carried partial values through unchanged. Depth-capped
-// defensively; DAG re-visits are fine (pure predicate).
-func joinDependentsTerminate(
-	j *Stage,
-	aggFunc map[string]string,
-	consumersOf map[string][]*Stage,
-	collectSpecs func([]AggSpec) bool,
-	touchesAgg func([]string) bool,
-	refsAgg func(...string) bool,
-	depth int,
-) bool {
-	if depth > 8 {
-		return false
-	}
 	deps := consumersOf[j.ID]
 	if len(deps) == 0 {
-		return false // output goes straight to gather — row-shaped
+		return false // join output goes straight to gather — row-shaped
 	}
 	for _, d := range deps {
-		switch {
-		case isGroupedFinalAggregate(d):
-			// Every spec the terminal aggregate computes must be a
-			// re-merge of covered columns: joins pass row-count changes
-			// through, so an uncovered aggregate (COUNT(*), SUM over
-			// another table's column) would see different multiplicity.
-			for _, sp := range d.AggSpecs {
-				fn := strings.ToLower(strings.TrimSpace(sp.Func))
-				if sp.InputExpr != "" || aggFunc[sp.InputCol] != fn {
-					return false
-				}
-			}
-			if !collectSpecs(d.AggSpecs) {
+		if !isGroupedFinalAggregate(d) {
+			return false
+		}
+		// Every spec the dependent computes must be a re-merge of covered
+		// columns: joins pass row-count changes through, so an uncovered
+		// aggregate (COUNT(*), SUM over another table's column) would see
+		// different multiplicity.
+		for _, sp := range d.AggSpecs {
+			fn := strings.ToLower(strings.TrimSpace(sp.Func))
+			if sp.InputExpr != "" || aggFunc[sp.InputCol] != fn {
 				return false
 			}
-		case d.Type == StageHashJoin || d.Type == StageSortMergeJoin:
-			if touchesAgg(d.JoinLeftKeys) || touchesAgg(d.JoinRightKeys) ||
-				refsAgg(d.JoinFilter) || refsAgg(d.FilterExprs...) || refsAgg(d.BuildFilterExprs...) {
-				return false
-			}
-			for _, cj := range d.ChainedJoins {
-				if touchesAgg(cj.JoinLeftKeys) || touchesAgg(cj.JoinRightKeys) ||
-					refsAgg(cj.JoinFilter) || refsAgg(cj.FilterExprs...) || refsAgg(cj.BuildFilterExprs...) {
-					return false
-				}
-			}
-			for _, fj := range d.FusedJoins {
-				if touchesAgg(fj.JoinLeftKeys) || touchesAgg(fj.JoinRightKeys) ||
-					refsAgg(fj.JoinFilter) || refsAgg(fj.FilterExprs...) {
-					return false
-				}
-			}
-			if !joinDependentsTerminate(d, aggFunc, consumersOf, collectSpecs, touchesAgg, refsAgg, depth+1) {
-				return false
-			}
-		default:
+		}
+		if !collectSpecs(d.AggSpecs) {
 			return false
 		}
 	}
