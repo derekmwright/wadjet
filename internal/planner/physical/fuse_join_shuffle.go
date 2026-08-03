@@ -111,6 +111,19 @@ func fuseJoinShuffle(stages []Stage) []Stage {
 		if len(ex.Exchange.ComputedCols) > 0 || len(ex.Exchange.ExtraReadCols) > 0 {
 			continue
 		}
+		// Width gate (#280): the dispatcher derives a compute stage's task
+		// count from its Distribution, so the absorption below rewrites the
+		// join's parallelism to the exchange's partition count. Absorbing a
+		// narrower exchange collapses the join's width — SF100 Q18 join-8
+		// absorbed its /4 final-aggregate repartition and ran 3 tasks of
+		// ~78s (each pressure-collapsing to serial) where the unfused shape
+		// ran 24 partition tasks of 2-4s (cold +126%, 2026-08-03 pair).
+		// Fuse only width-preserving pairs; the narrower join→final_aggregate
+		// legs keep their explicit repartition stage until fused joins can
+		// schedule at input-binding width and bucket output per-Exchange.
+		if ex.Distribution.Count != join.Distribution.Count {
+			continue
+		}
 
 		join.Distribution = ex.Distribution
 		join.Exchange = ex.Exchange
