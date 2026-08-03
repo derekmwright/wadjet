@@ -1048,7 +1048,19 @@ func (c *Coordinator) dispatchShuffleStage(
 	if len(stage.Exchange.ExtraReadCols) > 0 && len(synthetic.Columns) > 0 {
 		synthetic.Columns = append(append([]string(nil), synthetic.Columns...), stage.Exchange.ExtraReadCols...)
 	}
-	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters, computedCols, stage.Exchange.ExtraReadCols, c.eagerFeedHandle(queryID, stage.ID))
+	// Sender-side partial aggregation (markExchangePartialAgg): thread the
+	// planner-proven keys/specs into the shuffle tasks. Nil when unmarked.
+	var partialAggKeys []string
+	var partialAggSpecs []distributed.AggSpec
+	if len(stage.Exchange.PartialAggSpecs) > 0 {
+		partialAggKeys = stage.Exchange.PartialAggGroupBy
+		for _, sp := range stage.Exchange.PartialAggSpecs {
+			partialAggSpecs = append(partialAggSpecs, distributed.AggSpec{
+				Func: sp.Func, InputCol: sp.InputCol, OutputCol: sp.OutputCol,
+			})
+		}
+	}
+	shards, shardStats, err := c.runShuffleSide(ctx, queryID, "stage-"+stage.ID, synthetic, stage.Exchange.Keys, numParts, workerCount, upstream.DynamicFilters, computedCols, stage.Exchange.ExtraReadCols, partialAggKeys, partialAggSpecs, c.eagerFeedHandle(queryID, stage.ID))
 	if err != nil {
 		return StageOutput{}, err
 	}

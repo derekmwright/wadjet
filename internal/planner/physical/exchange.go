@@ -53,6 +53,14 @@ type ExchangeStage struct {
 	// ComputedCols expressions can evaluate, but which are NOT part of the
 	// shipped payload — the worker drops them after computing the flags.
 	ExtraReadCols []string
+	// PartialAggGroupBy/PartialAggSpecs mark this Repartition for
+	// sender-side partial aggregation (markExchangePartialAgg): the
+	// shuffle task pre-combines rows on PartialAggGroupBy, shipping
+	// name-preserving SUM/MIN/MAX partials (OutputCol == InputCol)
+	// instead of raw rows. Set only when every consumer is proven
+	// merge-compatible; empty means ship raw.
+	PartialAggGroupBy []string
+	PartialAggSpecs   []AggSpec
 }
 
 // ComputedCol is one appended expression column on a shuffle payload.

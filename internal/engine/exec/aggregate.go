@@ -2455,6 +2455,17 @@ func (h *HashAggregate) Inspect() memory.OperatorFootprint {
 	}
 }
 
+// StateBytes reports the current in-memory group-state size. Exposed for
+// callers that bound memory without a SpillManager (the shuffle sender's
+// capped partial aggregate flushes an epoch when this crosses its cap);
+// Inspect() reports zero footprint when no Spill is attached, so it can't
+// serve that role.
+func (h *HashAggregate) StateBytes() int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.groupMemoryUsage()
+}
+
 // accName is the stable identifier for this aggregate instance.
 func (h *HashAggregate) accName() string {
 	if len(h.GroupByCols) == 0 {

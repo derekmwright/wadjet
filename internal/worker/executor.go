@@ -1136,11 +1136,39 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// 2026-05-01 streaming-refactor deploy.
 	progress := exec.ProgressReporterFromContext(ctx)
 
+	// Sender-side partial aggregation (exchange partial agg): pre-combine
+	// rows on the planner-proven keys before partitioning. Rows entering
+	// the sink are the operator's flushed partials, so the sink's schema
+	// comes from the FIRST FLUSH, never from a raw batch. Kill switch
+	// WADJET_EXCHANGE_PARTIAL_AGG=0 is applied at plan time; the worker
+	// honors whatever the task carries.
+	var partialAgg *cappedPartialAgg
+	if len(task.PartialAggKeys) > 0 && len(task.PartialAggSpecs) > 0 {
+		partialAgg = newCappedPartialAgg(task.PartialAggKeys, task.PartialAggSpecs, 0)
+	}
+
 	// Sink is created lazily on the first non-empty batch — it needs the
 	// schema upfront, and discovering it from the first batch lets us avoid
 	// any pre-pass over the input.
 	var sink *partitionedShuffleSink
 	var totalRows int64
+	defer func() {
+		if sink != nil {
+			sink.Close()
+		}
+	}()
+	consumeToSink := func(b *batch.RecordBatch) error {
+		if sink == nil {
+			sink = newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, b.Schema)
+			if err := sink.Init(ctx); err != nil {
+				return fmt.Errorf("shuffle task %s: init sink: %w", task.ID, err)
+			}
+		}
+		if err := sink.Consume(ctx, b); err != nil {
+			return fmt.Errorf("shuffle task %s: consuming batch: %w", task.ID, err)
+		}
+		return nil
+	}
 	for {
 		b, err := src.Next(ctx)
 		if err != nil {
@@ -1192,20 +1220,43 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 			}
 		}
 		b = applyComputedCols(computedAppenders, task.DropCols, b)
-		if sink == nil {
-			sink = newPartitionedShuffleSink(spillDir, task.ShuffleKeys, task.NumPartitions, b.Schema)
-			if err := sink.Init(ctx); err != nil {
-				return fmt.Errorf("shuffle task %s: init sink: %w", task.ID, err)
+		if partialAgg != nil {
+			flushed, aggErr := partialAgg.consume(ctx, b)
+			if aggErr != nil {
+				return fmt.Errorf("shuffle task %s: %w", task.ID, aggErr)
 			}
-			defer sink.Close()
-		}
-		if err := sink.Consume(ctx, b); err != nil {
-			return fmt.Errorf("shuffle task %s: consuming batch: %w", task.ID, err)
+			for _, fb := range flushed {
+				if fb.ActiveLen() == 0 {
+					continue
+				}
+				if err := consumeToSink(fb); err != nil {
+					return err
+				}
+			}
+		} else if err := consumeToSink(b); err != nil {
+			return err
 		}
 		totalRows += n
 		if progress != nil {
 			progress.AddRows(n)
 		}
+	}
+	if partialAgg != nil {
+		flushed, aggErr := partialAgg.drain(ctx)
+		if aggErr != nil {
+			return fmt.Errorf("shuffle task %s: %w", task.ID, aggErr)
+		}
+		for _, fb := range flushed {
+			if fb.ActiveLen() == 0 {
+				continue
+			}
+			if err := consumeToSink(fb); err != nil {
+				return err
+			}
+		}
+		e.logger.Info("shuffle partial agg",
+			"task_id", task.ID, "in_rows", partialAgg.inRows,
+			"out_rows", partialAgg.outRows, "flushes", partialAgg.flushes)
 	}
 
 	tStreamEnd = time.Now()

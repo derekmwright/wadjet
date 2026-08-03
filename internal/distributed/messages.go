@@ -160,6 +160,15 @@ type Task struct {
 	// DropCols are read-only helper columns (ComputedCols expression
 	// inputs) removed from the payload after the flags are computed.
 	DropCols []string `json:"drop_cols,omitempty"`
+	// PartialAggKeys/PartialAggSpecs enable sender-side partial
+	// aggregation inside the shuffle task (exchange partial agg): rows
+	// are pre-combined on PartialAggKeys with name-preserving
+	// SUM/MIN/MAX specs (OutputCol == InputCol) before partitioning.
+	// Only set when the planner proved every consumer of the exchange
+	// merge-compatible; the reduction is exchange-internal and invisible
+	// downstream.
+	PartialAggKeys  []string  `json:"partial_agg_keys,omitempty"`
+	PartialAggSpecs []AggSpec `json:"partial_agg_specs,omitempty"`
 	PartitionID   int      `json:"partition_id,omitempty"`   // which partition this join task handles
 
 	// Dynamic filters carried at the top level for non-fragment task shapes

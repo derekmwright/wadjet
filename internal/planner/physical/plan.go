@@ -1902,6 +1902,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 		// stage. Gated on collapsing-consumer (final_aggregate /
 		// merge_aggregate) only.
 	stages = fuseScanAggregateShuffle(stages)
+	// Sender-side partial aggregation on surviving exchanges (SF100 Q18's
+	// 600M-row raw (l_orderkey, l_quantity) rp leg → ~4× reduction). Runs
+	// after every stage-rewiring pass so the consumer set it validates is
+	// final. Kill switch WADJET_EXCHANGE_PARTIAL_AGG=0.
+	markExchangePartialAgg(stages)
 	// Dynamic-filter pass: must run AFTER fuseScanAggregateShuffle (which
 	// may absorb an exchange-repartition into a fused scan-aggregate) but
 	// BEFORE AssertExchangeConsistency / ValidateNativeDAGShape so any

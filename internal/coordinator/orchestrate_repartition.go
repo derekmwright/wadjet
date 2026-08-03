@@ -103,7 +103,7 @@ func (c *Coordinator) orchestrateRepartition(
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
-		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount, nil, nil, nil, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "build", buildStage, cand.BuildKeys, numParts, workerCount, nil, nil, nil, nil, nil, nil)
 		if err != nil {
 			return fmt.Errorf("build-side shuffle for %s: %w", cand.BuildAlias, err)
 		}
@@ -112,7 +112,7 @@ func (c *Coordinator) orchestrateRepartition(
 	})
 
 	g.Go(func() error {
-		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount, nil, nil, nil, nil)
+		shards, stats, err := c.runShuffleSide(gctx, queryID, "probe", probeStage, cand.ProbeKeys, numParts, workerCount, nil, nil, nil, nil, nil, nil)
 		if err != nil {
 			return fmt.Errorf("probe-side shuffle for %s: %w", cand.ProbeAlias, err)
 		}
@@ -190,6 +190,8 @@ func (c *Coordinator) runShuffleSide(
 	dynamicFilters []distributed.DynamicFilterSpec, // resolved bloom/range pushdowns from upstream build stat
 	computedCols []distributed.ComputedColSpec, // appended payload expression columns (exchange subsumption)
 	dropCols []string, // read-only flag-input columns dropped post-compute
+	partialAggKeys []string, // sender-side partial agg group keys (exchange partial agg; nil = ship raw)
+	partialAggSpecs []distributed.AggSpec, // name-preserving SUM/MIN/MAX partial specs
 	eagerFeed *eagerFeed,
 ) ([][]string, shuffleSideStats, error) {
 	ctx, cancel := context.WithTimeout(ctx, shuffleStageTimeout)
@@ -270,6 +272,8 @@ func (c *Coordinator) runShuffleSide(
 			DynamicFilters: dynamicFilters,
 			ComputedCols:   computedCols,
 			DropCols:       dropCols,
+			PartialAggKeys:  partialAggKeys,
+			PartialAggSpecs: partialAggSpecs,
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
