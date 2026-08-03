@@ -3592,11 +3592,10 @@ func (p *Planner) walkStages(node *logical.Node, stages *[]Stage, parentID *stri
 			// Each partition receives 1/numPartitions of the shuffled data, so
 			// higher counts reduce peak hash table memory on each worker.
 			// At SF100 with 3 workers, 24 partitions halves per-partition
-			// memory compared to the previous 12.
-			numPartitions = p.WorkerCount * 8
-			if numPartitions < 16 {
-				numPartitions = 16
-			}
+			// memory compared to the previous 12. HashPartitionCount is the
+			// same rule EnsureDistribution applies to count-unpinned exchanges
+			// (grouped finals, windows) — one width for all hash shuffles.
+			numPartitions = HashPartitionCount(p.WorkerCount)
 
 			// Compute columns the shuffle must preserve: join keys + all
 			// columns needed downstream (from the join's NeededColumns).

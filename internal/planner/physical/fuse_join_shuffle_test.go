@@ -94,3 +94,22 @@ func TestFuseJoinShuffle_FlatteningConsumerDeclined(t *testing.T) {
 		}
 	}
 }
+
+// TestHashPartitionCount — one width rule for all hash exchanges: the
+// count-unpinned reduce side (grouped finals, windows) must scale with
+// cluster compute width exactly like join shuffles, not with node count
+// (SF100 Q20: a 54.5M-group final_aggregate at workerCount width ran 3
+// tasks × ~23s × ~7.7GB heap). Single-process planning keeps 1.
+func TestHashPartitionCount(t *testing.T) {
+	for _, tc := range []struct{ workers, want int }{
+		{0, 1}, {1, 1}, {2, 16}, {3, 24}, {4, 32}, {8, 64},
+	} {
+		if got := HashPartitionCount(tc.workers); got != tc.want {
+			t.Errorf("HashPartitionCount(%d) = %d, want %d", tc.workers, got, tc.want)
+		}
+	}
+	d := distributionFromRequired(RequiredDistribution{Kind: RequiredClusteredOn, Keys: []string{"k"}}, 3)
+	if d.Count != 24 {
+		t.Errorf("count-unpinned clustered requirement at 3 workers = %d partitions, want 24", d.Count)
+	}
+}

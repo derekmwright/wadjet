@@ -208,12 +208,33 @@ func distributionFromRequired(req RequiredDistribution, workerCount int) Distrib
 	case RequiredHashPartitionedOn, RequiredClusteredOn:
 		n := req.Count
 		if n == 0 {
-			n = workerCount
+			n = HashPartitionCount(workerCount)
 		}
 		return Distribution{Kind: DistHashPartitioned, Keys: append([]string(nil), req.Keys...), Count: n}
 	default:
 		return Distribution{Kind: DistSingleton}
 	}
+}
+
+// HashPartitionCount is the one width rule for hash exchanges whose
+// requirement doesn't pin a count: workerCount × 8, floor 16 — the same
+// rule the join planner uses for its shuffle inputs (higher counts cut
+// per-task hash state). Until 2026-08-03 the count-unpinned path (grouped
+// final_aggregate and window inputs) defaulted to workerCount, so the
+// REDUCE side ran node-count-wide while the map side ran core-scaled:
+// SF100 Q20's 54.5M-group final_aggregate ran 3 tasks of ~23s and ~7.7GB
+// tracked heap each, 4× slower than Trino on the same shape. Single-
+// process planning (workerCount <= 1) keeps one partition — width there
+// comes from morsel parallelism, not partition fan-out.
+func HashPartitionCount(workerCount int) int {
+	if workerCount <= 1 {
+		return 1
+	}
+	n := workerCount * 8
+	if n < 16 {
+		n = 16
+	}
+	return n
 }
 
 func replaceOne(xs []string, old, new string) []string {

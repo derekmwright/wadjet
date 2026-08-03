@@ -3,11 +3,10 @@ scan-1	scan	Singleton
 scan-3	scan	Singleton
 scan-4	scan	Singleton
 join-5	broadcast_join	Singleton	deps=scan-3,exchange-replicate-join-5-4
-scan-6	scan	Hash(l_partkey,l_suppkey)/4
-final_aggregate-45	final_aggregate	Hash(l_partkey,l_suppkey)/4	deps=scan-6
+scan-6	scan	Hash(l_partkey,l_suppkey)/32
+final_aggregate-45	final_aggregate	Hash(l_partkey,l_suppkey)/32	deps=scan-6
 exchange-repartition-46	exchange-repartition	Hash(ps_partkey,ps_suppkey)/32	deps=join-5
-exchange-repartition-47	exchange-repartition	Hash(l_partkey,l_suppkey)/32	deps=final_aggregate-45
-join-48	hash_join	Hash(ps_partkey,ps_suppkey)/32	deps=exchange-repartition-46,exchange-repartition-47
+join-48	hash_join	Hash(ps_partkey,ps_suppkey)/32	deps=exchange-repartition-46,final_aggregate-45
 join-49	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-49-10,scan-1
 exchange-replicate-join-5-4	exchange-replicate	Broadcast	deps=scan-4
 exchange-replicate-join-49-10	exchange-replicate	Broadcast	deps=join-48
