@@ -41,6 +41,14 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	// filter node above the join tree).
 	plan = reduceDecorrelatedScalarAggs(plan)
 	plan = dedupSemiAntiBuildSide(plan)
+	// Push semi/anti joins (decorrelated IN / NOT IN) below inner joins so
+	// they filter before the join multiplies work — reorderJoins then
+	// treats the semi-filtered relation as a leaf of the chain it orders.
+	// SF100 Q18: the o_orderkey IN (HAVING subquery) semijoin applied
+	// above customer⋈orders meant joining all 150M orders×customer rows
+	// (15.8s, 8.8 GB materialized) before filtering to 6,398. Kill switch
+	// WADJET_SEMI_PUSHDOWN=0.
+	plan = pushSemiAntiBelowInnerJoins(plan)
 	plan = reorderJoins(plan)
 	plan = rewriteDistinctAsGroupBy(plan)
 	plan = extractPartitionFilters(plan)
@@ -1375,110 +1383,6 @@ func flattenASTAnd(expr plansql.Node, result *[]Predicate) {
 // extractCommonORPredicates walks the plan tree and decomposes OR predicates
 // that share common terms across all branches. For example:
 //
-// pushDownSemiAntiJoins pushes semi/anti joins through inner joins so that
-// they filter earlier in the pipeline. For example:
-//
-//	SemiJoin(InnerJoin(A, B), subq, key=A.col)
-//
-// becomes:
-//
-//	InnerJoin(SemiJoin(A, subq, key=A.col), B)
-//
-// This is a major optimization for IN/NOT IN subqueries combined with multi-way
-// joins: filtering early reduces the cardinality of subsequent join probes.
-// For Q18 at SF1, this reduces 6M+ row joins to ~200 rows after semi-join filter.
-func pushDownSemiAntiJoins(n *Node) *Node {
-	if n == nil {
-		return nil
-	}
-	// Process children first (bottom-up)
-	for i, child := range n.Children {
-		n.Children[i] = pushDownSemiAntiJoins(child)
-	}
-
-	if n.Type != NodeJoin {
-		return n
-	}
-	jt := strings.ToLower(n.JoinType)
-	if jt != "semi" && jt != "anti" {
-		return n
-	}
-
-	// Only push down when there's no JoinFilter — JoinFilter references both
-	// probe and build sides, so pushing through inner joins requires validating
-	// that all probe-side filter columns exist in the target subtree.
-	if n.JoinFilter != "" {
-		return n
-	}
-
-	leftChild := n.Children[0]
-	if leftChild == nil || leftChild.Type != NodeJoin || !isInnerJoin(leftChild) {
-		return n
-	}
-
-	// Extract the outer (probe-side) key column from the semi-join condition.
-	// The condition is "outer_col = inner_col" — we need the outer_col to
-	// determine which side of the inner join provides it.
-	semiOuterCol := semiJoinOuterCol(n.JoinCond)
-	if semiOuterCol == "" {
-		return n
-	}
-
-	// Build column→table maps for each side of the inner join
-	_, leftColMap := collectScanInfo(leftChild.Children[0])
-	_, rightColMap := collectScanInfo(leftChild.Children[1])
-
-	leftHas := semiColInMap(semiOuterCol, leftColMap)
-	rightHas := semiColInMap(semiOuterCol, rightColMap)
-
-	if leftHas && !rightHas {
-		// Push semi/anti join into the left subtree of the inner join
-		innerJoin := leftChild
-		n.Children[0] = innerJoin.Children[0]
-		innerJoin.Children[0] = n
-		return pushDownSemiAntiJoins(innerJoin)
-	}
-	if rightHas && !leftHas {
-		// Push semi/anti join into the right subtree of the inner join
-		innerJoin := leftChild
-		n.Children[0] = innerJoin.Children[1]
-		innerJoin.Children[1] = n
-		return pushDownSemiAntiJoins(innerJoin)
-	}
-
-	return n
-}
-
-// semiJoinOuterCol extracts the outer (left/probe-side) column name from a
-// semi-join condition like "o_orderkey = l_orderkey". Handles optional AND
-// for multi-key conditions by returning only the first key.
-func semiJoinOuterCol(cond string) string {
-	// Handle multi-key: "a = b AND c = d" → just use first key
-	if idx := strings.Index(strings.ToLower(cond), " and "); idx >= 0 {
-		cond = cond[:idx]
-	}
-	eqIdx := strings.Index(cond, "=")
-	if eqIdx < 0 {
-		return ""
-	}
-	col := strings.TrimSpace(cond[:eqIdx])
-	// Strip table qualifier
-	if dot := strings.LastIndex(col, "."); dot >= 0 {
-		col = col[dot+1:]
-	}
-	return strings.ToLower(col)
-}
-
-// semiColInMap checks if a column name exists in a colToTable mapping.
-// Strips table qualifiers and compares case-insensitively.
-func semiColInMap(col string, colMap map[string]string) bool {
-	col = strings.ToLower(col)
-	if dot := strings.LastIndex(col, "."); dot >= 0 {
-		col = col[dot+1:]
-	}
-	_, ok := colMap[col]
-	return ok
-}
 
 //	(A AND C1 AND C2) OR (B AND C1 AND C2)
 //

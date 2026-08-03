@@ -1,6 +1,10 @@
 package physical
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/citc-tech/wadjet/internal/planner/logical"
+)
 
 // Q05-shape: hash_join (orders ⨝ customer-side chain) whose only consumer
 // is a same-distribution broadcast_join over a dimension chain — the
@@ -207,6 +211,13 @@ func TestFuseStageChains_Q18Interplay(t *testing.T) {
 	prevAgg := AggOverExchange.Load()
 	t.Cleanup(func() { AggOverExchange.Store(prevAgg) })
 	AggOverExchange.Store(true)
+	// The fusion+AggOverExchange interplay this test pins arises on the
+	// LEGACY Q18 join order; semi pushdown reshapes the tree so the 1:1
+	// hash_join→hash_join chain no longer forms from this SQL. Run with
+	// the rewrite off — the machinery under test is fusion, not the
+	// logical join order.
+	prevSemi := logical.SetSemiPushdownEnabled(false)
+	t.Cleanup(func() { logical.SetSemiPushdownEnabled(prevSemi) })
 
 	on := planWithFusion(t, aggOverExchangeQ18SQL, true)
 	_, fused := chainStats(on)

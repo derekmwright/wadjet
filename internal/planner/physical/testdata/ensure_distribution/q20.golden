@@ -1,13 +1,16 @@
-scan-0	scan	Singleton
+scan-0	scan	Hash(n_nationkey)/32
 scan-1	scan	Singleton
+scan-2	scan	Singleton
 scan-3	scan	Singleton
-scan-4	scan	Singleton
-join-5	broadcast_join	Singleton	deps=scan-3,exchange-replicate-join-5-4
-scan-6	scan	Hash(l_partkey,l_suppkey)/32
-final_aggregate-45	final_aggregate	Hash(l_partkey,l_suppkey)/32	deps=scan-6
-exchange-repartition-46	exchange-repartition	Hash(ps_partkey,ps_suppkey)/32	deps=join-5
-join-48	hash_join	Hash(ps_partkey,ps_suppkey)/32	deps=exchange-repartition-46,final_aggregate-45
-join-49	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-49-10,scan-1
-exchange-replicate-join-5-4	exchange-replicate	Broadcast	deps=scan-4
-exchange-replicate-join-49-10	exchange-replicate	Broadcast	deps=join-48
-exchange-gather-join-49	exchange-gather	Singleton	deps=join-49
+join-4	broadcast_join	Singleton	deps=scan-2,exchange-replicate-join-4-4
+scan-5	scan	Hash(l_partkey,l_suppkey)/32
+final_aggregate-44	final_aggregate	Hash(l_partkey,l_suppkey)/32	deps=scan-5
+exchange-repartition-45	exchange-repartition	Hash(ps_partkey,ps_suppkey)/32	deps=join-4
+join-47	hash_join	Hash(ps_partkey,ps_suppkey)/32	deps=exchange-repartition-45,final_aggregate-44
+join-48	broadcast_join	Singleton	deps=scan-1,exchange-replicate-join-48-10
+exchange-repartition-50	exchange-repartition	Hash(s_nationkey)/32	deps=join-48
+join-51	hash_join	Hash(n_nationkey)/32	deps=scan-0,exchange-repartition-50
+sort-52	sort	Singleton	deps=join-51
+exchange-replicate-join-4-4	exchange-replicate	Broadcast	deps=scan-3
+exchange-replicate-join-48-10	exchange-replicate	Broadcast	deps=join-47
+exchange-gather-sort-52	exchange-gather	Singleton	deps=sort-52

@@ -20,6 +20,12 @@ import (
 // not annotate it. This test documents which joins v1 covers and which
 // require v2.
 func TestDynamicFilterEligibilityQ18(t *testing.T) {
+	// This test audits dynamic-filter v1 coverage on the LEGACY Q18 join
+	// order (semijoin above the chain). Semi pushdown reshapes the plan
+	// so join-4 no longer processes unfiltered orders×customer; run with
+	// the rewrite off to keep pinning the v1 eligibility walk itself.
+	prev := logical.SetSemiPushdownEnabled(false)
+	t.Cleanup(func() { logical.SetSemiPushdownEnabled(prev) })
 	cat, ctx := setupTPCHCatalog(t)
 	const sql = `SELECT c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice,
 		SUM(l_quantity) AS total_qty
