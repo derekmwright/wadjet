@@ -371,6 +371,63 @@ func TestExecuteFragment_MorselParallel_AggPressureCollapse(t *testing.T) {
 	}
 }
 
+// TestExecuteFragment_MorselParallel_AggCollapseUnresolvedPrimary is the
+// #279 repro (SF100 Q18 join-8 under fuseJoinShuffle): the warmup batch —
+// the whole first input file — is fully filtered out, so the PRIMARY sink
+// never runs resolveIndices; the clones resolve on their own first batches;
+// pressure collapse forces the clone partials to merge into the empty
+// primary (adoptStateFrom copies resolved=true), and the serial
+// continuation then consumes the remaining input through the primary.
+// Pre-fix, its nil batchUpdaters scratch panicked with index-out-of-range
+// on the first post-merge batch; post-fix the totals must be exact.
+func TestExecuteFragment_MorselParallel_AggCollapseUnresolvedPrimary(t *testing.T) {
+	// Enough input files that the pressure collapse reliably fires while the
+	// channel still holds unconsumed batches — the serial continuation must
+	// actually consume through the adopted primary for the repro to bite.
+	const numFiles = 64
+	const rowsPerFile = 2048
+	const totalRows = numFiles * rowsPerFile
+	// File 0 holds ids [0, rowsPerFile); the v >= minV filter drops it
+	// entirely, which is exactly the fully-filtered-warmup precondition.
+	const minV = rowsPerFile
+
+	bucket := "morsel-agg-collapse-unresolved"
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), bucket); err != nil {
+		t.Fatalf("MakeBucket: %v", err)
+	}
+	// groups == totalRows → per-row groups; state growth trips the tiny
+	// budget fast, same shape as AggPressureCollapse above.
+	keys, want := putGroupedFiles(t, store, bucket, numFiles, rowsPerFile, totalRows, minV)
+
+	executor := NewExecutor(store, NewLRUCache(4*1024*1024), nil)
+	executor.SetSharedPoolBudget(256 * 1024)
+	executor.SetMorselWorkers(4)
+	executor.cpuTokens = newCPUTokens(8)
+
+	task := aggFragmentTask(bucket, keys, minV)
+	result := &distributed.ResultNotification{TaskID: task.ID}
+	if err := executor.executeStage(context.Background(), task, result); err != nil {
+		t.Fatalf("executeStage: %v", err)
+	}
+	if got := executor.morselCollapses.Load(); got < 1 {
+		t.Fatalf("expected at least one pressure collapse (repro precondition), counter = %d", got)
+	}
+	const wantRows = totalRows - rowsPerFile
+	if result.NumRows != int64(wantRows) {
+		t.Fatalf("NumRows = %d, want %d", result.NumRows, wantRows)
+	}
+	got := readGroupTotals(t, store, bucket, result.ResultFiles[0])
+	if len(got) != wantRows {
+		t.Fatalf("output groups = %d, want %d", len(got), wantRows)
+	}
+	for g, s := range want {
+		if got[g] != s {
+			t.Fatalf("group %d: total %v, want %v (state lost across collapse/merge)", g, got[g], s)
+		}
+	}
+}
+
 // TestExecuteFragment_MorselParallel_AggEmptyInput covers the breaker
 // warmup-nil path: zero input batches must still finalize the aggregate
 // (empty output) without engaging clones.

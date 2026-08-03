@@ -1063,22 +1063,29 @@ func (h *HashAggregate) resolveIndices(b *batch.RecordBatch) {
 		}
 		if allBatchable {
 			h.isScalarAgg = true
-			h.scalarAccs = make([]kernel.Accumulator, len(h.Aggs))
+			// scalarAccs may already hold merged clone partials: mergeSinkState's
+			// scalar adoption does not set h.resolved, so a post-merge Consume
+			// (collapse serial continuation, spill replay) re-enters resolution
+			// here — remaking the accumulators would silently discard the merged
+			// state (#279 sibling: wrong results instead of a panic).
+			if h.scalarAccs == nil {
+				h.scalarAccs = make([]kernel.Accumulator, len(h.Aggs))
+			}
 		}
 	}
 }
 
 func (h *HashAggregate) consumeBatch(b *batch.RecordBatch) {
 	// Terminal defense for the #277 panic family: a zero-column batch can
-	// reach here through paths the Consume-entry guard cannot cover — the
-	// 2026-08-02 SF100 stacks show one arriving via the external-merge
-	// drain branch AFTER the entry guard passed, i.e. the batch's Columns
-	// were emptied between guard and here (recycled-batch hazard; both
-	// the updater-selection loop and the scalar kernels index b.Columns
-	// by resolved position). Pure COUNT(*)-style aggregates (every
-	// aggColIdx < 0) legitimately consume schemaless batches and proceed.
-	// Otherwise skipping is no worse than the panic it replaces — both
-	// lose the batch and the task retry re-runs against durable inputs.
+	// reach here through paths the Consume-entry guard cannot cover (the
+	// flushSpilledOps drain feeds Consume without gates). Pure
+	// COUNT(*)-style aggregates (every aggColIdx < 0) legitimately consume
+	// schemaless batches and proceed. Otherwise skipping is no worse than
+	// the panic it replaces. NOTE: the 2026-08-02 SF100 Q18 join-8 stacks
+	// that were first read as "Columns emptied between this guard and the
+	// updater loop" were actually #279 — a nil batchUpdaters scratch after
+	// adoptStateFrom, one line below the b.Columns index on the same
+	// source line. The batch was never mutated; no such race exists.
 	if len(b.Columns) == 0 {
 		for _, ci := range h.aggColIdx {
 			if ci >= 0 {
@@ -3124,6 +3131,13 @@ func (h *HashAggregate) adoptStateFrom(o *HashAggregate) {
 	h.groupColMeta = o.groupColMeta
 	h.aggUpdaters = o.aggUpdaters
 	h.aggUpdatersNoNull = o.aggUpdatersNoNull
+	// Per-batch updater-selection scratch, normally sized by resolveIndices.
+	// h skipped resolveIndices when its warmup batch was fully filtered, and
+	// adopting o.resolved below suppresses it forever — yet the post-merge
+	// consume paths (pressure-collapse serial continuation, spilled-partition
+	// replay) index this scratch unconditionally (#279: SF100 Q18 join-8,
+	// index-out-of-range at the first post-adoption consumeBatch).
+	h.batchUpdaters = make([]kernel.RowAggUpdater, len(h.Aggs))
 	h.batchAggKernels = o.batchAggKernels
 	h.aggF64Extract = o.aggF64Extract
 	h.aggF64Extract2 = o.aggF64Extract2
