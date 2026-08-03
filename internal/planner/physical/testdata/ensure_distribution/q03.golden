@@ -3,9 +3,8 @@ scan-1	scan	Singleton
 join-2	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-2-2
 scan-3	scan	Hash(l_orderkey)/32
 exchange-repartition-4	exchange-repartition	Hash(o_orderkey)/32	deps=join-2
-join-6	hash_join	Hash(o_orderkey)/32	deps=exchange-repartition-4,scan-3
-final_aggregate-8	final_aggregate	Hash(l_orderkey,o_orderdate,o_shippriority)/4	deps=exchange-repartition-final_aggregate-8-8
+join-6	hash_join	Hash(l_orderkey,o_orderdate,o_shippriority)/4	deps=exchange-repartition-4,scan-3
+final_aggregate-8	final_aggregate	Hash(l_orderkey,o_orderdate,o_shippriority)/4	deps=join-6
 sort-9	sort	Singleton	deps=final_aggregate-8
 exchange-replicate-join-2-2	exchange-replicate	Broadcast	deps=scan-1
-exchange-repartition-final_aggregate-8-8	exchange-repartition	Hash(l_orderkey,o_orderdate,o_shippriority)/4	deps=join-6
 exchange-gather-sort-9	exchange-gather	Singleton	deps=sort-9

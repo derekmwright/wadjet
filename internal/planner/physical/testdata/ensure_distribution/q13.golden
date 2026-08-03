@@ -1,8 +1,7 @@
 scan-0	scan	Singleton
 scan-1	scan	Hash(o_custkey)/32
 exchange-repartition-2	exchange-repartition	Hash(c_custkey)/32	deps=scan-0
-join-4	hash_join	Hash(c_custkey)/32	deps=exchange-repartition-2,scan-1
-final_aggregate-6	final_aggregate	Hash(c_custkey)/4	deps=exchange-repartition-final_aggregate-6-6
+join-4	hash_join	Hash(c_custkey)/4	deps=exchange-repartition-2,scan-1
+final_aggregate-6	final_aggregate	Hash(c_custkey)/4	deps=join-4
 sort-7	sort	Singleton	deps=final_aggregate-6
-exchange-repartition-final_aggregate-6-6	exchange-repartition	Hash(c_custkey)/4	deps=join-4
 exchange-gather-sort-7	exchange-gather	Singleton	deps=sort-7
