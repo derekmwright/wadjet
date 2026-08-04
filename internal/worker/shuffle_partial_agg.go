@@ -40,6 +40,24 @@ type cappedPartialAgg struct {
 	inRows  int64
 	outRows int64
 	flushes int64
+
+	// resolved/disabled implement first-batch schema intersection: the
+	// planner's PartialAggKeys derive from the exchange's DECLARED payload,
+	// which is an over-approximated union by planner convention ("the
+	// reader ignores columns that don't exist"). Grouping by a declared-
+	// but-absent column would make HashAggregate materialize it as an
+	// all-null placeholder in every flush — the placeholder then collides
+	// with the REAL column of the same name on a downstream join's build
+	// side, forcing alias qualification and breaking bare-name resolution
+	// for every consumer after it (SF100 Q18 composed-stack 0-rows,
+	// results/20260803-223926). Keys are intersected against the first
+	// batch's actual schema; specs whose input is absent are dropped; if
+	// nothing combinable remains (or a partition key is itself absent),
+	// the operator disables itself and the stream passes through raw.
+	resolved      bool
+	disabled      bool
+	droppedKeys   int
+	partitionKeys []string
 }
 
 // defaultPartialAggCapBytes bounds the per-task hash state. 128 MB keeps
@@ -49,6 +67,15 @@ type cappedPartialAgg struct {
 const defaultPartialAggCapBytes = 128 << 20
 
 func newCappedPartialAgg(keys []string, specs []distributed.AggSpec, capBytes int64) *cappedPartialAgg {
+	return newCappedPartialAggPartitioned(keys, specs, nil, capBytes)
+}
+
+// newCappedPartialAggPartitioned additionally pins the exchange's partition
+// keys: if any of them is absent from the runtime schema the operator
+// disables itself entirely (a phantom partition key means the declared
+// payload has diverged from the stream beyond what key-intersection can
+// repair).
+func newCappedPartialAggPartitioned(keys []string, specs []distributed.AggSpec, partitionKeys []string, capBytes int64) *cappedPartialAgg {
 	if capBytes <= 0 {
 		capBytes = defaultPartialAggCapBytes
 	}
@@ -61,11 +88,52 @@ func newCappedPartialAgg(keys []string, specs []distributed.AggSpec, capBytes in
 			OutputType: aggOutputTypeString(s.Func),
 		}
 	}
-	return &cappedPartialAgg{groupBy: keys, aggs: aggs, capBytes: capBytes}
+	return &cappedPartialAgg{groupBy: keys, aggs: aggs, capBytes: capBytes, partitionKeys: partitionKeys}
 }
 
-func (p *cappedPartialAgg) ensureAgg(ctx context.Context) error {
-	if p.agg != nil {
+// resolveAgainst intersects the configured keys/specs with the actual
+// batch schema (see the type comment). Called once, on the first batch.
+func (p *cappedPartialAgg) resolveAgainst(b *batch.RecordBatch) {
+	p.resolved = true
+	present := make(map[string]bool, len(b.Schema))
+	for _, c := range b.Schema {
+		present[c.Name] = true
+	}
+	for _, k := range p.partitionKeys {
+		if !present[k] {
+			p.disabled = true
+			return
+		}
+	}
+	keptKeys := p.groupBy[:0]
+	for _, k := range p.groupBy {
+		if present[k] {
+			keptKeys = append(keptKeys, k)
+		} else {
+			p.droppedKeys++
+		}
+	}
+	p.groupBy = keptKeys
+	keptAggs := p.aggs[:0]
+	for _, a := range p.aggs {
+		if present[a.InputCol] {
+			keptAggs = append(keptAggs, a)
+		}
+	}
+	p.aggs = keptAggs
+	// Nothing combinable, or grouping degenerated to zero keys (which
+	// would collapse a flush to one row and change row multiplicity for
+	// non-aggregate consumers): pass through raw.
+	if len(p.aggs) == 0 || len(p.groupBy) == 0 {
+		p.disabled = true
+	}
+}
+
+func (p *cappedPartialAgg) ensureAgg(ctx context.Context, b *batch.RecordBatch) error {
+	if !p.resolved {
+		p.resolveAgainst(b)
+	}
+	if p.disabled || p.agg != nil {
 		return nil
 	}
 	p.agg = exec.NewHashAggregate(p.groupBy, p.aggs)
@@ -78,12 +146,18 @@ func (p *cappedPartialAgg) ensureAgg(ctx context.Context) error {
 
 // consume feeds one input batch. It returns flushed partial batches when
 // the epoch cap was exceeded, nil otherwise. The caller forwards any
-// returned batches to the sink before consuming further input.
+// returned batches to the sink before consuming further input. When the
+// operator disabled itself at resolve time the input batch is returned
+// verbatim (raw passthrough).
 func (p *cappedPartialAgg) consume(ctx context.Context, b *batch.RecordBatch) ([]*batch.RecordBatch, error) {
-	if err := p.ensureAgg(ctx); err != nil {
+	if err := p.ensureAgg(ctx, b); err != nil {
 		return nil, err
 	}
 	p.inRows += int64(b.ActiveLen())
+	if p.disabled {
+		p.outRows += int64(b.ActiveLen())
+		return []*batch.RecordBatch{b}, nil
+	}
 	if err := p.agg.Consume(ctx, b); err != nil {
 		return nil, fmt.Errorf("partial agg consume: %w", err)
 	}
