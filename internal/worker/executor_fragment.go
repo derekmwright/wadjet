@@ -499,6 +499,16 @@ func (s *bloomFilteredSource) Next(ctx context.Context) (*batch.RecordBatch, err
 			b = nb
 		}
 		if b != nil {
+			// DETACH the selection vector from the ops' reused scratch.
+			// BloomFilterOp writes b.Sel into its per-op selBuf, which the
+			// NEXT Execute overwrites. This source runs in the morsel
+			// producer while consumers still hold earlier batches — without
+			// a copy, batch N's Sel is corrupted by batch N+1's content
+			// (SF100 Q04 2026-08-04: Filter.Eval walked a stale index past
+			// the null bitmap, index out of range [1057*64+6]).
+			if b.Sel != nil {
+				b.Sel = append([]uint32(nil), b.Sel...)
+			}
 			return b, nil
 		}
 	}

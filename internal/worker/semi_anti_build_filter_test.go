@@ -162,3 +162,47 @@ func TestBloomFilteredSourceFilters(t *testing.T) {
 		}
 	}
 }
+
+// Regression: SF100 Q04 2026-08-04 worker panic ("index out of range
+// [1057*64+6]"). BloomFilterOp reuses an internal selBuf across Execute
+// calls; bloomFilteredSource runs in the morsel PRODUCER while consumers
+// still hold earlier batches, so each emitted batch's Sel must be
+// detached from the op's scratch. This asserts (a) no aliasing between
+// successive batches' Sel backing arrays and (b) batch N's Sel content
+// survives producing batch N+1.
+func TestBloomFilteredSourceSelDetached(t *testing.T) {
+	bloom, mask := exec.NewBloomSized(4)
+	for _, k := range []int64{10, 20, 30, 40} {
+		h := exec.BloomHashInt(k)
+		bloom[h&mask] |= 1 << (h & 63)
+		bloom[(h>>17)&mask] |= 1 << ((h >> 6) & 63)
+	}
+	op := exec.NewBloomFilterOp(bloom, mask, []string{"k"}, true)
+	if err := op.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	src := &bloomFilteredSource{
+		inner: &sliceSource{batches: []*batch.RecordBatch{
+			intBatch(t, "k", []int64{10, 999, 20}), // Sel -> [0 2]
+			intBatch(t, "k", []int64{998, 30, 40}), // Sel -> [1 2]
+		}},
+		ops: []*exec.BloomFilterOp{op},
+	}
+	b1, err := src.Next(context.Background())
+	if err != nil || b1 == nil || b1.Sel == nil {
+		t.Fatalf("batch 1: b=%v err=%v", b1, err)
+	}
+	sel1 := append([]uint32(nil), b1.Sel...)
+	b2, err := src.Next(context.Background())
+	if err != nil || b2 == nil || b2.Sel == nil {
+		t.Fatalf("batch 2: b=%v err=%v", b2, err)
+	}
+	if &b1.Sel[0] == &b2.Sel[0] {
+		t.Fatal("batch 1 and batch 2 share Sel backing storage (op scratch not detached)")
+	}
+	for i, v := range sel1 {
+		if b1.Sel[i] != v {
+			t.Fatalf("batch 1 Sel[%d] mutated by producing batch 2: %d != %d", i, b1.Sel[i], v)
+		}
+	}
+}
