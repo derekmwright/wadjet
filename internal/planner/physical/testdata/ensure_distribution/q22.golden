@@ -1,5 +1,5 @@
 scan-0	scan	Hash(c_custkey)/32
-scan-1	scan	Singleton	deps=scan-0
+scan-1	scan	Singleton
 exchange-repartition-3	exchange-repartition	Hash(o_custkey)/32	deps=scan-1
 join-4	hash_join	Hash(c_custkey)/32	deps=scan-0,exchange-repartition-3
 scan-5	scan	Singleton

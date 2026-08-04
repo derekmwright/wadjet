@@ -162,6 +162,18 @@ func (p *Planner) markSemiAntiBuildFilters(ctx context.Context, stages []Stage) 
 		if !allConsumersSemiAntiFrom(bscan.ID, exchangeID, s.ID, stages, byID, consumers) {
 			continue
 		}
+		// COST eligibility: the row-level bloom probe taxes EVERY scanned
+		// build row (~0.35µs/row against a multi-MB cache-hostile bitset —
+		// SF100 Q04 2026-08-04: +137 cpu-s on a 380M-row scan), while the
+		// saving is the shuffle write + hash build of REJECTED rows. One
+		// cheap key-only build doesn't pay for it (Q04 cold +19s, Q22
+		// steady +11s); two or more builds sharing the filtered exchange
+		// do (Q21: semi + anti over the same raw lineitem, cold −31%).
+		// Count LOGICAL builds: primary semi/anti consumers plus chained
+		// semi/anti joins whose build rides the same exchange.
+		if countSemiAntiBuilds(bscan.ID, exchangeID, stages, consumers) < 2 {
+			continue
+		}
 		// Dedupe: one consume per (B, source, column). A second semi/anti
 		// join sharing B and S reuses the existing filter.
 		if hasConsumeFor(bscan.ConsumeDynamicFilters, s.ID, buildKey) {
@@ -347,6 +359,38 @@ func probeDescendsFrom(id, source string, stages []Stage, byID map[string]int) b
 		}
 	}
 	return false
+}
+
+// countSemiAntiBuilds counts the LOGICAL semi/anti hash builds fed by the
+// scan/exchange pair: consumer stages using it as their primary build side
+// plus chained semi/anti joins (stage-chain fusion) whose BuildDepStage is
+// the exchange or scan.
+func countSemiAntiBuilds(scanID, exchangeID string, stages []Stage, consumers map[string][]int) int {
+	n := 0
+	seen := make(map[int]bool)
+	for _, id := range []string{scanID, exchangeID} {
+		if id == "" {
+			continue
+		}
+		for _, ci := range consumers[id] {
+			if seen[ci] {
+				continue
+			}
+			seen[ci] = true
+			c := &stages[ci]
+			if c.Type == StageHashJoin && (c.JoinType == "semi" || c.JoinType == "anti") &&
+				(c.RightDepStage == scanID || c.RightDepStage == exchangeID) {
+				n++
+			}
+			for _, cj := range c.ChainedJoins {
+				if (cj.JoinType == "semi" || cj.JoinType == "anti") &&
+					(cj.BuildDepStage == scanID || cj.BuildDepStage == exchangeID) {
+					n++
+				}
+			}
+		}
+	}
+	return n
 }
 
 func hasConsumeFor(consumes []DynamicFilterConsume, sourceID, col string) bool {

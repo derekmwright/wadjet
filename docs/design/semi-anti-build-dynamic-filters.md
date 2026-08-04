@@ -1,7 +1,43 @@
 # Semi/anti-build dynamic filters (probe-sourced build reduction)
 
-Status: In development (2026-08-04). Slice 1 of the Q21/Q04/Q22 gap arc.
+Status: Landed + SF100-validated for the multi-build class (2026-08-04
+arms: dd1fbef mechanism, 0350268 merge fix + eligibility).
 Kill switch: `WADJET_SEMIANTI_BUILD_FILTER=0`.
+
+## SF100 validation results (2026-08-04, three arms vs control ed7fe7e)
+
+- Mechanism (arm dd1fbef): Q21's rp-11 shipped 98.5M rows instead of
+  600M (6.1×); semi+anti build cpu 212 → 76 cpu-s (−64%); every join
+  and aggregate output byte-identical; 44/44 vsigs identical across
+  the pair (Q19 last-digit ULP flicker excepted, known).
+- First arm regressed wall: the coordinator's 24×8MB SERIAL partial
+  fetch put ~25s on the critical path. Fixed by WDF2 (s2-compressed
+  artifacts, ~5×) + bounded-parallel merge — gap now sub-second
+  (join-4 ends 23:32:49.0, merged .494, shuffle starts .5).
+- Fixed arm (0350268): Q21 cold 50.0 → 34.7s (−31%), steady −14%
+  (window-gapped comparison; same-window pair still owed).
+- Q04 cold regressed +19s and Q22 steady +11s: the row-level bloom
+  probe taxes EVERY scanned build row (~0.35µs against a multi-MB
+  cache-hostile bitset; Q04's 380M-row scan paid +137 cpu-s) while a
+  SINGLE cheap key-only build saves less than that. Hence the cost
+  eligibility below.
+
+## Cost eligibility (v1.1)
+
+Engage only when ≥2 logical semi/anti builds consume the filtered
+exchange (primary consumers + chained semi/anti joins riding the same
+build dep). Multi-build sharing is what amortizes the per-row probe
+tax — Q21 (semi l2 + anti l3 on one raw exchange) qualifies; Q04/Q22
+(one build each) do not and revert to baseline. Note: SF1's
+default-broadcast plan chains Q21's legs into one stage behind a
+replicate, so runtime engagement at SF1 requires the shuffle-regime
+shape (`--broadcast-bytes=-1`); the planner unit test pins marking on
+the SF100-like shape.
+
+Future refinements that could re-admit single-build shapes: blocked
+(cache-line) bloom layout to cut probe cost ~2×, source-cardinality-
+sized blooms (7M keys need 10 Mbit, not 64), and consumer-side (build-
+read-time) filtering that skips the shuffle-sender tax entirely.
 
 ## Problem
 
