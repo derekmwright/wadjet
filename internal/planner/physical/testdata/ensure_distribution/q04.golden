@@ -1,5 +1,5 @@
 scan-0	scan	Hash(o_orderkey)/32
-scan-1	scan	Hash(l_orderkey)/32
+scan-1	scan	Hash(l_orderkey)/32	deps=scan-0
 join-4	hash_join	Hash(o_orderkey)/32	deps=scan-0,scan-1
 final_aggregate-6	final_aggregate	Singleton	deps=join-4
 exchange-gather-final_aggregate-6	exchange-gather	Singleton	deps=final_aggregate-6

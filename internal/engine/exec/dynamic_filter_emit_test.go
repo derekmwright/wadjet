@@ -141,3 +141,63 @@ func TestDynamicFilterEmitOpEmptyBatchNoOp(t *testing.T) {
 		t.Error("nil batch should not change RowCount")
 	}
 }
+
+// TestDynamicFilterEmitOpUnresolvedPoison: an op that saw rows but could
+// not resolve its key column must report Unresolved (the worker withholds
+// the partial — an incomplete bloom falsely rejects rows downstream). An
+// op that saw NO rows is not unresolved: its key set is legitimately empty.
+func TestDynamicFilterEmitOpUnresolvedPoison(t *testing.T) {
+	op := NewDynamicFilterEmitOp("f1", "missing_col", "int64", 1024)
+	schema := []parquet.Column{{Name: "id", Type: parquet.TypeInt64}}
+	b := batch.NewRecordBatch(schema, 4)
+	if _, err := op.Execute(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	if snap := op.Snapshot(); !snap.Unresolved {
+		t.Fatal("op saw rows without resolving key column; Snapshot must be Unresolved")
+	}
+
+	idle := NewDynamicFilterEmitOp("f2", "missing_col", "int64", 1024)
+	if snap := idle.Snapshot(); snap.Unresolved {
+		t.Fatal("op that saw no rows must NOT be Unresolved (empty key set is valid)")
+	}
+}
+
+// TestDynamicFilterEmitOpQualifiedSuffixResolution: join outputs may carry
+// the key alias-qualified ("l1.l_orderkey"); a UNIQUE suffix match must
+// resolve, while an ambiguous suffix must stay unresolved.
+func TestDynamicFilterEmitOpQualifiedSuffixResolution(t *testing.T) {
+	op := NewDynamicFilterEmitOp("f1", "l_orderkey", "int64", 1024)
+	schema := []parquet.Column{
+		{Name: "l1.l_orderkey", Type: parquet.TypeInt64},
+		{Name: "other", Type: parquet.TypeInt64},
+	}
+	b := batch.NewRecordBatch(schema, 2)
+	b.Columns[0].Int64Data[0] = 11
+	b.Columns[0].Int64Data[1] = 22
+	if _, err := op.Execute(context.Background(), b); err != nil {
+		t.Fatal(err)
+	}
+	snap := op.Snapshot()
+	if snap.Unresolved || snap.RowCount != 2 {
+		t.Fatalf("unique suffix must resolve: unresolved=%v rows=%d", snap.Unresolved, snap.RowCount)
+	}
+	for _, k := range []int64{11, 22} {
+		if !BloomContains(snap.Bloom, snap.BloomMask, BloomHashInt(k)) {
+			t.Errorf("bloom missing key %d", k)
+		}
+	}
+
+	amb := NewDynamicFilterEmitOp("f2", "l_orderkey", "int64", 1024)
+	schema2 := []parquet.Column{
+		{Name: "l1.l_orderkey", Type: parquet.TypeInt64},
+		{Name: "l2.l_orderkey", Type: parquet.TypeInt64},
+	}
+	b2 := batch.NewRecordBatch(schema2, 1)
+	if _, err := amb.Execute(context.Background(), b2); err != nil {
+		t.Fatal(err)
+	}
+	if snap := amb.Snapshot(); !snap.Unresolved {
+		t.Fatal("ambiguous suffix must stay unresolved (wrong column would poison the bloom)")
+	}
+}

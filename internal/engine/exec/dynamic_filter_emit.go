@@ -26,6 +26,7 @@ type DynamicFilterEmitOp struct {
 
 	keyIdx   int
 	resolved bool
+	sawRows  bool
 
 	hasRange bool
 	min, max int64
@@ -60,9 +61,17 @@ func (op *DynamicFilterEmitOp) Execute(_ context.Context, in *batch.RecordBatch)
 	if in == nil || in.ActiveLen() == 0 {
 		return in, nil
 	}
+	op.sawRows = true
 
 	if !op.resolved {
 		op.keyIdx = in.ColumnIndex(op.keyColumn)
+		if op.keyIdx < 0 {
+			// Join outputs may carry the key alias-qualified
+			// ("l1.l_orderkey"). Accept a UNIQUE suffix match; ambiguity
+			// (two qualified columns with the same base name) stays
+			// unresolved — a wrong column would poison the bloom.
+			op.keyIdx = uniqueSuffixColumnIndex(in, op.keyColumn)
+		}
 		op.resolved = true
 		if op.bloom == nil {
 			nSlots := op.bloomBits / 64
@@ -166,24 +175,54 @@ type DynamicFilterPartial struct {
 	HasRange  bool
 	Min, Max  int64
 	RowCount  int64
+	// Unresolved is set when the op observed input rows but could not
+	// resolve KeyColumn in the batch schema — the partial is missing keys
+	// that exist in the stream and MUST NOT be uploaded (a bloom missing
+	// live keys falsely rejects rows at the consume side). A task that saw
+	// zero rows is NOT unresolved: its key set is legitimately empty.
+	Unresolved bool
 }
 
 // Snapshot returns the accumulated partial. Safe to call once after the
 // pipeline has finished — caller takes ownership of the bloom slice.
 func (op *DynamicFilterEmitOp) Snapshot() DynamicFilterPartial {
 	return DynamicFilterPartial{
-		FilterID:  op.filterID,
-		KeyType:   op.keyType,
-		KeyColumn: op.keyColumn,
-		BloomBits: op.bloomBits,
-		Bloom:     op.bloom,
-		BloomMask: op.bloomMask,
-		HasRange:  op.hasRange,
-		Min:       op.min,
-		Max:       op.max,
-		RowCount:  op.rowCount,
+		FilterID:   op.filterID,
+		KeyType:    op.keyType,
+		KeyColumn:  op.keyColumn,
+		BloomBits:  op.bloomBits,
+		Bloom:      op.bloom,
+		BloomMask:  op.bloomMask,
+		HasRange:   op.hasRange,
+		Min:        op.min,
+		Max:        op.max,
+		RowCount:   op.rowCount,
+		Unresolved: op.sawRows && op.keyIdx < 0,
 	}
 }
 
 // FilterID lets the runner correlate the op back to its OpSpec entry.
 func (op *DynamicFilterEmitOp) FilterID() string { return op.filterID }
+
+// uniqueSuffixColumnIndex returns the index of the single column whose
+// base name (segment after the last '.') equals name, or -1 when zero or
+// multiple columns match.
+func uniqueSuffixColumnIndex(in *batch.RecordBatch, name string) int {
+	found := -1
+	for i, col := range in.Schema {
+		cn := col.Name
+		for j := len(cn) - 1; j >= 0; j-- {
+			if cn[j] == '.' {
+				cn = cn[j+1:]
+				break
+			}
+		}
+		if cn == name {
+			if found >= 0 {
+				return -1
+			}
+			found = i
+		}
+	}
+	return found
+}

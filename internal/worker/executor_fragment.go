@@ -351,6 +351,33 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 			return fmt.Errorf("fragment task %s: emit op init: %w", task.ID, err)
 		}
 	}
+	// Output-side emits (DynamicFilterEmit.AtOutput — semi/anti build
+	// filters): accumulate over the stage's OUTPUT stream by wrapping the
+	// sink, which covers the linear, parallel, and breaker paths in one
+	// place. The wrapper serializes accumulation — parallel fragments call
+	// sink.consume concurrently, and racing `bloom[i] |= bit` read-modify-
+	// writes would silently LOSE keys (false rejections downstream).
+	sinkEmitOps, err := buildDynamicFilterEmitOps(sinkSpec.DynamicFilterEmits)
+	if err != nil {
+		return fmt.Errorf("fragment task %s: sink emit ops: %w", task.ID, err)
+	}
+	if len(sinkEmitOps) > 0 {
+		for _, op := range sinkEmitOps {
+			if err := op.Init(ctx); err != nil {
+				return fmt.Errorf("fragment task %s: sink emit op init: %w", task.ID, err)
+			}
+		}
+		sink = &emitCapturingSink{inner: sink, ops: sinkEmitOps}
+	}
+	allEmitOps := append(append([]*exec.DynamicFilterEmitOp(nil), emitOps...), sinkEmitOps...)
+	allEmitSpecs := append(append([]distributed.DynamicFilterEmit(nil), sourceSpec.DynamicFilterEmits...), sinkSpec.DynamicFilterEmits...)
+
+	// Row-level dynamic-filter consume: the source already applies specs at
+	// row-group granularity (buildFragmentSource); uniform-key filters (join
+	// keys) never prune a row group, so also filter row-level via selection
+	// vectors before the first operator. Adaptive disable inside
+	// BloomFilterOp bypasses non-selective blooms after 32 batches.
+	src = e.wrapSourceWithBloomFilters(ctx, task, sourceSpec, src)
 
 	if len(breakerIdxs) == 0 {
 		// Linear pipeline: source → unary ops → sink.
@@ -363,7 +390,7 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 		if err := e.runFragmentLinear(ctx, task, src, ops, sink, result); err != nil {
 			return err
 		}
-		return e.finalizeDynamicFilterEmits(ctx, task, emitOps, sourceSpec.DynamicFilterEmits, result)
+		return e.finalizeDynamicFilterEmits(ctx, task, allEmitOps, allEmitSpecs, result)
 	}
 
 	// One or more pipeline-breakers — split middle into N+1 unary segments
@@ -376,8 +403,108 @@ func (e *Executor) executeFragment(ctx context.Context, task distributed.Task, r
 	if err := e.runFragmentWithBreakers(ctx, task, src, middle, breakerIdxs, sink, result, emitOps); err != nil {
 		return err
 	}
-	return e.finalizeDynamicFilterEmits(ctx, task, emitOps, sourceSpec.DynamicFilterEmits, result)
+	return e.finalizeDynamicFilterEmits(ctx, task, allEmitOps, allEmitSpecs, result)
 }
+
+// emitCapturingSink decorates a fragmentSink with output-side dynamic-filter
+// accumulators. The mutex is required: parallel fragment paths consume from
+// k goroutines and the emit op's bloom writes are read-modify-write.
+type emitCapturingSink struct {
+	inner fragmentSink
+	ops   []*exec.DynamicFilterEmitOp
+	mu    sync.Mutex
+}
+
+func (s *emitCapturingSink) consume(ctx context.Context, b *batch.RecordBatch) error {
+	s.mu.Lock()
+	for _, op := range s.ops {
+		// Late-materialized view columns carry empty typed backing; the
+		// emit op reads typed vectors directly, so flatten first (same
+		// contract runChain applies before every non-view-aware op). Only
+		// marked stages pay this, on their post-join reduced output.
+		exec.FlattenForConsumer(b, op)
+		// Pass-through accumulator; never mutates b, never errors on data.
+		if _, err := op.Execute(ctx, b); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+	}
+	s.mu.Unlock()
+	return s.inner.consume(ctx, b)
+}
+
+func (s *emitCapturingSink) finalize(ctx context.Context, task distributed.Task, result *distributed.ResultNotification) error {
+	return s.inner.finalize(ctx, task, result)
+}
+
+func (s *emitCapturingSink) close() { s.inner.close() }
+
+// wrapSourceWithBloomFilters applies the spec's dynamic-filter blooms at row
+// level on top of whatever row-group pruning the source already does. A
+// single wrap point ahead of the operator chain covers the linear, morsel-
+// parallel, and breaker execution paths (Next is producer-single-threaded
+// in all three). Returns src unchanged when there is nothing to apply.
+func (e *Executor) wrapSourceWithBloomFilters(ctx context.Context, task distributed.Task, spec distributed.OpSpec, src exec.Source) exec.Source {
+	if len(spec.DynamicFilters) == 0 || spec.Type != distributed.OpScan {
+		return src
+	}
+	_, blooms, err := e.materializeDynamicFilters(spec.DynamicFilters)
+	if err != nil || len(blooms) == 0 {
+		return src
+	}
+	var ops []*exec.BloomFilterOp
+	for _, bf := range blooms {
+		if bf == nil {
+			continue
+		}
+		op := exec.NewBloomFilterOp(bf.Bloom, bf.BloomMask, []string{bf.Column}, bf.UseIntKey)
+		if err := op.Init(ctx); err != nil {
+			continue
+		}
+		ops = append(ops, op)
+	}
+	if len(ops) == 0 {
+		return src
+	}
+	e.logger.Info("dynamic_filter: row-level blooms active on fragment scan",
+		"task_id", task.ID, "stage_id", task.StageID, "filters", len(ops))
+	return &bloomFilteredSource{inner: src, ops: ops}
+}
+
+// bloomFilteredSource filters each batch through row-level bloom ops via
+// selection vectors. Batches that reject every row are skipped (the
+// consumer never sees them).
+type bloomFilteredSource struct {
+	inner exec.Source
+	ops   []*exec.BloomFilterOp
+}
+
+func (s *bloomFilteredSource) Init(ctx context.Context) error { return s.inner.Init(ctx) }
+
+func (s *bloomFilteredSource) Next(ctx context.Context) (*batch.RecordBatch, error) {
+	for {
+		b, err := s.inner.Next(ctx)
+		if err != nil || b == nil {
+			return b, err
+		}
+		for _, op := range s.ops {
+			nb, err := op.Execute(ctx, b)
+			if err != nil {
+				return nil, err
+			}
+			if nb == nil || nb.ActiveLen() == 0 {
+				b = nil
+				break
+			}
+			b = nb
+		}
+		if b != nil {
+			return b, nil
+		}
+	}
+}
+
+func (s *bloomFilteredSource) Close() error { return s.inner.Close() }
 
 func prependEmitOps(emit []*exec.DynamicFilterEmitOp, rest []exec.UnaryOperator) []exec.UnaryOperator {
 	if len(emit) == 0 {

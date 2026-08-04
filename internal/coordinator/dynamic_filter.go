@@ -103,6 +103,70 @@ func mergeBuildStatsFromPartials(
 	return merged, nil
 }
 
+// mergeCompleteBuildStats merges per-task partials and enforces
+// COMPLETENESS: a FilterID whose distinct partial count is below
+// expectedTasks is dropped entirely. A bloom missing any task's keys
+// falsely rejects rows at the consume side — "degrade to fewer partials"
+// is only safe for zero partials (no filter), never for some. Partial
+// refs are deduped by object key so task retries (same task ID → same
+// key, idempotent overwrite) don't double-count. Oversized filters are
+// staged to S3, mirroring dispatchScanFilterStage's inline-vs-stage
+// decision.
+func (c *Coordinator) mergeCompleteBuildStats(
+	ctx context.Context,
+	queryID, stageID string,
+	refs []distributed.DynamicFilterPartialRef,
+	expectedTasks int,
+) map[string]*BuildStats {
+	if len(refs) == 0 {
+		return nil
+	}
+	merged, err := mergeBuildStatsFromPartials(ctx, c.catalog.Store(), refs)
+	if err != nil {
+		c.logger.Warn("dynamic_filter: partial merge failed; downstream consumes will see no filter",
+			"stage_id", stageID, "error", err)
+		return nil
+	}
+	perFilter := make(map[string]map[string]bool, len(merged))
+	for _, r := range refs {
+		set := perFilter[r.FilterID]
+		if set == nil {
+			set = make(map[string]bool, expectedTasks)
+			perFilter[r.FilterID] = set
+		}
+		set[r.Key] = true
+	}
+	for fid := range merged {
+		if len(perFilter[fid]) < expectedTasks {
+			c.logger.Warn("dynamic_filter: incomplete partial coverage; filter withheld",
+				"stage_id", stageID, "filter_id", fid,
+				"partials", len(perFilter[fid]), "expected", expectedTasks)
+			delete(merged, fid)
+		}
+	}
+	staged := 0
+	for filterID, stats := range merged {
+		if stats == nil {
+			continue
+		}
+		if estimateBuildStatsInlineSize(stats) > dynamicFilterInlineThresholdBytes {
+			if err := stageBuildStats(ctx, c.catalog.Store(), c.config.ResultBucket, queryID, stageID, filterID, stats); err != nil {
+				c.logger.Warn("dynamic_filter: stage upload failed; falling back to inline",
+					"stage_id", stageID, "filter_id", filterID, "error", err)
+			}
+		}
+		if stats.StagedKey != "" {
+			staged++
+		}
+	}
+	c.logger.Info("dynamic_filter: build partials merged",
+		"stage_id", stageID,
+		"partial_refs", len(refs),
+		"merged_filters", len(merged),
+		"staged_to_s3", staged)
+	return merged
+}
+
 // stageBuildStats writes a BuildStats artifact to S3 when it exceeds the
 // inline threshold. Mutates stats.StagedBucket/StagedKey on success and
 // clears Bloom (so it isn't double-shipped through the OpSpec). Best-

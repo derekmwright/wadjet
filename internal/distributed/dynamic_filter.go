@@ -21,6 +21,11 @@ type DynamicFilterEmit struct {
 	KeyColumn string `json:"key_column"`
 	KeyType   string `json:"key_type"` // "int32" | "int64" | "date" — integer types only in v1
 	BloomBits int    `json:"bloom_bits"`
+	// AtOutput places the accumulator over the task's OUTPUT stream (just
+	// before the sink) instead of the scan source. Used by the semi/anti
+	// build-filter pass, whose bloom must reflect the stage's post-filter /
+	// post-join output keys (docs/design/semi-anti-build-dynamic-filters.md).
+	AtOutput bool `json:"at_output,omitempty"`
 }
 
 // DynamicFilterConsume, attached to a probe-scan Stage, instructs the

@@ -1911,17 +1911,27 @@ func (c *Coordinator) dispatchScanFilterStage(
 			scanOp.ScanShardCount = shardCount
 		}
 		// Build-side: each task emits a partial bloom+range artifact.
+		// Source-side emits (legacy leaf-scan blooms) accumulate at the
+		// scan; AtOutput emits (semi/anti build filters) ride the sink
+		// OpSpec below so they observe the stage's post-filter OUTPUT.
+		var outputEmits []distributed.DynamicFilterEmit
 		if len(stage.EmitDynamicFilters) > 0 {
-			emits := make([]distributed.DynamicFilterEmit, len(stage.EmitDynamicFilters))
-			for i, e := range stage.EmitDynamicFilters {
-				emits[i] = distributed.DynamicFilterEmit{
+			var scanEmits []distributed.DynamicFilterEmit
+			for _, e := range stage.EmitDynamicFilters {
+				em := distributed.DynamicFilterEmit{
 					FilterID:  e.FilterID,
 					KeyColumn: e.KeyColumn,
 					KeyType:   e.KeyType,
 					BloomBits: e.BloomBits,
+					AtOutput:  e.AtOutput,
+				}
+				if e.AtOutput {
+					outputEmits = append(outputEmits, em)
+				} else {
+					scanEmits = append(scanEmits, em)
 				}
 			}
-			scanOp.DynamicFilterEmits = emits
+			scanOp.DynamicFilterEmits = scanEmits
 		}
 		// Probe-side: coordinator-merged stats from the upstream build-scan.
 		// dynamicFilterSpecsFromBuildStats walks ConsumeDynamicFilters and
@@ -1958,13 +1968,15 @@ func (c *Coordinator) dispatchScanFilterStage(
 		}
 		if fuseShuffle {
 			t.Operators = append(t.Operators, distributed.OpSpec{
-				Type:          distributed.OpExchangeSender,
-				ShuffleKeys:   append([]string(nil), stage.Exchange.Keys...),
-				NumPartitions: stage.Exchange.Count,
+				Type:               distributed.OpExchangeSender,
+				ShuffleKeys:        append([]string(nil), stage.Exchange.Keys...),
+				NumPartitions:      stage.Exchange.Count,
+				DynamicFilterEmits: outputEmits,
 			})
 		} else {
 			t.Operators = append(t.Operators, distributed.OpSpec{
-				Type: distributed.OpUnpartitionedSink,
+				Type:               distributed.OpUnpartitionedSink,
+				DynamicFilterEmits: outputEmits,
 			})
 		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
@@ -2055,38 +2067,12 @@ func (c *Coordinator) dispatchScanFilterStage(
 
 	// Union per-task dynamic-filter partials into stage-level BuildStats.
 	// Skipped if the stage didn't emit (no partials expected) — saves the
-	// S3 round-trip for the common non-emit case.
+	// S3 round-trip for the common non-emit case. Completeness-enforced:
+	// a filter missing any task's partial is withheld (an incomplete bloom
+	// falsely rejects rows downstream).
 	var buildStats map[string]*BuildStats
 	if len(stage.EmitDynamicFilters) > 0 {
-		allRefs := retrier.DynamicFilterPartials()
-		merged, mergeErr := mergeBuildStatsFromPartials(ctx, c.catalog.Store(), allRefs)
-		if mergeErr != nil {
-			c.logger.Warn("dynamic_filter: partial merge failed; downstream consumes will see no filter",
-				"stage_id", stage.ID, "error", mergeErr)
-		}
-		// Inline-vs-stage decision per FilterID.
-		for filterID, stats := range merged {
-			if stats == nil {
-				continue
-			}
-			if estimateBuildStatsInlineSize(stats) > dynamicFilterInlineThresholdBytes {
-				if err := stageBuildStats(ctx, c.catalog.Store(), c.config.ResultBucket, queryID, stage.ID, filterID, stats); err != nil {
-					c.logger.Warn("dynamic_filter: stage upload failed; falling back to inline",
-						"stage_id", stage.ID, "filter_id", filterID, "error", err)
-				}
-			}
-		}
-		staged := 0
-		for _, stats := range merged {
-			if stats != nil && stats.StagedKey != "" {
-				staged++
-			}
-		}
-		c.logger.Info("dynamic_filter: build partials merged",
-			"stage_id", stage.ID,
-			"partial_refs", len(allRefs),
-			"merged_filters", len(merged),
-			"staged_to_s3", staged)
+		merged := c.mergeCompleteBuildStats(ctx, queryID, stage.ID, retrier.DynamicFilterPartials(), len(tasks))
 		buildStats = merged
 	}
 
@@ -2625,6 +2611,30 @@ func (c *Coordinator) dispatchComputeStage(
 			}
 			t.Operators = ops
 		}
+		// Output-side dynamic-filter emits (markSemiAntiBuildFilters): ride
+		// the fragment's terminal sink OpSpec so the worker accumulates the
+		// bloom over this stage's OUTPUT stream. Legacy single-op tasks
+		// (t.Operators == nil) cannot emit — no partials upload, the
+		// completeness check withholds the filter, and consumers run
+		// unfiltered (correct, just unoptimized).
+		if len(stage.EmitDynamicFilters) > 0 && len(t.Operators) > 0 {
+			var emits []distributed.DynamicFilterEmit
+			for _, e := range stage.EmitDynamicFilters {
+				if !e.AtOutput {
+					continue
+				}
+				emits = append(emits, distributed.DynamicFilterEmit{
+					FilterID:  e.FilterID,
+					KeyColumn: e.KeyColumn,
+					KeyType:   e.KeyType,
+					BloomBits: e.BloomBits,
+					AtOutput:  true,
+				})
+			}
+			if len(emits) > 0 {
+				t.Operators[len(t.Operators)-1].DynamicFilterEmits = emits
+			}
+		}
 		if clusterID := c.catalog.ClusterID(); clusterID != "" {
 			t.ClusterID = clusterID
 		}
@@ -2806,6 +2816,13 @@ func (c *Coordinator) dispatchComputeStage(
 		return StageOutput{}, fmt.Errorf("stage %s: task %s failed after %d attempts: %s", stage.ID, taskID, maxTaskAttempts, errMsg)
 	}
 	resultFiles := retrier.Files()
+	// Output-side dynamic-filter partials (markSemiAntiBuildFilters):
+	// completeness-enforced union into BuildStats, attached to every
+	// StageOutput shape below so the consuming build scan can resolve them.
+	var buildStats map[string]*BuildStats
+	if len(stage.EmitDynamicFilters) > 0 {
+		buildStats = c.mergeCompleteBuildStats(ctx, queryID, stage.ID, retrier.DynamicFilterPartials(), len(tasks))
+	}
 	// Fused join + downstream exchange-sender: each task produced N partition
 	// files at "<prefix>partition=NNNN/<task>.wshf" (worker's executeFragment
 	// → fragmentExchangeSink). Bucket all files across all tasks by partition
@@ -2831,6 +2848,7 @@ func (c *Coordinator) dispatchComputeStage(
 			Kind:          OutputPartitioned,
 			NumPartitions: numParts,
 			Files:         shardFiles,
+			BuildStats:    buildStats,
 			Bytes:         retrier.TotalBytes(),
 		}
 		out.PartitionRows, out.PartitionBytes = retrier.PartitionAccounting(numParts)
@@ -2852,6 +2870,7 @@ func (c *Coordinator) dispatchComputeStage(
 			Kind:          OutputPartitioned,
 			NumPartitions: skewGroups,
 			Files:         grouped,
+			BuildStats:    buildStats,
 			Bytes:         retrier.TotalBytes(),
 		}, nil
 	}
@@ -2887,6 +2906,7 @@ func (c *Coordinator) dispatchComputeStage(
 			Kind:          OutputSinglePart,
 			NumPartitions: 1,
 			Files:         [][]string{flat},
+			BuildStats:    buildStats,
 			Bytes:         retrier.TotalBytes(),
 		}, nil
 	}
@@ -2894,6 +2914,7 @@ func (c *Coordinator) dispatchComputeStage(
 		Kind:          kind,
 		NumPartitions: len(tasks),
 		Files:         files,
+		BuildStats:    buildStats,
 		Bytes:         retrier.TotalBytes(),
 	}, nil
 }

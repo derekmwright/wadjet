@@ -201,9 +201,21 @@ func validateStageGraph(t *testing.T, stages []Stage, queryName string) {
 			}
 		}
 
-		// Scan stages should have no dependencies
+		// Scan stages should have no STRUCTURAL dependencies. Stat-dep
+		// edges (dynamic-filter consumes: the scan waits for the emitting
+		// stage's BuildStats) are the one legitimate exception — each dep
+		// must be accounted for by a ConsumeDynamicFilters entry.
 		if s.Type == "scan" && len(s.Dependencies) > 0 {
-			t.Errorf("%s: scan stage %s has dependencies: %v", queryName, s.ID, s.Dependencies)
+			statDeps := make(map[string]bool, len(s.ConsumeDynamicFilters))
+			for _, c := range s.ConsumeDynamicFilters {
+				statDeps[c.SourceStageID] = true
+			}
+			for _, dep := range s.Dependencies {
+				if !statDeps[dep] {
+					t.Errorf("%s: scan stage %s has non-stat dependency %s (deps=%v)",
+						queryName, s.ID, dep, s.Dependencies)
+				}
+			}
 		}
 
 		// Join stages should have BuildTableAlias for self-join scenarios

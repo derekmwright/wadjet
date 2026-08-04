@@ -131,6 +131,17 @@ func (e *Executor) finalizeDynamicFilterEmits(
 		snap := op.Snapshot()
 		_ = specByID[snap.FilterID] // reserved for future key-type validation
 
+		// A partial that saw rows but never resolved its key column is
+		// POISON: it is missing keys that exist in the stream, and a bloom
+		// missing live keys falsely rejects rows at the consume side. Skip
+		// the upload; the coordinator's completeness check (one partial per
+		// task) then drops the whole FilterID and consumers run unfiltered.
+		if snap.Unresolved {
+			e.logger.Warn("dynamic_filter_emit: key column unresolved; partial withheld",
+				"task_id", task.ID, "filter_id", snap.FilterID)
+			continue
+		}
+
 		artifact := &distributed.DynamicFilterArtifact{
 			KeyType:   snap.KeyType,
 			HasRange:  snap.HasRange,

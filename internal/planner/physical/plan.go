@@ -363,6 +363,11 @@ type DynamicFilterEmit struct {
 	KeyColumn string
 	KeyType   string // "int32" | "int64" | "date"
 	BloomBits int    // total bloom-bitset size; identical across all tasks so union = bitwise OR
+	// AtOutput accumulates over the stage's OUTPUT stream (pre-sink) rather
+	// than the scan source — required when the emitting stage is a join or
+	// filtered scan whose output, not input, defines the key set
+	// (markSemiAntiBuildFilters).
+	AtOutput bool
 }
 
 // DynamicFilterConsume is the planner-side spec attached to a probe-side
@@ -1912,6 +1917,12 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// BEFORE AssertExchangeConsistency / ValidateNativeDAGShape so any
 	// stat-dep edges we add are visible to the validators.
 	stages = p.applyDynamicFilters(ctx, stages)
+	// Probe-sourced build filters for semi/anti joins (Q21's raw-lineitem
+	// EXISTS/NOT-EXISTS builds, Q04, Q22): the probe dep's output key set
+	// prunes the build exchange before shuffle + hash build. Runs after
+	// every rewiring pass (shapes final) and independent of the legacy
+	// DynamicFiltersEnabled flag. Kill switch WADJET_SEMIANTI_BUILD_FILTER=0.
+	stages = p.markSemiAntiBuildFilters(ctx, stages)
 	prev := BehaviorPreservingMode
 	BehaviorPreservingMode = false
 	defer func() { BehaviorPreservingMode = prev }()
