@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/klauspost/compress/s2"
 )
 
 // Dynamic-filter sideband artifact wire format. Each build-scan task uploads
@@ -28,8 +30,16 @@ import (
 // version forward (the next byte after magic is `version`).
 
 const (
-	dfMagic   = "WDF1"
-	dfVersion = 1
+	dfMagic = "WDF1"
+	// dfVersion 2 (2026-08-04): the bloom section is s2-compressed. A
+	// 64 Mbit per-task partial holding a few hundred thousand keys is
+	// overwhelmingly zero words — v1 shipped it raw at 8 MB/partial, and
+	// the coordinator's 24-partial serial merge put ~25s of S3 GETs on
+	// Q21's critical path (the entire SF100 regression of the first
+	// semi/anti-build-filter pair). v2 partials are tens-to-hundreds of
+	// KB. Decode still accepts v1.
+	dfVersion   = 2
+	dfVersionV1 = 1
 
 	dfKeyTypeInt32 = 0
 	dfKeyTypeInt64 = 1
@@ -100,14 +110,21 @@ func EncodeDynamicFilterArtifact(w io.Writer, a *DynamicFilterArtifact) error {
 	if _, err := w.Write(hdr); err != nil {
 		return err
 	}
-	buf := make([]byte, 8)
-	for _, word := range a.Bloom {
-		binary.LittleEndian.PutUint64(buf, word)
-		if _, err := w.Write(buf); err != nil {
-			return err
-		}
+	if len(a.Bloom) == 0 {
+		return nil
 	}
-	return nil
+	raw := make([]byte, 8*len(a.Bloom))
+	for i, word := range a.Bloom {
+		binary.LittleEndian.PutUint64(raw[i*8:], word)
+	}
+	comp := s2.Encode(nil, raw)
+	var lenBuf [8]byte
+	binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(comp)))
+	if _, err := w.Write(lenBuf[:]); err != nil {
+		return err
+	}
+	_, err = w.Write(comp)
+	return err
 }
 
 // DecodeDynamicFilterArtifact reads a WDF1-format artifact from r. The
@@ -120,8 +137,9 @@ func DecodeDynamicFilterArtifact(r io.Reader) (*DynamicFilterArtifact, error) {
 	if string(hdr[0:4]) != dfMagic {
 		return nil, fmt.Errorf("dynamic-filter: bad magic %q (want %q)", string(hdr[0:4]), dfMagic)
 	}
-	if hdr[4] != dfVersion {
-		return nil, fmt.Errorf("dynamic-filter: unsupported version %d", hdr[4])
+	ver := hdr[4]
+	if ver != dfVersion && ver != dfVersionV1 {
+		return nil, fmt.Errorf("dynamic-filter: unsupported version %d", ver)
 	}
 	kt, err := keyTypeFromCode(hdr[5])
 	if err != nil {
@@ -138,16 +156,41 @@ func DecodeDynamicFilterArtifact(r io.Reader) (*DynamicFilterArtifact, error) {
 	if nWords > 1<<25 { // 256 MiB safety cap
 		return nil, fmt.Errorf("dynamic-filter: implausibly large bloom (%d words)", nWords)
 	}
-	if nWords > 0 {
-		a.Bloom = make([]uint64, nWords)
-		buf := make([]byte, 8)
-		for i := range a.Bloom {
-			if _, err := io.ReadFull(r, buf); err != nil {
-				return nil, fmt.Errorf("dynamic-filter: read bloom[%d]: %w", i, err)
-			}
-			a.Bloom[i] = binary.LittleEndian.Uint64(buf)
-		}
-		a.BloomMask = uint64(nWords - 1)
+	if nWords == 0 {
+		return a, nil
 	}
+	raw := make([]byte, 8*nWords)
+	switch ver {
+	case dfVersionV1:
+		if _, err := io.ReadFull(r, raw); err != nil {
+			return nil, fmt.Errorf("dynamic-filter: read bloom: %w", err)
+		}
+	default: // v2: [8] comp_len + s2 block
+		var lenBuf [8]byte
+		if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+			return nil, fmt.Errorf("dynamic-filter: read comp len: %w", err)
+		}
+		compLen := binary.LittleEndian.Uint64(lenBuf[:])
+		if compLen > 8*nWords+1024 {
+			return nil, fmt.Errorf("dynamic-filter: implausible comp len %d for %d words", compLen, nWords)
+		}
+		comp := make([]byte, compLen)
+		if _, err := io.ReadFull(r, comp); err != nil {
+			return nil, fmt.Errorf("dynamic-filter: read comp bloom: %w", err)
+		}
+		dec, err := s2.Decode(raw, comp)
+		if err != nil {
+			return nil, fmt.Errorf("dynamic-filter: decompress bloom: %w", err)
+		}
+		if len(dec) != len(raw) {
+			return nil, fmt.Errorf("dynamic-filter: decompressed bloom %d bytes, want %d", len(dec), len(raw))
+		}
+		raw = dec
+	}
+	a.Bloom = make([]uint64, nWords)
+	for i := range a.Bloom {
+		a.Bloom[i] = binary.LittleEndian.Uint64(raw[i*8:])
+	}
+	a.BloomMask = uint64(nWords - 1)
 	return a, nil
 }

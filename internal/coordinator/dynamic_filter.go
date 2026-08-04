@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
@@ -37,27 +38,50 @@ func mergeBuildStatsFromPartials(
 	ctx context.Context,
 	store objstore.Store,
 	refs []distributed.DynamicFilterPartialRef,
-) (map[string]*BuildStats, error) {
+) (out map[string]*BuildStats, mergedCount map[string]int, retErr error) {
 	if len(refs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
+	// Fetch+decode all partials CONCURRENTLY (bounded), then union
+	// serially — the OR/min/max/rowcount union is order-independent.
+	// The serial fetch loop this replaces put ~25s of back-to-back S3
+	// GETs on Q21's critical path at SF100 (24 partials, first
+	// semi/anti-build-filter pair, 2026-08-04).
+	artifacts := make([]*distributed.DynamicFilterArtifact, len(refs))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i := range refs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			rc, _, err := store.Get(ctx, refs[i].Bucket, refs[i].Key)
+			if err != nil {
+				// Best-effort: a missing partial leaves artifacts[i] nil;
+				// the caller's completeness check then withholds the filter.
+				return
+			}
+			a, err := distributed.DecodeDynamicFilterArtifact(rc)
+			rc.Close()
+			if err != nil {
+				return
+			}
+			artifacts[i] = a
+		}(i)
+	}
+	wg.Wait()
 	merged := make(map[string]*BuildStats)
-	for _, ref := range refs {
-		rc, _, err := store.Get(ctx, ref.Bucket, ref.Key)
-		if err != nil {
-			// Treat as best-effort — log via the returned error annotation
-			// path? coordinator helper has no logger; bubble up a sentinel
-			// the caller can warn-and-continue on. Easier: just continue.
-			continue
-		}
-		artifact, err := distributed.DecodeDynamicFilterArtifact(rc)
-		rc.Close()
-		if err != nil {
+	mergedCount = make(map[string]int)
+	for i, ref := range refs {
+		artifact := artifacts[i]
+		if artifact == nil {
 			continue
 		}
 		if len(artifact.Bloom) > dynamicFilterMaxBloomWords {
 			continue
 		}
+		mergedCount[ref.FilterID]++
 		existing, ok := merged[ref.FilterID]
 		if !ok {
 			// First partial for this FilterID — adopt its shape.
@@ -100,7 +124,7 @@ func mergeBuildStatsFromPartials(
 		}
 		existing.RowCount += artifact.RowCount
 	}
-	return merged, nil
+	return merged, mergedCount, nil
 }
 
 // mergeCompleteBuildStats merges per-task partials and enforces
@@ -121,26 +145,31 @@ func (c *Coordinator) mergeCompleteBuildStats(
 	if len(refs) == 0 {
 		return nil
 	}
-	merged, err := mergeBuildStatsFromPartials(ctx, c.catalog.Store(), refs)
+	// Dedupe refs by object key FIRST: task retries re-append the same
+	// (idempotently overwritten) key, and a duplicate would both
+	// double-count completeness and double-merge RowCount.
+	seen := make(map[string]bool, len(refs))
+	deduped := refs[:0:0]
+	for _, r := range refs {
+		if !seen[r.Key] {
+			seen[r.Key] = true
+			deduped = append(deduped, r)
+		}
+	}
+	merged, mergedCount, err := mergeBuildStatsFromPartials(ctx, c.catalog.Store(), deduped)
 	if err != nil {
 		c.logger.Warn("dynamic_filter: partial merge failed; downstream consumes will see no filter",
 			"stage_id", stageID, "error", err)
 		return nil
 	}
-	perFilter := make(map[string]map[string]bool, len(merged))
-	for _, r := range refs {
-		set := perFilter[r.FilterID]
-		if set == nil {
-			set = make(map[string]bool, expectedTasks)
-			perFilter[r.FilterID] = set
-		}
-		set[r.Key] = true
-	}
+	// Completeness counts SUCCESSFULLY MERGED partials (not refs): a
+	// failed fetch/decode must withhold the filter exactly like a
+	// missing upload — an incomplete bloom falsely rejects rows.
 	for fid := range merged {
-		if len(perFilter[fid]) < expectedTasks {
+		if mergedCount[fid] < expectedTasks {
 			c.logger.Warn("dynamic_filter: incomplete partial coverage; filter withheld",
 				"stage_id", stageID, "filter_id", fid,
-				"partials", len(perFilter[fid]), "expected", expectedTasks)
+				"partials", mergedCount[fid], "expected", expectedTasks)
 			delete(merged, fid)
 		}
 	}
