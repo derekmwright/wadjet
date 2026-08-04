@@ -34,6 +34,18 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		if err != nil {
 			return nil, err
 		}
+		// Comma-separated FROM entries beyond the first parse into
+		// info.Tables (the parser only emits JoinInfo for explicit JOIN
+		// syntax). Fold them in as cross joins; pushdownPredicates and
+		// reorderJoins recover the real join conditions from WHERE.
+		// Dropping them silently returned wrong results (issue #281).
+		for _, t := range info.Tables[1:] {
+			right, err := resolveTableOrCTE(t, ctes)
+			if err != nil {
+				return nil, err
+			}
+			plan = NewJoin(plan, right, "cross", "")
+		}
 
 		for _, join := range info.Joins {
 			if join.Lateral && strings.HasPrefix(join.RightTable, "(") {
@@ -70,6 +82,14 @@ func BuildFromSelectWithCTEs(info *plansql.SelectInfo, ctes []plansql.CTEDef) (*
 		plan, err = resolveTableOrCTE(info.Tables[0], ctes)
 		if err != nil {
 			return nil, err
+		}
+		// Comma-join FROM list (see the explicit-join branch above).
+		for _, t := range info.Tables[1:] {
+			right, err := resolveTableOrCTE(t, ctes)
+			if err != nil {
+				return nil, err
+			}
+			plan = NewJoin(plan, right, "cross", "")
 		}
 	} else {
 		// Table-less SELECT (e.g., SELECT CURRENT_DATE, SELECT 1+1).

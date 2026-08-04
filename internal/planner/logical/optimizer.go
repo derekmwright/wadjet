@@ -36,6 +36,11 @@ func Optimize(plan *Node, annotators ...func(*Node)) *Node {
 	plan = decorrelateScalarSubqueries(plan)
 	plan = extractCommonORPredicates(plan)
 	plan = pushdownPredicates(plan)
+	// Move WHERE equalities onto comma-FROM cross joins (issue #281) so
+	// semi pushdown and reorderJoins see real join conditions. After
+	// pushdownPredicates: single-table predicates are already on scans,
+	// leaving only cross-relation predicates in the filter.
+	plan = liftWhereEquiPredsIntoJoins(plan)
 	// After pushdown so the cloned key-source branch carries its final
 	// filters (before pushdown, single-table predicates still sit in the
 	// filter node above the join tree).
