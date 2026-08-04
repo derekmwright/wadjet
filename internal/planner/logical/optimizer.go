@@ -2809,6 +2809,15 @@ func greedyJoinReorder(rels []*Node, edges []joinEdge) *Node {
 // enhanced greedy to find the join order that minimizes total hash join cost,
 // estimated from cardinality propagation through the join tree.
 func costBasedJoinReorder(rels []*Node, edges []joinEdge) *Node {
+	// DEBUG (repro-only): pin the left-deep join order to the
+	// comma-separated table-name list in WADJET_DEBUG_JOIN_ORDER,
+	// keeping the normal edge/condition assignment machinery.
+	if order := os.Getenv("WADJET_DEBUG_JOIN_ORDER"); order != "" {
+		if plan := debugPinnedJoinOrder(rels, edges, strings.Split(order, ",")); plan != nil {
+			slog.Info("DEBUG pinned join order applied", "order", order)
+			return plan
+		}
+	}
 	if len(rels) <= 16 {
 		plan, bushyJoins := dpJoinReorder(rels, edges)
 		// Validate: if the DP produced any inner join with an empty
@@ -2825,6 +2834,80 @@ func costBasedJoinReorder(rels []*Node, edges []joinEdge) *Node {
 		return plan
 	}
 	return greedyJoinReorder(rels, edges)
+}
+
+// debugPinnedJoinOrder (repro-only) builds a left-deep plan joining the
+// relations in exactly the order named by tables, using the same
+// edge/condition attachment as greedyJoinReorder. Returns nil if any
+// requested table doesn't match a relation (caller falls through to the
+// normal path).
+func debugPinnedJoinOrder(rels []*Node, edges []joinEdge, tables []string) *Node {
+	n := len(rels)
+	if len(tables) != n {
+		return nil
+	}
+	relTables := make([]map[string]bool, n)
+	for i, r := range rels {
+		relTables[i], _ = collectScanInfo(r)
+	}
+	seq := make([]int, 0, n)
+	taken := make([]bool, n)
+	for _, want := range tables {
+		// Prefer the narrowest matching relation: a bare scan of the
+		// requested table beats a subtree (e.g. a semi-wrapped join)
+		// that merely contains it among others.
+		found := -1
+		for i := 0; i < n; i++ {
+			if taken[i] || !relTables[i][strings.TrimSpace(want)] {
+				continue
+			}
+			if found < 0 || len(relTables[i]) < len(relTables[found]) {
+				found = i
+			}
+		}
+		if found < 0 {
+			return nil
+		}
+		taken[found] = true
+		seq = append(seq, found)
+	}
+	used := make([]bool, n)
+	usedEdges := make([]bool, len(edges))
+	used[seq[0]] = true
+	plan := rels[seq[0]]
+	for _, next := range seq[1:] {
+		bestEdge := -1
+		for ei, e := range edges {
+			if usedEdges[ei] {
+				continue
+			}
+			if (used[e.leftIdx] && e.rightIdx == next) || (used[e.rightIdx] && e.leftIdx == next) {
+				bestEdge = ei
+				break
+			}
+		}
+		if bestEdge < 0 {
+			plan = NewJoin(plan, rels[next], "inner", "")
+		} else {
+			usedEdges[bestEdge] = true
+			plan = NewJoin(plan, rels[next], edges[bestEdge].joinType, edges[bestEdge].joinCond)
+		}
+		used[next] = true
+		for ei, e := range edges {
+			if usedEdges[ei] {
+				continue
+			}
+			if used[e.leftIdx] && used[e.rightIdx] {
+				usedEdges[ei] = true
+				if plan.JoinCond != "" {
+					plan.JoinCond = plan.JoinCond + " AND " + e.joinCond
+				} else {
+					plan.JoinCond = e.joinCond
+				}
+			}
+		}
+	}
+	return plan
 }
 
 // hasEmptyJoinCond checks if the left-deep join spine has any inner join

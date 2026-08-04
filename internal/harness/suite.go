@@ -44,9 +44,44 @@ var SliceConfigs = map[Slice]SliceConfig{
 	},
 }
 
+// q18ChainSQL is a DEBUG variant of Q18 that pins the SF100 join order
+// via a CTE fence (reorderJoins skips joins involving CTE refs): the
+// semi-filtered orders join lineitem INSIDE the CTE, and customer joins
+// the CTE output last — reproducing the join-13→join-17 chain where the
+// partial-agg'd lineitem exchange's join output feeds the customer join.
+const q18ChainSQL = `with ol as (
+  select o_orderkey, o_custkey, o_orderdate, o_totalprice, l_quantity
+  from orders, lineitem
+  where o_orderkey = l_orderkey
+    and o_orderkey in (
+      select l_orderkey from lineitem group by l_orderkey having sum(l_quantity) > 300)
+)
+select c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum(l_quantity)
+from customer, ol
+where c_custkey = o_custkey
+group by c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+order by o_totalprice desc, o_orderdate
+limit 100`
+
 // LoadQuery returns the SQL text for the given TPC-H query name (e.g. "q05").
 // Uses SF100 scale factor for Q11 fraction calculation.
 func LoadQuery(name string) (string, error) {
+	if name == "q18c" {
+		return q18ChainSQL, nil
+	}
+	if name == "q18d" {
+		// Q18 with FROM order pre-arranged left-deep as
+		// ((orders ⋈ lineitem) ⋈ customer); run under
+		// WADJET_DEBUG_NO_JOIN_REORDER=1 to pin the SF100 join order.
+		return `select c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice, sum(l_quantity)
+from orders, lineitem, customer
+where o_orderkey in (
+    select l_orderkey from lineitem group by l_orderkey having sum(l_quantity) > 300)
+  and c_custkey = o_custkey and o_orderkey = l_orderkey
+group by c_name, c_custkey, o_orderkey, o_orderdate, o_totalprice
+order by o_totalprice desc, o_orderdate
+limit 100`, nil
+	}
 	num, err := parseQueryNum(name)
 	if err != nil {
 		return "", err

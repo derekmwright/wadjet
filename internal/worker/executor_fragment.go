@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"strings"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -2077,6 +2078,15 @@ func (e *Executor) buildFragmentJoinProbe(ctx context.Context, task distributed.
 		if err := hj.Build(ctx, src); err != nil {
 			return nil, fmt.Errorf("building hash table: %w", err)
 		}
+		if os.Getenv("WADJET_DEBUG_JOIN_TRACE") == "1" {
+			br := 0
+			for _, bb := range hj.DebugBuildBatches() {
+				br += bb.ActiveLen()
+			}
+			slog.Info("DEBUG hj build done", "stage", task.StageID, "task", task.ID,
+				"build_alias", spec.BuildAlias, "build_rows", br, "build_files", len(spec.BuildFiles),
+				"left_keys", spec.LeftKeys, "right_keys", spec.RightKeys, "join_type", spec.JoinType)
+		}
 		if hj.FixKeyAssignment() {
 			slog.Warn("join key repair fired at runtime — plan-time side assignment missed a pair",
 				"left_keys", hj.LeftKeys, "right_keys", hj.RightKeys)
@@ -2198,6 +2208,13 @@ type fragmentExchangeSink struct {
 func (s *fragmentExchangeSink) consume(ctx context.Context, b *batch.RecordBatch) error {
 	s.initMu.Lock()
 	if s.sink == nil {
+		if os.Getenv("WADJET_DEBUG_JOIN_TRACE") == "1" {
+			cols := make([]string, len(b.Schema))
+			for i, sc := range b.Schema {
+				cols[i] = fmt.Sprintf("%s:%v", sc.Name, sc.Type)
+			}
+			slog.Info("DEBUG exchange sink first batch schema", "cols", strings.Join(cols, ","), "rows", b.ActiveLen())
+		}
 		sink := newPartitionedShuffleSink(s.spillDir, s.shuffleKeys, s.numParts, b.Schema)
 		if err := sink.Init(ctx); err != nil {
 			s.initMu.Unlock()
@@ -2237,6 +2254,13 @@ type fragmentUnpartitionedSink struct {
 }
 
 func (s *fragmentUnpartitionedSink) consume(ctx context.Context, b *batch.RecordBatch) error {
+	if os.Getenv("WADJET_DEBUG_JOIN_TRACE") == "1" && s.sink.NumChunks() == 0 {
+		cols := make([]string, len(b.Schema))
+		for i, sc := range b.Schema {
+			cols[i] = fmt.Sprintf("%s:%v", sc.Name, sc.Type)
+		}
+		slog.Info("DEBUG sink first batch schema", "cols", strings.Join(cols, ","), "rows", b.ActiveLen())
+	}
 	return s.sink.Consume(ctx, b)
 }
 

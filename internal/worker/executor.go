@@ -1144,7 +1144,7 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 	// honors whatever the task carries.
 	var partialAgg *cappedPartialAgg
 	if len(task.PartialAggKeys) > 0 && len(task.PartialAggSpecs) > 0 {
-		partialAgg = newCappedPartialAgg(task.PartialAggKeys, task.PartialAggSpecs, 0)
+		partialAgg = newCappedPartialAggPartitioned(task.PartialAggKeys, task.PartialAggSpecs, task.ShuffleKeys, 0)
 	}
 
 	// Sink is created lazily on the first non-empty batch — it needs the
@@ -1256,7 +1256,8 @@ func (e *Executor) executeShuffle(ctx context.Context, task distributed.Task, re
 		}
 		e.logger.Info("shuffle partial agg",
 			"task_id", task.ID, "in_rows", partialAgg.inRows,
-			"out_rows", partialAgg.outRows, "flushes", partialAgg.flushes)
+			"out_rows", partialAgg.outRows, "flushes", partialAgg.flushes,
+			"dropped_phantom_keys", partialAgg.droppedKeys, "disabled", partialAgg.disabled)
 	}
 
 	tStreamEnd = time.Now()

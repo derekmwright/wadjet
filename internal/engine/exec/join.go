@@ -3,6 +3,8 @@ package exec
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -1894,6 +1896,38 @@ func (h *HashJoin) resolveProbeKeyIdx(b *batch.RecordBatch) {
 	h.probeKeyIdx = make([]int, len(h.LeftKeys))
 	for i, col := range h.LeftKeys {
 		h.probeKeyIdx[i] = columnIndexFallback(b, col)
+		if idx := h.probeKeyIdx[i]; idx >= 0 && debugJoinTrace {
+			v := b.Columns[idx]
+			sample := make([]any, 0, 3)
+			nulls := 0
+			for r := 0; r < b.Len && r < 3; r++ {
+				if v.Nulls.IsNull(r) {
+					nulls++
+					sample = append(sample, "NULL")
+					continue
+				}
+				switch v.Type {
+				case batch.TypeInt64:
+					sample = append(sample, v.Int64Data[r])
+				case batch.TypeFloat64:
+					sample = append(sample, v.Float64Data[r])
+				default:
+					sample = append(sample, fmt.Sprintf("type=%v", v.Type))
+				}
+			}
+			slog.Info("DEBUG probe key sample", "key", col, "build_alias", h.BuildTableAlias,
+				"col_type", v.Type, "first_values", fmt.Sprint(sample), "batch_len", b.Len)
+		}
+		if h.probeKeyIdx[i] < 0 {
+			cols := make([]string, len(b.Schema))
+			for ci, sc := range b.Schema {
+				cols[ci] = sc.Name
+			}
+			slog.Warn("DEBUG probe key unresolved — every probe key null, join emits nothing",
+				"key", col, "build_alias", h.BuildTableAlias,
+				"left_keys", h.LeftKeys, "right_keys", h.RightKeys,
+				"probe_batch_columns", cols)
+		}
 	}
 	h.probeResolved.Store(true)
 }
@@ -3918,3 +3952,12 @@ func antiProbeInt32(idx *intHashTable, data []int32, inSel []uint32, inLen int, 
 	}
 	return sel
 }
+
+// DebugBuildBatches exposes the build-side batches for repro-only
+// diagnostics (WADJET_DEBUG_JOIN_TRACE). Not for production use.
+func (h *HashJoin) DebugBuildBatches() []*batch.RecordBatch {
+	return h.buildBatches
+}
+
+// debugJoinTrace gates repro-only join diagnostics.
+var debugJoinTrace = os.Getenv("WADJET_DEBUG_JOIN_TRACE") == "1"
