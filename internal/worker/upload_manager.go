@@ -21,6 +21,20 @@ import (
 // backstop if the producer also dies.
 const uploadRetryAttempts = 3
 
+// Background-upload QoS (docs/design/upload-foreground-qos.md): each job
+// burns a core on s2 compression plus NVMe read-back plus PUT bandwidth,
+// and at the old fixed concurrency of 8 a heavy query's drain starved the
+// NEXT query's scans (SF100 Q06: 2s clean vs ~19s when the predecessor's
+// drain overlapped — the dominant short-query cold-variance signature,
+// 2026-08-05). Foreground tasks take priority: full width only while the
+// worker is otherwise idle. Kill switch WADJET_UPLOAD_QOS=0 pins the idle
+// width unconditionally.
+const (
+	uploadSlotsIdle  = 8
+	uploadSlotsBusy  = 2
+	uploadSlotPollMs = 50
+)
+
 // uploadRetryBackoff is the base delay between background upload retries
 // (doubled per attempt). Background work — latency here is invisible to
 // the query unless a consumer's S3 fallthrough is waiting on it.
@@ -50,7 +64,13 @@ type uploadManager struct {
 	nc     *nats.Conn
 	logger *slog.Logger
 
-	sem chan struct{} // global upload concurrency (matches the sync path's 8)
+	// Adaptive upload concurrency: uploadSlotsIdle wide while the worker
+	// has no foreground task, uploadSlotsBusy while it does (foreground
+	// scans must not fight 8 background compress+PUT streams for cores
+	// and NVMe). busy is nil-safe (nil = never busy = fixed idle width).
+	slots   atomic.Int64
+	busy    func() bool
+	yieldNs atomic.Int64 // time jobs spent waiting on the busy-width gate
 
 	mu      sync.Mutex
 	queries map[string]*queryUploadState
@@ -90,9 +110,61 @@ func newUploadManager(store objstore.Store, nc *nats.Conn, logger *slog.Logger) 
 		store:   store,
 		nc:      nc,
 		logger:  logger,
-		sem:     make(chan struct{}, 8),
 		queries: make(map[string]*queryUploadState),
 	}
+}
+
+// SetForegroundProbe wires the busy signal for the adaptive width. Call
+// before the first StartTask (executor construction) — jobs read it
+// per-acquire, nil means never busy.
+func (m *uploadManager) SetForegroundProbe(busy func() bool) {
+	m.busy = busy
+}
+
+// slotCap returns the current width of the upload gate.
+func (m *uploadManager) slotCap() int64 {
+	if m.busy != nil && uploadQoSEnabled && m.busy() {
+		return uploadSlotsBusy
+	}
+	return uploadSlotsIdle
+}
+
+// uploadQoSEnabled gates the busy-width reduction. WADJET_UPLOAD_QOS=0
+// pins the idle width (pre-QoS behavior) for A/B arms.
+var uploadQoSEnabled = os.Getenv("WADJET_UPLOAD_QOS") != "0"
+
+// acquireSlot blocks until a slot under the CURRENT width is free or ctx
+// ends. Polling (50ms) is fine here: this is background work, and the
+// width itself changes with foreground activity so a condvar would need
+// external kicks anyway. Progress is guaranteed — the busy width is ≥1.
+func (m *uploadManager) acquireSlot(ctx context.Context) bool {
+	waited := int64(0)
+	for {
+		cur := m.slots.Load()
+		if cur < m.slotCap() && m.slots.CompareAndSwap(cur, cur+1) {
+			if waited > 0 {
+				m.yieldNs.Add(waited)
+			}
+			return true
+		}
+		select {
+		case <-time.After(uploadSlotPollMs * time.Millisecond):
+			waited += int64(uploadSlotPollMs) * int64(time.Millisecond)
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+func (m *uploadManager) releaseSlot() { m.slots.Add(-1) }
+
+// UploadYieldNs returns cumulative time background jobs spent yielding to
+// foreground work. Observability for QoS A/B arms.
+func (m *uploadManager) UploadYieldNs() int64 {
+	if m == nil {
+		return 0
+	}
+	return m.yieldNs.Load()
 }
 
 // uploadJob is one file to land in S3: srcPath is a LocalStageCache-owned
@@ -298,14 +370,12 @@ func (m *uploadManager) startJob(qs *queryUploadState, tu *taskUploads, j upload
 
 func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob) {
 	defer tu.jobDone()
-	select {
-	case m.sem <- struct{}{}:
-		defer func() { <-m.sem }()
-	case <-ctx.Done():
+	if !m.acquireSlot(ctx) {
 		tu.anyCanceled.Store(true)
 		m.noteCancelled(j)
 		return
 	}
+	defer m.releaseSlot()
 
 	var lastErr error
 	for attempt := 1; attempt <= uploadRetryAttempts; attempt++ {

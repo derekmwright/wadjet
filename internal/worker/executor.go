@@ -140,6 +140,10 @@ type Executor struct {
 	scanDecodeAheadPressureNs   atomic.Int64
 	scanDecodeAheadTokenNs      atomic.Int64
 	scanDecodeAheadLedgerNs     atomic.Int64
+
+	// activeForeground counts tasks currently inside Execute — the busy
+	// signal the background-upload QoS gate yields to.
+	activeForeground atomic.Int64
 	// scanDecodeAheadByQuery attributes the counters above per source
 	// identity — the task's QueryID, which on stage-input sources is
 	// stage-scoped (e.g. "st-join-10-<query>"), so SF100 logs separate a
@@ -294,6 +298,7 @@ func NewExecutor(store objstore.Store, cache *LRUCache, js jetstream.JetStream) 
 		peers:          newPeerExchange(),
 	}
 	e.uploads = newUploadManager(store, nil, e.logger)
+	e.uploads.SetForegroundProbe(func() bool { return e.activeForeground.Load() > 0 })
 	return e
 }
 
@@ -532,6 +537,10 @@ func (e *Executor) newSpillManagerScaled(taskID string, joinCount int) (*memory.
 // Execute runs a task and returns the result notification.
 func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID string) distributed.ResultNotification {
 	start := time.Now()
+	// Foreground-activity signal for the background-upload QoS gate
+	// (upload_manager.go): while any task executes, drains yield.
+	e.activeForeground.Add(1)
+	defer e.activeForeground.Add(-1)
 
 	result := distributed.ResultNotification{
 		TaskID:    task.ID,
