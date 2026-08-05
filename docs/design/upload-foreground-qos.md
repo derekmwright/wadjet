@@ -1,7 +1,33 @@
 # Background-upload QoS: drains yield to foreground queries
 
-Status: Landed 2026-08-05. Kill switch: `WADJET_UPLOAD_QOS=0` (pins the
-idle width — pre-QoS behavior).
+Status: v2 landed 2026-08-05. Kill switch: `WADJET_UPLOAD_QOS=0` (pins
+the idle width — pre-QoS behavior).
+
+## v2 (same day): bounded yield + demand release + breaker 404s
+
+The v1 flat busy-width validated the acute fix spectacularly (SF100
+arm 20260805-122925: Q06 18.6→2.2s, Q03 36.4→16.3s, Q18 steady
+60.2→24.3s, Q21 cold 33.1→28.9s) but created CHRONIC upload
+starvation: foreground is almost always active during a suite, so the
+queue ran 2-wide for the whole run — upload_yield_ms ≈ 23–25 THOUSAND
+seconds cumulative per worker, durability lagged minutes, consumers'
+S3 fallbacks 404ed, the circuit breaker opened on those 404s, Q06/Q08
+steady FAILED, and 28 uploads/worker were abandoned. Three additions:
+
+1. **Bounded yield** (`uploadYieldMaxMs` = 10s): each job yields at
+   most 10s before escalating to the idle width. Keeps the acute win
+   (short queries complete inside the window) while capping durability
+   lag.
+2. **Demand release**: `awaitDurableObject` (a consumer whose S3
+   fallback missed an upload-pending key) broadcasts
+   `SubjectUploadRelease` for the key's root; the producing worker
+   marks that root URGENT and its jobs bypass the gate. Reuses the
+   lazy-policy release plumbing; idempotent.
+3. **Breaker classification**: `ErrNotFound` no longer counts as an S3
+   failure in `CircuitStore.onFailure` — a 404 is a definitive healthy
+   answer, and under upload lag it is an expected race, not an
+   availability signal. (Same family as the 2026-07-12
+   context.Canceled exemption.)
 
 ## Problem: the previous query's drain starves the next query
 

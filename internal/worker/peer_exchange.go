@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -233,7 +234,18 @@ func (e *missingInputError) Unwrap() error { return e.cause }
 // missed — the producing worker reported the file, so either its background
 // upload is in flight (it will land) or the producer died with it (it
 // won't). Returns the opened reader on success.
+//
+// Entering this wait IS a demand signal: broadcast SubjectUploadRelease
+// for the key's root query so the producing worker's pending uploads jump
+// the foreground-yield gate (upload_manager.go urgency) instead of racing
+// the re-poll at the throttled width. Idempotent, cheap, best-effort.
 func (s *cachedFileStreamSource) awaitDurableObject(ctx context.Context, key string) (io.ReadCloser, error) {
+	if root := rootQueryFromKey(key); root != "" && s.executor.nc != nil {
+		if err := s.executor.nc.Publish(distributed.SubjectUploadRelease, []byte(root)); err != nil && s.executor.logger != nil {
+			s.executor.logger.Debug("upload-release publish failed; re-poll continues",
+				"key", key, "error", err)
+		}
+	}
 	deadline := time.Now().Add(durableWaitTotal)
 	var lastErr error
 	for {
@@ -255,6 +267,20 @@ func (s *cachedFileStreamSource) awaitDurableObject(ctx context.Context, key str
 			return nil, err // real store error — don't spin on it
 		}
 	}
+}
+
+// rootQueryFromKey extracts the root query id from a stage-output key of
+// the form "queries/<root>/<stage>/<file>". Empty for other layouts.
+func rootQueryFromKey(key string) string {
+	const p = "queries/"
+	if !strings.HasPrefix(key, p) {
+		return ""
+	}
+	rest := key[len(p):]
+	if i := strings.IndexByte(rest, '/'); i > 0 {
+		return rest[:i]
+	}
+	return ""
 }
 
 // PeerFetchHits returns how many input files were served via peer fetch.

@@ -154,6 +154,15 @@ func (cs *CircuitStore) onFailure(err error) {
 	if errors.Is(err, context.Canceled) {
 		return
 	}
+	// Not-found is a DEFINITIVE, healthy S3 answer — the service responded;
+	// the key just isn't there (yet). Streaming exchange makes this an
+	// expected race: consumers' S3-tier fallbacks probe keys whose
+	// background upload hasn't landed (widened by the upload QoS gate,
+	// SF100 2026-08-05: repeated fallback 404s opened the breaker and
+	// killed the NEXT queries' healthy reads — Q06/Q08 steady FAIL).
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrBucketNotFound) {
+		return
+	}
 
 	cs.mu.Lock()
 	defer cs.mu.Unlock()

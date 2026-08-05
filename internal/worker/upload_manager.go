@@ -33,6 +33,14 @@ const (
 	uploadSlotsIdle  = 8
 	uploadSlotsBusy  = 2
 	uploadSlotPollMs = 50
+	// uploadYieldMaxMs bounds how long any single job yields to foreground
+	// work. The v1 flat gate let the backlog snowball under a busy suite
+	// (uploads ran 2-wide for the entire run: durability lagged minutes,
+	// consumers' S3 fallbacks 404ed, 28 uploads/worker were abandoned,
+	// Q06/Q08 steady FAILED — SF100 2026-08-05). Bounded yield keeps the
+	// acute fix (a short query following a heavy drain completes inside
+	// the yield window) while capping durability lag at ~10s + transfer.
+	uploadYieldMaxMs = 10_000
 )
 
 // uploadRetryBackoff is the base delay between background upload retries
@@ -90,6 +98,11 @@ type queryUploadState struct {
 	cancel   context.CancelFunc
 	inflight sync.WaitGroup
 
+	// urgent marks a demand signal (SubjectUploadRelease: a consumer or
+	// the coordinator needs this root's durable copies NOW). Jobs for an
+	// urgent root bypass the foreground-yield gate entirely.
+	urgent atomic.Bool
+
 	mu       sync.Mutex
 	pending  []pendingUpload // lazy jobs queued unstarted
 	released bool            // demand signal seen: later lazy jobs start immediately
@@ -136,12 +149,19 @@ var uploadQoSEnabled = os.Getenv("WADJET_UPLOAD_QOS") != "0"
 // acquireSlot blocks until a slot under the CURRENT width is free or ctx
 // ends. Polling (50ms) is fine here: this is background work, and the
 // width itself changes with foreground activity so a condvar would need
-// external kicks anyway. Progress is guaranteed — the busy width is ≥1.
-func (m *uploadManager) acquireSlot(ctx context.Context) bool {
+// external kicks anyway. Progress is guaranteed — the busy width is ≥1,
+// and two escapes bound the yield: an URGENT root (demand-released — a
+// consumer needs the durable copy) and a per-job wait past
+// uploadYieldMaxMs both escalate to the idle width.
+func (m *uploadManager) acquireSlot(ctx context.Context, qs *queryUploadState) bool {
 	waited := int64(0)
 	for {
+		cap := m.slotCap()
+		if (qs != nil && qs.urgent.Load()) || waited >= int64(uploadYieldMaxMs)*int64(time.Millisecond) {
+			cap = uploadSlotsIdle
+		}
 		cur := m.slots.Load()
-		if cur < m.slotCap() && m.slots.CompareAndSwap(cur, cur+1) {
+		if cur < cap && m.slots.CompareAndSwap(cur, cur+1) {
 			if waited > 0 {
 				m.yieldNs.Add(waited)
 			}
@@ -240,7 +260,10 @@ func (m *uploadManager) ReleaseQuery(root string) {
 }
 
 // releasePending flips the root to released and starts its queued jobs.
+// The release IS a demand signal, so the root also turns urgent: its jobs
+// (queued lazy AND already-waiting eager) bypass the foreground-yield gate.
 func (m *uploadManager) releasePending(qs *queryUploadState) {
+	qs.urgent.Store(true)
 	qs.mu.Lock()
 	qs.released = true
 	pending := qs.pending
@@ -364,13 +387,14 @@ func (m *uploadManager) startJob(qs *queryUploadState, tu *taskUploads, j upload
 	qs.inflight.Add(1)
 	go func() {
 		defer qs.inflight.Done()
-		m.runJob(qs.ctx, tu, j)
+		m.runJob(qs, tu, j)
 	}()
 }
 
-func (m *uploadManager) runJob(ctx context.Context, tu *taskUploads, j uploadJob) {
+func (m *uploadManager) runJob(qs *queryUploadState, tu *taskUploads, j uploadJob) {
+	ctx := qs.ctx
 	defer tu.jobDone()
-	if !m.acquireSlot(ctx) {
+	if !m.acquireSlot(ctx, qs) {
 		tu.anyCanceled.Store(true)
 		m.noteCancelled(j)
 		return

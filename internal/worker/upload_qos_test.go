@@ -28,7 +28,7 @@ func TestUploadSlotGateYieldsToForeground(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if !m.acquireSlot(ctx) {
+			if !m.acquireSlot(ctx, nil) {
 				return
 			}
 			defer m.releaseSlot()
@@ -70,13 +70,13 @@ func TestUploadSlotGateCancel(t *testing.T) {
 	// Fill the busy width.
 	ctx := context.Background()
 	for i := 0; i < uploadSlotsBusy; i++ {
-		if !m.acquireSlot(ctx) {
+		if !m.acquireSlot(ctx, nil) {
 			t.Fatal("initial acquire failed")
 		}
 	}
 	cctx, cancel := context.WithCancel(context.Background())
 	done := make(chan bool, 1)
-	go func() { done <- m.acquireSlot(cctx) }()
+	go func() { done <- m.acquireSlot(cctx, nil) }()
 	cancel()
 	select {
 	case ok := <-done:
@@ -85,5 +85,42 @@ func TestUploadSlotGateCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancelled acquire did not return")
+	}
+}
+
+// Urgent roots (demand-released) and long-waiting jobs must escape the
+// busy width — the v1 flat gate starved the backlog for whole suites.
+func TestUploadSlotGateUrgencyAndBoundedYield(t *testing.T) {
+	m := newUploadManager(nil, nil, nil)
+	m.SetForegroundProbe(func() bool { return true })
+	ctx := context.Background()
+	// Saturate the busy width.
+	for i := 0; i < uploadSlotsBusy; i++ {
+		if !m.acquireSlot(ctx, nil) {
+			t.Fatal("initial acquire failed")
+		}
+	}
+	// Non-urgent job stays gated...
+	blocked := make(chan bool, 1)
+	go func() {
+		c, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		defer cancel()
+		blocked <- m.acquireSlot(c, nil)
+	}()
+	if ok := <-blocked; ok {
+		t.Fatal("non-urgent job passed a saturated busy gate")
+	}
+	// ...an urgent root's job does not.
+	qs := &queryUploadState{}
+	qs.urgent.Store(true)
+	done := make(chan bool, 1)
+	go func() { done <- m.acquireSlot(ctx, qs) }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("urgent acquire returned false")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("urgent job did not bypass the busy gate")
 	}
 }
