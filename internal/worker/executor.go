@@ -538,9 +538,12 @@ func (e *Executor) newSpillManagerScaled(taskID string, joinCount int) (*memory.
 func (e *Executor) Execute(ctx context.Context, task distributed.Task, workerID string) distributed.ResultNotification {
 	start := time.Now()
 	// Foreground-activity signal for the background-upload QoS gate
-	// (upload_manager.go): while any task executes, drains yield.
+	// (upload_manager.go): while any task executes, drains yield — but
+	// only inside the protection window a NEW root query's first task
+	// opens (the v3 epoch clock).
 	e.activeForeground.Add(1)
 	defer e.activeForeground.Add(-1)
+	e.uploads.NoteForegroundQuery(distributed.TaskRootQueryID(&task))
 
 	result := distributed.ResultNotification{
 		TaskID:    task.ID,

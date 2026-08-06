@@ -33,14 +33,25 @@ const (
 	uploadSlotsIdle  = 8
 	uploadSlotsBusy  = 2
 	uploadSlotPollMs = 50
-	// uploadYieldMaxMs bounds how long any single job yields to foreground
-	// work. The v1 flat gate let the backlog snowball under a busy suite
-	// (uploads ran 2-wide for the entire run: durability lagged minutes,
-	// consumers' S3 fallbacks 404ed, 28 uploads/worker were abandoned,
-	// Q06/Q08 steady FAILED — SF100 2026-08-05). Bounded yield keeps the
-	// acute fix (a short query following a heavy drain completes inside
-	// the yield window) while capping durability lag at ~10s + transfer.
-	uploadYieldMaxMs = 10_000
+)
+
+// Yield-clock tunables (vars so tests can compress time; semantically
+// constants). Three generations of this gate, each SF100-measured
+// (docs/design/upload-foreground-qos.md):
+//   v1 flat busy-width — backlog snowballed, durability lagged minutes,
+//     Q06/Q08 steady FAILED, 28 uploads/worker abandoned.
+//   v2 per-job 10s wait cap — the budget burns while the PRODUCING query
+//     is still running, so protection for the NEXT query was a coin flip
+//     (Q06 cold 2.6s vs 20.6s across arms).
+//   v3 (this): the clock references the FOREGROUND EPOCH — each new root
+//     query's first task opens a protection window during which drains
+//     run at the busy width; outside it they run full width even while
+//     busy. Every query gets the same head start; long queries release
+//     the drain after the window; per-job uploadHardCapMs guarantees
+//     progress even under a pathological stream of new queries.
+var (
+	uploadProtectMs int64 = 10_000
+	uploadHardCapMs int64 = 60_000
 )
 
 // uploadRetryBackoff is the base delay between background upload retries
@@ -79,6 +90,14 @@ type uploadManager struct {
 	slots   atomic.Int64
 	busy    func() bool
 	yieldNs atomic.Int64 // time jobs spent waiting on the busy-width gate
+
+	// Foreground-epoch protection window (v3): protectedUntil holds the
+	// unixnano until which drains yield; NoteForegroundQuery extends it
+	// when a NEW root query's first task arrives. seenRoots dedupes so a
+	// query's hundreds of tasks open exactly one window.
+	protectedUntil atomic.Int64
+	seenMu         sync.Mutex
+	seenRoots      map[string]struct{}
 
 	mu      sync.Mutex
 	queries map[string]*queryUploadState
@@ -120,10 +139,39 @@ func newUploadManager(store objstore.Store, nc *nats.Conn, logger *slog.Logger) 
 		logger = slog.Default()
 	}
 	return &uploadManager{
-		store:   store,
-		nc:      nc,
-		logger:  logger,
-		queries: make(map[string]*queryUploadState),
+		store:     store,
+		nc:        nc,
+		logger:    logger,
+		queries:   make(map[string]*queryUploadState),
+		seenRoots: make(map[string]struct{}),
+	}
+}
+
+// NoteForegroundQuery opens (or extends) the drain-protection window when
+// a root query's FIRST task arrives. Later tasks of the same root are
+// no-ops — one head start per query, so long queries release the drain
+// after uploadProtectMs. Call from Executor.Execute.
+func (m *uploadManager) NoteForegroundQuery(root string) {
+	if m == nil || root == "" {
+		return
+	}
+	m.seenMu.Lock()
+	if _, ok := m.seenRoots[root]; ok {
+		m.seenMu.Unlock()
+		return
+	}
+	// Bound the dedupe set; roots are transient per-query IDs.
+	if len(m.seenRoots) > 1024 {
+		m.seenRoots = make(map[string]struct{}, 64)
+	}
+	m.seenRoots[root] = struct{}{}
+	m.seenMu.Unlock()
+	until := time.Now().Add(time.Duration(uploadProtectMs) * time.Millisecond).UnixNano()
+	for {
+		cur := m.protectedUntil.Load()
+		if until <= cur || m.protectedUntil.CompareAndSwap(cur, until) {
+			return
+		}
 	}
 }
 
@@ -134,9 +182,12 @@ func (m *uploadManager) SetForegroundProbe(busy func() bool) {
 	m.busy = busy
 }
 
-// slotCap returns the current width of the upload gate.
+// slotCap returns the current width of the upload gate: the busy width
+// only while a foreground task is running AND a query's protection
+// window is open.
 func (m *uploadManager) slotCap() int64 {
-	if m.busy != nil && uploadQoSEnabled && m.busy() {
+	if m.busy != nil && uploadQoSEnabled && m.busy() &&
+		time.Now().UnixNano() < m.protectedUntil.Load() {
 		return uploadSlotsBusy
 	}
 	return uploadSlotsIdle
@@ -157,7 +208,7 @@ func (m *uploadManager) acquireSlot(ctx context.Context, qs *queryUploadState) b
 	waited := int64(0)
 	for {
 		cap := m.slotCap()
-		if (qs != nil && qs.urgent.Load()) || waited >= int64(uploadYieldMaxMs)*int64(time.Millisecond) {
+		if (qs != nil && qs.urgent.Load()) || waited >= uploadHardCapMs*int64(time.Millisecond) {
 			cap = uploadSlotsIdle
 		}
 		cur := m.slots.Load()

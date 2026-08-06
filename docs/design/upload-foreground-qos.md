@@ -1,7 +1,22 @@
 # Background-upload QoS: drains yield to foreground queries
 
-Status: v2 landed 2026-08-05. Kill switch: `WADJET_UPLOAD_QOS=0` (pins
+Status: v3 landed 2026-08-05. Kill switch: `WADJET_UPLOAD_QOS=0` (pins
 the idle width — pre-QoS behavior).
+
+## v3 (same day): foreground-epoch yield clock
+
+The v2 pair delivered suite −12.4% cold / −12.6% steady with zero
+failures — but the per-job wait cap referenced ENQUEUE time, and a
+heavy query's jobs burn that budget while their own query still runs,
+so protection for the NEXT query was a coin flip (Q06 cold: control
+2.6s, treatment 20.6s — the residual lottery). v3 references the
+FOREGROUND EPOCH instead: the first task of each NEW root query opens a
+`uploadProtectMs` (10s) protection window; the busy width applies only
+inside an open window. Every query gets the same head start, long
+queries release the drain after 10s, repeat tasks of one query do not
+re-open the window, and the per-job `uploadHardCapMs` (60s) backstop
+guarantees progress under any query arrival pattern. Urgency (demand
+release) still bypasses everything.
 
 ## v2 (same day): bounded yield + demand release + breaker 404s
 

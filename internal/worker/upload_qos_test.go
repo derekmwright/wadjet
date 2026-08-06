@@ -17,6 +17,7 @@ func TestUploadSlotGateYieldsToForeground(t *testing.T) {
 	busy := atomic.Bool{}
 	busy.Store(true)
 	m.SetForegroundProbe(busy.Load)
+	m.NoteForegroundQuery("test-root") // open the protection window
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -67,6 +68,7 @@ func TestUploadSlotGateYieldsToForeground(t *testing.T) {
 func TestUploadSlotGateCancel(t *testing.T) {
 	m := newUploadManager(nil, nil, nil)
 	m.SetForegroundProbe(func() bool { return true })
+	m.NoteForegroundQuery("test-root")
 	// Fill the busy width.
 	ctx := context.Background()
 	for i := 0; i < uploadSlotsBusy; i++ {
@@ -93,6 +95,7 @@ func TestUploadSlotGateCancel(t *testing.T) {
 func TestUploadSlotGateUrgencyAndBoundedYield(t *testing.T) {
 	m := newUploadManager(nil, nil, nil)
 	m.SetForegroundProbe(func() bool { return true })
+	m.NoteForegroundQuery("test-root")
 	ctx := context.Background()
 	// Saturate the busy width.
 	for i := 0; i < uploadSlotsBusy; i++ {
@@ -122,5 +125,42 @@ func TestUploadSlotGateUrgencyAndBoundedYield(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("urgent job did not bypass the busy gate")
+	}
+}
+
+
+// The v3 epoch clock: the busy width applies only inside the protection
+// window a NEW root query opens; the window expires (drains resume full
+// width even while busy) and repeat tasks of the same root do not
+// re-open it.
+func TestUploadSlotGateEpochWindow(t *testing.T) {
+	old := uploadProtectMs
+	uploadProtectMs = 150
+	defer func() { uploadProtectMs = old }()
+
+	m := newUploadManager(nil, nil, nil)
+	m.SetForegroundProbe(func() bool { return true })
+
+	// No window opened yet: busy alone must NOT throttle.
+	if got := m.slotCap(); got != uploadSlotsIdle {
+		t.Fatalf("no-window cap = %d, want idle %d", got, uploadSlotsIdle)
+	}
+	m.NoteForegroundQuery("root-a")
+	if got := m.slotCap(); got != uploadSlotsBusy {
+		t.Fatalf("in-window cap = %d, want busy %d", got, uploadSlotsBusy)
+	}
+	time.Sleep(200 * time.Millisecond) // window expires
+	if got := m.slotCap(); got != uploadSlotsIdle {
+		t.Fatalf("expired-window cap = %d, want idle %d", got, uploadSlotsIdle)
+	}
+	// Same root again: no new window.
+	m.NoteForegroundQuery("root-a")
+	if got := m.slotCap(); got != uploadSlotsIdle {
+		t.Fatalf("repeat-root cap = %d, want idle %d", got, uploadSlotsIdle)
+	}
+	// A NEW root re-opens it.
+	m.NoteForegroundQuery("root-b")
+	if got := m.slotCap(); got != uploadSlotsBusy {
+		t.Fatalf("new-root cap = %d, want busy %d", got, uploadSlotsBusy)
 	}
 }
