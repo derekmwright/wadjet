@@ -159,6 +159,17 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 			return false
 		}
 		marked := false
+		// Reject reasons are collected unconditionally and logged when a
+		// multi-leg join fails to match: plan-time only, one line per
+		// no-match join, bounded. Three SF100 arms were spent (2026-08-06)
+		// reconstructing why Q21's shape didn't match from dispatch lines
+		// alone; this makes the next miss name itself.
+		var rejects []string
+		note := func(format string, a ...any) {
+			if len(rejects) < 12 {
+				rejects = append(rejects, fmt.Sprintf(format, a...))
+			}
+		}
 		for di := range legs {
 			if marked {
 				break
@@ -169,12 +180,15 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 			}
 			dIdx := findLeafScanStage(legD.buildDep, stages, byID)
 			if dIdx < 0 || dIdx == fIdx {
+				note("D[%s→%s]: no leaf scan via %s", legD.rightKey, legD.leftKey, legD.buildDep)
 				continue
 			}
 			d := &stages[dIdx]
 			if len(d.FilterExprs) == 0 || d.TableName == "" ||
 				d.EstimatedRows <= 0 || d.EstimatedRows > cascadeMaxEmitterRows ||
 				!hasColumn(d.Columns, legD.rightKey) {
+				note("D[%s→%s]=%s: filters=%d est=%d hasKey=%t", legD.rightKey, legD.leftKey,
+					d.ID, len(d.FilterExprs), d.EstimatedRows, hasColumn(d.Columns, legD.rightKey))
 				continue
 			}
 			for bi := range legs {
@@ -189,16 +203,21 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 				// target) and legD's probe column must belong to legB's
 				// BUILD scan (provenance).
 				if !hasColumn(f.Columns, legB.leftKey) {
+					note("B[%s→%s]: %s not on fact %s cols=%v", legB.rightKey, legB.leftKey, legB.leftKey, f.ID, f.Columns)
 					continue
 				}
 				b0Idx := findLeafScanStage(legB.buildDep, stages, byID)
 				if b0Idx < 0 || b0Idx == fIdx || b0Idx == dIdx {
+					note("B[%s→%s]: no leaf scan via %s", legB.rightKey, legB.leftKey, legB.buildDep)
 					continue
 				}
 				b0 := &stages[b0Idx]
 				if b0.TableName == "" || len(b0.ScanFiles) == 0 ||
 					!hasColumn(b0.Columns, legD.leftKey) ||
 					!hasColumn(b0.Columns, legB.rightKey) {
+					note("B0=%s: scanFiles=%d hasStream(%s)=%t hasKey(%s)=%t cols=%v", b0.ID,
+						len(b0.ScanFiles), legD.leftKey, hasColumn(b0.Columns, legD.leftKey),
+						legB.rightKey, hasColumn(b0.Columns, legB.rightKey), b0.Columns)
 					continue
 				}
 				dKeyType, ok := p.columnIntType(ctx, d.TableName, legD.rightKey)
@@ -265,6 +284,14 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 				marked = true
 				break
 			}
+		}
+		if !marked && len(legs) > 1 {
+			legStrs := make([]string, 0, len(legs))
+			for _, l := range legs {
+				legStrs = append(legStrs, fmt.Sprintf("%s→%s(dep=%s,jt=%q)", l.rightKey, l.leftKey, l.buildDep, l.joinType))
+			}
+			slog.Info("dimension_cascade: debug no-match",
+				"join", j.ID, "fact", f.ID, "legs", legStrs, "rejects", rejects)
 		}
 	}
 	return stages
