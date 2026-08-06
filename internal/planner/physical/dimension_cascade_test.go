@@ -115,3 +115,68 @@ func TestDimensionCascadeKillSwitch(t *testing.T) {
 		}
 	}
 }
+
+// The ACTUAL SF100 Q21 shape (results/20260806-110951 ground truth):
+// orders is the PRIMARY build; supplier rides as a fused leg; nation is
+// chained keyed on s_nationkey — a column owned by the SUPPLIER leg's
+// build, not the primary. The generalized leg-pair matcher must wire
+// nation→supplier→lineitem here too.
+func TestDimensionCascadeMarksRealSF100Shape(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	stages := []Stage{
+		{ID: "scan-l1", Type: StageScan, TableName: "lineitem",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"l_receiptdate > l_commitdate"},
+			Columns: []string{"l_orderkey", "l_suppkey"}, EstimatedRows: 600_000_000},
+		{ID: "scan-orders", Type: StageScan, TableName: "orders",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"o_orderstatus = 'F'"},
+			Columns: []string{"o_orderkey"}, EstimatedRows: 150_000_000},
+		{ID: "scan-supp", Type: StageScan, TableName: "supplier",
+			ScanFiles: []string{"f"}, Columns: []string{"s_suppkey", "s_nationkey", "s_name"},
+			EstimatedRows: 1_000_000},
+		{ID: "scan-nation", Type: StageScan, TableName: "nation",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"n_name = 'SAUDI ARABIA'"},
+			Columns: []string{"n_nationkey", "n_name"}, EstimatedRows: 25},
+		{ID: "join", Type: StageHashJoin, JoinType: "inner",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "scan-l1", RightDepStage: "scan-orders",
+			Dependencies: []string{"scan-l1", "scan-orders", "scan-supp", "scan-nation"},
+			FusedJoins: []FusedJoinSpec{{
+				JoinType:      "inner",
+				JoinLeftKeys:  []string{"l_suppkey"},
+				JoinRightKeys: []string{"s_suppkey"},
+				BuildDepStage: "scan-supp",
+			}},
+			ChainedJoins: []ChainedJoinSpec{{
+				JoinType:      "inner",
+				JoinLeftKeys:  []string{"s_nationkey"},
+				JoinRightKeys: []string{"n_nationkey"},
+				BuildDepStage: "scan-nation",
+			}},
+		},
+	}
+	p := NewPlanner(cat)
+	p.markDimensionCascade(ctx, stages)
+	var nation, supp, l1 *Stage
+	for i := range stages {
+		switch stages[i].ID {
+		case "scan-nation":
+			nation = &stages[i]
+		case "scan-supp":
+			supp = &stages[i]
+		case "scan-l1":
+			l1 = &stages[i]
+		}
+	}
+	if len(nation.EmitDynamicFilters) != 1 || nation.EmitDynamicFilters[0].KeyColumn != "n_nationkey" {
+		t.Fatalf("hop A emit wrong: %+v", nation.EmitDynamicFilters)
+	}
+	if len(supp.ConsumeDynamicFilters) != 1 || supp.ConsumeDynamicFilters[0].TargetColumn != "s_nationkey" {
+		t.Fatalf("hop A consume wrong: %+v", supp.ConsumeDynamicFilters)
+	}
+	if len(supp.EmitDynamicFilters) != 1 || supp.EmitDynamicFilters[0].KeyColumn != "s_suppkey" {
+		t.Fatalf("hop B emit wrong: %+v", supp.EmitDynamicFilters)
+	}
+	if len(l1.ConsumeDynamicFilters) != 1 || l1.ConsumeDynamicFilters[0].TargetColumn != "l_suppkey" {
+		t.Fatalf("hop B consume wrong: %+v", l1.ConsumeDynamicFilters)
+	}
+}

@@ -78,18 +78,9 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 		if len(j.JoinLeftKeys) != 1 || len(j.JoinRightKeys) != 1 {
 			continue
 		}
-		// Primary build B0: walk to its leaf scan.
-		b0Idx := findLeafScanStage(j.RightDepStage, stages, byID)
-		if b0Idx < 0 {
-			continue
-		}
-		b0 := &stages[b0Idx]
-		if b0.TableName == "" || len(b0.ScanFiles) == 0 {
-			continue
-		}
 		// Probe fact scan F.
 		fIdx := findLeafScanStage(j.LeftDepStage, stages, byID)
-		if fIdx < 0 || fIdx == b0Idx {
+		if fIdx < 0 {
 			continue
 		}
 		f := &stages[fIdx]
@@ -99,116 +90,143 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 		if len(f.FilterExprs) == 0 {
 			continue
 		}
-		// Find a chained/fused dimension join keyed on a B0-origin column
-		// whose build resolves to a TINY FILTERED leaf scan D.
-		type dimHit struct {
-			dIdx      int
-			streamCol string // column of B0 the chained join probes on
-			dKey      string // D's join key column
+		// Enumerate ALL of J's legs uniformly: the primary build plus
+		// every fused/chained leg. The 20260806-110951 ground truth: Q21's
+		// join-4 has orders as PRIMARY, supplier as a fused/chained leg,
+		// and nation keyed on a column owned by the SUPPLIER leg's build —
+		// so D and B0 can each be any leg; anchoring B0 on the primary
+		// (the first cut of this pass) matched nothing at SF100.
+		type leg struct {
+			joinType          string
+			leftKey, rightKey string
+			buildDep          string
 		}
-		var hit *dimHit
-		checkLeg := func(joinType string, leftKeys, rightKeys []string, buildDep string) {
-			if hit != nil || len(leftKeys) != 1 || len(rightKeys) != 1 {
-				return
-			}
-			switch joinType {
-			case "inner", "semi", "left", "":
-			default:
-				return
-			}
-			streamCol := baseColName(leftKeys[0])
-			if !hasColumn(b0.Columns, streamCol) {
-				return // provenance: the probed column must live on B0
-			}
-			dIdx := findLeafScanStage(buildDep, stages, byID)
-			if dIdx < 0 || dIdx == b0Idx || dIdx == fIdx {
-				return
-			}
-			d := &stages[dIdx]
-			if len(d.FilterExprs) == 0 || d.TableName == "" {
-				return // unfiltered dimension = no reduction to ship
-			}
-			if d.EstimatedRows <= 0 || d.EstimatedRows > cascadeMaxEmitterRows {
-				return
-			}
-			if !hasColumn(d.Columns, baseColName(rightKeys[0])) {
-				return
-			}
-			hit = &dimHit{dIdx: dIdx, streamCol: streamCol, dKey: baseColName(rightKeys[0])}
-		}
+		legs := []leg{{j.JoinType, baseColName(j.JoinLeftKeys[0]), baseColName(j.JoinRightKeys[0]), j.RightDepStage}}
 		for _, cj := range j.ChainedJoins {
-			checkLeg(cj.JoinType, cj.JoinLeftKeys, cj.JoinRightKeys, cj.BuildDepStage)
+			if len(cj.JoinLeftKeys) == 1 && len(cj.JoinRightKeys) == 1 {
+				legs = append(legs, leg{cj.JoinType, baseColName(cj.JoinLeftKeys[0]), baseColName(cj.JoinRightKeys[0]), cj.BuildDepStage})
+			}
 		}
 		for _, fj := range j.FusedJoins {
-			checkLeg(fj.JoinType, fj.JoinLeftKeys, fj.JoinRightKeys, fj.BuildDepStage)
+			if len(fj.JoinLeftKeys) == 1 && len(fj.JoinRightKeys) == 1 {
+				legs = append(legs, leg{fj.JoinType, baseColName(fj.JoinLeftKeys[0]), baseColName(fj.JoinRightKeys[0]), fj.BuildDepStage})
+			}
 		}
-		if hit == nil {
-			continue
+		innerForm := func(t string) bool {
+			switch t {
+			case "inner", "semi", "left", "":
+				return true
+			}
+			return false
 		}
-		d := &stages[hit.dIdx]
-		// Key types: integer class on both hops.
-		dKeyType, ok := p.columnIntType(ctx, d.TableName, hit.dKey)
-		if !ok {
-			continue
-		}
-		b0KeyType, ok := p.columnIntType(ctx, b0.TableName, baseColName(j.JoinRightKeys[0]))
-		if !ok {
-			continue
-		}
-		// Cycle guards for both stat-dep edges.
-		if stageReaches(d.ID, b0.ID, stages, byID) || stageReaches(b0.ID, f.ID, stages, byID) {
-			continue
-		}
-		// Idempotence.
-		if hasConsumeFor(b0.ConsumeDynamicFilters, d.ID, hit.streamCol) ||
-			hasConsumeFor(f.ConsumeDynamicFilters, b0.ID, baseColName(j.JoinLeftKeys[0])) {
-			continue
-		}
+		marked := false
+		for di := range legs {
+			if marked {
+				break
+			}
+			legD := legs[di]
+			if !innerForm(legD.joinType) {
+				continue
+			}
+			dIdx := findLeafScanStage(legD.buildDep, stages, byID)
+			if dIdx < 0 || dIdx == fIdx {
+				continue
+			}
+			d := &stages[dIdx]
+			if len(d.FilterExprs) == 0 || d.TableName == "" ||
+				d.EstimatedRows <= 0 || d.EstimatedRows > cascadeMaxEmitterRows ||
+				!hasColumn(d.Columns, legD.rightKey) {
+				continue
+			}
+			for bi := range legs {
+				if bi == di {
+					continue
+				}
+				legB := legs[bi]
+				if !innerForm(legB.joinType) {
+					continue
+				}
+				// legB's probe column must belong to the FACT scan (hop-B
+				// target) and legD's probe column must belong to legB's
+				// BUILD scan (provenance).
+				if !hasColumn(f.Columns, legB.leftKey) {
+					continue
+				}
+				b0Idx := findLeafScanStage(legB.buildDep, stages, byID)
+				if b0Idx < 0 || b0Idx == fIdx || b0Idx == dIdx {
+					continue
+				}
+				b0 := &stages[b0Idx]
+				if b0.TableName == "" || len(b0.ScanFiles) == 0 ||
+					!hasColumn(b0.Columns, legD.leftKey) ||
+					!hasColumn(b0.Columns, legB.rightKey) {
+					continue
+				}
+				dKeyType, ok := p.columnIntType(ctx, d.TableName, legD.rightKey)
+				if !ok {
+					continue
+				}
+				b0KeyType, ok := p.columnIntType(ctx, b0.TableName, legB.rightKey)
+				if !ok {
+					continue
+				}
+				if stageReaches(d.ID, b0.ID, stages, byID) || stageReaches(b0.ID, f.ID, stages, byID) {
+					continue
+				}
+				if hasConsumeFor(b0.ConsumeDynamicFilters, d.ID, legD.leftKey) ||
+					hasConsumeFor(f.ConsumeDynamicFilters, b0.ID, legB.leftKey) {
+					continue
+				}
 
-		// Hop A: D --(dKey set)--> B0 on streamCol.
-		hopA := fmt.Sprintf("dimc-%s-%d-a", j.ID, seq)
-		d.EmitDynamicFilters = append(d.EmitDynamicFilters, DynamicFilterEmit{
-			FilterID:  hopA,
-			KeyColumn: hit.dKey,
-			KeyType:   dKeyType,
-			BloomBits: cascadeBloomBits(d.EstimatedRows),
-			AtOutput:  true,
-		})
-		b0.ConsumeDynamicFilters = append(b0.ConsumeDynamicFilters, DynamicFilterConsume{
-			FilterID:      hopA,
-			SourceStageID: d.ID,
-			TargetColumn:  hit.streamCol,
-			KeyType:       dKeyType,
-		})
-		if !containsString(b0.Dependencies, d.ID) {
-			b0.Dependencies = append(b0.Dependencies, d.ID)
+				// Hop A: D --(legD.rightKey set)--> B0 on legD.leftKey.
+				hopA := fmt.Sprintf("dimc-%s-%d-a", j.ID, seq)
+				d.EmitDynamicFilters = append(d.EmitDynamicFilters, DynamicFilterEmit{
+					FilterID:  hopA,
+					KeyColumn: legD.rightKey,
+					KeyType:   dKeyType,
+					BloomBits: cascadeBloomBits(d.EstimatedRows),
+					AtOutput:  true,
+				})
+				b0.ConsumeDynamicFilters = append(b0.ConsumeDynamicFilters, DynamicFilterConsume{
+					FilterID:      hopA,
+					SourceStageID: d.ID,
+					TargetColumn:  legD.leftKey,
+					KeyType:       dKeyType,
+				})
+				if !containsString(b0.Dependencies, d.ID) {
+					b0.Dependencies = append(b0.Dependencies, d.ID)
+				}
+				// Hop B: B0 --(post-consume legB.rightKey set)--> F on
+				// legB.leftKey. The B0 emit forces dispatchScanFilterStage,
+				// whose sink-side AtOutput emit runs after the row-level
+				// hop-A consume.
+				hopB := fmt.Sprintf("dimc-%s-%d-b", j.ID, seq)
+				b0.EmitDynamicFilters = append(b0.EmitDynamicFilters, DynamicFilterEmit{
+					FilterID:  hopB,
+					KeyColumn: legB.rightKey,
+					KeyType:   b0KeyType,
+					BloomBits: cascadeBloomBits(b0.EstimatedRows / 8),
+					AtOutput:  true,
+				})
+				f.ConsumeDynamicFilters = append(f.ConsumeDynamicFilters, DynamicFilterConsume{
+					FilterID:      hopB,
+					SourceStageID: b0.ID,
+					TargetColumn:  legB.leftKey,
+					KeyType:       b0KeyType,
+				})
+				if !containsString(f.Dependencies, b0.ID) {
+					f.Dependencies = append(f.Dependencies, b0.ID)
+				}
+				seq++
+				DimensionCascadesPlanned.Add(1)
+				slog.Info("dimension_cascade: marked",
+					"join", j.ID, "dim", d.ID, "mid", b0.ID, "fact", f.ID,
+					"hop_a", legD.rightKey+"->"+legD.leftKey,
+					"hop_b", legB.rightKey+"->"+legB.leftKey)
+				marked = true
+				break
+			}
 		}
-		// Hop B: B0 --(post-consume build-key set)--> F on the probe key.
-		// The B0 emit forces dispatchScanFilterStage, whose sink-side
-		// AtOutput emit runs after the row-level hop-A consume.
-		hopB := fmt.Sprintf("dimc-%s-%d-b", j.ID, seq)
-		b0.EmitDynamicFilters = append(b0.EmitDynamicFilters, DynamicFilterEmit{
-			FilterID:  hopB,
-			KeyColumn: baseColName(j.JoinRightKeys[0]),
-			KeyType:   b0KeyType,
-			BloomBits: cascadeBloomBits(b0.EstimatedRows / 8),
-			AtOutput:  true,
-		})
-		f.ConsumeDynamicFilters = append(f.ConsumeDynamicFilters, DynamicFilterConsume{
-			FilterID:      hopB,
-			SourceStageID: b0.ID,
-			TargetColumn:  baseColName(j.JoinLeftKeys[0]),
-			KeyType:       b0KeyType,
-		})
-		if !containsString(f.Dependencies, b0.ID) {
-			f.Dependencies = append(f.Dependencies, b0.ID)
-		}
-		seq++
-		DimensionCascadesPlanned.Add(1)
-		slog.Info("dimension_cascade: marked",
-			"join", j.ID, "dim", d.ID, "mid", b0.ID, "fact", f.ID,
-			"hop_a", hit.dKey+"->"+hit.streamCol,
-			"hop_b", baseColName(j.JoinRightKeys[0])+"->"+baseColName(j.JoinLeftKeys[0]))
 	}
 	return stages
 }
