@@ -1,5 +1,5 @@
-scan-0	scan	Singleton
-scan-1	scan	Singleton
+scan-0	scan	Singleton	deps=scan-1
+scan-1	scan	Singleton	deps=scan-7
 join-2	broadcast_join	Singleton	deps=scan-0,exchange-replicate-join-2-2
 scan-3	scan	Hash(o_orderkey)/32
 exchange-repartition-4	exchange-repartition	Hash(l1.l_orderkey)/32	deps=join-2

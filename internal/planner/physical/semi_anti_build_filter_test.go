@@ -80,7 +80,9 @@ func sqlToStagesShuffled(t *testing.T, cat *catalog.Catalog, ctx context.Context
 func findSemiAntiMarks(stages []Stage) (emitters, consumers []*Stage) {
 	for i := range stages {
 		for _, e := range stages[i].EmitDynamicFilters {
-			if e.AtOutput {
+			// Scope to THIS pass's filters — the dimension cascade also
+			// plants AtOutput emits on Q21-class plans.
+			if e.AtOutput && strings.HasPrefix(e.FilterID, "sabf-") {
 				emitters = append(emitters, &stages[i])
 				break
 			}

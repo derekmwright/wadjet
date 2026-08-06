@@ -78,8 +78,42 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 		if len(j.JoinLeftKeys) != 1 || len(j.JoinRightKeys) != 1 {
 			continue
 		}
-		// Probe fact scan F.
-		fIdx := findLeafScanStage(j.LeftDepStage, stages, byID)
+		// Probe fact scan F: the ROOT of J's probe chain, walked through
+		// exchanges AND predecessor inner-form joins (Q21's shape: join-6
+		// probes join-2's output through a repartition; the fact scan is
+		// join-2's probe). Collect the predecessor joins on the way — a
+		// dimension leg on J may pair with a leg from any of them.
+		chainJoins := []*Stage{j}
+		fIdx := -1
+		cur := j.LeftDepStage
+		for hops := 0; hops < 12; hops++ {
+			idx, ok := byID[cur]
+			if !ok {
+				break
+			}
+			s := &stages[idx]
+			if s.Type == StageScan {
+				fIdx = idx
+				break
+			}
+			if s.Type == StageHashJoin || s.Type == StageBroadcastJoin {
+				switch s.JoinType {
+				case "inner", "semi", "left", "":
+				default:
+					fIdx = -1
+					hops = 12 // outer join breaks probe-row preservation
+					break
+				}
+				chainJoins = append(chainJoins, s)
+				cur = s.LeftDepStage
+				continue
+			}
+			if (s.Type == StageExchangeRepartition || s.Type == StageExchangeReplicate) && len(s.Dependencies) >= 1 {
+				cur = s.Dependencies[0]
+				continue
+			}
+			break // aggregate/sort/etc.: stop conservatively
+		}
 		if fIdx < 0 {
 			continue
 		}
@@ -101,15 +135,20 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 			leftKey, rightKey string
 			buildDep          string
 		}
-		legs := []leg{{j.JoinType, baseColName(j.JoinLeftKeys[0]), baseColName(j.JoinRightKeys[0]), j.RightDepStage}}
-		for _, cj := range j.ChainedJoins {
+		var legs []leg
+		for _, cj := range chainJoins {
 			if len(cj.JoinLeftKeys) == 1 && len(cj.JoinRightKeys) == 1 {
-				legs = append(legs, leg{cj.JoinType, baseColName(cj.JoinLeftKeys[0]), baseColName(cj.JoinRightKeys[0]), cj.BuildDepStage})
+				legs = append(legs, leg{cj.JoinType, baseColName(cj.JoinLeftKeys[0]), baseColName(cj.JoinRightKeys[0]), cj.RightDepStage})
 			}
-		}
-		for _, fj := range j.FusedJoins {
-			if len(fj.JoinLeftKeys) == 1 && len(fj.JoinRightKeys) == 1 {
-				legs = append(legs, leg{fj.JoinType, baseColName(fj.JoinLeftKeys[0]), baseColName(fj.JoinRightKeys[0]), fj.BuildDepStage})
+			for _, c := range cj.ChainedJoins {
+				if len(c.JoinLeftKeys) == 1 && len(c.JoinRightKeys) == 1 {
+					legs = append(legs, leg{c.JoinType, baseColName(c.JoinLeftKeys[0]), baseColName(c.JoinRightKeys[0]), c.BuildDepStage})
+				}
+			}
+			for _, fu := range cj.FusedJoins {
+				if len(fu.JoinLeftKeys) == 1 && len(fu.JoinRightKeys) == 1 {
+					legs = append(legs, leg{fu.JoinType, baseColName(fu.JoinLeftKeys[0]), baseColName(fu.JoinRightKeys[0]), fu.BuildDepStage})
+				}
 			}
 		}
 		innerForm := func(t string) bool {
