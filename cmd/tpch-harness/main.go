@@ -19,7 +19,7 @@ func main() {
 		slice          = flag.String("slice", "small", "data slice for local mode: small or large")
 		coordURL       = flag.String("coord-url", "", "pgwire URL of an existing coordinator (golden mode)")
 		dataDir        = flag.String("data-dir", "/tmp/sf100-sample", "directory containing TPC-H sample files (local mode)")
-		baselinePath   = flag.String("baseline", "benchmarks/tpch/baseline-sf100.json", "path to baseline JSON")
+		baselinePath   = flag.String("baseline", "", "path to baseline JSON (default: benchmarks/tpch/baseline-local-small.json for --mode=local --slice=small at the default scale factor, else benchmarks/tpch/baseline-sf100.json)")
 		outPath        = flag.String("out", "./harness-result.json", "path to write result JSON")
 		queries        = flag.String("queries", "", "comma-separated query names (default: all 22 + micros)")
 		updateBaseline = flag.Bool("update-baseline", false, "(golden only) write the result directly to --baseline")
@@ -48,6 +48,18 @@ func main() {
 	if *source != "local" && *source != "s3" {
 		fmt.Fprintln(os.Stderr, "ERROR: --source must be 'local' or 's3'")
 		os.Exit(harness.ExitSetup)
+	}
+	if *baselinePath == "" {
+		// The SF100 file is a row-count oracle for SF100 data; comparing
+		// local/small (SF0.01 fixture) row counts against it fails every
+		// SF-scaled query. The gate silently lost its default baseline
+		// when the SF100 oracle was populated (da5301a) — local/small now
+		// gets its own DuckDB-validated oracle.
+		if *mode == "local" && *slice == "small" && *scaleFactor == 0 {
+			*baselinePath = "benchmarks/tpch/baseline-local-small.json"
+		} else {
+			*baselinePath = "benchmarks/tpch/baseline-sf100.json"
+		}
 	}
 
 	cfg := harness.Config{
