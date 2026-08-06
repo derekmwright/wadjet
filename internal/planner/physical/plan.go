@@ -1923,6 +1923,11 @@ func (p *Planner) PlanDistributed(ctx context.Context, node *logical.Node) ([]St
 	// every rewiring pass (shapes final) and independent of the legacy
 	// DynamicFiltersEnabled flag. Kill switch WADJET_SEMIANTI_BUILD_FILTER=0.
 	stages = p.markSemiAntiBuildFilters(ctx, stages)
+	// Two-hop dimension bloom cascade (nation→supplier→lineitem class):
+	// transitive semijoin reduction of a fact probe scan via a tiny
+	// filtered dimension riding a chained/fused build. Cardinality-capped
+	// L2-resident blooms. Kill switch WADJET_DIMENSION_CASCADE=0.
+	stages = p.markDimensionCascade(ctx, stages)
 	prev := BehaviorPreservingMode
 	BehaviorPreservingMode = false
 	defer func() { BehaviorPreservingMode = prev }()
