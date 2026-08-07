@@ -45,9 +45,12 @@ func init() {
 //     P's N; same field restrictions as P. C's FusedJoins ride along as
 //     chained broadcast probes (they ran before C's primary, so they stay
 //     ordered before it in the chain).
-//   - No dep aliasing: C's build deps must not already be deps of P
-//     (buildTaskInputsForStage's dep-count arithmetic assumes distinct
-//     entries).
+//   - No dep aliasing: C's build deps must not already be deps of P,
+//     EXCEPT C's primary build sharing P's primary build (hash-partitioned
+//     only) — the semi/anti-over-one-exchange shape (Q21). The duplicate
+//     dep entry satisfies the 2+fused+chained arithmetic, chained builds
+//     resolve by upstream-ID lookup, and partition slices align because
+//     both builds read the same exchange.
 func fuseStageChains(stages []Stage) []Stage {
 	if !StageFusion.Load() {
 		return stages
@@ -137,7 +140,17 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 		if !chainConsumerEligible(c, p) {
 			continue
 		}
-		// No dep aliasing between C's build-side deps and P's existing deps.
+		// No dep aliasing between C's build-side deps and P's existing
+		// deps — with ONE exception: C's PRIMARY build may equal P's
+		// primary build (RightDepStage) when C is hash-partitioned. Both
+		// joins then read the same exchange partition slice (task w reads
+		// partition w for each build: dispatch resolves chained builds by
+		// upstream-ID map lookup, and the dep-count arithmetic counts the
+		// duplicate entry; dep-readiness waits are channel-idempotent).
+		// Measured on Q21 (2026-08-06 wlogs): the semi+anti pair over one
+		// sabf-filtered lineitem repartition each ran a full stage — the
+		// strict rule forced join-16 to rebuild join-12's exact build
+		// input AND materialize/re-read the 7M-row link between them.
 		pDeps := make(map[string]bool, len(p.Dependencies))
 		for _, d := range p.Dependencies {
 			pDeps[d] = true
@@ -146,14 +159,21 @@ func fuseOneChainLink(stages []Stage) ([]Stage, bool) {
 		for _, fj := range c.FusedJoins {
 			cBuildDeps = append(cBuildDeps, fj.BuildDepStage)
 		}
+		primaryIdx := len(cBuildDeps) // index of c.RightDepStage below
 		cBuildDeps = append(cBuildDeps, c.RightDepStage)
 		for _, cj := range c.ChainedJoins {
 			cBuildDeps = append(cBuildDeps, cj.BuildDepStage)
 		}
+		sharedPrimaryBuild := c.Type == StageHashJoin &&
+			p.RightDepStage != "" && c.RightDepStage == p.RightDepStage
 		aliased := false
 		seen := make(map[string]bool, len(cBuildDeps))
-		for _, d := range cBuildDeps {
-			if d == "" || pDeps[d] || seen[d] {
+		for i, d := range cBuildDeps {
+			if d == "" || seen[d] {
+				aliased = true
+				break
+			}
+			if pDeps[d] && !(sharedPrimaryBuild && i == primaryIdx) {
 				aliased = true
 				break
 			}

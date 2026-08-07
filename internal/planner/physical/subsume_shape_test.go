@@ -26,6 +26,14 @@ AND NOT EXISTS (SELECT 1 FROM lineitem l3 WHERE l3.l_orderkey = l1.l_orderkey AN
 		if len(s.BuildFilterExprs) > 0 {
 			buildFiltered++
 		}
+		// Stage-chain fusion (shared-build exception) may absorb the
+		// build-filtered anti into the semi; its BuildFilterExprs then
+		// ride the chained spec instead of a stage of its own.
+		for _, cj := range s.ChainedJoins {
+			if len(cj.BuildFilterExprs) > 0 {
+				buildFiltered++
+			}
+		}
 	}
 	if flagged != 1 || buildFiltered != 1 {
 		for _, s := range stages {

@@ -157,3 +157,40 @@ deletes the fused Q18 stage's remaining output materialization.
   broadcast_join→agg Singleton links are small).
 - Skew-splitting stages with partitioned chained builds (needs
   partition-indexed slicing for sub-tasks).
+
+## Shared-primary-build exception (2026-08-06)
+
+The v1 dep-aliasing rule ("C's build deps must not already be deps of P")
+blocked exactly one measured SF100 shape: Q21's semi+anti pair, where
+join-16 (anti) builds from the SAME `exchange-repartition-11` as join-12
+(semi, its probe producer). The strict rule forced two stages that each
+fetched + decoded + hash-built the same sabf-filtered lineitem repartition
+AND materialized/re-read the ~7M-row semi→anti link (2026-08-06 wlogs:
+join-12 24–46s + join-16 33–52s summed task CPU per run).
+
+Relaxation: C's PRIMARY build (RightDepStage) may equal P's primary build
+when C is a hash_join. Safety:
+
+- **Dep arithmetic**: the duplicate entry is appended, so the
+  `2 + fused + chained` length checks (ValidateNativeDAGShape,
+  buildTaskInputsForStage, dispatch) still hold.
+- **Input resolution**: chained builds resolve via `inputs[BuildDepStage]`
+  map lookup, not positionally; the DAG scheduler's dep-readiness waits
+  are channel-reads, idempotent under duplicates; `collectInputs` and
+  eager-feed maps key by stage ID (duplicate collapses).
+- **Slicing alignment**: both builds are partition slices of the same
+  exchange — task w reads partition w for the primary AND the chained
+  build. The second fetch is local-cache-warm; the second decode+build
+  remains (a fused single-build semi+anti probe operator is the follow-on
+  slice if profiles still rank it).
+- **Downstream passes**: markSemiAntiBuildFilters already counts
+  ChainedJoinSpec semi/antis as logical builds (its ≥2 eligibility sees
+  primary+chained = 2 and still marks Q21); fuseScanShuffle /
+  fuseJoinShuffle consumer gates are type checks, indifferent to the
+  duplicate consumer entry.
+- **Scope**: only C's primary build gets the exception — C's fused/chained
+  build deps and aliasing against P's PROBE dep stay blocked
+  (TestFuseStageChains_ProbeAliasStillBlocked).
+
+SF100 plan sweep (catalog-snapshot repro, all 22 queries): the exception
+fires on Q21 only — 13 → 12 stages, sabf + dimension-cascade marks intact.
