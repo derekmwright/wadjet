@@ -175,3 +175,211 @@ func TestPollDeferredBloomResolvesOnArrival(t *testing.T) {
 		t.Fatal("fresh poll after staging must find the artifact")
 	}
 }
+
+// parsePartialCount: key-shape parsing for count-in-key partials.
+func TestParsePartialCount(t *testing.T) {
+	cases := []struct {
+		key, filterID string
+		wantN         int
+		wantOK        bool
+	}{
+		{"queries/st-s-q/dynfilter/s/abc123-f1.of3.wdf", "f1", 3, true},
+		{"abc123-f1.of12.wdf", "f1", 12, true},
+		{"queries/st-s-q/dynfilter/s/abc123-f1.wdf", "f1", 0, false},     // legacy, no stamp
+		{"queries/st-s-q/dynfilter/s/abc123-f2.of3.wdf", "f1", 0, false}, // other filter
+		{"queries/st-s-q/dynfilter/s/abc123-f1.of0.wdf", "f1", 0, false}, // bad count
+		{"queries/st-s-q/dynfilter/s/abc123-f1.ofx.wdf", "f1", 0, false},
+		{"queries/st-s-q/dynfilter/s/abc123-f1.of3.txt", "f1", 0, false},
+		// FilterID containing a dash still suffix-matches.
+		{"queries/st-s-q/dynfilter/s/abc123-df-scan-7-c0.of24.wdf", "df-scan-7-c0", 24, true},
+	}
+	for _, c := range cases {
+		n, ok := parsePartialCount(c.key, c.filterID)
+		if n != c.wantN || ok != c.wantOK {
+			t.Errorf("parsePartialCount(%q, %q) = (%d, %v), want (%d, %v)",
+				c.key, c.filterID, n, ok, c.wantN, c.wantOK)
+		}
+	}
+}
+
+// Incremental partial publication: the poll resolves via the consumer-side
+// union the moment the LAST ".of<N>" partial lands — no merged key needed —
+// and never before full coverage (an incomplete union falsely rejects rows).
+func TestPollDeferredBloomIncrementalPartials(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{store: store, logger: slog.Default()}
+	spec := distributed.DynamicFilterSpec{
+		FilterID: "f1", BloomBucket: "b",
+		BloomKey:      "queries/q/dynfilter-merged/scan-1/f1.wdf",
+		PartialPrefix: "queries/st-scan-1-q/dynfilter/scan-1/",
+		Deferred:      true,
+	}
+	// Two of three partials present: must NOT resolve.
+	stageArtifact(t, store, "b", spec.PartialPrefix+"t1-f1.of3.wdf", 10)
+	stageArtifact(t, store, "b", spec.PartialPrefix+"t2-f1.of3.wdf", 20)
+	// A different filter's partial in the same prefix must be ignored.
+	stageArtifact(t, store, "b", spec.PartialPrefix+"t1-f2.of1.wdf", 999)
+	p := e.pollDeferredBloom(spec)
+	select {
+	case <-p.done:
+		t.Fatal("resolved with incomplete partial coverage")
+	case <-time.After(600 * time.Millisecond):
+	}
+	stageArtifact(t, store, "b", spec.PartialPrefix+"t3-f1.of3.wdf", 30)
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not resolve after the last partial landed")
+	}
+	bloom, mask, ok := p.resolved()
+	if !ok || p.source != "partials" || p.partials != 3 {
+		t.Fatalf("want resolution via 3 partials, got ok=%v source=%q partials=%d", ok, p.source, p.partials)
+	}
+	// The union must equal the bitwise OR of the three partials.
+	b1, m1 := testBloomOf(10)
+	b2, _ := testBloomOf(20)
+	b3, _ := testBloomOf(30)
+	if mask != m1 || len(bloom) != len(b1) {
+		t.Fatalf("union shape mismatch: mask=%d want %d, words=%d want %d", mask, m1, len(bloom), len(b1))
+	}
+	for i := range bloom {
+		if bloom[i] != b1[i]|b2[i]|b3[i] {
+			t.Fatalf("union word %d = %x, want OR of partials %x", i, bloom[i], b1[i]|b2[i]|b3[i])
+		}
+	}
+}
+
+// The coordinator-staged merged key is authoritative and supersedes the
+// partial path: when it exists, the poll resolves from it regardless of
+// partial coverage.
+func TestPollDeferredBloomMergedSupersedesPartials(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{store: store, logger: slog.Default()}
+	spec := distributed.DynamicFilterSpec{
+		FilterID: "f1", BloomBucket: "b",
+		BloomKey:      "queries/q/dynfilter-merged/scan-1/f1.wdf",
+		PartialPrefix: "queries/st-scan-1-q/dynfilter/scan-1/",
+		Deferred:      true,
+	}
+	stageArtifact(t, store, "b", spec.PartialPrefix+"t1-f1.of3.wdf", 10)
+	stageArtifact(t, store, "b", spec.BloomKey, 10, 20, 30)
+	p := e.pollDeferredBloom(spec)
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("merged key present but poll did not resolve")
+	}
+	if _, _, ok := p.resolved(); !ok || p.source != "merged" {
+		t.Fatalf("want resolution via merged key, got ok=%v source=%q", ok, p.source)
+	}
+}
+
+// A partial whose bloom size disagrees with the accumulated union (planner
+// bug guard) must never count toward completeness — the filter degrades to
+// never-activating, mirroring the coordinator's withhold.
+func TestPollDeferredBloomPartialSizeMismatchNeverActivates(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{store: store, logger: slog.Default()}
+	spec := distributed.DynamicFilterSpec{
+		FilterID: "f1", BloomBucket: "b",
+		BloomKey:      "queries/q/dynfilter-merged/scan-1/f1.wdf",
+		PartialPrefix: "queries/st-scan-1-q/dynfilter/scan-1/",
+		Deferred:      true,
+	}
+	stageArtifact(t, store, "b", spec.PartialPrefix+"t1-f1.of2.wdf", 10)
+	// Larger key set -> NewBloomSized picks a bigger bloom -> size mismatch.
+	stageArtifact(t, store, "b", spec.PartialPrefix+"t2-f1.of2.wdf",
+		1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22,
+		23, 24, 25, 26, 27, 28, 29, 31, 32, 33, 34, 35, 36, 37, 38, 39, 41, 42,
+		43, 44, 45, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 58, 59, 61, 62,
+		63, 64, 65, 66, 67, 68, 69, 71, 72, 73, 74, 75, 76, 77, 78, 79, 81, 82)
+	p := e.pollDeferredBloom(spec)
+	select {
+	case <-p.done:
+		t.Fatal("size-mismatched partial must not complete the union")
+	case <-time.After(900 * time.Millisecond):
+	}
+}
+
+// Emit-side count-in-key: a stamped StagePartials + PartialPrefix names the
+// partial "<PartialPrefix><taskID>-<filterID>.of<N>.wdf" — the prefix is
+// used VERBATIM (the coordinator stamps the same value into consumer specs,
+// so emit and consume agree by construction) — and the shape round-trips
+// through parsePartialCount.
+func TestFinalizeDynamicFilterEmitsCountInKey(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{store: store, logger: slog.Default()}
+	op := exec.NewDynamicFilterEmitOp("f1", "k", "int64", 256)
+	if err := op.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := op.Execute(context.Background(), intBatch(t, "k", []int64{10, 20})); err != nil {
+		t.Fatal(err)
+	}
+	task := distributed.Task{
+		ID: "abc123", QueryID: "st-scan-1-qid", StageID: "scan-1", ResultBucket: "b",
+	}
+	specs := []distributed.DynamicFilterEmit{
+		{FilterID: "f1", KeyColumn: "k", KeyType: "int64", BloomBits: 256,
+			StagePartials: 3, PartialPrefix: "queries/st-scan-1-qid/dynfilter/scan-1/"},
+	}
+	var result distributed.ResultNotification
+	if err := e.finalizeDynamicFilterEmits(context.Background(), task,
+		[]*exec.DynamicFilterEmitOp{op}, specs, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.DynamicFilterPartials) != 1 {
+		t.Fatalf("want 1 partial ref, got %d", len(result.DynamicFilterPartials))
+	}
+	key := result.DynamicFilterPartials[0].Key
+	want := "queries/st-scan-1-qid/dynfilter/scan-1/abc123-f1.of3.wdf"
+	if key != want {
+		t.Fatalf("partial key layout drifted:\n got %q\nwant %q", key, want)
+	}
+	if n, ok := parsePartialCount(key, "f1"); !ok || n != 3 {
+		t.Fatalf("emit key must round-trip through parsePartialCount: n=%d ok=%v", n, ok)
+	}
+	if _, _, err := store.Get(context.Background(), "b", key); err != nil {
+		t.Fatalf("partial not uploaded at its ref key: %v", err)
+	}
+}
+
+// Un-stamped specs (StagePartials zero — legacy coordinator) keep the
+// original key shape so the coordinator merge path is byte-compatible.
+func TestFinalizeDynamicFilterEmitsLegacyKeyWithoutStamp(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{store: store, logger: slog.Default()}
+	op := exec.NewDynamicFilterEmitOp("f1", "k", "int64", 256)
+	if err := op.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := op.Execute(context.Background(), intBatch(t, "k", []int64{10})); err != nil {
+		t.Fatal(err)
+	}
+	task := distributed.Task{ID: "abc123", QueryID: "q", StageID: "s", ResultBucket: "b"}
+	specs := []distributed.DynamicFilterEmit{{FilterID: "f1", KeyColumn: "k", KeyType: "int64", BloomBits: 256}}
+	var result distributed.ResultNotification
+	if err := e.finalizeDynamicFilterEmits(context.Background(), task,
+		[]*exec.DynamicFilterEmitOp{op}, specs, &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.DynamicFilterPartials) != 1 ||
+		result.DynamicFilterPartials[0].Key != "queries/q/dynfilter/s/abc123-f1.wdf" {
+		t.Fatalf("legacy key shape changed: %+v", result.DynamicFilterPartials)
+	}
+}

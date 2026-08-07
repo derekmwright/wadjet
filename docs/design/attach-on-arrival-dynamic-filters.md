@@ -148,11 +148,67 @@ serialization (dispatch round-trips + merge latency) from every marked
 query's critical path. Edges where that trade inverts (join-fed emitters)
 stay WAIT by rule 2.
 
+## Incremental partial publication (2026-08-07)
+
+Kill switch: `WADJET_DF_INCREMENTAL_PARTIALS=0`.
+
+The first SF100 pair (ctl f6a47c6 / trt 1cb836e, 2026-08-07) showed the
+residual on attach-mode edges is **merge availability latency**: the bloom
+becomes pollable only after emitter stage completion → NATS result gather →
+coordinator batch-fetch of partials → union → merged-key PUT → consumer's
+next poll. Q21's long fact scan absorbed that chain (~85% of the row cut
+retained); Q07's shorter scan did not (17/48 consumer tasks never-arrived,
+~90% of the cut lost).
+
+Fix: consumers discover the emitter's **per-task partials directly from S3**
+as workers upload them, OR-union progressively, and activate the union the
+moment the last partial lands. The whole coordinator merge chain leaves the
+availability path; what remains is (last partial PUT + ≤250 ms poll).
+
+The correctness constraint shapes the design: a bloom missing ANY task's
+keys falsely rejects rows (same reason `mergeCompleteBuildStats` withholds
+incomplete filters), so partial coverage never filters — the union
+accumulates across ticks and installs only at full coverage.
+
+Mechanism:
+
+- **Count-in-key**: the coordinator stamps `DynamicFilterEmit.StagePartials`
+  (= the stage's task count) and `DynamicFilterEmit.PartialPrefix` at
+  dispatch; the emitting worker uploads partials to
+  `<PartialPrefix><taskID>-<filterID>.of<N>.wdf`, prefix verbatim. Any
+  single partial thus tells a consumer the completeness target — necessary
+  because the consumer usually dispatches BEFORE the emitter stage exists
+  (task IDs are random and the count is dispatch-time knowledge). Task
+  retries reuse the task ID → same key, idempotent overwrite, no double
+  count. A retried attempt's artifact is byte-deterministic (same files →
+  same key set → same bloom), so a consumer that read the earlier attempt's
+  upload holds identical bits.
+- **`DynamicFilterSpec.PartialPrefix`** on Deferred specs names the same
+  prefix (`queries/st-<stage>-<qid>/dynfilter/<stage>/` — the stage-scoped
+  query ID emitter scan tasks publish under). Both sides are stamped from
+  one coordinator helper (`dynamicFilterPartialPrefix`), so emit and
+  consume agree by construction. Kill switch off ⇒ consumer prefix omitted
+  ⇒ merged-key polling only.
+- **Poller**: each 250 ms tick GETs the merged key first (authoritative,
+  and the fallback for mixed versions), then LISTs the prefix, GETs new
+  partials, ORs them, and resolves when merged-count reaches N. Guards
+  mirror the coordinator's merge: size-mismatched or oversized partials are
+  rejected permanently and never count — the filter then never activates,
+  exactly the coordinator's withhold degradation (which also triggers in
+  that case, so neither path filters).
+
+The coordinator merge + merged-key staging are unchanged and still run —
+they serve wait-mode consumes, late-registering consumers (post-merge
+polls resolve in one GET), and the mixed-version fallback.
+
 ## Observability
 
 - Planner: `AttachOnArrivalConsumesPlanned` counter +
   `dynamic_filter: attach-on-arrival` log line per converted edge.
 - Coordinator: `staged_to_s3` count in the existing merge log now includes
   forced stagings; deferred spec count in the consume-attach log.
-- Worker: `late attach installed` (with batches/rows before attach) and
-  `late attach never arrived` (scan ended first) lines.
+- Worker: `late attach installed` (with batches/rows before attach, plus
+  `source=merged|partials` and the partial count) and
+  `late attach never arrived` (scan ended first) lines;
+  `incremental partial union complete` when the consumer-side union wins
+  the race against the coordinator merge.

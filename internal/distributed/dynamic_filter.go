@@ -26,6 +26,23 @@ type DynamicFilterEmit struct {
 	// build-filter pass, whose bloom must reflect the stage's post-filter /
 	// post-join output keys (docs/design/semi-anti-build-dynamic-filters.md).
 	AtOutput bool `json:"at_output,omitempty"`
+	// StagePartials is the total number of partials the stage will produce
+	// for this filter (== the stage's task count), stamped by the
+	// coordinator at dispatch. When set, the emitting worker names its
+	// partial key with an ".of<N>" suffix so an attach-on-arrival consumer
+	// that discovers partials directly (DynamicFilterSpec.PartialPrefix)
+	// learns the completeness target from any single partial — the
+	// consumer usually dispatches before the emitter stage exists, so it
+	// cannot be told the count in its own spec.
+	StagePartials int `json:"stage_partials,omitempty"`
+	// PartialPrefix is the exact S3 prefix the worker must upload this
+	// filter's partials under, stamped by the coordinator alongside
+	// StagePartials. The coordinator stamps the SAME value into consumer
+	// DynamicFilterSpec.PartialPrefix, making it the single source of
+	// truth for the partial key layout — the worker never reconstructs it.
+	// Empty (legacy coordinator) ⇒ the worker falls back to the historical
+	// queries/<task.QueryID>/dynfilter/<stageID>/ construction.
+	PartialPrefix string `json:"partial_prefix,omitempty"`
 }
 
 // DynamicFilterConsume, attached to a probe-scan Stage, instructs the
@@ -79,4 +96,15 @@ type DynamicFilterSpec struct {
 	// identical). A key that never appears (emitter withheld the filter)
 	// degrades to an unfiltered scan, same as a missing filter today.
 	Deferred bool `json:"deferred,omitempty"`
+
+	// PartialPrefix (Deferred only) is the S3 prefix where the emitter
+	// stage's per-task partials land. When set, the consumer's poll loop
+	// additionally lists the prefix and ORs partials as they are uploaded,
+	// activating the union the moment the last partial lands — instead of
+	// waiting out emitter stage completion + coordinator merge + merged-key
+	// staging. Activation still requires FULL coverage (every one of the
+	// ".of<N>" partials merged): an incomplete union falsely rejects rows,
+	// so partial-coverage filtering is never applied. Empty = merged-key
+	// polling only (kill switch WADJET_DF_INCREMENTAL_PARTIALS=0).
+	PartialPrefix string `json:"partial_prefix,omitempty"`
 }

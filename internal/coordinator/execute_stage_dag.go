@@ -1953,6 +1953,17 @@ func (c *Coordinator) dispatchScanFilterStage(
 					KeyType:   e.KeyType,
 					BloomBits: e.BloomBits,
 					AtOutput:  e.AtOutput,
+					// Count-in-key completeness target + upload prefix for
+					// incremental partial publication: attach-on-arrival
+					// consumers listing the prefix learn from any one
+					// ".of<N>" partial how many the stage will produce.
+					// StagePartials must equal the expectedTasks the
+					// coordinator's own mergeCompleteBuildStats enforces
+					// (len(tasks) below); PartialPrefix is stamped from the
+					// same helper the consumer specs use, so emit and
+					// consume agree by construction.
+					StagePartials: actualTasks,
+					PartialPrefix: dynamicFilterPartialPrefix(queryID, stage.ID),
 				}
 				if e.AtOutput {
 					outputEmits = append(outputEmits, em)

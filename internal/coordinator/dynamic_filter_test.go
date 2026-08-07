@@ -143,4 +143,39 @@ func TestDynamicFilterSpecsDeferred(t *testing.T) {
 		s.TargetColumn != "l_suppkey" {
 		t.Fatalf("deferred spec malformed: %+v", s)
 	}
+	if s.PartialPrefix != dynamicFilterPartialPrefix("q", "src-a") {
+		t.Fatalf("deferred spec must carry the partial prefix for incremental publication: %+v", s)
+	}
+}
+
+// Kill switch WADJET_DF_INCREMENTAL_PARTIALS=0: deferred specs carry no
+// PartialPrefix, so consumers poll the merged key only (pre-2026-08-07
+// attach behavior).
+func TestDynamicFilterSpecsDeferredIncrementalKillSwitch(t *testing.T) {
+	old := dfIncrementalPartials
+	dfIncrementalPartials = false
+	defer func() { dfIncrementalPartials = old }()
+	consumes := []physical.DynamicFilterConsume{
+		{FilterID: "fa", SourceStageID: "src-a", TargetColumn: "l_suppkey", KeyType: "int64", AttachOnArrival: true},
+	}
+	specs := dynamicFilterSpecsFromBuildStats(consumes, map[string]StageOutput{}, "q", "bkt")
+	if len(specs) != 1 || !specs[0].Deferred {
+		t.Fatalf("want 1 deferred spec, got %+v", specs)
+	}
+	if specs[0].PartialPrefix != "" {
+		t.Fatalf("kill switch must suppress PartialPrefix: %+v", specs[0])
+	}
+}
+
+// The partial prefix must match where dispatchScanFilterStage's tasks
+// actually upload: emitter scan tasks are published under the stage-scoped
+// query ID ("st-<stageID>-<queryID>"), and the worker's
+// finalizeDynamicFilterEmits keys partials under queries/<task.QueryID>/
+// dynfilter/<stageID>/. This test pins the three-site agreement.
+func TestDynamicFilterPartialPrefixMatchesEmitLayout(t *testing.T) {
+	got := dynamicFilterPartialPrefix("qid-123", "scan-5")
+	want := "queries/st-scan-5-qid-123/dynfilter/scan-5/"
+	if got != want {
+		t.Fatalf("partial prefix drifted from the emit-side key layout:\n got %q\nwant %q", got, want)
+	}
 }

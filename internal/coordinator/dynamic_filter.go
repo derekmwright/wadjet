@@ -4,12 +4,23 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
 	"github.com/citc-tech/wadjet/internal/distributed"
 	"github.com/citc-tech/wadjet/internal/planner/physical"
 	"github.com/citc-tech/wadjet/internal/storage/objstore"
 )
+
+// dfIncrementalPartials gates incremental partial-bloom publication
+// (docs/design/attach-on-arrival-dynamic-filters.md §Incremental partial
+// publication): attach-on-arrival consumers discover the emitter's per-task
+// partials directly from S3 and OR them as they land, activating at full
+// coverage — instead of waiting for emitter stage completion + coordinator
+// merge + merged-key staging. Kill switch WADJET_DF_INCREMENTAL_PARTIALS=0
+// (deferred specs then carry no PartialPrefix and consumers poll the merged
+// key only, the pre-2026-08-07 behavior). Var, not const, so tests toggle it.
+var dfIncrementalPartials = os.Getenv("WADJET_DF_INCREMENTAL_PARTIALS") != "0"
 
 // dynamicFilterInlineThresholdBytes — partials with serialized blooms below
 // this size are carried inline in OpSpec.DynamicFilters. Larger ones are
@@ -255,6 +266,22 @@ func mergedDynamicFilterKey(queryID, stageID, filterID string) string {
 	return fmt.Sprintf("queries/%s/dynfilter-merged/%s/%s.wdf", queryID, stageID, filterID)
 }
 
+// dynamicFilterPartialPrefix is the S3 prefix under which an emitter stage's
+// per-task partial artifacts land — the single source of truth for the
+// layout. The coordinator stamps it into BOTH sides: the emit specs
+// (DynamicFilterEmit.PartialPrefix — workers upload verbatim, no
+// reconstruction) and the deferred consume specs
+// (DynamicFilterSpec.PartialPrefix — consumers list it), so the two agree by
+// construction. The value intentionally equals the historical worker-side
+// construction (queries/<stage-scoped task QueryID>/dynfilter/<stageID>/,
+// where dispatchScanFilterStage rebases task QueryIDs to
+// "st-<stageID>-<queryID>") so legacy workers that fall back to
+// reconstructing from task.QueryID upload to the same place, and existing
+// cleanup behavior is unchanged.
+func dynamicFilterPartialPrefix(queryID, stageID string) string {
+	return fmt.Sprintf("queries/st-%s-%s/dynfilter/%s/", stageID, queryID, stageID)
+}
+
 // lateAttachFilterIDs collects the FilterIDs the planner marked LateAttach
 // on a stage's emits — the set mergeCompleteBuildStats must force-stage.
 func lateAttachFilterIDs(emits []physical.DynamicFilterEmit) map[string]bool {
@@ -268,6 +295,27 @@ func lateAttachFilterIDs(emits []physical.DynamicFilterEmit) map[string]bool {
 		}
 	}
 	return out
+}
+
+// deferredDynamicFilterSpec builds the attach-on-arrival wire spec for a
+// consume whose emitter has not run (the normal case — the stat-dep edge was
+// removed, so the emitter's stats are never in `upstream`). The consumer
+// polls the deterministic merged key; with incremental publication on it
+// additionally lists PartialPrefix and ORs partials as emitter tasks upload
+// them, activating at full ".of<N>" coverage.
+func deferredDynamicFilterSpec(c physical.DynamicFilterConsume, queryID, bucket string) distributed.DynamicFilterSpec {
+	spec := distributed.DynamicFilterSpec{
+		FilterID:     c.FilterID,
+		TargetColumn: c.TargetColumn,
+		KeyType:      c.KeyType,
+		BloomBucket:  bucket,
+		BloomKey:     mergedDynamicFilterKey(queryID, c.SourceStageID, c.FilterID),
+		Deferred:     true,
+	}
+	if dfIncrementalPartials {
+		spec.PartialPrefix = dynamicFilterPartialPrefix(queryID, c.SourceStageID)
+	}
+	return spec
 }
 
 // dynamicFilterSpecsFromBuildStats translates a stage's ConsumeDynamicFilters
@@ -295,28 +343,14 @@ func dynamicFilterSpecsFromBuildStats(
 		stageOut, ok := upstream[c.SourceStageID]
 		if !ok || stageOut.BuildStats == nil {
 			if c.AttachOnArrival && bucket != "" {
-				out = append(out, distributed.DynamicFilterSpec{
-					FilterID:     c.FilterID,
-					TargetColumn: c.TargetColumn,
-					KeyType:      c.KeyType,
-					BloomBucket:  bucket,
-					BloomKey:     mergedDynamicFilterKey(queryID, c.SourceStageID, c.FilterID),
-					Deferred:     true,
-				})
+				out = append(out, deferredDynamicFilterSpec(c, queryID, bucket))
 			}
 			continue
 		}
 		stats, ok := stageOut.BuildStats[c.FilterID]
 		if !ok || stats == nil {
 			if c.AttachOnArrival && bucket != "" {
-				out = append(out, distributed.DynamicFilterSpec{
-					FilterID:     c.FilterID,
-					TargetColumn: c.TargetColumn,
-					KeyType:      c.KeyType,
-					BloomBucket:  bucket,
-					BloomKey:     mergedDynamicFilterKey(queryID, c.SourceStageID, c.FilterID),
-					Deferred:     true,
-				})
+				out = append(out, deferredDynamicFilterSpec(c, queryID, bucket))
 			}
 			continue
 		}

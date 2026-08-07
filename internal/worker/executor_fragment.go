@@ -545,9 +545,14 @@ func (s *bloomFilteredSource) promotePending(ctx context.Context) {
 		if err := op.Init(ctx); err == nil {
 			s.ops = append(s.ops, op)
 			if s.logger != nil {
+				source := d.pb.source
+				if source == "" {
+					source = "merged"
+				}
 				s.logger.Info("dynamic_filter: late attach installed",
 					"task_id", s.taskID, "stage_id", s.stageID,
-					"filter_id", d.filterID, "batches_before_attach", d.batches)
+					"filter_id", d.filterID, "batches_before_attach", d.batches,
+					"source", source, "partials", d.pb.partials)
 			}
 		}
 	}

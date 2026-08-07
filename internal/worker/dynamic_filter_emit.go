@@ -136,7 +136,7 @@ func (e *Executor) finalizeDynamicFilterEmits(
 
 	for _, op := range emitOps {
 		snap := op.Snapshot()
-		_ = specByID[snap.FilterID] // reserved for future key-type validation
+		spec := specByID[snap.FilterID]
 
 		// A partial that saw rows but never resolved its key column is
 		// POISON: it is missing keys that exist in the stream, and a bloom
@@ -165,8 +165,19 @@ func (e *Executor) finalizeDynamicFilterEmits(
 				"task_id", task.ID, "filter_id", snap.FilterID, "error", err)
 			continue
 		}
+		// Count-in-key: when the coordinator stamped the stage's partial
+		// count, the key carries it (".of<N>") so an attach-on-arrival
+		// consumer listing the prefix learns the completeness target from
+		// any single partial. The prefix comes verbatim from the spec (the
+		// coordinator stamps the same value into the consumer side — single
+		// source of truth for the layout). Task retries reuse the task ID →
+		// same key, idempotent overwrite, so the count never double-counts.
 		key := fmt.Sprintf("queries/%s/dynfilter/%s/%s-%s.wdf",
 			task.QueryID, task.StageID, task.ID, snap.FilterID)
+		if spec.PartialPrefix != "" && spec.StagePartials > 0 {
+			key = fmt.Sprintf("%s%s-%s.of%d.wdf",
+				spec.PartialPrefix, task.ID, snap.FilterID, spec.StagePartials)
+		}
 		reader := bytes.NewReader(buf.Bytes())
 		if _, err := e.store.Put(ctx, task.ResultBucket, key,
 			reader, int64(buf.Len()), "application/octet-stream"); err != nil {
