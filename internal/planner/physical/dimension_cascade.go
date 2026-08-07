@@ -64,7 +64,42 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 	for i := range stages {
 		byID[stages[i].ID] = i
 	}
+	// FIXPOINT: a mid that gained a cascade consume in one iteration
+	// qualifies as the next iteration's D (transitively-filtered dimension
+	// — Q05's nation carries no predicate of its own; its key set narrows
+	// only through region's bloom). Each iteration marks at most one new
+	// segment per join; the chain region→nation→supplier→lineitem needs
+	// two. Four iterations bounds any realistic snowflake depth; the
+	// existing-consume dedup guarantees termination.
 	var seq int
+	for iter := 0; iter < 4; iter++ {
+		if !p.markDimensionCascadeOnce(ctx, stages, byID, &seq) {
+			break
+		}
+	}
+	return stages
+}
+
+// markDimensionCascadeOnce runs one marking sweep; reports whether any
+// segment was marked (the fixpoint driver's continue signal).
+func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, byID map[string]int, seqp *int) bool {
+	seq := *seqp
+	defer func() { *seqp = seq }()
+	anyMarked := false
+	// Scans that feed an exchange stage as its only input: a consume on
+	// such a pass-through scan is FORWARDED into the exchange's tasks
+	// (dispatchShuffleStage ships upstream.DynamicFilters), so it is a
+	// legal bloom target even with no pushed filters of its own — Q05's
+	// lineitem feeds exchange-repartition as a shuffle build.
+	exchangeFed := make(map[int]bool)
+	for i := range stages {
+		s := &stages[i]
+		if (s.Type == StageExchangeRepartition || s.Type == StageExchangeReplicate) && len(s.Dependencies) == 1 {
+			if idx, ok := byID[s.Dependencies[0]]; ok && stages[idx].Type == StageScan {
+				exchangeFed[idx] = true
+			}
+		}
+	}
 	for ji := range stages {
 		j := &stages[ji]
 		if j.Type != StageHashJoin && j.Type != StageBroadcastJoin {
@@ -158,6 +193,13 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 			}
 			return false
 		}
+		// Candidate bloom targets: the fact probe root plus every leg's
+		// build leaf scan (a leg's probe column can live on another leg's
+		// build in build-heavy plans — Q05's lineitem).
+		targetCandidates := []int{fIdx}
+		for _, l := range legs {
+			targetCandidates = append(targetCandidates, findLeafScanStage(l.buildDep, stages, byID))
+		}
 		marked := false
 		// Reject reasons are collected unconditionally and logged when a
 		// multi-leg join fails to match: plan-time only, one line per
@@ -184,11 +226,18 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 				continue
 			}
 			d := &stages[dIdx]
-			if len(d.FilterExprs) == 0 || d.TableName == "" ||
+			// D must be SELECTIVE: either its own pushed predicate, or a
+			// cascade consume gained in an earlier fixpoint iteration
+			// (transitively-filtered dimension — its emitted key set
+			// narrows through the upstream bloom because the AtOutput emit
+			// observes post-consume rows).
+			selective := len(d.FilterExprs) > 0 || len(d.ConsumeDynamicFilters) > 0
+			if !selective || d.TableName == "" ||
 				d.EstimatedRows <= 0 || d.EstimatedRows > cascadeMaxEmitterRows ||
 				!hasColumn(d.Columns, legD.rightKey) {
-				note("D[%s→%s]=%s: filters=%d est=%d hasKey=%t", legD.rightKey, legD.leftKey,
-					d.ID, len(d.FilterExprs), d.EstimatedRows, hasColumn(d.Columns, legD.rightKey))
+				note("D[%s→%s]=%s: filters=%d consumes=%d est=%d hasKey=%t", legD.rightKey, legD.leftKey,
+					d.ID, len(d.FilterExprs), len(d.ConsumeDynamicFilters),
+					d.EstimatedRows, hasColumn(d.Columns, legD.rightKey))
 				continue
 			}
 			for bi := range legs {
@@ -199,19 +248,59 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 				if !innerForm(legB.joinType) {
 					continue
 				}
-				// legB's probe column must belong to the FACT scan (hop-B
-				// target) and legD's probe column must belong to legB's
-				// BUILD scan (provenance).
+				// Hop-B target: the leaf scan OWNING legB's probe column.
+				// Usually the fact probe root — but in build-heavy plans
+				// (Q05: orders is the probe root, lineitem arrives as a
+				// shuffle BUILD) the leg's probe column lives on another
+				// leg's build scan. Drop-only stays safe either way: an
+				// inner-form row failing the leg produces nothing.
+				tIdx := fIdx
 				if !hasColumn(f.Columns, legB.leftKey) {
-					note("B[%s→%s]: %s not on fact %s cols=%v", legB.rightKey, legB.leftKey, legB.leftKey, f.ID, f.Columns)
+					tIdx = uniqueColumnOwner(legB.leftKey, targetCandidates, stages)
+					if tIdx < 0 {
+						note("B[%s→%s]: %s owner not unique among fact %s + leg scans", legB.rightKey, legB.leftKey, legB.leftKey, f.ID)
+						continue
+					}
+					// The consume must have somewhere to ride: pushed
+					// filters (dispatchScanFilterStage), a fused exchange,
+					// or a pass-through scan feeding an exchange (spec
+					// forwarding). A DIMENSION-CLASS target is also allowed
+					// while undispatchable: an intermediate chain scan
+					// (Q05's supplier at segment 1) only becomes an emitter
+					// — which forces its dispatch and applies the consume —
+					// when the NEXT fixpoint iteration marks the following
+					// segment; until then the consume is a harmless no-op.
+					t := &stages[tIdx]
+					dispatched := len(t.FilterExprs) > 0 ||
+						(t.Exchange != nil && len(t.Exchange.Keys) > 0 && t.Exchange.Count > 0) ||
+						exchangeFed[tIdx]
+					if !dispatched && t.EstimatedRows > cascadeMaxEmitterRows {
+						note("B[%s→%s]: target %s undispatchable (no filters/exchange/forwarding) and above dimension class", legB.rightKey, legB.leftKey, t.ID)
+						continue
+					}
+				}
+				t := &stages[tIdx]
+				if tIdx == dIdx {
 					continue
 				}
 				b0Idx := findLeafScanStage(legB.buildDep, stages, byID)
-				if b0Idx < 0 || b0Idx == fIdx || b0Idx == dIdx {
+				if b0Idx < 0 || b0Idx == fIdx || b0Idx == dIdx || b0Idx == tIdx {
 					note("B[%s→%s]: no leaf scan via %s", legB.rightKey, legB.leftKey, legB.buildDep)
 					continue
 				}
 				b0 := &stages[b0Idx]
+				// The mid becomes an EMITTER: the dimension-class size cap
+				// applies to it exactly as to D — emitters bypass the
+				// dispatch semaphore and ride the priority lane, whose
+				// memory rationale assumes tiny scans, and an oversized
+				// mid's bloom saturates the L2-residency ceiling anyway.
+				// (The 2-hop matcher got this bound implicitly from join
+				// shape; the fixpoint + generalized target must enforce it:
+				// customer at SF100 is 15M rows and must not qualify.)
+				if b0.EstimatedRows <= 0 || b0.EstimatedRows > cascadeMaxEmitterRows {
+					note("B0 via %s: est=%d exceeds emitter cap", legB.buildDep, stages[b0Idx].EstimatedRows)
+					continue
+				}
 				if b0.TableName == "" || len(b0.ScanFiles) == 0 ||
 					!hasColumn(b0.Columns, legD.leftKey) ||
 					!hasColumn(b0.Columns, legB.rightKey) {
@@ -228,33 +317,39 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 				if !ok {
 					continue
 				}
-				if stageReaches(d.ID, b0.ID, stages, byID) || stageReaches(b0.ID, f.ID, stages, byID) {
+				if stageReaches(d.ID, b0.ID, stages, byID) || stageReaches(b0.ID, t.ID, stages, byID) {
 					continue
 				}
-				if hasConsumeFor(b0.ConsumeDynamicFilters, d.ID, legD.leftKey) ||
-					hasConsumeFor(f.ConsumeDynamicFilters, b0.ID, legB.leftKey) {
+				// Segment dedup: this exact hop-B already marked (fixpoint
+				// termination). Hop-A dedup is a REUSE, not a skip — chain
+				// segments share edges (segment 1's hop-B nation→supplier
+				// IS segment 2's hop-A).
+				if hasConsumeFor(t.ConsumeDynamicFilters, b0.ID, legB.leftKey) {
 					continue
 				}
+				hopAExists := hasConsumeFor(b0.ConsumeDynamicFilters, d.ID, legD.leftKey)
 
-				// Hop A: D --(legD.rightKey set)--> B0 on legD.leftKey.
-				hopA := fmt.Sprintf("dimc-%s-%d-a", j.ID, seq)
-				d.EmitDynamicFilters = append(d.EmitDynamicFilters, DynamicFilterEmit{
-					FilterID:  hopA,
-					KeyColumn: legD.rightKey,
-					KeyType:   dKeyType,
-					BloomBits: cascadeBloomBits(d.EstimatedRows),
-					AtOutput:  true,
-				})
-				b0.ConsumeDynamicFilters = append(b0.ConsumeDynamicFilters, DynamicFilterConsume{
-					FilterID:      hopA,
-					SourceStageID: d.ID,
-					TargetColumn:  legD.leftKey,
-					KeyType:       dKeyType,
-				})
-				if !containsString(b0.Dependencies, d.ID) {
-					b0.Dependencies = append(b0.Dependencies, d.ID)
+				if !hopAExists {
+					// Hop A: D --(legD.rightKey set)--> B0 on legD.leftKey.
+					hopA := fmt.Sprintf("dimc-%s-%d-a", j.ID, seq)
+					d.EmitDynamicFilters = append(d.EmitDynamicFilters, DynamicFilterEmit{
+						FilterID:  hopA,
+						KeyColumn: legD.rightKey,
+						KeyType:   dKeyType,
+						BloomBits: cascadeBloomBits(d.EstimatedRows),
+						AtOutput:  true,
+					})
+					b0.ConsumeDynamicFilters = append(b0.ConsumeDynamicFilters, DynamicFilterConsume{
+						FilterID:      hopA,
+						SourceStageID: d.ID,
+						TargetColumn:  legD.leftKey,
+						KeyType:       dKeyType,
+					})
+					if !containsString(b0.Dependencies, d.ID) {
+						b0.Dependencies = append(b0.Dependencies, d.ID)
+					}
 				}
-				// Hop B: B0 --(post-consume legB.rightKey set)--> F on
+				// Hop B: B0 --(post-consume legB.rightKey set)--> T on
 				// legB.leftKey. The B0 emit forces dispatchScanFilterStage,
 				// whose sink-side AtOutput emit runs after the row-level
 				// hop-A consume.
@@ -266,22 +361,23 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 					BloomBits: cascadeBloomBits(b0.EstimatedRows / 8),
 					AtOutput:  true,
 				})
-				f.ConsumeDynamicFilters = append(f.ConsumeDynamicFilters, DynamicFilterConsume{
+				t.ConsumeDynamicFilters = append(t.ConsumeDynamicFilters, DynamicFilterConsume{
 					FilterID:      hopB,
 					SourceStageID: b0.ID,
 					TargetColumn:  legB.leftKey,
 					KeyType:       b0KeyType,
 				})
-				if !containsString(f.Dependencies, b0.ID) {
-					f.Dependencies = append(f.Dependencies, b0.ID)
+				if !containsString(t.Dependencies, b0.ID) {
+					t.Dependencies = append(t.Dependencies, b0.ID)
 				}
 				seq++
 				DimensionCascadesPlanned.Add(1)
 				slog.Info("dimension_cascade: marked",
-					"join", j.ID, "dim", d.ID, "mid", b0.ID, "fact", f.ID,
-					"hop_a", legD.rightKey+"->"+legD.leftKey,
+					"join", j.ID, "dim", d.ID, "mid", b0.ID, "target", t.ID, "fact", f.ID,
+					"hop_a", legD.rightKey+"->"+legD.leftKey, "hop_a_reused", hopAExists,
 					"hop_b", legB.rightKey+"->"+legB.leftKey)
 				marked = true
+				anyMarked = true
 				break
 			}
 		}
@@ -294,7 +390,26 @@ func (p *Planner) markDimensionCascade(ctx context.Context, stages []Stage) []St
 				"join", j.ID, "fact", f.ID, "legs", legStrs, "rejects", rejects)
 		}
 	}
-	return stages
+	return anyMarked
+}
+
+// uniqueColumnOwner returns the single candidate scan whose Columns contain
+// col, or -1 when zero or multiple candidates match — an ambiguous owner
+// must never receive a bloom (a wrong target falsely rejects rows).
+func uniqueColumnOwner(col string, candidates []int, stages []Stage) int {
+	owner := -1
+	for _, idx := range candidates {
+		if idx < 0 {
+			continue
+		}
+		if hasColumn(stages[idx].Columns, col) {
+			if owner >= 0 && owner != idx {
+				return -1
+			}
+			owner = idx
+		}
+	}
+	return owner
 }
 
 // cascadeBloomBits sizes a cascade bloom from an emitter-rows estimate,
