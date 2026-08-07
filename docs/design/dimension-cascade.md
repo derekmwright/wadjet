@@ -1,7 +1,8 @@
 # Dimension bloom cascades
 
 Status: shipped. 2-hop 2026-08-06; N-hop fixpoint + generalized target
-2026-08-07. Kill switch `WADJET_DIMENSION_CASCADE=0`.
+2026-08-07; exchange-fed fact gate + alias provenance guard 2026-08-07
+(late). Kill switch `WADJET_DIMENSION_CASCADE=0`.
 
 ## The idea
 
@@ -62,6 +63,44 @@ lineitem — 1200 files, the expensive scan, a shuffle build — receives the
 supplier bloom (~20% pass rate for region='ASIA') on l_suppkey. The same
 sweep also discovered Q07's customer-side chain
 (nation→customer→orders) at scales where customer fits the emitter cap.
+
+## Exchange-fed fact gate (2026-08-07 late)
+
+The "orders is the probe root" premise above is the SF10 shape. At SF100
+the join order FLIPS: lineitem is the UNFILTERED probe root feeding
+exchange-repartition as a shuffle side, orders is the build — and the
+matcher's original fact gate (`len(f.FilterExprs) == 0 → continue`)
+rejected every Q05 join before leg enumeration, silently (the reject
+logging sat after the gate). The fixpoint shipped SF100-inert; both
+2026-08-07 SF100 arms marked only the Q07/Q21 2-hop shapes
+(coordinator-log ground truth, results/20260807-{213833,215900}).
+
+Fix: the fact-as-target obeys the SAME dispatchability rule as any
+generalized target — pushed filters, a fused exchange, or an exchange-fed
+pass-through (the consume forwards into the exchange's tasks, where the
+row-level BloomFilterOp applies it; runtime proven at SF10 on the
+identical lineitem-exchange shape). With the gate fixed, the SF100 sweep
+marks Q02 (region→nation→supplier), Q05 (both segments,
+region→nation→supplier→lineitem), and Q08 (region→n1→customer), leaving
+Q07/Q21 untouched.
+
+## Alias provenance guard (2026-08-07 late)
+
+Widening the gate exposed a latent wrong-results hazard in hop-A
+pairing: B0 "owning" D's probed column was tested by BARE COLUMN NAME.
+Q08 scans nation twice with identical column sets — n1 (customer's
+nation, region-filtered) and n2 (supplier's nation, feeding the
+market-share CASE, which must see EVERY nation). Both own `n_regionkey`
+by name, so the region leg paired with the n2 leg and would have
+region-filtered n2's build — silently dropping every
+non-AMERICA-supplier row from Q08's denominator.
+
+The guard: when more than one candidate scan owns the hop-A column, the
+alias qualifiers on the join keys are the only surviving provenance —
+D's probe key ("n1.n_regionkey") must name the same instance as B0's
+build key ("n1.n_nationkey"); unqualified or mismatched contests REJECT.
+Same discipline as `uniqueColumnOwner` on hop-B targets: a bloom on the
+wrong instance is a correctness bug, not a missed optimization.
 
 ## What the chain costs
 

@@ -280,6 +280,229 @@ func TestDimensionCascadeThreeHopQ05Shape(t *testing.T) {
 	}
 }
 
+// sf100Q05Fixture mirrors the SF100 Q05 plan (zero-EC2 catalog repro,
+// 2026-08-07, identical to production qid 1bf185d7): the probe root is the
+// UNFILTERED lineitem scan feeding exchange-repartition as a shuffle build
+// side — orders (filtered) is the BUILD of join-4, the reverse of the SF10
+// shape q05Fixture pins. The fact gate must accept the exchange-fed
+// pass-through root (the consume forwards into the exchange's tasks);
+// gating on FilterExprs alone rejected every Q05 join at SF100 before leg
+// enumeration, which is why the fixpoint shipped inert there.
+func sf100Q05Fixture() []Stage {
+	return []Stage{
+		{ID: "scan-0", Type: StageScan, TableName: "lineitem",
+			ScanFiles: []string{"f"},
+			Columns:   []string{"l_discount", "l_extendedprice", "l_orderkey", "l_suppkey"}, EstimatedRows: 600_000_000},
+		{ID: "exchange-repartition-2", Type: StageExchangeRepartition,
+			Dependencies: []string{"scan-0"},
+			Exchange:     &ExchangeStage{Keys: []string{"l_orderkey"}, Count: 24}},
+		{ID: "scan-1", Type: StageScan, TableName: "orders",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"o_orderdate >= '1994-01-01'"},
+			Columns: []string{"o_custkey", "o_orderdate", "o_orderkey"}, EstimatedRows: 150_000_000},
+		{ID: "join-4", Type: StageHashJoin, JoinType: "inner",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "exchange-repartition-2", RightDepStage: "scan-1",
+			Dependencies: []string{"exchange-repartition-2", "scan-1", "exchange-replicate-supp"},
+			ChainedJoins: []ChainedJoinSpec{
+				{JoinType: "inner", JoinLeftKeys: []string{"l_suppkey"}, JoinRightKeys: []string{"s_suppkey"}, BuildDepStage: "exchange-replicate-supp"},
+			},
+		},
+		{ID: "scan-5", Type: StageScan, TableName: "supplier",
+			ScanFiles: []string{"f"}, Columns: []string{"s_nationkey", "s_suppkey"}, EstimatedRows: 1_000_000},
+		{ID: "exchange-replicate-supp", Type: StageExchangeReplicate,
+			Dependencies: []string{"scan-5"}},
+		{ID: "scan-7", Type: StageScan, TableName: "customer",
+			ScanFiles: []string{"f"}, Columns: []string{"c_custkey", "c_nationkey"}, EstimatedRows: 15_000_000},
+		{ID: "exchange-repartition-9", Type: StageExchangeRepartition,
+			Dependencies: []string{"scan-7"},
+			Exchange:     &ExchangeStage{Keys: []string{"c_custkey"}, Count: 24}},
+		{ID: "join-10", Type: StageHashJoin, JoinType: "inner",
+			JoinLeftKeys: []string{"o_custkey"}, JoinRightKeys: []string{"c_custkey"},
+			LeftDepStage: "join-4", RightDepStage: "exchange-repartition-9",
+			Dependencies: []string{"join-4", "exchange-repartition-9", "scan-11", "exchange-replicate-region"},
+			ChainedJoins: []ChainedJoinSpec{
+				{JoinType: "inner", JoinLeftKeys: []string{"s_nationkey"}, JoinRightKeys: []string{"n_nationkey"}, BuildDepStage: "scan-11"},
+				{JoinType: "inner", JoinLeftKeys: []string{"n_regionkey"}, JoinRightKeys: []string{"r_regionkey"}, BuildDepStage: "exchange-replicate-region"},
+			},
+		},
+		{ID: "scan-11", Type: StageScan, TableName: "nation",
+			ScanFiles: []string{"f"}, Columns: []string{"n_name", "n_nationkey", "n_regionkey"}, EstimatedRows: 25},
+		{ID: "scan-13", Type: StageScan, TableName: "region",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"r_name = 'ASIA'"},
+			Columns: []string{"r_name", "r_regionkey"}, EstimatedRows: 5},
+		{ID: "exchange-replicate-region", Type: StageExchangeReplicate,
+			Dependencies: []string{"scan-13"}},
+	}
+}
+
+// Regression for the SF100 F gate: the exchange-fed UNFILTERED probe root
+// must not block the cascade. Expect the full two-segment chain
+// region→nation→supplier→LINEITEM with the tip consume on scan-0 and the
+// oversized customer mid correctly excluded. Fails on the pre-fix matcher
+// with zero marks.
+func TestDimensionCascadeSF100Q05BuildHeavyShape(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	p := NewPlanner(cat)
+	stages := sf100Q05Fixture()
+	before := DimensionCascadesPlanned.Load()
+	p.markDimensionCascade(ctx, stages)
+
+	get := func(id string) *Stage {
+		for i := range stages {
+			if stages[i].ID == id {
+				return &stages[i]
+			}
+		}
+		t.Fatalf("stage %s missing", id)
+		return nil
+	}
+	region, nation, supp, li, cust := get("scan-13"), get("scan-11"), get("scan-5"), get("scan-0"), get("scan-7")
+
+	if len(region.EmitDynamicFilters) != 1 || region.EmitDynamicFilters[0].KeyColumn != "r_regionkey" {
+		t.Fatalf("region must emit r_regionkey: %+v", region.EmitDynamicFilters)
+	}
+	if len(nation.ConsumeDynamicFilters) != 1 || nation.ConsumeDynamicFilters[0].TargetColumn != "n_regionkey" {
+		t.Fatalf("nation must consume region's bloom: %+v", nation.ConsumeDynamicFilters)
+	}
+	if len(supp.ConsumeDynamicFilters) != 1 || supp.ConsumeDynamicFilters[0].TargetColumn != "s_nationkey" {
+		t.Fatalf("supplier must consume nation's bloom: %+v", supp.ConsumeDynamicFilters)
+	}
+	if len(li.ConsumeDynamicFilters) != 1 || li.ConsumeDynamicFilters[0].TargetColumn != "l_suppkey" ||
+		li.ConsumeDynamicFilters[0].SourceStageID != "scan-5" {
+		t.Fatalf("lineitem (exchange-fed probe root) must consume supplier's bloom: %+v", li.ConsumeDynamicFilters)
+	}
+	if !containsString(li.Dependencies, "scan-5") {
+		t.Fatal("lineitem must gain the WAIT stat-dep on supplier")
+	}
+	if len(li.EmitDynamicFilters) != 0 {
+		t.Fatalf("lineitem is the chain TIP, never an emitter: %+v", li.EmitDynamicFilters)
+	}
+	if len(cust.EmitDynamicFilters) != 0 || len(cust.ConsumeDynamicFilters) != 0 {
+		t.Fatalf("customer (15M) exceeds the emitter cap and must stay unmarked: %+v %+v",
+			cust.EmitDynamicFilters, cust.ConsumeDynamicFilters)
+	}
+	if got := DimensionCascadesPlanned.Load() - before; got != 2 {
+		t.Fatalf("chain = exactly 2 segments, counter moved %d", got)
+	}
+}
+
+// q08Fixture mirrors the SF100 Q08 plan: nation is scanned TWICE with
+// identical column sets — n1 (customer's nation, region-filtered) and n2
+// (supplier's nation, which must NOT be filtered: it feeds the market-share
+// CASE and needs every nation). Region's leg is keyed "n1.n_regionkey";
+// bare-name ownership of n_regionkey is contested between the two nation
+// scans, and only the alias qualifiers can tell them apart.
+func q08Fixture() []Stage {
+	return []Stage{
+		{ID: "scan-li", Type: StageScan, TableName: "lineitem",
+			ScanFiles: []string{"f"},
+			Columns:   []string{"l_extendedprice", "l_orderkey", "l_suppkey"}, EstimatedRows: 600_000_000},
+		{ID: "er-li", Type: StageExchangeRepartition,
+			Dependencies: []string{"scan-li"},
+			Exchange:     &ExchangeStage{Keys: []string{"l_orderkey"}, Count: 24}},
+		{ID: "scan-orders", Type: StageScan, TableName: "orders",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"o_orderdate >= '1995-01-01'"},
+			Columns: []string{"o_custkey", "o_orderdate", "o_orderkey"}, EstimatedRows: 150_000_000},
+		{ID: "join-10", Type: StageHashJoin, JoinType: "inner",
+			JoinLeftKeys: []string{"l_orderkey"}, JoinRightKeys: []string{"o_orderkey"},
+			LeftDepStage: "er-li", RightDepStage: "scan-orders",
+			Dependencies: []string{"er-li", "scan-orders", "scan-supp", "scan-n2"},
+			ChainedJoins: []ChainedJoinSpec{
+				{JoinType: "inner", JoinLeftKeys: []string{"l_suppkey"}, JoinRightKeys: []string{"s_suppkey"}, BuildDepStage: "scan-supp"},
+				{JoinType: "inner", JoinLeftKeys: []string{"s_nationkey"}, JoinRightKeys: []string{"n2.n_nationkey"}, BuildDepStage: "scan-n2"},
+			},
+		},
+		{ID: "scan-supp", Type: StageScan, TableName: "supplier",
+			ScanFiles: []string{"f"}, Columns: []string{"s_nationkey", "s_suppkey"}, EstimatedRows: 1_000_000},
+		{ID: "scan-cust", Type: StageScan, TableName: "customer",
+			ScanFiles: []string{"f"}, Columns: []string{"c_custkey", "c_nationkey"}, EstimatedRows: 15_000_000},
+		{ID: "er-cust", Type: StageExchangeRepartition,
+			Dependencies: []string{"scan-cust"},
+			Exchange:     &ExchangeStage{Keys: []string{"c_custkey"}, Count: 24}},
+		{ID: "join-14", Type: StageHashJoin, JoinType: "inner",
+			JoinLeftKeys: []string{"o_custkey"}, JoinRightKeys: []string{"c_custkey"},
+			LeftDepStage: "join-10", RightDepStage: "er-cust",
+			Dependencies: []string{"join-10", "er-cust", "scan-n1", "scan-region"},
+			ChainedJoins: []ChainedJoinSpec{
+				{JoinType: "inner", JoinLeftKeys: []string{"c_nationkey"}, JoinRightKeys: []string{"n1.n_nationkey"}, BuildDepStage: "scan-n1"},
+				{JoinType: "inner", JoinLeftKeys: []string{"n1.n_regionkey"}, JoinRightKeys: []string{"r_regionkey"}, BuildDepStage: "scan-region"},
+			},
+		},
+		{ID: "scan-n1", Type: StageScan, TableName: "nation",
+			ScanFiles: []string{"f"}, Columns: []string{"n_name", "n_nationkey", "n_regionkey"}, EstimatedRows: 25},
+		{ID: "scan-n2", Type: StageScan, TableName: "nation",
+			ScanFiles: []string{"f"}, Columns: []string{"n_name", "n_nationkey", "n_regionkey"}, EstimatedRows: 25},
+		{ID: "scan-region", Type: StageScan, TableName: "region",
+			ScanFiles: []string{"f"}, FilterExprs: []string{"r_name = 'AMERICA'"},
+			Columns: []string{"r_name", "r_regionkey"}, EstimatedRows: 5},
+	}
+}
+
+// Regression for the hop-A provenance guard: region's bloom must land on
+// n1 (whose leg keys carry the n1 qualifier) and NEVER on n2 — a
+// region-filtered n2 build silently drops every non-AMERICA-supplier row
+// from Q08's market-share denominator. Without the guard the wrong pairing
+// marks on the second fixpoint sweep (after the correct n1 segment dedups).
+func TestDimensionCascadeQ08AliasProvenance(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	p := NewPlanner(cat)
+	stages := q08Fixture()
+	p.markDimensionCascade(ctx, stages)
+
+	get := func(id string) *Stage {
+		for i := range stages {
+			if stages[i].ID == id {
+				return &stages[i]
+			}
+		}
+		t.Fatalf("stage %s missing", id)
+		return nil
+	}
+	n1, n2, cust, supp := get("scan-n1"), get("scan-n2"), get("scan-cust"), get("scan-supp")
+
+	if len(n1.ConsumeDynamicFilters) != 1 || n1.ConsumeDynamicFilters[0].TargetColumn != "n_regionkey" ||
+		n1.ConsumeDynamicFilters[0].SourceStageID != "scan-region" {
+		t.Fatalf("n1 must consume region's bloom: %+v", n1.ConsumeDynamicFilters)
+	}
+	if len(cust.ConsumeDynamicFilters) != 1 || cust.ConsumeDynamicFilters[0].TargetColumn != "c_nationkey" ||
+		cust.ConsumeDynamicFilters[0].SourceStageID != "scan-n1" {
+		t.Fatalf("customer must consume n1's bloom: %+v", cust.ConsumeDynamicFilters)
+	}
+	if len(n2.ConsumeDynamicFilters) != 0 || len(n2.EmitDynamicFilters) != 0 {
+		t.Fatalf("n2 (supplier's nation, unfiltered by region) must stay unmarked: consumes=%+v emits=%+v",
+			n2.ConsumeDynamicFilters, n2.EmitDynamicFilters)
+	}
+	for _, c := range supp.ConsumeDynamicFilters {
+		if c.SourceStageID == "scan-n2" {
+			t.Fatalf("supplier must not consume a bloom from the misbound n2: %+v", supp.ConsumeDynamicFilters)
+		}
+	}
+}
+
+// With UNQUALIFIED leg keys the contested n_regionkey ownership cannot be
+// resolved — the guard must reject the pairing outright rather than guess.
+func TestDimensionCascadeUnqualifiedAmbiguityRejects(t *testing.T) {
+	cat, ctx := setupTPCHCatalog(t)
+	stages := q08Fixture()
+	for i := range stages {
+		if stages[i].ID == "join-14" {
+			stages[i].ChainedJoins[0].JoinRightKeys = []string{"n_nationkey"}
+			stages[i].ChainedJoins[1].JoinLeftKeys = []string{"n_regionkey"}
+		}
+		if stages[i].ID == "join-10" {
+			stages[i].ChainedJoins[1].JoinRightKeys = []string{"n_nationkey"}
+		}
+	}
+	NewPlanner(cat).markDimensionCascade(ctx, stages)
+	for i := range stages {
+		if n := stages[i]; n.TableName == "nation" &&
+			(len(n.ConsumeDynamicFilters) != 0 || len(n.EmitDynamicFilters) != 0) {
+			t.Fatalf("%s: contested unqualified ownership must reject, got consumes=%+v emits=%+v",
+				n.ID, n.ConsumeDynamicFilters, n.EmitDynamicFilters)
+		}
+	}
+}
+
 // Fixpoint termination: re-running the pass on an already-marked plan must
 // mark nothing new (the segment dedup) — guards against oscillation.
 func TestDimensionCascadeFixpointTerminates(t *testing.T) {

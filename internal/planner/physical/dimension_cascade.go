@@ -153,12 +153,6 @@ func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, 
 			continue
 		}
 		f := &stages[fIdx]
-		// The fact scan must dispatch already (pushed filters) — the
-		// consume rides its existing fragment. Pass-through fact scans
-		// are exchange-fused shapes handled by the semi/anti pass.
-		if len(f.FilterExprs) == 0 {
-			continue
-		}
 		// Enumerate ALL of J's legs uniformly: the primary build plus
 		// every fused/chained leg. The 20260806-110951 ground truth: Q21's
 		// join-4 has orders as PRIMARY, supplier as a fused/chained leg,
@@ -167,22 +161,28 @@ func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, 
 		// (the first cut of this pass) matched nothing at SF100.
 		type leg struct {
 			joinType          string
-			leftKey, rightKey string
-			buildDep          string
+			leftKey, rightKey string // base column names
+			// Raw keys as written in the join condition, possibly
+			// alias-qualified ("n1.n_regionkey") — the qualifier is the
+			// only provenance signal that survives when the same table is
+			// scanned twice (Q08's n1/n2 both carry n_regionkey in their
+			// Columns; bare-name membership cannot tell them apart).
+			rawLeftKey, rawRightKey string
+			buildDep                string
 		}
 		var legs []leg
 		for _, cj := range chainJoins {
 			if len(cj.JoinLeftKeys) == 1 && len(cj.JoinRightKeys) == 1 {
-				legs = append(legs, leg{cj.JoinType, baseColName(cj.JoinLeftKeys[0]), baseColName(cj.JoinRightKeys[0]), cj.RightDepStage})
+				legs = append(legs, leg{cj.JoinType, baseColName(cj.JoinLeftKeys[0]), baseColName(cj.JoinRightKeys[0]), cj.JoinLeftKeys[0], cj.JoinRightKeys[0], cj.RightDepStage})
 			}
 			for _, c := range cj.ChainedJoins {
 				if len(c.JoinLeftKeys) == 1 && len(c.JoinRightKeys) == 1 {
-					legs = append(legs, leg{c.JoinType, baseColName(c.JoinLeftKeys[0]), baseColName(c.JoinRightKeys[0]), c.BuildDepStage})
+					legs = append(legs, leg{c.JoinType, baseColName(c.JoinLeftKeys[0]), baseColName(c.JoinRightKeys[0]), c.JoinLeftKeys[0], c.JoinRightKeys[0], c.BuildDepStage})
 				}
 			}
 			for _, fu := range cj.FusedJoins {
 				if len(fu.JoinLeftKeys) == 1 && len(fu.JoinRightKeys) == 1 {
-					legs = append(legs, leg{fu.JoinType, baseColName(fu.JoinLeftKeys[0]), baseColName(fu.JoinRightKeys[0]), fu.BuildDepStage})
+					legs = append(legs, leg{fu.JoinType, baseColName(fu.JoinLeftKeys[0]), baseColName(fu.JoinRightKeys[0]), fu.JoinLeftKeys[0], fu.JoinRightKeys[0], fu.BuildDepStage})
 				}
 			}
 		}
@@ -250,36 +250,37 @@ func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, 
 				}
 				// Hop-B target: the leaf scan OWNING legB's probe column.
 				// Usually the fact probe root — but in build-heavy plans
-				// (Q05: orders is the probe root, lineitem arrives as a
-				// shuffle BUILD) the leg's probe column lives on another
+				// (SF10 Q05: orders is the probe root, lineitem arrives as
+				// a shuffle BUILD) the leg's probe column lives on another
 				// leg's build scan. Drop-only stays safe either way: an
 				// inner-form row failing the leg produces nothing.
-				tIdx := fIdx
-				if !hasColumn(f.Columns, legB.leftKey) {
-					tIdx = uniqueColumnOwner(legB.leftKey, targetCandidates, stages)
-					if tIdx < 0 {
-						note("B[%s→%s]: %s owner not unique among fact %s + leg scans", legB.rightKey, legB.leftKey, legB.leftKey, f.ID)
-						continue
-					}
-					// The consume must have somewhere to ride: pushed
-					// filters (dispatchScanFilterStage), a fused exchange,
-					// or a pass-through scan feeding an exchange (spec
-					// forwarding). A DIMENSION-CLASS target is also allowed
-					// while undispatchable: an intermediate chain scan
-					// (Q05's supplier at segment 1) only becomes an emitter
-					// — which forces its dispatch and applies the consume —
-					// when the NEXT fixpoint iteration marks the following
-					// segment; until then the consume is a harmless no-op.
-					t := &stages[tIdx]
-					dispatched := len(t.FilterExprs) > 0 ||
-						(t.Exchange != nil && len(t.Exchange.Keys) > 0 && t.Exchange.Count > 0) ||
-						exchangeFed[tIdx]
-					if !dispatched && t.EstimatedRows > cascadeMaxEmitterRows {
-						note("B[%s→%s]: target %s undispatchable (no filters/exchange/forwarding) and above dimension class", legB.rightKey, legB.leftKey, t.ID)
-						continue
-					}
+				tIdx := uniqueColumnOwner(legB.leftKey, targetCandidates, stages)
+				if tIdx < 0 {
+					note("B[%s→%s]: %s owner not unique among fact %s + leg scans", legB.rightKey, legB.leftKey, legB.leftKey, f.ID)
+					continue
 				}
+				// The consume must have somewhere to ride — the SAME rule
+				// whether the target is the fact probe root or a leg build
+				// scan: pushed filters (dispatchScanFilterStage), a fused
+				// exchange, or a pass-through scan feeding an exchange
+				// (spec forwarding; SF100 Q05's lineitem is the UNFILTERED
+				// probe root feeding exchange-repartition — gating the
+				// fact on FilterExprs alone rejected every Q05 join before
+				// leg enumeration, silently). A DIMENSION-CLASS target is
+				// also allowed while undispatchable: an intermediate chain
+				// scan (Q05's supplier at segment 1) only becomes an
+				// emitter — which forces its dispatch and applies the
+				// consume — when the NEXT fixpoint iteration marks the
+				// following segment; until then the consume is a harmless
+				// no-op.
 				t := &stages[tIdx]
+				dispatched := len(t.FilterExprs) > 0 ||
+					(t.Exchange != nil && len(t.Exchange.Keys) > 0 && t.Exchange.Count > 0) ||
+					exchangeFed[tIdx]
+				if !dispatched && t.EstimatedRows > cascadeMaxEmitterRows {
+					note("B[%s→%s]: target %s undispatchable (no filters/exchange/forwarding) and above dimension class", legB.rightKey, legB.leftKey, t.ID)
+					continue
+				}
 				if tIdx == dIdx {
 					continue
 				}
@@ -308,6 +309,25 @@ func (p *Planner) markDimensionCascadeOnce(ctx context.Context, stages []Stage, 
 						len(b0.ScanFiles), legD.leftKey, hasColumn(b0.Columns, legD.leftKey),
 						legB.rightKey, hasColumn(b0.Columns, legB.rightKey), b0.Columns)
 					continue
+				}
+				// Hop-A provenance guard: b0 owning legD's probe column by
+				// NAME is not ownership by IDENTITY when another candidate
+				// scan carries the same base column — Q08 scans nation
+				// twice (n1/n2) with identical column sets, and wiring
+				// region's bloom into n2 (whose rows must NOT be
+				// region-filtered) drops valid probe rows. When ownership
+				// is contested, the alias qualifiers on the join keys are
+				// the only surviving provenance: D's probe key and B0's
+				// build key must name the same instance ("n1.n_regionkey"
+				// pairs with "n1.n_nationkey", never "n2.n_nationkey").
+				// Unresolvable contests reject — a bloom on the wrong
+				// instance is a correctness bug, not a missed optimization.
+				if owners := columnOwnerCount(legD.leftKey, targetCandidates, stages); owners > 1 {
+					qd, qb := colQualifier(legD.rawLeftKey), colQualifier(legB.rawRightKey)
+					if qd == "" || qd != qb {
+						note("hopA[%s→%s]: %d owners of %s and qualifiers %q/%q cannot disambiguate", legD.rightKey, legD.leftKey, owners, legD.leftKey, qd, qb)
+						continue
+					}
 				}
 				dKeyType, ok := p.columnIntType(ctx, d.TableName, legD.rightKey)
 				if !ok {
@@ -410,6 +430,36 @@ func uniqueColumnOwner(col string, candidates []int, stages []Stage) int {
 		}
 	}
 	return owner
+}
+
+// columnOwnerCount counts the DISTINCT candidate scans whose Columns
+// contain col — the "is bare-name ownership contested?" probe behind the
+// hop-A provenance guard. Duplicate indices (the same leaf reached via
+// several legs) count once.
+func columnOwnerCount(col string, candidates []int, stages []Stage) int {
+	seen := make(map[int]bool, len(candidates))
+	n := 0
+	for _, idx := range candidates {
+		if idx < 0 || seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		if hasColumn(stages[idx].Columns, col) {
+			n++
+		}
+	}
+	return n
+}
+
+// colQualifier returns the alias/table qualifier of a join-key reference
+// ("n1.n_regionkey" → "n1"), or "" when the key is unqualified.
+func colQualifier(id string) string {
+	for i := len(id) - 1; i >= 0; i-- {
+		if id[i] == '.' {
+			return id[:i]
+		}
+	}
+	return ""
 }
 
 // cascadeBloomBits sizes a cascade bloom from an emitter-rows estimate,
