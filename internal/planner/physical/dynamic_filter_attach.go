@@ -45,13 +45,25 @@ var DFAttachOnArrival atomic.Bool
 // emits is an AtScan accumulator — the emit op then buffers rows scanned
 // before the consumed bloom lands and retro-filters them at finalize
 // (guarded re-emit), preserving downstream filter quality without the
-// start barrier. Kill switch WADJET_DF_GUARDED_REEMIT=0 restores rule 1's
-// original form (re-emitters keep the barrier).
+// start barrier.
+//
+// DEFAULT OFF (opt-in WADJET_DF_GUARDED_REEMIT=1). The SF100 pair
+// 2026-08-07 (ctl 6c173cf 16:07 / trt 944e640 16:29) proved the guard
+// mechanism itself sound (guard_wait_ms median 46ms, retro-filter at
+// exact dim selectivity) but exposed the relaxation's structural blind
+// spot: the barrier also protects the mid-scan's OUTPUT volume. At SF100
+// the mid's 1-2s scan always ends before the dim bloom arrives (2-4s),
+// so its output ships 100% unfiltered — full supplier (8×240K rows) into
+// the broadcast replicate + join build instead of the nation-filtered ~8%
+// — costing Q05/Q07/Q21 +33-60% in both guarded arms. Re-emitters keep
+// the barrier until a shape exists that starts the scan early WITHOUT
+// shipping the unfiltered head (e.g. worker-side scan-start hold on the
+// deferred bloom).
 var DFGuardedReemit atomic.Bool
 
 func init() {
 	DFAttachOnArrival.Store(os.Getenv("WADJET_DF_ATTACH_ON_ARRIVAL") != "0")
-	DFGuardedReemit.Store(os.Getenv("WADJET_DF_GUARDED_REEMIT") != "0")
+	DFGuardedReemit.Store(os.Getenv("WADJET_DF_GUARDED_REEMIT") == "1")
 }
 
 // AttachOnArrivalConsumesPlanned counts converted consume edges,

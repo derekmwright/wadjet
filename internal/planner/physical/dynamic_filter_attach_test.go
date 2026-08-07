@@ -13,6 +13,8 @@ import (
 // nation bloom, and the supplier's stat-dep on nation is removed — the
 // entire chain dispatches at t=0.
 func TestAttachOnArrivalConvertsTerminalScanConsume(t *testing.T) {
+	DFGuardedReemit.Store(true) // opt-in: exercise the guarded machinery
+	defer DFGuardedReemit.Store(false)
 	cat, ctx := setupTPCHCatalog(t)
 	p := NewPlanner(cat)
 	stages := cascadeFixture()
@@ -64,11 +66,10 @@ func TestAttachOnArrivalConvertsTerminalScanConsume(t *testing.T) {
 	}
 }
 
-// Guarded-re-emit kill switch: re-emitters revert to the barrier while
-// terminal consumes still convert.
-func TestAttachOnArrivalGuardedReemitKillSwitch(t *testing.T) {
-	DFGuardedReemit.Store(false)
-	defer DFGuardedReemit.Store(true)
+// Guarded re-emit is DEFAULT OFF (the barrier also protects the mid-scan's
+// output volume — SF100 2026-08-07): re-emitters keep the barrier unless
+// WADJET_DF_GUARDED_REEMIT=1, while terminal consumes still convert.
+func TestAttachOnArrivalGuardedReemitDefaultOff(t *testing.T) {
 	cat, ctx := setupTPCHCatalog(t)
 	p := NewPlanner(cat)
 	stages := cascadeFixture()
@@ -99,6 +100,8 @@ func TestAttachOnArrivalGuardedReemitKillSwitch(t *testing.T) {
 // its emit to the scan head would observe pre-filter rows and a column-pair
 // guard cannot reproduce arbitrary predicate filtering.
 func TestAttachOnArrivalGuardedReemitRequiresBareScan(t *testing.T) {
+	DFGuardedReemit.Store(true)
+	defer DFGuardedReemit.Store(false)
 	cat, ctx := setupTPCHCatalog(t)
 	p := NewPlanner(cat)
 	stages := cascadeFixture()

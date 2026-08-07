@@ -203,7 +203,23 @@ polls resolve in one GET), and the mixed-version fallback.
 
 ## Guarded re-emit (2026-08-07, rule-1 relaxation)
 
-Kill switch: `WADJET_DF_GUARDED_REEMIT=0`.
+Status: **DEFAULT OFF** (opt-in `WADJET_DF_GUARDED_REEMIT=1`). The SF100
+pair (ctl 6c173cf 16:07 / trt 944e640 16:29, results/20260807-16*) proved
+the guard mechanism itself sound — guard_wait_ms median 46ms/max 255ms,
+retro-filter at exact dim selectivity, no deadlock, no tombstones — but
+exposed the relaxation's structural blind spot: **the start barrier also
+protects the mid-scan's OUTPUT volume**. At SF100 the mid's 1-2s scan
+always ends before the dim bloom arrives (~2-4s), so its own consume never
+installs and its output ships 100% unfiltered — full supplier (8×240K
+rows) into the broadcast replicate + join build instead of the
+nation-filtered ~8% — costing Q05/Q07/Q21 +33-60% in both guarded arms
+(hop-B `task completed rows=240000` vs the ctl's filtered outputs is the
+row-level proof). A future shape must start the mid scan early WITHOUT
+shipping the unfiltered head — e.g. a worker-side scan-start hold on the
+deferred bloom (barrier moved into the worker, saving the dispatch
+round-trip only). The guard machinery (exec emit guards, GuardConsumes
+wire, lane deep class) remains in place for that follow-up and for
+experiments.
 
 After incremental publication, cold Q07's fact-filter availability was
 bounded by the emitter chain itself: hop-B (the cascade mid-scan) could not
