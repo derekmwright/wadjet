@@ -155,13 +155,13 @@ func TestPriorityLaneDrains(t *testing.T) {
 
 	const burst = 10
 	for i := 0; i < burst; i++ {
-		if _, err := js.Publish(ctx, distributed.PriTaskSubject("stage", "q", "s"),
+		if _, err := js.Publish(ctx, distributed.PriTaskSubject("leaf", "stage", "q", "s"),
 			[]byte(fmt.Sprintf("not-a-task-%03d", i))); err != nil {
 			t.Fatalf("publish %d: %v", i, err)
 		}
 	}
 
-	consumer, err := js.Consumer(ctx, distributed.StreamPriTasks, "pritasks")
+	consumer, err := js.Consumer(ctx, distributed.StreamPriTasks, "pritasks-leaf")
 	if err != nil {
 		t.Fatalf("lookup pri consumer: %v", err)
 	}

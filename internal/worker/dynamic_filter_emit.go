@@ -194,6 +194,9 @@ func (e *Executor) finalizeDynamicFilterEmits(
 			key = fmt.Sprintf("%s%s-%s.of%d.wdf",
 				spec.PartialPrefix, task.ID, snap.FilterID, spec.StagePartials)
 		}
+		e.logger.Debug("dynamic_filter_emit: uploading partial", "task_id", task.ID,
+			"filter_id", snap.FilterID, "rows", snap.RowCount,
+			"bloom_words", len(snap.Bloom), "saw_key", snap.KeyColumn)
 		reader := bytes.NewReader(buf.Bytes())
 		if _, err := e.store.Put(ctx, task.ResultBucket, key,
 			reader, int64(buf.Len()), "application/octet-stream"); err != nil {

@@ -383,3 +383,95 @@ func TestFinalizeDynamicFilterEmitsLegacyKeyWithoutStamp(t *testing.T) {
 		t.Fatalf("legacy key shape changed: %+v", result.DynamicFilterPartials)
 	}
 }
+
+// A zero-byte tombstone at the merged key (coordinator withheld the
+// filter) must terminate the poll promptly with ok=false — consumers stay
+// unfiltered and guarded re-emits flush unguarded, instead of waiting out
+// the 10-minute poll deadline (the ead0976 SF100 hang class).
+func TestPollDeferredBloomTombstoneTerminates(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{store: store, logger: slog.Default()}
+	spec := distributed.DynamicFilterSpec{
+		FilterID: "f1", BloomBucket: "b",
+		BloomKey: "queries/q/dynfilter-merged/s/f1.wdf", Deferred: true,
+	}
+	if _, err := store.Put(context.Background(), "b", spec.BloomKey,
+		bytes.NewReader(nil), 0, "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	p := e.pollDeferredBloom(spec)
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("tombstone must terminate the poll promptly")
+	}
+	if _, _, ok := p.resolved(); ok {
+		t.Fatal("tombstone termination must not deliver a bloom")
+	}
+}
+
+// Blob router: priority and priority_deep flags classify tasks onto the
+// leaf vs deep lanes (disjoint slot pools — the deadlock prevention).
+func TestTaskBlobPriorityClass(t *testing.T) {
+	cases := []struct {
+		blob      string
+		pri, deep bool
+	}{
+		{`{"priority":true}`, true, false},
+		{`{"priority":true,"priority_deep":true}`, true, true},
+		{`{"priority_deep":true}`, false, true}, // never emitted, but parse faithfully
+		{`{}`, false, false},
+		{`not-json`, false, false},
+	}
+	for _, c := range cases {
+		pri, deep := taskBlobPriority([]byte(c.blob))
+		if pri != c.pri || deep != c.deep {
+			t.Errorf("taskBlobPriority(%s) = (%v,%v), want (%v,%v)", c.blob, pri, deep, c.pri, c.deep)
+		}
+	}
+}
+
+// Consumer-side mirror of the empty-partial rule: an empty ".of<N>" partial
+// counts toward completeness without adopting shape, so a zero-row emitter
+// task can neither poison nor stall the incremental union.
+func TestPollDeferredBloomIncrementalEmptyPartialCounts(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "b"); err != nil {
+		t.Fatal(err)
+	}
+	e := &Executor{store: store, logger: slog.Default()}
+	spec := distributed.DynamicFilterSpec{
+		FilterID: "f1", BloomBucket: "b",
+		BloomKey:      "queries/q/dynfilter-merged/scan-1/f1.wdf",
+		PartialPrefix: "queries/st-scan-1-q/dynfilter/scan-1/",
+		Deferred:      true,
+	}
+	// Empty partial FIRST (zero-row task finishes first), real one second.
+	emptyArt := &distributed.DynamicFilterArtifact{KeyType: "int64"}
+	var buf bytes.Buffer
+	if err := distributed.EncodeDynamicFilterArtifact(&buf, emptyArt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(context.Background(), "b", spec.PartialPrefix+"t1-f1.of2.wdf",
+		bytes.NewReader(buf.Bytes()), int64(buf.Len()), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	stageArtifact(t, store, "b", spec.PartialPrefix+"t2-f1.of2.wdf", 10)
+	p := e.pollDeferredBloom(spec)
+	select {
+	case <-p.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("union with an empty partial must complete")
+	}
+	bloom, mask, ok := p.resolved()
+	if !ok || p.partials != 2 {
+		t.Fatalf("want resolution counting both partials, ok=%v partials=%d", ok, p.partials)
+	}
+	want, wantMask := testBloomOf(10)
+	if mask != wantMask || len(bloom) != len(want) {
+		t.Fatal("union must adopt the real partial's shape")
+	}
+}

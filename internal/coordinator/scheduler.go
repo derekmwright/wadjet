@@ -176,9 +176,10 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 		// scan fan-out.
 		var subject string
 		if task.Priority {
-			subject = distributed.PriTaskSubject(string(task.Type), task.QueryID, task.StageID)
+			class := distributed.PriTaskClass(task.PriorityDeep)
+			subject = distributed.PriTaskSubject(class, string(task.Type), task.QueryID, task.StageID)
 			if task.ClusterID != "" {
-				subject = distributed.ClusterPriTaskSubject(task.ClusterID, string(task.Type), task.QueryID, task.StageID)
+				subject = distributed.ClusterPriTaskSubject(task.ClusterID, class, string(task.Type), task.QueryID, task.StageID)
 			}
 		} else {
 			subject = distributed.TaskSubject(string(task.Type), task.QueryID, task.StageID)
@@ -200,6 +201,14 @@ func (s *Scheduler) PublishTasks(ctx context.Context, tasks []distributed.Task) 
 
 	// Publish all pre-serialized messages
 	for _, p := range batch {
+		if p.task.Priority {
+			// Lane-routing observability: the class token decides which
+			// worker slot pool serves the task (leaf vs deep — disjoint by
+			// deadlock-prevention design); a task published to a subject no
+			// class consumer filters is silently never delivered.
+			s.logger.Debug("publishing priority task",
+				"task_id", p.task.ID, "subject", p.subject, "deep", p.task.PriorityDeep)
+		}
 		if err := s.nc.Publish(p.subject, p.data); err != nil {
 			return fmt.Errorf("publishing task %s to %s: %w", p.task.ID, p.subject, err)
 		}

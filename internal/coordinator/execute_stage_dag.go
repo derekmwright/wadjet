@@ -1921,8 +1921,13 @@ func (c *Coordinator) dispatchScanFilterStage(
 			// Emitter scans ride the priority lane for the same reason
 			// they bypass the dispatch semaphore: their completion is what
 			// makes the concurrently-running bulk scans cheap, and the
-			// bulk fan-out must not be able to queue them out.
-			Priority: len(stage.EmitDynamicFilters) > 0,
+			// bulk fan-out must not be able to queue them out. Emitters
+			// that ALSO consume (guarded re-emit mids) ride the lane's
+			// "deep" class — a disjoint slot pool, because they may block
+			// at finalize on a leaf emitter's bloom and must never occupy
+			// the slots that leaf needs (lane deadlock otherwise).
+			Priority:     len(stage.EmitDynamicFilters) > 0,
+			PriorityDeep: len(stage.EmitDynamicFilters) > 0 && len(stage.ConsumeDynamicFilters) > 0,
 		}
 		// Both branches emit fragment Operators[]. fuseShuffle terminates
 		// in OpExchangeSender (writing partitioned shuffle output);

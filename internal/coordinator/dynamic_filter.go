@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -92,10 +93,22 @@ func mergeBuildStatsFromPartials(
 		if len(artifact.Bloom) > dynamicFilterMaxBloomWords {
 			continue
 		}
-		mergedCount[ref.FilterID]++
+		// EMPTY partial (zero-row task — its emit op never allocated a
+		// bloom): a legitimate "no keys from me" contribution. Counts
+		// toward completeness (none of its keys are missing) but must not
+		// adopt shape — zero-row tasks finish FIRST, and adopting their
+		// 0-word bloom made every real partial a "size mismatch": the
+		// union collapsed to an empty artifact, silently killing the
+		// filter (and hanging guarded re-emits, TestDistributedTPCH/Q07
+		// 2026-08-07).
+		if len(artifact.Bloom) == 0 {
+			mergedCount[ref.FilterID]++
+			continue
+		}
 		existing, ok := merged[ref.FilterID]
 		if !ok {
-			// First partial for this FilterID — adopt its shape.
+			// First NON-EMPTY partial for this FilterID — adopt its shape.
+			mergedCount[ref.FilterID]++
 			existing = &BuildStats{
 				FilterID:  ref.FilterID,
 				KeyType:   artifact.KeyType,
@@ -113,9 +126,12 @@ func mergeBuildStatsFromPartials(
 		if len(existing.Bloom) != len(artifact.Bloom) {
 			// Size mismatch is a planner bug: emit specs are supposed to
 			// give every task the same BloomBits. Drop the conflicting
-			// partial rather than corrupt the union.
+			// partial rather than corrupt the union — and do NOT count it,
+			// so the completeness gate withholds the filter (a counted
+			// drop would attach a bloom missing this task's keys).
 			continue
 		}
+		mergedCount[ref.FilterID]++
 		for i, w := range artifact.Bloom {
 			existing.Bloom[i] |= w
 		}
@@ -204,6 +220,33 @@ func (c *Coordinator) mergeCompleteBuildStats(
 			staged++
 		}
 	}
+	// WITHHELD LateAttach filters get a zero-byte TOMBSTONE at the merged
+	// key: consumers (and guarded re-emits blocked at finalize) poll that
+	// key and would otherwise wait out the full poll deadline for a bloom
+	// that is never coming. The tombstone terminates them promptly with
+	// the "no filter" degradation. Zero-byte is the unambiguous marker —
+	// a real artifact always has a header. Best-effort: on Put failure the
+	// poll deadline remains the backstop.
+	for filterID := range forceStage {
+		if _, ok := merged[filterID]; ok {
+			continue
+		}
+		key := mergedDynamicFilterKey(queryID, stageID, filterID)
+		if _, err := c.catalog.Store().Put(ctx, c.config.ResultBucket, key,
+			&growReader{}, 0, "application/octet-stream"); err != nil {
+			c.logger.Warn("dynamic_filter: tombstone upload failed; consumers fall back to poll deadline",
+				"stage_id", stageID, "filter_id", filterID, "error", err)
+			continue
+		}
+		c.logger.Info("dynamic_filter: withheld filter tombstoned",
+			"stage_id", stageID, "filter_id", filterID)
+	}
+	for fid, st := range merged {
+		if st != nil && st.StagedKey != "" {
+			c.logger.Info("dynamic_filter: staged merged artifact",
+				"filter_id", fid, "bucket", st.StagedBucket, "key", st.StagedKey)
+		}
+	}
 	c.logger.Info("dynamic_filter: build partials merged",
 		"stage_id", stageID,
 		"partial_refs", len(refs),
@@ -241,6 +284,8 @@ func stageBuildStats(
 		return fmt.Errorf("encode: %w", err)
 	}
 	key := mergedDynamicFilterKey(queryID, stageID, filterID)
+	slog.Info("dynamic_filter: staging merged artifact", "key", key,
+		"bytes", buf.Len(), "bloom_words", len(stats.Bloom))
 	if _, err := store.Put(ctx, bucket, key, buf.Reader(), int64(buf.Len()), "application/octet-stream"); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}

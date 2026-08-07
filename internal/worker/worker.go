@@ -34,10 +34,10 @@ import (
 
 // Config holds worker configuration.
 type Config struct {
-	NATSUrl          string
-	WorkerID         string
-	ClusterID        string // cluster this worker belongs to (for federated routing)
-	MaxConcurrent    int    // max concurrent tasks
+	NATSUrl       string
+	WorkerID      string
+	ClusterID     string // cluster this worker belongs to (for federated routing)
+	MaxConcurrent int    // max concurrent tasks
 	// MaxTaskDuration caps how long a single task may run before its context
 	// is cancelled, guaranteeing its concurrency slot is eventually released
 	// even if it wedges. The coordinator's per-task DeadlineUnixNano (the
@@ -53,7 +53,7 @@ type Config struct {
 	// 0 = unbounded (the platform's kill timeout — e.g. the Kubernetes
 	// termination grace period — is the backstop).
 	DrainTimeout     time.Duration
-	ResultStoreBytes int64  // in-memory result store capacity (0 = disabled, results go to S3)
+	ResultStoreBytes int64 // in-memory result store capacity (0 = disabled, results go to S3)
 
 	// Reservoirs is the Phase-3 system-reservoir registry. When non-nil, the
 	// worker registers its cache + result-store reservoirs against it and wires
@@ -136,7 +136,7 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		MaxConcurrent:    4,
-		MaxTaskDuration:  30 * time.Minute, // matches the coordinator's default query timeout
+		MaxTaskDuration:  30 * time.Minute,  // matches the coordinator's default query timeout
 		CacheBytes:       256 * 1024 * 1024, // 256 MB
 		ResultStoreBytes: 512 * 1024 * 1024, // 512 MB — avoids S3 round-trips for inter-stage results
 	}
@@ -390,7 +390,7 @@ func (w *Worker) Start(ctx context.Context) error {
 	// Skipped when the gRPC data plane is in use: coord pushes TaskDispatch
 	// over the bidi stream and the JetStream Fetch loop stays dormant.
 	var consumer jetstream.Consumer
-	var priConsumer jetstream.Consumer
+	var priConsumer, priDeepConsumer jetstream.Consumer
 	if w.dpClient == nil {
 		consumerName := "tasks"
 		if w.config.ClusterID != "" {
@@ -409,25 +409,42 @@ func (w *Worker) Start(ctx context.Context) error {
 		consumer = c
 
 		// Priority lane: latency-critical dimension-class tasks (dyn-filter
-		// emitter scans) drain through their own consumer + slots so they
-		// never queue behind bulk fan-out occupying MaxConcurrent.
-		priFilter := distributed.SubjectPriTasksAll
-		priName := "pritasks"
+		// emitter scans) drain through their own consumers + slots so they
+		// never queue behind bulk fan-out occupying MaxConcurrent. The lane
+		// is CLASS-SPLIT (leaf vs deep, non-overlapping WorkQueue filters):
+		// deep tasks (guarded re-emit mids) may block at finalize waiting on
+		// a leaf's bloom, so they must never share the slots that leaf needs
+		// — the shared-pool version deadlocked (SF100 2026-08-07, ead0976).
+		// Best-effort delete of the pre-split durable: its wadjet.pritasks.>
+		// filter overlaps both class filters, which WorkQueue forbids.
+		legacyPriName := "pritasks"
 		if w.config.ClusterID != "" {
-			priFilter = distributed.ClusterPriTasksFilter(w.config.ClusterID)
-			priName = "pritasks-" + w.config.ClusterID
+			legacyPriName = "pritasks-" + w.config.ClusterID
 		}
-		pc, err := w.js.CreateOrUpdateConsumer(ctx, distributed.StreamPriTasks, jetstream.ConsumerConfig{
-			Durable:       priName,
-			FilterSubject: priFilter,
-			AckPolicy:     jetstream.AckExplicitPolicy,
-			AckWait:       10 * time.Minute,
-			MaxDeliver:    3,
-		})
-		if err != nil {
-			return fmt.Errorf("creating priority consumer: %w", err)
+		_ = w.js.DeleteConsumer(ctx, distributed.StreamPriTasks, legacyPriName)
+		for _, class := range []string{"leaf", "deep"} {
+			priFilter := "wadjet.pritasks." + class + ".>"
+			priName := "pritasks-" + class
+			if w.config.ClusterID != "" {
+				priFilter = distributed.ClusterPriTasksFilter(w.config.ClusterID, class)
+				priName = "pritasks-" + w.config.ClusterID + "-" + class
+			}
+			pc, err := w.js.CreateOrUpdateConsumer(ctx, distributed.StreamPriTasks, jetstream.ConsumerConfig{
+				Durable:       priName,
+				FilterSubject: priFilter,
+				AckPolicy:     jetstream.AckExplicitPolicy,
+				AckWait:       10 * time.Minute,
+				MaxDeliver:    3,
+			})
+			if err != nil {
+				return fmt.Errorf("creating priority consumer (%s): %w", class, err)
+			}
+			if class == "leaf" {
+				priConsumer = pc
+			} else {
+				priDeepConsumer = pc
+			}
 		}
-		priConsumer = pc
 	}
 
 	// Subscribe to query cancellation messages
@@ -574,14 +591,21 @@ func (w *Worker) Start(ctx context.Context) error {
 		// recv → coord's stream.Send blocks → backpressure propagates.
 		pending := make(chan dataplane.TaskDispatch, w.config.MaxConcurrent)
 		// Priority lane, gRPC flavor: latency-critical tasks (Task.Priority
-		// inside the blob) route to their own bounded queue + slot pool so
+		// inside the blob) route to their own bounded queues + slot pools so
 		// bulk fan-out saturating MaxConcurrent cannot delay them — the
-		// same guarantee the NATS path gets from the pritasks consumer.
+		// same guarantee the NATS path gets from the pritasks consumers.
+		// Leaf and deep classes are DISJOINT (deadlock prevention, see the
+		// NATS consumer setup comment).
 		priPending := make(chan dataplane.TaskDispatch, priorityLaneSlots)
+		priDeepPending := make(chan dataplane.TaskDispatch, priorityLaneSlots)
 		w.dpClient.RegisterDispatchHandler(func(td dataplane.TaskDispatch) {
 			pending := pending
-			if taskBlobPriority(td.TaskBlob) {
-				pending = priPending
+			if pri, deep := taskBlobPriority(td.TaskBlob); pri {
+				if deep {
+					pending = priDeepPending
+				} else {
+					pending = priPending
+				}
 			}
 			// Fast path: the bounded queue has room.
 			select {
@@ -622,23 +646,36 @@ func (w *Worker) Start(ctx context.Context) error {
 			defer w.wg.Done()
 			w.dispatchLoop(ctx, priPending, priSem)
 		}()
+		priDeepSem := make(chan struct{}, priorityLaneSlots)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.dispatchLoop(ctx, priDeepPending, priDeepSem)
+		}()
 	} else {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			w.taskLoop(ctx, consumer, sem)
+			w.taskLoop(ctx, consumer, sem, "main")
 		}()
-		// Priority lane runs the SAME loop with its own slot pool: the
-		// tasks are planner-bounded tiny (dimension scans), so two extra
+		// Priority lanes run the SAME loop with their own slot pools: the
+		// tasks are planner-bounded tiny (dimension scans), so a few extra
 		// concurrent tasks cannot meaningfully move worker memory, and
 		// giving them dedicated slots is the whole point — a saturated
 		// MaxConcurrent must not delay the filter that makes the
-		// saturating work cheap.
+		// saturating work cheap. Leaf and deep classes get DISJOINT pools
+		// (deadlock prevention — see the consumer setup comment).
 		priSem := make(chan struct{}, priorityLaneSlots)
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			w.taskLoop(ctx, priConsumer, priSem)
+			w.taskLoop(ctx, priConsumer, priSem, "pri-leaf")
+		}()
+		priDeepSem := make(chan struct{}, priorityLaneSlots)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.taskLoop(ctx, priDeepConsumer, priDeepSem, "pri-deep")
 		}()
 	}
 
@@ -1113,7 +1150,8 @@ func sweepDirContents(dir string, logger *slog.Logger) (int, int64) {
 	return removed, bytesFreed
 }
 
-func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem chan struct{}) {
+func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem chan struct{}, lane string) {
+	w.logger.Info("task intake loop starting", "lane", lane)
 	// Persistent pull subscription with slot-gated Next() instead of a
 	// 500ms-polled one-shot Fetch. The polled Fetch churned ~2 pull
 	// requests/second/worker, and each request-expiry boundary is a race
@@ -1215,6 +1253,7 @@ func (w *Worker) taskLoop(ctx context.Context, consumer jetstream.Consumer, sem 
 			continue
 		}
 
+		w.logger.Debug("task intake: delivery", "lane", lane, "subject", msg.Subject())
 		w.wg.Add(1)
 		go func(m jetstream.Msg) {
 			defer w.wg.Done()

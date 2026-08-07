@@ -86,7 +86,15 @@ const (
 	// second consumer under the same prefix would overlap, which WorkQueue
 	// retention forbids. Workers drain this lane with dedicated slots
 	// outside MaxConcurrent (docs/design/attach-on-arrival-dynamic-filters.md).
-	SubjectPriTasksAll = "wadjet.pritasks.>"
+	//
+	// The lane is CLASS-SPLIT into two non-overlapping subject spaces:
+	// "leaf" (emitters with no consumes — dims) and "deep" (guarded
+	// re-emitters, which may block at finalize waiting on a leaf's bloom).
+	// Each class gets its own WorkQueue consumer + worker slot pool so a
+	// blocked deep task can never starve the leaf it waits on.
+	SubjectPriTasksAll  = "wadjet.pritasks.>"
+	SubjectPriTasksLeaf = "wadjet.pritasks.leaf.>"
+	SubjectPriTasksDeep = "wadjet.pritasks.deep.>"
 
 	// Stream names
 	StreamTasks    = "WADJET_TASKS"
@@ -103,20 +111,36 @@ func TaskSubject(taskType string, queryID string, stageID string) string {
 	return SubjectTasksScan[:len("wadjet.tasks.")] + taskType + "." + queryID + "." + stageID
 }
 
-// PriTaskSubject is TaskSubject's counterpart on the priority lane.
-func PriTaskSubject(taskType string, queryID string, stageID string) string {
-	return "wadjet.pritasks." + taskType + "." + queryID + "." + stageID
+// PriTaskClass returns the lane class token for a task: "deep" for guarded
+// re-emitters (emitters that also consume), "leaf" otherwise.
+func PriTaskClass(deep bool) string {
+	if deep {
+		return "deep"
+	}
+	return "leaf"
 }
 
-// ClusterPriTaskSubject is ClusterTaskSubject's counterpart on the priority lane.
-func ClusterPriTaskSubject(clusterID, taskType, queryID, stageID string) string {
-	return "wadjet.pritasks." + clusterID + "." + taskType + "." + queryID + "." + stageID
+// PriTaskSubject is TaskSubject's counterpart on the priority lane.
+// class is PriTaskClass(task.PriorityDeep).
+func PriTaskSubject(class, taskType, queryID, stageID string) string {
+	return "wadjet.pritasks." + class + "." + taskType + "." + queryID + "." + stageID
+}
+
+// ClusterPriTaskSubject is ClusterTaskSubject's counterpart on the priority
+// lane. The CLASS token comes BEFORE the cluster ID — a non-cluster worker
+// filters "wadjet.pritasks.<class>.>", and nesting the cluster under the
+// class keeps that filter matching cluster-tagged subjects too (the same
+// property the pre-split "wadjet.pritasks.>" filter had; token order the
+// other way silently strands cluster-tagged tasks on class filters —
+// caught by TestDistributedTPCH/Q07 hanging, 2026-08-07).
+func ClusterPriTaskSubject(clusterID, class, taskType, queryID, stageID string) string {
+	return "wadjet.pritasks." + class + "." + clusterID + "." + taskType + "." + queryID + "." + stageID
 }
 
 // ClusterPriTasksFilter returns the priority-lane filter subject for a
-// worker to receive only its cluster's priority tasks.
-func ClusterPriTasksFilter(clusterID string) string {
-	return "wadjet.pritasks." + clusterID + ".>"
+// worker to receive only its cluster's priority tasks of one class.
+func ClusterPriTasksFilter(clusterID, class string) string {
+	return "wadjet.pritasks." + class + "." + clusterID + ".>"
 }
 
 // ClusterTaskSubject returns the NATS subject for a task targeted at a specific cluster.

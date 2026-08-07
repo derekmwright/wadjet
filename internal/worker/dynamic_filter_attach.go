@@ -1,8 +1,10 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +87,9 @@ func (e *Executor) pollDeferredBloom(spec distributed.DynamicFilterSpec) *pendin
 	e.dfAttachMu.Unlock()
 
 	go func() {
+		e.logger.Info("dynamic_filter: late attach poll started",
+			"filter_id", spec.FilterID, "bucket", spec.BloomBucket,
+			"key", spec.BloomKey, "partial_prefix", spec.PartialPrefix)
 		defer func() {
 			e.dfAttachMu.Lock()
 			delete(e.dfAttachPolls, key)
@@ -99,8 +104,18 @@ func (e *Executor) pollDeferredBloom(spec distributed.DynamicFilterSpec) *pendin
 		for {
 			// Merged key first: it is authoritative (the coordinator's
 			// completeness-gated union) and the fallback when the emitter ran
-			// on a binary that doesn't stamp ".of<N>" counts.
-			if bloom, mask, ok := e.tryLoadStagedBloom(ctx, spec.BloomBucket, spec.BloomKey); ok {
+			// on a binary that doesn't stamp ".of<N>" counts. A zero-byte
+			// TOMBSTONE at the key means the coordinator withheld the filter
+			// — terminate now (ok=false) instead of waiting out the
+			// deadline; consumers stay unfiltered and guarded re-emits flush
+			// unguarded, both the correct withhold degradations.
+			bloom, mask, ok, tombstone := e.tryLoadStagedBloom(ctx, spec.BloomBucket, spec.BloomKey)
+			if tombstone {
+				e.logger.Info("dynamic_filter: filter withheld (tombstone)",
+					"filter_id", spec.FilterID, "key", spec.BloomKey)
+				return
+			}
+			if ok {
 				p.bloom, p.mask, p.ok = bloom, mask, true
 				p.source = "merged"
 				return
@@ -112,6 +127,15 @@ func (e *Executor) pollDeferredBloom(spec distributed.DynamicFilterSpec) *pendin
 			// coordinator's completeness gate).
 			if spec.PartialPrefix != "" {
 				if e.tryUnionPartials(ctx, spec, acc) {
+					if acc.bloom == nil {
+						// Complete but every partial was empty: the emitter
+						// matched nothing anywhere. Terminate without a
+						// bloom (consumers/guards proceed unfiltered — the
+						// conservative pre-existing degradation).
+						e.logger.Info("dynamic_filter: incremental partial union complete (all empty)",
+							"filter_id", spec.FilterID, "partials", acc.merged)
+						return
+					}
 					p.bloom, p.mask, p.ok = acc.bloom, acc.mask, true
 					p.source = "partials"
 					p.partials = acc.merged
@@ -177,8 +201,17 @@ func (e *Executor) tryUnionPartials(ctx context.Context, spec distributed.Dynami
 		}
 		art, err := distributed.DecodeDynamicFilterArtifact(rc)
 		rc.Close()
-		if err != nil || len(art.Bloom) == 0 {
+		if err != nil {
 			continue // treat as transient (mirrors tryLoadStagedBloom): retry next tick
+		}
+		if len(art.Bloom) == 0 {
+			// EMPTY partial: a zero-row emitter task's legitimate "no keys
+			// from me" contribution — counts toward completeness, adopts no
+			// shape (mirrors the coordinator merge; see
+			// mergeBuildStatsFromPartials).
+			acc.seen[obj.Key] = true
+			acc.merged++
+			continue
 		}
 		if len(art.Bloom) > dynamicFilterMaxBloomWords {
 			acc.seen[obj.Key] = true // structural: never counts (coordinator drops it too)
@@ -276,33 +309,47 @@ func (p pendingBloomProbe) Wait(ctx context.Context) ([]uint64, uint64, bool) {
 	}
 }
 
-// taskBlobPriority reports whether a marshaled Task carries the Priority
-// flag, without decoding the full task. Task blobs are JSON
-// (distributed.Marshal); a partial decode into a one-field struct is
+// taskBlobPriority reports whether a marshaled Task carries the Priority /
+// PriorityDeep flags, without decoding the full task. Task blobs are JSON
+// (distributed.Marshal); a partial decode into a two-field struct is
 // microseconds against multi-second tasks. Used by the gRPC dispatch
-// handler to route latency-critical tasks onto the priority queue.
-func taskBlobPriority(blob []byte) bool {
+// handler to route latency-critical tasks onto the priority queues (leaf
+// vs deep — disjoint slot pools, see the lane-split comment in worker.go).
+func taskBlobPriority(blob []byte) (priority, deep bool) {
 	var p struct {
-		Priority bool `json:"priority"`
+		Priority     bool `json:"priority"`
+		PriorityDeep bool `json:"priority_deep"`
 	}
 	if err := json.Unmarshal(blob, &p); err != nil {
-		return false
+		return false, false
 	}
-	return p.Priority
+	return p.Priority, p.PriorityDeep
 }
 
 // tryLoadStagedBloom is the quiet fetch used by the poll loop — a missing
 // key is the EXPECTED state until the coordinator stages the merge, so it
-// must not log per attempt (4 attempts/second).
-func (e *Executor) tryLoadStagedBloom(ctx context.Context, bucket, key string) ([]uint64, uint64, bool) {
+// must not log per attempt (4 attempts/second). tombstone=true reports a
+// zero-byte object: the coordinator's explicit "withheld, stop waiting"
+// marker.
+func (e *Executor) tryLoadStagedBloom(ctx context.Context, bucket, key string) (bloom []uint64, mask uint64, ok, tombstone bool) {
 	rc, _, err := e.store.Get(ctx, bucket, key)
 	if err != nil {
-		return nil, 0, false
+		return nil, 0, false, false
 	}
-	defer rc.Close()
-	art, err := distributed.DecodeDynamicFilterArtifact(rc)
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return nil, 0, false, false
+	}
+	// Zero BYTES read (not store-reported size, which not every impl
+	// populates) is the tombstone test — a real artifact always has a
+	// header, so an empty body can only be the coordinator's marker.
+	if len(data) == 0 {
+		return nil, 0, false, true
+	}
+	art, err := distributed.DecodeDynamicFilterArtifact(bytes.NewReader(data))
 	if err != nil || len(art.Bloom) == 0 {
-		return nil, 0, false
+		return nil, 0, false, false
 	}
-	return art.Bloom, art.BloomMask, true
+	return art.Bloom, art.BloomMask, true, false
 }

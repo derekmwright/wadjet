@@ -58,6 +58,16 @@ type Task struct {
 	// work (dyn-filter emitter scans); their smallness is enforced by the
 	// planner passes that mark them.
 	Priority bool `json:"priority,omitempty"`
+	// PriorityDeep sub-classes the priority lane: emitter tasks that ALSO
+	// consume dynamic filters (guarded re-emit mid-scans) ride a slot pool
+	// SEPARATE from leaf emitters. A guarded task blocks at finalize until
+	// its consumed bloom settles; if it could occupy the slots its own
+	// upstream leaf emitter needs, the lane deadlocks until the poll
+	// deadline (observed SF100 2026-08-07, trt ead0976: Q07 stalled ~10min,
+	// hop-B held both lane slots waiting on the dim task queued behind it).
+	// Class-disjoint pools make the circular wait structurally impossible,
+	// cross-query included.
+	PriorityDeep bool `json:"priority_deep,omitempty"`
 
 	// Pipeline-specific (full query on one worker)
 	SQLText    string `json:"sql_text,omitempty"`    // SQL query to execute as standalone pipeline

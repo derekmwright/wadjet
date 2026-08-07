@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"testing"
 
@@ -178,4 +179,112 @@ func TestDynamicFilterPartialPrefixMatchesEmitLayout(t *testing.T) {
 	if got != want {
 		t.Fatalf("partial prefix drifted from the emit-side key layout:\n got %q\nwant %q", got, want)
 	}
+}
+
+// A withheld LateAttach filter must leave a zero-byte tombstone at the
+// merged key so attach-mode consumers and guarded re-emits terminate
+// promptly instead of polling to the deadline (the ead0976 hang class).
+func TestMergeCompleteBuildStatsTombstonesWithheldLateAttach(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, "test")
+	if err := cat.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c := &Coordinator{catalog: cat, logger: slog.Default(), config: Config{ResultBucket: "test"}}
+	// One expected task, one INCOMPLETE partial set (2 expected, 1 present)
+	// → the filter is withheld.
+	refs := []distributed.DynamicFilterPartialRef{
+		putPartial(t, store, "test", "queries/q/dynfilter/stage-1/task0-f1.wdf", []int64{7}),
+	}
+	merged := c.mergeCompleteBuildStats(context.Background(), "q", "stage-1",
+		refs, 2, map[string]bool{"f1": true})
+	if len(merged) != 0 {
+		t.Fatalf("incomplete partials must merge nothing, got %v", merged)
+	}
+	key := mergedDynamicFilterKey("q", "stage-1", "f1")
+	rc, _, err := store.Get(context.Background(), c.config.ResultBucket, key)
+	if err != nil {
+		t.Fatalf("tombstone missing at merged key: %v", err)
+	}
+	data, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil || len(data) != 0 {
+		t.Fatalf("tombstone must be zero bytes, got %d (err %v)", len(data), err)
+	}
+}
+
+// Zero-row emitter tasks upload EMPTY partials (their emit op never
+// allocates a bloom). An empty partial arriving FIRST must not poison the
+// union: it counts toward completeness but adopts no shape — before this
+// fix the 0-word shape made every real partial a "size mismatch", the
+// union collapsed to a header-only artifact, and guarded re-emits hung
+// polling it (TestDistributedTPCH/Q07, 2026-08-07). Order-dependent:
+// zero-row tasks finish first, so empty-first is the COMMON arrival order.
+func TestMergeBuildStatsEmptyPartialFirstDoesNotPoisonUnion(t *testing.T) {
+	store := objstore.NewMemStore()
+	if err := store.MakeBucket(context.Background(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	// Empty partial (zero rows) FIRST, then a real one, then another empty.
+	empty1 := putEmptyPartial(t, store, "test", "queries/q/dynfilter/s/t0-f1.wdf")
+	real := putPartial(t, store, "test", "queries/q/dynfilter/s/t1-f1.wdf", []int64{7, 9})
+	empty2 := putEmptyPartial(t, store, "test", "queries/q/dynfilter/s/t2-f1.wdf")
+	merged, count, err := mergeBuildStatsFromPartials(context.Background(), store,
+		[]distributed.DynamicFilterPartialRef{empty1, real, empty2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count["f1"] != 3 {
+		t.Fatalf("all 3 partials must count toward completeness, got %d", count["f1"])
+	}
+	stats := merged["f1"]
+	if stats == nil || len(stats.Bloom) == 0 {
+		t.Fatalf("union must adopt the real partial's bloom, got %+v", stats)
+	}
+	if stats.RowCount != 2 {
+		t.Fatalf("rowcount must come from the real partial, got %d", stats.RowCount)
+	}
+}
+
+// All-empty partials: complete (nothing is missing) but no bloom to stage —
+// the filter is simply absent and, when LateAttach, tombstoned so pollers
+// terminate.
+func TestMergeBuildStatsAllEmptyPartialsTombstones(t *testing.T) {
+	store := objstore.NewMemStore()
+	cat := catalog.NewWithStore(store, "test")
+	if err := cat.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c := &Coordinator{catalog: cat, logger: slog.Default(), config: Config{ResultBucket: "test"}}
+	refs := []distributed.DynamicFilterPartialRef{
+		putEmptyPartial(t, store, "test", "queries/q/dynfilter/s2/t0-f1.wdf"),
+		putEmptyPartial(t, store, "test", "queries/q/dynfilter/s2/t1-f1.wdf"),
+	}
+	merged := c.mergeCompleteBuildStats(context.Background(), "q", "s2", refs, 2, map[string]bool{"f1": true})
+	if len(merged) != 0 {
+		t.Fatalf("all-empty filter must be absent, got %v", merged)
+	}
+	rc, _, err := store.Get(context.Background(), "test", mergedDynamicFilterKey("q", "s2", "f1"))
+	if err != nil {
+		t.Fatalf("all-empty LateAttach filter must be tombstoned: %v", err)
+	}
+	data, _ := io.ReadAll(rc)
+	rc.Close()
+	if len(data) != 0 {
+		t.Fatalf("tombstone must be zero bytes, got %d", len(data))
+	}
+}
+
+func putEmptyPartial(t *testing.T, store objstore.Store, bucket, key string) distributed.DynamicFilterPartialRef {
+	t.Helper()
+	art := &distributed.DynamicFilterArtifact{KeyType: "int64"}
+	var buf bytes.Buffer
+	if err := distributed.EncodeDynamicFilterArtifact(&buf, art); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(context.Background(), bucket, key,
+		bytes.NewReader(buf.Bytes()), int64(buf.Len()), "application/octet-stream"); err != nil {
+		t.Fatal(err)
+	}
+	return distributed.DynamicFilterPartialRef{FilterID: "f1", Bucket: bucket, Key: key}
 }
