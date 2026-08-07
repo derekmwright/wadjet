@@ -231,9 +231,9 @@ func TestFilterAttachedStatDepsKeepsMixedSource(t *testing.T) {
 
 func TestParseSemiAntiNE(t *testing.T) {
 	cases := []struct {
-		filter         string
+		filter               string
 		wantProbe, wantBuild string
-		wantOK         bool
+		wantOK               bool
 	}{
 		{"l1.l_suppkey <> l2.l_suppkey", "l_suppkey", "l_suppkey", true},
 		{"a.x != b.y", "x", "y", true},
